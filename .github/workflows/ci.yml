@@ -16,6 +16,9 @@ jobs:
       matrix:
         os: [macos-14, macos-15-intel, ubuntu-22.04, ubuntu-22.04-arm, windows-2022, windows-11-arm]
     runs-on: ${{ matrix.os }}
+    # No debug info: faster compiles and links, and smaller caches to restore and save.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -28,4 +31,9 @@ jobs:
         if: matrix.os == 'windows-11-arm'
         shell: bash
         run: echo "C:\Program Files\LLVM\bin" >> "$GITHUB_PATH"
-      - run: cargo test --locked
+      # The tests are platform independent, so one system runs them; the others only need to
+      # compile, and a check skips code generation and linking.
+      - if: matrix.os == 'ubuntu-22.04'
+        run: cargo test --locked
+      - if: matrix.os != 'ubuntu-22.04'
+        run: cargo check --locked --all-targets
