@@ -1,0 +1,6768 @@
+use crate::db::{self, Msg, PAGE_SIZE, Query, ShellKind, Target, UndoAction, UndoKind, Worker};
+use eframe::egui::{self, Color32, CornerRadius, FontId, Key, RichText, Sense, Stroke, TextFormat, text::LayoutJob};
+use mongodb::Client;
+use mongodb::bson::{Bson, Document, doc, oid::ObjectId};
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::mpsc::{Receiver, channel};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+// Dark palette from the original's `.dark-mode` theme.
+const BG: Color32 = Color32::from_rgb(0x10, 0x12, 0x14);
+const PANEL: Color32 = Color32::from_rgb(0x16, 0x18, 0x1b);
+const RAISED: Color32 = Color32::from_rgb(0x1c, 0x1f, 0x22);
+const HOVER: Color32 = Color32::from_rgb(0x27, 0x2b, 0x2f);
+const BORDER: Color32 = Color32::from_rgb(0x32, 0x37, 0x3c);
+const TEXT: Color32 = Color32::from_rgb(0xcc, 0xcc, 0xcc);
+const BRIGHT: Color32 = Color32::from_rgb(0xfa, 0xfa, 0xfa);
+const MUTED: Color32 = Color32::from_rgb(0x8a, 0x8f, 0x96);
+const FAINT: Color32 = Color32::from_rgb(0x5f, 0x64, 0x69);
+const PRIMARY: Color32 = Color32::from_rgb(134, 201, 249);
+const ALERT: Color32 = Color32::from_rgb(247, 110, 133);
+const SUCCESS: Color32 = Color32::from_rgb(142, 242, 140);
+const WARNING: Color32 = Color32::from_rgb(247, 208, 110);
+const C_STRING: Color32 = Color32::from_rgb(0xf2, 0xa3, 0x65);
+const C_NUMBER: Color32 = Color32::from_rgb(0x5c, 0xa5, 0xd6);
+const C_TRUE: Color32 = Color32::from_rgb(0x83, 0xc7, 0x6b);
+const C_FALSE: Color32 = Color32::from_rgb(0xe5, 0x4d, 0x56);
+const C_DATE: Color32 = Color32::from_rgb(0x66, 0xcc, 0xb4);
+const C_NULL: Color32 = Color32::from_rgb(0x9e, 0x9e, 0x9e);
+const C_OID: Color32 = Color32::from_rgb(0x00, 0xba, 0xc1);
+const C_OBJ: Color32 = Color32::from_rgb(0xa3, 0xaa, 0xb5);
+const KEY: Color32 = Color32::from_rgb(0xd7, 0xda, 0xe0);
+const C_LINK: Color32 = Color32::from_rgb(0x72, 0xc3, 0xec);
+const HIGHLIGHT: Color32 = Color32::from_rgba_premultiplied(40, 34, 18, 60);
+const SIDEBAR_W: f32 = 250.0;
+const HEADER_H: f32 = 40.0;
+const SYSTEM_DBS: [&str; 3] = ["admin", "config", "local"];
+/// Columns shown before the user picks their own; drawing every field of a wide collection is slow.
+const DEFAULT_COLS: usize = 8;
+const ROW_H: f32 = 28.0;
+const OPTIMAL_MIN_W: f32 = 40.0;
+const OPTIMAL_MAX_W: f32 = 400.0;
+const OPTIMAL_PAD: f32 = 10.0;
+const CELL_PAD: f32 = 16.0;
+const NUM_W: f32 = 40.0;
+/// Fixed so an open editor never pushes its panel wider.
+const EDITOR_W: f32 = 230.0;
+
+/// Text gets a sub-type like in the original: web links (isUrl, renderer line 1707) and ids kept
+/// as 24-hex strings (its isForeignKey rule, renderer line 30722) stand out from plain text.
+#[derive(PartialEq)]
+enum StrKind {
+    Plain,
+    Url,
+    Id,
+}
+
+fn str_kind(s: &str) -> StrKind {
+    if (s.starts_with("http://") || s.starts_with("https://")) && !s.contains(char::is_whitespace) {
+        StrKind::Url
+    } else if s.len() == 24 && s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        StrKind::Id
+    } else {
+        StrKind::Plain
+    }
+}
+
+fn color_of(b: &Bson) -> Color32 {
+    match b {
+        Bson::String(s) => match str_kind(s) {
+            StrKind::Url => C_LINK,
+            StrKind::Id => C_OID,
+            StrKind::Plain if s.is_empty() => C_NULL,
+            StrKind::Plain => C_STRING,
+        },
+        Bson::Double(_) | Bson::Int32(_) | Bson::Int64(_) | Bson::Decimal128(_) => C_NUMBER,
+        Bson::Boolean(true) => C_TRUE,
+        Bson::Boolean(false) => C_FALSE,
+        Bson::DateTime(_) | Bson::Timestamp(_) => C_DATE,
+        Bson::Null | Bson::Undefined => C_NULL,
+        Bson::ObjectId(_) => C_OID,
+        _ => C_OBJ,
+    }
+}
+
+fn leaf_text(b: &Bson) -> String {
+    match b {
+        Bson::String(s) => format!("\"{s}\""),
+        Bson::ObjectId(o) => format!("ObjectId(\"{}\")", o.to_hex()),
+        Bson::DateTime(t) => t.try_to_rfc3339_string().unwrap_or_else(|_| t.timestamp_millis().to_string()),
+        Bson::Int64(n) => n.to_string(),
+        Bson::Document(d) => format!("{{{} fields}}", d.len()),
+        Bson::Array(a) => format!("[{} items]", a.len()),
+        other => db::compact(other),
+    }
+}
+
+/// The original's string display rule: lodash `_.truncate(value, {length: 100})`, so at most 100
+/// characters including the trailing "..." (fieldTypes.string.toDisplayString, renderer line 30804).
+const STRING_DISPLAY_MAX: usize = 100;
+
+fn truncate_display(s: &str) -> String {
+    if s.chars().count() <= STRING_DISPLAY_MAX {
+        s.to_string()
+    } else {
+        s.chars().take(STRING_DISPLAY_MAX - 3).chain("...".chars()).collect()
+    }
+}
+
+/// Colours JSON and shell-style query text by token, for every code editor in the app.
+fn json_job(text: &str) -> LayoutJob {
+    let fmt = |c: Color32| TextFormat { font_id: FontId::monospace(13.0), color: c, ..Default::default() };
+    let next_is_colon = |rest: &str| rest.trim_start().starts_with(':');
+    let mut job = LayoutJob::default();
+    let mut i = 0;
+    while i < text.len() {
+        let c = text[i..].chars().next().unwrap();
+        let start = i;
+        i += c.len_utf8();
+        let color = if c == '"' || c == '\'' {
+            let mut esc = false;
+            while i < text.len() {
+                let ch = text[i..].chars().next().unwrap();
+                i += ch.len_utf8();
+                if esc {
+                    esc = false;
+                } else if ch == '\\' {
+                    esc = true;
+                } else if ch == c {
+                    break;
+                }
+            }
+            if next_is_colon(&text[i..]) {
+                if text[start + 1..].starts_with('$') { PRIMARY } else { KEY }
+            } else {
+                C_STRING
+            }
+        } else if c.is_ascii_digit() || (c == '-' && text[i..].starts_with(|d: char| d.is_ascii_digit())) {
+            while i < text.len() && text[i..].starts_with(|d: char| d.is_ascii_alphanumeric() || d == '.' || d == '+' || d == '-') {
+                i += 1;
+            }
+            C_NUMBER
+        } else if c.is_alphabetic() || c == '$' || c == '_' {
+            while i < text.len() && text[i..].starts_with(|d: char| d.is_alphanumeric() || d == '$' || d == '_') {
+                i += text[i..].chars().next().unwrap().len_utf8();
+            }
+            match &text[start..i] {
+                "true" => C_TRUE,
+                "false" => C_FALSE,
+                "null" | "undefined" => C_NULL,
+                "ObjectId" => C_OID,
+                "ISODate" | "Date" | "new" => C_DATE,
+                "NumberLong" | "NumberInt" | "NumberDecimal" => C_NUMBER,
+                w if w.starts_with('$') => PRIMARY,
+                _ if next_is_colon(&text[i..]) => KEY,
+                _ => TEXT,
+            }
+        } else if "{}[]()".contains(c) {
+            C_OBJ
+        } else if ":,".contains(c) {
+            FAINT
+        } else {
+            TEXT
+        };
+        job.append(&text[start..i], 0.0, fmt(color));
+    }
+    job
+}
+
+/// Closes brackets, parentheses and quotes as they are typed, and types over a closer that is
+/// already there, so `{` gives `{|}` and typing `}` then just moves past it.
+fn with_autopair(ui: &mut egui::Ui, id: egui::Id, text: &mut String, show: impl FnOnce(&mut egui::Ui, &mut String) -> egui::text_edit::TextEditOutput) -> egui::text_edit::TextEditOutput {
+    let focused = ui.memory(|m| m.has_focus(id));
+    let typed: Option<char> = if focused {
+        ui.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                egui::Event::Text(t) if t.chars().count() == 1 => t.chars().next(),
+                _ => None,
+            })
+        })
+    } else {
+        None
+    };
+    let enter = focused && ui.input(|i| i.key_pressed(Key::Enter));
+    let cursor = egui::TextEdit::load_state(ui.ctx(), id).and_then(|s| s.cursor.char_range()).filter(|r| r.is_empty()).map(|r| r.primary.index.0);
+    if let (Some(c), Some(ci)) = (typed, cursor) {
+        if ")]}\"'".contains(c) && text.chars().nth(ci) == Some(c) {
+            ui.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Text(t) if t.chars().count() == 1)));
+            if let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), id) {
+                st.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(ci + 1))));
+                st.store(ui.ctx(), id);
+            }
+            return show(ui, text);
+        }
+    }
+    let out = show(ui, text);
+    let close = match typed {
+        Some('{') => Some('}'),
+        Some('[') => Some(']'),
+        Some('(') => Some(')'),
+        Some('"') => Some('"'),
+        Some('\'') => Some('\''),
+        _ => None,
+    };
+    if let (Some(close), Some(r), true) = (close, out.cursor_range, out.response.changed()) {
+        let ci = r.primary.index.0;
+        let next = text.chars().nth(ci);
+        let prev = ci.checked_sub(2).and_then(|p| text.chars().nth(p));
+        let fits = next.is_none_or(|n| n.is_whitespace() || ")]},:".contains(n));
+        // A quote right after a word is more likely an apostrophe or the end of a string.
+        let quote_ok = !matches!(close, '"' | '\'') || prev.is_none_or(|p| !p.is_alphanumeric());
+        if fits && quote_ok {
+            let byte = text.char_indices().nth(ci).map(|(b, _)| b).unwrap_or(text.len());
+            text.insert(byte, close);
+        }
+    }
+    // Auto indent: a new line keeps the indentation, goes one step deeper after an opening
+    // bracket, and a closing bracket typed on an empty indented line steps back.
+    if let (true, Some(r)) = (out.response.changed(), out.cursor_range) {
+        let ci = r.primary.index.0;
+        let fixed = if enter && ci > 0 && text.chars().nth(ci - 1) == Some('\n') {
+            newline_indent(text, ci)
+        } else if matches!(typed, Some('}' | ']' | ')')) {
+            closer_dedent(text, ci)
+        } else {
+            None
+        };
+        if let Some((t2, c2)) = fixed {
+            *text = t2;
+            if let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), id) {
+                st.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(c2))));
+                st.store(ui.ctx(), id);
+            }
+        }
+    }
+    out
+}
+
+/// One indent step; the same two spaces the pretty-printed JSON uses.
+const INDENT: &str = "  ";
+
+fn byte_at(text: &str, ci: usize) -> usize {
+    text.char_indices().nth(ci).map(|(b, _)| b).unwrap_or(text.len())
+}
+
+/// After a newline was typed just before char `ci`: the text with the right indentation added
+/// and where the caret goes.
+fn newline_indent(text: &str, ci: usize) -> Option<(String, usize)> {
+    let nl = byte_at(text, ci - 1);
+    let line = &text[text[..nl].rfind('\n').map(|i| i + 1).unwrap_or(0)..nl];
+    let indent: String = line.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+    let opener = line.trim_end().chars().last().filter(|c| "{[(".contains(*c));
+    let rest = &text[nl + 1..];
+    let next = rest.trim_start_matches([' ', '\t']).chars().next();
+    let pair = |o: char| match o {
+        '{' => '}',
+        '[' => ']',
+        _ => ')',
+    };
+    // Spaces that were after the caret on the old line would push the closer; drop them.
+    let after = rest.len() - rest.trim_start_matches([' ', '\t']).len();
+    let (insert, caret) = match opener {
+        Some(o) if next == Some(pair(o)) => (format!("{indent}{INDENT}\n{indent}"), indent.chars().count() + INDENT.len()),
+        Some(_) => (format!("{indent}{INDENT}"), indent.chars().count() + INDENT.len()),
+        None if indent.is_empty() => return None,
+        None => (indent.clone(), indent.chars().count()),
+    };
+    let mut out = String::with_capacity(text.len() + insert.len());
+    out.push_str(&text[..nl + 1]);
+    out.push_str(&insert);
+    out.push_str(&text[nl + 1 + after..]);
+    Some((out, ci + caret))
+}
+
+/// After a closing bracket was typed just before char `ci`: one indent step less if the
+/// bracket is the first thing on its line.
+fn closer_dedent(text: &str, ci: usize) -> Option<(String, usize)> {
+    let at = byte_at(text, ci - 1);
+    let start = text[..at].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let lead = &text[start..at];
+    if lead.len() < INDENT.len() || !lead.chars().all(|c| c == ' ') {
+        return None;
+    }
+    let mut out = String::with_capacity(text.len());
+    out.push_str(&text[..start]);
+    out.push_str(&text[start + INDENT.len()..]);
+    Some((out, ci - INDENT.len()))
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum FieldKind {
+    Query,
+    Sort,
+    Project,
+}
+
+/// One autocomplete suggestion: what is shown, a short note, what is inserted and where the
+/// caret lands inside it (in characters).
+struct Sug {
+    text: String,
+    note: &'static str,
+    insert: String,
+    caret: usize,
+}
+
+/// Open suggestion list of one query input.
+#[derive(Default)]
+struct Ac {
+    id: Option<egui::Id>,
+    /// Length in characters of the word being completed, just before `cursor`.
+    token: usize,
+    items: Vec<Sug>,
+    sel: usize,
+    cursor: usize,
+    rect: Option<egui::Rect>,
+}
+
+impl ShellTab {
+    fn set_value(&mut self, v: Bson) {
+        self.docs = match &v {
+            Bson::Array(a) if !a.is_empty() && a.iter().all(|x| matches!(x, Bson::Document(_))) => a.iter().filter_map(|x| x.as_document().cloned()).collect(),
+            Bson::Document(d) => vec![d.clone()],
+            _ => Vec::new(),
+        };
+        self.fields = auto_fields(&self.docs);
+        self.count = match &v {
+            Bson::Array(a) => Some(a.len()),
+            _ => None,
+        };
+        self.page = 0;
+        self.raw = self.docs.is_empty();
+        self.raw_text = None;
+        self.value = Some(v);
+        self.error = None;
+    }
+}
+
+impl Ac {
+    fn apply(&mut self, ctx: &egui::Context, id: egui::Id, text: &mut String, i: usize) {
+        let Some(s) = self.items.get(i) else { return };
+        let start = self.cursor.saturating_sub(self.token);
+        let byte = |c: usize| text.char_indices().nth(c).map(|(b, _)| b).unwrap_or(text.len());
+        let (bs, be) = (byte(start), byte(self.cursor));
+        text.replace_range(bs..be, &s.insert);
+        if let Some(mut st) = egui::TextEdit::load_state(ctx, id) {
+            st.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(start + s.caret))));
+            st.store(ctx, id);
+        }
+        self.items.clear();
+    }
+}
+
+/// Query operators offered inside a field's own object, as in the original (renderer line 95668).
+const QUERY_OPS: [&str; 33] = [
+    "$all: [  ]", "$and: [  ]", "$bitsAllClear: ", "$bitsAllSet: ", "$bitsAnyClear: ", "$bitsAnySet: ", "$comment: ",
+    "$elemMatch: {  }", "$eq: ", "$exists: true", "$exists: false", "$expr: {  }", "$geoIntersects: {  }", "$geoWithin: {  }",
+    "$gt: ", "$gte: ", "$in: [  ]", "$jsonSchema: ", "$lt: ", "$lte: ", "$meta: ", "$mod: [  ]", "$ne: ", "$near: {  }",
+    "$nearSphere: {  }", "$nin: [  ]", "$nor: [  ]", "$not: ", "$or: [  ]", "$regex: ", "$size: ", "$text: ", "$type: ",
+];
+
+/// Every dotted path in the documents (array elements merged), capped so huge documents stay fast.
+fn doc_paths(docs: &[Document]) -> Vec<String> {
+    const MAX_PATHS: usize = 2000;
+    const MAX_DEPTH: usize = 4;
+    fn walk(d: &Document, prefix: &str, depth: usize, out: &mut Vec<String>, seen: &mut HashSet<String>) {
+        for (k, v) in d {
+            if out.len() >= MAX_PATHS {
+                return;
+            }
+            let p = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
+            if seen.insert(p.clone()) {
+                out.push(p.clone());
+            }
+            if depth < MAX_DEPTH {
+                match v {
+                    Bson::Document(c) => walk(c, &p, depth + 1, out, seen),
+                    Bson::Array(a) => {
+                        for x in a.iter().take(20) {
+                            if let Bson::Document(c) = x {
+                                walk(c, &p, depth + 1, out, seen);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    let (mut out, mut seen) = (Vec::new(), HashSet::new());
+    for d in docs {
+        walk(d, "", 0, &mut out, &mut seen);
+    }
+    out
+}
+
+/// The original's loose match: the typed letters in order, anywhere (values: from the start).
+fn fuzzy(token: &str, option: &str, anchored: bool) -> bool {
+    let mut it = option.chars().map(|c| c.to_ascii_lowercase());
+    for (n, t) in token.chars().map(|c| c.to_ascii_lowercase()).enumerate() {
+        let found = if anchored && n == 0 { it.next() == Some(t) } else { it.any(|c| c == t) };
+        if !found {
+            return false;
+        }
+    }
+    true
+}
+
+/// Suggestions for the text before the caret, following the original's setSuggestions
+/// (renderer line 95645): after `{` or `,` field paths (operators when nested), after a dot the
+/// sub-fields, after `:` values. Shortest first, at most 50.
+fn suggest(before: &str, kind: FieldKind, paths: &[String]) -> Option<(usize, Vec<Sug>)> {
+    const MAX_SUGGESTIONS: usize = 50;
+    let token_start = before.char_indices().rev().take_while(|(_, c)| c.is_ascii_alphanumeric() || "@#$._".contains(*c)).last().map(|(i, _)| i).unwrap_or(before.len());
+    let token = &before[token_start..];
+    let lead = &before[..token_start];
+    let quoted = lead.ends_with(['"', '\'']);
+    let lead = lead.trim_end_matches(['"', '\'']).trim_end();
+    let caret_in = |s: &str| ["[  ]", "{  }", "(\"\")"].iter().find_map(|m| s.find(m).map(|i| s[..i].chars().count() + 2)).unwrap_or(s.chars().count());
+    let field = |p: &String| {
+        let insert = if quoted { p.clone() } else { format!("{p}: ") };
+        Sug { text: p.clone(), note: "field", caret: insert.chars().count(), insert }
+    };
+    let (anchored, mut items): (bool, Vec<Sug>) = if token.contains('.') {
+        let prefix = &token[..token.rfind('.').unwrap()];
+        let kids = paths.iter().filter(|p| p.strip_prefix(prefix).and_then(|r| r.strip_prefix('.')).is_some_and(|r| !r.contains('.')));
+        // The original lists at most 100 sub-fields after a dot (renderer line 95666).
+        const MAX_CHILD_KEYS: usize = 100;
+        (false, kids.take(MAX_CHILD_KEYS).map(field).collect())
+    } else if lead.ends_with('{') || lead.ends_with(',') {
+        if token.is_empty() {
+            return None;
+        }
+        let depth = before.matches('{').count() as i64 - before.matches('}').count() as i64;
+        if depth > 1 && kind == FieldKind::Query {
+            (false, QUERY_OPS.iter().map(|o| Sug { text: o.trim_end().to_string(), note: "operator", insert: o.to_string(), caret: caret_in(o) }).collect())
+        } else {
+            (false, paths.iter().map(field).collect())
+        }
+    } else if lead.ends_with(':') {
+        let vals: &[(&str, &'static str)] = match kind {
+            FieldKind::Query => &[("ObjectId(\"\")", "objectId"), ("ISODate(\"\")", "date"), ("true", "bool"), ("false", "bool"), ("null", "null")],
+            FieldKind::Sort => &[("1", "ascending"), ("-1", "descending")],
+            FieldKind::Project => &[("1", "include"), ("0", "exclude")],
+        };
+        if token.is_empty() && kind == FieldKind::Query {
+            return None;
+        }
+        (true, vals.iter().map(|(v, n)| Sug { text: v.to_string(), note: n, insert: v.to_string(), caret: caret_in(v) }).collect())
+    } else {
+        return None;
+    };
+    items.retain(|s| fuzzy(token, &s.text, anchored));
+    let mut seen = HashSet::new();
+    items.retain(|s| seen.insert(s.text.clone()));
+    // The original sorts by length only; words that start with what was typed come first here.
+    let lower = token.to_ascii_lowercase();
+    items.sort_by_key(|s| (!s.text.to_ascii_lowercase().starts_with(&lower), s.text.len()));
+    items.truncate(MAX_SUGGESTIONS);
+    (!items.is_empty()).then(|| (token.chars().count(), items))
+}
+
+/// A code input with brackets that close themselves and a suggestion list under the caret.
+/// Up/Down move, Enter or Tab insert, Esc closes. Returns the editor output and whether a
+/// suggestion was inserted this frame (so the caller does not also treat Enter as "run").
+fn ac_field(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    text: &mut String,
+    ac: &mut Ac,
+    compute: &dyn Fn(&str) -> Option<(usize, Vec<Sug>)>,
+    show: impl FnOnce(&mut egui::Ui, &mut String, bool) -> egui::text_edit::TextEditOutput,
+) -> (egui::text_edit::TextEditOutput, bool) {
+    let open = ac.id == Some(id) && !ac.items.is_empty();
+    let mut pick = None;
+    let mut moved = false;
+    if open && ui.memory(|m| m.has_focus(id)) {
+        ui.input_mut(|i| {
+            if i.consume_key(egui::Modifiers::NONE, Key::ArrowDown) {
+                ac.sel = (ac.sel + 1).min(ac.items.len() - 1);
+                moved = true;
+            }
+            if i.consume_key(egui::Modifiers::NONE, Key::ArrowUp) {
+                ac.sel = ac.sel.saturating_sub(1);
+                moved = true;
+            }
+            if i.consume_key(egui::Modifiers::NONE, Key::Enter) || i.consume_key(egui::Modifiers::NONE, Key::Tab) {
+                pick = Some(ac.sel);
+            }
+            if i.consume_key(egui::Modifiers::NONE, Key::Escape) {
+                ac.items.clear();
+            }
+        });
+    }
+    let out = with_autopair(ui, id, text, |ui, text| show(ui, text, open));
+    let focused = out.response.has_focus();
+    if let Some(i) = pick {
+        ac.apply(ui.ctx(), id, text, i);
+        return (out, true);
+    }
+    let cursor = out.cursor_range.filter(|r| r.is_empty()).map(|r| r.primary.index.0);
+    if let (true, Some(ci)) = (focused, cursor) {
+        if out.response.changed() {
+            let before: String = text.chars().take(ci).collect();
+            match compute(&before) {
+                Some((token, items)) => *ac = Ac { id: Some(id), token, items, sel: 0, cursor: ci, rect: None },
+                None if ac.id == Some(id) => ac.items.clear(),
+                None => {}
+            }
+        } else if ac.id == Some(id) && ci != ac.cursor {
+            ac.items.clear();
+        }
+    }
+    let test_shot = std::env::var("QUARRY_TEST_AC").is_ok();
+    let pointer_on_list = test_shot || ac.rect.zip(ui.input(|i| i.pointer.hover_pos())).is_some_and(|(r, p)| r.contains(p));
+    if !focused && ac.id == Some(id) && !pointer_on_list {
+        ac.items.clear();
+    }
+    let mut picked = false;
+    if ac.id == Some(id) && !ac.items.is_empty() {
+        let caret = out.galley.pos_from_cursor(egui::text::CCursor::new(ac.cursor));
+        let pos = out.galley_pos + caret.left_bottom().to_vec2() + egui::vec2(-6.0, 4.0);
+        let mut click = None;
+        let r = egui::Area::new(id.with("ac")).order(egui::Order::Foreground).fixed_pos(pos).show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_min_width(240.0);
+                egui::ScrollArea::vertical().max_height(230.0).show(ui, |ui| {
+                    for (i, s) in ac.items.iter().enumerate() {
+                        let mut job = LayoutJob::default();
+                        job.append(&s.text, 0.0, mono(if s.text.starts_with('$') { PRIMARY } else { BRIGHT }));
+                        job.append(&format!("   {}", s.note), 0.0, TextFormat { font_id: FontId::proportional(11.5), color: FAINT, ..Default::default() });
+                        let r = ui.selectable_label(i == ac.sel, job);
+                        if i == ac.sel && moved {
+                            r.scroll_to_me(None);
+                        }
+                        if r.clicked() {
+                            click = Some(i);
+                        }
+                    }
+                });
+            });
+        });
+        ac.rect = Some(r.response.rect);
+        if let Some(i) = click {
+            ac.apply(ui.ctx(), id, text, i);
+            ui.memory_mut(|m| m.request_focus(id));
+            picked = true;
+        }
+    }
+    (out, picked)
+}
+
+const JS_KEYWORDS: [&str; 30] = [
+    "async", "await", "break", "case", "catch", "class", "const", "continue", "default", "delete", "do", "else", "export", "finally", "for",
+    "function", "if", "import", "in", "instanceof", "let", "new", "of", "return", "switch", "throw", "try", "typeof", "var", "while",
+];
+/// Names the Shell provides (see the runner) plus common JavaScript built-ins.
+const JS_GLOBALS: [&str; 18] = ["db", "ObjectId", "ISODate", "console", "log", "randomId", "UUIDv4", "UUIDv1", "_", "dayjs", "require", "Math", "JSON", "Date", "Promise", "Object", "Array", "Number"];
+const DB_METHODS: [&str; 10] = ["collection", "listCollections", "command", "aggregate", "createCollection", "dropCollection", "renameCollection", "stats", "admin", "dropDatabase"];
+const COLL_METHODS: [&str; 28] = [
+    "find", "findOne", "aggregate", "countDocuments", "estimatedDocumentCount", "distinct", "insertOne", "insertMany", "updateOne", "updateMany",
+    "replaceOne", "deleteOne", "deleteMany", "bulkWrite", "findOneAndUpdate", "findOneAndReplace", "findOneAndDelete", "createIndex", "createIndexes",
+    "indexes", "listIndexes", "dropIndex", "dropIndexes", "drop", "rename", "watch", "indexExists", "options",
+];
+const CURSOR_METHODS: [&str; 15] = ["toArray", "limit", "skip", "sort", "project", "batchSize", "hint", "collation", "count", "next", "hasNext", "forEach", "map", "explain", "close"];
+const CONSOLE_METHODS: [&str; 4] = ["log", "warn", "error", "info"];
+
+/// Shell autocomplete: methods after `db.`, a collection or a cursor; fields and operators inside a
+/// call's object; otherwise keywords, globals and collection names.
+/// The variable a package is loaded as: camelCase of its name without scope. Must match
+/// packageIdent() in shell_runner.mjs.
+fn package_ident(spec: &str) -> String {
+    let name = db::package_spec(spec).0;
+    let base = name.strip_prefix('@').and_then(|r| r.split_once('/')).map(|(_, n)| n.to_string()).unwrap_or(name);
+    let mut id: String = base
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|p| !p.is_empty())
+        .enumerate()
+        .map(|(i, p)| if i == 0 { p.to_string() } else { p[..1].to_ascii_uppercase() + &p[1..] })
+        .collect();
+    if id.starts_with(|c: char| c.is_ascii_digit()) {
+        id.insert(0, '_');
+    }
+    if id.is_empty() { "pkg".into() } else { id }
+}
+
+fn suggest_js(before: &str, paths: &[String], colls: &[String], pkgs: &[String]) -> Option<(usize, Vec<Sug>)> {
+    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '$';
+    let tok_start = before.char_indices().rev().take_while(|(_, c)| ident(*c)).last().map(|(i, _)| i).unwrap_or(before.len());
+    let token = &before[tok_start..];
+    let lead = &before[..tok_start];
+    let method = |m: &&str| Sug { text: m.to_string(), note: "method", insert: format!("{m}()"), caret: m.len() + 1 };
+    let mut items: Vec<Sug> = if let Some(obj) = lead.strip_suffix('.') {
+        let name_of = |s: &str| s[s.char_indices().rev().take_while(|(_, c)| ident(*c)).last().map(|(i, _)| i).unwrap_or(s.len())..].to_string();
+        let list: &[&str] = if let Some(inner) = obj.strip_suffix(')') {
+            // Find the call this ')' closes and look at its name: db.collection(), find(), aggregate()...
+            let mut depth = 0;
+            let open = inner.char_indices().rev().find(|(_, c)| {
+                match c {
+                    ')' => depth += 1,
+                    '(' if depth == 0 => return true,
+                    '(' => depth -= 1,
+                    _ => {}
+                }
+                false
+            });
+            match open.map(|(i, _)| name_of(&inner[..i])).as_deref() {
+                Some("collection") => &COLL_METHODS,
+                Some("find" | "aggregate" | "sort" | "limit" | "skip" | "project" | "batchSize" | "hint" | "collation") => &CURSOR_METHODS,
+                _ => &[],
+            }
+        } else {
+            match name_of(obj).as_str() {
+                "db" => &DB_METHODS,
+                "console" => &CONSOLE_METHODS,
+                n if colls.iter().any(|c| c == n) => &COLL_METHODS,
+                _ => &[],
+            }
+        };
+        list.iter().map(method).collect()
+    } else if token.is_empty() {
+        return None;
+    } else if before.matches('(').count() > before.matches(')').count() && lead.trim_end().ends_with(['{', ',', ':']) {
+        // Inside a call's arguments: the same field and operator suggestions as the Query box.
+        return suggest(before, FieldKind::Query, paths);
+    } else {
+        let mut v: Vec<Sug> = JS_KEYWORDS.iter().map(|k| Sug { text: k.to_string(), note: "keyword", insert: format!("{k} "), caret: k.len() + 1 }).collect();
+        v.extend(JS_GLOBALS.iter().map(|g| match *g {
+            "ObjectId" | "ISODate" => Sug { text: g.to_string(), note: "helper", insert: format!("{g}(\"\")"), caret: g.len() + 2 },
+            _ => Sug { text: g.to_string(), note: "global", insert: g.to_string(), caret: g.len() },
+        }));
+        v.extend(pkgs.iter().map(|p| Sug { text: p.clone(), note: "package", insert: p.clone(), caret: p.chars().count() }));
+        v.extend(colls.iter().filter(|c| c.chars().all(ident) && !c.starts_with(|c: char| c.is_ascii_digit())).map(|c| Sug { text: c.clone(), note: "collection", insert: c.clone(), caret: c.chars().count() }));
+        v
+    };
+    items.retain(|s| fuzzy(token, &s.text, false));
+    let lower = token.to_ascii_lowercase();
+    items.sort_by_key(|s| (!s.text.to_ascii_lowercase().starts_with(&lower), s.text.len()));
+    items.truncate(50);
+    if items.len() == 1 && items[0].text == token {
+        return None;
+    }
+    (!items.is_empty()).then(|| (token.chars().count(), items))
+}
+
+const C_KEYWORD: Color32 = Color32::from_rgb(0xc4, 0xa7, 0xe7);
+
+/// JavaScript colouring for the Shell editor.
+fn js_job(text: &str) -> LayoutJob {
+    let fmt = |c: Color32| TextFormat { font_id: FontId::monospace(13.0), color: c, ..Default::default() };
+    let mut job = LayoutJob::default();
+    let mut i = 0;
+    let mut prev_dot = false;
+    while i < text.len() {
+        let rest = &text[i..];
+        let c = rest.chars().next().unwrap();
+        let start = i;
+        let color = if rest.starts_with("//") {
+            i += rest.find('\n').unwrap_or(rest.len());
+            FAINT
+        } else if rest.starts_with("/*") {
+            i += rest[2..].find("*/").map(|e| e + 4).unwrap_or(rest.len());
+            FAINT
+        } else if c == '"' || c == '\'' || c == '`' {
+            i += 1;
+            let mut esc = false;
+            while i < text.len() {
+                let ch = text[i..].chars().next().unwrap();
+                i += ch.len_utf8();
+                if esc {
+                    esc = false;
+                } else if ch == '\\' {
+                    esc = true;
+                } else if ch == c {
+                    break;
+                }
+            }
+            C_STRING
+        } else if c.is_ascii_digit() {
+            while i < text.len() && text[i..].starts_with(|d: char| d.is_ascii_alphanumeric() || d == '.' || d == '_') {
+                i += 1;
+            }
+            C_NUMBER
+        } else if c.is_alphabetic() || c == '_' || c == '$' {
+            while i < text.len() && text[i..].starts_with(|d: char| d.is_alphanumeric() || d == '_' || d == '$') {
+                i += text[i..].chars().next().unwrap().len_utf8();
+            }
+            let w = &text[start..i];
+            let call = text[i..].trim_start().starts_with('(');
+            match w {
+                "true" => C_TRUE,
+                "false" => C_FALSE,
+                "null" | "undefined" => C_NULL,
+                _ if JS_KEYWORDS.contains(&w) && !prev_dot => C_KEYWORD,
+                _ if w.starts_with('$') => PRIMARY,
+                _ if call => C_DATE,
+                _ if JS_GLOBALS.contains(&w) && !prev_dot => C_OID,
+                _ if prev_dot => KEY,
+                _ if text[i..].trim_start().starts_with(':') => KEY,
+                _ => TEXT,
+            }
+        } else {
+            i += c.len_utf8();
+            if "{}[]()".contains(c) { C_OBJ } else if ".,:;".contains(c) { FAINT } else if "=+-*/<>!&|?%".contains(c) { C_KEYWORD } else { TEXT }
+        };
+        if !text[start..i].trim().is_empty() {
+            prev_dot = &text[start..i] == ".";
+        }
+        job.append(&text[start..i], 0.0, fmt(color));
+    }
+    job
+}
+
+fn js_layout(ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32) -> Arc<egui::Galley> {
+    let mut job = js_job(buf.as_str());
+    job.wrap.max_width = wrap;
+    ui.fonts_mut(|f| f.layout_job(job))
+}
+
+fn code_layout(ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32) -> Arc<egui::Galley> {
+    let mut job = json_job(buf.as_str());
+    job.wrap.max_width = wrap;
+    ui.fonts_mut(|f| f.layout_job(job))
+}
+
+/// A table cell as coloured text, like the original's table: strings in quotes, and objects and
+/// arrays as a short coloured preview of their contents, so nested data keeps its type colours.
+fn cell_job(v: &Bson) -> LayoutJob {
+    const MAX: usize = 160;
+    fn push(job: &mut LayoutJob, s: &str, c: Color32) -> bool {
+        let room = MAX.saturating_sub(job.text.len());
+        if room == 0 {
+            return false;
+        }
+        let t: String = s.chars().take(room).collect();
+        job.append(&t, 0.0, mono(c));
+        job.text.len() < MAX
+    }
+    fn walk(job: &mut LayoutJob, v: &Bson) -> bool {
+        match v {
+            Bson::Document(d) => {
+                if !push(job, "{", C_OBJ) {
+                    return false;
+                }
+                for (i, (k, x)) in d.iter().enumerate() {
+                    if (i > 0 && !push(job, ", ", FAINT)) || !push(job, k, MUTED) || !push(job, ": ", FAINT) || !walk(job, x) {
+                        return false;
+                    }
+                }
+                push(job, "}", C_OBJ)
+            }
+            Bson::Array(a) => {
+                if !push(job, "[", C_OBJ) {
+                    return false;
+                }
+                for (i, x) in a.iter().enumerate() {
+                    if (i > 0 && !push(job, ", ", FAINT)) || !walk(job, x) {
+                        return false;
+                    }
+                }
+                push(job, "]", C_OBJ)
+            }
+            Bson::String(s) if str_kind(s) == StrKind::Url => push(job, s, C_LINK),
+            Bson::String(s) => push(job, &format!("\"{}\"", truncate_display(&s.replace('\n', " "))), color_of(v)),
+            Bson::ObjectId(o) => push(job, &o.to_hex(), C_OID),
+            other => push(job, &leaf_text(other), color_of(other)),
+        }
+    }
+    let mut job = LayoutJob::default();
+    walk(&mut job, v);
+    job
+}
+
+/// Short text for a table cell. Objects and arrays are summarised, never serialised, so wide
+/// documents stay cheap to draw.
+fn cell_text(b: &Bson) -> String {
+    match b {
+        Bson::String(s) => s.chars().take(120).collect(),
+        Bson::ObjectId(o) => o.to_hex(),
+        Bson::Document(d) => format!("{{{} fields}}", d.len()),
+        Bson::Array(a) => format!("[{} items]", a.len()),
+        other => leaf_text(other),
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct ConnMeta {
+    id: u64,
+    name: String,
+    /// Reach the server through an SSH tunnel; passwords and passphrases live in the Keychain.
+    #[serde(default)]
+    ssh: Option<crate::ssh::SshConf>,
+    /// Reach the server through a SOCKS5 proxy; its password lives in the Keychain.
+    #[serde(default)]
+    proxy: Option<db::Proxy>,
+}
+
+#[derive(PartialEq)]
+enum Status {
+    Idle,
+    Connecting,
+    Ready,
+    Failed(String),
+}
+
+struct Conn {
+    meta: ConnMeta,
+    client: Option<Client>,
+    status: Status,
+    /// Writes are locked at every launch and only unlocked for this session.
+    writable: bool,
+    dbs: Vec<(String, Option<Vec<String>>)>,
+    masked_uri: String,
+    /// Kept alive while connected through SSH; dropping it closes the tunnel.
+    tunnel: Option<crate::ssh::Tunnel>,
+}
+
+#[derive(Clone, PartialEq)]
+struct Sel {
+    conn: u64,
+    db: String,
+    coll: String,
+}
+
+#[derive(PartialEq, Clone, Copy)]
+enum View {
+    Documents,
+    Aggregate,
+    Indexes,
+    Shell,
+    Schema,
+    Import,
+    Compare,
+}
+
+/// Everything that belongs to one open tab.
+struct Tab {
+    sel: Sel,
+    view: View,
+    filter_txt: String,
+    sort_txt: String,
+    proj_txt: String,
+    query: Query,
+    page: u64,
+    docs: Vec<Document>,
+    fields: Vec<String>,
+    /// Every dotted field path seen in the loaded documents, for autocomplete.
+    paths: Vec<String>,
+    count: u64,
+    ms: u128,
+    req: u64,
+    /// Index list requests have their own id, so they never cancel a documents load.
+    idx_req: u64,
+    loading: bool,
+    selected: Option<(bool, usize)>,
+    agg_txt: String,
+    agg_docs: Vec<Document>,
+    agg_fields: Vec<String>,
+    agg_ms: Option<u128>,
+    indexes: Vec<Document>,
+    shell: ShellTab,
+    schema: SchemaTab,
+    import: ImportTab,
+    compare: CompareTab,
+    /// Preview text of referenced documents, keyed by `compact(_id)`.
+    related: HashMap<String, String>,
+}
+
+/// The Compare view: this tab's collection (source) against a chosen target.
+#[derive(Default)]
+struct CompareTab {
+    conn: u64,
+    db: String,
+    coll: String,
+    req: u64,
+    running: bool,
+    result: Option<db::Compared>,
+    insert: bool,
+    replace: bool,
+    delete: bool,
+}
+
+/// A field holding ids of another collection's documents (the original's dataRelations).
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq)]
+#[serde(default)]
+struct Relation {
+    coll: String,
+    path: String,
+    target: String,
+    preview: String,
+}
+
+/// Relations as the original's export file (exportRelations, renderer line 135294), so files
+/// move between Quarry and the original.
+fn relations_export(db: &str, list: &[Relation]) -> String {
+    let rel: Vec<serde_json::Value> = list.iter().map(|r| serde_json::json!({ "collection": r.coll, "path": r.path, "referencedCollection": r.target, "previewField": r.preview })).collect();
+    let now = mongodb::bson::DateTime::now().try_to_rfc3339_string().unwrap_or_default();
+    serde_json::to_string_pretty(&serde_json::json!({ "version": "1.0", "database": db, "exportedAt": now, "relations": rel })).unwrap_or_default()
+}
+
+/// Reads an export file; files without `version` and `relations` are refused, like the original
+/// (importRelations, 135332). Array markers in the original's paths ("items[].id") are dropped.
+fn relations_import(text: &str) -> db::Res<Vec<Relation>> {
+    let v: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    let (Some(_), Some(list)) = (v.get("version"), v.get("relations").and_then(|r| r.as_array())) else {
+        return Err("Invalid data relations file format".into());
+    };
+    let s = |r: &serde_json::Value, k: &str| r.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    Ok(list.iter().map(|r| Relation { coll: s(r, "collection"), path: s(r, "path").replace("[]", ""), target: s(r, "referencedCollection"), preview: s(r, "previewField") }).filter(|r| !r.coll.is_empty() && !r.path.is_empty() && !r.target.is_empty()).collect())
+}
+
+/// The Dump or Restore form.
+#[derive(Default)]
+struct ToolForm {
+    conn: u64,
+    db: String,
+    coll: String,
+    restore: bool,
+    path: String,
+    gzip: bool,
+    drop: bool,
+    /// Database name inside the archive; restoring renames it to `db` when different.
+    from_db: String,
+}
+
+/// A running (or finished) mongodump or mongorestore.
+struct ToolRun {
+    title: String,
+    log: Vec<String>,
+    cancel: Option<tokio::sync::oneshot::Sender<()>>,
+    done: Option<db::Res<String>>,
+}
+
+/// The Schema view of one tab.
+struct SchemaTab {
+    req: u64,
+    limit: i64,
+    running: bool,
+    stats: Vec<db::FieldStat>,
+    docs: usize,
+    ms: Option<u128>,
+}
+
+impl Default for SchemaTab {
+    fn default() -> Self {
+        Self { req: 0, limit: SCHEMA_DEFAULT_LIMIT, running: false, stats: Vec::new(), docs: 0, ms: None }
+    }
+}
+
+/// The original analyses every matching document (limit 0); on large production collections that
+/// is slow, so the rebuild starts with the first 1000 and offers "All".
+const SCHEMA_DEFAULT_LIMIT: i64 = 1000;
+
+/// The Import view of one tab: the text to import, how to read it and the parsed preview.
+struct ImportTab {
+    text: String,
+    file: Option<String>,
+    kind: db::ImportKind,
+    separator: Option<char>,
+    header: bool,
+    camel: bool,
+    upsert: bool,
+    upsert_by: String,
+    parsed: Option<db::Res<Vec<Document>>>,
+    /// What `parsed` was made from, so it is redone only when something changes.
+    parsed_key: u64,
+    fields: Vec<String>,
+}
+
+impl Default for ImportTab {
+    fn default() -> Self {
+        Self { text: String::new(), file: None, kind: db::ImportKind::Json, separator: None, header: true, camel: false, upsert: false, upsert_by: "_id".into(), parsed: None, parsed_key: 0, fields: Vec::new() }
+    }
+}
+
+/// The Shell view of one tab: the script, its logs and its result.
+#[derive(Default)]
+struct ShellTab {
+    code: String,
+    logs: Vec<(String, String)>,
+    /// The returned value; documents also go to `docs` for the table.
+    value: Option<Bson>,
+    docs: Vec<Document>,
+    fields: Vec<String>,
+    page: usize,
+    /// Show the result as JSON text instead of the table.
+    raw: bool,
+    raw_text: Option<String>,
+    error: Option<String>,
+    req: u64,
+    cancel: Option<tokio::sync::oneshot::Sender<()>>,
+    help: bool,
+    started: Option<std::time::Instant>,
+    ms: Option<u128>,
+    count: Option<usize>,
+}
+
+impl Tab {
+    fn new(sel: Sel) -> Self {
+        Self {
+            sel,
+            view: View::Documents,
+            filter_txt: String::new(),
+            sort_txt: String::new(),
+            proj_txt: String::new(),
+            query: Query::default(),
+            page: 0,
+            docs: Vec::new(),
+            fields: Vec::new(),
+            paths: Vec::new(),
+            count: 0,
+            ms: 0,
+            req: 0,
+            idx_req: 0,
+            loading: false,
+            selected: None,
+            agg_txt: "[\n  { $match: {} },\n  { $limit: 20 }\n]".into(),
+            agg_docs: Vec::new(),
+            agg_fields: Vec::new(),
+            agg_ms: None,
+            indexes: Vec::new(),
+            shell: ShellTab::default(),
+            schema: SchemaTab::default(),
+            import: ImportTab::default(),
+            compare: CompareTab { insert: true, replace: true, ..Default::default() },
+            related: HashMap::new(),
+        }
+    }
+}
+
+enum Danger {
+    DeleteMatching(Document),
+    DropCollection,
+    DropIndex(String),
+    RemoveConnection(u64),
+    DropDatabase { conn: u64, db: String },
+    DropCollAt { conn: u64, db: String, coll: String },
+    DropUser { conn: u64, db: String, user: String },
+    RenameMany { filter: Document, from: String, to: String },
+    Upsert { key: String },
+    Sync { conn: u64 },
+    Restore { conn: u64, args: Vec<String> },
+}
+
+enum Modal {
+    Conn(Box<ConnForm>),
+    Settings,
+    Unlock(u64),
+    Save { tag: String, changes: Vec<(String, Option<Bson>, Option<Bson>)> },
+    SaveAll(Vec<String>),
+    Delete(Document),
+    Typed { title: String, expect: String, typed: String, action: Danger },
+    AggWrite(Vec<Document>),
+    ShellWrite(Vec<String>),
+    ImportInsert(usize),
+    NewCollection { conn: u64, db: String, name: String, view: bool, source: String, pipeline: String },
+    RenameColl { conn: u64, db: String, coll: String, name: String },
+    Undo,
+    Text { title: String, body: String },
+    Rename { doc: Document, path: Vec<String>, name: String },
+    Tool(Box<ToolForm>),
+    Relations { conn: u64, db: String },
+}
+
+/// A value being edited in place in the document tree.
+struct Inline {
+    path: Vec<String>,
+    text: String,
+    kind: &'static str,
+    focus: bool,
+}
+
+/// The large JSON editor for a whole document (empty path) or one object/array field.
+struct JsonEdit {
+    base: Document,
+    path: Vec<String>,
+    text: String,
+    kind: &'static str,
+    focus: bool,
+}
+
+/// One document's edits that are not written yet. `original` is what was loaded, so saving can
+/// refuse to overwrite someone else's change.
+#[derive(Clone)]
+struct Draft {
+    conn: u64,
+    db: String,
+    coll: String,
+    original: Document,
+    current: Document,
+}
+
+/// A field being added inside an object (or appended to an array).
+struct NewField {
+    parent: Vec<String>,
+    name: String,
+    text: String,
+    kind: &'static str,
+}
+
+/// Per-collection column setup, saved between launches.
+#[derive(Default, Serialize, Deserialize, Clone)]
+#[serde(default)]
+struct ColPrefs {
+    /// Highlighted field paths (array positions removed), like the original's highlightedFields.
+    highlight: Vec<String>,
+    /// Chosen columns in order (dotted paths allowed). `None` means the first DEFAULT_COLS fields.
+    shown: Option<Vec<String>>,
+    /// Pinned columns always come first.
+    pinned: Vec<String>,
+    widths: HashMap<String, f32>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(default)]
+struct UiPrefs {
+    /// Open documents under their row (like the original) instead of in a side panel.
+    open_inline: bool,
+    table: bool,
+    /// Show the list of changes before writing staged edits. Off by default, as asked.
+    confirm_save: bool,
+    /// Write every edit right away and offer Undo, instead of collecting unsaved edits.
+    auto_save: bool,
+    /// Columns shown before the person picks their own.
+    default_cols: usize,
+    timeout_ms: u64,
+    /// Path to Bun for the Shell; empty means find it automatically.
+    shell_runtime: String,
+    /// Shell scripts run, newest first, per "connection/database" like the original's history refs.
+    shell_histories: HashMap<String, Vec<String>>,
+    /// npm packages available to Shell scripts.
+    shell_packages: Vec<String>,
+    /// Per collection ("conn/db/coll"): recent Query, Sort and Project inputs.
+    history: HashMap<String, QueryHist>,
+    /// Per collection: named saved queries and pipelines.
+    library: HashMap<String, Vec<SavedQuery>>,
+    /// Tabs open when the app was last used, restored at launch.
+    open_tabs: Vec<SavedTab>,
+    cur_tab: usize,
+    cols: HashMap<String, ColPrefs>,
+    /// Per "conn/db": fields that point to documents of another collection.
+    relations: HashMap<String, Vec<Relation>>,
+    /// Paths to mongodump and mongorestore; empty means find them automatically.
+    mongodump: String,
+    mongorestore: String,
+    /// Install new releases from GitHub and restart into them.
+    auto_update: bool,
+}
+
+/// The original keeps 30 recent inputs per collection and kind (HISTORY_LENGTH_BY_COLLECTION,
+/// renderer line 195241), skipping empty ones and moving repeats to the top (addHistory, 195309).
+const HISTORY_LENGTH_BY_COLLECTION: usize = 30;
+
+#[derive(Default, Serialize, Deserialize, Clone)]
+#[serde(default)]
+struct QueryHist {
+    selector: Vec<String>,
+    sort: Vec<String>,
+    project: Vec<String>,
+}
+
+fn push_history(list: &mut Vec<String>, value: &str) {
+    let v = value.trim();
+    if v.is_empty() || v == "{}" {
+        return;
+    }
+    list.retain(|x| x != v);
+    list.insert(0, v.to_string());
+    list.truncate(HISTORY_LENGTH_BY_COLLECTION);
+}
+
+/// A named query (or pipeline) saved for a collection; saving under an existing name replaces it,
+/// like the original's saved filters (CLS.saveFilter, renderer line 195332).
+#[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(default)]
+struct SavedQuery {
+    name: String,
+    filter: String,
+    sort: String,
+    project: String,
+    pipeline: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Default)]
+#[serde(default)]
+struct SavedTab {
+    conn: u64,
+    db: String,
+    coll: String,
+    view: String,
+    filter: String,
+    sort: String,
+    project: String,
+    agg: String,
+    shell: String,
+}
+
+/// The new/edit connection form.
+#[derive(Default)]
+struct ConnForm {
+    id: Option<u64>,
+    name: String,
+    uri: String,
+    show: bool,
+    ssh_on: bool,
+    ssh: crate::ssh::SshConf,
+    ssh_pwd: String,
+    ssh_pass: String,
+    proxy_on: bool,
+    proxy: db::Proxy,
+    proxy_pwd: String,
+    testing: bool,
+}
+
+impl ConnForm {
+    fn net(&self) -> db::Net {
+        db::Net {
+            ssh: self.ssh_on.then(|| (crate::ssh::SshConf { host: self.ssh.host.trim().into(), user: self.ssh.user.trim().into(), ..self.ssh.clone() }, crate::ssh::SshSecrets { password: Some(self.ssh_pwd.clone()), passphrase: Some(self.ssh_pass.clone()) })),
+            proxy: (self.proxy_on && !self.ssh_on).then(|| db::Proxy { host: self.proxy.host.trim().into(), password: Some(self.proxy_pwd.clone()), ..self.proxy.clone() }),
+        }
+    }
+}
+
+/// The Users and roles window of one connection.
+#[derive(Default)]
+struct UsersWin {
+    conn: u64,
+    users: Option<db::Res<Vec<Document>>>,
+    roles: Option<db::Res<Vec<Document>>>,
+    new_name: String,
+    new_pwd: String,
+    new_db: String,
+    new_roles: String,
+    /// (user, database, new password or empty, roles text)
+    edit: Option<(String, String, String, String)>,
+}
+
+/// "readWrite@shop, read" as role documents; a role without @db belongs to `default_db`.
+fn parse_roles(text: &str, default_db: &str) -> Vec<Bson> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .map(|r| {
+            let (role, db) = r.split_once('@').unwrap_or((r, default_db));
+            Bson::Document(doc! { "role": role.trim(), "db": db.trim() })
+        })
+        .collect()
+}
+
+fn roles_text(user: &Document) -> String {
+    user.get_array("roles")
+        .map(|a| a.iter().filter_map(|r| r.as_document()).map(|r| format!("{}@{}", r.get_str("role").unwrap_or_default(), r.get_str("db").unwrap_or_default())).collect::<Vec<_>>().join(", "))
+        .unwrap_or_default()
+}
+
+enum SideAct {
+    NewColl(String, bool),
+    Refresh(String),
+    Users,
+    DropDb(String),
+    Stats(String, String),
+    ViewDef(String, String),
+    Rename(String, String),
+    DropColl(String, String),
+    Dump(String, String),
+    Restore(String),
+    Compare(String, String),
+    Relations(String),
+    /// Analyze relations of one collection, or of every collection when empty.
+    Analyze(String, String),
+}
+
+enum QAct {
+    Filter(String),
+    Sort(String),
+    Project(String),
+    Load(SavedQuery),
+    Save(String),
+    Delete(String),
+}
+
+impl Default for UiPrefs {
+    fn default() -> Self {
+        Self { open_inline: true, table: true, confirm_save: false, auto_save: false, default_cols: DEFAULT_COLS, timeout_ms: db::DEFAULT_TIMEOUT_MS, shell_runtime: String::new(), shell_histories: HashMap::new(), shell_packages: Vec::new(), history: HashMap::new(), library: HashMap::new(), open_tabs: Vec::new(), cur_tab: 0, cols: HashMap::new(), relations: HashMap::new(), mongodump: String::new(), mongorestore: String::new(), auto_update: true }
+    }
+}
+
+enum TreeAct {
+    Start(Vec<String>, Bson),
+    Commit,
+    Cancel,
+    Remove(Vec<String>),
+    AddField(Vec<String>),
+    CommitNew,
+    Locked,
+    ShowFull(String, Bson),
+    PinColumn(String),
+    Highlight(String),
+    Filter(String, Bson, bool),
+    Group(String, Bson, bool),
+    Distinct(String),
+    Index(String),
+    Rename(Vec<String>),
+    GoRef(String, Bson),
+}
+
+#[derive(Clone, Copy)]
+enum TabClose {
+    This,
+    Others,
+    Left,
+    Right,
+    All,
+}
+
+enum ColAct {
+    Pin(String),
+    Hide(String),
+    Move(String, i32),
+    Show(String),
+    Reset,
+}
+
+pub struct App {
+    worker: Worker,
+    rx: Receiver<Msg>,
+    conns: Vec<Conn>,
+    active: Option<u64>,
+    open_dbs: HashSet<(u64, String)>,
+    tabs: Vec<Tab>,
+    cur: usize,
+    req: u64,
+    json_edit: Option<JsonEdit>,
+    drafts: HashMap<String, Draft>,
+    saving: HashMap<String, Draft>,
+    /// Paths changed in the document being drawn, for tinting.
+    changed: HashSet<String>,
+    inline: Option<Inline>,
+    new_field: Option<NewField>,
+    insert: Option<String>,
+    prefs: UiPrefs,
+    new_col: String,
+    new_pkg: String,
+    new_lib: String,
+    /// Views per (connection, database), shown differently in the sidebar.
+    views: HashSet<(u64, String, String)>,
+    users: Option<UsersWin>,
+    conn_test: Option<db::Res<String>>,
+    idx_keys: String,
+    idx_unique: bool,
+    undo: Vec<UndoAction>,
+    modal: Option<Modal>,
+    status: (String, bool),
+    status_at: std::time::Instant,
+    toast: Option<(String, std::time::Instant)>,
+    ac: Ac,
+    tree_filter: String,
+    demo: bool,
+    tool: Option<ToolRun>,
+    /// Recently closed tabs, newest first.
+    closed: Vec<Tab>,
+    /// Version installed by the updater, waiting for a restart.
+    updated: Option<String>,
+    update_note: String,
+    update_checked: Option<std::time::Instant>,
+    last_input: std::time::Instant,
+    started: std::time::Instant,
+    shot: Option<(PathBuf, u32, Arc<Mutex<Option<egui::ColorImage>>>)>,
+}
+
+fn config_dir() -> PathBuf {
+    dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("quarry")
+}
+
+fn keychain(id: u64) -> Option<keyring::Entry> {
+    keyring::Entry::new("quarry", &format!("connection-{id}")).ok()
+}
+
+/// Other secrets of a connection: "ssh-password", "ssh-passphrase", "proxy-password".
+fn secret(id: u64, what: &str) -> Option<String> {
+    keyring::Entry::new("quarry", &format!("connection-{id}-{what}")).ok()?.get_password().ok().filter(|s| !s.is_empty())
+}
+
+fn set_secret(id: u64, what: &str, value: &str) {
+    if let Ok(k) = keyring::Entry::new("quarry", &format!("connection-{id}-{what}")) {
+        let _ = if value.is_empty() { k.delete_credential() } else { k.set_password(value) };
+    }
+}
+
+fn net_of(meta: &ConnMeta) -> db::Net {
+    db::Net {
+        ssh: meta.ssh.clone().map(|c| (c, crate::ssh::SshSecrets { password: secret(meta.id, "ssh-password"), passphrase: secret(meta.id, "ssh-passphrase") })),
+        proxy: meta.proxy.clone().map(|p| db::Proxy { password: secret(meta.id, "proxy-password"), ..p }),
+    }
+}
+
+/// Top-level fields of the shown documents, `_id` first, in the order they appear.
+fn auto_fields(docs: &[Document]) -> Vec<String> {
+    let mut cols = vec!["_id".to_string()];
+    let mut seen: HashSet<&str> = HashSet::from(["_id"]);
+    for d in docs {
+        for k in d.keys() {
+            if seen.insert(k) {
+                cols.push(k.clone());
+            }
+        }
+    }
+    cols
+}
+
+fn highlighted(prefs: &UiPrefs, key: &str, path: &[String]) -> bool {
+    prefs.cols.get(key).is_some_and(|p| !p.highlight.is_empty() && p.highlight.contains(&db::strip_indices(&path.join("."))))
+}
+
+/// Right-click menu for one field, modelled on the original's fieldActions (renderer line 106562).
+fn field_menu(ui: &mut egui::Ui, path: &[String], v: &Bson, editable: bool, acts: &mut Vec<TreeAct>) {
+    let p = path.join(".");
+    let is_id = path.first().is_some_and(|k| k == "_id");
+    ui.set_min_width(230.0);
+    ui.label(RichText::new(format!("Field: {p}")).size(11.5).color(MUTED));
+    ui.separator();
+    if ui.button("Copy value").clicked() {
+        ui.ctx().copy_text(match v {
+            Bson::Document(_) | Bson::Array(_) => db::shell_text(v),
+            other => db::value_text(other),
+        });
+        ui.close();
+    }
+    if ui.button("Copy path").clicked() {
+        ui.ctx().copy_text(p.clone());
+        ui.close();
+    }
+    if ui.button("Show full value").clicked() {
+        acts.push(TreeAct::ShowFull(p.clone(), v.clone()));
+    }
+    if editable && !is_id && ui.button("Edit value…").clicked() {
+        acts.push(TreeAct::Start(path.to_vec(), v.clone()));
+    }
+    if !is_id && matches!(v, Bson::ObjectId(_) | Bson::String(_)) && ui.button("Go to referenced document").on_hover_text("Opens the document whose _id is this value; the collection is found automatically the first time").clicked() {
+        acts.push(TreeAct::GoRef(p.clone(), v.clone()));
+    }
+    ui.separator();
+    if ui.button("Pin as a new column").clicked() {
+        acts.push(TreeAct::PinColumn(p.clone()));
+    }
+    if ui.button("Highlight field").clicked() {
+        acts.push(TreeAct::Highlight(p.clone()));
+    }
+    ui.menu_button("Filter by value", |ui| {
+        if ui.button("All documents").clicked() {
+            acts.push(TreeAct::Filter(p.clone(), v.clone(), false));
+        }
+        if ui.button("Filtered documents only").clicked() {
+            acts.push(TreeAct::Filter(p.clone(), v.clone(), true));
+        }
+    });
+    ui.menu_button("Group by and count", |ui| {
+        if ui.button("All documents").clicked() {
+            acts.push(TreeAct::Group(p.clone(), v.clone(), false));
+        }
+        if ui.button("Filtered documents only").clicked() {
+            acts.push(TreeAct::Group(p.clone(), v.clone(), true));
+        }
+    });
+    if ui.button("Count distinct values").on_hover_text("Number of distinct values in this field within the current query").clicked() {
+        acts.push(TreeAct::Distinct(db::strip_indices(&p)));
+    }
+    if ui.button("Create index on this field").clicked() {
+        acts.push(TreeAct::Index(p.clone()));
+    }
+    if editable && !is_id {
+        ui.separator();
+        if ui.button("Rename field…").clicked() {
+            acts.push(TreeAct::Rename(path.to_vec()));
+        }
+        if ui.button(RichText::new("Delete field").color(ALERT)).clicked() {
+            acts.push(TreeAct::Remove(path.to_vec()));
+        }
+        if ui.button("Add field").on_hover_text("Add a field next to this one").clicked() {
+            let parent = match v {
+                Bson::Document(_) | Bson::Array(_) => path.to_vec(),
+                _ => path[..path.len() - 1].to_vec(),
+            };
+            acts.push(TreeAct::AddField(parent));
+        }
+    }
+    ui.separator();
+    ui.label(RichText::new(format!("Field size: {} bytes", db::field_size(v))).size(11.5).color(FAINT));
+}
+
+/// Bun for the Shell: the path from Settings, else the usual install places. Apps opened from
+/// Finder do not get the terminal's PATH, so the common folders are checked directly.
+fn find_bun(setting: &str) -> Option<PathBuf> {
+    find_exe("bun", setting)
+}
+
+/// A program from its Settings path, else from PATH and the usual install folders.
+fn find_exe(name: &str, setting: &str) -> Option<PathBuf> {
+    if !setting.trim().is_empty() {
+        return Some(PathBuf::from(setting.trim()));
+    }
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    dirs.extend(["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from));
+    if let Some(h) = dirs::home_dir() {
+        dirs.push(h.join(".bun").join("bin"));
+    }
+    let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+    dirs.into_iter().map(|d| d.join(&file)).find(|p| p.is_file())
+}
+
+/// Words the original treats as possibly destructive in the shell (`dangerousCommands`,
+/// renderer line 131264: /drop|remove|replace|update|delete|insert|rename|\$out/i).
+fn dangerous_words(code: &str) -> Vec<String> {
+    let lower = code.to_lowercase();
+    ["drop", "remove", "replace", "update", "delete", "insert", "rename", "$out"].iter().filter(|w| lower.contains(*w)).map(|w| w.to_string()).collect()
+}
+
+/// The original's "Open query in NodeShell" script (renderer line 96080), with its collection
+/// reference rule (getSnippetCollectionRef): names that are not plain words go through db.collection().
+fn query_script(coll: &str, filter: &str) -> String {
+    let f = filter.trim().trim_end_matches(';');
+    if db::is_shell(f) {
+        return format!("async function run() {{\n\treturn await {f}\n}}");
+    }
+    let f = if f.is_empty() { "{}" } else { f };
+    format!("async function run() {{\n\treturn await {}.find({f})\n}}", collection_ref(coll))
+}
+
+fn collection_ref(coll: &str) -> String {
+    if coll.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') && !coll.starts_with(|c: char| c.is_ascii_digit()) {
+        coll.to_string()
+    } else {
+        format!("db.collection({})", serde_json::Value::String(coll.into()))
+    }
+}
+
+/// The Shell's reference: how scripts work, every name the runner provides, the main methods and
+/// examples that can be loaded into the editor. Returns an example to load, if one was picked.
+fn shell_help(ui: &mut egui::Ui, coll: &str, writable: bool) -> Option<String> {
+    let mut pick = None;
+    let code = |s: &str| RichText::new(s).monospace().size(12.5).color(C_DATE);
+    let head = |ui: &mut egui::Ui, s: &str| {
+        ui.add_space(4.0);
+        ui.label(RichText::new(s).size(11.0).strong().color(MUTED));
+    };
+    egui::Frame::new().fill(PANEL).corner_radius(8).inner_margin(12).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        head(ui, "HOW IT WORKS");
+        ui.label("Write one function and return what you want to see. The script runs with Bun and the official MongoDB Node.js driver, so its whole API is available.");
+        ui.label(code("async function run() {\n  return await orders.find({ status: 'paid' }).toArray();\n}"));
+        ui.label(RichText::new("A returned cursor is cut to 100 documents. Logs from console.log/warn/error appear above the result. Cmd+Enter runs, Stop ends a long script.").color(MUTED));
+        if !writable {
+            ui.label(RichText::new("This connection is read-only: insert, update, delete, drop, index changes, $out/$merge and other write commands are refused. Unlock writes in the top bar to allow them.").color(SUCCESS));
+        }
+        head(ui, "NAMES YOU CAN USE");
+        egui::Grid::new("shell-names").num_columns(2).spacing([16.0, 4.0]).show(ui, |ui| {
+            for (n, what) in [
+                ("db", "the current database (Db): db.collection('name'), db.command({ ping: 1 }), db.listCollections()"),
+                ("<collection>", "every collection whose name is a plain word, e.g. orders.find()"),
+                ("ObjectId(\"…\")", "an ObjectId, with or without new"),
+                ("ISODate(\"…\")", "a Date from an ISO string"),
+                ("console.log / warn / error, log", "print to the log"),
+                ("randomId(n), UUIDv4(), UUIDv1()", "random ids"),
+                ("_ , dayjs", "lodash and dayjs, always available like in the original shell"),
+                ("packages", "every package added in Packages is ready by name: date-fns as dateFns, lodash as lodash and _"),
+                ("require('pkg'), import('pkg')", "load a package another way, or a part of it"),
+            ] {
+                ui.label(code(n));
+                ui.label(what);
+                ui.end_row();
+            }
+        });
+        head(ui, "COLLECTION METHODS");
+        ui.label(RichText::new(COLL_METHODS.join("  ·  ")).monospace().size(12.0).color(TEXT));
+        head(ui, "CURSOR METHODS (after find / aggregate)");
+        ui.label(RichText::new(CURSOR_METHODS.join("  ·  ")).monospace().size(12.0).color(TEXT));
+        head(ui, "EXAMPLES  ·  click Use to load one");
+        let examples = [
+            ("Find with a filter", format!("async function run() {{\n  return await {coll}.find({{ status: 'paid' }}).sort({{ _id: -1 }}).limit(20).toArray();\n}}")),
+            ("Count", format!("async function run() {{\n  return await {coll}.countDocuments({{}});\n}}")),
+            ("Group and count", format!("async function run() {{\n  return await {coll}.aggregate([\n    {{ $group: {{ _id: '$status', n: {{ $sum: 1 }} }} }},\n    {{ $sort: {{ n: -1 }} }}\n  ]).toArray();\n}}")),
+            ("Distinct values", format!("async function run() {{\n  return await {coll}.distinct('status');\n}}")),
+            ("Loop and log", format!("async function run() {{\n  for await (const d of {coll}.find().limit(5)) {{\n    console.log(d._id);\n  }}\n  return 'done';\n}}")),
+            ("By id", format!("async function run() {{\n  return await {coll}.findOne({{ _id: ObjectId(\"\") }});\n}}")),
+            ("Use lodash (built in as _)", format!("async function run() {{\n  const docs = await {coll}.find().limit(100).toArray();\n  return _.countBy(docs, 'status');\n}}")),
+            ("Update (needs writes unlocked)", format!("async function run() {{\n  return await {coll}.updateMany({{ status: 'pending' }}, {{ $set: {{ status: 'paid' }} }});\n}}")),
+        ];
+        for (title, ex) in examples {
+            ui.horizontal(|ui| {
+                if ui.small_button("Use").clicked() {
+                    pick = Some(ex.clone());
+                }
+                ui.label(RichText::new(title).color(BRIGHT));
+            });
+        }
+        ui.hyperlink_to("MongoDB Node.js driver reference", "https://www.mongodb.com/docs/drivers/node/current/");
+    });
+    pick
+}
+
+fn default_script(coll: &str) -> String {
+    let target = collection_ref(coll);
+    format!("async function run() {{\n  return await {target}.find({{}}).limit(20).toArray();\n}}")
+}
+
+/// A menu that stays open while you type or click inside it, closing on a click outside or Esc.
+/// Plain egui menus close on any click inside, which made their text boxes unusable.
+fn sticky_menu(ui: &mut egui::Ui, title: String, content: impl FnOnce(&mut egui::Ui)) {
+    use egui::containers::menu::{MenuButton, MenuConfig};
+    MenuButton::new(title).config(MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)).ui(ui, content);
+}
+
+/// Recent Query, Sort and Project inputs of this collection; picking one fills that box.
+/// Like the original's history menu (onHistory, renderer line 96157): each list starts with `{}`
+/// to clear the box, and Sort also offers the key of every index of the collection.
+fn history_menu(ui: &mut egui::Ui, h: &QueryHist, index_sorts: &[String], acts: &mut Vec<QAct>) {
+    sticky_menu(ui, "History".into(), |ui| {
+        ui.set_min_width(360.0);
+        ui.set_max_width(520.0);
+        let mut sort = h.sort.clone();
+        for k in index_sorts {
+            if !sort.contains(k) {
+                sort.push(k.clone());
+            }
+        }
+        let with_clear = |l: &Vec<String>| std::iter::once("{}".to_string()).chain(l.iter().cloned()).collect::<Vec<_>>();
+        let (sel, sort, proj) = (with_clear(&h.selector), with_clear(&sort), with_clear(&h.project));
+        for (title, list, kind) in [("QUERY", &sel, 0), ("SORT  ·  history and indexes", &sort, 1), ("PROJECT", &proj, 2)] {
+            ui.label(RichText::new(title).size(11.0).color(MUTED));
+            egui::ScrollArea::vertical().id_salt(("hist", kind)).max_height(170.0).show(ui, |ui| {
+                for v in list {
+                    let one_line: String = v.split_whitespace().collect::<Vec<_>>().join(" ");
+                    let mut job = json_job(&one_line.chars().take(90).collect::<String>());
+                    job.wrap.max_rows = 1;
+                    if ui.add(egui::Button::new(job).frame(false)).on_hover_text(v.as_str()).clicked() {
+                        acts.push(match kind {
+                            0 => QAct::Filter(v.clone()),
+                            1 => QAct::Sort(v.clone()),
+                            _ => QAct::Project(v.clone()),
+                        });
+                        ui.close();
+                    }
+                }
+            });
+            ui.separator();
+        }
+    });
+}
+
+/// Named queries (or pipelines) saved for this collection: load, delete, or save the current one.
+fn library_menu(ui: &mut egui::Ui, lib: &[SavedQuery], new_name: &mut String, pipeline: bool, acts: &mut Vec<QAct>) {
+    sticky_menu(ui, format!("Library ({})", lib.len()), |ui| {
+        ui.set_min_width(320.0);
+        if lib.is_empty() {
+            ui.label(RichText::new(if pipeline { "No saved pipelines for this collection yet." } else { "No saved queries for this collection yet." }).color(MUTED));
+        }
+        egui::ScrollArea::vertical().id_salt("lib").max_height(260.0).show(ui, |ui| {
+            for q in lib {
+                ui.horizontal(|ui| {
+                    let preview = if pipeline { q.pipeline.clone().unwrap_or_default() } else { q.filter.clone() };
+                    let preview: String = preview.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(60).collect();
+                    if ui.add(egui::Button::new(RichText::new(&q.name).color(BRIGHT)).frame(false)).on_hover_text(preview.as_str()).clicked() {
+                        acts.push(QAct::Load(q.clone()));
+                        ui.close();
+                    }
+                    ui.label(RichText::new(preview).monospace().size(11.0).color(FAINT));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("×").on_hover_text("Delete").clicked() {
+                            acts.push(QAct::Delete(q.name.clone()));
+                        }
+                    });
+                });
+            }
+        });
+        ui.separator();
+        ui.label(RichText::new(if pipeline { "SAVE THIS PIPELINE" } else { "SAVE THIS QUERY (query, sort and project)" }).size(11.0).color(MUTED));
+        ui.horizontal(|ui| {
+            let r = ui.add(egui::TextEdit::singleline(new_name).hint_text("name").desired_width(200.0));
+            let ok = !new_name.trim().is_empty();
+            if ui.add_enabled(ok, egui::Button::new("Save")).clicked() || (ok && r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))) {
+                acts.push(QAct::Save(new_name.trim().to_string()));
+                new_name.clear();
+            }
+        });
+        ui.label(RichText::new("Saving under an existing name replaces it.").size(11.0).color(FAINT));
+    });
+}
+
+/// A titled card holding a group of settings.
+fn settings_section(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
+    ui.label(RichText::new(title).size(11.0).strong().color(MUTED));
+    ui.add_space(2.0);
+    egui::Frame::new().fill(RAISED).stroke(Stroke::new(1.0, BORDER)).corner_radius(10).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing.y = 6.0;
+        add(ui);
+    });
+    ui.add_space(10.0);
+}
+
+/// One setting: its name and a short explanation on the left, the control on the right.
+fn setting_row(ui: &mut egui::Ui, title: &str, desc: &str, control: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal(|ui| {
+        let w = ui.available_width();
+        ui.vertical(|ui| {
+            ui.set_width((w - 230.0).max(160.0));
+            ui.label(RichText::new(title).size(14.0).color(BRIGHT));
+            ui.add(egui::Label::new(RichText::new(desc).size(12.0).color(MUTED)).wrap());
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), control);
+    });
+}
+
+/// "−  n  +" for a small whole number (the control slot is right-to-left, so added in reverse).
+fn stepper(ui: &mut egui::Ui, value: &mut usize, min: usize, max: usize) {
+    egui::Frame::new().fill(BG).corner_radius(8).inner_margin(3).show(ui, |ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        if ui.add_enabled(*value < max, egui::Button::new(RichText::new("+").size(14.0)).corner_radius(6)).clicked() {
+            *value += 1;
+        }
+        ui.add_sized([34.0, 22.0], egui::Label::new(RichText::new(value.to_string()).size(14.0).color(BRIGHT)));
+        if ui.add_enabled(*value > min, egui::Button::new(RichText::new("−").size(14.0)).corner_radius(6)).clicked() {
+            *value -= 1;
+        }
+    });
+}
+
+/// An on/off switch.
+fn toggle(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
+    let (rect, mut r) = ui.allocate_exact_size(egui::vec2(38.0, 22.0), Sense::click());
+    if r.clicked() {
+        *on = !*on;
+        r.mark_changed();
+    }
+    let t = ui.ctx().animate_bool(r.id, *on);
+    let enabled = ui.is_enabled();
+    let bg = if enabled { Color32::from_rgb(0x3a, 0x40, 0x46).lerp_to_gamma(PRIMARY, t) } else { HOVER };
+    ui.painter().rect_filled(rect, 11, bg);
+    let x = egui::lerp(rect.left() + 11.0..=rect.right() - 11.0, t);
+    ui.painter().circle_filled(egui::pos2(x, rect.center().y), 8.0, if enabled { BRIGHT } else { MUTED });
+    r.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A row of joined buttons where exactly one is chosen.
+fn segmented<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options: &[(T, &str)]) {
+    egui::Frame::new().fill(BG).corner_radius(8).inner_margin(3).show(ui, |ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        // In a right-to-left row, add in reverse so the options still read left to right.
+        let rtl = ui.layout().main_dir() == egui::Direction::RightToLeft;
+        let order: Vec<&(T, &str)> = if rtl { options.iter().rev().collect() } else { options.iter().collect() };
+        for (v, label) in order {
+            let on = *value == *v;
+            let b = egui::Button::new(RichText::new(*label).size(12.5).color(if on { BG } else { TEXT })).fill(if on { PRIMARY } else { Color32::TRANSPARENT }).corner_radius(6);
+            if ui.add(b).clicked() {
+                *value = *v;
+            }
+        }
+    });
+}
+
+/// The original's "optimal" column width (measureColumnWidth, renderer line 31273): the widest
+/// cell, kept between 40 and 400 px, plus 10 px. Our cells add 16 px of inner padding on top.
+fn optimal_width(ui: &egui::Ui, docs: &[Document], col: &str) -> f32 {
+    if docs.is_empty() {
+        return 100.0 + CELL_PAD; // the original's fallback width
+    }
+    let widest = ui.fonts_mut(|f| {
+        let head = f.layout_no_wrap(col.to_string(), FontId::proportional(12.5), TEXT).size().x;
+        docs.iter()
+            .filter_map(|d| db::get_path(d, col))
+            .map(|v| f.layout_job(cell_job(v)).size().x)
+            .fold(head, f32::max)
+    });
+    widest.clamp(OPTIMAL_MIN_W, OPTIMAL_MAX_W) + OPTIMAL_PAD + CELL_PAD
+}
+
+fn visible_cols(p: Option<&ColPrefs>, fields: &[String], n: usize) -> Vec<String> {
+    let base: Vec<String> = match p.and_then(|p| p.shown.clone()) {
+        Some(v) => v,
+        None => fields.iter().take(n).cloned().collect(),
+    };
+    let pinned: Vec<String> = p.map(|p| p.pinned.clone()).unwrap_or_default();
+    let mut out: Vec<String> = pinned.iter().filter(|c| base.contains(c)).cloned().collect();
+    out.extend(base.into_iter().filter(|c| !pinned.contains(c)));
+    out
+}
+
+impl App {
+    pub fn new(cc: &eframe::CreationContext<'_>, shot: Option<PathBuf>) -> Self {
+        style(&cc.egui_ctx);
+        let (tx, rx) = channel();
+        let demo = shot.is_some();
+        let mut app = Self {
+            worker: Worker::new(tx, cc.egui_ctx.clone()),
+            rx,
+            conns: Vec::new(),
+            active: None,
+            open_dbs: HashSet::new(),
+            tabs: Vec::new(),
+            cur: 0,
+            req: 0,
+            json_edit: None,
+            drafts: HashMap::new(),
+            saving: HashMap::new(),
+            changed: HashSet::new(),
+            inline: None,
+            new_field: None,
+            insert: None,
+            prefs: UiPrefs::default(),
+            new_col: String::new(),
+            new_pkg: String::new(),
+            new_lib: String::new(),
+            views: HashSet::new(),
+            users: None,
+            conn_test: None,
+            idx_keys: String::new(),
+            idx_unique: false,
+            undo: Vec::new(),
+            modal: None,
+            status: ("Ready. All connections start read-only.".into(), false),
+            toast: None,
+            ac: Ac::default(),
+            status_at: std::time::Instant::now(),
+            tree_filter: String::new(),
+            demo,
+            tool: None,
+            closed: Vec::new(),
+            updated: None,
+            update_note: String::new(),
+            update_checked: None,
+            last_input: std::time::Instant::now(),
+            started: std::time::Instant::now(),
+            shot: shot.map(|p| (p, 0, Arc::new(Mutex::new(None)))),
+        };
+        // Test fixture: QUARRY_TEST_JSON=<file of Extended JSON documents> makes screenshot mode
+        // show those documents through the same message path real query results take.
+        let fixture = std::env::var("QUARRY_TEST_JSON").ok().filter(|_| demo);
+        if let Some(path) = fixture {
+            app.demo = false;
+            let docs: Vec<Document> = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|t| db::parse_value(&t).ok())
+                .and_then(|b| match b {
+                    Bson::Array(a) => Some(a.into_iter().filter_map(|d| d.as_document().cloned()).collect()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            let sel = Sel { conn: 1, db: "fixture".into(), coll: "documents".into() };
+            app.conns.push(Conn { meta: ConnMeta { id: 1, name: "Fixture".into(), ..Default::default() }, client: None, status: Status::Ready, writable: false, dbs: vec![("fixture".into(), Some(vec!["documents".into()]))], masked_uri: String::new() , tunnel: None });
+            app.active = Some(1);
+            app.open_dbs.insert((1, "fixture".into()));
+            app.open_collection(sel, false);
+            app.req += 1;
+            app.tabs[0].req = app.req;
+            let n = docs.len() as u64;
+            app.worker.send(Msg::Docs { req: app.req, res: Ok((docs, n, 3)) });
+        } else if demo {
+            app.load_demo();
+        } else {
+            crate::update::cleanup();
+            let read = |f: &str| std::fs::read(config_dir().join(f)).ok();
+            let metas: Vec<ConnMeta> = read("connections.json").and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+            app.prefs = read("ui.json").and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+            for meta in metas {
+                let masked = keychain(meta.id).and_then(|k| k.get_password().ok()).map(|u| db::mask_uri(&u)).unwrap_or_default();
+                app.conns.push(Conn { meta, client: None, status: Status::Idle, writable: false, dbs: Vec::new(), masked_uri: masked , tunnel: None });
+            }
+            app.active = app.conns.first().map(|c| c.meta.id);
+            // Reopen the tabs of the last session; they load once their connection is connected.
+            for st in app.prefs.open_tabs.clone() {
+                if app.conn(st.conn).is_none() {
+                    continue;
+                }
+                let mut t = Tab::new(Sel { conn: st.conn, db: st.db, coll: st.coll });
+                t.view = match st.view.as_str() {
+                    "Aggregate" => View::Aggregate,
+                    "Indexes" => View::Indexes,
+                    "Shell" => View::Shell,
+                    "Schema" => View::Schema,
+                    "Import" => View::Import,
+                    "Compare" => View::Compare,
+                    _ => View::Documents,
+                };
+                (t.filter_txt, t.sort_txt, t.proj_txt, t.shell.code) = (st.filter, st.sort, st.project, st.shell);
+                if !st.agg.is_empty() {
+                    t.agg_txt = st.agg;
+                }
+                app.tabs.push(t);
+            }
+            app.cur = app.prefs.cur_tab.min(app.tabs.len().saturating_sub(1));
+            if let Some(t) = app.tabs.get(app.cur) {
+                app.active = Some(t.sel.conn);
+            }
+        }
+        app
+    }
+
+    fn write_config(&mut self, file: &str, bytes: Vec<u8>) {
+        if self.demo {
+            return;
+        }
+        let dir = config_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        if let Err(err) = std::fs::write(dir.join(file), bytes) {
+            self.err(format!("Could not save {file}: {err}"));
+        }
+    }
+
+    fn save_conns(&mut self) {
+        let metas: Vec<&ConnMeta> = self.conns.iter().map(|c| &c.meta).collect();
+        let b = serde_json::to_vec_pretty(&metas).unwrap_or_default();
+        self.write_config("connections.json", b);
+    }
+
+    fn save_prefs(&mut self) {
+        let b = serde_json::to_vec_pretty(&self.prefs).unwrap_or_default();
+        self.write_config("ui.json", b);
+    }
+
+    fn ok(&mut self, s: impl Into<String>) {
+        self.status = (s.into(), false);
+        self.status_at = std::time::Instant::now();
+    }
+
+    fn err(&mut self, s: impl Into<String>) {
+        self.status = (s.into(), true);
+        self.status_at = std::time::Instant::now();
+    }
+
+    fn conn(&self, id: u64) -> Option<&Conn> {
+        self.conns.iter().find(|c| c.meta.id == id)
+    }
+
+    fn t(&self) -> Option<&Tab> {
+        self.tabs.get(self.cur)
+    }
+
+    fn tm(&mut self) -> Option<&mut Tab> {
+        self.tabs.get_mut(self.cur)
+    }
+
+    fn sel_is_view(&self) -> bool {
+        self.t().is_some_and(|t| self.views.contains(&(t.sel.conn, t.sel.db.clone(), t.sel.coll.clone())))
+    }
+
+    fn sel_writable(&self) -> bool {
+        if self.sel_is_view() {
+            return false;
+        }
+        self.t().and_then(|t| self.conn(t.sel.conn)).is_some_and(|c| c.writable)
+    }
+
+    fn timeout(&self) -> Duration {
+        Duration::from_millis(self.prefs.timeout_ms)
+    }
+
+    fn target_for(&self, s: &Sel) -> Option<Target> {
+        let client = self.conn(s.conn)?.client.clone()?;
+        Some(Target { client, db: s.db.clone(), coll: s.coll.clone(), timeout: self.timeout() })
+    }
+
+    fn target(&self) -> Option<Target> {
+        self.target_for(&self.t()?.sel)
+    }
+
+    /// The single gate every write goes through.
+    fn writable_target(&mut self) -> Option<(u64, Target)> {
+        let conn = self.t()?.sel.conn;
+        if !self.sel_writable() {
+            self.err("This connection is read-only. Unlock writes in the top bar first.");
+            return None;
+        }
+        match self.target() {
+            Some(t) => Some((conn, t)),
+            None => {
+                self.err("Not connected.");
+                None
+            }
+        }
+    }
+
+    fn ask_unlock(&mut self) {
+        if let Some(t) = self.t() {
+            self.modal = Some(Modal::Unlock(t.sel.conn));
+        }
+    }
+
+    fn connect(&mut self, id: u64) {
+        let Some(uri) = keychain(id).and_then(|k| k.get_password().ok()) else {
+            self.err("Could not read this connection's address from the Keychain.");
+            return;
+        };
+        let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == id) else { return };
+        c.status = Status::Connecting;
+        c.client = None;
+        c.tunnel = None;
+        let net = net_of(&c.meta);
+        self.worker.connect(id, uri, self.timeout(), net);
+    }
+
+    fn col_key(&self, agg: bool) -> String {
+        let s = self.t().map(|t| format!("{}/{}/{}", t.sel.conn, t.sel.db, t.sel.coll)).unwrap_or_default();
+        match (agg, self.t().map(|t| t.view)) {
+            (true, Some(View::Shell)) => format!("{s}#shell"),
+            (true, Some(View::Import)) => format!("{s}#import"),
+            (true, _) => format!("{s}#agg"),
+            _ => s,
+        }
+    }
+
+    fn reset_doc_state(&mut self) {
+        self.json_edit = None;
+        self.inline = None;
+        self.new_field = None;
+    }
+
+    /// Opens a collection. Like the original (treeOpenInNewTab), a new tab is used unless one
+    /// already shows that collection; `replace` reuses the current tab instead.
+    fn open_collection(&mut self, sel: Sel, replace: bool) {
+        self.reset_doc_state();
+        if let Some(i) = self.tabs.iter().position(|t| t.sel == sel) {
+            self.cur = i;
+            return;
+        }
+        if replace && !self.tabs.is_empty() {
+            let view = self.tabs[self.cur].view;
+            self.tabs[self.cur] = Tab { view, ..Tab::new(sel) };
+        } else {
+            self.tabs.push(Tab::new(sel));
+            self.cur = self.tabs.len() - 1;
+        }
+        self.reload();
+    }
+
+    /// Keeps the 10 most recently closed tabs for "Reopen closed tab" (maxClosedTabsCount,
+    /// renderer line 197320).
+    fn remember_closed(&mut self, t: Tab) {
+        self.closed.insert(0, t);
+        self.closed.truncate(10);
+    }
+
+    fn reopen_tab(&mut self) {
+        if self.closed.is_empty() {
+            return;
+        }
+        let t = self.closed.remove(0);
+        self.tabs.push(t);
+        self.cur = self.tabs.len() - 1;
+        self.reset_doc_state();
+        self.reload();
+    }
+
+    fn close_tab(&mut self, i: usize) {
+        if i >= self.tabs.len() {
+            return;
+        }
+        let t = self.tabs.remove(i);
+        self.remember_closed(t);
+        if self.cur > i || self.cur >= self.tabs.len() {
+            self.cur = self.cur.saturating_sub(1);
+        }
+        self.reset_doc_state();
+    }
+
+    fn run_query(&mut self) {
+        let Some(t) = self.t() else { return };
+        if db::is_shell(&t.filter_txt) {
+            let text = t.filter_txt.clone();
+            return self.run_shell(&text);
+        }
+        let parse = |s: &str| -> db::Res<Option<Document>> { if s.trim().is_empty() { Ok(None) } else { db::parse_doc(s).map(Some) } };
+        let q = (|| -> db::Res<Query> {
+            Ok(Query {
+                filter: db::parse_doc(&t.filter_txt).map_err(|e| format!("Filter: {e}"))?,
+                sort: parse(&t.sort_txt).map_err(|e| format!("Sort: {e}"))?,
+                projection: parse(&t.proj_txt).map_err(|e| format!("Projection: {e}"))?,
+                ..Default::default()
+            })
+        })();
+        match q {
+            Ok(q) => {
+                let (f, so, p) = (t.filter_txt.clone(), t.sort_txt.clone(), t.proj_txt.clone());
+                let key = self.col_key(false);
+                let h = self.prefs.history.entry(key).or_default();
+                push_history(&mut h.selector, &f);
+                push_history(&mut h.sort, &so);
+                push_history(&mut h.project, &p);
+                self.save_prefs();
+                let t = self.tm().unwrap();
+                t.query = q;
+                t.page = 0;
+                self.reload();
+            }
+            Err(e) => self.err(e),
+        }
+    }
+
+    /// Runs a pasted `db.<coll>.find(...)` or `db.<coll>.aggregate([...])`, switching collection if needed.
+    fn run_shell(&mut self, text: &str) {
+        let sh = match db::parse_shell(text) {
+            Ok(s) => s,
+            Err(e) => return self.err(e),
+        };
+        let Some(cur) = self.t().map(|t| t.sel.clone()) else { return self.err("Open a collection first.") };
+        if sh.coll != cur.coll {
+            self.open_collection(Sel { coll: sh.coll.clone(), ..cur }, true);
+        }
+        let t = self.tm().unwrap();
+        t.selected = None;
+        match sh.kind {
+            ShellKind::Find(q) => {
+                t.view = View::Documents;
+                t.filter_txt = text.trim().to_string();
+                t.sort_txt.clear();
+                t.proj_txt.clear();
+                t.query = q;
+                t.page = 0;
+                self.reload();
+            }
+            ShellKind::Aggregate(p) => {
+                t.view = View::Aggregate;
+                t.agg_txt = text.trim().to_string();
+                self.run_pipeline(p);
+            }
+        }
+    }
+
+    fn run_pipeline(&mut self, p: Vec<Document>) {
+        if db::has_write_stage(&p) {
+            if self.writable_target().is_some() {
+                self.modal = Some(Modal::AggWrite(p));
+            }
+        } else if self.demo {
+            self.ok("Offline demo: nothing to run.");
+        } else {
+            match self.target() {
+                Some(target) => {
+                    self.req += 1;
+                    let req = self.req;
+                    self.tm().unwrap().req = req;
+                    self.worker.aggregate(req, target, p);
+                }
+                None => self.err("Not connected."),
+            }
+        }
+    }
+
+    fn load_indexes(&mut self) {
+        if let Some(target) = self.target() {
+            self.req += 1;
+            let req = self.req;
+            self.tm().unwrap().idx_req = req;
+            self.worker.indexes(req, target);
+        }
+    }
+
+    /// Asks for the preview of every referenced id on the page, like the original's
+    /// relatedDocuments (renderer line 107207).
+    fn load_related(&mut self, req: u64) {
+        let Some(t) = self.tabs.iter().find(|t| t.req == req) else { return };
+        let Some(client) = self.conn(t.sel.conn).and_then(|c| c.client.clone()) else { return };
+        let rels = self.prefs.relations.get(&format!("{}/{}", t.sel.conn, t.sel.db)).into_iter().flatten().filter(|r| r.coll == t.sel.coll && !r.preview.is_empty());
+        for r in rels {
+            let ids = db::values_at(&t.docs, &r.path);
+            if !ids.is_empty() {
+                self.worker.related(req, Target { client: client.clone(), db: t.sel.db.clone(), coll: r.target.clone(), timeout: self.timeout() }, ids, r.preview.clone());
+            }
+        }
+    }
+
+    /// Opens the referenced document in its collection's tab.
+    fn go_ref(&mut self, conn: u64, db: String, coll: String, id: Bson) {
+        self.open_collection(Sel { conn, db, coll }, false);
+        let t = self.tm().unwrap();
+        t.view = View::Documents;
+        t.filter_txt = format!("{{ _id: {} }}", db::shell_text(&id));
+        t.sort_txt.clear();
+        t.proj_txt.clear();
+        self.run_query();
+    }
+
+    fn analyze_relations(&mut self, conn: u64, client: Client, db: String, coll: String) {
+        let all: Vec<String> = self.conn(conn).and_then(|c| c.dbs.iter().find(|d| d.0 == db)).and_then(|d| d.1.clone()).unwrap_or_default().into_iter().filter(|c| !c.starts_with("system.") && !self.views.contains(&(conn, db.clone(), c.clone()))).collect();
+        let colls = if coll.is_empty() { all.clone() } else { vec![coll.clone()] };
+        self.ok(format!("Analyzing data relations of {}…", if coll.is_empty() { db.clone() } else { format!("{db}.{coll}") }));
+        self.worker.analyze_relations(conn, Target { client, db, coll, timeout: self.timeout() }, colls, all);
+    }
+
+    /// Something a restart would lose: unsaved edits, writes in flight, running scripts or tools.
+    fn busy(&self) -> bool {
+        !self.drafts.is_empty()
+            || !self.saving.is_empty()
+            || self.json_edit.is_some()
+            || self.insert.is_some()
+            || self.inline.is_some()
+            || self.new_field.is_some()
+            || self.modal.is_some()
+            || self.tool.as_ref().is_some_and(|t| t.done.is_none())
+            || self.tabs.iter().any(|t| t.shell.cancel.is_some() || t.compare.running || t.loading)
+    }
+
+    /// Checks GitHub 5 seconds after launch and then daily, like the original (main process
+    /// setTimeout 5 s and setInterval 24 h, main.js line 33757); restarts into an update once idle.
+    fn auto_update(&mut self, ctx: &egui::Context) {
+        if self.demo || cfg!(debug_assertions) {
+            return;
+        }
+        if ctx.input(|i| !i.events.is_empty() || i.pointer.is_moving()) {
+            self.last_input = std::time::Instant::now();
+        }
+        const FIRST_CHECK_S: u64 = 5;
+        const CHECK_EVERY_S: u64 = 24 * 3600;
+        let due = match self.update_checked {
+            None => self.started.elapsed().as_secs() >= FIRST_CHECK_S,
+            Some(t) => t.elapsed().as_secs() >= CHECK_EVERY_S,
+        };
+        if self.update_checked.is_none() && self.prefs.auto_update {
+            ctx.request_repaint_after(std::time::Duration::from_secs(FIRST_CHECK_S));
+        }
+        if self.prefs.auto_update && self.updated.is_none() && due {
+            self.check_update();
+        }
+        if self.updated.is_some() && self.prefs.auto_update {
+            if self.last_input.elapsed().as_secs() >= 60 && !self.busy() {
+                crate::update::restart();
+            }
+            // Wake up to test idleness even when nothing else repaints.
+            ctx.request_repaint_after(std::time::Duration::from_secs(5));
+        }
+    }
+
+    fn check_update(&mut self) {
+        self.update_checked = Some(std::time::Instant::now());
+        self.update_note = "Checking for updates…".into();
+        self.worker.blocking(|| Msg::Update(crate::update::check_and_install()));
+    }
+
+    fn start_tool(&mut self, restore: bool, title: String, args: Vec<String>) {
+        let (name, setting) = if restore { ("mongorestore", &self.prefs.mongorestore) } else { ("mongodump", &self.prefs.mongodump) };
+        let Some(exe) = find_exe(name, setting) else {
+            return self.err(format!("{name} was not found. Install the MongoDB Database Tools (brew install mongodb-database-tools) or set its path in Settings."));
+        };
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.tool = Some(ToolRun { title, log: Vec::new(), cancel: Some(tx), done: None });
+        self.worker.tool(exe, args, rx);
+    }
+
+    fn reload(&mut self) {
+        if self.demo {
+            return;
+        }
+        let Some(target) = self.target() else { return };
+        // Each answer is matched to its tab by id; a slower older one never overwrites a newer one.
+        self.req += 1;
+        let req = self.req;
+        let t = self.tm().unwrap();
+        t.req = req;
+        t.loading = true;
+        let (q, page, view, no_idx) = (t.query.clone(), t.page, t.view, t.indexes.is_empty());
+        self.worker.find(req, target, q, page);
+        // Indexes also feed the Sort history (as in the original), so load them once per tab.
+        if view == View::Indexes || no_idx {
+            self.load_indexes();
+        }
+    }
+
+    fn push_undo(&mut self, a: UndoAction) {
+        self.undo.insert(0, a);
+        self.undo.retain(|a| a.at.elapsed().as_secs() <= db::UNDO_MAX_AGE_S);
+        self.undo.truncate(db::UNDO_MAX);
+    }
+
+    fn apply_undo(&mut self, i: usize) {
+        let a = &self.undo[i];
+        let Some(c) = self.conn(a.conn) else { return };
+        if !c.writable {
+            self.err("Undo is a write: unlock writes on that connection first.");
+            return;
+        }
+        let Some(client) = c.client.clone() else {
+            self.err("That connection is closed.");
+            return;
+        };
+        let a = self.undo.remove(i);
+        let t = Target { client, db: a.db, coll: a.coll, timeout: self.timeout() };
+        match a.kind {
+            UndoKind::Insert { id } => self.worker.delete_by_id(t, id),
+            UndoKind::InsertMany { ids } => self.worker.delete_ids(t, ids),
+            UndoKind::Delete { old } => self.worker.insert(a.conn, t, old),
+            UndoKind::Update { old, new } => self.worker.replace(a.conn, t, new, old, false),
+        }
+    }
+
+    fn tab_by_req(&mut self, req: u64) -> Option<&mut Tab> {
+        self.tabs.iter_mut().find(|t| t.req == req)
+    }
+
+    fn poll(&mut self) {
+        while let Ok(m) = self.rx.try_recv() {
+            match m {
+                Msg::Connected { conn, res } => {
+                    let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) else { continue };
+                    match res {
+                        Ok((client, dbs, tunnel)) => {
+                            // Trust the SSH host key the first time; later a different key is refused.
+                            let mut trusted = None;
+                            if let (Some(t), Some(sc)) = (&tunnel, c.meta.ssh.as_mut()) {
+                                if sc.known_host.is_none() && !t.fingerprint.is_empty() {
+                                    sc.known_host = Some(t.fingerprint.clone());
+                                    trusted = Some(t.fingerprint.clone());
+                                }
+                            }
+                            c.tunnel = tunnel;
+                            // Load every database's collections up front so the list can show counts.
+                            for d in &dbs {
+                                self.worker.collections(conn, client.clone(), d.clone());
+                            }
+                            c.client = Some(client);
+                            c.status = Status::Ready;
+                            c.dbs = dbs.into_iter().map(|d| (d, None)).collect();
+                            let n = c.meta.name.clone();
+                            self.ok(format!("Connected to {n} (read-only)"));
+                            if let Some(fp) = trusted {
+                                self.save_conns();
+                                self.ok(format!("Connected to {n} through SSH (read-only). Host key remembered: {fp}"));
+                            }
+                            let here = self.cur;
+                            for i in 0..self.tabs.len() {
+                                if self.tabs[i].sel.conn == conn && self.tabs[i].docs.is_empty() {
+                                    self.cur = i;
+                                    self.run_query();
+                                }
+                            }
+                            self.cur = here;
+
+                        }
+                        Err(e) => {
+                            c.status = Status::Failed(e.clone());
+                            self.err(e);
+                        }
+                    }
+                }
+                Msg::Collections { conn, db, res } => match res {
+                    Ok((v, views)) => {
+                        self.views.retain(|(c, d, _)| !(*c == conn && *d == db));
+                        self.views.extend(views.into_iter().map(|n| (conn, db.clone(), n)));
+                        if let Some(d) = self.conns.iter_mut().find(|c| c.meta.id == conn).and_then(|c| c.dbs.iter_mut().find(|d| d.0 == db)) {
+                            d.1 = Some(v);
+                        }
+                    }
+                    Err(e) => self.err(e),
+                },
+                Msg::Command { tag, res } => match (tag.as_str(), res) {
+                    ("users", r) => {
+                        if let Some(u) = &mut self.users {
+                            u.users = Some(r.map(|d| d.get_array("users").map(|a| a.iter().filter_map(|x| x.as_document().cloned()).collect()).unwrap_or_default()));
+                        }
+                    }
+                    ("roles", r) => {
+                        if let Some(u) = &mut self.users {
+                            u.roles = Some(r.map(|d| d.get_array("roles").map(|a| a.iter().filter_map(|x| x.as_document().cloned()).collect()).unwrap_or_default()));
+                        }
+                    }
+                    ("stats", Ok(d)) => {
+                        let title = format!("Statistics of {}", d.get_str("collection").unwrap_or_default());
+                        let mut lines = Vec::new();
+                        for (k, v) in d.iter().filter(|(k, _)| *k != "collection") {
+                            let n = match v {
+                                Bson::Int32(n) => Some(*n as f64),
+                                Bson::Int64(n) => Some(*n as f64),
+                                Bson::Double(n) => Some(*n),
+                                _ => None,
+                            };
+                            let text = match (k.as_str(), n) {
+                                ("size" | "avgObjSize" | "storageSize" | "totalIndexSize", Some(n)) => human_bytes(n as usize),
+                                (_, Some(n)) => group(&(n as i64).to_string()),
+                                ("indexSizes", _) => v.as_document().map(|d| d.iter().map(|(i, s)| format!("{i}: {}", human_bytes(match s { Bson::Int32(n) => *n as usize, Bson::Int64(n) => *n as usize, Bson::Double(n) => *n as usize, _ => 0 }))).collect::<Vec<_>>().join(", ")).unwrap_or_default(),
+                                _ => db::value_text(v),
+                            };
+                            lines.push(format!("{k}: {text}"));
+                        }
+                        self.modal = Some(Modal::Text { title, body: lines.join("\n") });
+                    }
+                    ("viewdef", Ok(d)) => {
+                        let opts = d.get_document("cursor").ok().and_then(|c| c.get_array("firstBatch").ok()).and_then(|a| a.first()).and_then(|x| x.as_document()).and_then(|x| x.get_document("options").ok()).cloned().unwrap_or_default();
+                        let body = format!("viewOn: {}\npipeline:\n{}", opts.get_str("viewOn").unwrap_or_default(), db::to_edit_value(opts.get("pipeline").unwrap_or(&Bson::Array(vec![]))));
+                        self.modal = Some(Modal::Text { title: "View definition".into(), body });
+                    }
+                    (_, Err(e)) => self.err(e),
+                    _ => {}
+                },
+                Msg::DbChanged { conn, db, res } => {
+                    match res {
+                        Ok(m) => self.ok(m),
+                        Err(e) => self.err(e),
+                    }
+                    if let Some(client) = self.conn(conn).and_then(|c| c.client.clone()) {
+                        if db == "*" {
+                            self.connect(conn);
+                        } else {
+                            self.worker.collections(conn, client, db);
+                        }
+                    }
+                    if self.users.as_ref().is_some_and(|u| u.conn == conn) {
+                        self.load_users(conn);
+                    }
+                }
+                Msg::Docs { req, res } => {
+                    let Some(t) = self.tab_by_req(req) else { continue };
+                    t.loading = false;
+                    match res {
+                        Ok((docs, count, ms)) => {
+                            // A query that works again clears an earlier error.
+                            if self.status.1 {
+                                self.status = (format!("Loaded {} documents", docs.len()), false);
+                            }
+                            let t = self.tab_by_req(req).unwrap();
+                            t.fields = auto_fields(&docs);
+                            t.paths = doc_paths(&docs);
+                            t.docs = docs;
+                            t.count = count;
+                            t.ms = ms;
+                            if matches!(t.selected, Some((false, i)) if i >= t.docs.len()) {
+                                t.selected = None;
+                            }
+                            t.related.clear();
+                            self.load_related(req);
+                        }
+                        Err(e) => {
+                            t.docs.clear();
+                            self.err(e);
+                        }
+                    }
+                }
+                Msg::Indexes { req, res } => match (res, self.tabs.iter_mut().find(|t| t.idx_req == req)) {
+                    (Ok(v), Some(t)) => t.indexes = v,
+                    (Err(e), _) => self.err(e),
+                    _ => {}
+                },
+                Msg::Aggregated { req, res } => match (res, self.tab_by_req(req)) {
+                    (Ok((d, ms)), Some(t)) => {
+                        t.agg_fields = auto_fields(&d);
+                        let n = d.len();
+                        t.agg_docs = d;
+                        t.agg_ms = Some(ms);
+                        self.ok(format!("Pipeline returned {n} documents"));
+                    }
+                    (Err(e), _) => self.err(e),
+                    _ => {}
+                },
+                Msg::Written { res, undo, reload } => {
+                    match res {
+                        Ok(s) => {
+                            self.reset_doc_state();
+                            self.ok(s);
+                        }
+                        Err(e) => self.err(e),
+                    }
+                    if let Some(u) = undo {
+                        self.push_undo(u);
+                    }
+                    if reload {
+                        self.reload();
+                    } else {
+                        self.load_indexes();
+                    }
+                }
+                Msg::Saved { tag, res, undo } => {
+                    match res {
+                        Ok(s) => {
+                            self.saving.remove(&tag);
+                            self.toast = Some((s.clone(), std::time::Instant::now()));
+                            self.ok(s);
+                        }
+                        Err(e) => {
+                            // Keep the edits so nothing typed is lost; the person can reload and redo.
+                            if let Some(dr) = self.saving.remove(&tag) {
+                                self.drafts.insert(tag, dr);
+                            }
+                            self.err(e);
+                        }
+                    }
+                    if let Some(u) = undo {
+                        self.push_undo(u);
+                    }
+                    if self.saving.is_empty() {
+                        self.reload();
+                    }
+                }
+                Msg::Info(res) => match res {
+                    Ok(s) => self.ok(s),
+                    Err(e) => self.err(e),
+                },
+                Msg::Notice { title, body } => self.modal = Some(Modal::Text { title, body }),
+                Msg::Related { req, res } => match (res, self.tab_by_req(req)) {
+                    (Ok(v), Some(t)) => t.related.extend(v),
+                    (Err(e), _) => self.err(format!("Could not load related documents: {e}")),
+                    _ => {}
+                },
+                Msg::RefFound { conn, db, coll, path, value, res } => match res {
+                    Ok(Some((target, preview))) => {
+                        self.prefs.relations.entry(format!("{conn}/{db}")).or_default().push(Relation { coll: coll.clone(), path: path.clone(), target: target.clone(), preview: preview.clone() });
+                        self.save_prefs();
+                        let reqs: Vec<u64> = self.tabs.iter().filter(|t| t.sel.conn == conn && t.sel.db == db && t.sel.coll == coll).map(|t| t.req).collect();
+                        for r in reqs {
+                            self.load_related(r);
+                        }
+                        self.go_ref(conn, db, target.clone(), value);
+                        self.ok(format!("Linked {path} to {target}, showing {preview} next to its ids. Edit it under Data relations in the database menu."));
+                    }
+                    Ok(None) => self.err(format!("No collection of {db} has a document with this _id.")),
+                    Err(e) => self.err(e),
+                },
+                Msg::Analyzed { conn, db, res } => match res {
+                    Ok(found) => {
+                        let list = self.prefs.relations.entry(format!("{conn}/{db}")).or_default();
+                        let mut added = 0;
+                        for (coll, path, target, preview) in found {
+                            if !list.iter().any(|r| r.coll == coll && r.path == path) {
+                                list.push(Relation { coll, path, target, preview });
+                                added += 1;
+                            }
+                        }
+                        self.save_prefs();
+                        let reqs: Vec<u64> = self.tabs.iter().filter(|t| t.sel.conn == conn && t.sel.db == db).map(|t| t.req).collect();
+                        for r in reqs {
+                            self.load_related(r);
+                        }
+                        self.ok(if added == 0 { "Analysis done: no new relations found.".to_string() } else { format!("Analysis done: {added} new relation{} found.", if added == 1 { "" } else { "s" }) });
+                        if self.modal.is_none() {
+                            self.modal = Some(Modal::Relations { conn, db });
+                        }
+                    }
+                    Err(e) => self.err(format!("Could not analyze relations: {e}")),
+                },
+                Msg::Compared { req, res } => {
+                    let Some(t) = self.tabs.iter_mut().find(|t| t.compare.req == req) else { continue };
+                    t.compare.running = false;
+                    match res {
+                        Ok(r) => t.compare.result = Some(r),
+                        Err(e) => self.err(e),
+                    }
+                }
+                Msg::ToolLog(line) => {
+                    if let Some(t) = &mut self.tool {
+                        t.log.push(line);
+                        if t.log.len() > 2000 {
+                            t.log.drain(..500);
+                        }
+                    }
+                }
+                Msg::Update(res) => match res {
+                    Ok(Some(v)) => {
+                        self.update_note = format!("Version {v} is installed and starts on restart.");
+                        self.updated = Some(v);
+                    }
+                    Ok(None) => self.update_note = format!("Up to date (version {}).", env!("CARGO_PKG_VERSION")),
+                    // Offline or rate-limited checks stay quiet; the reason shows in Settings.
+                    Err(e) => self.update_note = format!("Last check failed: {e}"),
+                },
+                Msg::ToolDone(res) => {
+                    if let Some(t) = &mut self.tool {
+                        t.cancel = None;
+                        t.done = Some(res.clone());
+                    }
+                    match res {
+                        Ok(m) => self.ok(m),
+                        Err(e) => self.err(e),
+                    }
+                }
+                Msg::Tested { res } => self.conn_test = Some(res),
+                Msg::Schema { req, res } => {
+                    let Some(t) = self.tabs.iter_mut().find(|t| t.schema.req == req) else { continue };
+                    t.schema.running = false;
+                    match res {
+                        Ok((stats, n, ms)) => (t.schema.stats, t.schema.docs, t.schema.ms) = (stats, n, Some(ms)),
+                        Err(e) => self.err(e),
+                    }
+                }
+                Msg::ShellLog { req, level, text } => {
+                    if let Some(t) = self.tabs.iter_mut().find(|t| t.shell.req == req) {
+                        t.shell.logs.push((level, text));
+                    }
+                }
+                Msg::ShellDone { req, res, ms } => {
+                    let Some(t) = self.tabs.iter_mut().find(|t| t.shell.req == req) else { continue };
+                    let sh = &mut t.shell;
+                    sh.cancel = None;
+                    sh.started = None;
+                    sh.ms = Some(ms);
+                    let parsed = res.and_then(|ejson| {
+                        let v: serde_json::Value = serde_json::from_str(&ejson).map_err(|e| e.to_string())?;
+                        match Bson::try_from(v).map_err(|e| e.to_string())? {
+                            Bson::Document(mut d) => Ok(d.remove("v").unwrap_or(Bson::Null)),
+                            _ => Err("Unexpected result from the shell".to_string()),
+                        }
+                    });
+                    match parsed {
+                        Ok(v) => sh.set_value(v),
+                        Err(e) => {
+                            sh.value = None;
+                            sh.docs.clear();
+                            sh.error = Some(e);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn selected_doc(&self) -> Option<&Document> {
+        let t = self.t()?;
+        match t.selected? {
+            (false, i) => t.docs.get(i),
+            (true, i) => t.agg_docs.get(i),
+        }
+    }
+
+    fn draft_key(&self, d: &Document) -> String {
+        let s = self.t().map(|t| format!("{}/{}/{}", t.sel.conn, t.sel.db, t.sel.coll)).unwrap_or_default();
+        format!("{s}#{}", d.get("_id").map(db::compact).unwrap_or_default())
+    }
+
+    /// The document as it should be shown: with its unsaved edits, if any.
+    fn shown_doc(&self, d: &Document) -> Option<Document> {
+        if self.drafts.is_empty() {
+            return None;
+        }
+        self.drafts.get(&self.draft_key(d)).map(|x| x.current.clone())
+    }
+
+    /// Keeps an edit as unsaved instead of writing it, so several edits go out in one save.
+    fn stage(&mut self, d: &Document, new: db::Res<Document>) {
+        let new = match new {
+            Ok(n) => n,
+            Err(e) => return self.err(e),
+        };
+        let key = self.draft_key(d);
+        let Some(sel) = self.t().map(|t| t.sel.clone()) else { return };
+        let original = self.drafts.get(&key).map(|x| x.original.clone()).unwrap_or_else(|| d.clone());
+        self.inline = None;
+        self.new_field = None;
+        self.json_edit = None;
+        if db::diff(&original, &new).is_empty() {
+            self.drafts.remove(&key);
+            return self.ok("No changes left on this document");
+        }
+        let n = db::diff(&original, &new).len();
+        self.drafts.insert(key.clone(), Draft { conn: sel.conn, db: sel.db, coll: sel.coll, original, current: new });
+        if self.prefs.auto_save && self.sel_writable() {
+            self.write_draft(&key);
+        } else {
+            self.ok(format!("{n} unsaved change(s). Press Save on the document when ready."));
+        }
+    }
+
+    fn save_draft(&mut self, key: &str) {
+        let Some(dr) = self.drafts.get(key) else { return };
+        if !self.conn(dr.conn).is_some_and(|c| c.writable) {
+            return self.modal = Some(Modal::Unlock(dr.conn));
+        }
+        if self.prefs.confirm_save {
+            let changes = db::diff(&dr.original, &dr.current);
+            self.modal = Some(Modal::Save { tag: key.to_string(), changes });
+        } else {
+            self.write_draft(key);
+        }
+    }
+
+    fn write_draft(&mut self, key: &str) {
+        let Some(dr) = self.drafts.remove(key) else { return };
+        let Some(target) = self.target_for(&Sel { conn: dr.conn, db: dr.db.clone(), coll: dr.coll.clone() }) else {
+            self.drafts.insert(key.to_string(), dr);
+            return self.err("Not connected.");
+        };
+        self.worker.save(key.to_string(), dr.conn, target, dr.original.clone(), dr.current.clone());
+        self.saving.insert(key.to_string(), dr);
+    }
+
+    /// Unsaved documents of the open collection.
+    fn tab_drafts(&self) -> Vec<String> {
+        let Some(t) = self.t() else { return Vec::new() };
+        let prefix = format!("{}/{}/{}#", t.sel.conn, t.sel.db, t.sel.coll);
+        self.drafts.keys().filter(|k| k.starts_with(&prefix)).cloned().collect()
+    }
+
+    fn load_demo(&mut self) {
+        let names = ["Ada Byron", "Grace Hopper", "Linus Ito", "Mira Okafor", "Sam Patel", "Noor Haddad", "Jun Park", "Eva Lind"];
+        let status = ["paid", "shipped", "pending", "refunded"];
+        let docs: Vec<Document> = (0..50)
+            .map(|i: i32| {
+                doc! {
+                    "_id": ObjectId::parse_str(format!("6650f1c2a1b2c3d4e5f6{:04x}", 0x0700 + i)).unwrap(),
+                    "number": 10_400 + i,
+                    "customer": { "name": names[i as usize % names.len()], "tier": if i % 3 == 0 { "gold" } else { "standard" } },
+                    "status": status[i as usize % status.len()],
+                    "total": 19.5 + (i as f64 * 7.25) % 230.0,
+                    "items": (0..(1 + i % 4)).map(|k| Bson::Document(doc! { "sku": format!("SKU-{:03}", 100 + k * 7 + i), "qty": 1 + k })).collect::<Vec<_>>(),
+                    "gift": i % 5 == 0,
+                    "note": if i % 4 == 1 { Bson::Null } else { Bson::String("leave at the door".into()) },
+                    "createdAt": mongodb::bson::DateTime::from_millis(1_730_000_000_000 + i as i64 * 3_600_000),
+                    "updatedAt": 1_730_000_000i64 + i as i64 * 3600,
+                }
+            })
+            .collect();
+        let colls = |v: &[&str]| Some(v.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let dbs = vec![
+            ("admin".to_string(), colls(&["system.users", "system.version"])),
+            ("analytics".to_string(), colls(&["events", "funnels", "sessions"])),
+            ("config".to_string(), colls(&["system.sessions"])),
+            ("local".to_string(), colls(&["startup_log"])),
+            ("shop".to_string(), colls(&["carts", "customers", "orders", "paid_orders", "products", "reviews", "shipments"])),
+            ("users".to_string(), colls(&["accounts", "profiles"])),
+        ];
+        self.conns.push(Conn {
+            meta: ConnMeta { id: 1, name: "Local sample".into(), ..Default::default() },
+            client: None,
+            status: Status::Ready,
+            writable: false,
+            dbs,
+            masked_uri: "mongodb://localhost:27017".into(),
+            tunnel: None,
+        });
+        self.conns.push(Conn {
+            meta: ConnMeta { id: 2, name: "Staging".into(), ..Default::default() },
+            client: None,
+            status: Status::Idle,
+            writable: false,
+            dbs: Vec::new(),
+            masked_uri: "mongodb+srv://app:****@staging.example.net".into(),
+            tunnel: None,
+        });
+        self.active = Some(1);
+        self.open_dbs.insert((1, "shop".into()));
+        self.views.insert((1, "shop".into(), "paid_orders".into()));
+        let sel = |db: &str, coll: &str| Sel { conn: 1, db: db.into(), coll: coll.into() };
+        self.tabs.push(Tab::new(sel("shop", "customers")));
+        let mut t = Tab::new(sel("shop", "orders"));
+        t.fields = auto_fields(&docs);
+        t.paths = doc_paths(&docs);
+        t.docs = docs;
+        t.count = 1284;
+        t.ms = 14;
+        t.selected = Some((false, 2));
+        t.filter_txt = "{ status: { $in: ['paid', 'shipped', 'pending'] } }".into();
+        t.sort_txt = "{ total: -1 }".into();
+        t.query.sort = Some(doc! { "total": -1 });
+        self.tabs.push(t);
+        self.tabs.push(Tab::new(sel("analytics", "events")));
+        self.cur = 1;
+        let key = self.col_key(false);
+        self.prefs.cols.insert(key, ColPrefs { pinned: vec!["status".into()], highlight: vec!["customer.name".into()], ..Default::default() });
+        self.status = ("Offline demo: no database is connected.".into(), false);
+        if std::env::var("QUARRY_TEST_CONNFORM").is_ok() {
+            self.modal = Some(Modal::Conn(Box::new(ConnForm {
+                id: Some(2),
+                name: "Staging".into(),
+                uri: "mongodb://app:secret@10.0.3.12:27017/?replicaSet=rs0".into(),
+                ssh_on: true,
+                ssh: crate::ssh::SshConf { host: "bastion.example.com".into(), port: 22, user: "deploy".into(), auth: crate::ssh::SshAuth::KeyFile, key_path: "~/.ssh/id_ed25519".into(), legacy_rsa: false, known_host: Some("SHA256:3n9Yk0mF1q2hV7Qp6zXcR4tL8wE5sA0dJ2uB1nM7kPo".into()) },
+                ..Default::default()
+            })));
+        }
+        if std::env::var("QUARRY_TEST_USERS").is_ok() {
+            self.users = Some(UsersWin {
+                conn: 1,
+                users: Some(Ok(vec![
+                    doc! { "user": "admin", "db": "admin", "roles": [ { "role": "root", "db": "admin" } ] },
+                    doc! { "user": "shop_app", "db": "shop", "roles": [ { "role": "readWrite", "db": "shop" } ] },
+                    doc! { "user": "analyst", "db": "admin", "roles": [ { "role": "read", "db": "shop" }, { "role": "read", "db": "analytics" } ] },
+                ])),
+                roles: Some(Ok(vec![doc! { "role": "reportsReader", "db": "admin", "roles": [ { "role": "read", "db": "analytics" } ] }])),
+                new_db: "admin".into(),
+                ..Default::default()
+            });
+        }
+        if std::env::var("QUARRY_TEST_SCHEMA").is_ok() {
+            self.tabs[1].view = View::Schema;
+            self.tabs[1].selected = None;
+        }
+        if std::env::var("QUARRY_TEST_IMPORT").is_ok() {
+            let t = &mut self.tabs[1];
+            t.view = View::Import;
+            t.selected = None;
+            t.import.kind = db::ImportKind::Csv;
+            t.import.file = Some("new-orders.csv".into());
+            t.import.text = "number,customer,status,total,createdAt\n10501,Ada Byron,paid,42.5,2024-11-02T10:00:00Z\n10502,Grace Hopper,pending,18,2024-11-02T11:30:00Z\n10503,Linus Ito,shipped,99.9,2024-11-03T08:15:00Z\n".into();
+        }
+        if std::env::var("QUARRY_TEST_SETTINGS").is_ok() {
+            self.modal = Some(Modal::Settings);
+        }
+        // Test switch: show the Shell view with a finished run in the demo picture.
+        if std::env::var("QUARRY_TEST_SHELL").is_ok() {
+            let t = &mut self.tabs[1];
+            t.view = View::Shell;
+            t.shell.code = "async function run() {\n  const n = await orders.countDocuments({ status: 'paid' });\n  console.log('paid orders:', n);\n  return await orders.find({ status: 'paid' }).project({ number: 1, total: 1 }).limit(3).toArray();\n}".into();
+            t.shell.logs = vec![("log".into(), "paid orders: 321".into())];
+            let docs: Vec<Bson> = t.docs.iter().take(3).map(|d| Bson::Document(doc! { "_id": d.get("_id").cloned().unwrap(), "number": d.get("number").cloned().unwrap(), "total": d.get("total").cloned().unwrap() })).collect();
+            t.shell.set_value(Bson::Array(docs));
+            t.shell.ms = Some(42);
+            t.shell.help = std::env::var("QUARRY_TEST_HELP").is_ok();
+        }
+        // Test switch: show the Compare view with a finished comparison.
+        if std::env::var("QUARRY_TEST_COMPARE").is_ok() {
+            let t = &mut self.tabs[1];
+            t.view = View::Compare;
+            t.selected = None;
+            (t.compare.conn, t.compare.db, t.compare.coll) = (1, "shop".into(), "paid_orders".into());
+            let src = t.docs.clone();
+            let mut dst: Vec<Document> = src.iter().skip(3).cloned().collect();
+            for d in dst.iter_mut().take(4) {
+                d.insert("status", "refunded");
+                d.remove("note");
+            }
+            dst.push(doc! { "_id": ObjectId::parse_str("6650f1c2a1b2c3d4e5f6ffff").unwrap(), "number": 9999, "status": "test" });
+            t.compare.result = Some(db::compare_docs(src, dst));
+        }
+        // Test switch: show the Data relations window with a few relations.
+        if std::env::var("QUARRY_TEST_RELATIONS").is_ok() {
+            let r = |coll: &str, path: &str, target: &str, preview: &str| Relation { coll: coll.into(), path: path.into(), target: target.into(), preview: preview.into() };
+            self.prefs.relations.insert("1/shop".into(), vec![r("orders", "customerId", "customers", "name"), r("orders", "items.productId", "products", "title"), r("reviews", "authorAccountId", "customers", "email")]);
+            self.modal = Some(Modal::Relations { conn: 1, db: "shop".into() });
+        }
+        // Test switch: show the Dump dialog.
+        if std::env::var("QUARRY_TEST_DUMP").is_ok() {
+            self.modal = Some(Modal::Tool(Box::new(ToolForm { conn: 1, db: "shop".into(), from_db: "shop".into(), restore: true, path: "/Users/me/Downloads/shop.archive.gz".into(), gzip: true, ..Default::default() })));
+        }
+        // Test switch: show the JSON editor and an unsaved edit in the demo picture.
+        if std::env::var("QUARRY_TEST_EDIT").is_ok() {
+            let d = self.tabs[1].docs[2].clone();
+            let mut changed = d.clone();
+            changed.insert("status", "shipped");
+            self.drafts.insert(self.draft_key(&d), Draft { conn: 1, db: "shop".into(), coll: "orders".into(), original: d.clone(), current: changed.clone() });
+            let items = changed.get("items").cloned().unwrap();
+            self.json_edit = Some(JsonEdit { base: changed, path: vec!["items".into()], text: db::to_edit_value(&items), kind: "array", focus: false });
+        }
+    }
+}
+
+fn style(ctx: &egui::Context) {
+    let mut v = egui::Visuals::dark();
+    v.panel_fill = PANEL;
+    v.window_fill = RAISED;
+    v.extreme_bg_color = BG;
+    v.faint_bg_color = Color32::from_rgb(0x13, 0x15, 0x17);
+    v.window_stroke = Stroke::new(1.0, BORDER);
+    v.selection.bg_fill = Color32::from_rgba_unmultiplied(134, 201, 249, 48);
+    v.selection.stroke = Stroke::new(1.0, PRIMARY);
+    v.hyperlink_color = PRIMARY;
+    v.override_text_color = Some(TEXT);
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
+    v.widgets.inactive.weak_bg_fill = RAISED;
+    v.widgets.inactive.bg_fill = RAISED;
+    v.widgets.hovered.weak_bg_fill = HOVER;
+    v.widgets.active.weak_bg_fill = HOVER;
+    for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.noninteractive] {
+        w.corner_radius = CornerRadius::same(6);
+    }
+    ctx.set_visuals(v);
+    ctx.global_style_mut(|s| {
+        s.spacing.item_spacing = egui::vec2(8.0, 6.0);
+        s.spacing.button_padding = egui::vec2(10.0, 4.0);
+        // No bounce past the edge of lists.
+        s.spacing.scroll.kinetic.rubber_band = false;
+    });
+}
+
+fn pill(ui: &mut egui::Ui, text: &str, fg: Color32) -> egui::Response {
+    let bg = Color32::from_rgba_unmultiplied(fg.r(), fg.g(), fg.b(), 30);
+    ui.add(egui::Button::new(RichText::new(text).color(fg).strong().size(12.0)).fill(bg).stroke(Stroke::new(1.0, fg)).corner_radius(10))
+}
+
+fn primary(ui: &mut egui::Ui, text: &str, fill: Color32) -> egui::Response {
+    ui.add(egui::Button::new(RichText::new(text).strong().color(BG)).fill(fill))
+}
+
+fn mono(c: Color32) -> TextFormat {
+    TextFormat { font_id: FontId::monospace(12.5), color: c, ..Default::default() }
+}
+
+fn row_job(d: &Document, width: f32) -> LayoutJob {
+    let mut job = LayoutJob::default();
+    if let Some(id) = d.get("_id") {
+        job.append(&db::short(id), 0.0, mono(C_OID));
+        job.append("  ", 0.0, mono(MUTED));
+    }
+    for (k, v) in d.iter().filter(|(k, _)| *k != "_id").take(12) {
+        job.append(k, 0.0, mono(MUTED));
+        job.append(": ", 0.0, mono(MUTED));
+        job.append(&cell_text(v).chars().take(60).collect::<String>(), 0.0, mono(color_of(v)));
+        job.append("   ", 0.0, mono(MUTED));
+    }
+    job.wrap = egui::text::TextWrapping { max_width: width, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    job
+}
+
+/// One clickable sidebar row painted by hand, so it reads as a list rather than a form.
+fn side_row(ui: &mut egui::Ui, indent: f32, active: bool, paint: impl FnOnce(&egui::Painter, egui::Rect)) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), Sense::click());
+    let fill = if active {
+        Color32::from_rgba_unmultiplied(134, 201, 249, 30)
+    } else if resp.hovered() {
+        HOVER
+    } else {
+        Color32::TRANSPARENT
+    };
+    ui.painter().rect_filled(rect, 6, fill);
+    let inner = egui::Rect::from_min_max(rect.min + egui::vec2(8.0 + indent, 0.0), rect.max - egui::vec2(8.0, 0.0));
+    paint(ui.painter(), inner);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn chevron(p: &egui::Painter, c: egui::Pos2, open: bool, color: Color32) {
+    let pts = if open {
+        vec![c + egui::vec2(-4.0, -2.0), c + egui::vec2(4.0, -2.0), c + egui::vec2(0.0, 3.0)]
+    } else {
+        vec![c + egui::vec2(-2.0, -4.0), c + egui::vec2(3.0, 0.0), c + egui::vec2(-2.0, 4.0)]
+    };
+    p.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
+}
+
+impl eframe::App for App {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Screenshot mode must keep drawing even if the window is covered or hidden, or it never finishes.
+        if self.shot.is_some() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaintWhileHidden);
+            ctx.request_repaint();
+        }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.poll();
+        self.remember_tabs();
+        let ctx = ui.ctx().clone();
+        // AppKit resets the window buttons on every layout, so re-centre them in our header each frame.
+        frame.set_traffic_lights_position(&ctx, egui::Rangef::new(0.0, HEADER_H), 16.0);
+        self.top_bar(ui);
+        self.status_bar(ui);
+        self.sidebar(ui);
+        let view = self.t().map(|t| t.view);
+        if !self.prefs.open_inline && self.selected_doc().is_some() && view != Some(View::Indexes) {
+            self.inspector(ui);
+        }
+        egui::CentralPanel::default_margins().frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin { left: 12, right: 12, top: 8, bottom: 8 })).show(ui, |ui| {
+            self.tab_strip(ui);
+            if self.tabs.is_empty() {
+                self.welcome(ui);
+            } else {
+                self.collection(ui);
+            }
+        });
+        self.auto_update(&ctx);
+        self.modals(&ctx);
+        self.users_window(&ctx);
+        self.tool_window(&ctx);
+        self.toast(&ctx);
+        self.keys(&ctx);
+        self.screenshot(&ctx);
+    }
+}
+
+impl App {
+    /// Keeps the open tabs and their inputs in the settings file, so the next launch reopens them.
+    fn remember_tabs(&mut self) {
+        if self.demo || self.shot.is_some() {
+            return;
+        }
+        let tabs: Vec<SavedTab> = self
+            .tabs
+            .iter()
+            .map(|t| SavedTab {
+                conn: t.sel.conn,
+                db: t.sel.db.clone(),
+                coll: t.sel.coll.clone(),
+                view: match t.view {
+                    View::Documents => "Documents",
+                    View::Aggregate => "Aggregate",
+                    View::Indexes => "Indexes",
+                    View::Shell => "Shell",
+                    View::Schema => "Schema",
+                    View::Import => "Import",
+                    View::Compare => "Compare",
+                }
+                .into(),
+                filter: t.filter_txt.clone(),
+                sort: t.sort_txt.clone(),
+                project: t.proj_txt.clone(),
+                agg: t.agg_txt.clone(),
+                shell: t.shell.code.clone(),
+            })
+            .collect();
+        if tabs != self.prefs.open_tabs || self.cur != self.prefs.cur_tab {
+            self.prefs.open_tabs = tabs;
+            self.prefs.cur_tab = self.cur;
+            self.save_prefs();
+        }
+    }
+
+    fn keys(&mut self, ctx: &egui::Context) {
+        if self.modal.is_some() || self.insert.is_some() || self.json_edit.is_some() || self.users.is_some() {
+            return;
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, Key::T)) {
+            self.reopen_tab();
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::W)) {
+            self.close_tab(self.cur);
+        }
+        // Esc closes the innermost thing that is open. Dialogs and menus handle their own Esc.
+        if ctx.any_popup_open() || !ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+            return;
+        }
+        if self.inline.take().is_some() || self.new_field.take().is_some() {
+            return;
+        }
+        if let Some(t) = self.tm() {
+            if t.selected.take().is_some() {
+                return;
+            }
+        }
+        self.tree_filter.clear();
+    }
+
+    /// Users of all databases with their roles, custom roles, and user actions. Writes need the
+    /// connection unlocked; dropping a user asks for its name.
+    /// Progress and output of mongodump or mongorestore.
+    fn tool_window(&mut self, ctx: &egui::Context) {
+        if self.modal.is_some() {
+            return;
+        }
+        let Some(t) = &mut self.tool else { return };
+        let mut close = false;
+        egui::Modal::new(egui::Id::unique(("quarry-layer", "tool"))).show(ctx, |ui| {
+            ui.set_width(640.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&t.title).strong().size(16.0).color(BRIGHT));
+                match &t.done {
+                    None => {
+                        ui.spinner();
+                    }
+                    Some(Ok(m)) => {
+                        ui.label(RichText::new(m).color(SUCCESS));
+                    }
+                    Some(Err(e)) => {
+                        ui.label(RichText::new(e).color(ALERT));
+                    }
+                }
+            });
+            egui::Frame::new().fill(BG).corner_radius(6).inner_margin(8).show(ui, |ui| {
+                egui::ScrollArea::vertical().max_height(320.0).stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
+                    for l in &t.log {
+                        ui.label(RichText::new(l).monospace().size(11.5).color(TEXT));
+                    }
+                });
+            });
+            ui.horizontal(|ui| {
+                if t.done.is_none() {
+                    if ui.button(RichText::new("Stop").color(ALERT)).clicked() {
+                        if let Some(c) = t.cancel.take() {
+                            let _ = c.send(());
+                        }
+                    }
+                } else {
+                    close = ui.button("Close").clicked();
+                }
+                if ui.button("Copy log").clicked() {
+                    ui.ctx().copy_text(t.log.join("\n"));
+                }
+            });
+        });
+        if close {
+            self.tool = None;
+        }
+    }
+
+    fn users_window(&mut self, ctx: &egui::Context) {
+        let Some(mut u) = self.users.take() else { return };
+        let conn = u.conn;
+        let writable = self.conn(conn).is_some_and(|c| c.writable);
+        let client = self.conn(conn).and_then(|c| c.client.clone());
+        let atlas = self.conn(conn).is_some_and(|c| c.masked_uri.contains(".mongodb.net"));
+        let mut open = true;
+        let mut cmds: Vec<(String, Document, String)> = Vec::new();
+        let mut drop_user = None;
+        let mut unlock = false;
+        let screen = ctx.content_rect();
+        let r = egui::Modal::new(egui::Id::unique(("quarry-layer", "users-window"))).show(ctx, |ui| {
+            ui.set_width((screen.width() * 0.6).clamp(560.0, 900.0));
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Users and roles").strong().size(18.0).color(BRIGHT));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    open = !ui.button("Done").on_hover_text("Esc").clicked();
+                    if ui.button("Refresh").clicked() {
+                        u.users = None;
+                        u.roles = None;
+                        cmds.push(("*reload".into(), Document::new(), String::new()));
+                    }
+                });
+            });
+            if !writable {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Read-only: unlock writes to add, change or drop users.").color(SUCCESS));
+                    unlock = ui.small_button("Unlock…").clicked();
+                });
+            }
+            if atlas {
+                ui.label(RichText::new("Atlas manages database users in its web console; it refuses adding, changing or dropping users from here, and may list none.").size(12.0).color(WARNING));
+            }
+            egui::ScrollArea::vertical().max_height(screen.height() - 220.0).show(ui, |ui| {
+                settings_section(ui, "USERS", |ui| match &u.users {
+                    None => {
+                        ui.spinner();
+                    }
+                    Some(Err(e)) => {
+                        ui.label(RichText::new(format!("Could not list users: {e}")).color(ALERT));
+                    }
+                    Some(Ok(list)) => {
+                        if list.is_empty() {
+                            ui.label(RichText::new("No users.").color(MUTED));
+                        }
+                        for user in list {
+                            let (name, db) = (user.get_str("user").unwrap_or_default().to_string(), user.get_str("db").unwrap_or_default().to_string());
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(&name).monospace().color(BRIGHT));
+                                ui.label(RichText::new(format!("@{db}")).monospace().color(FAINT));
+                                ui.label(RichText::new(roles_text(user)).monospace().size(12.0).color(C_STRING));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.add_enabled(writable, egui::Button::new(RichText::new("Drop…").color(ALERT)).small()).clicked() {
+                                        drop_user = Some((db.clone(), name.clone()));
+                                    }
+                                    if ui.add_enabled(writable, egui::Button::new("Edit").small()).clicked() {
+                                        u.edit = Some((name.clone(), db.clone(), String::new(), roles_text(user)));
+                                    }
+                                });
+                            });
+                            if let Some((en, edb, pwd, roles)) = &mut u.edit {
+                                if *en == name && *edb == db {
+                                    egui::Frame::new().fill(BG).corner_radius(6).inner_margin(8).show(ui, |ui| {
+                                        egui::Grid::new(("edit", &name)).num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                                            ui.label("New password");
+                                            ui.add(egui::TextEdit::singleline(pwd).password(true).hint_text("leave empty to keep").desired_width(280.0));
+                                            ui.end_row();
+                                            ui.label("Roles");
+                                            ui.add(egui::TextEdit::singleline(roles).hint_text("readWrite@shop, read@analytics").desired_width(280.0).font(FontId::monospace(12.5)));
+                                            ui.end_row();
+                                        });
+                                        ui.horizontal(|ui| {
+                                            if primary(ui, "Save", PRIMARY).clicked() {
+                                                let mut cmd = doc! { "updateUser": en.as_str(), "roles": parse_roles(roles, edb) };
+                                                if !pwd.is_empty() {
+                                                    cmd.insert("pwd", pwd.as_str());
+                                                }
+                                                cmds.push((edb.clone(), cmd, format!("Updated user {en}")));
+                                            }
+                                            if ui.button("Cancel").clicked() {
+                                                cmds.push(("*close-edit".into(), Document::new(), String::new()));
+                                            }
+                                        });
+                                    });
+                                }
+                            }
+                            ui.separator();
+                        }
+                    }
+                });
+                settings_section(ui, "ADD USER", |ui| {
+                    egui::Grid::new("adduser").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                        ui.label("Name");
+                        ui.add(egui::TextEdit::singleline(&mut u.new_name).desired_width(280.0));
+                        ui.end_row();
+                        ui.label("Password");
+                        ui.add(egui::TextEdit::singleline(&mut u.new_pwd).password(true).desired_width(280.0));
+                        ui.end_row();
+                        ui.label("Database");
+                        ui.add(egui::TextEdit::singleline(&mut u.new_db).hint_text("admin").desired_width(280.0));
+                        ui.end_row();
+                        ui.label("Roles");
+                        ui.add(egui::TextEdit::singleline(&mut u.new_roles).hint_text("readWrite@shop, read@analytics").desired_width(280.0).font(FontId::monospace(12.5)));
+                        ui.end_row();
+                    });
+                    let ok = writable && !u.new_name.trim().is_empty() && !u.new_pwd.is_empty();
+                    if ui.add_enabled(ok, egui::Button::new(RichText::new("Add user").strong().color(BG)).fill(PRIMARY)).clicked() {
+                        let db = if u.new_db.trim().is_empty() { "admin".to_string() } else { u.new_db.trim().to_string() };
+                        let cmd = doc! { "createUser": u.new_name.trim(), "pwd": u.new_pwd.as_str(), "roles": parse_roles(&u.new_roles, &db) };
+                        cmds.push((db, cmd, format!("Added user {}", u.new_name.trim())));
+                        u.new_pwd.clear();
+                    }
+                });
+                settings_section(ui, "CUSTOM ROLES", |ui| match &u.roles {
+                    None => {
+                        ui.spinner();
+                    }
+                    Some(Err(e)) => {
+                        ui.label(RichText::new(format!("Could not list roles: {e}")).color(ALERT));
+                    }
+                    Some(Ok(list)) if list.is_empty() => {
+                        ui.label(RichText::new("No custom roles; built-in roles like read, readWrite and dbAdmin can be given to users.").color(MUTED));
+                    }
+                    Some(Ok(list)) => {
+                        for r in list {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(format!("{}@{}", r.get_str("role").unwrap_or_default(), r.get_str("db").unwrap_or_default())).monospace().color(BRIGHT));
+                                ui.label(RichText::new(format!("inherits: {}", roles_text(r))).monospace().size(12.0).color(FAINT));
+                            });
+                        }
+                    }
+                });
+            });
+        });
+        if unlock {
+            self.modal = Some(Modal::Unlock(conn));
+        }
+        for (db, cmd, done) in cmds {
+            match db.as_str() {
+                "*reload" => self.load_users(conn),
+                "*close-edit" => u.edit = None,
+                _ => {
+                    if let Some(client) = client.clone() {
+                        u.edit = None;
+                        self.worker.db_change(conn, client, db, cmd, done);
+                    }
+                }
+            }
+        }
+        if let Some((db, user)) = drop_user {
+            self.modal = Some(Modal::Typed { title: format!("Drop the user {user} of {db}? Apps that log in with it will stop working."), expect: user.clone(), typed: String::new(), action: Danger::DropUser { conn, db, user } });
+        }
+        if open && !(r.should_close() && self.modal.is_none()) {
+            self.users = Some(u);
+        }
+    }
+
+    /// "Saved … Undo" notice after a write, for 8 seconds.
+    fn toast(&mut self, ctx: &egui::Context) {
+        const TOAST_S: u64 = 8;
+        let Some((msg, at)) = self.toast.clone() else { return };
+        if at.elapsed().as_secs() >= TOAST_S {
+            self.toast = None;
+            return;
+        }
+        ctx.request_repaint_after(Duration::from_millis(250));
+        let mut undo = false;
+        let mut close = false;
+        egui::Area::new(egui::Id::unique(("quarry-layer", "toast"))).anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -40.0)).show(ctx, |ui| {
+            egui::Frame::new().fill(RAISED).stroke(Stroke::new(1.0, BORDER)).corner_radius(8).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("✓").color(SUCCESS));
+                    ui.label(RichText::new(&msg).color(TEXT));
+                    if !self.undo.is_empty() && ui.button(RichText::new("Undo").color(PRIMARY)).clicked() {
+                        undo = true;
+                    }
+                    close = ui.small_button("×").clicked();
+                });
+            });
+        });
+        if undo {
+            self.apply_undo(0);
+            self.toast = None;
+        } else if close {
+            self.toast = None;
+        }
+    }
+
+    fn screenshot(&mut self, ctx: &egui::Context) {
+        let Some((path, frames, slot)) = &mut self.shot else { return };
+        *frames += 1;
+        ctx.request_repaint();
+        if *frames == 120 {
+            let slot = slot.clone();
+            ctx.request_screenshot(move |img| *slot.lock().unwrap() = Some((*img).clone()));
+        }
+        let taken = slot.lock().unwrap().take();
+        if let Some(img) = taken {
+            let px: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_srgba_unmultiplied()).collect();
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            match image::RgbaImage::from_raw(img.size[0] as u32, img.size[1] as u32, px).map(|i| i.save(&*path)) {
+                Some(Ok(())) => eprintln!("saved {}", path.display()),
+                other => eprintln!("screenshot failed: {other:?}"),
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    fn top_bar(&mut self, ui: &mut egui::Ui) {
+        // Leaves room for the macOS window buttons, which sit over our header.
+        let left = if cfg!(target_os = "macos") { 92 } else { 12 };
+        let frame = egui::Frame::new().fill(PANEL).inner_margin(egui::Margin { left, right: 12, top: 7, bottom: 7 });
+        egui::Panel::top("top").exact_size(HEADER_H).frame(frame).show(ui, |ui| {
+            // Registered before the widgets so they stay clickable; the empty header moves the window.
+            let bar = ui.interact(ui.max_rect().expand2(egui::vec2(left as f32, 7.0)), egui::Id::unique("titlebar"), Sense::click_and_drag());
+            if bar.drag_started_by(egui::PointerButton::Primary) {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
+            if bar.double_clicked() {
+                let max = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
+            }
+            ui.horizontal_centered(|ui| {
+                ui.label(RichText::new("Quarry").strong().size(16.0).color(BRIGHT));
+                ui.label(RichText::new("MongoDB workbench").color(MUTED));
+                ui.separator();
+                if let Some(s) = self.t().map(|t| t.sel.clone()) {
+                    let (name, writable) = self.conn(s.conn).map(|c| (c.meta.name.clone(), c.writable)).unwrap_or_default();
+                    ui.label(RichText::new(format!("{name}  /  {}  /  {}", s.db, s.coll)).monospace().color(TEXT));
+                    if writable {
+                        if pill(ui, "WRITES ON", ALERT).on_hover_text("Click to lock this connection again").clicked() {
+                            if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == s.conn) {
+                                c.writable = false;
+                            }
+                            self.ok("Writes locked");
+                        }
+                    } else if pill(ui, "READ-ONLY", SUCCESS).on_hover_text("Click to allow edits on this connection for this session").clicked() {
+                        self.modal = Some(Modal::Unlock(s.conn));
+                    }
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    self.undo.retain(|a| a.at.elapsed().as_secs() <= db::UNDO_MAX_AGE_S);
+                    let n = self.undo.len();
+                    if ui.add_enabled(n > 0, egui::Button::new(format!("Undo ({n})"))).clicked() {
+                        self.modal = Some(Modal::Undo);
+                    }
+                    if ui.button("Settings").clicked() {
+                        self.modal = Some(Modal::Settings);
+                    }
+                    if let Some(v) = &self.updated {
+                        let r = ui.add(egui::Button::new(RichText::new(format!("Restart for {v}")).color(BG).strong()).fill(SUCCESS)).on_hover_text("The update is installed. Quarry restarts by itself once you have no unsaved edits and have been idle for a minute.");
+                        if r.clicked() {
+                            if self.busy() {
+                                self.err("Save or discard your edits and wait for running scripts first.");
+                            } else {
+                                crate::update::restart();
+                            }
+                        }
+                    }
+                });
+            });
+        });
+    }
+
+    fn status_bar(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::bottom("status").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::symmetric(12, 5))).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                // Errors fade after 15 s so an old problem does not look current.
+                const ERROR_S: u64 = 15;
+                if self.status.1 {
+                    if self.status_at.elapsed().as_secs() >= ERROR_S {
+                        self.status = ("Ready".into(), false);
+                    } else {
+                        ui.ctx().request_repaint_after(Duration::from_secs(1));
+                        if ui.small_button("×").on_hover_text("Dismiss").clicked() {
+                            self.status = ("Ready".into(), false);
+                        }
+                    }
+                }
+                let (msg, is_err) = &self.status;
+                let first = msg.lines().next().unwrap_or_default();
+                ui.add(egui::Label::new(RichText::new(first).size(12.0).color(if *is_err { ALERT } else { MUTED })).truncate()).on_hover_text(msg.as_str());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new("Esc closes  ·  Cmd+W closes tab  ·  Enter runs  ·  double-click a value to edit").size(11.5).color(FAINT));
+                });
+            });
+        });
+    }
+
+    fn new_conn_modal(&mut self) {
+        self.conn_test = None;
+        self.modal = Some(Modal::Conn(Box::new(ConnForm { uri: "mongodb://localhost:27017".into(), ..Default::default() })));
+    }
+
+    fn sidebar(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::left("tree")
+            .default_size(SIDEBAR_W)
+            .size_range(200.0..=480.0)
+            .resizable(true)
+            .frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin { left: 10, right: 10, top: 12, bottom: 10 }).stroke(Stroke::new(1.0, BORDER)))
+            .show(ui, |ui| {
+                self.conn_picker(ui);
+                ui.add_space(10.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.tree_filter)
+                        .hint_text("Find a collection")
+                        .desired_width(f32::INFINITY)
+                        .margin(egui::Margin::symmetric(10, 6)),
+                );
+                ui.add_space(12.0);
+                ui.label(RichText::new("DATABASES").size(11.0).strong().color(FAINT));
+                ui.add_space(2.0);
+                egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| self.db_tree(ui));
+            });
+    }
+
+    fn conn_picker(&mut self, ui: &mut egui::Ui) {
+        let cur = self.active.and_then(|id| self.conn(id));
+        let (name, dot) = match cur {
+            Some(c) => (
+                c.meta.name.clone(),
+                match c.status {
+                    Status::Ready => SUCCESS,
+                    Status::Connecting => WARNING,
+                    Status::Failed(_) => ALERT,
+                    Status::Idle => FAINT,
+                },
+            ),
+            None => ("Add a connection".to_string(), FAINT),
+        };
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 38.0), Sense::click());
+        let p = ui.painter();
+        p.rect(rect, 8, if resp.hovered() { HOVER } else { RAISED }, Stroke::new(1.0, BORDER), egui::StrokeKind::Inside);
+        p.circle_filled(egui::pos2(rect.left() + 16.0, rect.center().y), 4.0, dot);
+        p.text(egui::pos2(rect.left() + 28.0, rect.center().y), egui::Align2::LEFT_CENTER, &name, FontId::proportional(14.5), BRIGHT);
+        chevron(p, egui::pos2(rect.right() - 16.0, rect.center().y), true, MUTED);
+        let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+        if cur.is_none() && resp.clicked() {
+            return self.new_conn_modal();
+        }
+        let mut pick = None;
+        let mut new = false;
+        let mut remove = None;
+        let mut edit = None;
+        let mut refresh = None;
+        egui::Popup::menu(&resp).width(rect.width()).show(|ui| {
+            for c in &self.conns {
+                let label = format!("{}   {}", c.meta.name, c.masked_uri);
+                if ui.selectable_label(Some(c.meta.id) == self.active, RichText::new(label).color(TEXT)).clicked() {
+                    pick = Some(c.meta.id);
+                }
+            }
+            ui.separator();
+            if ui.button("+ New connection…").clicked() {
+                new = true;
+            }
+            if let Some(c) = cur {
+                if ui.button(format!("Edit \"{}\"…", c.meta.name)).clicked() {
+                    edit = Some(c.meta.id);
+                }
+                if ui.button("Refresh databases").on_hover_text("Reconnect and reload the list of databases and collections").clicked() {
+                    refresh = Some(c.meta.id);
+                }
+                if ui.button(RichText::new(format!("Remove \"{}\"…", c.meta.name)).color(ALERT)).clicked() {
+                    remove = Some((c.meta.id, c.meta.name.clone()));
+                }
+            }
+        });
+        if let Some(id) = edit {
+            if let Some(meta) = self.conn(id).map(|c| c.meta.clone()) {
+                self.conn_test = None;
+                let uri = keychain(id).and_then(|k| k.get_password().ok()).unwrap_or_default();
+                self.modal = Some(Modal::Conn(Box::new(ConnForm {
+                    id: Some(id),
+                    name: meta.name.clone(),
+                    uri,
+                    ssh_on: meta.ssh.is_some(),
+                    ssh: meta.ssh.clone().unwrap_or_default(),
+                    ssh_pwd: secret(id, "ssh-password").unwrap_or_default(),
+                    ssh_pass: secret(id, "ssh-passphrase").unwrap_or_default(),
+                    proxy_on: meta.proxy.is_some(),
+                    proxy: meta.proxy.clone().unwrap_or_default(),
+                    proxy_pwd: secret(id, "proxy-password").unwrap_or_default(),
+                    show: false,
+                    testing: false,
+                })));
+            }
+        }
+        if let Some(id) = refresh {
+            if !self.demo {
+                self.connect(id);
+            }
+        }
+        if let Some(id) = pick {
+            self.active = Some(id);
+            if self.conn(id).is_some_and(|c| c.status == Status::Idle) && !self.demo {
+                self.connect(id);
+            }
+        }
+        if new {
+            self.new_conn_modal();
+        }
+        if let Some((id, name)) = remove {
+            self.modal = Some(Modal::Typed {
+                title: format!("Remove the saved connection \"{name}\"? Its address is deleted from the Keychain. No data is touched."),
+                expect: name,
+                typed: String::new(),
+                action: Danger::RemoveConnection(id),
+            });
+        }
+    }
+
+    fn db_tree(&mut self, ui: &mut egui::Ui) {
+        let Some(id) = self.active else {
+            ui.add_space(8.0);
+            ui.label(RichText::new("No connections yet.").color(MUTED));
+            return;
+        };
+        ui.spacing_mut().item_spacing.y = 2.0;
+        let filter = self.tree_filter.to_lowercase();
+        let cur_sel = self.t().map(|t| t.sel.clone());
+        let mut toggle = None;
+        let mut open = None;
+        let mut side: Vec<SideAct> = Vec::new();
+        let mut connect = false;
+        {
+            let Some(c) = self.conn(id) else { return };
+            match &c.status {
+                Status::Ready => {}
+                Status::Connecting => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(RichText::new("Connecting…").color(MUTED));
+                    });
+                }
+                st => {
+                    ui.add_space(6.0);
+                    if let Status::Failed(e) = st {
+                        ui.add(egui::Label::new(RichText::new(e).size(11.5).color(ALERT)).wrap());
+                    }
+                    connect = primary(ui, "Connect", PRIMARY).clicked();
+                }
+            }
+            for (db_name, colls) in &c.dbs {
+                let matches: Vec<&String> = colls.iter().flatten().filter(|n| filter.is_empty() || n.to_lowercase().contains(&filter)).collect();
+                if !filter.is_empty() && matches.is_empty() {
+                    continue;
+                }
+                let is_open = !filter.is_empty() || self.open_dbs.contains(&(id, db_name.clone()));
+                let dim = SYSTEM_DBS.contains(&db_name.as_str());
+                let count = colls.as_ref().map(|v| v.len().to_string()).unwrap_or_else(|| "…".into());
+                let r = side_row(ui, 0.0, false, |p, r| {
+                    chevron(p, egui::pos2(r.left() + 4.0, r.center().y), is_open, MUTED);
+                    p.text(egui::pos2(r.left() + 16.0, r.center().y), egui::Align2::LEFT_CENTER, db_name, FontId::proportional(14.0), if dim { FAINT } else { BRIGHT });
+                    p.text(egui::pos2(r.right(), r.center().y), egui::Align2::RIGHT_CENTER, &count, FontId::proportional(12.0), FAINT);
+                });
+                if r.clicked() {
+                    toggle = Some(db_name.clone());
+                }
+                r.context_menu(|ui| {
+                    ui.label(RichText::new(format!("Database: {db_name}")).size(11.5).color(MUTED));
+                    if ui.button("New collection…").clicked() {
+                        side.push(SideAct::NewColl(db_name.clone(), false));
+                    }
+                    if ui.button("New view…").clicked() {
+                        side.push(SideAct::NewColl(db_name.clone(), true));
+                    }
+                    if ui.button("Refresh").clicked() {
+                        side.push(SideAct::Refresh(db_name.clone()));
+                    }
+                    if ui.button("Users and roles…").clicked() {
+                        side.push(SideAct::Users);
+                    }
+                    if ui.button("Data relations…").clicked() {
+                        side.push(SideAct::Relations(db_name.clone()));
+                    }
+                    ui.separator();
+                    if ui.button("Dump database…").clicked() {
+                        side.push(SideAct::Dump(db_name.clone(), String::new()));
+                    }
+                    if ui.button("Restore into this database…").clicked() {
+                        side.push(SideAct::Restore(db_name.clone()));
+                    }
+                    ui.separator();
+                    if ui.button(RichText::new("Drop database…").color(ALERT)).clicked() {
+                        side.push(SideAct::DropDb(db_name.clone()));
+                    }
+                });
+                if is_open {
+                    for coll in matches {
+                        let sel = Sel { conn: id, db: db_name.clone(), coll: coll.clone() };
+                        let active = cur_sel.as_ref() == Some(&sel);
+                        let is_view = self.views.contains(&(id, db_name.clone(), coll.clone()));
+                        let r = side_row(ui, 16.0, active, |p, r| {
+                            let c = egui::pos2(r.left() + 4.0, r.center().y);
+                            if is_view {
+                                // Views get a hollow marker so they read as derived data.
+                                p.circle_stroke(c, 3.5, Stroke::new(1.5, if active { PRIMARY } else { C_DATE }));
+                            } else {
+                                p.circle_filled(c, 3.5, if active { PRIMARY } else { WARNING });
+                            }
+                            let w = r.width() - 16.0;
+                            let galley = p.layout(coll.clone(), FontId::proportional(13.5), if active { BRIGHT } else if is_view { C_DATE } else { TEXT }, w);
+                            p.galley(egui::pos2(r.left() + 16.0, r.center().y - galley.size().y / 2.0), galley, TEXT);
+                        });
+                        let r = if is_view { r.on_hover_text("View (read-only)") } else { r };
+                        if r.clicked() {
+                            open = Some(sel.clone());
+                        }
+                        r.context_menu(|ui| {
+                            ui.label(RichText::new(format!("{}: {coll}", if is_view { "View" } else { "Collection" })).size(11.5).color(MUTED));
+                            if ui.button("Open").clicked() {
+                                open = Some(sel.clone());
+                            }
+                            if ui.button("Statistics").clicked() {
+                                side.push(SideAct::Stats(db_name.clone(), coll.clone()));
+                            }
+                            if is_view && ui.button("View definition").clicked() {
+                                side.push(SideAct::ViewDef(db_name.clone(), coll.clone()));
+                            }
+                            if !is_view && ui.button("Analyze data relations").on_hover_text("Find fields that hold ids of other collections' documents").clicked() {
+                                side.push(SideAct::Analyze(db_name.clone(), coll.clone()));
+                            }
+                            if ui.button("Compare with…").clicked() {
+                                side.push(SideAct::Compare(db_name.clone(), coll.clone()));
+                            }
+                            if !is_view && ui.button("Dump collection…").clicked() {
+                                side.push(SideAct::Dump(db_name.clone(), coll.clone()));
+                            }
+                            ui.separator();
+                            if !is_view && ui.button("Rename…").clicked() {
+                                side.push(SideAct::Rename(db_name.clone(), coll.clone()));
+                            }
+                            if ui.button(RichText::new(if is_view { "Drop view…" } else { "Drop collection…" }).color(ALERT)).clicked() {
+                                side.push(SideAct::DropColl(db_name.clone(), coll.clone()));
+                            }
+                        });
+                    }
+                    ui.add_space(4.0);
+                }
+            }
+        }
+        if connect {
+            self.connect(id);
+        }
+        if let Some(d) = toggle {
+            if !self.open_dbs.remove(&(id, d.clone())) {
+                self.open_dbs.insert((id, d));
+            }
+        }
+        if let Some(s) = open {
+            self.open_collection(s, false);
+        }
+        for a in side {
+            self.side_act(id, a);
+        }
+    }
+
+    fn side_act(&mut self, conn: u64, a: SideAct) {
+        let Some(client) = self.conn(conn).and_then(|c| c.client.clone()) else {
+            return self.err("Connect first.");
+        };
+        let writable = self.conn(conn).is_some_and(|c| c.writable);
+        let needs_write = matches!(a, SideAct::NewColl(..) | SideAct::DropDb(_) | SideAct::Rename(..) | SideAct::DropColl(..) | SideAct::Restore(_));
+        if needs_write && !writable {
+            return self.modal = Some(Modal::Unlock(conn));
+        }
+        match a {
+            SideAct::NewColl(db, view) => self.modal = Some(Modal::NewCollection { conn, db, name: String::new(), view, source: String::new(), pipeline: "[\n  { $match: {} }\n]".into() }),
+            SideAct::Refresh(db) => self.worker.collections(conn, client, db),
+            SideAct::Users => {
+                self.users = Some(UsersWin { conn, new_db: "admin".into(), ..Default::default() });
+                self.load_users(conn);
+            }
+            SideAct::DropDb(db) => {
+                self.modal = Some(Modal::Typed { title: format!("Drop the whole database {db} with all its collections? This cannot be undone."), expect: db.clone(), typed: String::new(), action: Danger::DropDatabase { conn, db } })
+            }
+            SideAct::Stats(db, coll) => self.worker.coll_stats(client, db, coll),
+            SideAct::ViewDef(db, coll) => self.worker.command(client, db, doc! { "listCollections": 1, "filter": { "name": coll } }, "viewdef"),
+            SideAct::Rename(db, coll) => self.modal = Some(Modal::RenameColl { conn, db, name: coll.clone(), coll }),
+            SideAct::Dump(db, coll) => {
+                let name = if coll.is_empty() { db.clone() } else { format!("{db}.{coll}") };
+                let path = dirs::download_dir().unwrap_or_default().join(format!("{name}.archive.gz")).display().to_string();
+                self.modal = Some(Modal::Tool(Box::new(ToolForm { conn, from_db: db.clone(), db, coll, path, gzip: true, ..Default::default() })));
+            }
+            SideAct::Restore(db) => self.modal = Some(Modal::Tool(Box::new(ToolForm { conn, from_db: db.clone(), db, restore: true, gzip: true, ..Default::default() }))),
+            SideAct::Compare(db, coll) => {
+                self.open_collection(Sel { conn, db: db.clone(), coll }, false);
+                let t = self.tm().unwrap();
+                t.view = View::Compare;
+                if t.compare.conn == 0 {
+                    (t.compare.conn, t.compare.db) = (conn, db);
+                }
+            }
+            SideAct::Relations(db) => self.modal = Some(Modal::Relations { conn, db }),
+            SideAct::Analyze(db, coll) => self.analyze_relations(conn, client, db, coll),
+            SideAct::DropColl(db, coll) => {
+                self.modal = Some(Modal::Typed { title: format!("Drop {db}.{coll} with all its documents and indexes? This cannot be undone."), expect: coll.clone(), typed: String::new(), action: Danger::DropCollAt { conn, db, coll } })
+            }
+        }
+    }
+
+    /// Users of every database and custom roles, read from admin like the original
+    /// (usersInfo / rolesInfo with showBuiltinRoles false, renderer ~156395).
+    fn load_users(&mut self, conn: u64) {
+        let Some(client) = self.conn(conn).and_then(|c| c.client.clone()) else { return };
+        self.worker.command(client.clone(), "admin".into(), doc! { "usersInfo": { "forAllDBs": true } }, "users");
+        self.worker.command(client, "admin".into(), doc! { "rolesInfo": 1, "showBuiltinRoles": false }, "roles");
+    }
+
+    fn tab_strip(&mut self, ui: &mut egui::Ui) {
+        let mut pick = None;
+        let mut close = None;
+        let mut dup = false;
+        let mut many: Option<(usize, TabClose)> = None;
+        let mut reopen = false;
+        let has_closed = !self.closed.is_empty();
+        egui::ScrollArea::horizontal().id_salt("tabs").max_height(38.0).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let n = self.tabs.len();
+                for (i, t) in self.tabs.iter().enumerate() {
+                    let active = i == self.cur;
+                    let mut job = LayoutJob::default();
+                    job.append(&t.sel.coll, 0.0, egui::TextFormat::simple(FontId::proportional(13.5), if active { BRIGHT } else { TEXT }));
+                    job.append(&t.sel.db, 6.0, egui::TextFormat::simple(FontId::proportional(11.5), FAINT));
+                    if t.view != View::Documents {
+                        let v = match t.view {
+                            View::Aggregate => "aggregate",
+                            View::Indexes => "indexes",
+                            View::Shell => "shell",
+                            View::Schema => "schema",
+                            View::Import => "import",
+                            View::Compare => "compare",
+                            View::Documents => "",
+                        };
+                        job.append(v, 6.0, egui::TextFormat::simple(FontId::proportional(11.5), C_LINK.gamma_multiply(0.8)));
+                    }
+                    let title = ui.fonts_mut(|f| f.layout_job(job));
+                    let w = (title.size().x + 50.0).clamp(96.0, 300.0);
+                    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 30.0), Sense::click());
+                    let rect = rect.shrink2(egui::vec2(0.0, 1.0));
+                    let p = ui.painter();
+                    let hovered = resp.hovered();
+                    if active {
+                        p.rect(rect, 7, RAISED, Stroke::new(1.0, BORDER), egui::StrokeKind::Inside);
+                        // The original marks the active tab with a yellow underline.
+                        p.line_segment([rect.left_bottom() + egui::vec2(8.0, -1.0), rect.right_bottom() + egui::vec2(-8.0, -1.0)], Stroke::new(2.0, WARNING));
+                    } else if hovered {
+                        p.rect_filled(rect, 7, PANEL);
+                    }
+                    let is_view = self.views.contains(&(t.sel.conn, t.sel.db.clone(), t.sel.coll.clone()));
+                    let dot = egui::pos2(rect.left() + 13.0, rect.center().y);
+                    let dc = if active { WARNING } else { FAINT };
+                    if is_view {
+                        p.circle_stroke(dot, 3.0, Stroke::new(1.3, dc));
+                    } else {
+                        p.circle_filled(dot, 3.0, dc);
+                    }
+                    let clip = egui::Rect::from_min_max(rect.min, egui::pos2(rect.right() - 24.0, rect.bottom()));
+                    p.with_clip_rect(clip).galley(egui::pos2(rect.left() + 24.0, rect.center().y - title.size().y / 2.0), title, TEXT);
+                    let xr = egui::Rect::from_center_size(egui::pos2(rect.right() - 13.0, rect.center().y), egui::vec2(16.0, 16.0));
+                    let xresp = ui.interact(xr, ui.scope_id().with(("close", i)), Sense::click());
+                    if active || hovered || xresp.hovered() {
+                        if xresp.hovered() {
+                            ui.painter().rect_filled(xr, 4, HOVER);
+                        }
+                        let c = xr.center();
+                        let s = Stroke::new(1.4, if xresp.hovered() { BRIGHT } else { MUTED });
+                        ui.painter().line_segment([c + egui::vec2(-3.5, -3.5), c + egui::vec2(3.5, 3.5)], s);
+                        ui.painter().line_segment([c + egui::vec2(3.5, -3.5), c + egui::vec2(-3.5, 3.5)], s);
+                    }
+                    let conn_name = self.conns.iter().find(|c| c.meta.id == t.sel.conn).map(|c| c.meta.name.clone()).unwrap_or_default();
+                    let resp = resp.on_hover_text(format!("{conn_name} / {} / {}\nMiddle-click closes, right-click for more", t.sel.db, t.sel.coll));
+                    resp.context_menu(|ui| {
+                        ui.set_min_width(190.0);
+                        for (label, what, enabled) in [
+                            ("Close", TabClose::This, true),
+                            ("Close others", TabClose::Others, n > 1),
+                            ("Close tabs to the left", TabClose::Left, i > 0),
+                            ("Close tabs to the right", TabClose::Right, i + 1 < n),
+                            ("Close all", TabClose::All, true),
+                        ] {
+                            if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                                many = Some((i, what));
+                            }
+                        }
+                        ui.separator();
+                        if ui.button("Duplicate").clicked() {
+                            pick = Some(i);
+                            dup = true;
+                        }
+                        if ui.add_enabled(has_closed, egui::Button::new("Reopen closed tab").shortcut_text("Cmd+Shift+T")).clicked() {
+                            reopen = true;
+                        }
+                    });
+                    if xresp.clicked() || resp.middle_clicked() {
+                        close = Some(i);
+                    } else if resp.clicked() {
+                        pick = Some(i);
+                    }
+                }
+                if !self.tabs.is_empty() && ui.add(egui::Button::new(RichText::new("+").size(16.0).color(MUTED)).frame(false)).on_hover_text("Duplicate this tab").clicked() {
+                    dup = true;
+                }
+            });
+        });
+        ui.painter().hline(ui.max_rect().x_range(), ui.min_rect().bottom(), Stroke::new(1.0, BORDER));
+        ui.add_space(8.0);
+        if reopen {
+            return self.reopen_tab();
+        }
+        if let Some((i, what)) = many {
+            let keep = |j: usize| match what {
+                TabClose::This => j != i,
+                TabClose::Others => j == i,
+                TabClose::Left => j >= i,
+                TabClose::Right => j <= i,
+                TabClose::All => false,
+            };
+            let cur = self.cur;
+            let all = std::mem::take(&mut self.tabs);
+            for (j, t) in all.into_iter().enumerate() {
+                if keep(j) {
+                    self.tabs.push(t);
+                } else {
+                    self.remember_closed(t);
+                }
+            }
+            // Stay on the same tab when it survives, else on the clicked one, else the nearest.
+            self.cur = if keep(cur) { (0..cur).filter(|&k| keep(k)).count() } else if keep(i) { (0..i).filter(|&k| keep(k)).count() } else { i.saturating_sub(1) }.min(self.tabs.len().saturating_sub(1));
+            self.reset_doc_state();
+        } else if let Some(i) = close {
+            self.close_tab(i);
+        } else if let Some(i) = pick {
+            if i != self.cur {
+                self.cur = i;
+                self.reset_doc_state();
+            }
+        }
+        if dup {
+            let t = &self.tabs[self.cur];
+            let mut n = Tab::new(t.sel.clone());
+            (n.filter_txt, n.sort_txt, n.proj_txt, n.query, n.view, n.agg_txt) = (t.filter_txt.clone(), t.sort_txt.clone(), t.proj_txt.clone(), t.query.clone(), t.view, t.agg_txt.clone());
+            self.tabs.insert(self.cur + 1, n);
+            self.cur += 1;
+            self.reset_doc_state();
+            self.reload();
+        }
+    }
+
+    fn welcome(&mut self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            ui.add_space(120.0);
+            ui.label(RichText::new("Pick a collection on the left").size(20.0).color(BRIGHT));
+            ui.add_space(6.0);
+            ui.label(RichText::new("Each collection opens in its own tab. Every connection starts read-only; edits need an explicit unlock, show a change preview, and can be undone.").color(MUTED));
+            ui.add_space(16.0);
+            if ui.button("+ Add a connection").clicked() {
+                self.new_conn_modal();
+            }
+        });
+    }
+
+    fn collection(&mut self, ui: &mut egui::Ui) {
+        let Some(t) = self.t() else { return };
+        let (coll, view) = (t.sel.coll.clone(), t.view);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(&coll).size(18.0).strong().color(BRIGHT));
+            ui.add_space(12.0);
+            for (v, label) in [(View::Documents, "Documents"), (View::Aggregate, "Aggregate"), (View::Indexes, "Indexes"), (View::Schema, "Schema"), (View::Import, "Import"), (View::Compare, "Compare"), (View::Shell, "Shell")] {
+                if ui.selectable_label(view == v, label).clicked() && view != v {
+                    let t = self.tm().unwrap();
+                    t.view = v;
+                    t.selected = None;
+                    self.reset_doc_state();
+                    if v == View::Indexes {
+                        self.load_indexes();
+                    }
+                }
+            }
+            if matches!(view, View::Documents | View::Aggregate) {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if self.prefs.table {
+                        self.columns_menu(ui, view == View::Aggregate);
+                    }
+                    let mut table = self.prefs.table;
+                    ui.selectable_value(&mut table, false, "JSON");
+                    ui.selectable_value(&mut table, true, "Table");
+                    if table != self.prefs.table {
+                        self.prefs.table = table;
+                        self.save_prefs();
+                    }
+                });
+            }
+        });
+        ui.add_space(6.0);
+        match view {
+            View::Documents => self.documents(ui),
+            View::Aggregate => self.aggregate(ui),
+            View::Indexes => self.indexes_view(ui),
+            View::Shell => self.shell_view(ui),
+            View::Schema => self.schema_view(ui),
+            View::Import => self.import_view(ui),
+            View::Compare => self.compare_view(ui),
+        }
+    }
+
+    /// A query input that grows with its content, with highlighting and autocomplete.
+    /// Enter runs it (or picks a suggestion), Shift+Enter adds a line.
+    #[allow(clippy::too_many_arguments)]
+    fn query_field(ui: &mut egui::Ui, label: &str, text: &mut String, hint: &str, width: f32, kind: FieldKind, paths: &[String], ac: &mut Ac) -> bool {
+        ui.add_sized([56.0, 20.0], egui::Label::new(RichText::new(label).size(11.0).color(MUTED)));
+        let id = ui.make_persistent_id(("query", label));
+        // Test switch: show the suggestion list in the demo picture.
+        if ac.id.is_none() && kind == FieldKind::Query && std::env::var("QUARRY_TEST_AC").is_ok() {
+            if let Some((token, items)) = suggest("{ status: { $i", kind, paths) {
+                *ac = Ac { id: Some(id), token, items, sel: 0, cursor: 14, rect: None };
+            }
+        }
+        let (out, picked) = ac_field(ui, id, text, ac, &|b| suggest(b, kind, paths), |ui, text, open| {
+            egui::TextEdit::multiline(text)
+                .id(id)
+                .font(FontId::monospace(13.0))
+                .hint_text(hint)
+                .desired_width(width)
+                .desired_rows(1)
+                .lock_focus(open)
+                .return_key(egui::KeyboardShortcut::new(egui::Modifiers::SHIFT, Key::Enter))
+                .layouter(&mut code_layout)
+                .show(ui)
+        });
+        !picked && out.response.has_focus() && ui.input(|i| i.key_pressed(Key::Enter) && !i.modifiers.shift)
+    }
+
+    fn documents(&mut self, ui: &mut egui::Ui) {
+        let mut run = false;
+        let key = self.col_key(false);
+        let hist = self.prefs.history.get(&key).cloned().unwrap_or_default();
+        let index_sorts: Vec<String> = self.t().map(|t| t.indexes.iter().filter_map(|ix| ix.get_document("keys").ok()).map(|k| db::shell_text(&Bson::Document(k.clone()))).collect()).unwrap_or_default();
+        let lib: Vec<SavedQuery> = self.prefs.library.get(&key).map(|v| v.iter().filter(|q| q.pipeline.is_none()).cloned().collect()).unwrap_or_default();
+        let mut qacts = Vec::new();
+        let (t, ac, new_lib) = (&mut self.tabs[self.cur], &mut self.ac, &mut self.new_lib);
+        let paths = std::mem::take(&mut t.paths);
+        egui::Frame::new().fill(PANEL).corner_radius(8).inner_margin(10).show(ui, |ui| {
+            ui.horizontal_top(|ui| {
+                let w = ui.available_width() - 290.0;
+                run |= Self::query_field(ui, "QUERY", &mut t.filter_txt, "{ field: value }   or paste db.coll.find(...) / db.coll.aggregate([...])", w, FieldKind::Query, &paths, ac);
+                if primary(ui, "  Find  ", PRIMARY).on_hover_text("Enter").clicked() {
+                    run = true;
+                }
+                history_menu(ui, &hist, &index_sorts, &mut qacts);
+                library_menu(ui, &lib, new_lib, false, &mut qacts);
+            });
+            // A pasted shell query carries its own sort and projection.
+            if !db::is_shell(&t.filter_txt) {
+                ui.horizontal_top(|ui| {
+                    let w = (ui.available_width() - 160.0) / 2.0;
+                    run |= Self::query_field(ui, "SORT", &mut t.sort_txt, "{ _id: -1 }", w, FieldKind::Sort, &paths, ac);
+                    run |= Self::query_field(ui, "PROJECT", &mut t.proj_txt, "{ name: 1 }", w, FieldKind::Project, &paths, ac);
+                });
+            }
+        });
+        t.paths = paths;
+        for a in qacts {
+            let t = &mut self.tabs[self.cur];
+            match a {
+                QAct::Filter(v) => t.filter_txt = v,
+                QAct::Sort(v) => t.sort_txt = v,
+                QAct::Project(v) => t.proj_txt = v,
+                QAct::Load(q) => {
+                    (t.filter_txt, t.sort_txt, t.proj_txt) = (q.filter, q.sort, q.project);
+                    run = true;
+                }
+                QAct::Save(name) => {
+                    let q = SavedQuery { name: name.clone(), filter: t.filter_txt.clone(), sort: t.sort_txt.clone(), project: t.proj_txt.clone(), pipeline: None };
+                    self.save_to_library(q);
+                }
+                QAct::Delete(name) => self.delete_from_library(&name, false),
+            }
+        }
+        if run {
+            self.run_query();
+        }
+        ui.add_space(6.0);
+        let t = self.t().unwrap();
+        let (count, ms, loading, page) = (t.count, t.ms, t.loading, t.page);
+        let pages = count.div_ceil(PAGE_SIZE).max(1);
+        let mut go: Option<u64> = None;
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("{} documents", group(&count.to_string()))).color(BRIGHT));
+            ui.label(RichText::new(format!("{ms} ms")).color(MUTED));
+            if loading {
+                ui.spinner();
+            }
+            ui.separator();
+            if ui.add_enabled(page > 0, egui::Button::new("‹")).clicked() {
+                go = Some(page - 1);
+            }
+            ui.label(format!("page {} of {}", page + 1, pages));
+            if ui.add_enabled(page + 1 < pages, egui::Button::new("›")).clicked() {
+                go = Some(page + 1);
+            }
+            if ui.button("Reload").clicked() {
+                go = Some(page);
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.menu_button("More", |ui| {
+                    if ui.button("Open query in Shell").clicked() {
+                        let t = &mut self.tabs[self.cur];
+                        t.shell.code = query_script(&t.sel.coll, &t.filter_txt);
+                        t.view = View::Shell;
+                        t.selected = None;
+                        ui.close();
+                    }
+                    ui.separator();
+                    let t = self.t().unwrap();
+                    let (coll, filter) = (t.sel.coll.clone(), t.query.filter.clone());
+                    if ui.button("Delete all matching documents…").clicked() {
+                        self.modal = Some(Modal::Typed {
+                            title: format!("Delete every document in {coll} matching the current filter (about {count} documents)?"),
+                            expect: coll.clone(),
+                            typed: String::new(),
+                            action: Danger::DeleteMatching(filter),
+                        });
+                        ui.close();
+                    }
+                    if ui.button("Drop collection…").clicked() {
+                        self.modal = Some(Modal::Typed {
+                            title: format!("Drop the collection {coll} with all its documents and indexes? This cannot be undone."),
+                            expect: coll,
+                            typed: String::new(),
+                            action: Danger::DropCollection,
+                        });
+                        ui.close();
+                    }
+                });
+                if ui.button("Export…").clicked() {
+                    self.export();
+                }
+                if ui.button("+ Insert").clicked() {
+                    self.insert = Some("{\n  \n}".into());
+                }
+                let pending = self.tab_drafts();
+                if !pending.is_empty() && primary(ui, &format!("Save all ({})", pending.len()), WARNING).on_hover_text("Documents with unsaved edits").clicked() {
+                    if !self.sel_writable() {
+                        self.ask_unlock();
+                    } else if self.prefs.confirm_save {
+                        self.modal = Some(Modal::SaveAll(pending));
+                    } else {
+                        for k in &pending {
+                            self.write_draft(k);
+                        }
+                    }
+                }
+            });
+        });
+        if let Some(p) = go {
+            self.tm().unwrap().page = p;
+            self.reload();
+        }
+        ui.add_space(4.0);
+        self.results(ui, false);
+    }
+
+    fn columns_menu(&mut self, ui: &mut egui::Ui, agg: bool) {
+        let key = self.col_key(agg);
+        let t = self.t().unwrap();
+        let fields = if agg { t.agg_fields.clone() } else { t.fields.clone() };
+        let prefs = self.prefs.cols.get(&key).cloned().unwrap_or_default();
+        let n = self.prefs.default_cols;
+        let shown = visible_cols(Some(&prefs), &fields, n);
+        let mut acts = Vec::new();
+        let mut add = None;
+        sticky_menu(ui, format!("Columns ({})", shown.len()), |ui| {
+            ui.set_min_width(280.0);
+            ui.label(RichText::new("SHOWN  ·  pinned columns stay first").size(11.0).color(MUTED));
+            egui::ScrollArea::vertical().id_salt("shown").max_height(260.0).show(ui, |ui| {
+                for (i, c) in shown.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        let pinned = prefs.pinned.contains(c);
+                        if ui.selectable_label(pinned, RichText::new("pin").size(11.0)).on_hover_text("Keep this column first").clicked() {
+                            acts.push(ColAct::Pin(c.clone()));
+                        }
+                        ui.label(RichText::new(c).monospace().color(if fields.contains(c) { TEXT } else { PRIMARY }));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("×").on_hover_text("Hide").clicked() {
+                                acts.push(ColAct::Hide(c.clone()));
+                            }
+                            if ui.add_enabled(i + 1 < shown.len(), egui::Button::new("↓").small()).clicked() {
+                                acts.push(ColAct::Move(c.clone(), 1));
+                            }
+                            if ui.add_enabled(i > 0, egui::Button::new("↑").small()).clicked() {
+                                acts.push(ColAct::Move(c.clone(), -1));
+                            }
+                        });
+                    });
+                }
+            });
+            let hidden: Vec<&String> = fields.iter().filter(|f| !shown.contains(f)).collect();
+            if !hidden.is_empty() {
+                ui.separator();
+                ui.label(RichText::new(format!("MORE FIELDS ({})", hidden.len())).size(11.0).color(MUTED));
+                egui::ScrollArea::vertical().id_salt("more").max_height(180.0).show(ui, |ui| {
+                    for f in hidden {
+                        if ui.button(RichText::new(format!("+ {f}")).monospace()).clicked() {
+                            acts.push(ColAct::Show(f.clone()));
+                        }
+                    }
+                });
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                let r = ui.add(egui::TextEdit::singleline(&mut self.new_col).hint_text("custom: customer.name").desired_width(170.0).font(FontId::monospace(12.5)));
+                if (ui.button("Add").clicked() || (r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)))) && !self.new_col.trim().is_empty() {
+                    add = Some(self.new_col.trim().to_string());
+                }
+            });
+            ui.label(RichText::new("Dotted paths reach inside objects and arrays, like items.0.sku").size(11.0).color(FAINT));
+            if ui.button(format!("Reset to the first {n} fields")).clicked() {
+                acts.push(ColAct::Reset);
+            }
+        });
+        if let Some(c) = add {
+            acts.push(ColAct::Show(c));
+            self.new_col.clear();
+        }
+        if !acts.is_empty() {
+            self.apply_col_acts(&key, &fields, acts);
+        }
+    }
+
+    fn apply_col_acts(&mut self, key: &str, fields: &[String], acts: Vec<ColAct>) {
+        let n = self.prefs.default_cols;
+        let p = self.prefs.cols.entry(key.to_string()).or_default();
+        for a in acts {
+            let mut shown = visible_cols(Some(p), fields, n);
+            match a {
+                ColAct::Pin(c) => {
+                    if !p.pinned.contains(&c) {
+                        p.pinned.push(c);
+                    } else {
+                        p.pinned.retain(|x| *x != c);
+                    }
+                    continue;
+                }
+                ColAct::Hide(c) => {
+                    shown.retain(|x| *x != c);
+                    p.pinned.retain(|x| *x != c);
+                }
+                ColAct::Move(c, d) => {
+                    if let Some(i) = shown.iter().position(|x| *x == c) {
+                        let j = (i as i32 + d).clamp(0, shown.len() as i32 - 1) as usize;
+                        let pinned_n = p.pinned.iter().filter(|x| shown.contains(x)).count();
+                        shown.swap(i, j);
+                        // Moving across the edge of the pinned block changes which columns are pinned.
+                        p.pinned = shown[..pinned_n].to_vec();
+                    }
+                }
+                ColAct::Show(c) => {
+                    if !shown.contains(&c) {
+                        shown.push(c);
+                    }
+                }
+                ColAct::Reset => {
+                    *p = ColPrefs::default();
+                    continue;
+                }
+            }
+            p.shown = Some(shown);
+        }
+        self.save_prefs();
+    }
+
+    /// Table or JSON list of the current results, with the open document shown under its row.
+    fn results(&mut self, ui: &mut egui::Ui, agg: bool) {
+        let t = self.tm().unwrap();
+        // Taken out for the frame so the open document can be edited through `self`.
+        let docs = std::mem::take(if agg { &mut t.agg_docs } else { &mut t.docs });
+        let fields = if agg { t.agg_fields.clone() } else { t.fields.clone() };
+        let base = match (agg, t.view) {
+            (true, View::Shell) => t.shell.page as u64 * PAGE_SIZE,
+            (true, _) => 0,
+            _ => t.page * PAGE_SIZE,
+        };
+        let loading = t.loading;
+        let closed = self.t().and_then(|t| self.conn(t.sel.conn)).filter(|c| c.status != Status::Ready && !self.demo).map(|c| (c.meta.id, c.meta.name.clone()));
+        if let (true, Some((id, name))) = (docs.is_empty(), closed) {
+            ui.add_space(20.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("Connect to {name} to load this tab.")).color(MUTED));
+                if primary(ui, "Connect", PRIMARY).clicked() {
+                    self.active = Some(id);
+                    self.connect(id);
+                }
+            });
+        } else if docs.is_empty() {
+            ui.add_space(20.0);
+            ui.label(RichText::new(if loading { "Loading…" } else { "No documents" }).color(MUTED));
+        } else if self.prefs.table {
+            self.doc_table(ui, agg, &docs, &fields, base);
+        } else {
+            self.doc_list(ui, agg, &docs);
+        }
+        let t = self.tm().unwrap();
+        *(if agg { &mut t.agg_docs } else { &mut t.docs }) = docs;
+    }
+
+    fn select(&mut self, agg: bool, i: usize, toggle: bool) {
+        let t = self.tm().unwrap();
+        let same = t.selected == Some((agg, i));
+        t.selected = if same && toggle { None } else { Some((agg, i)) };
+        if !same || toggle {
+            self.reset_doc_state();
+        }
+    }
+
+    fn doc_table(&mut self, ui: &mut egui::Ui, agg: bool, docs: &[Document], fields: &[String], base: u64) {
+        let key = self.col_key(agg);
+        let prefs = self.prefs.cols.get(&key).cloned().unwrap_or_default();
+        let cols = visible_cols(Some(&prefs), fields, self.prefs.default_cols);
+        let widths: Vec<f32> = cols.iter().map(|c| prefs.widths.get(c).copied().unwrap_or_else(|| optimal_width(ui, docs, c))).collect();
+        let total: f32 = NUM_W + widths.iter().sum::<f32>();
+        let selected = self.t().unwrap().selected;
+        let view_w = ui.available_width();
+        let mut click = None;
+        let mut edit_cell = None;
+        let mut col_acts = Vec::new();
+        let mut resized = None;
+        let mut save_widths = false;
+        let mut fit = None;
+        let mut sort_set: Option<(String, Option<i64>)> = None;
+        let mut cell_acts: Vec<(usize, Vec<TreeAct>)> = Vec::new();
+        // Single-field sort shown in the header; clicking cycles ascending, descending, off.
+        let sort = if agg { None } else { self.t().and_then(|t| t.query.sort.clone()).filter(|s| s.len() == 1) };
+        let dir_of = |c: &str| sort.as_ref().and_then(|s| s.get(c)).and_then(|v| match v {
+            Bson::Int32(n) => Some(*n as i64),
+            Bson::Int64(n) => Some(*n),
+            Bson::Double(f) => Some(*f as i64),
+            _ => None,
+        });
+        let hl_cols: Vec<bool> = cols.iter().map(|c| prefs.highlight.contains(&db::strip_indices(c))).collect();
+        let related = if agg { HashMap::new() } else { self.t().map(|t| t.related.clone()).unwrap_or_default() };
+        egui::Frame::new().fill(PANEL).corner_radius(8).inner_margin(egui::Margin::symmetric(4, 4)).show(ui, |ui| {
+            egui::ScrollArea::both().id_salt(("res", agg)).auto_shrink(false).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let row_w = total.max(view_w - 12.0);
+                // Header
+                let (hr, _) = ui.allocate_exact_size(egui::vec2(row_w, 30.0), Sense::hover());
+                let p = ui.painter();
+                p.text(egui::pos2(hr.left() + 10.0, hr.center().y), egui::Align2::LEFT_CENTER, "#", FontId::proportional(11.5), FAINT);
+                let mut x = hr.left() + NUM_W;
+                for (c, w) in cols.iter().zip(&widths) {
+                    let cell = egui::Rect::from_min_size(egui::pos2(x, hr.top()), egui::vec2(*w, hr.height()));
+                    let pinned = prefs.pinned.contains(c);
+                    let color = if pinned { WARNING } else if fields.contains(c) { MUTED } else { PRIMARY };
+                    let dir = dir_of(c);
+                    let hresp = ui.interact(cell.shrink2(egui::vec2(4.0, 0.0)), ui.scope_id().with(("h", c)), Sense::click());
+                    if hresp.hovered() && !agg {
+                        ui.painter().rect_filled(cell.shrink(2.0), 4, HOVER);
+                    }
+                    ui.painter().with_clip_rect(cell.shrink2(egui::vec2(6.0, 0.0))).text(egui::pos2(x + 8.0, cell.center().y), egui::Align2::LEFT_CENTER, c, FontId::proportional(12.5), if dir.is_some() { BRIGHT } else { color });
+                    if let Some(d) = dir {
+                        let a = egui::pos2(cell.right() - 14.0, cell.center().y);
+                        let pts = if d > 0 { vec![a + egui::vec2(-4.0, 2.5), a + egui::vec2(4.0, 2.5), a + egui::vec2(0.0, -3.0)] } else { vec![a + egui::vec2(-4.0, -2.5), a + egui::vec2(4.0, -2.5), a + egui::vec2(0.0, 3.0)] };
+                        ui.painter().add(egui::Shape::convex_polygon(pts, PRIMARY, Stroke::NONE));
+                    }
+                    let hresp = if agg { hresp.on_hover_text("Right-click for column options") } else { hresp.on_hover_text("Click to sort, right-click for column options") };
+                    if hresp.clicked() && !agg {
+                        let next = match dir {
+                            None => Some(1),
+                            Some(d) if d > 0 => Some(-1),
+                            _ => None,
+                        };
+                        sort_set = Some((c.clone(), next));
+                    }
+                    hresp.context_menu(|ui| {
+                        // Same three column actions as the original's table (renderer line 106057).
+                        if !agg {
+                            if ui.button("Sort ascending").clicked() {
+                                sort_set = Some((c.clone(), Some(1)));
+                            }
+                            if ui.button("Sort descending").clicked() {
+                                sort_set = Some((c.clone(), Some(-1)));
+                            }
+                            if ui.add_enabled(dir.is_some(), egui::Button::new("Unsort")).clicked() {
+                                sort_set = Some((c.clone(), None));
+                            }
+                            ui.separator();
+                        }
+                        if ui.button(if pinned { "Unpin" } else { "Pin to the left" }).clicked() {
+                            col_acts.push(ColAct::Pin(c.clone()));
+                        }
+                        if ui.button("Move left").clicked() {
+                            col_acts.push(ColAct::Move(c.clone(), -1));
+                        }
+                        if ui.button("Move right").clicked() {
+                            col_acts.push(ColAct::Move(c.clone(), 1));
+                        }
+                        if ui.button("Hide column").clicked() {
+                            col_acts.push(ColAct::Hide(c.clone()));
+                        }
+                    });
+                    // Drag the right edge to resize.
+                    let handle = egui::Rect::from_min_max(egui::pos2(cell.right() - 3.0, cell.top() + 6.0), egui::pos2(cell.right() + 3.0, cell.bottom() - 6.0));
+                    let dr = ui.interact(handle, ui.scope_id().with(("w", c)), Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::ResizeColumn).on_hover_text("Drag to resize, double-click to fit");
+                    if dr.double_clicked() {
+                        fit = Some(c.clone());
+                    }
+                    ui.painter().vline(cell.right(), handle.y_range(), Stroke::new(1.0, if dr.hovered() || dr.dragged() { PRIMARY } else { BORDER }));
+                    if dr.dragged() {
+                        resized = Some((c.clone(), (*w + dr.drag_delta().x).clamp(50.0, 900.0)));
+                    }
+                    if dr.drag_stopped() {
+                        save_widths = true;
+                    }
+                    x += w;
+                }
+                ui.painter().hline(hr.x_range(), hr.bottom(), Stroke::new(1.0, BORDER));
+                // Rows (at most one page, so no virtualisation is needed)
+                for (i, d) in docs.iter().enumerate() {
+                    let drafted = if agg { None } else { self.shown_doc(d) };
+                    let d = drafted.as_ref().unwrap_or(d);
+                    let active = selected == Some((agg, i));
+                    let (rr, resp) = ui.allocate_exact_size(egui::vec2(row_w, ROW_H), Sense::click());
+                    let fill = if active {
+                        Color32::from_rgba_unmultiplied(134, 201, 249, 32)
+                    } else if ui.rect_contains_pointer(rr) && !ui.ctx().any_popup_open() {
+                        HOVER
+                    } else if i % 2 == 1 {
+                        Color32::from_rgb(0x19, 0x1b, 0x1e)
+                    } else {
+                        Color32::TRANSPARENT
+                    };
+                    let p = ui.painter();
+                    p.rect_filled(rr, 4, fill);
+                    if self.prefs.open_inline {
+                        chevron(p, egui::pos2(rr.left() + 9.0, rr.center().y), active, if active { PRIMARY } else { FAINT });
+                    }
+                    let num = (base + i as u64 + 1).to_string();
+                    let (num, nc) = if drafted.is_some() { (format!("{num}●"), WARNING) } else { (num, FAINT) };
+                    p.text(egui::pos2(rr.left() + 18.0, rr.center().y), egui::Align2::LEFT_CENTER, num, FontId::proportional(11.5), nc);
+                    let mut x = rr.left() + NUM_W;
+                    for (ci, (c, w)) in cols.iter().zip(&widths).enumerate() {
+                        let cell = egui::Rect::from_min_size(egui::pos2(x, rr.top()), egui::vec2(*w, ROW_H));
+                        if hl_cols[ci] {
+                            ui.painter().rect_filled(cell, 0, HIGHLIGHT);
+                        }
+                        let clip = ui.painter().with_clip_rect(cell.shrink2(egui::vec2(6.0, 0.0)));
+                        let v = db::get_path(d, c);
+                        match v {
+                            Some(v) => {
+                                let g = ui.fonts_mut(|f| f.layout_job(cell_job(v)));
+                                let gw = g.size().x;
+                                clip.galley(egui::pos2(x + 8.0, cell.center().y - g.size().y / 2.0), g, TEXT);
+                                if let Some(p) = related.get(&db::compact(v)).filter(|_| matches!(v, Bson::ObjectId(_) | Bson::String(_))) {
+                                    clip.text(egui::pos2(x + 14.0 + gw, cell.center().y), egui::Align2::LEFT_CENTER, p, FontId::proportional(12.0), C_LINK);
+                                }
+                            }
+                            None => {
+                                clip.text(egui::pos2(x + 8.0, cell.center().y), egui::Align2::LEFT_CENTER, "—", FontId::proportional(12.0), FAINT);
+                            }
+                        }
+                        let cr = ui.interact(cell, ui.scope_id().with(("c", i, ci)), Sense::click());
+                        if cr.double_clicked() {
+                            edit_cell = Some((i, c.clone()));
+                        } else if cr.clicked() {
+                            click = Some(i);
+                        }
+                        if let Some(v) = v {
+                            let path: Vec<String> = c.split('.').map(String::from).collect();
+                            let mut acts = Vec::new();
+                            cr.context_menu(|ui| field_menu(ui, &path, v, !agg, &mut acts));
+                            if !acts.is_empty() {
+                                cell_acts.push((i, acts));
+                            }
+                        }
+                        x += w;
+                    }
+                    if resp.clicked() {
+                        click = Some(i);
+                    }
+                    if active && self.prefs.open_inline {
+                        ui.add_space(4.0);
+                        let w = (view_w - 24.0).max(320.0);
+                        egui::Frame::new().fill(RAISED).corner_radius(8).inner_margin(12).stroke(Stroke::new(1.0, BORDER)).show(ui, |ui| {
+                            ui.set_width(w - 24.0);
+                            ui.spacing_mut().item_spacing.y = 6.0;
+                            self.doc_body(ui, d, agg);
+                        });
+                        ui.add_space(6.0);
+                    }
+                }
+            });
+        });
+        if let Some((c, w)) = resized {
+            self.prefs.cols.entry(key.clone()).or_default().widths.insert(c, w);
+        }
+        if let Some(c) = fit {
+            // Back to the measured width, like the original's "optimal" column width.
+            self.prefs.cols.entry(key.clone()).or_default().widths.remove(&c);
+            save_widths = true;
+        }
+        if save_widths {
+            self.save_prefs();
+        }
+        if !col_acts.is_empty() {
+            self.apply_col_acts(&key, fields, col_acts);
+        }
+        if let Some(i) = click {
+            self.select(agg, i, true);
+        }
+        for (i, acts) in cell_acts {
+            self.select(agg, i, false);
+            let d = self.shown_doc(&docs[i]).unwrap_or_else(|| docs[i].clone());
+            self.handle_acts(&d, acts);
+        }
+        if let Some((c, next)) = sort_set {
+            let t = self.tm().unwrap();
+            t.query.sort = next.map(|d| doc! { c.clone(): d });
+            t.sort_txt = t.query.sort.as_ref().map(|s| db::shell_text(&Bson::Document(s.clone()))).unwrap_or_default();
+            t.page = 0;
+            self.reload();
+        }
+        if let (Some((i, c)), false) = (edit_cell, agg) {
+            self.select(agg, i, false);
+            let path: Vec<String> = c.split('.').map(String::from).collect();
+            let d = self.shown_doc(&docs[i]).unwrap_or_else(|| docs[i].clone());
+            match db::get_path(&d, &c).cloned() {
+                Some(v) if c != "_id" => self.start_inline(&d, path, v),
+                Some(_) => {}
+                None => self.err(format!("This document has no field {c}. Use + Add field.")),
+            }
+        }
+    }
+
+    fn doc_list(&mut self, ui: &mut egui::Ui, agg: bool, docs: &[Document]) {
+        let selected = self.t().unwrap().selected;
+        let view_w = ui.available_width();
+        let mut click = None;
+        egui::Frame::new().fill(PANEL).corner_radius(8).inner_margin(4).show(ui, |ui| {
+            egui::ScrollArea::vertical().id_salt(("list", agg)).auto_shrink(false).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for (i, d) in docs.iter().enumerate() {
+                    let drafted = if agg { None } else { self.shown_doc(d) };
+                    let d = drafted.as_ref().unwrap_or(d);
+                    let active = selected == Some((agg, i));
+                    let w = ui.available_width();
+                    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, ROW_H), Sense::click());
+                    let fill = if active { Color32::from_rgba_unmultiplied(134, 201, 249, 32) } else if resp.hovered() { HOVER } else { Color32::TRANSPARENT };
+                    ui.painter().rect_filled(rect, 4, fill);
+                    let galley = ui.fonts_mut(|f| f.layout_job(row_job(d, w - 16.0)));
+                    ui.painter().galley(rect.left_center() + egui::vec2(8.0, -galley.size().y / 2.0), galley, TEXT);
+                    if resp.clicked() {
+                        click = Some(i);
+                    }
+                    if active && self.prefs.open_inline {
+                        ui.add_space(4.0);
+                        egui::Frame::new().fill(RAISED).corner_radius(8).inner_margin(12).stroke(Stroke::new(1.0, BORDER)).show(ui, |ui| {
+                            ui.set_width(view_w - 48.0);
+                            ui.spacing_mut().item_spacing.y = 6.0;
+                            self.doc_body(ui, d, agg);
+                        });
+                        ui.add_space(6.0);
+                    }
+                }
+            });
+        });
+        if let Some(i) = click {
+            self.select(agg, i, true);
+        }
+    }
+
+    /// Starts editing one value: small values in place, objects and arrays in the large JSON editor.
+    fn start_inline(&mut self, d: &Document, path: Vec<String>, v: Bson) {
+        if !self.sel_writable() {
+            return self.ask_unlock();
+        }
+        self.new_field = None;
+        if matches!(v, Bson::Document(_) | Bson::Array(_)) {
+            self.inline = None;
+            self.json_edit = Some(JsonEdit { base: d.clone(), path, text: db::to_edit_value(&v), kind: db::type_name_kind(&v), focus: true });
+        } else {
+            self.inline = Some(Inline { text: db::value_text(&v), kind: db::type_name_kind(&v), path, focus: true });
+        }
+    }
+
+    /// Side panel mode: the open document on the right.
+    fn inspector(&mut self, ui: &mut egui::Ui) {
+        let Some(d) = self.selected_doc().cloned() else { return };
+        let d = self.shown_doc(&d).unwrap_or(d);
+        let from_agg = matches!(self.t().and_then(|t| t.selected), Some((true, _)));
+        egui::Panel::right("inspector")
+            .default_size(460.0)
+            .size_range(320.0..=900.0)
+            .resizable(true)
+            .frame(egui::Frame::new().fill(PANEL).inner_margin(12).stroke(Stroke::new(1.0, BORDER)))
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| self.doc_body(ui, &d, from_agg));
+            });
+    }
+
+    /// The open document: actions, then its fields as a tree that can be edited in place.
+    fn doc_body(&mut self, ui: &mut egui::Ui, d: &Document, from_agg: bool) {
+        let mut acts = Vec::new();
+        ui.horizontal(|ui| {
+            let id = d.get("_id").map(db::short).unwrap_or_default();
+            ui.label(RichText::new(id).monospace().color(C_OID));
+            ui.add_space(8.0);
+            if !from_agg {
+                if ui.small_button("Edit JSON").clicked() {
+                    if self.sel_writable() {
+                        self.inline = None;
+                        self.json_edit = Some(JsonEdit { base: d.clone(), path: Vec::new(), text: db::to_edit_json(d), kind: "object", focus: true });
+                    } else {
+                        acts.push(TreeAct::Locked);
+                    }
+                }
+                if ui.small_button("+ Add field").clicked() {
+                    acts.push(TreeAct::AddField(Vec::new()));
+                }
+                if ui.small_button("Duplicate").clicked() {
+                    let mut c = d.clone();
+                    c.remove("_id");
+                    self.insert = Some(db::to_edit_json(&c));
+                }
+                if ui.small_button(RichText::new("Delete").color(ALERT)).clicked() {
+                    self.modal = Some(Modal::Delete(d.clone()));
+                }
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("Close").on_hover_text("Esc").clicked() {
+                    if let Some(t) = self.tm() {
+                        t.selected = None;
+                    }
+                    self.reset_doc_state();
+                }
+                if ui.small_button("Copy JSON").clicked() {
+                    ui.ctx().copy_text(db::to_edit_json(d));
+                    self.ok("Copied document as JSON");
+                }
+            });
+        });
+        ui.separator();
+        let key = self.draft_key(d);
+        self.changed = match self.drafts.get(&key) {
+            Some(dr) if !from_agg => {
+                let changes = db::diff(&dr.original, &dr.current);
+                self.draft_bar(ui, &key, &changes);
+                changes.into_iter().map(|c| c.0).collect()
+            }
+            _ => HashSet::new(),
+        };
+        let id = egui::Id::unique(("doc", d.get("_id").map(db::compact)));
+        let mut path = Vec::new();
+        for (k, v) in d {
+            path.push(k.clone());
+            self.tree(ui, k, v, 0, id, &mut path, !from_agg, &mut acts);
+            path.pop();
+        }
+        if self.new_field.as_ref().is_some_and(|n| n.parent.is_empty()) {
+            self.new_field_row(ui, &mut acts);
+        }
+        self.changed.clear();
+        self.handle_acts(d, acts);
+    }
+
+    /// Unsaved edits of one document: what changed, Save, Discard, and the confirm switch.
+    fn draft_bar(&mut self, ui: &mut egui::Ui, key: &str, changes: &[(String, Option<Bson>, Option<Bson>)]) {
+        let mut save = false;
+        let mut discard = false;
+        let mut confirm = self.prefs.confirm_save;
+        egui::Frame::new().fill(Color32::from_rgba_unmultiplied(247, 208, 110, 22)).stroke(Stroke::new(1.0, WARNING.gamma_multiply(0.5))).corner_radius(6).inner_margin(8).show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(format!("● {} unsaved change(s)", changes.len())).color(WARNING).strong());
+                let list: Vec<&str> = changes.iter().take(5).map(|c| c.0.as_str()).collect();
+                let more = if changes.len() > 5 { format!(" +{}", changes.len() - 5) } else { String::new() };
+                ui.label(RichText::new(format!("{}{more}", list.join(", "))).monospace().size(11.5).color(MUTED));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    save = primary(ui, "Save", PRIMARY).on_hover_text("Write all edits of this document at once (Cmd+S)").clicked() || ui.input(|i| i.modifiers.command && i.key_pressed(Key::S));
+                    discard = ui.small_button("Discard").clicked();
+                    ui.checkbox(&mut confirm, RichText::new("Ask before saving").size(11.5));
+                });
+            });
+        });
+        ui.add_space(4.0);
+        if confirm != self.prefs.confirm_save {
+            self.prefs.confirm_save = confirm;
+            self.save_prefs();
+        }
+        if discard {
+            self.drafts.remove(key);
+            self.ok("Edits discarded");
+        } else if save {
+            self.save_draft(key);
+        }
+    }
+
+    fn handle_acts(&mut self, d: &Document, acts: Vec<TreeAct>) {
+        for a in acts {
+            match a {
+                TreeAct::Start(p, v) => self.start_inline(d, p, v),
+                TreeAct::Cancel => {
+                    self.inline = None;
+                    self.new_field = None;
+                }
+                TreeAct::Commit => {
+                    if let Some(i) = &self.inline {
+                        let new = db::make_value(i.kind, &i.text).and_then(|v| db::edit_path(d, &i.path, Some(v)));
+                        self.stage(d, new);
+                    }
+                }
+                TreeAct::Remove(p) => {
+                    if self.sel_writable() {
+                        self.stage(d, db::edit_path(d, &p, None));
+                    } else {
+                        self.ask_unlock();
+                    }
+                }
+                TreeAct::AddField(parent) => {
+                    if self.sel_writable() {
+                        self.inline = None;
+                        self.new_field = Some(NewField { parent, name: String::new(), text: String::new(), kind: "string" });
+                    } else {
+                        self.ask_unlock();
+                    }
+                }
+                TreeAct::CommitNew => {
+                    if let Some(n) = &self.new_field {
+                        let is_array = !n.parent.is_empty() && matches!(db::get_path(d, &n.parent.join(".")), Some(Bson::Array(_)));
+                        let name = n.name.trim().to_string();
+                        if name.is_empty() && !is_array {
+                            self.err("Give the new field a name.");
+                            continue;
+                        }
+                        let mut path = n.parent.clone();
+                        path.push(if is_array { usize::MAX.to_string() } else { name.clone() });
+                        if !is_array && db::get_path(d, &path.join(".")).is_some() {
+                            self.err(format!("{name} already exists. Double-click it to change it."));
+                            continue;
+                        }
+                        let new = db::make_value(n.kind, &n.text).and_then(|v| db::edit_path(d, &path, Some(v)));
+                        self.stage(d, new);
+                    }
+                }
+                TreeAct::Locked => self.ask_unlock(),
+                TreeAct::ShowFull(path, v) => {
+                    let body = match &v {
+                        Bson::String(s) => s.clone(),
+                        Bson::Document(_) | Bson::Array(_) => db::to_edit_json(&doc! { "v": v.clone() }).lines().skip(1).collect::<Vec<_>>().join("\n").trim_start().trim_start_matches("\"v\": ").trim_end_matches('}').trim_end().to_string(),
+                        other => db::value_text(other),
+                    };
+                    self.modal = Some(Modal::Text { title: path, body });
+                }
+                TreeAct::PinColumn(path) => {
+                    let key = self.col_key(false);
+                    let fields = self.t().map(|t| t.fields.clone()).unwrap_or_default();
+                    self.apply_col_acts(&key, &fields, vec![ColAct::Show(path.clone()), ColAct::Pin(path)]);
+                    self.prefs.table = true;
+                }
+                TreeAct::Highlight(path) => {
+                    let key = self.col_key(false);
+                    let p = self.prefs.cols.entry(key).or_default();
+                    let path = db::strip_indices(&path);
+                    if p.highlight.contains(&path) {
+                        p.highlight.retain(|x| *x != path);
+                    } else {
+                        p.highlight.push(path);
+                    }
+                    self.save_prefs();
+                }
+                TreeAct::Filter(path, v, add) => {
+                    let path = db::strip_indices(&path);
+                    let t = self.tm().unwrap();
+                    let mut f = if add { t.query.filter.clone() } else { Document::new() };
+                    f.insert(path, v);
+                    t.filter_txt = db::shell_text(&Bson::Document(f));
+                    t.view = View::Documents;
+                    t.selected = None;
+                    self.reset_doc_state();
+                    self.run_query();
+                }
+                TreeAct::Group(path, v, filtered) => {
+                    let filter = if filtered { self.t().unwrap().query.filter.clone() } else { Document::new() };
+                    match db::group_count_pipeline(&path, &v, filter) {
+                        Ok(p) => {
+                            let t = self.tm().unwrap();
+                            t.view = View::Aggregate;
+                            t.selected = None;
+                            t.agg_txt = format!("[\n{}\n]", p.iter().map(|s| format!("  {}", db::shell_text(&Bson::Document(s.clone())))).collect::<Vec<_>>().join(",\n"));
+                            self.reset_doc_state();
+                            self.run_pipeline(p);
+                        }
+                        Err(e) => self.err(e),
+                    }
+                }
+                TreeAct::Distinct(path) => match self.target() {
+                    Some(target) => {
+                        let f = self.t().unwrap().query.filter.clone();
+                        self.worker.distinct_count(target, path, f);
+                    }
+                    None => self.err("Not connected."),
+                },
+                TreeAct::Index(path) => {
+                    self.idx_keys = format!("{{ {}: 1 }}", db::shell_text(&Bson::Document(doc! { db::strip_indices(&path): 1 })).trim_start_matches("{ ").trim_end_matches(": 1 }"));
+                    let t = self.tm().unwrap();
+                    t.view = View::Indexes;
+                    t.selected = None;
+                    self.reset_doc_state();
+                    self.load_indexes();
+                    self.ok("Check the keys, then press Create (writes must be unlocked).");
+                }
+                TreeAct::GoRef(path, v) => {
+                    let Some(s) = self.t().map(|t| t.sel.clone()) else { continue };
+                    let path = db::strip_indices(&path);
+                    let rel = self.prefs.relations.get(&format!("{}/{}", s.conn, s.db)).and_then(|l| l.iter().find(|r| r.coll == s.coll && r.path == path)).cloned();
+                    match (rel, self.conn(s.conn).and_then(|c| c.client.clone())) {
+                        (_, None) => self.err("Not connected."),
+                        (Some(r), _) => self.go_ref(s.conn, s.db, r.target, v),
+                        (None, Some(client)) => {
+                            let colls = self.conn(s.conn).and_then(|c| c.dbs.iter().find(|d| d.0 == s.db)).and_then(|d| d.1.clone()).unwrap_or_default();
+                            self.ok("Looking for the collection that holds this id…");
+                            self.worker.find_ref(s.conn, Target { client, db: s.db, coll: s.coll, timeout: self.timeout() }, colls, path, v);
+                        }
+                    }
+                }
+                TreeAct::Rename(path) => {
+                    if self.sel_writable() {
+                        let name = path.last().cloned().unwrap_or_default();
+                        self.modal = Some(Modal::Rename { doc: d.clone(), path, name });
+                    } else {
+                        self.ask_unlock();
+                    }
+                }
+            }
+        }
+    }
+
+    fn type_combo(ui: &mut egui::Ui, id: &'static str, kind: &mut &'static str) {
+        egui::ComboBox::from_id_salt(id).width(86.0).selected_text(RichText::new(*kind).size(12.0)).show_ui(ui, |ui| {
+            for k in db::KINDS {
+                ui.selectable_value(kind, k, k);
+            }
+        });
+    }
+
+    fn new_field_row(&mut self, ui: &mut egui::Ui, acts: &mut Vec<TreeAct>) {
+        let Some(n) = &mut self.new_field else { return };
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            let r = ui.add(egui::TextEdit::singleline(&mut n.name).hint_text("name").desired_width(120.0).font(FontId::monospace(12.5)));
+            if n.name.is_empty() && !r.has_focus() && !ui.ctx().any_popup_open() {
+                r.request_focus();
+            }
+            let v = ui.add(egui::TextEdit::singleline(&mut n.text).hint_text("value").desired_width(EDITOR_W - 60.0).font(FontId::monospace(12.5)));
+            Self::type_combo(ui, "newkind", &mut n.kind);
+            if ui.small_button("Add").clicked() || ((r.lost_focus() || v.lost_focus()) && ui.input(|i| i.key_pressed(Key::Enter))) {
+                acts.push(TreeAct::CommitNew);
+            }
+            if ui.small_button("×").clicked() {
+                acts.push(TreeAct::Cancel);
+            }
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn tree(&mut self, ui: &mut egui::Ui, key: &str, v: &Bson, depth: usize, id: egui::Id, path: &mut Vec<String>, editable: bool, acts: &mut Vec<TreeAct>) {
+        let editing_here = self.inline.as_ref().is_some_and(|i| i.path == *path);
+        match v {
+            Bson::Document(_) | Bson::Array(_) if !editing_here => {
+                let items: Vec<(String, &Bson)> = match v {
+                    Bson::Document(d) => d.iter().map(|(k, v)| (k.clone(), v)).collect(),
+                    Bson::Array(a) => a.iter().enumerate().map(|(i, v)| (i.to_string(), v)).collect(),
+                    _ => unreachable!(),
+                };
+                let mut job = LayoutJob::default();
+                job.append(key, 0.0, mono(BRIGHT));
+                job.append(&format!("  {}", leaf_text(v)), 0.0, mono(FAINT));
+                let adding_here = self.new_field.as_ref().is_some_and(|n| n.parent == *path);
+                let r = egui::CollapsingHeader::new(job)
+                    .id_salt(id.with(&*path))
+                    .default_open(depth < 1)
+                    .open(adding_here.then_some(true))
+                    .show(ui, |ui| {
+                        for (k, child) in items {
+                            path.push(k.clone());
+                            self.tree(ui, &k, child, depth + 1, id, path, editable, acts);
+                            path.pop();
+                        }
+                        if adding_here {
+                            self.new_field_row(ui, acts);
+                        }
+                    });
+                if highlighted(&self.prefs, &self.col_key(false), path) {
+                    ui.painter().rect_filled(r.header_response.rect.expand(2.0), 4, HIGHLIGHT);
+                }
+                if editable && r.header_response.double_clicked() && path.first().is_some_and(|k| k != "_id") {
+                    acts.push(TreeAct::Start(path.clone(), v.clone()));
+                }
+                let p = path.clone();
+                r.header_response.on_hover_text("Double-click to edit as JSON, right-click for more").context_menu(|ui| field_menu(ui, &p, v, editable, acts));
+            }
+            leaf => {
+                let hl = highlighted(&self.prefs, &self.col_key(false), path);
+                let edited = !self.changed.is_empty() && self.changed.contains(&path.join("."));
+                egui::Frame::new().fill(if edited { Color32::from_rgba_unmultiplied(247, 208, 110, 34) } else if hl { HIGHLIGHT } else { Color32::TRANSPARENT }).corner_radius(4).show(ui, |ui| ui.horizontal(|ui| {
+                    ui.add_space(16.0);
+                    ui.label(RichText::new(key).monospace().color(MUTED));
+                    if editing_here {
+                        let inl = self.inline.as_mut().unwrap();
+                        let r = ui.add(egui::TextEdit::singleline(&mut inl.text).desired_width(EDITOR_W).font(FontId::monospace(12.5)).clip_text(true));
+                        if inl.focus {
+                            r.request_focus();
+                            inl.focus = false;
+                        }
+                        Self::type_combo(ui, "inlinekind", &mut inl.kind);
+                        if ui.small_button("✓").on_hover_text("Review and save (Enter)").clicked() || (r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))) {
+                            acts.push(TreeAct::Commit);
+                        }
+                        if ui.small_button("×").on_hover_text("Cancel (Esc)").clicked() {
+                            acts.push(TreeAct::Cancel);
+                        }
+                    } else {
+                        let text = leaf_text(leaf);
+                        let r = ui.add(egui::Label::new(RichText::new(&text).monospace().color(color_of(leaf))).truncate().sense(Sense::click()));
+                        ui.label(RichText::new(db::type_name(leaf)).size(10.5).color(FAINT));
+                        if let Some(p) = self.t().and_then(|t| t.related.get(&db::compact(leaf))) {
+                            ui.label(RichText::new(p).size(12.0).color(C_LINK)).on_hover_text("Preview of the referenced document");
+                        }
+                        if let Some(ts) = db::possible_timestamp(leaf) {
+                            ui.label(RichText::new(format!("= {ts}?")).size(10.5).color(C_DATE.gamma_multiply(0.7))).on_hover_text("This number looks like a Unix timestamp in seconds");
+                        }
+                        let r = if editable {
+                            let r = r.on_hover_cursor(egui::CursorIcon::Text).on_hover_text(if text.len() > 60 { text.clone() } else { "Double-click to edit, right-click for more".into() });
+                            if r.double_clicked() && path.first().is_some_and(|k| k != "_id") {
+                                acts.push(TreeAct::Start(path.clone(), leaf.clone()));
+                            }
+                            r
+                        } else {
+                            r
+                        };
+                        let p = path.clone();
+                        r.context_menu(|ui| field_menu(ui, &p, leaf, editable, acts));
+                    }
+                }));
+            }
+        }
+    }
+
+    fn run_shell_script(&mut self) {
+        let Some(t) = self.t() else { return };
+        let code = t.shell.code.clone();
+        let ops = dangerous_words(&code);
+        // Same check as the original; on a read-only connection the runner refuses writes anyway.
+        if !ops.is_empty() && self.sel_writable() {
+            self.modal = Some(Modal::ShellWrite(ops));
+        } else {
+            self.start_shell();
+        }
+    }
+
+    fn start_shell(&mut self) {
+        if self.demo {
+            return self.ok("Offline demo: the shell needs a real connection.");
+        }
+        let Some(runtime) = find_bun(&self.prefs.shell_runtime) else {
+            return self.err("Bun was not found. Install it from bun.sh, or set its path in Settings.");
+        };
+        let Some(t) = self.t() else { return };
+        let sel = t.sel.clone();
+        let code = t.shell.code.clone();
+        let Some(uri) = keychain(sel.conn).and_then(|k| k.get_password().ok()) else {
+            return self.err("Could not read this connection's address from the Keychain.");
+        };
+        let collections: Vec<String> = self.conn(sel.conn).and_then(|c| c.dbs.iter().find(|d| d.0 == sel.db)).and_then(|d| d.1.clone()).unwrap_or_default();
+        let input = serde_json::json!({
+            "uri": uri, "db": sel.db, "code": code, "collections": collections,
+            "readOnly": !self.sel_writable(), "timeoutMs": self.prefs.timeout_ms,
+            "packages": self.prefs.shell_packages.iter().map(|p| db::package_spec(p).0).collect::<Vec<_>>(),
+            "proxy": self.shell_proxy(sel.conn),
+        })
+        .to_string();
+        // The original's NodeShell.addHistory (renderer line 196411): skip scripts over 1000
+        // characters, move a repeat to the top, keep MAX_HISTORY_LENGTH = 50 per database.
+        const MAX_HISTORY_LENGTH: usize = 50;
+        const MAX_HISTORY_SCRIPT: usize = 1000;
+        if code.chars().count() <= MAX_HISTORY_SCRIPT {
+            let h = self.prefs.shell_histories.entry(format!("{}/{}", sel.conn, sel.db)).or_default();
+            h.retain(|x| *x != code);
+            h.insert(0, code);
+            h.truncate(MAX_HISTORY_LENGTH);
+        }
+        self.save_prefs();
+        self.req += 1;
+        let req = self.req;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let sh = &mut self.tabs[self.cur].shell;
+        *sh = ShellTab { code: std::mem::take(&mut sh.code), req, cancel: Some(tx), started: Some(std::time::Instant::now()), ..Default::default() };
+        let packages = self.prefs.shell_packages.clone();
+        self.worker.shell(req, db::ShellJob { runtime, dir: config_dir().join("shell"), input, packages }, rx);
+    }
+
+    /// The Shell runs in its own process, so it reaches SSH-only servers through this app's
+    /// tunnel (a local SOCKS5 port) or through the connection's own proxy.
+    fn shell_proxy(&self, conn: u64) -> serde_json::Value {
+        let Some(c) = self.conn(conn) else { return serde_json::Value::Null };
+        if let Some(t) = &c.tunnel {
+            return serde_json::json!({ "host": "127.0.0.1", "port": t.port });
+        }
+        match &c.meta.proxy {
+            Some(p) => serde_json::json!({ "host": p.host, "port": if p.port == 0 { 1080 } else { p.port }, "user": p.user, "password": secret(conn, "proxy-password") }),
+            None => serde_json::Value::Null,
+        }
+    }
+
+    fn shell_view(&mut self, ui: &mut egui::Ui) {
+        let writable = self.sel_writable();
+        let coll = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
+        let history = self.t().and_then(|t| self.prefs.shell_histories.get(&format!("{}/{}", t.sel.conn, t.sel.db)).cloned()).unwrap_or_default();
+        let mut packages = self.prefs.shell_packages.clone();
+        let mut pkg_names: Vec<String> = packages.iter().map(|p| package_ident(p)).collect();
+        if packages.iter().any(|p| db::package_spec(p).0 == "lodash") {
+            pkg_names.push("_".into());
+        }
+        let mut new_pkg = std::mem::take(&mut self.new_pkg);
+        let colls: Vec<String> = self.t().and_then(|t| self.conn(t.sel.conn).and_then(|c| c.dbs.iter().find(|d| d.0 == t.sel.db)).and_then(|d| d.1.clone())).unwrap_or_default();
+        let (t, ac) = (&mut self.tabs[self.cur], &mut self.ac);
+        let paths = t.paths.clone();
+        if t.shell.code.is_empty() {
+            t.shell.code = default_script(&coll);
+        }
+        let running = t.shell.started;
+        let mut run = false;
+        let mut stop = false;
+        egui::Frame::new().fill(PANEL).corner_radius(8).inner_margin(10).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("SHELL  ·  JavaScript run by Bun with the official MongoDB driver").size(11.0).color(MUTED));
+                ui.label(RichText::new("?").color(PRIMARY)).on_hover_text(
+                    "Write a function and return a value; a cursor is cut to 100 documents.\nAvailable: db, every collection by name, ObjectId, ISODate, console.log, randomId, UUIDv4.",
+                );
+                if !writable {
+                    ui.label(RichText::new("read-only: writes are refused").size(11.0).color(SUCCESS));
+                }
+            });
+            let id = ui.make_persistent_id("shell-editor");
+            ac_field(ui, id, &mut t.shell.code, ac, &|b| suggest_js(b, &paths, &colls, &pkg_names), |ui, text, _open| {
+                egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(10).lock_focus(true).layouter(&mut js_layout).show(ui)
+            });
+            ui.horizontal(|ui| {
+                match running {
+                    Some(at) => {
+                        ui.spinner();
+                        ui.label(RichText::new(format!("Running {:.1} s", at.elapsed().as_secs_f32())).color(MUTED));
+                        ui.ctx().request_repaint_after(Duration::from_millis(100));
+                        stop = ui.button("Stop").clicked();
+                    }
+                    None => {
+                        run = primary(ui, "Run", PRIMARY).on_hover_text("Cmd+Enter").clicked() || ui.input(|i| i.modifiers.command && i.key_pressed(Key::Enter));
+                        if let Some(ms) = t.shell.ms {
+                            let n = t.shell.count.map(|n| format!("{n} results  ")).unwrap_or_default();
+                            ui.label(RichText::new(format!("{n}{ms} ms")).color(MUTED));
+                        }
+                    }
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.menu_button("History", |ui| {
+                        ui.set_max_width(520.0);
+                        if history.is_empty() {
+                            ui.label(RichText::new("Nothing run yet").color(MUTED));
+                        }
+                        for h in &history {
+                            let first: String = h.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with("async function")).take(1).collect();
+                            if ui.button(RichText::new(first.chars().take(80).collect::<String>()).monospace()).on_hover_text(h.as_str()).clicked() {
+                                t.shell.code = h.clone();
+                                ui.close();
+                            }
+                        }
+                    });
+                    sticky_menu(ui, format!("Packages ({})", packages.len()), |ui| {
+                        ui.set_min_width(300.0);
+                        ui.label(RichText::new("npm packages for your scripts. Each one is loaded for you and ready by the name shown.").size(11.5).color(MUTED));
+                        let mut drop = None;
+                        for (i, p) in packages.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(p).monospace().color(BRIGHT));
+                                let alias = if db::package_spec(p).0 == "lodash" { format!("{}, _", package_ident(p)) } else { package_ident(p) };
+                                ui.label(RichText::new(format!("ready as {alias}")).monospace().size(11.5).color(C_DATE));
+                                if ui.small_button("×").on_hover_text("Remove").clicked() {
+                                    drop = Some(i);
+                                }
+                            });
+                        }
+                        if let Some(i) = drop {
+                            packages.remove(i);
+                        }
+                        ui.horizontal(|ui| {
+                            let r = ui.add(egui::TextEdit::singleline(&mut new_pkg).hint_text("lodash  or  dayjs@1.11").desired_width(190.0).font(FontId::monospace(12.5)));
+                            let valid = db::valid_package(new_pkg.trim());
+                            if (ui.add_enabled(valid, egui::Button::new("Add")).clicked() || (valid && r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)))) && !packages.contains(&new_pkg.trim().to_string()) {
+                                packages.push(new_pkg.trim().to_string());
+                                new_pkg.clear();
+                            }
+                        });
+                        ui.label(RichText::new("Installed by Bun on the next run. Bun does not run install scripts of packages unless you trust them.").size(11.0).color(FAINT));
+                    });
+                    if ui.selectable_label(t.shell.help, "Help").on_hover_text("What the shell can do, with examples").clicked() {
+                        t.shell.help = !t.shell.help;
+                    }
+                    if ui.button("Reset").on_hover_text("Back to the starter script").clicked() {
+                        t.shell.code = default_script(&coll);
+                    }
+                });
+            });
+        });
+        ui.add_space(6.0);
+        let mut use_example = None;
+        let has_table = !t.shell.docs.is_empty() && !t.shell.raw;
+        let top_h = if has_table { (ui.available_height() * 0.3).max(60.0) } else { f32::INFINITY };
+        egui::ScrollArea::vertical().id_salt("shell-out").max_height(top_h).auto_shrink([false, true]).show(ui, |ui| {
+            if t.shell.help {
+                use_example = shell_help(ui, &collection_ref(&coll), writable);
+                ui.add_space(6.0);
+            }
+            if !t.shell.logs.is_empty() {
+                egui::Frame::new().fill(PANEL).corner_radius(8).inner_margin(10).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(RichText::new("LOG").size(11.0).color(MUTED));
+                    for (level, text) in &t.shell.logs {
+                        let c = match level.as_str() {
+                            "error" => ALERT,
+                            "warn" => WARNING,
+                            "info" => PRIMARY,
+                            _ => TEXT,
+                        };
+                        ui.label(RichText::new(text).monospace().size(12.5).color(c));
+                    }
+                });
+                ui.add_space(6.0);
+            }
+            if let Some(e) = &t.shell.error {
+                egui::Frame::new().fill(Color32::from_rgba_unmultiplied(247, 110, 133, 20)).corner_radius(8).inner_margin(10).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(RichText::new(e).monospace().color(ALERT));
+                });
+            }
+        });
+        let mut export = false;
+        let mut page_to = None;
+        if let Some(v) = &t.shell.value {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("RESULT").size(11.0).color(MUTED));
+                let what = match (t.shell.docs.len(), t.shell.count) {
+                    (0, Some(n)) => format!("{n} items"),
+                    (0, None) => db::type_name(v).to_string(),
+                    (n, _) => format!("{} documents", group(&n.to_string())),
+                };
+                ui.label(RichText::new(what).color(BRIGHT));
+                let pages = t.shell.docs.len().div_ceil(PAGE_SIZE as usize);
+                if has_table && pages > 1 {
+                    ui.separator();
+                    if ui.add_enabled(t.shell.page > 0, egui::Button::new("‹")).clicked() {
+                        page_to = Some(t.shell.page - 1);
+                    }
+                    ui.label(format!("page {} of {pages}", t.shell.page + 1));
+                    if ui.add_enabled(t.shell.page + 1 < pages, egui::Button::new("›")).clicked() {
+                        page_to = Some(t.shell.page + 1);
+                    }
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    export = ui.button("Export…").clicked();
+                    if ui.button("Copy").on_hover_text("Copy the whole result as JSON").clicked() {
+                        ui.ctx().copy_text(db::to_edit_value(v));
+                    }
+                    if !t.shell.docs.is_empty() {
+                        ui.selectable_value(&mut t.shell.raw, true, "JSON");
+                        ui.selectable_value(&mut t.shell.raw, false, "Table");
+                    }
+                });
+            });
+            ui.add_space(4.0);
+            if !has_table {
+                // Very large results are cut for display; Export writes everything.
+                const RAW_MAX: usize = 300_000;
+                let text = t.shell.raw_text.get_or_insert_with(|| {
+                    let mut s = db::to_edit_value(v);
+                    if s.len() > RAW_MAX {
+                        let cut = (0..=RAW_MAX).rev().find(|i| s.is_char_boundary(*i)).unwrap_or(0);
+                        s.truncate(cut);
+                        s.push_str("\n… cut for display. Use Export to save the whole result.");
+                    }
+                    s
+                });
+                egui::Frame::new().fill(PANEL).corner_radius(8).inner_margin(10).show(ui, |ui| {
+                    egui::ScrollArea::vertical().id_salt("shell-raw").auto_shrink(false).show(ui, |ui| {
+                        ui.add(egui::TextEdit::multiline(&mut text.as_str()).code_editor().desired_width(f32::INFINITY).layouter(&mut code_layout));
+                    });
+                });
+            }
+        }
+        if let Some(p) = page_to {
+            t.shell.page = p;
+            t.selected = None;
+        }
+        if export {
+            self.export_shell();
+        }
+        if has_table {
+            // The result table is the same one documents use: open, colours, right-click menu.
+            let t = &mut self.tabs[self.cur];
+            let start = t.shell.page * PAGE_SIZE as usize;
+            let slice = t.shell.docs[start.min(t.shell.docs.len())..(start + PAGE_SIZE as usize).min(t.shell.docs.len())].to_vec();
+            let saved_docs = std::mem::replace(&mut t.agg_docs, slice);
+            let saved_fields = std::mem::replace(&mut t.agg_fields, t.shell.fields.clone());
+            self.results(ui, true);
+            let t = &mut self.tabs[self.cur];
+            t.agg_docs = saved_docs;
+            t.agg_fields = saved_fields;
+        }
+        if let Some(code) = use_example {
+            self.tabs[self.cur].shell.code = code;
+        }
+        self.new_pkg = new_pkg;
+        if packages != self.prefs.shell_packages {
+            self.prefs.shell_packages = packages;
+            self.save_prefs();
+        }
+        if stop {
+            if let Some(c) = self.tabs[self.cur].shell.cancel.take() {
+                let _ = c.send(());
+            }
+        }
+        if run {
+            self.run_shell_script();
+        }
+    }
+
+    fn save_to_library(&mut self, q: SavedQuery) {
+        let key = self.col_key(false);
+        let list = self.prefs.library.entry(key).or_default();
+        let name = q.name.clone();
+        list.retain(|x| !(x.name == q.name && x.pipeline.is_some() == q.pipeline.is_some()));
+        list.push(q);
+        list.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        self.save_prefs();
+        self.ok(format!("Saved \"{name}\" to the library"));
+    }
+
+    fn delete_from_library(&mut self, name: &str, pipeline: bool) {
+        let key = self.col_key(false);
+        if let Some(list) = self.prefs.library.get_mut(&key) {
+            list.retain(|x| !(x.name == name && x.pipeline.is_some() == pipeline));
+        }
+        self.save_prefs();
+    }
+
+    /// Saves the whole Shell result: JSON for anything, CSV or TSV for document lists.
+    fn export_shell(&mut self) {
+        let t = &self.tabs[self.cur];
+        let Some(v) = t.shell.value.clone() else { return };
+        let docs = t.shell.docs.clone();
+        let mut dialog = rfd::FileDialog::new().set_file_name(format!("{}-shell.json", t.sel.coll)).add_filter("JSON", &["json"]);
+        if !docs.is_empty() {
+            dialog = dialog.add_filter("CSV", &["csv"]).add_filter("TSV", &["tsv"]);
+        }
+        let Some(path) = dialog.save_file() else { return };
+        let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("json").to_ascii_lowercase();
+        let body = match ext.as_str() {
+            "csv" if !docs.is_empty() => db::to_table(&docs, ','),
+            "tsv" if !docs.is_empty() => db::to_table(&docs, '\t'),
+            _ => serde_json::to_string_pretty(&v.into_relaxed_extjson()).unwrap_or_default(),
+        };
+        match std::fs::write(&path, body) {
+            Ok(()) => self.ok(format!("Saved the shell result to {}", path.display())),
+            Err(e) => self.err(format!("Could not save: {e}")),
+        }
+    }
+
+    fn export(&mut self) {
+        let Some(target) = self.target() else { return self.err("Not connected.") };
+        let file = rfd::FileDialog::new()
+            .set_file_name(format!("{}.json", target.coll))
+            .add_filter("JSON", &["json"])
+            .add_filter("CSV", &["csv"])
+            .add_filter("TSV", &["tsv"])
+            .save_file();
+        if let Some(path) = file {
+            self.ok(format!("Exporting to {}…", path.display()));
+            let q = self.t().unwrap().query.clone();
+            self.worker.export(target, q, path);
+        }
+    }
+
+    fn aggregate(&mut self, ui: &mut egui::Ui) {
+        let mut run = false;
+        let key = self.col_key(false);
+        let agg_lib: Vec<SavedQuery> = self.prefs.library.get(&key).map(|v| v.iter().filter(|q| q.pipeline.is_some()).cloned().collect()).unwrap_or_default();
+        let mut agg_acts = Vec::new();
+        let mut agg_new = std::mem::take(&mut self.new_lib);
+        let t = self.tm().unwrap();
+        egui::Frame::new().fill(PANEL).corner_radius(8).inner_margin(10).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("PIPELINE  ·  an array of stages, or paste db.coll.aggregate([...])").size(11.0).color(MUTED));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    library_menu(ui, &agg_lib, &mut agg_new, true, &mut agg_acts);
+                });
+            });
+            let id = ui.make_persistent_id("agg-editor");
+            with_autopair(ui, id, &mut t.agg_txt, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(8).layouter(&mut code_layout).show(ui));
+            ui.horizontal(|ui| {
+                run = primary(ui, "Run", PRIMARY).on_hover_text("Cmd+Enter").clicked() || ui.input(|i| i.modifiers.command && i.key_pressed(Key::Enter));
+                if let Some(ms) = t.agg_ms {
+                    ui.label(RichText::new(format!("{} results  {} ms  (first 1000 shown)", t.agg_docs.len(), ms)).color(MUTED));
+                }
+            });
+        });
+        self.new_lib = agg_new;
+        for a in agg_acts {
+            match a {
+                QAct::Load(q) => {
+                    self.tabs[self.cur].agg_txt = q.pipeline.unwrap_or_default();
+                    run = true;
+                }
+                QAct::Save(name) => {
+                    let pipeline = Some(self.tabs[self.cur].agg_txt.clone());
+                    self.save_to_library(SavedQuery { name, pipeline, ..Default::default() });
+                }
+                QAct::Delete(name) => self.delete_from_library(&name, true),
+                _ => {}
+            }
+        }
+        let t = self.tm().unwrap();
+        if run {
+            let text = t.agg_txt.clone();
+            if db::is_shell(&text) {
+                self.run_shell(&text);
+            } else {
+                match db::parse_pipeline(&text) {
+                    Err(e) => self.err(e),
+                    Ok(p) => self.run_pipeline(p),
+                }
+            }
+        }
+        ui.add_space(6.0);
+        self.results(ui, true);
+    }
+
+    fn schema_view(&mut self, ui: &mut egui::Ui) {
+        let mut analyze = false;
+        let mut acts: Vec<(String, u8)> = Vec::new();
+        let t = &mut self.tabs[self.cur];
+        // Analyze once when the view opens; the limit keeps it light on big collections.
+        if t.schema.stats.is_empty() && !t.schema.running && t.schema.ms.is_none() {
+            analyze = true;
+        }
+        egui::Frame::new().fill(PANEL).corner_radius(8).inner_margin(10).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("SCHEMA  ·  fields of the documents matching the current query").size(11.0).color(MUTED));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    analyze |= primary(ui, "Analyze", PRIMARY).clicked();
+                    egui::ComboBox::from_id_salt("schema-limit")
+                        .selected_text(if t.schema.limit == 0 { "all documents".to_string() } else { format!("first {}", group(&t.schema.limit.to_string())) })
+                        .show_ui(ui, |ui| {
+                            for n in [100, 1000, 10_000, 100_000, 0] {
+                                ui.selectable_value(&mut t.schema.limit, n, if n == 0 { "all documents".to_string() } else { format!("first {}", group(&n.to_string())) });
+                            }
+                        });
+                    if t.schema.running {
+                        ui.spinner();
+                    }
+                });
+            });
+            let filter = if t.query.filter.is_empty() { "{} (all documents)".to_string() } else { db::shell_text(&Bson::Document(t.query.filter.clone())) };
+            ui.label(RichText::new(format!("Query: {filter}")).monospace().size(12.0).color(FAINT));
+        });
+        ui.add_space(6.0);
+        if let Some(ms) = t.schema.ms {
+            ui.label(RichText::new(format!("{} fields in {} documents  ·  {ms} ms", t.schema.stats.len(), group(&t.schema.docs.to_string()))).color(MUTED));
+        }
+        let n = t.schema.docs.max(1) as f32;
+        egui::ScrollArea::vertical().id_salt("schema").auto_shrink(false).show(ui, |ui| {
+            egui::Grid::new("schema-grid").num_columns(4).striped(true).spacing([18.0, 6.0]).min_col_width(60.0).show(ui, |ui| {
+                for h in ["FIELD", "PRESENT IN", "TYPES", "EXAMPLES"] {
+                    ui.label(RichText::new(h).size(11.0).color(MUTED));
+                }
+                ui.end_row();
+                for f in &t.schema.stats {
+                    let name = f.path.rsplit('.').next().unwrap_or(&f.path);
+                    let r = ui.horizontal(|ui| {
+                        ui.add_space(f.depth as f32 * 16.0);
+                        ui.label(RichText::new(name).monospace().color(BRIGHT)).on_hover_text(&f.path)
+                    });
+                    r.response.context_menu(|ui| {
+                        ui.label(RichText::new(format!("Field: {}", f.path)).size(11.5).color(MUTED));
+                        if ui.button("Add as column").clicked() {
+                            acts.push((f.path.clone(), 0));
+                        }
+                        if ui.button("Filter: has this field").clicked() {
+                            acts.push((f.path.clone(), 1));
+                        }
+                        if ui.button("Filter: missing this field").clicked() {
+                            acts.push((f.path.clone(), 2));
+                        }
+                    });
+                    let share = f.docs as f32 / n;
+                    ui.horizontal(|ui| {
+                        let (rect, _) = ui.allocate_exact_size(egui::vec2(90.0, 8.0), Sense::hover());
+                        ui.painter().rect_filled(rect, 4, HOVER);
+                        let mut fill = rect;
+                        fill.set_width(rect.width() * share);
+                        ui.painter().rect_filled(fill, 4, if share >= 0.999 { SUCCESS } else { PRIMARY });
+                        ui.label(RichText::new(format!("{:.0}%", share * 100.0)).size(12.0).color(TEXT));
+                    });
+                    ui.horizontal(|ui| {
+                        let total: usize = f.types.iter().map(|t| t.1).sum::<usize>().max(1);
+                        for (tn, c) in &f.types {
+                            let col = color_of(&match *tn {
+                                "string" => Bson::String(String::new()),
+                                "int" | "long" | "double" | "decimal" => Bson::Int32(0),
+                                "bool" => Bson::Boolean(true),
+                                "date" | "timestamp" => Bson::DateTime(mongodb::bson::DateTime::from_millis(0)),
+                                "null" => Bson::Null,
+                                "objectId" => Bson::ObjectId(ObjectId::new()),
+                                _ => Bson::Document(Document::new()),
+                            });
+                            let pct = *c as f32 * 100.0 / total as f32;
+                            let label = if f.types.len() > 1 { format!("{tn} {pct:.0}%") } else { tn.to_string() };
+                            ui.label(RichText::new(label).monospace().size(12.0).color(col));
+                        }
+                    });
+                    ui.label(RichText::new(f.examples.join("   ")).monospace().size(12.0).color(FAINT));
+                    ui.end_row();
+                }
+            });
+        });
+        for (path, what) in acts {
+            match what {
+                0 => {
+                    let key = self.col_key(false);
+                    let fields = self.t().map(|t| t.fields.clone()).unwrap_or_default();
+                    self.apply_col_acts(&key, &fields, vec![ColAct::Show(path)]);
+                    self.ok("Column added; open Documents to see it");
+                }
+                _ => {
+                    let t = &mut self.tabs[self.cur];
+                    t.filter_txt = db::shell_text(&Bson::Document(doc! { path: { "$exists": what == 1 } }));
+                    t.view = View::Documents;
+                    self.run_query();
+                }
+            }
+        }
+        if analyze {
+            if let Some(target) = self.target() {
+                self.req += 1;
+                let req = self.req;
+                let t = &mut self.tabs[self.cur];
+                t.schema.req = req;
+                t.schema.running = true;
+                self.worker.schema(req, target, t.query.filter.clone(), t.schema.limit);
+            } else if self.demo {
+                let t = &mut self.tabs[self.cur];
+                t.schema.stats = db::analyze_schema(&t.docs);
+                (t.schema.docs, t.schema.ms) = (t.docs.len(), Some(3));
+            }
+        }
+    }
+
+    /// Compares this tab's collection with another one, by `_id`, and copies differences over.
+    fn compare_view(&mut self, ui: &mut egui::Ui) {
+        let i = self.cur;
+        let src = self.tabs[i].sel.clone();
+        if self.tabs[i].compare.conn == 0 {
+            let c = &mut self.tabs[i].compare;
+            (c.conn, c.db) = (src.conn, src.db.clone());
+        }
+        let conns: Vec<(u64, String)> = self.conns.iter().filter(|c| c.client.is_some() || self.demo).map(|c| (c.meta.id, c.meta.name.clone())).collect();
+        let dbs = self.conn(self.tabs[i].compare.conn).map(|c| c.dbs.clone()).unwrap_or_default();
+        let mut load_colls = None;
+        let mut run = false;
+        let mut sync = false;
+        ui.label(RichText::new(format!("{}.{} is the source. Documents are matched by _id; field order is ignored.", src.db, src.coll)).color(MUTED));
+        ui.add_space(4.0);
+        let c = &mut self.tabs[i].compare;
+        ui.horizontal(|ui| {
+            ui.label("Target");
+            let name = conns.iter().find(|x| x.0 == c.conn).map(|x| x.1.clone()).unwrap_or_default();
+            egui::ComboBox::from_id_salt("cmp-conn").selected_text(name).show_ui(ui, |ui| {
+                for (id, n) in &conns {
+                    if ui.selectable_label(c.conn == *id, n).clicked() && c.conn != *id {
+                        (c.conn, c.db, c.coll) = (*id, String::new(), String::new());
+                    }
+                }
+            });
+            egui::ComboBox::from_id_salt("cmp-db").selected_text(if c.db.is_empty() { "database" } else { &c.db }).show_ui(ui, |ui| {
+                for (d, colls) in &dbs {
+                    if ui.selectable_label(c.db == *d, d).clicked() {
+                        c.db = d.clone();
+                        c.coll.clear();
+                        if colls.is_none() {
+                            load_colls = Some(d.clone());
+                        }
+                    }
+                }
+            });
+            let colls = dbs.iter().find(|d| d.0 == c.db).and_then(|d| d.1.clone()).unwrap_or_default();
+            egui::ComboBox::from_id_salt("cmp-coll").selected_text(if c.coll.is_empty() { "collection" } else { &c.coll }).show_ui(ui, |ui| {
+                for n in &colls {
+                    ui.selectable_value(&mut c.coll, n.clone(), n);
+                }
+            });
+            let same = c.conn == src.conn && c.db == src.db && c.coll == src.coll;
+            let ok = !c.coll.is_empty() && !same && !c.running;
+            run = ui.add_enabled(ok, egui::Button::new(RichText::new("Compare").strong().color(BG)).fill(PRIMARY)).on_disabled_hover_text(if same { "Pick a different collection" } else { "Pick a target collection" }).clicked();
+            if c.running {
+                ui.spinner();
+            }
+        });
+        if let Some(r) = &c.result {
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                for (label, n, color) in [("Identical", r.same, MUTED), ("Only in source", r.only_src.len(), SUCCESS), ("Only in target", r.only_dst.len(), WARNING), ("Different", r.changed.len(), C_LINK)] {
+                    egui::Frame::new().fill(RAISED).corner_radius(6).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
+                        ui.label(RichText::new(group(&n.to_string())).strong().size(16.0).color(color));
+                        ui.label(RichText::new(label).size(11.5).color(MUTED));
+                    });
+                }
+            });
+            ui.add_space(6.0);
+            egui::ScrollArea::vertical().max_height((ui.available_height() - 110.0).max(120.0)).auto_shrink([false, true]).show(ui, |ui| {
+                const SHOWN: usize = 200;
+                let more = |ui: &mut egui::Ui, n: usize| {
+                    if n > SHOWN {
+                        ui.label(RichText::new(format!("and {} more", group(&(n - SHOWN).to_string()))).color(FAINT));
+                    }
+                };
+                egui::CollapsingHeader::new(format!("Different ({})", r.changed.len())).id_salt("cmp-changed").default_open(true).show(ui, |ui| {
+                    for (a, b) in r.changed.iter().take(SHOWN) {
+                        let d = db::diff(b, a);
+                        egui::CollapsingHeader::new(RichText::new(format!("{}   {} field{} differ{}", db::short(a.get("_id").unwrap_or(&Bson::Null)), d.len(), if d.len() == 1 { "" } else { "s" }, if d.len() == 1 { "s" } else { "" })).monospace()).id_salt(("cmp-d", db::compact(a.get("_id").unwrap_or(&Bson::Null)))).show(ui, |ui| {
+                            egui::Grid::new(("cmp-g", db::compact(a.get("_id").unwrap_or(&Bson::Null)))).striped(true).show(ui, |ui| {
+                                ui.label(RichText::new("Field").color(FAINT));
+                                ui.label(RichText::new("Target now").color(FAINT));
+                                ui.label(RichText::new("Source").color(FAINT));
+                                ui.end_row();
+                                for (path, old, new) in d {
+                                    let t = |v: &Option<Bson>| v.as_ref().map_or("missing".to_string(), cell_text);
+                                    ui.label(RichText::new(path).monospace().color(KEY));
+                                    ui.label(RichText::new(t(&old)).monospace().color(ALERT));
+                                    ui.label(RichText::new(t(&new)).monospace().color(SUCCESS));
+                                    ui.end_row();
+                                }
+                            });
+                        });
+                    }
+                    more(ui, r.changed.len());
+                });
+                for (title, list) in [("Only in source", &r.only_src), ("Only in target", &r.only_dst)] {
+                    egui::CollapsingHeader::new(format!("{title} ({})", list.len())).id_salt(title).show(ui, |ui| {
+                        for d in list.iter().take(SHOWN) {
+                            let mut t = db::compact(&Bson::Document(d.clone()));
+                            if t.len() > 160 {
+                                t = format!("{}…", &t[..t.floor_char_boundary(160)]);
+                            }
+                            ui.add(egui::Label::new(RichText::new(t).monospace().size(12.0).color(TEXT)).truncate());
+                        }
+                        more(ui, list.len());
+                    });
+                }
+            });
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut c.insert, format!("Copy the {} only in source", r.only_src.len()));
+                ui.checkbox(&mut c.replace, format!("Overwrite the {} different", r.changed.len()));
+                let col = if c.delete { ALERT } else { TEXT };
+                ui.checkbox(&mut c.delete, RichText::new(format!("Delete the {} only in target", r.only_dst.len())).color(col));
+                let any = (c.insert && !r.only_src.is_empty()) || (c.replace && !r.changed.is_empty()) || (c.delete && !r.only_dst.is_empty());
+                sync = ui.add_enabled(any, egui::Button::new(RichText::new("Sync to target…").strong().color(BG)).fill(WARNING)).clicked();
+            });
+        } else if !c.running {
+            ui.add_space(20.0);
+            ui.label(RichText::new("Pick a target and press Compare. Nothing is written until you sync and type the target's name.").color(FAINT));
+        }
+        let (tc, tdb, tcoll) = (c.conn, c.db.clone(), c.coll.clone());
+        if let Some(d) = load_colls {
+            if let Some(client) = self.conn(tc).and_then(|c| c.client.clone()) {
+                self.worker.collections(tc, client, d);
+            }
+        }
+        if run {
+            let (Some(a), Some(b)) = (self.conn(src.conn).and_then(|c| c.client.clone()), self.conn(tc).and_then(|c| c.client.clone())) else {
+                return self.err(if self.demo { "Offline demo: nothing to compare." } else { "Connect both sides first." });
+            };
+            self.req += 1;
+            let req = self.req;
+            let to = self.timeout();
+            let c = &mut self.tabs[i].compare;
+            (c.req, c.running, c.result) = (req, true, None);
+            self.worker.compare(req, Target { client: a, db: src.db, coll: src.coll, timeout: to }, Target { client: b, db: tdb, coll: tcoll, timeout: to });
+        } else if sync {
+            if !self.conn(tc).is_some_and(|c| c.writable) {
+                return self.modal = Some(Modal::Unlock(tc));
+            }
+            let c = &self.tabs[i].compare;
+            let r = c.result.as_ref().unwrap();
+            let n = |on: bool, k: usize| if on { k } else { 0 };
+            let title = format!(
+                "Write to {tdb}.{tcoll}: copy {}, overwrite {} and delete {} documents? Overwrites skip documents changed since the comparison. This has no Undo.",
+                n(c.insert, r.only_src.len()),
+                n(c.replace, r.changed.len()),
+                n(c.delete, r.only_dst.len())
+            );
+            self.modal = Some(Modal::Typed { title, expect: tcoll, typed: String::new(), action: Danger::Sync { conn: tc } });
+        }
+    }
+
+    fn import_view(&mut self, ui: &mut egui::Ui) {
+        let mut open_file = false;
+        let mut start = false;
+        let writable = self.sel_writable();
+        let t = &mut self.tabs[self.cur];
+        let im = &mut t.import;
+        egui::Frame::new().fill(PANEL).corner_radius(8).inner_margin(10).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("IMPORT").size(11.0).color(MUTED));
+                segmented(ui, &mut im.kind, &[(db::ImportKind::Json, "JSON"), (db::ImportKind::JsonLines, "JSON Lines"), (db::ImportKind::Csv, "CSV")]);
+                if im.kind == db::ImportKind::Csv {
+                    ui.add_space(8.0);
+                    ui.checkbox(&mut im.header, "First row is the header");
+                    ui.checkbox(&mut im.camel, "camelCase names");
+                    egui::ComboBox::from_id_salt("csv-sep")
+                        .selected_text(match im.separator {
+                            None => "separator: auto",
+                            Some('\t') => "separator: tab",
+                            Some(',') => "separator: ,",
+                            Some(';') => "separator: ;",
+                            _ => "separator: |",
+                        })
+                        .show_ui(ui, |ui| {
+                            for (v, l) in [(None, "auto"), (Some(','), ","), (Some(';'), ";"), (Some('\t'), "tab"), (Some('|'), "|")] {
+                                ui.selectable_value(&mut im.separator, v, l);
+                            }
+                        });
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    open_file = ui.button("Open file…").clicked();
+                    if let Some(f) = &im.file {
+                        ui.label(RichText::new(f).size(12.0).color(MUTED));
+                    }
+                });
+            });
+            let id = ui.make_persistent_id("import-text");
+            // Very large files are not shown in full; the preview below shows what will be imported.
+            const IMPORT_SHOW_MAX: usize = 200_000;
+            if im.text.len() <= IMPORT_SHOW_MAX {
+                egui::ScrollArea::vertical().id_salt("import-src").max_height(180.0).show(ui, |ui| {
+                    with_autopair(ui, id, &mut im.text, |ui, text| {
+                        egui::TextEdit::multiline(text).id(id).code_editor().hint_text("Paste JSON, JSON Lines or CSV here, or open a file").desired_width(f32::INFINITY).desired_rows(6).layouter(&mut code_layout).show(ui)
+                    });
+                });
+            } else {
+                ui.label(RichText::new(format!("{} loaded from the file (too large to show).", human_bytes(im.text.len()))).color(MUTED));
+            }
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut im.upsert, false, "Insert as new documents");
+                ui.radio_value(&mut im.upsert, true, "Upsert by");
+                ui.add_enabled(im.upsert, egui::TextEdit::singleline(&mut im.upsert_by).desired_width(110.0).font(FontId::monospace(12.5)));
+                ui.label(RichText::new("(update the match, add if none)").size(11.5).color(FAINT));
+            });
+        });
+        // Parse again only when the input or options changed.
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (&im.text, im.kind as u8, im.separator, im.header, im.camel).hash(&mut h);
+            h.finish()
+        };
+        if key != im.parsed_key {
+            im.parsed_key = key;
+            im.parsed = (!im.text.trim().is_empty()).then(|| db::parse_import(&im.text, im.kind, &db::CsvOptions { separator: im.separator, header: im.header, camel_case: im.camel }));
+            im.fields = match &im.parsed {
+                Some(Ok(d)) => auto_fields(&d[..d.len().min(500)]),
+                _ => Vec::new(),
+            };
+            t.selected = None;
+        }
+        ui.add_space(6.0);
+        let mut preview = None;
+        match &im.parsed {
+            None => {
+                ui.label(RichText::new("Nothing to import yet.").color(MUTED));
+            }
+            Some(Err(e)) => {
+                ui.label(RichText::new(e).monospace().color(ALERT));
+            }
+            Some(Ok(docs)) => {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("{} documents ready", group(&docs.len().to_string()))).color(BRIGHT));
+                    ui.label(RichText::new(format!("·  {} fields  ·  preview of the first {}", im.fields.len(), docs.len().min(PAGE_SIZE as usize))).color(MUTED));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let label = format!("{} {} documents", if im.upsert { "Upsert" } else { "Import" }, group(&docs.len().to_string()));
+                        start = ui.add_enabled(!docs.is_empty(), egui::Button::new(RichText::new(label).strong().color(BG)).fill(if writable { PRIMARY } else { FAINT })).clicked();
+                        if !writable {
+                            ui.label(RichText::new("needs writes unlocked").size(11.5).color(FAINT));
+                        }
+                    });
+                });
+                preview = Some((docs[..docs.len().min(PAGE_SIZE as usize)].to_vec(), im.fields.clone()));
+            }
+        }
+        if open_file {
+            if let Some(path) = rfd::FileDialog::new().add_filter("Data", &["json", "jsonl", "ndjson", "csv", "tsv", "txt"]).pick_file() {
+                match std::fs::read_to_string(&path) {
+                    Ok(text) => {
+                        let im = &mut self.tabs[self.cur].import;
+                        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+                        im.kind = match ext.as_str() {
+                            "csv" | "tsv" => db::ImportKind::Csv,
+                            "jsonl" | "ndjson" => db::ImportKind::JsonLines,
+                            _ if text.trim_start().starts_with('{') && text.lines().filter(|l| !l.trim().is_empty()).count() > 1 && db::parse_doc(text.lines().next().unwrap_or_default()).is_ok() => db::ImportKind::JsonLines,
+                            _ => db::ImportKind::Json,
+                        };
+                        if ext == "tsv" {
+                            im.separator = Some('\t');
+                        }
+                        im.file = path.file_name().map(|f| f.to_string_lossy().to_string());
+                        im.text = text;
+                    }
+                    Err(e) => self.err(format!("Could not read the file: {e}")),
+                }
+            }
+        }
+        if start {
+            if !writable {
+                self.ask_unlock();
+            } else {
+                let im = &self.tabs[self.cur].import;
+                let n = match &im.parsed {
+                    Some(Ok(d)) => d.len(),
+                    _ => 0,
+                };
+                if im.upsert {
+                    let key = im.upsert_by.trim().to_string();
+                    let coll = self.tabs[self.cur].sel.coll.clone();
+                    self.modal = Some(Modal::Typed {
+                        title: format!("Upsert {n} documents into {coll} by {key}? Matching documents are updated with the imported fields."),
+                        expect: coll,
+                        typed: String::new(),
+                        action: Danger::Upsert { key },
+                    });
+                } else {
+                    self.modal = Some(Modal::ImportInsert(n));
+                }
+            }
+        }
+        if let Some((docs, fields)) = preview {
+            // The preview uses the same table as documents.
+            let t = &mut self.tabs[self.cur];
+            let saved_docs = std::mem::replace(&mut t.agg_docs, docs);
+            let saved_fields = std::mem::replace(&mut t.agg_fields, fields);
+            self.results(ui, true);
+            let t = &mut self.tabs[self.cur];
+            t.agg_docs = saved_docs;
+            t.agg_fields = saved_fields;
+        }
+    }
+
+    fn indexes_view(&mut self, ui: &mut egui::Ui) {
+        egui::Frame::new().fill(PANEL).corner_radius(8).inner_margin(10).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("NEW INDEX").size(11.0).color(MUTED));
+                ui.add(egui::TextEdit::singleline(&mut self.idx_keys).font(FontId::monospace(13.0)).hint_text("{ email: 1 }").desired_width(280.0));
+                ui.checkbox(&mut self.idx_unique, "unique");
+                if ui.button("Create").clicked() {
+                    match db::parse_doc(&self.idx_keys) {
+                        Ok(k) if k.is_empty() => self.err("Give at least one key, like { email: 1 }"),
+                        Ok(k) => {
+                            if let Some((_, target)) = self.writable_target() {
+                                self.worker.create_index(target, k, self.idx_unique);
+                            }
+                        }
+                        Err(e) => self.err(e),
+                    }
+                }
+            });
+        });
+        ui.add_space(8.0);
+        let mut drop = None;
+        egui::Grid::new("idx").striped(true).num_columns(4).spacing([24.0, 8.0]).show(ui, |ui| {
+            for h in ["NAME", "KEYS", "OPTIONS", ""] {
+                ui.label(RichText::new(h).size(11.0).color(MUTED));
+            }
+            ui.end_row();
+            for ix in &self.t().unwrap().indexes {
+                let name = ix.get_str("name").unwrap_or_default().to_string();
+                ui.label(RichText::new(&name).monospace().color(BRIGHT));
+                ui.label(RichText::new(ix.get("keys").map(db::compact).unwrap_or_default()).monospace().color(C_STRING));
+                let mut opts = ix.clone();
+                opts.remove("name");
+                opts.remove("keys");
+                ui.label(RichText::new(if opts.is_empty() { String::new() } else { db::compact(&Bson::Document(opts)) }).monospace().color(MUTED));
+                if name != "_id_" && ui.small_button(RichText::new("Drop").color(ALERT)).clicked() {
+                    drop = Some(name);
+                }
+                ui.end_row();
+            }
+        });
+        if let Some(name) = drop {
+            self.modal = Some(Modal::Typed {
+                title: format!("Drop the index {name}? Queries that rely on it may become slow."),
+                expect: name.clone(),
+                typed: String::new(),
+                action: Danger::DropIndex(name),
+            });
+        }
+    }
+
+    fn modals(&mut self, ctx: &egui::Context) {
+        if let Some(mut je) = self.json_edit.take() {
+            let mut apply = false;
+            let mut close = false;
+            let screen = ctx.content_rect();
+            let r = egui::Modal::new(egui::Id::unique(("quarry-layer", "jsonedit"))).show(ctx, |ui| {
+                ui.set_width((screen.width() * 0.72).clamp(480.0, 1200.0));
+                ui.horizontal(|ui| {
+                    let title = if je.path.is_empty() { "Edit document".to_string() } else { format!("Edit {}", je.path.join(".")) };
+                    ui.label(RichText::new(title).strong().size(16.0).color(BRIGHT));
+                    if !je.path.is_empty() {
+                        ui.add_space(8.0);
+                        Self::type_combo(ui, "jsonkind", &mut je.kind);
+                    }
+                });
+                ui.label(RichText::new("JSON, JSON5 or shell syntax. Applying keeps it as an unsaved edit until you press Save.").size(12.0).color(MUTED));
+                ui.add_space(4.0);
+                let rows = je.text.lines().count().clamp(12, 40);
+                egui::ScrollArea::vertical().max_height(screen.height() * 0.62).show(ui, |ui| {
+                    let id = egui::Id::unique("json-editor-text");
+                    let r = with_autopair(ui, id, &mut je.text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(rows).layouter(&mut code_layout).show(ui)).response;
+                    if je.focus {
+                        r.request_focus();
+                        je.focus = false;
+                    }
+                });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    apply = primary(ui, "Apply", PRIMARY).on_hover_text("Cmd+Enter").clicked() || ui.input(|i| i.modifiers.command && (i.key_pressed(Key::Enter) || i.key_pressed(Key::S)));
+                    close = ui.button("Cancel").on_hover_text("Esc").clicked();
+                });
+            });
+            if apply {
+                let new = if je.path.is_empty() {
+                    db::parse_doc(&je.text).and_then(|mut new| {
+                        match (je.base.get("_id"), new.get("_id")) {
+                            (Some(a), Some(b)) if a != b => return Err("The _id of a document cannot change. Use Duplicate to make a copy.".to_string()),
+                            (Some(a), None) => {
+                                // Keep _id first, as MongoDB stores it.
+                                let mut d = doc! { "_id": a.clone() };
+                                d.extend(new);
+                                new = d;
+                            }
+                            _ => {}
+                        }
+                        Ok(new)
+                    })
+                } else {
+                    db::make_value(je.kind, &je.text).and_then(|v| db::edit_path(&je.base, &je.path, Some(v)))
+                };
+                match new {
+                    Ok(n) => {
+                        let base = je.base.clone();
+                        self.stage(&base, Ok(n));
+                    }
+                    Err(e) => {
+                        self.err(e);
+                        self.json_edit = Some(je);
+                    }
+                }
+            } else if !(close || r.should_close()) {
+                self.json_edit = Some(je);
+            }
+        }
+        if let Some(text) = &mut self.insert {
+            let mut close = false;
+            let mut submit = false;
+            let r = egui::Modal::new(egui::Id::unique(("quarry-layer", "insert"))).show(ctx, |ui| {
+                ui.set_width(560.0);
+                ui.label(RichText::new("Insert a document").strong().size(16.0).color(BRIGHT));
+                ui.label(RichText::new("JSON, JSON5 or shell syntax: ObjectId(\"…\"), ISODate(\"…\"), NumberLong(…).").color(MUTED));
+                egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                    let id = egui::Id::unique("insert-editor-text");
+                    with_autopair(ui, id, text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(16).layouter(&mut code_layout).show(ui));
+                });
+                ui.horizontal(|ui| {
+                    submit = primary(ui, "Insert", PRIMARY).clicked();
+                    close = ui.button("Cancel").on_hover_text("Esc").clicked();
+                });
+            });
+            if submit {
+                match db::parse_doc(text) {
+                    Ok(d) => {
+                        if let Some((conn, target)) = self.writable_target() {
+                            self.worker.insert(conn, target, d);
+                            self.insert = None;
+                        }
+                    }
+                    Err(e) => self.err(e),
+                }
+            } else if close || r.should_close() {
+                self.insert = None;
+            }
+        }
+
+        let Some(mut m) = self.modal.take() else { return };
+        let mut keep = true;
+        let r = egui::Modal::new(egui::Id::unique(("quarry-layer", "modal"))).show(ctx, |ui| {
+            ui.set_max_width(620.0);
+            match &mut m {
+                Modal::Conn(f) => {
+                    let mut save = false;
+                    let mut test = false;
+                    ui.set_width(560.0);
+                    ui.label(RichText::new(if f.id.is_some() { "Edit connection" } else { "New connection" }).strong().size(16.0).color(BRIGHT));
+                    ui.label(RichText::new("Addresses, passwords and passphrases are stored in the macOS Keychain. The connection opens read-only.").size(12.0).color(MUTED));
+                    egui::ScrollArea::vertical().max_height(ctx.content_rect().height() - 220.0).show(ui, |ui| {
+                        settings_section(ui, "SERVER", |ui| {
+                            egui::Grid::new("cf").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+                                ui.label("Name");
+                                ui.add(egui::TextEdit::singleline(&mut f.name).hint_text("Production cluster").desired_width(400.0));
+                                ui.end_row();
+                                ui.label("URI");
+                                ui.add(egui::TextEdit::singleline(&mut f.uri).password(!f.show).font(FontId::monospace(13.0)).desired_width(400.0));
+                                ui.end_row();
+                                ui.label("");
+                                ui.checkbox(&mut f.show, "Show address");
+                                ui.end_row();
+                            });
+                        });
+                        settings_section(ui, "SSH TUNNEL", |ui| {
+                            ui.checkbox(&mut f.ssh_on, "Connect through an SSH server (jump host)");
+                            if f.ssh_on {
+                                egui::Grid::new("ssh").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+                                    ui.label("Host");
+                                    ui.horizontal(|ui| {
+                                        ui.add(egui::TextEdit::singleline(&mut f.ssh.host).hint_text("bastion.example.com").desired_width(280.0));
+                                        ui.label("Port");
+                                        let mut port = if f.ssh.port == 0 { "22".to_string() } else { f.ssh.port.to_string() };
+                                        if ui.add(egui::TextEdit::singleline(&mut port).desired_width(60.0)).changed() {
+                                            f.ssh.port = port.trim().parse().unwrap_or(22);
+                                        }
+                                    });
+                                    ui.end_row();
+                                    ui.label("User");
+                                    ui.add(egui::TextEdit::singleline(&mut f.ssh.user).desired_width(280.0));
+                                    ui.end_row();
+                                    ui.label("Log in with");
+                                    segmented(ui, &mut f.ssh.auth, &[(crate::ssh::SshAuth::Auto, "Auto"), (crate::ssh::SshAuth::Password, "Password"), (crate::ssh::SshAuth::KeyFile, "Key file"), (crate::ssh::SshAuth::Agent, "SSH agent")]);
+                                    ui.end_row();
+                                    use crate::ssh::SshAuth::*;
+                                    if matches!(f.ssh.auth, Auto | Password) {
+                                        ui.label("Password");
+                                        ui.add(egui::TextEdit::singleline(&mut f.ssh_pwd).password(true).hint_text(if f.ssh.auth == Auto { "optional, tried last" } else { "" }).desired_width(280.0));
+                                        ui.end_row();
+                                    }
+                                    if matches!(f.ssh.auth, Auto | KeyFile) {
+                                        ui.label("Key file");
+                                        ui.horizontal(|ui| {
+                                            ui.add(egui::TextEdit::singleline(&mut f.ssh.key_path).hint_text(if f.ssh.auth == Auto { "optional; ~/.ssh/id_* are tried" } else { "~/.ssh/id_ed25519" }).desired_width(280.0));
+                                            if ui.button("Choose…").clicked() {
+                                                if let Some(p) = rfd::FileDialog::new().set_directory(dirs::home_dir().unwrap_or_default().join(".ssh")).pick_file() {
+                                                    f.ssh.key_path = p.display().to_string();
+                                                }
+                                            }
+                                        });
+                                        ui.end_row();
+                                        ui.label("Passphrase");
+                                        ui.add(egui::TextEdit::singleline(&mut f.ssh_pass).password(true).hint_text("if the key has one").desired_width(280.0));
+                                        ui.end_row();
+                                    }
+                                    ui.label("");
+                                    ui.checkbox(&mut f.ssh.legacy_rsa, "Allow legacy ssh-rsa host keys (old servers)");
+                                    ui.end_row();
+                                    ui.label("Host key");
+                                    ui.horizontal(|ui| match f.ssh.known_host.clone() {
+                                        Some(fp) => {
+                                            ui.label(RichText::new(fp).monospace().size(11.5).color(MUTED));
+                                            if ui.small_button("Forget").on_hover_text("Trust the next key the server shows, e.g. after a reinstall").clicked() {
+                                                f.ssh.known_host = None;
+                                            }
+                                        }
+                                        None => {
+                                            ui.label(RichText::new("remembered on first connect; a different key later is refused").size(11.5).color(FAINT));
+                                        }
+                                    });
+                                    ui.end_row();
+                                });
+                            }
+                        });
+                        settings_section(ui, "SOCKS5 PROXY", |ui| {
+                            ui.add_enabled(!f.ssh_on, egui::Checkbox::new(&mut f.proxy_on, "Connect through a SOCKS5 proxy"));
+                            if f.ssh_on {
+                                ui.label(RichText::new("Not needed with an SSH tunnel: the tunnel already carries the connection.").size(11.5).color(FAINT));
+                            } else if f.proxy_on {
+                                egui::Grid::new("px").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+                                    ui.label("Host");
+                                    ui.horizontal(|ui| {
+                                        ui.add(egui::TextEdit::singleline(&mut f.proxy.host).desired_width(280.0));
+                                        ui.label("Port");
+                                        let mut port = if f.proxy.port == 0 { "1080".to_string() } else { f.proxy.port.to_string() };
+                                        if ui.add(egui::TextEdit::singleline(&mut port).desired_width(60.0)).changed() {
+                                            f.proxy.port = port.trim().parse().unwrap_or(1080);
+                                        }
+                                    });
+                                    ui.end_row();
+                                    ui.label("User");
+                                    ui.add(egui::TextEdit::singleline(&mut f.proxy.user).hint_text("optional").desired_width(280.0));
+                                    ui.end_row();
+                                    ui.label("Password");
+                                    ui.add(egui::TextEdit::singleline(&mut f.proxy_pwd).password(true).desired_width(280.0));
+                                    ui.end_row();
+                                });
+                            }
+                        });
+                    });
+                    match &self.conn_test {
+                        None if f.testing => {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(RichText::new("Testing…").color(MUTED));
+                            });
+                        }
+                        Some(Ok(m)) => {
+                            ui.label(RichText::new(m).color(SUCCESS));
+                        }
+                        Some(Err(e)) => {
+                            ui.add(egui::Label::new(RichText::new(e).color(ALERT)).wrap());
+                        }
+                        None => {}
+                    }
+                    ui.horizontal(|ui| {
+                        let valid = !f.name.trim().is_empty() && (f.uri.starts_with("mongodb://") || f.uri.starts_with("mongodb+srv://")) && (!f.ssh_on || (!f.ssh.host.trim().is_empty() && !f.ssh.user.trim().is_empty())) && (!f.proxy_on || f.ssh_on || !f.proxy.host.trim().is_empty());
+                        save = ui.add_enabled(valid, egui::Button::new(RichText::new("Save and connect").strong().color(BG)).fill(PRIMARY)).clicked();
+                        test = ui.add_enabled(valid, egui::Button::new("Test")).clicked();
+                        if ui.button("Cancel").clicked() {
+                            keep = false;
+                        }
+                    });
+                    if test {
+                        f.testing = true;
+                        self.conn_test = None;
+                        let net = f.net();
+                        self.worker.test(f.uri.trim().to_string(), self.timeout(), net);
+                    }
+                    if save {
+                        let id = f.id.unwrap_or_else(|| self.conns.iter().map(|c| c.meta.id).max().unwrap_or(0) + 1);
+                        match keychain(id).map(|k| k.set_password(f.uri.trim())) {
+                            Some(Ok(())) => {
+                                set_secret(id, "ssh-password", if f.ssh_on { &f.ssh_pwd } else { "" });
+                                set_secret(id, "ssh-passphrase", if f.ssh_on { &f.ssh_pass } else { "" });
+                                set_secret(id, "proxy-password", if f.proxy_on && !f.ssh_on { &f.proxy_pwd } else { "" });
+                                let meta = ConnMeta {
+                                    id,
+                                    name: f.name.trim().into(),
+                                    ssh: f.ssh_on.then(|| crate::ssh::SshConf { host: f.ssh.host.trim().into(), user: f.ssh.user.trim().into(), ..f.ssh.clone() }),
+                                    proxy: (f.proxy_on && !f.ssh_on).then(|| db::Proxy { host: f.proxy.host.trim().into(), password: None, ..f.proxy.clone() }),
+                                };
+                                match self.conns.iter_mut().find(|c| c.meta.id == id) {
+                                    Some(c) => {
+                                        c.meta = meta;
+                                        c.masked_uri = db::mask_uri(f.uri.trim());
+                                        c.writable = false;
+                                        c.dbs.clear();
+                                    }
+                                    None => self.conns.push(Conn { meta, client: None, status: Status::Idle, writable: false, dbs: Vec::new(), masked_uri: db::mask_uri(f.uri.trim()), tunnel: None }),
+                                }
+                                self.active = Some(id);
+                                self.save_conns();
+                                self.connect(id);
+                                keep = false;
+                            }
+                            other => self.err(format!("Could not save to the Keychain: {other:?}")),
+                        }
+                    }
+                }
+                Modal::Settings => {
+                    ui.set_width(600.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Settings").strong().size(18.0).color(BRIGHT));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("Done").on_hover_text("Esc").clicked() {
+                                keep = false;
+                            }
+                        });
+                    });
+                    ui.label(RichText::new("Changes are saved right away.").size(12.0).color(FAINT));
+                    ui.add_space(8.0);
+                    let before = (self.prefs.open_inline, self.prefs.auto_save, self.prefs.confirm_save, self.prefs.default_cols, self.prefs.timeout_ms, self.prefs.shell_runtime.clone(), self.prefs.mongodump.clone(), self.prefs.mongorestore.clone(), self.prefs.auto_update);
+                    ui.scope(|ui| {
+                        settings_section(ui, "DOCUMENTS", |ui| {
+                            setting_row(ui, "Open documents", "Where a clicked row shows its document.", |ui| {
+                                segmented(ui, &mut self.prefs.open_inline, &[(false, "Side panel"), (true, "Under the row")]);
+                            });
+                            ui.separator();
+                            setting_row(ui, "Columns shown", "How many fields the table shows before you pick your own.", |ui| {
+                                stepper(ui, &mut self.prefs.default_cols, 3, 30);
+                            });
+                        });
+                        settings_section(ui, "EDITING", |ui| {
+                            setting_row(ui, "Auto-save edits", "Write each edit right away and offer Undo for 8 seconds.", |ui| {
+                                toggle(ui, &mut self.prefs.auto_save);
+                            });
+                            ui.separator();
+                            let auto = self.prefs.auto_save;
+                            setting_row(ui, "Show changes before saving", "List every changed field before writing unsaved edits.", |ui| {
+                                ui.add_enabled_ui(!auto, |ui| toggle(ui, &mut self.prefs.confirm_save));
+                            });
+                            ui.label(RichText::new("Writes always need the connection unlocked, and a save never overwrites someone else's change.").size(11.5).color(FAINT));
+                        });
+                        settings_section(ui, "QUERIES", |ui| {
+                            setting_row(ui, "Query timeout", "How long a query may run before it is stopped.", |ui| {
+                                egui::ComboBox::from_id_salt("timeout").width(90.0).selected_text(format!("{} s", self.prefs.timeout_ms / 1000)).show_ui(ui, |ui| {
+                                    // Same presets as the original's preferences.
+                                    for s in [5, 10, 30, 60, 300, 3600] {
+                                        ui.selectable_value(&mut self.prefs.timeout_ms, s * 1000, format!("{s} s"));
+                                    }
+                                });
+                            });
+                        });
+                        settings_section(ui, "SHELL", |ui| {
+                            let detected = find_bun("").map(|p| p.display().to_string());
+                            let desc = match &detected {
+                                Some(p) => format!("Found automatically at {p}. Set a path only to use another Bun."),
+                                None => "Bun was not found. Install it from bun.sh or enter its path.".to_string(),
+                            };
+                            setting_row(ui, "Bun runtime", &desc, |ui| {
+                                ui.add(egui::TextEdit::singleline(&mut self.prefs.shell_runtime).hint_text("automatic").desired_width(190.0));
+                            });
+                        });
+                        settings_section(ui, "UPDATES", |ui| {
+                            let desc = if self.update_note.is_empty() { format!("Version {}. New releases of {} are installed in the background, then Quarry restarts when idle with nothing unsaved.", env!("CARGO_PKG_VERSION"), crate::update::REPO) } else { format!("Version {}. {}", env!("CARGO_PKG_VERSION"), self.update_note) };
+                            setting_row(ui, "Update automatically", &desc, |ui| {
+                                toggle(ui, &mut self.prefs.auto_update);
+                            });
+                            if !self.demo && !cfg!(debug_assertions) && self.updated.is_none() && ui.button("Check now").clicked() {
+                                self.check_update();
+                            }
+                        });
+                        settings_section(ui, "DATABASE TOOLS", |ui| {
+                            for (i, (name, path)) in [("mongodump", &mut self.prefs.mongodump), ("mongorestore", &mut self.prefs.mongorestore)].into_iter().enumerate() {
+                                if i > 0 {
+                                    ui.separator();
+                                }
+                                let desc = match find_exe(name, "") {
+                                    Some(p) => format!("Found automatically at {}.", p.display()),
+                                    None => "Not found. Install the MongoDB Database Tools or enter its path.".to_string(),
+                                };
+                                setting_row(ui, name, &desc, |ui| {
+                                    ui.add(egui::TextEdit::singleline(path).hint_text("automatic").desired_width(190.0));
+                                });
+                            }
+                        });
+                    });
+                    if before != (self.prefs.open_inline, self.prefs.auto_save, self.prefs.confirm_save, self.prefs.default_cols, self.prefs.timeout_ms, self.prefs.shell_runtime.clone(), self.prefs.mongodump.clone(), self.prefs.mongorestore.clone(), self.prefs.auto_update) {
+                        self.save_prefs();
+                    }
+                }
+                Modal::Unlock(id) => {
+                    let name = self.conn(*id).map(|c| c.meta.name.clone()).unwrap_or_default();
+                    ui.label(RichText::new(format!("Allow writes on \"{name}\"?")).strong().size(16.0).color(BRIGHT));
+                    ui.label(RichText::new("Edits, inserts, deletes and index changes become possible until you lock it again or quit. Each one still asks first.").color(MUTED));
+                    ui.horizontal(|ui| {
+                        if primary(ui, "Allow writes", ALERT).clicked() {
+                            if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == *id) {
+                                c.writable = true;
+                            }
+                            self.ok(format!("Writes allowed on {name} for this session"));
+                            keep = false;
+                        }
+                        if ui.button("Stay read-only").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Modal::Save { tag, changes } => {
+                    ui.label(RichText::new(format!("Save {} change(s)?", changes.len())).strong().size(16.0).color(BRIGHT));
+                    ui.label(RichText::new("Saving is refused if someone else changed this document since you opened it.").color(MUTED));
+                    egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                        egui::Grid::new("chg").num_columns(3).striped(true).spacing([14.0, 6.0]).show(ui, |ui| {
+                            for (path, a, b) in changes.iter() {
+                                ui.label(RichText::new(path).monospace().color(BRIGHT));
+                                let show = |v: &Option<Bson>| v.as_ref().map(|v| format!("{} ({})", leaf_text(v), db::type_name(v))).unwrap_or("(none)".into());
+                                ui.label(RichText::new(show(a)).monospace().color(ALERT).strikethrough());
+                                ui.label(RichText::new(show(b)).monospace().color(SUCCESS));
+                                ui.end_row();
+                            }
+                        });
+                    });
+                    ui.horizontal(|ui| {
+                        if primary(ui, "Save", PRIMARY).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
+                            self.write_draft(tag);
+                            keep = false;
+                        }
+                        if ui.button("Keep editing").on_hover_text("Esc").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Modal::Delete(d) => {
+                    let id = d.get("_id").map(db::short).unwrap_or_default();
+                    ui.label(RichText::new("Delete this document?").strong().size(16.0).color(BRIGHT));
+                    ui.label(RichText::new(format!("_id {id}. You can undo this for 24 hours.")).monospace().color(MUTED));
+                    ui.horizontal(|ui| {
+                        if primary(ui, "Delete", ALERT).clicked() {
+                            if let Some((conn, target)) = self.writable_target() {
+                                self.worker.delete(conn, target, d.clone(), true);
+                                if let Some(t) = self.tm() {
+                                    t.selected = None;
+                                }
+                            }
+                            keep = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Modal::Typed { title, expect, typed, action } => {
+                    ui.label(RichText::new(title.as_str()).strong().color(BRIGHT));
+                    ui.label(RichText::new(format!("Type {expect} to confirm (case sensitive).")).color(MUTED));
+                    ui.add(egui::TextEdit::singleline(typed).font(FontId::monospace(13.0)).desired_width(320.0));
+                    ui.horizontal(|ui| {
+                        let ok = typed == expect;
+                        if ui.add_enabled(ok, egui::Button::new(RichText::new("Confirm").strong().color(BG)).fill(ALERT)).clicked() {
+                            keep = false;
+                            let action = std::mem::replace(action, Danger::DropCollection);
+                            self.danger(action);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Modal::NewCollection { conn, db, name, view, source, pipeline } => {
+                    ui.set_width(520.0);
+                    ui.label(RichText::new(if *view { format!("New view in {db}") } else { format!("New collection in {db}") }).strong().size(16.0).color(BRIGHT));
+                    egui::Grid::new("newcoll").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+                        ui.label("Name");
+                        ui.add(egui::TextEdit::singleline(name).desired_width(380.0));
+                        ui.end_row();
+                        if *view {
+                            ui.label("Based on");
+                            let colls: Vec<String> = self.conn(*conn).and_then(|c| c.dbs.iter().find(|d| d.0 == *db)).and_then(|d| d.1.clone()).unwrap_or_default();
+                            egui::ComboBox::from_id_salt("view-src").width(380.0).selected_text(if source.is_empty() { "choose a collection" } else { source.as_str() }).show_ui(ui, |ui| {
+                                for c in colls {
+                                    ui.selectable_value(source, c.clone(), c);
+                                }
+                            });
+                            ui.end_row();
+                            ui.label("Pipeline");
+                            let id = ui.make_persistent_id("view-pipeline");
+                            with_autopair(ui, id, pipeline, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(380.0).desired_rows(6).layouter(&mut code_layout).show(ui));
+                            ui.end_row();
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        let ok = !name.trim().is_empty() && (!*view || !source.is_empty());
+                        if ui.add_enabled(ok, egui::Button::new(RichText::new("Create").strong().color(BG)).fill(PRIMARY)).clicked() {
+                            let cmd = if *view {
+                                db::parse_pipeline(pipeline).map(|p| doc! { "create": name.trim(), "viewOn": source.as_str(), "pipeline": p })
+                            } else {
+                                Ok(doc! { "create": name.trim() })
+                            };
+                            match (cmd, self.conn(*conn).and_then(|c| c.client.clone())) {
+                                (Ok(cmd), Some(client)) => {
+                                    self.worker.db_change(*conn, client, db.clone(), cmd, format!("Created {}", name.trim()));
+                                    keep = false;
+                                }
+                                (Err(e), _) => self.err(e),
+                                (_, None) => self.err("Not connected."),
+                            }
+                        }
+                        if ui.button("Cancel").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Modal::Tool(f) => {
+                    let name = if f.coll.is_empty() { f.db.clone() } else { format!("{}.{}", f.db, f.coll) };
+                    ui.set_width(560.0);
+                    ui.label(RichText::new(if f.restore { format!("Restore into {name}") } else { format!("Dump {name}") }).strong().size(16.0).color(BRIGHT));
+                    let meta = self.conn(f.conn).map(|c| c.meta.clone()).unwrap_or_default();
+                    let tool = if f.restore { "mongorestore" } else { "mongodump" };
+                    let exe = find_exe(tool, if f.restore { &self.prefs.mongorestore } else { &self.prefs.mongodump });
+                    ui.label(RichText::new(match &exe {
+                        Some(p) => format!("Runs {} with this connection's address.", p.display()),
+                        None => format!("{tool} was not found. Install the MongoDB Database Tools (brew install mongodb-database-tools) or set its path in Settings."),
+                    }).size(12.0).color(if exe.is_some() { MUTED } else { WARNING }));
+                    let tunneled = meta.ssh.is_some() || meta.proxy.is_some();
+                    if tunneled {
+                        ui.label(RichText::new("This connection goes through SSH or a proxy, which the MongoDB tools cannot use. Open an SSH port forward and use a direct connection instead.").color(WARNING));
+                    }
+                    ui.add_space(6.0);
+                    egui::Grid::new("toolform").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+                        ui.label("Archive file");
+                        ui.horizontal(|ui| {
+                            ui.add(egui::TextEdit::singleline(&mut f.path).desired_width(360.0));
+                            if ui.button("Choose…").clicked() {
+                                let d = rfd::FileDialog::new();
+                                let picked = if f.restore { d.pick_file() } else { d.set_file_name(format!("{name}.archive.gz")).save_file() };
+                                if let Some(p) = picked {
+                                    f.path = p.display().to_string();
+                                    if f.restore {
+                                        f.gzip = f.path.ends_with(".gz");
+                                    }
+                                }
+                            }
+                        });
+                        ui.end_row();
+                        ui.label("");
+                        ui.checkbox(&mut f.gzip, "Compressed (gzip)");
+                        ui.end_row();
+                        if f.restore {
+                            ui.label("Database in the archive");
+                            ui.add(egui::TextEdit::singleline(&mut f.from_db).desired_width(200.0)).on_hover_text("Restored under the name of this database when it differs");
+                            ui.end_row();
+                            ui.label("Only collection");
+                            ui.add(egui::TextEdit::singleline(&mut f.coll).hint_text("all").desired_width(200.0));
+                            ui.end_row();
+                            ui.label("");
+                            let col = if f.drop { ALERT } else { TEXT };
+                            ui.checkbox(&mut f.drop, RichText::new("Drop each collection before restoring it").color(col));
+                            ui.end_row();
+                        }
+                    });
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        let ok = exe.is_some() && !tunneled && !f.path.trim().is_empty() && (!f.restore || !f.from_db.trim().is_empty());
+                        if ui.add_enabled(ok, egui::Button::new(RichText::new(if f.restore { "Restore…" } else { "Dump" }).strong().color(BG)).fill(if f.restore { WARNING } else { PRIMARY })).clicked() {
+                            match keychain(f.conn).and_then(|k| k.get_password().ok()) {
+                                None => self.err("The connection's address is missing from the Keychain."),
+                                Some(uri) => {
+                                    let coll = Some(f.coll.trim()).filter(|c| !c.is_empty());
+                                    let path = f.path.trim();
+                                    if f.restore {
+                                        let args = db::restore_args(&uri, path, f.from_db.trim(), coll, &f.db, f.drop, f.gzip);
+                                        let what = if f.drop { "Existing collections with the same names are dropped first. " } else { "" };
+                                        self.modal = Some(Modal::Typed { title: format!("Restore {path} into {}? {what}Type the database name.", f.db), expect: f.db.clone(), typed: String::new(), action: Danger::Restore { conn: f.conn, args } });
+                                    } else {
+                                        self.start_tool(false, format!("Dump {name}"), db::dump_args(&uri, &f.db, coll, path, f.gzip));
+                                    }
+                                    keep = false;
+                                }
+                            }
+                        }
+                        if ui.button("Cancel").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Modal::Relations { conn, db } => {
+                    ui.set_max_width(860.0);
+                    ui.set_width(820.0);
+                    let colls: Vec<String> = self.conn(*conn).and_then(|c| c.dbs.iter().find(|d| d.0 == *db)).and_then(|d| d.1.clone()).unwrap_or_default();
+                    ui.label(RichText::new(format!("Data relations in {db}")).strong().size(16.0).color(BRIGHT));
+                    ui.label(RichText::new("A field that holds ids of another collection's documents. Its preview field is shown next to the ids, and \"Go to referenced document\" opens them. Add them by analyzing, or by right-clicking an id and choosing that action.").size(12.0).color(MUTED));
+                    ui.add_space(6.0);
+                    let key = format!("{conn}/{db}");
+                    let before = self.prefs.relations.get(&key).cloned().unwrap_or_default();
+                    let list = self.prefs.relations.entry(key.clone()).or_default();
+                    if list.is_empty() {
+                        ui.label(RichText::new("None yet.").color(FAINT));
+                    }
+                    let mut remove = None;
+                    egui::ScrollArea::vertical().max_height(420.0).auto_shrink([false, true]).show(ui, |ui| {
+                        egui::Grid::new("rels").num_columns(4).striped(true).spacing([12.0, 8.0]).min_col_width(60.0).show(ui, |ui| {
+                            ui.label(RichText::new("FIELD").size(11.0).color(FAINT));
+                            ui.label(RichText::new("POINTS TO COLLECTION").size(11.0).color(FAINT));
+                            ui.label(RichText::new("PREVIEW FIELD").size(11.0).color(FAINT));
+                            ui.end_row();
+                            for (i, r) in list.iter_mut().enumerate() {
+                                let name = format!("{}.{}", r.coll, r.path);
+                                ui.allocate_ui_with_layout(egui::vec2(260.0, 22.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                    ui.set_min_width(260.0);
+                                    ui.add(egui::Label::new(RichText::new(&name).monospace().color(KEY)).truncate()).on_hover_text(&name);
+                                });
+                                egui::ComboBox::from_id_salt(("rel-target", i)).width(250.0).selected_text(&r.target).show_ui(ui, |ui| {
+                                    for c in &colls {
+                                        ui.selectable_value(&mut r.target, c.clone(), c);
+                                    }
+                                });
+                                ui.add_sized([180.0, 22.0], egui::TextEdit::singleline(&mut r.preview).hint_text("_id"));
+                                if ui.small_button(RichText::new("Remove").color(ALERT)).clicked() {
+                                    remove = Some(i);
+                                }
+                                ui.end_row();
+                            }
+                        });
+                    });
+                    if let Some(i) = remove {
+                        list.remove(i);
+                    }
+                    if *list != before {
+                        self.save_prefs();
+                    }
+                    ui.add_space(6.0);
+                    let mut analyze = None;
+                    ui.horizontal(|ui| {
+                        if ui.button("Analyze all collections").on_hover_text("Samples the 10 newest documents of each collection and looks their ids up in the others").clicked() {
+                            analyze = Some(String::new());
+                        }
+                        let cur = self.t().filter(|t| t.sel.conn == *conn && t.sel.db == *db).map(|t| t.sel.coll.clone());
+                        if let Some(c) = cur {
+                            if ui.button(format!("Analyze {c}")).clicked() {
+                                analyze = Some(c);
+                            }
+                        }
+                    });
+                    let mut note: Option<db::Res<String>> = None;
+                    let mut changed = false;
+                    ui.horizontal(|ui| {
+                        let list = self.prefs.relations.entry(key.clone()).or_default();
+                        if ui.add_enabled(!list.is_empty(), egui::Button::new("Export…")).clicked() {
+                            if let Some(path) = rfd::FileDialog::new().set_file_name(format!("{db}-data-relations.json")).save_file() {
+                                match std::fs::write(&path, relations_export(db, list)) {
+                                    Ok(()) => note = Some(Ok(format!("Exported {} data relations", list.len()))),
+                                    Err(e) => note = Some(Err(format!("Failed to export relations: {e}"))),
+                                }
+                            }
+                        }
+                        if ui.button("Import…").on_hover_text("A file exported here or from Mingo; relations already present are skipped").clicked() {
+                            if let Some(path) = rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file() {
+                                match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| relations_import(&t)) {
+                                    Ok(new) => {
+                                        let mut added = 0;
+                                        for r in new {
+                                            if !list.iter().any(|x| x.coll == r.coll && x.path == r.path && x.target == r.target) {
+                                                list.push(r);
+                                                added += 1;
+                                            }
+                                        }
+                                        changed = true;
+                                        note = Some(Ok(format!("Imported {added} data relations")));
+                                    }
+                                    Err(e) => note = Some(Err(format!("Failed to import relations: {e}"))),
+                                }
+                            }
+                        }
+                        let n = self.prefs.relations.get(&key).map_or(0, Vec::len);
+                        ui.add_enabled_ui(n > 0, |ui| {
+                            ui.menu_button(RichText::new("Remove all…").color(ALERT), |ui| {
+                                if ui.button(RichText::new(format!("Remove all {n} relations of {db}")).color(ALERT)).clicked() {
+                                    self.prefs.relations.remove(&key);
+                                    changed = true;
+                                    ui.close();
+                                }
+                            });
+                        });
+                    });
+                    if changed {
+                        self.save_prefs();
+                    }
+                    match note {
+                        Some(Ok(m)) => self.ok(m),
+                        Some(Err(e)) => self.err(e),
+                        None => {}
+                    }
+                    if let Some(c) = analyze {
+                        match self.conn(*conn).and_then(|x| x.client.clone()) {
+                            Some(client) => self.analyze_relations(*conn, client, db.clone(), c),
+                            None => self.err("Connect first."),
+                        }
+                    }
+                    ui.add_space(6.0);
+                    if ui.button("Done").clicked() {
+                        keep = false;
+                        let reqs: Vec<u64> = self.tabs.iter().filter(|t| t.sel.conn == *conn && t.sel.db == *db).map(|t| t.req).collect();
+                        for r in reqs {
+                            if let Some(t) = self.tab_by_req(r) {
+                                t.related.clear();
+                            }
+                            self.load_related(r);
+                        }
+                    }
+                }
+                Modal::RenameColl { conn, db, coll, name } => {
+                    ui.label(RichText::new(format!("Rename {db}.{coll}")).strong().size(16.0).color(BRIGHT));
+                    ui.label(RichText::new("Open tabs of this collection are closed, as in the original.").color(MUTED));
+                    ui.add(egui::TextEdit::singleline(name).desired_width(320.0));
+                    ui.horizontal(|ui| {
+                        let ok = !name.trim().is_empty() && name.trim() != coll.as_str();
+                        if ui.add_enabled(ok, egui::Button::new(RichText::new("Rename").strong().color(BG)).fill(PRIMARY)).clicked() {
+                            if let Some(client) = self.conn(*conn).and_then(|c| c.client.clone()) {
+                                let (from, to) = (format!("{db}.{coll}"), format!("{db}.{}", name.trim()));
+                                self.tabs.retain(|t| !(t.sel.conn == *conn && t.sel.db == *db && t.sel.coll == *coll));
+                                self.cur = self.cur.min(self.tabs.len().saturating_sub(1));
+                                self.worker.db_change(*conn, client, db.clone(), doc! { "renameCollection": from, "to": to }, format!("Renamed {coll} to {}", name.trim()));
+                            }
+                            keep = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Modal::ImportInsert(n) => {
+                    let coll = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
+                    ui.label(RichText::new(format!("Insert {n} documents into {coll}?")).strong().size(16.0).color(BRIGHT));
+                    ui.label(RichText::new("They are added as new documents. Undo removes exactly these documents again.").color(MUTED));
+                    ui.horizontal(|ui| {
+                        if primary(ui, "Import", PRIMARY).clicked() {
+                            if let Some((conn, target)) = self.writable_target() {
+                                if let Some(Ok(docs)) = self.tabs[self.cur].import.parsed.clone() {
+                                    self.worker.import(conn, target, docs, None);
+                                    self.ok("Importing…");
+                                }
+                            }
+                            keep = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Modal::ShellWrite(ops) => {
+                    ui.label(RichText::new("Execute this command?").strong().size(16.0).color(BRIGHT));
+                    ui.label(RichText::new("Your command contains potentially destructive operations:").color(MUTED));
+                    ui.label(RichText::new(ops.join(", ")).monospace().color(ALERT));
+                    ui.horizontal(|ui| {
+                        if primary(ui, "Execute", ALERT).clicked() {
+                            self.start_shell();
+                            keep = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Modal::AggWrite(p) => {
+                    ui.label(RichText::new("This pipeline writes data ($out or $merge)").strong().size(16.0).color(BRIGHT));
+                    ui.label(RichText::new("It can replace or change a whole collection and cannot be undone here.").color(MUTED));
+                    ui.horizontal(|ui| {
+                        if primary(ui, "Run it", ALERT).clicked() {
+                            if let Some((_, target)) = self.writable_target() {
+                                self.req += 1;
+                                let req = self.req;
+                                self.tm().unwrap().req = req;
+                                self.worker.aggregate(req, target, p.clone());
+                            }
+                            keep = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Modal::SaveAll(keys) => {
+                    let n: usize = keys.iter().filter_map(|k| self.drafts.get(k)).map(|d| db::diff(&d.original, &d.current).len()).sum();
+                    ui.label(RichText::new(format!("Save {} documents ({n} changes)?", keys.len())).strong().size(16.0).color(BRIGHT));
+                    ui.label(RichText::new("Each document is refused if someone else changed it since you opened it; its edits are kept.").color(MUTED));
+                    ui.horizontal(|ui| {
+                        if primary(ui, "Save all", PRIMARY).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
+                            for k in keys.iter() {
+                                self.write_draft(k);
+                            }
+                            keep = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Modal::Text { title, body } => {
+                    ui.set_width(560.0);
+                    ui.label(RichText::new(title.as_str()).strong().size(15.0).color(BRIGHT));
+                    egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                        ui.add(egui::TextEdit::multiline(&mut body.as_str()).code_editor().desired_width(f32::INFINITY));
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("Copy").clicked() {
+                            ui.ctx().copy_text(body.clone());
+                        }
+                        if ui.button("Close").on_hover_text("Esc").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Modal::Rename { doc: d, path, name } => {
+                    let from = path.join(".");
+                    ui.label(RichText::new(format!("Rename {from}")).strong().size(16.0).color(BRIGHT));
+                    ui.add(egui::TextEdit::singleline(name).font(FontId::monospace(13.0)).desired_width(320.0));
+                    let valid = !name.trim().is_empty() && !name.contains('.') && !name.starts_with('$') && Some(name.trim()) != path.last().map(|s| s.as_str());
+                    let mut to = path[..path.len() - 1].to_vec();
+                    to.push(name.trim().to_string());
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(valid, egui::Button::new(RichText::new("In this document").strong().color(BG)).fill(PRIMARY)).clicked() {
+                            let new = db::get_path(d, &from).cloned().ok_or_else(|| "Field not found".to_string()).and_then(|v| db::edit_path(&db::edit_path(d, path, None)?, &to, Some(v)));
+                            let base = d.clone();
+                            self.stage(&base, new);
+                            keep = false;
+                        }
+                        // $rename cannot reach into arrays, so this is offered only for plain paths.
+                        let plain = path.iter().all(|s| s.parse::<usize>().is_err());
+                        let (count, filter) = self.t().map(|t| (t.count, t.query.filter.clone())).unwrap_or_default();
+                        if plain && ui.add_enabled(valid, egui::Button::new(format!("In all {count} matching documents…"))).clicked() {
+                            let coll = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
+                            self.modal = Some(Modal::Typed {
+                                title: format!("Rename {from} to {} in every document of {coll} matching the current filter (about {count})?", to.join(".")),
+                                expect: coll,
+                                typed: String::new(),
+                                action: Danger::RenameMany { filter, from: from.clone(), to: to.join(".") },
+                            });
+                            keep = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Modal::Undo => {
+                    ui.label(RichText::new("Recent changes").strong().size(16.0).color(BRIGHT));
+                    ui.label(RichText::new(format!("Last {} actions from the past 24 hours.", db::UNDO_MAX)).color(MUTED));
+                    let mut pick = None;
+                    egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
+                        for (i, a) in self.undo.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                let what = match &a.kind {
+                                    UndoKind::Insert { id } => format!("inserted {}", db::short(id)),
+                                    UndoKind::InsertMany { ids } => format!("imported {} documents", ids.len()),
+                                    UndoKind::Delete { old } => format!("deleted {}", old.get("_id").map(db::short).unwrap_or_default()),
+                                    UndoKind::Update { old, .. } => format!("edited {}", old.get("_id").map(db::short).unwrap_or_default()),
+                                };
+                                let mins = a.at.elapsed().as_secs() / 60;
+                                ui.label(RichText::new(format!("{}.{}  {what}", a.db, a.coll)).monospace());
+                                ui.label(RichText::new(format!("{mins} min ago")).color(MUTED));
+                                if ui.small_button("Undo").clicked() {
+                                    pick = Some(i);
+                                }
+                            });
+                        }
+                    });
+                    if let Some(i) = pick {
+                        self.apply_undo(i);
+                    }
+                    if ui.button("Close").clicked() {
+                        keep = false;
+                    }
+                }
+            }
+        });
+        if keep && !r.should_close() && self.modal.is_none() {
+            self.modal = Some(m);
+        }
+    }
+
+    fn danger(&mut self, action: Danger) {
+        if let Danger::RemoveConnection(id) = action {
+            if let Some(k) = keychain(id) {
+                let _ = k.delete_credential();
+            }
+            self.conns.retain(|c| c.meta.id != id);
+            self.tabs.retain(|t| t.sel.conn != id);
+            self.cur = self.cur.min(self.tabs.len().saturating_sub(1));
+            if self.active == Some(id) {
+                self.active = self.conns.first().map(|c| c.meta.id);
+            }
+            self.save_conns();
+            return self.ok("Connection removed");
+        }
+        let conn_specific = match &action {
+            Danger::DropDatabase { conn, .. } | Danger::DropCollAt { conn, .. } | Danger::DropUser { conn, .. } | Danger::Sync { conn } | Danger::Restore { conn, .. } => Some(*conn),
+            _ => None,
+        };
+        if let Some(conn) = conn_specific {
+            let Some(client) = self.conn(conn).filter(|c| c.writable).and_then(|c| c.client.clone()) else {
+                return self.modal = Some(Modal::Unlock(conn));
+            };
+            match action {
+                Danger::DropDatabase { db, .. } => {
+                    self.tabs.retain(|t| !(t.sel.conn == conn && t.sel.db == db));
+                    self.cur = self.cur.min(self.tabs.len().saturating_sub(1));
+                    self.worker.db_change(conn, client, db.clone(), doc! { "dropDatabase": 1 }, format!("Dropped database {db}"));
+                    if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
+                        c.dbs.retain(|d| d.0 != db);
+                    }
+                }
+                Danger::DropCollAt { db, coll, .. } => {
+                    self.tabs.retain(|t| !(t.sel.conn == conn && t.sel.db == db && t.sel.coll == coll));
+                    self.cur = self.cur.min(self.tabs.len().saturating_sub(1));
+                    self.worker.db_change(conn, client, db, doc! { "drop": &coll }, format!("Dropped {coll}"));
+                }
+                Danger::DropUser { db, user, .. } => self.worker.db_change(conn, client, db, doc! { "dropUser": &user }, format!("Dropped user {user}")),
+                Danger::Sync { .. } => {
+                    let timeout = self.timeout();
+                    let c = &mut self.tabs[self.cur].compare;
+                    let Some(r) = c.result.take() else { return };
+                    let insert = if c.insert { r.only_src } else { Vec::new() };
+                    let replace = if c.replace { r.changed } else { Vec::new() };
+                    let delete = if c.delete { r.only_dst.iter().filter_map(|d| d.get("_id").cloned()).collect() } else { Vec::new() };
+                    self.worker.sync(Target { client, db: c.db.clone(), coll: c.coll.clone(), timeout }, insert, replace, delete);
+                    self.ok("Syncing… Run Compare again afterwards to check.");
+                }
+                Danger::Restore { args, .. } => self.start_tool(true, "Restore".into(), args),
+                _ => unreachable!(),
+            }
+            return;
+        }
+        let Some((_, target)) = self.writable_target() else { return };
+        match action {
+            Danger::DeleteMatching(f) => self.worker.delete_many(target, f),
+            Danger::DropIndex(name) => self.worker.drop_index(target, name),
+            Danger::DropCollection => {
+                let s = self.t().unwrap().sel.clone();
+                if let Some(d) = self.conns.iter_mut().find(|c| c.meta.id == s.conn).and_then(|c| c.dbs.iter_mut().find(|d| d.0 == s.db)) {
+                    if let Some(list) = &mut d.1 {
+                        list.retain(|c| *c != s.coll);
+                    }
+                }
+                self.close_tab(self.cur);
+                self.worker.drop_collection(target);
+            }
+            Danger::RenameMany { filter, from, to } => self.worker.rename_many(target, filter, from, to),
+            Danger::Upsert { key } => {
+                let conn = self.t().unwrap().sel.conn;
+                if let Some(Ok(docs)) = self.tabs[self.cur].import.parsed.clone() {
+                    self.worker.import(conn, target, docs, Some(key));
+                }
+            }
+            Danger::RemoveConnection(_) | Danger::DropDatabase { .. } | Danger::DropCollAt { .. } | Danger::DropUser { .. } | Danger::Sync { .. } | Danger::Restore { .. } => unreachable!(),
+        }
+    }
+}
+
+fn human_bytes(n: usize) -> String {
+    match n {
+        n if n >= 1 << 20 => format!("{:.1} MB", n as f64 / (1 << 20) as f64),
+        n if n >= 1 << 10 => format!("{:.0} KB", n as f64 / 1024.0),
+        n => format!("{n} bytes"),
+    }
+}
+
+fn group(n: &str) -> String {
+    let mut out = String::new();
+    for (i, ch) in n.chars().enumerate() {
+        if i > 0 && (n.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn autocomplete_contexts() {
+        let paths: Vec<String> = ["status", "customer", "customer.name", "customer.tier", "total"].iter().map(|s| s.to_string()).collect();
+        let (n, s) = suggest("{ cus", FieldKind::Query, &paths).unwrap();
+        assert_eq!((n, s[0].text.as_str(), s[0].insert.as_str()), (3, "customer", "customer: "));
+        let (_, s) = suggest("{ customer.n", FieldKind::Query, &paths).unwrap();
+        assert_eq!(s[0].text, "customer.name");
+        let (_, s) = suggest("{ total: { $g", FieldKind::Query, &paths).unwrap();
+        assert!(s.iter().any(|x| x.text == "$gt:"));
+        assert!(s[0].text.starts_with("$g"));
+        let (_, s) = suggest("{ status: { $i", FieldKind::Query, &paths).unwrap();
+        let i = s.iter().find(|x| x.text == "$in: [  ]").unwrap();
+        assert_eq!(&i.insert[..i.insert.char_indices().nth(i.caret).unwrap().0], "$in: [ ");
+        let (_, s) = suggest("{ total: ", FieldKind::Sort, &paths).unwrap();
+        assert_eq!(s.len(), 2);
+        let (_, s) = suggest("{ _id: Obj", FieldKind::Query, &paths).unwrap();
+        assert_eq!((s[0].text.as_str(), s[0].caret), ("ObjectId(\"\")", 10));
+        assert!(suggest("{ ", FieldKind::Query, &paths).is_none());
+        let (_, s) = suggest("{ \"cus", FieldKind::Query, &paths).unwrap();
+        assert_eq!(s[0].insert, "customer");
+    }
+
+    #[test]
+    fn shell_autocomplete() {
+        let colls = vec!["orders".to_string(), "users".to_string()];
+        let paths = vec!["status".to_string(), "total".to_string()];
+        let (_, s) = suggest_js("return await db.coll", &paths, &colls, &[]).unwrap();
+        assert_eq!((s[0].text.as_str(), s[0].insert.as_str()), ("collection", "collection()"));
+        let (_, s) = suggest_js("await orders.upd", &paths, &colls, &[]).unwrap();
+        assert!(s[0].text.starts_with("update"));
+        let (_, s) = suggest_js("await orders.find({}).", &paths, &colls, &[]).unwrap();
+        assert!(s.iter().any(|x| x.text == "toArray"));
+        let (_, s) = suggest_js("db.collection('x').", &paths, &colls, &[]).unwrap();
+        assert!(s.iter().any(|x| x.text == "find"));
+        let (_, s) = suggest_js("await orders.find({ sta", &paths, &colls, &[]).unwrap();
+        assert_eq!(s[0].text, "status");
+        let (_, s) = suggest_js("  ord", &paths, &colls, &[]).unwrap();
+        assert_eq!(s[0].text, "orders");
+        let (_, s) = suggest_js("  aw", &paths, &colls, &[]).unwrap();
+        assert_eq!(s[0].insert, "await ");
+    }
+
+    #[test]
+    fn js_colours() {
+        let job = js_job("const x = await orders.find({}); // hi");
+        let colour_of = |w: &str| {
+            let at = job.text.find(w).unwrap();
+            job.sections.iter().find(|s| s.byte_range.start.0 <= at && at < s.byte_range.end.0).unwrap().format.color
+        };
+        assert_eq!(colour_of("const"), C_KEYWORD);
+        assert_eq!(colour_of("find"), C_DATE);
+        assert_eq!(colour_of("// hi"), FAINT);
+    }
+
+    #[test]
+    fn relation_files() {
+        let list = vec![Relation { coll: "orders".into(), path: "items.productId".into(), target: "products".into(), preview: "title".into() }];
+        assert!(relations_import(&relations_export("shop", &list)).unwrap() == list);
+        let mingo = r#"{"version":"1.0","database":"shop","relations":[{"collection":"orders","path":"items[].productId","referencedCollection":"products","previewField":"title"}]}"#;
+        assert!(relations_import(mingo).unwrap() == list);
+        assert!(relations_import(r#"{"relations":[]}"#).is_err());
+    }
+
+    #[test]
+    fn package_names() {
+        assert_eq!(package_ident("lodash"), "lodash");
+        assert_eq!(package_ident("date-fns@3.6.0"), "dateFns");
+        assert_eq!(package_ident("@faker-js/faker"), "faker");
+        assert_eq!(package_ident("@scope/x-y@^1"), "xY");
+        let (_, s) = suggest_js("  dateF", &[], &[], &["dateFns".into()]).unwrap();
+        assert_eq!((s[0].text.as_str(), s[0].note), ("dateFns", "package"));
+    }
+
+    #[test]
+    fn roles() {
+        let r = parse_roles("readWrite@shop, read ,", "admin");
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[1].as_document().unwrap().get_str("db").unwrap(), "admin");
+        let u = doc! { "roles": [ { "role": "read", "db": "x" } ] };
+        assert_eq!(roles_text(&u), "read@x");
+    }
+
+    #[test]
+    fn query_history() {
+        let mut h = Vec::new();
+        for v in ["{ a: 1 }", "{}", " ", "{ b: 2 }", "{ a: 1 }"] {
+            push_history(&mut h, v);
+        }
+        assert_eq!(h, ["{ a: 1 }", "{ b: 2 }"]);
+        for i in 0..40 {
+            push_history(&mut h, &format!("{{ n: {i} }}"));
+        }
+        assert_eq!(h.len(), HISTORY_LENGTH_BY_COLLECTION);
+    }
+
+    #[test]
+    fn auto_indent() {
+        // Enter between {} : closer on its own line, caret indented one step.
+        let t = "  run({\n})";
+        let (out, c) = newline_indent(t, 8).unwrap();
+        assert_eq!(out, "  run({\n    \n  })");
+        assert_eq!(c, 12);
+        // Plain line keeps its indent.
+        let (out, c) = newline_indent("    a: 1,\n", 10).unwrap();
+        assert_eq!((out.as_str(), c), ("    a: 1,\n    ", 14));
+        assert!(newline_indent("a\n", 2).is_none());
+        // Closer typed on an empty indented line steps back.
+        let (out, c) = closer_dedent("{\n    }", 7).unwrap();
+        assert_eq!((out.as_str(), c), ("{\n  }", 5));
+        assert!(closer_dedent("{ a }", 5).is_none());
+    }
+
+    #[test]
+    fn shell_scripts() {
+        assert_eq!(query_script("orders", "{ a: 1 }"), "async function run() {\n\treturn await orders.find({ a: 1 })\n}");
+        assert!(query_script("my.coll", "").contains("db.collection(\"my.coll\").find({})"));
+        assert!(query_script("x", "db.x.find({});").ends_with("return await db.x.find({})\n}"));
+        assert_eq!(dangerous_words("db.x.deleteMany({})"), ["delete"]);
+    }
+
+    #[test]
+    fn string_display_truncates_like_lodash() {
+        assert_eq!(truncate_display(&"a".repeat(100)).len(), 100);
+        let t = truncate_display(&"a".repeat(150));
+        assert_eq!((t.len(), t.ends_with("...")), (100, true));
+    }
+
+    #[test]
+    fn columns_default_pin_and_move() {
+        let fields: Vec<String> = (0..12).map(|i| format!("f{i}")).collect();
+        assert_eq!(visible_cols(None, &fields, DEFAULT_COLS).len(), DEFAULT_COLS);
+        let p = ColPrefs { pinned: vec!["f3".into()], ..Default::default() };
+        assert_eq!(visible_cols(Some(&p), &fields, DEFAULT_COLS)[0], "f3");
+        let p = ColPrefs { shown: Some(vec!["a".into(), "b".into()]), pinned: vec!["b".into(), "zz".into()], ..Default::default() };
+        assert_eq!(visible_cols(Some(&p), &fields, DEFAULT_COLS), ["b", "a"]);
+    }
+}

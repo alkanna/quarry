@@ -1,0 +1,32 @@
+# graft's local graph cache, regenerable, not committed (run `graft build`).
+/graft/
+/.ignore
+
+# Build output
+/target/
+/dist/
+
+# Local screenshots from --screenshot runs (README pictures live in docs/)
+/shots/
+
+# macOS
+.DS_Store
+
+# Craft Anything workspace records: notes about the original app and its pictures, not source
+/craft.json
+/feed.json
+/questions.json
+/usage.json
+/assets.json
+/transcript.json
+/extract-transcript.json
+/build-activity*.log
+/inbox/
+/checks/
+/capture/
+/reference/
+/attachments/
+/investigation.cany/
+/pinned/
+/MECHANICS.md
+/mechanics.json
