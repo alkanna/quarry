@@ -60,7 +60,14 @@ pub fn cleanup() {
     }
 }
 
+/// The app runs without a console on Windows, so each console tool it starts would otherwise
+/// flash a console window of its own.
+#[cfg(windows)]
+pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 fn run(cmd: &mut Command) -> Result<String, String> {
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(cmd, CREATE_NO_WINDOW);
     let name = cmd.get_program().to_string_lossy().to_string();
     let out = cmd.output().map_err(|e| format!("{name}: {e}"))?;
     if out.status.success() {
@@ -82,11 +89,15 @@ pub fn check_and_install() -> Result<Option<String>, String> {
     if !newer(env!("CARGO_PKG_VERSION"), tag) {
         return Ok(None);
     }
-    let url = v["assets"]
+    // The release is published minutes before the build jobs attach their files: until then it
+    // counts as up to date and the next check picks it up.
+    let Some(url) = v["assets"]
         .as_array()
         .and_then(|a| a.iter().find(|x| x["name"] == name.as_str()))
         .and_then(|x| x["browser_download_url"].as_str())
-        .ok_or(format!("Release {tag} has no {name} yet."))?;
+    else {
+        return Ok(None);
+    };
     let dir = std::env::temp_dir().join(format!("quarry-update-{tag}"));
     remove(&dir);
     let out = dir.join("x");
@@ -113,7 +124,14 @@ pub fn check_and_install() -> Result<Option<String>, String> {
 fn install(new: &Path, target: &Path) -> Result<(), String> {
     let old = old_path(target);
     remove(&old);
-    std::fs::rename(target, &old).map_err(|e| format!("Cannot replace {} ({e}).", target.display()))?;
+    std::fs::rename(target, &old).map_err(|e| {
+        // macOS runs a downloaded app that was never moved from a read-only random copy.
+        if target.to_string_lossy().contains("/AppTranslocation/") {
+            "Move Quarry to the Applications folder to get updates.".to_string()
+        } else {
+            format!("Cannot replace {} ({e}).", target.display())
+        }
+    })?;
     // A copy, not a rename: the temp folder may be on another disk.
     let copied = if new.is_dir() { run(Command::new("ditto").arg(new).arg(target)).map(drop) } else { std::fs::copy(new, target).map(drop).map_err(|e| e.to_string()) };
     if let Err(e) = copied {
@@ -125,6 +143,28 @@ fn install(new: &Path, target: &Path) -> Result<(), String> {
         remove(&old);
     }
     Ok(())
+}
+
+/// The notes of one version from CHANGELOG.md (written by release-please), as plain text.
+pub fn changelog(version: &str) -> Option<String> {
+    // Release headings are "## [1.2.0](compare link) (date)", section headings "### Features".
+    let is_release = |l: &str| l.starts_with('#') && l.trim_start_matches('#').trim_start().starts_with('[');
+    let head = format!("[{version}]");
+    let mut lines = include_str!("../CHANGELOG.md").lines().skip_while(|l| !(is_release(l) && l.contains(&head)));
+    lines.next()?;
+    let mut out = String::new();
+    for l in lines.take_while(|l| !is_release(l)) {
+        // Drops the trailing commit link, " ([abc1234](https://...))", and bold scopes.
+        let l = l.find(" ([").map_or(l, |i| &l[..i]).replace("**", "");
+        let l = l.trim_start_matches('#').trim();
+        let l = l.strip_prefix("* ").map_or(l.to_string(), |b| format!("- {b}"));
+        if !l.is_empty() || !out.ends_with("\n\n") {
+            out.push_str(&l);
+            out.push('\n');
+        }
+    }
+    let out = out.trim().to_string();
+    (!out.is_empty()).then_some(out)
 }
 
 /// Starts the installed copy and ends this one.
@@ -153,5 +193,11 @@ mod tests {
         assert!(!newer("1.0.0", "nightly"));
         assert!(newer("1.0.0", "v1.0.1-beta"));
         assert_eq!(old_path(Path::new("/A/Quarry.app")), PathBuf::from("/A/Quarry.app.old"));
+    }
+
+    #[test]
+    fn changelog_section() {
+        assert_eq!(changelog("0.2.0").as_deref(), Some("Features\n\n- initial release of Quarry, a native MongoDB workbench"));
+        assert_eq!(changelog("9.9.9"), None);
     }
 }

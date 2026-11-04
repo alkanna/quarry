@@ -1146,6 +1146,8 @@ struct UiPrefs {
     mongorestore: String,
     /// Install new releases from GitHub and restart into them.
     auto_update: bool,
+    /// The version that last ran, to show the changelog once after an update.
+    last_version: String,
 }
 
 /// The original keeps 30 recent inputs per collection and kind (HISTORY_LENGTH_BY_COLLECTION,
@@ -1282,7 +1284,7 @@ enum QAct {
 
 impl Default for UiPrefs {
     fn default() -> Self {
-        Self { open_inline: true, table: true, confirm_save: false, auto_save: false, default_cols: DEFAULT_COLS, timeout_ms: db::DEFAULT_TIMEOUT_MS, shell_runtime: String::new(), shell_histories: HashMap::new(), shell_packages: Vec::new(), history: HashMap::new(), library: HashMap::new(), open_tabs: Vec::new(), cur_tab: 0, cols: HashMap::new(), relations: HashMap::new(), mongodump: String::new(), mongorestore: String::new(), auto_update: true }
+        Self { open_inline: true, table: true, confirm_save: false, auto_save: false, default_cols: DEFAULT_COLS, timeout_ms: db::DEFAULT_TIMEOUT_MS, shell_runtime: String::new(), shell_histories: HashMap::new(), shell_packages: Vec::new(), history: HashMap::new(), library: HashMap::new(), open_tabs: Vec::new(), cur_tab: 0, cols: HashMap::new(), relations: HashMap::new(), mongodump: String::new(), mongorestore: String::new(), auto_update: true, last_version: String::new() }
     }
 }
 
@@ -1861,7 +1863,8 @@ impl App {
             crate::update::cleanup();
             let read = |f: &str| std::fs::read(config_dir().join(f)).ok();
             let metas: Vec<ConnMeta> = read("connections.json").and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-            app.prefs = read("ui.json").and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+            let ui_json = read("ui.json");
+            app.prefs = ui_json.as_ref().and_then(|b| serde_json::from_slice(b).ok()).unwrap_or_default();
             for meta in metas {
                 let masked = keychain(meta.id).and_then(|k| k.get_password().ok()).map(|u| db::mask_uri(&u)).unwrap_or_default();
                 app.conns.push(Conn { meta, client: None, status: Status::Idle, writable: false, dbs: Vec::new(), masked_uri: masked , tunnel: None });
@@ -1891,6 +1894,18 @@ impl App {
             app.cur = app.prefs.cur_tab.min(app.tabs.len().saturating_sub(1));
             if let Some(t) = app.tabs.get(app.cur) {
                 app.active = Some(t.sel.conn);
+            }
+            let current = env!("CARGO_PKG_VERSION");
+            if app.prefs.last_version != current {
+                // A fresh install has no ui.json, so it skips the notes. Settings from 0.2.0 and
+                // earlier lack last_version, so updating from those shows them.
+                if ui_json.is_some()
+                    && let Some(body) = crate::update::changelog(current)
+                {
+                    app.modal = Some(Modal::Text { title: format!("What's new in Quarry {current}"), body });
+                }
+                app.prefs.last_version = current.into();
+                app.save_prefs();
             }
         }
         app
