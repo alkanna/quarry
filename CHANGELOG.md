@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.0](https://github.com/alkanna/quarry/compare/v0.4.0...v0.5.0) (2026-11-04)
+
+
+### Features
+
+* highlight JSON in the full value and view definition dialogs ([#7](https://github.com/alkanna/quarry/issues/7)) ([59e8dc4](https://github.com/alkanna/quarry/commit/59e8dc4be77b36904b5babfe042830af1e78ffaa))
+* reconnect to the last used connection at launch ([#6](https://github.com/alkanna/quarry/issues/6)) ([fe80057](https://github.com/alkanna/quarry/commit/fe80057e0373d84bc680da75c8fcd1a9e03e711c))
+
 ## [0.4.0](https://github.com/alkanna/quarry/compare/v0.3.0...v0.4.0) (2026-11-04)
 
 
