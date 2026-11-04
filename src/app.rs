@@ -823,6 +823,42 @@ struct Sel {
     coll: String,
 }
 
+/// Where the Cmd+K palette can jump to.
+#[derive(Clone)]
+enum Jump {
+    Conn(u64),
+    Db(u64, String),
+    Coll(Sel),
+}
+
+/// Palette entries matching `q` as (label, hint, target). Substring matches rank above fuzzy
+/// ones, and within each the active connection comes first.
+fn jumps(conns: &[Conn], active: Option<u64>, q: &str) -> Vec<(String, String, Jump)> {
+    const MAX: usize = 50;
+    let mut out = Vec::new();
+    let mut order: Vec<&Conn> = conns.iter().collect();
+    order.sort_by_key(|c| Some(c.meta.id) != active);
+    for c in order {
+        let id = c.meta.id;
+        let mut push = |label: String, hint: &str, j: Jump| {
+            if fuzzy(q, &label, false) {
+                out.push((label, hint.to_string(), j));
+            }
+        };
+        push(c.meta.name.clone(), &c.masked_uri, Jump::Conn(id));
+        for (db, colls) in &c.dbs {
+            push(db.clone(), &c.meta.name, Jump::Db(id, db.clone()));
+            for coll in colls.iter().flatten() {
+                push(format!("{db}.{coll}"), &c.meta.name, Jump::Coll(Sel { conn: id, db: db.clone(), coll: coll.clone() }));
+            }
+        }
+    }
+    let q = q.to_lowercase();
+    out.sort_by_cached_key(|(label, ..)| !label.to_lowercase().contains(&q));
+    out.truncate(MAX);
+    out
+}
+
 #[derive(PartialEq, Clone, Copy)]
 enum View {
     Documents,
@@ -1061,6 +1097,7 @@ enum Modal {
     Rename { doc: Document, path: Vec<String>, name: String },
     Tool(Box<ToolForm>),
     Relations { conn: u64, db: String },
+    Palette { query: String, sel: usize },
 }
 
 /// A value being edited in place in the document tree.
@@ -2966,11 +3003,13 @@ impl eframe::App for App {
             }
         });
         self.auto_update(&ctx);
+        // Before the modals, so one opened by a shortcut draws this frame, and an Esc that closes a
+        // modal is not also taken as a second Esc by `keys`.
+        self.keys(&ctx);
         self.modals(&ctx);
         self.users_window(&ctx);
         self.tool_window(&ctx);
         self.toast(&ctx);
-        self.keys(&ctx);
         self.screenshot(&ctx);
     }
 }
@@ -3021,6 +3060,9 @@ impl App {
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::W)) {
             self.close_tab(self.cur);
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::K)) {
+            self.modal = Some(Modal::Palette { query: String::new(), sel: 0 });
         }
         // Esc closes the innermost thing that is open. Dialogs and menus handle their own Esc.
         if ctx.any_popup_open() || !ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
@@ -3374,7 +3416,7 @@ impl App {
                 let first = msg.lines().next().unwrap_or_default();
                 ui.add(egui::Label::new(RichText::new(first).size(12.0).color(if *is_err { ALERT } else { MUTED })).truncate()).on_hover_text(msg.as_str());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new("Esc closes  ·  Cmd+W closes tab  ·  Enter runs  ·  double-click a value to edit").size(11.5).color(FAINT));
+                    ui.label(RichText::new("Cmd+K jumps  ·  Esc closes  ·  Cmd+W closes tab  ·  Enter runs  ·  double-click a value to edit").size(11.5).color(FAINT));
                 });
             });
         });
@@ -3485,10 +3527,7 @@ impl App {
             }
         }
         if let Some(id) = pick {
-            self.active = Some(id);
-            if self.conn(id).is_some_and(|c| c.status == Status::Idle) && !self.demo {
-                self.connect(id);
-            }
+            self.activate(id);
         }
         if new {
             self.new_conn_modal();
@@ -3500,6 +3539,30 @@ impl App {
                 typed: String::new(),
                 action: Danger::RemoveConnection(id),
             });
+        }
+    }
+
+    fn activate(&mut self, id: u64) {
+        self.active = Some(id);
+        if self.conn(id).is_some_and(|c| c.status == Status::Idle) && !self.demo {
+            self.connect(id);
+        }
+    }
+
+    fn jump(&mut self, j: Jump) {
+        let (id, db) = match &j {
+            Jump::Conn(id) => (*id, None),
+            Jump::Db(id, db) => (*id, Some(db.clone())),
+            Jump::Coll(s) => (s.conn, Some(s.db.clone())),
+        };
+        self.activate(id);
+        // Reveal the target in the tree, which a leftover filter could hide.
+        if let Some(db) = db {
+            self.tree_filter.clear();
+            self.open_dbs.insert((id, db));
+        }
+        if let Jump::Coll(sel) = j {
+            self.open_collection(sel, false);
         }
     }
 
@@ -6536,6 +6599,49 @@ impl App {
                         keep = false;
                     }
                 }
+                Modal::Palette { query, sel } => {
+                    ui.set_width(560.0);
+                    // Taken before the text field sees them, so arrows move the selection and Enter picks.
+                    let (up, down, enter) = ui.input_mut(|i| (i.consume_key(egui::Modifiers::NONE, Key::ArrowUp), i.consume_key(egui::Modifiers::NONE, Key::ArrowDown), i.consume_key(egui::Modifiers::NONE, Key::Enter)));
+                    let r = ui.add(egui::TextEdit::singleline(query).hint_text("Jump to a connection, database or collection").desired_width(f32::INFINITY).margin(egui::Margin::symmetric(10, 8)));
+                    r.request_focus();
+                    if r.changed() {
+                        *sel = 0;
+                    }
+                    let items = jumps(&self.conns, self.active, query);
+                    if down {
+                        *sel = (*sel + 1).min(items.len().saturating_sub(1));
+                    }
+                    if up {
+                        *sel = sel.saturating_sub(1);
+                    }
+                    let mut pick = if enter { items.get(*sel).map(|x| x.2.clone()) } else { None };
+                    ui.add_space(4.0);
+                    egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                        if items.is_empty() {
+                            ui.label(RichText::new("No matches").color(MUTED));
+                        }
+                        for (i, (label, hint, j)) in items.iter().enumerate() {
+                            let r = ui
+                                .horizontal(|ui| {
+                                    let r = ui.selectable_label(i == *sel, RichText::new(label).color(BRIGHT));
+                                    ui.label(RichText::new(hint).size(11.5).color(FAINT));
+                                    r
+                                })
+                                .inner;
+                            if i == *sel && (up || down) {
+                                r.scroll_to_me(None);
+                            }
+                            if r.clicked() {
+                                pick = Some(j.clone());
+                            }
+                        }
+                    });
+                    if let Some(j) = pick {
+                        keep = false;
+                        self.jump(j);
+                    }
+                }
             }
         });
         if keep && !r.should_close() && self.modal.is_none() {
@@ -6643,6 +6749,17 @@ fn group(n: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn palette_jumps() {
+        let conn = |id, name: &str, status, dbs| Conn { meta: ConnMeta { id, name: name.into(), ..Default::default() }, client: None, status, writable: false, dbs, masked_uri: String::new(), tunnel: None };
+        let conns = [conn(1, "prod", Status::Ready, vec![("shop".into(), Some(vec!["users".into(), "orders".into()]))]), conn(2, "staging", Status::Idle, Vec::new())];
+        let labels = |active, q| jumps(&conns, active, q).into_iter().map(|j| j.0).collect::<Vec<_>>();
+        assert_eq!(labels(Some(2), ""), ["staging", "prod", "shop", "shop.users", "shop.orders"]);
+        assert_eq!(labels(Some(1), "users"), ["shop.users"]);
+        // "or" fuzzily matches shop.users too, but the substring match ranks first.
+        assert_eq!(labels(Some(1), "or"), ["shop.orders", "shop.users"]);
+    }
 
     #[test]
     fn autocomplete_contexts() {
