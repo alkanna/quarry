@@ -1176,6 +1176,8 @@ struct UiPrefs {
     open_tabs: Vec<SavedTab>,
     cur_tab: usize,
     cols: HashMap<String, ColPrefs>,
+    /// The connection picked when the app was last used, connected again at launch.
+    last_conn: Option<u64>,
     /// Per "conn/db": fields that point to documents of another collection.
     relations: HashMap<String, Vec<Relation>>,
     /// Paths to mongodump and mongorestore; empty means find them automatically.
@@ -1321,7 +1323,7 @@ enum QAct {
 
 impl Default for UiPrefs {
     fn default() -> Self {
-        Self { open_inline: true, table: true, confirm_save: false, auto_save: false, default_cols: DEFAULT_COLS, timeout_ms: db::DEFAULT_TIMEOUT_MS, shell_runtime: String::new(), shell_histories: HashMap::new(), shell_packages: Vec::new(), history: HashMap::new(), library: HashMap::new(), open_tabs: Vec::new(), cur_tab: 0, cols: HashMap::new(), relations: HashMap::new(), mongodump: String::new(), mongorestore: String::new(), auto_update: true, last_version: String::new() }
+        Self { open_inline: true, table: true, confirm_save: false, auto_save: false, default_cols: DEFAULT_COLS, timeout_ms: db::DEFAULT_TIMEOUT_MS, shell_runtime: String::new(), shell_histories: HashMap::new(), shell_packages: Vec::new(), history: HashMap::new(), library: HashMap::new(), open_tabs: Vec::new(), cur_tab: 0, last_conn: None, cols: HashMap::new(), relations: HashMap::new(), mongodump: String::new(), mongorestore: String::new(), auto_update: true, last_version: String::new() }
     }
 }
 
@@ -1933,6 +1935,12 @@ impl App {
                 app.active = Some(t.sel.conn);
             }
             let current = env!("CARGO_PKG_VERSION");
+            if let Some(id) = app.prefs.last_conn.filter(|&id| app.conn(id).is_some()) {
+                app.active = Some(id);
+            }
+            if let Some(id) = app.active {
+                app.connect(id);
+            }
             if app.prefs.last_version != current {
                 // A fresh install has no ui.json, so it skips the notes. Settings from 0.2.0 and
                 // earlier lack last_version, so updating from those shows them.
@@ -3044,10 +3052,11 @@ impl App {
                 shell: t.shell.code.clone(),
             })
             .collect();
-        if tabs != self.prefs.open_tabs || self.cur != self.prefs.cur_tab {
+        if tabs != self.prefs.open_tabs || self.cur != self.prefs.cur_tab || self.active != self.prefs.last_conn {
             self.prefs.open_tabs = tabs;
             self.prefs.cur_tab = self.cur;
             self.save_prefs();
+            self.prefs.last_conn = self.active;
         }
     }
 
