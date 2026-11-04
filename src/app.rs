@@ -1093,7 +1093,8 @@ enum Modal {
     NewCollection { conn: u64, db: String, name: String, view: bool, source: String, pipeline: String },
     RenameColl { conn: u64, db: String, coll: String, name: String },
     Undo,
-    Text { title: String, body: String },
+    /// `code` highlights the body as JSON.
+    Text { title: String, body: String, code: bool },
     Rename { doc: Document, path: Vec<String>, name: String },
     Tool(Box<ToolForm>),
     Relations { conn: u64, db: String },
@@ -1947,7 +1948,7 @@ impl App {
                 if ui_json.is_some()
                     && let Some(body) = crate::update::changelog(current)
                 {
-                    app.modal = Some(Modal::Text { title: format!("What's new in Quarry {current}"), body });
+                    app.modal = Some(Modal::Text { title: format!("What's new in Quarry {current}"), body, code: false });
                 }
                 app.prefs.last_version = current.into();
                 app.save_prefs();
@@ -2440,12 +2441,12 @@ impl App {
                             };
                             lines.push(format!("{k}: {text}"));
                         }
-                        self.modal = Some(Modal::Text { title, body: lines.join("\n") });
+                        self.modal = Some(Modal::Text { title, body: lines.join("\n"), code: false });
                     }
                     ("viewdef", Ok(d)) => {
                         let opts = d.get_document("cursor").ok().and_then(|c| c.get_array("firstBatch").ok()).and_then(|a| a.first()).and_then(|x| x.as_document()).and_then(|x| x.get_document("options").ok()).cloned().unwrap_or_default();
                         let body = format!("viewOn: {}\npipeline:\n{}", opts.get_str("viewOn").unwrap_or_default(), db::to_edit_value(opts.get("pipeline").unwrap_or(&Bson::Array(vec![]))));
-                        self.modal = Some(Modal::Text { title: "View definition".into(), body });
+                        self.modal = Some(Modal::Text { title: "View definition".into(), body, code: true });
                     }
                     (_, Err(e)) => self.err(e),
                     _ => {}
@@ -2552,7 +2553,7 @@ impl App {
                     Ok(s) => self.ok(s),
                     Err(e) => self.err(e),
                 },
-                Msg::Notice { title, body } => self.modal = Some(Modal::Text { title, body }),
+                Msg::Notice { title, body } => self.modal = Some(Modal::Text { title, body, code: false }),
                 Msg::Related { req, res } => match (res, self.tab_by_req(req)) {
                     (Ok(v), Some(t)) => t.related.extend(v),
                     (Err(e), _) => self.err(format!("Could not load related documents: {e}")),
@@ -4715,7 +4716,7 @@ impl App {
                         Bson::Document(_) | Bson::Array(_) => db::to_edit_json(&doc! { "v": v.clone() }).lines().skip(1).collect::<Vec<_>>().join("\n").trim_start().trim_start_matches("\"v\": ").trim_end_matches('}').trim_end().to_string(),
                         other => db::value_text(other),
                     };
-                    self.modal = Some(Modal::Text { title: path, body });
+                    self.modal = Some(Modal::Text { title: path, body, code: !matches!(v, Bson::String(_)) });
                 }
                 TreeAct::PinColumn(path) => {
                     let key = self.col_key(false);
@@ -6532,11 +6533,14 @@ impl App {
                         }
                     });
                 }
-                Modal::Text { title, body } => {
+                Modal::Text { title, body, code } => {
                     ui.set_width(560.0);
                     ui.label(RichText::new(title.as_str()).strong().size(15.0).color(BRIGHT));
                     egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
-                        ui.add(egui::TextEdit::multiline(&mut body.as_str()).code_editor().desired_width(f32::INFINITY));
+                        let mut text = body.as_str();
+                        let mut layout = code_layout;
+                        let edit = egui::TextEdit::multiline(&mut text).code_editor().desired_width(f32::INFINITY);
+                        ui.add(if *code { edit.layouter(&mut layout) } else { edit });
                     });
                     ui.horizontal(|ui| {
                         if ui.button("Copy").clicked() {
