@@ -1,15 +1,20 @@
-# Builds and tests every pull request on the three systems, so a release never breaks at tag time.
+# Builds and tests every pull request on each system and architecture the release ships, so a
+# release never breaks at tag time.
 name: CI
 
+# Runs only once a maintainer adds the "ci" label to the pull request, then on every push to it.
 on:
   pull_request:
+    types: [labeled, synchronize]
 
 jobs:
   test:
+    # Checks the label just added, so adding some other label to a "ci" pull request does not rerun it.
+    if: github.event.label.name == 'ci' || (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'ci'))
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, ubuntu-24.04, windows-2022]
+        os: [macos-14, macos-15-intel, ubuntu-22.04, ubuntu-22.04-arm, windows-2022, windows-11-arm]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -18,4 +23,9 @@ jobs:
       - name: Linux libraries
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+      # ring needs clang for Windows on ARM; the runner image ships LLVM here.
+      - name: Clang for Windows on ARM
+        if: matrix.os == 'windows-11-arm'
+        shell: bash
+        run: echo "C:\Program Files\LLVM\bin" >> "$GITHUB_PATH"
       - run: cargo test --locked

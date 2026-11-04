@@ -631,12 +631,11 @@ impl Worker {
             let name = exe.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
             let run = async {
                 use tokio::io::AsyncBufReadExt;
-                let mut child = tokio::process::Command::new(&exe)
-                    .args(&args)
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .kill_on_drop(true)
+                let mut cmd = tokio::process::Command::new(&exe);
+                cmd.args(&args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
+                #[cfg(windows)]
+                cmd.creation_flags(crate::update::CREATE_NO_WINDOW);
+                let mut child = cmd
                     .spawn()
                     .map_err(|err| format!("Could not start {} ({err})", exe.display()))?;
                 // Both tools write their progress to stderr.
@@ -907,19 +906,26 @@ async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + Send + Sync)
         || job.packages.iter().any(|p| !job.dir.join("node_modules").join(package_spec(p).0).exists());
     if deps_changed || missing {
         note("Installing packages for the shell with Bun…");
-        let out = Command::new(&job.runtime).arg("install").current_dir(&job.dir).output().await.map_err(|err| format!("Could not start Bun ({}): {err}", job.runtime.display()))?;
+        let mut cmd = Command::new(&job.runtime);
+        cmd.arg("install").current_dir(&job.dir);
+        #[cfg(windows)]
+        cmd.creation_flags(crate::update::CREATE_NO_WINDOW);
+        let out = cmd.output().await.map_err(|err| format!("Could not start Bun ({}): {err}", job.runtime.display()))?;
         if !out.status.success() {
             return Err(format!("bun install failed: {}", String::from_utf8_lossy(&out.stderr)));
         }
         note("Packages ready.");
     }
-    let mut child = Command::new(&job.runtime)
-        .arg("runner.mjs")
+    let mut cmd = Command::new(&job.runtime);
+    cmd.arg("runner.mjs")
         .current_dir(&job.dir)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    cmd.creation_flags(crate::update::CREATE_NO_WINDOW);
+    let mut child = cmd
         .spawn()
         .map_err(|err| format!("Could not start Bun ({}): {err}", job.runtime.display()))?;
     let mut stdin = child.stdin.take().ok_or("no stdin")?;
