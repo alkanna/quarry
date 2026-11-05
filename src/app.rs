@@ -9,31 +9,128 @@ use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-// Dark palette from the original's `.dark-mode` theme.
-const BG: Color32 = Color32::from_rgb(0x10, 0x12, 0x14);
-const PANEL: Color32 = Color32::from_rgb(0x16, 0x18, 0x1b);
-const RAISED: Color32 = Color32::from_rgb(0x1c, 0x1f, 0x22);
-const HOVER: Color32 = Color32::from_rgb(0x27, 0x2b, 0x2f);
-const BORDER: Color32 = Color32::from_rgb(0x32, 0x37, 0x3c);
-const TEXT: Color32 = Color32::from_rgb(0xcc, 0xcc, 0xcc);
-const BRIGHT: Color32 = Color32::from_rgb(0xfa, 0xfa, 0xfa);
-const MUTED: Color32 = Color32::from_rgb(0x8a, 0x8f, 0x96);
-const FAINT: Color32 = Color32::from_rgb(0x5f, 0x64, 0x69);
-const PRIMARY: Color32 = Color32::from_rgb(134, 201, 249);
-const ALERT: Color32 = Color32::from_rgb(247, 110, 133);
-const SUCCESS: Color32 = Color32::from_rgb(142, 242, 140);
-const WARNING: Color32 = Color32::from_rgb(247, 208, 110);
-const C_STRING: Color32 = Color32::from_rgb(0xf2, 0xa3, 0x65);
-const C_NUMBER: Color32 = Color32::from_rgb(0x5c, 0xa5, 0xd6);
-const C_TRUE: Color32 = Color32::from_rgb(0x83, 0xc7, 0x6b);
-const C_FALSE: Color32 = Color32::from_rgb(0xe5, 0x4d, 0x56);
-const C_DATE: Color32 = Color32::from_rgb(0x66, 0xcc, 0xb4);
-const C_NULL: Color32 = Color32::from_rgb(0x9e, 0x9e, 0x9e);
-const C_OID: Color32 = Color32::from_rgb(0x00, 0xba, 0xc1);
-const C_OBJ: Color32 = Color32::from_rgb(0xa3, 0xaa, 0xb5);
-const KEY: Color32 = Color32::from_rgb(0xd7, 0xda, 0xe0);
-const C_LINK: Color32 = Color32::from_rgb(0x72, 0xc3, 0xec);
-const HIGHLIGHT: Color32 = Color32::from_rgba_premultiplied(40, 34, 18, 60);
+// Colors come from the palette of the theme in use, so they are functions, not constants.
+// The dark one is the original's `.dark-mode` theme.
+struct Palette {
+    bg: Color32,
+    panel: Color32,
+    raised: Color32,
+    hover: Color32,
+    border: Color32,
+    text: Color32,
+    bright: Color32,
+    muted: Color32,
+    faint: Color32,
+    primary: Color32,
+    alert: Color32,
+    success: Color32,
+    warning: Color32,
+    c_string: Color32,
+    c_number: Color32,
+    c_true: Color32,
+    c_false: Color32,
+    c_date: Color32,
+    c_null: Color32,
+    c_oid: Color32,
+    c_obj: Color32,
+    key: Color32,
+    c_link: Color32,
+    highlight: Color32,
+    c_keyword: Color32,
+    /// Alternate table rows.
+    stripe: Color32,
+    /// An off switch.
+    track: Color32,
+    faint_bg: Color32,
+}
+
+const DARK_PAL: Palette = Palette {
+    bg: Color32::from_rgb(0x10, 0x12, 0x14),
+    panel: Color32::from_rgb(0x16, 0x18, 0x1b),
+    raised: Color32::from_rgb(0x1c, 0x1f, 0x22),
+    hover: Color32::from_rgb(0x27, 0x2b, 0x2f),
+    border: Color32::from_rgb(0x32, 0x37, 0x3c),
+    text: Color32::from_rgb(0xcc, 0xcc, 0xcc),
+    bright: Color32::from_rgb(0xfa, 0xfa, 0xfa),
+    muted: Color32::from_rgb(0x8a, 0x8f, 0x96),
+    faint: Color32::from_rgb(0x5f, 0x64, 0x69),
+    primary: Color32::from_rgb(134, 201, 249),
+    alert: Color32::from_rgb(247, 110, 133),
+    success: Color32::from_rgb(142, 242, 140),
+    warning: Color32::from_rgb(247, 208, 110),
+    c_string: Color32::from_rgb(0xf2, 0xa3, 0x65),
+    c_number: Color32::from_rgb(0x5c, 0xa5, 0xd6),
+    c_true: Color32::from_rgb(0x83, 0xc7, 0x6b),
+    c_false: Color32::from_rgb(0xe5, 0x4d, 0x56),
+    c_date: Color32::from_rgb(0x66, 0xcc, 0xb4),
+    c_null: Color32::from_rgb(0x9e, 0x9e, 0x9e),
+    c_oid: Color32::from_rgb(0x00, 0xba, 0xc1),
+    c_obj: Color32::from_rgb(0xa3, 0xaa, 0xb5),
+    key: Color32::from_rgb(0xd7, 0xda, 0xe0),
+    c_link: Color32::from_rgb(0x72, 0xc3, 0xec),
+    highlight: Color32::from_rgba_premultiplied(40, 34, 18, 60),
+    c_keyword: Color32::from_rgb(0xc4, 0xa7, 0xe7),
+    stripe: Color32::from_rgb(0x19, 0x1b, 0x1e),
+    track: Color32::from_rgb(0x3a, 0x40, 0x46),
+    faint_bg: Color32::from_rgb(0x13, 0x15, 0x17),
+};
+
+/// Same roles as the dark palette, darkened where needed to stay readable on white.
+const LIGHT_PAL: Palette = Palette {
+    bg: Color32::from_rgb(0xff, 0xff, 0xff),
+    panel: Color32::from_rgb(0xf3, 0xf4, 0xf6),
+    raised: Color32::from_rgb(0xfa, 0xfb, 0xfc),
+    hover: Color32::from_rgb(0xe4, 0xe7, 0xeb),
+    border: Color32::from_rgb(0xd2, 0xd6, 0xdb),
+    text: Color32::from_rgb(0x2b, 0x2f, 0x34),
+    bright: Color32::from_rgb(0x0d, 0x0f, 0x12),
+    muted: Color32::from_rgb(0x5f, 0x66, 0x6e),
+    faint: Color32::from_rgb(0x8c, 0x93, 0x9a),
+    primary: Color32::from_rgb(0x1f, 0x6f, 0xc0),
+    alert: Color32::from_rgb(0xc8, 0x28, 0x46),
+    success: Color32::from_rgb(0x1f, 0x87, 0x30),
+    warning: Color32::from_rgb(0xa8, 0x6a, 0x00),
+    c_string: Color32::from_rgb(0xb0, 0x55, 0x00),
+    c_number: Color32::from_rgb(0x1d, 0x5f, 0xa8),
+    c_true: Color32::from_rgb(0x2e, 0x7d, 0x1f),
+    c_false: Color32::from_rgb(0xc6, 0x28, 0x28),
+    c_date: Color32::from_rgb(0x00, 0x7d, 0x68),
+    c_null: Color32::from_rgb(0x75, 0x75, 0x75),
+    c_oid: Color32::from_rgb(0x00, 0x7f, 0x87),
+    c_obj: Color32::from_rgb(0x5a, 0x63, 0x6e),
+    key: Color32::from_rgb(0x24, 0x29, 0x2f),
+    c_link: Color32::from_rgb(0x0b, 0x6a, 0xad),
+    highlight: Color32::from_rgba_premultiplied(64, 52, 10, 64),
+    c_keyword: Color32::from_rgb(0x7a, 0x3e, 0xb5),
+    stripe: Color32::from_rgb(0xf6, 0xf7, 0xf8),
+    track: Color32::from_rgb(0xc4, 0xc9, 0xcf),
+    faint_bg: Color32::from_rgb(0xf8, 0xf9, 0xfa),
+};
+
+/// Set at the start of each frame from egui's resolved theme.
+static LIGHT_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn pal() -> &'static Palette {
+    if LIGHT_MODE.load(std::sync::atomic::Ordering::Relaxed) { &LIGHT_PAL } else { &DARK_PAL }
+}
+
+macro_rules! colors {
+    ($($name:ident: $field:ident),* $(,)?) => {
+        $(
+            #[allow(non_snake_case)]
+            fn $name() -> Color32 {
+                pal().$field
+            }
+        )*
+    };
+}
+
+colors!(BG: bg, PANEL: panel, RAISED: raised, HOVER: hover, BORDER: border, TEXT: text, BRIGHT: bright, MUTED: muted, FAINT: faint, PRIMARY: primary, ALERT: alert, SUCCESS: success, WARNING: warning, C_STRING: c_string, C_NUMBER: c_number, C_TRUE: c_true, C_FALSE: c_false, C_DATE: c_date, C_NULL: c_null, C_OID: c_oid, C_OBJ: c_obj, KEY: key, C_LINK: c_link, HIGHLIGHT: highlight, C_KEYWORD: c_keyword);
+
+/// `c` at `alpha` out of 255, for tints over the background.
+fn tint(c: Color32, alpha: u8) -> Color32 {
+    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), alpha)
+}
 const SIDEBAR_W: f32 = 250.0;
 const HEADER_H: f32 = 40.0;
 const SYSTEM_DBS: [&str; 3] = ["admin", "config", "local"];
@@ -67,17 +164,17 @@ fn str_kind(s: &str) -> StrKind {
 fn color_of(b: &Bson) -> Color32 {
     match b {
         Bson::String(s) => match str_kind(s) {
-            StrKind::Url => C_LINK,
-            StrKind::Plain if s.is_empty() => C_NULL,
-            StrKind::Plain => C_STRING,
+            StrKind::Url => C_LINK(),
+            StrKind::Plain if s.is_empty() => C_NULL(),
+            StrKind::Plain => C_STRING(),
         },
-        Bson::Double(_) | Bson::Int32(_) | Bson::Int64(_) | Bson::Decimal128(_) => C_NUMBER,
-        Bson::Boolean(true) => C_TRUE,
-        Bson::Boolean(false) => C_FALSE,
-        Bson::DateTime(_) | Bson::Timestamp(_) => C_DATE,
-        Bson::Null | Bson::Undefined => C_NULL,
-        Bson::ObjectId(_) => C_OID,
-        _ => C_OBJ,
+        Bson::Double(_) | Bson::Int32(_) | Bson::Int64(_) | Bson::Decimal128(_) => C_NUMBER(),
+        Bson::Boolean(true) => C_TRUE(),
+        Bson::Boolean(false) => C_FALSE(),
+        Bson::DateTime(_) | Bson::Timestamp(_) => C_DATE(),
+        Bson::Null | Bson::Undefined => C_NULL(),
+        Bson::ObjectId(_) => C_OID(),
+        _ => C_OBJ(),
     }
 }
 
@@ -129,36 +226,36 @@ fn json_job(text: &str) -> LayoutJob {
                 }
             }
             if next_is_colon(&text[i..]) {
-                if text[start + 1..].starts_with('$') { PRIMARY } else { KEY }
+                if text[start + 1..].starts_with('$') { PRIMARY() } else { KEY() }
             } else {
-                C_STRING
+                C_STRING()
             }
         } else if c.is_ascii_digit() || (c == '-' && text[i..].starts_with(|d: char| d.is_ascii_digit())) {
             while i < text.len() && text[i..].starts_with(|d: char| d.is_ascii_alphanumeric() || d == '.' || d == '+' || d == '-') {
                 i += 1;
             }
-            C_NUMBER
+            C_NUMBER()
         } else if c.is_alphabetic() || c == '$' || c == '_' {
             while i < text.len() && text[i..].starts_with(|d: char| d.is_alphanumeric() || d == '$' || d == '_') {
                 i += text[i..].chars().next().unwrap().len_utf8();
             }
             match &text[start..i] {
-                "true" => C_TRUE,
-                "false" => C_FALSE,
-                "null" | "undefined" => C_NULL,
-                "ObjectId" => C_OID,
-                "ISODate" | "Date" | "new" => C_DATE,
-                "NumberLong" | "NumberInt" | "NumberDecimal" => C_NUMBER,
-                w if w.starts_with('$') => PRIMARY,
-                _ if next_is_colon(&text[i..]) => KEY,
-                _ => TEXT,
+                "true" => C_TRUE(),
+                "false" => C_FALSE(),
+                "null" | "undefined" => C_NULL(),
+                "ObjectId" => C_OID(),
+                "ISODate" | "Date" | "new" => C_DATE(),
+                "NumberLong" | "NumberInt" | "NumberDecimal" => C_NUMBER(),
+                w if w.starts_with('$') => PRIMARY(),
+                _ if next_is_colon(&text[i..]) => KEY(),
+                _ => TEXT(),
             }
         } else if "{}[]()".contains(c) {
-            C_OBJ
+            C_OBJ()
         } else if ":,".contains(c) {
-            FAINT
+            FAINT()
         } else {
-            TEXT
+            TEXT()
         };
         job.append(&text[start..i], 0.0, fmt(color));
     }
@@ -555,8 +652,8 @@ fn ac_field(
                 egui::ScrollArea::vertical().max_height(230.0).show(ui, |ui| {
                     for (i, s) in ac.items.iter().enumerate() {
                         let mut job = LayoutJob::default();
-                        job.append(&s.text, 0.0, mono(if s.text.starts_with('$') { PRIMARY } else { BRIGHT }));
-                        job.append(&format!("   {}", s.note), 0.0, TextFormat { font_id: FontId::proportional(11.5), color: FAINT, ..Default::default() });
+                        job.append(&s.text, 0.0, mono(if s.text.starts_with('$') { PRIMARY() } else { BRIGHT() }));
+                        job.append(&format!("   {}", s.note), 0.0, TextFormat { font_id: FontId::proportional(11.5), color: FAINT(), ..Default::default() });
                         let r = ui.selectable_label(i == ac.sel, job);
                         if i == ac.sel && moved {
                             r.scroll_to_me(None);
@@ -671,8 +768,6 @@ fn suggest_js(before: &str, paths: &[String], colls: &[String], pkgs: &[String])
     (!items.is_empty()).then(|| (token.chars().count(), items))
 }
 
-const C_KEYWORD: Color32 = Color32::from_rgb(0xc4, 0xa7, 0xe7);
-
 /// JavaScript colouring for the Shell editor.
 fn js_job(text: &str) -> LayoutJob {
     let fmt = |c: Color32| TextFormat { font_id: FontId::monospace(13.0), color: c, ..Default::default() };
@@ -685,10 +780,10 @@ fn js_job(text: &str) -> LayoutJob {
         let start = i;
         let color = if rest.starts_with("//") {
             i += rest.find('\n').unwrap_or(rest.len());
-            FAINT
+            FAINT()
         } else if rest.starts_with("/*") {
             i += rest[2..].find("*/").map(|e| e + 4).unwrap_or(rest.len());
-            FAINT
+            FAINT()
         } else if c == '"' || c == '\'' || c == '`' {
             i += 1;
             let mut esc = false;
@@ -703,12 +798,12 @@ fn js_job(text: &str) -> LayoutJob {
                     break;
                 }
             }
-            C_STRING
+            C_STRING()
         } else if c.is_ascii_digit() {
             while i < text.len() && text[i..].starts_with(|d: char| d.is_ascii_alphanumeric() || d == '.' || d == '_') {
                 i += 1;
             }
-            C_NUMBER
+            C_NUMBER()
         } else if c.is_alphabetic() || c == '_' || c == '$' {
             while i < text.len() && text[i..].starts_with(|d: char| d.is_alphanumeric() || d == '_' || d == '$') {
                 i += text[i..].chars().next().unwrap().len_utf8();
@@ -716,20 +811,20 @@ fn js_job(text: &str) -> LayoutJob {
             let w = &text[start..i];
             let call = text[i..].trim_start().starts_with('(');
             match w {
-                "true" => C_TRUE,
-                "false" => C_FALSE,
-                "null" | "undefined" => C_NULL,
-                _ if JS_KEYWORDS.contains(&w) && !prev_dot => C_KEYWORD,
-                _ if w.starts_with('$') => PRIMARY,
-                _ if call => C_DATE,
-                _ if JS_GLOBALS.contains(&w) && !prev_dot => C_OID,
-                _ if prev_dot => KEY,
-                _ if text[i..].trim_start().starts_with(':') => KEY,
-                _ => TEXT,
+                "true" => C_TRUE(),
+                "false" => C_FALSE(),
+                "null" | "undefined" => C_NULL(),
+                _ if JS_KEYWORDS.contains(&w) && !prev_dot => C_KEYWORD(),
+                _ if w.starts_with('$') => PRIMARY(),
+                _ if call => C_DATE(),
+                _ if JS_GLOBALS.contains(&w) && !prev_dot => C_OID(),
+                _ if prev_dot => KEY(),
+                _ if text[i..].trim_start().starts_with(':') => KEY(),
+                _ => TEXT(),
             }
         } else {
             i += c.len_utf8();
-            if "{}[]()".contains(c) { C_OBJ } else if ".,:;".contains(c) { FAINT } else if "=+-*/<>!&|?%".contains(c) { C_KEYWORD } else { TEXT }
+            if "{}[]()".contains(c) { C_OBJ() } else if ".,:;".contains(c) { FAINT() } else if "=+-*/<>!&|?%".contains(c) { C_KEYWORD() } else { TEXT() }
         };
         if !text[start..i].trim().is_empty() {
             prev_dot = &text[start..i] == ".";
@@ -811,7 +906,7 @@ impl Find {
                     step(&mut f, false);
                 }
                 let label = if f.query.is_empty() { String::new() } else if n == 0 { "No matches".into() } else { format!("{} of {n}", f.cur + 1) };
-                ui.label(RichText::new(label).size(12.0).color(MUTED));
+                ui.label(RichText::new(label).size(12.0).color(MUTED()));
             });
         }
         ui.data_mut(|d| d.insert_temp(key, f.clone()));
@@ -867,10 +962,10 @@ impl Find {
                     Some(h) if h.start <= at => {
                         let e = h.end.min(end);
                         if k == self.cur {
-                            piece.format.background = WARNING;
-                            piece.format.color = BG;
+                            piece.format.background = WARNING();
+                            piece.format.color = BG();
                         } else {
-                            piece.format.background = WARNING.gamma_multiply(0.3);
+                            piece.format.background = WARNING().gamma_multiply(0.3);
                         }
                         piece.byte_range = ByteIndex(at)..ByteIndex(e);
                         at = e;
@@ -915,7 +1010,7 @@ fn column_job(v: &Bson, summarize: bool) -> LayoutJob {
             _ => return job,
         };
         let mut j = LayoutJob::default();
-        j.append(&text, 0.0, mono(C_OBJ));
+        j.append(&text, 0.0, mono(C_OBJ()));
         return j;
     }
     job
@@ -941,33 +1036,33 @@ fn cell_job(v: &Bson) -> LayoutJob {
     fn walk(job: &mut LayoutJob, v: &Bson) -> bool {
         match v {
             Bson::Document(d) => {
-                if !push(job, "{", C_OBJ) {
+                if !push(job, "{", C_OBJ()) {
                     return false;
                 }
                 for (i, (k, x)) in d.iter().enumerate() {
-                    if (i > 0 && !push(job, ", ", FAINT)) || !push(job, k, MUTED) || !push(job, ": ", FAINT) || !walk(job, x) {
+                    if (i > 0 && !push(job, ", ", FAINT())) || !push(job, k, MUTED()) || !push(job, ": ", FAINT()) || !walk(job, x) {
                         return false;
                     }
                 }
-                push(job, "}", C_OBJ)
+                push(job, "}", C_OBJ())
             }
             Bson::Array(a) => {
-                if !push(job, "[", C_OBJ) {
+                if !push(job, "[", C_OBJ()) {
                     return false;
                 }
                 for (i, x) in a.iter().enumerate() {
-                    if (i > 0 && !push(job, ", ", FAINT)) || !walk(job, x) {
+                    if (i > 0 && !push(job, ", ", FAINT())) || !walk(job, x) {
                         return false;
                     }
                 }
-                push(job, "]", C_OBJ)
+                push(job, "]", C_OBJ())
             }
-            Bson::String(s) if str_kind(s) == StrKind::Url => push(job, s, C_LINK),
+            Bson::String(s) if str_kind(s) == StrKind::Url => push(job, s, C_LINK()),
             // Cut before replacing: a cell shows 100 characters, the string may hold megabytes.
             Bson::String(s) => push(job, &format!("\"{}\"", truncate_display(&s.chars().take(STRING_DISPLAY_MAX + 1).collect::<String>().replace('\n', " "))), color_of(v)),
             // The original shows binary from 100 bytes as "<too long binary>" (fieldTypes.binary, 31012).
-            Bson::Binary(b) if b.bytes.len() >= 100 => push(job, &format!("BinData({} bytes)", b.bytes.len()), FAINT),
-            Bson::ObjectId(o) => push(job, &o.to_hex(), C_OID),
+            Bson::Binary(b) if b.bytes.len() >= 100 => push(job, &format!("BinData({} bytes)", b.bytes.len()), FAINT()),
+            Bson::ObjectId(o) => push(job, &o.to_hex(), C_OID()),
             other => push(job, &leaf_text(other), color_of(other)),
         }
     }
@@ -1509,8 +1604,27 @@ struct UiPrefs {
     /// Show the first characters of big objects and arrays in columns, as the original does,
     /// instead of "{12 fields}".
     object_preview: bool,
+    appearance: Appearance,
     /// The version that last ran, to show the changelog once after an update.
     last_version: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Default)]
+enum Appearance {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Appearance {
+    fn apply(self, ctx: &egui::Context) {
+        ctx.set_theme(match self {
+            Appearance::System => egui::ThemePreference::System,
+            Appearance::Light => egui::ThemePreference::Light,
+            Appearance::Dark => egui::ThemePreference::Dark,
+        });
+    }
 }
 
 /// The original keeps 30 recent inputs per collection and kind (HISTORY_LENGTH_BY_COLLECTION,
@@ -1728,7 +1842,7 @@ enum QAct {
 
 impl Default for UiPrefs {
     fn default() -> Self {
-        Self { open_inline: true, table: true, confirm_save: false, auto_save: false, always_writable: false, default_cols: DEFAULT_COLS, timeout_ms: db::DEFAULT_TIMEOUT_MS, shell_runtime: String::new(), shell_histories: HashMap::new(), shell_packages: Vec::new(), history: HashMap::new(), library: HashMap::new(), open_tabs: Vec::new(), cur_tab: 0, last_conn: None, cols: HashMap::new(), relations: HashMap::new(), mongodump: String::new(), mongorestore: String::new(), auto_update: true, auto_preview: true, show_fps: false, object_preview: false, last_version: String::new() }
+        Self { open_inline: true, table: true, confirm_save: false, auto_save: false, always_writable: false, default_cols: DEFAULT_COLS, timeout_ms: db::DEFAULT_TIMEOUT_MS, shell_runtime: String::new(), shell_histories: HashMap::new(), shell_packages: Vec::new(), history: HashMap::new(), library: HashMap::new(), open_tabs: Vec::new(), cur_tab: 0, last_conn: None, cols: HashMap::new(), relations: HashMap::new(), mongodump: String::new(), mongorestore: String::new(), auto_update: true, auto_preview: true, show_fps: false, object_preview: false, appearance: Appearance::System, last_version: String::new() }
     }
 }
 
@@ -1949,7 +2063,7 @@ fn field_menu(ui: &mut egui::Ui, path: &[String], v: &Bson, editable: bool, acts
     let p = path.join(".");
     let is_id = path.first().is_some_and(|k| k == "_id");
     ui.set_min_width(230.0);
-    ui.label(RichText::new(format!("Field: {p}")).size(11.5).color(MUTED));
+    ui.label(RichText::new(format!("Field: {p}")).size(11.5).color(MUTED()));
     ui.separator();
     if ui.button("Copy value").clicked() {
         ui.ctx().copy_text(match v {
@@ -2008,7 +2122,7 @@ fn field_menu(ui: &mut egui::Ui, path: &[String], v: &Bson, editable: bool, acts
         if ui.button("Rename field…").clicked() {
             acts.push(TreeAct::Rename(path.to_vec()));
         }
-        if ui.button(RichText::new("Delete field").color(ALERT)).clicked() {
+        if ui.button(RichText::new("Delete field").color(ALERT())).clicked() {
             acts.push(TreeAct::Remove(path.to_vec()));
         }
         if ui.button("Add field").on_hover_text("Add a field next to this one").clicked() {
@@ -2020,7 +2134,7 @@ fn field_menu(ui: &mut egui::Ui, path: &[String], v: &Bson, editable: bool, acts
         }
     }
     ui.separator();
-    ui.label(RichText::new(format!("Field size: {} bytes", db::field_size(v))).size(11.5).color(FAINT));
+    ui.label(RichText::new(format!("Field size: {} bytes", db::field_size(v))).size(11.5).color(FAINT()));
 }
 
 /// Bun for the Shell: the path from Settings, else the usual install places. Apps opened from
@@ -2074,19 +2188,19 @@ pub(crate) fn collection_ref(coll: &str) -> String {
 /// examples that can be loaded into the editor. Returns an example to load, if one was picked.
 fn shell_help(ui: &mut egui::Ui, coll: &str, writable: bool) -> Option<String> {
     let mut pick = None;
-    let code = |s: &str| RichText::new(s).monospace().size(12.5).color(C_DATE);
+    let code = |s: &str| RichText::new(s).monospace().size(12.5).color(C_DATE());
     let head = |ui: &mut egui::Ui, s: &str| {
         ui.add_space(4.0);
-        ui.label(RichText::new(s).size(11.0).strong().color(MUTED));
+        ui.label(RichText::new(s).size(11.0).strong().color(MUTED()));
     };
-    egui::Frame::new().fill(PANEL).corner_radius(8).inner_margin(12).show(ui, |ui| {
+    egui::Frame::new().fill(PANEL()).corner_radius(8).inner_margin(12).show(ui, |ui| {
         ui.set_width(ui.available_width());
         head(ui, "HOW IT WORKS");
         ui.label("Write one function and return what you want to see. The script runs with Bun and the official MongoDB Node.js driver, so its whole API is available.");
         ui.label(code("async function run() {\n  return await orders.find({ status: 'paid' }).toArray();\n}"));
-        ui.label(RichText::new("A returned cursor is cut to 100 documents. Logs from console.log/warn/error appear above the result. Cmd+Enter runs, Stop ends a long script.").color(MUTED));
+        ui.label(RichText::new("A returned cursor is cut to 100 documents. Logs from console.log/warn/error appear above the result. Cmd+Enter runs, Stop ends a long script.").color(MUTED()));
         if !writable {
-            ui.label(RichText::new("This connection is read-only: insert, update, delete, drop, index changes, $out/$merge and other write commands are refused. Unlock writes in the top bar to allow them.").color(SUCCESS));
+            ui.label(RichText::new("This connection is read-only: insert, update, delete, drop, index changes, $out/$merge and other write commands are refused. Unlock writes in the top bar to allow them.").color(SUCCESS()));
         }
         head(ui, "NAMES YOU CAN USE");
         egui::Grid::new("shell-names").num_columns(2).spacing([16.0, 4.0]).show(ui, |ui| {
@@ -2107,9 +2221,9 @@ fn shell_help(ui: &mut egui::Ui, coll: &str, writable: bool) -> Option<String> {
             }
         });
         head(ui, "COLLECTION METHODS");
-        ui.label(RichText::new(COLL_METHODS.join("  ·  ")).monospace().size(12.0).color(TEXT));
+        ui.label(RichText::new(COLL_METHODS.join("  ·  ")).monospace().size(12.0).color(TEXT()));
         head(ui, "CURSOR METHODS (after find / aggregate)");
-        ui.label(RichText::new(CURSOR_METHODS.join("  ·  ")).monospace().size(12.0).color(TEXT));
+        ui.label(RichText::new(CURSOR_METHODS.join("  ·  ")).monospace().size(12.0).color(TEXT()));
         head(ui, "EXAMPLES  ·  click Use to load one");
         let examples = [
             ("Find with a filter", format!("async function run() {{\n  return await {coll}.find({{ status: 'paid' }}).sort({{ _id: -1 }}).limit(20).toArray();\n}}")),
@@ -2126,7 +2240,7 @@ fn shell_help(ui: &mut egui::Ui, coll: &str, writable: bool) -> Option<String> {
                 if ui.small_button("Use").clicked() {
                     pick = Some(ex.clone());
                 }
-                ui.label(RichText::new(title).color(BRIGHT));
+                ui.label(RichText::new(title).color(BRIGHT()));
             });
         }
         ui.hyperlink_to("MongoDB Node.js driver reference", "https://www.mongodb.com/docs/drivers/node/current/");
@@ -2173,7 +2287,7 @@ fn history_menu(ui: &mut egui::Ui, h: &QueryHist, index_sorts: &[String], acts: 
         let with_clear = |l: &Vec<String>| std::iter::once("{}".to_string()).chain(l.iter().cloned()).collect::<Vec<_>>();
         let (sel, sort, proj) = (with_clear(&h.selector), with_clear(&sort), with_clear(&h.project));
         for (title, list, kind) in [("QUERY", &sel, 0), ("SORT  ·  history and indexes", &sort, 1), ("PROJECT", &proj, 2)] {
-            ui.label(RichText::new(title).size(11.0).color(MUTED));
+            ui.label(RichText::new(title).size(11.0).color(MUTED()));
             egui::ScrollArea::vertical().id_salt(("hist", kind)).max_height(170.0).show(ui, |ui| {
                 for v in list {
                     let one_line: String = v.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -2199,18 +2313,18 @@ fn library_menu(ui: &mut egui::Ui, lib: &[SavedQuery], new_name: &mut String, pi
     sticky_menu(ui, format!("Library ({})", lib.len()), |ui| {
         ui.set_min_width(320.0);
         if lib.is_empty() {
-            ui.label(RichText::new(if pipeline { "No saved pipelines for this collection yet." } else { "No saved queries for this collection yet." }).color(MUTED));
+            ui.label(RichText::new(if pipeline { "No saved pipelines for this collection yet." } else { "No saved queries for this collection yet." }).color(MUTED()));
         }
         egui::ScrollArea::vertical().id_salt("lib").max_height(260.0).show(ui, |ui| {
             for q in lib {
                 ui.horizontal(|ui| {
                     let preview = if pipeline { q.pipeline.clone().unwrap_or_default() } else { q.filter.clone() };
                     let preview: String = preview.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(60).collect();
-                    if ui.add(egui::Button::new(RichText::new(&q.name).color(BRIGHT)).frame(false)).on_hover_text(preview.as_str()).clicked() {
+                    if ui.add(egui::Button::new(RichText::new(&q.name).color(BRIGHT())).frame(false)).on_hover_text(preview.as_str()).clicked() {
                         acts.push(QAct::Load(q.clone()));
                         ui.close();
                     }
-                    ui.label(RichText::new(preview).monospace().size(11.0).color(FAINT));
+                    ui.label(RichText::new(preview).monospace().size(11.0).color(FAINT()));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.small_button("×").on_hover_text("Delete").clicked() {
                             acts.push(QAct::Delete(q.name.clone()));
@@ -2220,7 +2334,7 @@ fn library_menu(ui: &mut egui::Ui, lib: &[SavedQuery], new_name: &mut String, pi
             }
         });
         ui.separator();
-        ui.label(RichText::new(if pipeline { "SAVE THIS PIPELINE" } else { "SAVE THIS QUERY (query, sort and project)" }).size(11.0).color(MUTED));
+        ui.label(RichText::new(if pipeline { "SAVE THIS PIPELINE" } else { "SAVE THIS QUERY (query, sort and project)" }).size(11.0).color(MUTED()));
         ui.horizontal(|ui| {
             let r = ui.add(egui::TextEdit::singleline(new_name).hint_text("name").desired_width(200.0));
             let ok = !new_name.trim().is_empty();
@@ -2229,15 +2343,15 @@ fn library_menu(ui: &mut egui::Ui, lib: &[SavedQuery], new_name: &mut String, pi
                 new_name.clear();
             }
         });
-        ui.label(RichText::new("Saving under an existing name replaces it.").size(11.0).color(FAINT));
+        ui.label(RichText::new("Saving under an existing name replaces it.").size(11.0).color(FAINT()));
     });
 }
 
 /// A titled card holding a group of settings.
 fn settings_section(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
-    ui.label(RichText::new(title).size(11.0).strong().color(MUTED));
+    ui.label(RichText::new(title).size(11.0).strong().color(MUTED()));
     ui.add_space(2.0);
-    egui::Frame::new().fill(RAISED).stroke(Stroke::new(1.0, BORDER)).corner_radius(10).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
+    egui::Frame::new().fill(RAISED()).stroke(Stroke::new(1.0, BORDER())).corner_radius(10).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.spacing_mut().item_spacing.y = 6.0;
         add(ui);
@@ -2251,8 +2365,8 @@ fn setting_row(ui: &mut egui::Ui, title: &str, desc: &str, control: impl FnOnce(
         let w = ui.available_width();
         ui.vertical(|ui| {
             ui.set_width((w - 230.0).max(160.0));
-            ui.label(RichText::new(title).size(14.0).color(BRIGHT));
-            ui.add(egui::Label::new(RichText::new(desc).size(12.0).color(MUTED)).wrap());
+            ui.label(RichText::new(title).size(14.0).color(BRIGHT()));
+            ui.add(egui::Label::new(RichText::new(desc).size(12.0).color(MUTED())).wrap());
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), control);
     });
@@ -2260,12 +2374,12 @@ fn setting_row(ui: &mut egui::Ui, title: &str, desc: &str, control: impl FnOnce(
 
 /// "−  n  +" for a small whole number (the control slot is right-to-left, so added in reverse).
 fn stepper(ui: &mut egui::Ui, value: &mut usize, min: usize, max: usize) {
-    egui::Frame::new().fill(BG).corner_radius(8).inner_margin(3).show(ui, |ui| {
+    egui::Frame::new().fill(BG()).corner_radius(8).inner_margin(3).show(ui, |ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
         if ui.add_enabled(*value < max, egui::Button::new(RichText::new("+").size(14.0)).corner_radius(6)).clicked() {
             *value += 1;
         }
-        ui.add_sized([34.0, 22.0], egui::Label::new(RichText::new(value.to_string()).size(14.0).color(BRIGHT)));
+        ui.add_sized([34.0, 22.0], egui::Label::new(RichText::new(value.to_string()).size(14.0).color(BRIGHT())));
         if ui.add_enabled(*value > min, egui::Button::new(RichText::new("−").size(14.0)).corner_radius(6)).clicked() {
             *value -= 1;
         }
@@ -2281,23 +2395,23 @@ fn toggle(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
     }
     let t = ui.ctx().animate_bool(r.id, *on);
     let enabled = ui.is_enabled();
-    let bg = if enabled { Color32::from_rgb(0x3a, 0x40, 0x46).lerp_to_gamma(PRIMARY, t) } else { HOVER };
+    let bg = if enabled { pal().track.lerp_to_gamma(PRIMARY(), t) } else { HOVER() };
     ui.painter().rect_filled(rect, 11, bg);
     let x = egui::lerp(rect.left() + 11.0..=rect.right() - 11.0, t);
-    ui.painter().circle_filled(egui::pos2(x, rect.center().y), 8.0, if enabled { BRIGHT } else { MUTED });
+    ui.painter().circle_filled(egui::pos2(x, rect.center().y), 8.0, if enabled { Color32::from_gray(0xfa) } else { MUTED() });
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// A row of joined buttons where exactly one is chosen.
 fn segmented<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options: &[(T, &str)]) {
-    egui::Frame::new().fill(BG).corner_radius(8).inner_margin(3).show(ui, |ui| {
+    egui::Frame::new().fill(BG()).corner_radius(8).inner_margin(3).show(ui, |ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
         // In a right-to-left row, add in reverse so the options still read left to right.
         let rtl = ui.layout().main_dir() == egui::Direction::RightToLeft;
         let order: Vec<&(T, &str)> = if rtl { options.iter().rev().collect() } else { options.iter().collect() };
         for (v, label) in order {
             let on = *value == *v;
-            let b = egui::Button::new(RichText::new(*label).size(12.5).color(if on { BG } else { TEXT })).fill(if on { PRIMARY } else { Color32::TRANSPARENT }).corner_radius(6);
+            let b = egui::Button::new(RichText::new(*label).size(12.5).color(if on { BG() } else { TEXT() })).fill(if on { PRIMARY() } else { Color32::TRANSPARENT }).corner_radius(6);
             if ui.add(b).clicked() {
                 *value = *v;
             }
@@ -2312,7 +2426,7 @@ fn optimal_width(ui: &egui::Ui, docs: &[Document], col: &str, summarize: bool) -
         return 100.0 + CELL_PAD; // the original's fallback width
     }
     let widest = ui.fonts_mut(|f| {
-        let head = f.layout_no_wrap(col.to_string(), FontId::proportional(12.5), TEXT).size().x;
+        let head = f.layout_no_wrap(col.to_string(), FontId::proportional(12.5), TEXT()).size().x;
         docs.iter()
             .filter_map(|d| db::get_path(d, col))
             .map(|v| f.layout_job(column_job(v, summarize)).size().x)
@@ -2414,7 +2528,10 @@ impl App {
             app.worker.send(Msg::Docs { req: app.req, res: Ok((docs, n, 3)) });
         } else if demo {
             app.load_demo();
-            // Test switch: the demo picture with the find bar open.
+            // Test switches: the demo picture in the light theme, and with the find bar open.
+            if std::env::var("QUARRY_TEST_LIGHT").is_ok() {
+                Appearance::Light.apply(&cc.egui_ctx);
+            }
             if let Ok(q) = std::env::var("QUARRY_TEST_FIND") {
                 let f = Find { open: true, query: q, ..Default::default() };
                 cc.egui_ctx.data_mut(|d| d.insert_temp(egui::Id::unique("json-editor-text").with("find"), f));
@@ -2425,6 +2542,7 @@ impl App {
             let ui_json = config_dir().join("ui.json").exists().then_some(());
             let (prefs, broken_prefs) = parse_config(&config_dir().join("ui.json"));
             app.prefs = prefs;
+            app.prefs.appearance.apply(&cc.egui_ctx);
             for meta in metas {
                 let masked = keychain(meta.id).and_then(|k| k.get_password().ok()).map(|u| db::mask_uri(&u)).unwrap_or_default();
                 app.conns.push(Conn { meta, client: None, status: Status::Idle, writable: false, dbs: Vec::new(), masked_uri: masked , tunnel: None });
@@ -2899,7 +3017,7 @@ impl App {
         if self.tools_installing {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(RichText::new("Downloading the MongoDB Database Tools…").color(MUTED));
+                ui.label(RichText::new("Downloading the MongoDB Database Tools…").color(MUTED()));
             });
         } else if ui.button("Install the MongoDB Database Tools").on_hover_text(format!("Downloads MongoDB's official build into {}", tools_dir().display())).clicked() {
             self.install_tools();
@@ -3645,32 +3763,39 @@ impl App {
     }
 }
 
+/// Visuals for both themes; egui picks one from the system or the Appearance setting.
 fn style(ctx: &egui::Context) {
-    let mut v = egui::Visuals::dark();
-    v.panel_fill = PANEL;
-    v.window_fill = RAISED;
-    v.extreme_bg_color = BG;
-    v.faint_bg_color = Color32::from_rgb(0x13, 0x15, 0x17);
-    v.window_stroke = Stroke::new(1.0, BORDER);
-    v.selection.bg_fill = Color32::from_rgba_unmultiplied(134, 201, 249, 48);
-    v.selection.stroke = Stroke::new(1.0, PRIMARY);
-    v.hyperlink_color = PRIMARY;
-    v.override_text_color = Some(TEXT);
-    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
-    v.widgets.inactive.weak_bg_fill = RAISED;
-    v.widgets.inactive.bg_fill = RAISED;
-    v.widgets.hovered.weak_bg_fill = HOVER;
-    v.widgets.active.weak_bg_fill = HOVER;
-    for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.noninteractive] {
-        w.corner_radius = CornerRadius::same(6);
+    for (theme, p) in [(egui::Theme::Dark, &DARK_PAL), (egui::Theme::Light, &LIGHT_PAL)] {
+        ctx.set_visuals_of(theme, visuals(theme, p));
     }
-    ctx.set_visuals(v);
     ctx.global_style_mut(|s| {
         s.spacing.item_spacing = egui::vec2(8.0, 6.0);
         s.spacing.button_padding = egui::vec2(10.0, 4.0);
         // No bounce past the edge of lists.
         s.spacing.scroll.kinetic.rubber_band = false;
     });
+}
+
+fn visuals(theme: egui::Theme, p: &Palette) -> egui::Visuals {
+    let mut v = theme.default_visuals();
+    v.panel_fill = p.panel;
+    v.window_fill = p.raised;
+    v.extreme_bg_color = p.bg;
+    v.faint_bg_color = p.faint_bg;
+    v.window_stroke = Stroke::new(1.0, p.border);
+    v.selection.bg_fill = tint(p.primary, 48);
+    v.selection.stroke = Stroke::new(1.0, p.primary);
+    v.hyperlink_color = p.primary;
+    v.override_text_color = Some(p.text);
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, p.border);
+    v.widgets.inactive.weak_bg_fill = p.raised;
+    v.widgets.inactive.bg_fill = p.raised;
+    v.widgets.hovered.weak_bg_fill = p.hover;
+    v.widgets.active.weak_bg_fill = p.hover;
+    for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.noninteractive] {
+        w.corner_radius = CornerRadius::same(6);
+    }
+    v
 }
 
 enum StageAct {
@@ -3689,10 +3814,10 @@ enum StageAct {
 /// One stage of the pipeline builder: operator, on/off, order and removal on top, the stage body
 /// on the left and what comes out of the stage on the right.
 fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, auto: bool, acts: &mut Vec<StageAct>) {
-    egui::Frame::new().fill(RAISED).corner_radius(8).inner_margin(10).stroke(Stroke::new(1.0, BORDER)).show(ui, |ui| {
+    egui::Frame::new().fill(RAISED()).corner_radius(8).inner_margin(10).stroke(Stroke::new(1.0, BORDER())).show(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("{}", i + 1)).monospace().color(FAINT));
-            ui.menu_button(RichText::new(&s.op).monospace().strong().color(if s.on { C_KEYWORD } else { FAINT }), |ui| {
+            ui.label(RichText::new(format!("{}", i + 1)).monospace().color(FAINT()));
+            ui.menu_button(RichText::new(&s.op).monospace().strong().color(if s.on { C_KEYWORD() } else { FAINT() }), |ui| {
                 egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
                     for (op, _) in db::STAGES {
                         if ui.button(RichText::new(*op).monospace()).clicked() {
@@ -3709,8 +3834,8 @@ fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, auto: bool, 
             }
             ui.hyperlink_to(RichText::new("Docs").size(11.5), format!("https://www.mongodb.com/docs/manual/reference/operator/aggregation/{}/", s.op.trim_start_matches('$')));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.menu_button(RichText::new("Remove…").color(ALERT), |ui| {
-                    if ui.button(RichText::new(format!("Remove stage {}", i + 1)).color(ALERT)).clicked() {
+                ui.menu_button(RichText::new("Remove…").color(ALERT()), |ui| {
+                    if ui.button(RichText::new(format!("Remove stage {}", i + 1)).color(ALERT())).clicked() {
                         acts.push(StageAct::Remove(i));
                         ui.close();
                     }
@@ -3734,7 +3859,7 @@ fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, auto: bool, 
                     acts.push(StageAct::Edited(i));
                 }
                 if let Err(e) = db::parse_value(&s.text) {
-                    ui.label(RichText::new(e).size(11.5).color(ALERT));
+                    ui.label(RichText::new(e).size(11.5).color(ALERT()));
                 }
             });
             // A gap, not ui.separator(): in a row a separator takes all the height left and
@@ -3743,14 +3868,14 @@ fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, auto: bool, 
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
                     if !s.on {
-                        ui.label(RichText::new("Off: the pipeline skips this stage.").color(FAINT));
+                        ui.label(RichText::new("Off: the pipeline skips this stage.").color(FAINT()));
                     } else if s.req != 0 {
                         ui.spinner();
-                        ui.label(RichText::new("Previewing…").color(MUTED));
+                        ui.label(RichText::new("Previewing…").color(MUTED()));
                     } else if let Some(n) = s.count {
-                        ui.label(RichText::new(format!("{} documents", group(&n.to_string()))).strong().color(BRIGHT));
+                        ui.label(RichText::new(format!("{} documents", group(&n.to_string()))).strong().color(BRIGHT()));
                         if let Some(ms) = s.ms {
-                            ui.label(RichText::new(format!("{ms} ms")).color(FAINT));
+                            ui.label(RichText::new(format!("{ms} ms")).color(FAINT()));
                         }
                     } else if s.error.is_none() && !auto && ui.small_button("Preview").clicked() {
                         acts.push(StageAct::Preview(i));
@@ -3758,7 +3883,7 @@ fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, auto: bool, 
                 });
                 if s.on {
                     if let Some(e) = &s.error {
-                        ui.label(RichText::new(e).size(12.0).color(if e.starts_with("This stage writes") { WARNING } else { ALERT }));
+                        ui.label(RichText::new(e).size(12.0).color(if e.starts_with("This stage writes") { WARNING() } else { ALERT() }));
                     }
                     stage_samples(ui, s, i, acts);
                 }
@@ -3772,7 +3897,7 @@ fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, auto: bool, 
 fn stage_samples(ui: &mut egui::Ui, s: &mut Stage, i: usize, acts: &mut Vec<StageAct>) {
     if s.sample.is_empty() {
         if s.count == Some(0) {
-            ui.label(RichText::new("No documents come out of this stage.").color(FAINT));
+            ui.label(RichText::new("No documents come out of this stage.").color(FAINT()));
         }
         return;
     }
@@ -3782,12 +3907,12 @@ fn stage_samples(ui: &mut egui::Ui, s: &mut Stage, i: usize, acts: &mut Vec<Stag
             let open = s.open.contains(&k);
             let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 20.0), Sense::click());
             if resp.hovered() {
-                ui.painter().rect_filled(rect, 4, HOVER);
+                ui.painter().rect_filled(rect, 4, HOVER());
             }
-            chevron(ui.painter(), egui::pos2(rect.left() + 8.0, rect.center().y), open, if open { PRIMARY } else { FAINT });
+            chevron(ui.painter(), egui::pos2(rect.left() + 8.0, rect.center().y), open, if open { PRIMARY() } else { FAINT() });
             let g = ui.fonts_mut(|f| f.layout_job(cell_job(&Bson::Document(d.clone()))));
             let clip = ui.painter().with_clip_rect(rect.shrink2(egui::vec2(2.0, 0.0)));
-            clip.galley(egui::pos2(rect.left() + 20.0, rect.center().y - g.size().y / 2.0), g, TEXT);
+            clip.galley(egui::pos2(rect.left() + 20.0, rect.center().y - g.size().y / 2.0), g, TEXT());
             if resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(if open { "Click to close" } else { "Click to see the whole document" }).clicked() {
                 if !s.open.remove(&k) {
                     s.open.insert(k);
@@ -3815,7 +3940,7 @@ fn pill(ui: &mut egui::Ui, text: &str, fg: Color32) -> egui::Response {
 }
 
 fn primary(ui: &mut egui::Ui, text: &str, fill: Color32) -> egui::Response {
-    ui.add(egui::Button::new(RichText::new(text).strong().color(BG)).fill(fill))
+    ui.add(egui::Button::new(RichText::new(text).strong().color(BG())).fill(fill))
 }
 
 fn mono(c: Color32) -> TextFormat {
@@ -3825,14 +3950,14 @@ fn mono(c: Color32) -> TextFormat {
 fn row_job(d: &Document, width: f32) -> LayoutJob {
     let mut job = LayoutJob::default();
     if let Some(id) = d.get("_id") {
-        job.append(&db::short(id), 0.0, mono(C_OID));
-        job.append("  ", 0.0, mono(MUTED));
+        job.append(&db::short(id), 0.0, mono(C_OID()));
+        job.append("  ", 0.0, mono(MUTED()));
     }
     for (k, v) in d.iter().filter(|(k, _)| *k != "_id").take(12) {
-        job.append(k, 0.0, mono(MUTED));
-        job.append(": ", 0.0, mono(MUTED));
+        job.append(k, 0.0, mono(MUTED()));
+        job.append(": ", 0.0, mono(MUTED()));
         job.append(&cell_text(v).chars().take(60).collect::<String>(), 0.0, mono(color_of(v)));
-        job.append("   ", 0.0, mono(MUTED));
+        job.append("   ", 0.0, mono(MUTED()));
     }
     job.wrap = egui::text::TextWrapping { max_width: width, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
     job
@@ -3842,9 +3967,9 @@ fn row_job(d: &Document, width: f32) -> LayoutJob {
 fn side_row(ui: &mut egui::Ui, indent: f32, active: bool, paint: impl FnOnce(&egui::Painter, egui::Rect)) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), Sense::click());
     let fill = if active {
-        Color32::from_rgba_unmultiplied(134, 201, 249, 30)
+        tint(PRIMARY(), 30)
     } else if resp.hovered() {
-        HOVER
+        HOVER()
     } else {
         Color32::TRANSPARENT
     };
@@ -3865,6 +3990,7 @@ fn chevron(p: &egui::Painter, c: egui::Pos2, open: bool, color: Color32) {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        LIGHT_MODE.store(ctx.theme() == egui::Theme::Light, std::sync::atomic::Ordering::Relaxed);
         // Screenshot mode must keep drawing even if the window is covered or hidden, or it never finishes.
         if self.shot.is_some() {
             ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaintWhileHidden);
@@ -3895,7 +4021,7 @@ impl eframe::App for App {
         if !self.prefs.open_inline && self.selected_doc().is_some() && view != Some(View::Indexes) {
             self.inspector(ui);
         }
-        egui::CentralPanel::default_margins().frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin { left: 12, right: 12, top: 8, bottom: 8 })).show(ui, |ui| {
+        egui::CentralPanel::default_margins().frame(egui::Frame::new().fill(BG()).inner_margin(egui::Margin { left: 12, right: 12, top: 8, bottom: 8 })).show(ui, |ui| {
             self.tab_strip(ui);
             if self.tabs.is_empty() {
                 self.welcome(ui);
@@ -4094,29 +4220,29 @@ impl App {
         egui::Modal::new(egui::Id::unique(("quarry-layer", "tool"))).show(ctx, |ui| {
             ui.set_width(640.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new(&t.title).strong().size(16.0).color(BRIGHT));
+                ui.label(RichText::new(&t.title).strong().size(16.0).color(BRIGHT()));
                 match &t.done {
                     None => {
                         ui.spinner();
                     }
                     Some(Ok(m)) => {
-                        ui.label(RichText::new(m).color(SUCCESS));
+                        ui.label(RichText::new(m).color(SUCCESS()));
                     }
                     Some(Err(e)) => {
-                        ui.label(RichText::new(e).color(ALERT));
+                        ui.label(RichText::new(e).color(ALERT()));
                     }
                 }
             });
-            egui::Frame::new().fill(BG).corner_radius(6).inner_margin(8).show(ui, |ui| {
+            egui::Frame::new().fill(BG()).corner_radius(6).inner_margin(8).show(ui, |ui| {
                 egui::ScrollArea::vertical().max_height(320.0).stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
                     for l in &t.log {
-                        ui.label(RichText::new(l).monospace().size(11.5).color(TEXT));
+                        ui.label(RichText::new(l).monospace().size(11.5).color(TEXT()));
                     }
                 });
             });
             ui.horizontal(|ui| {
                 if t.done.is_none() {
-                    if ui.button(RichText::new("Stop").color(ALERT)).clicked() {
+                    if ui.button(RichText::new("Stop").color(ALERT())).clicked() {
                         if let Some(c) = t.cancel.take() {
                             let _ = c.send(());
                         }
@@ -4148,7 +4274,7 @@ impl App {
         let r = egui::Modal::new(egui::Id::unique(("quarry-layer", "users-window"))).show(ctx, |ui| {
             ui.set_width((screen.width() * 0.6).clamp(560.0, 900.0));
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Users and roles").strong().size(18.0).color(BRIGHT));
+                ui.label(RichText::new("Users and roles").strong().size(18.0).color(BRIGHT()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     open = !ui.button("Done").on_hover_text("Esc").clicked();
                     if ui.button("Refresh").clicked() {
@@ -4160,12 +4286,12 @@ impl App {
             });
             if !writable {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Read-only: unlock writes to add, change or drop users.").color(SUCCESS));
+                    ui.label(RichText::new("Read-only: unlock writes to add, change or drop users.").color(SUCCESS()));
                     unlock = ui.small_button("Unlock…").clicked();
                 });
             }
             if atlas {
-                ui.label(RichText::new("Atlas manages database users in its web console; it refuses adding, changing or dropping users from here, and may list none.").size(12.0).color(WARNING));
+                ui.label(RichText::new("Atlas manages database users in its web console; it refuses adding, changing or dropping users from here, and may list none.").size(12.0).color(WARNING()));
             }
             egui::ScrollArea::vertical().max_height(screen.height() - 220.0).show(ui, |ui| {
                 settings_section(ui, "USERS", |ui| match &u.users {
@@ -4173,20 +4299,20 @@ impl App {
                         ui.spinner();
                     }
                     Some(Err(e)) => {
-                        ui.label(RichText::new(format!("Could not list users: {e}")).color(ALERT));
+                        ui.label(RichText::new(format!("Could not list users: {e}")).color(ALERT()));
                     }
                     Some(Ok(list)) => {
                         if list.is_empty() {
-                            ui.label(RichText::new("No users.").color(MUTED));
+                            ui.label(RichText::new("No users.").color(MUTED()));
                         }
                         for user in list {
                             let (name, db) = (user.get_str("user").unwrap_or_default().to_string(), user.get_str("db").unwrap_or_default().to_string());
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new(&name).monospace().color(BRIGHT));
-                                ui.label(RichText::new(format!("@{db}")).monospace().color(FAINT));
-                                ui.label(RichText::new(roles_text(user)).monospace().size(12.0).color(C_STRING));
+                                ui.label(RichText::new(&name).monospace().color(BRIGHT()));
+                                ui.label(RichText::new(format!("@{db}")).monospace().color(FAINT()));
+                                ui.label(RichText::new(roles_text(user)).monospace().size(12.0).color(C_STRING()));
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui.add_enabled(writable, egui::Button::new(RichText::new("Drop…").color(ALERT)).small()).clicked() {
+                                    if ui.add_enabled(writable, egui::Button::new(RichText::new("Drop…").color(ALERT())).small()).clicked() {
                                         drop_user = Some((db.clone(), name.clone()));
                                     }
                                     if ui.add_enabled(writable, egui::Button::new("Edit").small()).clicked() {
@@ -4196,7 +4322,7 @@ impl App {
                             });
                             if let Some((en, edb, pwd, roles)) = &mut u.edit {
                                 if *en == name && *edb == db {
-                                    egui::Frame::new().fill(BG).corner_radius(6).inner_margin(8).show(ui, |ui| {
+                                    egui::Frame::new().fill(BG()).corner_radius(6).inner_margin(8).show(ui, |ui| {
                                         egui::Grid::new(("edit", &name)).num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
                                             ui.label("New password");
                                             ui.add(egui::TextEdit::singleline(pwd).password(true).hint_text("leave empty to keep").desired_width(280.0));
@@ -4206,7 +4332,7 @@ impl App {
                                             ui.end_row();
                                         });
                                         ui.horizontal(|ui| {
-                                            if primary(ui, "Save", PRIMARY).clicked() {
+                                            if primary(ui, "Save", PRIMARY()).clicked() {
                                                 let mut cmd = doc! { "updateUser": en.as_str(), "roles": parse_roles(roles, edb) };
                                                 if !pwd.is_empty() {
                                                     cmd.insert("pwd", pwd.as_str());
@@ -4240,7 +4366,7 @@ impl App {
                         ui.end_row();
                     });
                     let ok = writable && !u.new_name.trim().is_empty() && !u.new_pwd.is_empty();
-                    if ui.add_enabled(ok, egui::Button::new(RichText::new("Add user").strong().color(BG)).fill(PRIMARY)).clicked() {
+                    if ui.add_enabled(ok, egui::Button::new(RichText::new("Add user").strong().color(BG())).fill(PRIMARY())).clicked() {
                         let db = if u.new_db.trim().is_empty() { "admin".to_string() } else { u.new_db.trim().to_string() };
                         let cmd = doc! { "createUser": u.new_name.trim(), "pwd": u.new_pwd.as_str(), "roles": parse_roles(&u.new_roles, &db) };
                         cmds.push((db, cmd, format!("Added user {}", u.new_name.trim())));
@@ -4252,16 +4378,16 @@ impl App {
                         ui.spinner();
                     }
                     Some(Err(e)) => {
-                        ui.label(RichText::new(format!("Could not list roles: {e}")).color(ALERT));
+                        ui.label(RichText::new(format!("Could not list roles: {e}")).color(ALERT()));
                     }
                     Some(Ok(list)) if list.is_empty() => {
-                        ui.label(RichText::new("No custom roles; built-in roles like read, readWrite and dbAdmin can be given to users.").color(MUTED));
+                        ui.label(RichText::new("No custom roles; built-in roles like read, readWrite and dbAdmin can be given to users.").color(MUTED()));
                     }
                     Some(Ok(list)) => {
                         for r in list {
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new(format!("{}@{}", r.get_str("role").unwrap_or_default(), r.get_str("db").unwrap_or_default())).monospace().color(BRIGHT));
-                                ui.label(RichText::new(format!("inherits: {}", roles_text(r))).monospace().size(12.0).color(FAINT));
+                                ui.label(RichText::new(format!("{}@{}", r.get_str("role").unwrap_or_default(), r.get_str("db").unwrap_or_default())).monospace().color(BRIGHT()));
+                                ui.label(RichText::new(format!("inherits: {}", roles_text(r))).monospace().size(12.0).color(FAINT()));
                             });
                         }
                     }
@@ -4303,11 +4429,11 @@ impl App {
         let mut undo = false;
         let mut close = false;
         egui::Area::new(egui::Id::unique(("quarry-layer", "toast"))).anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -40.0)).show(ctx, |ui| {
-            egui::Frame::new().fill(RAISED).stroke(Stroke::new(1.0, BORDER)).corner_radius(8).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
+            egui::Frame::new().fill(RAISED()).stroke(Stroke::new(1.0, BORDER())).corner_radius(8).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("✓").color(SUCCESS));
-                    ui.label(RichText::new(&msg).color(TEXT));
-                    if !self.undo.is_empty() && ui.button(RichText::new("Undo").color(PRIMARY)).clicked() {
+                    ui.label(RichText::new("✓").color(SUCCESS()));
+                    ui.label(RichText::new(&msg).color(TEXT()));
+                    if !self.undo.is_empty() && ui.button(RichText::new("Undo").color(PRIMARY())).clicked() {
                         undo = true;
                     }
                     close = ui.small_button("×").clicked();
@@ -4347,7 +4473,7 @@ impl App {
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         // Leaves room for the macOS window buttons, which sit over our header.
         let left = if cfg!(target_os = "macos") { 92 } else { 12 };
-        let frame = egui::Frame::new().fill(PANEL).inner_margin(egui::Margin { left, right: 12, top: 7, bottom: 7 });
+        let frame = egui::Frame::new().fill(PANEL()).inner_margin(egui::Margin { left, right: 12, top: 7, bottom: 7 });
         egui::Panel::top("top").exact_size(HEADER_H).frame(frame).show(ui, |ui| {
             // Registered before the widgets so they stay clickable; the empty header moves the window.
             let bar = ui.interact(ui.max_rect().expand2(egui::vec2(left as f32, 7.0)), egui::Id::unique("titlebar"), Sense::click_and_drag());
@@ -4359,22 +4485,22 @@ impl App {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
             }
             ui.horizontal_centered(|ui| {
-                ui.label(RichText::new("Quarry").strong().size(16.0).color(BRIGHT));
-                ui.label(RichText::new("MongoDB workbench").color(MUTED));
+                ui.label(RichText::new("Quarry").strong().size(16.0).color(BRIGHT()));
+                ui.label(RichText::new("MongoDB workbench").color(MUTED()));
                 ui.separator();
                 if let Some(s) = self.t().map(|t| t.sel.clone()) {
                     let (name, writable) = self.conn(s.conn).map(|c| (c.meta.name.clone(), c.writable)).unwrap_or_default();
-                    ui.label(RichText::new(format!("{name}  /  {}  /  {}", s.db, s.coll)).monospace().color(TEXT));
+                    ui.label(RichText::new(format!("{name}  /  {}  /  {}", s.db, s.coll)).monospace().color(TEXT()));
                     if self.prefs.always_writable {
                         // No lock to toggle: writes are always on.
                     } else if writable {
-                        if pill(ui, "WRITES ON", ALERT).on_hover_text("Click to lock this connection again").clicked() {
+                        if pill(ui, "WRITES ON", ALERT()).on_hover_text("Click to lock this connection again").clicked() {
                             if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == s.conn) {
                                 c.writable = false;
                             }
                             self.ok("Writes locked");
                         }
-                    } else if pill(ui, "READ-ONLY", SUCCESS).on_hover_text("Click to allow edits on this connection for this session").clicked() {
+                    } else if pill(ui, "READ-ONLY", SUCCESS()).on_hover_text("Click to allow edits on this connection for this session").clicked() {
                         self.modal = Some(Modal::Unlock(s.conn, None));
                     }
                 }
@@ -4388,7 +4514,7 @@ impl App {
                         self.modal = Some(Modal::Settings);
                     }
                     if let Some(v) = &self.updated {
-                        let r = ui.add(egui::Button::new(RichText::new(format!("Restart for {v}")).color(BG).strong()).fill(SUCCESS)).on_hover_text("The update is installed. Quarry restarts by itself once you have no unsaved edits and have been idle for a minute.");
+                        let r = ui.add(egui::Button::new(RichText::new(format!("Restart for {v}")).color(BG()).strong()).fill(SUCCESS())).on_hover_text("The update is installed. Quarry restarts by itself once you have no unsaved edits and have been idle for a minute.");
                         if r.clicked() {
                             if self.busy() {
                                 self.err("Save or discard your edits and wait for running scripts first.");
@@ -4403,12 +4529,12 @@ impl App {
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::bottom("status").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::symmetric(12, 5))).show(ui, |ui| {
+        egui::Panel::bottom("status").frame(egui::Frame::new().fill(PANEL()).inner_margin(egui::Margin::symmetric(12, 5))).show(ui, |ui| {
             ui.horizontal(|ui| {
                 if self.prefs.show_fps {
                     let dt = ui.input(|i| i.stable_dt).max(0.000_1);
                     let budget = 1000.0 * dt;
-                    let color = if self.frame_ms > budget * 0.8 { WARNING } else { SUCCESS };
+                    let color = if self.frame_ms > budget * 0.8 { WARNING() } else { SUCCESS() };
                     ui.label(RichText::new(format!("{:.0} fps · {:.1} ms", 1.0 / dt, self.frame_ms)).monospace().size(11.0).color(color)).on_hover_text("Frames per second while something moves, and the time Quarry needs to build one frame. At 120 Hz each frame has 8.3 ms.");
                     ui.add_space(8.0);
                 }
@@ -4426,7 +4552,7 @@ impl App {
                 }
                 let (msg, is_err) = &self.status;
                 let first = msg.lines().next().unwrap_or_default();
-                let r = ui.add(egui::Label::new(RichText::new(first).size(12.0).color(if *is_err { ALERT } else { MUTED })).truncate().sense(egui::Sense::click()));
+                let r = ui.add(egui::Label::new(RichText::new(first).size(12.0).color(if *is_err { ALERT() } else { MUTED() })).truncate().sense(egui::Sense::click()));
                 // Errors often carry advice on a second line or a long server message.
                 if !*is_err {
                     r.on_hover_text(msg.as_str());
@@ -4437,7 +4563,7 @@ impl App {
                     if ui.selectable_label(self.log.open, RichText::new("Query log").size(11.5)).on_hover_text("Every command sent to the servers (Cmd+L)").clicked() {
                         self.log.open = !self.log.open;
                     }
-                    ui.label(RichText::new("Cmd+K jumps  ·  Enter runs  ·  double-click a value to edit  ·  Cmd+/ shortcuts").size(11.5).color(FAINT));
+                    ui.label(RichText::new("Cmd+K jumps  ·  Enter runs  ·  double-click a value to edit  ·  Cmd+/ shortcuts").size(11.5).color(FAINT()));
                 });
             });
         });
@@ -4447,7 +4573,7 @@ impl App {
         if !self.log.open {
             return;
         }
-        let frame = egui::Frame::new().fill(BG).inner_margin(egui::Margin::symmetric(12, 6));
+        let frame = egui::Frame::new().fill(BG()).inner_margin(egui::Margin::symmetric(12, 6));
         if !self.log.detached {
             egui::Panel::bottom("query-log").resizable(true).default_size(200.0).min_size(90.0).frame(frame).show(ui, |ui| self.log_body(ui));
             return;
@@ -4465,7 +4591,7 @@ impl App {
         let mut copied = false;
         let (log, conns) = (&mut self.log, &self.conns);
         ui.horizontal(|ui| {
-            ui.label(RichText::new("QUERY LOG").size(11.0).color(MUTED));
+            ui.label(RichText::new("QUERY LOG").size(11.0).color(MUTED()));
             ui.add(egui::TextEdit::singleline(&mut log.filter).hint_text("filter").desired_width(200.0).font(FontId::monospace(12.0)));
             ui.checkbox(&mut log.errors, "Errors only");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -4489,7 +4615,7 @@ impl App {
             .filter(|l| (!log.errors || l.err.is_some()) && (log.filter.is_empty() || [&l.name, &l.db, &l.cmd].iter().any(|s| s.contains(log.filter.as_str()))))
             .collect();
         if rows.is_empty() {
-            ui.label(RichText::new(if entries.is_empty() { "Commands sent to the servers show up here." } else { "No command matches." }).color(FAINT));
+            ui.label(RichText::new(if entries.is_empty() { "Commands sent to the servers show up here." } else { "No command matches." }).color(FAINT()));
             return;
         }
         let row_h = 18.0;
@@ -4500,27 +4626,27 @@ impl App {
                     .horizontal(|ui| {
                         ui.set_height(row_h);
                         let mono = |t: &str, c: Color32| RichText::new(t).monospace().size(12.0).color(c);
-                        ui.add_sized([34.0, row_h], egui::Label::new(mono(&ago(l.at), FAINT)));
+                        ui.add_sized([34.0, row_h], egui::Label::new(mono(&ago(l.at), FAINT())));
                         ui.add_sized([60.0, row_h], egui::Label::new(mono(&match (l.ms, &l.err) {
                             (None, _) => "running".into(),
                             (Some(ms), _) => format!("{ms} ms"),
-                        }, if l.err.is_some() { ALERT } else { MUTED })).truncate());
-                        ui.label(mono(&format!("{name} · {}", l.db), MUTED));
-                        ui.label(mono(&l.name, if l.err.is_some() { ALERT } else { PRIMARY }));
+                        }, if l.err.is_some() { ALERT() } else { MUTED() })).truncate());
+                        ui.label(mono(&format!("{name} · {}", l.db), MUTED()));
+                        ui.label(mono(&l.name, if l.err.is_some() { ALERT() } else { PRIMARY() }));
                         if let Some(e) = &l.err {
-                            ui.add(egui::Label::new(mono(e.lines().next().unwrap_or_default(), ALERT)).truncate());
+                            ui.add(egui::Label::new(mono(e.lines().next().unwrap_or_default(), ALERT())).truncate());
                         }
-                        ui.add(egui::Label::new(mono(&l.cmd, TEXT)).truncate());
+                        ui.add(egui::Label::new(mono(&l.cmd, TEXT())).truncate());
                     })
                     .response
                     .interact(egui::Sense::click());
                 let r = r.on_hover_ui(|ui| {
                     ui.set_max_width(640.0);
                     if let Some(e) = &l.err {
-                        ui.label(RichText::new(e).color(ALERT));
+                        ui.label(RichText::new(e).color(ALERT()));
                     }
                     ui.label(RichText::new(&l.cmd).monospace().size(12.0));
-                    ui.label(RichText::new("Click to copy the command").size(11.0).color(FAINT));
+                    ui.label(RichText::new("Click to copy the command").size(11.0).color(FAINT()));
                 });
                 if r.clicked() {
                     ui.ctx().copy_text(l.cmd.clone());
@@ -4544,7 +4670,7 @@ impl App {
             .default_size(SIDEBAR_W)
             .size_range(200.0..=480.0)
             .resizable(true)
-            .frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin { left: 10, right: 10, top: 12, bottom: 10 }).stroke(Stroke::new(1.0, BORDER)))
+            .frame(egui::Frame::new().fill(PANEL()).inner_margin(egui::Margin { left: 10, right: 10, top: 12, bottom: 10 }).stroke(Stroke::new(1.0, BORDER())))
             .show(ui, |ui| {
                 self.conn_picker(ui);
                 ui.add_space(10.0);
@@ -4556,7 +4682,7 @@ impl App {
                         .margin(egui::Margin::symmetric(10, 6)),
                 );
                 ui.add_space(12.0);
-                ui.label(RichText::new("DATABASES").size(11.0).strong().color(FAINT));
+                ui.label(RichText::new("DATABASES").size(11.0).strong().color(FAINT()));
                 ui.add_space(2.0);
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| self.db_tree(ui));
             });
@@ -4568,20 +4694,20 @@ impl App {
             Some(c) => (
                 c.meta.name.clone(),
                 match c.status {
-                    Status::Ready => SUCCESS,
-                    Status::Connecting => WARNING,
-                    Status::Failed(_) => ALERT,
-                    Status::Idle => FAINT,
+                    Status::Ready => SUCCESS(),
+                    Status::Connecting => WARNING(),
+                    Status::Failed(_) => ALERT(),
+                    Status::Idle => FAINT(),
                 },
             ),
-            None => ("Add a connection".to_string(), FAINT),
+            None => ("Add a connection".to_string(), FAINT()),
         };
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 38.0), Sense::click());
         let p = ui.painter();
-        p.rect(rect, 8, if resp.hovered() { HOVER } else { RAISED }, Stroke::new(1.0, BORDER), egui::StrokeKind::Inside);
+        p.rect(rect, 8, if resp.hovered() { HOVER() } else { RAISED() }, Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
         p.circle_filled(egui::pos2(rect.left() + 16.0, rect.center().y), 4.0, dot);
-        p.text(egui::pos2(rect.left() + 28.0, rect.center().y), egui::Align2::LEFT_CENTER, &name, FontId::proportional(14.5), BRIGHT);
-        chevron(p, egui::pos2(rect.right() - 16.0, rect.center().y), true, MUTED);
+        p.text(egui::pos2(rect.left() + 28.0, rect.center().y), egui::Align2::LEFT_CENTER, &name, FontId::proportional(14.5), BRIGHT());
+        chevron(p, egui::pos2(rect.right() - 16.0, rect.center().y), true, MUTED());
         let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
         if cur.is_none() && resp.clicked() {
             return self.new_conn_modal();
@@ -4594,7 +4720,7 @@ impl App {
         egui::Popup::menu(&resp).width(rect.width()).show(|ui| {
             for c in &self.conns {
                 let label = format!("{}   {}", c.meta.name, c.masked_uri);
-                if ui.selectable_label(Some(c.meta.id) == self.active, RichText::new(label).color(TEXT)).clicked() {
+                if ui.selectable_label(Some(c.meta.id) == self.active, RichText::new(label).color(TEXT())).clicked() {
                     pick = Some(c.meta.id);
                 }
             }
@@ -4609,7 +4735,7 @@ impl App {
                 if ui.button("Refresh databases").on_hover_text("Reconnect and reload the list of databases and collections").clicked() {
                     refresh = Some(c.meta.id);
                 }
-                if ui.button(RichText::new(format!("Remove \"{}\"…", c.meta.name)).color(ALERT)).clicked() {
+                if ui.button(RichText::new(format!("Remove \"{}\"…", c.meta.name)).color(ALERT())).clicked() {
                     remove = Some((c.meta.id, c.meta.name.clone()));
                 }
             }
@@ -4689,7 +4815,7 @@ impl App {
     fn db_tree(&mut self, ui: &mut egui::Ui) {
         let Some(id) = self.active else {
             ui.add_space(8.0);
-            ui.label(RichText::new("No connections yet.").color(MUTED));
+            ui.label(RichText::new("No connections yet.").color(MUTED()));
             return;
         };
         ui.spacing_mut().item_spacing.y = 2.0;
@@ -4707,15 +4833,15 @@ impl App {
                 Status::Connecting => {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label(RichText::new("Connecting…").color(MUTED));
+                        ui.label(RichText::new("Connecting…").color(MUTED()));
                     });
                 }
                 st => {
                     ui.add_space(6.0);
                     if let Status::Failed(e) = st {
-                        ui.add(egui::Label::new(RichText::new(e).size(11.5).color(ALERT)).wrap());
+                        ui.add(egui::Label::new(RichText::new(e).size(11.5).color(ALERT())).wrap());
                     }
-                    connect = primary(ui, "Connect", PRIMARY).clicked();
+                    connect = primary(ui, "Connect", PRIMARY()).clicked();
                 }
             }
             for (db_name, colls) in &c.dbs {
@@ -4727,9 +4853,9 @@ impl App {
                 let dim = SYSTEM_DBS.contains(&db_name.as_str());
                 let count = colls.as_ref().map(|v| v.len().to_string()).unwrap_or_else(|| "…".into());
                 let r = side_row(ui, 0.0, false, |p, r| {
-                    chevron(p, egui::pos2(r.left() + 4.0, r.center().y), is_open, MUTED);
-                    p.text(egui::pos2(r.left() + 16.0, r.center().y), egui::Align2::LEFT_CENTER, db_name, FontId::proportional(14.0), if dim { FAINT } else { BRIGHT });
-                    p.text(egui::pos2(r.right(), r.center().y), egui::Align2::RIGHT_CENTER, &count, FontId::proportional(12.0), FAINT);
+                    chevron(p, egui::pos2(r.left() + 4.0, r.center().y), is_open, MUTED());
+                    p.text(egui::pos2(r.left() + 16.0, r.center().y), egui::Align2::LEFT_CENTER, db_name, FontId::proportional(14.0), if dim { FAINT() } else { BRIGHT() });
+                    p.text(egui::pos2(r.right(), r.center().y), egui::Align2::RIGHT_CENTER, &count, FontId::proportional(12.0), FAINT());
                 });
                 if matches!(&self.reveal, Some((c, d, None)) if *c == id && d == db_name) {
                     r.scroll_to_me(Some(egui::Align::Center));
@@ -4739,7 +4865,7 @@ impl App {
                     toggle = Some(db_name.clone());
                 }
                 r.context_menu(|ui| {
-                    ui.label(RichText::new(format!("Database: {db_name}")).size(11.5).color(MUTED));
+                    ui.label(RichText::new(format!("Database: {db_name}")).size(11.5).color(MUTED()));
                     if ui.button("New collection…").clicked() {
                         side.push(SideAct::NewColl(db_name.clone(), false));
                     }
@@ -4763,7 +4889,7 @@ impl App {
                         side.push(SideAct::Restore(db_name.clone()));
                     }
                     ui.separator();
-                    if ui.button(RichText::new("Drop database…").color(ALERT)).clicked() {
+                    if ui.button(RichText::new("Drop database…").color(ALERT())).clicked() {
                         side.push(SideAct::DropDb(db_name.clone()));
                     }
                 });
@@ -4776,13 +4902,13 @@ impl App {
                             let c = egui::pos2(r.left() + 4.0, r.center().y);
                             if is_view {
                                 // Views get a hollow marker so they read as derived data.
-                                p.circle_stroke(c, 3.5, Stroke::new(1.5, if active { PRIMARY } else { C_DATE }));
+                                p.circle_stroke(c, 3.5, Stroke::new(1.5, if active { PRIMARY() } else { C_DATE() }));
                             } else {
-                                p.circle_filled(c, 3.5, if active { PRIMARY } else { WARNING });
+                                p.circle_filled(c, 3.5, if active { PRIMARY() } else { WARNING() });
                             }
                             let w = r.width() - 16.0;
-                            let galley = p.layout(coll.clone(), FontId::proportional(13.5), if active { BRIGHT } else if is_view { C_DATE } else { TEXT }, w);
-                            p.galley(egui::pos2(r.left() + 16.0, r.center().y - galley.size().y / 2.0), galley, TEXT);
+                            let galley = p.layout(coll.clone(), FontId::proportional(13.5), if active { BRIGHT() } else if is_view { C_DATE() } else { TEXT() }, w);
+                            p.galley(egui::pos2(r.left() + 16.0, r.center().y - galley.size().y / 2.0), galley, TEXT());
                         });
                         let r = if is_view { r.on_hover_text("View (read-only)") } else { r };
                         if matches!(&self.reveal, Some((c, d, Some(k))) if *c == id && d == db_name && k == coll) {
@@ -4793,7 +4919,7 @@ impl App {
                             open = Some(sel.clone());
                         }
                         r.context_menu(|ui| {
-                            ui.label(RichText::new(format!("{}: {coll}", if is_view { "View" } else { "Collection" })).size(11.5).color(MUTED));
+                            ui.label(RichText::new(format!("{}: {coll}", if is_view { "View" } else { "Collection" })).size(11.5).color(MUTED()));
                             if ui.button("Open").clicked() {
                                 open = Some(sel.clone());
                             }
@@ -4816,7 +4942,7 @@ impl App {
                             if !is_view && ui.button("Rename…").clicked() {
                                 side.push(SideAct::Rename(db_name.clone(), coll.clone()));
                             }
-                            if ui.button(RichText::new(if is_view { "Drop view…" } else { "Drop collection…" }).color(ALERT)).clicked() {
+                            if ui.button(RichText::new(if is_view { "Drop view…" } else { "Drop collection…" }).color(ALERT())).clicked() {
                                 side.push(SideAct::DropColl(db_name.clone(), coll.clone()));
                             }
                         });
@@ -4910,8 +5036,8 @@ impl App {
                 for (i, t) in self.tabs.iter().enumerate() {
                     let active = i == self.cur;
                     let mut job = LayoutJob::default();
-                    job.append(&t.sel.coll, 0.0, egui::TextFormat::simple(FontId::proportional(13.5), if active { BRIGHT } else { TEXT }));
-                    job.append(&t.sel.db, 6.0, egui::TextFormat::simple(FontId::proportional(11.5), FAINT));
+                    job.append(&t.sel.coll, 0.0, egui::TextFormat::simple(FontId::proportional(13.5), if active { BRIGHT() } else { TEXT() }));
+                    job.append(&t.sel.db, 6.0, egui::TextFormat::simple(FontId::proportional(11.5), FAINT()));
                     if t.view != View::Documents {
                         let v = match t.view {
                             View::Aggregate => "aggregate",
@@ -4922,7 +5048,7 @@ impl App {
                             View::Compare => "compare",
                             View::Documents => "",
                         };
-                        job.append(v, 6.0, egui::TextFormat::simple(FontId::proportional(11.5), C_LINK.gamma_multiply(0.8)));
+                        job.append(v, 6.0, egui::TextFormat::simple(FontId::proportional(11.5), C_LINK().gamma_multiply(0.8)));
                     }
                     let title = ui.fonts_mut(|f| f.layout_job(job));
                     let w = (title.size().x + 50.0).clamp(96.0, 300.0);
@@ -4931,30 +5057,30 @@ impl App {
                     let p = ui.painter();
                     let hovered = resp.hovered();
                     if active {
-                        p.rect(rect, 7, RAISED, Stroke::new(1.0, BORDER), egui::StrokeKind::Inside);
+                        p.rect(rect, 7, RAISED(), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
                         // The original marks the active tab with a yellow underline.
-                        p.line_segment([rect.left_bottom() + egui::vec2(8.0, -1.0), rect.right_bottom() + egui::vec2(-8.0, -1.0)], Stroke::new(2.0, WARNING));
+                        p.line_segment([rect.left_bottom() + egui::vec2(8.0, -1.0), rect.right_bottom() + egui::vec2(-8.0, -1.0)], Stroke::new(2.0, WARNING()));
                     } else if hovered {
-                        p.rect_filled(rect, 7, PANEL);
+                        p.rect_filled(rect, 7, PANEL());
                     }
                     let is_view = self.views.contains(&(t.sel.conn, t.sel.db.clone(), t.sel.coll.clone()));
                     let dot = egui::pos2(rect.left() + 13.0, rect.center().y);
-                    let dc = if active { WARNING } else { FAINT };
+                    let dc = if active { WARNING() } else { FAINT() };
                     if is_view {
                         p.circle_stroke(dot, 3.0, Stroke::new(1.3, dc));
                     } else {
                         p.circle_filled(dot, 3.0, dc);
                     }
                     let clip = egui::Rect::from_min_max(rect.min, egui::pos2(rect.right() - 24.0, rect.bottom()));
-                    p.with_clip_rect(clip).galley(egui::pos2(rect.left() + 24.0, rect.center().y - title.size().y / 2.0), title, TEXT);
+                    p.with_clip_rect(clip).galley(egui::pos2(rect.left() + 24.0, rect.center().y - title.size().y / 2.0), title, TEXT());
                     let xr = egui::Rect::from_center_size(egui::pos2(rect.right() - 13.0, rect.center().y), egui::vec2(16.0, 16.0));
                     let xresp = ui.interact(xr, ui.scope_id().with(("close", i)), Sense::click());
                     if active || hovered || xresp.hovered() {
                         if xresp.hovered() {
-                            ui.painter().rect_filled(xr, 4, HOVER);
+                            ui.painter().rect_filled(xr, 4, HOVER());
                         }
                         let c = xr.center();
-                        let s = Stroke::new(1.4, if xresp.hovered() { BRIGHT } else { MUTED });
+                        let s = Stroke::new(1.4, if xresp.hovered() { BRIGHT() } else { MUTED() });
                         ui.painter().line_segment([c + egui::vec2(-3.5, -3.5), c + egui::vec2(3.5, 3.5)], s);
                         ui.painter().line_segment([c + egui::vec2(3.5, -3.5), c + egui::vec2(-3.5, 3.5)], s);
                     }
@@ -4988,12 +5114,12 @@ impl App {
                         pick = Some(i);
                     }
                 }
-                if !self.tabs.is_empty() && ui.add(egui::Button::new(RichText::new("+").size(16.0).color(MUTED)).frame(false)).on_hover_text("Duplicate this tab").clicked() {
+                if !self.tabs.is_empty() && ui.add(egui::Button::new(RichText::new("+").size(16.0).color(MUTED())).frame(false)).on_hover_text("Duplicate this tab").clicked() {
                     dup = true;
                 }
             });
         });
-        ui.painter().hline(ui.max_rect().x_range(), ui.min_rect().bottom(), Stroke::new(1.0, BORDER));
+        ui.painter().hline(ui.max_rect().x_range(), ui.min_rect().bottom(), Stroke::new(1.0, BORDER()));
         ui.add_space(8.0);
         if reopen {
             return self.reopen_tab();
@@ -5037,9 +5163,9 @@ impl App {
     fn welcome(&mut self, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
             ui.add_space(120.0);
-            ui.label(RichText::new("Pick a collection on the left").size(20.0).color(BRIGHT));
+            ui.label(RichText::new("Pick a collection on the left").size(20.0).color(BRIGHT()));
             ui.add_space(6.0);
-            ui.label(RichText::new("Each collection opens in its own tab. Every connection starts read-only; edits need an explicit unlock, show a change preview, and can be undone.").color(MUTED));
+            ui.label(RichText::new("Each collection opens in its own tab. Every connection starts read-only; edits need an explicit unlock, show a change preview, and can be undone.").color(MUTED()));
             ui.add_space(16.0);
             if ui.button("+ Add a connection").clicked() {
                 self.new_conn_modal();
@@ -5051,7 +5177,7 @@ impl App {
         let Some(t) = self.t() else { return };
         let (coll, view) = (t.sel.coll.clone(), t.view);
         ui.horizontal(|ui| {
-            ui.label(RichText::new(&coll).size(18.0).strong().color(BRIGHT));
+            ui.label(RichText::new(&coll).size(18.0).strong().color(BRIGHT()));
             ui.add_space(12.0);
             for (v, label) in [(View::Documents, "Documents"), (View::Aggregate, "Aggregate"), (View::Indexes, "Indexes"), (View::Schema, "Schema"), (View::Import, "Import"), (View::Compare, "Compare"), (View::Shell, "Shell")] {
                 if ui.selectable_label(view == v, label).clicked() {
@@ -5089,7 +5215,7 @@ impl App {
     /// Enter runs it (or picks a suggestion), Shift+Enter adds a line.
     #[allow(clippy::too_many_arguments)]
     fn query_field(ui: &mut egui::Ui, label: &str, text: &mut String, hint: &str, width: f32, kind: FieldKind, paths: &[String], dates: &[String], ac: &mut Ac) -> bool {
-        ui.add_sized([56.0, 20.0], egui::Label::new(RichText::new(label).size(11.0).color(MUTED)));
+        ui.add_sized([56.0, 20.0], egui::Label::new(RichText::new(label).size(11.0).color(MUTED())));
         let id = egui::Id::unique(("query", label));
         // Test switch: show the suggestion list in the demo picture.
         if ac.id.is_none() && kind == FieldKind::Query && std::env::var("QUARRY_TEST_AC").is_ok() {
@@ -5127,11 +5253,11 @@ impl App {
         let (t, ac, new_lib) = (&mut self.tabs[self.cur], &mut self.ac, &mut self.new_lib);
         let paths = std::mem::take(&mut t.paths);
         let dates = t.date_paths.clone();
-        egui::Frame::new().fill(PANEL).corner_radius(8).inner_margin(10).show(ui, |ui| {
+        egui::Frame::new().fill(PANEL()).corner_radius(8).inner_margin(10).show(ui, |ui| {
             ui.horizontal_top(|ui| {
                 let w = ui.available_width() - 490.0;
                 run |= Self::query_field(ui, "QUERY", &mut t.filter_txt, "{ field: value }   or paste db.coll.find(...) / db.coll.aggregate([...])", w, FieldKind::Query, &paths, &dates, ac);
-                if primary(ui, "  Find  ", PRIMARY).on_hover_text("Enter").clicked() {
+                if primary(ui, "  Find  ", PRIMARY()).on_hover_text("Enter").clicked() {
                     run = true;
                 }
                 explain |= ui.button("Explain").on_hover_text("Cmd+E").clicked();
@@ -5181,8 +5307,8 @@ impl App {
         let pages = count.div_ceil(PAGE_SIZE).max(1);
         let mut go: Option<u64> = None;
         ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("{} documents", group(&count.to_string()))).color(BRIGHT));
-            ui.label(RichText::new(format!("{ms} ms")).color(MUTED));
+            ui.label(RichText::new(format!("{} documents", group(&count.to_string()))).color(BRIGHT()));
+            ui.label(RichText::new(format!("{ms} ms")).color(MUTED()));
             if loading {
                 ui.spinner();
             }
@@ -5239,7 +5365,7 @@ impl App {
                     self.insert = Some("{\n  \n}".into());
                 }
                 let pending = self.tab_drafts();
-                if !pending.is_empty() && primary(ui, &format!("Save all ({})", pending.len()), WARNING).on_hover_text("Documents with unsaved edits").clicked() {
+                if !pending.is_empty() && primary(ui, &format!("Save all ({})", pending.len()), WARNING()).on_hover_text("Documents with unsaved edits").clicked() {
                     if !self.sel_writable() {
                         self.ask_unlock();
                     } else if self.prefs.confirm_save && !self.prefs.always_writable {
@@ -5271,7 +5397,7 @@ impl App {
         let mut add = None;
         sticky_menu(ui, format!("Columns ({})", shown.len()), |ui| {
             ui.set_min_width(280.0);
-            ui.label(RichText::new("SHOWN  ·  pinned columns stay first").size(11.0).color(MUTED));
+            ui.label(RichText::new("SHOWN  ·  pinned columns stay first").size(11.0).color(MUTED()));
             egui::ScrollArea::vertical().id_salt("shown").max_height(260.0).show(ui, |ui| {
                 for (i, c) in shown.iter().enumerate() {
                     ui.horizontal(|ui| {
@@ -5279,7 +5405,7 @@ impl App {
                         if ui.selectable_label(pinned, RichText::new("pin").size(11.0)).on_hover_text("Keep this column first").clicked() {
                             acts.push(ColAct::Pin(c.clone()));
                         }
-                        ui.label(RichText::new(c).monospace().color(if fields.contains(c) { TEXT } else { PRIMARY }));
+                        ui.label(RichText::new(c).monospace().color(if fields.contains(c) { TEXT() } else { PRIMARY() }));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.small_button("×").on_hover_text("Hide").clicked() {
                                 acts.push(ColAct::Hide(c.clone()));
@@ -5297,7 +5423,7 @@ impl App {
             let hidden: Vec<&String> = fields.iter().filter(|f| !shown.contains(f)).collect();
             if !hidden.is_empty() {
                 ui.separator();
-                ui.label(RichText::new(format!("MORE FIELDS ({})", hidden.len())).size(11.0).color(MUTED));
+                ui.label(RichText::new(format!("MORE FIELDS ({})", hidden.len())).size(11.0).color(MUTED()));
                 egui::ScrollArea::vertical().id_salt("more").max_height(180.0).show(ui, |ui| {
                     for f in hidden {
                         if ui.button(RichText::new(format!("+ {f}")).monospace()).clicked() {
@@ -5313,7 +5439,7 @@ impl App {
                     add = Some(self.new_col.trim().to_string());
                 }
             });
-            ui.label(RichText::new("Dotted paths reach inside objects and arrays, like items.0.sku").size(11.0).color(FAINT));
+            ui.label(RichText::new("Dotted paths reach inside objects and arrays, like items.0.sku").size(11.0).color(FAINT()));
             if ui.button(format!("Reset to the first {n} fields")).clicked() {
                 acts.push(ColAct::Reset);
             }
@@ -5387,18 +5513,18 @@ impl App {
             ui.horizontal(|ui| {
                 if connecting {
                     ui.spinner();
-                    ui.label(RichText::new(format!("Connecting to {name}…")).color(MUTED));
+                    ui.label(RichText::new(format!("Connecting to {name}…")).color(MUTED()));
                     return;
                 }
-                ui.label(RichText::new(format!("Connect to {name} to load this tab.")).color(MUTED));
-                if primary(ui, "Connect", PRIMARY).clicked() {
+                ui.label(RichText::new(format!("Connect to {name} to load this tab.")).color(MUTED()));
+                if primary(ui, "Connect", PRIMARY()).clicked() {
                     self.active = Some(id);
                     self.connect(id);
                 }
             });
         } else if docs.is_empty() {
             ui.add_space(20.0);
-            ui.label(RichText::new(if loading { "Loading…" } else { "No documents" }).color(MUTED));
+            ui.label(RichText::new(if loading { "Loading…" } else { "No documents" }).color(MUTED()));
         } else if self.prefs.table {
             self.doc_table(ui, agg, &docs, &fields, base);
         } else {
@@ -5462,7 +5588,7 @@ impl App {
         });
         let hl_cols: Vec<bool> = cols.iter().map(|c| prefs.highlight.contains(&db::strip_indices(c))).collect();
         let related = if agg { HashMap::new() } else { self.t().map(|t| t.related.clone()).unwrap_or_default() };
-        egui::Frame::new().fill(PANEL).corner_radius(8).inner_margin(egui::Margin::symmetric(4, 4)).show(ui, |ui| {
+        egui::Frame::new().fill(PANEL()).corner_radius(8).inner_margin(egui::Margin::symmetric(4, 4)).show(ui, |ui| {
             let mut area = egui::ScrollArea::both().id_salt(("res", agg)).auto_shrink(false);
             // QUARRY_SCROLL_TEST slides the table sideways every frame, to measure scrolling cost.
             if std::env::var("QUARRY_SCROLL_TEST").is_ok() {
@@ -5474,22 +5600,22 @@ impl App {
                 // Header
                 let (hr, _) = ui.allocate_exact_size(egui::vec2(row_w, 30.0), Sense::hover());
                 let p = ui.painter();
-                p.text(egui::pos2(hr.left() + 10.0, hr.center().y), egui::Align2::LEFT_CENTER, "#", FontId::proportional(11.5), FAINT);
+                p.text(egui::pos2(hr.left() + 10.0, hr.center().y), egui::Align2::LEFT_CENTER, "#", FontId::proportional(11.5), FAINT());
                 let mut x = hr.left() + NUM_W;
                 for (c, w) in cols.iter().zip(&widths) {
                     let cell = egui::Rect::from_min_size(egui::pos2(x, hr.top()), egui::vec2(*w, hr.height()));
                     let pinned = prefs.pinned.contains(c);
-                    let color = if pinned { WARNING } else if fields.contains(c) { MUTED } else { PRIMARY };
+                    let color = if pinned { WARNING() } else if fields.contains(c) { MUTED() } else { PRIMARY() };
                     let dir = dir_of(c);
                     let hresp = ui.interact(cell.shrink2(egui::vec2(4.0, 0.0)), ui.scope_id().with(("h", c)), Sense::click());
                     if hresp.hovered() && !agg {
-                        ui.painter().rect_filled(cell.shrink(2.0), 4, HOVER);
+                        ui.painter().rect_filled(cell.shrink(2.0), 4, HOVER());
                     }
-                    ui.painter().with_clip_rect(cell.shrink2(egui::vec2(6.0, 0.0))).text(egui::pos2(x + 8.0, cell.center().y), egui::Align2::LEFT_CENTER, c, FontId::proportional(12.5), if dir.is_some() { BRIGHT } else { color });
+                    ui.painter().with_clip_rect(cell.shrink2(egui::vec2(6.0, 0.0))).text(egui::pos2(x + 8.0, cell.center().y), egui::Align2::LEFT_CENTER, c, FontId::proportional(12.5), if dir.is_some() { BRIGHT() } else { color });
                     if let Some(d) = dir {
                         let a = egui::pos2(cell.right() - 14.0, cell.center().y);
                         let pts = if d > 0 { vec![a + egui::vec2(-4.0, 2.5), a + egui::vec2(4.0, 2.5), a + egui::vec2(0.0, -3.0)] } else { vec![a + egui::vec2(-4.0, -2.5), a + egui::vec2(4.0, -2.5), a + egui::vec2(0.0, 3.0)] };
-                        ui.painter().add(egui::Shape::convex_polygon(pts, PRIMARY, Stroke::NONE));
+                        ui.painter().add(egui::Shape::convex_polygon(pts, PRIMARY(), Stroke::NONE));
                     }
                     let hresp = if agg { hresp.on_hover_text("Right-click for column options") } else { hresp.on_hover_text("Click to sort, right-click for column options") };
                     if hresp.clicked() && !agg {
@@ -5533,7 +5659,7 @@ impl App {
                     if dr.double_clicked() {
                         fit = Some(c.clone());
                     }
-                    ui.painter().vline(cell.right(), handle.y_range(), Stroke::new(1.0, if dr.hovered() || dr.dragged() { PRIMARY } else { BORDER }));
+                    ui.painter().vline(cell.right(), handle.y_range(), Stroke::new(1.0, if dr.hovered() || dr.dragged() { PRIMARY() } else { BORDER() }));
                     if dr.dragged() {
                         resized = Some((c.clone(), (*w + dr.drag_delta().x).clamp(50.0, 900.0)));
                     }
@@ -5542,7 +5668,7 @@ impl App {
                     }
                     x += w;
                 }
-                ui.painter().hline(hr.x_range(), hr.bottom(), Stroke::new(1.0, BORDER));
+                ui.painter().hline(hr.x_range(), hr.bottom(), Stroke::new(1.0, BORDER()));
                 // Rows (at most one page, so no virtualisation is needed)
                 for (i, d) in docs.iter().enumerate() {
                     let drafted = if agg { None } else { self.shown_doc(d) };
@@ -5555,21 +5681,21 @@ impl App {
                     // Rows scrolled out of view keep their space but skip all layout and painting.
                     if ui.is_rect_visible(rr) {
                         let fill = if active {
-                            Color32::from_rgba_unmultiplied(134, 201, 249, 32)
+                            tint(PRIMARY(), 32)
                         } else if ui.rect_contains_pointer(rr) && !ui.ctx().any_popup_open() {
-                            HOVER
+                            HOVER()
                         } else if i % 2 == 1 {
-                            Color32::from_rgb(0x19, 0x1b, 0x1e)
+                            pal().stripe
                         } else {
                             Color32::TRANSPARENT
                         };
                         let p = ui.painter();
                         p.rect_filled(rr, 4, fill);
                         if self.prefs.open_inline {
-                            chevron(p, egui::pos2(rr.left() + 9.0, rr.center().y), active, if active { PRIMARY } else { FAINT });
+                            chevron(p, egui::pos2(rr.left() + 9.0, rr.center().y), active, if active { PRIMARY() } else { FAINT() });
                         }
                         let num = (base + i as u64 + 1).to_string();
-                        let (num, nc) = if drafted.is_some() { (format!("{num}●"), WARNING) } else { (num, FAINT) };
+                        let (num, nc) = if drafted.is_some() { (format!("{num}●"), WARNING()) } else { (num, FAINT()) };
                         p.text(egui::pos2(rr.left() + 18.0, rr.center().y), egui::Align2::LEFT_CENTER, num, FontId::proportional(11.5), nc);
                         let mut x = rr.left() + NUM_W;
                         for (ci, (c, w)) in cols.iter().zip(&widths).enumerate() {
@@ -5580,7 +5706,7 @@ impl App {
                                 continue;
                             }
                             if hl_cols[ci] {
-                                ui.painter().rect_filled(cell, 0, HIGHLIGHT);
+                                ui.painter().rect_filled(cell, 0, HIGHLIGHT());
                             }
                             let clip = ui.painter().with_clip_rect(cell.shrink2(egui::vec2(6.0, 0.0)));
                             let v = db::get_path(d, c);
@@ -5588,16 +5714,16 @@ impl App {
                                 Some(v) => {
                                     let g = ui.fonts_mut(|f| f.layout_job(column_job(v, summarize)));
                                     let gw = g.size().x;
-                                    clip.galley(egui::pos2(x + 8.0, cell.center().y - g.size().y / 2.0), g, TEXT);
+                                    clip.galley(egui::pos2(x + 8.0, cell.center().y - g.size().y / 2.0), g, TEXT());
                                     // Ids only, checked before compact(): that turns the whole value into JSON,
                                 // which is costly for big objects on every frame.
                                 let rel = (!related.is_empty() && matches!(v, Bson::ObjectId(_) | Bson::String(_))).then(|| related.get(&db::compact(v))).flatten();
                                 if let Some(p) = rel {
-                                        clip.text(egui::pos2(x + 14.0 + gw, cell.center().y), egui::Align2::LEFT_CENTER, p, FontId::proportional(12.0), C_LINK);
+                                        clip.text(egui::pos2(x + 14.0 + gw, cell.center().y), egui::Align2::LEFT_CENTER, p, FontId::proportional(12.0), C_LINK());
                                     }
                                 }
                                 None => {
-                                    clip.text(egui::pos2(x + 8.0, cell.center().y), egui::Align2::LEFT_CENTER, "—", FontId::proportional(12.0), FAINT);
+                                    clip.text(egui::pos2(x + 8.0, cell.center().y), egui::Align2::LEFT_CENTER, "—", FontId::proportional(12.0), FAINT());
                                 }
                             }
                             let cr = ui.interact(cell, ui.scope_id().with(("c", i, ci)), Sense::click());
@@ -5629,7 +5755,7 @@ impl App {
                     if active && self.prefs.open_inline {
                         ui.add_space(4.0);
                         let w = (view_w - 24.0).max(320.0);
-                        egui::Frame::new().fill(RAISED).corner_radius(8).inner_margin(12).stroke(Stroke::new(1.0, BORDER)).show(ui, |ui| {
+                        egui::Frame::new().fill(RAISED()).corner_radius(8).inner_margin(12).stroke(Stroke::new(1.0, BORDER())).show(ui, |ui| {
                             ui.set_width(w - 24.0);
                             ui.spacing_mut().item_spacing.y = 6.0;
                             self.doc_body(ui, d, agg);
@@ -5684,7 +5810,7 @@ impl App {
         let selected = self.t().unwrap().selected;
         let view_w = ui.available_width();
         let mut click = None;
-        egui::Frame::new().fill(PANEL).corner_radius(8).inner_margin(4).show(ui, |ui| {
+        egui::Frame::new().fill(PANEL()).corner_radius(8).inner_margin(4).show(ui, |ui| {
             egui::ScrollArea::vertical().id_salt(("list", agg)).auto_shrink(false).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 for (i, d) in docs.iter().enumerate() {
@@ -5696,16 +5822,16 @@ impl App {
                     if active && std::mem::take(&mut self.scroll_sel) {
                         resp.scroll_to_me(None);
                     }
-                    let fill = if active { Color32::from_rgba_unmultiplied(134, 201, 249, 32) } else if resp.hovered() { HOVER } else { Color32::TRANSPARENT };
+                    let fill = if active { tint(PRIMARY(), 32) } else if resp.hovered() { HOVER() } else { Color32::TRANSPARENT };
                     ui.painter().rect_filled(rect, 4, fill);
                     let galley = ui.fonts_mut(|f| f.layout_job(row_job(d, w - 16.0)));
-                    ui.painter().galley(rect.left_center() + egui::vec2(8.0, -galley.size().y / 2.0), galley, TEXT);
+                    ui.painter().galley(rect.left_center() + egui::vec2(8.0, -galley.size().y / 2.0), galley, TEXT());
                     if resp.clicked() {
                         click = Some(i);
                     }
                     if active && self.prefs.open_inline {
                         ui.add_space(4.0);
-                        egui::Frame::new().fill(RAISED).corner_radius(8).inner_margin(12).stroke(Stroke::new(1.0, BORDER)).show(ui, |ui| {
+                        egui::Frame::new().fill(RAISED()).corner_radius(8).inner_margin(12).stroke(Stroke::new(1.0, BORDER())).show(ui, |ui| {
                             ui.set_width(view_w - 48.0);
                             ui.spacing_mut().item_spacing.y = 6.0;
                             self.doc_body(ui, d, agg);
@@ -5744,7 +5870,7 @@ impl App {
             .default_size(460.0)
             .size_range(320.0..=900.0)
             .resizable(true)
-            .frame(egui::Frame::new().fill(PANEL).inner_margin(12).stroke(Stroke::new(1.0, BORDER)))
+            .frame(egui::Frame::new().fill(PANEL()).inner_margin(12).stroke(Stroke::new(1.0, BORDER())))
             .show(ui, |ui| {
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| self.doc_body(ui, &d, from_agg));
             });
@@ -5755,7 +5881,7 @@ impl App {
         let mut acts = Vec::new();
         ui.horizontal(|ui| {
             let id = d.get("_id").map(db::short).unwrap_or_default();
-            ui.label(RichText::new(id).monospace().color(C_OID));
+            ui.label(RichText::new(id).monospace().color(C_OID()));
             ui.add_space(8.0);
             if !from_agg {
                 if ui.small_button("Edit JSON").clicked() {
@@ -5769,7 +5895,7 @@ impl App {
                     c.remove("_id");
                     self.insert = Some(db::to_edit_json(&c));
                 }
-                if ui.small_button(RichText::new("Delete").color(ALERT)).clicked() {
+                if ui.small_button(RichText::new("Delete").color(ALERT())).clicked() {
                     self.modal = Some(Modal::Delete(d.clone()));
                 }
             }
@@ -5820,14 +5946,14 @@ impl App {
         let mut save = false;
         let mut discard = false;
         let mut confirm = self.prefs.confirm_save;
-        egui::Frame::new().fill(Color32::from_rgba_unmultiplied(247, 208, 110, 22)).stroke(Stroke::new(1.0, WARNING.gamma_multiply(0.5))).corner_radius(6).inner_margin(8).show(ui, |ui| {
+        egui::Frame::new().fill(tint(WARNING(), 22)).stroke(Stroke::new(1.0, WARNING().gamma_multiply(0.5))).corner_radius(6).inner_margin(8).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(format!("● {} unsaved change(s)", changes.len())).color(WARNING).strong());
+                ui.label(RichText::new(format!("● {} unsaved change(s)", changes.len())).color(WARNING()).strong());
                 let list: Vec<&str> = changes.iter().take(5).map(|c| c.0.as_str()).collect();
                 let more = if changes.len() > 5 { format!(" +{}", changes.len() - 5) } else { String::new() };
-                ui.label(RichText::new(format!("{}{more}", list.join(", "))).monospace().size(11.5).color(MUTED));
+                ui.label(RichText::new(format!("{}{more}", list.join(", "))).monospace().size(11.5).color(MUTED()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    save = primary(ui, "Save", PRIMARY).on_hover_text("Write all edits of this document at once (Cmd+S)").clicked() || ui.input(|i| i.modifiers.command && i.key_pressed(Key::S));
+                    save = primary(ui, "Save", PRIMARY()).on_hover_text("Write all edits of this document at once (Cmd+S)").clicked() || ui.input(|i| i.modifiers.command && i.key_pressed(Key::S));
                     discard = ui.small_button("Discard").clicked();
                     if !self.prefs.always_writable {
                         ui.checkbox(&mut confirm, RichText::new("Ask before saving").size(11.5));
@@ -6037,8 +6163,8 @@ impl App {
                     _ => unreachable!(),
                 };
                 let mut job = LayoutJob::default();
-                job.append(key, 0.0, mono(BRIGHT));
-                job.append(&format!("  {}", leaf_text(v)), 0.0, mono(FAINT));
+                job.append(key, 0.0, mono(BRIGHT()));
+                job.append(&format!("  {}", leaf_text(v)), 0.0, mono(FAINT()));
                 let adding_here = self.new_field.as_ref().is_some_and(|n| n.parent == *path);
                 let forced = self.fold.as_ref().filter(|f| f.0 == id && path.starts_with(&f.1)).map(|f| f.2);
                 let r = egui::CollapsingHeader::new(job)
@@ -6056,7 +6182,7 @@ impl App {
                         }
                     });
                 if highlighted(&self.prefs, &self.col_key(false), path) {
-                    ui.painter().rect_filled(r.header_response.rect.expand(2.0), 4, HIGHLIGHT);
+                    ui.painter().rect_filled(r.header_response.rect.expand(2.0), 4, HIGHLIGHT());
                 }
                 if editable && r.header_response.double_clicked() && path.first().is_some_and(|k| k != "_id") {
                     acts.push(TreeAct::Start(path.clone(), v.clone()));
@@ -6078,9 +6204,9 @@ impl App {
                 let hl = highlighted(&self.prefs, &self.col_key(false), path);
                 let mut fold = None;
                 let edited = !self.changed.is_empty() && self.changed.contains(&path.join("."));
-                egui::Frame::new().fill(if edited { Color32::from_rgba_unmultiplied(247, 208, 110, 34) } else if hl { HIGHLIGHT } else { Color32::TRANSPARENT }).corner_radius(4).show(ui, |ui| ui.horizontal(|ui| {
+                egui::Frame::new().fill(if edited { tint(WARNING(), 34) } else if hl { HIGHLIGHT() } else { Color32::TRANSPARENT }).corner_radius(4).show(ui, |ui| ui.horizontal(|ui| {
                     ui.add_space(16.0);
-                    let key_r = ui.add(egui::Label::new(RichText::new(key).monospace().color(MUTED)).sense(Sense::click()));
+                    let key_r = ui.add(egui::Label::new(RichText::new(key).monospace().color(MUTED())).sense(Sense::click()));
                     if editing_here {
                         let inl = self.inline.as_mut().unwrap();
                         let r = ui.add(egui::TextEdit::singleline(&mut inl.text).desired_width(EDITOR_W).font(FontId::monospace(12.5)).clip_text(true));
@@ -6104,13 +6230,13 @@ impl App {
                             _ => leaf_text(leaf),
                         };
                         let r = ui.add(egui::Label::new(RichText::new(&text).monospace().color(color_of(leaf))).truncate().sense(Sense::click()));
-                        ui.label(RichText::new(db::type_name(leaf)).size(10.5).color(FAINT));
+                        ui.label(RichText::new(db::type_name(leaf)).size(10.5).color(FAINT()));
                         let id_like = matches!(leaf, Bson::ObjectId(_)) || matches!(leaf, Bson::String(s) if s.len() <= 64);
                         if let Some(p) = self.t().filter(|t| id_like && !t.related.is_empty()).and_then(|t| t.related.get(&db::compact(leaf))) {
-                            ui.label(RichText::new(p).size(12.0).color(C_LINK)).on_hover_text("Preview of the referenced document");
+                            ui.label(RichText::new(p).size(12.0).color(C_LINK())).on_hover_text("Preview of the referenced document");
                         }
                         if let Some(ts) = db::possible_timestamp(leaf) {
-                            ui.label(RichText::new(format!("= {ts}?")).size(10.5).color(C_DATE.gamma_multiply(0.7))).on_hover_text("This number looks like a Unix timestamp in seconds");
+                            ui.label(RichText::new(format!("= {ts}?")).size(10.5).color(C_DATE().gamma_multiply(0.7))).on_hover_text("This number looks like a Unix timestamp in seconds");
                         }
                         let r = if editable {
                             let r = r.on_hover_cursor(egui::CursorIcon::Text).on_hover_text(if text.len() > 60 { text.chars().take(600).collect::<String>() } else { "Double-click to edit, right-click for more".into() });
@@ -6221,14 +6347,14 @@ impl App {
         let running = t.shell.started;
         let mut run = false;
         let mut stop = false;
-        egui::Frame::new().fill(PANEL).corner_radius(8).inner_margin(10).show(ui, |ui| {
+        egui::Frame::new().fill(PANEL()).corner_radius(8).inner_margin(10).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("SHELL  ·  JavaScript run by Bun with the official MongoDB driver").size(11.0).color(MUTED));
-                ui.label(RichText::new("?").color(PRIMARY)).on_hover_text(
+                ui.label(RichText::new("SHELL  ·  JavaScript run by Bun with the official MongoDB driver").size(11.0).color(MUTED()));
+                ui.label(RichText::new("?").color(PRIMARY())).on_hover_text(
                     "Write a function and return a value; a cursor is cut to 100 documents.\nAvailable: db, every collection by name, ObjectId, ISODate, console.log, randomId, UUIDv4.",
                 );
                 if !writable {
-                    ui.label(RichText::new("read-only: writes are refused").size(11.0).color(SUCCESS));
+                    ui.label(RichText::new("read-only: writes are refused").size(11.0).color(SUCCESS()));
                 }
             });
             let id = ui.make_persistent_id("shell-editor");
@@ -6239,15 +6365,15 @@ impl App {
                 match running {
                     Some(at) => {
                         ui.spinner();
-                        ui.label(RichText::new(format!("Running {:.1} s", at.elapsed().as_secs_f32())).color(MUTED));
+                        ui.label(RichText::new(format!("Running {:.1} s", at.elapsed().as_secs_f32())).color(MUTED()));
                         ui.ctx().request_repaint_after(Duration::from_millis(100));
                         stop = ui.button("Stop").clicked();
                     }
                     None => {
-                        run = primary(ui, "Run", PRIMARY).on_hover_text("Cmd+Enter").clicked() || ui.input(|i| i.modifiers.command && i.key_pressed(Key::Enter));
+                        run = primary(ui, "Run", PRIMARY()).on_hover_text("Cmd+Enter").clicked() || ui.input(|i| i.modifiers.command && i.key_pressed(Key::Enter));
                         if let Some(ms) = t.shell.ms {
                             let n = t.shell.count.map(|n| format!("{n} results  ")).unwrap_or_default();
-                            ui.label(RichText::new(format!("{n}{ms} ms")).color(MUTED));
+                            ui.label(RichText::new(format!("{n}{ms} ms")).color(MUTED()));
                         }
                     }
                 }
@@ -6255,7 +6381,7 @@ impl App {
                     ui.menu_button("History", |ui| {
                         ui.set_max_width(520.0);
                         if history.is_empty() {
-                            ui.label(RichText::new("Nothing run yet").color(MUTED));
+                            ui.label(RichText::new("Nothing run yet").color(MUTED()));
                         }
                         for h in &history {
                             let first: String = h.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with("async function")).take(1).collect();
@@ -6267,13 +6393,13 @@ impl App {
                     });
                     sticky_menu(ui, format!("Packages ({})", packages.len()), |ui| {
                         ui.set_min_width(300.0);
-                        ui.label(RichText::new("npm packages for your scripts. Each one is loaded for you and ready by the name shown.").size(11.5).color(MUTED));
+                        ui.label(RichText::new("npm packages for your scripts. Each one is loaded for you and ready by the name shown.").size(11.5).color(MUTED()));
                         let mut drop = None;
                         for (i, p) in packages.iter().enumerate() {
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new(p).monospace().color(BRIGHT));
+                                ui.label(RichText::new(p).monospace().color(BRIGHT()));
                                 let alias = if db::package_spec(p).0 == "lodash" { format!("{}, _", package_ident(p)) } else { package_ident(p) };
-                                ui.label(RichText::new(format!("ready as {alias}")).monospace().size(11.5).color(C_DATE));
+                                ui.label(RichText::new(format!("ready as {alias}")).monospace().size(11.5).color(C_DATE()));
                                 if ui.small_button("×").on_hover_text("Remove").clicked() {
                                     drop = Some(i);
                                 }
@@ -6290,7 +6416,7 @@ impl App {
                                 new_pkg.clear();
                             }
                         });
-                        ui.label(RichText::new("Installed by Bun on the next run. Bun does not run install scripts of packages unless you trust them.").size(11.0).color(FAINT));
+                        ui.label(RichText::new("Installed by Bun on the next run. Bun does not run install scripts of packages unless you trust them.").size(11.0).color(FAINT()));
                     });
                     if ui.selectable_label(t.shell.help, "Help").on_hover_text("What the shell can do, with examples").clicked() {
                         t.shell.help = !t.shell.help;
@@ -6311,15 +6437,15 @@ impl App {
                 ui.add_space(6.0);
             }
             if !t.shell.logs.is_empty() {
-                egui::Frame::new().fill(PANEL).corner_radius(8).inner_margin(10).show(ui, |ui| {
+                egui::Frame::new().fill(PANEL()).corner_radius(8).inner_margin(10).show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    ui.label(RichText::new("LOG").size(11.0).color(MUTED));
+                    ui.label(RichText::new("LOG").size(11.0).color(MUTED()));
                     for (level, text) in &t.shell.logs {
                         let c = match level.as_str() {
-                            "error" => ALERT,
-                            "warn" => WARNING,
-                            "info" => PRIMARY,
-                            _ => TEXT,
+                            "error" => ALERT(),
+                            "warn" => WARNING(),
+                            "info" => PRIMARY(),
+                            _ => TEXT(),
                         };
                         ui.label(RichText::new(text).monospace().size(12.5).color(c));
                     }
@@ -6327,9 +6453,9 @@ impl App {
                 ui.add_space(6.0);
             }
             if let Some(e) = &t.shell.error {
-                egui::Frame::new().fill(Color32::from_rgba_unmultiplied(247, 110, 133, 20)).corner_radius(8).inner_margin(10).show(ui, |ui| {
+                egui::Frame::new().fill(tint(ALERT(), 20)).corner_radius(8).inner_margin(10).show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    ui.label(RichText::new(e).monospace().color(ALERT));
+                    ui.label(RichText::new(e).monospace().color(ALERT()));
                 });
             }
         });
@@ -6338,13 +6464,13 @@ impl App {
         if let Some(v) = &t.shell.value {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new("RESULT").size(11.0).color(MUTED));
+                ui.label(RichText::new("RESULT").size(11.0).color(MUTED()));
                 let what = match (t.shell.docs.len(), t.shell.count) {
                     (0, Some(n)) => format!("{n} items"),
                     (0, None) => db::type_name(v).to_string(),
                     (n, _) => format!("{} documents", group(&n.to_string())),
                 };
-                ui.label(RichText::new(what).color(BRIGHT));
+                ui.label(RichText::new(what).color(BRIGHT()));
                 let pages = t.shell.docs.len().div_ceil(PAGE_SIZE as usize);
                 if has_table && pages > 1 {
                     ui.separator();
@@ -6380,7 +6506,7 @@ impl App {
                     }
                     s
                 });
-                egui::Frame::new().fill(PANEL).corner_radius(8).inner_margin(10).show(ui, |ui| {
+                egui::Frame::new().fill(PANEL()).corner_radius(8).inner_margin(10).show(ui, |ui| {
                     egui::ScrollArea::vertical().id_salt("shell-raw").auto_shrink(false).show(ui, |ui| {
                         ui.add(egui::TextEdit::multiline(&mut text.as_str()).code_editor().desired_width(f32::INFINITY).layouter(&mut code_layout));
                     });
@@ -6504,9 +6630,9 @@ impl App {
         let unsynced = (builder && t.stages_src != t.agg_txt).then(|| if db::is_shell(&t.agg_txt) { "this is a shell command".to_string() } else { stages_from_text(&t.agg_txt).err().unwrap_or_default() });
         let has_results = t.agg_ms.is_some() || t.agg_req != 0;
         let avail = ui.available_height();
-        egui::Frame::new().fill(PANEL).corner_radius(8).inner_margin(10).show(ui, |ui| {
+        egui::Frame::new().fill(PANEL()).corner_radius(8).inner_margin(10).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(if builder { "PIPELINE  ·  each stage shows what comes out of it" } else { "PIPELINE  ·  an array of stages, or paste db.coll.aggregate([...])" }).size(11.0).color(MUTED));
+                ui.label(RichText::new(if builder { "PIPELINE  ·  each stage shows what comes out of it" } else { "PIPELINE  ·  an array of stages, or paste db.coll.aggregate([...])" }).size(11.0).color(MUTED()));
                 ui.add_space(8.0);
                 segmented(ui, &mut t.agg_text_mode, &[(false, "Stages"), (true, "Text")]);
                 if builder {
@@ -6519,16 +6645,16 @@ impl App {
             if builder {
                 match &unsynced {
                     Some(e) => {
-                        ui.label(RichText::new(format!("Cannot show this pipeline as stages: {e}. Fix or run it in Text.")).color(WARNING));
+                        ui.label(RichText::new(format!("Cannot show this pipeline as stages: {e}. Fix or run it in Text.")).color(WARNING()));
                     }
                     None => {
                         let max_h = if has_results { (avail * 0.55).max(260.0) } else { (avail - 70.0).max(260.0) };
                         egui::ScrollArea::vertical().id_salt("stages").max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
-                            egui::Frame::new().fill(BG).corner_radius(8).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
+                            egui::Frame::new().fill(BG()).corner_radius(8).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
                                 ui.set_width(ui.available_width());
                                 let n = t.agg_input.count.map_or(String::new(), |n| format!("  ·  about {} documents", group(&n.to_string())));
                                 // Closed at first, like the original's collection sample (isOpen: false, renderer line 111386).
-                                egui::CollapsingHeader::new(RichText::new(format!("Collection input{n}")).color(MUTED)).id_salt("agg-input").default_open(false).show(ui, |ui| {
+                                egui::CollapsingHeader::new(RichText::new(format!("Collection input{n}")).color(MUTED())).id_salt("agg-input").default_open(false).show(ui, |ui| {
                                     stage_samples(ui, &mut t.agg_input, usize::MAX, &mut sacts);
                                 });
                             });
@@ -6538,7 +6664,7 @@ impl App {
                                 stage_card(ui, i, n, s, auto, &mut sacts);
                             }
                             ui.add_space(6.0);
-                            ui.menu_button(RichText::new("+ Add stage").strong().color(PRIMARY), |ui| {
+                            ui.menu_button(RichText::new("+ Add stage").strong().color(PRIMARY()), |ui| {
                                 egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
                                     for (k, (op, _)) in db::STAGES.iter().enumerate() {
                                         // The first ten are the original's most used stages (topStages).
@@ -6560,21 +6686,21 @@ impl App {
                 with_autopair(ui, id, &mut t.agg_txt, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(8).layouter(&mut code_layout).show(ui));
             }
             ui.horizontal(|ui| {
-                run = primary(ui, "Run", PRIMARY).on_hover_text("Run the whole pipeline (Cmd+Enter)").clicked() || ui.input(|i| i.modifiers.command && i.key_pressed(Key::Enter));
+                run = primary(ui, "Run", PRIMARY()).on_hover_text("Run the whole pipeline (Cmd+Enter)").clicked() || ui.input(|i| i.modifiers.command && i.key_pressed(Key::Enter));
                 explain = ui.button("Explain").on_hover_text("Cmd+E").clicked();
                 code_menu(ui, &mut code_lang);
                 if t.agg_req != 0 {
                     ui.spinner();
-                    ui.label(RichText::new("Running…").color(MUTED));
+                    ui.label(RichText::new("Running…").color(MUTED()));
                 } else if let Some(ms) = t.agg_ms {
                     let from = t.agg_stage.map_or(String::new(), |i| format!("Output after stage {}  ", i + 1));
-                    ui.label(RichText::new(format!("{from}{} results  {} ms  (first 1000 shown)", t.agg_docs.len(), ms)).color(MUTED));
+                    ui.label(RichText::new(format!("{from}{} results  {} ms  (first 1000 shown)", t.agg_docs.len(), ms)).color(MUTED()));
                 }
             });
             if !labels.is_empty() {
                 ui.horizontal_wrapped(|ui| {
                     for (i, l) in labels.iter().enumerate() {
-                        let fg = if t.agg_stage == Some(i) { PRIMARY } else { MUTED };
+                        let fg = if t.agg_stage == Some(i) { PRIMARY() } else { MUTED() };
                         if pill(ui, &format!("{} {l}", i + 1), fg).on_hover_text("Preview the output after this stage").clicked() {
                             stage = Some(i);
                         }
@@ -6760,11 +6886,11 @@ impl App {
         if t.schema.stats.is_empty() && !t.schema.running && t.schema.ms.is_none() && t.schema.err.is_none() {
             analyze = true;
         }
-        egui::Frame::new().fill(PANEL).corner_radius(8).inner_margin(10).show(ui, |ui| {
+        egui::Frame::new().fill(PANEL()).corner_radius(8).inner_margin(10).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("SCHEMA  ·  fields of the documents matching the current query").size(11.0).color(MUTED));
+                ui.label(RichText::new("SCHEMA  ·  fields of the documents matching the current query").size(11.0).color(MUTED()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    analyze |= primary(ui, "Analyze", PRIMARY).clicked();
+                    analyze |= primary(ui, "Analyze", PRIMARY()).clicked();
                     egui::ComboBox::from_id_salt("schema-limit")
                         .selected_text(if t.schema.limit == 0 { "all documents".to_string() } else { format!("first {}", group(&t.schema.limit.to_string())) })
                         .show_ui(ui, |ui| {
@@ -6778,18 +6904,18 @@ impl App {
                 });
             });
             let filter = if t.query.filter.is_empty() { "{} (all documents)".to_string() } else { db::shell_text(&Bson::Document(t.query.filter.clone())) };
-            ui.label(RichText::new(format!("Query: {filter}")).monospace().size(12.0).color(FAINT));
+            ui.label(RichText::new(format!("Query: {filter}")).monospace().size(12.0).color(FAINT()));
         });
         ui.add_space(6.0);
         let (mut apply, mut generate, mut reload) = (false, false, false);
         // QUARRY_TEST_VALIDATOR opens it in the demo picture.
-        egui::CollapsingHeader::new(RichText::new("VALIDATOR").size(11.0).color(MUTED)).id_salt("schema-validator").default_open(std::env::var("QUARRY_TEST_VALIDATOR").is_ok()).show(ui, |ui| {
+        egui::CollapsingHeader::new(RichText::new("VALIDATOR").size(11.0).color(MUTED())).id_salt("schema-validator").default_open(std::env::var("QUARRY_TEST_VALIDATOR").is_ok()).show(ui, |ui| {
             let s = &mut t.schema;
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Level").color(MUTED));
+                ui.label(RichText::new("Level").color(MUTED()));
                 segmented(ui, &mut s.vlevel, &[(0, "off"), (1, "moderate"), (2, "strict")]);
                 ui.add_space(12.0);
-                ui.label(RichText::new("Action").color(MUTED));
+                ui.label(RichText::new("Action").color(MUTED()));
                 segmented(ui, &mut s.vwarn, &[(false, "error"), (true, "warn")]);
             });
             let id = ui.make_persistent_id("validator-editor");
@@ -6800,32 +6926,32 @@ impl App {
                 with_autopair(ui, id, &mut s.vtext, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().hint_text("{ $jsonSchema: { bsonType: \"object\", required: [...] } }").desired_width(f32::INFINITY).desired_rows(8).layouter(&mut code_layout).show(ui));
             });
             ui.horizontal(|ui| {
-                apply = primary(ui, "Apply", PRIMARY).on_hover_text("Runs collMod on this collection").clicked();
+                apply = primary(ui, "Apply", PRIMARY()).on_hover_text("Runs collMod on this collection").clicked();
                 generate = ui.add_enabled(!s.stats.is_empty(), egui::Button::new("Generate from analysis")).on_hover_text("Built from the sampled documents; review it before applying").clicked();
                 reload = ui.button("Reload").clicked();
             });
         });
         ui.add_space(6.0);
         if let Some(e) = &t.schema.err {
-            ui.label(RichText::new(format!("Analysis failed: {e}")).color(ALERT));
+            ui.label(RichText::new(format!("Analysis failed: {e}")).color(ALERT()));
         } else if let Some(ms) = t.schema.ms {
-            ui.label(RichText::new(format!("{} fields in {} documents  ·  {ms} ms", t.schema.stats.len(), group(&t.schema.docs.to_string()))).color(MUTED));
+            ui.label(RichText::new(format!("{} fields in {} documents  ·  {ms} ms", t.schema.stats.len(), group(&t.schema.docs.to_string()))).color(MUTED()));
         }
         let n = t.schema.docs.max(1) as f32;
         egui::ScrollArea::vertical().id_salt("schema").auto_shrink(false).show(ui, |ui| {
             egui::Grid::new("schema-grid").num_columns(4).striped(true).spacing([18.0, 6.0]).min_col_width(60.0).show(ui, |ui| {
                 for h in ["FIELD", "PRESENT IN", "TYPES", "EXAMPLES"] {
-                    ui.label(RichText::new(h).size(11.0).color(MUTED));
+                    ui.label(RichText::new(h).size(11.0).color(MUTED()));
                 }
                 ui.end_row();
                 for f in &t.schema.stats {
                     let name = f.path.rsplit('.').next().unwrap_or(&f.path);
                     let r = ui.horizontal(|ui| {
                         ui.add_space(f.depth as f32 * 16.0);
-                        ui.label(RichText::new(name).monospace().color(BRIGHT)).on_hover_text(&f.path)
+                        ui.label(RichText::new(name).monospace().color(BRIGHT())).on_hover_text(&f.path)
                     });
                     r.response.context_menu(|ui| {
-                        ui.label(RichText::new(format!("Field: {}", f.path)).size(11.5).color(MUTED));
+                        ui.label(RichText::new(format!("Field: {}", f.path)).size(11.5).color(MUTED()));
                         if ui.button("Add as column").clicked() {
                             acts.push((f.path.clone(), 0));
                         }
@@ -6839,11 +6965,11 @@ impl App {
                     let share = f.docs as f32 / n;
                     ui.horizontal(|ui| {
                         let (rect, _) = ui.allocate_exact_size(egui::vec2(90.0, 8.0), Sense::hover());
-                        ui.painter().rect_filled(rect, 4, HOVER);
+                        ui.painter().rect_filled(rect, 4, HOVER());
                         let mut fill = rect;
                         fill.set_width(rect.width() * share);
-                        ui.painter().rect_filled(fill, 4, if share >= 0.999 { SUCCESS } else { PRIMARY });
-                        ui.label(RichText::new(format!("{:.0}%", share * 100.0)).size(12.0).color(TEXT));
+                        ui.painter().rect_filled(fill, 4, if share >= 0.999 { SUCCESS() } else { PRIMARY() });
+                        ui.label(RichText::new(format!("{:.0}%", share * 100.0)).size(12.0).color(TEXT()));
                     });
                     ui.horizontal(|ui| {
                         let total: usize = f.types.iter().map(|t| t.1).sum::<usize>().max(1);
@@ -6862,7 +6988,7 @@ impl App {
                             ui.label(RichText::new(label).monospace().size(12.0).color(col));
                         }
                     });
-                    ui.label(RichText::new(f.examples.join("   ")).monospace().size(12.0).color(FAINT));
+                    ui.label(RichText::new(f.examples.join("   ")).monospace().size(12.0).color(FAINT()));
                     ui.end_row();
                 }
             });
@@ -6940,7 +7066,7 @@ impl App {
         let mut load_colls = None;
         let mut run = false;
         let mut sync = false;
-        ui.label(RichText::new(format!("{}.{} is the source. Documents are matched by _id; field order is ignored.", src.db, src.coll)).color(MUTED));
+        ui.label(RichText::new(format!("{}.{} is the source. Documents are matched by _id; field order is ignored.", src.db, src.coll)).color(MUTED()));
         ui.add_space(4.0);
         let c = &mut self.tabs[i].compare;
         ui.horizontal(|ui| {
@@ -6972,7 +7098,7 @@ impl App {
             });
             let same = c.conn == src.conn && c.db == src.db && c.coll == src.coll;
             let ok = !c.coll.is_empty() && !same && !c.running;
-            run = ui.add_enabled(ok, egui::Button::new(RichText::new("Compare").strong().color(BG)).fill(PRIMARY)).on_disabled_hover_text(if same { "Pick a different collection" } else { "Pick a target collection" }).clicked();
+            run = ui.add_enabled(ok, egui::Button::new(RichText::new("Compare").strong().color(BG())).fill(PRIMARY())).on_disabled_hover_text(if same { "Pick a different collection" } else { "Pick a target collection" }).clicked();
             if c.running {
                 ui.spinner();
             }
@@ -6980,10 +7106,10 @@ impl App {
         if let Some(r) = &c.result {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                for (label, n, color) in [("Identical", r.same, MUTED), ("Only in source", r.only_src.len(), SUCCESS), ("Only in target", r.only_dst.len(), WARNING), ("Different", r.changed.len(), C_LINK)] {
-                    egui::Frame::new().fill(RAISED).corner_radius(6).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
+                for (label, n, color) in [("Identical", r.same, MUTED()), ("Only in source", r.only_src.len(), SUCCESS()), ("Only in target", r.only_dst.len(), WARNING()), ("Different", r.changed.len(), C_LINK())] {
+                    egui::Frame::new().fill(RAISED()).corner_radius(6).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
                         ui.label(RichText::new(group(&n.to_string())).strong().size(16.0).color(color));
-                        ui.label(RichText::new(label).size(11.5).color(MUTED));
+                        ui.label(RichText::new(label).size(11.5).color(MUTED()));
                     });
                 }
             });
@@ -6992,7 +7118,7 @@ impl App {
                 const SHOWN: usize = 200;
                 let more = |ui: &mut egui::Ui, n: usize| {
                     if n > SHOWN {
-                        ui.label(RichText::new(format!("and {} more", group(&(n - SHOWN).to_string()))).color(FAINT));
+                        ui.label(RichText::new(format!("and {} more", group(&(n - SHOWN).to_string()))).color(FAINT()));
                     }
                 };
                 egui::CollapsingHeader::new(format!("Different ({})", r.changed.len())).id_salt("cmp-changed").default_open(true).show(ui, |ui| {
@@ -7000,15 +7126,15 @@ impl App {
                         let d = db::diff(b, a);
                         egui::CollapsingHeader::new(RichText::new(format!("{}   {} field{} differ{}", db::short(a.get("_id").unwrap_or(&Bson::Null)), d.len(), if d.len() == 1 { "" } else { "s" }, if d.len() == 1 { "s" } else { "" })).monospace()).id_salt(("cmp-d", db::compact(a.get("_id").unwrap_or(&Bson::Null)))).show(ui, |ui| {
                             egui::Grid::new(("cmp-g", db::compact(a.get("_id").unwrap_or(&Bson::Null)))).striped(true).show(ui, |ui| {
-                                ui.label(RichText::new("Field").color(FAINT));
-                                ui.label(RichText::new("Target now").color(FAINT));
-                                ui.label(RichText::new("Source").color(FAINT));
+                                ui.label(RichText::new("Field").color(FAINT()));
+                                ui.label(RichText::new("Target now").color(FAINT()));
+                                ui.label(RichText::new("Source").color(FAINT()));
                                 ui.end_row();
                                 for (path, old, new) in d {
                                     let t = |v: &Option<Bson>| v.as_ref().map_or("missing".to_string(), cell_text);
-                                    ui.label(RichText::new(path).monospace().color(KEY));
-                                    ui.label(RichText::new(t(&old)).monospace().color(ALERT));
-                                    ui.label(RichText::new(t(&new)).monospace().color(SUCCESS));
+                                    ui.label(RichText::new(path).monospace().color(KEY()));
+                                    ui.label(RichText::new(t(&old)).monospace().color(ALERT()));
+                                    ui.label(RichText::new(t(&new)).monospace().color(SUCCESS()));
                                     ui.end_row();
                                 }
                             });
@@ -7023,7 +7149,7 @@ impl App {
                             if t.len() > 160 {
                                 t = format!("{}…", &t[..t.floor_char_boundary(160)]);
                             }
-                            ui.add(egui::Label::new(RichText::new(t).monospace().size(12.0).color(TEXT)).truncate());
+                            ui.add(egui::Label::new(RichText::new(t).monospace().size(12.0).color(TEXT())).truncate());
                         }
                         more(ui, list.len());
                     });
@@ -7033,14 +7159,14 @@ impl App {
             ui.horizontal(|ui| {
                 ui.checkbox(&mut c.insert, format!("Copy the {} only in source", r.only_src.len()));
                 ui.checkbox(&mut c.replace, format!("Overwrite the {} different", r.changed.len()));
-                let col = if c.delete { ALERT } else { TEXT };
+                let col = if c.delete { ALERT() } else { TEXT() };
                 ui.checkbox(&mut c.delete, RichText::new(format!("Delete the {} only in target", r.only_dst.len())).color(col));
                 let any = (c.insert && !r.only_src.is_empty()) || (c.replace && !r.changed.is_empty()) || (c.delete && !r.only_dst.is_empty());
-                sync = ui.add_enabled(any, egui::Button::new(RichText::new("Sync to target…").strong().color(BG)).fill(WARNING)).clicked();
+                sync = ui.add_enabled(any, egui::Button::new(RichText::new("Sync to target…").strong().color(BG())).fill(WARNING())).clicked();
             });
         } else if !c.running {
             ui.add_space(20.0);
-            ui.label(RichText::new("Pick a target and press Compare. Nothing is written until you sync and type the target's name.").color(FAINT));
+            ui.label(RichText::new("Pick a target and press Compare. Nothing is written until you sync and type the target's name.").color(FAINT()));
         }
         let (tc, tdb, tcoll) = (c.conn, c.db.clone(), c.coll.clone());
         if let Some(d) = load_colls {
@@ -7081,9 +7207,9 @@ impl App {
         let writable = self.sel_writable();
         let t = &mut self.tabs[self.cur];
         let im = &mut t.import;
-        egui::Frame::new().fill(PANEL).corner_radius(8).inner_margin(10).show(ui, |ui| {
+        egui::Frame::new().fill(PANEL()).corner_radius(8).inner_margin(10).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("IMPORT").size(11.0).color(MUTED));
+                ui.label(RichText::new("IMPORT").size(11.0).color(MUTED()));
                 segmented(ui, &mut im.kind, &[(db::ImportKind::Json, "JSON"), (db::ImportKind::JsonLines, "JSON Lines"), (db::ImportKind::Csv, "CSV")]);
                 if im.kind == db::ImportKind::Csv {
                     ui.add_space(8.0);
@@ -7106,7 +7232,7 @@ impl App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     open_file = ui.button("Open file…").clicked();
                     if let Some(f) = &im.file {
-                        ui.label(RichText::new(f).size(12.0).color(MUTED));
+                        ui.label(RichText::new(f).size(12.0).color(MUTED()));
                     }
                 });
             });
@@ -7120,13 +7246,13 @@ impl App {
                     });
                 });
             } else {
-                ui.label(RichText::new(format!("{} loaded from the file (too large to show).", human_bytes(im.text.len()))).color(MUTED));
+                ui.label(RichText::new(format!("{} loaded from the file (too large to show).", human_bytes(im.text.len()))).color(MUTED()));
             }
             ui.horizontal(|ui| {
                 ui.radio_value(&mut im.upsert, false, "Insert as new documents");
                 ui.radio_value(&mut im.upsert, true, "Upsert by");
                 ui.add_enabled(im.upsert, egui::TextEdit::singleline(&mut im.upsert_by).desired_width(110.0).font(FontId::monospace(12.5)));
-                ui.label(RichText::new("(update the match, add if none)").size(11.5).color(FAINT));
+                ui.label(RichText::new("(update the match, add if none)").size(11.5).color(FAINT()));
             });
         });
         // Parse again only when the input or options changed.
@@ -7149,20 +7275,20 @@ impl App {
         let mut preview = None;
         match &im.parsed {
             None => {
-                ui.label(RichText::new("Nothing to import yet.").color(MUTED));
+                ui.label(RichText::new("Nothing to import yet.").color(MUTED()));
             }
             Some(Err(e)) => {
-                ui.label(RichText::new(e).monospace().color(ALERT));
+                ui.label(RichText::new(e).monospace().color(ALERT()));
             }
             Some(Ok(docs)) => {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("{} documents ready", group(&docs.len().to_string()))).color(BRIGHT));
-                    ui.label(RichText::new(format!("·  {} fields  ·  preview of the first {}", im.fields.len(), docs.len().min(PAGE_SIZE as usize))).color(MUTED));
+                    ui.label(RichText::new(format!("{} documents ready", group(&docs.len().to_string()))).color(BRIGHT()));
+                    ui.label(RichText::new(format!("·  {} fields  ·  preview of the first {}", im.fields.len(), docs.len().min(PAGE_SIZE as usize))).color(MUTED()));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let label = format!("{} {} documents", if im.upsert { "Upsert" } else { "Import" }, group(&docs.len().to_string()));
-                        start = ui.add_enabled(!docs.is_empty(), egui::Button::new(RichText::new(label).strong().color(BG)).fill(if writable { PRIMARY } else { FAINT })).clicked();
+                        start = ui.add_enabled(!docs.is_empty(), egui::Button::new(RichText::new(label).strong().color(BG())).fill(if writable { PRIMARY() } else { FAINT() })).clicked();
                         if !writable {
-                            ui.label(RichText::new("needs writes unlocked").size(11.5).color(FAINT));
+                            ui.label(RichText::new("needs writes unlocked").size(11.5).color(FAINT()));
                         }
                     });
                 });
@@ -7227,9 +7353,9 @@ impl App {
     }
 
     fn indexes_view(&mut self, ui: &mut egui::Ui) {
-        egui::Frame::new().fill(PANEL).corner_radius(8).inner_margin(10).show(ui, |ui| {
+        egui::Frame::new().fill(PANEL()).corner_radius(8).inner_margin(10).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("NEW INDEX").size(11.0).color(MUTED));
+                ui.label(RichText::new("NEW INDEX").size(11.0).color(MUTED()));
                 ui.add(egui::TextEdit::singleline(&mut self.idx_keys).font(FontId::monospace(13.0)).hint_text("{ email: 1 }").desired_width(280.0));
                 ui.checkbox(&mut self.idx_unique, "unique");
                 if ui.button("Create").clicked() {
@@ -7256,38 +7382,38 @@ impl App {
         egui::ScrollArea::both().id_salt("indexes").auto_shrink(false).show(ui, |ui| {
             egui::Grid::new("idx").striped(true).num_columns(6).spacing([24.0, 8.0]).show(ui, |ui| {
                 for h in ["NAME", "KEYS", "OPTIONS", "USAGE", "SIZE", ""] {
-                    ui.label(RichText::new(h).size(11.0).color(MUTED));
+                    ui.label(RichText::new(h).size(11.0).color(MUTED()));
                 }
                 ui.end_row();
                 for ix in &t.indexes {
                     let name = ix.get_str("name").unwrap_or_default().to_string();
-                    ui.label(RichText::new(&name).monospace().color(BRIGHT));
-                    ui.label(RichText::new(ix.get("keys").map(db::compact).unwrap_or_default()).monospace().color(C_STRING));
+                    ui.label(RichText::new(&name).monospace().color(BRIGHT()));
+                    ui.label(RichText::new(ix.get("keys").map(db::compact).unwrap_or_default()).monospace().color(C_STRING()));
                     let mut opts = ix.clone();
                     opts.remove("name");
                     opts.remove("keys");
-                    ui.label(RichText::new(if opts.is_empty() { String::new() } else { db::compact(&Bson::Document(opts)) }).monospace().color(MUTED));
+                    ui.label(RichText::new(if opts.is_empty() { String::new() } else { db::compact(&Bson::Document(opts)) }).monospace().color(MUTED()));
                     let stat = info.and_then(|i| i.stats.iter().find(|s| s.name == name));
                     ui.horizontal(|ui| {
                         let Some(s) = stat else { return };
                         // A counter that restarted recently cannot prove an index is unused.
                         let recent = s.since.is_some_and(|t| now - t < 7 * 24 * 3600 * 1000);
-                        ui.label(RichText::new(format!("{} ops{}", group(&s.ops.to_string()), if s.ops == 0 && recent { ", since restart" } else { "" })).monospace().color(MUTED));
+                        ui.label(RichText::new(format!("{} ops{}", group(&s.ops.to_string()), if s.ops == 0 && recent { ", since restart" } else { "" })).monospace().color(MUTED()));
                         if name != "_id_" && db::is_unused(s.ops, s.since, now) {
-                            pill(ui, "unused", WARNING);
+                            pill(ui, "unused", WARNING());
                         }
                         if s.hidden {
-                            pill(ui, "hidden", PRIMARY);
+                            pill(ui, "hidden", PRIMARY());
                         }
                     });
-                    ui.label(RichText::new(stat.and_then(|s| s.size).map(human_bytes).unwrap_or_default()).monospace().color(MUTED));
+                    ui.label(RichText::new(stat.and_then(|s| s.size).map(human_bytes).unwrap_or_default()).monospace().color(MUTED()));
                     ui.horizontal(|ui| {
                         if name != "_id_" {
                             let hidden = stat.is_some_and(|s| s.hidden);
                             if ui.small_button(if hidden { "Unhide" } else { "Hide" }).clicked() {
                                 hide = Some((name.clone(), !hidden));
                             }
-                            if ui.small_button(RichText::new("Drop").color(ALERT)).clicked() {
+                            if ui.small_button(RichText::new("Drop").color(ALERT())).clicked() {
                                 drop = Some(name);
                             }
                         }
@@ -7297,23 +7423,23 @@ impl App {
             });
             if let Some(i) = info {
                 ui.add_space(12.0);
-                ui.label(RichText::new("SUGGESTIONS").size(11.0).color(MUTED));
+                ui.label(RichText::new("SUGGESTIONS").size(11.0).color(MUTED()));
                 // Skip queries an existing index already serves from its leading keys.
                 let covered = |sug: &Document| t.indexes.iter().any(|ix| ix.get_document("keys").is_ok_and(|k| k.keys().zip(sug.keys()).filter(|(a, b)| a == b).count() == sug.len()));
                 let shapes: Vec<_> = i.shapes.iter().filter(|s| !covered(&s.suggestion)).take(8).collect();
                 if i.level == 0 && shapes.is_empty() {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("The profiler is off, so slow queries are not recorded.").color(MUTED));
+                        ui.label(RichText::new("The profiler is off, so slow queries are not recorded.").color(MUTED()));
                         profiling = ui.button("Enable profiling (slow ops >= 100 ms)").clicked();
                     });
                 } else if shapes.is_empty() {
-                    ui.label(RichText::new(format!("No unindexed or slow queries recorded (profiler level {}, slow >= {} ms).", i.level, i.slowms)).color(MUTED));
+                    ui.label(RichText::new(format!("No unindexed or slow queries recorded (profiler level {}, slow >= {} ms).", i.level, i.slowms)).color(MUTED()));
                 }
                 for s in shapes {
                     ui.horizontal(|ui| {
                         let sort = if s.sort.is_empty() { String::new() } else { format!("  sort {}", db::compact(&Bson::Document(s.sort.clone()))) };
-                        ui.label(RichText::new(format!("{}x  avg {:.0} ms  find {}{sort}", s.count, s.avg_ms, db::compact(&Bson::Document(s.filter.clone())))).monospace().color(MUTED));
-                        ui.label(RichText::new(db::compact(&Bson::Document(s.suggestion.clone()))).monospace().color(C_STRING));
+                        ui.label(RichText::new(format!("{}x  avg {:.0} ms  find {}{sort}", s.count, s.avg_ms, db::compact(&Bson::Document(s.filter.clone())))).monospace().color(MUTED()));
+                        ui.label(RichText::new(db::compact(&Bson::Document(s.suggestion.clone()))).monospace().color(C_STRING()));
                         if ui.small_button("Create").clicked() {
                             create = Some(s.suggestion.clone());
                         }
@@ -7354,13 +7480,13 @@ impl App {
                 ui.set_width((screen.width() * 0.72).clamp(480.0, 1200.0));
                 ui.horizontal(|ui| {
                     let title = if je.path.is_empty() { "Edit document".to_string() } else { format!("Edit {}", je.path.join(".")) };
-                    ui.label(RichText::new(title).strong().size(16.0).color(BRIGHT));
+                    ui.label(RichText::new(title).strong().size(16.0).color(BRIGHT()));
                     if !je.path.is_empty() {
                         ui.add_space(8.0);
                         Self::type_combo(ui, "jsonkind", &mut je.kind);
                     }
                 });
-                ui.label(RichText::new("JSON, JSON5 or shell syntax. Applying keeps it as an unsaved edit until you press Save.").size(12.0).color(MUTED));
+                ui.label(RichText::new("JSON, JSON5 or shell syntax. Applying keeps it as an unsaved edit until you press Save.").size(12.0).color(MUTED()));
                 ui.add_space(4.0);
                 let rows = je.text.lines().count().clamp(12, 40);
                 let id = egui::Id::unique("json-editor-text");
@@ -7375,7 +7501,7 @@ impl App {
                 });
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    apply = primary(ui, "Apply", PRIMARY).on_hover_text("Cmd+Enter").clicked() || ui.input(|i| i.modifiers.command && (i.key_pressed(Key::Enter) || i.key_pressed(Key::S)));
+                    apply = primary(ui, "Apply", PRIMARY()).on_hover_text("Cmd+Enter").clicked() || ui.input(|i| i.modifiers.command && (i.key_pressed(Key::Enter) || i.key_pressed(Key::S)));
                     close = ui.button("Cancel").on_hover_text("Esc").clicked();
                 });
             });
@@ -7416,8 +7542,8 @@ impl App {
             let mut submit = false;
             let r = egui::Modal::new(egui::Id::unique(("quarry-layer", "insert"))).show(ctx, |ui| {
                 ui.set_width(560.0);
-                ui.label(RichText::new("Insert a document").strong().size(16.0).color(BRIGHT));
-                ui.label(RichText::new("JSON, JSON5 or shell syntax: ObjectId(\"…\"), ISODate(\"…\"), NumberLong(…).").color(MUTED));
+                ui.label(RichText::new("Insert a document").strong().size(16.0).color(BRIGHT()));
+                ui.label(RichText::new("JSON, JSON5 or shell syntax: ObjectId(\"…\"), ISODate(\"…\"), NumberLong(…).").color(MUTED()));
                 let id = egui::Id::unique("insert-editor-text");
                 let find = Find::bar(ui, id, text);
                 egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
@@ -7425,7 +7551,7 @@ impl App {
                     find.reveal(ui, text, &out);
                 });
                 ui.horizontal(|ui| {
-                    submit = primary(ui, "Insert", PRIMARY).clicked();
+                    submit = primary(ui, "Insert", PRIMARY()).clicked();
                     close = ui.button("Cancel").on_hover_text("Esc").clicked();
                 });
             });
@@ -7452,8 +7578,8 @@ impl App {
                     let mut save = false;
                     let mut test = false;
                     ui.set_width(560.0);
-                    ui.label(RichText::new(if f.id.is_some() { "Edit connection" } else { "New connection" }).strong().size(16.0).color(BRIGHT));
-                    ui.label(RichText::new("Addresses, passwords and passphrases are stored in the macOS Keychain. The connection opens read-only.").size(12.0).color(MUTED));
+                    ui.label(RichText::new(if f.id.is_some() { "Edit connection" } else { "New connection" }).strong().size(16.0).color(BRIGHT()));
+                    ui.label(RichText::new("Addresses, passwords and passphrases are stored in the macOS Keychain. The connection opens read-only.").size(12.0).color(MUTED()));
                     egui::ScrollArea::vertical().max_height(ctx.content_rect().height() - 220.0).show(ui, |ui| {
                         settings_section(ui, "SERVER", |ui| {
                             egui::Grid::new("cf").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
@@ -7515,13 +7641,13 @@ impl App {
                                     ui.label("Host key");
                                     ui.horizontal(|ui| match f.ssh.known_host.clone() {
                                         Some(fp) => {
-                                            ui.label(RichText::new(fp).monospace().size(11.5).color(MUTED));
+                                            ui.label(RichText::new(fp).monospace().size(11.5).color(MUTED()));
                                             if ui.small_button("Forget").on_hover_text("Trust the next key the server shows, e.g. after a reinstall").clicked() {
                                                 f.ssh.known_host = None;
                                             }
                                         }
                                         None => {
-                                            ui.label(RichText::new("remembered on first connect; a different key later is refused").size(11.5).color(FAINT));
+                                            ui.label(RichText::new("remembered on first connect; a different key later is refused").size(11.5).color(FAINT()));
                                         }
                                     });
                                     ui.end_row();
@@ -7531,7 +7657,7 @@ impl App {
                         settings_section(ui, "SOCKS5 PROXY", |ui| {
                             ui.add_enabled(!f.ssh_on, egui::Checkbox::new(&mut f.proxy_on, "Connect through a SOCKS5 proxy"));
                             if f.ssh_on {
-                                ui.label(RichText::new("Not needed with an SSH tunnel: the tunnel already carries the connection.").size(11.5).color(FAINT));
+                                ui.label(RichText::new("Not needed with an SSH tunnel: the tunnel already carries the connection.").size(11.5).color(FAINT()));
                             } else if f.proxy_on {
                                 egui::Grid::new("px").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
                                     ui.label("Host");
@@ -7558,20 +7684,20 @@ impl App {
                         None if f.testing => {
                             ui.horizontal(|ui| {
                                 ui.spinner();
-                                ui.label(RichText::new("Testing…").color(MUTED));
+                                ui.label(RichText::new("Testing…").color(MUTED()));
                             });
                         }
                         Some(Ok(m)) => {
-                            ui.label(RichText::new(m).color(SUCCESS));
+                            ui.label(RichText::new(m).color(SUCCESS()));
                         }
                         Some(Err(e)) => {
-                            ui.add(egui::Label::new(RichText::new(e).color(ALERT)).wrap());
+                            ui.add(egui::Label::new(RichText::new(e).color(ALERT())).wrap());
                         }
                         None => {}
                     }
                     ui.horizontal(|ui| {
                         let valid = !f.name.trim().is_empty() && (f.uri.starts_with("mongodb://") || f.uri.starts_with("mongodb+srv://")) && (!f.ssh_on || (!f.ssh.host.trim().is_empty() && !f.ssh.user.trim().is_empty())) && (!f.proxy_on || f.ssh_on || !f.proxy.host.trim().is_empty());
-                        save = ui.add_enabled(valid, egui::Button::new(RichText::new("Save and connect").strong().color(BG)).fill(PRIMARY)).clicked();
+                        save = ui.add_enabled(valid, egui::Button::new(RichText::new("Save and connect").strong().color(BG())).fill(PRIMARY())).clicked();
                         test = ui.add_enabled(valid, egui::Button::new("Test")).clicked();
                         if ui.button("Cancel").clicked() {
                             keep = false;
@@ -7623,19 +7749,29 @@ impl App {
                 Modal::Settings => {
                     ui.set_width(600.0);
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("Settings").strong().size(18.0).color(BRIGHT));
+                        ui.label(RichText::new("Settings").strong().size(18.0).color(BRIGHT()));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button("Done").on_hover_text("Esc").clicked() {
                                 keep = false;
                             }
                         });
                     });
-                    ui.label(RichText::new("Changes are saved right away.").size(12.0).color(FAINT));
+                    ui.label(RichText::new("Changes are saved right away.").size(12.0).color(FAINT()));
                     ui.add_space(8.0);
                     let before = (self.prefs.open_inline, self.prefs.auto_save, self.prefs.always_writable, self.prefs.confirm_save, self.prefs.default_cols, self.prefs.timeout_ms, self.prefs.shell_runtime.clone(), self.prefs.mongodump.clone(), self.prefs.mongorestore.clone(), self.prefs.auto_update, self.prefs.show_fps, self.prefs.object_preview);
                     // The sections scroll inside the dialog, which keeps its title and Done in the window.
                     let max_h = (ui.ctx().content_rect().height() - 150.0).max(200.0);
                     egui::ScrollArea::vertical().id_salt("settings-scroll").max_height(max_h).min_scrolled_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
+                        settings_section(ui, "APPEARANCE", |ui| {
+                            setting_row(ui, "Theme", "System follows the macOS light or dark setting.", |ui| {
+                                let was = self.prefs.appearance;
+                                segmented(ui, &mut self.prefs.appearance, &[(Appearance::System, "System"), (Appearance::Light, "Light"), (Appearance::Dark, "Dark")]);
+                                if self.prefs.appearance != was {
+                                    self.prefs.appearance.apply(ui.ctx());
+                                    self.save_prefs();
+                                }
+                            });
+                        });
                         settings_section(ui, "DOCUMENTS", |ui| {
                             setting_row(ui, "Open documents", "Where a clicked row shows its document.", |ui| {
                                 segmented(ui, &mut self.prefs.open_inline, &[(false, "Side panel"), (true, "Under the row")]);
@@ -7662,7 +7798,7 @@ impl App {
                             setting_row(ui, "Show changes before saving", "List every changed field before writing unsaved edits.", |ui| {
                                 ui.add_enabled_ui(!auto, |ui| toggle(ui, &mut self.prefs.confirm_save));
                             });
-                            ui.label(RichText::new(if self.prefs.always_writable { "A save never overwrites someone else's change." } else { "Writes always need the connection unlocked, and a save never overwrites someone else's change." }).size(11.5).color(FAINT));
+                            ui.label(RichText::new(if self.prefs.always_writable { "A save never overwrites someone else's change." } else { "Writes always need the connection unlocked, and a save never overwrites someone else's change." }).size(11.5).color(FAINT()));
                         });
                         settings_section(ui, "QUERIES", |ui| {
                             setting_row(ui, "Query timeout", "How long a query may run before it is stopped.", |ui| {
@@ -7722,10 +7858,10 @@ impl App {
                 }
                 Modal::Unlock(id, then) => {
                     let name = self.conn(*id).map(|c| c.meta.name.clone()).unwrap_or_default();
-                    ui.label(RichText::new(format!("Allow writes on \"{name}\"?")).strong().size(16.0).color(BRIGHT));
-                    ui.label(RichText::new("Edits, inserts, deletes and index changes become possible until you lock it again or quit. Each one still asks first.").color(MUTED));
+                    ui.label(RichText::new(format!("Allow writes on \"{name}\"?")).strong().size(16.0).color(BRIGHT()));
+                    ui.label(RichText::new("Edits, inserts, deletes and index changes become possible until you lock it again or quit. Each one still asks first.").color(MUTED()));
                     ui.horizontal(|ui| {
-                        if primary(ui, "Allow writes", ALERT).clicked() {
+                        if primary(ui, "Allow writes", ALERT()).clicked() {
                             if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == *id) {
                                 c.writable = true;
                             }
@@ -7741,21 +7877,21 @@ impl App {
                     });
                 }
                 Modal::Save { tag, changes } => {
-                    ui.label(RichText::new(format!("Save {} change(s)?", changes.len())).strong().size(16.0).color(BRIGHT));
-                    ui.label(RichText::new("Saving is refused if someone else changed this document since you opened it.").color(MUTED));
+                    ui.label(RichText::new(format!("Save {} change(s)?", changes.len())).strong().size(16.0).color(BRIGHT()));
+                    ui.label(RichText::new("Saving is refused if someone else changed this document since you opened it.").color(MUTED()));
                     egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
                         egui::Grid::new("chg").num_columns(3).striped(true).spacing([14.0, 6.0]).show(ui, |ui| {
                             for (path, a, b) in changes.iter() {
-                                ui.label(RichText::new(path).monospace().color(BRIGHT));
+                                ui.label(RichText::new(path).monospace().color(BRIGHT()));
                                 let show = |v: &Option<Bson>| v.as_ref().map(|v| format!("{} ({})", leaf_text(v), db::type_name(v))).unwrap_or("(none)".into());
-                                ui.label(RichText::new(show(a)).monospace().color(ALERT).strikethrough());
-                                ui.label(RichText::new(show(b)).monospace().color(SUCCESS));
+                                ui.label(RichText::new(show(a)).monospace().color(ALERT()).strikethrough());
+                                ui.label(RichText::new(show(b)).monospace().color(SUCCESS()));
                                 ui.end_row();
                             }
                         });
                     });
                     ui.horizontal(|ui| {
-                        if primary(ui, "Save", PRIMARY).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
+                        if primary(ui, "Save", PRIMARY()).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
                             self.write_draft(tag);
                             keep = false;
                         }
@@ -7766,10 +7902,10 @@ impl App {
                 }
                 Modal::Delete(d) => {
                     let id = d.get("_id").map(db::short).unwrap_or_default();
-                    ui.label(RichText::new("Delete this document?").strong().size(16.0).color(BRIGHT));
-                    ui.label(RichText::new(format!("_id {id}. You can undo this for 24 hours.")).monospace().color(MUTED));
+                    ui.label(RichText::new("Delete this document?").strong().size(16.0).color(BRIGHT()));
+                    ui.label(RichText::new(format!("_id {id}. You can undo this for 24 hours.")).monospace().color(MUTED()));
                     ui.horizontal(|ui| {
-                        if primary(ui, "Delete", ALERT).clicked() {
+                        if primary(ui, "Delete", ALERT()).clicked() {
                             if let Some((conn, target)) = self.writable_target() {
                                 self.worker.delete(conn, target, d.clone(), true);
                                 if let Some(t) = self.tm() {
@@ -7784,12 +7920,12 @@ impl App {
                     });
                 }
                 Modal::Typed { title, expect, typed, action } => {
-                    ui.label(RichText::new(title.as_str()).strong().color(BRIGHT));
-                    ui.label(RichText::new(format!("Type {expect} to confirm (case sensitive).")).color(MUTED));
+                    ui.label(RichText::new(title.as_str()).strong().color(BRIGHT()));
+                    ui.label(RichText::new(format!("Type {expect} to confirm (case sensitive).")).color(MUTED()));
                     ui.add(egui::TextEdit::singleline(typed).font(FontId::monospace(13.0)).desired_width(320.0));
                     ui.horizontal(|ui| {
                         let ok = typed == expect;
-                        if ui.add_enabled(ok, egui::Button::new(RichText::new("Confirm").strong().color(BG)).fill(ALERT)).clicked() {
+                        if ui.add_enabled(ok, egui::Button::new(RichText::new("Confirm").strong().color(BG())).fill(ALERT())).clicked() {
                             keep = false;
                             let action = std::mem::replace(action, Danger::DropCollection);
                             self.danger(action);
@@ -7801,7 +7937,7 @@ impl App {
                 }
                 Modal::NewCollection { conn, db, name, view, source, pipeline } => {
                     ui.set_width(520.0);
-                    ui.label(RichText::new(if *view { format!("New view in {db}") } else { format!("New collection in {db}") }).strong().size(16.0).color(BRIGHT));
+                    ui.label(RichText::new(if *view { format!("New view in {db}") } else { format!("New collection in {db}") }).strong().size(16.0).color(BRIGHT()));
                     egui::Grid::new("newcoll").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
                         ui.label("Name");
                         ui.add(egui::TextEdit::singleline(name).desired_width(380.0));
@@ -7823,7 +7959,7 @@ impl App {
                     });
                     ui.horizontal(|ui| {
                         let ok = !name.trim().is_empty() && (!*view || !source.is_empty());
-                        if ui.add_enabled(ok, egui::Button::new(RichText::new("Create").strong().color(BG)).fill(PRIMARY)).clicked() {
+                        if ui.add_enabled(ok, egui::Button::new(RichText::new("Create").strong().color(BG())).fill(PRIMARY())).clicked() {
                             let cmd = if *view {
                                 db::parse_pipeline(pipeline).map(|p| doc! { "create": name.trim(), "viewOn": source.as_str(), "pipeline": p })
                             } else {
@@ -7846,20 +7982,20 @@ impl App {
                 Modal::Tool(f) => {
                     let name = if f.coll.is_empty() { f.db.clone() } else { format!("{}.{}", f.db, f.coll) };
                     ui.set_width(560.0);
-                    ui.label(RichText::new(if f.restore { format!("Restore into {name}") } else { format!("Dump {name}") }).strong().size(16.0).color(BRIGHT));
+                    ui.label(RichText::new(if f.restore { format!("Restore into {name}") } else { format!("Dump {name}") }).strong().size(16.0).color(BRIGHT()));
                     let meta = self.conn(f.conn).map(|c| c.meta.clone()).unwrap_or_default();
                     let tool = if f.restore { "mongorestore" } else { "mongodump" };
                     let exe = find_exe(tool, if f.restore { &self.prefs.mongorestore } else { &self.prefs.mongodump });
                     ui.label(RichText::new(match &exe {
                         Some(p) => format!("Runs {} with this connection's address.", p.display()),
                         None => format!("{tool} was not found. Install the MongoDB Database Tools here, or set its path in Settings."),
-                    }).size(12.0).color(if exe.is_some() { MUTED } else { WARNING }));
+                    }).size(12.0).color(if exe.is_some() { MUTED() } else { WARNING() }));
                     if exe.is_none() {
                         self.install_tools_button(ui);
                     }
                     let tunneled = meta.ssh.is_some() || meta.proxy.is_some();
                     if tunneled {
-                        ui.label(RichText::new("This connection goes through SSH or a proxy, which the MongoDB tools cannot use. Open an SSH port forward and use a direct connection instead.").color(WARNING));
+                        ui.label(RichText::new("This connection goes through SSH or a proxy, which the MongoDB tools cannot use. Open an SSH port forward and use a direct connection instead.").color(WARNING()));
                     }
                     ui.add_space(6.0);
                     egui::Grid::new("toolform").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
@@ -7889,7 +8025,7 @@ impl App {
                             ui.add(egui::TextEdit::singleline(&mut f.coll).hint_text("all").desired_width(200.0));
                             ui.end_row();
                             ui.label("");
-                            let col = if f.drop { ALERT } else { TEXT };
+                            let col = if f.drop { ALERT() } else { TEXT() };
                             ui.checkbox(&mut f.drop, RichText::new("Drop each collection before restoring it").color(col));
                             ui.end_row();
                         }
@@ -7897,7 +8033,7 @@ impl App {
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         let ok = exe.is_some() && !tunneled && !f.path.trim().is_empty() && (!f.restore || !f.from_db.trim().is_empty());
-                        if ui.add_enabled(ok, egui::Button::new(RichText::new(if f.restore { "Restore…" } else { "Dump" }).strong().color(BG)).fill(if f.restore { WARNING } else { PRIMARY })).clicked() {
+                        if ui.add_enabled(ok, egui::Button::new(RichText::new(if f.restore { "Restore…" } else { "Dump" }).strong().color(BG())).fill(if f.restore { WARNING() } else { PRIMARY() })).clicked() {
                             match stored_uri(f.conn) {
                                 Err(e) => self.err(uri_err(e)),
                                 Ok(uri) => {
@@ -7923,27 +8059,27 @@ impl App {
                     ui.set_max_width(860.0);
                     ui.set_width(820.0);
                     let colls: Vec<String> = self.conn(*conn).and_then(|c| c.dbs.iter().find(|d| d.0 == *db)).and_then(|d| d.1.clone()).unwrap_or_default();
-                    ui.label(RichText::new(format!("Data relations in {db}")).strong().size(16.0).color(BRIGHT));
-                    ui.label(RichText::new("A field that holds ids of another collection's documents. Its preview field is shown next to the ids, and \"Go to referenced document\" opens them. Add them by analyzing, or by right-clicking an id and choosing that action.").size(12.0).color(MUTED));
+                    ui.label(RichText::new(format!("Data relations in {db}")).strong().size(16.0).color(BRIGHT()));
+                    ui.label(RichText::new("A field that holds ids of another collection's documents. Its preview field is shown next to the ids, and \"Go to referenced document\" opens them. Add them by analyzing, or by right-clicking an id and choosing that action.").size(12.0).color(MUTED()));
                     ui.add_space(6.0);
                     let key = format!("{conn}/{db}");
                     let before = self.prefs.relations.get(&key).cloned().unwrap_or_default();
                     let list = self.prefs.relations.entry(key.clone()).or_default();
                     if list.is_empty() {
-                        ui.label(RichText::new("None yet.").color(FAINT));
+                        ui.label(RichText::new("None yet.").color(FAINT()));
                     }
                     let mut remove = None;
                     egui::ScrollArea::vertical().max_height(420.0).auto_shrink([false, true]).show(ui, |ui| {
                         egui::Grid::new("rels").num_columns(4).striped(true).spacing([12.0, 8.0]).min_col_width(60.0).show(ui, |ui| {
-                            ui.label(RichText::new("FIELD").size(11.0).color(FAINT));
-                            ui.label(RichText::new("POINTS TO COLLECTION").size(11.0).color(FAINT));
-                            ui.label(RichText::new("PREVIEW FIELD").size(11.0).color(FAINT));
+                            ui.label(RichText::new("FIELD").size(11.0).color(FAINT()));
+                            ui.label(RichText::new("POINTS TO COLLECTION").size(11.0).color(FAINT()));
+                            ui.label(RichText::new("PREVIEW FIELD").size(11.0).color(FAINT()));
                             ui.end_row();
                             for (i, r) in list.iter_mut().enumerate() {
                                 let name = format!("{}.{}", r.coll, r.path);
                                 ui.allocate_ui_with_layout(egui::vec2(260.0, 22.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
                                     ui.set_min_width(260.0);
-                                    ui.add(egui::Label::new(RichText::new(&name).monospace().color(KEY)).truncate()).on_hover_text(&name);
+                                    ui.add(egui::Label::new(RichText::new(&name).monospace().color(KEY())).truncate()).on_hover_text(&name);
                                 });
                                 egui::ComboBox::from_id_salt(("rel-target", i)).width(250.0).selected_text(&r.target).show_ui(ui, |ui| {
                                     for c in &colls {
@@ -7951,7 +8087,7 @@ impl App {
                                     }
                                 });
                                 ui.add_sized([180.0, 22.0], egui::TextEdit::singleline(&mut r.preview).hint_text("_id"));
-                                if ui.small_button(RichText::new("Remove").color(ALERT)).clicked() {
+                                if ui.small_button(RichText::new("Remove").color(ALERT())).clicked() {
                                     remove = Some(i);
                                 }
                                 ui.end_row();
@@ -8009,8 +8145,8 @@ impl App {
                         }
                         let n = self.prefs.relations.get(&key).map_or(0, Vec::len);
                         ui.add_enabled_ui(n > 0, |ui| {
-                            ui.menu_button(RichText::new("Remove all…").color(ALERT), |ui| {
-                                if ui.button(RichText::new(format!("Remove all {n} relations of {db}")).color(ALERT)).clicked() {
+                            ui.menu_button(RichText::new("Remove all…").color(ALERT()), |ui| {
+                                if ui.button(RichText::new(format!("Remove all {n} relations of {db}")).color(ALERT())).clicked() {
                                     self.prefs.relations.remove(&key);
                                     changed = true;
                                     ui.close();
@@ -8045,12 +8181,12 @@ impl App {
                     }
                 }
                 Modal::RenameColl { conn, db, coll, name } => {
-                    ui.label(RichText::new(format!("Rename {db}.{coll}")).strong().size(16.0).color(BRIGHT));
-                    ui.label(RichText::new("Open tabs of this collection are closed, as in the original.").color(MUTED));
+                    ui.label(RichText::new(format!("Rename {db}.{coll}")).strong().size(16.0).color(BRIGHT()));
+                    ui.label(RichText::new("Open tabs of this collection are closed, as in the original.").color(MUTED()));
                     ui.add(egui::TextEdit::singleline(name).desired_width(320.0));
                     ui.horizontal(|ui| {
                         let ok = !name.trim().is_empty() && name.trim() != coll.as_str();
-                        if ui.add_enabled(ok, egui::Button::new(RichText::new("Rename").strong().color(BG)).fill(PRIMARY)).clicked() {
+                        if ui.add_enabled(ok, egui::Button::new(RichText::new("Rename").strong().color(BG())).fill(PRIMARY())).clicked() {
                             if let Some(client) = self.conn(*conn).and_then(|c| c.client.clone()) {
                                 let (from, to) = (format!("{db}.{coll}"), format!("{db}.{}", name.trim()));
                                 self.tabs.retain(|t| !(t.sel.conn == *conn && t.sel.db == *db && t.sel.coll == *coll));
@@ -8066,10 +8202,10 @@ impl App {
                 }
                 Modal::ImportInsert(n) => {
                     let coll = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
-                    ui.label(RichText::new(format!("Insert {n} documents into {coll}?")).strong().size(16.0).color(BRIGHT));
-                    ui.label(RichText::new("They are added as new documents. Undo removes exactly these documents again.").color(MUTED));
+                    ui.label(RichText::new(format!("Insert {n} documents into {coll}?")).strong().size(16.0).color(BRIGHT()));
+                    ui.label(RichText::new("They are added as new documents. Undo removes exactly these documents again.").color(MUTED()));
                     ui.horizontal(|ui| {
-                        if primary(ui, "Import", PRIMARY).clicked() {
+                        if primary(ui, "Import", PRIMARY()).clicked() {
                             if let Some((conn, target)) = self.writable_target() {
                                 if let Some(Ok(docs)) = self.tabs[self.cur].import.parsed.clone() {
                                     self.worker.import(conn, target, docs, None);
@@ -8084,11 +8220,11 @@ impl App {
                     });
                 }
                 Modal::ShellWrite(ops) => {
-                    ui.label(RichText::new("Execute this command?").strong().size(16.0).color(BRIGHT));
-                    ui.label(RichText::new("Your command contains potentially destructive operations:").color(MUTED));
-                    ui.label(RichText::new(ops.join(", ")).monospace().color(ALERT));
+                    ui.label(RichText::new("Execute this command?").strong().size(16.0).color(BRIGHT()));
+                    ui.label(RichText::new("Your command contains potentially destructive operations:").color(MUTED()));
+                    ui.label(RichText::new(ops.join(", ")).monospace().color(ALERT()));
                     ui.horizontal(|ui| {
-                        if primary(ui, "Execute", ALERT).clicked() {
+                        if primary(ui, "Execute", ALERT()).clicked() {
                             self.start_shell();
                             keep = false;
                         }
@@ -8098,10 +8234,10 @@ impl App {
                     });
                 }
                 Modal::AggWrite(p) => {
-                    ui.label(RichText::new("This pipeline writes data ($out or $merge)").strong().size(16.0).color(BRIGHT));
-                    ui.label(RichText::new("It can replace or change a whole collection and cannot be undone here.").color(MUTED));
+                    ui.label(RichText::new("This pipeline writes data ($out or $merge)").strong().size(16.0).color(BRIGHT()));
+                    ui.label(RichText::new("It can replace or change a whole collection and cannot be undone here.").color(MUTED()));
                     ui.horizontal(|ui| {
-                        if primary(ui, "Run it", ALERT).clicked() {
+                        if primary(ui, "Run it", ALERT()).clicked() {
                             if let Some((_, target)) = self.writable_target() {
                                 self.req += 1;
                                 let req = self.req;
@@ -8117,10 +8253,10 @@ impl App {
                 }
                 Modal::SaveAll(keys) => {
                     let n: usize = keys.iter().filter_map(|k| self.drafts.get(k)).map(|d| db::diff(&d.original, &d.current).len()).sum();
-                    ui.label(RichText::new(format!("Save {} documents ({n} changes)?", keys.len())).strong().size(16.0).color(BRIGHT));
-                    ui.label(RichText::new("Each document is refused if someone else changed it since you opened it; its edits are kept.").color(MUTED));
+                    ui.label(RichText::new(format!("Save {} documents ({n} changes)?", keys.len())).strong().size(16.0).color(BRIGHT()));
+                    ui.label(RichText::new("Each document is refused if someone else changed it since you opened it; its edits are kept.").color(MUTED()));
                     ui.horizontal(|ui| {
-                        if primary(ui, "Save all", PRIMARY).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
+                        if primary(ui, "Save all", PRIMARY()).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
                             for k in keys.iter() {
                                 self.write_draft(k);
                             }
@@ -8133,13 +8269,13 @@ impl App {
                 }
                 Modal::Grouped { sel, path, pipeline, rows } => {
                     ui.set_width(560.0);
-                    ui.label(RichText::new(format!("Distinct values for {}: {path}", sel.coll)).strong().size(15.0).color(BRIGHT));
+                    ui.label(RichText::new(format!("Distinct values for {}: {path}", sel.coll)).strong().size(15.0).color(BRIGHT()));
                     let total: u64 = rows.iter().filter_map(|r| r.get("count").and_then(|c| c.as_i64().or_else(|| c.as_i32().map(i64::from)))).map(|c| c as u64).sum();
-                    ui.label(RichText::new(format!("{} values in {} documents{}", group(&rows.len().to_string()), group(&total.to_string()), if rows.len() >= 1000 { ", first 1000 values shown" } else { "" })).color(MUTED));
+                    ui.label(RichText::new(format!("{} values in {} documents{}", group(&rows.len().to_string()), group(&total.to_string()), if rows.len() >= 1000 { ", first 1000 values shown" } else { "" })).color(MUTED()));
                     egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
                         egui::Grid::new("grouped").striped(true).num_columns(2).spacing([24.0, 4.0]).show(ui, |ui| {
-                            ui.label(RichText::new("VALUE").size(11.0).color(FAINT));
-                            ui.label(RichText::new("COUNT").size(11.0).color(FAINT));
+                            ui.label(RichText::new("VALUE").size(11.0).color(FAINT()));
+                            ui.label(RichText::new("COUNT").size(11.0).color(FAINT()));
                             ui.end_row();
                             for r in rows.iter() {
                                 // A fixed width: a truncating label in a grid otherwise shrinks to a few letters.
@@ -8147,7 +8283,7 @@ impl App {
                                     ui.set_min_width(400.0);
                                     ui.add(egui::Label::new(cell_job(r.get("_id").unwrap_or(&Bson::Null))).truncate());
                                 });
-                                ui.label(RichText::new(r.get("count").map(db::compact).unwrap_or_default()).monospace().color(C_NUMBER));
+                                ui.label(RichText::new(r.get("count").map(db::compact).unwrap_or_default()).monospace().color(C_NUMBER()));
                                 ui.end_row();
                             }
                         });
@@ -8156,7 +8292,7 @@ impl App {
                         if ui.button("Copy").on_hover_text("Copy as JSON: value and count").clicked() {
                             ui.ctx().copy_text(db::to_edit_value(&Bson::Array(rows.iter().cloned().map(Bson::Document).collect())));
                         }
-                        if primary(ui, "Open in Aggregate", PRIMARY).on_hover_text("Open this pipeline in a new tab").clicked() {
+                        if primary(ui, "Open in Aggregate", PRIMARY()).on_hover_text("Open this pipeline in a new tab").clicked() {
                             let mut t = Tab::new(sel.clone());
                             t.view = View::Aggregate;
                             t.agg_txt = format!("[\n{}\n]", pipeline.iter().map(|s| format!("  {}", db::shell_text(&Bson::Document(s.clone())))).collect::<Vec<_>>().join(",\n"));
@@ -8175,7 +8311,7 @@ impl App {
                 }
                 Modal::Text { title, body, code } => {
                     ui.set_width(560.0);
-                    ui.label(RichText::new(title.as_str()).strong().size(15.0).color(BRIGHT));
+                    ui.label(RichText::new(title.as_str()).strong().size(15.0).color(BRIGHT()));
                     let find = Find::bar(ui, egui::Id::unique("text-modal"), body);
                     egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
                         let mut text = body.as_str();
@@ -8193,13 +8329,13 @@ impl App {
                 }
                 Modal::Rename { doc: d, path, name } => {
                     let from = path.join(".");
-                    ui.label(RichText::new(format!("Rename {from}")).strong().size(16.0).color(BRIGHT));
+                    ui.label(RichText::new(format!("Rename {from}")).strong().size(16.0).color(BRIGHT()));
                     ui.add(egui::TextEdit::singleline(name).font(FontId::monospace(13.0)).desired_width(320.0));
                     let valid = !name.trim().is_empty() && !name.contains('.') && !name.starts_with('$') && Some(name.trim()) != path.last().map(|s| s.as_str());
                     let mut to = path[..path.len() - 1].to_vec();
                     to.push(name.trim().to_string());
                     ui.horizontal(|ui| {
-                        if ui.add_enabled(valid, egui::Button::new(RichText::new("In this document").strong().color(BG)).fill(PRIMARY)).clicked() {
+                        if ui.add_enabled(valid, egui::Button::new(RichText::new("In this document").strong().color(BG())).fill(PRIMARY())).clicked() {
                             let new = db::get_path(d, &from).cloned().ok_or_else(|| "Field not found".to_string()).and_then(|v| db::edit_path(&db::edit_path(d, path, None)?, &to, Some(v)));
                             let base = d.clone();
                             self.stage(&base, new);
@@ -8226,12 +8362,12 @@ impl App {
                 Modal::UpdateMany { set_txt, unset_txt, preview } => {
                     ui.set_width(560.0);
                     let filter = self.t().map(|t| t.query.filter.clone()).unwrap_or_default();
-                    ui.label(RichText::new("Update matching documents").strong().size(16.0).color(BRIGHT));
-                    ui.label(RichText::new("Applies to every document matching the current filter. Values starting with $ are read as field paths.").color(MUTED));
-                    ui.label(RichText::new("Set fields").color(FAINT));
+                    ui.label(RichText::new("Update matching documents").strong().size(16.0).color(BRIGHT()));
+                    ui.label(RichText::new("Applies to every document matching the current filter. Values starting with $ are read as field paths.").color(MUTED()));
+                    ui.label(RichText::new("Set fields").color(FAINT()));
                     let id = ui.make_persistent_id("um-set");
                     let mut changed = with_autopair(ui, id, set_txt, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(4).layouter(&mut code_layout).show(ui)).response.changed();
-                    ui.label(RichText::new("Remove fields (comma separated paths)").color(FAINT));
+                    ui.label(RichText::new("Remove fields (comma separated paths)").color(FAINT()));
                     changed |= ui.add(egui::TextEdit::singleline(unset_txt).font(FontId::monospace(13.0)).desired_width(f32::INFINITY)).changed();
                     if changed {
                         *preview = None;
@@ -8239,10 +8375,10 @@ impl App {
                     let stages = db::parse_doc(set_txt).map(|set| db::update_stages(set, unset_txt.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect()));
                     match &stages {
                         Err(err) => {
-                            ui.label(RichText::new(err).color(ALERT));
+                            ui.label(RichText::new(err).color(ALERT()));
                         }
                         Ok(st) if st.is_empty() => {
-                            ui.label(RichText::new("Nothing to change yet.").color(MUTED));
+                            ui.label(RichText::new("Nothing to change yet.").color(MUTED()));
                         }
                         Ok(_) => {}
                     }
@@ -8250,19 +8386,19 @@ impl App {
                     let fresh = matches!((preview.as_ref(), stages.as_ref()), (Some((p, _)), Ok(s)) if p == s);
                     match preview.as_ref().filter(|_| fresh).map(|(_, r)| r) {
                         Some(Err(err)) => {
-                            ui.label(RichText::new(&*err).color(ALERT));
+                            ui.label(RichText::new(&*err).color(ALERT()));
                         }
                         Some(Ok((rows, n))) => {
-                            ui.label(RichText::new(format!("{} documents match. Showing {} of them after the change.", group(&n.to_string()), rows.len())).color(MUTED));
+                            ui.label(RichText::new(format!("{} documents match. Showing {} of them after the change.", group(&n.to_string()), rows.len())).color(MUTED()));
                             egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
                                 for (i, (old, new)) in rows.iter().enumerate() {
-                                    ui.label(RichText::new(old.get("_id").map(db::short).unwrap_or_default()).monospace().color(BRIGHT));
+                                    ui.label(RichText::new(old.get("_id").map(db::short).unwrap_or_default()).monospace().color(BRIGHT()));
                                     egui::Grid::new(("um-chg", i)).num_columns(3).striped(true).spacing([14.0, 6.0]).show(ui, |ui| {
                                         for (path, a, b) in db::diff(old, new) {
                                             let show = |v: &Option<Bson>| v.as_ref().map(|v| format!("{} ({})", leaf_text(v), db::type_name(v))).unwrap_or("(none)".into());
-                                            ui.label(RichText::new(path).monospace().color(KEY));
-                                            ui.label(RichText::new(show(&a)).monospace().color(ALERT).strikethrough());
-                                            ui.label(RichText::new(show(&b)).monospace().color(SUCCESS));
+                                            ui.label(RichText::new(path).monospace().color(KEY()));
+                                            ui.label(RichText::new(show(&a)).monospace().color(ALERT()).strikethrough());
+                                            ui.label(RichText::new(show(&b)).monospace().color(SUCCESS()));
                                             ui.end_row();
                                         }
                                     });
@@ -8278,7 +8414,7 @@ impl App {
                             }
                         }
                         let applicable = ready && fresh && matches!(preview, Some((_, Ok(_))));
-                        if ui.add_enabled(applicable, egui::Button::new(RichText::new("Apply…").strong().color(BG)).fill(ALERT)).clicked() {
+                        if ui.add_enabled(applicable, egui::Button::new(RichText::new("Apply…").strong().color(BG())).fill(ALERT())).clicked() {
                             let coll = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
                             let n = if let Some((_, Ok((_, n)))) = preview { *n } else { 0 };
                             self.modal = Some(Modal::Typed {
@@ -8295,8 +8431,8 @@ impl App {
                     });
                 }
                 Modal::Undo => {
-                    ui.label(RichText::new("Recent changes").strong().size(16.0).color(BRIGHT));
-                    ui.label(RichText::new(format!("Last {} actions from the past 24 hours.", db::UNDO_MAX)).color(MUTED));
+                    ui.label(RichText::new("Recent changes").strong().size(16.0).color(BRIGHT()));
+                    ui.label(RichText::new(format!("Last {} actions from the past 24 hours.", db::UNDO_MAX)).color(MUTED()));
                     let mut pick = None;
                     egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
                         for (i, a) in self.undo.iter().enumerate() {
@@ -8309,7 +8445,7 @@ impl App {
                                 };
                                 let mins = a.at.elapsed().as_secs() / 60;
                                 ui.label(RichText::new(format!("{}.{}  {what}", a.db, a.coll)).monospace());
-                                ui.label(RichText::new(format!("{mins} min ago")).color(MUTED));
+                                ui.label(RichText::new(format!("{mins} min ago")).color(MUTED()));
                                 if ui.small_button("Undo").clicked() {
                                     pick = Some(i);
                                 }
@@ -8325,10 +8461,10 @@ impl App {
                 }
                 Modal::Explain { summary, raw, show_raw } => {
                     ui.set_width(720.0);
-                    ui.label(RichText::new("Explain").strong().size(16.0).color(BRIGHT));
-                    ui.label(RichText::new(format!("{} returned  ·  {} keys examined  ·  {} documents examined  ·  {} ms", group(&summary.returned.to_string()), group(&summary.keys.to_string()), group(&summary.docs.to_string()), summary.ms)).color(MUTED));
+                    ui.label(RichText::new("Explain").strong().size(16.0).color(BRIGHT()));
+                    ui.label(RichText::new(format!("{} returned  ·  {} keys examined  ·  {} documents examined  ·  {} ms", group(&summary.returned.to_string()), group(&summary.keys.to_string()), group(&summary.docs.to_string()), summary.ms)).color(MUTED()));
                     for w in &summary.warnings {
-                        ui.label(RichText::new(w.as_str()).color(WARNING));
+                        ui.label(RichText::new(w.as_str()).color(WARNING()));
                     }
                     ui.horizontal(|ui| {
                         segmented(ui, show_raw, &[(false, "Stages"), (true, "Raw JSON")]);
@@ -8340,22 +8476,22 @@ impl App {
                             let out = egui::TextEdit::multiline(&mut text).code_editor().desired_width(f32::INFINITY).layouter(&mut find.layouter(true)).show(ui);
                             find.reveal(ui, raw, &out);
                         } else if summary.rows.is_empty() {
-                            ui.label(RichText::new("The server returned no execution stages. See Raw JSON.").color(MUTED));
+                            ui.label(RichText::new("The server returned no execution stages. See Raw JSON.").color(MUTED()));
                         } else {
                             egui::Grid::new("explain-stages").num_columns(6).spacing([16.0, 4.0]).striped(true).show(ui, |ui| {
                                 for h in ["STAGE", "INDEX", "KEYS", "DOCS", "RETURNED", "MS"] {
-                                    ui.label(RichText::new(h).size(11.0).color(MUTED));
+                                    ui.label(RichText::new(h).size(11.0).color(MUTED()));
                                 }
                                 ui.end_row();
                                 let n = |v: Option<i64>| v.map(|v| group(&v.to_string())).unwrap_or_default();
                                 for r in &summary.rows {
                                     let c = match r.stage.to_lowercase().as_str() {
-                                        "ixscan" | "ixseek" => SUCCESS,
-                                        "collscan" | "scan" => ALERT,
-                                        _ => TEXT,
+                                        "ixscan" | "ixseek" => SUCCESS(),
+                                        "collscan" | "scan" => ALERT(),
+                                        _ => TEXT(),
                                     };
                                     ui.label(RichText::new(format!("{}{}", "  ".repeat(r.depth), r.stage)).monospace().color(c));
-                                    ui.label(RichText::new(r.index.as_str()).monospace().color(MUTED));
+                                    ui.label(RichText::new(r.index.as_str()).monospace().color(MUTED()));
                                     for v in [r.keys, r.docs, r.returned, r.ms] {
                                         ui.label(RichText::new(n(v)).monospace());
                                     }
@@ -8393,13 +8529,13 @@ impl App {
                     ui.add_space(4.0);
                     egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
                         if items.is_empty() {
-                            ui.label(RichText::new("No matches").color(MUTED));
+                            ui.label(RichText::new("No matches").color(MUTED()));
                         }
                         for (i, (label, hint, j)) in items.iter().enumerate() {
                             let r = ui
                                 .horizontal(|ui| {
-                                    let r = ui.selectable_label(i == *sel, RichText::new(label).color(BRIGHT));
-                                    ui.label(RichText::new(hint).size(11.5).color(FAINT));
+                                    let r = ui.selectable_label(i == *sel, RichText::new(label).color(BRIGHT()));
+                                    ui.label(RichText::new(hint).size(11.5).color(FAINT()));
                                     r
                                 })
                                 .inner;
@@ -8595,9 +8731,9 @@ mod tests {
             let at = job.text.find(w).unwrap();
             job.sections.iter().find(|s| s.byte_range.start.0 <= at && at < s.byte_range.end.0).unwrap().format.color
         };
-        assert_eq!(colour_of("const"), C_KEYWORD);
-        assert_eq!(colour_of("find"), C_DATE);
-        assert_eq!(colour_of("// hi"), FAINT);
+        assert_eq!(colour_of("const"), C_KEYWORD());
+        assert_eq!(colour_of("find"), C_DATE());
+        assert_eq!(colour_of("// hi"), FAINT());
     }
 
     #[test]
