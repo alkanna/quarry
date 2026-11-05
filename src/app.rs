@@ -831,32 +831,75 @@ enum Jump {
     Coll(Sel),
 }
 
-/// Palette entries matching `q` as (label, hint, target). Substring matches rank above fuzzy
-/// ones, and within each the active connection comes first.
+/// How well one lowercase query token matches one lowercase name.
+fn seg_score(t: &str, s: &str) -> Option<u32> {
+    if s == t {
+        Some(8)
+    } else if s.starts_with(t) {
+        Some(6)
+    } else if s.match_indices(t).any(|(p, _)| s[..p].ends_with(['-', '_', '.', ' '])) {
+        Some(4)
+    } else if s.contains(t) {
+        Some(2)
+    } else {
+        fuzzy(t, s, false).then_some(1)
+    }
+}
+
+/// Scores an entry's lowercase names (connection, database, collection) against the query
+/// tokens, or None when a token matches nowhere. Each token counts its best name, so
+/// "vairon travels" finds thetreep-api-vairon.travels. A collection whose own name matches
+/// the last token gets a bonus, as people usually type the collection last.
+fn jump_score(tokens: &[String], segs: &[&str]) -> Option<u32> {
+    let mut total = 0;
+    for (n, t) in tokens.iter().enumerate() {
+        let best = segs.iter().enumerate().filter_map(|(i, s)| seg_score(t, s).map(|sc| (sc, i))).max();
+        let (sc, i) = match best {
+            Some(b) => b,
+            // Typed without separators, like "shopord", a token can span names.
+            None if fuzzy(t, &segs.join("."), false) => (1, 0),
+            None => return None,
+        };
+        total += sc;
+        if n + 1 == tokens.len() && segs.len() == 3 && i == 2 {
+            total += 3;
+        }
+    }
+    Some(total)
+}
+
+/// Palette entries matching `q` as (label, hint, target), best match first. With an empty query
+/// they keep tree order, active connection first.
 fn jumps(conns: &[Conn], active: Option<u64>, q: &str) -> Vec<(String, String, Jump)> {
     const MAX: usize = 50;
+    let q = q.to_lowercase();
+    let tokens: Vec<String> = q.split(|c: char| c.is_whitespace() || c == '.' || c == '/').filter(|t| !t.is_empty()).map(String::from).collect();
     let mut out = Vec::new();
     let mut order: Vec<&Conn> = conns.iter().collect();
     order.sort_by_key(|c| Some(c.meta.id) != active);
     for c in order {
         let id = c.meta.id;
-        let mut push = |label: String, hint: &str, j: Jump| {
-            if fuzzy(q, &label, false) {
-                out.push((label, hint.to_string(), j));
+        let bonus = u32::from(Some(id) == active);
+        let name = c.meta.name.to_lowercase();
+        let mut push = |segs: &[&str], label: String, hint: &str, j: Jump| {
+            if let Some(s) = jump_score(&tokens, segs) {
+                out.push((s + bonus, label, hint.to_string(), j));
             }
         };
-        push(c.meta.name.clone(), &c.masked_uri, Jump::Conn(id));
+        push(&[&name], c.meta.name.clone(), &c.masked_uri, Jump::Conn(id));
         for (db, colls) in &c.dbs {
-            push(db.clone(), &c.meta.name, Jump::Db(id, db.clone()));
+            let dbl = db.to_lowercase();
+            push(&[&name, &dbl], db.clone(), &c.meta.name, Jump::Db(id, db.clone()));
             for coll in colls.iter().flatten() {
-                push(format!("{db}.{coll}"), &c.meta.name, Jump::Coll(Sel { conn: id, db: db.clone(), coll: coll.clone() }));
+                push(&[&name, &dbl, &coll.to_lowercase()], format!("{db}.{coll}"), &c.meta.name, Jump::Coll(Sel { conn: id, db: db.clone(), coll: coll.clone() }));
             }
         }
     }
-    let q = q.to_lowercase();
-    out.sort_by_cached_key(|(label, ..)| !label.to_lowercase().contains(&q));
+    if !tokens.is_empty() {
+        out.sort_by_key(|(s, label, ..)| (std::cmp::Reverse(*s), label.len()));
+    }
     out.truncate(MAX);
-    out
+    out.into_iter().map(|(_, label, hint, j)| (label, hint, j)).collect()
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -1398,6 +1441,8 @@ pub struct App {
     toast: Option<(String, std::time::Instant)>,
     ac: Ac,
     tree_filter: String,
+    /// Tree row the palette jumped to, as (connection, database, collection), scrolled into view once drawn.
+    reveal: Option<(u64, String, Option<String>)>,
     demo: bool,
     tool: Option<ToolRun>,
     /// Recently closed tabs, newest first.
@@ -1865,6 +1910,7 @@ impl App {
             ac: Ac::default(),
             status_at: std::time::Instant::now(),
             tree_filter: String::new(),
+            reveal: None,
             demo,
             tool: None,
             closed: Vec::new(),
@@ -3566,6 +3612,7 @@ impl App {
             Jump::Coll(s) => (s.conn, Some(s.db.clone())),
         };
         self.activate(id);
+        self.reveal = db.clone().map(|d| (id, d, if let Jump::Coll(s) = &j { Some(s.coll.clone()) } else { None }));
         // Reveal the target in the tree, which a leftover filter could hide.
         if let Some(db) = db {
             self.tree_filter.clear();
@@ -3589,6 +3636,7 @@ impl App {
         let mut open = None;
         let mut side: Vec<SideAct> = Vec::new();
         let mut connect = false;
+        let mut revealed = false;
         {
             let Some(c) = self.conn(id) else { return };
             match &c.status {
@@ -3620,6 +3668,10 @@ impl App {
                     p.text(egui::pos2(r.left() + 16.0, r.center().y), egui::Align2::LEFT_CENTER, db_name, FontId::proportional(14.0), if dim { FAINT } else { BRIGHT });
                     p.text(egui::pos2(r.right(), r.center().y), egui::Align2::RIGHT_CENTER, &count, FontId::proportional(12.0), FAINT);
                 });
+                if matches!(&self.reveal, Some((c, d, None)) if *c == id && d == db_name) {
+                    r.scroll_to_me(Some(egui::Align::Center));
+                    revealed = true;
+                }
                 if r.clicked() {
                     toggle = Some(db_name.clone());
                 }
@@ -3670,6 +3722,10 @@ impl App {
                             p.galley(egui::pos2(r.left() + 16.0, r.center().y - galley.size().y / 2.0), galley, TEXT);
                         });
                         let r = if is_view { r.on_hover_text("View (read-only)") } else { r };
+                        if matches!(&self.reveal, Some((c, d, Some(k))) if *c == id && d == db_name && k == coll) {
+                            r.scroll_to_me(Some(egui::Align::Center));
+                            revealed = true;
+                        }
                         if r.clicked() {
                             open = Some(sel.clone());
                         }
@@ -3705,6 +3761,9 @@ impl App {
                     ui.add_space(4.0);
                 }
             }
+        }
+        if revealed {
+            self.reveal = None;
         }
         if connect {
             self.connect(id);
@@ -6772,6 +6831,13 @@ mod tests {
         assert_eq!(labels(Some(1), "users"), ["shop.users"]);
         // "or" fuzzily matches shop.users too, but the substring match ranks first.
         assert_eq!(labels(Some(1), "or"), ["shop.orders", "shop.users"]);
+        assert_eq!(labels(Some(1), "prod users")[0], "shop.users");
+        assert_eq!(labels(Some(1), "shop")[0], "shop");
+
+        let conns = [conn(1, "local", Status::Ready, vec![("thetreep-api-main".into(), Some(vec!["travels".into()])), ("thetreep-api-vairon".into(), Some(vec!["travels".into(), "users".into()]))])];
+        let labels = |q| jumps(&conns, Some(1), q).into_iter().map(|j| j.0).collect::<Vec<_>>();
+        assert_eq!(labels("vairon travels"), ["thetreep-api-vairon.travels"]);
+        assert_eq!(labels("travels")[..2], ["thetreep-api-main.travels", "thetreep-api-vairon.travels"]);
     }
 
     #[test]
