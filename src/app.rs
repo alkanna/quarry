@@ -1249,6 +1249,8 @@ struct UiPrefs {
     confirm_save: bool,
     /// Write every edit right away and offer Undo, instead of collecting unsaved edits.
     auto_save: bool,
+    /// Every connection is writable and saving edits skips the change list.
+    always_writable: bool,
     /// Columns shown before the person picks their own.
     default_cols: usize,
     timeout_ms: u64,
@@ -1413,7 +1415,7 @@ enum QAct {
 
 impl Default for UiPrefs {
     fn default() -> Self {
-        Self { open_inline: true, table: true, confirm_save: false, auto_save: false, default_cols: DEFAULT_COLS, timeout_ms: db::DEFAULT_TIMEOUT_MS, shell_runtime: String::new(), shell_histories: HashMap::new(), shell_packages: Vec::new(), history: HashMap::new(), library: HashMap::new(), open_tabs: Vec::new(), cur_tab: 0, last_conn: None, cols: HashMap::new(), relations: HashMap::new(), mongodump: String::new(), mongorestore: String::new(), auto_update: true, last_version: String::new() }
+        Self { open_inline: true, table: true, confirm_save: false, auto_save: false, always_writable: false, default_cols: DEFAULT_COLS, timeout_ms: db::DEFAULT_TIMEOUT_MS, shell_runtime: String::new(), shell_histories: HashMap::new(), shell_packages: Vec::new(), history: HashMap::new(), library: HashMap::new(), open_tabs: Vec::new(), cur_tab: 0, last_conn: None, cols: HashMap::new(), relations: HashMap::new(), mongodump: String::new(), mongorestore: String::new(), auto_update: true, last_version: String::new() }
     }
 }
 
@@ -3045,7 +3047,7 @@ impl App {
         if !self.conn(dr.conn).is_some_and(|c| c.writable) {
             return self.modal = Some(Modal::Unlock(dr.conn));
         }
-        if self.prefs.confirm_save {
+        if self.prefs.confirm_save && !self.prefs.always_writable {
             let changes = db::diff(&dr.original, &dr.current);
             self.modal = Some(Modal::Save { tag: key.to_string(), changes });
         } else {
@@ -3311,6 +3313,10 @@ impl eframe::App for App {
         if self.shot.is_some() {
             ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaintWhileHidden);
             ctx.request_repaint();
+        }
+        // Set every frame so connections added or reconnected later need no extra handling.
+        if self.prefs.always_writable {
+            self.conns.iter_mut().for_each(|c| c.writable = true);
         }
     }
 
@@ -3796,7 +3802,9 @@ impl App {
                 if let Some(s) = self.t().map(|t| t.sel.clone()) {
                     let (name, writable) = self.conn(s.conn).map(|c| (c.meta.name.clone(), c.writable)).unwrap_or_default();
                     ui.label(RichText::new(format!("{name}  /  {}  /  {}", s.db, s.coll)).monospace().color(TEXT));
-                    if writable {
+                    if self.prefs.always_writable {
+                        // No lock to toggle: writes are always on.
+                    } else if writable {
                         if pill(ui, "WRITES ON", ALERT).on_hover_text("Click to lock this connection again").clicked() {
                             if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == s.conn) {
                                 c.writable = false;
@@ -4660,7 +4668,7 @@ impl App {
                 if !pending.is_empty() && primary(ui, &format!("Save all ({})", pending.len()), WARNING).on_hover_text("Documents with unsaved edits").clicked() {
                     if !self.sel_writable() {
                         self.ask_unlock();
-                    } else if self.prefs.confirm_save {
+                    } else if self.prefs.confirm_save && !self.prefs.always_writable {
                         self.modal = Some(Modal::SaveAll(pending));
                     } else {
                         for k in &pending {
@@ -5205,7 +5213,9 @@ impl App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     save = primary(ui, "Save", PRIMARY).on_hover_text("Write all edits of this document at once (Cmd+S)").clicked() || ui.input(|i| i.modifiers.command && i.key_pressed(Key::S));
                     discard = ui.small_button("Discard").clicked();
-                    ui.checkbox(&mut confirm, RichText::new("Ask before saving").size(11.5));
+                    if !self.prefs.always_writable {
+                        ui.checkbox(&mut confirm, RichText::new("Ask before saving").size(11.5));
+                    }
                 });
             });
         });
@@ -6779,7 +6789,7 @@ impl App {
                     });
                     ui.label(RichText::new("Changes are saved right away.").size(12.0).color(FAINT));
                     ui.add_space(8.0);
-                    let before = (self.prefs.open_inline, self.prefs.auto_save, self.prefs.confirm_save, self.prefs.default_cols, self.prefs.timeout_ms, self.prefs.shell_runtime.clone(), self.prefs.mongodump.clone(), self.prefs.mongorestore.clone(), self.prefs.auto_update);
+                    let before = (self.prefs.open_inline, self.prefs.auto_save, self.prefs.always_writable, self.prefs.confirm_save, self.prefs.default_cols, self.prefs.timeout_ms, self.prefs.shell_runtime.clone(), self.prefs.mongodump.clone(), self.prefs.mongorestore.clone(), self.prefs.auto_update);
                     ui.scope(|ui| {
                         settings_section(ui, "DOCUMENTS", |ui| {
                             setting_row(ui, "Open documents", "Where a clicked row shows its document.", |ui| {
@@ -6795,11 +6805,15 @@ impl App {
                                 toggle(ui, &mut self.prefs.auto_save);
                             });
                             ui.separator();
-                            let auto = self.prefs.auto_save;
+                            setting_row(ui, "Always allow writes", "Skip read-only mode on every connection and save edits without showing the changes first.", |ui| {
+                                toggle(ui, &mut self.prefs.always_writable);
+                            });
+                            ui.separator();
+                            let auto = self.prefs.auto_save || self.prefs.always_writable;
                             setting_row(ui, "Show changes before saving", "List every changed field before writing unsaved edits.", |ui| {
                                 ui.add_enabled_ui(!auto, |ui| toggle(ui, &mut self.prefs.confirm_save));
                             });
-                            ui.label(RichText::new("Writes always need the connection unlocked, and a save never overwrites someone else's change.").size(11.5).color(FAINT));
+                            ui.label(RichText::new(if self.prefs.always_writable { "A save never overwrites someone else's change." } else { "Writes always need the connection unlocked, and a save never overwrites someone else's change." }).size(11.5).color(FAINT));
                         });
                         settings_section(ui, "QUERIES", |ui| {
                             setting_row(ui, "Query timeout", "How long a query may run before it is stopped.", |ui| {
@@ -6848,7 +6862,7 @@ impl App {
                             self.install_tools_button(ui);
                         }
                     });
-                    if before != (self.prefs.open_inline, self.prefs.auto_save, self.prefs.confirm_save, self.prefs.default_cols, self.prefs.timeout_ms, self.prefs.shell_runtime.clone(), self.prefs.mongodump.clone(), self.prefs.mongorestore.clone(), self.prefs.auto_update) {
+                    if before != (self.prefs.open_inline, self.prefs.auto_save, self.prefs.always_writable, self.prefs.confirm_save, self.prefs.default_cols, self.prefs.timeout_ms, self.prefs.shell_runtime.clone(), self.prefs.mongodump.clone(), self.prefs.mongorestore.clone(), self.prefs.auto_update) {
                         self.save_prefs();
                     }
                 }

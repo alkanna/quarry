@@ -10,7 +10,7 @@
 
 - **Browse and query**: tabs, table or JSON view, pinned and reordered columns per collection, sort from the header, query history and a saved query library. Paste `db.orders.find(...)` or `aggregate([...])` straight into the query bar. Editors auto-close brackets and indent as you type.
 - **Jump anywhere** with the Cmd+K palette, and drive tabs, views, reload and paging from the keyboard (Cmd+/ lists the shortcuts; Cmd is Ctrl on Linux and Windows).
-- **Safe editing**: every connection opens read-only. Edits are typed, staged and saved together, never overwrite a change someone else made in the meantime, and can be undone. Update every matching document after previewing the result.
+- **Safe editing**: every connection opens read-only, unless you turn on Always allow writes in Settings. Edits are typed, staged and saved together, never overwrite a change someone else made in the meantime, and can be undone. Update every matching document after previewing the result.
 - **Aggregate** with a preview of the output after each stage, and **explain plans** for queries and pipelines.
 - **Copy as driver code**: turn a query or pipeline into code for the official MongoDB drivers.
 - **Indexes**: usage stats, hide and unhide, and suggestions from slow queries.
