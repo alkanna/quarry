@@ -1383,10 +1383,14 @@ enum Danger {
     Validator(Document),
 }
 
+/// What to run once writes are allowed.
+type Retry = Box<dyn FnOnce(&mut App)>;
+
 enum Modal {
     Conn(Box<ConnForm>),
     Settings,
-    Unlock(u64),
+    /// The second field reruns what asked for writes once they are allowed.
+    Unlock(u64, Option<Retry>),
     Save { tag: String, changes: Vec<(String, Option<Bson>, Option<Bson>)> },
     SaveAll(Vec<String>),
     Delete(Document),
@@ -2566,7 +2570,14 @@ impl App {
 
     fn ask_unlock(&mut self) {
         if let Some(t) = self.t() {
-            self.modal = Some(Modal::Unlock(t.sel.conn));
+            self.modal = Some(Modal::Unlock(t.sel.conn, None));
+        }
+    }
+
+    /// Asks to allow writes, then runs `then` if they were allowed.
+    fn ask_unlock_then(&mut self, then: impl FnOnce(&mut App) + 'static) {
+        if let Some(t) = self.t() {
+            self.modal = Some(Modal::Unlock(t.sel.conn, Some(Box::new(then))));
         }
     }
 
@@ -3413,7 +3424,8 @@ impl App {
     fn save_draft(&mut self, key: &str) {
         let Some(dr) = self.drafts.get(key) else { return };
         if !self.conn(dr.conn).is_some_and(|c| c.writable) {
-            return self.modal = Some(Modal::Unlock(dr.conn));
+            let key = key.to_string();
+            return self.modal = Some(Modal::Unlock(dr.conn, Some(Box::new(move |a: &mut App| a.save_draft(&key)))));
         }
         if self.prefs.confirm_save && !self.prefs.always_writable {
             let changes = db::diff(&dr.original, &dr.current);
@@ -4254,7 +4266,7 @@ impl App {
             });
         });
         if unlock {
-            self.modal = Some(Modal::Unlock(conn));
+            self.modal = Some(Modal::Unlock(conn, None));
         }
         for (db, cmd, done) in cmds {
             match db.as_str() {
@@ -4360,7 +4372,7 @@ impl App {
                             self.ok("Writes locked");
                         }
                     } else if pill(ui, "READ-ONLY", SUCCESS).on_hover_text("Click to allow edits on this connection for this session").clicked() {
-                        self.modal = Some(Modal::Unlock(s.conn));
+                        self.modal = Some(Modal::Unlock(s.conn, None));
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -4836,7 +4848,7 @@ impl App {
         let writable = self.conn(conn).is_some_and(|c| c.writable);
         let needs_write = matches!(a, SideAct::NewColl(..) | SideAct::DropDb(_) | SideAct::Rename(..) | SideAct::DropColl(..) | SideAct::Restore(_));
         if needs_write && !writable {
-            return self.modal = Some(Modal::Unlock(conn));
+            return self.modal = Some(Modal::Unlock(conn, None));
         }
         match a {
             SideAct::NewColl(db, view) => self.modal = Some(Modal::NewCollection { conn, db, name: String::new(), view, source: String::new(), pipeline: "[\n  { $match: {} }\n]".into() }),
@@ -5702,7 +5714,8 @@ impl App {
     /// Starts editing one value: small values in place, objects and arrays in the large JSON editor.
     fn start_inline(&mut self, d: &Document, path: Vec<String>, v: Bson) {
         if !self.sel_writable() {
-            return self.ask_unlock();
+            let d = d.clone();
+            return self.ask_unlock_then(move |a| a.start_inline(&d, path, v));
         }
         self.new_field = None;
         if matches!(v, Bson::Document(_) | Bson::Array(_)) {
@@ -5849,7 +5862,8 @@ impl App {
                     if self.sel_writable() {
                         self.stage(d, db::edit_path(d, &p, None));
                     } else {
-                        self.ask_unlock();
+                        let d = d.clone();
+                        self.ask_unlock_then(move |a| a.handle_acts(&d, vec![TreeAct::Remove(p)]));
                     }
                 }
                 TreeAct::AddField(parent) => {
@@ -5857,7 +5871,8 @@ impl App {
                         self.inline = None;
                         self.new_field = Some(NewField { parent, name: String::new(), text: String::new(), kind: "string" });
                     } else {
-                        self.ask_unlock();
+                        let d = d.clone();
+                        self.ask_unlock_then(move |a| a.handle_acts(&d, vec![TreeAct::AddField(parent)]));
                     }
                 }
                 TreeAct::CommitNew => {
@@ -5964,7 +5979,8 @@ impl App {
                         let name = path.last().cloned().unwrap_or_default();
                         self.modal = Some(Modal::Rename { doc: d.clone(), path, name });
                     } else {
-                        self.ask_unlock();
+                        let d = d.clone();
+                        self.ask_unlock_then(move |a| a.handle_acts(&d, vec![TreeAct::Rename(path)]));
                     }
                 }
             }
@@ -7032,7 +7048,7 @@ impl App {
             self.worker.compare(req, Target { client: a, db: src.db, coll: src.coll, timeout: to }, Target { client: b, db: tdb, coll: tcoll, timeout: to });
         } else if sync {
             if !self.conn(tc).is_some_and(|c| c.writable) {
-                return self.modal = Some(Modal::Unlock(tc));
+                return self.modal = Some(Modal::Unlock(tc, None));
             }
             let c = &self.tabs[i].compare;
             let r = c.result.as_ref().unwrap();
@@ -7692,7 +7708,7 @@ impl App {
                         self.save_prefs();
                     }
                 }
-                Modal::Unlock(id) => {
+                Modal::Unlock(id, then) => {
                     let name = self.conn(*id).map(|c| c.meta.name.clone()).unwrap_or_default();
                     ui.label(RichText::new(format!("Allow writes on \"{name}\"?")).strong().size(16.0).color(BRIGHT));
                     ui.label(RichText::new("Edits, inserts, deletes and index changes become possible until you lock it again or quit. Each one still asks first.").color(MUTED));
@@ -7703,6 +7719,9 @@ impl App {
                             }
                             self.ok(format!("Writes allowed on {name} for this session"));
                             keep = false;
+                            if let Some(then) = then.take() {
+                                then(self);
+                            }
                         }
                         if ui.button("Stay read-only").clicked() {
                             keep = false;
@@ -8416,7 +8435,7 @@ impl App {
         };
         if let Some(conn) = conn_specific {
             let Some(client) = self.conn(conn).filter(|c| c.writable).and_then(|c| c.client.clone()) else {
-                return self.modal = Some(Modal::Unlock(conn));
+                return self.modal = Some(Modal::Unlock(conn, None));
             };
             match action {
                 Danger::DropDatabase { db, .. } => {
