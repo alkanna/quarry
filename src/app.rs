@@ -824,7 +824,7 @@ struct Sel {
 }
 
 /// Shortcuts listed by Cmd+/. Cmd is Ctrl on Linux and Windows.
-const SHORTCUTS: [(&str, &str); 20] = [
+const SHORTCUTS: [(&str, &str); 21] = [
     ("Cmd+K, Cmd+T", "Jump to a connection, database or collection"),
     ("Cmd+R", "Reload the current tab"),
     ("Cmd+Shift+R", "Refresh the connection's databases"),
@@ -840,6 +840,7 @@ const SHORTCUTS: [(&str, &str); 20] = [
     ("Up, Down", "Select the previous or next document"),
     ("PageUp, PageDown", "Previous or next page"),
     ("Enter", "Run the query"),
+    ("Cmd+E", "Explain the query or pipeline"),
     ("Cmd+Enter", "Run the pipeline or script"),
     ("Esc", "Close or deselect"),
     ("Cmd+,", "Settings"),
@@ -1160,6 +1161,7 @@ enum Modal {
     NewCollection { conn: u64, db: String, name: String, view: bool, source: String, pipeline: String },
     RenameColl { conn: u64, db: String, coll: String, name: String },
     Undo,
+    Explain { summary: db::ExplainSummary, raw: String, show_raw: bool },
     /// `code` highlights the body as JSON.
     Text { title: String, body: String, code: bool },
     Rename { doc: Document, path: Vec<String>, name: String },
@@ -1459,6 +1461,7 @@ pub struct App {
     idx_keys: String,
     idx_unique: bool,
     undo: Vec<UndoAction>,
+    explain_req: u64,
     modal: Option<Modal>,
     status: (String, bool),
     status_at: std::time::Instant,
@@ -1930,6 +1933,7 @@ impl App {
             idx_keys: String::new(),
             idx_unique: false,
             undo: Vec::new(),
+            explain_req: 0,
             modal: None,
             status: ("Ready. All connections start read-only.".into(), false),
             toast: None,
@@ -2260,6 +2264,27 @@ impl App {
         }
     }
 
+    /// Explains the Documents query or the Aggregate pipeline, whichever view is open.
+    fn explain(&mut self) {
+        let Some(t) = self.t() else { return };
+        let what = match t.view {
+            View::Documents if !db::is_shell(&t.filter_txt) => Ok(db::ExplainOf::Find(t.query.clone())),
+            View::Aggregate if !db::is_shell(&t.agg_txt) => db::parse_pipeline(&t.agg_txt).and_then(|p| if db::has_write_stage(&p) { Err("Explain would run the write stage.".into()) } else { Ok(db::ExplainOf::Aggregate(p)) }),
+            View::Documents | View::Aggregate => Err("Run the pasted query first, then explain it.".into()),
+            _ => return,
+        };
+        match (what, self.target()) {
+            _ if self.demo => self.ok("Offline demo: nothing to explain."),
+            (Err(e), _) => self.err(e),
+            (Ok(w), Some(target)) => {
+                self.req += 1;
+                self.explain_req = self.req;
+                self.worker.explain(self.req, target, w);
+            }
+            _ => self.err("Not connected."),
+        }
+    }
+
     fn run_pipeline(&mut self, p: Vec<Document>) {
         if db::has_write_stage(&p) {
             if self.writable_target().is_some() {
@@ -2572,6 +2597,11 @@ impl App {
                     (Err(e), _) => self.err(e),
                     _ => {}
                 },
+                Msg::Explained { req, res } if req == self.explain_req => match res {
+                    Ok(raw) => self.modal = Some(Modal::Explain { summary: db::explain_summary(&raw), raw: db::to_edit_json(&raw), show_raw: false }),
+                    Err(e) => self.err(e),
+                },
+                Msg::Explained { .. } => {}
                 Msg::Aggregated { req, res } => match (res, self.tab_by_req(req)) {
                     (Ok((d, ms)), Some(t)) => {
                         t.agg_fields = auto_fields(&d);
@@ -3149,6 +3179,9 @@ impl App {
         }
         if k(cmd, Key::K) || k(cmd, Key::T) {
             self.modal = Some(Modal::Palette { query: String::new(), sel: 0 });
+        }
+        if k(cmd, Key::E) {
+            self.explain();
         }
         if k(cmd | shift, Key::R) {
             if let Some(id) = self.active.filter(|_| !self.demo) {
@@ -4172,6 +4205,7 @@ impl App {
 
     fn documents(&mut self, ui: &mut egui::Ui) {
         let mut run = false;
+        let mut explain = false;
         let key = self.col_key(false);
         let hist = self.prefs.history.get(&key).cloned().unwrap_or_default();
         let index_sorts: Vec<String> = self.t().map(|t| t.indexes.iter().filter_map(|ix| ix.get_document("keys").ok()).map(|k| db::shell_text(&Bson::Document(k.clone()))).collect()).unwrap_or_default();
@@ -4186,6 +4220,7 @@ impl App {
                 if primary(ui, "  Find  ", PRIMARY).on_hover_text("Enter").clicked() {
                     run = true;
                 }
+                explain |= ui.button("Explain").on_hover_text("Cmd+E").clicked();
                 history_menu(ui, &hist, &index_sorts, &mut qacts);
                 library_menu(ui, &lib, new_lib, false, &mut qacts);
             });
@@ -4218,6 +4253,9 @@ impl App {
         }
         if run {
             self.run_query();
+        }
+        if explain {
+            self.explain();
         }
         ui.add_space(6.0);
         let t = self.t().unwrap();
@@ -5436,6 +5474,7 @@ impl App {
 
     fn aggregate(&mut self, ui: &mut egui::Ui) {
         let mut run = false;
+        let mut explain = false;
         let key = self.col_key(false);
         let agg_lib: Vec<SavedQuery> = self.prefs.library.get(&key).map(|v| v.iter().filter(|q| q.pipeline.is_some()).cloned().collect()).unwrap_or_default();
         let mut agg_acts = Vec::new();
@@ -5452,6 +5491,7 @@ impl App {
             with_autopair(ui, id, &mut t.agg_txt, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(8).layouter(&mut code_layout).show(ui));
             ui.horizontal(|ui| {
                 run = primary(ui, "Run", PRIMARY).on_hover_text("Cmd+Enter").clicked() || ui.input(|i| i.modifiers.command && i.key_pressed(Key::Enter));
+                explain = ui.button("Explain").on_hover_text("Cmd+E").clicked();
                 if let Some(ms) = t.agg_ms {
                     ui.label(RichText::new(format!("{} results  {} ms  (first 1000 shown)", t.agg_docs.len(), ms)).color(MUTED));
                 }
@@ -5483,6 +5523,9 @@ impl App {
                     Ok(p) => self.run_pipeline(p),
                 }
             }
+        }
+        if explain {
+            self.explain();
         }
         ui.add_space(6.0);
         self.results(ui, true);
@@ -6788,6 +6831,55 @@ impl App {
                     if ui.button("Close").clicked() {
                         keep = false;
                     }
+                }
+                Modal::Explain { summary, raw, show_raw } => {
+                    ui.set_width(720.0);
+                    ui.label(RichText::new("Explain").strong().size(16.0).color(BRIGHT));
+                    ui.label(RichText::new(format!("{} returned  ·  {} keys examined  ·  {} documents examined  ·  {} ms", group(&summary.returned.to_string()), group(&summary.keys.to_string()), group(&summary.docs.to_string()), summary.ms)).color(MUTED));
+                    for w in &summary.warnings {
+                        ui.label(RichText::new(w.as_str()).color(WARNING));
+                    }
+                    ui.horizontal(|ui| {
+                        segmented(ui, show_raw, &[(false, "Stages"), (true, "Raw JSON")]);
+                    });
+                    egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                        if *show_raw {
+                            let mut text = raw.as_str();
+                            let mut layout = code_layout;
+                            ui.add(egui::TextEdit::multiline(&mut text).code_editor().desired_width(f32::INFINITY).layouter(&mut layout));
+                        } else if summary.rows.is_empty() {
+                            ui.label(RichText::new("The server returned no execution stages. See Raw JSON.").color(MUTED));
+                        } else {
+                            egui::Grid::new("explain-stages").num_columns(6).spacing([16.0, 4.0]).striped(true).show(ui, |ui| {
+                                for h in ["STAGE", "INDEX", "KEYS", "DOCS", "RETURNED", "MS"] {
+                                    ui.label(RichText::new(h).size(11.0).color(MUTED));
+                                }
+                                ui.end_row();
+                                let n = |v: Option<i64>| v.map(|v| group(&v.to_string())).unwrap_or_default();
+                                for r in &summary.rows {
+                                    let c = match r.stage.to_lowercase().as_str() {
+                                        "ixscan" | "ixseek" => SUCCESS,
+                                        "collscan" | "scan" => ALERT,
+                                        _ => TEXT,
+                                    };
+                                    ui.label(RichText::new(format!("{}{}", "  ".repeat(r.depth), r.stage)).monospace().color(c));
+                                    ui.label(RichText::new(r.index.as_str()).monospace().color(MUTED));
+                                    for v in [r.keys, r.docs, r.returned, r.ms] {
+                                        ui.label(RichText::new(n(v)).monospace());
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("Copy raw").clicked() {
+                            ui.ctx().copy_text(raw.clone());
+                        }
+                        if ui.button("Close").on_hover_text("Esc").clicked() {
+                            keep = false;
+                        }
+                    });
                 }
                 Modal::Palette { query, sel } => {
                     ui.set_width(560.0);
