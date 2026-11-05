@@ -406,10 +406,23 @@ fn fuzzy(token: &str, option: &str, anchored: bool) -> bool {
     true
 }
 
+/// Whether a field name reads like a date (createdAt, syncedAt, startDate, timestamp), for fields
+/// not in the loaded documents.
+fn date_like(path: &str) -> bool {
+    let last = path.rsplit('.').next().unwrap_or(path);
+    let l = last.to_ascii_lowercase();
+    (last.len() > 2 && last.ends_with("At")) || l.ends_with("date") || l.starts_with("date") || l.ends_with("time") || l.contains("timestamp")
+}
+
+/// Loaded fields whose values are dates, for date suggestions in the Query box.
+fn date_paths(docs: &[Document], paths: &[String]) -> Vec<String> {
+    paths.iter().filter(|p| docs.iter().take(50).any(|d| matches!(db::get_path(d, p), Some(Bson::DateTime(_))))).cloned().collect()
+}
+
 /// Suggestions for the text before the caret, following the original's setSuggestions
 /// (renderer line 95645): after `{` or `,` field paths (operators when nested), after a dot the
 /// sub-fields, after `:` values. Shortest first, at most 50.
-fn suggest(before: &str, kind: FieldKind, paths: &[String]) -> Option<(usize, Vec<Sug>)> {
+fn suggest(before: &str, kind: FieldKind, paths: &[String], dates: &[String]) -> Option<(usize, Vec<Sug>)> {
     const MAX_SUGGESTIONS: usize = 50;
     let token_start = before.char_indices().rev().take_while(|(_, c)| c.is_ascii_alphanumeric() || "@#$._".contains(*c)).last().map(|(i, _)| i).unwrap_or(before.len());
     let token = &before[token_start..];
@@ -437,6 +450,17 @@ fn suggest(before: &str, kind: FieldKind, paths: &[String]) -> Option<(usize, Ve
         } else {
             (false, paths.iter().map(field).collect())
         }
+    } else if lead.ends_with(':') && kind == FieldKind::Query && {
+        // The field before the colon, quotes removed.
+        let f = lead[..lead.len() - 1].trim_end().trim_end_matches(['"', '\'']);
+        let f = &f[f.char_indices().rev().take_while(|(_, c)| c.is_ascii_alphanumeric() || "._$".contains(*c)).last().map_or(f.len(), |(i, _)| i)..];
+        !f.is_empty() && (dates.iter().any(|d| d == f) || (!paths.iter().any(|p| p == f) && date_like(f)))
+    } {
+        // A date field lists date shortcuts and range templates as soon as the colon is typed.
+        let now = mongodb::bson::DateTime::now().timestamp_millis();
+        let mut v: Vec<Sug> = db::date_suggestions(now).into_iter().map(|(t, n)| Sug { caret: t.chars().count(), insert: t.clone(), text: t, note: n }).collect();
+        v.push(Sug { text: "ISODate(\"\")".into(), note: "date", insert: "ISODate(\"\")".into(), caret: 9 });
+        (true, v)
     } else if lead.ends_with(':') {
         let query_vals: Vec<(&str, &'static str)> = [("ObjectId(\"\")", "objectId"), ("ISODate(\"\")", "date"), ("true", "bool"), ("false", "bool"), ("null", "null")].into_iter().chain(db::DATE_SHORTCUTS).collect();
         let vals: &[(&str, &'static str)] = match kind {
@@ -456,7 +480,10 @@ fn suggest(before: &str, kind: FieldKind, paths: &[String]) -> Option<(usize, Ve
     items.retain(|s| seen.insert(s.text.clone()));
     // The original sorts by length only; words that start with what was typed come first here.
     let lower = token.to_ascii_lowercase();
-    items.sort_by_key(|s| (!s.text.to_ascii_lowercase().starts_with(&lower), s.text.len()));
+    // Nothing typed yet keeps the list in its own order (the date list is ordered by use).
+    if !token.is_empty() {
+        items.sort_by_key(|s| (!s.text.to_ascii_lowercase().starts_with(&lower), s.text.len()));
+    }
     items.truncate(MAX_SUGGESTIONS);
     (!items.is_empty()).then(|| (token.chars().count(), items))
 }
@@ -623,7 +650,7 @@ fn suggest_js(before: &str, paths: &[String], colls: &[String], pkgs: &[String])
         return None;
     } else if before.matches('(').count() > before.matches(')').count() && lead.trim_end().ends_with(['{', ',', ':']) {
         // Inside a call's arguments: the same field and operator suggestions as the Query box.
-        return suggest(before, FieldKind::Query, paths);
+        return suggest(before, FieldKind::Query, paths, &[]);
     } else {
         let mut v: Vec<Sug> = JS_KEYWORDS.iter().map(|k| Sug { text: k.to_string(), note: "keyword", insert: format!("{k} "), caret: k.len() + 1 }).collect();
         v.extend(JS_GLOBALS.iter().map(|g| match *g {
@@ -952,6 +979,8 @@ struct Tab {
     fields: Vec<String>,
     /// Every dotted field path seen in the loaded documents, for autocomplete.
     paths: Vec<String>,
+    /// Paths whose loaded values are dates; their Query values suggest date shortcuts.
+    date_paths: Vec<String>,
     count: u64,
     ms: u128,
     req: u64,
@@ -1134,6 +1163,7 @@ impl Tab {
             docs: Vec::new(),
             fields: Vec::new(),
             paths: Vec::new(),
+            date_paths: Vec::new(),
             count: 0,
             ms: 0,
             req: 0,
@@ -2884,6 +2914,7 @@ impl App {
                             let t = self.tab_by_req(req).unwrap();
                             t.fields = auto_fields(&docs);
                             t.paths = doc_paths(&docs);
+                            t.date_paths = date_paths(&docs, &t.paths);
                             t.docs = docs;
                             t.count = count;
                             t.ms = ms;
@@ -3261,11 +3292,12 @@ impl App {
         let mut t = Tab::new(sel("shop", "orders"));
         t.fields = auto_fields(&docs);
         t.paths = doc_paths(&docs);
+        t.date_paths = date_paths(&docs, &t.paths);
         t.docs = docs;
         t.count = 1284;
         t.ms = 14;
         t.selected = Some((false, 2));
-        t.filter_txt = "{ status: { $in: ['paid', 'shipped', 'pending'] } }".into();
+        t.filter_txt = if std::env::var("QUARRY_TEST_AC").is_ok_and(|v| v == "date") { "{ createdAt: }".into() } else { "{ status: { $in: ['paid', 'shipped', 'pending'] } }".into() };
         t.sort_txt = "{ total: -1 }".into();
         t.query.sort = Some(doc! { "total": -1 });
         self.tabs.push(t);
@@ -4813,16 +4845,19 @@ impl App {
     /// A query input that grows with its content, with highlighting and autocomplete.
     /// Enter runs it (or picks a suggestion), Shift+Enter adds a line.
     #[allow(clippy::too_many_arguments)]
-    fn query_field(ui: &mut egui::Ui, label: &str, text: &mut String, hint: &str, width: f32, kind: FieldKind, paths: &[String], ac: &mut Ac) -> bool {
+    fn query_field(ui: &mut egui::Ui, label: &str, text: &mut String, hint: &str, width: f32, kind: FieldKind, paths: &[String], dates: &[String], ac: &mut Ac) -> bool {
         ui.add_sized([56.0, 20.0], egui::Label::new(RichText::new(label).size(11.0).color(MUTED)));
         let id = egui::Id::unique(("query", label));
         // Test switch: show the suggestion list in the demo picture.
         if ac.id.is_none() && kind == FieldKind::Query && std::env::var("QUARRY_TEST_AC").is_ok() {
-            if let Some((token, items)) = suggest("{ status: { $i", kind, paths) {
-                *ac = Ac { id: Some(id), token, items, sel: 0, cursor: 14, rect: None };
+            // QUARRY_TEST_AC=date shows the date list after a date field's colon instead.
+            let date = std::env::var("QUARRY_TEST_AC").is_ok_and(|v| v == "date");
+            let before = if date { "{ createdAt: " } else { "{ status: { $i" };
+            if let Some((token, items)) = suggest(before, kind, paths, dates) {
+                *ac = Ac { id: Some(id), token, items, sel: 0, cursor: before.chars().count(), rect: None };
             }
         }
-        let (out, picked) = ac_field(ui, id, text, ac, &|b| suggest(b, kind, paths), |ui, text, open| {
+        let (out, picked) = ac_field(ui, id, text, ac, &|b| suggest(b, kind, paths, dates), |ui, text, open| {
             egui::TextEdit::multiline(text)
                 .id(id)
                 .font(FontId::monospace(13.0))
@@ -4848,10 +4883,11 @@ impl App {
         let mut qacts = Vec::new();
         let (t, ac, new_lib) = (&mut self.tabs[self.cur], &mut self.ac, &mut self.new_lib);
         let paths = std::mem::take(&mut t.paths);
+        let dates = t.date_paths.clone();
         egui::Frame::new().fill(PANEL).corner_radius(8).inner_margin(10).show(ui, |ui| {
             ui.horizontal_top(|ui| {
                 let w = ui.available_width() - 490.0;
-                run |= Self::query_field(ui, "QUERY", &mut t.filter_txt, "{ field: value }   or paste db.coll.find(...) / db.coll.aggregate([...])", w, FieldKind::Query, &paths, ac);
+                run |= Self::query_field(ui, "QUERY", &mut t.filter_txt, "{ field: value }   or paste db.coll.find(...) / db.coll.aggregate([...])", w, FieldKind::Query, &paths, &dates, ac);
                 if primary(ui, "  Find  ", PRIMARY).on_hover_text("Enter").clicked() {
                     run = true;
                 }
@@ -4864,8 +4900,8 @@ impl App {
             if !db::is_shell(&t.filter_txt) {
                 ui.horizontal_top(|ui| {
                     let w = (ui.available_width() - 160.0) / 2.0;
-                    run |= Self::query_field(ui, "SORT", &mut t.sort_txt, "{ _id: -1 }", w, FieldKind::Sort, &paths, ac);
-                    run |= Self::query_field(ui, "PROJECT", &mut t.proj_txt, "{ name: 1 }", w, FieldKind::Project, &paths, ac);
+                    run |= Self::query_field(ui, "SORT", &mut t.sort_txt, "{ _id: -1 }", w, FieldKind::Sort, &paths, &[], ac);
+                    run |= Self::query_field(ui, "PROJECT", &mut t.proj_txt, "{ name: 1 }", w, FieldKind::Project, &paths, &[], ac);
                 });
             }
         });
@@ -8146,24 +8182,24 @@ mod tests {
     #[test]
     fn autocomplete_contexts() {
         let paths: Vec<String> = ["status", "customer", "customer.name", "customer.tier", "total"].iter().map(|s| s.to_string()).collect();
-        let (n, s) = suggest("{ cus", FieldKind::Query, &paths).unwrap();
+        let (n, s) = suggest("{ cus", FieldKind::Query, &paths, &[]).unwrap();
         assert_eq!((n, s[0].text.as_str(), s[0].insert.as_str()), (3, "customer", "customer: "));
-        let (_, s) = suggest("{ customer.n", FieldKind::Query, &paths).unwrap();
+        let (_, s) = suggest("{ customer.n", FieldKind::Query, &paths, &[]).unwrap();
         assert_eq!(s[0].text, "customer.name");
-        let (_, s) = suggest("{ total: { $g", FieldKind::Query, &paths).unwrap();
+        let (_, s) = suggest("{ total: { $g", FieldKind::Query, &paths, &[]).unwrap();
         assert!(s.iter().any(|x| x.text == "$gt:"));
         assert!(s[0].text.starts_with("$g"));
-        let (_, s) = suggest("{ status: { $i", FieldKind::Query, &paths).unwrap();
+        let (_, s) = suggest("{ status: { $i", FieldKind::Query, &paths, &[]).unwrap();
         let i = s.iter().find(|x| x.text == "$in: [  ]").unwrap();
         assert_eq!(&i.insert[..i.insert.char_indices().nth(i.caret).unwrap().0], "$in: [ ");
-        let (_, s) = suggest("{ total: ", FieldKind::Sort, &paths).unwrap();
+        let (_, s) = suggest("{ total: ", FieldKind::Sort, &paths, &[]).unwrap();
         assert_eq!(s.len(), 2);
-        let (_, s) = suggest("{ _id: Obj", FieldKind::Query, &paths).unwrap();
+        let (_, s) = suggest("{ _id: Obj", FieldKind::Query, &paths, &[]).unwrap();
         assert_eq!((s[0].text.as_str(), s[0].caret), ("ObjectId(\"\")", 10));
-        assert!(suggest("{ ", FieldKind::Query, &paths).is_none());
-        let (_, s) = suggest("{ \"cus", FieldKind::Query, &paths).unwrap();
+        assert!(suggest("{ ", FieldKind::Query, &paths, &[]).is_none());
+        let (_, s) = suggest("{ \"cus", FieldKind::Query, &paths, &[]).unwrap();
         assert_eq!(s[0].insert, "customer");
-        let (n, s) = suggest("{ at: #last2m", FieldKind::Query, &paths).unwrap();
+        let (n, s) = suggest("{ at: #last2m", FieldKind::Query, &paths, &[]).unwrap();
         assert_eq!((n, s[0].text.as_str()), (7, "#last2months"));
     }
 
@@ -8197,6 +8233,23 @@ mod tests {
         assert_eq!(colour_of("const"), C_KEYWORD);
         assert_eq!(colour_of("find"), C_DATE);
         assert_eq!(colour_of("// hi"), FAINT);
+    }
+
+    #[test]
+    fn date_field_suggestions() {
+        let paths = vec!["status".to_string(), "createdAt".to_string(), "format".to_string()];
+        let dates = vec!["createdAt".to_string()];
+        // A date field lists date shortcuts right after the colon, with nothing typed yet.
+        let (n, s) = suggest("{ createdAt: ", FieldKind::Query, &paths, &dates).unwrap();
+        assert_eq!((n, s[0].text.as_str()), (0, "#today"));
+        assert!(s.iter().any(|x| x.note == "between two days, both included"));
+        // Fields not loaded yet are judged by their name.
+        assert!(suggest("{ \"providerOrder.syncedAt\": ", FieldKind::Query, &paths, &dates).is_some());
+        assert!(suggest("{ status: ", FieldKind::Query, &paths, &dates).is_none());
+        assert!(suggest("{ format: ", FieldKind::Query, &paths, &dates).is_none());
+        let (_, s) = suggest("{ createdAt: #last", FieldKind::Query, &paths, &dates).unwrap();
+        assert!(s.iter().all(|x| x.text.to_ascii_lowercase().contains("last")));
+        assert!(date_like("startDate") && date_like("syncedAt") && date_like("timestamp") && !date_like("status"));
     }
 
     #[test]
