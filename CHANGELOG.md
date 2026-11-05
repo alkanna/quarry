@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.6.0](https://github.com/alkanna/quarry/compare/v0.5.0...v0.6.0) (2026-11-05)
+
+
+### Features
+
+* copy a query or pipeline as driver code ([#17](https://github.com/alkanna/quarry/issues/17)) ([3064355](https://github.com/alkanna/quarry/commit/3064355b885a558c07f8f5e454cba2aa9bc88c38))
+* explain plans for queries and pipelines ([#13](https://github.com/alkanna/quarry/issues/13)) ([85bf6f8](https://github.com/alkanna/quarry/commit/85bf6f8e3bba18a8d9210b6a410b88de4cd28d23))
+* index usage, hide/unhide and suggestions in the Indexes view ([#14](https://github.com/alkanna/quarry/issues/14)) ([91fbf75](https://github.com/alkanna/quarry/commit/91fbf757b8f4d6847b82097e1e672a729f9c0ee3))
+* keyboard shortcuts for reload, tabs, views, focus and paging, with a shortcut sheet ([#12](https://github.com/alkanna/quarry/issues/12)) ([b4b5079](https://github.com/alkanna/quarry/commit/b4b5079320f06ab16c0571499a2f4ee2f9be0c0a))
+* multi-word palette matching and reveal the jump target in the tree ([#10](https://github.com/alkanna/quarry/issues/10)) ([a7ea07e](https://github.com/alkanna/quarry/commit/a7ea07e4ae24962b8f629b71809160948aa367af))
+* preview aggregation output after each stage ([#16](https://github.com/alkanna/quarry/issues/16)) ([c704a4f](https://github.com/alkanna/quarry/commit/c704a4f6fe4fe953653847280313268dfb609ac4))
+* right-click a property name for the field menu ([#11](https://github.com/alkanna/quarry/issues/11)) ([0d7ca11](https://github.com/alkanna/quarry/commit/0d7ca111dd13e1c616878a8886e857824462469f))
+* update matching documents with a preview ([#15](https://github.com/alkanna/quarry/issues/15)) ([5ae6898](https://github.com/alkanna/quarry/commit/5ae68989909d9f0dcaafae8bd1102cd84e76269f))
+* view, generate and apply collection validators ([#18](https://github.com/alkanna/quarry/issues/18)) ([91878e0](https://github.com/alkanna/quarry/commit/91878e0acda9de48bd111a9cd44491c08748a1b0))
+
 ## [0.5.0](https://github.com/alkanna/quarry/compare/v0.4.0...v0.5.0) (2026-11-04)
 
 
