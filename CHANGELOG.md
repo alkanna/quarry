@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/alkanna/quarry/compare/v0.7.1...v0.8.0) (2026-11-05)
+
+
+### Features
+
+* add a query log and fix loading states and error handling ([#26](https://github.com/alkanna/quarry/issues/26)) ([7930afd](https://github.com/alkanna/quarry/commit/7930afd595bf253b0ff57a39fd2bcd685c5ba19b))
+
 ## [0.7.1](https://github.com/alkanna/quarry/compare/v0.7.0...v0.7.1) (2026-11-05)
 
 
