@@ -1142,6 +1142,7 @@ enum Danger {
     DropCollAt { conn: u64, db: String, coll: String },
     DropUser { conn: u64, db: String, user: String },
     RenameMany { filter: Document, from: String, to: String },
+    UpdateMany { filter: Document, stages: Vec<Document> },
     Upsert { key: String },
     Sync { conn: u64 },
     Restore { conn: u64, args: Vec<String> },
@@ -1165,6 +1166,9 @@ enum Modal {
     /// `code` highlights the body as JSON.
     Text { title: String, body: String, code: bool },
     Rename { doc: Document, path: Vec<String>, name: String },
+    /// `preview` keeps the stages it was made from; Apply only runs when they equal the current
+    /// ones, so a late reply for older inputs cannot approve newer stages.
+    UpdateMany { set_txt: String, unset_txt: String, preview: Option<(Vec<Document>, db::Res<(Vec<(Document, Document)>, u64)>)> },
     Tool(Box<ToolForm>),
     Relations { conn: u64, db: String },
     Palette { query: String, sel: usize },
@@ -2617,6 +2621,11 @@ impl App {
                     Err(e) => self.err(e),
                 },
                 Msg::Explained { .. } => {}
+                Msg::UpdatePreview { stages, res } => {
+                    if let Some(Modal::UpdateMany { preview, .. }) = &mut self.modal {
+                        *preview = Some((stages, res));
+                    }
+                }
                 Msg::Aggregated { req, res } => match (res, self.tab_by_req(req)) {
                     (Ok((d, ms)), Some(t)) => {
                         t.agg_fields = auto_fields(&d);
@@ -4301,6 +4310,10 @@ impl App {
                         t.shell.code = query_script(&t.sel.coll, &t.filter_txt);
                         t.view = View::Shell;
                         t.selected = None;
+                        ui.close();
+                    }
+                    if ui.button("Update matching…").clicked() {
+                        self.modal = Some(Modal::UpdateMany { set_txt: "{\n  \n}".into(), unset_txt: String::new(), preview: None });
                         ui.close();
                     }
                     ui.separator();
@@ -6885,6 +6898,77 @@ impl App {
                         }
                     });
                 }
+                Modal::UpdateMany { set_txt, unset_txt, preview } => {
+                    ui.set_width(560.0);
+                    let filter = self.t().map(|t| t.query.filter.clone()).unwrap_or_default();
+                    ui.label(RichText::new("Update matching documents").strong().size(16.0).color(BRIGHT));
+                    ui.label(RichText::new("Applies to every document matching the current filter. Values starting with $ are read as field paths.").color(MUTED));
+                    ui.label(RichText::new("Set fields").color(FAINT));
+                    let id = ui.make_persistent_id("um-set");
+                    let mut changed = with_autopair(ui, id, set_txt, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(4).layouter(&mut code_layout).show(ui)).response.changed();
+                    ui.label(RichText::new("Remove fields (comma separated paths)").color(FAINT));
+                    changed |= ui.add(egui::TextEdit::singleline(unset_txt).font(FontId::monospace(13.0)).desired_width(f32::INFINITY)).changed();
+                    if changed {
+                        *preview = None;
+                    }
+                    let stages = db::parse_doc(set_txt).map(|set| db::update_stages(set, unset_txt.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect()));
+                    match &stages {
+                        Err(err) => {
+                            ui.label(RichText::new(err).color(ALERT));
+                        }
+                        Ok(st) if st.is_empty() => {
+                            ui.label(RichText::new("Nothing to change yet.").color(MUTED));
+                        }
+                        Ok(_) => {}
+                    }
+                    let ready = stages.as_ref().is_ok_and(|s| !s.is_empty());
+                    let fresh = matches!((preview.as_ref(), stages.as_ref()), (Some((p, _)), Ok(s)) if p == s);
+                    match preview.as_ref().filter(|_| fresh).map(|(_, r)| r) {
+                        Some(Err(err)) => {
+                            ui.label(RichText::new(&*err).color(ALERT));
+                        }
+                        Some(Ok((rows, n))) => {
+                            ui.label(RichText::new(format!("{} documents match. Showing {} of them after the change.", group(&n.to_string()), rows.len())).color(MUTED));
+                            egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                                for (i, (old, new)) in rows.iter().enumerate() {
+                                    ui.label(RichText::new(old.get("_id").map(db::short).unwrap_or_default()).monospace().color(BRIGHT));
+                                    egui::Grid::new(("um-chg", i)).num_columns(3).striped(true).spacing([14.0, 6.0]).show(ui, |ui| {
+                                        for (path, a, b) in db::diff(old, new) {
+                                            let show = |v: &Option<Bson>| v.as_ref().map(|v| format!("{} ({})", leaf_text(v), db::type_name(v))).unwrap_or("(none)".into());
+                                            ui.label(RichText::new(path).monospace().color(KEY));
+                                            ui.label(RichText::new(show(&a)).monospace().color(ALERT).strikethrough());
+                                            ui.label(RichText::new(show(&b)).monospace().color(SUCCESS));
+                                            ui.end_row();
+                                        }
+                                    });
+                                }
+                            });
+                        }
+                        None => {}
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(ready, egui::Button::new("Preview")).clicked() {
+                            if let (Ok(st), Some(t)) = (&stages, self.target()) {
+                                self.worker.update_preview(t, filter.clone(), st.clone());
+                            }
+                        }
+                        let applicable = ready && fresh && matches!(preview, Some((_, Ok(_))));
+                        if ui.add_enabled(applicable, egui::Button::new(RichText::new("Apply…").strong().color(BG)).fill(ALERT)).clicked() {
+                            let coll = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
+                            let n = if let Some((_, Ok((_, n)))) = preview { *n } else { 0 };
+                            self.modal = Some(Modal::Typed {
+                                title: format!("Update every document in {coll} matching the current filter ({n})?"),
+                                expect: coll,
+                                typed: String::new(),
+                                action: Danger::UpdateMany { filter, stages: stages.unwrap_or_default() },
+                            });
+                            keep = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
                 Modal::Undo => {
                     ui.label(RichText::new("Recent changes").strong().size(16.0).color(BRIGHT));
                     ui.label(RichText::new(format!("Last {} actions from the past 24 hours.", db::UNDO_MAX)).color(MUTED));
@@ -7080,6 +7164,7 @@ impl App {
                 self.worker.drop_collection(target);
             }
             Danger::RenameMany { filter, from, to } => self.worker.rename_many(target, filter, from, to),
+            Danger::UpdateMany { filter, stages } => self.worker.update_many(target, filter, stages),
             Danger::Upsert { key } => {
                 let conn = self.t().unwrap().sel.conn;
                 if let Some(Ok(docs)) = self.tabs[self.cur].import.parsed.clone() {
