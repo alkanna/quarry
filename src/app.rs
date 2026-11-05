@@ -810,7 +810,8 @@ fn cell_job(v: &Bson) -> LayoutJob {
                 push(job, "]", C_OBJ)
             }
             Bson::String(s) if str_kind(s) == StrKind::Url => push(job, s, C_LINK),
-            Bson::String(s) => push(job, &format!("\"{}\"", truncate_display(&s.replace('\n', " "))), color_of(v)),
+            // Cut before replacing: a cell shows 100 characters, the string may hold megabytes.
+            Bson::String(s) => push(job, &format!("\"{}\"", truncate_display(&s.chars().take(STRING_DISPLAY_MAX + 1).collect::<String>().replace('\n', " "))), color_of(v)),
             // The original shows binary from 100 bytes as "<too long binary>" (fieldTypes.binary, 31012).
             Bson::Binary(b) if b.bytes.len() >= 100 => push(job, &format!("BinData({} bytes)", b.bytes.len()), FAINT),
             Bson::ObjectId(o) => push(job, &o.to_hex(), C_OID),
@@ -1344,6 +1345,8 @@ struct UiPrefs {
     auto_update: bool,
     /// Pipeline builder stages preview themselves after each change.
     auto_preview: bool,
+    /// Frame rate and the time each frame takes, in the status bar.
+    show_fps: bool,
     /// Show the first characters of big objects and arrays in columns, as the original does,
     /// instead of "{12 fields}".
     object_preview: bool,
@@ -1566,7 +1569,7 @@ enum QAct {
 
 impl Default for UiPrefs {
     fn default() -> Self {
-        Self { open_inline: true, table: true, confirm_save: false, auto_save: false, always_writable: false, default_cols: DEFAULT_COLS, timeout_ms: db::DEFAULT_TIMEOUT_MS, shell_runtime: String::new(), shell_histories: HashMap::new(), shell_packages: Vec::new(), history: HashMap::new(), library: HashMap::new(), open_tabs: Vec::new(), cur_tab: 0, last_conn: None, cols: HashMap::new(), relations: HashMap::new(), mongodump: String::new(), mongorestore: String::new(), auto_update: true, auto_preview: true, object_preview: false, last_version: String::new() }
+        Self { open_inline: true, table: true, confirm_save: false, auto_save: false, always_writable: false, default_cols: DEFAULT_COLS, timeout_ms: db::DEFAULT_TIMEOUT_MS, shell_runtime: String::new(), shell_histories: HashMap::new(), shell_packages: Vec::new(), history: HashMap::new(), library: HashMap::new(), open_tabs: Vec::new(), cur_tab: 0, last_conn: None, cols: HashMap::new(), relations: HashMap::new(), mongodump: String::new(), mongorestore: String::new(), auto_update: true, auto_preview: true, show_fps: false, object_preview: false, last_version: String::new() }
     }
 }
 
@@ -1674,6 +1677,10 @@ pub struct App {
     scroll_sel: bool,
     demo: bool,
     tool: Option<ToolRun>,
+    /// CPU time of the last frame in milliseconds, for the frame rate readout.
+    frame_ms: f32,
+    /// Measured column widths per result set and column.
+    width_cache: HashMap<(usize, usize, String, bool), f32>,
     /// Recently closed tabs, newest first.
     closed: Vec<Tab>,
     /// Version installed by the updater, waiting for a restart.
@@ -2211,6 +2218,8 @@ impl App {
             scroll_sel: false,
             demo,
             tool: None,
+            width_cache: HashMap::new(),
+            frame_ms: 0.0,
             closed: Vec::new(),
             updated: None,
             update_note: String::new(),
@@ -3672,6 +3681,11 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.frame_ms = frame.info().cpu_usage.unwrap_or(0.0) * 1000.0;
+        // QUARRY_FRAME_LOG prints each frame's CPU time, for measuring with a fixture.
+        if std::env::var("QUARRY_FRAME_LOG").is_ok() {
+            eprintln!("frame_ms {:.3}", self.frame_ms);
+        }
         self.poll();
         self.remember_tabs();
         let ctx = ui.ctx().clone();
@@ -4195,6 +4209,13 @@ impl App {
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::bottom("status").frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::symmetric(12, 5))).show(ui, |ui| {
             ui.horizontal(|ui| {
+                if self.prefs.show_fps {
+                    let dt = ui.input(|i| i.stable_dt).max(0.000_1);
+                    let budget = 1000.0 * dt;
+                    let color = if self.frame_ms > budget * 0.8 { WARNING } else { SUCCESS };
+                    ui.label(RichText::new(format!("{:.0} fps · {:.1} ms", 1.0 / dt, self.frame_ms)).monospace().size(11.0).color(color)).on_hover_text("Frames per second while something moves, and the time Quarry needs to build one frame. At 120 Hz each frame has 8.3 ms.");
+                    ui.add_space(8.0);
+                }
                 // Errors fade after 15 s so an old problem does not look current.
                 const ERROR_S: u64 = 15;
                 if self.status.1 {
@@ -5205,7 +5226,25 @@ impl App {
         let prefs = self.prefs.cols.get(&key).cloned().unwrap_or_default();
         let cols = visible_cols(Some(&prefs), fields, self.prefs.default_cols);
         let summarize = !self.prefs.object_preview;
-        let widths: Vec<f32> = cols.iter().map(|c| prefs.widths.get(c).copied().unwrap_or_else(|| optimal_width(ui, docs, c, summarize))).collect();
+        // Measuring lays out every loaded cell of the column, so it is done once per result set
+        // (keyed by where the documents live and how many) instead of on every frame.
+        let widths: Vec<f32> = cols
+            .iter()
+            .map(|c| {
+                prefs.widths.get(c).copied().unwrap_or_else(|| {
+                    let k = (docs.as_ptr() as usize, docs.len(), c.clone(), summarize);
+                    if let Some(w) = self.width_cache.get(&k) {
+                        return *w;
+                    }
+                    let w = optimal_width(ui, docs, c, summarize);
+                    if self.width_cache.len() > 512 {
+                        self.width_cache.clear();
+                    }
+                    self.width_cache.insert(k, w);
+                    w
+                })
+            })
+            .collect();
         let total: f32 = NUM_W + widths.iter().sum::<f32>();
         let selected = self.t().unwrap().selected;
         let view_w = ui.available_width();
@@ -5228,7 +5267,12 @@ impl App {
         let hl_cols: Vec<bool> = cols.iter().map(|c| prefs.highlight.contains(&db::strip_indices(c))).collect();
         let related = if agg { HashMap::new() } else { self.t().map(|t| t.related.clone()).unwrap_or_default() };
         egui::Frame::new().fill(PANEL).corner_radius(8).inner_margin(egui::Margin::symmetric(4, 4)).show(ui, |ui| {
-            egui::ScrollArea::both().id_salt(("res", agg)).auto_shrink(false).show(ui, |ui| {
+            let mut area = egui::ScrollArea::both().id_salt(("res", agg)).auto_shrink(false);
+            // QUARRY_SCROLL_TEST slides the table sideways every frame, to measure scrolling cost.
+            if std::env::var("QUARRY_SCROLL_TEST").is_ok() {
+                area = area.horizontal_scroll_offset((ui.ctx().cumulative_frame_nr() % 60) as f32 * 25.0);
+            }
+            area.show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 let row_w = total.max(view_w - 12.0);
                 // Header
@@ -5312,59 +5356,70 @@ impl App {
                     if active && std::mem::take(&mut self.scroll_sel) {
                         resp.scroll_to_me(None);
                     }
-                    let fill = if active {
-                        Color32::from_rgba_unmultiplied(134, 201, 249, 32)
-                    } else if ui.rect_contains_pointer(rr) && !ui.ctx().any_popup_open() {
-                        HOVER
-                    } else if i % 2 == 1 {
-                        Color32::from_rgb(0x19, 0x1b, 0x1e)
-                    } else {
-                        Color32::TRANSPARENT
-                    };
-                    let p = ui.painter();
-                    p.rect_filled(rr, 4, fill);
-                    if self.prefs.open_inline {
-                        chevron(p, egui::pos2(rr.left() + 9.0, rr.center().y), active, if active { PRIMARY } else { FAINT });
-                    }
-                    let num = (base + i as u64 + 1).to_string();
-                    let (num, nc) = if drafted.is_some() { (format!("{num}●"), WARNING) } else { (num, FAINT) };
-                    p.text(egui::pos2(rr.left() + 18.0, rr.center().y), egui::Align2::LEFT_CENTER, num, FontId::proportional(11.5), nc);
-                    let mut x = rr.left() + NUM_W;
-                    for (ci, (c, w)) in cols.iter().zip(&widths).enumerate() {
-                        let cell = egui::Rect::from_min_size(egui::pos2(x, rr.top()), egui::vec2(*w, ROW_H));
-                        if hl_cols[ci] {
-                            ui.painter().rect_filled(cell, 0, HIGHLIGHT);
+                    // Rows scrolled out of view keep their space but skip all layout and painting.
+                    if ui.is_rect_visible(rr) {
+                        let fill = if active {
+                            Color32::from_rgba_unmultiplied(134, 201, 249, 32)
+                        } else if ui.rect_contains_pointer(rr) && !ui.ctx().any_popup_open() {
+                            HOVER
+                        } else if i % 2 == 1 {
+                            Color32::from_rgb(0x19, 0x1b, 0x1e)
+                        } else {
+                            Color32::TRANSPARENT
+                        };
+                        let p = ui.painter();
+                        p.rect_filled(rr, 4, fill);
+                        if self.prefs.open_inline {
+                            chevron(p, egui::pos2(rr.left() + 9.0, rr.center().y), active, if active { PRIMARY } else { FAINT });
                         }
-                        let clip = ui.painter().with_clip_rect(cell.shrink2(egui::vec2(6.0, 0.0)));
-                        let v = db::get_path(d, c);
-                        match v {
-                            Some(v) => {
-                                let g = ui.fonts_mut(|f| f.layout_job(column_job(v, summarize)));
-                                let gw = g.size().x;
-                                clip.galley(egui::pos2(x + 8.0, cell.center().y - g.size().y / 2.0), g, TEXT);
-                                if let Some(p) = related.get(&db::compact(v)).filter(|_| matches!(v, Bson::ObjectId(_) | Bson::String(_))) {
-                                    clip.text(egui::pos2(x + 14.0 + gw, cell.center().y), egui::Align2::LEFT_CENTER, p, FontId::proportional(12.0), C_LINK);
+                        let num = (base + i as u64 + 1).to_string();
+                        let (num, nc) = if drafted.is_some() { (format!("{num}●"), WARNING) } else { (num, FAINT) };
+                        p.text(egui::pos2(rr.left() + 18.0, rr.center().y), egui::Align2::LEFT_CENTER, num, FontId::proportional(11.5), nc);
+                        let mut x = rr.left() + NUM_W;
+                        for (ci, (c, w)) in cols.iter().zip(&widths).enumerate() {
+                            let cell = egui::Rect::from_min_size(egui::pos2(x, rr.top()), egui::vec2(*w, ROW_H));
+                            // Same for columns scrolled out sideways.
+                            if !ui.is_rect_visible(cell) {
+                                x += w;
+                                continue;
+                            }
+                            if hl_cols[ci] {
+                                ui.painter().rect_filled(cell, 0, HIGHLIGHT);
+                            }
+                            let clip = ui.painter().with_clip_rect(cell.shrink2(egui::vec2(6.0, 0.0)));
+                            let v = db::get_path(d, c);
+                            match v {
+                                Some(v) => {
+                                    let g = ui.fonts_mut(|f| f.layout_job(column_job(v, summarize)));
+                                    let gw = g.size().x;
+                                    clip.galley(egui::pos2(x + 8.0, cell.center().y - g.size().y / 2.0), g, TEXT);
+                                    // Ids only, checked before compact(): that turns the whole value into JSON,
+                                // which is costly for big objects on every frame.
+                                let rel = (!related.is_empty() && matches!(v, Bson::ObjectId(_) | Bson::String(_))).then(|| related.get(&db::compact(v))).flatten();
+                                if let Some(p) = rel {
+                                        clip.text(egui::pos2(x + 14.0 + gw, cell.center().y), egui::Align2::LEFT_CENTER, p, FontId::proportional(12.0), C_LINK);
+                                    }
+                                }
+                                None => {
+                                    clip.text(egui::pos2(x + 8.0, cell.center().y), egui::Align2::LEFT_CENTER, "—", FontId::proportional(12.0), FAINT);
                                 }
                             }
-                            None => {
-                                clip.text(egui::pos2(x + 8.0, cell.center().y), egui::Align2::LEFT_CENTER, "—", FontId::proportional(12.0), FAINT);
+                            let cr = ui.interact(cell, ui.scope_id().with(("c", i, ci)), Sense::click());
+                            if cr.double_clicked() {
+                                edit_cell = Some((i, c.clone()));
+                            } else if cr.clicked() {
+                                click = Some(i);
                             }
-                        }
-                        let cr = ui.interact(cell, ui.scope_id().with(("c", i, ci)), Sense::click());
-                        if cr.double_clicked() {
-                            edit_cell = Some((i, c.clone()));
-                        } else if cr.clicked() {
-                            click = Some(i);
-                        }
-                        if let Some(v) = v {
-                            let path: Vec<String> = c.split('.').map(String::from).collect();
-                            let mut acts = Vec::new();
-                            cr.context_menu(|ui| field_menu(ui, &path, v, !agg, &mut acts));
-                            if !acts.is_empty() {
-                                cell_acts.push((i, acts));
+                            if let Some(v) = v {
+                                let path: Vec<String> = c.split('.').map(String::from).collect();
+                                let mut acts = Vec::new();
+                                cr.context_menu(|ui| field_menu(ui, &path, v, !agg, &mut acts));
+                                if !acts.is_empty() {
+                                    cell_acts.push((i, acts));
+                                }
                             }
+                            x += w;
                         }
-                        x += w;
                     }
                     if resp.clicked() {
                         click = Some(i);
@@ -5832,17 +5887,24 @@ impl App {
                             acts.push(TreeAct::Cancel);
                         }
                     } else {
-                        let text = leaf_text(leaf);
+                        // A one-line label never shows more than this; laying out a megabyte string on
+                        // every frame stalls scrolling. "Show full value" opens the whole thing.
+                        const LEAF_MAX: usize = 2000;
+                        let text = match leaf {
+                            Bson::String(s) if s.len() > LEAF_MAX => format!("\"{}…\"", s.chars().take(LEAF_MAX).collect::<String>()),
+                            _ => leaf_text(leaf),
+                        };
                         let r = ui.add(egui::Label::new(RichText::new(&text).monospace().color(color_of(leaf))).truncate().sense(Sense::click()));
                         ui.label(RichText::new(db::type_name(leaf)).size(10.5).color(FAINT));
-                        if let Some(p) = self.t().and_then(|t| t.related.get(&db::compact(leaf))) {
+                        let id_like = matches!(leaf, Bson::ObjectId(_)) || matches!(leaf, Bson::String(s) if s.len() <= 64);
+                        if let Some(p) = self.t().filter(|t| id_like && !t.related.is_empty()).and_then(|t| t.related.get(&db::compact(leaf))) {
                             ui.label(RichText::new(p).size(12.0).color(C_LINK)).on_hover_text("Preview of the referenced document");
                         }
                         if let Some(ts) = db::possible_timestamp(leaf) {
                             ui.label(RichText::new(format!("= {ts}?")).size(10.5).color(C_DATE.gamma_multiply(0.7))).on_hover_text("This number looks like a Unix timestamp in seconds");
                         }
                         let r = if editable {
-                            let r = r.on_hover_cursor(egui::CursorIcon::Text).on_hover_text(if text.len() > 60 { text.clone() } else { "Double-click to edit, right-click for more".into() });
+                            let r = r.on_hover_cursor(egui::CursorIcon::Text).on_hover_text(if text.len() > 60 { text.chars().take(600).collect::<String>() } else { "Double-click to edit, right-click for more".into() });
                             if r.double_clicked() && path.first().is_some_and(|k| k != "_id") {
                                 acts.push(TreeAct::Start(path.clone(), leaf.clone()));
                             }
@@ -7351,7 +7413,7 @@ impl App {
                     });
                     ui.label(RichText::new("Changes are saved right away.").size(12.0).color(FAINT));
                     ui.add_space(8.0);
-                    let before = (self.prefs.open_inline, self.prefs.auto_save, self.prefs.always_writable, self.prefs.confirm_save, self.prefs.default_cols, self.prefs.timeout_ms, self.prefs.shell_runtime.clone(), self.prefs.mongodump.clone(), self.prefs.mongorestore.clone(), self.prefs.auto_update, self.prefs.object_preview);
+                    let before = (self.prefs.open_inline, self.prefs.auto_save, self.prefs.always_writable, self.prefs.confirm_save, self.prefs.default_cols, self.prefs.timeout_ms, self.prefs.shell_runtime.clone(), self.prefs.mongodump.clone(), self.prefs.mongorestore.clone(), self.prefs.auto_update, self.prefs.show_fps, self.prefs.object_preview);
                     ui.scope(|ui| {
                         settings_section(ui, "DOCUMENTS", |ui| {
                             setting_row(ui, "Open documents", "Where a clicked row shows its document.", |ui| {
@@ -7401,6 +7463,11 @@ impl App {
                                 ui.add(egui::TextEdit::singleline(&mut self.prefs.shell_runtime).hint_text("automatic").desired_width(190.0));
                             });
                         });
+                        settings_section(ui, "PERFORMANCE", |ui| {
+                            setting_row(ui, "Show frame rate", "Frames per second and the time each frame takes, in the status bar. Quarry follows your display's refresh rate (vsync), up to 120 Hz on ProMotion screens.", |ui| {
+                                toggle(ui, &mut self.prefs.show_fps);
+                            });
+                        });
                         settings_section(ui, "UPDATES", |ui| {
                             let desc = if self.update_note.is_empty() { format!("Version {}. New releases of {} are installed in the background, then Quarry restarts when idle with nothing unsaved.", env!("CARGO_PKG_VERSION"), crate::update::REPO) } else { format!("Version {}. {}", env!("CARGO_PKG_VERSION"), self.update_note) };
                             setting_row(ui, "Update automatically", &desc, |ui| {
@@ -7428,7 +7495,7 @@ impl App {
                             self.install_tools_button(ui);
                         }
                     });
-                    if before != (self.prefs.open_inline, self.prefs.auto_save, self.prefs.always_writable, self.prefs.confirm_save, self.prefs.default_cols, self.prefs.timeout_ms, self.prefs.shell_runtime.clone(), self.prefs.mongodump.clone(), self.prefs.mongorestore.clone(), self.prefs.auto_update, self.prefs.object_preview) {
+                    if before != (self.prefs.open_inline, self.prefs.auto_save, self.prefs.always_writable, self.prefs.confirm_save, self.prefs.default_cols, self.prefs.timeout_ms, self.prefs.shell_runtime.clone(), self.prefs.mongodump.clone(), self.prefs.mongorestore.clone(), self.prefs.auto_update, self.prefs.show_fps, self.prefs.object_preview) {
                         self.save_prefs();
                     }
                 }
