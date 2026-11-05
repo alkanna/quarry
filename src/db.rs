@@ -1184,7 +1184,8 @@ pub fn explain_summary(d: &Document) -> ExplainSummary {
         s.warnings.push("SORT in memory: no index provides the order. An index ending in the sort fields avoids it.".into());
     }
     let examined = s.docs.max(s.keys);
-    if examined >= 1000 && examined > s.returned * 10 {
+    // Grouping and counting shrink the output by design, so few results there are not a sign of a weak filter.
+    if examined >= 1000 && examined > s.returned * 10 && !has(&["group", "count", "count_scan"]) {
         s.warnings.push(format!("Examined {examined} to return {}. The filter is not selective for the indexes in use.", s.returned));
     }
     s
@@ -2008,8 +2009,8 @@ mod tests {
         let stages: Vec<_> = s.rows.iter().map(|r| r.stage.as_str()).collect();
         assert_eq!(stages, ["project", "group", "fetch", "ixseek"]);
         assert_eq!((s.rows[2].docs, s.rows[3].keys, s.rows[3].index.as_str()), (Some(5000), Some(5000), "status_1_createdAt_-1"));
-        assert_eq!(s.warnings.len(), 1);
-        assert!(s.warnings[0].starts_with("Examined 5000"));
+        // A $group returns few results by design, so no selectivity warning.
+        assert!(s.warnings.is_empty());
     }
 
     #[test]
