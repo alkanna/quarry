@@ -2399,10 +2399,15 @@ fn toggle(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
     }
     let t = ui.ctx().animate_bool(r.id, *on);
     let enabled = ui.is_enabled();
-    let bg = if enabled { pal().track.lerp_to_gamma(PRIMARY(), t) } else { HOVER() };
+    let mut bg = if enabled { pal().track.lerp_to_gamma(PRIMARY(), t) } else { HOVER() };
+    if enabled && r.hovered() {
+        bg = shade(bg, if r.is_pointer_button_down_on() { 0.24 } else { 0.12 });
+    }
     ui.painter().rect_filled(rect, 11, bg);
     let x = egui::lerp(rect.left() + 11.0..=rect.right() - 11.0, t);
-    ui.painter().circle_filled(egui::pos2(x, rect.center().y), 8.0, if enabled { Color32::from_gray(0xfa) } else { MUTED() });
+    // The knob grows a little while pressed, like a macOS switch.
+    let knob = if enabled && r.is_pointer_button_down_on() { 9.0 } else { 8.0 };
+    ui.painter().circle_filled(egui::pos2(x, rect.center().y), knob, if enabled { Color32::from_gray(0xfa) } else { MUTED() });
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -2415,7 +2420,7 @@ fn segmented<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options: &[(
         let order: Vec<&(T, &str)> = if rtl { options.iter().rev().collect() } else { options.iter().collect() };
         for (v, label) in order {
             let on = *value == *v;
-            let b = egui::Button::new(RichText::new(*label).size(12.5).color(if on { BG() } else { TEXT() })).fill(if on { PRIMARY() } else { Color32::TRANSPARENT }).corner_radius(6);
+            let b = egui::Button::new(RichText::new(*label).size(12.5).color(if on { BG() } else { TEXT() })).fill(state_fill(ui, if on { PRIMARY() } else { Color32::TRANSPARENT })).corner_radius(6);
             if ui.add(b).clicked() {
                 *value = *v;
             }
@@ -3796,11 +3801,16 @@ fn visuals(theme: egui::Theme, p: &Palette) -> egui::Visuals {
     v.widgets.inactive.weak_bg_fill = tint(p.text, 18);
     v.widgets.hovered.weak_bg_fill = tint(p.text, 34);
     v.widgets.active.weak_bg_fill = tint(p.text, 46);
-    v.widgets.hovered.bg_stroke = Stroke::NONE;
-    v.widgets.active.bg_stroke = Stroke::NONE;
+    v.widgets.open.weak_bg_fill = tint(p.text, 46);
+    // Faint outline on hover: the only hover cue for inputs, checkboxes and filled buttons.
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0, tint(p.text, 60));
+    v.widgets.active.bg_stroke = Stroke::new(1.0, tint(p.text, 90));
+    v.widgets.open.bg_stroke = Stroke::new(1.0, tint(p.text, 60));
     v.text_edit_bg_color = Some(p.well);
     // Checkboxes and radios fill with bg_fill and have no stroke, so it must stand out from cards.
     v.widgets.inactive.bg_fill = p.track;
+    v.widgets.hovered.bg_fill = p.track.lerp_to_gamma(p.text, 0.15);
+    v.widgets.active.bg_fill = p.track.lerp_to_gamma(p.text, 0.3);
     for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.noninteractive] {
         w.corner_radius = CornerRadius::same(6);
     }
@@ -3944,17 +3954,45 @@ fn stage_samples(ui: &mut egui::Ui, s: &mut Stage, i: usize, acts: &mut Vec<Stag
 }
 
 fn pill(ui: &mut egui::Ui, text: &str, fg: Color32) -> egui::Response {
-    let bg = Color32::from_rgba_unmultiplied(fg.r(), fg.g(), fg.b(), 30);
+    let bg = state_fill(ui, tint(fg, 30));
     ui.add(egui::Button::new(RichText::new(text).color(fg).strong().size(12.0)).fill(bg).stroke(Stroke::new(1.0, fg)).corner_radius(10))
 }
 
+/// `c` moved by `t` away from its own lightness: toward white barely changes an already light color.
+fn shade(c: Color32, t: f32) -> Color32 {
+    let light = (0.3 * c.r() as f32 + 0.59 * c.g() as f32 + 0.11 * c.b() as f32) / 255.0 > 0.55;
+    c.lerp_to_gamma(if light { Color32::BLACK } else { Color32::WHITE }, t)
+}
+
+/// A fill for the next widget that follows hover and press. egui uses a button's own fill for
+/// every state, so buttons with one would otherwise never react. Reads last frame's response
+/// of the widget about to be added, which has the next auto id.
+fn state_fill(ui: &egui::Ui, base: Color32) -> Color32 {
+    let r = ui.ctx().read_response(ui.next_auto_id()).filter(|r| r.enabled() && ui.is_enabled());
+    let k = match r {
+        Some(r) if r.is_pointer_button_down_on() => 2,
+        Some(r) if r.hovered() => 1,
+        _ => 0,
+    };
+    if base.a() == 0 {
+        // A transparent option shows the same hover as an ordinary button.
+        [base, tint(TEXT(), 34), tint(TEXT(), 46)][k]
+    } else if base.a() < 255 {
+        let [r, g, b, a] = base.to_srgba_unmultiplied();
+        let c = Color32::from_rgb(r, g, b);
+        [base, tint(c, a.saturating_mul(2)), tint(c, a.saturating_mul(3))][k]
+    } else {
+        [base, shade(base, 0.12), shade(base, 0.24)][k]
+    }
+}
+
 fn primary(ui: &mut egui::Ui, text: &str, fill: Color32) -> egui::Response {
-    ui.add(primary_button(text, fill))
+    ui.add(primary_button(ui, text, fill))
 }
 
 /// For `add_enabled`; `primary` when it is always enabled.
-fn primary_button(text: impl Into<String>, fill: Color32) -> egui::Button<'static> {
-    egui::Button::new(RichText::new(text).strong().color(BG())).fill(fill)
+fn primary_button(ui: &egui::Ui, text: impl Into<String>, fill: Color32) -> egui::Button<'static> {
+    egui::Button::new(RichText::new(text).strong().color(BG())).fill(state_fill(ui, fill))
 }
 
 /// Every dialog gets the same frame; egui's popup frame has only 6 px of margin.
@@ -4007,7 +4045,9 @@ fn row_job(d: &Document, width: f32) -> LayoutJob {
 /// One clickable sidebar row painted by hand, so it reads as a list rather than a form.
 fn side_row(ui: &mut egui::Ui, indent: f32, active: bool, paint: impl FnOnce(&egui::Painter, egui::Rect)) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), Sense::click());
-    let fill = if active {
+    let fill = if resp.is_pointer_button_down_on() {
+        tint(PRIMARY(), 45)
+    } else if active {
         tint(PRIMARY(), 30)
     } else if resp.hovered() {
         HOVER()
@@ -4030,6 +4070,22 @@ fn chevron(p: &egui::Painter, c: egui::Pos2, open: bool, color: Color32) {
 }
 
 impl eframe::App for App {
+    /// Test switch for the demo picture: QUARRY_TEST_POINTER="x,y" hovers that point and
+    /// "x,y,down" also holds the primary button there, to check hover and press states.
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+        if self.shot.is_none() {
+            return;
+        }
+        let Ok(spec) = std::env::var("QUARRY_TEST_POINTER") else { return };
+        let mut parts = spec.split(',');
+        let (Some(Ok(x)), Some(Ok(y))) = (parts.next().map(str::parse::<f32>), parts.next().map(str::parse::<f32>)) else { return };
+        let pos = egui::pos2(x, y);
+        raw.events.push(egui::Event::PointerMoved(pos));
+        if parts.next() == Some("down") {
+            raw.events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+        }
+    }
+
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         LIGHT_MODE.store(ctx.theme() == egui::Theme::Light, std::sync::atomic::Ordering::Relaxed);
         // Screenshot mode must keep drawing even if the window is covered or hidden, or it never finishes.
@@ -4407,7 +4463,7 @@ impl App {
                         ui.end_row();
                     });
                     let ok = writable && !u.new_name.trim().is_empty() && !u.new_pwd.is_empty();
-                    if ui.add_enabled(ok, primary_button("Add user", PRIMARY())).clicked() {
+                    if ui.add_enabled(ok, primary_button(ui, "Add user", PRIMARY())).clicked() {
                         let db = if u.new_db.trim().is_empty() { "admin".to_string() } else { u.new_db.trim().to_string() };
                         let cmd = doc! { "createUser": u.new_name.trim(), "pwd": u.new_pwd.as_str(), "roles": parse_roles(&u.new_roles, &db) };
                         cmds.push((db, cmd, format!("Added user {}", u.new_name.trim())));
@@ -4555,7 +4611,7 @@ impl App {
                         self.modal = Some(Modal::Settings);
                     }
                     if let Some(v) = &self.updated {
-                        let r = ui.add(egui::Button::new(RichText::new(format!("Restart for {v}")).color(BG()).strong()).fill(SUCCESS())).on_hover_text("The update is installed. Quarry restarts by itself once you have no unsaved edits and have been idle for a minute.");
+                        let r = ui.add(primary_button(ui, format!("Restart for {v}"), SUCCESS())).on_hover_text("The update is installed. Quarry restarts by itself once you have no unsaved edits and have been idle for a minute.");
                         if r.clicked() {
                             if self.busy() {
                                 self.err("Save or discard your edits and wait for running scripts first.");
@@ -4597,7 +4653,7 @@ impl App {
                 // Errors often carry advice on a second line or a long server message.
                 if !*is_err {
                     r.on_hover_text(msg.as_str());
-                } else if r.on_hover_text(format!("{msg}\n\nClick to open the whole message.")).clicked() {
+                } else if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("{msg}\n\nClick to open the whole message.")).clicked() {
                     self.modal = Some(Modal::Text { title: "Error".into(), body: msg.clone(), code: false });
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -4663,6 +4719,8 @@ impl App {
         egui::ScrollArea::both().auto_shrink(false).stick_to_bottom(true).show_rows(ui, row_h, rows.len(), |ui, range| {
             for l in &rows[range] {
                 let name = conns.iter().find(|c| c.meta.id == l.conn).map_or("test", |c| c.meta.name.as_str());
+                // Painted under the row once its size is known, so a hovered row shows it copies.
+                let bg = ui.painter().add(egui::Shape::Noop);
                 let r = ui
                     .horizontal(|ui| {
                         ui.set_height(row_h);
@@ -4689,6 +4747,10 @@ impl App {
                     ui.label(RichText::new(&l.cmd).monospace().size(12.0));
                     ui.label(RichText::new("Click to copy the command").size(11.0).color(FAINT()));
                 });
+                if r.hovered() {
+                    ui.painter().set(bg, egui::Shape::rect_filled(r.rect.expand2(egui::vec2(4.0, 1.0)), 4, HOVER()));
+                }
+                let r = r.on_hover_cursor(egui::CursorIcon::PointingHand);
                 if r.clicked() {
                     ui.ctx().copy_text(l.cmd.clone());
                     copied = true;
@@ -4745,7 +4807,8 @@ impl App {
         };
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 38.0), Sense::click());
         let p = ui.painter();
-        p.rect(rect, 8, if resp.hovered() { HOVER() } else { RAISED() }, Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
+        let fill = if resp.is_pointer_button_down_on() { shade(HOVER(), 0.08) } else if resp.hovered() { HOVER() } else { RAISED() };
+        p.rect(rect, 8, fill, Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
         p.circle_filled(egui::pos2(rect.left() + 16.0, rect.center().y), 4.0, dot);
         p.text(egui::pos2(rect.left() + 28.0, rect.center().y), egui::Align2::LEFT_CENTER, &name, FontId::proportional(14.5), BRIGHT());
         chevron(p, egui::pos2(rect.right() - 16.0, rect.center().y), true, MUTED());
@@ -7140,7 +7203,7 @@ impl App {
             });
             let same = c.conn == src.conn && c.db == src.db && c.coll == src.coll;
             let ok = !c.coll.is_empty() && !same && !c.running;
-            run = ui.add_enabled(ok, primary_button("Compare", PRIMARY())).on_disabled_hover_text(if same { "Pick a different collection" } else { "Pick a target collection" }).clicked();
+            run = ui.add_enabled(ok, primary_button(ui, "Compare", PRIMARY())).on_disabled_hover_text(if same { "Pick a different collection" } else { "Pick a target collection" }).clicked();
             if c.running {
                 ui.spinner();
             }
@@ -7205,7 +7268,7 @@ impl App {
                 let col = if c.delete { ALERT() } else { TEXT() };
                 ui.checkbox(&mut c.delete, RichText::new(format!("Delete the {} only in target", r.only_dst.len())).color(col));
                 let any = (c.insert && !r.only_src.is_empty()) || (c.replace && !r.changed.is_empty()) || (c.delete && !r.only_dst.is_empty());
-                sync = ui.add_enabled(any, primary_button("Sync to target…", WARNING())).clicked();
+                sync = ui.add_enabled(any, primary_button(ui, "Sync to target…", WARNING())).clicked();
             });
         } else if !c.running {
             ui.add_space(20.0);
@@ -7329,7 +7392,7 @@ impl App {
                     ui.label(RichText::new(format!("·  {} fields  ·  preview of the first {}", im.fields.len(), docs.len().min(PAGE_SIZE as usize))).color(MUTED()));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let label = format!("{} {} documents", if im.upsert { "Upsert" } else { "Import" }, group(&docs.len().to_string()));
-                        start = ui.add_enabled(!docs.is_empty(), egui::Button::new(RichText::new(label).strong().color(BG())).fill(if writable { PRIMARY() } else { FAINT() })).clicked();
+                        start = ui.add_enabled(!docs.is_empty(), primary_button(ui, label, if writable { PRIMARY() } else { FAINT() })).clicked();
                         if !writable {
                             ui.label(RichText::new("needs writes unlocked").size(12.0).color(FAINT()));
                         }
@@ -7741,7 +7804,7 @@ impl App {
                     }
                     dialog_actions(ui, |ui| {
                         let valid = !f.name.trim().is_empty() && (f.uri.starts_with("mongodb://") || f.uri.starts_with("mongodb+srv://")) && (!f.ssh_on || (!f.ssh.host.trim().is_empty() && !f.ssh.user.trim().is_empty())) && (!f.proxy_on || f.ssh_on || !f.proxy.host.trim().is_empty());
-                        save = ui.add_enabled(valid, primary_button("Save and connect", PRIMARY())).clicked();
+                        save = ui.add_enabled(valid, primary_button(ui, "Save and connect", PRIMARY())).clicked();
                         test = ui.add_enabled(valid, egui::Button::new("Test")).clicked();
                         if ui.button("Cancel").clicked() {
                             keep = false;
@@ -7969,7 +8032,7 @@ impl App {
                     ui.add(egui::TextEdit::singleline(typed).font(FontId::monospace(13.0)).desired_width(320.0));
                     dialog_actions(ui, |ui| {
                         let ok = typed == expect;
-                        if ui.add_enabled(ok, primary_button("Confirm", ALERT())).clicked() {
+                        if ui.add_enabled(ok, primary_button(ui, "Confirm", ALERT())).clicked() {
                             keep = false;
                             let action = std::mem::replace(action, Danger::DropCollection);
                             self.danger(action);
@@ -8003,7 +8066,7 @@ impl App {
                     });
                     dialog_actions(ui, |ui| {
                         let ok = !name.trim().is_empty() && (!*view || !source.is_empty());
-                        if ui.add_enabled(ok, primary_button("Create", PRIMARY())).clicked() {
+                        if ui.add_enabled(ok, primary_button(ui, "Create", PRIMARY())).clicked() {
                             let cmd = if *view {
                                 db::parse_pipeline(pipeline).map(|p| doc! { "create": name.trim(), "viewOn": source.as_str(), "pipeline": p })
                             } else {
@@ -8077,7 +8140,7 @@ impl App {
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         let ok = exe.is_some() && !tunneled && !f.path.trim().is_empty() && (!f.restore || !f.from_db.trim().is_empty());
-                        if ui.add_enabled(ok, egui::Button::new(RichText::new(if f.restore { "Restore…" } else { "Dump" }).strong().color(BG())).fill(if f.restore { WARNING() } else { PRIMARY() })).clicked() {
+                        if ui.add_enabled(ok, primary_button(ui, if f.restore { "Restore…" } else { "Dump" }, if f.restore { WARNING() } else { PRIMARY() })).clicked() {
                             match stored_uri(f.conn) {
                                 Err(e) => self.err(uri_err(e)),
                                 Ok(uri) => {
@@ -8229,7 +8292,7 @@ impl App {
                     ui.add(egui::TextEdit::singleline(name).desired_width(320.0));
                     dialog_actions(ui, |ui| {
                         let ok = !name.trim().is_empty() && name.trim() != coll.as_str();
-                        if ui.add_enabled(ok, primary_button("Rename", PRIMARY())).clicked() {
+                        if ui.add_enabled(ok, primary_button(ui, "Rename", PRIMARY())).clicked() {
                             if let Some(client) = self.conn(*conn).and_then(|c| c.client.clone()) {
                                 let (from, to) = (format!("{db}.{coll}"), format!("{db}.{}", name.trim()));
                                 self.tabs.retain(|t| !(t.sel.conn == *conn && t.sel.db == *db && t.sel.coll == *coll));
@@ -8378,7 +8441,7 @@ impl App {
                     let mut to = path[..path.len() - 1].to_vec();
                     to.push(name.trim().to_string());
                     dialog_actions(ui, |ui| {
-                        if ui.add_enabled(valid, primary_button("In this document", PRIMARY())).clicked() {
+                        if ui.add_enabled(valid, primary_button(ui, "In this document", PRIMARY())).clicked() {
                             let new = db::get_path(d, &from).cloned().ok_or_else(|| "Field not found".to_string()).and_then(|v| db::edit_path(&db::edit_path(d, path, None)?, &to, Some(v)));
                             let base = d.clone();
                             self.stage(&base, new);
@@ -8457,7 +8520,7 @@ impl App {
                             }
                         }
                         let applicable = ready && fresh && matches!(preview, Some((_, Ok(_))));
-                        if ui.add_enabled(applicable, primary_button("Apply…", ALERT())).clicked() {
+                        if ui.add_enabled(applicable, primary_button(ui, "Apply…", ALERT())).clicked() {
                             let coll = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
                             let n = if let Some((_, Ok((_, n)))) = preview { *n } else { 0 };
                             self.modal = Some(Modal::Typed {
