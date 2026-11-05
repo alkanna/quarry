@@ -1484,6 +1484,7 @@ pub struct App {
     toast: Option<(String, std::time::Instant)>,
     ac: Ac,
     tree_filter: String,
+    tools_installing: bool,
     /// Tree row the palette jumped to, as (connection, database, collection), scrolled into view once drawn.
     reveal: Option<(u64, String, Option<String>)>,
     /// Scroll the selected document row into view on its next draw, after keyboard selection.
@@ -1503,6 +1504,11 @@ pub struct App {
 
 fn config_dir() -> PathBuf {
     dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("quarry")
+}
+
+/// Where Quarry installs the MongoDB Database Tools itself when they are missing.
+fn tools_dir() -> PathBuf {
+    config_dir().join("tools")
 }
 
 fn keychain(id: u64) -> Option<keyring::Entry> {
@@ -1637,6 +1643,7 @@ fn find_exe(name: &str, setting: &str) -> Option<PathBuf> {
     if let Some(h) = dirs::home_dir() {
         dirs.push(h.join(".bun").join("bin"));
     }
+    dirs.push(tools_dir());
     let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
     dirs.into_iter().map(|d| d.join(&file)).find(|p| p.is_file())
 }
@@ -1968,6 +1975,7 @@ impl App {
             ac: Ac::default(),
             status_at: std::time::Instant::now(),
             tree_filter: String::new(),
+            tools_installing: false,
             reveal: None,
             scroll_sel: false,
             demo,
@@ -2449,12 +2457,35 @@ impl App {
         self.update_checked = Some(std::time::Instant::now());
         self.update_note = "Checking for updates…".into();
         self.worker.blocking(|| Msg::Update(crate::update::check_and_install()));
+        // A running dump or restore keeps its program open; Windows cannot replace it then.
+        if self.tool.as_ref().is_none_or(|t| t.done.is_some()) {
+            self.worker.blocking(|| Msg::ToolsInstalled(crate::update::update_db_tools(&tools_dir())));
+        }
+    }
+
+    fn install_tools(&mut self) {
+        if !self.tools_installing {
+            self.tools_installing = true;
+            self.worker.blocking(|| Msg::ToolsInstalled(crate::update::install_db_tools(&tools_dir()).map(Some)));
+        }
+    }
+
+    /// The Install button, or a spinner while the download runs.
+    fn install_tools_button(&mut self, ui: &mut egui::Ui) {
+        if self.tools_installing {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(RichText::new("Downloading the MongoDB Database Tools…").color(MUTED));
+            });
+        } else if ui.button("Install the MongoDB Database Tools").on_hover_text(format!("Downloads MongoDB's official build into {}", tools_dir().display())).clicked() {
+            self.install_tools();
+        }
     }
 
     fn start_tool(&mut self, restore: bool, title: String, args: Vec<String>) {
         let (name, setting) = if restore { ("mongorestore", &self.prefs.mongorestore) } else { ("mongodump", &self.prefs.mongodump) };
         let Some(exe) = find_exe(name, setting) else {
-            return self.err(format!("{name} was not found. Install the MongoDB Database Tools (brew install mongodb-database-tools) or set its path in Settings."));
+            return self.err(format!("{name} was not found. Install the MongoDB Database Tools from Settings or set its path there."));
         };
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.tool = Some(ToolRun { title, log: Vec::new(), cancel: Some(tx), done: None });
@@ -2810,6 +2841,16 @@ impl App {
                     // Offline or rate-limited checks stay quiet; the reason shows in Settings.
                     Err(e) => self.update_note = format!("Last check failed: {e}"),
                 },
+                Msg::ToolsInstalled(res) => {
+                    // Only a click shows failures; a background update that fails stays quiet, like the app's own.
+                    let manual = std::mem::take(&mut self.tools_installing);
+                    match res {
+                        Ok(Some(v)) => self.ok(format!("{} the MongoDB Database Tools {v} in {}", if manual { "Installed" } else { "Updated" }, tools_dir().display())),
+                        Ok(None) => {}
+                        Err(e) if manual => self.err(format!("Could not install the MongoDB Database Tools: {e}")),
+                        Err(_) => {}
+                    }
+                }
                 Msg::ToolDone(res) => {
                     if let Some(t) = &mut self.tool {
                         t.cancel = None;
@@ -6583,6 +6624,9 @@ impl App {
                                 });
                             }
                         });
+                        if find_exe("mongodump", "").is_none() || find_exe("mongorestore", "").is_none() {
+                            self.install_tools_button(ui);
+                        }
                     });
                     if before != (self.prefs.open_inline, self.prefs.auto_save, self.prefs.confirm_save, self.prefs.default_cols, self.prefs.timeout_ms, self.prefs.shell_runtime.clone(), self.prefs.mongodump.clone(), self.prefs.mongorestore.clone(), self.prefs.auto_update) {
                         self.save_prefs();
@@ -6717,8 +6761,11 @@ impl App {
                     let exe = find_exe(tool, if f.restore { &self.prefs.mongorestore } else { &self.prefs.mongodump });
                     ui.label(RichText::new(match &exe {
                         Some(p) => format!("Runs {} with this connection's address.", p.display()),
-                        None => format!("{tool} was not found. Install the MongoDB Database Tools (brew install mongodb-database-tools) or set its path in Settings."),
+                        None => format!("{tool} was not found. Install the MongoDB Database Tools here, or set its path in Settings."),
                     }).size(12.0).color(if exe.is_some() { MUTED } else { WARNING }));
+                    if exe.is_none() {
+                        self.install_tools_button(ui);
+                    }
                     let tunneled = meta.ssh.is_some() || meta.proxy.is_some();
                     if tunneled {
                         ui.label(RichText::new("This connection goes through SSH or a proxy, which the MongoDB tools cannot use. Open an SSH port forward and use a direct connection instead.").color(WARNING));
