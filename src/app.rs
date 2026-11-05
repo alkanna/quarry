@@ -823,7 +823,7 @@ struct Sel {
 }
 
 /// Shortcuts listed by Cmd+/. Cmd is Ctrl on Linux and Windows.
-const SHORTCUTS: [(&str, &str); 21] = [
+const SHORTCUTS: [(&str, &str); 22] = [
     ("Cmd+K, Cmd+T", "Jump to a connection, database or collection"),
     ("Cmd+R", "Reload the current tab"),
     ("Cmd+Shift+R", "Refresh the connection's databases"),
@@ -844,6 +844,7 @@ const SHORTCUTS: [(&str, &str); 21] = [
     ("Esc", "Close or deselect"),
     ("Cmd+,", "Settings"),
     ("Cmd+N", "New connection"),
+    ("Cmd+L", "Show or hide the query log"),
     ("Cmd+/", "This list"),
 ];
 
@@ -961,6 +962,9 @@ struct Tab {
     agg_docs: Vec<Document>,
     agg_fields: Vec<String>,
     agg_ms: Option<u128>,
+    /// The running pipeline's request, 0 when idle. Kept apart from `req` so a page load and a
+    /// pipeline never discard each other's answer.
+    agg_req: u64,
     // Stage whose output the results pane shows; None after a full run.
     agg_stage: Option<usize>,
     indexes: Vec<Document>,
@@ -1045,6 +1049,8 @@ struct SchemaTab {
     stats: Vec<db::FieldStat>,
     docs: usize,
     ms: Option<u128>,
+    /// Why the last analysis failed; also stops the automatic analysis from retrying every frame.
+    err: Option<String>,
     /// Validator editor: the JSON, the level (0 off, 1 moderate, 2 strict) and whether failures only warn.
     vtext: String,
     vlevel: u8,
@@ -1055,7 +1061,7 @@ struct SchemaTab {
 
 impl Default for SchemaTab {
     fn default() -> Self {
-        Self { req: 0, limit: SCHEMA_DEFAULT_LIMIT, running: false, stats: Vec::new(), docs: 0, ms: None, vtext: String::new(), vlevel: 2, vwarn: false, vreq: 0, vloaded: false }
+        Self { req: 0, limit: SCHEMA_DEFAULT_LIMIT, running: false, stats: Vec::new(), docs: 0, ms: None, err: None, vtext: String::new(), vlevel: 2, vwarn: false, vreq: 0, vloaded: false }
     }
 }
 
@@ -1130,6 +1136,7 @@ impl Tab {
             agg_docs: Vec::new(),
             agg_fields: Vec::new(),
             agg_ms: None,
+            agg_req: 0,
             agg_stage: None,
             indexes: Vec::new(),
             shell: ShellTab::default(),
@@ -1446,6 +1453,24 @@ enum ColAct {
     Reset,
 }
 
+/// The query log panel: docked above the status bar, or in its own window.
+#[derive(Default)]
+struct LogUi {
+    open: bool,
+    detached: bool,
+    filter: String,
+    errors: bool,
+}
+
+fn ago(t: std::time::SystemTime) -> String {
+    let s = t.elapsed().map_or(0, |d| d.as_secs());
+    match s {
+        0..60 => format!("{s}s"),
+        60..3600 => format!("{}m", s / 60),
+        _ => format!("{}h", s / 3600),
+    }
+}
+
 pub struct App {
     worker: Worker,
     rx: Receiver<Msg>,
@@ -1463,6 +1488,8 @@ pub struct App {
     inline: Option<Inline>,
     new_field: Option<NewField>,
     insert: Option<String>,
+    /// Database hidden from the sidebar while its drop runs, to show again if the drop fails.
+    dropping_db: Option<(u64, String)>,
     prefs: UiPrefs,
     new_col: String,
     new_pkg: String,
@@ -1480,6 +1507,7 @@ pub struct App {
     modal: Option<Modal>,
     status: (String, bool),
     status_at: std::time::Instant,
+    log: LogUi,
     toast: Option<(String, std::time::Instant)>,
     ac: Ac,
     tree_filter: String,
@@ -1501,6 +1529,23 @@ pub struct App {
     shot: Option<(PathBuf, u32, Arc<Mutex<Option<egui::ColorImage>>>)>,
 }
 
+/// Parses a config file. One that no longer parses is moved to `<name>.bak`, so the next save
+/// cannot overwrite what the person had, and the reason comes back to be shown.
+fn parse_config<T: serde::de::DeserializeOwned + Default>(path: &std::path::Path) -> (T, Option<String>) {
+    let Ok(b) = std::fs::read(path) else { return (T::default(), None) };
+    match serde_json::from_slice(&b) {
+        Ok(v) => (v, None),
+        Err(err) => {
+            let bak = path.with_extension("json.bak");
+            let moved = match std::fs::rename(path, &bak) {
+                Ok(()) => format!("The file was kept as {}.", bak.display()),
+                Err(e) => format!("Moving it aside failed too ({e}); it will be overwritten on the next save."),
+            };
+            (T::default(), Some(format!("Could not read {}: {err}. {moved}", path.display())))
+        }
+    }
+}
+
 fn config_dir() -> PathBuf {
     dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("quarry")
 }
@@ -1519,9 +1564,21 @@ fn secret(id: u64, what: &str) -> Option<String> {
     keyring::Entry::new("quarry", &format!("connection-{id}-{what}")).ok()?.get_password().ok().filter(|s| !s.is_empty())
 }
 
-fn set_secret(id: u64, what: &str, value: &str) {
-    if let Ok(k) = keyring::Entry::new("quarry", &format!("connection-{id}-{what}")) {
-        let _ = if value.is_empty() { k.delete_credential() } else { k.set_password(value) };
+/// The connection's address from the Keychain.
+fn stored_uri(id: u64) -> Result<String, keyring::Error> {
+    keychain(id).ok_or(keyring::Error::NoEntry)?.get_password()
+}
+
+fn uri_err(e: keyring::Error) -> String {
+    format!("Could not read the connection's address from the Keychain: {e}")
+}
+
+/// Stores a secret, or removes it when `value` is empty.
+fn set_secret(id: u64, what: &str, value: &str) -> Result<(), String> {
+    let r = keyring::Entry::new("quarry", &format!("connection-{id}-{what}")).and_then(|k| if value.is_empty() { k.delete_credential() } else { k.set_password(value) });
+    match r {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(format!("Could not store the {} in the Keychain: {e}", what.replace('-', " "))),
     }
 }
 
@@ -1956,6 +2013,7 @@ impl App {
             inline: None,
             new_field: None,
             insert: None,
+            dropping_db: None,
             prefs: UiPrefs::default(),
             new_col: String::new(),
             new_pkg: String::new(),
@@ -1973,6 +2031,7 @@ impl App {
             toast: None,
             ac: Ac::default(),
             status_at: std::time::Instant::now(),
+            log: LogUi::default(),
             tree_filter: String::new(),
             tools_installing: false,
             reveal: None,
@@ -2013,10 +2072,10 @@ impl App {
             app.load_demo();
         } else {
             crate::update::cleanup();
-            let read = |f: &str| std::fs::read(config_dir().join(f)).ok();
-            let metas: Vec<ConnMeta> = read("connections.json").and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-            let ui_json = read("ui.json");
-            app.prefs = ui_json.as_ref().and_then(|b| serde_json::from_slice(b).ok()).unwrap_or_default();
+            let (metas, broken_conns) = parse_config::<Vec<ConnMeta>>(&config_dir().join("connections.json"));
+            let ui_json = config_dir().join("ui.json").exists().then_some(());
+            let (prefs, broken_prefs) = parse_config(&config_dir().join("ui.json"));
+            app.prefs = prefs;
             for meta in metas {
                 let masked = keychain(meta.id).and_then(|k| k.get_password().ok()).map(|u| db::mask_uri(&u)).unwrap_or_default();
                 app.conns.push(Conn { meta, client: None, status: Status::Idle, writable: false, dbs: Vec::new(), masked_uri: masked , tunnel: None });
@@ -2064,6 +2123,10 @@ impl App {
                 }
                 app.prefs.last_version = current.into();
                 app.save_prefs();
+            }
+            let broken: Vec<String> = [broken_conns, broken_prefs].into_iter().flatten().collect();
+            if !broken.is_empty() {
+                app.modal = Some(Modal::Text { title: "Some settings could not be loaded".into(), body: broken.join("\n\n"), code: false });
             }
         }
         app
@@ -2160,9 +2223,9 @@ impl App {
     }
 
     fn connect(&mut self, id: u64) {
-        let Some(uri) = keychain(id).and_then(|k| k.get_password().ok()) else {
-            self.err("Could not read this connection's address from the Keychain.");
-            return;
+        let uri = match stored_uri(id) {
+            Ok(u) => u,
+            Err(e) => return self.err(uri_err(e)),
         };
         let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == id) else { return };
         c.status = Status::Connecting;
@@ -2356,7 +2419,7 @@ impl App {
                 Some(target) => {
                     self.req += 1;
                     let req = self.req;
-                    self.tm().unwrap().req = req;
+                    self.tm().unwrap().agg_req = req;
                     self.worker.aggregate(req, target, p);
                 }
                 None => self.err("Not connected."),
@@ -2532,7 +2595,7 @@ impl App {
         match a.kind {
             UndoKind::Insert { id } => self.worker.delete_by_id(t, id),
             UndoKind::InsertMany { ids } => self.worker.delete_ids(t, ids),
-            UndoKind::Delete { old } => self.worker.insert(a.conn, t, old),
+            UndoKind::Delete { old } => self.worker.insert(a.conn, t, old, None),
             UndoKind::Update { old, new } => self.worker.replace(a.conn, t, new, old, false),
         }
     }
@@ -2594,7 +2657,7 @@ impl App {
                             d.1 = Some(v);
                         }
                     }
-                    Err(e) => self.err(e),
+                    Err(e) => self.err(format!("Could not list the collections of {db}: {e}")),
                 },
                 Msg::Command { tag, res } => match (tag.as_str(), res) {
                     ("users", r) => {
@@ -2650,9 +2713,18 @@ impl App {
                     _ => {}
                 },
                 Msg::DbChanged { conn, db, res } => {
+                    let dropped = self.dropping_db.take_if(|d| d.0 == conn && d.1 == db);
                     match res {
                         Ok(m) => self.ok(m),
-                        Err(e) => self.err(e),
+                        Err(e) => {
+                            self.err(e);
+                            if dropped.is_some() {
+                                if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
+                                    c.dbs.push((db.clone(), None));
+                                    c.dbs.sort_by(|a, b| a.0.cmp(&b.0));
+                                }
+                            }
+                        }
                     }
                     // The server may normalise the validator, so show what it kept.
                     for t in self.tabs.iter_mut().filter(|t| t.sel.conn == conn && t.sel.db == db) {
@@ -2719,24 +2791,46 @@ impl App {
                         *preview = Some((stages, res));
                     }
                 }
-                Msg::Aggregated { req, res } => match (res, self.tab_by_req(req)) {
-                    (Ok((d, ms)), Some(t)) => {
-                        t.agg_fields = auto_fields(&d);
-                        let n = d.len();
-                        t.agg_docs = d;
-                        t.agg_ms = Some(ms);
-                        self.ok(format!("Pipeline returned {n} documents"));
+                Msg::Aggregated { req, res } => {
+                    let Some(t) = self.tabs.iter_mut().find(|t| t.agg_req == req) else {
+                        // A superseded run or a closed tab: its error still deserves a mention.
+                        if let Err(e) = res {
+                            self.err(e);
+                        }
+                        continue;
+                    };
+                    t.agg_req = 0;
+                    match res {
+                        Ok((d, ms)) => {
+                            t.agg_fields = auto_fields(&d);
+                            let n = d.len();
+                            t.agg_docs = d;
+                            t.agg_ms = Some(ms);
+                            self.ok(format!("Pipeline returned {n} documents"));
+                        }
+                        Err(e) => {
+                            // Old results under a failed run would read as its output.
+                            (t.agg_docs, t.agg_ms) = (Vec::new(), None);
+                            self.err(e);
+                        }
                     }
-                    (Err(e), _) => self.err(e),
-                    _ => {}
-                },
-                Msg::Written { res, undo, reload } => {
+                }
+                Msg::Written { res, undo, reload, retry } => {
                     match res {
                         Ok(s) => {
                             self.reset_doc_state();
                             self.ok(s);
                         }
-                        Err(e) => self.err(e),
+                        Err(e) => {
+                            // Reopen the refused insert so the typed document is not lost, but
+                            // only over the collection it was meant for.
+                            if let Some((db, coll, text)) = retry {
+                                if self.t().is_some_and(|t| t.sel.db == db && t.sel.coll == coll) {
+                                    self.insert = Some(text);
+                                }
+                            }
+                            self.err(e);
+                        }
                     }
                     if let Some(u) = undo {
                         self.push_undo(u);
@@ -2865,8 +2959,8 @@ impl App {
                     let Some(t) = self.tabs.iter_mut().find(|t| t.schema.req == req) else { continue };
                     t.schema.running = false;
                     match res {
-                        Ok((stats, n, ms)) => (t.schema.stats, t.schema.docs, t.schema.ms) = (stats, n, Some(ms)),
-                        Err(e) => self.err(e),
+                        Ok((stats, n, ms)) => (t.schema.stats, t.schema.docs, t.schema.ms, t.schema.err) = (stats, n, Some(ms), None),
+                        Err(e) => (t.schema.stats, t.schema.ms, t.schema.err) = (Vec::new(), None, Some(e)),
                     }
                 }
                 Msg::ShellLog { req, level, text } => {
@@ -3228,6 +3322,7 @@ impl eframe::App for App {
         frame.set_traffic_lights_position(&ctx, egui::Rangef::new(0.0, HEADER_H), 16.0);
         self.top_bar(ui);
         self.status_bar(ui);
+        self.query_log(ui);
         self.sidebar(ui);
         let view = self.t().map(|t| t.view);
         if !self.prefs.open_inline && self.selected_doc().is_some() && view != Some(View::Indexes) {
@@ -3330,6 +3425,9 @@ impl App {
         }
         if k(cmd, Key::N) {
             self.new_conn_modal();
+        }
+        if k(cmd, Key::L) {
+            self.log.open = !self.log.open;
         }
         if k(cmd, Key::Slash) {
             let body = SHORTCUTS.iter().map(|(keys, what)| format!("{keys:<30}{what}")).collect::<Vec<_>>().join("\n");
@@ -3750,12 +3848,112 @@ impl App {
                 }
                 let (msg, is_err) = &self.status;
                 let first = msg.lines().next().unwrap_or_default();
-                ui.add(egui::Label::new(RichText::new(first).size(12.0).color(if *is_err { ALERT } else { MUTED })).truncate()).on_hover_text(msg.as_str());
+                let r = ui.add(egui::Label::new(RichText::new(first).size(12.0).color(if *is_err { ALERT } else { MUTED })).truncate().sense(egui::Sense::click()));
+                // Errors often carry advice on a second line or a long server message.
+                if !*is_err {
+                    r.on_hover_text(msg.as_str());
+                } else if r.on_hover_text(format!("{msg}\n\nClick to open the whole message.")).clicked() {
+                    self.modal = Some(Modal::Text { title: "Error".into(), body: msg.clone(), code: false });
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.selectable_label(self.log.open, RichText::new("Query log").size(11.5)).on_hover_text("Every command sent to the servers (Cmd+L)").clicked() {
+                        self.log.open = !self.log.open;
+                    }
                     ui.label(RichText::new("Cmd+K jumps  ·  Enter runs  ·  double-click a value to edit  ·  Cmd+/ shortcuts").size(11.5).color(FAINT));
                 });
             });
         });
+    }
+
+    fn query_log(&mut self, ui: &mut egui::Ui) {
+        if !self.log.open {
+            return;
+        }
+        let frame = egui::Frame::new().fill(BG).inner_margin(egui::Margin::symmetric(12, 6));
+        if !self.log.detached {
+            egui::Panel::bottom("query-log").resizable(true).default_size(200.0).min_size(90.0).frame(frame).show(ui, |ui| self.log_body(ui));
+            return;
+        }
+        let ctx = ui.ctx().clone();
+        ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("query-log"), egui::ViewportBuilder::default().with_title("Query log").with_inner_size([960.0, 420.0]), |ui, _| {
+            egui::CentralPanel::default_margins().frame(frame).show(ui, |ui| self.log_body(ui));
+            if ui.input(|i| i.viewport().close_requested()) {
+                self.log.open = false;
+            }
+        });
+    }
+
+    fn log_body(&mut self, ui: &mut egui::Ui) {
+        let mut copied = false;
+        let (log, conns) = (&mut self.log, &self.conns);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("QUERY LOG").size(11.0).color(MUTED));
+            ui.add(egui::TextEdit::singleline(&mut log.filter).hint_text("filter").desired_width(200.0).font(FontId::monospace(12.0)));
+            ui.checkbox(&mut log.errors, "Errors only");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("×").on_hover_text("Hide (Cmd+L)").clicked() {
+                    log.open = false;
+                }
+                let (label, tip) = if log.detached { ("Dock", "Show at the bottom of the main window") } else { ("Detach", "Open in its own window") };
+                if ui.small_button(label).on_hover_text(tip).clicked() {
+                    log.detached = !log.detached;
+                }
+                if ui.small_button("Clear").clicked() {
+                    db::LOG.lock().map(|mut l| l.clear()).ok();
+                }
+            });
+        });
+        ui.separator();
+        // The driver threads write to the log too, so it stays locked only while visible rows are drawn.
+        let Ok(entries) = db::LOG.lock() else { return };
+        let rows: Vec<&db::LogEntry> = entries
+            .iter()
+            .filter(|l| (!log.errors || l.err.is_some()) && (log.filter.is_empty() || [&l.name, &l.db, &l.cmd].iter().any(|s| s.contains(log.filter.as_str()))))
+            .collect();
+        if rows.is_empty() {
+            ui.label(RichText::new(if entries.is_empty() { "Commands sent to the servers show up here." } else { "No command matches." }).color(FAINT));
+            return;
+        }
+        let row_h = 18.0;
+        egui::ScrollArea::both().auto_shrink(false).stick_to_bottom(true).show_rows(ui, row_h, rows.len(), |ui, range| {
+            for l in &rows[range] {
+                let name = conns.iter().find(|c| c.meta.id == l.conn).map_or("test", |c| c.meta.name.as_str());
+                let r = ui
+                    .horizontal(|ui| {
+                        ui.set_height(row_h);
+                        let mono = |t: &str, c: Color32| RichText::new(t).monospace().size(12.0).color(c);
+                        ui.add_sized([34.0, row_h], egui::Label::new(mono(&ago(l.at), FAINT)));
+                        ui.add_sized([60.0, row_h], egui::Label::new(mono(&match (l.ms, &l.err) {
+                            (None, _) => "running".into(),
+                            (Some(ms), _) => format!("{ms} ms"),
+                        }, if l.err.is_some() { ALERT } else { MUTED })).truncate());
+                        ui.label(mono(&format!("{name} · {}", l.db), MUTED));
+                        ui.label(mono(&l.name, if l.err.is_some() { ALERT } else { PRIMARY }));
+                        if let Some(e) = &l.err {
+                            ui.add(egui::Label::new(mono(e.lines().next().unwrap_or_default(), ALERT)).truncate());
+                        }
+                        ui.add(egui::Label::new(mono(&l.cmd, TEXT)).truncate());
+                    })
+                    .response
+                    .interact(egui::Sense::click());
+                let r = r.on_hover_ui(|ui| {
+                    ui.set_max_width(640.0);
+                    if let Some(e) = &l.err {
+                        ui.label(RichText::new(e).color(ALERT));
+                    }
+                    ui.label(RichText::new(&l.cmd).monospace().size(12.0));
+                    ui.label(RichText::new("Click to copy the command").size(11.0).color(FAINT));
+                });
+                if r.clicked() {
+                    ui.ctx().copy_text(l.cmd.clone());
+                    copied = true;
+                }
+            }
+        });
+        drop(entries);
+        if copied {
+            self.ok("Command copied");
+        }
     }
 
     fn new_conn_modal(&mut self) {
@@ -3841,7 +4039,13 @@ impl App {
         if let Some(id) = edit {
             if let Some(meta) = self.conn(id).map(|c| c.meta.clone()) {
                 self.conn_test = None;
-                let uri = keychain(id).and_then(|k| k.get_password().ok()).unwrap_or_default();
+                // Opening the form with an empty address would overwrite the stored one on save,
+                // unless there is none, which is when re-entering it is the way out.
+                let uri = match stored_uri(id) {
+                    Ok(u) => u,
+                    Err(keyring::Error::NoEntry) => String::new(),
+                    Err(e) => return self.err(uri_err(e)),
+                };
                 self.modal = Some(Modal::Conn(Box::new(ConnForm {
                     id: Some(id),
                     name: meta.name.clone(),
@@ -4595,10 +4799,15 @@ impl App {
             _ => t.page * PAGE_SIZE,
         };
         let loading = t.loading;
-        let closed = self.t().and_then(|t| self.conn(t.sel.conn)).filter(|c| c.status != Status::Ready && !self.demo).map(|c| (c.meta.id, c.meta.name.clone()));
-        if let (true, Some((id, name))) = (docs.is_empty(), closed) {
+        let closed = self.t().and_then(|t| self.conn(t.sel.conn)).filter(|c| c.status != Status::Ready && !self.demo).map(|c| (c.meta.id, c.meta.name.clone(), c.status == Status::Connecting));
+        if let (true, Some((id, name, connecting))) = (docs.is_empty(), closed) {
             ui.add_space(20.0);
             ui.horizontal(|ui| {
+                if connecting {
+                    ui.spinner();
+                    ui.label(RichText::new(format!("Connecting to {name}…")).color(MUTED));
+                    return;
+                }
                 ui.label(RichText::new(format!("Connect to {name} to load this tab.")).color(MUTED));
                 if primary(ui, "Connect", PRIMARY).clicked() {
                     self.active = Some(id);
@@ -5286,8 +5495,9 @@ impl App {
         let Some(t) = self.t() else { return };
         let sel = t.sel.clone();
         let code = t.shell.code.clone();
-        let Some(uri) = keychain(sel.conn).and_then(|k| k.get_password().ok()) else {
-            return self.err("Could not read this connection's address from the Keychain.");
+        let uri = match stored_uri(sel.conn) {
+            Ok(u) => u,
+            Err(e) => return self.err(uri_err(e)),
         };
         let collections: Vec<String> = self.conn(sel.conn).and_then(|c| c.dbs.iter().find(|d| d.0 == sel.db)).and_then(|d| d.1.clone()).unwrap_or_default();
         let input = serde_json::json!({
@@ -5636,7 +5846,10 @@ impl App {
                 run = primary(ui, "Run", PRIMARY).on_hover_text("Cmd+Enter").clicked() || ui.input(|i| i.modifiers.command && i.key_pressed(Key::Enter));
                 explain = ui.button("Explain").on_hover_text("Cmd+E").clicked();
                 code_menu(ui, &mut code_lang);
-                if let Some(ms) = t.agg_ms {
+                if t.agg_req != 0 {
+                    ui.spinner();
+                    ui.label(RichText::new("Running…").color(MUTED));
+                } else if let Some(ms) = t.agg_ms {
                     let from = t.agg_stage.map_or(String::new(), |i| format!("Output after stage {}  ", i + 1));
                     ui.label(RichText::new(format!("{from}{} results  {} ms  (first 1000 shown)", t.agg_docs.len(), ms)).color(MUTED));
                 }
@@ -5701,7 +5914,7 @@ impl App {
         let mut acts: Vec<(String, u8)> = Vec::new();
         let t = &mut self.tabs[self.cur];
         // Analyze once when the view opens; the limit keeps it light on big collections.
-        if t.schema.stats.is_empty() && !t.schema.running && t.schema.ms.is_none() {
+        if t.schema.stats.is_empty() && !t.schema.running && t.schema.ms.is_none() && t.schema.err.is_none() {
             analyze = true;
         }
         egui::Frame::new().fill(PANEL).corner_radius(8).inner_margin(10).show(ui, |ui| {
@@ -5744,7 +5957,9 @@ impl App {
             });
         });
         ui.add_space(6.0);
-        if let Some(ms) = t.schema.ms {
+        if let Some(e) = &t.schema.err {
+            ui.label(RichText::new(format!("Analysis failed: {e}")).color(ALERT));
+        } else if let Some(ms) = t.schema.ms {
             ui.label(RichText::new(format!("{} fields in {} documents  ·  {ms} ms", t.schema.stats.len(), group(&t.schema.docs.to_string()))).color(MUTED));
         }
         let n = t.schema.docs.max(1) as f32;
@@ -5853,6 +6068,7 @@ impl App {
                 let t = &mut self.tabs[self.cur];
                 t.schema.req = req;
                 t.schema.running = true;
+                t.schema.err = None;
                 self.worker.schema(req, target, t.query.filter.clone(), t.schema.limit);
             } else if self.demo {
                 let t = &mut self.tabs[self.cur];
@@ -6364,8 +6580,7 @@ impl App {
                 match db::parse_doc(text) {
                     Ok(d) => {
                         if let Some((conn, target)) = self.writable_target() {
-                            self.worker.insert(conn, target, d);
-                            self.insert = None;
+                            self.worker.insert(conn, target, d, self.insert.take());
                         }
                     }
                     Err(e) => self.err(e),
@@ -6519,9 +6734,11 @@ impl App {
                         let id = f.id.unwrap_or_else(|| self.conns.iter().map(|c| c.meta.id).max().unwrap_or(0) + 1);
                         match keychain(id).map(|k| k.set_password(f.uri.trim())) {
                             Some(Ok(())) => {
-                                set_secret(id, "ssh-password", if f.ssh_on { &f.ssh_pwd } else { "" });
-                                set_secret(id, "ssh-passphrase", if f.ssh_on { &f.ssh_pass } else { "" });
-                                set_secret(id, "proxy-password", if f.proxy_on && !f.ssh_on { &f.proxy_pwd } else { "" });
+                                let stored = [
+                                    set_secret(id, "ssh-password", if f.ssh_on { &f.ssh_pwd } else { "" }),
+                                    set_secret(id, "ssh-passphrase", if f.ssh_on { &f.ssh_pass } else { "" }),
+                                    set_secret(id, "proxy-password", if f.proxy_on && !f.ssh_on { &f.proxy_pwd } else { "" }),
+                                ];
                                 let meta = ConnMeta {
                                     id,
                                     name: f.name.trim().into(),
@@ -6541,8 +6758,12 @@ impl App {
                                 self.save_conns();
                                 self.connect(id);
                                 keep = false;
+                                if let Some(Err(e)) = stored.into_iter().find(|r| r.is_err()) {
+                                    self.err(e);
+                                }
                             }
-                            other => self.err(format!("Could not save to the Keychain: {other:?}")),
+                            Some(Err(e)) => self.err(format!("Could not save the address to the Keychain: {e}")),
+                            None => self.err("The Keychain is not available."),
                         }
                     }
                 }
@@ -6806,9 +7027,9 @@ impl App {
                     ui.horizontal(|ui| {
                         let ok = exe.is_some() && !tunneled && !f.path.trim().is_empty() && (!f.restore || !f.from_db.trim().is_empty());
                         if ui.add_enabled(ok, egui::Button::new(RichText::new(if f.restore { "Restore…" } else { "Dump" }).strong().color(BG)).fill(if f.restore { WARNING } else { PRIMARY })).clicked() {
-                            match keychain(f.conn).and_then(|k| k.get_password().ok()) {
-                                None => self.err("The connection's address is missing from the Keychain."),
-                                Some(uri) => {
+                            match stored_uri(f.conn) {
+                                Err(e) => self.err(uri_err(e)),
+                                Ok(uri) => {
                                     let coll = Some(f.coll.trim()).filter(|c| !c.is_empty());
                                     let path = f.path.trim();
                                     if f.restore {
@@ -7013,7 +7234,7 @@ impl App {
                             if let Some((_, target)) = self.writable_target() {
                                 self.req += 1;
                                 let req = self.req;
-                                self.tm().unwrap().req = req;
+                                self.tm().unwrap().agg_req = req;
                                 self.worker.aggregate(req, target, p.clone());
                             }
                             keep = false;
@@ -7293,6 +7514,10 @@ impl App {
             if let Some(k) = keychain(id) {
                 let _ = k.delete_credential();
             }
+            // ponytail: best effort, a failure only leaves an orphaned Keychain entry behind.
+            for what in ["ssh-password", "ssh-passphrase", "proxy-password"] {
+                let _ = set_secret(id, what, "");
+            }
             self.conns.retain(|c| c.meta.id != id);
             self.tabs.retain(|t| t.sel.conn != id);
             self.cur = self.cur.min(self.tabs.len().saturating_sub(1));
@@ -7318,6 +7543,7 @@ impl App {
                     if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
                         c.dbs.retain(|d| d.0 != db);
                     }
+                    self.dropping_db = Some((conn, db));
                 }
                 Danger::DropCollAt { db, coll, .. } => {
                     self.tabs.retain(|t| !(t.sel.conn == conn && t.sel.db == db && t.sel.coll == coll));
@@ -7346,14 +7572,9 @@ impl App {
             Danger::DropIndex(name) => self.worker.drop_index(target, name),
             Danger::Validator(cmd) => self.worker.db_change(conn, target.client, target.db, cmd, "Validator updated".into()),
             Danger::DropCollection => {
-                let s = self.t().unwrap().sel.clone();
-                if let Some(d) = self.conns.iter_mut().find(|c| c.meta.id == s.conn).and_then(|c| c.dbs.iter_mut().find(|d| d.0 == s.db)) {
-                    if let Some(list) = &mut d.1 {
-                        list.retain(|c| *c != s.coll);
-                    }
-                }
-                self.close_tab(self.cur);
-                self.worker.drop_collection(target);
+                // The sidebar's drop also reloads the collection list, which keeps a refused drop visible.
+                let Sel { conn, db, coll } = self.t().unwrap().sel.clone();
+                self.danger(Danger::DropCollAt { conn, db, coll });
             }
             Danger::RenameMany { filter, from, to } => self.worker.rename_many(target, filter, from, to),
             Danger::UpdateMany { filter, stages } => self.worker.update_many(target, filter, stages),
@@ -7502,6 +7723,20 @@ mod tests {
             push_history(&mut h, &format!("{{ n: {i} }}"));
         }
         assert_eq!(h.len(), HISTORY_LENGTH_BY_COLLECTION);
+    }
+
+    #[test]
+    fn broken_config_is_moved_aside() {
+        let dir = std::env::temp_dir().join(format!("quarry-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("connections.json");
+        std::fs::write(&p, "[{").unwrap();
+        let (v, err): (Vec<ConnMeta>, _) = parse_config(&p);
+        assert!(v.is_empty() && err.is_some());
+        assert!(!p.exists() && dir.join("connections.json.bak").exists());
+        let (_, err): (Vec<ConnMeta>, _) = parse_config(&p);
+        assert!(err.is_none(), "a missing file is a fresh install, not an error");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
