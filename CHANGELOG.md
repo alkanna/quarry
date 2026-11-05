@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.1](https://github.com/alkanna/quarry/compare/v0.7.0...v0.7.1) (2026-11-05)
+
+
+### Bug Fixes
+
+* apply auto indent in the same frame and colour hex id strings as strings ([#24](https://github.com/alkanna/quarry/issues/24)) ([5a5d67b](https://github.com/alkanna/quarry/commit/5a5d67bb2d883fb1e541f4ca3e0409229b28d737))
+
 ## [0.7.0](https://github.com/alkanna/quarry/compare/v0.6.1...v0.7.0) (2026-11-05)
 
 
