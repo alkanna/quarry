@@ -4871,7 +4871,7 @@ impl App {
                 let edited = !self.changed.is_empty() && self.changed.contains(&path.join("."));
                 egui::Frame::new().fill(if edited { Color32::from_rgba_unmultiplied(247, 208, 110, 34) } else if hl { HIGHLIGHT } else { Color32::TRANSPARENT }).corner_radius(4).show(ui, |ui| ui.horizontal(|ui| {
                     ui.add_space(16.0);
-                    ui.label(RichText::new(key).monospace().color(MUTED));
+                    let key_r = ui.add(egui::Label::new(RichText::new(key).monospace().color(MUTED)).sense(Sense::click()));
                     if editing_here {
                         let inl = self.inline.as_mut().unwrap();
                         let r = ui.add(egui::TextEdit::singleline(&mut inl.text).desired_width(EDITOR_W).font(FontId::monospace(12.5)).clip_text(true));
@@ -4906,7 +4906,7 @@ impl App {
                             r
                         };
                         let p = path.clone();
-                        r.context_menu(|ui| field_menu(ui, &p, leaf, editable, acts));
+                        r.union(key_r).context_menu(|ui| field_menu(ui, &p, leaf, editable, acts));
                     }
                 }));
             }
