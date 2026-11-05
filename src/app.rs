@@ -962,6 +962,8 @@ struct Tab {
     agg_docs: Vec<Document>,
     agg_fields: Vec<String>,
     agg_ms: Option<u128>,
+    // Stage whose output the results pane shows; None after a full run.
+    agg_stage: Option<usize>,
     indexes: Vec<Document>,
     shell: ShellTab,
     schema: SchemaTab,
@@ -1123,6 +1125,7 @@ impl Tab {
             agg_docs: Vec::new(),
             agg_fields: Vec::new(),
             agg_ms: None,
+            agg_stage: None,
             indexes: Vec::new(),
             shell: ShellTab::default(),
             schema: SchemaTab::default(),
@@ -2293,6 +2296,7 @@ impl App {
     }
 
     fn run_pipeline(&mut self, p: Vec<Document>) {
+        self.tm().unwrap().agg_stage = None;
         if db::has_write_stage(&p) {
             if self.writable_target().is_some() {
                 self.modal = Some(Modal::AggWrite(p));
@@ -5507,7 +5511,13 @@ impl App {
         let agg_lib: Vec<SavedQuery> = self.prefs.library.get(&key).map(|v| v.iter().filter(|q| q.pipeline.is_some()).cloned().collect()).unwrap_or_default();
         let mut agg_acts = Vec::new();
         let mut agg_new = std::mem::take(&mut self.new_lib);
+        let mut stage = None;
         let t = self.tm().unwrap();
+        let labels: Vec<String> = if db::is_shell(&t.agg_txt) {
+            Vec::new()
+        } else {
+            db::parse_pipeline(&t.agg_txt).map(|p| p.iter().map(|s| s.keys().next().cloned().unwrap_or_default()).collect()).unwrap_or_default()
+        };
         egui::Frame::new().fill(PANEL).corner_radius(8).inner_margin(10).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("PIPELINE  ·  an array of stages, or paste db.coll.aggregate([...])").size(11.0).color(MUTED));
@@ -5521,9 +5531,20 @@ impl App {
                 run = primary(ui, "Run", PRIMARY).on_hover_text("Cmd+Enter").clicked() || ui.input(|i| i.modifiers.command && i.key_pressed(Key::Enter));
                 explain = ui.button("Explain").on_hover_text("Cmd+E").clicked();
                 if let Some(ms) = t.agg_ms {
-                    ui.label(RichText::new(format!("{} results  {} ms  (first 1000 shown)", t.agg_docs.len(), ms)).color(MUTED));
+                    let from = t.agg_stage.map_or(String::new(), |i| format!("Output after stage {}  ", i + 1));
+                    ui.label(RichText::new(format!("{from}{} results  {} ms  (first 1000 shown)", t.agg_docs.len(), ms)).color(MUTED));
                 }
             });
+            if !labels.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    for (i, l) in labels.iter().enumerate() {
+                        let fg = if t.agg_stage == Some(i) { PRIMARY } else { MUTED };
+                        if pill(ui, &format!("{} {l}", i + 1), fg).on_hover_text("Preview the output after this stage").clicked() {
+                            stage = Some(i);
+                        }
+                    }
+                });
+            }
         });
         self.new_lib = agg_new;
         for a in agg_acts {
@@ -5538,6 +5559,13 @@ impl App {
                 }
                 QAct::Delete(name) => self.delete_from_library(&name, true),
                 _ => {}
+            }
+        }
+        let t = self.tm().unwrap();
+        if let (Some(i), false) = (stage, run) {
+            if let Some(p) = db::parse_pipeline(&t.agg_txt).ok().and_then(|p| db::stage_preview(&p, i)) {
+                self.run_pipeline(p);
+                self.tm().unwrap().agg_stage = Some(i);
             }
         }
         let t = self.tm().unwrap();

@@ -1436,6 +1436,14 @@ pub fn has_write_stage(p: &[Document]) -> bool {
     p.iter().any(|s| s.contains_key("$out") || s.contains_key("$merge"))
 }
 
+/// Pipeline up to and including stage `i`, capped so a preview stays cheap.
+/// Write stages are dropped so a preview can never modify data.
+pub fn stage_preview(p: &[Document], i: usize) -> Option<Vec<Document>> {
+    let mut out: Vec<Document> = p.get(..=i)?.iter().filter(|s| !has_write_stage(std::slice::from_ref(s))).cloned().collect();
+    out.push(doc! { "$limit": 20 });
+    Some(out)
+}
+
 /// CSV or TSV with every top-level field seen in any document, RFC 4180 quoting.
 pub fn to_table(docs: &[Document], sep: char) -> String {
     let mut cols: Vec<String> = Vec::new();
@@ -2299,6 +2307,14 @@ mod tests {
         assert_eq!(s.rows.len(), 5);
         assert_eq!(s.warnings.len(), 2);
         assert!(explain_summary(&doc! { "ok": 1 }).rows.is_empty());
+    }
+
+    #[test]
+    fn stage_preview_cuts_limits_and_skips_writes() {
+        let p = vec![doc! { "$match": {} }, doc! { "$out": "x" }, doc! { "$group": { "_id": 1 } }];
+        assert_eq!(stage_preview(&p, 2).unwrap(), vec![doc! { "$match": {} }, doc! { "$group": { "_id": 1 } }, doc! { "$limit": 20 }]);
+        assert_eq!(stage_preview(&p, 0).unwrap().len(), 2);
+        assert!(stage_preview(&p, 3).is_none());
     }
 
     #[test]
