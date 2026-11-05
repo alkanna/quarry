@@ -751,6 +751,159 @@ fn code_layout(ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32) -> Arc<egui
     ui.fonts_mut(|f| f.layout_job(job))
 }
 
+/// Cmd+F for a big text area, kept in egui memory under the area's id.
+#[derive(Clone, Default)]
+struct Find {
+    open: bool,
+    query: String,
+    cur: usize,
+    scroll: bool,
+    frame: u64,
+}
+
+impl Find {
+    /// The bar above the text area. Enter and Shift+Enter step through the matches; Esc closes
+    /// the bar here so it does not also close the window around it.
+    fn bar(ui: &mut egui::Ui, id: egui::Id, text: &str) -> Find {
+        let key = id.with("find");
+        let field = key.with("field");
+        let now = ui.ctx().cumulative_frame_nr();
+        let mut f: Find = ui.data(|d| d.get_temp(key)).unwrap_or_default();
+        // Not drawn last frame means the window was closed: start fresh when it opens again.
+        if f.frame + 1 < now {
+            f = Find::default();
+        }
+        f.frame = now;
+        f.scroll = false;
+        if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::F)) {
+            f.open = true;
+            ui.memory_mut(|m| m.request_focus(field));
+        }
+        if f.open && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+            f.open = false;
+        }
+        if f.open {
+            ui.horizontal(|ui| {
+                let r = ui.add(egui::TextEdit::singleline(&mut f.query).id(field).hint_text("Find").desired_width(240.0));
+                if r.changed() {
+                    f.cur = 0;
+                    f.scroll = true;
+                }
+                let n = f.hits(text).len();
+                if f.cur >= n {
+                    f.cur = 0;
+                }
+                let step = |f: &mut Find, back: bool| {
+                    if n > 0 {
+                        f.cur = if back { (f.cur + n - 1) % n } else { (f.cur + 1) % n };
+                        f.scroll = true;
+                    }
+                };
+                // A single line field gives up focus on Enter; take it back to keep stepping.
+                if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                    step(&mut f, ui.input(|i| i.modifiers.shift));
+                    r.request_focus();
+                }
+                if ui.small_button("Prev").on_hover_text("Shift+Enter").clicked() {
+                    step(&mut f, true);
+                }
+                if ui.small_button("Next").on_hover_text("Enter").clicked() {
+                    step(&mut f, false);
+                }
+                let label = if f.query.is_empty() { String::new() } else if n == 0 { "No matches".into() } else { format!("{} of {n}", f.cur + 1) };
+                ui.label(RichText::new(label).size(12.0).color(MUTED));
+            });
+        }
+        ui.data_mut(|d| d.insert_temp(key, f.clone()));
+        f
+    }
+
+    fn hits(&self, text: &str) -> Vec<std::ops::Range<usize>> {
+        if !self.open || self.query.is_empty() {
+            return Vec::new();
+        }
+        // ponytail: ASCII case folding only, so byte offsets stay those of the original text.
+        let q = self.query.to_ascii_lowercase();
+        text.to_ascii_lowercase().match_indices(&q).map(|(i, _)| i..i + q.len()).collect()
+    }
+
+    /// Layouter for the text area: `code` colors JSON, matches get a background.
+    fn layouter(&self, code: bool) -> impl FnMut(&egui::Ui, &dyn egui::TextBuffer, f32) -> Arc<egui::Galley> + '_ {
+        move |ui, buf, wrap| {
+            let mut job = if code {
+                json_job(buf.as_str())
+            } else {
+                let color = ui.visuals().override_text_color.unwrap_or_else(|| ui.visuals().widgets.inactive.text_color());
+                LayoutJob::simple(buf.as_str().to_owned(), egui::TextStyle::Monospace.resolve(ui.style()), color, wrap)
+            };
+            self.mark(&mut job);
+            job.wrap.max_width = wrap;
+            ui.fonts_mut(|f| f.layout_job(job))
+        }
+    }
+
+    /// Splits the sections at match edges. Hits are sorted, so one pass covers both lists.
+    fn mark(&self, job: &mut LayoutJob) {
+        let hits = self.hits(&job.text);
+        if hits.is_empty() {
+            return;
+        }
+        let mut out = Vec::with_capacity(job.sections.len() + 2 * hits.len());
+        use egui::text::ByteIndex;
+        let mut j = 0;
+        for s in job.sections.drain(..) {
+            let (start, end): (usize, usize) = (s.byte_range.start.into(), s.byte_range.end.into());
+            let mut at = start;
+            while j < hits.len() && hits[j].end <= at {
+                j += 1;
+            }
+            let mut k = j;
+            while at < end {
+                let mut piece = s.clone();
+                if at > start {
+                    piece.leading_space = 0.0;
+                }
+                match hits.get(k).filter(|h| h.start < end) {
+                    Some(h) if h.start <= at => {
+                        let e = h.end.min(end);
+                        if k == self.cur {
+                            piece.format.background = WARNING;
+                            piece.format.color = BG;
+                        } else {
+                            piece.format.background = WARNING.gamma_multiply(0.3);
+                        }
+                        piece.byte_range = ByteIndex(at)..ByteIndex(e);
+                        at = e;
+                        if h.end <= end {
+                            k += 1;
+                        }
+                    }
+                    Some(h) => {
+                        piece.byte_range = ByteIndex(at)..ByteIndex(h.start);
+                        at = h.start;
+                    }
+                    None => {
+                        piece.byte_range = ByteIndex(at)..ByteIndex(end);
+                        at = end;
+                    }
+                }
+                out.push(piece);
+            }
+        }
+        job.sections = out;
+    }
+
+    /// Scrolls the current match into view. Call inside the text area's ScrollArea.
+    fn reveal(&self, ui: &egui::Ui, text: &str, out: &egui::text_edit::TextEditOutput) {
+        if !self.scroll {
+            return;
+        }
+        let Some(before) = self.hits(text).get(self.cur).and_then(|h| text.get(..h.start)) else { return };
+        let r = out.galley.pos_from_cursor(egui::text::CCursor::new(before.chars().count()));
+        ui.scroll_to_rect(r.translate(out.galley_pos.to_vec2()), Some(egui::Align::Center));
+    }
+}
+
 /// A table cell. With `summarize`, an object or array whose JSON would not fit the cell shows as
 /// "{12 fields}" or "[500 items]" instead of its first characters; small ones stay in full.
 fn column_job(v: &Bson, summarize: bool) -> LayoutJob {
@@ -2254,6 +2407,11 @@ impl App {
             app.worker.send(Msg::Docs { req: app.req, res: Ok((docs, n, 3)) });
         } else if demo {
             app.load_demo();
+            // Test switch: the demo picture with the find bar open.
+            if let Ok(q) = std::env::var("QUARRY_TEST_FIND") {
+                let f = Find { open: true, query: q, ..Default::default() };
+                cc.egui_ctx.data_mut(|d| d.insert_temp(egui::Id::unique("json-editor-text").with("find"), f));
+            }
         } else {
             crate::update::cleanup();
             let (metas, broken_conns) = parse_config::<Vec<ConnMeta>>(&config_dir().join("connections.json"));
@@ -7177,11 +7335,13 @@ impl App {
                 ui.label(RichText::new("JSON, JSON5 or shell syntax. Applying keeps it as an unsaved edit until you press Save.").size(12.0).color(MUTED));
                 ui.add_space(4.0);
                 let rows = je.text.lines().count().clamp(12, 40);
+                let id = egui::Id::unique("json-editor-text");
+                let find = Find::bar(ui, id, &je.text);
                 egui::ScrollArea::vertical().max_height(screen.height() * 0.62).show(ui, |ui| {
-                    let id = egui::Id::unique("json-editor-text");
-                    let r = with_autopair(ui, id, &mut je.text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(rows).layouter(&mut code_layout).show(ui)).response;
+                    let out = with_autopair(ui, id, &mut je.text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(rows).layouter(&mut find.layouter(true)).show(ui));
+                    find.reveal(ui, &je.text, &out);
                     if je.focus {
-                        r.request_focus();
+                        out.response.request_focus();
                         je.focus = false;
                     }
                 });
@@ -7230,9 +7390,11 @@ impl App {
                 ui.set_width(560.0);
                 ui.label(RichText::new("Insert a document").strong().size(16.0).color(BRIGHT));
                 ui.label(RichText::new("JSON, JSON5 or shell syntax: ObjectId(\"…\"), ISODate(\"…\"), NumberLong(…).").color(MUTED));
+                let id = egui::Id::unique("insert-editor-text");
+                let find = Find::bar(ui, id, text);
                 egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
-                    let id = egui::Id::unique("insert-editor-text");
-                    with_autopair(ui, id, text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(16).layouter(&mut code_layout).show(ui));
+                    let out = with_autopair(ui, id, text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(16).layouter(&mut find.layouter(true)).show(ui));
+                    find.reveal(ui, text, &out);
                 });
                 ui.horizontal(|ui| {
                     submit = primary(ui, "Insert", PRIMARY).clicked();
@@ -7983,11 +8145,11 @@ impl App {
                 Modal::Text { title, body, code } => {
                     ui.set_width(560.0);
                     ui.label(RichText::new(title.as_str()).strong().size(15.0).color(BRIGHT));
+                    let find = Find::bar(ui, egui::Id::unique("text-modal"), body);
                     egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
                         let mut text = body.as_str();
-                        let mut layout = code_layout;
-                        let edit = egui::TextEdit::multiline(&mut text).code_editor().desired_width(f32::INFINITY);
-                        ui.add(if *code { edit.layouter(&mut layout) } else { edit });
+                        let out = egui::TextEdit::multiline(&mut text).code_editor().desired_width(f32::INFINITY).layouter(&mut find.layouter(*code)).show(ui);
+                        find.reveal(ui, body, &out);
                     });
                     ui.horizontal(|ui| {
                         if ui.button("Copy").clicked() {
@@ -8140,11 +8302,12 @@ impl App {
                     ui.horizontal(|ui| {
                         segmented(ui, show_raw, &[(false, "Stages"), (true, "Raw JSON")]);
                     });
+                    let find = if *show_raw { Find::bar(ui, egui::Id::unique("explain-raw"), raw) } else { Find::default() };
                     egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
                         if *show_raw {
                             let mut text = raw.as_str();
-                            let mut layout = code_layout;
-                            ui.add(egui::TextEdit::multiline(&mut text).code_editor().desired_width(f32::INFINITY).layouter(&mut layout));
+                            let out = egui::TextEdit::multiline(&mut text).code_editor().desired_width(f32::INFINITY).layouter(&mut find.layouter(true)).show(ui);
+                            find.reveal(ui, raw, &out);
                         } else if summary.rows.is_empty() {
                             ui.label(RichText::new("The server returned no execution stages. See Raw JSON.").color(MUTED));
                         } else {
