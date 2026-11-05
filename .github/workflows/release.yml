@@ -49,11 +49,10 @@ jobs:
       - name: macOS universal app
         if: runner.os == 'macOS'
         run: |
-          rustup target add aarch64-apple-darwin x86_64-apple-darwin
           # Apple silicon, Intel, then both in one app; later runs reuse the compiled targets.
-          for pair in "arm64:aarch64-apple-darwin" "x86_64:x86_64-apple-darwin" "universal:aarch64-apple-darwin x86_64-apple-darwin"; do
-            TARGETS="${pair#*:}" ./bundle.sh
-            ditto -c -k --keepParent dist/Quarry.app "Quarry-macos-${pair%%:*}.zip"
+          for arch in arm64 x86_64 universal; do
+            ./bundle.sh "macos-$arch"
+            ditto -c -k --keepParent dist/Quarry.app "Quarry-macos-$arch.zip"
           done
           gh release upload "$TAG" Quarry-macos-arm64.zip Quarry-macos-x86_64.zip Quarry-macos-universal.zip --clobber
 
