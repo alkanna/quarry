@@ -265,7 +265,9 @@ fn install(new: &Path, target: &Path) -> Result<(), String> {
     let copied = if new.is_dir() { run(Command::new("ditto").arg(new).arg(target)).map(drop) } else { std::fs::copy(new, target).map(drop).map_err(|e| e.to_string()) };
     if let Err(e) = copied {
         remove(target);
-        let _ = std::fs::rename(&old, target);
+        if let Err(back) = std::fs::rename(&old, target) {
+            return Err(format!("{e}\nQuarry could not be put back ({back}); the previous version is at {}.", old.display()));
+        }
         return Err(e);
     }
     if cfg!(target_os = "macos") {

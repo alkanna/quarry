@@ -80,8 +80,9 @@ pub enum Msg {
     Explained { req: u64, res: Res<Document> },
     /// Up to 5 matching documents as (before, after) the given update stages, and the total match count.
     UpdatePreview { stages: Vec<Document>, res: Res<(Vec<(Document, Document)>, u64)> },
-    /// A write finished. `undo` is filled when the write can be reverted.
-    Written { res: Res<String>, undo: Option<UndoAction>, reload: bool },
+    /// A write finished. `undo` is filled when the write can be reverted. `retry` is the insert
+    /// dialog's (db, coll, text), to reopen it if the server refused the document.
+    Written { res: Res<String>, undo: Option<UndoAction>, reload: bool, retry: Option<(String, String, String)> },
     /// A staged document edit was written (or refused); `tag` names the draft.
     Saved { tag: String, res: Res<String>, undo: Option<UndoAction> },
     Info(Res<String>),
@@ -261,6 +262,11 @@ pub struct Worker {
 
 fn e(err: impl std::fmt::Display) -> String {
     let s = err.to_string();
+    // Driver errors append their labels and the raw reply bytes, which only hide the message.
+    let s = match s.strip_prefix("Kind: ") {
+        Some(r) => r.split(", labels: ").next().unwrap_or(r).to_string(),
+        None => s,
+    };
     if s.contains("imeout") || s.contains("exceeded time limit") {
         // Same advice the original gives on timeouts.
         format!("{s}\nThis usually means a query on a non-indexed field of a big collection. Raise the timeout or add an index.")
@@ -311,14 +317,16 @@ impl Worker {
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         self.rt.spawn(async move {
-            let _ = tx.send(f.await);
+            // A panic in the task would otherwise end it silently; say so instead.
+            let msg = tokio::spawn(f).await.unwrap_or_else(|err| Msg::Info(Err(format!("Internal error: {err}"))));
+            let _ = tx.send(msg);
             ctx.request_repaint();
         });
     }
 
     pub fn connect(&self, conn: u64, uri: String, timeout: Duration, net: Net) {
         self.spawn(async move {
-            let res = open_client(&uri, timeout, &net).await;
+            let res = open_client(conn, &uri, timeout, &net).await;
             Msg::Connected { conn, res }
         });
     }
@@ -326,7 +334,7 @@ impl Worker {
     /// Connects and lists databases without keeping anything, for the connection form.
     pub fn test(&self, uri: String, timeout: Duration, net: Net) {
         self.spawn(async move {
-            let res = open_client(&uri, timeout, &net).await.map(|(_, dbs, t)| {
+            let res = open_client(0, &uri, timeout, &net).await.map(|(_, dbs, t)| {
                 let via = match (&t, &net.proxy) {
                     (Some(t), _) => format!(" through SSH (host key {})", t.fingerprint),
                     (None, Some(p)) => format!(" through the proxy {}:{}", p.host, p.port),
@@ -550,19 +558,21 @@ impl Worker {
     fn write(&self, f: impl Future<Output = (Res<String>, Option<UndoAction>)> + Send + 'static) {
         self.spawn(async move {
             let (res, undo) = f.await;
-            Msg::Written { res, undo, reload: true }
+            Msg::Written { res, undo, reload: true, retry: None }
         });
     }
 
-    pub fn insert(&self, conn: u64, t: Target, d: Document) {
-        self.write(async move {
-            match t.c().insert_one(d).await {
+    pub fn insert(&self, conn: u64, t: Target, d: Document, text: Option<String>) {
+        self.spawn(async move {
+            let retry = text.map(|x| (t.db.clone(), t.coll.clone(), x));
+            let (res, undo) = match t.c().insert_one(d).await {
                 Ok(r) => (
                     Ok(format!("Inserted document {}", short(&r.inserted_id))),
                     Some(UndoAction { at: Instant::now(), conn, db: t.db, coll: t.coll, kind: UndoKind::Insert { id: r.inserted_id } }),
                 ),
                 Err(err) => (Err(e(err)), None),
-            }
+            };
+            Msg::Written { res, undo, reload: true, retry }
         });
     }
 
@@ -905,27 +915,18 @@ impl Worker {
         });
     }
 
-    pub fn drop_collection(&self, t: Target) {
-        self.write(async move {
-            match t.c().drop().await {
-                Ok(()) => (Ok(format!("Dropped collection {}", t.coll)), None),
-                Err(err) => (Err(e(err)), None),
-            }
-        });
-    }
-
     pub fn create_index(&self, t: Target, keys: Document, unique: bool) {
         self.spawn(async move {
             let m = IndexModel::builder().keys(keys).options(IndexOptions::builder().unique(unique).build()).build();
             let res = t.c().create_index(m).await.map(|r| format!("Created index {}", r.index_name)).map_err(e);
-            Msg::Written { res, undo: None, reload: false }
+            Msg::Written { res, undo: None, reload: false, retry: None }
         });
     }
 
     pub fn drop_index(&self, t: Target, name: String) {
         self.spawn(async move {
             let res = t.c().drop_index(&name).await.map(|_| format!("Dropped index {name}")).map_err(e);
-            Msg::Written { res, undo: None, reload: false }
+            Msg::Written { res, undo: None, reload: false, retry: None }
         });
     }
 
@@ -952,7 +953,7 @@ impl Worker {
                     _ => serde_json::to_string_pretty(&docs.iter().map(|d| Bson::Document(d.clone()).into_relaxed_extjson()).collect::<Vec<_>>())
                         .map_err(e)?,
                 };
-                std::fs::write(&path, body).map_err(e)?;
+                std::fs::write(&path, body).map_err(|x| format!("Could not write {}: {x}", path.display()))?;
                 Ok(format!("Exported {} documents to {}", docs.len(), path.display()))
             }
             .await;
@@ -1109,7 +1110,73 @@ pub struct Proxy {
     pub password: Option<String>,
 }
 
-async fn open_client(uri: &str, timeout: Duration, net: &Net) -> Res<(Client, Vec<String>, Option<crate::ssh::Tunnel>)> {
+/// One command sent to a server, for the query log.
+pub struct LogEntry {
+    pub conn: u64,
+    pub at: std::time::SystemTime,
+    pub db: String,
+    pub name: String,
+    pub cmd: String,
+    /// None while the command is still running.
+    pub ms: Option<u128>,
+    pub err: Option<String>,
+    req: i32,
+}
+
+pub const LOG_MAX: usize = 2000;
+
+// ponytail: one process-wide log, clients of every connection write here; keyed by conn id.
+pub static LOG: std::sync::Mutex<std::collections::VecDeque<LogEntry>> = std::sync::Mutex::new(std::collections::VecDeque::new());
+
+/// Feeds the driver's command events into `LOG`. The driver already blanks the bodies of
+/// authentication and user password commands, so secrets never reach the log.
+fn log_event(conn: u64, ev: mongodb::event::command::CommandEvent) {
+    use mongodb::event::command::CommandEvent as E;
+    match ev {
+        E::Started(s) => {
+            // Driver housekeeping, not something the user asked for.
+            if matches!(s.command_name.as_str(), "hello" | "isMaster" | "ismaster" | "endSessions" | "killCursors") {
+                return;
+            }
+            let mut cmd = s.command;
+            for k in ["lsid", "$db", "$clusterTime", "$readPreference", "txnNumber", "apiVersion"] {
+                cmd.remove(k);
+            }
+            // Bulk writes carry thousands of documents; a few show the shape.
+            for k in ["documents", "updates", "deletes"] {
+                if let Some(Bson::Array(a)) = cmd.get_mut(k).filter(|a| a.as_array().is_some_and(|a| a.len() > 3)) {
+                    let more = a.len() - 3;
+                    a.truncate(3);
+                    a.push(Bson::String(format!("… {more} more")));
+                }
+            }
+            let mut text = compact(&Bson::Document(cmd));
+            if let Some((cut, _)) = text.char_indices().nth(4000) {
+                text.truncate(cut);
+                text.push_str(" …");
+            }
+            let entry = LogEntry { conn, at: std::time::SystemTime::now(), db: s.db, name: s.command_name, cmd: text, ms: None, err: None, req: s.request_id };
+            let Ok(mut log) = LOG.lock() else { return };
+            if log.len() >= LOG_MAX {
+                log.pop_front();
+            }
+            log.push_back(entry);
+        }
+        other => {
+            let (req, ms, err) = match other {
+                E::Succeeded(s) => (s.request_id, s.duration.as_millis(), None),
+                E::Failed(f) => (f.request_id, f.duration.as_millis(), Some(e(f.failure))),
+                _ => return,
+            };
+            let Ok(mut log) = LOG.lock() else { return };
+            if let Some(l) = log.iter_mut().rev().find(|l| l.conn == conn && l.req == req) {
+                (l.ms, l.err) = (Some(ms), err);
+            }
+        }
+    }
+}
+
+async fn open_client(conn: u64, uri: &str, timeout: Duration, net: &Net) -> Res<(Client, Vec<String>, Option<crate::ssh::Tunnel>)> {
     use mongodb::options::Socks5Proxy;
     let tunnel = match &net.ssh {
         Some((conf, secrets)) => Some(crate::ssh::open(conf, secrets, timeout).await?),
@@ -1119,6 +1186,7 @@ async fn open_client(uri: &str, timeout: Duration, net: &Net) -> Res<(Client, Ve
     o.connect_timeout = Some(timeout);
     o.server_selection_timeout = Some(timeout);
     o.app_name.get_or_insert_with(|| "quarry".into());
+    o.command_event_handler = Some(mongodb::event::EventHandler::callback(move |ev| log_event(conn, ev)));
     if let Some(t) = &tunnel {
         o.socks5_proxy = Some(Socks5Proxy::builder().host("127.0.0.1".to_string()).port(t.port).build());
     } else if let Some(p) = &net.proxy {
@@ -2605,6 +2673,13 @@ mod tests {
     }
 
     #[test]
+    fn driver_errors_drop_labels_and_raw_reply() {
+        let raw = "Kind: Command failed: Error code 59 (CommandNotFound): no such command: 'nope', labels: {}, source: None, server response: Some(RawDocumentBuf { data: \"5d00\" })";
+        assert_eq!(e(raw), "Command failed: Error code 59 (CommandNotFound): no such command: 'nope'");
+        assert_eq!(e("plain"), "plain");
+    }
+
+    #[test]
     fn schema_from_stats_maps_types_and_required() {
         let s = vec![stat("_id", 10, &["objectId"]), stat("age", 10, &["int", "string"]), stat("nick", 4, &["string"]), stat("tags", 10, &["array"])];
         let js = schema_from_stats(&s, 10);
@@ -2730,7 +2805,7 @@ mod tests {
                 (String::from_utf8(name).unwrap(), u16::from_be_bytes(p))
             });
             let net = Net { ssh: None, proxy: Some(Proxy { host: "127.0.0.1".into(), port, user: String::new(), password: None }) };
-            let r = open_client("mongodb://db.internal.example:27018/", Duration::from_millis(1500), &net).await;
+            let r = open_client(0, "mongodb://db.internal.example:27018/", Duration::from_millis(1500), &net).await;
             assert!(r.is_err());
             assert_eq!(seen.await.unwrap(), ("db.internal.example".to_string(), 27018));
         });
@@ -2842,3 +2917,5 @@ mod tests {
         assert_eq!(serde_json::from_str::<Document>(&json).unwrap(), q.filter);
     }
 }
+
+
