@@ -1046,11 +1046,17 @@ struct SchemaTab {
     stats: Vec<db::FieldStat>,
     docs: usize,
     ms: Option<u128>,
+    /// Validator editor: the JSON, the level (0 off, 1 moderate, 2 strict) and whether failures only warn.
+    vtext: String,
+    vlevel: u8,
+    vwarn: bool,
+    vreq: u64,
+    vloaded: bool,
 }
 
 impl Default for SchemaTab {
     fn default() -> Self {
-        Self { req: 0, limit: SCHEMA_DEFAULT_LIMIT, running: false, stats: Vec::new(), docs: 0, ms: None }
+        Self { req: 0, limit: SCHEMA_DEFAULT_LIMIT, running: false, stats: Vec::new(), docs: 0, ms: None, vtext: String::new(), vlevel: 2, vwarn: false, vreq: 0, vloaded: false }
     }
 }
 
@@ -1149,6 +1155,7 @@ enum Danger {
     Upsert { key: String },
     Sync { conn: u64 },
     Restore { conn: u64, args: Vec<String> },
+    Validator(Document),
 }
 
 enum Modal {
@@ -2595,6 +2602,20 @@ impl App {
                         let body = format!("viewOn: {}\npipeline:\n{}", opts.get_str("viewOn").unwrap_or_default(), db::to_edit_value(opts.get("pipeline").unwrap_or(&Bson::Array(vec![]))));
                         self.modal = Some(Modal::Text { title: "View definition".into(), body, code: true });
                     }
+                    (tag, Ok(d)) if tag.starts_with("validator:") => {
+                        let req: u64 = tag["validator:".len()..].parse().unwrap_or(0);
+                        let opts = d.get_document("cursor").ok().and_then(|c| c.get_array("firstBatch").ok()).and_then(|a| a.first()).and_then(|x| x.as_document()).and_then(|x| x.get_document("options").ok()).cloned().unwrap_or_default();
+                        if let Some(t) = self.tabs.iter_mut().find(|t| t.schema.vreq == req) {
+                            let s = &mut t.schema;
+                            s.vtext = opts.get_document("validator").map(db::to_edit_json).unwrap_or_default();
+                            s.vlevel = match opts.get_str("validationLevel") {
+                                Ok("off") => 0,
+                                Ok("moderate") => 1,
+                                _ => 2,
+                            };
+                            s.vwarn = opts.get_str("validationAction") == Ok("warn");
+                        }
+                    }
                     (_, Err(e)) => self.err(e),
                     _ => {}
                 },
@@ -2602,6 +2623,10 @@ impl App {
                     match res {
                         Ok(m) => self.ok(m),
                         Err(e) => self.err(e),
+                    }
+                    // The server may normalise the validator, so show what it kept.
+                    for t in self.tabs.iter_mut().filter(|t| t.sel.conn == conn && t.sel.db == db) {
+                        t.schema.vloaded = false;
                     }
                     if let Some(client) = self.conn(conn).and_then(|c| c.client.clone()) {
                         if db == "*" {
@@ -5660,6 +5685,25 @@ impl App {
             ui.label(RichText::new(format!("Query: {filter}")).monospace().size(12.0).color(FAINT));
         });
         ui.add_space(6.0);
+        let (mut apply, mut generate, mut reload) = (false, false, false);
+        egui::CollapsingHeader::new(RichText::new("VALIDATOR").size(11.0).color(MUTED)).id_salt("schema-validator").show(ui, |ui| {
+            let s = &mut t.schema;
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Level").color(MUTED));
+                segmented(ui, &mut s.vlevel, &[(0, "off"), (1, "moderate"), (2, "strict")]);
+                ui.add_space(12.0);
+                ui.label(RichText::new("Action").color(MUTED));
+                segmented(ui, &mut s.vwarn, &[(false, "error"), (true, "warn")]);
+            });
+            let id = ui.make_persistent_id("validator-editor");
+            with_autopair(ui, id, &mut s.vtext, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().hint_text("{ $jsonSchema: { bsonType: \"object\", required: [...] } }").desired_width(f32::INFINITY).desired_rows(8).layouter(&mut code_layout).show(ui));
+            ui.horizontal(|ui| {
+                apply = primary(ui, "Apply", PRIMARY).on_hover_text("Runs collMod on this collection").clicked();
+                generate = ui.add_enabled(!s.stats.is_empty(), egui::Button::new("Generate from analysis")).on_hover_text("Built from the sampled documents; review it before applying").clicked();
+                reload = ui.button("Reload").clicked();
+            });
+        });
+        ui.add_space(6.0);
         if let Some(ms) = t.schema.ms {
             ui.label(RichText::new(format!("{} fields in {} documents  ·  {ms} ms", t.schema.stats.len(), group(&t.schema.docs.to_string()))).color(MUTED));
         }
@@ -5719,6 +5763,33 @@ impl App {
                 }
             });
         });
+        if generate {
+            let s = &mut self.tabs[self.cur].schema;
+            s.vtext = db::to_edit_json(&db::schema_from_stats(&s.stats, s.docs));
+        }
+        if reload {
+            self.tabs[self.cur].schema.vloaded = false;
+        }
+        if apply {
+            let t = &self.tabs[self.cur];
+            match db::parse_doc(&t.schema.vtext) {
+                Ok(v) => {
+                    let level = ["off", "moderate", "strict"][t.schema.vlevel as usize];
+                    let cmd = doc! { "collMod": &t.sel.coll, "validator": v, "validationLevel": level, "validationAction": if t.schema.vwarn { "warn" } else { "error" } };
+                    self.modal = Some(Modal::Typed { title: format!("Change the validator of {}? Writes that fail it may be rejected.", t.sel.coll), expect: t.sel.coll.clone(), typed: String::new(), action: Danger::Validator(cmd) });
+                }
+                Err(e) => self.err(e),
+            }
+        }
+        if !self.tabs[self.cur].schema.vloaded {
+            if let Some(target) = self.target() {
+                self.req += 1;
+                let (req, coll) = (self.req, target.coll.clone());
+                let s = &mut self.tabs[self.cur].schema;
+                (s.vloaded, s.vreq) = (true, req);
+                self.worker.command(target.client, target.db, doc! { "listCollections": 1, "filter": { "name": coll } }, &format!("validator:{req}"));
+            }
+        }
         for (path, what) in acts {
             match what {
                 0 => {
@@ -7221,10 +7292,11 @@ impl App {
             }
             return;
         }
-        let Some((_, target)) = self.writable_target() else { return };
+        let Some((conn, target)) = self.writable_target() else { return };
         match action {
             Danger::DeleteMatching(f) => self.worker.delete_many(target, f),
             Danger::DropIndex(name) => self.worker.drop_index(target, name),
+            Danger::Validator(cmd) => self.worker.db_change(conn, target.client, target.db, cmd, "Validator updated".into()),
             Danger::DropCollection => {
                 let s = self.t().unwrap().sel.clone();
                 if let Some(d) = self.conns.iter_mut().find(|c| c.meta.id == s.conn).and_then(|c| c.dbs.iter_mut().find(|d| d.0 == s.db)) {
