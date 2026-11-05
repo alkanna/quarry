@@ -186,14 +186,36 @@ fn family_version(family: &str, v: &str) -> Option<u32> {
     v.parse().ok()
 }
 
-/// Downloads the MongoDB Database Tools into `dir`, checking the archive against the feed's
-/// SHA-256, and returns the installed version.
-pub fn install_db_tools(dir: &Path) -> Result<String, String> {
-    use sha2::Digest;
+/// The newest Database Tools build for this system, as (version, url, sha256).
+fn latest_tools() -> Result<(String, String, String), String> {
     let json = run(Command::new("curl").args(["-fsSL", "https://downloads.mongodb.org/tools/db/release.json"]))?;
     let feed: serde_json::Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
     let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
-    let (version, url, sha) = pick_tools(&feed, std::env::consts::OS, std::env::consts::ARCH, &os_release).ok_or("MongoDB publishes no Database Tools build for this system.")?;
+    pick_tools(&feed, std::env::consts::OS, std::env::consts::ARCH, &os_release).ok_or_else(|| "MongoDB publishes no Database Tools build for this system.".into())
+}
+
+/// Records which version Quarry installed, which also marks the tools as Quarry's to update.
+const TOOLS_VERSION_FILE: &str = "VERSION";
+
+/// Downloads the MongoDB Database Tools into `dir` and returns the installed version.
+pub fn install_db_tools(dir: &Path) -> Result<String, String> {
+    install_tools_build(dir, latest_tools()?)
+}
+
+/// Updates tools that Quarry installed itself to the newest build. Ok(None) when there is
+/// nothing to do, including tools installed some other way, which are never touched.
+pub fn update_db_tools(dir: &Path) -> Result<Option<String>, String> {
+    let Ok(installed) = std::fs::read_to_string(dir.join(TOOLS_VERSION_FILE)) else { return Ok(None) };
+    let latest = latest_tools()?;
+    if !newer(installed.trim(), &latest.0) {
+        return Ok(None);
+    }
+    install_tools_build(dir, latest).map(Some)
+}
+
+/// Downloads one build, checks it against the feed's SHA-256 and puts its programs in `dir`.
+fn install_tools_build(dir: &Path, (version, url, sha): (String, String, String)) -> Result<String, String> {
+    use sha2::Digest;
     let tmp = std::env::temp_dir().join(format!("quarry-tools-{version}"));
     remove(&tmp);
     let out = tmp.join("x");
@@ -215,8 +237,13 @@ pub fn install_db_tools(dir: &Path) -> Result<String, String> {
     let bin = std::fs::read_dir(&out).map_err(|e| e.to_string())?.flatten().map(|e| e.path().join("bin")).find(|p| p.is_dir()).ok_or("The Database Tools archive has no bin folder.")?;
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     for f in std::fs::read_dir(&bin).map_err(|e| e.to_string())?.flatten() {
-        std::fs::copy(f.path(), dir.join(f.file_name())).map_err(|e| e.to_string())?;
+        // Copied beside the target, then renamed over it: a rename leaves a copy that is running
+        // intact, where writing into the file in place would corrupt it.
+        let part = dir.join(format!(".{}.part", f.file_name().to_string_lossy()));
+        std::fs::copy(f.path(), &part).map_err(|e| e.to_string())?;
+        std::fs::rename(&part, dir.join(f.file_name())).map_err(|e| e.to_string())?;
     }
+    std::fs::write(dir.join(TOOLS_VERSION_FILE), &version).map_err(|e| e.to_string())?;
     remove(&tmp);
     Ok(version)
 }
@@ -321,6 +348,14 @@ mod tests {
         assert_eq!(url("linux", "x86_64", "ID=linuxmint\nID_LIKE=\"ubuntu debian\"\nVERSION_ID=\"22\"").unwrap(), "ubuntu2204-x86_64");
         assert_eq!(url("linux", "x86_64", "ID=arch").unwrap(), "ubuntu2204-x86_64");
         assert_eq!(url("freebsd", "x86_64", ""), None);
+    }
+
+    #[test]
+    fn db_tools_update_skips_foreign_installs() {
+        // Without Quarry's version file nothing is checked or replaced, so this needs no network.
+        let dir = std::env::temp_dir().join("quarry-test-no-tools");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(update_db_tools(&dir), Ok(None));
     }
 
     #[test]

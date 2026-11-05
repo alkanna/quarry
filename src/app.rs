@@ -2457,12 +2457,16 @@ impl App {
         self.update_checked = Some(std::time::Instant::now());
         self.update_note = "Checking for updates…".into();
         self.worker.blocking(|| Msg::Update(crate::update::check_and_install()));
+        // A running dump or restore keeps its program open; Windows cannot replace it then.
+        if self.tool.as_ref().is_none_or(|t| t.done.is_some()) {
+            self.worker.blocking(|| Msg::ToolsInstalled(crate::update::update_db_tools(&tools_dir())));
+        }
     }
 
     fn install_tools(&mut self) {
         if !self.tools_installing {
             self.tools_installing = true;
-            self.worker.blocking(|| Msg::ToolsInstalled(crate::update::install_db_tools(&tools_dir())));
+            self.worker.blocking(|| Msg::ToolsInstalled(crate::update::install_db_tools(&tools_dir()).map(Some)));
         }
     }
 
@@ -2838,10 +2842,13 @@ impl App {
                     Err(e) => self.update_note = format!("Last check failed: {e}"),
                 },
                 Msg::ToolsInstalled(res) => {
-                    self.tools_installing = false;
+                    // Only a click shows failures; a background update that fails stays quiet, like the app's own.
+                    let manual = std::mem::take(&mut self.tools_installing);
                     match res {
-                        Ok(v) => self.ok(format!("Installed the MongoDB Database Tools {v} in {}", tools_dir().display())),
-                        Err(e) => self.err(format!("Could not install the MongoDB Database Tools: {e}")),
+                        Ok(Some(v)) => self.ok(format!("{} the MongoDB Database Tools {v} in {}", if manual { "Installed" } else { "Updated" }, tools_dir().display())),
+                        Ok(None) => {}
+                        Err(e) if manual => self.err(format!("Could not install the MongoDB Database Tools: {e}")),
+                        Err(_) => {}
                     }
                 }
                 Msg::ToolDone(res) => {
