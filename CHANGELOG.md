@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.1](https://github.com/alkanna/quarry/compare/v0.10.0...v0.10.1) (2026-11-05)
+
+
+### Bug Fixes
+
+* consistent buttons, cards and spacing across the app ([#42](https://github.com/alkanna/quarry/issues/42)) ([921ed2f](https://github.com/alkanna/quarry/commit/921ed2f0fa8a4f83b11d237ca9208b735f7971ee))
+
 ## [0.10.0](https://github.com/alkanna/quarry/compare/v0.9.0...v0.10.0) (2026-11-05)
 
 
