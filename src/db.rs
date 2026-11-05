@@ -1365,12 +1365,101 @@ pub fn parse_pipeline(text: &str) -> Res<Vec<Document>> {
     }
 }
 
+const DAY_MS: i64 = 86_400_000;
+
+/// Days since 1970-01-01 of a proleptic Gregorian date (Howard Hinnant's algorithm).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468
+}
+
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (yoe + era * 400 + i64::from(m <= 2), m, doy - (153 * mp + 2) / 5 + 1)
+}
+
+/// `ms` moved back by whole calendar months, the day clamped so Mar 31 minus one month is Feb 28.
+fn months_back(ms: i64, months: i64) -> i64 {
+    let (y, m, d) = civil_from_days(ms.div_euclid(DAY_MS));
+    let idx = y * 12 + m - 1 - months;
+    let (y, m) = (idx.div_euclid(12), idx.rem_euclid(12) + 1);
+    let len = days_from_civil(y + i64::from(m == 12), m % 12 + 1, 1) - days_from_civil(y, m, 1);
+    days_from_civil(y, m, d.min(len)) * DAY_MS + ms.rem_euclid(DAY_MS)
+}
+
+/// Mingo-style query shortcuts, shown by autocomplete after a field's colon.
+pub const DATE_SHORTCUTS: [(&str, &str); 12] = [
+    ("#now", "this instant"),
+    ("#today", "since 00:00 UTC"),
+    ("#yesterday", "the previous UTC day"),
+    ("#thisMonth", "since the 1st, UTC"),
+    ("#thisYear", "since Jan 1, UTC"),
+    ("#lastHour", "rolling"),
+    ("#last24hours", "rolling"),
+    ("#last7days", "rolling"),
+    ("#last30days", "rolling"),
+    ("#last2months", "rolling"),
+    ("#last6months", "rolling"),
+    ("#lastYear", "rolling"),
+];
+
+/// Extended JSON for a shortcut like `today` or `last2months` (any number and unit from minutes to
+/// years), relative to `now` in epoch milliseconds. Ranges become `$gte`/`$lt` filters.
+// ponytail: days and months are UTC, add the local offset if people expect local midnight
+pub fn date_shortcut(word: &str, now: i64) -> Option<String> {
+    let date = |ms: i64| format!("{{\"$date\":{{\"$numberLong\":\"{ms}\"}}}}");
+    let gte = |ms: i64| format!("{{\"$gte\":{}}}", date(ms));
+    let day = now.div_euclid(DAY_MS);
+    let (y, m, _) = civil_from_days(day);
+    let w = word.to_ascii_lowercase();
+    match w.as_str() {
+        "now" => return Some(date(now)),
+        "today" => return Some(gte(day * DAY_MS)),
+        "yesterday" => return Some(format!("{{\"$gte\":{},\"$lt\":{}}}", date((day - 1) * DAY_MS), date(day * DAY_MS))),
+        "thismonth" => return Some(gte(days_from_civil(y, m, 1) * DAY_MS)),
+        "thisyear" => return Some(gte(days_from_civil(y, 1, 1) * DAY_MS)),
+        _ => {}
+    }
+    let rest = w.strip_prefix("last")?;
+    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+    // Capped so the date math below can never overflow.
+    let n: i64 = if digits == 0 { 1 } else { rest[..digits].parse().ok().filter(|n| *n <= 100_000)? };
+    let unit = match rest[digits..].strip_suffix('s').unwrap_or(&rest[digits..]) {
+        "minute" => 60_000,
+        "hour" => 3_600_000,
+        "day" => DAY_MS,
+        "week" => 7 * DAY_MS,
+        "month" => return Some(gte(months_back(now, n))),
+        "year" => return Some(gte(months_back(now, n * 12))),
+        _ => return None,
+    };
+    Some(gte(now - n * unit))
+}
+
 fn shell_to_ejson(src: &str) -> String {
     let mut out = String::with_capacity(src.len());
     let chars: Vec<char> = src.chars().collect();
+    let now = mongodb::bson::DateTime::now().timestamp_millis();
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
+        if c == '#' {
+            let end = (i + 1..chars.len()).find(|&k| !chars[k].is_ascii_alphanumeric()).unwrap_or(chars.len());
+            if let Some(rep) = date_shortcut(&chars[i + 1..end].iter().collect::<String>(), now) {
+                out.push_str(&rep);
+                i = end;
+                continue;
+            }
+        }
         if c == '"' || c == '\'' {
             let start = i;
             i += 1;
@@ -2544,6 +2633,26 @@ mod tests {
     }
     fn kv(v: &[(&str, i32)]) -> Vec<(String, i32)> {
         v.iter().map(|(k, d)| (k.to_string(), *d)).collect()
+    }
+
+    #[test]
+    fn date_shortcuts() {
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        assert_eq!(civil_from_days(days_from_civil(2024, 2, 29)), (2024, 2, 29));
+        let at = |y, m, d, h: i64| days_from_civil(y, m, d) * DAY_MS + h * 3_600_000;
+        let now = at(2026, 3, 31, 12);
+        let gte = |s: Option<String>| parse_value(&s.unwrap()).unwrap().as_document().unwrap().get_datetime("$gte").unwrap().timestamp_millis();
+        assert_eq!(gte(date_shortcut("last2months", now)), at(2026, 1, 31, 12));
+        assert_eq!(gte(date_shortcut("lastMonth", now)), at(2026, 2, 28, 12));
+        assert_eq!(gte(date_shortcut("lastYear", now)), at(2025, 3, 31, 12));
+        assert_eq!(gte(date_shortcut("last7days", now)), at(2026, 3, 24, 12));
+        assert_eq!(gte(date_shortcut("today", now)), at(2026, 3, 31, 0));
+        assert_eq!(gte(date_shortcut("thisYear", now)), at(2026, 1, 1, 0));
+        assert!(date_shortcut("last2fortnights", now).is_none());
+        assert!(date_shortcut("last999999999999days", now).is_none());
+        let q = parse_doc("{ at: #yesterday, tag: \"#today\" }").unwrap();
+        assert!(q.get_document("at").unwrap().contains_key("$lt"));
+        assert_eq!(q.get_str("tag").unwrap(), "#today");
     }
 
     #[test]

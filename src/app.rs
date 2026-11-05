@@ -438,8 +438,9 @@ fn suggest(before: &str, kind: FieldKind, paths: &[String]) -> Option<(usize, Ve
             (false, paths.iter().map(field).collect())
         }
     } else if lead.ends_with(':') {
+        let query_vals: Vec<(&str, &'static str)> = [("ObjectId(\"\")", "objectId"), ("ISODate(\"\")", "date"), ("true", "bool"), ("false", "bool"), ("null", "null")].into_iter().chain(db::DATE_SHORTCUTS).collect();
         let vals: &[(&str, &'static str)] = match kind {
-            FieldKind::Query => &[("ObjectId(\"\")", "objectId"), ("ISODate(\"\")", "date"), ("true", "bool"), ("false", "bool"), ("null", "null")],
+            FieldKind::Query => &query_vals,
             FieldKind::Sort => &[("1", "ascending"), ("-1", "descending")],
             FieldKind::Project => &[("1", "include"), ("0", "exclude")],
         };
@@ -7707,6 +7708,8 @@ mod tests {
         assert!(suggest("{ ", FieldKind::Query, &paths).is_none());
         let (_, s) = suggest("{ \"cus", FieldKind::Query, &paths).unwrap();
         assert_eq!(s[0].insert, "customer");
+        let (n, s) = suggest("{ at: #last2m", FieldKind::Query, &paths).unwrap();
+        assert_eq!((n, s[0].text.as_str()), (7, "#last2months"));
     }
 
     #[test]
