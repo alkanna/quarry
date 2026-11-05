@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.9.0](https://github.com/alkanna/quarry/compare/v0.8.0...v0.9.0) (2026-11-05)
+
+
+### Features
+
+* add a setting to always allow writes and save edits without a change preview ([#29](https://github.com/alkanna/quarry/issues/29)) ([ca86ed6](https://github.com/alkanna/quarry/commit/ca86ed64758fba3a43726e7212de3d522aa82cef))
+* add date shortcuts like #last2months to queries and their autocomplete ([#30](https://github.com/alkanna/quarry/issues/30)) ([40a3967](https://github.com/alkanna/quarry/commit/40a3967f2a562d80f571271e7c77af02852b1201))
+* add expand all, collapse all and expand recursively to the document tree menu ([#28](https://github.com/alkanna/quarry/issues/28)) ([38e077b](https://github.com/alkanna/quarry/commit/38e077b68b62e01827a0c6dec1848bee371604db))
+* all date shortcuts and date autocomplete ([#33](https://github.com/alkanna/quarry/issues/33)) ([081cdbc](https://github.com/alkanna/quarry/commit/081cdbc5566a9a6dc6528b70f1a7bf768ea432d7))
+* pipeline builder with per-stage previews ([#32](https://github.com/alkanna/quarry/issues/32)) ([504e261](https://github.com/alkanna/quarry/commit/504e261aaccc4976a80d95da9772fdecd30c3396))
+* show big objects as their size in columns ([#34](https://github.com/alkanna/quarry/issues/34)) ([565c931](https://github.com/alkanna/quarry/commit/565c9314b7391fe34c26396c58c4335b06cddb8c))
+
+
+### Bug Fixes
+
+* group by and count, validator and settings scrolling ([#36](https://github.com/alkanna/quarry/issues/36)) ([3c31a76](https://github.com/alkanna/quarry/commit/3c31a76236db2b2174858af22637643b0015fc36))
+* scrolling performance ([#35](https://github.com/alkanna/quarry/issues/35)) ([61c3c16](https://github.com/alkanna/quarry/commit/61c3c16b1f77a45492fa9772d19a0c70010d6945))
+
 ## [0.8.0](https://github.com/alkanna/quarry/compare/v0.7.1...v0.8.0) (2026-11-05)
 
 
