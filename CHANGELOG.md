@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/alkanna/quarry/compare/v0.6.1...v0.7.0) (2026-11-05)
+
+
+### Features
+
+* install the MongoDB Database Tools when mongodump or mongorestore is missing ([#22](https://github.com/alkanna/quarry/issues/22)) ([17f82b9](https://github.com/alkanna/quarry/commit/17f82b9b566bff75ca073b7dd41cbc5ca028730b))
+
 ## [0.6.1](https://github.com/alkanna/quarry/compare/v0.6.0...v0.6.1) (2026-11-05)
 
 
