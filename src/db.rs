@@ -1932,6 +1932,71 @@ pub fn analyze_schema(docs: &[Document]) -> Vec<FieldStat> {
     stats
 }
 
+/// A `$jsonSchema` validator describing the analysed documents. A field is required when every
+/// sampled document has it. Children are nested only under object values, because `properties`
+/// does not constrain array elements.
+pub fn schema_from_stats(stats: &[FieldStat], sampled: usize) -> Document {
+    fn bson_type(t: &str) -> Option<&'static str> {
+        Some(match t {
+            "double" => "double",
+            "string" => "string",
+            "object" => "object",
+            "array" => "array",
+            "bool" => "bool",
+            "null" => "null",
+            "int" => "int",
+            "long" => "long",
+            "objectId" => "objectId",
+            "date" => "date",
+            "decimal" => "decimal",
+            "uuid" | "binary" => "binData",
+            "regex" => "regex",
+            "timestamp" => "timestamp",
+            _ => return None,
+        })
+    }
+    fn object(stats: &[FieldStat], prefix: &str, depth: usize, present: usize) -> Document {
+        let (mut props, mut required) = (Document::new(), Vec::new());
+        for f in stats.iter().filter(|f| f.depth == depth && f.path.strip_prefix(prefix).is_some_and(|r| !r.contains('.'))) {
+            let name = &f.path[prefix.len()..];
+            let mut types: Vec<&str> = f.types.iter().filter_map(|(t, _)| bson_type(t)).collect();
+            let all_mapped = types.len() == f.types.len();
+            types.sort_unstable();
+            types.dedup();
+            let mut schema = Document::new();
+            // An unmappable type leaves the field unconstrained rather than rejecting its documents.
+            if all_mapped {
+                match types.as_slice() {
+                    [one] => schema.insert("bsonType", *one),
+                    many => schema.insert("bsonType", many.iter().map(|t| Bson::String(t.to_string())).collect::<Vec<_>>()),
+                };
+            }
+            // When the path is also an array its children are merged from elements, so their
+            // counts say nothing about presence inside each object.
+            if f.types.iter().any(|(t, _)| *t == "object") {
+                let plain = !f.types.iter().any(|(t, _)| *t == "array");
+                schema.extend(object(stats, &format!("{}.", f.path), depth + 1, if plain { f.docs } else { 0 }));
+            }
+            if present > 0 && f.docs == present {
+                required.push(Bson::String(name.to_string()));
+            }
+            props.insert(name, schema);
+        }
+        let mut out = Document::new();
+        if !props.is_empty() {
+            out.insert("properties", props);
+        }
+        // MongoDB rejects an empty required array.
+        if !required.is_empty() {
+            out.insert("required", required);
+        }
+        out
+    }
+    let mut schema = doc! { "bsonType": "object" };
+    schema.extend(object(stats, "", 0, sampled));
+    doc! { "$jsonSchema": schema }
+}
+
 // ---------- import ----------
 
 #[derive(Clone, Copy, PartialEq, Default)]
@@ -2531,6 +2596,36 @@ mod tests {
         assert_eq!(stage_preview(&p, 2).unwrap(), vec![doc! { "$match": {} }, doc! { "$group": { "_id": 1 } }, doc! { "$limit": 20 }]);
         assert_eq!(stage_preview(&p, 0).unwrap().len(), 2);
         assert!(stage_preview(&p, 3).is_none());
+    }
+
+    fn stat(path: &str, docs: usize, types: &[&'static str]) -> FieldStat {
+        FieldStat { path: path.into(), depth: path.matches('.').count(), docs, types: types.iter().map(|t| (*t, 1)).collect(), examples: Vec::new() }
+    }
+
+    #[test]
+    fn schema_from_stats_maps_types_and_required() {
+        let s = vec![stat("_id", 10, &["objectId"]), stat("age", 10, &["int", "string"]), stat("nick", 4, &["string"]), stat("tags", 10, &["array"])];
+        let js = schema_from_stats(&s, 10);
+        let js = js.get_document("$jsonSchema").unwrap();
+        let names = |a: &Vec<Bson>| a.iter().map(|b| b.as_str().unwrap().to_string()).collect::<Vec<_>>();
+        assert_eq!(names(js.get_array("required").unwrap()), ["_id", "age", "tags"]);
+        let p = js.get_document("properties").unwrap();
+        assert_eq!(names(p.get_document("age").unwrap().get_array("bsonType").unwrap()), ["int", "string"]);
+        assert_eq!(p.get_document("tags").unwrap().get_str("bsonType").unwrap(), "array");
+        assert_eq!(p.get_document("nick").unwrap().get_str("bsonType").unwrap(), "string");
+    }
+
+    #[test]
+    fn schema_from_stats_nests_objects_but_not_arrays() {
+        let s = vec![stat("addr", 5, &["object"]), stat("addr.city", 5, &["string"]), stat("addr.zip", 2, &["string"]), stat("list", 5, &["array"]), stat("list.x", 5, &["int"])];
+        let js = schema_from_stats(&s, 10);
+        let top = js.get_document("$jsonSchema").unwrap();
+        assert!(top.get("required").is_none());
+        let p = top.get_document("properties").unwrap();
+        let addr = p.get_document("addr").unwrap();
+        assert_eq!(addr.get_array("required").unwrap(), &vec![Bson::String("city".into())]);
+        assert!(addr.get_document("properties").unwrap().get_document("zip").is_ok());
+        assert!(p.get_document("list").unwrap().get("properties").is_none());
     }
 
     #[test]
