@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.2](https://github.com/alkanna/quarry/compare/v0.10.1...v0.10.2) (2026-11-05)
+
+
+### Bug Fixes
+
+* hover and press states on every interactive element ([#44](https://github.com/alkanna/quarry/issues/44)) ([be8bf9c](https://github.com/alkanna/quarry/commit/be8bf9caba9baaad3a6340dcc2690dfa8508a122))
+
 ## [0.10.1](https://github.com/alkanna/quarry/compare/v0.10.0...v0.10.1) (2026-11-05)
 
 
