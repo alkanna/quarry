@@ -8,13 +8,19 @@
 
 ## Features
 
-- **Browse and query**: tabs, table or JSON view, pinned and reordered columns per collection, sort from the header, query history and a saved query library. Paste `db.orders.find(...)` or `aggregate([...])` straight into the query bar.
-- **Safe editing**: every connection opens read-only. Edits are typed, staged and saved together, never overwrite a change someone else made in the meantime, and can be undone. Destructive actions ask you to type the name.
-- **Aggregate, Indexes, Schema and Import** views, plus export to JSON, CSV or TSV.
+- **Browse and query**: tabs, table or JSON view, pinned and reordered columns per collection, sort from the header, query history and a saved query library. Paste `db.orders.find(...)` or `aggregate([...])` straight into the query bar. Editors auto-close brackets and indent as you type.
+- **Jump anywhere** with the Cmd+K palette, and drive tabs, views, reload and paging from the keyboard (Cmd+/ lists the shortcuts).
+- **Safe editing**: every connection opens read-only. Edits are typed, staged and saved together, never overwrite a change someone else made in the meantime, and can be undone. Update every matching document after previewing the result.
+- **Aggregate** with a preview of the output after each stage, and **explain plans** for queries and pipelines.
+- **Copy as driver code**: turn a query or pipeline into code for the official MongoDB drivers.
+- **Indexes**: usage stats, hide and unhide, and suggestions from slow queries.
+- **Schema**: field types and presence, plus viewing, generating and applying collection validators.
+- **Import**, and export to JSON, CSV or TSV.
+- **Query log**: every command sent to the server, with its duration and errors, docked at the bottom or in its own window (Cmd+L).
 - **Shell**: JavaScript run by [Bun](https://bun.sh) with the official MongoDB driver, npm packages, autocomplete, and results shown as a table.
 - **Data relations**: shows a preview next to referenced ids and jumps to the referenced document. Relations can be found automatically.
-- **Compare and sync** two collections, **dump and restore** with the MongoDB Database Tools, and **users and roles**.
-- **SSH tunnels** (password, key file or agent) and **SOCKS5 proxies**. Secrets are kept in the macOS Keychain.
+- **Compare and sync** two collections, **dump and restore** with the MongoDB Database Tools (Quarry installs and updates them if they are missing), and **users and roles**.
+- **SSH tunnels** (password, key file or agent) and **SOCKS5 proxies**. Secrets are kept in the macOS Keychain. Quarry reconnects to the last used connection at launch.
 
 | | |
 |---|---|
@@ -27,11 +33,11 @@ Download the latest build for your system from [Releases](https://github.com/alk
 
 The macOS app is not notarized, so after unzipping it into Applications, run `xattr -dr com.apple.quarantine /Applications/Quarry.app` once.
 
-Quarry then updates itself: it checks for new releases shortly after launch and once a day, installs them in the background, and restarts once you have been idle for a minute with nothing unsaved. You can turn this off in Settings.
+Quarry then updates itself: it checks for new releases shortly after launch and once a day, installs them in the background, and restarts once you have been idle for a minute with nothing unsaved. It shows what's new after an update. You can turn updates off in Settings.
 
 ## Build
 
-Needs Rust (stable). The Shell needs [Bun](https://bun.sh), and dump/restore needs the [MongoDB Database Tools](https://www.mongodb.com/docs/database-tools/) (`brew install mongodb-database-tools`). Quarry finds both automatically, or you can set their paths in Settings.
+Needs Rust (stable). The Shell needs [Bun](https://bun.sh), and dump/restore needs the [MongoDB Database Tools](https://www.mongodb.com/docs/database-tools/), which Quarry can install for you. Quarry finds both automatically, or you can set their paths in Settings.
 
 ```sh
 cargo run --release      # run it
