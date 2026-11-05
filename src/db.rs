@@ -78,6 +78,8 @@ pub enum Msg {
     Aggregated { req: u64, res: Res<(Vec<Document>, u128)> },
     /// The server's explain output for a query or pipeline.
     Explained { req: u64, res: Res<Document> },
+    /// Up to 5 matching documents as (before, after) the given update stages, and the total match count.
+    UpdatePreview { stages: Vec<Document>, res: Res<(Vec<(Document, Document)>, u64)> },
     /// A write finished. `undo` is filled when the write can be reverted.
     Written { res: Res<String>, undo: Option<UndoAction>, reload: bool },
     /// A staged document edit was written (or refused); `tag` names the draft.
@@ -761,6 +763,33 @@ impl Worker {
         });
     }
 
+    /// Runs the real update stages on a sample, so the preview cannot differ from the write.
+    pub fn update_preview(&self, t: Target, filter: Document, stages: Vec<Document>) {
+        self.spawn(async move {
+            let res = async {
+                let before: Vec<Document> = t.c().aggregate(vec![doc! { "$match": &filter }, doc! { "$limit": 5 }]).max_time(t.timeout).await.map_err(e)?.try_collect().await.map_err(e)?;
+                // The same documents by _id, so each pair is one document even if others change meanwhile.
+                let ids: Vec<Bson> = before.iter().filter_map(|d| d.get("_id").cloned()).collect();
+                let after_pipe = std::iter::once(doc! { "$match": { "_id": { "$in": ids } } }).chain(stages.iter().cloned()).collect::<Vec<_>>();
+                let mut after: std::collections::HashMap<String, Document> = t.c().aggregate(after_pipe).max_time(t.timeout).await.map_err(e)?.try_collect::<Vec<_>>().await.map_err(e)?.into_iter().map(|d| (d.get("_id").map(compact).unwrap_or_default(), d)).collect();
+                let pairs = before.into_iter().filter_map(|b| after.remove(&b.get("_id").map(compact).unwrap_or_default()).map(|a| (b, a))).collect();
+                let n = t.c().count_documents(filter).max_time(t.timeout).await.map_err(e)?;
+                Ok((pairs, n))
+            }
+            .await;
+            Msg::UpdatePreview { stages, res }
+        });
+    }
+
+    pub fn update_many(&self, t: Target, filter: Document, stages: Vec<Document>) {
+        self.write(async move {
+            match t.c().update_many(filter, stages).await {
+                Ok(r) => (Ok(format!("Updated {} documents", r.modified_count)), None),
+                Err(err) => (Err(e(err)), None),
+            }
+        });
+    }
+
     pub fn rename_many(&self, t: Target, filter: Document, from: String, to: String) {
         self.write(async move {
             match t.c().update_many(filter, doc! { "$rename": { &from: &to } }).await {
@@ -1388,6 +1417,19 @@ pub fn diff(old: &Document, new: &Document) -> Vec<(String, Option<Bson>, Option
     let mut out = Vec::new();
     walk("", old, new, &mut out);
     out
+}
+
+/// Pipeline-form update stages. `$unset` takes an array of paths, which every server with
+/// pipeline updates accepts.
+pub fn update_stages(set: Document, unset: Vec<String>) -> Vec<Document> {
+    let mut v = Vec::new();
+    if !set.is_empty() {
+        v.push(doc! { "$set": set });
+    }
+    if !unset.is_empty() {
+        v.push(doc! { "$unset": unset });
+    }
+    v
 }
 
 pub fn has_write_stage(p: &[Document]) -> bool {
@@ -2285,6 +2327,14 @@ mod tests {
         let t = to_table(&[doc! { "a": "x,\"y\"" }, doc! { "b": false }], ',');
         assert_eq!(t, "a,b\n\"x,\"\"y\"\"\",\n,false");
         assert_eq!(mask_uri("mongodb://u:secret@h:27017/db"), "mongodb://u:****@h:27017/db");
+    }
+
+    #[test]
+    fn update_stage_building() {
+        let st = update_stages(doc! { "a.b": 1 }, vec!["x".into(), "y.z".into()]);
+        assert_eq!(st, vec![doc! { "$set": { "a.b": 1 } }, doc! { "$unset": ["x", "y.z"] }]);
+        assert_eq!(update_stages(Document::new(), vec!["x".into()]), vec![doc! { "$unset": ["x"] }]);
+        assert!(update_stages(Document::new(), vec![]).is_empty());
     }
 
     #[test]
