@@ -1739,7 +1739,6 @@ enum TreeAct {
     Remove(Vec<String>),
     AddField(Vec<String>),
     CommitNew,
-    Locked,
     ShowFull(String, Bson),
     PinColumn(String),
     Highlight(String),
@@ -1749,6 +1748,7 @@ enum TreeAct {
     Index(String),
     Rename(Vec<String>),
     GoRef(String, Bson),
+    EditDoc,
 }
 
 #[derive(Clone, Copy)]
@@ -1967,6 +1967,9 @@ fn field_menu(ui: &mut egui::Ui, path: &[String], v: &Bson, editable: bool, acts
     }
     if editable && !is_id && ui.button("Edit value…").clicked() {
         acts.push(TreeAct::Start(path.to_vec(), v.clone()));
+    }
+    if editable && ui.button("Edit full document as JSON…").clicked() {
+        acts.push(TreeAct::EditDoc);
     }
     if !is_id && matches!(v, Bson::ObjectId(_) | Bson::String(_)) && ui.button("Go to referenced document").on_hover_text("Opens the document whose _id is this value; the collection is found automatically the first time").clicked() {
         acts.push(TreeAct::GoRef(p.clone(), v.clone()));
@@ -5603,13 +5606,19 @@ impl App {
                             } else if cr.clicked() {
                                 click = Some(i);
                             }
+                            let mut acts = Vec::new();
                             if let Some(v) = v {
                                 let path: Vec<String> = c.split('.').map(String::from).collect();
-                                let mut acts = Vec::new();
                                 cr.context_menu(|ui| field_menu(ui, &path, v, !agg, &mut acts));
-                                if !acts.is_empty() {
-                                    cell_acts.push((i, acts));
-                                }
+                            } else if !agg {
+                                cr.context_menu(|ui| {
+                                    if ui.button("Edit full document as JSON…").clicked() {
+                                        acts.push(TreeAct::EditDoc);
+                                    }
+                                });
+                            }
+                            if !acts.is_empty() {
+                                cell_acts.push((i, acts));
                             }
                             x += w;
                         }
@@ -5750,12 +5759,7 @@ impl App {
             ui.add_space(8.0);
             if !from_agg {
                 if ui.small_button("Edit JSON").clicked() {
-                    if self.sel_writable() {
-                        self.inline = None;
-                        self.json_edit = Some(JsonEdit { base: d.clone(), path: Vec::new(), text: db::to_edit_json(d), kind: "object", focus: true });
-                    } else {
-                        acts.push(TreeAct::Locked);
-                    }
+                    acts.push(TreeAct::EditDoc);
                 }
                 if ui.small_button("+ Add field").clicked() {
                     acts.push(TreeAct::AddField(Vec::new()));
@@ -5893,7 +5897,15 @@ impl App {
                         self.stage(d, new);
                     }
                 }
-                TreeAct::Locked => self.ask_unlock(),
+                TreeAct::EditDoc => {
+                    if self.sel_writable() {
+                        self.inline = None;
+                        self.json_edit = Some(JsonEdit { base: d.clone(), path: Vec::new(), text: db::to_edit_json(d), kind: "object", focus: true });
+                    } else {
+                        let d = d.clone();
+                        self.ask_unlock_then(move |a| a.handle_acts(&d, vec![TreeAct::EditDoc]));
+                    }
+                }
                 TreeAct::ShowFull(path, v) => {
                     let body = match &v {
                         Bson::String(s) => s.clone(),
