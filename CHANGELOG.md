@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.10.0](https://github.com/alkanna/quarry/compare/v0.9.0...v0.10.0) (2026-11-05)
+
+
+### Features
+
+* Cmd+F find in big text areas ([#37](https://github.com/alkanna/quarry/issues/37)) ([67d6b56](https://github.com/alkanna/quarry/commit/67d6b56ff83355a6448f02075c98174135198e2d))
+* edit full document as JSON from the row menu ([#40](https://github.com/alkanna/quarry/issues/40)) ([afde42f](https://github.com/alkanna/quarry/commit/afde42f71ae86a02fdebfd74655d72a5ed3e8a33))
+* light and dark themes ([#41](https://github.com/alkanna/quarry/issues/41)) ([c88157e](https://github.com/alkanna/quarry/commit/c88157eb9074cc6945473997b15b8ea970e51942))
+
+
+### Bug Fixes
+
+* rerun the edit after allowing writes ([#38](https://github.com/alkanna/quarry/issues/38)) ([fdf6422](https://github.com/alkanna/quarry/commit/fdf642236cb4a69151dd71556b3a397da42ceedd))
+
 ## [0.9.0](https://github.com/alkanna/quarry/compare/v0.8.0...v0.9.0) (2026-11-05)
 
 
