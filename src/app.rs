@@ -1652,7 +1652,7 @@ fn query_script(coll: &str, filter: &str) -> String {
     format!("async function run() {{\n\treturn await {}.find({f})\n}}", collection_ref(coll))
 }
 
-fn collection_ref(coll: &str) -> String {
+pub(crate) fn collection_ref(coll: &str) -> String {
     if coll.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') && !coll.starts_with(|c: char| c.is_ascii_digit()) {
         coll.to_string()
     } else {
@@ -1722,6 +1722,17 @@ fn shell_help(ui: &mut egui::Ui, coll: &str, writable: bool) -> Option<String> {
         ui.hyperlink_to("MongoDB Node.js driver reference", "https://www.mongodb.com/docs/drivers/node/current/");
     });
     pick
+}
+
+fn code_menu(ui: &mut egui::Ui, pick: &mut Option<db::Lang>) {
+    ui.menu_button("Copy as code", |ui| {
+        for l in db::Lang::ALL {
+            if ui.button(l.name()).clicked() {
+                *pick = Some(l);
+                ui.close();
+            }
+        }
+    });
 }
 
 fn default_script(coll: &str) -> String {
@@ -2240,6 +2251,29 @@ impl App {
                 t.page = 0;
                 self.reload();
             }
+            Err(e) => self.err(e),
+        }
+    }
+
+    /// Opens the current query or pipeline as a snippet for one language.
+    fn show_code(&mut self, lang: db::Lang, find: bool) {
+        let Some(t) = self.t() else { return };
+        let from_shell = |s: &str| db::parse_shell(s).map(|sh| match sh.kind {
+            db::ShellKind::Find(q) => db::CodeOf::Find(q),
+            db::ShellKind::Aggregate(p) => db::CodeOf::Aggregate(p),
+        });
+        let opt = |s: &str, what: &str| if s.trim().is_empty() { Ok(None) } else { db::parse_doc(s).map(Some).map_err(|e| format!("{what}: {e}")) };
+        let what = if find && !db::is_shell(&t.filter_txt) {
+            (|| Ok(db::CodeOf::Find(Query { filter: db::parse_doc(&t.filter_txt).map_err(|e| format!("Filter: {e}"))?, sort: opt(&t.sort_txt, "Sort")?, projection: opt(&t.proj_txt, "Projection")?, ..Default::default() })))()
+        } else if find {
+            from_shell(&t.filter_txt)
+        } else if db::is_shell(&t.agg_txt) {
+            from_shell(&t.agg_txt)
+        } else {
+            db::parse_pipeline(&t.agg_txt).map(db::CodeOf::Aggregate)
+        };
+        match what {
+            Ok(w) => self.modal = Some(Modal::Text { title: format!("{} code", lang.name()), body: db::driver_code(lang, &t.sel.db, &t.sel.coll, &w), code: false }),
             Err(e) => self.err(e),
         }
     }
@@ -4234,6 +4268,7 @@ impl App {
     fn documents(&mut self, ui: &mut egui::Ui) {
         let mut run = false;
         let mut explain = false;
+        let mut code_lang = None;
         let key = self.col_key(false);
         let hist = self.prefs.history.get(&key).cloned().unwrap_or_default();
         let index_sorts: Vec<String> = self.t().map(|t| t.indexes.iter().filter_map(|ix| ix.get_document("keys").ok()).map(|k| db::shell_text(&Bson::Document(k.clone()))).collect()).unwrap_or_default();
@@ -4243,12 +4278,13 @@ impl App {
         let paths = std::mem::take(&mut t.paths);
         egui::Frame::new().fill(PANEL).corner_radius(8).inner_margin(10).show(ui, |ui| {
             ui.horizontal_top(|ui| {
-                let w = ui.available_width() - 290.0;
+                let w = ui.available_width() - 490.0;
                 run |= Self::query_field(ui, "QUERY", &mut t.filter_txt, "{ field: value }   or paste db.coll.find(...) / db.coll.aggregate([...])", w, FieldKind::Query, &paths, ac);
                 if primary(ui, "  Find  ", PRIMARY).on_hover_text("Enter").clicked() {
                     run = true;
                 }
                 explain |= ui.button("Explain").on_hover_text("Cmd+E").clicked();
+                code_menu(ui, &mut code_lang);
                 history_menu(ui, &hist, &index_sorts, &mut qacts);
                 library_menu(ui, &lib, new_lib, false, &mut qacts);
             });
@@ -4284,6 +4320,9 @@ impl App {
         }
         if explain {
             self.explain();
+        }
+        if let Some(l) = code_lang {
+            self.show_code(l, true);
         }
         ui.add_space(6.0);
         let t = self.t().unwrap();
@@ -5510,6 +5549,7 @@ impl App {
         let key = self.col_key(false);
         let agg_lib: Vec<SavedQuery> = self.prefs.library.get(&key).map(|v| v.iter().filter(|q| q.pipeline.is_some()).cloned().collect()).unwrap_or_default();
         let mut agg_acts = Vec::new();
+        let mut code_lang = None;
         let mut agg_new = std::mem::take(&mut self.new_lib);
         let mut stage = None;
         let t = self.tm().unwrap();
@@ -5530,6 +5570,7 @@ impl App {
             ui.horizontal(|ui| {
                 run = primary(ui, "Run", PRIMARY).on_hover_text("Cmd+Enter").clicked() || ui.input(|i| i.modifiers.command && i.key_pressed(Key::Enter));
                 explain = ui.button("Explain").on_hover_text("Cmd+E").clicked();
+                code_menu(ui, &mut code_lang);
                 if let Some(ms) = t.agg_ms {
                     let from = t.agg_stage.map_or(String::new(), |i| format!("Output after stage {}  ", i + 1));
                     ui.label(RichText::new(format!("{from}{} results  {} ms  (first 1000 shown)", t.agg_docs.len(), ms)).color(MUTED));
@@ -5547,6 +5588,9 @@ impl App {
             }
         });
         self.new_lib = agg_new;
+        if let Some(l) = code_lang {
+            self.show_code(l, false);
+        }
         for a in agg_acts {
             match a {
                 QAct::Load(q) => {
