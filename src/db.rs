@@ -105,6 +105,8 @@ pub enum Msg {
     ToolDone(Res<String>),
     /// Update check: Some(version) once a newer version is installed.
     Update(Res<Option<String>>),
+    /// The MongoDB Database Tools finished installing, with their version.
+    ToolsInstalled(Res<String>),
 }
 
 /// Two collections compared by `_id`.

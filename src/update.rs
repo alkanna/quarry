@@ -119,6 +119,108 @@ pub fn check_and_install() -> Result<Option<String>, String> {
     Ok(Some(tag.trim_start_matches('v').to_string()))
 }
 
+/// The MongoDB Database Tools build for this system in the official feed's latest release, as
+/// (version, url, sha256). Linux builds are per distribution, so /etc/os-release picks the newest
+/// build of its family not newer than the system; unknown distributions get Ubuntu 22.04's.
+pub fn pick_tools(feed: &serde_json::Value, os: &str, arch: &str, os_release: &str) -> Option<(String, String, String)> {
+    let latest = &feed["versions"][0];
+    // The feed calls 64-bit ARM "arm64" on macOS and Ubuntu and "aarch64" elsewhere. Windows on
+    // ARM has no build and runs the x86_64 one under emulation.
+    let arches: &[&str] = match (os, arch) {
+        ("windows", _) => &["x86_64"],
+        (_, "aarch64") => &["arm64", "aarch64"],
+        _ => &["x86_64"],
+    };
+    let downloads: Vec<&serde_json::Value> = latest["downloads"].as_array()?.iter().filter(|d| arches.contains(&d["arch"].as_str().unwrap_or(""))).collect();
+    let name = match os {
+        "macos" | "windows" => os.to_string(),
+        "linux" => {
+            let (family, ours) = linux_family(os_release);
+            downloads
+                .iter()
+                .filter_map(|d| d["name"].as_str())
+                .filter_map(|n| n.strip_prefix(family).and_then(|v| family_version(family, v)).map(|v| (v, n)))
+                .filter(|(v, _)| *v <= ours)
+                .max()?
+                .1
+                .to_string()
+        }
+        _ => return None,
+    };
+    let d = downloads.iter().find(|d| d["name"] == name.as_str())?;
+    Some((latest["version"].as_str()?.into(), d["archive"]["url"].as_str()?.into(), d["archive"]["sha256"].as_str()?.into()))
+}
+
+/// The feed family of a Linux system and its version on that family's scale.
+fn linux_family(os_release: &str) -> (&'static str, u32) {
+    let field = |k: &str| os_release.lines().find_map(|l| l.strip_prefix(k)?.strip_prefix('=')).map(|v| v.trim().trim_matches('"').to_lowercase()).unwrap_or_default();
+    let (id, like, ver) = (field("ID"), field("ID_LIKE"), field("VERSION_ID"));
+    let is = |f: &str| id == f || like.split_whitespace().any(|x| x == f);
+    let num = |family| family_version(family, &ver.replace('.', ""));
+    if id == "ubuntu" {
+        ("ubuntu", num("ubuntu").unwrap_or(2204))
+    } else if id == "debian" {
+        ("debian", ver.split('.').next().and_then(|v| v.parse().ok()).unwrap_or(12))
+    } else if id == "amzn" {
+        ("amazon", ver.parse().unwrap_or(2023))
+    } else if is("rhel") || is("fedora") || is("centos") {
+        // Fedora is ahead of every RHEL, so it takes the newest RHEL build.
+        ("rhel", if id == "fedora" { u32::MAX } else { num("rhel").unwrap_or(9) })
+    } else if is("suse") || id.starts_with("opensuse") || id == "sles" {
+        ("suse", ver.split('.').next().and_then(|v| v.parse().ok()).unwrap_or(15))
+    } else {
+        // Ubuntu derivatives (Mint, Pop!_OS) number their releases differently, so they take an LTS.
+        ("ubuntu", 2204)
+    }
+}
+
+/// A feed name's version within its family, comparable with `linux_family`'s. RHEL names pack
+/// major and minor ("rhel88", "rhel93") except from 10 on ("rhel10"), so only the major counts.
+fn family_version(family: &str, v: &str) -> Option<u32> {
+    if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    if family == "rhel" {
+        return if v.starts_with("1") && v.len() >= 2 { v[..2].parse().ok() } else { v[..1].parse().ok() };
+    }
+    v.parse().ok()
+}
+
+/// Downloads the MongoDB Database Tools into `dir`, checking the archive against the feed's
+/// SHA-256, and returns the installed version.
+pub fn install_db_tools(dir: &Path) -> Result<String, String> {
+    use sha2::Digest;
+    let json = run(Command::new("curl").args(["-fsSL", "https://downloads.mongodb.org/tools/db/release.json"]))?;
+    let feed: serde_json::Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+    let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+    let (version, url, sha) = pick_tools(&feed, std::env::consts::OS, std::env::consts::ARCH, &os_release).ok_or("MongoDB publishes no Database Tools build for this system.")?;
+    let tmp = std::env::temp_dir().join(format!("quarry-tools-{version}"));
+    remove(&tmp);
+    let out = tmp.join("x");
+    std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+    let archive = tmp.join(url.rsplit('/').next().unwrap_or("tools"));
+    run(Command::new("curl").args(["-fsSL", "-o"]).arg(&archive).arg(&url))?;
+    let bytes = std::fs::read(&archive).map_err(|e| e.to_string())?;
+    let got: String = sha2::Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+    if !got.eq_ignore_ascii_case(&sha) {
+        remove(&tmp);
+        return Err("The downloaded Database Tools do not match MongoDB's checksum; nothing was installed.".into());
+    }
+    if cfg!(target_os = "macos") {
+        run(Command::new("ditto").args(["-x", "-k"]).arg(&archive).arg(&out))?;
+    } else {
+        run(Command::new("tar").arg("-xf").arg(&archive).arg("-C").arg(&out))?;
+    }
+    // The archive holds one folder, mongodb-database-tools-<platform>-<version>, with bin/ inside.
+    let bin = std::fs::read_dir(&out).map_err(|e| e.to_string())?.flatten().map(|e| e.path().join("bin")).find(|p| p.is_dir()).ok_or("The Database Tools archive has no bin folder.")?;
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    for f in std::fs::read_dir(&bin).map_err(|e| e.to_string())?.flatten() {
+        std::fs::copy(f.path(), dir.join(f.file_name())).map_err(|e| e.to_string())?;
+    }
+    remove(&tmp);
+    Ok(version)
+}
+
 /// Moves the running copy aside (allowed even while it runs), then puts the new one in its place;
 /// on failure the old copy is put back.
 fn install(new: &Path, target: &Path) -> Result<(), String> {
@@ -193,6 +295,32 @@ mod tests {
         assert!(!newer("1.0.0", "nightly"));
         assert!(newer("1.0.0", "v1.0.1-beta"));
         assert_eq!(old_path(Path::new("/A/Quarry.app")), PathBuf::from("/A/Quarry.app.old"));
+    }
+
+    #[test]
+    fn db_tools_platform() {
+        let builds = [("macos", "arm64"), ("macos", "x86_64"), ("windows", "x86_64"), ("ubuntu2004", "x86_64"), ("ubuntu2204", "x86_64"), ("ubuntu2404", "x86_64"), ("ubuntu2204", "arm64"), ("ubuntu2404", "arm64"), ("debian11", "x86_64"), ("debian12", "x86_64"), ("rhel70", "x86_64"), ("rhel88", "x86_64"), ("rhel93", "x86_64"), ("rhel10", "x86_64"), ("rhel88", "aarch64"), ("rhel93", "aarch64"), ("amazon2", "aarch64"), ("amazon2023", "aarch64"), ("suse15", "x86_64")];
+        let downloads: Vec<_> = builds.iter().map(|(n, a)| serde_json::json!({ "name": n, "arch": a, "archive": { "url": format!("https://x/{n}-{a}"), "sha256": "ab" } })).collect();
+        let feed = serde_json::json!({ "versions": [{ "version": "100.20.1", "downloads": downloads }] });
+        let url = |os: &str, arch: &str, rel: &str| pick_tools(&feed, os, arch, rel).map(|(_, u, _)| u.trim_start_matches("https://x/").to_string());
+        assert_eq!(pick_tools(&feed, "macos", "aarch64", "").unwrap(), ("100.20.1".into(), "https://x/macos-arm64".into(), "ab".into()));
+        assert_eq!(url("macos", "x86_64", "").unwrap(), "macos-x86_64");
+        // Windows on ARM runs the x86_64 build under emulation.
+        assert_eq!(url("windows", "aarch64", "").unwrap(), "windows-x86_64");
+        assert_eq!(url("linux", "x86_64", "ID=ubuntu\nVERSION_ID=\"24.04\"").unwrap(), "ubuntu2404-x86_64");
+        // A release between builds takes the older one, whose libraries it has.
+        assert_eq!(url("linux", "x86_64", "ID=ubuntu\nVERSION_ID=\"23.10\"").unwrap(), "ubuntu2204-x86_64");
+        assert_eq!(url("linux", "aarch64", "ID=ubuntu\nVERSION_ID=\"24.04\"").unwrap(), "ubuntu2404-arm64");
+        assert_eq!(url("linux", "x86_64", "ID=debian\nVERSION_ID=\"12\"").unwrap(), "debian12-x86_64");
+        assert_eq!(url("linux", "aarch64", "ID=\"rocky\"\nID_LIKE=\"rhel centos fedora\"\nVERSION_ID=\"9.4\"").unwrap(), "rhel93-aarch64");
+        assert_eq!(url("linux", "x86_64", "ID=\"rhel\"\nVERSION_ID=\"8.10\"").unwrap(), "rhel88-x86_64");
+        assert_eq!(url("linux", "x86_64", "ID=\"rhel\"\nVERSION_ID=\"10.0\"").unwrap(), "rhel10-x86_64");
+        assert_eq!(url("linux", "x86_64", "ID=fedora\nVERSION_ID=41").unwrap(), "rhel10-x86_64");
+        assert_eq!(url("linux", "aarch64", "ID=\"amzn\"\nVERSION_ID=\"2023\"").unwrap(), "amazon2023-aarch64");
+        assert_eq!(url("linux", "x86_64", "ID=\"opensuse-leap\"\nID_LIKE=\"suse opensuse\"\nVERSION_ID=\"15.6\"").unwrap(), "suse15-x86_64");
+        assert_eq!(url("linux", "x86_64", "ID=linuxmint\nID_LIKE=\"ubuntu debian\"\nVERSION_ID=\"22\"").unwrap(), "ubuntu2204-x86_64");
+        assert_eq!(url("linux", "x86_64", "ID=arch").unwrap(), "ubuntu2204-x86_64");
+        assert_eq!(url("freebsd", "x86_64", ""), None);
     }
 
     #[test]
