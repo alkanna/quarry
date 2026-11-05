@@ -1487,6 +1487,9 @@ pub struct App {
     changed: HashSet<String>,
     inline: Option<Inline>,
     new_field: Option<NewField>,
+    /// Pending expand/collapse from the tree menu: document, path prefix, open.
+    fold: Option<(egui::Id, Vec<String>, bool)>,
+    fold_busy: bool,
     insert: Option<String>,
     /// Database hidden from the sidebar while its drop runs, to show again if the drop fails.
     dropping_db: Option<(u64, String)>,
@@ -1608,6 +1611,21 @@ fn highlighted(prefs: &UiPrefs, key: &str, path: &[String]) -> bool {
 }
 
 /// Right-click menu for one field, modelled on the original's fieldActions (renderer line 106562).
+fn fold_menu(ui: &mut egui::Ui, path: &[String], container: bool) -> Option<(Vec<String>, bool)> {
+    ui.separator();
+    let mut f = None;
+    if container && ui.button("Expand recursively").clicked() {
+        f = Some((path.to_vec(), true));
+    }
+    if ui.button("Expand all").clicked() {
+        f = Some((Vec::new(), true));
+    }
+    if ui.button("Collapse all").clicked() {
+        f = Some((Vec::new(), false));
+    }
+    f
+}
+
 fn field_menu(ui: &mut egui::Ui, path: &[String], v: &Bson, editable: bool, acts: &mut Vec<TreeAct>) {
     let p = path.join(".");
     let is_id = path.first().is_some_and(|k| k == "_id");
@@ -2012,6 +2030,8 @@ impl App {
             changed: HashSet::new(),
             inline: None,
             new_field: None,
+            fold: None,
+            fold_busy: false,
             insert: None,
             dropping_db: None,
             prefs: UiPrefs::default(),
@@ -5179,10 +5199,15 @@ impl App {
         };
         let id = egui::Id::unique(("doc", d.get("_id").map(db::compact)));
         let mut path = Vec::new();
+        self.fold_busy = false;
         for (k, v) in d {
             path.push(k.clone());
             self.tree(ui, k, v, 0, id, &mut path, !from_agg, &mut acts);
             path.pop();
+        }
+        // Nested headers only render once their parent opens, so the fold stays forced until every animation settles.
+        if !self.fold_busy && self.fold.as_ref().is_some_and(|f| f.0 == id) {
+            self.fold = None;
         }
         if self.new_field.as_ref().is_some_and(|n| n.parent.is_empty()) {
             self.new_field_row(ui, &mut acts);
@@ -5403,10 +5428,11 @@ impl App {
                 job.append(key, 0.0, mono(BRIGHT));
                 job.append(&format!("  {}", leaf_text(v)), 0.0, mono(FAINT));
                 let adding_here = self.new_field.as_ref().is_some_and(|n| n.parent == *path);
+                let forced = self.fold.as_ref().filter(|f| f.0 == id && path.starts_with(&f.1)).map(|f| f.2);
                 let r = egui::CollapsingHeader::new(job)
                     .id_salt(id.with(&*path))
                     .default_open(depth < 1)
-                    .open(adding_here.then_some(true))
+                    .open(adding_here.then_some(true).or(forced))
                     .show(ui, |ui| {
                         for (k, child) in items {
                             path.push(k.clone());
@@ -5423,11 +5449,22 @@ impl App {
                 if editable && r.header_response.double_clicked() && path.first().is_some_and(|k| k != "_id") {
                     acts.push(TreeAct::Start(path.clone(), v.clone()));
                 }
+                if forced.is_some_and(|o| r.openness != if o { 1.0 } else { 0.0 }) {
+                    self.fold_busy = true;
+                }
                 let p = path.clone();
-                r.header_response.on_hover_text("Double-click to edit as JSON, right-click for more").context_menu(|ui| field_menu(ui, &p, v, editable, acts));
+                let mut fold = None;
+                r.header_response.on_hover_text("Double-click to edit as JSON, right-click for more").context_menu(|ui| {
+                    field_menu(ui, &p, v, editable, acts);
+                    fold = fold_menu(ui, &p, true);
+                });
+                if let Some((p, open)) = fold {
+                    self.fold = Some((id, p, open));
+                }
             }
             leaf => {
                 let hl = highlighted(&self.prefs, &self.col_key(false), path);
+                let mut fold = None;
                 let edited = !self.changed.is_empty() && self.changed.contains(&path.join("."));
                 egui::Frame::new().fill(if edited { Color32::from_rgba_unmultiplied(247, 208, 110, 34) } else if hl { HIGHLIGHT } else { Color32::TRANSPARENT }).corner_radius(4).show(ui, |ui| ui.horizontal(|ui| {
                     ui.add_space(16.0);
@@ -5466,9 +5503,15 @@ impl App {
                             r
                         };
                         let p = path.clone();
-                        r.union(key_r).context_menu(|ui| field_menu(ui, &p, leaf, editable, acts));
+                        r.union(key_r).context_menu(|ui| {
+                            field_menu(ui, &p, leaf, editable, acts);
+                            fold = fold_menu(ui, &p, false);
+                        });
                     }
                 }));
+                if let Some((p, open)) = fold {
+                    self.fold = Some((id, p, open));
+                }
             }
         }
     }
