@@ -823,6 +823,30 @@ struct Sel {
     coll: String,
 }
 
+/// Shortcuts listed by Cmd+/. Cmd is Ctrl on Linux and Windows.
+const SHORTCUTS: [(&str, &str); 20] = [
+    ("Cmd+K, Cmd+T", "Jump to a connection, database or collection"),
+    ("Cmd+R", "Reload the current tab"),
+    ("Cmd+Shift+R", "Refresh the connection's databases"),
+    ("Cmd+W", "Close the tab"),
+    ("Cmd+Shift+T", "Reopen the last closed tab"),
+    ("Cmd+1 to Cmd+8", "Go to that tab"),
+    ("Cmd+9", "Go to the last tab"),
+    ("Ctrl+Tab, Cmd+Shift+]", "Next tab"),
+    ("Ctrl+Shift+Tab, Cmd+Shift+[", "Previous tab"),
+    ("Cmd+Alt+1 to Cmd+Alt+7", "Documents, Aggregate, Indexes, Schema, Import, Compare, Shell"),
+    ("Cmd+F", "Focus the query"),
+    ("Cmd+Shift+F", "Find a collection in the sidebar"),
+    ("Up, Down", "Select the previous or next document"),
+    ("PageUp, PageDown", "Previous or next page"),
+    ("Enter", "Run the query"),
+    ("Cmd+Enter", "Run the pipeline or script"),
+    ("Esc", "Close or deselect"),
+    ("Cmd+,", "Settings"),
+    ("Cmd+N", "New connection"),
+    ("Cmd+/", "This list"),
+];
+
 /// Where the Cmd+K palette can jump to.
 #[derive(Clone)]
 enum Jump {
@@ -1443,6 +1467,8 @@ pub struct App {
     tree_filter: String,
     /// Tree row the palette jumped to, as (connection, database, collection), scrolled into view once drawn.
     reveal: Option<(u64, String, Option<String>)>,
+    /// Scroll the selected document row into view on its next draw, after keyboard selection.
+    scroll_sel: bool,
     demo: bool,
     tool: Option<ToolRun>,
     /// Recently closed tabs, newest first.
@@ -1911,6 +1937,7 @@ impl App {
             status_at: std::time::Instant::now(),
             tree_filter: String::new(),
             reveal: None,
+            scroll_sel: false,
             demo,
             tool: None,
             closed: Vec::new(),
@@ -3111,14 +3138,90 @@ impl App {
         if self.modal.is_some() || self.insert.is_some() || self.json_edit.is_some() || self.users.is_some() {
             return;
         }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, Key::T)) {
+        let k = |m: egui::Modifiers, key: Key| ctx.input_mut(|i| i.consume_key(m, key));
+        let (none, cmd, shift, ctrl, alt) = (egui::Modifiers::NONE, egui::Modifiers::COMMAND, egui::Modifiers::SHIFT, egui::Modifiers::CTRL, egui::Modifiers::ALT);
+        // Extra Shift and Alt still match a plain Cmd shortcut, so the longer combos go first.
+        if k(cmd | shift, Key::T) {
             self.reopen_tab();
         }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::W)) {
+        if k(cmd, Key::W) {
             self.close_tab(self.cur);
         }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::K)) {
+        if k(cmd, Key::K) || k(cmd, Key::T) {
             self.modal = Some(Modal::Palette { query: String::new(), sel: 0 });
+        }
+        if k(cmd | shift, Key::R) {
+            if let Some(id) = self.active.filter(|_| !self.demo) {
+                self.connect(id);
+            }
+        }
+        if k(cmd, Key::R) && !self.tabs.is_empty() {
+            self.reload();
+        }
+        if k(cmd | shift, Key::F) {
+            ctx.memory_mut(|m| m.request_focus(egui::Id::unique("tree-filter")));
+        }
+        if k(cmd, Key::F) && !self.tabs.is_empty() {
+            self.set_view(View::Documents);
+            ctx.memory_mut(|m| m.request_focus(egui::Id::unique(("query", "QUERY"))));
+        }
+        if k(cmd, Key::Comma) {
+            self.modal = Some(Modal::Settings);
+        }
+        if k(cmd, Key::N) {
+            self.new_conn_modal();
+        }
+        if k(cmd, Key::Slash) {
+            let body = SHORTCUTS.iter().map(|(keys, what)| format!("{keys:<30}{what}")).collect::<Vec<_>>().join("\n");
+            self.modal = Some(Modal::Text { title: "Keyboard shortcuts".into(), body, code: false });
+        }
+        let n = self.tabs.len();
+        if n > 0 {
+            if k(ctrl | shift, Key::Tab) || k(cmd | shift, Key::OpenBracket) || k(cmd | shift, Key::OpenCurlyBracket) {
+                self.go_tab((self.cur + n - 1) % n);
+            }
+            if k(ctrl, Key::Tab) || k(cmd | shift, Key::CloseBracket) || k(cmd | shift, Key::CloseCurlyBracket) {
+                self.go_tab((self.cur + 1) % n);
+            }
+            const DIGITS: [Key; 9] = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
+            const VIEWS: [View; 7] = [View::Documents, View::Aggregate, View::Indexes, View::Schema, View::Import, View::Compare, View::Shell];
+            for (d, v) in DIGITS.iter().zip(VIEWS) {
+                if k(cmd | alt, *d) {
+                    self.set_view(v);
+                }
+            }
+            for (i, d) in DIGITS.iter().enumerate() {
+                if k(cmd, *d) {
+                    self.go_tab(if i == 8 { n - 1 } else { i.min(n - 1) });
+                }
+            }
+        }
+        // Plain keys only act when no text field or menu wants them.
+        if ctx.memory(|m| m.focused().is_none()) && !ctx.any_popup_open() {
+            let (up, down) = (k(none, Key::ArrowUp), k(none, Key::ArrowDown));
+            let (prev, next) = (k(none, Key::PageUp), k(none, Key::PageDown));
+            let nav = self.t().filter(|t| matches!(t.view, View::Documents | View::Aggregate)).map(|t| {
+                let agg = t.view == View::Aggregate;
+                let len = if agg { t.agg_docs.len() } else { t.docs.len() };
+                let row = ((up || down) && len > 0).then(|| match t.selected.filter(|s| s.0 == agg) {
+                    None => 0,
+                    Some((_, i)) if down => (i + 1).min(len - 1),
+                    Some((_, i)) => i.saturating_sub(1),
+                });
+                let (page, pages) = (t.page, t.count.div_ceil(PAGE_SIZE).max(1));
+                let go = if agg { None } else if prev && page > 0 { Some(page - 1) } else if next && page + 1 < pages { Some(page + 1) } else { None };
+                (agg, row, go)
+            });
+            if let Some((agg, row, go)) = nav {
+                if let Some(i) = row {
+                    self.select(agg, i, false);
+                    self.scroll_sel = true;
+                }
+                if let Some(p) = go {
+                    self.tm().unwrap().page = p;
+                    self.reload();
+                }
+            }
         }
         // Esc closes the innermost thing that is open. Dialogs and menus handle their own Esc.
         if ctx.any_popup_open() || !ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
@@ -3133,6 +3236,23 @@ impl App {
             }
         }
         self.tree_filter.clear();
+    }
+
+    fn go_tab(&mut self, i: usize) {
+        if i != self.cur && i < self.tabs.len() {
+            self.cur = i;
+            self.reset_doc_state();
+        }
+    }
+
+    fn set_view(&mut self, v: View) {
+        let Some(t) = self.tm().filter(|t| t.view != v) else { return };
+        t.view = v;
+        t.selected = None;
+        self.reset_doc_state();
+        if v == View::Indexes {
+            self.load_indexes();
+        }
     }
 
     /// Users of all databases with their roles, custom roles, and user actions. Writes need the
@@ -3472,7 +3592,7 @@ impl App {
                 let first = msg.lines().next().unwrap_or_default();
                 ui.add(egui::Label::new(RichText::new(first).size(12.0).color(if *is_err { ALERT } else { MUTED })).truncate()).on_hover_text(msg.as_str());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new("Cmd+K jumps  ·  Esc closes  ·  Cmd+W closes tab  ·  Enter runs  ·  double-click a value to edit").size(11.5).color(FAINT));
+                    ui.label(RichText::new("Cmd+K jumps  ·  Enter runs  ·  double-click a value to edit  ·  Cmd+/ shortcuts").size(11.5).color(FAINT));
                 });
             });
         });
@@ -3494,6 +3614,7 @@ impl App {
                 ui.add_space(10.0);
                 ui.add(
                     egui::TextEdit::singleline(&mut self.tree_filter)
+                        .id(egui::Id::unique("tree-filter"))
                         .hint_text("Find a collection")
                         .desired_width(f32::INFINITY)
                         .margin(egui::Margin::symmetric(10, 6)),
@@ -3958,10 +4079,7 @@ impl App {
         } else if let Some(i) = close {
             self.close_tab(i);
         } else if let Some(i) = pick {
-            if i != self.cur {
-                self.cur = i;
-                self.reset_doc_state();
-            }
+            self.go_tab(i);
         }
         if dup {
             let t = &self.tabs[self.cur];
@@ -3994,14 +4112,8 @@ impl App {
             ui.label(RichText::new(&coll).size(18.0).strong().color(BRIGHT));
             ui.add_space(12.0);
             for (v, label) in [(View::Documents, "Documents"), (View::Aggregate, "Aggregate"), (View::Indexes, "Indexes"), (View::Schema, "Schema"), (View::Import, "Import"), (View::Compare, "Compare"), (View::Shell, "Shell")] {
-                if ui.selectable_label(view == v, label).clicked() && view != v {
-                    let t = self.tm().unwrap();
-                    t.view = v;
-                    t.selected = None;
-                    self.reset_doc_state();
-                    if v == View::Indexes {
-                        self.load_indexes();
-                    }
+                if ui.selectable_label(view == v, label).clicked() {
+                    self.set_view(v);
                 }
             }
             if matches!(view, View::Documents | View::Aggregate) {
@@ -4036,7 +4148,7 @@ impl App {
     #[allow(clippy::too_many_arguments)]
     fn query_field(ui: &mut egui::Ui, label: &str, text: &mut String, hint: &str, width: f32, kind: FieldKind, paths: &[String], ac: &mut Ac) -> bool {
         ui.add_sized([56.0, 20.0], egui::Label::new(RichText::new(label).size(11.0).color(MUTED)));
-        let id = ui.make_persistent_id(("query", label));
+        let id = egui::Id::unique(("query", label));
         // Test switch: show the suggestion list in the demo picture.
         if ac.id.is_none() && kind == FieldKind::Query && std::env::var("QUARRY_TEST_AC").is_ok() {
             if let Some((token, items)) = suggest("{ status: { $i", kind, paths) {
@@ -4448,6 +4560,9 @@ impl App {
                     let d = drafted.as_ref().unwrap_or(d);
                     let active = selected == Some((agg, i));
                     let (rr, resp) = ui.allocate_exact_size(egui::vec2(row_w, ROW_H), Sense::click());
+                    if active && std::mem::take(&mut self.scroll_sel) {
+                        resp.scroll_to_me(None);
+                    }
                     let fill = if active {
                         Color32::from_rgba_unmultiplied(134, 201, 249, 32)
                     } else if ui.rect_contains_pointer(rr) && !ui.ctx().any_popup_open() {
@@ -4572,6 +4687,9 @@ impl App {
                     let active = selected == Some((agg, i));
                     let w = ui.available_width();
                     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, ROW_H), Sense::click());
+                    if active && std::mem::take(&mut self.scroll_sel) {
+                        resp.scroll_to_me(None);
+                    }
                     let fill = if active { Color32::from_rgba_unmultiplied(134, 201, 249, 32) } else if resp.hovered() { HOVER } else { Color32::TRANSPARENT };
                     ui.painter().rect_filled(rect, 4, fill);
                     let galley = ui.fonts_mut(|f| f.layout_job(row_job(d, w - 16.0)));
