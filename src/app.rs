@@ -751,10 +751,31 @@ fn code_layout(ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32) -> Arc<egui
     ui.fonts_mut(|f| f.layout_job(job))
 }
 
+/// A table cell. With `summarize`, an object or array whose JSON would not fit the cell shows as
+/// "{12 fields}" or "[500 items]" instead of its first characters; small ones stay in full.
+fn column_job(v: &Bson, summarize: bool) -> LayoutJob {
+    let job = cell_job(v);
+    if summarize && job.text.len() >= CELL_PREVIEW_MAX {
+        let text = match v {
+            Bson::Document(d) => format!("{{{} fields}}", d.len()),
+            Bson::Array(a) => format!("[{} items]", a.len()),
+            _ => return job,
+        };
+        let mut j = LayoutJob::default();
+        j.append(&text, 0.0, mono(C_OBJ));
+        return j;
+    }
+    job
+}
+
+/// Characters of a cell preview, the original's cut for objects and arrays
+/// (fieldTypes.object.toDisplayString, renderer line 30953: substring(0, 150)).
+const CELL_PREVIEW_MAX: usize = 150;
+
 /// A table cell as coloured text, like the original's table: strings in quotes, and objects and
 /// arrays as a short coloured preview of their contents, so nested data keeps its type colours.
 fn cell_job(v: &Bson) -> LayoutJob {
-    const MAX: usize = 160;
+    const MAX: usize = CELL_PREVIEW_MAX;
     fn push(job: &mut LayoutJob, s: &str, c: Color32) -> bool {
         let room = MAX.saturating_sub(job.text.len());
         if room == 0 {
@@ -790,6 +811,8 @@ fn cell_job(v: &Bson) -> LayoutJob {
             }
             Bson::String(s) if str_kind(s) == StrKind::Url => push(job, s, C_LINK),
             Bson::String(s) => push(job, &format!("\"{}\"", truncate_display(&s.replace('\n', " "))), color_of(v)),
+            // The original shows binary from 100 bytes as "<too long binary>" (fieldTypes.binary, 31012).
+            Bson::Binary(b) if b.bytes.len() >= 100 => push(job, &format!("BinData({} bytes)", b.bytes.len()), FAINT),
             Bson::ObjectId(o) => push(job, &o.to_hex(), C_OID),
             other => push(job, &leaf_text(other), color_of(other)),
         }
@@ -1321,6 +1344,9 @@ struct UiPrefs {
     auto_update: bool,
     /// Pipeline builder stages preview themselves after each change.
     auto_preview: bool,
+    /// Show the first characters of big objects and arrays in columns, as the original does,
+    /// instead of "{12 fields}".
+    object_preview: bool,
     /// The version that last ran, to show the changelog once after an update.
     last_version: String,
 }
@@ -1540,7 +1566,7 @@ enum QAct {
 
 impl Default for UiPrefs {
     fn default() -> Self {
-        Self { open_inline: true, table: true, confirm_save: false, auto_save: false, always_writable: false, default_cols: DEFAULT_COLS, timeout_ms: db::DEFAULT_TIMEOUT_MS, shell_runtime: String::new(), shell_histories: HashMap::new(), shell_packages: Vec::new(), history: HashMap::new(), library: HashMap::new(), open_tabs: Vec::new(), cur_tab: 0, last_conn: None, cols: HashMap::new(), relations: HashMap::new(), mongodump: String::new(), mongorestore: String::new(), auto_update: true, auto_preview: true, last_version: String::new() }
+        Self { open_inline: true, table: true, confirm_save: false, auto_save: false, always_writable: false, default_cols: DEFAULT_COLS, timeout_ms: db::DEFAULT_TIMEOUT_MS, shell_runtime: String::new(), shell_histories: HashMap::new(), shell_packages: Vec::new(), history: HashMap::new(), library: HashMap::new(), open_tabs: Vec::new(), cur_tab: 0, last_conn: None, cols: HashMap::new(), relations: HashMap::new(), mongodump: String::new(), mongorestore: String::new(), auto_update: true, auto_preview: true, object_preview: false, last_version: String::new() }
     }
 }
 
@@ -2112,7 +2138,7 @@ fn segmented<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options: &[(
 
 /// The original's "optimal" column width (measureColumnWidth, renderer line 31273): the widest
 /// cell, kept between 40 and 400 px, plus 10 px. Our cells add 16 px of inner padding on top.
-fn optimal_width(ui: &egui::Ui, docs: &[Document], col: &str) -> f32 {
+fn optimal_width(ui: &egui::Ui, docs: &[Document], col: &str, summarize: bool) -> f32 {
     if docs.is_empty() {
         return 100.0 + CELL_PAD; // the original's fallback width
     }
@@ -2120,7 +2146,7 @@ fn optimal_width(ui: &egui::Ui, docs: &[Document], col: &str) -> f32 {
         let head = f.layout_no_wrap(col.to_string(), FontId::proportional(12.5), TEXT).size().x;
         docs.iter()
             .filter_map(|d| db::get_path(d, col))
-            .map(|v| f.layout_job(cell_job(v)).size().x)
+            .map(|v| f.layout_job(column_job(v, summarize)).size().x)
             .fold(head, f32::max)
     });
     widest.clamp(OPTIMAL_MIN_W, OPTIMAL_MAX_W) + OPTIMAL_PAD + CELL_PAD
@@ -5178,7 +5204,8 @@ impl App {
         let key = self.col_key(agg);
         let prefs = self.prefs.cols.get(&key).cloned().unwrap_or_default();
         let cols = visible_cols(Some(&prefs), fields, self.prefs.default_cols);
-        let widths: Vec<f32> = cols.iter().map(|c| prefs.widths.get(c).copied().unwrap_or_else(|| optimal_width(ui, docs, c))).collect();
+        let summarize = !self.prefs.object_preview;
+        let widths: Vec<f32> = cols.iter().map(|c| prefs.widths.get(c).copied().unwrap_or_else(|| optimal_width(ui, docs, c, summarize))).collect();
         let total: f32 = NUM_W + widths.iter().sum::<f32>();
         let selected = self.t().unwrap().selected;
         let view_w = ui.available_width();
@@ -5312,7 +5339,7 @@ impl App {
                         let v = db::get_path(d, c);
                         match v {
                             Some(v) => {
-                                let g = ui.fonts_mut(|f| f.layout_job(cell_job(v)));
+                                let g = ui.fonts_mut(|f| f.layout_job(column_job(v, summarize)));
                                 let gw = g.size().x;
                                 clip.galley(egui::pos2(x + 8.0, cell.center().y - g.size().y / 2.0), g, TEXT);
                                 if let Some(p) = related.get(&db::compact(v)).filter(|_| matches!(v, Bson::ObjectId(_) | Bson::String(_))) {
@@ -7324,7 +7351,7 @@ impl App {
                     });
                     ui.label(RichText::new("Changes are saved right away.").size(12.0).color(FAINT));
                     ui.add_space(8.0);
-                    let before = (self.prefs.open_inline, self.prefs.auto_save, self.prefs.always_writable, self.prefs.confirm_save, self.prefs.default_cols, self.prefs.timeout_ms, self.prefs.shell_runtime.clone(), self.prefs.mongodump.clone(), self.prefs.mongorestore.clone(), self.prefs.auto_update);
+                    let before = (self.prefs.open_inline, self.prefs.auto_save, self.prefs.always_writable, self.prefs.confirm_save, self.prefs.default_cols, self.prefs.timeout_ms, self.prefs.shell_runtime.clone(), self.prefs.mongodump.clone(), self.prefs.mongorestore.clone(), self.prefs.auto_update, self.prefs.object_preview);
                     ui.scope(|ui| {
                         settings_section(ui, "DOCUMENTS", |ui| {
                             setting_row(ui, "Open documents", "Where a clicked row shows its document.", |ui| {
@@ -7333,6 +7360,10 @@ impl App {
                             ui.separator();
                             setting_row(ui, "Columns shown", "How many fields the table shows before you pick your own.", |ui| {
                                 stepper(ui, &mut self.prefs.default_cols, 3, 30);
+                            });
+                            ui.separator();
+                            setting_row(ui, "Big objects in columns", "Objects and arrays too long for a cell show their size, or their first characters as in Mingo. Small ones always show in full.", |ui| {
+                                segmented(ui, &mut self.prefs.object_preview, &[(false, "Size"), (true, "First characters")]);
                             });
                         });
                         settings_section(ui, "EDITING", |ui| {
@@ -7397,7 +7428,7 @@ impl App {
                             self.install_tools_button(ui);
                         }
                     });
-                    if before != (self.prefs.open_inline, self.prefs.auto_save, self.prefs.always_writable, self.prefs.confirm_save, self.prefs.default_cols, self.prefs.timeout_ms, self.prefs.shell_runtime.clone(), self.prefs.mongodump.clone(), self.prefs.mongorestore.clone(), self.prefs.auto_update) {
+                    if before != (self.prefs.open_inline, self.prefs.auto_save, self.prefs.always_writable, self.prefs.confirm_save, self.prefs.default_cols, self.prefs.timeout_ms, self.prefs.shell_runtime.clone(), self.prefs.mongodump.clone(), self.prefs.mongorestore.clone(), self.prefs.auto_update, self.prefs.object_preview) {
                         self.save_prefs();
                     }
                 }
@@ -8233,6 +8264,17 @@ mod tests {
         assert_eq!(colour_of("const"), C_KEYWORD);
         assert_eq!(colour_of("find"), C_DATE);
         assert_eq!(colour_of("// hi"), FAINT);
+    }
+
+    #[test]
+    fn big_objects_show_their_size() {
+        let small = Bson::Document(doc! { "name": "Ada", "tier": "gold" });
+        assert_eq!(column_job(&small, true).text, "{name: \"Ada\", tier: \"gold\"}");
+        let big = Bson::Document((0..40).map(|i| (format!("field{i}"), Bson::Int32(i))).collect());
+        assert_eq!(column_job(&big, true).text, "{40 fields}");
+        assert!(column_job(&big, false).text.starts_with("{field0: 0"));
+        let list = Bson::Array((0..500).map(Bson::Int32).collect());
+        assert_eq!(column_job(&list, true).text, "[500 items]");
     }
 
     #[test]
