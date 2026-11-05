@@ -2,14 +2,14 @@
 
 <h1 align="center">Quarry</h1>
 
-<p align="center">A fast, native MongoDB workbench for macOS, written in Rust with egui.<br>Built to read and edit production data safely.</p>
+<p align="center">A fast, stable and full-featured MongoDB client, written in Rust with egui.<br>Inspired by <a href="https://mingo.io">Mingo</a>.</p>
 
 ![Documents view](docs/documents.png)
 
 ## Features
 
 - **Browse and query**: tabs, table or JSON view, pinned and reordered columns per collection, sort from the header, query history and a saved query library. Paste `db.orders.find(...)` or `aggregate([...])` straight into the query bar. Editors auto-close brackets and indent as you type.
-- **Jump anywhere** with the Cmd+K palette, and drive tabs, views, reload and paging from the keyboard (Cmd+/ lists the shortcuts).
+- **Jump anywhere** with the Cmd+K palette, and drive tabs, views, reload and paging from the keyboard (Cmd+/ lists the shortcuts; Cmd is Ctrl on Linux and Windows).
 - **Safe editing**: every connection opens read-only. Edits are typed, staged and saved together, never overwrite a change someone else made in the meantime, and can be undone. Update every matching document after previewing the result.
 - **Aggregate** with a preview of the output after each stage, and **explain plans** for queries and pipelines.
 - **Copy as driver code**: turn a query or pipeline into code for the official MongoDB drivers.
@@ -20,7 +20,7 @@
 - **Shell**: JavaScript run by [Bun](https://bun.sh) with the official MongoDB driver, npm packages, autocomplete, and results shown as a table.
 - **Data relations**: shows a preview next to referenced ids and jumps to the referenced document. Relations can be found automatically.
 - **Compare and sync** two collections, **dump and restore** with the MongoDB Database Tools (Quarry installs and updates them if they are missing), and **users and roles**.
-- **SSH tunnels** (password, key file or agent) and **SOCKS5 proxies**. Secrets are kept in the macOS Keychain. Quarry reconnects to the last used connection at launch.
+- **SSH tunnels** (password, key file or agent) and **SOCKS5 proxies**. Secrets are kept in the system keychain (macOS Keychain, Windows Credential Manager, or the Secret Service on Linux). Quarry reconnects to the last used connection at launch.
 
 | | |
 |---|---|
@@ -29,9 +29,13 @@
 
 ## Install
 
-Download the latest build for your system from [Releases](https://github.com/alkanna/quarry/releases): macOS (Apple silicon, Intel, or universal), Linux and Windows (x86_64 and ARM64).
+Download the latest build for your system from [Releases](https://github.com/alkanna/quarry/releases).
 
-The macOS app is not notarized, so after unzipping it into Applications, run `xattr -dr com.apple.quarantine /Applications/Quarry.app` once.
+**macOS** (Apple silicon, Intel, or universal): unzip `Quarry-macos-*.zip` into Applications. The app is not notarized, so run `xattr -dr com.apple.quarantine /Applications/Quarry.app` once.
+
+**Linux** (x86_64 and ARM64): extract `quarry-linux-*.tar.gz` and put the `quarry` binary somewhere on your `PATH`, such as `~/.local/bin`. It needs GTK 3 and xkbcommon (`sudo apt install libgtk-3-0 libxkbcommon0` on Debian and Ubuntu), and a Secret Service provider such as GNOME Keyring or KWallet to store passwords.
+
+**Windows** (x86_64 and ARM64): unzip `quarry-windows-*.zip` and run `quarry.exe`. The binary is not signed, so SmartScreen may warn the first time: choose More info, then Run anyway.
 
 Quarry then updates itself: it checks for new releases shortly after launch and once a day, installs them in the background, and restarts once you have been idle for a minute with nothing unsaved. It shows what's new after an update. You can turn updates off in Settings.
 
@@ -41,7 +45,8 @@ Needs Rust (stable). The Shell needs [Bun](https://bun.sh), and dump/restore nee
 
 ```sh
 cargo run --release      # run it
-./bundle.sh              # build dist/Quarry.app
+./bundle.sh              # package for this machine into dist/
+./bundle.sh linux-x86_64 # or for a given platform (./bundle.sh --help lists them)
 cargo test               # run the tests
 ```
 
