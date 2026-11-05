@@ -1254,6 +1254,8 @@ enum Modal {
     Tool(Box<ToolForm>),
     Relations { conn: u64, db: String },
     Palette { query: String, sel: usize },
+    /// Values of a field with how many documents hold each, and the pipeline that counted them.
+    Grouped { sel: Sel, path: String, pipeline: Vec<Document>, rows: Vec<Document> },
 }
 
 /// A value being edited in place in the document tree.
@@ -3071,6 +3073,13 @@ impl App {
                     Err(e) => self.err(e),
                 },
                 Msg::Notice { title, body } => self.modal = Some(Modal::Text { title, body, code: false }),
+                Msg::Grouped { conn, db, coll, path, pipeline, res } => match res {
+                    Ok(rows) => {
+                        self.ok(format!("{} distinct values of {path}", rows.len()));
+                        self.modal = Some(Modal::Grouped { sel: Sel { conn, db, coll }, path, pipeline, rows });
+                    }
+                    Err(e) => self.err(e),
+                },
                 Msg::Related { req, res } => match (res, self.tab_by_req(req)) {
                     (Ok(v), Some(t)) => t.related.extend(v),
                     (Err(e), _) => self.err(format!("Could not load related documents: {e}")),
@@ -3368,6 +3377,14 @@ impl App {
             self.tabs[1].view = View::Schema;
             self.tabs[1].selected = None;
         }
+        // Test switch: a long generated validator, to check its box scrolls inside the window.
+        if std::env::var("QUARRY_TEST_VALIDATOR").is_ok() {
+            let t = &mut self.tabs[1];
+            t.view = View::Schema;
+            t.selected = None;
+            let props: Document = (0..60).map(|i| (format!("field{i}"), Bson::Document(doc! { "bsonType": "string", "description": "generated" }))).collect();
+            t.schema.vtext = db::to_edit_json(&doc! { "$jsonSchema": { "bsonType": "object", "properties": props } });
+        }
         if std::env::var("QUARRY_TEST_IMPORT").is_ok() {
             let t = &mut self.tabs[1];
             t.view = View::Import;
@@ -3389,6 +3406,12 @@ impl App {
             t.shell.set_value(Bson::Array(docs));
             t.shell.ms = Some(42);
             t.shell.help = std::env::var("QUARRY_TEST_HELP").is_ok();
+        }
+        // Test switch: show the "Group by and count" window.
+        if std::env::var("QUARRY_TEST_GROUP").is_ok() {
+            let rows = vec![doc! { "_id": "paid", "count": 321 }, doc! { "_id": "shipped", "count": 321 }, doc! { "_id": "pending", "count": 321 }, doc! { "_id": "refunded", "count": 321 }];
+            let pipeline = db::group_count_pipeline("status", &Bson::String("paid".into()), Document::new()).unwrap_or_default();
+            self.modal = Some(Modal::Grouped { sel: self.tabs[1].sel.clone(), path: "status".into(), pipeline, rows });
         }
         // Test switch: show the pipeline builder with stage previews.
         if std::env::var("QUARRY_TEST_PIPELINE").is_ok() {
@@ -5736,16 +5759,16 @@ impl App {
                 }
                 TreeAct::Group(path, v, filtered) => {
                     let filter = if filtered { self.t().unwrap().query.filter.clone() } else { Document::new() };
-                    match db::group_count_pipeline(&path, &v, filter) {
-                        Ok(p) => {
-                            let t = self.tm().unwrap();
-                            t.view = View::Aggregate;
-                            t.selected = None;
-                            t.agg_txt = format!("[\n{}\n]", p.iter().map(|s| format!("  {}", db::shell_text(&Bson::Document(s.clone())))).collect::<Vec<_>>().join(",\n"));
-                            self.reset_doc_state();
-                            self.run_pipeline(p);
+                    // Counted in the background and shown in a window, so the tab's own pipeline is kept;
+                    // "Open in Aggregate" opens the pipeline in a new tab, as the original does.
+                    match (db::group_count_pipeline(&path, &v, filter), self.target()) {
+                        (Err(e), _) => self.err(e),
+                        (_, None) => self.err("Not connected."),
+                        (Ok(p), Some(target)) => {
+                            let conn = self.t().unwrap().sel.conn;
+                            self.ok(format!("Counting the values of {path}…"));
+                            self.worker.group_count(conn, target, path, p);
                         }
-                        Err(e) => self.err(e),
                     }
                 }
                 TreeAct::Distinct(path) => match self.target() {
@@ -6573,7 +6596,8 @@ impl App {
         });
         ui.add_space(6.0);
         let (mut apply, mut generate, mut reload) = (false, false, false);
-        egui::CollapsingHeader::new(RichText::new("VALIDATOR").size(11.0).color(MUTED)).id_salt("schema-validator").show(ui, |ui| {
+        // QUARRY_TEST_VALIDATOR opens it in the demo picture.
+        egui::CollapsingHeader::new(RichText::new("VALIDATOR").size(11.0).color(MUTED)).id_salt("schema-validator").default_open(std::env::var("QUARRY_TEST_VALIDATOR").is_ok()).show(ui, |ui| {
             let s = &mut t.schema;
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Level").color(MUTED));
@@ -6583,7 +6607,12 @@ impl App {
                 segmented(ui, &mut s.vwarn, &[(false, "error"), (true, "warn")]);
             });
             let id = ui.make_persistent_id("validator-editor");
-            with_autopair(ui, id, &mut s.vtext, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().hint_text("{ $jsonSchema: { bsonType: \"object\", required: [...] } }").desired_width(f32::INFINITY).desired_rows(8).layouter(&mut code_layout).show(ui));
+            // A generated validator can run to hundreds of lines; scroll inside a capped box so the
+            // Apply buttons and the field list stay in the window.
+            let max_h = (ui.ctx().content_rect().height() * 0.4).clamp(160.0, 420.0);
+            egui::ScrollArea::vertical().id_salt("validator-scroll").max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
+                with_autopair(ui, id, &mut s.vtext, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().hint_text("{ $jsonSchema: { bsonType: \"object\", required: [...] } }").desired_width(f32::INFINITY).desired_rows(8).layouter(&mut code_layout).show(ui));
+            });
             ui.horizontal(|ui| {
                 apply = primary(ui, "Apply", PRIMARY).on_hover_text("Runs collMod on this collection").clicked();
                 generate = ui.add_enabled(!s.stats.is_empty(), egui::Button::new("Generate from analysis")).on_hover_text("Built from the sampled documents; review it before applying").clicked();
@@ -7414,7 +7443,9 @@ impl App {
                     ui.label(RichText::new("Changes are saved right away.").size(12.0).color(FAINT));
                     ui.add_space(8.0);
                     let before = (self.prefs.open_inline, self.prefs.auto_save, self.prefs.always_writable, self.prefs.confirm_save, self.prefs.default_cols, self.prefs.timeout_ms, self.prefs.shell_runtime.clone(), self.prefs.mongodump.clone(), self.prefs.mongorestore.clone(), self.prefs.auto_update, self.prefs.show_fps, self.prefs.object_preview);
-                    ui.scope(|ui| {
+                    // The sections scroll inside the dialog, which keeps its title and Done in the window.
+                    let max_h = (ui.ctx().content_rect().height() - 150.0).max(200.0);
+                    egui::ScrollArea::vertical().id_salt("settings-scroll").max_height(max_h).min_scrolled_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
                         settings_section(ui, "DOCUMENTS", |ui| {
                             setting_row(ui, "Open documents", "Where a clicked row shows its document.", |ui| {
                                 segmented(ui, &mut self.prefs.open_inline, &[(false, "Side panel"), (true, "Under the row")]);
@@ -7903,6 +7934,48 @@ impl App {
                             keep = false;
                         }
                         if ui.button("Cancel").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Modal::Grouped { sel, path, pipeline, rows } => {
+                    ui.set_width(560.0);
+                    ui.label(RichText::new(format!("Distinct values for {}: {path}", sel.coll)).strong().size(15.0).color(BRIGHT));
+                    let total: u64 = rows.iter().filter_map(|r| r.get("count").and_then(|c| c.as_i64().or_else(|| c.as_i32().map(i64::from)))).map(|c| c as u64).sum();
+                    ui.label(RichText::new(format!("{} values in {} documents{}", group(&rows.len().to_string()), group(&total.to_string()), if rows.len() >= 1000 { ", first 1000 values shown" } else { "" })).color(MUTED));
+                    egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                        egui::Grid::new("grouped").striped(true).num_columns(2).spacing([24.0, 4.0]).show(ui, |ui| {
+                            ui.label(RichText::new("VALUE").size(11.0).color(FAINT));
+                            ui.label(RichText::new("COUNT").size(11.0).color(FAINT));
+                            ui.end_row();
+                            for r in rows.iter() {
+                                // A fixed width: a truncating label in a grid otherwise shrinks to a few letters.
+                                ui.allocate_ui_with_layout(egui::vec2(400.0, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                    ui.set_min_width(400.0);
+                                    ui.add(egui::Label::new(cell_job(r.get("_id").unwrap_or(&Bson::Null))).truncate());
+                                });
+                                ui.label(RichText::new(r.get("count").map(db::compact).unwrap_or_default()).monospace().color(C_NUMBER));
+                                ui.end_row();
+                            }
+                        });
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("Copy").on_hover_text("Copy as JSON: value and count").clicked() {
+                            ui.ctx().copy_text(db::to_edit_value(&Bson::Array(rows.iter().cloned().map(Bson::Document).collect())));
+                        }
+                        if primary(ui, "Open in Aggregate", PRIMARY).on_hover_text("Open this pipeline in a new tab").clicked() {
+                            let mut t = Tab::new(sel.clone());
+                            t.view = View::Aggregate;
+                            t.agg_txt = format!("[\n{}\n]", pipeline.iter().map(|s| format!("  {}", db::shell_text(&Bson::Document(s.clone())))).collect::<Vec<_>>().join(",\n"));
+                            // Next to the current tab, like the original's nextToActive.
+                            let at = (self.cur + 1).min(self.tabs.len());
+                            self.tabs.insert(at, t);
+                            self.cur = at;
+                            self.reset_doc_state();
+                            self.run_pipeline(pipeline.clone());
+                            keep = false;
+                        }
+                        if ui.button("Close").on_hover_text("Esc").clicked() {
                             keep = false;
                         }
                     });

@@ -96,6 +96,8 @@ pub enum Msg {
     ShellDone { req: u64, res: Res<String>, ms: u128 },
     /// A result to show in a dialog, such as a distinct-values count.
     Notice { title: String, body: String },
+    /// "Group by and count" finished: one `{ _id, count }` per value, most frequent first.
+    Grouped { conn: u64, db: String, coll: String, path: String, pipeline: Vec<Document>, res: Res<Vec<Document>> },
     /// Preview values of referenced documents, keyed by `compact(_id)`.
     Related { req: u64, res: Res<Vec<(String, String)>> },
     /// Which collection of `db` holds `value` as an `_id`, and the field to preview it with.
@@ -793,6 +795,17 @@ impl Worker {
                 _ = cancel => Err(format!("{name} stopped")),
             };
             send(Msg::ToolDone(res));
+        });
+    }
+
+    /// Runs "Group by and count" in the background like the original's groupCountField
+    /// (renderer line 100487), which shows the result in a window instead of a tab.
+    // ponytail: first 1000 values kept; a field with millions of distinct values would not fit a window anyway
+    pub fn group_count(&self, conn: u64, t: Target, path: String, pipeline: Vec<Document>) {
+        self.spawn(async move {
+            let p = pipeline.clone();
+            let res = async { t.c().aggregate(p).max_time(t.timeout).allow_disk_use(true).await.map_err(e)?.take(1000).try_collect().await.map_err(e) }.await;
+            Msg::Grouped { conn, db: t.db, coll: t.coll, path, pipeline, res }
         });
     }
 
