@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/alkanna/quarry/compare/v0.6.0...v0.6.1) (2026-11-05)
+
+
+### Bug Fixes
+
+* scroll the Indexes view horizontally and vertically ([#20](https://github.com/alkanna/quarry/issues/20)) ([eeb705c](https://github.com/alkanna/quarry/commit/eeb705c946ea4f0935f0b607326b16934177d6e7))
+
 ## [0.6.0](https://github.com/alkanna/quarry/compare/v0.5.0...v0.6.0) (2026-11-05)
 
 
