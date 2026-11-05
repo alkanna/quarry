@@ -73,6 +73,8 @@ pub enum Msg {
     DbChanged { conn: u64, db: String, res: Res<String> },
     Docs { req: u64, res: Res<(Vec<Document>, u64, u128)> },
     Indexes { req: u64, res: Res<Vec<Document>> },
+    /// Usage and suggestions for the collection named `key` ("db.coll").
+    IndexInfo { key: String, res: Res<IndexInfo> },
     Aggregated { req: u64, res: Res<(Vec<Document>, u128)> },
     /// The server's explain output for a query or pipeline.
     Explained { req: u64, res: Res<Document> },
@@ -441,6 +443,65 @@ impl Worker {
             }
             .await;
             Msg::Indexes { req, res }
+        });
+    }
+
+    /// Usage, size and hidden state per index, plus the profiler's unindexed or slow queries.
+    pub fn index_info(&self, t: Target) {
+        self.spawn(async move {
+            let key = format!("{}.{}", t.db, t.coll);
+            let res = async {
+                let db = t.client.database(&t.db);
+                let num = |b: Option<&Bson>| match b {
+                    Some(Bson::Int32(n)) => *n as i64,
+                    Some(Bson::Int64(n)) => *n,
+                    Some(Bson::Double(n)) => *n as i64,
+                    _ => 0,
+                };
+                // Sizes are best effort: views and some deployments refuse $collStats.
+                let sizes = async {
+                    let mut cur = t.c().aggregate(vec![doc! { "$collStats": { "storageStats": {} } }]).await.ok()?;
+                    let d = cur.try_next().await.ok()??;
+                    d.get_document("storageStats").ok()?.get_document("indexSizes").ok().cloned()
+                }
+                .await
+                .unwrap_or_default();
+                let rows: Vec<Document> = t.c().aggregate(vec![doc! { "$indexStats": {} }]).await.map_err(e)?.try_collect().await.map_err(e)?;
+                let stats = rows
+                    .iter()
+                    .map(|d| {
+                        let name = d.get_str("name").unwrap_or_default().to_string();
+                        let acc = d.get_document("accesses").cloned().unwrap_or_default();
+                        IndexStat {
+                            ops: num(acc.get("ops")),
+                            since: acc.get_datetime("since").ok().map(|t| t.timestamp_millis()),
+                            hidden: d.get_document("spec").is_ok_and(|s| s.get_bool("hidden") == Ok(true)),
+                            size: sizes.get(&name).map(|b| num(Some(b)) as usize),
+                            name,
+                        }
+                    })
+                    .collect();
+                let prof = db.run_command(doc! { "profile": -1 }).await.ok();
+                let level = prof.as_ref().map_or(0, |p| num(p.get("was")) as i32);
+                let slowms = prof.as_ref().map_or(100, |p| num(p.get("slowms")));
+                // Newest first so the cap keeps recent traffic.
+                let entries: Vec<Document> = match db
+                    .collection::<Document>("system.profile")
+                    .aggregate(vec![
+                        doc! { "$match": { "ns": &key, "op": "query", "command.find": { "$exists": true }, "$or": [{ "planSummary": { "$regex": "COLLSCAN" } }, { "millis": { "$gt": slowms } }] } },
+                        doc! { "$sort": { "ts": -1 } },
+                        doc! { "$limit": 1000 },
+                        doc! { "$project": { "filter": "$command.filter", "sort": "$command.sort", "millis": 1 } },
+                    ])
+                    .await
+                {
+                    Ok(c) => c.try_collect().await.unwrap_or_default(),
+                    Err(_) => Vec::new(),
+                };
+                Ok(IndexInfo { stats, level, slowms, shapes: group_profile(&entries) })
+            }
+            .await;
+            Msg::IndexInfo { key, res }
         });
     }
 
@@ -1970,9 +2031,171 @@ pub fn edit_path(d: &Document, path: &[String], value: Option<Bson>) -> Res<Docu
     }
 }
 
+pub struct IndexStat {
+    pub name: String,
+    pub ops: i64,
+    /// When the counter started, in ms since the epoch.
+    pub since: Option<i64>,
+    pub hidden: bool,
+    pub size: Option<usize>,
+}
+
+pub struct IndexInfo {
+    pub stats: Vec<IndexStat>,
+    /// Profiler level: 0 off, 1 slow operations, 2 all.
+    pub level: i32,
+    pub slowms: i64,
+    pub shapes: Vec<Shape>,
+}
+
+/// Profiled queries that share filter fields and sort.
+pub struct Shape {
+    pub filter: Document,
+    pub sort: Document,
+    pub count: usize,
+    pub avg_ms: f64,
+    pub suggestion: Document,
+}
+
+/// Unused for a week; a younger counter proves nothing because it resets on restart.
+pub fn is_unused(ops: i64, since_ms: Option<i64>, now_ms: i64) -> bool {
+    ops == 0 && since_ms.is_some_and(|s| now_ms - s > 7 * 24 * 3600 * 1000)
+}
+
+/// Compound index for a query in the usual order: equality fields, then sort fields, then ranges.
+pub fn suggest_index(filter: &Document, sort: &Document) -> Document {
+    let mut eq = Vec::new();
+    let mut range = Vec::new();
+    for (k, v) in filter.iter().filter(|(k, _)| !k.starts_with('$')) {
+        let is_eq = match v {
+            Bson::Document(d) if d.keys().any(|k| k.starts_with('$')) => d.keys().any(|k| matches!(k.as_str(), "$eq" | "$in" | "$elemMatch")),
+            _ => true,
+        };
+        if is_eq { eq.push(k) } else { range.push(k) }
+    }
+    let mut out = Document::new();
+    for k in eq {
+        out.insert(k, 1);
+    }
+    for (k, v) in sort {
+        let dir = match v {
+            Bson::Int32(n) if *n < 0 => -1,
+            Bson::Int64(n) if *n < 0 => -1,
+            Bson::Double(n) if *n < 0.0 => -1,
+            _ => 1,
+        };
+        if !out.contains_key(k) {
+            out.insert(k, dir);
+        }
+    }
+    for k in range {
+        if !out.contains_key(k) {
+            out.insert(k, 1);
+        }
+    }
+    out
+}
+
+/// Groups profile entries (`filter`, `sort`, `millis`) by query shape, busiest first.
+pub fn group_profile(entries: &[Document]) -> Vec<Shape> {
+    let mut groups: Vec<(String, Shape, f64)> = Vec::new();
+    for en in entries {
+        let filter = en.get_document("filter").cloned().unwrap_or_default();
+        let sort = en.get_document("sort").cloned().unwrap_or_default();
+        let suggestion = suggest_index(&filter, &sort);
+        // A bare full scan has no field to index.
+        if suggestion.is_empty() {
+            continue;
+        }
+        let ms = match en.get("millis") {
+            Some(Bson::Int32(n)) => *n as f64,
+            Some(Bson::Int64(n)) => *n as f64,
+            _ => 0.0,
+        };
+        let mut fields: Vec<&String> = filter.keys().collect();
+        fields.sort();
+        let key = format!("{fields:?}{}", compact(&Bson::Document(sort.clone())));
+        match groups.iter_mut().find(|g| g.0 == key) {
+            Some(g) => {
+                g.1.count += 1;
+                g.2 += ms;
+            }
+            None => groups.push((key, Shape { filter, sort, count: 1, avg_ms: 0.0, suggestion }, ms)),
+        }
+    }
+    let mut out: Vec<Shape> = groups
+        .into_iter()
+        .map(|(_, mut s, total)| {
+            s.avg_ms = total / s.count as f64;
+            s
+        })
+        .collect();
+    out.sort_by(|a, b| b.count.cmp(&a.count).then(b.avg_ms.total_cmp(&a.avg_ms)));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn keys(d: &Document) -> Vec<(String, i32)> {
+        d.iter().map(|(k, v)| (k.clone(), v.as_i32().unwrap())).collect()
+    }
+    fn kv(v: &[(&str, i32)]) -> Vec<(String, i32)> {
+        v.iter().map(|(k, d)| (k.to_string(), *d)).collect()
+    }
+
+    #[test]
+    fn suggests_equality_only() {
+        assert_eq!(keys(&suggest_index(&doc! { "a": 1, "b": "x" }, &doc! {})), kv(&[("a", 1), ("b", 1)]));
+    }
+
+    #[test]
+    fn suggests_equality_then_sort() {
+        assert_eq!(keys(&suggest_index(&doc! { "status": "a" }, &doc! { "createdAt": -1 })), kv(&[("status", 1), ("createdAt", -1)]));
+    }
+
+    #[test]
+    fn suggests_equality_sort_range() {
+        let f = doc! { "total": { "$lt": 50 }, "customer.tier": "gold" };
+        assert_eq!(keys(&suggest_index(&f, &doc! { "createdAt": 1 })), kv(&[("customer.tier", 1), ("createdAt", 1), ("total", 1)]));
+    }
+
+    #[test]
+    fn in_and_elem_match_count_as_equality() {
+        let f = doc! { "n": { "$gt": 1 }, "t": { "$in": ["a", "b"] }, "l": { "$elemMatch": { "x": 1 } }, "$or": [{ "z": 1 }] };
+        assert_eq!(keys(&suggest_index(&f, &doc! {})), kv(&[("t", 1), ("l", 1), ("n", 1)]));
+    }
+
+    #[test]
+    fn sort_on_an_equality_field_keeps_its_place() {
+        assert_eq!(keys(&suggest_index(&doc! { "a": 1 }, &doc! { "a": -1, "b": -1 })), kv(&[("a", 1), ("b", -1)]));
+    }
+
+    #[test]
+    fn groups_profile_by_shape() {
+        let e = |f: Document, s: Option<Document>, ms: i32| {
+            let mut d = doc! { "filter": f, "millis": ms };
+            if let Some(s) = s {
+                d.insert("sort", s);
+            }
+            d
+        };
+        let entries = vec![e(doc! { "a": 1 }, None, 10), e(doc! { "a": 2 }, None, 30), e(doc! { "a": 1 }, Some(doc! { "b": 1 }), 5), e(doc! {}, None, 99)];
+        let g = group_profile(&entries);
+        assert_eq!(g.len(), 2);
+        assert_eq!((g[0].count, g[0].avg_ms), (2, 20.0));
+        assert_eq!(keys(&g[1].suggestion), kv(&[("a", 1), ("b", 1)]));
+    }
+
+    #[test]
+    fn unused_needs_an_old_zero_counter() {
+        let week = 7 * 24 * 3600 * 1000;
+        assert!(is_unused(0, Some(0), week + 1));
+        assert!(!is_unused(0, Some(0), week));
+        assert!(!is_unused(3, Some(0), week * 2));
+        assert!(!is_unused(0, None, week * 2));
+    }
 
     #[test]
     fn explain_summary_find_with_index() {

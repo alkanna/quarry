@@ -1460,6 +1460,8 @@ pub struct App {
     conn_test: Option<db::Res<String>>,
     idx_keys: String,
     idx_unique: bool,
+    /// Usage and suggestions of the collection "db.coll" the Indexes view last asked about.
+    idx_info: Option<(String, db::IndexInfo)>,
     undo: Vec<UndoAction>,
     explain_req: u64,
     modal: Option<Modal>,
@@ -1932,6 +1934,7 @@ impl App {
             conn_test: None,
             idx_keys: String::new(),
             idx_unique: false,
+            idx_info: None,
             undo: Vec::new(),
             explain_req: 0,
             modal: None,
@@ -2310,6 +2313,10 @@ impl App {
             self.req += 1;
             let req = self.req;
             self.tm().unwrap().idx_req = req;
+            // Only the Indexes view shows usage, and it costs a profiler query.
+            if self.t().is_some_and(|t| t.view == View::Indexes) {
+                self.worker.index_info(target.clone());
+            }
             self.worker.indexes(req, target);
         }
     }
@@ -2564,7 +2571,15 @@ impl App {
                     if self.users.as_ref().is_some_and(|u| u.conn == conn) {
                         self.load_users(conn);
                     }
+                    // Hiding an index or switching the profiler changes what the Indexes view shows.
+                    if self.t().is_some_and(|t| t.view == View::Indexes) {
+                        self.load_indexes();
+                    }
                 }
+                Msg::IndexInfo { key, res } => match res {
+                    Ok(i) => self.idx_info = Some((key, i)),
+                    Err(e) => self.err(e),
+                },
                 Msg::Docs { req, res } => {
                     let Some(t) = self.tab_by_req(req) else { continue };
                     t.loading = false;
@@ -5971,12 +5986,17 @@ impl App {
         });
         ui.add_space(8.0);
         let mut drop = None;
-        egui::Grid::new("idx").striped(true).num_columns(4).spacing([24.0, 8.0]).show(ui, |ui| {
-            for h in ["NAME", "KEYS", "OPTIONS", ""] {
+        let mut hide = None;
+        let t = self.t().unwrap();
+        let key = format!("{}.{}", t.sel.db, t.sel.coll);
+        let info = self.idx_info.as_ref().filter(|(k, _)| *k == key).map(|(_, i)| i);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+        egui::Grid::new("idx").striped(true).num_columns(6).spacing([24.0, 8.0]).show(ui, |ui| {
+            for h in ["NAME", "KEYS", "OPTIONS", "USAGE", "SIZE", ""] {
                 ui.label(RichText::new(h).size(11.0).color(MUTED));
             }
             ui.end_row();
-            for ix in &self.t().unwrap().indexes {
+            for ix in &t.indexes {
                 let name = ix.get_str("name").unwrap_or_default().to_string();
                 ui.label(RichText::new(&name).monospace().color(BRIGHT));
                 ui.label(RichText::new(ix.get("keys").map(db::compact).unwrap_or_default()).monospace().color(C_STRING));
@@ -5984,12 +6004,74 @@ impl App {
                 opts.remove("name");
                 opts.remove("keys");
                 ui.label(RichText::new(if opts.is_empty() { String::new() } else { db::compact(&Bson::Document(opts)) }).monospace().color(MUTED));
-                if name != "_id_" && ui.small_button(RichText::new("Drop").color(ALERT)).clicked() {
-                    drop = Some(name);
-                }
+                let stat = info.and_then(|i| i.stats.iter().find(|s| s.name == name));
+                ui.horizontal(|ui| {
+                    let Some(s) = stat else { return };
+                    // A counter that restarted recently cannot prove an index is unused.
+                    let recent = s.since.is_some_and(|t| now - t < 7 * 24 * 3600 * 1000);
+                    ui.label(RichText::new(format!("{} ops{}", group(&s.ops.to_string()), if s.ops == 0 && recent { ", since restart" } else { "" })).monospace().color(MUTED));
+                    if name != "_id_" && db::is_unused(s.ops, s.since, now) {
+                        pill(ui, "unused", WARNING);
+                    }
+                    if s.hidden {
+                        pill(ui, "hidden", PRIMARY);
+                    }
+                });
+                ui.label(RichText::new(stat.and_then(|s| s.size).map(human_bytes).unwrap_or_default()).monospace().color(MUTED));
+                ui.horizontal(|ui| {
+                    if name != "_id_" {
+                        let hidden = stat.is_some_and(|s| s.hidden);
+                        if ui.small_button(if hidden { "Unhide" } else { "Hide" }).clicked() {
+                            hide = Some((name.clone(), !hidden));
+                        }
+                        if ui.small_button(RichText::new("Drop").color(ALERT)).clicked() {
+                            drop = Some(name);
+                        }
+                    }
+                });
                 ui.end_row();
             }
         });
+        let (mut create, mut profiling) = (None, false);
+        if let Some(i) = info {
+            ui.add_space(12.0);
+            ui.label(RichText::new("SUGGESTIONS").size(11.0).color(MUTED));
+            // Skip queries an existing index already serves from its leading keys.
+            let covered = |sug: &Document| t.indexes.iter().any(|ix| ix.get_document("keys").is_ok_and(|k| k.keys().zip(sug.keys()).filter(|(a, b)| a == b).count() == sug.len()));
+            let shapes: Vec<_> = i.shapes.iter().filter(|s| !covered(&s.suggestion)).take(8).collect();
+            if i.level == 0 && shapes.is_empty() {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("The profiler is off, so slow queries are not recorded.").color(MUTED));
+                    profiling = ui.button("Enable profiling (slow ops >= 100 ms)").clicked();
+                });
+            } else if shapes.is_empty() {
+                ui.label(RichText::new(format!("No unindexed or slow queries recorded (profiler level {}, slow >= {} ms).", i.level, i.slowms)).color(MUTED));
+            }
+            for s in shapes {
+                ui.horizontal(|ui| {
+                    let sort = if s.sort.is_empty() { String::new() } else { format!("  sort {}", db::compact(&Bson::Document(s.sort.clone()))) };
+                    ui.label(RichText::new(format!("{}x  avg {:.0} ms  find {}{sort}", s.count, s.avg_ms, db::compact(&Bson::Document(s.filter.clone())))).monospace().color(MUTED));
+                    ui.label(RichText::new(db::compact(&Bson::Document(s.suggestion.clone()))).monospace().color(C_STRING));
+                    if ui.small_button("Create").clicked() {
+                        create = Some(s.suggestion.clone());
+                    }
+                });
+            }
+        }
+        if let Some(k) = create {
+            self.idx_keys = db::shell_text(&Bson::Document(k));
+        }
+        if let Some((name, hidden)) = hide {
+            if let Some((conn, target)) = self.writable_target() {
+                let done = format!("{} index {name}", if hidden { "Hid" } else { "Unhid" });
+                self.worker.db_change(conn, target.client, target.db, doc! { "collMod": target.coll, "index": { "name": name, "hidden": hidden } }, done);
+            }
+        }
+        if profiling {
+            if let Some((conn, target)) = self.writable_target() {
+                self.worker.db_change(conn, target.client, target.db, doc! { "profile": 1, "slowms": 100 }, "Profiling slow operations".into());
+            }
+        }
         if let Some(name) = drop {
             self.modal = Some(Modal::Typed {
                 title: format!("Drop the index {name}? Queries that rely on it may become slow."),
