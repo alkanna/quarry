@@ -76,6 +76,8 @@ pub enum Msg {
     /// Usage and suggestions for the collection named `key` ("db.coll").
     IndexInfo { key: String, res: Res<IndexInfo> },
     Aggregated { req: u64, res: Res<(Vec<Document>, u128)> },
+    /// One pipeline builder stage's preview: documents out of the stage, the first of them, time.
+    StagePreview { req: u64, res: Res<(u64, Vec<Document>, u128)> },
     /// The server's explain output for a query or pipeline.
     Explained { req: u64, res: Res<Document> },
     /// Up to 5 matching documents as (before, after) the given update stages, and the total match count.
@@ -514,6 +516,35 @@ impl Worker {
             }
             .await;
             Msg::IndexInfo { key, res }
+        });
+    }
+
+    /// Preview of a pipeline cut after one stage, as the original's getResultsForStage (renderer
+    /// line 112026): a `$count` run for the total and a `$limit` run for the first documents. An
+    /// empty pipeline is the collection itself, counted by the estimate (getCollectionSample, 111469).
+    pub fn stage_preview(&self, req: u64, t: Target, pipeline: Vec<Document>, limit: i64) {
+        self.spawn(async move {
+            let res = async {
+                let start = Instant::now();
+                let c = t.c();
+                let (n, docs) = if pipeline.is_empty() {
+                    let n = c.estimated_document_count().max_time(t.timeout).await.map_err(e)?;
+                    let docs: Vec<Document> = c.find(doc! {}).limit(limit).max_time(t.timeout).await.map_err(e)?.try_collect().await.map_err(e)?;
+                    (n, docs)
+                } else {
+                    let mut counting = pipeline.clone();
+                    counting.push(doc! { "$count": "total" });
+                    let counted: Vec<Document> = c.aggregate(counting).max_time(t.timeout).allow_disk_use(true).await.map_err(e)?.try_collect().await.map_err(e)?;
+                    let n = counted.first().and_then(|d| d.get("total")).map_or(Ok(0), as_u64)?;
+                    let mut sampling = pipeline;
+                    sampling.push(doc! { "$limit": limit });
+                    let docs: Vec<Document> = c.aggregate(sampling).max_time(t.timeout).allow_disk_use(true).await.map_err(e)?.try_collect().await.map_err(e)?;
+                    (n, docs)
+                };
+                Ok((n, trim_sample(docs), start.elapsed().as_millis()))
+            }
+            .await;
+            Msg::StagePreview { req, res }
         });
     }
 
@@ -1811,6 +1842,75 @@ pub fn has_write_stage(p: &[Document]) -> bool {
     p.iter().any(|s| s.contains_key("$out") || s.contains_key("$merge"))
 }
 
+/// Documents a builder stage previews at first, and how many "More" adds (samplesCount, renderer
+/// line 112206 and 109918).
+pub const STAGE_SAMPLE: i64 = 10;
+
+/// A preview larger than this many characters of JSON is cut, with the original's own formula
+/// (getResultsForStage, renderer line 112058): keep floor(100000 / (chars / 10)) documents, at least 1.
+pub fn trim_sample(mut docs: Vec<Document>) -> Vec<Document> {
+    const MAX_CHARS: usize = 100_000;
+    let chars: usize = docs.iter().map(|d| compact(&Bson::Document(d.clone())).len()).sum::<usize>() + docs.len().saturating_sub(1) + 2;
+    if chars > MAX_CHARS {
+        let keep = ((MAX_CHARS as f64 / (chars as f64 / 10.0)).floor() as usize).max(1);
+        docs.truncate(keep);
+    }
+    docs
+}
+
+/// Stages offered by the builder, most used first (topStages, renderer line 111389), with the
+/// original's examples (AggregationStages, 108071) in shell syntax.
+pub const STAGES: &[(&str, &str)] = &[
+    ("$match", "{ author: 'dave' }"),
+    ("$group", "{\n  _id: null,\n  count: { $sum: 1 }\n}"),
+    ("$unwind", "'$sizes'"),
+    ("$project", "{ title: 1, author: 1 }"),
+    ("$addFields", "{ totalScore: { $add: ['$totalHomework', '$totalQuiz'] } }"),
+    ("$lookup", "{\n  from: 'inventory',\n  localField: 'item',\n  foreignField: 'sku',\n  as: 'inventory_docs'\n}"),
+    ("$count", "'total'"),
+    ("$sort", "{ age: -1, posts: 1 }"),
+    ("$sample", "{ size: 3 }"),
+    ("$limit", "5"),
+    ("$skip", "5"),
+    ("$set", "{ status: 'active' }"),
+    ("$unset", "['isbn', 'copies']"),
+    ("$replaceRoot", "{ newRoot: '$name' }"),
+    ("$replaceWith", "'$name'"),
+    ("$bucket", "{\n  groupBy: '$price',\n  boundaries: [0, 200, 400],\n  default: 'Other'\n}"),
+    ("$bucketAuto", "{ groupBy: '$price', buckets: 4 }"),
+    ("$facet", "{\n  byTag: [{ $sortByCount: '$tags' }]\n}"),
+    ("$sortByCount", "'$tags'"),
+    ("$graphLookup", "{\n  from: 'employees',\n  startWith: '$reportsTo',\n  connectFromField: 'reportsTo',\n  connectToField: 'name',\n  as: 'reportingHierarchy'\n}"),
+    ("$unionWith", "{ coll: 'warehouses', pipeline: [] }"),
+    ("$densify", "{ field: 'timestamp', range: { step: 1, unit: 'hour', bounds: 'full' } }"),
+    ("$fill", "{ output: { score: { value: 0 } } }"),
+    ("$setWindowFields", "{\n  partitionBy: '$state',\n  sortBy: { orderDate: 1 },\n  output: { total: { $sum: '$quantity', window: { documents: ['unbounded', 'current'] } } }\n}"),
+    ("$redact", "{ $cond: { if: { $eq: ['$level', 5] }, then: '$$PRUNE', else: '$$DESCEND' } }"),
+    ("$geoNear", "{\n  near: { type: 'Point', coordinates: [-73.99279, 40.719296] },\n  distanceField: 'dist.calculated',\n  maxDistance: 2,\n  spherical: true\n}"),
+    ("$collStats", "{ storageStats: {} }"),
+    ("$indexStats", "{}"),
+    ("$out", "'authors'"),
+    ("$merge", "{ into: 'reporting', on: '_id', whenMatched: 'replace', whenNotMatched: 'insert' }"),
+];
+
+/// Readable shell syntax for a stage body: short values stay on one line, longer objects and
+/// arrays get one entry per line.
+pub fn pretty_shell(b: &Bson) -> String {
+    fn at(b: &Bson, level: usize) -> String {
+        let flat = shell_text(b);
+        if flat.len() <= 60 {
+            return flat;
+        }
+        let (pad, end) = ("  ".repeat(level + 1), "  ".repeat(level));
+        match b {
+            Bson::Document(d) => format!("{{\n{}\n{end}}}", d.iter().map(|(k, v)| format!("{pad}{}: {}", shell_key(k), at(v, level + 1))).collect::<Vec<_>>().join(",\n")),
+            Bson::Array(a) => format!("[\n{}\n{end}]", a.iter().map(|v| format!("{pad}{}", at(v, level + 1))).collect::<Vec<_>>().join(",\n")),
+            _ => flat,
+        }
+    }
+    at(b, 0)
+}
+
 /// Pipeline up to and including stage `i`, capped so a preview stays cheap.
 /// Write stages are dropped so a preview can never modify data.
 pub fn stage_preview(p: &[Document], i: usize) -> Option<Vec<Document>> {
@@ -2327,15 +2427,18 @@ pub fn field_size(b: &Bson) -> usize {
     plain_json(b).to_string().len()
 }
 
+/// A key as written in shell syntax: bare when it is a plain identifier, quoted otherwise.
+fn shell_key(k: &str) -> String {
+    if !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') && !k.starts_with(|c: char| c.is_ascii_digit()) {
+        k.to_string()
+    } else {
+        serde_json::Value::String(k.into()).to_string()
+    }
+}
+
 /// Readable shell syntax that `parse_value` reads back, e.g. `{ _id: ObjectId("...") }`.
 pub fn shell_text(b: &Bson) -> String {
-    let key = |k: &str| {
-        if !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') && !k.starts_with(|c: char| c.is_ascii_digit()) {
-            k.to_string()
-        } else {
-            serde_json::Value::String(k.into()).to_string()
-        }
-    };
+    let key = shell_key;
     match b {
         Bson::ObjectId(o) => format!("ObjectId(\"{}\")", o.to_hex()),
         Bson::DateTime(t) => format!("ISODate(\"{}\")", t.try_to_rfc3339_string().unwrap_or_default()),
@@ -2767,6 +2870,24 @@ mod tests {
         assert_eq!(s.rows.len(), 5);
         assert_eq!(s.warnings.len(), 2);
         assert!(explain_summary(&doc! { "ok": 1 }).rows.is_empty());
+    }
+
+    #[test]
+    fn builder_stages() {
+        // Every template parses as a stage body.
+        for (op, body) in STAGES {
+            assert!(parse_value(body).is_ok(), "{op}");
+        }
+        let v = parse_value("{ from: 'inventory', localField: 'item', foreignField: 'sku', as: 'inventory_docs', extra: [1, 2, 3] }").unwrap();
+        let pretty = pretty_shell(&v);
+        assert!(pretty.contains("\n  from: \"inventory\""), "{pretty}");
+        assert_eq!(parse_value(&pretty).unwrap(), v);
+        assert_eq!(pretty_shell(&Bson::Int32(5)), "5");
+        let small: Vec<Document> = (0..10).map(|i| doc! { "i": i }).collect();
+        assert_eq!(trim_sample(small).len(), 10);
+        let big: Vec<Document> = (0..10).map(|_| doc! { "s": "x".repeat(30_000) }).collect();
+        // 300k characters: floor(100000 / 30000) = 3 documents kept.
+        assert_eq!(trim_sample(big).len(), 3);
     }
 
     #[test]

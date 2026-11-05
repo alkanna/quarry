@@ -968,6 +968,13 @@ struct Tab {
     agg_req: u64,
     // Stage whose output the results pane shows; None after a full run.
     agg_stage: Option<usize>,
+    /// Pipeline builder stages and the pipeline text they match; when `agg_txt` changes
+    /// elsewhere (Text mode, library, a pasted query) the stages are rebuilt from it.
+    stages: Vec<Stage>,
+    stages_src: String,
+    /// The collection's first documents and estimated count, shown above the first stage.
+    agg_input: Stage,
+    agg_text_mode: bool,
     indexes: Vec<Document>,
     shell: ShellTab,
     schema: SchemaTab,
@@ -1139,6 +1146,10 @@ impl Tab {
             agg_ms: None,
             agg_req: 0,
             agg_stage: None,
+            stages: Vec::new(),
+            stages_src: String::new(),
+            agg_input: Stage::new("", "", true),
+            agg_text_mode: false,
             indexes: Vec::new(),
             shell: ShellTab::default(),
             schema: SchemaTab::default(),
@@ -1278,6 +1289,8 @@ struct UiPrefs {
     mongorestore: String,
     /// Install new releases from GitHub and restart into them.
     auto_update: bool,
+    /// Pipeline builder stages preview themselves after each change.
+    auto_preview: bool,
     /// The version that last ran, to show the changelog once after an update.
     last_version: String,
 }
@@ -1319,6 +1332,10 @@ struct SavedQuery {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Default)]
 #[serde(default)]
 struct SavedTab {
+    /// Pipeline builder stages, kept so stages switched off survive a restart.
+    stages: Vec<SavedStage>,
+    /// The Aggregate view shows the pipeline as text instead of stage cards.
+    agg_text_mode: bool,
     conn: u64,
     db: String,
     coll: String,
@@ -1328,6 +1345,83 @@ struct SavedTab {
     project: String,
     agg: String,
     shell: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Default)]
+#[serde(default)]
+struct SavedStage {
+    op: String,
+    text: String,
+    on: bool,
+}
+
+/// One stage of the pipeline builder with its own preview, like the original's AggregatorStage
+/// (prepareNewStage, renderer line 112193).
+struct Stage {
+    /// Stable id for the editor, so reordering keeps each text box's cursor and focus.
+    uid: u64,
+    op: String,
+    text: String,
+    on: bool,
+    req: u64,
+    count: Option<u64>,
+    sample: Vec<Document>,
+    ms: Option<u128>,
+    error: Option<String>,
+    limit: i64,
+    /// When the preview should run; edits wait a second like the original's 1000 ms debounce
+    /// (updateStage, renderer line 112016).
+    due: Option<std::time::Instant>,
+    /// Sample rows shown whole.
+    open: HashSet<usize>,
+}
+
+impl Stage {
+    fn new(op: &str, text: &str, on: bool) -> Self {
+        static UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            uid: UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            op: op.into(),
+            text: text.into(),
+            on,
+            req: 0,
+            count: None,
+            sample: Vec::new(),
+            ms: None,
+            error: None,
+            limit: db::STAGE_SAMPLE,
+            due: Some(std::time::Instant::now()),
+            open: HashSet::new(),
+        }
+    }
+}
+
+/// Stages from pipeline text; each stage must hold exactly one operator.
+fn stages_from_text(text: &str) -> db::Res<Vec<Stage>> {
+    db::parse_pipeline(text)?
+        .iter()
+        .enumerate()
+        .map(|(i, d)| match (d.len(), d.iter().next()) {
+            (1, Some((op, v))) => Ok(Stage::new(op, &db::pretty_shell(v), true)),
+            _ => Err(format!("Stage {} must have exactly one operator, like {{ $match: {{}} }}", i + 1)),
+        })
+        .collect()
+}
+
+/// Pipeline text of the stages that are on, so Run, the library and code export see them.
+fn text_from_stages(stages: &[Stage]) -> String {
+    let body: Vec<String> = stages.iter().filter(|s| s.on).map(|s| format!("  {{ {}: {} }}", s.op, s.text.trim().replace('\n', "\n  "))).collect();
+    if body.is_empty() { "[]".into() } else { format!("[\n{}\n]", body.join(",\n")) }
+}
+
+/// The pipeline that ends with stage `i`, stages that are off left out.
+fn stage_pipeline(stages: &[Stage], i: usize) -> db::Res<Vec<Document>> {
+    stages[..=i]
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.on)
+        .map(|(k, s)| db::parse_value(&s.text).map(|v| doc! { s.op.clone(): v }).map_err(|e| format!("Stage {} ({}): {e}", k + 1, s.op)))
+        .collect()
 }
 
 /// The new/edit connection form.
@@ -1416,7 +1510,7 @@ enum QAct {
 
 impl Default for UiPrefs {
     fn default() -> Self {
-        Self { open_inline: true, table: true, confirm_save: false, auto_save: false, always_writable: false, default_cols: DEFAULT_COLS, timeout_ms: db::DEFAULT_TIMEOUT_MS, shell_runtime: String::new(), shell_histories: HashMap::new(), shell_packages: Vec::new(), history: HashMap::new(), library: HashMap::new(), open_tabs: Vec::new(), cur_tab: 0, last_conn: None, cols: HashMap::new(), relations: HashMap::new(), mongodump: String::new(), mongorestore: String::new(), auto_update: true, last_version: String::new() }
+        Self { open_inline: true, table: true, confirm_save: false, auto_save: false, always_writable: false, default_cols: DEFAULT_COLS, timeout_ms: db::DEFAULT_TIMEOUT_MS, shell_runtime: String::new(), shell_histories: HashMap::new(), shell_packages: Vec::new(), history: HashMap::new(), library: HashMap::new(), open_tabs: Vec::new(), cur_tab: 0, last_conn: None, cols: HashMap::new(), relations: HashMap::new(), mongodump: String::new(), mongorestore: String::new(), auto_update: true, auto_preview: true, last_version: String::new() }
     }
 }
 
@@ -2123,6 +2217,12 @@ impl App {
                 if !st.agg.is_empty() {
                     t.agg_txt = st.agg;
                 }
+                t.agg_text_mode = st.agg_text_mode;
+                let stages: Vec<Stage> = st.stages.iter().map(|s| Stage::new(&s.op, &s.text, s.on)).collect();
+                if !stages.is_empty() && text_from_stages(&stages) == t.agg_txt {
+                    t.stages_src = t.agg_txt.clone();
+                    t.stages = stages;
+                }
                 app.tabs.push(t);
             }
             app.cur = app.prefs.cur_tab.min(app.tabs.len().saturating_sub(1));
@@ -2814,6 +2914,20 @@ impl App {
                         *preview = Some((stages, res));
                     }
                 }
+                Msg::StagePreview { req, res } => {
+                    let Some(st) = self.tabs.iter_mut().flat_map(|t| std::iter::once(&mut t.agg_input).chain(t.stages.iter_mut())).find(|s| s.req == req) else { continue };
+                    st.req = 0;
+                    match res {
+                        Ok((n, docs, ms)) => {
+                            // Rows stay open when a refresh brings back the same documents.
+                            if st.sample != docs {
+                                st.open.clear();
+                            }
+                            (st.count, st.sample, st.ms, st.error) = (Some(n), docs, Some(ms), None);
+                        }
+                        Err(e) => (st.count, st.sample, st.ms, st.error) = (None, Vec::new(), None, Some(e)),
+                    }
+                }
                 Msg::Aggregated { req, res } => {
                     let Some(t) = self.tabs.iter_mut().find(|t| t.agg_req == req) else {
                         // A superseded run or a closed tab: its error still deserves a mention.
@@ -3209,6 +3323,28 @@ impl App {
             t.shell.ms = Some(42);
             t.shell.help = std::env::var("QUARRY_TEST_HELP").is_ok();
         }
+        // Test switch: show the pipeline builder with stage previews.
+        if std::env::var("QUARRY_TEST_PIPELINE").is_ok() {
+            let t = &mut self.tabs[1];
+            t.view = View::Aggregate;
+            t.selected = None;
+            let docs = t.docs.clone();
+            let done = |mut s: Stage, n: u64, sample: Vec<Document>, ms: u128| {
+                (s.count, s.sample, s.ms, s.due) = (Some(n), sample, Some(ms), None);
+                s
+            };
+            t.agg_input = done(Stage::new("", "", true), 1284, docs.iter().take(10).cloned().collect(), 3);
+            let paid: Vec<Document> = docs.iter().filter(|d| matches!(d.get_str("status"), Ok("paid" | "shipped"))).take(10).cloned().collect();
+            let groups = vec![doc! { "_id": "standard", "orders": 428, "revenue": 51210.75 }, doc! { "_id": "gold", "orders": 214, "revenue": 25431.5 }];
+            t.stages = vec![
+                done(Stage::new("$match", "{ status: { $in: ['paid', 'shipped'] } }", true), 642, paid, 12),
+                done(Stage::new("$group", "{\n  _id: '$customer.tier',\n  orders: { $sum: 1 },\n  revenue: { $sum: '$total' }\n}", true), 2, groups.clone(), 31),
+                done(Stage::new("$sort", "{ revenue: -1 }", true), 2, groups, 33),
+            ];
+            t.stages[1].open.insert(0);
+            t.agg_txt = text_from_stages(&t.stages);
+            t.stages_src = t.agg_txt.clone();
+        }
         // Test switch: show the Compare view with a finished comparison.
         if std::env::var("QUARRY_TEST_COMPARE").is_ok() {
             let t = &mut self.tabs[1];
@@ -3271,6 +3407,142 @@ fn style(ctx: &egui::Context) {
         s.spacing.button_padding = egui::vec2(10.0, 4.0);
         // No bounce past the edge of lists.
         s.spacing.scroll.kinetic.rubber_band = false;
+    });
+}
+
+enum StageAct {
+    Edited(usize),
+    Toggled(usize),
+    /// Move a stage one place, down when true.
+    Move(usize, bool),
+    Remove(usize),
+    Add(String),
+    Op(usize, String),
+    /// Show 10 more documents; `usize::MAX` is the collection sample.
+    More(usize),
+    Preview(usize),
+}
+
+/// One stage of the pipeline builder: operator, on/off, order and removal on top, the stage body
+/// on the left and what comes out of the stage on the right.
+fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, auto: bool, acts: &mut Vec<StageAct>) {
+    egui::Frame::new().fill(RAISED).corner_radius(8).inner_margin(10).stroke(Stroke::new(1.0, BORDER)).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("{}", i + 1)).monospace().color(FAINT));
+            ui.menu_button(RichText::new(&s.op).monospace().strong().color(if s.on { C_KEYWORD } else { FAINT }), |ui| {
+                egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
+                    for (op, _) in db::STAGES {
+                        if ui.button(RichText::new(*op).monospace()).clicked() {
+                            acts.push(StageAct::Op(i, op.to_string()));
+                            ui.close();
+                        }
+                    }
+                });
+            })
+            .response
+            .on_hover_text("Change the stage operator");
+            if ui.checkbox(&mut s.on, "").on_hover_text("Include this stage in the pipeline").changed() {
+                acts.push(StageAct::Toggled(i));
+            }
+            ui.hyperlink_to(RichText::new("Docs").size(11.5), format!("https://www.mongodb.com/docs/manual/reference/operator/aggregation/{}/", s.op.trim_start_matches('$')));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.menu_button(RichText::new("Remove…").color(ALERT), |ui| {
+                    if ui.button(RichText::new(format!("Remove stage {}", i + 1)).color(ALERT)).clicked() {
+                        acts.push(StageAct::Remove(i));
+                        ui.close();
+                    }
+                });
+                if ui.add_enabled(i + 1 < n, egui::Button::new("Down").small()).clicked() {
+                    acts.push(StageAct::Move(i, true));
+                }
+                if ui.add_enabled(i > 0, egui::Button::new("Up").small()).clicked() {
+                    acts.push(StageAct::Move(i, false));
+                }
+            });
+        });
+        ui.horizontal_top(|ui| {
+            let w = (ui.available_width() * 0.45).max(260.0);
+            ui.allocate_ui_with_layout(egui::vec2(w, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                ui.set_width(w);
+                let id = egui::Id::unique(("stage-editor", s.uid));
+                let rows = s.text.lines().count().clamp(2, 16);
+                let out = with_autopair(ui, id, &mut s.text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(rows).layouter(&mut code_layout).show(ui));
+                if out.response.changed() {
+                    acts.push(StageAct::Edited(i));
+                }
+                if let Err(e) = db::parse_value(&s.text) {
+                    ui.label(RichText::new(e).size(11.5).color(ALERT));
+                }
+            });
+            // A gap, not ui.separator(): in a row a separator takes all the height left and
+            // stretches the card down the whole view.
+            ui.add_space(14.0);
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    if !s.on {
+                        ui.label(RichText::new("Off: the pipeline skips this stage.").color(FAINT));
+                    } else if s.req != 0 {
+                        ui.spinner();
+                        ui.label(RichText::new("Previewing…").color(MUTED));
+                    } else if let Some(n) = s.count {
+                        ui.label(RichText::new(format!("{} documents", group(&n.to_string()))).strong().color(BRIGHT));
+                        if let Some(ms) = s.ms {
+                            ui.label(RichText::new(format!("{ms} ms")).color(FAINT));
+                        }
+                    } else if s.error.is_none() && !auto && ui.small_button("Preview").clicked() {
+                        acts.push(StageAct::Preview(i));
+                    }
+                });
+                if s.on {
+                    if let Some(e) = &s.error {
+                        ui.label(RichText::new(e).size(12.0).color(if e.starts_with("This stage writes") { WARNING } else { ALERT }));
+                    }
+                    stage_samples(ui, s, i, acts);
+                }
+            });
+        });
+    });
+}
+
+/// The first documents out of a stage, one line each. The whole row toggles the document open
+/// or closed, and several can be open at once.
+fn stage_samples(ui: &mut egui::Ui, s: &mut Stage, i: usize, acts: &mut Vec<StageAct>) {
+    if s.sample.is_empty() {
+        if s.count == Some(0) {
+            ui.label(RichText::new("No documents come out of this stage.").color(FAINT));
+        }
+        return;
+    }
+    let max_h = if s.open.is_empty() { 220.0 } else { 440.0 };
+    egui::ScrollArea::vertical().id_salt(("stage-sample", s.uid)).max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
+        for (k, d) in s.sample.iter().enumerate() {
+            let open = s.open.contains(&k);
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 20.0), Sense::click());
+            if resp.hovered() {
+                ui.painter().rect_filled(rect, 4, HOVER);
+            }
+            chevron(ui.painter(), egui::pos2(rect.left() + 8.0, rect.center().y), open, if open { PRIMARY } else { FAINT });
+            let g = ui.fonts_mut(|f| f.layout_job(cell_job(&Bson::Document(d.clone()))));
+            let clip = ui.painter().with_clip_rect(rect.shrink2(egui::vec2(2.0, 0.0)));
+            clip.galley(egui::pos2(rect.left() + 20.0, rect.center().y - g.size().y / 2.0), g, TEXT);
+            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(if open { "Click to close" } else { "Click to see the whole document" }).clicked() {
+                if !s.open.remove(&k) {
+                    s.open.insert(k);
+                }
+            }
+            if open {
+                let text = db::to_edit_json(d);
+                let rows = text.lines().count().min(24);
+                ui.horizontal(|ui| {
+                    ui.add_space(16.0);
+                    // A &str buffer is read-only: the text can be selected and copied, not edited.
+                    ui.add(egui::TextEdit::multiline(&mut text.as_str()).code_editor().desired_width(f32::INFINITY).desired_rows(rows).layouter(&mut code_layout));
+                });
+            }
+        }
+        if s.count.is_some_and(|n| n > s.sample.len() as u64) && s.sample.len() as i64 >= s.limit && ui.small_button(format!("Show {} more", db::STAGE_SAMPLE)).clicked() {
+            acts.push(StageAct::More(i));
+        }
     });
 }
 
@@ -3403,6 +3675,8 @@ impl App {
                 project: t.proj_txt.clone(),
                 agg: t.agg_txt.clone(),
                 shell: t.shell.code.clone(),
+                stages: if t.stages_src == t.agg_txt { t.stages.iter().map(|s| SavedStage { op: s.op.clone(), text: s.text.clone(), on: s.on }).collect() } else { Vec::new() },
+                agg_text_mode: t.agg_text_mode,
             })
             .collect();
         if tabs != self.prefs.open_tabs || self.cur != self.prefs.cur_tab || self.active != self.prefs.last_conn {
@@ -5881,23 +6155,78 @@ impl App {
         let mut code_lang = None;
         let mut agg_new = std::mem::take(&mut self.new_lib);
         let mut stage = None;
+        let mut sacts: Vec<StageAct> = Vec::new();
+        self.sync_stages();
+        let auto = self.prefs.auto_preview;
+        let mut auto_now = auto;
         let t = self.tm().unwrap();
-        let labels: Vec<String> = if db::is_shell(&t.agg_txt) {
+        let builder = !t.agg_text_mode;
+        let labels: Vec<String> = if builder || db::is_shell(&t.agg_txt) {
             Vec::new()
         } else {
             db::parse_pipeline(&t.agg_txt).map(|p| p.iter().map(|s| s.keys().next().cloned().unwrap_or_default()).collect()).unwrap_or_default()
         };
+        // Why the text cannot be shown as stages, if it cannot.
+        let unsynced = (builder && t.stages_src != t.agg_txt).then(|| if db::is_shell(&t.agg_txt) { "this is a shell command".to_string() } else { stages_from_text(&t.agg_txt).err().unwrap_or_default() });
+        let has_results = t.agg_ms.is_some() || t.agg_req != 0;
+        let avail = ui.available_height();
         egui::Frame::new().fill(PANEL).corner_radius(8).inner_margin(10).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("PIPELINE  ·  an array of stages, or paste db.coll.aggregate([...])").size(11.0).color(MUTED));
+                ui.label(RichText::new(if builder { "PIPELINE  ·  each stage shows what comes out of it" } else { "PIPELINE  ·  an array of stages, or paste db.coll.aggregate([...])" }).size(11.0).color(MUTED));
+                ui.add_space(8.0);
+                segmented(ui, &mut t.agg_text_mode, &[(false, "Stages"), (true, "Text")]);
+                if builder {
+                    ui.checkbox(&mut auto_now, "Auto preview").on_hover_text("Preview each stage a second after you stop typing. Every preview runs two read-only aggregations on the server.");
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     library_menu(ui, &agg_lib, &mut agg_new, true, &mut agg_acts);
                 });
             });
-            let id = ui.make_persistent_id("agg-editor");
-            with_autopair(ui, id, &mut t.agg_txt, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(8).layouter(&mut code_layout).show(ui));
+            if builder {
+                match &unsynced {
+                    Some(e) => {
+                        ui.label(RichText::new(format!("Cannot show this pipeline as stages: {e}. Fix or run it in Text.")).color(WARNING));
+                    }
+                    None => {
+                        let max_h = if has_results { (avail * 0.55).max(260.0) } else { (avail - 70.0).max(260.0) };
+                        egui::ScrollArea::vertical().id_salt("stages").max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
+                            egui::Frame::new().fill(BG).corner_radius(8).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                let n = t.agg_input.count.map_or(String::new(), |n| format!("  ·  about {} documents", group(&n.to_string())));
+                                // Closed at first, like the original's collection sample (isOpen: false, renderer line 111386).
+                                egui::CollapsingHeader::new(RichText::new(format!("Collection input{n}")).color(MUTED)).id_salt("agg-input").default_open(false).show(ui, |ui| {
+                                    stage_samples(ui, &mut t.agg_input, usize::MAX, &mut sacts);
+                                });
+                            });
+                            let n = t.stages.len();
+                            for (i, s) in t.stages.iter_mut().enumerate() {
+                                ui.add_space(6.0);
+                                stage_card(ui, i, n, s, auto, &mut sacts);
+                            }
+                            ui.add_space(6.0);
+                            ui.menu_button(RichText::new("+ Add stage").strong().color(PRIMARY), |ui| {
+                                egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
+                                    for (k, (op, _)) in db::STAGES.iter().enumerate() {
+                                        // The first ten are the original's most used stages (topStages).
+                                        if k == 10 {
+                                            ui.separator();
+                                        }
+                                        if ui.button(RichText::new(*op).monospace()).clicked() {
+                                            sacts.push(StageAct::Add(op.to_string()));
+                                            ui.close();
+                                        }
+                                    }
+                                });
+                            });
+                        });
+                    }
+                }
+            } else {
+                let id = ui.make_persistent_id("agg-editor");
+                with_autopair(ui, id, &mut t.agg_txt, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(8).layouter(&mut code_layout).show(ui));
+            }
             ui.horizontal(|ui| {
-                run = primary(ui, "Run", PRIMARY).on_hover_text("Cmd+Enter").clicked() || ui.input(|i| i.modifiers.command && i.key_pressed(Key::Enter));
+                run = primary(ui, "Run", PRIMARY).on_hover_text("Run the whole pipeline (Cmd+Enter)").clicked() || ui.input(|i| i.modifiers.command && i.key_pressed(Key::Enter));
                 explain = ui.button("Explain").on_hover_text("Cmd+E").clicked();
                 code_menu(ui, &mut code_lang);
                 if t.agg_req != 0 {
@@ -5919,6 +6248,17 @@ impl App {
                 });
             }
         });
+        if auto_now != auto {
+            self.prefs.auto_preview = auto_now;
+            self.save_prefs();
+            if auto_now {
+                self.stages_changed(0, false);
+            }
+        }
+        self.apply_stage_acts(sacts);
+        if builder && unsynced.is_none() {
+            self.pump_previews(ui.ctx());
+        }
         self.new_lib = agg_new;
         if let Some(l) = code_lang {
             self.show_code(l, false);
@@ -5960,7 +6300,122 @@ impl App {
             self.explain();
         }
         ui.add_space(6.0);
-        self.results(ui, true);
+        if !builder || has_results {
+            self.results(ui, true);
+        }
+    }
+
+    /// Rebuilds the builder's stages when the pipeline text changed elsewhere (Text mode, the
+    /// library, a pasted query).
+    fn sync_stages(&mut self) {
+        let Some(t) = self.tm() else { return };
+        if t.agg_text_mode || t.stages_src == t.agg_txt || db::is_shell(&t.agg_txt) {
+            return;
+        }
+        if let Ok(st) = stages_from_text(&t.agg_txt) {
+            t.stages = st;
+            t.stages_src = t.agg_txt.clone();
+        }
+    }
+
+    /// Stages from `from` on need a new preview (a second later while typing), and the pipeline
+    /// text follows the stages.
+    fn stages_changed(&mut self, from: usize, typing: bool) {
+        let auto = self.prefs.auto_preview;
+        let t = self.tm().unwrap();
+        let at = std::time::Instant::now() + std::time::Duration::from_millis(if typing { 1000 } else { 0 });
+        for s in t.stages.iter_mut().skip(from) {
+            s.due = auto.then_some(at);
+        }
+        t.agg_txt = text_from_stages(&t.stages);
+        t.stages_src = t.agg_txt.clone();
+    }
+
+    fn apply_stage_acts(&mut self, acts: Vec<StageAct>) {
+        for a in acts {
+            let t = self.tm().unwrap();
+            match a {
+                StageAct::Edited(i) => self.stages_changed(i, true),
+                StageAct::Toggled(i) => self.stages_changed(i, false),
+                StageAct::Move(i, down) => {
+                    let j = if down { i + 1 } else { i.wrapping_sub(1) };
+                    if j < t.stages.len() {
+                        t.stages.swap(i, j);
+                        self.stages_changed(i.min(j), false);
+                    }
+                }
+                StageAct::Remove(i) => {
+                    if i < t.stages.len() {
+                        t.stages.remove(i);
+                        self.stages_changed(i, false);
+                    }
+                }
+                StageAct::Add(op) => {
+                    let body = db::STAGES.iter().find(|(o, _)| *o == op).map_or("{}", |(_, b)| b);
+                    t.stages.push(Stage::new(&op, body, true));
+                    let i = t.stages.len() - 1;
+                    self.stages_changed(i, false);
+                }
+                StageAct::Op(i, op) => {
+                    let s = &mut t.stages[i];
+                    // A body still equal to the old stage's example becomes the new stage's example.
+                    let template = |o: &str| db::STAGES.iter().find(|(x, _)| *x == o).map(|(_, b)| *b);
+                    if template(&s.op) == Some(s.text.as_str()) || s.text.trim().is_empty() {
+                        s.text = template(&op).unwrap_or("{}").to_string();
+                    }
+                    s.op = op;
+                    self.stages_changed(i, false);
+                }
+                StageAct::More(i) => {
+                    let s = if i == usize::MAX { &mut t.agg_input } else { &mut t.stages[i] };
+                    s.limit += db::STAGE_SAMPLE;
+                    s.due = Some(std::time::Instant::now());
+                }
+                StageAct::Preview(i) => t.stages[i].due = Some(std::time::Instant::now()),
+            }
+        }
+    }
+
+    /// Runs the next stage preview that is due, one at a time and in order, like the original's
+    /// getResultsForStages (renderer line 112079), so a pipeline never floods the server.
+    fn pump_previews(&mut self, ctx: &egui::Context) {
+        if self.demo {
+            return;
+        }
+        let Some(target) = self.target() else { return };
+        let now = std::time::Instant::now();
+        let t = &mut self.tabs[self.cur];
+        if t.agg_input.req == 0 && t.agg_input.due.is_some_and(|d| d <= now) {
+            t.agg_input.due = None;
+            self.req += 1;
+            t.agg_input.req = self.req;
+            self.worker.stage_preview(self.req, target.clone(), Vec::new(), t.agg_input.limit);
+        }
+        if t.stages.iter().any(|s| s.req != 0) {
+            return;
+        }
+        if let Some(next) = t.stages.iter().filter_map(|s| s.due).min() {
+            if next > now {
+                ctx.request_repaint_after(next - now);
+            }
+        }
+        let Some(k) = t.stages.iter().position(|s| s.due.is_some_and(|d| d <= now)) else { return };
+        t.stages[k].due = None;
+        if !t.stages[k].on {
+            return;
+        }
+        match stage_pipeline(&t.stages, k) {
+            Err(e) => (t.stages[k].error, t.stages[k].count, t.stages[k].sample) = (Some(e), None, Vec::new()),
+            // The original never previews past $out or $merge (lastStages, renderer line 112045).
+            Ok(p) if db::has_write_stage(&p) => {
+                (t.stages[k].error, t.stages[k].count, t.stages[k].sample) = (Some("This stage writes, so it only runs with the whole pipeline (Run).".into()), None, Vec::new());
+            }
+            Ok(p) => {
+                self.req += 1;
+                t.stages[k].req = self.req;
+                self.worker.stage_preview(self.req, target, p, t.stages[k].limit);
+            }
+        }
     }
 
     fn schema_view(&mut self, ui: &mut egui::Ui) {
@@ -7742,6 +8197,21 @@ mod tests {
         assert_eq!(colour_of("const"), C_KEYWORD);
         assert_eq!(colour_of("find"), C_DATE);
         assert_eq!(colour_of("// hi"), FAINT);
+    }
+
+    #[test]
+    fn pipeline_builder_text() {
+        let mut st = stages_from_text("[{ $match: { a: 1 } }, { $limit: 5 }, { $project: { a: 1 } }]").unwrap();
+        assert_eq!(st.iter().map(|s| s.op.as_str()).collect::<Vec<_>>(), ["$match", "$limit", "$project"]);
+        st[1].on = false;
+        // Stages that are off are left out of the text and of every preview pipeline.
+        let text = text_from_stages(&st);
+        assert_eq!(db::parse_pipeline(&text).unwrap().len(), 2);
+        assert_eq!(stage_pipeline(&st, 2).unwrap(), vec![doc! { "$match": { "a": 1 } }, doc! { "$project": { "a": 1 } }]);
+        st[0].text = "{ a: ".into();
+        assert!(stage_pipeline(&st, 2).unwrap_err().starts_with("Stage 1 ($match)"));
+        assert!(stages_from_text("[{ $match: {}, $limit: 1 }]").is_err());
+        assert_eq!(text_from_stages(&[]), "[]");
     }
 
     #[test]
