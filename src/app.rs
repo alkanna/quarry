@@ -48,20 +48,17 @@ const NUM_W: f32 = 40.0;
 /// Fixed so an open editor never pushes its panel wider.
 const EDITOR_W: f32 = 230.0;
 
-/// Text gets a sub-type like in the original: web links (isUrl, renderer line 1707) and ids kept
-/// as 24-hex strings (its isForeignKey rule, renderer line 30722) stand out from plain text.
+/// Web links stand out from plain text. Hex ids stored as strings keep the string colour so the
+/// colour always matches the type shown next to them.
 #[derive(PartialEq)]
 enum StrKind {
     Plain,
     Url,
-    Id,
 }
 
 fn str_kind(s: &str) -> StrKind {
     if (s.starts_with("http://") || s.starts_with("https://")) && !s.contains(char::is_whitespace) {
         StrKind::Url
-    } else if s.len() == 24 && s.bytes().all(|b| b.is_ascii_hexdigit()) {
-        StrKind::Id
     } else {
         StrKind::Plain
     }
@@ -71,7 +68,6 @@ fn color_of(b: &Bson) -> Color32 {
     match b {
         Bson::String(s) => match str_kind(s) {
             StrKind::Url => C_LINK,
-            StrKind::Id => C_OID,
             StrKind::Plain if s.is_empty() => C_NULL,
             StrKind::Plain => C_STRING,
         },
@@ -214,6 +210,8 @@ fn with_autopair(ui: &mut egui::Ui, id: egui::Id, text: &mut String, show: impl 
         if fits && quote_ok {
             let byte = text.char_indices().nth(ci).map(|(b, _)| b).unwrap_or(text.len());
             text.insert(byte, close);
+            // Redraw this frame with the edit so it never shows half applied.
+            ui.ctx().request_discard("autopair");
         }
     }
     // Auto indent: a new line keeps the indentation, goes one step deeper after an opening
@@ -233,6 +231,7 @@ fn with_autopair(ui: &mut egui::Ui, id: egui::Id, text: &mut String, show: impl 
                 st.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(c2))));
                 st.store(ui.ctx(), id);
             }
+            ui.ctx().request_discard("auto indent");
         }
     }
     out
