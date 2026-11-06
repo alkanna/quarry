@@ -2636,7 +2636,11 @@ fn camel_case(s: &str) -> String {
         .enumerate()
         .map(|(i, p)| {
             let lower = p.to_lowercase();
-            if i == 0 { lower } else { lower[..1].to_uppercase() + &lower[1..] }
+            if i == 0 {
+                return lower;
+            }
+            let mut chars = lower.chars();
+            chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
         })
         .collect()
 }
@@ -2975,6 +2979,13 @@ mod tests {
     }
     fn kv(v: &[(&str, i32)]) -> Vec<(String, i32)> {
         v.iter().map(|(k, d)| (k.to_string(), *d)).collect()
+    }
+
+    #[test]
+    fn camel_case_headers() {
+        assert_eq!(camel_case("First Name"), "firstName");
+        assert_eq!(camel_case("Prénom Élève"), "prénomÉlève");
+        assert_eq!(camel_case("über straße"), "überStraße");
     }
 
     #[test]
