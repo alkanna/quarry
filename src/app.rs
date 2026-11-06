@@ -4116,6 +4116,18 @@ fn grip(ui: &mut egui::Ui) {
     }
 }
 
+/// Right-aligned end of a wrapping row: moves to its own line when the room left would make it
+/// overlap the items before it. Its width is remembered from the previous frame.
+fn right_group(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    let id = ui.scope_id().with("right-group-w");
+    let need = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(160.0);
+    if ui.available_size_before_wrap().x < need + 8.0 {
+        ui.end_row();
+    }
+    let r = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add);
+    ui.data_mut(|d| d.insert_temp(id, r.response.rect.width()));
+}
+
 /// A glyph button large enough to hit comfortably.
 fn icon_button(ui: &mut egui::Ui, glyph: &str, enabled: bool) -> egui::Response {
     ui.add_enabled(enabled, egui::Button::new(RichText::new(glyph).size(15.0)).min_size(egui::vec2(28.0, 26.0)))
@@ -5447,7 +5459,7 @@ impl App {
     fn collection(&mut self, ui: &mut egui::Ui) {
         let Some(t) = self.t() else { return };
         let (coll, view) = (t.sel.coll.clone(), t.view);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(&coll).size(18.0).strong().color(BRIGHT()));
             ui.add_space(12.0);
             for (v, label) in [(View::Documents, "Documents"), (View::Aggregate, "Aggregate"), (View::Indexes, "Indexes"), (View::Schema, "Schema"), (View::Import, "Import"), (View::Compare, "Compare"), (View::Shell, "Shell")] {
@@ -5456,7 +5468,7 @@ impl App {
                 }
             }
             if matches!(view, View::Documents | View::Aggregate) {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                right_group(ui, |ui| {
                     if self.prefs.table {
                         self.columns_menu(ui, view == View::Aggregate);
                     }
@@ -6426,7 +6438,7 @@ impl App {
         let vis = ui.clip_rect().x_range();
         let (left, right) = (vis.min.max(full.min), vis.max.min(full.max) - 4.0);
         let w = (right - full.min).max(240.0);
-        ui.allocate_ui_with_layout(egui::vec2(w, ui.spacing().interact_size.y), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        ui.allocate_ui_with_layout(egui::vec2(w, ui.spacing().interact_size.y), egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true), |ui| {
             ui.add_space((left - full.min).min(w - 240.0).max(0.0));
             let id = d.get("_id").map(db::short).unwrap_or_default();
             ui.label(RichText::new(id).monospace().color(C_OID()));
@@ -6445,7 +6457,7 @@ impl App {
                     self.docs_act(ui.ctx(), DocsAct::Delete, vec![d.clone()]);
                 }
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            right_group(ui, |ui| {
                 if ui.small_button("Close").on_hover_text("Esc").clicked() {
                     if let Some(key) = row.or(selected) {
                         self.close_row(key);
