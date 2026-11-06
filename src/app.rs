@@ -3026,7 +3026,7 @@ impl App {
     fn install_tools_button(&mut self, ui: &mut egui::Ui) {
         if self.tools_installing {
             ui.horizontal(|ui| {
-                ui.spinner();
+                spin(ui);
                 ui.label(RichText::new("Downloading the MongoDB Database Tools…").color(MUTED()));
             });
         } else if ui.button("Install the MongoDB Database Tools").on_hover_text(format!("Downloads MongoDB's official build into {}", tools_dir().display())).clicked() {
@@ -3890,7 +3890,7 @@ fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, auto: bool, 
                     if !s.on {
                         ui.label(RichText::new("Off: the pipeline skips this stage.").color(FAINT()));
                     } else if s.req != 0 {
-                        ui.spinner();
+                        spin(ui);
                         ui.label(RichText::new("Previewing…").color(MUTED()));
                     } else if let Some(n) = s.count {
                         ui.label(RichText::new(format!("{} documents", group(&n.to_string()))).strong().color(BRIGHT()));
@@ -4025,6 +4025,16 @@ fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::Inn
 
 fn mono(c: Color32) -> TextFormat {
     TextFormat { font_id: FontId::monospace(12.5), color: c, ..Default::default() }
+}
+
+/// egui's spinner asks for a new frame on every refresh. Behind other windows a static glyph
+/// lets the app go idle instead of redrawing at full rate for something nobody is watching.
+fn spin(ui: &mut egui::Ui) {
+    if ui.input(|i| i.viewport().focused.unwrap_or(true)) {
+        ui.spinner();
+    } else {
+        ui.label(RichText::new("…").color(FAINT()));
+    }
 }
 
 fn row_job(d: &Document, width: f32) -> LayoutJob {
@@ -4321,7 +4331,7 @@ impl App {
                 dialog_title(ui, &t.title);
                 match &t.done {
                     None => {
-                        ui.spinner();
+                        spin(ui);
                     }
                     Some(Ok(m)) => {
                         ui.label(RichText::new(m).color(SUCCESS()));
@@ -4394,7 +4404,7 @@ impl App {
             egui::ScrollArea::vertical().max_height(screen.height() - 220.0).show(ui, |ui| {
                 settings_section(ui, "USERS", |ui| match &u.users {
                     None => {
-                        ui.spinner();
+                        spin(ui);
                     }
                     Some(Err(e)) => {
                         ui.label(RichText::new(format!("Could not list users: {e}")).color(ALERT()));
@@ -4473,7 +4483,7 @@ impl App {
                 });
                 settings_section(ui, "CUSTOM ROLES", |ui| match &u.roles {
                     None => {
-                        ui.spinner();
+                        spin(ui);
                     }
                     Some(Err(e)) => {
                         ui.label(RichText::new(format!("Could not list roles: {e}")).color(ALERT()));
@@ -4937,7 +4947,7 @@ impl App {
                 Status::Ready => {}
                 Status::Connecting => {
                     ui.horizontal(|ui| {
-                        ui.spinner();
+                        spin(ui);
                         ui.label(RichText::new("Connecting…").color(MUTED()));
                     });
                 }
@@ -5415,7 +5425,7 @@ impl App {
             ui.label(RichText::new(format!("{} documents", group(&count.to_string()))).color(BRIGHT()));
             ui.label(RichText::new(format!("{ms} ms")).color(MUTED()));
             if loading {
-                ui.spinner();
+                spin(ui);
             }
             ui.separator();
             if ui.add_enabled(page > 0, egui::Button::new("‹")).clicked() {
@@ -5617,7 +5627,7 @@ impl App {
             ui.add_space(20.0);
             ui.horizontal(|ui| {
                 if connecting {
-                    ui.spinner();
+                    spin(ui);
                     ui.label(RichText::new(format!("Connecting to {name}…")).color(MUTED()));
                     return;
                 }
@@ -6469,7 +6479,7 @@ impl App {
             ui.horizontal(|ui| {
                 match running {
                     Some(at) => {
-                        ui.spinner();
+                        spin(ui);
                         ui.label(RichText::new(format!("Running {:.1} s", at.elapsed().as_secs_f32())).color(MUTED()));
                         ui.ctx().request_repaint_after(Duration::from_millis(100));
                         stop = ui.button("Stop").clicked();
@@ -6795,7 +6805,7 @@ impl App {
                 explain = ui.button("Explain").on_hover_text("Cmd+E").clicked();
                 code_menu(ui, &mut code_lang);
                 if t.agg_req != 0 {
-                    ui.spinner();
+                    spin(ui);
                     ui.label(RichText::new("Running…").color(MUTED()));
                 } else if let Some(ms) = t.agg_ms {
                     let from = t.agg_stage.map_or(String::new(), |i| format!("Output after stage {}  ", i + 1));
@@ -7004,7 +7014,7 @@ impl App {
                             }
                         });
                     if t.schema.running {
-                        ui.spinner();
+                        spin(ui);
                     }
                 });
             });
@@ -7206,7 +7216,7 @@ impl App {
             let ok = !c.coll.is_empty() && !same && !c.running;
             run = ui.add_enabled(ok, primary_button(ui, "Compare", PRIMARY())).on_disabled_hover_text(if same { "Pick a different collection" } else { "Pick a target collection" }).clicked();
             if c.running {
-                ui.spinner();
+                spin(ui);
             }
             });
         });
@@ -7791,7 +7801,7 @@ impl App {
                     match &self.conn_test {
                         None if f.testing => {
                             ui.horizontal(|ui| {
-                                ui.spinner();
+                                spin(ui);
                                 ui.label(RichText::new("Testing…").color(MUTED()));
                             });
                         }
