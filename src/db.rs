@@ -242,6 +242,26 @@ pub fn dump_args(uri: &str, db: &str, coll: Option<&str>, archive: &str, gzip: b
     a
 }
 
+/// The YAML that mongodump and mongorestore read with --config. A JSON string is also a valid
+/// YAML scalar, so any character in the address is quoted safely.
+pub fn tool_config(uri: &str) -> String {
+    format!("uri: {}\n", serde_json::Value::from(uri))
+}
+
+/// Writes the tool config to a fresh temp file that only the user can read.
+fn write_tool_config(uri: &str) -> std::io::Result<std::path::PathBuf> {
+    use std::io::Write;
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let path = std::env::temp_dir().join(format!("quarry-tool-{}-{nanos}.yaml", std::process::id()));
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    // Windows temp folders are already private to the user.
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    o.open(&path)?.write_all(tool_config(uri).as_bytes())?;
+    Ok(path)
+}
+
 /// mongorestore arguments (getMongorestoreCommand, renderer line 135878): only `from_db` (or one
 /// collection of it) is restored, renamed into `to_db` when the names differ.
 pub fn restore_args(uri: &str, archive: &str, from_db: &str, coll: Option<&str>, to_db: &str, drop: bool, gzip: bool) -> Vec<String> {
@@ -799,6 +819,18 @@ impl Worker {
                 ctx.request_repaint();
             };
             let name = exe.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            // The address carries the password, and arguments are visible to every local user.
+            let mut args = args;
+            let mut config = None;
+            if let Some(i) = args.iter().position(|a| a.starts_with("--uri=")) {
+                match write_tool_config(&args[i]["--uri=".len()..]) {
+                    Ok(p) => {
+                        args[i] = format!("--config={}", p.display());
+                        config = Some(p);
+                    }
+                    Err(err) => return send(Msg::ToolDone(Err(format!("Could not write the {name} config ({err})")))),
+                }
+            }
             let run = async {
                 use tokio::io::AsyncBufReadExt;
                 let mut cmd = tokio::process::Command::new(&exe);
@@ -825,6 +857,9 @@ impl Worker {
                 r = run => r,
                 _ = cancel => Err(format!("{name} stopped")),
             };
+            if let Some(p) = config {
+                let _ = std::fs::remove_file(p);
+            }
             send(Msg::ToolDone(res));
         });
     }
@@ -3326,6 +3361,7 @@ mod tests {
         assert_eq!(uri_without_db("mongodb://u:p@h:1/shop?tls=true"), "mongodb://u:p@h:1/?tls=true");
         assert_eq!(uri_without_db("mongodb+srv://h/shop"), "mongodb+srv://h/");
         assert_eq!(uri_without_db("mongodb://h:1"), "mongodb://h:1");
+        assert_eq!(tool_config("mongodb://u:p\"#@h/?a=1"), "uri: \"mongodb://u:p\\\"#@h/?a=1\"\n");
         assert_eq!(dump_args("mongodb://h", "shop", Some("orders"), "/tmp/a", true), ["--uri=mongodb://h", "--archive=/tmp/a", "--db=shop", "--collection=orders", "--gzip", "--forceTableScan"]);
         assert_eq!(restore_args("mongodb://h/shop", "/tmp/a", "shop", None, "copy", true, false), ["--uri=mongodb://h/", "--archive=/tmp/a", "--nsInclude=shop.*", "--nsFrom=shop.*", "--nsTo=copy.*", "--drop"]);
     }
