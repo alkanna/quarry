@@ -1923,6 +1923,10 @@ pub struct App {
     /// Pending expand/collapse from the tree menu: document, path prefix, open.
     fold: Option<(egui::Id, Vec<String>, bool)>,
     fold_busy: bool,
+    /// Key column width and full row span of the tree being drawn, so values line up and hover bands cover the whole card.
+    key_w: f32,
+    char_w: f32,
+    tree_x: egui::Rangef,
     insert: Option<String>,
     /// Database hidden from the sidebar while its drop runs, to show again if the drop fails.
     dropping_db: Option<(u64, String)>,
@@ -2478,6 +2482,9 @@ impl App {
             new_field: None,
             fold: None,
             fold_busy: false,
+            key_w: 0.0,
+            char_w: 0.0,
+            tree_x: egui::Rangef::NOTHING,
             insert: None,
             dropping_db: None,
             prefs: UiPrefs::default(),
@@ -4023,8 +4030,10 @@ fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::Inn
     egui::Frame::new().fill(RAISED()).stroke(Stroke::new(1.0, BORDER())).corner_radius(8).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, add)
 }
 
+const MONO_PX: f32 = 12.5;
+
 fn mono(c: Color32) -> TextFormat {
-    TextFormat { font_id: FontId::monospace(12.5), color: c, ..Default::default() }
+    TextFormat { font_id: FontId::monospace(MONO_PX), color: c, ..Default::default() }
 }
 
 /// egui's spinner asks for a new frame on every refresh. Behind other windows a static glyph
@@ -5869,9 +5878,11 @@ impl App {
                     }
                     if active && self.prefs.open_inline {
                         ui.add_space(4.0);
-                        let w = (view_w - 24.0).max(320.0);
+                        // Spans every column like the rows above it, not just the visible part.
+                        let w = row_w.max(320.0);
                         card(ui, |ui| {
-                            ui.set_width(w - 24.0);
+                            // Card inner margin and stroke on both sides.
+                            ui.set_width(w - 30.0);
                             ui.spacing_mut().item_spacing.y = 6.0;
                             self.doc_body(ui, d, agg);
                         });
@@ -5994,7 +6005,14 @@ impl App {
     /// The open document: actions, then its fields as a tree that can be edited in place.
     fn doc_body(&mut self, ui: &mut egui::Ui, d: &Document, from_agg: bool) {
         let mut acts = Vec::new();
-        ui.horizontal(|ui| {
+        // The inline card can be wider than the table viewport; the header row stays within the
+        // visible part so its buttons never sit behind the window edge.
+        let full = ui.max_rect().x_range();
+        let vis = ui.clip_rect().x_range();
+        let (left, right) = (vis.min.max(full.min), vis.max.min(full.max) - 4.0);
+        let w = (right - full.min).max(240.0);
+        ui.allocate_ui_with_layout(egui::vec2(w, ui.spacing().interact_size.y), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.add_space((left - full.min).min(w - 240.0).max(0.0));
             let id = d.get("_id").map(db::short).unwrap_or_default();
             ui.label(RichText::new(id).monospace().color(C_OID()));
             ui.add_space(8.0);
@@ -6040,6 +6058,25 @@ impl App {
         let id = egui::Id::unique(("doc", d.get("_id").map(db::compact)));
         let mut path = Vec::new();
         self.fold_busy = false;
+        // Runs every frame, so capped like doc_paths: deeper keys just truncate.
+        fn longest(d: &Document, depth: usize) -> usize {
+            d.iter().map(|(k, v)| k.chars().count().max(match v {
+                _ if depth >= 4 => 0,
+                Bson::Document(c) => longest(c, depth + 1),
+                Bson::Array(a) => a.iter().take(20).filter_map(|v| v.as_document()).map(|c| longest(c, depth + 1)).max().unwrap_or(0),
+                _ => 0,
+            })).max().unwrap_or(0)
+        }
+        self.char_w = ui.fonts_mut(|f| f.glyph_width(&FontId::monospace(MONO_PX), 'x'));
+        // Cached per document and field count, so open documents are not walked every frame.
+        let cache = id.with(("key-chars", d.len()));
+        let chars = ui.data(|m| m.get_temp::<usize>(cache)).unwrap_or_else(|| {
+            let n = longest(d, 0).min(32);
+            ui.data_mut(|m| m.insert_temp(cache, n));
+            n
+        });
+        self.key_w = (chars as f32 * self.char_w + 24.0).clamp(96.0, 320.0);
+        self.tree_x = ui.max_rect().x_range().expand(8.0);
         for (k, v) in d {
             path.push(k.clone());
             self.tree(ui, k, v, 0, id, &mut path, !from_agg, &mut acts);
@@ -6277,9 +6314,11 @@ impl App {
                     Bson::Array(a) => a.iter().enumerate().map(|(i, v)| (i.to_string(), v)).collect(),
                     _ => unreachable!(),
                 };
+                let band = ui.painter().add(egui::Shape::Noop);
+                let key_px = key.chars().count() as f32 * self.char_w;
                 let mut job = LayoutJob::default();
                 job.append(key, 0.0, mono(BRIGHT()));
-                job.append(&format!("  {}", leaf_text(v)), 0.0, mono(FAINT()));
+                job.append(&leaf_text(v), (self.key_w - key_px).max(12.0), mono(FAINT()));
                 let adding_here = self.new_field.as_ref().is_some_and(|n| n.parent == *path);
                 let forced = self.fold.as_ref().filter(|f| f.0 == id && path.starts_with(&f.1)).map(|f| f.2);
                 let r = egui::CollapsingHeader::new(job)
@@ -6299,6 +6338,7 @@ impl App {
                 if highlighted(&self.prefs, &self.col_key(false), path) {
                     ui.painter().rect_filled(r.header_response.rect.expand(2.0), 4, HIGHLIGHT());
                 }
+                self.hover_band(ui, band, r.header_response.rect.y_range());
                 if editable && r.header_response.double_clicked() && path.first().is_some_and(|k| k != "_id") {
                     acts.push(TreeAct::Start(path.clone(), v.clone()));
                 }
@@ -6319,9 +6359,17 @@ impl App {
                 let hl = highlighted(&self.prefs, &self.col_key(false), path);
                 let mut fold = None;
                 let edited = !self.changed.is_empty() && self.changed.contains(&path.join("."));
-                egui::Frame::new().fill(if edited { tint(WARNING(), 34) } else if hl { HIGHLIGHT() } else { Color32::TRANSPARENT }).corner_radius(4).show(ui, |ui| ui.horizontal(|ui| {
-                    ui.add_space(16.0);
-                    let key_r = ui.add(egui::Label::new(RichText::new(key).monospace().color(MUTED())).sense(Sense::click()));
+                let band = ui.painter().add(egui::Shape::Noop);
+                let row = egui::Frame::new().fill(if edited { tint(WARNING(), 34) } else if hl { HIGHLIGHT() } else { Color32::TRANSPARENT }).corner_radius(4).show(ui, |ui| ui.horizontal(|ui| {
+                    // Same offsets as a collapsing header so keys and values line up across both.
+                    let x0 = ui.cursor().left();
+                    ui.add_space(ui.spacing().indent);
+                    let key_w = self.key_w;
+                    let key_r = ui.scope(|ui| {
+                        ui.set_max_width(key_w - 8.0);
+                        ui.add(egui::Label::new(RichText::new(key).font(FontId::monospace(MONO_PX)).color(MUTED())).truncate().sense(Sense::click()))
+                    }).inner;
+                    ui.add_space((x0 + ui.spacing().indent + key_w - ui.cursor().left()).max(0.0));
                     if editing_here {
                         let inl = self.inline.as_mut().unwrap();
                         let r = ui.add(egui::TextEdit::singleline(&mut inl.text).desired_width(EDITOR_W).font(FontId::monospace(12.5)).clip_text(true));
@@ -6369,10 +6417,19 @@ impl App {
                         });
                     }
                 }));
+                self.hover_band(ui, band, row.response.rect.y_range());
                 if let Some((p, open)) = fold {
                     self.fold = Some((id, p, open));
                 }
             }
+        }
+    }
+
+    /// Paints a full-width band behind a tree row while the pointer is over it.
+    fn hover_band(&self, ui: &egui::Ui, at: egui::layers::ShapeIdx, y: egui::Rangef) {
+        let r = egui::Rect::from_x_y_ranges(self.tree_x, y.expand(2.0));
+        if ui.rect_contains_pointer(r) {
+            ui.painter().set(at, egui::epaint::RectShape::filled(r, 4, HOVER()));
         }
     }
 
