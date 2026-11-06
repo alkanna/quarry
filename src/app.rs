@@ -1303,6 +1303,8 @@ struct CompareTab {
     req: u64,
     running: bool,
     result: Option<db::Compared>,
+    /// The target `result` was computed against.
+    ran: (u64, String, String),
     insert: bool,
     replace: bool,
     delete: bool,
@@ -3819,6 +3821,7 @@ impl App {
             t.view = View::Compare;
             t.selected = None;
             (t.compare.conn, t.compare.db, t.compare.coll) = (1, "shop".into(), "paid_orders".into());
+            t.compare.ran = (1, "shop".into(), "paid_orders".into());
             let src = t.docs.clone();
             let mut dst: Vec<Document> = src.iter().skip(3).cloned().collect();
             for d in dst.iter_mut().take(4) {
@@ -7755,6 +7758,10 @@ impl App {
             }
             });
         });
+        // Syncing writes the old diff to whatever target is picked, so a diff for another one is dropped.
+        if c.ran != (c.conn, c.db.clone(), c.coll.clone()) {
+            c.result = None;
+        }
         if let Some(r) = &c.result {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -7834,7 +7841,7 @@ impl App {
             let req = self.req;
             let to = self.timeout();
             let c = &mut self.tabs[i].compare;
-            (c.req, c.running, c.result) = (req, true, None);
+            (c.req, c.running, c.result, c.ran) = (req, true, None, (tc, tdb.clone(), tcoll.clone()));
             self.worker.compare(req, Target { client: a, db: src.db, coll: src.coll, timeout: to }, Target { client: b, db: tdb, coll: tcoll, timeout: to });
         } else if sync {
             if !self.conn(tc).is_some_and(|c| c.writable) {
