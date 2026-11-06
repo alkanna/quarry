@@ -751,7 +751,20 @@ fn suggest_js(before: &str, paths: &[String], colls: &[String], pkgs: &[String])
         return None;
     } else if before.matches('(').count() > before.matches(')').count() && lead.trim_end().ends_with(['{', ',', ':']) {
         // Inside a call's arguments: the same field and operator suggestions as the Query box.
-        return suggest(before, FieldKind::Query, paths, &[]);
+        // Only the open call's arguments are passed, so braces of the function around the call
+        // do not count as query nesting.
+        let mut depth = 0;
+        let open = before.char_indices().rev().find(|(_, c)| {
+            match c {
+                ')' => depth += 1,
+                '(' if depth == 0 => return true,
+                '(' => depth -= 1,
+                _ => {}
+            }
+            false
+        });
+        let args = open.map_or(before, |(i, _)| &before[i + 1..]);
+        return suggest(args, FieldKind::Query, paths, &[]);
     } else {
         let mut v: Vec<Sug> = JS_KEYWORDS.iter().map(|k| Sug { text: k.to_string(), note: "keyword", insert: format!("{k} "), caret: k.len() + 1 }).collect();
         v.extend(JS_GLOBALS.iter().map(|g| match *g {
@@ -1303,6 +1316,8 @@ struct CompareTab {
     req: u64,
     running: bool,
     result: Option<db::Compared>,
+    /// The target `result` was computed against.
+    ran: (u64, String, String),
     insert: bool,
     replace: bool,
     delete: bool,
@@ -2008,6 +2023,26 @@ fn parse_config<T: serde::de::DeserializeOwned + Default>(path: &std::path::Path
     }
 }
 
+/// Like `parse_config` for a list, but an entry that no longer parses is skipped instead of
+/// losing every other one. The whole file is copied to `<name>.bak` first, because the next save
+/// writes back only the entries that parsed.
+fn parse_config_list<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> (Vec<T>, Option<String>) {
+    let Ok(b) = std::fs::read(path) else { return (Vec::new(), None) };
+    let Ok(items) = serde_json::from_slice::<Vec<serde_json::Value>>(&b) else { return parse_config(path) };
+    let total = items.len();
+    let mut errs = Vec::new();
+    let good: Vec<T> = items.into_iter().filter_map(|v| serde_json::from_value(v).map_err(|e| errs.push(e.to_string())).ok()).collect();
+    if errs.is_empty() {
+        return (good, None);
+    }
+    let bak = path.with_extension("json.bak");
+    let kept = match std::fs::copy(path, &bak) {
+        Ok(_) => format!("The full file was kept as {}.", bak.display()),
+        Err(e) => format!("Copying it aside failed ({e}); the skipped entries will be lost on the next save."),
+    };
+    (good, Some(format!("Skipped {} of {total} entries in {}: {}. {kept}", errs.len(), path.display(), errs.join("; "))))
+}
+
 fn config_dir() -> PathBuf {
     dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("quarry")
 }
@@ -2187,10 +2222,11 @@ fn find_exe(name: &str, setting: &str) -> Option<PathBuf> {
 }
 
 /// Words the original treats as possibly destructive in the shell (`dangerousCommands`,
-/// renderer line 131264: /drop|remove|replace|update|delete|insert|rename|\$out/i).
+/// renderer line 131264: /drop|remove|replace|update|delete|insert|rename|\$out/i), plus `$merge`,
+/// which writes to a collection from a pipeline just like `$out`.
 fn dangerous_words(code: &str) -> Vec<String> {
     let lower = code.to_lowercase();
-    ["drop", "remove", "replace", "update", "delete", "insert", "rename", "$out"].iter().filter(|w| lower.contains(*w)).map(|w| w.to_string()).collect()
+    ["drop", "remove", "replace", "update", "delete", "insert", "rename", "$out", "$merge"].iter().filter(|w| lower.contains(*w)).map(|w| w.to_string()).collect()
 }
 
 /// The original's "Open query in NodeShell" script (renderer line 96080), with its collection
@@ -2204,8 +2240,16 @@ fn query_script(coll: &str, filter: &str) -> String {
     format!("async function run() {{\n\treturn await {}.find({f})\n}}", collection_ref(coll))
 }
 
+/// Words the Shell runner does not bind as bare names, since they cannot be parameter names or
+/// would not resolve to the collection inside run(). Must match RESERVED in shell_runner.mjs.
+const JS_RESERVED: [&str; 48] = [
+    "break", "case", "catch", "class", "const", "continue", "debugger", "default", "delete", "do", "else", "enum", "export", "extends", "false", "finally", "for",
+    "function", "if", "import", "in", "instanceof", "new", "null", "return", "super", "switch", "this", "throw", "true", "try", "typeof", "var", "void", "while",
+    "with", "implements", "interface", "let", "package", "private", "protected", "public", "static", "yield", "await", "arguments", "eval",
+];
+
 pub(crate) fn collection_ref(coll: &str) -> String {
-    if coll.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') && !coll.starts_with(|c: char| c.is_ascii_digit()) {
+    if coll.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') && !coll.starts_with(|c: char| c.is_ascii_digit()) && !JS_RESERVED.contains(&coll) {
         coll.to_string()
     } else {
         format!("db.collection({})", serde_json::Value::String(coll.into()))
@@ -2581,7 +2625,7 @@ impl App {
             }
         } else {
             crate::update::cleanup();
-            let (metas, broken_conns) = parse_config::<Vec<ConnMeta>>(&config_dir().join("connections.json"));
+            let (metas, broken_conns) = parse_config_list::<ConnMeta>(&config_dir().join("connections.json"));
             let ui_json = config_dir().join("ui.json").exists().then_some(());
             let (prefs, broken_prefs) = parse_config(&config_dir().join("ui.json"));
             app.prefs = prefs;
@@ -2654,7 +2698,11 @@ impl App {
         }
         let dir = config_dir();
         let _ = std::fs::create_dir_all(&dir);
-        if let Err(err) = std::fs::write(dir.join(file), bytes) {
+        // Written beside the file, then renamed over it: a crash mid-write leaves the old file
+        // whole instead of a truncated one that no longer parses.
+        let tmp = dir.join(format!(".{file}.tmp"));
+        if let Err(err) = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, dir.join(file))) {
+            let _ = std::fs::remove_file(&tmp);
             self.err(format!("Could not save {file}: {err}"));
         }
     }
@@ -2746,6 +2794,10 @@ impl App {
     }
 
     fn connect(&mut self, id: u64) {
+        // Demo ids overlap real ones, so reading the Keychain here would connect to a real server.
+        if self.demo {
+            return self.ok("Offline demo: no database is connected.");
+        }
         let uri = match stored_uri(id) {
             Ok(u) => u,
             Err(e) => return self.err(uri_err(e)),
@@ -2951,12 +3003,16 @@ impl App {
     }
 
     fn load_indexes(&mut self) {
-        if let Some(target) = self.target() {
+        self.load_indexes_of(self.cur);
+    }
+
+    fn load_indexes_of(&mut self, i: usize) {
+        if let Some(target) = self.tabs.get(i).and_then(|t| self.target_for(&t.sel)) {
             self.req += 1;
             let req = self.req;
-            self.tm().unwrap().idx_req = req;
+            self.tabs[i].idx_req = req;
             // Only the Indexes view shows usage, and it costs a profiler query.
-            if self.t().is_some_and(|t| t.view == View::Indexes) {
+            if self.tabs[i].view == View::Indexes {
                 self.worker.index_info(target.clone());
             }
             self.worker.indexes(req, target);
@@ -3098,21 +3154,25 @@ impl App {
     }
 
     fn reload(&mut self) {
+        self.reload_of(self.cur);
+    }
+
+    fn reload_of(&mut self, i: usize) {
         if self.demo {
             return;
         }
-        let Some(target) = self.target() else { return };
+        let Some(target) = self.tabs.get(i).and_then(|t| self.target_for(&t.sel)) else { return };
         // Each answer is matched to its tab by id; a slower older one never overwrites a newer one.
         self.req += 1;
         let req = self.req;
-        let t = self.tm().unwrap();
+        let t = &mut self.tabs[i];
         t.req = req;
         t.loading = true;
         let (q, page, view, no_idx) = (t.query.clone(), t.page, t.view, t.indexes.is_empty());
         self.worker.find(req, target, q, page);
         // Indexes also feed the Sort history (as in the original), so load them once per tab.
         if view == View::Indexes || no_idx {
-            self.load_indexes();
+            self.load_indexes_of(i);
         }
     }
 
@@ -3390,7 +3450,7 @@ impl App {
                         }
                     }
                 }
-                Msg::Written { res, undo, reload, retry } => {
+                Msg::Written { at, res, undo, reload, retry } => {
                     match res {
                         Ok(s) => {
                             self.reset_doc_state();
@@ -3410,22 +3470,28 @@ impl App {
                     if let Some(u) = undo {
                         self.push_undo(u);
                     }
-                    if reload {
-                        self.reload();
-                    } else {
-                        self.load_indexes();
+                    // The worker only knows the database and collection, so a same-named
+                    // collection on another connection may reload too, which is harmless.
+                    let tabs: Vec<usize> = (0..self.tabs.len()).filter(|&i| self.tabs[i].sel.db == at.0 && self.tabs[i].sel.coll == at.1).collect();
+                    for i in tabs {
+                        if reload {
+                            self.reload_of(i);
+                        } else {
+                            self.load_indexes_of(i);
+                        }
                     }
                 }
                 Msg::Saved { tag, res, undo } => {
+                    let dr = self.saving.remove(&tag);
+                    let sel = dr.as_ref().map(|d| Sel { conn: d.conn, db: d.db.clone(), coll: d.coll.clone() });
                     match res {
                         Ok(s) => {
-                            self.saving.remove(&tag);
                             self.toast = Some((s.clone(), std::time::Instant::now(), undo.as_ref().map(|u| u.at)));
                             self.ok(s);
                         }
                         Err(e) => {
                             // Keep the edits so nothing typed is lost; the person can reload and redo.
-                            if let Some(dr) = self.saving.remove(&tag) {
+                            if let Some(dr) = dr {
                                 self.drafts.insert(tag, dr);
                             }
                             self.err(e);
@@ -3434,8 +3500,12 @@ impl App {
                     if let Some(u) = undo {
                         self.push_undo(u);
                     }
-                    if self.saving.is_empty() {
-                        self.reload();
+                    // Waits for the collection's other saves so the reload shows all of them.
+                    if let Some(sel) = sel.filter(|s| !self.saving.values().any(|d| d.conn == s.conn && d.db == s.db && d.coll == s.coll)) {
+                        let tabs: Vec<usize> = (0..self.tabs.len()).filter(|&i| self.tabs[i].sel == sel).collect();
+                        for i in tabs {
+                            self.reload_of(i);
+                        }
                     }
                 }
                 Msg::Info(res) => match res {
@@ -3580,7 +3650,14 @@ impl App {
         let t = self.t()?;
         match t.selected? {
             (false, i) => t.docs.get(i),
-            (true, i) => t.agg_docs.get(i),
+            // Shell and Import lend their rows to `agg_docs` only while their table draws, so
+            // the side panel has to read the row from where it came from.
+            (true, i) => match (t.view, &t.import.parsed) {
+                (View::Shell, _) => t.shell.docs.get(t.shell.page * PAGE_SIZE as usize + i),
+                (View::Import, Some(Ok(docs))) => docs.get(i),
+                (View::Import, _) => None,
+                _ => t.agg_docs.get(i),
+            },
         }
     }
 
@@ -3812,6 +3889,7 @@ impl App {
             t.view = View::Compare;
             t.selected = None;
             (t.compare.conn, t.compare.db, t.compare.coll) = (1, "shop".into(), "paid_orders".into());
+            t.compare.ran = (1, "shop".into(), "paid_orders".into());
             let src = t.docs.clone();
             let mut dst: Vec<Document> = src.iter().skip(3).cloned().collect();
             for d in dst.iter_mut().take(4) {
@@ -4391,8 +4469,8 @@ impl App {
         if tabs != self.prefs.open_tabs || self.cur != self.prefs.cur_tab || self.active != self.prefs.last_conn {
             self.prefs.open_tabs = tabs;
             self.prefs.cur_tab = self.cur;
-            self.save_prefs();
             self.prefs.last_conn = self.active;
+            self.save_prefs();
         }
     }
 
@@ -5077,22 +5155,28 @@ impl App {
                 self.conn_test = None;
                 // Opening the form with an empty address would overwrite the stored one on save,
                 // unless there is none, which is when re-entering it is the way out.
-                let uri = match stored_uri(id) {
-                    Ok(u) => u,
-                    Err(keyring::Error::NoEntry) => String::new(),
-                    Err(e) => return self.err(uri_err(e)),
+                // Demo ids overlap real ones, so the demo must not show the user's real secrets.
+                let uri = if self.demo {
+                    self.conn(id).map(|c| c.masked_uri.clone()).unwrap_or_default()
+                } else {
+                    match stored_uri(id) {
+                        Ok(u) => u,
+                        Err(keyring::Error::NoEntry) => String::new(),
+                        Err(e) => return self.err(uri_err(e)),
+                    }
                 };
+                let stored = |what: &str| if self.demo { String::new() } else { secret(id, what).unwrap_or_default() };
                 self.modal = Some(Modal::Conn(Box::new(ConnForm {
                     id: Some(id),
                     name: meta.name.clone(),
                     uri,
                     ssh_on: meta.ssh.is_some(),
                     ssh: meta.ssh.clone().unwrap_or_default(),
-                    ssh_pwd: secret(id, "ssh-password").unwrap_or_default(),
-                    ssh_pass: secret(id, "ssh-passphrase").unwrap_or_default(),
+                    ssh_pwd: stored("ssh-password"),
+                    ssh_pass: stored("ssh-passphrase"),
                     proxy_on: meta.proxy.is_some(),
                     proxy: meta.proxy.clone().unwrap_or_default(),
-                    proxy_pwd: secret(id, "proxy-password").unwrap_or_default(),
+                    proxy_pwd: stored("proxy-password"),
                     show: false,
                     testing: false,
                 })));
@@ -5873,6 +5957,8 @@ impl App {
 
     /// Table or JSON list of the current results, with the open document shown under its row.
     fn results(&mut self, ui: &mut egui::Ui, agg: bool) {
+        // Following a reference while rendering can switch to another tab, so the docs go back by index.
+        let cur = self.cur;
         let t = self.tm().unwrap();
         // Taken out for the frame so the open document can be edited through `self`.
         let docs = std::mem::take(if agg { &mut t.agg_docs } else { &mut t.docs });
@@ -5911,8 +5997,9 @@ impl App {
                 self.doc_list(ui, agg, &docs);
             }
         }
-        let t = self.tm().unwrap();
-        *(if agg { &mut t.agg_docs } else { &mut t.docs }) = docs;
+        if let Some(t) = self.tabs.get_mut(cur) {
+            *(if agg { &mut t.agg_docs } else { &mut t.docs }) = docs;
+        }
     }
 
     /// Row click: Cmd toggles the row's check, Shift checks a range, a plain click opens it.
@@ -6503,7 +6590,9 @@ impl App {
                     self.docs_act(ui.ctx(), DocsAct::Duplicate, vec![d.clone()]);
                 }
                 if ui.small_button(RichText::new("Delete").color(ALERT())).clicked() {
-                    self.docs_act(ui.ctx(), DocsAct::Delete, vec![d.clone()]);
+                    // `d` carries unsaved edits; the delete only matches the document as stored.
+                    let stored = self.drafts.get(&self.draft_key(d)).map(|dr| dr.original.clone()).unwrap_or_else(|| d.clone());
+                    self.docs_act(ui.ctx(), DocsAct::Delete, vec![stored]);
                 }
             }
             right_group(ui, |ui| {
@@ -7750,6 +7839,10 @@ impl App {
             }
             });
         });
+        // Syncing writes the old diff to whatever target is picked, so a diff for another one is dropped.
+        if c.ran != (c.conn, c.db.clone(), c.coll.clone()) {
+            c.result = None;
+        }
         if let Some(r) = &c.result {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -7829,7 +7922,7 @@ impl App {
             let req = self.req;
             let to = self.timeout();
             let c = &mut self.tabs[i].compare;
-            (c.req, c.running, c.result) = (req, true, None);
+            (c.req, c.running, c.result, c.ran) = (req, true, None, (tc, tdb.clone(), tcoll.clone()));
             self.worker.compare(req, Target { client: a, db: src.db, coll: src.coll, timeout: to }, Target { client: b, db: tdb, coll: tcoll, timeout: to });
         } else if sync {
             if !self.conn(tc).is_some_and(|c| c.writable) {
@@ -8359,13 +8452,19 @@ impl App {
                     }
                     if save {
                         let id = f.id.unwrap_or_else(|| self.conns.iter().map(|c| c.meta.id).max().unwrap_or(0) + 1);
-                        match keychain(id).map(|k| k.set_password(f.uri.trim())) {
+                        // Demo ids overlap real ones, so the demo keeps its edits in memory only.
+                        let saved = if self.demo { Some(Ok(())) } else { keychain(id).map(|k| k.set_password(f.uri.trim())) };
+                        match saved {
                             Some(Ok(())) => {
-                                let stored = [
-                                    set_secret(id, "ssh-password", if f.ssh_on { &f.ssh_pwd } else { "" }),
-                                    set_secret(id, "ssh-passphrase", if f.ssh_on { &f.ssh_pass } else { "" }),
-                                    set_secret(id, "proxy-password", if f.proxy_on && !f.ssh_on { &f.proxy_pwd } else { "" }),
-                                ];
+                                let stored = if self.demo {
+                                    Vec::new()
+                                } else {
+                                    vec![
+                                        set_secret(id, "ssh-password", if f.ssh_on { &f.ssh_pwd } else { "" }),
+                                        set_secret(id, "ssh-passphrase", if f.ssh_on { &f.ssh_pass } else { "" }),
+                                        set_secret(id, "proxy-password", if f.proxy_on && !f.ssh_on { &f.proxy_pwd } else { "" }),
+                                    ]
+                                };
                                 let meta = ConnMeta {
                                     id,
                                     name: f.name.trim().into(),
@@ -8500,6 +8599,10 @@ impl App {
                             self.install_tools_button(ui);
                         }
                     });
+                    // The pref unlocks every connection each frame, so turning it off has to lock them back.
+                    if before.2 && !self.prefs.always_writable {
+                        self.conns.iter_mut().for_each(|c| c.writable = false);
+                    }
                     if before != (self.prefs.open_inline, self.prefs.auto_save, self.prefs.always_writable, self.prefs.confirm_save, self.prefs.default_cols, self.prefs.timeout_ms, self.prefs.shell_runtime.clone(), self.prefs.mongodump.clone(), self.prefs.mongorestore.clone(), self.prefs.auto_update, self.prefs.show_fps, self.prefs.object_preview) {
                         self.save_prefs();
                     }
@@ -8984,9 +9087,14 @@ impl App {
                     let from = path.join(".");
                     dialog_title(ui, format!("Rename {from}"));
                     ui.add(egui::TextEdit::singleline(name).font(FontId::monospace(13.0)).desired_width(320.0));
-                    let valid = !name.trim().is_empty() && !name.contains('.') && !name.starts_with('$') && Some(name.trim()) != path.last().map(|s| s.as_str());
+                    let mut valid = !name.trim().is_empty() && !name.contains('.') && !name.starts_with('$') && Some(name.trim()) != path.last().map(|s| s.as_str());
                     let mut to = path[..path.len() - 1].to_vec();
                     to.push(name.trim().to_string());
+                    // Both the edit and $rename would replace the sibling's value with this one.
+                    if valid && db::get_path(d, &to.join(".")).is_some() {
+                        ui.label(RichText::new(format!("{} already exists here.", name.trim())).color(ALERT()));
+                        valid = false;
+                    }
                     dialog_actions(ui, |ui| {
                         if ui.add_enabled(valid, primary_button(ui, "In this document", PRIMARY())).clicked() {
                             let new = db::get_path(d, &from).cloned().ok_or_else(|| "Field not found".to_string()).and_then(|v| db::edit_path(&db::edit_path(d, path, None)?, &to, Some(v)));
@@ -9215,12 +9323,15 @@ impl App {
 
     fn danger(&mut self, action: Danger) {
         if let Danger::RemoveConnection(id) = action {
-            if let Some(k) = keychain(id) {
-                let _ = k.delete_credential();
-            }
-            // ponytail: best effort, a failure only leaves an orphaned Keychain entry behind.
-            for what in ["ssh-password", "ssh-passphrase", "proxy-password"] {
-                let _ = set_secret(id, what, "");
+            // Demo ids overlap real ones, so removing a demo connection must not touch the Keychain.
+            if !self.demo {
+                if let Some(k) = keychain(id) {
+                    let _ = k.delete_credential();
+                }
+                // ponytail: best effort, a failure only leaves an orphaned Keychain entry behind.
+                for what in ["ssh-password", "ssh-passphrase", "proxy-password"] {
+                    let _ = set_secret(id, what, "");
+                }
             }
             self.conns.retain(|c| c.meta.id != id);
             self.tabs.retain(|t| t.sel.conn != id);
@@ -9335,6 +9446,17 @@ mod tests {
     }
 
     #[test]
+    fn collection_refs() {
+        assert_eq!(collection_ref("users"), "users");
+        assert_eq!(collection_ref("my-coll"), "db.collection(\"my-coll\")");
+        assert_eq!(collection_ref("2024"), "db.collection(\"2024\")");
+        for word in ["default", "class", "new", "delete", "import", "await"] {
+            assert_eq!(collection_ref(word), format!("db.collection(\"{word}\")"));
+        }
+        assert_eq!(query_script("default", ""), "async function run() {\n\treturn await db.collection(\"default\").find({})\n}");
+    }
+
+    #[test]
     fn autocomplete_contexts() {
         let paths: Vec<String> = ["status", "customer", "customer.name", "customer.tier", "total"].iter().map(|s| s.to_string()).collect();
         let (n, s) = suggest("{ cus", FieldKind::Query, &paths, &[]).unwrap();
@@ -9372,6 +9494,10 @@ mod tests {
         assert!(s.iter().any(|x| x.text == "find"));
         let (_, s) = suggest_js("await orders.find({ sta", &paths, &colls, &[]).unwrap();
         assert_eq!(s[0].text, "status");
+        let (_, s) = suggest_js("async function run() {\n  return await orders.find({ sta", &paths, &colls, &[]).unwrap();
+        assert_eq!(s[0].text, "status");
+        let (_, s) = suggest_js("async function run() {\n  return await orders.find({ total: { $g", &paths, &colls, &[]).unwrap();
+        assert_eq!(s[0].note, "operator");
         let (_, s) = suggest_js("  ord", &paths, &colls, &[]).unwrap();
         assert_eq!(s[0].text, "orders");
         let (_, s) = suggest_js("  aw", &paths, &colls, &[]).unwrap();
@@ -9489,6 +9615,19 @@ mod tests {
     }
 
     #[test]
+    fn bad_connection_is_skipped_not_all() {
+        let dir = std::env::temp_dir().join(format!("quarry-cfg-list-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("connections.json");
+        std::fs::write(&p, r#"[{"id": 1, "name": "good"}, {"id": "x", "name": "bad"}]"#).unwrap();
+        let (v, err) = parse_config_list::<ConnMeta>(&p);
+        assert_eq!(v.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["good"]);
+        assert!(err.is_some());
+        assert!(p.exists() && dir.join("connections.json.bak").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn auto_indent() {
         // Enter between {} : closer on its own line, caret indented one step.
         let t = "  run({\n})";
@@ -9511,6 +9650,7 @@ mod tests {
         assert!(query_script("my.coll", "").contains("db.collection(\"my.coll\").find({})"));
         assert!(query_script("x", "db.x.find({});").ends_with("return await db.x.find({})\n}"));
         assert_eq!(dangerous_words("db.x.deleteMany({})"), ["delete"]);
+        assert_eq!(dangerous_words("db.x.aggregate([{ $merge: { into: 'y' } }])"), ["$merge"]);
     }
 
     #[test]

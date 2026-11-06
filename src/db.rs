@@ -27,6 +27,10 @@ impl Target {
     fn c(&self) -> mongodb::Collection<Document> {
         self.client.database(&self.db).collection(&self.coll)
     }
+
+    fn at(&self) -> (String, String) {
+        (self.db.clone(), self.coll.clone())
+    }
 }
 
 #[derive(Clone, Default)]
@@ -85,8 +89,9 @@ pub enum Msg {
     /// Up to 5 matching documents as (before, after) the given update stages, and the total match count.
     UpdatePreview { stages: Vec<Document>, res: Res<(Vec<(Document, Document)>, u64)> },
     /// A write finished. `undo` is filled when the write can be reverted. `retry` is the insert
-    /// dialog's (db, coll, text), to reopen it if the server refused the document.
-    Written { res: Res<String>, undo: Option<UndoAction>, reload: bool, retry: Option<(String, String, String)> },
+    /// dialog's (db, coll, text), to reopen it if the server refused the document. `at` is the
+    /// written (db, coll), so the tabs showing it reload instead of whichever tab is current.
+    Written { at: (String, String), res: Res<String>, undo: Option<UndoAction>, reload: bool, retry: Option<(String, String, String)> },
     /// A staged document edit was written (or refused); `tag` names the draft.
     Saved { tag: String, res: Res<String>, undo: Option<UndoAction> },
     Info(Res<String>),
@@ -225,6 +230,19 @@ pub fn uri_without_db(uri: &str) -> String {
     let Some(s) = uri.find("://").map(|i| i + 3) else { return uri.into() };
     let Some(slash) = uri[s..].find('/').map(|i| s + i) else { return uri.into() };
     let q = uri[slash..].find('?').map_or(uri.len(), |i| slash + i);
+    let db = &uri[slash + 1..q];
+    let opts = uri[q..].trim_start_matches('?');
+    let key = |k: &str| opts.split('&').any(|o| o.split('=').next().is_some_and(|n| n.eq_ignore_ascii_case(k)));
+    // The path database is also the default auth database, so keep it as authSource. SRV
+    // addresses are left alone because their TXT record usually sets authSource, which wins over
+    // the path, and the external mechanisms never authenticate against the path database.
+    let external = opts.split('&').any(|o| {
+        o.split_once('=').is_some_and(|(k, v)| k.eq_ignore_ascii_case("authMechanism") && ["MONGODB-X509", "GSSAPI", "MONGODB-AWS", "MONGODB-OIDC"].contains(&v))
+    });
+    if !db.is_empty() && uri.starts_with("mongodb://") && uri[s..slash].contains('@') && !key("authSource") && !external {
+        let sep = if opts.is_empty() { "" } else { "&" };
+        return format!("{}/?{opts}{sep}authSource={db}", &uri[..slash]);
+    }
     format!("{}/{}", &uri[..slash], &uri[q..])
 }
 
@@ -240,6 +258,26 @@ pub fn dump_args(uri: &str, db: &str, coll: Option<&str>, archive: &str, gzip: b
     }
     a.push("--forceTableScan".into());
     a
+}
+
+/// The YAML that mongodump and mongorestore read with --config. A JSON string is also a valid
+/// YAML scalar, so any character in the address is quoted safely.
+pub fn tool_config(uri: &str) -> String {
+    format!("uri: {}\n", serde_json::Value::from(uri))
+}
+
+/// Writes the tool config to a fresh temp file that only the user can read.
+fn write_tool_config(uri: &str) -> std::io::Result<std::path::PathBuf> {
+    use std::io::Write;
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let path = std::env::temp_dir().join(format!("quarry-tool-{}-{nanos}.yaml", std::process::id()));
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    // Windows temp folders are already private to the user.
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    o.open(&path)?.write_all(tool_config(uri).as_bytes())?;
+    Ok(path)
 }
 
 /// mongorestore arguments (getMongorestoreCommand, renderer line 135878): only `from_db` (or one
@@ -264,6 +302,16 @@ pub struct Worker {
     rt: tokio::runtime::Runtime,
     tx: Sender<Msg>,
     ctx: eframe::egui::Context,
+}
+
+/// How many leading documents of an ordered insert_many batch were written before `err`.
+/// An ordered insert stops at its first write error, so everything before that index is in.
+/// A write concern error alone means the whole batch was written but not confirmed.
+fn inserted_before(err: &mongodb::error::Error, batch: usize) -> usize {
+    match &*err.kind {
+        mongodb::error::ErrorKind::InsertMany(f) => f.write_errors.iter().flatten().map(|w| w.index).min().unwrap_or(batch).min(batch),
+        _ => 0,
+    }
 }
 
 fn e(err: impl std::fmt::Display) -> String {
@@ -590,15 +638,16 @@ impl Worker {
         });
     }
 
-    fn write(&self, f: impl Future<Output = (Res<String>, Option<UndoAction>)> + Send + 'static) {
+    fn write(&self, at: (String, String), f: impl Future<Output = (Res<String>, Option<UndoAction>)> + Send + 'static) {
         self.spawn(async move {
             let (res, undo) = f.await;
-            Msg::Written { res, undo, reload: true, retry: None }
+            Msg::Written { at, res, undo, reload: true, retry: None }
         });
     }
 
     pub fn insert(&self, conn: u64, t: Target, d: Document, text: Option<String>) {
         self.spawn(async move {
+            let at = t.at();
             let retry = text.map(|x| (t.db.clone(), t.coll.clone(), x));
             let (res, undo) = match t.c().insert_one(d).await {
                 Ok(r) => (
@@ -607,13 +656,13 @@ impl Worker {
                 ),
                 Err(err) => (Err(e(err)), None),
             };
-            Msg::Written { res, undo, reload: true, retry }
+            Msg::Written { at, res, undo, reload: true, retry }
         });
     }
 
     /// Replaces `old` with `new`, but only if the server still holds exactly `old`.
     pub fn replace(&self, conn: u64, t: Target, old: Document, new: Document, record_undo: bool) {
-        self.write(replace_doc(conn, t, old, new, record_undo));
+        self.write(t.at(), replace_doc(conn, t, old, new, record_undo));
     }
 
     /// Writes one document's staged edits; the answer names the draft so it can be kept on failure.
@@ -625,7 +674,7 @@ impl Worker {
     }
 
     pub fn delete(&self, conn: u64, t: Target, old: Document, record_undo: bool) {
-        self.write(async move {
+        self.write(t.at(), async move {
             match t.c().delete_one(unchanged(&old)).await {
                 Ok(r) if r.deleted_count == 0 => (Err(CONFLICT.into()), None),
                 Ok(_) => (
@@ -640,7 +689,7 @@ impl Worker {
     /// Deletes each document only while the server still holds it as loaded, like `delete`.
     /// Undo restores exactly the ones that went, never ones changed or removed meanwhile.
     pub fn delete_docs(&self, conn: u64, t: Target, old: Vec<Document>) {
-        self.write(async move {
+        self.write(t.at(), async move {
             let c = t.c();
             let total = old.len();
             let mut gone = Vec::new();
@@ -667,7 +716,7 @@ impl Worker {
     }
 
     pub fn delete_by_id(&self, t: Target, id: Bson) {
-        self.write(async move {
+        self.write(t.at(), async move {
             match t.c().delete_one(doc! { "_id": id }).await {
                 Ok(r) => (Ok(format!("Undo removed {} document", r.deleted_count)), None),
                 Err(err) => (Err(e(err)), None),
@@ -763,7 +812,7 @@ impl Worker {
     /// Writes chosen differences into the target. A changed document is only replaced while it is
     /// still as compared, so edits made meanwhile are kept.
     pub fn sync(&self, t: Target, insert: Vec<Document>, replace: Vec<(Document, Document)>, delete: Vec<Bson>) {
-        self.write(async move {
+        self.write(t.at(), async move {
             let r = async {
                 let c = t.c();
                 for ch in insert.chunks(SYNC_CHUNK) {
@@ -799,6 +848,18 @@ impl Worker {
                 ctx.request_repaint();
             };
             let name = exe.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            // The address carries the password, and arguments are visible to every local user.
+            let mut args = args;
+            let mut config = None;
+            if let Some(i) = args.iter().position(|a| a.starts_with("--uri=")) {
+                match write_tool_config(&args[i]["--uri=".len()..]) {
+                    Ok(p) => {
+                        args[i] = format!("--config={}", p.display());
+                        config = Some(p);
+                    }
+                    Err(err) => return send(Msg::ToolDone(Err(format!("Could not write the {name} config ({err})")))),
+                }
+            }
             let run = async {
                 use tokio::io::AsyncBufReadExt;
                 let mut cmd = tokio::process::Command::new(&exe);
@@ -825,6 +886,9 @@ impl Worker {
                 r = run => r,
                 _ = cancel => Err(format!("{name} stopped")),
             };
+            if let Some(p) = config {
+                let _ = std::fs::remove_file(p);
+            }
             send(Msg::ToolDone(res));
         });
     }
@@ -869,7 +933,7 @@ impl Worker {
     }
 
     pub fn update_many(&self, t: Target, filter: Document, stages: Vec<Document>) {
-        self.write(async move {
+        self.write(t.at(), async move {
             match t.c().update_many(filter, stages).await {
                 Ok(r) => (Ok(format!("Updated {} documents", r.modified_count)), None),
                 Err(err) => (Err(e(err)), None),
@@ -878,7 +942,7 @@ impl Worker {
     }
 
     pub fn rename_many(&self, t: Target, filter: Document, from: String, to: String) {
-        self.write(async move {
+        self.write(t.at(), async move {
             match t.c().update_many(filter, doc! { "$rename": { &from: &to } }).await {
                 Ok(r) => (Ok(format!("Renamed {from} to {to} in {} documents", r.modified_count)), None),
                 Err(err) => (Err(e(err)), None),
@@ -890,13 +954,14 @@ impl Worker {
     /// $set like the original's import (bulkWrite of updateOne upserts).
     pub fn import(&self, conn: u64, t: Target, docs: Vec<Document>, upsert_by: Option<String>) {
         const BATCH: usize = 1000;
-        self.write(async move {
+        self.write(t.at(), async move {
             let c = t.c();
             let mut docs = docs;
             match upsert_by {
                 None => {
                     // Like the original's generateNewDocumentId: documents without _id get one of the
-                    // kind the collection already uses (ObjectIds are left to the driver).
+                    // kind the collection already uses. ObjectIds are made here rather than by the
+                    // driver so a failed batch still knows the ids of what it did insert.
                     if docs.iter().any(|d| !d.contains_key("_id")) {
                         let last = c.find_one(doc! {}).sort(doc! { "_id": -1 }).await.ok().flatten().and_then(|d| d.get("_id").cloned());
                         let mut next = match &last {
@@ -912,7 +977,7 @@ impl Worker {
                                     *n += 1;
                                     Bson::Int64(*n - 1)
                                 }
-                                _ => continue,
+                                _ => Bson::ObjectId(mongodb::bson::oid::ObjectId::new()),
                             };
                             let mut with_id = doc! { "_id": id };
                             with_id.extend(std::mem::take(d));
@@ -924,6 +989,8 @@ impl Worker {
                         match c.insert_many(chunk.to_vec()).await {
                             Ok(r) => ids.extend(r.inserted_ids.into_values()),
                             Err(err) => {
+                                let done = inserted_before(&err, chunk.len());
+                                ids.extend(chunk[..done].iter().filter_map(|d| d.get("_id").cloned()));
                                 let msg = format!("Stopped after {} documents: {}", ids.len(), e(err));
                                 let undo = (!ids.is_empty()).then(|| UndoAction { at: Instant::now(), conn, db: t.db.clone(), coll: t.coll.clone(), kind: UndoKind::InsertMany { ids } });
                                 return (Err(msg), undo);
@@ -954,7 +1021,7 @@ impl Worker {
     }
 
     pub fn delete_ids(&self, t: Target, ids: Vec<Bson>) {
-        self.write(async move {
+        self.write(t.at(), async move {
             match t.c().delete_many(doc! { "_id": { "$in": ids } }).await {
                 Ok(r) => (Ok(format!("Undo removed {} imported documents", r.deleted_count)), None),
                 Err(err) => (Err(e(err)), None),
@@ -982,7 +1049,7 @@ impl Worker {
     }
 
     pub fn delete_many(&self, t: Target, filter: Document) {
-        self.write(async move {
+        self.write(t.at(), async move {
             match t.c().delete_many(filter).await {
                 Ok(r) => (Ok(format!("Deleted {} documents", r.deleted_count)), None),
                 Err(err) => (Err(e(err)), None),
@@ -994,14 +1061,14 @@ impl Worker {
         self.spawn(async move {
             let m = IndexModel::builder().keys(keys).options(IndexOptions::builder().unique(unique).build()).build();
             let res = t.c().create_index(m).await.map(|r| format!("Created index {}", r.index_name)).map_err(e);
-            Msg::Written { res, undo: None, reload: false, retry: None }
+            Msg::Written { at: t.at(), res, undo: None, reload: false, retry: None }
         });
     }
 
     pub fn drop_index(&self, t: Target, name: String) {
         self.spawn(async move {
             let res = t.c().drop_index(&name).await.map(|_| format!("Dropped index {name}")).map_err(e);
-            Msg::Written { res, undo: None, reload: false, retry: None }
+            Msg::Written { at: t.at(), res, undo: None, reload: false, retry: None }
         });
     }
 
@@ -1081,7 +1148,7 @@ fn runner_package(packages: &[String]) -> String {
 
 const RUNNER: &str = include_str!("shell_runner.mjs");
 
-async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + Send + Sync), cancel: tokio::sync::oneshot::Receiver<()>) -> Res<String> {
+async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + Send + Sync), mut cancel: tokio::sync::oneshot::Receiver<()>) -> Res<String> {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
     use tokio::process::Command;
     let note = |t: &str| send(Msg::ShellLog { req, level: "info".into(), text: t.into() });
@@ -1101,10 +1168,13 @@ async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + Send + Sync)
     if deps_changed || missing {
         note("Installing packages for the shell with Bun…");
         let mut cmd = Command::new(&job.runtime);
-        cmd.arg("install").current_dir(&job.dir);
+        cmd.arg("install").current_dir(&job.dir).kill_on_drop(true);
         #[cfg(windows)]
         cmd.creation_flags(crate::update::CREATE_NO_WINDOW);
-        let out = cmd.output().await.map_err(|err| format!("Could not start Bun ({}): {err}", job.runtime.display()))?;
+        let out = tokio::select! {
+            o = cmd.output() => o.map_err(|err| format!("Could not start Bun ({}): {err}", job.runtime.display()))?,
+            _ = &mut cancel => return Err("Stopped.".into()),
+        };
         if !out.status.success() {
             return Err(format!("bun install failed: {}", String::from_utf8_lossy(&out.stderr)));
         }
@@ -1127,6 +1197,12 @@ async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + Send + Sync)
     drop(stdin);
     let mut lines = tokio::io::BufReader::new(child.stdout.take().ok_or("no stdout")?).lines();
     let mut stderr = child.stderr.take().ok_or("no stderr")?;
+    // Read alongside stdout: a full stderr pipe would block the child before stdout closes.
+    let errs = tokio::spawn(async move {
+        let mut err = String::new();
+        let _ = stderr.read_to_string(&mut err).await;
+        err
+    });
     let read = async {
         let mut result: Option<Res<String>> = None;
         while let Some(line) = lines.next_line().await.map_err(e)? {
@@ -1150,8 +1226,7 @@ async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + Send + Sync)
             match r? {
                 Some(res) => res,
                 None => {
-                    let mut err = String::new();
-                    let _ = stderr.read_to_string(&mut err).await;
+                    let err = errs.await.unwrap_or_default();
                     Err(if err.trim().is_empty() { "The shell ended without a result.".into() } else { err })
                 }
             }
@@ -2580,7 +2655,11 @@ fn camel_case(s: &str) -> String {
         .enumerate()
         .map(|(i, p)| {
             let lower = p.to_lowercase();
-            if i == 0 { lower } else { lower[..1].to_uppercase() + &lower[1..] }
+            if i == 0 {
+                return lower;
+            }
+            let mut chars = lower.chars();
+            chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
         })
         .collect()
 }
@@ -2919,6 +2998,22 @@ mod tests {
     }
     fn kv(v: &[(&str, i32)]) -> Vec<(String, i32)> {
         v.iter().map(|(k, d)| (k.to_string(), *d)).collect()
+    }
+
+    #[test]
+    fn camel_case_headers() {
+        assert_eq!(camel_case("First Name"), "firstName");
+        assert_eq!(camel_case("Prénom Élève"), "prénomÉlève");
+        assert_eq!(camel_case("über straße"), "überStraße");
+    }
+
+    #[test]
+    fn partial_insert_count() {
+        use mongodb::error::{Error, ErrorKind, InsertManyError};
+        let failed = |d: Document| Error::from(ErrorKind::InsertMany(mongodb::bson::from_document::<InsertManyError>(d).unwrap()));
+        assert_eq!(inserted_before(&failed(doc! { "writeErrors": [{ "index": 3, "code": 11000, "errmsg": "dup" }] }), 10), 3);
+        assert_eq!(inserted_before(&failed(doc! { "writeConcernError": { "code": 64, "errmsg": "wc" } }), 10), 10);
+        assert_eq!(inserted_before(&Error::from(std::io::ErrorKind::ConnectionReset), 10), 0);
     }
 
     #[test]
@@ -3323,9 +3418,13 @@ mod tests {
         let found = proto_relations(&[doc! { "_id": oid.clone(), "owner": oid.clone(), "code": "abc123", "items": [{ "product": oid.clone() }], "tags": [oid.clone()] }], 6);
         let paths: Vec<&str> = found.iter().map(|(p, _)| p.as_str()).collect();
         assert_eq!(paths, ["owner", "code", "items.product", "tags"]);
-        assert_eq!(uri_without_db("mongodb://u:p@h:1/shop?tls=true"), "mongodb://u:p@h:1/?tls=true");
+        assert_eq!(uri_without_db("mongodb://u:p@h:1/shop?tls=true"), "mongodb://u:p@h:1/?tls=true&authSource=shop");
+        assert_eq!(uri_without_db("mongodb://u:p@h/shop"), "mongodb://u:p@h/?authSource=shop");
+        assert_eq!(uri_without_db("mongodb://u:p@h/shop?authsource=admin"), "mongodb://u:p@h/?authsource=admin");
+        assert_eq!(uri_without_db("mongodb://h/shop?tls=true"), "mongodb://h/?tls=true");
         assert_eq!(uri_without_db("mongodb+srv://h/shop"), "mongodb+srv://h/");
         assert_eq!(uri_without_db("mongodb://h:1"), "mongodb://h:1");
+        assert_eq!(tool_config("mongodb://u:p\"#@h/?a=1"), "uri: \"mongodb://u:p\\\"#@h/?a=1\"\n");
         assert_eq!(dump_args("mongodb://h", "shop", Some("orders"), "/tmp/a", true), ["--uri=mongodb://h", "--archive=/tmp/a", "--db=shop", "--collection=orders", "--gzip", "--forceTableScan"]);
         assert_eq!(restore_args("mongodb://h/shop", "/tmp/a", "shop", None, "copy", true, false), ["--uri=mongodb://h/", "--archive=/tmp/a", "--nsInclude=shop.*", "--nsFrom=shop.*", "--nsTo=copy.*", "--drop"]);
     }
