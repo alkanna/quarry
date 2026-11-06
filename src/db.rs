@@ -225,6 +225,19 @@ pub fn uri_without_db(uri: &str) -> String {
     let Some(s) = uri.find("://").map(|i| i + 3) else { return uri.into() };
     let Some(slash) = uri[s..].find('/').map(|i| s + i) else { return uri.into() };
     let q = uri[slash..].find('?').map_or(uri.len(), |i| slash + i);
+    let db = &uri[slash + 1..q];
+    let opts = uri[q..].trim_start_matches('?');
+    let key = |k: &str| opts.split('&').any(|o| o.split('=').next().is_some_and(|n| n.eq_ignore_ascii_case(k)));
+    // The path database is also the default auth database, so keep it as authSource. SRV
+    // addresses are left alone because their TXT record usually sets authSource, which wins over
+    // the path, and the external mechanisms never authenticate against the path database.
+    let external = opts.split('&').any(|o| {
+        o.split_once('=').is_some_and(|(k, v)| k.eq_ignore_ascii_case("authMechanism") && ["MONGODB-X509", "GSSAPI", "MONGODB-AWS", "MONGODB-OIDC"].contains(&v))
+    });
+    if !db.is_empty() && uri.starts_with("mongodb://") && uri[s..slash].contains('@') && !key("authSource") && !external {
+        let sep = if opts.is_empty() { "" } else { "&" };
+        return format!("{}/?{opts}{sep}authSource={db}", &uri[..slash]);
+    }
     format!("{}/{}", &uri[..slash], &uri[q..])
 }
 
@@ -3358,7 +3371,10 @@ mod tests {
         let found = proto_relations(&[doc! { "_id": oid.clone(), "owner": oid.clone(), "code": "abc123", "items": [{ "product": oid.clone() }], "tags": [oid.clone()] }], 6);
         let paths: Vec<&str> = found.iter().map(|(p, _)| p.as_str()).collect();
         assert_eq!(paths, ["owner", "code", "items.product", "tags"]);
-        assert_eq!(uri_without_db("mongodb://u:p@h:1/shop?tls=true"), "mongodb://u:p@h:1/?tls=true");
+        assert_eq!(uri_without_db("mongodb://u:p@h:1/shop?tls=true"), "mongodb://u:p@h:1/?tls=true&authSource=shop");
+        assert_eq!(uri_without_db("mongodb://u:p@h/shop"), "mongodb://u:p@h/?authSource=shop");
+        assert_eq!(uri_without_db("mongodb://u:p@h/shop?authsource=admin"), "mongodb://u:p@h/?authsource=admin");
+        assert_eq!(uri_without_db("mongodb://h/shop?tls=true"), "mongodb://h/?tls=true");
         assert_eq!(uri_without_db("mongodb+srv://h/shop"), "mongodb+srv://h/");
         assert_eq!(uri_without_db("mongodb://h:1"), "mongodb://h:1");
         assert_eq!(tool_config("mongodb://u:p\"#@h/?a=1"), "uri: \"mongodb://u:p\\\"#@h/?a=1\"\n");
