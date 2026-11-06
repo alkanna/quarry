@@ -45,6 +45,8 @@ pub enum UndoKind {
     InsertMany { ids: Vec<Bson> },
     Update { old: Document, new: Document },
     Delete { old: Document },
+    /// Undo puts these documents back.
+    DeleteMany { old: Vec<Document> },
 }
 
 pub struct UndoAction {
@@ -635,6 +637,35 @@ impl Worker {
         });
     }
 
+    /// Deletes each document only while the server still holds it as loaded, like `delete`.
+    /// Undo restores exactly the ones that went, never ones changed or removed meanwhile.
+    pub fn delete_docs(&self, conn: u64, t: Target, old: Vec<Document>) {
+        self.write(async move {
+            let c = t.c();
+            let total = old.len();
+            let mut gone = Vec::new();
+            for d in old {
+                match c.delete_one(unchanged(&d)).await {
+                    Ok(r) if r.deleted_count == 1 => gone.push(d),
+                    Ok(_) => {}
+                    Err(err) => {
+                        let undo = (!gone.is_empty()).then(|| UndoAction { at: Instant::now(), conn, db: t.db.clone(), coll: t.coll.clone(), kind: UndoKind::DeleteMany { old: gone.clone() } });
+                        return (Err(format!("Stopped after deleting {}: {}", gone.len(), e(err))), undo);
+                    }
+                }
+            }
+            let skipped = total - gone.len();
+            if gone.is_empty() {
+                return (Err(CONFLICT.into()), None);
+            }
+            let mut msg = format!("Deleted {} documents", gone.len());
+            if skipped > 0 {
+                msg += &format!(", {skipped} skipped because they changed or were already deleted");
+            }
+            (Ok(msg), Some(UndoAction { at: Instant::now(), conn, db: t.db, coll: t.coll, kind: UndoKind::DeleteMany { old: gone } }))
+        });
+    }
+
     pub fn delete_by_id(&self, t: Target, id: Bson) {
         self.write(async move {
             match t.c().delete_one(doc! { "_id": id }).await {
@@ -991,12 +1022,7 @@ impl Worker {
                 // ponytail: whole result held in memory (CSV needs every column first); stream if exports get huge.
                 let docs: Vec<Document> = f.await.map_err(e)?.try_collect().await.map_err(e)?;
                 let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("json").to_ascii_lowercase();
-                let body = match ext.as_str() {
-                    "csv" => to_table(&docs, ','),
-                    "tsv" => to_table(&docs, '\t'),
-                    _ => serde_json::to_string_pretty(&docs.iter().map(|d| Bson::Document(d.clone()).into_relaxed_extjson()).collect::<Vec<_>>())
-                        .map_err(e)?,
-                };
+                let body = export_body(&docs, &ext)?;
                 std::fs::write(&path, body).map_err(|x| format!("Could not write {}: {x}", path.display()))?;
                 Ok(format!("Exported {} documents to {}", docs.len(), path.display()))
             }
@@ -1692,15 +1718,21 @@ pub fn to_edit_json(d: &Document) -> String {
 
 /// Pretty editor text for any value, with the same long-integer rule as `to_edit_json`.
 pub fn to_edit_value(b: &Bson) -> String {
-    fn conv(b: &Bson) -> serde_json::Value {
-        match b {
-            Bson::Int64(n) => serde_json::json!({ "$numberLong": n.to_string() }),
-            Bson::Document(d) => serde_json::Value::Object(d.iter().map(|(k, v)| (k.clone(), conv(v))).collect()),
-            Bson::Array(a) => serde_json::Value::Array(a.iter().map(conv).collect()),
-            other => other.clone().into_relaxed_extjson(),
-        }
+    serde_json::to_string_pretty(&edit_json(b)).unwrap_or_default()
+}
+
+/// One-line form of `to_edit_value`, for JSON lines.
+pub fn to_edit_line(b: &Bson) -> String {
+    edit_json(b).to_string()
+}
+
+fn edit_json(b: &Bson) -> serde_json::Value {
+    match b {
+        Bson::Int64(n) => serde_json::json!({ "$numberLong": n.to_string() }),
+        Bson::Document(d) => serde_json::Value::Object(d.iter().map(|(k, v)| (k.clone(), edit_json(v))).collect()),
+        Bson::Array(a) => serde_json::Value::Array(a.iter().map(edit_json).collect()),
+        other => other.clone().into_relaxed_extjson(),
     }
-    serde_json::to_string_pretty(&conv(b)).unwrap_or_default()
 }
 
 /// What to turn into driver code: a find with its options, or a pipeline.
@@ -2059,6 +2091,15 @@ pub fn stage_preview(p: &[Document], i: usize) -> Option<Vec<Document>> {
     let mut out: Vec<Document> = p.get(..=i)?.iter().filter(|s| !has_write_stage(std::slice::from_ref(s))).cloned().collect();
     out.push(doc! { "$limit": 20 });
     Some(out)
+}
+
+/// File contents for exported documents: CSV, TSV, or a pretty JSON array for anything else.
+pub fn export_body(docs: &[Document], ext: &str) -> Res<String> {
+    Ok(match ext {
+        "csv" => to_table(docs, ','),
+        "tsv" => to_table(docs, '\t'),
+        _ => serde_json::to_string_pretty(&docs.iter().map(|d| Bson::Document(d.clone()).into_relaxed_extjson()).collect::<Vec<_>>()).map_err(e)?,
+    })
 }
 
 /// CSV or TSV with every top-level field seen in any document, RFC 4180 quoting.
@@ -3141,6 +3182,7 @@ mod tests {
         let t = to_table(&[doc! { "a": "x,\"y\"" }, doc! { "b": false }], ',');
         assert_eq!(t, "a,b\n\"x,\"\"y\"\"\",\n,false");
         assert_eq!(mask_uri("mongodb://u:secret@h:27017/db"), "mongodb://u:****@h:27017/db");
+        assert_eq!(to_edit_line(&Bson::Document(doc! { "n": 5i64, "s": "x" })), r#"{"n":{"$numberLong":"5"},"s":"x"}"#);
     }
 
     #[test]
