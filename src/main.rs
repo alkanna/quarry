@@ -3,6 +3,8 @@
 
 mod app;
 mod db;
+#[cfg(target_os = "macos")]
+mod menu;
 mod ssh;
 mod update;
 
@@ -20,6 +22,7 @@ fn main() -> eframe::Result {
             .with_title("Quarry")
             .with_inner_size([1400.0, 860.0])
             .with_min_inner_size([900.0, 560.0])
+            .with_active(true)
             // macOS: draw our own header under a transparent title bar, keeping the window buttons.
             .with_fullsize_content_view(true)
             .with_titlebar_shown(false)

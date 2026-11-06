@@ -1944,6 +1944,11 @@ pub struct App {
     prefs: UiPrefs,
     new_col: String,
     col_filter: String,
+    #[cfg(target_os = "macos")]
+    menu: Option<crate::menu::MenuBar>,
+    /// Menu picks that are not key presses, handled at the start of the next frame.
+    #[cfg(target_os = "macos")]
+    menu_acts: Vec<crate::menu::Act>,
     new_pkg: String,
     new_lib: String,
     /// Views per (connection, database), shown differently in the sidebar.
@@ -2504,6 +2509,11 @@ impl App {
             prefs: UiPrefs::default(),
             new_col: String::new(),
             col_filter: String::new(),
+            // Screenshot runs stay off the real menu bar.
+            #[cfg(target_os = "macos")]
+            menu: (!demo || std::env::var("QUARRY_DEMO").is_ok()).then(|| crate::menu::MenuBar::new(&cc.egui_ctx)),
+            #[cfg(target_os = "macos")]
+            menu_acts: Vec::new(),
             new_pkg: String::new(),
             new_lib: String::new(),
             views: HashSet::new(),
@@ -3024,6 +3034,26 @@ impl App {
             }
             // Wake up to test idleness even when nothing else repaints.
             ctx.request_repaint_after(std::time::Duration::from_secs(5));
+        }
+    }
+
+    /// Menu items without a keyboard twin.
+    #[cfg(target_os = "macos")]
+    fn menu_act(&mut self, ctx: &egui::Context, a: crate::menu::Act) {
+        use crate::menu::Act;
+        match a {
+            Act::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            // Same rule as Settings' "Check now": dev builds and the demo never install releases.
+            Act::CheckUpdates => {
+                if !self.demo && !cfg!(debug_assertions) && self.updated.is_none() {
+                    self.check_update();
+                }
+                self.modal = Some(Modal::Settings);
+            }
+            Act::Export if !self.tabs.is_empty() => self.export(),
+            Act::Insert if !self.tabs.is_empty() => self.insert = Some("{\n  \n}".into()),
+            Act::Url(u) => ctx.open_url(egui::OpenUrl::new_tab(u)),
+            _ => {}
         }
     }
 
@@ -4243,7 +4273,14 @@ fn chevron(p: &egui::Painter, c: egui::Pos2, open: bool, color: Color32) {
 impl eframe::App for App {
     /// Test switch for the demo picture: QUARRY_TEST_POINTER="x,y" hovers that point and
     /// "x,y,down" also holds the primary button there, to check hover and press states.
-    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        #[cfg(not(target_os = "macos"))]
+        let _ = ctx;
+        #[cfg(target_os = "macos")]
+        if let Some(m) = &mut self.menu {
+            let rest = m.feed(ctx, raw);
+            self.menu_acts.extend(rest);
+        }
         if self.shot.is_none() {
             return;
         }
@@ -4259,6 +4296,15 @@ impl eframe::App for App {
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         LIGHT_MODE.store(ctx.theme() == egui::Theme::Light, std::sync::atomic::Ordering::Relaxed);
+        // macOS leaves an app started from a terminal or Finder behind the frontmost one; the first
+        // frames ask for focus once the window is visible (a no-op when it already has it).
+        if ctx.cumulative_frame_nr() < 3 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+        #[cfg(target_os = "macos")]
+        for a in std::mem::take(&mut self.menu_acts) {
+            self.menu_act(ctx, a);
+        }
         // Screenshot mode must keep drawing even if the window is covered or hidden, or it never finishes.
         if self.shot.is_some() {
             ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaintWhileHidden);
