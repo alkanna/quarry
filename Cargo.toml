@@ -23,3 +23,10 @@ russh = { version = "0.65", default-features = false, features = ["ring", "rsa",
 
 [profile.release]
 lto = "thin"
+
+# Dependencies build optimized once and stay cached; our own crate recompiles quickly but still runs smoothly.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
