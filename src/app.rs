@@ -6500,7 +6500,9 @@ impl App {
                     self.docs_act(ui.ctx(), DocsAct::Duplicate, vec![d.clone()]);
                 }
                 if ui.small_button(RichText::new("Delete").color(ALERT())).clicked() {
-                    self.docs_act(ui.ctx(), DocsAct::Delete, vec![d.clone()]);
+                    // `d` carries unsaved edits; the delete only matches the document as stored.
+                    let stored = self.drafts.get(&self.draft_key(d)).map(|dr| dr.original.clone()).unwrap_or_else(|| d.clone());
+                    self.docs_act(ui.ctx(), DocsAct::Delete, vec![stored]);
                 }
             }
             right_group(ui, |ui| {
