@@ -2459,7 +2459,8 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, shot: Option<PathBuf>) -> Self {
         style(&cc.egui_ctx);
         let (tx, rx) = channel();
-        let demo = shot.is_some();
+        // QUARRY_DEMO=1 opens the offline demo to click around in, without screenshot mode closing it.
+        let demo = shot.is_some() || std::env::var("QUARRY_DEMO").is_ok();
         let mut app = Self {
             worker: Worker::new(tx, cc.egui_ctx.clone()),
             rx,
