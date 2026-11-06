@@ -5870,6 +5870,8 @@ impl App {
 
     /// Table or JSON list of the current results, with the open document shown under its row.
     fn results(&mut self, ui: &mut egui::Ui, agg: bool) {
+        // Following a reference while rendering can switch to another tab, so the docs go back by index.
+        let cur = self.cur;
         let t = self.tm().unwrap();
         // Taken out for the frame so the open document can be edited through `self`.
         let docs = std::mem::take(if agg { &mut t.agg_docs } else { &mut t.docs });
@@ -5908,8 +5910,9 @@ impl App {
                 self.doc_list(ui, agg, &docs);
             }
         }
-        let t = self.tm().unwrap();
-        *(if agg { &mut t.agg_docs } else { &mut t.docs }) = docs;
+        if let Some(t) = self.tabs.get_mut(cur) {
+            *(if agg { &mut t.agg_docs } else { &mut t.docs }) = docs;
+        }
     }
 
     /// Row click: Cmd toggles the row's check, Shift checks a range, a plain click opens it.
