@@ -2755,6 +2755,10 @@ impl App {
     }
 
     fn connect(&mut self, id: u64) {
+        // Demo ids overlap real ones, so reading the Keychain here would connect to a real server.
+        if self.demo {
+            return self.ok("Offline demo: no database is connected.");
+        }
         let uri = match stored_uri(id) {
             Ok(u) => u,
             Err(e) => return self.err(uri_err(e)),
@@ -5085,22 +5089,28 @@ impl App {
                 self.conn_test = None;
                 // Opening the form with an empty address would overwrite the stored one on save,
                 // unless there is none, which is when re-entering it is the way out.
-                let uri = match stored_uri(id) {
-                    Ok(u) => u,
-                    Err(keyring::Error::NoEntry) => String::new(),
-                    Err(e) => return self.err(uri_err(e)),
+                // Demo ids overlap real ones, so the demo must not show the user's real secrets.
+                let uri = if self.demo {
+                    self.conn(id).map(|c| c.masked_uri.clone()).unwrap_or_default()
+                } else {
+                    match stored_uri(id) {
+                        Ok(u) => u,
+                        Err(keyring::Error::NoEntry) => String::new(),
+                        Err(e) => return self.err(uri_err(e)),
+                    }
                 };
+                let stored = |what: &str| if self.demo { String::new() } else { secret(id, what).unwrap_or_default() };
                 self.modal = Some(Modal::Conn(Box::new(ConnForm {
                     id: Some(id),
                     name: meta.name.clone(),
                     uri,
                     ssh_on: meta.ssh.is_some(),
                     ssh: meta.ssh.clone().unwrap_or_default(),
-                    ssh_pwd: secret(id, "ssh-password").unwrap_or_default(),
-                    ssh_pass: secret(id, "ssh-passphrase").unwrap_or_default(),
+                    ssh_pwd: stored("ssh-password"),
+                    ssh_pass: stored("ssh-passphrase"),
                     proxy_on: meta.proxy.is_some(),
                     proxy: meta.proxy.clone().unwrap_or_default(),
-                    proxy_pwd: secret(id, "proxy-password").unwrap_or_default(),
+                    proxy_pwd: stored("proxy-password"),
                     show: false,
                     testing: false,
                 })));
@@ -8371,13 +8381,19 @@ impl App {
                     }
                     if save {
                         let id = f.id.unwrap_or_else(|| self.conns.iter().map(|c| c.meta.id).max().unwrap_or(0) + 1);
-                        match keychain(id).map(|k| k.set_password(f.uri.trim())) {
+                        // Demo ids overlap real ones, so the demo keeps its edits in memory only.
+                        let saved = if self.demo { Some(Ok(())) } else { keychain(id).map(|k| k.set_password(f.uri.trim())) };
+                        match saved {
                             Some(Ok(())) => {
-                                let stored = [
-                                    set_secret(id, "ssh-password", if f.ssh_on { &f.ssh_pwd } else { "" }),
-                                    set_secret(id, "ssh-passphrase", if f.ssh_on { &f.ssh_pass } else { "" }),
-                                    set_secret(id, "proxy-password", if f.proxy_on && !f.ssh_on { &f.proxy_pwd } else { "" }),
-                                ];
+                                let stored = if self.demo {
+                                    Vec::new()
+                                } else {
+                                    vec![
+                                        set_secret(id, "ssh-password", if f.ssh_on { &f.ssh_pwd } else { "" }),
+                                        set_secret(id, "ssh-passphrase", if f.ssh_on { &f.ssh_pass } else { "" }),
+                                        set_secret(id, "proxy-password", if f.proxy_on && !f.ssh_on { &f.proxy_pwd } else { "" }),
+                                    ]
+                                };
                                 let meta = ConnMeta {
                                     id,
                                     name: f.name.trim().into(),
@@ -9227,12 +9243,15 @@ impl App {
 
     fn danger(&mut self, action: Danger) {
         if let Danger::RemoveConnection(id) = action {
-            if let Some(k) = keychain(id) {
-                let _ = k.delete_credential();
-            }
-            // ponytail: best effort, a failure only leaves an orphaned Keychain entry behind.
-            for what in ["ssh-password", "ssh-passphrase", "proxy-password"] {
-                let _ = set_secret(id, what, "");
+            // Demo ids overlap real ones, so removing a demo connection must not touch the Keychain.
+            if !self.demo {
+                if let Some(k) = keychain(id) {
+                    let _ = k.delete_credential();
+                }
+                // ponytail: best effort, a failure only leaves an orphaned Keychain entry behind.
+                for what in ["ssh-password", "ssh-passphrase", "proxy-password"] {
+                    let _ = set_secret(id, what, "");
+                }
             }
             self.conns.retain(|c| c.meta.id != id);
             self.tabs.retain(|t| t.sel.conn != id);
