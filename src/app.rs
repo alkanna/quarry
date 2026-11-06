@@ -6640,7 +6640,7 @@ impl App {
         self.tree_x = ui.max_rect().x_range().expand(8.0);
         for (k, v) in d {
             path.push(k.clone());
-            self.tree(ui, k, v, 0, id, &mut path, !from_agg, &mut acts);
+            self.tree(ui, k, v, id, &mut path, !from_agg, &mut acts);
             path.pop();
         }
         // Nested headers only render once their parent opens, so the fold stays forced until every animation settles.
@@ -6866,7 +6866,7 @@ impl App {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn tree(&mut self, ui: &mut egui::Ui, key: &str, v: &Bson, depth: usize, id: egui::Id, path: &mut Vec<String>, editable: bool, acts: &mut Vec<TreeAct>) {
+    fn tree(&mut self, ui: &mut egui::Ui, key: &str, v: &Bson, id: egui::Id, path: &mut Vec<String>, editable: bool, acts: &mut Vec<TreeAct>) {
         let editing_here = self.inline.as_ref().is_some_and(|i| i.path == *path);
         match v {
             Bson::Document(_) | Bson::Array(_) if !editing_here => {
@@ -6884,12 +6884,12 @@ impl App {
                 let forced = self.fold.as_ref().filter(|f| f.0 == id && path.starts_with(&f.1)).map(|f| f.2);
                 let r = egui::CollapsingHeader::new(job)
                     .id_salt(id.with(&*path))
-                    .default_open(depth < 1)
+                    .default_open(false)
                     .open(adding_here.then_some(true).or(forced))
                     .show(ui, |ui| {
                         for (k, child) in items {
                             path.push(k.clone());
-                            self.tree(ui, &k, child, depth + 1, id, path, editable, acts);
+                            self.tree(ui, &k, child, id, path, editable, acts);
                             path.pop();
                         }
                         if adding_here {
