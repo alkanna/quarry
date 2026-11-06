@@ -9047,9 +9047,14 @@ impl App {
                     let from = path.join(".");
                     dialog_title(ui, format!("Rename {from}"));
                     ui.add(egui::TextEdit::singleline(name).font(FontId::monospace(13.0)).desired_width(320.0));
-                    let valid = !name.trim().is_empty() && !name.contains('.') && !name.starts_with('$') && Some(name.trim()) != path.last().map(|s| s.as_str());
+                    let mut valid = !name.trim().is_empty() && !name.contains('.') && !name.starts_with('$') && Some(name.trim()) != path.last().map(|s| s.as_str());
                     let mut to = path[..path.len() - 1].to_vec();
                     to.push(name.trim().to_string());
+                    // Both the edit and $rename would replace the sibling's value with this one.
+                    if valid && db::get_path(d, &to.join(".")).is_some() {
+                        ui.label(RichText::new(format!("{} already exists here.", name.trim())).color(ALERT()));
+                        valid = false;
+                    }
                     dialog_actions(ui, |ui| {
                         if ui.add_enabled(valid, primary_button(ui, "In this document", PRIMARY())).clicked() {
                             let new = db::get_path(d, &from).cloned().ok_or_else(|| "Field not found".to_string()).and_then(|v| db::edit_path(&db::edit_path(d, path, None)?, &to, Some(v)));
