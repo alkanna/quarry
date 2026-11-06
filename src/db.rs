@@ -1081,7 +1081,7 @@ fn runner_package(packages: &[String]) -> String {
 
 const RUNNER: &str = include_str!("shell_runner.mjs");
 
-async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + Send + Sync), cancel: tokio::sync::oneshot::Receiver<()>) -> Res<String> {
+async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + Send + Sync), mut cancel: tokio::sync::oneshot::Receiver<()>) -> Res<String> {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
     use tokio::process::Command;
     let note = |t: &str| send(Msg::ShellLog { req, level: "info".into(), text: t.into() });
@@ -1101,10 +1101,13 @@ async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + Send + Sync)
     if deps_changed || missing {
         note("Installing packages for the shell with Bun…");
         let mut cmd = Command::new(&job.runtime);
-        cmd.arg("install").current_dir(&job.dir);
+        cmd.arg("install").current_dir(&job.dir).kill_on_drop(true);
         #[cfg(windows)]
         cmd.creation_flags(crate::update::CREATE_NO_WINDOW);
-        let out = cmd.output().await.map_err(|err| format!("Could not start Bun ({}): {err}", job.runtime.display()))?;
+        let out = tokio::select! {
+            o = cmd.output() => o.map_err(|err| format!("Could not start Bun ({}): {err}", job.runtime.display()))?,
+            _ = &mut cancel => return Err("Stopped.".into()),
+        };
         if !out.status.success() {
             return Err(format!("bun install failed: {}", String::from_utf8_lossy(&out.stderr)));
         }
@@ -1127,6 +1130,12 @@ async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + Send + Sync)
     drop(stdin);
     let mut lines = tokio::io::BufReader::new(child.stdout.take().ok_or("no stdout")?).lines();
     let mut stderr = child.stderr.take().ok_or("no stderr")?;
+    // Read alongside stdout: a full stderr pipe would block the child before stdout closes.
+    let errs = tokio::spawn(async move {
+        let mut err = String::new();
+        let _ = stderr.read_to_string(&mut err).await;
+        err
+    });
     let read = async {
         let mut result: Option<Res<String>> = None;
         while let Some(line) = lines.next_line().await.map_err(e)? {
@@ -1150,8 +1159,7 @@ async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + Send + Sync)
             match r? {
                 Some(res) => res,
                 None => {
-                    let mut err = String::new();
-                    let _ = stderr.read_to_string(&mut err).await;
+                    let err = errs.await.unwrap_or_default();
                     Err(if err.trim().is_empty() { "The shell ended without a result.".into() } else { err })
                 }
             }
