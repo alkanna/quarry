@@ -3,7 +3,7 @@ use eframe::egui::{self, Color32, CornerRadius, FontId, Key, RichText, Sense, St
 use mongodb::Client;
 use mongodb::bson::{Bson, Document, doc, oid::ObjectId};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
@@ -1264,6 +1264,9 @@ struct Tab {
     idx_req: u64,
     loading: bool,
     selected: Option<(bool, usize)>,
+    /// Rows of the current page checked for bulk actions, and the last one clicked for Shift ranges.
+    checked: BTreeSet<usize>,
+    check_anchor: Option<usize>,
     agg_txt: String,
     agg_docs: Vec<Document>,
     agg_fields: Vec<String>,
@@ -1446,6 +1449,8 @@ impl Tab {
             idx_req: 0,
             loading: false,
             selected: None,
+            checked: BTreeSet::new(),
+            check_anchor: None,
             agg_txt: "[\n  { $match: {} },\n  { $limit: 20 }\n]".into(),
             agg_docs: Vec::new(),
             agg_fields: Vec::new(),
@@ -1492,7 +1497,7 @@ enum Modal {
     Unlock(u64, Option<Retry>),
     Save { tag: String, changes: Vec<(String, Option<Bson>, Option<Bson>)> },
     SaveAll(Vec<String>),
-    Delete(Document),
+    Delete(Vec<Document>),
     Typed { title: String, expect: String, typed: String, action: Danger },
     AggWrite(Vec<Document>),
     ShellWrite(Vec<String>),
@@ -3093,6 +3098,7 @@ impl App {
             UndoKind::Insert { id } => self.worker.delete_by_id(t, id),
             UndoKind::InsertMany { ids } => self.worker.delete_ids(t, ids),
             UndoKind::Delete { old } => self.worker.insert(a.conn, t, old, None),
+            UndoKind::DeleteMany { old } => self.worker.import(a.conn, t, old, None),
             UndoKind::Update { old, new } => self.worker.replace(a.conn, t, new, old, false),
         }
     }
@@ -3259,6 +3265,12 @@ impl App {
                             t.fields = auto_fields(&docs);
                             t.paths = doc_paths(&docs);
                             t.date_paths = date_paths(&docs, &t.paths);
+                            // Checks and open rows follow their documents by _id, so actions that reload
+                            // (duplicate, filter, edits) keep them; rows that left the results drop out.
+                            if !t.checked.is_empty() {
+                                t.checked = follow_ids(&t.docs, &docs, t.checked.iter().copied());
+                                t.check_anchor = None;
+                            }
                             t.docs = docs;
                             t.count = count;
                             t.ms = ms;
@@ -4031,6 +4043,77 @@ fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::Inn
 }
 
 const MONO_PX: f32 = 12.5;
+
+#[derive(Clone, Copy)]
+enum DocsAct {
+    CopyJs,
+    CopyJson,
+    CopyLines,
+    Duplicate,
+    Export,
+    Filter,
+    Update,
+    Delete,
+}
+
+/// Positions in `new` of the documents at `rows` in `old`, matched by _id.
+fn follow_ids(old: &[Document], new: &[Document], rows: impl Iterator<Item = usize>) -> BTreeSet<usize> {
+    let ids: HashSet<String> = rows.filter_map(|i| old.get(i)?.get("_id").map(db::compact)).collect();
+    if ids.is_empty() {
+        return BTreeSet::new();
+    }
+    new.iter().enumerate().filter(|(_, d)| d.get("_id").is_some_and(|v| ids.contains(&db::compact(v)))).map(|(i, _)| i).collect()
+}
+
+/// Width of the checkbox column in front of the row number.
+const CHECK_W: f32 = 22.0;
+
+/// Actions on one document or the checked ones, shared by the selection bar and the row menus.
+fn docs_menu(ui: &mut egui::Ui, n: usize, heading: bool) -> Option<DocsAct> {
+    if heading {
+        ui.label(RichText::new(if n == 1 { "Document".to_string() } else { format!("{n} selected documents") }).size(11.0).color(FAINT()));
+    }
+    let items: [(&str, DocsAct); 8] = [
+        ("Copy as JS", DocsAct::CopyJs),
+        ("Copy as JSON", DocsAct::CopyJson),
+        ("Copy as JSON lines", DocsAct::CopyLines),
+        ("Duplicate", DocsAct::Duplicate),
+        ("Export…", DocsAct::Export),
+        ("Filter to these", DocsAct::Filter),
+        ("Update in shell", DocsAct::Update),
+        ("Delete…", DocsAct::Delete),
+    ];
+    let mut act = None;
+    for (label, a) in items {
+        let text = if matches!(a, DocsAct::Delete) { RichText::new(label).color(ALERT()) } else { RichText::new(label) };
+        if ui.button(text).clicked() {
+            act = Some(a);
+        }
+    }
+    act
+}
+
+/// The row menu: acts on every checked document when the row is one of them, else on that row.
+fn row_menu(ui: &mut egui::Ui, i: usize, checked: &BTreeSet<usize>) -> Option<(usize, DocsAct)> {
+    docs_menu(ui, if checked.contains(&i) { checked.len() } else { 1 }, true).map(|a| (i, a))
+}
+
+/// A painted checkbox for table rows; the egui widget would take part in the row layout.
+fn check_box(ui: &egui::Ui, center: egui::Pos2, id: egui::Id, on: bool, partial: bool) -> egui::Response {
+    let rect = egui::Rect::from_center_size(center, egui::vec2(14.0, 14.0));
+    let r = ui.interact(rect.expand(3.0), id, Sense::click());
+    let filled = on || partial;
+    let edge = if filled { PRIMARY() } else if r.hovered() { MUTED() } else { FAINT() };
+    let p = ui.painter();
+    p.rect(rect, 3, if filled { PRIMARY() } else { Color32::TRANSPARENT }, Stroke::new(1.0, edge), egui::StrokeKind::Inside);
+    let s = Stroke::new(1.6, Color32::WHITE);
+    if on {
+        p.line(vec![center + egui::vec2(-3.5, 0.0), center + egui::vec2(-1.0, 2.5), center + egui::vec2(3.5, -2.5)], s);
+    } else if partial {
+        p.hline(center.x - 3.5..=center.x + 3.5, center.y, s);
+    }
+    r
+}
 
 fn mono(c: Color32) -> TextFormat {
     TextFormat { font_id: FontId::monospace(MONO_PX), color: c, ..Default::default() }
@@ -5649,13 +5732,150 @@ impl App {
         } else if docs.is_empty() {
             ui.add_space(20.0);
             ui.label(RichText::new(if loading { "Loading…" } else { "No documents" }).color(MUTED()));
-        } else if self.prefs.table {
-            self.doc_table(ui, agg, &docs, &fields, base);
         } else {
-            self.doc_list(ui, agg, &docs);
+            if !agg {
+                self.selection_bar(ui, &docs);
+            }
+            if self.prefs.table {
+                self.doc_table(ui, agg, &docs, &fields, base);
+            } else {
+                self.doc_list(ui, agg, &docs);
+            }
         }
         let t = self.tm().unwrap();
         *(if agg { &mut t.agg_docs } else { &mut t.docs }) = docs;
+    }
+
+    /// Row click: Cmd toggles the row's check, Shift checks a range, a plain click opens it.
+    fn row_click(&mut self, ui: &egui::Ui, agg: bool, i: usize) {
+        let m = ui.input(|i| i.modifiers);
+        if !agg && (m.command || m.shift) {
+            self.toggle_check(i, m.shift);
+        } else {
+            self.select(agg, i, true);
+        }
+    }
+
+    fn toggle_check(&mut self, i: usize, range: bool) {
+        let t = self.tm().unwrap();
+        match t.check_anchor.filter(|_| range) {
+            Some(a) => t.checked.extend(a.min(i)..=a.max(i)),
+            None => {
+                if !t.checked.insert(i) {
+                    t.checked.remove(&i);
+                }
+            }
+        }
+        t.check_anchor = Some(i);
+    }
+
+    /// The documents a row action applies to: every checked one when the row is checked, else that row.
+    fn act_targets(checked: &BTreeSet<usize>, docs: &[Document], i: usize) -> Vec<Document> {
+        if checked.contains(&i) { Self::checked_docs(checked, docs) } else { docs.get(i).cloned().into_iter().collect() }
+    }
+
+    fn checked_docs(checked: &BTreeSet<usize>, docs: &[Document]) -> Vec<Document> {
+        checked.iter().filter_map(|&j| docs.get(j).cloned()).collect()
+    }
+
+    fn selection_bar(&mut self, ui: &mut egui::Ui, docs: &[Document]) {
+        let n = self.t().unwrap().checked.len();
+        // Hidden under dialogs, which would otherwise sit behind it.
+        if n == 0 || self.modal.is_some() || self.insert.is_some() {
+            return;
+        }
+        let mut cancel = false;
+        // Floats over the bottom of the results so checking rows never shifts the table.
+        let area = ui.available_rect_before_wrap();
+        let act = egui::Area::new(egui::Id::unique("selection-toolbar"))
+            .order(egui::Order::Foreground)
+            .pivot(egui::Align2::CENTER_BOTTOM)
+            .fixed_pos(egui::pos2(area.center().x, area.bottom() - 16.0))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).inner_margin(egui::Margin::symmetric(12, 8)).corner_radius(10).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(format!("{n} selected")).strong().color(BRIGHT()));
+                        ui.add_space(8.0);
+                        let act = docs_menu(ui, n, false);
+                        cancel = ui.button("Cancel").on_hover_text("Clear the selection").clicked();
+                        act
+                    })
+                    .inner
+                })
+                .inner
+            })
+            .inner;
+        if cancel {
+            self.tm().unwrap().checked.clear();
+        } else if let Some(a) = act {
+            let sel = Self::checked_docs(&self.t().unwrap().checked, docs);
+            self.docs_act(ui.ctx(), a, sel);
+        }
+    }
+
+    fn docs_act(&mut self, ctx: &egui::Context, act: DocsAct, docs: Vec<Document>) {
+        if docs.is_empty() {
+            return;
+        }
+        let what = if docs.len() == 1 { "1 document".to_string() } else { format!("{} documents", docs.len()) };
+        let value = || if docs.len() == 1 { Bson::Document(docs[0].clone()) } else { Bson::Array(docs.iter().cloned().map(Bson::Document).collect()) };
+        let by_id = || {
+            let mut ids: Vec<Bson> = docs.iter().filter_map(|d| d.get("_id").cloned()).collect();
+            Bson::Document(if ids.len() == 1 { doc! { "_id": ids.remove(0) } } else { doc! { "_id": { "$in": ids } } })
+        };
+        match act {
+            DocsAct::CopyJs => {
+                ctx.copy_text(db::pretty_shell(&value()));
+                self.ok(format!("Copied {what} as JS"));
+            }
+            DocsAct::CopyJson => {
+                ctx.copy_text(db::to_edit_value(&value()));
+                self.ok(format!("Copied {what} as JSON"));
+            }
+            DocsAct::CopyLines => {
+                let lines: Vec<String> = docs.iter().map(|d| db::to_edit_line(&Bson::Document(d.clone()))).collect();
+                ctx.copy_text(lines.join("\n"));
+                self.ok(format!("Copied {what} as JSON lines"));
+            }
+            DocsAct::Duplicate => {
+                let copies: Vec<Document> = docs.into_iter().map(|mut d| {
+                    d.remove("_id");
+                    d
+                }).collect();
+                // One copy opens the insert editor to tweak it first; many are written straight away.
+                if let [c] = copies.as_slice() {
+                    self.insert = Some(db::to_edit_json(c));
+                } else if let Some((conn, target)) = self.writable_target() {
+                    self.worker.import(conn, target, copies, None);
+                }
+            }
+            DocsAct::Export => {
+                let coll = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
+                let file = rfd::FileDialog::new().set_file_name(format!("{coll}-selection.json")).add_filter("JSON", &["json"]).add_filter("CSV", &["csv"]).add_filter("TSV", &["tsv"]).save_file();
+                let Some(path) = file else { return };
+                let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("json").to_ascii_lowercase();
+                match db::export_body(&docs, &ext).and_then(|b| std::fs::write(&path, b).map_err(|e| format!("Could not write {}: {e}", path.display()))) {
+                    Ok(()) => self.ok(format!("Exported {what} to {}", path.display())),
+                    Err(e) => self.err(e),
+                }
+            }
+            DocsAct::Filter => {
+                let t = self.tm().unwrap();
+                t.filter_txt = db::shell_text(&by_id());
+                t.page = 0;
+                self.run_query();
+            }
+            DocsAct::Update => {
+                let t = self.tm().unwrap();
+                t.shell.code = format!(
+                    "async function run() {{\n  return await {}.updateMany(\n    {},\n    {{ $set: {{  }} }}\n  );\n}}",
+                    collection_ref(&t.sel.coll),
+                    db::pretty_shell(&by_id())
+                );
+                t.view = View::Shell;
+            }
+            DocsAct::Delete => self.modal = Some(Modal::Delete(docs)),
+        }
     }
 
     fn select(&mut self, agg: bool, i: usize, toggle: bool) {
@@ -5691,8 +5911,14 @@ impl App {
                 })
             })
             .collect();
-        let total: f32 = NUM_W + widths.iter().sum::<f32>();
+        // The documents view adds a checkbox in front of the row number.
+        let num_w = if agg { NUM_W } else { NUM_W + CHECK_W };
+        let total: f32 = num_w + widths.iter().sum::<f32>();
         let selected = self.t().unwrap().selected;
+        let checked = if agg { BTreeSet::new() } else { self.t().unwrap().checked.clone() };
+        let mut check_click = None;
+        let mut check_all = None;
+        let mut doc_act = None;
         let view_w = ui.available_width();
         let mut click = None;
         let mut edit_cell = None;
@@ -5725,7 +5951,14 @@ impl App {
                 let (hr, _) = ui.allocate_exact_size(egui::vec2(row_w, 30.0), Sense::hover());
                 let p = ui.painter();
                 p.text(egui::pos2(hr.left() + 10.0, hr.center().y), egui::Align2::LEFT_CENTER, "#", FontId::proportional(11.5), FAINT());
-                let mut x = hr.left() + NUM_W;
+                if !agg {
+                    let all = checked.len() == docs.len();
+                    let r = check_box(ui, egui::pos2(hr.left() + 13.0, hr.center().y), ui.scope_id().with("check-all"), all, !all && !checked.is_empty());
+                    if r.on_hover_text("Select every document on this page").clicked() {
+                        check_all = Some(!all);
+                    }
+                }
+                let mut x = hr.left() + num_w;
                 for (c, w) in cols.iter().zip(&widths) {
                     let cell = egui::Rect::from_min_size(egui::pos2(x, hr.top()), egui::vec2(*w, hr.height()));
                     let pinned = prefs.pinned.contains(c);
@@ -5806,6 +6039,8 @@ impl App {
                     if ui.is_rect_visible(rr) {
                         let fill = if active {
                             tint(PRIMARY(), 32)
+                        } else if checked.contains(&i) {
+                            tint(PRIMARY(), 18)
                         } else if ui.rect_contains_pointer(rr) && !ui.ctx().any_popup_open() {
                             HOVER()
                         } else if i % 2 == 1 {
@@ -5815,13 +6050,17 @@ impl App {
                         };
                         let p = ui.painter();
                         p.rect_filled(rr, 4, fill);
+                        let off = num_w - NUM_W;
                         if self.prefs.open_inline {
-                            chevron(p, egui::pos2(rr.left() + 9.0, rr.center().y), active, if active { PRIMARY() } else { FAINT() });
+                            chevron(p, egui::pos2(rr.left() + off + 9.0, rr.center().y), active, if active { PRIMARY() } else { FAINT() });
                         }
                         let num = (base + i as u64 + 1).to_string();
                         let (num, nc) = if drafted.is_some() { (format!("{num}●"), WARNING()) } else { (num, FAINT()) };
-                        p.text(egui::pos2(rr.left() + 18.0, rr.center().y), egui::Align2::LEFT_CENTER, num, FontId::proportional(11.5), nc);
-                        let mut x = rr.left() + NUM_W;
+                        p.text(egui::pos2(rr.left() + off + 18.0, rr.center().y), egui::Align2::LEFT_CENTER, num, FontId::proportional(11.5), nc);
+                        if !agg && check_box(ui, egui::pos2(rr.left() + 13.0, rr.center().y), ui.scope_id().with(("check", i)), checked.contains(&i), false).clicked() {
+                            check_click = Some(i);
+                        }
+                        let mut x = rr.left() + num_w;
                         for (ci, (c, w)) in cols.iter().zip(&widths).enumerate() {
                             let cell = egui::Rect::from_min_size(egui::pos2(x, rr.top()), egui::vec2(*w, ROW_H));
                             // Same for columns scrolled out sideways.
@@ -5859,12 +6098,20 @@ impl App {
                             let mut acts = Vec::new();
                             if let Some(v) = v {
                                 let path: Vec<String> = c.split('.').map(String::from).collect();
-                                cr.context_menu(|ui| field_menu(ui, &path, v, !agg, &mut acts));
+                                cr.context_menu(|ui| {
+                                    field_menu(ui, &path, v, !agg, &mut acts);
+                                    if !agg {
+                                        ui.separator();
+                                        doc_act = row_menu(ui, i, &checked).or(doc_act);
+                                    }
+                                });
                             } else if !agg {
                                 cr.context_menu(|ui| {
                                     if ui.button("Edit full document as JSON…").clicked() {
                                         acts.push(TreeAct::EditDoc);
                                     }
+                                    ui.separator();
+                                    doc_act = row_menu(ui, i, &checked).or(doc_act);
                                 });
                             }
                             if !acts.is_empty() {
@@ -5875,6 +6122,9 @@ impl App {
                     }
                     if resp.clicked() {
                         click = Some(i);
+                    }
+                    if !agg {
+                        resp.context_menu(|ui| doc_act = row_menu(ui, i, &checked).or(doc_act));
                     }
                     if active && self.prefs.open_inline {
                         ui.add_space(4.0);
@@ -5906,7 +6156,16 @@ impl App {
             self.apply_col_acts(&key, fields, col_acts);
         }
         if let Some(i) = click {
-            self.select(agg, i, true);
+            self.row_click(ui, agg, i);
+        }
+        if let Some(i) = check_click {
+            self.toggle_check(i, ui.input(|i| i.modifiers.shift));
+        }
+        if let Some(on) = check_all {
+            self.tm().unwrap().checked = if on { (0..docs.len()).collect() } else { BTreeSet::new() };
+        }
+        if let Some((i, a)) = doc_act {
+            self.docs_act(&ui.ctx().clone(), a, Self::act_targets(&checked, docs, i));
         }
         for (i, acts) in cell_acts {
             self.select(agg, i, false);
@@ -5934,6 +6193,8 @@ impl App {
 
     fn doc_list(&mut self, ui: &mut egui::Ui, agg: bool, docs: &[Document]) {
         let selected = self.t().unwrap().selected;
+        let checked = if agg { BTreeSet::new() } else { self.t().unwrap().checked.clone() };
+        let mut doc_act = None;
         let view_w = ui.available_width();
         let mut click = None;
         egui::Frame::new().fill(PANEL()).corner_radius(8).inner_margin(4).show(ui, |ui| {
@@ -5948,12 +6209,23 @@ impl App {
                     if active && std::mem::take(&mut self.scroll_sel) {
                         resp.scroll_to_me(None);
                     }
-                    let fill = if active { tint(PRIMARY(), 32) } else if resp.hovered() { HOVER() } else { Color32::TRANSPARENT };
+                    let fill = if active {
+                        tint(PRIMARY(), 32)
+                    } else if checked.contains(&i) {
+                        tint(PRIMARY(), 18)
+                    } else if resp.hovered() {
+                        HOVER()
+                    } else {
+                        Color32::TRANSPARENT
+                    };
                     ui.painter().rect_filled(rect, 4, fill);
                     let galley = ui.fonts_mut(|f| f.layout_job(row_job(d, w - 16.0)));
                     ui.painter().galley(rect.left_center() + egui::vec2(8.0, -galley.size().y / 2.0), galley, TEXT());
                     if resp.clicked() {
                         click = Some(i);
+                    }
+                    if !agg {
+                        resp.context_menu(|ui| doc_act = row_menu(ui, i, &checked).or(doc_act));
                     }
                     if active && self.prefs.open_inline {
                         ui.add_space(4.0);
@@ -5968,7 +6240,10 @@ impl App {
             });
         });
         if let Some(i) = click {
-            self.select(agg, i, true);
+            self.row_click(ui, agg, i);
+        }
+        if let Some((i, a)) = doc_act {
+            self.docs_act(&ui.ctx().clone(), a, Self::act_targets(&checked, docs, i));
         }
     }
 
@@ -6024,12 +6299,10 @@ impl App {
                     acts.push(TreeAct::AddField(Vec::new()));
                 }
                 if ui.small_button("Duplicate").clicked() {
-                    let mut c = d.clone();
-                    c.remove("_id");
-                    self.insert = Some(db::to_edit_json(&c));
+                    self.docs_act(ui.ctx(), DocsAct::Duplicate, vec![d.clone()]);
                 }
                 if ui.small_button(RichText::new("Delete").color(ALERT())).clicked() {
-                    self.modal = Some(Modal::Delete(d.clone()));
+                    self.docs_act(ui.ctx(), DocsAct::Delete, vec![d.clone()]);
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -6040,8 +6313,7 @@ impl App {
                     self.reset_doc_state();
                 }
                 if ui.small_button("Copy JSON").clicked() {
-                    ui.ctx().copy_text(db::to_edit_json(d));
-                    self.ok("Copied document as JSON");
+                    self.docs_act(ui.ctx(), DocsAct::CopyJson, vec![d.clone()]);
                 }
             });
         });
@@ -8075,14 +8347,20 @@ impl App {
                         }
                     });
                 }
-                Modal::Delete(d) => {
-                    let id = d.get("_id").map(db::short).unwrap_or_default();
-                    dialog_title(ui, "Delete this document?");
-                    ui.label(RichText::new(format!("_id {id}. You can undo this for 24 hours.")).monospace().color(MUTED()));
+                Modal::Delete(docs) => {
+                    const SHOWN: usize = 5;
+                    let ids: Vec<String> = docs.iter().take(SHOWN).map(|d| d.get("_id").map(db::short).unwrap_or_default()).collect();
+                    let more = if docs.len() > SHOWN { format!(" and {} more", docs.len() - SHOWN) } else { String::new() };
+                    dialog_title(ui, if docs.len() == 1 { "Delete this document?".to_string() } else { format!("Delete {} documents?", docs.len()) });
+                    ui.label(RichText::new(format!("_id {}{more}. You can undo this for 24 hours.", ids.join(", "))).monospace().color(MUTED()));
                     dialog_actions(ui, |ui| {
                         if primary(ui, "Delete", ALERT()).clicked() {
                             if let Some((conn, target)) = self.writable_target() {
-                                self.worker.delete(conn, target, d.clone(), true);
+                                match docs.as_slice() {
+                                    [d] => self.worker.delete(conn, target, d.clone(), true),
+                                    _ => self.worker.delete_docs(conn, target, docs.clone()),
+                                }
+                                // The reload drops deleted rows from the checks; others stay checked.
                                 if let Some(t) = self.tm() {
                                     t.selected = None;
                                 }
@@ -8615,6 +8893,7 @@ impl App {
                                     UndoKind::Insert { id } => format!("inserted {}", db::short(id)),
                                     UndoKind::InsertMany { ids } => format!("imported {} documents", ids.len()),
                                     UndoKind::Delete { old } => format!("deleted {}", old.get("_id").map(db::short).unwrap_or_default()),
+                                    UndoKind::DeleteMany { old } => format!("deleted {} documents", old.len()),
                                     UndoKind::Update { old, .. } => format!("edited {}", old.get("_id").map(db::short).unwrap_or_default()),
                                 };
                                 let mins = a.at.elapsed().as_secs() / 60;
