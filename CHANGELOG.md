@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.11.0](https://github.com/alkanna/quarry/compare/v0.10.2...v0.11.0) (2026-11-06)
+
+
+### Features
+
+* column manager with drag and drop, pin icons, filter and path suggestions ([#54](https://github.com/alkanna/quarry/issues/54)) ([ac53a8b](https://github.com/alkanna/quarry/commit/ac53a8b0a2cbc9658ff12db6af1c0ba879dcc998))
+* highlight toggles show their state in field and column menus ([#53](https://github.com/alkanna/quarry/issues/53)) ([dcc56ed](https://github.com/alkanna/quarry/commit/dcc56edfcec785456cc4f58a37fcf72a5efff0bb))
+* native macOS menu bar with About panel and shortcuts ([#56](https://github.com/alkanna/quarry/issues/56)) ([7dcf1e2](https://github.com/alkanna/quarry/commit/7dcf1e28ff962631b7c70e07ca2ef1c5567dcf85))
+* open several documents inline at once ([#52](https://github.com/alkanna/quarry/issues/52)) ([72b68de](https://github.com/alkanna/quarry/commit/72b68def5dd7abeeee3b94f3dbb5417a28ef3855))
+* select several documents for bulk actions ([#51](https://github.com/alkanna/quarry/issues/51)) ([2994ae8](https://github.com/alkanna/quarry/commit/2994ae8bafef13f9eed27e95f0171426afd371a2))
+
+
+### Bug Fixes
+
+* aligned values, row hover and full-width cards in the document tree ([#50](https://github.com/alkanna/quarry/issues/50)) ([36808a7](https://github.com/alkanna/quarry/commit/36808a7d1d122b6caa12bac9fc78b2a1ca254889))
+* single border around the sidebar and inspector ([#47](https://github.com/alkanna/quarry/issues/47)) ([6149bb6](https://github.com/alkanna/quarry/commit/6149bb61df8b472c268a7fc6583f18fa54ebea91))
+* wrap the view bar and document header instead of overlapping ([#55](https://github.com/alkanna/quarry/issues/55)) ([2278812](https://github.com/alkanna/quarry/commit/227881229bed1b14f0e6b981aa2ea77ba0987199))
+
+
+### Performance Improvements
+
+* spinners stop redrawing behind other windows ([#48](https://github.com/alkanna/quarry/issues/48)) ([b5e468b](https://github.com/alkanna/quarry/commit/b5e468b5a9242ce07b25a8bffbff82628983936d))
+
 ## [0.10.2](https://github.com/alkanna/quarry/compare/v0.10.1...v0.10.2) (2026-11-05)
 
 
