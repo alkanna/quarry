@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.11.1](https://github.com/alkanna/quarry/compare/v0.11.0...v0.11.1) (2026-11-06)
+
+
+### Bug Fixes
+
+* ask before running shell code that uses $merge ([#77](https://github.com/alkanna/quarry/issues/77)) ([d6036a3](https://github.com/alkanna/quarry/commit/d6036a3cf52b2ed4933efa3c91ff887ac6bcc22b))
+* count and undo documents inserted before a failed import batch ([#66](https://github.com/alkanna/quarry/issues/66)) ([dddd92a](https://github.com/alkanna/quarry/commit/dddd92a3234010f738ce52a94a1f90f21280923e))
+* delete a document with unsaved edits against its stored version ([#63](https://github.com/alkanna/quarry/issues/63)) ([3284682](https://github.com/alkanna/quarry/commit/3284682dfb331794f2fc7de456554a6fd691dd7e))
+* drain shell stderr while it runs and let stop cancel bun install ([#70](https://github.com/alkanna/quarry/issues/70)) ([50e4cba](https://github.com/alkanna/quarry/commit/50e4cba628cbe6a1efd42cfeb5f6db474a7ca9de))
+* drop the compare result when the target changes ([#60](https://github.com/alkanna/quarry/issues/60)) ([0c8d638](https://github.com/alkanna/quarry/commit/0c8d63809e16091008d9b4b8b1650727dd2c0638))
+* handle accented header words in csv camel case ([#58](https://github.com/alkanna/quarry/issues/58)) ([6700ee7](https://github.com/alkanna/quarry/commit/6700ee7f990d26713f023a5fe2f864f2f64c7175))
+* keep each tab's documents when a reference opens a new tab ([#59](https://github.com/alkanna/quarry/issues/59)) ([3408208](https://github.com/alkanna/quarry/commit/340820877fb93418da0996dca391929c08de2cd2))
+* keep the implicit auth database when restoring ([#65](https://github.com/alkanna/quarry/issues/65)) ([7e77ff6](https://github.com/alkanna/quarry/commit/7e77ff6074ee957b141788b3f648ee852219674b))
+* keep the offline demo away from the keychain ([#67](https://github.com/alkanna/quarry/issues/67)) ([586d20a](https://github.com/alkanna/quarry/commit/586d20ad700b182fc8d1e8efb2f61f272b85b048))
+* keep the other connections when one entry fails to parse ([#82](https://github.com/alkanna/quarry/issues/82)) ([21c61aa](https://github.com/alkanna/quarry/commit/21c61aa61f9368a91197adaf072f5652f9706866))
+* keep the password out of mongodump and mongorestore arguments ([#62](https://github.com/alkanna/quarry/issues/62)) ([086b166](https://github.com/alkanna/quarry/commit/086b166136289e5d330da83940b85e8b7900c6fb))
+* lock connections again when always allow writes is turned off ([#73](https://github.com/alkanna/quarry/issues/73)) ([7c11756](https://github.com/alkanna/quarry/commit/7c11756b7ada4d504398f42fa68bd4c4fbfb8ac4))
+* make the toast's undo revert the save it describes ([#79](https://github.com/alkanna/quarry/issues/79)) ([fafae74](https://github.com/alkanna/quarry/commit/fafae7476474946e6525d1900e0effede864ca67))
+* reject path-like and pinned shell package specs ([#76](https://github.com/alkanna/quarry/issues/76)) ([0b11f1c](https://github.com/alkanna/quarry/commit/0b11f1c3f7f5a5761c55b3cee2b6722f6c2cf436))
+* reload the tab a write belongs to instead of the current one ([#74](https://github.com/alkanna/quarry/issues/74)) ([c5a7876](https://github.com/alkanna/quarry/commit/c5a787688964bc876c2b8c4f150224fb88b5217f))
+* restart the updated binary on linux instead of the old copy ([#61](https://github.com/alkanna/quarry/issues/61)) ([2787227](https://github.com/alkanna/quarry/commit/2787227a8903ecd9896520d5a0b2df5490243835))
+* save the last connection with the rest of the session ([#78](https://github.com/alkanna/quarry/issues/78)) ([fcdd32a](https://github.com/alkanna/quarry/commit/fcdd32af036b26b11df200c6f460008c728f04b8))
+* **shell:** close read-only guard gaps for aggregation stages, admin commands and client writes ([#64](https://github.com/alkanna/quarry/issues/64)) ([6ff9168](https://github.com/alkanna/quarry/commit/6ff9168bc3da72cd607471f53c03a790011aa143))
+* **shell:** reach collections named after reserved words through db.collection ([#71](https://github.com/alkanna/quarry/issues/71)) ([e82354e](https://github.com/alkanna/quarry/commit/e82354ecf9a7ed0f0728ee6533ee0e620538277f))
+* show the shell or import row in the side panel, not an aggregate one ([#81](https://github.com/alkanna/quarry/issues/81)) ([d4b8fce](https://github.com/alkanna/quarry/commit/d4b8fce9a264b2d6ac7110c0077e4f65f4d4959a))
+* stop field renames from overwriting a sibling ([#68](https://github.com/alkanna/quarry/issues/68)) ([8003128](https://github.com/alkanna/quarry/commit/8003128935c08acf37dc4f717c8d2610ea448608))
+* suggest field names inside shell function bodies ([#75](https://github.com/alkanna/quarry/issues/75)) ([3a5f514](https://github.com/alkanna/quarry/commit/3a5f514aa79b79f0c1180a6ebe58fdd03f0dae16))
+* verify the update archive against a published sha-256 checksum ([#69](https://github.com/alkanna/quarry/issues/69)) ([0520b84](https://github.com/alkanna/quarry/commit/0520b8471179f95390105018dd762ff05dc3329c))
+* write settings files atomically ([#80](https://github.com/alkanna/quarry/issues/80)) ([94e4bcf](https://github.com/alkanna/quarry/commit/94e4bcf3f746921a24970de16a94663c1a3cb465))
+
 ## [0.11.0](https://github.com/alkanna/quarry/compare/v0.10.2...v0.11.0) (2026-11-06)
 
 
