@@ -1890,6 +1890,8 @@ enum ColAct {
     Pin(String),
     Hide(String),
     Move(String, i32),
+    /// Drag and drop: the column goes before the one at this position.
+    MoveTo(String, usize),
     Show(String),
     Highlight(String),
     Reset,
@@ -1941,6 +1943,7 @@ pub struct App {
     dropping_db: Option<(u64, String)>,
     prefs: UiPrefs,
     new_col: String,
+    col_filter: String,
     new_pkg: String,
     new_lib: String,
     /// Views per (connection, database), shown differently in the sidebar.
@@ -2500,6 +2503,7 @@ impl App {
             dropping_db: None,
             prefs: UiPrefs::default(),
             new_col: String::new(),
+            col_filter: String::new(),
             new_pkg: String::new(),
             new_lib: String::new(),
             views: HashSet::new(),
@@ -4081,6 +4085,42 @@ fn follow_ids(old: &[Document], new: &[Document], rows: impl Iterator<Item = usi
     new.iter().enumerate().filter(|(_, d)| d.get("_id").is_some_and(|v| ids.contains(&db::compact(v)))).map(|(i, _)| i).collect()
 }
 
+/// Thumbtack toggle: filled when pinned, outlined when not.
+fn pin_button(ui: &mut egui::Ui, pinned: bool) -> egui::Response {
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), Sense::click());
+    let color = if pinned { PRIMARY() } else if r.hovered() { MUTED() } else { FAINT() };
+    let p = ui.painter();
+    if r.hovered() {
+        p.rect_filled(rect, 4, HOVER());
+    }
+    let c = rect.center();
+    let head = egui::Rect::from_center_size(c + egui::vec2(0.0, -3.5), egui::vec2(8.0, 7.0));
+    if pinned {
+        p.rect_filled(head, 2, color);
+    } else {
+        p.rect_stroke(head, 2, Stroke::new(1.4, color), egui::StrokeKind::Inside);
+    }
+    p.line_segment([c + egui::vec2(-6.0, 1.0), c + egui::vec2(6.0, 1.0)], Stroke::new(1.6, color));
+    p.line_segment([c + egui::vec2(0.0, 1.0), c + egui::vec2(0.0, 7.5)], Stroke::new(1.4, color));
+    r
+}
+
+/// Six dots marking a drag handle; painted because the default fonts lack the braille glyph.
+fn grip(ui: &mut egui::Ui) {
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(14.0, 26.0), Sense::hover());
+    let color = if r.hovered() { MUTED() } else { FAINT() };
+    for dx in [-2.5, 2.5] {
+        for dy in [-5.0, 0.0, 5.0] {
+            ui.painter().circle_filled(rect.center() + egui::vec2(dx, dy), 1.3, color);
+        }
+    }
+}
+
+/// A glyph button large enough to hit comfortably.
+fn icon_button(ui: &mut egui::Ui, glyph: &str, enabled: bool) -> egui::Response {
+    ui.add_enabled(enabled, egui::Button::new(RichText::new(glyph).size(15.0)).min_size(egui::vec2(28.0, 26.0)))
+}
+
 /// Width of the checkbox column in front of the row number.
 const CHECK_W: f32 = 22.0;
 
@@ -5627,49 +5667,76 @@ impl App {
         let mut acts = Vec::new();
         let mut add = None;
         sticky_menu(ui, format!("Columns ({})", shown.len()), |ui| {
-            ui.set_min_width(280.0);
-            ui.label(RichText::new("SHOWN  ·  pinned columns stay first").size(11.0).color(MUTED()));
-            egui::ScrollArea::vertical().id_salt("shown").max_height(260.0).show(ui, |ui| {
-                for (i, c) in shown.iter().enumerate() {
-                    ui.horizontal(|ui| {
+            ui.set_min_width(360.0);
+            ui.add(egui::TextEdit::singleline(&mut self.col_filter).hint_text("Filter fields").desired_width(f32::INFINITY).margin(egui::Margin::symmetric(10, 6)));
+            let needle = self.col_filter.trim().to_lowercase();
+            let keep = |c: &str| needle.is_empty() || c.to_lowercase().contains(&needle);
+            ui.add_space(6.0);
+            ui.label(RichText::new("SHOWN  ·  drag to reorder, pinned columns stay first").size(11.0).color(MUTED()));
+            egui::ScrollArea::vertical().id_salt("shown").max_height(320.0).show(ui, |ui| {
+                for (i, c) in shown.iter().enumerate().filter(|(_, c)| keep(c)) {
+                    let row = ui.horizontal(|ui| {
+                        ui.set_min_height(28.0);
+                        ui.dnd_drag_source(egui::Id::unique(("col-drag", c)), i, grip).response.on_hover_cursor(egui::CursorIcon::Grab);
                         let pinned = prefs.pinned.contains(c);
-                        if ui.selectable_label(pinned, RichText::new("pin").size(11.0)).on_hover_text("Keep this column first").clicked() {
+                        if pin_button(ui, pinned).on_hover_text(if pinned { "Unpin" } else { "Pin: keep this column first" }).clicked() {
                             acts.push(ColAct::Pin(c.clone()));
                         }
                         ui.label(RichText::new(c).monospace().color(if fields.contains(c) { TEXT() } else { PRIMARY() }));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("×").on_hover_text("Hide").clicked() {
+                            if icon_button(ui, "×", true).on_hover_text("Hide").clicked() {
                                 acts.push(ColAct::Hide(c.clone()));
                             }
-                            if ui.add_enabled(i + 1 < shown.len(), egui::Button::new("↓").small()).clicked() {
+                            if icon_button(ui, "↓", i + 1 < shown.len()).on_hover_text("Move down").clicked() {
                                 acts.push(ColAct::Move(c.clone(), 1));
                             }
-                            if ui.add_enabled(i > 0, egui::Button::new("↑").small()).clicked() {
+                            if icon_button(ui, "↑", i > 0).on_hover_text("Move up").clicked() {
                                 acts.push(ColAct::Move(c.clone(), -1));
                             }
                         });
-                    });
+                    }).response;
+                    // Drop on the upper half to go before this row, the lower half to go after it.
+                    let below = ui.input(|inp| inp.pointer.hover_pos()).is_some_and(|p| p.y > row.rect.center().y);
+                    if row.dnd_hover_payload::<usize>().is_some() {
+                        let y = if below { row.rect.bottom() } else { row.rect.top() };
+                        ui.painter().hline(row.rect.x_range(), y, Stroke::new(2.0, PRIMARY()));
+                    }
+                    if let Some(from) = row.dnd_release_payload::<usize>() {
+                        acts.push(ColAct::MoveTo(shown[*from].clone(), i + below as usize));
+                    }
                 }
             });
-            let hidden: Vec<&String> = fields.iter().filter(|f| !shown.contains(f)).collect();
+            let hidden: Vec<&String> = fields.iter().filter(|f| !shown.contains(f) && keep(f)).collect();
             if !hidden.is_empty() {
                 ui.separator();
                 ui.label(RichText::new(format!("MORE FIELDS ({})", hidden.len())).size(11.0).color(MUTED()));
-                egui::ScrollArea::vertical().id_salt("more").max_height(180.0).show(ui, |ui| {
+                egui::ScrollArea::vertical().id_salt("more").max_height(200.0).show(ui, |ui| {
                     for f in hidden {
-                        if ui.button(RichText::new(format!("+ {f}")).monospace()).clicked() {
+                        if ui.add(egui::Button::new(RichText::new(format!("+ {f}")).monospace()).frame(false).min_size(egui::vec2(ui.available_width(), 26.0))).clicked() {
                             acts.push(ColAct::Show(f.clone()));
                         }
                     }
                 });
             }
             ui.separator();
+            ui.label(RichText::new("CUSTOM FIELD").size(11.0).color(MUTED()));
             ui.horizontal(|ui| {
-                let r = ui.add(egui::TextEdit::singleline(&mut self.new_col).hint_text("custom: customer.name").desired_width(170.0).font(FontId::monospace(12.5)));
-                if (ui.button("Add").clicked() || (r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)))) && !self.new_col.trim().is_empty() {
+                let w = ui.available_width() - 64.0;
+                let r = ui.add(egui::TextEdit::singleline(&mut self.new_col).hint_text("customer.name").desired_width(w).font(FontId::monospace(13.0)).margin(egui::Margin::symmetric(10, 6)));
+                if (ui.add(egui::Button::new("Add").min_size(egui::vec2(56.0, 28.0))).clicked() || (r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)))) && !self.new_col.trim().is_empty() {
                     add = Some(self.new_col.trim().to_string());
                 }
             });
+            // Nested paths seen in the loaded documents, for paths the field list does not offer.
+            let typed = self.new_col.trim().to_lowercase();
+            if !typed.is_empty() {
+                let paths = if agg { &fields } else { &self.tabs[self.cur].paths };
+                for path in paths.iter().filter(|x| x.to_lowercase().contains(&typed) && !shown.contains(x)).take(8) {
+                    if ui.add(egui::Button::new(RichText::new(path).monospace()).frame(false).min_size(egui::vec2(ui.available_width(), 24.0))).clicked() {
+                        add = Some(path.clone());
+                    }
+                }
+            }
             ui.label(RichText::new("Dotted paths reach inside objects and arrays, like items.0.sku").size(11.0).color(FAINT()));
             if ui.button(format!("Reset to the first {n} fields")).clicked() {
                 acts.push(ColAct::Reset);
@@ -5717,6 +5784,14 @@ impl App {
                         let pinned_n = p.pinned.iter().filter(|x| shown.contains(x)).count();
                         shown.swap(i, j);
                         // Moving across the edge of the pinned block changes which columns are pinned.
+                        p.pinned = shown[..pinned_n].to_vec();
+                    }
+                }
+                ColAct::MoveTo(c, to) => {
+                    if let Some(i) = shown.iter().position(|x| *x == c) {
+                        let pinned_n = p.pinned.iter().filter(|x| shown.contains(x)).count();
+                        let c = shown.remove(i);
+                        shown.insert(if to > i { to - 1 } else { to }.min(shown.len()), c);
                         p.pinned = shown[..pinned_n].to_vec();
                     }
                 }
