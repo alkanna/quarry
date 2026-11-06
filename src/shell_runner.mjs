@@ -2,7 +2,7 @@
 // Input (stdin, JSON): { uri, db, code, collections: [names], readOnly, timeoutMs }
 // Output (stdout, one JSON object per line): { type: "log", level, text } ... then
 // { type: "result", ok: true, ejson } or { type: "result", ok: false, error }.
-import { MongoClient, ObjectId as BsonObjectId, BSON, Collection, Db } from "mongodb";
+import { MongoClient, ObjectId as BsonObjectId, BSON, Collection, Db, Admin, AggregationCursor } from "mongodb";
 import { createRequire } from "module";
 
 // Packages added in Quarry are installed next to this file; scripts load them with require() or import().
@@ -26,23 +26,45 @@ if (input.readOnly) {
     "updateSearchIndex", "initializeOrderedBulkOp", "initializeUnorderedBulkOp"]) {
     Collection.prototype[m] = blocked(m);
   }
-  for (const m of ["dropDatabase", "dropCollection", "createCollection", "renameCollection", "createIndex"]) {
+  for (const m of ["dropDatabase", "dropCollection", "createCollection", "renameCollection", "createIndex",
+    "removeUser", "setProfilingLevel"]) {
     Db.prototype[m] = blocked(m);
   }
+  Admin.prototype.removeUser = blocked("removeUser");
+  // Scripts reach the client through db.client, and its bulkWrite spans collections.
+  MongoClient.prototype.bulkWrite = blocked("bulkWrite");
   const READ_COMMANDS = new Set(["ping", "buildinfo", "buildInfo", "serverStatus", "dbStats", "dbstats", "collStats",
-    "listCollections", "listIndexes", "count", "distinct", "find", "hello", "isMaster", "explain", "connectionStatus"]);
-  const command = Db.prototype.command;
-  Db.prototype.command = function (cmd, ...rest) {
-    const name = Object.keys(cmd || {})[0];
-    if (!READ_COMMANDS.has(name)) throw new Error(`db.command({ ${name} }) is not allowed on a read-only connection.`);
-    return command.call(this, cmd, ...rest);
+    "listCollections", "listIndexes", "count", "distinct", "find", "hello", "isMaster", "explain", "connectionStatus",
+    "replSetGetStatus", "listDatabases"]);
+  // Admin.command and runCursorCommand send commands without going through Db.command.
+  const guardCommand = (proto, method, label) => {
+    const run = proto[method];
+    proto[method] = function (cmd, ...rest) {
+      const name = Object.keys(cmd || {})[0];
+      if (!READ_COMMANDS.has(name)) throw new Error(`${label}({ ${name} }) is not allowed on a read-only connection.`);
+      return run.call(this, cmd, ...rest);
+    };
   };
+  guardCommand(Db.prototype, "command", "db.command");
+  guardCommand(Db.prototype, "runCursorCommand", "db.runCursorCommand");
+  guardCommand(Admin.prototype, "command", "db.admin().command");
+  const writesData = (pipeline) => (pipeline || []).some((s) => s && ("$out" in s || "$merge" in s));
+  const PIPELINE_WRITE = "$out and $merge write data; this connection is read-only.";
   const aggregate = Collection.prototype.aggregate;
   Collection.prototype.aggregate = function (pipeline, ...rest) {
-    if ((pipeline || []).some((s) => s && ("$out" in s || "$merge" in s))) {
-      throw new Error("$out and $merge write data; this connection is read-only.");
-    }
+    if (writesData(pipeline)) throw new Error(PIPELINE_WRITE);
     return aggregate.call(this, pipeline, ...rest);
+  };
+  const addStage = AggregationCursor.prototype.addStage;
+  AggregationCursor.prototype.addStage = function (stage) {
+    if (writesData([stage])) throw new Error(PIPELINE_WRITE);
+    return addStage.call(this, stage);
+  };
+  // The cursor keeps the caller's pipeline array, which can still change before it runs.
+  const initialize = AggregationCursor.prototype._initialize;
+  AggregationCursor.prototype._initialize = async function (...args) {
+    if (writesData(this.pipeline)) throw new Error(PIPELINE_WRITE);
+    return initialize.apply(this, args);
   };
 }
 
