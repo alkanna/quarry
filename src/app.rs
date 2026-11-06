@@ -2965,12 +2965,16 @@ impl App {
     }
 
     fn load_indexes(&mut self) {
-        if let Some(target) = self.target() {
+        self.load_indexes_of(self.cur);
+    }
+
+    fn load_indexes_of(&mut self, i: usize) {
+        if let Some(target) = self.tabs.get(i).and_then(|t| self.target_for(&t.sel)) {
             self.req += 1;
             let req = self.req;
-            self.tm().unwrap().idx_req = req;
+            self.tabs[i].idx_req = req;
             // Only the Indexes view shows usage, and it costs a profiler query.
-            if self.t().is_some_and(|t| t.view == View::Indexes) {
+            if self.tabs[i].view == View::Indexes {
                 self.worker.index_info(target.clone());
             }
             self.worker.indexes(req, target);
@@ -3112,21 +3116,25 @@ impl App {
     }
 
     fn reload(&mut self) {
+        self.reload_of(self.cur);
+    }
+
+    fn reload_of(&mut self, i: usize) {
         if self.demo {
             return;
         }
-        let Some(target) = self.target() else { return };
+        let Some(target) = self.tabs.get(i).and_then(|t| self.target_for(&t.sel)) else { return };
         // Each answer is matched to its tab by id; a slower older one never overwrites a newer one.
         self.req += 1;
         let req = self.req;
-        let t = self.tm().unwrap();
+        let t = &mut self.tabs[i];
         t.req = req;
         t.loading = true;
         let (q, page, view, no_idx) = (t.query.clone(), t.page, t.view, t.indexes.is_empty());
         self.worker.find(req, target, q, page);
         // Indexes also feed the Sort history (as in the original), so load them once per tab.
         if view == View::Indexes || no_idx {
-            self.load_indexes();
+            self.load_indexes_of(i);
         }
     }
 
@@ -3404,7 +3412,7 @@ impl App {
                         }
                     }
                 }
-                Msg::Written { res, undo, reload, retry } => {
+                Msg::Written { at, res, undo, reload, retry } => {
                     match res {
                         Ok(s) => {
                             self.reset_doc_state();
@@ -3424,22 +3432,28 @@ impl App {
                     if let Some(u) = undo {
                         self.push_undo(u);
                     }
-                    if reload {
-                        self.reload();
-                    } else {
-                        self.load_indexes();
+                    // The worker only knows the database and collection, so a same-named
+                    // collection on another connection may reload too, which is harmless.
+                    let tabs: Vec<usize> = (0..self.tabs.len()).filter(|&i| self.tabs[i].sel.db == at.0 && self.tabs[i].sel.coll == at.1).collect();
+                    for i in tabs {
+                        if reload {
+                            self.reload_of(i);
+                        } else {
+                            self.load_indexes_of(i);
+                        }
                     }
                 }
                 Msg::Saved { tag, res, undo } => {
+                    let dr = self.saving.remove(&tag);
+                    let sel = dr.as_ref().map(|d| Sel { conn: d.conn, db: d.db.clone(), coll: d.coll.clone() });
                     match res {
                         Ok(s) => {
-                            self.saving.remove(&tag);
                             self.toast = Some((s.clone(), std::time::Instant::now()));
                             self.ok(s);
                         }
                         Err(e) => {
                             // Keep the edits so nothing typed is lost; the person can reload and redo.
-                            if let Some(dr) = self.saving.remove(&tag) {
+                            if let Some(dr) = dr {
                                 self.drafts.insert(tag, dr);
                             }
                             self.err(e);
@@ -3448,8 +3462,12 @@ impl App {
                     if let Some(u) = undo {
                         self.push_undo(u);
                     }
-                    if self.saving.is_empty() {
-                        self.reload();
+                    // Waits for the collection's other saves so the reload shows all of them.
+                    if let Some(sel) = sel.filter(|s| !self.saving.values().any(|d| d.conn == s.conn && d.db == s.db && d.coll == s.coll)) {
+                        let tabs: Vec<usize> = (0..self.tabs.len()).filter(|&i| self.tabs[i].sel == sel).collect();
+                        for i in tabs {
+                            self.reload_of(i);
+                        }
                     }
                 }
                 Msg::Info(res) => match res {
