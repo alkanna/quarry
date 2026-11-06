@@ -1891,6 +1891,7 @@ enum ColAct {
     Hide(String),
     Move(String, i32),
     Show(String),
+    Highlight(String),
     Reset,
 }
 
@@ -2075,7 +2076,7 @@ fn fold_menu(ui: &mut egui::Ui, path: &[String], container: bool) -> Option<(Vec
     f
 }
 
-fn field_menu(ui: &mut egui::Ui, path: &[String], v: &Bson, editable: bool, acts: &mut Vec<TreeAct>) {
+fn field_menu(ui: &mut egui::Ui, path: &[String], v: &Bson, editable: bool, highlighted: bool, acts: &mut Vec<TreeAct>) {
     let p = path.join(".");
     let is_id = path.first().is_some_and(|k| k == "_id");
     ui.set_min_width(230.0);
@@ -2108,8 +2109,10 @@ fn field_menu(ui: &mut egui::Ui, path: &[String], v: &Bson, editable: bool, acts
     if ui.button("Pin as a new column").clicked() {
         acts.push(TreeAct::PinColumn(p.clone()));
     }
-    if ui.button("Highlight field").clicked() {
+    // A checkbox so an active highlight reads as on and is clearly undone from here.
+    if ui.checkbox(&mut highlighted.clone(), "Highlight field").clicked() {
         acts.push(TreeAct::Highlight(p.clone()));
+        ui.close();
     }
     ui.menu_button("Filter by value", |ui| {
         if ui.button("All documents").clicked() {
@@ -5687,6 +5690,15 @@ impl App {
         for a in acts {
             let mut shown = visible_cols(Some(p), fields, n);
             match a {
+                ColAct::Highlight(c) => {
+                    let c = db::strip_indices(&c);
+                    if !p.highlight.contains(&c) {
+                        p.highlight.push(c);
+                    } else {
+                        p.highlight.retain(|x| *x != c);
+                    }
+                    continue;
+                }
                 ColAct::Pin(c) => {
                     if !p.pinned.contains(&c) {
                         p.pinned.push(c);
@@ -6050,6 +6062,11 @@ impl App {
                         if ui.button("Hide column").clicked() {
                             col_acts.push(ColAct::Hide(c.clone()));
                         }
+                        ui.separator();
+                        if ui.checkbox(&mut prefs.highlight.contains(&db::strip_indices(c)), "Highlight column").clicked() {
+                            col_acts.push(ColAct::Highlight(c.clone()));
+                            ui.close();
+                        }
                     });
                     // Drag the right edge to resize.
                     let handle = egui::Rect::from_min_max(egui::pos2(cell.right() - 3.0, cell.top() + 6.0), egui::pos2(cell.right() + 3.0, cell.bottom() - 6.0));
@@ -6140,7 +6157,7 @@ impl App {
                             if let Some(v) = v {
                                 let path: Vec<String> = c.split('.').map(String::from).collect();
                                 cr.context_menu(|ui| {
-                                    field_menu(ui, &path, v, !agg, &mut acts);
+                                    field_menu(ui, &path, v, !agg, hl_cols[ci], &mut acts);
                                     if !agg {
                                         ui.separator();
                                         doc_act = row_menu(ui, i, &checked).or(doc_act);
@@ -6525,15 +6542,8 @@ impl App {
                     self.prefs.table = true;
                 }
                 TreeAct::Highlight(path) => {
-                    let key = self.col_key(false);
-                    let p = self.prefs.cols.entry(key).or_default();
-                    let path = db::strip_indices(&path);
-                    if p.highlight.contains(&path) {
-                        p.highlight.retain(|x| *x != path);
-                    } else {
-                        p.highlight.push(path);
-                    }
-                    self.save_prefs();
+                    let fields = self.t().map(|t| t.fields.clone()).unwrap_or_default();
+                    self.apply_col_acts(&self.col_key(false), &fields, vec![ColAct::Highlight(path)]);
                 }
                 TreeAct::Filter(path, v, add) => {
                     let path = db::strip_indices(&path);
@@ -6673,8 +6683,9 @@ impl App {
                 }
                 let p = path.clone();
                 let mut fold = None;
+                let hl = highlighted(&self.prefs, &self.col_key(false), &p);
                 r.header_response.on_hover_text("Double-click to edit as JSON, right-click for more").context_menu(|ui| {
-                    field_menu(ui, &p, v, editable, acts);
+                    field_menu(ui, &p, v, editable, hl, acts);
                     fold = fold_menu(ui, &p, true);
                 });
                 if let Some((p, open)) = fold {
@@ -6738,7 +6749,7 @@ impl App {
                         };
                         let p = path.clone();
                         r.union(key_r).context_menu(|ui| {
-                            field_menu(ui, &p, leaf, editable, acts);
+                            field_menu(ui, &p, leaf, editable, hl, acts);
                             fold = fold_menu(ui, &p, false);
                         });
                     }
