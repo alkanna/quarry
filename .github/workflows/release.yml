@@ -6,6 +6,12 @@ name: Release
 on:
   push:
     branches: [master]
+  # Rebuilds and attaches the apps for an existing release, for when a build job failed.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build, like v0.11.0
+        required: true
 
 permissions:
   contents: write
@@ -23,12 +29,13 @@ jobs:
 
   build:
     needs: release-please
-    if: needs.release-please.outputs.created == 'true'
+    if: needs.release-please.outputs.created == 'true' || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-14, name: macos-universal }
+          # The newest Apple silicon image, so a retired version never stops a release again.
+          - { os: macos-latest, name: macos-universal }
           # Built on the oldest Ubuntu image: the binary needs that glibc or newer (2.35).
           - { os: ubuntu-22.04, name: linux-x86_64 }
           - { os: ubuntu-22.04-arm, name: linux-aarch64 }
@@ -37,9 +44,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       GH_TOKEN: ${{ github.token }}
-      TAG: ${{ needs.release-please.outputs.tag }}
+      TAG: ${{ inputs.tag || needs.release-please.outputs.tag }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Linux libraries
