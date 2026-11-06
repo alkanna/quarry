@@ -1980,7 +1980,8 @@ pub struct App {
     status: (String, bool),
     status_at: std::time::Instant,
     log: LogUi,
-    toast: Option<(String, std::time::Instant)>,
+    /// Message, when it was shown, and the `at` of the undo entry its Undo button reverts.
+    toast: Option<(String, std::time::Instant, Option<std::time::Instant>)>,
     ac: Ac,
     tree_filter: String,
     tools_installing: bool,
@@ -3485,7 +3486,7 @@ impl App {
                     let sel = dr.as_ref().map(|d| Sel { conn: d.conn, db: d.db.clone(), coll: d.coll.clone() });
                     match res {
                         Ok(s) => {
-                            self.toast = Some((s.clone(), std::time::Instant::now()));
+                            self.toast = Some((s.clone(), std::time::Instant::now(), undo.as_ref().map(|u| u.at)));
                             self.ok(s);
                         }
                         Err(e) => {
@@ -4820,7 +4821,9 @@ impl App {
     /// "Saved … Undo" notice after a write, for 8 seconds.
     fn toast(&mut self, ctx: &egui::Context) {
         const TOAST_S: u64 = 8;
-        let Some((msg, at)) = self.toast.clone() else { return };
+        let Some((msg, at, undo_at)) = self.toast.clone() else { return };
+        // Later writes push newer entries in front, so the toast's own entry is found by its time.
+        let entry = undo_at.and_then(|k| self.undo.iter().position(|a| a.at == k));
         if at.elapsed().as_secs() >= TOAST_S {
             self.toast = None;
             return;
@@ -4833,15 +4836,15 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("✓").color(SUCCESS()));
                     ui.label(RichText::new(&msg).color(TEXT()));
-                    if !self.undo.is_empty() && ui.button(RichText::new("Undo").color(PRIMARY())).clicked() {
+                    if entry.is_some() && ui.button(RichText::new("Undo").color(PRIMARY())).clicked() {
                         undo = true;
                     }
                     close = ui.small_button("×").clicked();
                 });
             });
         });
-        if undo {
-            self.apply_undo(0);
+        if let (true, Some(i)) = (undo, entry) {
+            self.apply_undo(i);
             self.toast = None;
         } else if close {
             self.toast = None;
