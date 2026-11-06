@@ -4774,7 +4774,7 @@ impl App {
             .default_size(SIDEBAR_W)
             .size_range(200.0..=480.0)
             .resizable(true)
-            .frame(egui::Frame::new().fill(PANEL()).inner_margin(egui::Margin { left: 10, right: 10, top: 12, bottom: 10 }).stroke(Stroke::new(1.0, BORDER())))
+            .frame(egui::Frame::new().fill(PANEL()).inner_margin(egui::Margin { left: 10, right: 10, top: 12, bottom: 10 }))
             .show(ui, |ui| {
                 self.conn_picker(ui);
                 ui.add_space(10.0);
@@ -5975,7 +5975,7 @@ impl App {
             .default_size(460.0)
             .size_range(320.0..=900.0)
             .resizable(true)
-            .frame(egui::Frame::new().fill(PANEL()).inner_margin(12).stroke(Stroke::new(1.0, BORDER())))
+            .frame(egui::Frame::new().fill(PANEL()).inner_margin(12))
             .show(ui, |ui| {
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| self.doc_body(ui, &d, from_agg));
             });
