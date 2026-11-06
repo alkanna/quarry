@@ -2203,8 +2203,16 @@ fn query_script(coll: &str, filter: &str) -> String {
     format!("async function run() {{\n\treturn await {}.find({f})\n}}", collection_ref(coll))
 }
 
+/// Words the Shell runner does not bind as bare names, since they cannot be parameter names or
+/// would not resolve to the collection inside run(). Must match RESERVED in shell_runner.mjs.
+const JS_RESERVED: [&str; 48] = [
+    "break", "case", "catch", "class", "const", "continue", "debugger", "default", "delete", "do", "else", "enum", "export", "extends", "false", "finally", "for",
+    "function", "if", "import", "in", "instanceof", "new", "null", "return", "super", "switch", "this", "throw", "true", "try", "typeof", "var", "void", "while",
+    "with", "implements", "interface", "let", "package", "private", "protected", "public", "static", "yield", "await", "arguments", "eval",
+];
+
 pub(crate) fn collection_ref(coll: &str) -> String {
-    if coll.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') && !coll.starts_with(|c: char| c.is_ascii_digit()) {
+    if coll.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') && !coll.starts_with(|c: char| c.is_ascii_digit()) && !JS_RESERVED.contains(&coll) {
         coll.to_string()
     } else {
         format!("db.collection({})", serde_json::Value::String(coll.into()))
@@ -9329,6 +9337,17 @@ mod tests {
         let labels = |q| jumps(&conns, Some(1), q).into_iter().map(|j| j.0).collect::<Vec<_>>();
         assert_eq!(labels("vairon travels"), ["thetreep-api-vairon.travels"]);
         assert_eq!(labels("travels")[..2], ["thetreep-api-main.travels", "thetreep-api-vairon.travels"]);
+    }
+
+    #[test]
+    fn collection_refs() {
+        assert_eq!(collection_ref("users"), "users");
+        assert_eq!(collection_ref("my-coll"), "db.collection(\"my-coll\")");
+        assert_eq!(collection_ref("2024"), "db.collection(\"2024\")");
+        for word in ["default", "class", "new", "delete", "import", "await"] {
+            assert_eq!(collection_ref(word), format!("db.collection(\"{word}\")"));
+        }
+        assert_eq!(query_script("default", ""), "async function run() {\n\treturn await db.collection(\"default\").find({})\n}");
     }
 
     #[test]

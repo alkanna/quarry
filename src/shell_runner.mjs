@@ -75,6 +75,14 @@ function packageIdent(name) {
   return id || "pkg";
 }
 
+// Reserved words are not valid parameter names for new Function, so those collections are only
+// reachable through db.collection(). Must match JS_RESERVED in app.rs.
+const RESERVED = new Set(["break", "case", "catch", "class", "const", "continue", "debugger", "default", "delete", "do",
+  "else", "enum", "export", "extends", "false", "finally", "for", "function", "if", "import", "in", "instanceof", "new",
+  "null", "return", "super", "switch", "this", "throw", "true", "try", "typeof", "var", "void", "while", "with",
+  "implements", "interface", "let", "package", "private", "protected", "public", "static", "yield", "await",
+  "arguments", "eval"]);
+
 // Shell helpers like the original's: ObjectId works with or without `new`.
 function ObjectId(...a) { return new BsonObjectId(...a); }
 function ISODate(s) { return s ? new Date(s) : new Date(); }
@@ -100,7 +108,7 @@ try {
   const db = client.db(input.db);
   const ctx = { db, ObjectId, ISODate, randomId, UUIDv4, require, console: console2, log: console2.log };
   for (const name of input.collections) {
-    if (/^[A-Za-z_$][\w$]*$/.test(name) && !(name in ctx)) ctx[name] = db.collection(name);
+    if (/^[A-Za-z_$][\w$]*$/.test(name) && !RESERVED.has(name) && !(name in ctx)) ctx[name] = db.collection(name);
   }
   // Built in, like the original shell: _ (lodash), dayjs and UUIDv1.
   try {
