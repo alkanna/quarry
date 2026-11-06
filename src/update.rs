@@ -98,19 +98,28 @@ pub fn check_and_install() -> Result<Option<String>, String> {
     }
     // The release is published minutes before the build jobs attach their files: until then it
     // counts as up to date and the next check picks it up.
-    let Some(url) = v["assets"]
-        .as_array()
-        .and_then(|a| a.iter().find(|x| x["name"] == name.as_str()))
-        .and_then(|x| x["browser_download_url"].as_str())
-    else {
-        return Ok(None);
-    };
-    let dir = std::env::temp_dir().join(format!("quarry-update-{tag}"));
+    let asset_url = |n: &str| v["assets"].as_array().and_then(|a| a.iter().find(|x| x["name"] == n)).and_then(|x| x["browser_download_url"].as_str());
+    let Some(url) = asset_url(&name) else { return Ok(None) };
+    // The build jobs upload the checksum before the archive, so an archive without one is from a
+    // release older than checksums or a broken build, never one still being attached.
+    let sum_url = asset_url(&format!("{name}.sha256")).ok_or_else(|| format!("Quarry {tag} publishes no checksum for {name}, so it was not installed."))?;
+    let sum = run(Command::new("curl").args(["-fsSL", sum_url]))?;
+    let sha = parse_checksum(&sum).ok_or_else(|| format!("The checksum of {name} is unreadable, so Quarry {tag} was not installed."))?;
+    let dir = fresh_temp_dir("quarry-update")?;
+    let installed = download_and_install(&dir, &name, url, &sha, &target);
     remove(&dir);
+    installed?;
+    Ok(Some(tag.trim_start_matches('v').to_string()))
+}
+
+fn download_and_install(dir: &Path, name: &str, url: &str, sha: &str, target: &Path) -> Result<(), String> {
     let out = dir.join("x");
-    std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
-    let archive = dir.join(&name);
+    std::fs::create_dir(&out).map_err(|e| e.to_string())?;
+    let archive = dir.join(name);
     run(Command::new("curl").args(["-fsSL", "-o"]).arg(&archive).arg(url))?;
+    if !sha256_matches(&archive, sha)? {
+        return Err(format!("The downloaded {name} does not match its published checksum; nothing was installed."));
+    }
     if cfg!(target_os = "macos") {
         run(Command::new("ditto").args(["-x", "-k"]).arg(&archive).arg(&out))?;
     } else {
@@ -121,9 +130,33 @@ pub fn check_and_install() -> Result<Option<String>, String> {
     if !new.exists() {
         return Err(format!("{name} does not contain {}.", new.file_name().unwrap_or_default().to_string_lossy()));
     }
-    install(&new, &target)?;
-    remove(&dir);
-    Ok(Some(tag.trim_start_matches('v').to_string()))
+    install(&new, target)
+}
+
+/// The digest in a `.sha256` file as written by sha256sum, shasum or Get-FileHash: the first
+/// word, which must be 64 hex digits.
+fn parse_checksum(s: &str) -> Option<String> {
+    let h = s.split_whitespace().next()?;
+    (h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit())).then(|| h.to_ascii_lowercase())
+}
+
+fn sha256_matches(file: &Path, sha: &str) -> Result<bool, String> {
+    use sha2::Digest;
+    let bytes = std::fs::read(file).map_err(|e| e.to_string())?;
+    let got: String = sha2::Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+    Ok(got.eq_ignore_ascii_case(sha))
+}
+
+/// A new, empty folder in the temp folder with a name nobody can guess, so another user cannot
+/// plant files or links where the download lands.
+fn fresh_temp_dir(prefix: &str) -> Result<PathBuf, String> {
+    use std::hash::{BuildHasher, Hasher};
+    // RandomState is keyed from the system's random source, which saves a dependency.
+    let n = std::collections::hash_map::RandomState::new().build_hasher().finish();
+    let dir = std::env::temp_dir().join(format!("{prefix}-{n:016x}"));
+    // create_dir, not create_dir_all: it fails when the path already exists, links included.
+    std::fs::create_dir(&dir).map_err(|e| format!("Cannot create {} ({e}).", dir.display()))?;
+    Ok(dir)
 }
 
 /// The MongoDB Database Tools build for this system in the official feed's latest release, as
@@ -222,16 +255,13 @@ pub fn update_db_tools(dir: &Path) -> Result<Option<String>, String> {
 
 /// Downloads one build, checks it against the feed's SHA-256 and puts its programs in `dir`.
 fn install_tools_build(dir: &Path, (version, url, sha): (String, String, String)) -> Result<String, String> {
-    use sha2::Digest;
     let tmp = std::env::temp_dir().join(format!("quarry-tools-{version}"));
     remove(&tmp);
     let out = tmp.join("x");
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
     let archive = tmp.join(url.rsplit('/').next().unwrap_or("tools"));
     run(Command::new("curl").args(["-fsSL", "-o"]).arg(&archive).arg(&url))?;
-    let bytes = std::fs::read(&archive).map_err(|e| e.to_string())?;
-    let got: String = sha2::Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
-    if !got.eq_ignore_ascii_case(&sha) {
+    if !sha256_matches(&archive, &sha)? {
         remove(&tmp);
         return Err("The downloaded Database Tools do not match MongoDB's checksum; nothing was installed.".into());
     }
@@ -331,6 +361,23 @@ mod tests {
         assert!(!newer("1.0.0", "nightly"));
         assert!(newer("1.0.0", "v1.0.1-beta"));
         assert_eq!(old_path(Path::new("/A/Quarry.app")), PathBuf::from("/A/Quarry.app.old"));
+    }
+
+    #[test]
+    fn update_checksum() {
+        let hex = "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855";
+        assert_eq!(parse_checksum(&format!("{hex}  quarry-linux-x86_64.tar.gz\n")), Some(hex.to_lowercase()));
+        assert_eq!(parse_checksum(hex), Some(hex.to_lowercase()));
+        assert_eq!(parse_checksum(""), None);
+        assert_eq!(parse_checksum("abc  file"), None);
+        let dir = fresh_temp_dir("quarry-test").unwrap();
+        let f = dir.join("empty");
+        std::fs::write(&f, "").unwrap();
+        assert_eq!(sha256_matches(&f, hex), Ok(true));
+        let other = fresh_temp_dir("quarry-test").unwrap();
+        assert_ne!(other, dir);
+        remove(&dir);
+        remove(&other);
     }
 
     #[test]

@@ -63,6 +63,8 @@ jobs:
             ./bundle.sh "macos-$arch"
             ditto -c -k --keepParent dist/Quarry.app "Quarry-macos-$arch.zip"
           done
+          for f in Quarry-macos-*.zip; do shasum -a 256 "$f" > "$f.sha256"; done
+          gh release upload "$TAG" Quarry-macos-*.zip.sha256 --clobber
           gh release upload "$TAG" Quarry-macos-arm64.zip Quarry-macos-x86_64.zip Quarry-macos-universal.zip --clobber
 
       - name: Linux binary
@@ -70,6 +72,8 @@ jobs:
         run: |
           cargo build --release --locked
           tar -czf quarry-${{ matrix.name }}.tar.gz -C target/release quarry
+          sha256sum quarry-${{ matrix.name }}.tar.gz > quarry-${{ matrix.name }}.tar.gz.sha256
+          gh release upload "$TAG" quarry-${{ matrix.name }}.tar.gz.sha256 --clobber
           gh release upload "$TAG" quarry-${{ matrix.name }}.tar.gz --clobber
 
       # ring needs clang for Windows on ARM; the runner image ships LLVM here.
@@ -84,4 +88,7 @@ jobs:
         run: |
           cargo build --release --locked
           Compress-Archive -Path target/release/quarry.exe -DestinationPath quarry-${{ matrix.name }}.zip
+          $hash = (Get-FileHash -Algorithm SHA256 quarry-${{ matrix.name }}.zip).Hash.ToLower()
+          "$hash  quarry-${{ matrix.name }}.zip" | Set-Content -NoNewline quarry-${{ matrix.name }}.zip.sha256
+          gh release upload "$env:TAG" quarry-${{ matrix.name }}.zip.sha256 --clobber
           gh release upload "$env:TAG" quarry-${{ matrix.name }}.zip --clobber
