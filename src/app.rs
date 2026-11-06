@@ -7142,7 +7142,12 @@ impl App {
                         ui.horizontal(|ui| {
                             let r = ui.add(egui::TextEdit::singleline(&mut new_pkg).hint_text("lodash  or  dayjs@1.11").desired_width(190.0).font(FontId::monospace(12.5)));
                             let valid = db::valid_package(new_pkg.trim());
-                            if (ui.add_enabled(valid, egui::Button::new("Add")).clicked() || (valid && r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)))) && !packages.contains(&new_pkg.trim().to_string()) {
+                            let name = db::package_spec(new_pkg.trim()).0;
+                            let mut add = ui.add_enabled(valid, egui::Button::new("Add"));
+                            if db::PINNED_PACKAGES.contains(&name.as_str()) {
+                                add = add.on_disabled_hover_text(format!("{name} is built in, at the version the shell needs"));
+                            }
+                            if (add.clicked() || (valid && r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)))) && !packages.contains(&new_pkg.trim().to_string()) {
                                 packages.push(new_pkg.trim().to_string());
                                 new_pkg.clear();
                             }

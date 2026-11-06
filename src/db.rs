@@ -1117,15 +1117,21 @@ pub fn package_spec(p: &str) -> (String, String) {
     }
 }
 
+/// The Shell runner itself needs these, so their versions are not the person's to change.
+pub const PINNED_PACKAGES: [&str; 2] = ["mongodb", "socks"];
+
 /// npm package names: lowercase letters, digits, - . _ ~ and one optional @scope/.
 pub fn valid_package(p: &str) -> bool {
     let (name, version) = package_spec(p);
-    let ok = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "-._~".contains(c));
+    // npm forbids a leading . or _, which also keeps "." and ".." from naming a folder outside node_modules.
+    let ok = |s: &str| !s.is_empty() && !s.starts_with(['.', '_']) && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "-._~".contains(c));
     let name_ok = match name.strip_prefix('@').and_then(|r| r.split_once('/')) {
         Some((scope, n)) => ok(scope) && ok(n),
         None => !name.starts_with('@') && ok(&name),
     };
-    name_ok && !version.is_empty() && version.chars().all(|c| c.is_ascii_alphanumeric() || "-._^~<>=*|".contains(c))
+    // A version starting with . is read by the installer as a local folder, not a registry version.
+    let version_ok = !version.is_empty() && !version.starts_with('.') && version.chars().all(|c| c.is_ascii_alphanumeric() || "-._^~<>=*|".contains(c));
+    name_ok && version_ok && !PINNED_PACKAGES.contains(&name.as_str())
 }
 
 /// Always available in the Shell, like the original NodeShell's context (renderer ~131560:
@@ -3005,6 +3011,21 @@ mod tests {
         assert_eq!(camel_case("First Name"), "firstName");
         assert_eq!(camel_case("Prénom Élève"), "prénomÉlève");
         assert_eq!(camel_case("über straße"), "überStraße");
+    }
+
+    #[test]
+    fn package_validation() {
+        assert!(valid_package("lodash@4.17.21"));
+        assert!(valid_package("@faker-js/faker"));
+        assert!(valid_package("dayjs@^1.11"));
+        assert!(!valid_package(".."));
+        assert!(!valid_package("@../x"));
+        assert!(!valid_package("lodash@.."));
+        assert!(!valid_package("mongodb@5.0.0"));
+        assert!(!valid_package("socks"));
+        let deps: serde_json::Value = serde_json::from_str(&runner_package(&["mongodb@1.0.0".into(), "..".into()])).unwrap();
+        assert_eq!(deps["dependencies"]["mongodb"], "^6.10.0");
+        assert!(deps["dependencies"].get("..").is_none());
     }
 
     #[test]
