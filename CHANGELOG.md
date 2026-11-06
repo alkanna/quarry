@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.2](https://github.com/alkanna/quarry/compare/v0.11.1...v0.11.2) (2026-11-06)
+
+
+### Bug Fixes
+
+* open document rows with their nested fields collapsed ([#83](https://github.com/alkanna/quarry/issues/83)) ([cda7e26](https://github.com/alkanna/quarry/commit/cda7e26abca6facdef6813c3c83ba1c1c5e85c44))
+
 ## [0.11.1](https://github.com/alkanna/quarry/compare/v0.11.0...v0.11.1) (2026-11-06)
 
 
