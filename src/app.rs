@@ -751,7 +751,20 @@ fn suggest_js(before: &str, paths: &[String], colls: &[String], pkgs: &[String])
         return None;
     } else if before.matches('(').count() > before.matches(')').count() && lead.trim_end().ends_with(['{', ',', ':']) {
         // Inside a call's arguments: the same field and operator suggestions as the Query box.
-        return suggest(before, FieldKind::Query, paths, &[]);
+        // Only the open call's arguments are passed, so braces of the function around the call
+        // do not count as query nesting.
+        let mut depth = 0;
+        let open = before.char_indices().rev().find(|(_, c)| {
+            match c {
+                ')' => depth += 1,
+                '(' if depth == 0 => return true,
+                '(' => depth -= 1,
+                _ => {}
+            }
+            false
+        });
+        let args = open.map_or(before, |(i, _)| &before[i + 1..]);
+        return suggest(args, FieldKind::Query, paths, &[]);
     } else {
         let mut v: Vec<Sug> = JS_KEYWORDS.iter().map(|k| Sug { text: k.to_string(), note: "keyword", insert: format!("{k} "), caret: k.len() + 1 }).collect();
         v.extend(JS_GLOBALS.iter().map(|g| match *g {
@@ -9454,6 +9467,10 @@ mod tests {
         assert!(s.iter().any(|x| x.text == "find"));
         let (_, s) = suggest_js("await orders.find({ sta", &paths, &colls, &[]).unwrap();
         assert_eq!(s[0].text, "status");
+        let (_, s) = suggest_js("async function run() {\n  return await orders.find({ sta", &paths, &colls, &[]).unwrap();
+        assert_eq!(s[0].text, "status");
+        let (_, s) = suggest_js("async function run() {\n  return await orders.find({ total: { $g", &paths, &colls, &[]).unwrap();
+        assert_eq!(s[0].note, "operator");
         let (_, s) = suggest_js("  ord", &paths, &colls, &[]).unwrap();
         assert_eq!(s[0].text, "orders");
         let (_, s) = suggest_js("  aw", &paths, &colls, &[]).unwrap();
