@@ -4390,8 +4390,8 @@ impl App {
         if tabs != self.prefs.open_tabs || self.cur != self.prefs.cur_tab || self.active != self.prefs.last_conn {
             self.prefs.open_tabs = tabs;
             self.prefs.cur_tab = self.cur;
-            self.save_prefs();
             self.prefs.last_conn = self.active;
+            self.save_prefs();
         }
     }
 
