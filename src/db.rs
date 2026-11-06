@@ -27,6 +27,10 @@ impl Target {
     fn c(&self) -> mongodb::Collection<Document> {
         self.client.database(&self.db).collection(&self.coll)
     }
+
+    fn at(&self) -> (String, String) {
+        (self.db.clone(), self.coll.clone())
+    }
 }
 
 #[derive(Clone, Default)]
@@ -85,8 +89,9 @@ pub enum Msg {
     /// Up to 5 matching documents as (before, after) the given update stages, and the total match count.
     UpdatePreview { stages: Vec<Document>, res: Res<(Vec<(Document, Document)>, u64)> },
     /// A write finished. `undo` is filled when the write can be reverted. `retry` is the insert
-    /// dialog's (db, coll, text), to reopen it if the server refused the document.
-    Written { res: Res<String>, undo: Option<UndoAction>, reload: bool, retry: Option<(String, String, String)> },
+    /// dialog's (db, coll, text), to reopen it if the server refused the document. `at` is the
+    /// written (db, coll), so the tabs showing it reload instead of whichever tab is current.
+    Written { at: (String, String), res: Res<String>, undo: Option<UndoAction>, reload: bool, retry: Option<(String, String, String)> },
     /// A staged document edit was written (or refused); `tag` names the draft.
     Saved { tag: String, res: Res<String>, undo: Option<UndoAction> },
     Info(Res<String>),
@@ -297,6 +302,16 @@ pub struct Worker {
     rt: tokio::runtime::Runtime,
     tx: Sender<Msg>,
     ctx: eframe::egui::Context,
+}
+
+/// How many leading documents of an ordered insert_many batch were written before `err`.
+/// An ordered insert stops at its first write error, so everything before that index is in.
+/// A write concern error alone means the whole batch was written but not confirmed.
+fn inserted_before(err: &mongodb::error::Error, batch: usize) -> usize {
+    match &*err.kind {
+        mongodb::error::ErrorKind::InsertMany(f) => f.write_errors.iter().flatten().map(|w| w.index).min().unwrap_or(batch).min(batch),
+        _ => 0,
+    }
 }
 
 fn e(err: impl std::fmt::Display) -> String {
@@ -623,15 +638,16 @@ impl Worker {
         });
     }
 
-    fn write(&self, f: impl Future<Output = (Res<String>, Option<UndoAction>)> + Send + 'static) {
+    fn write(&self, at: (String, String), f: impl Future<Output = (Res<String>, Option<UndoAction>)> + Send + 'static) {
         self.spawn(async move {
             let (res, undo) = f.await;
-            Msg::Written { res, undo, reload: true, retry: None }
+            Msg::Written { at, res, undo, reload: true, retry: None }
         });
     }
 
     pub fn insert(&self, conn: u64, t: Target, d: Document, text: Option<String>) {
         self.spawn(async move {
+            let at = t.at();
             let retry = text.map(|x| (t.db.clone(), t.coll.clone(), x));
             let (res, undo) = match t.c().insert_one(d).await {
                 Ok(r) => (
@@ -640,13 +656,13 @@ impl Worker {
                 ),
                 Err(err) => (Err(e(err)), None),
             };
-            Msg::Written { res, undo, reload: true, retry }
+            Msg::Written { at, res, undo, reload: true, retry }
         });
     }
 
     /// Replaces `old` with `new`, but only if the server still holds exactly `old`.
     pub fn replace(&self, conn: u64, t: Target, old: Document, new: Document, record_undo: bool) {
-        self.write(replace_doc(conn, t, old, new, record_undo));
+        self.write(t.at(), replace_doc(conn, t, old, new, record_undo));
     }
 
     /// Writes one document's staged edits; the answer names the draft so it can be kept on failure.
@@ -658,7 +674,7 @@ impl Worker {
     }
 
     pub fn delete(&self, conn: u64, t: Target, old: Document, record_undo: bool) {
-        self.write(async move {
+        self.write(t.at(), async move {
             match t.c().delete_one(unchanged(&old)).await {
                 Ok(r) if r.deleted_count == 0 => (Err(CONFLICT.into()), None),
                 Ok(_) => (
@@ -673,7 +689,7 @@ impl Worker {
     /// Deletes each document only while the server still holds it as loaded, like `delete`.
     /// Undo restores exactly the ones that went, never ones changed or removed meanwhile.
     pub fn delete_docs(&self, conn: u64, t: Target, old: Vec<Document>) {
-        self.write(async move {
+        self.write(t.at(), async move {
             let c = t.c();
             let total = old.len();
             let mut gone = Vec::new();
@@ -700,7 +716,7 @@ impl Worker {
     }
 
     pub fn delete_by_id(&self, t: Target, id: Bson) {
-        self.write(async move {
+        self.write(t.at(), async move {
             match t.c().delete_one(doc! { "_id": id }).await {
                 Ok(r) => (Ok(format!("Undo removed {} document", r.deleted_count)), None),
                 Err(err) => (Err(e(err)), None),
@@ -796,7 +812,7 @@ impl Worker {
     /// Writes chosen differences into the target. A changed document is only replaced while it is
     /// still as compared, so edits made meanwhile are kept.
     pub fn sync(&self, t: Target, insert: Vec<Document>, replace: Vec<(Document, Document)>, delete: Vec<Bson>) {
-        self.write(async move {
+        self.write(t.at(), async move {
             let r = async {
                 let c = t.c();
                 for ch in insert.chunks(SYNC_CHUNK) {
@@ -917,7 +933,7 @@ impl Worker {
     }
 
     pub fn update_many(&self, t: Target, filter: Document, stages: Vec<Document>) {
-        self.write(async move {
+        self.write(t.at(), async move {
             match t.c().update_many(filter, stages).await {
                 Ok(r) => (Ok(format!("Updated {} documents", r.modified_count)), None),
                 Err(err) => (Err(e(err)), None),
@@ -926,7 +942,7 @@ impl Worker {
     }
 
     pub fn rename_many(&self, t: Target, filter: Document, from: String, to: String) {
-        self.write(async move {
+        self.write(t.at(), async move {
             match t.c().update_many(filter, doc! { "$rename": { &from: &to } }).await {
                 Ok(r) => (Ok(format!("Renamed {from} to {to} in {} documents", r.modified_count)), None),
                 Err(err) => (Err(e(err)), None),
@@ -938,13 +954,14 @@ impl Worker {
     /// $set like the original's import (bulkWrite of updateOne upserts).
     pub fn import(&self, conn: u64, t: Target, docs: Vec<Document>, upsert_by: Option<String>) {
         const BATCH: usize = 1000;
-        self.write(async move {
+        self.write(t.at(), async move {
             let c = t.c();
             let mut docs = docs;
             match upsert_by {
                 None => {
                     // Like the original's generateNewDocumentId: documents without _id get one of the
-                    // kind the collection already uses (ObjectIds are left to the driver).
+                    // kind the collection already uses. ObjectIds are made here rather than by the
+                    // driver so a failed batch still knows the ids of what it did insert.
                     if docs.iter().any(|d| !d.contains_key("_id")) {
                         let last = c.find_one(doc! {}).sort(doc! { "_id": -1 }).await.ok().flatten().and_then(|d| d.get("_id").cloned());
                         let mut next = match &last {
@@ -960,7 +977,7 @@ impl Worker {
                                     *n += 1;
                                     Bson::Int64(*n - 1)
                                 }
-                                _ => continue,
+                                _ => Bson::ObjectId(mongodb::bson::oid::ObjectId::new()),
                             };
                             let mut with_id = doc! { "_id": id };
                             with_id.extend(std::mem::take(d));
@@ -972,6 +989,8 @@ impl Worker {
                         match c.insert_many(chunk.to_vec()).await {
                             Ok(r) => ids.extend(r.inserted_ids.into_values()),
                             Err(err) => {
+                                let done = inserted_before(&err, chunk.len());
+                                ids.extend(chunk[..done].iter().filter_map(|d| d.get("_id").cloned()));
                                 let msg = format!("Stopped after {} documents: {}", ids.len(), e(err));
                                 let undo = (!ids.is_empty()).then(|| UndoAction { at: Instant::now(), conn, db: t.db.clone(), coll: t.coll.clone(), kind: UndoKind::InsertMany { ids } });
                                 return (Err(msg), undo);
@@ -1002,7 +1021,7 @@ impl Worker {
     }
 
     pub fn delete_ids(&self, t: Target, ids: Vec<Bson>) {
-        self.write(async move {
+        self.write(t.at(), async move {
             match t.c().delete_many(doc! { "_id": { "$in": ids } }).await {
                 Ok(r) => (Ok(format!("Undo removed {} imported documents", r.deleted_count)), None),
                 Err(err) => (Err(e(err)), None),
@@ -1030,7 +1049,7 @@ impl Worker {
     }
 
     pub fn delete_many(&self, t: Target, filter: Document) {
-        self.write(async move {
+        self.write(t.at(), async move {
             match t.c().delete_many(filter).await {
                 Ok(r) => (Ok(format!("Deleted {} documents", r.deleted_count)), None),
                 Err(err) => (Err(e(err)), None),
@@ -1042,14 +1061,14 @@ impl Worker {
         self.spawn(async move {
             let m = IndexModel::builder().keys(keys).options(IndexOptions::builder().unique(unique).build()).build();
             let res = t.c().create_index(m).await.map(|r| format!("Created index {}", r.index_name)).map_err(e);
-            Msg::Written { res, undo: None, reload: false, retry: None }
+            Msg::Written { at: t.at(), res, undo: None, reload: false, retry: None }
         });
     }
 
     pub fn drop_index(&self, t: Target, name: String) {
         self.spawn(async move {
             let res = t.c().drop_index(&name).await.map(|_| format!("Dropped index {name}")).map_err(e);
-            Msg::Written { res, undo: None, reload: false, retry: None }
+            Msg::Written { at: t.at(), res, undo: None, reload: false, retry: None }
         });
     }
 
@@ -3007,6 +3026,15 @@ mod tests {
         let deps: serde_json::Value = serde_json::from_str(&runner_package(&["mongodb@1.0.0".into(), "..".into()])).unwrap();
         assert_eq!(deps["dependencies"]["mongodb"], "^6.10.0");
         assert!(deps["dependencies"].get("..").is_none());
+    }
+
+    #[test]
+    fn partial_insert_count() {
+        use mongodb::error::{Error, ErrorKind, InsertManyError};
+        let failed = |d: Document| Error::from(ErrorKind::InsertMany(mongodb::bson::from_document::<InsertManyError>(d).unwrap()));
+        assert_eq!(inserted_before(&failed(doc! { "writeErrors": [{ "index": 3, "code": 11000, "errmsg": "dup" }] }), 10), 3);
+        assert_eq!(inserted_before(&failed(doc! { "writeConcernError": { "code": 64, "errmsg": "wc" } }), 10), 10);
+        assert_eq!(inserted_before(&Error::from(std::io::ErrorKind::ConnectionReset), 10), 0);
     }
 
     #[test]
