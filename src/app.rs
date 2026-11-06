@@ -8528,6 +8528,10 @@ impl App {
                             self.install_tools_button(ui);
                         }
                     });
+                    // The pref unlocks every connection each frame, so turning it off has to lock them back.
+                    if before.2 && !self.prefs.always_writable {
+                        self.conns.iter_mut().for_each(|c| c.writable = false);
+                    }
                     if before != (self.prefs.open_inline, self.prefs.auto_save, self.prefs.always_writable, self.prefs.confirm_save, self.prefs.default_cols, self.prefs.timeout_ms, self.prefs.shell_runtime.clone(), self.prefs.mongodump.clone(), self.prefs.mongorestore.clone(), self.prefs.auto_update, self.prefs.show_fps, self.prefs.object_preview) {
                         self.save_prefs();
                     }
