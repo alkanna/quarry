@@ -299,6 +299,16 @@ pub struct Worker {
     ctx: eframe::egui::Context,
 }
 
+/// How many leading documents of an ordered insert_many batch were written before `err`.
+/// An ordered insert stops at its first write error, so everything before that index is in.
+/// A write concern error alone means the whole batch was written but not confirmed.
+fn inserted_before(err: &mongodb::error::Error, batch: usize) -> usize {
+    match &*err.kind {
+        mongodb::error::ErrorKind::InsertMany(f) => f.write_errors.iter().flatten().map(|w| w.index).min().unwrap_or(batch).min(batch),
+        _ => 0,
+    }
+}
+
 fn e(err: impl std::fmt::Display) -> String {
     let s = err.to_string();
     // Driver errors append their labels and the raw reply bytes, which only hide the message.
@@ -944,7 +954,8 @@ impl Worker {
             match upsert_by {
                 None => {
                     // Like the original's generateNewDocumentId: documents without _id get one of the
-                    // kind the collection already uses (ObjectIds are left to the driver).
+                    // kind the collection already uses. ObjectIds are made here rather than by the
+                    // driver so a failed batch still knows the ids of what it did insert.
                     if docs.iter().any(|d| !d.contains_key("_id")) {
                         let last = c.find_one(doc! {}).sort(doc! { "_id": -1 }).await.ok().flatten().and_then(|d| d.get("_id").cloned());
                         let mut next = match &last {
@@ -960,7 +971,7 @@ impl Worker {
                                     *n += 1;
                                     Bson::Int64(*n - 1)
                                 }
-                                _ => continue,
+                                _ => Bson::ObjectId(mongodb::bson::oid::ObjectId::new()),
                             };
                             let mut with_id = doc! { "_id": id };
                             with_id.extend(std::mem::take(d));
@@ -972,6 +983,8 @@ impl Worker {
                         match c.insert_many(chunk.to_vec()).await {
                             Ok(r) => ids.extend(r.inserted_ids.into_values()),
                             Err(err) => {
+                                let done = inserted_before(&err, chunk.len());
+                                ids.extend(chunk[..done].iter().filter_map(|d| d.get("_id").cloned()));
                                 let msg = format!("Stopped after {} documents: {}", ids.len(), e(err));
                                 let undo = (!ids.is_empty()).then(|| UndoAction { at: Instant::now(), conn, db: t.db.clone(), coll: t.coll.clone(), kind: UndoKind::InsertMany { ids } });
                                 return (Err(msg), undo);
@@ -2986,6 +2999,15 @@ mod tests {
         assert_eq!(camel_case("First Name"), "firstName");
         assert_eq!(camel_case("Prénom Élève"), "prénomÉlève");
         assert_eq!(camel_case("über straße"), "überStraße");
+    }
+
+    #[test]
+    fn partial_insert_count() {
+        use mongodb::error::{Error, ErrorKind, InsertManyError};
+        let failed = |d: Document| Error::from(ErrorKind::InsertMany(mongodb::bson::from_document::<InsertManyError>(d).unwrap()));
+        assert_eq!(inserted_before(&failed(doc! { "writeErrors": [{ "index": 3, "code": 11000, "errmsg": "dup" }] }), 10), 3);
+        assert_eq!(inserted_before(&failed(doc! { "writeConcernError": { "code": 64, "errmsg": "wc" } }), 10), 10);
+        assert_eq!(inserted_before(&Error::from(std::io::ErrorKind::ConnectionReset), 10), 0);
     }
 
     #[test]
