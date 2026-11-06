@@ -32,6 +32,13 @@ pub fn asset_name() -> Option<String> {
 /// What gets replaced: the .app bundle on macOS, else the executable. None when running from
 /// somewhere that is not an installed app (a cargo build), which is never updated.
 pub fn install_target() -> Option<PathBuf> {
+    // Read once: on Linux the running executable's path follows it when an update renames it to
+    // .old, so asking again afterwards would restart and clean up the old copy.
+    static TARGET: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    TARGET.get_or_init(find_install_target).clone()
+}
+
+fn find_install_target() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
     if cfg!(target_os = "macos") {
         let app = exe.parent()?.parent()?.parent()?;
