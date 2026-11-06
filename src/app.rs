@@ -2653,7 +2653,11 @@ impl App {
         }
         let dir = config_dir();
         let _ = std::fs::create_dir_all(&dir);
-        if let Err(err) = std::fs::write(dir.join(file), bytes) {
+        // Written beside the file, then renamed over it: a crash mid-write leaves the old file
+        // whole instead of a truncated one that no longer parses.
+        let tmp = dir.join(format!(".{file}.tmp"));
+        if let Err(err) = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, dir.join(file))) {
+            let _ = std::fs::remove_file(&tmp);
             self.err(format!("Could not save {file}: {err}"));
         }
     }
