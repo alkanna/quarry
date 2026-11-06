@@ -1267,6 +1267,8 @@ struct Tab {
     /// Rows of the current page checked for bulk actions, and the last one clicked for Shift ranges.
     checked: BTreeSet<usize>,
     check_anchor: Option<usize>,
+    /// Rows open inline besides the selected one, keyed like `selected`.
+    expanded: BTreeSet<(bool, usize)>,
     agg_txt: String,
     agg_docs: Vec<Document>,
     agg_fields: Vec<String>,
@@ -1451,6 +1453,7 @@ impl Tab {
             selected: None,
             checked: BTreeSet::new(),
             check_anchor: None,
+            expanded: BTreeSet::new(),
             agg_txt: "[\n  { $match: {} },\n  { $limit: 20 }\n]".into(),
             agg_docs: Vec::new(),
             agg_fields: Vec::new(),
@@ -3271,6 +3274,15 @@ impl App {
                                 t.checked = follow_ids(&t.docs, &docs, t.checked.iter().copied());
                                 t.check_anchor = None;
                             }
+                            // The open document follows its _id too; rows without one keep their position.
+                            if let Some((false, i)) = t.selected {
+                                if t.docs.get(i).is_some_and(|d| d.contains_key("_id")) {
+                                    t.selected = follow_ids(&t.docs, &docs, std::iter::once(i)).first().map(|&j| (false, j));
+                                }
+                            }
+                            let open = follow_ids(&t.docs, &docs, t.expanded.iter().filter(|e| !e.0).map(|e| e.1));
+                            t.expanded.retain(|e| e.0);
+                            t.expanded.extend(open.into_iter().map(|i| (false, i)));
                             t.docs = docs;
                             t.count = count;
                             t.ms = ms;
@@ -3329,6 +3341,7 @@ impl App {
                             t.agg_fields = auto_fields(&d);
                             let n = d.len();
                             t.agg_docs = d;
+                            t.expanded.retain(|e| !e.0);
                             t.agg_ms = Some(ms);
                             self.ok(format!("Pipeline returned {n} documents"));
                         }
@@ -4367,6 +4380,10 @@ impl App {
             });
             if let Some((agg, row, go)) = nav {
                 if let Some(i) = row {
+                    // The open card moves with the keys instead of leaving the previous one open.
+                    if let Some(prev) = self.t().and_then(|t| t.selected) {
+                        self.tm().unwrap().expanded.remove(&prev);
+                    }
                     self.select(agg, i, false);
                     self.scroll_sel = true;
                 }
@@ -4384,7 +4401,11 @@ impl App {
             return;
         }
         if let Some(t) = self.tm() {
-            if t.selected.take().is_some() {
+            if let Some(key) = t.selected {
+                return self.close_row(key);
+            }
+            if !t.expanded.is_empty() {
+                t.expanded.clear();
                 return;
             }
         }
@@ -5751,8 +5772,27 @@ impl App {
         let m = ui.input(|i| i.modifiers);
         if !agg && (m.command || m.shift) {
             self.toggle_check(i, m.shift);
+        } else if self.prefs.open_inline {
+            // Rows open and close on their own; the last one opened takes edits and keys.
+            let t = self.tm().unwrap();
+            let key = (agg, i);
+            if t.expanded.remove(&key) || t.selected == Some(key) {
+                self.close_row(key);
+            } else {
+                t.expanded.insert(key);
+                self.select(agg, i, false);
+            }
         } else {
             self.select(agg, i, true);
+        }
+    }
+
+    fn close_row(&mut self, key: (bool, usize)) {
+        let t = self.tm().unwrap();
+        t.expanded.remove(&key);
+        if t.selected == Some(key) {
+            t.selected = None;
+            self.reset_doc_state();
         }
     }
 
@@ -5916,6 +5956,7 @@ impl App {
         let total: f32 = num_w + widths.iter().sum::<f32>();
         let selected = self.t().unwrap().selected;
         let checked = if agg { BTreeSet::new() } else { self.t().unwrap().checked.clone() };
+        let expanded = self.t().unwrap().expanded.clone();
         let mut check_click = None;
         let mut check_all = None;
         let mut doc_act = None;
@@ -6052,7 +6093,7 @@ impl App {
                         p.rect_filled(rr, 4, fill);
                         let off = num_w - NUM_W;
                         if self.prefs.open_inline {
-                            chevron(p, egui::pos2(rr.left() + off + 9.0, rr.center().y), active, if active { PRIMARY() } else { FAINT() });
+                            chevron(p, egui::pos2(rr.left() + off + 9.0, rr.center().y), active || expanded.contains(&(agg, i)), if active { PRIMARY() } else { FAINT() });
                         }
                         let num = (base + i as u64 + 1).to_string();
                         let (num, nc) = if drafted.is_some() { (format!("{num}●"), WARNING()) } else { (num, FAINT()) };
@@ -6126,7 +6167,7 @@ impl App {
                     if !agg {
                         resp.context_menu(|ui| doc_act = row_menu(ui, i, &checked).or(doc_act));
                     }
-                    if active && self.prefs.open_inline {
+                    if (active || expanded.contains(&(agg, i))) && self.prefs.open_inline {
                         ui.add_space(4.0);
                         // Spans every column like the rows above it, not just the visible part.
                         let w = row_w.max(320.0);
@@ -6134,7 +6175,7 @@ impl App {
                             // Card inner margin and stroke on both sides.
                             ui.set_width(w - 30.0);
                             ui.spacing_mut().item_spacing.y = 6.0;
-                            self.doc_body(ui, d, agg);
+                            self.doc_body(ui, d, agg, Some((agg, i)));
                         });
                         ui.add_space(6.0);
                     }
@@ -6194,6 +6235,7 @@ impl App {
     fn doc_list(&mut self, ui: &mut egui::Ui, agg: bool, docs: &[Document]) {
         let selected = self.t().unwrap().selected;
         let checked = if agg { BTreeSet::new() } else { self.t().unwrap().checked.clone() };
+        let expanded = self.t().unwrap().expanded.clone();
         let mut doc_act = None;
         let view_w = ui.available_width();
         let mut click = None;
@@ -6227,12 +6269,12 @@ impl App {
                     if !agg {
                         resp.context_menu(|ui| doc_act = row_menu(ui, i, &checked).or(doc_act));
                     }
-                    if active && self.prefs.open_inline {
+                    if (active || expanded.contains(&(agg, i))) && self.prefs.open_inline {
                         ui.add_space(4.0);
                         card(ui, |ui| {
                             ui.set_width(view_w - 48.0);
                             ui.spacing_mut().item_spacing.y = 6.0;
-                            self.doc_body(ui, d, agg);
+                            self.doc_body(ui, d, agg, Some((agg, i)));
                         });
                         ui.add_space(6.0);
                     }
@@ -6273,12 +6315,18 @@ impl App {
             .resizable(true)
             .frame(egui::Frame::new().fill(PANEL()).inner_margin(12))
             .show(ui, |ui| {
-                egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| self.doc_body(ui, &d, from_agg));
+                egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| self.doc_body(ui, &d, from_agg, None));
             });
     }
 
     /// The open document: actions, then its fields as a tree that can be edited in place.
-    fn doc_body(&mut self, ui: &mut egui::Ui, d: &Document, from_agg: bool) {
+    /// `row` is the inline row showing this document, None in the side panel. Only the selected
+    /// document holds edit state; acting in another open one selects it first.
+    fn doc_body(&mut self, ui: &mut egui::Ui, d: &Document, from_agg: bool, row: Option<(bool, usize)>) {
+        let selected = self.t().and_then(|t| t.selected);
+        let passive = row.is_some() && row != selected;
+        // Edit state is keyed by field path only, so other open documents must not see it.
+        let parked = passive.then(|| (self.inline.take(), self.new_field.take()));
         let mut acts = Vec::new();
         // The inline card can be wider than the table viewport; the header row stays within the
         // visible part so its buttons never sit behind the window edge.
@@ -6307,10 +6355,9 @@ impl App {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("Close").on_hover_text("Esc").clicked() {
-                    if let Some(t) = self.tm() {
-                        t.selected = None;
+                    if let Some(key) = row.or(selected) {
+                        self.close_row(key);
                     }
-                    self.reset_doc_state();
                 }
                 if ui.small_button("Copy JSON").clicked() {
                     self.docs_act(ui.ctx(), DocsAct::CopyJson, vec![d.clone()]);
@@ -6362,6 +6409,13 @@ impl App {
             self.new_field_row(ui, &mut acts);
         }
         self.changed.clear();
+        if let Some((inline, new_field)) = parked {
+            self.inline = inline;
+            self.new_field = new_field;
+        }
+        if let (true, Some((agg, i)), false) = (passive, row, acts.is_empty()) {
+            self.select(agg, i, false);
+        }
         self.handle_acts(d, acts);
     }
 
