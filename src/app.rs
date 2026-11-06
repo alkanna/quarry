@@ -2188,10 +2188,11 @@ fn find_exe(name: &str, setting: &str) -> Option<PathBuf> {
 }
 
 /// Words the original treats as possibly destructive in the shell (`dangerousCommands`,
-/// renderer line 131264: /drop|remove|replace|update|delete|insert|rename|\$out/i).
+/// renderer line 131264: /drop|remove|replace|update|delete|insert|rename|\$out/i), plus `$merge`,
+/// which writes to a collection from a pipeline just like `$out`.
 fn dangerous_words(code: &str) -> Vec<String> {
     let lower = code.to_lowercase();
-    ["drop", "remove", "replace", "update", "delete", "insert", "rename", "$out"].iter().filter(|w| lower.contains(*w)).map(|w| w.to_string()).collect()
+    ["drop", "remove", "replace", "update", "delete", "insert", "rename", "$out", "$merge"].iter().filter(|w| lower.contains(*w)).map(|w| w.to_string()).collect()
 }
 
 /// The original's "Open query in NodeShell" script (renderer line 96080), with its collection
@@ -9557,6 +9558,7 @@ mod tests {
         assert!(query_script("my.coll", "").contains("db.collection(\"my.coll\").find({})"));
         assert!(query_script("x", "db.x.find({});").ends_with("return await db.x.find({})\n}"));
         assert_eq!(dangerous_words("db.x.deleteMany({})"), ["delete"]);
+        assert_eq!(dangerous_words("db.x.aggregate([{ $merge: { into: 'y' } }])"), ["$merge"]);
     }
 
     #[test]
