@@ -3612,7 +3612,14 @@ impl App {
         let t = self.t()?;
         match t.selected? {
             (false, i) => t.docs.get(i),
-            (true, i) => t.agg_docs.get(i),
+            // Shell and Import lend their rows to `agg_docs` only while their table draws, so
+            // the side panel has to read the row from where it came from.
+            (true, i) => match (t.view, &t.import.parsed) {
+                (View::Shell, _) => t.shell.docs.get(t.shell.page * PAGE_SIZE as usize + i),
+                (View::Import, Some(Ok(docs))) => docs.get(i),
+                (View::Import, _) => None,
+                _ => t.agg_docs.get(i),
+            },
         }
     }
 
