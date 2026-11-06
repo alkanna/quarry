@@ -39,7 +39,7 @@ jobs:
           # Built on the oldest Ubuntu image: the binary needs that glibc or newer (2.35).
           - { os: ubuntu-22.04, name: linux-x86_64 }
           - { os: ubuntu-22.04-arm, name: linux-aarch64 }
-          - { os: windows-2022, name: windows-x86_64 }
+          - { os: windows-latest, name: windows-x86_64 }
           - { os: windows-11-arm, name: windows-aarch64 }
     runs-on: ${{ matrix.os }}
     env:

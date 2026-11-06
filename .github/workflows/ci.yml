@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, macos-15-intel, ubuntu-22.04, ubuntu-22.04-arm, windows-2022, windows-11-arm]
+        os: [macos-latest, macos-15-intel, ubuntu-22.04, ubuntu-22.04-arm, windows-latest, windows-11-arm]
     runs-on: ${{ matrix.os }}
     # No debug info: faster compiles and links, and smaller caches to restore and save.
     env:
