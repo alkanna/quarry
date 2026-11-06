@@ -2022,6 +2022,26 @@ fn parse_config<T: serde::de::DeserializeOwned + Default>(path: &std::path::Path
     }
 }
 
+/// Like `parse_config` for a list, but an entry that no longer parses is skipped instead of
+/// losing every other one. The whole file is copied to `<name>.bak` first, because the next save
+/// writes back only the entries that parsed.
+fn parse_config_list<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> (Vec<T>, Option<String>) {
+    let Ok(b) = std::fs::read(path) else { return (Vec::new(), None) };
+    let Ok(items) = serde_json::from_slice::<Vec<serde_json::Value>>(&b) else { return parse_config(path) };
+    let total = items.len();
+    let mut errs = Vec::new();
+    let good: Vec<T> = items.into_iter().filter_map(|v| serde_json::from_value(v).map_err(|e| errs.push(e.to_string())).ok()).collect();
+    if errs.is_empty() {
+        return (good, None);
+    }
+    let bak = path.with_extension("json.bak");
+    let kept = match std::fs::copy(path, &bak) {
+        Ok(_) => format!("The full file was kept as {}.", bak.display()),
+        Err(e) => format!("Copying it aside failed ({e}); the skipped entries will be lost on the next save."),
+    };
+    (good, Some(format!("Skipped {} of {total} entries in {}: {}. {kept}", errs.len(), path.display(), errs.join("; "))))
+}
+
 fn config_dir() -> PathBuf {
     dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("quarry")
 }
@@ -2604,7 +2624,7 @@ impl App {
             }
         } else {
             crate::update::cleanup();
-            let (metas, broken_conns) = parse_config::<Vec<ConnMeta>>(&config_dir().join("connections.json"));
+            let (metas, broken_conns) = parse_config_list::<ConnMeta>(&config_dir().join("connections.json"));
             let ui_json = config_dir().join("ui.json").exists().then_some(());
             let (prefs, broken_prefs) = parse_config(&config_dir().join("ui.json"));
             app.prefs = prefs;
@@ -9588,6 +9608,19 @@ mod tests {
         assert!(!p.exists() && dir.join("connections.json.bak").exists());
         let (_, err): (Vec<ConnMeta>, _) = parse_config(&p);
         assert!(err.is_none(), "a missing file is a fresh install, not an error");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn bad_connection_is_skipped_not_all() {
+        let dir = std::env::temp_dir().join(format!("quarry-cfg-list-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("connections.json");
+        std::fs::write(&p, r#"[{"id": 1, "name": "good"}, {"id": "x", "name": "bad"}]"#).unwrap();
+        let (v, err) = parse_config_list::<ConnMeta>(&p);
+        assert_eq!(v.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["good"]);
+        assert!(err.is_some());
+        assert!(p.exists() && dir.join("connections.json.bak").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
