@@ -190,8 +190,10 @@ impl App {
             }
             _ => HashSet::new(),
         };
-        // Result rows can repeat an _id (one per differing field, or $unwind), so their row keeps them apart.
-        let id = egui::Id::unique(("doc", d.get("_id").map(db::compact), from_agg.then_some(row)));
+        // Result rows can repeat an _id (one per differing field, or $unwind), and projected rows can lack one,
+        // so the row keeps them apart. Shared ids make one click toggle every copy of a header.
+        let doc_id = d.get("_id").map(db::compact);
+        let id = egui::Id::unique(("doc", (from_agg || doc_id.is_none()).then_some(row), doc_id));
         let mut path = Vec::new();
         self.fold_busy = false;
         // Runs every frame, so capped like doc_paths: deeper keys just truncate.
