@@ -1274,6 +1274,14 @@ pub struct LogEntry {
     req: i32,
 }
 
+impl LogEntry {
+    /// A finished command, for the offline demo.
+    pub fn finished(conn: u64, secs_ago: u64, db: &str, name: &str, cmd: &str, ms: u128, err: Option<&str>) -> Self {
+        let at = std::time::SystemTime::now() - std::time::Duration::from_secs(secs_ago);
+        LogEntry { conn, at, db: db.into(), name: name.into(), cmd: cmd.into(), ms: Some(ms), err: err.map(Into::into), req: 0 }
+    }
+}
+
 pub const LOG_MAX: usize = 2000;
 
 // ponytail: one process-wide log, clients of every connection write here; keyed by conn id.
