@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.0](https://github.com/alkanna/quarry/compare/v0.12.0...v0.13.0) (2026-11-07)
+
+
+### Features
+
+* attached tab strip with overflow list, centered text and hand cursors ([#92](https://github.com/alkanna/quarry/issues/92)) ([99d5c42](https://github.com/alkanna/quarry/commit/99d5c42441a1f9d80b2235c8af4a4926c5178ea8))
+
 ## [0.12.0](https://github.com/alkanna/quarry/compare/v0.11.2...v0.12.0) (2026-11-07)
 
 
