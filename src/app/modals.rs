@@ -391,7 +391,10 @@ impl App {
                     });
                 }
                 Modal::Text { title, body, code } => {
-                    ui.set_width(560.0);
+                    // Wide enough for the longest line, so column layouts like the Query help do not wrap.
+                    let longest = body.lines().map(|l| l.chars().count()).max().unwrap_or(0);
+                    let text_w = ui.painter().layout_no_wrap("0".repeat(longest), egui::FontId::monospace(TXT_BODY), TEXT()).size().x;
+                    ui.set_width((text_w + 40.0).clamp(560.0, 820.0));
                     dialog_title(ui, title.as_str());
                     let find = Find::bar(ui, egui::Id::unique("text-modal"), body);
                     egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {

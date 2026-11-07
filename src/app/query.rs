@@ -82,7 +82,7 @@ impl App {
     /// A query input that grows with its content, with highlighting and autocomplete.
     /// Enter runs it (or picks a suggestion), Shift+Enter adds a line.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn query_field(ui: &mut egui::Ui, label: &str, text: &mut String, hint: &str, width: f32, kind: FieldKind, paths: &[String], dates: &[String], ac: &mut Ac) -> bool {
+    pub(super) fn query_field(ui: &mut egui::Ui, label: &str, text: &mut String, hint: &str, width: f32, kind: FieldKind, paths: &[String], fields: &Fields, ac: &mut Ac) -> bool {
         ui.add_sized([56.0, 20.0], egui::Label::new(caption_text(label)));
         let id = egui::Id::unique(("query", label));
         // Test switch: show the suggestion list in the demo picture.
@@ -90,11 +90,11 @@ impl App {
             // QUARRY_TEST_AC=date shows the date list after a date field's colon instead.
             let date = std::env::var("QUARRY_TEST_AC").is_ok_and(|v| v == "date");
             let before = if date { "{ createdAt: " } else { "{ status: { $i" };
-            if let Some((token, items)) = suggest(before, kind, paths, dates) {
+            if let Some((token, items)) = suggest(before, kind, paths, fields) {
                 *ac = Ac { id: Some(id), token, items, sel: 0, cursor: before.chars().count(), rect: None, doc: None };
             }
         }
-        let (out, picked) = ac_field(ui, id, text, ac, &|b| suggest(b, kind, paths, dates), |ui, text, open| {
+        let (out, picked) = ac_field(ui, id, text, ac, &|b| suggest(b, kind, paths, fields), |ui, text, open| {
             egui::TextEdit::multiline(text)
                 .id(id)
                 .font(egui::TextStyle::Monospace)

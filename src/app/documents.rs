@@ -95,7 +95,7 @@ impl App {
 
     pub(super) fn documents(&mut self, ui: &mut egui::Ui) {
         let mut run = false;
-        let mut explain = false;
+        let (mut explain, mut help) = (false, false);
         let mut code_lang = None;
         let key = self.col_key(false);
         let hist = self.prefs.history.get(&key).cloned().unwrap_or_default();
@@ -104,15 +104,16 @@ impl App {
         let mut qacts = Vec::new();
         let (t, ac, new_lib) = (&mut self.tabs[self.cur], &mut self.ac, &mut self.new_lib);
         let paths = std::mem::take(&mut t.paths);
-        let dates = t.date_paths.clone();
+        let fields = std::mem::take(&mut t.field_info);
         toolbar(ui, |ui| {
             ui.horizontal_top(|ui| {
-                let w = ui.available_width() - 490.0;
-                run |= Self::query_field(ui, "QUERY", &mut t.filter_txt, "{ field: value }   or paste db.coll.find(...) / db.coll.aggregate([...])", w, FieldKind::Query, &paths, &dates, ac);
+                let w = ui.available_width() - 520.0;
+                run |= Self::query_field(ui, "QUERY", &mut t.filter_txt, "{ field: value }   or paste db.coll.find(...) / db.coll.aggregate([...])", w, FieldKind::Query, &paths, &fields, ac);
                 if primary(ui, "  Find  ", PRIMARY()).on_hover_text("Enter").clicked() {
                     run = true;
                 }
                 explain |= ui.button("Explain").on_hover_text("Cmd+E").clicked();
+                help |= ui.button("?").on_hover_text("Query shortcuts and syntax").clicked();
                 code_menu(ui, &mut code_lang);
                 history_menu(ui, &hist, &index_sorts, &mut qacts);
                 library_menu(ui, &lib, new_lib, false, &mut qacts);
@@ -121,12 +122,13 @@ impl App {
             if !db::is_shell(&t.filter_txt) {
                 ui.horizontal_top(|ui| {
                     let w = (ui.available_width() - 160.0) / 2.0;
-                    run |= Self::query_field(ui, "SORT", &mut t.sort_txt, "{ _id: -1 }", w, FieldKind::Sort, &paths, &[], ac);
-                    run |= Self::query_field(ui, "PROJECT", &mut t.proj_txt, "{ name: 1 }", w, FieldKind::Project, &paths, &[], ac);
+                    run |= Self::query_field(ui, "SORT", &mut t.sort_txt, "{ _id: -1 }", w, FieldKind::Sort, &paths, &Default::default(), ac);
+                    run |= Self::query_field(ui, "PROJECT", &mut t.proj_txt, "{ name: 1 }", w, FieldKind::Project, &paths, &Default::default(), ac);
                 });
             }
         });
         t.paths = paths;
+        t.field_info = fields;
         for a in qacts {
             let t = &mut self.tabs[self.cur];
             match a {
@@ -149,6 +151,9 @@ impl App {
         }
         if explain {
             self.explain();
+        }
+        if help {
+            self.modal = Some(Modal::Text { title: "Query help".into(), body: query_help(), code: false });
         }
         if let Some(l) = code_lang {
             self.show_code(l, true);

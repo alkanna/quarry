@@ -337,15 +337,40 @@ pub(crate) fn chevron(p: &egui::Painter, c: egui::Pos2, open: bool, color: Color
     p.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
 }
 
-/// The ‹ page x of y › control shared by every paged result. Returns the page to go to.
+/// The « ‹ page x of y › » control shared by every paged result, with first and last buttons and
+/// a page number that can be typed over (Enter or leaving the box goes there, Esc cancels).
+/// Returns the page to go to.
 pub(crate) fn pager(ui: &mut egui::Ui, page: usize, pages: usize) -> Option<usize> {
     let mut go = None;
+    let last = pages.saturating_sub(1);
+    if ui.add_enabled(page > 0, egui::Button::new("«")).on_hover_text("First page").clicked() {
+        go = Some(0);
+    }
     if ui.add_enabled(page > 0, egui::Button::new("‹")).clicked() {
         go = Some(page - 1);
     }
-    ui.label(format!("page {} of {pages}", page + 1));
-    if ui.add_enabled(page + 1 < pages, egui::Button::new("›")).clicked() {
+    ui.label("page");
+    // The typed text lives in temp memory only while the box is being edited.
+    let id = ui.scope_id().with("pager-input");
+    let mut text = ui.data(|d| d.get_temp::<String>(id)).unwrap_or_else(|| (page + 1).to_string());
+    let digits = pages.max(1).to_string().len() as f32;
+    let r = ui.add(egui::TextEdit::singleline(&mut text).desired_width(digits * 8.0 + 8.0).align(egui::Align2::CENTER_CENTER)).on_hover_text("Type a page number, then Enter");
+    if r.lost_focus() {
+        if !ui.input(|i| i.key_pressed(egui::Key::Escape))
+            && let Ok(n) = text.trim().parse::<usize>()
+        {
+            go = Some(n.clamp(1, pages.max(1)) - 1);
+        }
+        ui.data_mut(|d| d.remove::<String>(id));
+    } else if r.has_focus() {
+        ui.data_mut(|d| d.insert_temp(id, text));
+    }
+    ui.label(format!("of {pages}"));
+    if ui.add_enabled(page < last, egui::Button::new("›")).clicked() {
         go = Some(page + 1);
     }
-    go
+    if ui.add_enabled(page < last, egui::Button::new("»")).on_hover_text("Last page").clicked() {
+        go = Some(last);
+    }
+    go.filter(|&p| p != page)
 }

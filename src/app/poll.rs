@@ -160,7 +160,7 @@ impl App {
                             let t = self.tab_by_req(req).unwrap();
                             t.fields = auto_fields(&docs);
                             t.paths = doc_paths(&docs);
-                            t.date_paths = date_paths(&docs, &t.paths);
+                            t.field_info = field_info(&docs);
                             // Checks and open rows follow their documents by _id, so actions that reload
                             // (duplicate, filter, edits) keep them; rows that left the results drop out.
                             if !t.checked.is_empty() {
