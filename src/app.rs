@@ -136,6 +136,26 @@ fn tint(c: Color32, alpha: u8) -> Color32 {
     Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), alpha)
 }
 const SIDEBAR_W: f32 = 250.0;
+
+// Type scale: every text size in the app is one of these.
+/// Section captions, badges and hints.
+const TXT_CAPTION: f32 = 11.0;
+/// Secondary text: chips, notes, counts.
+const TXT_SMALL: f32 = 12.0;
+/// Body, buttons, inputs and code.
+const TXT_BODY: f32 = 12.5;
+/// Names in lists: connections, databases, collections.
+const TXT_TITLE: f32 = 14.0;
+/// Dialog titles and the collection heading.
+const TXT_HEADING: f32 = 17.0;
+
+/// Height of every button and single-line input.
+const BUTTON_H: f32 = 24.0;
+
+// Corner radii: small for rows and glyphs, medium for widgets and cards, large for popups and dialogs.
+const R_SM: u8 = 4;
+const R_MD: u8 = 8;
+const R_LG: u8 = 12;
 const SIDE_ROW_H: f32 = 28.0;
 const HEADER_H: f32 = 40.0;
 const SYSTEM_DBS: [&str; 3] = ["admin", "config", "local"];
@@ -209,7 +229,7 @@ fn truncate_display(s: &str) -> String {
 
 /// Colours JSON and shell-style query text by token, for every code editor in the app.
 fn json_job(text: &str) -> LayoutJob {
-    let fmt = |c: Color32| TextFormat { font_id: FontId::monospace(13.0), color: c, ..Default::default() };
+    let fmt = |c: Color32| TextFormat { font_id: FontId::monospace(TXT_BODY), color: c, ..Default::default() };
     let next_is_colon = |rest: &str| rest.trim_start().starts_with(':');
     let mut job = LayoutJob::default();
     let mut i = 0;
@@ -658,7 +678,7 @@ fn ac_field(
                     for (i, s) in ac.items.iter().enumerate() {
                         let mut job = LayoutJob::default();
                         job.append(&s.text, 0.0, mono(if s.text.starts_with('$') { PRIMARY() } else { BRIGHT() }));
-                        job.append(&format!("   {}", s.note), 0.0, TextFormat { font_id: FontId::proportional(11.5), color: FAINT(), ..Default::default() });
+                        job.append(&format!("   {}", s.note), 0.0, TextFormat { font_id: FontId::proportional(TXT_CAPTION), color: FAINT(), ..Default::default() });
                         let r = ui.selectable_label(i == ac.sel, job);
                         if i == ac.sel && moved {
                             r.scroll_to_me(None);
@@ -788,7 +808,7 @@ fn suggest_js(before: &str, paths: &[String], colls: &[String], pkgs: &[String])
 
 /// JavaScript colouring for the Shell editor.
 fn js_job(text: &str) -> LayoutJob {
-    let fmt = |c: Color32| TextFormat { font_id: FontId::monospace(13.0), color: c, ..Default::default() };
+    let fmt = |c: Color32| TextFormat { font_id: FontId::monospace(TXT_BODY), color: c, ..Default::default() };
     let mut job = LayoutJob::default();
     let mut i = 0;
     let mut prev_dot = false;
@@ -917,14 +937,14 @@ impl Find {
                     step(&mut f, ui.input(|i| i.modifiers.shift));
                     r.request_focus();
                 }
-                if ui.small_button("Prev").on_hover_text("Shift+Enter").clicked() {
+                if ui.button("Prev").on_hover_text("Shift+Enter").clicked() {
                     step(&mut f, true);
                 }
-                if ui.small_button("Next").on_hover_text("Enter").clicked() {
+                if ui.button("Next").on_hover_text("Enter").clicked() {
                     step(&mut f, false);
                 }
                 let label = if f.query.is_empty() { String::new() } else if n == 0 { "No matches".into() } else { format!("{} of {n}", f.cur + 1) };
-                ui.label(RichText::new(label).size(12.0).color(MUTED()));
+                ui.label(RichText::new(label).size(TXT_SMALL).color(MUTED()));
             });
         }
         ui.data_mut(|d| d.insert_temp(key, f.clone()));
@@ -1926,6 +1946,8 @@ struct LogUi {
     detached: bool,
     filter: String,
     errors: bool,
+    /// Commands shown in full, by connection and start time.
+    expanded: HashSet<(u64, std::time::SystemTime)>,
 }
 
 fn ago(t: std::time::SystemTime) -> String {
@@ -2129,7 +2151,7 @@ fn field_menu(ui: &mut egui::Ui, path: &[String], v: &Bson, editable: bool, high
     let p = path.join(".");
     let is_id = path.first().is_some_and(|k| k == "_id");
     ui.set_min_width(230.0);
-    ui.label(RichText::new(format!("Field: {p}")).size(12.0).color(MUTED()));
+    ui.label(RichText::new(format!("Field: {p}")).size(TXT_SMALL).color(MUTED()));
     ui.separator();
     if ui.button("Copy value").clicked() {
         ui.ctx().copy_text(match v {
@@ -2190,7 +2212,7 @@ fn field_menu(ui: &mut egui::Ui, path: &[String], v: &Bson, editable: bool, high
         if ui.button("Rename field…").clicked() {
             acts.push(TreeAct::Rename(path.to_vec()));
         }
-        if ui.button(RichText::new("Delete field").color(ALERT())).clicked() {
+        if danger(ui, "Delete field").clicked() {
             acts.push(TreeAct::Remove(path.to_vec()));
         }
         if ui.button("Add field").on_hover_text("Add a field next to this one").clicked() {
@@ -2202,7 +2224,7 @@ fn field_menu(ui: &mut egui::Ui, path: &[String], v: &Bson, editable: bool, high
         }
     }
     ui.separator();
-    ui.label(RichText::new(format!("Field size: {} bytes", db::field_size(v))).size(12.0).color(FAINT()));
+    ui.label(RichText::new(format!("Field size: {} bytes", db::field_size(v))).size(TXT_SMALL).color(FAINT()));
 }
 
 /// Bun for the Shell: the path from Settings, else the usual install places. Apps opened from
@@ -2265,12 +2287,12 @@ pub(crate) fn collection_ref(coll: &str) -> String {
 /// examples that can be loaded into the editor. Returns an example to load, if one was picked.
 fn shell_help(ui: &mut egui::Ui, coll: &str, writable: bool) -> Option<String> {
     let mut pick = None;
-    let code = |s: &str| RichText::new(s).monospace().size(12.5).color(C_DATE());
+    let code = |s: &str| RichText::new(s).monospace().size(TXT_BODY).color(C_DATE());
     let head = |ui: &mut egui::Ui, s: &str| {
         ui.add_space(4.0);
-        ui.label(RichText::new(s).size(11.0).strong().color(MUTED()));
+        caption(ui, s);
     };
-    egui::Frame::new().fill(PANEL()).corner_radius(8).inner_margin(12).show(ui, |ui| {
+    egui::Frame::new().fill(PANEL()).corner_radius(R_MD).inner_margin(12).show(ui, |ui| {
         ui.set_width(ui.available_width());
         head(ui, "HOW IT WORKS");
         ui.label("Write one function and return what you want to see. The script runs with Bun and the official MongoDB Node.js driver, so its whole API is available.");
@@ -2298,9 +2320,9 @@ fn shell_help(ui: &mut egui::Ui, coll: &str, writable: bool) -> Option<String> {
             }
         });
         head(ui, "COLLECTION METHODS");
-        ui.label(RichText::new(COLL_METHODS.join("  ·  ")).monospace().size(12.0).color(TEXT()));
+        ui.label(RichText::new(COLL_METHODS.join("  ·  ")).monospace().size(TXT_SMALL).color(TEXT()));
         head(ui, "CURSOR METHODS (after find / aggregate)");
-        ui.label(RichText::new(CURSOR_METHODS.join("  ·  ")).monospace().size(12.0).color(TEXT()));
+        ui.label(RichText::new(CURSOR_METHODS.join("  ·  ")).monospace().size(TXT_SMALL).color(TEXT()));
         head(ui, "EXAMPLES  ·  click Use to load one");
         let examples = [
             ("Find with a filter", format!("async function run() {{\n  return await {coll}.find({{ status: 'paid' }}).sort({{ _id: -1 }}).limit(20).toArray();\n}}")),
@@ -2314,7 +2336,7 @@ fn shell_help(ui: &mut egui::Ui, coll: &str, writable: bool) -> Option<String> {
         ];
         for (title, ex) in examples {
             ui.horizontal(|ui| {
-                if ui.small_button("Use").clicked() {
+                if ui.button("Use").clicked() {
                     pick = Some(ex.clone());
                 }
                 ui.label(RichText::new(title).color(BRIGHT()));
@@ -2326,7 +2348,7 @@ fn shell_help(ui: &mut egui::Ui, coll: &str, writable: bool) -> Option<String> {
 }
 
 fn code_menu(ui: &mut egui::Ui, pick: &mut Option<db::Lang>) {
-    ui.menu_button("Copy as code", |ui| {
+    ui.menu_button("🗐 Copy as code", |ui| {
         for l in db::Lang::ALL {
             if ui.button(l.name()).clicked() {
                 *pick = Some(l);
@@ -2364,13 +2386,13 @@ fn history_menu(ui: &mut egui::Ui, h: &QueryHist, index_sorts: &[String], acts: 
         let with_clear = |l: &Vec<String>| std::iter::once("{}".to_string()).chain(l.iter().cloned()).collect::<Vec<_>>();
         let (sel, sort, proj) = (with_clear(&h.selector), with_clear(&sort), with_clear(&h.project));
         for (title, list, kind) in [("QUERY", &sel, 0), ("SORT  ·  history and indexes", &sort, 1), ("PROJECT", &proj, 2)] {
-            ui.label(RichText::new(title).size(11.0).color(MUTED()));
+            caption(ui, title);
             egui::ScrollArea::vertical().id_salt(("hist", kind)).max_height(170.0).show(ui, |ui| {
                 for v in list {
                     let one_line: String = v.split_whitespace().collect::<Vec<_>>().join(" ");
                     let mut job = json_job(&one_line.chars().take(90).collect::<String>());
                     job.wrap.max_rows = 1;
-                    if ui.add(egui::Button::new(job).frame(false)).on_hover_text(v.as_str()).clicked() {
+                    if ui.add(quiet_button(job)).on_hover_text(v.as_str()).clicked() {
                         acts.push(match kind {
                             0 => QAct::Filter(v.clone()),
                             1 => QAct::Sort(v.clone()),
@@ -2397,13 +2419,13 @@ fn library_menu(ui: &mut egui::Ui, lib: &[SavedQuery], new_name: &mut String, pi
                 ui.horizontal(|ui| {
                     let preview = if pipeline { q.pipeline.clone().unwrap_or_default() } else { q.filter.clone() };
                     let preview: String = preview.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(60).collect();
-                    if ui.add(egui::Button::new(RichText::new(&q.name).color(BRIGHT())).frame(false)).on_hover_text(preview.as_str()).clicked() {
+                    if ui.add(quiet_button(RichText::new(&q.name).color(BRIGHT()))).on_hover_text(preview.as_str()).clicked() {
                         acts.push(QAct::Load(q.clone()));
                         ui.close();
                     }
-                    ui.label(RichText::new(preview).monospace().size(11.0).color(FAINT()));
+                    ui.label(RichText::new(preview).monospace().size(TXT_CAPTION).color(FAINT()));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("×").on_hover_text("Delete").clicked() {
+                        if ui.button("🗙").on_hover_text("Delete").clicked() {
                             acts.push(QAct::Delete(q.name.clone()));
                         }
                     });
@@ -2411,7 +2433,7 @@ fn library_menu(ui: &mut egui::Ui, lib: &[SavedQuery], new_name: &mut String, pi
             }
         });
         ui.separator();
-        ui.label(RichText::new(if pipeline { "SAVE THIS PIPELINE" } else { "SAVE THIS QUERY (query, sort and project)" }).size(11.0).color(MUTED()));
+        caption(ui, if pipeline { "SAVE THIS PIPELINE" } else { "SAVE THIS QUERY (query, sort and project)" });
         ui.horizontal(|ui| {
             let r = ui.add(egui::TextEdit::singleline(new_name).hint_text("name").desired_width(200.0));
             let ok = !new_name.trim().is_empty();
@@ -2420,13 +2442,22 @@ fn library_menu(ui: &mut egui::Ui, lib: &[SavedQuery], new_name: &mut String, pi
                 new_name.clear();
             }
         });
-        ui.label(RichText::new("Saving under an existing name replaces it.").size(11.0).color(FAINT()));
+        ui.label(RichText::new("Saving under an existing name replaces it.").size(TXT_CAPTION).color(FAINT()));
     });
+}
+
+/// The one style for uppercase labels over a group: sections, lists, menus and column headers.
+fn caption_text(text: impl Into<String>) -> RichText {
+    RichText::new(text).size(TXT_CAPTION).strong().color(MUTED())
+}
+
+fn caption(ui: &mut egui::Ui, text: impl Into<String>) -> egui::Response {
+    ui.label(caption_text(text))
 }
 
 /// A titled card holding a group of settings.
 fn settings_section(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
-    ui.label(RichText::new(title).size(11.0).strong().color(MUTED()));
+    caption(ui, title);
     ui.add_space(2.0);
     card(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -2442,8 +2473,8 @@ fn setting_row(ui: &mut egui::Ui, title: &str, desc: &str, control: impl FnOnce(
         let w = ui.available_width();
         ui.vertical(|ui| {
             ui.set_width((w - 230.0).max(160.0));
-            ui.label(RichText::new(title).size(14.0).color(BRIGHT()));
-            ui.add(egui::Label::new(RichText::new(desc).size(12.0).color(MUTED())).wrap());
+            ui.label(RichText::new(title).size(TXT_TITLE).color(BRIGHT()));
+            ui.add(egui::Label::new(RichText::new(desc).size(TXT_SMALL).color(MUTED())).wrap());
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), control);
     });
@@ -2451,13 +2482,13 @@ fn setting_row(ui: &mut egui::Ui, title: &str, desc: &str, control: impl FnOnce(
 
 /// "−  n  +" for a small whole number (the control slot is right-to-left, so added in reverse).
 fn stepper(ui: &mut egui::Ui, value: &mut usize, min: usize, max: usize) {
-    egui::Frame::new().fill(pal().well).corner_radius(8).inner_margin(3).show(ui, |ui| {
+    egui::Frame::new().fill(pal().well).corner_radius(R_MD).inner_margin(3).show(ui, |ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
-        if ui.add_enabled(*value < max, egui::Button::new(RichText::new("+").size(14.0)).corner_radius(6)).clicked() {
+        if ui.add_enabled(*value < max, egui::Button::new(RichText::new("+").size(TXT_TITLE)).corner_radius(R_SM)).clicked() {
             *value += 1;
         }
-        ui.add_sized([34.0, 22.0], egui::Label::new(RichText::new(value.to_string()).size(14.0).color(BRIGHT())));
-        if ui.add_enabled(*value > min, egui::Button::new(RichText::new("−").size(14.0)).corner_radius(6)).clicked() {
+        ui.add_sized([34.0, 22.0], egui::Label::new(RichText::new(value.to_string()).size(TXT_TITLE).color(BRIGHT())));
+        if ui.add_enabled(*value > min, egui::Button::new(RichText::new("−").size(TXT_TITLE)).corner_radius(R_SM)).clicked() {
             *value -= 1;
         }
     });
@@ -2476,7 +2507,7 @@ fn toggle(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
     if enabled && r.hovered() {
         bg = shade(bg, if r.is_pointer_button_down_on() { 0.24 } else { 0.12 });
     }
-    ui.painter().rect_filled(rect, 11, bg);
+    ui.painter().rect_filled(rect, rect.height() / 2.0, bg);
     let x = egui::lerp(rect.left() + 11.0..=rect.right() - 11.0, t);
     // The knob grows a little while pressed, like a macOS switch.
     let knob = if enabled && r.is_pointer_button_down_on() { 9.0 } else { 8.0 };
@@ -2486,14 +2517,14 @@ fn toggle(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
 
 /// A row of joined buttons where exactly one is chosen.
 fn segmented<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options: &[(T, &str)]) {
-    egui::Frame::new().fill(pal().well).corner_radius(8).inner_margin(3).show(ui, |ui| {
+    egui::Frame::new().fill(pal().well).corner_radius(R_MD).inner_margin(3).show(ui, |ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
         // In a right-to-left row, add in reverse so the options still read left to right.
         let rtl = ui.layout().main_dir() == egui::Direction::RightToLeft;
         let order: Vec<&(T, &str)> = if rtl { options.iter().rev().collect() } else { options.iter().collect() };
         for (v, label) in order {
             let on = *value == *v;
-            let b = egui::Button::new(RichText::new(*label).size(12.5).color(if on { BG() } else { TEXT() })).fill(state_fill(ui, if on { PRIMARY() } else { Color32::TRANSPARENT })).corner_radius(6);
+            let b = egui::Button::new(RichText::new(*label).size(TXT_BODY).color(if on { BG() } else { TEXT() })).fill(state_fill(ui, if on { PRIMARY() } else { Color32::TRANSPARENT })).corner_radius(R_SM);
             if ui.add(b).clicked() {
                 *value = *v;
             }
@@ -2508,7 +2539,7 @@ fn optimal_width(ui: &egui::Ui, docs: &[Document], col: &str, summarize: bool) -
         return 100.0 + CELL_PAD; // the original's fallback width
     }
     let widest = ui.fonts_mut(|f| {
-        let head = f.layout_no_wrap(col.to_string(), FontId::proportional(12.5), TEXT()).size().x;
+        let head = f.layout_no_wrap(col.to_string(), FontId::proportional(TXT_BODY), TEXT()).size().x;
         docs.iter()
             .filter_map(|d| db::get_path(d, col))
             .map(|v| f.layout_job(column_job(v, summarize)).size().x)
@@ -3948,8 +3979,22 @@ fn style(ctx: &egui::Context) {
     ctx.all_styles_mut(|s| {
         s.spacing.item_spacing = egui::vec2(8.0, 6.0);
         s.spacing.button_padding = egui::vec2(10.0, 4.0);
+        // Every button and single-line input is this tall, so toolbars line up.
+        s.spacing.interact_size.y = BUTTON_H;
+        use egui::{FontFamily::*, TextStyle};
+        s.text_styles = [
+            (TextStyle::Small, FontId::new(TXT_CAPTION, Proportional)),
+            (TextStyle::Body, FontId::new(TXT_BODY, Proportional)),
+            (TextStyle::Button, FontId::new(TXT_BODY, Proportional)),
+            (TextStyle::Monospace, FontId::new(TXT_BODY, Monospace)),
+            (TextStyle::Heading, FontId::new(TXT_HEADING, Proportional)),
+        ]
+        .into();
         // No bounce past the edge of lists.
         s.spacing.scroll.kinetic.rubber_band = false;
+        // Scrollbars stay faintly visible wherever content overflows, so long lists and menus
+        // show there is more without hovering them first.
+        s.spacing.scroll.dormant_handle_opacity = 0.5;
     });
 }
 
@@ -3980,7 +4025,7 @@ fn visuals(theme: egui::Theme, p: &Palette) -> egui::Visuals {
     v.widgets.hovered.bg_fill = p.track.lerp_to_gamma(p.text, 0.15);
     v.widgets.active.bg_fill = p.track.lerp_to_gamma(p.text, 0.3);
     for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.noninteractive] {
-        w.corner_radius = CornerRadius::same(6);
+        w.corner_radius = CornerRadius::same(R_MD);
     }
     v
 }
@@ -4019,18 +4064,18 @@ fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, auto: bool, 
             if ui.checkbox(&mut s.on, "").on_hover_text("Include this stage in the pipeline").changed() {
                 acts.push(StageAct::Toggled(i));
             }
-            ui.hyperlink_to(RichText::new("Docs").size(12.0), format!("https://www.mongodb.com/docs/manual/reference/operator/aggregation/{}/", s.op.trim_start_matches('$')));
+            ui.hyperlink_to(RichText::new("Docs").size(TXT_SMALL), format!("https://www.mongodb.com/docs/manual/reference/operator/aggregation/{}/", s.op.trim_start_matches('$')));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.menu_button(RichText::new("Remove…").color(ALERT()), |ui| {
-                    if ui.button(RichText::new(format!("Remove stage {}", i + 1)).color(ALERT())).clicked() {
+                ui.menu_button(RichText::new("🗑 Remove…").color(ALERT()), |ui| {
+                    if danger(ui, format!("Remove stage {}", i + 1)).clicked() {
                         acts.push(StageAct::Remove(i));
                         ui.close();
                     }
                 });
-                if ui.add_enabled(i + 1 < n, egui::Button::new("Down").small()).clicked() {
+                if ui.add_enabled(i + 1 < n, egui::Button::new("⏷")).on_hover_text("Move this stage down").clicked() {
                     acts.push(StageAct::Move(i, true));
                 }
-                if ui.add_enabled(i > 0, egui::Button::new("Up").small()).clicked() {
+                if ui.add_enabled(i > 0, egui::Button::new("⏶")).on_hover_text("Move this stage up").clicked() {
                     acts.push(StageAct::Move(i, false));
                 }
             });
@@ -4046,7 +4091,7 @@ fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, auto: bool, 
                     acts.push(StageAct::Edited(i));
                 }
                 if let Err(e) = db::parse_value(&s.text) {
-                    ui.label(RichText::new(e).size(12.0).color(ALERT()));
+                    ui.label(RichText::new(e).size(TXT_SMALL).color(ALERT()));
                 }
             });
             // A gap, not ui.separator(): in a row a separator takes all the height left and
@@ -4064,13 +4109,13 @@ fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, auto: bool, 
                         if let Some(ms) = s.ms {
                             ui.label(RichText::new(format!("{ms} ms")).color(FAINT()));
                         }
-                    } else if s.error.is_none() && !auto && ui.small_button("Preview").clicked() {
+                    } else if s.error.is_none() && !auto && ui.button("Preview").clicked() {
                         acts.push(StageAct::Preview(i));
                     }
                 });
                 if s.on {
                     if let Some(e) = &s.error {
-                        ui.label(RichText::new(e).size(12.0).color(if e.starts_with("This stage writes") { WARNING() } else { ALERT() }));
+                        ui.label(RichText::new(e).size(TXT_SMALL).color(if e.starts_with("This stage writes") { WARNING() } else { ALERT() }));
                     }
                     stage_samples(ui, s, i, acts);
                 }
@@ -4094,7 +4139,7 @@ fn stage_samples(ui: &mut egui::Ui, s: &mut Stage, i: usize, acts: &mut Vec<Stag
             let open = s.open.contains(&k);
             let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 20.0), Sense::click());
             if resp.hovered() {
-                ui.painter().rect_filled(rect, 4, HOVER());
+                ui.painter().rect_filled(rect, R_SM, HOVER());
             }
             chevron(ui.painter(), egui::pos2(rect.left() + 8.0, rect.center().y), open, if open { PRIMARY() } else { FAINT() });
             let g = ui.fonts_mut(|f| f.layout_job(cell_job(&Bson::Document(d.clone()))));
@@ -4115,17 +4160,47 @@ fn stage_samples(ui: &mut egui::Ui, s: &mut Stage, i: usize, acts: &mut Vec<Stag
                 });
             }
         }
-        if s.count.is_some_and(|n| n > s.sample.len() as u64) && s.sample.len() as i64 >= s.limit && ui.small_button(format!("Show {} more", db::STAGE_SAMPLE)).clicked() {
+        if s.count.is_some_and(|n| n > s.sample.len() as u64) && s.sample.len() as i64 >= s.limit && ui.button(format!("Show {} more", db::STAGE_SAMPLE)).clicked() {
             acts.push(StageAct::More(i));
         }
     });
 }
 
+const CHIP_H: f32 = 22.0;
+
+/// The pill look shared by `chip`, `badge` and `paint_tag`. Only colors change with `state` (0 idle,
+/// 1 hovered, 2 pressed); the rect never does, because egui buttons with a custom stroke lose a pixel
+/// on hover. `fg` only colors a chip that is on; one that is off is muted.
+fn paint_chip(p: &egui::Painter, rect: egui::Rect, text: std::sync::Arc<egui::Galley>, fg: Color32, on: bool, state: usize) {
+    let (text_c, line, fill) = if on {
+        (fg, tint(fg, 150), tint(fg, [34, 56, 78][state]))
+    } else {
+        (if state > 0 { TEXT() } else { MUTED() }, BORDER(), [Color32::TRANSPARENT, tint(TEXT(), 34), tint(TEXT(), 46)][state])
+    };
+    p.rect(rect, rect.height() / 2.0, fill, Stroke::new(1.0, line), egui::StrokeKind::Inside);
+    p.galley(rect.center() - text.size() / 2.0, text, text_c);
+}
+
 /// A rounded label in `fg`, or muted with a plain border when off, as in one-of choices like connection tags.
 fn chip(ui: &mut egui::Ui, text: &str, fg: Color32, on: bool) -> egui::Response {
-    let (text_c, line, bg) = if on { (fg, fg, tint(fg, 30)) } else { (MUTED(), BORDER(), Color32::TRANSPARENT) };
-    let bg = state_fill(ui, bg);
-    ui.add(egui::Button::new(RichText::new(text).color(text_c).strong().size(12.0)).fill(bg).stroke(Stroke::new(1.0, line)).corner_radius(10))
+    let g = ui.painter().layout_no_wrap(text.to_string(), FontId::proportional(TXT_SMALL), Color32::PLACEHOLDER);
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(g.size().x + 20.0, CHIP_H), Sense::click());
+    let state = if r.is_pointer_button_down_on() { 2 } else if r.hovered() { 1 } else { 0 };
+    paint_chip(ui.painter(), rect, g, fg, on, state);
+    if r.has_focus() {
+        ui.painter().rect_stroke(rect.expand(2.0), rect.height() / 2.0 + 2.0, ui.visuals().selection.stroke, egui::StrokeKind::Outside);
+    }
+    let enabled = ui.is_enabled();
+    r.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, enabled, on, text));
+    r.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A chip that only labels something: no hover and no pointer.
+fn badge(ui: &mut egui::Ui, text: &str, fg: Color32) -> egui::Response {
+    let g = ui.painter().layout_no_wrap(text.to_string(), FontId::proportional(TXT_SMALL), Color32::PLACEHOLDER);
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(g.size().x + 20.0, CHIP_H), Sense::hover());
+    paint_chip(ui.painter(), rect, g, fg, true, 0);
+    r
 }
 
 /// Offered in the connection form; any other text is a custom tag.
@@ -4162,11 +4237,9 @@ fn truncated(p: &egui::Painter, text: &str, font: FontId, color: Color32, w: f32
 
 /// Paints a tag badge at most `max_w` wide whose right edge is at `right`, and returns its left edge.
 fn paint_tag(p: &egui::Painter, right: f32, cy: f32, tag: &str, max_w: f32) -> f32 {
-    let c = tag_color(tag);
-    let g = truncated(p, &tag.to_uppercase(), FontId::proportional(10.5), c, (max_w - 14.0).min(140.0));
+    let g = truncated(p, &tag.to_uppercase(), FontId::proportional(TXT_CAPTION), Color32::PLACEHOLDER, (max_w - 14.0).min(140.0));
     let r = egui::Rect::from_min_max(egui::pos2(right - g.size().x - 14.0, cy - 9.0), egui::pos2(right, cy + 9.0));
-    p.rect(r, 9, tint(c, 34), Stroke::new(1.0, tint(c, 150)), egui::StrokeKind::Inside);
-    p.galley(egui::pos2(r.left() + 7.0, cy - g.size().y / 2.0), g, c);
+    paint_chip(p, r, g, tag_color(tag), true, 0);
     r.left()
 }
 
@@ -4188,9 +4261,9 @@ fn conn_row(ui: &mut egui::Ui, c: &Conn, active: bool) -> egui::Response {
     side_row(ui, 48.0, 4.0, active, |p, r| {
         let (left, right, top) = (r.left(), r.right() - 2.0, r.top() + 17.0);
         p.circle_filled(egui::pos2(left + 3.5, top), 3.5, status_color(&c.status));
-        paint_name_tag(p, egui::Rangef::new(left + 16.0, right), top, &c.meta.name, FontId::proportional(13.5), if active { BRIGHT() } else { TEXT() }, &c.meta.tag);
+        paint_name_tag(p, egui::Rangef::new(left + 16.0, right), top, &c.meta.name, FontId::proportional(TXT_TITLE), if active { BRIGHT() } else { TEXT() }, &c.meta.tag);
         let uri = if c.masked_uri.is_empty() { "no address saved" } else { &c.masked_uri };
-        let addr = truncated(p, uri, FontId::monospace(11.0), FAINT(), right - left - 16.0);
+        let addr = truncated(p, uri, FontId::monospace(TXT_CAPTION), FAINT(), right - left - 16.0);
         p.galley(egui::pos2(left + 16.0, r.top() + 34.0 - addr.size().y / 2.0), addr, FAINT());
     })
 }
@@ -4223,6 +4296,24 @@ fn state_fill(ui: &egui::Ui, base: Color32) -> Color32 {
     }
 }
 
+// Buttons come in four kinds, all BUTTON_H tall: `primary` for the main action, `ui.button` for the
+// rest, `quiet_button` for list rows and toolbar extras (framed only on hover), and `danger` for
+// destructive actions.
+
+/// Framed only while hovered or pressed: rows in lists and menus, and low-key toolbar actions.
+fn quiet_button<'a>(text: impl Into<egui::WidgetText>) -> egui::Button<'a> {
+    egui::Button::new(text).frame_when_inactive(false)
+}
+
+/// A destructive action: red text on an ordinary button, so it keeps the same height and hover.
+fn danger_button<'a>(text: impl Into<String>) -> egui::Button<'a> {
+    egui::Button::new(RichText::new(text).color(ALERT()))
+}
+
+fn danger(ui: &mut egui::Ui, text: impl Into<String>) -> egui::Response {
+    ui.add(danger_button(text))
+}
+
 fn primary(ui: &mut egui::Ui, text: &str, fill: Color32) -> egui::Response {
     ui.add(primary_button(ui, text, fill))
 }
@@ -4235,7 +4326,23 @@ fn primary_button(ui: &egui::Ui, text: impl Into<String>, fill: Color32) -> egui
 /// Every dialog gets the same frame; egui's popup frame has only 6 px of margin.
 fn dialog(id: egui::Id) -> egui::Modal {
     let shadow = egui::Shadow { offset: [0, 6], blur: 20, spread: 0, color: Color32::from_black_alpha(50) };
-    egui::Modal::new(id).frame(egui::Frame::new().shadow(shadow).fill(RAISED()).stroke(Stroke::new(1.0, BORDER())).corner_radius(12).inner_margin(18))
+    egui::Modal::new(id).frame(egui::Frame::new().shadow(shadow).fill(RAISED()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_LG).inner_margin(18))
+}
+
+/// Label column width of dialog form grids, so fields in every section start at the same x.
+const FORM_LABEL_W: f32 = 84.0;
+
+/// A form row's label, at the top of its cell so it lines up with the first line of a tall field.
+fn form_label(ui: &mut egui::Ui, text: &str) {
+    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+        ui.add_space(4.0);
+        ui.label(text);
+    });
+}
+
+/// The Done row of a dialog that saves as it goes.
+fn done(ui: &mut egui::Ui) -> bool {
+    dialog_actions(ui, |ui| ui.button("Done").on_hover_text("Esc").clicked())
 }
 
 /// The button row at the bottom of a dialog: primary action first, then the rest, Cancel last.
@@ -4245,21 +4352,21 @@ fn dialog_actions<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) ->
 }
 
 fn dialog_title(ui: &mut egui::Ui, text: impl Into<String>) {
-    ui.label(RichText::new(text).strong().size(16.0).color(BRIGHT()));
+    ui.label(RichText::new(text).strong().size(TXT_HEADING).color(BRIGHT()));
     ui.add_space(2.0);
 }
 
 /// The strip at the top of a view holding its inputs and actions.
 fn toolbar<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::InnerResponse<R> {
-    egui::Frame::new().fill(PANEL()).corner_radius(8).inner_margin(10).show(ui, add)
+    egui::Frame::new().fill(PANEL()).corner_radius(R_MD).inner_margin(10).show(ui, add)
 }
 
 /// A bordered box grouping related content: settings sections, pipeline stages, a document.
 fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::InnerResponse<R> {
-    egui::Frame::new().fill(RAISED()).stroke(Stroke::new(1.0, BORDER())).corner_radius(8).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, add)
+    egui::Frame::new().fill(RAISED()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, add)
 }
 
-const MONO_PX: f32 = 12.5;
+const MONO_PX: f32 = TXT_BODY;
 
 #[derive(Clone, Copy)]
 enum DocsAct {
@@ -4284,18 +4391,18 @@ fn follow_ids(old: &[Document], new: &[Document], rows: impl Iterator<Item = usi
 
 /// Thumbtack toggle: filled when pinned, outlined when not.
 fn pin_button(ui: &mut egui::Ui, pinned: bool) -> egui::Response {
-    let (rect, r) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), Sense::click());
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(BUTTON_H, BUTTON_H), Sense::click());
     let color = if pinned { PRIMARY() } else if r.hovered() { MUTED() } else { FAINT() };
     let p = ui.painter();
     if r.hovered() {
-        p.rect_filled(rect, 4, HOVER());
+        p.rect_filled(rect, R_SM, HOVER());
     }
     let c = rect.center();
     let head = egui::Rect::from_center_size(c + egui::vec2(0.0, -3.5), egui::vec2(8.0, 7.0));
     if pinned {
-        p.rect_filled(head, 2, color);
+        p.rect_filled(head, R_SM, color);
     } else {
-        p.rect_stroke(head, 2, Stroke::new(1.4, color), egui::StrokeKind::Inside);
+        p.rect_stroke(head, R_SM, Stroke::new(1.4, color), egui::StrokeKind::Inside);
     }
     p.line_segment([c + egui::vec2(-6.0, 1.0), c + egui::vec2(6.0, 1.0)], Stroke::new(1.6, color));
     p.line_segment([c + egui::vec2(0.0, 1.0), c + egui::vec2(0.0, 7.5)], Stroke::new(1.4, color));
@@ -4327,7 +4434,7 @@ fn right_group(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
 
 /// A glyph button large enough to hit comfortably.
 fn icon_button(ui: &mut egui::Ui, glyph: &str, enabled: bool) -> egui::Response {
-    ui.add_enabled(enabled, egui::Button::new(RichText::new(glyph).size(15.0)).min_size(egui::vec2(28.0, 26.0)))
+    ui.add_enabled(enabled, egui::Button::new(RichText::new(glyph).size(TXT_TITLE)).min_size(egui::vec2(28.0, BUTTON_H)))
 }
 
 /// Width of the checkbox column in front of the row number.
@@ -4336,7 +4443,7 @@ const CHECK_W: f32 = 22.0;
 /// Actions on one document or the checked ones, shared by the selection bar and the row menus.
 fn docs_menu(ui: &mut egui::Ui, n: usize, heading: bool) -> Option<DocsAct> {
     if heading {
-        ui.label(RichText::new(if n == 1 { "Document".to_string() } else { format!("{n} selected documents") }).size(11.0).color(FAINT()));
+        ui.label(RichText::new(if n == 1 { "Document".to_string() } else { format!("{n} selected documents") }).size(TXT_CAPTION).color(FAINT()));
     }
     let items: [(&str, DocsAct); 8] = [
         ("Copy as JS", DocsAct::CopyJs),
@@ -4370,7 +4477,7 @@ fn check_box(ui: &egui::Ui, center: egui::Pos2, id: egui::Id, on: bool, partial:
     let filled = on || partial;
     let edge = if filled { PRIMARY() } else if r.hovered() { MUTED() } else { FAINT() };
     let p = ui.painter();
-    p.rect(rect, 3, if filled { PRIMARY() } else { Color32::TRANSPARENT }, Stroke::new(1.0, edge), egui::StrokeKind::Inside);
+    p.rect(rect, R_SM, if filled { PRIMARY() } else { Color32::TRANSPARENT }, Stroke::new(1.0, edge), egui::StrokeKind::Inside);
     let s = Stroke::new(1.6, Color32::WHITE);
     if on {
         p.line(vec![center + egui::vec2(-3.5, 0.0), center + egui::vec2(-1.0, 2.5), center + egui::vec2(3.5, -2.5)], s);
@@ -4422,7 +4529,7 @@ fn side_row(ui: &mut egui::Ui, height: f32, indent: f32, active: bool, paint: im
     } else {
         Color32::TRANSPARENT
     };
-    ui.painter().rect_filled(rect, 6, fill);
+    ui.painter().rect_filled(rect, R_MD, fill);
     let inner = egui::Rect::from_min_max(rect.min + egui::vec2(8.0 + indent, 0.0), rect.max - egui::vec2(8.0, 0.0));
     paint(ui.painter(), inner);
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -4722,16 +4829,16 @@ impl App {
                     }
                 }
             });
-            egui::Frame::new().fill(pal().well).corner_radius(6).inner_margin(8).show(ui, |ui| {
+            egui::Frame::new().fill(pal().well).corner_radius(R_MD).inner_margin(8).show(ui, |ui| {
                 egui::ScrollArea::vertical().max_height(320.0).stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
                     for l in &t.log {
-                        ui.label(RichText::new(l).monospace().size(12.0).color(TEXT()));
+                        ui.label(RichText::new(l).monospace().size(TXT_SMALL).color(TEXT()));
                     }
                 });
             });
             dialog_actions(ui, |ui| {
                 if t.done.is_none() {
-                    if ui.button(RichText::new("Stop").color(ALERT())).clicked() {
+                    if danger(ui, "Stop").clicked() {
                         if let Some(c) = t.cancel.take() {
                             let _ = c.send(());
                         }
@@ -4765,8 +4872,7 @@ impl App {
             ui.horizontal(|ui| {
                 dialog_title(ui, "Users and roles");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    open = !ui.button("Done").on_hover_text("Esc").clicked();
-                    if ui.button("Refresh").clicked() {
+                    if ui.button("⟳ Refresh").clicked() {
                         u.users = None;
                         u.roles = None;
                         cmds.push(("*reload".into(), Document::new(), String::new()));
@@ -4776,11 +4882,11 @@ impl App {
             if !writable {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Read-only: unlock writes to add, change or drop users.").color(SUCCESS()));
-                    unlock = ui.small_button("Unlock…").clicked();
+                    unlock = ui.button("Unlock…").clicked();
                 });
             }
             if atlas {
-                ui.label(RichText::new("Atlas manages database users in its web console; it refuses adding, changing or dropping users from here, and may list none.").size(12.0).color(WARNING()));
+                ui.label(RichText::new("Atlas manages database users in its web console; it refuses adding, changing or dropping users from here, and may list none.").size(TXT_SMALL).color(WARNING()));
             }
             egui::ScrollArea::vertical().max_height(screen.height() - 220.0).show(ui, |ui| {
                 settings_section(ui, "USERS", |ui| match &u.users {
@@ -4799,25 +4905,25 @@ impl App {
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new(&name).monospace().color(BRIGHT()));
                                 ui.label(RichText::new(format!("@{db}")).monospace().color(FAINT()));
-                                ui.label(RichText::new(roles_text(user)).monospace().size(12.0).color(C_STRING()));
+                                ui.label(RichText::new(roles_text(user)).monospace().size(TXT_SMALL).color(C_STRING()));
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui.add_enabled(writable, egui::Button::new(RichText::new("Drop…").color(ALERT())).small()).clicked() {
+                                    if ui.add_enabled(writable, danger_button("Drop…")).clicked() {
                                         drop_user = Some((db.clone(), name.clone()));
                                     }
-                                    if ui.add_enabled(writable, egui::Button::new("Edit").small()).clicked() {
+                                    if ui.add_enabled(writable, egui::Button::new("Edit")).clicked() {
                                         u.edit = Some((name.clone(), db.clone(), String::new(), roles_text(user)));
                                     }
                                 });
                             });
                             if let Some((en, edb, pwd, roles)) = &mut u.edit {
                                 if *en == name && *edb == db {
-                                    egui::Frame::new().fill(pal().well).corner_radius(6).inner_margin(8).show(ui, |ui| {
-                                        egui::Grid::new(("edit", &name)).num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
-                                            ui.label("New password");
+                                    egui::Frame::new().fill(pal().well).corner_radius(R_MD).inner_margin(8).show(ui, |ui| {
+                                        egui::Grid::new(("edit", &name)).num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
+                                            form_label(ui, "New password");
                                             ui.add(egui::TextEdit::singleline(pwd).password(true).hint_text("leave empty to keep").desired_width(280.0));
                                             ui.end_row();
-                                            ui.label("Roles");
-                                            ui.add(egui::TextEdit::singleline(roles).hint_text("readWrite@shop, read@analytics").desired_width(280.0).font(FontId::monospace(12.5)));
+                                            form_label(ui, "Roles");
+                                            ui.add(egui::TextEdit::singleline(roles).hint_text("readWrite@shop, read@analytics").desired_width(280.0).font(egui::TextStyle::Monospace));
                                             ui.end_row();
                                         });
                                         ui.horizontal(|ui| {
@@ -4840,18 +4946,18 @@ impl App {
                     }
                 });
                 settings_section(ui, "ADD USER", |ui| {
-                    egui::Grid::new("adduser").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
-                        ui.label("Name");
+                    egui::Grid::new("adduser").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
+                        form_label(ui, "Name");
                         ui.add(egui::TextEdit::singleline(&mut u.new_name).desired_width(280.0));
                         ui.end_row();
-                        ui.label("Password");
+                        form_label(ui, "Password");
                         ui.add(egui::TextEdit::singleline(&mut u.new_pwd).password(true).desired_width(280.0));
                         ui.end_row();
-                        ui.label("Database");
+                        form_label(ui, "Database");
                         ui.add(egui::TextEdit::singleline(&mut u.new_db).hint_text("admin").desired_width(280.0));
                         ui.end_row();
-                        ui.label("Roles");
-                        ui.add(egui::TextEdit::singleline(&mut u.new_roles).hint_text("readWrite@shop, read@analytics").desired_width(280.0).font(FontId::monospace(12.5)));
+                        form_label(ui, "Roles");
+                        ui.add(egui::TextEdit::singleline(&mut u.new_roles).hint_text("readWrite@shop, read@analytics").desired_width(280.0).font(egui::TextStyle::Monospace));
                         ui.end_row();
                     });
                     let ok = writable && !u.new_name.trim().is_empty() && !u.new_pwd.is_empty();
@@ -4876,12 +4982,13 @@ impl App {
                         for r in list {
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new(format!("{}@{}", r.get_str("role").unwrap_or_default(), r.get_str("db").unwrap_or_default())).monospace().color(BRIGHT()));
-                                ui.label(RichText::new(format!("inherits: {}", roles_text(r))).monospace().size(12.0).color(FAINT()));
+                                ui.label(RichText::new(format!("inherits: {}", roles_text(r))).monospace().size(TXT_SMALL).color(FAINT()));
                             });
                         }
                     }
                 });
             });
+            open = !done(ui);
         });
         if unlock {
             self.modal = Some(Modal::Unlock(conn, None));
@@ -4920,14 +5027,14 @@ impl App {
         let mut undo = false;
         let mut close = false;
         egui::Area::new(egui::Id::unique(("quarry-layer", "toast"))).anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -40.0)).show(ctx, |ui| {
-            egui::Frame::new().fill(RAISED()).stroke(Stroke::new(1.0, BORDER())).corner_radius(8).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
+            egui::Frame::new().fill(RAISED()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("✓").color(SUCCESS()));
                     ui.label(RichText::new(&msg).color(TEXT()));
                     if entry.is_some() && ui.button(RichText::new("Undo").color(PRIMARY())).clicked() {
                         undo = true;
                     }
-                    close = ui.small_button("×").clicked();
+                    close = ui.button("🗙").clicked();
                 });
             });
         });
@@ -4984,7 +5091,7 @@ impl App {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
             }
             ui.horizontal_centered(|ui| {
-                ui.label(RichText::new("Quarry").strong().size(16.0).color(BRIGHT()));
+                ui.label(RichText::new("Quarry").strong().size(TXT_HEADING).color(BRIGHT()));
                 ui.label(RichText::new("MongoDB workbench").color(MUTED()));
                 ui.separator();
                 if let Some(s) = self.t().map(|t| t.sel.clone()) {
@@ -5006,10 +5113,10 @@ impl App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     self.undo.retain(|a| a.at.elapsed().as_secs() <= db::UNDO_MAX_AGE_S);
                     let n = self.undo.len();
-                    if ui.add_enabled(n > 0, egui::Button::new(format!("Undo ({n})"))).clicked() {
+                    if ui.add_enabled(n > 0, egui::Button::new(format!("⟲ Undo ({n})"))).clicked() {
                         self.modal = Some(Modal::Undo);
                     }
-                    if ui.button("Settings").clicked() {
+                    if ui.button("⚙ Settings").clicked() {
                         self.modal = Some(Modal::Settings);
                     }
                     if let Some(v) = &self.updated {
@@ -5034,7 +5141,7 @@ impl App {
                     let dt = ui.input(|i| i.stable_dt).max(0.000_1);
                     let budget = 1000.0 * dt;
                     let color = if self.frame_ms > budget * 0.8 { WARNING() } else { SUCCESS() };
-                    ui.label(RichText::new(format!("{:.0} fps · {:.1} ms", 1.0 / dt, self.frame_ms)).monospace().size(11.0).color(color)).on_hover_text("Frames per second while something moves, and the time Quarry needs to build one frame. At 120 Hz each frame has 8.3 ms.");
+                    ui.label(RichText::new(format!("{:.0} fps · {:.1} ms", 1.0 / dt, self.frame_ms)).monospace().size(TXT_CAPTION).color(color)).on_hover_text("Frames per second while something moves, and the time Quarry needs to build one frame. At 120 Hz each frame has 8.3 ms.");
                     ui.add_space(8.0);
                 }
                 // Errors fade after 15 s so an old problem does not look current.
@@ -5044,14 +5151,14 @@ impl App {
                         self.status = ("Ready".into(), false);
                     } else {
                         ui.ctx().request_repaint_after(Duration::from_secs(1));
-                        if ui.small_button("×").on_hover_text("Dismiss").clicked() {
+                        if ui.button("🗙").on_hover_text("Dismiss").clicked() {
                             self.status = ("Ready".into(), false);
                         }
                     }
                 }
                 let (msg, is_err) = &self.status;
                 let first = msg.lines().next().unwrap_or_default();
-                let r = ui.add(egui::Label::new(RichText::new(first).size(12.0).color(if *is_err { ALERT() } else { MUTED() })).truncate().sense(egui::Sense::click()));
+                let r = ui.add(egui::Label::new(RichText::new(first).size(TXT_SMALL).color(if *is_err { ALERT() } else { MUTED() })).truncate().sense(egui::Sense::click()));
                 // Errors often carry advice on a second line or a long server message.
                 if !*is_err {
                     r.on_hover_text(msg.as_str());
@@ -5059,10 +5166,10 @@ impl App {
                     self.modal = Some(Modal::Text { title: "Error".into(), body: msg.clone(), code: false });
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.selectable_label(self.log.open, RichText::new("Query log").size(12.0)).on_hover_text("Every command sent to the servers (Cmd+L)").clicked() {
+                    if ui.selectable_label(self.log.open, RichText::new("Query log").size(TXT_SMALL)).on_hover_text("Every command sent to the servers (Cmd+L)").clicked() {
                         self.log.open = !self.log.open;
                     }
-                    ui.label(RichText::new("Cmd+K jumps  ·  Enter runs  ·  double-click a value to edit  ·  Cmd+/ shortcuts").size(12.0).color(FAINT()));
+                    ui.label(RichText::new("Cmd+K jumps  ·  Enter runs  ·  double-click a value to edit  ·  Cmd+/ shortcuts").size(TXT_SMALL).color(FAINT()));
                 });
             });
         });
@@ -5090,18 +5197,18 @@ impl App {
         let mut copied = false;
         let (log, conns) = (&mut self.log, &self.conns);
         ui.horizontal(|ui| {
-            ui.label(RichText::new("QUERY LOG").size(11.0).color(MUTED()));
-            ui.add(egui::TextEdit::singleline(&mut log.filter).hint_text("filter").desired_width(200.0).font(FontId::monospace(12.0)));
+            caption(ui, "QUERY LOG");
+            ui.add(egui::TextEdit::singleline(&mut log.filter).hint_text("filter").desired_width(200.0).font(FontId::monospace(TXT_SMALL)));
             ui.checkbox(&mut log.errors, "Errors only");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("×").on_hover_text("Hide (Cmd+L)").clicked() {
+                if ui.button("🗙").on_hover_text("Hide (Cmd+L)").clicked() {
                     log.open = false;
                 }
                 let (label, tip) = if log.detached { ("Dock", "Show at the bottom of the main window") } else { ("Detach", "Open in its own window") };
-                if ui.small_button(label).on_hover_text(tip).clicked() {
+                if ui.button(label).on_hover_text(tip).clicked() {
                     log.detached = !log.detached;
                 }
-                if ui.small_button("Clear").clicked() {
+                if ui.button("Clear").clicked() {
                     db::LOG.lock().map(|mut l| l.clear()).ok();
                 }
             });
@@ -5117,51 +5224,104 @@ impl App {
             ui.label(RichText::new(if entries.is_empty() { "Commands sent to the servers show up here." } else { "No command matches." }).color(FAINT()));
             return;
         }
-        let row_h = 18.0;
-        egui::ScrollArea::both().auto_shrink(false).stick_to_bottom(true).show_rows(ui, row_h, rows.len(), |ui, range| {
-            for l in &rows[range] {
-                let name = conns.iter().find(|c| c.meta.id == l.conn).map_or("test", |c| c.meta.name.as_str());
-                // Painted under the row once its size is known, so a hovered row shows it copies.
-                let bg = ui.painter().add(egui::Shape::Noop);
-                let r = ui
-                    .horizontal(|ui| {
-                        ui.set_height(row_h);
-                        let mono = |t: &str, c: Color32| RichText::new(t).monospace().size(12.0).color(c);
-                        ui.add_sized([34.0, row_h], egui::Label::new(mono(&ago(l.at), FAINT())));
-                        ui.add_sized([60.0, row_h], egui::Label::new(mono(&match (l.ms, &l.err) {
-                            (None, _) => "running".into(),
-                            (Some(ms), _) => format!("{ms} ms"),
-                        }, if l.err.is_some() { ALERT() } else { MUTED() })).truncate());
-                        ui.label(mono(&format!("{name} · {}", l.db), MUTED()));
-                        ui.label(mono(&l.name, if l.err.is_some() { ALERT() } else { PRIMARY() }));
-                        if let Some(e) = &l.err {
-                            ui.add(egui::Label::new(mono(e.lines().next().unwrap_or_default(), ALERT())).truncate());
-                        }
-                        ui.add(egui::Label::new(mono(&l.cmd, TEXT())).truncate());
-                    })
-                    .response
-                    .interact(egui::Sense::click());
-                let r = r.on_hover_ui(|ui| {
-                    ui.set_max_width(640.0);
+        // Painted rows of a known height: stick_to_bottom then sees the same content height every
+        // frame, and the whole row takes the hover instead of selectable labels.
+        const LOG_ROW_H: f32 = 20.0;
+        // When, duration, connection and database, command name; the error and command text follow.
+        const COLS: [f32; 4] = [40.0, 68.0, 190.0, 130.0];
+        let mut copy = None;
+        // Commands the log has evicted no longer need their expanded flag.
+        if !log.expanded.is_empty() {
+            log.expanded.retain(|k| entries.iter().any(|e| (e.conn, e.at) == *k));
+        }
+        egui::ScrollArea::vertical().auto_shrink(false).stick_to_bottom(true).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            let w = ui.available_width();
+            let font = FontId::monospace(TXT_SMALL);
+            let text_x = 6.0 + COLS.iter().sum::<f32>();
+            for l in &rows {
+                let key = (l.conn, l.at);
+                let open = log.expanded.contains(&key);
+                // Expanded rows wrap the error and command under the text column.
+                let body = open.then(|| {
+                    let mut job = LayoutJob::default();
                     if let Some(e) = &l.err {
-                        ui.label(RichText::new(e).color(ALERT()));
+                        job.append(&format!("{e}\n"), 0.0, egui::TextFormat::simple(font.clone(), ALERT()));
                     }
-                    ui.label(RichText::new(&l.cmd).monospace().size(12.0));
-                    ui.label(RichText::new("Click to copy the command").size(11.0).color(FAINT()));
+                    job.append(&l.cmd, 0.0, egui::TextFormat::simple(font.clone(), TEXT()));
+                    job.wrap.max_width = (w - text_x - 6.0).max(80.0);
+                    ui.painter().layout_job(job)
                 });
-                if r.hovered() {
-                    ui.painter().set(bg, egui::Shape::rect_filled(r.rect.expand2(egui::vec2(4.0, 1.0)), 4, HOVER()));
+                let h = body.as_ref().map_or(LOG_ROW_H, |g| LOG_ROW_H.max(g.size().y + 6.0));
+                let (rect, r) = ui.allocate_exact_size(egui::vec2(w, h), Sense::click());
+                if !ui.is_rect_visible(rect) {
+                    continue;
                 }
-                let r = r.on_hover_cursor(egui::CursorIcon::PointingHand);
-                if r.clicked() {
-                    ui.ctx().copy_text(l.cmd.clone());
-                    copied = true;
+                let p = ui.painter_at(rect);
+                if r.hovered() || open {
+                    p.rect_filled(rect, R_SM, if r.hovered() { HOVER() } else { tint(HOVER(), 120) });
                 }
+                let failed = l.err.is_some();
+                let name = conns.iter().find(|c| c.meta.id == l.conn).map_or("test", |c| c.meta.name.as_str());
+                let ms = l.ms.map_or("running".to_string(), |ms| format!("{ms} ms"));
+                let when = ago(l.at);
+                let cy = rect.top() + LOG_ROW_H / 2.0;
+                let mut x = rect.left() + 6.0;
+                for ((text, color), cw) in [
+                    (when.clone(), FAINT()),
+                    (ms.clone(), if failed { ALERT() } else { MUTED() }),
+                    (format!("{name} · {}", l.db), MUTED()),
+                    (l.name.clone(), if failed { ALERT() } else { PRIMARY() }),
+                ]
+                .into_iter()
+                .zip(COLS)
+                {
+                    let g = truncated(&p, &text, font.clone(), color, cw - 12.0);
+                    p.galley(egui::pos2(x, cy - g.size().y / 2.0), g, color);
+                    x += cw;
+                }
+                let mut cut = false;
+                match body {
+                    Some(g) => p.galley(egui::pos2(x, rect.top() + 3.0), g, TEXT()),
+                    None => {
+                        let first = l.err.as_deref().map(|e| (e.lines().next().unwrap_or_default(), ALERT()));
+                        for (text, color) in first.into_iter().chain([(l.cmd.as_str(), TEXT())]) {
+                            let g = truncated(&p, text, font.clone(), color, rect.right() - x - 6.0);
+                            cut |= g.elided;
+                            let gw = g.size().x;
+                            p.galley(egui::pos2(x, cy - g.size().y / 2.0), g, color);
+                            x += gw + 12.0;
+                        }
+                    }
+                }
+                let toggles = open || cut;
+                let r = if toggles { r.on_hover_cursor(egui::CursorIcon::PointingHand) } else { r };
+                if r.clicked() && toggles && !log.expanded.remove(&key) {
+                    log.expanded.insert(key);
+                }
+                r.context_menu(|ui| {
+                    if ui.button("🗐 Copy command").clicked() {
+                        copy = Some(l.cmd.clone());
+                    }
+                    if let Some(e) = &l.err
+                        && ui.button("🗐 Copy error").clicked()
+                    {
+                        copy = Some(e.clone());
+                    }
+                    if ui.button("🗐 Copy line").clicked() {
+                        let err = l.err.as_deref().map(|e| format!(" {e}")).unwrap_or_default();
+                        copy = Some(format!("{when} {ms} {name} · {} {}{err} {}", l.db, l.name, l.cmd));
+                    }
+                });
             }
         });
+        if let Some(text) = copy {
+            ui.ctx().copy_text(text);
+            copied = true;
+        }
         drop(entries);
         if copied {
-            self.ok("Command copied");
+            self.ok("Copied");
         }
     }
 
@@ -5187,7 +5347,7 @@ impl App {
                         .margin(egui::Margin::symmetric(10, 6)),
                 );
                 ui.add_space(12.0);
-                ui.label(RichText::new("DATABASES").size(11.0).strong().color(FAINT()));
+                caption(ui, "DATABASES");
                 ui.add_space(2.0);
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| self.db_tree(ui));
             });
@@ -5202,10 +5362,10 @@ impl App {
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 40.0), Sense::click());
         let p = ui.painter();
         let fill = if resp.is_pointer_button_down_on() { shade(HOVER(), 0.08) } else if resp.hovered() { HOVER() } else { RAISED() };
-        p.rect(rect, 8, fill, Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
+        p.rect(rect, R_MD, fill, Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
         p.circle_filled(egui::pos2(rect.left() + 16.0, rect.center().y), 4.0, dot);
         chevron(p, egui::pos2(rect.right() - 16.0, rect.center().y), true, MUTED());
-        paint_name_tag(p, egui::Rangef::new(rect.left() + 28.0, rect.right() - 30.0), rect.center().y, &name, FontId::proportional(14.5), BRIGHT(), &tag);
+        paint_name_tag(p, egui::Rangef::new(rect.left() + 28.0, rect.right() - 30.0), rect.center().y, &name, FontId::proportional(TXT_TITLE), BRIGHT(), &tag);
         let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
         if cur.is_none() && resp.clicked() {
             return self.new_conn_modal();
@@ -5221,7 +5381,7 @@ impl App {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.add_space(10.0);
-                ui.label(RichText::new("CONNECTIONS").size(11.0).strong().color(FAINT()));
+                caption(ui, "CONNECTIONS");
             });
             ui.add_space(2.0);
             for c in &self.conns {
@@ -5245,7 +5405,7 @@ impl App {
                 ui.add_space(2.0);
                 ui.separator();
                 ui.add_space(2.0);
-                if ui.button(RichText::new(format!("Remove \"{}\"…", c.meta.name)).color(ALERT())).clicked() {
+                if danger(ui, format!("Remove \"{}\"…", c.meta.name)).clicked() {
                     remove = Some((c.meta.id, c.meta.name.clone()));
                 }
             }
@@ -5357,7 +5517,7 @@ impl App {
                 st => {
                     ui.add_space(6.0);
                     if let Status::Failed(e) = st {
-                        ui.add(egui::Label::new(RichText::new(e).size(12.0).color(ALERT())).wrap());
+                        ui.add(egui::Label::new(RichText::new(e).size(TXT_SMALL).color(ALERT())).wrap());
                     }
                     connect = primary(ui, "Connect", PRIMARY()).clicked();
                 }
@@ -5372,8 +5532,8 @@ impl App {
                 let count = colls.as_ref().map(|v| v.len().to_string()).unwrap_or_else(|| "…".into());
                 let r = side_row(ui, SIDE_ROW_H, 0.0, false, |p, r| {
                     chevron(p, egui::pos2(r.left() + 4.0, r.center().y), is_open, MUTED());
-                    p.text(egui::pos2(r.left() + 16.0, r.center().y), egui::Align2::LEFT_CENTER, db_name, FontId::proportional(14.0), if dim { FAINT() } else { BRIGHT() });
-                    p.text(egui::pos2(r.right(), r.center().y), egui::Align2::RIGHT_CENTER, &count, FontId::proportional(12.0), FAINT());
+                    p.text(egui::pos2(r.left() + 16.0, r.center().y), egui::Align2::LEFT_CENTER, db_name, FontId::proportional(TXT_TITLE), if dim { FAINT() } else { BRIGHT() });
+                    p.text(egui::pos2(r.right(), r.center().y), egui::Align2::RIGHT_CENTER, &count, FontId::proportional(TXT_SMALL), FAINT());
                 });
                 if matches!(&self.reveal, Some((c, d, None)) if *c == id && d == db_name) {
                     r.scroll_to_me(Some(egui::Align::Center));
@@ -5383,14 +5543,14 @@ impl App {
                     toggle = Some(db_name.clone());
                 }
                 r.context_menu(|ui| {
-                    ui.label(RichText::new(format!("Database: {db_name}")).size(12.0).color(MUTED()));
+                    ui.label(RichText::new(format!("Database: {db_name}")).size(TXT_SMALL).color(MUTED()));
                     if ui.button("New collection…").clicked() {
                         side.push(SideAct::NewColl(db_name.clone(), false));
                     }
                     if ui.button("New view…").clicked() {
                         side.push(SideAct::NewColl(db_name.clone(), true));
                     }
-                    if ui.button("Refresh").clicked() {
+                    if ui.button("⟳ Refresh").clicked() {
                         side.push(SideAct::Refresh(db_name.clone()));
                     }
                     if ui.button("Users and roles…").clicked() {
@@ -5407,7 +5567,7 @@ impl App {
                         side.push(SideAct::Restore(db_name.clone()));
                     }
                     ui.separator();
-                    if ui.button(RichText::new("Drop database…").color(ALERT())).clicked() {
+                    if danger(ui, "Drop database…").clicked() {
                         side.push(SideAct::DropDb(db_name.clone()));
                     }
                 });
@@ -5425,7 +5585,7 @@ impl App {
                                 p.circle_filled(c, 3.5, if active { PRIMARY() } else { WARNING() });
                             }
                             let w = r.width() - 16.0;
-                            let galley = p.layout(coll.clone(), FontId::proportional(13.5), if active { BRIGHT() } else if is_view { C_DATE() } else { TEXT() }, w);
+                            let galley = p.layout(coll.clone(), FontId::proportional(TXT_TITLE), if active { BRIGHT() } else if is_view { C_DATE() } else { TEXT() }, w);
                             p.galley(egui::pos2(r.left() + 16.0, r.center().y - galley.size().y / 2.0), galley, TEXT());
                         });
                         let r = if is_view { r.on_hover_text("View (read-only)") } else { r };
@@ -5437,7 +5597,7 @@ impl App {
                             open = Some(sel.clone());
                         }
                         r.context_menu(|ui| {
-                            ui.label(RichText::new(format!("{}: {coll}", if is_view { "View" } else { "Collection" })).size(12.0).color(MUTED()));
+                            ui.label(RichText::new(format!("{}: {coll}", if is_view { "View" } else { "Collection" })).size(TXT_SMALL).color(MUTED()));
                             if ui.button("Open").clicked() {
                                 open = Some(sel.clone());
                             }
@@ -5460,7 +5620,7 @@ impl App {
                             if !is_view && ui.button("Rename…").clicked() {
                                 side.push(SideAct::Rename(db_name.clone(), coll.clone()));
                             }
-                            if ui.button(RichText::new(if is_view { "Drop view…" } else { "Drop collection…" }).color(ALERT())).clicked() {
+                            if danger(ui, if is_view { "Drop view…" } else { "Drop collection…" }).clicked() {
                                 side.push(SideAct::DropColl(db_name.clone(), coll.clone()));
                             }
                         });
@@ -5554,8 +5714,8 @@ impl App {
                 for (i, t) in self.tabs.iter().enumerate() {
                     let active = i == self.cur;
                     let mut job = LayoutJob::default();
-                    job.append(&t.sel.coll, 0.0, egui::TextFormat::simple(FontId::proportional(13.5), if active { BRIGHT() } else { TEXT() }));
-                    job.append(&t.sel.db, 6.0, egui::TextFormat::simple(FontId::proportional(11.5), FAINT()));
+                    job.append(&t.sel.coll, 0.0, egui::TextFormat::simple(FontId::proportional(TXT_TITLE), if active { BRIGHT() } else { TEXT() }));
+                    job.append(&t.sel.db, 6.0, egui::TextFormat::simple(FontId::proportional(TXT_CAPTION), FAINT()));
                     if t.view != View::Documents {
                         let v = match t.view {
                             View::Aggregate => "aggregate",
@@ -5566,7 +5726,7 @@ impl App {
                             View::Compare => "compare",
                             View::Documents => "",
                         };
-                        job.append(v, 6.0, egui::TextFormat::simple(FontId::proportional(11.5), C_LINK().gamma_multiply(0.8)));
+                        job.append(v, 6.0, egui::TextFormat::simple(FontId::proportional(TXT_CAPTION), C_LINK().gamma_multiply(0.8)));
                     }
                     let title = ui.fonts_mut(|f| f.layout_job(job));
                     let w = (title.size().x + 50.0).clamp(96.0, 300.0);
@@ -5575,11 +5735,11 @@ impl App {
                     let p = ui.painter();
                     let hovered = resp.hovered();
                     if active {
-                        p.rect(rect, 7, RAISED(), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
+                        p.rect(rect, R_MD, RAISED(), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
                         // The original marks the active tab with a yellow underline.
                         p.line_segment([rect.left_bottom() + egui::vec2(8.0, -1.0), rect.right_bottom() + egui::vec2(-8.0, -1.0)], Stroke::new(2.0, WARNING()));
                     } else if hovered {
-                        p.rect_filled(rect, 7, PANEL());
+                        p.rect_filled(rect, R_MD, PANEL());
                     }
                     let is_view = self.views.contains(&(t.sel.conn, t.sel.db.clone(), t.sel.coll.clone()));
                     let dot = egui::pos2(rect.left() + 13.0, rect.center().y);
@@ -5595,7 +5755,7 @@ impl App {
                     let xresp = ui.interact(xr, ui.scope_id().with(("close", i)), Sense::click());
                     if active || hovered || xresp.hovered() {
                         if xresp.hovered() {
-                            ui.painter().rect_filled(xr, 4, HOVER());
+                            ui.painter().rect_filled(xr, R_SM, HOVER());
                         }
                         let c = xr.center();
                         let s = Stroke::new(1.4, if xresp.hovered() { BRIGHT() } else { MUTED() });
@@ -5618,7 +5778,7 @@ impl App {
                             }
                         }
                         ui.separator();
-                        if ui.button("Duplicate").clicked() {
+                        if ui.button("🗋 Duplicate").clicked() {
                             pick = Some(i);
                             dup = true;
                         }
@@ -5632,7 +5792,7 @@ impl App {
                         pick = Some(i);
                     }
                 }
-                if !self.tabs.is_empty() && ui.add(egui::Button::new(RichText::new("+").size(16.0).color(MUTED())).frame(false)).on_hover_text("Duplicate this tab").clicked() {
+                if !self.tabs.is_empty() && ui.add(quiet_button(RichText::new("+").size(TXT_HEADING).color(MUTED()))).on_hover_text("Duplicate this tab").clicked() {
                     dup = true;
                 }
             });
@@ -5681,7 +5841,7 @@ impl App {
     fn welcome(&mut self, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
             ui.add_space(120.0);
-            ui.label(RichText::new("Pick a collection on the left").size(20.0).color(BRIGHT()));
+            ui.label(RichText::new("Pick a collection on the left").size(TXT_HEADING).color(BRIGHT()));
             ui.add_space(6.0);
             ui.label(RichText::new("Each collection opens in its own tab. Every connection starts read-only; edits need an explicit unlock, show a change preview, and can be undone.").color(MUTED()));
             ui.add_space(16.0);
@@ -5695,7 +5855,7 @@ impl App {
         let Some(t) = self.t() else { return };
         let (coll, view) = (t.sel.coll.clone(), t.view);
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(&coll).size(18.0).strong().color(BRIGHT()));
+            ui.label(RichText::new(&coll).size(TXT_HEADING).strong().color(BRIGHT()));
             ui.add_space(12.0);
             for (v, label) in [(View::Documents, "Documents"), (View::Aggregate, "Aggregate"), (View::Indexes, "Indexes"), (View::Schema, "Schema"), (View::Import, "Import"), (View::Compare, "Compare"), (View::Shell, "Shell")] {
                 if ui.selectable_label(view == v, label).clicked() {
@@ -5733,7 +5893,7 @@ impl App {
     /// Enter runs it (or picks a suggestion), Shift+Enter adds a line.
     #[allow(clippy::too_many_arguments)]
     fn query_field(ui: &mut egui::Ui, label: &str, text: &mut String, hint: &str, width: f32, kind: FieldKind, paths: &[String], dates: &[String], ac: &mut Ac) -> bool {
-        ui.add_sized([56.0, 20.0], egui::Label::new(RichText::new(label).size(11.0).color(MUTED())));
+        ui.add_sized([56.0, 20.0], egui::Label::new(caption_text(label)));
         let id = egui::Id::unique(("query", label));
         // Test switch: show the suggestion list in the demo picture.
         if ac.id.is_none() && kind == FieldKind::Query && std::env::var("QUARRY_TEST_AC").is_ok() {
@@ -5747,7 +5907,7 @@ impl App {
         let (out, picked) = ac_field(ui, id, text, ac, &|b| suggest(b, kind, paths, dates), |ui, text, open| {
             egui::TextEdit::multiline(text)
                 .id(id)
-                .font(FontId::monospace(13.0))
+                .font(egui::TextStyle::Monospace)
                 .hint_text(hint)
                 .desired_width(width)
                 .desired_rows(1)
@@ -5838,7 +5998,7 @@ impl App {
             if ui.add_enabled(page + 1 < pages, egui::Button::new("›")).clicked() {
                 go = Some(page + 1);
             }
-            if ui.button("Reload").clicked() {
+            if ui.button("⟳ Reload").clicked() {
                 go = Some(page);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -5876,10 +6036,10 @@ impl App {
                         ui.close();
                     }
                 });
-                if ui.button("Export…").clicked() {
+                if ui.button("📤 Export…").clicked() {
                     self.export();
                 }
-                if ui.button("+ Insert").clicked() {
+                if ui.button("✚ Insert").clicked() {
                     self.insert = Some("{\n  \n}".into());
                 }
                 let pending = self.tab_drafts();
@@ -5919,7 +6079,7 @@ impl App {
             let needle = self.col_filter.trim().to_lowercase();
             let keep = |c: &str| needle.is_empty() || c.to_lowercase().contains(&needle);
             ui.add_space(6.0);
-            ui.label(RichText::new("SHOWN  ·  drag to reorder, pinned columns stay first").size(11.0).color(MUTED()));
+            caption(ui, "SHOWN  ·  drag to reorder, pinned columns stay first");
             egui::ScrollArea::vertical().id_salt("shown").max_height(320.0).show(ui, |ui| {
                 for (i, c) in shown.iter().enumerate().filter(|(_, c)| keep(c)) {
                     let row = ui.horizontal(|ui| {
@@ -5931,13 +6091,13 @@ impl App {
                         }
                         ui.label(RichText::new(c).monospace().color(if fields.contains(c) { TEXT() } else { PRIMARY() }));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if icon_button(ui, "×", true).on_hover_text("Hide").clicked() {
+                            if icon_button(ui, "🗙", true).on_hover_text("Hide").clicked() {
                                 acts.push(ColAct::Hide(c.clone()));
                             }
-                            if icon_button(ui, "↓", i + 1 < shown.len()).on_hover_text("Move down").clicked() {
+                            if icon_button(ui, "⏷", i + 1 < shown.len()).on_hover_text("Move down").clicked() {
                                 acts.push(ColAct::Move(c.clone(), 1));
                             }
-                            if icon_button(ui, "↑", i > 0).on_hover_text("Move up").clicked() {
+                            if icon_button(ui, "⏶", i > 0).on_hover_text("Move up").clicked() {
                                 acts.push(ColAct::Move(c.clone(), -1));
                             }
                         });
@@ -5956,21 +6116,21 @@ impl App {
             let hidden: Vec<&String> = fields.iter().filter(|f| !shown.contains(f) && keep(f)).collect();
             if !hidden.is_empty() {
                 ui.separator();
-                ui.label(RichText::new(format!("MORE FIELDS ({})", hidden.len())).size(11.0).color(MUTED()));
+                caption(ui, format!("MORE FIELDS ({})", hidden.len()));
                 egui::ScrollArea::vertical().id_salt("more").max_height(200.0).show(ui, |ui| {
                     for f in hidden {
-                        if ui.add(egui::Button::new(RichText::new(format!("+ {f}")).monospace()).frame(false).min_size(egui::vec2(ui.available_width(), 26.0))).clicked() {
+                        if ui.add(quiet_button(RichText::new(format!("+ {f}")).monospace()).min_size(egui::vec2(ui.available_width(), 26.0))).clicked() {
                             acts.push(ColAct::Show(f.clone()));
                         }
                     }
                 });
             }
             ui.separator();
-            ui.label(RichText::new("CUSTOM FIELD").size(11.0).color(MUTED()));
+            caption(ui, "CUSTOM FIELD");
             ui.horizontal(|ui| {
                 let w = ui.available_width() - 64.0;
-                let r = ui.add(egui::TextEdit::singleline(&mut self.new_col).hint_text("customer.name").desired_width(w).font(FontId::monospace(13.0)).margin(egui::Margin::symmetric(10, 6)));
-                if (ui.add(egui::Button::new("Add").min_size(egui::vec2(56.0, 28.0))).clicked() || (r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)))) && !self.new_col.trim().is_empty() {
+                let r = ui.add(egui::TextEdit::singleline(&mut self.new_col).hint_text("customer.name").desired_width(w).font(egui::TextStyle::Monospace).margin(egui::Margin::symmetric(10, 6)));
+                if (ui.add(egui::Button::new("Add").min_size(egui::vec2(56.0, BUTTON_H))).clicked() || (r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)))) && !self.new_col.trim().is_empty() {
                     add = Some(self.new_col.trim().to_string());
                 }
             });
@@ -5979,12 +6139,12 @@ impl App {
             if !typed.is_empty() {
                 let paths = if agg { &fields } else { &self.tabs[self.cur].paths };
                 for path in paths.iter().filter(|x| x.to_lowercase().contains(&typed) && !shown.contains(x)).take(8) {
-                    if ui.add(egui::Button::new(RichText::new(path).monospace()).frame(false).min_size(egui::vec2(ui.available_width(), 24.0))).clicked() {
+                    if ui.add(quiet_button(RichText::new(path).monospace()).min_size(egui::vec2(ui.available_width(), 24.0))).clicked() {
                         add = Some(path.clone());
                     }
                 }
             }
-            ui.label(RichText::new("Dotted paths reach inside objects and arrays, like items.0.sku").size(11.0).color(FAINT()));
+            ui.label(RichText::new("Dotted paths reach inside objects and arrays, like items.0.sku").size(TXT_CAPTION).color(FAINT()));
             if ui.button(format!("Reset to the first {n} fields")).clicked() {
                 acts.push(ColAct::Reset);
             }
@@ -6169,7 +6329,7 @@ impl App {
             .pivot(egui::Align2::CENTER_BOTTOM)
             .fixed_pos(egui::pos2(area.center().x, area.bottom() - 16.0))
             .show(ui.ctx(), |ui| {
-                egui::Frame::popup(ui.style()).inner_margin(egui::Margin::symmetric(12, 8)).corner_radius(10).show(ui, |ui| {
+                egui::Frame::popup(ui.style()).inner_margin(egui::Margin::symmetric(12, 8)).corner_radius(R_LG).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(format!("{n} selected")).strong().color(BRIGHT()));
                         ui.add_space(8.0);
@@ -6316,7 +6476,7 @@ impl App {
         });
         let hl_cols: Vec<bool> = cols.iter().map(|c| prefs.highlight.contains(&db::strip_indices(c))).collect();
         let related = if agg { HashMap::new() } else { self.t().map(|t| t.related.clone()).unwrap_or_default() };
-        egui::Frame::new().fill(PANEL()).corner_radius(8).inner_margin(egui::Margin::symmetric(4, 4)).show(ui, |ui| {
+        egui::Frame::new().fill(PANEL()).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(4, 4)).show(ui, |ui| {
             let mut area = egui::ScrollArea::both().id_salt(("res", agg)).auto_shrink(false);
             // QUARRY_SCROLL_TEST slides the table sideways every frame, to measure scrolling cost.
             if std::env::var("QUARRY_SCROLL_TEST").is_ok() {
@@ -6328,7 +6488,7 @@ impl App {
                 // Header
                 let (hr, _) = ui.allocate_exact_size(egui::vec2(row_w, 30.0), Sense::hover());
                 let p = ui.painter();
-                p.text(egui::pos2(hr.left() + 10.0, hr.center().y), egui::Align2::LEFT_CENTER, "#", FontId::proportional(11.5), FAINT());
+                p.text(egui::pos2(hr.left() + 10.0, hr.center().y), egui::Align2::LEFT_CENTER, "#", FontId::proportional(TXT_CAPTION), FAINT());
                 if !agg {
                     let all = checked.len() == docs.len();
                     let r = check_box(ui, egui::pos2(hr.left() + 13.0, hr.center().y), ui.scope_id().with("check-all"), all, !all && !checked.is_empty());
@@ -6344,9 +6504,9 @@ impl App {
                     let dir = dir_of(c);
                     let hresp = ui.interact(cell.shrink2(egui::vec2(4.0, 0.0)), ui.scope_id().with(("h", c)), Sense::click());
                     if hresp.hovered() && !agg {
-                        ui.painter().rect_filled(cell.shrink(2.0), 4, HOVER());
+                        ui.painter().rect_filled(cell.shrink(2.0), R_SM, HOVER());
                     }
-                    ui.painter().with_clip_rect(cell.shrink2(egui::vec2(6.0, 0.0))).text(egui::pos2(x + 8.0, cell.center().y), egui::Align2::LEFT_CENTER, c, FontId::proportional(12.5), if dir.is_some() { BRIGHT() } else { color });
+                    ui.painter().with_clip_rect(cell.shrink2(egui::vec2(6.0, 0.0))).text(egui::pos2(x + 8.0, cell.center().y), egui::Align2::LEFT_CENTER, c, FontId::proportional(TXT_BODY), if dir.is_some() { BRIGHT() } else { color });
                     if let Some(d) = dir {
                         let a = egui::pos2(cell.right() - 14.0, cell.center().y);
                         let pts = if d > 0 { vec![a + egui::vec2(-4.0, 2.5), a + egui::vec2(4.0, 2.5), a + egui::vec2(0.0, -3.0)] } else { vec![a + egui::vec2(-4.0, -2.5), a + egui::vec2(4.0, -2.5), a + egui::vec2(0.0, 3.0)] };
@@ -6432,14 +6592,14 @@ impl App {
                             Color32::TRANSPARENT
                         };
                         let p = ui.painter();
-                        p.rect_filled(rr, 4, fill);
+                        p.rect_filled(rr, R_SM, fill);
                         let off = num_w - NUM_W;
                         if self.prefs.open_inline {
                             chevron(p, egui::pos2(rr.left() + off + 9.0, rr.center().y), active || expanded.contains(&(agg, i)), if active { PRIMARY() } else { FAINT() });
                         }
                         let num = (base + i as u64 + 1).to_string();
                         let (num, nc) = if drafted.is_some() { (format!("{num}●"), WARNING()) } else { (num, FAINT()) };
-                        p.text(egui::pos2(rr.left() + off + 18.0, rr.center().y), egui::Align2::LEFT_CENTER, num, FontId::proportional(11.5), nc);
+                        p.text(egui::pos2(rr.left() + off + 18.0, rr.center().y), egui::Align2::LEFT_CENTER, num, FontId::proportional(TXT_CAPTION), nc);
                         if !agg && check_box(ui, egui::pos2(rr.left() + 13.0, rr.center().y), ui.scope_id().with(("check", i)), checked.contains(&i), false).clicked() {
                             check_click = Some(i);
                         }
@@ -6458,18 +6618,21 @@ impl App {
                             let v = db::get_path(d, c);
                             match v {
                                 Some(v) => {
-                                    let g = ui.fonts_mut(|f| f.layout_job(column_job(v, summarize)));
+                                    let mut job = column_job(v, summarize);
+                                    // Ends in an ellipsis at the cell's padding instead of being cut mid-glyph by the clip.
+                                    job.wrap = egui::text::TextWrapping::truncate_at_width(w - 14.0);
+                                    let g = ui.fonts_mut(|f| f.layout_job(job));
                                     let gw = g.size().x;
                                     clip.galley(egui::pos2(x + 8.0, cell.center().y - g.size().y / 2.0), g, TEXT());
                                     // Ids only, checked before compact(): that turns the whole value into JSON,
                                 // which is costly for big objects on every frame.
                                 let rel = (!related.is_empty() && matches!(v, Bson::ObjectId(_) | Bson::String(_))).then(|| related.get(&db::compact(v))).flatten();
                                 if let Some(p) = rel {
-                                        clip.text(egui::pos2(x + 14.0 + gw, cell.center().y), egui::Align2::LEFT_CENTER, p, FontId::proportional(12.0), C_LINK());
+                                        clip.text(egui::pos2(x + 14.0 + gw, cell.center().y), egui::Align2::LEFT_CENTER, p, FontId::proportional(TXT_SMALL), C_LINK());
                                     }
                                 }
                                 None => {
-                                    clip.text(egui::pos2(x + 8.0, cell.center().y), egui::Align2::LEFT_CENTER, "—", FontId::proportional(12.0), FAINT());
+                                    clip.text(egui::pos2(x + 8.0, cell.center().y), egui::Align2::LEFT_CENTER, "—", FontId::proportional(TXT_SMALL), FAINT());
                                 }
                             }
                             let cr = ui.interact(cell, ui.scope_id().with(("c", i, ci)), Sense::click());
@@ -6581,7 +6744,7 @@ impl App {
         let mut doc_act = None;
         let view_w = ui.available_width();
         let mut click = None;
-        egui::Frame::new().fill(PANEL()).corner_radius(8).inner_margin(4).show(ui, |ui| {
+        egui::Frame::new().fill(PANEL()).corner_radius(R_MD).inner_margin(4).show(ui, |ui| {
             egui::ScrollArea::vertical().id_salt(("list", agg)).auto_shrink(false).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 for (i, d) in docs.iter().enumerate() {
@@ -6602,7 +6765,7 @@ impl App {
                     } else {
                         Color32::TRANSPARENT
                     };
-                    ui.painter().rect_filled(rect, 4, fill);
+                    ui.painter().rect_filled(rect, R_SM, fill);
                     let galley = ui.fonts_mut(|f| f.layout_job(row_job(d, w - 16.0)));
                     ui.painter().galley(rect.left_center() + egui::vec2(8.0, -galley.size().y / 2.0), galley, TEXT());
                     if resp.clicked() {
@@ -6682,28 +6845,28 @@ impl App {
             ui.label(RichText::new(id).monospace().color(C_OID()));
             ui.add_space(8.0);
             if !from_agg {
-                if ui.small_button("Edit JSON").clicked() {
+                if ui.button("✏ Edit JSON").clicked() {
                     acts.push(TreeAct::EditDoc);
                 }
-                if ui.small_button("+ Add field").clicked() {
+                if ui.button("✚ Add field").clicked() {
                     acts.push(TreeAct::AddField(Vec::new()));
                 }
-                if ui.small_button("Duplicate").clicked() {
+                if ui.button("🗋 Duplicate").clicked() {
                     self.docs_act(ui.ctx(), DocsAct::Duplicate, vec![d.clone()]);
                 }
-                if ui.small_button(RichText::new("Delete").color(ALERT())).clicked() {
+                if danger(ui, "🗑 Delete").clicked() {
                     // `d` carries unsaved edits; the delete only matches the document as stored.
                     let stored = self.drafts.get(&self.draft_key(d)).map(|dr| dr.original.clone()).unwrap_or_else(|| d.clone());
                     self.docs_act(ui.ctx(), DocsAct::Delete, vec![stored]);
                 }
             }
             right_group(ui, |ui| {
-                if ui.small_button("Close").on_hover_text("Esc").clicked() {
+                if ui.button("Close").on_hover_text("Esc").clicked() {
                     if let Some(key) = row.or(selected) {
                         self.close_row(key);
                     }
                 }
-                if ui.small_button("Copy JSON").clicked() {
+                if ui.button("🗐 Copy JSON").clicked() {
                     self.docs_act(ui.ctx(), DocsAct::CopyJson, vec![d.clone()]);
                 }
             });
@@ -6740,11 +6903,14 @@ impl App {
         });
         self.key_w = (chars as f32 * self.char_w + 24.0).clamp(96.0, 320.0);
         self.tree_x = ui.max_rect().x_range().expand(8.0);
+        // Tree rows keep egui's compact 18 px; the global BUTTON_H would show a quarter fewer fields.
+        let interact_h = std::mem::replace(&mut ui.spacing_mut().interact_size.y, 18.0);
         for (k, v) in d {
             path.push(k.clone());
             self.tree(ui, k, v, id, &mut path, !from_agg, &mut acts);
             path.pop();
         }
+        ui.spacing_mut().interact_size.y = interact_h;
         // Nested headers only render once their parent opens, so the fold stays forced until every animation settles.
         if !self.fold_busy && self.fold.as_ref().is_some_and(|f| f.0 == id) {
             self.fold = None;
@@ -6772,17 +6938,17 @@ impl App {
         let mut save = false;
         let mut discard = false;
         let mut confirm = self.prefs.confirm_save;
-        egui::Frame::new().fill(tint(WARNING(), 22)).stroke(Stroke::new(1.0, WARNING().gamma_multiply(0.5))).corner_radius(6).inner_margin(8).show(ui, |ui| {
+        egui::Frame::new().fill(tint(WARNING(), 22)).stroke(Stroke::new(1.0, WARNING().gamma_multiply(0.5))).corner_radius(R_MD).inner_margin(8).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(format!("● {} unsaved change(s)", changes.len())).color(WARNING()).strong());
                 let list: Vec<&str> = changes.iter().take(5).map(|c| c.0.as_str()).collect();
                 let more = if changes.len() > 5 { format!(" +{}", changes.len() - 5) } else { String::new() };
-                ui.label(RichText::new(format!("{}{more}", list.join(", "))).monospace().size(12.0).color(MUTED()));
+                ui.label(RichText::new(format!("{}{more}", list.join(", "))).monospace().size(TXT_SMALL).color(MUTED()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     save = primary(ui, "Save", PRIMARY()).on_hover_text("Write all edits of this document at once (Cmd+S)").clicked() || ui.input(|i| i.modifiers.command && i.key_pressed(Key::S));
-                    discard = ui.small_button("Discard").clicked();
+                    discard = ui.button("Discard").clicked();
                     if !self.prefs.always_writable {
-                        ui.checkbox(&mut confirm, RichText::new("Ask before saving").size(12.0));
+                        ui.checkbox(&mut confirm, RichText::new("Ask before saving").size(TXT_SMALL));
                     }
                 });
             });
@@ -6947,7 +7113,7 @@ impl App {
     }
 
     fn type_combo(ui: &mut egui::Ui, id: &'static str, kind: &mut &'static str) {
-        egui::ComboBox::from_id_salt(id).width(86.0).selected_text(RichText::new(*kind).size(12.0)).show_ui(ui, |ui| {
+        egui::ComboBox::from_id_salt(id).width(86.0).selected_text(RichText::new(*kind).size(TXT_SMALL)).show_ui(ui, |ui| {
             for k in db::KINDS {
                 ui.selectable_value(kind, k, k);
             }
@@ -6958,16 +7124,16 @@ impl App {
         let Some(n) = &mut self.new_field else { return };
         ui.horizontal(|ui| {
             ui.add_space(16.0);
-            let r = ui.add(egui::TextEdit::singleline(&mut n.name).hint_text("name").desired_width(120.0).font(FontId::monospace(12.5)));
+            let r = ui.add(egui::TextEdit::singleline(&mut n.name).hint_text("name").desired_width(120.0).font(egui::TextStyle::Monospace));
             if n.name.is_empty() && !r.has_focus() && !ui.ctx().any_popup_open() {
                 r.request_focus();
             }
-            let v = ui.add(egui::TextEdit::singleline(&mut n.text).hint_text("value").desired_width(EDITOR_W - 60.0).font(FontId::monospace(12.5)));
+            let v = ui.add(egui::TextEdit::singleline(&mut n.text).hint_text("value").desired_width(EDITOR_W - 60.0).font(egui::TextStyle::Monospace));
             Self::type_combo(ui, "newkind", &mut n.kind);
-            if ui.small_button("Add").clicked() || ((r.lost_focus() || v.lost_focus()) && ui.input(|i| i.key_pressed(Key::Enter))) {
+            if ui.button("Add").clicked() || ((r.lost_focus() || v.lost_focus()) && ui.input(|i| i.key_pressed(Key::Enter))) {
                 acts.push(TreeAct::CommitNew);
             }
-            if ui.small_button("×").clicked() {
+            if ui.button("🗙").clicked() {
                 acts.push(TreeAct::Cancel);
             }
         });
@@ -7005,7 +7171,7 @@ impl App {
                         }
                     });
                 if highlighted(&self.prefs, &self.col_key(false), path) {
-                    ui.painter().rect_filled(r.header_response.rect.expand(2.0), 4, HIGHLIGHT());
+                    ui.painter().rect_filled(r.header_response.rect.expand(2.0), R_SM, HIGHLIGHT());
                 }
                 self.hover_band(ui, band, r.header_response.rect.y_range());
                 if editable && r.header_response.double_clicked() && path.first().is_some_and(|k| k != "_id") {
@@ -7025,7 +7191,7 @@ impl App {
                 let hl = highlighted(&self.prefs, &self.col_key(false), path);
                 let edited = !self.changed.is_empty() && self.changed.contains(&path.join("."));
                 let band = ui.painter().add(egui::Shape::Noop);
-                let row = egui::Frame::new().fill(if edited { tint(WARNING(), 34) } else if hl { HIGHLIGHT() } else { Color32::TRANSPARENT }).corner_radius(4).show(ui, |ui| ui.horizontal(|ui| {
+                let row = egui::Frame::new().fill(if edited { tint(WARNING(), 34) } else if hl { HIGHLIGHT() } else { Color32::TRANSPARENT }).corner_radius(R_SM).show(ui, |ui| ui.horizontal(|ui| {
                     // Same offsets as a collapsing header so keys and values line up across both.
                     let x0 = ui.cursor().left();
                     ui.add_space(ui.spacing().indent);
@@ -7037,16 +7203,16 @@ impl App {
                     ui.add_space((x0 + ui.spacing().indent + key_w - ui.cursor().left()).max(0.0));
                     if editing_here {
                         let inl = self.inline.as_mut().unwrap();
-                        let r = ui.add(egui::TextEdit::singleline(&mut inl.text).desired_width(EDITOR_W).font(FontId::monospace(12.5)).clip_text(true));
+                        let r = ui.add(egui::TextEdit::singleline(&mut inl.text).desired_width(EDITOR_W).font(egui::TextStyle::Monospace).clip_text(true));
                         if inl.focus {
                             r.request_focus();
                             inl.focus = false;
                         }
                         Self::type_combo(ui, "inlinekind", &mut inl.kind);
-                        if ui.small_button("✓").on_hover_text("Review and save (Enter)").clicked() || (r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))) {
+                        if ui.button("✓").on_hover_text("Review and save (Enter)").clicked() || (r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))) {
                             acts.push(TreeAct::Commit);
                         }
-                        if ui.small_button("×").on_hover_text("Cancel (Esc)").clicked() {
+                        if ui.button("🗙").on_hover_text("Cancel (Esc)").clicked() {
                             acts.push(TreeAct::Cancel);
                         }
                     } else {
@@ -7058,13 +7224,13 @@ impl App {
                             _ => leaf_text(leaf),
                         };
                         let r = ui.add(egui::Label::new(RichText::new(&text).monospace().color(color_of(leaf))).truncate().sense(Sense::click()));
-                        ui.label(RichText::new(db::type_name(leaf)).size(11.0).color(FAINT()));
+                        ui.label(RichText::new(db::type_name(leaf)).size(TXT_CAPTION).color(FAINT()));
                         let id_like = matches!(leaf, Bson::ObjectId(_)) || matches!(leaf, Bson::String(s) if s.len() <= 64);
                         if let Some(p) = self.t().filter(|t| id_like && !t.related.is_empty()).and_then(|t| t.related.get(&db::compact(leaf))) {
-                            ui.label(RichText::new(p).size(12.0).color(C_LINK())).on_hover_text("Preview of the referenced document");
+                            ui.label(RichText::new(p).size(TXT_SMALL).color(C_LINK())).on_hover_text("Preview of the referenced document");
                         }
                         if let Some(ts) = db::possible_timestamp(leaf) {
-                            ui.label(RichText::new(format!("= {ts}?")).size(11.0).color(C_DATE().gamma_multiply(0.7))).on_hover_text("This number looks like a Unix timestamp in seconds");
+                            ui.label(RichText::new(format!("= {ts}?")).size(TXT_CAPTION).color(C_DATE().gamma_multiply(0.7))).on_hover_text("This number looks like a Unix timestamp in seconds");
                         }
                         let r = if editable {
                             let r = r.on_hover_cursor(egui::CursorIcon::Text).on_hover_text(if text.len() > 60 { text.chars().take(600).collect::<String>() } else { "Double-click to edit, right-click for more".into() });
@@ -7183,12 +7349,12 @@ impl App {
         let mut stop = false;
         toolbar(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("SHELL  ·  JavaScript run by Bun with the official MongoDB driver").size(11.0).color(MUTED()));
+                caption(ui, "SHELL  ·  JavaScript run by Bun with the official MongoDB driver");
                 ui.label(RichText::new("?").color(PRIMARY())).on_hover_text(
                     "Write a function and return a value; a cursor is cut to 100 documents.\nAvailable: db, every collection by name, ObjectId, ISODate, console.log, randomId, UUIDv4.",
                 );
                 if !writable {
-                    ui.label(RichText::new("read-only: writes are refused").size(11.0).color(SUCCESS()));
+                    ui.label(RichText::new("read-only: writes are refused").size(TXT_CAPTION).color(SUCCESS()));
                 }
             });
             let id = ui.make_persistent_id("shell-editor");
@@ -7227,14 +7393,14 @@ impl App {
                     });
                     sticky_menu(ui, format!("Packages ({})", packages.len()), |ui| {
                         ui.set_min_width(300.0);
-                        ui.label(RichText::new("npm packages for your scripts. Each one is loaded for you and ready by the name shown.").size(12.0).color(MUTED()));
+                        ui.label(RichText::new("npm packages for your scripts. Each one is loaded for you and ready by the name shown.").size(TXT_SMALL).color(MUTED()));
                         let mut drop = None;
                         for (i, p) in packages.iter().enumerate() {
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new(p).monospace().color(BRIGHT()));
                                 let alias = if db::package_spec(p).0 == "lodash" { format!("{}, _", package_ident(p)) } else { package_ident(p) };
-                                ui.label(RichText::new(format!("ready as {alias}")).monospace().size(12.0).color(C_DATE()));
-                                if ui.small_button("×").on_hover_text("Remove").clicked() {
+                                ui.label(RichText::new(format!("ready as {alias}")).monospace().size(TXT_SMALL).color(C_DATE()));
+                                if ui.button("🗙").on_hover_text("Remove").clicked() {
                                     drop = Some(i);
                                 }
                             });
@@ -7243,7 +7409,7 @@ impl App {
                             packages.remove(i);
                         }
                         ui.horizontal(|ui| {
-                            let r = ui.add(egui::TextEdit::singleline(&mut new_pkg).hint_text("lodash  or  dayjs@1.11").desired_width(190.0).font(FontId::monospace(12.5)));
+                            let r = ui.add(egui::TextEdit::singleline(&mut new_pkg).hint_text("lodash  or  dayjs@1.11").desired_width(190.0).font(egui::TextStyle::Monospace));
                             let valid = db::valid_package(new_pkg.trim());
                             let name = db::package_spec(new_pkg.trim()).0;
                             let mut add = ui.add_enabled(valid, egui::Button::new("Add"));
@@ -7255,7 +7421,7 @@ impl App {
                                 new_pkg.clear();
                             }
                         });
-                        ui.label(RichText::new("Installed by Bun on the next run. Bun does not run install scripts of packages unless you trust them.").size(11.0).color(FAINT()));
+                        ui.label(RichText::new("Installed by Bun on the next run. Bun does not run install scripts of packages unless you trust them.").size(TXT_CAPTION).color(FAINT()));
                     });
                     if ui.selectable_label(t.shell.help, "Help").on_hover_text("What the shell can do, with examples").clicked() {
                         t.shell.help = !t.shell.help;
@@ -7278,7 +7444,7 @@ impl App {
             if !t.shell.logs.is_empty() {
                 toolbar(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    ui.label(RichText::new("LOG").size(11.0).color(MUTED()));
+                    caption(ui, "LOG");
                     for (level, text) in &t.shell.logs {
                         let c = match level.as_str() {
                             "error" => ALERT(),
@@ -7286,13 +7452,13 @@ impl App {
                             "info" => PRIMARY(),
                             _ => TEXT(),
                         };
-                        ui.label(RichText::new(text).monospace().size(12.5).color(c));
+                        ui.label(RichText::new(text).monospace().size(TXT_BODY).color(c));
                     }
                 });
                 ui.add_space(6.0);
             }
             if let Some(e) = &t.shell.error {
-                egui::Frame::new().fill(tint(ALERT(), 20)).corner_radius(8).inner_margin(10).show(ui, |ui| {
+                egui::Frame::new().fill(tint(ALERT(), 20)).corner_radius(R_MD).inner_margin(10).show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.label(RichText::new(e).monospace().color(ALERT()));
                 });
@@ -7303,7 +7469,7 @@ impl App {
         if let Some(v) = &t.shell.value {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new("RESULT").size(11.0).color(MUTED()));
+                caption(ui, "RESULT");
                 let what = match (t.shell.docs.len(), t.shell.count) {
                     (0, Some(n)) => format!("{n} items"),
                     (0, None) => db::type_name(v).to_string(),
@@ -7322,7 +7488,7 @@ impl App {
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    export = ui.button("Export…").clicked();
+                    export = ui.button("📤 Export…").clicked();
                     if ui.button("Copy").on_hover_text("Copy the whole result as JSON").clicked() {
                         ui.ctx().copy_text(db::to_edit_value(v));
                     }
@@ -7471,7 +7637,7 @@ impl App {
         let avail = ui.available_height();
         toolbar(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(if builder { "PIPELINE  ·  each stage shows what comes out of it" } else { "PIPELINE  ·  an array of stages, or paste db.coll.aggregate([...])" }).size(11.0).color(MUTED()));
+                caption(ui, if builder { "PIPELINE  ·  each stage shows what comes out of it" } else { "PIPELINE  ·  an array of stages, or paste db.coll.aggregate([...])" });
                 ui.add_space(8.0);
                 segmented(ui, &mut t.agg_text_mode, &[(false, "Stages"), (true, "Text")]);
                 if builder {
@@ -7489,7 +7655,7 @@ impl App {
                     None => {
                         let max_h = if has_results { (avail * 0.55).max(260.0) } else { (avail - 70.0).max(260.0) };
                         egui::ScrollArea::vertical().id_salt("stages").max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
-                            egui::Frame::new().fill(BG()).corner_radius(8).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
+                            egui::Frame::new().fill(BG()).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
                                 ui.set_width(ui.available_width());
                                 let n = t.agg_input.count.map_or(String::new(), |n| format!("  ·  about {} documents", group(&n.to_string())));
                                 // Closed at first, like the original's collection sample (isOpen: false, renderer line 111386).
@@ -7727,7 +7893,7 @@ impl App {
         }
         toolbar(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("SCHEMA  ·  fields of the documents matching the current query").size(11.0).color(MUTED()));
+                caption(ui, "SCHEMA  ·  fields of the documents matching the current query");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     analyze |= primary(ui, "Analyze", PRIMARY()).clicked();
                     egui::ComboBox::from_id_salt("schema-limit")
@@ -7743,12 +7909,12 @@ impl App {
                 });
             });
             let filter = if t.query.filter.is_empty() { "{} (all documents)".to_string() } else { db::shell_text(&Bson::Document(t.query.filter.clone())) };
-            ui.label(RichText::new(format!("Query: {filter}")).monospace().size(12.0).color(FAINT()));
+            ui.label(RichText::new(format!("Query: {filter}")).monospace().size(TXT_SMALL).color(FAINT()));
         });
         ui.add_space(6.0);
         let (mut apply, mut generate, mut reload) = (false, false, false);
         // QUARRY_TEST_VALIDATOR opens it in the demo picture.
-        egui::CollapsingHeader::new(RichText::new("VALIDATOR").size(11.0).color(MUTED())).id_salt("schema-validator").default_open(std::env::var("QUARRY_TEST_VALIDATOR").is_ok()).show(ui, |ui| {
+        egui::CollapsingHeader::new(caption_text("VALIDATOR")).id_salt("schema-validator").default_open(std::env::var("QUARRY_TEST_VALIDATOR").is_ok()).show(ui, |ui| {
             let s = &mut t.schema;
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Level").color(MUTED()));
@@ -7767,7 +7933,7 @@ impl App {
             ui.horizontal(|ui| {
                 apply = primary(ui, "Apply", PRIMARY()).on_hover_text("Runs collMod on this collection").clicked();
                 generate = ui.add_enabled(!s.stats.is_empty(), egui::Button::new("Generate from analysis")).on_hover_text("Built from the sampled documents; review it before applying").clicked();
-                reload = ui.button("Reload").clicked();
+                reload = ui.button("⟳ Reload").clicked();
             });
         });
         ui.add_space(6.0);
@@ -7780,7 +7946,7 @@ impl App {
         egui::ScrollArea::vertical().id_salt("schema").auto_shrink(false).show(ui, |ui| {
             egui::Grid::new("schema-grid").num_columns(4).striped(true).spacing([18.0, 6.0]).min_col_width(60.0).show(ui, |ui| {
                 for h in ["FIELD", "PRESENT IN", "TYPES", "EXAMPLES"] {
-                    ui.label(RichText::new(h).size(11.0).color(MUTED()));
+                    caption(ui, h);
                 }
                 ui.end_row();
                 for f in &t.schema.stats {
@@ -7790,7 +7956,7 @@ impl App {
                         ui.label(RichText::new(name).monospace().color(BRIGHT())).on_hover_text(&f.path)
                     });
                     r.response.context_menu(|ui| {
-                        ui.label(RichText::new(format!("Field: {}", f.path)).size(12.0).color(MUTED()));
+                        ui.label(RichText::new(format!("Field: {}", f.path)).size(TXT_SMALL).color(MUTED()));
                         if ui.button("Add as column").clicked() {
                             acts.push((f.path.clone(), 0));
                         }
@@ -7804,11 +7970,11 @@ impl App {
                     let share = f.docs as f32 / n;
                     ui.horizontal(|ui| {
                         let (rect, _) = ui.allocate_exact_size(egui::vec2(90.0, 8.0), Sense::hover());
-                        ui.painter().rect_filled(rect, 4, HOVER());
+                        ui.painter().rect_filled(rect, R_SM, HOVER());
                         let mut fill = rect;
                         fill.set_width(rect.width() * share);
-                        ui.painter().rect_filled(fill, 4, if share >= 0.999 { SUCCESS() } else { PRIMARY() });
-                        ui.label(RichText::new(format!("{:.0}%", share * 100.0)).size(12.0).color(TEXT()));
+                        ui.painter().rect_filled(fill, R_SM, if share >= 0.999 { SUCCESS() } else { PRIMARY() });
+                        ui.label(RichText::new(format!("{:.0}%", share * 100.0)).size(TXT_SMALL).color(TEXT()));
                     });
                     ui.horizontal(|ui| {
                         let total: usize = f.types.iter().map(|t| t.1).sum::<usize>().max(1);
@@ -7824,10 +7990,10 @@ impl App {
                             });
                             let pct = *c as f32 * 100.0 / total as f32;
                             let label = if f.types.len() > 1 { format!("{tn} {pct:.0}%") } else { tn.to_string() };
-                            ui.label(RichText::new(label).monospace().size(12.0).color(col));
+                            ui.label(RichText::new(label).monospace().size(TXT_SMALL).color(col));
                         }
                     });
-                    ui.label(RichText::new(f.examples.join("   ")).monospace().size(12.0).color(FAINT()));
+                    ui.label(RichText::new(f.examples.join("   ")).monospace().size(TXT_SMALL).color(FAINT()));
                     ui.end_row();
                 }
             });
@@ -7908,7 +8074,7 @@ impl App {
         let c = &mut self.tabs[i].compare;
         toolbar(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new(format!("COMPARE  ·  {}.{} is the source, documents are matched by _id and field order is ignored", src.db, src.coll)).size(11.0).color(MUTED()));
+            caption(ui, format!("COMPARE  ·  {}.{} is the source, documents are matched by _id and field order is ignored", src.db, src.coll));
             ui.horizontal(|ui| {
             ui.label("Target");
             let name = conns.iter().find(|x| x.0 == c.conn).map(|x| x.1.clone()).unwrap_or_default();
@@ -7952,9 +8118,9 @@ impl App {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 for (label, n, color) in [("Identical", r.same, MUTED()), ("Only in source", r.only_src.len(), SUCCESS()), ("Only in target", r.only_dst.len(), WARNING()), ("Different", r.changed.len(), C_LINK())] {
-                    egui::Frame::new().fill(RAISED()).corner_radius(6).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
-                        ui.label(RichText::new(group(&n.to_string())).strong().size(16.0).color(color));
-                        ui.label(RichText::new(label).size(12.0).color(MUTED()));
+                    egui::Frame::new().fill(RAISED()).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
+                        ui.label(RichText::new(group(&n.to_string())).strong().size(TXT_HEADING).color(color));
+                        ui.label(RichText::new(label).size(TXT_SMALL).color(MUTED()));
                     });
                 }
             });
@@ -7994,7 +8160,7 @@ impl App {
                             if t.len() > 160 {
                                 t = format!("{}…", &t[..t.floor_char_boundary(160)]);
                             }
-                            ui.add(egui::Label::new(RichText::new(t).monospace().size(12.0).color(TEXT())).truncate());
+                            ui.add(egui::Label::new(RichText::new(t).monospace().size(TXT_SMALL).color(TEXT())).truncate());
                         }
                         more(ui, list.len());
                     });
@@ -8054,7 +8220,7 @@ impl App {
         let im = &mut t.import;
         toolbar(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("IMPORT").size(11.0).color(MUTED()));
+                caption(ui, "IMPORT");
                 segmented(ui, &mut im.kind, &[(db::ImportKind::Json, "JSON"), (db::ImportKind::JsonLines, "JSON Lines"), (db::ImportKind::Csv, "CSV")]);
                 if im.kind == db::ImportKind::Csv {
                     ui.add_space(8.0);
@@ -8077,7 +8243,7 @@ impl App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     open_file = ui.button("Open file…").clicked();
                     if let Some(f) = &im.file {
-                        ui.label(RichText::new(f).size(12.0).color(MUTED()));
+                        ui.label(RichText::new(f).size(TXT_SMALL).color(MUTED()));
                     }
                 });
             });
@@ -8096,8 +8262,8 @@ impl App {
             ui.horizontal(|ui| {
                 ui.radio_value(&mut im.upsert, false, "Insert as new documents");
                 ui.radio_value(&mut im.upsert, true, "Upsert by");
-                ui.add_enabled(im.upsert, egui::TextEdit::singleline(&mut im.upsert_by).desired_width(110.0).font(FontId::monospace(12.5)));
-                ui.label(RichText::new("(update the match, add if none)").size(12.0).color(FAINT()));
+                ui.add_enabled(im.upsert, egui::TextEdit::singleline(&mut im.upsert_by).desired_width(110.0).font(egui::TextStyle::Monospace));
+                ui.label(RichText::new("(update the match, add if none)").size(TXT_SMALL).color(FAINT()));
             });
         });
         // Parse again only when the input or options changed.
@@ -8133,7 +8299,7 @@ impl App {
                         let label = format!("{} {} documents", if im.upsert { "Upsert" } else { "Import" }, group(&docs.len().to_string()));
                         start = ui.add_enabled(!docs.is_empty(), primary_button(ui, label, if writable { PRIMARY() } else { FAINT() })).clicked();
                         if !writable {
-                            ui.label(RichText::new("needs writes unlocked").size(12.0).color(FAINT()));
+                            ui.label(RichText::new("needs writes unlocked").size(TXT_SMALL).color(FAINT()));
                         }
                     });
                 });
@@ -8200,8 +8366,8 @@ impl App {
     fn indexes_view(&mut self, ui: &mut egui::Ui) {
         toolbar(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("NEW INDEX").size(11.0).color(MUTED()));
-                ui.add(egui::TextEdit::singleline(&mut self.idx_keys).font(FontId::monospace(13.0)).hint_text("{ email: 1 }").desired_width(280.0));
+                caption(ui, "NEW INDEX");
+                ui.add(egui::TextEdit::singleline(&mut self.idx_keys).font(egui::TextStyle::Monospace).hint_text("{ email: 1 }").desired_width(280.0));
                 ui.checkbox(&mut self.idx_unique, "unique");
                 if ui.button("Create").clicked() {
                     match db::parse_doc(&self.idx_keys) {
@@ -8227,7 +8393,7 @@ impl App {
         egui::ScrollArea::both().id_salt("indexes").auto_shrink(false).show(ui, |ui| {
             egui::Grid::new("idx").striped(true).num_columns(6).spacing([24.0, 8.0]).show(ui, |ui| {
                 for h in ["NAME", "KEYS", "OPTIONS", "USAGE", "SIZE", ""] {
-                    ui.label(RichText::new(h).size(11.0).color(MUTED()));
+                    caption(ui, h);
                 }
                 ui.end_row();
                 for ix in &t.indexes {
@@ -8245,20 +8411,20 @@ impl App {
                         let recent = s.since.is_some_and(|t| now - t < 7 * 24 * 3600 * 1000);
                         ui.label(RichText::new(format!("{} ops{}", group(&s.ops.to_string()), if s.ops == 0 && recent { ", since restart" } else { "" })).monospace().color(MUTED()));
                         if name != "_id_" && db::is_unused(s.ops, s.since, now) {
-                            chip(ui, "unused", WARNING(), true);
+                            badge(ui, "unused", WARNING());
                         }
                         if s.hidden {
-                            chip(ui, "hidden", PRIMARY(), true);
+                            badge(ui, "hidden", PRIMARY());
                         }
                     });
                     ui.label(RichText::new(stat.and_then(|s| s.size).map(human_bytes).unwrap_or_default()).monospace().color(MUTED()));
                     ui.horizontal(|ui| {
                         if name != "_id_" {
                             let hidden = stat.is_some_and(|s| s.hidden);
-                            if ui.small_button(if hidden { "Unhide" } else { "Hide" }).clicked() {
+                            if ui.button(if hidden { "Unhide" } else { "Hide" }).clicked() {
                                 hide = Some((name.clone(), !hidden));
                             }
-                            if ui.small_button(RichText::new("Drop").color(ALERT())).clicked() {
+                            if danger(ui, "Drop").clicked() {
                                 drop = Some(name);
                             }
                         }
@@ -8268,7 +8434,7 @@ impl App {
             });
             if let Some(i) = info {
                 ui.add_space(12.0);
-                ui.label(RichText::new("SUGGESTIONS").size(11.0).color(MUTED()));
+                caption(ui, "SUGGESTIONS");
                 // Skip queries an existing index already serves from its leading keys.
                 let covered = |sug: &Document| t.indexes.iter().any(|ix| ix.get_document("keys").is_ok_and(|k| k.keys().zip(sug.keys()).filter(|(a, b)| a == b).count() == sug.len()));
                 let shapes: Vec<_> = i.shapes.iter().filter(|s| !covered(&s.suggestion)).take(8).collect();
@@ -8285,7 +8451,7 @@ impl App {
                         let sort = if s.sort.is_empty() { String::new() } else { format!("  sort {}", db::compact(&Bson::Document(s.sort.clone()))) };
                         ui.label(RichText::new(format!("{}x  avg {:.0} ms  find {}{sort}", s.count, s.avg_ms, db::compact(&Bson::Document(s.filter.clone())))).monospace().color(MUTED()));
                         ui.label(RichText::new(db::compact(&Bson::Document(s.suggestion.clone()))).monospace().color(C_STRING()));
-                        if ui.small_button("Create").clicked() {
+                        if ui.button("Create").clicked() {
                             create = Some(s.suggestion.clone());
                         }
                     });
@@ -8331,7 +8497,7 @@ impl App {
                         Self::type_combo(ui, "jsonkind", &mut je.kind);
                     }
                 });
-                ui.label(RichText::new("JSON, JSON5 or shell syntax. Applying keeps it as an unsaved edit until you press Save.").size(12.0).color(MUTED()));
+                ui.label(RichText::new("JSON, JSON5 or shell syntax. Applying keeps it as an unsaved edit until you press Save.").size(TXT_SMALL).color(MUTED()));
                 ui.add_space(4.0);
                 let rows = je.text.lines().count().clamp(12, 40);
                 let id = egui::Id::unique("json-editor-text");
@@ -8424,17 +8590,17 @@ impl App {
                     let mut test = false;
                     ui.set_width(600.0);
                     dialog_title(ui, if f.id.is_some() { "Edit connection" } else { "New connection" });
-                    ui.label(RichText::new("Addresses, passwords and passphrases are stored in the macOS Keychain. The connection opens read-only.").size(12.0).color(MUTED()));
+                    ui.label(RichText::new("Addresses, passwords and passphrases are stored in the macOS Keychain. The connection opens read-only.").size(TXT_SMALL).color(MUTED()));
                     ui.add_space(8.0);
                     egui::ScrollArea::vertical().max_height(ctx.content_rect().height() - 220.0).show(ui, |ui| {
                         settings_section(ui, "SERVER", |ui| {
                             // Grid cells do not know their width on the first frame, so size fields from the section.
-                            let field_w = ui.available_width() - 64.0;
-                            egui::Grid::new("cf").num_columns(2).spacing([14.0, 12.0]).show(ui, |ui| {
-                                ui.label("Name");
+                            let field_w = ui.available_width() - FORM_LABEL_W - 14.0;
+                            egui::Grid::new("cf").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
+                                form_label(ui, "Name");
                                 ui.add(egui::TextEdit::singleline(&mut f.name).hint_text("Production cluster").desired_width(field_w).margin(egui::Margin::symmetric(8, 5)));
                                 ui.end_row();
-                                ui.label("Tag");
+                                form_label(ui, "Tag");
                                 ui.vertical(|ui| {
                                     ui.horizontal_wrapped(|ui| {
                                         ui.spacing_mut().item_spacing.x = 6.0;
@@ -8449,10 +8615,10 @@ impl App {
                                     ui.add(egui::TextEdit::singleline(&mut f.tag).hint_text("or type a custom tag").char_limit(24).desired_width(220.0).margin(egui::Margin::symmetric(8, 5)));
                                 });
                                 ui.end_row();
-                                ui.label("URI");
+                                form_label(ui, "URI");
                                 ui.vertical(|ui| {
                                     let edit = if f.show { egui::TextEdit::multiline(&mut f.uri).desired_rows(3).return_key(None) } else { egui::TextEdit::singleline(&mut f.uri).password(true) };
-                                    ui.add(edit.font(FontId::monospace(13.0)).hint_text("mongodb+srv://user:password@host/").desired_width(field_w).margin(egui::Margin::symmetric(8, 6)));
+                                    ui.add(edit.font(egui::TextStyle::Monospace).hint_text("mongodb+srv://user:password@host/").desired_width(field_w).margin(egui::Margin::symmetric(8, 6)));
                                     // Wrapping is only visual; a pasted newline would break the URI.
                                     if f.show {
                                         f.uri.retain(|c| c != '\n' && c != '\r');
@@ -8466,8 +8632,8 @@ impl App {
                         settings_section(ui, "SSH TUNNEL", |ui| {
                             ui.checkbox(&mut f.ssh_on, "Connect through an SSH server (jump host)");
                             if f.ssh_on {
-                                egui::Grid::new("ssh").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-                                    ui.label("Host");
+                                egui::Grid::new("ssh").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
+                                    form_label(ui, "Host");
                                     ui.horizontal(|ui| {
                                         ui.add(egui::TextEdit::singleline(&mut f.ssh.host).hint_text("bastion.example.com").desired_width(280.0));
                                         ui.label("Port");
@@ -8477,20 +8643,20 @@ impl App {
                                         }
                                     });
                                     ui.end_row();
-                                    ui.label("User");
+                                    form_label(ui, "User");
                                     ui.add(egui::TextEdit::singleline(&mut f.ssh.user).desired_width(280.0));
                                     ui.end_row();
-                                    ui.label("Log in with");
+                                    form_label(ui, "Log in with");
                                     segmented(ui, &mut f.ssh.auth, &[(crate::ssh::SshAuth::Auto, "Auto"), (crate::ssh::SshAuth::Password, "Password"), (crate::ssh::SshAuth::KeyFile, "Key file"), (crate::ssh::SshAuth::Agent, "SSH agent")]);
                                     ui.end_row();
                                     use crate::ssh::SshAuth::*;
                                     if matches!(f.ssh.auth, Auto | Password) {
-                                        ui.label("Password");
+                                        form_label(ui, "Password");
                                         ui.add(egui::TextEdit::singleline(&mut f.ssh_pwd).password(true).hint_text(if f.ssh.auth == Auto { "optional, tried last" } else { "" }).desired_width(280.0));
                                         ui.end_row();
                                     }
                                     if matches!(f.ssh.auth, Auto | KeyFile) {
-                                        ui.label("Key file");
+                                        form_label(ui, "Key file");
                                         ui.horizontal(|ui| {
                                             ui.add(egui::TextEdit::singleline(&mut f.ssh.key_path).hint_text(if f.ssh.auth == Auto { "optional; ~/.ssh/id_* are tried" } else { "~/.ssh/id_ed25519" }).desired_width(280.0));
                                             if ui.button("Choose…").clicked() {
@@ -8500,23 +8666,23 @@ impl App {
                                             }
                                         });
                                         ui.end_row();
-                                        ui.label("Passphrase");
+                                        form_label(ui, "Passphrase");
                                         ui.add(egui::TextEdit::singleline(&mut f.ssh_pass).password(true).hint_text("if the key has one").desired_width(280.0));
                                         ui.end_row();
                                     }
                                     ui.label("");
                                     ui.checkbox(&mut f.ssh.legacy_rsa, "Allow legacy ssh-rsa host keys (old servers)");
                                     ui.end_row();
-                                    ui.label("Host key");
+                                    form_label(ui, "Host key");
                                     ui.horizontal(|ui| match f.ssh.known_host.clone() {
                                         Some(fp) => {
-                                            ui.label(RichText::new(fp).monospace().size(12.0).color(MUTED()));
-                                            if ui.small_button("Forget").on_hover_text("Trust the next key the server shows, e.g. after a reinstall").clicked() {
+                                            ui.label(RichText::new(fp).monospace().size(TXT_SMALL).color(MUTED()));
+                                            if ui.button("Forget").on_hover_text("Trust the next key the server shows, e.g. after a reinstall").clicked() {
                                                 f.ssh.known_host = None;
                                             }
                                         }
                                         None => {
-                                            ui.label(RichText::new("remembered on first connect; a different key later is refused").size(12.0).color(FAINT()));
+                                            ui.label(RichText::new("remembered on first connect; a different key later is refused").size(TXT_SMALL).color(FAINT()));
                                         }
                                     });
                                     ui.end_row();
@@ -8526,10 +8692,10 @@ impl App {
                         settings_section(ui, "SOCKS5 PROXY", |ui| {
                             ui.add_enabled(!f.ssh_on, egui::Checkbox::new(&mut f.proxy_on, "Connect through a SOCKS5 proxy"));
                             if f.ssh_on {
-                                ui.label(RichText::new("Not needed with an SSH tunnel: the tunnel already carries the connection.").size(12.0).color(FAINT()));
+                                ui.label(RichText::new("Not needed with an SSH tunnel: the tunnel already carries the connection.").size(TXT_SMALL).color(FAINT()));
                             } else if f.proxy_on {
-                                egui::Grid::new("px").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-                                    ui.label("Host");
+                                egui::Grid::new("px").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
+                                    form_label(ui, "Host");
                                     ui.horizontal(|ui| {
                                         ui.add(egui::TextEdit::singleline(&mut f.proxy.host).desired_width(280.0));
                                         ui.label("Port");
@@ -8539,10 +8705,10 @@ impl App {
                                         }
                                     });
                                     ui.end_row();
-                                    ui.label("User");
+                                    form_label(ui, "User");
                                     ui.add(egui::TextEdit::singleline(&mut f.proxy.user).hint_text("optional").desired_width(280.0));
                                     ui.end_row();
-                                    ui.label("Password");
+                                    form_label(ui, "Password");
                                     ui.add(egui::TextEdit::singleline(&mut f.proxy_pwd).password(true).desired_width(280.0));
                                     ui.end_row();
                                 });
@@ -8624,19 +8790,12 @@ impl App {
                 }
                 Modal::Settings => {
                     ui.set_width(600.0);
-                    ui.horizontal(|ui| {
-                        dialog_title(ui, "Settings");
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("Done").on_hover_text("Esc").clicked() {
-                                keep = false;
-                            }
-                        });
-                    });
-                    ui.label(RichText::new("Changes are saved right away.").size(12.0).color(FAINT()));
+                    dialog_title(ui, "Settings");
+                    ui.label(RichText::new("Changes are saved right away.").size(TXT_SMALL).color(FAINT()));
                     ui.add_space(8.0);
                     let before = (self.prefs.open_inline, self.prefs.auto_save, self.prefs.always_writable, self.prefs.confirm_save, self.prefs.default_cols, self.prefs.timeout_ms, self.prefs.shell_runtime.clone(), self.prefs.mongodump.clone(), self.prefs.mongorestore.clone(), self.prefs.auto_update, self.prefs.show_fps, self.prefs.object_preview);
                     // The sections scroll inside the dialog, which keeps its title and Done in the window.
-                    let max_h = (ui.ctx().content_rect().height() - 150.0).max(200.0);
+                    let max_h = (ui.ctx().content_rect().height() - 190.0).max(200.0);
                     egui::ScrollArea::vertical().id_salt("settings-scroll").max_height(max_h).min_scrolled_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
                         settings_section(ui, "APPEARANCE", |ui| {
                             setting_row(ui, "Theme", "System follows the macOS light or dark setting.", |ui| {
@@ -8674,7 +8833,7 @@ impl App {
                             setting_row(ui, "Show changes before saving", "List every changed field before writing unsaved edits.", |ui| {
                                 ui.add_enabled_ui(!auto, |ui| toggle(ui, &mut self.prefs.confirm_save));
                             });
-                            ui.label(RichText::new(if self.prefs.always_writable { "A save never overwrites someone else's change." } else { "Writes always need the connection unlocked, and a save never overwrites someone else's change." }).size(12.0).color(FAINT()));
+                            ui.label(RichText::new(if self.prefs.always_writable { "A save never overwrites someone else's change." } else { "Writes always need the connection unlocked, and a save never overwrites someone else's change." }).size(TXT_SMALL).color(FAINT()));
                         });
                         settings_section(ui, "QUERIES", |ui| {
                             setting_row(ui, "Query timeout", "How long a query may run before it is stopped.", |ui| {
@@ -8728,6 +8887,9 @@ impl App {
                             self.install_tools_button(ui);
                         }
                     });
+                    if done(ui) {
+                        keep = false;
+                    }
                     // The pref unlocks every connection each frame, so turning it off has to lock them back.
                     if before.2 && !self.prefs.always_writable {
                         self.conns.iter_mut().for_each(|c| c.writable = false);
@@ -8808,7 +8970,7 @@ impl App {
                 Modal::Typed { title, expect, typed, action } => {
                     ui.label(RichText::new(title.as_str()).strong().color(BRIGHT()));
                     ui.label(RichText::new(format!("Type {expect} to confirm (case sensitive).")).color(MUTED()));
-                    ui.add(egui::TextEdit::singleline(typed).font(FontId::monospace(13.0)).desired_width(320.0));
+                    ui.add(egui::TextEdit::singleline(typed).font(egui::TextStyle::Monospace).desired_width(320.0));
                     dialog_actions(ui, |ui| {
                         let ok = typed == expect;
                         if ui.add_enabled(ok, primary_button(ui, "Confirm", ALERT())).clicked() {
@@ -8824,12 +8986,12 @@ impl App {
                 Modal::NewCollection { conn, db, name, view, source, pipeline } => {
                     ui.set_width(520.0);
                     dialog_title(ui, if *view { format!("New view in {db}") } else { format!("New collection in {db}") });
-                    egui::Grid::new("newcoll").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-                        ui.label("Name");
+                    egui::Grid::new("newcoll").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
+                        form_label(ui, "Name");
                         ui.add(egui::TextEdit::singleline(name).desired_width(380.0));
                         ui.end_row();
                         if *view {
-                            ui.label("Based on");
+                            form_label(ui, "Based on");
                             let colls: Vec<String> = self.conn(*conn).and_then(|c| c.dbs.iter().find(|d| d.0 == *db)).and_then(|d| d.1.clone()).unwrap_or_default();
                             egui::ComboBox::from_id_salt("view-src").width(380.0).selected_text(if source.is_empty() { "choose a collection" } else { source.as_str() }).show_ui(ui, |ui| {
                                 for c in colls {
@@ -8837,7 +8999,7 @@ impl App {
                                 }
                             });
                             ui.end_row();
-                            ui.label("Pipeline");
+                            form_label(ui, "Pipeline");
                             let id = ui.make_persistent_id("view-pipeline");
                             with_autopair(ui, id, pipeline, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(380.0).desired_rows(6).layouter(&mut code_layout).show(ui));
                             ui.end_row();
@@ -8875,7 +9037,7 @@ impl App {
                     ui.label(RichText::new(match &exe {
                         Some(p) => format!("Runs {} with this connection's address.", p.display()),
                         None => format!("{tool} was not found. Install the MongoDB Database Tools here, or set its path in Settings."),
-                    }).size(12.0).color(if exe.is_some() { MUTED() } else { WARNING() }));
+                    }).size(TXT_SMALL).color(if exe.is_some() { MUTED() } else { WARNING() }));
                     if exe.is_none() {
                         self.install_tools_button(ui);
                     }
@@ -8884,8 +9046,8 @@ impl App {
                         ui.label(RichText::new("This connection goes through SSH or a proxy, which the MongoDB tools cannot use. Open an SSH port forward and use a direct connection instead.").color(WARNING()));
                     }
                     ui.add_space(6.0);
-                    egui::Grid::new("toolform").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-                        ui.label("Archive file");
+                    egui::Grid::new("toolform").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
+                        form_label(ui, "Archive file");
                         ui.horizontal(|ui| {
                             ui.add(egui::TextEdit::singleline(&mut f.path).desired_width(360.0));
                             if ui.button("Choose…").clicked() {
@@ -8900,17 +9062,17 @@ impl App {
                             }
                         });
                         ui.end_row();
-                        ui.label("");
+                        form_label(ui, "");
                         ui.checkbox(&mut f.gzip, "Compressed (gzip)");
                         ui.end_row();
                         if f.restore {
-                            ui.label("Database in the archive");
+                            form_label(ui, "Database in the archive");
                             ui.add(egui::TextEdit::singleline(&mut f.from_db).desired_width(200.0)).on_hover_text("Restored under the name of this database when it differs");
                             ui.end_row();
-                            ui.label("Only collection");
+                            form_label(ui, "Only collection");
                             ui.add(egui::TextEdit::singleline(&mut f.coll).hint_text("all").desired_width(200.0));
                             ui.end_row();
-                            ui.label("");
+                            form_label(ui, "");
                             let col = if f.drop { ALERT() } else { TEXT() };
                             ui.checkbox(&mut f.drop, RichText::new("Drop each collection before restoring it").color(col));
                             ui.end_row();
@@ -8946,7 +9108,7 @@ impl App {
                     ui.set_width(820.0);
                     let colls: Vec<String> = self.conn(*conn).and_then(|c| c.dbs.iter().find(|d| d.0 == *db)).and_then(|d| d.1.clone()).unwrap_or_default();
                     dialog_title(ui, format!("Data relations in {db}"));
-                    ui.label(RichText::new("A field that holds ids of another collection's documents. Its preview field is shown next to the ids, and \"Go to referenced document\" opens them. Add them by analyzing, or by right-clicking an id and choosing that action.").size(12.0).color(MUTED()));
+                    ui.label(RichText::new("A field that holds ids of another collection's documents. Its preview field is shown next to the ids, and \"Go to referenced document\" opens them. Add them by analyzing, or by right-clicking an id and choosing that action.").size(TXT_SMALL).color(MUTED()));
                     ui.add_space(6.0);
                     let key = format!("{conn}/{db}");
                     let before = self.prefs.relations.get(&key).cloned().unwrap_or_default();
@@ -8957,9 +9119,9 @@ impl App {
                     let mut remove = None;
                     egui::ScrollArea::vertical().max_height(420.0).auto_shrink([false, true]).show(ui, |ui| {
                         egui::Grid::new("rels").num_columns(4).striped(true).spacing([12.0, 8.0]).min_col_width(60.0).show(ui, |ui| {
-                            ui.label(RichText::new("FIELD").size(11.0).color(FAINT()));
-                            ui.label(RichText::new("POINTS TO COLLECTION").size(11.0).color(FAINT()));
-                            ui.label(RichText::new("PREVIEW FIELD").size(11.0).color(FAINT()));
+                            caption(ui, "FIELD");
+                            caption(ui, "POINTS TO COLLECTION");
+                            caption(ui, "PREVIEW FIELD");
                             ui.end_row();
                             for (i, r) in list.iter_mut().enumerate() {
                                 let name = format!("{}.{}", r.coll, r.path);
@@ -8972,8 +9134,8 @@ impl App {
                                         ui.selectable_value(&mut r.target, c.clone(), c);
                                     }
                                 });
-                                ui.add_sized([180.0, 22.0], egui::TextEdit::singleline(&mut r.preview).hint_text("_id"));
-                                if ui.small_button(RichText::new("Remove").color(ALERT())).clicked() {
+                                ui.add_sized([180.0, BUTTON_H], egui::TextEdit::singleline(&mut r.preview).hint_text("_id"));
+                                if danger(ui, "Remove").clicked() {
                                     remove = Some(i);
                                 }
                                 ui.end_row();
@@ -9032,7 +9194,7 @@ impl App {
                         let n = self.prefs.relations.get(&key).map_or(0, Vec::len);
                         ui.add_enabled_ui(n > 0, |ui| {
                             ui.menu_button(RichText::new("Remove all…").color(ALERT()), |ui| {
-                                if ui.button(RichText::new(format!("Remove all {n} relations of {db}")).color(ALERT())).clicked() {
+                                if danger(ui, format!("Remove all {n} relations of {db}")).clicked() {
                                     self.prefs.relations.remove(&key);
                                     changed = true;
                                     ui.close();
@@ -9054,7 +9216,7 @@ impl App {
                             None => self.err("Connect first."),
                         }
                     }
-                    if dialog_actions(ui, |ui| ui.button("Done").clicked()) {
+                    if done(ui) {
                         keep = false;
                         let reqs: Vec<u64> = self.tabs.iter().filter(|t| t.sel.conn == *conn && t.sel.db == *db).map(|t| t.req).collect();
                         for r in reqs {
@@ -9159,8 +9321,8 @@ impl App {
                     ui.label(RichText::new(format!("{} values in {} documents{}", group(&rows.len().to_string()), group(&total.to_string()), if rows.len() >= 1000 { ", first 1000 values shown" } else { "" })).color(MUTED()));
                     egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
                         egui::Grid::new("grouped").striped(true).num_columns(2).spacing([24.0, 4.0]).show(ui, |ui| {
-                            ui.label(RichText::new("VALUE").size(11.0).color(FAINT()));
-                            ui.label(RichText::new("COUNT").size(11.0).color(FAINT()));
+                            caption(ui, "VALUE");
+                            caption(ui, "COUNT");
                             ui.end_row();
                             for r in rows.iter() {
                                 // A fixed width: a truncating label in a grid otherwise shrinks to a few letters.
@@ -9215,7 +9377,7 @@ impl App {
                 Modal::Rename { doc: d, path, name } => {
                     let from = path.join(".");
                     dialog_title(ui, format!("Rename {from}"));
-                    ui.add(egui::TextEdit::singleline(name).font(FontId::monospace(13.0)).desired_width(320.0));
+                    ui.add(egui::TextEdit::singleline(name).font(egui::TextStyle::Monospace).desired_width(320.0));
                     let mut valid = !name.trim().is_empty() && !name.contains('.') && !name.starts_with('$') && Some(name.trim()) != path.last().map(|s| s.as_str());
                     let mut to = path[..path.len() - 1].to_vec();
                     to.push(name.trim().to_string());
@@ -9258,7 +9420,7 @@ impl App {
                     let id = ui.make_persistent_id("um-set");
                     let mut changed = with_autopair(ui, id, set_txt, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(4).layouter(&mut code_layout).show(ui)).response.changed();
                     ui.label(RichText::new("Remove fields (comma separated paths)").color(FAINT()));
-                    changed |= ui.add(egui::TextEdit::singleline(unset_txt).font(FontId::monospace(13.0)).desired_width(f32::INFINITY)).changed();
+                    changed |= ui.add(egui::TextEdit::singleline(unset_txt).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY)).changed();
                     if changed {
                         *preview = None;
                     }
@@ -9337,7 +9499,7 @@ impl App {
                                 let mins = a.at.elapsed().as_secs() / 60;
                                 ui.label(RichText::new(format!("{}.{}  {what}", a.db, a.coll)).monospace());
                                 ui.label(RichText::new(format!("{mins} min ago")).color(MUTED()));
-                                if ui.small_button("Undo").clicked() {
+                                if ui.button("Undo").clicked() {
                                     pick = Some(i);
                                 }
                             });
@@ -9371,7 +9533,7 @@ impl App {
                         } else {
                             egui::Grid::new("explain-stages").num_columns(6).spacing([16.0, 4.0]).striped(true).show(ui, |ui| {
                                 for h in ["STAGE", "INDEX", "KEYS", "DOCS", "RETURNED", "MS"] {
-                                    ui.label(RichText::new(h).size(11.0).color(MUTED()));
+                                    caption(ui, h);
                                 }
                                 ui.end_row();
                                 let n = |v: Option<i64>| v.map(|v| group(&v.to_string())).unwrap_or_default();
@@ -9426,7 +9588,7 @@ impl App {
                             let r = ui
                                 .horizontal(|ui| {
                                     let r = ui.selectable_label(i == *sel, RichText::new(label).color(BRIGHT()));
-                                    ui.label(RichText::new(hint).size(12.0).color(FAINT()));
+                                    ui.label(RichText::new(hint).size(TXT_SMALL).color(FAINT()));
                                     r
                                 })
                                 .inner;
