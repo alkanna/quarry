@@ -7,7 +7,26 @@ use eframe::egui::{self, Color32, FontId, RichText, Sense, Stroke};
 /// Plain egui menus close on any click inside, which made their text boxes unusable.
 pub(crate) fn sticky_menu(ui: &mut egui::Ui, title: String, content: impl FnOnce(&mut egui::Ui)) {
     use egui::containers::menu::{MenuButton, MenuConfig};
-    MenuButton::new(title).config(MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)).ui(ui, content);
+    MenuButton::new(title).config(MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)).ui(ui, |ui| {
+        menu_look(ui);
+        content(ui)
+    });
+}
+
+/// Menu content that scrolls once it is taller than the window. egui keeps a popup inside the
+/// window, so a taller one is cut off at the edge with its last items out of reach.
+pub(crate) fn menu_scroll<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let max_h = ui.ctx().content_rect().height() - 24.0;
+    egui::ScrollArea::vertical().max_height(max_h).show(ui, add).inner
+}
+
+/// Tighter corners for menu and dropdown items. egui builds menu styles from the app style, so
+/// each menu calls this first; the button radius looked like a pill on a full-width row.
+pub(crate) fn menu_look(ui: &mut egui::Ui) {
+    let w = &mut ui.visuals_mut().widgets;
+    for s in [&mut w.inactive, &mut w.hovered, &mut w.active, &mut w.open] {
+        s.corner_radius = egui::CornerRadius::same(R_SM);
+    }
 }
 
 /// The one style for uppercase labels over a group: sections, lists, menus and column headers.
@@ -215,7 +234,7 @@ pub(crate) fn pin_button(ui: &mut egui::Ui, pinned: bool) -> egui::Response {
     }
     p.line_segment([c + egui::vec2(-6.0, 1.0), c + egui::vec2(6.0, 1.0)], Stroke::new(1.6, color));
     p.line_segment([c + egui::vec2(0.0, 1.0), c + egui::vec2(0.0, 7.5)], Stroke::new(1.4, color));
-    r
+    r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Six dots marking a drag handle; painted because the default fonts lack the braille glyph.
@@ -260,7 +279,7 @@ pub(crate) fn check_box(ui: &egui::Ui, center: egui::Pos2, id: egui::Id, on: boo
     } else if partial {
         p.hline(center.x - 3.5..=center.x + 3.5, center.y, s);
     }
-    r
+    r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// egui's spinner asks for a new frame on every refresh. Behind other windows a static glyph

@@ -26,6 +26,7 @@ impl App {
                             _ => "separator: |",
                         })
                         .show_ui(ui, |ui| {
+                            menu_look(ui);
                             for (v, l) in [(None, "auto"), (Some(','), ","), (Some(';'), ";"), (Some('\t'), "tab"), (Some('|'), "|")] {
                                 ui.selectable_value(&mut im.separator, v, l);
                             }

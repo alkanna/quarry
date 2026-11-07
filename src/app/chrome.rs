@@ -2,6 +2,7 @@
 
 use super::*;
 
+
 impl App {
     /// Keeps the open tabs and their inputs in the settings file, so the next launch reopens them.
     pub(super) fn remember_tabs(&mut self) {
@@ -346,98 +347,157 @@ impl App {
         let mut many: Option<(usize, TabClose)> = None;
         let mut reopen = false;
         let has_closed = !self.closed.is_empty();
-        egui::ScrollArea::horizontal().id_salt("tabs").max_height(38.0).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                let n = self.tabs.len();
-                for (i, t) in self.tabs.iter().enumerate() {
-                    let active = i == self.cur;
-                    let mut job = LayoutJob::default();
-                    job.append(&t.sel.coll, 0.0, egui::TextFormat::simple(FontId::proportional(TXT_TITLE), if active { BRIGHT() } else { TEXT() }));
-                    job.append(&t.sel.db, 6.0, egui::TextFormat::simple(FontId::proportional(TXT_CAPTION), FAINT()));
-                    if t.view != View::Documents {
-                        let v = match t.view {
-                            View::Aggregate => "aggregate",
-                            View::Indexes => "indexes",
-                            View::Shell => "shell",
-                            View::Schema => "schema",
-                            View::Import => "import",
-                            View::Compare => "compare",
-                            View::Documents => "",
-                        };
-                        job.append(v, 6.0, egui::TextFormat::simple(FontId::proportional(TXT_CAPTION), C_LINK().gamma_multiply(0.8)));
-                    }
-                    let title = ui.fonts_mut(|f| f.layout_job(job));
-                    let w = (title.size().x + 50.0).clamp(96.0, 300.0);
-                    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 30.0), Sense::click());
-                    let rect = rect.shrink2(egui::vec2(0.0, 1.0));
-                    let p = ui.painter();
-                    let hovered = resp.hovered();
-                    if active {
-                        p.rect(rect, R_MD, RAISED(), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
-                        // The original marks the active tab with a yellow underline.
-                        p.line_segment([rect.left_bottom() + egui::vec2(8.0, -1.0), rect.right_bottom() + egui::vec2(-8.0, -1.0)], Stroke::new(2.0, WARNING()));
-                    } else if hovered {
-                        p.rect_filled(rect, R_MD, PANEL());
-                    }
-                    let is_view = self.views.contains(&(t.sel.conn, t.sel.db.clone(), t.sel.coll.clone()));
-                    let dot = egui::pos2(rect.left() + 13.0, rect.center().y);
-                    let dc = if active { WARNING() } else { FAINT() };
-                    if is_view {
-                        p.circle_stroke(dot, 3.0, Stroke::new(1.3, dc));
-                    } else {
-                        p.circle_filled(dot, 3.0, dc);
-                    }
-                    let clip = egui::Rect::from_min_max(rect.min, egui::pos2(rect.right() - 24.0, rect.bottom()));
-                    p.with_clip_rect(clip).galley(egui::pos2(rect.left() + 24.0, rect.center().y - title.size().y / 2.0), title, TEXT());
-                    let xr = egui::Rect::from_center_size(egui::pos2(rect.right() - 13.0, rect.center().y), egui::vec2(16.0, 16.0));
-                    let xresp = ui.interact(xr, ui.scope_id().with(("close", i)), Sense::click());
-                    if active || hovered || xresp.hovered() {
-                        if xresp.hovered() {
-                            ui.painter().rect_filled(xr, R_SM, HOVER());
-                        }
-                        let c = xr.center();
-                        let s = Stroke::new(1.4, if xresp.hovered() { BRIGHT() } else { MUTED() });
-                        ui.painter().line_segment([c + egui::vec2(-3.5, -3.5), c + egui::vec2(3.5, 3.5)], s);
-                        ui.painter().line_segment([c + egui::vec2(3.5, -3.5), c + egui::vec2(-3.5, 3.5)], s);
-                    }
-                    let conn_name = self.conns.iter().find(|c| c.meta.id == t.sel.conn).map(|c| c.meta.name.clone()).unwrap_or_default();
-                    let resp = resp.on_hover_text(format!("{conn_name} / {} / {}\nMiddle-click closes, right-click for more", t.sel.db, t.sel.coll));
-                    resp.context_menu(|ui| {
-                        ui.set_min_width(190.0);
-                        for (label, what, enabled) in [
-                            ("Close", TabClose::This, true),
-                            ("Close others", TabClose::Others, n > 1),
-                            ("Close tabs to the left", TabClose::Left, i > 0),
-                            ("Close tabs to the right", TabClose::Right, i + 1 < n),
-                            ("Close all", TabClose::All, true),
-                        ] {
-                            if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
-                                many = Some((i, what));
+        const TAB_H: f32 = 34.0;
+        const TAB_MIN_W: f32 = 120.0;
+        const PLUS_W: f32 = 32.0;
+        const LIST_W: f32 = 84.0;
+        let n = self.tabs.len();
+        // The name is left as a placeholder so its color can follow hover, which is known only after layout.
+        let titles: Vec<_> = self.tabs.iter().enumerate().map(|(i, t)| {
+            let mut job = LayoutJob::default();
+            job.append(&t.sel.coll, 0.0, egui::TextFormat::simple(FontId::proportional(TXT_TITLE), Color32::PLACEHOLDER));
+            job.append(&t.sel.db, 6.0, egui::TextFormat::simple(FontId::proportional(TXT_CAPTION), if i == self.cur { MUTED() } else { FAINT() }));
+            let v = match t.view {
+                View::Aggregate => Some("aggregate"),
+                View::Indexes => Some("indexes"),
+                View::Shell => Some("shell"),
+                View::Schema => Some("schema"),
+                View::Import => Some("import"),
+                View::Compare => Some("compare"),
+                View::Documents => None,
+            };
+            if let Some(v) = v {
+                job.append(v, 6.0, egui::TextFormat::simple(FontId::proportional(TXT_CAPTION), C_LINK().gamma_multiply(0.8)));
+            }
+            ui.fonts_mut(|f| f.layout_job(job))
+        }).collect();
+        // Like a browser, tabs narrow down to TAB_MIN_W before the strip has to scroll.
+        let full = ui.available_width();
+        let cap = ((full - PLUS_W) / n.max(1) as f32).max(TAB_MIN_W);
+        let widths: Vec<f32> = titles.iter().map(|g| (g.size().x + 54.0).clamp(TAB_MIN_W, 240.0).min(cap)).collect();
+        let overflow = widths.iter().sum::<f32>() + PLUS_W > full;
+        let view_w = full - PLUS_W - if overflow { LIST_W } else { 0.0 };
+        // Scroll to the active tab whenever it changes, however it was picked, shortcuts included.
+        let moved = self.tab_seen != Some(self.cur);
+        self.tab_seen = Some(self.cur);
+        let top = egui::CornerRadius { nw: R_MD, ne: R_MD, sw: 0, se: 0 };
+        // Painted first so the active tab's bottom cover hides it, joining the tab to the page.
+        let baseline = ui.painter().add(egui::Shape::Noop);
+        let strip = ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            // egui's own edge fades, opaque, show there are more tabs now that the scrollbar is hidden.
+            ui.spacing_mut().scroll.fade = egui::style::ScrollFadeStyle { strength: 1.0, size: 24.0 };
+            // The floating scrollbar grew over the labels on hover; the wheel and trackpad still scroll.
+            egui::ScrollArea::horizontal()
+                .id_salt("tabs")
+                .max_width(view_w)
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let mut prev_plain = false;
+                        for (i, (t, title)) in self.tabs.iter().zip(titles).enumerate() {
+                            let active = i == self.cur;
+                            let (rect, resp) = ui.allocate_exact_size(egui::vec2(widths[i], TAB_H), Sense::click());
+                            let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+                            if active && moved {
+                                resp.scroll_to_me(None);
+                            }
+                            let p = ui.painter();
+                            let hovered = resp.hovered();
+                            if active {
+                                // Same fill as the page below and no bottom edge, so the tab joins what it shows.
+                                p.rect(rect, top, BG(), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
+                                p.rect_filled(egui::Rect::from_min_max(egui::pos2(rect.left() + 1.0, rect.bottom() - 1.5), egui::pos2(rect.right() - 1.0, rect.bottom() + 1.0)), 0, BG());
+                                p.line_segment([rect.left_top() + egui::vec2(10.0, 1.0), rect.right_top() + egui::vec2(-10.0, 1.0)], Stroke::new(2.0, WARNING()));
+                            } else if hovered {
+                                p.rect_filled(rect, top, PANEL());
+                            } else if prev_plain {
+                                p.vline(rect.left(), rect.shrink2(egui::vec2(0.0, 10.0)).y_range(), Stroke::new(1.0, HOVER()));
+                            }
+                            prev_plain = !active && !hovered;
+                            let is_view = self.views.contains(&(t.sel.conn, t.sel.db.clone(), t.sel.coll.clone()));
+                            let dot = egui::pos2(rect.left() + 14.0, rect.center().y);
+                            let dc = if active { WARNING() } else { FAINT() };
+                            if is_view {
+                                p.circle_stroke(dot, 3.0, Stroke::new(1.3, dc));
+                            } else {
+                                p.circle_filled(dot, 3.0, dc);
+                            }
+                            let clip = egui::Rect::from_min_max(rect.min, egui::pos2(rect.right() - 26.0, rect.bottom()));
+                            let name = if active { BRIGHT() } else if hovered { TEXT() } else { MUTED() };
+                            p.with_clip_rect(clip.intersect(p.clip_rect())).galley(egui::pos2(rect.left() + 26.0, rect.center().y - title.size().y / 2.0), title, name);
+                            let xr = egui::Rect::from_center_size(egui::pos2(rect.right() - 14.0, rect.center().y), egui::vec2(16.0, 16.0));
+                            let xresp = ui.interact(xr, ui.scope_id().with(("close", i)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                            if active || hovered || xresp.hovered() {
+                                if xresp.hovered() {
+                                    ui.painter().rect_filled(xr, R_SM, HOVER());
+                                }
+                                let c = xr.center();
+                                let s = Stroke::new(1.4, if xresp.hovered() { BRIGHT() } else { MUTED() });
+                                ui.painter().line_segment([c + egui::vec2(-3.5, -3.5), c + egui::vec2(3.5, 3.5)], s);
+                                ui.painter().line_segment([c + egui::vec2(3.5, -3.5), c + egui::vec2(-3.5, 3.5)], s);
+                            }
+                            let conn_name = self.conn(t.sel.conn).map_or("", |c| c.meta.name.as_str());
+                            let resp = resp.on_hover_text(format!("{conn_name} / {} / {}\nMiddle-click closes, right-click for more", t.sel.db, t.sel.coll));
+                            resp.context_menu(|ui| {
+                                menu_look(ui);
+                                ui.set_min_width(190.0);
+                                for (label, what, enabled) in [
+                                    ("Close", TabClose::This, true),
+                                    ("Close others", TabClose::Others, n > 1),
+                                    ("Close tabs to the left", TabClose::Left, i > 0),
+                                    ("Close tabs to the right", TabClose::Right, i + 1 < n),
+                                    ("Close all", TabClose::All, true),
+                                ] {
+                                    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                                        many = Some((i, what));
+                                    }
+                                }
+                                ui.separator();
+                                if ui.button("🗋 Duplicate").clicked() {
+                                    pick = Some(i);
+                                    dup = true;
+                                }
+                                if ui.add_enabled(has_closed, egui::Button::new("Reopen closed tab").shortcut_text("Cmd+Shift+T")).clicked() {
+                                    reopen = true;
+                                }
+                            });
+                            if xresp.clicked() || resp.middle_clicked() {
+                                close = Some(i);
+                            } else if resp.clicked() {
+                                pick = Some(i);
                             }
                         }
-                        ui.separator();
-                        if ui.button("🗋 Duplicate").clicked() {
-                            pick = Some(i);
-                            dup = true;
-                        }
-                        if ui.add_enabled(has_closed, egui::Button::new("Reopen closed tab").shortcut_text("Cmd+Shift+T")).clicked() {
-                            reopen = true;
-                        }
                     });
-                    if xresp.clicked() || resp.middle_clicked() {
-                        close = Some(i);
-                    } else if resp.clicked() {
-                        pick = Some(i);
-                    }
+                });
+            // Outside the scroll area so it stays reachable when the strip overflows.
+            ui.add_space(4.0);
+            if n > 0 {
+                // Painted like the close cross: the font's "+" sits on the math axis, below center.
+                let (r, resp) = ui.allocate_exact_size(egui::vec2(BUTTON_H, TAB_H), Sense::click());
+                let b = egui::Rect::from_center_size(r.center(), egui::vec2(BUTTON_H, BUTTON_H));
+                if resp.hovered() {
+                    ui.painter().rect_filled(b, R_MD, HOVER());
                 }
-                if !self.tabs.is_empty() && ui.add(quiet_button(RichText::new("+").size(TXT_HEADING).color(MUTED()))).on_hover_text("Duplicate this tab").clicked() {
+                let (c, s) = (b.center(), Stroke::new(1.5, if resp.hovered() { BRIGHT() } else { MUTED() }));
+                ui.painter().line_segment([c - egui::vec2(5.5, 0.0), c + egui::vec2(5.5, 0.0)], s);
+                ui.painter().line_segment([c - egui::vec2(0.0, 5.5), c + egui::vec2(0.0, 5.5)], s);
+                if resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Duplicate this tab").clicked() {
                     dup = true;
                 }
-            });
+            }
+            if overflow {
+                ui.add_space(6.0);
+                self.tab_list(ui, &mut pick);
+            }
         });
-        ui.painter().hline(ui.max_rect().x_range(), ui.min_rect().bottom(), Stroke::new(1.0, BORDER()));
+        let y = strip.response.rect.bottom() - 0.5;
+        ui.painter().set(baseline, egui::Shape::hline(ui.max_rect().x_range(), y, Stroke::new(1.0, BORDER())));
         ui.add_space(8.0);
+        if pick.is_some() {
+            // Scroll even when the picked tab was already active but scrolled out of view.
+            self.tab_seen = None;
+        }
         if reopen {
             return self.reopen_tab();
         }
@@ -475,6 +535,58 @@ impl App {
             self.reset_doc_state();
             self.reload();
         }
+    }
+
+    /// Every open tab grouped by connection and database, with a filter, for when the strip overflows.
+    fn tab_list(&self, ui: &mut egui::Ui, pick: &mut Option<usize>) {
+        let id = egui::Id::unique("tab-filter");
+        let n = self.tabs.len();
+        sticky_menu(ui, format!("{n} tabs"), |ui| {
+            ui.set_min_width(260.0);
+            // The filter lives only while the menu stays open: a gap of a frame means it was closed.
+            let frame = ui.ctx().cumulative_frame_nr();
+            let mut q = ui.data(|d| d.get_temp::<(String, u64)>(id)).filter(|(_, f)| *f + 1 >= frame).map(|(q, _)| q).unwrap_or_default();
+            let r = ui.add(egui::TextEdit::singleline(&mut q).hint_text("Filter tabs").desired_width(f32::INFINITY));
+            if ui.memory(|m| m.focused().is_none()) {
+                r.request_focus();
+            }
+            ui.data_mut(|d| d.insert_temp(id, (q.clone(), frame)));
+            let q = q.to_lowercase();
+            // Grouped by connection too, so same-named databases on two servers stay apart.
+            let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+            for (i, t) in self.tabs.iter().enumerate() {
+                let conn = self.conn(t.sel.conn).map_or("", |c| c.meta.name.as_str());
+                if !format!("{} {} {conn}", t.sel.coll, t.sel.db).to_lowercase().contains(&q) {
+                    continue;
+                }
+                let key = format!("{conn} / {}", t.sel.db);
+                match groups.iter_mut().find(|g| g.0 == key) {
+                    Some(g) => g.1.push(i),
+                    None => groups.push((key, vec![i])),
+                }
+            }
+            if groups.is_empty() {
+                ui.label(RichText::new("No tab matches").color(MUTED()));
+            }
+            menu_scroll(ui, |ui| {
+                for (db, idx) in groups {
+                    ui.add_space(4.0);
+                    caption(ui, db);
+                    for i in idx {
+                        let mut b = egui::Button::selectable(i == self.cur, &self.tabs[i].sel.coll);
+                        // Cmd+1 to 8 jump to those tabs and Cmd+9 to the last one, as in browsers.
+                        let key = if i == n - 1 { Some(9) } else if i < 8 { Some(i + 1) } else { None };
+                        if let Some(k) = key {
+                            b = b.shortcut_text(format!("Cmd+{k}"));
+                        }
+                        if ui.add(b).clicked() {
+                            *pick = Some(i);
+                            ui.close();
+                        }
+                    }
+                }
+            });
+        });
     }
 
     pub(super) fn welcome(&mut self, ui: &mut egui::Ui) {

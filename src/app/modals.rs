@@ -205,6 +205,7 @@ impl App {
                             form_label(ui, "Based on");
                             let colls: Vec<String> = self.conn(*conn).and_then(|c| c.dbs.iter().find(|d| d.0 == *db)).and_then(|d| d.1.clone()).unwrap_or_default();
                             egui::ComboBox::from_id_salt("view-src").width(380.0).selected_text(if source.is_empty() { "choose a collection" } else { source.as_str() }).show_ui(ui, |ui| {
+                                menu_look(ui);
                                 for c in colls {
                                     ui.selectable_value(source, c.clone(), c);
                                 }
@@ -544,7 +545,8 @@ impl App {
                     }
                     let mut pick = if enter { items.get(*sel).map(|x| x.2.clone()) } else { None };
                     ui.add_space(4.0);
-                    egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                    // Full width, so the scrollbar sits on the dialog edge rather than after the longest row.
+                    egui::ScrollArea::vertical().max_height(360.0).auto_shrink([false, true]).show(ui, |ui| {
                         if items.is_empty() {
                             ui.label(RichText::new("No matches").color(MUTED()));
                         }
@@ -552,7 +554,7 @@ impl App {
                             let r = ui
                                 .horizontal(|ui| {
                                     let r = ui.selectable_label(i == *sel, RichText::new(label).color(BRIGHT()));
-                                    ui.label(RichText::new(hint).size(TXT_SMALL).color(FAINT()));
+                                    ui.add(egui::Label::new(RichText::new(hint).size(TXT_SMALL).color(FAINT())).truncate());
                                     r
                                 })
                                 .inner;

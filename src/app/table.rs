@@ -262,6 +262,7 @@ impl App {
                     let color = if pinned { WARNING() } else if fields.contains(c) { MUTED() } else { PRIMARY() };
                     let dir = dir_of(c);
                     let hresp = ui.interact(cell.shrink2(egui::vec2(4.0, 0.0)), ui.scope_id().with(("h", c)), Sense::click());
+                    let hresp = if agg { hresp } else { hresp.on_hover_cursor(egui::CursorIcon::PointingHand) };
                     if hresp.hovered() && !agg {
                         ui.painter().rect_filled(cell.shrink(2.0), R_SM, HOVER());
                     }
@@ -281,6 +282,7 @@ impl App {
                         sort_set = Some((c.clone(), next));
                     }
                     hresp.context_menu(|ui| {
+                        menu_look(ui);
                         // Same three column actions as the original's table (renderer line 106057).
                         if !agg {
                             if ui.button("Sort ascending").clicked() {
@@ -334,6 +336,7 @@ impl App {
                     let d = drafted.as_ref().unwrap_or(d);
                     let active = selected == Some((agg, i));
                     let (rr, resp) = ui.allocate_exact_size(egui::vec2(row_w, ROW_H), Sense::click());
+                    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
                     if active && std::mem::take(&mut self.scroll_sel) {
                         resp.scroll_to_me(None);
                     }
@@ -394,7 +397,7 @@ impl App {
                                     clip.text(egui::pos2(x + 8.0, cell.center().y), egui::Align2::LEFT_CENTER, "—", FontId::proportional(TXT_SMALL), FAINT());
                                 }
                             }
-                            let cr = ui.interact(cell, ui.scope_id().with(("c", i, ci)), Sense::click());
+                            let cr = ui.interact(cell, ui.scope_id().with(("c", i, ci)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
                             if cr.double_clicked() {
                                 edit_cell = Some((i, c.clone()));
                             } else if cr.clicked() {
@@ -404,14 +407,19 @@ impl App {
                             if let Some(v) = v {
                                 let path: Vec<String> = c.split('.').map(String::from).collect();
                                 cr.context_menu(|ui| {
-                                    field_menu(ui, &path, v, !agg, hl_cols[ci], &mut acts);
-                                    if !agg {
-                                        ui.separator();
-                                        doc_act = row_menu(ui, i, &checked).or(doc_act);
-                                    }
+                                    menu_look(ui);
+                                    // Field and document actions together run about 800 pt, taller than many windows.
+                                    menu_scroll(ui, |ui| {
+                                        field_menu(ui, &path, v, !agg, hl_cols[ci], &mut acts);
+                                        if !agg {
+                                            ui.separator();
+                                            doc_act = row_menu(ui, i, &checked).or(doc_act);
+                                        }
+                                    });
                                 });
                             } else if !agg {
                                 cr.context_menu(|ui| {
+                                    menu_look(ui);
                                     if ui.button("Edit full document as JSON…").clicked() {
                                         acts.push(TreeAct::EditDoc);
                                     }
@@ -512,6 +520,7 @@ impl App {
                     let active = selected == Some((agg, i));
                     let w = ui.available_width();
                     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, ROW_H), Sense::click());
+                    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
                     if active && std::mem::take(&mut self.scroll_sel) {
                         resp.scroll_to_me(None);
                     }

@@ -59,6 +59,7 @@ pub(super) fn field_menu(ui: &mut egui::Ui, path: &[String], v: &Bson, editable:
         ui.close();
     }
     ui.menu_button("Filter by value", |ui| {
+        menu_look(ui);
         if ui.button("All documents").clicked() {
             acts.push(TreeAct::Filter(p.clone(), v.clone(), false));
         }
@@ -67,6 +68,7 @@ pub(super) fn field_menu(ui: &mut egui::Ui, path: &[String], v: &Bson, editable:
         }
     });
     ui.menu_button("Group by and count", |ui| {
+        menu_look(ui);
         if ui.button("All documents").clicked() {
             acts.push(TreeAct::Group(p.clone(), v.clone(), false));
         }
@@ -421,6 +423,7 @@ impl App {
 
     pub(super) fn type_combo(ui: &mut egui::Ui, id: &'static str, kind: &mut &'static str) {
         egui::ComboBox::from_id_salt(id).width(86.0).selected_text(RichText::new(*kind).size(TXT_SMALL)).show_ui(ui, |ui| {
+            menu_look(ui);
             for k in db::KINDS {
                 ui.selectable_value(kind, k, k);
             }
@@ -489,7 +492,8 @@ impl App {
                 }
                 let p = path.clone();
                 let hl = highlighted(&self.prefs, &self.col_key(false), &p);
-                r.header_response.on_hover_text("Double-click to edit as JSON, right-click for more").context_menu(|ui| {
+                r.header_response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Double-click to edit as JSON, right-click for more").context_menu(|ui| {
+                    menu_look(ui);
                     field_menu(ui, &p, v, editable, hl, acts);
                     fold_menu(ui, &p, true, acts);
                 });
@@ -550,6 +554,7 @@ impl App {
                         };
                         let p = path.clone();
                         r.union(key_r).context_menu(|ui| {
+                            menu_look(ui);
                             field_menu(ui, &p, leaf, editable, hl, acts);
                             fold_menu(ui, &p, false, acts);
                         });

@@ -137,6 +137,7 @@ impl App {
                     log.expanded.insert(key);
                 }
                 r.context_menu(|ui| {
+                    menu_look(ui);
                     if ui.button("🗐 Copy command").clicked() {
                         copy = Some(l.cmd.clone());
                     }

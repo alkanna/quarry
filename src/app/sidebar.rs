@@ -185,6 +185,7 @@ impl App {
         let mut edit = None;
         let mut refresh = None;
         egui::Popup::menu(&resp).width(rect.width().max(320.0)).show(|ui| {
+            menu_look(ui);
             ui.spacing_mut().item_spacing.y = 2.0;
             ui.spacing_mut().button_padding = egui::vec2(10.0, 6.0);
             ui.add_space(4.0);
@@ -352,6 +353,7 @@ impl App {
                     toggle = Some(db_name.clone());
                 }
                 r.context_menu(|ui| {
+                    menu_look(ui);
                     ui.label(RichText::new(format!("Database: {db_name}")).size(TXT_SMALL).color(MUTED()));
                     if ui.button("New collection…").clicked() {
                         side.push(SideAct::NewColl(db_name.clone(), false));
@@ -406,6 +408,7 @@ impl App {
                             open = Some(sel.clone());
                         }
                         r.context_menu(|ui| {
+                            menu_look(ui);
                             ui.label(RichText::new(format!("{}: {coll}", if is_view { "View" } else { "Collection" })).size(TXT_SMALL).color(MUTED()));
                             if ui.button("Open").clicked() {
                                 open = Some(sel.clone());

@@ -53,6 +53,7 @@ impl App {
             settings_section(ui, "QUERIES", |ui| {
                 setting_row(ui, "Query timeout", "How long a query may run before it is stopped.", |ui| {
                     egui::ComboBox::from_id_salt("timeout").width(90.0).selected_text(format!("{} s", self.prefs.timeout_ms / 1000)).show_ui(ui, |ui| {
+                        menu_look(ui);
                         // Same presets as the original's preferences.
                         for s in [5, 10, 30, 60, 300, 3600] {
                             ui.selectable_value(&mut self.prefs.timeout_ms, s * 1000, format!("{s} s"));
