@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.0](https://github.com/alkanna/quarry/compare/v0.15.0...v0.16.0) (2026-11-07)
+
+
+### Features
+
+* paged compare results in the shared table, rows read where each view keeps them ([#98](https://github.com/alkanna/quarry/issues/98)) ([77441fd](https://github.com/alkanna/quarry/commit/77441fd1a9b8b8d1cf4c48ecd0abad65b4d5466d))
+
 ## [0.15.0](https://github.com/alkanna/quarry/compare/v0.14.0...v0.15.0) (2026-11-07)
 
 
