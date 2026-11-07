@@ -136,6 +136,7 @@ fn tint(c: Color32, alpha: u8) -> Color32 {
     Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), alpha)
 }
 const SIDEBAR_W: f32 = 250.0;
+const SIDE_ROW_H: f32 = 28.0;
 const HEADER_H: f32 = 40.0;
 const SYSTEM_DBS: [&str; 3] = ["admin", "config", "local"];
 /// Columns shown before the user picks their own; drawing every field of a wide collection is slow.
@@ -1110,6 +1111,9 @@ struct ConnMeta {
     /// Reach the server through a SOCKS5 proxy; its password lives in the Keychain.
     #[serde(default)]
     proxy: Option<db::Proxy>,
+    /// Environment label shown next to the name, such as Production.
+    #[serde(default)]
+    tag: String,
 }
 
 #[derive(PartialEq)]
@@ -1788,6 +1792,7 @@ fn stage_pipeline(stages: &[Stage], i: usize) -> db::Res<Vec<Document>> {
 struct ConnForm {
     id: Option<u64>,
     name: String,
+    tag: String,
     uri: String,
     show: bool,
     ssh_on: bool,
@@ -3759,7 +3764,7 @@ impl App {
             ("users".to_string(), colls(&["accounts", "profiles"])),
         ];
         self.conns.push(Conn {
-            meta: ConnMeta { id: 1, name: "Local sample".into(), ..Default::default() },
+            meta: ConnMeta { id: 1, name: "Local sample".into(), tag: "Local".into(), ..Default::default() },
             client: None,
             status: Status::Ready,
             writable: false,
@@ -3768,7 +3773,7 @@ impl App {
             tunnel: None,
         });
         self.conns.push(Conn {
-            meta: ConnMeta { id: 2, name: "Staging".into(), ..Default::default() },
+            meta: ConnMeta { id: 2, name: "Staging".into(), tag: "Staging".into(), ..Default::default() },
             client: None,
             status: Status::Idle,
             writable: false,
@@ -3802,6 +3807,7 @@ impl App {
             self.modal = Some(Modal::Conn(Box::new(ConnForm {
                 id: Some(2),
                 name: "Staging".into(),
+                tag: "Staging".into(),
                 uri: "mongodb://app:secret@10.0.3.12:27017/?replicaSet=rs0".into(),
                 ssh_on: true,
                 ssh: crate::ssh::SshConf { host: "bastion.example.com".into(), port: 22, user: "deploy".into(), auth: crate::ssh::SshAuth::KeyFile, key_path: "~/.ssh/id_ed25519".into(), legacy_rsa: false, known_host: Some("SHA256:3n9Yk0mF1q2hV7Qp6zXcR4tL8wE5sA0dJ2uB1nM7kPo".into()) },
@@ -4102,9 +4108,78 @@ fn stage_samples(ui: &mut egui::Ui, s: &mut Stage, i: usize, acts: &mut Vec<Stag
     });
 }
 
-fn pill(ui: &mut egui::Ui, text: &str, fg: Color32) -> egui::Response {
-    let bg = state_fill(ui, tint(fg, 30));
-    ui.add(egui::Button::new(RichText::new(text).color(fg).strong().size(12.0)).fill(bg).stroke(Stroke::new(1.0, fg)).corner_radius(10))
+/// A rounded label in `fg`, or muted with a plain border when off, as in one-of choices like connection tags.
+fn chip(ui: &mut egui::Ui, text: &str, fg: Color32, on: bool) -> egui::Response {
+    let (text_c, line, bg) = if on { (fg, fg, tint(fg, 30)) } else { (MUTED(), BORDER(), Color32::TRANSPARENT) };
+    let bg = state_fill(ui, bg);
+    ui.add(egui::Button::new(RichText::new(text).color(text_c).strong().size(12.0)).fill(bg).stroke(Stroke::new(1.0, line)).corner_radius(10))
+}
+
+/// Offered in the connection form; any other text is a custom tag.
+const TAG_PRESETS: [&str; 5] = ["Production", "Staging", "Development", "Internal", "Local"];
+
+/// Production is red so it is never mistaken for a scratch server. Only the first word counts,
+/// so custom tags like "Prod EU" keep their environment's color.
+fn tag_color(tag: &str) -> Color32 {
+    let t = tag.trim().to_ascii_lowercase();
+    match t.split(|c: char| !c.is_ascii_alphanumeric()).next().unwrap_or("") {
+        "production" | "prod" | "live" => ALERT(),
+        "staging" | "preprod" | "uat" => WARNING(),
+        "development" | "dev" | "local" | "test" => SUCCESS(),
+        "internal" => PRIMARY(),
+        _ => C_KEYWORD(),
+    }
+}
+
+fn status_color(s: &Status) -> Color32 {
+    match s {
+        Status::Ready => SUCCESS(),
+        Status::Connecting => WARNING(),
+        Status::Failed(_) => ALERT(),
+        Status::Idle => FAINT(),
+    }
+}
+
+/// One line of text cut with an ellipsis at `w`.
+fn truncated(p: &egui::Painter, text: &str, font: FontId, color: Color32, w: f32) -> std::sync::Arc<egui::Galley> {
+    let mut job = LayoutJob::simple_singleline(text.to_string(), font, color);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(w.max(0.0));
+    p.layout_job(job)
+}
+
+/// Paints a tag badge at most `max_w` wide whose right edge is at `right`, and returns its left edge.
+fn paint_tag(p: &egui::Painter, right: f32, cy: f32, tag: &str, max_w: f32) -> f32 {
+    let c = tag_color(tag);
+    let g = truncated(p, &tag.to_uppercase(), FontId::proportional(10.5), c, (max_w - 14.0).min(140.0));
+    let r = egui::Rect::from_min_max(egui::pos2(right - g.size().x - 14.0, cy - 9.0), egui::pos2(right, cy + 9.0));
+    p.rect(r, 9, tint(c, 34), Stroke::new(1.0, tint(c, 150)), egui::StrokeKind::Inside);
+    p.galley(egui::pos2(r.left() + 7.0, cy - g.size().y / 2.0), g, c);
+    r.left()
+}
+
+/// `name` cut to fit before its tag badge, both centered on `cy` within `x`.
+fn paint_name_tag(p: &egui::Painter, x: egui::Rangef, cy: f32, name: &str, font: FontId, color: Color32, tag: &str) {
+    let name_right = if tag.is_empty() { x.max } else { paint_tag(p, x.max, cy, tag, x.span() * 0.4) - 8.0 };
+    let g = truncated(p, name, font, color, name_right - x.min);
+    p.galley(egui::pos2(x.min, cy - g.size().y / 2.0), g, color);
+}
+
+/// Typing "none" means no tag, the same as the None chip.
+fn clean_tag(tag: &str) -> &str {
+    let t = tag.trim();
+    if t.eq_ignore_ascii_case("none") { "" } else { t }
+}
+
+/// A saved connection in the picker: status, name and tag, then the masked address.
+fn conn_row(ui: &mut egui::Ui, c: &Conn, active: bool) -> egui::Response {
+    side_row(ui, 48.0, 4.0, active, |p, r| {
+        let (left, right, top) = (r.left(), r.right() - 2.0, r.top() + 17.0);
+        p.circle_filled(egui::pos2(left + 3.5, top), 3.5, status_color(&c.status));
+        paint_name_tag(p, egui::Rangef::new(left + 16.0, right), top, &c.meta.name, FontId::proportional(13.5), if active { BRIGHT() } else { TEXT() }, &c.meta.tag);
+        let uri = if c.masked_uri.is_empty() { "no address saved" } else { &c.masked_uri };
+        let addr = truncated(p, uri, FontId::monospace(11.0), FAINT(), right - left - 16.0);
+        p.galley(egui::pos2(left + 16.0, r.top() + 34.0 - addr.size().y / 2.0), addr, FAINT());
+    })
 }
 
 /// `c` moved by `t` away from its own lightness: toward white barely changes an already light color.
@@ -4323,8 +4398,8 @@ fn row_job(d: &Document, width: f32) -> LayoutJob {
 }
 
 /// One clickable sidebar row painted by hand, so it reads as a list rather than a form.
-fn side_row(ui: &mut egui::Ui, indent: f32, active: bool, paint: impl FnOnce(&egui::Painter, egui::Rect)) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), Sense::click());
+fn side_row(ui: &mut egui::Ui, height: f32, indent: f32, active: bool, paint: impl FnOnce(&egui::Painter, egui::Rect)) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), Sense::click());
     let fill = if resp.is_pointer_button_down_on() {
         tint(PRIMARY(), 45)
     } else if active {
@@ -4897,13 +4972,13 @@ impl App {
                     if self.prefs.always_writable {
                         // No lock to toggle: writes are always on.
                     } else if writable {
-                        if pill(ui, "WRITES ON", ALERT()).on_hover_text("Click to lock this connection again").clicked() {
+                        if chip(ui, "WRITES ON", ALERT(), true).on_hover_text("Click to lock this connection again").clicked() {
                             if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == s.conn) {
                                 c.writable = false;
                             }
                             self.ok("Writes locked");
                         }
-                    } else if pill(ui, "READ-ONLY", SUCCESS()).on_hover_text("Click to allow edits on this connection for this session").clicked() {
+                    } else if chip(ui, "READ-ONLY", SUCCESS(), true).on_hover_text("Click to allow edits on this connection for this session").clicked() {
                         self.modal = Some(Modal::Unlock(s.conn, None));
                     }
                 }
@@ -5099,25 +5174,17 @@ impl App {
 
     fn conn_picker(&mut self, ui: &mut egui::Ui) {
         let cur = self.active.and_then(|id| self.conn(id));
-        let (name, dot) = match cur {
-            Some(c) => (
-                c.meta.name.clone(),
-                match c.status {
-                    Status::Ready => SUCCESS(),
-                    Status::Connecting => WARNING(),
-                    Status::Failed(_) => ALERT(),
-                    Status::Idle => FAINT(),
-                },
-            ),
-            None => ("Add a connection".to_string(), FAINT()),
+        let (name, tag, dot) = match cur {
+            Some(c) => (c.meta.name.clone(), c.meta.tag.clone(), status_color(&c.status)),
+            None => ("Add a connection".to_string(), String::new(), FAINT()),
         };
-        let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 38.0), Sense::click());
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 40.0), Sense::click());
         let p = ui.painter();
         let fill = if resp.is_pointer_button_down_on() { shade(HOVER(), 0.08) } else if resp.hovered() { HOVER() } else { RAISED() };
         p.rect(rect, 8, fill, Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
         p.circle_filled(egui::pos2(rect.left() + 16.0, rect.center().y), 4.0, dot);
-        p.text(egui::pos2(rect.left() + 28.0, rect.center().y), egui::Align2::LEFT_CENTER, &name, FontId::proportional(14.5), BRIGHT());
         chevron(p, egui::pos2(rect.right() - 16.0, rect.center().y), true, MUTED());
+        paint_name_tag(p, egui::Rangef::new(rect.left() + 28.0, rect.right() - 30.0), rect.center().y, &name, FontId::proportional(14.5), BRIGHT(), &tag);
         let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
         if cur.is_none() && resp.clicked() {
             return self.new_conn_modal();
@@ -5127,15 +5194,24 @@ impl App {
         let mut remove = None;
         let mut edit = None;
         let mut refresh = None;
-        egui::Popup::menu(&resp).width(rect.width()).show(|ui| {
+        egui::Popup::menu(&resp).width(rect.width().max(320.0)).show(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.spacing_mut().button_padding = egui::vec2(10.0, 6.0);
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.add_space(10.0);
+                ui.label(RichText::new("CONNECTIONS").size(11.0).strong().color(FAINT()));
+            });
+            ui.add_space(2.0);
             for c in &self.conns {
-                let label = format!("{}   {}", c.meta.name, c.masked_uri);
-                if ui.selectable_label(Some(c.meta.id) == self.active, RichText::new(label).color(TEXT())).clicked() {
+                if conn_row(ui, c, Some(c.meta.id) == self.active).clicked() {
                     pick = Some(c.meta.id);
                 }
             }
+            ui.add_space(4.0);
             ui.separator();
-            if ui.button("+ New connection…").clicked() {
+            ui.add_space(2.0);
+            if ui.button("+  New connection…").clicked() {
                 new = true;
             }
             if let Some(c) = cur {
@@ -5145,10 +5221,14 @@ impl App {
                 if ui.button("Refresh databases").on_hover_text("Reconnect and reload the list of databases and collections").clicked() {
                     refresh = Some(c.meta.id);
                 }
+                ui.add_space(2.0);
+                ui.separator();
+                ui.add_space(2.0);
                 if ui.button(RichText::new(format!("Remove \"{}\"…", c.meta.name)).color(ALERT())).clicked() {
                     remove = Some((c.meta.id, c.meta.name.clone()));
                 }
             }
+            ui.add_space(2.0);
         });
         if let Some(id) = edit {
             if let Some(meta) = self.conn(id).map(|c| c.meta.clone()) {
@@ -5169,6 +5249,7 @@ impl App {
                 self.modal = Some(Modal::Conn(Box::new(ConnForm {
                     id: Some(id),
                     name: meta.name.clone(),
+                    tag: meta.tag.clone(),
                     uri,
                     ssh_on: meta.ssh.is_some(),
                     ssh: meta.ssh.clone().unwrap_or_default(),
@@ -5268,7 +5349,7 @@ impl App {
                 let is_open = !filter.is_empty() || self.open_dbs.contains(&(id, db_name.clone()));
                 let dim = SYSTEM_DBS.contains(&db_name.as_str());
                 let count = colls.as_ref().map(|v| v.len().to_string()).unwrap_or_else(|| "…".into());
-                let r = side_row(ui, 0.0, false, |p, r| {
+                let r = side_row(ui, SIDE_ROW_H, 0.0, false, |p, r| {
                     chevron(p, egui::pos2(r.left() + 4.0, r.center().y), is_open, MUTED());
                     p.text(egui::pos2(r.left() + 16.0, r.center().y), egui::Align2::LEFT_CENTER, db_name, FontId::proportional(14.0), if dim { FAINT() } else { BRIGHT() });
                     p.text(egui::pos2(r.right(), r.center().y), egui::Align2::RIGHT_CENTER, &count, FontId::proportional(12.0), FAINT());
@@ -5314,7 +5395,7 @@ impl App {
                         let sel = Sel { conn: id, db: db_name.clone(), coll: coll.clone() };
                         let active = cur_sel.as_ref() == Some(&sel);
                         let is_view = self.views.contains(&(id, db_name.clone(), coll.clone()));
-                        let r = side_row(ui, 16.0, active, |p, r| {
+                        let r = side_row(ui, SIDE_ROW_H, 16.0, active, |p, r| {
                             let c = egui::pos2(r.left() + 4.0, r.center().y);
                             if is_view {
                                 // Views get a hollow marker so they read as derived data.
@@ -7438,7 +7519,7 @@ impl App {
                 ui.horizontal_wrapped(|ui| {
                     for (i, l) in labels.iter().enumerate() {
                         let fg = if t.agg_stage == Some(i) { PRIMARY() } else { MUTED() };
-                        if pill(ui, &format!("{} {l}", i + 1), fg).on_hover_text("Preview the output after this stage").clicked() {
+                        if chip(ui, &format!("{} {l}", i + 1), fg, true).on_hover_text("Preview the output after this stage").clicked() {
                             stage = Some(i);
                         }
                     }
@@ -8143,10 +8224,10 @@ impl App {
                         let recent = s.since.is_some_and(|t| now - t < 7 * 24 * 3600 * 1000);
                         ui.label(RichText::new(format!("{} ops{}", group(&s.ops.to_string()), if s.ops == 0 && recent { ", since restart" } else { "" })).monospace().color(MUTED()));
                         if name != "_id_" && db::is_unused(s.ops, s.since, now) {
-                            pill(ui, "unused", WARNING());
+                            chip(ui, "unused", WARNING(), true);
                         }
                         if s.hidden {
-                            pill(ui, "hidden", PRIMARY());
+                            chip(ui, "hidden", PRIMARY(), true);
                         }
                     });
                     ui.label(RichText::new(stat.and_then(|s| s.size).map(human_bytes).unwrap_or_default()).monospace().color(MUTED()));
@@ -8320,21 +8401,44 @@ impl App {
                 Modal::Conn(f) => {
                     let mut save = false;
                     let mut test = false;
-                    ui.set_width(560.0);
+                    ui.set_width(600.0);
                     dialog_title(ui, if f.id.is_some() { "Edit connection" } else { "New connection" });
                     ui.label(RichText::new("Addresses, passwords and passphrases are stored in the macOS Keychain. The connection opens read-only.").size(12.0).color(MUTED()));
                     ui.add_space(8.0);
                     egui::ScrollArea::vertical().max_height(ctx.content_rect().height() - 220.0).show(ui, |ui| {
                         settings_section(ui, "SERVER", |ui| {
-                            egui::Grid::new("cf").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+                            // Grid cells do not know their width on the first frame, so size fields from the section.
+                            let field_w = ui.available_width() - 64.0;
+                            egui::Grid::new("cf").num_columns(2).spacing([14.0, 12.0]).show(ui, |ui| {
                                 ui.label("Name");
-                                ui.add(egui::TextEdit::singleline(&mut f.name).hint_text("Production cluster").desired_width(400.0));
+                                ui.add(egui::TextEdit::singleline(&mut f.name).hint_text("Production cluster").desired_width(field_w).margin(egui::Margin::symmetric(8, 5)));
+                                ui.end_row();
+                                ui.label("Tag");
+                                ui.vertical(|ui| {
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 6.0;
+                                        for t in std::iter::once("").chain(TAG_PRESETS) {
+                                            let c = if t.is_empty() { MUTED() } else { tag_color(t) };
+                                            if chip(ui, if t.is_empty() { "None" } else { t }, c, clean_tag(&f.tag).eq_ignore_ascii_case(t)).clicked() {
+                                                f.tag = t.to_string();
+                                            }
+                                        }
+                                    });
+                                    ui.add_space(4.0);
+                                    ui.add(egui::TextEdit::singleline(&mut f.tag).hint_text("or type a custom tag").char_limit(24).desired_width(220.0).margin(egui::Margin::symmetric(8, 5)));
+                                });
                                 ui.end_row();
                                 ui.label("URI");
-                                ui.add(egui::TextEdit::singleline(&mut f.uri).password(!f.show).font(FontId::monospace(13.0)).desired_width(400.0));
-                                ui.end_row();
-                                ui.label("");
-                                ui.checkbox(&mut f.show, "Show address");
+                                ui.vertical(|ui| {
+                                    let edit = if f.show { egui::TextEdit::multiline(&mut f.uri).desired_rows(3).return_key(None) } else { egui::TextEdit::singleline(&mut f.uri).password(true) };
+                                    ui.add(edit.font(FontId::monospace(13.0)).hint_text("mongodb+srv://user:password@host/").desired_width(field_w).margin(egui::Margin::symmetric(8, 6)));
+                                    // Wrapping is only visual; a pasted newline would break the URI.
+                                    if f.show {
+                                        f.uri.retain(|c| c != '\n' && c != '\r');
+                                    }
+                                    ui.add_space(2.0);
+                                    ui.checkbox(&mut f.show, "Show address");
+                                });
                                 ui.end_row();
                             });
                         });
@@ -8471,6 +8575,7 @@ impl App {
                                 let meta = ConnMeta {
                                     id,
                                     name: f.name.trim().into(),
+                                    tag: clean_tag(&f.tag).into(),
                                     ssh: f.ssh_on.then(|| crate::ssh::SshConf { host: f.ssh.host.trim().into(), user: f.ssh.user.trim().into(), ..f.ssh.clone() }),
                                     proxy: (f.proxy_on && !f.ssh_on).then(|| db::Proxy { host: f.proxy.host.trim().into(), password: None, ..f.proxy.clone() }),
                                 };

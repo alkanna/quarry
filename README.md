@@ -20,12 +20,13 @@
 - **Shell**: JavaScript run by [Bun](https://bun.sh) with the official MongoDB driver, npm packages, autocomplete, and results shown as a table.
 - **Data relations**: shows a preview next to referenced ids and jumps to the referenced document. Relations can be found automatically.
 - **Compare and sync** two collections, **dump and restore** with the MongoDB Database Tools (Quarry installs and updates them if they are missing), and **users and roles**.
-- **SSH tunnels** (password, key file or agent) and **SOCKS5 proxies**. Secrets are kept in the system keychain (macOS Keychain, Windows Credential Manager, or the Secret Service on Linux). Quarry reconnects to the last used connection at launch.
+- **SSH tunnels** (password, key file or agent) and **SOCKS5 proxies**. Secrets are kept in the system keychain (macOS Keychain, Windows Credential Manager, or the Secret Service on Linux). Quarry reconnects to the last used connection at launch. Tag connections as Production, Staging or your own label so the one in use is always clear.
 
 | | |
 |---|---|
 | ![Editing a document](docs/edit.png) | ![Shell](docs/shell.png) |
 | ![Schema](docs/schema.png) | ![Compare and sync](docs/compare.png) |
+| ![Aggregation pipeline with a preview after each stage](docs/aggregate.png) | ![Connection with a tag and an SSH tunnel](docs/connection.png) |
 
 ## Install
 
