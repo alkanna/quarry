@@ -608,6 +608,37 @@ impl Worker {
         });
     }
 
+    /// A column data action over the documents matching `filter`, at most COL_VALUES_CAP of them in
+    /// query order. Group results come back as `Msg::Grouped`, like the field menu's group by.
+    pub fn column_values(&self, conn: u64, t: Target, op: ColOp, path: String, filter: Document, sort: Option<Document>) {
+        self.spawn(async move {
+            let pipeline = group_count_pipeline(&path, &Bson::Null, filter.clone()).unwrap_or_default();
+            let res = async {
+                // Only the top-level field is projected: a numeric segment may be an array position, which
+                // find cannot project, or a plain key, which stripping would lose. get_path picks the value.
+                let top = path.split('.').next().unwrap_or_default();
+                let c = t.c();
+                let mut f = c.find(filter).projection(doc! { top: 1 }).limit(COL_VALUES_CAP).max_time(t.timeout);
+                if let Some(s) = sort {
+                    f = f.sort(s);
+                }
+                // Streamed so each document is dropped once its value is taken.
+                let mut cursor = f.await.map_err(e)?;
+                let (mut values, mut n) = (Vec::new(), 0);
+                while let Some(d) = cursor.try_next().await.map_err(e)? {
+                    n += 1;
+                    values.extend(get_path(&d, &path).cloned());
+                }
+                Ok((col_op_result(op, &values), n >= COL_VALUES_CAP))
+            }
+            .await;
+            match res {
+                Ok((ColOut::Groups(rows), _)) => Msg::Grouped { conn, db: t.db, coll: t.coll, path, pipeline, res: Ok(rows) },
+                res => Msg::ColumnValues { op, coll: t.coll, path, res },
+            }
+        });
+    }
+
     /// Like the original's "Count distinct values": distinct(path, current filter).len().
     pub fn distinct_count(&self, t: Target, path: String, filter: Document) {
         self.spawn(async move {

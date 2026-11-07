@@ -13,6 +13,17 @@ pub(super) struct ColPrefs {
     /// Pinned columns always come first.
     pub(super) pinned: Vec<String>,
     pub(super) widths: HashMap<String, f32>,
+    /// 0 left (the default when missing), 1 center, 2 right.
+    pub(super) align: HashMap<String, u8>,
+    /// Header text shown instead of the field path.
+    pub(super) labels: HashMap<String, String>,
+}
+
+impl ColPrefs {
+    /// Header text for column `c`: its custom label or the path itself.
+    pub(super) fn label<'a>(&'a self, c: &'a str) -> &'a str {
+        self.labels.get(c).map_or(c, String::as_str)
+    }
 }
 
 #[derive(Serialize, Deserialize)]

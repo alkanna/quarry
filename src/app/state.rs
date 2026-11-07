@@ -344,6 +344,8 @@ pub(super) enum Modal {
     Palette { query: String, sel: usize },
     /// Values of a field with how many documents hold each, and the pipeline that counted them.
     Grouped { sel: Sel, path: String, pipeline: Vec<Document>, rows: Vec<Document> },
+    /// The column header's Customize window; `key` is the column prefs key it edits.
+    ColumnCustomize { key: String, agg: bool, col: String, label: String, path: String },
 }
 
 /// A value being edited in place in the document tree.
@@ -556,6 +558,9 @@ pub(super) enum ColAct {
     MoveTo(String, usize),
     Show(String),
     Highlight(String),
+    Align(String, u8),
+    /// Sets the header label (empty clears it) and moves the column to another field path.
+    Customize { col: String, label: String, path: String },
     Reset,
 }
 

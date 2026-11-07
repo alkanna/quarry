@@ -179,10 +179,8 @@ impl App {
                 ui.menu_button("More", |ui| {
                     menu_look(ui);
                     if ui.button("Open query in Shell").clicked() {
-                        let t = &mut self.tabs[self.cur];
-                        t.shell.code = query_script(&t.sel.coll, &t.filter_txt);
-                        t.view = View::Shell;
-                        t.selected = None;
+                        let t = &self.tabs[self.cur];
+                        self.open_in_shell(query_script(&t.sel.coll, &t.filter_txt));
                         ui.close();
                     }
                     if ui.button("Update matching…").clicked() {
@@ -425,13 +423,13 @@ impl App {
                 self.run_query();
             }
             DocsAct::Update => {
-                let t = self.tm().unwrap();
-                t.shell.code = format!(
+                let coll = &self.t().unwrap().sel.coll;
+                let code = format!(
                     "async function run() {{\n  return await {}.updateMany(\n    {},\n    {{ $set: {{  }} }}\n  );\n}}",
-                    collection_ref(&t.sel.coll),
+                    collection_ref(coll),
                     db::pretty_shell(&by_id())
                 );
-                t.view = View::Shell;
+                self.open_in_shell(code);
             }
             DocsAct::Delete => self.modal = Some(Modal::Delete(docs)),
         }
