@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.0](https://github.com/alkanna/quarry/compare/v0.14.0...v0.15.0) (2026-11-07)
+
+
+### Features
+
+* shell editor intelligence from the tsrs language server, IDE-style suggestion list and column stats for dates ([#96](https://github.com/alkanna/quarry/issues/96)) ([7a5e977](https://github.com/alkanna/quarry/commit/7a5e9777d87cf4c7b35075f44a57988b38bc8fb1))
+
 ## [0.14.0](https://github.com/alkanna/quarry/compare/v0.13.0...v0.14.0) (2026-11-07)
 
 
