@@ -1,0 +1,578 @@
+//! The dialog layer: the JSON editor, insert, and the confirmations and pickers in `Modal`.
+//! Larger dialogs live with their feature and are called from here.
+
+use super::*;
+
+impl App {
+    pub(super) fn modals(&mut self, ctx: &egui::Context) {
+        if let Some(mut je) = self.json_edit.take() {
+            let mut apply = false;
+            let mut close = false;
+            let screen = ctx.content_rect();
+            let r = dialog(egui::Id::unique(("quarry-layer", "jsonedit"))).show(ctx, |ui| {
+                ui.set_width((screen.width() * 0.72).clamp(480.0, 1200.0));
+                ui.horizontal(|ui| {
+                    let title = if je.path.is_empty() { "Edit document".to_string() } else { format!("Edit {}", je.path.join(".")) };
+                    dialog_title(ui, title);
+                    if !je.path.is_empty() {
+                        ui.add_space(8.0);
+                        Self::type_combo(ui, "jsonkind", &mut je.kind);
+                    }
+                });
+                ui.label(RichText::new("JSON, JSON5 or shell syntax. Applying keeps it as an unsaved edit until you press Save.").size(TXT_SMALL).color(MUTED()));
+                ui.add_space(4.0);
+                let rows = je.text.lines().count().clamp(12, 40);
+                let id = egui::Id::unique("json-editor-text");
+                let find = Find::bar(ui, id, &je.text);
+                egui::ScrollArea::vertical().max_height(screen.height() * 0.62).show(ui, |ui| {
+                    let out = with_autopair(ui, id, &mut je.text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(rows).layouter(&mut find.layouter(true)).show(ui));
+                    find.reveal(ui, &je.text, &out);
+                    if je.focus {
+                        out.response.request_focus();
+                        je.focus = false;
+                    }
+                });
+                ui.add_space(4.0);
+                dialog_actions(ui, |ui| {
+                    apply = primary(ui, "Apply", PRIMARY()).on_hover_text("Cmd+Enter").clicked() || ui.input(|i| i.modifiers.command && (i.key_pressed(Key::Enter) || i.key_pressed(Key::S)));
+                    close = ui.button("Cancel").on_hover_text("Esc").clicked();
+                });
+            });
+            if apply {
+                let new = if je.path.is_empty() {
+                    db::parse_doc(&je.text).and_then(|mut new| {
+                        match (je.base.get("_id"), new.get("_id")) {
+                            (Some(a), Some(b)) if a != b => return Err("The _id of a document cannot change. Use Duplicate to make a copy.".to_string()),
+                            (Some(a), None) => {
+                                // Keep _id first, as MongoDB stores it.
+                                let mut d = doc! { "_id": a.clone() };
+                                d.extend(new);
+                                new = d;
+                            }
+                            _ => {}
+                        }
+                        Ok(new)
+                    })
+                } else {
+                    db::make_value(je.kind, &je.text).and_then(|v| db::edit_path(&je.base, &je.path, Some(v)))
+                };
+                match new {
+                    Ok(n) => {
+                        let base = je.base.clone();
+                        self.stage(&base, Ok(n));
+                    }
+                    Err(e) => {
+                        self.err(e);
+                        self.json_edit = Some(je);
+                    }
+                }
+            } else if !(close || r.should_close()) {
+                self.json_edit = Some(je);
+            }
+        }
+        if let Some(text) = &mut self.insert {
+            let mut close = false;
+            let mut submit = false;
+            let r = dialog(egui::Id::unique(("quarry-layer", "insert"))).show(ctx, |ui| {
+                ui.set_width(560.0);
+                dialog_title(ui, "Insert a document");
+                ui.label(RichText::new("JSON, JSON5 or shell syntax: ObjectId(\"…\"), ISODate(\"…\"), NumberLong(…).").color(MUTED()));
+                let id = egui::Id::unique("insert-editor-text");
+                let find = Find::bar(ui, id, text);
+                egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                    let out = with_autopair(ui, id, text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(16).layouter(&mut find.layouter(true)).show(ui));
+                    find.reveal(ui, text, &out);
+                });
+                dialog_actions(ui, |ui| {
+                    submit = primary(ui, "Insert", PRIMARY()).clicked();
+                    close = ui.button("Cancel").on_hover_text("Esc").clicked();
+                });
+            });
+            if submit {
+                match db::parse_doc(text) {
+                    Ok(d) => {
+                        if let Some((conn, target)) = self.writable_target() {
+                            self.worker.insert(conn, target, d, self.insert.take());
+                        }
+                    }
+                    Err(e) => self.err(e),
+                }
+            } else if close || r.should_close() {
+                self.insert = None;
+            }
+        }
+
+        let Some(mut m) = self.modal.take() else { return };
+        let mut keep = true;
+        let r = dialog(egui::Id::unique(("quarry-layer", "modal"))).show(ctx, |ui| {
+            ui.set_max_width(620.0);
+            match &mut m {
+                Modal::Conn(f) => self.conn_dialog(ui, f, &mut keep),
+                Modal::Settings => self.settings_dialog(ui, &mut keep),
+                Modal::Unlock(id, then) => {
+                    let name = self.conn(*id).map(|c| c.meta.name.clone()).unwrap_or_default();
+                    dialog_title(ui, format!("Allow writes on \"{name}\"?"));
+                    ui.label(RichText::new("Edits, inserts, deletes and index changes become possible until you lock it again or quit. Each one still asks first.").color(MUTED()));
+                    dialog_actions(ui, |ui| {
+                        if primary(ui, "Allow writes", ALERT()).clicked() {
+                            if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == *id) {
+                                c.writable = true;
+                            }
+                            self.ok(format!("Writes allowed on {name} for this session"));
+                            keep = false;
+                            if let Some(then) = then.take() {
+                                then(self);
+                            }
+                        }
+                        if ui.button("Stay read-only").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Modal::Save { tag, changes } => {
+                    dialog_title(ui, format!("Save {} change(s)?", changes.len()));
+                    ui.label(RichText::new("Saving is refused if someone else changed this document since you opened it.").color(MUTED()));
+                    egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                        egui::Grid::new("chg").num_columns(3).striped(true).spacing([14.0, 6.0]).show(ui, |ui| {
+                            for (path, a, b) in changes.iter() {
+                                ui.label(RichText::new(path).monospace().color(BRIGHT()));
+                                let show = |v: &Option<Bson>| v.as_ref().map(|v| format!("{} ({})", leaf_text(v), db::type_name(v))).unwrap_or("(none)".into());
+                                ui.label(RichText::new(show(a)).monospace().color(ALERT()).strikethrough());
+                                ui.label(RichText::new(show(b)).monospace().color(SUCCESS()));
+                                ui.end_row();
+                            }
+                        });
+                    });
+                    dialog_actions(ui, |ui| {
+                        if primary(ui, "Save", PRIMARY()).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
+                            self.write_draft(tag);
+                            keep = false;
+                        }
+                        if ui.button("Keep editing").on_hover_text("Esc").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Modal::Delete(docs) => {
+                    const SHOWN: usize = 5;
+                    let ids: Vec<String> = docs.iter().take(SHOWN).map(|d| d.get("_id").map(db::short).unwrap_or_default()).collect();
+                    let more = if docs.len() > SHOWN { format!(" and {} more", docs.len() - SHOWN) } else { String::new() };
+                    dialog_title(ui, if docs.len() == 1 { "Delete this document?".to_string() } else { format!("Delete {} documents?", docs.len()) });
+                    ui.label(RichText::new(format!("_id {}{more}. You can undo this for 24 hours.", ids.join(", "))).monospace().color(MUTED()));
+                    dialog_actions(ui, |ui| {
+                        if primary(ui, "Delete", ALERT()).clicked() {
+                            if let Some((conn, target)) = self.writable_target() {
+                                match docs.as_slice() {
+                                    [d] => self.worker.delete(conn, target, d.clone(), true),
+                                    _ => self.worker.delete_docs(conn, target, docs.clone()),
+                                }
+                                // The reload drops deleted rows from the checks; others stay checked.
+                                if let Some(t) = self.tm() {
+                                    t.selected = None;
+                                }
+                            }
+                            keep = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Modal::Typed { title, expect, typed, action } => {
+                    ui.label(RichText::new(title.as_str()).strong().color(BRIGHT()));
+                    ui.label(RichText::new(format!("Type {expect} to confirm (case sensitive).")).color(MUTED()));
+                    ui.add(egui::TextEdit::singleline(typed).font(egui::TextStyle::Monospace).desired_width(320.0));
+                    dialog_actions(ui, |ui| {
+                        let ok = typed == expect;
+                        if ui.add_enabled(ok, primary_button(ui, "Confirm", ALERT())).clicked() {
+                            keep = false;
+                            let action = std::mem::replace(action, Danger::DropCollection);
+                            self.danger(action);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Modal::NewCollection { conn, db, name, view, source, pipeline } => {
+                    ui.set_width(520.0);
+                    dialog_title(ui, if *view { format!("New view in {db}") } else { format!("New collection in {db}") });
+                    egui::Grid::new("newcoll").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
+                        form_label(ui, "Name");
+                        ui.add(egui::TextEdit::singleline(name).desired_width(380.0));
+                        ui.end_row();
+                        if *view {
+                            form_label(ui, "Based on");
+                            let colls: Vec<String> = self.conn(*conn).and_then(|c| c.dbs.iter().find(|d| d.0 == *db)).and_then(|d| d.1.clone()).unwrap_or_default();
+                            egui::ComboBox::from_id_salt("view-src").width(380.0).selected_text(if source.is_empty() { "choose a collection" } else { source.as_str() }).show_ui(ui, |ui| {
+                                for c in colls {
+                                    ui.selectable_value(source, c.clone(), c);
+                                }
+                            });
+                            ui.end_row();
+                            form_label(ui, "Pipeline");
+                            let id = ui.make_persistent_id("view-pipeline");
+                            with_autopair(ui, id, pipeline, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(380.0).desired_rows(6).layouter(&mut code_layout).show(ui));
+                            ui.end_row();
+                        }
+                    });
+                    dialog_actions(ui, |ui| {
+                        let ok = !name.trim().is_empty() && (!*view || !source.is_empty());
+                        if ui.add_enabled(ok, primary_button(ui, "Create", PRIMARY())).clicked() {
+                            let cmd = if *view {
+                                db::parse_pipeline(pipeline).map(|p| doc! { "create": name.trim(), "viewOn": source.as_str(), "pipeline": p })
+                            } else {
+                                Ok(doc! { "create": name.trim() })
+                            };
+                            match (cmd, self.conn(*conn).and_then(|c| c.client.clone())) {
+                                (Ok(cmd), Some(client)) => {
+                                    self.worker.db_change(*conn, client, db.clone(), cmd, format!("Created {}", name.trim()));
+                                    keep = false;
+                                }
+                                (Err(e), _) => self.err(e),
+                                (_, None) => self.err("Not connected."),
+                            }
+                        }
+                        if ui.button("Cancel").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Modal::Tool(f) => self.tool_dialog(ui, f, &mut keep),
+                Modal::Relations { conn, db } => self.relations_dialog(ui, conn, db, &mut keep),
+                Modal::RenameColl { conn, db, coll, name } => {
+                    dialog_title(ui, format!("Rename {db}.{coll}"));
+                    ui.label(RichText::new("Open tabs of this collection are closed, as in the original.").color(MUTED()));
+                    ui.add(egui::TextEdit::singleline(name).desired_width(320.0));
+                    dialog_actions(ui, |ui| {
+                        let ok = !name.trim().is_empty() && name.trim() != coll.as_str();
+                        if ui.add_enabled(ok, primary_button(ui, "Rename", PRIMARY())).clicked() {
+                            if let Some(client) = self.conn(*conn).and_then(|c| c.client.clone()) {
+                                let (from, to) = (format!("{db}.{coll}"), format!("{db}.{}", name.trim()));
+                                self.tabs.retain(|t| !(t.sel.conn == *conn && t.sel.db == *db && t.sel.coll == *coll));
+                                self.cur = self.cur.min(self.tabs.len().saturating_sub(1));
+                                self.worker.db_change(*conn, client, db.clone(), doc! { "renameCollection": from, "to": to }, format!("Renamed {coll} to {}", name.trim()));
+                            }
+                            keep = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Modal::ImportInsert(n) => {
+                    let coll = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
+                    dialog_title(ui, format!("Insert {n} documents into {coll}?"));
+                    ui.label(RichText::new("They are added as new documents. Undo removes exactly these documents again.").color(MUTED()));
+                    dialog_actions(ui, |ui| {
+                        if primary(ui, "Import", PRIMARY()).clicked() {
+                            if let Some((conn, target)) = self.writable_target() {
+                                if let Some(Ok(docs)) = self.tabs[self.cur].import.parsed.clone() {
+                                    self.worker.import(conn, target, docs, None);
+                                    self.ok("Importing…");
+                                }
+                            }
+                            keep = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Modal::ShellWrite(ops) => {
+                    dialog_title(ui, "Execute this command?");
+                    ui.label(RichText::new("Your command contains potentially destructive operations:").color(MUTED()));
+                    ui.label(RichText::new(ops.join(", ")).monospace().color(ALERT()));
+                    dialog_actions(ui, |ui| {
+                        if primary(ui, "Execute", ALERT()).clicked() {
+                            self.start_shell();
+                            keep = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Modal::AggWrite(p) => {
+                    dialog_title(ui, "This pipeline writes data ($out or $merge)");
+                    ui.label(RichText::new("It can replace or change a whole collection and cannot be undone here.").color(MUTED()));
+                    dialog_actions(ui, |ui| {
+                        if primary(ui, "Run it", ALERT()).clicked() {
+                            if let Some((_, target)) = self.writable_target() {
+                                self.req += 1;
+                                let req = self.req;
+                                self.tm().unwrap().agg_req = req;
+                                self.worker.aggregate(req, target, p.clone());
+                            }
+                            keep = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Modal::SaveAll(keys) => {
+                    let n: usize = keys.iter().filter_map(|k| self.drafts.get(k)).map(|d| db::diff(&d.original, &d.current).len()).sum();
+                    dialog_title(ui, format!("Save {} documents ({n} changes)?", keys.len()));
+                    ui.label(RichText::new("Each document is refused if someone else changed it since you opened it; its edits are kept.").color(MUTED()));
+                    dialog_actions(ui, |ui| {
+                        if primary(ui, "Save all", PRIMARY()).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
+                            for k in keys.iter() {
+                                self.write_draft(k);
+                            }
+                            keep = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Modal::Grouped { sel, path, pipeline, rows } => {
+                    ui.set_width(560.0);
+                    dialog_title(ui, format!("Distinct values for {}: {path}", sel.coll));
+                    let total: u64 = rows.iter().filter_map(|r| r.get("count").and_then(|c| c.as_i64().or_else(|| c.as_i32().map(i64::from)))).map(|c| c as u64).sum();
+                    ui.label(RichText::new(format!("{} values in {} documents{}", group(&rows.len().to_string()), group(&total.to_string()), if rows.len() >= 1000 { ", first 1000 values shown" } else { "" })).color(MUTED()));
+                    egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                        egui::Grid::new("grouped").striped(true).num_columns(2).spacing([24.0, 4.0]).show(ui, |ui| {
+                            caption(ui, "VALUE");
+                            caption(ui, "COUNT");
+                            ui.end_row();
+                            for r in rows.iter() {
+                                // A fixed width: a truncating label in a grid otherwise shrinks to a few letters.
+                                ui.allocate_ui_with_layout(egui::vec2(400.0, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                    ui.set_min_width(400.0);
+                                    ui.add(egui::Label::new(cell_job(r.get("_id").unwrap_or(&Bson::Null))).truncate());
+                                });
+                                ui.label(RichText::new(r.get("count").map(db::compact).unwrap_or_default()).monospace().color(C_NUMBER()));
+                                ui.end_row();
+                            }
+                        });
+                    });
+                    dialog_actions(ui, |ui| {
+                        if primary(ui, "Open in Aggregate", PRIMARY()).on_hover_text("Open this pipeline in a new tab").clicked() {
+                            let mut t = Tab::new(sel.clone());
+                            t.view = View::Aggregate;
+                            t.agg_txt = format!("[\n{}\n]", pipeline.iter().map(|s| format!("  {}", db::shell_text(&Bson::Document(s.clone())))).collect::<Vec<_>>().join(",\n"));
+                            // Next to the current tab, like the original's nextToActive.
+                            let at = (self.cur + 1).min(self.tabs.len());
+                            self.tabs.insert(at, t);
+                            self.cur = at;
+                            self.reset_doc_state();
+                            self.run_pipeline(pipeline.clone());
+                            keep = false;
+                        }
+                        if ui.button("Copy").on_hover_text("Copy as JSON: value and count").clicked() {
+                            ui.ctx().copy_text(db::to_edit_value(&Bson::Array(rows.iter().cloned().map(Bson::Document).collect())));
+                        }
+                        if ui.button("Close").on_hover_text("Esc").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Modal::Text { title, body, code } => {
+                    ui.set_width(560.0);
+                    dialog_title(ui, title.as_str());
+                    let find = Find::bar(ui, egui::Id::unique("text-modal"), body);
+                    egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                        let mut text = body.as_str();
+                        let out = egui::TextEdit::multiline(&mut text).code_editor().desired_width(f32::INFINITY).layouter(&mut find.layouter(*code)).show(ui);
+                        find.reveal(ui, body, &out);
+                    });
+                    dialog_actions(ui, |ui| {
+                        if ui.button("Copy").clicked() {
+                            ui.ctx().copy_text(body.clone());
+                        }
+                        if ui.button("Close").on_hover_text("Esc").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Modal::Rename { doc: d, path, name } => {
+                    let from = path.join(".");
+                    dialog_title(ui, format!("Rename {from}"));
+                    ui.add(egui::TextEdit::singleline(name).font(egui::TextStyle::Monospace).desired_width(320.0));
+                    let mut valid = !name.trim().is_empty() && !name.contains('.') && !name.starts_with('$') && Some(name.trim()) != path.last().map(|s| s.as_str());
+                    let mut to = path[..path.len() - 1].to_vec();
+                    to.push(name.trim().to_string());
+                    // Both the edit and $rename would replace the sibling's value with this one.
+                    if valid && db::get_path(d, &to.join(".")).is_some() {
+                        ui.label(RichText::new(format!("{} already exists here.", name.trim())).color(ALERT()));
+                        valid = false;
+                    }
+                    dialog_actions(ui, |ui| {
+                        if ui.add_enabled(valid, primary_button(ui, "In this document", PRIMARY())).clicked() {
+                            let new = db::get_path(d, &from).cloned().ok_or_else(|| "Field not found".to_string()).and_then(|v| db::edit_path(&db::edit_path(d, path, None)?, &to, Some(v)));
+                            let base = d.clone();
+                            self.stage(&base, new);
+                            keep = false;
+                        }
+                        // $rename cannot reach into arrays, so this is offered only for plain paths.
+                        let plain = path.iter().all(|s| s.parse::<usize>().is_err());
+                        let (count, filter) = self.t().map(|t| (t.count, t.query.filter.clone())).unwrap_or_default();
+                        if plain && ui.add_enabled(valid, egui::Button::new(format!("In all {count} matching documents…"))).clicked() {
+                            let coll = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
+                            self.modal = Some(Modal::Typed {
+                                title: format!("Rename {from} to {} in every document of {coll} matching the current filter (about {count})?", to.join(".")),
+                                expect: coll,
+                                typed: String::new(),
+                                action: Danger::RenameMany { filter, from: from.clone(), to: to.join(".") },
+                            });
+                            keep = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Modal::UpdateMany { set_txt, unset_txt, preview } => {
+                    ui.set_width(560.0);
+                    let filter = self.t().map(|t| t.query.filter.clone()).unwrap_or_default();
+                    dialog_title(ui, "Update matching documents");
+                    ui.label(RichText::new("Applies to every document matching the current filter. Values starting with $ are read as field paths.").color(MUTED()));
+                    ui.label(RichText::new("Set fields").color(FAINT()));
+                    let id = ui.make_persistent_id("um-set");
+                    let mut changed = with_autopair(ui, id, set_txt, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(4).layouter(&mut code_layout).show(ui)).response.changed();
+                    ui.label(RichText::new("Remove fields (comma separated paths)").color(FAINT()));
+                    changed |= ui.add(egui::TextEdit::singleline(unset_txt).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY)).changed();
+                    if changed {
+                        *preview = None;
+                    }
+                    let stages = db::parse_doc(set_txt).map(|set| db::update_stages(set, unset_txt.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect()));
+                    match &stages {
+                        Err(err) => {
+                            ui.label(RichText::new(err).color(ALERT()));
+                        }
+                        Ok(st) if st.is_empty() => {
+                            ui.label(RichText::new("Nothing to change yet.").color(MUTED()));
+                        }
+                        Ok(_) => {}
+                    }
+                    let ready = stages.as_ref().is_ok_and(|s| !s.is_empty());
+                    let fresh = matches!((preview.as_ref(), stages.as_ref()), (Some((p, _)), Ok(s)) if p == s);
+                    match preview.as_ref().filter(|_| fresh).map(|(_, r)| r) {
+                        Some(Err(err)) => {
+                            ui.label(RichText::new(&*err).color(ALERT()));
+                        }
+                        Some(Ok((rows, n))) => {
+                            ui.label(RichText::new(format!("{} documents match. Showing {} of them after the change.", group(&n.to_string()), rows.len())).color(MUTED()));
+                            egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                                for (i, (old, new)) in rows.iter().enumerate() {
+                                    ui.label(RichText::new(old.get("_id").map(db::short).unwrap_or_default()).monospace().color(BRIGHT()));
+                                    egui::Grid::new(("um-chg", i)).num_columns(3).striped(true).spacing([14.0, 6.0]).show(ui, |ui| {
+                                        for (path, a, b) in db::diff(old, new) {
+                                            let show = |v: &Option<Bson>| v.as_ref().map(|v| format!("{} ({})", leaf_text(v), db::type_name(v))).unwrap_or("(none)".into());
+                                            ui.label(RichText::new(path).monospace().color(KEY()));
+                                            ui.label(RichText::new(show(&a)).monospace().color(ALERT()).strikethrough());
+                                            ui.label(RichText::new(show(&b)).monospace().color(SUCCESS()));
+                                            ui.end_row();
+                                        }
+                                    });
+                                }
+                            });
+                        }
+                        None => {}
+                    }
+                    dialog_actions(ui, |ui| {
+                        if ui.add_enabled(ready, egui::Button::new("Preview")).clicked() {
+                            if let (Ok(st), Some(t)) = (&stages, self.target()) {
+                                self.worker.update_preview(t, filter.clone(), st.clone());
+                            }
+                        }
+                        let applicable = ready && fresh && matches!(preview, Some((_, Ok(_))));
+                        if ui.add_enabled(applicable, primary_button(ui, "Apply…", ALERT())).clicked() {
+                            let coll = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
+                            let n = if let Some((_, Ok((_, n)))) = preview { *n } else { 0 };
+                            self.modal = Some(Modal::Typed {
+                                title: format!("Update every document in {coll} matching the current filter ({n})?"),
+                                expect: coll,
+                                typed: String::new(),
+                                action: Danger::UpdateMany { filter, stages: stages.unwrap_or_default() },
+                            });
+                            keep = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Modal::Undo => {
+                    dialog_title(ui, "Recent changes");
+                    ui.label(RichText::new(format!("Last {} actions from the past 24 hours.", db::UNDO_MAX)).color(MUTED()));
+                    let mut pick = None;
+                    egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
+                        for (i, a) in self.undo.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                let what = match &a.kind {
+                                    UndoKind::Insert { id } => format!("inserted {}", db::short(id)),
+                                    UndoKind::InsertMany { ids } => format!("imported {} documents", ids.len()),
+                                    UndoKind::Delete { old } => format!("deleted {}", old.get("_id").map(db::short).unwrap_or_default()),
+                                    UndoKind::DeleteMany { old } => format!("deleted {} documents", old.len()),
+                                    UndoKind::Update { old, .. } => format!("edited {}", old.get("_id").map(db::short).unwrap_or_default()),
+                                };
+                                let mins = a.at.elapsed().as_secs() / 60;
+                                ui.label(RichText::new(format!("{}.{}  {what}", a.db, a.coll)).monospace());
+                                ui.label(RichText::new(format!("{mins} min ago")).color(MUTED()));
+                                if ui.button("Undo").clicked() {
+                                    pick = Some(i);
+                                }
+                            });
+                        }
+                    });
+                    if let Some(i) = pick {
+                        self.apply_undo(i);
+                    }
+                    if dialog_actions(ui, |ui| ui.button("Close").clicked()) {
+                        keep = false;
+                    }
+                }
+                Modal::Explain { summary, raw, show_raw } => self.explain_dialog(ui, summary, raw, show_raw, &mut keep),
+                Modal::Palette { query, sel } => {
+                    ui.set_width(560.0);
+                    // Taken before the text field sees them, so arrows move the selection and Enter picks.
+                    let (up, down, enter) = ui.input_mut(|i| (i.consume_key(egui::Modifiers::NONE, Key::ArrowUp), i.consume_key(egui::Modifiers::NONE, Key::ArrowDown), i.consume_key(egui::Modifiers::NONE, Key::Enter)));
+                    let r = ui.add(egui::TextEdit::singleline(query).hint_text("Jump to a connection, database or collection").desired_width(f32::INFINITY).margin(egui::Margin::symmetric(10, 8)));
+                    r.request_focus();
+                    if r.changed() {
+                        *sel = 0;
+                    }
+                    let items = jumps(&self.conns, self.active, query);
+                    if down {
+                        *sel = (*sel + 1).min(items.len().saturating_sub(1));
+                    }
+                    if up {
+                        *sel = sel.saturating_sub(1);
+                    }
+                    let mut pick = if enter { items.get(*sel).map(|x| x.2.clone()) } else { None };
+                    ui.add_space(4.0);
+                    egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                        if items.is_empty() {
+                            ui.label(RichText::new("No matches").color(MUTED()));
+                        }
+                        for (i, (label, hint, j)) in items.iter().enumerate() {
+                            let r = ui
+                                .horizontal(|ui| {
+                                    let r = ui.selectable_label(i == *sel, RichText::new(label).color(BRIGHT()));
+                                    ui.label(RichText::new(hint).size(TXT_SMALL).color(FAINT()));
+                                    r
+                                })
+                                .inner;
+                            if i == *sel && (up || down) {
+                                r.scroll_to_me(None);
+                            }
+                            if r.clicked() {
+                                pick = Some(j.clone());
+                            }
+                        }
+                    });
+                    if let Some(j) = pick {
+                        keep = false;
+                        self.jump(j);
+                    }
+                }
+            }
+        });
+        if keep && !r.should_close() && self.modal.is_none() {
+            self.modal = Some(m);
+        }
+    }
+}
