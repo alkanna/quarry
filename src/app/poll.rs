@@ -3,7 +3,7 @@
 use super::*;
 
 impl App {
-    pub(super) fn poll(&mut self) {
+    pub(super) fn poll(&mut self, ctx: &egui::Context) {
         while let Ok(m) = self.rx.try_recv() {
             match m {
                 Msg::Connected { conn, res } => {
@@ -307,6 +307,7 @@ impl App {
                     Ok(s) => self.ok(s),
                     Err(e) => self.err(e),
                 },
+                Msg::ColumnValues { op, coll, path, res } => self.column_values_done(ctx, op, coll, path, res),
                 Msg::Notice { title, body } => self.modal = Some(Modal::Text { title, body, code: false }),
                 Msg::Grouped { conn, db, coll, path, pipeline, res } => match res {
                     Ok(rows) => {

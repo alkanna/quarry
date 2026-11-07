@@ -12,6 +12,7 @@ use std::time::Duration;
 
 mod aggregate;
 mod chrome;
+mod column_menu;
 mod compare;
 mod config;
 mod conn_form;
@@ -34,6 +35,7 @@ mod table;
 mod tools;
 mod tree;
 mod users;
+use column_menu::*;
 use config::*;
 use documents::*;
 use shell::*;
@@ -121,6 +123,8 @@ pub struct App {
     prefs: UiPrefs,
     new_col: String,
     col_filter: String,
+    /// Column data actions cover the whole query instead of the loaded page.
+    col_scope_query: bool,
     #[cfg(target_os = "macos")]
     menu: Option<crate::menu::MenuBar>,
     /// Menu picks that are not key presses, handled at the start of the next frame.
@@ -158,7 +162,7 @@ pub struct App {
     /// CPU time of the last frame in milliseconds, for the frame rate readout.
     frame_ms: f32,
     /// Measured column widths per result set and column.
-    width_cache: HashMap<(usize, usize, String, bool), f32>,
+    width_cache: HashMap<(usize, usize, String, Option<String>, bool), f32>,
     /// Recently closed tabs, newest first.
     closed: Vec<Tab>,
     /// Version installed by the updater, waiting for a restart.
@@ -230,6 +234,7 @@ impl App {
             prefs: UiPrefs::default(),
             new_col: String::new(),
             col_filter: String::new(),
+            col_scope_query: false,
             // Screenshot runs stay off the real menu bar.
             #[cfg(target_os = "macos")]
             menu: (!demo || std::env::var("QUARRY_DEMO").is_ok()).then(|| crate::menu::MenuBar::new(&cc.egui_ctx)),
@@ -1002,9 +1007,9 @@ impl eframe::App for App {
         if std::env::var("QUARRY_FRAME_LOG").is_ok() {
             eprintln!("frame_ms {:.3}", self.frame_ms);
         }
-        self.poll();
-        self.remember_tabs();
         let ctx = ui.ctx().clone();
+        self.poll(&ctx);
+        self.remember_tabs();
         // AppKit resets the window buttons on every layout, so re-centre them in our header each frame.
         frame.set_traffic_lights_position(&ctx, egui::Rangef::new(0.0, HEADER_H), 16.0);
         self.top_bar(ui);

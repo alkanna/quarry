@@ -111,6 +111,14 @@ pub(super) fn default_script(coll: &str) -> String {
 }
 
 impl App {
+    /// Switches the current tab to the Shell with `code` ready to review and run.
+    pub(super) fn open_in_shell(&mut self, code: String) {
+        let Some(t) = self.tm() else { return };
+        t.shell.code = code;
+        t.view = View::Shell;
+        t.selected = None;
+    }
+
     pub(super) fn run_shell_script(&mut self) {
         let Some(t) = self.t() else { return };
         let code = t.shell.code.clone();

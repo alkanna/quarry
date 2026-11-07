@@ -350,7 +350,8 @@ impl App {
                         });
                     });
                     dialog_actions(ui, |ui| {
-                        if primary(ui, "Open in Aggregate", PRIMARY()).on_hover_text("Open this pipeline in a new tab").clicked() {
+                        // Values counted from pipeline or script results have no pipeline to reopen.
+                        if ui.add_enabled(!pipeline.is_empty(), primary_button(ui, "Open in Aggregate", PRIMARY())).on_hover_text("Open this pipeline in a new tab").clicked() {
                             let mut t = Tab::new(sel.clone());
                             t.view = View::Aggregate;
                             t.agg_txt = format!("[\n{}\n]", pipeline.iter().map(|s| format!("  {}", db::shell_text(&Bson::Document(s.clone())))).collect::<Vec<_>>().join(",\n"));
@@ -366,6 +367,25 @@ impl App {
                             ui.ctx().copy_text(db::to_edit_value(&Bson::Array(rows.iter().cloned().map(Bson::Document).collect())));
                         }
                         if ui.button("Close").on_hover_text("Esc").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                Modal::ColumnCustomize { key, agg, col, label, path } => {
+                    dialog_title(ui, format!("Customize column {col}"));
+                    form_label(ui, "Column name");
+                    ui.add(egui::TextEdit::singleline(label).hint_text(col.as_str()).desired_width(360.0));
+                    form_label(ui, "Field path");
+                    ui.add(egui::TextEdit::singleline(path).font(egui::TextStyle::Monospace).desired_width(360.0));
+                    let p = path.trim();
+                    let valid = !p.starts_with('$') && !p.split('.').any(str::is_empty);
+                    dialog_actions(ui, |ui| {
+                        if ui.add_enabled(valid, primary_button(ui, "Save", PRIMARY())).clicked() {
+                            let fields = self.t().map(|t| if *agg { t.agg_fields.clone() } else { t.fields.clone() }).unwrap_or_default();
+                            self.apply_col_acts(key, &fields, vec![ColAct::Customize { col: col.clone(), label: label.clone(), path: p.to_string() }]);
+                            keep = false;
+                        }
+                        if ui.button("Cancel").clicked() {
                             keep = false;
                         }
                     });

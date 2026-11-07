@@ -4,18 +4,30 @@ use super::*;
 
 /// The original's "optimal" column width (measureColumnWidth, renderer line 31273): the widest
 /// cell, kept between 40 and 400 px, plus 10 px. Our cells add 16 px of inner padding on top.
-pub(super) fn optimal_width(ui: &egui::Ui, docs: &[Document], col: &str, summarize: bool) -> f32 {
+/// `header` is the text drawn in the header, a custom label or the path itself.
+pub(super) fn optimal_width(ui: &egui::Ui, docs: &[Document], col: &str, header: &str, summarize: bool, cap: f32) -> f32 {
     if docs.is_empty() {
         return 100.0 + CELL_PAD; // the original's fallback width
     }
     let widest = ui.fonts_mut(|f| {
-        let head = f.layout_no_wrap(col.to_string(), FontId::proportional(TXT_BODY), TEXT()).size().x;
+        let head = f.layout_no_wrap(header.to_string(), FontId::proportional(TXT_BODY), TEXT()).size().x;
         docs.iter()
             .filter_map(|d| db::get_path(d, col))
             .map(|v| f.layout_job(column_job(v, summarize)).size().x)
             .fold(head, f32::max)
     });
-    widest.clamp(OPTIMAL_MIN_W, OPTIMAL_MAX_W) + OPTIMAL_PAD + CELL_PAD
+    widest.clamp(OPTIMAL_MIN_W, cap) + OPTIMAL_PAD + CELL_PAD
+}
+
+/// Left edge for text `gw` wide in a cell at `x`, `w` wide, by the column's alignment. Text wider
+/// than the cell starts at its left padding so its beginning stays visible.
+fn align_x(align: u8, x: f32, w: f32, gw: f32) -> f32 {
+    match align {
+        1 => x + (w - gw) / 2.0,
+        2 => x + w - 8.0 - gw,
+        _ => x + 8.0,
+    }
+    .max(x + 8.0)
 }
 
 pub(super) fn visible_cols(p: Option<&ColPrefs>, fields: &[String], n: usize) -> Vec<String> {
@@ -173,6 +185,42 @@ impl App {
                         shown.push(c);
                     }
                 }
+                ColAct::Align(c, a) => {
+                    if a == 0 {
+                        p.align.remove(&c);
+                    } else {
+                        p.align.insert(c, a);
+                    }
+                    continue;
+                }
+                ColAct::Customize { col, label, path } => {
+                    if path != col {
+                        if shown.contains(&path) {
+                            shown.retain(|x| *x != col);
+                            p.pinned.retain(|x| *x != col);
+                        } else {
+                            shown.iter_mut().chain(p.pinned.iter_mut()).filter(|x| **x == col).for_each(|x| *x = path.clone());
+                        }
+                        // A column already at that path keeps its own width and alignment.
+                        if let Some(w) = p.widths.remove(&col) {
+                            p.widths.entry(path.clone()).or_insert(w);
+                        }
+                        if let Some(a) = p.align.remove(&col) {
+                            p.align.entry(path.clone()).or_insert(a);
+                        }
+                        p.labels.remove(&col);
+                        let (from, to) = (db::strip_indices(&col), db::strip_indices(&path));
+                        if p.highlight.contains(&from) {
+                            p.highlight.retain(|h| *h != from && *h != to);
+                            p.highlight.push(to);
+                        }
+                    }
+                    if label.trim().is_empty() {
+                        p.labels.remove(&path);
+                    } else {
+                        p.labels.insert(path, label.trim().to_string());
+                    }
+                }
                 ColAct::Reset => {
                     *p = ColPrefs::default();
                     continue;
@@ -194,11 +242,12 @@ impl App {
             .iter()
             .map(|c| {
                 prefs.widths.get(c).copied().unwrap_or_else(|| {
-                    let k = (docs.as_ptr() as usize, docs.len(), c.clone(), summarize);
+                    // The header text is measured too, so a custom label is part of the key.
+                    let k = (docs.as_ptr() as usize, docs.len(), c.clone(), prefs.labels.get(c).cloned(), summarize);
                     if let Some(w) = self.width_cache.get(&k) {
                         return *w;
                     }
-                    let w = optimal_width(ui, docs, c, summarize);
+                    let w = optimal_width(ui, docs, c, prefs.label(c), summarize, OPTIMAL_MAX_W);
                     if self.width_cache.len() > 512 {
                         self.width_cache.clear();
                     }
@@ -219,13 +268,13 @@ impl App {
         let view_w = ui.available_width();
         let mut click = None;
         let mut edit_cell = None;
-        let mut col_acts = Vec::new();
         let mut resized = None;
         let mut save_widths = false;
         let mut fit = None;
-        let mut sort_set: Option<(String, Option<i64>)> = None;
+        let mut head_acts: Vec<(String, HeadAct)> = Vec::new();
+        let mut scope_query = self.col_scope_query;
         let mut cell_acts: Vec<(usize, Vec<TreeAct>)> = Vec::new();
-        // Single-field sort shown in the header; clicking cycles ascending, descending, off.
+        // Single-field sort shown in the header and set from the column popover.
         let sort = if agg { None } else { self.t().and_then(|t| t.query.sort.clone()).filter(|s| s.len() == 1) };
         let dir_of = |c: &str| sort.as_ref().and_then(|s| s.get(c)).and_then(|v| match v {
             Bson::Int32(n) => Some(*n as i64),
@@ -233,6 +282,7 @@ impl App {
             Bson::Double(f) => Some(*f as i64),
             _ => None,
         });
+        let aligns: Vec<u8> = cols.iter().map(|c| prefs.align.get(c).copied().unwrap_or(0)).collect();
         let hl_cols: Vec<bool> = cols.iter().map(|c| prefs.highlight.contains(&db::strip_indices(c))).collect();
         let related = if agg { HashMap::new() } else { self.t().map(|t| t.related.clone()).unwrap_or_default() };
         egui::Frame::new().fill(PANEL()).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(4, 4)).show(ui, |ui| {
@@ -256,64 +306,40 @@ impl App {
                     }
                 }
                 let mut x = hr.left() + num_w;
-                for (c, w) in cols.iter().zip(&widths) {
+                for (ci, (c, w)) in cols.iter().zip(&widths).enumerate() {
                     let cell = egui::Rect::from_min_size(egui::pos2(x, hr.top()), egui::vec2(*w, hr.height()));
                     let pinned = prefs.pinned.contains(c);
                     let color = if pinned { WARNING() } else if fields.contains(c) { MUTED() } else { PRIMARY() };
                     let dir = dir_of(c);
-                    let hresp = ui.interact(cell.shrink2(egui::vec2(4.0, 0.0)), ui.scope_id().with(("h", c)), Sense::click());
-                    let hresp = if agg { hresp } else { hresp.on_hover_cursor(egui::CursorIcon::PointingHand) };
-                    if hresp.hovered() && !agg {
+                    let hresp = ui.interact(cell.shrink2(egui::vec2(4.0, 0.0)), ui.scope_id().with(("h", c)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if hresp.hovered() {
                         ui.painter().rect_filled(cell.shrink(2.0), R_SM, HOVER());
                     }
-                    ui.painter().with_clip_rect(cell.shrink2(egui::vec2(6.0, 0.0))).text(egui::pos2(x + 8.0, cell.center().y), egui::Align2::LEFT_CENTER, c, FontId::proportional(TXT_BODY), if dir.is_some() { BRIGHT() } else { color });
+                    let label = prefs.label(c);
+                    let g = ui.fonts_mut(|f| f.layout_no_wrap(label.to_string(), FontId::proportional(TXT_BODY), if dir.is_some() { BRIGHT() } else { color }));
+                    // Centered and right-aligned names keep clear of the sort arrow.
+                    let gx = align_x(aligns[ci], x, *w - if dir.is_some() { 14.0 } else { 0.0 }, g.size().x);
+                    ui.painter().with_clip_rect(cell.shrink2(egui::vec2(6.0, 0.0))).galley(egui::pos2(gx, cell.center().y - g.size().y / 2.0), g, color);
                     if let Some(d) = dir {
                         let a = egui::pos2(cell.right() - 14.0, cell.center().y);
                         let pts = if d > 0 { vec![a + egui::vec2(-4.0, 2.5), a + egui::vec2(4.0, 2.5), a + egui::vec2(0.0, -3.0)] } else { vec![a + egui::vec2(-4.0, -2.5), a + egui::vec2(4.0, -2.5), a + egui::vec2(0.0, 3.0)] };
                         ui.painter().add(egui::Shape::convex_polygon(pts, PRIMARY(), Stroke::NONE));
                     }
-                    let hresp = if agg { hresp.on_hover_text("Right-click for column options") } else { hresp.on_hover_text("Click to sort, right-click for column options") };
-                    if hresp.clicked() && !agg {
-                        let next = match dir {
-                            None => Some(1),
-                            Some(d) if d > 0 => Some(-1),
-                            _ => None,
-                        };
-                        sort_set = Some((c.clone(), next));
-                    }
-                    hresp.context_menu(|ui| {
-                        menu_look(ui);
-                        // Same three column actions as the original's table (renderer line 106057).
-                        if !agg {
-                            if ui.button("Sort ascending").clicked() {
-                                sort_set = Some((c.clone(), Some(1)));
-                            }
-                            if ui.button("Sort descending").clicked() {
-                                sort_set = Some((c.clone(), Some(-1)));
-                            }
-                            if ui.add_enabled(dir.is_some(), egui::Button::new("Unsort")).clicked() {
-                                sort_set = Some((c.clone(), None));
-                            }
-                            ui.separator();
-                        }
-                        if ui.button(if pinned { "Unpin" } else { "Pin to the left" }).clicked() {
-                            col_acts.push(ColAct::Pin(c.clone()));
-                        }
-                        if ui.button("Move left").clicked() {
-                            col_acts.push(ColAct::Move(c.clone(), -1));
-                        }
-                        if ui.button("Move right").clicked() {
-                            col_acts.push(ColAct::Move(c.clone(), 1));
-                        }
-                        if ui.button("Hide column").clicked() {
-                            col_acts.push(ColAct::Hide(c.clone()));
-                        }
-                        ui.separator();
-                        if ui.checkbox(&mut prefs.highlight.contains(&db::strip_indices(c)), "Highlight column").clicked() {
-                            col_acts.push(ColAct::Highlight(c.clone()));
-                            ui.close();
-                        }
-                    });
+                    // Built only while hovered, not for every header on every frame.
+                    let hresp = if label != c {
+                        hresp.on_hover_ui(|ui| {
+                            ui.label(RichText::new(c).monospace());
+                            ui.label("Click for column options");
+                        })
+                    } else {
+                        hresp.on_hover_text("Click for column options")
+                    };
+                    // Left and right click both open it; a second left click closes it.
+                    let open = if hresp.secondary_clicked() { Some(egui::SetOpenCommand::Bool(true)) } else if hresp.clicked() { Some(egui::SetOpenCommand::Toggle) } else { None };
+                    let mut acts = Vec::new();
+                    // Clicks inside, such as the Data scope switch, keep it open; each action closes it itself.
+                    egui::Popup::menu(&hresp).open_memory(open).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(190.0).show(|ui| col_popover(ui, c, agg, dir, &prefs, &mut scope_query, &mut acts));
+                    head_acts.extend(acts.into_iter().map(|a| (c.clone(), a)));
                     // Drag the right edge to resize.
                     let handle = egui::Rect::from_min_max(egui::pos2(cell.right() - 3.0, cell.top() + 6.0), egui::pos2(cell.right() + 3.0, cell.bottom() - 6.0));
                     let dr = ui.interact(handle, ui.scope_id().with(("w", c)), Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::ResizeColumn).on_hover_text("Drag to resize, double-click to fit");
@@ -322,7 +348,7 @@ impl App {
                     }
                     ui.painter().vline(cell.right(), handle.y_range(), Stroke::new(1.0, if dr.hovered() || dr.dragged() { PRIMARY() } else { BORDER() }));
                     if dr.dragged() {
-                        resized = Some((c.clone(), (*w + dr.drag_delta().x).clamp(50.0, 900.0)));
+                        resized = Some((c.clone(), (*w + dr.drag_delta().x).clamp(COL_MIN_W, COL_MAX_W)));
                     }
                     if dr.drag_stopped() {
                         save_widths = true;
@@ -385,16 +411,20 @@ impl App {
                                     job.wrap = egui::text::TextWrapping::truncate_at_width(w - 14.0);
                                     let g = ui.fonts_mut(|f| f.layout_job(job));
                                     let gw = g.size().x;
-                                    clip.galley(egui::pos2(x + 8.0, cell.center().y - g.size().y / 2.0), g, TEXT());
                                     // Ids only, checked before compact(): that turns the whole value into JSON,
-                                // which is costly for big objects on every frame.
-                                let rel = (!related.is_empty() && matches!(v, Bson::ObjectId(_) | Bson::String(_))).then(|| related.get(&db::compact(v))).flatten();
-                                if let Some(p) = rel {
-                                        clip.text(egui::pos2(x + 14.0 + gw, cell.center().y), egui::Align2::LEFT_CENTER, p, FontId::proportional(TXT_SMALL), C_LINK());
+                                    // which is costly for big objects on every frame.
+                                    let rel = (!related.is_empty() && matches!(v, Bson::ObjectId(_) | Bson::String(_))).then(|| related.get(&db::compact(v))).flatten();
+                                    let rg = rel.map(|p| ui.fonts_mut(|f| f.layout_no_wrap(p.clone(), FontId::proportional(TXT_SMALL), C_LINK())));
+                                    // The value and its preview are aligned as one, so the preview stays inside the cell.
+                                    let vx = align_x(aligns[ci], x, *w, gw + rg.as_ref().map_or(0.0, |r| 6.0 + r.size().x));
+                                    clip.galley(egui::pos2(vx, cell.center().y - g.size().y / 2.0), g, TEXT());
+                                    if let Some(r) = rg {
+                                        clip.galley(egui::pos2(vx + gw + 6.0, cell.center().y - r.size().y / 2.0), r, C_LINK());
                                     }
                                 }
                                 None => {
-                                    clip.text(egui::pos2(x + 8.0, cell.center().y), egui::Align2::LEFT_CENTER, "—", FontId::proportional(TXT_SMALL), FAINT());
+                                    let g = ui.fonts_mut(|f| f.layout_no_wrap("—".into(), FontId::proportional(TXT_SMALL), FAINT()));
+                                    clip.galley(egui::pos2(align_x(aligns[ci], x, *w, g.size().x), cell.center().y - g.size().y / 2.0), g, FAINT());
                                 }
                             }
                             let cr = ui.interact(cell, ui.scope_id().with(("c", i, ci)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -465,8 +495,9 @@ impl App {
         if save_widths {
             self.save_prefs();
         }
-        if !col_acts.is_empty() {
-            self.apply_col_acts(&key, fields, col_acts);
+        self.col_scope_query = scope_query;
+        for (c, a) in head_acts {
+            self.head_act(ui, agg, docs, fields, &c, a);
         }
         if let Some(i) = click {
             self.row_click(ui, agg, i);
@@ -484,13 +515,6 @@ impl App {
             self.select(agg, i, false);
             let d = self.shown_doc(&docs[i]).unwrap_or_else(|| docs[i].clone());
             self.handle_acts(&d, acts);
-        }
-        if let Some((c, next)) = sort_set {
-            let t = self.tm().unwrap();
-            t.query.sort = next.map(|d| doc! { c.clone(): d });
-            t.sort_txt = t.query.sort.as_ref().map(|s| db::shell_text(&Bson::Document(s.clone()))).unwrap_or_default();
-            t.page = 0;
-            self.reload();
         }
         if let (Some((i, c)), false) = (edit_cell, agg) {
             self.select(agg, i, false);

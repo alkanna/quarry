@@ -340,6 +340,105 @@ pub fn group_profile(entries: &[Document]) -> Vec<Shape> {
     out
 }
 
+/// A column data action from the table header.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum ColOp {
+    Copy,
+    CopyDistinct,
+    CopyDistinctJs,
+    CountDistinct,
+    Sum,
+    Avg,
+    Median,
+    Group,
+}
+
+impl ColOp {
+    /// In menu order.
+    pub const ALL: [ColOp; 8] = [ColOp::Copy, ColOp::CopyDistinct, ColOp::CopyDistinctJs, ColOp::CountDistinct, ColOp::Sum, ColOp::Avg, ColOp::Median, ColOp::Group];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ColOp::Copy => "Copy values",
+            ColOp::CopyDistinct => "Copy distinct values",
+            ColOp::CopyDistinctJs => "Copy distinct values as JS array",
+            ColOp::CountDistinct => "Count distinct values",
+            ColOp::Sum => "Sum of values",
+            ColOp::Avg => "Average of values",
+            ColOp::Median => "Median of values",
+            ColOp::Group => "Group by and count values",
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum ColOut {
+    /// Text for the clipboard and how many values it holds.
+    Copy(String, usize),
+    Notice(String),
+    /// `{ _id, count }` rows, most frequent first.
+    Groups(Vec<Document>),
+}
+
+fn num(v: &Bson) -> Option<f64> {
+    match v {
+        Bson::Int32(n) => Some(*n as f64),
+        Bson::Int64(n) => Some(*n as f64),
+        Bson::Double(f) => Some(*f),
+        Bson::Decimal128(d) => d.to_string().parse().ok(),
+        _ => None,
+    }
+}
+
+pub fn col_op_result(op: ColOp, values: &[Bson]) -> ColOut {
+    use std::collections::{HashMap, HashSet};
+    let distinct = || {
+        let mut seen = HashSet::new();
+        values.iter().filter(|v| seen.insert(compact(v))).cloned().collect::<Vec<_>>()
+    };
+    let mut nums: Vec<f64> = values.iter().filter_map(num).collect();
+    let stat = |x: Option<f64>, n: usize| ColOut::Notice(match x {
+        Some(x) => format!("{x}\n\n{n} of {} values are numbers", values.len()),
+        None => format!("None of the {} values are numbers", values.len()),
+    });
+    match op {
+        ColOp::Copy => ColOut::Copy(values.iter().map(copy_text).collect::<Vec<_>>().join("\n"), values.len()),
+        ColOp::CopyDistinct => {
+            let d = distinct();
+            ColOut::Copy(d.iter().map(copy_text).collect::<Vec<_>>().join("\n"), d.len())
+        }
+        ColOp::CopyDistinctJs => {
+            let d = distinct();
+            let n = d.len();
+            ColOut::Copy(shell_text(&Bson::Array(d)), n)
+        }
+        ColOp::CountDistinct => ColOut::Notice(format!("{} distinct values among {}", distinct().len(), values.len())),
+        ColOp::Sum => stat((!nums.is_empty()).then(|| nums.iter().sum()), nums.len()),
+        ColOp::Avg => stat((!nums.is_empty()).then(|| nums.iter().sum::<f64>() / nums.len() as f64), nums.len()),
+        ColOp::Median => {
+            nums.sort_by(f64::total_cmp);
+            let n = nums.len();
+            let m = (n > 0).then(|| if n % 2 == 1 { nums[n / 2] } else { (nums[n / 2 - 1] + nums[n / 2]) / 2.0 });
+            stat(m, n)
+        }
+        ColOp::Group => {
+            let mut rows: Vec<(Bson, i64)> = Vec::new();
+            let mut at: HashMap<String, usize> = HashMap::new();
+            for v in values {
+                let i = *at.entry(compact(v)).or_insert_with(|| {
+                    rows.push((v.clone(), 0));
+                    rows.len() - 1
+                });
+                rows[i].1 += 1;
+            }
+            rows.sort_by_key(|r| -r.1);
+            // Same limit as the server-side group, so the dialog stays quick to draw.
+            rows.truncate(1000);
+            ColOut::Groups(rows.into_iter().map(|(v, n)| doc! { "_id": v, "count": n }).collect())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,5 +531,25 @@ mod tests {
         assert_eq!(addr.get_array("required").unwrap(), &vec![Bson::String("city".into())]);
         assert!(addr.get_document("properties").unwrap().get_document("zip").is_ok());
         assert!(p.get_document("list").unwrap().get("properties").is_none());
+    }
+
+    #[test]
+    fn column_data_ops() {
+        let v = [Bson::Int32(3), Bson::Int64(1), Bson::String("a".into()), Bson::Double(2.5), Bson::Int32(1)];
+        let notice = |op| match col_op_result(op, &v) {
+            ColOut::Notice(s) => s.lines().next().unwrap().to_string(),
+            _ => panic!(),
+        };
+        assert_eq!(notice(ColOp::Sum), "7.5");
+        assert_eq!(notice(ColOp::Avg), "1.875");
+        assert_eq!(notice(ColOp::Median), "1.75");
+        assert_eq!(notice(ColOp::CountDistinct), "4 distinct values among 5");
+        let odd = [Bson::Int32(5), Bson::Int32(1), Bson::Int32(2)];
+        assert_eq!(col_op_result(ColOp::Median, &odd), ColOut::Notice("2\n\n3 of 3 values are numbers".into()));
+        assert_eq!(col_op_result(ColOp::CopyDistinct, &v), ColOut::Copy("3\n1\na\n2.5".into(), 4));
+        let ColOut::Copy(js, 4) = col_op_result(ColOp::CopyDistinctJs, &v) else { panic!() };
+        assert!(js.starts_with('[') && js.contains("\"a\""), "{js}");
+        let ColOut::Groups(g) = col_op_result(ColOp::Group, &v) else { panic!() };
+        assert_eq!(g[0], doc! { "_id": 1i64, "count": 2i64 });
     }
 }

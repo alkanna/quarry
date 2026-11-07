@@ -27,6 +27,8 @@ pub use shell::*;
 pub use tools::*;
 pub use worker::*;
 
+/// Whole-query column data actions read at most this many documents.
+pub const COL_VALUES_CAP: i64 = 100_000;
 pub const PAGE_SIZE: u64 = 50; // paginationLimit in the original
 pub const DEFAULT_TIMEOUT_MS: u64 = 5000; // Settings.connectionTimeout in the original
 pub const UNDO_MAX: usize = 50; // maxActionsLength
@@ -124,6 +126,8 @@ pub enum Msg {
     Notice { title: String, body: String },
     /// "Group by and count" finished: one `{ _id, count }` per value, most frequent first.
     Grouped { conn: u64, db: String, coll: String, path: String, pipeline: Vec<Document>, res: Res<Vec<Document>> },
+    /// A column data action over the whole query; the bool says the document cap was reached.
+    ColumnValues { op: ColOp, coll: String, path: String, res: Res<(ColOut, bool)> },
     /// Preview values of referenced documents, keyed by `compact(_id)`.
     Related { req: u64, res: Res<Vec<(String, String)>> },
     /// Which collection of `db` holds `value` as an `_id`, and the field to preview it with.
@@ -509,6 +513,14 @@ pub fn type_name_kind(b: &Bson) -> &'static str {
         Bson::RegularExpression(_) => "regex",
         b if uuid_of(b).is_some() => "uuid",
         _ => "object",
+    }
+}
+
+/// A value as "Copy value" puts it on the clipboard: objects and arrays as shell text.
+pub fn copy_text(v: &Bson) -> String {
+    match v {
+        Bson::Document(_) | Bson::Array(_) => shell_text(v),
+        other => value_text(other),
     }
 }
 

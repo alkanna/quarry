@@ -27,10 +27,7 @@ pub(super) fn field_menu(ui: &mut egui::Ui, path: &[String], v: &Bson, editable:
     ui.label(RichText::new(format!("Field: {p}")).size(TXT_SMALL).color(MUTED()));
     ui.separator();
     if ui.button("Copy value").clicked() {
-        ui.ctx().copy_text(match v {
-            Bson::Document(_) | Bson::Array(_) => db::shell_text(v),
-            other => db::value_text(other),
-        });
+        ui.ctx().copy_text(db::copy_text(v));
         ui.close();
     }
     if ui.button("Copy path").clicked() {
