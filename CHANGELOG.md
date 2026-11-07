@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.12.0](https://github.com/alkanna/quarry/compare/v0.11.2...v0.12.0) (2026-11-07)
+
+
+### Features
+
+* consistent type scale, buttons and icons, and a steadier query log ([#89](https://github.com/alkanna/quarry/issues/89)) ([c60d2aa](https://github.com/alkanna/quarry/commit/c60d2aabbaad43e7de28327d5bcf06f1c7977d10))
+* tag connections and polish the connection picker and dialog ([#86](https://github.com/alkanna/quarry/issues/86)) ([fefcc65](https://github.com/alkanna/quarry/commit/fefcc65a64e9d22dec02de0723e778af486d902f))
+
+
+### Bug Fixes
+
+* make Expand recursively, Expand all and Collapse all work again ([#85](https://github.com/alkanna/quarry/issues/85)) ([90dd533](https://github.com/alkanna/quarry/commit/90dd533a30e901734fa0be3d1438ef981c7be9dd))
+
 ## [0.11.2](https://github.com/alkanna/quarry/compare/v0.11.1...v0.11.2) (2026-11-06)
 
 
