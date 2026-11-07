@@ -1,0 +1,903 @@
+//! The async side: a tokio runtime that runs every Mongo, SSH and tool call and sends one `Msg` back.
+
+use super::*;
+
+pub struct Worker {
+    rt: tokio::runtime::Runtime,
+    tx: Sender<Msg>,
+    ctx: eframe::egui::Context,
+}
+
+/// How many leading documents of an ordered insert_many batch were written before `err`.
+/// An ordered insert stops at its first write error, so everything before that index is in.
+/// A write concern error alone means the whole batch was written but not confirmed.
+pub(crate) fn inserted_before(err: &mongodb::error::Error, batch: usize) -> usize {
+    match &*err.kind {
+        mongodb::error::ErrorKind::InsertMany(f) => f.write_errors.iter().flatten().map(|w| w.index).min().unwrap_or(batch).min(batch),
+        _ => 0,
+    }
+}
+
+pub(crate) fn e(err: impl std::fmt::Display) -> String {
+    let s = err.to_string();
+    // Driver errors append their labels and the raw reply bytes, which only hide the message.
+    let s = match s.strip_prefix("Kind: ") {
+        Some(r) => r.split(", labels: ").next().unwrap_or(r).to_string(),
+        None => s,
+    };
+    if s.contains("imeout") || s.contains("exceeded time limit") {
+        // Same advice the original gives on timeouts.
+        format!("{s}\nThis usually means a query on a non-indexed field of a big collection. Raise the timeout or add an index.")
+    } else {
+        s
+    }
+}
+
+impl Worker {
+    pub fn new(tx: Sender<Msg>, ctx: eframe::egui::Context) -> Self {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        Self { rt, tx, ctx }
+    }
+
+    /// Runs a Shell script in a separate Bun process; `cancel` stops it.
+    pub fn shell(&self, req: u64, job: ShellJob, cancel: tokio::sync::oneshot::Receiver<()>) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        self.rt.spawn(async move {
+            let send = move |m: Msg| {
+                let _ = tx.send(m);
+                ctx.request_repaint();
+            };
+            let start = Instant::now();
+            let res = run_shell(req, &job, &send, cancel).await;
+            send(Msg::ShellDone { req, res, ms: start.elapsed().as_millis() });
+        });
+    }
+
+    /// Runs blocking work (such as the update check) off the UI thread.
+    pub fn blocking(&self, f: impl FnOnce() -> Msg + Send + 'static) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        self.rt.spawn_blocking(move || {
+            let _ = tx.send(f());
+            ctx.request_repaint();
+        });
+    }
+
+    /// Delivers a message through the same channel real results use (test fixtures only).
+    pub fn send(&self, m: Msg) {
+        self.spawn(async move { m });
+    }
+
+    fn spawn(&self, f: impl Future<Output = Msg> + Send + 'static) {
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        self.rt.spawn(async move {
+            // A panic in the task would otherwise end it silently; say so instead.
+            let msg = tokio::spawn(f).await.unwrap_or_else(|err| Msg::Info(Err(format!("Internal error: {err}"))));
+            let _ = tx.send(msg);
+            ctx.request_repaint();
+        });
+    }
+
+    pub fn connect(&self, conn: u64, uri: String, timeout: Duration, net: Net) {
+        self.spawn(async move {
+            let res = open_client(conn, &uri, timeout, &net).await;
+            Msg::Connected { conn, res }
+        });
+    }
+
+    /// Connects and lists databases without keeping anything, for the connection form.
+    pub fn test(&self, uri: String, timeout: Duration, net: Net) {
+        self.spawn(async move {
+            let res = open_client(0, &uri, timeout, &net).await.map(|(_, dbs, t)| {
+                let via = match (&t, &net.proxy) {
+                    (Some(t), _) => format!(" through SSH (host key {})", t.fingerprint),
+                    (None, Some(p)) => format!(" through the proxy {}:{}", p.host, p.port),
+                    _ => String::new(),
+                };
+                format!("Connected{via}: {} databases.", dbs.len())
+            });
+            Msg::Tested { res }
+        });
+    }
+
+    pub fn collections(&self, conn: u64, client: Client, db: String) {
+        self.spawn(async move {
+            let res = async {
+                let specs: Vec<mongodb::results::CollectionSpecification> = client.database(&db).list_collections().await.map_err(e)?.try_collect().await.map_err(e)?;
+                let mut names: Vec<String> = specs.iter().map(|s| s.name.clone()).collect();
+                names.sort();
+                let views = specs.iter().filter(|s| s.collection_type == mongodb::results::CollectionType::View).map(|s| s.name.clone()).collect();
+                Ok((names, views))
+            }
+            .await;
+            Msg::Collections { conn, db, res }
+        });
+    }
+
+    /// Runs a read command and returns its answer under `tag`.
+    pub fn command(&self, client: Client, db: String, cmd: Document, tag: &str) {
+        let tag = tag.to_string();
+        self.spawn(async move {
+            let res = client.database(&db).run_command(cmd).await.map_err(e);
+            Msg::Command { tag, res }
+        });
+    }
+
+    /// Runs a command that changes a database (create, rename, drop, users) and reports `done`.
+    pub fn db_change(&self, conn: u64, client: Client, db: String, cmd: Document, done: String) {
+        self.spawn(async move {
+            // renameCollection only runs on the admin database.
+            let on = if cmd.contains_key("renameCollection") { "admin".to_string() } else { db.clone() };
+            let res = client.database(&on).run_command(cmd).await.map(|_| done).map_err(e);
+            Msg::DbChanged { conn, db, res }
+        });
+    }
+
+    /// Size and count of one collection, from $collStats (the collStats command is deprecated).
+    pub fn coll_stats(&self, client: Client, db: String, coll: String) {
+        self.spawn(async move {
+            let res = async {
+                let c = client.database(&db).collection::<Document>(&coll);
+                let mut cur = c.aggregate(vec![doc! { "$collStats": { "storageStats": {} } }]).await.map_err(e)?;
+                let d: Document = cur.try_next().await.map_err(e)?.ok_or("No statistics returned")?;
+                let s = d.get_document("storageStats").cloned().unwrap_or_default();
+                let mut out = doc! { "collection": format!("{db}.{coll}") };
+                for k in ["count", "size", "avgObjSize", "storageSize", "nindexes", "totalIndexSize", "capped"] {
+                    if let Some(v) = s.get(k) {
+                        out.insert(k, v.clone());
+                    }
+                }
+                if let Ok(sizes) = s.get_document("indexSizes") {
+                    out.insert("indexSizes", sizes.clone());
+                }
+                Ok(out)
+            }
+            .await;
+            Msg::Command { tag: "stats".into(), res }
+        });
+    }
+
+    pub fn find(&self, req: u64, t: Target, q: Query, page: u64) {
+        self.spawn(async move {
+            let res = async {
+                let start = Instant::now();
+                let c = t.c();
+                // An empty filter on a huge collection is the common case; the estimate is instant.
+                let count = if q.filter.is_empty() {
+                    c.estimated_document_count().max_time(t.timeout).await
+                } else {
+                    c.count_documents(q.filter.clone()).max_time(t.timeout).await
+                }
+                .map_err(e)?;
+                let count = q.limit.map_or(count.saturating_sub(q.skip), |l| count.saturating_sub(q.skip).min(l));
+                let take = count.saturating_sub(page * PAGE_SIZE).min(PAGE_SIZE).max(1);
+                let mut f = c.find(q.filter).skip(q.skip + page * PAGE_SIZE).limit(take as i64).max_time(t.timeout);
+                if let Some(s) = q.sort {
+                    f = f.sort(s);
+                }
+                if let Some(p) = q.projection {
+                    f = f.projection(p);
+                }
+                let docs: Vec<Document> = f.await.map_err(e)?.try_collect().await.map_err(e)?;
+                Ok((docs, count, start.elapsed().as_millis()))
+            }
+            .await;
+            Msg::Docs { req, res }
+        });
+    }
+
+    pub fn indexes(&self, req: u64, t: Target) {
+        self.spawn(async move {
+            let res = async {
+                let v: Vec<IndexModel> = t.c().list_indexes().await.map_err(e)?.try_collect().await.map_err(e)?;
+                Ok(v.into_iter()
+                    .map(|m| {
+                        let o = m.options.unwrap_or_default();
+                        let mut d = doc! { "name": o.name.unwrap_or_default(), "keys": m.keys };
+                        if o.unique == Some(true) {
+                            d.insert("unique", true);
+                        }
+                        if let Some(ttl) = o.expire_after {
+                            d.insert("expireAfterSeconds", ttl.as_secs() as i64);
+                        }
+                        if let Some(pf) = o.partial_filter_expression {
+                            d.insert("partialFilterExpression", pf);
+                        }
+                        d
+                    })
+                    .collect())
+            }
+            .await;
+            Msg::Indexes { req, res }
+        });
+    }
+
+    /// Usage, size and hidden state per index, plus the profiler's unindexed or slow queries.
+    pub fn index_info(&self, t: Target) {
+        self.spawn(async move {
+            let key = format!("{}.{}", t.db, t.coll);
+            let res = async {
+                let db = t.client.database(&t.db);
+                let num = |b: Option<&Bson>| match b {
+                    Some(Bson::Int32(n)) => *n as i64,
+                    Some(Bson::Int64(n)) => *n,
+                    Some(Bson::Double(n)) => *n as i64,
+                    _ => 0,
+                };
+                // Sizes are best effort: views and some deployments refuse $collStats.
+                let sizes = async {
+                    let mut cur = t.c().aggregate(vec![doc! { "$collStats": { "storageStats": {} } }]).await.ok()?;
+                    let d = cur.try_next().await.ok()??;
+                    d.get_document("storageStats").ok()?.get_document("indexSizes").ok().cloned()
+                }
+                .await
+                .unwrap_or_default();
+                let rows: Vec<Document> = t.c().aggregate(vec![doc! { "$indexStats": {} }]).await.map_err(e)?.try_collect().await.map_err(e)?;
+                let stats = rows
+                    .iter()
+                    .map(|d| {
+                        let name = d.get_str("name").unwrap_or_default().to_string();
+                        let acc = d.get_document("accesses").cloned().unwrap_or_default();
+                        IndexStat {
+                            ops: num(acc.get("ops")),
+                            since: acc.get_datetime("since").ok().map(|t| t.timestamp_millis()),
+                            hidden: d.get_document("spec").is_ok_and(|s| s.get_bool("hidden") == Ok(true)),
+                            size: sizes.get(&name).map(|b| num(Some(b)) as usize),
+                            name,
+                        }
+                    })
+                    .collect();
+                let prof = db.run_command(doc! { "profile": -1 }).await.ok();
+                let level = prof.as_ref().map_or(0, |p| num(p.get("was")) as i32);
+                let slowms = prof.as_ref().map_or(100, |p| num(p.get("slowms")));
+                // Newest first so the cap keeps recent traffic.
+                let entries: Vec<Document> = match db
+                    .collection::<Document>("system.profile")
+                    .aggregate(vec![
+                        doc! { "$match": { "ns": &key, "op": "query", "command.find": { "$exists": true }, "$or": [{ "planSummary": { "$regex": "COLLSCAN" } }, { "millis": { "$gt": slowms } }] } },
+                        doc! { "$sort": { "ts": -1 } },
+                        doc! { "$limit": 1000 },
+                        doc! { "$project": { "filter": "$command.filter", "sort": "$command.sort", "millis": 1 } },
+                    ])
+                    .await
+                {
+                    Ok(c) => c.try_collect().await.unwrap_or_default(),
+                    Err(_) => Vec::new(),
+                };
+                Ok(IndexInfo { stats, level, slowms, shapes: group_profile(&entries) })
+            }
+            .await;
+            Msg::IndexInfo { key, res }
+        });
+    }
+
+    /// Preview of a pipeline cut after one stage, as the original's getResultsForStage (renderer
+    /// line 112026): a `$count` run for the total and a `$limit` run for the first documents. An
+    /// empty pipeline is the collection itself, counted by the estimate (getCollectionSample, 111469).
+    pub fn stage_preview(&self, req: u64, t: Target, pipeline: Vec<Document>, limit: i64) {
+        self.spawn(async move {
+            let res = async {
+                let start = Instant::now();
+                let c = t.c();
+                let (n, docs) = if pipeline.is_empty() {
+                    let n = c.estimated_document_count().max_time(t.timeout).await.map_err(e)?;
+                    let docs: Vec<Document> = c.find(doc! {}).limit(limit).max_time(t.timeout).await.map_err(e)?.try_collect().await.map_err(e)?;
+                    (n, docs)
+                } else {
+                    let mut counting = pipeline.clone();
+                    counting.push(doc! { "$count": "total" });
+                    let counted: Vec<Document> = c.aggregate(counting).max_time(t.timeout).allow_disk_use(true).await.map_err(e)?.try_collect().await.map_err(e)?;
+                    let n = counted.first().and_then(|d| d.get("total")).map_or(Ok(0), as_u64)?;
+                    let mut sampling = pipeline;
+                    sampling.push(doc! { "$limit": limit });
+                    let docs: Vec<Document> = c.aggregate(sampling).max_time(t.timeout).allow_disk_use(true).await.map_err(e)?.try_collect().await.map_err(e)?;
+                    (n, docs)
+                };
+                Ok((n, trim_sample(docs), start.elapsed().as_millis()))
+            }
+            .await;
+            Msg::StagePreview { req, res }
+        });
+    }
+
+    pub fn aggregate(&self, req: u64, t: Target, pipeline: Vec<Document>) {
+        self.spawn(async move {
+            let res = async {
+                let start = Instant::now();
+                let cur = t.c().aggregate(pipeline).max_time(t.timeout).allow_disk_use(true).await.map_err(e)?;
+                // ponytail: results capped at 1000 in memory; stream to a file via export for more.
+                let docs: Vec<Document> = cur.take(1000).try_collect().await.map_err(e)?;
+                Ok((docs, start.elapsed().as_millis()))
+            }
+            .await;
+            Msg::Aggregated { req, res }
+        });
+    }
+
+    pub fn explain(&self, req: u64, t: Target, what: ExplainOf) {
+        self.spawn(async move {
+            let inner = match what {
+                ExplainOf::Find(q) => {
+                    let mut d = doc! { "find": &t.coll, "filter": q.filter, "limit": q.limit.map_or(PAGE_SIZE, |l| l.min(PAGE_SIZE)) as i64 };
+                    if q.skip > 0 {
+                        d.insert("skip", q.skip as i64);
+                    }
+                    if let Some(s) = q.sort {
+                        d.insert("sort", s);
+                    }
+                    if let Some(p) = q.projection {
+                        d.insert("projection", p);
+                    }
+                    d
+                }
+                ExplainOf::Aggregate(p) => doc! { "aggregate": &t.coll, "pipeline": p, "cursor": {} },
+            };
+            let cmd = doc! { "explain": inner, "verbosity": "executionStats", "maxTimeMS": t.timeout.as_millis() as i64 };
+            let res = t.client.database(&t.db).run_command(cmd).await.map_err(e);
+            Msg::Explained { req, res }
+        });
+    }
+
+    fn write(&self, at: (String, String), f: impl Future<Output = (Res<String>, Option<UndoAction>)> + Send + 'static) {
+        self.spawn(async move {
+            let (res, undo) = f.await;
+            Msg::Written { at, res, undo, reload: true, retry: None }
+        });
+    }
+
+    pub fn insert(&self, conn: u64, t: Target, d: Document, text: Option<String>) {
+        self.spawn(async move {
+            let at = t.at();
+            let retry = text.map(|x| (t.db.clone(), t.coll.clone(), x));
+            let (res, undo) = match t.c().insert_one(d).await {
+                Ok(r) => (
+                    Ok(format!("Inserted document {}", short(&r.inserted_id))),
+                    Some(UndoAction { at: Instant::now(), conn, db: t.db, coll: t.coll, kind: UndoKind::Insert { id: r.inserted_id } }),
+                ),
+                Err(err) => (Err(e(err)), None),
+            };
+            Msg::Written { at, res, undo, reload: true, retry }
+        });
+    }
+
+    /// Replaces `old` with `new`, but only if the server still holds exactly `old`.
+    pub fn replace(&self, conn: u64, t: Target, old: Document, new: Document, record_undo: bool) {
+        self.write(t.at(), replace_doc(conn, t, old, new, record_undo));
+    }
+
+    /// Writes one document's staged edits; the answer names the draft so it can be kept on failure.
+    pub fn save(&self, tag: String, conn: u64, t: Target, old: Document, new: Document) {
+        self.spawn(async move {
+            let (res, undo) = replace_doc(conn, t, old, new, true).await;
+            Msg::Saved { tag, res, undo }
+        });
+    }
+
+    pub fn delete(&self, conn: u64, t: Target, old: Document, record_undo: bool) {
+        self.write(t.at(), async move {
+            match t.c().delete_one(unchanged(&old)).await {
+                Ok(r) if r.deleted_count == 0 => (Err(CONFLICT.into()), None),
+                Ok(_) => (
+                    Ok("Deleted 1 document".into()),
+                    record_undo.then(|| UndoAction { at: Instant::now(), conn, db: t.db, coll: t.coll, kind: UndoKind::Delete { old } }),
+                ),
+                Err(err) => (Err(e(err)), None),
+            }
+        });
+    }
+
+    /// Deletes each document only while the server still holds it as loaded, like `delete`.
+    /// Undo restores exactly the ones that went, never ones changed or removed meanwhile.
+    pub fn delete_docs(&self, conn: u64, t: Target, old: Vec<Document>) {
+        self.write(t.at(), async move {
+            let c = t.c();
+            let total = old.len();
+            let mut gone = Vec::new();
+            for d in old {
+                match c.delete_one(unchanged(&d)).await {
+                    Ok(r) if r.deleted_count == 1 => gone.push(d),
+                    Ok(_) => {}
+                    Err(err) => {
+                        let undo = (!gone.is_empty()).then(|| UndoAction { at: Instant::now(), conn, db: t.db.clone(), coll: t.coll.clone(), kind: UndoKind::DeleteMany { old: gone.clone() } });
+                        return (Err(format!("Stopped after deleting {}: {}", gone.len(), e(err))), undo);
+                    }
+                }
+            }
+            let skipped = total - gone.len();
+            if gone.is_empty() {
+                return (Err(CONFLICT.into()), None);
+            }
+            let mut msg = format!("Deleted {} documents", gone.len());
+            if skipped > 0 {
+                msg += &format!(", {skipped} skipped because they changed or were already deleted");
+            }
+            (Ok(msg), Some(UndoAction { at: Instant::now(), conn, db: t.db, coll: t.coll, kind: UndoKind::DeleteMany { old: gone } }))
+        });
+    }
+
+    pub fn delete_by_id(&self, t: Target, id: Bson) {
+        self.write(t.at(), async move {
+            match t.c().delete_one(doc! { "_id": id }).await {
+                Ok(r) => (Ok(format!("Undo removed {} document", r.deleted_count)), None),
+                Err(err) => (Err(e(err)), None),
+            }
+        });
+    }
+
+    /// Preview values for the referenced ids shown in the table (relatedDocuments, renderer line 107207).
+    pub fn related(&self, req: u64, t: Target, ids: Vec<Bson>, preview: String) {
+        self.spawn(async move {
+            let res = async {
+                let c = t.c();
+                let f = c.find(doc! { "_id": { "$in": ids } }).projection(doc! { &preview: 1 }).max_time(t.timeout);
+                let docs: Vec<Document> = f.await.map_err(e)?.try_collect().await.map_err(e)?;
+                Ok(docs.iter().filter_map(|d| Some((compact(d.get("_id")?), value_text(get_path(d, &preview)?)))).collect())
+            }
+            .await;
+            Msg::Related { req, res }
+        });
+    }
+
+    /// Tries each collection of the database for a document with this `_id` (findReference,
+    /// renderer line 105588). `t.coll` is the collection the id was found in.
+    pub fn find_ref(&self, conn: u64, t: Target, colls: Vec<String>, path: String, value: Bson) {
+        self.spawn(async move {
+            let res = async {
+                let base = t.client.database(&t.db);
+                for c in colls.iter().filter(|c| !c.starts_with("system.")) {
+                    if let Some(d) = base.collection::<Document>(c).find_one(doc! { "_id": value.clone() }).max_time(t.timeout).await.map_err(e)? {
+                        return Ok(Some((c.clone(), preview_field(&d))));
+                    }
+                }
+                Ok(None)
+            }
+            .await;
+            Msg::RefFound { conn, db: t.db, coll: t.coll, path, value, res }
+        });
+    }
+
+    /// Finds relations of `colls` by sampling their 10 newest documents and looking their id-like
+    /// values up in every collection of the database (analyzeDataRelations, renderer line 105620).
+    pub fn analyze_relations(&self, conn: u64, t: Target, colls: Vec<String>, all: Vec<String>) {
+        self.spawn(async move {
+            let res = async {
+                let base = t.client.database(&t.db);
+                let mut found = Vec::new();
+                for coll in &colls {
+                    let docs: Vec<Document> = base.collection::<Document>(coll).find(doc! {}).sort(doc! { "$natural": -1 }).limit(10).max_time(t.timeout).await.map_err(e)?.try_collect().await.map_err(e)?;
+                    // String ids count only when this collection itself uses string ids of that length.
+                    let id_len = match docs.first().and_then(|d| d.get("_id")) {
+                        Some(Bson::String(s)) => s.len(),
+                        _ => 0,
+                    };
+                    for (path, ids) in proto_relations(&docs, id_len) {
+                        for target in &all {
+                            let hit = base.collection::<Document>(target).find_one(doc! { "_id": { "$in": ids.clone() } }).max_time(t.timeout).await;
+                            if let Ok(Some(d)) = hit {
+                                found.push((coll.clone(), path.clone(), target.clone(), preview_field(&d)));
+                                break;
+                            }
+                        }
+                    }
+                }
+                Ok(found)
+            }
+            .await;
+            Msg::Analyzed { conn, db: t.db, res }
+        });
+    }
+
+    /// Loads both collections whole and compares them by `_id`.
+    // ponytail: full documents are fetched; hash them server-side if collections near COMPARE_MAX get slow
+    pub fn compare(&self, req: u64, src: Target, dst: Target) {
+        self.spawn(async move {
+            let res = async {
+                let mut sides = Vec::new();
+                for t in [&src, &dst] {
+                    let n = t.c().estimated_document_count().await.map_err(e)?;
+                    if n > COMPARE_MAX {
+                        return Err(format!("{}.{} has {n} documents; comparing is limited to {COMPARE_MAX}.", t.db, t.coll));
+                    }
+                    let docs: Vec<Document> = t.c().find(doc! {}).await.map_err(e)?.try_collect().await.map_err(e)?;
+                    sides.push(docs);
+                }
+                let dst_docs = sides.pop().unwrap_or_default();
+                Ok(compare_docs(sides.pop().unwrap_or_default(), dst_docs))
+            }
+            .await;
+            Msg::Compared { req, res }
+        });
+    }
+
+    /// Writes chosen differences into the target. A changed document is only replaced while it is
+    /// still as compared, so edits made meanwhile are kept.
+    pub fn sync(&self, t: Target, insert: Vec<Document>, replace: Vec<(Document, Document)>, delete: Vec<Bson>) {
+        self.write(t.at(), async move {
+            let r = async {
+                let c = t.c();
+                for ch in insert.chunks(SYNC_CHUNK) {
+                    c.insert_many(ch.to_vec()).await.map_err(e)?;
+                }
+                let mut skipped = 0;
+                for (new, old) in &replace {
+                    if c.replace_one(unchanged(old), new.clone()).await.map_err(e)?.matched_count == 0 {
+                        skipped += 1;
+                    }
+                }
+                let mut deleted = 0;
+                for ch in delete.chunks(SYNC_CHUNK) {
+                    deleted += c.delete_many(doc! { "_id": { "$in": ch.to_vec() } }).await.map_err(e)?.deleted_count;
+                }
+                let mut msg = format!("Sync done: {} inserted, {} replaced, {deleted} deleted", insert.len(), replace.len() - skipped);
+                if skipped > 0 {
+                    msg += &format!(", {skipped} skipped because they changed since the comparison");
+                }
+                Ok(msg)
+            }
+            .await;
+            (r, None)
+        });
+    }
+
+    /// Runs mongodump or mongorestore, streaming its output; `cancel` stops it.
+    pub fn tool(&self, exe: std::path::PathBuf, args: Vec<String>, cancel: tokio::sync::oneshot::Receiver<()>) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        self.rt.spawn(async move {
+            let send = move |m: Msg| {
+                let _ = tx.send(m);
+                ctx.request_repaint();
+            };
+            let name = exe.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            // The address carries the password, and arguments are visible to every local user.
+            let mut args = args;
+            let mut config = None;
+            if let Some(i) = args.iter().position(|a| a.starts_with("--uri=")) {
+                match write_tool_config(&args[i]["--uri=".len()..]) {
+                    Ok(p) => {
+                        args[i] = format!("--config={}", p.display());
+                        config = Some(p);
+                    }
+                    Err(err) => return send(Msg::ToolDone(Err(format!("Could not write the {name} config ({err})")))),
+                }
+            }
+            let run = async {
+                use tokio::io::AsyncBufReadExt;
+                let mut cmd = tokio::process::Command::new(&exe);
+                cmd.args(&args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
+                #[cfg(windows)]
+                cmd.creation_flags(crate::update::CREATE_NO_WINDOW);
+                let mut child = cmd
+                    .spawn()
+                    .map_err(|err| format!("Could not start {} ({err})", exe.display()))?;
+                // Both tools write their progress to stderr.
+                let mut err = tokio::io::BufReader::new(child.stderr.take().ok_or("no stderr")?).lines();
+                let mut out = tokio::io::BufReader::new(child.stdout.take().ok_or("no stdout")?).lines();
+                let (mut err_open, mut out_open) = (true, true);
+                while err_open || out_open {
+                    tokio::select! {
+                        l = err.next_line(), if err_open => match l.map_err(e)? { Some(l) => send(Msg::ToolLog(l)), None => err_open = false },
+                        l = out.next_line(), if out_open => match l.map_err(e)? { Some(l) => send(Msg::ToolLog(l)), None => out_open = false },
+                    }
+                }
+                let st = child.wait().await.map_err(e)?;
+                if st.success() { Ok(format!("{name} finished")) } else { Err(format!("{name} failed ({st})")) }
+            };
+            let res = tokio::select! {
+                r = run => r,
+                _ = cancel => Err(format!("{name} stopped")),
+            };
+            if let Some(p) = config {
+                let _ = std::fs::remove_file(p);
+            }
+            send(Msg::ToolDone(res));
+        });
+    }
+
+    /// Runs "Group by and count" in the background like the original's groupCountField
+    /// (renderer line 100487), which shows the result in a window instead of a tab.
+    // ponytail: first 1000 values kept; a field with millions of distinct values would not fit a window anyway
+    pub fn group_count(&self, conn: u64, t: Target, path: String, pipeline: Vec<Document>) {
+        self.spawn(async move {
+            let p = pipeline.clone();
+            let res = async { t.c().aggregate(p).max_time(t.timeout).allow_disk_use(true).await.map_err(e)?.take(1000).try_collect().await.map_err(e) }.await;
+            Msg::Grouped { conn, db: t.db, coll: t.coll, path, pipeline, res }
+        });
+    }
+
+    /// Like the original's "Count distinct values": distinct(path, current filter).len().
+    pub fn distinct_count(&self, t: Target, path: String, filter: Document) {
+        self.spawn(async move {
+            match t.c().distinct(&path, filter).max_time(t.timeout).await {
+                Ok(v) => Msg::Notice { title: "Number of distinct values".into(), body: format!("{}\n\ndistinct values in \"{path}\" (the current query is applied)", v.len()) },
+                Err(err) => Msg::Info(Err(e(err))),
+            }
+        });
+    }
+
+    /// Runs the real update stages on a sample, so the preview cannot differ from the write.
+    pub fn update_preview(&self, t: Target, filter: Document, stages: Vec<Document>) {
+        self.spawn(async move {
+            let res = async {
+                let before: Vec<Document> = t.c().aggregate(vec![doc! { "$match": &filter }, doc! { "$limit": 5 }]).max_time(t.timeout).await.map_err(e)?.try_collect().await.map_err(e)?;
+                // The same documents by _id, so each pair is one document even if others change meanwhile.
+                let ids: Vec<Bson> = before.iter().filter_map(|d| d.get("_id").cloned()).collect();
+                let after_pipe = std::iter::once(doc! { "$match": { "_id": { "$in": ids } } }).chain(stages.iter().cloned()).collect::<Vec<_>>();
+                let mut after: std::collections::HashMap<String, Document> = t.c().aggregate(after_pipe).max_time(t.timeout).await.map_err(e)?.try_collect::<Vec<_>>().await.map_err(e)?.into_iter().map(|d| (d.get("_id").map(compact).unwrap_or_default(), d)).collect();
+                let pairs = before.into_iter().filter_map(|b| after.remove(&b.get("_id").map(compact).unwrap_or_default()).map(|a| (b, a))).collect();
+                let n = t.c().count_documents(filter).max_time(t.timeout).await.map_err(e)?;
+                Ok((pairs, n))
+            }
+            .await;
+            Msg::UpdatePreview { stages, res }
+        });
+    }
+
+    pub fn update_many(&self, t: Target, filter: Document, stages: Vec<Document>) {
+        self.write(t.at(), async move {
+            match t.c().update_many(filter, stages).await {
+                Ok(r) => (Ok(format!("Updated {} documents", r.modified_count)), None),
+                Err(err) => (Err(e(err)), None),
+            }
+        });
+    }
+
+    pub fn rename_many(&self, t: Target, filter: Document, from: String, to: String) {
+        self.write(t.at(), async move {
+            match t.c().update_many(filter, doc! { "$rename": { &from: &to } }).await {
+                Ok(r) => (Ok(format!("Renamed {from} to {to} in {} documents", r.modified_count)), None),
+                Err(err) => (Err(e(err)), None),
+            }
+        });
+    }
+
+    /// Writes imported documents: insert all (ordered, in batches), or upsert each by `key` with
+    /// $set like the original's import (bulkWrite of updateOne upserts).
+    pub fn import(&self, conn: u64, t: Target, docs: Vec<Document>, upsert_by: Option<String>) {
+        const BATCH: usize = 1000;
+        self.write(t.at(), async move {
+            let c = t.c();
+            let mut docs = docs;
+            match upsert_by {
+                None => {
+                    // Like the original's generateNewDocumentId: documents without _id get one of the
+                    // kind the collection already uses. ObjectIds are made here rather than by the
+                    // driver so a failed batch still knows the ids of what it did insert.
+                    if docs.iter().any(|d| !d.contains_key("_id")) {
+                        let last = c.find_one(doc! {}).sort(doc! { "_id": -1 }).await.ok().flatten().and_then(|d| d.get("_id").cloned());
+                        let mut next = match &last {
+                            Some(Bson::Int32(n)) => Some(*n as i64 + 1),
+                            Some(Bson::Int64(n)) => Some(n + 1),
+                            Some(Bson::Double(f)) => Some(*f as i64 + 1),
+                            _ => None,
+                        };
+                        for d in docs.iter_mut().filter(|d| !d.contains_key("_id")) {
+                            let id = match (&last, next.as_mut()) {
+                                (Some(Bson::String(s)), _) => Bson::String(random_id(s.chars().count())),
+                                (_, Some(n)) => {
+                                    *n += 1;
+                                    Bson::Int64(*n - 1)
+                                }
+                                _ => Bson::ObjectId(mongodb::bson::oid::ObjectId::new()),
+                            };
+                            let mut with_id = doc! { "_id": id };
+                            with_id.extend(std::mem::take(d));
+                            *d = with_id;
+                        }
+                    }
+                    let mut ids = Vec::with_capacity(docs.len());
+                    for chunk in docs.chunks(BATCH) {
+                        match c.insert_many(chunk.to_vec()).await {
+                            Ok(r) => ids.extend(r.inserted_ids.into_values()),
+                            Err(err) => {
+                                let done = inserted_before(&err, chunk.len());
+                                ids.extend(chunk[..done].iter().filter_map(|d| d.get("_id").cloned()));
+                                let msg = format!("Stopped after {} documents: {}", ids.len(), e(err));
+                                let undo = (!ids.is_empty()).then(|| UndoAction { at: Instant::now(), conn, db: t.db.clone(), coll: t.coll.clone(), kind: UndoKind::InsertMany { ids } });
+                                return (Err(msg), undo);
+                            }
+                        }
+                    }
+                    let n = ids.len();
+                    (Ok(format!("Imported {n} documents")), Some(UndoAction { at: Instant::now(), conn, db: t.db, coll: t.coll, kind: UndoKind::InsertMany { ids } }))
+                }
+                Some(key) => {
+                    let (mut matched, mut upserted) = (0u64, 0u64);
+                    for d in docs {
+                        let Some(v) = d.get(&key).cloned() else {
+                            return (Err(format!("A document has no {key}; nothing after it was written ({matched} updated, {upserted} added).")), None);
+                        };
+                        match c.update_one(doc! { &key: v }, doc! { "$set": d }).upsert(true).await {
+                            Ok(r) => {
+                                matched += r.matched_count;
+                                upserted += r.upserted_id.is_some() as u64;
+                            }
+                            Err(err) => return (Err(format!("Stopped ({matched} updated, {upserted} added): {}", e(err))), None),
+                        }
+                    }
+                    (Ok(format!("Import done: {matched} updated, {upserted} added")), None)
+                }
+            }
+        });
+    }
+
+    pub fn delete_ids(&self, t: Target, ids: Vec<Bson>) {
+        self.write(t.at(), async move {
+            match t.c().delete_many(doc! { "_id": { "$in": ids } }).await {
+                Ok(r) => (Ok(format!("Undo removed {} imported documents", r.deleted_count)), None),
+                Err(err) => (Err(e(err)), None),
+            }
+        });
+    }
+
+    /// Reads up to `limit` documents (0 = all) matching `filter` and summarises their fields.
+    pub fn schema(&self, req: u64, t: Target, filter: Document, limit: i64) {
+        self.spawn(async move {
+            let res = async {
+                let start = Instant::now();
+                let c = t.c();
+                let mut f = c.find(filter).max_time(t.timeout);
+                if limit > 0 {
+                    f = f.limit(limit);
+                }
+                let docs: Vec<Document> = f.await.map_err(e)?.try_collect().await.map_err(e)?;
+                let stats = analyze_schema(&docs);
+                Ok((stats, docs.len(), start.elapsed().as_millis()))
+            }
+            .await;
+            Msg::Schema { req, res }
+        });
+    }
+
+    pub fn delete_many(&self, t: Target, filter: Document) {
+        self.write(t.at(), async move {
+            match t.c().delete_many(filter).await {
+                Ok(r) => (Ok(format!("Deleted {} documents", r.deleted_count)), None),
+                Err(err) => (Err(e(err)), None),
+            }
+        });
+    }
+
+    pub fn create_index(&self, t: Target, keys: Document, unique: bool) {
+        self.spawn(async move {
+            let m = IndexModel::builder().keys(keys).options(IndexOptions::builder().unique(unique).build()).build();
+            let res = t.c().create_index(m).await.map(|r| format!("Created index {}", r.index_name)).map_err(e);
+            Msg::Written { at: t.at(), res, undo: None, reload: false, retry: None }
+        });
+    }
+
+    pub fn drop_index(&self, t: Target, name: String) {
+        self.spawn(async move {
+            let res = t.c().drop_index(&name).await.map(|_| format!("Dropped index {name}")).map_err(e);
+            Msg::Written { at: t.at(), res, undo: None, reload: false, retry: None }
+        });
+    }
+
+    pub fn export(&self, t: Target, q: Query, path: std::path::PathBuf) {
+        self.spawn(async move {
+            let res = async {
+                let c = t.c();
+                let mut f = c.find(q.filter).skip(q.skip).max_time(t.timeout);
+                if let Some(l) = q.limit {
+                    f = f.limit(l as i64);
+                }
+                if let Some(s) = q.sort {
+                    f = f.sort(s);
+                }
+                if let Some(p) = q.projection {
+                    f = f.projection(p);
+                }
+                // ponytail: whole result held in memory (CSV needs every column first); stream if exports get huge.
+                let docs: Vec<Document> = f.await.map_err(e)?.try_collect().await.map_err(e)?;
+                let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("json").to_ascii_lowercase();
+                let body = export_body(&docs, &ext)?;
+                std::fs::write(&path, body).map_err(|x| format!("Could not write {}: {x}", path.display()))?;
+                Ok(format!("Exported {} documents to {}", docs.len(), path.display()))
+            }
+            .await;
+            Msg::Info(res)
+        });
+    }
+}
+
+pub(crate) async fn open_client(conn: u64, uri: &str, timeout: Duration, net: &Net) -> Res<(Client, Vec<String>, Option<crate::ssh::Tunnel>)> {
+    use mongodb::options::Socks5Proxy;
+    let tunnel = match &net.ssh {
+        Some((conf, secrets)) => Some(crate::ssh::open(conf, secrets, timeout).await?),
+        None => None,
+    };
+    let mut o = ClientOptions::parse(uri).await.map_err(e)?;
+    o.connect_timeout = Some(timeout);
+    o.server_selection_timeout = Some(timeout);
+    o.app_name.get_or_insert_with(|| "quarry".into());
+    o.command_event_handler = Some(mongodb::event::EventHandler::callback(move |ev| log_event(conn, ev)));
+    if let Some(t) = &tunnel {
+        o.socks5_proxy = Some(Socks5Proxy::builder().host("127.0.0.1".to_string()).port(t.port).build());
+    } else if let Some(p) = &net.proxy {
+        // The original's proxyHost/proxyPort/proxyUsername/proxyPassword; port 1080 when unset.
+        let auth = (!p.user.is_empty()).then(|| (p.user.clone(), p.password.clone().unwrap_or_default()));
+        o.socks5_proxy = Some(Socks5Proxy::builder().host(p.host.clone()).port(if p.port == 0 { 1080 } else { p.port }).authentication(auth).build());
+    }
+    let client = Client::with_options(o).map_err(e)?;
+    let mut dbs = client.list_database_names().await.map_err(e)?;
+    dbs.sort();
+    Ok((client, dbs, tunnel))
+}
+
+pub(crate) async fn replace_doc(conn: u64, t: Target, old: Document, new: Document, record_undo: bool) -> (Res<String>, Option<UndoAction>) {
+    let id = old.get("_id").cloned().unwrap_or(Bson::Null);
+    match t.c().replace_one(unchanged(&old), new.clone()).await {
+        Ok(r) if r.matched_count == 0 => (Err(CONFLICT.into()), None),
+        Ok(_) => (
+            Ok(format!("Saved document {}", short(&id))),
+            record_undo.then(|| UndoAction { at: Instant::now(), conn, db: t.db, coll: t.coll, kind: UndoKind::Update { old, new } }),
+        ),
+        Err(err) => (Err(e(err)), None),
+    }
+}
+
+pub const CONFLICT: &str = "Not saved: this document changed on the server since you opened it. Reload and try again.";
+
+/// Matches the document only while every field is still exactly as we last read it,
+/// so a concurrent change by someone else is never silently overwritten.
+pub(crate) fn unchanged(old: &Document) -> Document {
+    doc! {
+        "_id": old.get("_id").cloned().unwrap_or(Bson::Null),
+        "$expr": { "$eq": ["$$ROOT", { "$literal": old.clone() }] },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn partial_insert_count() {
+        use mongodb::error::{Error, ErrorKind, InsertManyError};
+        let failed = |d: Document| Error::from(ErrorKind::InsertMany(mongodb::bson::from_document::<InsertManyError>(d).unwrap()));
+        assert_eq!(inserted_before(&failed(doc! { "writeErrors": [{ "index": 3, "code": 11000, "errmsg": "dup" }] }), 10), 3);
+        assert_eq!(inserted_before(&failed(doc! { "writeConcernError": { "code": 64, "errmsg": "wc" } }), 10), 10);
+        assert_eq!(inserted_before(&Error::from(std::io::ErrorKind::ConnectionReset), 10), 0);
+    }
+
+    #[test]
+    fn driver_errors_drop_labels_and_raw_reply() {
+        let raw = "Kind: Command failed: Error code 59 (CommandNotFound): no such command: 'nope', labels: {}, source: None, server response: Some(RawDocumentBuf { data: \"5d00\" })";
+        assert_eq!(e(raw), "Command failed: Error code 59 (CommandNotFound): no such command: 'nope'");
+        assert_eq!(e("plain"), "plain");
+    }
+
+    #[test]
+    fn connects_through_socks5_by_name() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let seen = tokio::spawn(async move {
+                let (mut s, _) = listener.accept().await.unwrap();
+                let mut head = [0u8; 2];
+                s.read_exact(&mut head).await.unwrap();
+                let mut m = vec![0u8; head[1] as usize];
+                s.read_exact(&mut m).await.unwrap();
+                s.write_all(&[5, 0]).await.unwrap();
+                let mut req = [0u8; 5];
+                s.read_exact(&mut req).await.unwrap();
+                assert_eq!(req[3], 3, "the host should be sent as a name");
+                let mut name = vec![0u8; req[4] as usize];
+                s.read_exact(&mut name).await.unwrap();
+                let mut p = [0u8; 2];
+                s.read_exact(&mut p).await.unwrap();
+                let _ = s.write_all(&[5, 5, 0, 1, 0, 0, 0, 0, 0, 0]).await;
+                (String::from_utf8(name).unwrap(), u16::from_be_bytes(p))
+            });
+            let net = Net { ssh: None, proxy: Some(Proxy { host: "127.0.0.1".into(), port, user: String::new(), password: None }) };
+            let r = open_client(0, "mongodb://db.internal.example:27018/", Duration::from_millis(1500), &net).await;
+            assert!(r.is_err());
+            assert_eq!(seen.await.unwrap(), ("db.internal.example".to_string(), 27018));
+        });
+    }
+}
