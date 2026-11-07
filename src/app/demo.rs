@@ -57,7 +57,7 @@ impl App {
         let mut t = Tab::new(sel("shop", "orders"));
         t.fields = auto_fields(&docs);
         t.paths = doc_paths(&docs);
-        t.date_paths = date_paths(&docs, &t.paths);
+        t.field_info = field_info(&docs);
         t.docs = docs;
         t.count = 1284;
         t.ms = 14;

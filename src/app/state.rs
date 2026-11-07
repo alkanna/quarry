@@ -96,8 +96,8 @@ pub(super) struct Tab {
     pub(super) fields: Vec<String>,
     /// Every dotted field path seen in the loaded documents, for autocomplete.
     pub(super) paths: Vec<String>,
-    /// Paths whose loaded values are dates; their Query values suggest date shortcuts.
-    pub(super) date_paths: Vec<String>,
+    /// Main kind and frequent values of each path in the loaded documents, for Query suggestions.
+    pub(super) field_info: crate::ui::complete::Fields,
     pub(super) count: u64,
     pub(super) ms: u128,
     pub(super) req: u64,
@@ -357,7 +357,7 @@ impl Tab {
             docs: Vec::new(),
             fields: Vec::new(),
             paths: Vec::new(),
-            date_paths: Vec::new(),
+            field_info: Default::default(),
             count: 0,
             ms: 0,
             req: 0,

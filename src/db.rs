@@ -188,6 +188,15 @@ pub fn parse_value(text: &str) -> Res<Bson> {
     Bson::try_from(v).map_err(|err| format!("Not valid Extended JSON: {err}"))
 }
 
+/// Query text with its shortcuts (`~"text"`, `#today`, `@moment`) written out as shell syntax, for
+/// JavaScript, which has none of them. None when it has none or does not parse.
+pub fn expand_shortcuts(text: &str) -> Option<String> {
+    if !text.contains(['~', '#', '@']) {
+        return None;
+    }
+    parse_doc(text).ok().map(|d| shell_text(&Bson::Document(d)))
+}
+
 pub fn parse_doc(text: &str) -> Res<Document> {
     match parse_value(text)? {
         Bson::Document(d) => Ok(d),
@@ -224,6 +233,31 @@ fn shell_to_ejson(src: &str) -> String {
             if let Some(rep) = if c == '#' { date_shortcut(&word, now) } else { moment(&word, now) } {
                 out.push_str(&rep);
                 i = end;
+                continue;
+            }
+        }
+        // `~"some text"` or `~word`: contains, any case, with regex characters taken literally.
+        if c == '~' {
+            let q = chars.get(i + 1).copied().filter(|&q| q == '"' || q == '\'');
+            let (mut text, mut k) = (String::new(), i + 1 + usize::from(q.is_some()));
+            while k < chars.len() && q.map_or(chars[k].is_alphanumeric() || "-_.".contains(chars[k]), |q| chars[k] != q) {
+                if chars[k] == '\\' && k + 1 < chars.len() {
+                    k += 1;
+                }
+                text.push(chars[k]);
+                k += 1;
+            }
+            // Nothing to look for: the `~` stays, so the query fails to parse instead of matching every text.
+            if !text.is_empty() {
+                let escaped = text.chars().fold(String::new(), |mut s, ch| {
+                    if "\\^$.|?*+()[]{}".contains(ch) {
+                        s.push('\\');
+                    }
+                    s.push(ch);
+                    s
+                });
+                out.push_str(&format!("{{\"$regex\":{},\"$options\":\"i\"}}", serde_json::Value::String(escaped)));
+                i = (k + usize::from(q.is_some())).min(chars.len());
                 continue;
             }
         }
@@ -677,6 +711,13 @@ mod tests {
         assert_eq!(d.get_str("s").unwrap(), "ObjectId(x)");
         assert!(parse_doc("{a: new Date('2024-01-02T03:04:05Z')}").unwrap().get_datetime("a").is_ok());
         assert!(parse_doc("[1]").is_err());
+        let d = parse_doc(r#"{a: ~"1.5 (x)", b: ~abc, c: { $not: ~'it\'s' }, d: "~x"}"#).unwrap();
+        assert_eq!(d.get_document("a").unwrap(), &doc! { "$regex": r"1\.5 \(x\)", "$options": "i" });
+        assert_eq!(d.get_document("b").unwrap().get_str("$regex"), Ok("abc"));
+        assert_eq!(d.get_document("c").unwrap().get_document("$not").unwrap().get_str("$regex"), Ok("it's"));
+        assert_eq!(d.get_str("d"), Ok("~x"));
+        assert_eq!(parse_doc("{a: ~Zürich}").unwrap().get_document("a").unwrap().get_str("$regex"), Ok("Zürich"));
+        assert!(parse_doc(r#"{a: ~""}"#).is_err() && parse_doc("{a: ~}").is_err());
         assert_eq!(parse_pipeline("[{$match: {}}, {$out: 'x'}]").map(|p| has_write_stage(&p)), Ok(true));
     }
 

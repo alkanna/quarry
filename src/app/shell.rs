@@ -18,6 +18,8 @@ pub(super) fn query_script(coll: &str, filter: &str) -> String {
         return format!("async function run() {{\n\treturn await {f}\n}}");
     }
     let f = if f.is_empty() { "{}" } else { f };
+    let expanded = db::expand_shortcuts(f);
+    let f = expanded.as_deref().unwrap_or(f);
     format!("async function run() {{\n\treturn await {}.find({f})\n}}", collection_ref(coll))
 }
 
@@ -461,6 +463,7 @@ mod tests {
         assert_eq!(query_script("orders", "{ a: 1 }"), "async function run() {\n\treturn await orders.find({ a: 1 })\n}");
         assert!(query_script("my.coll", "").contains("db.collection(\"my.coll\").find({})"));
         assert!(query_script("x", "db.x.find({});").ends_with("return await db.x.find({})\n}"));
+        assert!(query_script("orders", "{ name: ~\"a.b\" }").contains(r#"$regex: "a\\.b", $options: "i""#));
         assert_eq!(dangerous_words("db.x.deleteMany({})"), ["delete"]);
         assert_eq!(dangerous_words("db.x.aggregate([{ $merge: { into: 'y' } }])"), ["$merge"]);
     }
