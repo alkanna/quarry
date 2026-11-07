@@ -6,6 +6,7 @@ mod db;
 #[cfg(target_os = "macos")]
 mod menu;
 mod ssh;
+mod ui;
 mod update;
 
 fn main() -> eframe::Result {

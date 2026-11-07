@@ -1,5 +1,6 @@
+use crate::ui::{cells::*, theme::*, widgets::*};
 use crate::db::{self, Msg, PAGE_SIZE, Query, ShellKind, Target, UndoAction, UndoKind, Worker};
-use eframe::egui::{self, Color32, CornerRadius, FontId, Key, RichText, Sense, Stroke, TextFormat, text::LayoutJob};
+use eframe::egui::{self, Color32, FontId, Key, RichText, Sense, Stroke, TextFormat, text::LayoutJob};
 use mongodb::Client;
 use mongodb::bson::{Bson, Document, doc, oid::ObjectId};
 use serde::{Deserialize, Serialize};
@@ -9,223 +10,9 @@ use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-// Colors come from the palette of the theme in use, so they are functions, not constants.
-// The dark one is the original's `.dark-mode` theme.
-struct Palette {
-    bg: Color32,
-    panel: Color32,
-    raised: Color32,
-    hover: Color32,
-    border: Color32,
-    text: Color32,
-    bright: Color32,
-    muted: Color32,
-    faint: Color32,
-    primary: Color32,
-    alert: Color32,
-    success: Color32,
-    warning: Color32,
-    c_string: Color32,
-    c_number: Color32,
-    c_true: Color32,
-    c_false: Color32,
-    c_date: Color32,
-    c_null: Color32,
-    c_oid: Color32,
-    c_obj: Color32,
-    key: Color32,
-    c_link: Color32,
-    highlight: Color32,
-    c_keyword: Color32,
-    /// Alternate table rows.
-    stripe: Color32,
-    /// An off switch.
-    track: Color32,
-    faint_bg: Color32,
-    /// Inputs and control troughs. In light mode the page white is too close to cards to use.
-    well: Color32,
-}
-
-const DARK_PAL: Palette = Palette {
-    bg: Color32::from_rgb(0x10, 0x12, 0x14),
-    panel: Color32::from_rgb(0x16, 0x18, 0x1b),
-    raised: Color32::from_rgb(0x1c, 0x1f, 0x22),
-    hover: Color32::from_rgb(0x27, 0x2b, 0x2f),
-    border: Color32::from_rgb(0x32, 0x37, 0x3c),
-    text: Color32::from_rgb(0xcc, 0xcc, 0xcc),
-    bright: Color32::from_rgb(0xfa, 0xfa, 0xfa),
-    muted: Color32::from_rgb(0x8a, 0x8f, 0x96),
-    faint: Color32::from_rgb(0x5f, 0x64, 0x69),
-    primary: Color32::from_rgb(134, 201, 249),
-    alert: Color32::from_rgb(247, 110, 133),
-    success: Color32::from_rgb(142, 242, 140),
-    warning: Color32::from_rgb(247, 208, 110),
-    c_string: Color32::from_rgb(0xf2, 0xa3, 0x65),
-    c_number: Color32::from_rgb(0x5c, 0xa5, 0xd6),
-    c_true: Color32::from_rgb(0x83, 0xc7, 0x6b),
-    c_false: Color32::from_rgb(0xe5, 0x4d, 0x56),
-    c_date: Color32::from_rgb(0x66, 0xcc, 0xb4),
-    c_null: Color32::from_rgb(0x9e, 0x9e, 0x9e),
-    c_oid: Color32::from_rgb(0x00, 0xba, 0xc1),
-    c_obj: Color32::from_rgb(0xa3, 0xaa, 0xb5),
-    key: Color32::from_rgb(0xd7, 0xda, 0xe0),
-    c_link: Color32::from_rgb(0x72, 0xc3, 0xec),
-    highlight: Color32::from_rgba_premultiplied(40, 34, 18, 60),
-    c_keyword: Color32::from_rgb(0xc4, 0xa7, 0xe7),
-    stripe: Color32::from_rgb(0x19, 0x1b, 0x1e),
-    track: Color32::from_rgb(0x3a, 0x40, 0x46),
-    faint_bg: Color32::from_rgb(0x13, 0x15, 0x17),
-    well: Color32::from_rgb(0x10, 0x12, 0x14),
-};
-
-/// Same roles as the dark palette, darkened where needed to stay readable on white.
-const LIGHT_PAL: Palette = Palette {
-    bg: Color32::from_rgb(0xff, 0xff, 0xff),
-    panel: Color32::from_rgb(0xf3, 0xf4, 0xf6),
-    raised: Color32::from_rgb(0xfa, 0xfb, 0xfc),
-    hover: Color32::from_rgb(0xe4, 0xe7, 0xeb),
-    border: Color32::from_rgb(0xd2, 0xd6, 0xdb),
-    text: Color32::from_rgb(0x2b, 0x2f, 0x34),
-    bright: Color32::from_rgb(0x0d, 0x0f, 0x12),
-    muted: Color32::from_rgb(0x5f, 0x66, 0x6e),
-    faint: Color32::from_rgb(0x8c, 0x93, 0x9a),
-    primary: Color32::from_rgb(0x1f, 0x6f, 0xc0),
-    alert: Color32::from_rgb(0xc8, 0x28, 0x46),
-    success: Color32::from_rgb(0x1f, 0x87, 0x30),
-    warning: Color32::from_rgb(0xa8, 0x6a, 0x00),
-    c_string: Color32::from_rgb(0xb0, 0x55, 0x00),
-    c_number: Color32::from_rgb(0x1d, 0x5f, 0xa8),
-    c_true: Color32::from_rgb(0x2e, 0x7d, 0x1f),
-    c_false: Color32::from_rgb(0xc6, 0x28, 0x28),
-    c_date: Color32::from_rgb(0x00, 0x7d, 0x68),
-    c_null: Color32::from_rgb(0x75, 0x75, 0x75),
-    c_oid: Color32::from_rgb(0x00, 0x7f, 0x87),
-    c_obj: Color32::from_rgb(0x5a, 0x63, 0x6e),
-    key: Color32::from_rgb(0x24, 0x29, 0x2f),
-    c_link: Color32::from_rgb(0x0b, 0x6a, 0xad),
-    highlight: Color32::from_rgba_premultiplied(64, 52, 10, 64),
-    c_keyword: Color32::from_rgb(0x7a, 0x3e, 0xb5),
-    stripe: Color32::from_rgb(0xf6, 0xf7, 0xf8),
-    track: Color32::from_rgb(0xc4, 0xc9, 0xcf),
-    faint_bg: Color32::from_rgb(0xf8, 0xf9, 0xfa),
-    well: Color32::from_rgb(0xec, 0xee, 0xf1),
-};
-
-/// Set at the start of each frame from egui's resolved theme.
-static LIGHT_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-fn pal() -> &'static Palette {
-    if LIGHT_MODE.load(std::sync::atomic::Ordering::Relaxed) { &LIGHT_PAL } else { &DARK_PAL }
-}
-
-macro_rules! colors {
-    ($($name:ident: $field:ident),* $(,)?) => {
-        $(
-            #[allow(non_snake_case)]
-            fn $name() -> Color32 {
-                pal().$field
-            }
-        )*
-    };
-}
-
-colors!(BG: bg, PANEL: panel, RAISED: raised, HOVER: hover, BORDER: border, TEXT: text, BRIGHT: bright, MUTED: muted, FAINT: faint, PRIMARY: primary, ALERT: alert, SUCCESS: success, WARNING: warning, C_STRING: c_string, C_NUMBER: c_number, C_TRUE: c_true, C_FALSE: c_false, C_DATE: c_date, C_NULL: c_null, C_OID: c_oid, C_OBJ: c_obj, KEY: key, C_LINK: c_link, HIGHLIGHT: highlight, C_KEYWORD: c_keyword);
-
-/// `c` at `alpha` out of 255, for tints over the background.
-fn tint(c: Color32, alpha: u8) -> Color32 {
-    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), alpha)
-}
-const SIDEBAR_W: f32 = 250.0;
-
-// Type scale: every text size in the app is one of these.
-/// Section captions, badges and hints.
-const TXT_CAPTION: f32 = 11.0;
-/// Secondary text: chips, notes, counts.
-const TXT_SMALL: f32 = 12.0;
-/// Body, buttons, inputs and code.
-const TXT_BODY: f32 = 12.5;
-/// Names in lists: connections, databases, collections.
-const TXT_TITLE: f32 = 14.0;
-/// Dialog titles and the collection heading.
-const TXT_HEADING: f32 = 17.0;
-
-/// Height of every button and single-line input.
-const BUTTON_H: f32 = 24.0;
-
-// Corner radii: small for rows and glyphs, medium for widgets and cards, large for popups and dialogs.
-const R_SM: u8 = 4;
-const R_MD: u8 = 8;
-const R_LG: u8 = 12;
-const SIDE_ROW_H: f32 = 28.0;
-const HEADER_H: f32 = 40.0;
 const SYSTEM_DBS: [&str; 3] = ["admin", "config", "local"];
 /// Columns shown before the user picks their own; drawing every field of a wide collection is slow.
 const DEFAULT_COLS: usize = 8;
-const ROW_H: f32 = 28.0;
-const OPTIMAL_MIN_W: f32 = 40.0;
-const OPTIMAL_MAX_W: f32 = 400.0;
-const OPTIMAL_PAD: f32 = 10.0;
-const CELL_PAD: f32 = 16.0;
-const NUM_W: f32 = 40.0;
-/// Fixed so an open editor never pushes its panel wider.
-const EDITOR_W: f32 = 230.0;
-
-/// Web links stand out from plain text. Hex ids stored as strings keep the string colour so the
-/// colour always matches the type shown next to them.
-#[derive(PartialEq)]
-enum StrKind {
-    Plain,
-    Url,
-}
-
-fn str_kind(s: &str) -> StrKind {
-    if (s.starts_with("http://") || s.starts_with("https://")) && !s.contains(char::is_whitespace) {
-        StrKind::Url
-    } else {
-        StrKind::Plain
-    }
-}
-
-fn color_of(b: &Bson) -> Color32 {
-    match b {
-        Bson::String(s) => match str_kind(s) {
-            StrKind::Url => C_LINK(),
-            StrKind::Plain if s.is_empty() => C_NULL(),
-            StrKind::Plain => C_STRING(),
-        },
-        Bson::Double(_) | Bson::Int32(_) | Bson::Int64(_) | Bson::Decimal128(_) => C_NUMBER(),
-        Bson::Boolean(true) => C_TRUE(),
-        Bson::Boolean(false) => C_FALSE(),
-        Bson::DateTime(_) | Bson::Timestamp(_) => C_DATE(),
-        Bson::Null | Bson::Undefined => C_NULL(),
-        Bson::ObjectId(_) => C_OID(),
-        _ => C_OBJ(),
-    }
-}
-
-fn leaf_text(b: &Bson) -> String {
-    match b {
-        Bson::String(s) => format!("\"{s}\""),
-        Bson::ObjectId(o) => format!("ObjectId(\"{}\")", o.to_hex()),
-        Bson::DateTime(t) => t.try_to_rfc3339_string().unwrap_or_else(|_| t.timestamp_millis().to_string()),
-        Bson::Int64(n) => n.to_string(),
-        Bson::Document(d) => format!("{{{} fields}}", d.len()),
-        Bson::Array(a) => format!("[{} items]", a.len()),
-        other => db::compact(other),
-    }
-}
-
-/// The original's string display rule: lodash `_.truncate(value, {length: 100})`, so at most 100
-/// characters including the trailing "..." (fieldTypes.string.toDisplayString, renderer line 30804).
-const STRING_DISPLAY_MAX: usize = 100;
-
-fn truncate_display(s: &str) -> String {
-    if s.chars().count() <= STRING_DISPLAY_MAX {
-        s.to_string()
-    } else {
-        s.chars().take(STRING_DISPLAY_MAX - 3).chain("...".chars()).collect()
-    }
-}
 
 /// Colours JSON and shell-style query text by token, for every code editor in the app.
 fn json_job(text: &str) -> LayoutJob {
@@ -1034,90 +821,6 @@ impl Find {
         let Some(before) = self.hits(text).get(self.cur).and_then(|h| text.get(..h.start)) else { return };
         let r = out.galley.pos_from_cursor(egui::text::CCursor::new(before.chars().count()));
         ui.scroll_to_rect(r.translate(out.galley_pos.to_vec2()), Some(egui::Align::Center));
-    }
-}
-
-/// A table cell. With `summarize`, an object or array whose JSON would not fit the cell shows as
-/// "{12 fields}" or "[500 items]" instead of its first characters; small ones stay in full.
-fn column_job(v: &Bson, summarize: bool) -> LayoutJob {
-    let job = cell_job(v);
-    if summarize && job.text.len() >= CELL_PREVIEW_MAX {
-        let text = match v {
-            Bson::Document(d) => format!("{{{} fields}}", d.len()),
-            Bson::Array(a) => format!("[{} items]", a.len()),
-            _ => return job,
-        };
-        let mut j = LayoutJob::default();
-        j.append(&text, 0.0, mono(C_OBJ()));
-        return j;
-    }
-    job
-}
-
-/// Characters of a cell preview, the original's cut for objects and arrays
-/// (fieldTypes.object.toDisplayString, renderer line 30953: substring(0, 150)).
-const CELL_PREVIEW_MAX: usize = 150;
-
-/// A table cell as coloured text, like the original's table: strings in quotes, and objects and
-/// arrays as a short coloured preview of their contents, so nested data keeps its type colours.
-fn cell_job(v: &Bson) -> LayoutJob {
-    const MAX: usize = CELL_PREVIEW_MAX;
-    fn push(job: &mut LayoutJob, s: &str, c: Color32) -> bool {
-        let room = MAX.saturating_sub(job.text.len());
-        if room == 0 {
-            return false;
-        }
-        let t: String = s.chars().take(room).collect();
-        job.append(&t, 0.0, mono(c));
-        job.text.len() < MAX
-    }
-    fn walk(job: &mut LayoutJob, v: &Bson) -> bool {
-        match v {
-            Bson::Document(d) => {
-                if !push(job, "{", C_OBJ()) {
-                    return false;
-                }
-                for (i, (k, x)) in d.iter().enumerate() {
-                    if (i > 0 && !push(job, ", ", FAINT())) || !push(job, k, MUTED()) || !push(job, ": ", FAINT()) || !walk(job, x) {
-                        return false;
-                    }
-                }
-                push(job, "}", C_OBJ())
-            }
-            Bson::Array(a) => {
-                if !push(job, "[", C_OBJ()) {
-                    return false;
-                }
-                for (i, x) in a.iter().enumerate() {
-                    if (i > 0 && !push(job, ", ", FAINT())) || !walk(job, x) {
-                        return false;
-                    }
-                }
-                push(job, "]", C_OBJ())
-            }
-            Bson::String(s) if str_kind(s) == StrKind::Url => push(job, s, C_LINK()),
-            // Cut before replacing: a cell shows 100 characters, the string may hold megabytes.
-            Bson::String(s) => push(job, &format!("\"{}\"", truncate_display(&s.chars().take(STRING_DISPLAY_MAX + 1).collect::<String>().replace('\n', " "))), color_of(v)),
-            // The original shows binary from 100 bytes as "<too long binary>" (fieldTypes.binary, 31012).
-            Bson::Binary(b) if b.bytes.len() >= 100 => push(job, &format!("BinData({} bytes)", b.bytes.len()), FAINT()),
-            Bson::ObjectId(o) => push(job, &o.to_hex(), C_OID()),
-            other => push(job, &leaf_text(other), color_of(other)),
-        }
-    }
-    let mut job = LayoutJob::default();
-    walk(&mut job, v);
-    job
-}
-
-/// Short text for a table cell. Objects and arrays are summarised, never serialised, so wide
-/// documents stay cheap to draw.
-fn cell_text(b: &Bson) -> String {
-    match b {
-        Bson::String(s) => s.chars().take(120).collect(),
-        Bson::ObjectId(o) => o.to_hex(),
-        Bson::Document(d) => format!("{{{} fields}}", d.len()),
-        Bson::Array(a) => format!("[{} items]", a.len()),
-        other => leaf_text(other),
     }
 }
 
@@ -2363,13 +2066,6 @@ fn default_script(coll: &str) -> String {
     format!("async function run() {{\n  return await {target}.find({{}}).limit(20).toArray();\n}}")
 }
 
-/// A menu that stays open while you type or click inside it, closing on a click outside or Esc.
-/// Plain egui menus close on any click inside, which made their text boxes unusable.
-fn sticky_menu(ui: &mut egui::Ui, title: String, content: impl FnOnce(&mut egui::Ui)) {
-    use egui::containers::menu::{MenuButton, MenuConfig};
-    MenuButton::new(title).config(MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)).ui(ui, content);
-}
-
 /// Recent Query, Sort and Project inputs of this collection; picking one fills that box.
 /// Like the original's history menu (onHistory, renderer line 96157): each list starts with `{}`
 /// to clear the box, and Sort also offers the key of every index of the collection.
@@ -2443,92 +2139,6 @@ fn library_menu(ui: &mut egui::Ui, lib: &[SavedQuery], new_name: &mut String, pi
             }
         });
         ui.label(RichText::new("Saving under an existing name replaces it.").size(TXT_CAPTION).color(FAINT()));
-    });
-}
-
-/// The one style for uppercase labels over a group: sections, lists, menus and column headers.
-fn caption_text(text: impl Into<String>) -> RichText {
-    RichText::new(text).size(TXT_CAPTION).strong().color(MUTED())
-}
-
-fn caption(ui: &mut egui::Ui, text: impl Into<String>) -> egui::Response {
-    ui.label(caption_text(text))
-}
-
-/// A titled card holding a group of settings.
-fn settings_section(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
-    caption(ui, title);
-    ui.add_space(2.0);
-    card(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.spacing_mut().item_spacing.y = 6.0;
-        add(ui);
-    });
-    ui.add_space(10.0);
-}
-
-/// One setting: its name and a short explanation on the left, the control on the right.
-fn setting_row(ui: &mut egui::Ui, title: &str, desc: &str, control: impl FnOnce(&mut egui::Ui)) {
-    ui.horizontal(|ui| {
-        let w = ui.available_width();
-        ui.vertical(|ui| {
-            ui.set_width((w - 230.0).max(160.0));
-            ui.label(RichText::new(title).size(TXT_TITLE).color(BRIGHT()));
-            ui.add(egui::Label::new(RichText::new(desc).size(TXT_SMALL).color(MUTED())).wrap());
-        });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), control);
-    });
-}
-
-/// "−  n  +" for a small whole number (the control slot is right-to-left, so added in reverse).
-fn stepper(ui: &mut egui::Ui, value: &mut usize, min: usize, max: usize) {
-    egui::Frame::new().fill(pal().well).corner_radius(R_MD).inner_margin(3).show(ui, |ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
-        if ui.add_enabled(*value < max, egui::Button::new(RichText::new("+").size(TXT_TITLE)).corner_radius(R_SM)).clicked() {
-            *value += 1;
-        }
-        ui.add_sized([34.0, 22.0], egui::Label::new(RichText::new(value.to_string()).size(TXT_TITLE).color(BRIGHT())));
-        if ui.add_enabled(*value > min, egui::Button::new(RichText::new("−").size(TXT_TITLE)).corner_radius(R_SM)).clicked() {
-            *value -= 1;
-        }
-    });
-}
-
-/// An on/off switch.
-fn toggle(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
-    let (rect, mut r) = ui.allocate_exact_size(egui::vec2(38.0, 22.0), Sense::click());
-    if r.clicked() {
-        *on = !*on;
-        r.mark_changed();
-    }
-    let t = ui.ctx().animate_bool(r.id, *on);
-    let enabled = ui.is_enabled();
-    let mut bg = if enabled { pal().track.lerp_to_gamma(PRIMARY(), t) } else { HOVER() };
-    if enabled && r.hovered() {
-        bg = shade(bg, if r.is_pointer_button_down_on() { 0.24 } else { 0.12 });
-    }
-    ui.painter().rect_filled(rect, rect.height() / 2.0, bg);
-    let x = egui::lerp(rect.left() + 11.0..=rect.right() - 11.0, t);
-    // The knob grows a little while pressed, like a macOS switch.
-    let knob = if enabled && r.is_pointer_button_down_on() { 9.0 } else { 8.0 };
-    ui.painter().circle_filled(egui::pos2(x, rect.center().y), knob, if enabled { Color32::from_gray(0xfa) } else { MUTED() });
-    r.on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
-/// A row of joined buttons where exactly one is chosen.
-fn segmented<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options: &[(T, &str)]) {
-    egui::Frame::new().fill(pal().well).corner_radius(R_MD).inner_margin(3).show(ui, |ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
-        // In a right-to-left row, add in reverse so the options still read left to right.
-        let rtl = ui.layout().main_dir() == egui::Direction::RightToLeft;
-        let order: Vec<&(T, &str)> = if rtl { options.iter().rev().collect() } else { options.iter().collect() };
-        for (v, label) in order {
-            let on = *value == *v;
-            let b = egui::Button::new(RichText::new(*label).size(TXT_BODY).color(if on { BG() } else { TEXT() })).fill(state_fill(ui, if on { PRIMARY() } else { Color32::TRANSPARENT })).corner_radius(R_SM);
-            if ui.add(b).clicked() {
-                *value = *v;
-            }
-        }
     });
 }
 
@@ -3971,65 +3581,6 @@ impl App {
     }
 }
 
-/// Visuals for both themes; egui picks one from the system or the Appearance setting.
-fn style(ctx: &egui::Context) {
-    for (theme, p) in [(egui::Theme::Dark, &DARK_PAL), (egui::Theme::Light, &LIGHT_PAL)] {
-        ctx.set_visuals_of(theme, visuals(theme, p));
-    }
-    ctx.all_styles_mut(|s| {
-        s.spacing.item_spacing = egui::vec2(8.0, 6.0);
-        s.spacing.button_padding = egui::vec2(10.0, 4.0);
-        // Every button and single-line input is this tall, so toolbars line up.
-        s.spacing.interact_size.y = BUTTON_H;
-        use egui::{FontFamily::*, TextStyle};
-        s.text_styles = [
-            (TextStyle::Small, FontId::new(TXT_CAPTION, Proportional)),
-            (TextStyle::Body, FontId::new(TXT_BODY, Proportional)),
-            (TextStyle::Button, FontId::new(TXT_BODY, Proportional)),
-            (TextStyle::Monospace, FontId::new(TXT_BODY, Monospace)),
-            (TextStyle::Heading, FontId::new(TXT_HEADING, Proportional)),
-        ]
-        .into();
-        // No bounce past the edge of lists.
-        s.spacing.scroll.kinetic.rubber_band = false;
-        // Scrollbars stay faintly visible wherever content overflows, so long lists and menus
-        // show there is more without hovering them first.
-        s.spacing.scroll.dormant_handle_opacity = 0.5;
-    });
-}
-
-fn visuals(theme: egui::Theme, p: &Palette) -> egui::Visuals {
-    let mut v = theme.default_visuals();
-    v.panel_fill = p.panel;
-    v.window_fill = p.raised;
-    v.extreme_bg_color = p.bg;
-    v.faint_bg_color = p.faint_bg;
-    v.window_stroke = Stroke::new(1.0, p.border);
-    v.selection.bg_fill = tint(p.primary, 48);
-    v.selection.stroke = Stroke::new(1.0, p.primary);
-    v.hyperlink_color = p.primary;
-    v.override_text_color = Some(p.text);
-    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, p.border);
-    // Translucent so a button reads as a button on any surface: panel, card or dialog.
-    v.widgets.inactive.weak_bg_fill = tint(p.text, 18);
-    v.widgets.hovered.weak_bg_fill = tint(p.text, 34);
-    v.widgets.active.weak_bg_fill = tint(p.text, 46);
-    v.widgets.open.weak_bg_fill = tint(p.text, 46);
-    // Faint outline on hover: the only hover cue for inputs, checkboxes and filled buttons.
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0, tint(p.text, 60));
-    v.widgets.active.bg_stroke = Stroke::new(1.0, tint(p.text, 90));
-    v.widgets.open.bg_stroke = Stroke::new(1.0, tint(p.text, 60));
-    v.text_edit_bg_color = Some(p.well);
-    // Checkboxes and radios fill with bg_fill and have no stroke, so it must stand out from cards.
-    v.widgets.inactive.bg_fill = p.track;
-    v.widgets.hovered.bg_fill = p.track.lerp_to_gamma(p.text, 0.15);
-    v.widgets.active.bg_fill = p.track.lerp_to_gamma(p.text, 0.3);
-    for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.noninteractive] {
-        w.corner_radius = CornerRadius::same(R_MD);
-    }
-    v
-}
-
 enum StageAct {
     Edited(usize),
     Toggled(usize),
@@ -4166,43 +3717,6 @@ fn stage_samples(ui: &mut egui::Ui, s: &mut Stage, i: usize, acts: &mut Vec<Stag
     });
 }
 
-const CHIP_H: f32 = 22.0;
-
-/// The pill look shared by `chip`, `badge` and `paint_tag`. Only colors change with `state` (0 idle,
-/// 1 hovered, 2 pressed); the rect never does, because egui buttons with a custom stroke lose a pixel
-/// on hover. `fg` only colors a chip that is on; one that is off is muted.
-fn paint_chip(p: &egui::Painter, rect: egui::Rect, text: std::sync::Arc<egui::Galley>, fg: Color32, on: bool, state: usize) {
-    let (text_c, line, fill) = if on {
-        (fg, tint(fg, 150), tint(fg, [34, 56, 78][state]))
-    } else {
-        (if state > 0 { TEXT() } else { MUTED() }, BORDER(), [Color32::TRANSPARENT, tint(TEXT(), 34), tint(TEXT(), 46)][state])
-    };
-    p.rect(rect, rect.height() / 2.0, fill, Stroke::new(1.0, line), egui::StrokeKind::Inside);
-    p.galley(rect.center() - text.size() / 2.0, text, text_c);
-}
-
-/// A rounded label in `fg`, or muted with a plain border when off, as in one-of choices like connection tags.
-fn chip(ui: &mut egui::Ui, text: &str, fg: Color32, on: bool) -> egui::Response {
-    let g = ui.painter().layout_no_wrap(text.to_string(), FontId::proportional(TXT_SMALL), Color32::PLACEHOLDER);
-    let (rect, r) = ui.allocate_exact_size(egui::vec2(g.size().x + 20.0, CHIP_H), Sense::click());
-    let state = if r.is_pointer_button_down_on() { 2 } else if r.hovered() { 1 } else { 0 };
-    paint_chip(ui.painter(), rect, g, fg, on, state);
-    if r.has_focus() {
-        ui.painter().rect_stroke(rect.expand(2.0), rect.height() / 2.0 + 2.0, ui.visuals().selection.stroke, egui::StrokeKind::Outside);
-    }
-    let enabled = ui.is_enabled();
-    r.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, enabled, on, text));
-    r.on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
-/// A chip that only labels something: no hover and no pointer.
-fn badge(ui: &mut egui::Ui, text: &str, fg: Color32) -> egui::Response {
-    let g = ui.painter().layout_no_wrap(text.to_string(), FontId::proportional(TXT_SMALL), Color32::PLACEHOLDER);
-    let (rect, r) = ui.allocate_exact_size(egui::vec2(g.size().x + 20.0, CHIP_H), Sense::hover());
-    paint_chip(ui.painter(), rect, g, fg, true, 0);
-    r
-}
-
 /// Offered in the connection form; any other text is a custom tag.
 const TAG_PRESETS: [&str; 5] = ["Production", "Staging", "Development", "Internal", "Local"];
 
@@ -4268,106 +3782,6 @@ fn conn_row(ui: &mut egui::Ui, c: &Conn, active: bool) -> egui::Response {
     })
 }
 
-/// `c` moved by `t` away from its own lightness: toward white barely changes an already light color.
-fn shade(c: Color32, t: f32) -> Color32 {
-    let light = (0.3 * c.r() as f32 + 0.59 * c.g() as f32 + 0.11 * c.b() as f32) / 255.0 > 0.55;
-    c.lerp_to_gamma(if light { Color32::BLACK } else { Color32::WHITE }, t)
-}
-
-/// A fill for the next widget that follows hover and press. egui uses a button's own fill for
-/// every state, so buttons with one would otherwise never react. Reads last frame's response
-/// of the widget about to be added, which has the next auto id.
-fn state_fill(ui: &egui::Ui, base: Color32) -> Color32 {
-    let r = ui.ctx().read_response(ui.next_auto_id()).filter(|r| r.enabled() && ui.is_enabled());
-    let k = match r {
-        Some(r) if r.is_pointer_button_down_on() => 2,
-        Some(r) if r.hovered() => 1,
-        _ => 0,
-    };
-    if base.a() == 0 {
-        // A transparent option shows the same hover as an ordinary button.
-        [base, tint(TEXT(), 34), tint(TEXT(), 46)][k]
-    } else if base.a() < 255 {
-        let [r, g, b, a] = base.to_srgba_unmultiplied();
-        let c = Color32::from_rgb(r, g, b);
-        [base, tint(c, a.saturating_mul(2)), tint(c, a.saturating_mul(3))][k]
-    } else {
-        [base, shade(base, 0.12), shade(base, 0.24)][k]
-    }
-}
-
-// Buttons come in four kinds, all BUTTON_H tall: `primary` for the main action, `ui.button` for the
-// rest, `quiet_button` for list rows and toolbar extras (framed only on hover), and `danger` for
-// destructive actions.
-
-/// Framed only while hovered or pressed: rows in lists and menus, and low-key toolbar actions.
-fn quiet_button<'a>(text: impl Into<egui::WidgetText>) -> egui::Button<'a> {
-    egui::Button::new(text).frame_when_inactive(false)
-}
-
-/// A destructive action: red text on an ordinary button, so it keeps the same height and hover.
-fn danger_button<'a>(text: impl Into<String>) -> egui::Button<'a> {
-    egui::Button::new(RichText::new(text).color(ALERT()))
-}
-
-fn danger(ui: &mut egui::Ui, text: impl Into<String>) -> egui::Response {
-    ui.add(danger_button(text))
-}
-
-fn primary(ui: &mut egui::Ui, text: &str, fill: Color32) -> egui::Response {
-    ui.add(primary_button(ui, text, fill))
-}
-
-/// For `add_enabled`; `primary` when it is always enabled.
-fn primary_button(ui: &egui::Ui, text: impl Into<String>, fill: Color32) -> egui::Button<'static> {
-    egui::Button::new(RichText::new(text).strong().color(BG())).fill(state_fill(ui, fill))
-}
-
-/// Every dialog gets the same frame; egui's popup frame has only 6 px of margin.
-fn dialog(id: egui::Id) -> egui::Modal {
-    let shadow = egui::Shadow { offset: [0, 6], blur: 20, spread: 0, color: Color32::from_black_alpha(50) };
-    egui::Modal::new(id).frame(egui::Frame::new().shadow(shadow).fill(RAISED()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_LG).inner_margin(18))
-}
-
-/// Label column width of dialog form grids, so fields in every section start at the same x.
-const FORM_LABEL_W: f32 = 84.0;
-
-/// A form row's label, at the top of its cell so it lines up with the first line of a tall field.
-fn form_label(ui: &mut egui::Ui, text: &str) {
-    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-        ui.add_space(4.0);
-        ui.label(text);
-    });
-}
-
-/// The Done row of a dialog that saves as it goes.
-fn done(ui: &mut egui::Ui) -> bool {
-    dialog_actions(ui, |ui| ui.button("Done").on_hover_text("Esc").clicked())
-}
-
-/// The button row at the bottom of a dialog: primary action first, then the rest, Cancel last.
-fn dialog_actions<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    ui.add_space(8.0);
-    ui.horizontal(add).inner
-}
-
-fn dialog_title(ui: &mut egui::Ui, text: impl Into<String>) {
-    ui.label(RichText::new(text).strong().size(TXT_HEADING).color(BRIGHT()));
-    ui.add_space(2.0);
-}
-
-/// The strip at the top of a view holding its inputs and actions.
-fn toolbar<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::InnerResponse<R> {
-    egui::Frame::new().fill(PANEL()).corner_radius(R_MD).inner_margin(10).show(ui, add)
-}
-
-/// A bordered box grouping related content: settings sections, pipeline stages, a document.
-fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::InnerResponse<R> {
-    egui::Frame::new().fill(RAISED()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, add)
-}
-
-const MONO_PX: f32 = TXT_BODY;
-
 #[derive(Clone, Copy)]
 enum DocsAct {
     CopyJs,
@@ -4388,57 +3802,6 @@ fn follow_ids(old: &[Document], new: &[Document], rows: impl Iterator<Item = usi
     }
     new.iter().enumerate().filter(|(_, d)| d.get("_id").is_some_and(|v| ids.contains(&db::compact(v)))).map(|(i, _)| i).collect()
 }
-
-/// Thumbtack toggle: filled when pinned, outlined when not.
-fn pin_button(ui: &mut egui::Ui, pinned: bool) -> egui::Response {
-    let (rect, r) = ui.allocate_exact_size(egui::vec2(BUTTON_H, BUTTON_H), Sense::click());
-    let color = if pinned { PRIMARY() } else if r.hovered() { MUTED() } else { FAINT() };
-    let p = ui.painter();
-    if r.hovered() {
-        p.rect_filled(rect, R_SM, HOVER());
-    }
-    let c = rect.center();
-    let head = egui::Rect::from_center_size(c + egui::vec2(0.0, -3.5), egui::vec2(8.0, 7.0));
-    if pinned {
-        p.rect_filled(head, R_SM, color);
-    } else {
-        p.rect_stroke(head, R_SM, Stroke::new(1.4, color), egui::StrokeKind::Inside);
-    }
-    p.line_segment([c + egui::vec2(-6.0, 1.0), c + egui::vec2(6.0, 1.0)], Stroke::new(1.6, color));
-    p.line_segment([c + egui::vec2(0.0, 1.0), c + egui::vec2(0.0, 7.5)], Stroke::new(1.4, color));
-    r
-}
-
-/// Six dots marking a drag handle; painted because the default fonts lack the braille glyph.
-fn grip(ui: &mut egui::Ui) {
-    let (rect, r) = ui.allocate_exact_size(egui::vec2(14.0, 26.0), Sense::hover());
-    let color = if r.hovered() { MUTED() } else { FAINT() };
-    for dx in [-2.5, 2.5] {
-        for dy in [-5.0, 0.0, 5.0] {
-            ui.painter().circle_filled(rect.center() + egui::vec2(dx, dy), 1.3, color);
-        }
-    }
-}
-
-/// Right-aligned end of a wrapping row: moves to its own line when the room left would make it
-/// overlap the items before it. Its width is remembered from the previous frame.
-fn right_group(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
-    let id = ui.scope_id().with("right-group-w");
-    let need = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(160.0);
-    if ui.available_size_before_wrap().x < need + 8.0 {
-        ui.end_row();
-    }
-    let r = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add);
-    ui.data_mut(|d| d.insert_temp(id, r.response.rect.width()));
-}
-
-/// A glyph button large enough to hit comfortably.
-fn icon_button(ui: &mut egui::Ui, glyph: &str, enabled: bool) -> egui::Response {
-    ui.add_enabled(enabled, egui::Button::new(RichText::new(glyph).size(TXT_TITLE)).min_size(egui::vec2(28.0, BUTTON_H)))
-}
-
-/// Width of the checkbox column in front of the row number.
-const CHECK_W: f32 = 22.0;
 
 /// Actions on one document or the checked ones, shared by the selection bar and the row menus.
 fn docs_menu(ui: &mut egui::Ui, n: usize, heading: bool) -> Option<DocsAct> {
@@ -4468,80 +3831,6 @@ fn docs_menu(ui: &mut egui::Ui, n: usize, heading: bool) -> Option<DocsAct> {
 /// The row menu: acts on every checked document when the row is one of them, else on that row.
 fn row_menu(ui: &mut egui::Ui, i: usize, checked: &BTreeSet<usize>) -> Option<(usize, DocsAct)> {
     docs_menu(ui, if checked.contains(&i) { checked.len() } else { 1 }, true).map(|a| (i, a))
-}
-
-/// A painted checkbox for table rows; the egui widget would take part in the row layout.
-fn check_box(ui: &egui::Ui, center: egui::Pos2, id: egui::Id, on: bool, partial: bool) -> egui::Response {
-    let rect = egui::Rect::from_center_size(center, egui::vec2(14.0, 14.0));
-    let r = ui.interact(rect.expand(3.0), id, Sense::click());
-    let filled = on || partial;
-    let edge = if filled { PRIMARY() } else if r.hovered() { MUTED() } else { FAINT() };
-    let p = ui.painter();
-    p.rect(rect, R_SM, if filled { PRIMARY() } else { Color32::TRANSPARENT }, Stroke::new(1.0, edge), egui::StrokeKind::Inside);
-    let s = Stroke::new(1.6, Color32::WHITE);
-    if on {
-        p.line(vec![center + egui::vec2(-3.5, 0.0), center + egui::vec2(-1.0, 2.5), center + egui::vec2(3.5, -2.5)], s);
-    } else if partial {
-        p.hline(center.x - 3.5..=center.x + 3.5, center.y, s);
-    }
-    r
-}
-
-fn mono(c: Color32) -> TextFormat {
-    TextFormat { font_id: FontId::monospace(MONO_PX), color: c, ..Default::default() }
-}
-
-/// egui's spinner asks for a new frame on every refresh. Behind other windows a static glyph
-/// lets the app go idle instead of redrawing at full rate for something nobody is watching.
-fn spin(ui: &mut egui::Ui) {
-    if ui.input(|i| i.viewport().focused.unwrap_or(true)) {
-        ui.spinner();
-    } else {
-        ui.label(RichText::new("…").color(FAINT()));
-    }
-}
-
-fn row_job(d: &Document, width: f32) -> LayoutJob {
-    let mut job = LayoutJob::default();
-    if let Some(id) = d.get("_id") {
-        job.append(&db::short(id), 0.0, mono(C_OID()));
-        job.append("  ", 0.0, mono(MUTED()));
-    }
-    for (k, v) in d.iter().filter(|(k, _)| *k != "_id").take(12) {
-        job.append(k, 0.0, mono(MUTED()));
-        job.append(": ", 0.0, mono(MUTED()));
-        job.append(&cell_text(v).chars().take(60).collect::<String>(), 0.0, mono(color_of(v)));
-        job.append("   ", 0.0, mono(MUTED()));
-    }
-    job.wrap = egui::text::TextWrapping { max_width: width, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
-    job
-}
-
-/// One clickable sidebar row painted by hand, so it reads as a list rather than a form.
-fn side_row(ui: &mut egui::Ui, height: f32, indent: f32, active: bool, paint: impl FnOnce(&egui::Painter, egui::Rect)) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), Sense::click());
-    let fill = if resp.is_pointer_button_down_on() {
-        tint(PRIMARY(), 45)
-    } else if active {
-        tint(PRIMARY(), 30)
-    } else if resp.hovered() {
-        HOVER()
-    } else {
-        Color32::TRANSPARENT
-    };
-    ui.painter().rect_filled(rect, R_MD, fill);
-    let inner = egui::Rect::from_min_max(rect.min + egui::vec2(8.0 + indent, 0.0), rect.max - egui::vec2(8.0, 0.0));
-    paint(ui.painter(), inner);
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
-fn chevron(p: &egui::Painter, c: egui::Pos2, open: bool, color: Color32) {
-    let pts = if open {
-        vec![c + egui::vec2(-4.0, -2.0), c + egui::vec2(4.0, -2.0), c + egui::vec2(0.0, 3.0)]
-    } else {
-        vec![c + egui::vec2(-2.0, -4.0), c + egui::vec2(3.0, 0.0), c + egui::vec2(-2.0, 4.0)]
-    };
-    p.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
 }
 
 impl eframe::App for App {
@@ -9808,17 +9097,6 @@ mod tests {
     }
 
     #[test]
-    fn big_objects_show_their_size() {
-        let small = Bson::Document(doc! { "name": "Ada", "tier": "gold" });
-        assert_eq!(column_job(&small, true).text, "{name: \"Ada\", tier: \"gold\"}");
-        let big = Bson::Document((0..40).map(|i| (format!("field{i}"), Bson::Int32(i))).collect());
-        assert_eq!(column_job(&big, true).text, "{40 fields}");
-        assert!(column_job(&big, false).text.starts_with("{field0: 0"));
-        let list = Bson::Array((0..500).map(Bson::Int32).collect());
-        assert_eq!(column_job(&list, true).text, "[500 items]");
-    }
-
-    #[test]
     fn date_field_suggestions() {
         let paths = vec!["status".to_string(), "createdAt".to_string(), "format".to_string()];
         let dates = vec!["createdAt".to_string()];
@@ -9942,13 +9220,6 @@ mod tests {
         assert!(query_script("x", "db.x.find({});").ends_with("return await db.x.find({})\n}"));
         assert_eq!(dangerous_words("db.x.deleteMany({})"), ["delete"]);
         assert_eq!(dangerous_words("db.x.aggregate([{ $merge: { into: 'y' } }])"), ["$merge"]);
-    }
-
-    #[test]
-    fn string_display_truncates_like_lodash() {
-        assert_eq!(truncate_display(&"a".repeat(100)).len(), 100);
-        let t = truncate_display(&"a".repeat(150));
-        assert_eq!((t.len(), t.ends_with("...")), (100, true));
     }
 
     #[test]
