@@ -104,3 +104,81 @@ impl App {
         self.worker.tool(exe, args, rx);
     }
 }
+impl App {
+    pub(crate) fn tool_dialog(&mut self, ui: &mut egui::Ui, f: &mut ToolForm, keep: &mut bool) {
+        let name = if f.coll.is_empty() { f.db.clone() } else { format!("{}.{}", f.db, f.coll) };
+        ui.set_width(560.0);
+        dialog_title(ui, if f.restore { format!("Restore into {name}") } else { format!("Dump {name}") });
+        let meta = self.conn(f.conn).map(|c| c.meta.clone()).unwrap_or_default();
+        let tool = if f.restore { "mongorestore" } else { "mongodump" };
+        let exe = find_exe(tool, if f.restore { &self.prefs.mongorestore } else { &self.prefs.mongodump });
+        ui.label(RichText::new(match &exe {
+            Some(p) => format!("Runs {} with this connection's address.", p.display()),
+            None => format!("{tool} was not found. Install the MongoDB Database Tools here, or set its path in Settings."),
+        }).size(TXT_SMALL).color(if exe.is_some() { MUTED() } else { WARNING() }));
+        if exe.is_none() {
+            self.install_tools_button(ui);
+        }
+        let tunneled = meta.ssh.is_some() || meta.proxy.is_some();
+        if tunneled {
+            ui.label(RichText::new("This connection goes through SSH or a proxy, which the MongoDB tools cannot use. Open an SSH port forward and use a direct connection instead.").color(WARNING()));
+        }
+        ui.add_space(6.0);
+        egui::Grid::new("toolform").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
+            form_label(ui, "Archive file");
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut f.path).desired_width(360.0));
+                if ui.button("Choose…").clicked() {
+                    let d = rfd::FileDialog::new();
+                    let picked = if f.restore { d.pick_file() } else { d.set_file_name(format!("{name}.archive.gz")).save_file() };
+                    if let Some(p) = picked {
+                        f.path = p.display().to_string();
+                        if f.restore {
+                            f.gzip = f.path.ends_with(".gz");
+                        }
+                    }
+                }
+            });
+            ui.end_row();
+            form_label(ui, "");
+            ui.checkbox(&mut f.gzip, "Compressed (gzip)");
+            ui.end_row();
+            if f.restore {
+                form_label(ui, "Database in the archive");
+                ui.add(egui::TextEdit::singleline(&mut f.from_db).desired_width(200.0)).on_hover_text("Restored under the name of this database when it differs");
+                ui.end_row();
+                form_label(ui, "Only collection");
+                ui.add(egui::TextEdit::singleline(&mut f.coll).hint_text("all").desired_width(200.0));
+                ui.end_row();
+                form_label(ui, "");
+                let col = if f.drop { ALERT() } else { TEXT() };
+                ui.checkbox(&mut f.drop, RichText::new("Drop each collection before restoring it").color(col));
+                ui.end_row();
+            }
+        });
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            let ok = exe.is_some() && !tunneled && !f.path.trim().is_empty() && (!f.restore || !f.from_db.trim().is_empty());
+            if ui.add_enabled(ok, primary_button(ui, if f.restore { "Restore…" } else { "Dump" }, if f.restore { WARNING() } else { PRIMARY() })).clicked() {
+                match stored_uri(f.conn) {
+                    Err(e) => self.err(uri_err(e)),
+                    Ok(uri) => {
+                        let coll = Some(f.coll.trim()).filter(|c| !c.is_empty());
+                        let path = f.path.trim();
+                        if f.restore {
+                            let args = db::restore_args(&uri, path, f.from_db.trim(), coll, &f.db, f.drop, f.gzip);
+                            let what = if f.drop { "Existing collections with the same names are dropped first. " } else { "" };
+                            self.modal = Some(Modal::Typed { title: format!("Restore {path} into {}? {what}Type the database name.", f.db), expect: f.db.clone(), typed: String::new(), action: Danger::Restore { conn: f.conn, args } });
+                        } else {
+                            self.start_tool(false, format!("Dump {name}"), db::dump_args(&uri, &f.db, coll, path, f.gzip));
+                        }
+                        *keep = false;
+                    }
+                }
+            }
+            if ui.button("Cancel").clicked() {
+                *keep = false;
+            }
+        });
+    }
+}
