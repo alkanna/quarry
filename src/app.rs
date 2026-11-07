@@ -1890,6 +1890,8 @@ enum TreeAct {
     Rename(Vec<String>),
     GoRef(String, Bson),
     EditDoc,
+    /// Open or close every container under the path; an empty path means the whole document.
+    Fold(Vec<String>, bool),
 }
 
 #[derive(Clone, Copy)]
@@ -2105,19 +2107,17 @@ fn highlighted(prefs: &UiPrefs, key: &str, path: &[String]) -> bool {
 }
 
 /// Right-click menu for one field, modelled on the original's fieldActions (renderer line 106562).
-fn fold_menu(ui: &mut egui::Ui, path: &[String], container: bool) -> Option<(Vec<String>, bool)> {
+fn fold_menu(ui: &mut egui::Ui, path: &[String], container: bool, acts: &mut Vec<TreeAct>) {
     ui.separator();
-    let mut f = None;
     if container && ui.button("Expand recursively").clicked() {
-        f = Some((path.to_vec(), true));
+        acts.push(TreeAct::Fold(path.to_vec(), true));
     }
     if ui.button("Expand all").clicked() {
-        f = Some((Vec::new(), true));
+        acts.push(TreeAct::Fold(Vec::new(), true));
     }
     if ui.button("Collapse all").clicked() {
-        f = Some((Vec::new(), false));
+        acts.push(TreeAct::Fold(Vec::new(), false));
     }
-    f
 }
 
 fn field_menu(ui: &mut egui::Ui, path: &[String], v: &Bson, editable: bool, highlighted: bool, acts: &mut Vec<TreeAct>) {
@@ -6647,6 +6647,10 @@ impl App {
         if !self.fold_busy && self.fold.as_ref().is_some_and(|f| f.0 == id) {
             self.fold = None;
         }
+        // Picked after this frame's headers ran, so applied after the clear above to reach the next frame.
+        if let Some(TreeAct::Fold(p, open)) = acts.iter().find(|a| matches!(a, TreeAct::Fold(..))) {
+            self.fold = Some((id, p.clone(), *open));
+        }
         if self.new_field.as_ref().is_some_and(|n| n.parent.is_empty()) {
             self.new_field_row(ui, &mut acts);
         }
@@ -6697,6 +6701,8 @@ impl App {
     fn handle_acts(&mut self, d: &Document, acts: Vec<TreeAct>) {
         for a in acts {
             match a {
+                // Applied by the document view, which knows the fold's id.
+                TreeAct::Fold(..) => {}
                 TreeAct::Start(p, v) => self.start_inline(d, p, v),
                 TreeAct::Cancel => {
                     self.inline = None;
@@ -6907,19 +6913,14 @@ impl App {
                     self.fold_busy = true;
                 }
                 let p = path.clone();
-                let mut fold = None;
                 let hl = highlighted(&self.prefs, &self.col_key(false), &p);
                 r.header_response.on_hover_text("Double-click to edit as JSON, right-click for more").context_menu(|ui| {
                     field_menu(ui, &p, v, editable, hl, acts);
-                    fold = fold_menu(ui, &p, true);
+                    fold_menu(ui, &p, true, acts);
                 });
-                if let Some((p, open)) = fold {
-                    self.fold = Some((id, p, open));
-                }
             }
             leaf => {
                 let hl = highlighted(&self.prefs, &self.col_key(false), path);
-                let mut fold = None;
                 let edited = !self.changed.is_empty() && self.changed.contains(&path.join("."));
                 let band = ui.painter().add(egui::Shape::Noop);
                 let row = egui::Frame::new().fill(if edited { tint(WARNING(), 34) } else if hl { HIGHLIGHT() } else { Color32::TRANSPARENT }).corner_radius(4).show(ui, |ui| ui.horizontal(|ui| {
@@ -6975,14 +6976,11 @@ impl App {
                         let p = path.clone();
                         r.union(key_r).context_menu(|ui| {
                             field_menu(ui, &p, leaf, editable, hl, acts);
-                            fold = fold_menu(ui, &p, false);
+                            fold_menu(ui, &p, false, acts);
                         });
                     }
                 }));
                 self.hover_band(ui, band, row.response.rect.y_range());
-                if let Some((p, open)) = fold {
-                    self.fold = Some((id, p, open));
-                }
             }
         }
     }
