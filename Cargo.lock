@@ -4091,6 +4091,7 @@ dependencies = [
  "arboard",
  "dirs",
  "eframe",
+ "egui",
  "futures-util",
  "image",
  "json5",
