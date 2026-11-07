@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.0](https://github.com/alkanna/quarry/compare/v0.13.0...v0.14.0) (2026-11-07)
+
+
+### Features
+
+* column header popover with sort, alignment, widths, data actions and shell writes ([#94](https://github.com/alkanna/quarry/issues/94)) ([22d5edd](https://github.com/alkanna/quarry/commit/22d5edd048f6209537d09226c2a91f6dcc3433d3))
+
 ## [0.13.0](https://github.com/alkanna/quarry/compare/v0.12.0...v0.13.0) (2026-11-07)
 
 
