@@ -3,7 +3,7 @@
 use super::*;
 
 impl App {
-    pub(crate) fn conn_dialog(&mut self, ui: &mut egui::Ui, f: &mut ConnForm, keep: &mut bool) {
+    pub(super) fn conn_dialog(&mut self, ui: &mut egui::Ui, f: &mut ConnForm, keep: &mut bool) {
         let mut save = false;
         let mut test = false;
         ui.set_width(600.0);

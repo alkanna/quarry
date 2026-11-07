@@ -3,7 +3,7 @@
 use super::*;
 
 impl App {
-    pub(crate) fn schema_view(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn schema_view(&mut self, ui: &mut egui::Ui) {
         let mut analyze = false;
         let mut acts: Vec<(String, u8)> = Vec::new();
         let t = &mut self.tabs[self.cur];

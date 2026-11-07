@@ -1,9 +1,9 @@
-//! The documents view: query bar, results table and list, columns and row selection.
+//! The documents view: layout, row selection and actions on selected documents.
 
 use super::*;
 
 #[derive(Clone, Copy)]
-pub(crate) enum DocsAct {
+pub(super) enum DocsAct {
     CopyJs,
     CopyJson,
     CopyLines,
@@ -15,7 +15,7 @@ pub(crate) enum DocsAct {
 }
 
 /// Positions in `new` of the documents at `rows` in `old`, matched by _id.
-pub(crate) fn follow_ids(old: &[Document], new: &[Document], rows: impl Iterator<Item = usize>) -> BTreeSet<usize> {
+pub(super) fn follow_ids(old: &[Document], new: &[Document], rows: impl Iterator<Item = usize>) -> BTreeSet<usize> {
     let ids: HashSet<String> = rows.filter_map(|i| old.get(i)?.get("_id").map(db::compact)).collect();
     if ids.is_empty() {
         return BTreeSet::new();
@@ -24,7 +24,7 @@ pub(crate) fn follow_ids(old: &[Document], new: &[Document], rows: impl Iterator
 }
 
 /// Actions on one document or the checked ones, shared by the selection bar and the row menus.
-pub(crate) fn docs_menu(ui: &mut egui::Ui, n: usize, heading: bool) -> Option<DocsAct> {
+pub(super) fn docs_menu(ui: &mut egui::Ui, n: usize, heading: bool) -> Option<DocsAct> {
     if heading {
         ui.label(RichText::new(if n == 1 { "Document".to_string() } else { format!("{n} selected documents") }).size(TXT_CAPTION).color(FAINT()));
     }
@@ -49,11 +49,12 @@ pub(crate) fn docs_menu(ui: &mut egui::Ui, n: usize, heading: bool) -> Option<Do
 }
 
 /// The row menu: acts on every checked document when the row is one of them, else on that row.
-pub(crate) fn row_menu(ui: &mut egui::Ui, i: usize, checked: &BTreeSet<usize>) -> Option<(usize, DocsAct)> {
+pub(super) fn row_menu(ui: &mut egui::Ui, i: usize, checked: &BTreeSet<usize>) -> Option<(usize, DocsAct)> {
     docs_menu(ui, if checked.contains(&i) { checked.len() } else { 1 }, true).map(|a| (i, a))
 }
+
 impl App {
-    pub(crate) fn collection(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn collection(&mut self, ui: &mut egui::Ui) {
         let Some(t) = self.t() else { return };
         let (coll, view) = (t.sel.coll.clone(), t.view);
         ui.horizontal_wrapped(|ui| {
@@ -91,7 +92,7 @@ impl App {
         }
     }
 
-    pub(crate) fn documents(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn documents(&mut self, ui: &mut egui::Ui) {
         let mut run = false;
         let mut explain = false;
         let mut code_lang = None;
@@ -237,7 +238,7 @@ impl App {
     }
 
     /// Table or JSON list of the current results, with the open document shown under its row.
-    pub(crate) fn results(&mut self, ui: &mut egui::Ui, agg: bool) {
+    pub(super) fn results(&mut self, ui: &mut egui::Ui, agg: bool) {
         // Following a reference while rendering can switch to another tab, so the docs go back by index.
         let cur = self.cur;
         let t = self.tm().unwrap();
@@ -284,7 +285,7 @@ impl App {
     }
 
     /// Row click: Cmd toggles the row's check, Shift checks a range, a plain click opens it.
-    pub(crate) fn row_click(&mut self, ui: &egui::Ui, agg: bool, i: usize) {
+    pub(super) fn row_click(&mut self, ui: &egui::Ui, agg: bool, i: usize) {
         let m = ui.input(|i| i.modifiers);
         if !agg && (m.command || m.shift) {
             self.toggle_check(i, m.shift);
@@ -303,7 +304,7 @@ impl App {
         }
     }
 
-    pub(crate) fn close_row(&mut self, key: (bool, usize)) {
+    pub(super) fn close_row(&mut self, key: (bool, usize)) {
         let t = self.tm().unwrap();
         t.expanded.remove(&key);
         if t.selected == Some(key) {
@@ -312,7 +313,7 @@ impl App {
         }
     }
 
-    pub(crate) fn toggle_check(&mut self, i: usize, range: bool) {
+    pub(super) fn toggle_check(&mut self, i: usize, range: bool) {
         let t = self.tm().unwrap();
         match t.check_anchor.filter(|_| range) {
             Some(a) => t.checked.extend(a.min(i)..=a.max(i)),
@@ -326,15 +327,15 @@ impl App {
     }
 
     /// The documents a row action applies to: every checked one when the row is checked, else that row.
-    pub(crate) fn act_targets(checked: &BTreeSet<usize>, docs: &[Document], i: usize) -> Vec<Document> {
+    pub(super) fn act_targets(checked: &BTreeSet<usize>, docs: &[Document], i: usize) -> Vec<Document> {
         if checked.contains(&i) { Self::checked_docs(checked, docs) } else { docs.get(i).cloned().into_iter().collect() }
     }
 
-    pub(crate) fn checked_docs(checked: &BTreeSet<usize>, docs: &[Document]) -> Vec<Document> {
+    pub(super) fn checked_docs(checked: &BTreeSet<usize>, docs: &[Document]) -> Vec<Document> {
         checked.iter().filter_map(|&j| docs.get(j).cloned()).collect()
     }
 
-    pub(crate) fn selection_bar(&mut self, ui: &mut egui::Ui, docs: &[Document]) {
+    pub(super) fn selection_bar(&mut self, ui: &mut egui::Ui, docs: &[Document]) {
         let n = self.t().unwrap().checked.len();
         // Hidden under dialogs, which would otherwise sit behind it.
         if n == 0 || self.modal.is_some() || self.insert.is_some() {
@@ -369,7 +370,7 @@ impl App {
         }
     }
 
-    pub(crate) fn docs_act(&mut self, ctx: &egui::Context, act: DocsAct, docs: Vec<Document>) {
+    pub(super) fn docs_act(&mut self, ctx: &egui::Context, act: DocsAct, docs: Vec<Document>) {
         if docs.is_empty() {
             return;
         }
@@ -434,7 +435,7 @@ impl App {
         }
     }
 
-    pub(crate) fn select(&mut self, agg: bool, i: usize, toggle: bool) {
+    pub(super) fn select(&mut self, agg: bool, i: usize, toggle: bool) {
         let t = self.tm().unwrap();
         let same = t.selected == Some((agg, i));
         t.selected = if same && toggle { None } else { Some((agg, i)) };
@@ -443,7 +444,7 @@ impl App {
         }
     }
 
-    pub(crate) fn export(&mut self) {
+    pub(super) fn export(&mut self) {
         let Some(target) = self.target() else { return self.err("Not connected.") };
         let file = rfd::FileDialog::new()
             .set_file_name(format!("{}.json", target.coll))

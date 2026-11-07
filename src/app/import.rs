@@ -3,7 +3,7 @@
 use super::*;
 
 impl App {
-    pub(crate) fn import_view(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn import_view(&mut self, ui: &mut egui::Ui) {
         let mut open_file = false;
         let mut start = false;
         let writable = self.sel_writable();

@@ -4,7 +4,7 @@ use super::*;
 
 /// The original's "optimal" column width (measureColumnWidth, renderer line 31273): the widest
 /// cell, kept between 40 and 400 px, plus 10 px. Our cells add 16 px of inner padding on top.
-pub(crate) fn optimal_width(ui: &egui::Ui, docs: &[Document], col: &str, summarize: bool) -> f32 {
+pub(super) fn optimal_width(ui: &egui::Ui, docs: &[Document], col: &str, summarize: bool) -> f32 {
     if docs.is_empty() {
         return 100.0 + CELL_PAD; // the original's fallback width
     }
@@ -18,7 +18,7 @@ pub(crate) fn optimal_width(ui: &egui::Ui, docs: &[Document], col: &str, summari
     widest.clamp(OPTIMAL_MIN_W, OPTIMAL_MAX_W) + OPTIMAL_PAD + CELL_PAD
 }
 
-pub(crate) fn visible_cols(p: Option<&ColPrefs>, fields: &[String], n: usize) -> Vec<String> {
+pub(super) fn visible_cols(p: Option<&ColPrefs>, fields: &[String], n: usize) -> Vec<String> {
     let base: Vec<String> = match p.and_then(|p| p.shown.clone()) {
         Some(v) => v,
         None => fields.iter().take(n).cloned().collect(),
@@ -28,8 +28,9 @@ pub(crate) fn visible_cols(p: Option<&ColPrefs>, fields: &[String], n: usize) ->
     out.extend(base.into_iter().filter(|c| !pinned.contains(c)));
     out
 }
+
 impl App {
-    pub(crate) fn columns_menu(&mut self, ui: &mut egui::Ui, agg: bool) {
+    pub(super) fn columns_menu(&mut self, ui: &mut egui::Ui, agg: bool) {
         let key = self.col_key(agg);
         let t = self.t().unwrap();
         let fields = if agg { t.agg_fields.clone() } else { t.fields.clone() };
@@ -123,7 +124,7 @@ impl App {
         }
     }
 
-    pub(crate) fn apply_col_acts(&mut self, key: &str, fields: &[String], acts: Vec<ColAct>) {
+    pub(super) fn apply_col_acts(&mut self, key: &str, fields: &[String], acts: Vec<ColAct>) {
         let n = self.prefs.default_cols;
         let p = self.prefs.cols.entry(key.to_string()).or_default();
         for a in acts {
@@ -182,7 +183,7 @@ impl App {
         self.save_prefs();
     }
 
-    pub(crate) fn doc_table(&mut self, ui: &mut egui::Ui, agg: bool, docs: &[Document], fields: &[String], base: u64) {
+    pub(super) fn doc_table(&mut self, ui: &mut egui::Ui, agg: bool, docs: &[Document], fields: &[String], base: u64) {
         let key = self.col_key(agg);
         let prefs = self.prefs.cols.get(&key).cloned().unwrap_or_default();
         let cols = visible_cols(Some(&prefs), fields, self.prefs.default_cols);
@@ -495,7 +496,7 @@ impl App {
         }
     }
 
-    pub(crate) fn doc_list(&mut self, ui: &mut egui::Ui, agg: bool, docs: &[Document]) {
+    pub(super) fn doc_list(&mut self, ui: &mut egui::Ui, agg: bool, docs: &[Document]) {
         let selected = self.t().unwrap().selected;
         let checked = if agg { BTreeSet::new() } else { self.t().unwrap().checked.clone() };
         let expanded = self.t().unwrap().expanded.clone();

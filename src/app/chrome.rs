@@ -4,7 +4,7 @@ use super::*;
 
 impl App {
     /// Keeps the open tabs and their inputs in the settings file, so the next launch reopens them.
-    pub(crate) fn remember_tabs(&mut self) {
+    pub(super) fn remember_tabs(&mut self) {
         if self.demo || self.shot.is_some() {
             return;
         }
@@ -42,7 +42,7 @@ impl App {
         }
     }
 
-    pub(crate) fn keys(&mut self, ctx: &egui::Context) {
+    pub(super) fn keys(&mut self, ctx: &egui::Context) {
         if self.modal.is_some() || self.insert.is_some() || self.json_edit.is_some() || self.users.is_some() {
             return;
         }
@@ -160,14 +160,14 @@ impl App {
         self.tree_filter.clear();
     }
 
-    pub(crate) fn go_tab(&mut self, i: usize) {
+    pub(super) fn go_tab(&mut self, i: usize) {
         if i != self.cur && i < self.tabs.len() {
             self.cur = i;
             self.reset_doc_state();
         }
     }
 
-    pub(crate) fn set_view(&mut self, v: View) {
+    pub(super) fn set_view(&mut self, v: View) {
         let Some(t) = self.tm().filter(|t| t.view != v) else { return };
         t.view = v;
         t.selected = None;
@@ -178,7 +178,7 @@ impl App {
     }
 
     /// "Saved … Undo" notice after a write, for 8 seconds.
-    pub(crate) fn toast(&mut self, ctx: &egui::Context) {
+    pub(super) fn toast(&mut self, ctx: &egui::Context) {
         const TOAST_S: u64 = 8;
         let Some((msg, at, undo_at)) = self.toast.clone() else { return };
         // Later writes push newer entries in front, so the toast's own entry is found by its time.
@@ -210,7 +210,7 @@ impl App {
         }
     }
 
-    pub(crate) fn screenshot(&mut self, ctx: &egui::Context) {
+    pub(super) fn screenshot(&mut self, ctx: &egui::Context) {
         let Some((path, frames, slot)) = &mut self.shot else { return };
         // AppKit draws the window buttons outside our frame, so the capture would lack them.
         // Stand-ins go where set_traffic_lights_position puts the real ones.
@@ -240,7 +240,7 @@ impl App {
         }
     }
 
-    pub(crate) fn top_bar(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn top_bar(&mut self, ui: &mut egui::Ui) {
         // Leaves room for the macOS window buttons, which sit over our header.
         let left = if cfg!(target_os = "macos") { 92 } else { 12 };
         let frame = egui::Frame::new().fill(PANEL()).inner_margin(egui::Margin { left, right: 12, top: 7, bottom: 7 });
@@ -298,7 +298,7 @@ impl App {
         });
     }
 
-    pub(crate) fn status_bar(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn status_bar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::bottom("status").frame(egui::Frame::new().fill(PANEL()).inner_margin(egui::Margin::symmetric(12, 5))).show(ui, |ui| {
             ui.horizontal(|ui| {
                 if self.prefs.show_fps {
@@ -339,7 +339,7 @@ impl App {
         });
     }
 
-    pub(crate) fn tab_strip(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn tab_strip(&mut self, ui: &mut egui::Ui) {
         let mut pick = None;
         let mut close = None;
         let mut dup = false;
@@ -477,7 +477,7 @@ impl App {
         }
     }
 
-    pub(crate) fn welcome(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn welcome(&mut self, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
             ui.add_space(120.0);
             ui.label(RichText::new("Pick a collection on the left").size(TXT_HEADING).color(BRIGHT()));
@@ -490,7 +490,7 @@ impl App {
         });
     }
 
-    pub(crate) fn new_conn_modal(&mut self) {
+    pub(super) fn new_conn_modal(&mut self) {
         self.conn_test = None;
         self.modal = Some(Modal::Conn(Box::new(ConnForm { uri: "mongodb://localhost:27017".into(), ..Default::default() })));
     }

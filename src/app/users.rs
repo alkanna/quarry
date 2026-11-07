@@ -3,7 +3,7 @@
 use super::*;
 
 /// "readWrite@shop, read" as role documents; a role without @db belongs to `default_db`.
-pub(crate) fn parse_roles(text: &str, default_db: &str) -> Vec<Bson> {
+pub(super) fn parse_roles(text: &str, default_db: &str) -> Vec<Bson> {
     text.split(',')
         .map(str::trim)
         .filter(|r| !r.is_empty())
@@ -14,13 +14,16 @@ pub(crate) fn parse_roles(text: &str, default_db: &str) -> Vec<Bson> {
         .collect()
 }
 
-pub(crate) fn roles_text(user: &Document) -> String {
+pub(super) fn roles_text(user: &Document) -> String {
     user.get_array("roles")
         .map(|a| a.iter().filter_map(|r| r.as_document()).map(|r| format!("{}@{}", r.get_str("role").unwrap_or_default(), r.get_str("db").unwrap_or_default())).collect::<Vec<_>>().join(", "))
         .unwrap_or_default()
 }
+
 impl App {
-    pub(crate) fn users_window(&mut self, ctx: &egui::Context) {
+    /// Users of all databases with their roles, custom roles, and user actions. Writes need the
+    /// connection unlocked; dropping a user asks for its name.
+    pub(super) fn users_window(&mut self, ctx: &egui::Context) {
         let Some(mut u) = self.users.take() else { return };
         let conn = u.conn;
         let writable = self.conn(conn).is_some_and(|c| c.writable);
@@ -179,7 +182,7 @@ impl App {
 
     /// Users of every database and custom roles, read from admin like the original
     /// (usersInfo / rolesInfo with showBuiltinRoles false, renderer ~156395).
-    pub(crate) fn load_users(&mut self, conn: u64) {
+    pub(super) fn load_users(&mut self, conn: u64) {
         let Some(client) = self.conn(conn).and_then(|c| c.client.clone()) else { return };
         self.worker.command(client.clone(), "admin".into(), doc! { "usersInfo": { "forAllDBs": true } }, "users");
         self.worker.command(client, "admin".into(), doc! { "rolesInfo": 1, "showBuiltinRoles": false }, "roles");

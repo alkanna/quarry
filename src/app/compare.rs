@@ -4,7 +4,7 @@ use super::*;
 
 impl App {
     /// Compares this tab's collection with another one, by `_id`, and copies differences over.
-    pub(crate) fn compare_view(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn compare_view(&mut self, ui: &mut egui::Ui) {
         let i = self.cur;
         let src = self.tabs[i].sel.clone();
         if self.tabs[i].compare.conn == 0 {

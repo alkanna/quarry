@@ -4,12 +4,12 @@ use super::*;
 
 /// Bun for the Shell: the path from Settings, else the usual install places. Apps opened from
 /// Finder do not get the terminal's PATH, so the common folders are checked directly.
-pub(crate) fn find_bun(setting: &str) -> Option<PathBuf> {
+pub(super) fn find_bun(setting: &str) -> Option<PathBuf> {
     find_exe("bun", setting)
 }
 
 /// A program from its Settings path, else from PATH and the usual install folders.
-pub(crate) fn find_exe(name: &str, setting: &str) -> Option<PathBuf> {
+pub(super) fn find_exe(name: &str, setting: &str) -> Option<PathBuf> {
     if !setting.trim().is_empty() {
         return Some(PathBuf::from(setting.trim()));
     }
@@ -22,11 +22,10 @@ pub(crate) fn find_exe(name: &str, setting: &str) -> Option<PathBuf> {
     let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
     dirs.into_iter().map(|d| d.join(&file)).find(|p| p.is_file())
 }
+
 impl App {
-    /// Users of all databases with their roles, custom roles, and user actions. Writes need the
-    /// connection unlocked; dropping a user asks for its name.
     /// Progress and output of mongodump or mongorestore.
-    pub(crate) fn tool_window(&mut self, ctx: &egui::Context) {
+    pub(super) fn tool_window(&mut self, ctx: &egui::Context) {
         if self.modal.is_some() {
             return;
         }
@@ -75,7 +74,7 @@ impl App {
         }
     }
 
-    pub(crate) fn install_tools(&mut self) {
+    pub(super) fn install_tools(&mut self) {
         if !self.tools_installing {
             self.tools_installing = true;
             self.worker.blocking(|| Msg::ToolsInstalled(crate::update::install_db_tools(&tools_dir()).map(Some)));
@@ -83,7 +82,7 @@ impl App {
     }
 
     /// The Install button, or a spinner while the download runs.
-    pub(crate) fn install_tools_button(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn install_tools_button(&mut self, ui: &mut egui::Ui) {
         if self.tools_installing {
             ui.horizontal(|ui| {
                 spin(ui);
@@ -94,7 +93,7 @@ impl App {
         }
     }
 
-    pub(crate) fn start_tool(&mut self, restore: bool, title: String, args: Vec<String>) {
+    pub(super) fn start_tool(&mut self, restore: bool, title: String, args: Vec<String>) {
         let (name, setting) = if restore { ("mongorestore", &self.prefs.mongorestore) } else { ("mongodump", &self.prefs.mongodump) };
         let Some(exe) = find_exe(name, setting) else {
             return self.err(format!("{name} was not found. Install the MongoDB Database Tools from Settings or set its path there."));
@@ -104,8 +103,9 @@ impl App {
         self.worker.tool(exe, args, rx);
     }
 }
+
 impl App {
-    pub(crate) fn tool_dialog(&mut self, ui: &mut egui::Ui, f: &mut ToolForm, keep: &mut bool) {
+    pub(super) fn tool_dialog(&mut self, ui: &mut egui::Ui, f: &mut ToolForm, keep: &mut bool) {
         let name = if f.coll.is_empty() { f.db.clone() } else { format!("{}.{}", f.db, f.coll) };
         ui.set_width(560.0);
         dialog_title(ui, if f.restore { format!("Restore into {name}") } else { format!("Dump {name}") });

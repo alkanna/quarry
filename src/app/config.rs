@@ -5,68 +5,68 @@ use super::*;
 /// Per-collection column setup, saved between launches.
 #[derive(Default, Serialize, Deserialize, Clone)]
 #[serde(default)]
-pub(crate) struct ColPrefs {
+pub(super) struct ColPrefs {
     /// Highlighted field paths (array positions removed), like the original's highlightedFields.
-    pub(crate) highlight: Vec<String>,
+    pub(super) highlight: Vec<String>,
     /// Chosen columns in order (dotted paths allowed). `None` means the first DEFAULT_COLS fields.
-    pub(crate) shown: Option<Vec<String>>,
+    pub(super) shown: Option<Vec<String>>,
     /// Pinned columns always come first.
-    pub(crate) pinned: Vec<String>,
-    pub(crate) widths: HashMap<String, f32>,
+    pub(super) pinned: Vec<String>,
+    pub(super) widths: HashMap<String, f32>,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
-pub(crate) struct UiPrefs {
+pub(super) struct UiPrefs {
     /// Open documents under their row (like the original) instead of in a side panel.
-    pub(crate) open_inline: bool,
-    pub(crate) table: bool,
+    pub(super) open_inline: bool,
+    pub(super) table: bool,
     /// Show the list of changes before writing staged edits. Off by default, as asked.
-    pub(crate) confirm_save: bool,
+    pub(super) confirm_save: bool,
     /// Write every edit right away and offer Undo, instead of collecting unsaved edits.
-    pub(crate) auto_save: bool,
+    pub(super) auto_save: bool,
     /// Every connection is writable and saving edits skips the change list.
-    pub(crate) always_writable: bool,
+    pub(super) always_writable: bool,
     /// Columns shown before the person picks their own.
-    pub(crate) default_cols: usize,
-    pub(crate) timeout_ms: u64,
+    pub(super) default_cols: usize,
+    pub(super) timeout_ms: u64,
     /// Path to Bun for the Shell; empty means find it automatically.
-    pub(crate) shell_runtime: String,
+    pub(super) shell_runtime: String,
     /// Shell scripts run, newest first, per "connection/database" like the original's history refs.
-    pub(crate) shell_histories: HashMap<String, Vec<String>>,
+    pub(super) shell_histories: HashMap<String, Vec<String>>,
     /// npm packages available to Shell scripts.
-    pub(crate) shell_packages: Vec<String>,
+    pub(super) shell_packages: Vec<String>,
     /// Per collection ("conn/db/coll"): recent Query, Sort and Project inputs.
-    pub(crate) history: HashMap<String, QueryHist>,
+    pub(super) history: HashMap<String, QueryHist>,
     /// Per collection: named saved queries and pipelines.
-    pub(crate) library: HashMap<String, Vec<SavedQuery>>,
+    pub(super) library: HashMap<String, Vec<SavedQuery>>,
     /// Tabs open when the app was last used, restored at launch.
-    pub(crate) open_tabs: Vec<SavedTab>,
-    pub(crate) cur_tab: usize,
-    pub(crate) cols: HashMap<String, ColPrefs>,
+    pub(super) open_tabs: Vec<SavedTab>,
+    pub(super) cur_tab: usize,
+    pub(super) cols: HashMap<String, ColPrefs>,
     /// The connection picked when the app was last used, connected again at launch.
-    pub(crate) last_conn: Option<u64>,
+    pub(super) last_conn: Option<u64>,
     /// Per "conn/db": fields that point to documents of another collection.
-    pub(crate) relations: HashMap<String, Vec<Relation>>,
+    pub(super) relations: HashMap<String, Vec<Relation>>,
     /// Paths to mongodump and mongorestore; empty means find them automatically.
-    pub(crate) mongodump: String,
-    pub(crate) mongorestore: String,
+    pub(super) mongodump: String,
+    pub(super) mongorestore: String,
     /// Install new releases from GitHub and restart into them.
-    pub(crate) auto_update: bool,
+    pub(super) auto_update: bool,
     /// Pipeline builder stages preview themselves after each change.
-    pub(crate) auto_preview: bool,
+    pub(super) auto_preview: bool,
     /// Frame rate and the time each frame takes, in the status bar.
-    pub(crate) show_fps: bool,
+    pub(super) show_fps: bool,
     /// Show the first characters of big objects and arrays in columns, as the original does,
     /// instead of "{12 fields}".
-    pub(crate) object_preview: bool,
-    pub(crate) appearance: Appearance,
+    pub(super) object_preview: bool,
+    pub(super) appearance: Appearance,
     /// The version that last ran, to show the changelog once after an update.
-    pub(crate) last_version: String,
+    pub(super) last_version: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Default)]
-pub(crate) enum Appearance {
+pub(super) enum Appearance {
     #[default]
     System,
     Light,
@@ -74,7 +74,7 @@ pub(crate) enum Appearance {
 }
 
 impl Appearance {
-    pub(crate) fn apply(self, ctx: &egui::Context) {
+    pub(super) fn apply(self, ctx: &egui::Context) {
         ctx.set_theme(match self {
             Appearance::System => egui::ThemePreference::System,
             Appearance::Light => egui::ThemePreference::Light,
@@ -85,17 +85,17 @@ impl Appearance {
 
 /// The original keeps 30 recent inputs per collection and kind (HISTORY_LENGTH_BY_COLLECTION,
 /// renderer line 195241), skipping empty ones and moving repeats to the top (addHistory, 195309).
-pub(crate) const HISTORY_LENGTH_BY_COLLECTION: usize = 30;
+pub(super) const HISTORY_LENGTH_BY_COLLECTION: usize = 30;
 
 #[derive(Default, Serialize, Deserialize, Clone)]
 #[serde(default)]
-pub(crate) struct QueryHist {
-    pub(crate) selector: Vec<String>,
-    pub(crate) sort: Vec<String>,
-    pub(crate) project: Vec<String>,
+pub(super) struct QueryHist {
+    pub(super) selector: Vec<String>,
+    pub(super) sort: Vec<String>,
+    pub(super) project: Vec<String>,
 }
 
-pub(crate) fn push_history(list: &mut Vec<String>, value: &str) {
+pub(super) fn push_history(list: &mut Vec<String>, value: &str) {
     let v = value.trim();
     if v.is_empty() || v == "{}" {
         return;
@@ -109,38 +109,38 @@ pub(crate) fn push_history(list: &mut Vec<String>, value: &str) {
 /// like the original's saved filters (CLS.saveFilter, renderer line 195332).
 #[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(default)]
-pub(crate) struct SavedQuery {
-    pub(crate) name: String,
-    pub(crate) filter: String,
-    pub(crate) sort: String,
-    pub(crate) project: String,
-    pub(crate) pipeline: Option<String>,
+pub(super) struct SavedQuery {
+    pub(super) name: String,
+    pub(super) filter: String,
+    pub(super) sort: String,
+    pub(super) project: String,
+    pub(super) pipeline: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Default)]
 #[serde(default)]
-pub(crate) struct SavedTab {
+pub(super) struct SavedTab {
     /// Pipeline builder stages, kept so stages switched off survive a restart.
-    pub(crate) stages: Vec<SavedStage>,
+    pub(super) stages: Vec<SavedStage>,
     /// The Aggregate view shows the pipeline as text instead of stage cards.
-    pub(crate) agg_text_mode: bool,
-    pub(crate) conn: u64,
-    pub(crate) db: String,
-    pub(crate) coll: String,
-    pub(crate) view: String,
-    pub(crate) filter: String,
-    pub(crate) sort: String,
-    pub(crate) project: String,
-    pub(crate) agg: String,
-    pub(crate) shell: String,
+    pub(super) agg_text_mode: bool,
+    pub(super) conn: u64,
+    pub(super) db: String,
+    pub(super) coll: String,
+    pub(super) view: String,
+    pub(super) filter: String,
+    pub(super) sort: String,
+    pub(super) project: String,
+    pub(super) agg: String,
+    pub(super) shell: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Default)]
 #[serde(default)]
-pub(crate) struct SavedStage {
-    pub(crate) op: String,
-    pub(crate) text: String,
-    pub(crate) on: bool,
+pub(super) struct SavedStage {
+    pub(super) op: String,
+    pub(super) text: String,
+    pub(super) on: bool,
 }
 
 impl Default for UiPrefs {
@@ -151,7 +151,7 @@ impl Default for UiPrefs {
 
 /// Parses a config file. One that no longer parses is moved to `<name>.bak`, so the next save
 /// cannot overwrite what the person had, and the reason comes back to be shown.
-pub(crate) fn parse_config<T: serde::de::DeserializeOwned + Default>(path: &std::path::Path) -> (T, Option<String>) {
+pub(super) fn parse_config<T: serde::de::DeserializeOwned + Default>(path: &std::path::Path) -> (T, Option<String>) {
     let Ok(b) = std::fs::read(path) else { return (T::default(), None) };
     match serde_json::from_slice(&b) {
         Ok(v) => (v, None),
@@ -169,7 +169,7 @@ pub(crate) fn parse_config<T: serde::de::DeserializeOwned + Default>(path: &std:
 /// Like `parse_config` for a list, but an entry that no longer parses is skipped instead of
 /// losing every other one. The whole file is copied to `<name>.bak` first, because the next save
 /// writes back only the entries that parsed.
-pub(crate) fn parse_config_list<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> (Vec<T>, Option<String>) {
+pub(super) fn parse_config_list<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> (Vec<T>, Option<String>) {
     let Ok(b) = std::fs::read(path) else { return (Vec::new(), None) };
     let Ok(items) = serde_json::from_slice::<Vec<serde_json::Value>>(&b) else { return parse_config(path) };
     let total = items.len();
@@ -186,35 +186,35 @@ pub(crate) fn parse_config_list<T: serde::de::DeserializeOwned>(path: &std::path
     (good, Some(format!("Skipped {} of {total} entries in {}: {}. {kept}", errs.len(), path.display(), errs.join("; "))))
 }
 
-pub(crate) fn config_dir() -> PathBuf {
+pub(super) fn config_dir() -> PathBuf {
     dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("quarry")
 }
 
 /// Where Quarry installs the MongoDB Database Tools itself when they are missing.
-pub(crate) fn tools_dir() -> PathBuf {
+pub(super) fn tools_dir() -> PathBuf {
     config_dir().join("tools")
 }
 
-pub(crate) fn keychain(id: u64) -> Option<keyring::Entry> {
+pub(super) fn keychain(id: u64) -> Option<keyring::Entry> {
     keyring::Entry::new("quarry", &format!("connection-{id}")).ok()
 }
 
 /// Other secrets of a connection: "ssh-password", "ssh-passphrase", "proxy-password".
-pub(crate) fn secret(id: u64, what: &str) -> Option<String> {
+pub(super) fn secret(id: u64, what: &str) -> Option<String> {
     keyring::Entry::new("quarry", &format!("connection-{id}-{what}")).ok()?.get_password().ok().filter(|s| !s.is_empty())
 }
 
 /// The connection's address from the Keychain.
-pub(crate) fn stored_uri(id: u64) -> Result<String, keyring::Error> {
+pub(super) fn stored_uri(id: u64) -> Result<String, keyring::Error> {
     keychain(id).ok_or(keyring::Error::NoEntry)?.get_password()
 }
 
-pub(crate) fn uri_err(e: keyring::Error) -> String {
+pub(super) fn uri_err(e: keyring::Error) -> String {
     format!("Could not read the connection's address from the Keychain: {e}")
 }
 
 /// Stores a secret, or removes it when `value` is empty.
-pub(crate) fn set_secret(id: u64, what: &str, value: &str) -> Result<(), String> {
+pub(super) fn set_secret(id: u64, what: &str, value: &str) -> Result<(), String> {
     let r = keyring::Entry::new("quarry", &format!("connection-{id}-{what}")).and_then(|k| if value.is_empty() { k.delete_credential() } else { k.set_password(value) });
     match r {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),

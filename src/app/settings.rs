@@ -3,7 +3,7 @@
 use super::*;
 
 impl App {
-    pub(crate) fn settings_dialog(&mut self, ui: &mut egui::Ui, keep: &mut bool) {
+    pub(super) fn settings_dialog(&mut self, ui: &mut egui::Ui, keep: &mut bool) {
         ui.set_width(600.0);
         dialog_title(ui, "Settings");
         ui.label(RichText::new("Changes are saved right away.").size(TXT_SMALL).color(FAINT()));

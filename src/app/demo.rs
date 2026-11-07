@@ -3,7 +3,7 @@
 use super::*;
 
 impl App {
-    pub(crate) fn load_demo(&mut self) {
+    pub(super) fn load_demo(&mut self) {
         let names = ["Ada Byron", "Grace Hopper", "Linus Ito", "Mira Okafor", "Sam Patel", "Noor Haddad", "Jun Park", "Eva Lind"];
         let status = ["paid", "shipped", "pending", "refunded"];
         let docs: Vec<Document> = (0..50)

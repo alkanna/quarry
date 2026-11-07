@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(crate) enum StageAct {
+pub(super) enum StageAct {
     Edited(usize),
     Toggled(usize),
     /// Move a stage one place, down when true.
@@ -17,7 +17,7 @@ pub(crate) enum StageAct {
 
 /// One stage of the pipeline builder: operator, on/off, order and removal on top, the stage body
 /// on the left and what comes out of the stage on the right.
-pub(crate) fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, auto: bool, acts: &mut Vec<StageAct>) {
+pub(super) fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, auto: bool, acts: &mut Vec<StageAct>) {
     card(ui, |ui| {
         ui.horizontal(|ui| {
             ui.label(RichText::new(format!("{}", i + 1)).monospace().color(FAINT()));
@@ -98,7 +98,7 @@ pub(crate) fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, a
 
 /// The first documents out of a stage, one line each. The whole row toggles the document open
 /// or closed, and several can be open at once.
-pub(crate) fn stage_samples(ui: &mut egui::Ui, s: &mut Stage, i: usize, acts: &mut Vec<StageAct>) {
+pub(super) fn stage_samples(ui: &mut egui::Ui, s: &mut Stage, i: usize, acts: &mut Vec<StageAct>) {
     if s.sample.is_empty() {
         if s.count == Some(0) {
             ui.label(RichText::new("No documents come out of this stage.").color(FAINT()));
@@ -137,8 +137,9 @@ pub(crate) fn stage_samples(ui: &mut egui::Ui, s: &mut Stage, i: usize, acts: &m
         }
     });
 }
+
 impl App {
-    pub(crate) fn aggregate(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn aggregate(&mut self, ui: &mut egui::Ui) {
         let mut run = false;
         let mut explain = false;
         let key = self.col_key(false);
@@ -299,7 +300,7 @@ impl App {
 
     /// Rebuilds the builder's stages when the pipeline text changed elsewhere (Text mode, the
     /// library, a pasted query).
-    pub(crate) fn sync_stages(&mut self) {
+    pub(super) fn sync_stages(&mut self) {
         let Some(t) = self.tm() else { return };
         if t.agg_text_mode || t.stages_src == t.agg_txt || db::is_shell(&t.agg_txt) {
             return;
@@ -312,7 +313,7 @@ impl App {
 
     /// Stages from `from` on need a new preview (a second later while typing), and the pipeline
     /// text follows the stages.
-    pub(crate) fn stages_changed(&mut self, from: usize, typing: bool) {
+    pub(super) fn stages_changed(&mut self, from: usize, typing: bool) {
         let auto = self.prefs.auto_preview;
         let t = self.tm().unwrap();
         let at = std::time::Instant::now() + std::time::Duration::from_millis(if typing { 1000 } else { 0 });
@@ -323,7 +324,7 @@ impl App {
         t.stages_src = t.agg_txt.clone();
     }
 
-    pub(crate) fn apply_stage_acts(&mut self, acts: Vec<StageAct>) {
+    pub(super) fn apply_stage_acts(&mut self, acts: Vec<StageAct>) {
         for a in acts {
             let t = self.tm().unwrap();
             match a {
@@ -370,7 +371,7 @@ impl App {
 
     /// Runs the next stage preview that is due, one at a time and in order, like the original's
     /// getResultsForStages (renderer line 112079), so a pipeline never floods the server.
-    pub(crate) fn pump_previews(&mut self, ctx: &egui::Context) {
+    pub(super) fn pump_previews(&mut self, ctx: &egui::Context) {
         if self.demo {
             return;
         }

@@ -5,14 +5,14 @@ use super::*;
 /// Words the original treats as possibly destructive in the shell (`dangerousCommands`,
 /// renderer line 131264: /drop|remove|replace|update|delete|insert|rename|\$out/i), plus `$merge`,
 /// which writes to a collection from a pipeline just like `$out`.
-pub(crate) fn dangerous_words(code: &str) -> Vec<String> {
+pub(super) fn dangerous_words(code: &str) -> Vec<String> {
     let lower = code.to_lowercase();
     ["drop", "remove", "replace", "update", "delete", "insert", "rename", "$out", "$merge"].iter().filter(|w| lower.contains(*w)).map(|w| w.to_string()).collect()
 }
 
 /// The original's "Open query in NodeShell" script (renderer line 96080), with its collection
 /// reference rule (getSnippetCollectionRef): names that are not plain words go through db.collection().
-pub(crate) fn query_script(coll: &str, filter: &str) -> String {
+pub(super) fn query_script(coll: &str, filter: &str) -> String {
     let f = filter.trim().trim_end_matches(';');
     if db::is_shell(f) {
         return format!("async function run() {{\n\treturn await {f}\n}}");
@@ -23,7 +23,7 @@ pub(crate) fn query_script(coll: &str, filter: &str) -> String {
 
 /// Words the Shell runner does not bind as bare names, since they cannot be parameter names or
 /// would not resolve to the collection inside run(). Must match RESERVED in shell_runner.mjs.
-pub(crate) const JS_RESERVED: [&str; 48] = [
+pub(super) const JS_RESERVED: [&str; 48] = [
     "break", "case", "catch", "class", "const", "continue", "debugger", "default", "delete", "do", "else", "enum", "export", "extends", "false", "finally", "for",
     "function", "if", "import", "in", "instanceof", "new", "null", "return", "super", "switch", "this", "throw", "true", "try", "typeof", "var", "void", "while",
     "with", "implements", "interface", "let", "package", "private", "protected", "public", "static", "yield", "await", "arguments", "eval",
@@ -31,7 +31,7 @@ pub(crate) const JS_RESERVED: [&str; 48] = [
 
 /// The Shell's reference: how scripts work, every name the runner provides, the main methods and
 /// examples that can be loaded into the editor. Returns an example to load, if one was picked.
-pub(crate) fn shell_help(ui: &mut egui::Ui, coll: &str, writable: bool) -> Option<String> {
+pub(super) fn shell_help(ui: &mut egui::Ui, coll: &str, writable: bool) -> Option<String> {
     let mut pick = None;
     let code = |s: &str| RichText::new(s).monospace().size(TXT_BODY).color(C_DATE());
     let head = |ui: &mut egui::Ui, s: &str| {
@@ -93,7 +93,7 @@ pub(crate) fn shell_help(ui: &mut egui::Ui, coll: &str, writable: bool) -> Optio
     pick
 }
 
-pub(crate) fn code_menu(ui: &mut egui::Ui, pick: &mut Option<db::Lang>) {
+pub(super) fn code_menu(ui: &mut egui::Ui, pick: &mut Option<db::Lang>) {
     ui.menu_button("🗐 Copy as code", |ui| {
         for l in db::Lang::ALL {
             if ui.button(l.name()).clicked() {
@@ -104,12 +104,13 @@ pub(crate) fn code_menu(ui: &mut egui::Ui, pick: &mut Option<db::Lang>) {
     });
 }
 
-pub(crate) fn default_script(coll: &str) -> String {
+pub(super) fn default_script(coll: &str) -> String {
     let target = collection_ref(coll);
     format!("async function run() {{\n  return await {target}.find({{}}).limit(20).toArray();\n}}")
 }
+
 impl App {
-    pub(crate) fn run_shell_script(&mut self) {
+    pub(super) fn run_shell_script(&mut self) {
         let Some(t) = self.t() else { return };
         let code = t.shell.code.clone();
         let ops = dangerous_words(&code);
@@ -121,7 +122,7 @@ impl App {
         }
     }
 
-    pub(crate) fn start_shell(&mut self) {
+    pub(super) fn start_shell(&mut self) {
         if self.demo {
             return self.ok("Offline demo: the shell needs a real connection.");
         }
@@ -165,7 +166,7 @@ impl App {
 
     /// The Shell runs in its own process, so it reaches SSH-only servers through this app's
     /// tunnel (a local SOCKS5 port) or through the connection's own proxy.
-    pub(crate) fn shell_proxy(&self, conn: u64) -> serde_json::Value {
+    pub(super) fn shell_proxy(&self, conn: u64) -> serde_json::Value {
         let Some(c) = self.conn(conn) else { return serde_json::Value::Null };
         if let Some(t) = &c.tunnel {
             return serde_json::json!({ "host": "127.0.0.1", "port": t.port });
@@ -176,7 +177,7 @@ impl App {
         }
     }
 
-    pub(crate) fn shell_view(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn shell_view(&mut self, ui: &mut egui::Ui) {
         let writable = self.sel_writable();
         let coll = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
         let history = self.t().and_then(|t| self.prefs.shell_histories.get(&format!("{}/{}", t.sel.conn, t.sel.db)).cloned()).unwrap_or_default();
@@ -404,7 +405,7 @@ impl App {
     }
 
     /// Saves the whole Shell result: JSON for anything, CSV or TSV for document lists.
-    pub(crate) fn export_shell(&mut self) {
+    pub(super) fn export_shell(&mut self) {
         let t = &self.tabs[self.cur];
         let Some(v) = t.shell.value.clone() else { return };
         let docs = t.shell.docs.clone();

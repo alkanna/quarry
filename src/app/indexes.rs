@@ -3,7 +3,7 @@
 use super::*;
 
 impl App {
-    pub(crate) fn indexes_view(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn indexes_view(&mut self, ui: &mut egui::Ui) {
         toolbar(ui, |ui| {
             ui.horizontal(|ui| {
                 caption(ui, "NEW INDEX");

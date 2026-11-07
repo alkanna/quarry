@@ -3,7 +3,7 @@
 use super::*;
 
 impl ShellTab {
-    pub(crate) fn set_value(&mut self, v: Bson) {
+    pub(super) fn set_value(&mut self, v: Bson) {
         self.docs = match &v {
             Bson::Array(a) if !a.is_empty() && a.iter().all(|x| matches!(x, Bson::Document(_))) => a.iter().filter_map(|x| x.as_document().cloned()).collect(),
             Bson::Document(d) => vec![d.clone()],
@@ -23,57 +23,57 @@ impl ShellTab {
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
-pub(crate) struct ConnMeta {
-    pub(crate) id: u64,
-    pub(crate) name: String,
+pub(super) struct ConnMeta {
+    pub(super) id: u64,
+    pub(super) name: String,
     /// Reach the server through an SSH tunnel; passwords and passphrases live in the Keychain.
     #[serde(default)]
-    pub(crate) ssh: Option<crate::ssh::SshConf>,
+    pub(super) ssh: Option<crate::ssh::SshConf>,
     /// Reach the server through a SOCKS5 proxy; its password lives in the Keychain.
     #[serde(default)]
-    pub(crate) proxy: Option<db::Proxy>,
+    pub(super) proxy: Option<db::Proxy>,
     /// Environment label shown next to the name, such as Production.
     #[serde(default)]
-    pub(crate) tag: String,
+    pub(super) tag: String,
 }
 
 #[derive(PartialEq)]
-pub(crate) enum Status {
+pub(super) enum Status {
     Idle,
     Connecting,
     Ready,
     Failed(String),
 }
 
-pub(crate) struct Conn {
-    pub(crate) meta: ConnMeta,
-    pub(crate) client: Option<Client>,
-    pub(crate) status: Status,
+pub(super) struct Conn {
+    pub(super) meta: ConnMeta,
+    pub(super) client: Option<Client>,
+    pub(super) status: Status,
     /// Writes are locked at every launch and only unlocked for this session.
-    pub(crate) writable: bool,
-    pub(crate) dbs: Vec<(String, Option<Vec<String>>)>,
-    pub(crate) masked_uri: String,
+    pub(super) writable: bool,
+    pub(super) dbs: Vec<(String, Option<Vec<String>>)>,
+    pub(super) masked_uri: String,
     /// Kept alive while connected through SSH; dropping it closes the tunnel.
-    pub(crate) tunnel: Option<crate::ssh::Tunnel>,
+    pub(super) tunnel: Option<crate::ssh::Tunnel>,
 }
 
 #[derive(Clone, PartialEq)]
-pub(crate) struct Sel {
-    pub(crate) conn: u64,
-    pub(crate) db: String,
-    pub(crate) coll: String,
+pub(super) struct Sel {
+    pub(super) conn: u64,
+    pub(super) db: String,
+    pub(super) coll: String,
 }
 
 /// Where the Cmd+K palette can jump to.
 #[derive(Clone)]
-pub(crate) enum Jump {
+pub(super) enum Jump {
     Conn(u64),
     Db(u64, String),
     Coll(Sel),
 }
 
 #[derive(PartialEq, Clone, Copy)]
-pub(crate) enum View {
+pub(super) enum View {
     Documents,
     Aggregate,
     Indexes,
@@ -84,121 +84,121 @@ pub(crate) enum View {
 }
 
 /// Everything that belongs to one open tab.
-pub(crate) struct Tab {
-    pub(crate) sel: Sel,
-    pub(crate) view: View,
-    pub(crate) filter_txt: String,
-    pub(crate) sort_txt: String,
-    pub(crate) proj_txt: String,
-    pub(crate) query: Query,
-    pub(crate) page: u64,
-    pub(crate) docs: Vec<Document>,
-    pub(crate) fields: Vec<String>,
+pub(super) struct Tab {
+    pub(super) sel: Sel,
+    pub(super) view: View,
+    pub(super) filter_txt: String,
+    pub(super) sort_txt: String,
+    pub(super) proj_txt: String,
+    pub(super) query: Query,
+    pub(super) page: u64,
+    pub(super) docs: Vec<Document>,
+    pub(super) fields: Vec<String>,
     /// Every dotted field path seen in the loaded documents, for autocomplete.
-    pub(crate) paths: Vec<String>,
+    pub(super) paths: Vec<String>,
     /// Paths whose loaded values are dates; their Query values suggest date shortcuts.
-    pub(crate) date_paths: Vec<String>,
-    pub(crate) count: u64,
-    pub(crate) ms: u128,
-    pub(crate) req: u64,
+    pub(super) date_paths: Vec<String>,
+    pub(super) count: u64,
+    pub(super) ms: u128,
+    pub(super) req: u64,
     /// Index list requests have their own id, so they never cancel a documents load.
-    pub(crate) idx_req: u64,
-    pub(crate) loading: bool,
-    pub(crate) selected: Option<(bool, usize)>,
+    pub(super) idx_req: u64,
+    pub(super) loading: bool,
+    pub(super) selected: Option<(bool, usize)>,
     /// Rows of the current page checked for bulk actions, and the last one clicked for Shift ranges.
-    pub(crate) checked: BTreeSet<usize>,
-    pub(crate) check_anchor: Option<usize>,
+    pub(super) checked: BTreeSet<usize>,
+    pub(super) check_anchor: Option<usize>,
     /// Rows open inline besides the selected one, keyed like `selected`.
-    pub(crate) expanded: BTreeSet<(bool, usize)>,
-    pub(crate) agg_txt: String,
-    pub(crate) agg_docs: Vec<Document>,
-    pub(crate) agg_fields: Vec<String>,
-    pub(crate) agg_ms: Option<u128>,
+    pub(super) expanded: BTreeSet<(bool, usize)>,
+    pub(super) agg_txt: String,
+    pub(super) agg_docs: Vec<Document>,
+    pub(super) agg_fields: Vec<String>,
+    pub(super) agg_ms: Option<u128>,
     /// The running pipeline's request, 0 when idle. Kept apart from `req` so a page load and a
     /// pipeline never discard each other's answer.
-    pub(crate) agg_req: u64,
+    pub(super) agg_req: u64,
     // Stage whose output the results pane shows; None after a full run.
-    pub(crate) agg_stage: Option<usize>,
+    pub(super) agg_stage: Option<usize>,
     /// Pipeline builder stages and the pipeline text they match; when `agg_txt` changes
     /// elsewhere (Text mode, library, a pasted query) the stages are rebuilt from it.
-    pub(crate) stages: Vec<Stage>,
-    pub(crate) stages_src: String,
+    pub(super) stages: Vec<Stage>,
+    pub(super) stages_src: String,
     /// The collection's first documents and estimated count, shown above the first stage.
-    pub(crate) agg_input: Stage,
-    pub(crate) agg_text_mode: bool,
-    pub(crate) indexes: Vec<Document>,
-    pub(crate) shell: ShellTab,
-    pub(crate) schema: SchemaTab,
-    pub(crate) import: ImportTab,
-    pub(crate) compare: CompareTab,
+    pub(super) agg_input: Stage,
+    pub(super) agg_text_mode: bool,
+    pub(super) indexes: Vec<Document>,
+    pub(super) shell: ShellTab,
+    pub(super) schema: SchemaTab,
+    pub(super) import: ImportTab,
+    pub(super) compare: CompareTab,
     /// Preview text of referenced documents, keyed by `compact(_id)`.
-    pub(crate) related: HashMap<String, String>,
+    pub(super) related: HashMap<String, String>,
 }
 
 /// The Compare view: this tab's collection (source) against a chosen target.
 #[derive(Default)]
-pub(crate) struct CompareTab {
-    pub(crate) conn: u64,
-    pub(crate) db: String,
-    pub(crate) coll: String,
-    pub(crate) req: u64,
-    pub(crate) running: bool,
-    pub(crate) result: Option<db::Compared>,
+pub(super) struct CompareTab {
+    pub(super) conn: u64,
+    pub(super) db: String,
+    pub(super) coll: String,
+    pub(super) req: u64,
+    pub(super) running: bool,
+    pub(super) result: Option<db::Compared>,
     /// The target `result` was computed against.
-    pub(crate) ran: (u64, String, String),
-    pub(crate) insert: bool,
-    pub(crate) replace: bool,
-    pub(crate) delete: bool,
+    pub(super) ran: (u64, String, String),
+    pub(super) insert: bool,
+    pub(super) replace: bool,
+    pub(super) delete: bool,
 }
 
 /// A field holding ids of another collection's documents (the original's dataRelations).
 #[derive(Serialize, Deserialize, Clone, Default, PartialEq)]
 #[serde(default)]
-pub(crate) struct Relation {
-    pub(crate) coll: String,
-    pub(crate) path: String,
-    pub(crate) target: String,
-    pub(crate) preview: String,
+pub(super) struct Relation {
+    pub(super) coll: String,
+    pub(super) path: String,
+    pub(super) target: String,
+    pub(super) preview: String,
 }
 
 /// The Dump or Restore form.
 #[derive(Default)]
-pub(crate) struct ToolForm {
-    pub(crate) conn: u64,
-    pub(crate) db: String,
-    pub(crate) coll: String,
-    pub(crate) restore: bool,
-    pub(crate) path: String,
-    pub(crate) gzip: bool,
-    pub(crate) drop: bool,
+pub(super) struct ToolForm {
+    pub(super) conn: u64,
+    pub(super) db: String,
+    pub(super) coll: String,
+    pub(super) restore: bool,
+    pub(super) path: String,
+    pub(super) gzip: bool,
+    pub(super) drop: bool,
     /// Database name inside the archive; restoring renames it to `db` when different.
-    pub(crate) from_db: String,
+    pub(super) from_db: String,
 }
 
 /// A running (or finished) mongodump or mongorestore.
-pub(crate) struct ToolRun {
-    pub(crate) title: String,
-    pub(crate) log: Vec<String>,
-    pub(crate) cancel: Option<tokio::sync::oneshot::Sender<()>>,
-    pub(crate) done: Option<db::Res<String>>,
+pub(super) struct ToolRun {
+    pub(super) title: String,
+    pub(super) log: Vec<String>,
+    pub(super) cancel: Option<tokio::sync::oneshot::Sender<()>>,
+    pub(super) done: Option<db::Res<String>>,
 }
 
 /// The Schema view of one tab.
-pub(crate) struct SchemaTab {
-    pub(crate) req: u64,
-    pub(crate) limit: i64,
-    pub(crate) running: bool,
-    pub(crate) stats: Vec<db::FieldStat>,
-    pub(crate) docs: usize,
-    pub(crate) ms: Option<u128>,
+pub(super) struct SchemaTab {
+    pub(super) req: u64,
+    pub(super) limit: i64,
+    pub(super) running: bool,
+    pub(super) stats: Vec<db::FieldStat>,
+    pub(super) docs: usize,
+    pub(super) ms: Option<u128>,
     /// Why the last analysis failed; also stops the automatic analysis from retrying every frame.
-    pub(crate) err: Option<String>,
+    pub(super) err: Option<String>,
     /// Validator editor: the JSON, the level (0 off, 1 moderate, 2 strict) and whether failures only warn.
-    pub(crate) vtext: String,
-    pub(crate) vlevel: u8,
-    pub(crate) vwarn: bool,
-    pub(crate) vreq: u64,
-    pub(crate) vloaded: bool,
+    pub(super) vtext: String,
+    pub(super) vlevel: u8,
+    pub(super) vwarn: bool,
+    pub(super) vreq: u64,
+    pub(super) vloaded: bool,
 }
 
 impl Default for SchemaTab {
@@ -209,22 +209,22 @@ impl Default for SchemaTab {
 
 /// The original analyses every matching document (limit 0); on large production collections that
 /// is slow, so the rebuild starts with the first 1000 and offers "All".
-pub(crate) const SCHEMA_DEFAULT_LIMIT: i64 = 1000;
+pub(super) const SCHEMA_DEFAULT_LIMIT: i64 = 1000;
 
 /// The Import view of one tab: the text to import, how to read it and the parsed preview.
-pub(crate) struct ImportTab {
-    pub(crate) text: String,
-    pub(crate) file: Option<String>,
-    pub(crate) kind: db::ImportKind,
-    pub(crate) separator: Option<char>,
-    pub(crate) header: bool,
-    pub(crate) camel: bool,
-    pub(crate) upsert: bool,
-    pub(crate) upsert_by: String,
-    pub(crate) parsed: Option<db::Res<Vec<Document>>>,
+pub(super) struct ImportTab {
+    pub(super) text: String,
+    pub(super) file: Option<String>,
+    pub(super) kind: db::ImportKind,
+    pub(super) separator: Option<char>,
+    pub(super) header: bool,
+    pub(super) camel: bool,
+    pub(super) upsert: bool,
+    pub(super) upsert_by: String,
+    pub(super) parsed: Option<db::Res<Vec<Document>>>,
     /// What `parsed` was made from, so it is redone only when something changes.
-    pub(crate) parsed_key: u64,
-    pub(crate) fields: Vec<String>,
+    pub(super) parsed_key: u64,
+    pub(super) fields: Vec<String>,
 }
 
 impl Default for ImportTab {
@@ -235,28 +235,28 @@ impl Default for ImportTab {
 
 /// The Shell view of one tab: the script, its logs and its result.
 #[derive(Default)]
-pub(crate) struct ShellTab {
-    pub(crate) code: String,
-    pub(crate) logs: Vec<(String, String)>,
+pub(super) struct ShellTab {
+    pub(super) code: String,
+    pub(super) logs: Vec<(String, String)>,
     /// The returned value; documents also go to `docs` for the table.
-    pub(crate) value: Option<Bson>,
-    pub(crate) docs: Vec<Document>,
-    pub(crate) fields: Vec<String>,
-    pub(crate) page: usize,
+    pub(super) value: Option<Bson>,
+    pub(super) docs: Vec<Document>,
+    pub(super) fields: Vec<String>,
+    pub(super) page: usize,
     /// Show the result as JSON text instead of the table.
-    pub(crate) raw: bool,
-    pub(crate) raw_text: Option<String>,
-    pub(crate) error: Option<String>,
-    pub(crate) req: u64,
-    pub(crate) cancel: Option<tokio::sync::oneshot::Sender<()>>,
-    pub(crate) help: bool,
-    pub(crate) started: Option<std::time::Instant>,
-    pub(crate) ms: Option<u128>,
-    pub(crate) count: Option<usize>,
+    pub(super) raw: bool,
+    pub(super) raw_text: Option<String>,
+    pub(super) error: Option<String>,
+    pub(super) req: u64,
+    pub(super) cancel: Option<tokio::sync::oneshot::Sender<()>>,
+    pub(super) help: bool,
+    pub(super) started: Option<std::time::Instant>,
+    pub(super) ms: Option<u128>,
+    pub(super) count: Option<usize>,
 }
 
 impl Tab {
-    pub(crate) fn new(sel: Sel) -> Self {
+    pub(super) fn new(sel: Sel) -> Self {
         Self {
             sel,
             view: View::Documents,
@@ -298,7 +298,7 @@ impl Tab {
     }
 }
 
-pub(crate) enum Danger {
+pub(super) enum Danger {
     DeleteMatching(Document),
     DropCollection,
     DropIndex(String),
@@ -315,9 +315,9 @@ pub(crate) enum Danger {
 }
 
 /// What to run once writes are allowed.
-pub(crate) type Retry = Box<dyn FnOnce(&mut App)>;
+pub(super) type Retry = Box<dyn FnOnce(&mut App)>;
 
-pub(crate) enum Modal {
+pub(super) enum Modal {
     Conn(Box<ConnForm>),
     Settings,
     /// The second field reruns what asked for writes once they are allowed.
@@ -347,64 +347,64 @@ pub(crate) enum Modal {
 }
 
 /// A value being edited in place in the document tree.
-pub(crate) struct Inline {
-    pub(crate) path: Vec<String>,
-    pub(crate) text: String,
-    pub(crate) kind: &'static str,
-    pub(crate) focus: bool,
+pub(super) struct Inline {
+    pub(super) path: Vec<String>,
+    pub(super) text: String,
+    pub(super) kind: &'static str,
+    pub(super) focus: bool,
 }
 
 /// The large JSON editor for a whole document (empty path) or one object/array field.
-pub(crate) struct JsonEdit {
-    pub(crate) base: Document,
-    pub(crate) path: Vec<String>,
-    pub(crate) text: String,
-    pub(crate) kind: &'static str,
-    pub(crate) focus: bool,
+pub(super) struct JsonEdit {
+    pub(super) base: Document,
+    pub(super) path: Vec<String>,
+    pub(super) text: String,
+    pub(super) kind: &'static str,
+    pub(super) focus: bool,
 }
 
 /// One document's edits that are not written yet. `original` is what was loaded, so saving can
 /// refuse to overwrite someone else's change.
 #[derive(Clone)]
-pub(crate) struct Draft {
-    pub(crate) conn: u64,
-    pub(crate) db: String,
-    pub(crate) coll: String,
-    pub(crate) original: Document,
-    pub(crate) current: Document,
+pub(super) struct Draft {
+    pub(super) conn: u64,
+    pub(super) db: String,
+    pub(super) coll: String,
+    pub(super) original: Document,
+    pub(super) current: Document,
 }
 
 /// A field being added inside an object (or appended to an array).
-pub(crate) struct NewField {
-    pub(crate) parent: Vec<String>,
-    pub(crate) name: String,
-    pub(crate) text: String,
-    pub(crate) kind: &'static str,
+pub(super) struct NewField {
+    pub(super) parent: Vec<String>,
+    pub(super) name: String,
+    pub(super) text: String,
+    pub(super) kind: &'static str,
 }
 
 /// One stage of the pipeline builder with its own preview, like the original's AggregatorStage
 /// (prepareNewStage, renderer line 112193).
-pub(crate) struct Stage {
+pub(super) struct Stage {
     /// Stable id for the editor, so reordering keeps each text box's cursor and focus.
-    pub(crate) uid: u64,
-    pub(crate) op: String,
-    pub(crate) text: String,
-    pub(crate) on: bool,
-    pub(crate) req: u64,
-    pub(crate) count: Option<u64>,
-    pub(crate) sample: Vec<Document>,
-    pub(crate) ms: Option<u128>,
-    pub(crate) error: Option<String>,
-    pub(crate) limit: i64,
+    pub(super) uid: u64,
+    pub(super) op: String,
+    pub(super) text: String,
+    pub(super) on: bool,
+    pub(super) req: u64,
+    pub(super) count: Option<u64>,
+    pub(super) sample: Vec<Document>,
+    pub(super) ms: Option<u128>,
+    pub(super) error: Option<String>,
+    pub(super) limit: i64,
     /// When the preview should run; edits wait a second like the original's 1000 ms debounce
     /// (updateStage, renderer line 112016).
-    pub(crate) due: Option<std::time::Instant>,
+    pub(super) due: Option<std::time::Instant>,
     /// Sample rows shown whole.
-    pub(crate) open: HashSet<usize>,
+    pub(super) open: HashSet<usize>,
 }
 
 impl Stage {
-    pub(crate) fn new(op: &str, text: &str, on: bool) -> Self {
+    pub(super) fn new(op: &str, text: &str, on: bool) -> Self {
         static UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
             uid: UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
@@ -424,7 +424,7 @@ impl Stage {
 }
 
 /// Stages from pipeline text; each stage must hold exactly one operator.
-pub(crate) fn stages_from_text(text: &str) -> db::Res<Vec<Stage>> {
+pub(super) fn stages_from_text(text: &str) -> db::Res<Vec<Stage>> {
     db::parse_pipeline(text)?
         .iter()
         .enumerate()
@@ -436,13 +436,13 @@ pub(crate) fn stages_from_text(text: &str) -> db::Res<Vec<Stage>> {
 }
 
 /// Pipeline text of the stages that are on, so Run, the library and code export see them.
-pub(crate) fn text_from_stages(stages: &[Stage]) -> String {
+pub(super) fn text_from_stages(stages: &[Stage]) -> String {
     let body: Vec<String> = stages.iter().filter(|s| s.on).map(|s| format!("  {{ {}: {} }}", s.op, s.text.trim().replace('\n', "\n  "))).collect();
     if body.is_empty() { "[]".into() } else { format!("[\n{}\n]", body.join(",\n")) }
 }
 
 /// The pipeline that ends with stage `i`, stages that are off left out.
-pub(crate) fn stage_pipeline(stages: &[Stage], i: usize) -> db::Res<Vec<Document>> {
+pub(super) fn stage_pipeline(stages: &[Stage], i: usize) -> db::Res<Vec<Document>> {
     stages[..=i]
         .iter()
         .enumerate()
@@ -453,24 +453,24 @@ pub(crate) fn stage_pipeline(stages: &[Stage], i: usize) -> db::Res<Vec<Document
 
 /// The new/edit connection form.
 #[derive(Default)]
-pub(crate) struct ConnForm {
-    pub(crate) id: Option<u64>,
-    pub(crate) name: String,
-    pub(crate) tag: String,
-    pub(crate) uri: String,
-    pub(crate) show: bool,
-    pub(crate) ssh_on: bool,
-    pub(crate) ssh: crate::ssh::SshConf,
-    pub(crate) ssh_pwd: String,
-    pub(crate) ssh_pass: String,
-    pub(crate) proxy_on: bool,
-    pub(crate) proxy: db::Proxy,
-    pub(crate) proxy_pwd: String,
-    pub(crate) testing: bool,
+pub(super) struct ConnForm {
+    pub(super) id: Option<u64>,
+    pub(super) name: String,
+    pub(super) tag: String,
+    pub(super) uri: String,
+    pub(super) show: bool,
+    pub(super) ssh_on: bool,
+    pub(super) ssh: crate::ssh::SshConf,
+    pub(super) ssh_pwd: String,
+    pub(super) ssh_pass: String,
+    pub(super) proxy_on: bool,
+    pub(super) proxy: db::Proxy,
+    pub(super) proxy_pwd: String,
+    pub(super) testing: bool,
 }
 
 impl ConnForm {
-    pub(crate) fn net(&self) -> db::Net {
+    pub(super) fn net(&self) -> db::Net {
         db::Net {
             ssh: self.ssh_on.then(|| (crate::ssh::SshConf { host: self.ssh.host.trim().into(), user: self.ssh.user.trim().into(), ..self.ssh.clone() }, crate::ssh::SshSecrets { password: Some(self.ssh_pwd.clone()), passphrase: Some(self.ssh_pass.clone()) })),
             proxy: (self.proxy_on && !self.ssh_on).then(|| db::Proxy { host: self.proxy.host.trim().into(), password: Some(self.proxy_pwd.clone()), ..self.proxy.clone() }),
@@ -480,19 +480,19 @@ impl ConnForm {
 
 /// The Users and roles window of one connection.
 #[derive(Default)]
-pub(crate) struct UsersWin {
-    pub(crate) conn: u64,
-    pub(crate) users: Option<db::Res<Vec<Document>>>,
-    pub(crate) roles: Option<db::Res<Vec<Document>>>,
-    pub(crate) new_name: String,
-    pub(crate) new_pwd: String,
-    pub(crate) new_db: String,
-    pub(crate) new_roles: String,
+pub(super) struct UsersWin {
+    pub(super) conn: u64,
+    pub(super) users: Option<db::Res<Vec<Document>>>,
+    pub(super) roles: Option<db::Res<Vec<Document>>>,
+    pub(super) new_name: String,
+    pub(super) new_pwd: String,
+    pub(super) new_db: String,
+    pub(super) new_roles: String,
     /// (user, database, new password or empty, roles text)
-    pub(crate) edit: Option<(String, String, String, String)>,
+    pub(super) edit: Option<(String, String, String, String)>,
 }
 
-pub(crate) enum SideAct {
+pub(super) enum SideAct {
     NewColl(String, bool),
     Refresh(String),
     Users,
@@ -509,7 +509,7 @@ pub(crate) enum SideAct {
     Analyze(String, String),
 }
 
-pub(crate) enum QAct {
+pub(super) enum QAct {
     Filter(String),
     Sort(String),
     Project(String),
@@ -518,7 +518,7 @@ pub(crate) enum QAct {
     Delete(String),
 }
 
-pub(crate) enum TreeAct {
+pub(super) enum TreeAct {
     Start(Vec<String>, Bson),
     Commit,
     Cancel,
@@ -540,7 +540,7 @@ pub(crate) enum TreeAct {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum TabClose {
+pub(super) enum TabClose {
     This,
     Others,
     Left,
@@ -548,7 +548,7 @@ pub(crate) enum TabClose {
     All,
 }
 
-pub(crate) enum ColAct {
+pub(super) enum ColAct {
     Pin(String),
     Hide(String),
     Move(String, i32),
@@ -561,13 +561,13 @@ pub(crate) enum ColAct {
 
 /// The query log panel: docked above the status bar, or in its own window.
 #[derive(Default)]
-pub(crate) struct LogUi {
-    pub(crate) open: bool,
-    pub(crate) detached: bool,
-    pub(crate) filter: String,
-    pub(crate) errors: bool,
+pub(super) struct LogUi {
+    pub(super) open: bool,
+    pub(super) detached: bool,
+    pub(super) filter: String,
+    pub(super) errors: bool,
     /// Commands shown in full, by connection and start time.
-    pub(crate) expanded: HashSet<(u64, std::time::SystemTime)>,
+    pub(super) expanded: HashSet<(u64, std::time::SystemTime)>,
 }
 
 #[cfg(test)]

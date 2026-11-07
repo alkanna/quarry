@@ -3,7 +3,7 @@
 use super::*;
 
 /// How well one lowercase query token matches one lowercase name.
-pub(crate) fn seg_score(t: &str, s: &str) -> Option<u32> {
+pub(super) fn seg_score(t: &str, s: &str) -> Option<u32> {
     if s == t {
         Some(8)
     } else if s.starts_with(t) {
@@ -21,7 +21,7 @@ pub(crate) fn seg_score(t: &str, s: &str) -> Option<u32> {
 /// tokens, or None when a token matches nowhere. Each token counts its best name, so
 /// "vairon travels" finds thetreep-api-vairon.travels. A collection whose own name matches
 /// the last token gets a bonus, as people usually type the collection last.
-pub(crate) fn jump_score(tokens: &[String], segs: &[&str]) -> Option<u32> {
+pub(super) fn jump_score(tokens: &[String], segs: &[&str]) -> Option<u32> {
     let mut total = 0;
     for (n, t) in tokens.iter().enumerate() {
         let best = segs.iter().enumerate().filter_map(|(i, s)| seg_score(t, s).map(|sc| (sc, i))).max();
@@ -41,7 +41,7 @@ pub(crate) fn jump_score(tokens: &[String], segs: &[&str]) -> Option<u32> {
 
 /// Palette entries matching `q` as (label, hint, target), best match first. With an empty query
 /// they keep tree order, active connection first.
-pub(crate) fn jumps(conns: &[Conn], active: Option<u64>, q: &str) -> Vec<(String, String, Jump)> {
+pub(super) fn jumps(conns: &[Conn], active: Option<u64>, q: &str) -> Vec<(String, String, Jump)> {
     const MAX: usize = 50;
     let q = q.to_lowercase();
     let tokens: Vec<String> = q.split(|c: char| c.is_whitespace() || c == '.' || c == '/').filter(|t| !t.is_empty()).map(String::from).collect();
@@ -74,11 +74,11 @@ pub(crate) fn jumps(conns: &[Conn], active: Option<u64>, q: &str) -> Vec<(String
 }
 
 /// Offered in the connection form; any other text is a custom tag.
-pub(crate) const TAG_PRESETS: [&str; 5] = ["Production", "Staging", "Development", "Internal", "Local"];
+pub(super) const TAG_PRESETS: [&str; 5] = ["Production", "Staging", "Development", "Internal", "Local"];
 
 /// Production is red so it is never mistaken for a scratch server. Only the first word counts,
 /// so custom tags like "Prod EU" keep their environment's color.
-pub(crate) fn tag_color(tag: &str) -> Color32 {
+pub(super) fn tag_color(tag: &str) -> Color32 {
     let t = tag.trim().to_ascii_lowercase();
     match t.split(|c: char| !c.is_ascii_alphanumeric()).next().unwrap_or("") {
         "production" | "prod" | "live" => ALERT(),
@@ -89,7 +89,7 @@ pub(crate) fn tag_color(tag: &str) -> Color32 {
     }
 }
 
-pub(crate) fn status_color(s: &Status) -> Color32 {
+pub(super) fn status_color(s: &Status) -> Color32 {
     match s {
         Status::Ready => SUCCESS(),
         Status::Connecting => WARNING(),
@@ -99,14 +99,14 @@ pub(crate) fn status_color(s: &Status) -> Color32 {
 }
 
 /// One line of text cut with an ellipsis at `w`.
-pub(crate) fn truncated(p: &egui::Painter, text: &str, font: FontId, color: Color32, w: f32) -> std::sync::Arc<egui::Galley> {
+pub(super) fn truncated(p: &egui::Painter, text: &str, font: FontId, color: Color32, w: f32) -> std::sync::Arc<egui::Galley> {
     let mut job = LayoutJob::simple_singleline(text.to_string(), font, color);
     job.wrap = egui::text::TextWrapping::truncate_at_width(w.max(0.0));
     p.layout_job(job)
 }
 
 /// Paints a tag badge at most `max_w` wide whose right edge is at `right`, and returns its left edge.
-pub(crate) fn paint_tag(p: &egui::Painter, right: f32, cy: f32, tag: &str, max_w: f32) -> f32 {
+pub(super) fn paint_tag(p: &egui::Painter, right: f32, cy: f32, tag: &str, max_w: f32) -> f32 {
     let g = truncated(p, &tag.to_uppercase(), FontId::proportional(TXT_CAPTION), Color32::PLACEHOLDER, (max_w - 14.0).min(140.0));
     let r = egui::Rect::from_min_max(egui::pos2(right - g.size().x - 14.0, cy - 9.0), egui::pos2(right, cy + 9.0));
     paint_chip(p, r, g, tag_color(tag), true, 0);
@@ -114,20 +114,20 @@ pub(crate) fn paint_tag(p: &egui::Painter, right: f32, cy: f32, tag: &str, max_w
 }
 
 /// `name` cut to fit before its tag badge, both centered on `cy` within `x`.
-pub(crate) fn paint_name_tag(p: &egui::Painter, x: egui::Rangef, cy: f32, name: &str, font: FontId, color: Color32, tag: &str) {
+pub(super) fn paint_name_tag(p: &egui::Painter, x: egui::Rangef, cy: f32, name: &str, font: FontId, color: Color32, tag: &str) {
     let name_right = if tag.is_empty() { x.max } else { paint_tag(p, x.max, cy, tag, x.span() * 0.4) - 8.0 };
     let g = truncated(p, name, font, color, name_right - x.min);
     p.galley(egui::pos2(x.min, cy - g.size().y / 2.0), g, color);
 }
 
 /// Typing "none" means no tag, the same as the None chip.
-pub(crate) fn clean_tag(tag: &str) -> &str {
+pub(super) fn clean_tag(tag: &str) -> &str {
     let t = tag.trim();
     if t.eq_ignore_ascii_case("none") { "" } else { t }
 }
 
 /// A saved connection in the picker: status, name and tag, then the masked address.
-pub(crate) fn conn_row(ui: &mut egui::Ui, c: &Conn, active: bool) -> egui::Response {
+pub(super) fn conn_row(ui: &mut egui::Ui, c: &Conn, active: bool) -> egui::Response {
     side_row(ui, 48.0, 4.0, active, |p, r| {
         let (left, right, top) = (r.left(), r.right() - 2.0, r.top() + 17.0);
         p.circle_filled(egui::pos2(left + 3.5, top), 3.5, status_color(&c.status));
@@ -137,8 +137,9 @@ pub(crate) fn conn_row(ui: &mut egui::Ui, c: &Conn, active: bool) -> egui::Respo
         p.galley(egui::pos2(left + 16.0, r.top() + 34.0 - addr.size().y / 2.0), addr, FAINT());
     })
 }
+
 impl App {
-    pub(crate) fn sidebar(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn sidebar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::left("tree")
             .default_size(SIDEBAR_W)
             .size_range(200.0..=480.0)
@@ -161,7 +162,7 @@ impl App {
             });
     }
 
-    pub(crate) fn conn_picker(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn conn_picker(&mut self, ui: &mut egui::Ui) {
         let cur = self.active.and_then(|id| self.conn(id));
         let (name, tag, dot) = match cur {
             Some(c) => (c.meta.name.clone(), c.meta.tag.clone(), status_color(&c.status)),
@@ -273,14 +274,14 @@ impl App {
         }
     }
 
-    pub(crate) fn activate(&mut self, id: u64) {
+    pub(super) fn activate(&mut self, id: u64) {
         self.active = Some(id);
         if self.conn(id).is_some_and(|c| c.status == Status::Idle) && !self.demo {
             self.connect(id);
         }
     }
 
-    pub(crate) fn jump(&mut self, j: Jump) {
+    pub(super) fn jump(&mut self, j: Jump) {
         let (id, db) = match &j {
             Jump::Conn(id) => (*id, None),
             Jump::Db(id, db) => (*id, Some(db.clone())),
@@ -298,7 +299,7 @@ impl App {
         }
     }
 
-    pub(crate) fn db_tree(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn db_tree(&mut self, ui: &mut egui::Ui) {
         let Some(id) = self.active else {
             ui.add_space(8.0);
             ui.label(RichText::new("No connections yet.").color(MUTED()));
@@ -456,7 +457,7 @@ impl App {
         }
     }
 
-    pub(crate) fn side_act(&mut self, conn: u64, a: SideAct) {
+    pub(super) fn side_act(&mut self, conn: u64, a: SideAct) {
         let Some(client) = self.conn(conn).and_then(|c| c.client.clone()) else {
             return self.err("Connect first.");
         };

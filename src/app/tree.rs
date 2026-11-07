@@ -2,12 +2,12 @@
 
 use super::*;
 
-pub(crate) fn highlighted(prefs: &UiPrefs, key: &str, path: &[String]) -> bool {
+pub(super) fn highlighted(prefs: &UiPrefs, key: &str, path: &[String]) -> bool {
     prefs.cols.get(key).is_some_and(|p| !p.highlight.is_empty() && p.highlight.contains(&db::strip_indices(&path.join("."))))
 }
 
 /// Right-click menu for one field, modelled on the original's fieldActions (renderer line 106562).
-pub(crate) fn fold_menu(ui: &mut egui::Ui, path: &[String], container: bool, acts: &mut Vec<TreeAct>) {
+pub(super) fn fold_menu(ui: &mut egui::Ui, path: &[String], container: bool, acts: &mut Vec<TreeAct>) {
     ui.separator();
     if container && ui.button("Expand recursively").clicked() {
         acts.push(TreeAct::Fold(path.to_vec(), true));
@@ -20,7 +20,7 @@ pub(crate) fn fold_menu(ui: &mut egui::Ui, path: &[String], container: bool, act
     }
 }
 
-pub(crate) fn field_menu(ui: &mut egui::Ui, path: &[String], v: &Bson, editable: bool, highlighted: bool, acts: &mut Vec<TreeAct>) {
+pub(super) fn field_menu(ui: &mut egui::Ui, path: &[String], v: &Bson, editable: bool, highlighted: bool, acts: &mut Vec<TreeAct>) {
     let p = path.join(".");
     let is_id = path.first().is_some_and(|k| k == "_id");
     ui.set_min_width(230.0);
@@ -99,9 +99,10 @@ pub(crate) fn field_menu(ui: &mut egui::Ui, path: &[String], v: &Bson, editable:
     ui.separator();
     ui.label(RichText::new(format!("Field size: {} bytes", db::field_size(v))).size(TXT_SMALL).color(FAINT()));
 }
+
 impl App {
     /// Starts editing one value: small values in place, objects and arrays in the large JSON editor.
-    pub(crate) fn start_inline(&mut self, d: &Document, path: Vec<String>, v: Bson) {
+    pub(super) fn start_inline(&mut self, d: &Document, path: Vec<String>, v: Bson) {
         if !self.sel_writable() {
             let d = d.clone();
             return self.ask_unlock_then(move |a| a.start_inline(&d, path, v));
@@ -116,7 +117,7 @@ impl App {
     }
 
     /// Side panel mode: the open document on the right.
-    pub(crate) fn inspector(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn inspector(&mut self, ui: &mut egui::Ui) {
         let Some(d) = self.selected_doc().cloned() else { return };
         let d = self.shown_doc(&d).unwrap_or(d);
         let from_agg = matches!(self.t().and_then(|t| t.selected), Some((true, _)));
@@ -133,7 +134,7 @@ impl App {
     /// The open document: actions, then its fields as a tree that can be edited in place.
     /// `row` is the inline row showing this document, None in the side panel. Only the selected
     /// document holds edit state; acting in another open one selects it first.
-    pub(crate) fn doc_body(&mut self, ui: &mut egui::Ui, d: &Document, from_agg: bool, row: Option<(bool, usize)>) {
+    pub(super) fn doc_body(&mut self, ui: &mut egui::Ui, d: &Document, from_agg: bool, row: Option<(bool, usize)>) {
         let selected = self.t().and_then(|t| t.selected);
         let passive = row.is_some() && row != selected;
         // Edit state is keyed by field path only, so other open documents must not see it.
@@ -240,7 +241,7 @@ impl App {
     }
 
     /// Unsaved edits of one document: what changed, Save, Discard, and the confirm switch.
-    pub(crate) fn draft_bar(&mut self, ui: &mut egui::Ui, key: &str, changes: &[(String, Option<Bson>, Option<Bson>)]) {
+    pub(super) fn draft_bar(&mut self, ui: &mut egui::Ui, key: &str, changes: &[(String, Option<Bson>, Option<Bson>)]) {
         let mut save = false;
         let mut discard = false;
         let mut confirm = self.prefs.confirm_save;
@@ -272,7 +273,7 @@ impl App {
         }
     }
 
-    pub(crate) fn handle_acts(&mut self, d: &Document, acts: Vec<TreeAct>) {
+    pub(super) fn handle_acts(&mut self, d: &Document, acts: Vec<TreeAct>) {
         for a in acts {
             match a {
                 // Applied by the document view, which knows the fold's id.
@@ -418,7 +419,7 @@ impl App {
         }
     }
 
-    pub(crate) fn type_combo(ui: &mut egui::Ui, id: &'static str, kind: &mut &'static str) {
+    pub(super) fn type_combo(ui: &mut egui::Ui, id: &'static str, kind: &mut &'static str) {
         egui::ComboBox::from_id_salt(id).width(86.0).selected_text(RichText::new(*kind).size(TXT_SMALL)).show_ui(ui, |ui| {
             for k in db::KINDS {
                 ui.selectable_value(kind, k, k);
@@ -426,7 +427,7 @@ impl App {
         });
     }
 
-    pub(crate) fn new_field_row(&mut self, ui: &mut egui::Ui, acts: &mut Vec<TreeAct>) {
+    pub(super) fn new_field_row(&mut self, ui: &mut egui::Ui, acts: &mut Vec<TreeAct>) {
         let Some(n) = &mut self.new_field else { return };
         ui.horizontal(|ui| {
             ui.add_space(16.0);
@@ -446,7 +447,7 @@ impl App {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn tree(&mut self, ui: &mut egui::Ui, key: &str, v: &Bson, id: egui::Id, path: &mut Vec<String>, editable: bool, acts: &mut Vec<TreeAct>) {
+    pub(super) fn tree(&mut self, ui: &mut egui::Ui, key: &str, v: &Bson, id: egui::Id, path: &mut Vec<String>, editable: bool, acts: &mut Vec<TreeAct>) {
         let editing_here = self.inline.as_ref().is_some_and(|i| i.path == *path);
         match v {
             Bson::Document(_) | Bson::Array(_) if !editing_here => {
@@ -560,7 +561,7 @@ impl App {
     }
 
     /// Paints a full-width band behind a tree row while the pointer is over it.
-    pub(crate) fn hover_band(&self, ui: &egui::Ui, at: egui::layers::ShapeIdx, y: egui::Rangef) {
+    pub(super) fn hover_band(&self, ui: &egui::Ui, at: egui::layers::ShapeIdx, y: egui::Rangef) {
         let r = egui::Rect::from_x_y_ranges(self.tree_x, y.expand(2.0));
         if ui.rect_contains_pointer(r) {
             ui.painter().set(at, egui::epaint::RectShape::filled(r, 4, HOVER()));

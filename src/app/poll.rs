@@ -3,7 +3,7 @@
 use super::*;
 
 impl App {
-    pub(crate) fn poll(&mut self) {
+    pub(super) fn poll(&mut self) {
         while let Ok(m) = self.rx.try_recv() {
             match m {
                 Msg::Connected { conn, res } => {

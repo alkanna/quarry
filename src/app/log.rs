@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(crate) fn ago(t: std::time::SystemTime) -> String {
+pub(super) fn ago(t: std::time::SystemTime) -> String {
     let s = t.elapsed().map_or(0, |d| d.as_secs());
     match s {
         0..60 => format!("{s}s"),
@@ -10,8 +10,9 @@ pub(crate) fn ago(t: std::time::SystemTime) -> String {
         _ => format!("{}h", s / 3600),
     }
 }
+
 impl App {
-    pub(crate) fn query_log(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn query_log(&mut self, ui: &mut egui::Ui) {
         if !self.log.open {
             return;
         }
@@ -29,7 +30,7 @@ impl App {
         });
     }
 
-    pub(crate) fn log_body(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn log_body(&mut self, ui: &mut egui::Ui) {
         let mut copied = false;
         let (log, conns) = (&mut self.log, &self.conns);
         ui.horizontal(|ui| {
