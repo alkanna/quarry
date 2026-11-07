@@ -8,19 +8,44 @@
 
 ## Features
 
-- **Browse and query**: tabs, table or JSON view, pinned and reordered columns per collection, sort from the header, query history and a saved query library. Paste `db.orders.find(...)` or `aggregate([...])` straight into the query bar. Editors auto-close brackets and indent as you type. Date shortcuts such as `#today`, `#yesterday` or `#last2months` expand to date filters and show up in autocomplete.
-- **Jump anywhere** with the Cmd+K palette, and drive tabs, views, reload and paging from the keyboard (Cmd+/ lists the shortcuts; Cmd is Ctrl on Linux and Windows).
-- **Safe editing**: every connection opens read-only, unless you turn on Always allow writes in Settings. Edits are typed, staged and saved together, never overwrite a change someone else made in the meantime, and can be undone. Update every matching document after previewing the result.
-- **Aggregate** with a preview of the output after each stage, and **explain plans** for queries and pipelines.
-- **Copy as driver code**: turn a query or pipeline into code for the official MongoDB drivers.
-- **Indexes**: usage stats, hide and unhide, and suggestions from slow queries.
-- **Schema**: field types and presence, plus viewing, generating and applying collection validators.
-- **Import**, and export to JSON, CSV or TSV.
-- **Query log**: every command sent to the server, with its duration and errors, docked at the bottom or in its own window (Cmd+L).
-- **Shell**: JavaScript run by [Bun](https://bun.sh) with the official MongoDB driver, npm packages, autocomplete, and results shown as a table.
-- **Data relations**: shows a preview next to referenced ids and jumps to the referenced document. Relations can be found automatically.
-- **Compare and sync** two collections, **dump and restore** with the MongoDB Database Tools (Quarry installs and updates them if they are missing), and **users and roles**.
-- **SSH tunnels** (password, key file or agent) and **SOCKS5 proxies**. Secrets are kept in the system keychain (macOS Keychain, Windows Credential Manager, or the Secret Service on Linux). Quarry reconnects to the last used connection at launch. Tag connections as Production, Staging or your own label so the one in use is always clear.
+**Find your way around**
+- Tabs, a table or JSON view, and columns you can pin and reorder for each collection.
+- Paste `db.orders.find(...)` or `aggregate([...])` straight into the query bar.
+- Type `#today` or `#last2months` instead of writing date filters by hand.
+- Keep the queries you reuse in a library, and get back older ones from the history.
+- Press Cmd+K to jump to any collection, and Cmd+/ to see every shortcut. On Linux and Windows, Cmd is Ctrl.
+
+**Edit without worrying**
+- Every connection opens read-only until you unlock it.
+- Edits are staged, saved together, and can be undone.
+- Quarry won't overwrite a change someone else made in the meantime.
+- Preview the result before you update every matching document.
+
+**See what your queries do**
+- Build a pipeline one stage at a time and see what comes out of each stage.
+- Read the explain plan of a query or pipeline.
+- Watch every command sent to the server, with its duration and errors, in the query log (Cmd+L).
+- Copy a query or pipeline as code for the official MongoDB drivers.
+
+**Look after your collections**
+- See which indexes are used, hide one to see what happens without it, and get suggestions from slow queries.
+- See each field's types and how often it appears, and write or generate a validator from that.
+- Follow references: Quarry shows a preview next to an id and opens the document it points to. It can find these relations for you.
+
+**Move data around**
+- Import, and export to JSON, CSV or TSV.
+- Compare two collections and sync the differences.
+- Dump and restore with the MongoDB Database Tools. Quarry installs them if they're missing.
+- Manage users and roles.
+
+**Script it**
+- A JavaScript shell running on [Bun](https://bun.sh), with the official MongoDB driver, npm packages and autocomplete. Results come back as a table.
+
+**Connect from anywhere**
+- Go through an SSH tunnel (password, key file or agent) or a SOCKS5 proxy.
+- Passwords stay in your system keychain: the macOS Keychain, Windows Credential Manager, or the Secret Service on Linux.
+- Tag connections as Production, Staging or anything you like, so you always know which one you're on.
+- Quarry reconnects to your last connection when it starts.
 
 | | |
 |---|---|
