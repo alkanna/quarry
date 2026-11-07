@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0](https://github.com/alkanna/quarry/compare/v0.16.0...v0.17.0) (2026-11-07)
+
+
+### Features
+
+* query value shortcuts, field value suggestions, query help and page jumping ([#100](https://github.com/alkanna/quarry/issues/100)) ([50eb9b8](https://github.com/alkanna/quarry/commit/50eb9b81bc79a6556eeb20682fb28a1fa710ffdb))
+
 ## [0.16.0](https://github.com/alkanna/quarry/compare/v0.15.0...v0.16.0) (2026-11-07)
 
 
