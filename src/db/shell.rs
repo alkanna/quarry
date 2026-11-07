@@ -21,7 +21,10 @@ pub fn package_spec(p: &str) -> (String, String) {
 }
 
 /// The Shell runner itself needs these, so their versions are not the person's to change.
-pub const PINNED_PACKAGES: [&str; 2] = ["mongodb", "socks"];
+pub const PINNED_PACKAGES: [&str; 3] = ["mongodb", "socks", "tsrs"];
+
+/// Only for editor autocomplete: tsrs is the TypeScript language server, and lodash ships no types of its own.
+pub const EDITOR_PACKAGES: [(&str, &str); 2] = [("tsrs", "0.23.0-ts7.1.0-beta"), ("@types/lodash", "^4.17.20")];
 
 /// npm package names: lowercase letters, digits, - . _ ~ and one optional @scope/.
 pub fn valid_package(p: &str) -> bool {
@@ -45,8 +48,8 @@ pub const SHELL_BUILTINS: [(&str, &str); 4] = [("lodash", "^4.17.21"), ("dayjs",
 pub(crate) fn runner_package(packages: &[String]) -> String {
     let mut deps = serde_json::Map::new();
     deps.insert("mongodb".into(), "^6.10.0".into());
-    for (name, version) in SHELL_BUILTINS {
-        deps.insert(name.into(), version.into());
+    for (name, version) in SHELL_BUILTINS.iter().chain(&EDITOR_PACKAGES) {
+        deps.insert(name.to_string(), version.to_string().into());
     }
     for p in packages.iter().filter(|p| valid_package(p)) {
         let (name, version) = package_spec(p);
@@ -57,37 +60,57 @@ pub(crate) fn runner_package(packages: &[String]) -> String {
 
 pub(crate) const RUNNER: &str = include_str!("shell_runner.mjs");
 
-pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + Send + Sync), mut cancel: tokio::sync::oneshot::Receiver<()>) -> Res<String> {
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
-    use tokio::process::Command;
-    let note = |t: &str| send(Msg::ShellLog { req, level: "info".into(), text: t.into() });
-    std::fs::create_dir_all(&job.dir).map_err(e)?;
-    let package = runner_package(&job.packages);
+/// Lets the editor's language server resolve the shell's packages and their types.
+const TSCONFIG: &str = r#"{"compilerOptions":{"allowJs":true,"checkJs":false,"noEmit":true,"target":"es2022","module":"esnext","moduleResolution":"bundler","lib":["es2022"],"types":[]},"files":["__quarry_globals.d.ts","__quarry_script.js"]}"#;
+
+/// Writes the runner and its package.json, then installs packages when they changed or are missing.
+/// The Shell and the editor's language server both call this, so one install runs at a time.
+pub(crate) async fn prepare_shell_dir(runtime: &std::path::Path, dir: &std::path::Path, packages: &[String], note: &(impl Fn(&str) + Sync)) -> Res<()> {
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _guard = match LOCK.try_lock() {
+        Ok(g) => g,
+        Err(_) => {
+            // The editor's language server may be installing packages; say why the run waits.
+            note("Waiting for the package install to finish…");
+            LOCK.lock().await
+        }
+    };
+    std::fs::create_dir_all(dir).map_err(e)?;
+    let package = runner_package(packages);
     let mut deps_changed = false;
-    for (name, body) in [("runner.mjs", RUNNER), ("package.json", package.as_str())] {
-        let path = job.dir.join(name);
+    for (name, body) in [("runner.mjs", RUNNER), ("package.json", package.as_str()), ("tsconfig.json", TSCONFIG)] {
+        let path = dir.join(name);
         if std::fs::read_to_string(&path).ok().as_deref() != Some(body) {
             std::fs::write(&path, body).map_err(e)?;
             deps_changed |= name == "package.json";
         }
     }
-    let missing = !job.dir.join("node_modules").join("mongodb").exists()
-        || SHELL_BUILTINS.iter().any(|(n, _)| !job.dir.join("node_modules").join(n).exists())
-        || job.packages.iter().any(|p| !job.dir.join("node_modules").join(package_spec(p).0).exists());
+    let modules = dir.join("node_modules");
+    let missing = !modules.join("mongodb").exists()
+        || SHELL_BUILTINS.iter().chain(&EDITOR_PACKAGES).any(|(n, _)| !modules.join(n).exists())
+        || packages.iter().any(|p| !modules.join(package_spec(p).0).exists());
     if deps_changed || missing {
         note("Installing packages for the shell with Bun…");
-        let mut cmd = Command::new(&job.runtime);
-        cmd.arg("install").current_dir(&job.dir).kill_on_drop(true);
+        let mut cmd = tokio::process::Command::new(runtime);
+        cmd.arg("install").current_dir(dir).kill_on_drop(true);
         #[cfg(windows)]
         cmd.creation_flags(crate::update::CREATE_NO_WINDOW);
-        let out = tokio::select! {
-            o = cmd.output() => o.map_err(|err| format!("Could not start Bun ({}): {err}", job.runtime.display()))?,
-            _ = &mut cancel => return Err("Stopped.".into()),
-        };
+        let out = cmd.output().await.map_err(|err| format!("Could not start Bun ({}): {err}", runtime.display()))?;
         if !out.status.success() {
             return Err(format!("bun install failed: {}", String::from_utf8_lossy(&out.stderr)));
         }
         note("Packages ready.");
+    }
+    Ok(())
+}
+
+pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + Send + Sync), mut cancel: tokio::sync::oneshot::Receiver<()>) -> Res<String> {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+    use tokio::process::Command;
+    let note = |t: &str| send(Msg::ShellLog { req, level: "info".into(), text: t.into() });
+    tokio::select! {
+        r = prepare_shell_dir(&job.runtime, &job.dir, &job.packages, &note) => r?,
+        _ = &mut cancel => return Err("Stopped.".into()),
     }
     let mut cmd = Command::new(&job.runtime);
     cmd.arg("runner.mjs")

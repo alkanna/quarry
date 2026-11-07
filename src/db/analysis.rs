@@ -350,12 +350,13 @@ pub enum ColOp {
     Sum,
     Avg,
     Median,
+    Range,
     Group,
 }
 
 impl ColOp {
     /// In menu order.
-    pub const ALL: [ColOp; 8] = [ColOp::Copy, ColOp::CopyDistinct, ColOp::CopyDistinctJs, ColOp::CountDistinct, ColOp::Sum, ColOp::Avg, ColOp::Median, ColOp::Group];
+    pub const ALL: [ColOp; 9] = [ColOp::Copy, ColOp::CopyDistinct, ColOp::CopyDistinctJs, ColOp::CountDistinct, ColOp::Sum, ColOp::Avg, ColOp::Median, ColOp::Range, ColOp::Group];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -366,6 +367,7 @@ impl ColOp {
             ColOp::Sum => "Sum of values",
             ColOp::Avg => "Average of values",
             ColOp::Median => "Median of values",
+            ColOp::Range => "Range of values",
             ColOp::Group => "Group by and count values",
         }
     }
@@ -380,14 +382,75 @@ pub enum ColOut {
     Groups(Vec<Document>),
 }
 
+/// Numeric strings count too, since imported data often stores numbers as text.
+/// Leading zeros mark codes like "007", which import also keeps as text.
 fn num(v: &Bson) -> Option<f64> {
     match v {
         Bson::Int32(n) => Some(*n as f64),
         Bson::Int64(n) => Some(*n as f64),
         Bson::Double(f) => Some(*f),
         Bson::Decimal128(d) => d.to_string().parse().ok(),
+        Bson::String(s) => {
+            let t = s.trim();
+            let code = t.len() > 1 && t.starts_with('0') && !t.starts_with("0.");
+            if code { None } else { t.parse().ok().filter(|f: &f64| f.is_finite()) }
+        }
         _ => None,
     }
+}
+
+fn date_ms(v: &Bson) -> Option<i64> {
+    match v {
+        Bson::DateTime(t) => Some(t.timestamp_millis()),
+        Bson::Timestamp(t) => Some(t.time as i64 * 1000),
+        _ => None,
+    }
+}
+
+fn fmt_date(ms: i64) -> String {
+    mongodb::bson::DateTime::from_millis(ms).try_to_rfc3339_string().unwrap_or_else(|_| ms.to_string())
+}
+
+fn fmt_span(ms: i64) -> String {
+    if ms < 1000 {
+        return format!("{ms} ms");
+    }
+    let s = ms / 1000;
+    let parts = [(s / 86_400, "d"), (s / 3600 % 24, "h"), (s / 60 % 60, "m"), (s % 60, "s")];
+    parts.iter().filter(|p| p.0 > 0).map(|(n, u)| format!("{n}{u}")).collect::<Vec<_>>().join(" ")
+}
+
+/// Sum, average, median and range over numbers or dates, whichever the column holds more of.
+fn stat_result(op: ColOp, values: &[Bson]) -> String {
+    let total = values.len();
+    // Each epoch milli is exact as f64 (below 2^53), so dates share the number path.
+    let dates: Vec<f64> = values.iter().filter_map(date_ms).map(|ms| ms as f64).collect();
+    let nums: Vec<f64> = values.iter().filter_map(num).collect();
+    let is_date = dates.len() > nums.len();
+    let (mut xs, kind) = if is_date { (dates, "dates") } else { (nums, "numbers") };
+    let n = xs.len();
+    if n == 0 {
+        return format!("None of the {total} values are numbers or dates");
+    }
+    let show = |x: f64| if is_date { fmt_date(x as i64) } else { x.to_string() };
+    let body = match op {
+        ColOp::Sum if is_date => "Dates cannot be summed, try average, median or range".into(),
+        ColOp::Sum => show(xs.iter().sum()),
+        // Summed exactly: 100k epoch millis add up past 2^53, where f64 starts rounding.
+        ColOp::Avg if is_date => show((xs.iter().map(|&x| x as i128).sum::<i128>() / n as i128) as f64),
+        ColOp::Avg => show(xs.iter().sum::<f64>() / n as f64),
+        ColOp::Median => {
+            xs.sort_by(f64::total_cmp);
+            show(if n % 2 == 1 { xs[n / 2] } else { (xs[n / 2 - 1] + xs[n / 2]) / 2.0 })
+        }
+        ColOp::Range => {
+            let (lo, hi) = xs.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &x| (lo.min(x), hi.max(x)));
+            let span = if is_date { fmt_span((hi - lo) as i64) } else { (hi - lo).to_string() };
+            format!("{} to {}\nSpan {span}", show(lo), show(hi))
+        }
+        _ => unreachable!("not a stat op"),
+    };
+    format!("{body}\n\n{n} of {total} values are {kind}")
 }
 
 pub fn col_op_result(op: ColOp, values: &[Bson]) -> ColOut {
@@ -396,11 +459,6 @@ pub fn col_op_result(op: ColOp, values: &[Bson]) -> ColOut {
         let mut seen = HashSet::new();
         values.iter().filter(|v| seen.insert(compact(v))).cloned().collect::<Vec<_>>()
     };
-    let mut nums: Vec<f64> = values.iter().filter_map(num).collect();
-    let stat = |x: Option<f64>, n: usize| ColOut::Notice(match x {
-        Some(x) => format!("{x}\n\n{n} of {} values are numbers", values.len()),
-        None => format!("None of the {} values are numbers", values.len()),
-    });
     match op {
         ColOp::Copy => ColOut::Copy(values.iter().map(copy_text).collect::<Vec<_>>().join("\n"), values.len()),
         ColOp::CopyDistinct => {
@@ -413,14 +471,7 @@ pub fn col_op_result(op: ColOp, values: &[Bson]) -> ColOut {
             ColOut::Copy(shell_text(&Bson::Array(d)), n)
         }
         ColOp::CountDistinct => ColOut::Notice(format!("{} distinct values among {}", distinct().len(), values.len())),
-        ColOp::Sum => stat((!nums.is_empty()).then(|| nums.iter().sum()), nums.len()),
-        ColOp::Avg => stat((!nums.is_empty()).then(|| nums.iter().sum::<f64>() / nums.len() as f64), nums.len()),
-        ColOp::Median => {
-            nums.sort_by(f64::total_cmp);
-            let n = nums.len();
-            let m = (n > 0).then(|| if n % 2 == 1 { nums[n / 2] } else { (nums[n / 2 - 1] + nums[n / 2]) / 2.0 });
-            stat(m, n)
-        }
+        ColOp::Sum | ColOp::Avg | ColOp::Median | ColOp::Range => ColOut::Notice(stat_result(op, values)),
         ColOp::Group => {
             let mut rows: Vec<(Bson, i64)> = Vec::new();
             let mut at: HashMap<String, usize> = HashMap::new();
@@ -551,5 +602,14 @@ mod tests {
         assert!(js.starts_with('[') && js.contains("\"a\""), "{js}");
         let ColOut::Groups(g) = col_op_result(ColOp::Group, &v) else { panic!() };
         assert_eq!(g[0], doc! { "_id": 1i64, "count": 2i64 });
+        assert_eq!(notice(ColOp::Range), "1 to 3");
+        let text = [Bson::String(" 4 ".into()), Bson::String("x".into()), Bson::String("NaN".into()), Bson::String("007".into())];
+        assert_eq!(col_op_result(ColOp::Sum, &text), ColOut::Notice("4\n\n1 of 4 values are numbers".into()));
+        let day = 86_400_000;
+        let d = |ms| Bson::DateTime(mongodb::bson::DateTime::from_millis(ms));
+        let dates = [d(0), d(3 * day + 3_661_000), d(day), Bson::Int32(1)];
+        assert_eq!(col_op_result(ColOp::Median, &dates), ColOut::Notice("1970-01-02T00:00:00Z\n\n3 of 4 values are dates".into()));
+        assert_eq!(col_op_result(ColOp::Range, &dates), ColOut::Notice("1970-01-01T00:00:00Z to 1970-01-04T01:01:01Z\nSpan 3d 1h 1m 1s\n\n3 of 4 values are dates".into()));
+        assert!(matches!(col_op_result(ColOp::Sum, &dates), ColOut::Notice(s) if s.starts_with("Dates cannot")));
     }
 }

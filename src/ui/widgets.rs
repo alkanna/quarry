@@ -100,19 +100,36 @@ pub(crate) fn toggle(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
 
 /// A row of joined buttons where exactly one is chosen.
 pub(crate) fn segmented<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options: &[(T, &str)]) {
-    egui::Frame::new().fill(pal().well).corner_radius(R_MD).inner_margin(3).show(ui, |ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
-        // In a right-to-left row, add in reverse so the options still read left to right.
-        let rtl = ui.layout().main_dir() == egui::Direction::RightToLeft;
-        let order: Vec<&(T, &str)> = if rtl { options.iter().rev().collect() } else { options.iter().collect() };
-        for (v, label) in order {
-            let on = *value == *v;
-            let b = egui::Button::new(RichText::new(*label).size(TXT_BODY).color(if on { BG() } else { TEXT() })).fill(state_fill(ui, if on { PRIMARY() } else { Color32::TRANSPARENT })).corner_radius(R_SM);
-            if ui.add(b).clicked() {
-                *value = *v;
-            }
+    // Painted at a fixed height: a Frame grew with the row, leaving the track taller than its options.
+    const PAD: f32 = 3.0;
+    const GAP: f32 = 2.0;
+    let pad_x = ui.spacing().button_padding.x;
+    let galleys: Vec<_> = options.iter().map(|(_, l)| ui.painter().layout_no_wrap(l.to_string(), FontId::proportional(TXT_BODY), Color32::PLACEHOLDER)).collect();
+    let widths: Vec<f32> = galleys.iter().map(|g| g.size().x + pad_x * 2.0).collect();
+    let total = widths.iter().sum::<f32>() + GAP * (options.len().saturating_sub(1)) as f32 + PAD * 2.0;
+    let base = ui.next_auto_id();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(total, BUTTON_H), Sense::hover());
+    ui.painter().rect_filled(rect, R_MD, pal().well);
+    let mut x = rect.left() + PAD;
+    for (i, (((v, label), g), w)) in options.iter().zip(galleys).zip(widths).enumerate() {
+        let seg = egui::Rect::from_min_size(egui::pos2(x, rect.top() + PAD), egui::vec2(w, BUTTON_H - PAD * 2.0));
+        x += w + GAP;
+        let r = ui.interact(seg, base.with(i), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        let on = *value == *v;
+        let state = if r.is_pointer_button_down_on() { 2 } else if r.hovered() { 1 } else { 0 };
+        let fill = if on { [PRIMARY(), shade(PRIMARY(), 0.12), shade(PRIMARY(), 0.24)][state] } else { [Color32::TRANSPARENT, tint(TEXT(), 34), tint(TEXT(), 46)][state] };
+        ui.painter().rect_filled(seg, R_SM, fill);
+        let dy = optical_dy(&g);
+        ui.painter().galley(seg.center() - g.size() / 2.0 + egui::vec2(0.0, dy), g, if on { BG() } else { TEXT() });
+        if r.has_focus() {
+            ui.painter().rect_stroke(seg.expand(1.0), R_SM, ui.visuals().selection.stroke, egui::StrokeKind::Outside);
         }
-    });
+        let enabled = ui.is_enabled();
+        r.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, enabled, on, *label));
+        if r.clicked() {
+            *value = *v;
+        }
+    }
 }
 
 /// The pill look shared by `chip`, `badge` and `paint_tag`. Only colors change with `state` (0 idle,
@@ -125,7 +142,8 @@ pub(crate) fn paint_chip(p: &egui::Painter, rect: egui::Rect, text: std::sync::A
         (if state > 0 { TEXT() } else { MUTED() }, BORDER(), [Color32::TRANSPARENT, tint(TEXT(), 34), tint(TEXT(), 46)][state])
     };
     p.rect(rect, rect.height() / 2.0, fill, Stroke::new(1.0, line), egui::StrokeKind::Inside);
-    p.galley(rect.center() - text.size() / 2.0, text, text_c);
+    let dy = optical_dy(&text);
+    p.galley(rect.center() - text.size() / 2.0 + egui::vec2(0.0, dy), text, text_c);
 }
 
 /// A rounded label in `fg`, or muted with a plain border when off, as in one-of choices like connection tags.

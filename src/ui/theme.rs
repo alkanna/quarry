@@ -256,6 +256,23 @@ pub(crate) fn shade(c: Color32, t: f32) -> Color32 {
     c.lerp_to_gamma(if light { Color32::BLACK } else { Color32::WHITE }, t)
 }
 
+/// The frame of floating cards over the editors: suggestion lists and docs.
+pub(crate) fn popup_card(ui: &egui::Ui) -> egui::Frame {
+    egui::Frame::popup(ui.style()).fill(RAISED()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_MD)
+}
+
+/// How far to move a one-line galley so its ink, from the tallest letter to the baseline, is
+/// centered in its box. Box centering counts room for descenders, so all-caps labels sat high.
+pub(crate) fn optical_dy(g: &egui::Galley) -> f32 {
+    let Some(row) = g.rows.first() else { return 0.0 };
+    let Some(base) = row.glyphs.first().map(|gl| gl.pos.y) else { return 0.0 };
+    let top = row.glyphs.iter().filter(|gl| gl.uv_rect.size.y > 0.0).map(|gl| gl.pos.y + gl.uv_rect.offset.y).fold(f32::INFINITY, f32::min);
+    if !top.is_finite() {
+        return 0.0;
+    }
+    g.size().y / 2.0 - (row.pos.y + (top + base) / 2.0)
+}
+
 /// A fill for the next widget that follows hover and press. egui uses a button's own fill for
 /// every state, so buttons with one would otherwise never react. Reads last frame's response
 /// of the widget about to be added, which has the next auto id.

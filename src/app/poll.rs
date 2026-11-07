@@ -416,6 +416,8 @@ impl App {
                         t.shell.logs.push((level, text));
                     }
                 }
+                Msg::JsLs { req, out } => self.js_answer(ctx, req, out),
+                Msg::JsLsStopped { failed } => self.js_stopped(failed),
                 Msg::ShellDone { req, res, ms } => {
                     let Some(t) = self.tabs.iter_mut().find(|t| t.shell.req == req) else { continue };
                     let sh = &mut t.shell;

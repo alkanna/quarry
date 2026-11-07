@@ -13,6 +13,7 @@ mod code;
 mod dates;
 mod explain;
 mod import;
+mod js_ls;
 mod log;
 mod shell;
 mod tools;
@@ -22,6 +23,7 @@ pub use code::*;
 pub use dates::*;
 pub use explain::*;
 pub use import::*;
+pub use js_ls::*;
 pub use log::*;
 pub use shell::*;
 pub use tools::*;
@@ -122,6 +124,10 @@ pub enum Msg {
     ShellLog { req: u64, level: String, text: String },
     /// The Shell script finished: its return value as canonical Extended JSON `{"v": ...}`.
     ShellDone { req: u64, res: Res<String>, ms: u128 },
+    /// The shell editor's language server answered request `req`.
+    JsLs { req: u64, out: JsOut },
+    /// The shell editor's language server stopped, idle or `failed`.
+    JsLsStopped { failed: bool },
     /// A result to show in a dialog, such as a distinct-values count.
     Notice { title: String, body: String },
     /// "Group by and count" finished: one `{ _id, count }` per value, most frequent first.

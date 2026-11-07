@@ -205,6 +205,7 @@ impl App {
         let running = t.shell.started;
         let mut run = false;
         let mut stop = false;
+        let mut editor = None;
         toolbar(ui, |ui| {
             ui.horizontal(|ui| {
                 caption(ui, "SHELL  ·  JavaScript run by Bun with the official MongoDB driver");
@@ -216,8 +217,30 @@ impl App {
                 }
             });
             let id = ui.make_persistent_id("shell-editor");
-            ac_field(ui, id, &mut t.shell.code, ac, &|b| suggest_js(b, &paths, &colls, &pkg_names), |ui, text, _open| {
+            // Read before the list consumes it, so a late server answer cannot reopen a dismissed list.
+            let esc = ui.input(|i| i.key_pressed(Key::Escape));
+            let (out, picked) = ac_field(ui, id, &mut t.shell.code, ac, &|b| suggest_js(b, &paths, &colls, &pkg_names), |ui, text, _open| {
                 egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(10).lock_focus(true).layouter(&mut js_layout).show(ui)
+            });
+            let caret = out.cursor_range.filter(|r| r.is_empty()).map(|r| r.primary.index.0);
+            let hover = out.response.hover_pos().and_then(|p| {
+                // The character under the pointer, not just the nearest gap between two.
+                let rel = p - out.galley_pos;
+                let gap = out.galley.cursor_from_pos(rel).index.0;
+                let at = |c: usize| out.galley.pos_from_cursor(egui::text::CCursor::new(c));
+                let i = if rel.x < at(gap).min.x { gap.checked_sub(1)? } else { gap };
+                let (cell, next) = (at(i), at(i + 1));
+                (rel.x >= cell.min.x && rel.x < next.min.x && rel.y >= cell.min.y && rel.y < cell.max.y).then_some((i, p))
+            });
+            editor = Some(shell_ls::EditorFrame {
+                id,
+                edited: caret.filter(|_| out.response.changed()),
+                esc,
+                picked,
+                focused: out.response.has_focus(),
+                caret,
+                caret_pos: caret.map(|c| out.galley_pos + out.galley.pos_from_cursor(egui::text::CCursor::new(c)).left_top().to_vec2()),
+                hover,
             });
             ui.horizontal(|ui| {
                 match running {
@@ -403,6 +426,10 @@ impl App {
         if packages != self.prefs.shell_packages {
             self.prefs.shell_packages = packages;
             self.save_prefs();
+            self.js_restart();
+        }
+        if let Some(f) = editor {
+            self.js_editor(ui.ctx(), f, &colls);
         }
         if stop {
             if let Some(c) = self.tabs[self.cur].shell.cancel.take() {

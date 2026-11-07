@@ -57,6 +57,25 @@ impl Worker {
         });
     }
 
+    /// Starts the shell editor's language server; it stops once the sender drops or after a quiet spell.
+    pub fn js_ls(&self, runtime: std::path::PathBuf, dir: std::path::PathBuf, packages: Vec<String>) -> tokio::sync::mpsc::UnboundedSender<JsLsReq> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (out, ctx) = (self.tx.clone(), self.ctx.clone());
+        self.rt.spawn(async move {
+            let send = move |m: Msg| {
+                let _ = out.send(m);
+                ctx.request_repaint();
+            };
+            // Autocomplete falls back to the built-in suggestions, so a failure here is only logged.
+            let res = run_js_ls(runtime, dir, packages, rx, &send).await;
+            if let Err(err) = &res {
+                eprintln!("shell language server: {err}");
+            }
+            send(Msg::JsLsStopped { failed: res.is_err() });
+        });
+        tx
+    }
+
     /// Runs blocking work (such as the update check) off the UI thread.
     pub fn blocking(&self, f: impl FnOnce() -> Msg + Send + 'static) {
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
