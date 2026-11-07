@@ -9,8 +9,13 @@ pub struct Compared {
     pub only_dst: Vec<Document>,
     /// (source, target) pairs with the same `_id` and different content.
     pub changed: Vec<(Document, Document)>,
+    /// One row per differing field of `changed`: `_id`, `field`, and `target`/`source` when that side has it.
+    pub diffs: Vec<Document>,
     pub same: usize,
 }
+
+/// Columns of `Compared::diffs`, in the order the table shows them.
+pub const DIFF_FIELDS: [&str; 4] = ["_id", "field", "target", "source"];
 
 /// The original skips collections above this many documents (maxDocuments, renderer line 132512).
 pub const COMPARE_MAX: u64 = 1_000_000;
@@ -31,6 +36,21 @@ pub fn compare_docs(src: Vec<Document>, dst: Vec<Document>) -> Compared {
     }
     r.only_dst = other.into_values().collect();
     r.only_dst.sort_by_key(|d| compact(d.get("_id").unwrap_or(&Bson::Null)));
+    // Built here, on the worker, because diffing every changed document can take a while.
+    for (src, dst) in &r.changed {
+        let id = src.get("_id").cloned().unwrap_or(Bson::Null);
+        for (path, old, new) in diff(dst, src) {
+            let mut d = doc! { "_id": id.clone(), "field": path };
+            // A side without the field leaves the cell empty rather than showing null.
+            if let Some(v) = old {
+                d.insert("target", v);
+            }
+            if let Some(v) = new {
+                d.insert("source", v);
+            }
+            r.diffs.push(d);
+        }
+    }
     r
 }
 

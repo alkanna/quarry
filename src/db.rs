@@ -770,6 +770,7 @@ mod tests {
         let b = vec![doc! { "_id": 1, "y": 2, "x": 1 }, doc! { "_id": 2, "x": 2 }, doc! { "_id": 4 }];
         let r = compare_docs(a, b);
         assert_eq!((r.same, r.changed.len(), r.only_src.len(), r.only_dst.len()), (1, 1, 1, 1));
+        assert_eq!(r.diffs, vec![doc! { "_id": 2, "field": "x", "target": 2, "source": 1 }]);
         assert_eq!(preview_field(&doc! { "_id": 1, "owner": "6650f1c2a1b2c3d4e5f60700", "name": "Ada" }), "name");
         assert_eq!(values_at(&[doc! { "t": [1, 2] }, doc! { "t": 2 }], "t"), vec![Bson::Int32(1), Bson::Int32(2)]);
         assert_eq!(values_at(&[doc! { "items": [{ "p": 1 }, { "p": 3 }] }], "items.p"), vec![Bson::Int32(1), Bson::Int32(3)]);

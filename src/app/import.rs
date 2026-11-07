@@ -75,7 +75,7 @@ impl App {
             t.selected = None;
         }
         ui.add_space(6.0);
-        let mut preview = None;
+        let mut preview = false;
         match &im.parsed {
             None => {
                 ui.label(RichText::new("Nothing to import yet.").color(MUTED()));
@@ -95,7 +95,7 @@ impl App {
                         }
                     });
                 });
-                preview = Some((docs[..docs.len().min(PAGE_SIZE as usize)].to_vec(), im.fields.clone()));
+                preview = true;
             }
         }
         if open_file {
@@ -143,15 +143,9 @@ impl App {
                 }
             }
         }
-        if let Some((docs, fields)) = preview {
+        if preview {
             // The preview uses the same table as documents.
-            let t = &mut self.tabs[self.cur];
-            let saved_docs = std::mem::replace(&mut t.agg_docs, docs);
-            let saved_fields = std::mem::replace(&mut t.agg_fields, fields);
             self.results(ui, true);
-            let t = &mut self.tabs[self.cur];
-            t.agg_docs = saved_docs;
-            t.agg_fields = saved_fields;
         }
     }
 }

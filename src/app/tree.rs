@@ -20,7 +20,8 @@ pub(super) fn fold_menu(ui: &mut egui::Ui, path: &[String], container: bool, act
     }
 }
 
-pub(super) fn field_menu(ui: &mut egui::Ui, path: &[String], v: &Bson, editable: bool, highlighted: bool, acts: &mut Vec<TreeAct>) {
+/// `in_coll` is false for rows that are not documents of this collection, which hides actions run against it.
+pub(super) fn field_menu(ui: &mut egui::Ui, path: &[String], v: &Bson, editable: bool, in_coll: bool, highlighted: bool, acts: &mut Vec<TreeAct>) {
     let p = path.join(".");
     let is_id = path.first().is_some_and(|k| k == "_id");
     ui.set_min_width(230.0);
@@ -55,29 +56,31 @@ pub(super) fn field_menu(ui: &mut egui::Ui, path: &[String], v: &Bson, editable:
         acts.push(TreeAct::Highlight(p.clone()));
         ui.close();
     }
-    ui.menu_button("Filter by value", |ui| {
-        menu_look(ui);
-        if ui.button("All documents").clicked() {
-            acts.push(TreeAct::Filter(p.clone(), v.clone(), false));
+    if in_coll {
+        ui.menu_button("Filter by value", |ui| {
+            menu_look(ui);
+            if ui.button("All documents").clicked() {
+                acts.push(TreeAct::Filter(p.clone(), v.clone(), false));
+            }
+            if ui.button("Filtered documents only").clicked() {
+                acts.push(TreeAct::Filter(p.clone(), v.clone(), true));
+            }
+        });
+        ui.menu_button("Group by and count", |ui| {
+            menu_look(ui);
+            if ui.button("All documents").clicked() {
+                acts.push(TreeAct::Group(p.clone(), v.clone(), false));
+            }
+            if ui.button("Filtered documents only").clicked() {
+                acts.push(TreeAct::Group(p.clone(), v.clone(), true));
+            }
+        });
+        if ui.button("Count distinct values").on_hover_text("Number of distinct values in this field within the current query").clicked() {
+            acts.push(TreeAct::Distinct(db::strip_indices(&p)));
         }
-        if ui.button("Filtered documents only").clicked() {
-            acts.push(TreeAct::Filter(p.clone(), v.clone(), true));
+        if ui.button("Create index on this field").clicked() {
+            acts.push(TreeAct::Index(p.clone()));
         }
-    });
-    ui.menu_button("Group by and count", |ui| {
-        menu_look(ui);
-        if ui.button("All documents").clicked() {
-            acts.push(TreeAct::Group(p.clone(), v.clone(), false));
-        }
-        if ui.button("Filtered documents only").clicked() {
-            acts.push(TreeAct::Group(p.clone(), v.clone(), true));
-        }
-    });
-    if ui.button("Count distinct values").on_hover_text("Number of distinct values in this field within the current query").clicked() {
-        acts.push(TreeAct::Distinct(db::strip_indices(&p)));
-    }
-    if ui.button("Create index on this field").clicked() {
-        acts.push(TreeAct::Index(p.clone()));
     }
     if editable && !is_id {
         ui.separator();
@@ -118,8 +121,8 @@ impl App {
     /// Side panel mode: the open document on the right.
     pub(super) fn inspector(&mut self, ui: &mut egui::Ui) {
         let Some(d) = self.selected_doc().cloned() else { return };
-        let d = self.shown_doc(&d).unwrap_or(d);
         let from_agg = matches!(self.t().and_then(|t| t.selected), Some((true, _)));
+        let d = self.shown_doc(&d, from_agg).unwrap_or(d);
         egui::Panel::right("inspector")
             .default_size(460.0)
             .size_range(320.0..=900.0)
@@ -187,7 +190,8 @@ impl App {
             }
             _ => HashSet::new(),
         };
-        let id = egui::Id::unique(("doc", d.get("_id").map(db::compact)));
+        // Result rows can repeat an _id (one per differing field, or $unwind), so their row keeps them apart.
+        let id = egui::Id::unique(("doc", d.get("_id").map(db::compact), from_agg.then_some(row)));
         let mut path = Vec::new();
         self.fold_busy = false;
         // Runs every frame, so capped like doc_paths: deeper keys just truncate.
@@ -489,9 +493,10 @@ impl App {
                 }
                 let p = path.clone();
                 let hl = highlighted(&self.prefs, &self.col_key(false), &p);
+                let in_coll = self.in_coll();
                 r.header_response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Double-click to edit as JSON, right-click for more").context_menu(|ui| {
                     menu_look(ui);
-                    field_menu(ui, &p, v, editable, hl, acts);
+                    field_menu(ui, &p, v, editable, in_coll, hl, acts);
                     fold_menu(ui, &p, true, acts);
                 });
             }
@@ -550,9 +555,10 @@ impl App {
                             r
                         };
                         let p = path.clone();
+                        let in_coll = self.in_coll();
                         r.union(key_r).context_menu(|ui| {
                             menu_look(ui);
-                            field_menu(ui, &p, leaf, editable, hl, acts);
+                            field_menu(ui, &p, leaf, editable, in_coll, hl, acts);
                             fold_menu(ui, &p, false, acts);
                         });
                     }

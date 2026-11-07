@@ -288,7 +288,7 @@ impl App {
         if agg || !self.col_scope_query {
             // As the table shows them, unsaved edits included.
             let values: Vec<Bson> = docs.iter().filter_map(|d| {
-                let shown = if agg { None } else { self.shown_doc(d) };
+                let shown = self.shown_doc(d, agg);
                 db::get_path(shown.as_ref().unwrap_or(d), c).cloned()
             }).collect();
             let scope = format!("From the {} documents on this page.", docs.len());

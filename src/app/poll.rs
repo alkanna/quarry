@@ -361,7 +361,7 @@ impl App {
                     let Some(t) = self.tabs.iter_mut().find(|t| t.compare.req == req) else { continue };
                     t.compare.running = false;
                     match res {
-                        Ok(r) => t.compare.result = Some(r),
+                        Ok(r) => t.compare.set_result(Some(r)),
                         Err(e) => self.err(e),
                     }
                 }

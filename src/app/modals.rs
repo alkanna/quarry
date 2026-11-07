@@ -381,7 +381,7 @@ impl App {
                     let valid = !p.starts_with('$') && !p.split('.').any(str::is_empty);
                     dialog_actions(ui, |ui| {
                         if ui.add_enabled(valid, primary_button(ui, "Save", PRIMARY())).clicked() {
-                            let fields = self.t().map(|t| if *agg { t.agg_fields.clone() } else { t.fields.clone() }).unwrap_or_default();
+                            let fields = self.t().map(|t| if *agg { t.agg_source().1.to_vec() } else { t.fields.clone() }).unwrap_or_default();
                             self.apply_col_acts(key, &fields, vec![ColAct::Customize { col: col.clone(), label: label.clone(), path: p.to_string() }]);
                             keep = false;
                         }

@@ -336,3 +336,16 @@ pub(crate) fn chevron(p: &egui::Painter, c: egui::Pos2, open: bool, color: Color
     };
     p.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
 }
+
+/// The ‹ page x of y › control shared by every paged result. Returns the page to go to.
+pub(crate) fn pager(ui: &mut egui::Ui, page: usize, pages: usize) -> Option<usize> {
+    let mut go = None;
+    if ui.add_enabled(page > 0, egui::Button::new("‹")).clicked() {
+        go = Some(page - 1);
+    }
+    ui.label(format!("page {} of {pages}", page + 1));
+    if ui.add_enabled(page + 1 < pages, egui::Button::new("›")).clicked() {
+        go = Some(page + 1);
+    }
+    go
+}
