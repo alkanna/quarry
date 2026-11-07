@@ -59,62 +59,36 @@ impl App {
             });
         });
         // Syncing writes the old diff to whatever target is picked, so a diff for another one is dropped.
-        if c.ran != (c.conn, c.db.clone(), c.coll.clone()) {
-            c.result = None;
+        // Open rows are kept by position, so whenever the rows under them change they are closed.
+        let mut moved = false;
+        if c.result.is_some() && c.ran != (c.conn, c.db.clone(), c.coll.clone()) {
+            c.set_result(None);
+            moved = true;
         }
         if let Some(r) = &c.result {
             ui.add_space(8.0);
+            let mut pick = None;
             ui.horizontal(|ui| {
-                for (label, n, color) in [("Identical", r.same, MUTED()), ("Only in source", r.only_src.len(), SUCCESS()), ("Only in target", r.only_dst.len(), WARNING()), ("Different", r.changed.len(), C_LINK())] {
-                    egui::Frame::new().fill(RAISED()).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
+                for (label, n, color, list) in [("Different", r.changed.len(), C_LINK(), Some(CmpList::Changed)), ("Only in source", r.only_src.len(), SUCCESS(), Some(CmpList::OnlySrc)), ("Only in target", r.only_dst.len(), WARNING(), Some(CmpList::OnlyDst)), ("Identical", r.same, MUTED(), None)] {
+                    let on = list == Some(c.list);
+                    let stroke = Stroke::new(1.0, if on { color } else { Color32::TRANSPARENT });
+                    let f = egui::Frame::new().fill(RAISED()).stroke(stroke).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
                         ui.label(RichText::new(group(&n.to_string())).strong().size(TXT_HEADING).color(color));
-                        ui.label(RichText::new(label).size(TXT_SMALL).color(MUTED()));
+                        ui.label(RichText::new(label).size(TXT_SMALL).color(if on { BRIGHT() } else { MUTED() }));
                     });
+                    // Identical documents are counted, not kept, so there is nothing to list.
+                    if let Some(l) = list
+                        && f.response.interact(Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+                        && l != c.list
+                    {
+                        pick = Some(l);
+                    }
                 }
             });
+            if let Some(l) = pick {
+                (c.list, c.page, moved) = (l, 0, true);
+            }
             ui.add_space(6.0);
-            egui::ScrollArea::vertical().max_height((ui.available_height() - 110.0).max(120.0)).auto_shrink([false, true]).show(ui, |ui| {
-                const SHOWN: usize = 200;
-                let more = |ui: &mut egui::Ui, n: usize| {
-                    if n > SHOWN {
-                        ui.label(RichText::new(format!("and {} more", group(&(n - SHOWN).to_string()))).color(FAINT()));
-                    }
-                };
-                egui::CollapsingHeader::new(format!("Different ({})", r.changed.len())).id_salt("cmp-changed").default_open(true).show(ui, |ui| {
-                    for (a, b) in r.changed.iter().take(SHOWN) {
-                        let d = db::diff(b, a);
-                        egui::CollapsingHeader::new(RichText::new(format!("{}   {} field{} differ{}", db::short(a.get("_id").unwrap_or(&Bson::Null)), d.len(), if d.len() == 1 { "" } else { "s" }, if d.len() == 1 { "s" } else { "" })).monospace()).id_salt(("cmp-d", db::compact(a.get("_id").unwrap_or(&Bson::Null)))).show(ui, |ui| {
-                            egui::Grid::new(("cmp-g", db::compact(a.get("_id").unwrap_or(&Bson::Null)))).striped(true).show(ui, |ui| {
-                                ui.label(RichText::new("Field").color(FAINT()));
-                                ui.label(RichText::new("Target now").color(FAINT()));
-                                ui.label(RichText::new("Source").color(FAINT()));
-                                ui.end_row();
-                                for (path, old, new) in d {
-                                    let t = |v: &Option<Bson>| v.as_ref().map_or("missing".to_string(), cell_text);
-                                    ui.label(RichText::new(path).monospace().color(KEY()));
-                                    ui.label(RichText::new(t(&old)).monospace().color(ALERT()));
-                                    ui.label(RichText::new(t(&new)).monospace().color(SUCCESS()));
-                                    ui.end_row();
-                                }
-                            });
-                        });
-                    }
-                    more(ui, r.changed.len());
-                });
-                for (title, list) in [("Only in source", &r.only_src), ("Only in target", &r.only_dst)] {
-                    egui::CollapsingHeader::new(format!("{title} ({})", list.len())).id_salt(title).show(ui, |ui| {
-                        for d in list.iter().take(SHOWN) {
-                            let mut t = db::compact(&Bson::Document(d.clone()));
-                            if t.len() > 160 {
-                                t = format!("{}…", &t[..t.floor_char_boundary(160)]);
-                            }
-                            ui.add(egui::Label::new(RichText::new(t).monospace().size(TXT_SMALL).color(TEXT())).truncate());
-                        }
-                        more(ui, list.len());
-                    });
-                }
-            });
-            ui.separator();
             ui.horizontal(|ui| {
                 ui.checkbox(&mut c.insert, format!("Copy the {} only in source", r.only_src.len()));
                 ui.checkbox(&mut c.replace, format!("Overwrite the {} different", r.changed.len()));
@@ -123,10 +97,31 @@ impl App {
                 let any = (c.insert && !r.only_src.is_empty()) || (c.replace && !r.changed.is_empty()) || (c.delete && !r.only_dst.is_empty());
                 sync = ui.add_enabled(any, primary_button(ui, "Sync to target…", WARNING())).clicked();
             });
+            let n = c.rows().len();
+            let pages = n.div_ceil(PAGE_SIZE as usize).max(1);
+            c.page = c.page.min(pages - 1);
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                let what = if c.list == CmpList::Changed { "differing fields" } else { "documents" };
+                ui.label(RichText::new(format!("{} {what}", group(&n.to_string()))).color(BRIGHT()));
+                ui.separator();
+                if let Some(p) = pager(ui, c.page, pages) {
+                    (c.page, moved) = (p, true);
+                }
+            });
+            ui.add_space(4.0);
         } else if !c.running {
             ui.add_space(20.0);
             ui.label(RichText::new("Pick a target and press Compare. Nothing is written until you sync and type the target's name.").color(FAINT()));
         }
+        if moved {
+            self.drop_agg_row();
+        }
+        if self.tabs[i].compare.result.is_some() {
+            // The same table as documents, reading the list where the comparison keeps it.
+            self.results(ui, true);
+        }
+        let c = &mut self.tabs[i].compare;
         let (tc, tdb, tcoll) = (c.conn, c.db.clone(), c.coll.clone());
         if let Some(d) = load_colls {
             if let Some(client) = self.conn(tc).and_then(|c| c.client.clone()) {
@@ -140,8 +135,10 @@ impl App {
             self.req += 1;
             let req = self.req;
             let to = self.timeout();
+            self.drop_agg_row();
             let c = &mut self.tabs[i].compare;
-            (c.req, c.running, c.result, c.ran) = (req, true, None, (tc, tdb.clone(), tcoll.clone()));
+            c.set_result(None);
+            (c.req, c.running, c.ran) = (req, true, (tc, tdb.clone(), tcoll.clone()));
             self.worker.compare(req, Target { client: a, db: src.db, coll: src.coll, timeout: to }, Target { client: b, db: tdb, coll: tcoll, timeout: to });
         } else if sync {
             if !self.conn(tc).is_some_and(|c| c.writable) {

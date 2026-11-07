@@ -165,13 +165,7 @@ impl App {
                 spin(ui);
             }
             ui.separator();
-            if ui.add_enabled(page > 0, egui::Button::new("‹")).clicked() {
-                go = Some(page - 1);
-            }
-            ui.label(format!("page {} of {}", page + 1, pages));
-            if ui.add_enabled(page + 1 < pages, egui::Button::new("›")).clicked() {
-                go = Some(page + 1);
-            }
+            go = pager(ui, page as usize, pages as usize).map(|p| p as u64);
             if ui.button("⟳ Reload").clicked() {
                 go = Some(page);
             }
@@ -242,14 +236,20 @@ impl App {
         // Following a reference while rendering can switch to another tab, so the docs go back by index.
         let cur = self.cur;
         let t = self.tm().unwrap();
-        // Taken out for the frame so the open document can be edited through `self`.
-        let docs = std::mem::take(if agg { &mut t.agg_docs } else { &mut t.docs });
-        let fields = if agg { t.agg_fields.clone() } else { t.fields.clone() };
-        let base = match (agg, t.view) {
-            (true, View::Shell) => t.shell.page as u64 * PAGE_SIZE,
-            (true, _) => 0,
-            _ => t.page * PAGE_SIZE,
+        // Taken out of where the view keeps them for the frame, so the open document can be edited through `self`.
+        let view = t.view;
+        let (all, fields, range, base) = if agg {
+            let (_, fields, page, _) = t.agg_source();
+            let fields = fields.to_vec();
+            let all = t.agg_store(view).map(std::mem::take).unwrap_or_default();
+            let (range, base) = page_window(page, all.len());
+            (all, fields, range, base)
+        } else {
+            let docs = std::mem::take(&mut t.docs);
+            let range = 0..docs.len();
+            (docs, t.fields.clone(), range, t.page * PAGE_SIZE)
         };
+        let docs = &all[range];
         let loading = t.loading;
         let closed = self.t().and_then(|t| self.conn(t.sel.conn)).filter(|c| c.status != Status::Ready && !self.demo).map(|c| (c.meta.id, c.meta.name.clone(), c.status == Status::Connecting));
         if let (true, Some((id, name, connecting))) = (docs.is_empty(), closed) {
@@ -271,16 +271,20 @@ impl App {
             ui.label(RichText::new(if loading { "Loading…" } else { "No documents" }).color(MUTED()));
         } else {
             if !agg {
-                self.selection_bar(ui, &docs);
+                self.selection_bar(ui, docs);
             }
             if self.prefs.table {
-                self.doc_table(ui, agg, &docs, &fields, base);
+                self.doc_table(ui, agg, docs, &fields, base);
             } else {
-                self.doc_list(ui, agg, &docs);
+                self.doc_list(ui, agg, docs);
             }
         }
         if let Some(t) = self.tabs.get_mut(cur) {
-            *(if agg { &mut t.agg_docs } else { &mut t.docs }) = docs;
+            if !agg {
+                t.docs = all;
+            } else if let Some(store) = t.agg_store(view) {
+                *store = all;
+            }
         }
     }
 

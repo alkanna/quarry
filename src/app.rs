@@ -499,11 +499,23 @@ impl App {
 
     fn col_key(&self, agg: bool) -> String {
         let s = self.t().map(|t| format!("{}/{}/{}", t.sel.conn, t.sel.db, t.sel.coll)).unwrap_or_default();
-        match (agg, self.t().map(|t| t.view)) {
-            (true, Some(View::Shell)) => format!("{s}#shell"),
-            (true, Some(View::Import)) => format!("{s}#import"),
-            (true, _) => format!("{s}#agg"),
-            _ => s,
+        match self.t().filter(|_| agg) {
+            Some(t) => format!("{s}#{}", t.agg_source().3),
+            None => s,
+        }
+    }
+
+    fn in_coll(&self) -> bool {
+        self.t().is_none_or(|t| t.in_coll())
+    }
+
+    /// Closes open rows of the result table that is not the Documents one, after its rows changed under them.
+    fn drop_agg_row(&mut self) {
+        let Some(t) = self.tm() else { return };
+        t.expanded.retain(|k| !k.0);
+        if t.selected.is_some_and(|s| s.0) {
+            t.selected = None;
+            self.reset_doc_state();
         }
     }
 
@@ -870,14 +882,7 @@ impl App {
         let t = self.t()?;
         match t.selected? {
             (false, i) => t.docs.get(i),
-            // Shell and Import lend their rows to `agg_docs` only while their table draws, so
-            // the side panel has to read the row from where it came from.
-            (true, i) => match (t.view, &t.import.parsed) {
-                (View::Shell, _) => t.shell.docs.get(t.shell.page * PAGE_SIZE as usize + i),
-                (View::Import, Some(Ok(docs))) => docs.get(i),
-                (View::Import, _) => None,
-                _ => t.agg_docs.get(i),
-            },
+            (true, i) => t.agg_page().0.get(i),
         }
     }
 
@@ -886,9 +891,10 @@ impl App {
         format!("{s}#{}", d.get("_id").map(db::compact).unwrap_or_default())
     }
 
-    /// The document as it should be shown: with its unsaved edits, if any.
-    fn shown_doc(&self, d: &Document) -> Option<Document> {
-        if self.drafts.is_empty() {
+    /// The document as it should be shown: with its unsaved edits, if any. Edits only belong to
+    /// Documents rows, so a result row (`agg`) with the same _id never gets them.
+    fn shown_doc(&self, d: &Document, agg: bool) -> Option<Document> {
+        if agg || self.drafts.is_empty() {
             return None;
         }
         self.drafts.get(&self.draft_key(d)).map(|x| x.current.clone())
@@ -1094,8 +1100,11 @@ impl App {
                 Danger::DropUser { db, user, .. } => self.worker.db_change(conn, client, db, doc! { "dropUser": &user }, format!("Dropped user {user}")),
                 Danger::Sync { .. } => {
                     let timeout = self.timeout();
+                    self.drop_agg_row();
                     let c = &mut self.tabs[self.cur].compare;
-                    let Some(r) = c.result.take() else { return };
+                    let r = c.result.take();
+                    c.set_result(None);
+                    let Some(r) = r else { return };
                     let insert = if c.insert { r.only_src } else { Vec::new() };
                     let replace = if c.replace { r.changed } else { Vec::new() };
                     let delete = if c.delete { r.only_dst.iter().filter_map(|d| d.get("_id").cloned()).collect() } else { Vec::new() };

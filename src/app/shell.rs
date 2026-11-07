@@ -361,13 +361,7 @@ impl App {
                 let pages = t.shell.docs.len().div_ceil(PAGE_SIZE as usize);
                 if has_table && pages > 1 {
                     ui.separator();
-                    if ui.add_enabled(t.shell.page > 0, egui::Button::new("‹")).clicked() {
-                        page_to = Some(t.shell.page - 1);
-                    }
-                    ui.label(format!("page {} of {pages}", t.shell.page + 1));
-                    if ui.add_enabled(t.shell.page + 1 < pages, egui::Button::new("›")).clicked() {
-                        page_to = Some(t.shell.page + 1);
-                    }
+                    page_to = pager(ui, t.shell.page, pages);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     export = ui.button("📤 Export…").clicked();
@@ -402,22 +396,16 @@ impl App {
         }
         if let Some(p) = page_to {
             t.shell.page = p;
-            t.selected = None;
         }
         if export {
             self.export_shell();
         }
+        if page_to.is_some() {
+            self.drop_agg_row();
+        }
         if has_table {
             // The result table is the same one documents use: open, colours, right-click menu.
-            let t = &mut self.tabs[self.cur];
-            let start = t.shell.page * PAGE_SIZE as usize;
-            let slice = t.shell.docs[start.min(t.shell.docs.len())..(start + PAGE_SIZE as usize).min(t.shell.docs.len())].to_vec();
-            let saved_docs = std::mem::replace(&mut t.agg_docs, slice);
-            let saved_fields = std::mem::replace(&mut t.agg_fields, t.shell.fields.clone());
             self.results(ui, true);
-            let t = &mut self.tabs[self.cur];
-            t.agg_docs = saved_docs;
-            t.agg_fields = saved_fields;
         }
         if let Some(code) = use_example {
             self.tabs[self.cur].shell.code = code;

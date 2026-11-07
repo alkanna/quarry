@@ -184,7 +184,7 @@ impl App {
                 d.remove("note");
             }
             dst.push(doc! { "_id": ObjectId::parse_str("6650f1c2a1b2c3d4e5f6ffff").unwrap(), "number": 9999, "status": "test" });
-            t.compare.result = Some(db::compare_docs(src, dst));
+            t.compare.set_result(Some(db::compare_docs(src, dst)));
         }
         // Test switch: show the Data relations window with a few relations.
         if std::env::var("QUARRY_TEST_RELATIONS").is_ok() {

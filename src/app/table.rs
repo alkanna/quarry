@@ -45,7 +45,7 @@ impl App {
     pub(super) fn columns_menu(&mut self, ui: &mut egui::Ui, agg: bool) {
         let key = self.col_key(agg);
         let t = self.t().unwrap();
-        let fields = if agg { t.agg_fields.clone() } else { t.fields.clone() };
+        let fields = if agg { t.agg_source().1.to_vec() } else { t.fields.clone() };
         let prefs = self.prefs.cols.get(&key).cloned().unwrap_or_default();
         let n = self.prefs.default_cols;
         let shown = visible_cols(Some(&prefs), &fields, n);
@@ -297,6 +297,7 @@ impl App {
         let aligns: Vec<u8> = cols.iter().map(|c| prefs.align.get(c).copied().unwrap_or(0)).collect();
         let hl_cols: Vec<bool> = cols.iter().map(|c| prefs.highlight.contains(&db::strip_indices(c))).collect();
         let related = if agg { HashMap::new() } else { self.t().map(|t| t.related.clone()).unwrap_or_default() };
+        let in_coll = self.in_coll();
         egui::Frame::new().fill(PANEL()).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(4, 4)).show(ui, |ui| {
             let mut area = egui::ScrollArea::both().id_salt(("res", agg)).auto_shrink(false);
             // QUARRY_SCROLL_TEST slides the table sideways every frame, to measure scrolling cost.
@@ -370,7 +371,7 @@ impl App {
                 ui.painter().hline(hr.x_range(), hr.bottom(), Stroke::new(1.0, BORDER()));
                 // Rows (at most one page, so no virtualisation is needed)
                 for (i, d) in docs.iter().enumerate() {
-                    let drafted = if agg { None } else { self.shown_doc(d) };
+                    let drafted = self.shown_doc(d, agg);
                     let d = drafted.as_ref().unwrap_or(d);
                     let active = selected == Some((agg, i));
                     let (rr, resp) = ui.allocate_exact_size(egui::vec2(row_w, ROW_H), Sense::click());
@@ -452,7 +453,7 @@ impl App {
                                     menu_look(ui);
                                     // Field and document actions together run about 800 pt, taller than many windows.
                                     menu_scroll(ui, |ui| {
-                                        field_menu(ui, &path, v, !agg, hl_cols[ci], &mut acts);
+                                        field_menu(ui, &path, v, !agg, in_coll, hl_cols[ci], &mut acts);
                                         if !agg {
                                             ui.separator();
                                             doc_act = row_menu(ui, i, &checked).or(doc_act);
@@ -525,13 +526,13 @@ impl App {
         }
         for (i, acts) in cell_acts {
             self.select(agg, i, false);
-            let d = self.shown_doc(&docs[i]).unwrap_or_else(|| docs[i].clone());
+            let d = self.shown_doc(&docs[i], agg).unwrap_or_else(|| docs[i].clone());
             self.handle_acts(&d, acts);
         }
         if let (Some((i, c)), false) = (edit_cell, agg) {
             self.select(agg, i, false);
             let path: Vec<String> = c.split('.').map(String::from).collect();
-            let d = self.shown_doc(&docs[i]).unwrap_or_else(|| docs[i].clone());
+            let d = self.shown_doc(&docs[i], false).unwrap_or_else(|| docs[i].clone());
             match db::get_path(&d, &c).cloned() {
                 Some(v) if c != "_id" => self.start_inline(&d, path, v),
                 Some(_) => {}
@@ -551,7 +552,7 @@ impl App {
             egui::ScrollArea::vertical().id_salt(("list", agg)).auto_shrink(false).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 for (i, d) in docs.iter().enumerate() {
-                    let drafted = if agg { None } else { self.shown_doc(d) };
+                    let drafted = self.shown_doc(d, agg);
                     let d = drafted.as_ref().unwrap_or(d);
                     let active = selected == Some((agg, i));
                     let w = ui.available_width();

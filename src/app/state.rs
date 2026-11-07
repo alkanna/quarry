@@ -149,6 +149,50 @@ pub(super) struct CompareTab {
     pub(super) insert: bool,
     pub(super) replace: bool,
     pub(super) delete: bool,
+    pub(super) list: CmpList,
+    pub(super) page: usize,
+    /// Columns of each list, indexed by `CmpList`, so they stay put from page to page.
+    pub(super) fields: [Vec<String>; 3],
+}
+
+#[derive(Default, Clone, Copy, PartialEq)]
+pub(super) enum CmpList {
+    #[default]
+    Changed,
+    OnlySrc,
+    OnlyDst,
+}
+
+impl CompareTab {
+    /// Opens on the first list with rows, since an empty Different list is the common case.
+    pub(super) fn set_result(&mut self, r: Option<db::Compared>) {
+        if let Some(r) = &r {
+            let lens = [r.changed.len(), r.only_src.len(), r.only_dst.len()];
+            self.list = [CmpList::Changed, CmpList::OnlySrc, CmpList::OnlyDst][lens.iter().position(|&n| n > 0).unwrap_or(0)];
+            // ponytail: columns from the first 5000 documents, a field only seen later is reachable from the Columns menu.
+            let sample = |d: &[Document]| auto_fields(&d[..d.len().min(5000)]);
+            self.fields = [db::DIFF_FIELDS.map(String::from).to_vec(), sample(&r.only_src), sample(&r.only_dst)];
+        }
+        (self.result, self.page) = (r, 0);
+    }
+
+    /// Every row of the list being shown.
+    pub(super) fn rows(&self) -> &[Document] {
+        self.result.as_ref().map_or(&[], |r| match self.list {
+            CmpList::Changed => &r.diffs,
+            CmpList::OnlySrc => &r.only_src,
+            CmpList::OnlyDst => &r.only_dst,
+        })
+    }
+
+    fn rows_mut(&mut self) -> Option<&mut Vec<Document>> {
+        let r = self.result.as_mut()?;
+        Some(match self.list {
+            CmpList::Changed => &mut r.diffs,
+            CmpList::OnlySrc => &mut r.only_src,
+            CmpList::OnlyDst => &mut r.only_dst,
+        })
+    }
 }
 
 /// A field holding ids of another collection's documents (the original's dataRelations).
@@ -255,7 +299,52 @@ pub(super) struct ShellTab {
     pub(super) count: Option<usize>,
 }
 
+/// Which of `len` rows a page shows (all of them for None), and the number of the first one minus one.
+pub(super) fn page_window(page: Option<usize>, len: usize) -> (std::ops::Range<usize>, u64) {
+    let Some(page) = page else { return (0..len, 0) };
+    let start = (page * PAGE_SIZE as usize).min(len);
+    (start..(start + PAGE_SIZE as usize).min(len), start as u64)
+}
+
 impl Tab {
+    /// The result table that is not the Documents one, as this view keeps it: all its rows, their columns,
+    /// the page on screen (None shows every row) and the suffix of its column-settings key.
+    pub(super) fn agg_source(&self) -> (&[Document], &[String], Option<usize>, &'static str) {
+        match self.view {
+            View::Shell => (&self.shell.docs, &self.shell.fields, Some(self.shell.page), "shell"),
+            // Import previews its first page.
+            View::Import => match &self.import.parsed {
+                Some(Ok(d)) => (d, &self.import.fields, Some(0), "import"),
+                _ => (&[], &[], Some(0), "import"),
+            },
+            // Field rows and document rows have different columns.
+            View::Compare => (self.compare.rows(), &self.compare.fields[self.compare.list as usize], Some(self.compare.page), if self.compare.list == CmpList::Changed { "compare-diff" } else { "compare" }),
+            _ => (&self.agg_docs, &self.agg_fields, None, "agg"),
+        }
+    }
+
+    /// Where `view` keeps those rows, so the table can take them out while it draws and put them back.
+    pub(super) fn agg_store(&mut self, view: View) -> Option<&mut Vec<Document>> {
+        match view {
+            View::Shell => Some(&mut self.shell.docs),
+            View::Import => self.import.parsed.as_mut()?.as_mut().ok(),
+            View::Compare => self.compare.rows_mut(),
+            _ => Some(&mut self.agg_docs),
+        }
+    }
+
+    /// The rows on screen in that table, their columns, and the number of the first one minus one.
+    pub(super) fn agg_page(&self) -> (&[Document], &[String], u64) {
+        let (docs, fields, page, _) = self.agg_source();
+        let (range, base) = page_window(page, docs.len());
+        (&docs[range], fields, base)
+    }
+
+    /// Whether the rows on screen are documents of this collection, so actions on the collection apply to them.
+    pub(super) fn in_coll(&self) -> bool {
+        !matches!(self.view, View::Compare | View::Import)
+    }
+
     pub(super) fn new(sel: Sel) -> Self {
         Self {
             sel,
