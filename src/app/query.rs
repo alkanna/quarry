@@ -91,7 +91,7 @@ impl App {
             let date = std::env::var("QUARRY_TEST_AC").is_ok_and(|v| v == "date");
             let before = if date { "{ createdAt: " } else { "{ status: { $i" };
             if let Some((token, items)) = suggest(before, kind, paths, dates) {
-                *ac = Ac { id: Some(id), token, items, sel: 0, cursor: before.chars().count(), rect: None };
+                *ac = Ac { id: Some(id), token, items, sel: 0, cursor: before.chars().count(), rect: None, doc: None };
             }
         }
         let (out, picked) = ac_field(ui, id, text, ac, &|b| suggest(b, kind, paths, dates), |ui, text, open| {

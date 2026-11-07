@@ -29,6 +29,7 @@ mod relations;
 mod schema;
 mod settings;
 mod shell;
+mod shell_ls;
 mod sidebar;
 mod state;
 mod table;
@@ -149,6 +150,9 @@ pub struct App {
     /// Message, when it was shown, and the `at` of the undo entry its Undo button reverts.
     toast: Option<(String, std::time::Instant, Option<std::time::Instant>)>,
     ac: Ac,
+    /// Shell editor language server, started on the first edit of a script; it quits when idle,
+    /// so it only runs while someone writes JavaScript.
+    js: shell_ls::JsState,
     tree_filter: String,
     tools_installing: bool,
     /// Tree row the palette jumped to, as (connection, database, collection), scrolled into view once drawn.
@@ -254,6 +258,7 @@ impl App {
             status: ("Ready. All connections start read-only.".into(), false),
             toast: None,
             ac: Ac::default(),
+            js: Default::default(),
             status_at: std::time::Instant::now(),
             log: LogUi::default(),
             tree_filter: String::new(),

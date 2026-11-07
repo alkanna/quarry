@@ -105,22 +105,34 @@ impl App {
             }
             ui.separator();
             caption(ui, "CUSTOM FIELD");
+            // Nested paths seen in the loaded documents, for paths the field list does not offer.
+            let paths: &[String] = if agg { &fields } else { &self.tabs[self.cur].paths };
+            let suggest = |b: &str| {
+                let typed = b.trim().to_lowercase();
+                let items: Vec<Sug> = paths
+                    .iter()
+                    .filter(|p| !typed.is_empty() && p.to_lowercase().contains(&typed) && !shown.contains(p))
+                    .take(50)
+                    .map(|p| Sug { back: 0, text: p.clone(), note: "field", insert: p.clone(), caret: p.chars().count() })
+                    .collect();
+                (!items.is_empty()).then(|| (b.chars().count(), items))
+            };
+            let id = ui.make_persistent_id("custom-col");
+            let mut moved = false;
             ui.horizontal(|ui| {
                 let w = ui.available_width() - 64.0;
-                let r = ui.add(egui::TextEdit::singleline(&mut self.new_col).hint_text("customer.name").desired_width(w).font(egui::TextStyle::Monospace).margin(egui::Margin::symmetric(10, 6)));
-                if (ui.add(egui::Button::new("Add").min_size(egui::vec2(56.0, BUTTON_H))).clicked() || (r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)))) && !self.new_col.trim().is_empty() {
+                let (out, picked, m) = ac_input(ui, id, &mut self.new_col, &mut self.ac, &suggest, |ui, text, _| {
+                    egui::TextEdit::singleline(text).id(id).hint_text("customer.name").desired_width(w).font(egui::TextStyle::Monospace).margin(egui::Margin::symmetric(10, 6)).show(ui)
+                });
+                moved = m;
+                let enter = out.response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                if (ui.add(egui::Button::new("Add").min_size(egui::vec2(56.0, BUTTON_H))).clicked() || enter || picked) && !self.new_col.trim().is_empty() {
                     add = Some(self.new_col.trim().to_string());
                 }
             });
-            // Nested paths seen in the loaded documents, for paths the field list does not offer.
-            let typed = self.new_col.trim().to_lowercase();
-            if !typed.is_empty() {
-                let paths = if agg { &fields } else { &self.tabs[self.cur].paths };
-                for path in paths.iter().filter(|x| x.to_lowercase().contains(&typed) && !shown.contains(x)).take(8) {
-                    if ui.add(quiet_button(RichText::new(path).monospace()).min_size(egui::vec2(ui.available_width(), 24.0))).clicked() {
-                        add = Some(path.clone());
-                    }
-                }
+            // Drawn in the menu, not as a popup: a click on another layer would close the menu.
+            if ac_list(ui, id, &mut self.new_col, &mut self.ac, moved, Some(ui.available_width() - 2.0)) {
+                add = Some(self.new_col.trim().to_string());
             }
             ui.label(RichText::new("Dotted paths reach inside objects and arrays, like items.0.sku").size(TXT_CAPTION).color(FAINT()));
             if ui.button(format!("Reset to the first {n} fields")).clicked() {
