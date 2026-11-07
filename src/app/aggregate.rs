@@ -22,6 +22,7 @@ pub(super) fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, a
         ui.horizontal(|ui| {
             ui.label(RichText::new(format!("{}", i + 1)).monospace().color(FAINT()));
             ui.menu_button(RichText::new(&s.op).monospace().strong().color(if s.on { C_KEYWORD() } else { FAINT() }), |ui| {
+                menu_look(ui);
                 egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
                     for (op, _) in db::STAGES {
                         if ui.button(RichText::new(*op).monospace()).clicked() {
@@ -39,6 +40,7 @@ pub(super) fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, a
             ui.hyperlink_to(RichText::new("Docs").size(TXT_SMALL), format!("https://www.mongodb.com/docs/manual/reference/operator/aggregation/{}/", s.op.trim_start_matches('$')));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.menu_button(RichText::new("🗑 Remove…").color(ALERT()), |ui| {
+                    menu_look(ui);
                     if danger(ui, format!("Remove stage {}", i + 1)).clicked() {
                         acts.push(StageAct::Remove(i));
                         ui.close();
@@ -198,6 +200,7 @@ impl App {
                             }
                             ui.add_space(6.0);
                             ui.menu_button(RichText::new("+ Add stage").strong().color(PRIMARY()), |ui| {
+                                menu_look(ui);
                                 egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
                                     for (k, (op, _)) in db::STAGES.iter().enumerate() {
                                         // The first ten are the original's most used stages (topStages).

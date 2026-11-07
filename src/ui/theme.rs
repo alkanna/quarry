@@ -182,6 +182,17 @@ pub(crate) fn style(ctx: &egui::Context) {
     for (theme, p) in [(egui::Theme::Dark, &DARK_PAL), (egui::Theme::Light, &LIGHT_PAL)] {
         ctx.set_visuals_of(theme, visuals(theme, p));
     }
+    // egui's default UI font draws about 0.75 pt high at body size, so text looked off center in
+    // buttons and inputs. Shifting the glyphs only moves the ink, not the layout. The icon fonts
+    // that fill in for glyphs Ubuntu lacks get the same shift, or icons sit above their labels.
+    let mut fonts = egui::FontDefinitions::default();
+    for name in ["Ubuntu-Light", "egui-icons", "NotoEmoji-Regular", "emoji-icon-font"] {
+        if let Some(d) = fonts.font_data.get_mut(name) {
+            let tweak = egui::FontTweak { y_offset_factor: 0.06, ..d.tweak.clone() };
+            *d = std::sync::Arc::new((**d).clone().tweak(tweak));
+        }
+    }
+    ctx.set_fonts(fonts);
     ctx.all_styles_mut(|s| {
         s.spacing.item_spacing = egui::vec2(8.0, 6.0);
         s.spacing.button_padding = egui::vec2(10.0, 4.0);
@@ -207,6 +218,7 @@ pub(crate) fn style(ctx: &egui::Context) {
 pub(crate) fn visuals(theme: egui::Theme, p: &Palette) -> egui::Visuals {
     let mut v = theme.default_visuals();
     v.panel_fill = p.panel;
+    v.interact_cursor = Some(egui::CursorIcon::PointingHand);
     v.window_fill = p.raised;
     v.extreme_bg_color = p.bg;
     v.faint_bg_color = p.faint_bg;

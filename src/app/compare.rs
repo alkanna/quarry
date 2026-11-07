@@ -24,6 +24,7 @@ impl App {
             ui.label("Target");
             let name = conns.iter().find(|x| x.0 == c.conn).map(|x| x.1.clone()).unwrap_or_default();
             egui::ComboBox::from_id_salt("cmp-conn").selected_text(name).show_ui(ui, |ui| {
+                menu_look(ui);
                 for (id, n) in &conns {
                     if ui.selectable_label(c.conn == *id, n).clicked() && c.conn != *id {
                         (c.conn, c.db, c.coll) = (*id, String::new(), String::new());
@@ -31,6 +32,7 @@ impl App {
                 }
             });
             egui::ComboBox::from_id_salt("cmp-db").selected_text(if c.db.is_empty() { "database" } else { &c.db }).show_ui(ui, |ui| {
+                menu_look(ui);
                 for (d, colls) in &dbs {
                     if ui.selectable_label(c.db == *d, d).clicked() {
                         c.db = d.clone();
@@ -43,6 +45,7 @@ impl App {
             });
             let colls = dbs.iter().find(|d| d.0 == c.db).and_then(|d| d.1.clone()).unwrap_or_default();
             egui::ComboBox::from_id_salt("cmp-coll").selected_text(if c.coll.is_empty() { "collection" } else { &c.coll }).show_ui(ui, |ui| {
+                menu_look(ui);
                 for n in &colls {
                     ui.selectable_value(&mut c.coll, n.clone(), n);
                 }

@@ -95,6 +95,7 @@ pub(super) fn shell_help(ui: &mut egui::Ui, coll: &str, writable: bool) -> Optio
 
 pub(super) fn code_menu(ui: &mut egui::Ui, pick: &mut Option<db::Lang>) {
     ui.menu_button("🗐 Copy as code", |ui| {
+        menu_look(ui);
         for l in db::Lang::ALL {
             if ui.button(l.name()).clicked() {
                 *pick = Some(l);
@@ -228,6 +229,7 @@ impl App {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.menu_button("History", |ui| {
+                        menu_look(ui);
                         ui.set_max_width(520.0);
                         if history.is_empty() {
                             ui.label(RichText::new("Nothing run yet").color(MUTED()));

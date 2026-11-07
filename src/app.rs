@@ -151,6 +151,8 @@ pub struct App {
     reveal: Option<(u64, String, Option<String>)>,
     /// Scroll the selected document row into view on its next draw, after keyboard selection.
     scroll_sel: bool,
+    /// The active tab the tab strip last scrolled to; it scrolls again when this differs.
+    tab_seen: Option<usize>,
     demo: bool,
     tool: Option<ToolRun>,
     /// CPU time of the last frame in milliseconds, for the frame rate readout.
@@ -253,6 +255,7 @@ impl App {
             tools_installing: false,
             reveal: None,
             scroll_sel: false,
+            tab_seen: None,
             demo,
             tool: None,
             width_cache: HashMap::new(),
@@ -940,8 +943,9 @@ impl App {
 }
 
 impl eframe::App for App {
-    /// Test switch for the demo picture: QUARRY_TEST_POINTER="x,y" hovers that point and
-    /// "x,y,down" also holds the primary button there, to check hover and press states.
+    /// Test switch for the demo picture: QUARRY_TEST_POINTER="x,y" hovers that point,
+    /// "x,y,down" also holds the primary button there, to check hover and press states, and
+    /// "x,y,right" right-clicks there once on frame 60, so the capture shows the context menu.
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
         #[cfg(not(target_os = "macos"))]
         let _ = ctx;
@@ -958,8 +962,15 @@ impl eframe::App for App {
         let (Some(Ok(x)), Some(Ok(y))) = (parts.next().map(str::parse::<f32>), parts.next().map(str::parse::<f32>)) else { return };
         let pos = egui::pos2(x, y);
         raw.events.push(egui::Event::PointerMoved(pos));
-        if parts.next() == Some("down") {
-            raw.events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+        match parts.next() {
+            Some("down") => raw.events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() }),
+            // One right-click partway through, so the capture shows the context menu settled.
+            Some("right") if self.shot.as_ref().is_some_and(|s| s.1 == 60) => {
+                for pressed in [true, false] {
+                    raw.events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default() });
+                }
+            }
+            _ => {}
         }
     }
 

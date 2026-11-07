@@ -30,6 +30,7 @@ impl App {
                         ui.add(egui::Label::new(RichText::new(&name).monospace().color(KEY())).truncate()).on_hover_text(&name);
                     });
                     egui::ComboBox::from_id_salt(("rel-target", i)).width(250.0).selected_text(&r.target).show_ui(ui, |ui| {
+                        menu_look(ui);
                         for c in &colls {
                             ui.selectable_value(&mut r.target, c.clone(), c);
                         }
@@ -94,6 +95,7 @@ impl App {
             let n = self.prefs.relations.get(&key).map_or(0, Vec::len);
             ui.add_enabled_ui(n > 0, |ui| {
                 ui.menu_button(RichText::new("Remove all…").color(ALERT()), |ui| {
+                    menu_look(ui);
                     if danger(ui, format!("Remove all {n} relations of {db}")).clicked() {
                         self.prefs.relations.remove(&key);
                         changed = true;

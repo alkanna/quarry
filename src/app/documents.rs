@@ -50,6 +50,7 @@ pub(super) fn docs_menu(ui: &mut egui::Ui, n: usize, heading: bool) -> Option<Do
 
 /// The row menu: acts on every checked document when the row is one of them, else on that row.
 pub(super) fn row_menu(ui: &mut egui::Ui, i: usize, checked: &BTreeSet<usize>) -> Option<(usize, DocsAct)> {
+    menu_look(ui);
     docs_menu(ui, if checked.contains(&i) { checked.len() } else { 1 }, true).map(|a| (i, a))
 }
 
@@ -176,6 +177,7 @@ impl App {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.menu_button("More", |ui| {
+                    menu_look(ui);
                     if ui.button("Open query in Shell").clicked() {
                         let t = &mut self.tabs[self.cur];
                         t.shell.code = query_script(&t.sel.coll, &t.filter_txt);

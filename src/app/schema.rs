@@ -19,6 +19,7 @@ impl App {
                     egui::ComboBox::from_id_salt("schema-limit")
                         .selected_text(if t.schema.limit == 0 { "all documents".to_string() } else { format!("first {}", group(&t.schema.limit.to_string())) })
                         .show_ui(ui, |ui| {
+                            menu_look(ui);
                             for n in [100, 1000, 10_000, 100_000, 0] {
                                 ui.selectable_value(&mut t.schema.limit, n, if n == 0 { "all documents".to_string() } else { format!("first {}", group(&n.to_string())) });
                             }
@@ -76,6 +77,7 @@ impl App {
                         ui.label(RichText::new(name).monospace().color(BRIGHT())).on_hover_text(&f.path)
                     });
                     r.response.context_menu(|ui| {
+                        menu_look(ui);
                         ui.label(RichText::new(format!("Field: {}", f.path)).size(TXT_SMALL).color(MUTED()));
                         if ui.button("Add as column").clicked() {
                             acts.push((f.path.clone(), 0));
