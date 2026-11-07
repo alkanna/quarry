@@ -3800,6 +3800,19 @@ impl App {
         self.tabs.push(t);
         self.tabs.push(Tab::new(sel("analytics", "events")));
         self.cur = 1;
+        if let Ok(mut log) = db::LOG.lock() {
+            let q = r#"{ "status": { "$in": ["paid", "shipped", "pending"] } }"#;
+            log.extend([
+                db::LogEntry::finished(1, 340, "admin", "listDatabases", r#"{ "listDatabases": 1, "nameOnly": true }"#, 4, None),
+                db::LogEntry::finished(1, 338, "shop", "listCollections", r#"{ "listCollections": 1, "nameOnly": true }"#, 3, None),
+                db::LogEntry::finished(1, 212, "shop", "aggregate", r#"{ "aggregate": "orders", "pipeline": [{ "$match": { "status": { "$in": ["paid", "shipped"] } } }, { "$group": { "_id": "$customer.tier", "orders": { "$sum": 1 }, "revenue": { "$sum": "$total" } } }] }"#, 31, None),
+                db::LogEntry::finished(1, 95, "shop", "insert", r#"{ "insert": "orders", "documents": [{ "_id": { "$oid": "6650f1c2a1b2c3d4e5f60702" }, "number": 10402 }] }"#, 6, Some("E11000 duplicate key error collection: shop.orders index: _id_ dup key")),
+                db::LogEntry::finished(1, 41, "shop", "count", &format!(r#"{{ "count": "orders", "query": {q} }}"#), 9, None),
+                db::LogEntry::finished(1, 40, "shop", "find", &format!(r#"{{ "find": "orders", "filter": {q}, "sort": {{ "total": -1 }}, "limit": 50 }}"#), 14, None),
+            ]);
+        }
+        // QUARRY_TEST_LOG docks the query log under the documents, as in the README's main picture.
+        self.log.open = std::env::var("QUARRY_TEST_LOG").is_ok();
         let key = self.col_key(false);
         self.prefs.cols.insert(key, ColPrefs { pinned: vec!["status".into()], highlight: vec!["customer.name".into()], ..Default::default() });
         self.status = ("Offline demo: no database is connected.".into(), false);
@@ -4928,6 +4941,14 @@ impl App {
 
     fn screenshot(&mut self, ctx: &egui::Context) {
         let Some((path, frames, slot)) = &mut self.shot else { return };
+        // AppKit draws the window buttons outside our frame, so the capture would lack them.
+        // Stand-ins go where set_traffic_lights_position puts the real ones.
+        if cfg!(target_os = "macos") {
+            let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("shot-window-buttons")));
+            for (i, c) in [Color32::from_rgb(0xFF, 0x5F, 0x57), Color32::from_rgb(0xFE, 0xBC, 0x2E), Color32::from_rgb(0x28, 0xC8, 0x40)].into_iter().enumerate() {
+                p.circle(egui::pos2(23.0 + 20.0 * i as f32, HEADER_H / 2.0), 6.0, c, Stroke::new(0.5, Color32::from_black_alpha(50)));
+            }
+        }
         *frames += 1;
         ctx.request_repaint();
         if *frames == 120 {
