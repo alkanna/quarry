@@ -46,9 +46,11 @@ def big_doc(i):
 
 
 def fixture(tmp, n, make=doc):
-    path = os.path.join(tmp, f"{make.__name__}-{n}.json")
+    # JSON Lines: the app reads it one document at a time, like a query cursor.
+    path = os.path.join(tmp, f"{make.__name__}-{n}.jsonl")
     with open(path, "w") as f:
-        json.dump([make(i) for i in range(n)], f)
+        for i in range(n):
+            f.write(json.dumps(make(i)) + "\n")
     return path
 
 

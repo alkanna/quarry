@@ -173,13 +173,13 @@ pub struct App {
 }
 
 /// Top-level fields of the shown documents, `_id` first, in the order they appear.
-fn auto_fields(docs: &[Document]) -> Vec<String> {
+fn auto_fields<'a>(docs: impl IntoIterator<Item = impl Into<DocRef<'a>>>) -> Vec<String> {
     let mut cols = vec!["_id".to_string()];
     let mut seen: HashSet<&str> = HashSet::from(["_id"]);
     for d in docs {
-        for k in d.keys() {
+        for (k, _) in d.into().fields() {
             if seen.insert(k) {
-                cols.push(k.clone());
+                cols.push(k.to_string());
             }
         }
     }
@@ -265,18 +265,22 @@ impl App {
             shot: shot.map(|p| (p, 0, Arc::new(Mutex::new(None)))),
         };
         // Test fixture: QUARRY_TEST_JSON=<file of Extended JSON documents> makes screenshot mode
-        // show those documents through the same message path real query results take.
+        // show those documents through the same message path real query results take. A .jsonl
+        // file (one document per line) is read one document at a time like a cursor, so memory
+        // benchmarks measure what a query leaves behind rather than the parse of one big array.
         let fixture = std::env::var("QUARRY_TEST_JSON").ok().filter(|_| demo);
         if let Some(path) = fixture {
             app.demo = false;
-            let docs: Vec<Document> = std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|t| db::parse_value(&t).ok())
-                .and_then(|b| match b {
-                    Bson::Array(a) => Some(a.into_iter().filter_map(|d| d.as_document().cloned()).collect()),
-                    _ => None,
-                })
-                .unwrap_or_default();
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let rows: Vec<db::Row> = if path.ends_with(".jsonl") {
+                text.lines().filter_map(|l| db::parse_doc(l).ok()).filter_map(|d| db::Row::from_doc(&d).ok()).collect()
+            } else {
+                match db::parse_value(&text) {
+                    Ok(Bson::Array(a)) => a.iter().filter_map(Bson::as_document).filter_map(|d| db::Row::from_doc(d).ok()).collect(),
+                    _ => Vec::new(),
+                }
+            };
+            drop(text);
             let sel = Sel { conn: 1, db: "fixture".into(), coll: "documents".into() };
             app.conns.push(Conn { meta: ConnMeta { id: 1, name: "Fixture".into(), ..Default::default() }, client: None, status: Status::Ready, writable: false, dbs: vec![("fixture".into(), Some(vec!["documents".into()]))], masked_uri: String::new() , tunnel: None });
             app.active = Some(1);
@@ -284,9 +288,8 @@ impl App {
             app.open_collection(sel, false);
             app.req += 1;
             app.tabs[0].req = app.req;
-            let n = docs.len() as u64;
-            let rows = docs.iter().filter_map(|d| db::Row::from_doc(d).ok()).collect();
-            app.worker.send(Msg::Docs { req: app.req, res: Ok((rows, docs, n, 3)) });
+            let n = rows.len() as u64;
+            app.worker.send(Msg::Docs { req: app.req, res: Ok((rows, n, 3)) });
         } else if demo {
             app.load_demo();
             // Test switches: the demo picture in the light theme, and with the find bar open.

@@ -3,7 +3,7 @@
 use super::theme::*;
 use crate::db;
 use eframe::egui::{self, Color32, text::LayoutJob};
-use mongodb::bson::{Bson, Document, RawBsonRef};
+use mongodb::bson::{Bson, Document, RawBsonRef, RawDocument};
 use std::borrow::Cow;
 
 /// Web links stand out from plain text. Hex ids stored as strings keep the string colour so the
@@ -29,7 +29,70 @@ pub(crate) enum Val<'a> {
     R(RawBsonRef<'a>),
 }
 
+/// A whole document, decoded or as BSON bytes.
+#[derive(Clone, Copy)]
+pub(crate) enum DocRef<'a> {
+    B(&'a Document),
+    R(&'a RawDocument),
+}
+
+impl<'a> From<&'a Document> for DocRef<'a> {
+    fn from(d: &'a Document) -> Self {
+        DocRef::B(d)
+    }
+}
+
+impl<'a> From<&'a db::Row> for DocRef<'a> {
+    fn from(r: &'a db::Row) -> Self {
+        DocRef::R(r.raw())
+    }
+}
+
+impl<'a> DocRef<'a> {
+    pub(crate) fn fields(self) -> Box<dyn Iterator<Item = (&'a str, Val<'a>)> + 'a> {
+        match self {
+            DocRef::B(d) => Box::new(d.iter().map(|(k, v)| (k.as_str(), Val::B(v)))),
+            DocRef::R(d) => Box::new(d.iter().map_while(Result::ok).map(|(k, v)| (k, Val::R(v)))),
+        }
+    }
+}
+
 impl<'a> Val<'a> {
+    pub(crate) fn object(self) -> Option<DocRef<'a>> {
+        match self {
+            Val::B(Bson::Document(d)) => Some(DocRef::B(d)),
+            Val::R(RawBsonRef::Document(d)) => Some(DocRef::R(d)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn items(self) -> Option<Box<dyn Iterator<Item = Val<'a>> + 'a>> {
+        match self {
+            Val::B(Bson::Array(a)) => Some(Box::new(a.iter().map(Val::B))),
+            Val::R(RawBsonRef::Array(a)) => Some(Box::new(a.into_iter().map_while(Result::ok).map(Val::R))),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_str(self) -> Option<&'a str> {
+        match self {
+            Val::B(Bson::String(s)) => Some(s),
+            Val::R(RawBsonRef::String(s)) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// `db::type_name_kind`, without decoding a raw object, array or string.
+    pub(crate) fn kind(self) -> &'static str {
+        match self {
+            Val::B(b) => db::type_name_kind(b),
+            Val::R(RawBsonRef::Document(_)) => "object",
+            Val::R(RawBsonRef::Array(_)) => "array",
+            Val::R(RawBsonRef::String(_)) => "string",
+            Val::R(_) => db::type_name_kind(&self.bson()),
+        }
+    }
+
     /// The whole value. A raw object or array gets decoded, so this is for one value at a time,
     /// not for every cell on every frame.
     pub(crate) fn bson(self) -> Cow<'a, Bson> {
@@ -180,13 +243,16 @@ fn cell_job_of(v: Val) -> LayoutJob {
     }
     // Raw objects and arrays are walked in place, so a preview never decodes more than it shows.
     fn walk(job: &mut LayoutJob, v: Val) -> bool {
+        if let Some(d) = v.object() {
+            return object(job, d.fields());
+        }
+        if let Some(items) = v.items() {
+            return array(job, items);
+        }
+        if let Some(s) = v.as_str() {
+            return string(job, s);
+        }
         match v {
-            Val::B(Bson::Document(d)) => object(job, d.iter().map(|(k, x)| (k.as_str(), Val::B(x)))),
-            Val::R(RawBsonRef::Document(d)) => object(job, d.iter().map_while(Result::ok).map(|(k, x)| (k, Val::R(x)))),
-            Val::B(Bson::Array(a)) => array(job, a.iter().map(Val::B)),
-            Val::R(RawBsonRef::Array(a)) => array(job, a.into_iter().map_while(Result::ok).map(Val::R)),
-            Val::B(Bson::String(s)) => string(job, s),
-            Val::R(RawBsonRef::String(s)) => string(job, s),
             Val::B(Bson::Binary(b)) if b.bytes.len() >= 100 => binary(job, b.bytes.len()),
             Val::R(RawBsonRef::Binary(b)) if b.bytes.len() >= 100 => binary(job, b.bytes.len()),
             Val::B(Bson::ObjectId(o)) => push(job, &o.to_hex(), C_OID()),
@@ -211,18 +277,13 @@ pub(crate) fn cell_text(b: &Bson) -> String {
     }
 }
 
-pub(crate) fn row_job(d: &Document, width: f32) -> LayoutJob {
-    row_job_of(d.get("_id"), d.iter().map(|(k, v)| (k.as_str(), Val::B(v))), width)
-}
-
-/// A JSON list row from its _id and fields, which may be read straight from BSON bytes.
-pub(crate) fn row_job_of<'a>(id: Option<&Bson>, fields: impl Iterator<Item = (&'a str, Val<'a>)>, width: f32) -> LayoutJob {
+pub(crate) fn row_job(d: DocRef, width: f32) -> LayoutJob {
     let mut job = LayoutJob::default();
-    if let Some(id) = id {
-        job.append(&db::short(id), 0.0, mono(C_OID()));
+    if let Some((_, id)) = d.fields().find(|(k, _)| *k == "_id") {
+        job.append(&db::short(&id.bson()), 0.0, mono(C_OID()));
         job.append("  ", 0.0, mono(MUTED()));
     }
-    for (k, v) in fields.filter(|(k, _)| *k != "_id").take(12) {
+    for (k, v) in d.fields().filter(|(k, _)| *k != "_id").take(12) {
         let (text, color) = v.text_and_color();
         job.append(k, 0.0, mono(MUTED()));
         job.append(": ", 0.0, mono(MUTED()));
@@ -278,8 +339,7 @@ mod tests {
                 assert_eq!(jb.sections.iter().map(|s| (s.byte_range.clone(), s.format.color)).collect::<Vec<_>>(), jr.sections.iter().map(|s| (s.byte_range.clone(), s.format.color)).collect::<Vec<_>>(), "{p}");
             }
         }
-        let row = db::Row::from_raw(raw.clone());
-        let (jb, jr) = (row_job(&d, 500.0), row_job_of(row.id().as_ref(), row.raw().iter().map_while(Result::ok).map(|(k, v)| (k, Val::R(v))), 500.0));
+        let (jb, jr) = (row_job(DocRef::B(&d), 500.0), row_job(DocRef::R(&raw), 500.0));
         assert_eq!(jb.text, jr.text);
         assert_eq!(jb.sections.iter().map(|s| s.format.color).collect::<Vec<_>>(), jr.sections.iter().map(|s| s.format.color).collect::<Vec<_>>());
     }

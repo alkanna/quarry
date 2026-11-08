@@ -173,16 +173,15 @@ impl App {
                     let Some(t) = self.tab_by_req(req) else { continue };
                     t.loading = false;
                     match res {
-                        Ok((docs, decoded, count, ms)) => {
+                        Ok((docs, count, ms)) => {
                             // A query that works again clears an earlier error.
                             if self.status.1 {
                                 self.status = (format!("Loaded {} documents", docs.len()), false);
                             }
                             let t = self.tab_by_req(req).unwrap();
-                            t.fields = auto_fields(&decoded);
-                            t.paths = doc_paths(&decoded);
-                            t.field_info = field_info(&decoded);
-                            drop(decoded);
+                            t.fields = auto_fields(&docs);
+                            t.paths = doc_paths(&docs);
+                            t.field_info = field_info(&docs);
                             // Checks and open rows follow their documents by _id, so actions that reload
                             // (duplicate, filter, edits) keep them; rows that left the results drop out.
                             if !t.checked.is_empty() {
