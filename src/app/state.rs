@@ -574,6 +574,8 @@ impl ConnForm {
 pub(super) struct UsersWin {
     pub(super) conn: u64,
     pub(super) users: Option<db::Res<Vec<Document>>>,
+    /// usersInfo was refused, so the list holds only the logged-in user.
+    pub(super) self_only: bool,
     pub(super) roles: Option<db::Res<Vec<Document>>>,
     pub(super) new_name: String,
     pub(super) new_pwd: String,

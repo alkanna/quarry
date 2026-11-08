@@ -59,9 +59,24 @@ impl App {
                     Err(e) => self.err(format!("Could not list the collections of {db}: {e}")),
                 },
                 Msg::Command { tag, res } => match (tag.as_str(), res) {
+                    // Atlas and least-privilege users often may not list everyone; show who is logged in instead.
+                    ("users", Err(e)) if denied(&e) && self.users.as_ref().is_some_and(|u| !u.self_only) => {
+                        let conn = self.users.as_ref().map(|u| u.conn).unwrap_or_default();
+                        if let Some(client) = self.conn(conn).and_then(|c| c.client.clone()) {
+                            self.worker.command(client, "admin".into(), doc! { "connectionStatus": 1 }, "users-self");
+                        }
+                        if let Some(u) = &mut self.users {
+                            u.self_only = true;
+                        }
+                    }
                     ("users", r) => {
                         if let Some(u) = &mut self.users {
                             u.users = Some(r.map(|d| d.get_array("users").map(|a| a.iter().filter_map(|x| x.as_document().cloned()).collect()).unwrap_or_default()));
+                        }
+                    }
+                    ("users-self", r) => {
+                        if let Some(u) = &mut self.users {
+                            u.users = Some(r.map(|d| self_users(&d)));
                         }
                     }
                     ("roles", r) => {

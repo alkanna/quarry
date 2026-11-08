@@ -102,6 +102,8 @@ impl App {
                     doc! { "user": "admin", "db": "admin", "roles": [ { "role": "root", "db": "admin" } ] },
                     doc! { "user": "shop_app", "db": "shop", "roles": [ { "role": "readWrite", "db": "shop" } ] },
                     doc! { "user": "analyst", "db": "admin", "roles": [ { "role": "read", "db": "shop" }, { "role": "read", "db": "analytics" } ] },
+                    // Many roles, to check the list wraps instead of widening the window.
+                    doc! { "user": "reporting", "db": "admin", "roles": (0..24).map(|i| Bson::Document(doc! { "role": "read", "db": format!("tenant-api-customer-{i:02}") })).collect::<Vec<_>>() },
                 ])),
                 roles: Some(Ok(vec![doc! { "role": "reportsReader", "db": "admin", "roles": [ { "role": "read", "db": "analytics" } ] }])),
                 new_db: "admin".into(),
