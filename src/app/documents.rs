@@ -268,22 +268,35 @@ impl App {
         // Taken out of where the view keeps them for the frame, so the open document can be edited through `self`.
         let view = t.view;
         let (mut all, mut raw) = (Vec::new(), Vec::new());
-        let (fields, base, docs) = if agg {
+        let (fields, base, range, is_raw) = if agg {
             let (_, fields, page, _) = t.agg_source();
             let fields = fields.to_vec();
-            all = t.agg_store(view).map(std::mem::take).unwrap_or_default();
-            let (range, base) = page_window(page, all.len());
-            (fields, base, Rows::Docs(&all[range]))
+            let is_raw = match t.agg_store(view) {
+                Some(Store::Docs(v)) => {
+                    all = std::mem::take(v);
+                    false
+                }
+                Some(Store::Raw(v)) => {
+                    raw = std::mem::take(v);
+                    true
+                }
+                None => false,
+            };
+            let (range, base) = page_window(page, if is_raw { raw.len() } else { all.len() });
+            (fields, base, range, is_raw)
         } else {
             raw = std::mem::take(&mut t.docs);
-            // Rows that closed drop their decoded copy; only open ones keep it (see `db::Row`).
-            for (i, r) in raw.iter_mut().enumerate() {
-                if t.selected != Some((false, i)) && !t.expanded.contains(&(false, i)) {
+            (t.fields.clone(), t.page * PAGE_SIZE, 0..raw.len(), true)
+        };
+        // Rows that closed drop their decoded copy; only open ones keep it (see `db::Row`).
+        if is_raw {
+            for (i, r) in raw[range.clone()].iter_mut().enumerate() {
+                if t.selected != Some((agg, i)) && !t.expanded.contains(&(agg, i)) {
                     r.forget();
                 }
             }
-            (t.fields.clone(), t.page * PAGE_SIZE, Rows::Raw(&raw))
-        };
+        }
+        let docs = if is_raw { Rows::Raw(&raw[range]) } else { Rows::Docs(&all[range]) };
         let loading = t.loading;
         let closed = self.t().and_then(|t| self.conn(t.sel.conn)).filter(|c| c.status != Status::Ready && !self.demo).map(|c| (c.meta.id, c.meta.name.clone(), c.status == Status::Connecting));
         if let (true, Some((id, name, connecting))) = (docs.is_empty(), closed) {
@@ -314,10 +327,11 @@ impl App {
             }
         }
         if let Some(t) = self.tabs.get_mut(cur) {
-            if !agg {
-                t.docs = raw;
-            } else if let Some(store) = t.agg_store(view) {
-                *store = all;
+            match (agg, t.agg_store(view)) {
+                (false, _) => t.docs = raw,
+                (true, Some(Store::Docs(v))) => *v = all,
+                (true, Some(Store::Raw(v))) => *v = raw,
+                (true, None) => {}
             }
         }
     }

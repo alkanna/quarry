@@ -21,6 +21,13 @@ impl<'a> Rows<'a> {
         self.len() == 0
     }
 
+    pub(super) fn slice(self, range: std::ops::Range<usize>) -> Rows<'a> {
+        match self {
+            Rows::Docs(d) => Rows::Docs(&d[range]),
+            Rows::Raw(r) => Rows::Raw(&r[range]),
+        }
+    }
+
     /// Where the rows live, part of the column width cache key.
     fn addr(self) -> usize {
         match self {
