@@ -165,7 +165,7 @@ impl App {
                 }
                 if danger(ui, "🗑 Delete").clicked() {
                     // `d` carries unsaved edits; the delete only matches the document as stored.
-                    let stored = self.drafts.get(&self.draft_key(d)).map(|dr| dr.original.clone()).unwrap_or_else(|| d.clone());
+                    let stored = stored_version(&self.drafts, &self.draft_key(d), d);
                     self.docs_act(ui.ctx(), DocsAct::Delete, vec![stored]);
                 }
             }

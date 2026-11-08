@@ -33,7 +33,14 @@ jobs:
         run: echo "C:\Program Files\LLVM\bin" >> "$GITHUB_PATH"
       # The tests are platform independent, so one system runs them; the others only need to
       # compile, and a check skips code generation and linking.
+      # A real server for the tests that check writes never overwrite or lose data. A docker step
+      # rather than `services:`, which would apply to every system in the matrix.
+      - name: MongoDB for the live tests
+        if: matrix.os == 'ubuntu-22.04'
+        run: docker run -d -p 27017:27017 mongo:8
       - if: matrix.os == 'ubuntu-22.04'
         run: cargo test --locked
+        env:
+          QUARRY_TEST_MONGO: mongodb://localhost:27017
       - if: matrix.os != 'ubuntu-22.04'
         run: cargo check --locked --all-targets

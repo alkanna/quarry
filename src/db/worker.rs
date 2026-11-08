@@ -702,8 +702,14 @@ impl Worker {
 
     pub fn rename_many(&self, t: Target, filter: Document, from: String, to: String) {
         self.write(t.at(), async move {
-            match t.c().update_many(filter, doc! { "$rename": { &from: &to } }).await {
-                Ok(r) => (Ok(format!("Renamed {from} to {to} in {} documents", r.modified_count)), None),
+            let c = t.c();
+            match c.update_many(rename_filter(filter.clone(), &to), doc! { "$rename": { &from: &to } }).await {
+                Ok(r) => {
+                    // ponytail: counted after the write, so a concurrent change can make it slightly off.
+                    let skipped = c.count_documents(doc! { "$and": [filter, { &from: { "$exists": true } }, { &to: { "$exists": true } }] }).await.unwrap_or(0);
+                    let note = if skipped > 0 { format!(", skipped {skipped} that already had {to}") } else { String::new() };
+                    (Ok(format!("Renamed {from} to {to} in {} documents{note}", r.modified_count)), None)
+                }
                 Err(err) => (Err(e(err)), None),
             }
         });
@@ -723,25 +729,7 @@ impl Worker {
                     // driver so a failed batch still knows the ids of what it did insert.
                     if docs.iter().any(|d| !d.contains_key("_id")) {
                         let last = c.find_one(doc! {}).sort(doc! { "_id": -1 }).await.ok().flatten().and_then(|d| d.get("_id").cloned());
-                        let mut next = match &last {
-                            Some(Bson::Int32(n)) => Some(*n as i64 + 1),
-                            Some(Bson::Int64(n)) => Some(n + 1),
-                            Some(Bson::Double(f)) => Some(*f as i64 + 1),
-                            _ => None,
-                        };
-                        for d in docs.iter_mut().filter(|d| !d.contains_key("_id")) {
-                            let id = match (&last, next.as_mut()) {
-                                (Some(Bson::String(s)), _) => Bson::String(random_id(s.chars().count())),
-                                (_, Some(n)) => {
-                                    *n += 1;
-                                    Bson::Int64(*n - 1)
-                                }
-                                _ => Bson::ObjectId(mongodb::bson::oid::ObjectId::new()),
-                            };
-                            let mut with_id = doc! { "_id": id };
-                            with_id.extend(std::mem::take(d));
-                            *d = with_id;
-                        }
+                        assign_ids(&mut docs, last);
                     }
                     let mut ids = Vec::with_capacity(docs.len());
                     for chunk in docs.chunks(BATCH) {
@@ -894,7 +882,36 @@ pub(crate) async fn replace_doc(conn: u64, t: Target, old: Document, new: Docume
     }
 }
 
-pub const CONFLICT: &str = "Not saved: this document changed on the server since you opened it. Reload and try again.";
+/// Gives each document without an _id one of the kind the collection's `last` _id has: the next
+/// number, a random string of the same length, or an ObjectId.
+pub(crate) fn assign_ids(docs: &mut [Document], last: Option<Bson>) {
+    let mut next = match &last {
+        Some(Bson::Int32(n)) => Some(*n as i64 + 1),
+        Some(Bson::Int64(n)) => Some(n + 1),
+        Some(Bson::Double(f)) => Some(*f as i64 + 1),
+        _ => None,
+    };
+    for d in docs.iter_mut().filter(|d| !d.contains_key("_id")) {
+        let id = match (&last, next.as_mut()) {
+            (Some(Bson::String(s)), _) => Bson::String(random_id(s.chars().count())),
+            (_, Some(n)) => {
+                *n += 1;
+                Bson::Int64(*n - 1)
+            }
+            _ => Bson::ObjectId(mongodb::bson::oid::ObjectId::new()),
+        };
+        let mut with_id = doc! { "_id": id };
+        with_id.extend(std::mem::take(d));
+        *d = with_id;
+    }
+}
+
+/// $rename replaces a field that already has the new name, so documents that have one are left out.
+pub(crate) fn rename_filter(filter: Document, to: &str) -> Document {
+    doc! { "$and": [filter, { to: { "$exists": false } }] }
+}
+
+pub const CONFLICT: &str ="Not saved: this document changed on the server since you opened it. Reload and try again.";
 
 /// Matches the document only while every field is still exactly as we last read it,
 /// so a concurrent change by someone else is never silently overwritten.
@@ -954,5 +971,105 @@ mod tests {
             assert!(r.is_err());
             assert_eq!(seen.await.unwrap(), ("db.internal.example".to_string(), 27018));
         });
+    }
+
+    #[test]
+    fn writes_match_the_whole_document_as_read() {
+        let old = doc! { "_id": 7, "a": { "b": 1 } };
+        assert_eq!(unchanged(&old), doc! { "_id": 7, "$expr": { "$eq": ["$$ROOT", { "$literal": old.clone() }] } });
+        assert_eq!(rename_filter(doc! { "x": 1 }, "y"), doc! { "$and": [{ "x": 1 }, { "y": { "$exists": false } }] });
+    }
+
+    #[test]
+    fn imported_ids_follow_the_collection() {
+        let mut docs = vec![doc! { "a": 1 }, doc! { "_id": 99, "a": 2 }, doc! { "a": 3 }];
+        assign_ids(&mut docs, Some(Bson::Int32(10)));
+        assert_eq!(docs.iter().map(|d| d.get("_id").cloned().unwrap()).collect::<Vec<_>>(), [Bson::Int64(11), Bson::Int32(99), Bson::Int64(12)]);
+        // _id comes first, the way the original writes them.
+        assert_eq!(docs[0].keys().next().unwrap(), "_id");
+        let mut docs = vec![doc! {}];
+        assign_ids(&mut docs, Some(Bson::String("abcd".into())));
+        assert_eq!(docs[0].get_str("_id").unwrap().chars().count(), 4);
+        let mut docs = vec![doc! {}];
+        assign_ids(&mut docs, None);
+        assert!(docs[0].get_object_id("_id").is_ok());
+    }
+
+    /// A worker and an empty collection on the server at QUARRY_TEST_MONGO, or None to skip.
+    /// ponytail: one collection per test name, dropped at the start, so a failed run leaves no trap.
+    fn live(name: &str) -> Option<(Worker, std::sync::mpsc::Receiver<Msg>, Target)> {
+        let uri = std::env::var("QUARRY_TEST_MONGO").ok()?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let w = Worker::new(tx, eframe::egui::Context::default());
+        let t = w.rt.block_on(async {
+            let client = Client::with_uri_str(&uri).await.unwrap();
+            let t = Target { client, db: "quarry_test".into(), coll: name.into(), timeout: Duration::from_secs(5) };
+            t.c().drop().await.unwrap();
+            t
+        });
+        Some((w, rx, t))
+    }
+
+    fn next(rx: &std::sync::mpsc::Receiver<Msg>) -> Msg {
+        rx.recv_timeout(Duration::from_secs(10)).expect("worker answer")
+    }
+
+    fn all(w: &Worker, t: &Target) -> Vec<Document> {
+        w.rt.block_on(async { t.c().find(doc! {}).sort(doc! { "_id": 1 }).await.unwrap().try_collect().await.unwrap() })
+    }
+
+    fn seed(w: &Worker, t: &Target, docs: Vec<Document>) {
+        w.rt.block_on(async { t.c().insert_many(docs).await.unwrap() });
+    }
+
+    #[test]
+    fn live_save_refuses_a_document_changed_meanwhile() {
+        let Some((w, rx, t)) = live("save_conflict") else { return };
+        seed(&w, &t, vec![doc! { "_id": 1, "a": 1 }]);
+        let stale = doc! { "_id": 1, "a": 0 };
+        w.save("k".into(), 1, t.clone(), stale, doc! { "_id": 1, "a": 2 });
+        let Msg::Saved { res, undo, .. } = next(&rx) else { panic!("expected Saved") };
+        assert_eq!(res, Err(CONFLICT.to_string()));
+        assert!(undo.is_none());
+        assert_eq!(all(&w, &t), [doc! { "_id": 1, "a": 1 }]);
+        w.save("k".into(), 1, t.clone(), doc! { "_id": 1, "a": 1 }, doc! { "_id": 1, "a": 2 });
+        let Msg::Saved { res, .. } = next(&rx) else { panic!("expected Saved") };
+        assert!(res.is_ok());
+        assert_eq!(all(&w, &t), [doc! { "_id": 1, "a": 2 }]);
+    }
+
+    #[test]
+    fn live_delete_refuses_a_document_changed_meanwhile() {
+        let Some((w, rx, t)) = live("delete_conflict") else { return };
+        seed(&w, &t, vec![doc! { "_id": 1, "a": 1 }]);
+        w.delete(1, t.clone(), doc! { "_id": 1, "a": 0 }, true);
+        let Msg::Written { res, .. } = next(&rx) else { panic!("expected Written") };
+        assert_eq!(res, Err(CONFLICT.to_string()));
+        assert_eq!(all(&w, &t).len(), 1);
+    }
+
+    #[test]
+    fn live_failed_import_undoes_exactly_what_it_wrote() {
+        let Some((w, rx, t)) = live("import_rollback") else { return };
+        seed(&w, &t, vec![doc! { "_id": 3, "pre": true }]);
+        let docs = (1..=5).map(|i| doc! { "_id": i, "n": i }).collect();
+        w.import(1, t.clone(), docs, None);
+        let Msg::Written { res, undo, .. } = next(&rx) else { panic!("expected Written") };
+        assert!(res.unwrap_err().starts_with("Stopped after 2 documents"));
+        let Some(UndoAction { kind: UndoKind::InsertMany { ids }, .. }) = undo else { panic!("expected an undo") };
+        assert_eq!(ids, [Bson::Int32(1), Bson::Int32(2)]);
+        w.delete_ids(t.clone(), ids);
+        next(&rx);
+        assert_eq!(all(&w, &t), [doc! { "_id": 3, "pre": true }]);
+    }
+
+    #[test]
+    fn live_bulk_rename_skips_documents_that_have_the_new_name() {
+        let Some((w, rx, t)) = live("bulk_rename") else { return };
+        seed(&w, &t, vec![doc! { "_id": 1, "a": 1 }, doc! { "_id": 2, "a": 2, "b": "keep" }]);
+        w.rename_many(t.clone(), doc! {}, "a".into(), "b".into());
+        let Msg::Written { res, .. } = next(&rx) else { panic!("expected Written") };
+        assert_eq!(res.unwrap(), "Renamed a to b in 1 documents, skipped 1 that already had b");
+        assert_eq!(all(&w, &t), [doc! { "_id": 1, "b": 1 }, doc! { "_id": 2, "a": 2, "b": "keep" }]);
     }
 }
