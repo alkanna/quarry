@@ -15,12 +15,12 @@ pub(super) enum DocsAct {
 }
 
 /// Positions in `new` of the documents at `rows` in `old`, matched by _id.
-pub(super) fn follow_ids(old: &[Document], new: &[Document], rows: impl Iterator<Item = usize>) -> BTreeSet<usize> {
-    let ids: HashSet<String> = rows.filter_map(|i| old.get(i)?.get("_id").map(db::compact)).collect();
+pub(super) fn follow_ids(old: &[db::Row], new: &[db::Row], rows: impl Iterator<Item = usize>) -> BTreeSet<usize> {
+    let ids: HashSet<String> = rows.filter_map(|i| old.get(i)?.id().map(|v| db::compact(&v))).collect();
     if ids.is_empty() {
         return BTreeSet::new();
     }
-    new.iter().enumerate().filter(|(_, d)| d.get("_id").is_some_and(|v| ids.contains(&db::compact(v)))).map(|(i, _)| i).collect()
+    new.iter().enumerate().filter(|(_, d)| d.id().is_some_and(|v| ids.contains(&db::compact(&v)))).map(|(i, _)| i).collect()
 }
 
 /// Actions on one document or the checked ones, shared by the selection bar and the row menus.
@@ -69,10 +69,10 @@ pub(super) enum RowAct {
 }
 
 /// The menu of row `i`: document actions for Documents rows, index actions for Indexes rows.
-pub(super) fn any_row_menu(ui: &mut egui::Ui, kind: RowMenu, i: usize, d: &Document, checked: &BTreeSet<usize>) -> Option<(usize, RowAct)> {
+pub(super) fn any_row_menu(ui: &mut egui::Ui, kind: RowMenu, i: usize, rows: Rows, checked: &BTreeSet<usize>) -> Option<(usize, RowAct)> {
     match kind {
         RowMenu::Docs => row_menu(ui, i, checked).map(|(i, a)| (i, RowAct::Doc(a))),
-        RowMenu::Indexes => index_menu(ui, d).map(|a| (i, RowAct::Idx(a))),
+        RowMenu::Indexes => index_menu(ui, rows.doc(i)?).map(|a| (i, RowAct::Idx(a))),
         RowMenu::None => None,
     }
 }
@@ -267,18 +267,23 @@ impl App {
         let t = self.tm().unwrap();
         // Taken out of where the view keeps them for the frame, so the open document can be edited through `self`.
         let view = t.view;
-        let (all, fields, range, base) = if agg {
+        let (mut all, mut raw) = (Vec::new(), Vec::new());
+        let (fields, base, docs) = if agg {
             let (_, fields, page, _) = t.agg_source();
             let fields = fields.to_vec();
-            let all = t.agg_store(view).map(std::mem::take).unwrap_or_default();
+            all = t.agg_store(view).map(std::mem::take).unwrap_or_default();
             let (range, base) = page_window(page, all.len());
-            (all, fields, range, base)
+            (fields, base, Rows::Docs(&all[range]))
         } else {
-            let docs = std::mem::take(&mut t.docs);
-            let range = 0..docs.len();
-            (docs, t.fields.clone(), range, t.page * PAGE_SIZE)
+            raw = std::mem::take(&mut t.docs);
+            // Rows that closed drop their decoded copy; only open ones keep it (see `db::Row`).
+            for (i, r) in raw.iter_mut().enumerate() {
+                if t.selected != Some((false, i)) && !t.expanded.contains(&(false, i)) {
+                    r.forget();
+                }
+            }
+            (t.fields.clone(), t.page * PAGE_SIZE, Rows::Raw(&raw))
         };
-        let docs = &all[range];
         let loading = t.loading;
         let closed = self.t().and_then(|t| self.conn(t.sel.conn)).filter(|c| c.status != Status::Ready && !self.demo).map(|c| (c.meta.id, c.meta.name.clone(), c.status == Status::Connecting));
         if let (true, Some((id, name, connecting))) = (docs.is_empty(), closed) {
@@ -310,7 +315,7 @@ impl App {
         }
         if let Some(t) = self.tabs.get_mut(cur) {
             if !agg {
-                t.docs = all;
+                t.docs = raw;
             } else if let Some(store) = t.agg_store(view) {
                 *store = all;
             }
@@ -360,15 +365,15 @@ impl App {
     }
 
     /// The documents a row action applies to: every checked one when the row is checked, else that row.
-    pub(super) fn act_targets(checked: &BTreeSet<usize>, docs: &[Document], i: usize) -> Vec<Document> {
-        if checked.contains(&i) { Self::checked_docs(checked, docs) } else { docs.get(i).cloned().into_iter().collect() }
+    pub(super) fn act_targets(checked: &BTreeSet<usize>, docs: Rows, i: usize) -> Vec<Document> {
+        if checked.contains(&i) { Self::checked_docs(checked, docs) } else { docs.owned(i).into_iter().collect() }
     }
 
-    pub(super) fn checked_docs(checked: &BTreeSet<usize>, docs: &[Document]) -> Vec<Document> {
-        checked.iter().filter_map(|&j| docs.get(j).cloned()).collect()
+    pub(super) fn checked_docs(checked: &BTreeSet<usize>, docs: Rows) -> Vec<Document> {
+        checked.iter().filter_map(|&j| docs.owned(j)).collect()
     }
 
-    pub(super) fn selection_bar(&mut self, ui: &mut egui::Ui, docs: &[Document]) {
+    pub(super) fn selection_bar(&mut self, ui: &mut egui::Ui, docs: Rows) {
         let n = self.t().unwrap().checked.len();
         // Hidden under dialogs, which would otherwise sit behind it.
         if n == 0 || self.modal.is_some() || self.insert.is_some() {

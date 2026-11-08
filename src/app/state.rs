@@ -100,7 +100,7 @@ pub(super) struct Tab {
     pub(super) proj_txt: String,
     pub(super) query: Query,
     pub(super) page: u64,
-    pub(super) docs: Vec<Document>,
+    pub(super) docs: Vec<db::Row>,
     pub(super) fields: Vec<String>,
     /// Every dotted field path seen in the loaded documents, for autocomplete.
     pub(super) paths: Vec<String>,
@@ -319,6 +319,11 @@ pub(super) fn page_window(page: Option<usize>, len: usize) -> (std::ops::Range<u
 }
 
 impl Tab {
+    /// The page decoded, for a scan of every row; the tab itself keeps only BSON bytes.
+    pub(super) fn decoded_docs(&self) -> Vec<Document> {
+        self.docs.iter().map(db::Row::owned).collect()
+    }
+
     /// The result table that is not the Documents one, as this view keeps it: all its rows, their columns,
     /// the page on screen (None shows every row) and the suffix of its column-settings key.
     pub(super) fn agg_source(&self) -> (&[Document], &[String], Option<usize>, &'static str) {

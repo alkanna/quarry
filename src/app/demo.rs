@@ -58,7 +58,7 @@ impl App {
         t.fields = auto_fields(&docs);
         t.paths = doc_paths(&docs);
         t.field_info = field_info(&docs);
-        t.docs = docs;
+        t.docs = docs.iter().filter_map(|d| db::Row::from_doc(d).ok()).collect();
         t.count = 1284;
         t.ms = 14;
         t.selected = Some((false, 2));
@@ -192,7 +192,7 @@ impl App {
             t.view = View::Shell;
             t.shell.code = "async function run() {\n  const n = await orders.countDocuments({ status: 'paid' });\n  console.log('paid orders:', n);\n  return await orders.find({ status: 'paid' }).project({ number: 1, total: 1 }).limit(3).toArray();\n}".into();
             t.shell.logs = vec![("log".into(), "paid orders: 321".into())];
-            let docs: Vec<Bson> = t.docs.iter().take(3).map(|d| Bson::Document(doc! { "_id": d.get("_id").cloned().unwrap(), "number": d.get("number").cloned().unwrap(), "total": d.get("total").cloned().unwrap() })).collect();
+            let docs: Vec<Bson> = t.docs.iter().take(3).map(db::Row::owned).map(|d| Bson::Document(doc! { "_id": d.get("_id").cloned().unwrap(), "number": d.get("number").cloned().unwrap(), "total": d.get("total").cloned().unwrap() })).collect();
             t.shell.set_value(Bson::Array(docs));
             t.shell.ms = Some(42);
             t.shell.help = std::env::var("QUARRY_TEST_HELP").is_ok();
@@ -208,7 +208,7 @@ impl App {
             let t = &mut self.tabs[1];
             t.view = View::Aggregate;
             t.selected = None;
-            let docs = t.docs.clone();
+            let docs = t.decoded_docs();
             let done = |mut s: Stage, n: u64, sample: Vec<Document>, ms: u128| {
                 (s.count, s.sample, s.ms, s.due) = (Some(n), sample, Some(ms), None);
                 s
@@ -232,7 +232,7 @@ impl App {
             t.selected = None;
             (t.compare.conn, t.compare.db, t.compare.coll) = (1, "shop".into(), "paid_orders".into());
             t.compare.ran = (1, "shop".into(), "paid_orders".into());
-            let src = t.docs.clone();
+            let src = t.decoded_docs();
             let mut dst: Vec<Document> = src.iter().skip(3).cloned().collect();
             for d in dst.iter_mut().take(4) {
                 d.insert("status", "refunded");
@@ -253,7 +253,7 @@ impl App {
         }
         // Test switch: show the JSON editor and an unsaved edit in the demo picture.
         if std::env::var("QUARRY_TEST_EDIT").is_ok() {
-            let d = self.tabs[1].docs[2].clone();
+            let d = self.tabs[1].docs[2].owned();
             let mut changed = d.clone();
             changed.insert("status", "shipped");
             self.drafts.insert(self.draft_key(&d), Draft { conn: 1, db: "shop".into(), coll: "orders".into(), original: d.clone(), current: changed.clone() });

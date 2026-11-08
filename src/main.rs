@@ -9,6 +9,11 @@ mod ssh;
 mod ui;
 mod update;
 
+/// QUARRY_NO_FOCUS keeps benchmark and screenshot runs from stealing focus from the user.
+fn takes_focus() -> bool {
+    std::env::var("QUARRY_NO_FOCUS").is_err()
+}
+
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().collect();
     // `--screenshot out.png`: draw ~120 frames of an offline demo, save the picture and exit.
@@ -23,7 +28,7 @@ fn main() -> eframe::Result {
             .with_title("Quarry")
             .with_inner_size([1400.0, 860.0])
             .with_min_inner_size([900.0, 560.0])
-            .with_active(true)
+            .with_active(takes_focus())
             // macOS: draw our own header under a transparent title bar, keeping the window buttons.
             .with_fullsize_content_view(true)
             .with_titlebar_shown(false)

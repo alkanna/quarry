@@ -226,7 +226,7 @@ fn item(ui: &mut egui::Ui, label: &str, act: HeadAct, acts: &mut Vec<HeadAct>) {
 
 impl App {
     /// Applies one popover action for column `c` of the current table.
-    pub(super) fn head_act(&mut self, ui: &egui::Ui, agg: bool, docs: &[Document], fields: &[String], c: &str, act: HeadAct) {
+    pub(super) fn head_act(&mut self, ui: &egui::Ui, agg: bool, docs: Rows, fields: &[String], c: &str, act: HeadAct) {
         let key = self.col_key(agg);
         let Some(t) = self.t() else { return };
         let label = self.prefs.cols.get(&key).map(|p| p.label(c).to_string()).unwrap_or_else(|| c.into());
@@ -282,14 +282,14 @@ impl App {
         }
     }
 
-    fn col_data(&mut self, ctx: &egui::Context, agg: bool, docs: &[Document], c: &str, op: ColOp) {
+    fn col_data(&mut self, ctx: &egui::Context, agg: bool, docs: Rows, c: &str, op: ColOp) {
         let Some(t) = self.t() else { return };
         let (sel, filter) = (t.sel.clone(), t.query.filter.clone());
         if agg || !self.col_scope_query {
             // As the table shows them, unsaved edits included.
-            let values: Vec<Bson> = docs.iter().filter_map(|d| {
-                let shown = self.shown_doc(d, agg);
-                db::get_path(shown.as_ref().unwrap_or(d), c).cloned()
+            let values: Vec<Bson> = (0..docs.len()).filter_map(|i| match self.shown_row(docs, i, agg) {
+                Some(d) => db::get_path(&d, c).cloned(),
+                None => docs.value(i, c).map(|v| v.bson().into_owned()),
             }).collect();
             let scope = format!("From the {} documents on this page.", docs.len());
             return match col_op_result(op, &values) {

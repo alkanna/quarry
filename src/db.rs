@@ -2,7 +2,7 @@
 //! tokio task that sends one `Msg` back and asks for a repaint.
 
 use futures_util::{StreamExt, TryStreamExt};
-use mongodb::bson::{Bson, Document, doc};
+use mongodb::bson::{Bson, Document, RawBsonRef, RawDocument, RawDocumentBuf, doc};
 use mongodb::options::ClientOptions;
 use mongodb::Client;
 use std::sync::mpsc::Sender;
@@ -41,6 +41,60 @@ pub type Res<T> = Result<T, String>;
 /// Whether a server error means the user lacks a privilege, in the server's or Atlas's wording.
 pub fn is_unauthorized(e: &str) -> bool {
     e.contains("(Unauthorized)") || e.contains("not authorized") || e.contains("is not allowed to do action")
+}
+
+/// A loaded document kept as its BSON bytes. Decoded, a document takes about 11 times the memory
+/// (every field and subdocument is its own allocation), so only rows that are open keep a decoded copy.
+#[derive(Clone)]
+pub struct Row {
+    raw: RawDocumentBuf,
+    doc: std::cell::OnceCell<Document>,
+}
+
+impl Row {
+    pub fn from_raw(raw: RawDocumentBuf) -> Row {
+        Row { raw, doc: Default::default() }
+    }
+
+    /// Fails only for keys BSON cannot hold, such as ones with a NUL character.
+    pub fn from_doc(d: &Document) -> Res<Row> {
+        RawDocumentBuf::from_document(d).map(Row::from_raw).map_err(|err| err.to_string())
+    }
+
+    /// A decoded copy; the worker checks every page with this, so later decodes cannot fail.
+    pub fn decode(&self) -> Res<Document> {
+        match self.doc.get() {
+            Some(d) => Ok(d.clone()),
+            None => self.raw.to_document().map_err(|err| format!("A document could not be read: {err}")),
+        }
+    }
+
+    /// A decoded copy for actions, not kept.
+    pub fn owned(&self) -> Document {
+        self.decode().unwrap_or_default()
+    }
+
+    /// The decoded document, kept until `forget`, for rows that are open.
+    pub fn doc(&self) -> &Document {
+        self.doc.get_or_init(|| self.raw.to_document().unwrap_or_default())
+    }
+
+    pub fn forget(&mut self) {
+        self.doc.take();
+    }
+
+    /// The value at a dotted path, read from the bytes without decoding the rest of the document.
+    pub fn value(&self, path: &str) -> Option<RawBsonRef<'_>> {
+        get_path_raw(&self.raw, path)
+    }
+
+    pub fn id(&self) -> Option<Bson> {
+        self.raw.get("_id").ok().flatten().and_then(|v| Bson::try_from(v).ok())
+    }
+
+    pub fn raw(&self) -> &RawDocument {
+        &self.raw
+    }
 }
 
 #[derive(Clone)]
@@ -105,7 +159,8 @@ pub enum Msg {
     Command { tag: String, res: Res<Document> },
     /// A database-level change finished; the collection list of `db` is reloaded.
     DbChanged { conn: u64, db: String, res: Res<String> },
-    Docs { req: u64, res: Res<(Vec<Document>, u64, u128)> },
+    /// The page as rows, and decoded once for its field list; the decoded copy is not kept.
+    Docs { req: u64, res: Res<(Vec<Row>, Vec<Document>, u64, u128)> },
     Indexes { req: u64, res: Res<Vec<Document>> },
     /// Usage and suggestions for the collection named `key` ("db.coll").
     IndexInfo { key: String, res: Res<IndexInfo> },
@@ -633,6 +688,21 @@ pub fn get_path<'a>(d: &'a Document, path: &str) -> Option<&'a Bson> {
             (0, _) => d.get(seg),
             (_, Some(Bson::Document(x))) => x.get(seg),
             (_, Some(Bson::Array(a))) => seg.parse::<usize>().ok().and_then(|n| a.get(n)),
+            _ => None,
+        };
+        cur?;
+    }
+    cur
+}
+
+/// `get_path` on BSON bytes.
+pub fn get_path_raw<'a>(d: &'a RawDocument, path: &str) -> Option<RawBsonRef<'a>> {
+    let mut cur: Option<RawBsonRef<'a>> = None;
+    for (i, seg) in path.split('.').enumerate() {
+        cur = match (i, cur) {
+            (0, _) => d.get(seg).ok().flatten(),
+            (_, Some(RawBsonRef::Document(x))) => x.get(seg).ok().flatten(),
+            (_, Some(RawBsonRef::Array(a))) => seg.parse::<usize>().ok().and_then(|n| a.get(n).ok().flatten()),
             _ => None,
         };
         cur?;

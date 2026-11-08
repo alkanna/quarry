@@ -6,23 +6,32 @@ impl App {
     pub(super) fn selected_doc(&self) -> Option<&Document> {
         let t = self.t()?;
         match t.selected? {
-            (false, i) => t.docs.get(i),
+            (false, i) => t.docs.get(i).map(db::Row::doc),
             (true, i) => t.agg_page().0.get(i),
         }
     }
 
     pub(super) fn draft_key(&self, d: &Document) -> String {
+        self.draft_key_of(d.get("_id"))
+    }
+
+    fn draft_key_of(&self, id: Option<&Bson>) -> String {
         let s = self.t().map(|t| format!("{}/{}/{}", t.sel.conn, t.sel.db, t.sel.coll)).unwrap_or_default();
-        format!("{s}#{}", d.get("_id").map(db::compact).unwrap_or_default())
+        format!("{s}#{}", id.map(db::compact).unwrap_or_default())
     }
 
     /// The document as it should be shown: with its unsaved edits, if any. Edits only belong to
     /// Documents rows, so a result row (`agg`) with the same _id never gets them.
     pub(super) fn shown_doc(&self, d: &Document, agg: bool) -> Option<Document> {
+        self.shown_row(Rows::Docs(std::slice::from_ref(d)), 0, agg)
+    }
+
+    /// `shown_doc` for row `i` of a table, found by its _id without decoding the row.
+    pub(super) fn shown_row(&self, rows: Rows, i: usize, agg: bool) -> Option<Document> {
         if agg || self.drafts.is_empty() {
             return None;
         }
-        self.drafts.get(&self.draft_key(d)).map(|x| x.current.clone())
+        self.drafts.get(&self.draft_key_of(rows.id(i).as_ref())).map(|x| x.current.clone())
     }
 
     /// Keeps an edit as unsaved instead of writing it, so several edits go out in one save.
