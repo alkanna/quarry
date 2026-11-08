@@ -415,14 +415,12 @@ impl App {
                     let from = path.join(".");
                     dialog_title(ui, format!("Rename {from}"));
                     ui.add(egui::TextEdit::singleline(name).font(egui::TextStyle::Monospace).desired_width(320.0));
-                    let mut valid = !name.trim().is_empty() && !name.contains('.') && !name.starts_with('$') && Some(name.trim()) != path.last().map(|s| s.as_str());
-                    let mut to = path[..path.len() - 1].to_vec();
-                    to.push(name.trim().to_string());
-                    // Both the edit and $rename would replace the sibling's value with this one.
-                    if valid && db::get_path(d, &to.join(".")).is_some() {
-                        ui.label(RichText::new(format!("{} already exists here.", name.trim())).color(ALERT()));
-                        valid = false;
+                    let check = rename_check(d, path, name);
+                    if let Err(Some(msg)) = &check {
+                        ui.label(RichText::new(msg).color(ALERT()));
                     }
+                    let valid = check.is_ok();
+                    let to = check.unwrap_or_default();
                     dialog_actions(ui, |ui| {
                         if ui.add_enabled(valid, primary_button(ui, "In this document", PRIMARY())).clicked() {
                             let new = db::get_path(d, &from).cloned().ok_or_else(|| "Field not found".to_string()).and_then(|v| db::edit_path(&db::edit_path(d, path, None)?, &to, Some(v)));
@@ -436,7 +434,7 @@ impl App {
                         if plain && ui.add_enabled(valid, egui::Button::new(format!("In all {count} matching documents…"))).clicked() {
                             let coll = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
                             self.modal = Some(Modal::Typed {
-                                title: format!("Rename {from} to {} in every document of {coll} matching the current filter (about {count})?", to.join(".")),
+                                title: format!("Rename {from} to {} in every document of {coll} matching the current filter (about {count})? Documents that already have {} are skipped.", to.join("."), to.join(".")),
                                 expect: coll,
                                 typed: String::new(),
                                 action: Danger::RenameMany { filter, from: from.clone(), to: to.join(".") },
@@ -598,6 +596,40 @@ impl App {
         });
         if keep && !r.should_close() && self.modal.is_none() {
             self.modal = Some(m);
+        }
+    }
+}
+
+/// The new path for renaming the field at `path` to `name`. `Err(None)` disables the rename
+/// quietly (empty, unchanged or not a plain name); `Err(Some(_))` says why.
+fn rename_check(d: &Document, path: &[String], name: &str) -> Result<Vec<String>, Option<String>> {
+    let name = name.trim();
+    if name.is_empty() || name.contains('.') || name.starts_with('$') || Some(name) == path.last().map(|s| s.as_str()) {
+        return Err(None);
+    }
+    let mut to = path[..path.len() - 1].to_vec();
+    to.push(name.to_string());
+    // Both the edit and $rename would replace the sibling's value with this one.
+    if db::get_path(d, &to.join(".")).is_some() {
+        return Err(Some(format!("{name} already exists here.")));
+    }
+    Ok(to)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rename_never_overwrites_a_sibling() {
+        let d = doc! { "a": 1, "b": 2, "o": { "x": 1, "y": 2 } };
+        let p = |s: &str| s.split('.').map(String::from).collect::<Vec<_>>();
+        assert_eq!(rename_check(&d, &p("a"), " c "), Ok(p("c")));
+        assert_eq!(rename_check(&d, &p("o.x"), "z"), Ok(p("o.z")));
+        assert_eq!(rename_check(&d, &p("a"), "b"), Err(Some("b already exists here.".into())));
+        assert_eq!(rename_check(&d, &p("o.x"), "y"), Err(Some("y already exists here.".into())));
+        for bad in ["", "a", "c.d", "$c"] {
+            assert_eq!(rename_check(&d, &p("a"), bad), Err(None), "{bad:?}");
         }
     }
 }

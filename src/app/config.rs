@@ -233,18 +233,25 @@ pub(super) fn set_secret(id: u64, what: &str, value: &str) -> Result<(), String>
     }
 }
 
+/// Written beside the file, synced, then renamed over it: a crash mid-write leaves the old file
+/// whole instead of a truncated one that no longer parses.
+pub(super) fn write_atomic(dir: &std::path::Path, file: &str, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    std::fs::create_dir_all(dir)?;
+    let tmp = dir.join(format!(".{file}.tmp"));
+    let res = std::fs::File::create(&tmp).and_then(|mut f| f.write_all(bytes).and_then(|()| f.sync_all())).and_then(|()| std::fs::rename(&tmp, dir.join(file)));
+    if res.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    res
+}
+
 impl App {
     pub(super) fn write_config(&mut self, file: &str, bytes: Vec<u8>) {
         if self.demo {
             return;
         }
-        let dir = config_dir();
-        let _ = std::fs::create_dir_all(&dir);
-        // Written beside the file, then renamed over it: a crash mid-write leaves the old file
-        // whole instead of a truncated one that no longer parses.
-        let tmp = dir.join(format!(".{file}.tmp"));
-        if let Err(err) = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, dir.join(file))) {
-            let _ = std::fs::remove_file(&tmp);
+        if let Err(err) = write_atomic(&config_dir(), file, &bytes) {
             self.err(format!("Could not save {file}: {err}"));
         }
     }
@@ -276,6 +283,20 @@ mod tests {
             push_history(&mut h, &format!("{{ n: {i} }}"));
         }
         assert_eq!(h.len(), HISTORY_LENGTH_BY_COLLECTION);
+    }
+
+    #[test]
+    fn atomic_write_replaces_or_leaves_the_old_file() {
+        let dir = std::env::temp_dir().join(format!("quarry-atomic-{}", std::process::id()));
+        write_atomic(&dir, "ui.json", b"old").unwrap();
+        write_atomic(&dir, "ui.json", b"new").unwrap();
+        assert_eq!(std::fs::read(dir.join("ui.json")).unwrap(), b"new");
+        // A target the rename cannot replace: the write fails, the target is untouched, no temp file is left.
+        std::fs::create_dir_all(dir.join("busy.json").join("keep")).unwrap();
+        assert!(write_atomic(&dir, "busy.json", b"x").is_err());
+        assert!(dir.join("busy.json").join("keep").is_dir());
+        assert!(!dir.join(".busy.json.tmp").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -5,9 +5,17 @@ use super::*;
 impl App {
     pub(super) fn push_undo(&mut self, a: UndoAction) {
         self.undo.insert(0, a);
-        self.undo.retain(|a| a.at.elapsed().as_secs() <= db::UNDO_MAX_AGE_S);
-        self.undo.truncate(db::UNDO_MAX);
+        trim_undo(&mut self.undo, std::time::Instant::now());
     }
+}
+
+/// Drops actions older than a day and keeps the newest `UNDO_MAX`, like the original.
+pub(super) fn trim_undo(undo: &mut Vec<UndoAction>, now: std::time::Instant) {
+    undo.retain(|a| now.saturating_duration_since(a.at).as_secs() <= db::UNDO_MAX_AGE_S);
+    undo.truncate(db::UNDO_MAX);
+}
+
+impl App {
 
     pub(super) fn apply_undo(&mut self, i: usize) {
         let a = &self.undo[i];
@@ -29,5 +37,27 @@ impl App {
             UndoKind::DeleteMany { old } => self.worker.import(a.conn, t, old, None),
             UndoKind::Update { old, new } => self.worker.replace(a.conn, t, new, old, false),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn action(at: Instant) -> UndoAction {
+        UndoAction { at, conn: 1, db: "shop".into(), coll: "c".into(), kind: UndoKind::Insert { id: Bson::Int32(1) } }
+    }
+
+    #[test]
+    fn undo_list_is_capped_by_size_and_age() {
+        let t0 = Instant::now();
+        let mut undo: Vec<UndoAction> = (0..db::UNDO_MAX + 5).map(|_| action(t0)).collect();
+        trim_undo(&mut undo, t0);
+        assert_eq!(undo.len(), db::UNDO_MAX);
+        let later = t0 + Duration::from_secs(db::UNDO_MAX_AGE_S + 1);
+        undo.insert(0, action(later));
+        trim_undo(&mut undo, later);
+        assert_eq!(undo.len(), 1, "only the action from within the last day stays");
     }
 }
