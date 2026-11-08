@@ -807,7 +807,9 @@ impl Worker {
     }
 
     /// Reads up to `limit` documents (0 = all) matching `filter` and summarises their fields.
-    pub fn schema(&self, req: u64, t: Target, filter: Document, limit: i64) {
+    /// `last` reads the most recently inserted ones, in reverse natural order: `_id` is not always
+    /// an ObjectId, so sorting on it would not mean recent.
+    pub fn schema(&self, req: u64, t: Target, filter: Document, limit: i64, last: bool) {
         self.spawn(async move {
             let res = async {
                 let start = Instant::now();
@@ -815,6 +817,9 @@ impl Worker {
                 let mut f = c.find(filter).max_time(t.timeout);
                 if limit > 0 {
                     f = f.limit(limit);
+                }
+                if last {
+                    f = f.sort(doc! { "$natural": -1 });
                 }
                 let docs: Vec<Document> = f.await.map_err(e)?.try_collect().await.map_err(e)?;
                 let stats = analyze_schema(&docs);
