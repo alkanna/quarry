@@ -23,6 +23,13 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 sha2 = "0.11"
 russh = { version = "0.65", default-features = false, features = ["ring", "rsa", "flate2"] }
 
+# Already in the build through other crates; read the app's own memory and CPU time for the status bar.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+
 [profile.release]
 lto = "thin"
 
