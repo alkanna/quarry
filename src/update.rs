@@ -313,15 +313,30 @@ fn install(new: &Path, target: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// The notes of one version from CHANGELOG.md (written by release-please), as plain text.
-pub fn changelog(version: &str) -> Option<String> {
+/// The notes of every release after `since` up to `version`, newest first, from CHANGELOG.md
+/// (written by release-please), as plain text. An update can skip releases, for example when
+/// Quarry was not opened for a while, so the notes cover all of them. An unknown `since`, as in
+/// settings from 0.2.0 and earlier, gives the notes of `version` alone.
+pub fn changelog(since: &str, version: &str) -> Option<String> {
+    changelog_in(include_str!("../CHANGELOG.md"), since, version)
+}
+
+fn changelog_in(text: &str, since: &str, version: &str) -> Option<String> {
     // Release headings are "## [1.2.0](compare link) (date)", section headings "### Features".
-    let is_release = |l: &str| l.starts_with('#') && l.trim_start_matches('#').trim_start().starts_with('[');
-    let head = format!("[{version}]");
-    let mut lines = include_str!("../CHANGELOG.md").lines().skip_while(|l| !(is_release(l) && l.contains(&head)));
-    lines.next()?;
-    let mut out = String::new();
-    for l in lines.take_while(|l| !is_release(l)) {
+    fn release(l: &str) -> Option<&str> {
+        l.strip_prefix('#')?.trim_start_matches('#').trim_start().strip_prefix('[')?.split(']').next()
+    }
+    let (top, from) = (parse(version)?, parse(since));
+    let wanted = |v: &str| parse(v).is_some_and(|v| v <= top && from.map_or(v == top, |f| v > f));
+    let mut sections: Vec<(String, String)> = Vec::new();
+    let mut cur: Option<(String, String)> = None;
+    for l in text.lines() {
+        if let Some(v) = release(l) {
+            sections.extend(cur.take());
+            cur = wanted(v).then(|| (v.to_string(), String::new()));
+            continue;
+        }
+        let Some((_, out)) = cur.as_mut() else { continue };
         // Drops the trailing commit link, " ([abc1234](https://...))", and bold scopes.
         let l = l.find(" ([").map_or(l, |i| &l[..i]).replace("**", "");
         let l = l.trim_start_matches('#').trim();
@@ -331,8 +346,13 @@ pub fn changelog(version: &str) -> Option<String> {
             out.push('\n');
         }
     }
-    let out = out.trim().to_string();
-    (!out.is_empty()).then_some(out)
+    sections.extend(cur);
+    let sections: Vec<(String, String)> = sections.into_iter().map(|(v, b)| (v, b.trim().to_string())).filter(|(_, b)| !b.is_empty()).collect();
+    match sections.as_slice() {
+        [] => None,
+        [(_, body)] => Some(body.clone()),
+        many => Some(many.iter().map(|(v, b)| format!("Quarry {v}\n\n{b}")).collect::<Vec<_>>().join("\n\n")),
+    }
 }
 
 /// Starts the installed copy and ends this one.
@@ -416,7 +436,12 @@ mod tests {
 
     #[test]
     fn changelog_section() {
-        assert_eq!(changelog("0.2.0").as_deref(), Some("Features\n\n- initial release of Quarry, a native MongoDB workbench"));
-        assert_eq!(changelog("9.9.9"), None);
+        assert_eq!(changelog("", "0.2.0").as_deref(), Some("Features\n\n- initial release of Quarry, a native MongoDB workbench"));
+        assert_eq!(changelog("", "9.9.9"), None);
+        let text = "# Changelog\n\n## [0.3.0](x) (d)\n\n### Features\n\n* c ([1](y))\n\n## [0.2.1](x) (d)\n\n### Bug Fixes\n\n* b\n\n## [0.2.0](x) (d)\n\n* a\n";
+        // Skipped releases are included, newest first, each under its version.
+        assert_eq!(changelog_in(text, "0.2.0", "0.3.0").as_deref(), Some("Quarry 0.3.0\n\nFeatures\n\n- c\n\nQuarry 0.2.1\n\nBug Fixes\n\n- b"));
+        assert_eq!(changelog_in(text, "0.2.1", "0.3.0").as_deref(), Some("Features\n\n- c"));
+        assert_eq!(changelog_in(text, "", "0.2.1").as_deref(), Some("Bug Fixes\n\n- b"));
     }
 }
