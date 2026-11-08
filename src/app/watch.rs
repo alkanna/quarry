@@ -9,6 +9,18 @@ pub(super) static WATCH_FIELDS: std::sync::LazyLock<Vec<String>> = std::sync::La
 /// Changes kept on screen; the oldest go first.
 const WATCH_CAP: usize = 500;
 
+impl WatchTab {
+    pub(super) fn running(&self) -> bool {
+        self.cancel.is_some()
+    }
+
+    /// Ends the stream; its last events, already sent, are dropped since no tab has its id.
+    pub(super) fn stop(&mut self) {
+        self.cancel = None;
+        self.req = 0;
+    }
+}
+
 #[derive(Default)]
 pub(super) struct WatchTab {
     /// The running stream's id, 0 when stopped.
@@ -21,22 +33,22 @@ pub(super) struct WatchTab {
 
 /// One table row from a change event: when, what, which document, the fields an update touched,
 /// and the document as it is now (absent for deletes).
-pub(super) fn watch_row(ev: &Document) -> Document {
+pub(super) fn watch_row(mut ev: Document) -> Document {
     let mut row = Document::new();
-    if let Some(at) = ev.get("wallTime").or_else(|| ev.get("clusterTime")) {
-        row.insert("at", at.clone());
+    if let Some(at) = ev.remove("wallTime").or_else(|| ev.remove("clusterTime")) {
+        row.insert("at", at);
     }
     row.insert("op", ev.get_str("operationType").unwrap_or_default());
-    if let Some(id) = ev.get_document("documentKey").ok().and_then(|k| k.get("_id")) {
-        row.insert("_id", id.clone());
+    if let Some(id) = ev.get_document_mut("documentKey").ok().and_then(|k| k.remove("_id")) {
+        row.insert("_id", id);
     }
     if let Ok(u) = ev.get_document("updateDescription") {
         let mut changed: Vec<Bson> = u.get_document("updatedFields").map(|f| f.keys().map(|k| Bson::String(k.clone())).collect()).unwrap_or_default();
         changed.extend(u.get_array("removedFields").into_iter().flatten().filter_map(|k| k.as_str()).map(|k| Bson::String(format!("-{k}"))));
         row.insert("changed", changed);
     }
-    if let Ok(d) = ev.get_document("fullDocument") {
-        row.insert("doc", d.clone());
+    if let Some(d @ Bson::Document(_)) = ev.remove("fullDocument") {
+        row.insert("doc", d);
     }
     row
 }
@@ -52,7 +64,7 @@ fn shift_rows(selected: &mut Option<(bool, usize)>, expanded: &mut BTreeSet<(boo
 fn watch_err(e: &str) -> String {
     if e.contains("only supported on replica sets") || e.contains("40573") {
         "Change streams need a replica set or a sharded cluster; this server is standalone.".into()
-    } else if is_unauthorized(e) {
+    } else if db::is_unauthorized(e) {
         "Watching needs the changeStream and find privileges on this collection (the read role has both).".into()
     } else {
         e.to_string()
@@ -62,7 +74,7 @@ fn watch_err(e: &str) -> String {
 impl App {
     pub(super) fn watch_view(&mut self, ui: &mut egui::Ui) {
         let t = self.t().unwrap();
-        let (running, n, err) = (t.watch.req != 0, t.watch.rows.len(), t.watch.err.clone());
+        let (running, n, err) = (t.watch.running(), t.watch.rows.len(), t.watch.err.clone());
         let (mut start, mut stop, mut clear) = (false, false, false);
         toolbar(ui, |ui| {
             ui.horizontal(|ui| {
@@ -87,7 +99,7 @@ impl App {
         }
         let t = self.tm().unwrap();
         if stop {
-            t.watch.cancel = None;
+            t.watch.stop();
         }
         if clear {
             t.watch.rows.clear();
@@ -121,8 +133,8 @@ impl App {
     pub(super) fn stop_hidden_watches(&mut self) {
         let cur = self.cur;
         for (i, t) in self.tabs.iter_mut().enumerate() {
-            if t.watch.cancel.is_some() && (i != cur || t.view != View::Watch) {
-                t.watch.cancel = None;
+            if t.watch.running() && (i != cur || t.view != View::Watch) {
+                t.watch.stop();
             }
         }
     }
@@ -130,7 +142,7 @@ impl App {
     pub(super) fn watch_event(&mut self, req: u64, ev: Document) {
         let cur = self.cur;
         let Some((i, t)) = self.tabs.iter_mut().enumerate().find(|(_, t)| t.watch.req == req) else { return };
-        t.watch.rows.push(watch_row(&ev));
+        t.watch.rows.push(watch_row(ev));
         let n = t.watch.rows.len().saturating_sub(WATCH_CAP);
         if n == 0 {
             return;
@@ -146,8 +158,7 @@ impl App {
 
     pub(super) fn watch_done(&mut self, req: u64, res: db::Res<()>) {
         let Some(t) = self.tabs.iter_mut().find(|t| t.watch.req == req) else { return };
-        t.watch.req = 0;
-        t.watch.cancel = None;
+        t.watch.stop();
         t.watch.err = res.err().map(|e| watch_err(&e));
     }
 }
@@ -160,8 +171,8 @@ mod tests {
     fn change_events_become_rows() {
         let at = mongodb::bson::DateTime::from_millis(1_700_000_000_000);
         let ev = doc! { "operationType": "update", "wallTime": at, "documentKey": { "_id": 7 }, "updateDescription": { "updatedFields": { "status": "paid", "total": 5 }, "removedFields": ["note"] }, "fullDocument": { "_id": 7, "status": "paid" } };
-        assert_eq!(watch_row(&ev), doc! { "at": at, "op": "update", "_id": 7, "changed": ["status", "total", "-note"], "doc": { "_id": 7, "status": "paid" } });
-        assert_eq!(watch_row(&doc! { "operationType": "delete", "documentKey": { "_id": 7 } }), doc! { "op": "delete", "_id": 7 });
+        assert_eq!(watch_row(ev), doc! { "at": at, "op": "update", "_id": 7, "changed": ["status", "total", "-note"], "doc": { "_id": 7, "status": "paid" } });
+        assert_eq!(watch_row(doc! { "operationType": "delete", "documentKey": { "_id": 7 } }), doc! { "op": "delete", "_id": 7 });
     }
 
     #[test]

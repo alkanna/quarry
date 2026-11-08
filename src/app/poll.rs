@@ -60,7 +60,7 @@ impl App {
                 },
                 Msg::Command { tag, res } => match (tag.as_str(), res) {
                     // Atlas and least-privilege users often may not list everyone; show who is logged in instead.
-                    ("users", Err(e)) if denied(&e) && self.users.as_ref().is_some_and(|u| !u.self_only) => {
+                    ("users", Err(e)) if db::is_unauthorized(&e) && self.users.as_ref().is_some_and(|u| !u.self_only) => {
                         let conn = self.users.as_ref().map(|u| u.conn).unwrap_or_default();
                         if let Some(client) = self.conn(conn).and_then(|c| c.client.clone()) {
                             self.worker.command(client, "admin".into(), doc! { "connectionStatus": 1 }, "users-self");
@@ -215,7 +215,7 @@ impl App {
                 Msg::Indexes { req, res } => match (res, self.tabs.iter_mut().find(|t| t.idx_req == req)) {
                     (Ok(v), Some(t)) => {
                         t.indexes = v;
-                        let key = format!("{}.{}", t.sel.db, t.sel.coll);
+                        let key = t.sel.key();
                         self.refresh_idx_rows(&key);
                     }
                     (Err(e), _) => self.err(e),

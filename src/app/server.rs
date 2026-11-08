@@ -74,18 +74,8 @@ impl ServerWin {
     }
 }
 
-/// Whether a server error means the user lacks a privilege, including Atlas's wording.
-pub(super) fn is_unauthorized(e: &str) -> bool {
-    e.contains("(Unauthorized)") || e.contains("not authorized") || e.contains("is not allowed to do action")
-}
-
 fn num(d: &Document, path: &str) -> Option<f64> {
-    match db::get_path(d, path)? {
-        Bson::Int32(n) => Some(*n as f64),
-        Bson::Int64(n) => Some(*n as f64),
-        Bson::Double(n) => Some(*n),
-        _ => None,
-    }
+    db::get_path(d, path).and_then(db::num)
 }
 
 fn uptime(s: f64) -> String {
@@ -145,7 +135,7 @@ pub(super) fn member_rows(rs: Option<&db::Res<Document>>, hello: Option<&db::Res
     }
     let note = match rs {
         Some(Err(e)) if e.contains("NoReplicationEnabled") || e.contains("not running with --replSet") => return (Vec::new(), Some("Standalone server: no replica set.".into())),
-        Some(Err(e)) if is_unauthorized(e) => Some("States and lag need the clusterMonitor role.".to_string()),
+        Some(Err(e)) if db::is_unauthorized(e) => Some("States and lag need the clusterMonitor role.".to_string()),
         Some(Err(e)) => Some(format!("Replica set status unavailable: {e}")),
         _ => None,
     };
@@ -175,42 +165,8 @@ impl App {
         let client = self.conn(conn).and_then(|c| c.client.clone());
         let writable = self.conn(conn).is_some_and(|c| c.writable);
         let name = self.conn(conn).map(|c| c.meta.name.clone()).unwrap_or_default();
-        let polls = !s.ops_tab || s.auto_ops;
         if let (Some(client), false) = (&client, self.demo) {
-            let now = Instant::now();
-            if s.waiting == 0 && s.next.is_none_or(|t| now >= t) && ctx.input(|i| i.focused) {
-                s.next = Some(now + POLL);
-                let (id, mut sent) = (s.id, 0);
-                let mut ask = |cmd: Document, what: &str| {
-                    sent += 1;
-                    self.worker.command(client.clone(), "admin".into(), cmd, &format!("server:{id}:{what}"));
-                };
-                if s.ops_tab {
-                    if s.auto_ops || s.ops.is_none() || s.refresh {
-                        let mut cmd = doc! { "currentOp": 1, "active": true };
-                        if s.own_only {
-                            cmd.insert("$ownOps", true);
-                        }
-                        ask(cmd, "ops");
-                    }
-                } else {
-                    // A section that failed is not asked again until Refresh, so a missing privilege costs one call.
-                    if !matches!(s.status, Some(Err(_))) {
-                        ask(doc! { "serverStatus": 1, "repl": 0, "metrics": 0, "locks": 0 }, "status");
-                    }
-                    if !matches!(s.rs, Some(Err(_))) {
-                        ask(doc! { "replSetGetStatus": 1 }, "rs");
-                    }
-                    if s.hello.is_none() {
-                        ask(doc! { "hello": 1 }, "hello");
-                    }
-                }
-                s.waiting = sent;
-                s.refresh = false;
-            }
-            if polls {
-                ctx.request_repaint_after(POLL);
-            }
+            self.server_poll(ctx, &mut s, client);
         }
         let mut open = true;
         let (mut unlock, mut kill) = (false, None);
@@ -260,6 +216,48 @@ impl App {
         }
     }
 
+    /// Asks for the section on screen every POLL while Quarry is focused and the last answers are in.
+    fn server_poll(&self, ctx: &egui::Context, s: &mut ServerWin, client: &Client) {
+        if !ctx.input(|i| i.focused) {
+            return;
+        }
+        if !s.ops_tab || s.auto_ops {
+            ctx.request_repaint_after(POLL);
+        }
+        let now = Instant::now();
+        if s.waiting > 0 || s.next.is_some_and(|t| now < t) {
+            return;
+        }
+        s.next = Some(now + POLL);
+        let (id, mut sent) = (s.id, 0);
+        let mut ask = |cmd: Document, what: &str| {
+            sent += 1;
+            self.worker.command(client.clone(), "admin".into(), cmd, &format!("server:{id}:{what}"));
+        };
+        if s.ops_tab {
+            if s.auto_ops || s.ops.is_none() || s.refresh {
+                let mut cmd = doc! { "currentOp": 1, "active": true };
+                if s.own_only {
+                    cmd.insert("$ownOps", true);
+                }
+                ask(cmd, "ops");
+            }
+        } else {
+            // A section that failed is not asked again until Refresh, so a missing privilege costs one call.
+            if !matches!(s.status, Some(Err(_))) {
+                ask(doc! { "serverStatus": 1, "repl": 0, "metrics": 0, "locks": 0 }, "status");
+            }
+            if !matches!(s.rs, Some(Err(_))) {
+                ask(doc! { "replSetGetStatus": 1 }, "rs");
+            }
+            if s.hello.is_none() {
+                ask(doc! { "hello": 1 }, "hello");
+            }
+        }
+        s.waiting = sent;
+        s.refresh = false;
+    }
+
     fn ops_section(&self, ui: &mut egui::Ui, s: &mut ServerWin, writable: bool, unlock: &mut bool, kill: &mut Option<Bson>) {
         if s.own_only {
             ui.label(RichText::new("Showing only your operations: listing everyone's needs the inprog privilege (clusterMonitor role).").size(TXT_SMALL).color(WARNING()));
@@ -272,9 +270,18 @@ impl App {
         }
         let ops = match &s.ops {
             None => return spin(ui),
-            Some(Err(e)) if is_unauthorized(e) => return void(ui.label(RichText::new(NEEDS_MONITOR).color(MUTED()))),
-            Some(Err(e)) => return void(ui.label(RichText::new(format!("Could not list operations: {e}")).color(ALERT()))),
-            Some(Ok(ops)) if ops.is_empty() => return void(ui.label(RichText::new("Nothing is running.").color(MUTED()))),
+            Some(Err(e)) if db::is_unauthorized(e) => {
+                ui.label(RichText::new(NEEDS_MONITOR).color(MUTED()));
+                return;
+            }
+            Some(Err(e)) => {
+                ui.label(RichText::new(format!("Could not list operations: {e}")).color(ALERT()));
+                return;
+            }
+            Some(Ok(ops)) if ops.is_empty() => {
+                ui.label(RichText::new("Nothing is running.").color(MUTED()));
+                return;
+            }
             Some(Ok(ops)) => ops,
         };
         egui::Grid::new("server-ops").striped(true).num_columns(7).spacing([16.0, 6.0]).show(ui, |ui| {
@@ -330,7 +337,7 @@ impl App {
                         s.next = None;
                     }
                 }
-                Err(e) if is_unauthorized(&e) => self.err("Your role cannot kill this operation: killing other users' operations needs the killop privilege."),
+                Err(e) if db::is_unauthorized(&e) => self.err("Your role cannot kill this operation: killing other users' operations needs the killop privilege."),
                 Err(e) => self.err(e),
             }
             return;
@@ -347,7 +354,7 @@ impl App {
             "hello" => s.hello = Some(r),
             "rs" => s.rs = Some(r),
             "ops" => match r {
-                Err(e) if is_unauthorized(&e) && !s.own_only => {
+                Err(e) if db::is_unauthorized(&e) && !s.own_only => {
                     s.own_only = true;
                     s.refresh = true;
                     s.next = None;
@@ -359,13 +366,15 @@ impl App {
     }
 }
 
-fn void(_: egui::Response) {}
-
 fn overview_section(ui: &mut egui::Ui, s: &ServerWin) {
     settings_section(ui, "SERVER", |ui| match &s.status {
         None => spin(ui),
-        Some(Err(e)) if is_unauthorized(e) => void(ui.label(RichText::new(NEEDS_MONITOR).color(MUTED()))),
-        Some(Err(e)) => void(ui.label(RichText::new(format!("Could not read the server status: {e}")).color(ALERT()))),
+        Some(Err(e)) if db::is_unauthorized(e) => {
+            ui.label(RichText::new(NEEDS_MONITOR).color(MUTED()));
+        }
+        Some(Err(e)) => {
+            ui.label(RichText::new(format!("Could not read the server status: {e}")).color(ALERT()));
+        }
         Some(Ok((at, cur))) => {
             let prev = s.prev.as_ref().map(|(t, d)| (at.duration_since(*t).as_secs_f64(), d));
             egui::Grid::new("server-overview").num_columns(2).spacing([24.0, 6.0]).show(ui, |ui| {
@@ -405,9 +414,9 @@ mod tests {
 
     #[test]
     fn privilege_errors_are_recognized() {
-        assert!(is_unauthorized("Command failed: Error code 13 (Unauthorized): not authorized on admin to execute command { serverStatus: 1 }"));
-        assert!(is_unauthorized("Command failed: Error code 8000 (AtlasError): user is not allowed to do action [serverStatus] on [admin.]"));
-        assert!(!is_unauthorized("Command failed: Error code 76 (NoReplicationEnabled): not running with --replSet"));
+        assert!(db::is_unauthorized("Command failed: Error code 13 (Unauthorized): not authorized on admin to execute command { serverStatus: 1 }"));
+        assert!(db::is_unauthorized("Command failed: Error code 8000 (AtlasError): user is not allowed to do action [serverStatus] on [admin.]"));
+        assert!(!db::is_unauthorized("Command failed: Error code 76 (NoReplicationEnabled): not running with --replSet"));
     }
 
     #[test]

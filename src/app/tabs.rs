@@ -73,8 +73,7 @@ impl App {
         }
         let mut t = self.tabs.remove(i);
         // A closed tab is kept for reopening; its stream must not keep reading meanwhile.
-        t.watch.cancel = None;
-        t.watch.req = 0;
+        t.watch.stop();
         self.remember_closed(t);
         if self.cur > i || self.cur >= self.tabs.len() {
             self.cur = self.cur.saturating_sub(1);

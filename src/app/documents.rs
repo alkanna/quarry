@@ -54,6 +54,29 @@ pub(super) fn row_menu(ui: &mut egui::Ui, i: usize, checked: &BTreeSet<usize>) -
     docs_menu(ui, if checked.contains(&i) { checked.len() } else { 1 }, true).map(|a| (i, a))
 }
 
+/// Which menu a result row gets.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum RowMenu {
+    Docs,
+    Indexes,
+    None,
+}
+
+/// What a row menu asked for.
+pub(super) enum RowAct {
+    Doc(DocsAct),
+    Idx(IdxAct),
+}
+
+/// The menu of row `i`: document actions for Documents rows, index actions for Indexes rows.
+pub(super) fn any_row_menu(ui: &mut egui::Ui, kind: RowMenu, i: usize, d: &Document, checked: &BTreeSet<usize>) -> Option<(usize, RowAct)> {
+    match kind {
+        RowMenu::Docs => row_menu(ui, i, checked).map(|(i, a)| (i, RowAct::Doc(a))),
+        RowMenu::Indexes => index_menu(ui, d).map(|a| (i, RowAct::Idx(a))),
+        RowMenu::None => None,
+    }
+}
+
 impl App {
     pub(super) fn collection(&mut self, ui: &mut egui::Ui) {
         let Some(t) = self.t() else { return };

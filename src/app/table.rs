@@ -276,7 +276,7 @@ impl App {
         let expanded = self.t().unwrap().expanded.clone();
         let mut check_click = None;
         let mut check_all = None;
-        let mut doc_act = None;
+        let mut row_act = None;
         let view_w = ui.available_width();
         let mut click = None;
         let mut edit_cell = None;
@@ -298,8 +298,7 @@ impl App {
         let hl_cols: Vec<bool> = cols.iter().map(|c| prefs.highlight.contains(&db::strip_indices(c))).collect();
         let related = if agg { HashMap::new() } else { self.t().map(|t| t.related.clone()).unwrap_or_default() };
         let in_coll = self.in_coll();
-        let idx = agg && self.t().is_some_and(|t| t.view == View::Indexes);
-        let mut idx_act = None;
+        let menu = self.row_menu_kind(agg);
         egui::Frame::new().fill(PANEL()).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(4, 4)).show(ui, |ui| {
             let mut area = egui::ScrollArea::both().id_salt(("res", agg)).auto_shrink(false);
             // QUARRY_SCROLL_TEST slides the table sideways every frame, to measure scrolling cost.
@@ -456,25 +455,22 @@ impl App {
                                     // Field and document actions together run about 800 pt, taller than many windows.
                                     menu_scroll(ui, |ui| {
                                         field_menu(ui, &path, v, !agg, in_coll, hl_cols[ci], &mut acts);
-                                        if !agg {
+                                        if menu != RowMenu::None {
                                             ui.separator();
-                                            doc_act = row_menu(ui, i, &checked).or(doc_act);
-                                        } else if idx {
-                                            ui.separator();
-                                            idx_act = index_menu(ui, d).map(|a| (i, a)).or(idx_act.take());
+                                            row_act = any_row_menu(ui, menu, i, d, &checked).or(row_act.take());
                                         }
                                     });
                                 });
-                            } else if idx {
-                                cr.context_menu(|ui| idx_act = index_menu(ui, d).map(|a| (i, a)).or(idx_act.take()));
-                            } else if !agg {
+                            } else if menu != RowMenu::None {
                                 cr.context_menu(|ui| {
                                     menu_look(ui);
-                                    if ui.button("Edit full document as JSON…").clicked() {
-                                        acts.push(TreeAct::EditDoc);
+                                    if !agg {
+                                        if ui.button("Edit full document as JSON…").clicked() {
+                                            acts.push(TreeAct::EditDoc);
+                                        }
+                                        ui.separator();
                                     }
-                                    ui.separator();
-                                    doc_act = row_menu(ui, i, &checked).or(doc_act);
+                                    row_act = any_row_menu(ui, menu, i, d, &checked).or(row_act.take());
                                 });
                             }
                             if !acts.is_empty() {
@@ -486,10 +482,8 @@ impl App {
                     if resp.clicked() {
                         click = Some(i);
                     }
-                    if !agg {
-                        resp.context_menu(|ui| doc_act = row_menu(ui, i, &checked).or(doc_act));
-                    } else if idx {
-                        resp.context_menu(|ui| idx_act = index_menu(ui, d).map(|a| (i, a)).or(idx_act.take()));
+                    if menu != RowMenu::None {
+                        resp.context_menu(|ui| row_act = any_row_menu(ui, menu, i, d, &checked).or(row_act.take()));
                     }
                     if (active || expanded.contains(&(agg, i))) && self.prefs.open_inline {
                         ui.add_space(4.0);
@@ -530,12 +524,7 @@ impl App {
         if let Some(on) = check_all {
             self.tm().unwrap().checked = if on { (0..docs.len()).collect() } else { BTreeSet::new() };
         }
-        if let Some((i, a)) = doc_act {
-            self.docs_act(&ui.ctx().clone(), a, Self::act_targets(&checked, docs, i));
-        }
-        if let Some((i, a)) = idx_act {
-            self.index_act(ui.ctx(), &docs[i], a);
-        }
+        self.row_act(ui, row_act, docs, &checked);
         for (i, acts) in cell_acts {
             self.select(agg, i, false);
             let d = self.shown_doc(&docs[i], agg).unwrap_or_else(|| docs[i].clone());
@@ -557,9 +546,8 @@ impl App {
         let selected = self.t().unwrap().selected;
         let checked = if agg { BTreeSet::new() } else { self.t().unwrap().checked.clone() };
         let expanded = self.t().unwrap().expanded.clone();
-        let mut doc_act = None;
-        let idx = agg && self.t().is_some_and(|t| t.view == View::Indexes);
-        let mut idx_act = None;
+        let mut row_act = None;
+        let menu = self.row_menu_kind(agg);
         let view_w = ui.available_width();
         let mut click = None;
         egui::Frame::new().fill(PANEL()).corner_radius(R_MD).inner_margin(4).show(ui, |ui| {
@@ -590,10 +578,8 @@ impl App {
                     if resp.clicked() {
                         click = Some(i);
                     }
-                    if !agg {
-                        resp.context_menu(|ui| doc_act = row_menu(ui, i, &checked).or(doc_act));
-                    } else if idx {
-                        resp.context_menu(|ui| idx_act = index_menu(ui, d).map(|a| (i, a)).or(idx_act.take()));
+                    if menu != RowMenu::None {
+                        resp.context_menu(|ui| row_act = any_row_menu(ui, menu, i, d, &checked).or(row_act.take()));
                     }
                     if (active || expanded.contains(&(agg, i))) && self.prefs.open_inline {
                         ui.add_space(4.0);
@@ -610,11 +596,23 @@ impl App {
         if let Some(i) = click {
             self.row_click(ui, agg, i);
         }
-        if let Some((i, a)) = doc_act {
-            self.docs_act(&ui.ctx().clone(), a, Self::act_targets(&checked, docs, i));
+        self.row_act(ui, row_act, docs, &checked);
+    }
+
+    /// Documents rows get the document menu, Indexes rows the index menu, other result rows none.
+    fn row_menu_kind(&self, agg: bool) -> RowMenu {
+        match (agg, self.t().map(|t| t.view)) {
+            (false, _) => RowMenu::Docs,
+            (true, Some(View::Indexes)) => RowMenu::Indexes,
+            _ => RowMenu::None,
         }
-        if let Some((i, a)) = idx_act {
-            self.index_act(ui.ctx(), &docs[i], a);
+    }
+
+    fn row_act(&mut self, ui: &egui::Ui, act: Option<(usize, RowAct)>, docs: &[Document], checked: &BTreeSet<usize>) {
+        match act {
+            Some((i, RowAct::Doc(a))) => self.docs_act(&ui.ctx().clone(), a, Self::act_targets(checked, docs, i)),
+            Some((i, RowAct::Idx(a))) => self.index_act(ui.ctx(), &docs[i], a),
+            None => {}
         }
     }
 }

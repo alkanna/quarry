@@ -114,7 +114,8 @@ impl App {
             let t = &mut self.tabs[1];
             t.view = View::Watch;
             t.selected = None;
-            t.watch.req = u64::MAX;
+            // A live-looking stream: the receiver is dropped, so nothing ever arrives.
+            t.watch.cancel = Some(tokio::sync::oneshot::channel().0);
             let at = |s: i64| mongodb::bson::DateTime::from_millis(1_730_000_000_000 + s * 1000);
             let id = |n: u8| ObjectId::from_bytes([0x66, 0x50, 0xf1, 0xc2, 0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x08, n]);
             let events = [
@@ -124,7 +125,7 @@ impl App {
                 doc! { "operationType": "update", "wallTime": at(15), "documentKey": { "_id": id(2) }, "updateDescription": { "updatedFields": { "total": 21.0 }, "removedFields": ["coupon"] }, "fullDocument": { "_id": id(2), "number": 10502, "status": "pending", "total": 21.0 } },
                 doc! { "operationType": "delete", "wallTime": at(22), "documentKey": { "_id": id(3) } },
             ];
-            t.watch.rows = events.iter().map(watch_row).collect();
+            t.watch.rows = events.into_iter().map(watch_row).collect();
         }
         // QUARRY_TEST_SERVER=1 opens the Server window, =ops on its Operations section.
         if let Ok(v) = std::env::var("QUARRY_TEST_SERVER") {

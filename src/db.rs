@@ -38,6 +38,11 @@ pub const UNDO_MAX_AGE_S: u64 = 86_400; // maxActionsAge
 
 pub type Res<T> = Result<T, String>;
 
+/// Whether a server error means the user lacks a privilege, in the server's or Atlas's wording.
+pub fn is_unauthorized(e: &str) -> bool {
+    e.contains("(Unauthorized)") || e.contains("not authorized") || e.contains("is not allowed to do action")
+}
+
 #[derive(Clone)]
 pub struct Target {
     pub client: Client,

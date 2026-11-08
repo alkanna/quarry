@@ -64,6 +64,13 @@ pub(super) struct Sel {
     pub(super) coll: String,
 }
 
+impl Sel {
+    /// "db.coll", how index stats are keyed.
+    pub(super) fn key(&self) -> String {
+        format!("{}.{}", self.db, self.coll)
+    }
+}
+
 /// Where the Cmd+K palette can jump to.
 #[derive(Clone)]
 pub(super) enum Jump {
