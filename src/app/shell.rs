@@ -350,13 +350,13 @@ impl App {
         });
         let mut export = false;
         let mut page_to = None;
-        if let Some(v) = &t.shell.value {
+        if t.shell.value.is_some() || !t.shell.docs.is_empty() {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 caption(ui, "RESULT");
                 let what = match (t.shell.docs.len(), t.shell.count) {
                     (0, Some(n)) => format!("{n} items"),
-                    (0, None) => db::type_name(v).to_string(),
+                    (0, None) => t.shell.value.as_ref().map_or("", db::type_name).to_string(),
                     (n, _) => format!("{} documents", group(&n.to_string())),
                 };
                 ui.label(RichText::new(what).color(BRIGHT()));
@@ -368,7 +368,7 @@ impl App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     export = ui.button("📤 Export…").clicked();
                     if ui.button("Copy").on_hover_text("Copy the whole result as JSON").clicked() {
-                        ui.ctx().copy_text(db::to_edit_value(v));
+                        ui.ctx().copy_text(t.shell.result().map(|v| db::to_edit_value(&v)).unwrap_or_default());
                     }
                     if !t.shell.docs.is_empty() {
                         ui.selectable_value(&mut t.shell.raw, true, "JSON");
@@ -380,15 +380,16 @@ impl App {
             if !has_table {
                 // Very large results are cut for display; Export writes everything.
                 const RAW_MAX: usize = 300_000;
-                let text = t.shell.raw_text.get_or_insert_with(|| {
-                    let mut s = db::to_edit_value(v);
+                if t.shell.raw_text.is_none() {
+                    let mut s = t.shell.result().map(|v| db::to_edit_value(&v)).unwrap_or_default();
                     if s.len() > RAW_MAX {
                         let cut = (0..=RAW_MAX).rev().find(|i| s.is_char_boundary(*i)).unwrap_or(0);
                         s.truncate(cut);
                         s.push_str("\n… cut for display. Use Export to save the whole result.");
                     }
-                    s
-                });
+                    t.shell.raw_text = Some(s);
+                }
+                let text = t.shell.raw_text.as_ref().unwrap();
                 toolbar(ui, |ui| {
                     egui::ScrollArea::vertical().id_salt("shell-raw").auto_shrink(false).show(ui, |ui| {
                         ui.add(egui::TextEdit::multiline(&mut text.as_str()).code_editor().desired_width(f32::INFINITY).layouter(&mut code_layout));
@@ -433,10 +434,11 @@ impl App {
 
     /// Saves the whole Shell result: JSON for anything, CSV or TSV for document lists.
     pub(super) fn export_shell(&mut self) {
-        let t = &self.tabs[self.cur];
-        let Some(v) = t.shell.value.clone() else { return };
-        let docs = t.shell.docs.clone();
-        let mut dialog = rfd::FileDialog::new().set_file_name(format!("{}-shell.json", t.sel.coll)).add_filter("JSON", &["json"]);
+        let t = &self.tabs[self.cur].shell;
+        let Some(v) = t.result() else { return };
+        // Documents for CSV and TSV, decoded only for this save.
+        let docs: Vec<Document> = t.docs.iter().map(db::Row::owned).collect();
+        let mut dialog = rfd::FileDialog::new().set_file_name(format!("{}-shell.json", self.tabs[self.cur].sel.coll)).add_filter("JSON", &["json"]);
         if !docs.is_empty() {
             dialog = dialog.add_filter("CSV", &["csv"]).add_filter("TSV", &["tsv"]);
         }
