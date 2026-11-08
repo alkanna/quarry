@@ -164,8 +164,8 @@ pub enum Msg {
     /// Usage and suggestions for the collection named `key` ("db.coll").
     IndexInfo { key: String, res: Res<IndexInfo> },
     Aggregated { req: u64, res: Res<(Vec<Row>, u128)> },
-    /// One pipeline builder stage's preview: documents out of the stage, the first of them, time.
-    StagePreview { req: u64, res: Res<(u64, Vec<Document>, u128)> },
+    /// One pipeline builder stage's preview: documents out of the stage (none when counting them timed out), the first of them, time.
+    StagePreview { req: u64, res: Res<(Option<u64>, Vec<Document>, u128)> },
     /// The server's explain output for a query or pipeline.
     Explained { req: u64, res: Res<Document> },
     /// Up to 5 matching documents as (before, after) the given update stages, and the total match count.

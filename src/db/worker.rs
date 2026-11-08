@@ -325,18 +325,32 @@ impl Worker {
             let res = async {
                 let start = Instant::now();
                 let c = t.c();
+                // `{ $match: {} }` keeps every document, so it is dropped: a pipeline of only those is the
+                // collection itself, counted from its metadata instead of a scan that times out.
+                let mut pipeline = pipeline;
+                pipeline.retain(|s| !(s.len() == 1 && s.get_document("$match").is_ok_and(|m| m.is_empty())));
                 let (n, docs) = if pipeline.is_empty() {
                     let n = c.estimated_document_count().max_time(t.timeout).await.map_err(e)?;
                     let docs: Vec<Document> = c.find(doc! {}).limit(limit).max_time(t.timeout).await.map_err(e)?.try_collect().await.map_err(e)?;
-                    (n, docs)
+                    (Some(n), docs)
                 } else {
-                    let mut counting = pipeline.clone();
-                    counting.push(doc! { "$count": "total" });
-                    let counted: Vec<Document> = c.aggregate(counting).max_time(t.timeout).allow_disk_use(true).await.map_err(e)?.try_collect().await.map_err(e)?;
-                    let n = counted.first().and_then(|d| d.get("total")).map_or(Ok(0), as_u64)?;
-                    let mut sampling = pipeline;
+                    let mut sampling = pipeline.clone();
                     sampling.push(doc! { "$limit": limit });
-                    let docs: Vec<Document> = c.aggregate(sampling).max_time(t.timeout).allow_disk_use(true).await.map_err(e)?.try_collect().await.map_err(e)?;
+                    let mut counting = pipeline;
+                    counting.push(doc! { "$count": "total" });
+                    // Side by side, so a slow count does not hold the sample back.
+                    let (docs, counted) = tokio::join!(
+                        async { c.aggregate(sampling).max_time(t.timeout).allow_disk_use(true).await?.try_collect::<Vec<Document>>().await },
+                        async { c.aggregate(counting).max_time(t.timeout).allow_disk_use(true).await?.try_collect::<Vec<Document>>().await },
+                    );
+                    let docs = docs.map_err(e)?;
+                    // The count reads every document out of the stage, so it can run out of time where
+                    // the sample does not. It is left out then; any other failure is a real error.
+                    let n = match counted {
+                        Ok(d) => Some(d.first().and_then(|d| d.get("total")).map_or(Ok(0), as_u64)?),
+                        Err(err) if matches!(&*err.kind, mongodb::error::ErrorKind::Command(c) if c.code == 50) => None,
+                        Err(err) => return Err(e(err)),
+                    };
                     (n, docs)
                 };
                 Ok((n, trim_sample(docs), start.elapsed().as_millis()))
