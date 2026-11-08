@@ -9,7 +9,8 @@ mod ssh;
 mod ui;
 mod update;
 
-/// QUARRY_NO_FOCUS keeps benchmark and screenshot runs from stealing focus from the user.
+/// QUARRY_NO_FOCUS runs benchmark and screenshot windows in the background: never the active app,
+/// so they cannot take focus from whatever the user is doing.
 fn takes_focus() -> bool {
     std::env::var("QUARRY_NO_FOCUS").is_err()
 }
@@ -33,6 +34,13 @@ fn main() -> eframe::Result {
             .with_fullsize_content_view(true)
             .with_titlebar_shown(false)
             .with_title_shown(false),
+        #[cfg(target_os = "macos")]
+        event_loop_builder: (!takes_focus()).then(|| -> eframe::EventLoopBuilderHook {
+            Box::new(|b| {
+                use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+                b.with_activation_policy(ActivationPolicy::Accessory).with_activate_ignoring_other_apps(false);
+            })
+        }),
         ..Default::default()
     };
     eframe::run_native("Quarry", opts, Box::new(move |cc| Ok(Box::new(app::App::new(cc, shot)))))

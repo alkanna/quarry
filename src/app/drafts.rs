@@ -7,7 +7,7 @@ impl App {
         let t = self.t()?;
         match t.selected? {
             (false, i) => t.docs.get(i).map(db::Row::doc),
-            (true, i) => t.agg_page().0.get(i),
+            (true, i) => t.agg_page().0.doc(i),
         }
     }
 

@@ -91,6 +91,13 @@ pub(super) enum View {
     Watch,
 }
 
+/// Where a results view keeps its rows: decoded, or as BSON bytes like the Documents view
+/// (Aggregate and Watch, whose results can be large; see `db::Row`).
+pub(super) enum Store<'a> {
+    Docs(&'a mut Vec<Document>),
+    Raw(&'a mut Vec<db::Row>),
+}
+
 /// Everything that belongs to one open tab.
 pub(super) struct Tab {
     pub(super) sel: Sel,
@@ -119,7 +126,7 @@ pub(super) struct Tab {
     /// Rows open inline besides the selected one, keyed like `selected`.
     pub(super) expanded: BTreeSet<(bool, usize)>,
     pub(super) agg_txt: String,
-    pub(super) agg_docs: Vec<Document>,
+    pub(super) agg_docs: Vec<db::Row>,
     pub(super) agg_fields: Vec<String>,
     pub(super) agg_ms: Option<u128>,
     /// The running pipeline's request, 0 when idle. Kept apart from `req` so a page load and a
@@ -326,39 +333,39 @@ impl Tab {
 
     /// The result table that is not the Documents one, as this view keeps it: all its rows, their columns,
     /// the page on screen (None shows every row) and the suffix of its column-settings key.
-    pub(super) fn agg_source(&self) -> (&[Document], &[String], Option<usize>, &'static str) {
+    pub(super) fn agg_source(&self) -> (Rows<'_>, &[String], Option<usize>, &'static str) {
         match self.view {
-            View::Shell => (&self.shell.docs, &self.shell.fields, Some(self.shell.page), "shell"),
+            View::Shell => (Rows::Docs(&self.shell.docs), &self.shell.fields, Some(self.shell.page), "shell"),
             // Import previews its first page.
             View::Import => match &self.import.parsed {
-                Some(Ok(d)) => (d, &self.import.fields, Some(0), "import"),
-                _ => (&[], &[], Some(0), "import"),
+                Some(Ok(d)) => (Rows::Docs(d), &self.import.fields, Some(0), "import"),
+                _ => (Rows::Docs(&[]), &[], Some(0), "import"),
             },
             // Field rows and document rows have different columns.
-            View::Compare => (self.compare.rows(), &self.compare.fields[self.compare.list as usize], Some(self.compare.page), if self.compare.list == CmpList::Changed { "compare-diff" } else { "compare" }),
-            View::Indexes => (&self.idx_rows, &IDX_FIELDS, None, "indexes"),
-            View::Watch => (&self.watch.rows, &WATCH_FIELDS, None, "watch"),
-            _ => (&self.agg_docs, &self.agg_fields, None, "agg"),
+            View::Compare => (Rows::Docs(self.compare.rows()), &self.compare.fields[self.compare.list as usize], Some(self.compare.page), if self.compare.list == CmpList::Changed { "compare-diff" } else { "compare" }),
+            View::Indexes => (Rows::Docs(&self.idx_rows), &IDX_FIELDS, None, "indexes"),
+            View::Watch => (Rows::Raw(&self.watch.rows), &WATCH_FIELDS, None, "watch"),
+            _ => (Rows::Raw(&self.agg_docs), &self.agg_fields, None, "agg"),
         }
     }
 
     /// Where `view` keeps those rows, so the table can take them out while it draws and put them back.
-    pub(super) fn agg_store(&mut self, view: View) -> Option<&mut Vec<Document>> {
-        match view {
-            View::Shell => Some(&mut self.shell.docs),
-            View::Import => self.import.parsed.as_mut()?.as_mut().ok(),
-            View::Compare => self.compare.rows_mut(),
-            View::Indexes => Some(&mut self.idx_rows),
-            View::Watch => Some(&mut self.watch.rows),
-            _ => Some(&mut self.agg_docs),
-        }
+    pub(super) fn agg_store(&mut self, view: View) -> Option<Store<'_>> {
+        Some(match view {
+            View::Shell => Store::Docs(&mut self.shell.docs),
+            View::Import => Store::Docs(self.import.parsed.as_mut()?.as_mut().ok()?),
+            View::Compare => Store::Docs(self.compare.rows_mut()?),
+            View::Indexes => Store::Docs(&mut self.idx_rows),
+            View::Watch => Store::Raw(&mut self.watch.rows),
+            _ => Store::Raw(&mut self.agg_docs),
+        })
     }
 
     /// The rows on screen in that table, their columns, and the number of the first one minus one.
-    pub(super) fn agg_page(&self) -> (&[Document], &[String], u64) {
+    pub(super) fn agg_page(&self) -> (Rows<'_>, &[String], u64) {
         let (docs, fields, page, _) = self.agg_source();
         let (range, base) = page_window(page, docs.len());
-        (&docs[range], fields, base)
+        (docs.slice(range), fields, base)
     }
 
     /// Whether the rows on screen are documents of this collection, so actions on the collection apply to them.

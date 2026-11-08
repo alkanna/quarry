@@ -350,9 +350,13 @@ impl Worker {
         self.spawn(async move {
             let res = async {
                 let start = Instant::now();
-                let cur = t.c().aggregate(pipeline).max_time(t.timeout).allow_disk_use(true).await.map_err(e)?;
+                // Kept as BSON bytes like a Documents page, see `Row`.
+                let cur = t.c().aggregate(pipeline).with_type::<mongodb::bson::RawDocumentBuf>().max_time(t.timeout).allow_disk_use(true).await.map_err(e)?;
                 // ponytail: results capped at 1000 in memory; stream to a file via export for more.
-                let docs: Vec<Document> = cur.take(1000).try_collect().await.map_err(e)?;
+                let docs: Vec<Row> = cur.take(1000).map_ok(Row::from_raw).try_collect().await.map_err(e)?;
+                for r in &docs {
+                    r.decode()?;
+                }
                 Ok((docs, start.elapsed().as_millis()))
             }
             .await;
@@ -1053,6 +1057,18 @@ mod tests {
         let first = &rows[0];
         assert_eq!(first.id(), want[0].get("_id").cloned());
         assert_eq!(first.value("nested.list.1.deep").and_then(|v| Bson::try_from(v).ok()), crate::db::get_path(&want[0], "nested.list.1.deep").cloned());
+    }
+
+    #[test]
+    fn live_aggregate_returns_rows_as_bson_bytes() {
+        let Some((w, rx, t)) = live("agg_rows") else { return };
+        seed(&w, &t, (0..1500).map(|i| doc! { "_id": i, "g": i % 3 }).collect());
+        w.aggregate(1, t.clone(), vec![doc! { "$group": { "_id": "$g", "n": { "$sum": 1 } } }, doc! { "$sort": { "_id": 1 } }]);
+        let Msg::Aggregated { res: Ok((rows, _)), .. } = next(&rx) else { panic!("expected Aggregated") };
+        assert_eq!(rows.iter().map(|r| r.decode().unwrap()).collect::<Vec<_>>(), [doc! { "_id": 0, "n": 500 }, doc! { "_id": 1, "n": 500 }, doc! { "_id": 2, "n": 500 }]);
+        w.aggregate(2, t.clone(), vec![doc! { "$match": {} }]);
+        let Msg::Aggregated { res: Ok((rows, _)), .. } = next(&rx) else { panic!("expected Aggregated") };
+        assert_eq!(rows.len(), 1000);
     }
 
     #[test]
