@@ -138,15 +138,15 @@ impl App {
                 }
                 r.context_menu(|ui| {
                     menu_look(ui);
-                    if ui.button("🗐 Copy command").clicked() {
+                    if ui.button("Copy command").clicked() {
                         copy = Some(l.cmd.clone());
                     }
                     if let Some(e) = &l.err
-                        && ui.button("🗐 Copy error").clicked()
+                        && ui.button("Copy error").clicked()
                     {
                         copy = Some(e.clone());
                     }
-                    if ui.button("🗐 Copy line").clicked() {
+                    if ui.button("Copy line").clicked() {
                         let err = l.err.as_deref().map(|e| format!(" {e}")).unwrap_or_default();
                         copy = Some(format!("{when} {ms} {name} · {} {}{err} {}", l.db, l.name, l.cmd));
                     }

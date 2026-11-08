@@ -23,6 +23,9 @@ impl App {
                             for d in &dbs {
                                 self.worker.collections(conn, client.clone(), d.clone());
                             }
+                            // Version, replica set and host for the status bar.
+                            self.worker.command(client.clone(), "admin".into(), doc! { "buildInfo": 1 }, &format!("srv-build:{conn}"));
+                            self.worker.command(client.clone(), "admin".into(), doc! { "hello": 1 }, &format!("srv-hello:{conn}"));
                             c.client = Some(client);
                             c.status = Status::Ready;
                             c.dbs = dbs.into_iter().map(|d| (d, None)).collect();
@@ -59,6 +62,32 @@ impl App {
                     Err(e) => self.err(format!("Could not list the collections of {db}: {e}")),
                 },
                 Msg::Command { tag, res } => match (tag.as_str(), res) {
+                    (t, Ok(d)) if t.starts_with("srv-") => {
+                        let (kind, id) = t.split_once(':').unwrap_or_default();
+                        if let Some(c) = self.conns.iter_mut().find(|c| id.parse() == Ok(c.meta.id)) {
+                            if kind == "srv-build" {
+                                c.server.version = d.get_str("version").unwrap_or_default().to_string();
+                            } else {
+                                c.server.set_name = d.get_str("setName").unwrap_or_default().to_string();
+                                // The member answering, else the host from the connection string.
+                                c.server.host = d.get_str("me").map(str::to_string).unwrap_or_else(|_| host_of(&c.masked_uri));
+                            }
+                        }
+                    }
+                    (t, Ok(d)) if t.starts_with("tabstats\u{1f}") => {
+                        let key: Vec<&str> = t.split('\u{1f}').skip(1).collect();
+                        let n = |k: &str| match d.get(k) {
+                            Some(Bson::Int32(n)) => *n as u64,
+                            Some(Bson::Int64(n)) => *n as u64,
+                            Some(Bson::Double(n)) => *n as u64,
+                            _ => 0,
+                        };
+                        for tab in self.tabs.iter_mut().filter(|tab| [tab.sel.conn.to_string().as_str(), &tab.sel.db, &tab.sel.coll] == key[..]) {
+                            tab.stats = Some((n("count"), n("size"), n("nindexes")));
+                        }
+                    }
+                    // Nice to have: a server that refuses these just shows less.
+                    (t, Err(_)) if t.starts_with("srv-") || t.starts_with("tabstats\u{1f}") => {}
                     // Atlas and least-privilege users often may not list everyone; show who is logged in instead.
                     ("users", Err(e)) if db::is_unauthorized(&e) && self.users.as_ref().is_some_and(|u| !u.self_only) => {
                         let conn = self.users.as_ref().map(|u| u.conn).unwrap_or_default();
@@ -208,7 +237,15 @@ impl App {
                                 t.selected = None;
                             }
                             t.related.clear();
+                            let ask = (!t.stats_asked).then(|| t.sel.clone());
+                            t.stats_asked = true;
                             self.load_related(req);
+                            if let Some(s) = ask
+                                && let Some(client) = self.conn(s.conn).and_then(|c| c.client.clone())
+                            {
+                                let tag = format!("tabstats\u{1f}{}\u{1f}{}\u{1f}{}", s.conn, s.db, s.coll);
+                                self.worker.coll_stats(client, s.db, s.coll, tag);
+                            }
                         }
                         Err(e) => {
                             t.docs.clear();

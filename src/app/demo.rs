@@ -39,6 +39,7 @@ impl App {
             dbs,
             masked_uri: "mongodb://localhost:27017".into(),
             tunnel: None,
+            server: ServerInfo { version: "7.0.12".into(), set_name: "rs0".into(), host: "localhost:27017".into() },
         });
         self.conns.push(Conn {
             meta: ConnMeta { id: 2, name: "Staging".into(), tag: "Staging".into(), ..Default::default() },
@@ -48,6 +49,7 @@ impl App {
             dbs: Vec::new(),
             masked_uri: "mongodb+srv://app:****@staging.example.net".into(),
             tunnel: None,
+            server: Default::default(),
         });
         self.active = Some(1);
         self.open_dbs.insert((1, "shop".into()));
@@ -61,6 +63,7 @@ impl App {
         t.docs = docs.iter().filter_map(|d| db::Row::from_doc(d).ok()).collect();
         t.count = 1284;
         t.ms = 14;
+        t.stats = Some((1284, 412 * 1024, 3));
         t.selected = Some((false, 2));
         t.filter_txt = if std::env::var("QUARRY_TEST_AC").is_ok_and(|v| v == "date") { "{ createdAt: }".into() } else { "{ status: { $in: ['paid', 'shipped', 'pending'] } }".into() };
         t.sort_txt = "{ total: -1 }".into();

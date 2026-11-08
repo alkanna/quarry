@@ -144,21 +144,37 @@ impl App {
             .default_size(SIDEBAR_W)
             .size_range(200.0..=480.0)
             .resizable(true)
-            .frame(egui::Frame::new().fill(PANEL()).inner_margin(egui::Margin { left: 10, right: 10, top: 12, bottom: 10 }))
+            .frame(egui::Frame::new().fill(PANEL()).inner_margin(egui::Margin { left: 12, right: 12, top: 12, bottom: 8 }))
             .show(ui, |ui| {
-                self.conn_picker(ui);
-                ui.add_space(10.0);
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.tree_filter)
-                        .id(egui::Id::unique("tree-filter"))
-                        .hint_text("Find a collection")
-                        .desired_width(f32::INFINITY)
-                        .margin(egui::Margin::symmetric(10, 6)),
-                );
-                ui.add_space(12.0);
-                caption(ui, "DATABASES");
-                ui.add_space(2.0);
-                egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| self.db_tree(ui));
+                // The footer is laid out first from the bottom, so the tree scrolls above it.
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                    if let Some(text) = self.active.and_then(|id| self.conn(id)).and_then(|c| c.server.footer()) {
+                        ui.label(RichText::new(text).font(FontId::monospace(10.0)).color(FAINT()));
+                    }
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                        ui.label(LayoutJob::single_section("DATABASE EXPLORER".into(), ui_fmt(10.5, MUTED(), W_SEMIBOLD, 0.6)));
+                        ui.add_space(6.0);
+                        self.conn_picker(ui);
+                        ui.add_space(8.0);
+                        let r = ui.add(
+                            egui::TextEdit::singleline(&mut self.tree_filter)
+                                .id(egui::Id::unique("tree-filter"))
+                                .hint_text(RichText::new("Filter collections").color(FAINT()))
+                                .desired_width(f32::INFINITY)
+                                .margin(egui::Margin { left: 10, right: 28, top: 5, bottom: 5 }),
+                        );
+                        if !r.has_focus() && self.tree_filter.is_empty() {
+                            let g = ui.painter().layout_job(LayoutJob::single_section("/".into(), mono_fmt(10.0, MUTED(), 400.0)));
+                            let kr = egui::Rect::from_min_size(egui::pos2(r.rect.right() - 24.0, r.rect.center().y - 8.0), egui::vec2(18.0, 16.0));
+                            paint_kbd(ui.painter(), kr, g);
+                        }
+                        r.on_hover_text("Press / or Cmd+Shift+F");
+                        ui.add_space(14.0);
+                        ui.label(LayoutJob::single_section("Databases".into(), ui_fmt(10.5, FAINT(), W_SEMIBOLD, 0.8)));
+                        ui.add_space(2.0);
+                        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| self.db_tree(ui));
+                    });
+                });
             });
     }
 
@@ -168,13 +184,13 @@ impl App {
             Some(c) => (c.meta.name.clone(), c.meta.tag.clone(), status_color(&c.status)),
             None => ("Add a connection".to_string(), String::new(), FAINT()),
         };
-        let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 40.0), Sense::click());
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 32.0), Sense::click());
         let p = ui.painter();
-        let fill = if resp.is_pointer_button_down_on() { shade(HOVER(), 0.08) } else if resp.hovered() { HOVER() } else { RAISED() };
-        p.rect(rect, R_MD, fill, Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
-        p.circle_filled(egui::pos2(rect.left() + 16.0, rect.center().y), 4.0, dot);
-        chevron(p, egui::pos2(rect.right() - 16.0, rect.center().y), true, MUTED());
-        paint_name_tag(p, egui::Rangef::new(rect.left() + 28.0, rect.right() - 30.0), rect.center().y, &name, FontId::proportional(TXT_TITLE), BRIGHT(), &tag);
+        let (fill, edge) = if resp.is_pointer_button_down_on() { (PRESSED(), MUTED()) } else if resp.hovered() { (RAISED(), MUTED()) } else { (RAISED(), BORDER()) };
+        p.rect(rect, R_MD, fill, Stroke::new(1.0, if resp.has_focus() { PRIMARY() } else { edge }), egui::StrokeKind::Inside);
+        p.circle_filled(egui::pos2(rect.left() + 14.0, rect.center().y), 4.0, dot);
+        chevron(p, egui::pos2(rect.right() - 14.0, rect.center().y), true, if resp.hovered() { MUTED() } else { FAINT() });
+        paint_name_tag(p, egui::Rangef::new(rect.left() + 26.0, rect.right() - 28.0), rect.center().y, &name, FontId::proportional(TXT_TITLE), BRIGHT(), &tag);
         let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
         if cur.is_none() && resp.clicked() {
             return self.new_conn_modal();
@@ -282,7 +298,17 @@ impl App {
         }
     }
 
+    /// Opens the explorer if it was collapsed from the rail, remembering that for the next launch.
+    pub(super) fn show_sidebar(&mut self) {
+        if self.prefs.sidebar_hidden {
+            self.prefs.sidebar_hidden = false;
+            self.save_prefs();
+        }
+    }
+
     pub(super) fn jump(&mut self, j: Jump) {
+        // The jump reveals its target in the tree, which must be on screen to show it.
+        self.show_sidebar();
         let (id, db) = match &j {
             Jump::Conn(id) => (*id, None),
             Jump::Db(id, db) => (*id, Some(db.clone())),
@@ -341,9 +367,9 @@ impl App {
                 let dim = SYSTEM_DBS.contains(&db_name.as_str());
                 let count = colls.as_ref().map(|v| v.len().to_string()).unwrap_or_else(|| "…".into());
                 let r = side_row(ui, SIDE_ROW_H, 0.0, false, |p, r| {
-                    chevron(p, egui::pos2(r.left() + 4.0, r.center().y), is_open, MUTED());
-                    p.text(egui::pos2(r.left() + 16.0, r.center().y), egui::Align2::LEFT_CENTER, db_name, FontId::proportional(TXT_TITLE), if dim { FAINT() } else { BRIGHT() });
-                    p.text(egui::pos2(r.right(), r.center().y), egui::Align2::RIGHT_CENTER, &count, FontId::proportional(TXT_SMALL), FAINT());
+                    chevron(p, egui::pos2(r.left() + 4.0, r.center().y), is_open, FAINT());
+                    p.text(egui::pos2(r.left() + 18.0, r.center().y), egui::Align2::LEFT_CENTER, db_name, FontId::proportional(TXT_TITLE), if dim { FAINT() } else { TEXT() });
+                    p.text(egui::pos2(r.right(), r.center().y), egui::Align2::RIGHT_CENTER, &count, FontId::monospace(TXT_CAPTION), FAINT());
                 });
                 if matches!(&self.reveal, Some((c, d, None)) if *c == id && d == db_name) {
                     r.scroll_to_me(Some(egui::Align::Center));
@@ -361,7 +387,7 @@ impl App {
                     if ui.button("New view…").clicked() {
                         side.push(SideAct::NewColl(db_name.clone(), true));
                     }
-                    if ui.button("⟳ Refresh").clicked() {
+                    if ui.button("Refresh").clicked() {
                         side.push(SideAct::Refresh(db_name.clone()));
                     }
                     if ui.button("Users and roles…").clicked() {
@@ -390,17 +416,14 @@ impl App {
                         let sel = Sel { conn: id, db: db_name.clone(), coll: coll.clone() };
                         let active = cur_sel.as_ref() == Some(&sel);
                         let is_view = self.views.contains(&(id, db_name.clone(), coll.clone()));
-                        let r = side_row(ui, SIDE_ROW_H, 16.0, active, |p, r| {
-                            let c = egui::pos2(r.left() + 4.0, r.center().y);
-                            if is_view {
-                                // Views get a hollow marker so they read as derived data.
-                                p.circle_stroke(c, 3.5, Stroke::new(1.5, if active { PRIMARY() } else { C_DATE() }));
-                            } else {
-                                p.circle_filled(c, 3.5, if active { PRIMARY() } else { WARNING() });
-                            }
-                            let w = r.width() - 16.0;
+                        let r = side_row(ui, SIDE_ROW_H, 18.0, active, |p, r| {
+                            // Collections are marked as documents, views with a hollow diamond so
+                            // they read as derived data.
+                            let (glyph, gc) = if is_view { ("◇", C_DATE()) } else { ("{}", if active { PRIMARY() } else { FAINT() }) };
+                            p.text(egui::pos2(r.left(), r.center().y), egui::Align2::LEFT_CENTER, glyph, FontId::monospace(10.0), gc);
+                            let w = r.width() - 20.0;
                             let galley = p.layout(coll.clone(), FontId::proportional(TXT_TITLE), if active { BRIGHT() } else if is_view { C_DATE() } else { TEXT() }, w);
-                            p.galley(egui::pos2(r.left() + 16.0, r.center().y - galley.size().y / 2.0), galley, TEXT());
+                            p.galley(egui::pos2(r.left() + 20.0, r.center().y - galley.size().y / 2.0), galley, TEXT());
                         });
                         let r = if is_view { r.on_hover_text("View (read-only)") } else { r };
                         if matches!(&self.reveal, Some((c, d, Some(k))) if *c == id && d == db_name && k == coll) {
@@ -486,7 +509,7 @@ impl App {
             SideAct::DropDb(db) => {
                 self.modal = Some(Modal::Typed { title: format!("Drop the whole database {db} with all its collections? This cannot be undone."), expect: db.clone(), typed: String::new(), action: Danger::DropDatabase { conn, db } })
             }
-            SideAct::Stats(db, coll) => self.worker.coll_stats(client, db, coll),
+            SideAct::Stats(db, coll) => self.worker.coll_stats(client, db, coll, "stats".into()),
             SideAct::ViewDef(db, coll) => self.worker.command(client, db, doc! { "listCollections": 1, "filter": { "name": coll } }, "viewdef"),
             SideAct::Rename(db, coll) => self.modal = Some(Modal::RenameColl { conn, db, name: coll.clone(), coll }),
             SideAct::Dump(db, coll) => {
@@ -518,7 +541,7 @@ mod tests {
 
     #[test]
     fn palette_jumps() {
-        let conn = |id, name: &str, status, dbs| Conn { meta: ConnMeta { id, name: name.into(), ..Default::default() }, client: None, status, writable: false, dbs, masked_uri: String::new(), tunnel: None };
+        let conn = |id, name: &str, status, dbs| Conn { meta: ConnMeta { id, name: name.into(), ..Default::default() }, client: None, status, writable: false, dbs, masked_uri: String::new(), tunnel: None, server: Default::default() };
         let conns = [conn(1, "prod", Status::Ready, vec![("shop".into(), Some(vec!["users".into(), "orders".into()]))]), conn(2, "staging", Status::Idle, Vec::new())];
         let labels = |active, q| jumps(&conns, active, q).into_iter().map(|j| j.0).collect::<Vec<_>>();
         assert_eq!(labels(Some(2), ""), ["staging", "prod", "shop", "shop.users", "shop.orders"]);

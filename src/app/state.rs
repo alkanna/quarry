@@ -71,6 +71,37 @@ pub(super) struct Conn {
     pub(super) masked_uri: String,
     /// Kept alive while connected through SSH; dropping it closes the tunnel.
     pub(super) tunnel: Option<crate::ssh::Tunnel>,
+    /// Shown in the status bar and under the sidebar; filled after connecting.
+    pub(super) server: ServerInfo,
+}
+
+/// The host part of a connection string: after the scheme and any credentials, before the path
+/// or options (which may themselves hold an @).
+pub(super) fn host_of(uri: &str) -> String {
+    let rest = uri.split_once("://").map_or(uri, |(_, r)| r);
+    let authority = rest.split(['/', '?']).next().unwrap_or_default();
+    authority.rsplit('@').next().unwrap_or_default().to_string()
+}
+
+#[derive(Default, Clone)]
+pub(super) struct ServerInfo {
+    pub(super) version: String,
+    pub(super) set_name: String,
+    pub(super) host: String,
+}
+
+impl ServerInfo {
+    /// The status bar's "host · mongod version · set", with the host from `uri` until the server says.
+    pub(super) fn status_line(&self, uri: &str) -> String {
+        let host = if self.host.is_empty() { host_of(uri) } else { self.host.clone() };
+        let version = (!self.version.is_empty()).then(|| format!("mongod {}", self.version));
+        [Some(host), version, Some(self.set_name.clone())].into_iter().flatten().filter(|p| !p.is_empty()).collect::<Vec<_>>().join("  ·  ")
+    }
+
+    /// The sidebar's "mongod version · replica set name", once the version is known.
+    pub(super) fn footer(&self) -> Option<String> {
+        (!self.version.is_empty()).then(|| if self.set_name.is_empty() { format!("mongod {}", self.version) } else { format!("mongod {} · replica set {}", self.version, self.set_name) })
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -168,6 +199,10 @@ pub(super) struct Tab {
     pub(super) watch: WatchTab,
     /// Preview text of referenced documents, keyed by `compact(_id)`.
     pub(super) related: HashMap<String, String>,
+    /// Document count, data size in bytes and index count of the whole collection, shown under
+    /// its name; asked once per tab.
+    pub(super) stats: Option<(u64, u64, u64)>,
+    pub(super) stats_asked: bool,
 }
 
 /// The Compare view: this tab's collection (source) against a chosen target.
@@ -437,6 +472,8 @@ impl Tab {
             compare: CompareTab { insert: true, replace: true, ..Default::default() },
             watch: WatchTab::default(),
             related: HashMap::new(),
+            stats: None,
+            stats_asked: false,
         }
     }
 }
@@ -818,6 +855,8 @@ impl App {
         c.status = Status::Connecting;
         c.client = None;
         c.tunnel = None;
+        // Asked again once connected, so a changed or failed server never shows the old one.
+        c.server = ServerInfo::default();
         let net = net_of(&c.meta);
         self.worker.connect(id, uri, self.timeout(), net);
     }

@@ -21,7 +21,7 @@ pub(super) fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, a
     card(ui, |ui| {
         ui.horizontal(|ui| {
             ui.label(RichText::new(format!("{}", i + 1)).monospace().color(FAINT()));
-            ui.menu_button(RichText::new(&s.op).monospace().strong().color(if s.on { C_KEYWORD() } else { FAINT() }), |ui| {
+            ui.menu_button(semibold(RichText::new(&s.op).monospace()).color(if s.on { C_KEYWORD() } else { FAINT() }), |ui| {
                 menu_look(ui);
                 egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
                     for (op, _) in db::STAGES {
@@ -39,7 +39,7 @@ pub(super) fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, a
             }
             ui.hyperlink_to(RichText::new("Docs").size(TXT_SMALL), format!("https://www.mongodb.com/docs/manual/reference/operator/aggregation/{}/", s.op.trim_start_matches('$')));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.menu_button(RichText::new("🗑 Remove…").color(ALERT()), |ui| {
+                ui.menu_button(RichText::new("Remove…").color(ALERT()), |ui| {
                     menu_look(ui);
                     if danger(ui, format!("Remove stage {}", i + 1)).clicked() {
                         acts.push(StageAct::Remove(i));
@@ -80,7 +80,7 @@ pub(super) fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, a
                         ui.label(RichText::new("Previewing…").color(MUTED()));
                     } else if let Some(ms) = s.ms {
                         match s.count {
-                            Some(n) => ui.label(RichText::new(format!("{} documents", group(&n.to_string()))).strong().color(BRIGHT())),
+                            Some(n) => ui.label(semibold(RichText::new(format!("{} documents", group(&n.to_string()))).color(BRIGHT()))),
                             None => ui.label(RichText::new("Too many documents to count before the timeout").color(MUTED())),
                         };
                         ui.label(RichText::new(format!("{ms} ms")).color(FAINT()));
@@ -200,7 +200,7 @@ impl App {
                                 stage_card(ui, i, n, s, auto, &mut sacts);
                             }
                             ui.add_space(6.0);
-                            ui.menu_button(RichText::new("+ Add stage").strong().color(PRIMARY()), |ui| {
+                            ui.menu_button(semibold(RichText::new("+ Add stage").color(PRIMARY())), |ui| {
                                 menu_look(ui);
                                 egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
                                     for (k, (op, _)) in db::STAGES.iter().enumerate() {
@@ -223,8 +223,8 @@ impl App {
                 with_autopair(ui, id, &mut t.agg_txt, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(8).layouter(&mut code_layout).show(ui));
             }
             ui.horizontal(|ui| {
-                run = primary(ui, "Run", PRIMARY()).on_hover_text("Run the whole pipeline (Cmd+Enter)").clicked() || ui.input(|i| i.modifiers.command && i.key_pressed(Key::Enter));
-                explain = ui.button("Explain").on_hover_text("Cmd+E").clicked();
+                run = run_button(ui, "Run", "⌘↵").on_hover_text("Run the whole pipeline (Cmd+Enter)").clicked() || ui.input(|i| i.modifiers.command && i.key_pressed(Key::Enter));
+                explain = quiet(ui, "Explain").on_hover_text("Cmd+E").clicked();
                 code_menu(ui, &mut code_lang);
                 if t.agg_req != 0 {
                     spin(ui);

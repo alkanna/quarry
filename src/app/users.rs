@@ -52,7 +52,7 @@ impl App {
             ui.horizontal(|ui| {
                 dialog_title(ui, "Users and roles");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("⟳ Refresh").clicked() {
+                    if ui.button("Refresh").clicked() {
                         u.users = None;
                         u.roles = None;
                         u.self_only = false;
@@ -90,7 +90,7 @@ impl App {
                                 ui.label(RichText::new(&name).monospace().color(BRIGHT()));
                                 ui.label(RichText::new(format!("@{db}")).monospace().color(FAINT()));
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui.add_enabled(writable, danger_button("Drop…")).clicked() {
+                                    if ui.add_enabled_ui(writable, |ui| danger(ui, "Drop…")).inner.clicked() {
                                         drop_user = Some((db.clone(), name.clone()));
                                     }
                                     if ui.add_enabled(writable, egui::Button::new("Edit")).clicked() {

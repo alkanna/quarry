@@ -372,7 +372,7 @@ impl App {
         let related = if agg { HashMap::new() } else { self.t().map(|t| t.related.clone()).unwrap_or_default() };
         let in_coll = self.in_coll();
         let menu = self.row_menu_kind(agg);
-        egui::Frame::new().fill(PANEL()).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(4, 4)).show(ui, |ui| {
+        egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(1).show(ui, |ui| {
             let mut area = egui::ScrollArea::both().id_salt(("res", agg)).auto_shrink(false);
             // QUARRY_SCROLL_TEST slides the table sideways every frame, to measure scrolling cost.
             if std::env::var("QUARRY_SCROLL_TEST").is_ok() {
@@ -380,11 +380,12 @@ impl App {
             }
             area.show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                let row_w = total.max(view_w - 12.0);
+                let row_w = total.max(view_w - 2.0);
                 // Header
-                let (hr, _) = ui.allocate_exact_size(egui::vec2(row_w, 30.0), Sense::hover());
+                let (hr, _) = ui.allocate_exact_size(egui::vec2(row_w, TABLE_HEAD_H), Sense::hover());
                 let p = ui.painter();
-                p.text(egui::pos2(hr.left() + 10.0, hr.center().y), egui::Align2::LEFT_CENTER, "#", FontId::proportional(TXT_CAPTION), FAINT());
+                p.rect_filled(hr, egui::CornerRadius { nw: R_MD - 1, ne: R_MD - 1, sw: 0, se: 0 }, HDR());
+                p.text(egui::pos2(hr.left() + (num_w - NUM_W) + 18.0, hr.center().y), egui::Align2::LEFT_CENTER, "#", FontId::monospace(TXT_CAPTION), FAINT());
                 if !agg {
                     let all = checked.len() == docs.len();
                     let r = check_box(ui, egui::pos2(hr.left() + 13.0, hr.center().y), ui.scope_id().with("check-all"), all, !all && !checked.is_empty());
@@ -396,22 +397,23 @@ impl App {
                 for (ci, (c, w)) in cols.iter().zip(&widths).enumerate() {
                     let cell = egui::Rect::from_min_size(egui::pos2(x, hr.top()), egui::vec2(*w, hr.height()));
                     let pinned = prefs.pinned.contains(c);
-                    let color = if pinned { WARNING() } else if fields.contains(c) { MUTED() } else { PRIMARY() };
                     let dir = dir_of(c);
+                    // Inset so the resize handles at both edges stay on top for their clicks.
                     let hresp = ui.interact(cell.shrink2(egui::vec2(4.0, 0.0)), ui.scope_id().with(("h", c)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
-                    if hresp.hovered() {
-                        ui.painter().rect_filled(cell.shrink(2.0), R_SM, HOVER());
-                    }
+                    let state = state_of(&hresp);
+                    ui.painter().rect_filled(cell, 0, hover_fill(state));
+                    // Sorted in the accent with its direction, pinned in amber, fields missing from
+                    // this page faint; hover brightens the rest.
+                    let color = if dir.is_some() { PRIMARY() } else if pinned { WARNING() } else if state > 0 { BRIGHT() } else if fields.contains(c) { MUTED() } else { FAINT() };
                     let label = prefs.label(c);
-                    let g = ui.fonts_mut(|f| f.layout_no_wrap(label.to_string(), FontId::proportional(TXT_BODY), if dir.is_some() { BRIGHT() } else { color }));
-                    // Centered and right-aligned names keep clear of the sort arrow.
-                    let gx = align_x(aligns[ci], x, *w - if dir.is_some() { 14.0 } else { 0.0 }, g.size().x);
+                    let shown = match dir {
+                        Some(d) if d > 0 => format!("{label} ↑"),
+                        Some(_) => format!("{label} ↓"),
+                        None => label.to_string(),
+                    };
+                    let g = ui.fonts_mut(|f| f.layout_job(LayoutJob::single_section(shown, ui_fmt(TXT_CAPTION, color, W_SEMIBOLD, 0.2))));
+                    let gx = align_x(aligns[ci], x, *w, g.size().x);
                     ui.painter().with_clip_rect(cell.shrink2(egui::vec2(6.0, 0.0))).galley(egui::pos2(gx, cell.center().y - g.size().y / 2.0), g, color);
-                    if let Some(d) = dir {
-                        let a = egui::pos2(cell.right() - 14.0, cell.center().y);
-                        let pts = if d > 0 { vec![a + egui::vec2(-4.0, 2.5), a + egui::vec2(4.0, 2.5), a + egui::vec2(0.0, -3.0)] } else { vec![a + egui::vec2(-4.0, -2.5), a + egui::vec2(4.0, -2.5), a + egui::vec2(0.0, 3.0)] };
-                        ui.painter().add(egui::Shape::convex_polygon(pts, PRIMARY(), Stroke::NONE));
-                    }
                     // Built only while hovered, not for every header on every frame.
                     let hresp = if label != c {
                         hresp.on_hover_ui(|ui| {
@@ -433,7 +435,7 @@ impl App {
                     if dr.double_clicked() {
                         fit = Some(c.clone());
                     }
-                    ui.painter().vline(cell.right(), handle.y_range(), Stroke::new(1.0, if dr.hovered() || dr.dragged() { PRIMARY() } else { BORDER() }));
+                    ui.painter().vline(cell.right(), handle.y_range(), Stroke::new(if dr.hovered() || dr.dragged() { 2.0 } else { 1.0 }, if dr.hovered() || dr.dragged() { PRIMARY() } else { LINE() }));
                     if dr.dragged() {
                         resized = Some((c.clone(), (*w + dr.drag_delta().x).clamp(COL_MIN_W, COL_MAX_W)));
                     }
@@ -442,7 +444,9 @@ impl App {
                     }
                     x += w;
                 }
-                ui.painter().hline(hr.x_range(), hr.bottom(), Stroke::new(1.0, BORDER()));
+                ui.painter().hline(hr.x_range(), hr.bottom() - 0.5, Stroke::new(1.0, LINE()));
+                // Laid out once for every empty cell of the page.
+                let dash = ui.fonts_mut(|f| f.layout_no_wrap("—".into(), FontId::monospace(TXT_SMALL), FAINT()));
                 // Rows (at most one page, so no virtualisation is needed)
                 for i in 0..docs.len() {
                     let drafted = self.shown_row(docs, i, agg);
@@ -458,26 +462,19 @@ impl App {
                     }
                     // Rows scrolled out of view keep their space but skip all layout and painting.
                     if ui.is_rect_visible(rr) {
-                        let fill = if active {
-                            tint(PRIMARY(), 32)
-                        } else if checked.contains(&i) {
-                            tint(PRIMARY(), 18)
-                        } else if ui.rect_contains_pointer(rr) && !ui.ctx().any_popup_open() {
-                            HOVER()
-                        } else if i % 2 == 1 {
-                            pal().stripe
-                        } else {
-                            Color32::TRANSPARENT
-                        };
+                        let hovered = ui.rect_contains_pointer(rr) && !ui.ctx().any_popup_open();
+                        let fill = row_fill(active, checked.contains(&i), hovered, resp.is_pointer_button_down_on(), i % 2 == 1);
                         let p = ui.painter();
-                        p.rect_filled(rr, R_SM, fill);
+                        if fill != Color32::TRANSPARENT {
+                            p.rect_filled(rr, 0, fill);
+                        }
                         let off = num_w - NUM_W;
                         if self.prefs.open_inline {
                             chevron(p, egui::pos2(rr.left() + off + 9.0, rr.center().y), active || expanded.contains(&(agg, i)), if active { PRIMARY() } else { FAINT() });
                         }
                         let num = (base + i as u64 + 1).to_string();
                         let (num, nc) = if drafted.is_some() { (format!("{num}●"), WARNING()) } else { (num, FAINT()) };
-                        p.text(egui::pos2(rr.left() + off + 18.0, rr.center().y), egui::Align2::LEFT_CENTER, num, FontId::proportional(TXT_CAPTION), nc);
+                        p.text(egui::pos2(rr.left() + off + 18.0, rr.center().y), egui::Align2::LEFT_CENTER, num, FontId::monospace(TXT_CAPTION), nc);
                         if !agg && check_box(ui, egui::pos2(rr.left() + 13.0, rr.center().y), ui.scope_id().with(("check", i)), checked.contains(&i), false).clicked() {
                             check_click = Some(i);
                         }
@@ -513,7 +510,7 @@ impl App {
                                     }
                                 }
                                 None => {
-                                    let g = ui.fonts_mut(|f| f.layout_no_wrap("—".into(), FontId::proportional(TXT_SMALL), FAINT()));
+                                    let g = dash.clone();
                                     clip.galley(egui::pos2(align_x(aligns[ci], x, *w, g.size().x), cell.center().y - g.size().y / 2.0), g, FAINT());
                                 }
                             }
@@ -628,7 +625,7 @@ impl App {
         let menu = self.row_menu_kind(agg);
         let view_w = ui.available_width();
         let mut click = None;
-        egui::Frame::new().fill(PANEL()).corner_radius(R_MD).inner_margin(4).show(ui, |ui| {
+        egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(1).show(ui, |ui| {
             egui::ScrollArea::vertical().id_salt(("list", agg)).auto_shrink(false).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 for i in 0..docs.len() {
@@ -640,16 +637,8 @@ impl App {
                     if active && std::mem::take(&mut self.scroll_sel) {
                         resp.scroll_to_me(None);
                     }
-                    let fill = if active {
-                        tint(PRIMARY(), 32)
-                    } else if checked.contains(&i) {
-                        tint(PRIMARY(), 18)
-                    } else if resp.hovered() {
-                        HOVER()
-                    } else {
-                        Color32::TRANSPARENT
-                    };
-                    ui.painter().rect_filled(rect, R_SM, fill);
+                    let fill = row_fill(active, checked.contains(&i), resp.hovered(), resp.is_pointer_button_down_on(), i % 2 == 1);
+                    ui.painter().rect_filled(rect, 0, fill);
                     let job = match &drafted {
                         Some(d) => row_job(DocRef::B(d), w - 16.0),
                         None => row_job(docs.doc_ref(i), w - 16.0),
@@ -716,5 +705,17 @@ mod tests {
         assert_eq!(visible_cols(Some(&p), &fields, DEFAULT_COLS)[0], "f3");
         let p = ColPrefs { shown: Some(vec!["a".into(), "b".into()]), pinned: vec!["b".into(), "zz".into()], ..Default::default() };
         assert_eq!(visible_cols(Some(&p), &fields, DEFAULT_COLS), ["b", "a"]);
+    }
+}
+
+/// A result row's fill: selection, then checked, pressed and hovered, then the zebra stripe.
+fn row_fill(active: bool, checked: bool, hovered: bool, pressed: bool, odd: bool) -> Color32 {
+    match () {
+        _ if active => if hovered { SEL_HOVER() } else { SEL() },
+        _ if checked => tint(PRIMARY(), if hovered { 38 } else { 26 }),
+        _ if pressed => PRESSED(),
+        _ if hovered => HOVER(),
+        _ if odd => pal().stripe,
+        _ => Color32::TRANSPARENT,
     }
 }

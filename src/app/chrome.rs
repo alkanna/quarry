@@ -44,8 +44,14 @@ impl App {
         }
     }
 
+    /// A dialog or window over the page. It takes its own keys, Esc included, so page shortcuts
+    /// stay off while it is open; a new kind of window belongs in this list.
+    fn window_open(&self) -> bool {
+        self.modal.is_some() || self.insert.is_some() || self.json_edit.is_some() || self.users.is_some() || self.server.is_some() || self.tool.is_some()
+    }
+
     pub(super) fn keys(&mut self, ctx: &egui::Context) {
-        if self.modal.is_some() || self.insert.is_some() || self.json_edit.is_some() || self.users.is_some() {
+        if self.window_open() {
             return;
         }
         let k = |m: egui::Modifiers, key: Key| ctx.input_mut(|i| i.consume_key(m, key));
@@ -71,7 +77,10 @@ impl App {
         if k(cmd, Key::R) && !self.tabs.is_empty() {
             self.reload();
         }
-        if k(cmd | shift, Key::F) {
+        // "/" only while nothing is being typed into, so it never steals a slash from a field.
+        let typing = ctx.memory(|m| m.focused().is_some());
+        if k(cmd | shift, Key::F) || (!typing && k(none, Key::Slash)) {
+            self.show_sidebar();
             ctx.memory_mut(|m| m.request_focus(egui::Id::unique("tree-filter")));
         }
         if k(cmd, Key::F) && !self.tabs.is_empty() {
@@ -245,10 +254,12 @@ impl App {
     pub(super) fn top_bar(&mut self, ui: &mut egui::Ui) {
         // Leaves room for the macOS window buttons, which sit over our header.
         let left = if cfg!(target_os = "macos") { 92 } else { 12 };
-        let frame = egui::Frame::new().fill(PANEL()).inner_margin(egui::Margin { left, right: 12, top: 7, bottom: 7 });
-        egui::Panel::top("top").exact_size(HEADER_H).frame(frame).show(ui, |ui| {
+        let frame = egui::Frame::new().fill(CHROME()).inner_margin(egui::Margin { left, right: 12, top: 7, bottom: 7 });
+        egui::Panel::top("top").exact_size(HEADER_H).show_separator_line(false).frame(frame).show(ui, |ui| {
+            let full = ui.max_rect().expand2(egui::vec2(left as f32, 7.0));
+            ui.painter().hline(full.x_range(), full.bottom() - 0.5, Stroke::new(1.0, LINE()));
             // Registered before the widgets so they stay clickable; the empty header moves the window.
-            let bar = ui.interact(ui.max_rect().expand2(egui::vec2(left as f32, 7.0)), egui::Id::unique("titlebar"), Sense::click_and_drag());
+            let bar = ui.interact(full, egui::Id::unique("titlebar"), Sense::click_and_drag());
             if bar.drag_started_by(egui::PointerButton::Primary) {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
             }
@@ -257,33 +268,43 @@ impl App {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
             }
             ui.horizontal_centered(|ui| {
-                ui.label(RichText::new("Quarry").strong().size(TXT_HEADING).color(BRIGHT()));
-                ui.label(RichText::new("MongoDB workbench").color(MUTED()));
-                ui.separator();
+                app_mark(ui);
+                ui.add_space(-2.0);
+                ui.label(semibold(RichText::new("quarry").size(TXT_TITLE).color(BRIGHT())));
+                ui.add_space(22.0);
                 if let Some(s) = self.t().map(|t| t.sel.clone()) {
                     let (name, writable) = self.conn(s.conn).map(|c| (c.meta.name.clone(), c.writable)).unwrap_or_default();
-                    ui.label(RichText::new(format!("{name}  /  {}  /  {}", s.db, s.coll)).monospace().color(TEXT()));
+                    let mut job = LayoutJob::default();
+                    job.append(&format!("{name} / {} / ", s.db), 0.0, mono_fmt(12.0, MUTED(), 400.0));
+                    job.append(&s.coll, 0.0, mono_fmt(12.0, BRIGHT(), W_SEMIBOLD));
+                    ui.label(job);
+                    ui.add_space(4.0);
                     if self.prefs.always_writable {
                         // No lock to toggle: writes are always on.
                     } else if writable {
-                        if chip(ui, "WRITES ON", ALERT(), true).on_hover_text("Click to lock this connection again").clicked() {
+                        if badge(ui, "WRITES ON", ALERT()).on_hover_text("Click to lock this connection again").clicked() {
                             if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == s.conn) {
                                 c.writable = false;
                             }
                             self.ok("Writes locked");
                         }
-                    } else if chip(ui, "READ-ONLY", SUCCESS(), true).on_hover_text("Click to allow edits on this connection for this session").clicked() {
+                    } else if badge(ui, "READ-ONLY", PRIMARY()).on_hover_text("Click to allow edits on this connection for this session").clicked() {
                         self.modal = Some(Modal::Unlock(s.conn, None));
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     self.undo.retain(|a| a.at.elapsed().as_secs() <= db::UNDO_MAX_AGE_S);
                     let n = self.undo.len();
-                    if ui.add_enabled(n > 0, egui::Button::new(format!("⟲ Undo ({n})"))).clicked() {
+                    let undo = if n > 0 { format!("Undo ({n})") } else { "Undo".into() };
+                    if quiet_enabled(ui, n > 0, undo).on_hover_text("Recent writes you can take back").clicked() {
                         self.modal = Some(Modal::Undo);
                     }
-                    if ui.button("⚙ Settings").clicked() {
+                    if quiet(ui, "Settings").on_hover_text("Cmd+,").clicked() {
                         self.modal = Some(Modal::Settings);
+                    }
+                    ui.add_space(12.0);
+                    if search_pill(ui).clicked() {
+                        self.modal = Some(Modal::Palette { query: String::new(), sel: 0 });
                     }
                     if let Some(v) = &self.updated {
                         let r = ui.add(primary_button(ui, format!("Restart for {v}"), SUCCESS())).on_hover_text("The update is installed. Quarry restarts by itself once you have no unsaved edits and have been idle for a minute.");
@@ -314,8 +335,25 @@ impl App {
     }
 
     pub(super) fn status_bar(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::bottom("status").frame(egui::Frame::new().fill(PANEL()).inner_margin(egui::Margin::symmetric(12, 5))).show(ui, |ui| {
-            ui.horizontal(|ui| {
+        let frame = egui::Frame::new().fill(CHROME()).inner_margin(egui::Margin::symmetric(12, 0));
+        egui::Panel::bottom("status").exact_size(STATUS_H).show_separator_line(false).frame(frame).show(ui, |ui| {
+            let full = ui.max_rect().expand2(egui::vec2(12.0, 0.0));
+            ui.painter().hline(full.x_range(), full.top() + 0.5, Stroke::new(1.0, LINE()));
+            ui.horizontal_centered(|ui| {
+                // The active connection: its state, then where it is and what it runs.
+                if let Some(c) = self.active.and_then(|id| self.conn(id)) {
+                    let (dot_r, dot_resp) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), Sense::hover());
+                    ui.painter().circle_filled(dot_r.center(), 4.0, status_color(&c.status));
+                    let state = match &c.status {
+                        Status::Ready => "Connected",
+                        Status::Connecting => "Connecting",
+                        Status::Failed(_) => "Failed to connect",
+                        Status::Idle => "Not connected",
+                    };
+                    dot_resp.on_hover_text(state);
+                    ui.label(RichText::new(c.server.status_line(&c.masked_uri)).font(FontId::monospace(TXT_CAPTION)).color(MUTED()));
+                    ui.add_space(10.0);
+                }
                 if self.prefs.show_fps {
                     // Averaged over half a second of frames: one frame's dt swings above the refresh
                     // rate when an input event lands just after a vsync. Idle gaps are left out, but
@@ -346,32 +384,39 @@ impl App {
                         fixed_readout(ui, format!("cpu {:>3.0}%", cpu), "cpu 000%", color).on_hover_text("Quarry's CPU use over the last second, in percent of one core.");
                     }
                 }
-                // Errors fade after 15 s so an old problem does not look current.
-                const ERROR_S: u64 = 15;
-                if self.status.1 {
-                    if self.status_at.elapsed().as_secs() >= ERROR_S {
-                        self.status = ("Ready".into(), false);
-                    } else {
-                        ui.ctx().request_repaint_after(Duration::from_secs(1));
-                        if ui.button("🗙").on_hover_text("Dismiss").clicked() {
-                            self.status = ("Ready".into(), false);
-                        }
-                    }
-                }
-                let (msg, is_err) = &self.status;
-                let first = msg.lines().next().unwrap_or_default();
-                let r = ui.add(egui::Label::new(RichText::new(first).size(TXT_SMALL).color(if *is_err { ALERT() } else { MUTED() })).truncate().sense(egui::Sense::click()));
-                // Errors often carry advice on a second line or a long server message.
-                if !*is_err {
-                    r.on_hover_text(msg.as_str());
-                } else if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("{msg}\n\nClick to open the whole message.")).clicked() {
-                    self.modal = Some(Modal::Text { title: "Error".into(), body: msg.clone(), code: false });
-                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.selectable_label(self.log.open, RichText::new("Query log").size(TXT_SMALL)).on_hover_text("Every command sent to the servers (Cmd+L)").clicked() {
+                    let log = RichText::new("Query log").size(TXT_CAPTION);
+                    if quiet(ui, if self.log.open { log.color(BRIGHT()) } else { log }).on_hover_text("Every command sent to the servers (Cmd+L)").clicked() {
                         self.log.open = !self.log.open;
                     }
-                    ui.label(RichText::new("Cmd+K jumps  ·  Enter runs  ·  double-click a value to edit  ·  Cmd+/ shortcuts").size(TXT_SMALL).color(FAINT()));
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("⌘K jump   ↵ run   ⌘/ keys").font(FontId::monospace(TXT_CAPTION)).color(FAINT())).on_hover_text("Cmd+K jumps to a collection, Enter runs the query, double-click a value to edit it, Cmd+/ lists every shortcut");
+                    // The message gets only the room left between the connection and the hints, so a
+                    // long error is cut with an ellipsis instead of running under them.
+                    ui.add_space(12.0);
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        // Errors fade after 15 s so an old problem does not look current.
+                        const ERROR_S: u64 = 15;
+                        if self.status.1 {
+                            if self.status_at.elapsed().as_secs() >= ERROR_S {
+                                self.status = ("Ready".into(), false);
+                            } else {
+                                ui.ctx().request_repaint_after(Duration::from_secs(1));
+                                if icon_button(ui, "🗙", true).on_hover_text("Dismiss").clicked() {
+                                    self.status = ("Ready".into(), false);
+                                }
+                            }
+                        }
+                        let (msg, is_err) = &self.status;
+                        let first = msg.lines().next().unwrap_or_default();
+                        let r = ui.add(egui::Label::new(RichText::new(first).size(TXT_CAPTION).color(if *is_err { ALERT() } else { FAINT() })).truncate().sense(egui::Sense::click()));
+                        // Errors often carry advice on a second line or a long server message.
+                        if !*is_err {
+                            r.on_hover_text(msg.as_str());
+                        } else if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("{msg}\n\nClick to open the whole message.")).clicked() {
+                            self.modal = Some(Modal::Text { title: "Error".into(), body: msg.clone(), code: false });
+                        }
+                    });
                 });
             });
         });
@@ -384,7 +429,6 @@ impl App {
         let mut many: Option<(usize, TabClose)> = None;
         let mut reopen = false;
         let has_closed = !self.closed.is_empty();
-        const TAB_H: f32 = 34.0;
         const TAB_MIN_W: f32 = 120.0;
         const PLUS_W: f32 = 32.0;
         const LIST_W: f32 = 84.0;
@@ -392,8 +436,8 @@ impl App {
         // The name is left as a placeholder so its color can follow hover, which is known only after layout.
         let titles: Vec<_> = self.tabs.iter().enumerate().map(|(i, t)| {
             let mut job = LayoutJob::default();
-            job.append(&t.sel.coll, 0.0, egui::TextFormat::simple(FontId::proportional(TXT_TITLE), Color32::PLACEHOLDER));
-            job.append(&t.sel.db, 6.0, egui::TextFormat::simple(FontId::proportional(TXT_CAPTION), if i == self.cur { MUTED() } else { FAINT() }));
+            job.append(&t.sel.coll, 0.0, ui_fmt(TXT_BODY, Color32::PLACEHOLDER, if i == self.cur { W_MEDIUM } else { 400.0 }, 0.0));
+            job.append(&t.sel.db, 6.0, mono_fmt(10.0, FAINT(), 400.0));
             let v = match t.view {
                 View::Aggregate => Some("aggregate"),
                 View::Indexes => Some("indexes"),
@@ -405,23 +449,25 @@ impl App {
                 View::Documents => None,
             };
             if let Some(v) = v {
-                job.append(v, 6.0, egui::TextFormat::simple(FontId::proportional(TXT_CAPTION), C_LINK().gamma_multiply(0.8)));
+                job.append(v, 6.0, mono_fmt(10.0, C_LINK(), 400.0));
             }
             ui.fonts_mut(|f| f.layout_job(job))
         }).collect();
+        let frame = egui::Frame::new().fill(PANEL()).inner_margin(egui::Margin { left: 0, right: 8, top: 0, bottom: 0 });
+        egui::Panel::top("tabs").exact_size(TAB_STRIP_H).show_separator_line(false).frame(frame).show(ui, |ui| {
+        let panel = ui.max_rect();
+        // Under the tabs, so the active one covers it and joins the page below.
+        ui.painter().hline(panel.left()..=panel.right() + 8.0, panel.bottom() - 0.5, Stroke::new(1.0, LINE()));
         // Like a browser, tabs narrow down to TAB_MIN_W before the strip has to scroll.
         let full = ui.available_width();
         let cap = ((full - PLUS_W) / n.max(1) as f32).max(TAB_MIN_W);
-        let widths: Vec<f32> = titles.iter().map(|g| (g.size().x + 54.0).clamp(TAB_MIN_W, 240.0).min(cap)).collect();
+        let widths: Vec<f32> = titles.iter().map(|g| (g.size().x + 48.0).clamp(TAB_MIN_W, 260.0).min(cap)).collect();
         let overflow = widths.iter().sum::<f32>() + PLUS_W > full;
         let view_w = full - PLUS_W - if overflow { LIST_W } else { 0.0 };
         // Scroll to the active tab whenever it changes, however it was picked, shortcuts included.
         let moved = self.tab_seen != Some(self.cur);
         self.tab_seen = Some(self.cur);
-        let top = egui::CornerRadius { nw: R_MD, ne: R_MD, sw: 0, se: 0 };
-        // Painted first so the active tab's bottom cover hides it, joining the tab to the page.
-        let baseline = ui.painter().add(egui::Shape::Noop);
-        let strip = ui.horizontal(|ui| {
+        ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             // egui's own edge fades, opaque, show there are more tabs now that the scrollbar is hidden.
             ui.spacing_mut().scroll.fade = egui::style::ScrollFadeStyle { strength: 1.0, size: 24.0 };
@@ -432,10 +478,9 @@ impl App {
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        let mut prev_plain = false;
                         for (i, (t, title)) in self.tabs.iter().zip(titles).enumerate() {
                             let active = i == self.cur;
-                            let (rect, resp) = ui.allocate_exact_size(egui::vec2(widths[i], TAB_H), Sense::click());
+                            let (rect, resp) = ui.allocate_exact_size(egui::vec2(widths[i], TAB_STRIP_H), Sense::click());
                             let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
                             if active && moved {
                                 resp.scroll_to_me(None);
@@ -443,32 +488,24 @@ impl App {
                             let p = ui.painter();
                             let hovered = resp.hovered();
                             if active {
-                                // Same fill as the page below and no bottom edge, so the tab joins what it shows.
-                                p.rect(rect, top, BG(), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
-                                p.rect_filled(egui::Rect::from_min_max(egui::pos2(rect.left() + 1.0, rect.bottom() - 1.5), egui::pos2(rect.right() - 1.0, rect.bottom() + 1.0)), 0, BG());
-                                p.line_segment([rect.left_top() + egui::vec2(10.0, 1.0), rect.right_top() + egui::vec2(-10.0, 1.0)], Stroke::new(2.0, WARNING()));
-                            } else if hovered {
-                                p.rect_filled(rect, top, PANEL());
-                            } else if prev_plain {
-                                p.vline(rect.left(), rect.shrink2(egui::vec2(0.0, 10.0)).y_range(), Stroke::new(1.0, HOVER()));
-                            }
-                            prev_plain = !active && !hovered;
-                            let is_view = self.views.contains(&(t.sel.conn, t.sel.db.clone(), t.sel.coll.clone()));
-                            let dot = egui::pos2(rect.left() + 14.0, rect.center().y);
-                            let dc = if active { WARNING() } else { FAINT() };
-                            if is_view {
-                                p.circle_stroke(dot, 3.0, Stroke::new(1.3, dc));
+                                // The page's fill and an accent underline, covering the strip's bottom line
+                                // so the tab joins what it shows.
+                                p.rect_filled(rect, 0, BG());
+                                p.rect_filled(egui::Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 2.0), rect.max), 0, PRIMARY());
                             } else {
-                                p.circle_filled(dot, 3.0, dc);
+                                p.rect_filled(rect.with_max_y(rect.bottom() - 1.0), 0, hover_fill(state_of(&resp)));
                             }
-                            let clip = egui::Rect::from_min_max(rect.min, egui::pos2(rect.right() - 26.0, rect.bottom()));
+                            p.vline(rect.right() - 0.5, rect.shrink2(egui::vec2(0.0, 7.0)).y_range(), Stroke::new(1.0, LINE()));
+                            let clip = egui::Rect::from_min_max(rect.min, egui::pos2(rect.right() - 28.0, rect.bottom()));
                             let name = if active { BRIGHT() } else if hovered { TEXT() } else { MUTED() };
-                            p.with_clip_rect(clip.intersect(p.clip_rect())).galley(egui::pos2(rect.left() + 26.0, rect.center().y - title.size().y / 2.0), title, name);
+                            p.with_clip_rect(clip.intersect(p.clip_rect())).galley(egui::pos2(rect.left() + 14.0, rect.center().y - title.size().y / 2.0), title, name);
                             let xr = egui::Rect::from_center_size(egui::pos2(rect.right() - 14.0, rect.center().y), egui::vec2(16.0, 16.0));
                             let xresp = ui.interact(xr, ui.scope_id().with(("close", i)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
                             if active || hovered || xresp.hovered() {
-                                if xresp.hovered() {
-                                    ui.painter().rect_filled(xr, R_SM, HOVER());
+                                if xresp.is_pointer_button_down_on() {
+                                    ui.painter().rect_filled(xr, R_SM, PRESSED());
+                                } else if xresp.hovered() {
+                                    ui.painter().rect_filled(xr, R_SM, if active { HOVER() } else { PRESSED() });
                                 }
                                 let c = xr.center();
                                 let s = Stroke::new(1.4, if xresp.hovered() { BRIGHT() } else { MUTED() });
@@ -492,7 +529,7 @@ impl App {
                                     }
                                 }
                                 ui.separator();
-                                if ui.button("🗋 Duplicate").clicked() {
+                                if ui.button("Duplicate").clicked() {
                                     pick = Some(i);
                                     dup = true;
                                 }
@@ -512,11 +549,9 @@ impl App {
             ui.add_space(4.0);
             if n > 0 {
                 // Painted like the close cross: the font's "+" sits on the math axis, below center.
-                let (r, resp) = ui.allocate_exact_size(egui::vec2(BUTTON_H, TAB_H), Sense::click());
+                let (r, resp) = ui.allocate_exact_size(egui::vec2(BUTTON_H, TAB_STRIP_H), Sense::click());
                 let b = egui::Rect::from_center_size(r.center(), egui::vec2(BUTTON_H, BUTTON_H));
-                if resp.hovered() {
-                    ui.painter().rect_filled(b, R_MD, HOVER());
-                }
+                ui.painter().rect_filled(b, R_MD, hover_fill(state_of(&resp)));
                 let (c, s) = (b.center(), Stroke::new(1.5, if resp.hovered() { BRIGHT() } else { MUTED() }));
                 ui.painter().line_segment([c - egui::vec2(5.5, 0.0), c + egui::vec2(5.5, 0.0)], s);
                 ui.painter().line_segment([c - egui::vec2(0.0, 5.5), c + egui::vec2(0.0, 5.5)], s);
@@ -529,9 +564,7 @@ impl App {
                 self.tab_list(ui, &mut pick);
             }
         });
-        let y = strip.response.rect.bottom() - 0.5;
-        ui.painter().set(baseline, egui::Shape::hline(ui.max_rect().x_range(), y, Stroke::new(1.0, BORDER())));
-        ui.add_space(8.0);
+        });
         if pick.is_some() {
             // Scroll even when the picked tab was already active but scrolled out of view.
             self.tab_seen = None;
@@ -698,4 +731,39 @@ fn process_usage() -> (Option<u64>, Duration) {
         let cpu = if GetProcessTimes(p, &mut c, &mut e, &mut k, &mut u) != 0 { Duration::from_nanos((ticks(k) + ticks(u)) * 100) } else { Duration::ZERO };
         (mem, cpu)
     }
+}
+
+/// The app icon, decoded once and kept as a texture in egui's memory.
+fn app_mark(ui: &mut egui::Ui) {
+    let id = egui::Id::unique("quarry-logo");
+    let tex = ui.ctx().data(|d| d.get_temp::<egui::TextureHandle>(id)).or_else(|| {
+        let icon = eframe::icon_data::from_png_bytes(include_bytes!("../../assets/icon-256.png")).ok()?;
+        let img = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
+        let tex = ui.ctx().load_texture("quarry-logo", img, egui::TextureOptions::LINEAR);
+        ui.ctx().data_mut(|d| d.insert_temp(id, tex.clone()));
+        Some(tex)
+    });
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), Sense::hover());
+    if let Some(tex) = tex {
+        // The PNG follows the macOS icon grid: the tile has a 100/1024 margin, cropped here so
+        // the mark fills its box like the text beside it.
+        const M: f32 = 100.0 / 1024.0;
+        let uv = egui::Rect::from_min_max(egui::pos2(M, M), egui::pos2(1.0 - M, 1.0 - M));
+        ui.painter().image(tex.id(), rect, uv, Color32::WHITE);
+    }
+}
+
+/// The title bar's jump field: looks like a search box and opens the Cmd+K palette.
+fn search_pill(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(260.0, 24.0), Sense::click());
+    let down = r.is_pointer_button_down_on();
+    let (fill, edge) = if down { (RAISED(), MUTED()) } else if r.hovered() { (PANEL(), MUTED()) } else { (PANEL(), BORDER()) };
+    let p = ui.painter();
+    p.rect(rect, R_MD, fill, Stroke::new(1.0, if r.has_focus() { PRIMARY() } else { edge }), egui::StrokeKind::Inside);
+    let hint = p.layout_no_wrap("Search or jump to…".into(), FontId::proportional(TXT_SMALL), if r.hovered() { MUTED() } else { FAINT() });
+    p.galley(egui::pos2(rect.left() + 12.0, rect.center().y - hint.size().y / 2.0), hint, Color32::PLACEHOLDER);
+    let k = p.layout_job(LayoutJob::single_section("⌘K".into(), mono_fmt(10.0, MUTED(), 400.0)));
+    let kr = egui::Rect::from_min_size(egui::pos2(rect.right() - 6.0 - (k.size().x + 10.0), rect.center().y - 8.0), egui::vec2(k.size().x + 10.0, 16.0));
+    paint_kbd(p, kr, k);
+    r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Jump to a connection, database or collection")
 }

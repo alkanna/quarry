@@ -69,7 +69,7 @@ impl App {
             ui.horizontal(|ui| {
                 apply = primary(ui, "Apply", PRIMARY()).on_hover_text("Runs collMod on this collection").clicked();
                 generate = ui.add_enabled(!s.stats.is_empty(), egui::Button::new("Generate from analysis")).on_hover_text("Built from the sampled documents; review it before applying").clicked();
-                reload = ui.button("⟳ Reload").clicked();
+                reload = ui.button("Reload").clicked();
             });
         });
         ui.add_space(6.0);

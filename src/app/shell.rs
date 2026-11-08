@@ -96,14 +96,17 @@ pub(super) fn shell_help(ui: &mut egui::Ui, coll: &str, writable: bool) -> Optio
 }
 
 pub(super) fn code_menu(ui: &mut egui::Ui, pick: &mut Option<db::Lang>) {
-    ui.menu_button("🗐 Copy as code", |ui| {
-        menu_look(ui);
-        for l in db::Lang::ALL {
-            if ui.button(l.name()).clicked() {
-                *pick = Some(l);
-                ui.close();
+    ui.scope(|ui| {
+        quiet_look(ui);
+        ui.menu_button("Copy as code", |ui| {
+            menu_look(ui);
+            for l in db::Lang::ALL {
+                if ui.button(l.name()).clicked() {
+                    *pick = Some(l);
+                    ui.close();
+                }
             }
-        }
+        });
     });
 }
 
@@ -253,7 +256,7 @@ impl App {
                         stop = ui.button("Stop").clicked();
                     }
                     None => {
-                        run = primary(ui, "Run", PRIMARY()).on_hover_text("Cmd+Enter").clicked() || ui.input(|i| i.modifiers.command && i.key_pressed(Key::Enter));
+                        run = run_button(ui, "Run", "⌘↵").on_hover_text("Cmd+Enter").clicked() || ui.input(|i| i.modifiers.command && i.key_pressed(Key::Enter));
                         if let Some(ms) = t.shell.ms {
                             let n = t.shell.count.map(|n| format!("{n} results  ")).unwrap_or_default();
                             ui.label(RichText::new(format!("{n}{ms} ms")).color(MUTED()));
@@ -366,13 +369,12 @@ impl App {
                     page_to = pager(ui, t.shell.page, pages);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    export = ui.button("📤 Export…").clicked();
+                    export = ui.button("Export…").clicked();
                     if ui.button("Copy").on_hover_text("Copy the whole result as JSON").clicked() {
                         ui.ctx().copy_text(t.shell.result().map(|v| db::to_edit_value(&v)).unwrap_or_default());
                     }
                     if !t.shell.docs.is_empty() {
-                        ui.selectable_value(&mut t.shell.raw, true, "JSON");
-                        ui.selectable_value(&mut t.shell.raw, false, "Table");
+                        segmented(ui, &mut t.shell.raw, &[(false, "Table"), (true, "JSON")]);
                     }
                 });
             });

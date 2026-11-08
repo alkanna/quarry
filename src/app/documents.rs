@@ -81,22 +81,41 @@ impl App {
     pub(super) fn collection(&mut self, ui: &mut egui::Ui) {
         let Some(t) = self.t() else { return };
         let (coll, view) = (t.sel.coll.clone(), t.view);
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(&coll).size(TXT_HEADING).strong().color(BRIGHT()));
-            ui.add_space(12.0);
+        // Name, then what the collection holds: database, documents, data size and indexes.
+        // The whole collection's count, not the filter's, which the results line shows. Without
+        // statistics only an unfiltered count says what the collection holds.
+        let mut meta = vec![t.sel.db.clone()];
+        match t.stats {
+            Some((count, size, nidx)) => {
+                meta.push(format!("{} docs", group(&count.to_string())));
+                meta.push(human_bytes(size as usize));
+                meta.push(format!("{nidx} {}", if nidx == 1 { "index" } else { "indexes" }));
+            }
+            None if t.query.filter.is_empty() => meta.push(format!("{} docs", group(&t.count.to_string()))),
+            None => {}
+        }
+        ui.horizontal(|ui| {
+            ui.label(semibold(RichText::new(&coll).size(TXT_HEADING).color(BRIGHT())));
+            ui.add_space(6.0);
+            ui.label(RichText::new(meta.join(" · ")).font(FontId::monospace(TXT_CAPTION)).color(FAINT()));
+        });
+        ui.add_space(4.0);
+        // Wrapped, so on a narrow workspace the toggles move under the tabs instead of over them.
+        let tabs = ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 22.0;
             for (v, label) in [(View::Documents, "Documents"), (View::Aggregate, "Aggregate"), (View::Indexes, "Indexes"), (View::Schema, "Schema"), (View::Import, "Import"), (View::Compare, "Compare"), (View::Shell, "Shell"), (View::Watch, "Watch")] {
-                if ui.selectable_label(view == v, label).clicked() {
+                if view_tab(ui, label, view == v).clicked() {
                     self.set_view(v);
                 }
             }
             if matches!(view, View::Documents | View::Aggregate | View::Indexes | View::Watch) {
+                ui.spacing_mut().item_spacing.x = 8.0;
                 right_group(ui, |ui| {
                     if self.prefs.table {
                         self.columns_menu(ui, view != View::Documents);
                     }
                     let mut table = self.prefs.table;
-                    ui.selectable_value(&mut table, false, "JSON");
-                    ui.selectable_value(&mut table, true, "Table");
+                    segmented(ui, &mut table, &[(true, "Table"), (false, "JSON")]);
                     if table != self.prefs.table {
                         self.prefs.table = table;
                         self.save_prefs();
@@ -104,7 +123,10 @@ impl App {
                 });
             }
         });
-        ui.add_space(6.0);
+        // A full-width rule under the tabs, which the active tab's underline sits on.
+        let y = tabs.response.rect.bottom() - 0.5;
+        ui.painter().hline(ui.max_rect().x_range(), y, Stroke::new(1.0, LINE()));
+        ui.add_space(12.0);
         match view {
             View::Documents => self.documents(ui),
             View::Aggregate => self.aggregate(ui),
@@ -141,26 +163,33 @@ impl App {
         let fields = std::mem::take(&mut t.field_info);
         let mut typed = Typed::default();
         toolbar(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 4.0;
             ui.horizontal_top(|ui| {
-                let w = ui.available_width() - 520.0;
+                let w = ui.available_width() - 64.0 - 112.0;
                 run |= Self::query_field(ui, "QUERY", &mut t.filter_txt, "{ field: value }   or paste db.coll.find(...) / db.coll.aggregate([...])", w, FieldKind::Query, &paths, &fields, ac, &mut typed, &lookup);
-                if primary(ui, "  Find  ", PRIMARY()).on_hover_text("Enter").clicked() {
-                    run = true;
-                }
-                explain |= ui.button("Explain").on_hover_text("Cmd+E").clicked();
-                help |= ui.button("?").on_hover_text("Query shortcuts and syntax").clicked();
-                code_menu(ui, &mut code_lang);
-                history_menu(ui, &hist, &index_sorts, &mut qacts);
-                library_menu(ui, &lib, new_lib, false, &mut qacts);
+                // A fixed height, or a right-to-left layout takes all the height left in the card.
+                ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 26.0), egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                    if run_button(ui, "Run", "↵").on_hover_text("Enter").clicked() {
+                        run = true;
+                    }
+                });
             });
-            // A pasted shell query carries its own sort and projection.
-            if !db::is_shell(&t.filter_txt) {
-                ui.horizontal_top(|ui| {
-                    let w = (ui.available_width() - 160.0) / 2.0;
+            ui.horizontal_top(|ui| {
+                // A pasted shell query carries its own sort and projection.
+                if !db::is_shell(&t.filter_txt) {
+                    let w = ((ui.available_width() - 380.0) / 2.0 - 64.0).max(120.0);
                     run |= Self::query_field(ui, "SORT", &mut t.sort_txt, "{ _id: -1 }", w, FieldKind::Sort, &paths, &Default::default(), ac, &mut Typed::default(), &|_| Lookup::Done);
                     run |= Self::query_field(ui, "PROJECT", &mut t.proj_txt, "{ name: 1 }", w, FieldKind::Project, &paths, &Default::default(), ac, &mut Typed::default(), &|_| Lookup::Done);
+                }
+                ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 26.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    help |= quiet(ui, "?").on_hover_text("Query shortcuts and syntax").clicked();
+                    library_menu(ui, &lib, new_lib, false, &mut qacts);
+                    history_menu(ui, &hist, &index_sorts, &mut qacts);
+                    code_menu(ui, &mut code_lang);
+                    explain |= quiet(ui, "Explain").on_hover_text("Cmd+E").clicked();
                 });
-            }
+            });
         });
         t.paths = paths;
         t.field_info = fields;
@@ -213,25 +242,25 @@ impl App {
         if let Some(l) = code_lang {
             self.show_code(l, true);
         }
-        ui.add_space(6.0);
+        ui.add_space(10.0);
         let t = self.t().unwrap();
         let (count, ms, loading, page) = (t.count, t.ms, t.loading, t.page);
         let pages = count.div_ceil(PAGE_SIZE).max(1);
         let mut go: Option<u64> = None;
         ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("{} documents", group(&count.to_string()))).color(BRIGHT()));
-            ui.label(RichText::new(format!("{ms} ms")).color(MUTED()));
+            ui.label(semibold(RichText::new(format!("{} docs", group(&count.to_string()))).font(FontId::monospace(TXT_SMALL)).color(BRIGHT())));
+            ui.label(RichText::new(format!("{ms} ms")).font(FontId::monospace(TXT_SMALL)).color(SUCCESS()));
             if loading {
                 spin(ui);
             }
-            ui.separator();
+            ui.add_space(10.0);
             go = pager(ui, page as usize, pages as usize).map(|p| p as u64);
-            if ui.button("⟳ Reload").clicked() {
+            if icon_button(ui, "⟳", true).on_hover_text("Reload (Cmd+R)").clicked() {
                 go = Some(page);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.menu_button("More", |ui| {
-                    menu_look(ui);
+                ui.spacing_mut().item_spacing.x = 2.0;
+                dots_menu(ui, |ui| {
                     if ui.button("Open query in Shell").clicked() {
                         let t = &self.tabs[self.cur];
                         self.open_in_shell(query_script(&t.sel.coll, &t.filter_txt));
@@ -244,7 +273,7 @@ impl App {
                     ui.separator();
                     let t = self.t().unwrap();
                     let (coll, filter) = (t.sel.coll.clone(), t.query.filter.clone());
-                    if ui.button("Delete all matching documents…").clicked() {
+                    if danger_item(ui, "Delete all matching documents…").clicked() {
                         self.modal = Some(Modal::Typed {
                             title: format!("Delete every document in {coll} matching the current filter (about {count} documents)?"),
                             expect: coll.clone(),
@@ -253,7 +282,7 @@ impl App {
                         });
                         ui.close();
                     }
-                    if ui.button("Drop collection…").clicked() {
+                    if danger_item(ui, "Drop collection…").clicked() {
                         self.modal = Some(Modal::Typed {
                             title: format!("Drop the collection {coll} with all its documents and indexes? This cannot be undone."),
                             expect: coll,
@@ -262,11 +291,12 @@ impl App {
                         });
                         ui.close();
                     }
-                });
-                if ui.button("📤 Export…").clicked() {
+                })
+                .on_hover_text("More actions");
+                if quiet(ui, "Export").on_hover_text("Export these documents").clicked() {
                     self.export();
                 }
-                if ui.button("✚ Insert").clicked() {
+                if quiet(ui, "+ Insert").clicked() {
                     self.insert = Some("{\n  \n}".into());
                 }
                 let pending = self.tab_drafts();
@@ -434,7 +464,7 @@ impl App {
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).inner_margin(egui::Margin::symmetric(12, 8)).corner_radius(R_LG).show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(format!("{n} selected")).strong().color(BRIGHT()));
+                        ui.label(semibold(RichText::new(format!("{n} selected")).color(BRIGHT())));
                         ui.add_space(8.0);
                         let act = docs_menu(ui, n, false);
                         cancel = ui.button("Cancel").on_hover_text("Clear the selection").clicked();

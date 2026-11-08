@@ -179,7 +179,7 @@ impl App {
                     });
                 }
                 Modal::Typed { title, expect, typed, action } => {
-                    ui.label(RichText::new(title.as_str()).strong().color(BRIGHT()));
+                    ui.label(semibold(RichText::new(title.as_str()).color(BRIGHT())));
                     ui.label(RichText::new(format!("Type {expect} to confirm (case sensitive).")).color(MUTED()));
                     ui.add(egui::TextEdit::singleline(typed).font(egui::TextStyle::Monospace).desired_width(320.0));
                     dialog_actions(ui, |ui| {
