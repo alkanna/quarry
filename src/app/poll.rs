@@ -459,3 +459,28 @@ impl App {
         }
     }
 }
+
+impl App {
+    pub(super) fn reload(&mut self) {
+        self.reload_of(self.cur);
+    }
+
+    pub(super) fn reload_of(&mut self, i: usize) {
+        if self.demo {
+            return;
+        }
+        let Some(target) = self.tabs.get(i).and_then(|t| self.target_for(&t.sel)) else { return };
+        // Each answer is matched to its tab by id; a slower older one never overwrites a newer one.
+        self.req += 1;
+        let req = self.req;
+        let t = &mut self.tabs[i];
+        t.req = req;
+        t.loading = true;
+        let (q, page, view, no_idx) = (t.query.clone(), t.page, t.view, t.indexes.is_empty());
+        self.worker.find(req, target, q, page);
+        // Indexes also feed the Sort history (as in the original), so load them once per tab.
+        if view == View::Indexes || no_idx {
+            self.load_indexes_of(i);
+        }
+    }
+}
