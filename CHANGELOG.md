@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.1](https://github.com/alkanna/quarry/compare/v0.18.0...v0.18.1) (2026-11-08)
+
+
+### Performance Improvements
+
+* keep the Documents view's pages as BSON bytes to cut memory ([#113](https://github.com/alkanna/quarry/issues/113)) ([46a9370](https://github.com/alkanna/quarry/commit/46a9370075aed0630e742b658cb0de5a53c62392))
+
 ## [0.18.0](https://github.com/alkanna/quarry/compare/v0.17.1...v0.18.0) (2026-11-08)
 
 
