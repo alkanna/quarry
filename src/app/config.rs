@@ -233,13 +233,14 @@ pub(super) fn set_secret(id: u64, what: &str, value: &str) -> Result<(), String>
     }
 }
 
-/// Written beside the file, synced, then renamed over it: a crash mid-write leaves the old file
-/// whole instead of a truncated one that no longer parses.
+/// Written beside the file, then renamed over it: a crash mid-write leaves the old file whole
+/// instead of a truncated one that no longer parses.
+// ponytail: no fsync; ui.json is saved on every keystroke in the query boxes and an fsync on the UI
+// thread stalls typing. Only a power loss right after a save can lose it; sync on a worker if that matters.
 pub(super) fn write_atomic(dir: &std::path::Path, file: &str, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
     std::fs::create_dir_all(dir)?;
     let tmp = dir.join(format!(".{file}.tmp"));
-    let res = std::fs::File::create(&tmp).and_then(|mut f| f.write_all(bytes).and_then(|()| f.sync_all())).and_then(|()| std::fs::rename(&tmp, dir.join(file)));
+    let res = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, dir.join(file)));
     if res.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
