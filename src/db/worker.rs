@@ -212,23 +212,11 @@ impl Worker {
     pub fn indexes(&self, req: u64, t: Target) {
         self.spawn(async move {
             let res = async {
-                let v: Vec<IndexModel> = t.c().list_indexes().await.map_err(e)?.try_collect().await.map_err(e)?;
-                Ok(v.into_iter()
-                    .map(|m| {
-                        let o = m.options.unwrap_or_default();
-                        let mut d = doc! { "name": o.name.unwrap_or_default(), "keys": m.keys };
-                        if o.unique == Some(true) {
-                            d.insert("unique", true);
-                        }
-                        if let Some(ttl) = o.expire_after {
-                            d.insert("expireAfterSeconds", ttl.as_secs() as i64);
-                        }
-                        if let Some(pf) = o.partial_filter_expression {
-                            d.insert("partialFilterExpression", pf);
-                        }
-                        d
-                    })
-                    .collect())
+                // The raw specs rather than the driver's IndexModel, which drops options it does not
+                // model. A collection has at most 64 indexes, so the first batch holds them all.
+                let r = t.client.database(&t.db).run_command(doc! { "listIndexes": &t.coll }).await.map_err(e)?;
+                let specs = r.get_document("cursor").and_then(|c| c.get_array("firstBatch")).map_err(|err| err.to_string())?;
+                Ok(specs.iter().filter_map(Bson::as_document).map(index_doc).collect())
             }
             .await;
             Msg::Indexes { req, res }
@@ -804,14 +792,6 @@ impl Worker {
         });
     }
 
-    pub fn create_index(&self, t: Target, keys: Document, unique: bool) {
-        self.spawn(async move {
-            let m = IndexModel::builder().keys(keys).options(IndexOptions::builder().unique(unique).build()).build();
-            let res = t.c().create_index(m).await.map(|r| format!("Created index {}", r.index_name)).map_err(e);
-            Msg::Written { at: t.at(), res, undo: None, reload: false, retry: None }
-        });
-    }
-
     pub fn drop_index(&self, t: Target, name: String) {
         self.spawn(async move {
             let res = t.c().drop_index(&name).await.map(|_| format!("Dropped index {name}")).map_err(e);
@@ -880,6 +860,16 @@ pub(crate) async fn replace_doc(conn: u64, t: Target, old: Document, new: Docume
         ),
         Err(err) => (Err(e(err)), None),
     }
+}
+
+/// An index spec as the app keeps it: name and keys first, then every option the index was made
+/// with, without the format version and the old namespace field.
+pub(crate) fn index_doc(spec: &Document) -> Document {
+    let mut d = doc! { "name": spec.get_str("name").unwrap_or_default(), "keys": spec.get("key").cloned().unwrap_or_else(|| Bson::Document(doc! {})) };
+    for (k, v) in spec.iter().filter(|(k, _)| !["name", "key", "v", "ns"].contains(&k.as_str())) {
+        d.insert(k, v.clone());
+    }
+    d
 }
 
 /// Gives each document without an _id one of the kind the collection's `last` _id has: the next
@@ -1061,6 +1051,27 @@ mod tests {
         w.delete_ids(t.clone(), ids);
         next(&rx);
         assert_eq!(all(&w, &t), [doc! { "_id": 3, "pre": true }]);
+    }
+
+    #[test]
+    fn live_index_list_keeps_every_option() {
+        let Some((w, rx, t)) = live("index_options") else { return };
+        let ttl = doc! { "key": { "at": 1 }, "name": "ttl", "expireAfterSeconds": 60, "sparse": true, "hidden": true, "collation": { "locale": "fr", "strength": 2 } };
+        let partial = doc! { "key": { "x": 1 }, "name": "partial", "partialFilterExpression": { "x": { "$gt": 1 } } };
+        w.rt.block_on(async { t.client.database(&t.db).run_command(doc! { "createIndexes": &t.coll, "indexes": [ttl, partial] }).await.unwrap() });
+        w.indexes(1, t.clone());
+        let Msg::Indexes { res, .. } = next(&rx) else { panic!("expected Indexes") };
+        let list = res.unwrap();
+        let ix = |name: &str| list.iter().find(|d| d.get_str("name") == Ok(name)).unwrap().clone();
+        let ttl = ix("ttl");
+        assert_eq!(ttl.get_document("keys").unwrap(), &doc! { "at": 1 });
+        assert_eq!(ttl.get_i64("expireAfterSeconds").or(ttl.get_i32("expireAfterSeconds").map(i64::from)), Ok(60));
+        for k in ["sparse", "hidden"] {
+            assert_eq!(ttl.get_bool(k), Ok(true), "{k}");
+        }
+        assert_eq!(ttl.get_document("collation").unwrap().get_str("locale"), Ok("fr"));
+        assert!(ttl.get("v").is_none());
+        assert!(ix("partial").get_document("partialFilterExpression").is_ok());
     }
 
     #[test]

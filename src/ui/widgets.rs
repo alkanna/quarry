@@ -160,14 +160,6 @@ pub(crate) fn chip(ui: &mut egui::Ui, text: &str, fg: Color32, on: bool) -> egui
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// A chip that only labels something: no hover and no pointer.
-pub(crate) fn badge(ui: &mut egui::Ui, text: &str, fg: Color32) -> egui::Response {
-    let g = ui.painter().layout_no_wrap(text.to_string(), FontId::proportional(TXT_SMALL), Color32::PLACEHOLDER);
-    let (rect, r) = ui.allocate_exact_size(egui::vec2(g.size().x + 20.0, CHIP_H), Sense::hover());
-    paint_chip(ui.painter(), rect, g, fg, true, 0);
-    r
-}
-
 // Buttons come in four kinds, all BUTTON_H tall: `primary` for the main action, `ui.button` for the
 // rest, `quiet_button` for list rows and toolbar extras (framed only on hover), and `danger` for
 // destructive actions.

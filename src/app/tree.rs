@@ -389,13 +389,12 @@ impl App {
                     None => self.err("Not connected."),
                 },
                 TreeAct::Index(path) => {
-                    self.idx_keys = format!("{{ {}: 1 }}", db::shell_text(&Bson::Document(doc! { db::strip_indices(&path): 1 })).trim_start_matches("{ ").trim_end_matches(": 1 }"));
                     let t = self.tm().unwrap();
                     t.view = View::Indexes;
                     t.selected = None;
                     self.reset_doc_state();
                     self.load_indexes();
-                    self.ok("Check the keys, then press Create (writes must be unlocked).");
+                    self.open_create_index(Some(doc! { db::strip_indices(&path): 1 }));
                 }
                 TreeAct::GoRef(path, v) => {
                     let Some(s) = self.t().map(|t| t.sel.clone()) else { continue };

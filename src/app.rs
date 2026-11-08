@@ -52,6 +52,7 @@ use query::*;
 use tools::*;
 use tree::*;
 use users::*;
+use indexes::*;
 use drafts::*;
 
 const SYSTEM_DBS: [&str; 3] = ["admin", "config", "local"];
@@ -126,8 +127,6 @@ pub struct App {
     views: HashSet<(u64, String, String)>,
     users: Option<UsersWin>,
     conn_test: Option<db::Res<String>>,
-    idx_keys: String,
-    idx_unique: bool,
     /// Usage and suggestions of the collection "db.coll" the Indexes view last asked about.
     idx_info: Option<(String, db::IndexInfo)>,
     undo: Vec<UndoAction>,
@@ -231,8 +230,6 @@ impl App {
             views: HashSet::new(),
             users: None,
             conn_test: None,
-            idx_keys: String::new(),
-            idx_unique: false,
             idx_info: None,
             undo: Vec::new(),
             explain_req: 0,
@@ -454,8 +451,7 @@ impl eframe::App for App {
         self.status_bar(ui);
         self.query_log(ui);
         self.sidebar(ui);
-        let view = self.t().map(|t| t.view);
-        if !self.prefs.open_inline && self.selected_doc().is_some() && view != Some(View::Indexes) {
+        if !self.prefs.open_inline && self.selected_doc().is_some() {
             self.inspector(ui);
         }
         egui::CentralPanel::default_margins().frame(egui::Frame::new().fill(BG()).inner_margin(egui::Margin { left: 12, right: 12, top: 8, bottom: 8 })).show(ui, |ui| {

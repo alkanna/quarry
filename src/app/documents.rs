@@ -66,10 +66,10 @@ impl App {
                     self.set_view(v);
                 }
             }
-            if matches!(view, View::Documents | View::Aggregate) {
+            if matches!(view, View::Documents | View::Aggregate | View::Indexes) {
                 right_group(ui, |ui| {
                     if self.prefs.table {
-                        self.columns_menu(ui, view == View::Aggregate);
+                        self.columns_menu(ui, view != View::Documents);
                     }
                     let mut table = self.prefs.table;
                     ui.selectable_value(&mut table, false, "JSON");

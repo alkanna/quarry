@@ -298,6 +298,8 @@ impl App {
         let hl_cols: Vec<bool> = cols.iter().map(|c| prefs.highlight.contains(&db::strip_indices(c))).collect();
         let related = if agg { HashMap::new() } else { self.t().map(|t| t.related.clone()).unwrap_or_default() };
         let in_coll = self.in_coll();
+        let idx = agg && self.t().is_some_and(|t| t.view == View::Indexes);
+        let mut idx_act = None;
         egui::Frame::new().fill(PANEL()).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(4, 4)).show(ui, |ui| {
             let mut area = egui::ScrollArea::both().id_salt(("res", agg)).auto_shrink(false);
             // QUARRY_SCROLL_TEST slides the table sideways every frame, to measure scrolling cost.
@@ -457,9 +459,14 @@ impl App {
                                         if !agg {
                                             ui.separator();
                                             doc_act = row_menu(ui, i, &checked).or(doc_act);
+                                        } else if idx {
+                                            ui.separator();
+                                            idx_act = index_menu(ui, d).map(|a| (i, a)).or(idx_act.take());
                                         }
                                     });
                                 });
+                            } else if idx {
+                                cr.context_menu(|ui| idx_act = index_menu(ui, d).map(|a| (i, a)).or(idx_act.take()));
                             } else if !agg {
                                 cr.context_menu(|ui| {
                                     menu_look(ui);
@@ -481,6 +488,8 @@ impl App {
                     }
                     if !agg {
                         resp.context_menu(|ui| doc_act = row_menu(ui, i, &checked).or(doc_act));
+                    } else if idx {
+                        resp.context_menu(|ui| idx_act = index_menu(ui, d).map(|a| (i, a)).or(idx_act.take()));
                     }
                     if (active || expanded.contains(&(agg, i))) && self.prefs.open_inline {
                         ui.add_space(4.0);
@@ -524,6 +533,9 @@ impl App {
         if let Some((i, a)) = doc_act {
             self.docs_act(&ui.ctx().clone(), a, Self::act_targets(&checked, docs, i));
         }
+        if let Some((i, a)) = idx_act {
+            self.index_act(ui.ctx(), &docs[i], a);
+        }
         for (i, acts) in cell_acts {
             self.select(agg, i, false);
             let d = self.shown_doc(&docs[i], agg).unwrap_or_else(|| docs[i].clone());
@@ -546,6 +558,8 @@ impl App {
         let checked = if agg { BTreeSet::new() } else { self.t().unwrap().checked.clone() };
         let expanded = self.t().unwrap().expanded.clone();
         let mut doc_act = None;
+        let idx = agg && self.t().is_some_and(|t| t.view == View::Indexes);
+        let mut idx_act = None;
         let view_w = ui.available_width();
         let mut click = None;
         egui::Frame::new().fill(PANEL()).corner_radius(R_MD).inner_margin(4).show(ui, |ui| {
@@ -578,6 +592,8 @@ impl App {
                     }
                     if !agg {
                         resp.context_menu(|ui| doc_act = row_menu(ui, i, &checked).or(doc_act));
+                    } else if idx {
+                        resp.context_menu(|ui| idx_act = index_menu(ui, d).map(|a| (i, a)).or(idx_act.take()));
                     }
                     if (active || expanded.contains(&(agg, i))) && self.prefs.open_inline {
                         ui.add_space(4.0);
@@ -596,6 +612,9 @@ impl App {
         }
         if let Some((i, a)) = doc_act {
             self.docs_act(&ui.ctx().clone(), a, Self::act_targets(&checked, docs, i));
+        }
+        if let Some((i, a)) = idx_act {
+            self.index_act(ui.ctx(), &docs[i], a);
         }
     }
 }

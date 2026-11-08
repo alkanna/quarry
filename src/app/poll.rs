@@ -160,7 +160,10 @@ impl App {
                     }
                 }
                 Msg::IndexInfo { key, res } => match res {
-                    Ok(i) => self.idx_info = Some((key, i)),
+                    Ok(i) => {
+                        self.idx_info = Some((key.clone(), i));
+                        self.refresh_idx_rows(&key);
+                    }
                     Err(e) => self.err(e),
                 },
                 Msg::Docs { req, res } => {
@@ -207,7 +210,11 @@ impl App {
                     }
                 }
                 Msg::Indexes { req, res } => match (res, self.tabs.iter_mut().find(|t| t.idx_req == req)) {
-                    (Ok(v), Some(t)) => t.indexes = v,
+                    (Ok(v), Some(t)) => {
+                        t.indexes = v;
+                        let key = format!("{}.{}", t.sel.db, t.sel.coll);
+                        self.refresh_idx_rows(&key);
+                    }
                     (Err(e), _) => self.err(e),
                     _ => {}
                 },

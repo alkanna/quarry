@@ -411,6 +411,7 @@ impl App {
                         }
                     });
                 }
+                Modal::CreateIndex(f) => keep = self.create_index_dialog(ui, f),
                 Modal::Rename { doc: d, path, name } => {
                     let from = path.join(".");
                     dialog_title(ui, format!("Rename {from}"));

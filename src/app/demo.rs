@@ -110,6 +110,38 @@ impl App {
                 ..Default::default()
             });
         }
+        if std::env::var("QUARRY_TEST_INDEXES").is_ok() {
+            let t = &mut self.tabs[1];
+            t.view = View::Indexes;
+            t.selected = None;
+            t.indexes = vec![
+                doc! { "name": "_id_", "keys": { "_id": 1 } },
+                doc! { "name": "number_1", "keys": { "number": 1 }, "unique": true },
+                doc! { "name": "status_1_createdAt_-1", "keys": { "status": 1, "createdAt": -1 } },
+                doc! { "name": "customer.email_1", "keys": { "customer.email": 1 }, "collation": { "locale": "en", "strength": 2 } },
+                doc! { "name": "createdAt_1", "keys": { "createdAt": 1 }, "expireAfterSeconds": 7_776_000_i64, "hidden": true },
+                doc! { "name": "notes_text", "keys": { "_fts": "text", "_ftsx": 1 }, "weights": { "notes": 1 } },
+            ];
+            let now = mongodb::bson::DateTime::now().timestamp_millis();
+            let day = 24 * 3600 * 1000;
+            let stat = |name: &str, ops: i64, since: i64, size: usize| db::IndexStat { name: name.into(), ops, since: Some(since), hidden: name == "createdAt_1", size: Some(size) };
+            let shape = db::Shape { filter: doc! { "total": { "$gt": 100 } }, sort: doc! { "createdAt": -1 }, count: 214, avg_ms: 380.0, suggestion: doc! { "createdAt": -1, "total": 1 } };
+            self.idx_info = Some((
+                "shop.orders".into(),
+                db::IndexInfo {
+                    stats_err: None,
+                    stats: vec![stat("_id_", 120_431, now - 40 * day, 2_310_144), stat("number_1", 8_204, now - 40 * day, 1_048_576), stat("status_1_createdAt_-1", 96_310, now - 40 * day, 3_407_872), stat("customer.email_1", 0, now - 40 * day, 1_572_864), stat("createdAt_1", 0, now - 2 * day, 917_504), stat("notes_text", 12, now - 40 * day, 5_242_880)],
+                    level: 1,
+                    slowms: 100,
+                    shapes: vec![shape],
+                },
+            ));
+            self.refresh_idx_rows("shop.orders");
+            // QUARRY_TEST_INDEXES=new also opens the New index dialog.
+            if std::env::var("QUARRY_TEST_INDEXES").is_ok_and(|v| v == "new") {
+                self.open_create_index(Some(doc! { "createdAt": -1, "total": 1 }));
+            }
+        }
         if std::env::var("QUARRY_TEST_SCHEMA").is_ok() {
             self.tabs[1].view = View::Schema;
             self.tabs[1].selected = None;
