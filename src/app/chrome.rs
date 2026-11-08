@@ -24,6 +24,7 @@ impl App {
                     View::Schema => "Schema",
                     View::Import => "Import",
                     View::Compare => "Compare",
+                    View::Watch => "Watch",
                 }
                 .into(),
                 filter: t.filter_txt.clone(),
@@ -99,7 +100,7 @@ impl App {
                 self.go_tab((self.cur + 1) % n);
             }
             const DIGITS: [Key; 9] = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
-            const VIEWS: [View; 7] = [View::Documents, View::Aggregate, View::Indexes, View::Schema, View::Import, View::Compare, View::Shell];
+            const VIEWS: [View; 8] = [View::Documents, View::Aggregate, View::Indexes, View::Schema, View::Import, View::Compare, View::Shell, View::Watch];
             for (d, v) in DIGITS.iter().zip(VIEWS) {
                 if k(cmd | alt, *d) {
                     self.set_view(v);
@@ -364,6 +365,7 @@ impl App {
                 View::Schema => Some("schema"),
                 View::Import => Some("import"),
                 View::Compare => Some("compare"),
+                View::Watch => Some("watch"),
                 View::Documents => None,
             };
             if let Some(v) = v {

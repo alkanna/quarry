@@ -51,7 +51,7 @@ pub(super) fn index_rows(indexes: &[Document], info: Option<&db::IndexInfo>, now
 
 /// Why the usage columns are empty, without the raw command the server echoes back.
 fn stats_note(e: &str) -> &'static str {
-    if e.contains("not authorized") || e.contains("is not allowed to do action") {
+    if db::is_unauthorized(e) {
         "Usage counts are not available: this user may not read index statistics here (it needs the indexStats privilege, part of clusterMonitor)."
     } else {
         "Usage counts are not available for this collection."
@@ -62,8 +62,6 @@ fn stats_note(e: &str) -> &'static str {
 fn default_index_name(keys: &Document) -> String {
     let part = |v: &Bson| match v {
         Bson::String(s) => s.clone(),
-        Bson::Int32(n) => n.to_string(),
-        Bson::Int64(n) => n.to_string(),
         Bson::Double(f) => f.to_string(),
         other => db::compact(other),
     };
@@ -132,7 +130,7 @@ pub(super) enum IdxAct {
 pub(super) fn index_menu(ui: &mut egui::Ui, row: &Document) -> Option<IdxAct> {
     menu_look(ui);
     let name = row.get_str("name").unwrap_or_default();
-    let hidden = row.get_str("status").is_ok_and(|s| s.contains("hidden"));
+    let hidden = row.get_document("options").is_ok_and(|o| o.get_bool("hidden") == Ok(true));
     ui.label(RichText::new(format!("Index {name}")).size(TXT_CAPTION).color(FAINT()));
     let mut act = None;
     if ui.button("Copy as createIndex(…)").clicked() {
@@ -174,7 +172,7 @@ impl App {
     /// Unindexed or slow queries the profiler saw, each with an index that would serve it.
     fn index_suggestions(&mut self, ui: &mut egui::Ui) {
         let t = self.t().unwrap();
-        let key = format!("{}.{}", t.sel.db, t.sel.coll);
+        let key = t.sel.key();
         let Some(i) = self.idx_info.as_ref().filter(|(k, _)| *k == key).map(|(_, i)| i) else { return };
         if let Some(e) = &i.stats_err {
             ui.add_space(6.0);
@@ -222,14 +220,16 @@ impl App {
 
     /// The New index dialog; returns whether it stays open.
     pub(super) fn create_index_dialog(&mut self, ui: &mut egui::Ui, f: &mut IndexForm) -> bool {
-        let Some(t) = self.t() else { return false };
+        if self.t().is_none() {
+            return false;
+        }
+        let mut ac = std::mem::take(&mut self.ac);
+        let t = self.t().unwrap();
         let coll = t.sel.coll.clone();
-        let (paths, fields) = (t.paths.clone(), t.field_info.clone());
         dialog_title(ui, format!("New index on {coll}"));
         caption(ui, "KEYS");
         let id = egui::Id::unique("index-keys");
-        let mut ac = std::mem::take(&mut self.ac);
-        ac_field(ui, id, &mut f.keys, &mut ac, &|b| suggest(b, FieldKind::Sort, &paths, &fields), |ui, text, _| {
+        ac_field(ui, id, &mut f.keys, &mut ac, &|b| suggest(b, FieldKind::Sort, &t.paths, &t.field_info), |ui, text, _| {
             egui::TextEdit::singleline(text).id(id).font(egui::TextStyle::Monospace).hint_text("{ email: 1, createdAt: -1 }").desired_width(440.0).show(ui)
         });
         self.ac = ac;
@@ -272,29 +272,28 @@ impl App {
         });
         ui.add_space(6.0);
         let spec = f.spec();
-        let cmd = spec.as_ref().ok().map(|s| doc! { "createIndexes": &coll, "indexes": [s.clone()] });
-        match (&cmd, &spec) {
-            (Some(c), _) => {
+        let command = |s: Document| doc! { "createIndexes": &coll, "indexes": [s] };
+        match &spec {
+            Ok(s) => {
                 caption(ui, "COMMAND");
-                ui.label(RichText::new(db::shell_text(&Bson::Document(c.clone()))).monospace().color(C_STRING()));
+                ui.label(RichText::new(db::shell_text(&Bson::Document(command(s.clone())))).monospace().color(C_STRING()));
             }
-            (None, Err(e)) => {
+            Err(e) => {
                 ui.label(RichText::new(e).color(ALERT()));
             }
-            _ => {}
         }
         let mut keep = true;
         let mut create = false;
         dialog_actions(ui, |ui| {
-            create = ui.add_enabled(cmd.is_some(), primary_button(ui, "Create", PRIMARY())).clicked();
+            create = ui.add_enabled(spec.is_ok(), primary_button(ui, "Create", PRIMARY())).clicked();
             if ui.button("Cancel").on_hover_text("Esc").clicked() {
                 keep = false;
             }
         });
-        if let (true, Some(cmd), Ok(s)) = (create, cmd, spec) {
+        if let (true, Ok(s)) = (create, spec) {
             if let Some((conn, target)) = self.writable_target() {
                 let done = format!("Created index {}", s.get_str("name").unwrap_or_default());
-                self.worker.db_change(conn, target.client, target.db, cmd, done);
+                self.worker.db_change(conn, target.client, target.db, command(s), done);
                 keep = false;
             }
         }
@@ -340,9 +339,9 @@ impl App {
     /// Rebuilds the index rows of the tabs showing collection `key` ("db.coll"). Open rows follow
     /// their index by name, since a create or drop moves the others up or down.
     pub(super) fn refresh_idx_rows(&mut self, key: &str) {
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+        let now = mongodb::bson::DateTime::now().timestamp_millis();
         let info = self.idx_info.as_ref().filter(|(k, _)| k == key).map(|(_, i)| i);
-        for t in self.tabs.iter_mut().filter(|t| format!("{}.{}", t.sel.db, t.sel.coll) == key) {
+        for t in self.tabs.iter_mut().filter(|t| t.sel.key() == key) {
             let rows = index_rows(&t.indexes, info, now);
             if t.view == View::Indexes {
                 let name = |i: usize| t.idx_rows.get(i).and_then(|r| r.get_str("name").ok());

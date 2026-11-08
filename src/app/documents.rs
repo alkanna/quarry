@@ -54,6 +54,29 @@ pub(super) fn row_menu(ui: &mut egui::Ui, i: usize, checked: &BTreeSet<usize>) -
     docs_menu(ui, if checked.contains(&i) { checked.len() } else { 1 }, true).map(|a| (i, a))
 }
 
+/// Which menu a result row gets.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum RowMenu {
+    Docs,
+    Indexes,
+    None,
+}
+
+/// What a row menu asked for.
+pub(super) enum RowAct {
+    Doc(DocsAct),
+    Idx(IdxAct),
+}
+
+/// The menu of row `i`: document actions for Documents rows, index actions for Indexes rows.
+pub(super) fn any_row_menu(ui: &mut egui::Ui, kind: RowMenu, i: usize, d: &Document, checked: &BTreeSet<usize>) -> Option<(usize, RowAct)> {
+    match kind {
+        RowMenu::Docs => row_menu(ui, i, checked).map(|(i, a)| (i, RowAct::Doc(a))),
+        RowMenu::Indexes => index_menu(ui, d).map(|a| (i, RowAct::Idx(a))),
+        RowMenu::None => None,
+    }
+}
+
 impl App {
     pub(super) fn collection(&mut self, ui: &mut egui::Ui) {
         let Some(t) = self.t() else { return };
@@ -61,12 +84,12 @@ impl App {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(&coll).size(TXT_HEADING).strong().color(BRIGHT()));
             ui.add_space(12.0);
-            for (v, label) in [(View::Documents, "Documents"), (View::Aggregate, "Aggregate"), (View::Indexes, "Indexes"), (View::Schema, "Schema"), (View::Import, "Import"), (View::Compare, "Compare"), (View::Shell, "Shell")] {
+            for (v, label) in [(View::Documents, "Documents"), (View::Aggregate, "Aggregate"), (View::Indexes, "Indexes"), (View::Schema, "Schema"), (View::Import, "Import"), (View::Compare, "Compare"), (View::Shell, "Shell"), (View::Watch, "Watch")] {
                 if ui.selectable_label(view == v, label).clicked() {
                     self.set_view(v);
                 }
             }
-            if matches!(view, View::Documents | View::Aggregate | View::Indexes) {
+            if matches!(view, View::Documents | View::Aggregate | View::Indexes | View::Watch) {
                 right_group(ui, |ui| {
                     if self.prefs.table {
                         self.columns_menu(ui, view != View::Documents);
@@ -90,6 +113,7 @@ impl App {
             View::Schema => self.schema_view(ui),
             View::Import => self.import_view(ui),
             View::Compare => self.compare_view(ui),
+            View::Watch => self.watch_view(ui),
         }
     }
 

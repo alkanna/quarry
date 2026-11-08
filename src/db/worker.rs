@@ -57,6 +57,30 @@ impl Worker {
         });
     }
 
+    /// Streams the collection's changes as `WatchEvent`s until `cancel` fires or its sender drops.
+    pub fn watch(&self, req: u64, t: Target, cancel: tokio::sync::oneshot::Receiver<()>) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        self.rt.spawn(async move {
+            let send = move |m: Msg| {
+                let _ = tx.send(m);
+                ctx.request_repaint();
+            };
+            let run = async {
+                // UpdateLookup so an update shows the whole document as it is now, not just the change.
+                let mut s = t.c().watch().full_document(mongodb::options::FullDocumentType::UpdateLookup).await.map_err(e)?.with_type::<Document>();
+                while let Some(ev) = s.next().await {
+                    send(Msg::WatchEvent { req, doc: ev.map_err(e)? });
+                }
+                Ok(())
+            };
+            let res = tokio::select! {
+                r = run => r,
+                _ = cancel => Ok(()),
+            };
+            send(Msg::WatchDone { req, res });
+        });
+    }
+
     /// Starts the shell editor's language server; it stops once the sender drops or after a quiet spell.
     pub fn js_ls(&self, runtime: std::path::PathBuf, dir: std::path::PathBuf, packages: Vec<String>) -> tokio::sync::mpsc::UnboundedSender<JsLsReq> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -240,11 +264,12 @@ impl Worker {
                     let mut cur = t.c().aggregate(vec![doc! { "$collStats": { "storageStats": {} } }]).await.ok()?;
                     let d = cur.try_next().await.ok()??;
                     d.get_document("storageStats").ok()?.get_document("indexSizes").ok().cloned()
-                }
-                .await
-                .unwrap_or_default();
+                };
                 // Best effort too: usage counts are extra, and a refusal must not hide the suggestions.
-                let rows: Result<Vec<Document>, String> = async { t.c().aggregate(vec![doc! { "$indexStats": {} }]).await.map_err(e)?.try_collect().await.map_err(e) }.await;
+                let rows = async { t.c().aggregate(vec![doc! { "$indexStats": {} }]).await.map_err(e)?.try_collect::<Vec<Document>>().await.map_err(e) };
+                // Independent reads, asked together: one round trip instead of three.
+                let (sizes, rows, prof) = tokio::join!(sizes, rows, db.run_command(doc! { "profile": -1 }));
+                let (sizes, prof) = (sizes.unwrap_or_default(), prof.ok());
                 let (rows, stats_err) = match rows {
                     Ok(r) => (r, None),
                     Err(err) => (Vec::new(), Some(err)),
@@ -263,7 +288,6 @@ impl Worker {
                         }
                     })
                     .collect();
-                let prof = db.run_command(doc! { "profile": -1 }).await.ok();
                 let level = prof.as_ref().map_or(0, |p| num(p.get("was")) as i32);
                 let slowms = prof.as_ref().map_or(100, |p| num(p.get("slowms")));
                 // Newest first so the cap keeps recent traffic.
@@ -690,14 +714,8 @@ impl Worker {
 
     pub fn rename_many(&self, t: Target, filter: Document, from: String, to: String) {
         self.write(t.at(), async move {
-            let c = t.c();
-            match c.update_many(rename_filter(filter.clone(), &to), doc! { "$rename": { &from: &to } }).await {
-                Ok(r) => {
-                    // ponytail: counted after the write, so a concurrent change can make it slightly off.
-                    let skipped = c.count_documents(doc! { "$and": [filter, { &from: { "$exists": true } }, { &to: { "$exists": true } }] }).await.unwrap_or(0);
-                    let note = if skipped > 0 { format!(", skipped {skipped} that already had {to}") } else { String::new() };
-                    (Ok(format!("Renamed {from} to {to} in {} documents{note}", r.modified_count)), None)
-                }
+            match t.c().update_many(rename_filter(filter, &to), doc! { "$rename": { &from: &to } }).await {
+                Ok(r) => (Ok(format!("Renamed {from} to {to} in {} documents; any that already had {to} were left as they were", r.modified_count)), None),
                 Err(err) => (Err(e(err)), None),
             }
         });
@@ -901,7 +919,7 @@ pub(crate) fn rename_filter(filter: Document, to: &str) -> Document {
     doc! { "$and": [filter, { to: { "$exists": false } }] }
 }
 
-pub const CONFLICT: &str ="Not saved: this document changed on the server since you opened it. Reload and try again.";
+pub const CONFLICT: &str = "Not saved: this document changed on the server since you opened it. Reload and try again.";
 
 /// Matches the document only while every field is still exactly as we last read it,
 /// so a concurrent change by someone else is never silently overwritten.
@@ -988,7 +1006,11 @@ mod tests {
     /// A worker and an empty collection on the server at QUARRY_TEST_MONGO, or None to skip.
     /// ponytail: one collection per test name, dropped at the start, so a failed run leaves no trap.
     fn live(name: &str) -> Option<(Worker, std::sync::mpsc::Receiver<Msg>, Target)> {
-        let uri = std::env::var("QUARRY_TEST_MONGO").ok()?;
+        live_at("QUARRY_TEST_MONGO", name)
+    }
+
+    fn live_at(var: &str, name: &str) -> Option<(Worker, std::sync::mpsc::Receiver<Msg>, Target)> {
+        let uri = std::env::var(var).ok()?;
         let (tx, rx) = std::sync::mpsc::channel();
         let w = Worker::new(tx, eframe::egui::Context::default());
         let t = w.rt.block_on(async {
@@ -1074,13 +1096,35 @@ mod tests {
         assert!(ix("partial").get_document("partialFilterExpression").is_ok());
     }
 
+    /// Needs a replica set: QUARRY_TEST_MONGO_RS, like mongodb://localhost:27018/?directConnection=true.
+    #[test]
+    fn live_watch_streams_changes_until_stopped() {
+        let Some((w, rx, t)) = live_at("QUARRY_TEST_MONGO_RS", "watch") else { return };
+        let (stop, cancel) = tokio::sync::oneshot::channel();
+        w.watch(1, t.clone(), cancel);
+        // The stream starts asynchronously; keep writing until its first event arrives.
+        let ev = (0..50).find_map(|i| {
+            w.rt.block_on(async { t.c().insert_one(doc! { "_id": i, "n": i }).await.unwrap() });
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(Msg::WatchEvent { doc, .. }) => Some(doc),
+                _ => None,
+            }
+        });
+        let ev = ev.expect("a change event");
+        assert_eq!(ev.get_str("operationType"), Ok("insert"));
+        assert!(ev.get_document("fullDocument").is_ok());
+        drop(stop);
+        let done = std::iter::from_fn(|| rx.recv_timeout(Duration::from_secs(5)).ok()).find(|m| matches!(m, Msg::WatchDone { .. }));
+        assert!(matches!(done, Some(Msg::WatchDone { req: 1, res: Ok(()) })));
+    }
+
     #[test]
     fn live_bulk_rename_skips_documents_that_have_the_new_name() {
         let Some((w, rx, t)) = live("bulk_rename") else { return };
         seed(&w, &t, vec![doc! { "_id": 1, "a": 1 }, doc! { "_id": 2, "a": 2, "b": "keep" }]);
         w.rename_many(t.clone(), doc! {}, "a".into(), "b".into());
         let Msg::Written { res, .. } = next(&rx) else { panic!("expected Written") };
-        assert_eq!(res.unwrap(), "Renamed a to b in 1 documents, skipped 1 that already had b");
+        assert_eq!(res.unwrap(), "Renamed a to b in 1 documents; any that already had b were left as they were");
         assert_eq!(all(&w, &t), [doc! { "_id": 1, "b": 1 }, doc! { "_id": 2, "a": 2, "b": "keep" }]);
     }
 }

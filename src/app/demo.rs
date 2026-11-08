@@ -110,6 +110,23 @@ impl App {
                 ..Default::default()
             });
         }
+        if std::env::var("QUARRY_TEST_WATCH").is_ok() {
+            let t = &mut self.tabs[1];
+            t.view = View::Watch;
+            t.selected = None;
+            // A live-looking stream: the receiver is dropped, so nothing ever arrives.
+            t.watch.cancel = Some(tokio::sync::oneshot::channel().0);
+            let at = |s: i64| mongodb::bson::DateTime::from_millis(1_730_000_000_000 + s * 1000);
+            let id = |n: u8| ObjectId::from_bytes([0x66, 0x50, 0xf1, 0xc2, 0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x08, n]);
+            let events = [
+                doc! { "operationType": "insert", "wallTime": at(0), "documentKey": { "_id": id(1) }, "fullDocument": { "_id": id(1), "number": 10501, "status": "pending", "total": 42.5 } },
+                doc! { "operationType": "update", "wallTime": at(4), "documentKey": { "_id": id(1) }, "updateDescription": { "updatedFields": { "status": "paid", "paidAt": at(4) }, "removedFields": [] }, "fullDocument": { "_id": id(1), "number": 10501, "status": "paid", "total": 42.5, "paidAt": at(4) } },
+                doc! { "operationType": "insert", "wallTime": at(9), "documentKey": { "_id": id(2) }, "fullDocument": { "_id": id(2), "number": 10502, "status": "pending", "total": 18.0 } },
+                doc! { "operationType": "update", "wallTime": at(15), "documentKey": { "_id": id(2) }, "updateDescription": { "updatedFields": { "total": 21.0 }, "removedFields": ["coupon"] }, "fullDocument": { "_id": id(2), "number": 10502, "status": "pending", "total": 21.0 } },
+                doc! { "operationType": "delete", "wallTime": at(22), "documentKey": { "_id": id(3) } },
+            ];
+            t.watch.rows = events.into_iter().map(watch_row).collect();
+        }
         // QUARRY_TEST_SERVER=1 opens the Server window, =ops on its Operations section.
         if let Ok(v) = std::env::var("QUARRY_TEST_SERVER") {
             self.server = Some(ServerWin::demo(1, v == "ops"));

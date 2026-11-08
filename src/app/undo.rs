@@ -7,15 +7,6 @@ impl App {
         self.undo.insert(0, a);
         trim_undo(&mut self.undo, std::time::Instant::now());
     }
-}
-
-/// Drops actions older than a day and keeps the newest `UNDO_MAX`, like the original.
-pub(super) fn trim_undo(undo: &mut Vec<UndoAction>, now: std::time::Instant) {
-    undo.retain(|a| now.saturating_duration_since(a.at).as_secs() <= db::UNDO_MAX_AGE_S);
-    undo.truncate(db::UNDO_MAX);
-}
-
-impl App {
 
     pub(super) fn apply_undo(&mut self, i: usize) {
         let a = &self.undo[i];
@@ -38,6 +29,12 @@ impl App {
             UndoKind::Update { old, new } => self.worker.replace(a.conn, t, new, old, false),
         }
     }
+}
+
+/// Drops actions older than a day and keeps the newest `UNDO_MAX`, like the original.
+pub(super) fn trim_undo(undo: &mut Vec<UndoAction>, now: std::time::Instant) {
+    undo.retain(|a| now.saturating_duration_since(a.at).as_secs() <= db::UNDO_MAX_AGE_S);
+    undo.truncate(db::UNDO_MAX);
 }
 
 #[cfg(test)]

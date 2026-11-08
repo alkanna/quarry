@@ -406,7 +406,7 @@ pub enum ColOut {
 
 /// Numeric strings count too, since imported data often stores numbers as text.
 /// Leading zeros mark codes like "007", which import also keeps as text.
-fn num(v: &Bson) -> Option<f64> {
+pub(crate) fn num(v: &Bson) -> Option<f64> {
     match v {
         Bson::Int32(n) => Some(*n as f64),
         Bson::Int64(n) => Some(*n as f64),

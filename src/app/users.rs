@@ -14,11 +14,6 @@ pub(super) fn parse_roles(text: &str, default_db: &str) -> Vec<Bson> {
         .collect()
 }
 
-/// Whether the server refused for lack of a privilege, in its own or Atlas's wording.
-pub(super) fn denied(e: &str) -> bool {
-    e.contains("(Unauthorized)") || e.contains("not authorized") || e.contains("is not allowed to do action")
-}
-
 /// A server error without the command it echoes back, which can run to several lines.
 fn short_err(e: &str) -> &str {
     e.find(" to execute command").map_or(e, |i| &e[..i])
@@ -162,7 +157,7 @@ impl App {
                     None => {
                         spin(ui);
                     }
-                    Some(Err(e)) if denied(e) => {
+                    Some(Err(e)) if db::is_unauthorized(e) => {
                         ui.label(RichText::new("This user may not list custom roles.").color(MUTED()));
                     }
                     Some(Err(e)) => {
@@ -222,7 +217,7 @@ mod tests {
     #[test]
     fn refused_listing_falls_back_to_the_logged_in_user() {
         let e = "Command failed: Error code 13 (Unauthorized): not authorized on admin to execute command { usersInfo: { forAllDBs: true }, $db: \"admin\" }";
-        assert!(denied(e));
+        assert!(db::is_unauthorized(e));
         assert_eq!(short_err(e), "Command failed: Error code 13 (Unauthorized): not authorized on admin");
         let status = doc! { "authInfo": { "authenticatedUsers": [{ "user": "khiman", "db": "admin" }], "authenticatedUserRoles": [{ "role": "atlasAdmin", "db": "admin" }] } };
         let me = self_users(&status);
