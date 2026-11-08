@@ -31,6 +31,7 @@ mod query;
 mod relations;
 mod run;
 mod schema;
+mod server;
 mod settings;
 mod shell;
 mod shell_ls;
@@ -53,6 +54,7 @@ use tools::*;
 use tree::*;
 use users::*;
 use indexes::*;
+use server::*;
 use drafts::*;
 
 const SYSTEM_DBS: [&str; 3] = ["admin", "config", "local"];
@@ -126,6 +128,7 @@ pub struct App {
     /// Views per (connection, database), shown differently in the sidebar.
     views: HashSet<(u64, String, String)>,
     users: Option<UsersWin>,
+    server: Option<ServerWin>,
     conn_test: Option<db::Res<String>>,
     /// Usage and suggestions of the collection "db.coll" the Indexes view last asked about.
     idx_info: Option<(String, db::IndexInfo)>,
@@ -229,6 +232,7 @@ impl App {
             new_lib: String::new(),
             views: HashSet::new(),
             users: None,
+            server: None,
             conn_test: None,
             idx_info: None,
             undo: Vec::new(),
@@ -468,6 +472,7 @@ impl eframe::App for App {
         self.keys(&ctx);
         self.modals(&ctx);
         self.users_window(&ctx);
+        self.server_window(&ctx);
         self.tool_window(&ctx);
         self.toast(&ctx);
         self.screenshot(&ctx);
@@ -475,6 +480,7 @@ impl eframe::App for App {
 }
 fn human_bytes(n: usize) -> String {
     match n {
+        n if n >= 1 << 30 => format!("{:.1} GB", n as f64 / (1u64 << 30) as f64),
         n if n >= 1 << 20 => format!("{:.1} MB", n as f64 / (1 << 20) as f64),
         n if n >= 1 << 10 => format!("{:.0} KB", n as f64 / 1024.0),
         n => format!("{n} bytes"),

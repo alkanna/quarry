@@ -596,6 +596,7 @@ pub(super) enum SideAct {
     NewColl(String, bool),
     Refresh(String),
     Users,
+    Server,
     DropDb(String),
     Stats(String, String),
     ViewDef(String, String),

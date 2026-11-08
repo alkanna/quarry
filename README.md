@@ -24,6 +24,7 @@
 **See what your queries do**
 - Build a pipeline one stage at a time and see what comes out of each stage.
 - Read the explain plan of a query or pipeline.
+- Check the server's health and replica set, and find and kill slow operations (Server status, in a database's menu). It asks the server only while that window is open.
 - Watch every command sent to the server, with its duration and errors, in the query log (Cmd+L).
 - Copy a query or pipeline as code for the official MongoDB drivers.
 
