@@ -212,21 +212,11 @@ impl Worker {
     pub fn indexes(&self, req: u64, t: Target) {
         self.spawn(async move {
             let res = async {
-                let v: Vec<IndexModel> = t.c().list_indexes().await.map_err(e)?.try_collect().await.map_err(e)?;
-                Ok(v.into_iter()
-                    .map(|m| {
-                        let o = m.options.unwrap_or_default();
-                        let mut d = doc! { "name": o.name.clone().unwrap_or_default(), "keys": m.keys };
-                        // Every option the index was made with (unique, sparse, TTL, partial filter,
-                        // collation, hidden, text weights…), but not the format version.
-                        for (k, v) in mongodb::bson::to_document(&o).unwrap_or_default() {
-                            if k != "name" && k != "v" {
-                                d.insert(k, v);
-                            }
-                        }
-                        d
-                    })
-                    .collect())
+                // The raw specs rather than the driver's IndexModel, which drops options it does not
+                // model. A collection has at most 64 indexes, so the first batch holds them all.
+                let r = t.client.database(&t.db).run_command(doc! { "listIndexes": &t.coll }).await.map_err(e)?;
+                let specs = r.get_document("cursor").and_then(|c| c.get_array("firstBatch")).map_err(|err| err.to_string())?;
+                Ok(specs.iter().filter_map(Bson::as_document).map(index_doc).collect())
             }
             .await;
             Msg::Indexes { req, res }
@@ -870,6 +860,16 @@ pub(crate) async fn replace_doc(conn: u64, t: Target, old: Document, new: Docume
         ),
         Err(err) => (Err(e(err)), None),
     }
+}
+
+/// An index spec as the app keeps it: name and keys first, then every option the index was made
+/// with, without the format version and the old namespace field.
+pub(crate) fn index_doc(spec: &Document) -> Document {
+    let mut d = doc! { "name": spec.get_str("name").unwrap_or_default(), "keys": spec.get("key").cloned().unwrap_or_else(|| Bson::Document(doc! {})) };
+    for (k, v) in spec.iter().filter(|(k, _)| !["name", "key", "v", "ns"].contains(&k.as_str())) {
+        d.insert(k, v.clone());
+    }
+    d
 }
 
 /// Gives each document without an _id one of the kind the collection's `last` _id has: the next

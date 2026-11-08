@@ -136,7 +136,7 @@ impl App {
                     shapes: vec![shape],
                 },
             ));
-            self.refresh_idx_rows();
+            self.refresh_idx_rows("shop.orders");
             // QUARRY_TEST_INDEXES=new also opens the New index dialog.
             if std::env::var("QUARRY_TEST_INDEXES").is_ok_and(|v| v == "new") {
                 self.open_create_index(Some(doc! { "createdAt": -1, "total": 1 }));

@@ -91,6 +91,11 @@ impl IndexForm {
         if keys.is_empty() {
             return Err("Give at least one key, like { email: 1 }.".into());
         }
+        // The server refuses these combinations; saying so here keeps the form open to fix them.
+        if self.sparse && !self.partial.trim().is_empty() {
+            return Err("Sparse and a partial filter cannot be combined; a partial filter like { field: { $exists: true } } does what sparse does.".into());
+        }
+        let single = keys.len() == 1;
         let name = if self.name.trim().is_empty() { default_index_name(&keys) } else { self.name.trim().to_string() };
         let mut s = doc! { "key": keys, "name": name };
         for (on, k) in [(self.unique, "unique"), (self.sparse, "sparse"), (self.hidden, "hidden")] {
@@ -99,7 +104,10 @@ impl IndexForm {
             }
         }
         if !self.ttl.trim().is_empty() {
-            let n: i64 = self.ttl.trim().parse().map_err(|_| "Expire after: give a whole number of seconds.")?;
+            let n: i64 = self.ttl.trim().parse().ok().filter(|n| *n >= 0).ok_or("Expire after: give a whole number of seconds.")?;
+            if !single {
+                return Err("Expire after works only on an index with a single key, a date field.".into());
+            }
             s.insert("expireAfterSeconds", n);
         }
         if !self.partial.trim().is_empty() {
@@ -306,6 +314,8 @@ impl App {
                 let coll = collection_ref(&t.sel.coll);
                 let coll = if coll.starts_with("db.") { coll } else { format!("db.{coll}") };
                 let mut opts = row.get_document("options").cloned().unwrap_or_default();
+                // A clustered collection's _id index is made with the collection, never by createIndex.
+                opts.remove("clustered");
                 opts.insert("name", &name);
                 ctx.copy_text(format!("{coll}.createIndex({}, {})", db::shell_text(&keys), db::shell_text(&Bson::Document(opts))));
                 self.ok("Copied the createIndex command");
@@ -327,13 +337,23 @@ impl App {
         }
     }
 
-    /// Rebuilds every tab's index rows from its indexes and the latest usage stats.
-    pub(super) fn refresh_idx_rows(&mut self) {
+    /// Rebuilds the index rows of the tabs showing collection `key` ("db.coll"). Open rows follow
+    /// their index by name, since a create or drop moves the others up or down.
+    pub(super) fn refresh_idx_rows(&mut self, key: &str) {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
-        for t in &mut self.tabs {
-            let key = format!("{}.{}", t.sel.db, t.sel.coll);
-            let info = self.idx_info.as_ref().filter(|(k, _)| *k == key).map(|(_, i)| i);
-            t.idx_rows = index_rows(&t.indexes, info, now);
+        let info = self.idx_info.as_ref().filter(|(k, _)| k == key).map(|(_, i)| i);
+        for t in self.tabs.iter_mut().filter(|t| format!("{}.{}", t.sel.db, t.sel.coll) == key) {
+            let rows = index_rows(&t.indexes, info, now);
+            if t.view == View::Indexes {
+                let name = |i: usize| t.idx_rows.get(i).and_then(|r| r.get_str("name").ok());
+                let pos = |i: usize| name(i).and_then(|n| rows.iter().position(|r| r.get_str("name") == Ok(n)));
+                t.selected = match t.selected {
+                    Some((true, i)) => pos(i).map(|p| (true, p)),
+                    s => s,
+                };
+                t.expanded = t.expanded.iter().filter_map(|&(agg, i)| if agg { pos(i).map(|p| (true, p)) } else { Some((agg, i)) }).collect();
+            }
+            t.idx_rows = rows;
         }
     }
 
@@ -385,13 +405,15 @@ mod tests {
 
     #[test]
     fn index_form_builds_the_spec() {
-        let f = IndexForm { keys: "{ email: 1, at: -1 }".into(), unique: true, ttl: "3600".into(), partial: "{ active: true }".into(), locale: "fr".into(), strength: 2, ..Default::default() };
-        assert_eq!(
-            f.spec().unwrap(),
-            doc! { "key": { "email": 1, "at": -1 }, "name": "email_1_at_-1", "unique": true, "expireAfterSeconds": 3600_i64, "partialFilterExpression": { "active": true }, "collation": { "locale": "fr", "strength": 2 } }
-        );
+        let f = IndexForm { keys: "{ email: 1, at: -1 }".into(), unique: true, partial: "{ active: true }".into(), locale: "fr".into(), strength: 2, ..Default::default() };
+        assert_eq!(f.spec().unwrap(), doc! { "key": { "email": 1, "at": -1 }, "name": "email_1_at_-1", "unique": true, "partialFilterExpression": { "active": true }, "collation": { "locale": "fr", "strength": 2 } });
+        let ttl = IndexForm { keys: "{ at: 1 }".into(), ttl: "3600".into(), ..Default::default() };
+        assert_eq!(ttl.spec().unwrap(), doc! { "key": { "at": 1 }, "name": "at_1", "expireAfterSeconds": 3600_i64 });
         assert_eq!(IndexForm { keys: "{ body: 'text' }".into(), name: " search ".into(), ..Default::default() }.spec().unwrap(), doc! { "key": { "body": "text" }, "name": "search" });
         assert!(IndexForm { keys: "{}".into(), ..Default::default() }.spec().is_err());
         assert!(IndexForm { keys: "{ a: 1 }".into(), ttl: "soon".into(), ..Default::default() }.spec().is_err());
+        assert!(IndexForm { keys: "{ a: 1 }".into(), ttl: "-5".into(), ..Default::default() }.spec().is_err());
+        assert!(IndexForm { keys: "{ a: 1, b: 1 }".into(), ttl: "60".into(), ..Default::default() }.spec().is_err());
+        assert!(IndexForm { keys: "{ a: 1 }".into(), sparse: true, partial: "{ a: 1 }".into(), ..Default::default() }.spec().is_err());
     }
 }

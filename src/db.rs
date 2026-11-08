@@ -4,7 +4,7 @@
 use futures_util::{StreamExt, TryStreamExt};
 use mongodb::bson::{Bson, Document, doc};
 use mongodb::options::ClientOptions;
-use mongodb::{Client, IndexModel};
+use mongodb::Client;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
