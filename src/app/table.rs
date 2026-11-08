@@ -2,17 +2,83 @@
 
 use super::*;
 
+/// The rows a results table draws: result documents, or the Documents view's rows kept as BSON bytes.
+#[derive(Clone, Copy)]
+pub(super) enum Rows<'a> {
+    Docs(&'a [Document]),
+    Raw(&'a [db::Row]),
+}
+
+impl<'a> Rows<'a> {
+    pub(super) fn len(self) -> usize {
+        match self {
+            Rows::Docs(d) => d.len(),
+            Rows::Raw(r) => r.len(),
+        }
+    }
+
+    pub(super) fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
+    /// Where the rows live, part of the column width cache key.
+    fn addr(self) -> usize {
+        match self {
+            Rows::Docs(d) => d.as_ptr() as usize,
+            Rows::Raw(r) => r.as_ptr() as usize,
+        }
+    }
+
+    /// The value at a dotted path, read without decoding the rest of the row.
+    pub(super) fn value(self, i: usize, path: &str) -> Option<Val<'a>> {
+        match self {
+            Rows::Docs(d) => db::get_path(d.get(i)?, path).map(Val::B),
+            Rows::Raw(r) => r.get(i)?.value(path).map(Val::R),
+        }
+    }
+
+    /// Row `i` decoded; a raw row keeps it until the row closes, so only call it for open rows.
+    pub(super) fn doc(self, i: usize) -> Option<&'a Document> {
+        match self {
+            Rows::Docs(d) => d.get(i),
+            Rows::Raw(r) => r.get(i).map(db::Row::doc),
+        }
+    }
+
+    /// A decoded copy of row `i`, for actions.
+    pub(super) fn owned(self, i: usize) -> Option<Document> {
+        match self {
+            Rows::Docs(d) => d.get(i).cloned(),
+            Rows::Raw(r) => r.get(i).map(db::Row::owned),
+        }
+    }
+
+    pub(super) fn id(self, i: usize) -> Option<Bson> {
+        match self {
+            Rows::Docs(d) => d.get(i)?.get("_id").cloned(),
+            Rows::Raw(r) => r.get(i)?.id(),
+        }
+    }
+
+    fn row_job(self, i: usize, width: f32) -> LayoutJob {
+        match self {
+            Rows::Docs(d) => row_job(&d[i], width),
+            Rows::Raw(r) => row_job_of(r[i].id().as_ref(), r[i].raw().iter().map_while(Result::ok).map(|(k, v)| (k, Val::R(v))), width),
+        }
+    }
+}
+
 /// The original's "optimal" column width (measureColumnWidth, renderer line 31273): the widest
 /// cell, kept between 40 and 400 px, plus 10 px. Our cells add 16 px of inner padding on top.
 /// `header` is the text drawn in the header, a custom label or the path itself.
-pub(super) fn optimal_width(ui: &egui::Ui, docs: &[Document], col: &str, header: &str, summarize: bool, cap: f32) -> f32 {
+pub(super) fn optimal_width(ui: &egui::Ui, docs: Rows, col: &str, header: &str, summarize: bool, cap: f32) -> f32 {
     if docs.is_empty() {
         return 100.0 + CELL_PAD; // the original's fallback width
     }
     let widest = ui.fonts_mut(|f| {
         let head = f.layout_no_wrap(header.to_string(), FontId::proportional(TXT_BODY), TEXT()).size().x;
-        docs.iter()
-            .filter_map(|d| db::get_path(d, col))
+        (0..docs.len())
+            .filter_map(|i| docs.value(i, col))
             .map(|v| f.layout_job(column_job(v, summarize)).size().x)
             .fold(head, f32::max)
     });
@@ -243,7 +309,7 @@ impl App {
         self.save_prefs();
     }
 
-    pub(super) fn doc_table(&mut self, ui: &mut egui::Ui, agg: bool, docs: &[Document], fields: &[String], base: u64) {
+    pub(super) fn doc_table(&mut self, ui: &mut egui::Ui, agg: bool, docs: Rows, fields: &[String], base: u64) {
         let key = self.col_key(agg);
         let prefs = self.prefs.cols.get(&key).cloned().unwrap_or_default();
         let cols = visible_cols(Some(&prefs), fields, self.prefs.default_cols);
@@ -255,7 +321,7 @@ impl App {
             .map(|c| {
                 prefs.widths.get(c).copied().unwrap_or_else(|| {
                     // The header text is measured too, so a custom label is part of the key.
-                    let k = (docs.as_ptr() as usize, docs.len(), c.clone(), prefs.labels.get(c).cloned(), summarize);
+                    let k = (docs.addr(), docs.len(), c.clone(), prefs.labels.get(c).cloned(), summarize);
                     if let Some(w) = self.width_cache.get(&k) {
                         return *w;
                     }
@@ -371,9 +437,12 @@ impl App {
                 }
                 ui.painter().hline(hr.x_range(), hr.bottom(), Stroke::new(1.0, BORDER()));
                 // Rows (at most one page, so no virtualisation is needed)
-                for (i, d) in docs.iter().enumerate() {
-                    let drafted = self.shown_doc(d, agg);
-                    let d = drafted.as_ref().unwrap_or(d);
+                for i in 0..docs.len() {
+                    let drafted = self.shown_row(docs, i, agg);
+                    let value = |c: &str| match &drafted {
+                        Some(d) => db::get_path(d, c).map(Val::B),
+                        None => docs.value(i, c),
+                    };
                     let active = selected == Some((agg, i));
                     let (rr, resp) = ui.allocate_exact_size(egui::vec2(row_w, ROW_H), Sense::click());
                     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -417,7 +486,7 @@ impl App {
                                 ui.painter().rect_filled(cell, 0, HIGHLIGHT());
                             }
                             let clip = ui.painter().with_clip_rect(cell.shrink2(egui::vec2(6.0, 0.0)));
-                            let v = db::get_path(d, c);
+                            let v = value(c);
                             match v {
                                 Some(v) => {
                                     let mut job = column_job(v, summarize);
@@ -427,7 +496,7 @@ impl App {
                                     let gw = g.size().x;
                                     // Ids only, checked before compact(): that turns the whole value into JSON,
                                     // which is costly for big objects on every frame.
-                                    let rel = (!related.is_empty() && matches!(v, Bson::ObjectId(_) | Bson::String(_))).then(|| related.get(&db::compact(v))).flatten();
+                                    let rel = (!related.is_empty() && v.id_like()).then(|| related.get(&db::compact(&v.bson()))).flatten();
                                     let rg = rel.map(|p| ui.fonts_mut(|f| f.layout_no_wrap(p.clone(), FontId::proportional(TXT_SMALL), C_LINK())));
                                     // The value and its preview are aligned as one, so the preview stays inside the cell.
                                     let vx = align_x(aligns[ci], x, *w, gw + rg.as_ref().map_or(0.0, |r| 6.0 + r.size().x));
@@ -454,10 +523,10 @@ impl App {
                                     menu_look(ui);
                                     // Field and document actions together run about 800 pt, taller than many windows.
                                     menu_scroll(ui, |ui| {
-                                        field_menu(ui, &path, v, !agg, in_coll, hl_cols[ci], &mut acts);
+                                        field_menu(ui, &path, &v.bson(), !agg, in_coll, hl_cols[ci], &mut acts);
                                         if menu != RowMenu::None {
                                             ui.separator();
-                                            row_act = any_row_menu(ui, menu, i, d, &checked).or(row_act.take());
+                                            row_act = any_row_menu(ui, menu, i, docs, &checked).or(row_act.take());
                                         }
                                     });
                                 });
@@ -470,7 +539,7 @@ impl App {
                                         }
                                         ui.separator();
                                     }
-                                    row_act = any_row_menu(ui, menu, i, d, &checked).or(row_act.take());
+                                    row_act = any_row_menu(ui, menu, i, docs, &checked).or(row_act.take());
                                 });
                             }
                             if !acts.is_empty() {
@@ -483,7 +552,7 @@ impl App {
                         click = Some(i);
                     }
                     if menu != RowMenu::None {
-                        resp.context_menu(|ui| row_act = any_row_menu(ui, menu, i, d, &checked).or(row_act.take()));
+                        resp.context_menu(|ui| row_act = any_row_menu(ui, menu, i, docs, &checked).or(row_act.take()));
                     }
                     if (active || expanded.contains(&(agg, i))) && self.prefs.open_inline {
                         ui.add_space(4.0);
@@ -493,7 +562,9 @@ impl App {
                             // Card inner margin and stroke on both sides.
                             ui.set_width(w - 30.0);
                             ui.spacing_mut().item_spacing.y = 6.0;
-                            self.doc_body(ui, d, agg, Some((agg, i)));
+                            if let Some(d) = drafted.as_ref().or_else(|| docs.doc(i)) {
+                                self.doc_body(ui, d, agg, Some((agg, i)));
+                            }
                         });
                         ui.add_space(6.0);
                     }
@@ -527,13 +598,13 @@ impl App {
         self.row_act(ui, row_act, docs, &checked);
         for (i, acts) in cell_acts {
             self.select(agg, i, false);
-            let d = self.shown_doc(&docs[i], agg).unwrap_or_else(|| docs[i].clone());
+            let Some(d) = self.shown_row(docs, i, agg).or_else(|| docs.owned(i)) else { continue };
             self.handle_acts(&d, acts);
         }
         if let (Some((i, c)), false) = (edit_cell, agg) {
             self.select(agg, i, false);
             let path: Vec<String> = c.split('.').map(String::from).collect();
-            let d = self.shown_doc(&docs[i], false).unwrap_or_else(|| docs[i].clone());
+            let d = self.shown_row(docs, i, false).or_else(|| docs.owned(i)).unwrap_or_default();
             match db::get_path(&d, &c).cloned() {
                 Some(v) if c != "_id" => self.start_inline(&d, path, v),
                 Some(_) => {}
@@ -542,7 +613,7 @@ impl App {
         }
     }
 
-    pub(super) fn doc_list(&mut self, ui: &mut egui::Ui, agg: bool, docs: &[Document]) {
+    pub(super) fn doc_list(&mut self, ui: &mut egui::Ui, agg: bool, docs: Rows) {
         let selected = self.t().unwrap().selected;
         let checked = if agg { BTreeSet::new() } else { self.t().unwrap().checked.clone() };
         let expanded = self.t().unwrap().expanded.clone();
@@ -553,9 +624,8 @@ impl App {
         egui::Frame::new().fill(PANEL()).corner_radius(R_MD).inner_margin(4).show(ui, |ui| {
             egui::ScrollArea::vertical().id_salt(("list", agg)).auto_shrink(false).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                for (i, d) in docs.iter().enumerate() {
-                    let drafted = self.shown_doc(d, agg);
-                    let d = drafted.as_ref().unwrap_or(d);
+                for i in 0..docs.len() {
+                    let drafted = self.shown_row(docs, i, agg);
                     let active = selected == Some((agg, i));
                     let w = ui.available_width();
                     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, ROW_H), Sense::click());
@@ -573,20 +643,26 @@ impl App {
                         Color32::TRANSPARENT
                     };
                     ui.painter().rect_filled(rect, R_SM, fill);
-                    let galley = ui.fonts_mut(|f| f.layout_job(row_job(d, w - 16.0)));
+                    let job = match &drafted {
+                        Some(d) => row_job(d, w - 16.0),
+                        None => docs.row_job(i, w - 16.0),
+                    };
+                    let galley = ui.fonts_mut(|f| f.layout_job(job));
                     ui.painter().galley(rect.left_center() + egui::vec2(8.0, -galley.size().y / 2.0), galley, TEXT());
                     if resp.clicked() {
                         click = Some(i);
                     }
                     if menu != RowMenu::None {
-                        resp.context_menu(|ui| row_act = any_row_menu(ui, menu, i, d, &checked).or(row_act.take()));
+                        resp.context_menu(|ui| row_act = any_row_menu(ui, menu, i, docs, &checked).or(row_act.take()));
                     }
                     if (active || expanded.contains(&(agg, i))) && self.prefs.open_inline {
                         ui.add_space(4.0);
                         card(ui, |ui| {
                             ui.set_width(view_w - 48.0);
                             ui.spacing_mut().item_spacing.y = 6.0;
-                            self.doc_body(ui, d, agg, Some((agg, i)));
+                            if let Some(d) = drafted.as_ref().or_else(|| docs.doc(i)) {
+                                self.doc_body(ui, d, agg, Some((agg, i)));
+                            }
                         });
                         ui.add_space(6.0);
                     }
@@ -608,10 +684,14 @@ impl App {
         }
     }
 
-    fn row_act(&mut self, ui: &egui::Ui, act: Option<(usize, RowAct)>, docs: &[Document], checked: &BTreeSet<usize>) {
+    fn row_act(&mut self, ui: &egui::Ui, act: Option<(usize, RowAct)>, docs: Rows, checked: &BTreeSet<usize>) {
         match act {
             Some((i, RowAct::Doc(a))) => self.docs_act(&ui.ctx().clone(), a, Self::act_targets(checked, docs, i)),
-            Some((i, RowAct::Idx(a))) => self.index_act(ui.ctx(), &docs[i], a),
+            Some((i, RowAct::Idx(a))) => {
+                if let Some(d) = docs.doc(i) {
+                    self.index_act(ui.ctx(), d, a);
+                }
+            }
             None => {}
         }
     }

@@ -218,15 +218,18 @@ impl Worker {
                 .map_err(e)?;
                 let count = q.limit.map_or(count.saturating_sub(q.skip), |l| count.saturating_sub(q.skip).min(l));
                 let take = count.saturating_sub(page * PAGE_SIZE).min(PAGE_SIZE).max(1);
-                let mut f = c.find(q.filter).skip(q.skip + page * PAGE_SIZE).limit(take as i64).max_time(t.timeout);
+                // Read as BSON bytes: the page is kept that way, see `Row`.
+                let raw = c.clone_with_type::<mongodb::bson::RawDocumentBuf>();
+                let mut f = raw.find(q.filter).skip(q.skip + page * PAGE_SIZE).limit(take as i64).max_time(t.timeout);
                 if let Some(s) = q.sort {
                     f = f.sort(s);
                 }
                 if let Some(p) = q.projection {
                     f = f.projection(p);
                 }
-                let docs: Vec<Document> = f.await.map_err(e)?.try_collect().await.map_err(e)?;
-                Ok((docs, count, start.elapsed().as_millis()))
+                let docs: Vec<Row> = f.await.map_err(e)?.map_ok(Row::from_raw).try_collect().await.map_err(e)?;
+                let decoded = docs.iter().map(Row::decode).collect::<Res<Vec<_>>>()?;
+                Ok((docs, decoded, count, start.elapsed().as_millis()))
             }
             .await;
             Msg::Docs { req, res }
@@ -1032,6 +1035,22 @@ mod tests {
 
     fn seed(w: &Worker, t: &Target, docs: Vec<Document>) {
         w.rt.block_on(async { t.c().insert_many(docs).await.unwrap() });
+    }
+
+    #[test]
+    fn live_find_pages_rows_as_bson_bytes() {
+        let Some((w, rx, t)) = live("find_rows") else { return };
+        seed(&w, &t, (0..120).map(|i| doc! { "_id": i, "n": i % 7, "nested": { "list": [i, { "deep": format!("v{i}") }] } }).collect());
+        let q = Query { filter: doc! { "n": { "$lt": 5 } }, sort: Some(doc! { "_id": -1 }), projection: Some(doc! { "nested": 1 }), ..Default::default() };
+        w.find(1, t.clone(), q, 1);
+        let Msg::Docs { res: Ok((rows, decoded, count, _)), .. } = next(&rx) else { panic!("expected Docs") };
+        let want: Vec<Document> = (0..120).rev().filter(|i| i % 7 < 5).skip(PAGE_SIZE as usize).take(PAGE_SIZE as usize).map(|i| doc! { "_id": i, "nested": { "list": [i, { "deep": format!("v{i}") }] } }).collect();
+        assert_eq!(count, (0..120).filter(|i| i % 7 < 5).count() as u64);
+        assert_eq!(rows.iter().map(|r| r.decode().unwrap()).collect::<Vec<_>>(), want);
+        assert_eq!(decoded, want);
+        let first = &rows[0];
+        assert_eq!(first.id(), want[0].get("_id").cloned());
+        assert_eq!(first.value("nested.list.1.deep").and_then(|v| Bson::try_from(v).ok()), crate::db::get_path(&want[0], "nested.list.1.deep").cloned());
     }
 
     #[test]

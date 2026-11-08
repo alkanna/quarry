@@ -58,6 +58,7 @@ use indexes::*;
 use server::*;
 use watch::*;
 use drafts::*;
+use table::Rows;
 
 const SYSTEM_DBS: [&str; 3] = ["admin", "config", "local"];
 /// Columns shown before the user picks their own; drawing every field of a wide collection is slow.
@@ -284,7 +285,8 @@ impl App {
             app.req += 1;
             app.tabs[0].req = app.req;
             let n = docs.len() as u64;
-            app.worker.send(Msg::Docs { req: app.req, res: Ok((docs, n, 3)) });
+            let rows = docs.iter().filter_map(|d| db::Row::from_doc(d).ok()).collect();
+            app.worker.send(Msg::Docs { req: app.req, res: Ok((rows, docs, n, 3)) });
         } else if demo {
             app.load_demo();
             // Test switches: the demo picture in the light theme, and with the find bar open.
@@ -425,7 +427,7 @@ impl eframe::App for App {
         LIGHT_MODE.store(ctx.theme() == egui::Theme::Light, std::sync::atomic::Ordering::Relaxed);
         // macOS leaves an app started from a terminal or Finder behind the frontmost one; the first
         // frames ask for focus once the window is visible (a no-op when it already has it).
-        if ctx.cumulative_frame_nr() < 3 {
+        if ctx.cumulative_frame_nr() < 3 && crate::takes_focus() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
         #[cfg(target_os = "macos")]

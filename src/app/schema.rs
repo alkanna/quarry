@@ -174,7 +174,7 @@ impl App {
                 self.worker.schema(req, target, t.query.filter.clone(), t.schema.limit);
             } else if self.demo {
                 let t = &mut self.tabs[self.cur];
-                t.schema.stats = db::analyze_schema(&t.docs);
+                t.schema.stats = db::analyze_schema(&t.decoded_docs());
                 (t.schema.docs, t.schema.ms) = (t.docs.len(), Some(3));
             }
         }
