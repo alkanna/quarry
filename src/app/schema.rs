@@ -6,7 +6,13 @@ impl App {
     pub(super) fn schema_view(&mut self, ui: &mut egui::Ui) {
         let mut analyze = false;
         let mut acts: Vec<(String, u8)> = Vec::new();
+        let sel = &self.tabs[self.cur].sel;
+        // Views refuse a $natural sort, so they only offer the first documents.
+        let view = self.views.contains(&(sel.conn, sel.db.clone(), sel.coll.clone()));
         let t = &mut self.tabs[self.cur];
+        if view {
+            t.schema.last = false;
+        }
         // Analyze once when the view opens; the limit keeps it light on big collections.
         if t.schema.stats.is_empty() && !t.schema.running && t.schema.ms.is_none() && t.schema.err.is_none() {
             analyze = true;
@@ -16,14 +22,23 @@ impl App {
                 caption(ui, "SCHEMA  ·  fields of the documents matching the current query");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     analyze |= primary(ui, "Analyze", PRIMARY()).clicked();
-                    egui::ComboBox::from_id_salt("schema-limit")
-                        .selected_text(if t.schema.limit == 0 { "all documents".to_string() } else { format!("first {}", group(&t.schema.limit.to_string())) })
-                        .show_ui(ui, |ui| {
-                            menu_look(ui);
-                            for n in [100, 1000, 10_000, 100_000, 0] {
-                                ui.selectable_value(&mut t.schema.limit, n, if n == 0 { "all documents".to_string() } else { format!("first {}", group(&n.to_string())) });
+                    let label = |(n, last): (i64, bool)| if n == 0 { "all documents".to_string() } else { format!("{} {}", if last { "last" } else { "first" }, group(&n.to_string())) };
+                    let mut pick = (t.schema.limit, t.schema.last);
+                    egui::ComboBox::from_id_salt("schema-limit").selected_text(label(pick)).show_ui(ui, |ui| {
+                        menu_look(ui);
+                        let mut group = |ui: &mut egui::Ui, last: bool| {
+                            for n in [100, 1000, 10_000, 100_000].into_iter().filter(|&n| !last || n >= 1000) {
+                                ui.selectable_value(&mut pick, (n, last), label((n, last)));
                             }
-                        });
+                            ui.separator();
+                        };
+                        group(ui, false);
+                        if !view {
+                            group(ui, true);
+                        }
+                        ui.selectable_value(&mut pick, (0, false), label((0, false)));
+                    });
+                    (t.schema.limit, t.schema.last) = pick;
                     if t.schema.running {
                         spin(ui);
                     }
@@ -171,7 +186,7 @@ impl App {
                 t.schema.req = req;
                 t.schema.running = true;
                 t.schema.err = None;
-                self.worker.schema(req, target, t.query.filter.clone(), t.schema.limit);
+                self.worker.schema(req, target, t.query.filter.clone(), t.schema.limit, t.schema.last);
             } else if self.demo {
                 let t = &mut self.tabs[self.cur];
                 t.schema.stats = db::analyze_schema(&t.decoded_docs());

@@ -266,6 +266,8 @@ pub(super) struct ToolRun {
 pub(super) struct SchemaTab {
     pub(super) req: u64,
     pub(super) limit: i64,
+    /// The limit counts from the most recently inserted documents instead of the first.
+    pub(super) last: bool,
     pub(super) running: bool,
     pub(super) stats: Vec<db::FieldStat>,
     pub(super) docs: usize,
@@ -282,7 +284,7 @@ pub(super) struct SchemaTab {
 
 impl Default for SchemaTab {
     fn default() -> Self {
-        Self { req: 0, limit: SCHEMA_DEFAULT_LIMIT, running: false, stats: Vec::new(), docs: 0, ms: None, err: None, vtext: String::new(), vlevel: 2, vwarn: false, vreq: 0, vloaded: false }
+        Self { req: 0, limit: SCHEMA_DEFAULT_LIMIT, last: false, running: false, stats: Vec::new(), docs: 0, ms: None, err: None, vtext: String::new(), vlevel: 2, vwarn: false, vreq: 0, vloaded: false }
     }
 }
 
