@@ -891,8 +891,9 @@ mod tests {
         assert_eq!((r.same, r.changed.len(), r.only_src.len(), r.only_dst.len()), (1, 1, 1, 1));
         assert_eq!(r.diffs, vec![doc! { "_id": 2, "field": "x", "target": 2, "source": 1 }]);
         assert_eq!(preview_field(&doc! { "_id": 1, "owner": "6650f1c2a1b2c3d4e5f60700", "name": "Ada" }), "name");
-        assert_eq!(values_at(&[doc! { "t": [1, 2] }, doc! { "t": 2 }], "t"), vec![Bson::Int32(1), Bson::Int32(2)]);
-        assert_eq!(values_at(&[doc! { "items": [{ "p": 1 }, { "p": 3 }] }], "items.p"), vec![Bson::Int32(1), Bson::Int32(3)]);
+        let raw = |ds: &[Document]| ds.iter().map(|d| RawDocumentBuf::from_document(d).unwrap()).collect::<Vec<_>>();
+        assert_eq!(values_at(raw(&[doc! { "t": [1, 2] }, doc! { "t": 2 }]).iter().map(|d| d.as_ref()), "t"), vec![Bson::Int32(1), Bson::Int32(2)]);
+        assert_eq!(values_at(raw(&[doc! { "items": [{ "p": 1 }, { "p": 3 }] }]).iter().map(|d| d.as_ref()), "items.p"), vec![Bson::Int32(1), Bson::Int32(3)]);
         let oid = Bson::ObjectId(mongodb::bson::oid::ObjectId::new());
         let found = proto_relations(&[doc! { "_id": oid.clone(), "owner": oid.clone(), "code": "abc123", "items": [{ "product": oid.clone() }], "tags": [oid.clone()] }], 6);
         let paths: Vec<&str> = found.iter().map(|(p, _)| p.as_str()).collect();

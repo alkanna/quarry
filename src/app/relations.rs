@@ -158,7 +158,7 @@ impl App {
         let Some(client) = self.conn(t.sel.conn).and_then(|c| c.client.clone()) else { return };
         let rels = self.prefs.relations.get(&format!("{}/{}", t.sel.conn, t.sel.db)).into_iter().flatten().filter(|r| r.coll == t.sel.coll && !r.preview.is_empty());
         for r in rels {
-            let ids = db::values_at(&t.decoded_docs(), &r.path);
+            let ids = db::values_at(t.docs.iter().map(db::Row::raw), &r.path);
             if !ids.is_empty() {
                 self.worker.related(req, Target { client: client.clone(), db: t.sel.db.clone(), coll: r.target.clone(), timeout: self.timeout() }, ids, r.preview.clone());
             }

@@ -62,25 +62,26 @@ pub fn preview_field(d: &Document) -> String {
 }
 
 /// Every value at `path`, looking inside arrays at any level, for looking up referenced documents.
-pub fn values_at(docs: &[Document], path: &str) -> Vec<Bson> {
-    fn walk(v: &Bson, segs: &[&str], out: &mut Vec<Bson>) {
+pub fn values_at<'a>(docs: impl IntoIterator<Item = &'a RawDocument>, path: &str) -> Vec<Bson> {
+    // Read from the BSON bytes, so a page of large documents is not decoded to find a few ids.
+    fn walk(v: RawBsonRef, segs: &[&str], out: &mut Vec<Bson>) {
         match (v, segs.split_first()) {
-            (Bson::Array(a), _) => a.iter().for_each(|x| walk(x, segs, out)),
-            (Bson::Document(d), Some((k, rest))) => {
-                if let Some(x) = d.get(*k) {
+            (RawBsonRef::Array(a), _) => a.into_iter().flatten().for_each(|x| walk(x, segs, out)),
+            (RawBsonRef::Document(d), Some((k, rest))) => {
+                if let Ok(Some(x)) = d.get(k) {
                     walk(x, rest, out);
                 }
             }
-            (v, None) => out.push(v.clone()),
+            (v, None) => out.extend(Bson::try_from(v).ok()),
             _ => {}
         }
     }
     let segs: Vec<&str> = path.split('.').collect();
     let mut out = Vec::new();
     for d in docs {
-        walk(&Bson::Document(d.clone()), &segs, &mut out);
+        walk(RawBsonRef::Document(d), &segs, &mut out);
     }
-    out.sort_by_key(compact);
+    out.sort_by_cached_key(compact);
     out.dedup();
     out
 }
