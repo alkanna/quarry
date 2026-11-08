@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.0](https://github.com/alkanna/quarry/compare/v0.22.0...v0.23.0) (2026-11-08)
+
+
+### Features
+
+* hide the server line in the status bar by default, with a setting to show it ([#132](https://github.com/alkanna/quarry/issues/132)) ([bdaf4f4](https://github.com/alkanna/quarry/commit/bdaf4f4991e9137bb5a42e7e3820095e2ae4e5d1))
+
 ## [0.22.0](https://github.com/alkanna/quarry/compare/v0.21.0...v0.22.0) (2026-11-08)
 
 
