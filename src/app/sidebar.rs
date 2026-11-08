@@ -146,35 +146,27 @@ impl App {
             .resizable(true)
             .frame(egui::Frame::new().fill(PANEL()).inner_margin(egui::Margin { left: 12, right: 12, top: 12, bottom: 8 }))
             .show(ui, |ui| {
-                // The footer is laid out first from the bottom, so the tree scrolls above it.
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                    if let Some(text) = self.active.and_then(|id| self.conn(id)).and_then(|c| c.server.footer()) {
-                        ui.label(RichText::new(text).font(FontId::monospace(10.0)).color(FAINT()));
-                    }
-                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                        ui.label(LayoutJob::single_section("DATABASE EXPLORER".into(), ui_fmt(10.5, MUTED(), W_SEMIBOLD, 0.6)));
-                        ui.add_space(6.0);
-                        self.conn_picker(ui);
-                        ui.add_space(8.0);
-                        let r = ui.add(
-                            egui::TextEdit::singleline(&mut self.tree_filter)
-                                .id(egui::Id::unique("tree-filter"))
-                                .hint_text(RichText::new("Filter collections").color(FAINT()))
-                                .desired_width(f32::INFINITY)
-                                .margin(egui::Margin { left: 10, right: 28, top: 5, bottom: 5 }),
-                        );
-                        if !r.has_focus() && self.tree_filter.is_empty() {
-                            let g = ui.painter().layout_job(LayoutJob::single_section("/".into(), mono_fmt(10.0, MUTED(), 400.0)));
-                            let kr = egui::Rect::from_min_size(egui::pos2(r.rect.right() - 24.0, r.rect.center().y - 8.0), egui::vec2(18.0, 16.0));
-                            paint_kbd(ui.painter(), kr, g);
-                        }
-                        r.on_hover_text("Press / or Cmd+Shift+F");
-                        ui.add_space(14.0);
-                        ui.label(LayoutJob::single_section("Databases".into(), ui_fmt(10.5, FAINT(), W_SEMIBOLD, 0.8)));
-                        ui.add_space(2.0);
-                        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| self.db_tree(ui));
-                    });
-                });
+                ui.label(LayoutJob::single_section("DATABASE EXPLORER".into(), ui_fmt(10.5, MUTED(), W_SEMIBOLD, 0.6)));
+                ui.add_space(6.0);
+                self.conn_picker(ui);
+                ui.add_space(8.0);
+                let r = ui.add(
+                    egui::TextEdit::singleline(&mut self.tree_filter)
+                        .id(egui::Id::unique("tree-filter"))
+                        .hint_text(RichText::new("Filter collections").color(FAINT()))
+                        .desired_width(f32::INFINITY)
+                        .margin(egui::Margin { left: 10, right: 28, top: 5, bottom: 5 }),
+                );
+                if !r.has_focus() && self.tree_filter.is_empty() {
+                    let g = ui.painter().layout_job(LayoutJob::single_section("/".into(), mono_fmt(10.0, MUTED(), 400.0)));
+                    let kr = egui::Rect::from_min_size(egui::pos2(r.rect.right() - 24.0, r.rect.center().y - 8.0), egui::vec2(18.0, 16.0));
+                    paint_kbd(ui.painter(), kr, g);
+                }
+                r.on_hover_text("Press / or Cmd+Shift+F");
+                ui.add_space(14.0);
+                ui.label(LayoutJob::single_section("Databases".into(), ui_fmt(10.5, FAINT(), W_SEMIBOLD, 0.8)));
+                ui.add_space(2.0);
+                egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| self.db_tree(ui));
             });
     }
 

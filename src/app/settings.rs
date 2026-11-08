@@ -9,7 +9,7 @@ impl App {
         ui.label(RichText::new("Changes are saved right away.").size(TXT_SMALL).color(FAINT()));
         ui.add_space(8.0);
         // Settings that save when changed. Tuples compare up to 12 items, so the readout toggles are grouped.
-        let saved = |p: &UiPrefs| (p.open_inline, p.auto_save, p.always_writable, p.confirm_save, p.default_cols, p.timeout_ms, p.shell_runtime.clone(), p.mongodump.clone(), p.mongorestore.clone(), p.auto_update, (p.show_fps, p.show_mem, p.show_cpu), p.object_preview);
+        let saved = |p: &UiPrefs| (p.open_inline, p.auto_save, p.always_writable, p.confirm_save, p.default_cols, p.timeout_ms, p.shell_runtime.clone(), p.mongodump.clone(), p.mongorestore.clone(), p.auto_update, (p.show_server, p.show_fps, p.show_mem, p.show_cpu), p.object_preview);
         let before = saved(&self.prefs);
         // The sections scroll inside the dialog, which keeps its title and Done in the window.
         let max_h = (ui.ctx().content_rect().height() - 190.0).max(200.0);
@@ -71,6 +71,11 @@ impl App {
                 };
                 setting_row(ui, "Bun runtime", &desc, |ui| {
                     ui.add(egui::TextEdit::singleline(&mut self.prefs.shell_runtime).hint_text("automatic").desired_width(190.0));
+                });
+            });
+            settings_section(ui, "STATUS BAR", |ui| {
+                setting_row(ui, "Show server", "The connection's host, MongoDB version and replica set, with a dot for whether it is connected.", |ui| {
+                    toggle(ui, &mut self.prefs.show_server);
                 });
             });
             settings_section(ui, "PERFORMANCE", |ui| {

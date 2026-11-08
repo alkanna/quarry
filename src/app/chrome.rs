@@ -341,7 +341,7 @@ impl App {
             ui.painter().hline(full.x_range(), full.top() + 0.5, Stroke::new(1.0, LINE()));
             ui.horizontal_centered(|ui| {
                 // The active connection: its state, then where it is and what it runs.
-                if let Some(c) = self.active.and_then(|id| self.conn(id)) {
+                if let Some(c) = self.active.and_then(|id| self.conn(id)).filter(|_| self.prefs.show_server) {
                     let (dot_r, dot_resp) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), Sense::hover());
                     ui.painter().circle_filled(dot_r.center(), 4.0, status_color(&c.status));
                     let state = match &c.status {
