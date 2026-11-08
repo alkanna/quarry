@@ -130,3 +130,70 @@ impl App {
         }
     }
 }
+
+/// Relations as the original's export file (exportRelations, renderer line 135294), so files
+/// move between Quarry and the original.
+pub(super) fn relations_export(db: &str, list: &[Relation]) -> String {
+    let rel: Vec<serde_json::Value> = list.iter().map(|r| serde_json::json!({ "collection": r.coll, "path": r.path, "referencedCollection": r.target, "previewField": r.preview })).collect();
+    let now = mongodb::bson::DateTime::now().try_to_rfc3339_string().unwrap_or_default();
+    serde_json::to_string_pretty(&serde_json::json!({ "version": "1.0", "database": db, "exportedAt": now, "relations": rel })).unwrap_or_default()
+}
+
+/// Reads an export file; files without `version` and `relations` are refused, like the original
+/// (importRelations, 135332). Array markers in the original's paths ("items[].id") are dropped.
+pub(super) fn relations_import(text: &str) -> db::Res<Vec<Relation>> {
+    let v: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    let (Some(_), Some(list)) = (v.get("version"), v.get("relations").and_then(|r| r.as_array())) else {
+        return Err("Invalid data relations file format".into());
+    };
+    let s = |r: &serde_json::Value, k: &str| r.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    Ok(list.iter().map(|r| Relation { coll: s(r, "collection"), path: s(r, "path").replace("[]", ""), target: s(r, "referencedCollection"), preview: s(r, "previewField") }).filter(|r| !r.coll.is_empty() && !r.path.is_empty() && !r.target.is_empty()).collect())
+}
+
+impl App {
+    /// Asks for the preview of every referenced id on the page, like the original's
+    /// relatedDocuments (renderer line 107207).
+    pub(super) fn load_related(&mut self, req: u64) {
+        let Some(t) = self.tabs.iter().find(|t| t.req == req) else { return };
+        let Some(client) = self.conn(t.sel.conn).and_then(|c| c.client.clone()) else { return };
+        let rels = self.prefs.relations.get(&format!("{}/{}", t.sel.conn, t.sel.db)).into_iter().flatten().filter(|r| r.coll == t.sel.coll && !r.preview.is_empty());
+        for r in rels {
+            let ids = db::values_at(&t.docs, &r.path);
+            if !ids.is_empty() {
+                self.worker.related(req, Target { client: client.clone(), db: t.sel.db.clone(), coll: r.target.clone(), timeout: self.timeout() }, ids, r.preview.clone());
+            }
+        }
+    }
+
+    /// Opens the referenced document in its collection's tab.
+    pub(super) fn go_ref(&mut self, conn: u64, db: String, coll: String, id: Bson) {
+        self.open_collection(Sel { conn, db, coll }, false);
+        let t = self.tm().unwrap();
+        t.view = View::Documents;
+        t.filter_txt = format!("{{ _id: {} }}", db::shell_text(&id));
+        t.sort_txt.clear();
+        t.proj_txt.clear();
+        self.run_query();
+    }
+
+    pub(super) fn analyze_relations(&mut self, conn: u64, client: Client, db: String, coll: String) {
+        let all: Vec<String> = self.conn(conn).and_then(|c| c.dbs.iter().find(|d| d.0 == db)).and_then(|d| d.1.clone()).unwrap_or_default().into_iter().filter(|c| !c.starts_with("system.") && !self.views.contains(&(conn, db.clone(), c.clone()))).collect();
+        let colls = if coll.is_empty() { all.clone() } else { vec![coll.clone()] };
+        self.ok(format!("Analyzing data relations of {}…", if coll.is_empty() { db.clone() } else { format!("{db}.{coll}") }));
+        self.worker.analyze_relations(conn, Target { client, db, coll, timeout: self.timeout() }, colls, all);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relation_files() {
+        let list = vec![Relation { coll: "orders".into(), path: "items.productId".into(), target: "products".into(), preview: "title".into() }];
+        assert!(relations_import(&relations_export("shop", &list)).unwrap() == list);
+        let mingo = r#"{"version":"1.0","database":"shop","relations":[{"collection":"orders","path":"items[].productId","referencedCollection":"products","previewField":"title"}]}"#;
+        assert!(relations_import(mingo).unwrap() == list);
+        assert!(relations_import(r#"{"relations":[]}"#).is_err());
+    }
+}

@@ -127,6 +127,25 @@ impl App {
     }
 }
 
+impl App {
+    pub(super) fn load_indexes(&mut self) {
+        self.load_indexes_of(self.cur);
+    }
+
+    pub(super) fn load_indexes_of(&mut self, i: usize) {
+        if let Some(target) = self.tabs.get(i).and_then(|t| self.target_for(&t.sel)) {
+            self.req += 1;
+            let req = self.req;
+            self.tabs[i].idx_req = req;
+            // Only the Indexes view shows usage, and it costs a profiler query.
+            if self.tabs[i].view == View::Indexes {
+                self.worker.index_info(target.clone());
+            }
+            self.worker.indexes(req, target);
+        }
+    }
+}
+
 /// Why the usage column is empty, without the raw command the server echoes back.
 fn stats_note(e: &str) -> &'static str {
     if e.contains("not authorized") || e.contains("is not allowed to do action") {

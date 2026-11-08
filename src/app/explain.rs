@@ -54,3 +54,26 @@ impl App {
         });
     }
 }
+
+impl App {
+    /// Explains the Documents query or the Aggregate pipeline, whichever view is open.
+    pub(super) fn explain(&mut self) {
+        let Some(t) = self.t() else { return };
+        let what = match t.view {
+            View::Documents if !db::is_shell(&t.filter_txt) => Ok(db::ExplainOf::Find(t.query.clone())),
+            View::Aggregate if !db::is_shell(&t.agg_txt) => db::parse_pipeline(&t.agg_txt).and_then(|p| if db::has_write_stage(&p) { Err("Explain would run the write stage.".into()) } else { Ok(db::ExplainOf::Aggregate(p)) }),
+            View::Documents | View::Aggregate => Err("Run the pasted query first, then explain it.".into()),
+            _ => return,
+        };
+        match (what, self.target()) {
+            _ if self.demo => self.ok("Offline demo: nothing to explain."),
+            (Err(e), _) => self.err(e),
+            (Ok(w), Some(target)) => {
+                self.req += 1;
+                self.explain_req = self.req;
+                self.worker.explain(self.req, target, w);
+            }
+            _ => self.err("Not connected."),
+        }
+    }
+}

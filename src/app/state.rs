@@ -666,6 +666,120 @@ pub(super) struct LogUi {
     pub(super) expanded: HashSet<(u64, std::time::SystemTime)>,
 }
 
+pub(super) fn net_of(meta: &ConnMeta) -> db::Net {
+    db::Net {
+        ssh: meta.ssh.clone().map(|c| (c, crate::ssh::SshSecrets { password: secret(meta.id, "ssh-password"), passphrase: secret(meta.id, "ssh-passphrase") })),
+        proxy: meta.proxy.clone().map(|p| db::Proxy { password: secret(meta.id, "proxy-password"), ..p }),
+    }
+}
+
+impl App {
+    pub(super) fn ok(&mut self, s: impl Into<String>) {
+        self.status = (s.into(), false);
+        self.status_at = std::time::Instant::now();
+    }
+
+    pub(super) fn err(&mut self, s: impl Into<String>) {
+        self.status = (s.into(), true);
+        self.status_at = std::time::Instant::now();
+    }
+
+    pub(super) fn conn(&self, id: u64) -> Option<&Conn> {
+        self.conns.iter().find(|c| c.meta.id == id)
+    }
+
+    pub(super) fn t(&self) -> Option<&Tab> {
+        self.tabs.get(self.cur)
+    }
+
+    pub(super) fn tm(&mut self) -> Option<&mut Tab> {
+        self.tabs.get_mut(self.cur)
+    }
+
+    pub(super) fn sel_is_view(&self) -> bool {
+        self.t().is_some_and(|t| self.views.contains(&(t.sel.conn, t.sel.db.clone(), t.sel.coll.clone())))
+    }
+
+    pub(super) fn sel_writable(&self) -> bool {
+        if self.sel_is_view() {
+            return false;
+        }
+        self.t().and_then(|t| self.conn(t.sel.conn)).is_some_and(|c| c.writable)
+    }
+
+    pub(super) fn timeout(&self) -> Duration {
+        Duration::from_millis(self.prefs.timeout_ms)
+    }
+
+    pub(super) fn target_for(&self, s: &Sel) -> Option<Target> {
+        let client = self.conn(s.conn)?.client.clone()?;
+        Some(Target { client, db: s.db.clone(), coll: s.coll.clone(), timeout: self.timeout() })
+    }
+
+    pub(super) fn target(&self) -> Option<Target> {
+        self.target_for(&self.t()?.sel)
+    }
+
+    /// The single gate every write goes through.
+    pub(super) fn writable_target(&mut self) -> Option<(u64, Target)> {
+        let conn = self.t()?.sel.conn;
+        if !self.sel_writable() {
+            self.err("This connection is read-only. Unlock writes in the top bar first.");
+            return None;
+        }
+        match self.target() {
+            Some(t) => Some((conn, t)),
+            None => {
+                self.err("Not connected.");
+                None
+            }
+        }
+    }
+
+    pub(super) fn ask_unlock(&mut self) {
+        if let Some(t) = self.t() {
+            self.modal = Some(Modal::Unlock(t.sel.conn, None));
+        }
+    }
+
+    /// Asks to allow writes, then runs `then` if they were allowed.
+    pub(super) fn ask_unlock_then(&mut self, then: impl FnOnce(&mut App) + 'static) {
+        if let Some(t) = self.t() {
+            self.modal = Some(Modal::Unlock(t.sel.conn, Some(Box::new(then))));
+        }
+    }
+
+    pub(super) fn connect(&mut self, id: u64) {
+        // Demo ids overlap real ones, so reading the Keychain here would connect to a real server.
+        if self.demo {
+            return self.ok("Offline demo: no database is connected.");
+        }
+        let uri = match stored_uri(id) {
+            Ok(u) => u,
+            Err(e) => return self.err(uri_err(e)),
+        };
+        let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == id) else { return };
+        c.status = Status::Connecting;
+        c.client = None;
+        c.tunnel = None;
+        let net = net_of(&c.meta);
+        self.worker.connect(id, uri, self.timeout(), net);
+    }
+
+    /// Something a restart would lose: unsaved edits, writes in flight, running scripts or tools.
+    pub(super) fn busy(&self) -> bool {
+        !self.drafts.is_empty()
+            || !self.saving.is_empty()
+            || self.json_edit.is_some()
+            || self.insert.is_some()
+            || self.inline.is_some()
+            || self.new_field.is_some()
+            || self.modal.is_some()
+            || self.tool.as_ref().is_some_and(|t| t.done.is_none())
+            || self.tabs.iter().any(|t| t.shell.cancel.is_some() || t.compare.running || t.loading)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

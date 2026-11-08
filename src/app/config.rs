@@ -233,6 +233,34 @@ pub(super) fn set_secret(id: u64, what: &str, value: &str) -> Result<(), String>
     }
 }
 
+impl App {
+    pub(super) fn write_config(&mut self, file: &str, bytes: Vec<u8>) {
+        if self.demo {
+            return;
+        }
+        let dir = config_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        // Written beside the file, then renamed over it: a crash mid-write leaves the old file
+        // whole instead of a truncated one that no longer parses.
+        let tmp = dir.join(format!(".{file}.tmp"));
+        if let Err(err) = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, dir.join(file))) {
+            let _ = std::fs::remove_file(&tmp);
+            self.err(format!("Could not save {file}: {err}"));
+        }
+    }
+
+    pub(super) fn save_conns(&mut self) {
+        let metas: Vec<&ConnMeta> = self.conns.iter().map(|c| &c.meta).collect();
+        let b = serde_json::to_vec_pretty(&metas).unwrap_or_default();
+        self.write_config("connections.json", b);
+    }
+
+    pub(super) fn save_prefs(&mut self) {
+        let b = serde_json::to_vec_pretty(&self.prefs).unwrap_or_default();
+        self.write_config("ui.json", b);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
