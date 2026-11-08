@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.19.0](https://github.com/alkanna/quarry/compare/v0.18.2...v0.19.0) (2026-11-08)
+
+
+### Features
+
+* memory and CPU readouts in the status bar, steadier frame rate ([#121](https://github.com/alkanna/quarry/issues/121)) ([89d0b9f](https://github.com/alkanna/quarry/commit/89d0b9f61bac50d294bda7d04571865e35b08dac))
+
+
+### Performance Improvements
+
+* keep Shell result documents once, as BSON bytes ([#122](https://github.com/alkanna/quarry/issues/122)) ([7515b16](https://github.com/alkanna/quarry/commit/7515b16478217c0088516a0983d75512efd9a589))
+* read related-document ids from BSON bytes instead of decoding the page ([#119](https://github.com/alkanna/quarry/issues/119)) ([fedbaab](https://github.com/alkanna/quarry/commit/fedbaabfccfc686f85bf1c34bd5ba72e9444d434))
+
 ## [0.18.2](https://github.com/alkanna/quarry/compare/v0.18.1...v0.18.2) (2026-11-08)
 
 
