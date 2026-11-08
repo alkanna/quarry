@@ -1,6 +1,10 @@
 //! What is saved between runs: preferences, query history and library, open tabs, and keychain secrets.
 
 use super::*;
+use chacha20poly1305::{
+    ChaCha20Poly1305, Key, Nonce,
+    aead::{Aead, Generate, KeyInit},
+};
 
 /// Per-collection column setup, saved between launches.
 #[derive(Default, Serialize, Deserialize, Clone)]
@@ -200,10 +204,61 @@ pub(super) fn parse_config_list<T: serde::de::DeserializeOwned>(path: &std::path
     (good, Some(format!("Skipped {} of {total} entries in {}: {}. {kept}", errs.len(), path.display(), errs.join("; "))))
 }
 
-/// Field values kept for suggestions, as BSON so number types come back unchanged.
-// ponytail: an unreadable file is dropped, it is only a cache; no size cap since entries only exist for fields someone typed a value for.
+/// Field values kept for suggestions, as BSON so number types come back unchanged. The file is
+/// encrypted because sampled values can hold secrets. One that cannot be read (old plaintext
+/// file, wrong key, no keychain) is deleted: it is only a cache. No size cap since entries only
+/// exist for fields someone typed a value for.
 pub(super) fn load_values() -> HashMap<String, HashMap<String, Vec<Bson>>> {
-    std::fs::read(config_dir().join("values.bson")).ok().and_then(|b| mongodb::bson::from_slice(&b).ok()).unwrap_or_default()
+    let path = config_dir().join("values.bson");
+    let Ok(raw) = std::fs::read(&path) else { return HashMap::new() };
+    let vals = cache_key().and_then(|k| open(k, &raw)).and_then(|b| mongodb::bson::from_slice(&b).ok());
+    if vals.is_none() {
+        let _ = std::fs::remove_file(&path);
+    }
+    vals.unwrap_or_default()
+}
+
+/// Key of the suggestion cache, read from the keychain on first use and created there if absent.
+/// None when the keychain refuses, so the cache then stays in memory.
+fn cache_key() -> Option<&'static [u8; 32]> {
+    static KEY: std::sync::OnceLock<Option<[u8; 32]>> = std::sync::OnceLock::new();
+    KEY.get_or_init(|| {
+        let entry = keyring::Entry::new("quarry", "suggestion-cache-key").ok()?;
+        match entry.get_password() {
+            Ok(hex) => unhex(&hex),
+            Err(keyring::Error::NoEntry) => {
+                let key: [u8; 32] = Key::generate().into();
+                entry.set_password(&key.iter().map(|b| format!("{b:02x}")).collect::<String>()).ok()?;
+                Some(key)
+            }
+            Err(_) => None,
+        }
+    })
+    .as_ref()
+}
+
+fn unhex(s: &str) -> Option<[u8; 32]> {
+    let mut key = [0u8; 32];
+    if s.len() != 64 || !s.is_ascii() {
+        return None;
+    }
+    for (i, b) in key.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok()?;
+    }
+    Some(key)
+}
+
+/// Random nonce first, then the ciphertext with its authentication tag.
+fn seal(key: &[u8; 32], plain: &[u8]) -> Option<Vec<u8>> {
+    let nonce = Nonce::generate();
+    let mut out = nonce.to_vec();
+    out.extend(ChaCha20Poly1305::new(key.into()).encrypt(&nonce, plain).ok()?);
+    Some(out)
+}
+
+fn open(key: &[u8; 32], sealed: &[u8]) -> Option<Vec<u8>> {
+    let (nonce, ct) = sealed.split_at_checked(12)?;
+    ChaCha20Poly1305::new(key.into()).decrypt(Nonce::try_from(nonce).ok()?.as_ref(), ct).ok()
 }
 
 pub(super) fn config_dir() -> PathBuf {
@@ -273,7 +328,11 @@ impl App {
     }
 
     pub(super) fn save_values(&mut self) {
-        if let Ok(b) = mongodb::bson::to_vec(&self.values) {
+        // The demo must not touch the keychain, and without a key nothing is written in plain text.
+        if self.demo {
+            return;
+        }
+        if let Some(b) = cache_key().and_then(|k| seal(k, &mongodb::bson::to_vec(&self.values).ok()?)) {
             self.write_config("values.bson", b);
         }
     }
@@ -327,6 +386,20 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sealed_cache_round_trip() {
+        let key = [7u8; 32];
+        let sealed = seal(&key, b"a@b.com").unwrap();
+        assert!(!sealed.windows(7).any(|w| w == b"a@b.com"));
+        assert_eq!(open(&key, &sealed).unwrap(), b"a@b.com");
+        let mut bad = sealed.clone();
+        *bad.last_mut().unwrap() ^= 1;
+        assert!(open(&key, &bad).is_none());
+        assert!(open(&[8u8; 32], &sealed).is_none());
+        assert!(open(&key, &mongodb::bson::to_vec(&HashMap::<String, i32>::new()).unwrap()).is_none());
+        assert!(open(&key, b"short").is_none());
+    }
 
     #[test]
     fn query_history() {
