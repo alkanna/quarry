@@ -204,23 +204,37 @@ impl Worker {
         });
     }
 
-    pub fn find(&self, req: u64, t: Target, q: Query, page: u64) {
+    pub fn find(&self, req: u64, t: Target, q: Query, page: u64, size: u64) {
         self.spawn(async move {
             let res = async {
                 let start = Instant::now();
                 let c = t.c();
+                let (hint, co) = (q.driver_hint(), q.driver_collation()?);
                 // An empty filter on a huge collection is the common case; the estimate is instant.
                 let count = if q.filter.is_empty() {
                     c.estimated_document_count().max_time(t.timeout).await
                 } else {
-                    c.count_documents(q.filter.clone()).max_time(t.timeout).await
+                    let mut n = c.count_documents(q.filter.clone()).max_time(t.timeout);
+                    if let Some(h) = hint.clone() {
+                        n = n.hint(h);
+                    }
+                    if let Some(co) = co.clone() {
+                        n = n.collation(co);
+                    }
+                    n.await
                 }
                 .map_err(e)?;
                 let count = q.limit.map_or(count.saturating_sub(q.skip), |l| count.saturating_sub(q.skip).min(l));
-                let take = count.saturating_sub(page * PAGE_SIZE).min(PAGE_SIZE).max(1);
+                let take = count.saturating_sub(page * size).min(size).max(1);
                 // Read as BSON bytes: the page is kept that way, see `Row`.
                 let raw = c.clone_with_type::<mongodb::bson::RawDocumentBuf>();
-                let mut f = raw.find(q.filter).skip(q.skip + page * PAGE_SIZE).limit(take as i64).max_time(t.timeout);
+                let mut f = raw.find(q.filter).skip(q.skip.saturating_add(page * size)).limit(take as i64).max_time(t.timeout);
+                if let Some(h) = hint {
+                    f = f.hint(h);
+                }
+                if let Some(co) = co {
+                    f = f.collation(co);
+                }
                 if let Some(s) = q.sort {
                     f = f.sort(s);
                 }
@@ -371,11 +385,11 @@ impl Worker {
         });
     }
 
-    pub fn explain(&self, req: u64, t: Target, what: ExplainOf) {
+    pub fn explain(&self, req: u64, t: Target, what: ExplainOf, size: u64) {
         self.spawn(async move {
             let inner = match what {
                 ExplainOf::Find(q) => {
-                    let mut d = doc! { "find": &t.coll, "filter": q.filter, "limit": q.limit.map_or(PAGE_SIZE, |l| l.min(PAGE_SIZE)) as i64 };
+                    let mut d = doc! { "find": &t.coll, "filter": q.filter, "limit": q.limit.map_or(size, |l| l.min(size)) as i64 };
                     if q.skip > 0 {
                         d.insert("skip", q.skip as i64);
                     }
@@ -384,6 +398,12 @@ impl Worker {
                     }
                     if let Some(p) = q.projection {
                         d.insert("projection", p);
+                    }
+                    if let Some(h) = q.hint {
+                        d.insert("hint", h);
+                    }
+                    if let Some(co) = q.collation {
+                        d.insert("collation", co);
                     }
                     d
                 }
@@ -653,17 +673,26 @@ impl Worker {
     /// Runs "Group by and count" in the background like the original's groupCountField
     /// (renderer line 100487), which shows the result in a window instead of a tab.
     // ponytail: first 1000 values kept; a field with millions of distinct values would not fit a window anyway
-    pub fn group_count(&self, conn: u64, t: Target, path: String, pipeline: Vec<Document>) {
+    pub fn group_count(&self, conn: u64, t: Target, path: String, pipeline: Vec<Document>, co: Option<Document>) {
         self.spawn(async move {
             let p = pipeline.clone();
-            let res = async { t.c().aggregate(p).max_time(t.timeout).allow_disk_use(true).await.map_err(e)?.take(1000).try_collect().await.map_err(e) }.await;
+            let res = async {
+                let c = t.c();
+                let mut a = c.aggregate(p).max_time(t.timeout).allow_disk_use(true);
+                if let Some(co) = collation_of(co) {
+                    a = a.collation(co);
+                }
+                a.await.map_err(e)?.take(1000).try_collect().await.map_err(e)
+            }
+            .await;
             Msg::Grouped { conn, db: t.db, coll: t.coll, path, pipeline, res }
         });
     }
 
     /// A column data action over the documents matching `filter`, at most COL_VALUES_CAP of them in
     /// query order. Group results come back as `Msg::Grouped`, like the field menu's group by.
-    pub fn column_values(&self, conn: u64, t: Target, op: ColOp, path: String, filter: Document, sort: Option<Document>) {
+    pub fn column_values(&self, conn: u64, t: Target, op: ColOp, path: String, scope: Scope, sort: Option<Document>) {
+        let Scope { filter, collation: co } = scope;
         self.spawn(async move {
             let pipeline = group_count_pipeline(&path, &Bson::Null, filter.clone()).unwrap_or_default();
             let res = async {
@@ -672,6 +701,9 @@ impl Worker {
                 let top = path.split('.').next().unwrap_or_default();
                 let c = t.c();
                 let mut f = c.find(filter).projection(doc! { top: 1 }).limit(COL_VALUES_CAP).max_time(t.timeout);
+                if let Some(co) = collation_of(co) {
+                    f = f.collation(co);
+                }
                 if let Some(s) = sort {
                     f = f.sort(s);
                 }
@@ -742,9 +774,15 @@ impl Worker {
     }
 
     /// Like the original's "Count distinct values": distinct(path, current filter).len().
-    pub fn distinct_count(&self, t: Target, path: String, filter: Document) {
+    pub fn distinct_count(&self, t: Target, path: String, scope: Scope) {
+        let Scope { filter, collation: co } = scope;
         self.spawn(async move {
-            match t.c().distinct(&path, filter).max_time(t.timeout).await {
+            let c = t.c();
+            let mut d = c.distinct(&path, filter).max_time(t.timeout);
+            if let Some(co) = collation_of(co) {
+                d = d.collation(co);
+            }
+            match d.await {
                 Ok(v) => Msg::Notice { title: "Number of distinct values".into(), body: format!("{}\n\ndistinct values in \"{path}\" (the current query is applied)", v.len()) },
                 Err(err) => Msg::Info(Err(e(err))),
             }
@@ -752,16 +790,28 @@ impl Worker {
     }
 
     /// Runs the real update stages on a sample, so the preview cannot differ from the write.
-    pub fn update_preview(&self, t: Target, filter: Document, stages: Vec<Document>) {
+    pub fn update_preview(&self, t: Target, scope: Scope, stages: Vec<Document>) {
+        let Scope { filter, collation: co } = scope;
         self.spawn(async move {
             let res = async {
-                let before: Vec<Document> = t.c().aggregate(vec![doc! { "$match": &filter }, doc! { "$limit": 5 }]).max_time(t.timeout).await.map_err(e)?.try_collect().await.map_err(e)?;
+                let co = collation_of(co);
+                let c = t.c();
+                let mut a = c.aggregate(vec![doc! { "$match": &filter }, doc! { "$limit": 5 }]).max_time(t.timeout);
+                if let Some(co) = co.clone() {
+                    a = a.collation(co);
+                }
+                let before: Vec<Document> = a.await.map_err(e)?.try_collect().await.map_err(e)?;
                 // The same documents by _id, so each pair is one document even if others change meanwhile.
                 let ids: Vec<Bson> = before.iter().filter_map(|d| d.get("_id").cloned()).collect();
                 let after_pipe = std::iter::once(doc! { "$match": { "_id": { "$in": ids } } }).chain(stages.iter().cloned()).collect::<Vec<_>>();
                 let mut after: std::collections::HashMap<String, Document> = t.c().aggregate(after_pipe).max_time(t.timeout).await.map_err(e)?.try_collect::<Vec<_>>().await.map_err(e)?.into_iter().map(|d| (d.get("_id").map(compact).unwrap_or_default(), d)).collect();
                 let pairs = before.into_iter().filter_map(|b| after.remove(&b.get("_id").map(compact).unwrap_or_default()).map(|a| (b, a))).collect();
-                let n = t.c().count_documents(filter).max_time(t.timeout).await.map_err(e)?;
+                let c = t.c();
+                let mut n = c.count_documents(filter).max_time(t.timeout);
+                if let Some(co) = co {
+                    n = n.collation(co);
+                }
+                let n = n.await.map_err(e)?;
                 Ok((pairs, n))
             }
             .await;
@@ -769,18 +819,30 @@ impl Worker {
         });
     }
 
-    pub fn update_many(&self, t: Target, filter: Document, stages: Vec<Document>) {
+    pub fn update_many(&self, t: Target, scope: Scope, stages: Vec<Document>) {
+        let Scope { filter, collation: co } = scope;
         self.write(t.at(), async move {
-            match t.c().update_many(filter, stages).await {
+            let c = t.c();
+            let mut u = c.update_many(filter, stages);
+            if let Some(co) = collation_of(co) {
+                u = u.collation(co);
+            }
+            match u.await {
                 Ok(r) => (Ok(format!("Updated {} documents", r.modified_count)), None),
                 Err(err) => (Err(e(err)), None),
             }
         });
     }
 
-    pub fn rename_many(&self, t: Target, filter: Document, from: String, to: String) {
+    pub fn rename_many(&self, t: Target, scope: Scope, from: String, to: String) {
+        let Scope { filter, collation: co } = scope;
         self.write(t.at(), async move {
-            match t.c().update_many(rename_filter(filter, &to), doc! { "$rename": { &from: &to } }).await {
+            let c = t.c();
+            let mut u = c.update_many(rename_filter(filter, &to), doc! { "$rename": { &from: &to } });
+            if let Some(co) = collation_of(co) {
+                u = u.collation(co);
+            }
+            match u.await {
                 Ok(r) => (Ok(format!("Renamed {from} to {to} in {} documents; any that already had {to} were left as they were", r.modified_count)), None),
                 Err(err) => (Err(e(err)), None),
             }
@@ -851,12 +913,16 @@ impl Worker {
     /// Reads up to `limit` documents (0 = all) matching `filter` and summarises their fields.
     /// `last` reads the most recently inserted ones, in reverse natural order: `_id` is not always
     /// an ObjectId, so sorting on it would not mean recent.
-    pub fn schema(&self, req: u64, t: Target, filter: Document, limit: i64, last: bool) {
+    pub fn schema(&self, req: u64, t: Target, scope: Scope, limit: i64, last: bool) {
+        let Scope { filter, collation: co } = scope;
         self.spawn(async move {
             let res = async {
                 let start = Instant::now();
                 let c = t.c();
                 let mut f = c.find(filter).max_time(t.timeout);
+                if let Some(co) = collation_of(co) {
+                    f = f.collation(co);
+                }
                 if limit > 0 {
                     f = f.limit(limit);
                 }
@@ -872,9 +938,15 @@ impl Worker {
         });
     }
 
-    pub fn delete_many(&self, t: Target, filter: Document) {
+    pub fn delete_many(&self, t: Target, scope: Scope) {
+        let Scope { filter, collation: co } = scope;
         self.write(t.at(), async move {
-            match t.c().delete_many(filter).await {
+            let c = t.c();
+            let mut d = c.delete_many(filter);
+            if let Some(co) = collation_of(co) {
+                d = d.collation(co);
+            }
+            match d.await {
                 Ok(r) => (Ok(format!("Deleted {} documents", r.deleted_count)), None),
                 Err(err) => (Err(e(err)), None),
             }
@@ -892,7 +964,14 @@ impl Worker {
         self.spawn(async move {
             let res = async {
                 let c = t.c();
+                let (hint, co) = (q.driver_hint(), q.driver_collation()?);
                 let mut f = c.find(q.filter).skip(q.skip).max_time(t.timeout);
+                if let Some(h) = hint {
+                    f = f.hint(h);
+                }
+                if let Some(co) = co {
+                    f = f.collation(co);
+                }
                 if let Some(l) = q.limit {
                     f = f.limit(l as i64);
                 }
@@ -1118,7 +1197,7 @@ mod tests {
         let Some((w, rx, t)) = live("find_rows") else { return };
         seed(&w, &t, (0..120).map(|i| doc! { "_id": i, "n": i % 7, "nested": { "list": [i, { "deep": format!("v{i}") }] } }).collect());
         let q = Query { filter: doc! { "n": { "$lt": 5 } }, sort: Some(doc! { "_id": -1 }), projection: Some(doc! { "nested": 1 }), ..Default::default() };
-        w.find(1, t.clone(), q, 1);
+        w.find(1, t.clone(), q, 1, PAGE_SIZE);
         let Msg::Docs { res: Ok((rows, count, _)), .. } = next(&rx) else { panic!("expected Docs") };
         let want: Vec<Document> = (0..120).rev().filter(|i| i % 7 < 5).skip(PAGE_SIZE as usize).take(PAGE_SIZE as usize).map(|i| doc! { "_id": i, "nested": { "list": [i, { "deep": format!("v{i}") }] } }).collect();
         assert_eq!(count, (0..120).filter(|i| i % 7 < 5).count() as u64);
@@ -1228,7 +1307,7 @@ mod tests {
     fn live_bulk_rename_skips_documents_that_have_the_new_name() {
         let Some((w, rx, t)) = live("bulk_rename") else { return };
         seed(&w, &t, vec![doc! { "_id": 1, "a": 1 }, doc! { "_id": 2, "a": 2, "b": "keep" }]);
-        w.rename_many(t.clone(), doc! {}, "a".into(), "b".into());
+        w.rename_many(t.clone(), Scope::default(), "a".into(), "b".into());
         let Msg::Written { res, .. } = next(&rx) else { panic!("expected Written") };
         assert_eq!(res.unwrap(), "Renamed a to b in 1 documents; any that already had b were left as they were");
         assert_eq!(all(&w, &t), [doc! { "_id": 1, "b": 1 }, doc! { "_id": 2, "a": 2, "b": "keep" }]);

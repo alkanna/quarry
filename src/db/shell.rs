@@ -238,7 +238,7 @@ pub(crate) fn as_u64(b: &Bson) -> Res<u64> {
     }
 }
 
-/// Understands `db.coll.find(filter, projection).sort().skip().limit()`, `findOne`,
+/// Understands `db.coll.find(filter, projection).sort().skip().limit().hint().collation()`, `findOne`,
 /// `countDocuments`, `aggregate([...])` and `db.getCollection("name")...`.
 pub fn parse_shell(src: &str) -> Res<Shell> {
     let s = src.trim().trim_end_matches(';').trim();
@@ -308,6 +308,11 @@ pub fn parse_shell(src: &str) -> Res<Shell> {
                     "projection" | "project" => q.projection = as_doc(v.first())?,
                     "skip" => q.skip = as_u64(v.first().ok_or("skip needs a number")?)?,
                     "limit" => q.limit = Some(as_u64(v.first().ok_or("limit needs a number")?)?).filter(|l| *l > 0),
+                    "hint" => match v.first() {
+                        Some(h @ (Bson::Document(_) | Bson::String(_))) => q.hint = Some(h.clone()),
+                        _ => return Err("hint needs index keys like { a: 1 } or an index name".into()),
+                    },
+                    "collation" => q.collation = as_doc(v.first())?,
                     "toArray" | "pretty" => {}
                     other => return Err(format!(".{other}() is not supported here")),
                 }
@@ -401,6 +406,8 @@ mod tests {
         let ShellKind::Find(q) = s.kind else { panic!() };
         assert_eq!((q.skip, q.limit, q.filter.get_str("x").unwrap()), (5, Some(10), "y)"));
         assert!(q.sort.is_some() && q.projection.is_some());
+        let ShellKind::Find(q) = parse_shell("db.a.find({}).hint('a_1').collation({ locale: 'fr' })").unwrap().kind else { panic!() };
+        assert_eq!((q.hint, q.collation), (Some(Bson::String("a_1".into())), Some(doc! { "locale": "fr" })));
         assert!(parse_shell("db.x.drop()").is_err());
     }
 

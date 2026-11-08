@@ -148,6 +148,11 @@ pub(super) struct Tab {
     pub(super) filter_txt: String,
     pub(super) sort_txt: String,
     pub(super) proj_txt: String,
+    // ponytail: limit, skip, hint and collation are not saved with open tabs or the library; add them there if asked.
+    pub(super) limit_txt: String,
+    pub(super) skip_txt: String,
+    pub(super) hint_txt: String,
+    pub(super) collation_txt: String,
     pub(super) query: Query,
     pub(super) page: u64,
     pub(super) docs: Vec<db::Row>,
@@ -185,6 +190,11 @@ pub(super) struct Tab {
     pub(super) agg_input: Stage,
     pub(super) agg_text_mode: bool,
     pub(super) indexes: Vec<Document>,
+    /// Each indexed field path with the names of its indexes, built when the indexes arrive since
+    /// the table and document marks look it up on every frame.
+    pub(super) indexed: HashMap<String, String>,
+    /// The page size the documents on screen were loaded with, to reload them after it changes.
+    pub(super) size: u64,
     /// The Indexes view's table rows: each index with its usage merged in. Rebuilt only when the
     /// indexes or their stats arrive, since column widths are cached by the rows' address.
     pub(super) idx_rows: Vec<Document>,
@@ -428,6 +438,45 @@ impl Tab {
         !matches!(self.view, View::Compare | View::Import | View::Indexes | View::Watch)
     }
 
+    pub(super) fn set_indexes(&mut self, v: Vec<Document>) {
+        self.indexed.clear();
+        for ix in &v {
+            let name = ix.get_str("name").unwrap_or_default();
+            // Text indexes keep their fields under weights; their keys are internal.
+            for path in ["keys", "weights"].iter().filter_map(|k| ix.get_document(k).ok()).flat_map(|d| d.keys()) {
+                let names = self.indexed.entry(path.clone()).or_default();
+                if !names.is_empty() {
+                    names.push_str(", ");
+                }
+                names.push_str(name);
+            }
+        }
+        self.indexes = v;
+    }
+
+    /// Names of the indexes whose keys include this field, in the Documents view only. Array
+    /// positions in `path` are skipped, since index keys name a field inside an array without them.
+    pub(super) fn indexes_on(&self, path: &str) -> Option<&str> {
+        if self.view != View::Documents || self.indexed.is_empty() {
+            return None;
+        }
+        let hit = if path.split('.').any(|s| s.parse::<usize>().is_ok()) { self.indexed.get(&db::strip_indices(path)) } else { self.indexed.get(path) };
+        hit.map(String::as_str)
+    }
+
+    /// Empties the sort, project, limit, skip, hint and collation boxes, for a query that brings its own.
+    pub(super) fn clear_options(&mut self) {
+        for s in [&mut self.sort_txt, &mut self.proj_txt, &mut self.limit_txt, &mut self.skip_txt, &mut self.hint_txt, &mut self.collation_txt] {
+            s.clear();
+        }
+    }
+
+    /// How many documents an action on every match of the filter reaches, as a phrase. The results
+    /// count stops at the limit and skip, which such actions ignore.
+    pub(super) fn bulk_count(&self) -> String {
+        if self.query.limit.is_some() || self.query.skip > 0 { "every match, ignoring the limit and skip".into() } else { format!("about {}", self.count) }
+    }
+
     pub(super) fn new(sel: Sel) -> Self {
         Self {
             sel,
@@ -435,6 +484,10 @@ impl Tab {
             filter_txt: String::new(),
             sort_txt: String::new(),
             proj_txt: String::new(),
+            limit_txt: String::new(),
+            skip_txt: String::new(),
+            hint_txt: String::new(),
+            collation_txt: String::new(),
             query: Query::default(),
             page: 0,
             docs: Vec::new(),
@@ -461,6 +514,8 @@ impl Tab {
             agg_input: Stage::new("", "", true),
             agg_text_mode: false,
             indexes: Vec::new(),
+            indexed: HashMap::new(),
+            size: 0,
             idx_rows: Vec::new(),
             shell: ShellTab::default(),
             schema: SchemaTab::default(),
@@ -475,15 +530,15 @@ impl Tab {
 }
 
 pub(super) enum Danger {
-    DeleteMatching(Document),
+    DeleteMatching(db::Scope),
     DropCollection,
     DropIndex(String),
     RemoveConnection(u64),
     DropDatabase { conn: u64, db: String },
     DropCollAt { conn: u64, db: String, coll: String },
     DropUser { conn: u64, db: String, user: String },
-    RenameMany { filter: Document, from: String, to: String },
-    UpdateMany { filter: Document, stages: Vec<Document> },
+    RenameMany { scope: db::Scope, from: String, to: String },
+    UpdateMany { scope: db::Scope, stages: Vec<Document> },
     Upsert { key: String },
     Sync { conn: u64 },
     Restore { conn: u64, args: Vec<String> },

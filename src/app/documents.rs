@@ -54,6 +54,38 @@ pub(super) fn row_menu(ui: &mut egui::Ui, i: usize, checked: &BTreeSet<usize>) -
     docs_menu(ui, if checked.contains(&i) { checked.len() } else { 1 }, true).map(|a| (i, a))
 }
 
+/// One option of the find bar: a pill holding its editor while it is set or being edited, else a
+/// "+ name" chip that opens it. `edit` returns whether Enter was pressed. Returns whether the
+/// query should run: on Enter, or when the cross removed the option.
+fn opt_chip(ui: &mut egui::Ui, name: &str, id: egui::Id, text: &mut String, edit: impl FnOnce(&mut egui::Ui, &mut String) -> bool) -> bool {
+    let focused = ui.memory(|m| m.has_focus(id));
+    if text.is_empty() && !focused {
+        // The editor appears next frame; egui keeps a focus requested for a widget not yet drawn.
+        if add_chip(ui, name).clicked() {
+            ui.memory_mut(|m| m.request_focus(id));
+        }
+        return false;
+    }
+    let hovered = ui.ctx().read_response(id).is_some_and(|r| r.hovered());
+    let edge = if focused { PRIMARY() } else if hovered { BORDER() } else { LINE() };
+    let (mut clear, mut enter) = (false, false);
+    egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, edge)).corner_radius(BUTTON_H / 2.0).inner_margin(egui::Margin { left: 10, right: 3, top: 0, bottom: 0 }).show(ui, |ui| {
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.add_sized([0.0, BUTTON_H], egui::Label::new(RichText::new(name).font(FontId::monospace(TXT_CAPTION)).color(FAINT())));
+            // Centered on the label: the editor is shorter than the chip.
+            enter = ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), BUTTON_H), egui::Layout::left_to_right(egui::Align::Center), |ui| edit(ui, text)).inner;
+            ui.allocate_ui_with_layout(egui::vec2(CLOSE_W, BUTTON_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                clear = close_x(ui).on_hover_text(format!("Remove {name}")).clicked();
+            });
+        });
+    });
+    if clear {
+        text.clear();
+    }
+    clear || enter
+}
+
 /// Which menu a result row gets.
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum RowMenu {
@@ -80,24 +112,31 @@ pub(super) fn any_row_menu(ui: &mut egui::Ui, kind: RowMenu, i: usize, rows: Row
 impl App {
     pub(super) fn collection(&mut self, ui: &mut egui::Ui) {
         let Some(t) = self.t() else { return };
-        let (coll, view) = (t.sel.coll.clone(), t.view);
-        // Name, then what the collection holds: database, documents, data size and indexes.
-        // The whole collection's count, not the filter's, which the results line shows. Without
-        // statistics only an unfiltered count says what the collection holds.
-        let mut meta = vec![t.sel.db.clone()];
+        let (coll, view, db) = (t.sel.coll.clone(), t.view, t.sel.db.clone());
+        // What the collection holds: documents, data size and indexes. The whole collection's
+        // count, not the filter's, which the results line shows. Without statistics only an
+        // unfiltered count says what the collection holds.
+        let mut stats = Vec::new();
         match t.stats {
             Some((count, size, nidx)) => {
-                meta.push(format!("{} docs", group(&count.to_string())));
-                meta.push(human_bytes(size as usize));
-                meta.push(format!("{nidx} {}", if nidx == 1 { "index" } else { "indexes" }));
+                stats.push(format!("{} docs", group(&count.to_string())));
+                stats.push(human_bytes(size as usize));
+                stats.push(format!("{nidx} {}", if nidx == 1 { "index" } else { "indexes" }));
             }
-            None if t.query.filter.is_empty() => meta.push(format!("{} docs", group(&t.count.to_string()))),
+            None if t.query.filter.is_empty() && t.query.limit.is_none() && t.query.skip == 0 => stats.push(format!("{} docs", group(&t.count.to_string()))),
             None => {}
         }
+        let nidx = t.stats.map(|s| s.2);
         ui.horizontal(|ui| {
             ui.label(semibold(RichText::new(&coll).size(TXT_HEADING).color(BRIGHT())));
             ui.add_space(6.0);
-            ui.label(RichText::new(meta.join(" · ")).font(FontId::monospace(TXT_CAPTION)).color(FAINT()));
+            ui.label(RichText::new(&db).font(FontId::monospace(TXT_SMALL)).color(FAINT()));
+            ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), CHIP_H), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                for s in stats.iter().rev() {
+                    stat_chip(ui, s);
+                }
+            });
         });
         ui.add_space(4.0);
         // Wrapped, so on a narrow workspace the toggles move under the tabs instead of over them.
@@ -106,6 +145,10 @@ impl App {
             for (v, label) in [(View::Documents, "Documents"), (View::Aggregate, "Aggregate"), (View::Indexes, "Indexes"), (View::Schema, "Schema"), (View::Import, "Import"), (View::Compare, "Compare"), (View::Shell, "Shell"), (View::Watch, "Watch")] {
                 if view_tab(ui, label, view == v).clicked() {
                     self.set_view(v);
+                }
+                if let (View::Indexes, Some(n)) = (v, nidx) {
+                    ui.add_space(-16.0);
+                    stat_chip(ui, &n.to_string());
                 }
             }
             if matches!(view, View::Documents | View::Aggregate | View::Indexes | View::Watch) {
@@ -140,6 +183,12 @@ impl App {
     }
 
     pub(super) fn documents(&mut self, ui: &mut egui::Ui) {
+        // Loaded with another page size, set from another tab: its page numbers no longer line up.
+        let size = self.page_size();
+        if let Some(t) = self.tm().filter(|t| t.size != 0 && t.size != size && !t.loading) {
+            t.page = 0;
+            self.reload();
+        }
         let mut run = false;
         let (mut explain, mut help) = (false, false);
         let mut code_lang = None;
@@ -162,33 +211,73 @@ impl App {
         let paths = std::mem::take(&mut t.paths);
         let fields = std::mem::take(&mut t.field_info);
         let mut typed = Typed::default();
-        toolbar(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 4.0;
+        let shell = db::is_shell(&t.filter_txt);
+        let mono = egui::TextStyle::Monospace.resolve(ui.style());
+        let row_h = ui.fonts_mut(|f| f.row_height(&mono)) + 4.0;
+        // The bar is the filter's frame: it reads the filter's focus and hover from the last frame.
+        let fid = query_id("QUERY");
+        let focused = ui.memory(|m| m.has_focus(fid));
+        let hovered = ui.ctx().read_response(fid).is_some_and(|r| r.hovered());
+        let edge = if focused { PRIMARY() } else if hovered { MUTED() } else { BORDER() };
+        let bar = egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, edge)).corner_radius(R_BAR).inner_margin(egui::Margin { left: 12, right: 6, top: 7, bottom: 7 }).show(ui, |ui| {
             ui.horizontal_top(|ui| {
-                let w = ui.available_width() - 64.0 - 112.0;
+                ui.spacing_mut().item_spacing.x = 0.0;
+                // Room for the history and library icons and Run, but never so little the box vanishes.
+                let w = (ui.available_width() - 150.0).max(120.0);
                 run |= Self::query_field(ui, "QUERY", &mut t.filter_txt, "{ field: value }   or paste db.coll.find(...) / db.coll.aggregate([...])", w, FieldKind::Query, &paths, &fields, ac, &mut typed, &lookup);
-                // A fixed height, or a right-to-left layout takes all the height left in the card.
-                ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 26.0), egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                // A fixed height, or a right-to-left layout takes all the height left in the bar.
+                ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), row_h), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
                     if run_button(ui, "Run", "↵").on_hover_text("Enter").clicked() {
                         run = true;
                     }
+                    vsep(ui, 6.0);
+                    library_menu(ui, &lib, new_lib, false, true, &mut qacts);
+                    history_menu(ui, &hist, &index_sorts, &mut qacts);
                 });
             });
-            ui.horizontal_top(|ui| {
-                // A pasted shell query carries its own sort and projection.
-                if !db::is_shell(&t.filter_txt) {
-                    let w = ((ui.available_width() - 380.0) / 2.0 - 64.0).max(120.0);
-                    run |= Self::query_field(ui, "SORT", &mut t.sort_txt, "{ _id: -1 }", w, FieldKind::Sort, &paths, &Default::default(), ac, &mut Typed::default(), &|_| Lookup::Done);
-                    run |= Self::query_field(ui, "PROJECT", &mut t.proj_txt, "{ name: 1 }", w, FieldKind::Project, &paths, &Default::default(), ac, &mut Typed::default(), &|_| Lookup::Done);
+        });
+        if focused {
+            ui.painter().rect_stroke(bar.response.rect.expand(1.0), R_BAR + 1, Stroke::new(2.0, tint(PRIMARY(), 60)), egui::StrokeKind::Outside);
+        }
+        ui.add_space(8.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+            // A pasted shell query carries its own sort, projection, limit and skip.
+            if !shell {
+                let fit = |ui: &egui::Ui, s: &str, hint: &str| {
+                    let s = if s.is_empty() { hint } else { s.lines().max_by_key(|l| l.len()).unwrap_or(s) };
+                    (text_w(ui, s, mono.clone()) + 8.0).clamp(24.0, 420.0)
+                };
+                // Some(kind) is a query box with completion; hint gets the sort box's, since index
+                // keys are written like a sort. None is a plain one-line box.
+                for (name, label, kind, text, hint) in [
+                    ("sort", "SORT", Some(FieldKind::Sort), &mut t.sort_txt, "{ _id: -1 }"),
+                    ("project", "PROJECT", Some(FieldKind::Project), &mut t.proj_txt, "{ name: 1 }"),
+                    ("limit", "limit", None, &mut t.limit_txt, "0"),
+                    ("skip", "skip", None, &mut t.skip_txt, "0"),
+                    ("hint", "HINT", Some(FieldKind::Sort), &mut t.hint_txt, "{ field: 1 } or index name"),
+                    ("collation", "COLLATION", None, &mut t.collation_txt, "{ locale: 'fr', strength: 2 }"),
+                ] {
+                    let id = query_id(label);
+                    run |= opt_chip(ui, name, id, text, |ui, text| {
+                        let w = fit(ui, text, hint);
+                        if let Some(kind) = kind {
+                            return Self::query_field(ui, label, text, hint, w, kind, &paths, &Default::default(), ac, &mut Typed::default(), &|_| Lookup::Done);
+                        }
+                        let r = ui.add(egui::TextEdit::singleline(text).id(id).frame(editor_margin()).font(mono.clone()).hint_text(hint).desired_width(w).layouter(&mut code_layout));
+                        if r.changed() && matches!(name, "limit" | "skip") {
+                            text.retain(|c| c.is_ascii_digit());
+                        }
+                        r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))
+                    });
                 }
-                ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 26.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = 2.0;
-                    help |= quiet(ui, "?").on_hover_text("Query shortcuts and syntax").clicked();
-                    library_menu(ui, &lib, new_lib, false, &mut qacts);
-                    history_menu(ui, &hist, &index_sorts, &mut qacts);
-                    code_menu(ui, &mut code_lang);
-                    explain |= quiet(ui, "Explain").on_hover_text("Cmd+E").clicked();
-                });
+            }
+            right_group(ui, |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                help |= quiet(ui, "?").on_hover_text("Query shortcuts and syntax").clicked();
+                code_menu(ui, &mut code_lang);
+                explain |= quiet(ui, "Explain").on_hover_text("Cmd+E").clicked();
             });
         });
         t.paths = paths;
@@ -220,6 +309,7 @@ impl App {
                 QAct::Sort(v) => t.sort_txt = v,
                 QAct::Project(v) => t.proj_txt = v,
                 QAct::Load(q) => {
+                    t.clear_options();
                     (t.filter_txt, t.sort_txt, t.proj_txt) = (q.filter, q.sort, q.project);
                     run = true;
                 }
@@ -245,18 +335,13 @@ impl App {
         ui.add_space(10.0);
         let t = self.t().unwrap();
         let (count, ms, loading, page) = (t.count, t.ms, t.loading, t.page);
-        let pages = count.div_ceil(PAGE_SIZE).max(1);
+        let pages = count.div_ceil(self.page_size()).max(1);
         let mut go: Option<u64> = None;
         ui.horizontal(|ui| {
             ui.label(semibold(RichText::new(format!("{} docs", group(&count.to_string()))).font(FontId::monospace(TXT_SMALL)).color(BRIGHT())));
             ui.label(RichText::new(format!("{ms} ms")).font(FontId::monospace(TXT_SMALL)).color(SUCCESS()));
             if loading {
                 spin(ui);
-            }
-            ui.add_space(10.0);
-            go = pager(ui, page as usize, pages as usize).map(|p| p as u64);
-            if icon_button(ui, "⟳", true).on_hover_text("Reload (Cmd+R)").clicked() {
-                go = Some(page);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
@@ -266,19 +351,19 @@ impl App {
                         self.open_in_shell(query_script(&t.sel.coll, &t.filter_txt));
                         ui.close();
                     }
+                    let t = self.t().unwrap();
+                    let (coll, scope, reach) = (t.sel.coll.clone(), t.query.scope(), t.bulk_count());
                     if ui.button("Update matching…").clicked() {
                         self.modal = Some(Modal::UpdateMany { set_txt: "{\n  \n}".into(), unset_txt: String::new(), preview: None });
                         ui.close();
                     }
                     ui.separator();
-                    let t = self.t().unwrap();
-                    let (coll, filter) = (t.sel.coll.clone(), t.query.filter.clone());
                     if danger_item(ui, "Delete all matching documents…").clicked() {
                         self.modal = Some(Modal::Typed {
-                            title: format!("Delete every document in {coll} matching the current filter (about {count} documents)?"),
+                            title: format!("Delete every document in {coll} matching the current filter ({reach})?"),
                             expect: coll.clone(),
                             typed: String::new(),
-                            action: Danger::DeleteMatching(filter),
+                            action: Danger::DeleteMatching(scope),
                         });
                         ui.close();
                     }
@@ -298,6 +383,37 @@ impl App {
                 }
                 if quiet(ui, "+ Insert").clicked() {
                     self.insert = Some("{\n  \n}".into());
+                }
+                vsep(ui, 4.0);
+                if icon_button(ui, "⟳", true).on_hover_text("Reload (Cmd+R)").clicked() {
+                    go = Some(page);
+                }
+                // The pager reads left to right, so it gets its own layout at last frame's width.
+                let id = ui.scope_id().with("pager-w");
+                let w = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(150.0);
+                let r = ui.allocate_ui_with_layout(egui::vec2(w, BUTTON_H), egui::Layout::left_to_right(egui::Align::Center), |ui| pager(ui, page as usize, pages as usize));
+                if r.response.rect.width() != w {
+                    ui.data_mut(|d| d.insert_temp(id, r.response.rect.width()));
+                    ui.ctx().request_repaint();
+                }
+                if let Some(p) = r.inner {
+                    go = Some(p as u64);
+                }
+                let mut size = self.page_size();
+                ui.scope(|ui| {
+                    quiet_look(ui);
+                    egui::ComboBox::from_id_salt("page-size").selected_text(format!("{size} / page")).show_ui(ui, |ui| {
+                        menu_look(ui);
+                        for n in [db::PAGE_SIZE, 100, 200, db::PAGE_SIZE_MAX] {
+                            ui.selectable_value(&mut size, n, format!("{n} per page"));
+                        }
+                    });
+                });
+                // Remembered for every tab; the others reload when shown, see the top of this function.
+                if size != self.page_size() {
+                    self.prefs.page_size = size;
+                    self.save_prefs();
+                    go = Some(0);
                 }
                 let pending = self.tab_drafts();
                 if !pending.is_empty() && primary(ui, &format!("Save all ({})", pending.len()), WARNING()).on_hover_text("Documents with unsaved edits").clicked() {
@@ -325,6 +441,7 @@ impl App {
     pub(super) fn results(&mut self, ui: &mut egui::Ui, agg: bool) {
         // Following a reference while rendering can switch to another tab, so the docs go back by index.
         let cur = self.cur;
+        let size = self.page_size();
         let t = self.tm().unwrap();
         // Taken out of where the view keeps them for the frame, so the open document can be edited through `self`.
         let view = t.view;
@@ -347,7 +464,7 @@ impl App {
             (fields, base, range, is_raw)
         } else {
             raw = std::mem::take(&mut t.docs);
-            (t.fields.clone(), t.page * PAGE_SIZE, 0..raw.len(), true)
+            (t.fields.clone(), t.page * size, 0..raw.len(), true)
         };
         // Rows that closed drop their decoded copy; only open ones keep it (see `db::Row`).
         if is_raw {

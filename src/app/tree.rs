@@ -141,6 +141,14 @@ impl App {
         let passive = row.is_some() && row != selected;
         // Edit state is keyed by field path only, so other open documents must not see it.
         let parked = passive.then(|| (self.inline.take(), self.new_field.take()));
+        // Result rows can repeat an _id (one per differing field, or $unwind), and projected rows can lack one,
+        // so the row keeps them apart. Shared ids make one click toggle every copy of a header.
+        let doc_id = d.get("_id").map(db::compact);
+        let id = egui::Id::unique(("doc", (from_agg || doc_id.is_none()).then_some(row), doc_id));
+        // Whether any object or array section is closed, as the tree found last frame; None when
+        // the document has none.
+        let fold_key = id.with("fold-seen");
+        let any_closed = ui.data(|m| m.get_temp::<Option<bool>>(fold_key)).unwrap_or(Some(true));
         let mut acts = Vec::new();
         // The inline card can be wider than the table viewport; the header row stays within the
         // visible part so its buttons never sit behind the window edge.
@@ -178,6 +186,11 @@ impl App {
                 if quiet(ui, "Copy JSON").clicked() {
                     self.docs_act(ui.ctx(), DocsAct::CopyJson, vec![d.clone()]);
                 }
+                if let Some(closed) = any_closed
+                    && quiet(ui, if closed { "Expand all" } else { "Collapse all" }).clicked()
+                {
+                    acts.push(TreeAct::Fold(Vec::new(), closed));
+                }
             });
         });
         ui.separator();
@@ -190,10 +203,6 @@ impl App {
             }
             _ => HashSet::new(),
         };
-        // Result rows can repeat an _id (one per differing field, or $unwind), and projected rows can lack one,
-        // so the row keeps them apart. Shared ids make one click toggle every copy of a header.
-        let doc_id = d.get("_id").map(db::compact);
-        let id = egui::Id::unique(("doc", (from_agg || doc_id.is_none()).then_some(row), doc_id));
         let mut path = Vec::new();
         self.fold_busy = false;
         // Runs every frame, so capped like doc_paths: deeper keys just truncate.
@@ -217,10 +226,15 @@ impl App {
         self.tree_x = ui.max_rect().x_range().expand(8.0);
         // Tree rows keep egui's compact 18 px; the global BUTTON_H would show a quarter fewer fields.
         let interact_h = std::mem::replace(&mut ui.spacing_mut().interact_size.y, 18.0);
+        self.fold_seen = None;
         for (k, v) in d {
             path.push(k.clone());
             self.tree(ui, k, v, id, &mut path, !from_agg, &mut acts);
             path.pop();
+        }
+        if ui.data(|m| m.get_temp::<Option<bool>>(fold_key)) != Some(self.fold_seen) {
+            ui.data_mut(|m| m.insert_temp(fold_key, self.fold_seen));
+            ui.ctx().request_repaint();
         }
         ui.spacing_mut().interact_size.y = interact_h;
         // Nested headers only render once their parent opens, so the fold stays forced until every animation settles.
@@ -375,16 +389,17 @@ impl App {
                         (Err(e), _) => self.err(e),
                         (_, None) => self.err("Not connected."),
                         (Ok(p), Some(target)) => {
-                            let conn = self.t().unwrap().sel.conn;
+                            let t = self.t().unwrap();
+                            let (conn, co) = (t.sel.conn, filtered.then(|| t.query.collation.clone()).flatten());
                             self.ok(format!("Counting the values of {path}…"));
-                            self.worker.group_count(conn, target, path, p);
+                            self.worker.group_count(conn, target, path, p, co);
                         }
                     }
                 }
                 TreeAct::Distinct(path) => match self.target() {
                     Some(target) => {
-                        let f = self.t().unwrap().query.filter.clone();
-                        self.worker.distinct_count(target, path, f);
+                        let scope = self.t().unwrap().query.scope();
+                        self.worker.distinct_count(target, path, scope);
                     }
                     None => self.err("Not connected."),
                 },
@@ -452,6 +467,13 @@ impl App {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// The names of the indexes on the field at `path`, for its bolt. Skips joining the path when
+    /// the tab has no indexed fields, since it runs for every row on every frame.
+    fn index_mark(&self, path: &[String]) -> Option<String> {
+        let t = self.t().filter(|t| !t.indexed.is_empty())?;
+        t.indexes_on(&path.join(".")).map(str::to_string)
+    }
+
     pub(super) fn tree(&mut self, ui: &mut egui::Ui, key: &str, v: &Bson, id: egui::Id, path: &mut Vec<String>, editable: bool, acts: &mut Vec<TreeAct>) {
         let editing_here = self.inline.as_ref().is_some_and(|i| i.path == *path);
         match v {
@@ -485,6 +507,10 @@ impl App {
                 if highlighted(&self.prefs, &self.col_key(false), path) {
                     ui.painter().rect_filled(r.header_response.rect.expand(2.0), R_SM, HIGHLIGHT());
                 }
+                if self.index_mark(path).is_some() {
+                    let hr = r.header_response.rect;
+                    paint_bolt(ui.painter(), egui::pos2(hr.left() + ui.spacing().indent + key_px + 4.0, hr.center().y));
+                }
                 self.hover_band(ui, band, r.header_response.rect.y_range());
                 if editable && r.header_response.double_clicked() && path.first().is_some_and(|k| k != "_id") {
                     acts.push(TreeAct::Start(path.clone(), v.clone()));
@@ -492,6 +518,7 @@ impl App {
                 if forced.is_some_and(|o| r.openness != if o { 1.0 } else { 0.0 }) {
                     self.fold_busy = true;
                 }
+                self.fold_seen = Some(self.fold_seen.unwrap_or(false) || r.openness < 1.0);
                 let p = path.clone();
                 let hl = highlighted(&self.prefs, &self.col_key(false), &p);
                 let in_coll = self.in_coll();
@@ -510,10 +537,16 @@ impl App {
                     let x0 = ui.cursor().left();
                     ui.add_space(ui.spacing().indent);
                     let key_w = self.key_w;
+                    let ix = self.index_mark(path);
                     let key_r = ui.scope(|ui| {
-                        ui.set_max_width(key_w - 8.0);
+                        ui.set_max_width(key_w - 8.0 - if ix.is_some() { BOLT_ROOM } else { 0.0 });
                         ui.add(egui::Label::new(RichText::new(key).font(FontId::monospace(MONO_PX)).color(MUTED())).truncate().sense(Sense::click()))
                     }).inner;
+                    if let Some(ix) = ix {
+                        let (r, resp) = ui.allocate_exact_size(egui::vec2(BOLT_ROOM, BOLT_H), Sense::hover());
+                        paint_bolt(ui.painter(), egui::pos2(r.left() + 2.0, key_r.rect.center().y));
+                        resp.on_hover_text(format!("Indexed: {ix}"));
+                    }
                     ui.add_space((x0 + ui.spacing().indent + key_w - ui.cursor().left()).max(0.0));
                     if editing_here {
                         let inl = self.inline.as_mut().unwrap();

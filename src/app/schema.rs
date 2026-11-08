@@ -186,7 +186,7 @@ impl App {
                 t.schema.req = req;
                 t.schema.running = true;
                 t.schema.err = None;
-                self.worker.schema(req, target, t.query.filter.clone(), t.schema.limit, t.schema.last);
+                self.worker.schema(req, target, t.query.scope(), t.schema.limit, t.schema.last);
             } else if self.demo {
                 let t = &mut self.tabs[self.cur];
                 t.schema.stats = db::analyze_schema(&t.decoded_docs());

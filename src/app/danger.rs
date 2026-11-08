@@ -68,7 +68,7 @@ impl App {
         }
         let Some((conn, target)) = self.writable_target() else { return };
         match action {
-            Danger::DeleteMatching(f) => self.worker.delete_many(target, f),
+            Danger::DeleteMatching(s) => self.worker.delete_many(target, s),
             Danger::DropIndex(name) => self.worker.drop_index(target, name),
             Danger::Validator(cmd) => self.worker.db_change(conn, target.client, target.db, cmd, "Validator updated".into()),
             Danger::DropCollection => {
@@ -76,8 +76,8 @@ impl App {
                 let Sel { conn, db, coll } = self.t().unwrap().sel.clone();
                 self.danger(Danger::DropCollAt { conn, db, coll });
             }
-            Danger::RenameMany { filter, from, to } => self.worker.rename_many(target, filter, from, to),
-            Danger::UpdateMany { filter, stages } => self.worker.update_many(target, filter, stages),
+            Danger::RenameMany { scope, from, to } => self.worker.rename_many(target, scope, from, to),
+            Danger::UpdateMany { scope, stages } => self.worker.update_many(target, scope, stages),
             Danger::Upsert { key } => {
                 let conn = self.t().unwrap().sel.conn;
                 if let Some(Ok(docs)) = self.tabs[self.cur].import.parsed.clone() {

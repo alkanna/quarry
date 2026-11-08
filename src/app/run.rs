@@ -9,15 +9,7 @@ impl App {
             let text = t.filter_txt.clone();
             return self.run_shell(&text);
         }
-        let parse = |s: &str| -> db::Res<Option<Document>> { if s.trim().is_empty() { Ok(None) } else { db::parse_doc(s).map(Some) } };
-        let q = (|| -> db::Res<Query> {
-            Ok(Query {
-                filter: db::parse_doc(&t.filter_txt).map_err(|e| format!("Filter: {e}"))?,
-                sort: parse(&t.sort_txt).map_err(|e| format!("Sort: {e}"))?,
-                projection: parse(&t.proj_txt).map_err(|e| format!("Projection: {e}"))?,
-                ..Default::default()
-            })
-        })();
+        let q = find_query(t);
         match q {
             Ok(q) => {
                 let (f, so, p) = (t.filter_txt.clone(), t.sort_txt.clone(), t.proj_txt.clone());
@@ -40,12 +32,11 @@ impl App {
     pub(super) fn show_code(&mut self, lang: db::Lang, find: bool) {
         let Some(t) = self.t() else { return };
         let from_shell = |s: &str| db::parse_shell(s).map(|sh| match sh.kind {
-            db::ShellKind::Find(q) => db::CodeOf::Find(q),
+            db::ShellKind::Find(q) => db::CodeOf::Find(Box::new(q)),
             db::ShellKind::Aggregate(p) => db::CodeOf::Aggregate(p),
         });
-        let opt = |s: &str, what: &str| if s.trim().is_empty() { Ok(None) } else { db::parse_doc(s).map(Some).map_err(|e| format!("{what}: {e}")) };
         let what = if find && !db::is_shell(&t.filter_txt) {
-            (|| Ok(db::CodeOf::Find(Query { filter: db::parse_doc(&t.filter_txt).map_err(|e| format!("Filter: {e}"))?, sort: opt(&t.sort_txt, "Sort")?, projection: opt(&t.proj_txt, "Projection")?, ..Default::default() })))()
+            find_query(t).map(|q| db::CodeOf::Find(Box::new(q)))
         } else if find {
             from_shell(&t.filter_txt)
         } else if db::is_shell(&t.agg_txt) {
@@ -75,8 +66,7 @@ impl App {
             ShellKind::Find(q) => {
                 t.view = View::Documents;
                 t.filter_txt = text.trim().to_string();
-                t.sort_txt.clear();
-                t.proj_txt.clear();
+                t.clear_options();
                 t.query = q;
                 t.page = 0;
                 self.reload();
@@ -108,5 +98,53 @@ impl App {
                 None => self.err("Not connected."),
             }
         }
+    }
+}
+
+/// The Documents query from the tab's filter, sort, project, limit, skip, hint and collation boxes.
+pub(super) fn find_query(t: &Tab) -> db::Res<Query> {
+    let doc = |s: &str, what: &str| if s.trim().is_empty() { Ok(None) } else { db::parse_doc(s).map(Some).map_err(|e| format!("{what}: {e}")) };
+    // Read as i64, the server's type, so a value the server cannot take is refused here.
+    let num = |s: &str, what: &str| if s.trim().is_empty() { Ok(None) } else { s.trim().parse::<i64>().ok().filter(|n| *n >= 0).map(|n| Some(n as u64)).ok_or(format!("{what}: enter a whole number")) };
+    Ok(Query {
+        filter: db::parse_doc(&t.filter_txt).map_err(|e| format!("Filter: {e}"))?,
+        sort: doc(&t.sort_txt, "Sort")?,
+        projection: doc(&t.proj_txt, "Projection")?,
+        // A limit of 0 means none to the server, so it is treated as empty.
+        limit: num(&t.limit_txt, "Limit")?.filter(|&l| l > 0),
+        skip: num(&t.skip_txt, "Skip")?.unwrap_or(0),
+        // Index keys as an object, else an index name, quoted or not.
+        hint: match t.hint_txt.trim() {
+            "" => None,
+            h if h.starts_with('{') => Some(Bson::Document(db::parse_doc(h).map_err(|e| format!("Hint: {e}"))?)),
+            h => Some(Bson::String(h.trim_matches(|c| c == '"' || c == '\'').to_string())),
+        },
+        collation: doc(&t.collation_txt, "Collation")?,
+    })
+    .and_then(|q| q.driver_collation().map(|_| q))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_query_reads_limit_and_skip() {
+        let mut t = Tab::new(Sel { conn: 0, db: "d".into(), coll: "c".into() });
+        (t.filter_txt, t.limit_txt, t.skip_txt) = ("{}".into(), " 50 ".into(), "".into());
+        let q = find_query(&t).unwrap();
+        assert_eq!((q.limit, q.skip), (Some(50), 0));
+        t.limit_txt = "0".into();
+        assert_eq!(find_query(&t).unwrap().limit, None);
+        t.skip_txt = "x".into();
+        assert_eq!(find_query(&t).err().unwrap(), "Skip: enter a whole number");
+        t.skip_txt.clear();
+        (t.hint_txt, t.collation_txt) = ("'status_1'".into(), "{ locale: 'fr', strength: 2 }".into());
+        let q = find_query(&t).unwrap();
+        assert_eq!((q.hint, q.collation), (Some(Bson::String("status_1".into())), Some(doc! { "locale": "fr", "strength": 2 })));
+        t.hint_txt = "{ status: 1 }".into();
+        assert_eq!(find_query(&t).unwrap().hint, Some(Bson::Document(doc! { "status": 1 })));
+        t.collation_txt = "{ strength: 'x' }".into();
+        assert!(find_query(&t).err().unwrap().starts_with("Collation: "));
     }
 }

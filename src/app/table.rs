@@ -320,6 +320,7 @@ impl App {
         let key = self.col_key(agg);
         let prefs = self.prefs.cols.get(&key).cloned().unwrap_or_default();
         let cols = visible_cols(Some(&prefs), fields, self.prefs.default_cols);
+        let indexed: Vec<Option<String>> = cols.iter().map(|c| self.t().and_then(|t| t.indexes_on(c)).map(str::to_string)).collect();
         let summarize = !self.prefs.object_preview;
         // Measuring lays out every loaded cell of the column, so it is done once per result set
         // (keyed by where the documents live and how many) instead of on every frame.
@@ -340,6 +341,9 @@ impl App {
                     w
                 })
             })
+            .zip(cols.iter().zip(&indexed))
+            // A fitted width leaves room for the index bolt; a width the user dragged stays as set.
+            .map(|(w, (c, ix))| if ix.is_none() || prefs.widths.contains_key(c) { w } else { w + BOLT_ROOM })
             .collect();
         // The documents view adds a checkbox in front of the row number.
         let num_w = if agg { NUM_W } else { NUM_W + CHECK_W };
@@ -412,12 +416,23 @@ impl App {
                         None => label.to_string(),
                     };
                     let g = ui.fonts_mut(|f| f.layout_job(LayoutJob::single_section(shown, ui_fmt(TXT_CAPTION, color, W_SEMIBOLD, 0.2))));
-                    let gx = align_x(aligns[ci], x, *w, g.size().x);
-                    ui.painter().with_clip_rect(cell.shrink2(egui::vec2(6.0, 0.0))).galley(egui::pos2(gx, cell.center().y - g.size().y / 2.0), g, color);
+                    let ix = &indexed[ci];
+                    let bolt = if ix.is_some() { BOLT_ROOM } else { 0.0 };
+                    let gx = align_x(aligns[ci], x, *w - bolt, g.size().x);
+                    let clip = ui.painter().with_clip_rect(cell.shrink2(egui::vec2(6.0, 0.0)));
+                    if ix.is_some() {
+                        paint_bolt(&clip, egui::pos2(gx + g.size().x + 4.0, cell.center().y));
+                    }
+                    clip.galley(egui::pos2(gx, cell.center().y - g.size().y / 2.0), g, color);
                     // Built only while hovered, not for every header on every frame.
-                    let hresp = if label != c {
+                    let hresp = if label != c || ix.is_some() {
                         hresp.on_hover_ui(|ui| {
-                            ui.label(RichText::new(c).monospace());
+                            if label != c {
+                                ui.label(RichText::new(c).monospace());
+                            }
+                            if let Some(ix) = ix {
+                                ui.label(format!("Indexed: {ix}"));
+                            }
                             ui.label("Click for column options");
                         })
                     } else {

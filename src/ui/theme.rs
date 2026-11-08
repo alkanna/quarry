@@ -196,6 +196,11 @@ pub(crate) const TXT_HEADING: f32 = 18.0;
 
 /// Height of every button and single-line input.
 pub(crate) const BUTTON_H: f32 = 24.0;
+/// Height of the bolt marking an indexed field, and the room it takes beside a label.
+pub(crate) const BOLT_H: f32 = 10.0;
+pub(crate) const BOLT_ROOM: f32 = 12.0;
+/// Size of the small painted cross that removes a chip or a tab.
+pub(crate) const CLOSE_W: f32 = 18.0;
 
 // Corner radii: small for rows and glyphs, medium for widgets and cards, large for popups and dialogs.
 pub(crate) const R_SM: u8 = 4;
@@ -203,6 +208,8 @@ pub(crate) const R_SM: u8 = 4;
 pub(crate) const R_MD: u8 = 6;
 
 pub(crate) const R_LG: u8 = 10;
+/// The Documents find bar, a step rounder than inputs since it frames a whole row.
+pub(crate) const R_BAR: u8 = R_MD + 2;
 
 pub(crate) const SIDE_ROW_H: f32 = 26.0;
 
@@ -321,9 +328,10 @@ pub(crate) fn visuals(theme: egui::Theme, p: &Palette) -> egui::Visuals {
     v.selection.stroke = Stroke::new(1.0, p.primary);
     v.hyperlink_color = p.c_link;
     v.text_edit_bg_color = Some(p.well);
-    // Labels and separators.
+    // Labels and separators. Separators use the border color: menus and dialogs sit on `raised`,
+    // which in the dark palette is the same color as `line`, so a line separator vanished there.
     v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, p.text);
-    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, p.line);
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, p.border);
     // Buttons are raised and outlined at rest, so they read as buttons on any surface; hover
     // brightens the outline and text, press darkens the fill.
     v.widgets.inactive.weak_bg_fill = p.raised;
@@ -362,6 +370,11 @@ pub(crate) fn shade(c: Color32, t: f32) -> Color32 {
 /// The frame of floating cards over the editors: suggestion lists and docs.
 pub(crate) fn popup_card(ui: &egui::Ui) -> egui::Frame {
     egui::Frame::popup(ui.style()).fill(RAISED()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_MD)
+}
+
+/// Width of `text` on one line in `font`.
+pub(crate) fn text_w(ui: &egui::Ui, text: &str, font: FontId) -> f32 {
+    ui.fonts_mut(|f| f.layout_no_wrap(text.to_string(), font, Color32::PLACEHOLDER).size().x)
 }
 
 /// How far to move a one-line galley so its ink, from the tallest letter to the baseline, is

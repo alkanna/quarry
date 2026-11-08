@@ -428,20 +428,112 @@ pub(crate) fn right_group(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
 /// A quiet "more actions" menu button. The dots are painted: the ellipsis glyph comes from a
 /// fallback font and sits above the middle of the button.
 pub(crate) fn dots_menu(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) -> egui::Response {
-    use egui::containers::menu::MenuButton;
+    icon_menu(ui, paint_dots, false, content)
+}
+
+/// A quiet menu button showing a painted icon, muted at rest and bright on hover or press.
+/// A sticky menu stays open while you click or type inside it, for menus with text boxes.
+pub(crate) fn icon_menu(ui: &mut egui::Ui, paint: fn(&egui::Painter, egui::Pos2, Color32), sticky: bool, content: impl FnOnce(&mut egui::Ui)) -> egui::Response {
+    use egui::containers::menu::{MenuButton, MenuConfig};
     ui.scope(|ui| {
         quiet_look(ui);
-        let (r, _) = MenuButton::from_button(egui::Button::new("").min_size(egui::vec2(28.0, BUTTON_H))).ui(ui, |ui| {
+        let mut b = MenuButton::from_button(egui::Button::new("").min_size(egui::vec2(28.0, BUTTON_H)));
+        if sticky {
+            b = b.config(MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside));
+        }
+        let (r, _) = b.ui(ui, |ui| {
             menu_look(ui);
             content(ui)
         });
         let color = if r.hovered() || r.is_pointer_button_down_on() { BRIGHT() } else { MUTED() };
-        for dx in [-5.0, 0.0, 5.0] {
-            ui.painter().circle_filled(r.rect.center() + egui::vec2(dx, 0.0), 1.5, color);
-        }
+        paint(ui.painter(), r.rect.center(), color);
         r
     })
     .inner
+}
+
+pub(crate) fn paint_dots(p: &egui::Painter, c: egui::Pos2, color: Color32) {
+    for dx in [-5.0, 0.0, 5.0] {
+        p.circle_filled(c + egui::vec2(dx, 0.0), 1.5, color);
+    }
+}
+
+pub(crate) fn paint_clock(p: &egui::Painter, c: egui::Pos2, color: Color32) {
+    let s = Stroke::new(1.5, color);
+    p.circle_stroke(c, 6.5, s);
+    p.line_segment([c, c + egui::vec2(0.0, -4.0)], s);
+    p.line_segment([c, c + egui::vec2(3.0, 0.0)], s);
+}
+
+pub(crate) fn paint_book(p: &egui::Painter, c: egui::Pos2, color: Color32) {
+    let r = egui::Rect::from_center_size(c, egui::vec2(10.0, 13.0));
+    p.rect_stroke(r, 1.5, Stroke::new(1.5, color), egui::StrokeKind::Middle);
+    p.rect_filled(egui::Rect::from_min_size(egui::pos2(c.x - 2.0, r.top()), egui::vec2(4.0, 5.5)), 0.0, color);
+}
+
+/// A read-only figure in mono on a panel fill, like a collection's size.
+pub(crate) fn stat_chip(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let g = ui.painter().layout_job(egui::text::LayoutJob::single_section(text.to_string(), mono_fmt(TXT_CAPTION, MUTED(), 400.0)));
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(g.size().x + 16.0, CHIP_H), Sense::hover());
+    ui.painter().rect_filled(rect, R_SM, PANEL());
+    let dy = optical_dy(&g);
+    ui.painter().galley(rect.center() - g.size() / 2.0 + egui::vec2(0.0, dy), g, MUTED());
+    r
+}
+
+/// The amber lightning bolt marking an indexed field, with `left` the middle of its left edge.
+/// Two triangles, since a filled path must be convex.
+pub(crate) fn paint_bolt(p: &egui::Painter, left: egui::Pos2) {
+    let (s, color) = (BOLT_H / 12.0, WARNING());
+    let min = left - egui::vec2(0.0, BOLT_H / 2.0);
+    let pt = |x: f32, y: f32| min + egui::vec2(x * s, y * s);
+    p.add(egui::Shape::convex_polygon(vec![pt(5.5, 0.0), pt(0.5, 7.0), pt(4.5, 7.0)], color, Stroke::NONE));
+    p.add(egui::Shape::convex_polygon(vec![pt(3.5, 5.0), pt(7.5, 5.0), pt(2.5, 12.0)], color, Stroke::NONE));
+}
+
+/// A short vertical rule between groups of toolbar buttons, with `pad` on each side.
+pub(crate) fn vsep(ui: &mut egui::Ui, pad: f32) {
+    ui.add_space(pad);
+    let (r, _) = ui.allocate_exact_size(egui::vec2(1.0, BUTTON_H * 0.75), Sense::hover());
+    ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0, LINE()));
+    ui.add_space(pad);
+}
+
+/// A small painted cross that removes something, with a round hover fill.
+pub(crate) fn close_x(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(CLOSE_W, CLOSE_W), Sense::click());
+    let state = state_of(&r);
+    ui.painter().circle_filled(rect.center(), CLOSE_W / 2.0 - 1.0, hover_fill(state));
+    let color = if state > 0 { BRIGHT() } else { FAINT() };
+    let (c, d) = (rect.center(), 3.0);
+    for (a, b) in [(egui::vec2(-d, -d), egui::vec2(d, d)), (egui::vec2(-d, d), egui::vec2(d, -d))] {
+        ui.painter().line_segment([c + a, c + b], Stroke::new(1.3, color));
+    }
+    focus_ring(ui, &r, rect, CLOSE_W / 2.0);
+    r.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// An outlined mono pill that adds something, like "+ limit": `paint_chip`'s off look with a
+/// painted plus in front, since the "+" glyph sits off center.
+pub(crate) fn add_chip(ui: &mut egui::Ui, name: &str) -> egui::Response {
+    const PLUS: f32 = 7.0;
+    const GAP: f32 = 6.0;
+    let g = ui.painter().layout_job(egui::text::LayoutJob::single_section(name.to_string(), mono_fmt(TXT_CAPTION, Color32::PLACEHOLDER, 400.0)));
+    let pad = 9.0;
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(pad + PLUS + GAP + g.size().x + pad, BUTTON_H), Sense::click());
+    let state = state_of(&r);
+    let color = if state > 0 { BRIGHT() } else { MUTED() };
+    let p = ui.painter();
+    p.rect(rect, rect.height() / 2.0, hover_fill(state), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
+    let c = egui::pos2(rect.left() + pad + PLUS / 2.0, rect.center().y);
+    p.line_segment([c - egui::vec2(PLUS / 2.0, 0.0), c + egui::vec2(PLUS / 2.0, 0.0)], Stroke::new(1.2, color));
+    p.line_segment([c - egui::vec2(0.0, PLUS / 2.0), c + egui::vec2(0.0, PLUS / 2.0)], Stroke::new(1.2, color));
+    let dy = optical_dy(&g);
+    p.galley(egui::pos2(rect.left() + pad + PLUS + GAP, rect.center().y - g.size().y / 2.0 + dy), g, color);
+    focus_ring(ui, &r, rect, rect.height() / 2.0);
+    let enabled = ui.is_enabled();
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, format!("Add {name}")));
+    r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// A quiet glyph button large enough to hit comfortably.

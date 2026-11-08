@@ -36,6 +36,8 @@ pub const FIELD_VALUES_MAX: usize = 200;
 /// Largest collection whose field values are looked up by typed text without an index on the field.
 pub const PREFIX_SCAN_MAX: u64 = 100_000;
 pub const PAGE_SIZE: u64 = 50; // paginationLimit in the original
+/// The most documents a Documents page can show, from the setting.
+pub const PAGE_SIZE_MAX: u64 = 500;
 pub const DEFAULT_TIMEOUT_MS: u64 = 5000; // Settings.connectionTimeout in the original
 pub const UNDO_MAX: usize = 50; // maxActionsLength
 pub const UNDO_MAX_AGE_S: u64 = 86_400; // maxActionsAge
@@ -127,6 +129,43 @@ pub struct Query {
     /// From a pasted shell query such as `.skip(10).limit(5)`; paging happens inside this window.
     pub skip: u64,
     pub limit: Option<u64>,
+    /// The index to use: its keys as a document, or its name as a string.
+    pub hint: Option<Bson>,
+    pub collation: Option<Document>,
+}
+
+/// The driver's collation for a query's collation document, applied to every action on the
+/// documents the table shows so they match the same ones. find_query checked it when the query
+/// ran, so one that fails to convert here is left out instead of failing the action.
+pub fn collation_of(d: Option<Document>) -> Option<mongodb::options::Collation> {
+    d.and_then(|d| mongodb::bson::from_document(d).ok())
+}
+
+/// The documents an action works on: the shown query's filter and collation, so the action
+/// matches the same documents as the table.
+#[derive(Clone, Default)]
+pub struct Scope {
+    pub filter: Document,
+    pub collation: Option<Document>,
+}
+
+impl Query {
+    pub fn scope(&self) -> Scope {
+        Scope { filter: self.filter.clone(), collation: self.collation.clone() }
+    }
+
+    pub fn driver_hint(&self) -> Option<mongodb::options::Hint> {
+        match &self.hint {
+            Some(Bson::Document(d)) => Some(mongodb::options::Hint::Keys(d.clone())),
+            Some(Bson::String(s)) => Some(mongodb::options::Hint::Name(s.clone())),
+            _ => None,
+        }
+    }
+
+    /// Checked when the query is built, so a typo in a collation shows before anything runs.
+    pub fn driver_collation(&self) -> Res<Option<mongodb::options::Collation>> {
+        self.collation.clone().map(|d| mongodb::bson::from_document(d).map_err(|e| format!("Collation: {e}"))).transpose()
+    }
 }
 
 pub enum UndoKind {
@@ -148,7 +187,7 @@ pub struct UndoAction {
 }
 
 pub enum ExplainOf {
-    Find(Query),
+    Find(Box<Query>),
     Aggregate(Vec<Document>),
 }
 

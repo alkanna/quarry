@@ -175,7 +175,7 @@ impl App {
                     ui.checkbox(&mut auto_now, "Auto preview").on_hover_text("Preview each stage a second after you stop typing. Every preview runs two read-only aggregations on the server.");
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    library_menu(ui, &agg_lib, &mut agg_new, true, &mut agg_acts);
+                    library_menu(ui, &agg_lib, &mut agg_new, true, false, &mut agg_acts);
                 });
             });
             if builder {

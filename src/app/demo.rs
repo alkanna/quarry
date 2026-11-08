@@ -63,11 +63,12 @@ impl App {
         t.docs = docs.iter().filter_map(|d| db::Row::from_doc(d).ok()).collect();
         t.count = 1284;
         t.ms = 14;
-        t.stats = Some((1284, 412 * 1024, 3));
+        t.stats = Some((1284, 412 * 1024, 6));
         t.selected = Some((false, 2));
         t.filter_txt = if std::env::var("QUARRY_TEST_AC").is_ok_and(|v| v == "date") { "{ createdAt: }".into() } else { "{ status: { $in: ['paid', 'shipped', 'pending'] } }".into() };
         t.sort_txt = "{ total: -1 }".into();
         t.query.sort = Some(doc! { "total": -1 });
+        t.limit_txt = "50".into();
         self.tabs.push(t);
         self.tabs.push(Tab::new(sel("analytics", "events")));
         self.cur = 1;
@@ -134,18 +135,19 @@ impl App {
         if let Ok(v) = std::env::var("QUARRY_TEST_SERVER") {
             self.server = Some(ServerWin::demo(1, v == "ops"));
         }
+        // The orders tab's indexes, for the Indexes view and the indexed-field marks.
+        self.tabs[1].set_indexes(vec![
+            doc! { "name": "_id_", "keys": { "_id": 1 } },
+            doc! { "name": "number_1", "keys": { "number": 1 }, "unique": true },
+            doc! { "name": "status_1_createdAt_-1", "keys": { "status": 1, "createdAt": -1 } },
+            doc! { "name": "customer.email_1", "keys": { "customer.email": 1 }, "collation": { "locale": "en", "strength": 2 } },
+            doc! { "name": "createdAt_1", "keys": { "createdAt": 1 }, "expireAfterSeconds": 7_776_000_i64, "hidden": true },
+            doc! { "name": "notes_text", "keys": { "_fts": "text", "_ftsx": 1 }, "weights": { "notes": 1 } },
+        ]);
         if std::env::var("QUARRY_TEST_INDEXES").is_ok() {
             let t = &mut self.tabs[1];
             t.view = View::Indexes;
             t.selected = None;
-            t.indexes = vec![
-                doc! { "name": "_id_", "keys": { "_id": 1 } },
-                doc! { "name": "number_1", "keys": { "number": 1 }, "unique": true },
-                doc! { "name": "status_1_createdAt_-1", "keys": { "status": 1, "createdAt": -1 } },
-                doc! { "name": "customer.email_1", "keys": { "customer.email": 1 }, "collation": { "locale": "en", "strength": 2 } },
-                doc! { "name": "createdAt_1", "keys": { "createdAt": 1 }, "expireAfterSeconds": 7_776_000_i64, "hidden": true },
-                doc! { "name": "notes_text", "keys": { "_fts": "text", "_ftsx": 1 }, "weights": { "notes": 1 } },
-            ];
             let now = mongodb::bson::DateTime::now().timestamp_millis();
             let day = 24 * 3600 * 1000;
             let stat = |name: &str, ops: i64, since: i64, size: usize| db::IndexStat { name: name.into(), ops, since: Some(since), hidden: name == "createdAt_1", size: Some(size) };
