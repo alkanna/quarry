@@ -159,8 +159,7 @@ pub enum Msg {
     Command { tag: String, res: Res<Document> },
     /// A database-level change finished; the collection list of `db` is reloaded.
     DbChanged { conn: u64, db: String, res: Res<String> },
-    /// The page as rows, and decoded once for its field list; the decoded copy is not kept.
-    Docs { req: u64, res: Res<(Vec<Row>, Vec<Document>, u64, u128)> },
+    Docs { req: u64, res: Res<(Vec<Row>, u64, u128)> },
     Indexes { req: u64, res: Res<Vec<Document>> },
     /// Usage and suggestions for the collection named `key` ("db.coll").
     IndexInfo { key: String, res: Res<IndexInfo> },

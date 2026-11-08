@@ -60,10 +60,10 @@ impl<'a> Rows<'a> {
         }
     }
 
-    fn row_job(self, i: usize, width: f32) -> LayoutJob {
+    fn doc_ref(self, i: usize) -> DocRef<'a> {
         match self {
-            Rows::Docs(d) => row_job(&d[i], width),
-            Rows::Raw(r) => row_job_of(r[i].id().as_ref(), r[i].raw().iter().map_while(Result::ok).map(|(k, v)| (k, Val::R(v))), width),
+            Rows::Docs(d) => DocRef::B(&d[i]),
+            Rows::Raw(r) => DocRef::from(&r[i]),
         }
     }
 }
@@ -644,8 +644,8 @@ impl App {
                     };
                     ui.painter().rect_filled(rect, R_SM, fill);
                     let job = match &drafted {
-                        Some(d) => row_job(d, w - 16.0),
-                        None => docs.row_job(i, w - 16.0),
+                        Some(d) => row_job(DocRef::B(d), w - 16.0),
+                        None => row_job(docs.doc_ref(i), w - 16.0),
                     };
                     let galley = ui.fonts_mut(|f| f.layout_job(job));
                     ui.painter().galley(rect.left_center() + egui::vec2(8.0, -galley.size().y / 2.0), galley, TEXT());

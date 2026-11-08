@@ -1,10 +1,11 @@
 //! Autocomplete for query inputs and the JS shell: suggestion sources and the popup list.
 
+use super::cells::{DocRef, Val};
 use super::editor::*;
 use super::theme::*;
 use crate::db;
 use eframe::egui::{self, Color32, FontId, Key, text::LayoutJob};
-use mongodb::bson::{Bson, Document};
+use mongodb::bson::Bson;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Copy, PartialEq)]
@@ -150,29 +151,26 @@ pub(crate) type Fields = HashMap<String, FieldInfo>;
 const MAX_PATHS: usize = 2000;
 
 /// Calls `f` with every dotted path in a document and its value, the documents inside arrays
-/// walked under their array's path (at most 20 items, 4 levels deep).
-fn each_field(d: &Document, prefix: &str, depth: usize, f: &mut dyn FnMut(&str, &Bson)) {
-    for (k, v) in d {
-        let p = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
+/// walked under their array's path (at most 20 items, 4 levels deep). Raw documents are read
+/// from their bytes, so a page is never decoded just to scan it.
+fn each_field<'a>(d: DocRef<'a>, prefix: &str, depth: usize, f: &mut dyn FnMut(&str, Val<'a>)) {
+    for (k, v) in d.fields() {
+        let p = if prefix.is_empty() { k.to_string() } else { format!("{prefix}.{k}") };
         f(&p, v);
         if depth < 4 {
-            match v {
-                Bson::Document(c) => each_field(c, &p, depth + 1, f),
-                Bson::Array(items) => {
-                    for x in items.iter().take(20) {
-                        if let Bson::Document(c) = x {
-                            each_field(c, &p, depth + 1, f);
-                        }
-                    }
+            if let Some(c) = v.object() {
+                each_field(c, &p, depth + 1, f);
+            } else if let Some(items) = v.items() {
+                for c in items.take(20).filter_map(Val::object) {
+                    each_field(c, &p, depth + 1, f);
                 }
-                _ => {}
             }
         }
     }
 }
 
 /// Kinds and frequent values of every field, array items counted under their array's path.
-pub(crate) fn field_info(docs: &[Document]) -> Fields {
+pub(crate) fn field_info<'a>(docs: impl IntoIterator<Item = impl Into<DocRef<'a>>>) -> Fields {
     const MAX_VALUES: usize = 30;
     #[derive(Default)]
     struct Acc {
@@ -181,22 +179,25 @@ pub(crate) fn field_info(docs: &[Document]) -> Fields {
     }
     let mut acc: HashMap<String, Acc> = HashMap::new();
     // ponytail: first 200 documents only, enough for suggestions and fast on big pages.
-    for d in docs.iter().take(200) {
-        each_field(d, "", 0, &mut |p, v| {
+    for d in docs.into_iter().take(200) {
+        each_field(d.into(), "", 0, &mut |p, v| {
             if acc.len() >= MAX_PATHS && !acc.contains_key(p) {
                 return;
             }
             let a = acc.entry(p.to_string()).or_default();
-            *a.kinds.entry(db::type_name_kind(v)).or_default() += 1;
-            let items = if let Bson::Array(items) = v { &items[..items.len().min(20)] } else { std::slice::from_ref(v) };
+            *a.kinds.entry(v.kind()).or_default() += 1;
+            let items: Vec<Val> = match v.items() {
+                Some(items) => items.take(20).collect(),
+                None => vec![v],
+            };
             for x in items {
-                let keep = match x {
-                    Bson::String(s) => s.chars().count() <= 80,
-                    Bson::Int32(_) | Bson::Int64(_) | Bson::Double(_) | Bson::Boolean(_) => true,
-                    _ => false,
+                let keep = match x.as_str() {
+                    Some(s) => s.chars().count() <= 80,
+                    None => matches!(x.kind(), "int" | "long" | "double" | "bool"),
                 };
                 if keep {
-                    a.vals.entry(db::shell_text(x)).or_insert_with(|| (0, x.clone())).0 += 1;
+                    let x = x.bson().into_owned();
+                    a.vals.entry(db::shell_text(&x)).or_insert_with(|| (0, x)).0 += 1;
                 }
             }
         });
@@ -213,10 +214,10 @@ pub(crate) fn field_info(docs: &[Document]) -> Fields {
 }
 
 /// Every dotted path in the documents (array elements merged), capped so huge documents stay fast.
-pub(crate) fn doc_paths(docs: &[Document]) -> Vec<String> {
+pub(crate) fn doc_paths<'a>(docs: impl IntoIterator<Item = impl Into<DocRef<'a>>>) -> Vec<String> {
     let (mut out, mut seen) = (Vec::new(), HashSet::new());
     for d in docs {
-        each_field(d, "", 0, &mut |p, _| {
+        each_field(d.into(), "", 0, &mut |p, _| {
             if out.len() < MAX_PATHS && seen.insert(p.to_string()) {
                 out.push(p.to_string());
             }
@@ -717,6 +718,23 @@ pub(crate) fn suggest_js(before: &str, paths: &[String], colls: &[String], pkgs:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Scanning BSON bytes must find the same paths, kinds and values as scanning decoded documents.
+    #[test]
+    fn raw_pages_scan_like_decoded_ones() {
+        use mongodb::bson::{DateTime, doc, oid::ObjectId};
+        let docs: Vec<_> = (0..30)
+            .map(|i| doc! { "_id": ObjectId::new(), "n": i, "s": format!("v{}", i % 4), "long": "x".repeat(200), "at": DateTime::from_millis(i), "tags": ["a", "b"], "o": { "p": { "q": [{ "r": i % 3 }] } }, "maybe": if i % 2 == 0 { Bson::Null } else { Bson::Int64(i) } })
+            .collect();
+        let rows: Vec<db::Row> = docs.iter().map(|d| db::Row::from_doc(d).unwrap()).collect();
+        assert_eq!(doc_paths(&docs), doc_paths(&rows));
+        let (b, r) = (field_info(&docs), field_info(&rows));
+        assert_eq!(b.len(), r.len());
+        for (p, fb) in &b {
+            let fr = &r[p];
+            assert_eq!((fb.kind, &fb.values), (fr.kind, &fr.values), "{p}");
+        }
+    }
 
     #[test]
     fn query_help_lists_every_shortcut() {

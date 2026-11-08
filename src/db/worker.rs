@@ -228,8 +228,11 @@ impl Worker {
                     f = f.projection(p);
                 }
                 let docs: Vec<Row> = f.await.map_err(e)?.map_ok(Row::from_raw).try_collect().await.map_err(e)?;
-                let decoded = docs.iter().map(Row::decode).collect::<Res<Vec<_>>>()?;
-                Ok((docs, decoded, count, start.elapsed().as_millis()))
+                // One row at a time, so checking never holds more than one decoded document.
+                for r in &docs {
+                    r.decode()?;
+                }
+                Ok((docs, count, start.elapsed().as_millis()))
             }
             .await;
             Msg::Docs { req, res }
@@ -1043,11 +1046,10 @@ mod tests {
         seed(&w, &t, (0..120).map(|i| doc! { "_id": i, "n": i % 7, "nested": { "list": [i, { "deep": format!("v{i}") }] } }).collect());
         let q = Query { filter: doc! { "n": { "$lt": 5 } }, sort: Some(doc! { "_id": -1 }), projection: Some(doc! { "nested": 1 }), ..Default::default() };
         w.find(1, t.clone(), q, 1);
-        let Msg::Docs { res: Ok((rows, decoded, count, _)), .. } = next(&rx) else { panic!("expected Docs") };
+        let Msg::Docs { res: Ok((rows, count, _)), .. } = next(&rx) else { panic!("expected Docs") };
         let want: Vec<Document> = (0..120).rev().filter(|i| i % 7 < 5).skip(PAGE_SIZE as usize).take(PAGE_SIZE as usize).map(|i| doc! { "_id": i, "nested": { "list": [i, { "deep": format!("v{i}") }] } }).collect();
         assert_eq!(count, (0..120).filter(|i| i % 7 < 5).count() as u64);
         assert_eq!(rows.iter().map(|r| r.decode().unwrap()).collect::<Vec<_>>(), want);
-        assert_eq!(decoded, want);
         let first = &rows[0];
         assert_eq!(first.id(), want[0].get("_id").cloned());
         assert_eq!(first.value("nested.list.1.deep").and_then(|v| Bson::try_from(v).ok()), crate::db::get_path(&want[0], "nested.list.1.deep").cloned());
