@@ -200,6 +200,12 @@ pub(super) fn parse_config_list<T: serde::de::DeserializeOwned>(path: &std::path
     (good, Some(format!("Skipped {} of {total} entries in {}: {}. {kept}", errs.len(), path.display(), errs.join("; "))))
 }
 
+/// Field values kept for suggestions, as BSON so number types come back unchanged.
+// ponytail: an unreadable file is dropped, it is only a cache; no size cap since entries only exist for fields someone typed a value for.
+pub(super) fn load_values() -> HashMap<String, HashMap<String, Vec<Bson>>> {
+    std::fs::read(config_dir().join("values.bson")).ok().and_then(|b| mongodb::bson::from_slice(&b).ok()).unwrap_or_default()
+}
+
 pub(super) fn config_dir() -> PathBuf {
     dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("quarry")
 }
@@ -264,6 +270,52 @@ impl App {
         let metas: Vec<&ConnMeta> = self.conns.iter().map(|c| &c.meta).collect();
         let b = serde_json::to_vec_pretty(&metas).unwrap_or_default();
         self.write_config("connections.json", b);
+    }
+
+    pub(super) fn save_values(&mut self) {
+        if let Ok(b) = mongodb::bson::to_vec(&self.values) {
+            self.write_config("values.bson", b);
+        }
+    }
+
+    /// Asks the server for a field's values once per session: a sample (the copy kept on disk shows
+    /// meanwhile), or with `prefix` the values starting with the text being typed. `key` is the
+    /// collection the request was made in, which a tab switch may have left.
+    /// Returns whether a lookup was sent, so the caller redraws to show it running.
+    pub(super) fn want_values(&mut self, key: String, path: String, prefix: Option<String>) -> bool {
+        if key != self.col_key(false) || !self.values_asked.insert((key.clone(), path.clone(), prefix.clone())) {
+            return false;
+        }
+        let Some(t) = self.target() else { return false };
+        self.values_pending.insert((key.clone(), path.clone()));
+        self.worker.field_values(key, t, path, prefix);
+        true
+    }
+
+    pub(super) fn values_done(&mut self, key: String, path: String, prefix: Option<String>, res: db::Res<Option<Vec<Bson>>>) {
+        self.values_pending.remove(&(key.clone(), path.clone()));
+        // Suggestions are best effort: a refused or slow lookup keeps what the page offers. A typed
+        // lookup that did not run says why under the list.
+        let note = match &res {
+            Ok(None) => Some("Field not indexed: only sampled values are suggested"),
+            Err(_) if prefix.is_some() => Some("Lookup too slow: only sampled values are suggested"),
+            _ => None,
+        };
+        if let Some(n) = note {
+            self.values_note.insert((key.clone(), path.clone()), n);
+        }
+        let Ok(Some(mut vals)) = res else { return };
+        vals.retain(suggestible);
+        vals.truncate(db::FIELD_VALUES_MAX);
+        let found = HashMap::from([(path, vals)]);
+        for t in self.tabs.iter_mut().filter(|t| t.coll_key() == key) {
+            merge_values(&mut t.field_info, &found);
+        }
+        // Values found by what was typed are kept for the session only, so the file holds samples.
+        if prefix.is_none() {
+            self.values.entry(key).or_default().extend(found);
+            self.save_values();
+        }
     }
 
     pub(super) fn save_prefs(&mut self) {

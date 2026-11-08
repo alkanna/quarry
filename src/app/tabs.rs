@@ -4,7 +4,7 @@ use super::*;
 
 impl App {
     pub(super) fn col_key(&self, agg: bool) -> String {
-        let s = self.t().map(|t| format!("{}/{}/{}", t.sel.conn, t.sel.db, t.sel.coll)).unwrap_or_default();
+        let s = self.t().map(Tab::coll_key).unwrap_or_default();
         match self.t().filter(|_| agg) {
             Some(t) => format!("{s}#{}", t.agg_source().3),
             None => s,

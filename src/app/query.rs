@@ -78,11 +78,29 @@ pub(super) fn library_menu(ui: &mut egui::Ui, lib: &[SavedQuery], new_name: &mut
     });
 }
 
+/// Where the server lookup of a field's values stands.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum Lookup {
+    Pending,
+    Done,
+    /// Typed text is not looked up, for this reason.
+    Skipped(&'static str),
+}
+
+/// Where the query box's caret is, for the server lookups of field values.
+#[derive(Default)]
+pub(super) struct Typed {
+    /// The field whose value the caret is in.
+    pub(super) field: Option<String>,
+    /// Set when the box was edited this frame: the text typed so far in a string value, if any.
+    pub(super) edit: Option<Option<String>>,
+}
+
 impl App {
     /// A query input that grows with its content, with highlighting and autocomplete.
     /// Enter runs it (or picks a suggestion), Shift+Enter adds a line.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn query_field(ui: &mut egui::Ui, label: &str, text: &mut String, hint: &str, width: f32, kind: FieldKind, paths: &[String], fields: &Fields, ac: &mut Ac) -> bool {
+    pub(super) fn query_field(ui: &mut egui::Ui, label: &str, text: &mut String, hint: &str, width: f32, kind: FieldKind, paths: &[String], fields: &Fields, ac: &mut Ac, typed: &mut Typed, lookup: &dyn Fn(&str) -> Lookup) -> bool {
         ui.add_sized([56.0, 20.0], egui::Label::new(caption_text(label)));
         let id = egui::Id::unique(("query", label));
         // Test switch: show the suggestion list in the demo picture.
@@ -91,10 +109,18 @@ impl App {
             let date = std::env::var("QUARRY_TEST_AC").is_ok_and(|v| v == "date");
             let before = if date { "{ createdAt: " } else { "{ status: { $i" };
             if let Some((token, items)) = suggest(before, kind, paths, fields) {
-                *ac = Ac { id: Some(id), token, items, sel: 0, cursor: before.chars().count(), rect: None, doc: None };
+                *ac = Ac { id: Some(id), token, items, cursor: before.chars().count(), ..Default::default() };
             }
         }
-        let (out, picked) = ac_field(ui, id, text, ac, &|b| suggest(b, kind, paths, fields), |ui, text, open| {
+        // Suggestions are recomputed on every edit, even with no list open, so this sees every edit.
+        let edited = std::cell::Cell::new(None);
+        let compute = |b: &str| {
+            if kind == FieldKind::Query {
+                edited.set(Some(value_at(b).and_then(|(_, p)| p).map(str::to_string)));
+            }
+            suggest(b, kind, paths, fields)
+        };
+        let (out, picked) = ac_field(ui, id, text, ac, &compute, |ui, text, open| {
             egui::TextEdit::multiline(text)
                 .id(id)
                 .font(egui::TextStyle::Monospace)
@@ -106,6 +132,37 @@ impl App {
                 .layouter(&mut code_layout)
                 .show(ui)
         });
+        typed.edit = edited.take();
+        let here = out.cursor_range.filter(|r| r.is_empty() && kind == FieldKind::Query && out.response.has_focus()).and_then(|r| {
+            let ci = r.primary.index.0;
+            let before: String = text.chars().take(ci).collect();
+            value_at(&before).map(|(f, _)| (f.to_string(), ci))
+        });
+        // While the field's values are fetched the list stays open, empty or with the page's values,
+        // and says so; when they arrive it is rebuilt without waiting for another key. A skipped
+        // typed lookup is noted under the list, opened for it only by typing so Esc still closes it.
+        let state = here.as_ref().map_or(Lookup::Done, |(p, _)| lookup(p));
+        let note = match state {
+            Lookup::Skipped(n) => Some(n),
+            _ => None,
+        };
+        let was_loading = ac.id == Some(id) && ac.loading;
+        if let Some((_, ci)) = &here
+            && (state == Lookup::Pending || note.is_some() && (ac.shown(id) || typed.edit.is_some()))
+        {
+            if ac.id != Some(id) || ac.items.is_empty() {
+                *ac = Ac { id: Some(id), cursor: *ci, ..Default::default() };
+            }
+            (ac.loading, ac.note) = (state == Lookup::Pending, note);
+        }
+        if was_loading && state != Lookup::Pending {
+            ac.loading = false;
+            let before: String = text.chars().take(ac.cursor).collect();
+            if let (true, Some((token, items))) = (here.is_some(), suggest(&before, kind, paths, fields)) {
+                (ac.token, ac.items, ac.sel) = (token, items, 0);
+            }
+        }
+        typed.field = here.map(|h| h.0);
         !picked && out.response.has_focus() && ui.input(|i| i.key_pressed(Key::Enter) && !i.modifiers.shift)
     }
 

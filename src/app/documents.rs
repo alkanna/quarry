@@ -127,12 +127,23 @@ impl App {
         let lib: Vec<SavedQuery> = self.prefs.library.get(&key).map(|v| v.iter().filter(|q| q.pipeline.is_none()).cloned().collect()).unwrap_or_default();
         let mut qacts = Vec::new();
         let (t, ac, new_lib) = (&mut self.tabs[self.cur], &mut self.ac, &mut self.new_lib);
+        // Not asked yet (it is, right after this frame) or asked and not back.
+        let (asked, waiting, notes) = (&self.values_asked, &self.values_pending, &self.values_note);
+        let lookup = |p: &str| {
+            let k = (key.clone(), p.to_string());
+            if !asked.contains(&(k.0.clone(), k.1.clone(), None)) || waiting.contains(&k) {
+                Lookup::Pending
+            } else {
+                notes.get(&k).map_or(Lookup::Done, |n| Lookup::Skipped(n))
+            }
+        };
         let paths = std::mem::take(&mut t.paths);
         let fields = std::mem::take(&mut t.field_info);
+        let mut typed = Typed::default();
         toolbar(ui, |ui| {
             ui.horizontal_top(|ui| {
                 let w = ui.available_width() - 520.0;
-                run |= Self::query_field(ui, "QUERY", &mut t.filter_txt, "{ field: value }   or paste db.coll.find(...) / db.coll.aggregate([...])", w, FieldKind::Query, &paths, &fields, ac);
+                run |= Self::query_field(ui, "QUERY", &mut t.filter_txt, "{ field: value }   or paste db.coll.find(...) / db.coll.aggregate([...])", w, FieldKind::Query, &paths, &fields, ac, &mut typed, &lookup);
                 if primary(ui, "  Find  ", PRIMARY()).on_hover_text("Enter").clicked() {
                     run = true;
                 }
@@ -146,13 +157,33 @@ impl App {
             if !db::is_shell(&t.filter_txt) {
                 ui.horizontal_top(|ui| {
                     let w = (ui.available_width() - 160.0) / 2.0;
-                    run |= Self::query_field(ui, "SORT", &mut t.sort_txt, "{ _id: -1 }", w, FieldKind::Sort, &paths, &Default::default(), ac);
-                    run |= Self::query_field(ui, "PROJECT", &mut t.proj_txt, "{ name: 1 }", w, FieldKind::Project, &paths, &Default::default(), ac);
+                    run |= Self::query_field(ui, "SORT", &mut t.sort_txt, "{ _id: -1 }", w, FieldKind::Sort, &paths, &Default::default(), ac, &mut Typed::default(), &|_| Lookup::Done);
+                    run |= Self::query_field(ui, "PROJECT", &mut t.proj_txt, "{ name: 1 }", w, FieldKind::Project, &paths, &Default::default(), ac, &mut Typed::default(), &|_| Lookup::Done);
                 });
             }
         });
         t.paths = paths;
         t.field_info = fields;
+        // A lookup sent after this frame's list was drawn needs another frame to show its spinner;
+        // otherwise the next frame comes only with the answer.
+        let mut sent = false;
+        if let Some(f) = &typed.field {
+            sent |= self.want_values(key.clone(), f.clone(), None);
+        }
+        // Typing in a string asks for the values starting with it, once typing pauses.
+        let now = std::time::Instant::now();
+        if let Some(prefix) = typed.edit {
+            let due = now + std::time::Duration::from_millis(400);
+            self.values_typed = typed.field.zip(prefix).filter(|(_, p)| p.chars().count() >= 2).map(|(f, p)| (due, key.clone(), f, p));
+        }
+        if let Some((_, k, f, p)) = self.values_typed.take_if(|(due, ..)| *due <= now) {
+            sent |= self.want_values(k, f, Some(p));
+        } else if let Some((due, ..)) = &self.values_typed {
+            ui.ctx().request_repaint_after(*due - now);
+        }
+        if sent {
+            ui.ctx().request_repaint();
+        }
         for a in qacts {
             let t = &mut self.tabs[self.cur];
             match a {

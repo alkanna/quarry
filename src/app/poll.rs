@@ -178,10 +178,14 @@ impl App {
                             if self.status.1 {
                                 self.status = (format!("Loaded {} documents", docs.len()), false);
                             }
-                            let t = self.tab_by_req(req).unwrap();
+                            let Self { tabs, values, .. } = self;
+                            let t = tabs.iter_mut().find(|t| t.req == req).unwrap();
                             t.fields = auto_fields(&docs);
                             t.paths = doc_paths(&docs);
                             t.field_info = field_info(&docs);
+                            if let Some(v) = values.get(&t.coll_key()) {
+                                merge_values(&mut t.field_info, v);
+                            }
                             // Checks and open rows follow their documents by _id, so actions that reload
                             // (duplicate, filter, edits) keep them; rows that left the results drop out.
                             if !t.checked.is_empty() {
@@ -333,6 +337,7 @@ impl App {
                     Err(e) => self.err(e),
                 },
                 Msg::ColumnValues { op, coll, path, res } => self.column_values_done(ctx, op, coll, path, res),
+                Msg::FieldValues { key, path, prefix, res } => self.values_done(key, path, prefix, res),
                 Msg::Notice { title, body } => self.modal = Some(Modal::Text { title, body, code: false }),
                 Msg::Grouped { conn, db, coll, path, pipeline, res } => match res {
                     Ok(rows) => {

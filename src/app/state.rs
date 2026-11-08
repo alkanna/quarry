@@ -345,6 +345,11 @@ pub(super) fn page_window(page: Option<usize>, len: usize) -> (std::ops::Range<u
 }
 
 impl Tab {
+    /// "conn/db/coll", the key of per-collection settings.
+    pub(super) fn coll_key(&self) -> String {
+        format!("{}/{}/{}", self.sel.conn, self.sel.db, self.sel.coll)
+    }
+
     /// The page decoded, for a scan of every row; the tab itself keeps only BSON bytes.
     pub(super) fn decoded_docs(&self) -> Vec<Document> {
         self.docs.iter().map(db::Row::owned).collect()

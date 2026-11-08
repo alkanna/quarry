@@ -16,7 +16,7 @@ impl App {
     }
 
     fn draft_key_of(&self, id: Option<&Bson>) -> String {
-        let s = self.t().map(|t| format!("{}/{}/{}", t.sel.conn, t.sel.db, t.sel.coll)).unwrap_or_default();
+        let s = self.t().map(Tab::coll_key).unwrap_or_default();
         format!("{s}#{}", id.map(db::compact).unwrap_or_default())
     }
 

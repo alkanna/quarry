@@ -144,6 +144,17 @@ pub struct App {
     /// Message, when it was shown, and the `at` of the undo entry its Undo button reverts.
     toast: Option<(String, std::time::Instant, Option<std::time::Instant>)>,
     ac: Ac,
+    /// Field values fetched from the server for suggestions, per collection key then path. Kept on
+    /// disk, so a new session suggests them before its own fetch comes back.
+    values: HashMap<String, HashMap<String, Vec<Bson>>>,
+    /// (collection key, path, typed text) already fetched this session; no text for the sample.
+    values_asked: HashSet<(String, String, Option<String>)>,
+    /// (collection key, path) asked and not answered yet.
+    values_pending: HashSet<(String, String)>,
+    /// (collection key, path) whose typed text is not looked up, and why.
+    values_note: HashMap<(String, String), &'static str>,
+    /// A string value being typed: when to look up values starting with it, collection key, path, text.
+    values_typed: Option<(std::time::Instant, String, String, String)>,
     /// Shell editor language server, started on the first edit of a script; it quits when idle,
     /// so it only runs while someone writes JavaScript.
     js: shell_ls::JsState,
@@ -248,6 +259,11 @@ impl App {
             status: ("Ready. All connections start read-only.".into(), false),
             toast: None,
             ac: Ac::default(),
+            values: HashMap::new(),
+            values_asked: HashSet::new(),
+            values_pending: HashSet::new(),
+            values_note: HashMap::new(),
+            values_typed: None,
             js: Default::default(),
             status_at: std::time::Instant::now(),
             log: LogUi::default(),
@@ -316,12 +332,15 @@ impl App {
             let ui_json = config_dir().join("ui.json").exists().then_some(());
             let (prefs, broken_prefs) = parse_config(&config_dir().join("ui.json"));
             app.prefs = prefs;
+            app.values = load_values();
             app.prefs.appearance.apply(&cc.egui_ctx);
             for meta in metas {
                 let masked = keychain(meta.id).and_then(|k| k.get_password().ok()).map(|u| db::mask_uri(&u)).unwrap_or_default();
                 app.conns.push(Conn { meta, client: None, status: Status::Idle, writable: false, dbs: Vec::new(), masked_uri: masked , tunnel: None });
             }
             app.active = app.conns.first().map(|c| c.meta.id);
+            // Values of deleted connections go with them.
+            app.values.retain(|k, _| app.conns.iter().any(|c| k.starts_with(&format!("{}/", c.meta.id))));
             // Reopen the tabs of the last session; they load once their connection is connected.
             for st in app.prefs.open_tabs.clone() {
                 if app.conn(st.conn).is_none() {

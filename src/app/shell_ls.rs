@@ -281,7 +281,7 @@ impl App {
         let (items, raw): (Vec<Sug>, Vec<_>) = list.into_iter().map(|(s, i)| (s, i.raw)).unzip();
         self.js.raw = raw;
         self.js.resolve = None;
-        self.ac = Ac { id: Some(p.id), token: p.token, items, sel: 0, cursor: p.caret, rect: None, doc: None };
+        self.ac = Ac { id: Some(p.id), token: p.token, items, cursor: p.caret, ..Default::default() };
     }
 }
 
