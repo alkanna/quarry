@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.18.0](https://github.com/alkanna/quarry/compare/v0.17.1...v0.18.0) (2026-11-08)
+
+
+### Features
+
+* indexes as table rows with a full New index dialog ([#110](https://github.com/alkanna/quarry/issues/110)) ([ee2fc02](https://github.com/alkanna/quarry/commit/ee2fc02f534fe94a5d0523ba1012d2f4e772f741))
+* Server window with health, replica set and running operations ([#111](https://github.com/alkanna/quarry/issues/111)) ([be39a7d](https://github.com/alkanna/quarry/commit/be39a7d7c2fb696d7b30631c0ecb1c82978c841d))
+* Watch view that streams a collection's changes as they happen ([#112](https://github.com/alkanna/quarry/issues/112)) ([b2b15e8](https://github.com/alkanna/quarry/commit/b2b15e869fdc743a600330d4e18ad409df6afa0e))
+
+
+### Bug Fixes
+
+* index usage stats refused by the server no longer fail the Indexes view ([#104](https://github.com/alkanna/quarry/issues/104)) ([3f426c0](https://github.com/alkanna/quarry/commit/3f426c0e925870b84356f0e9435bcac60383ef56))
+* keep bulk renames and drafts from touching data they should not ([#109](https://github.com/alkanna/quarry/issues/109)) ([56f4888](https://github.com/alkanna/quarry/commit/56f48887d7918ecd40c9ac1883db02d114041dab))
+* Users and roles fits on screen and works for users who may not list everyone ([#107](https://github.com/alkanna/quarry/issues/107)) ([0b89f64](https://github.com/alkanna/quarry/commit/0b89f6431db38e331d997ef831a2b53bb2fdf81a))
+* what's new after an update covers every release since the last run ([#106](https://github.com/alkanna/quarry/issues/106)) ([e3ee104](https://github.com/alkanna/quarry/commit/e3ee10441ab407c5baf6ce9537f3efa0f46a4aab))
+
 ## [0.17.1](https://github.com/alkanna/quarry/compare/v0.17.0...v0.17.1) (2026-11-07)
 
 
