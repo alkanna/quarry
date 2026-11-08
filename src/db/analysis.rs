@@ -268,6 +268,8 @@ pub struct IndexStat {
 
 pub struct IndexInfo {
     pub stats: Vec<IndexStat>,
+    /// Why usage counts are missing: $indexStats was refused, as Atlas does on admin's system collections.
+    pub stats_err: Option<String>,
     /// Profiler level: 0 off, 1 slow operations, 2 all.
     pub level: i32,
     pub slowms: i64,

@@ -255,7 +255,12 @@ impl Worker {
                 }
                 .await
                 .unwrap_or_default();
-                let rows: Vec<Document> = t.c().aggregate(vec![doc! { "$indexStats": {} }]).await.map_err(e)?.try_collect().await.map_err(e)?;
+                // Best effort too: usage counts are extra, and a refusal must not hide the suggestions.
+                let rows: Result<Vec<Document>, String> = async { t.c().aggregate(vec![doc! { "$indexStats": {} }]).await.map_err(e)?.try_collect().await.map_err(e) }.await;
+                let (rows, stats_err) = match rows {
+                    Ok(r) => (r, None),
+                    Err(err) => (Vec::new(), Some(err)),
+                };
                 let stats = rows
                     .iter()
                     .map(|d| {
@@ -287,7 +292,7 @@ impl Worker {
                     Ok(c) => c.try_collect().await.unwrap_or_default(),
                     Err(_) => Vec::new(),
                 };
-                Ok(IndexInfo { stats, level, slowms, shapes: group_profile(&entries) })
+                Ok(IndexInfo { stats, stats_err, level, slowms, shapes: group_profile(&entries) })
             }
             .await;
             Msg::IndexInfo { key, res }

@@ -72,6 +72,10 @@ impl App {
                     ui.end_row();
                 }
             });
+            if let Some(e) = info.and_then(|i| i.stats_err.as_deref()) {
+                ui.add_space(8.0);
+                ui.label(RichText::new(stats_note(e)).color(MUTED())).on_hover_text(e);
+            }
             if let Some(i) = info {
                 ui.add_space(12.0);
                 caption(ui, "SUGGESTIONS");
@@ -120,5 +124,26 @@ impl App {
                 action: Danger::DropIndex(name),
             });
         }
+    }
+}
+
+/// Why the usage column is empty, without the raw command the server echoes back.
+fn stats_note(e: &str) -> &'static str {
+    if e.contains("not authorized") || e.contains("is not allowed to do action") {
+        "Usage counts are not available: this user may not read index statistics here (it needs the indexStats privilege, part of clusterMonitor)."
+    } else {
+        "Usage counts are not available for this collection."
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refused_index_stats_get_a_short_note() {
+        let atlas = "Command failed: Error code 13 (Unauthorized): not authorized on admin to execute command { aggregate: \"system.roles\", pipeline: [ { $indexStats: {} } ] }";
+        assert!(stats_note(atlas).contains("indexStats privilege"));
+        assert_eq!(stats_note("Command failed: something else"), "Usage counts are not available for this collection.");
     }
 }
