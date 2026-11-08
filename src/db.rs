@@ -334,6 +334,19 @@ fn shell_to_ejson(src: &str) -> String {
             out.extend(&chars[start..i]);
             continue;
         }
+        // `a.b: 1`: a dotted path as a key, which JSON5 (like JavaScript) only takes quoted. The
+        // suggestion list writes them unquoted, as people do.
+        if (c.is_ascii_alphabetic() || c == '_' || c == '$') && out.trim_end().ends_with(['{', ',']) {
+            let end = (i..chars.len()).find(|&k| !(chars[k].is_ascii_alphanumeric() || "_$.".contains(chars[k]))).unwrap_or(chars.len());
+            let colon = chars[end..].iter().find(|ch| !ch.is_whitespace()) == Some(&':');
+            if colon && chars[i..end].contains(&'.') {
+                out.push('"');
+                out.extend(&chars[i..end]);
+                out.push('"');
+                i = end;
+                continue;
+            }
+        }
         if c.is_ascii_alphabetic() && (i == 0 || !(chars[i - 1].is_ascii_alphanumeric() || chars[i - 1] == '$' || chars[i - 1] == '_')) {
             let start = i;
             while i < chars.len() && chars[i].is_ascii_alphanumeric() {
@@ -787,6 +800,10 @@ mod tests {
         assert!(matches!(d.get("_id"), Some(Bson::ObjectId(_))));
         assert_eq!(d.get("n"), Some(&Bson::Int64(5)));
         assert_eq!(d.get_str("s").unwrap(), "ObjectId(x)");
+        // Dotted keys without quotes, as the suggestion list writes them; text values keep their dots.
+        let d = parse_doc(r#"{booker.username: "a.b: c", $or: [{ x.y : 1 }, { z: 2 }]}"#).unwrap();
+        assert_eq!(d.get_str("booker.username").unwrap(), "a.b: c");
+        assert_eq!(d.get_array("$or").unwrap()[0].as_document().unwrap().get("x.y"), Some(&Bson::Int32(1)));
         assert!(parse_doc("{a: new Date('2024-01-02T03:04:05Z')}").unwrap().get_datetime("a").is_ok());
         assert!(parse_doc("[1]").is_err());
         let d = parse_doc(r#"{a: ~"1.5 (x)", b: ~abc, c: { $not: ~'it\'s' }, d: "~x"}"#).unwrap();
