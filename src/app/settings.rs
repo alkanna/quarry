@@ -8,7 +8,9 @@ impl App {
         dialog_title(ui, "Settings");
         ui.label(RichText::new("Changes are saved right away.").size(TXT_SMALL).color(FAINT()));
         ui.add_space(8.0);
-        let before = (self.prefs.open_inline, self.prefs.auto_save, self.prefs.always_writable, self.prefs.confirm_save, self.prefs.default_cols, self.prefs.timeout_ms, self.prefs.shell_runtime.clone(), self.prefs.mongodump.clone(), self.prefs.mongorestore.clone(), self.prefs.auto_update, self.prefs.show_fps, self.prefs.object_preview);
+        // Settings that save when changed. Tuples compare up to 12 items, so the readout toggles are grouped.
+        let saved = |p: &UiPrefs| (p.open_inline, p.auto_save, p.always_writable, p.confirm_save, p.default_cols, p.timeout_ms, p.shell_runtime.clone(), p.mongodump.clone(), p.mongorestore.clone(), p.auto_update, (p.show_fps, p.show_mem, p.show_cpu), p.object_preview);
+        let before = saved(&self.prefs);
         // The sections scroll inside the dialog, which keeps its title and Done in the window.
         let max_h = (ui.ctx().content_rect().height() - 190.0).max(200.0);
         egui::ScrollArea::vertical().id_salt("settings-scroll").max_height(max_h).min_scrolled_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
@@ -75,6 +77,12 @@ impl App {
                 setting_row(ui, "Show frame rate", "Frames per second and the time each frame takes, in the status bar. Quarry follows your display's refresh rate (vsync), up to 120 Hz on ProMotion screens.", |ui| {
                     toggle(ui, &mut self.prefs.show_fps);
                 });
+                setting_row(ui, "Show memory", "How much memory Quarry uses, in the status bar. Same number as Activity Monitor's Memory column on macOS, resident memory elsewhere.", |ui| {
+                    toggle(ui, &mut self.prefs.show_mem);
+                });
+                setting_row(ui, "Show CPU", "Quarry's CPU use over the last second, in percent of one core like Activity Monitor.", |ui| {
+                    toggle(ui, &mut self.prefs.show_cpu);
+                });
             });
             settings_section(ui, "UPDATES", |ui| {
                 let desc = if self.update_note.is_empty() { format!("Version {}. New releases of {} are installed in the background, then Quarry restarts when idle with nothing unsaved.", env!("CARGO_PKG_VERSION"), crate::update::REPO) } else { format!("Version {}. {}", env!("CARGO_PKG_VERSION"), self.update_note) };
@@ -110,7 +118,7 @@ impl App {
         if before.2 && !self.prefs.always_writable {
             self.conns.iter_mut().for_each(|c| c.writable = false);
         }
-        if before != (self.prefs.open_inline, self.prefs.auto_save, self.prefs.always_writable, self.prefs.confirm_save, self.prefs.default_cols, self.prefs.timeout_ms, self.prefs.shell_runtime.clone(), self.prefs.mongodump.clone(), self.prefs.mongorestore.clone(), self.prefs.auto_update, self.prefs.show_fps, self.prefs.object_preview) {
+        if before != saved(&self.prefs) {
             self.save_prefs();
         }
     }

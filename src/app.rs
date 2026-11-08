@@ -159,6 +159,10 @@ pub struct App {
     tool: Option<ToolRun>,
     /// CPU time of the last frame in milliseconds, for the frame rate readout.
     frame_ms: f32,
+    /// Last memory and CPU sample for the status bar: when, total CPU time then, CPU percent, bytes.
+    usage: (std::time::Instant, Duration, f32, Option<u64>),
+    /// Frame rate readout: seconds and frames counted so far, and the rate last shown.
+    fps: (f32, u32, f32),
     /// Measured column widths per result set and column.
     width_cache: HashMap<(usize, usize, String, Option<String>, bool), f32>,
     /// Recently closed tabs, newest first.
@@ -256,6 +260,8 @@ impl App {
             tool: None,
             width_cache: HashMap::new(),
             frame_ms: 0.0,
+            usage: (std::time::Instant::now(), Duration::ZERO, 0.0, None),
+            fps: (0.0, 0, 0.0),
             closed: Vec::new(),
             updated: None,
             update_note: String::new(),
@@ -264,6 +270,10 @@ impl App {
             started: std::time::Instant::now(),
             shot: shot.map(|p| (p, 0, Arc::new(Mutex::new(None)))),
         };
+        // Test switch: the frame rate, memory and CPU readouts, which demo mode leaves off.
+        if demo && std::env::var("QUARRY_TEST_STATUS").is_ok() {
+            (app.prefs.show_fps, app.prefs.show_mem, app.prefs.show_cpu) = (true, true, true);
+        }
         // Test fixture: QUARRY_TEST_JSON=<file of Extended JSON documents> makes screenshot mode
         // show those documents through the same message path real query results take. A .jsonl
         // file (one document per line) is read one document at a time like a cursor, so memory

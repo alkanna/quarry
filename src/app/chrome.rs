@@ -300,15 +300,51 @@ impl App {
         });
     }
 
+    /// Refreshes the memory and CPU readouts once a second, and asks for the repaint that shows them.
+    fn sample_usage(&mut self, ctx: &egui::Context) {
+        let (at, cpu_then, pct, _) = self.usage;
+        let wall = at.elapsed();
+        if wall >= Duration::from_secs(1) || cpu_then.is_zero() {
+            let (mem, cpu_now) = process_usage();
+            // A sample older than 2 s is from before the readouts were hidden, so it only starts a new second.
+            let pct = if cpu_then.is_zero() || wall > Duration::from_secs(2) { pct } else { cpu_now.saturating_sub(cpu_then).as_secs_f32() / wall.as_secs_f32() * 100.0 };
+            self.usage = (std::time::Instant::now(), cpu_now, pct, mem);
+        }
+        ctx.request_repaint_after(Duration::from_secs(1));
+    }
+
     pub(super) fn status_bar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::bottom("status").frame(egui::Frame::new().fill(PANEL()).inner_margin(egui::Margin::symmetric(12, 5))).show(ui, |ui| {
             ui.horizontal(|ui| {
                 if self.prefs.show_fps {
-                    let dt = ui.input(|i| i.stable_dt).max(0.000_1);
-                    let budget = 1000.0 * dt;
-                    let color = if self.frame_ms > budget * 0.8 { WARNING() } else { SUCCESS() };
-                    ui.label(RichText::new(format!("{:.0} fps · {:.1} ms", 1.0 / dt, self.frame_ms)).monospace().size(TXT_CAPTION).color(color)).on_hover_text("Frames per second while something moves, and the time Quarry needs to build one frame. At 120 Hz each frame has 8.3 ms.");
-                    ui.add_space(8.0);
+                    // Averaged over half a second of frames: one frame's dt swings above the refresh
+                    // rate when an input event lands just after a vsync. Idle gaps are left out, but
+                    // not the Shell's 100 ms repaints while a script runs.
+                    let dt = ui.input(|i| i.unstable_dt);
+                    let (sum, n, shown) = &mut self.fps;
+                    if dt < 0.25 {
+                        *sum += dt;
+                        *n += 1;
+                    }
+                    if *sum >= 0.5 || *shown == 0.0 && *n > 0 {
+                        *shown = *n as f32 / sum.max(0.000_1);
+                        (*sum, *n) = (0.0, 0);
+                    }
+                    let rate = self.fps.2.max(1.0);
+                    let color = if self.frame_ms > 1000.0 / rate * 0.8 { WARNING() } else { SUCCESS() };
+                    fixed_readout(ui, format!("{:>3.0} fps · {:>4.1} ms", rate, self.frame_ms), "000 fps · 00.0 ms", color).on_hover_text("Frames per second while something moves, and the time Quarry needs to build one frame. At 120 Hz each frame has 8.3 ms.");
+                }
+                if self.prefs.show_mem || self.prefs.show_cpu {
+                    self.sample_usage(ui.ctx());
+                    let (_, _, cpu, mem) = self.usage;
+                    if self.prefs.show_mem {
+                        let text = mem.map_or("mem n/a".into(), |b| format!("mem {:>9}", human_bytes(b as usize)));
+                        fixed_readout(ui, text, "mem 0000.0 MB", MUTED()).on_hover_text("Memory Quarry uses now, updated every second.");
+                    }
+                    if self.prefs.show_cpu {
+                        let color = if cpu >= 80.0 { WARNING() } else { MUTED() };
+                        fixed_readout(ui, format!("cpu {:>3.0}%", cpu), "cpu 000%", color).on_hover_text("Quarry's CPU use over the last second, in percent of one core.");
+                    }
                 }
                 // Errors fade after 15 s so an old problem does not look current.
                 const ERROR_S: u64 = 15;
@@ -607,5 +643,59 @@ impl App {
     pub(super) fn new_conn_modal(&mut self) {
         self.conn_test = None;
         self.modal = Some(Modal::Conn(Box::new(ConnForm { uri: "mongodb://localhost:27017".into(), ..Default::default() })));
+    }
+}
+
+/// A status bar readout in a slot as wide as `template`, so the text after it does not shift
+/// when the numbers change width.
+fn fixed_readout(ui: &mut egui::Ui, text: String, template: &str, color: Color32) -> egui::Response {
+    let font = FontId::monospace(TXT_CAPTION);
+    let w = ui.fonts_mut(|f| f.layout_no_wrap(template.into(), font.clone(), color).size().x);
+    let g = ui.fonts_mut(|f| f.layout_no_wrap(text, font, color));
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w.max(g.size().x) + 8.0, g.size().y), Sense::hover());
+    ui.painter().galley(rect.left_top(), g, color);
+    resp
+}
+
+/// The app's memory in bytes and the CPU time it has used so far.
+#[cfg(target_os = "macos")]
+fn process_usage() -> (Option<u64>, Duration) {
+    // phys_footprint is what Activity Monitor shows as Memory.
+    let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
+    let ok = unsafe { libc::proc_pid_rusage(libc::getpid(), libc::RUSAGE_INFO_V2, &mut info as *mut _ as *mut libc::rusage_info_t) } == 0;
+    (ok.then_some(info.ri_phys_footprint), unix_cpu_time())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn process_usage() -> (Option<u64>, Duration) {
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
+    let rss = std::fs::read_to_string("/proc/self/statm").ok().and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok()).map(|p| p * page);
+    (rss, unix_cpu_time())
+}
+
+#[cfg(unix)]
+fn unix_cpu_time() -> Duration {
+    let mut r: libc::rusage = unsafe { std::mem::zeroed() };
+    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut r) };
+    let tv = |t: libc::timeval| Duration::from_secs(t.tv_sec as u64) + Duration::from_micros(t.tv_usec as u64);
+    tv(r.ru_utime) + tv(r.ru_stime)
+}
+
+#[cfg(windows)]
+fn process_usage() -> (Option<u64>, Duration) {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+    unsafe {
+        let p = GetCurrentProcess();
+        let mut m: PROCESS_MEMORY_COUNTERS_EX = std::mem::zeroed();
+        m.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32;
+        // The working set, resident memory like the Linux readout and the Settings text say.
+        let mem = (GetProcessMemoryInfo(p, &mut m as *mut _ as *mut _, m.cb) != 0).then_some(m.WorkingSetSize as u64);
+        let z = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+        let (mut c, mut e, mut k, mut u) = (z, z, z, z);
+        let ticks = |t: FILETIME| ((t.dwHighDateTime as u64) << 32) | t.dwLowDateTime as u64;
+        let cpu = if GetProcessTimes(p, &mut c, &mut e, &mut k, &mut u) != 0 { Duration::from_nanos((ticks(k) + ticks(u)) * 100) } else { Duration::ZERO };
+        (mem, cpu)
     }
 }

@@ -68,6 +68,9 @@ pub(super) struct UiPrefs {
     pub(super) auto_preview: bool,
     /// Frame rate and the time each frame takes, in the status bar.
     pub(super) show_fps: bool,
+    /// Quarry's memory and its CPU use, in the status bar.
+    pub(super) show_mem: bool,
+    pub(super) show_cpu: bool,
     /// Show the first characters of big objects and arrays in columns, as the original does,
     /// instead of "{12 fields}".
     pub(super) object_preview: bool,
@@ -156,7 +159,7 @@ pub(super) struct SavedStage {
 
 impl Default for UiPrefs {
     fn default() -> Self {
-        Self { open_inline: true, table: true, confirm_save: false, auto_save: false, always_writable: false, default_cols: DEFAULT_COLS, timeout_ms: db::DEFAULT_TIMEOUT_MS, shell_runtime: String::new(), shell_histories: HashMap::new(), shell_packages: Vec::new(), history: HashMap::new(), library: HashMap::new(), open_tabs: Vec::new(), cur_tab: 0, last_conn: None, cols: HashMap::new(), relations: HashMap::new(), mongodump: String::new(), mongorestore: String::new(), auto_update: true, auto_preview: true, show_fps: false, object_preview: false, appearance: Appearance::System, last_version: String::new() }
+        Self { open_inline: true, table: true, confirm_save: false, auto_save: false, always_writable: false, default_cols: DEFAULT_COLS, timeout_ms: db::DEFAULT_TIMEOUT_MS, shell_runtime: String::new(), shell_histories: HashMap::new(), shell_packages: Vec::new(), history: HashMap::new(), library: HashMap::new(), open_tabs: Vec::new(), cur_tab: 0, last_conn: None, cols: HashMap::new(), relations: HashMap::new(), mongodump: String::new(), mongorestore: String::new(), auto_update: true, auto_preview: true, show_fps: false, show_mem: false, show_cpu: false, object_preview: false, appearance: Appearance::System, last_version: String::new() }
     }
 }
 
