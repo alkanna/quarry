@@ -38,6 +38,10 @@ pub(crate) struct Ac {
     pub(crate) rect: Option<egui::Rect>,
     /// Signature and docs of the item at this index, shown beside the list.
     pub(crate) doc: Option<(usize, db::JsDoc)>,
+    /// The field's values are being fetched from the server; the list stays open and says so.
+    pub(crate) loading: bool,
+    /// Why the server was not asked for values matching the typed text, shown under the list.
+    pub(crate) note: Option<&'static str>,
 }
 
 impl Ac {
@@ -51,7 +55,17 @@ impl Ac {
             st.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(start + s.caret))));
             st.store(ctx, id);
         }
+        self.close();
+    }
+
+    pub(crate) fn close(&mut self) {
         self.items.clear();
+        self.loading = false;
+        self.note = None;
+    }
+
+    pub(crate) fn shown(&self, id: egui::Id) -> bool {
+        self.id == Some(id) && (!self.items.is_empty() || self.loading || self.note.is_some())
     }
 }
 
@@ -213,6 +227,63 @@ pub(crate) fn field_info<'a>(docs: impl IntoIterator<Item = impl Into<DocRef<'a>
         .collect()
 }
 
+/// Whether a value is worth suggesting: short text, numbers and booleans, as `field_info` keeps.
+pub(crate) fn suggestible(v: &Bson) -> bool {
+    match v {
+        Bson::String(s) => s.chars().count() <= 80,
+        Bson::Int32(_) | Bson::Int64(_) | Bson::Double(_) | Bson::Boolean(_) => true,
+        _ => false,
+    }
+}
+
+/// Adds values fetched from the server after the page's own, which come first because they are
+/// counted. A field missing from the page gets an entry typed by its first value.
+pub(crate) fn merge_values(fields: &mut Fields, server: &HashMap<String, Vec<Bson>>) {
+    for (p, vals) in server {
+        let Some(first) = vals.first() else { continue };
+        let f = fields.entry(p.clone()).or_insert_with(|| FieldInfo { kind: db::type_name(first), values: Vec::new() });
+        for v in vals {
+            if !f.values.contains(v) {
+                f.values.push(v.clone());
+            }
+        }
+    }
+}
+
+/// The field whose value starts at the end of `before`: `status` in `{ status: "dr`. Operators
+/// like `$in` are left out, their field is further back.
+fn value_field(before: &str) -> Option<&str> {
+    let lead = before.trim_end_matches(|c: char| c.is_ascii_alphanumeric() || "@#$._".contains(c)).trim_end_matches(['"', '\'']).trim_end();
+    // Inside $elemMatch the key is relative to the array, not a path of the collection.
+    let owner = innermost_open(before).and_then(|i| key_before_colon(before[..i].trim_end()));
+    key_before_colon(lead).filter(|f| !f.is_empty() && !f.starts_with('$') && owner != Some("$elemMatch"))
+}
+
+/// Byte index of the quote that opens a string still open at the end of `s`.
+pub(crate) fn open_quote(s: &str) -> Option<usize> {
+    let (mut open, mut esc) = (None, false);
+    for (i, c) in s.char_indices() {
+        match open {
+            Some(_) if esc => esc = false,
+            Some(_) if c == '\\' => esc = true,
+            Some((_, q)) if c == q => open = None,
+            Some(_) => {}
+            None if c == '"' || c == '\'' => open = Some((i, c)),
+            None => {}
+        }
+    }
+    open.map(|(i, _)| i)
+}
+
+/// The field whose value the caret is in, and the text typed so far when that value is a string:
+/// (`name`, Some("al ex")) in `{ name: "al ex`.
+pub(crate) fn value_at(before: &str) -> Option<(&str, Option<&str>)> {
+    match open_quote(before) {
+        Some(q) => Some((value_field(&before[..=q])?, Some(&before[q + 1..]))),
+        None => Some((value_field(before)?, None)),
+    }
+}
+
 /// Every dotted path in the documents (array elements merged), capped so huge documents stay fast.
 pub(crate) fn doc_paths<'a>(docs: impl IntoIterator<Item = impl Into<DocRef<'a>>>) -> Vec<String> {
     let (mut out, mut seen) = (Vec::new(), HashSet::new());
@@ -296,7 +367,8 @@ pub(crate) fn suggest(before: &str, kind: FieldKind, paths: &[String], fields: &
     };
     let colon_field = key_before_colon(lead);
     let info = colon_field.and_then(|f| fields.get(f));
-    let (anchored, mut items): (bool, Vec<Sug>) = if token.contains('.') {
+    // A dot in a key walks into sub-fields; in a value (after a colon) it is just text.
+    let (anchored, mut items): (bool, Vec<Sug>) = if token.contains('.') && !lead.ends_with(':') {
         let prefix = &token[..token.rfind('.').unwrap()];
         let kids = paths.iter().filter(|p| p.strip_prefix(prefix).and_then(|r| r.strip_prefix('.')).is_some_and(|r| !r.contains('.')));
         // The original lists at most 100 sub-fields after a dot (renderer line 95666).
@@ -353,17 +425,24 @@ pub(crate) fn suggest(before: &str, kind: FieldKind, paths: &[String], fields: &
             FieldKind::Sort => &[("1", "ascending"), ("-1", "descending")],
             FieldKind::Project => &[("1", "include"), ("0", "exclude")],
         };
+        let values = |i: &FieldInfo| -> Vec<Sug> {
+            i.values.iter().map(|x| {
+                let insert = db::shell_text(x);
+                Sug { back: 0, text: x.as_str().map_or_else(|| insert.clone(), str::to_string), note: "value", caret: insert.chars().count(), insert }
+            }).collect()
+        };
+        // Right after the colon only the field's own values are listed, and nothing for a field
+        // without any, so the list does not pop up with generic snippets on every colon.
         if token.is_empty() && kind == FieldKind::Query {
-            return None;
+            let v = info.map(values).unwrap_or_default();
+            if v.is_empty() {
+                return None;
+            }
+            return Some((0, v));
         }
         let mut v: Vec<Sug> = vals.iter().map(|(v, n)| Sug { back: 0, text: v.to_string(), note: n, insert: v.to_string(), caret: caret_in(v) }).collect();
         if kind == FieldKind::Query {
-            if let Some(i) = info {
-                v.extend(i.values.iter().map(|x| {
-                    let insert = db::shell_text(x);
-                    Sug { back: 0, text: x.as_str().map_or_else(|| insert.clone(), str::to_string), note: "value", caret: insert.chars().count(), insert }
-                }));
-            }
+            v.extend(info.map(values).unwrap_or_default());
             // Snippets that suit the field's kind; all of them for a field not in the loaded documents.
             // None after an operator's colon, like `$gt:`, where they would nest a condition in a value.
             if !colon_field.is_some_and(|f| f.starts_with('$')) {
@@ -403,7 +482,7 @@ pub(crate) fn ac_field(
     show: impl FnOnce(&mut egui::Ui, &mut String, bool) -> egui::text_edit::TextEditOutput,
 ) -> (egui::text_edit::TextEditOutput, bool) {
     let (out, picked, moved) = ac_input(ui, id, text, ac, compute, show);
-    if picked || ac.id != Some(id) || ac.items.is_empty() {
+    if picked || !ac.shown(id) {
         return (out, picked);
     }
     let caret = out.galley.pos_from_cursor(egui::text::CCursor::new(ac.cursor));
@@ -444,7 +523,7 @@ pub(crate) fn ac_input(
                 pick = Some(ac.sel);
             }
             if i.consume_key(egui::Modifiers::NONE, Key::Escape) {
-                ac.items.clear();
+                ac.close();
             }
         });
     }
@@ -459,18 +538,18 @@ pub(crate) fn ac_input(
         if out.response.changed() {
             let before: String = text.chars().take(ci).collect();
             match compute(&before) {
-                Some((token, items)) => *ac = Ac { id: Some(id), token, items, sel: 0, cursor: ci, rect: None, doc: None },
-                None if ac.id == Some(id) => ac.items.clear(),
+                Some((token, items)) => *ac = Ac { id: Some(id), token, items, cursor: ci, ..Default::default() },
+                None if ac.id == Some(id) => ac.close(),
                 None => {}
             }
         } else if ac.id == Some(id) && ci != ac.cursor {
-            ac.items.clear();
+            ac.close();
         }
     }
     let test_shot = std::env::var("QUARRY_TEST_AC").is_ok();
     let pointer_on_list = test_shot || ac.rect.zip(ui.input(|i| i.pointer.hover_pos())).is_some_and(|(r, p)| r.contains(p));
     if !focused && ac.id == Some(id) && !pointer_on_list {
-        ac.items.clear();
+        ac.close();
     }
     (out, false, moved)
 }
@@ -478,7 +557,7 @@ pub(crate) fn ac_input(
 /// Draws the open suggestion list of input `id` here and inserts the clicked one. `width` fixes the
 /// list width, as inside a menu; otherwise it fits the longest suggestion. Returns whether one was picked.
 pub(crate) fn ac_list(ui: &mut egui::Ui, id: egui::Id, text: &mut String, ac: &mut Ac, moved: bool, width: Option<f32>) -> bool {
-    if ac.id != Some(id) || ac.items.is_empty() {
+    if !ac.shown(id) {
         return false;
     }
     let typed: String = text.chars().take(ac.cursor).skip(ac.cursor.saturating_sub(ac.token)).collect();
@@ -488,7 +567,7 @@ pub(crate) fn ac_list(ui: &mut egui::Ui, id: egui::Id, text: &mut String, ac: &m
         .horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             // Each card stacks its own rows; only the list and the doc sit side by side.
-            ui.vertical(|ui| popup_list(ui, &ac.items, ac.sel, &typed, moved, width, &mut click));
+            ui.vertical(|ui| popup_list(ui, ac, &typed, moved, width, &mut click));
             if let Some(d) = doc {
                 ui.vertical(|ui| super::js_doc::doc_card(ui, d));
             }
@@ -535,7 +614,8 @@ fn label_job(label: &str, typed: &str, selected: bool) -> LayoutJob {
 
 /// The suggestion popup, drawn like an IDE completion list: one tight row per item with a kind
 /// badge, the label, and the kind right-aligned, a scrollbar on the right edge, and a key hint.
-fn popup_list(ui: &mut egui::Ui, items: &[Sug], sel: usize, typed: &str, moved: bool, width: Option<f32>, click: &mut Option<usize>) {
+fn popup_list(ui: &mut egui::Ui, ac: &Ac, typed: &str, moved: bool, width: Option<f32>, click: &mut Option<usize>) {
+    let (items, sel) = (&ac.items, ac.sel);
     const ROW: f32 = 22.0;
     const BADGE: f32 = 16.0;
     const PAD: f32 = 6.0;
@@ -544,6 +624,14 @@ fn popup_list(ui: &mut egui::Ui, items: &[Sug], sel: usize, typed: &str, moved: 
     // Sized to the longest row, so the scrollbar sits on the edge instead of mid-list.
     let p = ui.painter();
     let fonts = items.iter().map(|s| p.layout_no_wrap(s.text.clone(), FontId::monospace(MONO_PX), TEXT()).size().x + p.layout_no_wrap(s.note.to_string(), note_font.clone(), TEXT()).size().x).fold(0.0, f32::max);
+    // A lookup in progress or a skipped one gets a row of its own, laid out like a suggestion.
+    let status = match (ac.loading, ac.note) {
+        (true, _) if items.is_empty() => Some("Looking up values in the collection…"),
+        (true, _) => Some("Looking up more values…"),
+        (false, n) => n,
+    };
+    let status_w = status.map_or(0.0, |s| p.layout_no_wrap(s.to_string(), note_font.clone(), TEXT()).size().x);
+    let fonts = fonts.max(status_w + 16.0);
     let w = width.unwrap_or((fonts + BADGE + PAD * 5.0 + 16.0).clamp(220.0, 520.0));
     popup_card(ui).inner_margin(egui::Margin::symmetric(0, 4)).show(ui, |ui| {
         ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
@@ -565,9 +653,12 @@ fn popup_list(ui: &mut egui::Ui, items: &[Sug], sel: usize, typed: &str, moved: 
                 let badge = egui::Rect::from_center_size(egui::pos2(row.left() + PAD + BADGE / 2.0, row.center().y), egui::vec2(BADGE, BADGE));
                 p.rect_filled(badge, R_SM, tint(color, 40));
                 p.text(badge.center(), egui::Align2::CENTER_CENTER, letter, FontId::monospace(TXT_CAPTION), color);
-                let label = p.layout_job(label_job(&s.text, typed, selected));
+                let note = p.text(egui::pos2(row.right() - PAD - 8.0, row.center().y), egui::Align2::RIGHT_CENTER, s.note, note_font.clone(), if selected { MUTED() } else { FAINT() });
+                let mut job = label_job(&s.text, typed, selected);
+                // The popup width is capped, so long paths are cut with an ellipsis before the kind note.
+                job.wrap = egui::text::TextWrapping::truncate_at_width(note.left() - PAD - badge.right() - PAD);
+                let label = p.layout_job(job);
                 p.galley(egui::pos2(badge.right() + PAD, row.center().y - label.size().y / 2.0), label, TEXT());
-                p.text(egui::pos2(row.right() - PAD - 8.0, row.center().y), egui::Align2::RIGHT_CENTER, s.note, note_font.clone(), if selected { MUTED() } else { FAINT() });
                 if selected && moved {
                     r.scroll_to_me(None);
                 }
@@ -576,9 +667,26 @@ fn popup_list(ui: &mut egui::Ui, items: &[Sug], sel: usize, typed: &str, moved: 
                 }
             }
         });
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 20.0), egui::Sense::hover());
-        ui.painter().hline(rect.x_range(), rect.top() + 2.0, egui::Stroke::new(1.0, BORDER()));
-        ui.painter().text(egui::pos2(rect.left() + PAD + 4.0, rect.center().y + 2.0), egui::Align2::LEFT_CENTER, "Enter or Tab to insert, Esc to close", note_font, FAINT());
+        // With nothing to insert yet, the status row is the whole popup.
+        if !items.is_empty() {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(w, if status.is_some() { 5.0 } else { 20.0 }), egui::Sense::hover());
+            ui.painter().hline(rect.x_range(), rect.top() + 2.0, egui::Stroke::new(1.0, BORDER()));
+            if status.is_none() {
+                ui.painter().text(egui::pos2(rect.left() + PAD + 4.0, rect.center().y + 2.0), egui::Align2::LEFT_CENTER, "Enter or Tab to insert, Esc to close", note_font.clone(), FAINT());
+            }
+        }
+        if let Some(text) = status {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(w, ROW), egui::Sense::hover());
+            let row = rect.shrink2(egui::vec2(4.0, 1.0));
+            let icon = egui::Rect::from_center_size(egui::pos2(row.left() + PAD + BADGE / 2.0, row.center().y), egui::vec2(BADGE, BADGE));
+            if ac.loading {
+                egui::Spinner::new().size(12.0).color(MUTED()).paint_at(ui, icon);
+            } else {
+                ui.painter().rect_filled(icon, R_SM, tint(WARNING(), 40));
+                ui.painter().text(icon.center(), egui::Align2::CENTER_CENTER, "!", FontId::monospace(TXT_CAPTION), WARNING());
+            }
+            ui.painter().text(egui::pos2(icon.right() + PAD, row.center().y), egui::Align2::LEFT_CENTER, text, note_font, MUTED());
+        }
     });
 }
 
@@ -811,8 +919,10 @@ mod tests {
         assert!(s.iter().any(|x| x.note == "between two days, both included"));
         // Fields not loaded yet are judged by their name.
         assert!(suggest("{ \"providerOrder.syncedAt\": ", FieldKind::Query, &paths, &dates).is_some());
-        assert!(suggest("{ status: ", FieldKind::Query, &paths, &dates).is_none());
-        assert!(suggest("{ format: ", FieldKind::Query, &paths, &dates).is_none());
+        // Other fields list their own values right after the colon, and nothing else.
+        let (_, s) = suggest("{ status: ", FieldKind::Query, &paths, &dates).unwrap();
+        assert!(s.len() == 1 && s[0].text == "active");
+        assert!(suggest("{ n: { $gt: ", FieldKind::Query, &paths, &dates).is_none());
         let (_, s) = suggest("{ createdAt: #last", FieldKind::Query, &paths, &dates).unwrap();
         assert!(s.iter().all(|x| x.text.to_ascii_lowercase().contains("last")));
         // Values from the loaded documents, most frequent first, and inside quotes as soon as one is typed.
@@ -843,6 +953,31 @@ mod tests {
         let (_, s) = suggest("{ s: 'it", FieldKind::Query, &paths, &field_info(&docs2)).unwrap();
         assert_eq!(s[0].insert, "it\\'s");
         assert!(date_like("startDate") && date_like("syncedAt") && date_like("timestamp") && !date_like("status"));
+    }
+
+    #[test]
+    fn server_values() {
+        assert_eq!(value_field("{ status: \"dr"), Some("status"));
+        assert_eq!(value_field("{ a.b: 4"), Some("a.b"));
+        assert_eq!((value_field("{ n: { $gt: "), value_field("{ sta")), (None, None));
+        assert_eq!(value_field("{ items: { $elemMatch: { sku: \"a"), None);
+        assert_eq!(value_at("{ a: 1, name: \"al ex"), Some(("name", Some("al ex"))));
+        assert_eq!(value_at("{ name: 'it\\'s"), Some(("name", Some("it\\'s"))));
+        assert_eq!(value_at("{ n: 4"), Some(("n", None)));
+        assert_eq!(value_at("{ name: \"al\", "), None);
+        let mut f = field_info(&[mongodb::bson::doc! { "status": "active" }]);
+        let server = HashMap::from([("status".to_string(), vec![Bson::from("archived"), Bson::from("active")]), ("kind".to_string(), vec![Bson::from(3)])]);
+        merge_values(&mut f, &server);
+        assert_eq!(f["status"].values, [Bson::from("active"), Bson::from("archived")]);
+        assert_eq!(f["kind"].kind, "int");
+        // A field only the server knows still suggests its values.
+        let (_, s) = suggest("{ status: \"ar", FieldKind::Query, &[], &f).unwrap();
+        assert_eq!(s[0].text, "archived");
+        // A dot typed in a value keeps matching values instead of looking for sub-fields.
+        let server = HashMap::from([("user".to_string(), vec![Bson::from("alex.p@x.com"), Bson::from("alexAdmin")])]);
+        merge_values(&mut f, &server);
+        let (_, s) = suggest("{ user: \"alex.", FieldKind::Query, &["user".into()], &f).unwrap();
+        assert_eq!(s.iter().map(|x| x.text.as_str()).collect::<Vec<_>>(), ["alex.p@x.com"]);
     }
 
     #[test]

@@ -241,14 +241,7 @@ impl Worker {
 
     pub fn indexes(&self, req: u64, t: Target) {
         self.spawn(async move {
-            let res = async {
-                // The raw specs rather than the driver's IndexModel, which drops options it does not
-                // model. A collection has at most 64 indexes, so the first batch holds them all.
-                let r = t.client.database(&t.db).run_command(doc! { "listIndexes": &t.coll }).await.map_err(e)?;
-                let specs = r.get_document("cursor").and_then(|c| c.get_array("firstBatch")).map_err(|err| err.to_string())?;
-                Ok(specs.iter().filter_map(Bson::as_document).map(index_doc).collect())
-            }
-            .await;
+            let res = index_specs(&t).await;
             Msg::Indexes { req, res }
         });
     }
@@ -699,6 +692,55 @@ impl Worker {
         });
     }
 
+    /// A field's most frequent values across the collection, for the query box's suggestions, from a
+    /// random sample: `distinct` is complete but unbounded, and on unindexed fields of big collections
+    /// it times out, while the sample's cost stays the same at any size. With `prefix`, the first
+    /// 1000 documents whose value starts with it instead (an anchored regex can use an index), or
+    /// None when that would scan a big collection.
+    pub fn field_values(&self, key: String, t: Target, path: String, prefix: Option<String>) {
+        self.spawn(async move {
+            let res = async {
+                // A prefix nobody has makes an unindexed field scan the whole collection, so typed
+                // lookups run only where they are cheap: the field leads an index, or the collection
+                // is small. Both checks read metadata only. Views answer neither and are skipped.
+                if prefix.is_some() {
+                    let c = t.c();
+                    let (count, specs) = tokio::join!(async { c.estimated_document_count().max_time(t.timeout).await }, index_specs(&t));
+                    let small = count.is_ok_and(|n| n <= PREFIX_SCAN_MAX);
+                    let leads = specs.is_ok_and(|s| s.iter().any(|ix| ix.get_document("keys").ok().and_then(|k| k.keys().next()) == Some(&path)));
+                    if !small && !leads {
+                        return Ok(None);
+                    }
+                }
+                // Only kinds the list offers, so ids or objects cannot take every slot.
+                let mut keep = doc! { "$type": ["string", "int", "long", "double", "bool"] };
+                let mut pipeline = vec![doc! { "$sample": { "size": 1000 } }];
+                if let Some(p) = &prefix {
+                    let re = format!("^{}", regex_escape(p));
+                    pipeline = vec![doc! { "$match": { &path: { "$regex": &re } } }, doc! { "$limit": 1000 }];
+                    keep.insert("$regex", re);
+                }
+                pipeline.extend([
+                    doc! { "$project": { "v": format!("${path}") } },
+                    doc! { "$unwind": "$v" },
+                    doc! { "$match": { "v": keep } },
+                    doc! { "$group": { "_id": "$v", "n": { "$sum": 1 } } },
+                    doc! { "$sort": { "n": -1, "_id": 1 } },
+                    doc! { "$limit": FIELD_VALUES_MAX as i64 },
+                ]);
+                // Named in the query log, and cut short: suggestions are not worth a long wait.
+                let mut cursor = t.c().aggregate(pipeline).comment("quarry: value suggestions").max_time(t.timeout.min(Duration::from_secs(2))).await.map_err(e)?;
+                let mut out = Vec::new();
+                while let Some(d) = cursor.try_next().await.map_err(e)? {
+                    out.extend(d.get("_id").cloned());
+                }
+                Ok(Some(out))
+            }
+            .await;
+            Msg::FieldValues { key, path, prefix, res }
+        });
+    }
+
     /// Like the original's "Count distinct values": distinct(path, current filter).len().
     pub fn distinct_count(&self, t: Target, path: String, filter: Document) {
         self.spawn(async move {
@@ -911,6 +953,14 @@ pub(crate) async fn replace_doc(conn: u64, t: Target, old: Document, new: Docume
 
 /// An index spec as the app keeps it: name and keys first, then every option the index was made
 /// with, without the format version and the old namespace field.
+/// The collection's index specs, raw rather than the driver's IndexModel, which drops options it
+/// does not model. A collection has at most 64 indexes, so the first batch holds them all.
+async fn index_specs(t: &Target) -> Res<Vec<Document>> {
+    let r = t.client.database(&t.db).run_command(doc! { "listIndexes": &t.coll }).await.map_err(e)?;
+    let specs = r.get_document("cursor").and_then(|c| c.get_array("firstBatch")).map_err(|err| err.to_string())?;
+    Ok(specs.iter().filter_map(Bson::as_document).map(index_doc).collect())
+}
+
 pub(crate) fn index_doc(spec: &Document) -> Document {
     let mut d = doc! { "name": spec.get_str("name").unwrap_or_default(), "keys": spec.get("key").cloned().unwrap_or_else(|| Bson::Document(doc! {})) };
     for (k, v) in spec.iter().filter(|(k, _)| !["name", "key", "v", "ns"].contains(&k.as_str())) {

@@ -1,6 +1,6 @@
 //! Code text areas: JSON and JS highlighting, self-closing brackets with auto-indent, and the Cmd+F bar.
 
-use super::complete::{JS_GLOBALS, JS_KEYWORDS};
+use super::complete::{JS_GLOBALS, JS_KEYWORDS, open_quote};
 use super::theme::*;
 use eframe::egui::{self, Color32, FontId, Key, RichText, TextFormat, text::LayoutJob};
 use std::sync::Arc;
@@ -81,6 +81,15 @@ pub(crate) fn with_autopair(ui: &mut egui::Ui, id: egui::Id, text: &mut String, 
     };
     let enter = focused && ui.input(|i| i.key_pressed(Key::Enter));
     let cursor = egui::TextEdit::load_state(ui.ctx(), id).and_then(|s| s.cursor.char_range()).filter(|r| r.is_empty()).map(|r| r.primary.index.0);
+    // Backspace between an empty pair removes both halves; the editor itself removes the opening one.
+    if let Some(ci) = cursor.filter(|&ci| ci > 0 && focused && ui.input(|i| i.key_pressed(Key::Backspace) && i.modifiers.is_none())) {
+        let mut around = text.chars().skip(ci - 1);
+        if let (Some(a), Some(b)) = (around.next(), around.next())
+            && ["()", "[]", "{}", "\"\"", "''"].iter().any(|p| p.starts_with(a) && p.ends_with(b))
+        {
+            text.remove(byte_at(text, ci));
+        }
+    }
     if let (Some(c), Some(ci)) = (typed, cursor) {
         if ")]}\"'".contains(c) && text.chars().nth(ci) == Some(c) {
             ui.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Text(t) if t.chars().count() == 1)));
@@ -105,8 +114,9 @@ pub(crate) fn with_autopair(ui: &mut egui::Ui, id: egui::Id, text: &mut String, 
         let next = text.chars().nth(ci);
         let prev = ci.checked_sub(2).and_then(|p| text.chars().nth(p));
         let fits = next.is_none_or(|n| n.is_whitespace() || ")]},:".contains(n));
-        // A quote right after a word is more likely an apostrophe or the end of a string.
-        let quote_ok = !matches!(close, '"' | '\'') || prev.is_none_or(|p| !p.is_alphanumeric());
+        // A quote right after a word is more likely an apostrophe, and one typed inside a string ends
+        // it (or is part of it), so neither gets a partner.
+        let quote_ok = !matches!(close, '"' | '\'') || (prev.is_none_or(|p| !p.is_alphanumeric()) && !in_string(&text[..byte_at(text, ci.saturating_sub(1))]));
         if fits && quote_ok {
             let byte = text.char_indices().nth(ci).map(|(b, _)| b).unwrap_or(text.len());
             text.insert(byte, close);
@@ -135,6 +145,11 @@ pub(crate) fn with_autopair(ui: &mut egui::Ui, id: egui::Id, text: &mut String, 
         }
     }
     out
+}
+
+/// Whether the end of `before` is inside a quoted string on its last line, escapes followed.
+fn in_string(before: &str) -> bool {
+    open_quote(before.rsplit('\n').next().unwrap_or(before)).is_some()
 }
 
 /// One indent step; the same two spaces the pretty-printed JSON uses.
@@ -422,6 +437,16 @@ impl Find {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quotes_inside_strings() {
+        assert!(!in_string("{ a: "));
+        assert!(in_string("{ a: \""));
+        assert!(in_string("{ a: \"x\\\""));
+        assert!(!in_string("{ a: \"x\", b: "));
+        assert!(in_string("{ a: \"it's"));
+        assert!(!in_string("x = \"a\nb: "));
+    }
 
     #[test]
     fn js_colours() {

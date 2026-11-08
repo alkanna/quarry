@@ -31,6 +31,10 @@ pub use worker::*;
 
 /// Whole-query column data actions read at most this many documents.
 pub const COL_VALUES_CAP: i64 = 100_000;
+/// Most values of one field kept for the query box's suggestions.
+pub const FIELD_VALUES_MAX: usize = 200;
+/// Largest collection whose field values are looked up by typed text without an index on the field.
+pub const PREFIX_SCAN_MAX: u64 = 100_000;
 pub const PAGE_SIZE: u64 = 50; // paginationLimit in the original
 pub const DEFAULT_TIMEOUT_MS: u64 = 5000; // Settings.connectionTimeout in the original
 pub const UNDO_MAX: usize = 50; // maxActionsLength
@@ -197,6 +201,9 @@ pub enum Msg {
     Grouped { conn: u64, db: String, coll: String, path: String, pipeline: Vec<Document>, res: Res<Vec<Document>> },
     /// A column data action over the whole query; the bool says the document cap was reached.
     ColumnValues { op: ColOp, coll: String, path: String, res: Res<(ColOut, bool)> },
+    /// A field's values across the collection `key` ("conn/db/coll"), for suggestions.
+    /// `prefix`: only string values starting with it, looked up while someone types one.
+    FieldValues { key: String, path: String, prefix: Option<String>, res: Res<Option<Vec<Bson>>> },
     /// Preview values of referenced documents, keyed by `compact(_id)`.
     Related { req: u64, res: Res<Vec<(String, String)>> },
     /// Which collection of `db` holds `value` as an `_id`, and the field to preview it with.
@@ -312,13 +319,7 @@ fn shell_to_ejson(src: &str) -> String {
             }
             // Nothing to look for: the `~` stays, so the query fails to parse instead of matching every text.
             if !text.is_empty() {
-                let escaped = text.chars().fold(String::new(), |mut s, ch| {
-                    if "\\^$.|?*+()[]{}".contains(ch) {
-                        s.push('\\');
-                    }
-                    s.push(ch);
-                    s
-                });
+                let escaped = regex_escape(&text);
                 out.push_str(&format!("{{\"$regex\":{},\"$options\":\"i\"}}", serde_json::Value::String(escaped)));
                 i = (k + usize::from(q.is_some())).min(chars.len());
                 continue;
@@ -411,6 +412,17 @@ fn edit_json(b: &Bson) -> serde_json::Value {
         Bson::Array(a) => serde_json::Value::Array(a.iter().map(edit_json).collect()),
         other => other.clone().into_relaxed_extjson(),
     }
+}
+
+/// Text with every regex character taken literally.
+pub fn regex_escape(text: &str) -> String {
+    text.chars().fold(String::new(), |mut s, ch| {
+        if "\\^$.|?*+()[]{}".contains(ch) {
+            s.push('\\');
+        }
+        s.push(ch);
+        s
+    })
 }
 
 pub fn compact(b: &Bson) -> String {
