@@ -364,9 +364,11 @@ impl App {
                 // A fresh install has no ui.json, so it skips the notes. Settings from 0.2.0 and
                 // earlier lack last_version, so updating from those shows them.
                 if ui_json.is_some()
-                    && let Some(body) = crate::update::changelog(current)
+                    && let Some(body) = crate::update::changelog(&app.prefs.last_version, current)
                 {
-                    app.modal = Some(Modal::Text { title: format!("What's new in Quarry {current}"), body, code: false });
+                    // Several releases come each under a "Quarry x.y.z" heading.
+                    let title = if body.starts_with("Quarry ") { format!("What's new since Quarry {}", app.prefs.last_version) } else { format!("What's new in Quarry {current}") };
+                    app.modal = Some(Modal::Text { title, body, code: false });
                 }
                 app.prefs.last_version = current.into();
                 app.save_prefs();
