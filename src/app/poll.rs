@@ -240,7 +240,7 @@ impl App {
                             if st.sample != docs {
                                 st.open.clear();
                             }
-                            (st.count, st.sample, st.ms, st.error) = (Some(n), docs, Some(ms), None);
+                            (st.count, st.sample, st.ms, st.error) = (n, docs, Some(ms), None);
                         }
                         Err(e) => (st.count, st.sample, st.ms, st.error) = (None, Vec::new(), None, Some(e)),
                     }

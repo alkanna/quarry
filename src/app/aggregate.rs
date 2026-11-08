@@ -78,11 +78,12 @@ pub(super) fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, a
                     } else if s.req != 0 {
                         spin(ui);
                         ui.label(RichText::new("Previewing…").color(MUTED()));
-                    } else if let Some(n) = s.count {
-                        ui.label(RichText::new(format!("{} documents", group(&n.to_string()))).strong().color(BRIGHT()));
-                        if let Some(ms) = s.ms {
-                            ui.label(RichText::new(format!("{ms} ms")).color(FAINT()));
-                        }
+                    } else if let Some(ms) = s.ms {
+                        match s.count {
+                            Some(n) => ui.label(RichText::new(format!("{} documents", group(&n.to_string()))).strong().color(BRIGHT())),
+                            None => ui.label(RichText::new("Too many documents to count before the timeout").color(MUTED())),
+                        };
+                        ui.label(RichText::new(format!("{ms} ms")).color(FAINT()));
                     } else if s.error.is_none() && !auto && ui.button("Preview").clicked() {
                         acts.push(StageAct::Preview(i));
                     }
@@ -134,7 +135,7 @@ pub(super) fn stage_samples(ui: &mut egui::Ui, s: &mut Stage, i: usize, acts: &m
                 });
             }
         }
-        if s.count.is_some_and(|n| n > s.sample.len() as u64) && s.sample.len() as i64 >= s.limit && ui.button(format!("Show {} more", db::STAGE_SAMPLE)).clicked() {
+        if s.count.is_none_or(|n| n > s.sample.len() as u64) && s.sample.len() as i64 >= s.limit && ui.button(format!("Show {} more", db::STAGE_SAMPLE)).clicked() {
             acts.push(StageAct::More(i));
         }
     });
