@@ -110,6 +110,10 @@ impl App {
                 ..Default::default()
             });
         }
+        // QUARRY_TEST_SERVER=1 opens the Server window, =ops on its Operations section.
+        if let Ok(v) = std::env::var("QUARRY_TEST_SERVER") {
+            self.server = Some(ServerWin::demo(1, v == "ops"));
+        }
         if std::env::var("QUARRY_TEST_INDEXES").is_ok() {
             let t = &mut self.tabs[1];
             t.view = View::Indexes;

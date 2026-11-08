@@ -367,6 +367,9 @@ impl App {
                     if ui.button("Users and roles…").clicked() {
                         side.push(SideAct::Users);
                     }
+                    if ui.button("Server status…").clicked() {
+                        side.push(SideAct::Server);
+                    }
                     if ui.button("Data relations…").clicked() {
                         side.push(SideAct::Relations(db_name.clone()));
                     }
@@ -476,6 +479,7 @@ impl App {
                 self.users = Some(UsersWin { conn, new_db: "admin".into(), ..Default::default() });
                 self.load_users(conn);
             }
+            SideAct::Server => self.server = Some(ServerWin::new(conn)),
             SideAct::DropDb(db) => {
                 self.modal = Some(Modal::Typed { title: format!("Drop the whole database {db} with all its collections? This cannot be undone."), expect: db.clone(), typed: String::new(), action: Danger::DropDatabase { conn, db } })
             }

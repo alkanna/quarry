@@ -123,6 +123,7 @@ impl App {
                             s.vwarn = opts.get_str("validationAction") == Ok("warn");
                         }
                     }
+                    (tag, r) if tag.starts_with("server:") => self.server_reply(tag, r),
                     (_, Err(e)) => self.err(e),
                     _ => {}
                 },
