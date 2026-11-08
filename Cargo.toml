@@ -34,5 +34,7 @@ opt-level = 1
 opt-level = 3
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# Already used by eframe; named here only to keep benchmark and test windows in the background.
+winit = { version = "0.30", default-features = false }
 muda = { version = "0.21", default-features = false }
 arboard = { version = "3", default-features = false }
