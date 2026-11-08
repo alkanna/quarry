@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.20.0](https://github.com/alkanna/quarry/compare/v0.19.0...v0.20.0) (2026-11-08)
+
+
+### Features
+
+* Query box suggests values from the whole collection, with type-ahead ([#127](https://github.com/alkanna/quarry/issues/127)) ([7f4f892](https://github.com/alkanna/quarry/commit/7f4f89258fbb81acc331ecd838e7d6edcc67043b))
+* Schema analysis can read the last 1,000, 10,000 or 100,000 documents ([#125](https://github.com/alkanna/quarry/issues/125)) ([df7bf14](https://github.com/alkanna/quarry/commit/df7bf14e98d66c214886e614c8e9c5754202ac6d))
+
+
+### Bug Fixes
+
+* Aggregate stage previews show their sample when counting times out ([#123](https://github.com/alkanna/quarry/issues/123)) ([4b32ff8](https://github.com/alkanna/quarry/commit/4b32ff8abb597f5e27ec1775044d72d22f0f6fe7))
+* Query box accepts dotted keys without quotes ([#126](https://github.com/alkanna/quarry/issues/126)) ([3651cdd](https://github.com/alkanna/quarry/commit/3651cddb5c4c4648baa8ab8ae5265a4ee2bd89e6))
+
 ## [0.19.0](https://github.com/alkanna/quarry/compare/v0.18.2...v0.19.0) (2026-11-08)
 
 
