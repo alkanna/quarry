@@ -646,8 +646,11 @@ fn popup_list(ui: &mut egui::Ui, ac: &Ac, typed: &str, moved: bool, width: Optio
                 let row = rect.shrink2(egui::vec2(4.0, 1.0));
                 if selected {
                     p.rect_filled(row, R_SM, tint(PRIMARY(), 56));
+                } else if r.is_pointer_button_down_on() {
+                    p.rect_filled(row, R_SM, menu_pressed());
                 } else if r.hovered() {
-                    p.rect_filled(row, R_SM, HOVER());
+                    // The list sits on a raised card, where the page hover would not show.
+                    p.rect_filled(row, R_SM, MENU_HOVER());
                 }
                 let (letter, color) = kind_badge(s.note);
                 let badge = egui::Rect::from_center_size(egui::pos2(row.left() + PAD + BADGE / 2.0, row.center().y), egui::vec2(BADGE, BADGE));

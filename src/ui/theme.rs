@@ -1,21 +1,39 @@
 //! Design tokens: palettes, type scale, radii and sizes, plus the egui style built from them.
 //! Literal colors and sizes belong here; views use these names.
 
-use eframe::egui::{self, Color32, CornerRadius, FontId, Stroke, TextFormat};
+use eframe::egui::{self, Color32, CornerRadius, FontId, RichText, Stroke, TextFormat};
 
 // Colors come from the palette of the theme in use, so they are functions, not constants.
-// The dark one is the original's `.dark-mode` theme.
+// Dark is "Workbench" and light is "Paper"; both share one layout, only colors differ.
 pub(crate) struct Palette {
+    /// The workspace: central page, table body, active tab and inputs.
     pub(crate) bg: Color32,
+    /// Sidebar, tab strip and the query card.
     pub(crate) panel: Color32,
+    /// Title bar, status bar and the activity rail.
+    pub(crate) chrome: Color32,
+    /// Controls that sit above a surface: pickers, kbd hints, popups, dialogs.
     pub(crate) raised: Color32,
     pub(crate) hover: Color32,
+    pub(crate) pressed: Color32,
+    /// Hover inside popups and menus, which sit on `raised`.
+    pub(crate) menu_hover: Color32,
+    /// Control outlines.
     pub(crate) border: Color32,
+    /// Hairlines and dividers, quieter than `border`.
+    pub(crate) line: Color32,
+    /// The table header row.
+    pub(crate) hdr: Color32,
     pub(crate) text: Color32,
     pub(crate) bright: Color32,
     pub(crate) muted: Color32,
     pub(crate) faint: Color32,
     pub(crate) primary: Color32,
+    /// Text and marks drawn on a `primary` fill.
+    pub(crate) on_primary: Color32,
+    /// The selected row, opaque so it reads the same over stripes.
+    pub(crate) sel: Color32,
+    pub(crate) sel_hover: Color32,
     pub(crate) alert: Color32,
     pub(crate) success: Color32,
     pub(crate) warning: Color32,
@@ -33,83 +51,111 @@ pub(crate) struct Palette {
     pub(crate) c_keyword: Color32,
     /// Alternate table rows.
     pub(crate) stripe: Color32,
-    /// An off switch.
+    /// An off switch and checkbox troughs.
     pub(crate) track: Color32,
-    pub(crate) faint_bg: Color32,
-    /// Inputs and control troughs. In light mode the page white is too close to cards to use.
+    /// Inputs and control troughs.
     pub(crate) well: Color32,
 }
 
+const fn hex(v: u32) -> Color32 {
+    Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
+}
+
 pub(crate) const DARK_PAL: Palette = Palette {
-    bg: Color32::from_rgb(0x10, 0x12, 0x14),
-    panel: Color32::from_rgb(0x16, 0x18, 0x1b),
-    raised: Color32::from_rgb(0x1c, 0x1f, 0x22),
-    hover: Color32::from_rgb(0x27, 0x2b, 0x2f),
-    border: Color32::from_rgb(0x32, 0x37, 0x3c),
-    text: Color32::from_rgb(0xcc, 0xcc, 0xcc),
-    bright: Color32::from_rgb(0xfa, 0xfa, 0xfa),
-    muted: Color32::from_rgb(0x8a, 0x8f, 0x96),
-    faint: Color32::from_rgb(0x5f, 0x64, 0x69),
-    primary: Color32::from_rgb(134, 201, 249),
-    alert: Color32::from_rgb(247, 110, 133),
-    success: Color32::from_rgb(142, 242, 140),
-    warning: Color32::from_rgb(247, 208, 110),
-    c_string: Color32::from_rgb(0xf2, 0xa3, 0x65),
-    c_number: Color32::from_rgb(0x5c, 0xa5, 0xd6),
-    c_true: Color32::from_rgb(0x83, 0xc7, 0x6b),
-    c_false: Color32::from_rgb(0xe5, 0x4d, 0x56),
-    c_date: Color32::from_rgb(0x66, 0xcc, 0xb4),
-    c_null: Color32::from_rgb(0x9e, 0x9e, 0x9e),
-    c_oid: Color32::from_rgb(0x00, 0xba, 0xc1),
-    c_obj: Color32::from_rgb(0xa3, 0xaa, 0xb5),
-    key: Color32::from_rgb(0xd7, 0xda, 0xe0),
-    c_link: Color32::from_rgb(0x72, 0xc3, 0xec),
-    highlight: Color32::from_rgba_premultiplied(40, 34, 18, 60),
-    c_keyword: Color32::from_rgb(0xc4, 0xa7, 0xe7),
-    stripe: Color32::from_rgb(0x19, 0x1b, 0x1e),
-    track: Color32::from_rgb(0x3a, 0x40, 0x46),
-    faint_bg: Color32::from_rgb(0x13, 0x15, 0x17),
-    well: Color32::from_rgb(0x10, 0x12, 0x14),
+    bg: hex(0x1e1f22),
+    panel: hex(0x2b2d30),
+    chrome: hex(0x2b2d30),
+    raised: hex(0x393b40),
+    hover: hex(0x35373b),
+    pressed: hex(0x3e4045),
+    menu_hover: hex(0x45474d),
+    border: hex(0x43454a),
+    line: hex(0x393b40),
+    hdr: hex(0x2b2d30),
+    text: hex(0xbcbec4),
+    bright: hex(0xdfe1e5),
+    muted: hex(0x8c8f96),
+    faint: hex(0x6f737a),
+    primary: hex(0x3574f0),
+    on_primary: hex(0xffffff),
+    sel: hex(0x2e436e),
+    sel_hover: hex(0x34497a),
+    alert: hex(0xf75464),
+    success: hex(0x5fb865),
+    warning: hex(0xe0a84e),
+    c_string: hex(0x6aab73),
+    c_number: hex(0x2aacb8),
+    c_true: hex(0x5fb865),
+    c_false: hex(0xf75464),
+    c_date: hex(0x56a8f5),
+    c_null: hex(0x8c8f96),
+    c_oid: hex(0xc77dbb),
+    c_obj: hex(0x8c8f96),
+    key: hex(0xbcbec4),
+    c_link: hex(0x56a8f5),
+    // #E0A84E at 25%, premultiplied.
+    highlight: Color32::from_rgba_premultiplied(56, 42, 20, 64),
+    c_keyword: hex(0xcf8e6d),
+    stripe: hex(0x232427),
+    track: hex(0x4e5157),
+    well: hex(0x1e1f22),
 };
 
-/// Same roles as the dark palette, darkened where needed to stay readable on white.
 pub(crate) const LIGHT_PAL: Palette = Palette {
-    bg: Color32::from_rgb(0xff, 0xff, 0xff),
-    panel: Color32::from_rgb(0xf3, 0xf4, 0xf6),
-    raised: Color32::from_rgb(0xfa, 0xfb, 0xfc),
-    hover: Color32::from_rgb(0xe4, 0xe7, 0xeb),
-    border: Color32::from_rgb(0xd2, 0xd6, 0xdb),
-    text: Color32::from_rgb(0x2b, 0x2f, 0x34),
-    bright: Color32::from_rgb(0x0d, 0x0f, 0x12),
-    muted: Color32::from_rgb(0x5f, 0x66, 0x6e),
-    faint: Color32::from_rgb(0x8c, 0x93, 0x9a),
-    primary: Color32::from_rgb(0x1f, 0x6f, 0xc0),
-    alert: Color32::from_rgb(0xc8, 0x28, 0x46),
-    success: Color32::from_rgb(0x1f, 0x87, 0x30),
-    warning: Color32::from_rgb(0xa8, 0x6a, 0x00),
-    c_string: Color32::from_rgb(0xb0, 0x55, 0x00),
-    c_number: Color32::from_rgb(0x1d, 0x5f, 0xa8),
-    c_true: Color32::from_rgb(0x2e, 0x7d, 0x1f),
-    c_false: Color32::from_rgb(0xc6, 0x28, 0x28),
-    c_date: Color32::from_rgb(0x00, 0x7d, 0x68),
-    c_null: Color32::from_rgb(0x75, 0x75, 0x75),
-    c_oid: Color32::from_rgb(0x00, 0x7f, 0x87),
-    c_obj: Color32::from_rgb(0x5a, 0x63, 0x6e),
-    key: Color32::from_rgb(0x24, 0x29, 0x2f),
-    c_link: Color32::from_rgb(0x0b, 0x6a, 0xad),
-    highlight: Color32::from_rgba_premultiplied(64, 52, 10, 64),
-    c_keyword: Color32::from_rgb(0x7a, 0x3e, 0xb5),
-    stripe: Color32::from_rgb(0xf6, 0xf7, 0xf8),
-    track: Color32::from_rgb(0xc4, 0xc9, 0xcf),
-    faint_bg: Color32::from_rgb(0xf8, 0xf9, 0xfa),
-    well: Color32::from_rgb(0xec, 0xee, 0xf1),
+    bg: hex(0xfbfaf7),
+    panel: hex(0xf5f3ee),
+    chrome: hex(0xf1eee8),
+    raised: hex(0xffffff),
+    hover: hex(0xece8e1),
+    pressed: hex(0xe3ded5),
+    menu_hover: hex(0xf1eee8),
+    border: hex(0xdcd7ce),
+    line: hex(0xe5e1d9),
+    hdr: hex(0xf3f1ec),
+    text: hex(0x3a3631),
+    bright: hex(0x15130f),
+    muted: hex(0x6e685f),
+    faint: hex(0xa39c91),
+    primary: hex(0xd9480f),
+    on_primary: hex(0xffffff),
+    // The accent at 8% and 12% over `bg`.
+    sel: hex(0xf8ece4),
+    sel_hover: hex(0xf7e5db),
+    alert: hex(0xc62828),
+    success: hex(0x2f8a3e),
+    warning: hex(0xa86a00),
+    c_string: hex(0x2f7d32),
+    c_number: hex(0x1d5fa8),
+    c_true: hex(0x2e7d1f),
+    c_false: hex(0xc62828),
+    c_date: hex(0x00796b),
+    c_null: hex(0x8c939a),
+    c_oid: hex(0x9a5b13),
+    c_obj: hex(0x6e685f),
+    key: hex(0x3a3631),
+    c_link: hex(0x0b6aad),
+    // #A86A00 at 20%, premultiplied.
+    highlight: Color32::from_rgba_premultiplied(34, 21, 0, 51),
+    c_keyword: hex(0x8a3fb5),
+    stripe: hex(0xf9f7f3),
+    track: hex(0xcfc9bf),
+    well: hex(0xfbfaf7),
 };
 
 /// Set at the start of each frame from egui's resolved theme.
 pub(crate) static LIGHT_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+pub(crate) fn is_light() -> bool {
+    LIGHT_MODE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Dialogs and floating windows: a deeper shadow on the dark theme, where a light one vanishes.
+pub(crate) fn window_shadow() -> egui::Shadow {
+    egui::Shadow { offset: [0, 6], blur: 20, spread: 0, color: Color32::from_black_alpha(if is_light() { 30 } else { 90 }) }
+}
+
 pub(crate) fn pal() -> &'static Palette {
-    if LIGHT_MODE.load(std::sync::atomic::Ordering::Relaxed) { &LIGHT_PAL } else { &DARK_PAL }
+    if is_light() { &LIGHT_PAL } else { &DARK_PAL }
 }
 
 macro_rules! colors {
@@ -123,7 +169,7 @@ macro_rules! colors {
     };
 }
 
-colors!(BG: bg, PANEL: panel, RAISED: raised, HOVER: hover, BORDER: border, TEXT: text, BRIGHT: bright, MUTED: muted, FAINT: faint, PRIMARY: primary, ALERT: alert, SUCCESS: success, WARNING: warning, C_STRING: c_string, C_NUMBER: c_number, C_TRUE: c_true, C_FALSE: c_false, C_DATE: c_date, C_NULL: c_null, C_OID: c_oid, C_OBJ: c_obj, KEY: key, C_LINK: c_link, HIGHLIGHT: highlight, C_KEYWORD: c_keyword);
+colors!(BG: bg, PANEL: panel, CHROME: chrome, RAISED: raised, HOVER: hover, PRESSED: pressed, MENU_HOVER: menu_hover, BORDER: border, LINE: line, HDR: hdr, ON_PRIMARY: on_primary, SEL: sel, SEL_HOVER: sel_hover, TEXT: text, BRIGHT: bright, MUTED: muted, FAINT: faint, PRIMARY: primary, ALERT: alert, SUCCESS: success, WARNING: warning, C_STRING: c_string, C_NUMBER: c_number, C_TRUE: c_true, C_FALSE: c_false, C_DATE: c_date, C_NULL: c_null, C_OID: c_oid, C_OBJ: c_obj, KEY: key, C_LINK: c_link, HIGHLIGHT: highlight, C_KEYWORD: c_keyword);
 
 /// `c` at `alpha` out of 255, for tints over the background.
 pub(crate) fn tint(c: Color32, alpha: u8) -> Color32 {
@@ -143,10 +189,10 @@ pub(crate) const TXT_SMALL: f32 = 12.0;
 pub(crate) const TXT_BODY: f32 = 12.5;
 
 /// Names in lists: connections, databases, collections.
-pub(crate) const TXT_TITLE: f32 = 14.0;
+pub(crate) const TXT_TITLE: f32 = 13.0;
 
 /// Dialog titles and the collection heading.
-pub(crate) const TXT_HEADING: f32 = 17.0;
+pub(crate) const TXT_HEADING: f32 = 18.0;
 
 /// Height of every button and single-line input.
 pub(crate) const BUTTON_H: f32 = 24.0;
@@ -154,13 +200,45 @@ pub(crate) const BUTTON_H: f32 = 24.0;
 // Corner radii: small for rows and glyphs, medium for widgets and cards, large for popups and dialogs.
 pub(crate) const R_SM: u8 = 4;
 
-pub(crate) const R_MD: u8 = 8;
+pub(crate) const R_MD: u8 = 6;
 
-pub(crate) const R_LG: u8 = 12;
+pub(crate) const R_LG: u8 = 10;
 
-pub(crate) const SIDE_ROW_H: f32 = 28.0;
+pub(crate) const SIDE_ROW_H: f32 = 26.0;
 
+/// Also where the macOS traffic lights are centered, so it stays 40.
 pub(crate) const HEADER_H: f32 = 40.0;
+
+pub(crate) const TAB_STRIP_H: f32 = 34.0;
+
+pub(crate) const STATUS_H: f32 = 26.0;
+
+pub(crate) const RAIL_W: f32 = 44.0;
+
+pub(crate) const TABLE_HEAD_H: f32 = 30.0;
+
+// Font weights, applied through the variable fonts' wght axis.
+pub(crate) const W_MEDIUM: f32 = 500.0;
+
+pub(crate) const W_SEMIBOLD: f32 = 600.0;
+
+pub(crate) fn medium(t: impl Into<RichText>) -> RichText {
+    t.into().variation(b"wght", W_MEDIUM)
+}
+
+pub(crate) fn semibold(t: impl Into<RichText>) -> RichText {
+    t.into().variation(b"wght", W_SEMIBOLD)
+}
+
+/// Monospace at `size` and `weight` (400 for regular).
+pub(crate) fn mono_fmt(size: f32, color: Color32, weight: f32) -> TextFormat {
+    TextFormat { font_id: FontId::monospace(size), color, coords: egui::epaint::text::VariationCoords::new([(b"wght", weight)]), ..Default::default() }
+}
+
+/// Proportional at `size` and `weight`, with optional letter spacing for captions.
+pub(crate) fn ui_fmt(size: f32, color: Color32, weight: f32, spacing: f32) -> TextFormat {
+    TextFormat { font_id: FontId::proportional(size), color, extra_letter_spacing: spacing, coords: egui::epaint::text::VariationCoords::new([(b"wght", weight)]), ..Default::default() }
+}
 
 pub(crate) const ROW_H: f32 = 28.0;
 
@@ -182,17 +260,7 @@ pub(crate) fn style(ctx: &egui::Context) {
     for (theme, p) in [(egui::Theme::Dark, &DARK_PAL), (egui::Theme::Light, &LIGHT_PAL)] {
         ctx.set_visuals_of(theme, visuals(theme, p));
     }
-    // egui's default UI font draws about 0.75 pt high at body size, so text looked off center in
-    // buttons and inputs. Shifting the glyphs only moves the ink, not the layout. The icon fonts
-    // that fill in for glyphs Ubuntu lacks get the same shift, or icons sit above their labels.
-    let mut fonts = egui::FontDefinitions::default();
-    for name in ["Ubuntu-Light", "egui-icons", "NotoEmoji-Regular", "emoji-icon-font"] {
-        if let Some(d) = fonts.font_data.get_mut(name) {
-            let tweak = egui::FontTweak { y_offset_factor: 0.06, ..d.tweak.clone() };
-            *d = std::sync::Arc::new((**d).clone().tweak(tweak));
-        }
-    }
-    ctx.set_fonts(fonts);
+    ctx.set_fonts(fonts());
     ctx.all_styles_mut(|s| {
         s.spacing.item_spacing = egui::vec2(8.0, 6.0);
         s.spacing.button_padding = egui::vec2(10.0, 4.0);
@@ -215,34 +283,69 @@ pub(crate) fn style(ctx: &egui::Context) {
     });
 }
 
+static INTER: &[u8] = include_bytes!("../../assets/fonts/InterVariable.ttf");
+static JB_MONO: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono-Variable.ttf");
+
+/// Inter for the interface and JetBrains Mono for data, both variable so one file covers every
+/// weight. egui's own fonts stay behind them as fallbacks for icons and emoji. Inter's metrics
+/// center in buttons as they are, so it needs none of the shift egui's Ubuntu font did.
+fn fonts() -> egui::FontDefinitions {
+    use egui::{FontData, FontFamily, FontTweak, epaint::text::VariationCoords};
+    let mut fonts = egui::FontDefinitions::default();
+    // Without an explicit weight a variable font draws its default instance, which for
+    // JetBrains Mono is not Regular.
+    let regular = |bytes: &'static [u8]| std::sync::Arc::new(FontData::from_static(bytes).tweak(FontTweak { coords: VariationCoords::new([(b"wght", 400.0)]), ..Default::default() }));
+    fonts.font_data.insert("Inter".into(), regular(INTER));
+    fonts.font_data.insert("JetBrainsMono".into(), regular(JB_MONO));
+    fonts.families.entry(FontFamily::Proportional).or_default().insert(0, "Inter".into());
+    fonts.families.entry(FontFamily::Monospace).or_default().insert(0, "JetBrainsMono".into());
+    fonts
+}
+
 pub(crate) fn visuals(theme: egui::Theme, p: &Palette) -> egui::Visuals {
     let mut v = theme.default_visuals();
     v.panel_fill = p.panel;
     v.interact_cursor = Some(egui::CursorIcon::PointingHand);
     v.window_fill = p.raised;
     v.extreme_bg_color = p.bg;
-    v.faint_bg_color = p.faint_bg;
+    v.faint_bg_color = p.stripe;
+    v.code_bg_color = p.hover;
     v.window_stroke = Stroke::new(1.0, p.border);
-    v.selection.bg_fill = tint(p.primary, 48);
+    v.window_corner_radius = CornerRadius::same(R_LG);
+    v.menu_corner_radius = CornerRadius::same(R_MD);
+    let shadow = egui::Shadow { offset: [0, 6], blur: 20, spread: 0, color: Color32::from_black_alpha(if theme == egui::Theme::Dark { 90 } else { 30 }) };
+    v.window_shadow = shadow;
+    v.popup_shadow = egui::Shadow { offset: [0, 4], blur: 12, ..shadow };
+    v.selection.bg_fill = tint(p.primary, 56);
+    // Also the focus outline of inputs.
     v.selection.stroke = Stroke::new(1.0, p.primary);
-    v.hyperlink_color = p.primary;
-    v.override_text_color = Some(p.text);
-    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, p.border);
-    // Translucent so a button reads as a button on any surface: panel, card or dialog.
-    v.widgets.inactive.weak_bg_fill = tint(p.text, 18);
-    v.widgets.hovered.weak_bg_fill = tint(p.text, 34);
-    v.widgets.active.weak_bg_fill = tint(p.text, 46);
-    v.widgets.open.weak_bg_fill = tint(p.text, 46);
-    // Faint outline on hover: the only hover cue for inputs, checkboxes and filled buttons.
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0, tint(p.text, 60));
-    v.widgets.active.bg_stroke = Stroke::new(1.0, tint(p.text, 90));
-    v.widgets.open.bg_stroke = Stroke::new(1.0, tint(p.text, 60));
+    v.hyperlink_color = p.c_link;
     v.text_edit_bg_color = Some(p.well);
-    // Checkboxes and radios fill with bg_fill and have no stroke, so it must stand out from cards.
+    // Labels and separators.
+    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, p.text);
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, p.line);
+    // Buttons are raised and outlined at rest, so they read as buttons on any surface; hover
+    // brightens the outline and text, press darkens the fill.
+    v.widgets.inactive.weak_bg_fill = p.raised;
+    v.widgets.inactive.bg_stroke = Stroke::new(1.0, p.border);
+    v.widgets.inactive.fg_stroke = Stroke::new(1.0, p.text);
+    v.widgets.hovered.weak_bg_fill = p.raised.lerp_to_gamma(p.hover, 0.5);
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0, p.muted);
+    v.widgets.hovered.fg_stroke = Stroke::new(1.0, p.bright);
+    v.widgets.hovered.expansion = 0.0;
+    v.widgets.active.weak_bg_fill = p.pressed;
+    v.widgets.active.bg_stroke = Stroke::new(1.0, p.muted);
+    v.widgets.active.fg_stroke = Stroke::new(1.0, p.bright);
+    v.widgets.active.expansion = 0.0;
+    v.widgets.open.weak_bg_fill = p.pressed;
+    v.widgets.open.bg_stroke = Stroke::new(1.0, p.border);
+    v.widgets.open.fg_stroke = Stroke::new(1.0, p.bright);
+    // Checkboxes, radios and slider rails fill with bg_fill, so it must stand out from cards.
     v.widgets.inactive.bg_fill = p.track;
     v.widgets.hovered.bg_fill = p.track.lerp_to_gamma(p.text, 0.15);
     v.widgets.active.bg_fill = p.track.lerp_to_gamma(p.text, 0.3);
-    for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.noninteractive] {
+    v.widgets.open.bg_fill = p.track;
+    for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open, &mut v.widgets.noninteractive] {
         w.corner_radius = CornerRadius::same(R_MD);
     }
     v
@@ -273,16 +376,31 @@ pub(crate) fn optical_dy(g: &egui::Galley) -> f32 {
     g.size().y / 2.0 - (row.pos.y + (top + base) / 2.0)
 }
 
+/// 0 idle, 1 hovered, 2 pressed, for the widget about to be added, from last frame's response
+/// of the next auto id.
+pub(crate) fn next_state(ui: &egui::Ui) -> usize {
+    match ui.ctx().read_response(ui.next_auto_id()).filter(|r| r.enabled() && ui.is_enabled()) {
+        Some(r) if r.is_pointer_button_down_on() => 2,
+        Some(r) if r.hovered() => 1,
+        _ => 0,
+    }
+}
+
+/// The fill of a frameless control on a page or panel for state 0 idle, 1 hovered, 2 pressed.
+pub(crate) fn hover_fill(state: usize) -> Color32 {
+    [Color32::TRANSPARENT, HOVER(), PRESSED()][state]
+}
+
+/// A pressed row inside a raised popup or menu.
+pub(crate) fn menu_pressed() -> Color32 {
+    MENU_HOVER().lerp_to_gamma(TEXT(), 0.08)
+}
+
 /// A fill for the next widget that follows hover and press. egui uses a button's own fill for
 /// every state, so buttons with one would otherwise never react. Reads last frame's response
 /// of the widget about to be added, which has the next auto id.
 pub(crate) fn state_fill(ui: &egui::Ui, base: Color32) -> Color32 {
-    let r = ui.ctx().read_response(ui.next_auto_id()).filter(|r| r.enabled() && ui.is_enabled());
-    let k = match r {
-        Some(r) if r.is_pointer_button_down_on() => 2,
-        Some(r) if r.hovered() => 1,
-        _ => 0,
-    };
+    let k = next_state(ui);
     if base.a() == 0 {
         // A transparent option shows the same hover as an ordinary button.
         [base, tint(TEXT(), 34), tint(TEXT(), 46)][k]

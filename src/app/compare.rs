@@ -73,7 +73,7 @@ impl App {
                     let on = list == Some(c.list);
                     let stroke = Stroke::new(1.0, if on { color } else { Color32::TRANSPARENT });
                     let f = egui::Frame::new().fill(RAISED()).stroke(stroke).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
-                        ui.label(RichText::new(group(&n.to_string())).strong().size(TXT_HEADING).color(color));
+                        ui.label(semibold(RichText::new(group(&n.to_string())).size(TXT_HEADING).color(color)));
                         ui.label(RichText::new(label).size(TXT_SMALL).color(if on { BRIGHT() } else { MUTED() }));
                     });
                     // Identical documents are counted, not kept, so there is nothing to list.

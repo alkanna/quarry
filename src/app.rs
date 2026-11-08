@@ -23,6 +23,7 @@ mod documents;
 mod drafts;
 mod explain;
 mod import;
+mod rail;
 mod indexes;
 mod log;
 mod modals;
@@ -308,7 +309,7 @@ impl App {
             };
             drop(text);
             let sel = Sel { conn: 1, db: "fixture".into(), coll: "documents".into() };
-            app.conns.push(Conn { meta: ConnMeta { id: 1, name: "Fixture".into(), ..Default::default() }, client: None, status: Status::Ready, writable: false, dbs: vec![("fixture".into(), Some(vec!["documents".into()]))], masked_uri: String::new() , tunnel: None });
+            app.conns.push(Conn { meta: ConnMeta { id: 1, name: "Fixture".into(), ..Default::default() }, client: None, status: Status::Ready, writable: false, dbs: vec![("fixture".into(), Some(vec!["documents".into()]))], masked_uri: String::new(), tunnel: None, server: Default::default() });
             app.active = Some(1);
             app.open_dbs.insert((1, "fixture".into()));
             app.open_collection(sel, false);
@@ -318,9 +319,12 @@ impl App {
             app.worker.send(Msg::Docs { req: app.req, res: Ok((rows, n, 3)) });
         } else if demo {
             app.load_demo();
-            // Test switches: the demo picture in the light theme, and with the find bar open.
+            // Test switches: the demo picture in either theme regardless of the system, and with
+            // the find bar open.
             if std::env::var("QUARRY_TEST_LIGHT").is_ok() {
                 Appearance::Light.apply(&cc.egui_ctx);
+            } else if std::env::var("QUARRY_TEST_DARK").is_ok() {
+                Appearance::Dark.apply(&cc.egui_ctx);
             }
             if let Ok(q) = std::env::var("QUARRY_TEST_FIND") {
                 let f = Find { open: true, query: q, ..Default::default() };
@@ -336,7 +340,7 @@ impl App {
             app.prefs.appearance.apply(&cc.egui_ctx);
             for meta in metas {
                 let masked = keychain(meta.id).and_then(|k| k.get_password().ok()).map(|u| db::mask_uri(&u)).unwrap_or_default();
-                app.conns.push(Conn { meta, client: None, status: Status::Idle, writable: false, dbs: Vec::new(), masked_uri: masked , tunnel: None });
+                app.conns.push(Conn { meta, client: None, status: Status::Idle, writable: false, dbs: Vec::new(), masked_uri: masked, tunnel: None, server: Default::default() });
             }
             app.active = app.conns.first().map(|c| c.meta.id);
             // Values of deleted connections go with them.
@@ -491,13 +495,19 @@ impl eframe::App for App {
         frame.set_traffic_lights_position(&ctx, egui::Rangef::new(0.0, HEADER_H), 16.0);
         self.top_bar(ui);
         self.status_bar(ui);
+        self.rail(ui);
+        if !self.prefs.sidebar_hidden {
+            self.sidebar(ui);
+        }
         self.query_log(ui);
-        self.sidebar(ui);
         if !self.prefs.open_inline && self.selected_doc().is_some() {
             self.inspector(ui);
         }
-        egui::CentralPanel::default_margins().frame(egui::Frame::new().fill(BG()).inner_margin(egui::Margin { left: 12, right: 12, top: 8, bottom: 8 })).show(ui, |ui| {
+        // After the side panels, so the strip spans only the workspace.
+        if !self.tabs.is_empty() {
             self.tab_strip(ui);
+        }
+        egui::CentralPanel::default_margins().frame(egui::Frame::new().fill(BG()).inner_margin(egui::Margin { left: 20, right: 20, top: 10, bottom: 12 })).show(ui, |ui| {
             if self.tabs.is_empty() {
                 self.welcome(ui);
             } else {

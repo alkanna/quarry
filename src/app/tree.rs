@@ -154,28 +154,28 @@ impl App {
             ui.label(RichText::new(id).monospace().color(C_OID()));
             ui.add_space(8.0);
             if !from_agg {
-                if ui.button("✏ Edit JSON").clicked() {
+                if quiet(ui, "Edit JSON").clicked() {
                     acts.push(TreeAct::EditDoc);
                 }
-                if ui.button("✚ Add field").clicked() {
+                if quiet(ui, "+ Add field").clicked() {
                     acts.push(TreeAct::AddField(Vec::new()));
                 }
-                if ui.button("🗋 Duplicate").clicked() {
+                if quiet(ui, "Duplicate").clicked() {
                     self.docs_act(ui.ctx(), DocsAct::Duplicate, vec![d.clone()]);
                 }
-                if danger(ui, "🗑 Delete").clicked() {
+                if danger(ui, "Delete").clicked() {
                     // `d` carries unsaved edits; the delete only matches the document as stored.
                     let stored = stored_version(&self.drafts, &self.draft_key(d), d);
                     self.docs_act(ui.ctx(), DocsAct::Delete, vec![stored]);
                 }
             }
             right_group(ui, |ui| {
-                if ui.button("Close").on_hover_text("Esc").clicked() {
+                if quiet(ui, "Close").on_hover_text("Esc").clicked() {
                     if let Some(key) = row.or(selected) {
                         self.close_row(key);
                     }
                 }
-                if ui.button("🗐 Copy JSON").clicked() {
+                if quiet(ui, "Copy JSON").clicked() {
                     self.docs_act(ui.ctx(), DocsAct::CopyJson, vec![d.clone()]);
                 }
             });
@@ -252,7 +252,7 @@ impl App {
         let mut confirm = self.prefs.confirm_save;
         egui::Frame::new().fill(tint(WARNING(), 22)).stroke(Stroke::new(1.0, WARNING().gamma_multiply(0.5))).corner_radius(R_MD).inner_margin(8).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(format!("● {} unsaved change(s)", changes.len())).color(WARNING()).strong());
+                ui.label(semibold(RichText::new(format!("● {} unsaved change(s)", changes.len())).color(WARNING())));
                 let list: Vec<&str> = changes.iter().take(5).map(|c| c.0.as_str()).collect();
                 let more = if changes.len() > 5 { format!(" +{}", changes.len() - 5) } else { String::new() };
                 ui.label(RichText::new(format!("{}{more}", list.join(", "))).monospace().size(TXT_SMALL).color(MUTED()));
@@ -538,13 +538,13 @@ impl App {
                             _ => leaf_text(leaf),
                         };
                         let r = ui.add(egui::Label::new(RichText::new(&text).monospace().color(color_of(leaf))).truncate().sense(Sense::click()));
-                        ui.label(RichText::new(db::type_name(leaf)).size(TXT_CAPTION).color(FAINT()));
+                        ui.label(RichText::new(db::type_name(leaf)).font(FontId::monospace(10.5)).color(FAINT()));
                         let id_like = matches!(leaf, Bson::ObjectId(_)) || matches!(leaf, Bson::String(s) if s.len() <= 64);
                         if let Some(p) = self.t().filter(|t| id_like && !t.related.is_empty()).and_then(|t| t.related.get(&db::compact(leaf))) {
                             ui.label(RichText::new(p).size(TXT_SMALL).color(C_LINK())).on_hover_text("Preview of the referenced document");
                         }
                         if let Some(ts) = db::possible_timestamp(leaf) {
-                            ui.label(RichText::new(format!("= {ts}?")).size(TXT_CAPTION).color(C_DATE().gamma_multiply(0.7))).on_hover_text("This number looks like a Unix timestamp in seconds");
+                            ui.label(RichText::new(format!("= {ts}?")).font(FontId::monospace(10.5)).color(C_DATE())).on_hover_text("This number looks like a Unix timestamp in seconds");
                         }
                         let r = if editable {
                             let r = r.on_hover_cursor(egui::CursorIcon::Text).on_hover_text(if text.len() > 60 { text.chars().take(600).collect::<String>() } else { "Double-click to edit, right-click for more".into() });
@@ -573,7 +573,7 @@ impl App {
     pub(super) fn hover_band(&self, ui: &egui::Ui, at: egui::layers::ShapeIdx, y: egui::Rangef) {
         let r = egui::Rect::from_x_y_ranges(self.tree_x, y.expand(2.0));
         if ui.rect_contains_pointer(r) {
-            ui.painter().set(at, egui::epaint::RectShape::filled(r, 4, HOVER()));
+            ui.painter().set(at, egui::epaint::RectShape::filled(r, R_SM, HOVER()));
         }
     }
 }

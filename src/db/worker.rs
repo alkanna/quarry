@@ -181,7 +181,7 @@ impl Worker {
     }
 
     /// Size and count of one collection, from $collStats (the collStats command is deprecated).
-    pub fn coll_stats(&self, client: Client, db: String, coll: String) {
+    pub fn coll_stats(&self, client: Client, db: String, coll: String, tag: String) {
         self.spawn(async move {
             let res = async {
                 let c = client.database(&db).collection::<Document>(&coll);
@@ -200,7 +200,7 @@ impl Worker {
                 Ok(out)
             }
             .await;
-            Msg::Command { tag: "stats".into(), res }
+            Msg::Command { tag, res }
         });
     }
 

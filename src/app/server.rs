@@ -177,13 +177,13 @@ impl App {
                 dialog_title(ui, format!("Server: {name}"));
                 ui.add_space(12.0);
                 for (ops, label) in [(false, "Overview"), (true, "Operations")] {
-                    if ui.selectable_label(s.ops_tab == ops, label).clicked() && s.ops_tab != ops {
+                    if view_tab(ui, label, s.ops_tab == ops).clicked() && s.ops_tab != ops {
                         s.ops_tab = ops;
                         s.next = None;
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("⟳ Refresh").clicked() {
+                    if ui.button("Refresh").clicked() {
                         s.status = s.status.take().filter(|r| r.is_ok());
                         s.rs = s.rs.take().filter(|r| r.is_ok());
                         s.hello = None;

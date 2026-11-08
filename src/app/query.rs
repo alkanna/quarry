@@ -101,8 +101,20 @@ impl App {
     /// Enter runs it (or picks a suggestion), Shift+Enter adds a line.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn query_field(ui: &mut egui::Ui, label: &str, text: &mut String, hint: &str, width: f32, kind: FieldKind, paths: &[String], fields: &Fields, ac: &mut Ac, typed: &mut Typed, lookup: &dyn Fn(&str) -> Lookup) -> bool {
-        ui.add_sized([56.0, 20.0], egui::Label::new(caption_text(label)));
+        // The label shown is lowercase like code; the id keeps the original name, which shortcuts focus.
+        let shown = match label {
+            "QUERY" => "filter",
+            "PROJECT" => "project",
+            l => &l.to_lowercase(),
+        };
+        ui.add_sized([56.0, 26.0], egui::Label::new(RichText::new(shown).font(FontId::monospace(TXT_CAPTION)).color(FAINT())));
         let id = egui::Id::unique(("query", label));
+        // No box at rest so the query reads as code on the card; a border on hover, and the page
+        // fill with an accent border while editing.
+        let focused = ui.memory(|m| m.has_focus(id));
+        let hovered = ui.ctx().read_response(id).is_some_and(|r| r.hovered());
+        let (fill, edge) = if focused { (BG(), PRIMARY()) } else if hovered { (BG(), BORDER()) } else { (Color32::TRANSPARENT, Color32::TRANSPARENT) };
+        let frame = egui::Frame::new().fill(fill).stroke(Stroke::new(1.0, edge)).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(8, 4));
         // Test switch: show the suggestion list in the demo picture.
         if ac.id.is_none() && kind == FieldKind::Query && std::env::var("QUARRY_TEST_AC").is_ok() {
             // QUARRY_TEST_AC=date shows the date list after a date field's colon instead.
@@ -123,8 +135,9 @@ impl App {
         let (out, picked) = ac_field(ui, id, text, ac, &compute, |ui, text, open| {
             egui::TextEdit::multiline(text)
                 .id(id)
+                .frame(frame)
                 .font(egui::TextStyle::Monospace)
-                .hint_text(hint)
+                .hint_text(RichText::new(hint).monospace().color(FAINT()))
                 .desired_width(width)
                 .desired_rows(1)
                 .lock_focus(open)

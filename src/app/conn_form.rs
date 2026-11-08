@@ -190,8 +190,9 @@ impl App {
                             c.masked_uri = db::mask_uri(f.uri.trim());
                             c.writable = false;
                             c.dbs.clear();
+                            c.server = Default::default();
                         }
-                        None => self.conns.push(Conn { meta, client: None, status: Status::Idle, writable: false, dbs: Vec::new(), masked_uri: db::mask_uri(f.uri.trim()), tunnel: None }),
+                        None => self.conns.push(Conn { meta, client: None, status: Status::Idle, writable: false, dbs: Vec::new(), masked_uri: db::mask_uri(f.uri.trim()), tunnel: None, server: Default::default() }),
                     }
                     self.active = Some(id);
                     self.save_conns();

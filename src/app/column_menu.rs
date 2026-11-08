@@ -71,12 +71,16 @@ fn grid_icon(ui: &mut egui::Ui, w: f32, icon: Icon, on: bool, enabled: bool, tip
     let (rect, r) = ui.allocate_exact_size(egui::vec2(w, 30.0), if enabled { Sense::click() } else { Sense::hover() });
     let r = if enabled { r.on_hover_cursor(egui::CursorIcon::PointingHand) } else { r };
     let p = ui.painter();
+    let down = enabled && r.is_pointer_button_down_on();
     if on {
-        p.rect_filled(rect.shrink(2.0), R_SM, tint(PRIMARY(), 40));
+        p.rect_filled(rect.shrink(2.0), R_SM, tint(PRIMARY(), if down { 64 } else { 40 }));
+    } else if down {
+        p.rect_filled(rect.shrink(2.0), R_SM, menu_pressed());
     } else if enabled && r.hovered() {
-        p.rect_filled(rect.shrink(2.0), R_SM, HOVER());
+        // The popover is raised, where the page hover would not show.
+        p.rect_filled(rect.shrink(2.0), R_SM, MENU_HOVER());
     }
-    let s = Stroke::new(1.5, if !enabled { FAINT().gamma_multiply(0.5) } else if on { PRIMARY() } else { MUTED() });
+    let s = Stroke::new(1.5, if !enabled { tint(FAINT(), 128) } else if on { PRIMARY() } else if r.hovered() { BRIGHT() } else { MUTED() });
     let c = rect.center();
     let h = |x0: f32, x1: f32, y: f32| p.line_segment([c + egui::vec2(x0, y), c + egui::vec2(x1, y)], s);
     let v = |x: f32| p.line_segment([c + egui::vec2(x, -6.0), c + egui::vec2(x, 6.0)], s);
