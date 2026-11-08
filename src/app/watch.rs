@@ -41,6 +41,13 @@ pub(super) fn watch_row(ev: &Document) -> Document {
     row
 }
 
+/// Open and expanded result rows after the first `n` result rows were dropped. Documents rows are untouched.
+fn shift_rows(selected: &mut Option<(bool, usize)>, expanded: &mut BTreeSet<(bool, usize)>, n: usize) {
+    let shift = |(agg, i): (bool, usize)| if !agg { Some((agg, i)) } else { i.checked_sub(n).map(|i| (true, i)) };
+    *selected = selected.and_then(shift);
+    *expanded = expanded.iter().copied().filter_map(shift).collect();
+}
+
 /// The message for a stream that could not start or stopped with an error.
 fn watch_err(e: &str) -> String {
     if e.contains("only supported on replica sets") || e.contains("40573") {
@@ -124,12 +131,16 @@ impl App {
         let cur = self.cur;
         let Some((i, t)) = self.tabs.iter_mut().enumerate().find(|(_, t)| t.watch.req == req) else { return };
         t.watch.rows.push(watch_row(&ev));
-        if t.watch.rows.len() > WATCH_CAP {
-            t.watch.rows.drain(..t.watch.rows.len() - WATCH_CAP);
-            // Row numbers moved under the open row.
-            if i == cur {
-                self.drop_agg_row();
-            }
+        let n = t.watch.rows.len().saturating_sub(WATCH_CAP);
+        if n == 0 {
+            return;
+        }
+        t.watch.rows.drain(..n);
+        // The open rows move up with their change; one that fell off the top closes.
+        let was_open = t.selected.is_some();
+        shift_rows(&mut t.selected, &mut t.expanded, n);
+        if was_open && t.selected.is_none() && i == cur {
+            self.reset_doc_state();
         }
     }
 
@@ -151,6 +162,17 @@ mod tests {
         let ev = doc! { "operationType": "update", "wallTime": at, "documentKey": { "_id": 7 }, "updateDescription": { "updatedFields": { "status": "paid", "total": 5 }, "removedFields": ["note"] }, "fullDocument": { "_id": 7, "status": "paid" } };
         assert_eq!(watch_row(&ev), doc! { "at": at, "op": "update", "_id": 7, "changed": ["status", "total", "-note"], "doc": { "_id": 7, "status": "paid" } });
         assert_eq!(watch_row(&doc! { "operationType": "delete", "documentKey": { "_id": 7 } }), doc! { "op": "delete", "_id": 7 });
+    }
+
+    #[test]
+    fn open_rows_follow_their_change_when_old_ones_drop() {
+        let (mut sel, mut exp) = (Some((true, 4)), BTreeSet::from([(true, 1), (true, 5), (false, 3)]));
+        shift_rows(&mut sel, &mut exp, 2);
+        assert_eq!(sel, Some((true, 2)));
+        assert_eq!(exp, BTreeSet::from([(true, 3), (false, 3)]));
+        let mut sel = Some((true, 1));
+        shift_rows(&mut sel, &mut BTreeSet::new(), 2);
+        assert_eq!(sel, None);
     }
 
     #[test]

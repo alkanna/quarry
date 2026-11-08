@@ -40,7 +40,8 @@ jobs:
         if: matrix.os == 'ubuntu-22.04'
         run: |
           docker run -d --name mongo -p 27017:27017 mongo:8 --replSet rs0
-          until docker exec mongo mongosh --quiet --eval 'try { rs.status().ok } catch (e) { rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "localhost:27017" }] }).ok }'; do sleep 1; done
+          # Waits for the node to be primary, not just for the initiate to be accepted.
+          until docker exec mongo mongosh --quiet --eval 'try { rs.status() } catch (e) { rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "localhost:27017" }] }) }; quit(db.hello().isWritablePrimary ? 0 : 1)'; do sleep 1; done
       - if: matrix.os == 'ubuntu-22.04'
         run: cargo test --locked
         env:
