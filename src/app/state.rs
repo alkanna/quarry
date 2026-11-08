@@ -98,10 +98,6 @@ impl ServerInfo {
         [Some(host), version, Some(self.set_name.clone())].into_iter().flatten().filter(|p| !p.is_empty()).collect::<Vec<_>>().join("  ·  ")
     }
 
-    /// The sidebar's "mongod version · replica set name", once the version is known.
-    pub(super) fn footer(&self) -> Option<String> {
-        (!self.version.is_empty()).then(|| if self.set_name.is_empty() { format!("mongod {}", self.version) } else { format!("mongod {} · replica set {}", self.version, self.set_name) })
-    }
 }
 
 #[derive(Clone, PartialEq)]
