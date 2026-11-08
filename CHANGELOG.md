@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.0](https://github.com/alkanna/quarry/compare/v0.23.0...v0.24.0) (2026-11-08)
+
+
+### Features
+
+* find bar with option chips, hint and collation, index marks and page size ([#134](https://github.com/alkanna/quarry/issues/134)) ([f2ff900](https://github.com/alkanna/quarry/commit/f2ff90051821849cd85a3ffc67139ce0d316f316))
+
 ## [0.23.0](https://github.com/alkanna/quarry/compare/v0.22.0...v0.23.0) (2026-11-08)
 
 
