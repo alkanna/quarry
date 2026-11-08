@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.18.2](https://github.com/alkanna/quarry/compare/v0.18.1...v0.18.2) (2026-11-08)
+
+
+### Bug Fixes
+
+* never decode a whole page at once, so its memory is not kept ([#115](https://github.com/alkanna/quarry/issues/115)) ([8ff7385](https://github.com/alkanna/quarry/commit/8ff7385607894774cdb2118738d31103316a911b))
+
+
+### Performance Improvements
+
+* keep Aggregate results and Watch events as BSON bytes ([#118](https://github.com/alkanna/quarry/issues/118)) ([081f8ed](https://github.com/alkanna/quarry/commit/081f8edddd2c81eeb64d5b2636a31f71081e6318))
+
 ## [0.18.1](https://github.com/alkanna/quarry/compare/v0.18.0...v0.18.1) (2026-11-08)
 
 
