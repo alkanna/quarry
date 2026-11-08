@@ -163,7 +163,7 @@ pub enum Msg {
     Indexes { req: u64, res: Res<Vec<Document>> },
     /// Usage and suggestions for the collection named `key` ("db.coll").
     IndexInfo { key: String, res: Res<IndexInfo> },
-    Aggregated { req: u64, res: Res<(Vec<Document>, u128)> },
+    Aggregated { req: u64, res: Res<(Vec<Row>, u128)> },
     /// One pipeline builder stage's preview: documents out of the stage, the first of them, time.
     StagePreview { req: u64, res: Res<(u64, Vec<Document>, u128)> },
     /// The server's explain output for a query or pipeline.

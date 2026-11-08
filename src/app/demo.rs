@@ -125,7 +125,7 @@ impl App {
                 doc! { "operationType": "update", "wallTime": at(15), "documentKey": { "_id": id(2) }, "updateDescription": { "updatedFields": { "total": 21.0 }, "removedFields": ["coupon"] }, "fullDocument": { "_id": id(2), "number": 10502, "status": "pending", "total": 21.0 } },
                 doc! { "operationType": "delete", "wallTime": at(22), "documentKey": { "_id": id(3) } },
             ];
-            t.watch.rows = events.into_iter().map(watch_row).collect();
+            t.watch.rows = events.into_iter().map(watch_row).filter_map(|d| db::Row::from_doc(&d).ok()).collect();
         }
         // QUARRY_TEST_SERVER=1 opens the Server window, =ops on its Operations section.
         if let Ok(v) = std::env::var("QUARRY_TEST_SERVER") {

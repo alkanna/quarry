@@ -27,7 +27,8 @@ pub(super) struct WatchTab {
     pub(super) req: u64,
     /// Dropping it stops the stream.
     pub(super) cancel: Option<tokio::sync::oneshot::Sender<()>>,
-    pub(super) rows: Vec<Document>,
+    /// Kept as BSON bytes: each event can carry a whole document, up to WATCH_CAP of them.
+    pub(super) rows: Vec<db::Row>,
     pub(super) err: Option<String>,
 }
 
@@ -142,7 +143,10 @@ impl App {
     pub(super) fn watch_event(&mut self, req: u64, ev: Document) {
         let cur = self.cur;
         let Some((i, t)) = self.tabs.iter_mut().enumerate().find(|(_, t)| t.watch.req == req) else { return };
-        t.watch.rows.push(watch_row(ev));
+        // Fails only for keys BSON cannot hold, which a server never sends.
+        if let Ok(r) = db::Row::from_doc(&watch_row(ev)) {
+            t.watch.rows.push(r);
+        }
         let n = t.watch.rows.len().saturating_sub(WATCH_CAP);
         if n == 0 {
             return;
