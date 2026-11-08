@@ -85,7 +85,7 @@ impl App {
         }
         if k(cmd, Key::F) && !self.tabs.is_empty() {
             self.set_view(View::Documents);
-            ctx.memory_mut(|m| m.request_focus(egui::Id::unique(("query", "QUERY"))));
+            ctx.memory_mut(|m| m.request_focus(query_id("QUERY")));
         }
         if k(cmd, Key::Comma) {
             self.modal = Some(Modal::Settings);
@@ -133,7 +133,7 @@ impl App {
                     Some((_, i)) if down => (i + 1).min(len - 1),
                     Some((_, i)) => i.saturating_sub(1),
                 });
-                let (page, pages) = (t.page, t.count.div_ceil(PAGE_SIZE).max(1));
+                let (page, pages) = (t.page, t.count.div_ceil(self.page_size()).max(1));
                 let go = if agg { None } else if prev && page > 0 { Some(page - 1) } else if next && page + 1 < pages { Some(page + 1) } else { None };
                 (agg, row, go)
             });
@@ -600,7 +600,7 @@ impl App {
         if dup {
             let t = &self.tabs[self.cur];
             let mut n = Tab::new(t.sel.clone());
-            (n.filter_txt, n.sort_txt, n.proj_txt, n.query, n.view, n.agg_txt) = (t.filter_txt.clone(), t.sort_txt.clone(), t.proj_txt.clone(), t.query.clone(), t.view, t.agg_txt.clone());
+            (n.filter_txt, n.sort_txt, n.proj_txt, n.limit_txt, n.skip_txt, n.hint_txt, n.collation_txt, n.query, n.view, n.agg_txt) = (t.filter_txt.clone(), t.sort_txt.clone(), t.proj_txt.clone(), t.limit_txt.clone(), t.skip_txt.clone(), t.hint_txt.clone(), t.collation_txt.clone(), t.query.clone(), t.view, t.agg_txt.clone());
             self.tabs.insert(self.cur + 1, n);
             self.cur += 1;
             self.reset_doc_state();

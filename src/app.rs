@@ -110,6 +110,9 @@ pub struct App {
     /// Pending expand/collapse from the tree menu: document, path prefix, open.
     fold: Option<(egui::Id, Vec<String>, bool)>,
     fold_busy: bool,
+    /// Set while drawing a document: whether any object or array section is closed, None when it
+    /// has none. The document's Expand all button reads last frame's answer to pick its label.
+    fold_seen: Option<bool>,
     /// Key column width and full row span of the tree being drawn, so values line up and hover bands cover the whole card.
     key_w: f32,
     char_w: f32,
@@ -233,6 +236,7 @@ impl App {
             new_field: None,
             fold: None,
             fold_busy: false,
+            fold_seen: None,
             key_w: 0.0,
             char_w: 0.0,
             tree_x: egui::Rangef::NOTHING,

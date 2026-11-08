@@ -255,7 +255,7 @@ impl App {
                 }
                 Msg::Indexes { req, res } => match (res, self.tabs.iter_mut().find(|t| t.idx_req == req)) {
                     (Ok(v), Some(t)) => {
-                        t.indexes = v;
+                        t.set_indexes(v);
                         let key = t.sel.key();
                         self.refresh_idx_rows(&key);
                     }
@@ -513,6 +513,11 @@ impl App {
 }
 
 impl App {
+    /// Documents per page, from the setting; a hand-edited value is kept in range.
+    pub(super) fn page_size(&self) -> u64 {
+        self.prefs.page_size.clamp(1, db::PAGE_SIZE_MAX)
+    }
+
     pub(super) fn reload(&mut self) {
         self.reload_of(self.cur);
     }
@@ -525,12 +530,15 @@ impl App {
         // Each answer is matched to its tab by id; a slower older one never overwrites a newer one.
         self.req += 1;
         let req = self.req;
+        let size = self.page_size();
         let t = &mut self.tabs[i];
         t.req = req;
         t.loading = true;
+        t.size = size;
         let (q, page, view, no_idx) = (t.query.clone(), t.page, t.view, t.indexes.is_empty());
-        self.worker.find(req, target, q, page);
-        // Indexes also feed the Sort history (as in the original), so load them once per tab.
+        self.worker.find(req, target, q, page, size);
+        // Indexes also feed the Sort history (as in the original) and the indexed-field marks, so
+        // load them once per tab.
         if view == View::Indexes || no_idx {
             self.load_indexes_of(i);
         }

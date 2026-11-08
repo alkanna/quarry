@@ -44,9 +44,12 @@ fn col_title(agg: bool, op: ColOp, coll: &str, path: &str) -> String {
     if agg { format!("{}: {path} in the results", op.label()) } else { format!("{}: {coll}.{path}", op.label()) }
 }
 
-fn update_script(coll: &str, filter: Document, update: Bson, note: &str) -> String {
+/// `scope` is the query's, so the script changes the documents the table shows.
+fn update_script(coll: &str, scope: db::Scope, update: Bson, note: &str) -> String {
+    let db::Scope { filter, collation } = scope;
+    let opts = collation.map(|c| format!(",\n    {}", db::pretty_shell(&Bson::Document(doc! { "collation": c })))).unwrap_or_default();
     format!(
-        "async function run() {{\n  // {note}\n  return await {}.updateMany(\n    {},\n    {}\n  );\n}}",
+        "async function run() {{\n  // {note}\n  return await {}.updateMany(\n    {},\n    {}{opts}\n  );\n}}",
         collection_ref(coll),
         db::pretty_shell(&Bson::Document(filter)),
         db::pretty_shell(&update)
@@ -258,12 +261,13 @@ impl App {
             }
             HeadAct::Data(op) => self.col_data(ui.ctx(), agg, docs, c, op),
             HeadAct::Rename(filtered) => {
-                let f = with_exists(if filtered { t.query.filter.clone() } else { Document::new() }, c);
+                let s = if filtered { t.query.scope() } else { db::Scope::default() };
+                let s = db::Scope { filter: with_exists(s.filter, c), ..s };
                 let to = match c.rsplit_once('.') {
                     Some((parent, _)) => format!("{parent}.NEW_NAME"),
                     None => "NEW_NAME".into(),
                 };
-                let code = update_script(&t.sel.coll, f, Bson::Document(doc! { "$rename": { c: to } }), "Replace NEW_NAME, then run.");
+                let code = update_script(&t.sel.coll, s, Bson::Document(doc! { "$rename": { c: to } }), "Replace NEW_NAME, then run.");
                 self.open_in_shell(code);
             }
             HeadAct::Cast(to) => {
@@ -271,12 +275,12 @@ impl App {
                 // The exists clause keeps documents without the field from gaining it as null.
                 let stage = doc! { "$set": { c: { "$convert": { "input": &input, "to": to, "onError": &input, "onNull": Bson::Null } } } };
                 let note = format!("Converts {c} to {to} in the documents matching the filter; values that cannot convert are kept.");
-                let code = update_script(&t.sel.coll, with_exists(t.query.filter.clone(), c), Bson::Array(vec![Bson::Document(stage)]), &note);
+                let code = update_script(&t.sel.coll, db::Scope { filter: with_exists(t.query.filter.clone(), c), ..t.query.scope() }, Bson::Array(vec![Bson::Document(stage)]), &note);
                 self.open_in_shell(code);
             }
             HeadAct::Update => {
                 let note = format!("Replace null with the new value of {c}, then run.");
-                let code = update_script(&t.sel.coll, t.query.filter.clone(), Bson::Document(doc! { "$set": { c: Bson::Null } }), &note);
+                let code = update_script(&t.sel.coll, t.query.scope(), Bson::Document(doc! { "$set": { c: Bson::Null } }), &note);
                 self.open_in_shell(code);
             }
             HeadAct::Customize => {
@@ -288,7 +292,7 @@ impl App {
 
     fn col_data(&mut self, ctx: &egui::Context, agg: bool, docs: Rows, c: &str, op: ColOp) {
         let Some(t) = self.t() else { return };
-        let (sel, filter) = (t.sel.clone(), t.query.filter.clone());
+        let (sel, matched) = (t.sel.clone(), t.query.scope());
         if agg || !self.col_scope_query {
             // As the table shows them, unsaved edits included.
             let values: Vec<Bson> = (0..docs.len()).filter_map(|i| match self.shown_row(docs, i, agg) {
@@ -299,7 +303,7 @@ impl App {
             return match col_op_result(op, &values) {
                 ColOut::Groups(rows) => {
                     // Pipeline and script results are not the collection, so there is nothing to reopen.
-                    let pipeline = if agg { Vec::new() } else { db::group_count_pipeline(c, &Bson::Null, filter).unwrap_or_default() };
+                    let pipeline = if agg { Vec::new() } else { db::group_count_pipeline(c, &Bson::Null, matched.filter.clone()).unwrap_or_default() };
                     self.modal = Some(Modal::Grouped { sel, path: c.into(), pipeline, rows });
                 }
                 out => self.col_result(ctx, &col_title(agg, op, &sel.coll, c), c, out, &scope),
@@ -308,7 +312,7 @@ impl App {
         let Some(target) = self.target() else { return self.err("Not connected.") };
         let sort = self.t().unwrap().query.sort.clone();
         self.ok(format!("Reading {c} from every matching document…"));
-        self.worker.column_values(sel.conn, target, op, c.into(), filter, sort);
+        self.worker.column_values(sel.conn, target, op, c.into(), matched, sort);
     }
 
     /// Copies or shows a data action's result. Groups never get here: they open `Modal::Grouped`.

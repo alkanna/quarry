@@ -6,7 +6,7 @@ use super::*;
 /// Like the original's history menu (onHistory, renderer line 96157): each list starts with `{}`
 /// to clear the box, and Sort also offers the key of every index of the collection.
 pub(super) fn history_menu(ui: &mut egui::Ui, h: &QueryHist, index_sorts: &[String], acts: &mut Vec<QAct>) {
-    sticky_menu(ui, "History".into(), |ui| {
+    icon_menu(ui, paint_clock, true, |ui| {
         ui.set_min_width(360.0);
         ui.set_max_width(520.0);
         let mut sort = h.sort.clone();
@@ -36,12 +36,15 @@ pub(super) fn history_menu(ui: &mut egui::Ui, h: &QueryHist, index_sorts: &[Stri
             });
             ui.separator();
         }
-    });
+    })
+    .on_hover_text("History");
 }
 
 /// Named queries (or pipelines) saved for this collection: load, delete, or save the current one.
-pub(super) fn library_menu(ui: &mut egui::Ui, lib: &[SavedQuery], new_name: &mut String, pipeline: bool, acts: &mut Vec<QAct>) {
-    sticky_menu(ui, format!("Library ({})", lib.len()), |ui| {
+/// `icon` shows it as a book icon, as in the find bar.
+pub(super) fn library_menu(ui: &mut egui::Ui, lib: &[SavedQuery], new_name: &mut String, pipeline: bool, icon: bool, acts: &mut Vec<QAct>) {
+    let title = format!("Library ({})", lib.len());
+    let body = |ui: &mut egui::Ui| {
         ui.set_min_width(320.0);
         if lib.is_empty() {
             ui.label(RichText::new(if pipeline { "No saved pipelines for this collection yet." } else { "No saved queries for this collection yet." }).color(MUTED()));
@@ -75,7 +78,23 @@ pub(super) fn library_menu(ui: &mut egui::Ui, lib: &[SavedQuery], new_name: &mut
             }
         });
         ui.label(RichText::new("Saving under an existing name replaces it.").size(TXT_CAPTION).color(FAINT()));
-    });
+    };
+    if icon {
+        icon_menu(ui, paint_book, true, body).on_hover_text(title);
+    } else {
+        sticky_menu(ui, title, body);
+    }
+}
+
+/// The id of a query box. Shortcuts focus it by this, and the find bar reads its focus and hover.
+pub(super) fn query_id(label: &str) -> egui::Id {
+    egui::Id::unique(("query", label))
+}
+
+/// Inner margin of the find bar's editors. Mono ink sits high in its line, so the text gets all
+/// the vertical room above it to center on the buttons and labels beside it.
+pub(super) fn editor_margin() -> egui::Frame {
+    egui::Frame::new().inner_margin(egui::Margin { left: 2, right: 2, top: 4, bottom: 0 })
 }
 
 /// Where the server lookup of a field's values stands.
@@ -97,24 +116,13 @@ pub(super) struct Typed {
 }
 
 impl App {
-    /// A query input that grows with its content, with highlighting and autocomplete.
+    /// A query input that grows with its content, with highlighting and autocomplete. It has no
+    /// frame or label: the find bar and option chips draw those around it.
     /// Enter runs it (or picks a suggestion), Shift+Enter adds a line.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn query_field(ui: &mut egui::Ui, label: &str, text: &mut String, hint: &str, width: f32, kind: FieldKind, paths: &[String], fields: &Fields, ac: &mut Ac, typed: &mut Typed, lookup: &dyn Fn(&str) -> Lookup) -> bool {
-        // The label shown is lowercase like code; the id keeps the original name, which shortcuts focus.
-        let shown = match label {
-            "QUERY" => "filter",
-            "PROJECT" => "project",
-            l => &l.to_lowercase(),
-        };
-        ui.add_sized([56.0, 26.0], egui::Label::new(RichText::new(shown).font(FontId::monospace(TXT_CAPTION)).color(FAINT())));
-        let id = egui::Id::unique(("query", label));
-        // No box at rest so the query reads as code on the card; a border on hover, and the page
-        // fill with an accent border while editing.
-        let focused = ui.memory(|m| m.has_focus(id));
-        let hovered = ui.ctx().read_response(id).is_some_and(|r| r.hovered());
-        let (fill, edge) = if focused { (BG(), PRIMARY()) } else if hovered { (BG(), BORDER()) } else { (Color32::TRANSPARENT, Color32::TRANSPARENT) };
-        let frame = egui::Frame::new().fill(fill).stroke(Stroke::new(1.0, edge)).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(8, 4));
+        let id = query_id(label);
+        let frame = editor_margin();
         // Test switch: show the suggestion list in the demo picture.
         if ac.id.is_none() && kind == FieldKind::Query && std::env::var("QUARRY_TEST_AC").is_ok() {
             // QUARRY_TEST_AC=date shows the date list after a date field's colon instead.

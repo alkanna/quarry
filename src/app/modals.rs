@@ -431,14 +431,14 @@ impl App {
                         }
                         // $rename cannot reach into arrays, so this is offered only for plain paths.
                         let plain = path.iter().all(|s| s.parse::<usize>().is_err());
-                        let (count, filter) = self.t().map(|t| (t.count, t.query.filter.clone())).unwrap_or_default();
-                        if plain && ui.add_enabled(valid, egui::Button::new(format!("In all {count} matching documents…"))).clicked() {
+                        let (reach, scope) = self.t().map(|t| (t.bulk_count(), t.query.scope())).unwrap_or_default();
+                        if plain && ui.add_enabled(valid, egui::Button::new("In all matching documents…")).clicked() {
                             let coll = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
                             self.modal = Some(Modal::Typed {
-                                title: format!("Rename {from} to {} in every document of {coll} matching the current filter (about {count})? Documents that already have {} are skipped.", to.join("."), to.join(".")),
+                                title: format!("Rename {from} to {} in every document of {coll} matching the current filter ({reach})? Documents that already have {} are skipped.", to.join("."), to.join(".")),
                                 expect: coll,
                                 typed: String::new(),
-                                action: Danger::RenameMany { filter, from: from.clone(), to: to.join(".") },
+                                action: Danger::RenameMany { scope, from: from.clone(), to: to.join(".") },
                             });
                             keep = false;
                         }
@@ -449,7 +449,7 @@ impl App {
                 }
                 Modal::UpdateMany { set_txt, unset_txt, preview } => {
                     ui.set_width(560.0);
-                    let filter = self.t().map(|t| t.query.filter.clone()).unwrap_or_default();
+                    let scope = self.t().map(|t| t.query.scope()).unwrap_or_default();
                     dialog_title(ui, "Update matching documents");
                     ui.label(RichText::new("Applies to every document matching the current filter. Values starting with $ are read as field paths.").color(MUTED()));
                     ui.label(RichText::new("Set fields").color(FAINT()));
@@ -498,7 +498,7 @@ impl App {
                     dialog_actions(ui, |ui| {
                         if ui.add_enabled(ready, egui::Button::new("Preview")).clicked() {
                             if let (Ok(st), Some(t)) = (&stages, self.target()) {
-                                self.worker.update_preview(t, filter.clone(), st.clone());
+                                self.worker.update_preview(t, scope.clone(), st.clone());
                             }
                         }
                         let applicable = ready && fresh && matches!(preview, Some((_, Ok(_))));
@@ -509,7 +509,7 @@ impl App {
                                 title: format!("Update every document in {coll} matching the current filter ({n})?"),
                                 expect: coll,
                                 typed: String::new(),
-                                action: Danger::UpdateMany { filter, stages: stages.unwrap_or_default() },
+                                action: Danger::UpdateMany { scope, stages: stages.unwrap_or_default() },
                             });
                             keep = false;
                         }

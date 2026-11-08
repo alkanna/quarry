@@ -171,8 +171,7 @@ impl App {
         let t = self.tm().unwrap();
         t.view = View::Documents;
         t.filter_txt = format!("{{ _id: {} }}", db::shell_text(&id));
-        t.sort_txt.clear();
-        t.proj_txt.clear();
+        t.clear_options();
         self.run_query();
     }
 

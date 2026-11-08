@@ -4,7 +4,7 @@ use super::*;
 
 /// What to turn into driver code: a find with its options, or a pipeline.
 pub enum CodeOf {
-    Find(Query),
+    Find(Box<Query>),
     Aggregate(Vec<Document>),
 }
 
@@ -38,10 +38,14 @@ impl Lang {
 pub fn driver_code(lang: Lang, db: &str, coll: &str, what: &CodeOf) -> String {
     let q = |s: &str| serde_json::Value::String(s.into()).to_string();
     let uri = "mongodb://localhost:27017";
-    let (filter, sort, proj, skip, limit) = match what {
-        CodeOf::Find(f) => (Some(to_edit_json(&f.filter)), f.sort.as_ref().map(to_edit_json), f.projection.as_ref().map(to_edit_json), f.skip, f.limit),
-        CodeOf::Aggregate(_) => (None, None, None, 0, None),
+    let (filter, sort, proj, skip, limit, hint, collation) = match what {
+        CodeOf::Find(f) => (Some(to_edit_json(&f.filter)), f.sort.as_ref().map(to_edit_json), f.projection.as_ref().map(to_edit_json), f.skip, f.limit, f.hint.as_ref(), f.collation.as_ref()),
+        CodeOf::Aggregate(_) => (None, None, None, 0, None, None, None),
     };
+    // An index name stays a plain string; index keys and collations travel as Extended JSON like the rest.
+    let hint_name = hint.and_then(|h| h.as_str());
+    let hint_keys = hint.filter(|h| h.as_str().is_none()).map(to_edit_value);
+    let coll_json = collation.map(to_edit_json);
     let pipe = match what {
         CodeOf::Aggregate(p) => Some(to_edit_value(&Bson::Array(p.iter().cloned().map(Bson::Document).collect()))),
         CodeOf::Find(_) => None,
@@ -76,6 +80,12 @@ pub fn driver_code(lang: Lang, db: &str, coll: &str, what: &CodeOf) -> String {
                 if let Some(n) = limit {
                     s += &format!(".limit({n})");
                 }
+                if let Some(h) = hint {
+                    s += &format!(".hint({})", shell_text(h));
+                }
+                if let Some(co) = collation {
+                    s += &format!(".collation({})", sh(co));
+                }
                 s
             }
             CodeOf::Aggregate(p) => format!("{c}.aggregate({})", shell_text(&Bson::Array(p.iter().cloned().map(Bson::Document).collect()))),
@@ -98,6 +108,15 @@ pub fn driver_code(lang: Lang, db: &str, coll: &str, what: &CodeOf) -> String {
                     if let Some(n) = limit {
                         opts.push(format!("limit: {n}"));
                     }
+                    if let Some(h) = hint_name {
+                        opts.push(format!("hint: {}", q(h)));
+                    }
+                    if let Some(h) = &hint_keys {
+                        opts.push(format!("hint: EJSON.parse({})", js(h)));
+                    }
+                    if let Some(co) = &coll_json {
+                        opts.push(format!("collation: EJSON.parse({})", js(co)));
+                    }
                     format!("{s}const docs = await coll.find(filter, {{ {} }}).toArray();\n", opts.join(", "))
                 }
                 (_, Some(p)) => format!("const pipeline = EJSON.parse({});\nconst docs = await coll.aggregate(pipeline).toArray();\n", js(p)),
@@ -119,6 +138,17 @@ pub fn driver_code(lang: Lang, db: &str, coll: &str, what: &CodeOf) -> String {
                     if let Some(v) = &sort {
                         s += &format!("sort = json_util.loads({})\n", py(v));
                         call += ".sort(list(sort.items()))";
+                    }
+                    if let Some(h) = hint_name {
+                        call += &format!(".hint({})", q(h));
+                    }
+                    if let Some(h) = &hint_keys {
+                        s += &format!("hint = json_util.loads({})\n", py(h));
+                        call += ".hint(list(hint.items()))";
+                    }
+                    if let Some(co) = &coll_json {
+                        s += &format!("collation = json_util.loads({})\n", py(co));
+                        call += ".collation(collation)";
                     }
                     if skip > 0 {
                         call += &format!(".skip({skip})");
@@ -146,6 +176,16 @@ pub fn driver_code(lang: Lang, db: &str, coll: &str, what: &CodeOf) -> String {
                     if let Some(v) = &sort {
                         s += &format!("    Document sort = {};\n", java(v));
                         call += ".sort(sort)";
+                    }
+                    if let Some(h) = hint_name {
+                        call += &format!(".hintString({})", q(h));
+                    }
+                    if let Some(h) = &hint_keys {
+                        s += &format!("    Document hint = {};\n", java(h));
+                        call += ".hint(hint)";
+                    }
+                    if let Some(co) = collation {
+                        call += &format!(".collation({})", java_collation(co));
                     }
                     if skip > 0 {
                         call += &format!(".skip({skip})");
@@ -182,6 +222,16 @@ pub fn driver_code(lang: Lang, db: &str, coll: &str, what: &CodeOf) -> String {
                     if let Some(n) = limit {
                         opts.push(format!(".SetLimit({n})"));
                     }
+                    if let Some(h) = hint_name {
+                        opts.push(format!(".SetHint({})", q(h)));
+                    }
+                    if let Some(h) = &hint_keys {
+                        s += &format!("\tvar hint bson.D\n\tparse({}, &hint)\n", go(h));
+                        opts.push(".SetHint(hint)".into());
+                    }
+                    if let Some(co) = collation {
+                        opts.push(format!(".SetCollation({})", go_collation(co)));
+                    }
                     format!("{s}\tcur, err := coll.Find(ctx, filter, options.Find(){})\n", opts.concat())
                 }
                 // UnmarshalExtJSON needs a document at the top, so the array rides inside one.
@@ -208,6 +258,17 @@ pub fn driver_code(lang: Lang, db: &str, coll: &str, what: &CodeOf) -> String {
                     if let Some(n) = limit {
                         call += &format!(".limit({n})");
                     }
+                    if let Some(h) = hint_name {
+                        call += &format!(".hint(mongodb::options::Hint::Name({}.into()))", q(h));
+                    }
+                    if let Some(h) = &hint_keys {
+                        s += &format!("    let hint: Document = serde_json::from_str({}).unwrap();\n", rs(h));
+                        call += ".hint(mongodb::options::Hint::Keys(hint))";
+                    }
+                    if let Some(co) = &coll_json {
+                        s += &format!("    let collation: Document = serde_json::from_str({}).unwrap();\n", rs(co));
+                        call += ".collation(mongodb::bson::from_document::<mongodb::options::Collation>(collation).unwrap())";
+                    }
                     format!("{s}    let mut cursor = {call}.await?;\n")
                 }
                 (_, Some(p)) => format!("    let pipeline: Vec<Document> = serde_json::from_str({}).unwrap();\n    let mut cursor = coll.aggregate(pipeline).await?;\n", rs(p)),
@@ -218,6 +279,59 @@ pub fn driver_code(lang: Lang, db: &str, coll: &str, what: &CodeOf) -> String {
     }
 }
 
+/// A collation option as a literal both Java and Go read: a quoted string, a bool or an integer.
+fn collation_lit(v: &Bson) -> Option<String> {
+    match v {
+        Bson::String(s) => Some(serde_json::Value::String(s.clone()).to_string()),
+        Bson::Boolean(b) => Some(b.to_string()),
+        Bson::Int32(n) => Some(n.to_string()),
+        Bson::Int64(n) => Some(n.to_string()),
+        Bson::Double(n) => Some((*n as i64).to_string()),
+        _ => None,
+    }
+}
+
+/// Java has no parser for a collation, so it is spelled out with the builder.
+fn java_collation(d: &Document) -> String {
+    let m = "com.mongodb.client.model.";
+    let mut s = format!("{m}Collation.builder()");
+    for (k, v) in d {
+        let Some(v) = collation_lit(v) else { continue };
+        s += &match k.as_str() {
+            "strength" => format!(".collationStrength({m}CollationStrength.fromInt({v}))"),
+            "caseFirst" => format!(".collationCaseFirst({m}CollationCaseFirst.fromString({v}))"),
+            "alternate" => format!(".collationAlternate({m}CollationAlternate.fromString({v}))"),
+            "maxVariable" => format!(".collationMaxVariable({m}CollationMaxVariable.fromString({v}))"),
+            "locale" | "caseLevel" | "numericOrdering" | "normalization" | "backwards" => format!(".{k}({v})"),
+            _ => continue,
+        };
+    }
+    s + ".build()"
+}
+
+/// Go's Collation fields carry no bson names that match the server's, so it is a struct literal.
+fn go_collation(d: &Document) -> String {
+    let fields: Vec<String> = d
+        .iter()
+        .filter_map(|(k, v)| {
+            let name = match k.as_str() {
+                "locale" => "Locale",
+                "caseLevel" => "CaseLevel",
+                "caseFirst" => "CaseFirst",
+                "strength" => "Strength",
+                "numericOrdering" => "NumericOrdering",
+                "alternate" => "Alternate",
+                "maxVariable" => "MaxVariable",
+                "normalization" => "Normalization",
+                "backwards" => "Backwards",
+                _ => return None,
+            };
+            Some(format!("{name}: {}", collation_lit(v)?))
+        })
+        .collect();
+    format!("&options.Collation{{{}}}", fields.join(", "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,21 +339,25 @@ mod tests {
     fn code_query() -> Query {
         let id = mongodb::bson::oid::ObjectId::parse_str("64b7f0c2a1b2c3d4e5f60718").unwrap();
         let at = mongodb::bson::DateTime::parse_rfc3339_str("2024-01-02T03:04:05Z").unwrap();
-        Query { filter: doc! { "_id": id, "at": { "$gt": at }, "n": 5i64 }, sort: Some(doc! { "at": -1 }), projection: Some(doc! { "n": 1 }), skip: 10, limit: Some(20) }
+        Query { filter: doc! { "_id": id, "at": { "$gt": at }, "n": 5i64 }, sort: Some(doc! { "at": -1 }), projection: Some(doc! { "n": 1 }), skip: 10, limit: Some(20), hint: Some(Bson::Document(doc! { "at": -1 })), collation: Some(doc! { "locale": "fr", "strength": 2 }) }
     }
 
     #[test]
     fn driver_code_embeds_extended_json() {
-        let what = CodeOf::Find(code_query());
+        let what = CodeOf::Find(Box::new(code_query()));
         for (lang, parser) in [(Lang::Node, "EJSON.parse("), (Lang::Python, "json_util.loads("), (Lang::Java, "Document.parse("), (Lang::Go, "bson.UnmarshalExtJSON(js, false, v)"), (Lang::Rust, "serde_json::from_str(")] {
             let code = driver_code(lang, "shop", "orders", &what);
             assert!(code.contains(parser), "{}", lang.name());
             assert!(code.contains("\"$oid\": \"64b7f0c2a1b2c3d4e5f60718\""), "{}", lang.name());
             assert!(code.contains("\"$date\": \"2024-01-02T03:04:05Z\""), "{}", lang.name());
             assert!(code.contains("20") && code.contains("10"), "{}", lang.name());
+            assert!(code.contains("hint") || code.contains("Hint"), "{}", lang.name());
+            assert!(code.contains("\"fr\""), "{}", lang.name());
         }
+        assert!(driver_code(Lang::Java, "shop", "orders", &what).contains(".collation(com.mongodb.client.model.Collation.builder().locale(\"fr\").collationStrength(com.mongodb.client.model.CollationStrength.fromInt(2)).build())"));
+        assert!(driver_code(Lang::Go, "shop", "orders", &what).contains(".SetCollation(&options.Collation{Locale: \"fr\", Strength: 2})"));
         let sh = driver_code(Lang::Mongosh, "shop", "orders", &what);
-        assert!(sh.starts_with("db.orders.find({") && sh.ends_with(".sort({ at: -1 }).skip(10).limit(20)"), "{sh}");
+        assert!(sh.starts_with("db.orders.find({") && sh.ends_with(".sort({ at: -1 }).skip(10).limit(20).hint({ at: -1 }).collation({ locale: \"fr\", strength: 2 })"), "{sh}");
         assert!(driver_code(Lang::Mongosh, "shop", "my-coll", &what).starts_with("db.getCollection(\"my-coll\").find("));
     }
 
