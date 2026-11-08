@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.0](https://github.com/alkanna/quarry/compare/v0.20.0...v0.21.0) (2026-11-08)
+
+
+### Features
+
+* encrypt the Query value suggestion cache at rest ([#128](https://github.com/alkanna/quarry/issues/128)) ([22dc0e3](https://github.com/alkanna/quarry/commit/22dc0e3421dafc7cd63fb104e2a7ab18ca7a92a3))
+
 ## [0.20.0](https://github.com/alkanna/quarry/compare/v0.19.0...v0.20.0) (2026-11-08)
 
 
