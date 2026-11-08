@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.0](https://github.com/alkanna/quarry/compare/v0.21.0...v0.22.0) (2026-11-08)
+
+
+### Features
+
+* new Workbench dark and Paper light themes with an IDE-style layout ([#130](https://github.com/alkanna/quarry/issues/130)) ([ad26de4](https://github.com/alkanna/quarry/commit/ad26de4e2ca2b1894d77b977e78f0c2effc159ae))
+
 ## [0.21.0](https://github.com/alkanna/quarry/compare/v0.20.0...v0.21.0) (2026-11-08)
 
 
