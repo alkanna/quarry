@@ -29,6 +29,7 @@
 
 **Look after your collections**
 - See which indexes are used, hide one to see what happens without it, and get suggestions from slow queries.
+- Create indexes with every option: unique, sparse, hidden, TTL, partial filter and collation.
 - See each field's types and how often it appears, and write or generate a validator from that.
 - Follow references: Quarry shows a preview next to an id and opens the document it points to. It can find these relations for you.
 

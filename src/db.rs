@@ -3,7 +3,7 @@
 
 use futures_util::{StreamExt, TryStreamExt};
 use mongodb::bson::{Bson, Document, doc};
-use mongodb::options::{ClientOptions, IndexOptions};
+use mongodb::options::ClientOptions;
 use mongodb::{Client, IndexModel};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};

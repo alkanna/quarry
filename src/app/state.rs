@@ -127,6 +127,9 @@ pub(super) struct Tab {
     pub(super) agg_input: Stage,
     pub(super) agg_text_mode: bool,
     pub(super) indexes: Vec<Document>,
+    /// The Indexes view's table rows: each index with its usage merged in. Rebuilt only when the
+    /// indexes or their stats arrive, since column widths are cached by the rows' address.
+    pub(super) idx_rows: Vec<Document>,
     pub(super) shell: ShellTab,
     pub(super) schema: SchemaTab,
     pub(super) import: ImportTab,
@@ -319,6 +322,7 @@ impl Tab {
             },
             // Field rows and document rows have different columns.
             View::Compare => (self.compare.rows(), &self.compare.fields[self.compare.list as usize], Some(self.compare.page), if self.compare.list == CmpList::Changed { "compare-diff" } else { "compare" }),
+            View::Indexes => (&self.idx_rows, &IDX_FIELDS, None, "indexes"),
             _ => (&self.agg_docs, &self.agg_fields, None, "agg"),
         }
     }
@@ -329,6 +333,7 @@ impl Tab {
             View::Shell => Some(&mut self.shell.docs),
             View::Import => self.import.parsed.as_mut()?.as_mut().ok(),
             View::Compare => self.compare.rows_mut(),
+            View::Indexes => Some(&mut self.idx_rows),
             _ => Some(&mut self.agg_docs),
         }
     }
@@ -342,7 +347,7 @@ impl Tab {
 
     /// Whether the rows on screen are documents of this collection, so actions on the collection apply to them.
     pub(super) fn in_coll(&self) -> bool {
-        !matches!(self.view, View::Compare | View::Import)
+        !matches!(self.view, View::Compare | View::Import | View::Indexes)
     }
 
     pub(super) fn new(sel: Sel) -> Self {
@@ -378,6 +383,7 @@ impl Tab {
             agg_input: Stage::new("", "", true),
             agg_text_mode: false,
             indexes: Vec::new(),
+            idx_rows: Vec::new(),
             shell: ShellTab::default(),
             schema: SchemaTab::default(),
             import: ImportTab::default(),
@@ -415,6 +421,7 @@ pub(super) enum Modal {
     SaveAll(Vec<String>),
     Delete(Vec<Document>),
     Typed { title: String, expect: String, typed: String, action: Danger },
+    CreateIndex(Box<IndexForm>),
     AggWrite(Vec<Document>),
     ShellWrite(Vec<String>),
     ImportInsert(usize),

@@ -216,15 +216,13 @@ impl Worker {
                 Ok(v.into_iter()
                     .map(|m| {
                         let o = m.options.unwrap_or_default();
-                        let mut d = doc! { "name": o.name.unwrap_or_default(), "keys": m.keys };
-                        if o.unique == Some(true) {
-                            d.insert("unique", true);
-                        }
-                        if let Some(ttl) = o.expire_after {
-                            d.insert("expireAfterSeconds", ttl.as_secs() as i64);
-                        }
-                        if let Some(pf) = o.partial_filter_expression {
-                            d.insert("partialFilterExpression", pf);
+                        let mut d = doc! { "name": o.name.clone().unwrap_or_default(), "keys": m.keys };
+                        // Every option the index was made with (unique, sparse, TTL, partial filter,
+                        // collation, hidden, text weights…), but not the format version.
+                        for (k, v) in mongodb::bson::to_document(&o).unwrap_or_default() {
+                            if k != "name" && k != "v" {
+                                d.insert(k, v);
+                            }
                         }
                         d
                     })
@@ -804,14 +802,6 @@ impl Worker {
         });
     }
 
-    pub fn create_index(&self, t: Target, keys: Document, unique: bool) {
-        self.spawn(async move {
-            let m = IndexModel::builder().keys(keys).options(IndexOptions::builder().unique(unique).build()).build();
-            let res = t.c().create_index(m).await.map(|r| format!("Created index {}", r.index_name)).map_err(e);
-            Msg::Written { at: t.at(), res, undo: None, reload: false, retry: None }
-        });
-    }
-
     pub fn drop_index(&self, t: Target, name: String) {
         self.spawn(async move {
             let res = t.c().drop_index(&name).await.map(|_| format!("Dropped index {name}")).map_err(e);
@@ -1061,6 +1051,27 @@ mod tests {
         w.delete_ids(t.clone(), ids);
         next(&rx);
         assert_eq!(all(&w, &t), [doc! { "_id": 3, "pre": true }]);
+    }
+
+    #[test]
+    fn live_index_list_keeps_every_option() {
+        let Some((w, rx, t)) = live("index_options") else { return };
+        let ttl = doc! { "key": { "at": 1 }, "name": "ttl", "expireAfterSeconds": 60, "sparse": true, "hidden": true, "collation": { "locale": "fr", "strength": 2 } };
+        let partial = doc! { "key": { "x": 1 }, "name": "partial", "partialFilterExpression": { "x": { "$gt": 1 } } };
+        w.rt.block_on(async { t.client.database(&t.db).run_command(doc! { "createIndexes": &t.coll, "indexes": [ttl, partial] }).await.unwrap() });
+        w.indexes(1, t.clone());
+        let Msg::Indexes { res, .. } = next(&rx) else { panic!("expected Indexes") };
+        let list = res.unwrap();
+        let ix = |name: &str| list.iter().find(|d| d.get_str("name") == Ok(name)).unwrap().clone();
+        let ttl = ix("ttl");
+        assert_eq!(ttl.get_document("keys").unwrap(), &doc! { "at": 1 });
+        assert_eq!(ttl.get_i64("expireAfterSeconds").or(ttl.get_i32("expireAfterSeconds").map(i64::from)), Ok(60));
+        for k in ["sparse", "hidden"] {
+            assert_eq!(ttl.get_bool(k), Ok(true), "{k}");
+        }
+        assert_eq!(ttl.get_document("collation").unwrap().get_str("locale"), Ok("fr"));
+        assert!(ttl.get("v").is_none());
+        assert!(ix("partial").get_document("partialFilterExpression").is_ok());
     }
 
     #[test]
