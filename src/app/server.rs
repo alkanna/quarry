@@ -12,6 +12,11 @@ const NEEDS_MONITOR: &str = "Not available for this user: it needs the clusterMo
 #[derive(Default)]
 pub(super) struct ServerWin {
     pub(super) conn: u64,
+    /// Tags this window's commands, so answers to a closed window or another connection's are dropped.
+    id: u64,
+    /// Commands sent and not answered yet; nothing new is sent until they are, so a slow server
+    /// never gets a pile of them.
+    waiting: usize,
     ops_tab: bool,
     /// When to ask again; None asks on the next frame.
     next: Option<Instant>,
@@ -30,8 +35,8 @@ pub(super) struct ServerWin {
 }
 
 impl ServerWin {
-    pub(super) fn new(conn: u64) -> Self {
-        Self { conn, ..Default::default() }
+    pub(super) fn new(conn: u64, id: u64) -> Self {
+        Self { conn, id, ..Default::default() }
     }
 
     /// Canned answers for the offline demo; `ops` opens the Operations section.
@@ -173,29 +178,34 @@ impl App {
         let polls = !s.ops_tab || s.auto_ops;
         if let (Some(client), false) = (&client, self.demo) {
             let now = Instant::now();
-            if s.next.is_none_or(|t| now >= t) && ctx.input(|i| i.focused) {
+            if s.waiting == 0 && s.next.is_none_or(|t| now >= t) && ctx.input(|i| i.focused) {
                 s.next = Some(now + POLL);
-                let ask = |cmd: Document, tag: &str| self.worker.command(client.clone(), "admin".into(), cmd, tag);
+                let (id, mut sent) = (s.id, 0);
+                let mut ask = |cmd: Document, what: &str| {
+                    sent += 1;
+                    self.worker.command(client.clone(), "admin".into(), cmd, &format!("server:{id}:{what}"));
+                };
                 if s.ops_tab {
                     if s.auto_ops || s.ops.is_none() || s.refresh {
                         let mut cmd = doc! { "currentOp": 1, "active": true };
                         if s.own_only {
                             cmd.insert("$ownOps", true);
                         }
-                        ask(cmd, "server:ops");
+                        ask(cmd, "ops");
                     }
                 } else {
                     // A section that failed is not asked again until Refresh, so a missing privilege costs one call.
                     if !matches!(s.status, Some(Err(_))) {
-                        ask(doc! { "serverStatus": 1, "repl": 0, "metrics": 0, "locks": 0 }, "server:status");
+                        ask(doc! { "serverStatus": 1, "repl": 0, "metrics": 0, "locks": 0 }, "status");
                     }
                     if !matches!(s.rs, Some(Err(_))) {
-                        ask(doc! { "replSetGetStatus": 1 }, "server:rs");
+                        ask(doc! { "replSetGetStatus": 1 }, "rs");
                     }
                     if s.hello.is_none() {
-                        ask(doc! { "hello": 1 }, "server:hello");
+                        ask(doc! { "hello": 1 }, "hello");
                     }
                 }
+                s.waiting = sent;
                 s.refresh = false;
             }
             if polls {
@@ -243,7 +253,7 @@ impl App {
             self.modal = Some(Modal::Unlock(conn, None));
         }
         if let (Some(op), Some(client)) = (kill, client) {
-            self.worker.command(client, "admin".into(), doc! { "killOp": 1, "op": op }, "server:kill");
+            self.worker.command(client, "admin".into(), doc! { "killOp": 1, "op": op }, &format!("server:{}:kill", s.id));
         }
         if open && !(r.should_close() && self.modal.is_none()) {
             self.server = Some(s);
@@ -309,11 +319,13 @@ impl App {
     /// Applies an answer to one of the Server window's commands. Errors stay in the window
     /// instead of the status bar, so a role without privileges is not told so every 2 seconds.
     pub(super) fn server_reply(&mut self, tag: &str, r: db::Res<Document>) {
-        if tag == "server:kill" {
+        let mut parts = tag.splitn(3, ':').skip(1);
+        let (id, what) = (parts.next().and_then(|i| i.parse::<u64>().ok()), parts.next().unwrap_or_default());
+        if what == "kill" {
             match r {
                 Ok(_) => {
                     self.ok("Asked the server to kill the operation");
-                    if let Some(s) = &mut self.server {
+                    if let Some(s) = self.server.as_mut().filter(|s| Some(s.id) == id) {
                         s.refresh = true;
                         s.next = None;
                     }
@@ -323,17 +335,18 @@ impl App {
             }
             return;
         }
-        let Some(s) = &mut self.server else { return };
-        match tag {
-            "server:status" => {
+        let Some(s) = self.server.as_mut().filter(|s| Some(s.id) == id) else { return };
+        s.waiting = s.waiting.saturating_sub(1);
+        match what {
+            "status" => {
                 if let Some(Ok(cur)) = s.status.take() {
                     s.prev = Some(cur);
                 }
                 s.status = Some(r.map(|d| (Instant::now(), d)));
             }
-            "server:hello" => s.hello = Some(r),
-            "server:rs" => s.rs = Some(r),
-            "server:ops" => match r {
+            "hello" => s.hello = Some(r),
+            "rs" => s.rs = Some(r),
+            "ops" => match r {
                 Err(e) if is_unauthorized(&e) && !s.own_only => {
                     s.own_only = true;
                     s.refresh = true;
