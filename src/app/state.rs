@@ -4,21 +4,37 @@ use super::*;
 
 impl ShellTab {
     pub(super) fn set_value(&mut self, v: Bson) {
-        self.docs = match &v {
-            Bson::Array(a) if !a.is_empty() && a.iter().all(|x| matches!(x, Bson::Document(_))) => a.iter().filter_map(|x| x.as_document().cloned()).collect(),
-            Bson::Document(d) => vec![d.clone()],
-            _ => Vec::new(),
-        };
-        self.fields = auto_fields(&self.docs);
         self.count = match &v {
             Bson::Array(a) => Some(a.len()),
             _ => None,
         };
+        // Documents are kept once, as BSON bytes; anything else stays a value. Rows fail only for
+        // keys BSON cannot hold, and such a result stays a value too.
+        let rows = match &v {
+            Bson::Array(a) if !a.is_empty() && a.iter().all(|x| matches!(x, Bson::Document(_))) => a.iter().filter_map(Bson::as_document).map(db::Row::from_doc).collect(),
+            Bson::Document(d) => db::Row::from_doc(d).map(|r| vec![r]),
+            _ => Err(String::new()),
+        };
+        (self.docs, self.value) = match rows {
+            Ok(rows) => (rows, None),
+            Err(_) => (Vec::new(), Some(v)),
+        };
+        self.fields = auto_fields(&self.docs);
         self.page = 0;
         self.raw = self.docs.is_empty();
         self.raw_text = None;
-        self.value = Some(v);
         self.error = None;
+    }
+
+    /// The whole result as one value, for Copy, Export and the JSON view. Documents are decoded
+    /// from their rows for the moment.
+    pub(super) fn result(&self) -> Option<Bson> {
+        match (&self.value, self.docs.as_slice(), self.count) {
+            (Some(v), ..) => Some(v.clone()),
+            (None, [], _) => None,
+            (None, [d], None) => Some(Bson::Document(d.owned())),
+            (None, rows, _) => Some(Bson::Array(rows.iter().map(|r| Bson::Document(r.owned())).collect())),
+        }
     }
 }
 
@@ -301,9 +317,10 @@ impl Default for ImportTab {
 pub(super) struct ShellTab {
     pub(super) code: String,
     pub(super) logs: Vec<(String, String)>,
-    /// The returned value; documents also go to `docs` for the table.
+    /// The returned value when it is not documents; see `result` for the whole of it.
     pub(super) value: Option<Bson>,
-    pub(super) docs: Vec<Document>,
+    /// Returned documents, one or an array of them, as BSON bytes for the table.
+    pub(super) docs: Vec<db::Row>,
     pub(super) fields: Vec<String>,
     pub(super) page: usize,
     /// Show the result as JSON text instead of the table.
@@ -335,7 +352,7 @@ impl Tab {
     /// the page on screen (None shows every row) and the suffix of its column-settings key.
     pub(super) fn agg_source(&self) -> (Rows<'_>, &[String], Option<usize>, &'static str) {
         match self.view {
-            View::Shell => (Rows::Docs(&self.shell.docs), &self.shell.fields, Some(self.shell.page), "shell"),
+            View::Shell => (Rows::Raw(&self.shell.docs), &self.shell.fields, Some(self.shell.page), "shell"),
             // Import previews its first page.
             View::Import => match &self.import.parsed {
                 Some(Ok(d)) => (Rows::Docs(d), &self.import.fields, Some(0), "import"),
@@ -352,7 +369,7 @@ impl Tab {
     /// Where `view` keeps those rows, so the table can take them out while it draws and put them back.
     pub(super) fn agg_store(&mut self, view: View) -> Option<Store<'_>> {
         Some(match view {
-            View::Shell => Store::Docs(&mut self.shell.docs),
+            View::Shell => Store::Raw(&mut self.shell.docs),
             View::Import => Store::Docs(self.import.parsed.as_mut()?.as_mut().ok()?),
             View::Compare => Store::Docs(self.compare.rows_mut()?),
             View::Indexes => Store::Docs(&mut self.idx_rows),
@@ -815,6 +832,23 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_keeps_documents_once_as_rows() {
+        let mut sh = ShellTab::default();
+        let docs = vec![Bson::Document(doc! { "_id": 1, "a": "x" }), Bson::Document(doc! { "_id": 2 })];
+        sh.set_value(Bson::Array(docs.clone()));
+        assert!(sh.value.is_none());
+        assert_eq!((sh.docs.len(), sh.count, sh.fields.clone()), (2, Some(2), vec!["_id".to_string(), "a".to_string()]));
+        assert_eq!(sh.result(), Some(Bson::Array(docs)));
+        sh.set_value(Bson::Document(doc! { "n": 3 }));
+        assert_eq!((sh.docs.len(), sh.count, sh.result()), (1, None, Some(Bson::Document(doc! { "n": 3 }))));
+        for v in [Bson::Int32(7), Bson::Array(vec![]), Bson::Array(vec![Bson::Int32(1), Bson::Document(doc! {})])] {
+            sh.set_value(v.clone());
+            assert!(sh.docs.is_empty() && sh.raw);
+            assert_eq!(sh.result(), Some(v));
+        }
+    }
 
     #[test]
     fn pipeline_builder_text() {
