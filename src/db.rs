@@ -124,6 +124,10 @@ pub enum Msg {
     ShellLog { req: u64, level: String, text: String },
     /// The Shell script finished: its return value as canonical Extended JSON `{"v": ...}`.
     ShellDone { req: u64, res: Res<String>, ms: u128 },
+    /// One change event from the Watch view's change stream `req`.
+    WatchEvent { req: u64, doc: Document },
+    /// The change stream `req` ended: stopped (Ok) or failed.
+    WatchDone { req: u64, res: Res<()> },
     /// The shell editor's language server answered request `req`.
     JsLs { req: u64, out: JsOut },
     /// The shell editor's language server stopped, idle or `failed`.

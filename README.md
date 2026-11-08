@@ -22,6 +22,7 @@
 - Preview the result before you update every matching document.
 
 **See what your queries do**
+- Watch a collection's inserts, updates and deletes as they happen (needs a replica set).
 - Build a pipeline one stage at a time and see what comes out of each stage.
 - Read the explain plan of a query or pipeline.
 - Check the server's health and replica set, and find and kill slow operations (Server status, in a database's menu). It asks the server only while that window is open.

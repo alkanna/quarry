@@ -35,12 +35,16 @@ jobs:
       # compile, and a check skips code generation and linking.
       # A real server for the tests that check writes never overwrite or lose data. A docker step
       # rather than `services:`, which would apply to every system in the matrix.
+      # A one-member replica set, since change streams (the Watch view) need one.
       - name: MongoDB for the live tests
         if: matrix.os == 'ubuntu-22.04'
-        run: docker run -d -p 27017:27017 mongo:8
+        run: |
+          docker run -d --name mongo -p 27017:27017 mongo:8 --replSet rs0
+          until docker exec mongo mongosh --quiet --eval 'try { rs.status().ok } catch (e) { rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "localhost:27017" }] }).ok }'; do sleep 1; done
       - if: matrix.os == 'ubuntu-22.04'
         run: cargo test --locked
         env:
-          QUARRY_TEST_MONGO: mongodb://localhost:27017
+          QUARRY_TEST_MONGO: mongodb://localhost:27017/?directConnection=true
+          QUARRY_TEST_MONGO_RS: mongodb://localhost:27017/?directConnection=true
       - if: matrix.os != 'ubuntu-22.04'
         run: cargo check --locked --all-targets

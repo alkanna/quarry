@@ -160,6 +160,8 @@ impl App {
                         self.load_indexes();
                     }
                 }
+                Msg::WatchEvent { req, doc } => self.watch_event(req, doc),
+                Msg::WatchDone { req, res } => self.watch_done(req, res),
                 Msg::IndexInfo { key, res } => match res {
                     Ok(i) => {
                         self.idx_info = Some((key.clone(), i));

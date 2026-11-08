@@ -81,6 +81,7 @@ pub(super) enum View {
     Schema,
     Import,
     Compare,
+    Watch,
 }
 
 /// Everything that belongs to one open tab.
@@ -134,6 +135,7 @@ pub(super) struct Tab {
     pub(super) schema: SchemaTab,
     pub(super) import: ImportTab,
     pub(super) compare: CompareTab,
+    pub(super) watch: WatchTab,
     /// Preview text of referenced documents, keyed by `compact(_id)`.
     pub(super) related: HashMap<String, String>,
 }
@@ -323,6 +325,7 @@ impl Tab {
             // Field rows and document rows have different columns.
             View::Compare => (self.compare.rows(), &self.compare.fields[self.compare.list as usize], Some(self.compare.page), if self.compare.list == CmpList::Changed { "compare-diff" } else { "compare" }),
             View::Indexes => (&self.idx_rows, &IDX_FIELDS, None, "indexes"),
+            View::Watch => (&self.watch.rows, &WATCH_FIELDS, None, "watch"),
             _ => (&self.agg_docs, &self.agg_fields, None, "agg"),
         }
     }
@@ -334,6 +337,7 @@ impl Tab {
             View::Import => self.import.parsed.as_mut()?.as_mut().ok(),
             View::Compare => self.compare.rows_mut(),
             View::Indexes => Some(&mut self.idx_rows),
+            View::Watch => Some(&mut self.watch.rows),
             _ => Some(&mut self.agg_docs),
         }
     }
@@ -347,7 +351,7 @@ impl Tab {
 
     /// Whether the rows on screen are documents of this collection, so actions on the collection apply to them.
     pub(super) fn in_coll(&self) -> bool {
-        !matches!(self.view, View::Compare | View::Import | View::Indexes)
+        !matches!(self.view, View::Compare | View::Import | View::Indexes | View::Watch)
     }
 
     pub(super) fn new(sel: Sel) -> Self {
@@ -388,6 +392,7 @@ impl Tab {
             schema: SchemaTab::default(),
             import: ImportTab::default(),
             compare: CompareTab { insert: true, replace: true, ..Default::default() },
+            watch: WatchTab::default(),
             related: HashMap::new(),
         }
     }

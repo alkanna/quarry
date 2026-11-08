@@ -61,12 +61,12 @@ impl App {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(&coll).size(TXT_HEADING).strong().color(BRIGHT()));
             ui.add_space(12.0);
-            for (v, label) in [(View::Documents, "Documents"), (View::Aggregate, "Aggregate"), (View::Indexes, "Indexes"), (View::Schema, "Schema"), (View::Import, "Import"), (View::Compare, "Compare"), (View::Shell, "Shell")] {
+            for (v, label) in [(View::Documents, "Documents"), (View::Aggregate, "Aggregate"), (View::Indexes, "Indexes"), (View::Schema, "Schema"), (View::Import, "Import"), (View::Compare, "Compare"), (View::Shell, "Shell"), (View::Watch, "Watch")] {
                 if ui.selectable_label(view == v, label).clicked() {
                     self.set_view(v);
                 }
             }
-            if matches!(view, View::Documents | View::Aggregate | View::Indexes) {
+            if matches!(view, View::Documents | View::Aggregate | View::Indexes | View::Watch) {
                 right_group(ui, |ui| {
                     if self.prefs.table {
                         self.columns_menu(ui, view != View::Documents);
@@ -90,6 +90,7 @@ impl App {
             View::Schema => self.schema_view(ui),
             View::Import => self.import_view(ui),
             View::Compare => self.compare_view(ui),
+            View::Watch => self.watch_view(ui),
         }
     }
 

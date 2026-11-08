@@ -43,6 +43,7 @@ mod tools;
 mod tree;
 mod undo;
 mod users;
+mod watch;
 use column_menu::*;
 use config::*;
 use documents::*;
@@ -55,6 +56,7 @@ use tree::*;
 use users::*;
 use indexes::*;
 use server::*;
+use watch::*;
 use drafts::*;
 
 const SYSTEM_DBS: [&str; 3] = ["admin", "config", "local"];
@@ -72,7 +74,7 @@ const SHORTCUTS: [(&str, &str); 22] = [
     ("Cmd+9", "Go to the last tab"),
     ("Ctrl+Tab, Cmd+Shift+]", "Next tab"),
     ("Ctrl+Shift+Tab, Cmd+Shift+[", "Previous tab"),
-    ("Cmd+Alt+1 to Cmd+Alt+7", "Documents, Aggregate, Indexes, Schema, Import, Compare, Shell"),
+    ("Cmd+Alt+1 to Cmd+Alt+8", "Documents, Aggregate, Indexes, Schema, Import, Compare, Shell, Watch"),
     ("Cmd+F", "Focus the query"),
     ("Cmd+Shift+F", "Find a collection in the sidebar"),
     ("Up, Down", "Select the previous or next document"),
@@ -318,6 +320,7 @@ impl App {
                     "Schema" => View::Schema,
                     "Import" => View::Import,
                     "Compare" => View::Compare,
+                    "Watch" => View::Watch,
                     _ => View::Documents,
                 };
                 (t.filter_txt, t.sort_txt, t.proj_txt, t.shell.code) = (st.filter, st.sort, st.project, st.shell);
@@ -448,6 +451,7 @@ impl eframe::App for App {
         }
         let ctx = ui.ctx().clone();
         self.poll(&ctx);
+        self.stop_hidden_watches();
         self.remember_tabs();
         // AppKit resets the window buttons on every layout, so re-centre them in our header each frame.
         frame.set_traffic_lights_position(&ctx, egui::Rangef::new(0.0, HEADER_H), 16.0);

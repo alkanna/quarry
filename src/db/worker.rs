@@ -57,6 +57,30 @@ impl Worker {
         });
     }
 
+    /// Streams the collection's changes as `WatchEvent`s until `cancel` fires or its sender drops.
+    pub fn watch(&self, req: u64, t: Target, cancel: tokio::sync::oneshot::Receiver<()>) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        self.rt.spawn(async move {
+            let send = move |m: Msg| {
+                let _ = tx.send(m);
+                ctx.request_repaint();
+            };
+            let run = async {
+                // UpdateLookup so an update shows the whole document as it is now, not just the change.
+                let mut s = t.c().watch().full_document(mongodb::options::FullDocumentType::UpdateLookup).await.map_err(e)?.with_type::<Document>();
+                while let Some(ev) = s.next().await {
+                    send(Msg::WatchEvent { req, doc: ev.map_err(e)? });
+                }
+                Ok(())
+            };
+            let res = tokio::select! {
+                r = run => r,
+                _ = cancel => Ok(()),
+            };
+            send(Msg::WatchDone { req, res });
+        });
+    }
+
     /// Starts the shell editor's language server; it stops once the sender drops or after a quiet spell.
     pub fn js_ls(&self, runtime: std::path::PathBuf, dir: std::path::PathBuf, packages: Vec<String>) -> tokio::sync::mpsc::UnboundedSender<JsLsReq> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1072,6 +1096,36 @@ mod tests {
         assert_eq!(ttl.get_document("collation").unwrap().get_str("locale"), Ok("fr"));
         assert!(ttl.get("v").is_none());
         assert!(ix("partial").get_document("partialFilterExpression").is_ok());
+    }
+
+    /// Needs a replica set: QUARRY_TEST_MONGO_RS, like mongodb://localhost:27018/?directConnection=true.
+    #[test]
+    fn live_watch_streams_changes_until_stopped() {
+        let Ok(uri) = std::env::var("QUARRY_TEST_MONGO_RS") else { return };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let w = Worker::new(tx, eframe::egui::Context::default());
+        let t = w.rt.block_on(async {
+            let client = Client::with_uri_str(&uri).await.unwrap();
+            let t = Target { client, db: "quarry_test".into(), coll: "watch".into(), timeout: Duration::from_secs(5) };
+            t.c().drop().await.unwrap();
+            t
+        });
+        let (stop, cancel) = tokio::sync::oneshot::channel();
+        w.watch(1, t.clone(), cancel);
+        // The stream starts asynchronously; keep writing until its first event arrives.
+        let ev = (0..50).find_map(|i| {
+            w.rt.block_on(async { t.c().insert_one(doc! { "_id": i, "n": i }).await.unwrap() });
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(Msg::WatchEvent { doc, .. }) => Some(doc),
+                _ => None,
+            }
+        });
+        let ev = ev.expect("a change event");
+        assert_eq!(ev.get_str("operationType"), Ok("insert"));
+        assert!(ev.get_document("fullDocument").is_ok());
+        drop(stop);
+        let done = std::iter::from_fn(|| rx.recv_timeout(Duration::from_secs(5)).ok()).find(|m| matches!(m, Msg::WatchDone { .. }));
+        assert!(matches!(done, Some(Msg::WatchDone { req: 1, res: Ok(()) })));
     }
 
     #[test]
