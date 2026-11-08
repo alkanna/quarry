@@ -45,6 +45,7 @@ use state::*;
 use query::*;
 use tools::*;
 use tree::*;
+use users::*;
 
 const SYSTEM_DBS: [&str; 3] = ["admin", "config", "local"];
 /// Columns shown before the user picks their own; drawing every field of a wide collection is slow.

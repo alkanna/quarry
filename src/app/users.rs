@@ -14,6 +14,24 @@ pub(super) fn parse_roles(text: &str, default_db: &str) -> Vec<Bson> {
         .collect()
 }
 
+/// Whether the server refused for lack of a privilege, in its own or Atlas's wording.
+pub(super) fn denied(e: &str) -> bool {
+    e.contains("(Unauthorized)") || e.contains("not authorized") || e.contains("is not allowed to do action")
+}
+
+/// A server error without the command it echoes back, which can run to several lines.
+fn short_err(e: &str) -> &str {
+    e.find(" to execute command").map_or(e, |i| &e[..i])
+}
+
+/// The logged-in user from a connectionStatus answer, which needs no privilege: the fallback when
+/// usersInfo is refused.
+pub(super) fn self_users(status: &Document) -> Vec<Document> {
+    let auth = status.get_document("authInfo").cloned().unwrap_or_default();
+    let roles = auth.get_array("authenticatedUserRoles").cloned().unwrap_or_default();
+    auth.get_array("authenticatedUsers").into_iter().flatten().filter_map(Bson::as_document).map(|u| doc! { "user": u.get_str("user").unwrap_or_default(), "db": u.get_str("db").unwrap_or_default(), "roles": roles.clone() }).collect()
+}
+
 pub(super) fn roles_text(user: &Document) -> String {
     user.get_array("roles")
         .map(|a| a.iter().filter_map(|r| r.as_document()).map(|r| format!("{}@{}", r.get_str("role").unwrap_or_default(), r.get_str("db").unwrap_or_default())).collect::<Vec<_>>().join(", "))
@@ -42,6 +60,7 @@ impl App {
                     if ui.button("⟳ Refresh").clicked() {
                         u.users = None;
                         u.roles = None;
+                        u.self_only = false;
                         cmds.push(("*reload".into(), Document::new(), String::new()));
                     }
                 });
@@ -52,6 +71,9 @@ impl App {
                     unlock = ui.button("Unlock…").clicked();
                 });
             }
+            if u.self_only {
+                ui.label(RichText::new("This user may not list other users (it needs viewUser on every database), so only your own user is shown.").size(TXT_SMALL).color(WARNING()));
+            }
             if atlas {
                 ui.label(RichText::new("Atlas manages database users in its web console; it refuses adding, changing or dropping users from here, and may list none.").size(TXT_SMALL).color(WARNING()));
             }
@@ -61,7 +83,7 @@ impl App {
                         spin(ui);
                     }
                     Some(Err(e)) => {
-                        ui.label(RichText::new(format!("Could not list users: {e}")).color(ALERT()));
+                        ui.add(egui::Label::new(RichText::new(format!("Could not list users: {}", short_err(e))).color(ALERT())).wrap()).on_hover_text(e);
                     }
                     Some(Ok(list)) => {
                         if list.is_empty() {
@@ -72,7 +94,6 @@ impl App {
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new(&name).monospace().color(BRIGHT()));
                                 ui.label(RichText::new(format!("@{db}")).monospace().color(FAINT()));
-                                ui.label(RichText::new(roles_text(user)).monospace().size(TXT_SMALL).color(C_STRING()));
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     if ui.add_enabled(writable, danger_button("Drop…")).clicked() {
                                         drop_user = Some((db.clone(), name.clone()));
@@ -82,6 +103,8 @@ impl App {
                                     }
                                 });
                             });
+                            // On its own line and wrapped: a user can hold dozens of roles.
+                            ui.add(egui::Label::new(RichText::new(roles_text(user)).monospace().size(TXT_SMALL).color(C_STRING())).wrap());
                             if let Some((en, edb, pwd, roles)) = &mut u.edit {
                                 if *en == name && *edb == db {
                                     egui::Frame::new().fill(pal().well).corner_radius(R_MD).inner_margin(8).show(ui, |ui| {
@@ -139,8 +162,11 @@ impl App {
                     None => {
                         spin(ui);
                     }
+                    Some(Err(e)) if denied(e) => {
+                        ui.label(RichText::new("This user may not list custom roles.").color(MUTED()));
+                    }
                     Some(Err(e)) => {
-                        ui.label(RichText::new(format!("Could not list roles: {e}")).color(ALERT()));
+                        ui.add(egui::Label::new(RichText::new(format!("Could not list roles: {}", short_err(e))).color(ALERT())).wrap()).on_hover_text(e);
                     }
                     Some(Ok(list)) if list.is_empty() => {
                         ui.label(RichText::new("No custom roles; built-in roles like read, readWrite and dbAdmin can be given to users.").color(MUTED()));
@@ -192,6 +218,17 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refused_listing_falls_back_to_the_logged_in_user() {
+        let e = "Command failed: Error code 13 (Unauthorized): not authorized on admin to execute command { usersInfo: { forAllDBs: true }, $db: \"admin\" }";
+        assert!(denied(e));
+        assert_eq!(short_err(e), "Command failed: Error code 13 (Unauthorized): not authorized on admin");
+        let status = doc! { "authInfo": { "authenticatedUsers": [{ "user": "khiman", "db": "admin" }], "authenticatedUserRoles": [{ "role": "atlasAdmin", "db": "admin" }] } };
+        let me = self_users(&status);
+        assert_eq!(me.len(), 1);
+        assert_eq!(roles_text(&me[0]), "atlasAdmin@admin");
+    }
 
     #[test]
     fn roles() {
