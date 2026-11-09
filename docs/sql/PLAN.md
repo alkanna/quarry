@@ -10,7 +10,7 @@ Update this list when a step lands. Each step is reviewed before it is ticked.
 
 **v1**
 - [ ] 1. sqlx dependency, `db::sql::Engine` and `Addr` (done: Cargo.toml, src/db/sql/mod.rs, tests), `ConnMeta.engine`, connection form B
-- [ ] 2. SSH plain port-forward mode in src/ssh.rs
+- [x] 2. SSH plain port-forward mode in src/ssh.rs (`ssh::open(.., Some((host, port)))`, connect to 127.0.0.1:tunnel.port)
 - [ ] 3. `db/sql/{lex,value}.rs` and `Dialect` with unit tests
 - [ ] 4. SQL worker, new `Msg` variants, live tests (`QUARRY_TEST_MYSQL`)
 - [ ] 5. state, tabs, poll and sidebar wiring
