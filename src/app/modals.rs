@@ -612,8 +612,9 @@ impl App {
                     }
                     let mut pick = if enter { items.get(*sel).map(|x| x.2.clone()) } else { None };
                     ui.add_space(4.0);
-                    // Full width, so the scrollbar sits on the dialog edge rather than after the longest row.
-                    egui::ScrollArea::vertical().max_height(360.0).auto_shrink([false, true]).show(ui, |ui| {
+                    // Full width, so the scrollbar sits on the dialog edge rather than after the longest row. The
+                    // dialog sizes itself from its content, so without a minimum the list starts scrolling at egui's 64 px.
+                    egui::ScrollArea::vertical().max_height(360.0).min_scrolled_height(360.0).auto_shrink([false, true]).show(ui, |ui| {
                         if items.is_empty() {
                             ui.label(RichText::new("No matches").color(MUTED()));
                         }
