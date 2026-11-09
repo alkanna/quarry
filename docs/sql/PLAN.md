@@ -35,6 +35,13 @@ Update this list when a step lands. Each step is reviewed before it is ticked.
 
 **v2**, driven end to end by session "attach-shell-connections" (it owns feat/mysql merges for v2; item 1 on branch `shell-attach`) (designs already exist for all of these except the connection form Advanced tab; see Designs): attached connections in the shell (first: the user asked for it; design page "Shell · attached connections", plan section "Attached connections in the shell"), structure editing with the ALTER preview (column editor dialog on the Structure page), relations and FKs (create, drop, click a FK cell to open the row), triggers editing, import and export (CSV and SQL dump, streamed), create and drop database and table (typed confirm), connection form Advanced tab (time zone, SQL mode, init command, timeouts: needs a quick design first).
 
+**v2 definition of done** (the user asked that v2 is not considered finished before all of this holds):
+1. All seven v2 items are on feat/mysql and ticked here; the Advanced tab design was shown to and approved by the user before it was built.
+2. Every item that writes, and the attached-connections relay, had an independent opus review; every finding is fixed with its failing input as a test, or marked "won't fix" here with the reason.
+3. On the final head: `cargo check --all-targets` with no warnings; full `cargo test`; live tests against both mysql:8.4 and mariadb:11 (QUARRY_TEST_MYSQL, QUARRY_TEST_MARIADB), shell live tests with Bun included; release build; `python3 bench.py --quick` with no regression against the numbers recorded here; screenshots of every new view in both themes compared with the designs.
+4. One final whole-branch opus review of all v2 commits together, its findings fixed.
+5. No worktrees, agent branches or test containers left; this file has a short v2 summary and its known limits.
+
 **v3**: users and privileges, process list, server variables, console log.
 
 ## How this work is run
