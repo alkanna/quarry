@@ -42,7 +42,37 @@ Update this list when a step lands. Each step is reviewed before it is ticked.
 - [x] 5. Import and export: built 16bb646, opus review found 13 issues, all fixed in 90ff5fc (see "Review (16bb646)").
 - [x] 6. Create and drop database and table: built ee27114 on `create-drop`, rebased onto feat/mysql as 339c804 on `create-fix`; opus review found 6 issues (9 points), all fixed in 305b250 (see "Review (ee27114)"). New database and New table dialogs with the statement preview, typed confirmation for drop database, drop table, drop view and empty table (`Danger::SqlDrop`), the "+" in the sidebar, undo of a create while the object is still empty (`SqlUndo::CreatedDb`, `CreatedTable`), everything disabled while locked. Statement builders and live tests in src/db/sql/create.rs, dialogs in src/app/sql_create.rs.
 - [ ] 7. Connection form Advanced tab: design approved by the user on 2026-11-09 (page "Connection · Advanced tab", frames 12544 and 12617, commit 2f71228); build not started.
-- [ ] Bench baseline: no numbers were recorded before v2; measure `python3 bench.py --quick` on 4abe8c6 (last commit before v2 code) on a quiet machine and compare with the final head.
+- [ ] Bench baseline measured on 4abe8c6 (last commit before v2), `python3 bench.py --quick`, release build, 2026-11-09; compare the final head on a quiet machine (no agents compiling):
+
+| scenario | rss_mb | footprint_mb | cpu_avg | cpu_max |
+|---|---|---|---|---|
+| demo | 102.1 | 32.0 | 0.0 | 0.0 |
+| 1,000 docs | 138.6 | 45.0 | 0.1 | 0.9 |
+| 10,000 docs | 436.2 | 234.0 | 0.3 | 2.7 |
+| 50 docs x 1 MB | 224.4 | 122.0 | 0.0 | 0.2 |
+| sql content 1,000 rows | 120.9 | 49.0 | 0.0 | 0.0 |
+| sql content 10,000 rows | 237.1 | 50.0 | 0.0 | 0.0 |
+| sql content 200 rows x 100 KB | 169.5 | 97.0 | 0.0 | 0.0 |
+| sql query 1,000 rows | 104.5 | 32.0 | 0.0 | 0.0 |
+| sql rules | 102.9 | 30.0 | 0.0 | 0.0 |
+| sql grouped | 102.4 | 30.0 | 0.0 | 0.0 |
+| sql structure | 102.5 | 30.0 | 0.0 | 0.0 |
+| sql shell | 103.0 | 30.0 | 0.0 | 0.0 |
+| scenario | wall_s | cpu_s | peak_rss_mb | frame_p50 | frame_p95 | frame_max |
+|---|---|---|---|---|---|---|
+| demo | 0.6 | 0.4 | 166.2 | 0.8 | 2.8 | 160.4 |
+| 1,000 docs | 0.5 | 0.5 | 196.9 | 1.1 | 3.0 | 23.4 |
+| 10,000 docs | 1.8 | 1.8 | 494.5 | 3.8 | 4.7 | 22.6 |
+| 50 docs x 1 MB | 1.2 | 1.2 | 278.8 | 0.8 | 2.2 | 19.5 |
+| sql content 1,000 rows | 0.4 | 0.4 | 178.4 | 1.0 | 2.7 | 18.5 |
+| sql content 10,000 rows | 1.0 | 1.0 | 294.9 | 3.5 | 4.3 | 23.3 |
+| sql content 200 rows x 100 KB | 0.4 | 0.4 | 207.9 | 1.0 | 2.5 | 20.1 |
+| sql query 1,000 rows | 0.3 | 0.3 | 163.7 | 0.6 | 2.1 | 24.6 |
+| sql rules | 0.3 | 0.3 | 160.8 | 0.7 | 2.5 | 20.4 |
+| sql grouped | 0.4 | 0.3 | 158.3 | 0.7 | 2.8 | 19.2 |
+| sql structure | 0.3 | 0.3 | 157.8 | 0.5 | 2.4 | 17.1 |
+| sql shell | 0.3 | 0.3 | 159.0 | 0.5 | 2.2 | 17.9 |
+
 
 **v2 definition of done** (the user asked that v2 is not considered finished before all of this holds):
 1. All seven v2 items are on feat/mysql and ticked here; the Advanced tab design was shown to and approved by the user before it was built.
