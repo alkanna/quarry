@@ -227,6 +227,40 @@ pub(crate) fn field_info<'a>(docs: impl IntoIterator<Item = impl Into<DocRef<'a>
         .collect()
 }
 
+/// The documents' shape as a TypeScript type, for the Shell's language server. Text fields list
+/// their known values, kept open with `string & {}`, so a quote after a field's colon offers them.
+pub(crate) fn ts_type(fields: &Fields) -> String {
+    let mut keys: Vec<&str> = fields.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    let mut kids: HashMap<&str, Vec<&str>> = HashMap::new();
+    for k in keys {
+        kids.entry(k.rfind('.').map_or("", |i| &k[..i])).or_default().push(k);
+    }
+    fn texts(vals: &[Bson]) -> Option<String> {
+        let v: Vec<String> = vals.iter().filter_map(Bson::as_str).map(|s| serde_json::Value::from(s).to_string()).collect();
+        (!v.is_empty()).then(|| format!("{} | (string & {{}})", v.join(" | ")))
+    }
+    fn obj(fields: &Fields, kids: &HashMap<&str, Vec<&str>>, parent: &str) -> Option<String> {
+        let props: Vec<String> = kids.get(parent)?.iter().map(|p| {
+            let i = &fields[*p];
+            let ty = match i.kind {
+                "string" => texts(&i.values).unwrap_or_else(|| "string".into()),
+                "int" | "long" | "double" => "number".into(),
+                "bool" => "boolean".into(),
+                "date" => "Date".into(),
+                "objectId" => "import(\"mongodb\").ObjectId".into(),
+                "object" => obj(fields, kids, p).unwrap_or_else(|| "any".into()),
+                "array" => obj(fields, kids, p).or_else(|| texts(&i.values)).map_or_else(|| "any[]".into(), |t| format!("Array<{t}>")),
+                _ => "any".into(),
+            };
+            format!("{}?: {ty}", db::shell_key(&p[p.rfind('.').map_or(0, |i| i + 1)..]))
+        }).collect();
+        // Open to fields the loaded page did not show, like ones a projection left out.
+        Some(format!("{{ {}; [key: string]: any }}", props.join("; ")))
+    }
+    obj(fields, &kids, "").unwrap_or_else(|| "import(\"mongodb\").Document".into())
+}
+
 /// Whether a value is worth suggesting: short text, numbers and booleans, as `field_info` keeps.
 pub(crate) fn suggestible(v: &Bson) -> bool {
     match v {
@@ -399,6 +433,7 @@ pub(crate) fn suggest(before: &str, kind: FieldKind, paths: &[String], fields: &
             (false, v)
         }
     } else if kind == FieldKind::Query
+        && quote.is_none()
         && colon_field.is_some_and(|f| !f.is_empty() && (info.map_or(!paths.iter().any(|p| p == f) && date_like(f), |i| i.kind == "date")))
     {
         // A date field lists date shortcuts and range templates as soon as the colon is typed.
@@ -745,27 +780,115 @@ pub(crate) fn in_query_args(before: &str) -> bool {
     before.matches('(').count() > before.matches(')').count() && lead.trim_end().ends_with(['{', ',', ':'])
 }
 
-pub(crate) fn suggest_js(before: &str, paths: &[String], colls: &[String], pkgs: &[String]) -> Option<(usize, Vec<Sug>)> {
+/// Where the end of a script sits: in a string that is a query value, in another string, a regex
+/// or a comment, or in code.
+#[derive(PartialEq)]
+pub(crate) enum JsSpot {
+    QueryString,
+    Inert,
+    Code,
+}
+
+/// Reads the caret's line only: strings and comments rarely span lines, template literals aside.
+pub(crate) fn js_spot(before: &str) -> JsSpot {
+    let start = before.rfind('\n').map_or(0, |i| i + 1);
+    // `prev` is the last character outside spaces: a slash after an operator or bracket opens a
+    // regex, after a name or a number it divides.
+    let (mut open, mut esc, mut prev) = (None, false, '(');
+    let mut chars = before[start..].char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        match open {
+            Some(_) if esc => esc = false,
+            Some(_) if c == '\\' => esc = true,
+            Some((_, q)) if c == q => open = None,
+            Some(_) => {}
+            None if c == '/' && chars.peek().is_some_and(|(_, n)| *n == '/') => return JsSpot::Inert,
+            None if c == '/' && "(,=:[!&|?{};+-*%<>~^".contains(prev) => open = Some((i, '/')),
+            None if matches!(c, '"' | '\'' | '`') => open = Some((i, c)),
+            None => {}
+        }
+        if !c.is_whitespace() {
+            prev = c;
+        }
+    }
+    match open {
+        Some((q, '"' | '\'')) if in_query_args(&before[..start + q]) => JsSpot::QueryString,
+        Some(_) => JsSpot::Inert,
+        None => JsSpot::Code,
+    }
+}
+
+/// Byte index of the `(` still open at the end of `s`.
+fn open_paren(s: &str) -> Option<usize> {
+    let mut depth = 0;
+    s.char_indices().rev().find(|(_, c)| {
+        match c {
+            ')' => depth += 1,
+            '(' if depth == 0 => return true,
+            '(' => depth -= 1,
+            _ => {}
+        }
+        false
+    }).map(|(i, _)| i)
+}
+
+/// The collection a call is made on: `orders` in `orders.find`, `x` in `db.collection("x").find`.
+fn call_target(call: &str) -> Option<&str> {
+    let recv = call.trim_end_matches(is_js_ident).strip_suffix('.')?;
+    let name = match recv.strip_suffix(')') {
+        Some(inner) => {
+            let inner = inner.trim_end();
+            let q = inner.chars().last().filter(|c| matches!(c, '"' | '\''))?;
+            let inner = &inner[..inner.len() - 1];
+            &inner[inner.rfind(q)? + 1..]
+        }
+        None => &recv[recv.trim_end_matches(is_js_ident).len()..],
+    };
+    (!name.is_empty()).then_some(name)
+}
+
+/// Suggestions in the Shell. `known` holds the fields of the collections loaded in tabs of this
+/// database; a query object takes those of the collection its call is made on.
+pub(crate) fn suggest_js(before: &str, known: &[(String, std::sync::Arc<Fields>)], colls: &[String], pkgs: &[String]) -> Option<(usize, Vec<Sug>)> {
     let ident = is_js_ident;
+    // Inside a string only a query value has suggestions here; the language server adds what it knows.
+    let quoted = match js_spot(before) {
+        JsSpot::QueryString => true,
+        JsSpot::Inert => return None,
+        JsSpot::Code => false,
+    };
     let tok_start = before.char_indices().rev().take_while(|(_, c)| ident(*c)).last().map(|(i, _)| i).unwrap_or(before.len());
     let token = &before[tok_start..];
     let lead = &before[..tok_start];
     let method = |m: &&str| Sug { back: 0, text: m.to_string(), note: "method", insert: format!("{m}()"), caret: m.len() + 1 };
-    let mut items: Vec<Sug> = if let Some(obj) = lead.strip_suffix('.') {
+    let mut items: Vec<Sug> = if quoted || in_query_args(before) {
+        // Inside a call's arguments: the same field, operator and value suggestions as the Query box.
+        // Only the open call's arguments are passed, so braces of the function around the call
+        // do not count as query nesting.
+        let open = open_paren(before);
+        let args = open.map_or(before, |i| &before[i + 1..]);
+        let empty = Fields::new();
+        let target = open.and_then(|i| call_target(&before[..i]));
+        let fields: &Fields = target.and_then(|c| known.iter().find(|k| k.0 == c)).map_or(&empty, |k| &k.1);
+        let mut paths: Vec<String> = fields.keys().cloned().collect();
+        paths.sort_unstable();
+        // `~"..."` only means something to the Query box's parser; in JavaScript `~` is bitwise NOT,
+        // so text matches become regex literals.
+        let (n, mut items) = suggest(args, FieldKind::Query, &paths, fields)?;
+        // Date shortcuts like #today are Query box syntax, not JavaScript.
+        items.retain(|x| !x.insert.starts_with(['#', '@']));
+        for x in &mut items {
+            if let Some(i) = x.insert.find("~\"\"") {
+                x.insert.replace_range(i..i + 3, "//i");
+                x.caret -= 1;
+            }
+        }
+        return (!items.is_empty()).then_some((n, items));
+    } else if let Some(obj) = lead.strip_suffix('.') {
         let name_of = |s: &str| s[s.char_indices().rev().take_while(|(_, c)| ident(*c)).last().map(|(i, _)| i).unwrap_or(s.len())..].to_string();
         let list: &[&str] = if let Some(inner) = obj.strip_suffix(')') {
-            // Find the call this ')' closes and look at its name: db.collection(), find(), aggregate()...
-            let mut depth = 0;
-            let open = inner.char_indices().rev().find(|(_, c)| {
-                match c {
-                    ')' => depth += 1,
-                    '(' if depth == 0 => return true,
-                    '(' => depth -= 1,
-                    _ => {}
-                }
-                false
-            });
-            match open.map(|(i, _)| name_of(&inner[..i])).as_deref() {
+            // The call this ')' closes decides: db.collection(), find(), aggregate()...
+            match open_paren(inner).map(|i| name_of(&inner[..i])).as_deref() {
                 Some("collection") => &COLL_METHODS,
                 Some("find" | "aggregate" | "sort" | "limit" | "skip" | "project" | "batchSize" | "hint" | "collation") => &CURSOR_METHODS,
                 _ => &[],
@@ -781,31 +904,6 @@ pub(crate) fn suggest_js(before: &str, paths: &[String], colls: &[String], pkgs:
         list.iter().map(method).collect()
     } else if token.is_empty() {
         return None;
-    } else if in_query_args(before) {
-        // Inside a call's arguments: the same field and operator suggestions as the Query box.
-        // Only the open call's arguments are passed, so braces of the function around the call
-        // do not count as query nesting.
-        let mut depth = 0;
-        let open = before.char_indices().rev().find(|(_, c)| {
-            match c {
-                ')' => depth += 1,
-                '(' if depth == 0 => return true,
-                '(' => depth -= 1,
-                _ => {}
-            }
-            false
-        });
-        let args = open.map_or(before, |(i, _)| &before[i + 1..]);
-        // `~"..."` only means something to the Query box's parser; in JavaScript `~` is bitwise NOT,
-        // so text matches become regex literals.
-        let (n, mut items) = suggest(args, FieldKind::Query, paths, &Fields::new())?;
-        for x in &mut items {
-            if let Some(i) = x.insert.find("~\"\"") {
-                x.insert.replace_range(i..i + 3, "//i");
-                x.caret -= 1;
-            }
-        }
-        return Some((n, items));
     } else {
         let mut v: Vec<Sug> = JS_KEYWORDS.iter().map(|k| Sug { back: 0, text: k.to_string(), note: "keyword", insert: format!("{k} "), caret: k.len() + 1 }).collect();
         v.extend(JS_GLOBALS.iter().map(|g| match *g {
@@ -884,27 +982,27 @@ mod tests {
     #[test]
     fn shell_autocomplete() {
         let colls = vec!["orders".to_string(), "users".to_string()];
-        let paths = vec!["status".to_string(), "total".to_string()];
-        let (_, s) = suggest_js("return await db.coll", &paths, &colls, &[]).unwrap();
+        let known = [("orders".to_string(), std::sync::Arc::new(field_info(&[mongodb::bson::doc! { "status": "paid", "total": 1 }])))];
+        let (_, s) = suggest_js("return await db.coll", &known, &colls, &[]).unwrap();
         assert_eq!((s[0].text.as_str(), s[0].insert.as_str()), ("collection", "collection()"));
         // Text shortcuts become regex literals in JavaScript.
-        let (_, s) = suggest_js("await orders.find({ status: cont", &paths, &colls, &[]).unwrap();
+        let (_, s) = suggest_js("await orders.find({ status: cont", &known, &colls, &[]).unwrap();
         assert_eq!((s[0].insert.as_str(), s[0].caret), ("//i", 1));
-        let (_, s) = suggest_js("await orders.upd", &paths, &colls, &[]).unwrap();
+        let (_, s) = suggest_js("await orders.upd", &known, &colls, &[]).unwrap();
         assert!(s[0].text.starts_with("update"));
-        let (_, s) = suggest_js("await orders.find({}).", &paths, &colls, &[]).unwrap();
+        let (_, s) = suggest_js("await orders.find({}).", &known, &colls, &[]).unwrap();
         assert!(s.iter().any(|x| x.text == "toArray"));
-        let (_, s) = suggest_js("db.collection('x').", &paths, &colls, &[]).unwrap();
+        let (_, s) = suggest_js("db.collection('x').", &known, &colls, &[]).unwrap();
         assert!(s.iter().any(|x| x.text == "find"));
-        let (_, s) = suggest_js("await orders.find({ sta", &paths, &colls, &[]).unwrap();
+        let (_, s) = suggest_js("await orders.find({ sta", &known, &colls, &[]).unwrap();
         assert_eq!(s[0].text, "status");
-        let (_, s) = suggest_js("async function run() {\n  return await orders.find({ sta", &paths, &colls, &[]).unwrap();
+        let (_, s) = suggest_js("async function run() {\n  return await orders.find({ sta", &known, &colls, &[]).unwrap();
         assert_eq!(s[0].text, "status");
-        let (_, s) = suggest_js("async function run() {\n  return await orders.find({ total: { $g", &paths, &colls, &[]).unwrap();
+        let (_, s) = suggest_js("async function run() {\n  return await orders.find({ total: { $g", &known, &colls, &[]).unwrap();
         assert_eq!(s[0].note, "operator");
-        let (_, s) = suggest_js("  ord", &paths, &colls, &[]).unwrap();
+        let (_, s) = suggest_js("  ord", &known, &colls, &[]).unwrap();
         assert_eq!(s[0].text, "orders");
-        let (_, s) = suggest_js("  aw", &paths, &colls, &[]).unwrap();
+        let (_, s) = suggest_js("  aw", &known, &colls, &[]).unwrap();
         assert_eq!(s[0].insert, "await ");
     }
 
@@ -951,6 +1049,35 @@ mod tests {
         assert_eq!(s[0].insert, "sku: ");
         // No value shortcuts after an operator's colon.
         assert!(!names("{ n: { $gt: ex").contains(&"exists".into()));
+        // The Shell gets the same values and kind-specific shortcuts inside find(), in JavaScript form.
+        let users = field_info(&[mongodb::bson::doc! { "role": "admin", "email": "a.b@c.io" }]);
+        let known = [("orders".to_string(), std::sync::Arc::new(dates.clone())), ("users".to_string(), std::sync::Arc::new(users))];
+        let js = |b: &str| suggest_js(b, &known, &[], &[]).map(|(_, s)| s.into_iter().map(|x| x.insert).collect::<Vec<_>>()).unwrap_or_default();
+        assert_eq!(js("orders.find({ status: "), ["\"active\""]);
+        assert!(js("orders.find({ format: \"").contains(&"pdf".into()));
+        assert!(js("orders.find({ status: con").contains(&"//i".into()) && !js("orders.find({ n: con").contains(&"//i".into()));
+        assert!(js("orders.find({ createdAt: ").iter().all(|x| !x.starts_with(['#', '@'])) && !js("orders.find({ createdAt: ").is_empty());
+        assert!(js("log(\"sta").is_empty());
+        // No date templates inside a string: they are code.
+        assert!(js("orders.find({ createdAt: \"").is_empty());
+        // Each call takes its own collection's fields, also through db.collection().
+        assert_eq!(js("users.find({ role: "), ["\"admin\""]);
+        assert_eq!(js("db.collection(\"users\").find({ role: "), ["\"admin\""]);
+        assert!(js("users.find({ status: ").is_empty() && js("unknown.find({ status: ").is_empty());
+        // A dot inside a value is text, not a method call.
+        assert_eq!(js("users.find({ email: \"a."), ["a.b@c.io"]);
+        assert!(js("users.find({ email: \"db.").is_empty());
+        // Strings that are not query values, comments and regexes are left alone.
+        assert!(js_spot("console.log(\"some text") == JsSpot::Inert && js_spot("x // it's") == JsSpot::Inert);
+        assert!(js_spot("users.find({ name: /it's/, sta") == JsSpot::Code && js_spot("a / b, 'x") == JsSpot::Inert);
+        assert!(js_spot("users.find({ role: 'ad") == JsSpot::QueryString);
+        assert_eq!(js("users.find({ name: /it's/, ro"), ["role: "]);
+        // And the language server gets the documents' shape, text fields with their values.
+        let ty = ts_type(&dates);
+        assert!(ty.contains("status?: \"active\" | (string & {})") && ty.contains("tags?: Array<\"a\" | \"b\" | (string & {})>"), "{ty}");
+        assert!(ty.contains("createdAt?: Date") && ty.contains("n?: number") && ty.contains("format?: \"pdf\" | \"say \\\"hi\\\"\""), "{ty}");
+        let nested = ts_type(&field_info(&[mongodb::bson::doc! { "items": [{ "sku": "A" }], "my-key": { "x": 1 } }]));
+        assert_eq!(nested, "{ items?: Array<{ sku?: \"A\" | (string & {}); [key: string]: any }>; \"my-key\"?: { x?: number; [key: string]: any }; [key: string]: any }");
         // A value picked inside single quotes is escaped for them.
         let docs2 = [mongodb::bson::doc! { "s": "it's" }];
         let (_, s) = suggest("{ s: 'it", FieldKind::Query, &paths, &field_info(&docs2)).unwrap();

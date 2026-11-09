@@ -374,7 +374,7 @@ impl App {
         vals.truncate(db::FIELD_VALUES_MAX);
         let found = HashMap::from([(path, vals)]);
         for t in self.tabs.iter_mut().filter(|t| t.coll_key() == key) {
-            merge_values(&mut t.field_info, &found);
+            merge_values(Arc::make_mut(&mut t.field_info), &found);
         }
         // Values found by what was typed are kept for the session only, so the file holds samples.
         if prefix.is_none() {

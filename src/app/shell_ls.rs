@@ -21,6 +21,9 @@ pub(super) struct JsState {
     fails: u32,
     /// Hash of the collections and packages whose declarations the server holds.
     globals: Option<u64>,
+    /// The field info the server's collection types were built from. Holding it keeps each
+    /// pointer unique, so pointer equality means unchanged.
+    typed: Vec<(String, Arc<Fields>)>,
     /// Newest completion request.
     complete: Option<Pending>,
     /// Server items of the list on screen, in list order, to ask for the selected one's docs.
@@ -84,7 +87,7 @@ fn word_span(code: &str, at: usize) -> Option<(usize, usize)> {
     Some((start, at + code[byte..].chars().take_while(|c| is_js_ident(*c)).count()))
 }
 
-/// Hash of what the globals declarations are built from.
+/// Hash of what the globals declarations are built from, besides the collection types.
 fn globals_key(colls: &[String], packages: &[String]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -110,6 +113,19 @@ fn kind_note(kind: u32) -> &'static str {
 }
 
 impl App {
+    /// Fields of the collections loaded in tabs of the current tab's database, the current tab's
+    /// first so its fields win for its collection.
+    pub(super) fn db_fields(&self) -> Vec<(String, Arc<Fields>)> {
+        let cur = &self.tabs[self.cur];
+        let mut out: Vec<(String, Arc<Fields>)> = Vec::new();
+        for t in std::iter::once(cur).chain(&self.tabs) {
+            if t.sel.conn == cur.sel.conn && t.sel.db == cur.sel.db && !t.field_info.is_empty() && !out.iter().any(|o| o.0 == t.sel.coll) {
+                out.push((t.sel.coll.clone(), t.field_info.clone()));
+            }
+        }
+        out
+    }
+
     /// Sends a request about character `at` of the current script, starting the server first if
     /// needed. Returns the request number, or None when the server is off or cannot start.
     fn js_send(&mut self, ask: db::JsAsk, at: usize, colls: &[String]) -> Option<u64> {
@@ -123,9 +139,17 @@ impl App {
         }
         let names: Vec<String> = self.prefs.shell_packages.iter().map(|p| db::package_spec(p).0).collect();
         let key = globals_key(colls, &names);
-        // Rebuilt and sent only when the collections or packages changed.
-        let globals = (self.js.globals != Some(key)).then(|| db::js_globals(colls, &names, package_ident, &JS_RESERVED));
-        self.js.globals = Some(key);
+        // Collections loaded in a tab of this database are typed from their fields, so the server
+        // completes their fields and text values. Field info is replaced on every change, so the
+        // types are rebuilt only when a pointer differs.
+        let known = self.db_fields();
+        let same = known.len() == self.js.typed.len() && known.iter().zip(&self.js.typed).all(|(a, b)| a.0 == b.0 && Arc::ptr_eq(&a.1, &b.1));
+        // Rebuilt and sent only when something changed; the server keeps the last one.
+        let globals = (self.js.globals != Some(key) || !same).then(|| {
+            let schemas = known.iter().map(|(c, f)| (c.clone(), ts_type(f))).collect();
+            db::js_globals(colls, &schemas, &names, package_ident, &JS_RESERVED)
+        });
+        (self.js.globals, self.js.typed) = (Some(key), known);
         let code = self.tabs[self.cur].shell.code.clone();
         let (line, col) = db::lsp_pos(&code, at);
         self.req += 1;
@@ -167,8 +191,8 @@ impl App {
     }
 
     /// After an edit: parameter hints (the server has none outside a call), and suggestions after
-    /// a dot or inside a name. In a query object the built-in field and operator suggestions stay,
-    /// as TypeScript knows no fields.
+    /// a dot, inside a name or inside a string. In a query object the built-in field, operator and
+    /// value suggestions stay, as they also cover dotted paths and the value shortcuts.
     fn js_ask(&mut self, id: egui::Id, caret: usize, colls: &[String]) {
         self.js.complete = None;
         self.js.resolve = None;
@@ -178,7 +202,13 @@ impl App {
         self.js.sig = Some(Sig { caret, req, doc });
         let before: String = self.tabs[self.cur].shell.code.chars().take(caret).collect();
         let token = before.chars().rev().take_while(|c| is_js_ident(*c)).count();
-        if (token == 0 && !before.ends_with('.')) || in_query_args(&before) {
+        let ask = match js_spot(&before) {
+            // A query value's string: the server knows the field's values from its type.
+            JsSpot::QueryString => true,
+            JsSpot::Inert => false,
+            JsSpot::Code => (token > 0 || before.ends_with('.')) && !in_query_args(&before),
+        };
+        if !ask {
             return;
         }
         let tab = self.cur;

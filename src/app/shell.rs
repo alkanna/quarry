@@ -202,8 +202,8 @@ impl App {
         }
         let mut new_pkg = std::mem::take(&mut self.new_pkg);
         let colls: Vec<String> = self.t().and_then(|t| self.conn(t.sel.conn).and_then(|c| c.dbs.iter().find(|d| d.0 == t.sel.db)).and_then(|d| d.1.clone())).unwrap_or_default();
+        let known = self.db_fields();
         let (t, ac) = (&mut self.tabs[self.cur], &mut self.ac);
-        let paths = t.paths.clone();
         if t.shell.code.is_empty() {
             t.shell.code = default_script(&coll);
         }
@@ -224,7 +224,7 @@ impl App {
             let id = ui.make_persistent_id("shell-editor");
             // Read before the list consumes it, so a late server answer cannot reopen a dismissed list.
             let esc = ui.input(|i| i.key_pressed(Key::Escape));
-            let (out, picked) = ac_field(ui, id, &mut t.shell.code, ac, &|b| suggest_js(b, &paths, &colls, &pkg_names), |ui, text, _open| {
+            let (out, picked) = ac_field(ui, id, &mut t.shell.code, ac, &|b| suggest_js(b, &known, &colls, &pkg_names), |ui, text, _open| {
                 egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(10).lock_focus(true).layouter(&mut js_layout).show(ui)
             });
             let caret = out.cursor_range.filter(|r| r.is_empty()).map(|r| r.primary.index.0);

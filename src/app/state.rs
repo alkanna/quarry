@@ -160,7 +160,9 @@ pub(super) struct Tab {
     /// Every dotted field path seen in the loaded documents, for autocomplete.
     pub(super) paths: Vec<String>,
     /// Main kind and frequent values of each path in the loaded documents, for Query suggestions.
-    pub(super) field_info: crate::ui::complete::Fields,
+    /// Shared with the Shell, which holds the Arcs its types were built from: a change through
+    /// Arc::make_mut then makes a new pointer, so the Shell can tell a change by identity.
+    pub(super) field_info: Arc<crate::ui::complete::Fields>,
     pub(super) count: u64,
     pub(super) ms: u128,
     pub(super) req: u64,

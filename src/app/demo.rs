@@ -59,7 +59,7 @@ impl App {
         let mut t = Tab::new(sel("shop", "orders"));
         t.fields = auto_fields(&docs);
         t.paths = doc_paths(&docs);
-        t.field_info = field_info(&docs);
+        t.field_info = field_info(&docs).into();
         t.docs = docs.iter().filter_map(|d| db::Row::from_doc(d).ok()).collect();
         t.count = 1284;
         t.ms = 14;
