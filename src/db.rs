@@ -201,12 +201,10 @@ pub enum Msg {
     /// A SQL connection opened (or not): the databases, and the SSH tunnel to keep alive.
     SqlConnected { conn: u64, res: Res<(sql::Db, Vec<String>, Option<crate::ssh::Tunnel>)> },
     /// The columns of a SQL table page and its primary key columns, sent just before the page's `Docs`.
-    #[allow(dead_code)]
     /// `estimated` says the count in that `Docs` is the information_schema estimate, not exact.
     SqlCols { req: u64, cols: Vec<sql::Col>, pk: Vec<String>, estimated: bool, matched: Option<u64> },
     /// A Custom Query run: one result per statement.
-    #[allow(dead_code)]
-    SqlRan { req: u64, sets: Vec<sql::ResultSet>, ms: u128 },
+    SqlRan { req: u64, sets: Vec<sql::ResultSet> },
     /// The row count of result tab `idx` of run `req`.
     SqlCount { req: u64, idx: usize, res: Res<u64> },
     /// A Query result streamed to a file or the clipboard text; see `sql::export`.

@@ -1,8 +1,6 @@
 //! The SQL half of the worker: connecting, listing tables, paging a table and running Custom Query
 //! scripts. Rows leave here as BSON like Mongo's, see `Row`.
 
-// The table and query views (docs/sql/PLAN.md steps 5 and 8) call page, run and kill; until then only the tests do.
-#![allow(dead_code)]
 
 use super::value::{self, Kind};
 use super::schema::{Schema, SchemaCol, SchemaTable};
@@ -713,11 +711,10 @@ impl Worker {
     /// is known so `sql_kill` can stop it. `cancel` is the flag `sql_kill` sets to keep the rest of the script from running.
     pub fn sql_run(&self, req: u64, db: Db, schema: String, text: String, read_only: bool, page: usize, conn_id: Arc<AtomicU64>, cancel: Arc<AtomicBool>) {
         self.spawn(async move {
-            let start = Instant::now();
             let sets = run(&db, &schema, &text, read_only, &conn_id, &cancel, page).await;
             // The server reuses connection ids, so a late Stop must not hit another session.
             conn_id.store(0, Ordering::SeqCst);
-            Msg::SqlRan { req, sets, ms: start.elapsed().as_millis() }
+            Msg::SqlRan { req, sets }
         });
     }
 
@@ -1169,14 +1166,14 @@ mod tests {
         let (mut ran, mut info) = (None, None);
         while ran.is_none() || info.is_none() {
             match next(&rx) {
-                Msg::SqlRan { sets, ms, .. } => ran = Some((sets, ms)),
+                Msg::SqlRan { sets, .. } => ran = Some(sets),
                 Msg::Info(r) => info = Some(r),
                 _ => {}
             }
         }
         assert!(info.unwrap().is_ok());
         assert!(start.elapsed() < Duration::from_secs(6), "the sleep was not interrupted");
-        assert!(ran.unwrap().1 < 6000);
+        assert!(ran.is_some());
         // A finished run resets the id so a late Stop cannot hit another session.
         assert_eq!(id.load(Ordering::SeqCst), 0);
     }

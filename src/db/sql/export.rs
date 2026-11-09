@@ -37,6 +37,7 @@ pub enum Sink {
 /// How a stream ended. `peak_batch` is the most rows held at once, which tests check against `BATCH`.
 pub struct Done {
     pub rows: u64,
+    #[cfg(test)]
     pub peak_batch: usize,
     pub path: Option<PathBuf>,
     pub text: Option<String>,
@@ -145,8 +146,8 @@ pub async fn export_to(db: &Db, schema: &str, stmt: &str, plan: &Plan, sink: Sin
     match sink {
         Sink::Clipboard => {
             let mut out = Capped { buf: Vec::new(), max: CLIP_MAX };
-            let (rows, peak_batch) = stream(db, schema, stmt, plan, &mut out, count, cancel, id).await?;
-            Ok(Done { rows, peak_batch, path: None, text: Some(String::from_utf8_lossy(&out.buf).into_owned()) })
+            let (rows, _peak) = stream(db, schema, stmt, plan, &mut out, count, cancel, id).await?;
+            Ok(Done { rows, #[cfg(test)] peak_batch: _peak, path: None, text: Some(String::from_utf8_lossy(&out.buf).into_owned()) })
         }
         Sink::File(path) => {
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -163,7 +164,7 @@ pub async fn export_to(db: &Db, schema: &str, stmt: &str, plan: &Plan, sink: Sin
             if res.is_err() {
                 let _ = std::fs::remove_file(&tmp);
             }
-            res.map(|(rows, peak_batch)| Done { rows, peak_batch, path: Some(path), text: None })
+            res.map(|(rows, _peak)| Done { rows, #[cfg(test)] peak_batch: _peak, path: Some(path), text: None })
         }
     }
 }

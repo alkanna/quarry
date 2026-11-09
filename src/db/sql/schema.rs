@@ -35,9 +35,8 @@ impl Schema {
     }
 }
 
+#[cfg(test)]
 impl SchemaTable {
-    // Read by the tests that check what the schema query found.
-    #[allow(dead_code)]
     pub fn col(&self, name: &str) -> Option<&SchemaCol> {
         self.cols.iter().find(|c| c.name == name).or_else(|| self.cols.iter().find(|c| c.name.eq_ignore_ascii_case(name)))
     }

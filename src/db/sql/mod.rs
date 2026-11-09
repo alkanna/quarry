@@ -1,20 +1,15 @@
 //! SQL engines (MySQL and MariaDB for now). Engine differences live in enums here, not traits:
 //! a new engine is a new arm.
 
-// The views (step 5 on) use parts of these; until then they only have tests.
-#[allow(dead_code)]
 mod dialect;
 mod worker;
 pub mod structure;
 pub mod write;
-#[allow(dead_code)]
 pub mod export;
 pub mod lex;
-#[allow(dead_code)]
 pub mod value;
 pub mod rules;
 pub mod schema;
-#[allow(unused_imports)]
 pub use dialect::{Dialect, FUNCTIONS, KEYWORDS};
 pub use structure::Structure;
 pub use worker::{Answer, Relay};
@@ -158,8 +153,6 @@ impl PageQuery {
 }
 
 /// A connected SQL server. Cloning shares the pool.
-// Read by the views from step 5 on.
-#[allow(dead_code)]
 #[derive(Clone)]
 pub struct Db {
     pub pool: Pool,
@@ -193,7 +186,6 @@ impl Db {
 }
 
 /// One result column. `ty` is the type name the server reported, such as "INT UNSIGNED".
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct Col {
     /// The key in a row document. Unique within the result, so a column named `_id` or a repeated
@@ -218,7 +210,6 @@ impl Col {
 
 /// The outcome of one statement of a Custom Query run. An `error` means the statement did not run
 /// or failed; `affected` is set for statements that return no rows.
-#[allow(dead_code)]
 #[derive(Clone)]
 pub struct ResultSet {
     pub stmt: String,
@@ -244,7 +235,6 @@ pub struct Page {
 }
 
 /// Rows of one Custom Query page, and the most rows an unpageable statement keeps.
-#[allow(dead_code)]
 pub const RUN_ROWS_MAX: usize = 1000;
 
 /// How hard the client insists on TLS, named like the mysql client's --ssl-mode.

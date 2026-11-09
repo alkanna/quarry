@@ -316,15 +316,7 @@ pub(crate) fn split_statement(before: &str, tail: &str) -> (String, String) {
     (all[start..before.len()].to_string(), all[start..end].to_string())
 }
 
-/// Suggestions for the text before the caret: the byte where the replaced word starts, and the list.
-/// The inputs call `analyze`, which also carries the heading, footer and lookups; the tests read this.
-#[allow(dead_code)]
-pub(crate) fn suggest_sql(before: &str, full_stmt: &str, scope: &Scope, values: &Fields) -> Option<(usize, Vec<Sug>)> {
-    let out = analyze(before, full_stmt, scope, values)?;
-    (!out.sugs.is_empty()).then_some((out.from, out.sugs))
-}
-
-/// The full analysis behind `suggest_sql`. None where nothing should pop up: in a comment, in a string
+/// Suggestions for the text before the caret, with the heading, footer and lookups. None where nothing should pop up: in a comment, in a string
 /// that is not a value, in a closed identifier, or in an empty word where a list would only be noise.
 pub(crate) fn analyze(before: &str, full_stmt: &str, scope: &Scope, values: &Fields) -> Option<Out> {
     // A space after the text shows whether it ends inside a string, comment or backtick name: such a
@@ -708,6 +700,11 @@ pub(crate) fn open_list(ui: &egui::Ui, id: egui::Id, text: &str, ac: &mut Ac, sc
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn suggest(before: &str, full_stmt: &str, scope: &Scope, values: &Fields) -> Option<(usize, Vec<Sug>)> {
+        let out = analyze(before, full_stmt, scope, values)?;
+        (!out.sugs.is_empty()).then_some((out.from, out.sugs))
+    }
     use mongodb::bson::Bson;
 
     fn col(name: &str, ty: &str, key: &str, fk: bool) -> SchemaCol {
@@ -752,7 +749,7 @@ mod tests {
     fn run_with(sql: &str, values: &Fields) -> Option<(usize, Vec<Sug>)> {
         let (before, tail) = sql.split_once('|').unwrap();
         let (b, full) = split_statement(before, tail);
-        suggest_sql(&b, &full, &scope(), values).map(|(from, s)| (from + (before.len() - b.len()), s))
+        suggest(&b, &full, &scope(), values).map(|(from, s)| (from + (before.len() - b.len()), s))
     }
 
     fn values() -> Fields {
@@ -951,7 +948,7 @@ mod tests {
         sc.table = Some("orders".into());
         let sug = |text: &str| {
             let (b, full) = split_statement(text, "");
-            suggest_sql(&b, &full, &sc, &values()).map(|x| x.1)
+            suggest(&b, &full, &sc, &values()).map(|x| x.1)
         };
         let s = sug("status = 'paid' AND cur").unwrap();
         assert_eq!(text_of(&s)[..4], ["currency", "customer_id", "CURDATE()", "CURTIME()"]);
@@ -961,7 +958,7 @@ mod tests {
         sc.schema = Arc::new(Schema::default());
         sc.fallback = vec![col("currency", "char(3)", "", false)];
         let (b, full) = split_statement("cur", "");
-        assert_eq!(text_of(&suggest_sql(&b, &full, &sc, &Fields::new()).unwrap().1)[0], "currency");
+        assert_eq!(text_of(&suggest(&b, &full, &sc, &Fields::new()).unwrap().1)[0], "currency");
         // Values work from the fallback too.
         let (b, full) = split_statement("currency = '", "");
         assert!(analyze(&b, &full, &sc, &Fields::new()).unwrap().need.is_some());
