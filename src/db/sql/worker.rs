@@ -1745,28 +1745,32 @@ mod tests {
 
     #[test]
     fn live_no_backslash_escapes_cannot_smuggle_a_statement() {
-        let Some((w, rx, _db, p)) = live("t_nb", "id INT PRIMARY KEY") else { return };
+        let Some((w, rx, db, p)) = live("t_nb", "id INT PRIMARY KEY") else { return };
         if !bun_ok() {
             return;
         }
         exec(&w, &p, "INSERT INTO quarry_test.t_nb VALUES (1)");
-        let old: String = w.rt.block_on(async { sqlx::query_scalar("SELECT @@GLOBAL.sql_mode").fetch_one(&*p).await.unwrap() });
-        exec(&w, &p, &format!("SET GLOBAL sql_mode = '{old},NO_BACKSLASH_ESCAPES'"));
-        let uri = std::env::var("QUARRY_TEST_MYSQL").unwrap();
-        w.sql_connect(2, uri, Duration::from_secs(30), Net::default());
-        let got = next(&rx);
-        // Restored before any assertion can fail, so a red test never leaves the server in this mode.
-        exec(&w, &p, &format!("SET GLOBAL sql_mode = '{old}'"));
-        let Msg::SqlConnected { res: Ok((db, _, _)), .. } = got else { panic!("expected SqlConnected") };
+        // Every session of this pool starts in NO_BACKSLASH_ESCAPES, as on a server set that way. A pool of its own
+        // rather than SET GLOBAL, which raced the other live tests: their new sessions changed mode under them.
+        let mut db = db;
+        let opts = db.opts.clone();
+        let pool = w.rt.block_on(async move {
+            sqlx::mysql::MySqlPoolOptions::new()
+                .max_connections(2)
+                .after_connect(|c, _| Box::pin(async move { sqlx::Executor::execute(c, "SET SESSION sql_mode = CONCAT(@@SESSION.sql_mode, ',NO_BACKSLASH_ESCAPES')").await.map(|_| ()) }))
+                .connect_with(opts)
+                .await
+                .unwrap()
+        });
+        db.sql_mode = w.rt.block_on(async { sqlx::query_scalar::<_, String>("SELECT @@SESSION.sql_mode").fetch_one(&pool).await.unwrap() });
         assert!(db.sql_mode.contains("NO_BACKSLASH_ESCAPES"), "{}", db.sql_mode);
-        exec(&w, &p, &format!("SET GLOBAL sql_mode = '{old},NO_BACKSLASH_ESCAPES'"));
+        db.pool = Pool::My(pool);
         let script = "async function run() {
   let r;
   try { r = await sql.unsafe(\"SELECT '\\\\'' AS a, ? AS b -- '\", ['x; DELETE FROM t_nb; #']); r = 'ran' } catch (e) { r = e.message }
   return { r, left: await t_nb.count() };
 }";
         let (_, res) = shell_script(&w, &rx, &db, script, &["t_nb"], false);
-        exec(&w, &p, &format!("SET GLOBAL sql_mode = '{old}'"));
         let v: serde_json::Value = serde_json::from_str(&res.expect("script result")).unwrap();
         assert_eq!(v["v"]["left"], 1, "{v}");
         assert!(v["v"]["r"].as_str().unwrap().contains("differently"), "{v}");
