@@ -88,7 +88,18 @@ impl App {
         let key = self.col_key(false);
         self.prefs.cols.insert(key, ColPrefs { pinned: vec!["status".into()], highlight: vec!["customer.name".into()], ..Default::default() });
         self.status = ("Offline demo: no database is connected.".into(), false);
-        if std::env::var("QUARRY_TEST_CONNFORM").is_ok() {
+        if std::env::var("QUARRY_TEST_CONNFORM").as_deref() == Ok("mysql") {
+            self.modal = Some(Modal::Conn(Box::new(ConnForm {
+                id: Some(2),
+                name: "shop-prod".into(),
+                tag: "Production".into(),
+                engine: db::sql::Engine::MySql,
+                addr: db::sql::Addr { scheme: "mysql".into(), host: "shop-prod.internal".into(), port: 3306, user: "app".into(), password: "hunter2hunter".into(), database: "shop".into(), ..Default::default() },
+                ssh_on: true,
+                ssh: crate::ssh::SshConf { host: "bastion-eu.example.com".into(), port: 22, user: "deploy".into(), auth: crate::ssh::SshAuth::Agent, ..Default::default() },
+                ..Default::default()
+            })));
+        } else if std::env::var("QUARRY_TEST_CONNFORM").is_ok() {
             self.modal = Some(Modal::Conn(Box::new(ConnForm {
                 id: Some(2),
                 name: "Staging".into(),

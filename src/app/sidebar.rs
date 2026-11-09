@@ -249,7 +249,9 @@ impl App {
                     id: Some(id),
                     name: meta.name.clone(),
                     tag: meta.tag.clone(),
-                    uri,
+                    engine: meta.engine,
+                    addr: if meta.engine.is_sql() { db::sql::Addr::parse(&uri).unwrap_or_default() } else { Default::default() },
+                    uri: if meta.engine.is_sql() { String::new() } else { uri },
                     ssh_on: meta.ssh.is_some(),
                     ssh: meta.ssh.clone().unwrap_or_default(),
                     ssh_pwd: stored("ssh-password"),
@@ -259,6 +261,7 @@ impl App {
                     proxy_pwd: stored("proxy-password"),
                     show: false,
                     testing: false,
+                    tab: Default::default(),
                 })));
             }
         }

@@ -42,6 +42,9 @@ impl ShellTab {
 pub(super) struct ConnMeta {
     pub(super) id: u64,
     pub(super) name: String,
+    /// Old saved connections have no engine and are Mongo.
+    #[serde(default)]
+    pub(super) engine: db::sql::Engine,
     /// Reach the server through an SSH tunnel; passwords and passphrases live in the Keychain.
     #[serde(default)]
     pub(super) ssh: Option<crate::ssh::SshConf>,
@@ -690,10 +693,23 @@ pub(super) fn stage_pipeline(stages: &[Stage], i: usize) -> db::Res<Vec<Document
         .collect()
 }
 
+/// The tabs of the connection form. Proxy is Mongo only and TLS is SQL only.
+#[derive(Default, Clone, Copy, PartialEq)]
+pub(super) enum ConnTab {
+    #[default]
+    Standard,
+    Ssh,
+    Proxy,
+    Tls,
+}
+
 /// The new/edit connection form.
 #[derive(Default)]
 pub(super) struct ConnForm {
     pub(super) id: Option<u64>,
+    pub(super) engine: db::sql::Engine,
+    pub(super) addr: db::sql::Addr,
+    pub(super) tab: ConnTab,
     pub(super) name: String,
     pub(super) tag: String,
     pub(super) uri: String,
@@ -712,7 +728,8 @@ impl ConnForm {
     pub(super) fn net(&self) -> db::Net {
         db::Net {
             ssh: self.ssh_on.then(|| (crate::ssh::SshConf { host: self.ssh.host.trim().into(), user: self.ssh.user.trim().into(), ..self.ssh.clone() }, crate::ssh::SshSecrets { password: Some(self.ssh_pwd.clone()), passphrase: Some(self.ssh_pass.clone()) })),
-            proxy: (self.proxy_on && !self.ssh_on).then(|| db::Proxy { host: self.proxy.host.trim().into(), password: Some(self.proxy_pwd.clone()), ..self.proxy.clone() }),
+            // SQL drivers cannot use SOCKS, so a stale proxy setting must not apply.
+            proxy: (self.proxy_on && !self.ssh_on && !self.engine.is_sql()).then(|| db::Proxy { host: self.proxy.host.trim().into(), password: Some(self.proxy_pwd.clone()), ..self.proxy.clone() }),
         }
     }
 }
@@ -903,6 +920,13 @@ impl App {
         // Demo ids overlap real ones, so reading the Keychain here would connect to a real server.
         if self.demo {
             return self.ok("Offline demo: no database is connected.");
+        }
+        // Temporary until the SQL worker lands (docs/sql/PLAN.md step 4).
+        if self.conn(id).is_some_and(|c| c.meta.engine.is_sql()) {
+            if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == id) {
+                c.status = Status::Failed("MySQL connections are not wired yet".into());
+            }
+            return;
         }
         let uri = match stored_uri(id) {
             Ok(u) => u,
