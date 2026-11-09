@@ -455,7 +455,12 @@ impl App {
             if let Some(id) = app.prefs.last_conn.filter(|&id| app.conn(id).is_some()) {
                 app.active = Some(id);
             }
-            if let Some(id) = app.active {
+            // Every connection open last time comes back open, in its rail order. The connections of reopened tabs
+            // count too, for settings saved before open_conns existed.
+            let mut seen = std::collections::HashSet::new();
+            let open: Vec<u64> = app.prefs.open_conns.iter().copied().chain(app.active).chain(app.tabs.iter().map(|t| t.sel.conn)).filter(|id| app.conn(*id).is_some() && seen.insert(*id)).collect();
+            app.rail_order = open.clone();
+            for id in open {
                 app.connect(id);
             }
             if app.prefs.last_version != current {

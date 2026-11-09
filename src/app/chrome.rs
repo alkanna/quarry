@@ -44,10 +44,12 @@ impl App {
                 agg_text_mode: t.agg_text_mode,
             })
             .collect();
-        if tabs != self.prefs.open_tabs || self.cur != self.prefs.cur_tab || self.active != self.prefs.last_conn {
+        let open: Vec<u64> = self.rail_order.iter().copied().filter(|id| self.conn(*id).is_some_and(|c| matches!(c.status, Status::Ready | Status::Connecting))).collect();
+        if tabs != self.prefs.open_tabs || self.cur != self.prefs.cur_tab || self.active != self.prefs.last_conn || open != self.prefs.open_conns {
             self.prefs.open_tabs = tabs;
             self.prefs.cur_tab = self.cur;
             self.prefs.last_conn = self.active;
+            self.prefs.open_conns = open;
             self.save_prefs();
         }
     }
