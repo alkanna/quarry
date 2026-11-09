@@ -375,7 +375,7 @@ impl App {
                     continue;
                 }
                 // Tables first, then views, each under its own caption.
-                let db_views: HashSet<&str> = if sql { self.views.iter().filter(|v| v.0 == id && v.1 == *db_name).map(|v| v.2.as_str()).collect() } else { HashSet::new() };
+                let db_views: HashSet<&str> = self.views.iter().filter(|v| v.0 == id && v.1 == *db_name).map(|v| v.2.as_str()).collect();
                 let is_view_of = |n: &String| db_views.contains(n.as_str());
                 let n_views = if sql { matches.iter().filter(|n| is_view_of(n)).count() } else { 0 };
                 if sql {
