@@ -360,6 +360,13 @@ impl App {
                     s.bar.c.limit = "100".into();
                 }
             }
+            Ok("ac") => {
+                t.filter_txt = "status = 'paid' AND total > 50 AND cur".into();
+                if let Some(s) = t.sql.as_mut() {
+                    s.bar.c.sql = true;
+                    s.bar.c.limit = "100".into();
+                }
+            }
             Ok("grouped") => {
                 t.filter_txt = "`status` IN ('paid', 'shipped') AND `total` > 50".into();
                 t.sort_txt = "`revenue` DESC".into();
@@ -390,6 +397,9 @@ impl App {
         }
         if std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("shell") {
             self.sql_shell_demo();
+        }
+        if matches!(std::env::var("QUARRY_TEST_SQL").as_deref(), Ok("ac" | "acquery")) {
+            self.sql_ac_demo();
         }
         // QUARRY_TEST_SQL=edit stages two cells of row 3; =select checks four rows.
         match std::env::var("QUARRY_TEST_SQL").as_deref() {
@@ -422,6 +432,32 @@ impl App {
             t.count = rows.len() as u64;
             t.docs = rows;
             if let Some(s) = t.sql.as_mut() { (s.cols, s.pk) = (cols.clone(), vec![cols[0].name.clone()]); }
+        }
+    }
+
+    /// QUARRY_TEST_SQL=ac or acquery: the schema and column values the suggestions come from, and for `acquery`
+    /// a Query tab with the caret after `c.`. The list itself is opened by the input (see `open_demo`).
+    fn sql_ac_demo(&mut self) {
+        use db::sql::schema::{Schema, SchemaCol, SchemaTable};
+        use db::sql::value::Kind;
+        let col = |name: &str, ty: &str, key: &str, fk: bool| SchemaCol { name: name.into(), ty: ty.into(), kind: Kind::from_type_name(ty.split('(').next().unwrap_or(ty).trim_end_matches(" unsigned")), key: key.into(), nullable: false, fk };
+        let table = |name: &str, rows: Option<u64>, cols: Vec<SchemaCol>| SchemaTable { name: name.into(), view: rows.is_none(), rows, cols };
+        let orders = table("orders", Some(4410), vec![col("id", "int unsigned", "PRI", false), col("customer_id", "int", "MUL", true), col("status", "enum('pending','paid','shipped','refunded','cancelled')", "", false), col("total", "decimal(10,2)", "", false), col("currency", "char(3)", "", false), col("note", "text", "", false), col("created_at", "datetime", "", false)]);
+        let customers = table("customers", Some(1284), vec![col("id", "int unsigned", "PRI", false), col("email", "varchar(255)", "UNI", false), col("name", "varchar(120)", "", false), col("country", "char(2)", "", false), col("created_at", "datetime", "", false)]);
+        self.sql_schema.insert((3, "shop".into()), Arc::new(Schema { tables: vec![customers, orders] }));
+        let mut vals = Fields::new();
+        vals.insert(crate::ui::sql_complete::value_key("orders", "currency"), FieldInfo { kind: "string", values: ["EUR", "USD", "GBP"].map(Bson::from).to_vec(), freq: vec![61, 27, 12] });
+        vals.insert(crate::ui::sql_complete::value_key("orders", "status"), FieldInfo { kind: "string", values: ["paid", "shipped", "pending", "refunded", "cancelled"].map(Bson::from).to_vec(), freq: vec![61, 22, 9, 5, 3] });
+        self.sql_values.insert((3, "shop".into()), vals);
+        if std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("acquery") {
+            let mut t = Tab::new(Sel { conn: 3, db: "shop".into(), coll: String::new() }).for_engine(db::sql::Engine::MySql);
+            t.view = View::Sql;
+            if let Some(s) = t.sql.as_mut() {
+                s.query = "SELECT o.id, c.name FROM orders o\nJOIN customers c ON c.".into();
+                s.caret = s.query.chars().count();
+            }
+            self.tabs.push(t);
+            self.cur = self.tabs.len() - 1;
         }
     }
 }

@@ -18,12 +18,19 @@ pub(crate) enum FieldKind {
 /// One autocomplete suggestion: what is shown, a short note, what is inserted and where the
 /// caret lands inside it (in characters).
 pub(crate) struct Sug {
+    /// SQL only: what the row shows at the right instead of the kind, and the footer line while it is selected.
+    pub(crate) sql: Option<SqlInfo>,
     /// Characters before the typed word that the insert also replaces, like the dot before `["my-field"]`.
     pub(crate) back: usize,
     pub(crate) text: String,
     pub(crate) note: &'static str,
     pub(crate) insert: String,
     pub(crate) caret: usize,
+}
+
+pub(crate) struct SqlInfo {
+    pub(crate) detail: String,
+    pub(crate) foot: String,
 }
 
 /// Open suggestion list of one query input.
@@ -42,6 +49,11 @@ pub(crate) struct Ac {
     pub(crate) loading: bool,
     /// Why the server was not asked for values matching the typed text, shown under the list.
     pub(crate) note: Option<&'static str>,
+    /// SQL only: the heading row above the list and the footer when the selected row has none.
+    pub(crate) title: String,
+    pub(crate) foot: String,
+    /// SQL only: the "table.column" whose values the list is waiting for.
+    pub(crate) want: String,
 }
 
 impl Ac {
@@ -149,7 +161,7 @@ pub(crate) fn query_help() -> String {
 
 fn snippet(name: &str, template: &str, note: &'static str) -> Sug {
     let caret = template[..template.find('|').unwrap_or(template.len())].chars().count();
-    Sug { back: 0, text: name.to_string(), note, insert: template.replace('|', ""), caret }
+    Sug { sql: None, back: 0, text: name.to_string(), note, insert: template.replace('|', ""), caret }
 }
 
 /// What the loaded documents hold in one field: its most common kind and its most common values.
@@ -157,6 +169,8 @@ fn snippet(name: &str, template: &str, note: &'static str) -> Sug {
 pub(crate) struct FieldInfo {
     pub(crate) kind: &'static str,
     pub(crate) values: Vec<Bson>,
+    /// SQL only: how many rows hold each of `values`, in the same order.
+    pub(crate) freq: Vec<u64>,
 }
 
 pub(crate) type Fields = HashMap<String, FieldInfo>;
@@ -222,7 +236,7 @@ pub(crate) fn field_info<'a>(docs: impl IntoIterator<Item = impl Into<DocRef<'a>
             let mut vals: Vec<(String, (usize, Bson))> = a.vals.into_iter().collect();
             // Ties in text order, so the list keeps its order across reloads.
             vals.sort_by(|x, y| y.1.0.cmp(&x.1.0).then_with(|| x.0.cmp(&y.0)));
-            (p, FieldInfo { kind, values: vals.into_iter().take(MAX_VALUES).map(|(_, (_, v))| v).collect() })
+            (p, FieldInfo { kind, values: vals.into_iter().take(MAX_VALUES).map(|(_, (_, v))| v).collect(), freq: Vec::new() })
         })
         .collect()
 }
@@ -275,7 +289,7 @@ pub(crate) fn suggestible(v: &Bson) -> bool {
 pub(crate) fn merge_values(fields: &mut Fields, server: &HashMap<String, Vec<Bson>>) {
     for (p, vals) in server {
         let Some(first) = vals.first() else { continue };
-        let f = fields.entry(p.clone()).or_insert_with(|| FieldInfo { kind: db::type_name(first), values: Vec::new() });
+        let f = fields.entry(p.clone()).or_insert_with(|| FieldInfo { kind: db::type_name(first), values: Vec::new(), freq: Vec::new() });
         for v in vals {
             if !f.values.contains(v) {
                 f.values.push(v.clone());
@@ -397,7 +411,7 @@ pub(crate) fn suggest(before: &str, kind: FieldKind, paths: &[String], fields: &
     let caret_in = |s: &str| ["[  ]", "{  }", "(\"\")"].iter().find_map(|m| s.find(m).map(|i| s[..i].chars().count() + 2)).unwrap_or(s.chars().count());
     let field = |p: &String| {
         let insert = if quote.is_some() { p.clone() } else { format!("{p}: ") };
-        Sug { back: 0, text: p.clone(), note: "field", caret: insert.chars().count(), insert }
+        Sug { sql: None, back: 0, text: p.clone(), note: "field", caret: insert.chars().count(), insert }
     };
     let colon_field = key_before_colon(lead);
     let info = colon_field.and_then(|f| fields.get(f));
@@ -417,7 +431,7 @@ pub(crate) fn suggest(before: &str, kind: FieldKind, paths: &[String], fields: &
         let pre = innermost_open(before).map_or("", |i| before[..i].trim_end());
         let owner = key_before_colon(pre);
         if owner.is_some() && kind == FieldKind::Query {
-            let mut v: Vec<Sug> = QUERY_OPS.iter().map(|o| Sug { back: 0, text: o.trim_end().to_string(), note: "operator", insert: o.to_string(), caret: caret_in(o) }).collect();
+            let mut v: Vec<Sug> = QUERY_OPS.iter().map(|o| Sug { sql: None, back: 0, text: o.trim_end().to_string(), note: "operator", insert: o.to_string(), caret: caret_in(o) }).collect();
             // $elemMatch also takes the array items' fields, named relative to the array.
             if owner == Some("$elemMatch")
                 && let Some(arr) = innermost_open(pre).and_then(|i| key_before_colon(pre[..i].trim_end()))
@@ -438,8 +452,8 @@ pub(crate) fn suggest(before: &str, kind: FieldKind, paths: &[String], fields: &
     {
         // A date field lists date shortcuts and range templates as soon as the colon is typed.
         let now = mongodb::bson::DateTime::now().timestamp_millis();
-        let mut v: Vec<Sug> = db::date_suggestions(now).into_iter().map(|(t, n)| Sug { back: 0, caret: t.chars().count(), insert: t.clone(), text: t, note: n }).collect();
-        v.push(Sug { back: 0, text: "ISODate(\"\")".into(), note: "date", insert: "ISODate(\"\")".into(), caret: 9 });
+        let mut v: Vec<Sug> = db::date_suggestions(now).into_iter().map(|(t, n)| Sug { sql: None, back: 0, caret: t.chars().count(), insert: t.clone(), text: t, note: n }).collect();
+        v.push(Sug { sql: None, back: 0, text: "ISODate(\"\")".into(), note: "date", insert: "ISODate(\"\")".into(), caret: 9 });
         (true, v)
     } else if lead.ends_with(':') && quote.is_some() {
         // Inside a string: the field's own text values, listed as soon as the quote is typed.
@@ -451,7 +465,7 @@ pub(crate) fn suggest(before: &str, kind: FieldKind, paths: &[String], fields: &
             let json = serde_json::Value::from(text).to_string();
             let s = json[1..json.len() - 1].to_string();
             let s = if quote == Some('\'') { s.replace("\\\"", "\"").replace('\'', "\\'") } else { s };
-            Sug { back: 0, text: text.to_string(), note: "value", caret: s.chars().count(), insert: s }
+            Sug { sql: None, back: 0, text: text.to_string(), note: "value", caret: s.chars().count(), insert: s }
         }).collect())
     } else if lead.ends_with(':') {
         let query_vals: Vec<(&str, &'static str)> = [("ObjectId(\"\")", "objectId"), ("ISODate(\"\")", "date"), ("true", "bool"), ("false", "bool"), ("null", "null")].into_iter().chain(db::DATE_SHORTCUTS).collect();
@@ -463,7 +477,7 @@ pub(crate) fn suggest(before: &str, kind: FieldKind, paths: &[String], fields: &
         let values = |i: &FieldInfo| -> Vec<Sug> {
             i.values.iter().map(|x| {
                 let insert = db::shell_text(x);
-                Sug { back: 0, text: x.as_str().map_or_else(|| insert.clone(), str::to_string), note: "value", caret: insert.chars().count(), insert }
+                Sug { sql: None, back: 0, text: x.as_str().map_or_else(|| insert.clone(), str::to_string), note: "value", caret: insert.chars().count(), insert }
             }).collect()
         };
         // Right after the colon only the field's own values are listed, and nothing for a field
@@ -475,7 +489,7 @@ pub(crate) fn suggest(before: &str, kind: FieldKind, paths: &[String], fields: &
             }
             return Some((0, v));
         }
-        let mut v: Vec<Sug> = vals.iter().map(|(v, n)| Sug { back: 0, text: v.to_string(), note: n, insert: v.to_string(), caret: caret_in(v) }).collect();
+        let mut v: Vec<Sug> = vals.iter().map(|(v, n)| Sug { sql: None, back: 0, text: v.to_string(), note: n, insert: v.to_string(), caret: caret_in(v) }).collect();
         if kind == FieldKind::Query {
             v.extend(info.map(values).unwrap_or_default());
             // Snippets that suit the field's kind; all of them for a field not in the loaded documents.
@@ -541,6 +555,20 @@ pub(crate) fn ac_input(
     compute: &Suggest,
     show: impl FnOnce(&mut egui::Ui, &mut String, bool) -> egui::text_edit::TextEditOutput,
 ) -> (egui::text_edit::TextEditOutput, bool, bool) {
+    ac_input_with(ui, id, text, ac, compute, true, show)
+}
+
+/// `ac_input`, where `pair` says whether brackets and quotes close themselves. SQL inputs leave
+/// them alone: an apostrophe in a comment or a lone quote in a LIKE pattern is common there.
+pub(crate) fn ac_input_with(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    text: &mut String,
+    ac: &mut Ac,
+    compute: &Suggest,
+    pair: bool,
+    show: impl FnOnce(&mut egui::Ui, &mut String, bool) -> egui::text_edit::TextEditOutput,
+) -> (egui::text_edit::TextEditOutput, bool, bool) {
     let open = ac.id == Some(id) && !ac.items.is_empty();
     let mut pick = None;
     let mut moved = false;
@@ -562,7 +590,7 @@ pub(crate) fn ac_input(
             }
         });
     }
-    let out = with_autopair(ui, id, text, |ui, text| show(ui, text, open));
+    let out = if pair { with_autopair(ui, id, text, |ui, text| show(ui, text, open)) } else { show(ui, text, open) };
     let focused = out.response.has_focus();
     if let Some(i) = pick {
         ac.apply(ui.ctx(), id, text, i);
@@ -581,7 +609,7 @@ pub(crate) fn ac_input(
             ac.close();
         }
     }
-    let test_shot = std::env::var("QUARRY_TEST_AC").is_ok();
+    let test_shot = std::env::var("QUARRY_TEST_AC").is_ok() || std::env::var("QUARRY_TEST_SQL").is_ok_and(|v| v.starts_with("ac"));
     let pointer_on_list = test_shot || ac.rect.zip(ui.input(|i| i.pointer.hover_pos())).is_some_and(|(r, p)| r.contains(p));
     if !focused && ac.id == Some(id) && !pointer_on_list {
         ac.close();
@@ -617,18 +645,26 @@ pub(crate) fn ac_list(ui: &mut egui::Ui, id: egui::Id, text: &mut String, ac: &m
 
 /// Badge letter and color per kind, so methods, fields and names read apart at a glance.
 /// Colors follow the editor's syntax colors for the same things.
-fn kind_badge(note: &str) -> (char, Color32) {
+fn kind_badge(note: &str) -> (&'static str, Color32) {
     match note {
-        "method" | "function" | "helper" | "constructor" => ('m', C_DATE()),
-        "field" | "property" => ('f', KEY()),
-        "operator" => ('$', PRIMARY()),
-        "keyword" => ('k', C_KEYWORD()),
-        "collection" => ('c', C_STRING()),
-        "package" | "module" => ('p', C_NUMBER()),
-        "class" | "interface" | "enum" => ('t', C_NUMBER()),
-        "date" => ('d', C_DATE()),
-        "global" | "variable" | "constant" => ('v', C_OID()),
-        _ => ('s', MUTED()),
+        "method" | "function" | "helper" | "constructor" => ("m", C_DATE()),
+        "field" | "property" => ("f", KEY()),
+        "operator" => ("$", PRIMARY()),
+        "keyword" => ("k", C_KEYWORD()),
+        "collection" => ("c", C_STRING()),
+        "package" | "module" => ("p", C_NUMBER()),
+        "class" | "interface" | "enum" => ("t", C_NUMBER()),
+        "date" => ("d", C_DATE()),
+        "global" | "variable" | "constant" => ("v", C_OID()),
+        // SQL kinds, named apart from the Mongo ones so those badges stay as they were.
+        "table" => ("t", PRIMARY()),
+        "view" => ("w", PRIMARY()),
+        "schema" => ("d", MUTED()),
+        "column" => ("c", PRIMARY()),
+        "pk" => ("PK", WARNING()),
+        "fn" => ("f", C_DATE()),
+        "literal" => ("v", C_STRING()),
+        _ => ("s", MUTED()),
     }
 }
 
@@ -658,9 +694,10 @@ fn popup_list(ui: &mut egui::Ui, ac: &Ac, typed: &str, moved: bool, width: Optio
     let note_font = FontId::proportional(TXT_CAPTION);
     // Sized to the longest row, so the scrollbar sits on the edge instead of mid-list.
     let p = ui.painter();
-    let fonts = items.iter().map(|s| p.layout_no_wrap(s.text.clone(), FontId::monospace(MONO_PX), TEXT()).size().x + p.layout_no_wrap(s.note.to_string(), note_font.clone(), TEXT()).size().x).fold(0.0, f32::max);
+    let fonts = items.iter().map(|s| p.layout_no_wrap(s.text.clone(), FontId::monospace(MONO_PX), TEXT()).size().x + p.layout_no_wrap(s.sql.as_ref().map_or(s.note, |i| i.detail.as_str()).to_string(), note_font.clone(), TEXT()).size().x).fold(0.0, f32::max);
     // A lookup in progress or a skipped one gets a row of its own, laid out like a suggestion.
     let status = match (ac.loading, ac.note) {
+        (true, _) if items.is_empty() && !ac.title.is_empty() => Some("Looking up values…"),
         (true, _) if items.is_empty() => Some("Looking up values in the collection…"),
         (true, _) => Some("Looking up more values…"),
         (false, n) => n,
@@ -671,6 +708,11 @@ fn popup_list(ui: &mut egui::Ui, ac: &Ac, typed: &str, moved: bool, width: Optio
     popup_card(ui).inner_margin(egui::Margin::symmetric(0, 4)).show(ui, |ui| {
         ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
         ui.spacing_mut().scroll = egui::style::ScrollStyle::thin();
+        // SQL lists name what they list in a heading row.
+        if !ac.title.is_empty() {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(w, ROW), egui::Sense::hover());
+            ui.painter().text(egui::pos2(rect.left() + PAD + 6.0, rect.center().y), egui::Align2::LEFT_CENTER, &ac.title, note_font.clone(), FAINT());
+        }
         egui::ScrollArea::vertical().max_height(ROW * VISIBLE as f32).show(ui, |ui| {
             ui.set_width(w);
             for (i, s) in items.iter().enumerate() {
@@ -691,7 +733,7 @@ fn popup_list(ui: &mut egui::Ui, ac: &Ac, typed: &str, moved: bool, width: Optio
                 let badge = egui::Rect::from_center_size(egui::pos2(row.left() + PAD + BADGE / 2.0, row.center().y), egui::vec2(BADGE, BADGE));
                 p.rect_filled(badge, R_SM, tint(color, 40));
                 p.text(badge.center(), egui::Align2::CENTER_CENTER, letter, FontId::monospace(TXT_CAPTION), color);
-                let note = p.text(egui::pos2(row.right() - PAD - 8.0, row.center().y), egui::Align2::RIGHT_CENTER, s.note, note_font.clone(), if selected { MUTED() } else { FAINT() });
+                let note = p.text(egui::pos2(row.right() - PAD - 8.0, row.center().y), egui::Align2::RIGHT_CENTER, s.sql.as_ref().map_or(s.note, |i| i.detail.as_str()), note_font.clone(), if selected { MUTED() } else { FAINT() });
                 let mut job = label_job(&s.text, typed, selected);
                 // The popup width is capped, so long paths are cut with an ellipsis before the kind note.
                 job.wrap = egui::text::TextWrapping::truncate_at_width(note.left() - PAD - badge.right() - PAD);
@@ -710,7 +752,7 @@ fn popup_list(ui: &mut egui::Ui, ac: &Ac, typed: &str, moved: bool, width: Optio
             let (rect, _) = ui.allocate_exact_size(egui::vec2(w, if status.is_some() { 5.0 } else { 20.0 }), egui::Sense::hover());
             ui.painter().hline(rect.x_range(), rect.top() + 2.0, egui::Stroke::new(1.0, BORDER()));
             if status.is_none() {
-                ui.painter().text(egui::pos2(rect.left() + PAD + 4.0, rect.center().y + 2.0), egui::Align2::LEFT_CENTER, "Enter or Tab to insert, Esc to close", note_font.clone(), FAINT());
+                ui.painter().text(egui::pos2(rect.left() + PAD + 4.0, rect.center().y + 2.0), egui::Align2::LEFT_CENTER, items.get(sel).and_then(|s| s.sql.as_ref()).map(|i| i.foot.as_str()).filter(|f| !f.is_empty()).or(Some(ac.foot.as_str()).filter(|f| !f.is_empty())).unwrap_or("Enter or Tab to insert, Esc to close"), note_font.clone(), FAINT());
             }
         }
         if let Some(text) = status {
@@ -860,7 +902,7 @@ pub(crate) fn suggest_js(before: &str, known: &[(String, std::sync::Arc<Fields>)
     let tok_start = before.char_indices().rev().take_while(|(_, c)| ident(*c)).last().map(|(i, _)| i).unwrap_or(before.len());
     let token = &before[tok_start..];
     let lead = &before[..tok_start];
-    let method = |m: &&str| Sug { back: 0, text: m.to_string(), note: "method", insert: format!("{m}()"), caret: m.len() + 1 };
+    let method = |m: &&str| Sug { sql: None, back: 0, text: m.to_string(), note: "method", insert: format!("{m}()"), caret: m.len() + 1 };
     let mut items: Vec<Sug> = if quoted || in_query_args(before) {
         // Inside a call's arguments: the same field, operator and value suggestions as the Query box.
         // Only the open call's arguments are passed, so braces of the function around the call
@@ -905,13 +947,13 @@ pub(crate) fn suggest_js(before: &str, known: &[(String, std::sync::Arc<Fields>)
     } else if token.is_empty() {
         return None;
     } else {
-        let mut v: Vec<Sug> = JS_KEYWORDS.iter().map(|k| Sug { back: 0, text: k.to_string(), note: "keyword", insert: format!("{k} "), caret: k.len() + 1 }).collect();
+        let mut v: Vec<Sug> = JS_KEYWORDS.iter().map(|k| Sug { sql: None, back: 0, text: k.to_string(), note: "keyword", insert: format!("{k} "), caret: k.len() + 1 }).collect();
         v.extend(JS_GLOBALS.iter().map(|g| match *g {
-            "ObjectId" | "ISODate" => Sug { back: 0, text: g.to_string(), note: "helper", insert: format!("{g}(\"\")"), caret: g.len() + 2 },
-            _ => Sug { back: 0, text: g.to_string(), note: "global", insert: g.to_string(), caret: g.len() },
+            "ObjectId" | "ISODate" => Sug { sql: None, back: 0, text: g.to_string(), note: "helper", insert: format!("{g}(\"\")"), caret: g.len() + 2 },
+            _ => Sug { sql: None, back: 0, text: g.to_string(), note: "global", insert: g.to_string(), caret: g.len() },
         }));
-        v.extend(pkgs.iter().map(|p| Sug { back: 0, text: p.clone(), note: "package", insert: p.clone(), caret: p.chars().count() }));
-        v.extend(colls.iter().filter(|c| c.chars().all(ident) && !c.starts_with(|c: char| c.is_ascii_digit())).map(|c| Sug { back: 0, text: c.clone(), note: "collection", insert: c.clone(), caret: c.chars().count() }));
+        v.extend(pkgs.iter().map(|p| Sug { sql: None, back: 0, text: p.clone(), note: "package", insert: p.clone(), caret: p.chars().count() }));
+        v.extend(colls.iter().filter(|c| c.chars().all(ident) && !c.starts_with(|c: char| c.is_ascii_digit())).map(|c| Sug { sql: None, back: 0, text: c.clone(), note: "collection", insert: c.clone(), caret: c.chars().count() }));
         v
     };
     items.retain(|s| fuzzy(token, &s.text, false));

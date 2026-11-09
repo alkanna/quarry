@@ -37,6 +37,7 @@ mod settings;
 mod shell;
 mod shell_ls;
 mod sidebar;
+mod sql_ac;
 mod sql_structure;
 mod sql_edit;
 mod sql_bar;
@@ -147,6 +148,13 @@ pub struct App {
     new_lib: String,
     /// Views per (connection, database), shown differently in the sidebar.
     views: HashSet<(u64, String, String)>,
+    /// Tables and columns of SQL databases, per (connection, database), for autocomplete. Loaded when a
+    /// SQL input there first has focus, and again on the sidebar's Refresh.
+    sql_schema: HashMap<(u64, String), Arc<db::sql::schema::Schema>>,
+    sql_schema_asked: HashSet<(u64, String)>,
+    /// Looked up column values per (connection, database), keyed `table.column`, and the lookups already sent.
+    sql_values: HashMap<(u64, String), Fields>,
+    sql_values_asked: HashSet<(u64, String, String, String, Option<String>)>,
     users: Option<UsersWin>,
     server: Option<ServerWin>,
     conn_test: Option<db::Res<String>>,
@@ -270,6 +278,10 @@ impl App {
             new_pkg: String::new(),
             new_lib: String::new(),
             views: HashSet::new(),
+            sql_schema: HashMap::new(),
+            sql_schema_asked: HashSet::new(),
+            sql_values: HashMap::new(),
+            sql_values_asked: HashSet::new(),
             users: None,
             server: None,
             conn_test: None,

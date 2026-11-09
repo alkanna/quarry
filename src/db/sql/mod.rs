@@ -12,6 +12,7 @@ pub mod lex;
 #[allow(dead_code)]
 pub mod value;
 pub mod rules;
+pub mod schema;
 #[allow(unused_imports)]
 pub use dialect::{Dialect, FUNCTIONS, KEYWORDS};
 pub use structure::Structure;

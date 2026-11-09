@@ -209,6 +209,10 @@ pub enum Msg {
     SqlRan { req: u64, sets: Vec<sql::ResultSet>, ms: u128 },
     /// A SQL table's columns, indexes, keys, triggers, status and CREATE statement. Answers the tab whose `idx_req` is `req`.
     SqlStructure { req: u64, res: Res<sql::Structure> },
+    /// Every table, view and column of one database, for SQL autocomplete.
+    SqlSchema { conn: u64, schema: String, res: Res<sql::schema::Schema> },
+    /// A column's most frequent values with their counts, for SQL autocomplete. None when the table is too big to look in.
+    SqlValues { conn: u64, schema: String, table: String, column: String, prefix: Option<String>, res: Res<Option<Vec<(String, u64)>>> },
     /// Result of the connection form's Test button.
     Tested { res: Res<String> },
     /// Collection names (sorted) and which of them are views.

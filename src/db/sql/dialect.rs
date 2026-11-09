@@ -76,9 +76,29 @@ impl Dialect {
     }
 
     /// Every column of a database in one round trip, for autocomplete. Params: [schema]. Columns:
-    /// tbl, name, full_type, col_key, nullable.
+    /// tbl, name, full_type, col_key, nullable (1 or 0).
     pub fn all_columns(self) -> &'static str {
         "SELECT TABLE_NAME AS tbl, COLUMN_NAME AS name, COLUMN_TYPE AS full_type, COLUMN_KEY AS col_key, IS_NULLABLE = 'YES' AS nullable FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME, ORDINAL_POSITION"
+    }
+
+    /// Which columns of a database hold a foreign key, for autocomplete. Params: [schema]. Columns:
+    /// tbl, name.
+    pub fn all_foreign_keys(self) -> &'static str {
+        "SELECT TABLE_NAME AS tbl, COLUMN_NAME AS name FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = ? AND REFERENCED_TABLE_NAME IS NOT NULL"
+    }
+
+    /// What decides whether a column's values may be looked up: the table's row estimate and how
+    /// many indexes lead with the column. Params: [column, schema, table]. Columns: est, leads.
+    pub fn value_gate(self) -> &'static str {
+        "SELECT t.TABLE_ROWS AS est, (SELECT COUNT(*) FROM information_schema.STATISTICS s WHERE s.TABLE_SCHEMA = t.TABLE_SCHEMA AND s.TABLE_NAME = t.TABLE_NAME AND s.COLUMN_NAME = ? AND s.SEQ_IN_INDEX = 1) AS leads FROM information_schema.TABLES t WHERE t.TABLE_SCHEMA = ? AND t.TABLE_NAME = ?"
+    }
+
+    /// The most frequent values of a column, for autocomplete. With `prefix` one parameter binds the
+    /// LIKE pattern. Identifiers cannot be bound, so the names are quoted into the text.
+    pub fn value_counts(self, db: &str, table: &str, col: &str, prefix: bool, limit: u32) -> String {
+        let c = self.quote_ident(col);
+        let filter = if prefix { format!(" WHERE {c} LIKE ?") } else { format!(" WHERE {c} IS NOT NULL") };
+        format!("SELECT CAST({c} AS CHAR) AS v, COUNT(*) AS n FROM {}{filter} GROUP BY {c} ORDER BY 2 DESC LIMIT {limit}", self.qualified(db, table))
     }
 
     /// Identifiers cannot be bound, so the names are quoted into the text.
@@ -257,7 +277,7 @@ mod tests {
     #[test]
     fn metadata_queries_bind_values() {
         let d = Dialect::MySql;
-        for (q, params) in [(d.tables(), 1), (d.columns(), 2), (d.indexes(), 2), (d.foreign_keys(), 2), (d.referenced_by(), 2), (d.triggers(), 2), (d.table_status(), 2), (d.all_columns(), 1)] {
+        for (q, params) in [(d.tables(), 1), (d.columns(), 2), (d.indexes(), 2), (d.foreign_keys(), 2), (d.referenced_by(), 2), (d.triggers(), 2), (d.table_status(), 2), (d.all_columns(), 1), (d.all_foreign_keys(), 1), (d.value_gate(), 3)] {
             assert_eq!(q.matches('?').count(), params, "{q}");
             assert!(q.starts_with("SELECT "));
             assert!(q.contains("information_schema."));

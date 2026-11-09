@@ -4,6 +4,7 @@ use super::*;
 use crate::db::sql::{lex, value::Kind, Col, ResultSet};
 use db::copy::{CopyCol, Fmt};
 use super::sql_bar::sql_job;
+use crate::ui::sql_complete::{open_demo, sql_ac_field};
 use egui::text::CCursor;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -292,6 +293,10 @@ impl App {
         let id = egui::Id::unique(("sql-editor", self.cur));
         let focused = ui.memory(|m| m.has_focus(id));
         let avail = ui.available_height();
+        let Some((conn, db)) = self.tabs.get(self.cur).map(|t| (t.sel.conn, run_db(t))) else { return };
+        let scope = self.sql_scope(conn, &db, None);
+        let none = Fields::new();
+        let values = self.sql_values.get(&(conn, db.clone())).unwrap_or(&none);
         let Some(s) = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()) else { return };
         let lines = s.query.split('\n').count();
         let h = (lines as f32 * LINE_H + 24.0).clamp(96.0, (avail * 0.5).max(96.0));
@@ -307,16 +312,22 @@ impl App {
             egui::ScrollArea::vertical().id_salt("sql-ed").max_height(h).auto_shrink([false, true]).show(ui, |ui| {
                 // Reserved first so the band is drawn under the text.
                 let band = ui.painter().add(egui::Shape::Noop);
-                let out = egui::TextEdit::multiline(&mut s.query)
-                    .id(id)
-                    .font(FontId::monospace(TXT_SMALL))
-                    .frame(egui::Frame::new().inner_margin(egui::Margin { left: GUTTER_W as i8, right: 12, top: 10, bottom: 10 }))
-                    .desired_width(f32::INFINITY)
-                    .min_size(egui::vec2(0.0, 96.0))
-                    .lock_focus(true)
-                    .hint_text(RichText::new("SELECT * FROM orders;").font(FontId::monospace(TXT_SMALL)).color(FAINT()))
-                    .layouter(&mut layout)
-                    .show(ui);
+                if std::env::var("QUARRY_TEST_SQL").is_ok_and(|v| v == "acquery") {
+                    open_demo(ui, id, &s.query, &mut s.bar.ac, &scope, values);
+                }
+                // The suggestions work on the statement under the caret, with the tail after it for aliases.
+                let (out, _) = sql_ac_field(ui, id, &mut s.query, &mut s.bar.ac, &scope, values, &mut s.bar.wants, |ui, text, _| {
+                    egui::TextEdit::multiline(text)
+                        .id(id)
+                        .font(FontId::monospace(TXT_SMALL))
+                        .frame(egui::Frame::new().inner_margin(egui::Margin { left: GUTTER_W as i8, right: 12, top: 10, bottom: 10 }))
+                        .desired_width(f32::INFINITY)
+                        .min_size(egui::vec2(0.0, 96.0))
+                        .lock_focus(true)
+                        .hint_text(RichText::new("SELECT * FROM orders;").font(FontId::monospace(TXT_SMALL)).color(FAINT()))
+                        .layouter(&mut layout)
+                        .show(ui)
+                });
                 if let Some(r) = out.cursor_range {
                     s.caret = usize::from(r.primary.index);
                 }
@@ -339,6 +350,8 @@ impl App {
                 }
             });
         });
+        let wants = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()).map(|s| std::mem::take(&mut s.bar.wants)).unwrap_or_default();
+        self.sql_serve(conn, &db, wants);
     }
 
     /// The result tabs, the Table or Text switch and the selected statement's outcome.

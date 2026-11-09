@@ -5,6 +5,7 @@
 #![allow(dead_code)]
 
 use super::value::{self, Kind};
+use super::schema::{Schema, SchemaCol, SchemaTable};
 use super::{lex, Addr, Col, Db, Dialect, PageQuery, Pool, ResultSet, SslMode, RUN_ROWS_MAX};
 use crate::db::{e, Msg, Net, Res, Row, Worker};
 use mongodb::bson::{Bson, Document};
@@ -542,6 +543,82 @@ impl Worker {
             Msg::SqlColumns { conn, db: schema, res }
         });
     }
+}
+
+/// Tables, views and columns of one database in three round trips run together.
+async fn load_schema(db: &Db, schema: &str) -> Res<Schema> {
+    let Pool::My(pool) = &db.pool;
+    let d = db.dialect;
+    let (tables, cols, fks) = tokio::try_join!(
+        async { sqlx::query(d.tables()).bind(schema).fetch_all(pool).await.map_err(e) },
+        async { sqlx::query(d.all_columns()).bind(schema).fetch_all(pool).await.map_err(e) },
+        async { sqlx::query(d.all_foreign_keys()).bind(schema).fetch_all(pool).await.map_err(e) },
+    )?;
+    let fk: HashSet<(String, String)> = fks.iter().filter_map(|r| Some((text(r, "tbl")?, text(r, "name")?))).collect();
+    let mut out: Vec<SchemaTable> = tables
+        .iter()
+        .filter_map(|r| {
+            let kind = text(r, "kind").unwrap_or_default();
+            Some(SchemaTable { name: text(r, "name")?, view: kind.contains("VIEW"), rows: super::structure::num(r, "row_estimate"), cols: Vec::new() })
+        })
+        .collect();
+    for r in &cols {
+        let (Some(t), Some(name), Some(ty)) = (text(r, "tbl"), text(r, "name"), text(r, "full_type")) else { continue };
+        let Some(table) = out.iter_mut().find(|x| x.name == t) else { continue };
+        let nullable = r.try_get::<i64, _>("nullable").map(|n| n != 0).unwrap_or(true);
+        table.cols.push(SchemaCol { fk: fk.contains(&(t, name.clone())), kind: kind_of_full(&ty), key: text(r, "col_key").unwrap_or_default(), nullable, name, ty });
+    }
+    Ok(Schema { tables: out })
+}
+
+/// Below this many rows a table is cheap enough to group in full while someone types.
+const VALUES_SMALL: u64 = 100_000;
+
+/// A column's most frequent values, or None where looking would scan a big table: the estimate is
+/// large and no index leads with the column. Both checks read metadata only. The lookup runs on a
+/// connection of its own with a 300 ms limit, so a slow one never holds the pool.
+async fn field_values(db: &Db, schema: &str, table: &str, column: &str, prefix: Option<&str>) -> Res<Option<Vec<(String, u64)>>> {
+    let Pool::My(pool) = &db.pool;
+    let d = db.dialect;
+    let Some(gate) = sqlx::query(d.value_gate()).bind(column).bind(schema).bind(table).fetch_optional(pool).await.map_err(e)? else { return Ok(None) };
+    let small = super::structure::num(&gate, "est").is_some_and(|n| n < VALUES_SMALL);
+    let leads = super::structure::num(&gate, "leads").unwrap_or(0) > 0;
+    if !small && !leads {
+        return Ok(None);
+    }
+    let mut c = tokio::time::timeout(Duration::from_secs(10), sqlx::MySqlConnection::connect_with(&db.opts)).await.map_err(|_| "Could not reach the server".to_string())?.map_err(e)?;
+    let res = async {
+        session(&mut c, 300).await.map_err(e)?;
+        let sql = d.value_counts(schema, table, column, prefix.is_some(), 201);
+        let mut q = sqlx::query(&sql);
+        if let Some(p) = prefix {
+            q = q.bind(format!("{}%", p.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")));
+        }
+        let rows = q.fetch_all(&mut c).await.map_err(e)?;
+        Ok(Some(rows.iter().filter_map(|r| Some((text(r, "v")?, super::structure::num(r, "n")?))).collect()))
+    }
+    .await;
+    let _ = c.close().await;
+    res
+}
+
+impl Worker {
+    /// Every table, view and column of `schema`, for autocomplete.
+    pub fn sql_schema(&self, conn: u64, db: Db, schema: String) {
+        self.spawn(async move {
+            let res = load_schema(&db, &schema).await;
+            Msg::SqlSchema { conn, schema, res }
+        });
+    }
+
+    /// The most frequent values of a column, with `prefix` only those that start with it. Skipped
+    /// (None) for big tables unless an index leads with the column.
+    pub fn sql_field_values(&self, conn: u64, db: Db, schema: String, table: String, column: String, prefix: Option<String>) {
+        self.spawn(async move {
+            let res = field_values(&db, &schema, &table, &column, prefix.as_deref()).await;
+            Msg::SqlValues { conn, schema, table, column, prefix, res }
+        });
+    }
 
     pub fn sql_connect(&self, conn: u64, uri: String, timeout: Duration, net: Net) {
         self.spawn(async move { Msg::SqlConnected { conn, res: open(&uri, timeout, &net).await } });
@@ -779,6 +856,62 @@ mod tests {
         let Msg::Collections { res: Ok((names, views)), .. } = next(&rx) else { panic!("expected Collections") };
         assert!(names.contains(&"t_list".to_string()) && names.contains(&"v_list".to_string()));
         assert!(views.contains(&"v_list".to_string()) && !views.contains(&"t_list".to_string()));
+    }
+
+    #[test]
+    fn live_schema_lists_columns_keys_and_estimates() {
+        let Some((w, rx, db, p)) = live("t_sch_parent", "id INT UNSIGNED PRIMARY KEY") else { return };
+        exec(&w, &p, "DROP TABLE IF EXISTS quarry_test.t_sch_child");
+        exec(&w, &p, "CREATE TABLE quarry_test.t_sch_child (id INT PRIMARY KEY, parent_id INT UNSIGNED NOT NULL, status ENUM('a','b'), note TEXT, KEY k_parent (parent_id), CONSTRAINT fk_parent FOREIGN KEY (parent_id) REFERENCES t_sch_parent (id))");
+        exec(&w, &p, "DROP VIEW IF EXISTS quarry_test.v_sch");
+        exec(&w, &p, "CREATE VIEW quarry_test.v_sch AS SELECT id FROM quarry_test.t_sch_parent");
+        w.sql_schema(1, db, "quarry_test".into());
+        let Msg::SqlSchema { schema, res: Ok(s), .. } = next(&rx) else { panic!("expected SqlSchema") };
+        assert_eq!(schema, "quarry_test");
+        let child = s.table("t_sch_child").unwrap();
+        assert!(!child.view && child.rows.is_some());
+        let col = |n: &str| child.col(n).unwrap();
+        assert_eq!((col("id").key.as_str(), col("id").nullable, col("id").fk), ("PRI", false, false));
+        assert_eq!((col("parent_id").ty.as_str(), col("parent_id").kind, col("parent_id").fk), ("int unsigned", Kind::UInt, true));
+        assert_eq!((col("status").kind, col("status").nullable), (Kind::Enum, true));
+        assert_eq!(crate::db::sql::schema::enum_values(&col("status").ty), ["a", "b"]);
+        let view = s.table("v_sch").unwrap();
+        assert!(view.view && view.rows.is_none() && view.cols.len() == 1);
+        assert_eq!(child.cols.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["id", "parent_id", "status", "note"]);
+    }
+
+    #[test]
+    fn live_field_values_count_and_respect_the_gate() {
+        let Some((w, rx, db, p)) = live("t_vals", "id INT PRIMARY KEY, status VARCHAR(10), n INT, note VARCHAR(10), KEY k_status (status)") else { return };
+        let vals: Vec<String> = (0..10).map(|i| format!("({i}, '{}', {}, NULL)", if i < 6 { "paid" } else if i < 9 { "open" } else { "it''s" }, i % 2)).collect();
+        exec(&w, &p, &format!("INSERT INTO quarry_test.t_vals VALUES {}", vals.join(",")));
+        let ask = |col: &str, prefix: Option<&str>| {
+            w.sql_field_values(1, db.clone(), "quarry_test".into(), "t_vals".into(), col.into(), prefix.map(str::to_string));
+            let Msg::SqlValues { res, column, .. } = next(&rx) else { panic!("expected SqlValues") };
+            assert_eq!(column, col);
+            res
+        };
+        // Most frequent first, an integer column comes back as text, NULLs are left out.
+        assert_eq!(ask("status", None).unwrap().unwrap(), [("paid".to_string(), 6), ("open".to_string(), 3), ("it's".to_string(), 1)]);
+        assert_eq!(ask("n", None).unwrap().unwrap().len(), 2);
+        assert!(ask("note", None).unwrap().unwrap().is_empty());
+        assert_eq!(ask("status", Some("p")).unwrap().unwrap(), [("paid".to_string(), 6)]);
+        // A wildcard typed by the user is a plain character.
+        assert!(ask("status", Some("%")).unwrap().unwrap().is_empty());
+        // A name that is not a column is the server's error, not an injection.
+        assert!(ask("x` FROM t_vals; --", None).is_err());
+        // Big estimate and no leading index: not looked up. The estimate is faked with a stats-free table of many rows.
+        exec(&w, &p, "DROP TABLE IF EXISTS quarry_test.t_big");
+        exec(&w, &p, "CREATE TABLE quarry_test.t_big (id INT PRIMARY KEY, a INT, b INT, KEY k_ab (a, b))");
+        exec(&w, &p, "SET SESSION cte_max_recursion_depth = 200000; INSERT INTO quarry_test.t_big WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 150000) SELECT i, i % 7, i % 5 FROM s");
+        exec(&w, &p, "ANALYZE TABLE quarry_test.t_big");
+        let big = |col: &str| {
+            w.sql_field_values(1, db.clone(), "quarry_test".into(), "t_big".into(), col.into(), None);
+            let Msg::SqlValues { res, .. } = next(&rx) else { panic!("expected SqlValues") };
+            res
+        };
+        assert_eq!(big("b").unwrap(), None);
+        assert_eq!(big("a").unwrap().unwrap().len(), 7);
     }
 
     #[test]

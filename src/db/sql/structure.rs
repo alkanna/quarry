@@ -156,7 +156,7 @@ pub fn normalize_default(d: Dialect, raw: Option<String>, nullable: bool, extra:
 }
 
 /// An unsigned column value, whichever width and signedness the server reports.
-fn num(r: &MySqlRow, name: &str) -> Option<u64> {
+pub(super) fn num(r: &MySqlRow, name: &str) -> Option<u64> {
     if let Ok(v) = r.try_get::<Option<u64>, _>(name) {
         return v;
     }

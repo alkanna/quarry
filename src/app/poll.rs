@@ -107,6 +107,13 @@ impl App {
                     }
                 }
                 Msg::SqlRan { req, sets, .. } => self.sql_ran(req, sets),
+                Msg::SqlSchema { conn, schema, res } => {
+                    // A failed read leaves the database without a schema until the next Refresh; typing still works.
+                    if let Ok(s) = res {
+                        self.sql_schema.insert((conn, schema), Arc::new(s));
+                    }
+                }
+                Msg::SqlValues { conn, schema, table, column, prefix, res } => self.sql_values_done(conn, schema, table, column, prefix, res),
                 Msg::Collections { conn, db, res } => match res {
                     Ok((v, views)) => {
                         self.views.retain(|(c, d, _)| !(*c == conn && *d == db));

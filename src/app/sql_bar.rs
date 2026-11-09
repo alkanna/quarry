@@ -6,9 +6,11 @@ use super::*;
 use crate::db::sql::{
     lex,
     rules::{self, Grain, Input, Op, Rule},
+    schema::SchemaCol,
     value::Kind,
     Col, Dialect, PageQuery,
 };
+use crate::ui::sql_complete::{open_demo, sql_ac_field, Scope, Wants};
 
 /// The clauses a tab keeps besides the WHERE and ORDER BY text, saved with the open tabs.
 #[derive(Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -59,6 +61,17 @@ pub(super) struct Bar {
     gdlg: GroupDlg,
     /// The table's own columns, kept when a grouped answer replaces the result columns.
     pub(super) table_cols: Vec<Col>,
+    /// The open suggestion list of whichever bar input has it, and what the inputs asked the app to look up.
+    pub(super) ac: Ac,
+    pub(super) wants: Wants,
+}
+
+/// A one line SQL input with highlighting and suggestions. Returns whether Enter ended the edit, which runs the query.
+#[allow(clippy::too_many_arguments)]
+fn sql_input(ui: &mut egui::Ui, id: egui::Id, text: &mut String, ac: &mut Ac, wants: &mut Wants, scope: &Scope, values: &Fields, hint: impl Into<egui::WidgetText>, w: f32) -> bool {
+    let mono = FontId::monospace(TXT_SMALL);
+    let (out, _) = sql_ac_field(ui, id, text, ac, scope, values, wants, |ui, text, _| egui::TextEdit::singleline(text).id(id).frame(editor_margin()).font(mono).hint_text(hint).desired_width(w).layouter(&mut sql_layout).show(ui));
+    out.response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))
 }
 
 /// Splits at commas outside quotes and parentheses: select lists and GROUP BY lists.
@@ -809,9 +822,12 @@ fn group_texts(g: &GroupDlg, d: Dialect) -> (String, String) {
 }
 
 /// Draws the bar and the clause chips. Returns true when the query should run.
-pub(super) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool) -> bool {
+pub(super) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, mut scope: Scope, values: &Fields) -> bool {
     let Some(s) = t.sql.as_mut() else { return false };
     let cols = if s.bar.table_cols.is_empty() { s.cols.clone() } else { s.bar.table_cols.clone() };
+    // The WHERE text has no FROM, so completion reads its columns from the table of the tab. Until the schema is loaded the result's own columns serve.
+    scope.table = Some(t.sel.coll.clone());
+    scope.fallback = cols.iter().map(|c| SchemaCol { name: c.name.clone(), ty: c.ty.clone(), kind: c.kind, key: if s.pk.contains(&c.name) { "PRI".into() } else { String::new() }, nullable: c.nullable, fk: false }).collect();
     let pairs: Vec<(String, Kind)> = cols.iter().map(|c| (c.name.clone(), c.kind)).collect();
     let b = &mut s.bar;
     let mut run = false;
@@ -864,8 +880,10 @@ pub(super) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool) -> bool 
                 ui.add_sized([0.0, BUTTON_H], egui::Label::new(RichText::new("WHERE").font(mono.clone()).color(C_KEYWORD())));
                 if b.c.sql {
                     let w = (ui.max_rect().right() - ui.cursor().left() - 24.0).max(160.0);
-                    let r = ui.add(egui::TextEdit::singleline(&mut t.filter_txt).id(fid).frame(editor_margin()).font(mono.clone()).hint_text(RichText::new("status = 'paid' AND total > 50").color(FAINT())).desired_width(w).layouter(&mut sql_layout));
-                    run |= r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                    if std::env::var("QUARRY_TEST_SQL").is_ok_and(|v| v == "ac") {
+                        open_demo(ui, fid, &t.filter_txt, &mut b.ac, &scope, values);
+                    }
+                    run |= sql_input(ui, fid, &mut t.filter_txt, &mut b.ac, &mut b.wants, &scope, values, RichText::new("status = 'paid' AND total > 50").color(FAINT()), w);
                 } else {
                     let mut edit: Option<usize> = None;
                     let mut remove: Option<usize> = None;
@@ -930,12 +948,12 @@ pub(super) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool) -> bool 
         ui.painter().rect_stroke(frame.response.rect.expand(1.0), R_BAR + 1, Stroke::new(2.0, tint(PRIMARY(), 60)), egui::StrokeKind::Outside);
     }
     ui.add_space(8.0);
-    run |= clauses(ui, t, d, &cols);
+    run |= clauses(ui, t, d, &cols, &scope, values);
     run
 }
 
 /// The chips under the bar, and the Copy as SQL and Explain buttons.
-fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col]) -> bool {
+fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col], scope: &Scope, values: &Fields) -> bool {
     let (db_name, table) = (t.sel.db.clone(), t.sel.coll.clone());
     let pk = t.sql.as_ref().map(|s| s.pk.clone()).unwrap_or_default();
     let matched = t.sql.as_ref().and_then(|s| s.matched).unwrap_or(0);
@@ -956,14 +974,12 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col]) -> bool {
                 let id = query_id("SQL-ORDER");
                 let tw = (text_w(ui, if t.sort_txt.is_empty() { "created_at DESC" } else { &t.sort_txt }, mono.clone()) + 8.0).clamp(24.0, 420.0);
                 run |= opt_chip(ui, "ORDER BY", id, &mut t.sort_txt, |ui, text| {
-                    let r = ui.add(egui::TextEdit::singleline(text).id(id).frame(editor_margin()).font(mono.clone()).hint_text("created_at DESC").desired_width(tw).layouter(&mut sql_layout));
-                    r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))
+                    sql_input(ui, id, text, &mut b.ac, &mut b.wants, scope, values, "created_at DESC", tw)
                 });
                 let id = query_id("SQL-GROUP");
                 let tw = (text_w(ui, if b.c.group.is_empty() { "status, currency" } else { &b.c.group }, mono.clone()) + 8.0).clamp(24.0, 420.0);
                 run |= opt_chip(ui, "GROUP BY", id, &mut b.c.group, |ui, text| {
-                    let r = ui.add(egui::TextEdit::singleline(text).id(id).frame(editor_margin()).font(mono.clone()).hint_text("status, currency").desired_width(tw).layouter(&mut sql_layout));
-                    r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))
+                    sql_input(ui, id, text, &mut b.ac, &mut b.wants, scope, values, "status, currency", tw)
                 });
             } else {
                 let keys = parse_order(&t.sort_txt);
@@ -1022,8 +1038,7 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col]) -> bool {
                 let id = query_id("SQL-HAVING");
                 let tw = (text_w(ui, if b.c.having.is_empty() { "orders > 10" } else { &b.c.having }, mono.clone()) + 8.0).clamp(24.0, 420.0);
                 run |= opt_chip(ui, "HAVING", id, &mut b.c.having, |ui, text| {
-                    let r = ui.add(egui::TextEdit::singleline(text).id(id).frame(editor_margin()).font(mono.clone()).hint_text("orders > 10").desired_width(tw).layouter(&mut sql_layout));
-                    r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))
+                    sql_input(ui, id, text, &mut b.ac, &mut b.wants, scope, values, "orders > 10", tw)
                 });
             }
             // LIMIT
@@ -1038,8 +1053,7 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col]) -> bool {
                     let id = query_id("SQL-COLUMNS");
                     let tw = (text_w(ui, if b.c.select.is_empty() { "id, status, total" } else { &b.c.select }, mono.clone()) + 8.0).clamp(24.0, 420.0);
                     run |= opt_chip(ui, "Columns", id, &mut b.c.select, |ui, text| {
-                        let r = ui.add(egui::TextEdit::singleline(text).id(id).frame(editor_margin()).font(mono.clone()).hint_text("id, status, total").desired_width(tw).layouter(&mut sql_layout));
-                        r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))
+                        sql_input(ui, id, text, &mut b.ac, &mut b.wants, scope, values, "id, status, total", tw)
                     });
                 } else {
                     let n = split_top(&b.c.select).len();

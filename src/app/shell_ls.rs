@@ -346,7 +346,7 @@ impl App {
                 let call = i.from.is_none() && i.insert == i.label && matches!(i.kind, 2 | 3);
                 let insert = if call { format!("{}()", i.insert) } else { i.insert.clone() };
                 let caret = insert.chars().count() - call as usize;
-                (Sug { back, text: i.label.clone(), note: kind_note(i.kind), insert, caret }, i)
+                (Sug { sql: None, back, text: i.label.clone(), note: kind_note(i.kind), insert, caret }, i)
             })
             .collect();
         let lower = typed.to_ascii_lowercase();

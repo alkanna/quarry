@@ -186,7 +186,7 @@ impl App {
                     .iter()
                     .filter(|p| !typed.is_empty() && p.to_lowercase().contains(&typed) && !shown.contains(p))
                     .take(50)
-                    .map(|p| Sug { back: 0, text: p.clone(), note: "field", insert: p.clone(), caret: p.chars().count() })
+                    .map(|p| Sug { sql: None, back: 0, text: p.clone(), note: "field", insert: p.clone(), caret: p.chars().count() })
                     .collect();
                 (!items.is_empty()).then(|| (b.chars().count(), items))
             };

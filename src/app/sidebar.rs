@@ -548,6 +548,7 @@ impl App {
             return self.sql_new_query(conn, db);
         }
         if let (SideAct::Refresh(db), Some(sql)) = (&a, self.conn(conn).and_then(|c| c.sql.clone())) {
+            self.sql_refresh_schema(conn, db);
             return self.worker.sql_tables(conn, sql, db.clone());
         }
         if self.conn(conn).is_some_and(|c| c.meta.engine.is_sql()) {
