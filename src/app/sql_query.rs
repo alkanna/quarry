@@ -547,11 +547,17 @@ impl App {
                 }
                 if p.next || p.n > 0 {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let to = match known {
+                        // The pager reads left to right, so it gets its own layout at last frame's width, as in Content.
+                        let id = ui.scope_id().with("pager-w");
+                        let w = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(150.0);
+                        let r = ui.allocate_ui_with_layout(egui::vec2(w, BUTTON_H), egui::Layout::left_to_right(egui::Align::Center), |ui| match known {
                             Some(n) => pager(ui, p.n, (n as usize).div_ceil(db::sql::RUN_ROWS_MAX).max(1)),
                             None => open_pager(ui, p.n, p.next),
-                        };
-                        goto = to.filter(|n| *n != p.n && !running).map(|n| (sel, n));
+                        });
+                        if r.response.rect.width() != w {
+                            ui.data_mut(|d| d.insert_temp(id, r.response.rect.width()));
+                        }
+                        goto = r.inner.filter(|n| *n != p.n && !running).map(|n| (sel, n));
                     });
                 }
             });
