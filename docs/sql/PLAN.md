@@ -11,7 +11,7 @@ Update this list when a step lands. Each step is reviewed before it is ticked.
 **v1**
 - [x] 1. sqlx dependency, `db::sql::Engine` and `Addr` `ConnMeta.engine`, connection form B. Advanced tab skipped until needed. Temporary spots for step 4: disabled Test for SQL in conn_form.rs, early return in `App::connect`
 - [x] 2. SSH plain port-forward mode in src/ssh.rs (`ssh::open(.., Some((host, port)))`, connect to 127.0.0.1:tunnel.port)
-- [ ] 3. `db/sql/{lex,value}.rs` and `Dialect` with unit tests
+- [x] 3. `db/sql/{lex,value}.rs` and `Dialect` with unit tests. Reviewed: read-only check passes under every quoting mode and both readings of versioned comments
 - [ ] 4. SQL worker, new `Msg` variants, live tests (`QUARRY_TEST_MYSQL`)
 - [ ] 5. state, tabs, poll and sidebar wiring
 - [ ] 6. Content view with design F: Rules / SQL bar, clause chips, edits, undo, colors, column actions, multi-select, Copy as (incl. Markdown and HTML)
