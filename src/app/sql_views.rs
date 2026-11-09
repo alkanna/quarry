@@ -69,10 +69,11 @@ impl App {
         ui.add_space(10.0);
         let t = self.t().unwrap();
         let (count, ms, loading, page) = (t.count, t.ms, t.loading, t.page);
+        let approx = if t.sql.as_ref().is_some_and(|s| s.estimated) { "~" } else { "" };
         let pages = count.div_ceil(self.page_size()).max(1);
         let mut go: Option<u64> = None;
         ui.horizontal(|ui| {
-            ui.label(semibold(RichText::new(format!("{} rows", group(&count.to_string()))).font(FontId::monospace(TXT_SMALL)).color(BRIGHT())));
+            ui.label(semibold(RichText::new(format!("{approx}{} rows", group(&count.to_string()))).font(FontId::monospace(TXT_SMALL)).color(BRIGHT())));
             ui.label(RichText::new(format!("{ms} ms")).font(FontId::monospace(TXT_SMALL)).color(SUCCESS()));
             if loading {
                 spin(ui);

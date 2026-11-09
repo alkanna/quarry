@@ -92,9 +92,9 @@ impl App {
                         }
                     }
                 }
-                Msg::SqlCols { req, cols, pk } => {
+                Msg::SqlCols { req, cols, pk, estimated } => {
                     if let Some(s) = self.tab_by_req(req).and_then(|t| t.sql.as_mut()) {
-                        (s.cols, s.pk) = (cols, pk);
+                        (s.cols, s.pk, s.estimated) = (cols, pk, estimated);
                     }
                 }
                 // Applied by the Custom Query view (docs/sql/PLAN.md step 8).

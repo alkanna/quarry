@@ -237,6 +237,8 @@ pub(super) struct SqlTab {
     pub(super) cols: Vec<db::sql::Col>,
     /// Primary key column names; empty means the rows cannot be edited.
     pub(super) pk: Vec<String>,
+    /// The row count is the server's table estimate, shown with a ~.
+    pub(super) estimated: bool,
     /// Server connection id of the running Custom Query, for Stop (step 8).
     #[allow(dead_code)]
     pub(super) run_conn:Arc<std::sync::atomic::AtomicU64>,
