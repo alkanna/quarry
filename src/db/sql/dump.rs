@@ -65,6 +65,39 @@ fn lit(s: &str) -> String {
     super::value::lit(s, true)
 }
 
+/// A name as it is written in a `--` comment line. A line break in a name would end the comment and turn the
+/// rest of the name into a statement when the file is run (the class of CVE-2016-5483), so every control
+/// character becomes a space.
+fn note(s: &str) -> String {
+    s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
+}
+
+/// The order to create views in: a view after the views it selects from, otherwise as listed. Each entry is a
+/// name and its CREATE statement. A reference is a backtick name after the `AS` of the statement, so a column
+/// that shares a view's name may add an order that is not needed; a loop that this makes is broken in list
+/// order instead of failing.
+fn view_order(views: &[(String, String)]) -> Vec<usize> {
+    let deps: Vec<Vec<usize>> = views
+        .iter()
+        .enumerate()
+        .map(|(i, (_, sql))| {
+            let toks = lex::tokens(sql);
+            let word = |k: usize, w: &str| toks[k].0 == lex::Tok::Word && sql[toks[k].1.clone()].eq_ignore_ascii_case(w);
+            let view = (0..toks.len()).find(|&k| word(k, "VIEW")).unwrap_or(0);
+            let body = (view..toks.len()).find(|&k| word(k, "AS")).map_or(0, |k| k + 1);
+            let named: Vec<&str> = toks[body..].iter().filter(|t| t.0 == lex::Tok::Quoted).map(|t| &sql[t.1.clone()]).collect();
+            (0..views.len()).filter(|&j| j != i && named.contains(&Dialect::MySql.quote_ident(&views[j].0).as_str())).collect()
+        })
+        .collect();
+    let (mut done, mut out) = (vec![false; views.len()], Vec::new());
+    while out.len() < views.len() {
+        let next = (0..views.len()).find(|&i| !done[i] && deps[i].iter().all(|&j| done[j])).or_else(|| (0..views.len()).find(|&i| !done[i])).unwrap_or(0);
+        done[next] = true;
+        out.push(next);
+    }
+    out
+}
+
 fn numeric(k: Kind) -> bool {
     matches!(k, Kind::Int | Kind::UInt | Kind::Float | Kind::Decimal)
 }
@@ -128,7 +161,9 @@ fn flush_rows(batch: &mut Vec<Document>, copy: &[CopyCol], table: &str, out: &mu
 #[allow(clippy::too_many_arguments)]
 async fn write_rows(c: &mut sqlx::MySqlConnection, d: Dialect, plan: &DumpPlan, table: &str, out: &mut (dyn Write + Send), count: &AtomicU64, base: u64, cancel: &AtomicBool) -> Res<u64> {
     let cols = table_cols(c, d, &plan.schema, table).await?;
-    let list = cols.names.iter().map(|n| d.quote_ident(n)).collect::<Vec<_>>().join(", ");
+    // The server writes a FLOAT as text with six digits, which reads back as another float. As a double it is
+    // exact, and the float it is written back into rounds to the same value. `* 1e0` keeps -0, `+ 0e0` would not.
+    let list = cols.names.iter().map(|n| if cols.meta.get(n).is_some_and(|m| m.0.to_ascii_lowercase().starts_with("float")) { format!("{0} * 1e0 AS {0}", d.quote_ident(n)) } else { d.quote_ident(n) }).collect::<Vec<_>>().join(", ");
     let mut sql = format!("SELECT {list} FROM {}", d.qualified(&plan.schema, table));
     if let Some(f) = plan.filter.as_ref().filter(|f| !f.trim().is_empty()) {
         // The clause is the user's text, so the whole statement must still be one statement that only reads.
@@ -194,6 +229,15 @@ pub async fn dump(db: &Db, plan: &DumpPlan, out: &mut (dyn Write + Send), count:
     // The statement timeout of the pool would cut the read of a big table short.
     let timeout = d.session_timeout(0);
     let _ = c.execute(timeout.as_str()).await;
+    // Like mysqldump: SHOW CREATE writes names the way the session's sql_mode quotes them, so ANSI_QUOTES in the
+    // server's mode would write "t", which the file cannot run back. A filter is the user's text, read under the
+    // mode they typed it in, and a filtered dump writes no CREATE, so it keeps the mode.
+    if plan.filter.is_none() {
+        c.execute("SET SESSION sql_mode = '', SESSION sql_quote_show_create = 1").await.map_err(e)?;
+    }
+    // TIMESTAMP values are read in the session's zone; the file says which zone that is, so a restore in any
+    // zone stores the same instants.
+    c.execute("SET SESSION time_zone = '+00:00'").await.map_err(e)?;
     if plan.snapshot {
         c.execute("START TRANSACTION WITH CONSISTENT SNAPSHOT").await.map_err(e)?;
     }
@@ -208,26 +252,39 @@ pub async fn dump(db: &Db, plan: &DumpPlan, out: &mut (dyn Write + Send), count:
 
 async fn dump_on(c: &mut sqlx::MySqlConnection, d: Dialect, db: &Db, plan: &DumpPlan, out: &mut (dyn Write + Send), count: &AtomicU64, cancel: &AtomicBool) -> Res<u64> {
     let q = |n: &str| d.quote_ident(n);
-    put(out, &format!("-- Quarry SQL dump\n-- Server: {}\n-- Database: {}\n\n", db.label(), plan.schema))?;
-    put(out, &format!("SET NAMES utf8mb4;\nSET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE={};\nSET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0;\n\n", lit(DUMP_MODE)))?;
+    put(out, &format!("-- Quarry SQL dump\n-- Server: {}\n-- Database: {}\n\n", note(&db.label()), note(&plan.schema)))?;
+    put(out, &format!("SET NAMES utf8mb4;\nSET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE={};\nSET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0;\nSET @OLD_TIME_ZONE=@@TIME_ZONE, TIME_ZONE='+00:00';\n\n", lit(DUMP_MODE)))?;
     if plan.create_db {
         let (_, s) = show_create(c, format!("SHOW CREATE DATABASE {}", q(&plan.schema)), 1).await?;
         put(out, &format!("{};\nUSE {};\n\n", create_db_sql(&s), q(&plan.schema)))?;
     }
     let mut rows = 0u64;
+    // The CREATE of every view is read first, so views can be written after the views they select from.
+    // Collected first: an iterator with a closure alive across the awaits makes the future too general to spawn.
+    let view_rows: Vec<&DumpTable> = plan.tables.iter().filter(|t| t.view).collect();
+    let mut views: Vec<(String, String)> = Vec::new();
+    for t in &view_rows {
+        stopped(cancel)?;
+        let s = if t.structure { show_create(c, d.create_stmt(true, &plan.schema, &t.name), 1).await?.1 } else { String::new() };
+        views.push((t.name.clone(), s));
+    }
+    let order = view_order(&views);
     // Tables first, then views, which need them; data before triggers, which would otherwise fire on every row.
-    let tables: Vec<&DumpTable> = plan.tables.iter().filter(|t| !t.view).chain(plan.tables.iter().filter(|t| t.view)).collect();
+    let tables: Vec<&DumpTable> = plan.tables.iter().filter(|t| !t.view).chain(order.iter().map(|&i| view_rows[i])).collect();
     for t in &tables {
         stopped(cancel)?;
         if !t.structure && !t.content {
             continue;
         }
-        put(out, &format!("--\n-- {} {}\n--\n\n", if t.view { "View" } else { "Table" }, t.name))?;
+        put(out, &format!("--\n-- {} {}\n--\n\n", if t.view { "View" } else { "Table" }, note(&t.name)))?;
         if t.drop {
             put(out, &format!("DROP {} IF EXISTS {};\n", if t.view { "VIEW" } else { "TABLE" }, q(&t.name)))?;
         }
-        if t.structure {
-            let (_, s) = show_create(c, d.create_stmt(t.view, &plan.schema, &t.name), 1).await?;
+        if t.structure && t.view {
+            let s = views.iter().find(|v| v.0 == t.name).map(|v| v.1.as_str()).unwrap_or_default();
+            put(out, &format!("{s};\n"))?;
+        } else if t.structure {
+            let (_, s) = show_create(c, d.create_stmt(false, &plan.schema, &t.name), 1).await?;
             put(out, &format!("{s};\n"))?;
         }
         if t.content && !t.view {
@@ -244,7 +301,7 @@ async fn dump_on(c: &mut sqlx::MySqlConnection, d: Dialect, db: &Db, plan: &Dump
             for n in names {
                 stopped(cancel)?;
                 let (mode, stmt) = show_create(c, format!("SHOW CREATE TRIGGER {}", d.qualified(&plan.schema, &n)), 2).await?;
-                put(out, &format!("--\n-- Trigger {n}\n--\n\nDROP TRIGGER IF EXISTS {};\n{}\n", q(&n), delimited(mode.as_deref(), &stmt)))?;
+                put(out, &format!("--\n-- Trigger {}\n--\n\nDROP TRIGGER IF EXISTS {};\n{}\n", note(&n), q(&n), delimited(mode.as_deref(), &stmt)))?;
             }
         }
         let routines: Vec<(String, String)> = sqlx::query("SELECT ROUTINE_NAME AS name, ROUTINE_TYPE AS kind FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ? ORDER BY ROUTINE_TYPE, ROUTINE_NAME").bind(&plan.schema).fetch_all(&mut *c).await.map_err(e)?.iter().filter_map(|r| Some((text(r, "name")?, text(r, "kind")?.to_ascii_uppercase()))).collect();
@@ -253,13 +310,13 @@ async fn dump_on(c: &mut sqlx::MySqlConnection, d: Dialect, db: &Db, plan: &Dump
             let kind = if kind == "FUNCTION" { "FUNCTION" } else { "PROCEDURE" };
             let (mode, stmt) = show_create(c, format!("SHOW CREATE {kind} {}", d.qualified(&plan.schema, &n)), 2).await?;
             if stmt.is_empty() {
-                put(out, &format!("-- {kind} {n} was left out: the account may not read its definition.\n\n"))?;
+                put(out, &format!("-- {kind} {} was left out: the account may not read its definition.\n\n", note(&n)))?;
                 continue;
             }
-            put(out, &format!("--\n-- {kind} {n}\n--\n\nDROP {kind} IF EXISTS {};\n{}\n", q(&n), delimited(mode.as_deref(), &stmt)))?;
+            put(out, &format!("--\n-- {kind} {}\n--\n\nDROP {kind} IF EXISTS {};\n{}\n", note(&n), q(&n), delimited(mode.as_deref(), &stmt)))?;
         }
     }
-    put(out, "SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS;\nSET SQL_MODE=@OLD_SQL_MODE;\n-- Dump complete\n")?;
+    put(out, "SET TIME_ZONE=@OLD_TIME_ZONE;\nSET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS;\nSET SQL_MODE=@OLD_SQL_MODE;\n-- Dump complete\n")?;
     Ok(rows)
 }
 
@@ -286,47 +343,9 @@ pub async fn dump_to(db: &Db, plan: &DumpPlan, path: PathBuf, count: &AtomicU64,
     res.map(|rows| Done { rows, #[cfg(test)] peak_batch: 0, path: Some(path), files: 1, text: None })
 }
 
-/// Reads text from `r` in pieces, holding back a character that a read cut in two.
-struct Utf8Chunks<R: Read> {
-    r: R,
-    carry: Vec<u8>,
-    first: bool,
-    buf: Vec<u8>,
-}
-
-impl<R: Read> Utf8Chunks<R> {
-    fn new(r: R) -> Utf8Chunks<R> {
-        Utf8Chunks { r, carry: Vec::new(), first: true, buf: vec![0; 256 << 10] }
-    }
-}
-
-impl<R: Read> Utf8Chunks<R> {
-    fn next(&mut self) -> Res<Option<String>> {
-        let n = self.r.read(&mut self.buf).map_err(|x| format!("Could not read the file: {x}"))?;
-        let mut bytes = std::mem::take(&mut self.carry);
-        bytes.extend_from_slice(&self.buf[..n]);
-        if n == 0 {
-            return Ok((!bytes.is_empty()).then(|| String::from_utf8_lossy(&bytes).into_owned()));
-        }
-        let keep = match std::str::from_utf8(&bytes) {
-            Ok(_) => bytes.len(),
-            Err(x) if x.error_len().is_none() => x.valid_up_to(),
-            Err(_) => bytes.len(),
-        };
-        self.carry = bytes.split_off(keep);
-        let mut text = String::from_utf8_lossy(&bytes).into_owned();
-        if self.first {
-            self.first = false;
-            if let Some(t) = text.strip_prefix('\u{feff}') {
-                text = t.to_string();
-            }
-        }
-        Ok(Some(text))
-    }
-}
-
 /// The statement as the error message shows it.
-fn excerpt(s: &str) -> String {
+fn excerpt(s: &[u8]) -> String {
+    let s = String::from_utf8_lossy(&s[..s.len().min(2400)]);
     let t: String = s.chars().take(600).collect();
     if s.chars().count() > 600 { format!("{t}...") } else { t }
 }
@@ -346,15 +365,18 @@ pub async fn run_file(db: Db, schema: String, src: Source, read_only: bool, prog
     }
     let timeout = db.dialect.session_timeout(0);
     let _ = c.execute(timeout.as_str()).await;
-    let open = src.open().map_err(|x| format!("Could not read the file: {x}"))?;
-    let mut chunks = Utf8Chunks::new(open);
+    let mut file = src.open().map_err(|x| format!("Could not read the file: {x}"))?;
     let mut sp = ScriptSplitter::new(mode_of(&mut c).await);
+    if let Some(max) = max_packet(&mut c).await {
+        sp.set_max(max);
+    }
+    let mut buf = vec![0u8; 256 << 10];
     let (mut n, mut eof) = (0u64, false);
     let res: Res<Ran> = 'run: {
         loop {
             let piece = match sp.next_piece() {
                 Ok(p) => p,
-                Err(x) => break 'run Err(x),
+                Err(x) => break 'run Err(format!("Statement {}: {x}", n + 1)),
             };
             match piece {
                 Some(Piece::Delimiter(_)) => {}
@@ -363,16 +385,16 @@ pub async fn run_file(db: Db, schema: String, src: Source, read_only: bool, prog
                         break 'run Err("Cancelled.".into());
                     }
                     n += 1;
-                    let outcome = run_text(&mut c, &stmt).await;
+                    let outcome = run_stmt(&mut c, &stmt).await;
                     if let Err(x) = outcome {
-                        break 'run Err(format!("Statement {n} failed: {}
+                        break 'run Err(format!("Statement {n} failed: {x}
 
 {}
 
-Statements before it ran and stay applied.", e(x), excerpt(&stmt)));
+Statements before it ran and stay applied.", excerpt(&stmt)));
                     }
                     // A SET of sql_mode changes how the rest of the file must be read.
-                    if lex::changes_escaping(&stmt) {
+                    if lex::changes_escaping(&String::from_utf8_lossy(&stmt)) {
                         let bs = mode_of(&mut c).await;
                         sp.set_backslash(bs);
                     }
@@ -380,14 +402,20 @@ Statements before it ran and stay applied.", e(x), excerpt(&stmt)));
                     prog.bytes.store(sp.offset(), Ordering::Relaxed);
                 }
                 None if eof => break,
-                None => match chunks.next() {
-                    Ok(Some(t)) => sp.feed(&t),
-                    Ok(None) => {
-                        eof = true;
-                        sp.finish();
+                None => {
+                    // Checked here too: a statement that never ends (an unclosed quote) is all reading, no running.
+                    if cancel.load(Ordering::SeqCst) {
+                        break 'run Err("Cancelled.".into());
                     }
-                    Err(x) => break 'run Err(x),
-                },
+                    match file.read(&mut buf) {
+                        Ok(0) => {
+                            eof = true;
+                            sp.finish();
+                        }
+                        Ok(k) => sp.feed(&buf[..k]),
+                        Err(x) => break 'run Err(format!("Could not read the file: {x}")),
+                    }
+                }
             }
         }
         prog.bytes.store(sp.offset(), Ordering::Relaxed);
@@ -401,6 +429,25 @@ Statements before it ran and stay applied.", e(x), excerpt(&stmt)));
     }
 }
 
+/// Runs one statement and reads its results to the end. The text protocol of the driver only takes UTF-8, but a
+/// dump may hold binary values written raw (mysqldump without --hex-blob, or a file in latin1). Such a statement
+/// goes to the server as a bound value instead, which arrives byte for byte, and runs from there as a prepared
+/// statement: a binary string is not converted to the connection's character set, so the server reads exactly
+/// the bytes of the file, as the mysql client would send them.
+async fn run_stmt(c: &mut sqlx::MySqlConnection, stmt: &[u8]) -> Result<(), String> {
+    if let Ok(text) = std::str::from_utf8(stmt) {
+        return run_text(c, text).await.map_err(e);
+    }
+    sqlx::query("SET @quarry_stmt = ?").bind(stmt).execute(&mut *c).await.map_err(e)?;
+    let mut r = run_text(c, "PREPARE quarry_stmt FROM @quarry_stmt").await;
+    if r.is_ok() {
+        r = run_text(c, "EXECUTE quarry_stmt").await;
+        let _ = run_text(c, "DEALLOCATE PREPARE quarry_stmt").await;
+    }
+    let _ = run_text(c, "SET @quarry_stmt = NULL").await;
+    r.map_err(|x| format!("{} (The statement holds bytes that are not UTF-8, so it ran as a prepared statement.)", e(x)))
+}
+
 /// Runs one statement as text and reads its results to the end.
 async fn run_text(c: &mut sqlx::MySqlConnection, stmt: &str) -> Result<(), sqlx::Error> {
     let mut s = raw_sql(stmt).fetch_many(&mut *c);
@@ -408,6 +455,18 @@ async fn run_text(c: &mut sqlx::MySqlConnection, stmt: &str) -> Result<(), sqlx:
         item?;
     }
     Ok(())
+}
+
+/// The longest statement the server takes, read once per file.
+async fn max_packet(c: &mut sqlx::MySqlConnection) -> Option<usize> {
+    let mut s = raw_sql("SELECT @@max_allowed_packet").fetch_many(&mut *c);
+    let mut max = None;
+    while let Some(item) = futures_util::StreamExt::next(&mut s).await {
+        if let Ok(sqlx::Either::Right(r)) = item {
+            max = raw(&r, 0).and_then(|b| std::str::from_utf8(b).ok()?.parse().ok());
+        }
+    }
+    max
 }
 
 async fn mode_of(c: &mut sqlx::MySqlConnection) -> bool {
@@ -459,7 +518,7 @@ mod tests {
         assert_eq!(s, "SET sql_mode = 'ANSI_QUOTES,STRICT_TRANS_TABLES';\nDELIMITER ;;\nCREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END;;\nDELIMITER ;\nSET sql_mode = 'NO_AUTO_VALUE_ON_ZERO';\n");
         // What was written reads back as exactly its statements.
         let mut sp = ScriptSplitter::new(true);
-        sp.feed(&s);
+        sp.feed(s.as_bytes());
         sp.finish();
         let mut got = Vec::new();
         while let Some(p) = sp.next_piece().unwrap() {
@@ -481,28 +540,30 @@ mod tests {
     }
 
     #[test]
-    fn a_file_is_read_in_chunks_without_cutting_a_character() {
-        let text = "SELECT 'caf\u{e9} \u{1F600}';\n".repeat(300);
-        // A reader that hands out a few bytes at a time lands inside characters.
-        struct Slow<'a>(&'a [u8], usize);
-        impl Read for Slow<'_> {
-            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-                let n = self.1.min(self.0.len()).min(buf.len());
-                buf[..n].copy_from_slice(&self.0[..n]);
-                self.0 = &self.0[n..];
-                Ok(n)
-            }
-        }
-        for cut in [1usize, 2, 3, 5, 4096] {
-            let mut ch = Utf8Chunks::new(Slow(text.as_bytes(), cut));
-            let mut all = String::new();
-            while let Some(t) = ch.next().unwrap() {
-                all.push_str(&t);
-            }
-            assert_eq!(all, text, "cut {cut}");
-        }
-        let mut ch = Utf8Chunks::new(std::io::Cursor::new(b"\xEF\xBB\xBFSELECT 1".to_vec()));
-        assert_eq!(ch.next().unwrap().unwrap(), "SELECT 1");
+    fn a_name_in_a_comment_line_cannot_start_a_statement() {
+        let name = "x\nDROP DATABASE qi_victim;\n-- x\r\u{b}y";
+        assert_eq!(note(name), "x DROP DATABASE qi_victim; -- x  y");
+        // Read back, the whole header is one comment and nothing else.
+        let line = format!("--\n-- Table {}\n--\n", note(name));
+        let mut sp = ScriptSplitter::new(true);
+        sp.feed(line.as_bytes());
+        sp.finish();
+        assert_eq!(sp.next_piece().unwrap(), None);
+    }
+
+    #[test]
+    fn views_come_after_the_views_they_select_from() {
+        let v = |n: &str, from: &str| (n.to_string(), format!("CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`%` SQL SECURITY DEFINER VIEW `{n}` AS select `{from}`.`a` AS `a` from `{from}`"));
+        // a_top reads z_base, which reads the table t: alphabetical order would create a_top first.
+        let views = [v("a_top", "z_base"), v("m_mid", "a_top"), v("z_base", "t")];
+        let order: Vec<&str> = view_order(&views).into_iter().map(|i| views[i].0.as_str()).collect();
+        assert_eq!(order, ["z_base", "a_top", "m_mid"]);
+        // Independent views keep their order, and a loop (from a column that shares a view's name) still writes all.
+        assert_eq!(view_order(&[v("a", "t"), v("b", "t")]), [0, 1]);
+        assert_eq!(view_order(&[v("a", "b"), v("b", "a")]), [0, 1]);
+        // The definer and the view's own name are not references.
+        assert_eq!(view_order(&[v("root", "t"), v("b", "t")]), [0, 1]);
+        assert!(view_order(&[]).is_empty());
     }
     use crate::db::sql::testing::every_server;
 
@@ -621,6 +682,195 @@ mod tests {
             assert!(locked.err().unwrap().contains("locked"), "{var}");
             let _ = std::fs::remove_file(p);
             l.sql(&format!("DROP DATABASE {db}"));
+        });
+    }
+
+    /// Every table and view of `db`, all of it, as the Whole database choice writes it.
+    fn whole(l: &crate::db::sql::testing::Live, db: &str) -> DumpPlan {
+        let names: Vec<(String, bool)> = l.w.rt.block_on(async {
+            let rows = sqlx::raw_sql(&format!("SELECT TABLE_NAME, TABLE_TYPE = 'VIEW' FROM information_schema.TABLES WHERE TABLE_SCHEMA = '{db}' ORDER BY TABLE_NAME")).fetch_all(&l.pool).await.unwrap();
+            rows.iter().map(|r| (String::from_utf8_lossy(raw(r, 0).unwrap()).into_owned(), raw(r, 1) == Some(b"1"))).collect()
+        });
+        DumpPlan { schema: db.into(), tables: names.into_iter().map(|(name, view)| DumpTable { name, view, structure: true, content: !view, drop: true }).collect(), create_db: true, extras: true, rows_per_insert: 1000, snapshot: true, filter: None }
+    }
+
+    fn dump_with(l: &crate::db::sql::testing::Live, db: &Db, plan: &DumpPlan, path: &Path) {
+        let (count, cancel, id) = (AtomicU64::new(0), AtomicBool::new(false), AtomicU64::new(0));
+        l.w.rt.block_on(dump_to(db, plan, path.to_path_buf(), &count, &cancel, &id)).unwrap_or_else(|x| panic!("dump: {x}"));
+    }
+
+    fn run_with(l: &crate::db::sql::testing::Live, db: &Db, schema: &str, path: &Path) -> Res<Ran> {
+        l.w.rt.block_on(run_file(db.clone(), schema.into(), Source::File(path.to_path_buf()), false, Arc::new(Progress::default()), Arc::new(AtomicBool::new(false)), Arc::new(AtomicU64::new(0))))
+    }
+
+    #[test]
+    fn live_a_table_name_with_a_line_break_cannot_drop_another_database() {
+        every_server(|l, var| {
+            let (src, victim) = ("quarry_if_inj_src", "quarry_if_inj_victim");
+            l.sql(&format!("DROP DATABASE IF EXISTS {src}; DROP DATABASE IF EXISTS {victim}; CREATE DATABASE {src}; CREATE DATABASE {victim}; CREATE TABLE {victim}.keep (id INT)"));
+            l.sql(&format!("CREATE TABLE {src}.`x\nDROP DATABASE {victim};\n-- x` (id INT); INSERT INTO {src}.`x\nDROP DATABASE {victim};\n-- x` VALUES (1)"));
+            let path = tmp(var, "inj.sql");
+            dump_with(l, &l.db, &whole(l, src), &path);
+            // Read back as the run reads it, no statement drops a database (the name inside backticks may span lines).
+            let mut sp = ScriptSplitter::new(true);
+            sp.feed(&std::fs::read(&path).unwrap());
+            sp.finish();
+            while let Some(p) = sp.next_piece().unwrap() {
+                if let Piece::Stmt(s) = p {
+                    assert!(!String::from_utf8_lossy(&s).to_ascii_uppercase().starts_with("DROP DATABASE"), "{var}: {}", String::from_utf8_lossy(&s));
+                }
+            }
+            l.sql(&format!("DROP DATABASE {src}"));
+            run_with(l, &l.db, "", &path).unwrap_or_else(|x| panic!("{var}: {x}"));
+            assert_eq!(l.one(&format!("SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = '{victim}'")), "1", "{var}: the victim database is still there");
+            assert_eq!(l.count(&format!("{src}.`x\nDROP DATABASE {victim};\n-- x`")), 1, "{var}");
+            let _ = std::fs::remove_file(path);
+            l.sql(&format!("DROP DATABASE {src}; DROP DATABASE {victim}"));
+        });
+    }
+
+    #[test]
+    fn live_binary_values_written_raw_arrive_byte_for_byte() {
+        every_server(|l, var| {
+            let db = "quarry_if_raw";
+            l.sql(&format!("DROP DATABASE IF EXISTS {db}; CREATE DATABASE {db}; CREATE TABLE {db}.t (id INT PRIMARY KEY, b BLOB)"));
+            // As mysqldump writes a BLOB without --hex-blob: the bytes raw, only NUL, newline and quote escaped,
+            // with and without the _binary introducer of newer versions.
+            let raw_value = b"\\0\xFF\x80\xC3\xE2A\\n\\'";
+            let mut file = b"/*!40101 SET NAMES utf8mb4 */;\nINSERT INTO t VALUES (1,'".to_vec();
+            file.extend_from_slice(raw_value);
+            file.extend_from_slice(b"'),(2,_binary '");
+            file.extend_from_slice(raw_value);
+            file.extend_from_slice(b"');\nINSERT INTO t VALUES (3, 'plain');\n");
+            let path = tmp(var, "raw.sql");
+            std::fs::write(&path, &file).unwrap();
+            let ran = run_with(l, &l.db, db, &path).unwrap_or_else(|x| panic!("{var}: {x}"));
+            assert_eq!(ran.statements, 3, "{var}");
+            for id in [1, 2] {
+                assert_eq!(l.one(&format!("SELECT HEX(b) FROM {db}.t WHERE id = {id}")), "00FF80C3E2410A27", "{var} row {id}");
+            }
+            assert_eq!(l.one(&format!("SELECT b FROM {db}.t WHERE id = 3")), "plain");
+            // The prepared statement is gone and a failing one still names its statement.
+            std::fs::write(&path, b"INSERT INTO nowhere VALUES ('\xFF');\n").unwrap();
+            let err = run_with(l, &l.db, db, &path).err().unwrap_or_else(|| panic!("{var}: must fail"));
+            assert!(err.contains("Statement 1 failed") && err.contains("not UTF-8"), "{var}: {err}");
+            let _ = std::fs::remove_file(path);
+            l.sql(&format!("DROP DATABASE {db}"));
+        });
+    }
+
+    #[test]
+    fn live_doubles_and_control_characters_survive_a_dump() {
+        every_server(|l, var| {
+            let db = "quarry_if_dbl";
+            l.sql(&format!("DROP DATABASE IF EXISTS {db}; CREATE DATABASE {db} CHARACTER SET utf8mb4; CREATE TABLE {db}.t (id INT PRIMARY KEY, d DOUBLE, f FLOAT, s VARCHAR(20))"));
+            l.sql(&format!("INSERT INTO {db}.t VALUES (1, 1e300, 0.1, CONCAT('a', CHAR(0), 'b', CHAR(26), 'c')), (2, 1e-100, -1.5e-30, NULL), (3, 1.7976931348623157e308, 3.4e38, ''), (4, 2.2250738585072014e-308, 1.17549435e-38, 'x'), (5, 0.30000000000000004, 1e-45, 'y'), (6, -0.0, 0, 'z')"));
+            let before = l.cell(&format!("CHECKSUM TABLE {db}.t"), 1);
+            let path = tmp(var, "dbl.sql");
+            dump_with(l, &l.db, &whole(l, db), &path);
+            let text = std::fs::read_to_string(&path).unwrap();
+            assert!(text.contains("'a\\0b\\Zc'"), "{var}: NUL and Ctrl-Z are escaped");
+            l.sql(&format!("DROP DATABASE {db}"));
+            run_with(l, &l.db, "", &path).unwrap_or_else(|x| panic!("{var}: {x}"));
+            assert_eq!(l.cell(&format!("CHECKSUM TABLE {db}.t"), 1), before, "{var}");
+            assert_eq!(l.one(&format!("SELECT d FROM {db}.t WHERE id = 1")), "1e300", "{var}");
+            assert_eq!(l.one(&format!("SELECT d FROM {db}.t WHERE id = 2")), "1e-100", "{var}");
+            assert_eq!(l.one(&format!("SELECT HEX(s) FROM {db}.t WHERE id = 1")), "6100621A63", "{var}");
+            let _ = std::fs::remove_file(path);
+            l.sql(&format!("DROP DATABASE {db}"));
+        });
+    }
+
+    #[test]
+    fn live_views_on_views_restore_in_dependency_order() {
+        every_server(|l, var| {
+            let db = "quarry_if_views";
+            l.sql(&format!("DROP DATABASE IF EXISTS {db}; CREATE DATABASE {db}; CREATE TABLE {db}.t (a INT); INSERT INTO {db}.t VALUES (1), (2)"));
+            // Alphabetical order would create a_top before the z_base it reads.
+            l.sql(&format!("CREATE VIEW {db}.z_base AS SELECT a FROM {db}.t; CREATE VIEW {db}.a_top AS SELECT a FROM {db}.z_base; CREATE VIEW {db}.m_mid AS SELECT a FROM {db}.a_top WHERE a > 0"));
+            let path = tmp(var, "views.sql");
+            dump_with(l, &l.db, &whole(l, db), &path);
+            let text = std::fs::read_to_string(&path).unwrap();
+            assert!(text.find("View z_base").unwrap() < text.find("View a_top").unwrap() && text.find("View a_top").unwrap() < text.find("View m_mid").unwrap(), "{var}");
+            l.sql(&format!("DROP DATABASE {db}"));
+            run_with(l, &l.db, "", &path).unwrap_or_else(|x| panic!("{var}: {x}"));
+            assert_eq!(l.one(&format!("SELECT COUNT(*) FROM {db}.m_mid")), "2", "{var}");
+            let _ = std::fs::remove_file(path);
+            l.sql(&format!("DROP DATABASE {db}"));
+        });
+    }
+
+    #[test]
+    fn live_a_server_in_ansi_quotes_mode_writes_a_dump_that_runs_back() {
+        every_server(|l, var| {
+            let db = "quarry_if_ansi";
+            l.sql(&format!("DROP DATABASE IF EXISTS {db}; CREATE DATABASE {db}; CREATE TABLE {db}.t (id INT PRIMARY KEY, v VARCHAR(10)); INSERT INTO {db}.t VALUES (1, 'x'); CREATE VIEW {db}.v AS SELECT id FROM {db}.t"));
+            let ansi = l.with_session("SET SESSION sql_mode = CONCAT(@@sql_mode, ',ANSI_QUOTES')");
+            let path = tmp(var, "ansi.sql");
+            dump_with(l, &ansi, &whole(l, db), &path);
+            let text = std::fs::read_to_string(&path).unwrap();
+            assert!(text.contains("CREATE TABLE `t`") && !text.contains("\"id\""), "{var}: {text}");
+            l.sql(&format!("DROP DATABASE {db}"));
+            run_with(l, &ansi, "", &path).unwrap_or_else(|x| panic!("{var}: {x}"));
+            assert_eq!(l.one(&format!("SELECT v FROM {db}.v JOIN {db}.t USING (id)")), "x", "{var}");
+            let _ = std::fs::remove_file(path);
+            l.sql(&format!("DROP DATABASE {db}"));
+        });
+    }
+
+    #[test]
+    fn live_timestamps_keep_their_instant_in_another_zone() {
+        every_server(|l, var| {
+            let db = "quarry_if_tz";
+            l.sql(&format!("DROP DATABASE IF EXISTS {db}; CREATE DATABASE {db}; CREATE TABLE {db}.t (ts TIMESTAMP NULL, dt DATETIME)"));
+            l.sql(&format!("INSERT INTO {db}.t VALUES (FROM_UNIXTIME(1700000000), '2026-01-02 03:04:05')"));
+            let path = tmp(var, "tz.sql");
+            // Dumped from a session at +03:00, run back in one at +05:00.
+            dump_with(l, &l.with_session("SET SESSION time_zone = '+03:00'"), &whole(l, db), &path);
+            l.sql(&format!("DROP DATABASE {db}"));
+            let east = l.with_session("SET SESSION time_zone = '+05:00'");
+            run_with(l, &east, "", &path).unwrap_or_else(|x| panic!("{var}: {x}"));
+            assert_eq!(l.one(&format!("SELECT UNIX_TIMESTAMP(ts) FROM {db}.t")), "1700000000", "{var}");
+            assert_eq!(l.one(&format!("SELECT dt FROM {db}.t")), "2026-01-02 03:04:05", "{var}: DATETIME has no zone");
+            // The file puts the session's zone back at the end.
+            let text = std::fs::read_to_string(&path).unwrap();
+            assert!(text.contains("TIME_ZONE='+00:00'") && text.contains("SET TIME_ZONE=@OLD_TIME_ZONE"), "{var}");
+            let _ = std::fs::remove_file(path);
+            l.sql(&format!("DROP DATABASE {db}"));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_cancel_stops_a_file_whose_quote_never_closes() {
+        every_server(|l, var| {
+            // A pipe that is written until the run is over never ends, so only Cancel can stop the reading; the
+            // statement limit would end it much later, with another message.
+            let path = tmp(var, "open.fifo");
+            let _ = std::fs::remove_file(&path);
+            assert!(std::process::Command::new("mkfifo").arg(&path).status().unwrap().success());
+            let (prog, cancel, done) = (Arc::new(Progress::default()), Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+            let writer = {
+                let (path, cancel, done) = (path.clone(), cancel.clone(), done.clone());
+                std::thread::spawn(move || {
+                    let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+                    let _ = f.write_all(b"SELECT 1;\nSELECT 'never closed ");
+                    let mut sent = 0usize;
+                    while !done.load(Ordering::SeqCst) && f.write_all(&[b'x'; 64 << 10]).is_ok() {
+                        sent += 64 << 10;
+                        if sent >= 2 << 20 {
+                            cancel.store(true, Ordering::SeqCst);
+                        }
+                    }
+                })
+            };
+            let r = l.w.rt.block_on(run_file(l.db.clone(), String::new(), Source::File(path.clone()), false, prog.clone(), cancel, Arc::new(AtomicU64::new(0))));
+            done.store(true, Ordering::SeqCst);
+            writer.join().unwrap();
+            let err = r.err().unwrap_or_else(|| panic!("{var}: must stop"));
+            assert!(err.starts_with("Run stopped.") && err.contains("Cancelled."), "{var}: {err}");
+            assert_eq!(prog.rows.load(Ordering::Relaxed), 1, "{var}: the open statement was never sent");
+            let _ = std::fs::remove_file(path);
         });
     }
 }

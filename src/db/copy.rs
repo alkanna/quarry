@@ -66,12 +66,20 @@ fn plain_number(s: &str) -> bool {
     !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit() || b == b'.' || b == b'e' || b == b'E' || b == b'-' || b == b'+') && t.bytes().next().is_some_and(|b| b.is_ascii_digit() || b == b'.') && s.parse::<f64>().is_ok_and(f64::is_finite)
 }
 
+/// A double as SQL that reads back as the same double. Plain digits are a DECIMAL literal to MySQL, which holds 65
+/// digits and 30 decimals, so 1e300 and 1e-100 would come back as other numbers. With an exponent it is a
+/// floating point literal, and Rust writes the shortest digits that round-trip. A whole number that a double
+/// holds exactly stays plain, which reads better and is exact either way.
+fn sql_double(f: f64) -> String {
+    if f.fract() == 0.0 && f.abs() < 1e15 && !(f == 0.0 && f.is_sign_negative()) { format!("{f}") } else { format!("{f:e}") }
+}
+
 /// `bs` is false when the server has NO_BACKSLASH_ESCAPES, where doubling a backslash would change the text.
 pub fn sql_literal(b: Option<&Bson>, numeric: bool, bs: bool) -> String {
     match b {
         None | Some(Bson::Null) | Some(Bson::Undefined) => "NULL".into(),
         Some(Bson::Int32(_) | Bson::Int64(_)) => text(b).unwrap_or_default(),
-        Some(Bson::Double(f)) if f.is_finite() => f.to_string(),
+        Some(Bson::Double(f)) if f.is_finite() => sql_double(*f),
         Some(Bson::Boolean(v)) => if *v { "TRUE" } else { "FALSE" }.into(),
         // A bare 0x is not valid SQL, and '' would turn a binary value into text.
         Some(Bson::Binary(x)) if x.bytes.is_empty() => "X''".into(),
@@ -372,6 +380,26 @@ mod tests {
         assert_eq!(sql_literal(Some(&s), false, false), "'a\\b''c'");
         let empty = Bson::Binary(mongodb::bson::Binary { subtype: mongodb::bson::spec::BinarySubtype::Generic, bytes: vec![] });
         assert_eq!(sql_literal(Some(&empty), false, true), "X''");
+    }
+
+    #[test]
+    fn doubles_are_written_so_they_read_back_exactly() {
+        let lit = |f: f64| sql_literal(Some(&Bson::Double(f)), true, true);
+        // Plain digits past DECIMAL's 65 digits or 30 decimals read back as 1e65 and 0.
+        assert_eq!(lit(1e300), "1e300");
+        assert_eq!(lit(1e-100), "1e-100");
+        assert_eq!(lit(0.1), "1e-1");
+        assert_eq!(lit(-0.0), "-0e0");
+        assert_eq!(lit(f64::MAX), "1.7976931348623157e308");
+        assert_eq!(lit(f64::MIN_POSITIVE), "2.2250738585072014e-308");
+        assert_eq!(lit(26.75), "2.675e1");
+        assert_eq!(lit(3.0), "3");
+        assert_eq!(lit(-42.0), "-42");
+        assert_eq!(lit(1e15), "1e15");
+        // Every form is the shortest text that parses back to the same bits.
+        for f in [1e300, 1e-100, 0.1, -0.0, f64::MAX, f64::MIN_POSITIVE, 1.0 / 3.0, 5e-324, 123456789.125] {
+            assert_eq!(lit(f).parse::<f64>().unwrap().to_bits(), f.to_bits(), "{f}");
+        }
     }
 
     #[test]

@@ -25,11 +25,13 @@ pub(super) struct SqlJob {
     pub(super) cancel: Arc<AtomicBool>,
     pub(super) total_rows: u64,
     pub(super) total_bytes: u64,
+    /// False for an import into a table whose engine has no transactions, where Cancel keeps what was written.
+    pub(super) rolls_back: bool,
 }
 
 impl SqlJob {
     pub(super) fn new(req: u64, conn: u64, db: db::sql::Db, schema: String, kind: JobKind, total_rows: u64, total_bytes: u64) -> SqlJob {
-        SqlJob { req, conn, db, schema, kind, prog: Arc::new(Progress::default()), id: Arc::new(AtomicU64::new(0)), cancel: Arc::new(AtomicBool::new(false)), total_rows, total_bytes }
+        SqlJob { req, conn, db, schema, kind, prog: Arc::new(Progress::default()), id: Arc::new(AtomicU64::new(0)), cancel: Arc::new(AtomicBool::new(false)), total_rows, total_bytes, rolls_back: true }
     }
 }
 
@@ -301,7 +303,7 @@ impl App {
             let Some(sql) = self.conn(f.conn).and_then(|c| c.sql.clone()) else { return self.err("Connect first.") };
             self.req += 1;
             let job = SqlJob::new(self.req, f.conn, sql.clone(), f.db.clone(), JobKind::Script, 0, f.size);
-            self.worker.sql_run_file(job.req, sql, f.db.clone(), f.src.clone(), false, job.prog.clone(), job.id.clone(), job.cancel.clone());
+            self.worker.sql_run_file(job.req, sql, f.db.clone(), f.src.clone(), !writable, job.prog.clone(), job.id.clone(), job.cancel.clone());
             self.sql_job = Some(job);
             self.ok(format!("Running {}", f.name));
             *keep = false;
@@ -330,6 +332,8 @@ impl App {
                 }
             }
             Err(e) if e == "Import cancelled" => self.ok("Import stopped. Nothing was imported."),
+            // A table that cannot roll back: the message counts the rows that stayed.
+            Err(e) if e.starts_with("Import stopped.") => self.ok(e),
             Err(e) => self.err(e),
         }
     }
@@ -344,7 +348,7 @@ impl App {
             JobKind::Script => format!("Running statement {}, {}%", group(&rows.to_string()), if j.total_bytes == 0 { 0 } else { (bytes * 100 / j.total_bytes).min(100) }),
         };
         ui.label(RichText::new(text).size(TXT_CAPTION).color(MUTED()));
-        if quiet(ui, RichText::new("Cancel").size(TXT_CAPTION)).on_hover_text(if j.kind == JobKind::Import { "Stop and roll everything back" } else { "Stop after the statement running now" }).clicked() {
+        if quiet(ui, RichText::new("Cancel").size(TXT_CAPTION)).on_hover_text(if j.kind == JobKind::Import && j.rolls_back { "Stop and roll everything back" } else if j.kind == JobKind::Import { "Stop. This table's engine cannot roll back, so rows written so far stay." } else { "Interrupt the running statement and stop. Statements that already ran stay applied." }).clicked() {
             self.worker.sql_kill(j.db.clone(), j.id.load(Ordering::SeqCst), j.cancel.clone());
         }
         ui.ctx().request_repaint_after(Duration::from_millis(200));

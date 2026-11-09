@@ -374,6 +374,9 @@ impl App {
                 Ok(()) => format!("Undo removes the {} rows again.", group(&rows.to_string())),
                 Err(why) => why.clone(),
             }), MUTED());
+            if !info.transactional() {
+                say(ui, format!("This table's engine ({}) cannot roll back: rows written before an error or Cancel stay.", info.engine), WARNING());
+            }
             if !missing.is_empty() {
                 say(ui, format!("Not in the file and without a default: {}. The server may refuse the insert.", missing.join(", ")), WARNING());
             }
@@ -440,7 +443,8 @@ impl App {
         let Some((sql, writable)) = self.conn(f.conn).and_then(|c| Some((c.sql.clone()?, c.writable))) else { return self.err("Connect first.") };
         let plan = ImportPlan { source: f.file.src.clone(), opts: f.file.opts, header: f.file.header, info: info.clone(), map: f.file.map.clone(), dup: f.dup, want_undo };
         self.req += 1;
-        let job = super::sql_dump::SqlJob::new(self.req, f.conn, sql.clone(), f.db.clone(), super::sql_dump::JobKind::Import, f.file.report.as_ref().map_or(0, |r| r.rows), f.file.size);
+        let mut job = super::sql_dump::SqlJob::new(self.req, f.conn, sql.clone(), f.db.clone(), super::sql_dump::JobKind::Import, f.file.report.as_ref().map_or(0, |r| r.rows), f.file.size);
+        job.rolls_back = info.transactional();
         self.worker.sql_import(job.req, f.conn, sql, f.db.clone(), f.table.clone(), plan, !writable, job.prog.clone(), job.id.clone(), job.cancel.clone());
         self.sql_job = Some(job);
         self.ok(format!("Importing {} rows into {}", group(&job_rows(&self.sql_job).to_string()), f.table));
@@ -457,7 +461,7 @@ impl App {
         let Ok(mut file) = FileState::open(src, "orders-2026-11.csv".into()) else { return };
         file.size = 182 * 1024;
         let col = |name: &str, ty: &str, nullable: bool, auto: bool| db::sql::csv::TCol::from_column(&db::sql::structure::Column { name: name.into(), full_type: ty.into(), nullable, extra: if auto { "auto_increment".into() } else { String::new() }, ..Default::default() });
-        let info = TableInfo { cols: vec![col("id", "int unsigned", false, true), col("customer_id", "int unsigned", false, false), col("status", "enum('pending','paid','shipped','refunded')", false, false), col("total", "decimal(10,2)", false, false), col("currency", "char(3)", false, false), col("created_at", "datetime", false, false)], pk: vec!["id".into()] };
+        let info = TableInfo { cols: vec![col("id", "int unsigned", false, true), col("customer_id", "int unsigned", false, false), col("status", "enum('pending','paid','shipped','refunded')", false, false), col("total", "decimal(10,2)", false, false), col("currency", "char(3)", false, false), col("created_at", "datetime", false, false)], pk: vec!["id".into()], engine: "InnoDB".into() };
         file.remap(&info);
         // The design maps the file's names to these columns, which only differ in spelling.
         file.map.map = vec![Some(0), Some(1), Some(2), Some(3), Some(4), Some(5), None];

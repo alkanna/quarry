@@ -1,7 +1,8 @@
 //! Importing a CSV file into a table. Everything runs in one transaction on a connection of its own: rows go
 //! in as multi-row INSERTs whose values are bound to placeholders, so no cell is ever read as SQL, and a
-//! failure or Cancel rolls the whole file back. Undo needs the keys of the rows that went in, so it is only
-//! recorded when they are certain.
+//! failure or Cancel rolls the whole file back, unless the table's engine has no transactions (MyISAM, Aria,
+//! MEMORY), where the rows written so far stay and the message says how many. Undo needs the keys of the rows
+//! that went in, so it is only recorded when they are certain.
 
 use super::csv::{Mapping, Opts, Reader, Source, TableInfo};
 use super::value::{Kind, Param};
@@ -108,6 +109,33 @@ fn key_value(p: &Param) -> Option<Bson> {
     })
 }
 
+/// A value the server reads as 0. In an auto-increment column 0 asks for the next number, like NULL, unless the
+/// session has NO_AUTO_VALUE_ON_ZERO.
+fn is_zero(p: &Param) -> bool {
+    match p {
+        Param::Int(i) => *i == 0,
+        Param::UInt(u) => *u == 0,
+        Param::Float(f) => *f == 0.0,
+        Param::Text(s) => s.trim().parse::<f64>() == Ok(0.0),
+        Param::Null | Param::Bytes(_) => false,
+    }
+}
+
+/// The end of every error that the rollback makes true.
+const NOTHING: &str = "Nothing was imported.";
+
+/// What stays of a failed or stopped import on an engine that cannot roll back, counted on the table since
+/// a multi-row INSERT that fails part way keeps the rows before the bad one.
+fn kept_note(kept: Option<u64>, engine: &str, stopped: bool) -> String {
+    let rows = match kept {
+        Some(k) => plural(k, "row", "rows"),
+        None => "The rows".into(),
+    };
+    let (verb, stay) = if kept == Some(1) { ("was", "stays") } else { ("were", "stay") };
+    let when = if stopped { "" } else { " before the error" };
+    format!("{rows} {verb} written{when} and {stay}: the {engine} engine of this table cannot roll back.")
+}
+
 fn size_of(p: &Param) -> usize {
     match p {
         Param::Text(s) => s.len(),
@@ -154,9 +182,21 @@ pub async fn run(db: &Db, schema: &str, table: &str, plan: &ImportPlan, conn: u6
     // A long import is not a slow query to cut off.
     let timeout = d.session_timeout(0);
     let _ = c.execute(timeout.as_str()).await;
+    // Counted on the pool: Cancel kills the import's own connection.
+    let super::Pool::My(pool) = &db.pool;
+    let count_sql = format!("SELECT COUNT(*) FROM {}", d.qualified(schema, table));
+    let trans = plan.info.transactional();
+    let before: Option<i64> = if trans { None } else { sqlx::query_scalar(&count_sql).fetch_one(pool).await.ok() };
     let res = import_on(&mut c, d, schema, table, plan, &names, per, conn, prog, cancel).await;
+    let stopped = cancel.load(Ordering::SeqCst);
     let res = match res {
-        Err(_) if cancel.load(Ordering::SeqCst) => Err("Import cancelled".to_string()),
+        Err(x) if !trans => {
+            let after: Option<i64> = sqlx::query_scalar(&count_sql).fetch_one(pool).await.ok();
+            let kept = before.zip(after).map(|(b, a)| (a - b).max(0) as u64);
+            let note = kept_note(kept, &plan.info.engine, stopped);
+            if stopped { Err(format!("Import stopped. {note}")) } else { Err(format!("{} {note}", x.strip_suffix(NOTHING).unwrap_or(&x).trim_end())) }
+        }
+        Err(_) if stopped => Err("Import cancelled".to_string()),
         r => r,
     };
     let _ = c.close().await;
@@ -172,11 +212,19 @@ async fn import_on(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str, tabl
     let mut keys = Keys::Off;
     let mut found: Vec<Document> = Vec::new();
     let mut why_not = None;
+    let mut zero_is_new = false;
     if plan.want_undo {
         match undo_plan(&plan.info, &plan.map, plan.dup, 0) {
             Ok(()) => {
                 let given: Vec<(String, usize)> = plan.info.pk.iter().filter_map(|p| names.iter().position(|n| n == p).map(|i| (p.clone(), i))).collect();
                 keys = if given.len() == plan.info.pk.len() {
+                    // Without NO_AUTO_VALUE_ON_ZERO a 0 in the auto-increment key is replaced by the next number,
+                    // so recording it would make Undo delete a row 0 that was there before.
+                    if given.iter().any(|(n, _)| plan.info.col(n).is_some_and(|c| c.auto_increment)) {
+                        let row = sqlx::query("SELECT @@SESSION.sql_mode").fetch_one(&mut *tx).await.map_err(e)?;
+                        let mode = super::worker::raw(&row, 0).map(|b| String::from_utf8_lossy(b).to_ascii_uppercase()).unwrap_or_default();
+                        zero_is_new = !mode.contains("NO_AUTO_VALUE_ON_ZERO");
+                    }
                     Keys::Given(given)
                 } else {
                     // Another session with a bigger step (a Galera cluster) leaves gaps, so the step is read, not assumed.
@@ -245,13 +293,14 @@ async fn import_on(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str, tabl
             first_row = row;
         }
         if let Keys::Given(at) = &keys {
-            let key: Option<Document> = at.iter().map(|(n, i)| key_value(&params[*i]).map(|v| (n.clone(), v))).collect::<Option<Vec<_>>>().map(Document::from_iter);
+            let generated = |n: &str, p: &Param| zero_is_new && is_zero(p) && plan.info.col(n).is_some_and(|c| c.auto_increment);
+            let key: Option<Document> = at.iter().map(|(n, i)| key_value(&params[*i]).filter(|_| !generated(n, &params[*i])).map(|v| (n.clone(), v))).collect::<Option<Vec<_>>>().map(Document::from_iter);
             match key {
                 Some(k) => pending.push(k),
-                // A NULL in an auto-increment key is filled by the server with a number the file never held.
+                // A NULL or 0 in an auto-increment key is filled by the server with a number the file never held.
                 None => {
                     keys = Keys::Off;
-                    why_not = Some("A key value in the file is empty and was generated by the server, so Undo is not available.".to_string());
+                    why_not = Some("A key value in the file is empty or 0 and was generated by the server, so Undo is not available.".to_string());
                 }
             }
         }
@@ -334,7 +383,7 @@ mod tests {
     }
 
     fn info() -> TableInfo {
-        TableInfo { cols: vec![tcol("id", "int", false, true), tcol("name", "varchar(20)", true, false), tcol("qty", "int", true, false)], pk: vec!["id".into()] }
+        TableInfo { cols: vec![tcol("id", "int", false, true), tcol("name", "varchar(20)", true, false), tcol("qty", "int", true, false)], pk: vec!["id".into()], engine: "InnoDB".into() }
     }
 
     fn map(m: &[Option<usize>]) -> Mapping {
@@ -577,5 +626,93 @@ mod tests {
             }
             base.sql(&format!("SET GLOBAL sql_mode = '{}'", old.replace('\'', "")));
         }
+    }
+
+    #[test]
+    fn zero_is_a_generated_key_only_without_no_auto_value_on_zero() {
+        for z in [Param::Int(0), Param::UInt(0), Param::Float(0.0), Param::Float(-0.0), Param::Text(" 0 ".into()), Param::Text("0.0".into())] {
+            assert!(is_zero(&z), "{z:?}");
+        }
+        for n in [Param::Int(7), Param::Null, Param::Text("".into()), Param::Text("a".into()), Param::Bytes(vec![0])] {
+            assert!(!is_zero(&n), "{n:?}");
+        }
+        assert_eq!(kept_note(Some(1200), "MyISAM", false), "1200 rows were written before the error and stay: the MyISAM engine of this table cannot roll back.");
+        assert_eq!(kept_note(Some(1), "Aria", true), "1 row was written and stays: the Aria engine of this table cannot roll back.");
+    }
+
+    fn rows_of(l: &Live, table: &str) -> String {
+        l.one(&format!("SELECT GROUP_CONCAT(CONCAT(id, ':', name) ORDER BY id) FROM {table}"))
+    }
+
+    #[test]
+    fn live_a_zero_auto_increment_key_records_no_undo() {
+        every_server(|l, var| {
+            let db = "quarry_if_zero";
+            l.sql(&format!("DROP DATABASE IF EXISTS {db}; CREATE DATABASE {db}; CREATE TABLE {db}.z (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(20))"));
+            // A row 0 can only be made by moving one there.
+            l.sql(&format!("INSERT INTO {db}.z VALUES (5, 'placeholder'); UPDATE {db}.z SET id = 0 WHERE id = 5; INSERT INTO {db}.z VALUES (7, 'other')"));
+            let plan = plan_for(l, db, "z", "id,name\n0,imported\n".into(), &["id", "name"], Dup::Stop);
+            let done = run_import(l, db, "z", &plan).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+            // The server gave the row the next number, so 0 is not its key and Undo would delete the placeholder.
+            assert_eq!(rows_of(l, &format!("{db}.z")), "0:placeholder,7:other,8:imported", "{var}");
+            assert!(done.undo.is_none(), "{var}");
+            assert!(summary("z", &plan, &done).contains("empty or 0 and was generated"), "{var}");
+            // Under NO_AUTO_VALUE_ON_ZERO the 0 is stored as written, so Undo knows the row and removes only it.
+            l.sql(&format!("CREATE TABLE {db}.k (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(20)); INSERT INTO {db}.k VALUES (7, 'other')"));
+            let nav = l.with_session("SET SESSION sql_mode = CONCAT(@@sql_mode, ',NO_AUTO_VALUE_ON_ZERO')");
+            let plan = plan_for(l, db, "k", "id,name\n0,imported\n".into(), &["id", "name"], Dup::Stop);
+            let r = l.w.rt.block_on(run(&nav, db, "k", &plan, 1, false, &Progress::default(), &AtomicBool::new(false), &AtomicU64::new(0)));
+            let done = r.unwrap_or_else(|x| panic!("{var}: {x}"));
+            assert_eq!(rows_of(l, &format!("{db}.k")), "0:imported,7:other", "{var}");
+            let undo = done.undo.unwrap_or_else(|| panic!("{var}: no undo, {:?}", done.why_not));
+            l.w.sql_undo(nav.clone(), undo, vec!["id".into()], false);
+            let Msg::Written { res, .. } = l.rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap() else { panic!("written") };
+            res.unwrap_or_else(|x| panic!("{var}: {x}"));
+            assert_eq!(rows_of(l, &format!("{db}.k")), "7:other", "{var}");
+            l.sql(&format!("DROP DATABASE {db}"));
+        });
+    }
+
+    #[test]
+    fn live_an_engine_without_transactions_reports_the_rows_that_stay() {
+        every_server(|l, var| {
+            let db = "quarry_if_myisam";
+            l.sql(&format!("DROP DATABASE IF EXISTS {db}; CREATE DATABASE {db}; CREATE TABLE {db}.m (id INT AUTO_INCREMENT PRIMARY KEY, code VARCHAR(8) NOT NULL UNIQUE) ENGINE=MyISAM; INSERT INTO {db}.m (code) VALUES ('dup')"));
+            let mut csv = String::from("code\n");
+            for i in 0..1200 {
+                csv.push_str(&format!("c{i}\n"));
+            }
+            csv.push_str("dup\n");
+            let plan = plan_for(l, db, "m", csv, &["code"], Dup::Stop);
+            assert!(!plan.info.transactional() && plan.info.engine.eq_ignore_ascii_case("MyISAM"), "{var}: {}", plan.info.engine);
+            let err = run_import(l, db, "m", &plan).0.err().unwrap_or_else(|| panic!("{var}: must fail"));
+            assert!(err.contains("Duplicate") && !err.contains("Nothing was imported"), "{var}: {err}");
+            assert!(err.ends_with("1200 rows were written before the error and stay: the MyISAM engine of this table cannot roll back."), "{var}: {err}");
+            assert_eq!(l.count(&format!("{db}.m")), 1201, "{var}");
+            // Cancel in the middle says how many rows stayed, not that nothing was imported.
+            l.sql(&format!("TRUNCATE TABLE {db}.m"));
+            let mut csv = String::from("code\n");
+            for i in 0..300_000 {
+                csv.push_str(&format!("{i}\n"));
+            }
+            let plan = plan_for(l, db, "m", csv, &["code"], Dup::Stop);
+            let prog = Arc::new(Progress::default());
+            let cancel = Arc::new(AtomicBool::new(false));
+            let watcher = {
+                let (prog, cancel) = (prog.clone(), cancel.clone());
+                std::thread::spawn(move || {
+                    while prog.rows.load(Ordering::Relaxed) < 5_000 {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                    cancel.store(true, Ordering::SeqCst);
+                })
+            };
+            let r = l.w.rt.block_on(run(&l.db, db, "m", &plan, 1, false, &prog, &cancel, &AtomicU64::new(0)));
+            watcher.join().unwrap();
+            let kept = l.count(&format!("{db}.m"));
+            assert!(kept >= 5_000 && kept < 300_000, "{var}: {kept}");
+            assert_eq!(r.err().unwrap_or_default(), format!("Import stopped. {kept} rows were written and stay: the MyISAM engine of this table cannot roll back."), "{var}");
+            l.sql(&format!("DROP DATABASE {db}"));
+        });
     }
 }

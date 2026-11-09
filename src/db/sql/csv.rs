@@ -439,12 +439,20 @@ impl TCol {
 pub struct TableInfo {
     pub cols: Vec<TCol>,
     pub pk: Vec<String>,
+    /// ENGINE of information_schema.TABLES, which decides whether a failed import can be rolled back.
+    pub engine: String,
 }
 
 impl TableInfo {
     pub fn from_structure(s: &Structure) -> TableInfo {
         let pk = s.indexes.iter().filter(|i| i.name == "PRIMARY").flat_map(|i| i.cols.iter().map(|c| c.name.clone())).collect();
-        TableInfo { cols: s.columns.iter().map(TCol::from_column).collect(), pk }
+        TableInfo { cols: s.columns.iter().map(TCol::from_column).collect(), pk, engine: s.status.engine.clone() }
+    }
+
+    /// Whether rows written inside a transaction go away on a rollback. MyISAM, Aria, MEMORY, CSV and ARCHIVE
+    /// keep every row the moment it is written. An unknown engine counts as transactional, like InnoDB, the default.
+    pub fn transactional(&self) -> bool {
+        self.engine.is_empty() || ["InnoDB", "XtraDB", "NDB", "NDBCLUSTER", "TokuDB", "RocksDB"].iter().any(|e| e.eq_ignore_ascii_case(&self.engine))
     }
 
     pub fn col(&self, name: &str) -> Option<&TCol> {

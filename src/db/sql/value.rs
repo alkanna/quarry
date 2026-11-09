@@ -4,9 +4,11 @@
 use mongodb::bson::{spec::BinarySubtype, Binary, Bson};
 
 /// A SQL string literal. Backslashes are escaped too, since MySQL reads them as escapes by default; `bs`
-/// is false under NO_BACKSLASH_ESCAPES, where doubling them would change the value.
+/// is false under NO_BACKSLASH_ESCAPES, where doubling them would change the value. NUL and Ctrl-Z are
+/// written as \0 and \Z like mysqldump does, since a raw NUL ends the text for C tools and a raw Ctrl-Z ends
+/// a file read in text mode on Windows. Under NO_BACKSLASH_ESCAPES there is no escape, so they stay raw.
 pub fn lit(s: &str, bs: bool) -> String {
-    let s = if bs { s.replace('\\', "\\\\") } else { s.to_string() };
+    let s = if bs { s.replace('\\', "\\\\").replace('\0', "\\0").replace('\u{1a}', "\\Z") } else { s.to_string() };
     format!("'{}'", s.replace('\'', "''"))
 }
 
@@ -223,6 +225,13 @@ impl Param {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn literals_escape_nul_and_ctrl_z_like_mysqldump() {
+        assert_eq!(lit("a\0b\u{1a}c\\d'e", true), "'a\\0b\\Zc\\\\d''e'");
+        // Without backslash escapes there is no escape for them, and a backslash is a plain character.
+        assert_eq!(lit("a\0b\u{1a}c\\d'e", false), "'a\0b\u{1a}c\\d''e'");
+    }
 
     #[test]
     fn type_names_map_to_kinds() {

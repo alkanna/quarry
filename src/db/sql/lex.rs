@@ -422,31 +422,59 @@ fn check_with(rest: &[Code]) -> Result<(), String> {
 }
 
 /// One piece of a script: a statement to send to the server, or a client side `DELIMITER` line that only
-/// changes where the next statements end.
+/// changes where the next statements end. A statement is bytes, not text: a dump may hold binary values
+/// written raw inside quotes, and those must reach the server unchanged.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Piece {
-    Stmt(String),
+    Stmt(Vec<u8>),
     Delimiter(String),
+}
+
+/// Where the scan of the pending statement stopped. Kept between feeds, so a statement that arrives in many
+/// chunks is read once instead of from its start on every chunk.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum At {
+    /// Before the first code of a piece: whitespace and comments, after which a DELIMITER line may still come.
+    Lead,
+    Code,
+    Quote(u8),
+    Line,
+    Block,
 }
 
 /// Splits a script that arrives in chunks into statements, the way the mysql client reads a dump: it
 /// understands `DELIMITER`, so a procedure body with its own `;` stays one statement. Quotes, backticks and
 /// comments hide a delimiter. A `/*! ... */` comment is kept whole, since the server runs what is inside it.
 /// A statement is never cut by a chunk edge, so a dump of any size needs only its longest statement in memory.
+/// Every delimiter, quote and comment mark is ASCII, so it works on bytes and never needs the file to be UTF-8.
 pub struct ScriptSplitter {
-    buf: String,
+    buf: Vec<u8>,
+    /// Start of the pending piece.
     pos: usize,
-    delim: String,
+    /// The next byte to look at; `at` and `code` say what the bytes before it were.
+    scan: usize,
+    at: At,
+    /// The pending piece holds code. A piece of only comments is not sent: the server would answer "query was empty".
+    code: bool,
+    delim: Vec<u8>,
     backslash: bool,
     eof: bool,
     /// Bytes dropped from the front of `buf`, so `offset` keeps counting from the start of the script.
     dropped: u64,
+    /// The longest statement the server accepts. Without it an unclosed quote would read the whole file into memory.
+    max: usize,
+    #[cfg(test)]
+    seen: u64,
+}
+
+fn trim_end(b: &[u8]) -> &[u8] {
+    &b[..b.iter().rposition(|c| !c.is_ascii_whitespace()).map_or(0, |p| p + 1)]
 }
 
 impl ScriptSplitter {
     /// `backslash` is false when the session runs with NO_BACKSLASH_ESCAPES.
     pub fn new(backslash: bool) -> ScriptSplitter {
-        ScriptSplitter { buf: String::new(), pos: 0, delim: ";".into(), backslash, eof: false, dropped: 0 }
+        ScriptSplitter { buf: Vec::new(), pos: 0, scan: 0, at: At::Lead, code: false, delim: b";".to_vec(), backslash, eof: false, dropped: 0, max: usize::MAX, #[cfg(test)] seen: 0 }
     }
 
     /// A SET of sql_mode inside the script changes how the server reads the text that follows.
@@ -454,18 +482,24 @@ impl ScriptSplitter {
         self.backslash = on;
     }
 
+    /// The server's max_allowed_packet: a pending statement past it is an error rather than more memory.
+    pub fn set_max(&mut self, max: usize) {
+        self.max = max.max(1);
+    }
+
     /// Bytes of the script read so far, for a progress bar.
     pub fn offset(&self) -> u64 {
         self.dropped + self.pos as u64
     }
 
-    pub fn feed(&mut self, text: &str) {
+    pub fn feed(&mut self, bytes: &[u8]) {
         if self.pos > 0 {
             self.buf.drain(..self.pos);
             self.dropped += self.pos as u64;
+            self.scan -= self.pos;
             self.pos = 0;
         }
-        self.buf.push_str(text);
+        self.buf.extend_from_slice(bytes);
     }
 
     /// No more text follows, so a last statement without its delimiter is complete.
@@ -476,69 +510,178 @@ impl ScriptSplitter {
     /// The next piece, or None when it needs more text (or the script is over). A statement is only returned
     /// once its delimiter was seen inside the text fed so far, so what comes next cannot change how it reads.
     pub fn next_piece(&mut self) -> Result<Option<Piece>, String> {
+        #[cfg(test)]
+        let from = self.scan;
+        let r = self.step();
+        #[cfg(test)]
+        {
+            let reached = if matches!(r, Ok(None)) { self.buf.len() } else { self.scan };
+            self.seen += reached.saturating_sub(from) as u64;
+        }
+        r
+    }
+
+    /// Stops at `i`, which the next call reads again once more text arrived.
+    fn wait(&mut self, i: usize) -> Result<Option<Piece>, String> {
+        self.scan = i;
+        if self.buf.len() - self.pos > self.max {
+            return Err(format!("A statement is longer than {} bytes, the server's max_allowed_packet, so it cannot be sent. A quote or comment left open earlier in the file reads the same way.", self.max));
+        }
+        Ok(None)
+    }
+
+    /// The pending piece up to `end`; the next one starts at `next`.
+    fn take(&mut self, end: usize, next: usize) -> Vec<u8> {
+        let text = trim_end(&self.buf[self.pos..end]).to_vec();
+        (self.pos, self.scan, self.at, self.code) = (next, next, At::Lead, false);
+        text
+    }
+
+    fn step(&mut self) -> Result<Option<Piece>, String> {
+        let n = self.buf.len();
+        let mut i = self.scan;
         loop {
-            let b = self.buf.as_bytes();
-            let n = b.len();
-            let mut i = self.pos;
-            while i < n && b[i].is_ascii_whitespace() {
-                i += 1;
-            }
-            self.pos = i;
             if i >= n {
-                return Ok(None);
+                if !self.eof {
+                    return self.wait(n);
+                }
+                let code = self.code;
+                let text = self.take(n, n);
+                return Ok(code.then_some(Piece::Stmt(text)));
             }
-            if n >= i + 10 && b[i..i + 9].eq_ignore_ascii_case(b"delimiter") && (b[i + 9] == b' ' || b[i + 9] == b'\t') {
-                let Some(nl) = self.buf[i..].find('\n').map(|p| i + p).or(self.eof.then_some(n)) else { return Ok(None) };
-                let arg = self.buf[i + 10..nl].split_whitespace().next().unwrap_or_default().to_string();
-                if arg.is_empty() {
-                    return Err("DELIMITER needs the text that ends a statement.".into());
-                }
-                if arg.contains('\\') {
-                    return Err("A delimiter cannot contain a backslash.".into());
-                }
-                self.pos = (nl + 1).min(n);
-                self.delim = arg.clone();
-                return Ok(Some(Piece::Delimiter(arg)));
-            }
-            let start = i;
-            let delim = self.delim.clone().into_bytes();
-            let mut code = false;
-            loop {
-                if i >= n {
-                    if !self.eof {
-                        return Ok(None);
+            let b = &self.buf;
+            let after = if self.code { At::Code } else { At::Lead };
+            // Up to nine bytes decide a mark, so a chunk edge inside one waits for more.
+            let eof = self.eof;
+            let need = |i: usize, k: usize| i + k >= n && !eof;
+            match self.at {
+                At::Quote(q) => {
+                    let esc = self.backslash && q != b'`';
+                    match b[i..].iter().position(|&c| c == q || (esc && c == b'\\')) {
+                        None => i = n,
+                        Some(p) => {
+                            i += p;
+                            // An escaped or a doubled quote does not close the string, so the next byte decides.
+                            if need(i, 1) {
+                                return self.wait(i);
+                            }
+                            if b[i] == b'\\' || b.get(i + 1) == Some(&q) {
+                                i += 2;
+                            } else {
+                                i += 1;
+                                self.at = At::Code;
+                            }
+                        }
                     }
-                    let text = self.buf[start..n].trim_end().to_string();
-                    self.pos = n;
-                    return Ok(code.then_some(Piece::Stmt(text)));
                 }
-                if b[i..].starts_with(&delim) {
-                    let text = self.buf[start..i].trim_end().to_string();
-                    self.pos = i + delim.len();
-                    if code {
-                        return Ok(Some(Piece::Stmt(text)));
+                At::Line => match b[i..].iter().position(|&c| c == b'\n') {
+                    None => i = n,
+                    Some(p) => {
+                        i += p;
+                        self.at = after;
                     }
-                    break;
-                }
-                let c = b[i];
-                if c == b'\'' || c == b'"' {
-                    code = true;
-                    i = quote_end(b, i, self.backslash);
-                } else if c == b'`' {
-                    code = true;
-                    i = quote_end(b, i, false);
-                } else if c == b'#' || (c == b'-' && b.get(i + 1) == Some(&b'-') && b.get(i + 2).map_or(self.eof, |x| x.is_ascii_whitespace() || x.is_ascii_control())) {
-                    while i < n && b[i] != b'\n' {
+                },
+                At::Block => match b[i..].windows(2).position(|w| w == b"*/") {
+                    // A `*` at the very end may be the first half of the close.
+                    None if !self.eof && b[n - 1] == b'*' => return self.wait(n - 1),
+                    None => i = n,
+                    Some(p) => {
+                        i += p + 2;
+                        self.at = after;
+                    }
+                },
+                At::Lead | At::Code => {
+                    let d = self.delim.len();
+                    if b[i..].starts_with(&self.delim) {
+                        let code = self.code;
+                        let text = self.take(i, i + d);
+                        if code {
+                            return Ok(Some(Piece::Stmt(text)));
+                        }
+                        i = self.scan;
+                        continue;
+                    }
+                    if n - i < d && !self.eof && self.delim.starts_with(&b[i..]) {
+                        return self.wait(i);
+                    }
+                    let c = b[i];
+                    let lead = self.at == At::Lead;
+                    if c == b'\'' || c == b'"' || c == b'`' {
+                        (self.at, self.code) = (At::Quote(c), true);
+                        i += 1;
+                    } else if c == b'#' {
+                        self.at = At::Line;
+                        i += 1;
+                    } else if c == b'-' {
+                        if need(i, 1) || (b.get(i + 1) == Some(&b'-') && need(i, 2)) {
+                            return self.wait(i);
+                        }
+                        if b.get(i + 1) == Some(&b'-') && b.get(i + 2).is_none_or(|x| x.is_ascii_whitespace() || x.is_ascii_control()) {
+                            self.at = At::Line;
+                            i += 2;
+                        } else {
+                            (self.at, self.code) = (At::Code, true);
+                            i += 1;
+                        }
+                    } else if c == b'/' {
+                        if need(i, 1) || (b.get(i + 1) == Some(&b'*') && (need(i, 2) || (b.get(i + 2) == Some(&b'M') && need(i, 3)))) {
+                            return self.wait(i);
+                        }
+                        if b.get(i + 1) == Some(&b'*') {
+                            // `/*!` and MariaDB's `/*M!` hold code, so a comment of only those counts as a statement.
+                            let exec = b.get(i + 2) == Some(&b'!') || (b.get(i + 2) == Some(&b'M') && b.get(i + 3) == Some(&b'!'));
+                            self.code |= exec;
+                            self.at = At::Block;
+                            i += 2;
+                        } else {
+                            (self.at, self.code) = (At::Code, true);
+                            i += 1;
+                        }
+                    } else if c.is_ascii_whitespace() {
+                        // Whitespace before a piece is not part of it.
+                        if lead && i == self.pos {
+                            self.pos += 1;
+                        }
+                        i += 1;
+                    } else if lead && self.dropped == 0 && i == 0 && c == 0xEF {
+                        // A byte order mark at the start of the file is not text.
+                        if need(i, 2) {
+                            return self.wait(i);
+                        }
+                        if b.starts_with(b"\xEF\xBB\xBF") {
+                            (self.pos, i) = (3, 3);
+                        } else {
+                            (self.at, self.code) = (At::Code, true);
+                            i += 1;
+                        }
+                    } else if lead && (c == b'd' || c == b'D') {
+                        // A DELIMITER line, which may follow comments (phpMyAdmin writes a header before it).
+                        if need(i, 9) {
+                            return self.wait(i);
+                        }
+                        let word = n >= i + 9 && b[i..i + 9].eq_ignore_ascii_case(b"delimiter") && b.get(i + 9).is_none_or(|x| x.is_ascii_whitespace());
+                        if !word {
+                            (self.at, self.code) = (At::Code, true);
+                            i += 1;
+                            continue;
+                        }
+                        let Some(nl) = b[i + 9..].iter().position(|&x| x == b'\n').map(|p| i + 9 + p).or(self.eof.then_some(n)) else { return self.wait(i) };
+                        let arg = b[i + 9..nl].split(|x| x.is_ascii_whitespace()).find(|w| !w.is_empty()).unwrap_or_default();
+                        if arg.is_empty() {
+                            return Err("DELIMITER needs the text that ends a statement.".into());
+                        }
+                        if arg.contains(&b'\\') {
+                            return Err("A delimiter cannot contain a backslash.".into());
+                        }
+                        let arg = String::from_utf8_lossy(arg).into_owned();
+                        let next = (nl + 1).min(n);
+                        self.take(next, next);
+                        self.delim = arg.clone().into_bytes();
+                        return Ok(Some(Piece::Delimiter(arg)));
+                    } else {
+                        (self.at, self.code) = (At::Code, true);
                         i += 1;
                     }
-                } else if c == b'/' && b.get(i + 1) == Some(&b'*') {
-                    // `/*!` and MariaDB's `/*M!` hold code, so a comment of only those counts as a statement.
-                    let exec = b.get(i + 2) == Some(&b'!') || (b.get(i + 2) == Some(&b'M') && b.get(i + 3) == Some(&b'!'));
-                    code |= exec;
-                    i = self.buf[i + 2..].find("*/").map_or(n, |p| i + 2 + p + 2);
-                } else {
-                    code |= !c.is_ascii_whitespace();
-                    i += 1;
                 }
             }
         }
@@ -817,21 +960,12 @@ mod tests {
         assert!(read_only_check(&page_sql("SELECT 1 INTO OUTFILE '/tmp/x'", 0, 1000)).is_err());
     }
 
-    /// Every piece of `text` when it arrives `chunk` bytes at a time, cut on char boundaries.
-    fn pieces(text: &str, chunk: usize, bs: bool) -> Result<Vec<Piece>, String> {
+    /// Every piece of `bytes` when they arrive `chunk` bytes at a time, cut anywhere, inside characters too.
+    fn pieces_b(bytes: &[u8], chunk: usize, bs: bool) -> Result<Vec<Piece>, String> {
         let mut sp = ScriptSplitter::new(bs);
         let mut out = Vec::new();
-        let mut at = 0;
-        while at < text.len() {
-            let mut end = (at + chunk).min(text.len());
-            while !text.is_char_boundary(end) {
-                end += 1;
-            }
-            sp.feed(&text[at..end]);
-            at = end;
-            if at >= text.len() {
-                sp.finish();
-            }
+        for c in bytes.chunks(chunk.max(1)) {
+            sp.feed(c);
             while let Some(p) = sp.next_piece()? {
                 out.push(p);
             }
@@ -843,13 +977,17 @@ mod tests {
         Ok(out)
     }
 
+    fn pieces(text: &str, chunk: usize, bs: bool) -> Result<Vec<Piece>, String> {
+        pieces_b(text.as_bytes(), chunk, bs)
+    }
+
     fn stmts(text: &str) -> Vec<String> {
-        // Chunk sizes that cut inside quotes, comments and delimiters must all agree.
+        // Chunk sizes that cut inside quotes, comments, delimiters and characters must all agree.
         let whole = pieces(text, text.len().max(1), true).unwrap();
         for chunk in [1, 2, 3, 5, 7, 16] {
             assert_eq!(pieces(text, chunk, true).unwrap(), whole, "chunk {chunk} of {text:?}");
         }
-        whole.into_iter().map(|p| match p { Piece::Stmt(s) => s, Piece::Delimiter(d) => format!("DELIMITER {d}") }).collect()
+        whole.into_iter().map(|p| match p { Piece::Stmt(s) => String::from_utf8(s).unwrap(), Piece::Delimiter(d) => format!("DELIMITER {d}") }).collect()
     }
 
     #[test]
@@ -913,7 +1051,7 @@ mod tests {
     fn progress_counts_the_bytes_that_were_turned_into_pieces() {
         let text = "SELECT 1;\nSELECT 2;\n";
         let mut sp = ScriptSplitter::new(true);
-        sp.feed(text);
+        sp.feed(text.as_bytes());
         sp.finish();
         assert_eq!(sp.next_piece().unwrap(), Some(Piece::Stmt("SELECT 1".into())));
         assert_eq!(sp.offset(), 9);
@@ -925,5 +1063,93 @@ mod tests {
     #[test]
     fn multibyte_text_survives_a_chunk_cut() {
         assert_eq!(stmts("SELECT 'héllo; wörld ✓'; SELECT 'ü'"), ["SELECT 'héllo; wörld ✓'", "SELECT 'ü'"]);
+    }
+
+    #[test]
+    fn a_delimiter_line_after_comments_is_still_a_delimiter_line() {
+        // phpMyAdmin and hand written files put a comment header before DELIMITER.
+        let body = "CREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END";
+        for head in ["-- Procedures\n", "--\n-- Procedures\n--\n", "/* header */\n", "# note\n", "/* a */ -- b\n# c\n  "] {
+            let text = format!("{head}DELIMITER $$\n{body}$$\nDELIMITER ;\nSELECT 3;\n");
+            assert_eq!(stmts(&text), ["DELIMITER $$", body, "DELIMITER ;", "SELECT 3"], "{head:?}");
+        }
+        // Comments before a statement stay in its text.
+        assert_eq!(stmts("-- note\nSELECT 1;\n/* c */ SELECT 2;"), ["-- note\nSELECT 1", "/* c */ SELECT 2"]);
+        // An executable comment is code, so a DELIMITER after it is not a client line.
+        assert_eq!(stmts("/*!40101 SET x=1 */ delimiter ;"), ["/*!40101 SET x=1 */ delimiter"]);
+    }
+
+    #[test]
+    fn a_bare_delimiter_line_is_an_error_and_never_sent() {
+        for text in ["DELIMITER\n", "SELECT 1;\nDELIMITER", "DELIMITER   \nSELECT 1;", "-- c\nDELIMITER\r\nSELECT 1;"] {
+            for chunk in [1, 3, 100] {
+                let r = pieces(text, chunk, true);
+                assert!(r.as_ref().is_err_and(|e| e.contains("DELIMITER needs")), "{text:?} chunk {chunk}: {r:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn raw_bytes_reach_the_statement_unchanged() {
+        // A mysqldump BLOB written without --hex-blob: bytes that are not UTF-8 between escapes.
+        let first = b"INSERT INTO t VALUES (1, '\\0\xFF\x80\xC3\xE2A\\n\\''), (2, _binary '\xC3;\xE2')".to_vec();
+        let text = [&first[..], b";\nSELECT 'caf\xE9';"].concat();
+        let want = vec![Piece::Stmt(first), Piece::Stmt(b"SELECT 'caf\xE9'".to_vec())];
+        for chunk in [1, 2, 3, 5, 7, text.len()] {
+            assert_eq!(pieces_b(&text, chunk, true).unwrap(), want, "chunk {chunk}");
+        }
+        // A byte order mark is not part of the first statement, cut or not.
+        for chunk in [1, 2, 100] {
+            assert_eq!(pieces_b(b"\xEF\xBB\xBFSELECT 1;", chunk, true).unwrap(), [Piece::Stmt(b"SELECT 1".to_vec())]);
+        }
+    }
+
+    #[test]
+    fn a_long_statement_in_many_chunks_is_read_once() {
+        let mut stmt = String::from("INSERT INTO t VALUES ");
+        while stmt.len() < 32 << 20 {
+            stmt.push_str("('abcdefghijklmnopqrstuvwxyz0123456789',12345),('it''s \\'q\\'', \"d\"),");
+        }
+        stmt.push_str("(1,1);\n");
+        let mut sp = ScriptSplitter::new(true);
+        let mut got = Vec::new();
+        for c in stmt.as_bytes().chunks(256 << 10) {
+            sp.feed(c);
+            while let Some(p) = sp.next_piece().unwrap() {
+                got.push(p);
+            }
+        }
+        sp.finish();
+        while let Some(p) = sp.next_piece().unwrap() {
+            got.push(p);
+        }
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0], Piece::Stmt(stmt.trim_end().trim_end_matches(';').as_bytes().to_vec()));
+        // Each byte is looked at about once, not once per chunk that came after it.
+        assert!(sp.seen < 2 * stmt.len() as u64, "{} bytes looked at for {}", sp.seen, stmt.len());
+    }
+
+    #[test]
+    fn a_statement_past_max_allowed_packet_is_an_error_not_more_memory() {
+        let mut sp = ScriptSplitter::new(true);
+        sp.set_max(1000);
+        sp.feed(b"SELECT 1; SELECT 'unclosed ");
+        assert_eq!(sp.next_piece().unwrap(), Some(Piece::Stmt(b"SELECT 1".to_vec())));
+        let mut err = None;
+        for _ in 0..10 {
+            sp.feed(&[b'x'; 300]);
+            if let Err(e) = sp.next_piece() {
+                err = Some(e);
+                break;
+            }
+        }
+        assert!(err.is_some_and(|e| e.contains("max_allowed_packet")));
+        // A statement under the limit is fine, however many of them follow.
+        let mut sp = ScriptSplitter::new(true);
+        sp.set_max(1000);
+        for _ in 0..100 {
+            sp.feed(b"SELECT 'a fairly short statement';\n");
+            while sp.next_piece().unwrap().is_some() {}
+        }
     }
 }
