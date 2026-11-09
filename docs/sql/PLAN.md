@@ -14,7 +14,7 @@ Update this list when a step lands. Each step is reviewed before it is ticked.
 - [x] 3. `db/sql/{lex,value}.rs` and `Dialect` with unit tests. Reviewed: read-only check passes under every quoting mode and both readings of versioned comments
 - [x] 4. SQL worker, new `Msg` variants, live tests (`QUARRY_TEST_MYSQL`). Reviewed; live tests pass on MySQL 8.4 and MariaDB 11
 - [x] 5. state, tabs, poll and sidebar wiring (with a basic Content grid and the `QUARRY_TEST_SQL=content` demo; table lists load when a database opens)
-- [ ] 6. Content view with design F: Rules / SQL bar, clause chips, edits, undo, colors, column actions, multi-select, Copy as (incl. Markdown and HTML)
+- [x] 6. Content view with design F: Rules / SQL bar, clause chips, edits, undo, colors, column actions, multi-select, Copy as (incl. Markdown and HTML). Reviewed; writes refuse partial keys, undo is safe with generated and renamed columns
 - [x] 7. Structure (design A) and Info, read-only, plus read-only Relations and Triggers views. Structure loads when one of those views opens
 - [x] 8. Custom Query: highlighter, several result sets, Stop (`KILL QUERY`), Explain, history, Query tabs from the sidebar. Save to library and Format left out
 - [ ] 9. SQL autocomplete
