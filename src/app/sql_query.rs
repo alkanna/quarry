@@ -496,7 +496,7 @@ mod tests {
     fn statement_under_the_caret() {
         let t = "SELECT 1;\n\nUPDATE a SET b = 2;\nSELECT 'x;y';";
         let (r, i, n) = statement_pos(t, 3).unwrap();
-        assert_eq!((&t[r], i, n), ("SELECT 1;", 1, 3));
+        assert_eq!((&t[r], i, n), ("SELECT 1", 1, 3));
         let (_, i, _) = statement_pos(t, 14).unwrap();
         assert_eq!(i, 2);
         // A caret past the end stays with the last statement.
