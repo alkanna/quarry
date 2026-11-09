@@ -1304,13 +1304,13 @@ mod tests {
     fn live_export_streams_200k_rows_to_csv_and_json_one_batch_at_a_time() {
         use super::super::export::{export_to, Plan, Sink, BATCH};
         use crate::db::copy::Fmt;
-        let Some((w, _rx, db, p)) = live("t_big", "id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(20)") else { return };
-        exec(&w, &p, "INSERT INTO quarry_test.t_big (name) SELECT 'x' FROM information_schema.columns a, information_schema.columns b LIMIT 200000");
+        let Some((w, _rx, db, p)) = live("t_export_big", "id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(20)") else { return };
+        exec(&w, &p, "INSERT INTO quarry_test.t_export_big (name) SELECT 'x' FROM information_schema.columns a, information_schema.columns b LIMIT 200000");
         let dir = std::env::temp_dir().join(format!("quarry-export-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let stmt = "SELECT id, name FROM t_big ORDER BY id";
+        let stmt = "SELECT id, name FROM t_export_big ORDER BY id";
         let run = |fmt: Fmt, file: &str| {
-            let plan = Plan { fmt, header: true, table: "t_big".into(), bs: true };
+            let plan = Plan { fmt, header: true, table: "t_export_big".into(), bs: true };
             let path = dir.join(file);
             let count = AtomicU64::new(0);
             let done = w.rt.block_on(export_to(&db, "quarry_test", stmt, &plan, Sink::File(path.clone()), &count, &AtomicBool::new(false), &AtomicU64::new(0))).unwrap();
@@ -1328,13 +1328,13 @@ mod tests {
         // A statement that writes is refused before it reaches the server, and leaves no file.
         let plan = Plan { fmt: Fmt::Csv, header: true, table: String::new(), bs: true };
         let refused = dir.join("never.csv");
-        let err = w.rt.block_on(export_to(&db, "quarry_test", "DELETE FROM t_big", &plan, Sink::File(refused.clone()), &AtomicU64::new(0), &AtomicBool::new(false), &AtomicU64::new(0))).err().unwrap();
+        let err = w.rt.block_on(export_to(&db, "quarry_test", "DELETE FROM t_export_big", &plan, Sink::File(refused.clone()), &AtomicU64::new(0), &AtomicBool::new(false), &AtomicU64::new(0))).err().unwrap();
         assert!(err.contains("read"), "{err}");
         assert!(!refused.exists());
-        let n: i64 = w.rt.block_on(async { sqlx::query_scalar("SELECT COUNT(*) FROM quarry_test.t_big").fetch_one(&p.pool).await.unwrap() });
+        let n: i64 = w.rt.block_on(async { sqlx::query_scalar("SELECT COUNT(*) FROM quarry_test.t_export_big").fetch_one(&p.pool).await.unwrap() });
         assert_eq!(n, 200_000);
         // An empty result still writes its header and footer.
-        let empty = w.rt.block_on(export_to(&db, "quarry_test", "SELECT id FROM t_big WHERE id < 0", &Plan { fmt: Fmt::Json, header: true, table: String::new(), bs: true }, Sink::Clipboard, &AtomicU64::new(0), &AtomicBool::new(false), &AtomicU64::new(0))).unwrap();
+        let empty = w.rt.block_on(export_to(&db, "quarry_test", "SELECT id FROM t_export_big WHERE id < 0", &Plan { fmt: Fmt::Json, header: true, table: String::new(), bs: true }, Sink::Clipboard, &AtomicU64::new(0), &AtomicBool::new(false), &AtomicU64::new(0))).unwrap();
         assert_eq!((empty.rows, empty.text.as_deref()), (0, Some("[]\n")));
         let _ = std::fs::remove_dir_all(&dir);
     }
