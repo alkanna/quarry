@@ -23,9 +23,31 @@ Update this list when a step lands. Each step is reviewed before it is ticked.
 
 **v1 known limits:** the Advanced tab of the connection form is not built; structure editing, relations and trigger editing, import and export, create and drop, attached shell connections, users, the process list and variables are v2 or v3; Save to library and Format in Query are not built.
 
-**v2**: structure editing, relations and FKs, triggers, import and export, create and drop, attached connections in the shell.
+**After v1 (requested by the user, done):** rail shortcuts for open connections and tabs that switch the active connection; SQL autocomplete inside sql`...` in the shell; resizable editor/results split in Query and Shell; Query results paged at 1,000 with the count in the background; Export for every Copy as format (selected, page, all rows streamed); multi-select in Query and Shell results; Query pager order fix; slow-drag divider fix.
+
+**Open before v2 (do these first, in order):**
+- [ ] Merge the cleanup branch `simplify` (worktree agent applying the /simplify findings: shared escaping/hex/quote_ident/highlighter helpers, stale allows removed, per-frame work cached, width cache keyed by a generation, `refused` flag on ResultSet, popover moved to widgets). It was cut from 37f3b11, so expect small conflicts with 1a80969 (Query pager) and 9da4fa5 (editor drag) in src/app/sql_query.rs and src/ui/editor.rs.
+- [ ] Export "All statements in the editor" (user request): run every statement of the Query editor on one connection (USE and @vars carry over), refuse the export if any statement fails `lex::read_only_check` even when unlocked, stream every result set; output "one file per result" (name-1.csv, name-2.csv, any format) or "one file" for SQL INSERT (appended), JSON lines (rows get a `statement` field), JSON (array of {statement, rows}), Markdown and HTML (a heading per statement); progress "Statement 2 of 5, 340k rows" with Cancel; .part files renamed at the end.
+- [ ] Polish: the SQL completion popup footer overflows its width in the shell; views get the table badge in that popup; the LIMIT clause chip text sits 1 px high.
+- [ ] Ask the user to verify by hand: slow drag of the editor divider (if it still jerks, check the `hi` limit that depends on the results space), rail right-click menu, Export from Content, Shell and Mongo, the column combobox.
+- [ ] User decisions: smoke test on real MySQL/MariaDB servers (SSH tunnel, big tables), open the PR feat/mysql into master with the `ci` label, and push/PR `fix/linux-wayland-fallback` (its Linux-only code was never compiled; CI on ubuntu-22.04 will).
+
+**v2** (designs already exist for all of these except the connection form Advanced tab; see Designs): attached connections in the shell (first: the user asked for it; design page "Shell · attached connections", plan section "Attached connections in the shell"), structure editing with the ALTER preview (column editor dialog on the Structure page), relations and FKs (create, drop, click a FK cell to open the row), triggers editing, import and export (CSV and SQL dump, streamed), create and drop database and table (typed confirm), connection form Advanced tab (time zone, SQL mode, init command, timeouts: needs a quick design first).
 
 **v3**: users and privileges, process list, server variables, console log.
+
+## How this work is run
+
+The plan and its progress list live in this file; update it whenever something lands or is decided. CLAUDE.md is not tracked by git here, so switches added for the SQL work are documented there locally and summarized in the Designs and Verification sections below.
+
+- **Delegation:** each step goes to a subagent with `isolation: worktree`, model sonnet for building and opus for reviews of risky code (writes, the read-only guard, anything that builds SQL text). A brief is self-contained: the goal, what exists, file ownership so parallel agents do not touch the same files, the strict comment rules (no em dashes, emojis or arrows; explain why), no rustfmt, and the verify list (cargo check with no warnings, cargo test into a log file, live tests in Docker on a unique port, release build, screenshots read and compared with the designs).
+- **Worktrees start at master,** so every brief tells the agent to run `git checkout -B <name> feat/mysql` first.
+- **Merging:** one Conventional Commit per reviewed step on `feat/mysql`, local only, never pushed without the user. Cherry-pick or fast-forward the agent commit, then check `git ls-files | grep -E '\.(bak|orig|rej)$'` (agents committed .bak files three times; *.bak is now in .gitignore), run cargo check and cargo test, tick this file, commit.
+- **Cleanup right after each merge:** `git worktree remove -f -f`, delete the agent branches, `docker rm -f` its test container. The user asked for this explicitly.
+- **Reviews:** security-sensitive steps get an independent opus review before they are ticked; findings go to a fix agent with each failing input as a test.
+- **Environment:** if cargo says sccache is missing, prefix with `RUSTC_WRAPPER=`. Many parallel worktrees saturate the machine (each builds its own target dir); keep at most three agents compiling at once.
+- **Designs:** `docs/sql/designs.figcraft`; read a frame with `figcraft-cli export docs/sql/designs.figcraft -o /tmp/x.png --node "<frame name>"`. New screens are designed in FigCraft (Workbench and Paper frames side by side, real theme tokens) and shown to the user before they are built. The generator scripts that drew them were in a session scratchpad and are gone; draw new frames with the FigCraft MCP tools directly or rebuild a small generator.
+- **Demo switches** for screenshots: `QUARRY_TEST_SQL=<view>` (content, rules, sqlmode, grouped, edit, select, colpick, structure, info, relations, triggers, query, shell, shellac, ac, acquery), `QUARRY_TEST_SQL_JSON=<file>`, `QUARRY_TEST_RAIL=1`, `QUARRY_TEST_CHECKED=1`, `QUARRY_TEST_EXPORT=1`; `bench.py --sql-only` for memory and frame time.
 
 ## Designs
 
