@@ -156,8 +156,9 @@ impl App {
         let vis = ui.clip_rect().x_range();
         let (left, right) = (vis.min.max(full.min), vis.max.min(full.max) - 4.0);
         let w = (right - full.min).max(240.0);
+        let indent = (left - full.min).min(w - 240.0).max(0.0);
         ui.allocate_ui_with_layout(egui::vec2(w, ui.spacing().interact_size.y), egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true), |ui| {
-            ui.add_space((left - full.min).min(w - 240.0).max(0.0));
+            ui.add_space(indent);
             let id = d.get("_id").map(db::short).unwrap_or_default();
             ui.label(RichText::new(id).monospace().color(C_OID()));
             ui.add_space(8.0);
@@ -198,7 +199,11 @@ impl App {
         self.changed = match self.drafts.get(&key) {
             Some(dr) if !from_agg => {
                 let changes = db::diff(&dr.original, &dr.current);
-                self.draft_bar(ui, &key, &changes);
+                // Same visible span as the header row, so Save stays on screen.
+                ui.allocate_ui_with_layout(egui::vec2(w, 0.0), egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                    ui.add_space(indent);
+                    ui.vertical(|ui| self.draft_bar(ui, &key, &changes));
+                });
                 changes.into_iter().map(|c| c.0).collect()
             }
             _ => HashSet::new(),
