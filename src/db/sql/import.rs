@@ -594,16 +594,20 @@ mod tests {
 
     #[test]
     fn live_values_survive_both_backslash_modes() {
-        // The global mode is set only while a connection of its own is made, and put back after.
-        static MODE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = MODE.lock().unwrap_or_else(|p| p.into_inner());
+        // NO_BACKSLASH_ESCAPES is set per session on a pool of its own: a SET GLOBAL here changed the mode under the
+        // other live tests running at the same time.
         for var in ENVS {
-            let Some(base) = live(var) else { continue };
-            let old = base.one("SELECT @@GLOBAL.sql_mode");
+            if live(var).is_none() {
+                continue;
+            }
             for nbe in [false, true] {
-                let mode = if nbe { format!("{old},NO_BACKSLASH_ESCAPES") } else { old.replace("NO_BACKSLASH_ESCAPES", "") };
-                base.sql(&format!("SET GLOBAL sql_mode = '{}'", mode.trim_matches(',')));
-                let l = live(var).unwrap();
+                let mut l = live(var).unwrap();
+                if nbe {
+                    let mut db = l.with_session("SET SESSION sql_mode = CONCAT(@@sql_mode, ',NO_BACKSLASH_ESCAPES')");
+                    let super::super::Pool::My(p) = &db.pool;
+                    db.sql_mode = l.w.rt.block_on(async { sqlx::query_scalar::<_, String>("SELECT @@SESSION.sql_mode").fetch_one(p).await.unwrap() });
+                    l.db = db;
+                }
                 assert_eq!(l.db.backslash_escapes(), !nbe, "{var}");
                 l.sql("CREATE DATABASE IF NOT EXISTS quarry_ie_import CHARACTER SET utf8mb4");
                 l.sql("DROP TABLE IF EXISTS quarry_ie_import.bs");
@@ -624,7 +628,6 @@ mod tests {
                     assert_eq!(l.one(&format!("SELECT HEX(v) FROM quarry_ie_import.bs WHERE id = {}", i + 1)), want, "{var} nbe={nbe} value {v:?}");
                 }
             }
-            base.sql(&format!("SET GLOBAL sql_mode = '{}'", old.replace('\'', "")));
         }
     }
 
