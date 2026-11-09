@@ -35,6 +35,15 @@ Update this list when a step lands. Each step is reviewed before it is ticked.
 
 **v2**, driven end to end by session "attach-shell-connections" (it owns feat/mysql merges for v2; item 1 on branch `shell-attach`) (designs already exist for all of these except the connection form Advanced tab; see Designs): attached connections in the shell (first: the user asked for it; design page "Shell · attached connections", plan section "Attached connections in the shell"), structure editing with the ALTER preview (column editor dialog on the Structure page), relations and FKs (create, drop, click a FK cell to open the row), triggers editing, import and export (CSV and SQL dump, streamed), create and drop database and table (typed confirm), connection form Advanced tab (time zone, SQL mode, init command, timeouts: needs a quick design first).
 
+**v2 progress** (branch, state):
+- [x] 1. Attached connections in the shell: runtime 371fb4d, review fixes d848044, UI 5e1fcbd. Opus review of the relay done (findings fixed, see "Review (c5761a5)").
+- [ ] 2. Structure editing: e993e30 on `structure-edit`, opus review found 14 issues, fix on `structure-fix` in progress.
+- [ ] 3. Relations and 4. triggers: building on `relations-triggers` (from e993e30).
+- [ ] 5. Import and export: 16bb646 on `import-export`, opus review in progress.
+- [ ] 6. Create and drop database and table: not started.
+- [ ] 7. Connection form Advanced tab: design approved by the user on 2026-11-09 (page "Connection · Advanced tab", frames 12544 and 12617, commit 2f71228); build not started.
+- [ ] Bench baseline: no numbers were recorded before v2; measure `python3 bench.py --quick` on 4abe8c6 (last commit before v2 code) on a quiet machine and compare with the final head.
+
 **v2 definition of done** (the user asked that v2 is not considered finished before all of this holds):
 1. All seven v2 items are on feat/mysql and ticked here; the Advanced tab design was shown to and approved by the user before it was built.
 2. Every item that writes, and the attached-connections relay, had an independent opus review; every finding is fixed with its failing input as a test, or marked "won't fix" here with the reason.
