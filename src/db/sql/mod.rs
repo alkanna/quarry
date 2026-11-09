@@ -15,6 +15,7 @@ pub mod rules;
 #[allow(unused_imports)]
 pub use dialect::{Dialect, FUNCTIONS, KEYWORDS};
 pub use structure::Structure;
+pub use worker::{Answer, Relay};
 
 /// Which kind of server a saved connection talks to. Saved connections from before SQL support
 /// have no engine field and load as Mongo.
@@ -398,4 +399,19 @@ mod tests {
         assert!(Addr::parse("mongodb://localhost").is_none());
         assert!(Addr::parse("mysql://h:notaport/").is_none());
     }
+}
+
+/// One column of a table, as the shell's editor types need it.
+#[derive(Clone, PartialEq, Debug)]
+pub struct TableCol {
+    pub name: String,
+    /// COLUMN_TYPE, such as "enum('a','b')" or "decimal(10,2)".
+    pub full_type: String,
+    pub nullable: bool,
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub struct TableCols {
+    pub name: String,
+    pub cols: Vec<TableCol>,
 }

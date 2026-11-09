@@ -108,9 +108,7 @@ async fn open(uri: &str, timeout: Duration, net: &Net) -> Res<(Db, Vec<String>, 
 /// A table kind from information_schema's COLUMN_TYPE ("varchar(20)", "bigint unsigned"), which stays
 /// right for `_bin` text columns that sqlx reports as binary.
 fn kind_of_full(full: &str) -> Kind {
-    let l = full.to_ascii_lowercase();
-    let base: String = l.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
-    Kind::from_type_name(&if l.contains(" unsigned") { format!("{base} UNSIGNED") } else { base })
+    Kind::from_column_type(full)
 }
 
 /// Names must be unique because a row is a BSON document keyed by them. `reserve_id` keeps a real
@@ -392,7 +390,159 @@ async fn kill_query(db: &Db, id: u64) -> Res<String> {
     r
 }
 
+/// The most rows one query of a shell script may return; past it the script gets an error instead of
+/// the server's whole table through a pipe.
+const RELAY_ROWS_MAX: usize = 100_000;
+
+/// What a shell script's query gave back: rows as relaxed Extended JSON, or the effect of a write.
+pub enum Answer {
+    Rows(Vec<serde_json::Value>),
+    Wrote { affected: u64, insert_id: u64 },
+}
+
+/// A literal for one bound value. The script's text goes through the text protocol so rows convert
+/// exactly like the Custom Query's, so values are escaped here instead of bound.
+fn literal(p: &value::Param, no_backslash: bool) -> Res<String> {
+    use value::Param;
+    Ok(match p {
+        Param::Null => "NULL".into(),
+        Param::Int(i) => i.to_string(),
+        Param::UInt(u) => u.to_string(),
+        Param::Float(f) if f.is_finite() => format!("{f:e}"),
+        Param::Float(_) => return Err("A value is not a finite number".into()),
+        Param::Text(s) => {
+            if s.contains('\0') {
+                return Err("A text value contains a NUL character".into());
+            }
+            // Quotes double in every mode; the backslash only escapes when the server reads it as an escape.
+            let s = if no_backslash { s.replace('\'', "''") } else { s.replace('\\', "\\\\").replace('\'', "''") };
+            format!("'{s}'")
+        }
+        Param::Bytes(b) => format!("X'{}'", b.iter().map(|x| format!("{x:02x}")).collect::<String>()),
+    })
+}
+
+/// The text with every `?` outside strings and comments replaced by the next value's literal.
+pub fn fill(text: &str, params: &[value::Param], no_backslash: bool) -> Res<String> {
+    let (mut out, mut last, mut n) = (String::new(), 0, 0);
+    for (t, r) in lex::tokens(text) {
+        if t == lex::Tok::Punct && &text[r.clone()] == "?" {
+            let p = params.get(n).ok_or("The query has more ? than values")?;
+            out.push_str(&text[last..r.start]);
+            out.push_str(&literal(p, no_backslash)?);
+            (last, n) = (r.end, n + 1);
+        }
+    }
+    if n != params.len() {
+        return Err(format!("The query has {n} placeholders but {} values", params.len()));
+    }
+    out.push_str(&text[last..]);
+    Ok(out)
+}
+
+/// A shell script's own connection, kept for the whole run so its @variables and transactions persist.
+/// It is the only way a script reaches the server, so the read-only check below covers every write.
+pub struct Relay {
+    conn: sqlx::MySqlConnection,
+    read_only: bool,
+    no_backslash: bool,
+    /// A result was abandoned halfway, which leaves the connection unusable.
+    dead: bool,
+}
+
+impl Relay {
+    pub async fn open(db: &Db, schema: &str, read_only: bool, id: &AtomicU64) -> Res<Relay> {
+        let Pool::My(pool) = &db.pool;
+        let mut conn = pool.acquire().await.map_err(e)?.detach();
+        prepare(&mut conn, db.dialect, schema, read_only, id).await.map_err(e)?;
+        Ok(Relay { conn, read_only, no_backslash: db.sql_mode.contains("NO_BACKSLASH_ESCAPES"), dead: false })
+    }
+
+    /// Interrupts the statement running on connection `id`, from a connection of its own.
+    pub async fn kill(db: &Db, id: u64) -> Res<String> {
+        kill_query(db, id).await
+    }
+
+    /// Runs one statement. On a locked connection the same check as the Custom Query runs on the final
+    /// text, and the session itself is READ ONLY.
+    pub async fn query(&mut self, text: &str, params: &[value::Param]) -> Res<Answer> {
+        if self.dead {
+            return Err("The connection of this script was lost after an earlier error".into());
+        }
+        let stmt = fill(text, params, self.no_backslash)?;
+        if lex::split_statements(&stmt).len() != 1 {
+            return Err("Send one statement per query".into());
+        }
+        if self.read_only {
+            lex::read_only_check(&stmt)?;
+        }
+        let (mut cols, mut rows, mut wrote) = (Vec::<Col>::new(), Vec::new(), None);
+        let mut failure = None;
+        {
+            let mut s = raw_sql(&stmt).fetch_many(&mut self.conn);
+            while let Some(item) = futures_util::StreamExt::next(&mut s).await {
+                match item {
+                    Ok(Either::Right(row)) => {
+                        if cols.is_empty() {
+                            cols = make_cols(row.columns(), &HashMap::new(), false);
+                        }
+                        if rows.len() >= RELAY_ROWS_MAX {
+                            failure = Some(format!("A query returned more than {RELAY_ROWS_MAX} rows. Add a LIMIT."));
+                            break;
+                        }
+                        let d: Document = cols.iter().enumerate().map(|(i, c)| (c.name.clone(), value::to_bson(c.kind, raw(&row, i)))).collect();
+                        rows.push(Bson::Document(d).into_relaxed_extjson());
+                    }
+                    // A CALL has several results; the first one with rows is what the script gets.
+                    Ok(Either::Left(r)) if cols.is_empty() && wrote.is_none() => wrote = Some((r.rows_affected(), r.last_insert_id())),
+                    Ok(Either::Left(_)) => {}
+                    Err(err) => {
+                        failure = Some(e(err));
+                        break;
+                    }
+                }
+            }
+        }
+        if let Some(f) = failure {
+            // Dropping the stream mid-result leaves unread packets on the wire.
+            self.dead = f.contains("more than");
+            return Err(f);
+        }
+        if cols.is_empty() {
+            // An empty SELECT still has headers, a write or SET does not.
+            let empty_read = wrote.is_some_and(|w| w.0 == 0) && (&mut self.conn).describe(&stmt).await.is_ok_and(|d| !d.columns().is_empty());
+            if !empty_read {
+                let (affected, insert_id) = wrote.unwrap_or_default();
+                return Ok(Answer::Wrote { affected, insert_id });
+            }
+        }
+        Ok(Answer::Rows(rows))
+    }
+}
+
 impl Worker {
+    /// Every column of a database in one round trip, for the shell editor's types.
+    pub fn sql_columns(&self, conn: u64, db: Db, schema: String) {
+        self.spawn(async move {
+            let res = async {
+                let Pool::My(pool) = &db.pool;
+                let rows = sqlx::query(db.dialect.all_columns()).bind(&schema).fetch_all(pool).await.map_err(e)?;
+                let mut out: Vec<super::TableCols> = Vec::new();
+                for r in &rows {
+                    let (Some(t), Some(name), Some(full_type)) = (text(r, "tbl"), text(r, "name"), text(r, "full_type")) else { continue };
+                    let col = super::TableCol { name, full_type, nullable: r.try_get::<i64, _>("nullable").map(|n| n != 0).unwrap_or(true) };
+                    match out.last_mut().filter(|x| x.name == t) {
+                        Some(x) => x.cols.push(col),
+                        None => out.push(super::TableCols { name: t, cols: vec![col] }),
+                    }
+                }
+                Ok(out)
+            }
+            .await;
+            Msg::SqlColumns { conn, db: schema, res }
+        });
+    }
+
     pub fn sql_connect(&self, conn: u64, uri: String, timeout: Duration, net: Net) {
         self.spawn(async move { Msg::SqlConnected { conn, res: open(&uri, timeout, &net).await } });
     }
@@ -690,6 +840,81 @@ mod tests {
         let json = if db.dialect == Dialect::MariaDb { Kind::Text } else { Kind::Json };
         assert_eq!(kinds, [Kind::Int, Kind::Int, Kind::UInt, Kind::Int, Kind::Decimal, Kind::Float, Kind::Text, Kind::Text, Kind::Binary, Kind::Date, Kind::DateTime, Kind::Time, Kind::Year, json, Kind::Enum, Kind::Set, Kind::Bit]);
         assert!(!cols[0].nullable);
+    }
+
+    #[test]
+    fn fill_binds_values_as_escaped_literals() {
+        use value::Param;
+        let f = |t: &str, p: &[Param], nb| fill(t, p, nb);
+        assert_eq!(f("SELECT ? , '?', `?` -- ?\n, ?", &[Param::Int(1), Param::Null], false).unwrap(), "SELECT 1 , '?', `?` -- ?\n, NULL");
+        assert_eq!(f("WHERE a = ?", &[Param::Text("it's \\ x".into())], false).unwrap(), "WHERE a = 'it''s \\\\ x'");
+        assert_eq!(f("WHERE a = ?", &[Param::Text("a\\".into())], true).unwrap(), "WHERE a = 'a\\'");
+        assert_eq!(f("?, ?", &[Param::Bytes(vec![0, 255]), Param::Float(1.5)], false).unwrap(), "X'00ff', 1.5e0");
+        // A value that tries to end the string stays inside it, so the text is still one statement.
+        let evil = f("SELECT ?", &[Param::Text("'; DROP TABLE t; --".into())], false).unwrap();
+        assert_eq!(lex::split_statements(&evil).len(), 1);
+        assert!(f("?", &[], false).is_err() && f("1", &[Param::Null], false).is_err());
+        assert!(f("?", &[Param::Float(f64::NAN)], false).is_err() && f("?", &[Param::Text("a\0".into())], false).is_err());
+    }
+
+    /// Runs a shell script on a SQL relay, returning the queries it sent and its result.
+    fn shell_script(w: &Worker, rx: &Receiver<Msg>, db: &Db, code: &str, tables: &[&str], read_only: bool) -> (Vec<crate::db::ShellQuery>, Res<String>) {
+        let input = serde_json::json!({ "db": "quarry_test", "code": code, "tables": tables, "readOnly": read_only, "timeoutMs": 30000, "packages": [] }).to_string();
+        let sql = Some(crate::db::SqlRelay { db: db.clone(), schema: "quarry_test".into(), read_only, conn_id: Default::default() });
+        let job = crate::db::ShellJob { runtime: "bun".into(), dir: std::env::temp_dir().join("quarry-shell-live-test"), input, packages: Vec::new(), sql };
+        let (_cancel, cancel_rx) = tokio::sync::oneshot::channel();
+        w.shell(5, job, cancel_rx);
+        let mut queries = Vec::new();
+        loop {
+            match rx.recv_timeout(Duration::from_secs(180)).expect("shell answer") {
+                Msg::ShellQuery { q, .. } => queries.push(q),
+                Msg::ShellDone { res, .. } => return (queries, res),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn live_shell_runs_sql_tables_and_refuses_writes_when_locked() {
+        let Some((w, rx, db, p)) = live("t_shell", "id INT PRIMARY KEY, status ENUM('paid','open') NOT NULL, note VARCHAR(20), total DECIMAL(8,2)") else { return };
+        if std::process::Command::new("bun").arg("--version").output().is_err() {
+            println!("skipped: bun is not installed");
+            return;
+        }
+        exec(&w, &p, "INSERT INTO quarry_test.t_shell VALUES (1, 'paid', 'it''s', 9.50), (2, 'open', NULL, 3.25), (3, 'paid', NULL, 1.00)");
+        let script = "async function run() {
+  await sql`SET @x = 41`;
+  const [{ y }] = await sql`SELECT @x + 1 AS y`;
+  const rows = await sql`SELECT status, COUNT(*) AS n FROM t_shell WHERE id IN (${[1, 2, 3]}) AND (note = ${\"it's\"} OR note IS NULL) GROUP BY status ORDER BY status`;
+  const found = await t_shell.find({ status: 'paid' }, { orderBy: '-id' });
+  const missing = await t_shell.findOne({ id: 99 });
+  const count = await t_shell.count({ total: { gt: 2 } });
+  console.log('count', count);
+  const refused = [];
+  for (const f of [() => t_shell.delete({ id: 1 }), () => t_shell.insert({ id: 9, status: 'open' }), () => sql`UPDATE t_shell SET note = 'x'`, () => sql.unsafe('DROP TABLE t_shell')]) {
+    try { await f(); refused.push(null) } catch (e) { refused.push(e.message) }
+  }
+  return { y, rows, found, missing, count, refused, after: await t_shell.count() };
+}";
+        let (queries, res) = shell_script(&w, &rx, &db, script, &["t_shell"], true);
+        let v: serde_json::Value = serde_json::from_str(&res.expect("script result")).unwrap();
+        let v = &v["v"];
+        assert_eq!(v["y"], 42, "{v}");
+        assert_eq!(v["rows"].as_array().unwrap().len(), 2);
+        assert_eq!(v["found"].as_array().unwrap().iter().map(|r| r["id"].as_i64().unwrap()).collect::<Vec<_>>(), [3, 1]);
+        // DECIMAL stays exact text.
+        assert_eq!(v["found"][1]["total"], "9.50");
+        assert!(v["missing"].is_null());
+        assert_eq!(v["count"], 2);
+        for r in v["refused"].as_array().unwrap() {
+            assert!(r.as_str().is_some_and(|m| m.contains("read-only") || m.contains("not allowed") || m.contains("Unlock")), "{v}");
+        }
+        // Nothing was written, and the refused statements never reached the server.
+        assert_eq!(v["after"], 3);
+        assert!(queries.iter().any(|q| q.error.is_some()) && queries.iter().any(|q| q.rows == Some(2)));
+        // Unlocked, the same table methods write.
+        let (_, res) = shell_script(&w, &rx, &db, "async function run() { await t_shell.update({ id: 2 }, { note: 'new' }); await t_shell.insert([{ id: 4, status: 'open' }, { id: 5, status: 'open' }]); return await t_shell.count() }", &["t_shell"], false);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&res.unwrap()).unwrap()["v"], 5);
     }
 
     #[test]

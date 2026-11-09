@@ -131,6 +131,107 @@ pub fn js_globals(collections: &[String], schemas: &HashMap<String, String>, pac
     out
 }
 
+/// The values of an `enum('a','b')` column type, in order; quotes inside a value are doubled.
+fn enum_values(full: &str) -> Vec<String> {
+    let Some(body) = full.strip_prefix("enum(").and_then(|r| r.strip_suffix(')')) else { return Vec::new() };
+    let (mut out, mut cur, mut open) = (Vec::new(), String::new(), false);
+    let mut chars = body.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (c, open) {
+            ('\'', false) => open = true,
+            ('\'', true) if chars.peek() == Some(&'\'') => {
+                cur.push('\'');
+                chars.next();
+            }
+            ('\'', true) => {
+                open = false;
+                out.push(std::mem::take(&mut cur));
+            }
+            (c, true) => cur.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The TypeScript type of a column as the runner returns it: integers as numbers, ENUM as its values,
+/// and DECIMAL, dates and JSON as the server's own text so nothing is rounded.
+fn sql_ts_type(c: &sql::TableCol) -> String {
+    use sql::value::Kind;
+    let t = match Kind::from_column_type(&c.full_type) {
+        Kind::Int | Kind::UInt | Kind::Float | Kind::Year => "number".to_string(),
+        Kind::Binary | Kind::Bit | Kind::Geometry => "Uint8Array".to_string(),
+        Kind::Enum => {
+            let v = enum_values(&c.full_type);
+            if v.is_empty() { "string".to_string() } else { v.iter().map(|x| format!("'{}'", x.replace('\\', "\\\\").replace('\'', "\\'").replace('\n', "\\n"))).collect::<Vec<_>>().join(" | ") }
+        }
+        _ => "string".to_string(),
+    };
+    if c.nullable { format!("{t} | null") } else { t }
+}
+
+/// `order_items` as `OrderItems`; a name with no letters or digits becomes `Table`.
+fn interface_name(table: &str) -> String {
+    let s: String = table.split(|c: char| !c.is_ascii_alphanumeric()).filter(|p| !p.is_empty()).map(|p| p[..1].to_ascii_uppercase() + &p[1..]).collect();
+    if s.is_empty() || s.starts_with(|c: char| c.is_ascii_digit()) { format!("Table{s}") } else { s }
+}
+
+/// Declarations for a SQL tab's scripts, in the order sql_runner.mjs puts names in scope: the helpers,
+/// one interface and one global per table whose name is a plain word, then `_`, dayjs and added packages
+/// where the name is still free. Must match sql_runner.mjs.
+pub fn sql_globals(tables: &[sql::TableCols], packages: &[String], ident: impl Fn(&str) -> String, reserved: &[&str]) -> String {
+    let mut out = String::from("type QuarryDefault<T> = T extends { default: infer D } ? D : T;\n");
+    out += "type QuarryOp<V> = { gt?: V; gte?: V; lt?: V; lte?: V; ne?: V | null; like?: string; in?: V[] };\n";
+    out += "type QuarryWhere<R> = { [K in keyof R]?: R[K] | R[K][] | null | QuarryOp<R[K]> };\n";
+    out += "type QuarryKey<R> = (keyof R & string) | `-${keyof R & string}`;\n";
+    out += "interface QuarryFind<R> { select?: (keyof R & string)[]; orderBy?: QuarryKey<R> | QuarryKey<R>[] | { [K in keyof R]?: 'asc' | 'desc' }; limit?: number; offset?: number }\n";
+    out += "interface QuarryWrite { affected: number; insertId: number }\n";
+    out += "interface QuarryTable<R> {\n  find(where?: QuarryWhere<R>, opts?: QuarryFind<R>): Promise<R[]>;\n  findOne(where?: QuarryWhere<R>, opts?: QuarryFind<R>): Promise<R | null>;\n  count(where?: QuarryWhere<R>): Promise<number>;\n  insert(row: Partial<R> | Partial<R>[]): Promise<QuarryWrite>;\n  update(where: QuarryWhere<R>, set: Partial<R>): Promise<QuarryWrite>;\n  delete(where: QuarryWhere<R>): Promise<QuarryWrite>;\n}\n";
+    out += "declare function sql<T = any>(s: TemplateStringsArray, ...v: unknown[]): Promise<T[]>;\n";
+    out += "declare namespace sql { function unsafe<T = any>(text: string, params?: unknown[]): Promise<T[]>; }\n";
+    out += "declare function table<T = any>(name: string): QuarryTable<T>;\n";
+    out += "declare function require(id: string): any;\n";
+    out += "declare const console: { log(...m: any[]): void; info(...m: any[]): void; warn(...m: any[]): void; error(...m: any[]): void };\n";
+    out += "declare const log: typeof console.log;\n";
+    let mut taken: Vec<String> = ["sql", "table", "require", "console", "log"].iter().map(|s| s.to_string()).collect();
+    let mut names: Vec<String> = Vec::new();
+    for t in tables {
+        let plain = t.name.starts_with(|ch: char| ch.is_ascii_alphabetic() || ch == '_' || ch == '$') && t.name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$');
+        if !plain || reserved.contains(&t.name.as_str()) || taken.contains(&t.name) {
+            continue;
+        }
+        let mut name = interface_name(&t.name);
+        while names.contains(&name) {
+            name.push('_');
+        }
+        out += &format!("interface {name} {{\n");
+        for c in &t.cols {
+            out += &format!("  {}: {};\n", if c.name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$') && !c.name.starts_with(|ch: char| ch.is_ascii_digit()) { c.name.clone() } else { Value::String(c.name.clone()).to_string() }, sql_ts_type(c));
+        }
+        out += &format!("}}\ndeclare const {}: QuarryTable<{name}>;\n", t.name);
+        taken.push(t.name.clone());
+        names.push(name);
+    }
+    for (n, d) in [("_", "declare const _: typeof import(\"lodash\");"), ("dayjs", "declare const dayjs: typeof import(\"dayjs\");")] {
+        if let Some(i) = out.find(&format!("declare const {n}: QuarryTable")) {
+            // A table of that name is replaced, as the runner sets the helper over it.
+            let end = out[i..].find('\n').map_or(out.len(), |e| i + e + 1);
+            out.replace_range(i..end, "");
+        }
+        out += d;
+        out.push('\n');
+        taken.push(n.to_string());
+    }
+    for p in packages {
+        let id = ident(p);
+        if !taken.contains(&id) {
+            out += &format!("declare const {id}: QuarryDefault<typeof import({})>;\n", Value::String(p.clone()));
+            taken.push(id);
+        }
+    }
+    out
+}
+
 /// A file:// URI for a folder, ending in a slash. The shell folder holds spaces on macOS ("Application Support").
 fn file_uri(dir: &std::path::Path) -> String {
     let path = dir.to_string_lossy().replace('\\', "/");
@@ -444,5 +545,29 @@ mod tests {
         // Plain text items (kind 1) are dropped from the Shell's list, so the values must not be one.
         let labels: Vec<&str> = items.iter().filter(|i| i.kind != 1).map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"booked") && labels.contains(&"cancelled"), "{labels:?}");
+    }
+
+    #[test]
+    fn sql_declarations_from_columns() {
+        let col = |name: &str, full_type: &str, nullable: bool| sql::TableCol { name: name.into(), full_type: full_type.into(), nullable };
+        let tables = vec![
+            sql::TableCols { name: "orders".into(), cols: vec![col("id", "int unsigned", false), col("status", "enum('pending','paid','it''s')", false), col("total", "decimal(10,2)", false), col("note", "varchar(20)", true), col("created_at", "datetime", false), col("meta", "json", true), col("blob", "blob", true)] },
+            sql::TableCols { name: "order_items".into(), cols: vec![col("qty", "smallint", false)] },
+            sql::TableCols { name: "my-table".into(), cols: vec![col("x", "int", false)] },
+            sql::TableCols { name: "delete".into(), cols: Vec::new() },
+        ];
+        let g = sql_globals(&tables, &["date-fns".into()], |p| p.replace('-', "_"), &["delete"]);
+        assert!(g.contains("declare function sql<T = any>(s: TemplateStringsArray, ...v: unknown[]): Promise<T[]>;"), "{g}");
+        assert!(g.contains("function unsafe<T = any>(text: string, params?: unknown[]): Promise<T[]>"));
+        assert!(g.contains("interface Orders {\n  id: number;\n  status: 'pending' | 'paid' | 'it\\'s';\n  total: string;\n  note: string | null;\n  created_at: string;\n  meta: string | null;\n  blob: Uint8Array | null;\n}"), "{g}");
+        assert!(g.contains("declare const orders: QuarryTable<Orders>;"));
+        assert!(g.contains("declare const order_items: QuarryTable<OrderItems>;"));
+        // Names that are not plain words or are reserved are not globals; table('name') reaches them.
+        assert!(!g.contains("my-table") && !g.contains("declare const delete"));
+        assert!(g.contains("declare const date_fns: QuarryDefault<typeof import(\"date-fns\")>;"));
+        assert!(g.contains("declare function table<T = any>(name: string): QuarryTable<T>;"));
+        for m in ["find(", "findOne(", "count(", "insert(", "update(", "delete("] {
+            assert!(g.contains(m), "{m}");
+        }
     }
 }

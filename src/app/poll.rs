@@ -554,6 +554,12 @@ impl App {
                         t.shell.logs.push((level, text));
                     }
                 }
+                Msg::ShellQuery { req, q } => {
+                    if let Some(t) = self.tabs.iter_mut().find(|t| t.shell.req == req) {
+                        t.shell.queries.push(q);
+                    }
+                }
+                Msg::SqlColumns { conn, db, res } => self.js_columns(conn, db, res),
                 Msg::JsLs { req, out } => self.js_answer(ctx, req, out),
                 Msg::JsLsStopped { failed } => self.js_stopped(failed),
                 Msg::ShellDone { req, res, ms } => {

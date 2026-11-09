@@ -388,6 +388,9 @@ impl App {
         if std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("query") {
             self.sql_query_demo();
         }
+        if std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("shell") {
+            self.sql_shell_demo();
+        }
         // QUARRY_TEST_SQL=edit stages two cells of row 3; =select checks four rows.
         match std::env::var("QUARRY_TEST_SQL").as_deref() {
             Ok("edit") => self.sql_demo_stage(),

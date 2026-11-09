@@ -269,12 +269,6 @@ pub(crate) fn js_job(text: &str) -> LayoutJob {
     job
 }
 
-pub(crate) fn js_layout(ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32) -> Arc<egui::Galley> {
-    let mut job = js_job(buf.as_str());
-    job.wrap.max_width = wrap;
-    ui.fonts_mut(|f| f.layout_job(job))
-}
-
 pub(crate) fn code_layout(ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32) -> Arc<egui::Galley> {
     let mut job = json_job(buf.as_str());
     job.wrap.max_width = wrap;

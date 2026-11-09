@@ -76,9 +76,9 @@ impl Dialect {
     }
 
     /// Every column of a database in one round trip, for autocomplete. Params: [schema]. Columns:
-    /// tbl, name, full_type, col_key.
+    /// tbl, name, full_type, col_key, nullable.
     pub fn all_columns(self) -> &'static str {
-        "SELECT TABLE_NAME AS tbl, COLUMN_NAME AS name, COLUMN_TYPE AS full_type, COLUMN_KEY AS col_key FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME, ORDINAL_POSITION"
+        "SELECT TABLE_NAME AS tbl, COLUMN_NAME AS name, COLUMN_TYPE AS full_type, COLUMN_KEY AS col_key, IS_NULLABLE = 'YES' AS nullable FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME, ORDINAL_POSITION"
     }
 
     /// Identifiers cannot be bound, so the names are quoted into the text.

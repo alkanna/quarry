@@ -215,7 +215,6 @@ impl App {
             View::Triggers => self.sql_triggers_view(ui),
             View::Info => self.sql_info_view(ui),
             View::Sql => self.sql_query_view(ui),
-            View::Shell if sql => self.sql_soon(ui),
             View::Documents => self.documents(ui),
             View::Aggregate => self.aggregate(ui),
             View::Indexes => self.indexes_view(ui),

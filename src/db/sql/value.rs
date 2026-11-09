@@ -50,6 +50,16 @@ impl Kind {
     }
 }
 
+impl Kind {
+    /// A kind from information_schema's COLUMN_TYPE ("varchar(20)", "bigint unsigned"), which stays right
+    /// for `_bin` text columns that sqlx reports as binary.
+    pub fn from_column_type(full: &str) -> Kind {
+        let l = full.to_ascii_lowercase();
+        let base: String = l.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
+        Kind::from_type_name(&if l.contains(" unsigned") { format!("{base} UNSIGNED") } else { base })
+    }
+}
+
 fn bytes(b: &[u8]) -> Bson {
     Bson::Binary(Binary { subtype: BinarySubtype::Generic, bytes: b.to_vec() })
 }

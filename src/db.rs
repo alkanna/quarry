@@ -240,6 +240,10 @@ pub enum Msg {
     Schema { req: u64, res: Res<(Vec<FieldStat>, usize, u128)> },
     /// A line the Shell script printed (console.log/warn/error), or a progress note.
     ShellLog { req: u64, level: String, text: String },
+    /// A query the Shell script sent to the SQL relay, with what came back.
+    ShellQuery { req: u64, q: ShellQuery },
+    /// Every column of a SQL database, for the shell editor types.
+    SqlColumns { conn: u64, db: String, res: Res<Vec<sql::TableCols>> },
     /// The Shell script finished: its return value as canonical Extended JSON `{"v": ...}`.
     ShellDone { req: u64, res: Res<String>, ms: u128 },
     /// One change event from the Watch view's change stream `req`.

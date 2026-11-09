@@ -31,12 +31,6 @@ impl App {
         self.reload();
     }
 
-    /// The centered note for SQL views that a later step builds.
-    pub(super) fn sql_soon(&self, ui: &mut egui::Ui) {
-        ui.add_space(40.0);
-        ui.vertical_centered(|ui| ui.label(RichText::new("Coming in a later step").size(TXT_SMALL).color(FAINT())));
-    }
-
     /// Content: the query line, the results line and the table.
     pub(super) fn sql_content(&mut self, ui: &mut egui::Ui) {
         // Loaded with another page size, set from another tab: its page numbers no longer line up.

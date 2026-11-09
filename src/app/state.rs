@@ -433,6 +433,10 @@ pub(super) struct ShellTab {
     pub(super) started: Option<std::time::Instant>,
     pub(super) ms: Option<u128>,
     pub(super) count: Option<usize>,
+    /// Every query a SQL script ran, in order.
+    pub(super) queries: Vec<db::ShellQuery>,
+    /// The bottom panel shows the Queries tab instead of the Console.
+    pub(super) queries_tab: bool,
 }
 
 /// Which of `len` rows a page shows (all of them for None), and the number of the first one minus one.
