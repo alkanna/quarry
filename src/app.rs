@@ -120,6 +120,8 @@ pub struct App {
     insert: Option<String>,
     /// Database hidden from the sidebar while its drop runs, to show again if the drop fails.
     dropping_db: Option<(u64, String)>,
+    /// Collections being written by a duplicate, as (connection, database, new name), shown with a spinner.
+    copying: std::collections::HashSet<(u64, String, String)>,
     prefs: UiPrefs,
     new_col: String,
     col_filter: String,
@@ -242,6 +244,7 @@ impl App {
             tree_x: egui::Rangef::NOTHING,
             insert: None,
             dropping_db: None,
+            copying: Default::default(),
             prefs: UiPrefs::default(),
             new_col: String::new(),
             col_filter: String::new(),

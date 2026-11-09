@@ -261,6 +261,32 @@ impl App {
                         }
                     });
                 }
+                Modal::DuplicateColl { conn, db, coll, name } => {
+                    dialog_title(ui, format!("Duplicate {db}.{coll}"));
+                    ui.label(RichText::new("Copies every document, index and setting (validator, collation) into a new collection of this database.").color(MUTED()));
+                    ui.add(egui::TextEdit::singleline(name).desired_width(320.0));
+                    let to = name.trim();
+                    let taken = self.copying.iter().any(|c| c.0 == *conn && c.1 == *db && c.2 == to) || self.conn(*conn).and_then(|c| c.dbs.iter().find(|d| d.0 == *db)).and_then(|d| d.1.as_ref()).is_some_and(|l| l.iter().any(|n| n == to));
+                    if taken {
+                        ui.label(RichText::new(format!("{db}.{to} already exists.")).color(ALERT()));
+                    }
+                    dialog_actions(ui, |ui| {
+                        if ui.add_enabled(!to.is_empty() && !taken, primary_button(ui, "Duplicate", PRIMARY())).clicked() {
+                            match self.conn(*conn).and_then(|c| c.client.clone()) {
+                                Some(client) => {
+                                    // The sidebar shows it with a spinner until the copy ends.
+                                    self.copying.insert((*conn, db.clone(), to.to_string()));
+                                    self.worker.duplicate_coll(*conn, client, db.clone(), coll.clone(), to.to_string());
+                                }
+                                None => self.err("Not connected."),
+                            }
+                            keep = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
                 Modal::ImportInsert(n) => {
                     let coll = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
                     dialog_title(ui, format!("Insert {n} documents into {coll}?"));

@@ -156,7 +156,17 @@ impl App {
                     (_, Err(e)) => self.err(e),
                     _ => {}
                 },
-                Msg::DbChanged { conn, db, res } => {
+                Msg::DbChanged { conn, db, copied, res } => {
+                    if let Some(to) = copied {
+                        // Listed now so the row does not blink out before the reload below answers.
+                        if res.is_ok() {
+                            if let Some(l) = self.conns.iter_mut().find(|c| c.meta.id == conn).and_then(|c| c.dbs.iter_mut().find(|d| d.0 == db)).and_then(|d| d.1.as_mut()) {
+                                l.push(to.clone());
+                                l.sort();
+                            }
+                        }
+                        self.copying.remove(&(conn, db.clone(), to));
+                    }
                     let dropped = self.dropping_db.take_if(|d| d.0 == conn && d.1 == db);
                     match res {
                         Ok(m) => self.ok(m),
