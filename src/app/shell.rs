@@ -402,7 +402,7 @@ impl App {
         let known = if sql { Vec::new() } else { self.db_fields() };
         // What SQL templates in the script complete from: the tab's database and its looked up values.
         let sql_cx = sql.then(|| (self.tabs[self.cur].sel.conn, self.tabs[self.cur].sel.db.clone()));
-        let scope = sql_cx.as_ref().map(|(c, d)| self.sql_scope(*c, d, None));
+        let scope = sql_cx.as_ref().map(|(c, d)| Self::sql_scope(&self.conns, &self.sql_schema, *c, d, None));
         let none = Fields::new();
         let values = sql_cx.as_ref().and_then(|k| self.sql_values.get(k)).unwrap_or(&none);
         let (t, ac) = (&mut self.tabs[self.cur], &mut self.ac);

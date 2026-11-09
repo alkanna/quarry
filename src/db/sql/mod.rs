@@ -226,13 +226,15 @@ pub struct ResultSet {
     pub kind: String,
     /// The read-only check refused the statement, so it never reached the server. `error` holds the words.
     pub refused: bool,
+    /// The longest cell per column among the first rows, in characters, read once by the grid for its column widths.
+    pub widest: std::cell::OnceCell<Vec<usize>>,
 }
 
 impl ResultSet {
     /// An empty outcome of `stmt`.
     pub fn new(stmt: &str) -> ResultSet {
         let kind = lex::tokens(stmt).into_iter().find(|(t, _)| *t == lex::Tok::Word).map(|(_, r)| stmt[r].to_ascii_uppercase()).unwrap_or_default();
-        ResultSet { stmt: stmt.into(), cols: Vec::new(), rows: Vec::new(), affected: None, error: None, ms: 0, capped: false, page: None, kind, refused: false }
+        ResultSet { stmt: stmt.into(), cols: Vec::new(), rows: Vec::new(), affected: None, error: None, ms: 0, capped: false, page: None, kind, refused: false, widest: Default::default() }
     }
 }
 

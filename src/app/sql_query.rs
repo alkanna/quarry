@@ -21,6 +21,34 @@ fn byte_at(text: &str, caret: usize) -> usize {
     text.char_indices().nth(caret).map_or(text.len(), |(b, _)| b)
 }
 
+/// Where the caret stands: line and column, and the statement under it.
+#[derive(Clone)]
+pub(super) struct CaretInfo {
+    key: (usize, u64, usize),
+    pub(super) line_col: (usize, usize),
+    pub(super) stmt: Option<(Range<usize>, usize, usize)>,
+}
+
+impl SqlTab {
+    /// The caret's place in the script. Lexing the script is costly next to a frame, so the answer is kept
+    /// until the text or the caret changes.
+    pub(super) fn caret_info(&self) -> CaretInfo {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.query.hash(&mut h);
+        let key = (self.query.len(), h.finish(), self.caret);
+        let mut slot = self.caret_cache.borrow_mut();
+        match &*slot {
+            Some(c) if c.key == key => c.clone(),
+            _ => {
+                let c = CaretInfo { key, line_col: line_col(&self.query, self.caret), stmt: statement_pos(&self.query, self.caret) };
+                *slot = Some(c.clone());
+                c
+            }
+        }
+    }
+}
+
 /// The statement under a caret (a char index) as a byte range, with its 1-based number and the count of statements.
 pub(super) fn statement_pos(text: &str, caret: usize) -> Option<(Range<usize>, usize, usize)> {
     let r = lex::statement_at(text, byte_at(text, caret))?;
@@ -74,14 +102,10 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, checked: &BTreeSet<usize>) -> GridOu
     let mono = FontId::monospace(TXT_SMALL);
     let cw = ui.fonts_mut(|f| f.glyph_width(&mono, '0'));
     // Widths from the headers and the first rows, so a wide cell further down is cut with an ellipsis.
-    let widths: Vec<f32> = set
-        .cols
-        .iter()
-        .map(|c| {
-            let longest = set.rows.iter().take(60).filter_map(|r| r.value(&c.name)).map(|v| if let mongodb::bson::raw::RawBsonRef::String(s) = v { s.chars().count() + 2 } else { 10 }).max().unwrap_or(0);
-            ((longest.max(c.name.chars().count()) as f32) * cw + 28.0).clamp(80.0, 360.0)
-        })
-        .collect();
+    let wide = set.widest.get_or_init(|| {
+        set.cols.iter().map(|c| set.rows.iter().take(60).filter_map(|r| r.value(&c.name)).map(|v| if let mongodb::bson::raw::RawBsonRef::String(s) = v { s.chars().count() + 2 } else { 10 }).max().unwrap_or(0)).collect()
+    });
+    let widths: Vec<f32> = set.cols.iter().zip(wide).map(|(c, &longest)| ((longest.max(c.name.chars().count()) as f32) * cw + 28.0).clamp(80.0, 360.0)).collect();
     let lead = CHECK_W + NUM_W;
     let total = lead + widths.iter().sum::<f32>();
     let mut out = GridOut::default();
@@ -199,7 +223,7 @@ impl App {
         let Some(t) = self.t() else { return };
         let (conn, schema) = (t.sel.conn, run_db(t));
         let Some(s) = t.sql.as_ref().filter(|s| s.run_req == 0) else { return };
-        let text = if all { s.query.clone() } else { statement_pos(&s.query, s.caret).map(|(r, _, _)| s.query[r].to_string()).unwrap_or_default() };
+        let text = if all { s.query.clone() } else { s.caret_info().stmt.map(|(r, _, _)| s.query[r].to_string()).unwrap_or_default() };
         if text.trim().is_empty() {
             return self.err("Nothing to run.");
         }
@@ -336,8 +360,8 @@ impl App {
         ui.add_space(4.0);
         let (mut run, mut run_all, mut stop, mut explain) = (false, false, false, false);
         let status = self.t().and_then(|t| t.sql.as_ref()).map(|s| {
-            let (l, c) = line_col(&s.query, s.caret);
-            let n = statement_pos(&s.query, s.caret).map_or(String::new(), |(_, i, n)| format!("  ·  statement {i} of {n}"));
+            let CaretInfo { line_col: (l, c), stmt, .. } = s.caret_info();
+            let n = stmt.map_or(String::new(), |(_, i, n)| format!("  ·  statement {i} of {n}"));
             format!("Ln {l}, Col {c}{n}")
         });
         ui.horizontal(|ui| {
@@ -386,7 +410,7 @@ impl App {
         let focused = ui.memory(|m| m.has_focus(id));
         let avail = ui.available_height();
         let Some((conn, db)) = self.tabs.get(self.cur).map(|t| (t.sel.conn, run_db(t))) else { return };
-        let scope = self.sql_scope(conn, &db, None);
+        let scope = Self::sql_scope(&self.conns, &self.sql_schema, conn, &db, None);
         let none = Fields::new();
         let values = self.sql_values.get(&(conn, db.clone())).unwrap_or(&none);
         let Some(s) = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()) else { return };
@@ -427,13 +451,14 @@ impl App {
                     s.caret = usize::from(r.primary.index);
                 }
                 let (g, gp, rect) = (&out.galley, out.galley_pos, out.response.rect);
-                if let Some((r, _, _)) = statement_pos(&s.query, s.caret).filter(|p| p.2 > 1) {
+                let info = s.caret_info();
+                if let Some((r, _, _)) = info.stmt.filter(|p| p.2 > 1) {
                     let at = |b: usize| s.query[..b].chars().count();
                     let (a, z) = (g.pos_from_cursor(CCursor::new(at(r.start))), g.pos_from_cursor(CCursor::new(at(r.end))));
                     let band_rect = egui::Rect::from_min_max(egui::pos2(rect.left(), gp.y + a.top()), egui::pos2(rect.right(), gp.y + z.bottom()));
                     ui.painter().set(band, egui::Shape::rect_filled(band_rect, 0.0, tint(PRIMARY(), 22)));
                 }
-                let cur_line = line_col(&s.query, s.caret).0;
+                let cur_line = info.line_col.0;
                 let (mut n, mut fresh) = (0, true);
                 for row in &g.rows {
                     if fresh {

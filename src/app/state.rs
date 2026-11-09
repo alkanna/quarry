@@ -225,6 +225,9 @@ pub(super) struct Tab {
     /// The Indexes view's table rows: each index with its usage merged in. Rebuilt only when the
     /// indexes or their stats arrive, since column widths are cached by the rows' address.
     pub(super) idx_rows: Vec<Document>,
+    /// Names the rows on screen, changed by `rows_replaced` whenever an answer replaces them. Measured column
+    /// widths are kept per generation, because the allocator may give a new answer an old one's address.
+    pub(super) rows_gen: u64,
     pub(super) shell: ShellTab,
     pub(super) schema: SchemaTab,
     pub(super) import: ImportTab,
@@ -244,7 +247,7 @@ pub(super) struct Tab {
 #[derive(Default)]
 pub(super) struct SqlTab {
     /// Columns in table order, from the last page answer.
-    pub(super) cols: Vec<db::sql::Col>,
+    pub(super) cols: Arc<Vec<db::sql::Col>>,
     /// Primary key column names; empty means the rows cannot be edited.
     pub(super) pk: Vec<String>,
     /// The row count is the server's table estimate, shown with a ~.
@@ -263,8 +266,9 @@ pub(super) struct SqlTab {
     pub(super) run_req: u64,
     /// Database the Query view runs in when it is not the tab's own.
     pub(super) run_db: String,
-    /// Caret of the Query editor as a char index.
+    /// Caret of the Query editor as a char index, and what the script says about it.
     pub(super) caret: usize,
+    pub(super) caret_cache: std::cell::RefCell<Option<super::sql_query::CaretInfo>>,
     /// Results as text instead of a grid, and that text for the set it was built from.
     pub(super) text_mode: bool,
     pub(super) text_cache: Option<(usize, String)>,
@@ -461,6 +465,12 @@ pub(super) fn page_window(page: Option<usize>, len: usize) -> (std::ops::Range<u
 }
 
 impl Tab {
+    /// Call wherever an answer replaces the rows this tab shows.
+    pub(super) fn rows_replaced(&mut self) {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        self.rows_gen = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// "conn/db/coll", the key of per-collection settings.
     pub(super) fn coll_key(&self) -> String {
         format!("{}/{}/{}", self.sel.conn, self.sel.db, self.sel.coll)
@@ -599,6 +609,7 @@ impl Tab {
             indexed: HashMap::new(),
             size: 0,
             idx_rows: Vec::new(),
+            rows_gen: 0,
             shell: ShellTab::default(),
             schema: SchemaTab::default(),
             import: ImportTab::default(),

@@ -5,10 +5,11 @@ use crate::ui::sql_complete::{value_key, Need, Scope, Wants};
 
 impl App {
     /// What completion knows about database `db` of connection `conn`. `table` is the implicit table of
-    /// the Content bar.
-    pub(super) fn sql_scope(&self, conn: u64, db: &str, table: Option<&str>) -> Scope {
-        let dbs = self.conn(conn).map(|c| c.dbs.iter().map(|(d, t)| (d.clone(), t.clone().unwrap_or_default())).collect()).unwrap_or_default();
-        Scope { schema: self.sql_schema.get(&(conn, db.to_string())).cloned().unwrap_or_default(), db: db.to_string(), dbs, table: table.filter(|t| !t.is_empty()).map(str::to_string), fallback: Vec::new() }
+    /// the Content bar. It borrows the connection list, so it takes the fields rather than `&self` and a
+    /// tab can be borrowed mutably beside it.
+    pub(super) fn sql_scope<'a>(conns: &'a [Conn], schemas: &HashMap<(u64, String), Arc<db::sql::schema::Schema>>, conn: u64, db: &str, table: Option<&str>) -> Scope<'a> {
+        let dbs = conns.iter().find(|c| c.meta.id == conn).map_or(&[][..], |c| c.dbs.as_slice());
+        Scope { schema: schemas.get(&(conn, db.to_string())).cloned().unwrap_or_default(), db: db.to_string(), dbs, table: table.filter(|t| !t.is_empty()).map(str::to_string), fallback: Default::default() }
     }
 
     /// Sends what an input asked for while it was drawn: the database's schema the first time one of its

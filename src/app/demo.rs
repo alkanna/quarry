@@ -357,7 +357,7 @@ impl App {
             .collect();
         t.fields = cols.iter().map(|c| c.name.clone()).collect();
         if let Some(s) = t.sql.as_mut() {
-            (s.cols, s.pk) = (cols, vec!["id".into()]);
+            (s.cols, s.pk) = (Arc::new(cols), vec!["id".into()]);
         }
         (t.count, t.ms, t.size) = (4410, 18, self.page_size());
         t.sort_txt = "created_at DESC".into();
@@ -404,7 +404,7 @@ impl App {
                 t.selected = Some((false, 1));
                 if let Some(s) = t.sql.as_mut() {
                     s.bar.table_cols = std::mem::take(&mut s.cols);
-                    s.cols = vec![col("status", "ENUM"), col("currency", "CHAR"), col("orders", "BIGINT"), col("revenue", "DECIMAL"), col("avg_total", "DECIMAL")];
+                    s.cols = Arc::new(vec![col("status", "ENUM"), col("currency", "CHAR"), col("orders", "BIGINT"), col("revenue", "DECIMAL"), col("avg_total", "DECIMAL")]);
                     s.pk.clear();
                     s.matched = Some(148);
                     s.bar.c.group = "`status`, `currency`".into();
@@ -457,7 +457,7 @@ impl App {
             t.fields = cols.iter().map(|c| c.name.clone()).collect();
             t.count = rows.len() as u64;
             t.docs = rows;
-            if let Some(s) = t.sql.as_mut() { (s.cols, s.pk) = (cols.clone(), vec![cols[0].name.clone()]); }
+            if let Some(s) = t.sql.as_mut() { (s.cols, s.pk) = (Arc::new(cols.clone()), vec![cols[0].name.clone()]); }
         }
     }
 

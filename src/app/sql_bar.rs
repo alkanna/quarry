@@ -59,12 +59,25 @@ pub(super) struct Bar {
     fold_open: bool,
     gdlg: GroupDlg,
     /// The table's own columns, kept when a grouped answer replaces the result columns.
-    pub(super) table_cols: Vec<Col>,
+    pub(super) table_cols: Arc<Vec<Col>>,
     /// The open suggestion list of whichever bar input has it, and what the inputs asked the app to look up.
     pub(super) ac: Ac,
     pub(super) wants: Wants,
     /// Initial open states; only the offline demo sets them.
     pub(super) preset: Preset,
+    /// What `bar` derives from the columns, kept while they and the primary key stay the same.
+    memo: Option<ColsMemo>,
+    /// Whether the WHERE text read as rules, for the text, the column pairs and the mode it was read with.
+    parsable: Option<(String, Arc<Vec<(String, Kind)>>, bool, bool)>,
+    /// The folded statement line as a job, for the statement text and the fold state it was built from.
+    fold: Option<(String, bool, LayoutJob)>,
+}
+
+struct ColsMemo {
+    cols: Arc<Vec<Col>>,
+    pk: Vec<String>,
+    fallback: Arc<Vec<SchemaCol>>,
+    pairs: Arc<Vec<(String, Kind)>>,
 }
 
 /// What the bar shows open from the first frame: the suggestion list, the ORDER BY popover and the
@@ -845,11 +858,21 @@ fn group_texts(g: &GroupDlg, d: Dialect) -> (String, String) {
 pub(super) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, mut scope: Scope, values: &Fields) -> bool {
     let Some(s) = t.sql.as_mut() else { return false };
     let cols = if s.bar.table_cols.is_empty() { s.cols.clone() } else { s.bar.table_cols.clone() };
+    let memo = match s.bar.memo.take() {
+        Some(m) if Arc::ptr_eq(&m.cols, &cols) && m.pk == s.pk => m,
+        _ => ColsMemo {
+            fallback: Arc::new(cols.iter().map(|c| SchemaCol { name: c.name.clone(), ty: c.ty.clone(), kind: c.kind, key: if s.pk.contains(&c.src) { "PRI".into() } else { String::new() }, nullable: c.nullable, fk: false }).collect()),
+            pairs: Arc::new(cols.iter().map(|c| (c.name.clone(), c.kind)).collect()),
+            pk: s.pk.clone(),
+            cols: cols.clone(),
+        },
+    };
     // The WHERE text has no FROM, so completion reads its columns from the table of the tab. Until the schema is loaded the result's own columns serve.
     scope.table = Some(t.sel.coll.clone());
-    scope.fallback = cols.iter().map(|c| SchemaCol { name: c.name.clone(), ty: c.ty.clone(), kind: c.kind, key: if s.pk.contains(&c.src) { "PRI".into() } else { String::new() }, nullable: c.nullable, fk: false }).collect();
-    let pairs: Vec<(String, Kind)> = cols.iter().map(|c| (c.name.clone(), c.kind)).collect();
+    scope.fallback = memo.fallback.clone();
+    let pairs = memo.pairs.clone();
     let b = &mut s.bar;
+    b.memo = Some(memo);
     let mut run = false;
     b.gdlg.bs = bs;
     // The WHERE text changed from elsewhere (Filter to these, a restored tab): read it back into rules.
@@ -883,7 +906,15 @@ pub(super) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, mut scop
             ui.allocate_ui_with_layout(egui::vec2(ui.available_width() - run_w, BUTTON_H), egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true), |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
                 // Rules mode needs text this module wrote; anything else stays in SQL mode.
-                let can_rules = rules::parse(&t.filter_txt, &pairs, bs).is_some() || pairs.is_empty();
+                let can_rules = pairs.is_empty()
+                    || match &b.parsable {
+                        Some((text, p, bs0, ok)) if *text == t.filter_txt && Arc::ptr_eq(p, &pairs) && *bs0 == bs => *ok,
+                        _ => {
+                            let ok = rules::parse(&t.filter_txt, &pairs, bs).is_some();
+                            b.parsable = Some((t.filter_txt.clone(), pairs.clone(), bs, ok));
+                            ok
+                        }
+                    };
                 let mut sql = b.c.sql;
                 let r0 = ui.cursor().min;
                 segmented(ui, &mut sql, &[(false, "Rules"), (true, "SQL")]);
@@ -974,11 +1005,13 @@ pub(super) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, mut scop
 
 /// The chips under the bar, and the Copy as SQL and Explain buttons.
 fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col], scope: &Scope, values: &Fields) -> bool {
-    let (db_name, table) = (t.sel.db.clone(), t.sel.coll.clone());
-    let pk = t.sql.as_ref().map(|s| s.pk.clone()).unwrap_or_default();
+    let table = t.sel.coll.clone();
     let matched = t.sql.as_ref().and_then(|s| s.matched).unwrap_or(0);
     let rows = t.count;
-    let stmt = page_query(t).select_sql(d, &db_name, &table, &pk, None);
+    // The statement is built only where it is shown (SQL mode) or copied.
+    let select = |t: &Tab| page_query(t).select_sql(d, &t.sel.db, &t.sel.coll, t.sql.as_ref().map_or(&[][..], |s| s.pk.as_slice()), None);
+    let stmt = t.sql.as_ref().is_some_and(|s| s.bar.c.sql).then(|| select(t));
+    let mut copy = false;
     let Some(s) = t.sql.as_mut() else { return false };
     let b = &mut s.bar;
     let mut run = false;
@@ -1117,19 +1150,23 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col], scope: &Sco
         });
         ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), BUTTON_H), egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
-            if quiet(ui, "Copy as SQL").on_hover_text("Copy the whole SELECT").clicked() {
-                ui.ctx().copy_text(format!("{stmt};"));
-            }
+            copy = quiet(ui, "Copy as SQL").on_hover_text("Copy the whole SELECT").clicked();
             // Step 8 adds Explain.
             quiet_enabled(ui, false, "Explain").on_disabled_hover_text("Coming with the Query view");
         });
     });
     // The full SELECT, folded under the bar in SQL mode.
-    if sql {
+    if let Some(stmt) = stmt.as_ref().filter(|_| sql) {
         ui.add_space(8.0);
-        let flat = stmt.split_whitespace().collect::<Vec<_>>().join(" ");
-        let text = if b.fold_open { stmt.clone() } else { flat };
-        let mut job = sql_job(&text, TXT_SMALL);
+        let mut job = match &b.fold {
+            Some((key, open, job)) if *open == b.fold_open && key == stmt => job.clone(),
+            _ => {
+                let text = if b.fold_open { stmt.clone() } else { stmt.split_whitespace().collect::<Vec<_>>().join(" ") };
+                let job = sql_job(&text, TXT_SMALL);
+                b.fold = Some((stmt.clone(), b.fold_open, job.clone()));
+                job
+            }
+        };
         job.wrap.max_width = ui.available_width() - 46.0;
         if !b.fold_open {
             job.wrap.max_rows = 1;
@@ -1148,6 +1185,9 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col], scope: &Sco
         if r.on_hover_text(if b.fold_open { "Fold the statement" } else { "Show the whole statement" }).clicked() {
             b.fold_open = !b.fold_open;
         }
+    }
+    if copy {
+        ui.ctx().copy_text(format!("{};", stmt.unwrap_or_else(|| select(t))));
     }
     run
 }

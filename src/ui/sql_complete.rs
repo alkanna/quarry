@@ -27,13 +27,13 @@ const RESERVED: &[&str] = &[
 /// What completion knows about the place being edited. `table` is the implicit table of the Content
 /// bar, whose text has no FROM; `fallback` holds its columns until the schema has arrived.
 #[derive(Default)]
-pub(crate) struct Scope {
+pub(crate) struct Scope<'a> {
     pub(crate) schema: Arc<Schema>,
     pub(crate) db: String,
-    /// The other databases of the server whose table lists are loaded: name and tables.
-    pub(crate) dbs: Vec<(String, Vec<String>)>,
+    /// The databases of the server with their table lists, once loaded.
+    pub(crate) dbs: &'a [(String, Option<Vec<String>>)],
     pub(crate) table: Option<String>,
-    pub(crate) fallback: Vec<SchemaCol>,
+    pub(crate) fallback: Arc<Vec<SchemaCol>>,
 }
 
 /// A lookup the caret asks the app to make: the schema of the database, or a column's values.
@@ -209,7 +209,7 @@ fn table_cols<'a>(scope: &'a Scope, name: &str) -> Option<(&'a str, &'a [SchemaC
         return Some((&t.name, &t.cols));
     }
     let own = scope.table.as_deref().filter(|t| t.eq_ignore_ascii_case(name) && !scope.fallback.is_empty())?;
-    Some((own, &scope.fallback))
+    Some((own, scope.fallback.as_slice()))
 }
 
 fn resolve<'a>(refs: &[Ref], scope: &'a Scope) -> Vec<Rt<'a>> {
@@ -433,7 +433,7 @@ fn qualified(q: &str, word: &str, from: usize, in_tick: bool, scope: &Scope, rts
         return Some(Out { from, sugs, ..Default::default() });
     }
     let (_, tables) = scope.dbs.iter().find(|(d, _)| d.eq_ignore_ascii_case(q))?;
-    let sugs: Vec<Sug> = tables.iter().filter(|t| starts_ci(t, word)).take(MAX_SUGGESTIONS).map(|t| sug(t.clone(), "table", ident(t, in_tick), String::new(), String::new())).collect();
+    let sugs: Vec<Sug> = tables.iter().flatten().filter(|t| starts_ci(t, word)).take(MAX_SUGGESTIONS).map(|t| sug(t.clone(), "table", ident(t, in_tick), String::new(), String::new())).collect();
     Some(Out { from, sugs, ..Default::default() })
 }
 
@@ -453,7 +453,7 @@ fn tables_list(word: &str, from: usize, in_tick: bool, scope: &Scope) -> Out {
     let mut sugs: Vec<Sug> = scope.schema.tables.iter().filter(|t| starts_ci(&t.name, word)).map(|t| table_sug(t, in_tick)).collect();
     // A name still loading is listed from the sidebar's table list, without the row counts.
     if scope.schema.tables.is_empty() {
-        if let Some((_, names)) = scope.dbs.iter().find(|(d, _)| d.eq_ignore_ascii_case(&scope.db)) {
+        if let Some((_, Some(names))) = scope.dbs.iter().find(|(d, _)| d.eq_ignore_ascii_case(&scope.db)) {
             sugs.extend(names.iter().filter(|t| starts_ci(t, word)).map(|t| sug(t.clone(), "table", ident(t, in_tick), String::new(), String::new())));
         }
     }
@@ -461,7 +461,7 @@ fn tables_list(word: &str, from: usize, in_tick: bool, scope: &Scope) -> Out {
         if starts_ci(d, word) {
             sugs.push(sug(d.clone(), "schema", format!("{}.", ident(d, in_tick)), "database".into(), String::new()));
         }
-        for t in tables.iter().filter(|t| starts_ci(t, word)) {
+        for t in tables.iter().flatten().filter(|t| starts_ci(t, word)) {
             sugs.push(sug(format!("{d}.{t}"), "schema", format!("{}.{}", ident(d, false), ident(t, in_tick)), "other db".into(), String::new()));
         }
     }
@@ -712,7 +712,7 @@ mod tests {
         SchemaCol { name: name.into(), ty: ty.into(), kind: Kind::from_type_name(&base), key: key.into(), nullable: false, fk }
     }
 
-    fn scope() -> Scope {
+    fn scope() -> Scope<'static> {
         let orders = SchemaTable {
             name: "orders".into(),
             view: false,
@@ -732,7 +732,7 @@ mod tests {
         Scope {
             schema: Arc::new(Schema { tables: vec![customers, items, orders, totals, weird] }),
             db: "shop".into(),
-            dbs: vec![("analytics".into(), vec!["orders_daily".into(), "visits".into()]), ("shop".into(), vec![])],
+            dbs: Box::leak(vec![("analytics".into(), Some(vec!["orders_daily".into(), "visits".into()])), ("shop".into(), Some(vec![]))].into_boxed_slice()),
             ..Default::default()
         }
     }
@@ -956,7 +956,7 @@ mod tests {
         assert_eq!(s[0].sql.as_ref().unwrap().foot, "Values: 'EUR' 61%  'USD' 27%  'GBP' 12%");
         // Before the schema arrives the bar's own columns serve.
         sc.schema = Arc::new(Schema::default());
-        sc.fallback = vec![col("currency", "char(3)", "", false)];
+        sc.fallback = Arc::new(vec![col("currency", "char(3)", "", false)]);
         let (b, full) = split_statement("cur", "");
         assert_eq!(text_of(&suggest(&b, &full, &sc, &Fields::new()).unwrap().1)[0], "currency");
         // Values work from the fallback too.

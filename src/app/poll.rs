@@ -93,10 +93,9 @@ impl App {
                     }
                 }
                 Msg::SqlCols { req, cols, pk, estimated, matched } => {
-                    // Widths are measured from the rows, and a new answer can reuse the old rows' address and length, so none of them may carry over.
-                    self.width_cache.clear();
                     if let Some(s) = self.tab_by_req(req).and_then(|t| t.sql.as_mut()) {
                         // The rules pick from table columns, which a grouped answer does not have.
+                        let cols = Arc::new(cols);
                         if matched.is_none() {
                             s.bar.table_cols = cols.clone();
                         }
@@ -276,9 +275,8 @@ impl App {
                     Err(e) => self.err(e),
                 },
                 Msg::Docs { req, res } => {
-                    // Widths are measured from the rows, and a new answer can reuse the old rows' address and length, so none of them may carry over.
-                    self.width_cache.clear();
                     let Some(t) = self.tab_by_req(req) else { continue };
+                    t.rows_replaced();
                     t.loading = false;
                     match res {
                         Ok((docs, count, ms)) => {
@@ -379,7 +377,7 @@ impl App {
                         continue;
                     };
                     t.agg_req = 0;
-                    self.width_cache.clear();
+                    t.rows_replaced();
                     match res {
                         Ok((d, ms)) => {
                             t.agg_fields = auto_fields(&d);
@@ -584,7 +582,7 @@ impl App {
                 Msg::JsLsStopped { failed } => self.js_stopped(failed),
                 Msg::ShellDone { req, res, ms } => {
                     let Some(t) = self.tabs.iter_mut().find(|t| t.shell.req == req) else { continue };
-                    self.width_cache.clear();
+                    t.rows_replaced();
                     let sql = t.sql.is_some();
                     let sh = &mut t.shell;
                     sh.cancel = None;

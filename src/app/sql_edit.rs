@@ -180,7 +180,7 @@ impl App {
     fn sql_ctx(&self) -> Option<(Sel, Vec<Col>, Vec<String>)> {
         let t = self.t()?;
         let s = t.sql.as_ref()?;
-        Some((t.sel.clone(), s.cols.clone(), s.pk.clone()))
+        Some((t.sel.clone(), s.cols.to_vec(), s.pk.clone()))
     }
 
     /// Whether the open connection's server reads backslash escapes in strings.
@@ -344,7 +344,7 @@ impl App {
         };
         let Some(db) = self.conn(first.conn).and_then(|c| c.sql.clone()) else { return put_back(self, drafts, "Not connected.") };
         let read_only = !self.conn(first.conn).is_some_and(|c| c.writable);
-        let Some((cols, pk)) = self.tabs.iter().find(|t| t.sel == first).and_then(|t| t.sql.as_ref()).map(|s| (s.cols.clone(), s.pk.clone())) else { return put_back(self, drafts, "Open the table to save its edits.") };
+        let Some((cols, pk)) = self.tabs.iter().find(|t| t.sel == first).and_then(|t| t.sql.as_ref()).map(|s| (s.cols.to_vec(), s.pk.clone())) else { return put_back(self, drafts, "Open the table to save its edits.") };
         // A row without its key could address any row, so it is never sent; its edits stay staged.
         let (keyed, keyless): (Vec<_>, Vec<_>) = drafts.into_iter().partition(|(_, d)| d.current.get_document("_id").is_ok_and(|k| !k.is_empty()));
         let skipped = keyless.len();

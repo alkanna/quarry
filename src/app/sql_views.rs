@@ -41,7 +41,7 @@ impl App {
         }
         let (dialect, bs) = self.sql_dialect();
         let (conn, db) = (self.tabs[self.cur].sel.conn, self.tabs[self.cur].sel.db.clone());
-        let scope = self.sql_scope(conn, &db, None);
+        let scope = Self::sql_scope(&self.conns, &self.sql_schema, conn, &db, None);
         let none = Fields::new();
         let t = &mut self.tabs[self.cur];
         let run = super::sql_bar::bar(ui, t, dialect, bs, scope, self.sql_values.get(&(conn, db.clone())).unwrap_or(&none));

@@ -332,14 +332,16 @@ impl App {
         let cols = visible_cols(Some(&prefs), fields, self.default_cols());
         let indexed: Vec<Option<String>> = cols.iter().map(|c| self.t().and_then(|t| t.indexes_on(c)).map(str::to_string)).collect();
         let summarize = !self.prefs.object_preview;
-        // Measuring lays out every loaded cell of the column, so it is done once per result set
-        // (keyed by where the documents live and how many) instead of on every frame.
+        // Measuring lays out every loaded cell of the column, so it is done once per result set instead of
+        // on every frame. The generation says which answer the rows came from; where they live and how
+        // many say which window of it is on screen.
+        let answer = self.t().map_or(0, |t| t.rows_gen);
         let widths: Vec<f32> = cols
             .iter()
             .map(|c| {
                 prefs.widths.get(c).copied().unwrap_or_else(|| {
                     // The header text is measured too, so a custom label is part of the key.
-                    let k = (docs.addr(), docs.len(), c.clone(), prefs.labels.get(c).cloned(), summarize);
+                    let k = (answer, docs.addr(), docs.len(), c.clone(), prefs.labels.get(c).cloned(), summarize);
                     if let Some(w) = self.width_cache.get(&k) {
                         return *w;
                     }

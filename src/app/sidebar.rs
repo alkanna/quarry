@@ -375,7 +375,8 @@ impl App {
                     continue;
                 }
                 // Tables first, then views, each under its own caption.
-                let is_view_of = |n: &String| self.views.contains(&(id, db_name.clone(), n.clone()));
+                let db_views: HashSet<&str> = if sql { self.views.iter().filter(|v| v.0 == id && v.1 == *db_name).map(|v| v.2.as_str()).collect() } else { HashSet::new() };
+                let is_view_of = |n: &String| db_views.contains(n.as_str());
                 let n_views = if sql { matches.iter().filter(|n| is_view_of(n)).count() } else { 0 };
                 if sql {
                     matches.sort_by_key(|n| is_view_of(n));
@@ -443,11 +444,12 @@ impl App {
                 });
                 if is_open {
                     let matches_len = matches.len();
-                    let est_rows = if sql { self.sql_schema.get(&(id, db_name.clone())).cloned() } else { None };
+                    let schema = if sql { self.sql_schema.get(&(id, db_name.clone())).cloned() } else { None };
+                    let est_rows: HashMap<&str, u64> = schema.iter().flat_map(|sc| sc.tables.iter().filter_map(|t| Some((t.name.as_str(), t.rows?)))).collect();
+                    let group_hidden = [false, true].map(|v| sql && self.side_closed.contains(&(id, db_name.clone(), v)));
                     for coll in matches {
-                        let sel = Sel { conn: id, db: db_name.clone(), coll: coll.clone() };
-                        let active = cur_sel.as_ref() == Some(&sel);
-                        let is_view = self.views.contains(&(id, db_name.clone(), coll.clone()));
+                        let active = cur_sel.as_ref().is_some_and(|s| s.conn == id && s.db == *db_name && s.coll == *coll);
+                        let is_view = is_view_of(coll);
                         let busy = pending.contains(&coll);
                         if sql && group != Some(is_view) {
                             group = Some(is_view);
@@ -457,7 +459,7 @@ impl App {
                             if hr.clicked() {
                                 folded.push(key.clone());
                             }
-                            let hidden = self.side_closed.contains(&key);
+                            let hidden = group_hidden[is_view as usize];
                             let g = ui.painter().layout_job(LayoutJob::single_section(label.into(), ui_fmt(10.0, FAINT(), W_SEMIBOLD, 0.6)));
                             if state_of(&hr) > 0 {
                                 ui.painter().rect_filled(cap, R_SM, hover_fill(state_of(&hr)));
@@ -470,7 +472,7 @@ impl App {
                             ui.painter().text(egui::pos2(cap.right() - 8.0, cap.center().y + 2.0), egui::Align2::RIGHT_CENTER, n.to_string(), FontId::monospace(TXT_CAPTION), FAINT());
                             hr.on_hover_cursor(egui::CursorIcon::PointingHand);
                         }
-                        if sql && self.side_closed.contains(&(id, db_name.clone(), is_view)) {
+                        if group_hidden[is_view as usize] {
                             continue;
                         }
                         let mut glyph_at = egui::Rect::NOTHING;
@@ -485,7 +487,7 @@ impl App {
                                 p.text(egui::pos2(r.left(), r.center().y), egui::Align2::LEFT_CENTER, glyph, FontId::monospace(10.0), gc);
                             }
                             // The server's estimate, once the schema is loaded for autocomplete.
-                            let est = if sql && !is_view { est_rows.as_ref().and_then(|sc| sc.table(&coll)).and_then(|t| t.rows) } else { None };
+                            let est = if sql && !is_view { est_rows.get(coll.as_str()).copied().or_else(|| schema.as_ref().and_then(|sc| sc.table(coll)).and_then(|t| t.rows)) } else { None };
                             let mut w = r.width() - 20.0;
                             if let Some(n) = est {
                                 let g = p.layout_no_wrap(rows_short(n), FontId::monospace(TXT_CAPTION), FAINT());
@@ -507,13 +509,13 @@ impl App {
                             revealed = true;
                         }
                         if r.clicked() {
-                            open = Some(sel.clone());
+                            open = Some(Sel { conn: id, db: db_name.clone(), coll: coll.clone() });
                         }
                         r.context_menu(|ui| {
                             menu_look(ui);
                             ui.label(RichText::new(format!("{}: {coll}", if is_view { "View" } else if sql { "Table" } else { "Collection" })).size(TXT_SMALL).color(MUTED()));
                             if ui.button("Open").clicked() {
-                                open = Some(sel.clone());
+                                open = Some(Sel { conn: id, db: db_name.clone(), coll: coll.clone() });
                             }
                             // The rest is Mongo only until SQL has its own actions.
                             if sql {

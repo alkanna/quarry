@@ -207,7 +207,7 @@ pub struct App {
     /// Frame rate readout: seconds and frames counted so far, and the rate last shown.
     fps: (f32, u32, f32),
     /// Measured column widths per result set and column.
-    width_cache: HashMap<(usize, usize, String, Option<String>, bool), f32>,
+    width_cache: HashMap<(u64, usize, usize, String, Option<String>, bool), f32>,
     /// Recently closed tabs, newest first.
     closed: Vec<Tab>,
     /// Version installed by the updater, waiting for a restart.
