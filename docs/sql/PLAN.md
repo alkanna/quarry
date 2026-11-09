@@ -16,7 +16,7 @@ Update this list when a step lands. Each step is reviewed before it is ticked.
 - [x] 5. state, tabs, poll and sidebar wiring (with a basic Content grid and the `QUARRY_TEST_SQL=content` demo; table lists load when a database opens)
 - [ ] 6. Content view with design F: Rules / SQL bar, clause chips, edits, undo, colors, column actions, multi-select, Copy as (incl. Markdown and HTML)
 - [x] 7. Structure (design A) and Info, read-only, plus read-only Relations and Triggers views. Structure loads when one of those views opens
-- [ ] 8. Custom Query: highlighter, several result sets, Stop (`KILL QUERY`)
+- [x] 8. Custom Query: highlighter, several result sets, Stop (`KILL QUERY`), Explain, history, Query tabs from the sidebar. Save to library and Format left out
 - [ ] 9. SQL autocomplete
 - [ ] 10. SQL shell with typed tables, and the shared shell layout for Mongo and SQL
 - [ ] 11. Demo data, `QUARRY_TEST_SQL` switches, CLAUDE.md
