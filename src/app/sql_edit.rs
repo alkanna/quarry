@@ -130,6 +130,7 @@ pub(super) fn copy_as_menu(ui: &mut egui::Ui, sql: bool) -> Option<DocsAct> {
         item(ui, "CSV", "with header", DocsAct::CopyAs(Fmt::Csv));
         item(ui, "TSV", "pastes into spreadsheets", DocsAct::CopyAs(Fmt::Tsv));
         item(ui, "JSON", "array of objects", DocsAct::CopyAs(Fmt::Json));
+        item(ui, "JSON lines", "one object per line", DocsAct::CopyAs(Fmt::JsonLines));
         ui.separator();
     } else {
         item(ui, "JS", "shell syntax", DocsAct::CopyJs);
@@ -159,7 +160,7 @@ pub(super) fn copy_as_menu(ui: &mut egui::Ui, sql: bool) -> Option<DocsAct> {
 }
 
 /// Rows of a Markdown or CSV copy are numeric when every filled value of the field is a number.
-fn infer_numeric(rows: &[Document], name: &str) -> bool {
+pub(super) fn infer_numeric(rows: &[Document], name: &str) -> bool {
     let vals: Vec<&Bson> = rows.iter().filter_map(|d| db::get_path(d, name)).filter(|v| !matches!(v, Bson::Null)).collect();
     !vals.is_empty() && vals.iter().all(|v| matches!(v, Bson::Int32(_) | Bson::Int64(_) | Bson::Double(_) | Bson::Decimal128(_)))
 }
@@ -613,19 +614,7 @@ impl App {
                 }
                 t.view = View::Sql;
             }
-            DocsAct::Export => {
-                let file = rfd::FileDialog::new().set_file_name(format!("{}-selection.json", sel.coll)).add_filter("JSON", &["json"]).add_filter("CSV", &["csv"]).add_filter("TSV", &["tsv"]).save_file();
-                let Some(path) = file else { return };
-                let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("json").to_ascii_lowercase();
-                let plain: Vec<Document> = rows.into_iter().map(|mut r| {
-                    r.remove("_id");
-                    r
-                }).collect();
-                match db::export_body(&plain, &ext).and_then(|b| std::fs::write(&path, b).map_err(|e| format!("Could not write {}: {e}", path.display()))) {
-                    Ok(()) => self.ok(format!("Exported {n} rows to {}", path.display())),
-                    Err(e) => self.err(e),
-                }
-            }
+            DocsAct::Export => self.open_export(rows, false),
             DocsAct::Duplicate => {
                 if let [one] = rows.as_slice() {
                     return self.sql_new_row(Some(one.clone()));
@@ -751,7 +740,7 @@ impl App {
     }
 
     /// The visible columns in the order shown, for the copy formats.
-    fn copy_cols(&self, rows: &[Document]) -> Vec<CopyCol> {
+    pub(super) fn copy_cols(&self, rows: &[Document]) -> Vec<CopyCol> {
         let Some(t) = self.t() else { return Vec::new() };
         let prefs = self.prefs.cols.get(&self.col_key(false)).cloned().unwrap_or_default();
         table::visible_cols(Some(&prefs), &t.fields, self.default_cols())
@@ -797,6 +786,7 @@ impl App {
             Fmt::Csv => "CSV",
             Fmt::Tsv => "TSV",
             Fmt::Json => "JSON",
+            Fmt::JsonLines => "JSON lines",
             Fmt::Markdown => "a Markdown table",
             Fmt::Html => "an HTML table",
             Fmt::Values => "values",

@@ -356,10 +356,12 @@ impl App {
             .map(|(w, (c, ix))| if ix.is_none() || prefs.widths.contains_key(c) { w } else { w + BOLT_ROOM })
             .collect();
         // The documents view adds a checkbox in front of the row number.
-        let num_w = if agg { NUM_W } else { NUM_W + CHECK_W };
+        // The Documents view and the Shell's result take checks; other results do not.
+        let checks = !agg || self.t().is_some_and(|t| t.view == View::Shell);
+        let num_w = if checks { NUM_W + CHECK_W } else { NUM_W };
         let total: f32 = num_w + widths.iter().sum::<f32>();
         let selected = self.t().unwrap().selected;
-        let checked = if agg { BTreeSet::new() } else { self.t().unwrap().checked.clone() };
+        let checked = if checks { self.checks().clone() } else { BTreeSet::new() };
         let expanded = self.t().unwrap().expanded.clone();
         let mut check_click = None;
         let mut check_all = None;
@@ -429,7 +431,7 @@ impl App {
                 let p = ui.painter();
                 p.rect_filled(hr, egui::CornerRadius { nw: R_MD - 1, ne: R_MD - 1, sw: 0, se: 0 }, HDR());
                 p.text(egui::pos2(hr.left() + (num_w - NUM_W) + 18.0, hr.center().y), egui::Align2::LEFT_CENTER, "#", FontId::monospace(TXT_CAPTION), FAINT());
-                if !agg {
+                if checks {
                     let all = checked.len() == docs.len();
                     let r = check_box(ui, egui::pos2(hr.left() + 13.0, hr.center().y), ui.scope_id().with("check-all"), all, !all && !checked.is_empty());
                     if r.on_hover_text("Select every document on this page").clicked() {
@@ -540,7 +542,7 @@ impl App {
                         let num = (base + i as u64 + 1).to_string();
                         let (num, nc) = if drafted.is_some() { (format!("{num}●"), WARNING()) } else { (num, FAINT()) };
                         p.text(egui::pos2(rr.left() + off + 18.0, rr.center().y), egui::Align2::LEFT_CENTER, num, FontId::monospace(TXT_CAPTION), nc);
-                        if !agg && check_box(ui, egui::pos2(rr.left() + 13.0, rr.center().y), ui.scope_id().with(("check", i)), checked.contains(&i), false).clicked() {
+                        if checks && check_box(ui, egui::pos2(rr.left() + 13.0, rr.center().y), ui.scope_id().with(("check", i)), checked.contains(&i), false).clicked() {
                             check_click = Some(i);
                         }
                         let mut x = rr.left() + num_w;
@@ -604,7 +606,7 @@ impl App {
                                 click = Some(i);
                             }
                             let mut acts = Vec::new();
-                            if sql {
+                            if sql && !agg {
                                 cr.context_menu(|ui| {
                                     menu_look(ui);
                                     // A checked row's menu is the selection's; a single cell also offers its value actions.
@@ -693,7 +695,7 @@ impl App {
             self.toggle_check(i, ui.input(|i| i.modifiers.shift));
         }
         if let Some(on) = check_all {
-            self.tm().unwrap().checked = if on { (0..docs.len()).collect() } else { BTreeSet::new() };
+            *self.checks_mut().0 = if on { (0..docs.len()).collect() } else { BTreeSet::new() };
         }
         self.row_act(ui, row_act, docs, &checked);
         for (i, acts) in cell_acts {
@@ -784,6 +786,7 @@ impl App {
             (false, _) if self.t().is_some_and(|t| t.sql.is_some()) => RowMenu::Sql,
             (false, _) => RowMenu::Docs,
             (true, Some(View::Indexes)) => RowMenu::Indexes,
+            (true, Some(View::Shell)) => RowMenu::Results(self.t().is_some_and(|t| t.sql.is_some())),
             _ => RowMenu::None,
         }
     }

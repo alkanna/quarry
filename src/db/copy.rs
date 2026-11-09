@@ -10,6 +10,8 @@ pub enum Fmt {
     Csv,
     Tsv,
     Json,
+    /// One compact object per line.
+    JsonLines,
     Markdown,
     Html,
     Values,
@@ -174,6 +176,7 @@ pub fn format(f: Fmt, s: &Sheet, header: bool) -> String {
                 .collect();
             format!("[\n{}\n]", rows.join(",\n"))
         }
+        Fmt::JsonLines => s.rows.iter().map(|d| json_line(d, s.cols)).collect::<Vec<_>>().join("\n"),
         Fmt::Markdown => {
             let head: Vec<String> = s.cols.iter().map(|c| if header { md_cell(&c.name) } else { String::new() }).collect();
             let body: Vec<Vec<String>> = s.rows.iter().map(|d| s.cols.iter().map(|c| md_cell(&cell(d, c))).collect()).collect();
@@ -201,6 +204,128 @@ pub fn format(f: Fmt, s: &Sheet, header: bool) -> String {
             out + "  </tbody>\n</table>"
         }
         Fmt::Values => s.rows.iter().flat_map(|d| s.cols.iter().map(move |c| cell(d, c))).collect::<Vec<_>>().join("\n"),
+    }
+}
+
+fn json_line(d: &Document, cols: &[CopyCol]) -> String {
+    format!("{{{}}}", cols.iter().map(|c| format!("{}:{}", serde_json::to_string(&c.name).unwrap_or_default(), json_literal(value(d, c), c.numeric))).collect::<Vec<_>>().join(","))
+}
+
+/// `format` in pieces for results too big to hold: `begin`, `rows` for each batch, then `end`. The
+/// pieces joined are the bytes `format` gives for the same rows, except that a Markdown table is not
+/// padded to the widest cell, which is unknown until the last row.
+pub struct Writer {
+    f: Fmt,
+    header: bool,
+    cols: Vec<CopyCol>,
+    table: String,
+    pk: Vec<String>,
+    bs: bool,
+    /// Something was written, so the next line or row needs its separator first.
+    any: bool,
+}
+
+impl Writer {
+    pub fn new(f: Fmt, header: bool, cols: Vec<CopyCol>, table: &str, pk: &[String], bs: bool) -> Writer {
+        Writer { f, header, cols, table: table.to_string(), pk: pk.to_vec(), bs, any: false }
+    }
+
+    /// Lines of text are joined by newlines, so the first has none in front.
+    fn line(&mut self, s: String) -> String {
+        let out = if self.any { format!("\n{s}") } else { s };
+        self.any = true;
+        out
+    }
+
+    pub fn begin(&mut self) -> String {
+        let names: Vec<&str> = self.cols.iter().map(|c| c.name.as_str()).collect();
+        match self.f {
+            Fmt::SqlInsert => format!("INSERT INTO {} ({}) VALUES\n", quote_ident(&self.table), self.cols.iter().map(|c| quote_ident(&c.src)).collect::<Vec<_>>().join(", ")),
+            Fmt::Csv | Fmt::Tsv if self.header => {
+                let (sep, esc): (&str, fn(&str) -> String) = if self.f == Fmt::Csv { (",", csv_cell) } else { ("\t", |x: &str| x.replace(['\t', '\n', '\r'], " ")) };
+                let l = names.iter().map(|n| esc(n)).collect::<Vec<_>>().join(sep);
+                self.line(l)
+            }
+            Fmt::Json => "[".into(),
+            Fmt::Markdown => {
+                let head = self.cols.iter().map(|c| if self.header { md_cell(&c.name) } else { String::new() }).map(|t| format!("{t:<3}")).collect::<Vec<_>>().join(" | ");
+                let rule = self.cols.iter().map(|c| if c.numeric { "--:" } else { "---" }).collect::<Vec<_>>().join(" | ");
+                let a = self.line(format!("| {head} |"));
+                a + &self.line(format!("| {rule} |"))
+            }
+            Fmt::Html => {
+                let mut out = String::from("<table>\n");
+                if self.header {
+                    out.push_str(&format!("  <thead><tr>{}</tr></thead>\n", names.iter().map(|n| format!("<th>{}</th>", html_cell(n))).collect::<String>()));
+                }
+                out + "  <tbody>\n"
+            }
+            _ => String::new(),
+        }
+    }
+
+    pub fn rows(&mut self, rows: &[Document]) -> String {
+        let mut out = String::new();
+        let cell = |d: &Document, c: &CopyCol| text(value(d, c)).unwrap_or_default();
+        for d in rows {
+            match self.f {
+                Fmt::SqlInsert => {
+                    let r = format!("({})", self.cols.iter().map(|c| sql_literal(value(d, c), c.numeric, self.bs)).collect::<Vec<_>>().join(", "));
+                    out.push_str(&if self.any { format!(",\n{r}") } else { r });
+                    self.any = true;
+                }
+                Fmt::SqlUpdate => {
+                    let sets: Vec<&CopyCol> = self.cols.iter().filter(|c| !self.pk.contains(&c.src)).collect();
+                    let Ok(key) = d.get_document("_id") else { continue };
+                    if sets.is_empty() || self.pk.is_empty() || !self.pk.iter().all(|p| key.contains_key(p)) {
+                        continue;
+                    }
+                    let set = sets.iter().map(|c| format!("{} = {}", quote_ident(&c.src), sql_literal(value(d, c), c.numeric, self.bs))).collect::<Vec<_>>().join(", ");
+                    let wh = self.pk.iter().map(|p| format!("{} = {}", quote_ident(p), sql_literal(key.get(p), false, self.bs))).collect::<Vec<_>>().join(" AND ");
+                    let l = self.line(format!("UPDATE {} SET {set} WHERE {wh};", quote_ident(&self.table)));
+                    out.push_str(&l);
+                }
+                Fmt::Csv | Fmt::Tsv => {
+                    let (sep, esc): (&str, fn(&str) -> String) = if self.f == Fmt::Csv { (",", csv_cell) } else { ("\t", |x: &str| x.replace(['\t', '\n', '\r'], " ")) };
+                    let l = self.line(self.cols.iter().map(|c| esc(&cell(d, c))).collect::<Vec<_>>().join(sep));
+                    out.push_str(&l);
+                }
+                Fmt::Json => {
+                    let fields: Vec<String> = self.cols.iter().map(|c| format!("    {}: {}", serde_json::to_string(&c.name).unwrap_or_default(), json_literal(value(d, c), c.numeric))).collect();
+                    out.push_str(&format!("{}  {{\n{}\n  }}", if self.any { ",\n" } else { "\n" }, fields.join(",\n")));
+                    self.any = true;
+                }
+                Fmt::JsonLines => {
+                    let l = self.line(json_line(d, &self.cols));
+                    out.push_str(&l);
+                }
+                Fmt::Markdown => {
+                    let cells = self.cols.iter().map(|c| md_cell(&cell(d, c))).map(|t| format!("{t:<3}")).collect::<Vec<_>>().join(" | ");
+                    let l = self.line(format!("| {cells} |"));
+                    out.push_str(&l);
+                }
+                Fmt::Html => {
+                    out.push_str(&format!("    <tr>{}</tr>\n", self.cols.iter().map(|c| format!("<td>{}</td>", html_cell(&cell(d, c)))).collect::<String>()));
+                    self.any = true;
+                }
+                Fmt::Values => {
+                    for c in self.cols.clone() {
+                        let l = self.line(cell(d, &c));
+                        out.push_str(&l);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    pub fn end(&mut self) -> String {
+        match self.f {
+            Fmt::SqlInsert => ";".into(),
+            Fmt::Json => if self.any { "\n]" } else { "]" }.into(),
+            Fmt::Html => "  </tbody>\n</table>".into(),
+            _ => String::new(),
+        }
     }
 }
 

@@ -210,6 +210,49 @@ pub fn statement_at(text: &str, caret: usize) -> Option<Range<usize>> {
     all.iter().find(|(_, semi)| *semi >= caret).or(all.last()).map(|(r, _)| r.clone())
 }
 
+/// Words of a statement outside parentheses, in capitals. None when the text holds a comment the server may run.
+fn top_words(stmt: &str) -> Option<Vec<String>> {
+    let (mut depth, mut out) = (0i32, Vec::new());
+    for (t, r) in tokens(stmt) {
+        match t {
+            Tok::ExecOpen | Tok::ExecClose => return None,
+            Tok::Punct if &stmt[r.clone()] == "(" => depth += 1,
+            Tok::Punct if &stmt[r.clone()] == ")" => depth -= 1,
+            Tok::Word if depth == 0 => out.push(stmt[r].to_ascii_uppercase()),
+            _ => {}
+        }
+    }
+    Some(out)
+}
+
+/// Whether a statement can sit inside `SELECT * FROM (...) AS q LIMIT ...` to be read a page at a time:
+/// one SELECT, WITH, TABLE or VALUES that writes nothing and has no INTO or locking clause.
+pub fn pageable(stmt: &str) -> bool {
+    let Some(w) = top_words(stmt) else { return false };
+    w.first().is_some_and(|f| ["SELECT", "WITH", "TABLE", "VALUES"].contains(&f.as_str())) && !w.iter().any(|x| ["INTO", "UPDATE", "DELETE", "INSERT", "REPLACE", "LOCK", "SHARE"].contains(&x.as_str()))
+}
+
+/// Whether the statement orders its rows, which keeps rows from moving between pages.
+pub fn has_order_by(stmt: &str) -> bool {
+    top_words(stmt).is_some_and(|w| w.windows(2).any(|p| p[0] == "ORDER" && p[1] == "BY"))
+}
+
+/// The statement without its end: spaces and `;`.
+fn bare(stmt: &str) -> &str {
+    stmt.trim_end_matches(|c: char| c.is_whitespace() || c == ';')
+}
+
+/// One page of `stmt`, a row more than `size` so the caller sees whether another page follows. The
+/// newlines keep a trailing `--` comment of the statement from swallowing the closing parenthesis.
+pub fn page_sql(stmt: &str, page: usize, size: usize) -> String {
+    format!("SELECT * FROM (\n{}\n) AS q LIMIT {} OFFSET {}", bare(stmt), size + 1, page * size)
+}
+
+/// The row count of `stmt`.
+pub fn count_sql(stmt: &str) -> String {
+    format!("SELECT COUNT(*) FROM (\n{}\n) AS q", bare(stmt))
+}
+
 type Code<'a> = (Tok, &'a str);
 
 fn is(t: &Code, kw: &str) -> bool {
@@ -626,5 +669,26 @@ mod tests {
         assert_eq!(placeholders("SELECT ?, '?'", true, false), placeholders("SELECT ?, '?'", false, false));
         assert_eq!(count_with("SELECT '\\''; SELECT 2", false, false), 1);
         assert_eq!(count_with("SELECT '\\''; SELECT 2", true, false), 2);
+    }
+
+    #[test]
+    fn only_plain_reads_are_paged() {
+        for ok in ["SELECT 1", "select * from t order by a", "WITH c AS (SELECT 1) SELECT * FROM c", "TABLE t", "VALUES ROW(1), ROW(2)", "SELECT (SELECT 1 INTO @x) FROM t"] {
+            assert!(pageable(ok), "{ok}");
+        }
+        for no in ["SHOW TABLES", "EXPLAIN SELECT 1", "CALL p()", "SELECT 1 INTO @x", "SELECT * FROM t FOR UPDATE", "SELECT * FROM t LOCK IN SHARE MODE", "WITH c AS (SELECT 1) DELETE FROM t", "SELECT /*!50000 1 */", "UPDATE t SET a = 1", ""] {
+            assert!(!pageable(no), "{no}");
+        }
+        assert!(has_order_by("SELECT * FROM t ORDER BY a") && !has_order_by("SELECT * FROM (SELECT 1 ORDER BY 1) x") && !has_order_by("SELECT 'order by'"));
+    }
+
+    #[test]
+    fn the_wrapped_page_is_still_a_read_and_survives_a_trailing_comment() {
+        let w = page_sql("SELECT * FROM t ORDER BY a -- last\n;", 2, 1000);
+        assert_eq!(w, "SELECT * FROM (\nSELECT * FROM t ORDER BY a -- last\n) AS q LIMIT 1001 OFFSET 2000");
+        assert!(read_only_check(&w).is_ok() && read_only_check(&count_sql("SELECT 1")).is_ok());
+        assert_eq!(count_sql("SELECT 1;"), "SELECT COUNT(*) FROM (\nSELECT 1\n) AS q");
+        // A statement that is refused stays refused inside the wrapper.
+        assert!(read_only_check(&page_sql("SELECT 1 INTO OUTFILE '/tmp/x'", 0, 1000)).is_err());
     }
 }

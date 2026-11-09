@@ -22,6 +22,7 @@ mod demo;
 mod documents;
 mod drafts;
 mod explain;
+mod export;
 mod import;
 mod rail;
 mod indexes;
@@ -136,6 +137,8 @@ pub struct App {
     dropping_db: Option<(u64, String)>,
     /// Collections being written by a duplicate, as (connection, database, new name), shown with a spinner.
     copying: std::collections::HashSet<(u64, String, String)>,
+    /// The Query result being streamed to a file or the clipboard, shown in the status bar with a Cancel.
+    export_job: Option<export::ExportJob>,
     prefs: UiPrefs,
     new_col: String,
     col_filter: String,
@@ -271,6 +274,7 @@ impl App {
             insert: None,
             dropping_db: None,
             copying: Default::default(),
+            export_job: None,
             prefs: UiPrefs::default(),
             new_col: String::new(),
             col_filter: String::new(),

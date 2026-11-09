@@ -665,9 +665,16 @@ impl App {
         }
         if let Some(p) = page_to {
             t.shell.page = p;
+            // Checks are positions in the page on screen.
+            t.shell_checked.clear();
         }
         if export {
-            self.export_shell();
+            if self.tabs[self.cur].shell.docs.is_empty() {
+                self.export_shell();
+            } else {
+                let sel = self.checked_rows();
+                self.open_export(sel, false);
+            }
         }
         if page_to.is_some() {
             self.drop_agg_row();

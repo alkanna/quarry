@@ -8,6 +8,7 @@ mod worker;
 pub mod structure;
 pub mod write;
 #[allow(dead_code)]
+pub mod export;
 pub mod lex;
 #[allow(dead_code)]
 pub mod value;
@@ -226,11 +227,23 @@ pub struct ResultSet {
     pub affected: Option<u64>,
     pub error: Option<String>,
     pub ms: u128,
-    /// More rows came back than `RUN_ROWS_MAX`; the rest were dropped.
+    /// A statement that cannot be paged (SHOW, CALL) returned more than `RUN_ROWS_MAX` rows; the rest were dropped.
     pub capped: bool,
+    /// Set for a SELECT read a page at a time.
+    pub page: Option<Page>,
 }
 
-/// Most rows of one statement a Custom Query keeps.
+/// Where a paged result stands: the page shown, whether another follows, and the whole row count once known.
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct Page {
+    pub n: usize,
+    pub next: bool,
+    pub total: Option<u64>,
+    /// The statement has an ORDER BY, so rows keep their place between pages.
+    pub ordered: bool,
+}
+
+/// Rows of one Custom Query page, and the most rows an unpageable statement keeps.
 #[allow(dead_code)]
 pub const RUN_ROWS_MAX: usize = 1000;
 

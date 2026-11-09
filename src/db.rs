@@ -207,6 +207,10 @@ pub enum Msg {
     /// A Custom Query run: one result per statement.
     #[allow(dead_code)]
     SqlRan { req: u64, sets: Vec<sql::ResultSet>, ms: u128 },
+    /// The row count of result tab `idx` of run `req`.
+    SqlCount { req: u64, idx: usize, res: Res<u64> },
+    /// A Query result streamed to a file or the clipboard text; see `sql::export`.
+    SqlExport { req: u64, res: Res<sql::export::Done> },
     /// A SQL table's columns, indexes, keys, triggers, status and CREATE statement. Answers the tab whose `idx_req` is `req`.
     SqlStructure { req: u64, res: Res<sql::Structure> },
     /// Every table, view and column of one database, for SQL autocomplete.

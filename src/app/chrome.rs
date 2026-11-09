@@ -426,6 +426,9 @@ impl App {
                                 }
                             }
                         }
+                        if self.export_progress(ui) {
+                            return;
+                        }
                         let (msg, is_err) = &self.status;
                         let first = msg.lines().next().unwrap_or_default();
                         let r = ui.add(egui::Label::new(RichText::new(first).size(TXT_CAPTION).color(if *is_err { ALERT() } else { FAINT() })).truncate().sense(egui::Sense::click()));

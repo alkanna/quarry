@@ -196,6 +196,8 @@ pub(super) struct Tab {
     /// Rows of the current page checked for bulk actions, and the last one clicked for Shift ranges.
     pub(super) checked: BTreeSet<usize>,
     pub(super) check_anchor: Option<usize>,
+    /// Checked rows of the Shell result's page, which has its own table and so its own checks.
+    pub(super) shell_checked: BTreeSet<usize>,
     /// Rows open inline besides the selected one, keyed like `selected`.
     pub(super) expanded: BTreeSet<(bool, usize)>,
     pub(super) agg_txt: String,
@@ -270,6 +272,14 @@ pub(super) struct SqlTab {
     /// Results as text instead of a grid, and that text for the set it was built from.
     pub(super) text_mode: bool,
     pub(super) text_cache: Option<(usize, String)>,
+    /// Checked rows of the shown page of the selected result, and the anchor of a Shift range. A page change
+    /// or a new run clears them: checks belong to the page they were made on.
+    pub(super) qchecked: BTreeSet<usize>,
+    pub(super) qanchor: Option<usize>,
+    /// The run the shown results belong to, which their row counts answer to, and the result tab being
+    /// read at another page (its answer replaces only that tab).
+    pub(super) sets_req: u64,
+    pub(super) paging: Option<usize>,
     /// What the Structure, Relations, Triggers and Info views show.
     pub(super) st: super::sql_structure::StructState,
 }
@@ -577,6 +587,7 @@ impl Tab {
             selected: None,
             checked: BTreeSet::new(),
             check_anchor: None,
+            shell_checked: BTreeSet::new(),
             expanded: BTreeSet::new(),
             agg_txt: "[\n  { $match: {} },\n  { $limit: 20 }\n]".into(),
             agg_docs: Vec::new(),
@@ -655,6 +666,8 @@ pub(super) enum Modal {
     Tool(Box<ToolForm>),
     Relations { conn: u64, db: String },
     Palette { query: String, sel: usize },
+    /// Export or copy-to-file of the rows of a result, in any of the Copy as formats.
+    Export(Box<super::export::ExportForm>),
     /// Values of a field with how many documents hold each, and the pipeline that counted them.
     Grouped { sel: Sel, path: String, pipeline: Vec<Document>, rows: Vec<Document> },
     /// The column header's Customize window; `key` is the column prefs key it edits.
