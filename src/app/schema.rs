@@ -79,31 +79,52 @@ impl App {
             ui.label(RichText::new(format!("{} fields in {} documents  ·  {ms} ms", t.schema.stats.len(), group(&t.schema.docs.to_string()))).color(MUTED()));
         }
         let n = t.schema.docs.max(1) as f32;
+        let mut toggle = None;
         egui::ScrollArea::vertical().id_salt("schema").auto_shrink(false).show(ui, |ui| {
             egui::Grid::new("schema-grid").num_columns(4).striped(true).spacing([18.0, 6.0]).min_col_width(60.0).show(ui, |ui| {
                 for h in ["FIELD", "PRESENT IN", "TYPES", "EXAMPLES"] {
                     caption(ui, h);
                 }
                 ui.end_row();
-                for f in &t.schema.stats {
+                // Stats come as a tree, so a closed field's children are the rows right after it.
+                // The depth of a closed field: deeper rows after it are its children.
+                let mut hidden: Option<usize> = None;
+                for (i, f) in t.schema.stats.iter().enumerate() {
+                    if hidden.is_some_and(|d| f.depth > d) {
+                        continue;
+                    }
+                    let open = !t.schema.closed.contains(&f.path);
+                    hidden = (!open).then_some(f.depth);
+                    let parent = t.schema.stats.get(i + 1).is_some_and(|n| n.depth > f.depth);
                     let name = f.path.rsplit('.').next().unwrap_or(&f.path);
                     let r = ui.horizontal(|ui| {
                         ui.add_space(f.depth as f32 * 16.0);
-                        ui.label(RichText::new(name).monospace().color(BRIGHT())).on_hover_text(&f.path)
-                    });
-                    r.response.context_menu(|ui| {
-                        menu_look(ui);
-                        ui.label(RichText::new(format!("Field: {}", f.path)).size(TXT_SMALL).color(MUTED()));
-                        if ui.button("Add as column").clicked() {
-                            acts.push((f.path.clone(), 0));
+                        let (rect, arrow) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), if parent { Sense::click() } else { Sense::hover() });
+                        if parent {
+                            chevron(ui.painter(), rect.center(), open, if arrow.hovered() { TEXT() } else { FAINT() });
                         }
-                        if ui.button("Filter: has this field").clicked() {
-                            acts.push((f.path.clone(), 1));
-                        }
-                        if ui.button("Filter: missing this field").clicked() {
-                            acts.push((f.path.clone(), 2));
+                        let (color, tip) = if name == db::DYNAMIC_KEY { (MUTED(), "Keys that are data rather than names (ids, numbers, dates, or keys sharing one pattern), merged into one row") } else { (BRIGHT(), f.path.as_str()) };
+                        let label = ui.add(egui::Label::new(RichText::new(name).monospace().color(color)).sense(Sense::click())).on_hover_text(tip);
+                        if parent && (arrow.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() || label.clicked()) {
+                            toggle = Some(f.path.clone());
                         }
                     });
+                    // Merged map keys have no single path to filter on or show as a column.
+                    if !f.dynamic {
+                        r.response.context_menu(|ui| {
+                            menu_look(ui);
+                            ui.label(RichText::new(format!("Field: {}", f.path)).size(TXT_SMALL).color(MUTED()));
+                            if ui.button("Add as column").clicked() {
+                                acts.push((f.path.clone(), 0));
+                            }
+                            if ui.button("Filter: has this field").clicked() {
+                                acts.push((f.path.clone(), 1));
+                            }
+                            if ui.button("Filter: missing this field").clicked() {
+                                acts.push((f.path.clone(), 2));
+                            }
+                        });
+                    }
                     let share = f.docs as f32 / n;
                     ui.horizontal(|ui| {
                         let (rect, _) = ui.allocate_exact_size(egui::vec2(90.0, 8.0), Sense::hover());
@@ -160,6 +181,12 @@ impl App {
                 let s = &mut self.tabs[self.cur].schema;
                 (s.vloaded, s.vreq) = (true, req);
                 self.worker.command(target.client, target.db, doc! { "listCollections": 1, "filter": { "name": coll } }, &format!("validator:{req}"));
+            }
+        }
+        if let Some(p) = toggle {
+            let closed = &mut self.tabs[self.cur].schema.closed;
+            if !closed.remove(&p) {
+                closed.insert(p);
             }
         }
         for (path, what) in acts {

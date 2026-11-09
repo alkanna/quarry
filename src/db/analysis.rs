@@ -137,59 +137,120 @@ pub struct FieldStat {
     /// Type name and how many times it was seen.
     pub types: Vec<(&'static str, usize)>,
     pub examples: Vec<String>,
+    /// A merged map row, or a field under one: it has no single path.
+    pub dynamic: bool,
 }
 
-/// Field paths in first-seen order, how many documents have each, their types and a few
-/// examples. Objects inside arrays are merged under the array's path.
+/// Stands for every key that looks like data rather than a name, like the ids of a map.
+pub const DYNAMIC_KEY: &str = "<id>";
+
+/// Whether a key looks generated on its own: a UUID, an ObjectId or other long hex, or a number
+/// or date. Objects keyed by these are maps, and listing each key would bury the real fields.
+fn dynamic_key(k: &str) -> bool {
+    let hex = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_hexdigit());
+    let uuid = k.len() == 36 && k.split('-').map(str::len).eq([8, 4, 4, 4, 12]) && hex(&k.replace('-', ""));
+    uuid || (k.len() >= 16 && hex(k)) || (k.chars().any(|c| c.is_ascii_digit()) && k.chars().all(|c| c.is_ascii_digit() || "-_:".contains(c)))
+}
+
+/// A key's pattern: digits become 9, letters a or A, other characters stay. A key of hex digits
+/// with at least one digit becomes all x, since hex ids mix letters and digits at random.
+fn key_shape(k: &str) -> String {
+    let hexy = k.chars().any(|c| c.is_ascii_digit()) && k.chars().all(|c| c.is_ascii_hexdigit() || "-_:".contains(c));
+    k.chars()
+        .map(|c| match c {
+            c if hexy && c.is_ascii_hexdigit() => 'x',
+            c if c.is_ascii_digit() => '9',
+            c if c.is_ascii_lowercase() => 'a',
+            c if c.is_ascii_uppercase() => 'A',
+            c => c,
+        })
+        .collect()
+}
+
+/// Which of one object level's distinct keys are data: generated-looking keys, and keys sharing
+/// a pattern with others at the same level, like `TRV-00123` and `TRV-00456`. A pattern with a
+/// digit needs 3 keys; one without needs 10, since real field names often share a length.
+fn dynamic_keys<'a>(keys: &[&'a str]) -> std::collections::HashSet<&'a str> {
+    let mut groups: std::collections::HashMap<String, Vec<&str>> = std::collections::HashMap::new();
+    for k in keys {
+        groups.entry(key_shape(k)).or_default().push(k);
+    }
+    let mut out: std::collections::HashSet<&str> = keys.iter().copied().filter(|k| dynamic_key(k)).collect();
+    for (shape, ks) in groups {
+        let need = if shape.contains(['9', 'x']) { 3 } else { 10 };
+        if ks.len() >= need {
+            out.extend(ks);
+        }
+    }
+    out
+}
+
+/// Field paths as a tree (each field right after its parent, siblings in first-seen order), how
+/// many documents have each, their types and a few examples. Objects inside arrays are merged
+/// under the array's path, and keys that are data rather than names under one `<id>` row.
 pub fn analyze_schema(docs: &[Document]) -> Vec<FieldStat> {
-    use std::collections::{HashMap, HashSet};
-    fn walk(d: &Document, prefix: &str, depth: usize, stats: &mut Vec<FieldStat>, at: &mut HashMap<String, usize>, seen: &mut HashSet<usize>) {
-        for (k, v) in d {
-            let path = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
-            let i = *at.entry(path.clone()).or_insert_with(|| {
-                stats.push(FieldStat { path: path.clone(), depth, docs: 0, types: Vec::new(), examples: Vec::new() });
-                stats.len() - 1
-            });
-            if seen.insert(i) {
-                stats[i].docs += 1;
-            }
-            let tn = type_name(v);
-            match stats[i].types.iter_mut().find(|(t, _)| *t == tn) {
-                Some(t) => t.1 += 1,
-                None => stats[i].types.push((tn, 1)),
-            }
-            if !matches!(v, Bson::Document(_) | Bson::Array(_)) && stats[i].examples.len() < 3 {
-                let shown = match v {
-                    Bson::ObjectId(o) => o.to_hex(),
-                    Bson::DateTime(d) => d.try_to_rfc3339_string().unwrap_or_default(),
-                    other => compact(other),
-                };
-                let ex: String = shown.chars().take(40).collect();
-                if !stats[i].examples.contains(&ex) {
-                    stats[i].examples.push(ex);
+    /// One object level across every document: the objects found there, each with the index of
+    /// the document it is in. Built level by level so a key's pattern is judged against all its
+    /// siblings in every document.
+    fn level(objs: &[(usize, &Document)], prefix: &str, depth: usize, in_map: bool, stats: &mut Vec<FieldStat>) {
+        let mut keys: Vec<&str> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for (_, d) in objs {
+            keys.extend(d.keys().map(String::as_str).filter(|k| seen.insert(*k)));
+        }
+        let dynamic = dynamic_keys(&keys);
+        // One pass buckets every value under its row: the field, its child objects, and the last
+        // document counted. Objects come grouped by document, so a new index is a new document.
+        type Row<'a> = (FieldStat, Vec<(usize, &'a Document)>, Option<usize>);
+        let mut rows: Vec<Row> = Vec::new();
+        let mut at: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for (i, d) in objs {
+            for (k, v) in d.iter() {
+                let n = if dynamic.contains(k.as_str()) { DYNAMIC_KEY } else { k.as_str() };
+                let r = *at.entry(n).or_insert_with(|| {
+                    let path = if prefix.is_empty() { n.to_string() } else { format!("{prefix}.{n}") };
+                    rows.push((FieldStat { path, depth, docs: 0, types: Vec::new(), examples: Vec::new(), dynamic: in_map || n == DYNAMIC_KEY }, Vec::new(), None));
+                    rows.len() - 1
+                });
+                let (f, kids, last) = &mut rows[r];
+                if *last != Some(*i) {
+                    (f.docs, *last) = (f.docs + 1, Some(*i));
                 }
-            }
-            match v {
-                Bson::Document(c) => walk(c, &path, depth + 1, stats, at, seen),
-                Bson::Array(a) => {
-                    for x in a.iter().take(50) {
-                        if let Bson::Document(c) = x {
-                            walk(c, &path, depth + 1, stats, at, seen);
+                let tn = type_name(v);
+                match f.types.iter_mut().find(|(t, _)| *t == tn) {
+                    Some(t) => t.1 += 1,
+                    None => f.types.push((tn, 1)),
+                }
+                match v {
+                    Bson::Document(c) => kids.push((*i, c)),
+                    Bson::Array(a) => kids.extend(a.iter().take(50).filter_map(|x| x.as_document()).map(|c| (*i, c))),
+                    _ if f.examples.len() < 3 => {
+                        let shown = match v {
+                            Bson::ObjectId(o) => o.to_hex(),
+                            Bson::DateTime(d) => d.try_to_rfc3339_string().unwrap_or_default(),
+                            other => compact(other),
+                        };
+                        let ex: String = shown.chars().take(40).collect();
+                        if !f.examples.contains(&ex) {
+                            f.examples.push(ex);
                         }
                     }
+                    _ => {}
                 }
-                _ => {}
+            }
+        }
+        for (mut f, kids, _) in rows {
+            f.types.sort_by(|a, b| b.1.cmp(&a.1));
+            let (path, dynamic) = (f.path.clone(), f.dynamic);
+            stats.push(f);
+            if !kids.is_empty() {
+                level(&kids, &path, depth + 1, dynamic, stats);
             }
         }
     }
-    let (mut stats, mut at) = (Vec::new(), HashMap::new());
-    for d in docs {
-        let mut seen = HashSet::new();
-        walk(d, "", 0, &mut stats, &mut at, &mut seen);
-    }
-    for s in &mut stats {
-        s.types.sort_by(|a, b| b.1.cmp(&a.1));
-    }
+    let top: Vec<(usize, &Document)> = docs.iter().enumerate().collect();
+    let mut stats = Vec::new();
+    level(&top, "", 0, false, &mut stats);
     stats
 }
 
@@ -218,7 +279,8 @@ pub fn schema_from_stats(stats: &[FieldStat], sampled: usize) -> Document {
     }
     fn object(stats: &[FieldStat], prefix: &str, depth: usize, present: usize) -> Document {
         let (mut props, mut required) = (Document::new(), Vec::new());
-        for f in stats.iter().filter(|f| f.depth == depth && f.path.strip_prefix(prefix).is_some_and(|r| !r.contains('.'))) {
+        // Map keys are data, so a map's entries are left unconstrained.
+        for f in stats.iter().filter(|f| !f.dynamic && f.depth == depth && f.path.strip_prefix(prefix).is_some_and(|r| !r.contains('.'))) {
             let name = &f.path[prefix.len()..];
             let mut types: Vec<&str> = f.types.iter().filter_map(|(t, _)| bson_type(t)).collect();
             let all_mapped = types.len() == f.types.len();
@@ -526,7 +588,7 @@ mod tests {
     }
 
     fn stat(path: &str, docs: usize, types: &[&'static str]) -> FieldStat {
-        FieldStat { path: path.into(), depth: path.matches('.').count(), docs, types: types.iter().map(|t| (*t, 1)).collect(), examples: Vec::new() }
+        FieldStat { path: path.into(), depth: path.matches('.').count(), docs, types: types.iter().map(|t| (*t, 1)).collect(), examples: Vec::new(), dynamic: false }
     }
 
     #[test]
@@ -579,6 +641,37 @@ mod tests {
         assert!(!is_unused(0, Some(0), week));
         assert!(!is_unused(3, Some(0), week * 2));
         assert!(!is_unused(0, None, week * 2));
+    }
+
+    #[test]
+    fn schema_merges_map_keys_and_keeps_children_under_parents() {
+        let docs = [
+            doc! { "analytics": { "byPax": 1 }, "risky": false },
+            doc! { "analytics": { "ofAgency": { "d11b8107-2150-4e13-9990-2e24fe005e16": [{ "uid": 1 }], "6650f1c2a1b2c3d4e5f60700": [{ "uid": 2 }] } }, "risky": true },
+            doc! { "analytics": { "ofAgency": { "2024-11-09": [] } } },
+        ];
+        let s = analyze_schema(&docs);
+        let paths: Vec<&str> = s.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["analytics", "analytics.byPax", "analytics.ofAgency", "analytics.ofAgency.<id>", "analytics.ofAgency.<id>.uid", "risky"]);
+        let map = &s[3];
+        assert_eq!((map.docs, map.depth), (2, 2));
+        assert!(map.dynamic && s[4].dynamic && !s[2].dynamic);
+        // Words and short codes stay real fields.
+        assert!(["status", "v2", "user_id", "fr-FR", "abc123"].iter().all(|k| !dynamic_key(k)));
+        assert!(["42", "deadbeefdeadbeef", "2024-11-09"].iter().all(|k| dynamic_key(k)));
+        // Keys sharing a pattern across documents are a map too, even when none looks like an id alone;
+        // a pattern of plain letters needs many keys, since real names often share a length.
+        let docs = [
+            doc! { "byTrip": { "TRV-00123": { "n": 1 } }, "name": "a", "city": "b" },
+            doc! { "byTrip": { "TRV-00456": { "n": 2 }, "TRV-00789": { "n": 3 } }, "type": "c", "date": "d" },
+        ];
+        let paths: Vec<String> = analyze_schema(&docs).into_iter().map(|f| f.path).collect();
+        assert_eq!(paths, ["byTrip", "byTrip.<id>", "byTrip.<id>.n", "name", "city", "type", "date"]);
+        assert_eq!((key_shape("TRV-00123"), key_shape("d11b8107")), ("AAA-99999".to_string(), "xxxxxxxx".to_string()));
+        // The validator leaves the map's entries unconstrained.
+        let js = schema_from_stats(&s, 3);
+        let of = js.get_document("$jsonSchema").unwrap().get_document("properties").unwrap().get_document("analytics").unwrap().get_document("properties").unwrap().get_document("ofAgency").unwrap();
+        assert!(of.get("properties").is_none());
     }
 
     #[test]
