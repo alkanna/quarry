@@ -19,7 +19,9 @@ Update this list when a step lands. Each step is reviewed before it is ticked.
 - [x] 8. Custom Query: highlighter, several result sets, Stop (`KILL QUERY`), Explain, history, Query tabs from the sidebar. Save to library and Format left out
 - [x] 9. SQL autocomplete (tables, aliases, columns, values with frequencies, functions and signature help) in the Content bar and the Query editor
 - [x] 10. SQL shell with typed tables, and the shared shell layout for Mongo and SQL. Reviewed; values are filled with the server's quoting rules, escaping changes are refused, BIGINT is exact, a bad `where` never means every row
-- [ ] 11. Demo data, `QUARRY_TEST_SQL` switches, CLAUDE.md
+- [x] 11. Demo data, `QUARRY_TEST_SQL` switches, CLAUDE.md, and the final polish (searchable column pickers, all columns by default, prepared statements refused in the shell, README)
+
+**v1 known limits:** the Advanced tab of the connection form is not built; structure editing, relations and trigger editing, import and export, create and drop, attached shell connections, users, the process list and variables are v2 or v3; Save to library and Format in Query are not built.
 
 **v2**: structure editing, relations and FKs, triggers, import and export, create and drop, attached connections in the shell.
 

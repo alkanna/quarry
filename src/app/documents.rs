@@ -30,7 +30,7 @@ pub(super) fn follow_ids(old: &[db::Row], new: &[db::Row], rows: impl Iterator<I
 }
 
 /// Actions on one document or the checked ones, shared by the selection bar and the row menus.
-pub(super) fn docs_menu(ui: &mut egui::Ui, n: usize, heading: bool, sql: bool) -> Option<DocsAct> {
+pub(super) fn docs_menu(ui: &mut egui::Ui, n: usize, heading: bool, sql: bool, grouped: bool) -> Option<DocsAct> {
     if heading {
         let (one, many) = if sql { ("Row".to_string(), format!("{n} selected rows")) } else { ("Document".to_string(), format!("{n} selected documents")) };
         ui.label(RichText::new(if n == 1 { one } else { many }).size(TXT_CAPTION).color(FAINT()));
@@ -51,7 +51,9 @@ pub(super) fn docs_menu(ui: &mut egui::Ui, n: usize, heading: bool, sql: bool) -
             ui.separator();
         }
         let text = if is_delete { RichText::new(label).color(ALERT()) } else { RichText::new(label) };
-        if ui.button(text).clicked() {
+        // Rows of a grouped answer are summaries, so these would only fail with a toast.
+        let off = grouped && matches!(a, DocsAct::Duplicate | DocsAct::Delete | DocsAct::SetValue | DocsAct::EditQuery);
+        if ui.add_enabled(!off, egui::Button::new(text)).on_disabled_hover_text("Grouped rows are summaries, not table rows. Ungroup to use this.").clicked() {
             act = Some(a);
         }
     }
@@ -59,9 +61,9 @@ pub(super) fn docs_menu(ui: &mut egui::Ui, n: usize, heading: bool, sql: bool) -
 }
 
 /// The row menu: acts on every checked document when the row is one of them, else on that row.
-pub(super) fn row_menu(ui: &mut egui::Ui, i: usize, checked: &BTreeSet<usize>, sql: bool) -> Option<(usize, DocsAct)> {
+pub(super) fn row_menu(ui: &mut egui::Ui, i: usize, checked: &BTreeSet<usize>, sql: bool, grouped: bool) -> Option<(usize, DocsAct)> {
     menu_look(ui);
-    docs_menu(ui, if checked.contains(&i) { checked.len() } else { 1 }, true, sql).map(|a| (i, a))
+    docs_menu(ui, if checked.contains(&i) { checked.len() } else { 1 }, true, sql, grouped).map(|a| (i, a))
 }
 
 /// SQL clause names (ORDER BY, LIMIT) read as keywords; Mongo's lowercase option names and plain
@@ -108,6 +110,8 @@ pub(super) enum RowMenu {
     Docs,
     /// SQL rows: the document actions with SQL's own.
     Sql,
+    /// SQL rows of a GROUP BY answer, where the actions that write are off.
+    SqlGrouped,
     Indexes,
     None,
 }
@@ -121,8 +125,9 @@ pub(super) enum RowAct {
 /// The menu of row `i`: document actions for Documents rows, index actions for Indexes rows.
 pub(super) fn any_row_menu(ui: &mut egui::Ui, kind: RowMenu, i: usize, rows: Rows, checked: &BTreeSet<usize>) -> Option<(usize, RowAct)> {
     match kind {
-        RowMenu::Docs => row_menu(ui, i, checked, false).map(|(i, a)| (i, RowAct::Doc(a))),
-        RowMenu::Sql => row_menu(ui, i, checked, true).map(|(i, a)| (i, RowAct::Doc(a))),
+        RowMenu::Docs => row_menu(ui, i, checked, false, false).map(|(i, a)| (i, RowAct::Doc(a))),
+        RowMenu::Sql => row_menu(ui, i, checked, true, false).map(|(i, a)| (i, RowAct::Doc(a))),
+        RowMenu::SqlGrouped => row_menu(ui, i, checked, true, true).map(|(i, a)| (i, RowAct::Doc(a))),
         RowMenu::Indexes => index_menu(ui, rows.doc(i)?).map(|a| (i, RowAct::Idx(a))),
         RowMenu::None => None,
     }
@@ -618,6 +623,7 @@ impl App {
         }
         let mut cancel = false;
         let sql = self.t().is_some_and(|t| t.sql.is_some());
+        let grouped = self.t().and_then(|t| t.sql.as_ref()).is_some_and(|s| s.matched.is_some());
         // Floats over the bottom of the results so checking rows never shifts the table.
         let area = ui.available_rect_before_wrap();
         let act = egui::Area::new(egui::Id::unique("selection-toolbar"))
@@ -629,7 +635,7 @@ impl App {
                     ui.horizontal(|ui| {
                         ui.label(semibold(RichText::new(format!("{n} selected")).color(BRIGHT())));
                         ui.add_space(8.0);
-                        let act = docs_menu(ui, n, false, sql);
+                        let act = docs_menu(ui, n, false, sql, grouped);
                         cancel = ui.button("Cancel").on_hover_text("Clear the selection").clicked();
                         act
                     })

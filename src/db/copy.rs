@@ -18,7 +18,10 @@ pub enum Fmt {
 /// One visible column. `numeric` right-aligns it in Markdown and leaves numbers unquoted in SQL and JSON.
 #[derive(Clone, Debug)]
 pub struct CopyCol {
+    /// The key in the row document, the name shown.
     pub name: String,
+    /// The server's own column name, which SQL statements must use. Equals `name` unless a result renamed the column.
+    pub src: String,
     pub numeric: bool,
 }
 
@@ -129,20 +132,20 @@ pub fn format(f: Fmt, s: &Sheet, header: bool) -> String {
     match f {
         Fmt::SqlInsert => {
             let mut out = format!("INSERT INTO {}", quote_ident(s.table));
-            out.push_str(&format!(" ({})", names.iter().map(|n| quote_ident(n)).collect::<Vec<_>>().join(", ")));
+            out.push_str(&format!(" ({})", s.cols.iter().map(|c| quote_ident(&c.src)).collect::<Vec<_>>().join(", ")));
             out.push_str(" VALUES\n");
             let rows: Vec<String> = s.rows.iter().map(|d| format!("({})", s.cols.iter().map(|c| sql_literal(value(d, c), c.numeric, s.bs)).collect::<Vec<_>>().join(", "))).collect();
             out + &rows.join(",\n") + ";"
         }
         Fmt::SqlUpdate => {
-            let sets: Vec<&CopyCol> = s.cols.iter().filter(|c| !s.pk.contains(&c.name)).collect();
+            let sets: Vec<&CopyCol> = s.cols.iter().filter(|c| !s.pk.contains(&c.src)).collect();
             let mut out = Vec::new();
             for d in s.rows {
                 let Ok(key) = d.get_document("_id") else { continue };
                 if sets.is_empty() || s.pk.is_empty() || !s.pk.iter().all(|p| key.contains_key(p)) {
                     continue;
                 }
-                let set = sets.iter().map(|c| format!("{} = {}", quote_ident(&c.name), sql_literal(value(d, c), c.numeric, s.bs))).collect::<Vec<_>>().join(", ");
+                let set = sets.iter().map(|c| format!("{} = {}", quote_ident(&c.src), sql_literal(value(d, c), c.numeric, s.bs))).collect::<Vec<_>>().join(", ");
                 let wh = s.pk.iter().map(|p| format!("{} = {}", quote_ident(p), sql_literal(key.get(p), false, s.bs))).collect::<Vec<_>>().join(" AND ");
                 out.push(format!("UPDATE {} SET {set} WHERE {wh};", quote_ident(s.table)));
             }
@@ -206,11 +209,21 @@ mod tests {
     use super::*;
 
     fn cols() -> Vec<CopyCol> {
-        vec![CopyCol { name: "id".into(), numeric: true }, CopyCol { name: "status".into(), numeric: false }, CopyCol { name: "total".into(), numeric: true }]
+        vec![CopyCol { name: "id".into(), src: "id".into(), numeric: true }, CopyCol { name: "status".into(), src: "status".into(), numeric: false }, CopyCol { name: "total".into(), src: "total".into(), numeric: true }]
     }
 
     fn rows() -> Vec<Document> {
         vec![doc! { "_id": { "id": 1_i64 }, "id": 1_i64, "status": "it's", "total": "26.75" }, doc! { "_id": { "id": 2_i64 }, "id": 2_i64, "status": "a|b\nc", "total": Bson::Null }]
+    }
+
+    #[test]
+    fn sql_copy_uses_the_servers_column_name() {
+        let c = [CopyCol { name: "_id_2".into(), src: "_id".into(), numeric: true }, CopyCol { name: "a".into(), src: "a".into(), numeric: false }];
+        let r = [doc! { "_id": { "_id": 1 }, "_id_2": 1, "a": "x" }];
+        let pk = vec!["_id".to_string()];
+        let sheet = Sheet { rows: &r, cols: &c, table: "t", pk: &pk, bs: true };
+        assert_eq!(format(Fmt::SqlInsert, &sheet, true), "INSERT INTO `t` (`_id`, `a`) VALUES\n(1, 'x');");
+        assert_eq!(format(Fmt::SqlUpdate, &sheet, true), "UPDATE `t` SET `a` = 'x' WHERE `_id` = 1;");
     }
 
     #[test]
@@ -256,7 +269,7 @@ mod tests {
         assert_eq!(csv, "id,status,total\n1,it's,26.75\n2,\"a|b\nc\",");
         assert_eq!(out(Fmt::Csv, false).lines().next(), Some("1,it's,26.75"));
         assert_eq!(out(Fmt::Tsv, true), "id\tstatus\ttotal\n1\tit's\t26.75\n2\ta|b c\t");
-        let c = [CopyCol { name: "a,\"b\"".into(), numeric: false }];
+        let c = [CopyCol { name: "a,\"b\"".into(), src: "a,\"b\"".into(), numeric: false }];
         let r = [doc! { "a,\"b\"": "x,y" }];
         assert_eq!(format(Fmt::Csv, &Sheet { rows: &r, cols: &c, table: "", pk: &[], bs: true }, true), "\"a,\"\"b\"\"\"\n\"x,y\"");
     }
@@ -281,7 +294,7 @@ mod tests {
 
     #[test]
     fn html_escapes_and_has_thead() {
-        let c = [CopyCol { name: "a<b".into(), numeric: false }];
+        let c = [CopyCol { name: "a<b".into(), src: "a<b".into(), numeric: false }];
         let r = [doc! { "a<b": "x & \"y\" <z>" }];
         let s = Sheet { rows: &r, cols: &c, table: "", pk: &[], bs: true };
         assert_eq!(format(Fmt::Html, &s, true), "<table>\n  <thead><tr><th>a&lt;b</th></tr></thead>\n  <tbody>\n    <tr><td>x &amp; &quot;y&quot; &lt;z&gt;</td></tr>\n  </tbody>\n</table>");
@@ -291,7 +304,7 @@ mod tests {
     #[test]
     fn values_one_per_line_and_mongo_types() {
         assert_eq!(out(Fmt::Values, true), "1\nit's\n26.75\n2\na|b\nc\n");
-        let c = [CopyCol { name: "a.b".into(), numeric: false }, CopyCol { name: "bin".into(), numeric: false }];
+        let c = [CopyCol { name: "a.b".into(), src: "a.b".into(), numeric: false }, CopyCol { name: "bin".into(), src: "bin".into(), numeric: false }];
         let r = [doc! { "a": { "b": 5 }, "bin": Bson::Binary(mongodb::bson::Binary { subtype: mongodb::bson::spec::BinarySubtype::Generic, bytes: vec![1, 255] }) }];
         assert_eq!(format(Fmt::Values, &Sheet { rows: &r, cols: &c, table: "", pk: &[], bs: true }, true), "5\n0x01FF");
     }

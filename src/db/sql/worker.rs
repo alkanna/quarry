@@ -495,6 +495,9 @@ impl Relay {
         if lex::changes_escaping(text) {
             return Err("This statement changes how values are escaped; not allowed in the shell".into());
         }
+        if lex::uses_prepared(text) {
+            return Err("Prepared statements are not available in the shell; use sql`...` with values instead.".into());
+        }
         let stmt = fill(text, params, self.backslash, self.ansi)?;
         if lex::count_with(&stmt, self.backslash, self.ansi) != 1 || lex::count_with(&stmt, !self.backslash, self.ansi) != 1 {
             return Err("Send one statement per query".into());
@@ -548,30 +551,6 @@ impl Relay {
             }
         }
         Ok(Answer::Rows(rows))
-    }
-}
-
-impl Worker {
-    /// Every column of a database in one round trip, for the shell editor's types.
-    pub fn sql_columns(&self, conn: u64, db: Db, schema: String) {
-        self.spawn(async move {
-            let res = async {
-                let Pool::My(pool) = &db.pool;
-                let rows = sqlx::query(db.dialect.all_columns()).bind(&schema).fetch_all(pool).await.map_err(e)?;
-                let mut out: Vec<super::TableCols> = Vec::new();
-                for r in &rows {
-                    let (Some(t), Some(name), Some(full_type)) = (text(r, "tbl"), text(r, "name"), text(r, "full_type")) else { continue };
-                    let col = super::TableCol { name, full_type, nullable: r.try_get::<i64, _>("nullable").map(|n| n != 0).unwrap_or(true) };
-                    match out.last_mut().filter(|x| x.name == t) {
-                        Some(x) => x.cols.push(col),
-                        None => out.push(super::TableCols { name: t, cols: vec![col] }),
-                    }
-                }
-                Ok(out)
-            }
-            .await;
-            Msg::SqlColumns { conn, db: schema, res }
-        });
     }
 }
 

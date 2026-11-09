@@ -238,6 +238,23 @@ pub fn read_only_check(stmt: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// True when any statement starts with PREPARE, EXECUTE or DEALLOCATE. A prepared statement is built
+/// from a string at run time, so it could hold a SET that `changes_escaping` cannot see. Checked under
+/// every reading of the text, like the read-only guard.
+pub fn uses_prepared(stmt: &str) -> bool {
+    for skip_exec in [false, true] {
+        for ansi in [false, true] {
+            for backslash in [true, false] {
+                let code: Vec<Code> = lex(stmt, Opts { backslash, ansi, skip_exec }).into_iter().filter(|(t, _)| matches!(t, Tok::Word | Tok::Quoted | Tok::Str | Tok::Punct)).map(|(t, r)| (t, &stmt[r])).collect();
+                if code.split(|t| punct(t, ";")).any(|part| part.first().is_some_and(|t| is(t, "PREPARE") || is(t, "EXECUTE") || is(t, "DEALLOCATE"))) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// True for a SET that changes how the server reads literals (character set, SQL mode). Quarry
 /// escapes values for the mode it saw at connect, so a script must not move it. Checked under every
 /// reading of the text, like the read-only guard.
@@ -589,6 +606,16 @@ mod tests {
         }
         for s in ["SET @sql_mode = 1", "SET @a = 'sql_mode'", "SET @a = (SELECT names FROM t)", "SELECT 'SET NAMES x'", "SET autocommit = 0"] {
             assert!(!changes_escaping(s), "{s}");
+        }
+    }
+
+    #[test]
+    fn prepared_statements_are_found() {
+        for s in ["PREPARE s FROM 'SET sql_mode=\'\''", "execute s", "DEALLOCATE PREPARE s", "SELECT 1; EXECUTE s USING @a", "/*!50000 PREPARE */ s FROM 'x'"] {
+            assert!(uses_prepared(s), "{s}");
+        }
+        for s in ["SELECT 'PREPARE x'", "SELECT execute FROM t", "SET @a = 1", "SELECT 1 -- EXECUTE s"] {
+            assert!(!uses_prepared(s), "{s}");
         }
     }
 

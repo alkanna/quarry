@@ -199,7 +199,8 @@ pub(crate) fn cell_job(v: &Bson) -> LayoutJob {
 
 /// A SQL table cell, colored by the column's type instead of the BSON type of the value: DECIMAL and
 /// DATETIME arrive as text but read as a number and a date, and NULL stays distinct from an empty string.
-pub(crate) fn sql_cell_job(v: Val, kind: db::sql::value::Kind) -> LayoutJob {
+/// Text is quoted in the Content grid, and bare in Query results where the quotes only add noise.
+pub(crate) fn sql_cell_job(v: Val, kind: db::sql::value::Kind, quoted: bool) -> LayoutJob {
     use db::sql::value::Kind::*;
     let b = v.bson();
     let (text, color) = match (&*b, kind) {
@@ -211,8 +212,8 @@ pub(crate) fn sql_cell_job(v: Val, kind: db::sql::value::Kind) -> LayoutJob {
             return job;
         }
         (Bson::Binary(bin), _) => (format!("<binary {} B>", bin.bytes.len()), FAINT()),
-        (Bson::String(s), Enum | Set) => (format!("'{}'", s.chars().take(120).collect::<String>()), C_STRING()),
-        (Bson::String(s), Text) => (format!("'{}'", s.chars().take(120).collect::<String>()), str_color(s)),
+        (Bson::String(s), Enum | Set) => (shown(s, quoted), C_STRING()),
+        (Bson::String(s), Text) => (shown(s, quoted), str_color(s)),
         (Bson::String(s), Date | DateTime | Time) => (s.clone(), C_DATE()),
         (Bson::String(s), Decimal | Int | UInt | Float | Year) => (s.clone(), C_NUMBER()),
         (Bson::Int64(n), _) => (n.to_string(), C_NUMBER()),
@@ -222,6 +223,11 @@ pub(crate) fn sql_cell_job(v: Val, kind: db::sql::value::Kind) -> LayoutJob {
     let mut job = LayoutJob::default();
     job.append(&text, 0.0, mono(color));
     job
+}
+
+fn shown(s: &str, quoted: bool) -> String {
+    let t: String = s.chars().take(120).collect();
+    if quoted { format!("'{t}'") } else { t }
 }
 
 fn cell_job_of(v: Val) -> LayoutJob {

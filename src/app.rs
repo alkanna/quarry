@@ -105,6 +105,8 @@ pub struct App {
     conns: Vec<Conn>,
     active: Option<u64>,
     open_dbs: HashSet<(u64, String)>,
+    /// Sidebar TABLES / VIEWS groups folded shut, by connection, database and whether it is the views group.
+    side_closed: HashSet<(u64, String, bool)>,
     /// SQL databases whose table list was asked for; lists load when a database opens, not all at connect.
     sql_asked: HashSet<(u64, String)>,
     tabs: Vec<Tab>,
@@ -246,6 +248,7 @@ impl App {
             conns: Vec::new(),
             active: None,
             open_dbs: HashSet::new(),
+            side_closed: HashSet::new(),
             sql_asked: HashSet::new(),
             tabs: Vec::new(),
             cur: 0,

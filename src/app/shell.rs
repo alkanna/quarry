@@ -639,7 +639,9 @@ impl App {
         }
         if has_table {
             // The result table is the same one documents use: open, colours, right-click menu.
-            let h = (ui.available_height() - SHELL_PANEL_H - 34.0).max(80.0);
+            // Sized to its rows so the Console sits right under a short result, not at the bottom.
+            let rows = self.tabs[self.cur].shell.docs.len().min(PAGE_SIZE as usize) as f32;
+            let h = (ui.available_height() - SHELL_PANEL_H - 34.0).max(80.0).min(TABLE_HEAD_H + rows * ROW_H + 10.0);
             ui.allocate_ui(egui::vec2(ui.available_width(), h), |ui| self.results(ui, true));
         }
         ui.add_space(8.0);
@@ -675,6 +677,7 @@ impl App {
         let rows = [(1284_i64, 9_i64, 4410_i64, "paid", "112.00"), (877, 7, 4409, "shipped", "26.75"), (61, 6, 4407, "paid", "1,204.10"), (430, 5, 4405, "paid", "54.20")];
         let docs: Vec<Bson> = rows.iter().map(|&(c, n, id, st, tot)| Bson::Document(doc! { "customer_id": c, "n": n, "last": { "id": id, "status": st, "total": tot } })).collect();
         t.shell.set_value(Bson::Array(docs));
+        t.shell.hide_absent_id();
         t.shell.ms = Some(84);
         t.shell.queries = vec![
             db::ShellQuery { text: "SELECT customer_id, COUNT(*) AS n FROM orders WHERE status = ? GROUP BY customer_id HAVING n > 3".into(), params: "[\"paid\"]".into(), rows: Some(12), affected: None, error: None, ms: 22 },

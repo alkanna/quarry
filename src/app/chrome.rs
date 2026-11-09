@@ -292,8 +292,10 @@ impl App {
                 if let Some(s) = self.t().map(|t| t.sel.clone()) {
                     let (name, writable) = self.conn(s.conn).map(|c| (c.meta.name.clone(), c.writable)).unwrap_or_default();
                     let mut job = LayoutJob::default();
+                    // A query tab has no table, so its own name ends the path.
+                    let last = self.tab_name(self.cur);
                     job.append(&format!("{name} / {} / ", s.db), 0.0, mono_fmt(12.0, MUTED(), 400.0));
-                    job.append(&s.coll, 0.0, mono_fmt(12.0, BRIGHT(), W_SEMIBOLD));
+                    job.append(&last, 0.0, mono_fmt(12.0, BRIGHT(), W_SEMIBOLD));
                     ui.label(job);
                     ui.add_space(4.0);
                     if self.prefs.always_writable {

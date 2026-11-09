@@ -93,6 +93,8 @@ impl App {
                     }
                 }
                 Msg::SqlCols { req, cols, pk, estimated, matched } => {
+                    // Widths are measured from the rows, and a new answer can reuse the old rows' address and length, so none of them may carry over.
+                    self.width_cache.clear();
                     if let Some(s) = self.tab_by_req(req).and_then(|t| t.sql.as_mut()) {
                         // The rules pick from table columns, which a grouped answer does not have.
                         if matched.is_none() {
@@ -272,6 +274,8 @@ impl App {
                     Err(e) => self.err(e),
                 },
                 Msg::Docs { req, res } => {
+                    // Widths are measured from the rows, and a new answer can reuse the old rows' address and length, so none of them may carry over.
+                    self.width_cache.clear();
                     let Some(t) = self.tab_by_req(req) else { continue };
                     t.loading = false;
                     match res {
@@ -373,6 +377,7 @@ impl App {
                         continue;
                     };
                     t.agg_req = 0;
+                    self.width_cache.clear();
                     match res {
                         Ok((d, ms)) => {
                             t.agg_fields = auto_fields(&d);
@@ -573,11 +578,12 @@ impl App {
                         t.shell.queries.drain(..over);
                     }
                 }
-                Msg::SqlColumns { conn, db, res } => self.js_columns(conn, db, res),
                 Msg::JsLs { req, out } => self.js_answer(ctx, req, out),
                 Msg::JsLsStopped { failed } => self.js_stopped(failed),
                 Msg::ShellDone { req, res, ms } => {
                     let Some(t) = self.tabs.iter_mut().find(|t| t.shell.req == req) else { continue };
+                    self.width_cache.clear();
+                    let sql = t.sql.is_some();
                     let sh = &mut t.shell;
                     sh.cancel = None;
                     sh.started = None;
@@ -590,7 +596,12 @@ impl App {
                         }
                     });
                     match parsed {
-                        Ok(v) => sh.set_value(v),
+                        Ok(v) => {
+                            sh.set_value(v);
+                            if sql {
+                                sh.hide_absent_id();
+                            }
+                        }
                         Err(e) => {
                             sh.value = None;
                             sh.docs.clear();

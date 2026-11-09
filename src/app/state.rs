@@ -26,6 +26,14 @@ impl ShellTab {
         self.error = None;
     }
 
+    /// SQL rows have no `_id` unless the query selects one, so the column the Mongo layout adds first
+    /// is dropped when no row holds it.
+    pub(super) fn hide_absent_id(&mut self) {
+        if !self.docs.iter().any(|r| r.value("_id").is_some()) {
+            self.fields.retain(|f| f != "_id");
+        }
+    }
+
     /// The whole result as one value, for Copy, Export and the JSON view. Documents are decoded
     /// from their rows for the moment.
     pub(super) fn result(&self) -> Option<Bson> {
@@ -1040,6 +1048,17 @@ mod tests {
             assert!(sh.docs.is_empty() && sh.raw);
             assert_eq!(sh.result(), Some(v));
         }
+    }
+
+    #[test]
+    fn sql_result_hides_missing_id() {
+        let mut sh = ShellTab::default();
+        sh.set_value(Bson::Array(vec![Bson::Document(doc! { "a": 1 })]));
+        sh.hide_absent_id();
+        assert_eq!(sh.fields, ["a"]);
+        sh.set_value(Bson::Array(vec![Bson::Document(doc! { "_id": 1, "a": 1 })]));
+        sh.hide_absent_id();
+        assert_eq!(sh.fields, ["_id", "a"]);
     }
 
     #[test]

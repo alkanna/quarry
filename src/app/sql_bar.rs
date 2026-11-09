@@ -180,10 +180,19 @@ fn paint_check(p: &egui::Painter, c: egui::Pos2, color: Color32) {
 
 /// One row of a menu: a check column, the label in `color`, a faint note on the right.
 fn menu_row(ui: &mut egui::Ui, label: &str, color: Color32, checked: bool, note: &str) -> egui::Response {
+    menu_row_in(ui, label, color, checked, note, "", false)
+}
+
+/// A menu row whose label shows the typed part `hl` in the primary color, and that can be held
+/// highlighted (`active`) by the keyboard selection of a searchable list.
+fn menu_row_in(ui: &mut egui::Ui, label: &str, color: Color32, checked: bool, note: &str, hl: &str, active: bool) -> egui::Response {
     let w = ui.available_width().max(190.0);
     let (rect, r) = ui.allocate_exact_size(egui::vec2(w, 24.0), Sense::click());
     let state = state_of(&r);
-    if state > 0 {
+    if !ui.is_rect_visible(rect) {
+        return r;
+    }
+    if state > 0 || active {
         ui.painter().rect_filled(rect, R_SM, if state == 2 { menu_pressed() } else { MENU_HOVER() });
     }
     if checked {
@@ -197,7 +206,16 @@ fn menu_row(ui: &mut egui::Ui, label: &str, color: Color32, checked: bool, note:
         note_left -= n.size().x;
         ui.painter().galley(egui::pos2(note_left, rect.center().y - n.size().y / 2.0 + dy), n, FAINT());
     }
-    let mut job = egui::text::LayoutJob::single_section(label.to_string(), egui::TextFormat::simple(FontId::monospace(TXT_SMALL), color));
+    let mut job = egui::text::LayoutJob::default();
+    let fmt = |c: Color32| egui::TextFormat::simple(FontId::monospace(TXT_SMALL), c);
+    match find_ci(label, hl) {
+        Some((i, j)) => {
+            job.append(&label[..i], 0.0, fmt(color));
+            job.append(&label[i..j], 0.0, fmt(PRIMARY()));
+            job.append(&label[j..], 0.0, fmt(color));
+        }
+        None => job.append(label, 0.0, fmt(color)),
+    }
     job.wrap = egui::text::TextWrapping::truncate_at_width((note_left - 12.0 - (rect.left() + 26.0)).max(20.0));
     let g = ui.painter().layout_job(job);
     let dy = optical_dy(&g);
@@ -237,25 +255,125 @@ fn combo_w(ui: &egui::Ui, main: &str, sub: &str, min: f32) -> f32 {
     (text_w(ui, main, FontId::monospace(TXT_SMALL)) + if sub.is_empty() { 0.0 } else { text_w(ui, sub, FontId::monospace(TXT_CAPTION)) + 6.0 } + 34.0).max(min)
 }
 
-/// A column picker. Returns the picked name.
+/// Byte range of the first case-insensitive (ASCII) occurrence of `q` in `name`. ASCII lowering keeps
+/// byte offsets, so the range indexes `name` itself.
+fn find_ci(name: &str, q: &str) -> Option<(usize, usize)> {
+    if q.is_empty() {
+        return None;
+    }
+    let i = name.to_ascii_lowercase().find(&q.to_ascii_lowercase())?;
+    Some((i, i + q.len()))
+}
+
+/// Indices of the columns that hold `q`, names starting with it first, each group in table order. An
+/// empty `q` keeps every column.
+fn col_filter(cols: &[Col], q: &str) -> Vec<usize> {
+    let q = q.to_ascii_lowercase();
+    let (mut starts, mut inside) = (Vec::new(), Vec::new());
+    for (i, c) in cols.iter().enumerate() {
+        match c.name.to_ascii_lowercase().find(&q) {
+            Some(0) => starts.push(i),
+            Some(_) => inside.push(i),
+            None => {}
+        }
+    }
+    starts.extend(inside);
+    starts
+}
+
+/// What a column picker holds while its field is being typed in.
+#[derive(Clone, Default)]
+struct ColBox {
+    text: String,
+    sel: usize,
+    /// Where the list was drawn last frame, so a press on it is not read as leaving the field.
+    list: Option<egui::Rect>,
+    /// Frames shown, so the first ones can win the focus they asked for before losing it counts.
+    age: u8,
+}
+
+/// A searchable column picker: a click turns the pill into a text field in place and typing filters
+/// the list. Returns the picked name.
 fn col_pick(ui: &mut egui::Ui, cur: &str, cols: &[Col], min: f32) -> Option<String> {
     let ty = cols.iter().find(|c| c.name == cur).map(type_name).unwrap_or_default();
-    let w = combo_w(ui, if cur.is_empty() { "column" } else { cur }, &ty, min);
-    let r = pill_combo(ui, if cur.is_empty() { "column" } else { cur }, &ty, w, if cur.is_empty() { FAINT() } else { TEXT() });
+    let shown = if cur.is_empty() { "column" } else { cur };
+    let w = combo_w(ui, shown, &ty, min);
+    let key = ui.next_auto_id().with("col-box");
+    let edit_id = key.with("edit");
+    let Some(mut st) = ui.data(|d| d.get_temp::<ColBox>(key)) else {
+        let r = pill_combo(ui, shown, &ty, w, if cur.is_empty() { FAINT() } else { TEXT() });
+        // QUARRY_TEST_SQL=colpick opens the first picker with text typed, for the screenshot.
+        let demo = std::env::var("QUARRY_TEST_SQL").is_ok_and(|v| v == "colpick") && !ui.data_mut(|d| std::mem::replace(d.get_temp_mut_or_default::<bool>(egui::Id::NULL.with("colpick-demo")), true));
+        if r.clicked() || demo {
+            ui.data_mut(|d| d.insert_temp(key, ColBox { text: if demo { "stat".into() } else { String::new() }, ..Default::default() }));
+            ui.memory_mut(|m| m.request_focus(edit_id));
+            ui.ctx().request_repaint();
+        }
+        return None;
+    };
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, BUTTON_H), Sense::hover());
+    ui.painter().rect(rect, R_SM, BG(), Stroke::new(1.0, PRIMARY()), egui::StrokeKind::Inside);
+    let (down, up, enter, esc) = ui.input_mut(|i| (i.consume_key(egui::Modifiers::NONE, Key::ArrowDown), i.consume_key(egui::Modifiers::NONE, Key::ArrowUp), i.consume_key(egui::Modifiers::NONE, Key::Enter), i.consume_key(egui::Modifiers::NONE, Key::Escape)));
+    let tab = ui.input(|i| i.key_pressed(Key::Tab));
+    if st.age < 3 {
+        st.age += 1;
+        ui.memory_mut(|m| m.request_focus(edit_id));
+    }
+    let settled = st.age >= 3;
+    let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
+    let te = inner.add(egui::TextEdit::singleline(&mut st.text).id(edit_id).frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 0))).font(FontId::monospace(TXT_SMALL)).hint_text(RichText::new(shown).color(FAINT())).align(egui::Align2::LEFT_CENTER).desired_width(w));
+    let hits = col_filter(cols, &st.text);
+    if te.changed() {
+        st.sel = 0;
+    }
+    if down {
+        st.sel += 1;
+    }
+    if up {
+        st.sel = st.sel.saturating_sub(1);
+    }
+    st.sel = st.sel.min(hits.len().saturating_sub(1));
     let mut pick = None;
-    // Wide enough for the longest name and its type, capped so a very long column name is cut instead.
-    let longest = cols.iter().map(|c| ui.painter().layout_no_wrap(c.name.clone(), FontId::monospace(TXT_SMALL), TEXT()).size().x + ui.painter().layout_no_wrap(type_name(c), FontId::monospace(TXT_CAPTION), FAINT()).size().x).fold(0.0, f32::max);
-    egui::Popup::menu(&r).width((longest + 60.0).clamp(220.0, 420.0)).show(|ui| {
+    // The list is cheap to draw whole: rows off screen are skipped before any text is laid out.
+    let width = {
+        let longest = cols.iter().map(|c| text_w(ui, &c.name, FontId::monospace(TXT_SMALL)) + text_w(ui, &type_name(c), FontId::monospace(TXT_CAPTION))).fold(0.0, f32::max);
+        (longest + 60.0).clamp(220.0, 420.0)
+    };
+    let mut open = true;
+    let list = egui::Popup::new(key.with("list"), ui.ctx().clone(), rect, ui.layer_id()).kind(egui::PopupKind::Menu).layout(egui::Layout::top_down_justified(egui::Align::Min)).style(egui::containers::menu::menu_style).gap(0.0).open_bool(&mut open).close_behavior(egui::PopupCloseBehavior::IgnoreClicks).width(width).show(|ui| {
         menu_look(ui);
         egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-            for c in cols {
-                if menu_row(ui, &c.name, TEXT(), c.name == cur, &type_name(c)).clicked() {
+            if hits.is_empty() {
+                ui.label(RichText::new("No matching column").size(TXT_SMALL).color(FAINT()));
+            }
+            for (n, &i) in hits.iter().enumerate() {
+                let c = &cols[i];
+                let r = menu_row_in(ui, &c.name, TEXT(), c.name == cur, &type_name(c), &st.text, n == st.sel);
+                if (down || up) && n == st.sel {
+                    ui.scroll_to_rect(r.rect, None);
+                }
+                if r.clicked() {
                     pick = Some(c.name.clone());
-                    ui.close();
                 }
             }
         });
     });
+    let in_list = list.as_ref().is_some_and(|l| ui.ctx().input(|i| i.pointer.interact_pos()).is_some_and(|p| l.response.rect.contains(p)) || Some(l.response.rect) == st.list);
+    if let Some(l) = &list {
+        st.list = Some(l.response.rect);
+    }
+    let keyed = enter || (tab && te.lost_focus());
+    if keyed {
+        pick = pick.or_else(|| hits.get(st.sel).map(|&i| cols[i].name.clone()));
+    }
+    // Leaving the field any other way, such as a click on the page, restores the previous value.
+    let gone = esc || keyed || pick.is_some() || (settled && !te.has_focus() && !ui.ctx().input(|i| i.pointer.any_down() && i.pointer.interact_pos().is_some_and(|p| st.list.is_some_and(|l| l.contains(p)))) && !in_list);
+    if gone {
+        ui.memory_mut(|m| m.surrender_focus(edit_id));
+        ui.data_mut(|d| d.remove::<ColBox>(key));
+    } else {
+        ui.data_mut(|d| d.insert_temp(key, st));
+    }
     pick
 }
 
@@ -264,7 +382,7 @@ fn col_pick(ui: &mut egui::Ui, cur: &str, cols: &[Col], min: f32) -> Option<Stri
 fn popover<R>(r: &egui::Response, w: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> Option<R> {
     let ctx = r.ctx.clone();
     let id = r.id.with("clause-popover");
-    let mut open = ctx.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+    let mut open = ctx.data(|d| d.get_temp::<bool>(id)).unwrap_or(std::env::var("QUARRY_TEST_SQL").is_ok_and(|v| v == "colpick") && w == 340.0);
     if r.clicked() {
         open = !open;
     }
@@ -525,7 +643,9 @@ fn clause_chip(ui: &mut egui::Ui, name: &str, summary: &str, open: bool) -> (egu
     ui.painter().galley(egui::pos2(rect.left() + 18.0 + nw, rect.center().y - gs.size().y / 2.0 + ds), gs, TEXT());
     focus_ring(ui, &r, rect, BUTTON_H / 2.0);
     let close = egui::Rect::from_center_size(egui::pos2(rect.right() - CLOSE_W / 2.0 - 3.0, rect.center().y), egui::vec2(CLOSE_W, CLOSE_W));
-    let x = ui.scope_builder(egui::UiBuilder::new().max_rect(close), |ui| close_x(ui).on_hover_text(format!("Remove {name}")).clicked()).inner;
+    // A child ui, not a scope: a scope would also claim room in the row and push the chips out of line.
+    let mut cross = ui.new_child(egui::UiBuilder::new().max_rect(close));
+    let x = close_x(&mut cross).on_hover_text(format!("Remove {name}")).clicked();
     (r.on_hover_cursor(egui::CursorIcon::PointingHand), x)
 }
 
@@ -827,7 +947,7 @@ pub(super) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, mut scop
     let cols = if s.bar.table_cols.is_empty() { s.cols.clone() } else { s.bar.table_cols.clone() };
     // The WHERE text has no FROM, so completion reads its columns from the table of the tab. Until the schema is loaded the result's own columns serve.
     scope.table = Some(t.sel.coll.clone());
-    scope.fallback = cols.iter().map(|c| SchemaCol { name: c.name.clone(), ty: c.ty.clone(), kind: c.kind, key: if s.pk.contains(&c.name) { "PRI".into() } else { String::new() }, nullable: c.nullable, fk: false }).collect();
+    scope.fallback = cols.iter().map(|c| SchemaCol { name: c.name.clone(), ty: c.ty.clone(), kind: c.kind, key: if s.pk.contains(&c.src) { "PRI".into() } else { String::new() }, nullable: c.nullable, fk: false }).collect();
     let pairs: Vec<(String, Kind)> = cols.iter().map(|c| (c.name.clone(), c.kind)).collect();
     let b = &mut s.bar;
     let mut run = false;
@@ -967,7 +1087,8 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col], scope: &Sco
     let grouped = !b.c.group.trim().is_empty();
     ui.horizontal_top(|ui| {
         let w = ui.available_width() - 190.0;
-        ui.allocate_ui_with_layout(egui::vec2(w, BUTTON_H), egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true), |ui| {
+        // The option chips are framed and so 2 px taller than the others; a row sized for them centers every chip.
+        ui.allocate_ui_with_layout(egui::vec2(w, BUTTON_H + 2.0), egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true), |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
             // ORDER BY
             if sql {
@@ -1217,6 +1338,17 @@ pub(super) fn drill(t: &mut Tab, row: usize, d: Dialect, bs: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn column_filter_puts_prefixes_first() {
+        let col = |n: &str| Col::plain(n, "VARCHAR", Kind::Text, false);
+        let cols = [col("created_at"), col("order_status"), col("status"), col("id"), col("Status_code")];
+        assert_eq!(col_filter(&cols, ""), [0, 1, 2, 3, 4]);
+        assert_eq!(col_filter(&cols, "stat"), [2, 4, 1]);
+        assert_eq!(col_filter(&cols, "STAT"), [2, 4, 1]);
+        assert!(col_filter(&cols, "zz").is_empty());
+        assert_eq!(find_ci("order_status", "STAT"), Some((6, 10)));
+    }
 
     #[test]
     fn shift_click_appends_or_flips_a_sort_key() {

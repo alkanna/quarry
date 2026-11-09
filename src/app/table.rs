@@ -114,13 +114,23 @@ pub(super) fn visible_cols(p: Option<&ColPrefs>, fields: &[String], n: usize) ->
     out
 }
 
+/// How many columns show before the user picks some. SQL tables are narrow enough to show whole,
+/// while Mongo documents can have hundreds of fields.
+fn default_n(sql: bool, setting: usize) -> usize {
+    if sql { usize::MAX } else { setting }
+}
+
 impl App {
+    pub(super) fn default_cols(&self) -> usize {
+        default_n(self.t().is_some_and(|t| t.sql.is_some()), self.prefs.default_cols)
+    }
+
     pub(super) fn columns_menu(&mut self, ui: &mut egui::Ui, agg: bool) {
         let key = self.col_key(agg);
         let t = self.t().unwrap();
         let fields = if agg { t.agg_source().1.to_vec() } else { t.fields.clone() };
         let prefs = self.prefs.cols.get(&key).cloned().unwrap_or_default();
-        let n = self.prefs.default_cols;
+        let n = self.default_cols();
         let shown = visible_cols(Some(&prefs), &fields, n);
         let mut acts = Vec::new();
         let mut add = None;
@@ -222,7 +232,7 @@ impl App {
     }
 
     pub(super) fn apply_col_acts(&mut self, key: &str, fields: &[String], acts: Vec<ColAct>) {
-        let n = self.prefs.default_cols;
+        let n = self.default_cols();
         let p = self.prefs.cols.entry(key.to_string()).or_default();
         for a in acts {
             let mut shown = visible_cols(Some(p), fields, n);
@@ -319,7 +329,7 @@ impl App {
     pub(super) fn doc_table(&mut self, ui: &mut egui::Ui, agg: bool, docs: Rows, fields: &[String], base: u64) {
         let key = self.col_key(agg);
         let prefs = self.prefs.cols.get(&key).cloned().unwrap_or_default();
-        let cols = visible_cols(Some(&prefs), fields, self.prefs.default_cols);
+        let cols = visible_cols(Some(&prefs), fields, self.default_cols());
         let indexed: Vec<Option<String>> = cols.iter().map(|c| self.t().and_then(|t| t.indexes_on(c)).map(str::to_string)).collect();
         let summarize = !self.prefs.object_preview;
         // Measuring lays out every loaded cell of the column, so it is done once per result set
@@ -559,7 +569,7 @@ impl App {
                             match v {
                                 Some(v) => {
                                     let mut job = match kinds[ci] {
-                                        Some(k) => sql_cell_job(v, k),
+                                        Some(k) => sql_cell_job(v, k, true),
                                         None => column_job(v, summarize),
                                     };
                                     // Ends in an ellipsis at the cell's padding instead of being cut mid-glyph by the clip.
@@ -770,6 +780,7 @@ impl App {
     /// Documents rows get the document menu, Indexes rows the index menu, other result rows none.
     fn row_menu_kind(&self, agg: bool) -> RowMenu {
         match (agg, self.t().map(|t| t.view)) {
+            (false, _) if self.t().and_then(|t| t.sql.as_ref()).is_some_and(|s| s.matched.is_some()) => RowMenu::SqlGrouped,
             (false, _) if self.t().is_some_and(|t| t.sql.is_some()) => RowMenu::Sql,
             (false, _) => RowMenu::Docs,
             (true, Some(View::Indexes)) => RowMenu::Indexes,
@@ -793,6 +804,13 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sql_shows_every_column_by_default() {
+        let fields: Vec<String> = (0..30).map(|i| format!("f{i}")).collect();
+        assert_eq!(visible_cols(None, &fields, default_n(true, DEFAULT_COLS)).len(), 30);
+        assert_eq!(visible_cols(None, &fields, default_n(false, DEFAULT_COLS)).len(), DEFAULT_COLS);
+    }
 
     #[test]
     fn columns_default_pin_and_move() {

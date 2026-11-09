@@ -485,11 +485,11 @@ impl App {
         }
         let Some((_, cols, pk)) = self.sql_ctx() else { return };
         // A single integer key is almost always generated, so a copy leaves it to the server.
-        let auto = pk.len() == 1 && cols.iter().any(|c| c.name == pk[0] && matches!(c.kind, Kind::Int | Kind::UInt));
+        let auto = pk.len() == 1 && cols.iter().any(|c| c.src == pk[0] && matches!(c.kind, Kind::Int | Kind::UInt));
         let fields = cols
             .into_iter()
             .map(|col| {
-                let v = from.as_ref().and_then(|d| d.get(&col.name)).filter(|_| !(auto && col.name == pk[0]));
+                let v = from.as_ref().and_then(|d| d.get(&col.name)).filter(|_| !(auto && col.src == pk[0]));
                 let (mode, text) = match v {
                     None => (Mode::Default, String::new()),
                     Some(Bson::Null) => (Mode::Null, String::new()),
@@ -579,7 +579,8 @@ impl App {
         }
         let (sel, cols, pk) = self.sql_ctx().unwrap_or_else(|| (Sel { conn: 0, db: String::new(), coll: String::new() }, Vec::new(), Vec::new()));
         let (d, bs) = (db::sql::Dialect::MySql, self.sql_bs());
-        let numeric = |name: &str| cols.iter().find(|c| c.name == name).is_some_and(|c| is_numeric(c.kind));
+        // The key names are the server's, which differ from the shown name of a renamed column.
+        let numeric = |name: &str| cols.iter().find(|c| c.src == name).is_some_and(|c| is_numeric(c.kind));
         let key_lit = |r: &Document, p: &String| copy::sql_literal(r.get_document("_id").ok().and_then(|k| k.get(p)), numeric(p), bs);
         // `pk IN (...)` for one key column, a row-value list for several.
         let key_list = || -> String {
@@ -629,12 +630,14 @@ impl App {
                 if let [one] = rows.as_slice() {
                     return self.sql_new_row(Some(one.clone()));
                 }
-                let auto = pk.len() == 1 && cols.iter().any(|c| c.name == pk[0] && matches!(c.kind, Kind::Int | Kind::UInt));
-                let copies: Vec<NewRow> = rows.iter().map(|r| r.iter().filter(|(k, _)| *k != "_id" && !(auto && **k == pk[0])).map(|(k, v)| (k.clone(), v.clone())).collect()).collect();
+                let pk_shown = cols.iter().find(|c| pk.len() == 1 && c.src == pk[0]).map(|c| (c.name.clone(), matches!(c.kind, Kind::Int | Kind::UInt)));
+                let auto = pk_shown.as_ref().is_some_and(|p| p.1);
+                let pk_name = pk_shown.map(|p| p.0).unwrap_or_default();
+                let copies: Vec<NewRow> = rows.iter().map(|r| r.iter().filter(|(k, _)| *k != "_id" && !(auto && **k == pk_name)).map(|(k, v)| (k.clone(), v.clone())).collect()).collect();
                 self.sql_insert_rows(copies);
             }
             DocsAct::SetValue => {
-                let first = cols.iter().find(|c| !pk.contains(&c.name) && c.kind != Kind::Geometry).map(|c| c.name.clone());
+                let first = cols.iter().find(|c| !pk.contains(&c.src) && c.kind != Kind::Geometry).map(|c| c.name.clone());
                 let Some(col) = first else { return self.err("No column of this table can be set.") };
                 self.modal = Some(Modal::SqlSet(Box::new(SetForm { rows, col, text: String::new(), null: false, err: None })));
             }
@@ -672,7 +675,7 @@ impl App {
         let ids: Vec<String> = f.rows.iter().take(4).map(|r| r.get_document("_id").map(|k| k.values().map(db::short).collect::<Vec<_>>().join("-")).unwrap_or_default()).collect();
         ui.label(RichText::new(format!("{} · rows {}{}", sel.coll, ids.join(", "), if n > 4 { ", …" } else { "" })).color(MUTED()));
         ui.add_space(6.0);
-        let editable: Vec<&Col> = cols.iter().filter(|c| !pk.contains(&c.name) && c.kind != Kind::Geometry).collect();
+        let editable: Vec<&Col> = cols.iter().filter(|c| !pk.contains(&c.src) && c.kind != Kind::Geometry).collect();
         let col = editable.iter().find(|c| c.name == f.col).copied().or(editable.first().copied());
         let Some(col) = col.cloned() else { return *keep = false };
         egui::Grid::new("sql-set").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
@@ -714,10 +717,10 @@ impl App {
             Ok(v) => copy::sql_literal(Some(v), is_numeric(col.kind), bs),
             Err(_) => "…".into(),
         };
-        let keys = if pk.len() == 1 { format!("{} IN ({})", d.quote_ident(&pk[0]), f.rows.iter().map(|r| copy::sql_literal(r.get_document("_id").ok().and_then(|k| k.get(&pk[0])), cols.iter().any(|c| c.name == pk[0] && is_numeric(c.kind)), bs)).collect::<Vec<_>>().join(", ")) } else { format!("{} composite keys", n) };
+        let keys = if pk.len() == 1 { format!("{} IN ({})", d.quote_ident(&pk[0]), f.rows.iter().map(|r| copy::sql_literal(r.get_document("_id").ok().and_then(|k| k.get(&pk[0])), cols.iter().any(|c| c.src == pk[0] && is_numeric(c.kind)), bs)).collect::<Vec<_>>().join(", ")) } else { format!("{} composite keys", n) };
         egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(10).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new(format!("UPDATE {}\n  SET {} = {lit}\n  WHERE {keys};", d.quote_ident(&sel.coll), d.quote_ident(&col.name))).monospace().size(TXT_SMALL).color(TEXT()));
+            ui.label(RichText::new(format!("UPDATE {}\n  SET {} = {lit}\n  WHERE {keys};", d.quote_ident(&sel.coll), d.quote_ident(&col.src))).monospace().size(TXT_SMALL).color(TEXT()));
         });
         if let (Some(m), false) = (&f.err, f.null) {
             ui.label(RichText::new(m).size(TXT_SMALL).color(ALERT()));
@@ -751,14 +754,16 @@ impl App {
     fn copy_cols(&self, rows: &[Document]) -> Vec<CopyCol> {
         let Some(t) = self.t() else { return Vec::new() };
         let prefs = self.prefs.cols.get(&self.col_key(false)).cloned().unwrap_or_default();
-        table::visible_cols(Some(&prefs), &t.fields, self.prefs.default_cols)
+        table::visible_cols(Some(&prefs), &t.fields, self.default_cols())
             .into_iter()
             .map(|name| {
+                let col = t.sql.as_ref().and_then(|s| s.cols.iter().find(|c| c.name == name));
                 let numeric = match t.sql.as_ref() {
-                    Some(s) => s.cols.iter().find(|c| c.name == name).is_some_and(|c| is_numeric(c.kind)),
+                    Some(_) => col.is_some_and(|c| is_numeric(c.kind)),
                     None => infer_numeric(rows, &name),
                 };
-                CopyCol { name, numeric }
+                let src = col.map_or_else(|| name.clone(), |c| c.src.clone());
+                CopyCol { name, src, numeric }
             })
             .collect()
     }

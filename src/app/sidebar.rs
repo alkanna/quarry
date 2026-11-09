@@ -337,6 +337,7 @@ impl App {
         let mut connect = false;
         let mut revealed = false;
         let mut lazy: Vec<String> = Vec::new();
+        let mut folded: Vec<(u64, String, bool)> = Vec::new();
         {
             let Some(c) = self.conn(id) else { return };
             match &c.status {
@@ -437,6 +438,7 @@ impl App {
                 });
                 if is_open {
                     let matches_len = matches.len();
+                    let est_rows = if sql { self.sql_schema.get(&(id, db_name.clone())).cloned() } else { None };
                     for coll in matches {
                         let sel = Sel { conn: id, db: db_name.clone(), coll: coll.clone() };
                         let active = cur_sel.as_ref() == Some(&sel);
@@ -445,10 +447,26 @@ impl App {
                         if sql && group != Some(is_view) {
                             group = Some(is_view);
                             let (label, n) = if is_view { ("VIEWS", n_views) } else { ("TABLES", matches_len - n_views) };
-                            let (cap, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), SIDE_ROW_H - 4.0), Sense::hover());
+                            let (cap, hr) = ui.allocate_exact_size(egui::vec2(ui.available_width(), SIDE_ROW_H - 4.0), Sense::click());
+                            let key = (id, db_name.clone(), is_view);
+                            if hr.clicked() {
+                                folded.push(key.clone());
+                            }
+                            let hidden = self.side_closed.contains(&key);
                             let g = ui.painter().layout_job(LayoutJob::single_section(label.into(), ui_fmt(10.0, FAINT(), W_SEMIBOLD, 0.6)));
-                            ui.painter().galley(egui::pos2(cap.left() + 18.0, cap.center().y - g.size().y / 2.0 + 2.0), g, FAINT());
+                            if state_of(&hr) > 0 {
+                                ui.painter().rect_filled(cap, R_SM, hover_fill(state_of(&hr)));
+                            }
+                            // A painted chevron, since the glyph sits off center.
+                            let c = egui::pos2(cap.left() + 12.0, cap.center().y + 1.0);
+                            let tri = if hidden { vec![c + egui::vec2(-2.0, -3.5), c + egui::vec2(-2.0, 3.5), c + egui::vec2(2.5, 0.0)] } else { vec![c + egui::vec2(-3.5, -2.0), c + egui::vec2(3.5, -2.0), c + egui::vec2(0.0, 2.5)] };
+                            ui.painter().add(egui::Shape::convex_polygon(tri, FAINT(), Stroke::NONE));
+                            ui.painter().galley(egui::pos2(cap.left() + 22.0, cap.center().y - g.size().y / 2.0 + 2.0), g, FAINT());
                             ui.painter().text(egui::pos2(cap.right() - 8.0, cap.center().y + 2.0), egui::Align2::RIGHT_CENTER, n.to_string(), FontId::monospace(TXT_CAPTION), FAINT());
+                            hr.on_hover_cursor(egui::CursorIcon::PointingHand);
+                        }
+                        if sql && self.side_closed.contains(&(id, db_name.clone(), is_view)) {
+                            continue;
                         }
                         let mut glyph_at = egui::Rect::NOTHING;
                         let r = side_row(ui, SIDE_ROW_H, 18.0, active, |p, r| {
@@ -461,7 +479,14 @@ impl App {
                                 let (glyph, gc) = if is_view { ("◇", C_DATE()) } else { ("{}", if active { PRIMARY() } else { FAINT() }) };
                                 p.text(egui::pos2(r.left(), r.center().y), egui::Align2::LEFT_CENTER, glyph, FontId::monospace(10.0), gc);
                             }
-                            let w = r.width() - 20.0;
+                            // The server's estimate, once the schema is loaded for autocomplete.
+                            let est = if sql && !is_view { est_rows.as_ref().and_then(|sc| sc.table(&coll)).and_then(|t| t.rows) } else { None };
+                            let mut w = r.width() - 20.0;
+                            if let Some(n) = est {
+                                let g = p.layout_no_wrap(rows_short(n), FontId::monospace(TXT_CAPTION), FAINT());
+                                p.galley(egui::pos2(r.right() - 8.0 - g.size().x, r.center().y - g.size().y / 2.0 + optical_dy(&g)), g.clone(), FAINT());
+                                w -= g.size().x + 12.0;
+                            }
                             let galley = p.layout(coll.clone(), FontId::proportional(TXT_TITLE), if active { BRIGHT() } else if is_view { C_DATE() } else { TEXT() }, w);
                             p.galley(egui::pos2(r.left() + 20.0, r.center().y - galley.size().y / 2.0), galley, TEXT());
                         });
@@ -522,6 +547,11 @@ impl App {
         }
         if revealed {
             self.reveal = None;
+        }
+        for k in folded {
+            if !self.side_closed.remove(&k) {
+                self.side_closed.insert(k);
+            }
         }
         for d in lazy {
             self.sql_asked.insert((id, d.clone()));
@@ -604,9 +634,23 @@ impl App {
     }
 }
 
+/// A row estimate in few characters: 842, 4.4k, 1.2M. Under 10,000 it is exact, so it never rounds up a count.
+fn rows_short(n: u64) -> String {
+    match n {
+        0..=9_999 => n.to_string(),
+        10_000..=999_999 => format!("{}k", n / 1000),
+        _ => format!("{:.1}M", n as f64 / 1e6),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn row_estimates_are_short() {
+        assert_eq!([842, 9_999, 12_345, 1_250_000].map(rows_short), ["842", "9999", "12k", "1.2M"]);
+    }
 
     #[test]
     fn palette_jumps() {

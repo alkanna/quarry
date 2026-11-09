@@ -102,7 +102,7 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet) -> Option<(Fmt, usize)> {
                             continue;
                         }
                         let (mut job, color) = match rows.value(i, &c.name) {
-                            Some(v) => (sql_cell_job(v, c.kind), TEXT()),
+                            Some(v) => (sql_cell_job(v, c.kind, false), TEXT()),
                             None => (egui::text::LayoutJob::single_section("—".into(), mono_fmt(TXT_SMALL, FAINT(), 400.0)), FAINT()),
                         };
                         job.wrap = egui::text::TextWrapping::truncate_at_width(w - 14.0);
@@ -442,7 +442,7 @@ impl App {
         }
         if let Some((fmt, row)) = copy {
             let rows: Vec<Document> = s.sets[sel].rows.iter().enumerate().filter(|(i, _)| row.is_none_or(|r| r == *i)).map(|(_, r)| r.owned()).collect();
-            let cols: Vec<CopyCol> = cols_for_copy.iter().map(|c| CopyCol { name: c.name.clone(), numeric: is_numeric(c.kind) }).collect();
+            let cols: Vec<CopyCol> = cols_for_copy.iter().map(|c| CopyCol { name: c.name.clone(), src: c.src.clone(), numeric: is_numeric(c.kind) }).collect();
             let table = if tab_coll.is_empty() { "result".to_string() } else { tab_coll };
             let ctx = ui.ctx().clone();
             self.copy_sheet(&ctx, fmt, &rows, &cols, &table, &[], self.sql_bs());

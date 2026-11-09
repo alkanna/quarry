@@ -24,11 +24,8 @@ pub(super) struct JsState {
     /// The field info the server's collection types were built from. Holding it keeps each
     /// pointer unique, so pointer equality means unchanged.
     typed: Vec<(String, Arc<Fields>)>,
-    /// The columns of each SQL database, by connection and database, and the ones asked for. Holding
-    /// the Arc that the server's types were built from keeps its pointer unique.
-    sql_cols: HashMap<(u64, String), Arc<Vec<db::sql::TableCols>>>,
-    sql_asked: HashSet<(u64, String)>,
-    typed_sql: Option<Arc<Vec<db::sql::TableCols>>>,
+    /// The schema a SQL tab's types were built from. Holding the Arc keeps its pointer unique.
+    typed_sql: Option<Arc<db::sql::schema::Schema>>,
     /// Newest completion request.
     complete: Option<Pending>,
     /// Server items of the list on screen, in list order, to ask for the selected one's docs.
@@ -137,25 +134,16 @@ impl App {
         (t.sel.conn, t.sel.db.clone())
     }
 
-    /// Asks for the columns of the current SQL tab's database. `again` refreshes columns already held,
-    /// as a run does so that a table added since shows up.
+    /// Asks for the schema of the current SQL tab's database, which autocomplete shares. `again`
+    /// refreshes one already held, as a run does so that a table added since shows up.
     pub(super) fn sql_columns_ask(&mut self, again: bool) {
         let key = self.sql_key();
-        if self.demo || (self.js.sql_asked.contains(&key) && !again) {
+        if self.demo || (self.sql_schema_asked.contains(&key) && !again) {
             return;
         }
         let Some(db) = self.conn(key.0).and_then(|c| c.sql.clone()) else { return };
-        self.js.sql_asked.insert(key.clone());
-        self.worker.sql_columns(key.0, db, key.1);
-    }
-
-    /// The columns arrived. They replace the held ones only when they differ.
-    pub(super) fn js_columns(&mut self, conn: u64, schema: String, res: Result<Vec<db::sql::TableCols>, String>) {
-        let Ok(cols) = res else { return };
-        let key = (conn, schema);
-        if self.js.sql_cols.get(&key).is_none_or(|old| **old != cols) {
-            self.js.sql_cols.insert(key, Arc::new(cols));
-        }
+        self.sql_schema_asked.insert(key.clone());
+        self.worker.sql_schema(key.0, db, key.1);
     }
 
     /// Sends a request about character `at` of the current script, starting the server first if
@@ -172,9 +160,9 @@ impl App {
         let names: Vec<String> = self.prefs.shell_packages.iter().map(|p| db::package_spec(p).0).collect();
         let sql = self.tabs[self.cur].sql.is_some();
         let key = globals_key(colls, &names) ^ sql as u64;
-        // SQL tabs are typed from the database's columns, fetched once and replaced only when they
-        // differ, so pointer equality means unchanged.
-        let sql_cols = sql.then(|| self.js.sql_cols.get(&self.sql_key()).cloned()).flatten();
+        // SQL tabs are typed from the autocomplete schema, which is replaced on every reload, so
+        // pointer equality means unchanged.
+        let sql_cols = sql.then(|| self.sql_schema.get(&self.sql_key()).cloned()).flatten();
         let (known, same) = if sql {
             let same = match (&sql_cols, &self.js.typed_sql) {
                 (Some(a), Some(b)) => Arc::ptr_eq(a, b),
@@ -194,7 +182,7 @@ impl App {
         let globals = (self.js.globals != Some(key) || !same).then(|| {
             if sql {
                 // Tables with no known columns yet still get a global, typed loosely.
-                let tables: Vec<db::sql::TableCols> = sql_cols.as_deref().cloned().unwrap_or_else(|| colls.iter().map(|c| db::sql::TableCols { name: c.clone(), cols: Vec::new() }).collect());
+                let tables: Vec<db::sql::TableCols> = sql_cols.as_deref().map(|s| s.tables.iter().map(|t| db::sql::TableCols { name: t.name.clone(), cols: t.cols.iter().map(|c| db::sql::TableCol { name: c.name.clone(), full_type: c.ty.clone(), nullable: c.nullable }).collect() }).collect()).unwrap_or_else(|| colls.iter().map(|c| db::sql::TableCols { name: c.clone(), cols: Vec::new() }).collect());
                 return db::sql_globals(&tables, &names, package_ident, &JS_RESERVED);
             }
             let schemas = known.iter().map(|(c, f)| (c.clone(), ts_type(f))).collect();

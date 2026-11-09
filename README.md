@@ -44,6 +44,13 @@
 **Script it**
 - A JavaScript shell running on [Bun](https://bun.sh), with the official MongoDB driver, npm packages and autocomplete. Results come back as a table.
 
+**Also MySQL and MariaDB**
+- Pick MySQL or MariaDB on the connection form's engine cards (MariaDB 10.6+, MySQL 5.7, 8.x and 9.x). Connections open read-only here too.
+- Content filters with typed rules or plain SQL, with edits staged like in MongoDB. Structure and Info show a table's columns, keys and indexes.
+- Query runs several statements at once and can stop one that is running.
+- The Shell takes sql`...` templates, where `${}` values are sent safely, and a typed global for each table.
+- Autocomplete knows your tables, columns and values. `python3 bench.py --sql-only` measures the SQL grid.
+
 **Connect from anywhere**
 - Go through an SSH tunnel (password, key file or agent) or a SOCKS5 proxy.
 - Passwords stay in your system keychain: the macOS Keychain, Windows Credential Manager, or the Secret Service on Linux.
