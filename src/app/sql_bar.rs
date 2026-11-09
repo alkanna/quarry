@@ -162,14 +162,19 @@ fn menu_row(ui: &mut egui::Ui, label: &str, color: Color32, checked: bool, note:
     if checked {
         paint_check(ui.painter(), egui::pos2(rect.left() + 12.0, rect.center().y), TEXT());
     }
-    let g = ui.painter().layout_no_wrap(label.to_string(), FontId::monospace(TXT_SMALL), color);
-    let dy = optical_dy(&g);
-    ui.painter().galley(egui::pos2(rect.left() + 26.0, rect.center().y - g.size().y / 2.0 + dy), g, color);
+    // The note is laid out first so a long label is cut with an ellipsis before it instead of running under it.
+    let mut note_left = rect.right() - 8.0;
     if !note.is_empty() {
         let n = ui.painter().layout_no_wrap(note.to_string(), FontId::monospace(TXT_CAPTION), FAINT());
         let dy = optical_dy(&n);
-        ui.painter().galley(egui::pos2(rect.right() - 8.0 - n.size().x, rect.center().y - n.size().y / 2.0 + dy), n, FAINT());
+        note_left -= n.size().x;
+        ui.painter().galley(egui::pos2(note_left, rect.center().y - n.size().y / 2.0 + dy), n, FAINT());
     }
+    let mut job = egui::text::LayoutJob::single_section(label.to_string(), egui::TextFormat::simple(FontId::monospace(TXT_SMALL), color));
+    job.wrap = egui::text::TextWrapping::truncate_at_width((note_left - 12.0 - (rect.left() + 26.0)).max(20.0));
+    let g = ui.painter().layout_job(job);
+    let dy = optical_dy(&g);
+    ui.painter().galley(egui::pos2(rect.left() + 26.0, rect.center().y - g.size().y / 2.0 + dy), g, color);
     focus_ring(ui, &r, rect, R_SM as f32);
     let label = label.to_string();
     let enabled = ui.is_enabled();
@@ -211,7 +216,9 @@ fn col_pick(ui: &mut egui::Ui, cur: &str, cols: &[Col], min: f32) -> Option<Stri
     let w = combo_w(ui, if cur.is_empty() { "column" } else { cur }, &ty, min);
     let r = pill_combo(ui, if cur.is_empty() { "column" } else { cur }, &ty, w, if cur.is_empty() { FAINT() } else { TEXT() });
     let mut pick = None;
-    egui::Popup::menu(&r).width(220.0).show(|ui| {
+    // Wide enough for the longest name and its type, capped so a very long column name is cut instead.
+    let longest = cols.iter().map(|c| ui.painter().layout_no_wrap(c.name.clone(), FontId::monospace(TXT_SMALL), TEXT()).size().x + ui.painter().layout_no_wrap(type_name(c), FontId::monospace(TXT_CAPTION), FAINT()).size().x).fold(0.0, f32::max);
+    egui::Popup::menu(&r).width((longest + 60.0).clamp(220.0, 420.0)).show(|ui| {
         menu_look(ui);
         egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
             for c in cols {
@@ -223,6 +230,31 @@ fn col_pick(ui: &mut egui::Ui, cur: &str, cols: &[Col], min: f32) -> Option<Stri
         });
     });
     pick
+}
+
+/// A clause popover. egui keeps one memory popup open at a time, so opening the column or direction
+/// menu inside would close it; it keeps its own open flag instead and closes on Esc or a click on the page.
+fn popover<R>(r: &egui::Response, w: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> Option<R> {
+    let ctx = r.ctx.clone();
+    let id = r.id.with("clause-popover");
+    let mut open = ctx.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+    if r.clicked() {
+        open = !open;
+    }
+    let out = if open {
+        egui::Popup::new(id, ctx.clone(), r, r.layer_id).kind(egui::PopupKind::Menu).layout(egui::Layout::top_down_justified(egui::Align::Min)).style(egui::containers::menu::menu_style).gap(0.0).open_bool(&mut open).close_behavior(egui::PopupCloseBehavior::IgnoreClicks).width(w).show(add)
+    } else {
+        None
+    };
+    // Its own menus are popups too, so only a click on a page layer counts as outside.
+    if open && !r.clicked() {
+        let page_click = ctx.input(|i| i.pointer.any_click().then(|| i.pointer.interact_pos()).flatten()).is_some_and(|p| !r.rect.contains(p) && ctx.layer_id_at(p).is_none_or(|l| l.order != egui::Order::Foreground));
+        if page_click || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            open = false;
+        }
+    }
+    ctx.data_mut(|d| d.insert_temp(id, open));
+    out.map(|o| o.inner)
 }
 
 /// The menu group of an operator, to draw a rule between groups like the design.
@@ -937,7 +969,7 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col]) -> bool {
                 };
                 if t.sort_txt.is_empty() {
                     let r = add_chip(ui, "ORDER BY");
-                    egui::Popup::menu(&r).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(340.0).show(|ui| {
+                    popover(&r, 340.0, |ui| {
                         if order_popover(ui, &mut t.sort_txt, cols, d) {
                             run = true;
                         }
@@ -950,7 +982,7 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col]) -> bool {
                     }
                 } else {
                     let (r, cleared) = clause_chip(ui, "ORDER BY", &summary, false);
-                    egui::Popup::menu(&r).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(340.0).show(|ui| {
+                    popover(&r, 340.0, |ui| {
                         if order_popover(ui, &mut t.sort_txt, cols, d) {
                             run = true;
                         }
@@ -963,7 +995,7 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col]) -> bool {
                 if grouped {
                     let (r, cleared) = clause_chip(ui, "GROUP BY", &b.c.group, false);
                     let mut applied = false;
-                    egui::Popup::menu(&r).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(580.0).show(|ui| applied = group_popover(ui, &mut b.gdlg, &mut b.c, cols, d, &table, matched.max(rows)));
+                    popover(&r, 580.0, |ui| applied = group_popover(ui, &mut b.gdlg, &mut b.c, cols, d, &table, matched.max(rows)));
                     run |= applied;
                     if cleared {
                         b.c.group.clear();
@@ -973,7 +1005,7 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col]) -> bool {
                     }
                     if !b.c.having.trim().is_empty() {
                         let (r2, cleared) = clause_chip(ui, "HAVING", &b.c.having.replace('`', ""), false);
-                        egui::Popup::menu(&r2).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(580.0).show(|ui| applied = group_popover(ui, &mut b.gdlg, &mut b.c, cols, d, &table, matched.max(rows)));
+                        popover(&r2, 580.0, |ui| applied = group_popover(ui, &mut b.gdlg, &mut b.c, cols, d, &table, matched.max(rows)));
                         run |= applied;
                         if cleared {
                             b.c.having.clear();
@@ -1008,7 +1040,7 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col]) -> bool {
                 } else {
                     let n = split_top(&b.c.select).len();
                     let (r, cleared) = if n == 0 { (add_chip(ui, "Columns"), false) } else { clause_chip(ui, "Columns", &format!("{n} of {}", cols.len()), false) };
-                    egui::Popup::menu(&r).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(320.0).show(|ui| run |= columns_popover(ui, &mut b.c.select, cols, d));
+                    popover(&r, 320.0, |ui| run |= columns_popover(ui, &mut b.c.select, cols, d));
                     if cleared {
                         b.c.select.clear();
                         run = true;
@@ -1018,7 +1050,7 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col]) -> bool {
             if !sql && !grouped {
                 let r = add_chip(ui, "GROUP BY");
                 let mut applied = false;
-                egui::Popup::menu(&r).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(580.0).show(|ui| applied = group_popover(ui, &mut b.gdlg, &mut b.c, cols, d, &table, rows));
+                popover(&r, 580.0, |ui| applied = group_popover(ui, &mut b.gdlg, &mut b.c, cols, d, &table, rows));
                 run |= applied;
             }
             // DISTINCT, a toggle
