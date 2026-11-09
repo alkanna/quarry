@@ -28,7 +28,8 @@ Update this list when a step lands. Each step is reviewed before it is ticked.
 **Open before v2 (do these first, in order):**
 - [x] Cleanup from /simplify merged (c50f17d): shared escaping, hex, quote_ident and highlighter helpers, stale allows and dead code removed, per-frame work cached, width cache keyed by a rows generation, `refused` flag on ResultSet, popover in widgets. Kept as is on purpose: `size` vs `human_bytes` (different text), the Include column names row, `sets_req` vs `run_req`.
 - [ ] Export "All statements in the editor" (user request): run every statement of the Query editor on one connection (USE and @vars carry over), refuse the export if any statement fails `lex::read_only_check` even when unlocked, stream every result set; output "one file per result" (name-1.csv, name-2.csv, any format) or "one file" for SQL INSERT (appended), JSON lines (rows get a `statement` field), JSON (array of {statement, rows}), Markdown and HTML (a heading per statement); progress "Statement 2 of 5, 340k rows" with Cancel; .part files renamed at the end.
-- [ ] Polish: the LIMIT clause chip text sits 1 px high. (The shell popup footer overflow and the view badge are handed to session bart-63 with v2 item 1.)
+- [x] Polish: the shell popup footer is cut with an ellipsis to the popup width, and views get their own `w` badge (the demo schema now holds a view).
+- [ ] Polish: the LIMIT clause chip text sits 1 px high.
 - [ ] Ask the user to verify by hand: slow drag of the editor divider (if it still jerks, check the `hi` limit that depends on the results space), rail right-click menu, Export from Content, Shell and Mongo, the column combobox.
 - [ ] User decisions: smoke test on real MySQL/MariaDB servers (SSH tunnel, big tables), open the PR feat/mysql into master with the `ci` label, and push/PR `fix/linux-wayland-fallback` (its Linux-only code was never compiled; CI on ubuntu-22.04 will).
 

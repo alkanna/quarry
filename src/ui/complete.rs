@@ -752,7 +752,12 @@ fn popup_list(ui: &mut egui::Ui, ac: &Ac, typed: &str, moved: bool, width: Optio
             let (rect, _) = ui.allocate_exact_size(egui::vec2(w, if status.is_some() { 5.0 } else { 20.0 }), egui::Sense::hover());
             ui.painter().hline(rect.x_range(), rect.top() + 2.0, egui::Stroke::new(1.0, BORDER()));
             if status.is_none() {
-                ui.painter().text(egui::pos2(rect.left() + PAD + 4.0, rect.center().y + 2.0), egui::Align2::LEFT_CENTER, items.get(sel).and_then(|s| s.sql.as_ref()).map(|i| i.foot.as_str()).filter(|f| !f.is_empty()).or(Some(ac.foot.as_str()).filter(|f| !f.is_empty())).unwrap_or("Enter or Tab to insert, Esc to close"), note_font.clone(), FAINT());
+                // The popup is sized to its rows, so a long footer is cut with an ellipsis instead of spilling out of the card.
+                let foot = items.get(sel).and_then(|s| s.sql.as_ref()).map(|i| i.foot.as_str()).filter(|f| !f.is_empty()).or(Some(ac.foot.as_str()).filter(|f| !f.is_empty())).unwrap_or("Enter or Tab to insert, Esc to close");
+                let mut job = LayoutJob::simple_singleline(foot.to_string(), note_font.clone(), FAINT());
+                job.wrap = egui::text::TextWrapping::truncate_at_width(w - (PAD + 4.0) * 2.0);
+                let galley = ui.painter().layout_job(job);
+                ui.painter().galley(egui::pos2(rect.left() + PAD + 4.0, rect.center().y + 2.0 - galley.size().y / 2.0), galley, FAINT());
             }
         }
         if let Some(text) = status {
@@ -969,6 +974,13 @@ pub(crate) fn suggest_js(before: &str, known: &[(String, std::sync::Arc<Fields>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A view must not read as a table in the SQL completion list.
+    #[test]
+    fn views_have_their_own_badge() {
+        assert_eq!(kind_badge("table").0, "t");
+        assert_eq!(kind_badge("view").0, "w");
+    }
 
     /// Scanning BSON bytes must find the same paths, kinds and values as scanning decoded documents.
     #[test]

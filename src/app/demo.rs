@@ -424,7 +424,7 @@ impl App {
         if matches!(std::env::var("QUARRY_TEST_SQL").as_deref(), Ok("shell" | "shellac")) {
             self.sql_shell_demo();
         }
-        if matches!(std::env::var("QUARRY_TEST_SQL").as_deref(), Ok("ac" | "acquery")) {
+        if matches!(std::env::var("QUARRY_TEST_SQL").as_deref(), Ok("ac" | "acquery" | "shellac")) {
             self.sql_ac_demo();
         }
         // QUARRY_TEST_SQL=edit stages two cells of row 3; =select checks four rows.
@@ -470,7 +470,10 @@ impl App {
         let table = |name: &str, rows: Option<u64>, cols: Vec<SchemaCol>| SchemaTable { name: name.into(), view: rows.is_none(), rows, cols };
         let orders = table("orders", Some(4410), vec![col("id", "int unsigned", "PRI", false), col("customer_id", "int", "MUL", true), col("status", "enum('pending','paid','shipped','refunded','cancelled')", "", false), col("total", "decimal(10,2)", "", false), col("currency", "char(3)", "", false), col("note", "text", "", false), col("created_at", "datetime", "", false)]);
         let customers = table("customers", Some(1284), vec![col("id", "int unsigned", "PRI", false), col("email", "varchar(255)", "UNI", false), col("name", "varchar(120)", "", false), col("country", "char(2)", "", false), col("created_at", "datetime", "", false)]);
-        self.sql_schema.insert((3, "shop".into()), Arc::new(Schema { tables: vec![customers, orders] }));
+        let order_items = table("order_items", Some(9120), vec![col("order_id", "int unsigned", "PRI", true), col("sku", "varchar(40)", "PRI", false)]);
+        // A view has no row count, which is how the completion list tells it from a table.
+        let order_totals = table("order_totals", None, vec![col("order_id", "int unsigned", "", false), col("total", "decimal(10,2)", "", false)]);
+        self.sql_schema.insert((3, "shop".into()), Arc::new(Schema { tables: vec![customers, order_items, orders, order_totals] }));
         let mut vals = Fields::new();
         vals.insert(crate::ui::sql_complete::value_key("orders", "currency"), FieldInfo { kind: "string", values: ["EUR", "USD", "GBP"].map(Bson::from).to_vec(), freq: vec![61, 27, 12] });
         vals.insert(crate::ui::sql_complete::value_key("orders", "status"), FieldInfo { kind: "string", values: ["paid", "shipped", "pending", "refunded", "cancelled"].map(Bson::from).to_vec(), freq: vec![61, 22, 9, 5, 3] });
