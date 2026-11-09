@@ -132,6 +132,9 @@ pub(crate) async fn prepare_shell_dir(runtime: &std::path::Path, dir: &std::path
 pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + Send + Sync), mut cancel: tokio::sync::oneshot::Receiver<()>) -> Res<String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::process::Command;
+    if let Some(n) = repeated_name(job.sql.iter().map(|(n, _)| n.as_str())) {
+        return Err(format!("The connection name \"{n}\" is used more than once in this script. Give each connection its own name."));
+    }
     let note = |t: &str| send(Msg::ShellLog { req, level: "info".into(), text: t.into() });
     tokio::select! {
         r = prepare_shell_dir(&job.runtime, &job.dir, &job.packages, &note) => r?,
@@ -262,6 +265,12 @@ pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + S
             Err("Stopped.".into())
         }
     }
+}
+
+/// The first name that appears twice. Queries find their relay by name, so a repeat would answer on the wrong connection.
+fn repeated_name<'a>(names: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    let mut seen = std::collections::HashSet::new();
+    names.into_iter().find(|n| !seen.insert(*n))
 }
 
 /// The longest line the runner may print. A script that prints more would otherwise grow this buffer until memory runs out.
@@ -545,6 +554,12 @@ pub fn shell_text(b: &Bson) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_repeated_connection_name_is_found() {
+        assert_eq!(repeated_name(["shop", "other", "shop"].into_iter()), Some("shop"));
+        assert_eq!(repeated_name(["shop", "other"].into_iter()), None);
+    }
 
     #[test]
     fn package_validation() {

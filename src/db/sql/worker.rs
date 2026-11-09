@@ -1114,6 +1114,116 @@ mod tests {
         assert!(queries.iter().all(|q| q.conn == "shop" || q.conn == "other"));
     }
 
+    fn sql_entry(name: &str, tables: &[&str]) -> serde_json::Value {
+        serde_json::json!({ "name": name, "db": "quarry_test", "tables": tables })
+    }
+
+    #[test]
+    fn live_shell_refuses_repeated_connection_names() {
+        let Some((w, rx, db, _p)) = live("t_dup", "id INT PRIMARY KEY") else { return };
+        if bun_missing() {
+            return;
+        }
+        let code = "async function run() { return await shop.sql`SELECT 1` }";
+        // The runner refuses the repeat when Rust did not catch it.
+        let input = serde_json::json!({ "code": code, "packages": [], "timeoutMs": 30000, "main": "shop", "mongo": [], "sql": [sql_entry("shop", &[]), sql_entry("shop", &[])] });
+        let (_, res) = shell_run(&w, &rx, input.clone(), vec![("shop".into(), relay(&db, true))]);
+        assert!(res.unwrap_err().contains("more than once"));
+        // run_shell refuses before Bun starts.
+        let (queries, res) = shell_run(&w, &rx, input, vec![("shop".into(), relay(&db, true)), ("shop".into(), relay(&db, true))]);
+        assert!(res.unwrap_err().contains("more than once") && queries.is_empty());
+        // A Mongo entry and an SQL entry share a name; no server is reached because the check comes first.
+        let input = serde_json::json!({ "code": code, "packages": [], "timeoutMs": 30000, "main": "x",
+            "mongo": [{ "name": "x", "uri": "mongodb://127.0.0.1:1", "db": "d", "proxy": null, "collections": [], "readOnly": true }], "sql": [sql_entry("x", &[])] });
+        let (_, res) = shell_run(&w, &rx, input, vec![("x".into(), relay(&db, true))]);
+        assert!(res.unwrap_err().contains("more than once"));
+    }
+
+    #[test]
+    fn live_shell_results_keep_invalid_dates_and_proto_keys() {
+        let Some((w, rx, db, _p)) = live("t_dates", "id INT PRIMARY KEY") else { return };
+        if bun_missing() {
+            return;
+        }
+        let script = "async function run() { return { bad: new Date(NaN), old: new Date(-62198755200000 - 86400000*400), far: new Date(8.64e15), ok: new Date(0), p: JSON.parse('{\"__proto__\":{\"a\":1},\"b\":2}') } }";
+        let check = |res: Res<String>| {
+            let v = decode(&res.expect("script result"));
+            assert_eq!(v.get("bad"), Some(&Bson::Null), "{v}");
+            assert_eq!(v.get("old"), Some(&Bson::Null));
+            assert_eq!(v.get("far"), Some(&Bson::Null));
+            assert!(matches!(v.get("ok"), Some(Bson::DateTime(_))));
+            let p = v.get_document("p").unwrap();
+            assert_eq!(p.get_i32("b").unwrap(), 2);
+            assert_eq!(p.get_document("__proto__").unwrap().get_i32("a").unwrap(), 1, "{p}");
+        };
+        let input = serde_json::json!({ "code": script, "packages": [], "timeoutMs": 30000, "main": "shop", "mongo": [], "sql": [sql_entry("shop", &[])] });
+        check(shell_run(&w, &rx, input, vec![("shop".into(), relay(&db, true))]).1);
+        // With the driver loaded the dates are spelled differently.
+        let Some(uri) = mongo_user(&w, "quarry_attach_c") else { return };
+        let input = serde_json::json!({ "code": script, "packages": [], "timeoutMs": 30000, "main": "shop",
+            "mongo": [{ "name": "travels", "uri": uri, "db": "quarry_attach_c", "proxy": null, "collections": [], "readOnly": true }], "sql": [sql_entry("shop", &[])] });
+        check(shell_run(&w, &rx, input, vec![("shop".into(), relay(&db, true))]).1);
+    }
+
+    #[test]
+    fn live_shell_lists_mongo_queries_only_with_attachments_and_words_them_right() {
+        let Some((w, rx, db, _p)) = live("t_mq", "id INT PRIMARY KEY") else { return };
+        let Some(uri) = mongo_user(&w, "quarry_attach_d") else { return };
+        if bun_missing() {
+            return;
+        }
+        let mongo = serde_json::json!([{ "name": "docs", "uri": uri, "db": "quarry_attach_d", "proxy": null, "collections": ["users"], "readOnly": false }]);
+        // One connection: no Mongo query lines.
+        let input = serde_json::json!({ "code": "async function run() { return { n: (await db.collection('users').find({}).toArray()).length } }", "packages": [], "timeoutMs": 30000, "main": "docs", "mongo": mongo, "sql": [] });
+        let (queries, res) = shell_run(&w, &rx, input, vec![]);
+        assert_eq!(decode(&res.expect("script result")).get_i32("n").unwrap(), 1);
+        assert!(queries.is_empty(), "{}", query_names(&queries));
+        // The two long filters put an emoji across the 2000 character cut in one of the two parities.
+        let script = "async function run() {
+  const u = db.collection('users');
+  await u.insertMany([{ k: 1 }, { k: 2 }, { k: 3 }]);
+  await db.command({ count: 'users' });
+  await u.find({}).batchSize(1).toArray();
+  await u.find({}).toArray();
+  try { await db.command({ dropUser: 'nobody' }) } catch (e) {}
+  for (const n of [0, 1]) await u.find({ t: 'a'.repeat(1980 + n) + '😀'.repeat(300) }).toArray();
+  return { ok: true };
+}";
+        let input = serde_json::json!({ "code": script, "packages": [], "timeoutMs": 30000, "main": "docs", "mongo": mongo, "sql": [sql_entry("shop", &[])] });
+        let (queries, res) = shell_run(&w, &rx, input, vec![("shop".into(), relay(&db, false))]);
+        res.expect("script result");
+        let ours: Vec<_> = queries.iter().filter(|q| q.conn == "docs").collect();
+        let names = query_names(&queries);
+        // count reports rows, never affected.
+        assert!(ours.iter().any(|q| q.text.starts_with("users.count(") && q.rows == Some(4) && q.affected.is_none()), "{names}");
+        assert!(ours.iter().any(|q| q.text.starts_with("users.insert(") && q.affected == Some(3)), "{names}");
+        // A multi-batch find omits rows; a one-batch find has them.
+        assert!(ours.iter().any(|q| q.text == "users.find({})" && q.rows.is_none() && q.error.is_none()), "{names}");
+        assert!(ours.iter().any(|q| q.text == "users.find({})" && q.rows == Some(4)), "{names}");
+        // A string argument is not a collection, and the error is text.
+        let drop = ours.iter().find(|q| q.text.starts_with("db.dropUser(")).unwrap_or_else(|| panic!("{names}"));
+        assert!(drop.error.as_deref().is_some_and(|e| !e.is_empty() && !e.contains("[object Object]")), "{:?}", drop.error);
+        // Both cuts arrive as queries, so neither held a lone surrogate that serde_json refuses.
+        assert_eq!(ours.iter().filter(|q| q.text.starts_with("users.find({\"t\"") && q.text.len() > 1900).count(), 2, "{names}");
+    }
+
+    #[test]
+    fn live_shell_attachment_names_cannot_replace_globals() {
+        let Some((w, rx, db, _p)) = live("t_glob", "id INT PRIMARY KEY") else { return };
+        if bun_missing() {
+            return;
+        }
+        let code = "async function run() { return 1 }";
+        for (clash, attach_first) in [("_", false), ("dayjs", false), ("t_glob", false), ("t_glob", true)] {
+            let (main, other) = (sql_entry("shop", &["t_glob"]), sql_entry(clash, &[]));
+            let list = if attach_first { vec![other, main] } else { vec![main, other] };
+            let input = serde_json::json!({ "code": code, "packages": [], "timeoutMs": 30000, "main": "shop", "mongo": [], "sql": list });
+            let (_, res) = shell_run(&w, &rx, input, vec![("shop".into(), relay(&db, true)), (clash.into(), relay(&db, true))]);
+            let err = res.unwrap_err();
+            assert!(err.contains(&format!("\"{clash}\"")) && err.contains("already defines"), "{clash}: {err}");
+        }
+    }
+
     #[test]
     fn live_shell_unknown_sql_connection_name_answers_an_error() {
         let Some((w, rx, db, _p)) = live("t_att2", "id INT PRIMARY KEY") else { return };

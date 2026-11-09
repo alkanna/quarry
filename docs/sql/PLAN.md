@@ -130,6 +130,15 @@ Pages: Connections (pick: **B**), Table content, Filters and selection, F · Que
 - Language server: declare each handle (`declare const travels: { users: Collection<Users>, … }`, `declare const shop: SqlConn<ShopTables>`) from the same field info and information_schema types.
 - The Queries panel and the query log name the connection of every query.
 - Phase: v2, right after the SQL shell ships, since it needs the SQL relay and the shared shell layout first.
+- Review (c5761a5), fixed in one commit:
+  1. Repeated connection names (including Mongo vs SQL and an attachment equal to main) fail the run in the runner, and `run_shell` refuses a job whose `sql` repeats a name before Bun starts.
+  2. An invalid Date or one outside years 0 to 9999 becomes null in `walk`, so the result still decodes.
+  3. `__proto__` keys survive `walk` (defineProperty instead of assignment).
+  4. Command monitoring is on only when the run has more than one connection, so single-connection Mongo scripts are as fast as before.
+  5. Queries panel text: `count` shows rows, multi-batch finds omit rows, failed sensitive commands show a message or "failed", only collection commands use a string as the collection (others show `db.<command>(...)`), and the 2000 char cut keeps the text well formed.
+  6. The panel keeps the last 1000 queries but trims in batches (at 1500) instead of draining on every message.
+  7. An attachment name that collides with a built-in, helper, package or main's collection or table fails the run naming it, whatever the input order.
+  - Won't fix: script BigInts always come back as Int64, intended so values beyond 2^53 stay exact.
 
 ### SQL shell (same power as the Mongo Shell)
 Scripts get no SQL driver. `shell_runner.mjs` gives them:

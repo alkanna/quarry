@@ -574,8 +574,11 @@ impl App {
                             q.text = q.text.chars().take(2000).collect();
                         }
                         t.shell.queries.push(q);
-                        let over = t.shell.queries.len().saturating_sub(1000);
-                        t.shell.queries.drain(..over);
+                        // Trimmed in batches so a loop does not shift a thousand entries per query.
+                        if t.shell.queries.len() > 1500 {
+                            let over = t.shell.queries.len() - 1000;
+                            t.shell.queries.drain(..over);
+                        }
                     }
                 }
                 Msg::JsLs { req, out } => self.js_answer(ctx, req, out),

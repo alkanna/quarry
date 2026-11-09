@@ -25,11 +25,17 @@ let mongodb = null;
 const walk = (v, bigint) => {
   if (typeof v === "bigint") return bigint(v);
   if (v instanceof Uint8Array) return { $binary: { base64: Buffer.from(v).toString("base64"), subType: "00" } };
+  // An invalid Date or one past what BSON and ISO parsing accept (years 0 to 9999) would make Quarry refuse the whole result.
+  if (v instanceof Date) {
+    const y = v.getUTCFullYear();
+    return Number.isNaN(y) || y < 0 || y > 9999 ? null : v;
+  }
   if (Array.isArray(v)) return v.map((x) => walk(x, bigint));
   // Only plain objects are copied: BSON values, dates and class instances keep their own serialization.
   if (v && typeof v === "object" && (Object.getPrototypeOf(v) === Object.prototype || Object.getPrototypeOf(v) === null)) {
     const o = {};
-    for (const k of Object.keys(v)) o[k] = walk(v[k], bigint);
+    // defineProperty, because assigning "__proto__" would change the prototype and drop the key.
+    for (const k of Object.keys(v)) Object.defineProperty(o, k, { value: walk(v[k], bigint), enumerable: true, writable: true, configurable: true });
     return o;
   }
   return v;
@@ -358,18 +364,22 @@ function mongoHelpers() {
 const QUIET = new Set(["hello", "isMaster", "ismaster", "ping", "endSessions", "killCursors", "getMore", "saslStart", "saslContinue", "buildInfo", "buildinfo"]);
 const TEXT_MAX = 2000;
 
+// Only these name a collection in their command document; for any other command a string value is an argument (dropUser: "u1").
+const COLLECTION_COMMANDS = new Set(["find", "aggregate", "count", "distinct", "insert", "update", "delete", "findAndModify", "createIndexes", "dropIndexes", "drop", "listIndexes", "collMod"]);
+const WRITE_COMMANDS = new Set(["insert", "update", "delete", "findAndModify"]);
+
 // users.find({ legacyId: ... }) for a command document, the way the script would have written it.
 function commandText(name, cmd) {
-  const coll = typeof cmd[name] === "string" ? cmd[name] : "";
+  const coll = COLLECTION_COMMANDS.has(name) && typeof cmd[name] === "string" ? cmd[name] : "";
   const ops = (list, key) => (list && list.length === 1 ? list[0][key] : list?.map((x) => x[key]));
   const arg = {
     find: cmd.filter, count: cmd.query, distinct: cmd.query, aggregate: cmd.pipeline,
     update: ops(cmd.updates, "q"), delete: ops(cmd.deletes, "q"),
   }[name];
   const body = name === "insert" ? `${cmd.documents?.length ?? 0} documents` : arg === undefined ? "" : mongodb.BSON.EJSON.stringify(arg, { relaxed: true });
-  const owner = coll || cmd.$db || "";
-  const text = `${owner}${owner ? "." : ""}${name}(${body})`;
-  return text.length > TEXT_MAX ? text.slice(0, TEXT_MAX) : text;
+  const text = `${coll || "db"}.${name}(${body})`;
+  // Cut on code points of the text, then repair a pair the cut split: serde_json refuses a lone surrogate.
+  return text.length > TEXT_MAX ? text.slice(0, TEXT_MAX).toWellFormed() : text;
 }
 
 // Each client reports its commands to the Queries panel under the connection's name.
@@ -383,10 +393,16 @@ function watchCommands(client, conn) {
     if (!cmd) return;
     started.delete(ev.requestId);
     const q = { type: "query", conn, text: commandText(ev.commandName, cmd), ms: Math.round(ev.duration) };
-    const batch = ev.reply?.cursor?.firstBatch;
-    if (Array.isArray(batch)) q.rows = batch.length;
-    else if (typeof ev.reply?.n === "number") q.affected = ev.reply.n;
-    if (failed) q.error = String(ev.failure?.message ?? ev.failure);
+    const cursor = ev.reply?.cursor;
+    // Later batches come through getMore, so a first batch alone would show a wrong row count.
+    if (Array.isArray(cursor?.firstBatch)) {
+      if (String(cursor.id) === "0") q.rows = cursor.firstBatch.length;
+    } else if (WRITE_COMMANDS.has(ev.commandName)) {
+      const n = ev.commandName === "findAndModify" ? ev.reply?.lastErrorObject?.n : ev.reply?.n;
+      if (typeof n === "number") q.affected = n;
+    } else if (typeof ev.reply?.n === "number") q.rows = ev.reply.n;
+    // The driver replaces the failure of a sensitive command with a bare object.
+    if (failed) q.error = String(ev.failure?.message ?? ev.failure?.codeName ?? "failed");
     out(q);
   };
   client.on("commandSucceeded", (ev) => done(ev));
@@ -400,6 +416,15 @@ const mongoEntries = input.mongo || [];
 const sqlEntries = input.sql || [];
 const clients = [];
 try {
+  // Names pick the connection a query goes to, so a repeated one would send queries to the wrong place.
+  const seen = new Set();
+  for (const n of [...mongoEntries, ...sqlEntries].map((e) => e.name)) {
+    if (seen.has(n)) throw new Error(`The connection name "${n}" is used more than once in this script. Give each connection its own name.`);
+    seen.add(n);
+  }
+  // ponytail: monitoring only with attachments, because it makes the driver decode every cursor reply twice (about 30% slower).
+  // Add a per-run opt-in if someone wants Mongo queries listed for a single connection.
+  const monitor = mongoEntries.length + sqlEntries.length > 1;
   const ctx = { require, console: console2, log: console2.log };
   if (mongoEntries.length) {
     mongodb = await import("mongodb");
@@ -410,7 +435,7 @@ try {
   const open = (m) => {
     // SSH-only servers are reached through Quarry's tunnel (a local SOCKS5 port) or the connection's
     // own proxy; the driver needs the "socks" package for that, installed as a built-in.
-    const options = { appName: "quarry-shell", serverSelectionTimeoutMS: input.timeoutMs, monitorCommands: true };
+    const options = { appName: "quarry-shell", serverSelectionTimeoutMS: input.timeoutMs, monitorCommands: monitor };
     if (m.proxy) {
       options.proxyHost = m.proxy.host;
       options.proxyPort = m.proxy.port;
@@ -422,13 +447,12 @@ try {
     // The driver connects on the first database call, so plain scripts run without a server.
     const client = new mongodb.MongoClient(m.uri, options);
     clients.push(client);
-    watchCommands(client, m.name);
+    if (monitor) watchCommands(client, m.name);
     return client.db(m.db);
   };
-  const attach = (name, value) => {
-    if (!isName(name) || name in ctx) throw new Error(`"${name}" cannot be a connection name in the shell, it is a reserved word or already in use.`);
-    ctx[name] = value;
-  };
+  // Attached handles are added after everything else the run defines, so a clash is found whatever the order of the input.
+  const attachments = [];
+  const attach = (name, value) => attachments.push([name, value]);
   // The main entry's things are plain globals; every other entry is one global under its name.
   for (const m of mongoEntries) {
     const db = open(m);
@@ -486,6 +510,11 @@ try {
     } catch (e) {
       console2.warn(`Could not load package ${pkg}: ${e && e.message ? e.message : e}`);
     }
+  }
+  for (const [name, value] of attachments) {
+    if (!isName(name)) throw new Error(`"${name}" cannot be a connection name in the shell, it is a reserved word or not a valid name.`);
+    if (name in ctx) throw new Error(`The connection "${name}" cannot be attached because the shell already defines "${name}" (a built-in, a helper, a package, or a collection or table of the main connection). Rename the connection.`);
+    ctx[name] = value;
   }
   const fn = new Function(...Object.keys(ctx), `return (${input.code.trim()})`)(...Object.values(ctx));
   if (typeof fn !== "function") throw new Error("The command is not a function. Write it as: async function run() { ... }");
