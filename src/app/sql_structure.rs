@@ -335,6 +335,13 @@ impl App {
             self.staged_bar(ui, &d, &staged, editable, applying, &mut acts);
             ui.add_space(8.0);
         }
+        // The schema's estimate, asked for once per database; a table it has not listed yet shows nothing.
+        let conn = self.tabs[self.cur].sel.conn;
+        let dbs: std::collections::BTreeSet<String> = d.referenced_by.iter().map(|fk| fk.db.clone()).collect();
+        for db in dbs {
+            self.sql_serve(conn, &db, crate::ui::sql_complete::Wants { schema: true, values: None });
+        }
+        let in_rows: Vec<Option<u64>> = d.referenced_by.iter().map(|fk| self.sql_schema.get(&(conn, fk.db.clone())).and_then(|s| s.table(&fk.table)).and_then(|t| t.rows)).collect();
         egui::ScrollArea::vertical().id_salt("sql-relations").auto_shrink([false, false]).show(ui, |ui| {
             caption(ui, "THIS TABLE POINTS TO");
             ui.add_space(6.0);
@@ -381,7 +388,7 @@ impl App {
             ui.add_space(16.0);
             caption(ui, "TABLES THAT POINT HERE");
             ui.add_space(6.0);
-            let heads = [gc("Table", 2.0), gc("Column", 1.6), gc("Constraint", 2.0), gc("On update", 1.2), gc("On delete", 1.2)];
+            let heads = [gc("Table", 2.0), gc("Column", 1.6), gc("Constraint", 2.0), gc("On update", 1.2), gc("On delete", 1.2), gc("Rows", 1.2)];
             if let Some(r) = grid(ui, "fk-in", &heads, d.referenced_by.len(), sel[3], |ui, rect, r, c| {
                 let fk = &d.referenced_by[r];
                 match c {
@@ -394,7 +401,8 @@ impl App {
                     1 => put(ui, rect, &fk.cols.join(", "), mono(TXT_SMALL), TEXT(), false),
                     2 => put(ui, rect, &fk.name, mono(TXT_SMALL), MUTED(), false),
                     3 => put(ui, rect, &fk.on_update, mono(TXT_SMALL), C_KEYWORD(), false),
-                    _ => put(ui, rect, &fk.on_delete, mono(TXT_SMALL), C_KEYWORD(), false),
+                    4 => put(ui, rect, &fk.on_delete, mono(TXT_SMALL), C_KEYWORD(), false),
+                    _ => put(ui, rect, &in_rows[r].map_or(String::new(), |n| group(&n.to_string())), mono(TXT_SMALL), C_NUMBER(), false),
                 }
             }) {
                 sel[3] = Some(r);

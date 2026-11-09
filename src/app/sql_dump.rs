@@ -221,6 +221,12 @@ impl App {
             ui.checkbox(&mut f.snapshot, "Consistent snapshot").on_hover_text("Reads every table from one point in time without locking anything (InnoDB).");
             ui.end_row();
             ui.checkbox(&mut f.extras, "Include views, triggers and routines");
+            // The file name carries the choice, so the path and the checkbox cannot disagree.
+            let mut gz = f.path.trim_end().ends_with(".gz");
+            if ui.checkbox(&mut gz, "Compress with gzip").changed() {
+                let p = f.path.trim_end();
+                f.path = if gz { format!("{p}.gz") } else { p.strip_suffix(".gz").unwrap_or(p).to_string() };
+            }
             ui.end_row();
         });
         ui.add_space(8.0);
@@ -230,7 +236,7 @@ impl App {
             ui.add(egui::TextEdit::singleline(&mut f.path).font(egui::TextStyle::Monospace).desired_width(w));
             if ui.button("Choose…").clicked() {
                 let start = std::path::Path::new(&f.path);
-                let mut dlg = rfd::FileDialog::new().add_filter("SQL", &["sql"]);
+                let mut dlg = rfd::FileDialog::new().add_filter("SQL", &["sql", "gz"]);
                 if let Some(n) = start.file_name() {
                     dlg = dlg.set_file_name(n.to_string_lossy());
                 }

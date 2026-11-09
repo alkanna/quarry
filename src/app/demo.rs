@@ -450,7 +450,7 @@ impl App {
         if matches!(std::env::var("QUARRY_TEST_SQL").as_deref(), Ok("shell" | "shellac" | "shellattach" | "attach")) {
             self.sql_shell_demo();
         }
-        if matches!(std::env::var("QUARRY_TEST_SQL").as_deref(), Ok("ac" | "acquery" | "shellac")) {
+        if matches!(std::env::var("QUARRY_TEST_SQL").as_deref(), Ok("ac" | "acquery" | "shellac" | "relations")) {
             self.sql_ac_demo();
         }
         // QUARRY_TEST_SQL=edit stages two cells of row 3; =select checks four rows.
@@ -506,7 +506,9 @@ impl App {
         let order_items = table("order_items", Some(9120), vec![col("order_id", "int unsigned", "PRI", true), col("sku", "varchar(40)", "PRI", false)]);
         // A view has no row count, which is how the completion list tells it from a table.
         let order_totals = table("order_totals", None, vec![col("order_id", "int unsigned", "", false), col("total", "decimal(10,2)", "", false)]);
-        self.sql_schema.insert((3, "shop".into()), Arc::new(Schema { tables: vec![customers, order_items, orders, order_totals] }));
+        let payments = table("payments", Some(4377), vec![col("id", "int unsigned", "PRI", false), col("order_id", "int unsigned", "MUL", true)]);
+        let shipments = table("shipments", Some(3120), vec![col("id", "int unsigned", "PRI", false), col("order_id", "int unsigned", "MUL", true)]);
+        self.sql_schema.insert((3, "shop".into()), Arc::new(Schema { tables: vec![customers, order_items, orders, payments, shipments, order_totals] }));
         let mut vals = Fields::new();
         vals.insert(crate::ui::sql_complete::value_key("orders", "currency"), FieldInfo { kind: "string", values: ["EUR", "USD", "GBP"].map(Bson::from).to_vec(), freq: vec![61, 27, 12] });
         vals.insert(crate::ui::sql_complete::value_key("orders", "status"), FieldInfo { kind: "string", values: ["paid", "shipped", "pending", "refunded", "cancelled"].map(Bson::from).to_vec(), freq: vec![61, 22, 9, 5, 3] });

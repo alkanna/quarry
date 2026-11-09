@@ -331,9 +331,20 @@ pub async fn dump_to(db: &Db, plan: &DumpPlan, path: PathBuf, count: &AtomicU64,
     let tmp = part_of(&path);
     let res = async {
         let file = std::fs::File::create(&tmp).map_err(|x| format!("Could not write {}: {x}", path.display()))?;
-        let mut out = std::io::BufWriter::new(file);
-        let rows = dump(db, plan, &mut out, count, cancel, id).await?;
-        out.flush().map_err(|x| format!("Could not write {}: {x}", path.display()))?;
+        let out = std::io::BufWriter::new(file);
+        let fail = |x: std::io::Error| format!("Could not write {}: {x}", path.display());
+        // The name is the only switch, so the dialog's checkbox and a typed .gz name agree.
+        let rows = if path.extension().is_some_and(|x| x == "gz") {
+            let mut gz = flate2::write::GzEncoder::new(out, flate2::Compression::default());
+            let rows = dump(db, plan, &mut gz, count, cancel, id).await?;
+            gz.finish().and_then(|mut b| b.flush()).map_err(fail)?;
+            rows
+        } else {
+            let mut out = out;
+            let rows = dump(db, plan, &mut out, count, cancel, id).await?;
+            out.flush().map_err(fail)?;
+            rows
+        };
         std::fs::rename(&tmp, &path).map_err(|x| format!("Could not write {}: {x}", path.display()))?;
         Ok(rows)
     }
@@ -617,6 +628,14 @@ mod tests {
             assert!(text.contains("DELIMITER ;;") && text.contains("CREATE DATABASE IF NOT EXISTS"), "{var}");
             // Triggers come after the data, so loading rows does not fire them.
             assert!(text.find("INSERT INTO `child`").unwrap() < text.find("Trigger trg_bi").unwrap(), "{var}");
+            // A .gz name writes the same script compressed.
+            let gz = tmp(var, "sql.gz");
+            l.w.rt.block_on(dump_to(&l.db, &plan(1000), gz.clone(), &count, &cancel, &id)).unwrap_or_else(|x| panic!("{var}: {x}"));
+            let mut unzipped = String::new();
+            flate2::read::GzDecoder::new(std::fs::File::open(&gz).unwrap()).read_to_string(&mut unzipped).unwrap();
+            assert_eq!(unzipped.lines().filter(|l| l.starts_with("INSERT")).count(), text.lines().filter(|l| l.starts_with("INSERT")).count(), "{var}");
+            assert!(unzipped.ends_with("-- Dump complete\n") && std::fs::metadata(&gz).unwrap().len() < text.len() as u64 / 2, "{var}");
+            let _ = std::fs::remove_file(&gz);
             let views_before = shape(l, &format!("SHOW CREATE VIEW {db}.v_sum"));
             let trig_before = l.one(&format!("SELECT ACTION_STATEMENT FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = '{db}'"));
             l.sql(&format!("DROP DATABASE {db}"));

@@ -361,7 +361,10 @@ async function run() {
         let q = f.filter.trim().to_lowercase();
         let rows: Vec<u64> = self.conns.iter().filter(|c| q.is_empty() || c.meta.name.to_lowercase().contains(&q) || c.meta.tag.to_lowercase().contains(&q)).map(|c| c.meta.id).collect();
         let mut pick = None;
-        egui::ScrollArea::vertical().max_height(4.0 * 46.0).auto_shrink([false, true]).show(ui, |ui| {
+        // Four whole rows of ROW_STEP, so the list never stops on half a row.
+        const ROW_STEP: f32 = 42.0;
+        egui::ScrollArea::vertical().max_height(4.0 * ROW_STEP).auto_shrink([false, true]).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = ROW_STEP - CONN_ROW_H;
             if rows.is_empty() {
                 ui.label(RichText::new("No saved connection matches").color(FAINT()));
             }
@@ -467,11 +470,14 @@ async function run() {
 }
 
 /// One saved connection in the Attach list: engine mark, name, engine and version, tag, and its state on the right.
+/// A connection row of the Attach dialog; its list is sized from this.
+const CONN_ROW_H: f32 = 40.0;
+
 fn connection_row(ui: &mut egui::Ui, c: &Conn, active: bool) -> egui::Response {
     let (mark, product, color) = mark_of(c);
     let version = short_version(&c.server.version);
     let engine = if version.is_empty() { product.to_string() } else { format!("{product} {version}") };
-    side_row(ui, 44.0, 0.0, active, |p, r| {
+    side_row(ui, CONN_ROW_H, 0.0, active, |p, r| {
         let mid = r.center().y;
         let sq = egui::Rect::from_center_size(egui::pos2(r.left() + 14.0, mid), egui::vec2(28.0, 28.0));
         p.rect_filled(sq, R_MD, tint(color, 45));
