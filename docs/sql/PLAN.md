@@ -9,7 +9,7 @@ Quarry is a MongoDB-only client. The goal is to open it to SQL engines, starting
 Update this list when a step lands. Each step is reviewed before it is ticked.
 
 **v1**
-- [ ] 1. sqlx dependency, `db::sql::Engine` and `Addr` (done: Cargo.toml, src/db/sql/mod.rs, tests), `ConnMeta.engine`, connection form B
+- [x] 1. sqlx dependency, `db::sql::Engine` and `Addr` `ConnMeta.engine`, connection form B. Advanced tab skipped until needed. Temporary spots for step 4: disabled Test for SQL in conn_form.rs, early return in `App::connect`
 - [x] 2. SSH plain port-forward mode in src/ssh.rs (`ssh::open(.., Some((host, port)))`, connect to 127.0.0.1:tunnel.port)
 - [ ] 3. `db/sql/{lex,value}.rs` and `Dialect` with unit tests
 - [ ] 4. SQL worker, new `Msg` variants, live tests (`QUARRY_TEST_MYSQL`)
