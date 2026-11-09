@@ -73,6 +73,10 @@ Update this list when a step lands. Each step is reviewed before it is ticked.
 | sql structure | 0.3 | 0.3 | 157.8 | 0.5 | 2.4 | 17.1 |
 | sql shell | 0.3 | 0.3 | 159.0 | 0.5 | 2.2 | 17.9 |
 
+**v2 summary:** a Shell tab can attach other saved connections, Mongo or SQL, each read-only unless allowed and unlocked, all through one Bun runner and the existing SQL relay. The Structure page edits columns, indexes, FKs and triggers through a previewed, checked ALTER with undo; FK cells open the row they point to. CSV and SQL dumps import and export streamed. Databases and tables are created and dropped with a statement preview and a typed confirm, and an empty new one can be undone. The connection form has an Advanced tab (time zone, charset, sql_mode, statement timeout, init command). Checked on 1b5824e: `cargo check --all-targets` clean, 454 tests passed live on mysql:8.4, mariadb:11.4 and mongo with Bun, the two language server tests passed, release build done.
+
+**v2 known limits:** the Content bar's filter literals use the sql_mode read at connect; MariaDB before 10.5.10 does not report column CHECKs, so they are not seen there; the init command only sets user variables and allow-listed session variables (not autocommit, completion_type, sql_select_limit or the charset variables, which the form owns); a row undo checks its key just before its transaction, not inside it; a create undo does not record the table id, so it relies on the emptiness check; the Advanced tab's System time zone on Windows was only type-checked. Still v3: users, the process list, variables, Save to library and Format in Query.
+
 
 **v2 definition of done** (the user asked that v2 is not considered finished before all of this holds):
 1. All seven v2 items are on feat/mysql and ticked here; the Advanced tab design was shown to and approved by the user before it was built.
