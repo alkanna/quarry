@@ -109,6 +109,7 @@ impl App {
             match &mut m {
                 Modal::Conn(f) => self.conn_dialog(ui, f, &mut keep),
                 Modal::Settings => self.settings_dialog(ui, &mut keep),
+                Modal::Attach(f) => self.attach_dialog(ui, f, &mut keep),
                 Modal::Unlock(id, then) => {
                     let name = self.conn(*id).map(|c| c.meta.name.clone()).unwrap_or_default();
                     dialog_title(ui, format!("Allow writes on \"{name}\"?"));

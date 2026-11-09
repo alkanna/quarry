@@ -26,6 +26,8 @@ pub(super) struct JsState {
     typed: Vec<(String, Arc<Fields>)>,
     /// The schema a SQL tab's types were built from. Holding the Arc keeps its pointer unique.
     typed_sql: Option<Arc<db::sql::schema::Schema>>,
+    /// The same for each attached connection, in the order of the tab's attachments.
+    typed_att: Vec<AttTyped>,
     /// Newest completion request.
     complete: Option<Pending>,
     /// Server items of the list on screen, in list order, to ask for the selected one's docs.
@@ -164,10 +166,13 @@ pub(super) fn shell_ac_demo(ui: &egui::Ui, id: egui::Id, code: &str, ac: &mut Ac
     }
 }
 
-fn globals_key(colls: &[String], packages: &[String]) -> u64 {
+fn globals_key(colls: &[String], packages: &[String], attached: &[AttachedInfo]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     (colls, packages).hash(&mut h);
+    for a in attached {
+        (&a.name, &a.names, matches!(a.typed, AttTyped::Sql(_))).hash(&mut h);
+    }
     h.finish()
 }
 
@@ -193,9 +198,15 @@ impl App {
     /// first so its fields win for its collection.
     pub(super) fn db_fields(&self) -> Vec<(String, Arc<Fields>)> {
         let cur = &self.tabs[self.cur];
+        self.fields_of(cur.sel.conn, &cur.sel.db)
+    }
+
+    /// The same for any connection and database, so an attached one is typed from tabs that show it.
+    pub(super) fn fields_of(&self, conn: u64, db: &str) -> Vec<(String, Arc<Fields>)> {
+        let cur = &self.tabs[self.cur];
         let mut out: Vec<(String, Arc<Fields>)> = Vec::new();
         for t in std::iter::once(cur).chain(&self.tabs) {
-            if t.sel.conn == cur.sel.conn && t.sel.db == cur.sel.db && !t.field_info.is_empty() && !out.iter().any(|o| o.0 == t.sel.coll) {
+            if t.sel.conn == conn && t.sel.db == db && !t.field_info.is_empty() && !out.iter().any(|o| o.0 == t.sel.coll) {
                 out.push((t.sel.coll.clone(), t.field_info.clone()));
             }
         }
@@ -233,7 +244,10 @@ impl App {
         }
         let names: Vec<String> = self.prefs.shell_packages.iter().map(|p| db::package_spec(p).0).collect();
         let sql = self.tabs[self.cur].sql.is_some();
-        let key = globals_key(colls, &names) ^ sql as u64;
+        let attached = self.attached_infos();
+        let key = globals_key(colls, &names, &attached) ^ sql as u64;
+        // Rebuilt when an attachment was added, removed or retyped by a new schema or field list.
+        let att_same = attached.len() == self.js.typed_att.len() && attached.iter().zip(&self.js.typed_att).all(|(a, b)| a.typed.same(b));
         // SQL tabs are typed from the autocomplete schema, which is replaced on every reload, so
         // pointer equality means unchanged.
         let sql_cols = sql.then(|| self.sql_schema.get(&self.sql_key()).cloned()).flatten();
@@ -253,16 +267,18 @@ impl App {
             (known, same)
         };
         // Rebuilt and sent only when something changed; the server keeps the last one.
-        let globals = (self.js.globals != Some(key) || !same).then(|| {
+        let globals = (self.js.globals != Some(key) || !same || !att_same).then(|| {
+            let extra = attached_decls(&attached, sql);
             if sql {
                 // Tables with no known columns yet still get a global, typed loosely.
                 let tables: Vec<db::sql::TableCols> = sql_cols.as_deref().map(|s| s.tables.iter().map(|t| db::sql::TableCols { name: t.name.clone(), cols: t.cols.iter().map(|c| db::sql::TableCol { name: c.name.clone(), full_type: c.ty.clone(), nullable: c.nullable }).collect() }).collect()).unwrap_or_else(|| colls.iter().map(|c| db::sql::TableCols { name: c.clone(), cols: Vec::new() }).collect());
-                return db::sql_globals(&tables, &names, package_ident, &JS_RESERVED);
+                return db::sql_globals(&tables, &names, package_ident, &JS_RESERVED) + &extra;
             }
             let schemas = known.iter().map(|(c, f)| (c.clone(), ts_type(f))).collect();
-            db::js_globals(colls, &schemas, &names, package_ident, &JS_RESERVED)
+            db::js_globals(colls, &schemas, &names, package_ident, &JS_RESERVED) + &extra
         });
         (self.js.globals, self.js.typed, self.js.typed_sql) = (Some(key), known, sql_cols);
+        self.js.typed_att = attached.into_iter().map(|a| a.typed).collect();
         let code = self.tabs[self.cur].shell.code.clone();
         let (line, col) = db::lsp_pos(&code, at);
         self.req += 1;

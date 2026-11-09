@@ -7,9 +7,9 @@ impl App {
     /// What completion knows about database `db` of connection `conn`. `table` is the implicit table of
     /// the Content bar. It borrows the connection list, so it takes the fields rather than `&self` and a
     /// tab can be borrowed mutably beside it.
-    pub(super) fn sql_scope<'a>(conns: &'a [Conn], schemas: &HashMap<(u64, String), Arc<db::sql::schema::Schema>>, conn: u64, db: &str, table: Option<&str>) -> Scope<'a> {
+    pub(super) fn sql_scope<'a>(conns: &'a [Conn], schemas: &HashMap<(u64, String), Arc<db::sql::schema::Schema>>, views: &HashSet<(u64, String, String)>, conn: u64, db: &str, table: Option<&str>) -> Scope<'a> {
         let dbs = conns.iter().find(|c| c.meta.id == conn).map_or(&[][..], |c| c.dbs.as_slice());
-        Scope { schema: schemas.get(&(conn, db.to_string())).cloned().unwrap_or_default(), db: db.to_string(), dbs, table: table.filter(|t| !t.is_empty()).map(str::to_string), fallback: Default::default() }
+        Scope { schema: schemas.get(&(conn, db.to_string())).cloned().unwrap_or_default(), db: db.to_string(), dbs, table: table.filter(|t| !t.is_empty()).map(str::to_string), fallback: Default::default(), views: views.iter().filter(|v| v.0 == conn && v.1 == db).map(|v| v.2.clone()).collect() }
     }
 
     /// Sends what an input asked for while it was drawn: the database's schema the first time one of its

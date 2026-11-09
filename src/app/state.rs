@@ -434,6 +434,8 @@ impl Default for ImportTab {
 #[derive(Default)]
 pub(super) struct ShellTab {
     pub(super) code: String,
+    /// Other saved connections whose data is a global of the script, saved with the tab.
+    pub(super) attached: Vec<Attached>,
     pub(super) logs: Vec<(String, String)>,
     /// The returned value when it is not documents; see `result` for the whole of it.
     pub(super) value: Option<Bson>,
@@ -679,6 +681,8 @@ pub(super) enum Modal {
     Grouped { sel: Sel, path: String, pipeline: Vec<Document>, rows: Vec<Document> },
     /// The column header's Customize window; `key` is the column prefs key it edits.
     ColumnCustomize { key: String, agg: bool, col: String, label: String, path: String },
+    /// Attach another saved connection to the current Shell tab.
+    Attach(Box<super::shell_attach::AttachForm>),
 }
 
 /// A value being edited in place in the document tree.

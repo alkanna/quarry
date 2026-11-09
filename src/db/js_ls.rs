@@ -176,17 +176,76 @@ fn interface_name(table: &str) -> String {
     if s.is_empty() || s.starts_with(|c: char| c.is_ascii_digit()) { format!("Table{s}") } else { s }
 }
 
-/// Declarations for a SQL tab's scripts, in the order sql_runner.mjs puts names in scope: the helpers,
-/// one interface and one global per table whose name is a plain word, then `_`, dayjs and added packages
-/// where the name is still free. Must match sql_runner.mjs.
-pub fn sql_globals(tables: &[sql::TableCols], packages: &[String], ident: impl Fn(&str) -> String, reserved: &[&str]) -> String {
-    let mut out = String::from("type QuarryDefault<T> = T extends { default: infer D } ? D : T;\n");
-    out += "type QuarryOp<V> = { gt?: V; gte?: V; lt?: V; lte?: V; ne?: V | null; like?: string; in?: V[] };\n";
+/// The type aliases a SQL tab and an attached SQL connection are both typed with.
+fn sql_types() -> String {
+    let mut out = String::from("type QuarryOp<V> = { gt?: V; gte?: V; lt?: V; lte?: V; ne?: V | null; like?: string; in?: V[] };\n");
     out += "type QuarryWhere<R> = { [K in keyof R]?: R[K] | R[K][] | null | QuarryOp<R[K]> };\n";
     out += "type QuarryKey<R> = (keyof R & string) | `-${keyof R & string}`;\n";
     out += "interface QuarryFind<R> { select?: (keyof R & string)[]; orderBy?: QuarryKey<R> | QuarryKey<R>[] | { [K in keyof R]?: 'asc' | 'desc' }; limit?: number; offset?: number }\n";
     out += "interface QuarryWrite { affected: number; insertId: number }\n";
     out += "interface QuarryTable<R> {\n  find(where?: QuarryWhere<R>, opts?: QuarryFind<R>): Promise<R[]>;\n  findOne(where?: QuarryWhere<R>, opts?: QuarryFind<R>): Promise<R | null>;\n  count(where?: QuarryWhere<R>): Promise<number>;\n  insert(row: Partial<R> | Partial<R>[]): Promise<QuarryWrite>;\n  update(where: QuarryWhere<R>, set: Partial<R>): Promise<QuarryWrite>;\n  delete(where: QuarryWhere<R>): Promise<QuarryWrite>;\n}\n";
+    out += "interface QuarryConn {\n  <R = any>(s: TemplateStringsArray, ...v: unknown[]): Promise<R[]>;\n  sql<R = any>(s: TemplateStringsArray, ...v: unknown[]): Promise<R[]>;\n  unsafe<R = any>(text: string, params?: unknown[]): Promise<R[]>;\n  table<R = any>(name: string): QuarryTable<R>;\n}\n";
+    out
+}
+
+/// What an attached connection holds, as far as the editor knows it.
+pub enum AttachedKind<'a> {
+    /// Collection names, and the TypeScript type of the documents of those whose fields are known.
+    Mongo { collections: &'a [String], schemas: &'a HashMap<String, String> },
+    Sql { tables: &'a [sql::TableCols] },
+}
+
+fn plain_name(n: &str, reserved: &[&str]) -> bool {
+    n.starts_with(|ch: char| ch.is_ascii_alphabetic() || ch == '_' || ch == '$') && n.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$') && !reserved.contains(&n)
+}
+
+/// One `declare const` per attached connection, matching what shell_runner.mjs builds: a Mongo one is a Db with
+/// a collection per plain name (a name the Db already has keeps its method), a SQL one is a tag function that
+/// also has `.sql`, `.unsafe`, `.table()` and a property per table. `with_types` adds the shared SQL type
+/// aliases for a tab that has no SQL of its own; a SQL tab already declares them.
+pub fn attached_globals(items: &[(&str, AttachedKind)], with_types: bool, reserved: &[&str]) -> String {
+    let mut out = String::new();
+    if with_types && items.iter().any(|i| matches!(i.1, AttachedKind::Sql { .. })) {
+        out += &sql_types();
+    }
+    for (name, kind) in items {
+        if !plain_name(name, reserved) {
+            continue;
+        }
+        match kind {
+            AttachedKind::Mongo { collections, schemas } => {
+                let props: Vec<String> = collections.iter().filter(|c| plain_name(c, reserved)).map(|c| format!("{c}: import(\"mongodb\").Collection{}", schemas.get(c).map(|t| format!("<{t}>")).unwrap_or_default())).collect();
+                out += &format!("declare const {name}: import(\"mongodb\").Db & Omit<{{ {} }}, keyof import(\"mongodb\").Db>;\n", props.join("; "));
+            }
+            AttachedKind::Sql { tables } => {
+                let mut names: Vec<String> = Vec::new();
+                let mut props: Vec<String> = Vec::new();
+                for t in tables.iter().filter(|t| plain_name(&t.name, reserved)) {
+                    let mut iface = format!("Quarry_{name}_{}", interface_name(&t.name));
+                    while names.contains(&iface) {
+                        iface.push('_');
+                    }
+                    out += &format!("interface {iface} {{\n");
+                    for c in &t.cols {
+                        out += &format!("  {}: {};\n", if c.name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$') && !c.name.starts_with(|ch: char| ch.is_ascii_digit()) { c.name.clone() } else { Value::String(c.name.clone()).to_string() }, sql_ts_type(c));
+                    }
+                    out += "}\n";
+                    props.push(format!("{}: QuarryTable<{iface}>", t.name));
+                    names.push(iface);
+                }
+                out += &format!("declare const {name}: QuarryConn & Omit<{{ {} }}, keyof QuarryConn | keyof Function>;\n", props.join("; "));
+            }
+        }
+    }
+    out
+}
+
+/// Declarations for a SQL tab's scripts, in the order shell_runner.mjs puts names in scope: the helpers,
+/// one interface and one global per table whose name is a plain word, then `_`, dayjs and added packages
+/// where the name is still free. Must match shell_runner.mjs.
+pub fn sql_globals(tables: &[sql::TableCols], packages: &[String], ident: impl Fn(&str) -> String, reserved: &[&str]) -> String {
+    let mut out = String::from("type QuarryDefault<T> = T extends { default: infer D } ? D : T;\n");
+    out += &sql_types();
     out += "declare function sql<T = any>(s: TemplateStringsArray, ...v: unknown[]): Promise<T[]>;\n";
     out += "declare namespace sql { function unsafe<T = any>(text: string, params?: unknown[]): Promise<T[]>; }\n";
     out += "declare function table<T = any>(name: string): QuarryTable<T>;\n";
@@ -569,5 +628,23 @@ mod tests {
         for m in ["find(", "findOne(", "count(", "insert(", "update(", "delete("] {
             assert!(g.contains(m), "{m}");
         }
+    }
+
+    #[test]
+    fn attached_declarations() {
+        let col = |name: &str, full_type: &str, nullable: bool| sql::TableCol { name: name.into(), full_type: full_type.into(), nullable };
+        let tables = vec![sql::TableCols { name: "orders".into(), cols: vec![col("id", "int", false), col("note", "text", true)] }, sql::TableCols { name: "my-table".into(), cols: Vec::new() }];
+        let colls = ["users", "trips", "my-coll", "class"].map(String::from);
+        let schemas = HashMap::from([("users".to_string(), "{ name?: string }".to_string())]);
+        let items = [("travels", AttachedKind::Mongo { collections: &colls, schemas: &schemas }), ("shop", AttachedKind::Sql { tables: &tables }), ("class", AttachedKind::Sql { tables: &[] })];
+        let g = attached_globals(&items, true, &["class"]);
+        assert!(g.contains("declare const travels: import(\"mongodb\").Db & Omit<{ users: import(\"mongodb\").Collection<{ name?: string }>; trips: import(\"mongodb\").Collection }, keyof import(\"mongodb\").Db>;"), "{g}");
+        assert!(g.contains("interface Quarry_shop_Orders {\n  id: number;\n  note: string | null;\n}"), "{g}");
+        assert!(g.contains("declare const shop: QuarryConn & Omit<{ orders: QuarryTable<Quarry_shop_Orders> }, keyof QuarryConn | keyof Function>;"), "{g}");
+        assert!(g.contains("interface QuarryConn {") && g.contains("  unsafe<R = any>(text: string, params?: unknown[]): Promise<R[]>;"));
+        // A name that cannot be a const is skipped, and a SQL tab already has the aliases.
+        assert!(!g.contains("const class") && !g.contains("my-table") && !g.contains("my-coll"));
+        assert!(!attached_globals(&items, false, &["class"]).contains("interface QuarryConn"));
+        assert!(attached_globals(&items[..1], true, &[]).find("QuarryTable").is_none());
     }
 }

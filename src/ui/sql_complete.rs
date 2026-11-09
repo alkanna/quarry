@@ -34,6 +34,8 @@ pub(crate) struct Scope<'a> {
     pub(crate) dbs: &'a [(String, Option<Vec<String>>)],
     pub(crate) table: Option<String>,
     pub(crate) fallback: Arc<Vec<SchemaCol>>,
+    /// Names of the views of `db` that the sidebar knows, so the plain table list shown before the schema arrives still marks them.
+    pub(crate) views: std::collections::HashSet<String>,
 }
 
 /// A lookup the caret asks the app to make: the schema of the database, or a column's values.
@@ -454,7 +456,10 @@ fn tables_list(word: &str, from: usize, in_tick: bool, scope: &Scope) -> Out {
     // A name still loading is listed from the sidebar's table list, without the row counts.
     if scope.schema.tables.is_empty() {
         if let Some((_, Some(names))) = scope.dbs.iter().find(|(d, _)| d.eq_ignore_ascii_case(&scope.db)) {
-            sugs.extend(names.iter().filter(|t| starts_ci(t, word)).map(|t| sug(t.clone(), "table", ident(t, in_tick), String::new(), String::new())));
+            sugs.extend(names.iter().filter(|t| starts_ci(t, word)).map(|t| {
+                let view = scope.views.contains(t.as_str());
+                sug(t.clone(), if view { "view" } else { "table" }, ident(t, in_tick), if view { "view".to_string() } else { String::new() }, String::new())
+            }));
         }
     }
     for (d, tables) in scope.dbs.iter().filter(|(d, _)| !d.eq_ignore_ascii_case(&scope.db)) {

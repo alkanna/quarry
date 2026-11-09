@@ -162,6 +162,8 @@ pub(super) struct SavedTab {
     pub(super) project: String,
     pub(super) agg: String,
     pub(super) shell: String,
+    /// Connections attached to the tab's shell.
+    pub(super) attached: Vec<Attached>,
     /// The SQL Content bar's clauses as JSON (`sql_bar::Clauses`); empty for other tabs.
     pub(super) clauses: String,
     /// The text of a SQL tab's Query view.

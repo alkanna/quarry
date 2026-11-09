@@ -36,6 +36,7 @@ mod schema;
 mod server;
 mod settings;
 mod shell;
+mod shell_attach;
 mod shell_ls;
 mod sidebar;
 mod sql_ac;
@@ -56,6 +57,7 @@ use column_menu::*;
 use config::*;
 use documents::*;
 use shell::*;
+use shell_attach::*;
 use sidebar::*;
 use state::*;
 use query::*;
@@ -410,6 +412,8 @@ impl App {
                     _ => View::Documents,
                 };
                 (t.filter_txt, t.sort_txt, t.proj_txt, t.shell.code) = (st.filter, st.sort, st.project, st.shell);
+                // A connection deleted since the last session cannot be attached any more.
+                t.shell.attached = st.attached.into_iter().filter(|a| app.conn(a.conn).is_some()).collect();
                 if let (Some(s), Ok(c)) = (t.sql.as_mut(), serde_json::from_str(&st.clauses)) {
                     s.bar.c = c;
                 }

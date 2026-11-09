@@ -121,7 +121,7 @@ fn sync_order(order: &mut Vec<u64>, open: &[u64]) {
 
 /// Two-letter mark and product name. MariaDB shares the MySQL engine, so only the server
 /// reply, once connected, tells it apart.
-fn engine_mark(engine: db::sql::Engine, product: &str) -> (&'static str, &'static str) {
+pub(super) fn engine_mark(engine: db::sql::Engine, product: &str) -> (&'static str, &'static str) {
     match (engine, product) {
         (db::sql::Engine::Mongo, _) => ("MO", "MongoDB"),
         (_, "MariaDB") => ("MA", "MariaDB"),
@@ -130,7 +130,7 @@ fn engine_mark(engine: db::sql::Engine, product: &str) -> (&'static str, &'stati
 }
 
 /// The colors of the connection form's engine cards, so an engine reads the same everywhere.
-fn mark_color(mark: &str) -> Color32 {
+pub(super) fn mark_color(mark: &str) -> Color32 {
     match mark {
         "MO" => C_STRING(),
         "MA" => C_KEYWORD(),

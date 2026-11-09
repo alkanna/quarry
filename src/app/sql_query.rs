@@ -410,7 +410,7 @@ impl App {
         let focused = ui.memory(|m| m.has_focus(id));
         let avail = ui.available_height();
         let Some((conn, db)) = self.tabs.get(self.cur).map(|t| (t.sel.conn, run_db(t))) else { return };
-        let scope = Self::sql_scope(&self.conns, &self.sql_schema, conn, &db, None);
+        let scope = Self::sql_scope(&self.conns, &self.sql_schema, &self.views, conn, &db, None);
         let none = Fields::new();
         let values = self.sql_values.get(&(conn, db.clone())).unwrap_or(&none);
         let Some(s) = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()) else { return };

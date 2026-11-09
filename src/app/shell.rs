@@ -18,6 +18,24 @@ pub(super) fn dangerous_words(code: &str, sql: bool) -> Vec<String> {
     ["drop", "remove", "replace", "update", "delete", "insert", "rename", "$out", "$merge"].iter().filter(|w| lower.contains(*w)).map(|w| w.to_string()).collect()
 }
 
+/// The words to confirm before a script runs. A script that reaches both engines is checked for both, since
+/// it cannot be told which handle a word belongs to.
+pub(super) fn shell_ops(code: &str, main_sql: bool, attached_sql: impl Iterator<Item = bool>) -> Vec<String> {
+    let (mut mongo, mut sql) = (!main_sql, main_sql);
+    for s in attached_sql {
+        (mongo, sql) = (mongo || !s, sql || s);
+    }
+    let mut out = if mongo { dangerous_words(code, false) } else { Vec::new() };
+    if sql {
+        for w in dangerous_words(code, true) {
+            if !out.contains(&w) {
+                out.push(w);
+            }
+        }
+    }
+    out
+}
+
 /// The original's "Open query in NodeShell" script (renderer line 96080), with its collection
 /// reference rule (getSnippetCollectionRef): names that are not plain words go through db.collection().
 pub(super) fn query_script(coll: &str, filter: &str) -> String {
@@ -65,6 +83,7 @@ pub(super) fn shell_help(ui: &mut egui::Ui, coll: &str, writable: bool, sql: boo
             for (n, what) in [
                 ("db", "the current database (Db): db.collection('name'), db.command({ ping: 1 }), db.listCollections()"),
                 ("<collection>", "every collection whose name is a plain word, e.g. orders.find()"),
+                ("<attached>", "each connection attached in Connections, by its name: travels.users.find() for MongoDB, shop`SELECT 1` or shop.orders.find() for SQL"),
                 ("ObjectId(\"…\")", "an ObjectId, with or without new"),
                 ("ISODate(\"…\")", "a Date from an ISO string"),
                 ("console.log / warn / error, log", "print to the log"),
@@ -154,26 +173,8 @@ const GUTTER_W: f32 = 52.0;
 /// Height of the Console and Queries panel under the result, tab row included.
 const SHELL_PANEL_H: f32 = 150.0;
 
-/// This tab's connection: the engine mark, its name and database, and a note in the primary color
-/// while writes are locked. Not clickable yet; attached connections will add more chips beside it.
-fn conn_chip(ui: &mut egui::Ui, engine: db::sql::Engine, name: &str, db: &str, locked: bool) {
-    let (mark, color) = if engine.is_sql() { ("MY", PRIMARY()) } else { ("MO", SUCCESS()) };
-    egui::Frame::new().fill(tint(PRIMARY(), 16)).stroke(Stroke::new(1.0, tint(PRIMARY(), 60))).corner_radius(CHIP_H / 2.0).inner_margin(egui::Margin::symmetric(6, 2)).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            let (r, _) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), Sense::hover());
-            ui.painter().circle_filled(r.center(), 9.0, tint(color, 55));
-            ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, mark, FontId::monospace(8.0), color);
-            ui.label(RichText::new(format!("{name}  ·  {db}")).color(BRIGHT()));
-            if locked {
-                ui.label(RichText::new("read-only").font(FontId::monospace(TXT_CAPTION)).color(PRIMARY()));
-            }
-        });
-    });
-}
-
 /// The panel under the result: the script's console output, or every query it ran.
-fn shell_panel(ui: &mut egui::Ui, sh: &mut ShellTab, conn: &str) {
+fn shell_panel(ui: &mut egui::Ui, sh: &mut ShellTab, conn: &str, kinds: &[(String, bool, Color32)]) {
     egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(egui::Margin { left: 12, right: 12, top: 0, bottom: 6 }).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.set_min_height(SHELL_PANEL_H - 12.0);
@@ -218,16 +219,17 @@ fn shell_panel(ui: &mut egui::Ui, sh: &mut ShellTab, conn: &str) {
                     None => rows.push((q, 1, q.ms)),
                 }
             }
-            for (q, n, ms) in rows {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 12.0;
-                    ui.label(mono(if q.conn.is_empty() { conn.into() } else { q.conn.clone() }, PRIMARY()));
+            // One grid, so the query text of every connection starts at the same x.
+            egui::Grid::new("shell-queries").num_columns(5).spacing([12.0, 3.0]).show(ui, |ui| {
+                for (q, n, ms) in rows {
+                    let name = if q.conn.is_empty() { conn.to_string() } else { q.conn.clone() };
+                    let (is_sql, color) = kinds.iter().find(|k| k.0 == name).map_or((false, PRIMARY()), |k| (k.1, k.2));
+                    ui.label(mono(name, color));
+                    ui.label(mono(if is_sql { "sql".into() } else { String::new() }, FAINT()));
                     let one_line: String = q.text.split_whitespace().collect::<Vec<_>>().join(" ");
                     let cut = if one_line.chars().count() > 70 { format!("{}…", one_line.chars().take(70).collect::<String>()) } else { one_line };
                     ui.label(mono(cut, TEXT())).on_hover_text(&q.text);
-                    if !q.params.is_empty() {
-                        ui.label(mono(q.params.clone(), FAINT()));
-                    }
+                    ui.label(mono(q.params.clone(), FAINT()));
                     let (text, c) = match (&q.error, q.rows, q.affected) {
                         (Some(e), ..) => (e.clone(), ALERT()),
                         _ if n > 1 => (format!("×{n}   {ms} ms"), MUTED()),
@@ -236,8 +238,9 @@ fn shell_panel(ui: &mut egui::Ui, sh: &mut ShellTab, conn: &str) {
                         _ => (format!("{ms} ms"), MUTED()),
                     };
                     ui.label(mono(text, c));
-                });
-            }
+                    ui.end_row();
+                }
+            });
         });
     });
 }
@@ -262,6 +265,7 @@ fn sql_help(ui: &mut egui::Ui, table: &str, writable: bool) -> Option<String> {
                 ("sql.unsafe(text, params)", "the same with text you built yourself and ? placeholders"),
                 ("<table>", "every table of the database whose name is a plain word, e.g. orders.find()"),
                 ("table('name')", "any table by its name, also names that are not plain words"),
+                ("<attached>", "each connection attached in Connections, by its name: travels.users.find() for MongoDB, shop`SELECT 1` or shop.orders.find() for SQL"),
                 ("console.log / warn / error, log", "print to the Console"),
                 ("_ , dayjs, packages", "lodash and dayjs, and every package added in Packages by name"),
             ] {
@@ -304,10 +308,9 @@ impl App {
     pub(super) fn run_shell_script(&mut self) {
         let Some(t) = self.t() else { return };
         let code = t.shell.code.clone();
-        let sql = t.sql.is_some();
-        let ops = dangerous_words(&code, sql);
+        let ops = shell_ops(&code, t.sql.is_some(), t.shell.attached.iter().filter_map(|a| self.conn(a.conn)).map(|c| c.meta.engine.is_sql()));
         // Same check as the original; on a read-only connection the runner refuses writes anyway.
-        if !ops.is_empty() && self.sel_writable() {
+        if !ops.is_empty() && self.shell_writable() {
             self.modal = Some(Modal::ShellWrite(ops));
         } else {
             self.start_shell();
@@ -322,24 +325,31 @@ impl App {
             return self.err("Bun was not found. Install it from bun.sh, or set its path in Settings.");
         };
         let Some(t) = self.t() else { return };
-        let sel = t.sel.clone();
-        let code = t.shell.code.clone();
+        let (sel, code, main_sql) = (t.sel.clone(), t.shell.code.clone(), t.sql.is_some());
         let collections: Vec<String> = self.conn(sel.conn).and_then(|c| c.dbs.iter().find(|d| d.0 == sel.db)).and_then(|d| d.1.clone()).unwrap_or_default();
         let packages: Vec<String> = self.prefs.shell_packages.iter().map(|p| db::package_spec(p).0).collect();
         let read_only = !self.sel_writable();
-        // The tab's own connection is the only entry for now. A SQL script gets no address and no password: its queries come back to this app.
+        let (mut mongo, mut sql_entries, mut sql) = match self.shell_attachments() {
+            Ok(v) => v,
+            Err(e) => {
+                self.tabs[self.cur].shell.error = Some(e);
+                return;
+            }
+        };
+        // The tab's own connection is the main entry. A SQL script gets no address and no password: its queries come back to this app.
         let name = self.conn(sel.conn).map(|c| c.meta.name.clone()).unwrap_or_default();
-        let (entries, sql) = if t.sql.is_some() {
+        if main_sql {
             let Some(db) = self.conn(sel.conn).and_then(|c| c.sql.clone()) else { return self.err("Connect first.") };
-            (serde_json::json!({ "mongo": [], "sql": [{ "name": name, "db": sel.db, "tables": collections }] }), vec![(name.clone(), db::SqlRelay { db, schema: sel.db.clone(), read_only, conn_id: Default::default() })])
+            sql_entries.insert(0, serde_json::json!({ "name": name, "db": sel.db, "tables": collections }));
+            sql.insert(0, (name.clone(), db::SqlRelay { db, schema: sel.db.clone(), read_only, conn_id: Default::default() }));
         } else {
             let uri = match stored_uri(sel.conn) {
                 Ok(u) => u,
                 Err(e) => return self.err(uri_err(e)),
             };
-            (serde_json::json!({ "mongo": [{ "name": name, "uri": uri, "db": sel.db, "proxy": self.shell_proxy(sel.conn), "collections": collections, "readOnly": read_only }], "sql": [] }), Vec::new())
-        };
-        let mut input = entries;
+            mongo.insert(0, serde_json::json!({ "name": name, "uri": uri, "db": sel.db, "proxy": self.shell_proxy(sel.conn), "collections": collections, "readOnly": read_only }));
+        }
+        let mut input = serde_json::json!({ "mongo": mongo, "sql": sql_entries });
         input["code"] = code.clone().into();
         input["packages"] = packages.into();
         input["timeoutMs"] = self.prefs.timeout_ms.into();
@@ -357,14 +367,20 @@ impl App {
         }
         self.save_prefs();
         // A table added since the editor types were built shows up in the next ones.
-        if !sql.is_empty() {
+        if main_sql {
             self.sql_columns_ask(true);
+        }
+        for a in self.tabs[self.cur].shell.attached.clone() {
+            if let Some(db) = self.conn(a.conn).and_then(|c| c.sql.clone()) {
+                self.sql_schema_asked.insert((a.conn, a.db.clone()));
+                self.worker.sql_schema(a.conn, db, a.db);
+            }
         }
         self.req += 1;
         let req = self.req;
         let (tx, rx) = tokio::sync::oneshot::channel();
         let sh = &mut self.tabs[self.cur].shell;
-        *sh = ShellTab { code: std::mem::take(&mut sh.code), req, cancel: Some(tx), started: Some(std::time::Instant::now()), queries_tab: sh.queries_tab, ..Default::default() };
+        *sh = ShellTab { code: std::mem::take(&mut sh.code), attached: std::mem::take(&mut sh.attached), req, cancel: Some(tx), started: Some(std::time::Instant::now()), queries_tab: sh.queries_tab, ..Default::default() };
         let packages = self.prefs.shell_packages.clone();
         self.worker.shell(req, db::ShellJob { runtime, dir: config_dir().join("shell"), input, packages, sql }, rx);
     }
@@ -386,7 +402,11 @@ impl App {
         let writable = self.sel_writable();
         let sql = self.t().is_some_and(|t| t.sql.is_some());
         let coll = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
-        let (engine, conn_name, db_name) = self.t().and_then(|t| self.conn(t.sel.conn).map(|c| (c.meta.engine, c.meta.name.clone(), t.sel.db.clone()))).unwrap_or_default();
+        let (conn_name, db_name) = self.t().and_then(|t| self.conn(t.sel.conn).map(|c| (c.meta.name.clone(), t.sel.db.clone()))).unwrap_or_default();
+        let own_pill = self.own_pill(&conn_name, &db_name, !writable);
+        let att_pills = self.attached_pills();
+        let kinds = self.shell_kinds();
+        let (mut detach, mut open_attach) = (None, false);
         if sql {
             self.sql_columns_ask(false);
         }
@@ -401,7 +421,7 @@ impl App {
         let known = if sql { Vec::new() } else { self.db_fields() };
         // What SQL templates in the script complete from: the tab's database and its looked up values.
         let sql_cx = sql.then(|| (self.tabs[self.cur].sel.conn, self.tabs[self.cur].sel.db.clone()));
-        let scope = sql_cx.as_ref().map(|(c, d)| Self::sql_scope(&self.conns, &self.sql_schema, *c, d, None));
+        let scope = sql_cx.as_ref().map(|(c, d)| Self::sql_scope(&self.conns, &self.sql_schema, &self.views, *c, d, None));
         let none = Fields::new();
         let values = sql_cx.as_ref().and_then(|k| self.sql_values.get(k)).unwrap_or(&none);
         let (t, ac) = (&mut self.tabs[self.cur], &mut self.ac);
@@ -425,7 +445,13 @@ impl App {
             let (r, _) = ui.allocate_exact_size(egui::vec2(1.0, 16.0), Sense::hover());
             ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0, LINE()));
             ui.label(RichText::new("Connections").color(MUTED()));
-            conn_chip(ui, engine, &conn_name, &db_name, !writable);
+            conn_pill(ui, ui.make_persistent_id("pill-own"), &own_pill, false);
+            for (i, p) in att_pills.iter().enumerate() {
+                if conn_pill(ui, ui.make_persistent_id(("pill", i)), p, true) {
+                    detach = Some(i);
+                }
+            }
+            open_attach = attach_button(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.selectable_label(t.shell.help, "Help").on_hover_text("What the shell can do, with examples").clicked() {
                     t.shell.help = !t.shell.help;
@@ -600,7 +626,12 @@ impl App {
                 };
                 ui.label(semibold(RichText::new(what).font(FontId::monospace(TXT_SMALL)).color(BRIGHT())));
                 if !t.shell.queries.is_empty() {
-                    ui.label(RichText::new(format!("{} queries", t.shell.queries.len())).font(FontId::monospace(TXT_SMALL)).color(SUCCESS()));
+                    let mut conns: Vec<&str> = t.shell.queries.iter().map(|q| q.conn.as_str()).collect();
+                    conns.sort_unstable();
+                    conns.dedup();
+                    let n = t.shell.queries.len();
+                    let text = if conns.len() > 1 { format!("{n} queries on {} connections", conns.len()) } else { format!("{n} {}", if n == 1 { "query" } else { "queries" }) };
+                    ui.label(RichText::new(text).font(FontId::monospace(TXT_SMALL)).color(SUCCESS()));
                 }
                 if let Some(ms) = t.shell.ms {
                     ui.label(RichText::new(format!("{ms} ms")).font(FontId::monospace(TXT_SMALL)).color(if sql { MUTED() } else { SUCCESS() }));
@@ -686,7 +717,7 @@ impl App {
             ui.allocate_ui(egui::vec2(ui.available_width(), h), |ui| self.results(ui, true));
         }
         ui.add_space(8.0);
-        shell_panel(ui, &mut self.tabs[self.cur].shell, &conn_name);
+        shell_panel(ui, &mut self.tabs[self.cur].shell, &conn_name, &kinds);
         if let Some(code) = use_example {
             self.tabs[self.cur].shell.code = code;
         }
@@ -709,6 +740,12 @@ impl App {
             if let Some(c) = self.tabs[self.cur].shell.cancel.take() {
                 let _ = c.send(());
             }
+        }
+        if let Some(i) = detach {
+            self.tabs[self.cur].shell.attached.remove(i);
+        }
+        if open_attach {
+            self.open_attach();
         }
         if run {
             self.run_shell_script();
@@ -736,6 +773,9 @@ impl App {
             t.shell.queries.push(q);
         }
         t.shell.queries_tab = true;
+        if matches!(std::env::var("QUARRY_TEST_SQL").as_deref(), Ok("shellattach" | "attach")) {
+            self.attach_demo();
+        }
     }
 
     /// Saves the whole Shell result: JSON for anything, CSV or TSV for document lists.
@@ -777,5 +817,9 @@ mod tests {
         assert_eq!(dangerous_words("await orders.delete({ id: 1 }); sql`TRUNCATE t`", true), ["delete", "truncate"]);
         assert_eq!(dangerous_words("sql`CALL p(); LOCK TABLES t READ; KILL 5; LOAD DATA INFILE 'x' INTO TABLE t`", true), ["call", "load", "lock", "kill"]);
         assert!(dangerous_words("sql`SELECT created_at, updated_at FROM orders`", true).is_empty());
+        // A script with both engines is checked for both, each word once.
+        assert_eq!(shell_ops("x.deleteMany({}); sql`DELETE FROM t`", false, [true].into_iter()), ["delete"]);
+        assert_eq!(shell_ops("db.x.aggregate([{ $out: 'y' }]); sql`TRUNCATE t`", true, [false].into_iter()), ["$out", "truncate"]);
+        assert!(shell_ops("sql`SELECT 1`", true, std::iter::empty()).is_empty());
     }
 }
