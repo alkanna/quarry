@@ -641,8 +641,10 @@ pub(super) enum Danger {
     Validator(Document),
     /// Rows of the open SQL table, by key.
     DeleteRows(Vec<Document>),
-    /// The staged ALTER TABLE of the open SQL table, confirmed because it drops a column.
+    /// The staged ALTER TABLE of the open SQL table, confirmed because it drops a column or cannot be undone.
     ApplyAlter,
+    /// The structure undo recorded at this time, confirmed because it drops a column or converts a type back.
+    UndoAlter(std::time::Instant),
 }
 
 /// What to run once writes are allowed.

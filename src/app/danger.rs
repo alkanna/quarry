@@ -30,6 +30,13 @@ impl App {
         if let Danger::ApplyAlter = action {
             return self.run_alter();
         }
+        if let Danger::UndoAlter(at) = action {
+            // Found by time, since the list may have moved while the dialog was open.
+            return match self.undo.iter().position(|a| a.at == at) {
+                Some(i) => self.apply_undo_as(i, true),
+                None => self.err("That change is no longer in Recent changes."),
+            };
+        }
         let conn_specific = match &action {
             Danger::DropDatabase { conn, .. } | Danger::DropCollAt { conn, .. } | Danger::DropUser { conn, .. } | Danger::Sync { conn } | Danger::Restore { conn, .. } => Some(*conn),
             _ => None,
@@ -90,7 +97,7 @@ impl App {
                     self.worker.import(conn, target, docs, Some(key));
                 }
             }
-            Danger::DeleteRows(_) | Danger::ApplyAlter | Danger::RemoveConnection(_) | Danger::DropDatabase { .. } | Danger::DropCollAt { .. } | Danger::DropUser { .. } | Danger::Sync { .. } | Danger::Restore { .. } => unreachable!(),
+            Danger::DeleteRows(_) | Danger::ApplyAlter | Danger::UndoAlter(_) | Danger::RemoveConnection(_) | Danger::DropDatabase { .. } | Danger::DropCollAt { .. } | Danger::DropUser { .. } | Danger::Sync { .. } | Danger::Restore { .. } => unreachable!(),
         }
     }
 }

@@ -1,6 +1,6 @@
 //! The structure of one SQL table for the Structure, Relations, Triggers and Info views: columns,
 //! indexes, foreign keys in both directions, triggers, the table status and the CREATE statement.
-//! Everything is read-only.
+//! Everything is read-only here; `ddl` builds the ALTERs from it.
 
 use super::worker::{raw, text};
 use super::{Db, Dialect, Pool};
@@ -23,6 +23,10 @@ pub struct Column {
     pub extra: String,
     pub collation: Option<String>,
     pub comment: String,
+    /// MySQL's SRID attribute of a spatial column.
+    pub srid: Option<u32>,
+    /// MariaDB's CHECK written on the column itself, which MODIFY would drop. MySQL keeps every CHECK on the table.
+    pub check: Option<String>,
 }
 
 impl Column {
@@ -47,6 +51,8 @@ pub struct IndexCol {
     pub desc: bool,
     /// How many leading characters or bytes are indexed.
     pub prefix: Option<u64>,
+    /// The expression of a functional key part, which has no column name.
+    pub expr: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -57,6 +63,8 @@ pub struct Index {
     pub kind: String,
     pub cardinality: Option<u64>,
     pub comment: String,
+    /// INVISIBLE on MySQL, IGNORED on MariaDB: kept up to date but not used by the optimizer.
+    pub invisible: bool,
 }
 
 /// One foreign key constraint, its columns in order. In `Structure::foreign_keys` the key belongs
@@ -198,7 +206,7 @@ fn columns(d: Dialect, rows: &[MySqlRow]) -> Vec<Column> {
             let nullable = r.try_get::<i64, _>("nullable").map(|n| n != 0).unwrap_or(true);
             let extra = s(r, "extra");
             let (default, default_expr) = normalize_default(d, text(r, "col_default"), nullable, &extra);
-            Column { name: s(r, "name"), full_type: s(r, "full_type"), nullable, key: s(r, "col_key"), default, default_expr, extra, collation: text(r, "collation"), comment: s(r, "comment") }
+            Column { name: s(r, "name"), full_type: s(r, "full_type"), nullable, key: s(r, "col_key"), default, default_expr, extra, collation: text(r, "collation"), comment: s(r, "comment"), srid: None, check: None }
         })
         .collect()
 }
@@ -208,12 +216,12 @@ fn indexes(rows: &[MySqlRow]) -> Vec<Index> {
     let mut out: Vec<Index> = Vec::new();
     for r in rows {
         let name = s(r, "name");
-        let col = IndexCol { name: s(r, "col"), desc: text(r, "direction").as_deref() == Some("D"), prefix: num(r, "sub_part") };
+        let col = IndexCol { name: s(r, "col"), desc: text(r, "direction").as_deref() == Some("D"), prefix: num(r, "sub_part"), expr: None };
         if out.last().is_some_and(|i| i.name == name) {
             out.last_mut().unwrap().cols.push(col);
         } else {
             let unique = r.try_get::<i64, _>("non_unique").map(|n| n == 0).unwrap_or(false);
-            out.push(Index { name, unique, cols: vec![col], kind: s(r, "index_type"), cardinality: num(r, "cardinality"), comment: s(r, "comment") });
+            out.push(Index { name, unique, cols: vec![col], kind: s(r, "index_type"), cardinality: num(r, "cardinality"), comment: s(r, "comment"), invisible: false });
         }
     }
     out
@@ -260,7 +268,38 @@ async fn query(pool: &sqlx::MySqlPool, sql: &str, schema: &str, table: &str) -> 
     sqlx::query(sql).bind(schema).bind(table).fetch_all(pool).await.map_err(e)
 }
 
-async fn load(db: &Db, schema: &str, table: &str) -> Res<Structure> {
+/// What the main queries cannot ask every server version for: SRIDs, invisible indexes and functional key parts on
+/// MySQL 8, ignored indexes and column CHECKs on MariaDB. An older server fails these queries, and has none of it.
+async fn extras(pool: &sqlx::MySqlPool, d: Dialect, schema: &str, table: &str, st: &mut Structure) {
+    let (idx, cols) = match d {
+        Dialect::MySql => (
+            "SELECT INDEX_NAME AS name, SEQ_IN_INDEX AS seq, IS_VISIBLE = 'NO' AS hidden, EXPRESSION AS expr FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+            "SELECT COLUMN_NAME AS name, SRS_ID AS srid, NULL AS clause FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND SRS_ID IS NOT NULL",
+        ),
+        Dialect::MariaDb => (
+            "SELECT INDEX_NAME AS name, SEQ_IN_INDEX AS seq, IGNORED = 'YES' AS hidden, NULL AS expr FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+            // A column CHECK is named after its column.
+            "SELECT CONSTRAINT_NAME AS name, NULL AS srid, CHECK_CLAUSE AS clause FROM information_schema.CHECK_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = ? AND TABLE_NAME = ? AND LEVEL = 'Column'",
+        ),
+    };
+    let (idx, cols) = tokio::join!(query(pool, idx, schema, table), query(pool, cols, schema, table));
+    for r in idx.unwrap_or_default() {
+        let (name, seq) = (s(&r, "name"), num(&r, "seq").unwrap_or(0) as usize);
+        let Some(ix) = st.indexes.iter_mut().find(|i| i.name == name) else { continue };
+        ix.invisible |= r.try_get::<i64, _>("hidden").is_ok_and(|n| n != 0);
+        if let (Some(e), Some(c)) = (text(&r, "expr"), seq.checked_sub(1).and_then(|k| ix.cols.get_mut(k))) {
+            c.expr = Some(e);
+        }
+    }
+    for r in cols.unwrap_or_default() {
+        let name = s(&r, "name");
+        let Some(c) = st.columns.iter_mut().find(|c| c.name == name) else { continue };
+        c.srid = num(&r, "srid").and_then(|n| u32::try_from(n).ok());
+        c.check = text(&r, "clause");
+    }
+}
+
+pub(super) async fn load(db: &Db, schema: &str, table: &str) -> Res<Structure> {
     let Pool::My(pool) = &db.pool;
     let d = db.dialect;
     // SHOW CREATE TABLE also answers for a view.
@@ -274,7 +313,7 @@ async fn load(db: &Db, schema: &str, table: &str) -> Res<Structure> {
         query(pool, d.table_status(), schema, table),
         create,
     )?;
-    Ok(Structure {
+    let mut st = Structure {
         columns: columns(d, &cols),
         indexes: indexes(&idx),
         foreign_keys: foreign_keys(&fks),
@@ -282,7 +321,9 @@ async fn load(db: &Db, schema: &str, table: &str) -> Res<Structure> {
         triggers: triggers(&trig),
         status: status(&stat),
         create: raw(&create, 1).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default(),
-    })
+    };
+    extras(pool, d, schema, table, &mut st).await;
+    Ok(st)
 }
 
 impl Worker {

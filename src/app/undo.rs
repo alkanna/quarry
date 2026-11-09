@@ -9,6 +9,11 @@ impl App {
     }
 
     pub(super) fn apply_undo(&mut self, i: usize) {
+        self.apply_undo_as(i, false);
+    }
+
+    /// `confirmed` once a structure undo that loses data passed its typed confirmation.
+    pub(super) fn apply_undo_as(&mut self, i: usize, confirmed: bool) {
         let a = &self.undo[i];
         let Some(c) = self.conn(a.conn) else { return };
         let writable = c.writable;
@@ -16,6 +21,11 @@ impl App {
             self.err("Undo is a write: unlock writes on that connection first.");
             return;
         }
+        if !confirmed && self.alter_undo_gate(i) {
+            return;
+        }
+        let Some(c) = self.conn(self.undo[i].conn) else { return };
+        let a = &self.undo[i];
         // SQL actions carry their own columns; the pool is read-only, so the worker switches a connection of its own.
         if let (Some(sql), UndoKind::Sql { .. }) = (c.sql.clone(), &a.kind) {
             let a = self.undo.remove(i);

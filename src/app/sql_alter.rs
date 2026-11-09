@@ -4,7 +4,7 @@
 
 use super::sql_structure::{size, Load};
 use super::*;
-use db::sql::ddl::{self, Change, ColDef, Dv, IdxCol, IndexDef, IndexKind, Pos};
+use db::sql::ddl::{self, Change, ColDef, Dv, IdxCol, IndexDef, IndexKind, Mode, Plan, Pos};
 use db::sql::structure::Structure;
 use db::sql::Dialect;
 
@@ -119,13 +119,25 @@ impl App {
         }
     }
 
-    /// The engine, its version and whether strings read backslashes, as the statements need them. The offline
-    /// demo has no server and uses MySQL 8.4.
-    fn alter_env(&self) -> (Dialect, String, bool) {
+    /// The engine, its version and how its sessions read quotes and backslashes, as the statements need them.
+    /// The mode is the last one the server reported; the worker checks it again on the connection that runs the
+    /// statement. The offline demo has no server and uses MySQL 8.4.
+    fn alter_env(&self) -> (Dialect, String, Mode) {
         match self.t().and_then(|t| self.conn(t.sel.conn)).and_then(|c| c.sql.as_ref()) {
-            Some(d) => (d.dialect, d.version.clone(), d.backslash_escapes()),
-            None => (Dialect::MySql, "8.4.0".into(), true),
+            Some(d) => (d.dialect, d.version.clone(), Mode::of(&d.sql_mode)),
+            None => (Dialect::MySql, "8.4.0".into(), Mode::DEFAULT),
         }
+    }
+
+    fn applying(&self) -> bool {
+        self.t().and_then(|t| t.sql.as_ref()).is_some_and(|s| s.st.applying)
+    }
+
+    /// The statement and its undo for these changes, as they will run. `st` is passed in because the Structure
+    /// view takes the tab's structure out while it draws.
+    fn plan_of(&self, st: &Structure, changes: &[Change]) -> Result<Plan, String> {
+        let (d, v, m) = self.alter_env();
+        ddl::plan(d, &v, m, &self.t().map(|t| t.sel.coll.clone()).unwrap_or_default(), st, changes)
     }
 
     fn engine_label(&self) -> String {
@@ -133,10 +145,8 @@ impl App {
     }
 
     /// The ALTER for these changes, as it will run.
-    fn alter_text(&self, changes: &[Change]) -> Result<String, String> {
-        let (d, v, bs) = self.alter_env();
-        let changes = self.structure().map_or_else(|| changes.to_vec(), |st| ddl::expand(d, st, changes));
-        ddl::alter(d, &v, bs, &self.t().map(|t| t.sel.coll.clone()).unwrap_or_default(), &changes)
+    fn alter_text(&self, st: &Structure, changes: &[Change]) -> Result<String, String> {
+        self.plan_of(st, changes).map(|p| p.sql)
     }
 
     /// The name a column has once the staged changes ran.
@@ -163,7 +173,7 @@ impl App {
         let (mine, rest): (Vec<Change>, Vec<Change>) = staged.into_iter().partition(|ch| matches!(ch, Change::Modify { from, .. } if *from == c.name));
         let (def, pos) = match mine.into_iter().next() {
             Some(Change::Modify { def, pos, .. }) => (def, pos),
-            _ => match ColDef::from_column(c) {
+            _ => match ColDef::in_table(&st, c) {
                 Ok(d) => (d, Pos::Keep),
                 Err(why) => return self.err(why),
             },
@@ -182,7 +192,7 @@ impl App {
     pub(super) fn duplicate_column(&mut self, i: usize) {
         let Some(st) = self.structure().cloned() else { return };
         let c = &st.columns[i];
-        let mut def = match ColDef::from_column(c) {
+        let mut def = match ColDef::in_table(&st, c) {
             Ok(d) => d,
             Err(why) => return self.err(why),
         };
@@ -225,7 +235,7 @@ impl App {
         let existing = staged.iter().position(|ch| matches!(ch, Change::Modify { from, .. } if *from == col.name));
         let def = match existing.map(|k| staged.remove(k)) {
             Some(Change::Modify { def, .. }) => def,
-            _ => match ColDef::from_column(col) {
+            _ => match ColDef::in_table(&st, col) {
                 Ok(d) => d,
                 Err(why) => return self.err(why),
             },
@@ -238,6 +248,9 @@ impl App {
         let Some(st) = self.structure().cloned() else { return };
         let staged = self.staged().to_vec();
         let from = i.and_then(|i| st.indexes.get(i)).map(IndexDef::from_index);
+        if let Some(f) = from.as_ref().filter(|f| f.functional) {
+            return self.err(format!("{} has an expression part, which this editor cannot write back. Change it with a query.", f.name));
+        }
         if let Some(f) = &from {
             if staged.iter().any(|c| matches!(c, Change::DropIndex(n) if *n == f.name) || matches!(c, Change::RenameIndex { from, .. } if *from == f.name)) {
                 return self.err(format!("{} already has a staged change. Remove it first.", f.name));
@@ -249,12 +262,17 @@ impl App {
             _ => None,
         })).unwrap_or_default();
         let avail = after.iter().map(|n| (n.clone(), ty(n))).collect();
-        let def = from.clone().unwrap_or(IndexDef { name: String::new(), kind: IndexKind::Index, cols: Vec::new(), comment: String::new() });
+        let def = from.clone().unwrap_or_default();
         self.modal = Some(Modal::IdxEdit(Box::new(IdxForm { from, def, avail, rest: staged })));
     }
 
     pub(super) fn stage_drop_index(&mut self, i: usize) {
-        let Some(name) = self.structure().and_then(|s| s.indexes.get(i)).map(|x| x.name.clone()) else { return };
+        let Some(ix) = self.structure().and_then(|s| s.indexes.get(i)) else { return };
+        // The server reports the expression in a form undo could not add back.
+        if ix.cols.iter().any(|c| c.expr.is_some()) {
+            return self.err(format!("{} has an expression part, so dropping it here could not be undone. Drop it with a query.", ix.name));
+        }
+        let name = ix.name.clone();
         let mut staged = self.staged().to_vec();
         if staged.iter().any(|c| matches!(c, Change::DropIndex(n) if *n == name)) {
             return;
@@ -276,7 +294,7 @@ impl App {
         self.set_staged(Vec::new());
     }
 
-    /// Asks for confirmation when the changes lose data, then runs them.
+    /// Asks for confirmation when the changes lose data or cannot be undone, then runs them.
     pub(super) fn request_alter_apply(&mut self) {
         if self.demo {
             return self.ok("Offline demo: no database is connected.");
@@ -284,55 +302,89 @@ impl App {
         if !self.sel_writable() {
             return self.err("This connection is read-only. Unlock writes in the top bar first.");
         }
+        if self.applying() {
+            return self.err(BUSY_NOTE);
+        }
         let staged = self.staged().to_vec();
+        let Some(st) = self.structure().cloned() else { return };
         if staged.is_empty() {
             return;
         }
-        if ddl::drops_data(&staged) {
+        let plan = match self.plan_of(&st, &staged) {
+            Ok(p) => p,
+            Err(e) => return self.err(e),
+        };
+        let n = staged.iter().filter(|c| matches!(c, Change::Drop(_))).count();
+        if n > 0 || plan.undo.is_err() {
             let table = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
-            let n = staged.iter().filter(|c| matches!(c, Change::Drop(_))).count();
-            let title = format!("Apply {} to {table}? Dropping {} deletes {} values for good. Undo can bring back the {}, not what it held.", plural_changes(staged.len()), if n == 1 { "a column" } else { "columns" }, if n == 1 { "its" } else { "their" }, if n == 1 { "column" } else { "columns" });
+            let mut title = format!("Apply {} to {table}?", plural_changes(staged.len()));
+            if n > 0 {
+                title.push_str(&format!(" Dropping {} deletes {} values for good.", if n == 1 { "a column" } else { "columns" }, if n == 1 { "its" } else { "their" }));
+            }
+            match &plan.undo {
+                Ok(_) if n > 0 => title.push_str(&format!(" Undo can bring back the {}, not what it held.", if n == 1 { "column" } else { "columns" })),
+                Ok(_) => {}
+                Err(why) => title.push_str(&format!(" This change cannot be undone: {why}")),
+            }
             self.modal = Some(Modal::Typed { title, expect: table, typed: String::new(), action: Danger::ApplyAlter });
             return;
         }
         self.run_alter();
     }
 
-    /// Sends the staged statement. The inverse comes from the structure read before it runs.
+    /// Sends the staged statement. The undo comes from the structure read before it runs.
     pub(super) fn run_alter(&mut self) {
         let Some((conn, schema, table)) = self.t().map(|t| (t.sel.conn, t.sel.db.clone(), t.sel.coll.clone())) else { return };
         let Some(db) = self.conn(conn).and_then(|c| c.sql.clone()) else { return self.err("Not connected.") };
-        if !self.sel_writable() {
+        let writable = self.sel_writable();
+        if !writable {
             return self.err("This connection is read-only. Unlock writes in the top bar first.");
         }
+        if self.applying() {
+            return self.err(BUSY_NOTE);
+        }
         let (Some(st), staged) = (self.structure().cloned(), self.staged().to_vec()) else { return };
-        let (d, v, bs) = self.alter_env();
-        let staged = ddl::expand(d, &st, &staged);
-        let sql = match ddl::alter(d, &v, bs, &table, &staged) {
-            Ok(s) => s,
+        let (.., m) = self.alter_env();
+        let Plan { sql, undo } = match self.plan_of(&st, &staged) {
+            Ok(p) => p,
             Err(e) => return self.err(e),
         };
-        let lossy = ddl::drops_data(&staged);
-        let (undo, done) = match ddl::inverse(d, &v, bs, &table, &st, &staged) {
-            Ok(back) => {
-                let mut label = if staged.len() == 1 { staged[0].describe().to_lowercase() } else { plural_changes(staged.len()) };
-                label = format!("changed the structure: {label}");
-                if lossy {
-                    label.push_str(" (dropped data is not restored)");
-                }
-                (Some((back, label)), "Changed the structure".to_string())
+        let (undo, done) = match undo {
+            Ok(mut u) => {
+                let what = if staged.len() == 1 { staged[0].describe().to_lowercase() } else { plural_changes(staged.len()) };
+                u.label = format!("changed the structure: {what}{}", if ddl::drops_data(&staged) { " (dropped data is not restored)" } else { "" });
+                (Some(u), "Changed the structure".to_string())
             }
             Err(why) => (None, format!("Changed the structure. It cannot be undone: {why}")),
         };
         if let Some(s) = self.tabs[self.cur].sql.as_mut() {
             s.st.applying = true;
         }
-        self.worker.sql_alter(conn, db, schema, table, sql, undo, false, done);
+        self.worker.sql_alter(conn, db, schema, table, sql, m, undo, !writable, done);
+    }
+
+    /// Before a structure undo runs: one that drops a column or converts a type back loses what was written since,
+    /// so it asks for the table name like a drop does. True when it asked, and the undo waits for the answer.
+    pub(super) fn alter_undo_gate(&mut self, i: usize) -> bool {
+        let Some(a) = self.undo.get(i) else { return false };
+        let UndoKind::Sql { undo: db::sql::write::SqlUndo::Alter(u), .. } = &a.kind else { return false };
+        if u.loss.is_empty() {
+            return false;
+        }
+        let title = format!("Undo \"{}\" on {}? {} This cannot be undone.", u.label, a.coll, u.loss.join(" "));
+        self.modal = Some(Modal::Typed { title, expect: a.coll.clone(), typed: String::new(), action: Danger::UndoAlter(a.at) });
+        true
     }
 
     /// The answer to an ALTER or to its undo.
-    pub(super) fn sql_altered(&mut self, conn: u64, schema: String, table: String, res: db::Res<String>, undo: Option<UndoAction>) {
+    pub(super) fn sql_altered(&mut self, conn: u64, schema: String, table: String, res: db::Res<String>, undo: Option<UndoAction>, sql_mode: Option<String>) {
         let ok = res.is_ok();
+        // The statement was refused for a stale mode; the previews follow the new one from now on.
+        if let Some(m) = sql_mode {
+            if let Some(d) = self.conns.iter_mut().find(|c| c.meta.id == conn).and_then(|c| c.sql.as_mut()) {
+                d.sql_mode = m;
+            }
+        }
         match res {
             Ok(s) => {
                 self.toast = Some((s.clone(), std::time::Instant::now(), undo.as_ref().map(|u| u.at)));
@@ -399,8 +451,14 @@ impl App {
                 ui.label(RichText::new(w).size(TXT_SMALL).color(WARNING()));
             }
             ui.add_space(6.0);
-            match self.alter_text(staged) {
-                Ok(t) => sql_block(ui, "staged-sql", &t, 140.0),
+            match self.plan_of(st, staged) {
+                Ok(p) => {
+                    if let Err(why) = &p.undo {
+                        ui.label(RichText::new(format!("This change cannot be undone: {why}")).size(TXT_SMALL).color(ALERT()));
+                        ui.add_space(4.0);
+                    }
+                    sql_block(ui, "staged-sql", &p.sql, 140.0);
+                }
                 Err(e) => {
                     ui.label(RichText::new(e).size(TXT_SMALL).color(ALERT()));
                 }
@@ -536,14 +594,16 @@ impl App {
         let mut all = f.rest.clone();
         all.push(change);
         let unchanged = f.orig.as_ref().is_some_and(|(d, p)| *d == f.def && *p == f.pos);
-        let dup = f.order.contains(&f.def.name);
-        let text = if dup {
+        let dup = f.order.iter().any(|n| ddl::same_name(n, &f.def.name));
+        let st = self.structure().cloned();
+        let plan = if dup {
             Err(format!("The table already has a column called {}.", f.def.name))
         } else if unchanged {
             Err("Nothing is changed yet.".into())
         } else {
-            self.alter_text(&all)
+            st.as_ref().map_or_else(|| Err("The structure is not loaded.".into()), |st| self.plan_of(st, &all))
         };
+        let text = plan.as_ref().map(|p| p.sql.clone()).map_err(Clone::clone);
         ui.add_space(6.0);
         caption(ui, "SQL TO RUN");
         ui.add_space(4.0);
@@ -553,7 +613,10 @@ impl App {
                 ui.label(RichText::new(e.as_str()).size(TXT_SMALL).color(if unchanged { FAINT() } else { ALERT() }));
             }
         }
-        if let Some(st) = self.structure() {
+        if let Ok(Plan { undo: Err(why), .. }) = &plan {
+            ui.label(RichText::new(format!("This change cannot be undone: {why}")).size(TXT_SMALL).color(ALERT()));
+        }
+        if let Some(st) = &st {
             for w in ddl::warnings(st, &all) {
                 ui.label(RichText::new(w).size(TXT_SMALL).color(WARNING()));
             }
@@ -565,7 +628,8 @@ impl App {
         let (mut stage, mut now) = (false, false);
         dialog_actions(ui, |ui| {
             stage = ui.add_enabled(text.is_ok(), primary_button(ui, "Stage change", PRIMARY())).clicked();
-            now = ui.add_enabled(text.is_ok() && self.sel_writable(), egui::Button::new("Apply now")).on_hover_text("Stage this change and run everything staged").on_disabled_hover_text(READ_ONLY_NOTE).clicked();
+            let busy = self.applying();
+            now = ui.add_enabled(text.is_ok() && self.sel_writable() && !busy, egui::Button::new("Apply now")).on_hover_text("Stage this change and run everything staged").on_disabled_hover_text(if busy { BUSY_NOTE } else { READ_ONLY_NOTE }).clicked();
             if ui.button("Cancel").clicked() {
                 *keep = false;
             }
@@ -664,7 +728,9 @@ impl App {
         let kinds: Vec<(String, String)> = f.def.cols.iter().map(|c| (c.name.clone(), f.avail.iter().find(|a| a.0 == c.name).map(|a| a.1.clone()).unwrap_or_default())).collect();
         let mut all = f.rest.clone();
         all.extend(changes.clone());
-        let dup = f.from.as_ref().map(|o| o.name.as_str()) != Some(f.def.name.as_str()) && self.structure().is_some_and(|s| s.indexes.iter().any(|x| x.name == f.def.name)) && f.def.kind != IndexKind::Primary;
+        // Against the indexes the other staged changes leave, without case, as the server compares them.
+        let taken = self.structure().map(|s| ddl::indexes_after(s, &f.rest)).unwrap_or_default();
+        let dup = f.def.kind != IndexKind::Primary && taken.iter().any(|x| ddl::same_name(x, &f.def.name) && f.from.as_ref().is_none_or(|o| !ddl::same_name(&o.name, x)));
         let primary_taken = f.def.kind == IndexKind::Primary && f.from.as_ref().map(|o| o.kind) != Some(IndexKind::Primary) && self.structure().is_some_and(|s| s.indexes.iter().any(|x| x.name == "PRIMARY")) && !all.iter().any(|c| matches!(c, Change::DropIndex(n) if n == "PRIMARY"));
         let text = if changes.is_empty() {
             Err("Nothing is changed yet.".to_string())
@@ -675,7 +741,7 @@ impl App {
         } else if let Some(p) = ddl::index_problem(f.def.kind, &kinds) {
             Err(p)
         } else {
-            self.alter_text(&all)
+            self.structure().map_or_else(|| Err("The structure is not loaded.".into()), |st| self.alter_text(st, &all))
         };
         ui.add_space(6.0);
         caption(ui, "SQL TO RUN");
@@ -694,7 +760,8 @@ impl App {
         let (mut stage, mut now) = (false, false);
         dialog_actions(ui, |ui| {
             stage = ui.add_enabled(text.is_ok(), primary_button(ui, "Stage change", PRIMARY())).clicked();
-            now = ui.add_enabled(text.is_ok() && self.sel_writable(), egui::Button::new("Apply now")).on_hover_text("Stage this change and run everything staged").on_disabled_hover_text(READ_ONLY_NOTE).clicked();
+            let busy = self.applying();
+            now = ui.add_enabled(text.is_ok() && self.sel_writable() && !busy, egui::Button::new("Apply now")).on_hover_text("Stage this change and run everything staged").on_disabled_hover_text(if busy { BUSY_NOTE } else { READ_ONLY_NOTE }).clicked();
             if ui.button("Cancel").clicked() {
                 *keep = false;
             }
@@ -735,3 +802,4 @@ fn plural_changes(n: usize) -> String {
 
 /// Shown under a disabled Apply now button.
 const READ_ONLY_NOTE: &str = "Read-only: unlock writes to change the structure";
+const BUSY_NOTE: &str = "A structure change is still running.";

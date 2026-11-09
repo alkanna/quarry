@@ -727,14 +727,16 @@ impl App {
             extra: extra.into(),
             collation: coll.then(|| "utf8mb4_0900_ai_ci".to_string()),
             comment: comment.into(),
+            ..Default::default()
         };
         let ix = |name: &str, unique: bool, cols: &[(&str, bool)], card: u64, comment: &str| Index {
             name: name.into(),
             unique,
-            cols: cols.iter().map(|(n, d)| db::sql::structure::IndexCol { name: (*n).into(), desc: *d, prefix: None }).collect(),
+            cols: cols.iter().map(|(n, d)| db::sql::structure::IndexCol { name: (*n).into(), desc: *d, ..Default::default() }).collect(),
             kind: "BTREE".into(),
             cardinality: Some(card),
             comment: comment.into(),
+            ..Default::default()
         };
         let fk = |name: &str, table: &str, c: &str, rt: &str, rc: &str, upd: &str, del: &str| ForeignKey { name: name.into(), db: "shop".into(), table: table.into(), cols: vec![c.into()], ref_db: "shop".into(), ref_table: rt.into(), ref_cols: vec![rc.into()], on_update: upd.into(), on_delete: del.into() };
         let create = "CREATE TABLE `orders` (\n  `id` int unsigned NOT NULL AUTO_INCREMENT,\n  `customer_id` int unsigned NOT NULL,\n  `status` enum('pending','paid','shipped','refunded','cancelled')\n    NOT NULL DEFAULT 'pending',\n  `total` decimal(10,2) unsigned NOT NULL DEFAULT 0.00,\n  `currency` char(3) NOT NULL DEFAULT 'EUR',\n  `note` text,\n  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  `updated_at` datetime DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,\n  PRIMARY KEY (`id`),\n  KEY `idx_status` (`status`),\n  KEY `idx_customer_created` (`customer_id`,`created_at` DESC),\n  CONSTRAINT `fk_orders_customer` FOREIGN KEY (`customer_id`)\n    REFERENCES `customers` (`id`) ON UPDATE CASCADE\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;";

@@ -37,7 +37,7 @@ Update this list when a step lands. Each step is reviewed before it is ticked.
 
 **v2 progress** (branch, state):
 - [x] 1. Attached connections in the shell: runtime 371fb4d, review fixes d848044, UI 5e1fcbd. Opus review of the relay done (findings fixed, see "Review (c5761a5)").
-- [ ] 2. Structure editing: e993e30 on `structure-edit`, opus review found 14 issues, fix on `structure-fix` in progress.
+- [x] 2. Structure editing: built e993e30, opus review found 14 issues, all fixed in c8d5a09 (see "Review (e993e30)").
 - [ ] 3. Relations and 4. triggers: building on `relations-triggers` (from e993e30).
 - [ ] 5. Import and export: 16bb646 on `import-export`, opus review in progress.
 - [ ] 6. Create and drop database and table: not started.
@@ -50,6 +50,23 @@ Update this list when a step lands. Each step is reviewed before it is ticked.
 3. On the final head: `cargo check --all-targets` with no warnings; full `cargo test`; live tests against both mysql:8.4 and mariadb:11 (QUARRY_TEST_MYSQL, QUARRY_TEST_MARIADB), shell live tests with Bun included; release build; `python3 bench.py --quick` with no regression against the numbers recorded here; screenshots of every new view in both themes compared with the designs.
 4. One final whole-branch opus review of all v2 commits together, its findings fixed.
 5. No worktrees, agent branches or test containers left; this file has a short v2 summary and its known limits.
+
+**Review (e993e30)**, structure editing, fixed on branch `structure-fix` (each finding has its failing input as a test in `src/db/sql/ddl.rs`; live ones in `review_live`, on MySQL 8.4 and MariaDB 11.4):
+1. An undo that drops a column or converts a type back asks for the table name like a drop and names what it loses (`AlterUndo::loss`, `Danger::UndoAlter`); every structure undo first re-reads the table and refuses unless the columns and indexes it touches are as the change left them (`snapshot`).
+2. ENUM and SET values are read with MySQL's escapes in every sql_mode (the server writes COLUMN_TYPE that way) and written with the session's.
+3. Every ALTER and undo step runs as one prepared statement, so a second statement cannot ride along; `check_expr` reads `"` as an identifier under ANSI_QUOTES.
+4. MySQL's hex default of a binary column and the `b'..'` default of a BIT column are written back as those literals.
+5. MySQL SRID and invisible indexes, and MariaDB ignored indexes and JSON (LONGTEXT with its json_valid CHECK) are read and kept; other MariaDB column CHECKs and COMPRESSED columns are refused like generated ones.
+6. The inverse is one ALTER per inverse step, run in order, so each names columns as the steps before it left them.
+7. Dropping an index with an expression part is refused, since the expression cannot be added back.
+8. MariaDB's index added back without a dropped column uses the names the whole ALTER leaves.
+9. The staged bar's preview comes from the same `plan` as Apply, with MariaDB's index edits.
+10. Undo is worked out while previewing: "This change cannot be undone: why" shows in the staged bar, the column form and the typed confirmation, which only promises undo when there is one.
+11. Apply now and Apply are refused while an ALTER runs.
+12. Apply passes the connection's read-only state to the worker.
+13. Statements are written for the sql_mode the app last saw, and the worker reads `@@SESSION.sql_mode` on the connection that runs them: when it differs nothing runs, and the app takes the new mode so the preview follows it. Row edits in `write.rs` bind every value as a parameter, so they do not have this gap; only their preview text, the Content bar's filter literals and the shell relay use the mode read at connect.
+14. Duplicate column and index names compare without case, the index check against the indexes the staged changes leave; a collation that is only the table default is no longer pinned by edits or undo.
+Won't fix: MariaDB column CHECKs are read from `CHECK_CONSTRAINTS.LEVEL`, which servers before 10.5.10 lack; there they are not seen, and an edit could drop one.
 
 **v3**: users and privileges, process list, server variables, console log.
 
