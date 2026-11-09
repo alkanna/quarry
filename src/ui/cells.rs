@@ -197,6 +197,27 @@ pub(crate) fn cell_job(v: &Bson) -> LayoutJob {
     cell_job_of(Val::B(v))
 }
 
+/// A SQL table cell, colored by the column's type instead of the BSON type of the value: DECIMAL and
+/// DATETIME arrive as text but read as a number and a date, and NULL stays distinct from an empty string.
+pub(crate) fn sql_cell_job(v: Val, kind: db::sql::value::Kind) -> LayoutJob {
+    use db::sql::value::Kind::*;
+    let b = v.bson();
+    let (text, color) = match (&*b, kind) {
+        (Bson::Null, _) => ("NULL".to_string(), C_NULL()),
+        (Bson::Binary(bin), _) => (format!("<binary {} B>", bin.bytes.len()), FAINT()),
+        (Bson::String(s), Enum | Set) => (format!("'{}'", s.chars().take(120).collect::<String>()), C_STRING()),
+        (Bson::String(s), Text) => (format!("'{}'", s.chars().take(120).collect::<String>()), str_color(s)),
+        (Bson::String(s), Date | DateTime | Time) => (s.clone(), C_DATE()),
+        (Bson::String(s), Decimal | Int | UInt | Float | Year) => (s.clone(), C_NUMBER()),
+        (Bson::Int64(n), _) => (n.to_string(), C_NUMBER()),
+        (Bson::Double(n), _) => (n.to_string(), C_NUMBER()),
+        _ => return cell_job_of(v),
+    };
+    let mut job = LayoutJob::default();
+    job.append(&text, 0.0, mono(color));
+    job
+}
+
 fn cell_job_of(v: Val) -> LayoutJob {
     const MAX: usize = CELL_PREVIEW_MAX;
     fn push(job: &mut LayoutJob, s: &str, c: Color32) -> bool {

@@ -600,6 +600,16 @@ pub(crate) fn side_row(ui: &mut egui::Ui, height: f32, indent: f32, active: bool
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// A small table: a frame with a header line and one column divider. Painted as shapes since a
+/// glyph from a fallback font sits off center.
+pub(crate) fn table_glyph(p: &egui::Painter, c: egui::Pos2, color: Color32) {
+    let r = egui::Rect::from_center_size(c, egui::vec2(11.0, 9.0));
+    let s = Stroke::new(1.0, color);
+    p.rect_stroke(r, 1, s, egui::StrokeKind::Inside);
+    p.hline(r.x_range(), r.top() + 3.0, s);
+    p.vline(r.left() + 4.5, r.y_range(), s);
+}
+
 pub(crate) fn chevron(p: &egui::Painter, c: egui::Pos2, open: bool, color: Color32) {
     let pts = if open {
         vec![c + egui::vec2(-4.0, -2.0), c + egui::vec2(4.0, -2.0), c + egui::vec2(0.0, 3.0)]

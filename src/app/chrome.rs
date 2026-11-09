@@ -25,6 +25,11 @@ impl App {
                     View::Import => "Import",
                     View::Compare => "Compare",
                     View::Watch => "Watch",
+                    View::Structure => "Structure",
+                    View::Relations => "Relations",
+                    View::Triggers => "Triggers",
+                    View::Info => "Info",
+                    View::Sql => "Sql",
                 }
                 .into(),
                 filter: t.filter_txt.clone(),
@@ -446,6 +451,11 @@ impl App {
                 View::Import => Some("import"),
                 View::Compare => Some("compare"),
                 View::Watch => Some("watch"),
+                View::Structure => Some("structure"),
+                View::Relations => Some("relations"),
+                View::Triggers => Some("triggers"),
+                View::Info => Some("info"),
+                View::Sql => Some("query"),
                 View::Documents => None,
             };
             if let Some(v) = v {

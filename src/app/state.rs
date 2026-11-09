@@ -140,6 +140,13 @@ pub(super) enum View {
     Import,
     Compare,
     Watch,
+    /// SQL tabs only. Documents is their Content view.
+    Structure,
+    Relations,
+    Triggers,
+    Info,
+    /// The SQL Custom Query.
+    Sql,
 }
 
 /// Where a results view keeps its rows: decoded, or as BSON bytes like the Documents view
@@ -219,6 +226,20 @@ pub(super) struct Tab {
     /// its name; asked once per tab.
     pub(super) stats: Option<(u64, u64, u64)>,
     pub(super) stats_asked: bool,
+    /// Set for tabs of a SQL connection, whose rows come from `sql_page` instead of `find`.
+    pub(super) sql: Option<Box<SqlTab>>,
+}
+
+/// What a SQL tab keeps besides the shared row fields of `Tab`.
+#[derive(Default)]
+pub(super) struct SqlTab {
+    /// Columns in table order, from the last page answer.
+    pub(super) cols: Vec<db::sql::Col>,
+    /// Primary key column names; empty means the rows cannot be edited.
+    pub(super) pk: Vec<String>,
+    /// Server connection id of the running Custom Query, for Stop (step 8).
+    #[allow(dead_code)]
+    pub(super) run_conn:Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// The Compare view: this tab's collection (source) against a chosen target.
@@ -489,6 +510,12 @@ impl Tab {
         if self.query.limit.is_some() || self.query.skip > 0 { "every match, ignoring the limit and skip".into() } else { format!("about {}", self.count) }
     }
 
+    /// Marks the tab as one of a SQL connection.
+    pub(super) fn for_engine(mut self, engine: db::sql::Engine) -> Self {
+        self.sql = engine.is_sql().then(Default::default);
+        self
+    }
+
     pub(super) fn new(sel: Sel) -> Self {
         Self {
             sel,
@@ -537,6 +564,7 @@ impl Tab {
             related: HashMap::new(),
             stats: None,
             stats_asked: false,
+            sql: None,
         }
     }
 }

@@ -57,7 +57,7 @@ pub(super) fn row_menu(ui: &mut egui::Ui, i: usize, checked: &BTreeSet<usize>) -
 /// One option of the find bar: a pill holding its editor while it is set or being edited, else a
 /// "+ name" chip that opens it. `edit` returns whether Enter was pressed. Returns whether the
 /// query should run: on Enter, or when the cross removed the option.
-fn opt_chip(ui: &mut egui::Ui, name: &str, id: egui::Id, text: &mut String, edit: impl FnOnce(&mut egui::Ui, &mut String) -> bool) -> bool {
+pub(super) fn opt_chip(ui: &mut egui::Ui, name: &str, id: egui::Id, text: &mut String, edit: impl FnOnce(&mut egui::Ui, &mut String) -> bool) -> bool {
     let focused = ui.memory(|m| m.has_focus(id));
     if text.is_empty() && !focused {
         // The editor appears next frame; egui keeps a focus requested for a widget not yet drawn.
@@ -127,6 +127,13 @@ impl App {
             None => {}
         }
         let nidx = t.stats.map(|s| s.2);
+        let sql = t.sql.is_some();
+        if sql {
+            stats.clear();
+            if t.filter_txt.is_empty() {
+                stats.push(format!("{} rows", group(&t.count.to_string())));
+            }
+        }
         ui.horizontal(|ui| {
             ui.label(semibold(RichText::new(&coll).size(TXT_HEADING).color(BRIGHT())));
             ui.add_space(6.0);
@@ -142,7 +149,9 @@ impl App {
         // Wrapped, so on a narrow workspace the toggles move under the tabs instead of over them.
         let tabs = ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 22.0;
-            for (v, label) in [(View::Documents, "Documents"), (View::Aggregate, "Aggregate"), (View::Indexes, "Indexes"), (View::Schema, "Schema"), (View::Import, "Import"), (View::Compare, "Compare"), (View::Shell, "Shell"), (View::Watch, "Watch")] {
+            let mongo_tabs = [(View::Documents, "Documents"), (View::Aggregate, "Aggregate"), (View::Indexes, "Indexes"), (View::Schema, "Schema"), (View::Import, "Import"), (View::Compare, "Compare"), (View::Shell, "Shell"), (View::Watch, "Watch")];
+            let sql_tabs = [(View::Documents, "Content"), (View::Structure, "Structure"), (View::Relations, "Relations"), (View::Triggers, "Triggers"), (View::Info, "Info"), (View::Sql, "Query"), (View::Shell, "Shell")];
+            for (v, label) in if sql { &sql_tabs[..] } else { &mongo_tabs[..] }.iter().copied() {
                 if view_tab(ui, label, view == v).clicked() {
                     self.set_view(v);
                 }
@@ -151,7 +160,9 @@ impl App {
                     stat_chip(ui, &n.to_string());
                 }
             }
-            if matches!(view, View::Documents | View::Aggregate | View::Indexes | View::Watch) {
+            if sql && view == View::Documents {
+                right_group(ui, |ui| self.columns_menu(ui, false));
+            } else if !sql && matches!(view, View::Documents | View::Aggregate | View::Indexes | View::Watch) {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 right_group(ui, |ui| {
                     if self.prefs.table {
@@ -171,6 +182,9 @@ impl App {
         ui.painter().hline(ui.max_rect().x_range(), y, Stroke::new(1.0, LINE()));
         ui.add_space(12.0);
         match view {
+            View::Documents if sql => self.sql_content(ui),
+            View::Structure | View::Relations | View::Triggers | View::Info | View::Sql => self.sql_soon(ui),
+            View::Shell if sql => self.sql_soon(ui),
             View::Documents => self.documents(ui),
             View::Aggregate => self.aggregate(ui),
             View::Indexes => self.indexes_view(ui),
@@ -495,10 +509,11 @@ impl App {
             ui.add_space(20.0);
             ui.label(RichText::new(if loading { "Loading…" } else { "No documents" }).color(MUTED()));
         } else {
-            if !agg {
+            let sql = self.t().is_some_and(|t| t.sql.is_some());
+            if !agg && !sql {
                 self.selection_bar(ui, docs);
             }
-            if self.prefs.table {
+            if self.prefs.table || sql {
                 self.doc_table(ui, agg, docs, &fields, base);
             } else {
                 self.doc_list(ui, agg, docs);

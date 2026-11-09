@@ -150,10 +150,11 @@ impl App {
                 ui.add_space(6.0);
                 self.conn_picker(ui);
                 ui.add_space(8.0);
+                let hint = if self.active.and_then(|id| self.conn(id)).is_some_and(|c| c.meta.engine.is_sql()) { "Filter tables" } else { "Filter collections" };
                 let r = ui.add(
                     egui::TextEdit::singleline(&mut self.tree_filter)
                         .id(egui::Id::unique("tree-filter"))
-                        .hint_text(RichText::new("Filter collections").color(FAINT()))
+                        .hint_text(RichText::new(hint).color(FAINT()))
                         .desired_width(f32::INFINITY)
                         .margin(egui::Margin { left: 10, right: 28, top: 5, bottom: 5 }),
                 );
@@ -335,6 +336,7 @@ impl App {
         let mut side: Vec<SideAct> = Vec::new();
         let mut connect = false;
         let mut revealed = false;
+        let mut lazy: Vec<String> = Vec::new();
         {
             let Some(c) = self.conn(id) else { return };
             match &c.status {
@@ -353,6 +355,7 @@ impl App {
                     connect = primary(ui, "Connect", PRIMARY()).clicked();
                 }
             }
+            let sql = c.meta.engine.is_sql();
             for (db_name, colls) in &c.dbs {
                 let mut matches: Vec<&String> = colls.iter().flatten().filter(|n| filter.is_empty() || n.to_lowercase().contains(&filter)).collect();
                 // Copies still running are not listed by the server yet, so they are drawn from `copying`.
@@ -365,7 +368,17 @@ impl App {
                 if !filter.is_empty() && matches.is_empty() {
                     continue;
                 }
+                // Tables first, then views, each under its own caption.
+                let is_view_of = |n: &String| self.views.contains(&(id, db_name.clone(), n.clone()));
+                let n_views = if sql { matches.iter().filter(|n| is_view_of(n)).count() } else { 0 };
+                if sql {
+                    matches.sort_by_key(|n| is_view_of(n));
+                }
+                let mut group: Option<bool> = None;
                 let is_open = !filter.is_empty() || self.open_dbs.contains(&(id, db_name.clone()));
+                if sql && is_open && colls.is_none() && c.status == Status::Ready && !self.sql_asked.contains(&(id, db_name.clone())) {
+                    lazy.push(db_name.clone());
+                }
                 let dim = SYSTEM_DBS.contains(&db_name.as_str());
                 let count = colls.as_ref().map(|v| v.len().to_string()).unwrap_or_else(|| "…".into());
                 let r = side_row(ui, SIDE_ROW_H, 0.0, false, |p, r| {
@@ -383,6 +396,12 @@ impl App {
                 r.context_menu(|ui| {
                     menu_look(ui);
                     ui.label(RichText::new(format!("Database: {db_name}")).size(TXT_SMALL).color(MUTED()));
+                    if sql {
+                        if ui.button("Refresh").clicked() {
+                            side.push(SideAct::Refresh(db_name.clone()));
+                        }
+                        return;
+                    }
                     if ui.button("New collection…").clicked() {
                         side.push(SideAct::NewColl(db_name.clone(), false));
                     }
@@ -414,17 +433,28 @@ impl App {
                     }
                 });
                 if is_open {
+                    let matches_len = matches.len();
                     for coll in matches {
                         let sel = Sel { conn: id, db: db_name.clone(), coll: coll.clone() };
                         let active = cur_sel.as_ref() == Some(&sel);
                         let is_view = self.views.contains(&(id, db_name.clone(), coll.clone()));
                         let busy = pending.contains(&coll);
+                        if sql && group != Some(is_view) {
+                            group = Some(is_view);
+                            let (label, n) = if is_view { ("VIEWS", n_views) } else { ("TABLES", matches_len - n_views) };
+                            let (cap, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), SIDE_ROW_H - 4.0), Sense::hover());
+                            let g = ui.painter().layout_job(LayoutJob::single_section(label.into(), ui_fmt(10.0, FAINT(), W_SEMIBOLD, 0.6)));
+                            ui.painter().galley(egui::pos2(cap.left() + 18.0, cap.center().y - g.size().y / 2.0 + 2.0), g, FAINT());
+                            ui.painter().text(egui::pos2(cap.right() - 8.0, cap.center().y + 2.0), egui::Align2::RIGHT_CENTER, n.to_string(), FontId::monospace(TXT_CAPTION), FAINT());
+                        }
                         let mut glyph_at = egui::Rect::NOTHING;
                         let r = side_row(ui, SIDE_ROW_H, 18.0, active, |p, r| {
                             // Collections are marked as documents, views with a hollow diamond so
                             // they read as derived data. A collection still being copied gets a spinner.
                             glyph_at = egui::Rect::from_center_size(egui::pos2(r.left() + 6.0, r.center().y), egui::Vec2::splat(TXT_SMALL));
-                            if !busy {
+                            if !busy && sql && !is_view {
+                                table_glyph(p, egui::pos2(r.left() + 6.0, r.center().y), if active { PRIMARY() } else { FAINT() });
+                            } else if !busy {
                                 let (glyph, gc) = if is_view { ("◇", C_DATE()) } else { ("{}", if active { PRIMARY() } else { FAINT() }) };
                                 p.text(egui::pos2(r.left(), r.center().y), egui::Align2::LEFT_CENTER, glyph, FontId::monospace(10.0), gc);
                             }
@@ -448,9 +478,13 @@ impl App {
                         }
                         r.context_menu(|ui| {
                             menu_look(ui);
-                            ui.label(RichText::new(format!("{}: {coll}", if is_view { "View" } else { "Collection" })).size(TXT_SMALL).color(MUTED()));
+                            ui.label(RichText::new(format!("{}: {coll}", if is_view { "View" } else if sql { "Table" } else { "Collection" })).size(TXT_SMALL).color(MUTED()));
                             if ui.button("Open").clicked() {
                                 open = Some(sel.clone());
+                            }
+                            // The rest is Mongo only until SQL has its own actions.
+                            if sql {
+                                return;
                             }
                             if ui.button("Statistics").clicked() {
                                 side.push(SideAct::Stats(db_name.clone(), coll.clone()));
@@ -486,6 +520,10 @@ impl App {
         if revealed {
             self.reveal = None;
         }
+        for d in lazy {
+            self.sql_asked.insert((id, d.clone()));
+            self.side_act(id, SideAct::Refresh(d));
+        }
         if connect {
             self.connect(id);
         }
@@ -505,6 +543,9 @@ impl App {
     pub(super) fn side_act(&mut self, conn: u64, a: SideAct) {
         if let (SideAct::Refresh(db), Some(sql)) = (&a, self.conn(conn).and_then(|c| c.sql.clone())) {
             return self.worker.sql_tables(conn, sql, db.clone());
+        }
+        if self.conn(conn).is_some_and(|c| c.meta.engine.is_sql()) {
+            return self.err(if self.conn(conn).is_some_and(|c| c.sql.is_some()) { "Not available for SQL connections yet." } else { "Connect first." });
         }
         let Some(client) = self.conn(conn).and_then(|c| c.client.clone()) else {
             return self.err("Connect first.");

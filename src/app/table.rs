@@ -365,12 +365,22 @@ impl App {
         let mut cell_acts: Vec<(usize, Vec<TreeAct>)> = Vec::new();
         // Single-field sort shown in the header and set from the column popover.
         let sort = if agg { None } else { self.t().and_then(|t| t.query.sort.clone()).filter(|s| s.len() == 1) };
-        let dir_of = |c: &str| sort.as_ref().and_then(|s| s.get(c)).and_then(|v| match v {
-            Bson::Int32(n) => Some(*n as i64),
-            Bson::Int64(n) => Some(*n),
-            Bson::Double(f) => Some(*f as i64),
-            _ => None,
-        });
+        // A SQL tab's sort is the ORDER BY text, which a header click writes as "`col` ASC".
+        let sql_sort = self.t().filter(|t| t.sql.is_some()).map(|t| t.sort_txt.clone());
+        let sql = sql_sort.is_some();
+        let dir_of = |c: &str| match &sql_sort {
+            Some(s) => {
+                let q = db::sql::Dialect::MySql.quote_ident(c);
+                if *s == format!("{q} ASC") { Some(1) } else if *s == format!("{q} DESC") { Some(-1) } else { None }
+            }
+            None => sort.as_ref().and_then(|s| s.get(c)).and_then(|v| match v {
+                Bson::Int32(n) => Some(*n as i64),
+                Bson::Int64(n) => Some(*n),
+                Bson::Double(f) => Some(*f as i64),
+                _ => None,
+            }),
+        };
+        let kinds: Vec<Option<db::sql::value::Kind>> = cols.iter().map(|c| self.t().and_then(|t| t.sql.as_ref()).and_then(|s| s.cols.iter().find(|k| &k.name == c)).map(|k| k.kind)).collect();
         let aligns: Vec<u8> = cols.iter().map(|c| prefs.align.get(c).copied().unwrap_or(0)).collect();
         let hl_cols: Vec<bool> = cols.iter().map(|c| prefs.highlight.contains(&db::strip_indices(c))).collect();
         let related = if agg { HashMap::new() } else { self.t().map(|t| t.related.clone()).unwrap_or_default() };
@@ -442,7 +452,7 @@ impl App {
                     let open = if hresp.secondary_clicked() { Some(egui::SetOpenCommand::Bool(true)) } else if hresp.clicked() { Some(egui::SetOpenCommand::Toggle) } else { None };
                     let mut acts = Vec::new();
                     // Clicks inside, such as the Data scope switch, keep it open; each action closes it itself.
-                    egui::Popup::menu(&hresp).open_memory(open).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(190.0).show(|ui| col_popover(ui, c, agg, dir, &prefs, &mut scope_query, &mut acts));
+                    egui::Popup::menu(&hresp).open_memory(open).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(190.0).show(|ui| col_popover(ui, c, agg, sql, dir, &prefs, &mut scope_query, &mut acts));
                     head_acts.extend(acts.into_iter().map(|a| (c.clone(), a)));
                     // Drag the right edge to resize.
                     let handle = egui::Rect::from_min_max(egui::pos2(cell.right() - 3.0, cell.top() + 6.0), egui::pos2(cell.right() + 3.0, cell.bottom() - 6.0));
@@ -484,7 +494,7 @@ impl App {
                             p.rect_filled(rr, 0, fill);
                         }
                         let off = num_w - NUM_W;
-                        if self.prefs.open_inline {
+                        if self.prefs.open_inline && !sql {
                             chevron(p, egui::pos2(rr.left() + off + 9.0, rr.center().y), active || expanded.contains(&(agg, i)), if active { PRIMARY() } else { FAINT() });
                         }
                         let num = (base + i as u64 + 1).to_string();
@@ -508,7 +518,10 @@ impl App {
                             let v = value(c);
                             match v {
                                 Some(v) => {
-                                    let mut job = column_job(v, summarize);
+                                    let mut job = match kinds[ci] {
+                                        Some(k) => sql_cell_job(v, k),
+                                        None => column_job(v, summarize),
+                                    };
                                     // Ends in an ellipsis at the cell's padding instead of being cut mid-glyph by the clip.
                                     job.wrap = egui::text::TextWrapping::truncate_at_width(w - 14.0);
                                     let g = ui.fonts_mut(|f| f.layout_job(job));
@@ -536,7 +549,7 @@ impl App {
                                 click = Some(i);
                             }
                             let mut acts = Vec::new();
-                            if let Some(v) = v {
+                            if let (Some(v), false) = (v, sql) {
                                 let path: Vec<String> = c.split('.').map(String::from).collect();
                                 cr.context_menu(|ui| {
                                     menu_look(ui);
@@ -573,7 +586,7 @@ impl App {
                     if menu != RowMenu::None {
                         resp.context_menu(|ui| row_act = any_row_menu(ui, menu, i, docs, &checked).or(row_act.take()));
                     }
-                    if (active || expanded.contains(&(agg, i))) && self.prefs.open_inline {
+                    if (active || expanded.contains(&(agg, i))) && self.prefs.open_inline && !sql {
                         ui.add_space(4.0);
                         // Spans every column like the rows above it, not just the visible part.
                         let w = row_w.max(320.0);
@@ -620,7 +633,7 @@ impl App {
             let Some(d) = self.shown_row(docs, i, agg).or_else(|| docs.owned(i)) else { continue };
             self.handle_acts(&d, acts);
         }
-        if let (Some((i, c)), false) = (edit_cell, agg) {
+        if let (Some((i, c)), false) = (edit_cell, agg || sql) {
             self.select(agg, i, false);
             let path: Vec<String> = c.split('.').map(String::from).collect();
             let d = self.shown_row(docs, i, false).or_else(|| docs.owned(i)).unwrap_or_default();
@@ -689,6 +702,8 @@ impl App {
     /// Documents rows get the document menu, Indexes rows the index menu, other result rows none.
     fn row_menu_kind(&self, agg: bool) -> RowMenu {
         match (agg, self.t().map(|t| t.view)) {
+            // SQL rows get their own menu with the edits of the next step.
+            (false, _) if self.t().is_some_and(|t| t.sql.is_some()) => RowMenu::None,
             (false, _) => RowMenu::Docs,
             (true, Some(View::Indexes)) => RowMenu::Indexes,
             _ => RowMenu::None,

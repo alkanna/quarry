@@ -63,8 +63,12 @@ impl App {
                                 }
                             }
                             c.tunnel = tunnel;
-                            for d in &dbs {
-                                self.worker.sql_tables(conn, sql.clone(), d.clone());
+                            // A server can hold hundreds of schemas, so only those on screen load now.
+                            self.sql_asked.retain(|k| k.0 != conn);
+                            let wanted: Vec<String> = dbs.iter().filter(|d| self.open_dbs.contains(&(conn, (*d).clone())) || self.tabs.iter().any(|t| t.sel.conn == conn && t.sel.db == **d)).cloned().collect();
+                            for d in wanted {
+                                self.sql_asked.insert((conn, d.clone()));
+                                self.worker.sql_tables(conn, sql.clone(), d);
                             }
                             c.server = ServerInfo { version: sql.label().split_once(' ').map(|(_, v)| v.to_string()).unwrap_or_default(), product: if sql.dialect == db::sql::Dialect::MariaDb { "MariaDB" } else { "MySQL" }.into(), host: host_of(&c.masked_uri), tls: sql.tls, ..Default::default() };
                             c.sql = Some(sql);
@@ -76,6 +80,11 @@ impl App {
                                 self.save_conns();
                                 self.ok(format!("Connected to {n} through SSH (read-only). Host key remembered: {fp}"));
                             }
+                            for i in 0..self.tabs.len() {
+                                if self.tabs[i].sel.conn == conn && self.tabs[i].docs.is_empty() {
+                                    self.reload_of(i);
+                                }
+                            }
                         }
                         Err(e) => {
                             c.status = Status::Failed(e.clone());
@@ -83,8 +92,13 @@ impl App {
                         }
                     }
                 }
-                // Applied by the table and query views (docs/sql/PLAN.md step 5 and 8).
-                Msg::SqlCols { .. } | Msg::SqlRan { .. } => {}
+                Msg::SqlCols { req, cols, pk } => {
+                    if let Some(s) = self.tab_by_req(req).and_then(|t| t.sql.as_mut()) {
+                        (s.cols, s.pk) = (cols, pk);
+                    }
+                }
+                // Applied by the Custom Query view (docs/sql/PLAN.md step 8).
+                Msg::SqlRan { .. } => {}
                 Msg::Collections { conn, db, res } => match res {
                     Ok((v, views)) => {
                         self.views.retain(|(c, d, _)| !(*c == conn && *d == db));
@@ -253,7 +267,11 @@ impl App {
                             }
                             let Self { tabs, values, .. } = self;
                             let t = tabs.iter_mut().find(|t| t.req == req).unwrap();
-                            t.fields = auto_fields(&docs);
+                            // SQL columns keep the table's order and never include the hidden _id.
+                            t.fields = match &t.sql {
+                                Some(s) => s.cols.iter().map(|c| c.name.clone()).collect(),
+                                None => auto_fields(&docs),
+                            };
                             t.paths = doc_paths(&docs);
                             let mut f = field_info(&docs);
                             if let Some(v) = values.get(&t.coll_key()) {
@@ -282,7 +300,7 @@ impl App {
                                 t.selected = None;
                             }
                             t.related.clear();
-                            let ask = (!t.stats_asked).then(|| t.sel.clone());
+                            let ask = (!t.stats_asked && t.sql.is_none()).then(|| t.sel.clone());
                             t.stats_asked = true;
                             self.load_related(req);
                             if let Some(s) = ask
@@ -570,6 +588,9 @@ impl App {
     pub(super) fn reload_of(&mut self, i: usize) {
         if self.demo {
             return;
+        }
+        if self.tabs.get(i).is_some_and(|t| t.sql.is_some()) {
+            return self.reload_sql(i);
         }
         let Some(target) = self.tabs.get(i).and_then(|t| self.target_for(&t.sel)) else { return };
         // Each answer is matched to its tab by id; a slower older one never overwrites a newer one.

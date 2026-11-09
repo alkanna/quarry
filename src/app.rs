@@ -37,6 +37,7 @@ mod settings;
 mod shell;
 mod shell_ls;
 mod sidebar;
+mod sql_views;
 mod state;
 mod table;
 mod tabs;
@@ -97,6 +98,8 @@ pub struct App {
     conns: Vec<Conn>,
     active: Option<u64>,
     open_dbs: HashSet<(u64, String)>,
+    /// SQL databases whose table list was asked for; lists load when a database opens, not all at connect.
+    sql_asked: HashSet<(u64, String)>,
     tabs: Vec<Tab>,
     cur: usize,
     req: u64,
@@ -227,6 +230,7 @@ impl App {
             conns: Vec::new(),
             active: None,
             open_dbs: HashSet::new(),
+            sql_asked: HashSet::new(),
             tabs: Vec::new(),
             cur: 0,
             req: 0,
@@ -357,7 +361,8 @@ impl App {
                 if app.conn(st.conn).is_none() {
                     continue;
                 }
-                let mut t = Tab::new(Sel { conn: st.conn, db: st.db, coll: st.coll });
+                let engine = app.conn(st.conn).map(|c| c.meta.engine).unwrap_or_default();
+                let mut t = Tab::new(Sel { conn: st.conn, db: st.db, coll: st.coll }).for_engine(engine);
                 t.view = match st.view.as_str() {
                     "Aggregate" => View::Aggregate,
                     "Indexes" => View::Indexes,
@@ -366,6 +371,11 @@ impl App {
                     "Import" => View::Import,
                     "Compare" => View::Compare,
                     "Watch" => View::Watch,
+                    "Structure" => View::Structure,
+                    "Relations" => View::Relations,
+                    "Triggers" => View::Triggers,
+                    "Info" => View::Info,
+                    "Sql" => View::Sql,
                     _ => View::Documents,
                 };
                 (t.filter_txt, t.sort_txt, t.proj_txt, t.shell.code) = (st.filter, st.sort, st.project, st.shell);

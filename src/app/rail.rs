@@ -18,7 +18,7 @@ impl App {
             let full = ui.max_rect().expand2(egui::vec2(8.0, 10.0));
             ui.painter().vline(full.right() - 0.5, full.y_range(), Stroke::new(1.0, LINE()));
             ui.spacing_mut().item_spacing.y = 8.0;
-            let connected = self.active.and_then(|id| self.conn(id)).is_some_and(|c| c.client.is_some());
+            let connected = self.active.and_then(|id| self.conn(id)).is_some_and(|c| c.client.is_some() || c.sql.is_some());
             let palette = matches!(self.modal, Some(Modal::Palette { .. }));
             if rail_button(ui, RailIcon::Explorer, !self.prefs.sidebar_hidden, true, "Database explorer").clicked() {
                 self.prefs.sidebar_hidden = !self.prefs.sidebar_hidden;

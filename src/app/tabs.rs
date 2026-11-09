@@ -39,11 +39,12 @@ impl App {
             self.cur = i;
             return;
         }
+        let engine = self.conn(sel.conn).map(|c| c.meta.engine).unwrap_or_default();
         if replace && !self.tabs.is_empty() {
             let view = self.tabs[self.cur].view;
-            self.tabs[self.cur] = Tab { view, ..Tab::new(sel) };
+            self.tabs[self.cur] = Tab { view, ..Tab::new(sel).for_engine(engine) };
         } else {
-            self.tabs.push(Tab::new(sel));
+            self.tabs.push(Tab::new(sel).for_engine(engine));
             self.cur = self.tabs.len() - 1;
         }
         self.reload();

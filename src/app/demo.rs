@@ -74,6 +74,11 @@ impl App {
         self.tabs.push(t);
         self.tabs.push(Tab::new(sel("analytics", "events")));
         self.cur = 1;
+        // QUARRY_TEST_SQL=content swaps the demo for a MySQL connection with its orders table open.
+        if std::env::var("QUARRY_TEST_SQL").is_ok() {
+            self.load_sql_demo();
+            return;
+        }
         if let Ok(mut log) = db::LOG.lock() {
             let q = r#"{ "status": { "$in": ["paid", "shipped", "pending"] } }"#;
             log.extend([
@@ -278,5 +283,67 @@ impl App {
             let items = changed.get("items").cloned().unwrap();
             self.json_edit = Some(JsonEdit { base: changed, path: vec!["items".into()], text: db::to_edit_value(&items), kind: "array", focus: false });
         }
+    }
+
+    /// The MySQL demo: a production connection and an open orders table. Nothing here reads the Keychain or the network.
+    fn load_sql_demo(&mut self) {
+        use db::sql::{Col, value::Kind};
+        let mut shop: Vec<String> = ["customers", "invoices", "order_items", "orders", "payments", "products", "shipments", "order_totals", "top_customers"].map(String::from).to_vec();
+        shop.sort();
+        self.conns.push(Conn {
+            meta: ConnMeta { id: 3, name: "shop-prod".into(), tag: "Production".into(), engine: db::sql::Engine::MySql, ..Default::default() },
+            client: None,
+            sql: None,
+            status: Status::Ready,
+            writable: false,
+            dbs: vec![("information_schema".into(), None), ("mysql".into(), None), ("shop".into(), Some(shop)), ("analytics".into(), None), ("sys".into(), None)],
+            masked_uri: "mysql://app:****@shop-prod.internal:3306/shop".into(),
+            tunnel: None,
+            server: ServerInfo { version: "8.4.3".into(), product: "MySQL".into(), host: "shop-prod.internal:3306".into(), tls: true, ..Default::default() },
+        });
+        self.active = Some(3);
+        self.open_dbs.insert((3, "shop".into()));
+        // The demo never lists tables, so every database counts as asked.
+        for d in ["information_schema", "mysql", "analytics", "sys"] {
+            self.sql_asked.insert((3, d.into()));
+        }
+        for v in ["order_totals", "top_customers"] {
+            self.views.insert((3, "shop".into(), v.into()));
+        }
+        let sel = |coll: &str| Sel { conn: 3, db: "shop".into(), coll: coll.into() };
+        let engine = db::sql::Engine::MySql;
+        let col = |name: &str, ty: &str, nullable: bool| Col { name: name.into(), ty: ty.into(), kind: Kind::from_type_name(ty.split('(').next().unwrap_or(ty)), nullable };
+        let cols = vec![col("id", "INT UNSIGNED", false), col("customer_id", "INT", false), col("status", "ENUM", false), col("total", "DECIMAL(10,2)", false), col("currency", "CHAR(3)", false), col("note", "TEXT", true), col("created_at", "DATETIME", false)];
+        // id, customer_id, status, total, currency, note, created_at
+        let data: [(i64, i64, &str, &str, &str, Option<&str>, &str); 13] = [
+            (4410, 1284, "paid", "112.50", "EUR", None, "2026-11-09 12:41:07"),
+            (4409, 877, "shipped", "26.75", "EUR", Some("Leave at the door"), "2026-11-09 12:38:52"),
+            (4408, 1102, "shipped", "34.00", "USD", Some("Ring twice"), "2026-11-09 12:30:19"),
+            (4407, 61, "paid", "1204.10", "EUR", Some("Gift wrap, two boxes"), "2026-11-09 11:58:44"),
+            (4406, 1284, "refunded", "8.90", "GBP", None, "2026-11-09 11:51:02"),
+            (4405, 430, "paid", "54.20", "EUR", Some("Call before delivery"), "2026-11-09 11:47:30"),
+            (4404, 919, "shipped", "71.00", "USD", None, "2026-11-09 11:22:15"),
+            (4403, 12, "paid", "15.25", "EUR", None, "2026-11-09 11:09:58"),
+            (4402, 1190, "pending", "220.00", "EUR", Some("B2B, invoice monthly"), "2026-11-09 10:57:41"),
+            (4401, 877, "paid", "9.99", "USD", None, "2026-11-09 10:44:03"),
+            (4400, 305, "shipped", "63.40", "EUR", None, "2026-11-09 10:31:27"),
+            (4399, 2201, "paid", "37.80", "USD", None, "2026-11-09 10:12:50"),
+            (4398, 742, "cancelled", "45.00", "EUR", None, "2026-11-09 09:58:36"),
+        ];
+        let mut t = Tab::new(sel("orders")).for_engine(engine);
+        t.docs = data
+            .iter()
+            .filter_map(|&(id, cust, status, total, cur, note, at)| db::Row::from_doc(&doc! { "_id": { "id": id }, "id": id, "customer_id": cust, "status": status, "total": total, "currency": cur, "note": note.map_or(Bson::Null, Bson::from), "created_at": at }).ok())
+            .collect();
+        t.fields = cols.iter().map(|c| c.name.clone()).collect();
+        if let Some(s) = t.sql.as_mut() {
+            (s.cols, s.pk) = (cols, vec!["id".into()]);
+        }
+        (t.count, t.ms, t.size) = (4410, 18, self.page_size());
+        t.sort_txt = "created_at DESC".into();
+        t.filter_txt = "status = 'paid' AND total > 50".into();
+        self.tabs = vec![t, Tab::new(sel("customers")).for_engine(engine)];
+        self.cur = 0;
+        self.status = ("Offline demo: no database is connected.".into(), false);
     }
 }
