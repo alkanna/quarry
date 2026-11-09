@@ -46,6 +46,9 @@ pub(super) async fn session(c: &mut sqlx::MySqlConnection, ms: u64, adv: &Setup)
     let v: String = sqlx::query_scalar("SELECT VERSION()").fetch_one(&mut *c).await?;
     let d = Dialect::from_version(&v);
     c.execute(d.session_read_only(true)).await?;
+    // A server whose global autocommit is off would keep every pooled read in one old snapshot holding metadata
+    // locks, so each session starts with it on whatever the server says.
+    c.execute("SET SESSION autocommit = 1").await?;
     // A refused setting fails the connect with the server's words, since the user asked for it.
     for q in &adv.statements {
         if let Err(err) = c.execute(q.as_str()).await {
