@@ -471,4 +471,16 @@ mod tests {
         assert!(p.exists() && dir.join("connections.json.bak").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    #[test]
+    fn a_connection_saved_before_the_advanced_tab_loads_with_defaults_and_saves_unchanged() {
+        let old = r#"{"id": 3, "name": "shop", "engine": "MySql", "tag": "Production"}"#;
+        let m: ConnMeta = serde_json::from_str(old).unwrap();
+        assert!(m.advanced.is_default());
+        // A default is not written, so a file stays as it was for older builds too.
+        assert!(!serde_json::to_string(&m).unwrap().contains("advanced"));
+        let set = ConnMeta { advanced: db::sql::Advanced { query_secs: Some(5), sql_mode: Some(vec!["ANSI_QUOTES".into()]), ..Default::default() }, ..m };
+        let back: ConnMeta = serde_json::from_str(&serde_json::to_string(&set).unwrap()).unwrap();
+        assert_eq!(back.advanced, set.advanced);
+    }
 }

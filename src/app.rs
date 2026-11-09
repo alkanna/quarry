@@ -176,6 +176,8 @@ pub struct App {
     users: Option<UsersWin>,
     server: Option<ServerWin>,
     conn_test: Option<db::Res<String>>,
+    /// What the last Test learned from a SQL server, for the Advanced tab to offer.
+    test_info: Option<db::sql::TestInfo>,
     /// Usage and suggestions of the collection "db.coll" the Indexes view last asked about.
     idx_info: Option<(String, db::IndexInfo)>,
     undo: Vec<UndoAction>,
@@ -308,6 +310,7 @@ impl App {
             users: None,
             server: None,
             conn_test: None,
+            test_info: None,
             idx_info: None,
             undo: Vec::new(),
             explain_req: 0,

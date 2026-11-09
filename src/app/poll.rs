@@ -574,7 +574,10 @@ impl App {
                         Err(e) => self.err(e),
                     }
                 }
-                Msg::Tested { res } => self.conn_test = Some(res),
+                Msg::Tested { res, info } => {
+                    self.conn_test = Some(res);
+                    self.test_info = info;
+                }
                 Msg::Schema { req, res } => {
                     let Some(t) = self.tabs.iter_mut().find(|t| t.schema.req == req) else { continue };
                     t.schema.running = false;

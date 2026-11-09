@@ -116,7 +116,9 @@ impl App {
         self.prefs.cols.insert(key, ColPrefs { pinned: vec!["status".into()], highlight: vec!["customer.name".into()], ..Default::default() });
         self.status = ("Offline demo: no database is connected.".into(), false);
         if std::env::var("QUARRY_TEST_CONNFORM").as_deref() == Ok("mysql") {
-            self.modal = Some(Modal::Conn(Box::new(ConnForm {
+            // QUARRY_TEST_CONNFORM_TAB=advanced opens the Advanced tab with the design's example values.
+            let advanced = std::env::var("QUARRY_TEST_CONNFORM_TAB").as_deref() == Ok("advanced");
+            let mut form = ConnForm {
                 id: Some(2),
                 name: "shop-prod".into(),
                 tag: "Production".into(),
@@ -125,7 +127,22 @@ impl App {
                 ssh_on: true,
                 ssh: crate::ssh::SshConf { host: "bastion-eu.example.com".into(), port: 22, user: "deploy".into(), auth: crate::ssh::SshAuth::Agent, ..Default::default() },
                 ..Default::default()
-            })));
+            };
+            if advanced {
+                use db::sql::advanced::MODE_FLAGS;
+                let mode = ["STRICT_TRANS_TABLES", "NO_ZERO_DATE", "NO_ZERO_IN_DATE", "ERROR_FOR_DIVISION_BY_ZERO", "NO_ENGINE_SUBSTITUTION"];
+                debug_assert!(mode.iter().all(|m| MODE_FLAGS.contains(m)));
+                form.set_advanced(&db::sql::Advanced {
+                    zone: db::sql::Zone::Custom("+02:00".into()),
+                    sql_mode: Some(mode.map(String::from).to_vec()),
+                    init: "SET SESSION group_concat_max_len = 1048576;\nSET SESSION innodb_lock_wait_timeout = 10;\nSET SESSION sql_safe_updates = 1;".into(),
+                    connect_secs: Some(15),
+                    query_secs: Some(5),
+                    ..Default::default()
+                });
+                form.tab = ConnTab::Advanced;
+            }
+            self.modal = Some(Modal::Conn(Box::new(form)));
         } else if std::env::var("QUARRY_TEST_CONNFORM").is_ok() {
             self.modal = Some(Modal::Conn(Box::new(ConnForm {
                 id: Some(2),

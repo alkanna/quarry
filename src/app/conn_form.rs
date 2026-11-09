@@ -52,6 +52,134 @@ fn tls_tab(ui: &mut egui::Ui, f: &mut ConnForm) {
     });
 }
 
+/// A timeout box: seconds, empty for the default, with the unit inside the box's right edge.
+fn secs_field(ui: &mut egui::Ui, text: &mut String, hint: &str) {
+    ui.add(egui::TextEdit::singleline(text).hint_text(hint).desired_width(58.0).margin(egui::Margin::symmetric(8, 5)));
+    ui.label(RichText::new("s").size(TXT_SMALL).color(FAINT()));
+}
+
+fn advanced_tab(ui: &mut egui::Ui, f: &mut ConnForm, default_s: u64) {
+    use db::sql::advanced::MODE_FLAGS;
+    let note = |ui: &mut egui::Ui, t: &str| {
+        ui.add(egui::Label::new(RichText::new(t).size(TXT_SMALL).color(FAINT())).wrap());
+    };
+    settings_section(ui, "SESSION", |ui| {
+        let field_w = ui.available_width() - FORM_LABEL_W - 14.0;
+        egui::Grid::new("adv-session").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
+            form_label(ui, "Time zone");
+            ui.horizontal(|ui| {
+                segmented(ui, &mut f.zone_kind, &[(ZoneKind::Server, "Server default"), (ZoneKind::Utc, "UTC"), (ZoneKind::System, "System"), (ZoneKind::Custom, "Custom")]);
+                if f.zone_kind == ZoneKind::Custom {
+                    ui.add(egui::TextEdit::singleline(&mut f.zone_text).hint_text("+02:00 or Europe/Paris").desired_width(ui.available_width()).margin(egui::Margin::symmetric(8, 5)));
+                }
+            });
+            ui.end_row();
+            ui.label("");
+            ui.vertical(|ui| {
+                ui.set_max_width(field_w);
+                note(ui, "System sends this computer's offset. Custom takes an offset like +02:00, or a zone name like Europe/Paris when the server has its zone tables loaded.")
+            });
+            ui.end_row();
+            form_label(ui, "Charset");
+            ui.horizontal(|ui| {
+                let before = f.adv.charset;
+                egui::ComboBox::from_id_salt("adv-charset").width(110.0).selected_text(RichText::new(f.adv.charset.as_str()).monospace()).show_ui(ui, |ui| {
+                    menu_look(ui);
+                    for (c, name) in db::sql::Charset::ALL {
+                        ui.selectable_value(&mut f.adv.charset, c, name);
+                    }
+                });
+                // A collation belongs to its charset, so it is not kept across a change.
+                if f.adv.charset != before {
+                    f.adv.collation.clear();
+                }
+                ui.label("Collation");
+                let cs = f.adv.charset.as_str();
+                let default = format!("Default for {cs}");
+                let known: Vec<&str> = f.collations.iter().filter(|(c, _)| c == cs).map(|(_, n)| n.as_str()).collect();
+                if known.is_empty() {
+                    ui.add(egui::TextEdit::singleline(&mut f.adv.collation).hint_text(default).font(egui::TextStyle::Monospace).desired_width(ui.available_width()).margin(egui::Margin::symmetric(8, 5)));
+                } else {
+                    egui::ComboBox::from_id_salt("adv-collation").width(ui.available_width()).selected_text(if f.adv.collation.is_empty() { default.clone() } else { f.adv.collation.clone() }).show_ui(ui, |ui| {
+                        menu_look(ui);
+                        ui.selectable_value(&mut f.adv.collation, String::new(), default);
+                        for n in known {
+                            ui.selectable_value(&mut f.adv.collation, n.to_string(), n);
+                        }
+                    });
+                }
+            });
+            ui.end_row();
+            ui.label("");
+            ui.vertical(|ui| {
+                ui.set_max_width(field_w);
+                note(ui, "UTF-8 charsets only, since Quarry decodes every result as UTF-8. Test reads the server's collations.")
+            });
+            ui.end_row();
+        });
+    });
+    settings_section(ui, "SQL MODE", |ui| {
+        egui::Grid::new("adv-mode").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
+            form_label(ui, "SQL mode");
+            ui.horizontal(|ui| {
+                let mut custom = f.mode_custom as u8;
+                segmented(ui, &mut custom, &[(0, "Server default"), (1, "Custom")]);
+                f.mode_custom = custom == 1;
+                if f.mode_custom {
+                    ui.label(RichText::new("Starts from the server's mode on Test").size(TXT_SMALL).color(FAINT()));
+                }
+            });
+            ui.end_row();
+            if f.mode_custom {
+                ui.label("");
+                ui.vertical(|ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                        for (flag, on) in MODE_FLAGS.iter().zip(f.mode_on.iter_mut()) {
+                            if chip(ui, flag, PRIMARY(), *on).clicked() {
+                                *on = !*on;
+                            }
+                        }
+                    });
+                    ui.add_space(4.0);
+                    ui.add(egui::TextEdit::singleline(&mut f.mode_extra).hint_text("More flags, comma separated").desired_width(ui.available_width()).margin(egui::Margin::symmetric(8, 5)));
+                });
+                ui.end_row();
+            }
+            ui.label("");
+            note(ui, "Either way Quarry reads the effective sql_mode and quotes by it.");
+            ui.end_row();
+        });
+    });
+    settings_section(ui, "INIT COMMAND", |ui| {
+        let mut layout = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
+            let mut job = sql_job(buf.as_str(), TXT_SMALL);
+            job.wrap.max_width = wrap;
+            ui.fonts_mut(|f| f.layout_job(job))
+        };
+        egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_MD).show(ui, |ui| {
+            ui.add(egui::TextEdit::multiline(&mut f.adv.init).font(FontId::monospace(TXT_SMALL)).frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(10, 8))).desired_rows(3).desired_width(f32::INFINITY).lock_focus(true).hint_text(RichText::new("SET SESSION group_concat_max_len = 1048576;").font(FontId::monospace(TXT_SMALL)).color(FAINT())).layouter(&mut layout));
+        });
+        ui.add_space(4.0);
+        note(ui, "Runs on every pooled connection. Writes are refused while the connection is read-only.");
+    });
+    settings_section(ui, "TIMEOUTS", |ui| {
+        let d = default_s.to_string();
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Connect").color(MUTED()));
+            secs_field(ui, &mut f.t_connect, &d);
+            ui.add_space(6.0);
+            ui.label(RichText::new("Query").color(MUTED()));
+            secs_field(ui, &mut f.t_query, &d);
+            ui.add_space(6.0);
+            ui.label(RichText::new("Idle").color(MUTED()));
+            secs_field(ui, &mut f.t_idle, "600");
+        });
+        ui.add_space(4.0);
+        note(ui, "Empty uses the timeout in Settings. Idle closes pooled connections unused that long. At the query timeout MySQL stops only SELECT, MariaDB every statement.");
+    });
+}
+
 fn standard_tab(ui: &mut egui::Ui, f: &mut ConnForm) {
     settings_section(ui, "SERVER", |ui| {
         // Grid cells do not know their width on the first frame, so size fields from the section.
@@ -214,6 +342,16 @@ impl App {
     pub(super) fn conn_dialog(&mut self, ui: &mut egui::Ui, f: &mut ConnForm, keep: &mut bool) {
         let mut save = false;
         let mut test = false;
+        let default_s = self.prefs.timeout_ms / 1000;
+        // Custom starts from what the server runs, once, so a mode the user already shaped is never replaced.
+        if let Some(info) = self.test_info.take() {
+            if f.mode_custom && f.mode_on.iter().all(|on| !on) && f.mode_extra.trim().is_empty() {
+                let flags = db::sql::advanced::parse_flags(&info.sql_mode).unwrap_or_default();
+                f.mode_on = db::sql::advanced::MODE_FLAGS.map(|m| flags.iter().any(|x| x == m));
+                f.mode_extra = flags.iter().filter(|x| !db::sql::advanced::MODE_FLAGS.contains(&x.as_str())).cloned().collect::<Vec<_>>().join(", ");
+            }
+            f.collations = info.collations;
+        }
         ui.set_width(760.0);
         dialog_title(ui, if f.id.is_some() { "Edit connection" } else { "New connection" });
         ui.label(RichText::new("Addresses, passwords and passphrases are stored in the macOS Keychain. The connection opens read-only.").size(TXT_SMALL).color(MUTED()));
@@ -244,7 +382,7 @@ impl App {
                         }
                     }
                     // The other engine has no tab for the one that was open.
-                    if matches!((engine.is_sql(), f.tab), (true, ConnTab::Proxy) | (false, ConnTab::Tls)) {
+                    if matches!((engine.is_sql(), f.tab), (true, ConnTab::Proxy) | (false, ConnTab::Tls | ConnTab::Advanced)) {
                         f.tab = ConnTab::Standard;
                     }
                 }
@@ -253,8 +391,8 @@ impl App {
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 18.0;
-                    let last = if f.engine.is_sql() { (ConnTab::Tls, "TLS") } else { (ConnTab::Proxy, "Proxy") };
-                    for (t, label) in [(ConnTab::Standard, "Standard"), (ConnTab::Ssh, "SSH"), last] {
+                    let tabs: &[(ConnTab, &str)] = if f.engine.is_sql() { &[(ConnTab::Standard, "Standard"), (ConnTab::Ssh, "SSH"), (ConnTab::Tls, "TLS"), (ConnTab::Advanced, "Advanced")] } else { &[(ConnTab::Standard, "Standard"), (ConnTab::Ssh, "SSH"), (ConnTab::Proxy, "Proxy")] };
+                    for &(t, label) in tabs {
                         if view_tab(ui, label, f.tab == t).clicked() {
                             f.tab = t;
                         }
@@ -266,6 +404,7 @@ impl App {
                     ConnTab::Ssh => ssh_tab(ui, f),
                     ConnTab::Proxy => proxy_tab(ui, f),
                     ConnTab::Tls => tls_tab(ui, f),
+                    ConnTab::Advanced => advanced_tab(ui, f, default_s),
                 });
             });
         });
@@ -284,9 +423,13 @@ impl App {
             }
             None => {}
         }
+        let adv = f.advanced();
+        if let Err(m) = &adv {
+            ui.add(egui::Label::new(RichText::new(m).color(ALERT())).wrap());
+        }
         dialog_actions(ui, |ui| {
             let address_ok = if f.engine.is_sql() { !f.addr.host.trim().is_empty() && !f.addr.user.trim().is_empty() } else { f.uri.starts_with("mongodb://") || f.uri.starts_with("mongodb+srv://") };
-            let valid = !f.name.trim().is_empty() && address_ok && (!f.ssh_on || (!f.ssh.host.trim().is_empty() && !f.ssh.user.trim().is_empty())) && (!f.proxy_on || f.ssh_on || f.engine.is_sql() || !f.proxy.host.trim().is_empty());
+            let valid = adv.is_ok() && !f.name.trim().is_empty() && address_ok && (!f.ssh_on || (!f.ssh.host.trim().is_empty() && !f.ssh.user.trim().is_empty())) && (!f.proxy_on || f.ssh_on || f.engine.is_sql() || !f.proxy.host.trim().is_empty());
             save = ui.add_enabled(valid, primary_button(ui, "Save and connect", PRIMARY())).clicked();
             test = ui.add_enabled(valid, egui::Button::new("Test")).clicked();
             if ui.button("Cancel").clicked() {
@@ -296,10 +439,11 @@ impl App {
         if test {
             f.testing = true;
             self.conn_test = None;
+            self.test_info = None;
             let net = f.net();
             if f.engine.is_sql() {
                 let addr = db::sql::Addr { host: f.addr.host.trim().into(), user: f.addr.user.trim().into(), database: f.addr.database.trim().into(), ..f.addr.clone() };
-                self.worker.sql_test(addr.to_uri(), self.timeout(), net);
+                self.worker.sql_test_with(addr.to_uri(), self.timeout(), net, adv.clone().unwrap_or_default());
             } else {
                 self.worker.test(f.uri.trim().to_string(), self.timeout(), net);
             }
@@ -328,6 +472,7 @@ impl App {
                         tag: clean_tag(&f.tag).into(),
                         ssh: f.ssh_on.then(|| crate::ssh::SshConf { host: f.ssh.host.trim().into(), user: f.ssh.user.trim().into(), ..f.ssh.clone() }),
                         proxy: (f.proxy_on && !f.ssh_on && !f.engine.is_sql()).then(|| db::Proxy { host: f.proxy.host.trim().into(), password: None, ..f.proxy.clone() }),
+                        advanced: adv.clone().unwrap_or_default(),
                     };
                     match self.conns.iter_mut().find(|c| c.meta.id == id) {
                         Some(c) => {

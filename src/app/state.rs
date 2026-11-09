@@ -62,6 +62,9 @@ pub(super) struct ConnMeta {
     /// Environment label shown next to the name, such as Production.
     #[serde(default)]
     pub(super) tag: String,
+    /// Session settings, init command and timeouts of a SQL connection. None of it is secret.
+    #[serde(default, skip_serializing_if = "db::sql::Advanced::is_default")]
+    pub(super) advanced: db::sql::Advanced,
 }
 
 #[derive(PartialEq)]
@@ -820,6 +823,17 @@ pub(super) enum ConnTab {
     Ssh,
     Proxy,
     Tls,
+    Advanced,
+}
+
+/// The time zone choice of the Advanced tab; the Custom text lives beside it.
+#[derive(Default, Clone, Copy, PartialEq)]
+pub(super) enum ZoneKind {
+    #[default]
+    Server,
+    Utc,
+    System,
+    Custom,
 }
 
 /// The new/edit connection form.
@@ -841,9 +855,71 @@ pub(super) struct ConnForm {
     pub(super) proxy: db::Proxy,
     pub(super) proxy_pwd: String,
     pub(super) testing: bool,
+    /// Charset, collation and init command are edited in place; the rest has form state of its own below.
+    pub(super) adv: db::sql::Advanced,
+    pub(super) zone_kind: ZoneKind,
+    pub(super) zone_text: String,
+    pub(super) mode_custom: bool,
+    pub(super) mode_on: [bool; 8],
+    pub(super) mode_extra: String,
+    pub(super) t_connect: String,
+    pub(super) t_query: String,
+    pub(super) t_idle: String,
+    /// (charset, collation) pairs the last Test read from the server.
+    pub(super) collations: Vec<(String, String)>,
 }
 
 impl ConnForm {
+    /// The form's Advanced tab as saved settings, or the first thing wrong with it.
+    pub(super) fn advanced(&self) -> Result<db::sql::Advanced, String> {
+        use db::sql::advanced::{parse_flags, MODE_FLAGS};
+        if !self.engine.is_sql() {
+            return Ok(Default::default());
+        }
+        let zone = match self.zone_kind {
+            ZoneKind::Server => db::sql::Zone::Server,
+            ZoneKind::Utc => db::sql::Zone::Utc,
+            ZoneKind::System => db::sql::Zone::System,
+            ZoneKind::Custom => db::sql::Zone::Custom(self.zone_text.trim().into()),
+        };
+        let sql_mode = if self.mode_custom {
+            let mut flags: Vec<String> = MODE_FLAGS.iter().zip(self.mode_on).filter(|(_, on)| *on).map(|(f, _)| f.to_string()).collect();
+            for f in parse_flags(&self.mode_extra)? {
+                if !flags.contains(&f) {
+                    flags.push(f);
+                }
+            }
+            Some(flags)
+        } else {
+            None
+        };
+        let secs = |text: &str, name: &str| -> Result<Option<u32>, String> {
+            let t = text.trim();
+            if t.is_empty() { Ok(None) } else { t.parse().map(Some).map_err(|_| format!("{name} timeout: {t:?} is not a number of seconds")) }
+        };
+        let a = db::sql::Advanced { zone, collation: self.adv.collation.trim().into(), sql_mode, connect_secs: secs(&self.t_connect, "Connect")?, query_secs: secs(&self.t_query, "Query")?, idle_secs: secs(&self.t_idle, "Idle")?, ..self.adv.clone() };
+        a.validate()?;
+        Ok(a)
+    }
+
+    /// Fills the form from saved settings.
+    pub(super) fn set_advanced(&mut self, a: &db::sql::Advanced) {
+        use db::sql::advanced::MODE_FLAGS;
+        self.adv = a.clone();
+        (self.zone_kind, self.zone_text) = match &a.zone {
+            db::sql::Zone::Server => (ZoneKind::Server, String::new()),
+            db::sql::Zone::Utc => (ZoneKind::Utc, String::new()),
+            db::sql::Zone::System => (ZoneKind::System, String::new()),
+            db::sql::Zone::Custom(z) => (ZoneKind::Custom, z.clone()),
+        };
+        self.mode_custom = a.sql_mode.is_some();
+        let flags = a.sql_mode.clone().unwrap_or_default();
+        self.mode_on = MODE_FLAGS.map(|f| flags.iter().any(|x| x == f));
+        self.mode_extra = flags.iter().filter(|f| !MODE_FLAGS.contains(&f.as_str())).cloned().collect::<Vec<_>>().join(", ");
+        let t = |s: Option<u32>| s.map(|s| s.to_string()).unwrap_or_default();
+        (self.t_connect, self.t_query, self.t_idle) = (t(a.connect_secs), t(a.query_secs), t(a.idle_secs));
+    }
+
     pub(super) fn net(&self) -> db::Net {
         db::Net {
             ssh: self.ssh_on.then(|| (crate::ssh::SshConf { host: self.ssh.host.trim().into(), user: self.ssh.user.trim().into(), ..self.ssh.clone() }, crate::ssh::SshSecrets { password: Some(self.ssh_pwd.clone()), passphrase: Some(self.ssh_pass.clone()) })),
@@ -1064,8 +1140,9 @@ impl App {
         // Asked again once connected, so a changed or failed server never shows the old one.
         c.server = ServerInfo::default();
         let net = net_of(&c.meta);
+        let adv = c.meta.advanced.clone();
         if c.meta.engine.is_sql() {
-            self.worker.sql_connect(id, uri, self.timeout(), net);
+            self.worker.sql_connect_with(id, uri, self.timeout(), net, adv);
         } else {
             self.worker.connect(id, uri, self.timeout(), net);
         }

@@ -143,7 +143,7 @@ impl Worker {
                 };
                 format!("Connected{via}: {} databases.", dbs.len())
             });
-            Msg::Tested { res }
+            Msg::Tested { res, info: None }
         });
     }
 

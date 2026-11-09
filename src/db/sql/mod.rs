@@ -2,6 +2,7 @@
 //! a new engine is a new arm.
 
 mod dialect;
+pub mod advanced;
 mod worker;
 pub mod structure;
 pub mod write;
@@ -17,6 +18,7 @@ pub mod dump;
 mod testing;
 pub mod rules;
 pub mod schema;
+pub use advanced::{Advanced, Charset, TestInfo, Zone};
 pub use dialect::{Dialect, FUNCTIONS, KEYWORDS};
 pub use structure::Structure;
 pub use worker::{Answer, Relay, RunHandle};

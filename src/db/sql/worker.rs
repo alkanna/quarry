@@ -4,7 +4,7 @@
 
 use super::value::{self, Kind};
 use super::schema::{Schema, SchemaCol, SchemaTable};
-use super::{lex, Addr, Col, Db, Dialect, Page, PageQuery, Pool, ResultSet, SslMode, RUN_ROWS_MAX};
+use super::{lex, Addr, Advanced, TestInfo, Col, Db, Dialect, Page, PageQuery, Pool, ResultSet, SslMode, RUN_ROWS_MAX};
 use crate::db::{e, Msg, Net, Res, Row, Worker};
 use mongodb::bson::{Bson, Document};
 use sqlx::mysql::{MySqlColumn, MySqlConnectOptions, MySqlPoolOptions, MySqlRow, MySqlSslMode};
@@ -37,17 +37,46 @@ fn ssl_mode(m: SslMode) -> MySqlSslMode {
     }
 }
 
-/// What every pool connection gets: read-only and the statement timeout.
-async fn session(c: &mut sqlx::MySqlConnection, ms: u64) -> Result<(), sqlx::Error> {
+/// What every pool connection gets: read-only, the settings of the Advanced tab, the statement timeout and the
+/// init command, in that order. The init command goes last so it can refine what came before, and after the
+/// guard so it cannot run as a writer.
+async fn session(c: &mut sqlx::MySqlConnection, ms: u64, adv: Option<&Setup>) -> Result<(), sqlx::Error> {
     // The dialect is not known yet, so each connection asks for it to pick the session statements.
     let v: String = sqlx::query_scalar("SELECT VERSION()").fetch_one(&mut *c).await?;
     let d = Dialect::from_version(&v);
     c.execute(d.session_read_only(true)).await?;
+    // A refused setting fails the connect with the server's words, since the user asked for it.
+    for q in adv.iter().flat_map(|a| a.statements.iter()) {
+        if let Err(err) = c.execute(q.as_str()).await {
+            return Err(failed_setup(adv, format!("{q}: {}", e(err))));
+        }
+    }
     // Old servers and proxies may lack the variable; a missing timeout is better than no connection, but a
     // missing read-only guard is not, so only that one fails the connect.
     let t = d.session_timeout(ms);
     let _ = c.execute(t.as_str()).await;
+    for q in adv.iter().flat_map(|a| a.init.iter()) {
+        if let Err(err) = c.execute(q.as_str()).await {
+            return Err(failed_setup(adv, format!("Init command failed on {q:?}: {}", e(err))));
+        }
+    }
     Ok(())
+}
+
+/// The settings of the Advanced tab as a connection applies them. A pool wraps what a connection hook failed
+/// with in text of its own, so the message is kept on the side for `open` to report.
+#[derive(Clone)]
+struct Setup {
+    statements: Vec<String>,
+    init: Vec<String>,
+    failure: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+fn failed_setup(adv: Option<&Setup>, msg: String) -> sqlx::Error {
+    if let Some(a) = adv {
+        *a.failure.lock().unwrap() = Some(msg.clone());
+    }
+    sqlx::Error::Protocol(msg)
 }
 
 /// Readies the script's own connection: its id for Stop, the database, and write access when unlocked.
@@ -65,7 +94,15 @@ pub(super) async fn prepare(conn: &mut sqlx::MySqlConnection, d: Dialect, schema
     Ok(())
 }
 
-async fn open(uri: &str, timeout: Duration, net: &Net) -> Res<(Db, Vec<String>, Option<crate::ssh::Tunnel>)> {
+async fn open(uri: &str, timeout: Duration, net: &Net, adv: &Advanced) -> Res<(Db, Vec<String>, Option<crate::ssh::Tunnel>)> {
+    open_full(uri, timeout, net, adv, false).await.map(|(db, dbs, t, _)| (db, dbs, t))
+}
+
+/// `info` also reads what the form's Test button shows: the server's default sql_mode and its UTF-8 collations.
+async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info: bool) -> Res<(Db, Vec<String>, Option<crate::ssh::Tunnel>, TestInfo)> {
+    // Checked before anything connects, so a bad value never costs a tunnel or a login.
+    let setup = Setup { statements: adv.session_statements(super::advanced::local_offset_secs())?, init: super::advanced::init_statements(&adv.init), failure: Default::default() };
+    let timeout = adv.connect_timeout(timeout);
     let a = Addr::parse(uri).ok_or("Not a MySQL address")?;
     let tunnel = match &net.ssh {
         Some((conf, secrets)) => Some(crate::ssh::open(conf, secrets, timeout, Some((a.host.clone(), a.port))).await?),
@@ -87,21 +124,29 @@ async fn open(uri: &str, timeout: Duration, net: &Net) -> Res<(Db, Vec<String>, 
     if !a.ssl_ca.is_empty() {
         o = o.ssl_ca(&a.ssl_ca);
     }
-    let ms = timeout.as_millis() as u64;
-    let pool = MySqlPoolOptions::new()
-        .max_connections(4)
-        .acquire_timeout(timeout)
-        .after_connect(move |c, _| Box::pin(session(c, ms)))
-        .connect_with(o.clone())
-        .await
-        .map_err(e)?;
+    let ms = adv.query_ms(timeout.as_millis() as u64);
+    let mut pool_opts = MySqlPoolOptions::new().max_connections(4).acquire_timeout(timeout);
+    if let Some(idle) = adv.idle_timeout() {
+        pool_opts = pool_opts.idle_timeout(idle);
+    }
+    let hook = setup.clone();
+    let pool = pool_opts.after_connect(move |c, _| {
+        let hook = hook.clone();
+        Box::pin(async move { session(c, ms, Some(&hook)).await })
+    }).connect_with(o.clone()).await.map_err(|err| setup.failure.lock().unwrap().take().unwrap_or_else(|| e(err)))?;
     let version: String = sqlx::query_scalar("SELECT VERSION()").fetch_one(&pool).await.map_err(e)?;
     let sql_mode: String = sqlx::query_scalar("SELECT @@sql_mode").fetch_one(&pool).await.unwrap_or_default();
     let tls = raw_sql("SHOW SESSION STATUS LIKE 'Ssl_cipher'").fetch_all(&pool).await.map_err(e)?.iter().any(|r| raw(r, 1).is_some_and(|v| !v.is_empty()));
     let mut dbs: Vec<String> = raw_sql("SHOW DATABASES").fetch_all(&pool).await.map_err(e)?.iter().filter_map(|r| raw(r, 0).map(|b| String::from_utf8_lossy(b).into_owned())).collect();
     dbs.sort();
+    let mut ti = TestInfo::default();
+    if info {
+        ti.sql_mode = sqlx::query_scalar("SELECT @@GLOBAL.sql_mode").fetch_one(&pool).await.unwrap_or_default();
+        let rows = raw_sql("SELECT CHARACTER_SET_NAME, COLLATION_NAME FROM information_schema.COLLATIONS WHERE CHARACTER_SET_NAME IN ('utf8mb4', 'utf8mb3') ORDER BY COLLATION_NAME").fetch_all(&pool).await.unwrap_or_default();
+        ti.collations = rows.iter().filter_map(|r| Some((String::from_utf8_lossy(raw(r, 0)?).into_owned(), String::from_utf8_lossy(raw(r, 1)?).into_owned()))).collect();
+    }
     let db = Db { dialect: Dialect::from_version(&version), pool: Pool::My(pool), opts: o, version, tls, sql_mode };
-    Ok((db, dbs, tunnel))
+    Ok((db, dbs, tunnel, ti))
 }
 
 /// A table kind from information_schema's COLUMN_TYPE ("varchar(20)", "bigint unsigned"), which stays
@@ -623,7 +668,7 @@ async fn field_values(db: &Db, schema: &str, table: &str, column: &str, prefix: 
     }
     let mut c = tokio::time::timeout(Duration::from_secs(10), sqlx::MySqlConnection::connect_with(&db.opts)).await.map_err(|_| "Could not reach the server".to_string())?.map_err(e)?;
     let res = async {
-        session(&mut c, 300).await.map_err(e)?;
+        session(&mut c, 300, None).await.map_err(e)?;
         let sql = d.value_counts(schema, table, column, prefix.is_some(), 201);
         let mut q = sqlx::query(&sql);
         if let Some(p) = prefix {
@@ -655,21 +700,33 @@ impl Worker {
         });
     }
 
+    #[cfg(test)]
     pub fn sql_connect(&self, conn: u64, uri: String, timeout: Duration, net: Net) {
-        self.spawn(async move { Msg::SqlConnected { conn, res: open(&uri, timeout, &net).await } });
+        self.sql_connect_with(conn, uri, timeout, net, Advanced::default());
+    }
+
+    pub fn sql_connect_with(&self, conn: u64, uri: String, timeout: Duration, net: Net, adv: Advanced) {
+        self.spawn(async move { Msg::SqlConnected { conn, res: open(&uri, timeout, &net, &adv).await } });
     }
 
     /// Connects and drops everything again, for the connection form.
+    #[cfg(test)]
     pub fn sql_test(&self, uri: String, timeout: Duration, net: Net) {
+        self.sql_test_with(uri, timeout, net, Advanced::default());
+    }
+
+    pub fn sql_test_with(&self, uri: String, timeout: Duration, net: Net, adv: Advanced) {
         self.spawn(async move {
             let start = Instant::now();
-            let res = open(&uri, timeout, &net).await.map(|(db, _, t)| {
+            let mut info = None;
+            let res = open_full(&uri, timeout, &net, &adv, true).await.map(|(db, _, t, ti)| {
+                info = Some(ti);
                 let via = t.as_ref().map(|t| format!(" through SSH (host key {})", t.fingerprint)).unwrap_or_default();
                 // Over a tunnel the certificate cannot match 127.0.0.1, so `open` checks the CA only.
                 let note = if t.is_some() && Addr::parse(&uri).is_some_and(|a| a.ssl_mode == SslMode::VerifyIdentity) { " (TLS verified against the CA; the host name is the tunnel's)" } else { "" };
                 format!("Connected{via} to {} in {} ms{note}", db.label(), start.elapsed().as_millis())
             });
-            Msg::Tested { res }
+            Msg::Tested { res, info }
         });
     }
 
@@ -892,10 +949,10 @@ mod tests {
         assert!(db.label().starts_with("MySQL ") || db.label().starts_with("MariaDB "));
         let uri = std::env::var("QUARRY_TEST_MYSQL").unwrap();
         w.sql_test(uri, Duration::from_secs(10), Net::default());
-        let Msg::Tested { res: Ok(m) } = next(&rx) else { panic!("expected Tested") };
+        let Msg::Tested { res: Ok(m), .. } = next(&rx) else { panic!("expected Tested") };
         assert!(m.starts_with("Connected to ") && m.contains(&db.label()) && m.ends_with(" ms"), "{m}");
         w.sql_test("mysql://root:wrong@127.0.0.1:3306".into(), Duration::from_secs(10), Net::default());
-        let Msg::Tested { res } = next(&rx) else { panic!("expected Tested") };
+        let Msg::Tested { res, .. } = next(&rx) else { panic!("expected Tested") };
         assert!(res.is_err());
     }
 

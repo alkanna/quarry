@@ -285,7 +285,7 @@ impl App {
                 }
             };
             let stored = |what: &str| if self.demo { String::new() } else { secret(id, what).unwrap_or_default() };
-            self.modal = Some(Modal::Conn(Box::new(ConnForm {
+            let mut form = ConnForm {
                 id: Some(id),
                 name: meta.name.clone(),
                 tag: meta.tag.clone(),
@@ -302,7 +302,10 @@ impl App {
                 show: false,
                 testing: false,
                 tab: Default::default(),
-            })));
+                ..Default::default()
+            };
+            form.set_advanced(&meta.advanced);
+            self.modal = Some(Modal::Conn(Box::new(form)));
         }
     }
 
