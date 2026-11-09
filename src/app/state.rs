@@ -321,11 +321,13 @@ pub(super) struct SchemaTab {
     pub(super) vwarn: bool,
     pub(super) vreq: u64,
     pub(super) vloaded: bool,
+    /// Field paths whose children are folded away.
+    pub(super) closed: HashSet<String>,
 }
 
 impl Default for SchemaTab {
     fn default() -> Self {
-        Self { req: 0, limit: SCHEMA_DEFAULT_LIMIT, last: false, running: false, stats: Vec::new(), docs: 0, ms: None, err: None, vtext: String::new(), vlevel: 2, vwarn: false, vreq: 0, vloaded: false }
+        Self { req: 0, limit: SCHEMA_DEFAULT_LIMIT, last: false, running: false, stats: Vec::new(), docs: 0, ms: None, err: None, vtext: String::new(), vlevel: 2, vwarn: false, vreq: 0, vloaded: false, closed: HashSet::new() }
     }
 }
 
