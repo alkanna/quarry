@@ -219,8 +219,17 @@ pub(crate) fn splitter(ui: &mut egui::Ui) -> egui::Response {
 /// `rendered` the height drawn this frame, which a drag starts from. Returns true when the drag
 /// ended or was reset, which is when to save.
 pub(crate) fn resize_editor(r: &egui::Response, pref: &mut f32, rendered: f32, lo: f32, hi: f32) -> bool {
+    // The drawn height snaps to whole lines, so adding each frame's delta to it fights the pointer
+    // and the bar jumps back. The height is taken from where the drag started instead.
+    let id = r.id.with("drag-start");
+    if r.drag_started() {
+        let y = r.interact_pointer_pos().map_or(0.0, |p| p.y);
+        r.ctx.data_mut(|d| d.insert_temp(id, (rendered, y)));
+    }
     if r.dragged() {
-        *pref = (rendered + r.drag_delta().y).clamp(lo, hi.max(lo));
+        if let (Some((h0, y0)), Some(p)) = (r.ctx.data(|d| d.get_temp::<(f32, f32)>(id)), r.interact_pointer_pos()) {
+            *pref = (h0 + p.y - y0).clamp(lo, hi.max(lo));
+        }
     }
     if r.double_clicked() {
         *pref = 0.0;
