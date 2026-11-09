@@ -1,6 +1,8 @@
 //! The JS shell view and running scripts.
 
 use super::*;
+use crate::ui::sql_complete::{Wants, analyze, split_statement};
+use std::cell::RefCell;
 
 /// Words the original treats as possibly destructive in the shell (`dangerousCommands`,
 /// renderer line 131264: /drop|remove|replace|update|delete|insert|rename|\$out/i), plus `$merge`,
@@ -398,6 +400,11 @@ impl App {
         let mut new_pkg = std::mem::take(&mut self.new_pkg);
         let colls: Vec<String> = self.t().and_then(|t| self.conn(t.sel.conn).and_then(|c| c.dbs.iter().find(|d| d.0 == t.sel.db)).and_then(|d| d.1.clone())).unwrap_or_default();
         let known = if sql { Vec::new() } else { self.db_fields() };
+        // What SQL templates in the script complete from: the tab's database and its looked up values.
+        let sql_cx = sql.then(|| (self.tabs[self.cur].sel.conn, self.tabs[self.cur].sel.db.clone()));
+        let scope = sql_cx.as_ref().map(|(c, d)| self.sql_scope(*c, d, None));
+        let none = Fields::new();
+        let values = sql_cx.as_ref().and_then(|k| self.sql_values.get(k)).unwrap_or(&none);
         let (t, ac) = (&mut self.tabs[self.cur], &mut self.ac);
         if t.shell.code.is_empty() {
             t.shell.code = default_script(&coll, sql);
@@ -490,28 +497,54 @@ impl App {
         let focused = ui.memory(|m| m.has_focus(id));
         // Read before the list consumes it, so a late server answer cannot reopen a dismissed list.
         let esc = ui.input(|i| i.key_pressed(Key::Escape));
-        let h = (t.shell.code.split('\n').count() as f32 * LINE_H + 24.0).clamp(110.0, (ui.available_height() * 0.4).max(110.0));
+        // The editor keeps three lines, and the results below it the Console, the header and three rows.
+        let (lo, hi) = (3.0 * LINE_H + 24.0, ui.available_height() - SHELL_PANEL_H - 3.0 * ROW_H - TABLE_HEAD_H - 70.0);
+        let pref = self.prefs.shell_editor_h;
+        let custom = pref > 0.0;
+        let h = if custom { pref.clamp(lo, hi.max(lo)) } else { (t.shell.code.split('\n').count() as f32 * LINE_H + 24.0).clamp(110.0, (ui.available_height() * 0.4).max(110.0)) };
         let mut layout = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
-            let mut job = js_job(buf.as_str());
+            let mut job = if sql { shell_ls::js_sql_job(buf.as_str()) } else { js_job(buf.as_str()) };
             for sec in &mut job.sections {
                 sec.format.line_height = Some(LINE_H);
             }
             job.wrap.max_width = wrap;
             ui.fonts_mut(|f| f.layout_job(job))
         };
-        egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, if focused { PRIMARY() } else { BORDER() })).corner_radius(R_MD).show(ui, |ui| {
+        // Inside sql`...` the suggestions are SQL ones; elsewhere the built-in and server ones stay.
+        let tail = if scope.is_some() && focused { shell_ls::template_tail(ui.ctx(), id, &t.shell.code) } else { String::new() };
+        let (meta, need): (RefCell<Option<(String, String)>>, RefCell<Option<crate::ui::sql_complete::Need>>) = Default::default();
+        let compute = |b: &str| -> Option<(usize, Vec<Sug>)> {
+            let tpl = scope.as_ref().and_then(|_| sql_at(b, b.len()));
+            let (Some(tpl), Some(scope)) = (tpl, &scope) else { return suggest_js(b, &known, &colls, &pkg_names) };
+            let (sb, full) = split_statement(&sql_text(b, &tpl, b.len()).0, &tail);
+            let o = analyze(&sb, &full, scope, values)?;
+            *need.borrow_mut() = o.need.clone();
+            *meta.borrow_mut() = Some((o.title.clone(), o.foot.clone()));
+            (!o.sugs.is_empty()).then(|| (sb[o.from..].chars().count(), o.sugs))
+        };
+        if let (Some(scope), true) = (&scope, std::env::var("QUARRY_TEST_SQL").is_ok_and(|v| v == "shellac")) {
+            shell_ls::shell_ac_demo(ui, id, &t.shell.code, ac, scope, values);
+        }
+        let mut sql_need = None;
+        let framed = egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, if focused { PRIMARY() } else { BORDER() })).corner_radius(R_MD).show(ui, |ui| {
             egui::ScrollArea::vertical().id_salt("shell-ed").max_height(h).auto_shrink([false, true]).show(ui, |ui| {
-                let (out, picked) = ac_field(ui, id, &mut t.shell.code, ac, &|b| suggest_js(b, &known, &colls, &pkg_names), |ui, text, _open| {
+                let (out, picked) = ac_field(ui, id, &mut t.shell.code, ac, &compute, |ui, text, _open| {
                     egui::TextEdit::multiline(text)
                         .id(id)
                         .font(FontId::monospace(TXT_SMALL))
                         .frame(egui::Frame::new().inner_margin(egui::Margin { left: GUTTER_W as i8, right: 12, top: 10, bottom: 10 }))
                         .desired_width(f32::INFINITY)
-                        .min_size(egui::vec2(0.0, 96.0))
+                        .min_size(egui::vec2(0.0, if custom { h } else { 96.0 }))
                         .lock_focus(true)
                         .layouter(&mut layout)
                         .show(ui)
                 });
+                if ac.id == Some(id) && !ac.items.is_empty() {
+                    if let Some((title, foot)) = meta.borrow_mut().take() {
+                        (ac.title, ac.foot) = (title, foot);
+                    }
+                }
+                sql_need = need.borrow_mut().take();
                 let caret = out.cursor_range.filter(|r| r.is_empty()).map(|r| r.primary.index.0);
                 let (g, gp, rect) = (&out.galley, out.galley_pos, out.response.rect);
                 let cur_line = caret.map_or(0, |c| t.shell.code.chars().take(c).filter(|ch| *ch == '\n').count() + 1);
@@ -545,7 +578,9 @@ impl App {
                 });
             });
         });
-        ui.add_space(8.0);
+        let bar = splitter(ui);
+        let saved = resize_editor(&bar, &mut self.prefs.shell_editor_h, framed.response.rect.height(), lo, hi);
+        ui.add_space(2.0);
         if let Some(e) = &t.shell.error {
             egui::Frame::new().fill(tint(ALERT(), 20)).corner_radius(R_MD).inner_margin(10).show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -655,6 +690,12 @@ impl App {
             self.save_prefs();
             self.js_restart();
         }
+        if saved {
+            self.save_prefs();
+        }
+        if let (Some(n), Some((c, d))) = (sql_need, &sql_cx) {
+            self.sql_serve(*c, d, Wants { schema: false, values: Some(n) });
+        }
         if let Some(f) = editor {
             self.js_editor(ui.ctx(), f, &colls);
         }
@@ -673,7 +714,8 @@ impl App {
         let t = &mut self.tabs[0];
         t.view = View::Shell;
         t.selected = None;
-        t.shell.code = "async function run() {\n  const rows = await sql`\n    SELECT customer_id, COUNT(*) AS n FROM orders\n    WHERE status = ${'paid'} GROUP BY customer_id HAVING n > 3`\n  for (const r of rows) {\n    r.last = await orders.findOne({ customer_id: r.customer_id }, { orderBy: '-id' })\n  }\n  return rows\n}".into();
+        let ac_demo = std::env::var("QUARRY_TEST_SQL").is_ok_and(|v| v == "shellac");
+        t.shell.code = if ac_demo { "async function run() {\n  const rows = await sql`\n    SELECT customer_id, COUNT(*) AS n FROM ord\n    WHERE status = ${'paid'} GROUP BY customer_id`\n  return rows\n}".into() } else { "async function run() {\n  const rows = await sql`\n    SELECT customer_id, COUNT(*) AS n FROM orders\n    WHERE status = ${'paid'} GROUP BY customer_id HAVING n > 3`\n  for (const r of rows) {\n    r.last = await orders.findOne({ customer_id: r.customer_id }, { orderBy: '-id' })\n  }\n  return rows\n}".into() };
         let rows = [(1284_i64, 9_i64, 4410_i64, "paid", "112.00"), (877, 7, 4409, "shipped", "26.75"), (61, 6, 4407, "paid", "1,204.10"), (430, 5, 4405, "paid", "54.20")];
         let docs: Vec<Bson> = rows.iter().map(|&(c, n, id, st, tot)| Bson::Document(doc! { "customer_id": c, "n": n, "last": { "id": id, "status": st, "total": tot } })).collect();
         t.shell.set_value(Bson::Array(docs));

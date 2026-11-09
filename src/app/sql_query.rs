@@ -278,7 +278,7 @@ impl App {
             s.query = text;
         }
         self.sql_editor(ui);
-        ui.add_space(10.0);
+        ui.add_space(4.0);
         self.sql_result_pane(ui, running);
         if stop {
             self.sql_stop();
@@ -299,7 +299,10 @@ impl App {
         let values = self.sql_values.get(&(conn, db.clone())).unwrap_or(&none);
         let Some(s) = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()) else { return };
         let lines = s.query.split('\n').count();
-        let h = (lines as f32 * LINE_H + 24.0).clamp(96.0, (avail * 0.5).max(96.0));
+        // The editor keeps three lines, and the results below it their tabs, header and three rows.
+        let (lo, hi) = (3.0 * LINE_H + 24.0, avail - 3.0 * ROW_H - TABLE_HEAD_H - 110.0);
+        let custom = self.prefs.query_editor_h > 0.0;
+        let h = if custom { self.prefs.query_editor_h.clamp(lo, hi.max(lo)) } else { (lines as f32 * LINE_H + 24.0).clamp(96.0, (avail * 0.5).max(96.0)) };
         let mut layout = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
             let mut job = sql_job(buf.as_str());
             for sec in &mut job.sections {
@@ -308,7 +311,7 @@ impl App {
             job.wrap.max_width = wrap;
             ui.fonts_mut(|f| f.layout_job(job))
         };
-        egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, if focused { PRIMARY() } else { BORDER() })).corner_radius(R_MD).show(ui, |ui| {
+        let framed = egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, if focused { PRIMARY() } else { BORDER() })).corner_radius(R_MD).show(ui, |ui| {
             egui::ScrollArea::vertical().id_salt("sql-ed").max_height(h).auto_shrink([false, true]).show(ui, |ui| {
                 // Reserved first so the band is drawn under the text.
                 let band = ui.painter().add(egui::Shape::Noop);
@@ -322,7 +325,7 @@ impl App {
                         .font(FontId::monospace(TXT_SMALL))
                         .frame(egui::Frame::new().inner_margin(egui::Margin { left: GUTTER_W as i8, right: 12, top: 10, bottom: 10 }))
                         .desired_width(f32::INFINITY)
-                        .min_size(egui::vec2(0.0, 96.0))
+                        .min_size(egui::vec2(0.0, if custom { h } else { 96.0 }))
                         .lock_focus(true)
                         .hint_text(RichText::new("SELECT * FROM orders;").font(FontId::monospace(TXT_SMALL)).color(FAINT()))
                         .layouter(&mut layout)
@@ -352,6 +355,10 @@ impl App {
         });
         let wants = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()).map(|s| std::mem::take(&mut s.bar.wants)).unwrap_or_default();
         self.sql_serve(conn, &db, wants);
+        let bar = splitter(ui);
+        if resize_editor(&bar, &mut self.prefs.query_editor_h, framed.response.rect.height(), lo, hi) {
+            self.save_prefs();
+        }
     }
 
     /// The result tabs, the Table or Text switch and the selected statement's outcome.

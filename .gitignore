@@ -34,3 +34,8 @@ __pycache__/
 
 # Remotion showcase video, kept local
 /showcase/
+
+# Editor and agent backups
+*.bak
+*.orig
+*.rej
