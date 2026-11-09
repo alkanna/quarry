@@ -78,11 +78,25 @@ impl App {
         if let Some(e) = &t.schema.err {
             ui.label(RichText::new(format!("Analysis failed: {e}")).color(ALERT()));
         } else if let Some(ms) = t.schema.ms {
-            ui.label(RichText::new(format!("{} fields in {} documents  ·  {ms} ms", t.schema.stats.len(), group(&t.schema.docs.to_string()))).color(MUTED()));
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("{} fields in {} documents  ·  {ms} ms", t.schema.stats.len(), group(&t.schema.docs.to_string()))).color(MUTED()));
+                // Fields followed by a deeper row are the ones that fold.
+                let s = &mut t.schema;
+                let parents: Vec<String> = s.stats.windows(2).filter(|w| w[1].depth > w[0].depth).map(|w| w[0].path.clone()).collect();
+                if !parents.is_empty() {
+                    ui.add_space(12.0);
+                    if quiet(ui, "Expand all").clicked() {
+                        s.closed.clear();
+                    }
+                    if quiet(ui, "Collapse all").clicked() {
+                        s.closed.extend(parents);
+                    }
+                }
+            });
         }
         let n = t.schema.docs.max(1) as f32;
         let mut toggle = None;
-        egui::ScrollArea::vertical().id_salt("schema").auto_shrink(false).show(ui, |ui| {
+        egui::ScrollArea::both().id_salt("schema").auto_shrink(false).show(ui, |ui| {
             egui::Grid::new("schema-grid").num_columns(4).striped(true).spacing([18.0, 6.0]).min_col_width(60.0).show(ui, |ui| {
                 for h in ["FIELD", "PRESENT IN", "TYPES", "EXAMPLES"] {
                     caption(ui, h);
@@ -113,7 +127,8 @@ impl App {
                     });
                     // Merged map keys have no single path to filter on or show as a column.
                     if !f.dynamic {
-                        r.response.context_menu(|ui| {
+                        // The row only senses hover, so a plain context_menu never sees the right click.
+                        r.response.container_context_menu(|ui| {
                             menu_look(ui);
                             ui.label(RichText::new(format!("Field: {}", f.path)).size(TXT_SMALL).color(MUTED()));
                             if ui.button("Add as column").clicked() {
