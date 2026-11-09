@@ -15,7 +15,7 @@ Update this list when a step lands. Each step is reviewed before it is ticked.
 - [x] 4. SQL worker, new `Msg` variants, live tests (`QUARRY_TEST_MYSQL`). Reviewed; live tests pass on MySQL 8.4 and MariaDB 11
 - [x] 5. state, tabs, poll and sidebar wiring (with a basic Content grid and the `QUARRY_TEST_SQL=content` demo; table lists load when a database opens)
 - [ ] 6. Content view with design F: Rules / SQL bar, clause chips, edits, undo, colors, column actions, multi-select, Copy as (incl. Markdown and HTML)
-- [ ] 7. Structure (design A) and Info, read-only
+- [x] 7. Structure (design A) and Info, read-only, plus read-only Relations and Triggers views. Structure loads when one of those views opens
 - [ ] 8. Custom Query: highlighter, several result sets, Stop (`KILL QUERY`)
 - [ ] 9. SQL autocomplete
 - [ ] 10. SQL shell with typed tables, and the shared shell layout for Mongo and SQL
