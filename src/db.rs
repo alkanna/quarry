@@ -17,6 +17,7 @@ mod js_ls;
 mod log;
 mod shell;
 pub mod sql;
+pub mod copy;
 mod tools;
 mod worker;
 pub use analysis::*;
@@ -177,6 +178,8 @@ pub enum UndoKind {
     Delete { old: Document },
     /// Undo puts these documents back.
     DeleteMany { old: Vec<Document> },
+    /// A SQL write; `db` and `coll` of the action are the schema and table.
+    Sql { cols: Vec<sql::Col>, undo: sql::write::SqlUndo },
 }
 
 pub struct UndoAction {

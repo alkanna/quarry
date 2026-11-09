@@ -80,6 +80,7 @@ impl App {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
+                self.sql_row_tools(ui);
                 if icon_button(ui, "⟳", true).on_hover_text("Reload (Cmd+R)").clicked() {
                     go = Some(page);
                 }
@@ -116,6 +117,6 @@ impl App {
             self.reload();
         }
         ui.add_space(4.0);
-        self.results(ui, false);
+        self.sql_results(ui);
     }
 }

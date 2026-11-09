@@ -381,7 +381,22 @@ impl App {
             }),
         };
         let kinds: Vec<Option<db::sql::value::Kind>> = cols.iter().map(|c| self.t().and_then(|t| t.sql.as_ref()).and_then(|s| s.cols.iter().find(|k| &k.name == c)).map(|k| k.kind)).collect();
-        let aligns: Vec<u8> = cols.iter().map(|c| prefs.align.get(c).copied().unwrap_or(0)).collect();
+        // Numbers read best right-aligned, so SQL numeric columns start that way unless the user chose otherwise.
+        let aligns: Vec<u8> = cols.iter().zip(&kinds).map(|(c, k)| prefs.align.get(c).copied().unwrap_or(if k.is_some_and(is_numeric) { 2 } else { 0 })).collect();
+        // Why a SQL column cannot be edited, or that writes are still locked; shown when a cell is hovered.
+        let locked = sql && !self.sel_writable() && !self.sel_is_view();
+        let sql_why: Vec<Option<String>> = cols
+            .iter()
+            .map(|c| {
+                if !sql {
+                    return None;
+                }
+                self.sql_edit_block().or_else(|| self.sql_col_block(c)).map(String::from).or_else(|| locked.then(|| "Read-only connection. Double-click to unlock writes and edit.".to_string()))
+            })
+            .collect();
+        let sql_edit_ok: Vec<bool> = cols.iter().map(|c| sql && self.sql_edit_block().is_none() && self.sql_col_block(c).is_none()).collect();
+        let sql_nullable: Vec<bool> = cols.iter().map(|c| self.t().and_then(|t| t.sql.as_ref()).and_then(|s| s.cols.iter().find(|k| &k.name == c)).is_some_and(|k| k.nullable)).collect();
+        let mut sql_acts: Vec<(usize, String, CellAct)> = Vec::new();
         let hl_cols: Vec<bool> = cols.iter().map(|c| prefs.highlight.contains(&db::strip_indices(c))).collect();
         let related = if agg { HashMap::new() } else { self.t().map(|t| t.related.clone()).unwrap_or_default() };
         let in_coll = self.in_coll();
@@ -479,6 +494,7 @@ impl App {
                         Some(d) => db::get_path(d, c).map(Val::B),
                         None => docs.value(i, c),
                     };
+                    let staged = if sql && drafted.is_some() { self.sql_staged_cols(docs, i) } else { Vec::new() };
                     let active = selected == Some((agg, i));
                     let (rr, resp) = ui.allocate_exact_size(egui::vec2(row_w, ROW_H), Sense::click());
                     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -514,6 +530,16 @@ impl App {
                             if hl_cols[ci] {
                                 ui.painter().rect_filled(cell, 0, HIGHLIGHT());
                             }
+                            // An unsaved edit: the warning tint with a bar on the left edge.
+                            if staged.iter().any(|s| s == c) {
+                                ui.painter().rect_filled(cell, 0, tint(WARNING(), 34));
+                                ui.painter().rect_filled(egui::Rect::from_min_size(cell.min, egui::vec2(2.0, cell.height())), 0, WARNING());
+                            }
+                            if sql && self.sql_cell.as_ref().is_some_and(|e| e.row == i && e.col == *c) {
+                                self.sql_cell_editor(ui, cell);
+                                x += w;
+                                continue;
+                            }
                             let clip = ui.painter().with_clip_rect(cell.shrink2(egui::vec2(6.0, 0.0)));
                             let v = value(c);
                             match v {
@@ -542,14 +568,30 @@ impl App {
                                     clip.galley(egui::pos2(align_x(aligns[ci], x, *w, g.size().x), cell.center().y - g.size().y / 2.0), g, FAINT());
                                 }
                             }
-                            let cr = ui.interact(cell, ui.scope_id().with(("c", i, ci)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                            let mut cr = ui.interact(cell, ui.scope_id().with(("c", i, ci)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                            if let Some(why) = &sql_why[ci] {
+                                cr = cr.on_hover_text(why.as_str());
+                            }
                             if cr.double_clicked() {
                                 edit_cell = Some((i, c.clone()));
                             } else if cr.clicked() {
                                 click = Some(i);
                             }
                             let mut acts = Vec::new();
-                            if let (Some(v), false) = (v, sql) {
+                            if sql {
+                                cr.context_menu(|ui| {
+                                    menu_look(ui);
+                                    // A checked row's menu is the selection's; a single cell also offers its value actions.
+                                    if !checked.contains(&i) {
+                                        if let Some(a) = sql_cell_menu(ui, sql_nullable[ci], sql_edit_ok[ci]) {
+                                            sql_acts.push((i, c.clone(), a));
+                                            ui.close();
+                                        }
+                                        ui.separator();
+                                    }
+                                    row_act = any_row_menu(ui, menu, i, docs, &checked).or(row_act.take());
+                                });
+                            } else if let (Some(v), false) = (v, sql) {
                                 let path: Vec<String> = c.split('.').map(String::from).collect();
                                 cr.context_menu(|ui| {
                                     menu_look(ui);
@@ -633,6 +675,13 @@ impl App {
             let Some(d) = self.shown_row(docs, i, agg).or_else(|| docs.owned(i)) else { continue };
             self.handle_acts(&d, acts);
         }
+        if let (Some((i, c)), true) = (&edit_cell, sql) {
+            self.sql_open_cell(*i, c.clone());
+        }
+        if sql {
+            self.sql_cell_finish();
+            self.sql_cell_acts(ui.ctx(), sql_acts);
+        }
         if let (Some((i, c)), false) = (edit_cell, agg || sql) {
             self.select(agg, i, false);
             let path: Vec<String> = c.split('.').map(String::from).collect();
@@ -702,8 +751,7 @@ impl App {
     /// Documents rows get the document menu, Indexes rows the index menu, other result rows none.
     fn row_menu_kind(&self, agg: bool) -> RowMenu {
         match (agg, self.t().map(|t| t.view)) {
-            // SQL rows get their own menu with the edits of the next step.
-            (false, _) if self.t().is_some_and(|t| t.sql.is_some()) => RowMenu::None,
+            (false, _) if self.t().is_some_and(|t| t.sql.is_some()) => RowMenu::Sql,
             (false, _) => RowMenu::Docs,
             (true, Some(View::Indexes)) => RowMenu::Indexes,
             _ => RowMenu::None,

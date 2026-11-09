@@ -15,6 +15,15 @@ impl App {
             self.err("Undo is a write: unlock writes on that connection first.");
             return;
         }
+        // SQL actions carry their own columns; the pool is read-only, so the worker switches a connection of its own.
+        if let (Some(sql), UndoKind::Sql { .. }) = (c.sql.clone(), &a.kind) {
+            let a = self.undo.remove(i);
+            if let UndoKind::Sql { cols, undo } = a.kind {
+                let pk = undo.pk_names();
+                self.worker.sql_undo(sql, a.db, a.coll, cols, pk, undo, false);
+            }
+            return;
+        }
         let Some(client) = c.client.clone() else {
             self.err("That connection is closed.");
             return;
@@ -27,6 +36,7 @@ impl App {
             UndoKind::Delete { old } => self.worker.insert(a.conn, t, old, None),
             UndoKind::DeleteMany { old } => self.worker.import(a.conn, t, old, None),
             UndoKind::Update { old, new } => self.worker.replace(a.conn, t, new, old, false),
+            UndoKind::Sql { .. } => {}
         }
     }
 }

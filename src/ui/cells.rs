@@ -203,7 +203,13 @@ pub(crate) fn sql_cell_job(v: Val, kind: db::sql::value::Kind) -> LayoutJob {
     use db::sql::value::Kind::*;
     let b = v.bson();
     let (text, color) = match (&*b, kind) {
-        (Bson::Null, _) => ("NULL".to_string(), C_NULL()),
+        (Bson::Null, _) => {
+            let mut job = LayoutJob::default();
+            let mut f = mono(FAINT());
+            f.italics = true;
+            job.append("NULL", 0.0, f);
+            return job;
+        }
         (Bson::Binary(bin), _) => (format!("<binary {} B>", bin.bytes.len()), FAINT()),
         (Bson::String(s), Enum | Set) => (format!("'{}'", s.chars().take(120).collect::<String>()), C_STRING()),
         (Bson::String(s), Text) => (format!("'{}'", s.chars().take(120).collect::<String>()), str_color(s)),

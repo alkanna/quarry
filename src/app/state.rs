@@ -239,6 +239,8 @@ pub(super) struct SqlTab {
     pub(super) pk: Vec<String>,
     /// The row count is the server's table estimate, shown with a ~.
     pub(super) estimated: bool,
+    /// Text for the Query view, set by "Edit in Query" on checked rows.
+    pub(super) query: String,
     /// Server connection id of the running Custom Query, for Stop (step 8).
     #[allow(dead_code)]
     pub(super) run_conn:Arc<std::sync::atomic::AtomicU64>,
@@ -587,6 +589,8 @@ pub(super) enum Danger {
     Sync { conn: u64 },
     Restore { conn: u64, args: Vec<String> },
     Validator(Document),
+    /// Rows of the open SQL table, by key.
+    DeleteRows(Vec<Document>),
 }
 
 /// What to run once writes are allowed.
@@ -600,6 +604,8 @@ pub(super) enum Modal {
     Save { tag: String, changes: Vec<(String, Option<Bson>, Option<Bson>)> },
     SaveAll(Vec<String>),
     Delete(Vec<Document>),
+    SqlSet(Box<SetForm>),
+    SqlRow(Box<RowForm>),
     Typed { title: String, expect: String, typed: String, action: Danger },
     CreateIndex(Box<IndexForm>),
     AggWrite(Vec<Document>),

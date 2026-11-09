@@ -313,7 +313,7 @@ impl App {
         let sel = |coll: &str| Sel { conn: 3, db: "shop".into(), coll: coll.into() };
         let engine = db::sql::Engine::MySql;
         let col = |name: &str, ty: &str, nullable: bool| Col { name: name.into(), ty: ty.into(), kind: Kind::from_type_name(ty.split('(').next().unwrap_or(ty)), nullable };
-        let cols = vec![col("id", "INT UNSIGNED", false), col("customer_id", "INT", false), col("status", "ENUM", false), col("total", "DECIMAL(10,2)", false), col("currency", "CHAR(3)", false), col("note", "TEXT", true), col("created_at", "DATETIME", false)];
+        let cols = vec![col("id", "INT UNSIGNED", false), col("customer_id", "INT", false), col("status", "ENUM('pending','paid','shipped','refunded','cancelled')", false), col("total", "DECIMAL(10,2)", false), col("currency", "CHAR(3)", false), col("note", "TEXT", true), col("created_at", "DATETIME", false)];
         // id, customer_id, status, total, currency, note, created_at
         let data: [(i64, i64, &str, &str, &str, Option<&str>, &str); 13] = [
             (4410, 1284, "paid", "112.50", "EUR", None, "2026-11-09 12:41:07"),
@@ -346,5 +346,11 @@ impl App {
         self.cur = 0;
         self.status = ("Offline demo: no database is connected.".into(), false);
         self.sql_structure_demo(&std::env::var("QUARRY_TEST_SQL").unwrap_or_default());
+        // QUARRY_TEST_SQL=edit stages two cells of row 3; =select checks four rows.
+        match std::env::var("QUARRY_TEST_SQL").as_deref() {
+            Ok("edit") => self.sql_demo_stage(),
+            Ok("select") => self.tabs[0].checked = [1, 2, 4, 5].into(),
+            _ => {}
+        }
     }
 }

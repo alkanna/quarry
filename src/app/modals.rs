@@ -155,12 +155,18 @@ impl App {
                 }
                 Modal::Delete(docs) => {
                     const SHOWN: usize = 5;
-                    let ids: Vec<String> = docs.iter().take(SHOWN).map(|d| d.get("_id").map(db::short).unwrap_or_default()).collect();
+                    let sql = self.t().is_some_and(|t| t.sql.is_some());
+                    let ids: Vec<String> = docs.iter().take(SHOWN).map(|d| d.get("_id").map(|k| if sql { k.as_document().map(|k| k.values().map(db::short).collect::<Vec<_>>().join("-")).unwrap_or_default() } else { db::short(k) }).unwrap_or_default()).collect();
                     let more = if docs.len() > SHOWN { format!(" and {} more", docs.len() - SHOWN) } else { String::new() };
-                    dialog_title(ui, if docs.len() == 1 { "Delete this document?".to_string() } else { format!("Delete {} documents?", docs.len()) });
-                    ui.label(RichText::new(format!("_id {}{more}. You can undo this for 24 hours.", ids.join(", "))).monospace().color(MUTED()));
+                    let noun = if sql { "row" } else { "document" };
+                    dialog_title(ui, if docs.len() == 1 { format!("Delete this {noun}?") } else { format!("Delete {} {noun}s?", docs.len()) });
+                    ui.label(RichText::new(format!("{} {}{more}. You can undo this for 24 hours.", if sql { "Key" } else { "_id" }, ids.join(", "))).monospace().color(MUTED()));
                     dialog_actions(ui, |ui| {
-                        if primary(ui, "Delete", ALERT()).clicked() {
+                        let del = primary(ui, "Delete", ALERT()).clicked();
+                        if del && sql {
+                            self.sql_delete(docs.clone());
+                            keep = false;
+                        } else if del {
                             if let Some((conn, target)) = self.writable_target() {
                                 match docs.as_slice() {
                                     [d] => self.worker.delete(conn, target, d.clone(), true),
@@ -178,6 +184,8 @@ impl App {
                         }
                     });
                 }
+                Modal::SqlSet(f) => self.sql_set_dialog(ui, f, &mut keep),
+                Modal::SqlRow(f) => self.sql_row_dialog(ui, f, &mut keep),
                 Modal::Typed { title, expect, typed, action } => {
                     ui.label(semibold(RichText::new(title.as_str()).color(BRIGHT())));
                     ui.label(RichText::new(format!("Type {expect} to confirm (case sensitive).")).color(MUTED()));
@@ -339,13 +347,23 @@ impl App {
                     });
                 }
                 Modal::SaveAll(keys) => {
+                    let sql = self.t().is_some_and(|t| t.sql.is_some());
                     let n: usize = keys.iter().filter_map(|k| self.drafts.get(k)).map(|d| db::diff(&d.original, &d.current).len()).sum();
-                    dialog_title(ui, format!("Save {} documents ({n} changes)?", keys.len()));
-                    ui.label(RichText::new("Each document is refused if someone else changed it since you opened it; its edits are kept.").color(MUTED()));
+                    if sql {
+                        dialog_title(ui, format!("Save {n} cell{} in {} row{}?", if n == 1 { "" } else { "s" }, keys.len(), if keys.len() == 1 { "" } else { "s" }));
+                        ui.label(RichText::new("They are written in one transaction. If a row changed on the server since you opened it, nothing is written and the edits stay staged.").color(MUTED()));
+                    } else {
+                        dialog_title(ui, format!("Save {} documents ({n} changes)?", keys.len()));
+                        ui.label(RichText::new("Each document is refused if someone else changed it since you opened it; its edits are kept.").color(MUTED()));
+                    }
                     dialog_actions(ui, |ui| {
                         if primary(ui, "Save all", PRIMARY()).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
-                            for k in keys.iter() {
-                                self.write_draft(k);
+                            if sql {
+                                self.write_sql_drafts(keys.clone());
+                            } else {
+                                for k in keys.iter() {
+                                    self.write_draft(k);
+                                }
                             }
                             keep = false;
                         }
@@ -557,6 +575,7 @@ impl App {
                                     UndoKind::Delete { old } => format!("deleted {}", old.get("_id").map(db::short).unwrap_or_default()),
                                     UndoKind::DeleteMany { old } => format!("deleted {} documents", old.len()),
                                     UndoKind::Update { old, .. } => format!("edited {}", old.get("_id").map(db::short).unwrap_or_default()),
+                                    UndoKind::Sql { undo, .. } => undo.describe(),
                                 };
                                 let mins = a.at.elapsed().as_secs() / 60;
                                 ui.label(RichText::new(format!("{}.{}  {what}", a.db, a.coll)).monospace());

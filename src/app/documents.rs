@@ -7,11 +7,17 @@ pub(super) enum DocsAct {
     CopyJs,
     CopyJson,
     CopyLines,
+    /// A table or text format shared by Mongo documents and SQL rows.
+    CopyAs(db::copy::Fmt),
     Duplicate,
     Export,
     Filter,
     Update,
     Delete,
+    /// SQL rows: stage one value on every row.
+    SetValue,
+    /// SQL rows: open an UPDATE for these rows in the Query view.
+    EditQuery,
 }
 
 /// Positions in `new` of the documents at `rows` in `old`, matched by _id.
@@ -24,23 +30,27 @@ pub(super) fn follow_ids(old: &[db::Row], new: &[db::Row], rows: impl Iterator<I
 }
 
 /// Actions on one document or the checked ones, shared by the selection bar and the row menus.
-pub(super) fn docs_menu(ui: &mut egui::Ui, n: usize, heading: bool) -> Option<DocsAct> {
+pub(super) fn docs_menu(ui: &mut egui::Ui, n: usize, heading: bool, sql: bool) -> Option<DocsAct> {
     if heading {
-        ui.label(RichText::new(if n == 1 { "Document".to_string() } else { format!("{n} selected documents") }).size(TXT_CAPTION).color(FAINT()));
+        let (one, many) = if sql { ("Row".to_string(), format!("{n} selected rows")) } else { ("Document".to_string(), format!("{n} selected documents")) };
+        ui.label(RichText::new(if n == 1 { one } else { many }).size(TXT_CAPTION).color(FAINT()));
     }
-    let items: [(&str, DocsAct); 8] = [
-        ("Copy as JS", DocsAct::CopyJs),
-        ("Copy as JSON", DocsAct::CopyJson),
-        ("Copy as JSON lines", DocsAct::CopyLines),
-        ("Duplicate", DocsAct::Duplicate),
-        ("Export…", DocsAct::Export),
-        ("Filter to these", DocsAct::Filter),
-        ("Update in shell", DocsAct::Update),
-        ("Delete…", DocsAct::Delete),
-    ];
     let mut act = None;
+    if let Some(a) = ui.menu_button("Copy as", |ui| copy_as_menu(ui, sql)).inner.flatten() {
+        act = Some(a);
+        ui.close();
+    }
+    let items: Vec<(&str, DocsAct)> = if sql {
+        vec![("Duplicate", DocsAct::Duplicate), ("Export…", DocsAct::Export), ("Filter to these", DocsAct::Filter), ("Set value…", DocsAct::SetValue), ("Edit in Query", DocsAct::EditQuery), ("Delete…", DocsAct::Delete)]
+    } else {
+        vec![("Duplicate", DocsAct::Duplicate), ("Export…", DocsAct::Export), ("Filter to these", DocsAct::Filter), ("Update in shell", DocsAct::Update), ("Delete…", DocsAct::Delete)]
+    };
     for (label, a) in items {
-        let text = if matches!(a, DocsAct::Delete) { RichText::new(label).color(ALERT()) } else { RichText::new(label) };
+        let is_delete = matches!(a, DocsAct::Delete);
+        if is_delete && sql {
+            ui.separator();
+        }
+        let text = if is_delete { RichText::new(label).color(ALERT()) } else { RichText::new(label) };
         if ui.button(text).clicked() {
             act = Some(a);
         }
@@ -49,9 +59,9 @@ pub(super) fn docs_menu(ui: &mut egui::Ui, n: usize, heading: bool) -> Option<Do
 }
 
 /// The row menu: acts on every checked document when the row is one of them, else on that row.
-pub(super) fn row_menu(ui: &mut egui::Ui, i: usize, checked: &BTreeSet<usize>) -> Option<(usize, DocsAct)> {
+pub(super) fn row_menu(ui: &mut egui::Ui, i: usize, checked: &BTreeSet<usize>, sql: bool) -> Option<(usize, DocsAct)> {
     menu_look(ui);
-    docs_menu(ui, if checked.contains(&i) { checked.len() } else { 1 }, true).map(|a| (i, a))
+    docs_menu(ui, if checked.contains(&i) { checked.len() } else { 1 }, true, sql).map(|a| (i, a))
 }
 
 /// One option of the find bar: a pill holding its editor while it is set or being edited, else a
@@ -90,6 +100,8 @@ pub(super) fn opt_chip(ui: &mut egui::Ui, name: &str, id: egui::Id, text: &mut S
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum RowMenu {
     Docs,
+    /// SQL rows: the document actions with SQL's own.
+    Sql,
     Indexes,
     None,
 }
@@ -103,7 +115,8 @@ pub(super) enum RowAct {
 /// The menu of row `i`: document actions for Documents rows, index actions for Indexes rows.
 pub(super) fn any_row_menu(ui: &mut egui::Ui, kind: RowMenu, i: usize, rows: Rows, checked: &BTreeSet<usize>) -> Option<(usize, RowAct)> {
     match kind {
-        RowMenu::Docs => row_menu(ui, i, checked).map(|(i, a)| (i, RowAct::Doc(a))),
+        RowMenu::Docs => row_menu(ui, i, checked, false).map(|(i, a)| (i, RowAct::Doc(a))),
+        RowMenu::Sql => row_menu(ui, i, checked, true).map(|(i, a)| (i, RowAct::Doc(a))),
         RowMenu::Indexes => index_menu(ui, rows.doc(i)?).map(|a| (i, RowAct::Idx(a))),
         RowMenu::None => None,
     }
@@ -518,7 +531,7 @@ impl App {
             ui.label(RichText::new(if loading { "Loading…" } else { "No documents" }).color(MUTED()));
         } else {
             let sql = self.t().is_some_and(|t| t.sql.is_some());
-            if !agg && !sql {
+            if !agg {
                 self.selection_bar(ui, docs);
             }
             if self.prefs.table || sql {
@@ -595,6 +608,7 @@ impl App {
             return;
         }
         let mut cancel = false;
+        let sql = self.t().is_some_and(|t| t.sql.is_some());
         // Floats over the bottom of the results so checking rows never shifts the table.
         let area = ui.available_rect_before_wrap();
         let act = egui::Area::new(egui::Id::unique("selection-toolbar"))
@@ -606,7 +620,7 @@ impl App {
                     ui.horizontal(|ui| {
                         ui.label(semibold(RichText::new(format!("{n} selected")).color(BRIGHT())));
                         ui.add_space(8.0);
-                        let act = docs_menu(ui, n, false);
+                        let act = docs_menu(ui, n, false, sql);
                         cancel = ui.button("Cancel").on_hover_text("Clear the selection").clicked();
                         act
                     })
@@ -627,6 +641,9 @@ impl App {
         if docs.is_empty() {
             return;
         }
+        if self.t().is_some_and(|t| t.sql.is_some()) {
+            return self.sql_docs_act(ctx, act, docs);
+        }
         let what = if docs.len() == 1 { "1 document".to_string() } else { format!("{} documents", docs.len()) };
         let value = || if docs.len() == 1 { Bson::Document(docs[0].clone()) } else { Bson::Array(docs.iter().cloned().map(Bson::Document).collect()) };
         let by_id = || {
@@ -642,6 +659,7 @@ impl App {
                 ctx.copy_text(db::to_edit_value(&value()));
                 self.ok(format!("Copied {what} as JSON"));
             }
+            DocsAct::CopyAs(f) => self.copy_rows_as(ctx, f, &docs),
             DocsAct::CopyLines => {
                 let lines: Vec<String> = docs.iter().map(|d| db::to_edit_line(&Bson::Document(d.clone()))).collect();
                 ctx.copy_text(lines.join("\n"));
@@ -685,6 +703,7 @@ impl App {
                 self.open_in_shell(code);
             }
             DocsAct::Delete => self.modal = Some(Modal::Delete(docs)),
+            DocsAct::SetValue | DocsAct::EditQuery => {}
         }
     }
 

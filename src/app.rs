@@ -38,6 +38,7 @@ mod shell;
 mod shell_ls;
 mod sidebar;
 mod sql_structure;
+mod sql_edit;
 mod sql_views;
 mod state;
 mod table;
@@ -61,6 +62,7 @@ use indexes::*;
 use server::*;
 use watch::*;
 use drafts::*;
+use sql_edit::*;
 use table::Rows;
 
 const SYSTEM_DBS: [&str; 3] = ["admin", "config", "local"];
@@ -110,6 +112,8 @@ pub struct App {
     /// Paths changed in the document being drawn, for tinting.
     changed: HashSet<String>,
     inline: Option<Inline>,
+    /// The SQL grid cell being edited in place.
+    sql_cell: Option<CellEdit>,
     new_field: Option<NewField>,
     /// Pending expand/collapse from the tree menu: document, path prefix, open.
     fold: Option<(egui::Id, Vec<String>, bool)>,
@@ -240,6 +244,7 @@ impl App {
             saving: HashMap::new(),
             changed: HashSet::new(),
             inline: None,
+            sql_cell: None,
             new_field: None,
             fold: None,
             fold_busy: false,
@@ -448,7 +453,8 @@ impl App {
 impl eframe::App for App {
     /// Test switch for the demo picture: QUARRY_TEST_POINTER="x,y" hovers that point,
     /// "x,y,down" also holds the primary button there, to check hover and press states, and
-    /// "x,y,right" right-clicks there once on frame 60, so the capture shows the context menu.
+    /// "x,y,right" right-clicks there once on frame 60, so the capture shows the context menu;
+    /// "x,y,right,x2,y2" then moves the pointer to x2,y2 to open a submenu.
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
         #[cfg(not(target_os = "macos"))]
         let _ = ctx;
@@ -463,9 +469,16 @@ impl eframe::App for App {
         let Ok(spec) = std::env::var("QUARRY_TEST_POINTER") else { return };
         let mut parts = spec.split(',');
         let (Some(Ok(x)), Some(Ok(y))) = (parts.next().map(str::parse::<f32>), parts.next().map(str::parse::<f32>)) else { return };
-        let pos = egui::pos2(x, y);
+        let mut pos = egui::pos2(x, y);
+        let mode = parts.next();
+        // "x,y,right,x2,y2": after the menu opened, the pointer moves on to x2,y2, to open a submenu.
+        if let (Some("right"), Some(Ok(x2)), Some(Ok(y2))) = (mode, parts.next().map(str::parse::<f32>), parts.next().map(str::parse::<f32>)) {
+            if self.shot.as_ref().is_some_and(|s| s.1 > 62) {
+                pos = egui::pos2(x2, y2);
+            }
+        }
         raw.events.push(egui::Event::PointerMoved(pos));
-        match parts.next() {
+        match mode {
             Some("down") => raw.events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() }),
             // One right-click partway through, so the capture shows the context menu settled.
             Some("right") if self.shot.as_ref().is_some_and(|s| s.1 == 60) => {

@@ -6,6 +6,7 @@
 mod dialect;
 mod worker;
 pub mod structure;
+pub mod write;
 #[allow(dead_code)]
 pub mod lex;
 #[allow(dead_code)]

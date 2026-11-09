@@ -24,6 +24,9 @@ impl App {
             self.save_conns();
             return self.ok("Connection removed");
         }
+        if let Danger::DeleteRows(rows) = action {
+            return self.sql_delete(rows);
+        }
         let conn_specific = match &action {
             Danger::DropDatabase { conn, .. } | Danger::DropCollAt { conn, .. } | Danger::DropUser { conn, .. } | Danger::Sync { conn } | Danger::Restore { conn, .. } => Some(*conn),
             _ => None,
@@ -84,7 +87,7 @@ impl App {
                     self.worker.import(conn, target, docs, Some(key));
                 }
             }
-            Danger::RemoveConnection(_) | Danger::DropDatabase { .. } | Danger::DropCollAt { .. } | Danger::DropUser { .. } | Danger::Sync { .. } | Danger::Restore { .. } => unreachable!(),
+            Danger::DeleteRows(_) | Danger::RemoveConnection(_) | Danger::DropDatabase { .. } | Danger::DropCollAt { .. } | Danger::DropUser { .. } | Danger::Sync { .. } | Danger::Restore { .. } => unreachable!(),
         }
     }
 }
