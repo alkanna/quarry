@@ -351,7 +351,14 @@ impl App {
                 }
             }
             for (db_name, colls) in &c.dbs {
-                let matches: Vec<&String> = colls.iter().flatten().filter(|n| filter.is_empty() || n.to_lowercase().contains(&filter)).collect();
+                let mut matches: Vec<&String> = colls.iter().flatten().filter(|n| filter.is_empty() || n.to_lowercase().contains(&filter)).collect();
+                // Copies still running are not listed by the server yet, so they are drawn from `copying`.
+                let pending: Vec<&String> = self.copying.iter().filter(|c| c.0 == id && c.1 == *db_name).map(|c| &c.2).collect();
+                if !pending.is_empty() {
+                    let extra: Vec<&String> = pending.iter().copied().filter(|n| !matches.contains(n) && (filter.is_empty() || n.to_lowercase().contains(&filter))).collect();
+                    matches.extend(extra);
+                    matches.sort();
+                }
                 if !filter.is_empty() && matches.is_empty() {
                     continue;
                 }
@@ -408,29 +415,30 @@ impl App {
                         let sel = Sel { conn: id, db: db_name.clone(), coll: coll.clone() };
                         let active = cur_sel.as_ref() == Some(&sel);
                         let is_view = self.views.contains(&(id, db_name.clone(), coll.clone()));
-                        let busy = self.copying.contains(&(id, db_name.clone(), coll.clone()));
+                        let busy = pending.contains(&coll);
                         let mut glyph_at = egui::Rect::NOTHING;
                         let r = side_row(ui, SIDE_ROW_H, 18.0, active, |p, r| {
                             // Collections are marked as documents, views with a hollow diamond so
                             // they read as derived data. A collection still being copied gets a spinner.
                             glyph_at = egui::Rect::from_center_size(egui::pos2(r.left() + 6.0, r.center().y), egui::Vec2::splat(TXT_SMALL));
-                            let (glyph, gc) = if busy { ("", FAINT()) } else if is_view { ("◇", C_DATE()) } else { ("{}", if active { PRIMARY() } else { FAINT() }) };
-                            p.text(egui::pos2(r.left(), r.center().y), egui::Align2::LEFT_CENTER, glyph, FontId::monospace(10.0), gc);
+                            if !busy {
+                                let (glyph, gc) = if is_view { ("◇", C_DATE()) } else { ("{}", if active { PRIMARY() } else { FAINT() }) };
+                                p.text(egui::pos2(r.left(), r.center().y), egui::Align2::LEFT_CENTER, glyph, FontId::monospace(10.0), gc);
+                            }
                             let w = r.width() - 20.0;
                             let galley = p.layout(coll.clone(), FontId::proportional(TXT_TITLE), if active { BRIGHT() } else if is_view { C_DATE() } else { TEXT() }, w);
                             p.galley(egui::pos2(r.left() + 20.0, r.center().y - galley.size().y / 2.0), galley, TEXT());
                         });
+                        // A collection still being copied does not exist yet, so it neither opens nor offers actions.
                         if busy {
                             spin_at(ui, glyph_at);
+                            r.on_hover_text("Being copied");
+                            continue;
                         }
-                        let r = if is_view { r.on_hover_text("View (read-only)") } else if busy { r.on_hover_text("Being copied") } else { r };
+                        let r = if is_view { r.on_hover_text("View (read-only)") } else { r };
                         if matches!(&self.reveal, Some((c, d, Some(k))) if *c == id && d == db_name && k == coll) {
                             r.scroll_to_me(Some(egui::Align::Center));
                             revealed = true;
-                        }
-                        // A collection still being copied does not exist yet, so it neither opens nor offers actions.
-                        if busy {
-                            continue;
                         }
                         if r.clicked() {
                             open = Some(sel.clone());

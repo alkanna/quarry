@@ -5,13 +5,6 @@ use super::*;
 impl App {
     pub(super) fn poll(&mut self, ctx: &egui::Context) {
         while let Ok(m) = self.rx.try_recv() {
-            let m = match m {
-                Msg::Duplicated { conn, db, to, res } => {
-                    self.copying.remove(&(conn, db.clone(), to));
-                    Msg::DbChanged { conn, db, res }
-                }
-                m => m,
-            };
             match m {
                 Msg::Connected { conn, res } => {
                     let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) else { continue };
@@ -59,13 +52,7 @@ impl App {
                     }
                 }
                 Msg::Collections { conn, db, res } => match res {
-                    Ok((mut v, views)) => {
-                        // A copy still running is not listed yet; keep its row and spinner until it ends.
-                        let pending = self.copying.iter().filter(|c| c.0 == conn && c.1 == db && !v.contains(&c.2)).map(|c| c.2.clone()).collect::<Vec<_>>();
-                        if !pending.is_empty() {
-                            v.extend(pending);
-                            v.sort();
-                        }
+                    Ok((v, views)) => {
                         self.views.retain(|(c, d, _)| !(*c == conn && *d == db));
                         self.views.extend(views.into_iter().map(|n| (conn, db.clone(), n)));
                         if let Some(d) = self.conns.iter_mut().find(|c| c.meta.id == conn).and_then(|c| c.dbs.iter_mut().find(|d| d.0 == db)) {
@@ -169,9 +156,17 @@ impl App {
                     (_, Err(e)) => self.err(e),
                     _ => {}
                 },
-                // Turned into DbChanged above.
-                Msg::Duplicated { .. } => {}
-                Msg::DbChanged { conn, db, res } => {
+                Msg::DbChanged { conn, db, copied, res } => {
+                    if let Some(to) = copied {
+                        // Listed now so the row does not blink out before the reload below answers.
+                        if res.is_ok() {
+                            if let Some(l) = self.conns.iter_mut().find(|c| c.meta.id == conn).and_then(|c| c.dbs.iter_mut().find(|d| d.0 == db)).and_then(|d| d.1.as_mut()) {
+                                l.push(to.clone());
+                                l.sort();
+                            }
+                        }
+                        self.copying.remove(&(conn, db.clone(), to));
+                    }
                     let dropped = self.dropping_db.take_if(|d| d.0 == conn && d.1 == db);
                     match res {
                         Ok(m) => self.ok(m),

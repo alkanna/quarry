@@ -176,7 +176,7 @@ impl Worker {
             // renameCollection only runs on the admin database.
             let on = if cmd.contains_key("renameCollection") { "admin".to_string() } else { db.clone() };
             let res = client.database(&on).run_command(cmd).await.map(|_| done).map_err(e);
-            Msg::DbChanged { conn, db, res }
+            Msg::DbChanged { conn, db, copied: None, res }
         });
     }
 
@@ -185,8 +185,9 @@ impl Worker {
         self.spawn(async move {
             let res = async {
                 let d = client.database(&db);
-                let batch = |r: Document| r.get_document("cursor").and_then(|c| c.get_array("firstBatch")).cloned().map_err(|_| "Unexpected reply from the server".to_string());
-                let info = batch(d.run_command(doc! { "listCollections": 1, "filter": { "name": &from } }).await.map_err(e)?)?;
+                // Independent reads, so they share one round trip.
+                let (info, indexes) = tokio::try_join!(d.run_command(doc! { "listCollections": 1, "filter": { "name": &from } }), d.run_command(doc! { "listIndexes": &from })).map_err(e)?;
+                let (info, indexes) = (first_batch(info)?, first_batch(indexes)?);
                 let mut opts = info.first().and_then(Bson::as_document).and_then(|c| c.get_document("options").ok()).cloned().unwrap_or_default();
                 // $merge cannot write into either kind, and a plain copy would quietly drop what makes them special.
                 if opts.get_bool("capped").unwrap_or(false) || opts.contains_key("timeseries") {
@@ -204,7 +205,7 @@ impl Worker {
                 // Documents that predate the validator must still copy.
                 src.aggregate(vec![doc! { "$merge": { "into": &to, "whenMatched": "fail", "whenNotMatched": "insert" } }]).bypass_document_validation(true).await.map_err(e)?;
                 // Raw specs keep every index option exactly as the server stores it.
-                let specs: Vec<Bson> = batch(d.run_command(doc! { "listIndexes": &from }).await.map_err(e)?)?
+                let specs: Vec<Bson> = indexes
                     .into_iter()
                     .filter_map(|s| match s {
                         Bson::Document(mut s) if s.get_str("name") != Ok("_id_") => {
@@ -220,7 +221,7 @@ impl Worker {
                 Ok(format!("Duplicated {from} to {to}"))
             }
             .await;
-            Msg::Duplicated { conn, db, to, res }
+            Msg::DbChanged { conn, db, copied: Some(to), res }
         });
     }
 
@@ -1079,9 +1080,13 @@ pub(crate) async fn replace_doc(conn: u64, t: Target, old: Document, new: Docume
 /// The collection's index specs, raw rather than the driver's IndexModel, which drops options it
 /// does not model. A collection has at most 64 indexes, so the first batch holds them all.
 async fn index_specs(t: &Target) -> Res<Vec<Document>> {
-    let r = t.client.database(&t.db).run_command(doc! { "listIndexes": &t.coll }).await.map_err(e)?;
-    let specs = r.get_document("cursor").and_then(|c| c.get_array("firstBatch")).map_err(|err| err.to_string())?;
+    let specs = first_batch(t.client.database(&t.db).run_command(doc! { "listIndexes": &t.coll }).await.map_err(e)?)?;
     Ok(specs.iter().filter_map(Bson::as_document).map(index_doc).collect())
+}
+
+/// The results of a command that answers with a cursor, like listIndexes or listCollections.
+fn first_batch(mut reply: Document) -> Res<Vec<Bson>> {
+    reply.get_document_mut("cursor").and_then(|c| c.get_array_mut("firstBatch")).map(std::mem::take).map_err(e)
 }
 
 pub(crate) fn index_doc(spec: &Document) -> Document {
@@ -1262,7 +1267,7 @@ mod tests {
             t.client.database(&t.db).run_command(doc! { "collMod": &t.coll, "validator": { "k": { "$gte": 0 } } }).await.unwrap();
         });
         w.duplicate_coll(0, t.client.clone(), t.db.clone(), t.coll.clone(), copy.coll.clone());
-        let Msg::Duplicated { res, .. } = next(&rx) else { panic!("expected Duplicated") };
+        let Msg::DbChanged { res, .. } = next(&rx) else { panic!("expected DbChanged") };
         res.unwrap();
         assert_eq!(all(&w, &copy), all(&w, &t));
         let names: Vec<String> = w.rt.block_on(async { copy.c().list_index_names().await.unwrap() });
@@ -1271,7 +1276,7 @@ mod tests {
         assert!(specs[0].options.validator.is_some());
         // A second copy onto the same name is refused instead of replacing it.
         w.duplicate_coll(0, t.client.clone(), t.db.clone(), t.coll.clone(), copy.coll.clone());
-        let Msg::Duplicated { res, .. } = next(&rx) else { panic!("expected Duplicated") };
+        let Msg::DbChanged { res, .. } = next(&rx) else { panic!("expected DbChanged") };
         assert!(res.unwrap_err().contains("already exists"));
     }
 
