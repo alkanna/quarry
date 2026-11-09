@@ -158,6 +158,8 @@ impl App {
                 },
                 Msg::DbChanged { conn, db, res } => {
                     let dropped = self.dropping_db.take_if(|d| d.0 == conn && d.1 == db);
+                    // ponytail: any change in this database ends its copies; two copies at once in one database lose the spinner early
+                    self.copying.retain(|c| !(c.0 == conn && c.1 == db));
                     match res {
                         Ok(m) => self.ok(m),
                         Err(e) => {

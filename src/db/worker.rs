@@ -180,6 +180,38 @@ impl Worker {
         });
     }
 
+    /// Copies a collection's documents and indexes under a new name in the same database.
+    pub fn duplicate_coll(&self, conn: u64, client: Client, db: String, from: String, to: String) {
+        self.spawn(async move {
+            let res = async {
+                let d = client.database(&db);
+                // $out replaces a collection that exists, so a name taken since the dialog opened is refused here.
+                if !d.list_collection_names().filter(doc! { "name": &to }).await.map_err(e)?.is_empty() {
+                    return Err(format!("{db}.{to} already exists"));
+                }
+                let src = d.collection::<Document>(&from);
+                src.aggregate(vec![doc! { "$out": &to }]).await.map_err(e)?;
+                // $out copies documents only, so the indexes are created again on the copy.
+                let list = d.run_command(doc! { "listIndexes": &from }).await.map_err(e)?;
+                let specs: Vec<Bson> = list.get_document("cursor").and_then(|c| c.get_array("firstBatch")).map(|a| a.clone()).unwrap_or_default().into_iter()
+                    .filter_map(|s| match s {
+                        Bson::Document(mut s) if s.get_str("name") != Ok("_id_") => {
+                            s.remove("ns");
+                            Some(Bson::Document(s))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if !specs.is_empty() {
+                    d.run_command(doc! { "createIndexes": &to, "indexes": specs }).await.map_err(e)?;
+                }
+                Ok(format!("Duplicated {from} to {to}"))
+            }
+            .await;
+            Msg::DbChanged { conn, db, res }
+        });
+    }
+
     /// Size and count of one collection, from $collStats (the collStats command is deprecated).
     pub fn coll_stats(&self, client: Client, db: String, coll: String, tag: String) {
         self.spawn(async move {
@@ -1205,6 +1237,24 @@ mod tests {
         let first = &rows[0];
         assert_eq!(first.id(), want[0].get("_id").cloned());
         assert_eq!(first.value("nested.list.1.deep").and_then(|v| Bson::try_from(v).ok()), crate::db::get_path(&want[0], "nested.list.1.deep").cloned());
+    }
+
+    #[test]
+    fn live_duplicate_copies_documents_and_indexes_and_refuses_a_taken_name() {
+        let Some((w, rx, t)) = live("dup_src") else { return };
+        let Some((_, _, copy)) = live("dup_copy") else { return };
+        seed(&w, &t, (0..10).map(|i| doc! { "_id": i, "k": i }).collect());
+        w.rt.block_on(async { t.c().create_index(mongodb::IndexModel::builder().keys(doc! { "k": 1 }).build()).await.unwrap() });
+        w.duplicate_coll(0, t.client.clone(), t.db.clone(), t.coll.clone(), copy.coll.clone());
+        let Msg::DbChanged { res, .. } = next(&rx) else { panic!("expected DbChanged") };
+        res.unwrap();
+        assert_eq!(all(&w, &copy), all(&w, &t));
+        let names: Vec<String> = w.rt.block_on(async { copy.c().list_index_names().await.unwrap() });
+        assert!(names.contains(&"k_1".to_string()));
+        // A second copy onto the same name is refused instead of replacing it.
+        w.duplicate_coll(0, t.client.clone(), t.db.clone(), t.coll.clone(), copy.coll.clone());
+        let Msg::DbChanged { res, .. } = next(&rx) else { panic!("expected DbChanged") };
+        assert!(res.unwrap_err().contains("already exists"));
     }
 
     #[test]

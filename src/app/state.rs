@@ -567,6 +567,7 @@ pub(super) enum Modal {
     ImportInsert(usize),
     NewCollection { conn: u64, db: String, name: String, view: bool, source: String, pipeline: String },
     RenameColl { conn: u64, db: String, coll: String, name: String },
+    DuplicateColl { conn: u64, db: String, coll: String, name: String },
     Undo,
     Explain { summary: db::ExplainSummary, raw: String, show_raw: bool },
     /// `code` highlights the body as JSON.
@@ -741,6 +742,7 @@ pub(super) enum SideAct {
     Stats(String, String),
     ViewDef(String, String),
     Rename(String, String),
+    Duplicate(String, String),
     DropColl(String, String),
     Dump(String, String),
     Restore(String),

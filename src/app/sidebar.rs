@@ -408,21 +408,31 @@ impl App {
                         let sel = Sel { conn: id, db: db_name.clone(), coll: coll.clone() };
                         let active = cur_sel.as_ref() == Some(&sel);
                         let is_view = self.views.contains(&(id, db_name.clone(), coll.clone()));
+                        let busy = self.copying.contains(&(id, db_name.clone(), coll.clone()));
+                        let mut glyph_at = egui::Rect::NOTHING;
                         let r = side_row(ui, SIDE_ROW_H, 18.0, active, |p, r| {
                             // Collections are marked as documents, views with a hollow diamond so
-                            // they read as derived data.
-                            let (glyph, gc) = if is_view { ("◇", C_DATE()) } else { ("{}", if active { PRIMARY() } else { FAINT() }) };
+                            // they read as derived data. A collection still being copied gets a spinner.
+                            glyph_at = egui::Rect::from_center_size(egui::pos2(r.left() + 6.0, r.center().y), egui::vec2(11.0, 11.0));
+                            let (glyph, gc) = if busy { ("", FAINT()) } else if is_view { ("◇", C_DATE()) } else { ("{}", if active { PRIMARY() } else { FAINT() }) };
                             p.text(egui::pos2(r.left(), r.center().y), egui::Align2::LEFT_CENTER, glyph, FontId::monospace(10.0), gc);
                             let w = r.width() - 20.0;
                             let galley = p.layout(coll.clone(), FontId::proportional(TXT_TITLE), if active { BRIGHT() } else if is_view { C_DATE() } else { TEXT() }, w);
                             p.galley(egui::pos2(r.left() + 20.0, r.center().y - galley.size().y / 2.0), galley, TEXT());
                         });
-                        let r = if is_view { r.on_hover_text("View (read-only)") } else { r };
+                        if busy {
+                            if ui.input(|i| i.viewport().focused.unwrap_or(true)) {
+                                egui::Spinner::new().size(11.0).color(FAINT()).paint_at(ui, glyph_at);
+                            } else {
+                                ui.painter().text(glyph_at.center(), egui::Align2::CENTER_CENTER, "…", FontId::monospace(10.0), FAINT());
+                            }
+                        }
+                        let r = if is_view { r.on_hover_text("View (read-only)") } else if busy { r.on_hover_text("Being copied") } else { r };
                         if matches!(&self.reveal, Some((c, d, Some(k))) if *c == id && d == db_name && k == coll) {
                             r.scroll_to_me(Some(egui::Align::Center));
                             revealed = true;
                         }
-                        if r.clicked() {
+                        if r.clicked() && !busy {
                             open = Some(sel.clone());
                         }
                         r.context_menu(|ui| {
@@ -449,6 +459,9 @@ impl App {
                             ui.separator();
                             if !is_view && ui.button("Rename…").clicked() {
                                 side.push(SideAct::Rename(db_name.clone(), coll.clone()));
+                            }
+                            if !is_view && ui.button("Duplicate…").on_hover_text("Copies the documents and indexes under a new name").clicked() {
+                                side.push(SideAct::Duplicate(db_name.clone(), coll.clone()));
                             }
                             if danger(ui, if is_view { "Drop view…" } else { "Drop collection…" }).clicked() {
                                 side.push(SideAct::DropColl(db_name.clone(), coll.clone()));
@@ -483,7 +496,7 @@ impl App {
             return self.err("Connect first.");
         };
         let writable = self.conn(conn).is_some_and(|c| c.writable);
-        let needs_write = matches!(a, SideAct::NewColl(..) | SideAct::DropDb(_) | SideAct::Rename(..) | SideAct::DropColl(..) | SideAct::Restore(_));
+        let needs_write = matches!(a, SideAct::NewColl(..) | SideAct::DropDb(_) | SideAct::Rename(..) | SideAct::Duplicate(..) | SideAct::DropColl(..) | SideAct::Restore(_));
         if needs_write && !writable {
             return self.modal = Some(Modal::Unlock(conn, None));
         }
@@ -504,6 +517,7 @@ impl App {
             SideAct::Stats(db, coll) => self.worker.coll_stats(client, db, coll, "stats".into()),
             SideAct::ViewDef(db, coll) => self.worker.command(client, db, doc! { "listCollections": 1, "filter": { "name": coll } }, "viewdef"),
             SideAct::Rename(db, coll) => self.modal = Some(Modal::RenameColl { conn, db, name: coll.clone(), coll }),
+            SideAct::Duplicate(db, coll) => self.modal = Some(Modal::DuplicateColl { conn, db, name: format!("{coll}_copy"), coll }),
             SideAct::Dump(db, coll) => {
                 let name = if coll.is_empty() { db.clone() } else { format!("{db}.{coll}") };
                 let path = dirs::download_dir().unwrap_or_default().join(format!("{name}.archive.gz")).display().to_string();
