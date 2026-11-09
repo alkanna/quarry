@@ -80,7 +80,7 @@ APP=dist/Quarry.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/quarry"
-# Made from assets/icon.svg; regenerate with rsvg-convert + iconutil if the logo changes.
+# Made from docs/logo.figcraft ("A, refined" and its 16 px master); regenerate the iconset there and run iconutil if the logo changes.
 cp assets/Quarry.icns "$APP/Contents/Resources/Quarry.icns"
 
 cat > "$APP/Contents/Info.plist" <<EOF
