@@ -211,10 +211,11 @@ impl App {
                             let t = tabs.iter_mut().find(|t| t.req == req).unwrap();
                             t.fields = auto_fields(&docs);
                             t.paths = doc_paths(&docs);
-                            t.field_info = field_info(&docs);
+                            let mut f = field_info(&docs);
                             if let Some(v) = values.get(&t.coll_key()) {
-                                merge_values(&mut t.field_info, v);
+                                merge_values(&mut f, v);
                             }
+                            t.field_info = Arc::new(f);
                             // Checks and open rows follow their documents by _id, so actions that reload
                             // (duplicate, filter, edits) keep them; rows that left the results drop out.
                             if !t.checked.is_empty() {

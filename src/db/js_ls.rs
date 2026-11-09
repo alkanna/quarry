@@ -4,6 +4,7 @@
 
 use super::*;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 /// What a request asks for at the caret.
@@ -90,7 +91,9 @@ pub fn char_at(code: &str, line: usize, col: usize) -> usize {
 /// Declarations for what the runner puts in scope, in the runner's order so the same name wins:
 /// its helpers, then collections, then the built-in _, dayjs and UUIDv1 (set over a collection of
 /// that name), then added packages where the name is still free. Must match shell_runner.mjs.
-pub fn js_globals(collections: &[String], packages: &[String], ident: impl Fn(&str) -> String, reserved: &[&str]) -> String {
+/// `schemas` types the documents of the collections whose fields are known, so the server
+/// completes their fields and values.
+pub fn js_globals(collections: &[String], schemas: &HashMap<String, String>, packages: &[String], ident: impl Fn(&str) -> String, reserved: &[&str]) -> String {
     let mut decls: Vec<(String, String)> = [
         ("db", "declare const db: import(\"mongodb\").Db;"),
         ("ObjectId", "declare function ObjectId(id?: string | number): import(\"mongodb\").ObjectId;"),
@@ -106,7 +109,8 @@ pub fn js_globals(collections: &[String], packages: &[String], ident: impl Fn(&s
     let plain = |c: &str| c.starts_with(|ch: char| ch.is_ascii_alphabetic() || ch == '_' || ch == '$') && c.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$');
     for c in collections {
         if plain(c) && !reserved.contains(&c.as_str()) && !decls.iter().any(|d| d.0 == *c) {
-            decls.push((c.clone(), format!("declare const {c}: import(\"mongodb\").Collection;")));
+            let doc = schemas.get(c).map(|t| format!("<{t}>")).unwrap_or_default();
+            decls.push((c.clone(), format!("declare const {c}: import(\"mongodb\").Collection{doc};")));
         }
     }
     for (n, d) in [("_", "declare const _: typeof import(\"lodash\");"), ("dayjs", "declare const dayjs: typeof import(\"dayjs\");"), ("UUIDv1", "declare const UUIDv1: typeof import(\"uuid\").v1;")] {
@@ -358,12 +362,13 @@ mod tests {
             "@faker-js/faker" => "faker".to_string(),
             _ => p.to_string(),
         };
-        let g = js_globals(&colls, &["date-fns".into(), "@faker-js/faker".into()], ident, &["class"]);
+        let schemas = HashMap::from([("faker".to_string(), "{ status?: \"paid\" }".to_string())]);
+        let g = js_globals(&colls, &schemas, &["date-fns".into(), "@faker-js/faker".into()], ident, &["class"]);
         assert!(g.contains("declare const dateFns: QuarryDefault<typeof import(\"date-fns\")>;"));
         assert!(g.contains("declare const orders: import(\"mongodb\").Collection;"));
         assert!(!g.contains("my-coll") && !g.contains("const class") && g.matches("const db:").count() == 1);
         // Like the runner: a collection keeps its name over a package, the built-in dayjs over a collection.
-        assert!(g.contains("declare const faker: import(\"mongodb\").Collection;") && !g.contains("\"@faker-js/faker\""));
+        assert!(g.contains("declare const faker: import(\"mongodb\").Collection<{ status?: \"paid\" }>;") && !g.contains("\"@faker-js/faker\""));
         assert!(g.contains("declare const dayjs: typeof import(\"dayjs\");") && g.matches("const dayjs").count() == 1);
     }
 
@@ -393,7 +398,8 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let (out, got) = std::sync::mpsc::channel();
-        let globals = js_globals(&["orders".into()], &[], |p| p.into(), &[]);
+        let schemas = HashMap::from([("orders".to_string(), "{ status?: \"paid\" | \"shipped\" | (string & {}) }".to_string())]);
+        let globals = js_globals(&["orders".into()], &schemas, &[], |p| p.into(), &[]);
         let ask = |req, ask, code: &str, globals: Option<String>| {
             let (line, col) = lsp_pos(code, code.chars().count());
             JsLsReq { req, ask, code: code.into(), line, col, globals }
@@ -413,5 +419,30 @@ mod tests {
         assert!(items.iter().any(|i| i.label == "findOne" && i.kind == 2));
         let Msg::JsLs { req: 3, out: JsOut::Doc(Some(d)) } = &answers[1] else { panic!() };
         assert!(d.sig.starts_with("add(") && d.active.is_some(), "{d:?}");
+    }
+
+    /// A collection typed from its loaded fields: a quote after a text field's colon offers its values.
+    /// Run with: QUARRY_LS_DIR=<empty folder> cargo test js_ls_query_values -- --ignored
+    #[test]
+    #[ignore = "needs Bun and network"]
+    fn js_ls_query_values() {
+        let dir = std::path::PathBuf::from(std::env::var("QUARRY_LS_DIR").expect("QUARRY_LS_DIR"));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (out, got) = std::sync::mpsc::channel();
+        let schemas = HashMap::from([("travels".to_string(), "{ status?: \"booked\" | \"cancelled\" | (string & {}); price?: number; [key: string]: any }".to_string())]);
+        let code = "async function run() {\n  return await travels.find({status: \"";
+        let (line, col) = lsp_pos(code, code.chars().count());
+        let globals = js_globals(&["travels".into()], &schemas, &[], |p| p.into(), &[]);
+        tx.send(JsLsReq { req: 1, ask: JsAsk::Complete, code: format!("{code}\"}}).limit(20).toArray();\n}}"), line, col, globals: Some(globals) }).unwrap();
+        drop(tx);
+        rt.block_on(run_js_ls(std::path::PathBuf::from("bun"), dir, Vec::new(), rx, move |m| {
+            let _ = out.send(m);
+        }))
+        .unwrap();
+        let Some(Msg::JsLs { req: 1, out: JsOut::Items(items) }) = got.try_iter().next() else { panic!() };
+        // Plain text items (kind 1) are dropped from the Shell's list, so the values must not be one.
+        let labels: Vec<&str> = items.iter().filter(|i| i.kind != 1).map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"booked") && labels.contains(&"cancelled"), "{labels:?}");
     }
 }
