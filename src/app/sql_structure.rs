@@ -1,8 +1,10 @@
 //! The read-only SQL views about one table: Structure, Relations, Triggers and Info. They share one
-//! fetch (`db::sql::Structure`), asked for when a view first draws and again on refresh. Editing
-//! the structure comes with writes (docs/sql/PLAN.md, v2).
+//! fetch (`db::sql::Structure`), asked for when a view first draws and again on refresh. Columns and
+//! indexes are edited here through staged changes (`sql_alter.rs`); the other three views stay read-only.
 
 use super::*;
+use super::sql_alter::staged_marks;
+use db::sql::ddl::Change;
 use db::sql::structure::{Column, ForeignKey, Index, Structure, Trigger};
 use egui::{pos2, vec2, Rect};
 
@@ -12,14 +14,18 @@ const LATER: &str = "Comes with writes";
 /// What the four views keep per tab.
 #[derive(Default)]
 pub(super) struct StructState {
-    load: Load,
-    data: Option<Structure>,
+    pub(super) load: Load,
+    pub(super) data: Option<Structure>,
     /// The selected row of each grid: columns, indexes, keys out, keys in, triggers.
     sel: [Option<usize>; 5],
+    /// Column and index changes waiting to become one ALTER TABLE.
+    pub(super) staged: Vec<Change>,
+    /// The ALTER is running.
+    pub(super) applying: bool,
 }
 
 #[derive(Default)]
-enum Load {
+pub(super) enum Load {
     #[default]
     Idle,
     Loading,
@@ -36,10 +42,21 @@ impl StructState {
 }
 
 /// What a frame of drawing asks the app to do afterwards.
-enum Act {
+pub(super) enum Act {
     Copy(String),
     Open { db: String, table: String },
     Refresh,
+    NewColumn,
+    EditColumn(usize),
+    DuplicateColumn(usize),
+    DropColumn(usize),
+    MoveColumn(usize, isize),
+    NewIndex,
+    EditIndex(usize),
+    DropIndex(usize),
+    Unstage(usize),
+    Discard,
+    Apply,
 }
 
 impl App {
@@ -106,6 +123,17 @@ impl App {
                 }
                 self.request_structure();
             }
+            Act::NewColumn => self.open_col_form(None),
+            Act::EditColumn(i) => self.open_col_form(Some(i)),
+            Act::DuplicateColumn(i) => self.duplicate_column(i),
+            Act::DropColumn(i) => self.stage_drop_column(i),
+            Act::MoveColumn(i, by) => self.stage_move_column(i, by),
+            Act::NewIndex => self.open_idx_form(None),
+            Act::EditIndex(i) => self.open_idx_form(Some(i)),
+            Act::DropIndex(i) => self.stage_drop_index(i),
+            Act::Unstage(i) => self.unstage(i),
+            Act::Discard => self.discard_staged(),
+            Act::Apply => self.request_alter_apply(),
         }
     }
 
@@ -123,7 +151,26 @@ impl App {
     pub(super) fn sql_structure_view(&mut self, ui: &mut egui::Ui) {
         let Some((d, mut sel)) = self.take_structure(ui) else { return };
         let mut acts = Vec::new();
-        edit_row(ui, &["+ Column", "Duplicate", "Delete"], READ_ONLY, |ui| {
+        let editable = self.sel_writable();
+        let is_view = self.sel_is_view();
+        let why = if is_view { "Views cannot be changed here" } else { READ_ONLY };
+        let note = if editable { "" } else { why };
+        let (staged, applying) = self.tabs[self.cur].sql.as_ref().map_or((Vec::new(), false), |s| (s.st.staged.clone(), s.st.applying));
+        let (dropped, changed) = staged_marks(&staged);
+        let col = sel[0].filter(|i| *i < d.columns.len());
+        let mut left = Vec::new();
+        edit_row_with(ui, editable, note, |ui, on| {
+            if quiet_enabled(ui, on, "+ Column").on_hover_text("Add a column").on_disabled_hover_text(why).clicked() {
+                left.push(Act::NewColumn);
+            }
+            let hint = if on { "Select a column first" } else { why };
+            for (t, tip, act) in [("Edit", "Change the selected column", col.map(Act::EditColumn)), ("Duplicate", "Add a copy of the selected column", col.map(Act::DuplicateColumn)), ("Delete", "Drop the selected column", col.map(Act::DropColumn)), ("Move up", "Place the column before the one above it", col.map(|i| Act::MoveColumn(i, -1))), ("Move down", "Place the column after the one below it", col.map(|i| Act::MoveColumn(i, 1)))] {
+                let r = quiet_enabled(ui, on && act.is_some(), t).on_hover_text(tip).on_disabled_hover_text(hint);
+                if let (true, Some(a)) = (r.clicked(), act) {
+                    left.push(a);
+                }
+            }
+        }, |ui| {
             if quiet(ui, "Copy CREATE TABLE").clicked() {
                 acts.push(Act::Copy(d.create.clone()));
             }
@@ -131,25 +178,103 @@ impl App {
                 acts.push(Act::Refresh);
             }
         });
+        acts.extend(left);
         ui.add_space(8.0);
+        if !staged.is_empty() {
+            self.staged_bar(ui, &d, &staged, editable, applying, &mut acts);
+            ui.add_space(8.0);
+        }
         egui::ScrollArea::vertical().id_salt("sql-structure").auto_shrink([false, false]).show(ui, |ui| {
             let heads = [gc("Name", 1.5), gc("Type", 1.0), gc("Length / values", 1.4), gc("Unsigned", 0.95), gc("Null", 0.6), gc("Key", 0.6), gc("Default", 1.9), gc("Extra", 2.1), gc("Collation", 1.9), gc("Comment", 1.3)];
-            if let Some(r) = grid(ui, "columns", &heads, d.columns.len(), sel[0], |ui, rect, r, c| column_cell(ui, rect, &d.columns[r], c)) {
+            let mut menu = |ui: &mut egui::Ui, r: usize| {
+                for (label, act) in [("Edit column", Act::EditColumn(r)), ("Duplicate", Act::DuplicateColumn(r)), ("Move up", Act::MoveColumn(r, -1)), ("Move down", Act::MoveColumn(r, 1))] {
+                    if ui.add_enabled(editable, egui::Button::new(label)).on_disabled_hover_text(why).clicked() {
+                        acts.push(act);
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                ui.add_enabled_ui(editable, |ui| {
+                    if danger_item(ui, "Drop column").clicked() {
+                        acts.push(Act::DropColumn(r));
+                        ui.close();
+                    }
+                })
+                .response
+                .on_disabled_hover_text(why);
+                ui.separator();
+                if ui.button("Copy name").clicked() {
+                    acts.push(Act::Copy(d.columns[r].name.clone()));
+                    ui.close();
+                }
+            };
+            let hit = grid_ex(
+                ui,
+                "columns",
+                &heads,
+                d.columns.len(),
+                sel[0],
+                |ui, rect, r, c| {
+                    if c == 0 {
+                        let name = &d.columns[r].name;
+                        let mark = if dropped.contains(name) { Some(ALERT()) } else if changed.contains(name) { Some(WARNING()) } else { None };
+                        if let Some(m) = mark {
+                            ui.painter().rect_filled(Rect::from_min_size(pos2(rect.left() - 40.0, rect.top()), vec2(3.0, rect.height())), 0.0, m);
+                        }
+                    }
+                    column_cell(ui, rect, &d.columns[r], c)
+                },
+                Some(&mut menu),
+            );
+            if let Some(r) = hit.click {
                 sel[0] = Some(r);
             }
+            if let (Some(r), true) = (hit.double, editable) {
+                acts.push(Act::EditColumn(r));
+            }
             ui.add_space(14.0);
+            let ix = sel[1].filter(|i| *i < d.indexes.len());
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 10.0;
                 caption(ui, "INDEXES");
                 stat_chip(ui, &d.indexes.len().to_string());
                 right_group(ui, |ui| {
-                    ui.add_enabled_ui(false, |ui| quiet(ui, "+ Index")).response.on_disabled_hover_text(READ_ONLY);
+                    if quiet_enabled(ui, editable, "+ Index").on_disabled_hover_text(why).clicked() {
+                        acts.push(Act::NewIndex);
+                    }
+                    if let Some(i) = ix {
+                        if quiet_enabled(ui, editable, "Drop").on_disabled_hover_text(why).clicked() {
+                            acts.push(Act::DropIndex(i));
+                        }
+                        if quiet_enabled(ui, editable, "Edit").on_disabled_hover_text(why).clicked() {
+                            acts.push(Act::EditIndex(i));
+                        }
+                    }
                 });
             });
             ui.add_space(6.0);
             let heads = [gc("Key name", 2.0), gc("Columns", 2.4), gc("Unique", 0.8), gc("Type", 0.8), gc_r("Cardinality", 1.2), gc("Comment", 2.4)];
-            if let Some(r) = grid(ui, "indexes", &heads, d.indexes.len(), sel[1], |ui, rect, r, c| index_cell(ui, rect, &d.indexes[r], c)) {
+            let mut imenu = |ui: &mut egui::Ui, r: usize| {
+                if ui.add_enabled(editable, egui::Button::new("Edit index")).on_disabled_hover_text(why).clicked() {
+                    acts.push(Act::EditIndex(r));
+                    ui.close();
+                }
+                ui.separator();
+                ui.add_enabled_ui(editable, |ui| {
+                    if danger_item(ui, "Drop index").clicked() {
+                        acts.push(Act::DropIndex(r));
+                        ui.close();
+                    }
+                })
+                .response
+                .on_disabled_hover_text(why);
+            };
+            let hit = grid_ex(ui, "indexes", &heads, d.indexes.len(), sel[1], |ui, rect, r, c| index_cell(ui, rect, &d.indexes[r], c), Some(&mut imenu));
+            if let Some(r) = hit.click {
                 sel[1] = Some(r);
+            }
+            if let (Some(r), true) = (hit.double, editable) {
+                acts.push(Act::EditIndex(r));
             }
         });
         self.keep(&ui.ctx().clone(), d, sel, acts);
@@ -326,8 +451,18 @@ fn edit_row(ui: &mut egui::Ui, buttons: &[&str], note: &str, right: impl FnOnce(
     });
 }
 
+/// The Structure view's row: `buttons` draws the actions given whether writes are allowed, then the note.
+fn edit_row_with(ui: &mut egui::Ui, on: bool, note: &str, buttons: impl FnOnce(&mut egui::Ui, bool), right: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        buttons(ui, on);
+        ui.label(RichText::new(note).size(TXT_SMALL).color(FAINT()));
+        right_group(ui, right);
+    });
+}
+
 /// "1.4 MB" for a byte count, one decimal from kilobytes up.
-fn size(n: u64) -> String {
+pub(super) fn size(n: u64) -> String {
     match n {
         n if n >= 1 << 30 => format!("{:.1} GB", n as f64 / (1u64 << 30) as f64),
         n if n >= 1 << 20 => format!("{:.1} MB", n as f64 / (1u64 << 20) as f64),
@@ -481,7 +616,20 @@ fn index_cell(ui: &egui::Ui, rect: Rect, ix: &Index, col: usize) {
 
 /// A bordered table with a header row, striped rows and a row number. `cell` paints one cell and
 /// may add widgets over it. Returns the row that was clicked.
-fn grid(ui: &mut egui::Ui, salt: &str, cols: &[GCol], rows: usize, sel: Option<usize>, mut cell: impl FnMut(&mut egui::Ui, Rect, usize, usize)) -> Option<usize> {
+fn grid(ui: &mut egui::Ui, salt: &str, cols: &[GCol], rows: usize, sel: Option<usize>, cell: impl FnMut(&mut egui::Ui, Rect, usize, usize)) -> Option<usize> {
+    grid_ex(ui, salt, cols, rows, sel, cell, None).click
+}
+
+/// What a frame of a grid saw: the row clicked (a right click counts, so a menu acts on what it opened over)
+/// and the row double-clicked.
+#[derive(Default)]
+struct Hit {
+    click: Option<usize>,
+    double: Option<usize>,
+}
+
+/// `grid` with a double-click and a row menu, which gets the row it opened on.
+fn grid_ex(ui: &mut egui::Ui, salt: &str, cols: &[GCol], rows: usize, sel: Option<usize>, mut cell: impl FnMut(&mut egui::Ui, Rect, usize, usize), mut menu: Option<&mut dyn FnMut(&mut egui::Ui, usize)>) -> Hit {
     const NUM: f32 = 40.0;
     let w = ui.available_width();
     let total: f32 = cols.iter().map(|c| c.weight).sum();
@@ -504,7 +652,7 @@ fn grid(ui: &mut egui::Ui, salt: &str, cols: &[GCol], rows: usize, sel: Option<u
         put(ui, head, c.head, FontId::proportional(TXT_SMALL), MUTED(), c.right);
     }
     let stripe = ui.visuals().faint_bg_color;
-    let mut clicked = None;
+    let mut hit = Hit::default();
     for r in 0..rows {
         let row = Rect::from_min_size(pos2(rect.left(), rect.top() + TABLE_HEAD_H + r as f32 * ROW_H), vec2(w, ROW_H));
         let resp = ui.interact(row, ui.scope_id().with(("sql-grid", salt, r)), Sense::click());
@@ -514,13 +662,22 @@ fn grid(ui: &mut egui::Ui, salt: &str, cols: &[GCol], rows: usize, sel: Option<u
         for (i, (a, b)) in xs.iter().enumerate() {
             cell(ui, Rect::from_min_max(pos2(*a, row.top()), pos2(*b, row.bottom())), r, i);
         }
-        if resp.clicked() {
-            clicked = Some(r);
+        if resp.clicked() || resp.secondary_clicked() {
+            hit.click = Some(r);
+        }
+        if resp.double_clicked() {
+            hit.double = Some(r);
+        }
+        if let Some(m) = menu.as_mut() {
+            resp.context_menu(|ui| {
+                menu_look(ui);
+                m(ui, r);
+            });
         }
     }
     ui.painter().hline(rect.x_range(), rect.top() + TABLE_HEAD_H, Stroke::new(1.0, LINE()));
     ui.painter().rect_stroke(rect, R_MD, Stroke::new(1.0, LINE()), egui::StrokeKind::Inside);
-    clicked
+    hit
 }
 
 /// A read-only code area with line numbers, scrolling both ways inside `height`.
@@ -554,7 +711,7 @@ impl App {
     /// relations or triggers pick the view. Never touches a server or the keychain.
     pub(super) fn sql_structure_demo(&mut self, which: &str) {
         let view = match which {
-            "structure" => View::Structure,
+            "structure" | "coledit" | "stagebar" => View::Structure,
             "info" => View::Info,
             "relations" => View::Relations,
             "triggers" => View::Triggers,

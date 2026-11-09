@@ -120,6 +120,32 @@ impl Dialect {
         }
     }
 
+    /// MySQL drops an index along with its last column. MariaDB refuses to drop a column an index still needs.
+    pub fn drops_index_with_column(self) -> bool {
+        self == Dialect::MySql
+    }
+
+    /// RENAME INDEX exists from MySQL 5.7 and MariaDB 10.5.2. Older servers need a drop and an add in one ALTER.
+    pub fn can_rename_index(self, version: &str) -> bool {
+        let v = version.strip_prefix("5.5.5-").unwrap_or(version);
+        let nums: Vec<u32> = v.split(|c: char| !c.is_ascii_digit()).filter(|p| !p.is_empty()).take(3).map(|p| p.parse().unwrap_or(0)).collect();
+        let at = |i: usize| nums.get(i).copied().unwrap_or(0);
+        match self {
+            Dialect::MySql => (at(0), at(1)) >= (5, 7),
+            Dialect::MariaDb => (at(0), at(1), at(2)) >= (10, 5, 2),
+        }
+    }
+
+    /// A DEFAULT that is an expression. Both engines take the timestamp functions bare; MySQL 8 wants every
+    /// other expression in parentheses and MariaDB accepts them.
+    pub fn default_expr(self, e: &str) -> String {
+        let t = e.trim();
+        let lower = t.to_ascii_lowercase();
+        let (name, rest) = lower.split_once('(').map_or((lower.as_str(), ""), |(a, b)| (a.trim_end(), b));
+        let bare = matches!(name, "current_timestamp" | "now" | "localtime" | "localtimestamp") && (rest.is_empty() || (rest.ends_with(')') && rest[..rest.len() - 1].bytes().all(|b| b.is_ascii_digit())));
+        if bare { t.to_string() } else { format!("({t})") }
+    }
+
     /// Stops the running statement and keeps the connection. Run it from a second connection.
     pub fn cancel(self, connection_id: u64) -> String {
         format!("KILL QUERY {connection_id}")
@@ -282,6 +308,23 @@ mod tests {
             assert!(q.starts_with("SELECT "));
             assert!(q.contains("information_schema."));
         }
+    }
+
+    #[test]
+    fn rename_index_and_default_expressions() {
+        assert!(Dialect::MySql.can_rename_index("8.4.3"));
+        assert!(Dialect::MySql.can_rename_index("5.7.44-log"));
+        assert!(!Dialect::MySql.can_rename_index("5.6.51"));
+        assert!(Dialect::MariaDb.can_rename_index("10.11.6-MariaDB"));
+        assert!(Dialect::MariaDb.can_rename_index("10.5.2-MariaDB"));
+        assert!(!Dialect::MariaDb.can_rename_index("10.5.1-MariaDB"));
+        assert!(!Dialect::MariaDb.can_rename_index("10.4.32-MariaDB"));
+        assert!(Dialect::MariaDb.can_rename_index("5.5.5-10.11.6-MariaDB"));
+        assert_eq!(Dialect::MySql.default_expr("CURRENT_TIMESTAMP"), "CURRENT_TIMESTAMP");
+        assert_eq!(Dialect::MySql.default_expr("current_timestamp(6)"), "current_timestamp(6)");
+        assert_eq!(Dialect::MySql.default_expr("now()"), "now()");
+        assert_eq!(Dialect::MySql.default_expr("UUID()"), "(UUID())");
+        assert_eq!(Dialect::MariaDb.default_expr("curdate() + interval 1 day"), "(curdate() + interval 1 day)");
     }
 
     #[test]

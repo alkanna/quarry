@@ -5,6 +5,7 @@ mod dialect;
 mod worker;
 pub mod structure;
 pub mod write;
+pub mod ddl;
 pub mod export;
 pub mod lex;
 pub mod value;

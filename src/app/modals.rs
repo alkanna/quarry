@@ -188,6 +188,8 @@ impl App {
                 Modal::Export(f) => self.export_dialog(ui, f, &mut keep),
                 Modal::SqlSet(f) => self.sql_set_dialog(ui, f, &mut keep),
                 Modal::SqlRow(f) => self.sql_row_dialog(ui, f, &mut keep),
+                Modal::ColEdit(f) => self.col_dialog(ui, f, &mut keep),
+                Modal::IdxEdit(f) => self.idx_dialog(ui, f, &mut keep),
                 Modal::Typed { title, expect, typed, action } => {
                     ui.label(semibold(RichText::new(title.as_str()).color(BRIGHT())));
                     ui.label(RichText::new(format!("Type {expect} to confirm (case sensitive).")).color(MUTED()));

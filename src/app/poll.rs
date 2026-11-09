@@ -107,6 +107,7 @@ impl App {
                         s.st.finish(res);
                     }
                 }
+                Msg::SqlAltered { conn, schema, table, res, undo } => self.sql_altered(conn, schema, table, res, undo),
                 Msg::SqlRan { req, sets, .. } => self.sql_ran(req, sets),
                 Msg::SqlCount { req, idx, res } => self.sql_counted(req, idx, res),
                 Msg::SqlExport { req, res } => self.export_done(ctx, req, res),

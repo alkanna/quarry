@@ -149,10 +149,35 @@ pub fn normalize_default(d: Dialect, raw: Option<String>, nullable: bool, extra:
         return (None, false);
     }
     if v.len() >= 2 && v.starts_with('\'') && v.ends_with('\'') {
-        return (Some(v[1..v.len() - 1].replace("''", "'")), false);
+        return (Some(unquote(&v[1..v.len() - 1])), false);
     }
     let literal = v == "NULL" || v.parse::<f64>().is_ok();
     (Some(v), !literal)
+}
+
+/// The text inside a MariaDB default literal: it doubles quotes and writes backslashes as escapes.
+fn unquote(inner: &str) -> String {
+    let mut out = String::new();
+    let mut it = inner.chars().peekable();
+    while let Some(c) = it.next() {
+        match c {
+            '\\' => out.push(match it.next() {
+                Some('n') => '\n',
+                Some('r') => '\r',
+                Some('t') => '\t',
+                Some('0') => '\0',
+                Some('Z') => '\x1a',
+                Some(o) => o,
+                None => '\\',
+            }),
+            '\'' if it.peek() == Some(&'\'') => {
+                it.next();
+                out.push('\'');
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// An unsigned column value, whichever width and signedness the server reports.
@@ -290,6 +315,8 @@ mod tests {
         assert_eq!(n("'abc'", false), (Some("abc".into()), false));
         assert_eq!(n("'it''s'", false), (Some("it's".into()), false));
         assert_eq!(n("''", false), (Some(String::new()), false));
+        assert_eq!(n(r"'a\\b\'c'", false), (Some(r"a\b'c".into()), false));
+        assert_eq!(n(r"'line\nbreak'", false), (Some("line\nbreak".into()), false));
         assert_eq!(n("NULL", true), (None, false));
         // A quoted string that says NULL is a string.
         assert_eq!(n("'NULL'", true), (Some("NULL".into()), false));

@@ -641,6 +641,8 @@ pub(super) enum Danger {
     Validator(Document),
     /// Rows of the open SQL table, by key.
     DeleteRows(Vec<Document>),
+    /// The staged ALTER TABLE of the open SQL table, confirmed because it drops a column.
+    ApplyAlter,
 }
 
 /// What to run once writes are allowed.
@@ -656,6 +658,9 @@ pub(super) enum Modal {
     Delete(Vec<Document>),
     SqlSet(Box<SetForm>),
     SqlRow(Box<RowForm>),
+    /// Add or edit a column of the open SQL table, with its ALTER preview.
+    ColEdit(Box<ColForm>),
+    IdxEdit(Box<IdxForm>),
     Typed { title: String, expect: String, typed: String, action: Danger },
     CreateIndex(Box<IndexForm>),
     AggWrite(Vec<Document>),

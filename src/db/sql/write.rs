@@ -24,6 +24,8 @@ pub enum SqlUndo {
     Update(Vec<RowEdit>),
     Delete(Vec<Document>),
     Insert(Vec<Document>),
+    /// A structure change: the ALTER TABLE that reverses it, and what it did for the Recent changes list.
+    Alter { sql: String, label: String },
 }
 
 impl SqlUndo {
@@ -33,6 +35,7 @@ impl SqlUndo {
             SqlUndo::Update(r) => r.first().map(|r| r.pk.clone()),
             SqlUndo::Delete(r) => r.first().map(pk_of),
             SqlUndo::Insert(r) => r.first().cloned(),
+            SqlUndo::Alter { .. } => None,
         };
         first.map(|d| d.keys().cloned().collect()).unwrap_or_default()
     }
@@ -43,6 +46,7 @@ impl SqlUndo {
             SqlUndo::Update(r) => format!("edited {}", plural(r.len(), "row")),
             SqlUndo::Delete(r) => format!("deleted {}", plural(r.len(), "row")),
             SqlUndo::Insert(r) => format!("inserted {}", plural(r.len(), "row")),
+            SqlUndo::Alter { label, .. } => label.clone(),
         }
     }
 }
@@ -193,7 +197,7 @@ fn bound<'q>(sql: &'q str, params: &'q [Param]) -> Query<'q> {
 }
 
 /// A connection of its own with write access, so the pool's read-only session is never changed.
-async fn writer(db: &Db, schema: &str, read_only: bool) -> Res<sqlx::MySqlConnection> {
+pub(super) async fn writer(db: &Db, schema: &str, read_only: bool) -> Res<sqlx::MySqlConnection> {
     if read_only {
         return Err("Writes are locked on this connection. Unlock them first.".into());
     }
@@ -346,6 +350,10 @@ impl Worker {
         self.spawn(async move {
             let at = (a.db.clone(), a.coll.clone());
             let UndoAction { at: when, conn, db: schema, coll: table, kind } = a;
+            if let UndoKind::Sql { undo: SqlUndo::Alter { sql, label }, .. } = &kind {
+                let (sql, label) = (sql.clone(), label.clone());
+                return super::ddl::undo(&db, UndoAction { at: when, conn, db: schema, coll: table, kind }, sql, label, read_only).await;
+            }
             let UndoKind::Sql { cols, undo } = kind else { return Msg::Written { at, res: Err("Not a SQL change".into()), undo: None, reload: false, retry: None } };
             let res = match undo.clone() {
                 SqlUndo::Update(edits) => {
@@ -358,6 +366,8 @@ impl Worker {
                     apply_inserts(&db, &schema, &table, &cols, &pk, &rows, read_only).await.map(|_| "Restored the deleted rows".to_string())
                 }
                 SqlUndo::Insert(pks) => apply_deletes(&db, &schema, &table, &cols, &pk, &pks, read_only).await.map(|_| "Removed the inserted rows".to_string()),
+                // Taken before this match, where the structure statements run.
+                SqlUndo::Alter { .. } => Err("Not a row change".into()),
             };
             let undo = res.is_err().then(|| UndoAction { at: when, conn, db: schema, coll: table, kind: UndoKind::Sql { cols, undo } });
             Msg::Written { at, res, undo, reload: true, retry: None }
