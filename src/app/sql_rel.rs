@@ -2,7 +2,7 @@
 //! points to from Content. Changes are staged like column and index edits (`sql_alter.rs`), so the statement
 //! the preview shows is the one that runs and the inverse comes from the structure read before.
 
-use super::sql_alter::{sql_block, READ_ONLY_NOTE};
+use super::sql_alter::{sql_block, BUSY_NOTE, READ_ONLY_NOTE};
 use super::*;
 use db::sql::ddl::{self, Change, FK_ACTIONS};
 use db::sql::structure::{ForeignKey, Structure};
@@ -31,10 +31,13 @@ pub(super) struct FkForm {
     asked: (String, String),
     parent_req: u64,
     parent_err: Option<String>,
-    /// How many rows point at nothing for the key as it stands, and which key and request that is for.
+    /// How many rows point at nothing for the key as it stands, and which columns and request that is for.
     orphans: Option<Result<u64, String>>,
-    orphan_for: Option<ForeignKey>,
+    orphan_for: Option<(Vec<String>, String, String, Vec<String>)>,
     orphan_req: u64,
+    /// The server takes a key only on a whole primary or unique key, and the request that asks it.
+    strict: bool,
+    rules_req: u64,
     /// The person asked for the check on a big table.
     check: bool,
 }
@@ -49,6 +52,12 @@ impl FkForm {
             Err(e) => (self.parent, self.parent_err) = (None, Some(e)),
         }
         true
+    }
+
+    pub(super) fn rules_done(&mut self, req: u64, strict: bool) {
+        if req == self.rules_req && req != 0 {
+            self.strict = strict;
+        }
     }
 
     pub(super) fn orphans_done(&mut self, req: u64, res: db::Res<u64>) -> bool {
@@ -90,12 +99,49 @@ fn type_text(st: &Structure, col: &str) -> String {
     st.columns.iter().find(|c| c.name.eq_ignore_ascii_case(col)).map(|c| c.full_type.to_ascii_uppercase()).unwrap_or_default()
 }
 
+/// Whether a tab holds a filter, sort or bar clause of the person's, which opening a row there would replace.
+fn has_clauses(t: &Tab) -> bool {
+    let bar = t.sql.as_ref().is_some_and(|s| {
+        let c = &s.bar.c;
+        !(c.select.is_empty() && c.group.is_empty() && c.having.is_empty() && c.limit.is_empty() && c.offset.is_empty() && c.hint.is_empty() && !c.distinct)
+    });
+    !t.filter_txt.trim().is_empty() || !t.sort_txt.trim().is_empty() || bar
+}
+
+/// The filter that finds the row a key points to, from the key columns of the clicked row. FLOAT and DOUBLE keys get
+/// none: the grid holds their value rounded to what it shows, and `=` against that may find no row or another one.
+pub(super) fn fk_row_filter(d: db::sql::Dialect, bs: bool, fk: &ForeignKey, cols: &[db::sql::Col], row: &Document) -> Result<String, String> {
+    let mut lits = Vec::new();
+    for c in &fk.cols {
+        // The row is keyed by the shown name, which differs from the server's for a renamed column.
+        let col = cols.iter().find(|k| k.src == *c);
+        if col.is_some_and(|k| k.kind == db::sql::value::Kind::Float) {
+            return Err(format!("{c} is a floating point column, whose value cannot be matched exactly. Filter {} by hand.", fk.ref_table));
+        }
+        let key = col.map_or(c.as_str(), |k| k.name.as_str());
+        match db::get_path(row, key) {
+            Some(Bson::Null) | None => return Err(format!("{c} is NULL in this row, so it points to nothing.")),
+            v => lits.push(db::copy::sql_literal(v, col.is_some_and(|k| is_numeric(k.kind)), bs)),
+        }
+    }
+    Ok(fk.row_where(d, &lits))
+}
+
 impl App {
     pub(super) fn open_fk_form(&mut self) {
         let Some(own) = self.structure().cloned() else { return };
         let Some(db_name) = self.t().map(|t| t.sel.db.clone()) else { return };
         let rest = self.staged().to_vec();
         let first = own.columns.first().map(|c| c.name.clone()).unwrap_or_default();
+        let (d, version, _) = self.alter_env();
+        // Until the server answers, a MySQL that has the rule on by default is taken to have it.
+        let strict = ddl::fk_whole_key_default(d, &version);
+        let mut rules_req = 0;
+        if let Some(sql) = self.t().and_then(|t| self.conn(t.sel.conn)).and_then(|c| c.sql.clone()) {
+            self.req += 1;
+            rules_req = self.req;
+            self.worker.sql_fk_rules(rules_req, sql);
+        }
         self.modal = Some(Modal::FkEdit(Box::new(FkForm {
             name: String::new(),
             named: false,
@@ -113,6 +159,8 @@ impl App {
             orphans: None,
             orphan_for: None,
             orphan_req: 0,
+            strict,
+            rules_req,
             check: false,
         })));
     }
@@ -277,7 +325,7 @@ impl App {
             problem = Some(format!("Could not read {}: {e}", f.ref_table));
             hard = true;
         } else if let (Some(k), Some(par)) = (&key, &f.parent) {
-            problem = ddl::fk_problem(&f.own, &table, par, k);
+            problem = ddl::fk_problem(&f.own, &table, par, k, f.strict);
             hard = problem.is_some();
             if problem.is_none() {
                 let taken = |n: &str| f.own.foreign_keys.iter().any(|x| x.name.eq_ignore_ascii_case(n)) || f.rest.iter().any(|c| matches!(c, Change::AddFk(x) if x.name.eq_ignore_ascii_case(n)));
@@ -287,13 +335,14 @@ impl App {
                 }
             }
         }
-        // The orphan check runs once per key, on its own request, and a big table waits for a click.
+        // The orphan check runs once per set of columns, on its own request, and a big table waits for a click. The
+        // name and the actions do not change its answer, so typing them asks nothing.
         if let (Some(k), None, Some(sql)) = (&key, &problem, &live) {
-            if f.orphan_for.as_ref() != Some(k) {
+            if f.orphan_for.as_ref() != Some(&ddl::orphan_key(k)) {
                 let big = f.own.status.rows.is_some_and(|n| n > CHECK_ROWS);
                 if f.parent.is_some() && (!big || f.check) {
                     self.req += 1;
-                    (f.orphan_req, f.orphan_for, f.orphans) = (self.req, Some(k.clone()), None);
+                    (f.orphan_req, f.orphan_for, f.orphans) = (self.req, Some(ddl::orphan_key(k)), None);
                     self.worker.sql_orphans(self.req, sql.clone(), schema.clone(), table.clone(), k.clone());
                 }
             }
@@ -320,7 +369,7 @@ impl App {
             ui.add_space(2.0);
             let (col, rc) = (k.cols.join(", "), format!("{}.{}", k.ref_table, k.ref_cols.join(", ")));
             match &f.orphans {
-                Some(Ok(n)) if *n > 0 && f.orphan_for.as_ref() == Some(k) => {
+                Some(Ok(n)) if *n > 0 && f.orphan_for.as_ref() == Some(&ddl::orphan_key(k)) => {
                     egui::Frame::new().fill(tint(WARNING(), 34)).corner_radius(R_MD).inner_margin(10).show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.label(RichText::new(format!("{n} row{} {} {col} missing from {rc}. Fix {} first or the ALTER fails.", if *n == 1 { "" } else { "s" }, if *n == 1 { "has a value in" } else { "have values in" }, if *n == 1 { "it" } else { "them" })).size(TXT_SMALL).color(WARNING()));
@@ -360,7 +409,8 @@ impl App {
         let (mut stage, mut now) = (false, false);
         dialog_actions(ui, |ui| {
             stage = ui.add_enabled(text.is_ok(), primary_button(ui, "Add relation", PRIMARY())).clicked();
-            now = ui.add_enabled(text.is_ok() && self.sel_writable(), egui::Button::new("Apply now")).on_hover_text("Stage this change and run everything staged").on_disabled_hover_text(READ_ONLY_NOTE).clicked();
+            let busy = self.applying();
+            now = ui.add_enabled(text.is_ok() && self.sel_writable() && !busy, egui::Button::new("Apply now")).on_hover_text("Stage this change and run everything staged").on_disabled_hover_text(if busy { BUSY_NOTE } else { READ_ONLY_NOTE }).clicked();
             if ui.button("Cancel").clicked() {
                 *keep = false;
             }
@@ -374,37 +424,35 @@ impl App {
         }
     }
 
-    /// Opens the row a key cell points to: the referenced table in its tab, filtered to that row. A composite key
-    /// uses every column. `row` is the document of the clicked row.
+    /// Opens the row a key cell points to: the referenced table, filtered to that row. A composite key uses every
+    /// column. `row` is the document of the clicked row. A tab of that table is reused only when it holds no filter,
+    /// sort or clause of the person's, so none is lost; otherwise the row opens in a tab of its own. The tab loads once.
     pub(super) fn open_fk_row(&mut self, fk: &ForeignKey, row: &Document) {
         let Some(conn) = self.t().map(|t| t.sel.conn) else { return };
+        // The editor belongs to this tab's rows; it would stage into the wrong table once the tab changes.
+        if self.sql_cell.is_some() {
+            return self.err("Finish or cancel the cell edit first.");
+        }
         let (d, bs) = self.sql_dialect();
         let cols = self.t().and_then(|t| t.sql.as_ref()).map(|s| s.cols.clone()).unwrap_or_default();
-        let mut lits = Vec::new();
-        for c in &fk.cols {
-            // The row is keyed by the shown name, which differs from the server's for a renamed column.
-            let col = cols.iter().find(|k| k.src == *c);
-            let key = col.map_or(c.as_str(), |k| k.name.as_str());
-            match db::get_path(row, key) {
-                Some(Bson::Null) | None => return self.err(format!("{c} is NULL in this row, so it points to nothing.")),
-                v => lits.push(db::copy::sql_literal(v, col.is_some_and(|k| is_numeric(k.kind)), bs)),
+        let text = match fk_row_filter(d, bs, fk, &cols, row) {
+            Ok(t) => t,
+            Err(why) => return self.err(why),
+        };
+        let sel = Sel { conn, db: fk.ref_db.clone(), coll: fk.ref_table.clone() };
+        self.reset_doc_state();
+        match self.tabs.iter().position(|t| t.sel == sel && !has_clauses(t)) {
+            Some(i) => self.set_cur(i),
+            None => {
+                let engine = self.conn(conn).map(|c| c.meta.engine).unwrap_or_default();
+                self.tabs.push(Tab::new(sel).for_engine(engine));
+                self.set_cur(self.tabs.len() - 1);
             }
         }
-        let text = fk.row_where(d, &lits);
-        let sel = Sel { conn, db: fk.ref_db.clone(), coll: fk.ref_table.clone() };
-        let reused = self.tabs.iter().any(|t| t.sel == sel);
-        self.open_collection(sel, false);
         let Some(t) = self.tm() else { return };
         t.view = View::Documents;
         t.filter_txt = text;
         t.page = 0;
-        // A tab that was already open may hold a sort, a grouping or a column list that would hide the row.
-        if reused {
-            t.sort_txt.clear();
-            if let Some(s) = t.sql.as_mut() {
-                s.bar.c = super::sql_bar::Clauses { sql: s.bar.c.sql, ..Default::default() };
-            }
-        }
         self.reload();
     }
 
@@ -435,6 +483,50 @@ impl App {
         // The design adds the key that the relations demo already lists, so the form starts without it.
         f.own.foreign_keys.retain(|k| k.name != "fk_orders_currency");
         let k = f.key("shop");
-        (f.orphan_for, f.orphans) = (k, Some(Ok(3)));
+        (f.orphan_for, f.orphans) = (k.as_ref().map(ddl::orphan_key), Some(Ok(3)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use db::sql::value::Kind;
+    use db::sql::{Col, Dialect};
+
+    fn key(cols: &[&str]) -> ForeignKey {
+        ForeignKey { name: "fk".into(), cols: cols.iter().map(|c| (*c).into()).collect(), ref_table: "parent".into(), ref_cols: cols.iter().map(|c| format!("p_{c}")).collect(), ..Default::default() }
+    }
+
+    /// Review finding 13: a FLOAT key cannot be matched by the rounded value the grid holds.
+    #[test]
+    fn a_float_key_gets_no_filter() {
+        let row = mongodb::bson::doc! { "a": 1, "f": 0.1 };
+        let cols = [Col::plain("a", "", Kind::Int, true), Col::plain("f", "", Kind::Float, true)];
+        assert_eq!(fk_row_filter(Dialect::MySql, true, &key(&["a"]), &cols, &row).unwrap(), "`p_a` = 1");
+        assert!(fk_row_filter(Dialect::MySql, true, &key(&["a", "f"]), &cols, &row).unwrap_err().contains("floating point"));
+        let null = mongodb::bson::doc! { "a": Bson::Null };
+        assert!(fk_row_filter(Dialect::MySql, true, &key(&["a"]), &cols, &null).unwrap_err().contains("NULL"));
+    }
+
+    /// Review finding 13: a tab with the person's own clauses is not replaced by the row's filter.
+    #[test]
+    fn a_tab_with_clauses_is_not_reused() {
+        let sel = Sel { conn: 1, db: "shop".into(), coll: "orders".into() };
+        let mut t = Tab::new(sel);
+        assert!(!has_clauses(&t));
+        t.sort_txt = "id DESC".into();
+        assert!(has_clauses(&t));
+        t.sort_txt.clear();
+        t.filter_txt = "status = 'paid'".into();
+        assert!(has_clauses(&t));
+    }
+
+    /// Review finding 9: the orphan count is asked again only when the columns or the table change.
+    #[test]
+    fn typing_a_name_does_not_count_orphans_again() {
+        let a = key(&["a"]);
+        let b = ForeignKey { name: "fk_typed".into(), on_delete: "CASCADE".into(), ..a.clone() };
+        assert_eq!(ddl::orphan_key(&a), ddl::orphan_key(&b));
+        assert_ne!(ddl::orphan_key(&a), ddl::orphan_key(&key(&["b"])));
     }
 }

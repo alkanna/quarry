@@ -92,8 +92,6 @@ pub(super) fn optimal_width(ui: &egui::Ui, docs: Rows, col: &str, header: &str, 
     widest.clamp(OPTIMAL_MIN_W, cap) + OPTIMAL_PAD + CELL_PAD
 }
 
-/// Left edge for text `gw` wide in a cell at `x`, `w` wide, by the column's alignment. Text wider
-/// than the cell starts at its left padding so its beginning stays visible.
 /// Width kept at the right of a foreign key cell for its link.
 const FK_W: f32 = 22.0;
 
@@ -118,6 +116,8 @@ fn fk_link(ui: &mut egui::Ui, cell: egui::Rect, id: egui::Id, fk: &db::sql::stru
     r
 }
 
+/// Left edge for text `gw` wide in a cell at `x`, `w` wide, by the column's alignment. Text wider
+/// than the cell starts at its left padding so its beginning stays visible.
 fn align_x(align: u8, x: f32, w: f32, gw: f32) -> f32 {
     match align {
         1 => x + (w - gw) / 2.0,
@@ -746,17 +746,17 @@ impl App {
         if let Some(i) = drill {
             self.sql_drill(i);
         }
-        if let Some((i, k)) = fk_open {
-            if let Some(d) = self.shown_row(docs, i, agg).or_else(|| docs.owned(i)) {
-                self.open_fk_row(&fks[k], &d);
-            }
-        }
+        let fk_row = fk_open.and_then(|(i, k)| self.shown_row(docs, i, agg).or_else(|| docs.owned(i)).map(|d| (k, d)));
         if let (Some((i, c)), true) = (&edit_cell, sql) {
             self.sql_open_cell(*i, c.clone());
         }
         if sql {
             self.sql_cell_finish();
             self.sql_cell_acts(ui.ctx(), sql_acts);
+        }
+        // After the cell editor finished on this tab: the link click that took its focus stages its edit here first.
+        if let Some((k, d)) = fk_row {
+            self.open_fk_row(&fks[k], &d);
         }
         if let (Some((i, c)), false) = (edit_cell, agg || sql) {
             self.select(agg, i, false);

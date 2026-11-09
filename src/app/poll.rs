@@ -107,6 +107,11 @@ impl App {
                         f.orphans_done(req, res);
                     }
                 }
+                Msg::SqlFkRules { req, strict } => {
+                    if let Some(Modal::FkEdit(f)) = self.modal.as_mut() {
+                        f.rules_done(req, strict);
+                    }
+                }
                 Msg::SqlStructure { req, res } => {
                     // The Add relation dialog asks for the table it points at on a request of its own.
                     if let Some(Modal::FkEdit(f)) = self.modal.as_mut() {
@@ -118,7 +123,7 @@ impl App {
                         s.st.finish(res);
                     }
                 }
-                Msg::SqlAltered { conn, schema, table, res, undo, sql_mode } => self.sql_altered(conn, schema, table, res, undo, sql_mode),
+                Msg::SqlAltered { conn, schema, table, res, undo, sql_mode, alter } => self.sql_altered(conn, schema, table, res, undo, sql_mode, alter),
                 Msg::SqlRan { req, sets, .. } => self.sql_ran(req, sets),
                 Msg::SqlCount { req, idx, res } => self.sql_counted(req, idx, res),
                 Msg::SqlExport { req, res } => self.export_done(ctx, req, res),

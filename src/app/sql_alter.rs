@@ -376,9 +376,12 @@ impl App {
         true
     }
 
-    /// The answer to an ALTER or to its undo.
-    pub(super) fn sql_altered(&mut self, conn: u64, schema: String, table: String, res: db::Res<String>, undo: Option<UndoAction>, sql_mode: Option<String>) {
+    /// The answer to an ALTER, a trigger change or an undo of either. Only an ALTER makes the staged changes stale; a
+    /// trigger answer reloads the structure even when it failed, since a failed MySQL swap may still have changed it.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn sql_altered(&mut self, conn: u64, schema: String, table: String, res: db::Res<String>, undo: Option<UndoAction>, sql_mode: Option<String>, alter: bool) {
         let ok = res.is_ok();
+        let (clear, reload) = answer_effects(ok, alter);
         // The statement was refused for a stale mode; the previews follow the new one from now on.
         if let Some(m) = sql_mode {
             if let Some(d) = self.conns.iter_mut().find(|c| c.meta.id == conn).and_then(|c| c.sql.as_mut()) {
@@ -399,18 +402,19 @@ impl App {
         for i in tabs {
             if let Some(s) = self.tabs[i].sql.as_mut() {
                 s.st.applying = false;
-                if ok {
-                    // The staged changes were written against the old structure.
+                if clear {
                     s.st.staged.clear();
+                }
+                if reload {
                     s.st.data = None;
                     s.st.load = Load::Idle;
                 }
             }
-            if ok {
+            if reload {
                 self.reload_of(i);
             }
         }
-        if ok {
+        if ok && alter {
             self.sql_refresh_schema(conn, &schema);
         }
     }
@@ -796,6 +800,13 @@ impl App {
     }
 }
 
+/// What an answer does to the tabs of its table: (clear the staged changes, reload the structure). A done ALTER
+/// leaves the staged changes written against a structure that is gone. A trigger answer leaves them as they are,
+/// and reloads even after a failure, which on MySQL may have come after the old trigger was dropped and put back.
+fn answer_effects(ok: bool, alter: bool) -> (bool, bool) {
+    (ok && alter, ok || !alter)
+}
+
 fn plural_changes(n: usize) -> String {
     format!("{n} structure change{}", if n == 1 { "" } else { "s" })
 }
@@ -803,3 +814,17 @@ fn plural_changes(n: usize) -> String {
 /// Shown under a disabled Apply now button.
 pub(super) const READ_ONLY_NOTE: &str = "Read-only: unlock writes to change the structure";
 pub(super) const BUSY_NOTE: &str = "A structure change is still running.";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Review finding 8: saving or dropping a trigger cleared the staged structure changes.
+    #[test]
+    fn only_an_alter_clears_the_staged_changes() {
+        assert_eq!(answer_effects(true, true), (true, true));
+        assert_eq!(answer_effects(false, true), (false, false));
+        assert_eq!(answer_effects(true, false), (false, true));
+        assert_eq!(answer_effects(false, false), (false, true), "a failed trigger change still reloads");
+    }
+}

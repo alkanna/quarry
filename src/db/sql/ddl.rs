@@ -1055,9 +1055,11 @@ pub fn fk_pair_problem(child_table: &str, child: &Column, parent_table: &str, pa
 }
 
 /// The first problem with a whole key, before the server is asked: column pairs that do not fit, SET NULL on a
-/// column that cannot be NULL, and a referenced side with no index to lean on.
-pub fn fk_problem(own: &Structure, table: &str, parent: &Structure, fk: &ForeignKey) -> Option<String> {
-    let find = |st: &Structure, n: &str| st.columns.iter().find(|c| c.name.eq_ignore_ascii_case(n)).cloned();
+/// column that cannot be NULL, and a referenced side with no index to lean on. `whole_key` is MySQL 8.4's
+/// restrict_fk_on_non_standard_key: the referenced columns must then be exactly the primary key or a unique key,
+/// where older servers take any index that starts with them.
+pub fn fk_problem(own: &Structure, table: &str, parent: &Structure, fk: &ForeignKey, whole_key: bool) -> Option<String> {
+    let find = |st: &Structure, n: &str| st.columns.iter().find(|c| same_name(&c.name, n)).cloned();
     for (a, b) in fk.cols.iter().zip(&fk.ref_cols) {
         let (Some(ca), Some(cb)) = (find(own, a), find(parent, b)) else { return Some("A picked column is not in its table any more.".into()) };
         if let Some(p) = fk_pair_problem(table, &ca, &fk.ref_table, &cb) {
@@ -1068,8 +1070,20 @@ pub fn fk_problem(own: &Structure, table: &str, parent: &Structure, fk: &Foreign
             return Some(format!("SET NULL needs a column that allows NULL, and {table}.{a} does not."));
         }
     }
-    let led = parent.indexes.iter().any(|ix| ix.cols.len() >= fk.ref_cols.len() && ix.cols.iter().zip(&fk.ref_cols).all(|(x, y)| x.prefix.is_none() && x.name.eq_ignore_ascii_case(y)));
+    let starts = |ix: &Index| ix.cols.len() >= fk.ref_cols.len() && ix.cols.iter().zip(&fk.ref_cols).all(|(x, y)| x.prefix.is_none() && x.expr.is_none() && same_name(&x.name, y));
+    if whole_key {
+        let exact = parent.indexes.iter().any(|ix| ix.unique && ix.cols.len() == fk.ref_cols.len() && starts(ix));
+        return (!exact).then(|| format!("This server only lets a key point at a whole primary or unique key, and {} has none on exactly ({}). Add a unique index there first.", fk.ref_table, fk.ref_cols.join(", ")));
+    }
+    let led = parent.indexes.iter().any(starts);
     (!led).then(|| format!("{} has no index that starts with ({}). Add an index there first.", fk.ref_table, fk.ref_cols.join(", ")))
+}
+
+/// Whether a server is taken to refuse keys on part of a key until it says: MySQL 8.4 and later turn
+/// restrict_fk_on_non_standard_key on by default.
+pub fn fk_whole_key_default(d: Dialect, version: &str) -> bool {
+    let mut n = version.split(|c: char| !c.is_ascii_digit()).filter_map(|p| p.parse::<u32>().ok());
+    d == Dialect::MySql && (n.next().unwrap_or(0), n.next().unwrap_or(0)) >= (8, 4)
 }
 
 /// Counts the rows of the table whose key points at nothing, which is what makes ADD FOREIGN KEY fail.
@@ -1082,6 +1096,12 @@ pub fn orphans_sql(d: Dialect, schema: &str, table: &str, fk: &ForeignKey) -> St
     format!("SELECT COUNT(*) AS n FROM {} c WHERE {present} AND NOT EXISTS (SELECT 1 FROM {parent} p WHERE {same})", d.qualified(schema, table))
 }
 
+/// What the orphan count depends on: the name and the actions of a key do not change which rows point at nothing,
+/// so typing a name does not count again.
+pub fn orphan_key(fk: &ForeignKey) -> (Vec<String>, String, String, Vec<String>) {
+    (fk.cols.clone(), fk.ref_db.clone(), fk.ref_table.clone(), fk.ref_cols.clone())
+}
+
 /// A trigger as the editor holds it. The body is the user's own SQL, written after FOR EACH ROW as typed.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TrigDef {
@@ -1091,25 +1111,249 @@ pub struct TrigDef {
     pub body: String,
 }
 
-/// The body without its trailing `;`. A body that is not BEGIN ... END must be one statement, so a second
-/// statement typed after a `;` is refused instead of running.
-pub fn check_body(body: &str, bs: bool, ansi: bool) -> Result<String, String> {
-    use super::lex::{tokens_with, Tok};
-    let text = body.trim();
-    let text = text.strip_suffix(';').unwrap_or(text).trim_end();
-    let toks = tokens_with(text, bs, ansi);
-    let code: Vec<_> = toks.iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment)).collect();
-    let Some((first, r)) = code.first() else { return Err("The trigger body is empty.".into()) };
-    if *first == Tok::Word && text[r.clone()].eq_ignore_ascii_case("BEGIN") {
-        return Ok(text.to_string());
-    }
-    if code.iter().any(|(t, r)| *t == Tok::Punct && &text[r.clone()] == ";") {
-        return Err("A body of several statements goes inside BEGIN ... END.".into());
-    }
-    Ok(text.to_string())
+/// The blocks a trigger body nests. A CASE inside an expression ends at a bare END, a CASE statement at END CASE.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Blk {
+    Begin,
+    If,
+    CaseStmt,
+    CaseExpr,
+    Loop,
+    While,
+    Repeat,
+    For,
 }
 
-fn trigger_head(d: Dialect, bs: bool, ansi: bool, table: &str, t: &TrigDef, replace: bool) -> Result<String, String> {
+impl Blk {
+    /// The word after END that closes this block, or None for a bare END.
+    fn end_word(self) -> Option<&'static str> {
+        match self {
+            Blk::Begin | Blk::CaseExpr => None,
+            Blk::If => Some("IF"),
+            Blk::CaseStmt => Some("CASE"),
+            Blk::Loop => Some("LOOP"),
+            Blk::While => Some("WHILE"),
+            Blk::Repeat => Some("REPEAT"),
+            Blk::For => Some("FOR"),
+        }
+    }
+}
+
+/// The body without its trailing `;`, refused unless the server reads all of it as the one statement after FOR EACH
+/// ROW. The text goes over the text protocol, where CREATE TRIGGER has to (it cannot be prepared) and where a second
+/// statement would run too, so the check follows the server's grammar: a body is one plain statement, or one
+/// compound statement (BEGIN, IF, CASE, LOOP, WHILE, REPEAT or MariaDB's FOR, maybe labelled) whose blocks are
+/// tracked to the END that closes it. Only a `;` may follow that END. When the check cannot tell what the server
+/// would read it refuses rather than guesses: it may see a block close earlier than the server (and refuse what
+/// follows), never later, so a block opens here only where the grammar opens one and every END closes one.
+/// Strings and comments are read with the session's quote rules, and executable comments are refused because the
+/// server runs or skips them by version.
+pub fn check_body(body: &str, m: Mode) -> Result<String, String> {
+    use super::lex::{tokens_with, Tok};
+    let toks: Vec<(Tok, std::ops::Range<usize>)> = tokens_with(body, m.bs, m.ansi).into_iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment)).collect();
+    if toks.iter().any(|(t, _)| matches!(t, Tok::ExecOpen | Tok::ExecClose)) {
+        return Err("A trigger body cannot hold an executable comment (/*! ... */): whether the server runs it depends on its version.".into());
+    }
+    let Some(first) = toks.first() else { return Err("The trigger body is empty.".into()) };
+    let text = |k: usize| &body[toks[k].1.clone()];
+    let word = |k: usize, w: &str| k < toks.len() && toks[k].0 == Tok::Word && text(k).eq_ignore_ascii_case(w);
+    let punct = |k: usize, p: &str| k < toks.len() && toks[k].0 == Tok::Punct && text(k) == p;
+    // A reserved word after a dot is a name (NEW.end, NEW.case), never a keyword.
+    let after_dot = |k: usize| k > 0 && punct(k - 1, ".");
+    let unquote = |s: &str| if s.len() >= 2 && (s.starts_with('`') || s.starts_with('"')) { s[1..s.len() - 1].to_string() } else { s.to_string() };
+    let several = "A body of several statements goes inside BEGIN ... END, and nothing may follow its END but a ;.";
+    let mut stack: Vec<(Blk, Option<String>)> = Vec::new();
+    // At the first word of a statement, where BEGIN, IF and the rest open blocks.
+    let mut start = true;
+    // The statement after FOR EACH ROW is over: a `;` ended a plain one or an END closed the outermost block.
+    let mut closed = false;
+    let mut semi = false;
+    let mut end = first.1.start;
+    let mut k = 0;
+    while k < toks.len() {
+        let (t, r) = (toks[k].0, toks[k].1.clone());
+        if closed {
+            if punct(k, ";") && !semi {
+                semi = true;
+                k += 1;
+                continue;
+            }
+            return Err(several.into());
+        }
+        if punct(k, ";") {
+            match stack.last() {
+                None => (closed, semi) = (true, true),
+                Some((Blk::CaseExpr, _)) => return Err("A CASE expression is not closed before the ;.".into()),
+                Some(_) => start = true,
+            }
+            k += 1;
+            continue;
+        }
+        end = r.end;
+        let is_word = t == Tok::Word && !after_dot(k);
+        let up = if is_word { text(k).to_ascii_uppercase() } else { String::new() };
+        if start {
+            start = false;
+            let mut label = None;
+            let mut j = k;
+            if matches!(t, Tok::Word | Tok::Quoted) && punct(k + 1, ":") {
+                label = Some(unquote(text(k)).to_lowercase());
+                j = k + 2;
+            }
+            let opener = match () {
+                _ if word(j, "BEGIN") => Some(Blk::Begin),
+                _ if word(j, "IF") && label.is_none() => Some(Blk::If),
+                _ if word(j, "CASE") && label.is_none() => Some(Blk::CaseStmt),
+                _ if word(j, "LOOP") => Some(Blk::Loop),
+                _ if word(j, "WHILE") => Some(Blk::While),
+                _ if word(j, "REPEAT") => Some(Blk::Repeat),
+                _ if word(j, "FOR") => Some(Blk::For),
+                _ => None,
+            };
+            if let Some(b) = opener {
+                stack.push((b, label));
+                // A block of statements starts one at once; IF, CASE, WHILE and FOR have a condition first.
+                start = matches!(b, Blk::Begin | Blk::Loop | Blk::Repeat);
+                end = toks[j].1.end;
+                k = j + 1;
+                continue;
+            }
+            if label.is_some() {
+                return Err("A label goes before BEGIN, LOOP, WHILE or REPEAT.".into());
+            }
+            // DECLARE ... HANDLER FOR conditions: the handler's own statement starts after the conditions.
+            if word(k, "DECLARE") {
+                let mut j = k + 1;
+                while j < toks.len() && !punct(j, ";") && !word(j, "HANDLER") {
+                    j += 1;
+                }
+                if word(j, "HANDLER") && word(j + 1, "FOR") {
+                    j += 2;
+                    loop {
+                        if word(j, "SQLSTATE") {
+                            j += 1 + usize::from(word(j + 1, "VALUE"));
+                            j += 1;
+                        } else if word(j, "NOT") {
+                            j += 2;
+                        } else {
+                            j += 1;
+                        }
+                        if punct(j, ",") {
+                            j += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    if j <= toks.len() {
+                        end = toks[j - 1].1.end;
+                        start = true;
+                        k = j;
+                        continue;
+                    }
+                }
+            }
+        }
+        if is_word && up == "CASE" {
+            stack.push((Blk::CaseExpr, None));
+        } else if is_word && up == "END" {
+            let Some((top, label)) = stack.pop() else { return Err(several.into()) };
+            let next_kw = ["IF", "CASE", "LOOP", "WHILE", "REPEAT", "FOR"].into_iter().find(|w| word(k + 1, w));
+            if next_kw != top.end_word() {
+                let want = top.end_word().map_or("END".to_string(), |w| format!("END {w}"));
+                return Err(format!("The blocks of the body do not match: {} where {want} was expected.", next_kw.map_or("END".to_string(), |w| format!("END {w}"))));
+            }
+            k += 1 + usize::from(next_kw.is_some());
+            end = toks[k - 1].1.end;
+            if top != Blk::CaseExpr {
+                // An end label must repeat the begin label, so only that word is taken as one.
+                if let Some(l) = &label {
+                    if k < toks.len() && matches!(toks[k].0, Tok::Word | Tok::Quoted) && unquote(text(k)).to_lowercase() == *l {
+                        end = toks[k].1.end;
+                        k += 1;
+                    }
+                }
+                closed = stack.is_empty();
+            }
+            continue;
+        } else if is_word && matches!(up.as_str(), "THEN" | "ELSE") && matches!(stack.last(), Some((Blk::If | Blk::CaseStmt, _))) {
+            start = true;
+        } else if is_word && up == "DO" && matches!(stack.last(), Some((Blk::While | Blk::For, _))) {
+            start = true;
+        }
+        k += 1;
+    }
+    if let Some((b, _)) = stack.last() {
+        return Err(format!("The body has {} with no {} to close it.", match b {
+            Blk::Begin => "a BEGIN",
+            Blk::If => "an IF",
+            Blk::CaseStmt | Blk::CaseExpr => "a CASE",
+            Blk::Loop => "a LOOP",
+            Blk::While => "a WHILE",
+            Blk::Repeat => "a REPEAT",
+            Blk::For => "a FOR",
+        }, b.end_word().map_or("END".to_string(), |w| format!("END {w}"))));
+    }
+    let out = body[first.1.start..end].trim();
+    if out.is_empty() || out == ";" {
+        return Err("The trigger body is empty.".into());
+    }
+    Ok(out.to_string())
+}
+
+/// Where a trigger fires among the triggers of its table with the same timing and event.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TrigOrder {
+    Follows(String),
+    Precedes(String),
+}
+
+/// The triggers just before and just after `name` in its timing and event, by ACTION_ORDER.
+pub fn neighbours(all: &[Trigger], name: &str) -> (Option<String>, Option<String>) {
+    let Some(me) = all.iter().find(|t| same_name(&t.name, name)) else { return (None, None) };
+    let group = all.iter().filter(|t| !same_name(&t.name, name) && t.timing.eq_ignore_ascii_case(&me.timing) && t.event.eq_ignore_ascii_case(&me.event));
+    let before = group.clone().filter(|t| t.order < me.order).max_by_key(|t| t.order).map(|t| t.name.clone());
+    let after = group.filter(|t| t.order > me.order).min_by_key(|t| t.order).map(|t| t.name.clone());
+    (before, after)
+}
+
+/// The clause that puts a trigger back between its old neighbours, among the triggers `live` that are there now:
+/// after the one before it, else before the one after it, else none (it is the only one, or both are gone).
+pub fn order_among(live: &[Trigger], name: &str, timing: &str, event: &str, before: Option<&str>, after: Option<&str>) -> Option<TrigOrder> {
+    let here = |n: &str| live.iter().any(|t| !same_name(&t.name, name) && same_name(&t.name, n) && t.timing.eq_ignore_ascii_case(timing) && t.event.eq_ignore_ascii_case(event));
+    match (before, after) {
+        (Some(b), _) if here(b) => Some(TrigOrder::Follows(b.to_string())),
+        (_, Some(a)) if here(a) => Some(TrigOrder::Precedes(a.to_string())),
+        _ => None,
+    }
+}
+
+fn order_clause(d: Dialect, o: Option<&TrigOrder>) -> String {
+    match o {
+        Some(TrigOrder::Follows(n)) => format!(" FOLLOWS {}", d.quote_ident(n)),
+        Some(TrigOrder::Precedes(n)) => format!(" PRECEDES {}", d.quote_ident(n)),
+        None => String::new(),
+    }
+}
+
+/// `DEFINER=`user`@`host`` from information_schema's `user@host`. The host never holds an @, so the last one splits.
+pub fn definer_clause(d: Dialect, definer: &str) -> Result<String, String> {
+    let (user, host) = definer.rsplit_once('@').ok_or_else(|| format!("The definer {definer:?} cannot be written back."))?;
+    Ok(format!("DEFINER={}@{}", d.quote_ident(user), d.quote_ident(host)))
+}
+
+/// How a trigger is saved: the editor's definition, the definer it keeps (an edited trigger stays its owner's) and
+/// its place among the triggers of its timing and event.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TrigSave {
+    pub def: TrigDef,
+    pub definer: Option<String>,
+    pub order: Option<TrigOrder>,
+}
+
+/// The CREATE TRIGGER statement. `replace` writes MariaDB's CREATE OR REPLACE, which swaps an existing trigger in
+/// one statement.
+pub fn create_trigger(d: Dialect, m: Mode, table: &str, s: &TrigSave, replace: bool) -> Result<String, String> {
+    let t = &s.def;
     check_ident(&t.name, "A trigger")?;
     let timing = t.timing.trim().to_ascii_uppercase();
     let event = t.event.trim().to_ascii_uppercase();
@@ -1119,16 +1363,122 @@ fn trigger_head(d: Dialect, bs: bool, ansi: bool, table: &str, t: &TrigDef, repl
     if !matches!(event.as_str(), "INSERT" | "UPDATE" | "DELETE") {
         return Err("The event is INSERT, UPDATE or DELETE.".into());
     }
-    let body = check_body(&t.body, bs, ansi)?;
-    let head = if replace && d == Dialect::MariaDb { "CREATE OR REPLACE TRIGGER" } else { "CREATE TRIGGER" };
-    Ok(format!("{head} {} {timing} {event} ON {}\nFOR EACH ROW\n{body}", d.quote_ident(&t.name), d.quote_ident(table)))
+    let body = check_body(&t.body, m)?;
+    let head = if replace { "CREATE OR REPLACE" } else { "CREATE" };
+    let definer = match &s.definer {
+        Some(x) => format!(" {}", definer_clause(d, x)?),
+        None => String::new(),
+    };
+    Ok(format!("{head}{definer} TRIGGER {} {timing} {event} ON {}\nFOR EACH ROW{}\n{body}", d.quote_ident(&t.name), d.quote_ident(table), order_clause(d, s.order.as_ref())))
 }
 
-/// The statements that save a trigger, each run on its own: one CREATE for a new trigger; for an edit MariaDB
-/// replaces in place and MySQL, which cannot, drops first.
-pub fn trigger_steps(d: Dialect, bs: bool, ansi: bool, table: &str, t: &TrigDef, exists: bool) -> Result<Vec<String>, String> {
-    let create = trigger_head(d, bs, ansi, table, t, exists)?;
-    Ok(if exists && d == Dialect::MySql { vec![drop_trigger(d, &t.name, false), create] } else { vec![create] })
+/// Checks a whole CREATE TRIGGER text again where it runs, under the session's own quote rules: the head up to FOR
+/// EACH ROW and its order clause holds no `;` and no executable comment, and the rest is one body by `check_body`.
+pub fn one_trigger_statement(sql: &str, m: Mode) -> Result<(), String> {
+    use super::lex::{count_with, tokens_with, Tok};
+    let toks: Vec<_> = tokens_with(sql, m.bs, m.ansi).into_iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment)).collect();
+    let w = |k: usize, s: &str| toks.get(k).is_some_and(|(t, r)| *t == Tok::Word && sql[r.clone()].eq_ignore_ascii_case(s));
+    let at = (0..toks.len()).find(|&k| w(k, "FOR") && w(k + 1, "EACH") && w(k + 2, "ROW")).ok_or("The statement has no FOR EACH ROW.")?;
+    let mut k = at + 3;
+    if w(k, "FOLLOWS") || w(k, "PRECEDES") {
+        k += 2;
+    }
+    let head = &sql[..toks.get(k).map_or(sql.len(), |(_, r)| r.start)];
+    if toks[..k.min(toks.len())].iter().any(|(t, r)| matches!(t, Tok::ExecOpen | Tok::ExecClose) || (*t == Tok::Punct && &sql[r.clone()] == ";")) || count_with(head, m.bs, m.ansi) != 1 {
+        return Err("The trigger statement is not one statement.".into());
+    }
+    let body = toks.get(k).map_or("", |(_, r)| &sql[r.start..]);
+    check_body(body, m).map(|_| ())
+}
+
+/// A stored trigger statement made ready to run again: MariaDB's OR REPLACE after CREATE, and the order clause after
+/// FOR EACH ROW in place of one the text may already hold. The text is read with the quote rules of the mode it was
+/// stored with.
+pub fn restate(d: Dialect, stmt: &str, m: Mode, order: Option<&TrigOrder>, replace: bool) -> Result<String, String> {
+    use super::lex::{tokens_with, Tok};
+    let toks: Vec<_> = tokens_with(stmt, m.bs, m.ansi).into_iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment)).collect();
+    let w = |k: usize, s: &str| toks.get(k).is_some_and(|(t, r)| *t == Tok::Word && stmt[r.clone()].eq_ignore_ascii_case(s));
+    if !w(0, "CREATE") {
+        return Err("The stored trigger does not start with CREATE.".into());
+    }
+    let at = (0..toks.len()).find(|&k| w(k, "FOR") && w(k + 1, "EACH") && w(k + 2, "ROW")).ok_or("The stored trigger has no FOR EACH ROW.")?;
+    let row_end = toks[at + 2].1.end;
+    let rest_at = if w(at + 3, "FOLLOWS") || w(at + 3, "PRECEDES") { toks.get(at + 4).map_or(stmt.len(), |(_, r)| r.end) } else { row_end };
+    let create_end = toks[0].1.end;
+    let or_replace = if replace && !w(1, "OR") { " OR REPLACE" } else { "" };
+    Ok(format!("{}{or_replace}{}{}{}", &stmt[..create_end], &stmt[create_end..row_end], order_clause(d, order), &stmt[rest_at..]))
+}
+
+/// Whether two sql_mode values hold the same modes, in any order.
+pub fn same_modes(a: &str, b: &str) -> bool {
+    let set = |s: &str| {
+        let mut v: Vec<String> = s.split(',').map(|p| p.trim().to_ascii_uppercase()).filter(|p| !p.is_empty()).collect();
+        v.sort();
+        v
+    };
+    set(a) == set(b)
+}
+
+/// Whether the live trigger is the one a change left or an editor saw: every part that decides what it does, its
+/// owner and its place.
+pub fn same_trigger(live: &Trigger, want: &Trigger) -> bool {
+    same_name(&live.name, &want.name) && live.timing.eq_ignore_ascii_case(&want.timing) && live.event.eq_ignore_ascii_case(&want.event) && live.body.trim() == want.body.trim() && live.definer == want.definer && same_modes(&live.sql_mode, &want.sql_mode) && live.order == want.order
+}
+
+/// A trigger as the server stores it, enough to make it again exactly: SHOW CREATE TRIGGER's statement, the session
+/// it was made in (its sql_mode decides how the body runs, and the character set how its strings read), and the
+/// triggers it sat between.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Stored {
+    pub stmt: String,
+    pub sql_mode: String,
+    pub charset: String,
+    pub collation: String,
+    pub timing: String,
+    pub event: String,
+    pub before: Option<String>,
+    pub after: Option<String>,
+}
+
+/// What a trigger change did, for its undo.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TrigUndo {
+    pub name: String,
+    /// The trigger to put back, or None to drop the one the change created.
+    pub restore: Option<Stored>,
+    /// The trigger as the change left it, or None when the change dropped it.
+    pub left: Option<Trigger>,
+    pub label: String,
+}
+
+/// A trigger change for the worker.
+#[derive(Clone, Debug)]
+pub enum TrigJob {
+    Create(TrigSave),
+    /// `was` is the trigger as the editor read it; the change is refused when the server's differs.
+    Edit { was: Trigger, save: TrigSave },
+    Drop(Trigger),
+}
+
+/// What Save sends for the draft `def`: a new trigger, or the live one `was` replaced by it. An edited trigger keeps
+/// its definer, and its place among the triggers of its timing and event when those stay the same.
+pub fn save_job(all: &[Trigger], was: Option<&Trigger>, def: &TrigDef) -> TrigJob {
+    let Some(was) = was else { return TrigJob::Create(TrigSave { def: def.clone(), definer: None, order: None }) };
+    let kept = was.timing.eq_ignore_ascii_case(&def.timing) && was.event.eq_ignore_ascii_case(&def.event);
+    let order = kept.then(|| neighbours(all, &was.name)).and_then(|(before, after)| before.map(TrigOrder::Follows).or(after.map(TrigOrder::Precedes)));
+    let definer = (!was.definer.is_empty()).then(|| was.definer.clone());
+    TrigJob::Edit { was: was.clone(), save: TrigSave { def: def.clone(), definer, order } }
+}
+
+/// The statements as the preview shows them. A MySQL edit also creates the new trigger under a scratch name first and
+/// holds a write lock on the table while it swaps them, which the note under the preview says.
+pub fn trigger_preview(d: Dialect, m: Mode, table: &str, job: &TrigJob) -> Result<Vec<String>, String> {
+    Ok(match job {
+        TrigJob::Create(s) => vec![create_trigger(d, m, table, s, false)?],
+        TrigJob::Edit { save, .. } if d == Dialect::MariaDb => vec![create_trigger(d, m, table, save, true)?],
+        TrigJob::Edit { was, save } => vec![drop_trigger(d, &was.name, false), create_trigger(d, m, table, save, false)?],
+        TrigJob::Drop(t) => vec![drop_trigger(d, &t.name, false)],
+    })
 }
 
 pub fn drop_trigger(d: Dialect, name: &str, if_exists: bool) -> String {
@@ -1140,24 +1490,11 @@ pub fn script(steps: &[String]) -> String {
     steps.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n\n")
 }
 
-/// What a trigger undo expects to find before it runs, so it never overwrites a change made since: the trigger as
-/// the change left it, or None for one that must be absent.
-#[derive(Clone, Debug)]
-pub struct Guard {
-    pub name: String,
-    pub present: Option<Trigger>,
-}
-
-impl Guard {
-    /// Err says what changed.
-    pub fn check(&self, st: &Structure) -> Result<(), String> {
-        let same = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
-        let live = st.triggers.iter().find(|t| same(&t.name, &self.name));
-        match (live, &self.present) {
-            (Some(l), Some(w)) if same(&l.timing, &w.timing) && same(&l.event, &w.event) && l.body.trim() == w.body.trim() => Ok(()),
-            (None, None) => Ok(()),
-            _ => Err(format!("The trigger {} is not as this change left it, so undo would overwrite a newer change. Undo it by hand.", self.name)),
-        }
+/// The note for an error the server gives when the login may not create a trigger for another definer.
+fn definer_note(err: String, definer: Option<&str>) -> String {
+    match definer {
+        Some(who) if err.contains("1227") || err.contains("SET_USER_ID") || err.contains("SUPER") => format!("{err}. The trigger belongs to {who}, and keeping that owner needs the SET_USER_ID (or SUPER) privilege, which this login lacks. Nothing was changed."),
+        _ => err,
     }
 }
 
@@ -1216,7 +1553,7 @@ pub(super) async fn undo(db: &Db, a: UndoAction, u: AlterUndo, read_only: bool) 
         k.at = at;
         k
     });
-    Msg::SqlAltered { conn, schema, table, res, undo: keep, sql_mode: seen }
+    Msg::SqlAltered { conn, schema, table, res, undo: keep, sql_mode: seen, alter: true }
 }
 
 impl Worker {
@@ -1243,92 +1580,223 @@ impl Worker {
                 },
                 _ => None,
             };
-            Msg::SqlAltered { conn, schema, table, res: res.map(|_| done), undo, sql_mode: seen }
+            Msg::SqlAltered { conn, schema, table, res: res.map(|_| done), undo, sql_mode: seen, alter: true }
         });
     }
 }
 
-fn ddl_undo(conn: u64, schema: &str, table: &str, steps: Vec<String>, guards: Vec<Guard>, label: String) -> UndoAction {
-    UndoAction { at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { cols: Vec::new(), undo: super::write::SqlUndo::Ddl { steps, guards, label } } }
+/// SHOW CREATE TRIGGER's statement and session, with the trigger's neighbours in `all`.
+async fn stored(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str, all: &[Trigger], t: &Trigger) -> Res<Stored> {
+    let show = format!("SHOW CREATE TRIGGER {}", d.qualified(schema, &t.name));
+    let row = raw_first(c, &show).await?.ok_or_else(|| format!("Could not read the definition of {}.", t.name))?;
+    let col = |i: usize| super::worker::raw(&row, i).map(|b| String::from_utf8_lossy(b).into_owned());
+    let stmt = col(2).ok_or_else(|| format!("Could not read the definition of {}.", t.name))?;
+    let (before, after) = neighbours(all, &t.name);
+    Ok(Stored { stmt, sql_mode: col(1).unwrap_or_default(), charset: col(3).unwrap_or_default(), collation: col(4).unwrap_or_default(), timing: t.timing.clone(), event: t.event.clone(), before, after })
 }
 
-/// Runs the statements one at a time on one connection, each as a call of its own.
-async fn run_steps(c: &mut sqlx::MySqlConnection, steps: &[String]) -> Res<()> {
-    for s in steps {
-        sqlx::Executor::execute(&mut *c, s.as_str()).await.map_err(e)?;
-    }
+/// Sets the session's sql_mode, client character set and connection collation, each bound as a value.
+async fn set_session(c: &mut sqlx::MySqlConnection, mode: &str, charset: &str, collation: &str) -> Res<()> {
+    sqlx::query("SET SESSION sql_mode = ?").bind(mode).execute(&mut *c).await.map_err(e)?;
+    sqlx::query("SET SESSION character_set_client = ?").bind(charset).execute(&mut *c).await.map_err(e)?;
+    sqlx::query("SET SESSION collation_connection = ?").bind(collation).execute(&mut *c).await.map_err(e)?;
     Ok(())
 }
 
-/// Runs a recorded undo of a trigger change. The live structure is read first, and anything that is not as the
-/// change left it stops the undo.
-pub(super) async fn undo_ddl(db: &Db, a: UndoAction, steps: Vec<String>, guards: Vec<Guard>, label: String, read_only: bool) -> Msg {
-    let UndoAction { at, conn, db: schema, coll: table, .. } = a;
-    let res = async {
-        let mut c = super::write::writer(db, &schema, read_only).await?;
-        let st = load(db, &schema, &table).await?;
-        for g in &guards {
-            g.check(&st)?;
-        }
-        run_steps(&mut c, &steps).await
-    }
-    .await
-    .map(|_| "Undid the change".to_string());
-    let keep = res.is_err().then(|| UndoAction { at, ..ddl_undo(conn, &schema, &table, steps, guards, label) });
-    Msg::SqlAltered { conn, schema, table, res, undo: keep, sql_mode: None }
+/// Runs a stored trigger statement in the session it was made in, so its body reads and runs as before (a
+/// PIPES_AS_CONCAT `||` stays a concatenation, an ANSI_QUOTES `"x"` a name), then puts the session back. The text
+/// goes out as UTF-8, so a non-UTF-8 client character set is kept only for an ASCII statement; the collation, which
+/// decides what its strings are, is always the stored one.
+async fn replay(c: &mut sqlx::MySqlConnection, d: Dialect, s: &Stored, order: Option<&TrigOrder>, replace: bool) -> Res<()> {
+    let sql = restate(d, &s.stmt, Mode::of(&s.sql_mode), order, replace)?;
+    let (mode, charset, collation): (String, String, String) = sqlx::query_as("SELECT @@SESSION.sql_mode, @@SESSION.character_set_client, @@SESSION.collation_connection").fetch_one(&mut *c).await.map_err(e)?;
+    let utf8 = s.charset.to_ascii_lowercase().starts_with("utf8");
+    let cs = if s.charset.is_empty() || !(utf8 || sql.is_ascii()) { charset.as_str() } else { s.charset.as_str() };
+    let coll = if s.collation.is_empty() { collation.as_str() } else { s.collation.as_str() };
+    let ran = match set_session(c, &s.sql_mode, cs, coll).await {
+        Ok(()) => run_text(c, &sql).await,
+        Err(x) => Err(x),
+    };
+    let back = set_session(c, &mode, &charset, &collation).await;
+    ran?;
+    back
 }
 
-/// Reads the trigger being replaced, runs the statements and reads the trigger as it is now. A named fn rather than
-/// an async block, which the compiler cannot prove Send around a borrowed connection.
-async fn trigger_job(db: &Db, schema: &str, table: &str, name: &str, steps: &[String], existed: bool, read_only: bool) -> Res<(Option<String>, Option<Trigger>)> {
-    let mut c = super::write::writer(db, schema, read_only).await?;
-    // Read from the pool with the schema spelled out, since the writer's own connection trips the borrow checker here.
-    let Pool::My(pool) = &db.pool;
-    let show = format!("SHOW CREATE TRIGGER {}", db.dialect.qualified(schema, name));
-    let old = sqlx::raw_sql(&show).fetch_one(pool).await.ok().and_then(|r| super::worker::raw(&r, 2).map(|b| String::from_utf8_lossy(b).into_owned()));
-    if existed && old.is_none() {
-        return Err(format!("Could not read the current definition of {name}, so it was left as it is."));
-    }
-    for (i, s) in steps.iter().enumerate() {
-        if let Err(err) = sqlx::Executor::execute(&mut c, s.as_str()).await {
-            let err = e(err);
-            // Only a step after the DROP can leave the trigger missing.
-            return Err(match (i, &old) {
-                (1.., Some(o)) => match sqlx::Executor::execute(&mut c, o.as_str()).await {
-                    Ok(_) => format!("{err}. The previous trigger was put back."),
-                    Err(back) => format!("{err}. The previous trigger could not be put back ({}). Its definition:\n{o}", e(back)),
-                },
-                _ => err,
-            });
+/// Runs a statement over the text protocol, for the statements a server will not prepare, and returns its first row.
+/// Read as a stream: `fetch_one` and `execute` of a raw statement on a borrowed connection are refused by the
+/// compiler inside a spawned task.
+async fn raw_first(c: &mut sqlx::MySqlConnection, sql: &str) -> Res<Option<sqlx::mysql::MySqlRow>> {
+    let mut s = sqlx::raw_sql(sql).fetch_many(&mut *c);
+    let mut first = None;
+    while let Some(item) = futures_util::StreamExt::next(&mut s).await {
+        if let sqlx::Either::Right(r) = item.map_err(e)? {
+            first.get_or_insert(r);
         }
     }
-    let live = load(db, schema, table).await.ok().and_then(|st| st.triggers.into_iter().find(|t| t.name.eq_ignore_ascii_case(name)));
-    Ok((old, live))
+    Ok(first)
+}
+
+/// Runs our own statement text (names quoted by us, a body checked by `one_trigger_statement`) over the text
+/// protocol.
+async fn run_text(c: &mut sqlx::MySqlConnection, sql: &str) -> Res<()> {
+    raw_first(c, sql).await.map(|_| ())
+}
+
+/// The trigger named `name` among `all`.
+fn find<'a>(all: &'a [Trigger], name: &str) -> Option<&'a Trigger> {
+    all.iter().find(|t| same_name(&t.name, name))
+}
+
+/// A scratch name for trying a new trigger before the old one is dropped.
+fn scratch_name() -> String {
+    let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    format!("quarry_check_{:x}", n & 0xffff_ffff_ffff)
+}
+
+/// MySQL cannot replace a trigger in place, so the old one is dropped and the new one created while the table is
+/// write-locked, which keeps every row write from slipping between the two. The new trigger is first created under a
+/// scratch name and dropped again, so a body or definer the server refuses stops before the old one is touched.
+/// When the CREATE still fails, `back` is put back. UNLOCK TABLES runs on every way out.
+async fn swap_locked(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str, table: &str, name: &str, try_first: Option<(&str, &str)>, create: Swap<'_>, back: &Stored, back_order: Option<&TrigOrder>) -> Res<()> {
+    run_text(c, &format!("LOCK TABLES {} WRITE", d.qualified(schema, table))).await.map_err(|x| format!("{x}. Replacing a trigger on MySQL locks the table so no row is written without one, which needs the LOCK TABLES privilege. Nothing was changed."))?;
+    let res = swap_inner(c, d, name, try_first, create, back, back_order).await;
+    let unlocked = run_text(c, "UNLOCK TABLES").await;
+    res?;
+    unlocked
+}
+
+/// What a locked swap creates: our own CREATE text, or a stored trigger replayed in its session.
+enum Swap<'a> {
+    Text(&'a str),
+    Stored(&'a Stored, Option<&'a TrigOrder>),
+}
+
+async fn swap_inner(c: &mut sqlx::MySqlConnection, d: Dialect, name: &str, try_first: Option<(&str, &str)>, create: Swap<'_>, back: &Stored, back_order: Option<&TrigOrder>) -> Res<()> {
+    if let Some((trial, scratch)) = try_first {
+        run_text(c, trial).await?;
+        run_text(c, &drop_trigger(d, scratch, true)).await?;
+    }
+    run_text(c, &drop_trigger(d, name, false)).await?;
+    let made = match create {
+        Swap::Text(sql) => run_text(c, sql).await,
+        Swap::Stored(s, o) => replay(c, d, s, o, false).await,
+    };
+    let Err(err) = made else { return Ok(()) };
+    Err(match replay(c, d, back, back_order, false).await {
+        Ok(()) => format!("{err}. The trigger was put back as it was."),
+        Err(again) => format!("{err}. The trigger could not be put back ({again}). Its definition:\n{}", back.stmt),
+    })
+}
+
+/// Saves, replaces or drops a trigger, after checking on the connection that writes that its session reads the text
+/// as it was written and that the trigger is as the editor saw it. Returns what undo needs.
+async fn trigger_job(db: &Db, schema: &str, table: &str, job: &TrigJob, m: Mode, read_only: bool) -> Result<(String, TrigUndo), (String, Option<String>)> {
+    let d = db.dialect;
+    let mut c = session(db, schema, read_only, m).await?;
+    let fail = |x: String| (x, None);
+    let all = super::structure::triggers_on(&mut c, d, schema, table).await.map_err(fail)?;
+    let changed = |n: &str| format!("Nothing ran: the trigger {n} changed on the server since it was read. Reload the structure and try again.");
+    match job {
+        TrigJob::Create(s) => {
+            let sql = create_trigger(d, m, table, s, false).map_err(fail)?;
+            one_trigger_statement(&sql, m).map_err(fail)?;
+            if find(&all, &s.def.name).is_some() {
+                return Err(fail(format!("The table already has a trigger called {}.", s.def.name)));
+            }
+            run_text(&mut c, &sql).await.map_err(fail)?;
+            let live = super::structure::triggers_on(&mut c, d, schema, table).await.ok().and_then(|v| find(&v, &s.def.name).cloned());
+            Ok((s.def.name.clone(), TrigUndo { name: s.def.name.clone(), restore: None, left: live, label: format!("created trigger {}", s.def.name) }))
+        }
+        TrigJob::Edit { was, save } => {
+            let sql = create_trigger(d, m, table, save, d == Dialect::MariaDb).map_err(fail)?;
+            one_trigger_statement(&sql, m).map_err(fail)?;
+            let Some(live) = find(&all, &was.name).filter(|l| same_trigger(l, was)) else { return Err(fail(changed(&was.name))) };
+            let old = stored(&mut c, d, schema, &all, live).await.map_err(fail)?;
+            if d == Dialect::MariaDb {
+                run_text(&mut c, &sql).await.map_err(|x| fail(definer_note(x, save.definer.as_deref())))?;
+            } else {
+                let scratch = TrigSave { def: TrigDef { name: scratch_name(), ..save.def.clone() }, ..save.clone() };
+                let trial = create_trigger(d, m, table, &scratch, false).map_err(fail)?;
+                one_trigger_statement(&trial, m).map_err(fail)?;
+                let back_order = order_among(&all, &was.name, &old.timing, &old.event, old.before.as_deref(), old.after.as_deref());
+                swap_locked(&mut c, d, schema, table, &was.name, Some((&trial, &scratch.def.name)), Swap::Text(&sql), &old, back_order.as_ref()).await.map_err(|x| fail(definer_note(x, save.definer.as_deref())))?;
+            }
+            let left = super::structure::triggers_on(&mut c, d, schema, table).await.ok().and_then(|v| find(&v, &save.def.name).cloned());
+            Ok((was.name.clone(), TrigUndo { name: was.name.clone(), restore: Some(old), left, label: format!("changed trigger {}", was.name) }))
+        }
+        TrigJob::Drop(was) => {
+            let Some(live) = find(&all, &was.name).filter(|l| same_trigger(l, was)) else { return Err(fail(changed(&was.name))) };
+            let old = stored(&mut c, d, schema, &all, live).await.map_err(fail)?;
+            run_text(&mut c, &drop_trigger(d, &was.name, false)).await.map_err(fail)?;
+            Ok((was.name.clone(), TrigUndo { name: was.name.clone(), restore: Some(old), left: None, label: format!("dropped trigger {}", was.name) }))
+        }
+    }
+}
+
+/// Puts a trigger back as a change found it. It runs only when the trigger is as the change left it, or absent
+/// where a previous undo stopped halfway, so it never overwrites a newer change; done twice it changes nothing.
+async fn undo_trigger_job(db: &Db, schema: &str, table: &str, u: &TrigUndo, read_only: bool) -> Res<String> {
+    let d = db.dialect;
+    let mut c = super::write::writer(db, schema, read_only).await?;
+    let all = super::structure::triggers_on(&mut c, d, schema, table).await?;
+    let live = find(&all, &u.name).cloned();
+    let refused = format!("Undo refused: the trigger {} changed after this change ran, so undoing it now would overwrite that. Undo it by hand.", u.name);
+    match (&u.restore, &u.left, &live) {
+        // Undo of a create: drop what it made.
+        (None, Some(left), Some(l)) if same_trigger(l, left) => run_text(&mut c, &drop_trigger(d, &u.name, true)).await.map(|_| "Dropped the trigger the change created".into()),
+        (None, _, None) => Ok("The trigger the change created is already gone".into()),
+        // Undo of a drop: make it again where it was.
+        (Some(old), None, None) => {
+            let o = order_among(&all, &u.name, &old.timing, &old.event, old.before.as_deref(), old.after.as_deref());
+            replay(&mut c, d, old, o.as_ref(), false).await.map(|_| "Put the dropped trigger back".into())
+        }
+        // Undo of an edit, or a retry of one whose earlier run left no trigger.
+        (Some(old), Some(left), now) if now.as_ref().is_none_or(|l| same_trigger(l, left)) => {
+            let o = order_among(&all, &u.name, &old.timing, &old.event, old.before.as_deref(), old.after.as_deref());
+            match now {
+                None => replay(&mut c, d, old, o.as_ref(), false).await,
+                Some(_) if d == Dialect::MariaDb => replay(&mut c, d, old, o.as_ref(), true).await,
+                Some(l) => {
+                    // The trigger as the edit left it, which is put back if the old one is refused.
+                    let cur = stored(&mut c, d, schema, &all, l).await?;
+                    let cur_o = order_among(&all, &u.name, &cur.timing, &cur.event, cur.before.as_deref(), cur.after.as_deref());
+                    swap_locked(&mut c, d, schema, table, &u.name, None, Swap::Stored(old, o.as_ref()), &cur, cur_o.as_ref()).await
+                }
+            }
+            .map(|_| "Put the trigger back as it was".into())
+        }
+        _ => Err(refused),
+    }
+}
+
+/// Runs a recorded undo of a trigger change. On failure the action stays in the list: the checks above make a retry
+/// safe.
+pub(super) async fn undo_trigger(db: &Db, a: UndoAction, u: TrigUndo, read_only: bool) -> Msg {
+    let UndoAction { at, conn, db: schema, coll: table, .. } = a;
+    let res = undo_trigger_job(db, &schema, &table, &u, read_only).await;
+    let keep = res.is_err().then(|| UndoAction { at, ..trigger_undo_action(conn, &schema, &table, u) });
+    Msg::SqlAltered { conn, schema, table, res, undo: keep, sql_mode: None, alter: false }
+}
+
+fn trigger_undo_action(conn: u64, schema: &str, table: &str, u: TrigUndo) -> UndoAction {
+    UndoAction { at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { cols: Vec::new(), undo: super::write::SqlUndo::Trigger(Box::new(u)) } }
 }
 
 impl Worker {
-    /// Saves or drops a trigger. The definition it replaces is read first with SHOW CREATE TRIGGER: it is put
-    /// back when the new one is refused (MySQL has to drop before it creates) and it is what undo restores.
+    /// Saves, replaces or drops a trigger written for the sql_mode `m`. The definition it replaces is read first with
+    /// SHOW CREATE TRIGGER, with the session it was made in: it is what a refused MySQL swap and undo put back.
     #[allow(clippy::too_many_arguments)]
-    pub fn sql_trigger(&self, conn: u64, db: Db, schema: String, table: String, name: String, steps: Vec<String>, existed: bool, dropping: bool, read_only: bool, done: String) {
+    pub fn sql_trigger(&self, conn: u64, db: Db, schema: String, table: String, job: TrigJob, m: Mode, read_only: bool, done: String) {
         self.spawn(async move {
-            let res = trigger_job(&db, &schema, &table, &name, &steps, existed, read_only).await;
-            let (res, undo) = match res {
-                Ok((old, live)) => {
-                    let d = db.dialect;
-                    let (back, present, label) = match (&old, dropping) {
-                        (Some(o), true) => (Some(vec![o.clone()]), None, format!("dropped trigger {name}")),
-                        (Some(o), false) => (Some(vec![drop_trigger(d, &name, true), o.clone()]), live, format!("changed trigger {name}")),
-                        (None, false) => (Some(vec![drop_trigger(d, &name, true)]), live, format!("created trigger {name}")),
-                        (None, true) => (None, None, String::new()),
-                    };
-                    let usable = dropping || present.is_some();
-                    let undo = back.filter(|_| usable).map(|s| ddl_undo(conn, &schema, &table, s, vec![Guard { name: name.clone(), present }], label));
-                    (Ok(done), undo)
+            let (res, undo, seen) = match trigger_job(&db, &schema, &table, &job, m, read_only).await {
+                Ok((_, u)) => {
+                    // A trigger the server shows no more after a create or edit cannot be guarded, so it gets no undo.
+                    let usable = u.left.is_some() || matches!(job, TrigJob::Drop(_));
+                    (Ok(done), usable.then(|| trigger_undo_action(conn, &schema, &table, u)), None)
                 }
-                Err(err) => (Err(err), None),
+                Err((why, now)) => (Err(why), None, now),
             };
-            Msg::SqlAltered { conn, schema, table, res, undo, sql_mode: None }
+            Msg::SqlAltered { conn, schema, table, res, undo, sql_mode: seen, alter: false }
         });
     }
 
@@ -1339,6 +1807,16 @@ impl Worker {
             let sql = orphans_sql(db.dialect, &schema, &table, &fk);
             let res = sqlx::query(&sql).fetch_one(pool).await.map_err(e).map(|r| super::structure::num(&r, "n").unwrap_or(0));
             Msg::SqlOrphans { req, res }
+        });
+    }
+
+    /// Whether the server takes a foreign key only on a whole primary or unique key (MySQL 8.4's
+    /// restrict_fk_on_non_standard_key). Servers without the variable take any index that starts with the columns.
+    pub fn sql_fk_rules(&self, req: u64, db: Db) {
+        self.spawn(async move {
+            let Pool::My(pool) = &db.pool;
+            let strict = sqlx::query_scalar::<_, i64>("SELECT @@restrict_fk_on_non_standard_key").fetch_one(pool).await.is_ok_and(|n| n != 0);
+            Msg::SqlFkRules { req, strict }
         });
     }
 }
@@ -1940,13 +2418,13 @@ mod tests {
         let own = Structure { columns: vec![fcol("customer_id", "int unsigned", None), Column { nullable: true, ..fcol("opt", "int unsigned", None) }], ..Default::default() };
         let parent = Structure { columns: vec![fcol("id", "int unsigned", None)], indexes: vec![ix("PRIMARY", true, &["id"])], ..Default::default() };
         let k = fk("fk", &["customer_id"], "customers", &["id"]);
-        assert!(fk_problem(&own, "orders", &parent, &k).is_none());
+        assert!(fk_problem(&own, "orders", &parent, &k, false).is_none());
         let set_null = ForeignKey { on_delete: "SET NULL".into(), ..k.clone() };
-        assert!(fk_problem(&own, "orders", &parent, &set_null).unwrap().contains("allows NULL"));
-        assert!(fk_problem(&own, "orders", &parent, &ForeignKey { cols: vec!["opt".into()], ..set_null }).is_none());
+        assert!(fk_problem(&own, "orders", &parent, &set_null, false).unwrap().contains("allows NULL"));
+        assert!(fk_problem(&own, "orders", &parent, &ForeignKey { cols: vec!["opt".into()], ..set_null }, false).is_none());
         let unindexed = Structure { indexes: vec![], ..parent.clone() };
-        assert!(fk_problem(&own, "orders", &unindexed, &k).unwrap().contains("no index"));
-        assert!(fk_problem(&own, "orders", &parent, &ForeignKey { cols: vec!["gone".into()], ..k }).is_some());
+        assert!(fk_problem(&own, "orders", &unindexed, &k, false).unwrap().contains("no index"));
+        assert!(fk_problem(&own, "orders", &parent, &ForeignKey { cols: vec!["gone".into()], ..k }, false).is_some());
     }
 
     #[test]
@@ -1961,47 +2439,213 @@ mod tests {
         TrigDef { name: name.into(), timing: "before".into(), event: "update".into(), body: body.into() }
     }
 
+    fn save(def: TrigDef) -> TrigSave {
+        TrigSave { def, definer: None, order: None }
+    }
+
     #[test]
     fn trigger_statements_by_engine() {
         let t = trig("orders_bu", "SET NEW.tag = 'x';");
-        let one = |d, exists| trigger_steps(d, true, false, "orders", &t, exists).unwrap();
-        assert_eq!(one(M, false), ["CREATE TRIGGER `orders_bu` BEFORE UPDATE ON `orders`\nFOR EACH ROW\nSET NEW.tag = 'x'"]);
-        assert_eq!(one(M, true), ["DROP TRIGGER `orders_bu`", "CREATE TRIGGER `orders_bu` BEFORE UPDATE ON `orders`\nFOR EACH ROW\nSET NEW.tag = 'x'"]);
+        let live = crate::db::sql::structure::Trigger { name: "orders_bu".into(), ..Default::default() };
+        let create = TrigJob::Create(save(t.clone()));
+        let edit = TrigJob::Edit { was: live, save: TrigSave { definer: Some("app@%".into()), order: Some(TrigOrder::Follows("orders_first".into())), ..save(t.clone()) } };
+        assert_eq!(trigger_preview(M, B, "orders", &create).unwrap(), ["CREATE TRIGGER `orders_bu` BEFORE UPDATE ON `orders`\nFOR EACH ROW\nSET NEW.tag = 'x'"]);
+        // The definer and the place of an edited trigger show in the preview, as they are sent.
+        assert_eq!(trigger_preview(M, B, "orders", &edit).unwrap(), ["DROP TRIGGER `orders_bu`", "CREATE DEFINER=`app`@`%` TRIGGER `orders_bu` BEFORE UPDATE ON `orders`\nFOR EACH ROW FOLLOWS `orders_first`\nSET NEW.tag = 'x'"]);
         // MariaDB replaces in place, so an edit is one statement and a new trigger is a plain CREATE.
-        assert_eq!(one(Dialect::MariaDb, true), ["CREATE OR REPLACE TRIGGER `orders_bu` BEFORE UPDATE ON `orders`\nFOR EACH ROW\nSET NEW.tag = 'x'"]);
-        assert!(one(Dialect::MariaDb, false)[0].starts_with("CREATE TRIGGER "));
+        assert_eq!(trigger_preview(Dialect::MariaDb, B, "orders", &edit).unwrap(), ["CREATE OR REPLACE DEFINER=`app`@`%` TRIGGER `orders_bu` BEFORE UPDATE ON `orders`\nFOR EACH ROW FOLLOWS `orders_first`\nSET NEW.tag = 'x'"]);
+        assert!(trigger_preview(Dialect::MariaDb, B, "orders", &create).unwrap()[0].starts_with("CREATE TRIGGER "));
         assert_eq!(drop_trigger(M, "a`b", false), "DROP TRIGGER `a``b`");
         assert_eq!(drop_trigger(M, "a", true), "DROP TRIGGER IF EXISTS `a`");
-        assert_eq!(script(&one(M, true)), "DROP TRIGGER `orders_bu`;\n\nCREATE TRIGGER `orders_bu` BEFORE UPDATE ON `orders`\nFOR EACH ROW\nSET NEW.tag = 'x';");
+        assert_eq!(script(&["A".into(), "B".into()]), "A;\n\nB;");
+        let p = create_trigger(M, B, "orders", &TrigSave { order: Some(TrigOrder::Precedes("n`x".into())), ..save(t) }, false).unwrap();
+        assert!(p.contains("FOR EACH ROW PRECEDES `n``x`\n"), "{p}");
     }
 
     #[test]
     fn trigger_names_are_quoted_and_the_body_stays_the_users() {
         for bs in [true, false] {
             let t = TrigDef { name: "t`; DROP TABLE x; --".into(), timing: "AFTER".into(), event: "DELETE".into(), body: "BEGIN\n  INSERT INTO log VALUES ('a''b');\nEND".into() };
-            let s = trigger_steps(M, bs, false, "or`ders", &t, false).unwrap();
-            assert_eq!(s, ["CREATE TRIGGER `t``; DROP TABLE x; --` AFTER DELETE ON `or``ders`\nFOR EACH ROW\nBEGIN\n  INSERT INTO log VALUES ('a''b');\nEND"], "bs={bs}");
+            let s = create_trigger(M, Mode { bs, ansi: false }, "or`ders", &save(t), false).unwrap();
+            assert_eq!(s, "CREATE TRIGGER `t``; DROP TABLE x; --` AFTER DELETE ON `or``ders`\nFOR EACH ROW\nBEGIN\n  INSERT INTO log VALUES ('a''b');\nEND", "bs={bs}");
         }
-        let bad = |t: TrigDef| trigger_steps(M, true, false, "orders", &t, false);
+        let bad = |t: TrigDef| create_trigger(M, B, "orders", &save(t), false);
         assert!(bad(trig("", "SET NEW.a = 1")).is_err());
         assert!(bad(TrigDef { timing: "INSTEAD OF".into(), ..trig("a", "SET NEW.a = 1") }).is_err());
         assert!(bad(TrigDef { event: "TRUNCATE".into(), ..trig("a", "SET NEW.a = 1") }).is_err());
         assert!(bad(trig("a", "  ")).is_err());
+        assert!(bad(trig("a", " ; ")).is_err());
+        // The definer is quoted part by part, split at its last @.
+        assert_eq!(definer_clause(M, "we`ird@user@%").unwrap(), "DEFINER=`we``ird@user`@`%`");
+        assert!(definer_clause(M, "nohost").is_err());
     }
 
     #[test]
     fn a_second_statement_in_a_trigger_body_is_refused() {
-        assert_eq!(check_body("SET NEW.a = 1;", true, false).unwrap(), "SET NEW.a = 1");
-        assert!(check_body("SET NEW.a = 1; DROP TABLE users", true, false).is_err());
-        assert!(check_body("-- note\nBEGIN SET NEW.a = 1; SET NEW.b = 2; END;", true, false).is_ok());
-        assert!(check_body("begin\nset new.a = 1;\nend", true, false).is_ok());
+        assert_eq!(check_body("SET NEW.a = 1;", B).unwrap(), "SET NEW.a = 1");
+        assert!(check_body("SET NEW.a = 1; DROP TABLE users", B).is_err());
+        assert_eq!(check_body("-- note\nBEGIN SET NEW.a = 1; SET NEW.b = 2; END;", B).unwrap(), "BEGIN SET NEW.a = 1; SET NEW.b = 2; END");
+        assert!(check_body("begin\nset new.a = 1;\nend", B).is_ok());
         // The same text is one statement or two depending on whether a backslash escapes the quote.
         let tricky = r"SET NEW.a = 'x\'; DROP TABLE users; --'";
-        assert!(check_body(tricky, true, false).is_ok());
-        assert!(check_body(tricky, false, false).is_err());
+        assert!(check_body(tricky, B).is_ok());
+        assert!(check_body(tricky, NB).is_err());
         // Under ANSI_QUOTES a double quoted ; is an identifier, and either way it is not a statement end.
-        assert!(check_body(r#"SET NEW.a = "x;y""#, true, false).is_ok());
-        assert!(check_body(r#"SET NEW.a = "x;y""#, true, true).is_ok());
+        assert!(check_body(r#"SET NEW.a = "x;y""#, B).is_ok());
+        assert!(check_body(r#"SET NEW.a = "x;y""#, Mode { bs: true, ansi: true }).is_ok());
+    }
+
+    /// Review finding 1: a body that starts with BEGIN was taken whole, so a statement after its END ran too.
+    #[test]
+    fn nothing_runs_after_the_end_of_a_compound_body() {
+        for body in [
+            "BEGIN END; DROP TABLE quarry_rt.rt_victim",
+            "BEGIN SET NEW.tag='new'; END; DELIMITER ;",
+            "BEGIN END DROP TABLE x",
+            "BEGIN END;;",
+            // A name after a dot is never a keyword, so it opens no block for a later END to close.
+            "BEGIN SET NEW.case = 1; END; DROP TABLE x; END",
+            "BEGIN SET NEW.begin = 1; SET NEW.if = 2; END; DROP TABLE x; END",
+            // A versioned comment may be skipped by the server, which would see the END after it early.
+            "BEGIN /*!99999 BEGIN */ END; DROP TABLE x; END",
+            "BEGIN /*M! BEGIN */ END; DROP TABLE x; END",
+            // An end label is only the begin label, and a label never hides the END that follows.
+            "a: BEGIN END a; DROP TABLE x",
+            "BEGIN END END",
+            "BEGIN IF 1 THEN SET NEW.a = 1; END; DROP TABLE x; END IF; END",
+            "IF 1 THEN SET NEW.a = 1; END IF; DROP TABLE x",
+            "BEGIN SET NEW.a = CASE WHEN 1 THEN 2 END; END; DROP TABLE x",
+        ] {
+            assert!(check_body(body, B).is_err(), "{body}");
+            assert!(check_body(body, NB).is_err(), "{body}");
+        }
+        // Where the string ends depends on the escaping mode, and the check follows the session's.
+        let s = r"BEGIN SET NEW.t = 'x\'; END; DROP TABLE y; -- '; END";
+        assert!(check_body(s, B).is_ok());
+        assert!(check_body(s, NB).is_err());
+        let q = r#"BEGIN SET NEW.t = "a; END; DROP TABLE x; "; END"#;
+        assert!(check_body(q, B).is_ok());
+        assert!(check_body(q, Mode { bs: true, ansi: true }).is_ok());
+        // Blocks that do not match, or one left open, are refused.
+        for body in ["BEGIN IF 1 THEN SET NEW.a = 1; END; END", "BEGIN SET NEW.a = 1;", "IF 1 THEN SET NEW.a = 1; END LOOP", "BEGIN CASE NEW.a WHEN 1 THEN SET NEW.b = 1; END; END", "lbl: IF 1 THEN SET NEW.a = 1; END IF"] {
+            assert!(check_body(body, B).is_err(), "{body}");
+        }
+        // The whole statement is checked again where it runs, head included.
+        let ok = create_trigger(M, B, "t", &save(trig("a", "BEGIN SET NEW.a = 1; END")), false).unwrap();
+        assert!(one_trigger_statement(&ok, B).is_ok());
+        assert!(one_trigger_statement(&format!("{ok}; DROP TABLE x"), B).is_err());
+        assert!(one_trigger_statement("CREATE TRIGGER a BEFORE INSERT ON t; DROP TABLE x; FOR EACH ROW SET NEW.a = 1", B).is_err());
+        assert!(one_trigger_statement("CREATE TRIGGER a BEFORE INSERT ON t FOR EACH ROW FOLLOWS b SET NEW.a = 1; DROP TABLE x", B).is_err());
+    }
+
+    /// Review finding 11: a compound statement without BEGIN and a labelled block were refused.
+    #[test]
+    fn every_kind_of_compound_body_is_taken() {
+        for body in [
+            "IF NEW.tag IS NULL THEN SET NEW.tag = 'n'; END IF",
+            "IF NEW.tag IS NULL THEN SET NEW.tag = 'n'; ELSEIF NEW.tag = '' THEN SET NEW.tag = 'e'; ELSE SET NEW.tag = UPPER(NEW.tag); END IF;",
+            "lbl: BEGIN SET NEW.tag = 'l'; END lbl",
+            "`l b`: BEGIN SET NEW.tag = 'l'; END `l b`;",
+            "CASE NEW.a WHEN 1 THEN SET NEW.b = 'one'; ELSE BEGIN END; END CASE",
+            "BEGIN DECLARE i INT DEFAULT 0; w: WHILE i < 3 DO SET i = i + 1; END WHILE w; REPEAT SET i = i - 1; UNTIL i = 0 END REPEAT; l: LOOP LEAVE l; END LOOP l; END",
+            "BEGIN DECLARE CONTINUE HANDLER FOR SQLSTATE VALUE '23000', NOT FOUND, 1062 BEGIN END; SET NEW.a = 1; END",
+            "BEGIN DECLARE EXIT HANDLER FOR SQLEXCEPTION SET NEW.a = 0; IF NEW.b THEN SET NEW.a = 1; END IF; END",
+            "SET NEW.a = CASE WHEN NEW.b > 0 THEN 1 ELSE CASE NEW.c WHEN 1 THEN 2 END END",
+            "BEGIN SET NEW.a = IF(NEW.b, 1, 2); SET NEW.c = REPEAT('x', 2); SET NEW.`end` = 1; SET NEW.end = 2; END",
+            "BEGIN IF (SELECT CASE WHEN 1 THEN 1 END) THEN SET NEW.a = 1; END IF; END",
+        ] {
+            assert!(check_body(body, B).is_ok(), "{body}: {:?}", check_body(body, B));
+        }
+        assert_eq!(check_body("lbl: BEGIN SET NEW.tag = 'l'; END lbl;  -- done", B).unwrap(), "lbl: BEGIN SET NEW.tag = 'l'; END lbl");
+    }
+
+    /// Review finding 12: the quote rules come from the exact mode names, as the session reports them.
+    #[test]
+    fn ansi_quotes_is_read_exactly() {
+        assert!(Mode::of("STRICT_TRANS_TABLES,ANSI_QUOTES").ansi);
+        assert!(Mode::of("REAL_AS_FLOAT,PIPES_AS_CONCAT,ANSI_QUOTES,IGNORE_SPACE,ANSI").ansi);
+        assert!(!Mode::of("STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION").ansi);
+        assert!(!Mode::of("ANSI_QUOTES_NOT_A_MODE").ansi);
+    }
+
+    /// Review finding 2 and 3: a stored statement is run again with OR REPLACE on MariaDB and its place among the
+    /// triggers of its event, whatever order clause it held.
+    #[test]
+    fn a_stored_trigger_is_restated() {
+        let s = "CREATE DEFINER=`root`@`%` TRIGGER `t` BEFORE INSERT ON `x` FOR EACH ROW SET NEW.tag = 'a' || 'b'";
+        assert_eq!(restate(M, s, B, None, false).unwrap(), s);
+        assert_eq!(restate(Dialect::MariaDb, s, B, Some(&TrigOrder::Follows("p".into())), true).unwrap(), "CREATE OR REPLACE DEFINER=`root`@`%` TRIGGER `t` BEFORE INSERT ON `x` FOR EACH ROW FOLLOWS `p` SET NEW.tag = 'a' || 'b'");
+        let held = "CREATE DEFINER=`root`@`%` TRIGGER `t` BEFORE INSERT ON `x` FOR EACH ROW PRECEDES `old` SET NEW.tag = 'for each row'";
+        assert_eq!(restate(M, held, B, Some(&TrigOrder::Precedes("n".into())), false).unwrap(), "CREATE DEFINER=`root`@`%` TRIGGER `t` BEFORE INSERT ON `x` FOR EACH ROW PRECEDES `n` SET NEW.tag = 'for each row'");
+        assert_eq!(restate(M, held, B, None, false).unwrap(), "CREATE DEFINER=`root`@`%` TRIGGER `t` BEFORE INSERT ON `x` FOR EACH ROW SET NEW.tag = 'for each row'");
+        // Under ANSI_QUOTES a double quoted name is read as one.
+        let ansi = "CREATE DEFINER=`root`@`%` TRIGGER \"for each row\" BEFORE INSERT ON `x` FOR EACH ROW SET NEW.\"tag\" = 'q'";
+        assert!(restate(M, ansi, Mode { bs: true, ansi: true }, Some(&TrigOrder::Follows("p".into())), false).unwrap().ends_with("FOR EACH ROW FOLLOWS `p` SET NEW.\"tag\" = 'q'"));
+        assert!(restate(M, "DROP TABLE x", B, None, false).is_err());
+    }
+
+    fn live_trig(name: &str, order: u64) -> crate::db::sql::structure::Trigger {
+        crate::db::sql::structure::Trigger { name: name.into(), timing: "BEFORE".into(), event: "INSERT".into(), body: "SET NEW.a = 1".into(), definer: "root@%".into(), order, sql_mode: "STRICT_TRANS_TABLES".into() }
+    }
+
+    /// Review finding 5: a trigger goes back between the triggers it sat between.
+    #[test]
+    fn the_order_is_found_from_the_neighbours() {
+        let all = [live_trig("a", 1), live_trig("b", 2), live_trig("c", 3), crate::db::sql::structure::Trigger { timing: "AFTER".into(), ..live_trig("z", 1) }];
+        assert_eq!(neighbours(&all, "b"), (Some("a".into()), Some("c".into())));
+        assert_eq!(neighbours(&all, "a"), (None, Some("b".into())));
+        assert_eq!(neighbours(&all, "z"), (None, None));
+        let rest = [live_trig("a", 1), live_trig("c", 2)];
+        assert_eq!(order_among(&rest, "b", "BEFORE", "INSERT", Some("a"), Some("c")), Some(TrigOrder::Follows("a".into())));
+        assert_eq!(order_among(&rest[1..], "b", "BEFORE", "INSERT", Some("a"), Some("c")), Some(TrigOrder::Precedes("c".into())));
+        assert_eq!(order_among(&[], "b", "BEFORE", "INSERT", Some("a"), Some("c")), None);
+        // The trigger itself, still there for MariaDB's OR REPLACE, is never its own neighbour.
+        assert_eq!(order_among(&[live_trig("b", 1)], "b", "BEFORE", "INSERT", Some("b"), None), None);
+    }
+
+    /// Review finding 14: the trigger check compares the definer, the sql_mode and the order too.
+    #[test]
+    fn a_trigger_is_the_same_only_when_every_part_is() {
+        let t = live_trig("Tr", 1);
+        assert!(same_trigger(&crate::db::sql::structure::Trigger { name: "tr".into(), body: " SET NEW.a = 1 ".into(), sql_mode: "strict_trans_tables".into(), ..t.clone() }, &t));
+        assert!(!same_trigger(&crate::db::sql::structure::Trigger { body: "SET NEW.a = 2".into(), ..t.clone() }, &t));
+        assert!(!same_trigger(&crate::db::sql::structure::Trigger { definer: "app@%".into(), ..t.clone() }, &t));
+        assert!(!same_trigger(&crate::db::sql::structure::Trigger { sql_mode: "ANSI_QUOTES".into(), ..t.clone() }, &t));
+        assert!(!same_trigger(&crate::db::sql::structure::Trigger { order: 2, ..t.clone() }, &t));
+        assert!(same_modes("A,B", " b,a "));
+    }
+
+    /// Review finding 10: MySQL 8.4 takes a key only on a whole primary or unique key.
+    #[test]
+    fn a_strict_server_needs_a_whole_unique_key() {
+        let own = Structure { columns: vec![fcol("a", "int", None)], ..Default::default() };
+        let mut parent = Structure { columns: vec![fcol("x", "int", None), fcol("y", "int", None)], indexes: vec![ix("idx_x", false, &["x"])], ..Default::default() };
+        let k = fk("fk", &["a"], "p", &["x"]);
+        assert!(fk_problem(&own, "c", &parent, &k, false).is_none());
+        assert!(fk_problem(&own, "c", &parent, &k, true).unwrap().contains("whole primary or unique key"));
+        parent.indexes = vec![ix("uq_xy", true, &["x", "y"])];
+        assert!(fk_problem(&own, "c", &parent, &k, true).is_some(), "part of a unique key is not enough");
+        parent.indexes = vec![ix("uq_x", true, &["x"])];
+        assert!(fk_problem(&own, "c", &parent, &k, true).is_none());
+        assert!(fk_whole_key_default(M, "8.4.11"));
+        assert!(fk_whole_key_default(M, "9.1.0"));
+        assert!(!fk_whole_key_default(M, "8.0.40"));
+        assert!(!fk_whole_key_default(Dialect::MariaDb, "11.4.3-MariaDB"));
+    }
+
+    /// Review finding 4: foreign key changes in a batch take the same plan as the rest, so their undo runs one step
+    /// at a time, is checked against a snapshot that holds the key, and names what it loses.
+    #[test]
+    fn a_batch_with_a_foreign_key_has_one_checked_undo() {
+        let t = table();
+        let k = fk("fk_mix", &["customer_id"], "customers", &["id"]);
+        let u = plan(M, "8.4.0", B, "orders", &t, &[Change::Drop("note".into()), Change::AddFk(k.clone())]).unwrap().undo.unwrap();
+        assert_eq!(u.steps.len(), 2, "{:?}", u.steps);
+        assert_eq!(u.steps[0], "ALTER TABLE `orders`\n  DROP FOREIGN KEY `fk_mix`");
+        assert!(u.steps[1].contains("ADD COLUMN `note`"), "{:?}", u.steps);
+        assert_eq!(u.fks, ["fk_mix"]);
+        let u = plan(M, "8.4.0", B, "orders", &t, &[Change::Add { def: def("qty", "INT"), pos: Pos::Keep }, Change::AddFk(k)]).unwrap().undo.unwrap();
+        assert_eq!(u.loss, ["Undo drops column qty and every value it holds."], "a loss asks for the typed confirmation");
     }
 
     #[test]
@@ -2015,19 +2659,6 @@ mod tests {
         assert_ne!(snapshot(&b, &[], &[], &names), a);
         b.foreign_keys.clear();
         assert!(snapshot(&b, &[], &[], &names)[0].1.is_none());
-    }
-
-    #[test]
-    fn trigger_undo_guards_compare_names_without_case() {
-        let mut st = fk_table();
-        let t = crate::db::sql::structure::Trigger { name: "Tr".into(), timing: "BEFORE".into(), event: "UPDATE".into(), body: " SET a = 1 ".into(), ..Default::default() };
-        let tg = Guard { name: "tr".into(), present: Some(crate::db::sql::structure::Trigger { body: "SET a = 1".into(), ..t.clone() }) };
-        st.triggers = vec![t.clone()];
-        assert!(tg.check(&st).is_ok());
-        st.triggers[0].body = "SET a = 2".into();
-        assert!(tg.check(&st).is_err());
-        st.triggers.clear();
-        assert!(Guard { name: "tr".into(), present: None }.check(&st).is_ok());
     }
 }
 
@@ -2625,6 +3256,8 @@ mod live_rel {
         db: Db,
         pool: sqlx::MySqlPool,
         n: u64,
+        /// The sql_mode every connection of these tests starts with.
+        mode: String,
     }
 
     impl Env {
@@ -2672,34 +3305,80 @@ mod live_rel {
             res.map(|_| ())
         }
 
-        fn trigger(&mut self, table: &str, def: &TrigDef, exists: bool) -> Result<UndoAction, String> {
-            let steps = trigger_steps(self.db.dialect, self.db.backslash_escapes(), false, table, def, exists)?;
-            self.w.sql_trigger(1, self.db.clone(), "quarry_rt".into(), table.into(), def.name.clone(), steps, exists, false, false, "done".into());
-            let Msg::SqlAltered { res, undo, .. } = recv(&self.rx) else { panic!("expected SqlAltered") };
+        /// Sends a trigger job as the app does, written for the mode the app last saw.
+        fn job_on(&mut self, db: &Db, table: &str, job: TrigJob) -> (Res<String>, Option<UndoAction>, Option<String>) {
+            let m = Mode::of(&self.db.sql_mode);
+            self.w.sql_trigger(1, db.clone(), "quarry_rt".into(), table.into(), job, m, false, "done".into());
+            let Msg::SqlAltered { res, undo, sql_mode, alter, .. } = recv(&self.rx) else { panic!("expected SqlAltered") };
+            assert!(!alter, "a trigger answer is not an ALTER");
+            (res, undo, sql_mode)
+        }
+
+        fn job(&mut self, table: &str, job: TrigJob) -> Result<UndoAction, String> {
+            let db = self.db.clone();
+            let (res, undo, _) = self.job_on(&db, table, job);
             res?;
             Ok(undo.expect("an undo"))
+        }
+
+        fn live_trigger(&mut self, table: &str, name: &str) -> Option<crate::db::sql::structure::Trigger> {
+            self.structure(table).triggers.into_iter().find(|t| t.name == name)
+        }
+
+        /// Creates a new trigger, or replaces the one of that name as the editor does (keeping its definer and place).
+        fn trigger(&mut self, table: &str, def: &TrigDef, exists: bool) -> Result<UndoAction, String> {
+            let all = self.structure(table).triggers;
+            let was = all.iter().find(|t| t.name == def.name).cloned();
+            assert_eq!(was.is_some(), exists, "{}", def.name);
+            self.job(table, save_job(&all, was.as_ref(), def))
         }
 
         fn drop_trigger(&mut self, table: &str, name: &str) -> Result<UndoAction, String> {
-            self.w.sql_trigger(1, self.db.clone(), "quarry_rt".into(), table.into(), name.into(), vec![drop_trigger(self.db.dialect, name, false)], true, true, false, "done".into());
-            let Msg::SqlAltered { res, undo, .. } = recv(&self.rx) else { panic!("expected SqlAltered") };
-            res?;
-            Ok(undo.expect("an undo"))
+            let t = self.live_trigger(table, name).expect("a trigger to drop");
+            self.job(table, TrigJob::Drop(t))
         }
 
-        /// The tag a fresh row gets from the BEFORE INSERT trigger.
+        /// The tag a fresh row gets from the BEFORE INSERT triggers.
         fn tag(&self) -> Option<String> {
-            self.exec("INSERT INTO quarry_rt.rt_trig (tag) VALUES (NULL)");
-            self.scalar("SELECT tag FROM quarry_rt.rt_trig ORDER BY id DESC LIMIT 1")
+            self.try_exec("INSERT INTO quarry_rt.rt_trig (tag) VALUES (NULL)").map_err(|e| format!("INSERT FAILS: {e}")).err().or_else(|| self.scalar("SELECT tag FROM quarry_rt.rt_trig ORDER BY id DESC LIMIT 1"))
+        }
+
+        /// Runs `sql` on one connection of the test pool with `mode` added to its session, then puts the mode back.
+        fn exec_in_mode(&self, mode: &str, sql: &str) {
+            self.exec(&format!("SET SESSION sql_mode = CONCAT(@@SESSION.sql_mode, ',{mode}'); {sql}; SET SESSION sql_mode = '{}'", self.mode));
         }
     }
 
+    /// A pool whose every connection starts in `mode`, whatever the server's global mode is at that moment.
+    fn pinned(w: &Worker, opts: sqlx::mysql::MySqlConnectOptions, mode: &str) -> sqlx::MySqlPool {
+        let set = format!("SET SESSION sql_mode = '{mode}'");
+        w.rt.block_on(async move {
+            sqlx::mysql::MySqlPoolOptions::new()
+                .max_connections(4)
+                .after_connect(move |c, _| {
+                    let set = set.clone();
+                    Box::pin(async move { sqlx::Executor::execute(c, set.as_str()).await.map(|_| ()) })
+                })
+                .connect_with(opts)
+                .await
+                .unwrap()
+        })
+    }
+
+    /// Connects the worker and a plain pool for the checks, both pinned to the server's mode without
+    /// NO_BACKSLASH_ESCAPES: another live test sets the global mode for a moment, and a connection opened then would
+    /// read text differently from the one the worker was connected with.
     fn start(var: &str) -> Option<Env> {
         let uri = std::env::var(var).ok()?;
         let (tx, rx) = std::sync::mpsc::channel();
         let w = Worker::new(tx, eframe::egui::Context::default());
+        w.sql_connect(1, uri.clone(), Duration::from_secs(30), crate::db::Net::default());
+        let Msg::SqlConnected { res: Ok((mut db, ..)), .. } = recv(&rx) else { panic!("expected SqlConnected") };
+        let mode = db.sql_mode.split(',').filter(|m| !m.trim().eq_ignore_ascii_case("NO_BACKSLASH_ESCAPES")).collect::<Vec<_>>().join(",");
+        db.pool = Pool::My(pinned(&w, db.opts.clone(), &mode));
+        db.sql_mode = mode.clone();
+        let p = pinned(&w, db.opts.clone(), &mode);
         let pool = w.rt.block_on(async {
-            let p = sqlx::MySqlPool::connect(&uri).await.unwrap();
             for sql in [
                 "DROP DATABASE IF EXISTS quarry_rt",
                 "DROP DATABASE IF EXISTS quarry_rt_b",
@@ -2719,9 +3398,7 @@ mod live_rel {
             }
             p
         });
-        w.sql_connect(1, uri, Duration::from_secs(30), crate::db::Net::default());
-        let Msg::SqlConnected { res: Ok((db, ..)), .. } = recv(&rx) else { panic!("expected SqlConnected") };
-        Some(Env { w, rx, db, pool, n: 100 })
+        Some(Env { w, rx, db, pool, n: 100, mode })
     }
 
     fn key(name: &str, table: &str, cols: &[&str], ref_db: &str, ref_table: &str, ref_cols: &[&str]) -> ForeignKey {
@@ -2734,7 +3411,7 @@ mod live_rel {
         let before = shape(&e.structure("rt_orders"));
         let k = key("fk_rt_cust", "rt_orders", &["customer_id"], "quarry_rt", "rt_customers", &["id"]);
         let (own, parent) = (e.structure("rt_orders"), e.structure("rt_customers"));
-        assert_eq!(fk_problem(&own, "rt_orders", &parent, &k), None, "{var}");
+        assert_eq!(fk_problem(&own, "rt_orders", &parent, &k, false), None, "{var}");
 
         // The orphan count says what would make the ALTER fail, and the ALTER does fail on it.
         e.exec("INSERT INTO quarry_rt.rt_orders (id, customer_id) VALUES (90, 777), (91, NULL), (92, 1)");
@@ -2809,7 +3486,7 @@ mod live_rel {
         let x = key("fk_rt_cur", "rt_orders", &["cur"], "quarry_rt_b", "rt_currencies", &["code"]);
         let own = e.structure("rt_orders");
         let parent = e.structure_in("quarry_rt_b", "rt_currencies");
-        assert_eq!(fk_problem(&own, "rt_orders", &parent, &x), None, "{var}");
+        assert_eq!(fk_problem(&own, "rt_orders", &parent, &x, false), None, "{var}");
         let undo = e.apply("rt_orders", &[Change::AddFk(x)]).unwrap_or_else(|er| panic!("{var}: {er}"));
         let st = e.structure("rt_orders");
         assert_eq!(st.foreign_keys[0].ref_db, "quarry_rt_b", "{var}");
@@ -2822,7 +3499,7 @@ mod live_rel {
         // The check agrees with the server about a pair that does not fit.
         let bad = key("fk_rt_bad", "rt_orders", &["wrong"], "quarry_rt", "rt_customers", &["id"]);
         let (own, parent) = (e.structure("rt_orders"), e.structure("rt_customers"));
-        assert!(fk_problem(&own, "rt_orders", &parent, &bad).is_some());
+        assert!(fk_problem(&own, "rt_orders", &parent, &bad, false).is_some());
         assert!(e.apply("rt_orders", &[Change::AddFk(bad)]).is_err(), "{var}: the server refuses INT against INT UNSIGNED too");
 
         e.exec("DROP DATABASE quarry_rt");
@@ -2844,12 +3521,18 @@ mod live_rel {
         let edit_undo = e.trigger("rt_trig", &b, true).unwrap_or_else(|er| panic!("{var}: {er}"));
         assert_eq!(e.tag().as_deref(), Some("b"), "{var}");
 
-        // A refused edit leaves the old trigger in place (MySQL dropped it first and has to put it back).
+        // A refused edit leaves the old trigger in place (MySQL tries it under a scratch name first).
         let bad = def("rt_bi", "SET NEW.nope_column = 1");
-        let Err(err) = e.trigger("rt_trig", &bad, true) else { panic!("{var}: a body that names a missing column must be refused") };
-        assert!(!err.is_empty());
-        assert_eq!(e.tag().as_deref(), Some("b"), "{var}: the old trigger survived {err}");
-        assert_eq!(body_of(&mut e, "rt_bi").as_deref(), Some("SET NEW.tag = 'b'"));
+        if let Err(err) = e.trigger("rt_trig", &bad, true) {
+            assert!(!err.is_empty());
+            assert_eq!(e.tag().as_deref(), Some("b"), "{var}: the old trigger survived {err}");
+            assert_eq!(body_of(&mut e, "rt_bi").as_deref(), Some("SET NEW.tag = 'b'"));
+            assert!(!e.structure("rt_trig").triggers.iter().any(|t| t.name.starts_with("quarry_check_")), "{var}: no scratch trigger is left");
+        } else {
+            // MariaDB checks NEW columns when the trigger runs, not when it is made.
+            assert_eq!(e.db.dialect, Dialect::MariaDb, "{var}: MySQL must refuse a missing column");
+            e.trigger("rt_trig", &b, true).unwrap();
+        }
 
         // Undo restores the old body.
         e.undo(edit_undo).unwrap_or_else(|er| panic!("{var}: {er}"));
@@ -2859,10 +3542,11 @@ mod live_rel {
         e.exec("DROP TRIGGER quarry_rt.rt_bi");
         e.exec("CREATE TRIGGER quarry_rt.rt_bi BEFORE INSERT ON quarry_rt.rt_trig FOR EACH ROW SET NEW.tag = 'z'");
         let refused = e.undo(again).unwrap_err();
-        assert!(refused.contains("not as this change left it"), "{var}: {refused}");
+        assert!(refused.contains("changed after this change ran"), "{var}: {refused}");
         assert_eq!(e.tag().as_deref(), Some("z"), "{var}: a refused undo changes nothing");
         e.exec("DROP TRIGGER quarry_rt.rt_bi");
-        drop(create_undo);
+        // Undo of a create whose trigger is already gone changes nothing and says so.
+        assert!(e.undo(create_undo).is_ok());
 
         // Drop, and undo of a drop.
         e.trigger("rt_trig", &a, false).unwrap();
@@ -2883,9 +3567,190 @@ mod live_rel {
         e.exec("UPDATE quarry_rt.rt_trig SET tag = 'it''s bad' WHERE id = 500");
 
         // Writes stay locked until the caller unlocks them.
-        e.w.sql_trigger(1, e.db.clone(), "quarry_rt".into(), "rt_trig".into(), "rt_bi".into(), vec![drop_trigger(e.db.dialect, "rt_bi", true)], false, true, true, "done".into());
+        e.w.sql_trigger(1, e.db.clone(), "quarry_rt".into(), "rt_trig".into(), TrigJob::Create(TrigSave { def: a.clone(), definer: None, order: None }), Mode::of(&e.db.sql_mode), true, "done".into());
         let Msg::SqlAltered { res, .. } = recv(&e.rx) else { panic!() };
         assert!(res.is_err());
+        assert!(e.structure("rt_trig").triggers.is_empty());
+
+        e.exec("DROP DATABASE quarry_rt");
+        e.exec("DROP DATABASE quarry_rt_b");
+    }
+
+    /// The review of 49a4432 and c5c77f1, each finding with the input that proved it.
+    fn review(var: &str) {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(mut e) = start(var) else { return };
+        let mysql = e.db.dialect == Dialect::MySql;
+        let def = |name: &str, body: &str| TrigDef { name: name.into(), timing: "BEFORE".into(), event: "INSERT".into(), body: body.into() };
+        let exists = |e: &mut Env, name: &str| e.live_trigger("rt_trig", name).is_some();
+        let clear = |e: &Env| e.exec("DELETE FROM quarry_rt.rt_trig");
+
+        // Finding 1: a body that smuggles a statement after its END is refused before anything runs, also by the
+        // worker when it is handed one.
+        e.exec("CREATE TABLE quarry_rt.rt_victim (x INT)");
+        for body in ["BEGIN END; DROP TABLE quarry_rt.rt_victim", "BEGIN /*!99999 BEGIN */ END; DROP TABLE quarry_rt.rt_victim; END"] {
+            let (res, undo, _) = { let db = e.db.clone(); e.job_on(&db, "rt_trig", TrigJob::Create(TrigSave { def: def("rt_s", body), definer: None, order: None })) };
+            assert!(res.is_err() && undo.is_none(), "{var}: {body}");
+            assert!(!exists(&mut e, "rt_s"), "{var}: {body}");
+        }
+        assert_eq!(e.scalar("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'quarry_rt' AND TABLE_NAME = 'rt_victim'").as_deref(), Some("1"), "{var}");
+        e.exec("CREATE TRIGGER quarry_rt.rt_n BEFORE INSERT ON quarry_rt.rt_trig FOR EACH ROW SET NEW.tag = 'old'");
+        let r = e.trigger("rt_trig", &def("rt_n", "BEGIN SET NEW.tag='new'; END; DELIMITER ;"), true);
+        assert!(r.is_err(), "{var}");
+        assert_eq!(e.tag().as_deref(), Some("old"), "{var}: nothing changed on the server");
+        e.exec("DROP TRIGGER quarry_rt.rt_n");
+        // Finding 11: bodies the old check refused are saved and run.
+        let u = e.trigger("rt_trig", &def("rt_if", "IF NEW.tag IS NULL THEN SET NEW.tag = 'n'; END IF"), false).unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(e.tag().as_deref(), Some("n"));
+        e.undo(u).unwrap();
+        let u = e.trigger("rt_trig", &def("rt_lbl", "lbl: BEGIN SET NEW.tag = 'l'; END lbl"), false).unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(e.tag().as_deref(), Some("l"));
+        e.undo(u).unwrap();
+        clear(&e);
+
+        // Finding 2: a trigger made under PIPES_AS_CONCAT, edited and undone, still concatenates.
+        e.exec_in_mode("PIPES_AS_CONCAT", "CREATE TRIGGER quarry_rt.rt_p BEFORE INSERT ON quarry_rt.rt_trig FOR EACH ROW SET NEW.tag = 'a' || 'b'");
+        assert_eq!(e.tag().as_deref(), Some("ab"), "{var}");
+        let u = e.trigger("rt_trig", &def("rt_p", "SET NEW.tag = 'x'"), true).unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(e.tag().as_deref(), Some("x"));
+        e.undo(u).unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(e.tag().as_deref(), Some("ab"), "{var}: the undone trigger runs in its own mode");
+        assert!(e.live_trigger("rt_trig", "rt_p").unwrap().sql_mode.contains("PIPES_AS_CONCAT"), "{var}");
+        // And a dropped one comes back in it too.
+        let u = e.drop_trigger("rt_trig", "rt_p").unwrap();
+        e.undo(u).unwrap();
+        assert_eq!(e.tag().as_deref(), Some("ab"), "{var}");
+        e.exec("DROP TRIGGER quarry_rt.rt_p");
+
+        // Finding 3: a trigger made under ANSI_QUOTES survives a refused edit and an edit and its undo.
+        e.exec_in_mode("ANSI_QUOTES", "CREATE TRIGGER quarry_rt.rt_q BEFORE INSERT ON quarry_rt.rt_trig FOR EACH ROW SET NEW.\"tag\" = 'q'");
+        assert_eq!(e.tag().as_deref(), Some("q"));
+        let refused = e.trigger("rt_trig", &def("rt_q", "SET NEW.nope = 1"), true);
+        if mysql {
+            assert!(refused.is_err(), "{var}");
+        }
+        assert!(exists(&mut e, "rt_q"), "{var}: the old trigger stays after a refused edit");
+        if refused.is_ok() {
+            e.exec("DROP TRIGGER quarry_rt.rt_q");
+            e.exec_in_mode("ANSI_QUOTES", "CREATE TRIGGER quarry_rt.rt_q BEFORE INSERT ON quarry_rt.rt_trig FOR EACH ROW SET NEW.\"tag\" = 'q'");
+        }
+        let u = e.trigger("rt_trig", &def("rt_q", "SET NEW.tag = 'y'"), true).unwrap();
+        assert_eq!(e.tag().as_deref(), Some("y"));
+        e.undo(u).unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(e.tag().as_deref(), Some("q"), "{var}: the ANSI_QUOTES body is back");
+        e.exec("DROP TRIGGER quarry_rt.rt_q");
+        // An undo whose old trigger the server now refuses keeps a trigger: the edited one is put back.
+        e.exec("ALTER TABLE quarry_rt.rt_trig ADD COLUMN extra INT NULL");
+        e.exec("CREATE TRIGGER quarry_rt.rt_x BEFORE INSERT ON quarry_rt.rt_trig FOR EACH ROW SET NEW.extra = 1, NEW.tag = 'old'");
+        let u = e.trigger("rt_trig", &def("rt_x", "SET NEW.tag = 'new'"), true).unwrap();
+        e.exec("ALTER TABLE quarry_rt.rt_trig DROP COLUMN extra");
+        let r = e.undo(u);
+        assert!(exists(&mut e, "rt_x"), "{var}: a trigger is left after the undo ({r:?})");
+        if mysql {
+            assert!(r.unwrap_err().contains("put back"), "{var}");
+            assert_eq!(e.tag().as_deref(), Some("new"), "{var}: the edited trigger is the one put back");
+        }
+        e.exec("DROP TRIGGER quarry_rt.rt_x");
+        // An undo that finds no trigger, as a run that stopped halfway leaves, makes the old one again.
+        e.exec("CREATE TRIGGER quarry_rt.rt_h BEFORE INSERT ON quarry_rt.rt_trig FOR EACH ROW SET NEW.tag = 'h1'");
+        let u = e.trigger("rt_trig", &def("rt_h", "SET NEW.tag = 'h2'"), true).unwrap();
+        e.exec("DROP TRIGGER quarry_rt.rt_h");
+        e.undo(u).unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(e.tag().as_deref(), Some("h1"), "{var}");
+        e.exec("DROP TRIGGER quarry_rt.rt_h");
+        clear(&e);
+
+        // Finding 5: two triggers that append keep their order through an edit, its undo, and a drop and its undo.
+        e.exec("CREATE TRIGGER quarry_rt.rt_1 BEFORE INSERT ON quarry_rt.rt_trig FOR EACH ROW SET NEW.tag = CONCAT(IFNULL(NEW.tag, ''), '1')");
+        e.exec("CREATE TRIGGER quarry_rt.rt_2 BEFORE INSERT ON quarry_rt.rt_trig FOR EACH ROW SET NEW.tag = CONCAT(IFNULL(NEW.tag, ''), '2')");
+        assert_eq!(e.tag().as_deref(), Some("12"));
+        let u = e.trigger("rt_trig", &def("rt_1", "SET NEW.tag = CONCAT(IFNULL(NEW.tag, ''), '1') /* same */"), true).unwrap();
+        assert_eq!(e.tag().as_deref(), Some("12"), "{var}: after the edit");
+        e.undo(u).unwrap();
+        assert_eq!(e.tag().as_deref(), Some("12"), "{var}: after its undo");
+        let u = e.drop_trigger("rt_trig", "rt_1").unwrap();
+        assert_eq!(e.tag().as_deref(), Some("2"));
+        e.undo(u).unwrap();
+        assert_eq!(e.tag().as_deref(), Some("12"), "{var}: after the drop and its undo");
+        let u = e.trigger("rt_trig", &def("rt_2", "SET NEW.tag = CONCAT(IFNULL(NEW.tag, ''), '2') /* same */"), true).unwrap();
+        assert_eq!(e.tag().as_deref(), Some("12"), "{var}: after editing the last one");
+        e.undo(u).unwrap();
+        e.exec("DROP TRIGGER quarry_rt.rt_1");
+        e.exec("DROP TRIGGER quarry_rt.rt_2");
+        clear(&e);
+
+        // Finding 6: an edited trigger keeps its definer, and a login that may not create one for another user is told
+        // so and changes nothing.
+        let _ = e.try_exec("DROP USER IF EXISTS 'qrf_owner'@'%'");
+        let _ = e.try_exec("DROP USER IF EXISTS 'qrf_low'@'%'");
+        e.exec("CREATE USER 'qrf_owner'@'%' IDENTIFIED BY 'x'");
+        e.exec("CREATE USER 'qrf_low'@'%' IDENTIFIED BY 'qrf_low_pw'");
+        e.exec("GRANT ALL ON quarry_rt.* TO 'qrf_owner'@'%'");
+        e.exec("GRANT SELECT, INSERT, TRIGGER, LOCK TABLES ON quarry_rt.* TO 'qrf_low'@'%'");
+        e.exec("CREATE DEFINER='qrf_owner'@'%' TRIGGER quarry_rt.rt_d BEFORE INSERT ON quarry_rt.rt_trig FOR EACH ROW SET NEW.tag = 'd'");
+        let definer = |e: &Env| e.scalar("SELECT DEFINER FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = 'quarry_rt' AND TRIGGER_NAME = 'rt_d'");
+        let u = e.trigger("rt_trig", &def("rt_d", "SET NEW.tag = 'e'"), true).unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(definer(&e).as_deref(), Some("qrf_owner@%"), "{var}: the definer is kept");
+        e.undo(u).unwrap();
+        assert_eq!(definer(&e).as_deref(), Some("qrf_owner@%"));
+        let low = {
+            let pool = pinned(&e.w, e.db.opts.clone().username("qrf_low").password("qrf_low_pw"), &e.mode);
+            Db { pool: Pool::My(pool), ..e.db.clone() }
+        };
+        let all = e.structure("rt_trig").triggers;
+        let was = all.iter().find(|t| t.name == "rt_d").cloned();
+        let (res, _, _) = e.job_on(&low, "rt_trig", save_job(&all, was.as_ref(), &def("rt_d", "SET NEW.tag = 'f'")));
+        let err = res.unwrap_err();
+        assert!(err.contains("SET_USER_ID") && err.contains("Nothing was changed"), "{var}: {err}");
+        assert_eq!(e.tag().as_deref(), Some("d"), "{var}: the old trigger stays");
+        assert_eq!(definer(&e).as_deref(), Some("qrf_owner@%"));
+        e.exec("DROP TRIGGER quarry_rt.rt_d");
+        e.exec("DROP USER 'qrf_owner'@'%'");
+        e.exec("DROP USER 'qrf_low'@'%'");
+        clear(&e);
+
+        // Finding 12: the worker reads the writer's own sql_mode, so a session in ANSI_QUOTES the app did not know of
+        // runs nothing and hands the mode back.
+        let ansi = Db { pool: Pool::My(pinned(&e.w, e.db.opts.clone(), &format!("{},ANSI_QUOTES", e.mode))), ..e.db.clone() };
+        let (res, _, seen) = e.job_on(&ansi, "rt_trig", TrigJob::Create(TrigSave { def: def("rt_m", r#"SET NEW.tag = "m""#), definer: None, order: None }));
+        assert!(res.unwrap_err().contains("Nothing ran"), "{var}");
+        assert!(seen.is_some_and(|m| Mode::of(&m).ansi), "{var}");
+        assert!(!exists(&mut e, "rt_m"));
+
+        // Finding 4: staged [Drop column wrong, AddFk fk_mix] takes the checked ALTER path: its undo is one ALTER per
+        // step, refused when the key changed since, and run when it did not.
+        let k = key("fk_mix", "rt_orders", &["customer_id"], "quarry_rt", "rt_customers", &["id"]);
+        let before = shape(&e.structure("rt_orders"));
+        let cols = e.structure("rt_orders").columns.len();
+        let undo = e.apply("rt_orders", &[Change::Drop("wrong".into()), Change::AddFk(k)]).unwrap_or_else(|x| panic!("{var}: {x}"));
+        let UndoKind::Sql { undo: crate::db::sql::write::SqlUndo::Alter(au), .. } = &undo.kind else { panic!("{var}: not the checked ALTER undo") };
+        assert!(au.steps.len() >= 2 && au.fks == ["fk_mix"] && au.expect.iter().any(|(w, v)| w == "foreign key fk_mix" && v.is_some()), "{var}: {au:?}");
+        e.exec("ALTER TABLE quarry_rt.rt_orders DROP FOREIGN KEY fk_mix");
+        e.w.sql_undo(e.db.clone(), undo, Vec::new(), false);
+        let Msg::SqlAltered { res, undo: kept, .. } = recv(&e.rx) else { panic!("expected SqlAltered") };
+        let refused = res.unwrap_err();
+        assert!(refused.contains("foreign key fk_mix changed"), "{var}: {refused}");
+        let undo = kept.expect("a refused undo stays in the list");
+        e.exec("ALTER TABLE quarry_rt.rt_orders ADD CONSTRAINT fk_mix FOREIGN KEY (customer_id) REFERENCES rt_customers (id) ON UPDATE CASCADE ON DELETE RESTRICT");
+        e.undo(undo).unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(shape(&e.structure("rt_orders")), before, "{var}");
+        assert_eq!(e.structure("rt_orders").columns.len(), cols);
+
+        // Finding 10: on MySQL 8.4 a key on part of a key is refused by the server (6125), and the pre-check says so first.
+        e.n += 1;
+        e.w.sql_fk_rules(e.n, e.db.clone());
+        let Msg::SqlFkRules { strict, .. } = recv(&e.rx) else { panic!("expected SqlFkRules") };
+        assert_eq!(strict, mysql && fk_whole_key_default(e.db.dialect, &e.db.version), "{var}");
+        e.exec("CREATE TABLE quarry_rt.rt_loose (x INT NOT NULL, y INT NOT NULL, KEY idx_x (x))");
+        e.exec("CREATE TABLE quarry_rt.rt_child (id INT PRIMARY KEY, x INT NULL)");
+        let k = key("fk_loose", "rt_child", &["x"], "quarry_rt", "rt_loose", &["x"]);
+        let (own, parent) = (e.structure("rt_child"), e.structure("rt_loose"));
+        let pre = fk_problem(&own, "rt_child", &parent, &k, strict);
+        let ran = e.apply("rt_child", &[Change::AddFk(k)]).map(|_| ());
+        assert_eq!(pre.is_some(), ran.is_err(), "{var}: the pre-check agrees with the server ({pre:?}, {ran:?})");
+        if strict {
+            assert!(ran.unwrap_err().contains("6125"), "{var}");
+        }
 
         e.exec("DROP DATABASE quarry_rt");
         e.exec("DROP DATABASE quarry_rt_b");
@@ -2909,5 +3774,15 @@ mod live_rel {
     #[test]
     fn live_triggers_mariadb() {
         triggers("QUARRY_TEST_MARIADB");
+    }
+
+    #[test]
+    fn live_review_mysql() {
+        review("QUARRY_TEST_MYSQL");
+    }
+
+    #[test]
+    fn live_review_mariadb() {
+        review("QUARRY_TEST_MARIADB");
     }
 }

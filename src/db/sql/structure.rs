@@ -89,6 +89,10 @@ pub struct Trigger {
     pub event: String,
     pub body: String,
     pub definer: String,
+    /// ACTION_ORDER: where it fires among the triggers of the same timing and event, from 1.
+    pub order: u64,
+    /// The sql_mode it was created under, which its body runs with.
+    pub sql_mode: String,
 }
 
 impl Trigger {
@@ -251,7 +255,14 @@ fn foreign_keys(rows: &[MySqlRow]) -> Vec<ForeignKey> {
 }
 
 fn triggers(rows: &[MySqlRow]) -> Vec<Trigger> {
-    rows.iter().map(|r| Trigger { name: s(r, "name"), timing: s(r, "timing"), event: s(r, "event"), body: s(r, "body"), definer: s(r, "definer") }).collect()
+    rows.iter().map(|r| Trigger { name: s(r, "name"), timing: s(r, "timing"), event: s(r, "event"), body: s(r, "body"), definer: s(r, "definer"), order: num(r, "ord").unwrap_or(0), sql_mode: s(r, "sql_mode") }).collect()
+}
+
+/// The triggers of a table read on a connection of the caller's, for the trigger jobs that must see what the
+/// connection they write on sees.
+pub(super) async fn triggers_on(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str, table: &str) -> Res<Vec<Trigger>> {
+    let rows = sqlx::query(d.triggers()).bind(schema).bind(table).fetch_all(&mut *c).await.map_err(e)?;
+    Ok(triggers(&rows))
 }
 
 fn status(rows: &[MySqlRow]) -> Status {

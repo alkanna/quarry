@@ -415,6 +415,7 @@ impl App {
                 s.st.trig.remove(sql_trig::NEW);
                 (s.st.trig_new, sel[4]) = (false, Some(i));
             }
+            sql_trig::prune_drafts(&mut s.st.trig, &d.triggers);
         }
         let creating = self.tabs[self.cur].sql.as_ref().is_some_and(|s| s.st.trig_new);
         let drafts: HashMap<String, db::sql::ddl::TrigDef> = self.tabs[self.cur].sql.as_ref().map(|s| s.st.trig.clone()).unwrap_or_default();
@@ -854,12 +855,16 @@ impl App {
                 timing: "BEFORE".into(),
                 event: "UPDATE".into(),
                 definer: "app@%".into(),
+                order: 1,
+                sql_mode: "STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION".into(),
                 body: "BEGIN\n  IF NEW.status = 'refunded' AND OLD.status <> 'paid' THEN\n    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Only paid orders can be refunded';\n  END IF;\nEND".into(),
             }, Trigger {
                 name: "orders_after_insert".into(),
                 timing: "AFTER".into(),
                 event: "INSERT".into(),
                 definer: "app@%".into(),
+                order: 1,
+                sql_mode: "STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION".into(),
                 body: "INSERT INTO audit_log (tbl, row_id, action) VALUES ('orders', NEW.id, 'insert')".into(),
             }],
             status: db::sql::structure::Status {

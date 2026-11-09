@@ -62,9 +62,9 @@ impl Dialect {
     }
 
     /// Triggers on a table. Params: [schema, table]. Columns: name, timing ("BEFORE" or "AFTER"),
-    /// event ("INSERT", "UPDATE" or "DELETE"), body, definer.
+    /// event ("INSERT", "UPDATE" or "DELETE"), body, definer, ord (ACTION_ORDER), sql_mode.
     pub fn triggers(self) -> &'static str {
-        "SELECT TRIGGER_NAME AS name, ACTION_TIMING AS timing, EVENT_MANIPULATION AS event, ACTION_STATEMENT AS body, DEFINER AS definer FROM information_schema.TRIGGERS WHERE EVENT_OBJECT_SCHEMA = ? AND EVENT_OBJECT_TABLE = ? ORDER BY ACTION_TIMING, EVENT_MANIPULATION, ACTION_ORDER"
+        "SELECT TRIGGER_NAME AS name, ACTION_TIMING AS timing, EVENT_MANIPULATION AS event, ACTION_STATEMENT AS body, DEFINER AS definer, ACTION_ORDER AS ord, SQL_MODE AS sql_mode FROM information_schema.TRIGGERS WHERE EVENT_OBJECT_SCHEMA = ? AND EVENT_OBJECT_TABLE = ? ORDER BY ACTION_TIMING, EVENT_MANIPULATION, ACTION_ORDER"
     }
 
     /// What SHOW TABLE STATUS shows, from information_schema because SHOW cannot bind the schema.
