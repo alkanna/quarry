@@ -17,7 +17,7 @@ Update this list when a step lands. Each step is reviewed before it is ticked.
 - [x] 6. Content view with design F: Rules / SQL bar, clause chips, edits, undo, colors, column actions, multi-select, Copy as (incl. Markdown and HTML). Reviewed; writes refuse partial keys, undo is safe with generated and renamed columns
 - [x] 7. Structure (design A) and Info, read-only, plus read-only Relations and Triggers views. Structure loads when one of those views opens
 - [x] 8. Custom Query: highlighter, several result sets, Stop (`KILL QUERY`), Explain, history, Query tabs from the sidebar. Save to library and Format left out
-- [ ] 9. SQL autocomplete
+- [x] 9. SQL autocomplete (tables, aliases, columns, values with frequencies, functions and signature help) in the Content bar and the Query editor
 - [ ] 10. SQL shell with typed tables, and the shared shell layout for Mongo and SQL
 - [ ] 11. Demo data, `QUARRY_TEST_SQL` switches, CLAUDE.md
 
