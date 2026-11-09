@@ -1,7 +1,7 @@
 //! Typed filter rules of the Content bar: the operators per column type (Sequel Ace's lists), the
 //! SQL a rule list turns into, and the way back for text this module wrote itself.
 
-use super::value::Kind;
+use super::value::{lit, Kind};
 use super::Dialect;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -199,13 +199,6 @@ pub fn label(op: Op, kind: Kind) -> &'static str {
 pub fn is_keyword(op: Op) -> bool {
     use Op::*;
     matches!(op, In | NotInOrNull | Between | IsNull | NotNull | Like | NotLike)
-}
-
-/// A string literal. Backslashes are escaped too, since MySQL reads them as escapes by default; `bs`
-/// is false under NO_BACKSLASH_ESCAPES, where doubling them would change the value.
-pub fn lit(s: &str, bs: bool) -> String {
-    let s = if bs { s.replace('\\', "\\\\") } else { s.to_string() };
-    format!("'{}'", s.replace('\'', "''"))
 }
 
 fn is_number(s: &str) -> bool {

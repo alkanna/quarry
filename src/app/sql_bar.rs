@@ -1324,7 +1324,7 @@ pub(super) fn drill(t: &mut Tab, row: usize, d: Dialect, bs: bool) {
         conds.push(match bson_text(v) {
             Some(text) => match tcols(s).iter().find(|c| c.name == name && expr.is_none()) {
                 Some(c) => rules::rule_sql(&Rule { col: name.clone(), kind: c.kind, op: Op::Eq, values: vec![text] }, d, bs),
-                None => format!("{lhs} = {}", rules::lit(&text, bs)),
+                None => format!("{lhs} = {}", db::sql::value::lit(&text, bs)),
             },
             None => format!("{lhs} IS NULL"),
         });

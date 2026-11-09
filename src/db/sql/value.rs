@@ -3,6 +3,22 @@
 
 use mongodb::bson::{spec::BinarySubtype, Binary, Bson};
 
+/// A SQL string literal. Backslashes are escaped too, since MySQL reads them as escapes by default; `bs`
+/// is false under NO_BACKSLASH_ESCAPES, where doubling them would change the value.
+pub fn lit(s: &str, bs: bool) -> String {
+    let s = if bs { s.replace('\\', "\\\\") } else { s.to_string() };
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+/// Bytes as hex digits, the part after `0x` or inside `X'..'`.
+pub fn hex_digits(b: &[u8], upper: bool) -> String {
+    use std::fmt::Write;
+    b.iter().fold(String::with_capacity(b.len() * 2), |mut s, x| {
+        let _ = if upper { write!(s, "{x:02X}") } else { write!(s, "{x:02x}") };
+        s
+    })
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
     Int,

@@ -108,7 +108,7 @@ fn needs_quote(name: &str) -> bool {
 /// A name as it is inserted. A backtick already typed is closed instead of added.
 fn ident(name: &str, in_tick: bool) -> String {
     if in_tick {
-        format!("{}`", name.replace('`', "``"))
+        Dialect::MySql.quote_ident(name)[1..].to_string()
     } else if needs_quote(name) {
         Dialect::MySql.quote_ident(name)
     } else {

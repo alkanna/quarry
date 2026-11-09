@@ -442,11 +442,10 @@ fn literal(p: &value::Param, no_backslash: bool) -> Res<String> {
             if s.contains('\0') {
                 return Err("A text value contains a NUL character".into());
             }
-            // Quotes double in every mode; the backslash only escapes when the server reads it as an escape.
-            let s = if no_backslash { s.replace('\'', "''") } else { s.replace('\\', "\\\\").replace('\'', "''") };
-            format!("'{s}'")
+            // The backslash only escapes when the server reads it as an escape.
+            value::lit(s, !no_backslash)
         }
-        Param::Bytes(b) => format!("X'{}'", b.iter().map(|x| format!("{x:02x}")).collect::<String>()),
+        Param::Bytes(b) => format!("X'{}'", value::hex_digits(b, false)),
     })
 }
 

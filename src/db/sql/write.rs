@@ -1,7 +1,7 @@
 //! Writing SQL rows: saving staged cell edits, deleting rows and inserting them, each in one
 //! transaction on a connection of its own that is switched to READ WRITE. The pool stays read-only.
 
-use super::value::{Kind, Param};
+use super::value::{hex_digits, lit, Kind, Param};
 use super::{Col, Db, Dialect, Pool};
 use crate::db::{e, Msg, Res, UndoAction, UndoKind, Worker};
 use mongodb::bson::{Bson, Document};
@@ -163,10 +163,10 @@ pub fn preview(sql: &str, params: &[Param], bs: bool) -> String {
                 Some(Param::Int(i)) => out.push_str(&i.to_string()),
                 Some(Param::UInt(u)) => out.push_str(&u.to_string()),
                 Some(Param::Float(f)) => out.push_str(&f.to_string()),
-                Some(Param::Text(s)) => out.push_str(&format!("'{}'", if bs { s.replace('\\', "\\\\") } else { s.clone() }.replace('\'', "''"))),
+                Some(Param::Text(s)) => out.push_str(&lit(s, bs)),
                 // A bare 0x is a syntax error, so an empty value has its own spelling.
                 Some(Param::Bytes(b)) if b.is_empty() => out.push_str("X''"),
-                Some(Param::Bytes(b)) => out.push_str(&format!("0x{}", b.iter().map(|x| format!("{x:02X}")).collect::<String>())),
+                Some(Param::Bytes(b)) => out.push_str(&format!("0x{}", hex_digits(b, true))),
             }
         } else {
             out.push(ch);

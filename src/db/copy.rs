@@ -3,6 +3,8 @@
 
 use super::*;
 
+const DIALECT: sql::Dialect = sql::Dialect::MySql;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Fmt {
     SqlInsert,
@@ -45,17 +47,13 @@ fn text(b: Option<&Bson>) -> Option<String> {
         Bson::String(s) => s.clone(),
         Bson::ObjectId(o) => o.to_hex(),
         Bson::DateTime(t) => t.try_to_rfc3339_string().unwrap_or_default(),
-        Bson::Binary(b) => hex(&b.bytes),
+        Bson::Binary(b) => format!("0x{}", sql::value::hex_digits(&b.bytes, true)),
         Bson::Int32(n) => n.to_string(),
         Bson::Int64(n) => n.to_string(),
         Bson::Double(f) => f.to_string(),
         Bson::Boolean(b) => b.to_string(),
         other => compact(other),
     })
-}
-
-fn hex(b: &[u8]) -> String {
-    format!("0x{}", b.iter().map(|x| format!("{x:02X}")).collect::<String>())
 }
 
 fn value<'a>(d: &'a Document, c: &CopyCol) -> Option<&'a Bson> {
@@ -68,10 +66,6 @@ fn plain_number(s: &str) -> bool {
     !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit() || b == b'.' || b == b'e' || b == b'E' || b == b'-' || b == b'+') && t.bytes().next().is_some_and(|b| b.is_ascii_digit() || b == b'.') && s.parse::<f64>().is_ok_and(f64::is_finite)
 }
 
-fn quote_ident(s: &str) -> String {
-    format!("`{}`", s.replace('`', "``"))
-}
-
 /// `bs` is false when the server has NO_BACKSLASH_ESCAPES, where doubling a backslash would change the text.
 pub fn sql_literal(b: Option<&Bson>, numeric: bool, bs: bool) -> String {
     match b {
@@ -81,11 +75,10 @@ pub fn sql_literal(b: Option<&Bson>, numeric: bool, bs: bool) -> String {
         Some(Bson::Boolean(v)) => if *v { "TRUE" } else { "FALSE" }.into(),
         // A bare 0x is not valid SQL, and '' would turn a binary value into text.
         Some(Bson::Binary(x)) if x.bytes.is_empty() => "X''".into(),
-        Some(Bson::Binary(x)) => hex(&x.bytes),
+        Some(Bson::Binary(x)) => format!("0x{}", sql::value::hex_digits(&x.bytes, true)),
         Some(Bson::String(s)) if numeric && plain_number(s) => s.clone(),
         _ => {
-            let t = text(b).unwrap_or_default();
-            format!("'{}'", if bs { t.replace('\\', "\\\\") } else { t }.replace('\'', "''"))
+            sql::value::lit(&text(b).unwrap_or_default(), bs)
         }
     }
 }
@@ -133,8 +126,8 @@ pub fn format(f: Fmt, s: &Sheet, header: bool) -> String {
     let names: Vec<&str> = s.cols.iter().map(|c| c.name.as_str()).collect();
     match f {
         Fmt::SqlInsert => {
-            let mut out = format!("INSERT INTO {}", quote_ident(s.table));
-            out.push_str(&format!(" ({})", s.cols.iter().map(|c| quote_ident(&c.src)).collect::<Vec<_>>().join(", ")));
+            let mut out = format!("INSERT INTO {}", DIALECT.quote_ident(s.table));
+            out.push_str(&format!(" ({})", s.cols.iter().map(|c| DIALECT.quote_ident(&c.src)).collect::<Vec<_>>().join(", ")));
             out.push_str(" VALUES\n");
             let rows: Vec<String> = s.rows.iter().map(|d| format!("({})", s.cols.iter().map(|c| sql_literal(value(d, c), c.numeric, s.bs)).collect::<Vec<_>>().join(", "))).collect();
             out + &rows.join(",\n") + ";"
@@ -147,9 +140,9 @@ pub fn format(f: Fmt, s: &Sheet, header: bool) -> String {
                 if sets.is_empty() || s.pk.is_empty() || !s.pk.iter().all(|p| key.contains_key(p)) {
                     continue;
                 }
-                let set = sets.iter().map(|c| format!("{} = {}", quote_ident(&c.src), sql_literal(value(d, c), c.numeric, s.bs))).collect::<Vec<_>>().join(", ");
-                let wh = s.pk.iter().map(|p| format!("{} = {}", quote_ident(p), sql_literal(key.get(p), false, s.bs))).collect::<Vec<_>>().join(" AND ");
-                out.push(format!("UPDATE {} SET {set} WHERE {wh};", quote_ident(s.table)));
+                let set = sets.iter().map(|c| format!("{} = {}", DIALECT.quote_ident(&c.src), sql_literal(value(d, c), c.numeric, s.bs))).collect::<Vec<_>>().join(", ");
+                let wh = s.pk.iter().map(|p| format!("{} = {}", DIALECT.quote_ident(p), sql_literal(key.get(p), false, s.bs))).collect::<Vec<_>>().join(" AND ");
+                out.push(format!("UPDATE {} SET {set} WHERE {wh};", DIALECT.quote_ident(s.table)));
             }
             out.join("\n")
         }
@@ -240,7 +233,7 @@ impl Writer {
     pub fn begin(&mut self) -> String {
         let names: Vec<&str> = self.cols.iter().map(|c| c.name.as_str()).collect();
         match self.f {
-            Fmt::SqlInsert => format!("INSERT INTO {} ({}) VALUES\n", quote_ident(&self.table), self.cols.iter().map(|c| quote_ident(&c.src)).collect::<Vec<_>>().join(", ")),
+            Fmt::SqlInsert => format!("INSERT INTO {} ({}) VALUES\n", DIALECT.quote_ident(&self.table), self.cols.iter().map(|c| DIALECT.quote_ident(&c.src)).collect::<Vec<_>>().join(", ")),
             Fmt::Csv | Fmt::Tsv if self.header => {
                 let (sep, esc): (&str, fn(&str) -> String) = if self.f == Fmt::Csv { (",", csv_cell) } else { ("\t", |x: &str| x.replace(['\t', '\n', '\r'], " ")) };
                 let l = names.iter().map(|n| esc(n)).collect::<Vec<_>>().join(sep);
@@ -280,9 +273,9 @@ impl Writer {
                     if sets.is_empty() || self.pk.is_empty() || !self.pk.iter().all(|p| key.contains_key(p)) {
                         continue;
                     }
-                    let set = sets.iter().map(|c| format!("{} = {}", quote_ident(&c.src), sql_literal(value(d, c), c.numeric, self.bs))).collect::<Vec<_>>().join(", ");
-                    let wh = self.pk.iter().map(|p| format!("{} = {}", quote_ident(p), sql_literal(key.get(p), false, self.bs))).collect::<Vec<_>>().join(" AND ");
-                    let l = self.line(format!("UPDATE {} SET {set} WHERE {wh};", quote_ident(&self.table)));
+                    let set = sets.iter().map(|c| format!("{} = {}", DIALECT.quote_ident(&c.src), sql_literal(value(d, c), c.numeric, self.bs))).collect::<Vec<_>>().join(", ");
+                    let wh = self.pk.iter().map(|p| format!("{} = {}", DIALECT.quote_ident(p), sql_literal(key.get(p), false, self.bs))).collect::<Vec<_>>().join(" AND ");
+                    let l = self.line(format!("UPDATE {} SET {set} WHERE {wh};", DIALECT.quote_ident(&self.table)));
                     out.push_str(&l);
                 }
                 Fmt::Csv | Fmt::Tsv => {
