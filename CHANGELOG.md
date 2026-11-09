@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.25.0](https://github.com/alkanna/quarry/compare/v0.24.0...v0.25.0) (2026-11-09)
+
+
+### Features
+
+* schema view merges map keys into one row, nests fields under their parent and folds ([#138](https://github.com/alkanna/quarry/issues/138)) ([eff77a8](https://github.com/alkanna/quarry/commit/eff77a84c8483ec072faa858d7d9d6780005ccd3))
+* shell suggests field values in queries, typed from each loaded collection for the TypeScript engine ([#139](https://github.com/alkanna/quarry/issues/139)) ([47f97a9](https://github.com/alkanna/quarry/commit/47f97a9811b6d0757d215b9baad524989785aa77))
+
+
+### Bug Fixes
+
+* keep the unsaved changes bar of an inline document inside the visible table area ([#136](https://github.com/alkanna/quarry/issues/136)) ([e8c8efe](https://github.com/alkanna/quarry/commit/e8c8efece2ec8ce3828bca937a0ddd75e80dd194))
+
 ## [0.24.0](https://github.com/alkanna/quarry/compare/v0.23.0...v0.24.0) (2026-11-08)
 
 
