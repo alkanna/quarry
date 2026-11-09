@@ -35,8 +35,14 @@ let first = true;
       first = false;
       return onInput(JSON.parse(line));
     }
-    // A bytes value comes back as Extended JSON.
-    const m = JSON.parse(line, (_, v) => (v && typeof v === "object" && v.$binary ? Buffer.from(v.$binary.base64, "base64") : v));
+    // Bytes and integers beyond 2^53 come back as Extended JSON, which a plain number could not hold.
+    const m = JSON.parse(line, (_, v) => {
+      if (v && typeof v === "object") {
+        if (v.$binary) return Buffer.from(v.$binary.base64, "base64");
+        if (typeof v.$numberLong === "string") return BigInt(v.$numberLong);
+      }
+      return v;
+    });
     const p = pending.get(m.id);
     if (!p) return;
     pending.delete(m.id);
@@ -47,12 +53,16 @@ let first = true;
     p.resolve(rows);
   };
   for await (const chunk of Bun.stdin.stream()) {
+    // Search only the new part: the old part has no newline, and rescanning it is quadratic for a big answer.
+    let from = buf.length;
     buf += dec.decode(chunk, { stream: true });
+    let start = 0;
     let i;
-    while ((i = buf.indexOf("\n")) >= 0) {
-      take(buf.slice(0, i));
-      buf = buf.slice(i + 1);
+    while ((i = buf.indexOf("\n", from)) >= 0) {
+      take(buf.slice(start, i));
+      start = from = i + 1;
     }
+    buf = buf.slice(start);
   }
   take(buf);
   for (const p of pending.values()) p.reject(new Error("Quarry closed the connection"));
@@ -63,9 +73,11 @@ let first = true;
 function wire(v) {
   if (v === undefined || v === null) return null;
   if (typeof v === "boolean") return v ? 1 : 0;
-  if (typeof v === "bigint") return Number.isSafeInteger(Number(v)) ? Number(v) : v.toString();
+  if (typeof v === "bigint") return v >= -9007199254740991n && v <= 9007199254740991n ? Number(v) : { $int: v.toString() };
   if (typeof v === "number") {
     if (!Number.isFinite(v)) throw new Error("A query value is not a finite number");
+    // Past 2^53 the number is already rounded, so the digits the script meant are gone. Use a BigInt.
+    if (Number.isInteger(v) && !Number.isSafeInteger(v)) throw new Error("A query value is an integer beyond 2^53 that a number cannot hold. Pass it as a BigInt, like 123n");
     return v;
   }
   if (v instanceof Date) {
@@ -111,26 +123,36 @@ sql.unsafe = (text, params = []) => query(String(text), params);
 
 const ident = (n) => "`" + String(n).replaceAll("`", "``") + "`";
 
+const isPlain = (v) => v !== null && typeof v === "object" && (Object.getPrototypeOf(v) === Object.prototype || Object.getPrototypeOf(v) === null);
+
 // where: { col: value } is =, null is IS NULL, an array is IN, and { gt, gte, lt, lte, ne, like, in } compare.
+// Anything unclear throws: a condition that silently vanishes would turn an update or delete into every row.
 function compileWhere(where, params) {
+  if (where === undefined) return "";
+  if (!isPlain(where)) throw new Error("where must be an object like { id: 1 }. Pass {} for every row.");
   const parts = [];
   const eq = (c, v) => {
-    if (v === null || v === undefined) return `${ident(c)} IS NULL`;
+    if (v === undefined) throw new Error(`The value for "${c}" is undefined. Use null to match NULL.`);
+    if (v === null) return `${ident(c)} IS NULL`;
     if (Array.isArray(v)) {
+      if (v.includes(undefined)) throw new Error(`A list for "${c}" holds undefined`);
       params.push(...v);
       return v.length ? `${ident(c)} IN (${v.map(() => "?").join(", ")})` : "FALSE";
     }
+    if (typeof v === "object" && !(v instanceof Date || v instanceof Uint8Array)) throw new Error(`The value for "${c}" is not a plain value, a list or a condition object`);
     params.push(v);
     return `${ident(c)} = ?`;
   };
   const ops = { gt: ">", gte: ">=", lt: "<", lte: "<=", like: "LIKE" };
-  for (const [c, v] of Object.entries(where ?? {})) {
-    const plain = v === null || typeof v !== "object" || Array.isArray(v) || v instanceof Date || v instanceof Uint8Array;
-    if (plain) {
+  for (const [c, v] of Object.entries(where)) {
+    if (!isPlain(v)) {
       parts.push(eq(c, v));
       continue;
     }
-    for (const [op, x] of Object.entries(v)) {
+    const entries = Object.entries(v);
+    if (!entries.length) throw new Error(`The condition for "${c}" is empty. Use gt, gte, lt, lte, ne, like or in.`);
+    for (const [op, x] of entries) {
+      if (x === undefined) throw new Error(`The "${op}" value for "${c}" is undefined`);
       if (op in ops) {
         params.push(x);
         parts.push(`${ident(c)} ${ops[op]} ?`);

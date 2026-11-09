@@ -147,9 +147,13 @@ fn lex(text: &str, o: Opts) -> Vec<(Tok, Range<usize>)> {
 
 /// Each statement as (range without the `;`, end including the `;`). Empty ones are dropped.
 fn split(text: &str) -> Vec<(Range<usize>, usize)> {
+    split_with(text, DEFAULT)
+}
+
+fn split_with(text: &str, o: Opts) -> Vec<(Range<usize>, usize)> {
     let mut out = Vec::new();
     let (mut start, mut last, mut code) = (None, 0, false);
-    for (t, r) in tokens(text) {
+    for (t, r) in lex(text, o) {
         match t {
             Tok::Space => {}
             Tok::Punct if &text[r.clone()] == ";" => {
@@ -179,6 +183,24 @@ fn split(text: &str) -> Vec<(Range<usize>, usize)> {
 /// surrounding whitespace, so the editor can map a caret to a statement.
 pub fn split_statements(text: &str) -> Vec<(Range<usize>, &str)> {
     split(text).into_iter().map(|(r, _)| (r.clone(), &text[r])).collect()
+}
+
+/// The `?` placeholders and the statement count of `text` as a server with these quote rules reads it.
+/// The worker compares two readings, because a text that reads differently is not safe to fill.
+pub fn placeholders(text: &str, backslash: bool, ansi: bool) -> (Vec<usize>, usize) {
+    let o = Opts { backslash, ansi, skip_exec: false };
+    let at = lex(text, o).into_iter().filter(|(t, r)| *t == Tok::Punct && &text[r.clone()] == "?").map(|(_, r)| r.start).collect();
+    (at, split_with(text, o).len())
+}
+
+/// Like `tokens`, but read with the server's own quote rules.
+pub fn tokens_with(text: &str, backslash: bool, ansi: bool) -> Vec<(Tok, Range<usize>)> {
+    lex(text, Opts { backslash, ansi, skip_exec: false })
+}
+
+/// Statements counted under the server's own quote rules.
+pub fn count_with(text: &str, backslash: bool, ansi: bool) -> usize {
+    split_with(text, Opts { backslash, ansi, skip_exec: false }).len()
 }
 
 /// The statement the caret belongs to. A caret right after a `;` stays with that statement, and one
@@ -214,6 +236,45 @@ pub fn read_only_check(stmt: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// True for a SET that changes how the server reads literals (character set, SQL mode). Quarry
+/// escapes values for the mode it saw at connect, so a script must not move it. Checked under every
+/// reading of the text, like the read-only guard.
+pub fn changes_escaping(stmt: &str) -> bool {
+    const VARS: [&str; 3] = ["character_set_client", "character_set_connection", "sql_mode"];
+    const HEADS: [&str; 3] = ["names", "charset", "character"];
+    for skip_exec in [false, true] {
+        for ansi in [false, true] {
+            for backslash in [true, false] {
+                let code: Vec<Code> = lex(stmt, Opts { backslash, ansi, skip_exec }).into_iter().filter(|(t, _)| matches!(t, Tok::Word | Tok::Quoted | Tok::Str | Tok::Punct)).map(|(t, r)| (t, &stmt[r])).collect();
+                for part in code.split(|t| punct(t, ";")) {
+                    if !part.first().is_some_and(|t| is(t, "SET")) {
+                        continue;
+                    }
+                    let mut depth = 0i32;
+                    let mut target = true;
+                    for t in &part[1..] {
+                        if punct(t, "(") {
+                            depth += 1;
+                        } else if punct(t, ")") {
+                            depth -= 1;
+                        } else if depth == 0 && punct(t, ",") {
+                            target = true;
+                        } else if depth == 0 && (punct(t, "=") || punct(t, ":")) {
+                            target = false;
+                        } else if target && matches!(t.0, Tok::Word | Tok::Quoted) {
+                            let w = t.1.trim_start_matches("@@").trim_matches('`').to_ascii_lowercase();
+                            if VARS.contains(&w.as_str()) || HEADS.contains(&w.as_str()) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 
 fn check_one(part: &[Code]) -> Result<(), String> {
@@ -519,5 +580,24 @@ mod tests {
         assert_eq!(statement_at(s, 12), Some(0..8));
         assert_eq!(statement_at(s, 30), Some(19..27));
         assert_eq!(statement_at(s, 33), Some(19..27));
+    }
+
+    #[test]
+    fn escaping_changes_are_found() {
+        for s in ["SET NAMES utf8", "set names 'utf8'", "SET CHARACTER SET utf8", "SET CHARSET utf8", "SET SESSION character_set_client = 1", "SET @@character_set_connection=1", "SET sql_mode=''", "SET @@sql_mode = ''", "SET @@session.sql_mode = ''", "SET @a = 1, `sql_mode` = ''", "SELECT 1; SET NAMES utf8", "SET /*!50000 NAMES */ utf8"] {
+            assert!(changes_escaping(s), "{s}");
+        }
+        for s in ["SET @sql_mode = 1", "SET @a = 'sql_mode'", "SET @a = (SELECT names FROM t)", "SELECT 'SET NAMES x'", "SET autocommit = 0"] {
+            assert!(!changes_escaping(s), "{s}");
+        }
+    }
+
+    #[test]
+    fn readings_differ_on_a_backslash_in_quotes() {
+        let t = "SELECT '\\'' AS a, ? AS b -- '";
+        assert_ne!(placeholders(t, true, false), placeholders(t, false, false));
+        assert_eq!(placeholders("SELECT ?, '?'", true, false), placeholders("SELECT ?, '?'", false, false));
+        assert_eq!(count_with("SELECT '\\''; SELECT 2", false, false), 1);
+        assert_eq!(count_with("SELECT '\\''; SELECT 2", true, false), 2);
     }
 }

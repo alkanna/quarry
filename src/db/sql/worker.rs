@@ -394,12 +394,17 @@ async fn kill_query(db: &Db, id: u64) -> Res<String> {
 /// The most rows one query of a shell script may return; past it the script gets an error instead of
 /// the server's whole table through a pipe.
 const RELAY_ROWS_MAX: usize = 100_000;
+/// And the most bytes of values one answer may hold, so a few huge cells cannot fill memory or the pipe.
+const RELAY_BYTES_MAX: usize = 64 << 20;
 
 /// What a shell script's query gave back: rows as relaxed Extended JSON, or the effect of a write.
 pub enum Answer {
     Rows(Vec<serde_json::Value>),
     Wrote { affected: u64, insert_id: u64 },
 }
+
+/// Where an unsafe JSON number would lose digits.
+const JS_SAFE: u64 = (1 << 53) - 1;
 
 /// A literal for one bound value. The script's text goes through the text protocol so rows convert
 /// exactly like the Custom Query's, so values are escaped here instead of bound.
@@ -423,14 +428,30 @@ fn literal(p: &value::Param, no_backslash: bool) -> Res<String> {
     })
 }
 
-/// The text with every `?` outside strings and comments replaced by the next value's literal.
-pub fn fill(text: &str, params: &[value::Param], no_backslash: bool) -> Res<String> {
+/// A row cell as the script gets it. An Int64 beyond 2^53 is sent as {"$numberLong"} because a plain
+/// JSON number would round in the script.
+fn cell(b: Bson) -> Bson {
+    match b {
+        Bson::Int64(i) if i.unsigned_abs() > JS_SAFE => mongodb::bson::doc! { "$numberLong": i.to_string() }.into(),
+        b => b,
+    }
+}
+
+/// The text with every `?` outside strings and comments replaced by the next value's literal. The text is
+/// read with the server's quote rules, and refused when the other backslash reading finds other
+/// placeholders or statements, since the server could then see code where this sees a string.
+pub fn fill(text: &str, params: &[value::Param], backslash: bool, ansi: bool) -> Res<String> {
+    let (at, count) = lex::placeholders(text, backslash, ansi);
+    if lex::placeholders(text, !backslash, ansi) != (at, count) {
+        return Err("This text reads differently with and without backslash escapes. Use ? for values and keep backslashes out of quotes".into());
+    }
     let (mut out, mut last, mut n) = (String::new(), 0, 0);
-    for (t, r) in lex::tokens(text) {
+    for (t, r) in lex::tokens_with(text, backslash, ansi) {
         if t == lex::Tok::Punct && &text[r.clone()] == "?" {
             let p = params.get(n).ok_or("The query has more ? than values")?;
             out.push_str(&text[last..r.start]);
-            out.push_str(&literal(p, no_backslash)?);
+            // Padded, so a literal never fuses with a word before or after it (X?, @?).
+            out.push_str(&format!(" {} ", literal(p, !backslash)?));
             (last, n) = (r.end, n + 1);
         }
     }
@@ -446,7 +467,8 @@ pub fn fill(text: &str, params: &[value::Param], no_backslash: bool) -> Res<Stri
 pub struct Relay {
     conn: sqlx::MySqlConnection,
     read_only: bool,
-    no_backslash: bool,
+    backslash: bool,
+    ansi: bool,
     /// A result was abandoned halfway, which leaves the connection unusable.
     dead: bool,
 }
@@ -456,7 +478,7 @@ impl Relay {
         let Pool::My(pool) = &db.pool;
         let mut conn = pool.acquire().await.map_err(e)?.detach();
         prepare(&mut conn, db.dialect, schema, read_only, id).await.map_err(e)?;
-        Ok(Relay { conn, read_only, no_backslash: db.sql_mode.contains("NO_BACKSLASH_ESCAPES"), dead: false })
+        Ok(Relay { conn, read_only, backslash: db.backslash_escapes(), ansi: db.sql_mode.to_ascii_uppercase().contains("ANSI_QUOTES"), dead: false })
     }
 
     /// Interrupts the statement running on connection `id`, from a connection of its own.
@@ -470,14 +492,17 @@ impl Relay {
         if self.dead {
             return Err("The connection of this script was lost after an earlier error".into());
         }
-        let stmt = fill(text, params, self.no_backslash)?;
-        if lex::split_statements(&stmt).len() != 1 {
+        if lex::changes_escaping(text) {
+            return Err("This statement changes how values are escaped; not allowed in the shell".into());
+        }
+        let stmt = fill(text, params, self.backslash, self.ansi)?;
+        if lex::count_with(&stmt, self.backslash, self.ansi) != 1 || lex::count_with(&stmt, !self.backslash, self.ansi) != 1 {
             return Err("Send one statement per query".into());
         }
         if self.read_only {
             lex::read_only_check(&stmt)?;
         }
-        let (mut cols, mut rows, mut wrote) = (Vec::<Col>::new(), Vec::new(), None);
+        let (mut cols, mut rows, mut wrote, mut bytes) = (Vec::<Col>::new(), Vec::new(), None, 0usize);
         let mut failure = None;
         {
             let mut s = raw_sql(&stmt).fetch_many(&mut self.conn);
@@ -491,7 +516,12 @@ impl Relay {
                             failure = Some(format!("A query returned more than {RELAY_ROWS_MAX} rows. Add a LIMIT."));
                             break;
                         }
-                        let d: Document = cols.iter().enumerate().map(|(i, c)| (c.name.clone(), value::to_bson(c.kind, raw(&row, i)))).collect();
+                        bytes += (0..cols.len()).map(|i| raw(&row, i).map_or(0, |b| b.len()) + 16).sum::<usize>();
+                        if bytes > RELAY_BYTES_MAX {
+                            failure = Some(format!("A query returned more than {} MB. Select fewer columns or add a LIMIT.", RELAY_BYTES_MAX >> 20));
+                            break;
+                        }
+                        let d: Document = cols.iter().enumerate().map(|(i, c)| (c.name.clone(), cell(value::to_bson(c.kind, raw(&row, i))))).collect();
                         rows.push(Bson::Document(d).into_relaxed_extjson());
                     }
                     // A CALL has several results; the first one with rows is what the script gets.
@@ -978,11 +1008,13 @@ mod tests {
     #[test]
     fn fill_binds_values_as_escaped_literals() {
         use value::Param;
-        let f = |t: &str, p: &[Param], nb| fill(t, p, nb);
-        assert_eq!(f("SELECT ? , '?', `?` -- ?\n, ?", &[Param::Int(1), Param::Null], false).unwrap(), "SELECT 1 , '?', `?` -- ?\n, NULL");
-        assert_eq!(f("WHERE a = ?", &[Param::Text("it's \\ x".into())], false).unwrap(), "WHERE a = 'it''s \\\\ x'");
-        assert_eq!(f("WHERE a = ?", &[Param::Text("a\\".into())], true).unwrap(), "WHERE a = 'a\\'");
-        assert_eq!(f("?, ?", &[Param::Bytes(vec![0, 255]), Param::Float(1.5)], false).unwrap(), "X'00ff', 1.5e0");
+        let f = |t: &str, p: &[Param], nb: bool| fill(t, p, !nb, false);
+        assert_eq!(f("SELECT ? , '?', `?` -- ?\n, ?", &[Param::Int(1), Param::Null], false).unwrap(), "SELECT  1  , '?', `?` -- ?\n,  NULL ");
+        assert_eq!(f("WHERE a = ?", &[Param::Text("it's \\ x".into())], false).unwrap(), "WHERE a =  'it''s \\\\ x' ");
+        assert_eq!(f("WHERE a = ?", &[Param::Text("a\\".into())], true).unwrap(), "WHERE a =  'a\\' ");
+        assert_eq!(f("?, ?", &[Param::Bytes(vec![0, 255]), Param::Float(1.5)], false).unwrap(), " X'00ff' ,  1.5e0 ");
+        // A literal never fuses with the word next to it.
+        assert_eq!(f("SELECT X?, a?, @?", &[Param::Int(1), Param::Int(2), Param::Int(3)], false).unwrap(), "SELECT X 1 , a 2 , @ 3 ");
         // A value that tries to end the string stays inside it, so the text is still one statement.
         let evil = f("SELECT ?", &[Param::Text("'; DROP TABLE t; --".into())], false).unwrap();
         assert_eq!(lex::split_statements(&evil).len(), 1);
@@ -1223,5 +1255,113 @@ mod tests {
         assert_eq!(sets.len(), 2);
         assert_eq!((sets[0].rows.len(), sets[0].capped), (RUN_ROWS_MAX, true));
         assert!(sets[1].error.as_deref().is_some_and(|m| m.contains("row limit")), "{:?}", sets[1].error);
+    }
+
+    #[test]
+    fn fill_refuses_text_that_reads_two_ways() {
+        use value::Param;
+        let evil = [Param::Text("x; DELETE FROM t; #".into())];
+        let text = "SELECT '\\'' AS a, ? AS b -- '";
+        // With backslash escapes the ? is inside a comment-free tail; without them the quote closes early.
+        assert!(fill(text, &evil, true, false).is_err());
+        assert!(fill(text, &evil, false, false).is_err());
+        // A text both readings agree on still fills, under either mode.
+        assert!(fill("SELECT ? AS b", &evil, true, false).is_ok() && fill("SELECT ? AS b", &evil, false, true).is_ok());
+        // ANSI_QUOTES makes "?" an identifier, not a placeholder, which both backslash readings share.
+        assert!(fill("SELECT \"a\" AS \"?\", ?", &evil, true, true).is_ok());
+    }
+
+    #[test]
+    fn int_params_keep_every_digit() {
+        use value::Param;
+        let p = |j: serde_json::Value| crate::db::shell::sql_params_for_test(&j);
+        assert_eq!(p(serde_json::json!([{ "$int": "9007199254740993" }, { "$int": "-9223372036854775808" }, { "$int": "18446744073709551615" }])).unwrap(), [Param::Int(9007199254740993), Param::Int(i64::MIN), Param::UInt(u64::MAX)]);
+        assert!(p(serde_json::json!([{ "$int": "18446744073709551616" }])).is_err());
+    }
+
+    /// Needs Bun and a server. Shared by the live tests that run scripts the person could not trust.
+    fn bun_ok() -> bool {
+        std::process::Command::new("bun").arg("--version").output().is_ok()
+    }
+
+    #[test]
+    fn live_shell_where_never_means_every_row_by_accident() {
+        let Some((w, rx, db, p)) = live("t_where", "id BIGINT PRIMARY KEY, note VARCHAR(20)") else { return };
+        if !bun_ok() {
+            return;
+        }
+        exec(&w, &p, "INSERT INTO quarry_test.t_where VALUES (1, 'a'), (2, NULL), (9007199254740993, 'big')");
+        let script = "async function run() {
+  const bad = [5, null, [], false, 'x', { id: {} }, { id: undefined }, { id: { gt: undefined } }, { id: new Map() }];
+  const out = [];
+  for (const w of bad) {
+    for (const f of [() => t_where.delete(w), () => t_where.update(w, { note: 'z' }), () => t_where.find(w), () => t_where.count(w)]) {
+      try { await f(); out.push('ran') } catch (e) { out.push('refused') }
+    }
+  }
+  const big = await t_where.findOne({ id: 9007199254740993n });
+  let unsafe;
+  try { await sql`SELECT ${2 ** 60}`; unsafe = 'ran' } catch (e) { unsafe = e.message }
+  return { out, count: await t_where.count({}), big, unsafe, sum: (await sql`SELECT ${9223372036854775807n} AS v, ${18446744073709551615n} AS u`)[0] };
+}";
+        let (_, res) = shell_script(&w, &rx, &db, script, &["t_where"], false);
+        let v: serde_json::Value = serde_json::from_str(&res.expect("script result")).unwrap();
+        let v = &v["v"];
+        assert!(v["out"].as_array().unwrap().iter().all(|x| x == "refused"), "{v}");
+        assert_eq!(v["count"], 3, "{v}");
+        assert_eq!(v["big"]["note"], "big");
+        // The row id came back as an exact value, not a rounded number.
+        assert_eq!(v["big"]["id"].to_string().trim_matches('"'), "9007199254740993", "{v}");
+        assert!(v["unsafe"].as_str().unwrap().contains("BigInt"), "{v}");
+        assert_eq!(v["sum"]["v"].to_string().trim_matches('"'), "9223372036854775807", "{v}");
+        assert_eq!(v["sum"]["u"].to_string().trim_matches('"'), "18446744073709551615", "{v}");
+    }
+
+    #[test]
+    fn live_shell_refuses_sets_that_move_the_escaping_even_when_unlocked() {
+        let Some((w, rx, db, _p)) = live("", "") else { return };
+        if !bun_ok() {
+            return;
+        }
+        let script = "async function run() {
+  const out = [];
+  for (const t of ['SET NAMES utf8mb4', 'SET CHARACTER SET utf8mb4', 'SET CHARSET utf8mb4', 'SET SESSION character_set_client = 1', 'set @@character_set_connection = 1', \"SET sql_mode = ''\", \"SET @@session.sql_mode = ''\", \"SET @a = 1, @@sql_mode = ''\"]) {
+    try { await sql.unsafe(t); out.push('ran') } catch (e) { out.push(e.message) }
+  }
+  await sql`SET @a = 1`;
+  return out;
+}";
+        let (_, res) = shell_script(&w, &rx, &db, script, &[], false);
+        let v: serde_json::Value = serde_json::from_str(&res.expect("script result")).unwrap();
+        assert!(v["v"].as_array().unwrap().iter().all(|m| m.as_str().unwrap().contains("not allowed in the shell")), "{v}");
+    }
+
+    #[test]
+    fn live_no_backslash_escapes_cannot_smuggle_a_statement() {
+        let Some((w, rx, _db, p)) = live("t_nb", "id INT PRIMARY KEY") else { return };
+        if !bun_ok() {
+            return;
+        }
+        exec(&w, &p, "INSERT INTO quarry_test.t_nb VALUES (1)");
+        let old: String = w.rt.block_on(async { sqlx::query_scalar("SELECT @@GLOBAL.sql_mode").fetch_one(&*p).await.unwrap() });
+        exec(&w, &p, &format!("SET GLOBAL sql_mode = '{old},NO_BACKSLASH_ESCAPES'"));
+        let uri = std::env::var("QUARRY_TEST_MYSQL").unwrap();
+        w.sql_connect(2, uri, Duration::from_secs(30), Net::default());
+        let got = next(&rx);
+        // Restored before any assertion can fail, so a red test never leaves the server in this mode.
+        exec(&w, &p, &format!("SET GLOBAL sql_mode = '{old}'"));
+        let Msg::SqlConnected { res: Ok((db, _, _)), .. } = got else { panic!("expected SqlConnected") };
+        assert!(db.sql_mode.contains("NO_BACKSLASH_ESCAPES"), "{}", db.sql_mode);
+        exec(&w, &p, &format!("SET GLOBAL sql_mode = '{old},NO_BACKSLASH_ESCAPES'"));
+        let script = "async function run() {
+  let r;
+  try { r = await sql.unsafe(\"SELECT '\\\\'' AS a, ? AS b -- '\", ['x; DELETE FROM t_nb; #']); r = 'ran' } catch (e) { r = e.message }
+  return { r, left: await t_nb.count() };
+}";
+        let (_, res) = shell_script(&w, &rx, &db, script, &["t_nb"], false);
+        exec(&w, &p, &format!("SET GLOBAL sql_mode = '{old}'"));
+        let v: serde_json::Value = serde_json::from_str(&res.expect("script result")).unwrap();
+        assert_eq!(v["v"]["left"], 1, "{v}");
+        assert!(v["v"]["r"].as_str().unwrap().contains("differently"), "{v}");
     }
 }

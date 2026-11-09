@@ -129,7 +129,7 @@ pub(crate) async fn prepare_shell_dir(runtime: &std::path::Path, dir: &std::path
 }
 
 pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + Send + Sync), mut cancel: tokio::sync::oneshot::Receiver<()>) -> Res<String> {
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::process::Command;
     let note = |t: &str| send(Msg::ShellLog { req, level: "info".into(), text: t.into() });
     tokio::select! {
@@ -158,7 +158,7 @@ pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + S
     } else {
         None
     };
-    let mut lines = tokio::io::BufReader::new(child.stdout.take().ok_or("no stdout")?).lines();
+    let mut lines = tokio::io::BufReader::new(child.stdout.take().ok_or("no stdout")?);
     let mut stderr = child.stderr.take().ok_or("no stderr")?;
     // Read alongside stdout: a full stderr pipe would block the child before stdout closes.
     let errs = tokio::spawn(async move {
@@ -169,7 +169,7 @@ pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + S
     let read = async {
         let mut result: Option<Res<String>> = None;
         let mut relay: Option<sql::Relay> = None;
-        while let Some(line) = lines.next_line().await.map_err(e)? {
+        while let Some(line) = next_line(&mut lines).await? {
             let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
                 send(Msg::ShellLog { req, level: "log".into(), text: line });
                 continue;
@@ -254,6 +254,37 @@ pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + S
     }
 }
 
+/// The longest line the runner may print. A script that prints more would otherwise grow this buffer until memory runs out.
+const LINE_MAX: usize = 64 << 20;
+
+/// The next line of the runner's stdout, ended by an error when it passes `LINE_MAX`.
+async fn next_line(r: &mut tokio::io::BufReader<tokio::process::ChildStdout>) -> Res<Option<String>> {
+    use tokio::io::AsyncBufReadExt;
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        let chunk = r.fill_buf().await.map_err(e)?;
+        if chunk.is_empty() {
+            return Ok(if buf.is_empty() { None } else { Some(String::from_utf8_lossy(&buf).into_owned()) });
+        }
+        let (take, done) = match chunk.iter().position(|b| *b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (chunk.len(), false),
+        };
+        buf.extend_from_slice(&chunk[..take]);
+        r.consume(take);
+        if buf.len() > LINE_MAX {
+            return Err(format!("The shell printed a line longer than {} MB and was stopped.", LINE_MAX >> 20));
+        }
+        if done {
+            buf.pop();
+            if buf.last() == Some(&b'\r') {
+                buf.pop();
+            }
+            return Ok(Some(String::from_utf8_lossy(&buf).into_owned()));
+        }
+    }
+}
+
 /// The values a script sent with a query, as bind values. A `{ "$hex": ... }` object is bytes, any other
 /// object or array is its JSON text, which is what a JSON column takes.
 fn sql_params(v: Option<&serde_json::Value>) -> Res<Vec<sql::value::Param>> {
@@ -271,6 +302,15 @@ fn sql_params(v: Option<&serde_json::Value>) -> Res<Vec<sql::value::Param>> {
                     _ => Param::Float(n.as_f64().unwrap_or(f64::NAN)),
                 },
                 Value::String(s) => Param::Text(s.clone()),
+                // A BigInt beyond 2^53, which a JSON number would round.
+                Value::Object(o) if o.len() == 1 && o.contains_key("$int") => {
+                    let t = o["$int"].as_str().unwrap_or_default();
+                    match (t.parse::<i64>(), t.parse::<u64>()) {
+                        (Ok(i), _) => Param::Int(i),
+                        (_, Ok(u)) => Param::UInt(u),
+                        _ => return Err("A BigInt value does not fit in 64 bits".to_string()),
+                    }
+                }
                 Value::Object(o) if o.len() == 1 && o.contains_key("$hex") => {
                     let h = o["$hex"].as_str().unwrap_or_default();
                     Param::Bytes((0..h.len() / 2).map(|i| u8::from_str_radix(h.get(i * 2..i * 2 + 2).unwrap_or("zz"), 16)).collect::<Result<_, _>>().map_err(|_| "Bad binary value".to_string())?)
@@ -279,6 +319,11 @@ fn sql_params(v: Option<&serde_json::Value>) -> Res<Vec<sql::value::Param>> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+pub(crate) fn sql_params_for_test(v: &serde_json::Value) -> Res<Vec<sql::value::Param>> {
+    sql_params(Some(v))
 }
 
 /// The values of a query for the Queries panel, cut to one short line.

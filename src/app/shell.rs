@@ -9,7 +9,7 @@ pub(super) fn dangerous_words(code: &str, sql: bool) -> Vec<String> {
     let lower = code.to_lowercase();
     if sql {
         // Whole words only: SQL scripts name columns like created_at and updated_at all the time.
-        const WORDS: [&str; 12] = ["drop", "replace", "update", "delete", "insert", "rename", "truncate", "alter", "create", "grant", "revoke", "merge"];
+        const WORDS: [&str; 16] = ["drop", "replace", "update", "delete", "insert", "rename", "truncate", "alter", "create", "grant", "revoke", "merge", "call", "load", "lock", "kill"];
         let found: Vec<&str> = lower.split(|c: char| !(c.is_alphanumeric() || c == '_')).collect();
         return WORDS.iter().filter(|w| found.contains(w)).map(|w| w.to_string()).collect();
     }
@@ -238,9 +238,9 @@ fn sql_help(ui: &mut egui::Ui, table: &str, writable: bool) -> Option<String> {
     egui::Frame::new().fill(PANEL()).corner_radius(R_MD).inner_margin(12).show(ui, |ui| {
         ui.set_width(ui.available_width());
         caption(ui, "HOW IT WORKS");
-        ui.label("Write one function and return what you want to see. The script runs with Bun, but it has no database driver: every query goes through this app, on one connection for the whole run, so @variables and transactions last until the script ends.");
+        ui.label("Write one function and return what you want to see. The script runs with Bun and has your file and network access, but it gets no database driver and no credentials: every query goes through this app, on one connection for the whole run, so @variables and transactions last until the script ends. While writes are locked each query passes Quarry's read-only check. That check guards queries, it is not a sandbox for the script.");
         ui.label(code("async function run() {\n  const rows = await sql`SELECT * FROM orders WHERE status = ${'paid'}`;\n  return rows;\n}"));
-        ui.label(RichText::new("Values in ${} become ? placeholders and are never spliced into the text. An array becomes a list for IN (${ids}). Cmd+Enter runs, Stop interrupts the running statement.").color(MUTED()));
+        ui.label(RichText::new("Values in ${} become ? placeholders and are never spliced into the text. Whole numbers beyond 2^53 come back as BigInt, and unsigned values above 9223372036854775807 come back as strings (send them back as a string or BigInt). An array becomes a list for IN (${ids}). Cmd+Enter runs, Stop interrupts the running statement.").color(MUTED()));
         if !writable {
             ui.label(RichText::new("This connection is read-only: only reading statements run, and every write is refused. Unlock writes in the top bar to allow them.").color(SUCCESS()));
         }
@@ -261,7 +261,7 @@ fn sql_help(ui: &mut egui::Ui, table: &str, writable: bool) -> Option<String> {
         });
         caption(ui, "TABLE METHODS");
         ui.label(RichText::new("find(where?, { select, orderBy, limit, offset })  ·  findOne  ·  count  ·  insert(row or rows)  ·  update(where, set)  ·  delete(where)").monospace().size(TXT_SMALL).color(TEXT()));
-        ui.label(RichText::new("where: { status: 'paid' } is =, null is IS NULL, a list is IN, and { total: { gt: 100, lte: 500 } } compares (gt, gte, lt, lte, ne, like, in). update and delete need a where; {} means every row.").color(MUTED()));
+        ui.label(RichText::new("where: { status: 'paid' } is =, null is IS NULL, a list is IN, and { total: { gt: 100, lte: 500 } } compares (gt, gte, lt, lte, ne, like, in). where must be a plain object, and a value of undefined or an empty condition is an error. update and delete need a where; only {} means every row.").color(MUTED()));
         caption(ui, "EXAMPLES  ·  click Use to load one");
         let examples = [
             ("Rows of a table", format!("async function run() {{\n  return await {table}.find({{}}, {{ orderBy: '-id', limit: 20 }});\n}}")),
@@ -715,6 +715,7 @@ mod tests {
         assert_eq!(dangerous_words("db.x.deleteMany({})", false), ["delete"]);
         assert_eq!(dangerous_words("db.x.aggregate([{ $merge: { into: 'y' } }])", false), ["$merge"]);
         assert_eq!(dangerous_words("await orders.delete({ id: 1 }); sql`TRUNCATE t`", true), ["delete", "truncate"]);
+        assert_eq!(dangerous_words("sql`CALL p(); LOCK TABLES t READ; KILL 5; LOAD DATA INFILE 'x' INTO TABLE t`", true), ["call", "load", "lock", "kill"]);
         assert!(dangerous_words("sql`SELECT created_at, updated_at FROM orders`", true).is_empty());
     }
 }

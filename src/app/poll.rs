@@ -563,7 +563,14 @@ impl App {
                 }
                 Msg::ShellQuery { req, q } => {
                     if let Some(t) = self.tabs.iter_mut().find(|t| t.shell.req == req) {
+                        // The panel keeps the latest queries only, a loop can run millions.
+                        let mut q = q;
+                        if q.text.len() > 2000 {
+                            q.text = q.text.chars().take(2000).collect();
+                        }
                         t.shell.queries.push(q);
+                        let over = t.shell.queries.len().saturating_sub(1000);
+                        t.shell.queries.drain(..over);
                     }
                 }
                 Msg::SqlColumns { conn, db, res } => self.js_columns(conn, db, res),
