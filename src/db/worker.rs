@@ -913,7 +913,7 @@ impl Worker {
     /// Reads up to `limit` documents (0 = all) matching `filter` and summarises their fields.
     /// `last` reads the most recently inserted ones, in reverse natural order: `_id` is not always
     /// an ObjectId, so sorting on it would not mean recent.
-    pub fn schema(&self, req: u64, t: Target, scope: Scope, limit: i64, last: bool) {
+    pub fn schema(&self, req: u64, t: Target, scope: Scope, limit: i64, last: bool, maps: Vec<String>) {
         let Scope { filter, collation: co } = scope;
         self.spawn(async move {
             let res = async {
@@ -930,7 +930,7 @@ impl Worker {
                     f = f.sort(doc! { "$natural": -1 });
                 }
                 let docs: Vec<Document> = f.await.map_err(e)?.try_collect().await.map_err(e)?;
-                let stats = analyze_schema(&docs);
+                let stats = analyze_schema(&docs, &maps);
                 Ok((stats, docs.len(), start.elapsed().as_millis()))
             }
             .await;

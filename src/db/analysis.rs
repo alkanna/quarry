@@ -185,20 +185,65 @@ fn dynamic_keys<'a>(keys: &[&'a str]) -> std::collections::HashSet<&'a str> {
     out
 }
 
+/// Keys whose values are objects of one shape, like `ERIC-ROMME` and `JULIEN-NYS` each holding a
+/// passenger's recap. Free-form keys such as names share no pattern, but 5 siblings holding objects
+/// with mostly the same fields are entries of a map when the keys also vary between objects: no
+/// object holds more than half of them. Real fields like `price`, `tax` and `total` each holding
+/// `{amount, currency}` repeat in every object, so they stay fields.
+fn alike_keys<'a>(skip: &std::collections::HashSet<&str>, keys: &[&'a str], objs: &[(usize, &'a Document)]) -> Vec<&'a str> {
+    use std::collections::{HashMap, HashSet};
+    // Most levels are leaves or narrow, and can never reach 5 alike keys.
+    if keys.len().saturating_sub(skip.len()) < 5 {
+        return Vec::new();
+    }
+    let mut kids: HashMap<&str, HashSet<&str>> = HashMap::new();
+    for (_, d) in objs {
+        for (k, v) in d.iter().filter(|(k, _)| !skip.contains(k.as_str())) {
+            let Bson::Document(c) = v else { continue };
+            kids.entry(k.as_str()).or_default().extend(c.keys().map(String::as_str));
+        }
+    }
+    // Overlap is measured against the smaller field set, so a sparse entry like `{url}` still joins `{url, sent, sentAt}`.
+    // ponytail: greedy grouping against each group's first key, at most 64 groups to bound the cost
+    let mut groups: Vec<(&HashSet<&str>, Vec<&str>)> = Vec::new();
+    for k in keys {
+        let Some(s) = kids.get(k).filter(|s| !s.is_empty()) else { continue };
+        let room = groups.len() < 64;
+        match groups.iter_mut().find(|(r, _)| { let need = s.len().min(r.len()).div_ceil(2); s.intersection(r).take(need).count() == need }) {
+            Some(g) => g.1.push(k),
+            None if room => groups.push((s, vec![k])),
+            None => {}
+        }
+    }
+    groups
+        .into_iter()
+        .filter(|(_, g)| g.len() >= 5 && objs.iter().all(|(_, d)| g.iter().filter(|k| d.contains_key(**k)).count() * 2 <= g.len()))
+        .flat_map(|(_, g)| g)
+        .collect()
+}
+
 /// Field paths as a tree (each field right after its parent, siblings in first-seen order), how
 /// many documents have each, their types and a few examples. Objects inside arrays are merged
 /// under the array's path, and keys that are data rather than names under one `<id>` row.
-pub fn analyze_schema(docs: &[Document]) -> Vec<FieldStat> {
+pub fn analyze_schema(docs: &[Document], maps: &[String]) -> Vec<FieldStat> {
     /// One object level across every document: the objects found there, each with the index of
     /// the document it is in. Built level by level so a key's pattern is judged against all its
     /// siblings in every document.
-    fn level(objs: &[(usize, &Document)], prefix: &str, depth: usize, in_map: bool, stats: &mut Vec<FieldStat>) {
+    fn level(objs: &[(usize, &Document)], prefix: &str, depth: usize, in_map: bool, maps: &[String], stats: &mut Vec<FieldStat>) {
         let mut keys: Vec<&str> = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for (_, d) in objs {
             keys.extend(d.keys().map(String::as_str).filter(|k| seen.insert(*k)));
         }
-        let dynamic = dynamic_keys(&keys);
+        // A level marked as a map by the person merges every key, since no guess catches every map.
+        let dynamic = if maps.iter().any(|m| m == prefix) {
+            keys.iter().copied().collect()
+        } else {
+            let mut d = dynamic_keys(&keys);
+            let alike = alike_keys(&d, &keys, objs);
+            d.extend(alike);
+            d
+        };
         // One pass buckets every value under its row: the field, its child objects, and the last
         // document counted. Objects come grouped by document, so a new index is a new document.
         type Row<'a> = (FieldStat, Vec<(usize, &'a Document)>, Option<usize>);
@@ -244,13 +289,13 @@ pub fn analyze_schema(docs: &[Document]) -> Vec<FieldStat> {
             let (path, dynamic) = (f.path.clone(), f.dynamic);
             stats.push(f);
             if !kids.is_empty() {
-                level(&kids, &path, depth + 1, dynamic, stats);
+                level(&kids, &path, depth + 1, dynamic, maps, stats);
             }
         }
     }
     let top: Vec<(usize, &Document)> = docs.iter().enumerate().collect();
     let mut stats = Vec::new();
-    level(&top, "", 0, false, &mut stats);
+    level(&top, "", 0, false, maps, &mut stats);
     stats
 }
 
@@ -650,7 +695,7 @@ mod tests {
             doc! { "analytics": { "ofAgency": { "d11b8107-2150-4e13-9990-2e24fe005e16": [{ "uid": 1 }], "6650f1c2a1b2c3d4e5f60700": [{ "uid": 2 }] } }, "risky": true },
             doc! { "analytics": { "ofAgency": { "2024-11-09": [] } } },
         ];
-        let s = analyze_schema(&docs);
+        let s = analyze_schema(&docs, &[]);
         let paths: Vec<&str> = s.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, ["analytics", "analytics.byPax", "analytics.ofAgency", "analytics.ofAgency.<id>", "analytics.ofAgency.<id>.uid", "risky"]);
         let map = &s[3];
@@ -665,9 +710,23 @@ mod tests {
             doc! { "byTrip": { "TRV-00123": { "n": 1 } }, "name": "a", "city": "b" },
             doc! { "byTrip": { "TRV-00456": { "n": 2 }, "TRV-00789": { "n": 3 } }, "type": "c", "date": "d" },
         ];
-        let paths: Vec<String> = analyze_schema(&docs).into_iter().map(|f| f.path).collect();
+        let paths: Vec<String> = analyze_schema(&docs, &[]).into_iter().map(|f| f.path).collect();
         assert_eq!(paths, ["byTrip", "byTrip.<id>", "byTrip.<id>.n", "name", "city", "type", "date"]);
         assert_eq!((key_shape("TRV-00123"), key_shape("d11b8107")), ("AAA-99999".to_string(), "xxxxxxxx".to_string()));
+        // Names share no pattern, but alike objects under keys that vary between documents are a map; a sparse
+        // entry joins it. Real fields of one shape repeat in every document, so they stay fields.
+        let amt = || doc! { "amount": 1, "currency": "EUR" };
+        let docs = [
+            doc! { "recapsOfPax": { "ERIC-ROMME": { "url": "u" }, "JULIEN-NYS": { "url": "u", "sent": true, "sentAt": 1 } }, "price": amt(), "tax": amt(), "subtotal": amt(), "discount": amt(), "total": amt() },
+            doc! { "recapsOfPax": { "EMILIE-DE FIGUEIREDO": { "url": "u", "sent": false }, "ANA-LI": { "url": "u", "sent": true }, "BO-XU": { "url": "u", "sent": true } }, "price": amt(), "tax": amt(), "subtotal": amt(), "discount": amt(), "total": amt() },
+            doc! { "recapsOfPax": { "LEA-MOREAU": { "url": "u", "sent": true }, "MAX-DUPONT": { "url": "u", "sent": true } } },
+        ];
+        let paths: Vec<String> = analyze_schema(&docs, &[]).into_iter().map(|f| f.path).filter(|p| !p.contains(".amount") && !p.contains(".currency")).collect();
+        assert_eq!(paths, ["recapsOfPax", "recapsOfPax.<id>", "recapsOfPax.<id>.url", "recapsOfPax.<id>.sent", "recapsOfPax.<id>.sentAt", "price", "tax", "subtotal", "discount", "total"]);
+        // Labels no guess catches merge once the person marks their parent as a map.
+        let docs = [doc! { "valueCodes": { "COMEX": "COMEX", "RDV SIEGE": "C01" }, "flags": { "NEW_UI": true } }];
+        let paths: Vec<String> = analyze_schema(&docs, &["valueCodes".into()]).into_iter().map(|f| f.path).collect();
+        assert_eq!(paths, ["valueCodes", "valueCodes.<id>", "flags", "flags.NEW_UI"]);
         // The validator leaves the map's entries unconstrained.
         let js = schema_from_stats(&s, 3);
         let of = js.get_document("$jsonSchema").unwrap().get_document("properties").unwrap().get_document("analytics").unwrap().get_document("properties").unwrap().get_document("ofAgency").unwrap();

@@ -6,6 +6,8 @@ impl App {
     pub(super) fn schema_view(&mut self, ui: &mut egui::Ui) {
         let mut analyze = false;
         let mut acts: Vec<(String, u8)> = Vec::new();
+        let key = self.tabs[self.cur].coll_key();
+        let maps = self.prefs.schema_maps.get(&key).cloned().unwrap_or_default();
         let sel = &self.tabs[self.cur].sel;
         // Views refuse a $natural sort, so they only offer the first documents.
         let view = self.views.contains(&(sel.conn, sel.db.clone(), sel.coll.clone()));
@@ -103,7 +105,7 @@ impl App {
                         if parent {
                             chevron(ui.painter(), rect.center(), open, if arrow.hovered() { TEXT() } else { FAINT() });
                         }
-                        let (color, tip) = if name == db::DYNAMIC_KEY { (MUTED(), "Keys that are data rather than names (ids, numbers, dates, or keys sharing one pattern), merged into one row") } else { (BRIGHT(), f.path.as_str()) };
+                        let (color, tip) = if name == db::DYNAMIC_KEY { (MUTED(), "Keys that are data rather than names (ids, numbers, dates, keys sharing one pattern, varying keys holding alike objects, or keys of an object marked as a map), merged into one row") } else { (BRIGHT(), f.path.as_str()) };
                         let label = ui.add(egui::Label::new(RichText::new(name).monospace().color(color)).sense(Sense::click())).on_hover_text(tip);
                         if parent && (arrow.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() || label.clicked()) {
                             toggle = Some(f.path.clone());
@@ -122,6 +124,14 @@ impl App {
                             }
                             if ui.button("Filter: missing this field").clicked() {
                                 acts.push((f.path.clone(), 2));
+                            }
+                            // Some maps, like labels keyed by name, look like fields to every guess.
+                            if f.types.iter().any(|(t, _)| *t == "object") {
+                                ui.separator();
+                                let label = if maps.contains(&f.path) { "Show its keys as fields" } else { "Treat its keys as map entries" };
+                                if ui.button(label).on_hover_text("Saved for this collection; analyzes again").clicked() {
+                                    acts.push((f.path.clone(), 3));
+                                }
                             }
                         });
                     }
@@ -197,6 +207,18 @@ impl App {
                     self.apply_col_acts(&key, &fields, vec![ColAct::Show(path)]);
                     self.ok("Column added; open Documents to see it");
                 }
+                3 => {
+                    let list = self.prefs.schema_maps.entry(key.clone()).or_default();
+                    match list.iter().position(|p| *p == path) {
+                        Some(i) => _ = list.remove(i),
+                        None => list.push(path),
+                    }
+                    if list.is_empty() {
+                        self.prefs.schema_maps.remove(&key);
+                    }
+                    self.save_prefs();
+                    analyze = true;
+                }
                 _ => {
                     let t = &mut self.tabs[self.cur];
                     t.filter_txt = db::shell_text(&Bson::Document(doc! { path: { "$exists": what == 1 } }));
@@ -213,10 +235,10 @@ impl App {
                 t.schema.req = req;
                 t.schema.running = true;
                 t.schema.err = None;
-                self.worker.schema(req, target, t.query.scope(), t.schema.limit, t.schema.last);
+                self.worker.schema(req, target, t.query.scope(), t.schema.limit, t.schema.last, maps.clone());
             } else if self.demo {
                 let t = &mut self.tabs[self.cur];
-                t.schema.stats = db::analyze_schema(&t.decoded_docs());
+                t.schema.stats = db::analyze_schema(&t.decoded_docs(), &maps);
                 (t.schema.docs, t.schema.ms) = (t.docs.len(), Some(3));
             }
         }
