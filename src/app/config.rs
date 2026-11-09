@@ -61,6 +61,8 @@ pub(super) struct UiPrefs {
     pub(super) open_tabs: Vec<SavedTab>,
     pub(super) cur_tab: usize,
     pub(super) cols: HashMap<String, ColPrefs>,
+    /// Per collection: object paths the person marked as maps, whose keys the schema merges into one row.
+    pub(super) schema_maps: HashMap<String, Vec<String>>,
     /// The connection picked when the app was last used, connected again at launch.
     pub(super) last_conn: Option<u64>,
     /// Per "conn/db": fields that point to documents of another collection.
@@ -169,7 +171,7 @@ pub(super) struct SavedStage {
 
 impl Default for UiPrefs {
     fn default() -> Self {
-        Self { open_inline: true, table: true, confirm_save: false, auto_save: false, always_writable: false, default_cols: DEFAULT_COLS, page_size: db::PAGE_SIZE, timeout_ms: db::DEFAULT_TIMEOUT_MS, shell_runtime: String::new(), shell_histories: HashMap::new(), shell_packages: Vec::new(), history: HashMap::new(), library: HashMap::new(), open_tabs: Vec::new(), cur_tab: 0, last_conn: None, cols: HashMap::new(), relations: HashMap::new(), mongodump: String::new(), mongorestore: String::new(), auto_update: true, auto_preview: true, show_server: false, show_fps: false, show_mem: false, show_cpu: false, object_preview: false, appearance: Appearance::System, sidebar_hidden: false, last_version: String::new() }
+        Self { open_inline: true, table: true, confirm_save: false, auto_save: false, always_writable: false, default_cols: DEFAULT_COLS, page_size: db::PAGE_SIZE, timeout_ms: db::DEFAULT_TIMEOUT_MS, shell_runtime: String::new(), shell_histories: HashMap::new(), shell_packages: Vec::new(), history: HashMap::new(), library: HashMap::new(), open_tabs: Vec::new(), cur_tab: 0, last_conn: None, cols: HashMap::new(), schema_maps: HashMap::new(), relations: HashMap::new(), mongodump: String::new(), mongorestore: String::new(), auto_update: true, auto_preview: true, show_server: false, show_fps: false, show_mem: false, show_cpu: false, object_preview: false, appearance: Appearance::System, sidebar_hidden: false, last_version: String::new() }
     }
 }
 

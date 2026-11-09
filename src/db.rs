@@ -928,7 +928,7 @@ mod tests {
         let j = parse_import("{a: 1}\n\n{a: 2, b: ObjectId('6650f1c2a1b2c3d4e5f60700')}", ImportKind::JsonLines, &csv).unwrap();
         assert_eq!(j.len(), 2);
         assert!(parse_import("[1]", ImportKind::Json, &csv).is_err());
-        let s = analyze_schema(&[doc! { "a": 1, "o": { "x": "s" }, "l": [{ "y": 1 }, { "y": 2 }] }, doc! { "a": "two" }]);
+        let s = analyze_schema(&[doc! { "a": 1, "o": { "x": "s" }, "l": [{ "y": 1 }, { "y": 2 }] }, doc! { "a": "two" }], &[]);
         let a = s.iter().find(|f| f.path == "a").unwrap();
         assert_eq!((a.docs, a.types.len()), (2, 2));
         let y = s.iter().find(|f| f.path == "l.y").unwrap();
