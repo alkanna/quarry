@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.26.0](https://github.com/alkanna/quarry/compare/v0.25.0...v0.26.0) (2026-11-09)
+
+
+### Features
+
+* schema merges name-keyed maps holding alike objects and lets a field be marked as a map ([#140](https://github.com/alkanna/quarry/issues/140)) ([e38d273](https://github.com/alkanna/quarry/commit/e38d27398c76d3eca875ce32c577bcf0db44b5ae))
+
 ## [0.25.0](https://github.com/alkanna/quarry/compare/v0.24.0...v0.25.0) (2026-11-09)
 
 
