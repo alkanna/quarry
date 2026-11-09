@@ -121,7 +121,7 @@ impl App {
                 }
                 Msg::SqlMeta { conn, schema, res } => self.sql_meta_done(conn, schema, res),
                 Msg::SqlDropInfo { conn, schema, table, res } => self.sql_drop_info_done(conn, schema, table, res),
-                Msg::SqlDdl { conn, schema, table, what, res, undo, dbs } => self.sql_ddl_done(conn, schema, table, what, res, undo, dbs),
+                Msg::SqlDdl { conn, schema, table, what, res, undo, dbs, sql_mode } => self.sql_ddl_done(conn, schema, table, what, res, undo, dbs, sql_mode),
                 Msg::SqlValues { conn, schema, table, column, prefix, res } => self.sql_values_done(conn, schema, table, column, prefix, res),
                 Msg::Collections { conn, db, res } => match res {
                     Ok((v, views)) => {

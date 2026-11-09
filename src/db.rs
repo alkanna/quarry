@@ -223,8 +223,9 @@ pub enum Msg {
     /// What a drop confirmation says will be lost; `table` is empty for a database.
     SqlDropInfo { conn: u64, schema: String, table: String, res: Res<sql::create::DropInfo> },
     /// A create or drop finished. `dbs` is the new database list after a change to it, and `undo` the entry
-    /// for a create (or the one a refused undo hands back).
-    SqlDdl { conn: u64, schema: String, table: String, what: sql::create::Ddl, res: Res<String>, undo: Option<UndoAction>, dbs: Option<Vec<String>> },
+    /// for a create (or the one a refused undo hands back). `sql_mode` is the session's mode when it no longer
+    /// matched the one the app had, so the previews follow it.
+    SqlDdl { conn: u64, schema: String, table: String, what: sql::create::Ddl, res: Res<String>, undo: Option<UndoAction>, dbs: Option<Vec<String>>, sql_mode: Option<String> },
     /// Every table, view and column of one database, for SQL autocomplete.
     SqlSchema { conn: u64, schema: String, res: Res<sql::schema::Schema> },
     /// A column's most frequent values with their counts, for SQL autocomplete. None when the table is too big to look in.

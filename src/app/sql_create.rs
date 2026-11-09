@@ -160,7 +160,13 @@ impl App {
 
     /// A create or drop finished: refresh what the sidebar and the tabs show of it.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn sql_ddl_done(&mut self, conn: u64, schema: String, table: String, what: Ddl, res: db::Res<String>, undo: Option<UndoAction>, dbs: Option<Vec<String>>) {
+    pub(super) fn sql_ddl_done(&mut self, conn: u64, schema: String, table: String, what: Ddl, res: db::Res<String>, undo: Option<UndoAction>, dbs: Option<Vec<String>>, sql_mode: Option<String>) {
+        // The create was built for the session's mode, which changed since connecting; the previews follow it now.
+        if let Some(m) = sql_mode {
+            if let Some(d) = self.conns.iter_mut().find(|c| c.meta.id == conn).and_then(|c| c.sql.as_mut()) {
+                d.sql_mode = m;
+            }
+        }
         // A refused undo hands its entry back, so it is kept whether or not the write went through.
         if let Some(u) = undo {
             self.push_undo(u);
@@ -367,7 +373,7 @@ impl App {
         ui.add_space(4.0);
         let built = f.meta.as_ref().map(|m| create::create_table_sql(d, bs, &TableSpec { schema: f.schema.clone(), name: f.name.clone(), engine: f.engine.clone(), collation: f.collation.clone(), columns: f.cols.clone() }, m));
         ui.horizontal(|ui| {
-            if ui.button("+ Column").clicked() {
+            if add_chip(ui, "Column").clicked() {
                 let n = f.cols.len() + 1;
                 f.cols.push(ColumnSpec { name: format!("column_{n}"), ..Default::default() });
             }
@@ -509,6 +515,7 @@ impl App {
         let writable = self.conn_writable(f.conn);
         let conn = self.conn_name(f.conn);
         let tag = self.conn(f.conn).map(|c| c.meta.tag.clone()).unwrap_or_default();
+        let uri_db = self.conn(f.conn).and_then(|c| c.sql.as_ref()).and_then(|d| d.opts.get_database().map(String::from));
         let (name, noun, button) = match f.kind {
             DropKind::Database => (f.schema.as_str(), "database", "Drop database"),
             DropKind::Table => (f.table.as_str(), "table", "Drop table"),
@@ -535,31 +542,11 @@ impl App {
             }
             Some(Ok(info)) => {
                 loaded = true;
-                let about = if info.rows_estimated { "about " } else { "" };
-                let rows = |n: u64| format!("{about}{}", plural(n, "row"));
-                let lead = match f.kind {
-                    DropKind::Database => {
-                        let mut parts = vec![plural(info.tables, "table")];
-                        for (n, w) in [(info.views, "view"), (info.triggers, "trigger"), (info.routines, "routine"), (info.events, "event")] {
-                            if n > 0 {
-                                parts.push(plural(n, w));
-                            }
-                        }
-                        let rows = info.rows.filter(|n| *n > 0).map(|n| format!(", {}", rows(n))).unwrap_or_default();
-                        format!("This deletes the database {name} on {conn} with {}{rows}. Everything in it goes. It cannot be undone.", list_and(&parts))
-                    }
-                    DropKind::Table => match info.rows {
-                        Some(0) => format!("This deletes the empty table and its structure on {conn}. It cannot be undone."),
-                        Some(n) => format!("This deletes {} and the table's structure on {conn}. It cannot be undone.", rows(n)),
-                        None => format!("This deletes the table and its structure on {conn}. It cannot be undone."),
-                    },
-                    DropKind::View => format!("This deletes the view on {conn}. The tables it reads from are not touched. It cannot be undone."),
-                    DropKind::Truncate => match info.rows {
-                        Some(n) => format!("This deletes all {} of {name} on {conn}. The table and its structure stay and the auto-increment counter restarts. It cannot be undone.", rows(n)),
-                        None => format!("This deletes every row of {name} on {conn}. The table stays. It cannot be undone."),
-                    },
-                };
-                wrap(ui, lead, TEXT());
+                wrap(ui, drop_lead(f.kind, name, &conn, info), TEXT());
+                // The connection opens this database by name, so every later connect would fail with 1049.
+                if f.kind == DropKind::Database && uri_db.as_deref().is_some_and(|u| u == name || (info.fold_case && u.eq_ignore_ascii_case(name))) {
+                    wrap(ui, format!("{conn} opens {name} when it connects (it is the database in its address), so connecting again fails until the address names another database or {name} exists again."), WARNING());
+                }
                 if matches!(f.kind, DropKind::Table | DropKind::Truncate) && !info.referenced_by.is_empty() {
                     let n = info.referenced_by.len() as u64;
                     let product = self.conn(f.conn).map(|c| c.server.product.clone()).filter(|p| !p.is_empty()).unwrap_or_else(|| "The server".into());
@@ -612,6 +599,7 @@ impl App {
             server_collation: "utf8mb4_0900_ai_ci".into(),
             server_engine: "InnoDB".into(),
             schema_collation: Some("utf8mb4_0900_ai_ci".into()),
+            fold_case: false,
         };
         self.modal = Some(match which {
             "newdb" => Modal::SqlNewDb(Box::new(NewDb { conn: 3, name: "billing".into(), charset: "utf8mb4".into(), collation: "utf8mb4_0900_ai_ci".into(), meta: Some(meta), load_err: None })),
@@ -635,6 +623,44 @@ impl App {
                 info: Some(Ok(DropInfo { exists: true, rows: Some(4410), referenced_by: vec!["order_items".into(), "payments".into(), "shipments".into()], ..Default::default() })),
             })),
         });
+    }
+}
+
+/// The rows a drop takes as the dialog says them: an exact count as it is, an estimate as "about N". An estimate
+/// of 0 is None like a missing one: the server's statistics lag behind, so it does not mean the table is empty.
+fn rows_said(info: &DropInfo) -> Option<String> {
+    match (info.rows, info.rows_estimated) {
+        (Some(n), false) => Some(plural(n, "row")),
+        (Some(n), true) if n > 0 => Some(format!("about {}", plural(n, "row"))),
+        _ => None,
+    }
+}
+
+/// The first line of a drop confirmation: what goes, with the row count only where it is known.
+fn drop_lead(kind: DropKind, name: &str, conn: &str, info: &DropInfo) -> String {
+    let exact_empty = info.rows == Some(0) && !info.rows_estimated;
+    match kind {
+        DropKind::Database => {
+            let mut parts = vec![plural(info.tables, "table")];
+            for (n, w) in [(info.views, "view"), (info.triggers, "trigger"), (info.routines, "routine"), (info.events, "event")] {
+                if n > 0 {
+                    parts.push(plural(n, w));
+                }
+            }
+            let rows = rows_said(info).filter(|_| !exact_empty).map(|r| format!(", {r}")).unwrap_or_default();
+            format!("This deletes the database {name} on {conn} with {}{rows}. Everything in it goes. It cannot be undone.", list_and(&parts))
+        }
+        DropKind::Table if exact_empty => format!("This deletes the empty table and its structure on {conn}. It cannot be undone."),
+        DropKind::Table => match rows_said(info) {
+            Some(r) => format!("This deletes {r} and the table's structure on {conn}. It cannot be undone."),
+            None => format!("This deletes the table, its rows (row count unknown) and its structure on {conn}. It cannot be undone."),
+        },
+        DropKind::View => format!("This deletes the view on {conn}. The tables it reads from are not touched. It cannot be undone."),
+        DropKind::Truncate => match rows_said(info) {
+            Some(r) if !info.rows_estimated => format!("This deletes all {r} of {name} on {conn}. The table and its structure stay and the auto-increment counter restarts. It cannot be undone."),
+            Some(r) => format!("This deletes every row of {name} ({r}) on {conn}. The table and its structure stay and the auto-increment counter restarts. It cannot be undone."),
+            None => format!("This deletes every row of {name} on {conn} (row count unknown). The table and its structure stay. It cannot be undone."),
+        },
     }
 }
 
@@ -670,4 +696,32 @@ fn extra_summary(c: &ColumnSpec) -> String {
         DefaultKind::Value => parts.push(format!("DEFAULT {}", c.default_text)),
     }
     if parts.is_empty() { "options".into() } else { parts.join(" ") }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info(rows: Option<u64>, estimated: bool) -> DropInfo {
+        DropInfo { exists: true, rows, rows_estimated: estimated, ..Default::default() }
+    }
+
+    /// Review finding 2: an estimate of 0 (statistics cached before the table filled) was shown as "the empty table".
+    #[test]
+    fn an_estimate_is_never_called_empty() {
+        for kind in [DropKind::Table, DropKind::Truncate, DropKind::Database] {
+            for i in [info(Some(0), true), info(None, true), info(None, false)] {
+                let s = drop_lead(kind, "orders", "shop-prod", &i);
+                assert!(!s.contains("empty") && !s.contains("about 0") && !s.contains(" 0 rows"), "{s}");
+                if kind != DropKind::Database {
+                    assert!(s.contains("row count unknown"), "{s}");
+                }
+            }
+            let s = drop_lead(kind, "orders", "shop-prod", &info(Some(1000), true));
+            assert!(s.contains("about 1,000 rows"), "{s}");
+        }
+        assert!(drop_lead(DropKind::Table, "orders", "shop-prod", &info(Some(0), false)).contains("the empty table"));
+        assert!(drop_lead(DropKind::Truncate, "orders", "shop-prod", &info(Some(3), false)).contains("all 3 rows of orders"));
+        assert!(drop_lead(DropKind::Table, "orders", "shop-prod", &info(Some(1), false)).contains("deletes 1 row and"));
+    }
 }

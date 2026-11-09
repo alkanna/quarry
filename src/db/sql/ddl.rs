@@ -910,7 +910,7 @@ pub fn free_name(taken: &[String], base: &str) -> String {
 
 /// A writable connection whose session reads text the way the statements were written for. When the server's
 /// sql_mode changed since, nothing runs and the error carries the mode now in force.
-async fn session(db: &Db, schema: &str, read_only: bool, m: Mode) -> Result<sqlx::MySqlConnection, (String, Option<String>)> {
+pub(super) async fn session(db: &Db, schema: &str, read_only: bool, m: Mode) -> Result<sqlx::MySqlConnection, (String, Option<String>)> {
     let mut c = super::write::writer(db, schema, read_only).await.map_err(|x| (x, None))?;
     let now: String = sqlx::query_scalar("SELECT @@SESSION.sql_mode").fetch_one(&mut c).await.map_err(|x| (e(x), None))?;
     if Mode::of(&now) != m {
@@ -920,7 +920,7 @@ async fn session(db: &Db, schema: &str, read_only: bool, m: Mode) -> Result<sqlx
 }
 
 /// One statement, prepared, so the server parses exactly one whatever the text holds.
-async fn exec(c: &mut sqlx::MySqlConnection, sql: &str) -> Res<()> {
+pub(super) async fn exec(c: &mut sqlx::MySqlConnection, sql: &str) -> Res<()> {
     sqlx::query(sql).persistent(false).execute(&mut *c).await.map_err(e)?;
     Ok(())
 }

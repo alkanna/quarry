@@ -1,8 +1,10 @@
 //! Creating and dropping databases and tables. Every statement is built here from quoted identifiers,
 //! numbers checked digit by digit and charset, collation and engine names that must appear in the
 //! lists the server itself gave, so no user text ever reaches the server as SQL. Each statement is
-//! sent alone on a connection of its own that is switched to READ WRITE, like the row writes.
+//! sent alone, as a prepared statement so the server takes exactly one, on a connection of its own that is
+//! switched to READ WRITE, like the row writes.
 
+use super::ddl::{self, Mode};
 use super::value::lit;
 use super::worker::{raw, text};
 use super::write::{writer, SqlUndo};
@@ -50,6 +52,8 @@ pub struct Meta {
     pub server_engine: String,
     /// The default collation of the database a new table goes into, when there is one.
     pub schema_collation: Option<String>,
+    /// lower_case_table_names is not 0: the server compares database and table names without case.
+    pub fold_case: bool,
 }
 
 impl Meta {
@@ -89,6 +93,8 @@ pub struct DropInfo {
     pub triggers: u64,
     pub routines: u64,
     pub events: u64,
+    /// lower_case_table_names is not 0, so names compare without case; read for a database only.
+    pub fold_case: bool,
 }
 
 // Identifiers.
@@ -96,15 +102,11 @@ pub struct DropInfo {
 /// MySQL's own limits plus what quoting cannot make safe: control characters would make a name that
 /// no one can read back, and a trailing space is stripped by some versions and refused by others.
 /// Databases and tables are also directories and files, so path characters are refused for them.
+/// These rules are for names this app creates; `check_existing` is the one for names already there.
 pub fn check_name(what: &str, name: &str, path_chars: bool) -> Res<()> {
-    if name.is_empty() {
-        return Err(format!("Give the {what} a name."));
-    }
+    check_existing(what, name)?;
     if name.chars().count() > 64 {
         return Err(format!("A {what} name is at most 64 characters."));
-    }
-    if name.chars().any(|c| c.is_control()) {
-        return Err(format!("A {what} name cannot contain control characters or line breaks."));
     }
     if name.starts_with(' ') || name.ends_with(' ') {
         return Err(format!("A {what} name cannot start or end with a space."));
@@ -115,12 +117,26 @@ pub fn check_name(what: &str, name: &str, path_chars: bool) -> Res<()> {
     Ok(())
 }
 
+/// A database or table already on the server can be dropped whatever it is called (`a.b` or ` lead` exist
+/// when another client made them), as long as the quoted name reads back as the one name.
+fn check_existing(what: &str, name: &str) -> Res<()> {
+    if name.is_empty() {
+        return Err(format!("Give the {what} a name."));
+    }
+    if name.chars().any(|c| c.is_control()) {
+        return Err(format!("A {what} name cannot contain control characters or line breaks."));
+    }
+    Ok(())
+}
+
 fn check_schema(name: &str) -> Res<()> {
     check_name("database", name, true)
 }
 
-fn not_system(name: &str) -> Res<()> {
-    if SYSTEM_SCHEMAS.iter().any(|s| s.eq_ignore_ascii_case(name)) {
+/// `fold` is whether the server compares names without case (lower_case_table_names is not 0). Where it
+/// does not, `MySQL` is a database of its own and not the server's `mysql`.
+fn not_system(name: &str, fold: bool) -> Res<()> {
+    if SYSTEM_SCHEMAS.iter().any(|s| if fold { s.eq_ignore_ascii_case(name) } else { *s == name }) {
         return Err(format!("{name} belongs to the server and is left alone."));
     }
     Ok(())
@@ -135,7 +151,7 @@ fn listed<'a>(what: &str, name: &str, known: impl IntoIterator<Item = &'a str>) 
 
 pub fn create_db_sql(d: Dialect, name: &str, charset: &str, collation: &str, meta: &Meta) -> Res<String> {
     check_schema(name)?;
-    not_system(name)?;
+    not_system(name, meta.fold_case)?;
     let cs = listed("charset", charset, meta.charsets.iter().map(|c| c.name.as_str()))?;
     let co = listed("collation", collation, meta.collations.iter().map(|c| c.name.as_str()))?;
     if meta.charset_of(co) != Some(cs) {
@@ -144,23 +160,23 @@ pub fn create_db_sql(d: Dialect, name: &str, charset: &str, collation: &str, met
     Ok(format!("CREATE DATABASE {}\n  CHARACTER SET {cs} COLLATE {co}", d.quote_ident(name)))
 }
 
-pub fn drop_db_sql(d: Dialect, name: &str) -> Res<String> {
-    check_schema(name)?;
-    not_system(name)?;
+pub fn drop_db_sql(d: Dialect, name: &str, fold: bool) -> Res<String> {
+    check_existing("database", name)?;
+    not_system(name, fold)?;
     Ok(format!("DROP DATABASE {}", d.quote_ident(name)))
 }
 
-pub fn drop_table_sql(d: Dialect, schema: &str, table: &str, view: bool) -> Res<String> {
-    check_schema(schema)?;
-    not_system(schema)?;
-    check_name("table", table, true)?;
+pub fn drop_table_sql(d: Dialect, schema: &str, table: &str, view: bool, fold: bool) -> Res<String> {
+    check_existing("database", schema)?;
+    not_system(schema, fold)?;
+    check_existing("table", table)?;
     Ok(format!("DROP {} {}", if view { "VIEW" } else { "TABLE" }, d.qualified(schema, table)))
 }
 
-pub fn truncate_sql(d: Dialect, schema: &str, table: &str) -> Res<String> {
-    check_schema(schema)?;
-    not_system(schema)?;
-    check_name("table", table, true)?;
+pub fn truncate_sql(d: Dialect, schema: &str, table: &str, fold: bool) -> Res<String> {
+    check_existing("database", schema)?;
+    not_system(schema, fold)?;
+    check_existing("table", table)?;
     Ok(format!("TRUNCATE TABLE {}", d.qualified(schema, table)))
 }
 
@@ -341,8 +357,8 @@ fn default_text(bs: bool, c: &ColumnSpec, def: &TypeDef) -> Res<String> {
 
 /// The CREATE TABLE statement, or the first thing wrong with the form.
 pub fn create_table_sql(d: Dialect, bs: bool, spec: &TableSpec, meta: &Meta) -> Res<String> {
-    check_schema(&spec.schema)?;
-    not_system(&spec.schema)?;
+    check_existing("database", &spec.schema)?;
+    not_system(&spec.schema, meta.fold_case)?;
     check_name("table", &spec.name, true)?;
     if !meta.loaded() {
         return Err("The server's engines and collations are still loading.".into());
@@ -399,7 +415,7 @@ pub fn shown(sql: &str) -> String {
 const CHARSETS: &str = "SELECT CHARACTER_SET_NAME AS name, DESCRIPTION AS descr, DEFAULT_COLLATE_NAME AS def FROM information_schema.CHARACTER_SETS ORDER BY CHARACTER_SET_NAME";
 const COLLATIONS: &str = "SELECT COLLATION_NAME AS name, CHARACTER_SET_NAME AS charset FROM information_schema.COLLATIONS ORDER BY COLLATION_NAME";
 const ENGINES: &str = "SELECT ENGINE AS name, SUPPORT AS support FROM information_schema.ENGINES ORDER BY ENGINE";
-const SERVER_DEFAULTS: &str = "SELECT @@character_set_server AS cs, @@collation_server AS co, @@default_storage_engine AS en";
+const SERVER_DEFAULTS: &str = "SELECT @@character_set_server AS cs, @@collation_server AS co, @@default_storage_engine AS en, @@lower_case_table_names AS lc";
 const SCHEMA_DEFAULT: &str = "SELECT DEFAULT_COLLATION_NAME AS co FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?";
 
 async fn load_meta(db: &Db, schema: &str) -> Res<Meta> {
@@ -419,6 +435,7 @@ async fn load_meta(db: &Db, schema: &str) -> Res<Meta> {
         server_collation: text(&df, "co").unwrap_or_default(),
         server_engine: text(&df, "en").unwrap_or_default(),
         schema_collation: None,
+        fold_case: super::structure::num(&df, "lc").unwrap_or(0) != 0,
     };
     if !schema.is_empty() {
         meta.schema_collation = sqlx::query(SCHEMA_DEFAULT).bind(schema).fetch_optional(pool).await.map_err(e)?.and_then(|r| text(&r, "co"));
@@ -465,31 +482,42 @@ async fn db_info(db: &Db, schema: &str) -> Res<DropInfo> {
         }
     }
     info.rows_estimated = true;
+    info.fold_case = sqlx::query("SELECT @@lower_case_table_names AS n").fetch_one(pool).await.ok().and_then(|r| super::structure::num(&r, "n")).unwrap_or(0) != 0;
     info.triggers = count(pool, "SELECT COUNT(*) AS n FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ?", schema).await;
     info.routines = count(pool, "SELECT COUNT(*) AS n FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ?", schema).await;
     info.events = count(pool, "SELECT COUNT(*) AS n FROM information_schema.EVENTS WHERE EVENT_SCHEMA = ?", schema).await;
     Ok(info)
 }
 
-/// Rows, and the tables that point at this one. The count has a few seconds to finish before the
-/// server's estimate stands in for it, so a huge table never holds the dialog up.
+/// How long the exact count of a drop confirmation may take before the server's estimate stands in.
+const COUNT_WAIT: Duration = Duration::from_secs(3);
+
+/// Rows, and the tables that point at this one. The reads run on a connection taken out of the pool, so the
+/// session setting below stays off the pool and a count cut short never hands a busy connection back to it.
 async fn table_info(db: &Db, schema: &str, table: &str) -> Res<DropInfo> {
     let Pool::My(pool) = &db.pool;
     let d = db.dialect;
-    let st = sqlx::query("SELECT TABLE_ROWS AS est FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?").bind(schema).bind(table).fetch_optional(pool).await.map_err(e)?;
-    let mut info = DropInfo { exists: st.is_some(), ..Default::default() };
-    let Some(st) = st else { return Ok(info) };
-    let exact = tokio::time::timeout(Duration::from_secs(3), async {
-        let sql = format!("SELECT COUNT(*) AS n FROM {}", d.qualified(schema, table));
-        sqlx::query(&sql).fetch_one(pool).await.ok().and_then(|r| super::structure::num(&r, "n"))
-    })
-    .await
-    .ok()
-    .flatten();
-    (info.rows, info.rows_estimated) = match exact {
-        Some(n) => (Some(n), false),
-        None => (super::structure::num(&st, "est"), true),
+    let mut c = pool.acquire().await.map_err(e)?.detach();
+    fresh_stats(&mut c, d).await;
+    let st = sqlx::query("SELECT TABLE_ROWS AS est, TABLE_TYPE AS kind FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?").bind(schema).bind(table).fetch_optional(&mut c).await.map_err(e);
+    let st = match st {
+        Ok(Some(st)) => st,
+        other => {
+            let _ = c.close().await;
+            return other.map(|_| DropInfo::default());
+        }
     };
+    let mut info = DropInfo { exists: true, ..Default::default() };
+    // Counting a view runs its query, which may take as long as it likes, and dropping one loses no rows.
+    if text(&st, "kind").is_some_and(|k| k.contains("VIEW")) {
+        let _ = c.close().await;
+    } else {
+        let sql = format!("SELECT COUNT(*) AS n FROM {}", d.qualified(schema, table));
+        (info.rows, info.rows_estimated) = match bounded_count(c, pool, &sql).await {
+            Some(n) => (Some(n), false),
+            None => (super::structure::num(&st, "est"), true),
+        };
+    }
     let refs = sqlx::query(d.referenced_by()).bind(schema).bind(table).fetch_all(pool).await.map_err(e)?;
     for r in &refs {
         let (rdb, rt) = (text(r, "db").unwrap_or_default(), text(r, "tbl").unwrap_or_default());
@@ -504,6 +532,49 @@ async fn table_info(db: &Db, schema: &str, table: &str) -> Res<DropInfo> {
     Ok(info)
 }
 
+/// MySQL 8 caches TABLE_ROWS and the other statistics of information_schema.TABLES for a day, so a table
+/// that filled since reads as 0. Only for this connection, which is never handed back to the pool; MariaDB
+/// has no such cache and no variable.
+async fn fresh_stats(c: &mut sqlx::MySqlConnection, d: Dialect) {
+    if d == Dialect::MySql {
+        let _ = c.execute("SET SESSION information_schema_stats_expiry = 0").await;
+    }
+}
+
+/// The exact count, or None after COUNT_WAIT. A count cut short is ended on the server before this returns,
+/// so no COUNT keeps a table lock wait, the disk or a connection busy once the dialog has its answer.
+async fn bounded_count(mut c: sqlx::MySqlConnection, pool: &sqlx::MySqlPool, sql: &str) -> Option<u64> {
+    let id = sqlx::query("SELECT CONNECTION_ID() AS n").fetch_one(&mut c).await.ok().and_then(|r| super::structure::num(&r, "n"));
+    let got = tokio::time::timeout(COUNT_WAIT, sqlx::query(sql).persistent(false).fetch_one(&mut c)).await;
+    match got {
+        Ok(r) => {
+            let _ = c.close().await;
+            r.ok().and_then(|r| super::structure::num(&r, "n"))
+        }
+        Err(_) => {
+            // Left in the middle of a statement, so it cannot be used again; the KILL ends it on the server.
+            drop(c);
+            if let Some(id) = id {
+                kill(pool, id).await;
+            }
+            None
+        }
+    }
+}
+
+/// Ends connection `id` and its statement, then waits for the server to let it go, since KILL only flags the
+/// thread and it stops at its next check.
+async fn kill(pool: &sqlx::MySqlPool, id: u64) {
+    let _ = sqlx::raw_sql(&format!("KILL {id}")).execute(pool).await;
+    for _ in 0..30 {
+        let left = sqlx::query("SELECT COUNT(*) AS n FROM information_schema.PROCESSLIST WHERE ID = ?").bind(id).fetch_one(pool).await.ok().and_then(|r| super::structure::num(&r, "n"));
+        if left.unwrap_or(0) == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 async fn database_names(c: &mut sqlx::MySqlConnection) -> Res<Vec<String>> {
     let rows = sqlx::query("SHOW DATABASES").fetch_all(&mut *c).await.map_err(e)?;
     let mut dbs: Vec<String> = rows.iter().filter_map(|r| raw(r, 0).map(|b| String::from_utf8_lossy(b).into_owned())).collect();
@@ -511,16 +582,60 @@ async fn database_names(c: &mut sqlx::MySqlConnection) -> Res<Vec<String>> {
     Ok(dbs)
 }
 
-/// Runs one statement on a connection of its own with write access, and for changes to the list of
-/// databases reads that list back on the same connection.
-async fn run(db: &Db, sql: String, read_only: bool, list: bool) -> Res<Option<Vec<String>>> {
+async fn table_names(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str) -> Res<Vec<String>> {
+    let rows = sqlx::query(&format!("SHOW TABLES FROM {}", d.quote_ident(schema))).persistent(false).fetch_all(&mut *c).await.map_err(e)?;
+    Ok(rows.iter().filter_map(|r| raw(r, 0).map(|b| String::from_utf8_lossy(b).into_owned())).collect())
+}
+
+/// The name the server lists for what was just created as `name`. With lower_case_table_names=1 it stores
+/// `Billing` as `billing`, and the sidebar, the tabs and undo must all use the stored one.
+pub fn stored_name(listed: &[String], name: &str) -> String {
+    if listed.iter().any(|n| n == name) {
+        return name.to_string();
+    }
+    let low = name.to_lowercase();
+    listed.iter().find(|n| n.to_lowercase() == low).cloned().unwrap_or_else(|| name.to_string())
+}
+
+/// Whether the server compares database and table names without case (lower_case_table_names 1 or 2).
+async fn folds_case(c: &mut sqlx::MySqlConnection) -> Res<bool> {
+    let r = sqlx::query("SELECT @@lower_case_table_names AS n").fetch_one(&mut *c).await.map_err(e)?;
+    Ok(super::structure::num(&r, "n").unwrap_or(0) != 0)
+}
+
+/// When the table was made, as the server writes it, so an undo drops it only while it is still that table.
+async fn create_time(c: &mut sqlx::MySqlConnection, schema: &str, table: &str) -> Option<String> {
+    let r = sqlx::query("SELECT CAST(CREATE_TIME AS CHAR) AS t FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?").bind(schema).bind(table).fetch_optional(&mut *c).await.ok()??;
+    text(&r, "t")
+}
+
+/// A writable connection and the sql_mode its session reads text with. The CREATE TABLE is built for that
+/// mode and runs on this same connection, so a mode changed since connecting (NO_BACKSLASH_ESCAPES turned on
+/// or off) cannot make a backslash in a default value end the string. A changed mode is handed back too, so
+/// the app's previews follow the server from then on.
+async fn mode_session(db: &Db, read_only: bool) -> Res<(sqlx::MySqlConnection, Mode, Option<String>)> {
+    let m = Mode::of(&db.sql_mode);
+    match ddl::session(db, "", read_only, m).await {
+        Ok(c) => Ok((c, m, None)),
+        Err((_, Some(now))) => {
+            let m = Mode::of(&now);
+            ddl::session(db, "", read_only, m).await.map(|c| (c, m, Some(now))).map_err(|(x, _)| x)
+        }
+        Err((x, None)) => Err(x),
+    }
+}
+
+/// Runs the statement `build` makes (told whether the server folds name case) on a writable connection of
+/// its own, prepared so the server takes exactly one statement, and for changes to the list of databases
+/// reads that list back on the same connection.
+async fn run(db: &Db, read_only: bool, list: bool, build: impl FnOnce(bool) -> Res<String>) -> Res<Option<Vec<String>>> {
     let mut c = writer(db, "", read_only).await?;
-    let done = c.execute(sql.as_str()).await.map_err(e);
-    let out = match done {
-        Err(err) => Err(err),
-        Ok(_) if list => database_names(&mut c).await.map(Some),
-        Ok(_) => Ok(None),
-    };
+    let out = async {
+        let sql = build(folds_case(&mut c).await?)?;
+        ddl::exec(&mut c, &sql).await?;
+        if list { database_names(&mut c).await.map(Some) } else { Ok(None) }
+    }
+    .await;
     let _ = c.close().await;
     out
 }
@@ -529,47 +644,61 @@ fn created(conn: u64, schema: &str, table: &str, undo: SqlUndo) -> UndoAction {
     UndoAction { at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { cols: Vec::new(), undo } }
 }
 
-/// The part of a table undo that runs with the table locked.
-async fn drop_if_empty(c: &mut sqlx::MySqlConnection, q: &str, table: &str, sql: &str) -> Res<()> {
-    let has = sqlx::query(&format!("SELECT 1 AS n FROM {q} LIMIT 1")).fetch_optional(&mut *c).await.map_err(e)?.is_some();
+/// The part of a table undo that runs with the table locked: it must still be the table the create made,
+/// and empty. CREATE_TIME has one second steps, so a table dropped and made again within the same second as
+/// the create passes; it is then just as empty.
+async fn drop_if_same_and_empty(c: &mut sqlx::MySqlConnection, schema: &str, table: &str, made: Option<&str>, q: &str, sql: &str) -> Res<()> {
+    if let Some(made) = made {
+        if create_time(c, schema, table).await.as_deref() != Some(made) {
+            return Err(format!("Not undone: {table} was dropped and made again since, so it is not the table this created."));
+        }
+    }
+    let has = sqlx::query(&format!("SELECT 1 AS n FROM {q} LIMIT 1")).persistent(false).fetch_optional(&mut *c).await.map_err(e)?.is_some();
     if has {
         return Err(format!("Not undone: {table} has rows now."));
     }
-    c.execute(sql).await.map_err(e)?;
-    Ok(())
+    ddl::exec(c, sql).await
 }
 
-/// Undo of a create: the object goes only while it is still empty. A table is locked first so a row
-/// cannot arrive between the check and the drop. A database cannot be locked, so a table created in
-/// it in that instant would be dropped with it; the window is one round trip.
-async fn undo_create(db: &Db, schema: &str, table: &str, read_only: bool) -> Res<(Ddl, Option<Vec<String>>)> {
+/// Undo of a create: the object goes only while it is still empty. The writable connection is opened first,
+/// so a locked connection refuses before anything is read and the check and the drop run one round trip
+/// apart on one connection. A table is also locked, so a row cannot arrive between the check and the drop.
+/// A database cannot be locked, so a table created in it in that instant would go with it.
+async fn undo_create(db: &Db, schema: &str, table: &str, made: Option<&str>, read_only: bool) -> Res<(Ddl, Option<Vec<String>>)> {
     let d = db.dialect;
-    let Pool::My(pool) = &db.pool;
-    if table.is_empty() {
-        let n = sqlx::query("SELECT (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?) + (SELECT COUNT(*) FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ?) + (SELECT COUNT(*) FROM information_schema.EVENTS WHERE EVENT_SCHEMA = ?) AS n")
-            .bind(schema)
-            .bind(schema)
-            .bind(schema)
-            .fetch_one(pool)
-            .await
-            .map_err(e)?;
-        if super::structure::num(&n, "n").unwrap_or(0) > 0 {
-            return Err(format!("Not undone: {schema} has tables or other objects in it now."));
-        }
-        let sql = drop_db_sql(d, schema)?;
-        return run(db, sql, read_only, true).await.map(|l| (Ddl::DroppedDb, l));
-    }
-    let sql = drop_table_sql(d, schema, table, false)?;
     let mut c = writer(db, "", read_only).await?;
-    let q = d.qualified(schema, table);
-    // Without the LOCK TABLES privilege the check still runs, only without the lock.
-    let locked = c.execute(format!("LOCK TABLES {q} WRITE").as_str()).await.is_ok();
-    let res = drop_if_empty(&mut c, &q, table, &sql).await;
-    if locked {
-        let _ = c.execute("UNLOCK TABLES").await;
+    let res = async {
+        let fold = folds_case(&mut c).await?;
+        if table.is_empty() {
+            let sql = drop_db_sql(d, schema, fold)?;
+            let n = sqlx::query("SELECT (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?) + (SELECT COUNT(*) FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ?) + (SELECT COUNT(*) FROM information_schema.EVENTS WHERE EVENT_SCHEMA = ?) AS n")
+                .bind(schema)
+                .bind(schema)
+                .bind(schema)
+                .fetch_one(&mut c)
+                .await
+                .map_err(e)?;
+            if super::structure::num(&n, "n").unwrap_or(0) > 0 {
+                return Err(format!("Not undone: {schema} has tables or other objects in it now."));
+            }
+            ddl::exec(&mut c, &sql).await?;
+            return database_names(&mut c).await.map(|l| (Ddl::DroppedDb, Some(l)));
+        }
+        let sql = drop_table_sql(d, schema, table, false, fold)?;
+        fresh_stats(&mut c, d).await;
+        let q = d.qualified(schema, table);
+        // Without the LOCK TABLES privilege the checks still run, only without the lock. MySQL cannot prepare LOCK
+        // TABLES (error 1295), so it goes as text; it holds nothing but the quoted names.
+        let locked = c.execute(format!("LOCK TABLES {q} WRITE").as_str()).await.is_ok();
+        let res = drop_if_same_and_empty(&mut c, schema, table, made, &q, &sql).await;
+        if locked {
+            let _ = c.execute("UNLOCK TABLES").await;
+        }
+        res.map(|_| (Ddl::DroppedTable, None))
     }
+    .await;
     let _ = c.close().await;
-    res.map(|_| (Ddl::DroppedTable, None))
+    res
 }
 
 impl Worker {
@@ -591,27 +720,44 @@ impl Worker {
 
     pub fn sql_create_db(&self, conn: u64, db: Db, name: String, charset: String, collation: String, meta: Meta, read_only: bool) {
         self.spawn(async move {
-            let res = async {
-                let sql = create_db_sql(db.dialect, &name, &charset, &collation, &meta)?;
-                run(&db, sql, read_only, true).await
-            }
+            let mut meta = meta;
+            let res = run(&db, read_only, true, |fold| {
+                meta.fold_case = fold;
+                create_db_sql(db.dialect, &name, &charset, &collation, &meta)
+            })
             .await;
+            let name = res.as_ref().ok().and_then(|l| l.as_deref()).map_or(name.clone(), |l| stored_name(l, &name));
             let undo = res.is_ok().then(|| created(conn, &name, "", SqlUndo::CreatedDb));
             let (res, dbs) = split(res, format!("Created database {name}"));
-            Msg::SqlDdl { conn, schema: name, table: String::new(), what: Ddl::CreatedDb, res, undo, dbs }
+            Msg::SqlDdl { conn, schema: name, table: String::new(), what: Ddl::CreatedDb, res, undo, dbs, sql_mode: None }
         });
     }
 
     pub fn sql_create_table(&self, conn: u64, db: Db, spec: TableSpec, meta: Meta, read_only: bool) {
         self.spawn(async move {
-            let res = async {
-                let sql = create_table_sql(db.dialect, db.backslash_escapes(), &spec, &meta)?;
-                run(&db, sql, read_only, false).await
+            let (mut name, mut made, mut seen) = (spec.name.clone(), None, None);
+            let res: Res<()> = async {
+                let (mut c, m, now) = mode_session(&db, read_only).await?;
+                seen = now;
+                let out = async {
+                    let mut meta = meta;
+                    meta.fold_case = folds_case(&mut c).await?;
+                    let sql = create_table_sql(db.dialect, m.bs, &spec, &meta)?;
+                    ddl::exec(&mut c, &sql).await?;
+                    // The table exists from here on, so a failed read back only costs the stored spelling.
+                    name = stored_name(&table_names(&mut c, db.dialect, &spec.schema).await.unwrap_or_default(), &spec.name);
+                    fresh_stats(&mut c, db.dialect).await;
+                    made = create_time(&mut c, &spec.schema, &name).await;
+                    Ok(())
+                }
+                .await;
+                let _ = c.close().await;
+                out
             }
             .await;
-            let undo = res.is_ok().then(|| created(conn, &spec.schema, &spec.name, SqlUndo::CreatedTable));
-            let (res, dbs) = split(res, format!("Created table {}", spec.name));
-            Msg::SqlDdl { conn, schema: spec.schema, table: spec.name, what: Ddl::CreatedTable, res, undo, dbs }
+            let undo = res.is_ok().then(|| created(conn, &spec.schema, &name, SqlUndo::CreatedTable { made }));
+            let (res, dbs) = split(res.map(|_| None), format!("Created table {name}"));
+            Msg::SqlDdl { conn, schema: spec.schema, table: name, what: Ddl::CreatedTable, res, undo, dbs, sql_mode: seen }
         });
     }
 
@@ -620,19 +766,21 @@ impl Worker {
     pub fn sql_drop(&self, conn: u64, db: Db, schema: String, table: String, view: bool, truncate: bool, read_only: bool) {
         self.spawn(async move {
             let d = db.dialect;
-            let (what, sql, done) = if table.is_empty() {
-                (Ddl::DroppedDb, drop_db_sql(d, &schema), format!("Dropped database {schema}"))
+            let (what, done) = if table.is_empty() {
+                (Ddl::DroppedDb, format!("Dropped database {schema}"))
             } else if truncate {
-                (Ddl::Emptied, truncate_sql(d, &schema, &table), format!("Emptied table {table}"))
+                (Ddl::Emptied, format!("Emptied table {table}"))
             } else {
-                (Ddl::DroppedTable, drop_table_sql(d, &schema, &table, view), format!("Dropped {} {table}", if view { "view" } else { "table" }))
+                (Ddl::DroppedTable, format!("Dropped {} {table}", if view { "view" } else { "table" }))
             };
-            let res = match sql {
-                Ok(sql) => run(&db, sql, read_only, what == Ddl::DroppedDb).await,
-                Err(err) => Err(err),
-            };
+            let res = run(&db, read_only, what == Ddl::DroppedDb, |fold| match what {
+                Ddl::DroppedDb => drop_db_sql(d, &schema, fold),
+                Ddl::Emptied => truncate_sql(d, &schema, &table, fold),
+                _ => drop_table_sql(d, &schema, &table, view, fold),
+            })
+            .await;
             let (res, dbs) = split(res, done);
-            Msg::SqlDdl { conn, schema, table, what, res, undo: None, dbs }
+            Msg::SqlDdl { conn, schema, table, what, res, undo: None, dbs, sql_mode: None }
         });
     }
 
@@ -640,7 +788,11 @@ impl Worker {
     pub fn sql_undo_create(&self, db: Db, a: UndoAction, read_only: bool) {
         self.spawn(async move {
             let UndoAction { at, conn, db: schema, coll: table, kind } = a;
-            let res = undo_create(&db, &schema, &table, read_only).await;
+            let made = match &kind {
+                UndoKind::Sql { undo: SqlUndo::CreatedTable { made }, .. } => made.clone(),
+                _ => None,
+            };
+            let res = undo_create(&db, &schema, &table, made.as_deref(), read_only).await;
             let (what, undone) = match &res {
                 Ok((w, _)) => (*w, true),
                 Err(_) => (if table.is_empty() { Ddl::DroppedDb } else { Ddl::DroppedTable }, false),
@@ -649,7 +801,7 @@ impl Worker {
             let (res, dbs) = split(res.map(|(_, l)| l), said);
             let undo = (!undone).then(|| UndoAction { at, conn, db: schema.clone(), coll: table.clone(), kind });
             // A refused undo changes nothing, so the app has nothing to refresh.
-            Msg::SqlDdl { conn, schema, table, what, res, undo, dbs }
+            Msg::SqlDdl { conn, schema, table, what, res, undo, dbs, sql_mode: None }
         });
     }
 }
@@ -677,6 +829,7 @@ mod tests {
             server_collation: "utf8mb4_0900_ai_ci".into(),
             server_engine: "InnoDB".into(),
             schema_collation: None,
+            fold_case: false,
         }
     }
 
@@ -714,26 +867,79 @@ mod tests {
             let sql = r.unwrap_or_else(|err| panic!("{name}: {err}"));
             assert!(sql.starts_with(&format!("CREATE DATABASE {}", Dialect::MySql.quote_ident(name))), "{sql}");
             one_statement(&sql);
-            let t = drop_table_sql(Dialect::MySql, "shop", name, false).unwrap();
+            let t = drop_table_sql(Dialect::MySql, "shop", name, false, false).unwrap();
             assert_eq!(t, format!("DROP TABLE `shop`.{}", Dialect::MySql.quote_ident(name)));
             one_statement(&t);
         }
         for name in ["", "a\nb", "a\rb", "tab\tx", "nul\0x", " lead", "trail ", "a/b", "a.b", "a\\b", &"x".repeat(65)] {
             assert!(create_db_sql(Dialect::MySql, name, "utf8mb4", "utf8mb4_bin", &m).is_err(), "{name:?}");
-            assert!(drop_db_sql(Dialect::MySql, name).is_err(), "{name:?}");
-            assert!(truncate_sql(Dialect::MySql, "shop", name).is_err(), "{name:?}");
+            assert!(create_table_sql(Dialect::MySql, true, &spec(name, vec![ColumnSpec::id()]), &m).is_err(), "{name:?}");
+        }
+        // Only an empty name or a control character stops a drop: the rest are names that exist.
+        for name in ["", "a\nb", "a\rb", "tab\tx", "nul\0x"] {
+            assert!(drop_db_sql(Dialect::MySql, name, false).is_err(), "{name:?}");
+            assert!(truncate_sql(Dialect::MySql, "shop", name, false).is_err(), "{name:?}");
+            assert!(drop_table_sql(Dialect::MySql, name, "t", false, false).is_err(), "{name:?}");
         }
         assert!(create_db_sql(Dialect::MySql, &"x".repeat(64), "utf8mb4", "utf8mb4_bin", &m).is_ok());
     }
 
+    /// Review finding 4: tables and databases another client named `a.b`, ` lead` or `x.y` could not be dropped
+    /// or emptied, because the rules for new names applied to drops too.
+    #[test]
+    fn existing_names_with_dots_slashes_or_spaces_can_be_dropped() {
+        let d = Dialect::MySql;
+        for name in ["a.b", " lead", "x.y", "trail ", "a/b", "a\\b", &"x".repeat(65)] {
+            let q = d.quote_ident(name);
+            assert_eq!(drop_db_sql(d, name, false).unwrap(), format!("DROP DATABASE {q}"));
+            assert_eq!(drop_table_sql(d, name, name, false, false).unwrap(), format!("DROP TABLE {q}.{q}"));
+            assert_eq!(drop_table_sql(d, "shop", name, true, false).unwrap(), format!("DROP VIEW `shop`.{q}"));
+            assert_eq!(truncate_sql(d, name, name, false).unwrap(), format!("TRUNCATE TABLE {q}.{q}"));
+            one_statement(&truncate_sql(d, name, name, false).unwrap());
+        }
+        // A new table may still go into an existing database with such a name.
+        let mut s = spec("t", vec![ColumnSpec::id()]);
+        s.schema = "x.y".into();
+        assert!(create_table_sql(d, true, &s, &meta()).unwrap().starts_with("CREATE TABLE `x.y`.`t`"));
+    }
+
     #[test]
     fn system_schemas_are_left_alone() {
+        let folding = Meta { fold_case: true, ..meta() };
         for s in ["mysql", "MYSQL", "sys", "information_schema", "performance_schema"] {
-            assert!(drop_db_sql(Dialect::MySql, s).is_err());
-            assert!(create_db_sql(Dialect::MySql, s, "utf8mb4", "utf8mb4_bin", &meta()).is_err());
-            assert!(drop_table_sql(Dialect::MySql, s, "user", false).is_err());
-            assert!(truncate_sql(Dialect::MySql, s, "user").is_err());
+            assert!(drop_db_sql(Dialect::MySql, s, true).is_err());
+            assert!(create_db_sql(Dialect::MySql, s, "utf8mb4", "utf8mb4_bin", &folding).is_err());
+            assert!(drop_table_sql(Dialect::MySql, s, "user", false, true).is_err());
+            assert!(truncate_sql(Dialect::MySql, s, "user", true).is_err());
         }
+        for s in ["mysql", "sys", "information_schema", "performance_schema"] {
+            assert!(drop_db_sql(Dialect::MySql, s, false).is_err());
+            assert!(create_db_sql(Dialect::MySql, s, "utf8mb4", "utf8mb4_bin", &meta()).is_err());
+        }
+    }
+
+    /// Review finding 6: with lower_case_table_names=0 the server keeps `MySQL` apart from `mysql`, so it is a
+    /// user database that can be made and dropped.
+    #[test]
+    fn a_system_name_in_other_case_is_a_user_database_where_case_counts() {
+        assert_eq!(drop_db_sql(Dialect::MySql, "MySQL", false).unwrap(), "DROP DATABASE `MySQL`");
+        assert!(create_db_sql(Dialect::MySql, "SYS", "utf8mb4", "utf8mb4_bin", &meta()).is_ok());
+        assert!(truncate_sql(Dialect::MySql, "Information_Schema", "t", false).is_ok());
+        assert!(drop_db_sql(Dialect::MySql, "MySQL", true).is_err());
+    }
+
+    /// Review finding 6: with lower_case_table_names=1 `Billing` is stored as `billing`, and the app must open
+    /// and undo the stored name.
+    #[test]
+    fn a_created_name_is_mapped_to_how_the_server_lists_it() {
+        let listed: Vec<String> = ["billing", "Shop", "ünï"].map(String::from).to_vec();
+        assert_eq!(stored_name(&listed, "Billing"), "billing");
+        assert_eq!(stored_name(&listed, "Shop"), "Shop");
+        assert_eq!(stored_name(&listed, "ÜNÏ"), "ünï");
+        assert_eq!(stored_name(&listed, "other"), "other");
+        // An exact match wins over a folded one.
+        let both: Vec<String> = ["a", "A"].map(String::from).to_vec();
+        assert_eq!(stored_name(&both, "A"), "A");
     }
 
     #[test]
@@ -864,11 +1070,11 @@ mod tests {
     #[test]
     fn drop_and_truncate_statements() {
         let d = Dialect::MariaDb;
-        assert_eq!(drop_table_sql(d, "shop", "orders", false).unwrap(), "DROP TABLE `shop`.`orders`");
-        assert_eq!(drop_table_sql(d, "shop", "v", true).unwrap(), "DROP VIEW `shop`.`v`");
-        assert_eq!(drop_db_sql(d, "shop").unwrap(), "DROP DATABASE `shop`");
-        assert_eq!(truncate_sql(d, "sh`op", "or`ders").unwrap(), "TRUNCATE TABLE `sh``op`.`or``ders`");
-        one_statement(&truncate_sql(d, "sh`op", "x; DROP TABLE y").unwrap());
+        assert_eq!(drop_table_sql(d, "shop", "orders", false, false).unwrap(), "DROP TABLE `shop`.`orders`");
+        assert_eq!(drop_table_sql(d, "shop", "v", true, false).unwrap(), "DROP VIEW `shop`.`v`");
+        assert_eq!(drop_db_sql(d, "shop", false).unwrap(), "DROP DATABASE `shop`");
+        assert_eq!(truncate_sql(d, "sh`op", "or`ders", false).unwrap(), "TRUNCATE TABLE `sh``op`.`or``ders`");
+        one_statement(&truncate_sql(d, "sh`op", "x; DROP TABLE y", false).unwrap());
     }
 
     #[test]
@@ -945,6 +1151,228 @@ mod tests {
             self.w.sql_undo_create(self.db.clone(), a, ro);
             self.ddl()
         }
+        /// The whole SqlDdl answer, with the names it reports and the sql_mode it hands back.
+        fn answer(&self) -> Answer {
+            let Msg::SqlDdl { schema, table, res, undo, sql_mode, .. } = self.next() else { panic!("expected SqlDdl") };
+            Answer { schema, table, res, undo, sql_mode }
+        }
+        fn text_of(&self, sql: &str) -> String {
+            self.w.rt.block_on(async { raw(&sqlx::query(sql).fetch_one(&self.pool).await.unwrap_or_else(|x| panic!("{sql}: {x}")), 0).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default() })
+        }
+        fn utf8mb4(&self) -> (Meta, String) {
+            let m = self.meta("");
+            let co = m.default_collation("utf8mb4").unwrap().to_string();
+            (m, co)
+        }
+        fn drop_info(&self, schema: &str, table: &str) -> (DropInfo, Duration) {
+            let t = Instant::now();
+            self.w.sql_drop_info(1, self.db.clone(), schema.into(), table.into());
+            let Msg::SqlDropInfo { res, .. } = self.next() else { panic!("expected SqlDropInfo") };
+            (res.unwrap_or_else(|x| panic!("{}: {x}", self.label)), t.elapsed())
+        }
+        /// Statements still running on the server whose text starts with `start`.
+        fn running(&self, start: &str) -> i64 {
+            self.scalar(&format!("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE INFO LIKE {}", lit(&format!("{start}%"), true)))
+        }
+    }
+
+    struct Answer {
+        schema: String,
+        table: String,
+        res: Res<String>,
+        undo: Option<UndoAction>,
+        sql_mode: Option<String>,
+    }
+
+    fn table_spec(schema: &str, name: &str, co: &str, engine: &str, columns: Vec<ColumnSpec>) -> TableSpec {
+        TableSpec { schema: schema.into(), name: name.into(), engine: engine.into(), collation: co.into(), columns }
+    }
+
+    fn text_default(name: &str, value: &str) -> ColumnSpec {
+        ColumnSpec { default: DefaultKind::Value, default_text: value.into(), ..col(name, "VARCHAR", "80") }
+    }
+
+    /// Review finding 1: the connect-time sql_mode had NO_BACKSLASH_ESCAPES and the session no longer does, so a
+    /// default written for the old mode ended its string at the backslash and the rest ran as statements; it
+    /// dropped `victim`. The other way round, `C:\temp` was stored as `C:\\temp`.
+    #[test]
+    fn live_a_default_value_stays_text_when_the_sql_mode_changed_since_connecting() {
+        each(|l| {
+            let (schema, victim) = (unique("qcd_inj"), unique("qcd_victim"));
+            l.exec(&format!("CREATE DATABASE `{schema}`"));
+            l.exec(&format!("CREATE DATABASE `{victim}`"));
+            let (m, co) = l.utf8mb4();
+            let evil = format!("\\'); DROP DATABASE {victim}; -- ");
+            // The app still believes in the mode it read when it connected.
+            let mut stale = l.db.clone();
+            stale.sql_mode = format!("{},NO_BACKSLASH_ESCAPES", stale.sql_mode);
+            l.w.sql_create_table(1, stale, table_spec(&schema, "t", &co, &m.server_engine, vec![ColumnSpec::id(), text_default("note", &evil)]), m.clone(), false);
+            let a = l.answer();
+            assert!(a.res.is_ok(), "{}: {:?}", l.label, a.res);
+            assert!(l.exists_db(&victim), "{}: the default value ran as a statement", l.label);
+            assert_eq!(a.sql_mode.as_deref().map(Mode::of), Some(Mode::of(&l.db.sql_mode)), "{}: the mode in force goes back to the app", l.label);
+            l.exec(&format!("INSERT INTO `{schema}`.t () VALUES ()"));
+            assert_eq!(l.text_of(&format!("SELECT note FROM `{schema}`.t")), evil, "{}", l.label);
+            // The session reads backslashes as plain characters, the app thinks it does not.
+            let nbe = crate::db::sql::testing::with_session(&l.w, &l.db, "SET SESSION sql_mode = CONCAT(@@SESSION.sql_mode, ',NO_BACKSLASH_ESCAPES')");
+            l.w.sql_create_table(1, nbe.clone(), table_spec(&schema, "path", &co, &m.server_engine, vec![ColumnSpec::id(), text_default("p", "C:\\temp")]), m.clone(), false);
+            let a = l.answer();
+            assert!(a.res.is_ok(), "{}: {:?}", l.label, a.res);
+            assert!(a.sql_mode.is_some_and(|s| !Mode::of(&s).bs), "{}", l.label);
+            l.exec(&format!("INSERT INTO `{schema}`.path () VALUES ()"));
+            assert_eq!(l.text_of(&format!("SELECT p FROM `{schema}`.path")), "C:\\temp", "{}", l.label);
+            // A mode that matches is not handed back.
+            l.w.sql_create_table(1, l.db.clone(), table_spec(&schema, "same", &co, &m.server_engine, vec![ColumnSpec::id(), text_default("p", "a\\b")]), m, false);
+            let a = l.answer();
+            assert!(a.res.is_ok() && a.sql_mode.is_none(), "{}: {:?}", l.label, a.res);
+            l.exec(&format!("INSERT INTO `{schema}`.same () VALUES ()"));
+            assert_eq!(l.text_of(&format!("SELECT p FROM `{schema}`.same")), "a\\b", "{}", l.label);
+            l.exec(&format!("DROP DATABASE `{schema}`"));
+            l.exec(&format!("DROP DATABASE `{victim}`"));
+        });
+    }
+
+    /// Review findings 2 and 3: a table whose cached TABLE_ROWS is 0 filled while another session holds LOCK
+    /// TABLES ... WRITE. The COUNT waited on the lock and held a pool connection, and the estimate said empty.
+    /// Now the answer comes after about 3 s with a fresh estimate, and no COUNT is left on the server.
+    #[test]
+    fn live_a_locked_table_gets_a_fresh_estimate_in_about_3s_and_no_count_is_left() {
+        each(|l| {
+            let schema = unique("qcd_cnt");
+            l.exec(&format!("CREATE DATABASE `{schema}`"));
+            l.exec(&format!("CREATE TABLE `{schema}`.t (id INT PRIMARY KEY AUTO_INCREMENT, v INT) ENGINE=InnoDB"));
+            // A read with the default expiry caches the empty table's statistics on MySQL.
+            assert_eq!(l.scalar(&format!("SELECT CAST(COALESCE(TABLE_ROWS, 0) AS SIGNED) FROM information_schema.TABLES WHERE TABLE_SCHEMA = '{schema}' AND TABLE_NAME = 't'")), 0);
+            let values = (1..=1000).map(|i| format!("({i})")).collect::<Vec<_>>().join(",");
+            let mut lock = l.w.rt.block_on(async {
+                let mut c = sqlx::MySqlConnection::connect_with(&l.db.opts).await.unwrap();
+                c.execute(format!("LOCK TABLES `{schema}`.t WRITE").as_str()).await.unwrap();
+                c.execute(format!("INSERT INTO `{schema}`.t (v) VALUES {values}").as_str()).await.unwrap();
+                c
+            });
+            let (info, took) = l.drop_info(&schema, "t");
+            assert!(info.exists && info.rows_estimated, "{}: {info:?}", l.label);
+            assert!(info.rows.is_some_and(|n| n > 0), "{}: an estimate of 0 rows is not an empty table: {info:?}", l.label);
+            assert!(took >= Duration::from_millis(2500) && took < Duration::from_secs(8), "{}: {took:?}", l.label);
+            assert_eq!(l.running(&format!("SELECT COUNT(*) AS n FROM `{schema}`")), 0, "{}: a COUNT is still running", l.label);
+            l.w.rt.block_on(async {
+                lock.execute("UNLOCK TABLES").await.unwrap();
+                lock.close().await.unwrap();
+            });
+            // Unlocked, the count is exact again.
+            let (info, _) = l.drop_info(&schema, "t");
+            assert!(info.rows == Some(1000) && !info.rows_estimated, "{}: {info:?}", l.label);
+            l.exec(&format!("DROP DATABASE `{schema}`"));
+        });
+    }
+
+    /// Review finding 3: a view was counted, which runs its query; one that sleeps held the dialog and a pool
+    /// connection for as long as it slept.
+    #[test]
+    fn live_a_slow_view_is_not_counted() {
+        each(|l| {
+            let schema = unique("qcd_view");
+            l.exec(&format!("CREATE DATABASE `{schema}`"));
+            l.exec(&format!("CREATE VIEW `{schema}`.slow AS SELECT SLEEP(25) AS s"));
+            let (info, took) = l.drop_info(&schema, "slow");
+            assert!(info.exists && info.rows.is_none() && !info.rows_estimated, "{}: {info:?}", l.label);
+            assert!(took < Duration::from_secs(2), "{}: {took:?}", l.label);
+            assert_eq!(l.running(&format!("SELECT COUNT(*) AS n FROM `{schema}`")), 0, "{}", l.label);
+            l.exec(&format!("DROP DATABASE `{schema}`"));
+        });
+    }
+
+    /// Review finding 4: names another client made, with a dot or a leading space, were refused for drop and empty.
+    #[test]
+    fn live_existing_names_with_a_dot_or_a_leading_space_can_be_emptied_and_dropped() {
+        each(|l| {
+            let schema = format!("{}.y", unique("qcd_x"));
+            l.exec(&format!("CREATE DATABASE `{schema}`"));
+            l.exec(&format!("CREATE TABLE `{schema}`.` lead` (a INT)"));
+            l.exec(&format!("CREATE TABLE `{schema}`.`a.b` (a INT)"));
+            l.exec(&format!("INSERT INTO `{schema}`.` lead` VALUES (1),(2)"));
+            l.w.sql_drop(1, l.db.clone(), schema.clone(), " lead".into(), false, true, false);
+            assert!(l.ddl().1.is_ok(), "{}", l.label);
+            assert_eq!(l.scalar(&format!("SELECT COUNT(*) FROM `{schema}`.` lead`")), 0);
+            l.w.sql_drop(1, l.db.clone(), schema.clone(), "a.b".into(), false, false, false);
+            let (_, res, _, _) = l.ddl();
+            assert!(res.is_ok(), "{}: {res:?}", l.label);
+            assert!(!l.exists_table(&schema, "a.b") && l.exists_table(&schema, " lead"));
+            l.w.sql_drop(1, l.db.clone(), schema.clone(), String::new(), false, false, false);
+            let (_, res, _, dbs) = l.ddl();
+            assert!(res.is_ok(), "{}: {res:?}", l.label);
+            assert!(!dbs.unwrap().contains(&schema) && !l.exists_db(&schema));
+        });
+    }
+
+    /// Review finding 5: the undo of a database create checked on the pool before it had a writable connection;
+    /// now a locked connection refuses first, whatever the database holds.
+    #[test]
+    fn live_undo_of_a_database_create_opens_the_writer_before_checking() {
+        each(|l| {
+            let name = unique("qcd_uw");
+            let (_, co) = l.utf8mb4();
+            let (_, res, undo, _) = l.create_db(&name, "utf8mb4", &co, false);
+            assert!(res.is_ok(), "{}: {res:?}", l.label);
+            l.exec(&format!("CREATE TABLE `{name}`.t (a INT)"));
+            let (_, res, back, _) = l.undo(undo.unwrap(), true);
+            assert!(res.as_ref().unwrap_err().contains("locked"), "{}: {res:?}", l.label);
+            let (_, res, back, _) = l.undo(back.unwrap(), false);
+            assert!(res.unwrap_err().contains("Not undone"), "{}", l.label);
+            l.exec(&format!("DROP TABLE `{name}`.t"));
+            assert!(l.undo(back.unwrap(), false).1.is_ok());
+            assert!(!l.exists_db(&name));
+        });
+    }
+
+    /// Review finding 5: a table dropped and made again by someone else after the create was dropped by the undo
+    /// of the create. The undo now compares CREATE_TIME under the lock.
+    #[test]
+    fn live_undo_of_a_table_create_refuses_a_table_made_again_since() {
+        each(|l| {
+            let schema = unique("qcd_again");
+            l.exec(&format!("CREATE DATABASE `{schema}`"));
+            let (m, co) = l.utf8mb4();
+            l.w.sql_create_table(1, l.db.clone(), table_spec(&schema, "t", &co, &m.server_engine, vec![ColumnSpec::id()]), m, false);
+            let a = l.answer();
+            assert!(a.res.is_ok(), "{}: {:?}", l.label, a.res);
+            let undo = a.undo.unwrap();
+            assert!(matches!(&undo.kind, UndoKind::Sql { undo: SqlUndo::CreatedTable { made: Some(_) }, .. }), "{}", l.label);
+            // CREATE_TIME counts whole seconds.
+            std::thread::sleep(Duration::from_millis(1100));
+            l.exec(&format!("DROP TABLE `{schema}`.t"));
+            l.exec(&format!("CREATE TABLE `{schema}`.t (other INT)"));
+            let (_, res, back, _) = l.undo(undo, false);
+            assert!(res.unwrap_err().contains("made again"), "{}", l.label);
+            assert!(back.is_some() && l.exists_table(&schema, "t"));
+            l.exec(&format!("DROP DATABASE `{schema}`"));
+        });
+    }
+
+    /// Review finding 6: under lower_case_table_names=1 `Qcd_Caps` is stored as `qcd_caps`, and the app opened and
+    /// undid the name it asked for. The answer now carries what SHOW DATABASES and SHOW TABLES list. Run it
+    /// against a server started with --lower-case-table-names=1 to see the folding; elsewhere names stay as typed.
+    #[test]
+    fn live_a_created_name_comes_back_as_the_server_lists_it() {
+        each(|l| {
+            let fold = l.scalar("SELECT CAST(@@lower_case_table_names AS SIGNED)") == 1;
+            let name = unique("Qcd_Caps");
+            let (m, co) = l.utf8mb4();
+            l.w.sql_create_db(1, l.db.clone(), name.clone(), "utf8mb4".into(), co.clone(), m.clone(), false);
+            let a = l.answer();
+            assert!(a.res.is_ok(), "{}: {:?}", l.label, a.res);
+            let listed = if fold { name.to_lowercase() } else { name.clone() };
+            assert_eq!(a.schema, listed, "{}", l.label);
+            assert_eq!(a.undo.as_ref().unwrap().db, listed);
+            l.w.sql_create_table(1, l.db.clone(), table_spec(&listed, "Caps_T", &co, &m.server_engine, vec![ColumnSpec::id()]), m, false);
+            let t = l.answer();
+            assert!(t.res.is_ok(), "{}: {:?}", l.label, t.res);
+            assert_eq!(t.table, if fold { "caps_t" } else { "Caps_T" }, "{}", l.label);
+            assert!(l.exists_table(&listed, &t.table));
+            assert!(l.undo(t.undo.unwrap(), false).1.is_ok(), "{}", l.label);
+            assert!(l.undo(a.undo.unwrap(), false).1.is_ok(), "{}", l.label);
+            assert!(!l.exists_db(&listed));
+        });
     }
 
     #[test]

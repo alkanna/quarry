@@ -65,18 +65,23 @@ impl Live {
     /// The same server, with every connection of its pool running `set` first: a session zone or sql_mode as a
     /// server configured that way would give it, without a SET GLOBAL that the tests running alongside would see.
     pub fn with_session(&self, set: &str) -> Db {
-        let set = set.to_string();
-        let pool = self.w.rt.block_on(async {
-            sqlx::mysql::MySqlPoolOptions::new()
-                .max_connections(2)
-                .after_connect(move |c, _| {
-                    let set = set.clone();
-                    Box::pin(async move { sqlx::Executor::execute(c, set.as_str()).await.map(|_| ()) })
-                })
-                .connect_with(self.db.opts.clone())
-                .await
-                .unwrap()
-        });
-        Db { pool: super::Pool::My(pool), ..self.db.clone() }
+        with_session(&self.w, &self.db, set)
     }
+}
+
+/// `Live::with_session` for tests that keep a worker and a `Db` of their own.
+pub fn with_session(w: &Worker, db: &Db, set: &str) -> Db {
+    let set = set.to_string();
+    let pool = w.rt.block_on(async {
+        sqlx::mysql::MySqlPoolOptions::new()
+            .max_connections(2)
+            .after_connect(move |c, _| {
+                let set = set.clone();
+                Box::pin(async move { sqlx::Executor::execute(c, set.as_str()).await.map(|_| ()) })
+            })
+            .connect_with(db.opts.clone())
+            .await
+            .unwrap()
+    });
+    Db { pool: super::Pool::My(pool), ..db.clone() }
 }
