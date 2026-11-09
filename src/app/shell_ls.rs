@@ -3,13 +3,20 @@
 //! never lands on text that changed, a list that was dismissed, or another tab.
 
 use super::*;
-use crate::ui::js_doc::doc_popup;
+use crate::ui::js_doc::hint_popup;
 use std::time::Instant;
 
 /// Starts after one failed start or crash; past this many it stays off for the session.
 const MAX_FAILS: u32 = 3;
 /// How long the pointer rests on a word before its docs are asked for.
 const HOVER_DELAY: Duration = Duration::from_millis(450);
+/// How long a popup stays after the pointer left both the word and the popup, so it can be reached.
+const GRACE: Duration = Duration::from_millis(400);
+/// The signature popup is never wider than this, so it cannot cover the whole editor.
+const SIG_W: f32 = 640.0;
+const HOVER_W: f32 = 520.0;
+/// Height of one editor line, for placing the signature under the caret when there is no room above.
+const CARET_ROW: f32 = 20.0;
 /// CompletionItemKind for plain words from the file, which TypeScript offers when it knows no members.
 const KIND_TEXT: u32 = 1;
 /// Every function has these; on a callable package like dayjs they only push its own API down.
@@ -36,6 +43,12 @@ pub(super) struct JsState {
     resolve: Option<(u64, usize)>,
     sig: Option<Sig>,
     hover: Option<Hover>,
+    /// After typing or Esc a hover popup waits for the pointer to move, measured from here.
+    hover_block: Option<egui::Pos2>,
+    /// Whether the editor had focus before the pointer went to a popup, which a click there takes away.
+    editor_focused: bool,
+    /// The offline demo holds its popups as set up, with no server behind them.
+    demo: bool,
 }
 
 /// Parameter hints for the caret they were asked at.
@@ -43,6 +56,10 @@ struct Sig {
     caret: usize,
     req: Option<u64>,
     doc: Option<db::JsDoc>,
+    /// Details is open: the full signature and docs.
+    open: bool,
+    /// Where the popup was drawn last frame and how tall it was, to judge the room above the caret.
+    rect: Option<egui::Rect>,
 }
 
 #[derive(Clone, Copy)]
@@ -63,6 +80,58 @@ struct Hover {
     asked: bool,
     req: Option<u64>,
     doc: Option<db::JsDoc>,
+    /// When the pointer left both the word and the popup, while the popup is on screen.
+    left: Option<Instant>,
+    open: bool,
+    rect: Option<egui::Rect>,
+}
+
+/// Which side of the caret line the signature popup takes.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(super) enum Side {
+    Above,
+    Below,
+}
+
+/// What wants to be on screen this frame.
+#[derive(Clone, Copy, Default)]
+pub(super) struct Want {
+    /// The suggestion list is open (it sits under the caret).
+    pub(super) completion: bool,
+    /// Parameter hints have an answer to show.
+    pub(super) sig: bool,
+    /// A hover popup has an answer to show.
+    pub(super) hover: bool,
+    /// The signature popup fits above the caret line.
+    pub(super) room_above: bool,
+}
+
+#[derive(PartialEq, Debug)]
+pub(super) struct Plan {
+    pub(super) sig: Option<Side>,
+    pub(super) hover: bool,
+}
+
+/// Which popups show, so they never pile up. The signature sits above the caret line while the
+/// suggestion list is under it, and gives way when there is no room above. A hover popup shows only
+/// when neither of the others does.
+pub(super) fn plan(w: Want) -> Plan {
+    let sig = match (w.sig, w.completion, w.room_above) {
+        (false, ..) | (true, true, false) => None,
+        (true, _, true) => Some(Side::Above),
+        (true, false, false) => Some(Side::Below),
+    };
+    Plan { sig, hover: w.hover && !w.completion && sig.is_none() }
+}
+
+/// Whether a popup stays: while the pointer is on its trigger or on the popup, and for `GRACE`
+/// after it left both. `left` remembers when that happened.
+fn hold(on_trigger: bool, on_popup: bool, left: &mut Option<Instant>, now: Instant) -> bool {
+    if on_trigger || on_popup {
+        *left = None;
+        return true;
+    }
+    now.saturating_duration_since(*left.get_or_insert(now)) < GRACE
 }
 
 /// What the shell editor reported this frame.
@@ -164,6 +233,39 @@ pub(super) fn shell_ac_demo(ui: &egui::Ui, id: egui::Id, code: &str, ac: &mut Ac
         st.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(n))));
         st.store(ui.ctx(), id);
     }
+}
+
+/// The script of `QUARRY_TEST_SHELL_SIG`: a call in progress whose callback parameter has a huge type.
+pub(super) fn shell_sig_code() -> Option<String> {
+    std::env::var("QUARRY_TEST_SHELL_SIG").ok().map(|_| "async function run() {\n  const docs = await configs.find({}).toArray()\n  // Who still has to confirm\n  const names = docs.map(c => c.se".into())
+}
+
+/// QUARRY_TEST_SHELL_SIG=1 shows parameter hints for `map` with a long elided type above the caret and the
+/// suggestion list under it, no hover; `details` shows the hints with Details open and no list.
+pub(super) fn shell_sig_demo(ui: &egui::Ui, id: egui::Id, code: &str, ac: &mut Ac, js: &mut JsState) {
+    let Ok(mode) = std::env::var("QUARRY_TEST_SHELL_SIG") else { return };
+    if js.sig.is_some() {
+        return;
+    }
+    js.demo = true;
+    let ids = (0..90).map(|i| format!("\"65f0c1a2b3c4d5e6f7a8b9{i:02}\"")).collect::<Vec<_>>().join(" | ");
+    let obj = format!("{{ _id: {ids}; name: string; sendConfirmationToApprover?: boolean }}");
+    let sig = format!("(method) Array<WithId<{obj}>>.map<any>(callbackfn: (value: WithId<{obj}>, index: number, array: WithId<{obj}>[]) => any, thisArg?: any): any[]");
+    let start = sig.find("callbackfn").unwrap_or(0);
+    let end = sig.find(", thisArg").unwrap_or(sig.len());
+    let doc = "Calls a defined callback function on each element of an array, and returns an array that contains the results.\n\n*@param* callbackfn A function that accepts up to three arguments. The map method calls the callbackfn function one time for each element in the array.\n\n*@param* thisArg An object to which the this keyword can refer in the callbackfn function. If thisArg is omitted, undefined is used as the this value.".to_string();
+    let n = code.chars().count();
+    js.sig = Some(Sig { caret: n, req: None, doc: Some(db::JsDoc { sig, doc, active: Some(start..end) }), open: mode == "details", rect: None });
+    if mode != "details" {
+        let item = |t: &str, note: &'static str| Sug { sql: None, back: 0, text: t.into(), note, insert: t.into(), caret: t.chars().count() };
+        let items = vec![item("sendConfirmationToApprover", "property"), item("sentAt", "property"), item("severity", "property")];
+        let d = db::JsDoc { sig: "(property) sendConfirmationToApprover?: boolean | undefined".into(), doc: String::new(), active: None };
+        *ac = Ac { id: Some(id), token: 2, items, cursor: n, doc: Some((0, d)), ..Default::default() };
+    }
+    ui.memory_mut(|m| m.request_focus(id));
+    let mut st = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
+    st.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(n))));
+    st.store(ui.ctx(), id);
 }
 
 fn globals_key(colls: &[String], packages: &[String], attached: &[AttachedInfo]) -> u64 {
@@ -301,21 +403,69 @@ impl App {
     /// Follows the editor each frame: asks for suggestions and hints after edits, docs for the
     /// selected suggestion and the word under the pointer, and draws hints and hover docs.
     pub(super) fn js_editor(&mut self, ctx: &egui::Context, f: EditorFrame, colls: &[String]) {
+        let pointer = ctx.input(|i| i.pointer.latest_pos());
+        let over = |r: Option<egui::Rect>| r.zip(pointer).is_some_and(|(r, p)| r.expand(2.0).contains(p));
+        let on_sig = over(self.js.sig.as_ref().and_then(|s| s.rect));
+        let on_hover = over(self.js.hover.as_ref().and_then(|h| h.rect));
+        if !on_sig && !on_hover {
+            self.js.editor_focused = f.focused;
+        }
         if f.esc || f.picked {
             self.js.complete = None;
         }
-        // Closed by Esc, leaving the editor, or the caret moving away without typing.
-        if f.esc || !f.focused || self.js.sig.as_ref().is_some_and(|s| Some(s.caret) != f.caret) {
+        if f.esc {
+            self.js.hover = None;
+            self.js.hover_block = pointer;
+        }
+        // Closed by Esc, leaving the editor, or the caret moving away without typing. Clicking the
+        // popup itself takes the focus from the editor, which must not close it.
+        if !self.js.demo && (f.esc || ((!f.focused || self.js.sig.as_ref().is_some_and(|s| Some(s.caret) != f.caret)) && !on_sig)) {
             self.js.sig = None;
         }
         if let Some(caret) = f.edited {
             self.js.hover = None;
+            self.js.hover_block = pointer;
             self.js_ask(f.id, caret, colls);
         }
         self.js_resolve(f.id, colls);
-        self.js_hover(ctx, f.hover, colls);
-        if let (Some(Sig { doc: Some(d), .. }), Some(pos)) = (&self.js.sig, f.caret_pos) {
-            doc_popup(ctx, f.id.with("sig"), pos - egui::vec2(6.0, 4.0), egui::Align2::LEFT_BOTTOM, d);
+        let completion = self.ac.shown(f.id);
+        let sig_doc = self.js.sig.as_ref().is_some_and(|s| s.doc.is_some());
+        self.js_hover(ctx, f.hover, completion || sig_doc, colls);
+        let top = ctx.content_rect().top() + 4.0;
+        let sig_h = self.js.sig.as_ref().and_then(|s| s.rect).map_or(120.0, |r| r.height());
+        let room_above = f.caret_pos.is_some_and(|c| c.y - 4.0 - sig_h >= top);
+        let hover_doc = self.js.hover.as_ref().is_some_and(|h| h.doc.is_some());
+        let plan = plan(Want { completion, sig: sig_doc && f.caret_pos.is_some(), hover: hover_doc, room_above });
+        // Details areas scroll past this, so a hint never fills the screen.
+        let max_h = (ctx.content_rect().height() * 0.4).clamp(120.0, 420.0);
+        let mut toggled = false;
+        if let (Some(side), Some(Sig { doc: Some(d), open, rect, .. }), Some(pos)) = (plan.sig, &mut self.js.sig, f.caret_pos) {
+            let (at, pivot) = match side {
+                Side::Above => (pos - egui::vec2(6.0, 4.0), egui::Align2::LEFT_BOTTOM),
+                Side::Below => (pos + egui::vec2(-6.0, CARET_ROW + 4.0), egui::Align2::LEFT_TOP),
+            };
+            let out = hint_popup(ctx, f.id.with("sig"), at, pivot, d, open, SIG_W, max_h);
+            // A new size can flip the side, which only shows on the next frame.
+            if rect.is_none_or(|r| (r.height() - out.rect.height()).abs() > 1.0) {
+                ctx.request_repaint();
+            }
+            *rect = Some(out.rect);
+            toggled |= out.toggled;
+        } else if let Some(s) = &mut self.js.sig {
+            s.rect = None;
+        }
+        if plan.hover
+            && let Some(Hover { pos, doc: Some(d), open, rect, .. }) = &mut self.js.hover
+        {
+            let out = hint_popup(ctx, f.id.with("hover"), *pos + egui::vec2(0.0, 10.0), egui::Align2::LEFT_TOP, d, open, HOVER_W, max_h);
+            *rect = Some(out.rect);
+            toggled |= out.toggled;
+        } else if let Some(h) = &mut self.js.hover {
+            h.rect = None;
+        }
+        // The click took the focus from the editor; the caret should stay where it was.
+        if toggled && self.js.editor_focused {
+            ctx.memory_mut(|m| m.request_focus(f.id));
         }
     }
 
@@ -333,8 +483,8 @@ impl App {
         }
         let req = self.js_send(db::JsAsk::Signature, caret, colls);
         // The hints on screen stay until the answer replaces them, so they do not flicker while typing.
-        let doc = self.js.sig.take().and_then(|s| s.doc);
-        self.js.sig = Some(Sig { caret, req, doc });
+        let (doc, open) = self.js.sig.take().map_or((None, false), |s| (s.doc, s.open));
+        self.js.sig = Some(Sig { caret, req, doc, open, rect: None });
         let token = before.chars().rev().take_while(|c| is_js_ident(*c)).count();
         let ask = match js_spot(&before) {
             // A query value's string: the server knows the field's values from its type.
@@ -361,13 +511,46 @@ impl App {
         self.js.resolve = self.js_send(db::JsAsk::Resolve(raw), caret, colls).map(|r| (r, sel));
     }
 
-    /// Docs for the word under the pointer once it rests there, shown under the pointer.
-    fn js_hover(&mut self, ctx: &egui::Context, at: Option<(usize, egui::Pos2)>, colls: &[String]) {
-        // Still on the same word: nothing to look up again.
-        let same = at.zip(self.js.hover.as_ref()).is_some_and(|((i, _), h)| (h.span.0..h.span.1).contains(&i));
-        if !same {
+    /// Docs for the word under the pointer once it rests there. A popup that is on screen stays while
+    /// the pointer is on the word or the popup and for a moment after, so it can be reached and
+    /// scrolled. `blocked` is a suggestion list or parameter hints, which a hover never joins.
+    fn js_hover(&mut self, ctx: &egui::Context, at: Option<(usize, egui::Pos2)>, blocked: bool, colls: &[String]) {
+        let pointer = ctx.input(|i| i.pointer.latest_pos());
+        // After typing or Esc the pointer has to move before a word counts as hovered again.
+        if let Some(b) = self.js.hover_block {
+            if pointer.is_some_and(|p| p.distance(b) <= 3.0) {
+                self.js.hover = None;
+                return;
+            }
+            self.js.hover_block = None;
+        }
+        if blocked {
+            self.js.hover = None;
+            return;
+        }
+        let on_word = at.zip(self.js.hover.as_ref()).is_some_and(|((i, _), h)| (h.span.0..h.span.1).contains(&i));
+        let alive = match &mut self.js.hover {
+            Some(h) if h.doc.is_some() => {
+                let on_popup = h.rect.zip(pointer).is_some_and(|(r, p)| r.expand(2.0).contains(p));
+                let now = Instant::now();
+                let alive = hold(on_word, on_popup, &mut h.left, now);
+                if alive && !on_word && !on_popup {
+                    ctx.request_repaint_after(GRACE.saturating_sub(now.saturating_duration_since(h.left.unwrap_or(now))));
+                }
+                alive
+            }
+            Some(h) => {
+                // Not shown yet: resting means not moving, so a moving pointer restarts the wait.
+                if on_word && let Some((_, p)) = at && p.distance(h.pos) > 2.0 && !h.asked {
+                    (h.since, h.pos) = (Instant::now(), p);
+                }
+                on_word
+            }
+            None => false,
+        };
+        if !alive {
             let span = at.and_then(|(i, pos)| word_span(&self.tabs[self.cur].shell.code, i).map(|span| (span, pos)));
-            self.js.hover = span.map(|(span, pos)| Hover { span, since: Instant::now(), pos, asked: false, req: None, doc: None });
+            self.js.hover = span.map(|(span, pos)| Hover { span, since: Instant::now(), pos, asked: false, req: None, doc: None, left: None, open: false, rect: None });
         }
         let Some(h) = &self.js.hover else { return };
         if !h.asked {
@@ -381,11 +564,6 @@ impl App {
             if let Some(h) = &mut self.js.hover {
                 (h.asked, h.req) = (true, req);
             }
-        }
-        if let Some(Hover { pos, doc: Some(d), .. }) = &self.js.hover
-            && self.ac.items.is_empty()
-        {
-            doc_popup(ctx, egui::Id::unique("js-hover"), *pos + egui::vec2(0.0, 18.0), egui::Align2::LEFT_TOP, d);
         }
     }
 
@@ -452,6 +630,41 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn want(completion: bool, sig: bool, hover: bool, room_above: bool) -> Plan {
+        plan(Want { completion, sig, hover, room_above })
+    }
+
+    #[test]
+    fn popups_never_stack() {
+        // Nothing open: the hover shows.
+        assert_eq!(want(false, false, true, true), Plan { sig: None, hover: true });
+        // Parameter hints hide the hover, above the caret when there is room and below when not.
+        assert_eq!(want(false, true, true, true), Plan { sig: Some(Side::Above), hover: false });
+        assert_eq!(want(false, true, true, false), Plan { sig: Some(Side::Below), hover: false });
+        // The list sits under the caret: hints go above it or not at all, and no hover.
+        assert_eq!(want(true, true, true, true), Plan { sig: Some(Side::Above), hover: false });
+        assert_eq!(want(true, true, true, false), Plan { sig: None, hover: false });
+        assert_eq!(want(true, false, true, true), Plan { sig: None, hover: false });
+        assert_eq!(want(false, false, false, true), Plan { sig: None, hover: false });
+    }
+
+    #[test]
+    fn a_popup_waits_before_closing() {
+        let t = Instant::now();
+        let mut left = None;
+        assert!(hold(true, false, &mut left, t));
+        // The pointer leaves both: it stays for the grace period only.
+        assert!(hold(false, false, &mut left, t));
+        assert!(hold(false, false, &mut left, t + GRACE / 2));
+        assert!(!hold(false, false, &mut left, t + GRACE));
+        // Reaching the popup in time resets the wait.
+        let mut left = None;
+        assert!(hold(false, false, &mut left, t));
+        assert!(hold(false, true, &mut left, t + GRACE / 2));
+        assert!(left.is_none());
+        assert!(hold(false, false, &mut left, t + GRACE));
+    }
 
     #[test]
     fn words_under_the_pointer() {

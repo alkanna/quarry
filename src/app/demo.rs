@@ -257,6 +257,12 @@ impl App {
             t.shell.ms = Some(42);
             t.shell.help = std::env::var("QUARRY_TEST_HELP").is_ok();
         }
+        // Test switch: the shell with parameter hints and a suggestion list, see shell_sig_demo.
+        if let Some(code) = shell_ls::shell_sig_code().filter(|_| std::env::var("QUARRY_TEST_SQL").is_err()) {
+            let t = &mut self.tabs[1];
+            t.view = View::Shell;
+            t.shell.code = code;
+        }
         // Test switch: show the "Group by and count" window.
         if std::env::var("QUARRY_TEST_GROUP").is_ok() {
             let rows = vec![doc! { "_id": "paid", "count": 321 }, doc! { "_id": "shipped", "count": 321 }, doc! { "_id": "pending", "count": 321 }, doc! { "_id": "refunded", "count": 321 }];

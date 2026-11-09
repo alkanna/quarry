@@ -609,7 +609,7 @@ pub(crate) fn ac_input_with(
             ac.close();
         }
     }
-    let test_shot = std::env::var("QUARRY_TEST_AC").is_ok() || std::env::var("QUARRY_TEST_SQL").is_ok_and(|v| v.starts_with("ac") || v == "shellac");
+    let test_shot = std::env::var("QUARRY_TEST_AC").is_ok() || std::env::var("QUARRY_TEST_SHELL_SIG").is_ok() || std::env::var("QUARRY_TEST_SQL").is_ok_and(|v| v.starts_with("ac") || v == "shellac");
     let pointer_on_list = test_shot || ac.rect.zip(ui.input(|i| i.pointer.hover_pos())).is_some_and(|(r, p)| r.contains(p));
     if !focused && ac.id == Some(id) && !pointer_on_list {
         ac.close();

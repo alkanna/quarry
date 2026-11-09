@@ -556,6 +556,7 @@ impl App {
         if let (Some(scope), true) = (&scope, std::env::var("QUARRY_TEST_SQL").is_ok_and(|v| v == "shellac")) {
             shell_ls::shell_ac_demo(ui, id, &t.shell.code, ac, scope, values);
         }
+        shell_ls::shell_sig_demo(ui, id, &t.shell.code, ac, &mut self.js);
         let mut sql_need = None;
         let framed = egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, if focused { PRIMARY() } else { BORDER() })).corner_radius(R_MD).show(ui, |ui| {
             egui::ScrollArea::vertical().id_salt("shell-ed").max_height(h).auto_shrink([false, true]).show(ui, |ui| {
@@ -779,6 +780,9 @@ impl App {
             t.shell.queries.push(q);
         }
         t.shell.queries_tab = true;
+        if let Some(code) = shell_ls::shell_sig_code() {
+            t.shell.code = code;
+        }
         if matches!(std::env::var("QUARRY_TEST_SQL").as_deref(), Ok("shellattach" | "attach")) {
             self.attach_demo();
         }
