@@ -91,7 +91,7 @@ Pages: Connections (pick: **B**), Table content, Filters and selection, F · Que
   - Anywhere else: keywords and functions with signatures.
   - The schema comes from `SqlSchema`, cached per database.
 - `src/ui/editor.rs`: a `sql_job` highlighter, modeled on `js_job` (editor.rs:207).
-- `src/db/sql_runner.mjs`: the SQL shell runtime, described below.
+- `src/db/shell_runner.mjs`: the one shell runtime for Mongo and SQL (it replaced sql_runner.mjs), described below.
 
 ### Changes to existing files
 - `state.rs`: `connect` (:902) branches on the engine, `writable_sql()` sits beside `writable_target` (:874), `ServerInfo::status_line` shows "MySQL 8.4", and the `agg_source`/`agg_store` arms cover Query results.
@@ -132,7 +132,7 @@ Pages: Connections (pick: **B**), Table content, Filters and selection, F · Que
 - Phase: v2, right after the SQL shell ships, since it needs the SQL relay and the shared shell layout first.
 
 ### SQL shell (same power as the Mongo Shell)
-Scripts get no driver. `sql_runner.mjs` gives them:
+Scripts get no SQL driver. `shell_runner.mjs` gives them:
 - a `sql` tagged template, which turns `${}` values into `?` placeholders;
 - `sql.unsafe(text, params)`;
 - one global per table with `find/count/insert/update/delete`.

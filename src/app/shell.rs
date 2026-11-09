@@ -213,7 +213,7 @@ fn shell_panel(ui: &mut egui::Ui, sh: &mut ShellTab, conn: &str) {
             // The same text run again (a loop) is one line with a count and the time added up.
             let mut rows: Vec<(&db::ShellQuery, usize, u128)> = Vec::new();
             for q in &sh.queries {
-                match rows.iter_mut().find(|r| r.0.text == q.text) {
+                match rows.iter_mut().find(|r| r.0.text == q.text && r.0.conn == q.conn) {
                     Some(r) => (r.1, r.2) = (r.1 + 1, r.2 + q.ms),
                     None => rows.push((q, 1, q.ms)),
                 }
@@ -221,7 +221,7 @@ fn shell_panel(ui: &mut egui::Ui, sh: &mut ShellTab, conn: &str) {
             for (q, n, ms) in rows {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 12.0;
-                    ui.label(mono(conn.into(), PRIMARY()));
+                    ui.label(mono(if q.conn.is_empty() { conn.into() } else { q.conn.clone() }, PRIMARY()));
                     let one_line: String = q.text.split_whitespace().collect::<Vec<_>>().join(" ");
                     let cut = if one_line.chars().count() > 70 { format!("{}…", one_line.chars().take(70).collect::<String>()) } else { one_line };
                     ui.label(mono(cut, TEXT())).on_hover_text(&q.text);
@@ -327,25 +327,24 @@ impl App {
         let collections: Vec<String> = self.conn(sel.conn).and_then(|c| c.dbs.iter().find(|d| d.0 == sel.db)).and_then(|d| d.1.clone()).unwrap_or_default();
         let packages: Vec<String> = self.prefs.shell_packages.iter().map(|p| db::package_spec(p).0).collect();
         let read_only = !self.sel_writable();
-        // A SQL script gets no address and no password: its queries come back to this app.
-        let (input, sql) = if t.sql.is_some() {
+        // The tab's own connection is the only entry for now. A SQL script gets no address and no password: its queries come back to this app.
+        let name = self.conn(sel.conn).map(|c| c.meta.name.clone()).unwrap_or_default();
+        let (entries, sql) = if t.sql.is_some() {
             let Some(db) = self.conn(sel.conn).and_then(|c| c.sql.clone()) else { return self.err("Connect first.") };
-            let input = serde_json::json!({ "db": sel.db, "code": code, "tables": collections, "readOnly": read_only, "timeoutMs": self.prefs.timeout_ms, "packages": packages }).to_string();
-            (input, Some(db::SqlRelay { db, schema: sel.db.clone(), read_only, conn_id: Default::default() }))
+            (serde_json::json!({ "mongo": [], "sql": [{ "name": name, "db": sel.db, "tables": collections }] }), vec![(name.clone(), db::SqlRelay { db, schema: sel.db.clone(), read_only, conn_id: Default::default() })])
         } else {
             let uri = match stored_uri(sel.conn) {
                 Ok(u) => u,
                 Err(e) => return self.err(uri_err(e)),
             };
-            let input = serde_json::json!({
-                "uri": uri, "db": sel.db, "code": code, "collections": collections,
-                "readOnly": read_only, "timeoutMs": self.prefs.timeout_ms,
-                "packages": packages,
-                "proxy": self.shell_proxy(sel.conn),
-            })
-            .to_string();
-            (input, None)
+            (serde_json::json!({ "mongo": [{ "name": name, "uri": uri, "db": sel.db, "proxy": self.shell_proxy(sel.conn), "collections": collections, "readOnly": read_only }], "sql": [] }), Vec::new())
         };
+        let mut input = entries;
+        input["code"] = code.clone().into();
+        input["packages"] = packages.into();
+        input["timeoutMs"] = self.prefs.timeout_ms.into();
+        input["main"] = name.into();
+        let input = input.to_string();
         // The original's NodeShell.addHistory (renderer line 196411): skip scripts over 1000
         // characters, move a repeat to the top, keep MAX_HISTORY_LENGTH = 50 per database.
         const MAX_HISTORY_LENGTH: usize = 50;
@@ -358,7 +357,7 @@ impl App {
         }
         self.save_prefs();
         // A table added since the editor types were built shows up in the next ones.
-        if sql.is_some() {
+        if !sql.is_empty() {
             self.sql_columns_ask(true);
         }
         self.req += 1;
@@ -729,8 +728,8 @@ impl App {
         t.shell.hide_absent_id();
         t.shell.ms = Some(84);
         t.shell.queries = vec![
-            db::ShellQuery { text: "SELECT customer_id, COUNT(*) AS n FROM orders WHERE status = ? GROUP BY customer_id HAVING n > 3".into(), params: "[\"paid\"]".into(), rows: Some(12), affected: None, error: None, ms: 22 },
-            db::ShellQuery { text: "SELECT * FROM `orders` WHERE `customer_id` = ? ORDER BY `id` DESC LIMIT 1".into(), params: String::new(), rows: Some(1), affected: None, error: None, ms: 5 },
+            db::ShellQuery { conn: "shop-prod".into(), text: "SELECT customer_id, COUNT(*) AS n FROM orders WHERE status = ? GROUP BY customer_id HAVING n > 3".into(), params: "[\"paid\"]".into(), rows: Some(12), affected: None, error: None, ms: 22 },
+            db::ShellQuery { conn: "shop-prod".into(), text: "SELECT * FROM `orders` WHERE `customer_id` = ? ORDER BY `id` DESC LIMIT 1".into(), params: String::new(), rows: Some(1), affected: None, error: None, ms: 5 },
         ];
         for _ in 0..11 {
             let q = t.shell.queries[1].clone();

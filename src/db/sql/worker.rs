@@ -1044,11 +1044,9 @@ mod tests {
         assert!(f("?", &[Param::Float(f64::NAN)], false).is_err() && f("?", &[Param::Text("a\0".into())], false).is_err());
     }
 
-    /// Runs a shell script on a SQL relay, returning the queries it sent and its result.
-    fn shell_script(w: &Worker, rx: &Receiver<Msg>, db: &Db, code: &str, tables: &[&str], read_only: bool) -> (Vec<crate::db::ShellQuery>, Res<String>) {
-        let input = serde_json::json!({ "db": "quarry_test", "code": code, "tables": tables, "readOnly": read_only, "timeoutMs": 30000, "packages": [] }).to_string();
-        let sql = Some(crate::db::SqlRelay { db: db.clone(), schema: "quarry_test".into(), read_only, conn_id: Default::default() });
-        let job = crate::db::ShellJob { runtime: "bun".into(), dir: std::env::temp_dir().join("quarry-shell-live-test"), input, packages: Vec::new(), sql };
+    /// Runs the runner with this input line and these SQL relays, returning the queries it reported and its result.
+    fn shell_run(w: &Worker, rx: &Receiver<Msg>, input: serde_json::Value, sql: Vec<(String, crate::db::SqlRelay)>) -> (Vec<crate::db::ShellQuery>, Res<String>) {
+        let job = crate::db::ShellJob { runtime: "bun".into(), dir: std::env::temp_dir().join("quarry-shell-live-test"), input: input.to_string(), packages: Vec::new(), sql };
         let (_cancel, cancel_rx) = tokio::sync::oneshot::channel();
         w.shell(5, job, cancel_rx);
         let mut queries = Vec::new();
@@ -1059,6 +1057,144 @@ mod tests {
                 _ => {}
             }
         }
+    }
+
+    fn relay(db: &Db, read_only: bool) -> crate::db::SqlRelay {
+        crate::db::SqlRelay { db: db.clone(), schema: "quarry_test".into(), read_only, conn_id: Default::default() }
+    }
+
+    /// Runs a shell script on a SQL relay, returning the queries it sent and its result.
+    fn shell_script(w: &Worker, rx: &Receiver<Msg>, db: &Db, code: &str, tables: &[&str], read_only: bool) -> (Vec<crate::db::ShellQuery>, Res<String>) {
+        let input = serde_json::json!({ "code": code, "packages": [], "timeoutMs": 30000, "main": "shop", "mongo": [], "sql": [{ "name": "shop", "db": "quarry_test", "tables": tables }] });
+        shell_run(w, rx, input, vec![("shop".into(), relay(db, read_only))])
+    }
+
+    fn bun_missing() -> bool {
+        let missing = std::process::Command::new("bun").arg("--version").output().is_err();
+        if missing {
+            println!("skipped: bun is not installed");
+        }
+        missing
+    }
+
+    fn query_names(queries: &[crate::db::ShellQuery]) -> String {
+        queries.iter().map(|q| format!("{} {}", q.conn, q.text)).collect::<Vec<_>>().join(" | ")
+    }
+
+    #[test]
+    fn live_shell_second_sql_connection_keeps_its_own_read_only_and_names_its_queries() {
+        let Some((w, rx, db, p)) = live("t_att", "id INT PRIMARY KEY, note VARCHAR(20)") else { return };
+        if bun_missing() {
+            return;
+        }
+        exec(&w, &p, "INSERT INTO quarry_test.t_att VALUES (1, 'a')");
+        let script = "async function run() {
+  const [{ one }] = await other.sql`SELECT 1 AS one`;
+  let refused = null;
+  try { await other.sql`UPDATE t_att SET note = 'x'` } catch (e) { refused = e.message }
+  let viaTable = null;
+  try { await other.t_att.update({ id: 1 }, { note: 'y' }) } catch (e) { viaTable = e.message }
+  const seen = await other.t_att.find({});
+  await t_att.update({ id: 1 }, { note: 'main' });
+  return { one, refused, viaTable, seen: seen.length, now: (await other.sql.unsafe('SELECT note FROM t_att'))[0].note, hasTable: typeof other.table };
+}";
+        // Tables named like function properties must not replace them.
+        let input = serde_json::json!({ "code": script, "packages": [], "timeoutMs": 30000, "main": "shop", "mongo": [], "sql": [
+            { "name": "shop", "db": "quarry_test", "tables": ["t_att"] }, { "name": "other", "db": "quarry_test", "tables": ["t_att", "call", "bind"] }] });
+        let (queries, res) = shell_run(&w, &rx, input, vec![("shop".into(), relay(&db, false)), ("other".into(), relay(&db, true))]);
+        let v: serde_json::Value = serde_json::from_str(&res.expect("script result")).unwrap();
+        let v = &v["v"];
+        assert_eq!(v["one"], 1, "{v}");
+        assert!(v["refused"].as_str().is_some_and(|m| !m.is_empty()) && v["viaTable"].as_str().is_some_and(|m| !m.is_empty()), "{v}");
+        assert_eq!(v["seen"], 1);
+        assert_eq!(v["hasTable"], "function");
+        // The unlocked main connection wrote, the locked one did not.
+        assert_eq!(v["now"], "main");
+        assert!(queries.iter().any(|q| q.conn == "other" && q.error.is_some()) && queries.iter().any(|q| q.conn == "shop" && q.error.is_none() && q.affected == Some(1)), "{}", query_names(&queries));
+        assert!(queries.iter().all(|q| q.conn == "shop" || q.conn == "other"));
+    }
+
+    #[test]
+    fn live_shell_unknown_sql_connection_name_answers_an_error() {
+        let Some((w, rx, db, _p)) = live("t_att2", "id INT PRIMARY KEY") else { return };
+        if bun_missing() {
+            return;
+        }
+        // The input lists a connection the job has no relay for, as a stale attachment would.
+        let input = serde_json::json!({ "code": "async function run() { return await ghost.sql`SELECT 1` }", "packages": [], "timeoutMs": 30000, "main": "shop", "mongo": [], "sql": [
+            { "name": "shop", "db": "quarry_test", "tables": [] }, { "name": "ghost", "db": "quarry_test", "tables": [] }] });
+        let (_, res) = shell_run(&w, &rx, input, vec![("shop".into(), relay(&db, true))]);
+        assert!(res.unwrap_err().contains("ghost"));
+    }
+
+    /// Needs QUARRY_TEST_MONGO too. Seeds one document and returns the server's uri.
+    fn mongo_user(w: &Worker, db: &str) -> Option<String> {
+        let uri = std::env::var("QUARRY_TEST_MONGO").ok()?;
+        w.rt.block_on(async {
+            let c = mongodb::Client::with_uri_str(&uri).await.unwrap().database(db).collection::<Document>("users");
+            c.drop().await.unwrap();
+            c.insert_one(mongodb::bson::doc! { "legacyId": 7, "name": "Ada" }).await.unwrap();
+        });
+        Some(uri)
+    }
+
+    /// What poll.rs does with a result line.
+    fn decode(res: &str) -> Document {
+        let v: serde_json::Value = serde_json::from_str(res).unwrap();
+        let Bson::Document(mut d) = Bson::try_from(v).unwrap() else { panic!("not a document") };
+        let Some(Bson::Document(v)) = d.remove("v") else { panic!("v is not a document") };
+        v
+    }
+
+    #[test]
+    fn live_shell_sql_main_reads_an_attached_mongo_and_mixes_types_in_one_result() {
+        let Some((w, rx, db, _p)) = live("t_att3", "id INT PRIMARY KEY") else { return };
+        let Some(uri) = mongo_user(&w, "quarry_attach_a") else { return };
+        if bun_missing() {
+            return;
+        }
+        let script = "async function run() {
+  const found = await travels.users.find({ legacyId: 7 }).toArray();
+  const [row] = await sql`SELECT CAST(9007199254740993 AS SIGNED) AS big, X'0aff' AS bytes`;
+  return { oid: ObjectId('507f1f77bcf86cd799439011'), big: row.big, bytes: row.bytes, name: found[0].name };
+}";
+        // A collection named like a Db method keeps the method.
+        let input = serde_json::json!({ "code": script, "packages": [], "timeoutMs": 30000, "main": "shop",
+            "mongo": [{ "name": "travels", "uri": uri, "db": "quarry_attach_a", "proxy": null, "collections": ["users", "command"], "readOnly": false }],
+            "sql": [{ "name": "shop", "db": "quarry_test", "tables": [] }] });
+        let (queries, res) = shell_run(&w, &rx, input, vec![("shop".into(), relay(&db, true))]);
+        let v = decode(&res.expect("script result"));
+        assert_eq!(v.get_object_id("oid").unwrap().to_hex(), "507f1f77bcf86cd799439011");
+        assert_eq!(v.get_i64("big").unwrap(), 9007199254740993);
+        assert_eq!(v.get_binary_generic("bytes").unwrap(), &vec![0x0a, 0xff]);
+        assert_eq!(v.get_str("name").unwrap(), "Ada");
+        assert!(queries.iter().any(|q| q.conn == "travels" && q.text.starts_with("users.find(") && q.text.contains("legacyId") && q.rows == Some(1)), "{}", query_names(&queries));
+        assert!(queries.iter().any(|q| q.conn == "shop"));
+    }
+
+    #[test]
+    fn live_shell_mongo_main_uses_an_attached_sql_connection_and_the_read_only_guard() {
+        let Some((w, rx, db, _p)) = live("t_att4", "id INT PRIMARY KEY") else { return };
+        let Some(uri) = mongo_user(&w, "quarry_attach_b") else { return };
+        if bun_missing() {
+            return;
+        }
+        let script = "async function run() {
+  const users = await db.collection('users').find({}).toArray();
+  const [{ n }] = await shop.sql`SELECT 41 + 1 AS n`;
+  let refused = null;
+  try { await db.collection('users').insertOne({ x: 1 }) } catch (e) { refused = e.message }
+  return { users: users.length, n, refused };
+}";
+        let input = serde_json::json!({ "code": script, "packages": [], "timeoutMs": 30000, "main": "docs",
+            "mongo": [{ "name": "docs", "uri": uri, "db": "quarry_attach_b", "proxy": null, "collections": ["users"], "readOnly": true }],
+            "sql": [{ "name": "shop", "db": "quarry_test", "tables": [] }] });
+        let (queries, res) = shell_run(&w, &rx, input, vec![("shop".into(), relay(&db, true))]);
+        let v = decode(&res.expect("script result"));
+        assert_eq!(v.get_i32("users").unwrap(), 1);
+        assert_eq!(v.get_i32("n").unwrap(), 42);
+        assert!(v.get_str("refused").unwrap().contains("read-only"));
+        assert!(queries.iter().any(|q| q.conn == "docs" && q.text.starts_with("users.find(")) && queries.iter().any(|q| q.conn == "shop"), "{}", query_names(&queries));
     }
 
     #[test]
@@ -1472,9 +1608,9 @@ mod tests {
         assert_eq!(v["count"], 3, "{v}");
         assert_eq!(v["big"]["note"], "big");
         // The row id came back as an exact value, not a rounded number.
-        assert_eq!(v["big"]["id"].to_string().trim_matches('"'), "9007199254740993", "{v}");
+        assert_eq!(v["big"]["id"]["$numberLong"], "9007199254740993", "{v}");
         assert!(v["unsafe"].as_str().unwrap().contains("BigInt"), "{v}");
-        assert_eq!(v["sum"]["v"].to_string().trim_matches('"'), "9223372036854775807", "{v}");
+        assert_eq!(v["sum"]["v"]["$numberLong"], "9223372036854775807", "{v}");
         assert_eq!(v["sum"]["u"].to_string().trim_matches('"'), "18446744073709551615", "{v}");
     }
 

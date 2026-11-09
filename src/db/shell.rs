@@ -6,12 +6,12 @@ pub struct ShellJob {
     pub runtime: std::path::PathBuf,
     /// Folder holding the runner script and its installed MongoDB driver.
     pub dir: std::path::PathBuf,
-    /// JSON for the runner: uri, db, code, collections, readOnly, timeoutMs.
+    /// First line for the runner: code, packages, timeoutMs, main, mongo entries and sql entries (see shell_runner.mjs).
     pub input: String,
     /// Extra npm packages the person added ("name" or "name@version").
     pub packages: Vec<String>,
-    /// Set for a SQL tab: the script runs sql_runner.mjs and its queries are answered here.
-    pub sql: Option<SqlRelay>,
+    /// The SQL connections of the script by their name in the input. Their queries are answered here.
+    pub sql: Vec<(String, SqlRelay)>,
 }
 
 /// Where a SQL script's queries run. The runner never gets a driver or a password.
@@ -26,6 +26,8 @@ pub struct SqlRelay {
 /// One query a script ran, for the Queries panel.
 #[derive(Clone)]
 pub struct ShellQuery {
+    /// Name of the connection the query ran on.
+    pub conn: String,
     pub text: String,
     /// The values, shortened, as the script passed them.
     pub params: String,
@@ -82,7 +84,6 @@ pub(crate) fn runner_package(packages: &[String]) -> String {
 }
 
 pub(crate) const RUNNER: &str = include_str!("shell_runner.mjs");
-pub(crate) const SQL_RUNNER: &str = include_str!("sql_runner.mjs");
 
 /// Lets the editor's language server resolve the shell's packages and their types.
 const TSCONFIG: &str = r#"{"compilerOptions":{"allowJs":true,"checkJs":false,"noEmit":true,"target":"es2022","module":"esnext","moduleResolution":"bundler","lib":["es2022"],"types":[]},"files":["__quarry_globals.d.ts","__quarry_script.js"]}"#;
@@ -102,7 +103,7 @@ pub(crate) async fn prepare_shell_dir(runtime: &std::path::Path, dir: &std::path
     std::fs::create_dir_all(dir).map_err(e)?;
     let package = runner_package(packages);
     let mut deps_changed = false;
-    for (name, body) in [("runner.mjs", RUNNER), ("sql_runner.mjs", SQL_RUNNER),("package.json", package.as_str()), ("tsconfig.json", TSCONFIG)] {
+    for (name, body) in [("runner.mjs", RUNNER), ("package.json", package.as_str()), ("tsconfig.json", TSCONFIG)] {
         let path = dir.join(name);
         if std::fs::read_to_string(&path).ok().as_deref() != Some(body) {
             std::fs::write(&path, body).map_err(e)?;
@@ -137,7 +138,7 @@ pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + S
         _ = &mut cancel => return Err("Stopped.".into()),
     }
     let mut cmd = Command::new(&job.runtime);
-    cmd.arg(if job.sql.is_some() { "sql_runner.mjs" } else { "runner.mjs" })
+    cmd.arg("runner.mjs")
         .current_dir(&job.dir)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -150,14 +151,9 @@ pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + S
         .map_err(|err| format!("Could not start Bun ({}): {err}", job.runtime.display()))?;
     let mut stdin = child.stdin.take().ok_or("no stdin")?;
     stdin.write_all(job.input.as_bytes()).await.map_err(e)?;
-    // The Mongo runner reads stdin to its end. The SQL runner reads one line and then the answers to its
-    // queries, so its stdin stays open until the result arrives.
-    let mut stdin = if job.sql.is_some() {
-        stdin.write_all(b"\n").await.map_err(e)?;
-        Some(stdin)
-    } else {
-        None
-    };
+    // The runner reads one line and then the answers to SQL queries, so stdin stays open until the result arrives.
+    stdin.write_all(b"\n").await.map_err(e)?;
+    let mut stdin = Some(stdin);
     let mut lines = tokio::io::BufReader::new(child.stdout.take().ok_or("no stdout")?);
     let mut stderr = child.stderr.take().ok_or("no stderr")?;
     // Read alongside stdout: a full stderr pipe would block the child before stdout closes.
@@ -168,7 +164,7 @@ pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + S
     });
     let read = async {
         let mut result: Option<Res<String>> = None;
-        let mut relay: Option<sql::Relay> = None;
+        let mut relays: std::collections::HashMap<String, sql::Relay> = std::collections::HashMap::new();
         while let Some(line) = next_line(&mut lines).await? {
             let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
                 send(Msg::ShellLog { req, level: "log".into(), text: line });
@@ -179,26 +175,40 @@ pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + S
                 Some("log") => send(Msg::ShellLog { req, level: s("level"), text: s("text") }),
                 Some("result") => {
                     result = Some(if v.get("ok").and_then(|o| o.as_bool()) == Some(true) { Ok(s("ejson")) } else { Err(s("error")) });
-                    // Closing the pipe lets the SQL runner exit.
+                    // Closing the pipe lets the runner exit.
                     stdin = None;
                 }
+                Some("query") => {
+                    // A command the runner's own MongoDB client ran.
+                    let q = ShellQuery {
+                        conn: s("conn"),
+                        text: s("text"),
+                        params: String::new(),
+                        rows: v.get("rows").and_then(|x| x.as_u64()).map(|n| n as usize),
+                        affected: v.get("affected").and_then(|x| x.as_u64()),
+                        error: v.get("error").and_then(|x| x.as_str()).map(String::from),
+                        ms: v.get("ms").and_then(|x| x.as_f64()).unwrap_or(0.0) as u128,
+                    };
+                    send(Msg::ShellQuery { req, q });
+                }
                 Some("sql") => {
-                    let Some(cfg) = &job.sql else { continue };
+                    let conn = s("conn");
                     let params = sql_params(v.get("params"));
                     let text = s("text");
                     let t = Instant::now();
                     let res = async {
-                        if relay.is_none() {
-                            relay = Some(sql::Relay::open(&cfg.db, &cfg.schema, cfg.read_only, &cfg.conn_id).await?);
+                        let Some((_, cfg)) = job.sql.iter().find(|(n, _)| *n == conn) else { return Err(format!("There is no SQL connection named \"{conn}\" in this script.")) };
+                        if !relays.contains_key(&conn) {
+                            relays.insert(conn.clone(), sql::Relay::open(&cfg.db, &cfg.schema, cfg.read_only, &cfg.conn_id).await?);
                         }
                         let p = params.as_ref().map_err(|x| x.clone())?;
-                        match relay.as_mut() {
+                        match relays.get_mut(&conn) {
                             Some(r) => r.query(&text, p).await,
                             None => Err("No connection".to_string()),
                         }
                     }
                     .await;
-                    let mut q = ShellQuery { text, params: params_summary(v.get("params")), rows: None, affected: None, error: None, ms: t.elapsed().as_millis() };
+                    let mut q = ShellQuery { conn, text, params: params_summary(v.get("params")), rows: None, affected: None, error: None, ms: t.elapsed().as_millis() };
                     let mut answer = serde_json::json!({ "type": "sqlres", "id": v.get("id") });
                     match res {
                         Ok(sql::Answer::Rows(rows)) => {
@@ -242,7 +252,7 @@ pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + S
         }
         _ = cancel => {
             // The statement in flight keeps running on the server unless it is interrupted too.
-            if let Some(c) = &job.sql {
+            for (_, c) in &job.sql {
                 let id = c.conn_id.load(std::sync::atomic::Ordering::SeqCst);
                 if id != 0 {
                     let _ = sql::Relay::kill(&c.db, id).await;
