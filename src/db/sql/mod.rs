@@ -11,6 +11,7 @@ pub mod write;
 pub mod lex;
 #[allow(dead_code)]
 pub mod value;
+pub mod rules;
 #[allow(unused_imports)]
 pub use dialect::{Dialect, FUNCTIONS, KEYWORDS};
 pub use structure::Structure;
@@ -36,6 +37,120 @@ impl Engine {
 
     pub fn is_sql(self) -> bool {
         self != Engine::Mongo
+    }
+}
+
+/// What the Content bar asks of one page: the clauses of the SELECT as the user wrote them. Each
+/// text is spliced on a line of its own, so a trailing `-- comment` cannot swallow the next clause.
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct PageQuery {
+    pub filter: String,
+    pub order: String,
+    /// The select list entries; empty means `*`.
+    pub select: Vec<String>,
+    pub distinct: bool,
+    pub group: Vec<String>,
+    pub having: String,
+    /// Most rows the whole result may have; pages stop there.
+    pub limit: Option<u64>,
+    /// Rows skipped before the first page (the OFFSET chip).
+    pub skip: u64,
+    /// Index names for `USE INDEX`, comma separated.
+    pub index_hint: String,
+}
+
+impl PageQuery {
+    pub fn grouped(&self) -> bool {
+        !self.group.is_empty()
+    }
+
+    /// `USE INDEX (...)` with every name quoted, so the text cannot carry anything else.
+    fn hint(&self, d: Dialect) -> String {
+        let names: Vec<String> = self.index_hint.split(',').map(str::trim).filter(|n| !n.is_empty()).map(|n| d.quote_ident(n.trim_matches('`'))).collect();
+        if names.is_empty() { String::new() } else { format!(" USE INDEX ({})", names.join(", ")) }
+    }
+
+    fn group_list(&self) -> String {
+        self.group.iter().map(|g| g.trim()).filter(|g| !g.is_empty()).collect::<Vec<_>>().join(", ")
+    }
+
+    fn select_list(&self) -> String {
+        let list: Vec<&str> = self.select.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        if !list.is_empty() {
+            list.join(",\n  ")
+        } else if self.grouped() {
+            self.group_list()
+        } else {
+            "*".into()
+        }
+    }
+
+    /// Everything up to the paging: SELECT, FROM, WHERE, GROUP BY and HAVING. `cols` is false for the count.
+    fn head(&self, d: Dialect, schema: &str, table: &str) -> String {
+        let mut sql = format!("SELECT {}{}\nFROM {}{}", if self.distinct { "DISTINCT " } else { "" }, self.select_list(), d.qualified(schema, table), self.hint(d));
+        if !self.filter.trim().is_empty() {
+            sql.push_str(&format!("\nWHERE (\n{}\n)", self.filter.trim()));
+        }
+        if self.grouped() {
+            sql.push_str(&format!("\nGROUP BY {}", self.group_list()));
+            if !self.having.trim().is_empty() {
+                sql.push_str(&format!("\nHAVING (\n{}\n)", self.having.trim()));
+            }
+        }
+        sql
+    }
+
+    /// The statement for one page, or for Copy as SQL when `page` is None (then only the LIMIT chip
+    /// applies). `pk` is the tiebreak that keeps pages from overlapping or skipping rows.
+    pub fn select_sql(&self, d: Dialect, schema: &str, table: &str, pk: &[String], page: Option<(u64, u64)>) -> String {
+        let mut sql = self.head(d, schema, table);
+        // DISTINCT with a select list cannot order by a column outside the list.
+        let tie = if self.grouped() { self.group_list() } else if self.distinct && !self.select.is_empty() { String::new() } else { pk.iter().map(|p| d.quote_ident(p)).collect::<Vec<_>>().join(", ") };
+        if !self.order.trim().is_empty() {
+            sql.push_str(&format!("\nORDER BY {}", self.order.trim()));
+            if !tie.is_empty() {
+                sql.push_str(&format!("\n, {tie}"));
+            }
+        } else if !tie.is_empty() {
+            sql.push_str(&format!("\nORDER BY {tie}"));
+        }
+        match page {
+            Some((size, offset)) => {
+                let start = self.skip + offset;
+                let size = self.limit.map_or(size, |l| size.min(l.saturating_sub(offset)));
+                sql.push_str(&format!("\n{}", d.page(size, start)));
+            }
+            None => {
+                if let Some(l) = self.limit {
+                    sql.push_str(&format!("\nLIMIT {l}{}", if self.skip > 0 { format!(" OFFSET {}", self.skip) } else { String::new() }));
+                } else if self.skip > 0 {
+                    sql.push_str(&format!("\nLIMIT 18446744073709551615 OFFSET {}", self.skip));
+                }
+            }
+        }
+        sql
+    }
+
+    /// Counts what the pages come from. Groups are counted by wrapping the grouped SELECT.
+    pub fn count_sql(&self, d: Dialect, schema: &str, table: &str) -> String {
+        if self.grouped() || self.distinct {
+            return format!("SELECT COUNT(*) FROM (\n{}\n) AS q", self.head(d, schema, table));
+        }
+        let mut sql = format!("SELECT COUNT(*) FROM {}{}", d.qualified(schema, table), self.hint(d));
+        if !self.filter.trim().is_empty() {
+            sql.push_str(&format!("\nWHERE (\n{}\n)", self.filter.trim()));
+        }
+        sql
+    }
+
+    /// Rows that match the filter before grouping.
+    pub fn rows_sql(&self, d: Dialect, schema: &str, table: &str) -> String {
+        PageQuery { filter: self.filter.clone(), ..Default::default() }.count_sql(d, schema, table)
+    }
+
+    /// Whether the table's row estimate can stand in for the count.
+    pub fn plain(&self) -> bool {
+        self.filter.trim().is_empty() && !self.distinct && !self.grouped() && self.limit.is_none() && self.skip == 0
     }
 }
 

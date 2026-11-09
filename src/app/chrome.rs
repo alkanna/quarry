@@ -37,6 +37,7 @@ impl App {
                 project: t.proj_txt.clone(),
                 agg: t.agg_txt.clone(),
                 shell: t.shell.code.clone(),
+                clauses: t.sql.as_ref().and_then(|s| serde_json::to_string(&s.bar.c).ok()).unwrap_or_default(),
                 stages: if t.stages_src == t.agg_txt { t.stages.iter().map(|s| SavedStage { op: s.op.clone(), text: s.text.clone(), on: s.on }).collect() } else { Vec::new() },
                 agg_text_mode: t.agg_text_mode,
             })

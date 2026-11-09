@@ -10,7 +10,8 @@ impl App {
         let (req, size) = (self.req, self.page_size());
         let t = &mut self.tabs[i];
         (t.req, t.loading, t.size) = (req, true, size);
-        self.worker.sql_page(req, db, t.sel.db.clone(), t.sel.coll.clone(), t.filter_txt.clone(), t.sort_txt.clone(), size, t.page * size);
+        let q = super::sql_bar::page_query(t);
+        self.worker.sql_page(req, db, t.sel.db.clone(), t.sel.coll.clone(), q, size, t.page * size);
     }
 
     /// The centered note for SQL views that a later step builds.
@@ -27,41 +28,9 @@ impl App {
             t.page = 0;
             self.reload();
         }
-        let mut run = false;
-        let mono = egui::TextStyle::Monospace.resolve(ui.style());
-        let row_h = ui.fonts_mut(|f| f.row_height(&mono)) + 4.0;
+        let dialect = self.conn(self.t().map(|t| t.sel.conn).unwrap_or(0)).and_then(|c| c.sql.as_ref()).map(|s| s.dialect).unwrap_or_default();
         let t = &mut self.tabs[self.cur];
-        // ponytail: step 6 replaces this WHERE and ORDER BY line with the F query builder.
-        let fid = query_id("SQL-WHERE");
-        let focused = ui.memory(|m| m.has_focus(fid));
-        let hovered = ui.ctx().read_response(fid).is_some_and(|r| r.hovered());
-        let edge = if focused { PRIMARY() } else if hovered { MUTED() } else { BORDER() };
-        let bar = egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, edge)).corner_radius(R_BAR).inner_margin(egui::Margin { left: 12, right: 6, top: 7, bottom: 7 }).show(ui, |ui| {
-            ui.horizontal_top(|ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                ui.add_sized([0.0, row_h], egui::Label::new(RichText::new("WHERE").font(mono.clone()).color(C_KEYWORD())));
-                let w = (ui.available_width() - 120.0).max(120.0);
-                let r = ui.add(egui::TextEdit::singleline(&mut t.filter_txt).id(fid).frame(editor_margin()).font(mono.clone()).hint_text(RichText::new("status = 'paid' AND total > 50").color(FAINT())).desired_width(w));
-                run |= r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), row_h), egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if run_button(ui, "Run", "↵").on_hover_text("Enter").clicked() {
-                        run = true;
-                    }
-                });
-            });
-        });
-        if focused {
-            ui.painter().rect_stroke(bar.response.rect.expand(1.0), R_BAR + 1, Stroke::new(2.0, tint(PRIMARY(), 60)), egui::StrokeKind::Outside);
-        }
-        ui.add_space(8.0);
-        ui.horizontal_wrapped(|ui| {
-            let id = query_id("SQL-ORDER");
-            let w = (text_w(ui, if t.sort_txt.is_empty() { "created_at DESC" } else { &t.sort_txt }, mono.clone()) + 8.0).clamp(24.0, 420.0);
-            run |= opt_chip(ui, "ORDER BY", id, &mut t.sort_txt, |ui, text| {
-                let r = ui.add(egui::TextEdit::singleline(text).id(id).frame(editor_margin()).font(mono.clone()).hint_text("created_at DESC").desired_width(w).layouter(&mut code_layout));
-                r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))
-            });
-        });
+        let run = super::sql_bar::bar(ui, t, dialect);
         if run {
             self.tm().unwrap().page = 0;
             self.reload();
@@ -117,6 +86,26 @@ impl App {
             self.reload();
         }
         ui.add_space(4.0);
+        let grouped = self.t().and_then(|t| t.sql.as_ref()).and_then(|s| s.matched);
+        if let Some(rows) = grouped {
+            if super::sql_bar::grouped_note(ui, self.t().map_or(0, |t| t.count), rows) {
+                super::sql_bar::ungroup(self.tm().unwrap());
+                self.reload();
+            }
+            ui.add_space(6.0);
+        }
+        let top = ui.cursor().top();
         self.sql_results(ui);
+        // The table has no hook for a double click on a SQL row, so it is read here: the first click already selected the row.
+        let below_header = ui.input(|i| i.pointer.latest_pos()).is_some_and(|p| p.y > top + 34.0 && ui.max_rect().contains(p));
+        let dbl = ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary));
+        let sel = self.t().and_then(|t| t.selected).map(|(_, i)| i);
+        if let (true, true, Some(row)) = (grouped.is_some() && dbl, below_header, sel) {
+            super::sql_bar::drill(self.tm().unwrap(), row, dialect);
+            self.reload();
+        }
+        if let Some(s) = self.tm().and_then(|t| t.sql.as_mut()) {
+            s.bar.shift = ui.input(|i| i.modifiers.shift);
+        }
     }
 }

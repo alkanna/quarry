@@ -39,6 +39,7 @@ mod shell_ls;
 mod sidebar;
 mod sql_structure;
 mod sql_edit;
+mod sql_bar;
 mod sql_views;
 mod state;
 mod table;
@@ -385,6 +386,9 @@ impl App {
                     _ => View::Documents,
                 };
                 (t.filter_txt, t.sort_txt, t.proj_txt, t.shell.code) = (st.filter, st.sort, st.project, st.shell);
+                if let (Some(s), Ok(c)) = (t.sql.as_mut(), serde_json::from_str(&st.clauses)) {
+                    s.bar.c = c;
+                }
                 if !st.agg.is_empty() {
                     t.agg_txt = st.agg;
                 }

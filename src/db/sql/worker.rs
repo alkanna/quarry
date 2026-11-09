@@ -5,7 +5,7 @@
 #![allow(dead_code)]
 
 use super::value::{self, Kind};
-use super::{lex, Addr, Col, Db, Dialect, Pool, ResultSet, SslMode, RUN_ROWS_MAX};
+use super::{lex, Addr, Col, Db, Dialect, PageQuery, Pool, ResultSet, SslMode, RUN_ROWS_MAX};
 use crate::db::{e, Msg, Net, Res, Row, Worker};
 use mongodb::bson::{Bson, Document};
 use sqlx::mysql::{MySqlColumn, MySqlConnectOptions, MySqlPoolOptions, MySqlRow, MySqlSslMode};
@@ -174,14 +174,11 @@ fn one_read(sql: &str) -> Res<()> {
     lex::read_only_check(sql)
 }
 
-/// User text goes on its own lines so a trailing `-- comment` cannot swallow what follows.
-fn where_of(filter: &str) -> String {
-    if filter.trim().is_empty() { String::new() } else { format!("\nWHERE (\n{}\n)", filter.trim()) }
-}
-
-/// The count and whether it is the information_schema estimate rather than an exact count.
-async fn count(pool: &sqlx::MySqlPool, d: Dialect, schema: &str, table: &str, filter: &str) -> Res<(u64, bool)> {
-    if filter.trim().is_empty() {
+/// The count and whether it is the information_schema estimate rather than an exact count. A
+/// grouped or distinct count that the server refuses (duplicate output names) falls back to
+/// zero, since the data query reports the same problem.
+async fn count(pool: &sqlx::MySqlPool, d: Dialect, schema: &str, table: &str, q: &PageQuery) -> Res<(u64, bool)> {
+    if q.plain() {
         let mut c = pool.acquire().await.map_err(e)?;
         // MySQL 8 caches TABLE_ROWS for a day. Fresh numbers cost a lot per schema, so only this one table's
         // lookup asks for them; 5.7 and MariaDB lack the variable, so a refusal is fine.
@@ -193,10 +190,13 @@ async fn count(pool: &sqlx::MySqlPool, d: Dialect, schema: &str, table: &str, fi
             return Ok((n, true));
         }
     }
-    let sql = format!("SELECT COUNT(*) FROM {}{}", d.qualified(schema, table), where_of(filter));
+    let sql = q.count_sql(d, schema, table);
     one_read(&sql)?;
-    let r = raw_sql(&sql).fetch_one(pool).await.map_err(e)?;
-    Ok((raw(&r, 0).and_then(|b| std::str::from_utf8(b).ok()?.parse().ok()).unwrap_or(0), false))
+    match raw_sql(&sql).fetch_one(pool).await {
+        Ok(r) => Ok((raw(&r, 0).and_then(|b| std::str::from_utf8(b).ok()?.parse().ok()).unwrap_or(0), false)),
+        Err(_) if q.grouped() || q.distinct => Ok((0, false)),
+        Err(err) => Err(e(err)),
+    }
 }
 
 /// Column types and the primary key, from information_schema.
@@ -214,27 +214,33 @@ async fn table_meta(pool: &sqlx::MySqlPool, d: Dialect, schema: &str, table: &st
     Ok((meta, pk))
 }
 
-async fn page(db: &Db, schema: &str, table: &str, filter: &str, order: &str, limit: u64, offset: u64) -> Res<(Vec<Col>, Vec<String>, Vec<Row>, u64, bool, u128)> {
+/// One page: columns, primary key, rows, the count of what the pages come from (groups when
+/// grouped), whether that is an estimate, the time, and the rows before grouping when grouped.
+type Paged = (Vec<Col>, Vec<String>, Vec<Row>, u64, bool, u128, Option<u64>);
+
+async fn page(db: &Db, schema: &str, table: &str, q: &PageQuery, limit: u64, offset: u64) -> Res<Paged> {
     let start = Instant::now();
     let Pool::My(pool) = &db.pool;
     let d = db.dialect;
     // The key is needed before the data query: without a total order, pages overlap and skip rows.
     let (meta, mut pk) = table_meta(pool, d, schema, table).await?;
-    let mut sql = format!("SELECT * FROM {}{}", d.qualified(schema, table), where_of(filter));
-    let keys = pk.iter().map(|p| d.quote_ident(p)).collect::<Vec<_>>().join(", ");
-    if !order.trim().is_empty() {
-        sql.push_str(&format!("\nORDER BY {}", order.trim()));
-        // On its own line so a trailing `-- comment` in the order cannot swallow it.
-        if !keys.is_empty() {
-            sql.push_str(&format!("\n, {keys}"));
-        }
-    } else if !keys.is_empty() {
-        sql.push_str(&format!("\nORDER BY {keys}"));
+    if q.grouped() {
+        pk.clear();
     }
-    sql.push_str(&format!("\n{}", d.page(limit, offset)));
+    let sql = q.select_sql(d, schema, table, &pk, Some((limit, offset)));
     one_read(&sql)?;
     let data = async { raw_sql(&sql).fetch_all(pool).await.map_err(e) };
-    let ((count, estimated), rows) = tokio::try_join!(count(pool, d, schema, table, filter), data)?;
+    let ((total, estimated), rows) = tokio::try_join!(count(pool, d, schema, table, q), data)?;
+    // The LIMIT chip caps the whole result, not a page.
+    let count = total.saturating_sub(q.skip).min(q.limit.unwrap_or(u64::MAX));
+    let matched = if q.grouped() {
+        let sql = q.rows_sql(d, schema, table);
+        one_read(&sql)?;
+        let r = raw_sql(&sql).fetch_one(pool).await.map_err(e)?;
+        Some(raw(&r, 0).and_then(|b| std::str::from_utf8(b).ok()?.parse().ok()).unwrap_or(0))
+    } else {
+        None
+    };
     let rcols: Vec<MySqlColumn> = match rows.first() {
         Some(r) => r.columns().to_vec(),
         // An empty page still needs its headers.
@@ -244,9 +250,11 @@ async fn page(db: &Db, schema: &str, table: &str, filter: &str, order: &str, lim
     if !pk.iter().all(|p| rcols.iter().any(|c| c.name() == p)) {
         pk.clear();
     }
+    // Output columns of a grouped query are computed, so they have no table type to look up.
+    let meta = if q.grouped() { HashMap::new() } else { meta };
     let cols = make_cols(&rcols, &meta, !pk.is_empty());
     let rows = rows.iter().map(|r| to_row(&cols, r, &pk)).collect::<Res<Vec<_>>>()?;
-    Ok((cols, pk, rows, count, estimated, start.elapsed().as_millis()))
+    Ok((cols, pk, rows, count, estimated, start.elapsed().as_millis(), matched))
 }
 
 fn failed(stmt: &str, error: String) -> ResultSet {
@@ -423,15 +431,15 @@ impl Worker {
         });
     }
 
-    /// One page of a table. `filter` is the text of a WHERE clause and `order` of an ORDER BY, both
-    /// as the user typed them. Sends `SqlCols` and then `Docs`.
+    /// One page of a table. The clauses are the text of the Content bar as the user typed them.
+    /// Sends `SqlCols` and then `Docs`.
     #[allow(clippy::too_many_arguments)]
-    pub fn sql_page(&self, req: u64, db: Db, schema: String, table: String, filter: String, order: String, limit: u64, offset: u64) {
+    pub fn sql_page(&self, req: u64, db: Db, schema: String, table: String, q: PageQuery, limit: u64, offset: u64) {
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
-            let res = match page(&db, &schema, &table, &filter, &order, limit, offset).await {
-                Ok((cols, pk, rows, count, estimated, ms)) => {
-                    let _ = tx.send(Msg::SqlCols { req, cols, pk, estimated });
+            let res = match page(&db, &schema, &table, &q, limit, offset).await {
+                Ok((cols, pk, rows, count, estimated, ms, matched)) => {
+                    let _ = tx.send(Msg::SqlCols { req, cols, pk, estimated, matched });
                     Ok((rows, count, ms))
                 }
                 Err(err) => Err(err),
@@ -534,10 +542,57 @@ mod tests {
     }
 
     fn page_of(w: &Worker, rx: &Receiver<Msg>, db: &Db, table: &str, filter: &str, order: &str, limit: u64, offset: u64) -> (Vec<Col>, Vec<String>, Vec<Document>, u64) {
-        w.sql_page(7, db.clone(), "quarry_test".into(), table.into(), filter.into(), order.into(), limit, offset);
+        page_q(w, rx, db, table, PageQuery { filter: filter.into(), order: order.into(), ..Default::default() }, limit, offset)
+    }
+
+    fn page_q(w: &Worker, rx: &Receiver<Msg>, db: &Db, table: &str, q: PageQuery, limit: u64, offset: u64) -> (Vec<Col>, Vec<String>, Vec<Document>, u64) {
+        w.sql_page(7, db.clone(), "quarry_test".into(), table.into(), q, limit, offset);
         let Msg::SqlCols { cols, pk, .. } = next(rx) else { panic!("expected SqlCols") };
         let Msg::Docs { res: Ok((rows, count, _)), .. } = next(rx) else { panic!("expected Docs") };
         (cols, pk, rows.iter().map(|r| r.decode().unwrap()).collect(), count)
+    }
+
+    #[test]
+    fn live_page_clauses_select_distinct_group_having_and_index() {
+        let Some((w, rx, db, p)) = live("t_clause", "id INT PRIMARY KEY, status VARCHAR(10), total INT, at DATETIME, KEY k_status (status)") else { return };
+        let vals: Vec<String> = (0..20).map(|i| format!("({i}, '{}', {}, '2026-11-{:02} 10:00:00')", ["paid", "shipped", "open"][i % 3], i * 10, 1 + i % 4)).collect();
+        exec(&w, &p, &format!("INSERT INTO quarry_test.t_clause VALUES {}", vals.join(",")));
+        let base = PageQuery::default();
+        // A select list: only those columns, and the key is gone with its column.
+        let (cols, pk, rows, count) = page_q(&w, &rx, &db, "t_clause", PageQuery { select: vec!["status".into(), "total * 2 AS dbl".into()], order: "total".into(), ..base.clone() }, 5, 0);
+        assert_eq!(cols.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["status", "dbl"]);
+        assert!(pk.is_empty());
+        assert_eq!((rows.len(), count), (5, 20));
+        assert_eq!(rows[1].get_str("status"), Ok("shipped"));
+        // DISTINCT counts distinct rows.
+        let (_, _, rows, count) = page_q(&w, &rx, &db, "t_clause", PageQuery { select: vec!["status".into()], distinct: true, order: "status".into(), ..base.clone() }, 10, 0);
+        assert_eq!((rows.len(), count), (3, 3));
+        // LIMIT caps the whole result and OFFSET skips: 7 rows in 5 per page leave 2 on page 2.
+        let (_, _, rows, count) = page_q(&w, &rx, &db, "t_clause", PageQuery { order: "id".into(), limit: Some(7), skip: 2, ..base.clone() }, 5, 5);
+        assert_eq!((rows.len(), count), (2, 7));
+        assert_eq!(rows[0].get_i64("id"), Ok(7));
+        // GROUP BY with an aggregate and HAVING: counts are groups, rows have no key.
+        let g = PageQuery { select: vec!["status".into(), "COUNT(*) AS n".into(), "SUM(total) AS sum_total".into()], group: vec!["status".into()], having: "n > 6".into(), order: "n DESC".into(), ..base.clone() };
+        let (cols, pk, rows, count) = page_q(&w, &rx, &db, "t_clause", g.clone(), 10, 0);
+        assert_eq!(cols.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["status", "n", "sum_total"]);
+        assert!(pk.is_empty() && rows[0].get("_id").is_none());
+        assert_eq!((rows.len(), count), (2, 2));
+        assert_eq!(rows[0].get_str("status"), Ok("paid"));
+        w.sql_page(8, db.clone(), "quarry_test".into(), "t_clause".into(), g, 10, 0);
+        let Msg::SqlCols { matched, .. } = next(&rx) else { panic!("expected SqlCols") };
+        assert_eq!(matched, Some(20));
+        let _ = next(&rx);
+        // A date grain groups by the day.
+        let day = crate::db::sql::rules::Grain::Day.expr("at", db.dialect);
+        let (_, _, rows, count) = page_q(&w, &rx, &db, "t_clause", PageQuery { select: vec![format!("{day} AS day"), "COUNT(*) AS n".into()], group: vec!["day".into()], order: "day".into(), ..base.clone() }, 10, 0);
+        assert_eq!((rows.len(), count), (4, 4));
+        // The index hint is quoted, and a bad name is the server's error, not an injection.
+        let (_, _, rows, _) = page_q(&w, &rx, &db, "t_clause", PageQuery { filter: "status = 'paid'".into(), index_hint: "k_status".into(), ..base.clone() }, 100, 0);
+        assert_eq!(rows.len(), 7);
+        w.sql_page(9, db.clone(), "quarry_test".into(), "t_clause".into(), PageQuery { index_hint: "k) ; DROP TABLE t_clause; --".into(), ..base }, 10, 0);
+        let Msg::Docs { res, .. } = next(&rx) else { panic!("expected Docs") };
+        assert!(res.is_err());
+        assert_eq!(page_of(&w, &rx, &db, "t_clause", "", "", 100, 0).3, 20);
     }
 
     fn run_all(w: &Worker, rx: &Receiver<Msg>, db: &Db, text: &str, read_only: bool) -> Vec<ResultSet> {
@@ -590,7 +645,7 @@ mod tests {
         // An empty page still has its columns, and injection through the filter is refused.
         let (cols, _, rows, count) = page_of(&w, &rx, &db, "t_page", "n = 99", "", 10, 0);
         assert_eq!((cols.len(), rows.len(), count), (3, 0, 0));
-        w.sql_page(8, db.clone(), "quarry_test".into(), "t_page".into(), "1=1; DELETE FROM t_page".into(), "".into(), 10, 0);
+        w.sql_page(8, db.clone(), "quarry_test".into(), "t_page".into(), PageQuery { filter: "1=1; DELETE FROM t_page".into(), ..Default::default() }, 10, 0);
         let Msg::Docs { res, .. } = next(&rx) else { panic!("expected Docs") };
         assert!(res.is_err());
         // The rows are all still there.

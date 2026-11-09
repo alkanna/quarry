@@ -388,7 +388,7 @@ mod tests {
             self.exec(&sql.replace("{T}", &self.table));
         }
         fn page(&self) -> (Vec<Col>, Vec<String>, Vec<Document>) {
-            self.w.sql_page(7, self.db.clone(), "quarry_write_test".into(), self.table.clone(), String::new(), String::new(), 100, 0);
+            self.w.sql_page(7, self.db.clone(), "quarry_write_test".into(), self.table.clone(), Default::default(), 100, 0);
             let Msg::SqlCols { cols, pk, .. } = self.next() else { panic!("cols") };
             let Msg::Docs { res: Ok((rows, _, _)), .. } = self.next() else { panic!("docs") };
             (cols, pk, rows.iter().map(|r| r.decode().unwrap()).collect())

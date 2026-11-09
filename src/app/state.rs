@@ -241,6 +241,10 @@ pub(super) struct SqlTab {
     pub(super) estimated: bool,
     /// Text for the Query view, set by "Edit in Query" on checked rows.
     pub(super) query: String,
+    /// Rows before grouping when the last answer was grouped; None for an ordinary answer.
+    pub(super) matched: Option<u64>,
+    /// The Content bar: rules, clause chips and their text.
+    pub(super) bar: super::sql_bar::Bar,
     /// Server connection id of the running Custom Query, for Stop (step 8).
     #[allow(dead_code)]
     pub(super) run_conn:Arc<std::sync::atomic::AtomicU64>,

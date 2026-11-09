@@ -92,9 +92,13 @@ impl App {
                         }
                     }
                 }
-                Msg::SqlCols { req, cols, pk, estimated } => {
+                Msg::SqlCols { req, cols, pk, estimated, matched } => {
                     if let Some(s) = self.tab_by_req(req).and_then(|t| t.sql.as_mut()) {
-                        (s.cols, s.pk, s.estimated) = (cols, pk, estimated);
+                        // The rules pick from table columns, which a grouped answer does not have.
+                        if matched.is_none() {
+                            s.bar.table_cols = cols.clone();
+                        }
+                        (s.cols, s.pk, s.estimated, s.matched) = (cols, pk, estimated, matched);
                     }
                 }
                 Msg::SqlStructure { req, res } => {

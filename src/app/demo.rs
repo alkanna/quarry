@@ -342,6 +342,45 @@ impl App {
         (t.count, t.ms, t.size) = (4410, 18, self.page_size());
         t.sort_txt = "created_at DESC".into();
         t.filter_txt = "status = 'paid' AND total > 50".into();
+        // QUARRY_TEST_SQL=rules, sqlmode or grouped pick the query bar's state; anything else is the plain Content view.
+        match std::env::var("QUARRY_TEST_SQL").as_deref() {
+            Ok("rules") => {
+                t.filter_txt = "`status` IN ('paid', 'shipped') AND `total` > 50".into();
+                t.sort_txt = "`created_at` DESC, `total` ASC".into();
+                if let Some(s) = t.sql.as_mut() {
+                    s.bar.c.limit = "100".into();
+                }
+            }
+            Ok("sqlmode") => {
+                t.filter_txt = "status IN ('paid','shipped') AND total > 50".into();
+                t.sort_txt = "created_at DESC, total ASC".into();
+                if let Some(s) = t.sql.as_mut() {
+                    s.bar.c.sql = true;
+                    s.bar.c.group = "status, cu".into();
+                    s.bar.c.limit = "100".into();
+                }
+            }
+            Ok("grouped") => {
+                t.filter_txt = "`status` IN ('paid', 'shipped') AND `total` > 50".into();
+                t.sort_txt = "`revenue` DESC".into();
+                let col = |name: &str, ty: &str| Col { name: name.into(), ty: ty.into(), kind: Kind::from_type_name(ty), nullable: false };
+                let rows: [(&str, &str, i64, &str, &str); 5] = [("paid", "EUR", 61, "6912.40", "113.32"), ("shipped", "EUR", 24, "2301.75", "95.91"), ("paid", "USD", 22, "1980.00", "90.00"), ("shipped", "USD", 14, "1204.10", "86.01"), ("paid", "GBP", 12, "840.25", "70.02")];
+                t.docs = rows.iter().filter_map(|&(st, cur, n, rev, avg)| db::Row::from_doc(&doc! { "status": st, "currency": cur, "orders": n, "revenue": rev, "avg_total": avg }).ok()).collect();
+                t.fields = ["status", "currency", "orders", "revenue", "avg_total"].map(String::from).to_vec();
+                t.count = 9;
+                t.selected = Some((false, 1));
+                if let Some(s) = t.sql.as_mut() {
+                    s.bar.table_cols = std::mem::take(&mut s.cols);
+                    s.cols = vec![col("status", "ENUM"), col("currency", "CHAR"), col("orders", "BIGINT"), col("revenue", "DECIMAL"), col("avg_total", "DECIMAL")];
+                    s.pk.clear();
+                    s.matched = Some(148);
+                    s.bar.c.group = "`status`, `currency`".into();
+                    s.bar.c.select = "`status`, `currency`, COUNT(*) AS `orders`, SUM(`total`) AS `revenue`, AVG(`total`) AS `avg_total`".into();
+                    s.bar.c.having = "`orders` > 10".into();
+                }
+            }
+            _ => {}
+        }
         self.tabs = vec![t, Tab::new(sel("customers")).for_engine(engine)];
         self.cur = 0;
         self.status = ("Offline demo: no database is connected.".into(), false);
