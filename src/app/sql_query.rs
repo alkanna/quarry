@@ -6,7 +6,7 @@ use db::copy::{CopyCol, Fmt};
 use crate::ui::sql_complete::{open_list, sql_ac_field};
 use egui::text::CCursor;
 use std::ops::Range;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 
 /// A fixed line height, so the gutter numbers and the statement band line up with the text.
 const LINE_H: f32 = 20.0;
@@ -29,20 +29,15 @@ pub(super) fn statement_pos(text: &str, caret: usize) -> Option<(Range<usize>, u
     Some((r, i + 1, all.len()))
 }
 
-/// The first keyword of a statement in capitals, for the result tab ("SELECT", "UPDATE").
-fn stmt_kind(stmt: &str) -> String {
-    lex::tokens(stmt).into_iter().find(|(t, _)| *t == lex::Tok::Word).map(|(_, r)| stmt[r].to_ascii_uppercase()).unwrap_or_default()
-}
-
 /// The database a run uses: the picked one, else the tab's own.
 fn run_db(t: &Tab) -> String {
     t.sql.as_ref().map(|s| s.run_db.clone()).filter(|d| !d.is_empty()).unwrap_or_else(|| t.sel.db.clone())
 }
 
 /// One result tab: the statement number, its kind and the outcome in color.
-fn set_tab(ui: &mut egui::Ui, i: usize, set: &ResultSet, on: bool, read_only: bool) -> egui::Response {
-    let (detail, color) = if let Some(e) = &set.error {
-        (if read_only && (e.contains("read-only") || e.contains("not allowed")) { "refused: read-only".to_string() } else { "error".to_string() }, ALERT())
+fn set_tab(ui: &mut egui::Ui, i: usize, set: &ResultSet, on: bool) -> egui::Response {
+    let (detail, color) = if set.error.is_some() {
+        (if set.refused { "refused: read-only" } else { "error" }.to_string(), ALERT())
     } else {
         let what = match set.affected {
             Some(n) => format!("{} affected", group(&n.to_string())),
@@ -52,7 +47,7 @@ fn set_tab(ui: &mut egui::Ui, i: usize, set: &ResultSet, on: bool, read_only: bo
     };
     let mut job = egui::text::LayoutJob::default();
     job.append(&(i + 1).to_string(), 0.0, mono_fmt(TXT_CAPTION, FAINT(), 400.0));
-    job.append(&stmt_kind(&set.stmt), 8.0, ui_fmt(TXT_SMALL, if on { BRIGHT() } else { MUTED() }, if on { W_MEDIUM } else { 400.0 }, 0.0));
+    job.append(&set.kind, 8.0, ui_fmt(TXT_SMALL, if on { BRIGHT() } else { MUTED() }, if on { W_MEDIUM } else { 400.0 }, 0.0));
     job.append(&detail, 8.0, mono_fmt(TXT_CAPTION, color, 400.0));
     let g = ui.painter().layout_job(job);
     let (rect, r) = ui.allocate_exact_size(egui::vec2(g.size().x + 20.0, BUTTON_H), Sense::click());
@@ -221,8 +216,8 @@ impl App {
         let req = self.req;
         let Some(s) = self.tabs[self.cur].sql.as_mut() else { return };
         // Fresh handles per run, so a Stop pressed for an old run never reaches this one.
-        (s.run_req, s.ran_ro, s.cancel, s.run_conn) = (req, read_only, Arc::new(AtomicBool::new(false)), Arc::new(AtomicU64::new(0)));
-        self.worker.sql_run(req, db, schema, text, read_only, 0, s.run_conn.clone(), s.cancel.clone());
+        (s.run_req, s.run) = (req, Default::default());
+        self.worker.sql_run(req, db, schema, text, read_only, 0, s.run.clone());
     }
 
     /// Stops the running script: the statement in flight is interrupted and the rest never starts.
@@ -230,7 +225,7 @@ impl App {
         let Some(t) = self.t() else { return };
         let Some(s) = t.sql.as_ref().filter(|s| s.run_req != 0) else { return };
         if let Some(db) = self.conn(t.sel.conn).and_then(|c| c.sql.clone()) {
-            self.worker.sql_kill(db, s.run_conn.load(Ordering::SeqCst), s.cancel.clone());
+            self.worker.sql_kill(db, s.run.conn.load(Ordering::SeqCst), s.run.cancel.clone());
         }
     }
 
@@ -292,8 +287,8 @@ impl App {
         self.req += 1;
         let req = self.req;
         let Some(s) = self.tabs[self.cur].sql.as_mut() else { return };
-        (s.run_req, s.paging, s.cancel, s.run_conn) = (req, Some(idx), Arc::new(AtomicBool::new(false)), Arc::new(AtomicU64::new(0)));
-        self.worker.sql_run(req, db, schema, stmt, read_only, n, s.run_conn.clone(), s.cancel.clone());
+        (s.run_req, s.paging, s.run) = (req, Some(idx), Default::default());
+        self.worker.sql_run(req, db, schema, stmt, read_only, n, s.run.clone());
     }
 
     pub(super) fn sql_query_view(&mut self, ui: &mut egui::Ui) {
@@ -485,7 +480,7 @@ impl App {
                 egui::ScrollArea::horizontal().id_salt("sql-sets").show(ui, |ui| {
                     ui.horizontal(|ui| {
                         for (i, set) in s.sets.iter().enumerate() {
-                            if set_tab(ui, i, set, i == sel, s.ran_ro).clicked() {
+                            if set_tab(ui, i, set, i == sel).clicked() {
                                 pick = Some(i);
                             }
                         }
@@ -674,30 +669,24 @@ impl App {
             ("Dennis Ritchie", "dennis@example.com", 2, "190.50"),
         ];
         let query = "-- Paid orders over the last week, by customer\nSELECT c.name, c.email, COUNT(*) AS orders, SUM(o.total) AS spent\nFROM orders o\nJOIN customers c ON c.id = o.customer_id\nWHERE o.status = 'paid'\n  AND o.created_at >= CURDATE() - INTERVAL 7 DAY\nGROUP BY c.id\nORDER BY spent DESC;\n\nUPDATE orders SET status = 'shipped' WHERE id IN (4405, 4407);\nSELECT * FROM shipments WHERE order_id = 4405;";
+        let stmt = query.lines().skip(1).take(7).collect::<Vec<_>>().join("\n");
         let first = ResultSet {
-            stmt: query.lines().skip(1).take(7).collect::<Vec<_>>().join("\n"),
             cols: vec![col("name", "VARCHAR"), col("email", "VARCHAR"), col("orders", "BIGINT"), col("spent", "DECIMAL")],
             rows: people.iter().filter_map(|&(n, e, o, s)| db::Row::from_doc(&doc! { "name": n, "email": e, "orders": o, "spent": s }).ok()).collect(),
-            affected: None,
-            error: None,
             ms: 31,
-            capped: false,
-            page: None,
+            ..ResultSet::new(&stmt)
         };
-        let refused = ResultSet { stmt: "UPDATE orders SET status = 'shipped' WHERE id IN (4405, 4407)".into(), cols: Vec::new(), rows: Vec::new(), affected: None, error: Some("This statement is not allowed on a read-only connection. Unlock writes to run it.".into()), ms: 0, capped: false, page: None };
+        let refused = ResultSet { error: Some("This statement is not allowed on a read-only connection. Unlock writes to run it.".into()), refused: true, ..ResultSet::new("UPDATE orders SET status = 'shipped' WHERE id IN (4405, 4407)") };
+        let stmt = "SELECT * FROM shipments WHERE order_id = 4405";
         let last = ResultSet {
-            stmt: "SELECT * FROM shipments WHERE order_id = 4405".into(),
             cols: vec![col("id", "INT"), col("order_id", "INT"), col("carrier", "VARCHAR")],
             rows: db::Row::from_doc(&doc! { "id": 912_i64, "order_id": 4405_i64, "carrier": "DHL" }).into_iter().collect(),
-            affected: None,
-            error: None,
             ms: 4,
-            capped: false,
-            page: None,
+            ..ResultSet::new(stmt)
         };
         if let Some(s) = t.sql.as_mut() {
             s.caret = query.lines().take(6).map(|l| l.chars().count() + 1).sum::<usize>() - 1;
-            (s.query, s.sets, s.ran_ro) = (query.into(), vec![first, refused, last], true);
+            (s.query, s.sets) = (query.into(), vec![first, refused, last]);
             // QUARRY_TEST_CHECKED=1 shows three rows checked with the selection bar.
             if std::env::var("QUARRY_TEST_CHECKED").is_ok() {
                 s.qchecked = [0, 2, 3].into();
@@ -740,7 +729,7 @@ mod tests {
 
     #[test]
     fn kind_skips_comments() {
-        assert_eq!(stmt_kind("-- hi\n  select 1"), "SELECT");
-        assert_eq!(stmt_kind(""), "");
+        assert_eq!(ResultSet::new("-- hi\n  select 1").kind, "SELECT");
+        assert_eq!(ResultSet::new("").kind, "");
     }
 }

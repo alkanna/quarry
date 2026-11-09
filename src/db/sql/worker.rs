@@ -258,7 +258,7 @@ async fn page(db: &Db, schema: &str, table: &str, q: &PageQuery, limit: u64, off
 }
 
 fn failed(stmt: &str, error: String) -> ResultSet {
-    ResultSet { stmt: stmt.into(), cols: Vec::new(), rows: Vec::new(), affected: None, error: Some(error), ms: 0, capped: false, page: None }
+    ResultSet { error: Some(error), ..ResultSet::new(stmt) }
 }
 
 /// Runs one statement and keeps at most `cap` rows of each result. A CALL can return several
@@ -267,8 +267,7 @@ fn failed(stmt: &str, error: String) -> ResultSet {
 async fn run_one(conn: &mut sqlx::MySqlConnection, stmt: &str, cap: usize) -> Vec<ResultSet> {
     let t = Instant::now();
     let mut sets: Vec<ResultSet> = Vec::new();
-    let mut cur = failed(stmt, String::new());
-    cur.error = None;
+    let mut cur = ResultSet::new(stmt);
     let mut cols: Vec<Col> = Vec::new();
     let mut failure = None;
     {
@@ -293,8 +292,7 @@ async fn run_one(conn: &mut sqlx::MySqlConnection, stmt: &str, cap: usize) -> Ve
                 }
                 // The end of one result set (or the OK of a write).
                 Ok(Either::Left(r)) => {
-                    let mut done = std::mem::replace(&mut cur, failed(stmt, String::new()));
-                    cur.error = None;
+                    let mut done = std::mem::replace(&mut cur, ResultSet::new(stmt));
                     done.cols = std::mem::take(&mut cols);
                     if done.cols.is_empty() {
                         done.affected = Some(r.rows_affected());
@@ -382,7 +380,7 @@ async fn run(db: &Db, schema: &str, text: &str, read_only: bool, id: &AtomicU64,
         }
         if read_only {
             if let Err(why) = lex::read_only_check(stmt) {
-                sets.push(failed(stmt, why));
+                sets.push(ResultSet { refused: true, ..failed(stmt, why) });
                 continue;
             }
         }
@@ -479,6 +477,15 @@ pub fn fill(text: &str, params: &[value::Param], backslash: bool, ansi: bool) ->
     }
     out.push_str(&text[last..]);
     Ok(out)
+}
+
+/// What Stop needs of a running Custom Query: the server connection id once it is known, and the flag
+/// that keeps the rest of the script from starting. Each run gets a fresh one, so a late Stop never
+/// reaches the next run.
+#[derive(Clone, Default)]
+pub struct RunHandle {
+    pub conn: Arc<AtomicU64>,
+    pub cancel: Arc<AtomicBool>,
 }
 
 /// A shell script's own connection, kept for the whole run so its @variables and transactions persist.
@@ -707,13 +714,13 @@ impl Worker {
         });
     }
 
-    /// Runs a Custom Query script on its own connection, whose id is stored in `conn_id` as soon as it
-    /// is known so `sql_kill` can stop it. `cancel` is the flag `sql_kill` sets to keep the rest of the script from running.
-    pub fn sql_run(&self, req: u64, db: Db, schema: String, text: String, read_only: bool, page: usize, conn_id: Arc<AtomicU64>, cancel: Arc<AtomicBool>) {
+    /// Runs a Custom Query script on its own connection, whose id is stored in `h` as soon as it is
+    /// known so `sql_kill` can stop it.
+    pub fn sql_run(&self, req: u64, db: Db, schema: String, text: String, read_only: bool, page: usize, h: RunHandle) {
         self.spawn(async move {
-            let sets = run(&db, &schema, &text, read_only, &conn_id, &cancel, page).await;
+            let sets = run(&db, &schema, &text, read_only, &h.conn, &h.cancel, page).await;
             // The server reuses connection ids, so a late Stop must not hit another session.
-            conn_id.store(0, Ordering::SeqCst);
+            h.conn.store(0, Ordering::SeqCst);
             Msg::SqlRan { req, sets }
         });
     }
@@ -871,7 +878,7 @@ mod tests {
     }
 
     fn run_all(w: &Worker, rx: &Receiver<Msg>, db: &Db, text: &str, read_only: bool) -> Vec<ResultSet> {
-        w.sql_run(9, db.clone(), "quarry_test".into(), text.into(), read_only, 0, Default::default(), Default::default());
+        w.sql_run(9, db.clone(), "quarry_test".into(), text.into(), read_only, 0, Default::default());
         let Msg::SqlRan { sets, .. } = next(rx) else { panic!("expected SqlRan") };
         sets
     }
@@ -1153,9 +1160,9 @@ mod tests {
     #[test]
     fn live_kill_stops_a_running_statement() {
         let Some((w, rx, db, _p)) = live("", "") else { return };
-        let id = Arc::new(AtomicU64::new(0));
-        let cancel = Arc::new(AtomicBool::new(false));
-        w.sql_run(3, db.clone(), "quarry_test".into(), "SELECT SLEEP(10)".into(), true, 0, id.clone(), cancel.clone());
+        let h = RunHandle::default();
+        let (id, cancel) = (h.conn.clone(), h.cancel.clone());
+        w.sql_run(3, db.clone(), "quarry_test".into(), "SELECT SLEEP(10)".into(), true, 0, h);
         let start = Instant::now();
         while id.load(Ordering::SeqCst) == 0 {
             assert!(start.elapsed() < Duration::from_secs(5), "no connection id");
@@ -1182,10 +1189,10 @@ mod tests {
     fn live_stop_keeps_later_statements_from_running() {
         let Some((w, rx, db, p)) = live("t_stop", "id INT PRIMARY KEY") else { return };
         exec(&w, &p, "INSERT INTO quarry_test.t_stop VALUES (1)");
-        let id = Arc::new(AtomicU64::new(0));
-        let cancel = Arc::new(AtomicBool::new(false));
+        let h = RunHandle::default();
+        let (id, cancel) = (h.conn.clone(), h.cancel.clone());
         // Unlocked, so the DELETE would really run if Stop only interrupted the sleep.
-        w.sql_run(3, db.clone(), "quarry_test".into(), "SELECT SLEEP(5); DELETE FROM t_stop".into(), false, 0, id.clone(), cancel.clone());
+        w.sql_run(3, db.clone(), "quarry_test".into(), "SELECT SLEEP(5); DELETE FROM t_stop".into(), false, 0, h);
         let start = Instant::now();
         while id.load(Ordering::SeqCst) == 0 {
             assert!(start.elapsed() < Duration::from_secs(5), "no connection id");
@@ -1270,7 +1277,7 @@ mod tests {
         exec(&w, &p, &format!("INSERT INTO quarry_test.t_pages VALUES {}", vals.join(",")));
         let stmt = "SELECT id -- the key\nFROM t_pages ORDER BY id DESC";
         let page = |n: usize| {
-            w.sql_run(9, db.clone(), "quarry_test".into(), stmt.into(), true, n, Default::default(), Default::default());
+            w.sql_run(9, db.clone(), "quarry_test".into(), stmt.into(), true, n, Default::default());
             let Msg::SqlRan { mut sets, .. } = next(&rx) else { panic!("expected SqlRan") };
             sets.remove(0)
         };

@@ -172,10 +172,10 @@ impl App {
         let paged = set.is_some_and(|x| x.page.is_some());
         let all = set.filter(|x| x.error.is_none() && !x.stmt.trim().is_empty()).and_then(|x| {
             let db = self.conn(t.sel.conn).and_then(|c| c.sql.clone())?;
-            let refused = lex_check(&x.stmt);
+            let refused = db::sql::lex::read_only_check(&x.stmt).err();
             Some(AllRows { db, schema: t.sql.as_ref().map(|s| s.run_db.clone()).filter(|d| !d.is_empty()).unwrap_or_else(|| t.sel.db.clone()), stmt: x.stmt.clone(), total: x.page.and_then(|p| p.total), paged, refused })
         });
-        let scope = pick_scope(all_pages, all.as_ref().is_some_and(|a| a.refused.is_none()), !selected.is_empty());
+        let scope = pick_scope(Ask { all_pages, all_ok: all.as_ref().is_some_and(|a| a.refused.is_none()), has_selected: !selected.is_empty() });
         let fmt = if sql { Format::T(Fmt::Csv) } else { Format::MongoJson };
         self.modal = Some(Modal::Export(Box::new(ExportForm { src, sql, fmt, header: true, scope, selected, shown, all, paged })));
     }
@@ -351,20 +351,22 @@ impl App {
     }
 }
 
+/// What decides the dialog's first scope.
+struct Ask {
+    all_pages: bool,
+    all_ok: bool,
+    has_selected: bool,
+}
+
 /// The scope the dialog starts on: every page when that was asked for and is allowed, else the checked rows, else what is shown.
-fn pick_scope(all_pages: bool, all_ok: bool, has_selected: bool) -> Scope {
-    if all_pages && all_ok {
+fn pick_scope(a: Ask) -> Scope {
+    if a.all_pages && a.all_ok {
         Scope::All
-    } else if has_selected {
+    } else if a.has_selected {
         Scope::Selected
     } else {
         Scope::Shown
     }
-}
-
-/// Why `stmt` may not be streamed, if so.
-fn lex_check(stmt: &str) -> Option<String> {
-    db::sql::lex::read_only_check(stmt).err()
 }
 
 fn lex_check_msg(stmt: &str) -> Result<(), String> {
@@ -377,22 +379,22 @@ mod tests {
 
     #[test]
     fn the_dialog_starts_on_the_widest_scope_asked_for_that_is_allowed() {
-        assert!(pick_scope(true, true, true) == Scope::All);
+        let ask = |all_pages, all_ok, has_selected| pick_scope(Ask { all_pages, all_ok, has_selected });
+        assert!(ask(true, true, true) == Scope::All);
         // Refused statements fall back to the checked rows, then to what is shown.
-        assert!(pick_scope(true, false, true) == Scope::Selected);
-        assert!(pick_scope(true, false, false) == Scope::Shown);
-        assert!(pick_scope(false, true, true) == Scope::Selected);
-        assert!(pick_scope(false, true, false) == Scope::Shown);
+        assert!(ask(true, false, true) == Scope::Selected);
+        assert!(ask(true, false, false) == Scope::Shown);
+        assert!(ask(false, true, true) == Scope::Selected);
+        assert!(ask(false, true, false) == Scope::Shown);
     }
 
     #[test]
     fn all_rows_export_refuses_what_writes() {
         for w in ["DELETE FROM t", "UPDATE t SET a = 1", "SELECT * FROM t INTO OUTFILE '/tmp/x'", "SET SESSION transaction_read_only = 0", "DROP TABLE t"] {
-            assert!(lex_check(w).is_some(), "{w}");
             assert!(lex_check_msg(w).is_err(), "{w}");
         }
         for r in ["SELECT * FROM t", "WITH c AS (SELECT 1) SELECT * FROM c", "SHOW TABLES"] {
-            assert!(lex_check(r).is_none(), "{r}");
+            assert!(lex_check_msg(r).is_ok(), "{r}");
         }
     }
 

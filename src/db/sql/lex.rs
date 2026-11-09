@@ -265,8 +265,9 @@ fn punct(t: &Code, p: &str) -> bool {
 
 const REFUSED: &str = "Unlock writes first.";
 
-/// Allow-list on the first keyword, because the session guard (`TRANSACTION READ ONLY`) does not
-/// stop everything, for example SET SESSION or INTO OUTFILE. Several statements are all checked.
+/// Allow-list on the first keyword. The session's READ ONLY transaction is the server-side guard; this
+/// check refuses what that guard does not cover, for example SET SESSION or INTO OUTFILE, so neither
+/// is the only boundary. Several statements are all checked.
 /// The server may or may not run `/*! */` text and may read quotes differently, so the text must pass
 /// under every combination of those readings. The default reading goes first for its messages.
 pub fn read_only_check(stmt: &str) -> Result<(), String> {

@@ -255,16 +255,12 @@ pub(super) struct SqlTab {
     pub(super) matched: Option<u64>,
     /// The Content bar: rules, clause chips and their text.
     pub(super) bar: super::sql_bar::Bar,
-    /// Server connection id of the running Custom Query, for Stop.
-    pub(super) run_conn: Arc<std::sync::atomic::AtomicU64>,
-    /// Set by Stop so the rest of the script never starts.
-    pub(super) cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// What Stop reaches of the running Custom Query.
+    pub(super) run: db::sql::RunHandle,
     /// The outcome of each statement of the last run, the one shown, and the request still awaited (0 when idle).
     pub(super) sets: Vec<db::sql::ResultSet>,
     pub(super) set_sel: usize,
     pub(super) run_req: u64,
-    /// The last run was read-only, which words its refusals.
-    pub(super) ran_ro: bool,
     /// Database the Query view runs in when it is not the tab's own.
     pub(super) run_db: String,
     /// Caret of the Query editor as a char index.

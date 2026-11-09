@@ -62,7 +62,7 @@ pub(super) fn docs_menu(ui: &mut egui::Ui, n: usize, heading: bool, sql: bool, g
 
 /// The floating bar over the bottom of the results while rows are checked: how many, the actions and Cancel.
 /// Returns whether Cancel was pressed and the action picked.
-pub(super) fn selection_area(ui: &mut egui::Ui, n: usize, hidden: bool, read_only: bool, sql: bool, grouped: bool) -> (bool, Option<DocsAct>) {
+pub(super) fn selection_area(ui: &mut egui::Ui, n: usize, hidden: bool, results_view: bool, sql: bool, grouped: bool) -> (bool, Option<DocsAct>) {
     if n == 0 || hidden {
         return (false, None);
     }
@@ -78,7 +78,7 @@ pub(super) fn selection_area(ui: &mut egui::Ui, n: usize, hidden: bool, read_onl
                 ui.horizontal(|ui| {
                     ui.label(semibold(RichText::new(format!("{n} selected")).color(BRIGHT())));
                     ui.add_space(8.0);
-                    let act = if read_only { results_menu(ui, n, false, sql) } else { docs_menu(ui, n, false, sql, grouped) };
+                    let act = if results_view { results_menu(ui, n, false, sql) } else { docs_menu(ui, n, false, sql, grouped) };
                     cancel = ui.button("Cancel").on_hover_text("Clear the selection").clicked();
                     act
                 })
@@ -693,8 +693,8 @@ impl App {
         let sql = self.t().is_some_and(|t| t.sql.is_some());
         let grouped = self.t().and_then(|t| t.sql.as_ref()).is_some_and(|s| s.matched.is_some());
         // Query and Shell results are read only: no edit or delete actions.
-        let read_only = self.t().is_some_and(|t| matches!(t.view, View::Sql | View::Shell));
-        let (cancel, act) = selection_area(ui, n, hidden, read_only, sql, grouped);
+        let results_view = self.t().is_some_and(|t| matches!(t.view, View::Sql | View::Shell));
+        let (cancel, act) = selection_area(ui, n, hidden, results_view, sql, grouped);
         if cancel {
             self.checks_mut().0.clear();
         } else if let Some(a) = act {

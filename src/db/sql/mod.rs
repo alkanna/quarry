@@ -12,7 +12,7 @@ pub mod rules;
 pub mod schema;
 pub use dialect::{Dialect, FUNCTIONS, KEYWORDS};
 pub use structure::Structure;
-pub use worker::{Answer, Relay};
+pub use worker::{Answer, Relay, RunHandle};
 
 /// Which kind of server a saved connection talks to. Saved connections from before SQL support
 /// have no engine field and load as Mongo.
@@ -222,6 +222,18 @@ pub struct ResultSet {
     pub capped: bool,
     /// Set for a SELECT read a page at a time.
     pub page: Option<Page>,
+    /// The first keyword of `stmt` in capitals ("SELECT"), for the result tab.
+    pub kind: String,
+    /// The read-only check refused the statement, so it never reached the server. `error` holds the words.
+    pub refused: bool,
+}
+
+impl ResultSet {
+    /// An empty outcome of `stmt`.
+    pub fn new(stmt: &str) -> ResultSet {
+        let kind = lex::tokens(stmt).into_iter().find(|(t, _)| *t == lex::Tok::Word).map(|(_, r)| stmt[r].to_ascii_uppercase()).unwrap_or_default();
+        ResultSet { stmt: stmt.into(), cols: Vec::new(), rows: Vec::new(), affected: None, error: None, ms: 0, capped: false, page: None, kind, refused: false }
+    }
 }
 
 /// Where a paged result stands: the page shown, whether another follows, and the whole row count once known.
