@@ -5,6 +5,13 @@ use super::*;
 impl App {
     pub(super) fn poll(&mut self, ctx: &egui::Context) {
         while let Ok(m) = self.rx.try_recv() {
+            let m = match m {
+                Msg::Duplicated { conn, db, to, res } => {
+                    self.copying.remove(&(conn, db.clone(), to));
+                    Msg::DbChanged { conn, db, res }
+                }
+                m => m,
+            };
             match m {
                 Msg::Connected { conn, res } => {
                     let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) else { continue };
@@ -52,7 +59,13 @@ impl App {
                     }
                 }
                 Msg::Collections { conn, db, res } => match res {
-                    Ok((v, views)) => {
+                    Ok((mut v, views)) => {
+                        // A copy still running is not listed yet; keep its row and spinner until it ends.
+                        let pending = self.copying.iter().filter(|c| c.0 == conn && c.1 == db && !v.contains(&c.2)).map(|c| c.2.clone()).collect::<Vec<_>>();
+                        if !pending.is_empty() {
+                            v.extend(pending);
+                            v.sort();
+                        }
                         self.views.retain(|(c, d, _)| !(*c == conn && *d == db));
                         self.views.extend(views.into_iter().map(|n| (conn, db.clone(), n)));
                         if let Some(d) = self.conns.iter_mut().find(|c| c.meta.id == conn).and_then(|c| c.dbs.iter_mut().find(|d| d.0 == db)) {
@@ -156,10 +169,10 @@ impl App {
                     (_, Err(e)) => self.err(e),
                     _ => {}
                 },
+                // Turned into DbChanged above.
+                Msg::Duplicated { .. } => {}
                 Msg::DbChanged { conn, db, res } => {
                     let dropped = self.dropping_db.take_if(|d| d.0 == conn && d.1 == db);
-                    // ponytail: any change in this database ends its copies; two copies at once in one database lose the spinner early
-                    self.copying.retain(|c| !(c.0 == conn && c.1 == db));
                     match res {
                         Ok(m) => self.ok(m),
                         Err(e) => {

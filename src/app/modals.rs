@@ -263,7 +263,7 @@ impl App {
                 }
                 Modal::DuplicateColl { conn, db, coll, name } => {
                     dialog_title(ui, format!("Duplicate {db}.{coll}"));
-                    ui.label(RichText::new("Copies every document and index into a new collection of this database.").color(MUTED()));
+                    ui.label(RichText::new("Copies every document, index and setting (validator, collation) into a new collection of this database.").color(MUTED()));
                     ui.add(egui::TextEdit::singleline(name).desired_width(320.0));
                     let to = name.trim().to_string();
                     let taken = self.conn(*conn).and_then(|c| c.dbs.iter().find(|d| d.0 == *db)).and_then(|d| d.1.as_ref()).is_some_and(|l| l.contains(&to));
@@ -272,16 +272,18 @@ impl App {
                     }
                     dialog_actions(ui, |ui| {
                         if ui.add_enabled(!to.is_empty() && !taken, primary_button(ui, "Duplicate", PRIMARY())).clicked() {
-                            if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == *conn) {
-                                // Shown right away with a spinner; the list from the server replaces it when the copy ends.
-                                if let Some(l) = c.dbs.iter_mut().find(|d| d.0 == *db).and_then(|d| d.1.as_mut()) {
-                                    l.push(to.clone());
-                                    l.sort();
-                                }
-                                if let Some(client) = c.client.clone() {
+                            match self.conns.iter_mut().find(|c| c.meta.id == *conn).filter(|c| c.client.is_some()) {
+                                Some(c) => {
+                                    // Shown right away with a spinner until the copy ends.
+                                    if let Some(l) = c.dbs.iter_mut().find(|d| d.0 == *db).and_then(|d| d.1.as_mut()) {
+                                        l.push(to.clone());
+                                        l.sort();
+                                    }
+                                    let client = c.client.clone().unwrap();
                                     self.copying.insert((*conn, db.clone(), to.clone()));
                                     self.worker.duplicate_coll(*conn, client, db.clone(), coll.clone(), to);
                                 }
+                                None => self.err("Not connected."),
                             }
                             keep = false;
                         }

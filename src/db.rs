@@ -202,6 +202,8 @@ pub enum Msg {
     Command { tag: String, res: Res<Document> },
     /// A database-level change finished; the collection list of `db` is reloaded.
     DbChanged { conn: u64, db: String, res: Res<String> },
+    /// A collection copy into `to` finished; handled like DbChanged once its spinner is cleared.
+    Duplicated { conn: u64, db: String, to: String, res: Res<String> },
     Docs { req: u64, res: Res<(Vec<Row>, u64, u128)> },
     Indexes { req: u64, res: Res<Vec<Document>> },
     /// Usage and suggestions for the collection named `key` ("db.coll").

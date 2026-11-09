@@ -574,6 +574,15 @@ pub(crate) fn spin(ui: &mut egui::Ui) {
     }
 }
 
+/// `spin` painted into a rect, for rows painted by hand.
+pub(crate) fn spin_at(ui: &egui::Ui, rect: egui::Rect) {
+    if ui.input(|i| i.viewport().focused.unwrap_or(true)) {
+        egui::Spinner::new().color(FAINT()).paint_at(ui, rect);
+    } else {
+        ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "…", FontId::proportional(TXT_SMALL), FAINT());
+    }
+}
+
 /// One clickable sidebar row painted by hand, so it reads as a list rather than a form.
 pub(crate) fn side_row(ui: &mut egui::Ui, height: f32, indent: f32, active: bool, paint: impl FnOnce(&egui::Painter, egui::Rect)) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), Sense::click());

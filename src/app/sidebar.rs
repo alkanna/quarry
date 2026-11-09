@@ -413,7 +413,7 @@ impl App {
                         let r = side_row(ui, SIDE_ROW_H, 18.0, active, |p, r| {
                             // Collections are marked as documents, views with a hollow diamond so
                             // they read as derived data. A collection still being copied gets a spinner.
-                            glyph_at = egui::Rect::from_center_size(egui::pos2(r.left() + 6.0, r.center().y), egui::vec2(11.0, 11.0));
+                            glyph_at = egui::Rect::from_center_size(egui::pos2(r.left() + 6.0, r.center().y), egui::Vec2::splat(TXT_SMALL));
                             let (glyph, gc) = if busy { ("", FAINT()) } else if is_view { ("◇", C_DATE()) } else { ("{}", if active { PRIMARY() } else { FAINT() }) };
                             p.text(egui::pos2(r.left(), r.center().y), egui::Align2::LEFT_CENTER, glyph, FontId::monospace(10.0), gc);
                             let w = r.width() - 20.0;
@@ -421,18 +421,18 @@ impl App {
                             p.galley(egui::pos2(r.left() + 20.0, r.center().y - galley.size().y / 2.0), galley, TEXT());
                         });
                         if busy {
-                            if ui.input(|i| i.viewport().focused.unwrap_or(true)) {
-                                egui::Spinner::new().size(11.0).color(FAINT()).paint_at(ui, glyph_at);
-                            } else {
-                                ui.painter().text(glyph_at.center(), egui::Align2::CENTER_CENTER, "…", FontId::monospace(10.0), FAINT());
-                            }
+                            spin_at(ui, glyph_at);
                         }
                         let r = if is_view { r.on_hover_text("View (read-only)") } else if busy { r.on_hover_text("Being copied") } else { r };
                         if matches!(&self.reveal, Some((c, d, Some(k))) if *c == id && d == db_name && k == coll) {
                             r.scroll_to_me(Some(egui::Align::Center));
                             revealed = true;
                         }
-                        if r.clicked() && !busy {
+                        // A collection still being copied does not exist yet, so it neither opens nor offers actions.
+                        if busy {
+                            continue;
+                        }
+                        if r.clicked() {
                             open = Some(sel.clone());
                         }
                         r.context_menu(|ui| {

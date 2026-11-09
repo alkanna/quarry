@@ -180,20 +180,32 @@ impl Worker {
         });
     }
 
-    /// Copies a collection's documents and indexes under a new name in the same database.
+    /// Copies a collection's documents, settings and indexes under a new name in the same database.
     pub fn duplicate_coll(&self, conn: u64, client: Client, db: String, from: String, to: String) {
         self.spawn(async move {
             let res = async {
                 let d = client.database(&db);
-                // $out replaces a collection that exists, so a name taken since the dialog opened is refused here.
-                if !d.list_collection_names().filter(doc! { "name": &to }).await.map_err(e)?.is_empty() {
-                    return Err(format!("{db}.{to} already exists"));
+                let batch = |r: Document| r.get_document("cursor").and_then(|c| c.get_array("firstBatch")).cloned().map_err(|_| "Unexpected reply from the server".to_string());
+                let info = batch(d.run_command(doc! { "listCollections": 1, "filter": { "name": &from } }).await.map_err(e)?)?;
+                let mut opts = info.first().and_then(Bson::as_document).and_then(|c| c.get_document("options").ok()).cloned().unwrap_or_default();
+                // $merge cannot write into either kind, and a plain copy would quietly drop what makes them special.
+                if opts.get_bool("capped").unwrap_or(false) || opts.contains_key("timeseries") {
+                    return Err(format!("{from} is capped or time-series and cannot be duplicated here; use Dump and Restore"));
                 }
+                if let Ok(ci) = opts.get_document_mut("clusteredIndex") {
+                    ci.remove("v");
+                }
+                // Creating the copy first refuses a taken name atomically, where $out would replace that collection,
+                // and keeps the source's validator, collation and other settings.
+                let mut create = doc! { "create": &to };
+                create.extend(opts);
+                d.run_command(create).await.map_err(e)?;
                 let src = d.collection::<Document>(&from);
-                src.aggregate(vec![doc! { "$out": &to }]).await.map_err(e)?;
-                // $out copies documents only, so the indexes are created again on the copy.
-                let list = d.run_command(doc! { "listIndexes": &from }).await.map_err(e)?;
-                let specs: Vec<Bson> = list.get_document("cursor").and_then(|c| c.get_array("firstBatch")).map(|a| a.clone()).unwrap_or_default().into_iter()
+                // Documents that predate the validator must still copy.
+                src.aggregate(vec![doc! { "$merge": { "into": &to, "whenMatched": "fail", "whenNotMatched": "insert" } }]).bypass_document_validation(true).await.map_err(e)?;
+                // Raw specs keep every index option exactly as the server stores it.
+                let specs: Vec<Bson> = batch(d.run_command(doc! { "listIndexes": &from }).await.map_err(e)?)?
+                    .into_iter()
                     .filter_map(|s| match s {
                         Bson::Document(mut s) if s.get_str("name") != Ok("_id_") => {
                             s.remove("ns");
@@ -203,12 +215,12 @@ impl Worker {
                     })
                     .collect();
                 if !specs.is_empty() {
-                    d.run_command(doc! { "createIndexes": &to, "indexes": specs }).await.map_err(e)?;
+                    d.run_command(doc! { "createIndexes": &to, "indexes": specs }).await.map_err(|err| format!("Copied the documents to {to}, but its indexes failed: {}", e(err)))?;
                 }
                 Ok(format!("Duplicated {from} to {to}"))
             }
             .await;
-            Msg::DbChanged { conn, db, res }
+            Msg::Duplicated { conn, db, to, res }
         });
     }
 
@@ -1242,18 +1254,24 @@ mod tests {
     #[test]
     fn live_duplicate_copies_documents_and_indexes_and_refuses_a_taken_name() {
         let Some((w, rx, t)) = live("dup_src") else { return };
-        let Some((_, _, copy)) = live("dup_copy") else { return };
+        let copy = Target { coll: "dup_copy".into(), ..t.clone() };
+        w.rt.block_on(async { copy.c().drop().await.unwrap() });
         seed(&w, &t, (0..10).map(|i| doc! { "_id": i, "k": i }).collect());
-        w.rt.block_on(async { t.c().create_index(mongodb::IndexModel::builder().keys(doc! { "k": 1 }).build()).await.unwrap() });
+        w.rt.block_on(async {
+            t.c().create_index(mongodb::IndexModel::builder().keys(doc! { "k": 1 }).build()).await.unwrap();
+            t.client.database(&t.db).run_command(doc! { "collMod": &t.coll, "validator": { "k": { "$gte": 0 } } }).await.unwrap();
+        });
         w.duplicate_coll(0, t.client.clone(), t.db.clone(), t.coll.clone(), copy.coll.clone());
-        let Msg::DbChanged { res, .. } = next(&rx) else { panic!("expected DbChanged") };
+        let Msg::Duplicated { res, .. } = next(&rx) else { panic!("expected Duplicated") };
         res.unwrap();
         assert_eq!(all(&w, &copy), all(&w, &t));
         let names: Vec<String> = w.rt.block_on(async { copy.c().list_index_names().await.unwrap() });
         assert!(names.contains(&"k_1".to_string()));
+        let specs: Vec<mongodb::results::CollectionSpecification> = w.rt.block_on(async { t.client.database(&t.db).list_collections().filter(doc! { "name": &copy.coll }).await.unwrap().try_collect().await.unwrap() });
+        assert!(specs[0].options.validator.is_some());
         // A second copy onto the same name is refused instead of replacing it.
         w.duplicate_coll(0, t.client.clone(), t.db.clone(), t.coll.clone(), copy.coll.clone());
-        let Msg::DbChanged { res, .. } = next(&rx) else { panic!("expected DbChanged") };
+        let Msg::Duplicated { res, .. } = next(&rx) else { panic!("expected Duplicated") };
         assert!(res.unwrap_err().contains("already exists"));
     }
 
