@@ -186,8 +186,12 @@ impl Worker {
             let res = async {
                 let d = client.database(&db);
                 // Independent reads, so they share one round trip.
-                let (info, indexes) = tokio::try_join!(d.run_command(doc! { "listCollections": 1, "filter": { "name": &from } }), d.run_command(doc! { "listIndexes": &from })).map_err(e)?;
+                let (info, indexes, taken) = tokio::try_join!(d.run_command(doc! { "listCollections": 1, "filter": { "name": &from } }), d.run_command(doc! { "listIndexes": &from }), d.run_command(doc! { "listCollections": 1, "filter": { "name": &to }, "nameOnly": true })).map_err(e)?;
                 let (info, indexes) = (first_batch(info)?, first_batch(indexes)?);
+                // Since MongoDB 7 create succeeds on a collection that exists with the same options, so it alone no longer refuses a taken name.
+                if !first_batch(taken)?.is_empty() {
+                    return Err(format!("{to} already exists in {db}"));
+                }
                 let mut opts = info.first().and_then(Bson::as_document).and_then(|c| c.get_document("options").ok()).cloned().unwrap_or_default();
                 // $merge cannot write into either kind, and a plain copy would quietly drop what makes them special.
                 if opts.get_bool("capped").unwrap_or(false) || opts.contains_key("timeseries") {
@@ -196,8 +200,8 @@ impl Worker {
                 if let Ok(ci) = opts.get_document_mut("clusteredIndex") {
                     ci.remove("v");
                 }
-                // Creating the copy first refuses a taken name atomically, where $out would replace that collection,
-                // and keeps the source's validator, collation and other settings.
+                // Creating the copy first refuses a name taken since the check above with other options, where $out would
+                // replace that collection, and keeps the source's validator, collation and other settings.
                 let mut create = doc! { "create": &to };
                 create.extend(opts);
                 d.run_command(create).await.map_err(e)?;
@@ -1277,7 +1281,8 @@ mod tests {
         // A second copy onto the same name is refused instead of replacing it.
         w.duplicate_coll(0, t.client.clone(), t.db.clone(), t.coll.clone(), copy.coll.clone());
         let Msg::DbChanged { res, .. } = next(&rx) else { panic!("expected DbChanged") };
-        assert!(res.unwrap_err().contains("already exists"));
+        let err = res.unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
     }
 
     #[test]
