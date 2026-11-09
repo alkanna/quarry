@@ -18,7 +18,7 @@ Update this list when a step lands. Each step is reviewed before it is ticked.
 - [x] 7. Structure (design A) and Info, read-only, plus read-only Relations and Triggers views. Structure loads when one of those views opens
 - [x] 8. Custom Query: highlighter, several result sets, Stop (`KILL QUERY`), Explain, history, Query tabs from the sidebar. Save to library and Format left out
 - [x] 9. SQL autocomplete (tables, aliases, columns, values with frequencies, functions and signature help) in the Content bar and the Query editor
-- [ ] 10. SQL shell with typed tables, and the shared shell layout for Mongo and SQL
+- [x] 10. SQL shell with typed tables, and the shared shell layout for Mongo and SQL. Reviewed; values are filled with the server's quoting rules, escaping changes are refused, BIGINT is exact, a bad `where` never means every row
 - [ ] 11. Demo data, `QUARRY_TEST_SQL` switches, CLAUDE.md
 
 **v2**: structure editing, relations and FKs, triggers, import and export, create and drop, attached connections in the shell.
