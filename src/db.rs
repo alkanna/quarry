@@ -16,6 +16,7 @@ mod import;
 mod js_ls;
 mod log;
 mod shell;
+pub mod sql;
 mod tools;
 mod worker;
 pub use analysis::*;
