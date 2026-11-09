@@ -37,6 +37,9 @@ impl App {
                 None => self.err("That change is no longer in Recent changes."),
             };
         }
+        if let Danger::SqlDrop { conn, schema, table, kind } = action {
+            return self.sql_drop_run(conn, schema, table, kind);
+        }
         let conn_specific = match &action {
             Danger::DropDatabase { conn, .. } | Danger::DropCollAt { conn, .. } | Danger::DropUser { conn, .. } | Danger::Sync { conn } | Danger::Restore { conn, .. } => Some(*conn),
             _ => None,
@@ -97,7 +100,7 @@ impl App {
                     self.worker.import(conn, target, docs, Some(key));
                 }
             }
-            Danger::DeleteRows(_) | Danger::ApplyAlter | Danger::UndoAlter(_) | Danger::RemoveConnection(_) | Danger::DropDatabase { .. } | Danger::DropCollAt { .. } | Danger::DropUser { .. } | Danger::Sync { .. } | Danger::Restore { .. } => unreachable!(),
+            Danger::DeleteRows(_) | Danger::ApplyAlter | Danger::UndoAlter(_) | Danger::SqlDrop { .. } | Danger::RemoveConnection(_) | Danger::DropDatabase { .. } | Danger::DropCollAt { .. } | Danger::DropUser { .. } | Danger::Sync { .. } | Danger::Restore { .. } => unreachable!(),
         }
     }
 }

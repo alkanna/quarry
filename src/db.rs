@@ -218,6 +218,13 @@ pub enum Msg {
     /// An ALTER TABLE or its undo ran (or failed). `undo` is what reverses it. `sql_mode` is the server's mode
     /// when it no longer matched the one the statement was written for, so the previews follow it.
     SqlAltered { conn: u64, schema: String, table: String, res: Res<String>, undo: Option<UndoAction>, sql_mode: Option<String> },
+    /// Charsets, collations and engines for the New database and New table dialogs; `schema` is empty for a new database.
+    SqlMeta { conn: u64, schema: String, res: Res<sql::create::Meta> },
+    /// What a drop confirmation says will be lost; `table` is empty for a database.
+    SqlDropInfo { conn: u64, schema: String, table: String, res: Res<sql::create::DropInfo> },
+    /// A create or drop finished. `dbs` is the new database list after a change to it, and `undo` the entry
+    /// for a create (or the one a refused undo hands back).
+    SqlDdl { conn: u64, schema: String, table: String, what: sql::create::Ddl, res: Res<String>, undo: Option<UndoAction>, dbs: Option<Vec<String>> },
     /// Every table, view and column of one database, for SQL autocomplete.
     SqlSchema { conn: u64, schema: String, res: Res<sql::schema::Schema> },
     /// A column's most frequent values with their counts, for SQL autocomplete. None when the table is too big to look in.

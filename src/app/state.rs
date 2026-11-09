@@ -645,6 +645,8 @@ pub(super) enum Danger {
     ApplyAlter,
     /// The structure undo recorded at this time, confirmed because it drops a column or converts a type back.
     UndoAlter(std::time::Instant),
+    /// Drop a SQL database, table or view, or empty a table; `table` is empty for a database.
+    SqlDrop { conn: u64, schema: String, table: String, kind: DropKind },
 }
 
 /// What to run once writes are allowed.
@@ -663,6 +665,9 @@ pub(super) enum Modal {
     /// Add or edit a column of the open SQL table, with its ALTER preview.
     ColEdit(Box<ColForm>),
     IdxEdit(Box<IdxForm>),
+    SqlNewDb(Box<NewDb>),
+    SqlNewTable(Box<NewTable>),
+    SqlDrop(Box<DropForm>),
     Typed { title: String, expect: String, typed: String, action: Danger },
     CreateIndex(Box<IndexForm>),
     AggWrite(Vec<Document>),
@@ -885,6 +890,10 @@ pub(super) enum SideAct {
     SqlDump(String, Option<String>),
     /// Run a script file on a SQL database.
     SqlRunFile(String),
+    /// SQL create and drop: a database, a table in a database, and a drop or empty of a table or database (name empty).
+    NewDb,
+    NewTable(String),
+    SqlDrop(String, String, DropKind),
 }
 
 pub(super) enum QAct {

@@ -165,7 +165,21 @@ impl App {
                 }
                 r.on_hover_text("Press / or Cmd+Shift+F");
                 ui.add_space(14.0);
-                ui.label(LayoutJob::single_section("Databases".into(), ui_fmt(10.5, FAINT(), W_SEMIBOLD, 0.8)));
+                let sql_conn = self.active.and_then(|id| self.conn(id)).filter(|c| c.meta.engine.is_sql() && c.status == Status::Ready).map(|c| (c.meta.id, c.writable));
+                let mut new_db = None;
+                ui.horizontal(|ui| {
+                    ui.label(LayoutJob::single_section("Databases".into(), ui_fmt(10.5, FAINT(), W_SEMIBOLD, 0.8)));
+                    if let Some((id, writable)) = sql_conn {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if plus_button(ui, writable).on_hover_text(if writable { "New database…" } else { "Read-only: unlock writes to create a database" }).clicked() && writable {
+                                new_db = Some(id);
+                            }
+                        });
+                    }
+                });
+                if let Some(id) = new_db {
+                    self.side_act(id, SideAct::NewDb);
+                }
                 ui.add_space(2.0);
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| self.db_tree(ui));
             });
@@ -362,6 +376,7 @@ impl App {
                 }
             }
             let sql = c.meta.engine.is_sql();
+            let writable = c.writable;
             for (db_name, colls) in &c.dbs {
                 let mut matches: Vec<&String> = colls.iter().flatten().filter(|n| filter.is_empty() || n.to_lowercase().contains(&filter)).collect();
                 // Copies still running are not listed by the server yet, so they are drawn from `copying`.
@@ -416,6 +431,15 @@ impl App {
                         }
                         if ui.button("Run SQL file…").on_hover_text("Runs a dump or any script file here").clicked() {
                             side.push(SideAct::SqlRunFile(db_name.clone()));
+                        }
+                        // Creating and dropping are writes, so they stay disabled until the connection is unlocked.
+                        let system = db::sql::create::SYSTEM_SCHEMAS.contains(&db_name.as_str());
+                        ui.separator();
+                        if ui.add_enabled(writable && !system, egui::Button::new("New table…")).on_disabled_hover_text(if system { "Belongs to the server" } else { "Read-only: unlock writes to create a table" }).clicked() {
+                            side.push(SideAct::NewTable(db_name.clone()));
+                        }
+                        if ui.add_enabled_ui(writable && !system, |ui| danger_item(ui, "Drop database…")).inner.on_disabled_hover_text(if system { "Belongs to the server" } else { "Read-only: unlock writes to drop a database" }).clicked() {
+                            side.push(SideAct::SqlDrop(db_name.clone(), String::new(), DropKind::Database));
                         }
                         return;
                     }
@@ -534,6 +558,16 @@ impl App {
                                 if ui.button("Export as SQL dump…").clicked() {
                                     side.push(SideAct::SqlDump(db_name.clone(), Some(coll.clone())));
                                 }
+                                let system = db::sql::create::SYSTEM_SCHEMAS.contains(&db_name.as_str());
+                                let on = writable && !system;
+                                let note = if system { "Belongs to the server" } else { "Read-only: unlock writes to change this table" };
+                                ui.separator();
+                                if !is_view && ui.add_enabled(on, egui::Button::new("Empty table…")).on_disabled_hover_text(note).on_hover_text("Deletes every row and keeps the table").clicked() {
+                                    side.push(SideAct::SqlDrop(db_name.clone(), coll.clone(), DropKind::Truncate));
+                                }
+                                if ui.add_enabled_ui(on, |ui| danger_item(ui, if is_view { "Drop view…" } else { "Drop table…" })).inner.on_disabled_hover_text(note).clicked() {
+                                    side.push(SideAct::SqlDrop(db_name.clone(), coll.clone(), if is_view { DropKind::View } else { DropKind::Table }));
+                                }
                                 return;
                             }
                             if ui.button("Statistics").clicked() {
@@ -596,15 +630,16 @@ impl App {
     }
 
     pub(super) fn side_act(&mut self, conn: u64, a: SideAct) {
-        if let SideAct::NewQuery(db) = a {
-            return self.sql_new_query(conn, db);
-        }
-        match a {
+        let a = match a {
+            SideAct::NewQuery(db) => return self.sql_new_query(conn, db),
+            SideAct::NewDb => return self.sql_new_db(conn),
+            SideAct::NewTable(db) => return self.sql_new_table(conn, db),
+            SideAct::SqlDrop(db, table, kind) => return self.sql_drop_ask(conn, db, table, kind),
             SideAct::SqlImport(db, table) => return self.open_sql_import(conn, db, table),
             SideAct::SqlDump(db, table) => return self.open_sql_dump(conn, db, table),
             SideAct::SqlRunFile(db) => return self.open_sql_run_file(conn, db),
-            _ => {}
-        }
+            a => a,
+        };
         if let (SideAct::Refresh(db), Some(sql)) = (&a, self.conn(conn).and_then(|c| c.sql.clone())) {
             self.sql_refresh_schema(conn, db);
             return self.worker.sql_tables(conn, sql, db.clone());
@@ -654,12 +689,25 @@ impl App {
             }
             SideAct::Relations(db) => self.modal = Some(Modal::Relations { conn, db }),
             SideAct::Analyze(db, coll) => self.analyze_relations(conn, client, db, coll),
-            SideAct::NewQuery(_) | SideAct::SqlImport(..) | SideAct::SqlDump(..) | SideAct::SqlRunFile(_) => {}
+            SideAct::NewQuery(_) | SideAct::SqlImport(..) | SideAct::SqlDump(..) | SideAct::SqlRunFile(_) | SideAct::NewDb | SideAct::NewTable(_) | SideAct::SqlDrop(..) => {}
             SideAct::DropColl(db, coll) => {
                 self.modal = Some(Modal::Typed { title: format!("Drop {db}.{coll} with all its documents and indexes? This cannot be undone."), expect: coll.clone(), typed: String::new(), action: Danger::DropCollAt { conn, db, coll } })
             }
         }
     }
+}
+
+/// A small painted plus, since the glyph from a fallback font sits off center. Dimmed while writes are locked.
+fn plus_button(ui: &mut egui::Ui, enabled: bool) -> egui::Response {
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), Sense::click());
+    let state = if enabled { state_of(&r) } else { 0 };
+    let color = if !enabled { tint(FAINT(), 120) } else if state > 0 { BRIGHT() } else { MUTED() };
+    ui.painter().rect_filled(rect, R_SM, hover_fill(state));
+    let (c, s) = (rect.center(), Stroke::new(1.4, color));
+    ui.painter().line_segment([c + egui::vec2(-4.5, 0.0), c + egui::vec2(4.5, 0.0)], s);
+    ui.painter().line_segment([c + egui::vec2(0.0, -4.5), c + egui::vec2(0.0, 4.5)], s);
+    focus_ring(ui, &r, rect, R_SM as f32);
+    r.on_hover_cursor(if enabled { egui::CursorIcon::PointingHand } else { egui::CursorIcon::NotAllowed })
 }
 
 /// A row estimate in few characters: 842, 4.4k, 1.2M. Under 10,000 it is exact, so it never rounds up a count.

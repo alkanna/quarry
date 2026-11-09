@@ -26,6 +26,9 @@ pub enum SqlUndo {
     Insert(Vec<Document>),
     /// A structure change: the ALTERs that reverse it and what they rely on.
     Alter(Box<super::ddl::AlterUndo>),
+    /// A database or table this app created: undone by dropping it while it is still empty.
+    CreatedDb,
+    CreatedTable,
 }
 
 impl SqlUndo {
@@ -36,6 +39,7 @@ impl SqlUndo {
             SqlUndo::Delete(r) => r.first().map(pk_of),
             SqlUndo::Insert(r) => r.first().cloned(),
             SqlUndo::Alter(_) => None,
+            SqlUndo::CreatedDb | SqlUndo::CreatedTable => None,
         };
         first.map(|d| d.keys().cloned().collect()).unwrap_or_default()
     }
@@ -47,6 +51,8 @@ impl SqlUndo {
             SqlUndo::Delete(r) => format!("deleted {}", plural(r.len(), "row")),
             SqlUndo::Insert(r) => format!("inserted {}", plural(r.len(), "row")),
             SqlUndo::Alter(u) => u.label.clone(),
+            SqlUndo::CreatedDb => "created database".into(),
+            SqlUndo::CreatedTable => "created table".into(),
         }
     }
 }
@@ -347,6 +353,9 @@ impl Worker {
     /// Reverts a SQL write. Updates need the new values to still be there, like the original save. When it
     /// fails the action comes back in the answer so the app can keep it in the list.
     pub fn sql_undo(&self, db: Db, a: UndoAction, pk: Vec<String>, read_only: bool) {
+        if matches!(&a.kind, UndoKind::Sql { undo: SqlUndo::CreatedDb | SqlUndo::CreatedTable, .. }) {
+            return self.sql_undo_create(db, a, read_only);
+        }
         self.spawn(async move {
             let at = (a.db.clone(), a.coll.clone());
             let UndoAction { at: when, conn, db: schema, coll: table, kind } = a;
@@ -368,6 +377,7 @@ impl Worker {
                 SqlUndo::Insert(pks) => apply_deletes(&db, &schema, &table, &cols, &pk, &pks, read_only).await.map(|_| "Removed the inserted rows".to_string()),
                 // Taken before this match, where the structure statements run.
                 SqlUndo::Alter(_) => Err("Not a row change".into()),
+                SqlUndo::CreatedDb | SqlUndo::CreatedTable => Err("Handled by sql_undo_create".to_string()),
             };
             let undo = res.is_err().then(|| UndoAction { at: when, conn, db: schema, coll: table, kind: UndoKind::Sql { cols, undo } });
             Msg::Written { at, res, undo, reload: true, retry: None }

@@ -441,6 +441,7 @@ impl App {
             Ok("dump") => self.demo_sql_dump(),
             _ => {}
         }
+        self.sql_create_demo(&std::env::var("QUARRY_TEST_SQL").unwrap_or_default());
     }
 
     /// QUARRY_TEST_SQL_JSON=<file> swaps the demo rows of the orders grid (content, rules, select, edit) or of

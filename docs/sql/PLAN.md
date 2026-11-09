@@ -40,7 +40,7 @@ Update this list when a step lands. Each step is reviewed before it is ticked.
 - [x] 2. Structure editing: built e993e30, opus review found 14 issues, all fixed in c8d5a09 (see "Review (e993e30)").
 - [ ] 3. Relations and 4. triggers: building on `relations-triggers` (from e993e30).
 - [x] 5. Import and export: built 16bb646, opus review found 13 issues, all fixed in 90ff5fc (see "Review (16bb646)").
-- [ ] 6. Create and drop database and table: not started.
+- [x] 6. Create and drop database and table: branch `create-drop`. New database and New table dialogs with the statement preview, typed confirmation for drop database, drop table, drop view and empty table (`Danger::SqlDrop`), the "+" in the sidebar, undo of a create while the object is still empty (`SqlUndo::CreatedDb`, `CreatedTable`), everything disabled while locked. Statement builders and live tests in src/db/sql/create.rs, dialogs in src/app/sql_create.rs.
 - [ ] 7. Connection form Advanced tab: design approved by the user on 2026-11-09 (page "Connection · Advanced tab", frames 12544 and 12617, commit 2f71228); build not started.
 - [ ] Bench baseline: no numbers were recorded before v2; measure `python3 bench.py --quick` on 4abe8c6 (last commit before v2 code) on a quiet machine and compare with the final head.
 
@@ -97,7 +97,7 @@ The plan and its progress list live in this file; update it whenever something l
 - **Reviews:** security-sensitive steps get an independent opus review before they are ticked; findings go to a fix agent with each failing input as a test.
 - **Environment:** if cargo says sccache is missing, prefix with `RUSTC_WRAPPER=`. Many parallel worktrees saturate the machine (each builds its own target dir); keep at most three agents compiling at once.
 - **Designs:** `docs/sql/designs.figcraft`; read a frame with `figcraft-cli export docs/sql/designs.figcraft -o /tmp/x.png --node "<frame name>"`. New screens are designed in FigCraft (Workbench and Paper frames side by side, real theme tokens) and shown to the user before they are built. The generator scripts that drew them were in a session scratchpad and are gone; draw new frames with the FigCraft MCP tools directly or rebuild a small generator.
-- **Demo switches** for screenshots: `QUARRY_TEST_SQL=<view>` (content, rules, sqlmode, grouped, edit, select, colpick, structure, info, relations, triggers, query, shell, shellac, shellattach, attach, ac, acquery, coledit, stagebar, import, dump), `QUARRY_TEST_SQL_JSON=<file>`, `QUARRY_TEST_RAIL=1`, `QUARRY_TEST_CHECKED=1`, `QUARRY_TEST_EXPORT=1` (or `script`, `script-ok` for the All statements scope); `shellattach` is the SQL shell tab with a read-only Mongo connection "travels" (db app) attached and a run that used both, `attach` is the Attach dialog with travels picked; `bench.py --sql-only` for memory and frame time.
+- **Demo switches** for screenshots: `QUARRY_TEST_SQL=<view>` (content, rules, sqlmode, grouped, edit, select, colpick, structure, info, relations, triggers, query, shell, shellac, shellattach, attach, ac, acquery, coledit, stagebar, import, dump, newdb, newtable, droptable), `QUARRY_TEST_SQL_JSON=<file>`, `QUARRY_TEST_RAIL=1`, `QUARRY_TEST_CHECKED=1`, `QUARRY_TEST_EXPORT=1` (or `script`, `script-ok` for the All statements scope); `shellattach` is the SQL shell tab with a read-only Mongo connection "travels" (db app) attached and a run that used both, `attach` is the Attach dialog with travels picked; `bench.py --sql-only` for memory and frame time.
 
 ## Designs
 

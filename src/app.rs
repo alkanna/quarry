@@ -40,6 +40,7 @@ mod shell_attach;
 mod shell_ls;
 mod sidebar;
 mod sql_ac;
+mod sql_create;
 mod sql_structure;
 mod sql_alter;
 mod sql_edit;
@@ -73,6 +74,7 @@ use watch::*;
 use drafts::*;
 use sql_edit::*;
 use sql_alter::*;
+use sql_create::*;
 use table::Rows;
 
 const SYSTEM_DBS: [&str; 3] = ["admin", "config", "local"];
