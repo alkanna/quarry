@@ -161,6 +161,8 @@ pub(super) struct SavedTab {
     pub(super) shell: String,
     /// The SQL Content bar's clauses as JSON (`sql_bar::Clauses`); empty for other tabs.
     pub(super) clauses: String,
+    /// The text of a SQL tab's Query view.
+    pub(super) query: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Default)]

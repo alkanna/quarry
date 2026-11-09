@@ -397,6 +397,9 @@ impl App {
                     menu_look(ui);
                     ui.label(RichText::new(format!("Database: {db_name}")).size(TXT_SMALL).color(MUTED()));
                     if sql {
+                        if ui.button("New query").on_hover_text("Open a SQL editor for this database").clicked() {
+                            side.push(SideAct::NewQuery(db_name.clone()));
+                        }
                         if ui.button("Refresh").clicked() {
                             side.push(SideAct::Refresh(db_name.clone()));
                         }
@@ -541,6 +544,9 @@ impl App {
     }
 
     pub(super) fn side_act(&mut self, conn: u64, a: SideAct) {
+        if let SideAct::NewQuery(db) = a {
+            return self.sql_new_query(conn, db);
+        }
         if let (SideAct::Refresh(db), Some(sql)) = (&a, self.conn(conn).and_then(|c| c.sql.clone())) {
             return self.worker.sql_tables(conn, sql, db.clone());
         }
@@ -589,6 +595,7 @@ impl App {
             }
             SideAct::Relations(db) => self.modal = Some(Modal::Relations { conn, db }),
             SideAct::Analyze(db, coll) => self.analyze_relations(conn, client, db, coll),
+            SideAct::NewQuery(_) => {}
             SideAct::DropColl(db, coll) => {
                 self.modal = Some(Modal::Typed { title: format!("Drop {db}.{coll} with all its documents and indexes? This cannot be undone."), expect: coll.clone(), typed: String::new(), action: Danger::DropCollAt { conn, db, coll } })
             }

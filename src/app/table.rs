@@ -787,7 +787,7 @@ mod tests {
 }
 
 /// A result row's fill: selection, then checked, pressed and hovered, then the zebra stripe.
-fn row_fill(active: bool, checked: bool, hovered: bool, pressed: bool, odd: bool) -> Color32 {
+pub(super) fn row_fill(active: bool, checked: bool, hovered: bool, pressed: bool, odd: bool) -> Color32 {
     match () {
         _ if active => if hovered { SEL_HOVER() } else { SEL() },
         _ if checked => tint(PRIMARY(), if hovered { 38 } else { 26 }),

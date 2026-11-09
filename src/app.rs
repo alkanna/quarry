@@ -41,6 +41,7 @@ mod sql_structure;
 mod sql_edit;
 mod sql_bar;
 mod sql_views;
+mod sql_query;
 mod state;
 mod table;
 mod tabs;
@@ -71,7 +72,7 @@ const SYSTEM_DBS: [&str; 3] = ["admin", "config", "local"];
 const DEFAULT_COLS: usize = 8;
 
 /// Shortcuts listed by Cmd+/. Cmd is Ctrl on Linux and Windows.
-const SHORTCUTS: [(&str, &str); 22] = [
+const SHORTCUTS: [(&str, &str); 23] = [
     ("Cmd+K, Cmd+T", "Jump to a connection, database or collection"),
     ("Cmd+R", "Reload the current tab"),
     ("Cmd+Shift+R", "Refresh the connection's databases"),
@@ -87,8 +88,9 @@ const SHORTCUTS: [(&str, &str); 22] = [
     ("Up, Down", "Select the previous or next document"),
     ("PageUp, PageDown", "Previous or next page"),
     ("Enter", "Run the query"),
-    ("Cmd+E", "Explain the query or pipeline"),
-    ("Cmd+Enter", "Run the pipeline or script"),
+    ("Cmd+E", "Explain the query, pipeline or SQL statement"),
+    ("Cmd+Enter", "Run the pipeline, script or SQL statement under the caret"),
+    ("Cmd+Shift+Enter", "Run every statement of a SQL Query view"),
     ("Esc", "Close or deselect"),
     ("Cmd+,", "Settings"),
     ("Cmd+N", "New connection"),
@@ -388,6 +390,9 @@ impl App {
                 (t.filter_txt, t.sort_txt, t.proj_txt, t.shell.code) = (st.filter, st.sort, st.project, st.shell);
                 if let (Some(s), Ok(c)) = (t.sql.as_mut(), serde_json::from_str(&st.clauses)) {
                     s.bar.c = c;
+                }
+                if let Some(s) = t.sql.as_mut() {
+                    s.query = st.query;
                 }
                 if !st.agg.is_empty() {
                     t.agg_txt = st.agg;

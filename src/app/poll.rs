@@ -106,8 +106,7 @@ impl App {
                         s.st.finish(res);
                     }
                 }
-                // Applied by the Custom Query view (docs/sql/PLAN.md step 8).
-                Msg::SqlRan { .. } => {}
+                Msg::SqlRan { req, sets, .. } => self.sql_ran(req, sets),
                 Msg::Collections { conn, db, res } => match res {
                     Ok((v, views)) => {
                         self.views.retain(|(c, d, _)| !(*c == conn && *d == db));

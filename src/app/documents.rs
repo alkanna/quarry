@@ -125,6 +125,10 @@ pub(super) fn any_row_menu(ui: &mut egui::Ui, kind: RowMenu, i: usize, rows: Row
 impl App {
     pub(super) fn collection(&mut self, ui: &mut egui::Ui) {
         let Some(t) = self.t() else { return };
+        // A Query tab that belongs to no table has no header or view tabs of a table.
+        if t.sql.is_some() && t.sel.coll.is_empty() {
+            return self.sql_query_view(ui);
+        }
         let (coll, view, db) = (t.sel.coll.clone(), t.view, t.sel.db.clone());
         // What the collection holds: documents, data size and indexes. The whole collection's
         // count, not the filter's, which the results line shows. Without statistics only an
@@ -204,7 +208,7 @@ impl App {
             View::Relations => self.sql_relations_view(ui),
             View::Triggers => self.sql_triggers_view(ui),
             View::Info => self.sql_info_view(ui),
-            View::Sql => self.sql_soon(ui),
+            View::Sql => self.sql_query_view(ui),
             View::Shell if sql => self.sql_soon(ui),
             View::Documents => self.documents(ui),
             View::Aggregate => self.aggregate(ui),

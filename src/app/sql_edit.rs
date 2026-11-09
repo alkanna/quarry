@@ -731,13 +731,18 @@ impl App {
 
     /// Copies rows in `fmt`. HTML also goes to the clipboard as rich text on macOS, so it pastes as a table.
     pub(super) fn copy_rows_as(&mut self, ctx: &egui::Context, fmt: Fmt, rows: &[Document]) {
-        let header = ctx.data(|d| d.get_temp::<bool>(egui::Id::unique("copy-with-header"))).unwrap_or(true);
         let cols = self.copy_cols(rows);
         let (table, pk) = match self.t() {
             Some(t) => (t.sel.coll.clone(), t.sql.as_ref().map(|s| s.pk.clone()).unwrap_or_default()),
             None => return,
         };
-        let sheet = Sheet { rows, cols: &cols, table: &table, pk: &pk };
+        self.copy_sheet(ctx, fmt, rows, &cols, &table, &pk);
+    }
+
+    /// `copy_rows_as` for rows whose columns and table are given, such as a Query result.
+    pub(super) fn copy_sheet(&mut self, ctx: &egui::Context, fmt: Fmt, rows: &[Document], cols: &[CopyCol], table: &str, pk: &[String]) {
+        let header = ctx.data(|d| d.get_temp::<bool>(egui::Id::unique("copy-with-header"))).unwrap_or(true);
+        let sheet = Sheet { rows, cols, table, pk };
         let text = copy::format(fmt, &sheet, header);
         if text.is_empty() {
             return self.err(if fmt == Fmt::SqlUpdate { "SQL UPDATE needs a table with a primary key." } else { "Nothing to copy." });

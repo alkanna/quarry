@@ -5,6 +5,10 @@ use super::*;
 impl App {
     /// Asks for the tab's current page. The answer is matched back to the tab by `req`.
     pub(super) fn reload_sql(&mut self, i: usize) {
+        // A Query tab that belongs to no table has no page to load.
+        if self.tabs.get(i).is_some_and(|t| t.sel.coll.is_empty()) {
+            return;
+        }
         let Some(db) = self.tabs.get(i).and_then(|t| self.conn(t.sel.conn)).and_then(|c| c.sql.clone()) else { return };
         self.req += 1;
         let (req, size) = (self.req, self.page_size());

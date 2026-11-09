@@ -101,6 +101,17 @@ fn html_cell(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
+/// Rows as a plain fixed-width table for the Query view's Text mode: a header, a rule and one line per row.
+pub fn text_table(cols: &[String], rows: &[Document]) -> String {
+    let cells: Vec<Vec<String>> = rows.iter().map(|d| cols.iter().map(|c| text(d.get(c)).map_or_else(|| "NULL".to_string(), |s| s.replace(['\n', '\r'], " "))).collect()).collect();
+    let widths: Vec<usize> = cols.iter().enumerate().map(|(i, c)| cells.iter().map(|r| r[i].chars().count()).chain([c.chars().count()]).max().unwrap_or(0)).collect();
+    let line = |r: &[String]| r.iter().zip(&widths).map(|(c, w)| format!("{c:<width$}", width = *w)).collect::<Vec<_>>().join("  ").trim_end().to_string();
+    let rule = widths.iter().map(|w| "-".repeat(*w)).collect::<Vec<_>>().join("  ");
+    let mut out = vec![line(cols), rule];
+    out.extend(cells.iter().map(|r| line(r)));
+    out.join("\n")
+}
+
 /// The text for `f`. `header` is the "Include column names" switch: SQL INSERT leaves out its column
 /// list, CSV, TSV and HTML their header row, Markdown keeps a blank one because a table needs it.
 pub fn format(f: Fmt, s: &Sheet, header: bool) -> String {
@@ -193,6 +204,14 @@ mod tests {
 
     fn rows() -> Vec<Document> {
         vec![doc! { "_id": { "id": 1_i64 }, "id": 1_i64, "status": "it's", "total": "26.75" }, doc! { "_id": { "id": 2_i64 }, "id": 2_i64, "status": "a|b\nc", "total": Bson::Null }]
+    }
+
+    #[test]
+    fn text_table_pads_columns() {
+        let names = vec!["id".to_string(), "status".to_string()];
+        assert_eq!(text_table(&names, &rows()), "id  status\n--  ------\n1   it's\n2   a|b c");
+        let nulls = [doc! { "id": 7_i64 }];
+        assert_eq!(text_table(&names, &nulls), "id  status\n--  ------\n7   NULL");
     }
 
     fn out(f: Fmt, header: bool) -> String {
