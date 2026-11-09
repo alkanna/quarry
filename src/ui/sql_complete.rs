@@ -120,19 +120,6 @@ fn starts_ci(name: &str, word: &str) -> bool {
     name.len() >= word.len() && name.as_bytes()[..word.len()].eq_ignore_ascii_case(word.as_bytes())
 }
 
-/// "4,410".
-fn grouped(n: u64) -> String {
-    let s = n.to_string();
-    let mut out = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
-}
-
 /// Columns that start with `word`, then, for two letters or more, those that hold its letters in order
 /// after the same first letter, like the popup's own highlighting reads them.
 fn col_matches<'a>(cols: &'a [SchemaCol], word: &str) -> Vec<&'a SchemaCol> {
@@ -315,7 +302,7 @@ fn col_sug(c: &SchemaCol, table: &str, scope_values: &Fields, qualifier: Option<
 }
 
 fn table_sug(t: &SchemaTable, in_tick: bool) -> Sug {
-    let detail = if t.view { "view".to_string() } else { t.rows.map_or(String::new(), |n| format!("{} rows", grouped(n))) };
+    let detail = if t.view { "view".to_string() } else { t.rows.map_or(String::new(), |n| format!("{} rows", crate::app::group(&n.to_string()))) };
     sug(t.name.clone(), if t.view { "view" } else { "table" }, ident(&t.name, in_tick), detail, String::new())
 }
 
@@ -702,8 +689,8 @@ pub(crate) fn sql_ac_field(
     (out, picked)
 }
 
-/// Offline demo: opens the list as if `text` had just been typed with the caret at its end.
-pub(crate) fn open_demo(ui: &egui::Ui, id: egui::Id, text: &str, ac: &mut Ac, scope: &Scope, values: &Fields) {
+/// Opens the list as if `text` had just been typed with the caret at its end.
+pub(crate) fn open_list(ui: &egui::Ui, id: egui::Id, text: &str, ac: &mut Ac, scope: &Scope, values: &Fields) {
     if ac.id.is_some() {
         return;
     }

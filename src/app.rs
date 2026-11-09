@@ -597,7 +597,7 @@ fn human_bytes(n: usize) -> String {
     }
 }
 
-fn group(n: &str) -> String {
+pub(crate) fn group(n: &str) -> String {
     let mut out = String::new();
     for (i, ch) in n.chars().enumerate() {
         if i > 0 && (n.len() - i) % 3 == 0 {

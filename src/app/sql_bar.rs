@@ -4,13 +4,12 @@
 
 use super::*;
 use crate::db::sql::{
-    lex,
     rules::{self, Grain, Input, Op, Rule},
     schema::SchemaCol,
     value::Kind,
     Col, Dialect, PageQuery,
 };
-use crate::ui::sql_complete::{open_demo, sql_ac_field, Scope, Wants};
+use crate::ui::sql_complete::{open_list, sql_ac_field, Scope, Wants};
 
 /// The clauses a tab keeps besides the WHERE and ORDER BY text, saved with the open tabs.
 #[derive(Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -64,6 +63,17 @@ pub(super) struct Bar {
     /// The open suggestion list of whichever bar input has it, and what the inputs asked the app to look up.
     pub(super) ac: Ac,
     pub(super) wants: Wants,
+    /// Initial open states; only the offline demo sets them.
+    pub(super) preset: Preset,
+}
+
+/// What the bar shows open from the first frame: the suggestion list, the ORDER BY popover and the
+/// text typed into its first column picker.
+#[derive(Default)]
+pub(super) struct Preset {
+    pub(super) ac: bool,
+    pub(super) order: bool,
+    pub(super) pick: Option<String>,
 }
 
 /// A one line SQL input with highlighting and suggestions. Returns whether Enter ended the edit, which runs the query.
@@ -145,86 +155,13 @@ pub(super) fn page_query(t: &Tab) -> PageQuery {
 
 /// SQL text colored by token: keywords, numbers and strings. Plugs into `TextEdit::layouter`.
 pub(super) fn sql_layout(ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32) -> Arc<egui::Galley> {
-    let mut job = sql_job(buf.as_str());
+    let mut job = sql_job(buf.as_str(), TXT_SMALL);
     job.wrap.max_width = wrap;
     ui.fonts_mut(|f| f.layout_job(job))
 }
 
-pub(super) fn sql_job(text: &str) -> LayoutJob {
-    let mut job = LayoutJob::default();
-    for (tok, r) in lex::tokens(text) {
-        let s = &text[r];
-        let color = match tok {
-            lex::Tok::Word if db::sql::KEYWORDS.iter().any(|k| k.eq_ignore_ascii_case(s)) => C_KEYWORD(),
-            lex::Tok::Word if s.chars().next().is_some_and(|c| c.is_ascii_digit()) => C_NUMBER(),
-            lex::Tok::Str => C_STRING(),
-            lex::Tok::Comment => FAINT(),
-            lex::Tok::Punct => MUTED(),
-            _ => TEXT(),
-        };
-        job.append(s, 0.0, mono_fmt(TXT_SMALL, color, 400.0));
-    }
-    job
-}
-
 fn type_name(c: &Col) -> String {
     c.ty.split('(').next().unwrap_or(&c.ty).split_whitespace().next().unwrap_or("").to_ascii_uppercase()
-}
-
-/// A painted check mark.
-fn paint_check(p: &egui::Painter, c: egui::Pos2, color: Color32) {
-    let pts = [c + egui::vec2(-4.0, 0.0), c + egui::vec2(-1.5, 3.0), c + egui::vec2(4.0, -3.5)];
-    p.line_segment([pts[0], pts[1]], Stroke::new(1.6, color));
-    p.line_segment([pts[1], pts[2]], Stroke::new(1.6, color));
-}
-
-/// One row of a menu: a check column, the label in `color`, a faint note on the right.
-fn menu_row(ui: &mut egui::Ui, label: &str, color: Color32, checked: bool, note: &str) -> egui::Response {
-    menu_row_in(ui, label, color, checked, note, "", false)
-}
-
-/// A menu row whose label shows the typed part `hl` in the primary color, and that can be held
-/// highlighted (`active`) by the keyboard selection of a searchable list.
-fn menu_row_in(ui: &mut egui::Ui, label: &str, color: Color32, checked: bool, note: &str, hl: &str, active: bool) -> egui::Response {
-    let w = ui.available_width().max(190.0);
-    let (rect, r) = ui.allocate_exact_size(egui::vec2(w, 24.0), Sense::click());
-    let state = state_of(&r);
-    if !ui.is_rect_visible(rect) {
-        return r;
-    }
-    if state > 0 || active {
-        ui.painter().rect_filled(rect, R_SM, if state == 2 { menu_pressed() } else { MENU_HOVER() });
-    }
-    if checked {
-        paint_check(ui.painter(), egui::pos2(rect.left() + 12.0, rect.center().y), TEXT());
-    }
-    // The note is laid out first so a long label is cut with an ellipsis before it instead of running under it.
-    let mut note_left = rect.right() - 8.0;
-    if !note.is_empty() {
-        let n = ui.painter().layout_no_wrap(note.to_string(), FontId::monospace(TXT_CAPTION), FAINT());
-        let dy = optical_dy(&n);
-        note_left -= n.size().x;
-        ui.painter().galley(egui::pos2(note_left, rect.center().y - n.size().y / 2.0 + dy), n, FAINT());
-    }
-    let mut job = egui::text::LayoutJob::default();
-    let fmt = |c: Color32| egui::TextFormat::simple(FontId::monospace(TXT_SMALL), c);
-    match find_ci(label, hl) {
-        Some((i, j)) => {
-            job.append(&label[..i], 0.0, fmt(color));
-            job.append(&label[i..j], 0.0, fmt(PRIMARY()));
-            job.append(&label[j..], 0.0, fmt(color));
-        }
-        None => job.append(label, 0.0, fmt(color)),
-    }
-    job.wrap = egui::text::TextWrapping::truncate_at_width((note_left - 12.0 - (rect.left() + 26.0)).max(20.0));
-    let g = ui.painter().layout_job(job);
-    let dy = optical_dy(&g);
-    ui.painter().galley(egui::pos2(rect.left() + 26.0, rect.center().y - g.size().y / 2.0 + dy), g, color);
-    focus_ring(ui, &r, rect, R_SM as f32);
-    let label = label.to_string();
-    let enabled = ui.is_enabled();
-    r.widget_info(|| egui::WidgetInfo::selected(egui::Role::MenuItem, enabled, checked, label.clone()));
-    r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// An input-looking button that opens a menu: `main` in mono, `sub` faint (the column type), a chevron.
@@ -253,16 +190,6 @@ fn pill_combo(ui: &mut egui::Ui, main: &str, sub: &str, w: f32, main_color: Colo
 /// Width of a pill combo for its texts.
 fn combo_w(ui: &egui::Ui, main: &str, sub: &str, min: f32) -> f32 {
     (text_w(ui, main, FontId::monospace(TXT_SMALL)) + if sub.is_empty() { 0.0 } else { text_w(ui, sub, FontId::monospace(TXT_CAPTION)) + 6.0 } + 34.0).max(min)
-}
-
-/// Byte range of the first case-insensitive (ASCII) occurrence of `q` in `name`. ASCII lowering keeps
-/// byte offsets, so the range indexes `name` itself.
-fn find_ci(name: &str, q: &str) -> Option<(usize, usize)> {
-    if q.is_empty() {
-        return None;
-    }
-    let i = name.to_ascii_lowercase().find(&q.to_ascii_lowercase())?;
-    Some((i, i + q.len()))
 }
 
 /// Indices of the columns that hold `q`, names starting with it first, each group in table order. An
@@ -294,7 +221,7 @@ struct ColBox {
 
 /// A searchable column picker: a click turns the pill into a text field in place and typing filters
 /// the list. Returns the picked name.
-fn col_pick(ui: &mut egui::Ui, cur: &str, cols: &[Col], min: f32) -> Option<String> {
+fn col_pick(ui: &mut egui::Ui, cur: &str, cols: &[Col], min: f32, start_text: Option<String>) -> Option<String> {
     let ty = cols.iter().find(|c| c.name == cur).map(type_name).unwrap_or_default();
     let shown = if cur.is_empty() { "column" } else { cur };
     let w = combo_w(ui, shown, &ty, min);
@@ -302,10 +229,8 @@ fn col_pick(ui: &mut egui::Ui, cur: &str, cols: &[Col], min: f32) -> Option<Stri
     let edit_id = key.with("edit");
     let Some(mut st) = ui.data(|d| d.get_temp::<ColBox>(key)) else {
         let r = pill_combo(ui, shown, &ty, w, if cur.is_empty() { FAINT() } else { TEXT() });
-        // QUARRY_TEST_SQL=colpick opens the first picker with text typed, for the screenshot.
-        let demo = std::env::var("QUARRY_TEST_SQL").is_ok_and(|v| v == "colpick") && !ui.data_mut(|d| std::mem::replace(d.get_temp_mut_or_default::<bool>(egui::Id::NULL.with("colpick-demo")), true));
-        if r.clicked() || demo {
-            ui.data_mut(|d| d.insert_temp(key, ColBox { text: if demo { "stat".into() } else { String::new() }, ..Default::default() }));
+        if r.clicked() || start_text.is_some() {
+            ui.data_mut(|d| d.insert_temp(key, ColBox { text: start_text.unwrap_or_default(), ..Default::default() }));
             ui.memory_mut(|m| m.request_focus(edit_id));
             ui.ctx().request_repaint();
         }
@@ -375,31 +300,6 @@ fn col_pick(ui: &mut egui::Ui, cur: &str, cols: &[Col], min: f32) -> Option<Stri
         ui.data_mut(|d| d.insert_temp(key, st));
     }
     pick
-}
-
-/// A clause popover. egui keeps one memory popup open at a time, so opening the column or direction
-/// menu inside would close it; it keeps its own open flag instead and closes on Esc or a click on the page.
-fn popover<R>(r: &egui::Response, w: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> Option<R> {
-    let ctx = r.ctx.clone();
-    let id = r.id.with("clause-popover");
-    let mut open = ctx.data(|d| d.get_temp::<bool>(id)).unwrap_or(std::env::var("QUARRY_TEST_SQL").is_ok_and(|v| v == "colpick") && w == 340.0);
-    if r.clicked() {
-        open = !open;
-    }
-    let out = if open {
-        egui::Popup::new(id, ctx.clone(), r, r.layer_id).kind(egui::PopupKind::Menu).layout(egui::Layout::top_down_justified(egui::Align::Min)).style(egui::containers::menu::menu_style).gap(0.0).open_bool(&mut open).close_behavior(egui::PopupCloseBehavior::IgnoreClicks).width(w).show(add)
-    } else {
-        None
-    };
-    // Its own menus are popups too, so only a click on a page layer counts as outside.
-    if open && !r.clicked() {
-        let page_click = ctx.input(|i| i.pointer.any_click().then(|| i.pointer.interact_pos()).flatten()).is_some_and(|p| !r.rect.contains(p) && ctx.layer_id_at(p).is_none_or(|l| l.order != egui::Order::Foreground));
-        if page_click || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            open = false;
-        }
-    }
-    ctx.data_mut(|d| d.insert_temp(id, open));
-    out.map(|o| o.inner)
 }
 
 /// The menu group of an operator, to draw a rule between groups like the design.
@@ -559,7 +459,7 @@ fn value_inputs(ui: &mut egui::Ui, r: &mut Rule, cols: &[Col], salt: egui::Id) -
         }
         Input::Column => {
             let dates: Vec<Col> = cols.iter().filter(|c| rules::group_of(c.kind) == rules::Group::Date && c.name != r.col).cloned().collect();
-            if let Some(p) = col_pick(ui, &r.values[0], &dates, 120.0) {
+            if let Some(p) = col_pick(ui, &r.values[0], &dates, 120.0, None) {
                 r.values[0] = p;
                 changed = true;
             }
@@ -599,7 +499,7 @@ fn value_inputs(ui: &mut egui::Ui, r: &mut Rule, cols: &[Col], salt: egui::Id) -
 /// An editable rule: column, operator and values. Returns (changed, Enter pressed).
 fn rule_editor(ui: &mut egui::Ui, r: &mut Rule, cols: &[Col], salt: egui::Id) -> (bool, bool) {
     let mut changed = false;
-    if let Some(p) = col_pick(ui, &r.col, cols, 130.0) {
+    if let Some(p) = col_pick(ui, &r.col, cols, 130.0, None) {
         if p != r.col {
             let kind = cols.iter().find(|c| c.name == p).map(|c| c.kind).unwrap_or(Kind::Text);
             r.col = p;
@@ -650,7 +550,7 @@ fn clause_chip(ui: &mut egui::Ui, name: &str, summary: &str, open: bool) -> (egu
 }
 
 /// The popover for ORDER BY: one row per key. Returns whether the text changed.
-fn order_popover(ui: &mut egui::Ui, text: &mut String, cols: &[Col], d: Dialect) -> bool {
+fn order_popover(ui: &mut egui::Ui, text: &mut String, cols: &[Col], d: Dialect, mut pick_text: Option<String>) -> bool {
     menu_look(ui);
     ui.set_min_width(320.0);
     ui.add_space(4.0);
@@ -665,7 +565,7 @@ fn order_popover(ui: &mut egui::Ui, text: &mut String, cols: &[Col], d: Dialect)
     let mut remove = None;
     for (i, (col, desc)) in keys.iter_mut().enumerate() {
         ui.horizontal(|ui| {
-            if let Some(p) = col_pick(ui, col, cols, 170.0) {
+            if let Some(p) = col_pick(ui, col, cols, 170.0, pick_text.take()) {
                 *col = p;
                 changed = true;
             }
@@ -816,7 +716,7 @@ fn group_popover(ui: &mut egui::Ui, g: &mut GroupDlg, c: &mut Clauses, cols: &[C
         if let Some(i) = remove {
             g.keys.remove(i);
         }
-        if let Some(p) = col_pick(ui, "", cols, 90.0) {
+        if let Some(p) = col_pick(ui, "", cols, 90.0, None) {
             // A date column starts grouped by day, since raw timestamps never repeat.
             let date = cols.iter().find(|c| c.name == p).is_some_and(|c| rules::group_of(c.kind) == rules::Group::Date);
             g.keys.push((p, date.then_some(Grain::Day)));
@@ -891,7 +791,7 @@ fn group_popover(ui: &mut egui::Ui, g: &mut GroupDlg, c: &mut Clauses, cols: &[C
     ui.add_space(6.0);
     let (sel, grp) = group_texts(g, d);
     let hav = g.having.as_ref().filter(|r| r.complete()).map(|r| rules::rule_sql(r, d, g.bs)).unwrap_or_default();
-    let mut job = sql_job(&format!("SELECT {sel}\n  GROUP BY {grp}{}", if hav.is_empty() { String::new() } else { format!(" HAVING {hav}") }));
+    let mut job = sql_job(&format!("SELECT {sel}\n  GROUP BY {grp}{}", if hav.is_empty() { String::new() } else { format!(" HAVING {hav}") }), TXT_SMALL);
     job.wrap.max_width = 520.0;
     egui::Frame::new().fill(BG()).corner_radius(R_SM).inner_margin(8).show(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -1000,8 +900,8 @@ pub(super) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, mut scop
                 ui.add_sized([0.0, BUTTON_H], egui::Label::new(RichText::new("WHERE").font(mono.clone()).color(C_KEYWORD())));
                 if b.c.sql {
                     let w = (ui.max_rect().right() - ui.cursor().left() - 24.0).max(160.0);
-                    if std::env::var("QUARRY_TEST_SQL").is_ok_and(|v| v == "ac") {
-                        open_demo(ui, fid, &t.filter_txt, &mut b.ac, &scope, values);
+                    if b.preset.ac {
+                        open_list(ui, fid, &t.filter_txt, &mut b.ac, &scope, values);
                     }
                     run |= sql_input(ui, fid, &mut t.filter_txt, &mut b.ac, &mut b.wants, &scope, values, RichText::new("status = 'paid' AND total > 50").color(FAINT()), w);
                 } else {
@@ -1110,8 +1010,8 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col], scope: &Sco
                 };
                 if t.sort_txt.is_empty() {
                     let r = add_chip(ui, "ORDER BY");
-                    popover(&r, 340.0, |ui| {
-                        if order_popover(ui, &mut t.sort_txt, cols, d) {
+                    popover(&r, 340.0, b.preset.order, |ui| {
+                        if order_popover(ui, &mut t.sort_txt, cols, d, b.preset.pick.take()) {
                             run = true;
                         }
                     });
@@ -1123,8 +1023,8 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col], scope: &Sco
                     }
                 } else {
                     let (r, cleared) = clause_chip(ui, "ORDER BY", &summary, false);
-                    popover(&r, 340.0, |ui| {
-                        if order_popover(ui, &mut t.sort_txt, cols, d) {
+                    popover(&r, 340.0, b.preset.order, |ui| {
+                        if order_popover(ui, &mut t.sort_txt, cols, d, b.preset.pick.take()) {
                             run = true;
                         }
                     });
@@ -1136,7 +1036,7 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col], scope: &Sco
                 if grouped {
                     let (r, cleared) = clause_chip(ui, "GROUP BY", &b.c.group, false);
                     let mut applied = false;
-                    popover(&r, 580.0, |ui| applied = group_popover(ui, &mut b.gdlg, &mut b.c, cols, d, &table, matched.max(rows)));
+                    popover(&r, 580.0, false, |ui| applied = group_popover(ui, &mut b.gdlg, &mut b.c, cols, d, &table, matched.max(rows)));
                     run |= applied;
                     if cleared {
                         b.c.group.clear();
@@ -1146,7 +1046,7 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col], scope: &Sco
                     }
                     if !b.c.having.trim().is_empty() {
                         let (r2, cleared) = clause_chip(ui, "HAVING", &b.c.having.replace('`', ""), false);
-                        popover(&r2, 580.0, |ui| applied = group_popover(ui, &mut b.gdlg, &mut b.c, cols, d, &table, matched.max(rows)));
+                        popover(&r2, 580.0, false, |ui| applied = group_popover(ui, &mut b.gdlg, &mut b.c, cols, d, &table, matched.max(rows)));
                         run |= applied;
                         if cleared {
                             b.c.having.clear();
@@ -1179,7 +1079,7 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col], scope: &Sco
                 } else {
                     let n = split_top(&b.c.select).len();
                     let (r, cleared) = if n == 0 { (add_chip(ui, "Columns"), false) } else { clause_chip(ui, "Columns", &format!("{n} of {}", cols.len()), false) };
-                    popover(&r, 320.0, |ui| run |= columns_popover(ui, &mut b.c.select, cols, d));
+                    popover(&r, 320.0, false, |ui| run |= columns_popover(ui, &mut b.c.select, cols, d));
                     if cleared {
                         b.c.select.clear();
                         run = true;
@@ -1189,7 +1089,7 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col], scope: &Sco
             if !sql && !grouped {
                 let r = add_chip(ui, "GROUP BY");
                 let mut applied = false;
-                popover(&r, 580.0, |ui| applied = group_popover(ui, &mut b.gdlg, &mut b.c, cols, d, &table, rows));
+                popover(&r, 580.0, false, |ui| applied = group_popover(ui, &mut b.gdlg, &mut b.c, cols, d, &table, rows));
                 run |= applied;
             }
             // DISTINCT, a toggle
@@ -1229,7 +1129,7 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col], scope: &Sco
         ui.add_space(8.0);
         let flat = stmt.split_whitespace().collect::<Vec<_>>().join(" ");
         let text = if b.fold_open { stmt.clone() } else { flat };
-        let mut job = sql_job(&text);
+        let mut job = sql_job(&text, TXT_SMALL);
         job.wrap.max_width = ui.available_width() - 46.0;
         if !b.fold_open {
             job.wrap.max_rows = 1;

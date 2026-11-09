@@ -3,7 +3,6 @@
 //! never lands on text that changed, a list that was dismissed, or another tab.
 
 use super::*;
-use super::sql_bar::sql_job;
 use crate::ui::js_doc::doc_popup;
 use std::time::Instant;
 
@@ -128,11 +127,11 @@ pub(super) fn js_sql_job(text: &str) -> LayoutJob {
         let mut seg = t.range.start;
         for h in &t.holes {
             let (hs, he) = (h.start.max(seg), h.end.min(t.range.end));
-            add(sql_job(&text[seg..hs]), true);
+            add(sql_job(&text[seg..hs], TXT_SMALL), true);
             add(js_job(&text[hs..he]), false);
             seg = he;
         }
-        add(sql_job(&text[seg..t.range.end]), true);
+        add(sql_job(&text[seg..t.range.end], TXT_SMALL), true);
         at = t.range.end;
     }
     js(&mut add, at, text.len());

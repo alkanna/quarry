@@ -3,8 +3,7 @@
 use super::*;
 use crate::db::sql::{lex, value::Kind, Col, ResultSet};
 use db::copy::{CopyCol, Fmt};
-use super::sql_bar::sql_job;
-use crate::ui::sql_complete::{open_demo, sql_ac_field};
+use crate::ui::sql_complete::{open_list, sql_ac_field};
 use egui::text::CCursor;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -327,7 +326,7 @@ impl App {
                     egui::ScrollArea::vertical().id_salt("sql-hist").max_height(300.0).show(ui, |ui| {
                         for h in &hist {
                             let one_line: String = h.split_whitespace().collect::<Vec<_>>().join(" ");
-                            let mut job = sql_job(&one_line.chars().take(90).collect::<String>());
+                            let mut job = sql_job(&one_line.chars().take(90).collect::<String>(), TXT_SMALL);
                             job.wrap.max_rows = 1;
                             if ui.add(quiet_button(job)).on_hover_text(h.as_str()).clicked() {
                                 load = Some(h.clone());
@@ -402,7 +401,7 @@ impl App {
         let custom = self.prefs.query_editor_h > 0.0;
         let h = if custom { self.prefs.query_editor_h.clamp(lo, hi.max(lo)) } else { (lines as f32 * LINE_H + 24.0).clamp(96.0, (avail * 0.5).max(96.0)) };
         let mut layout = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
-            let mut job = sql_job(buf.as_str());
+            let mut job = sql_job(buf.as_str(), TXT_SMALL);
             for sec in &mut job.sections {
                 sec.format.line_height = Some(LINE_H);
             }
@@ -413,8 +412,8 @@ impl App {
             egui::ScrollArea::vertical().id_salt("sql-ed").max_height(h).auto_shrink([false, true]).show(ui, |ui| {
                 // Reserved first so the band is drawn under the text.
                 let band = ui.painter().add(egui::Shape::Noop);
-                if std::env::var("QUARRY_TEST_SQL").is_ok_and(|v| v == "acquery") {
-                    open_demo(ui, id, &s.query, &mut s.bar.ac, &scope, values);
+                if s.bar.preset.ac {
+                    open_list(ui, id, &s.query, &mut s.bar.ac, &scope, values);
                 }
                 // The suggestions work on the statement under the caret, with the tail after it for aliases.
                 let (out, _) = sql_ac_field(ui, id, &mut s.query, &mut s.bar.ac, &scope, values, &mut s.bar.wants, |ui, text, _| {

@@ -380,9 +380,15 @@ impl App {
                     s.bar.c.limit = "100".into();
                 }
             }
+            Ok("colpick") => {
+                if let Some(s) = t.sql.as_mut() {
+                    s.bar.preset = super::sql_bar::Preset { order: true, pick: Some("stat".into()), ..Default::default() };
+                }
+            }
             Ok("ac") => {
                 t.filter_txt = "status = 'paid' AND total > 50 AND cur".into();
                 if let Some(s) = t.sql.as_mut() {
+                    s.bar.preset.ac = true;
                     s.bar.c.sql = true;
                     s.bar.c.limit = "100".into();
                 }
@@ -456,7 +462,7 @@ impl App {
     }
 
     /// QUARRY_TEST_SQL=ac or acquery: the schema and column values the suggestions come from, and for `acquery`
-    /// a Query tab with the caret after `c.`. The list itself is opened by the input (see `open_demo`).
+    /// a Query tab with the caret after `c.`. The list is opened by the bar preset (see `open_list`).
     fn sql_ac_demo(&mut self) {
         use db::sql::schema::{Schema, SchemaCol, SchemaTable};
         use db::sql::value::Kind;
@@ -475,6 +481,7 @@ impl App {
             if let Some(s) = t.sql.as_mut() {
                 s.query = "SELECT o.id, c.name FROM orders o\nJOIN customers c ON c.".into();
                 s.caret = s.query.chars().count();
+                s.bar.preset.ac = true;
             }
             self.tabs.push(t);
             self.cur = self.tabs.len() - 1;

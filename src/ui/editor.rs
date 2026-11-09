@@ -3,7 +3,61 @@
 use super::complete::{JS_GLOBALS, JS_KEYWORDS, open_quote};
 use super::theme::*;
 use eframe::egui::{self, Color32, FontId, Key, RichText, TextFormat, text::LayoutJob};
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, OnceLock};
+
+/// Types the keyword list does not hold, colored like keywords in a CREATE statement.
+const SQL_TYPES: &[&str] = &["TINYINT", "SMALLINT", "MEDIUMINT", "INT", "INTEGER", "BIGINT", "DECIMAL", "NUMERIC", "FLOAT", "DOUBLE", "BIT", "CHAR", "VARCHAR", "BINARY", "VARBINARY", "TINYTEXT", "TEXT", "MEDIUMTEXT", "LONGTEXT", "TINYBLOB", "BLOB", "MEDIUMBLOB", "LONGBLOB", "ENUM", "SET", "DATE", "TIME", "DATETIME", "TIMESTAMP", "YEAR", "JSON", "BOOLEAN", "BOOL", "CURRENT_TIMESTAMP", "ENGINE", "CHARSET"];
+
+/// Every SQL keyword and type, lowercase, so a word is looked up without scanning the lists.
+fn sql_words() -> &'static HashSet<String> {
+    static WORDS: OnceLock<HashSet<String>> = OnceLock::new();
+    WORDS.get_or_init(|| crate::db::sql::KEYWORDS.iter().chain(SQL_TYPES).map(|w| w.to_ascii_lowercase()).collect())
+}
+
+fn is_sql_word(w: &str) -> bool {
+    let mut buf = [0u8; 32];
+    let Some(dst) = buf.get_mut(..w.len()) else { return false };
+    dst.copy_from_slice(w.as_bytes());
+    dst.make_ascii_lowercase();
+    std::str::from_utf8(dst).is_ok_and(|l| sql_words().contains(l))
+}
+
+/// SQL text colored by token: keywords, types, numbers, strings and comments, in mono at `size`.
+pub(crate) fn sql_job(text: &str, size: f32) -> LayoutJob {
+    use crate::db::sql::lex::{self, Tok};
+    let mut job = LayoutJob::default();
+    for (tok, r) in lex::tokens(text) {
+        let s = &text[r];
+        let color = match tok {
+            Tok::Word if is_sql_word(s) => C_KEYWORD(),
+            Tok::Word if s.starts_with(|c: char| c.is_ascii_digit()) => C_NUMBER(),
+            Tok::Str => C_STRING(),
+            Tok::Comment => FAINT(),
+            Tok::Punct => MUTED(),
+            _ => TEXT(),
+        };
+        job.append(s, 0.0, mono_fmt(size, color, 400.0));
+    }
+    job
+}
+
+/// A job cut into one job per line. Strings and comments can span lines, so a highlighter colors the
+/// whole text first and the cut comes after.
+pub(crate) fn split_lines(job: &LayoutJob) -> Vec<LayoutJob> {
+    let mut lines = vec![LayoutJob::default()];
+    for sec in &job.sections {
+        for (i, part) in job.text[sec.byte_range.start.0..sec.byte_range.end.0].split('\n').enumerate() {
+            if i > 0 {
+                lines.push(LayoutJob::default());
+            }
+            if !part.is_empty() {
+                lines.last_mut().unwrap().append(part, 0.0, sec.format.clone());
+            }
+        }
+    }
+    lines
+}
 
 /// Colours JSON and shell-style query text by token, for every code editor in the app.
 pub(crate) fn json_job(text: &str) -> LayoutJob {

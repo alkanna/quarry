@@ -4,13 +4,10 @@
 
 use super::*;
 use db::sql::structure::{Column, ForeignKey, Index, Structure, Trigger};
-use db::sql::{lex, KEYWORDS};
 use egui::{pos2, vec2, Rect};
 
 const READ_ONLY: &str = "Read-only: unlock writes to change the structure";
 const LATER: &str = "Comes with writes";
-/// Types the keyword list does not hold, colored like keywords in the CREATE statement.
-const TYPES: &[&str] = &["TINYINT", "SMALLINT", "MEDIUMINT", "INT", "INTEGER", "BIGINT", "DECIMAL", "NUMERIC", "FLOAT", "DOUBLE", "BIT", "CHAR", "VARCHAR", "BINARY", "VARBINARY", "TINYTEXT", "TEXT", "MEDIUMTEXT", "LONGTEXT", "TINYBLOB", "BLOB", "MEDIUMBLOB", "LONGBLOB", "ENUM", "SET", "DATE", "TIME", "DATETIME", "TIMESTAMP", "YEAR", "JSON", "BOOLEAN", "BOOL", "CURRENT_TIMESTAMP", "ENGINE", "CHARSET"];
 
 /// What the four views keep per tab.
 #[derive(Default)]
@@ -399,7 +396,7 @@ fn tick(ui: &egui::Ui, rect: Rect, on: bool) {
     let p = ui.painter();
     p.rect(b, R_SM, if on { PRIMARY() } else { BG() }, Stroke::new(1.0, if on { PRIMARY() } else { BORDER() }), egui::StrokeKind::Inside);
     if on {
-        p.line(vec![c + vec2(-3.5, 0.0), c + vec2(-1.0, 2.5), c + vec2(3.5, -2.5)], Stroke::new(1.6, ON_PRIMARY()));
+        paint_check(p, c, ON_PRIMARY());
     }
 }
 
@@ -526,39 +523,11 @@ fn grid(ui: &mut egui::Ui, salt: &str, cols: &[GCol], rows: usize, sel: Option<u
     clicked
 }
 
-/// A line of SQL as colored pieces. Strings and comments can span lines, so the text is cut at
-/// each newline after coloring.
-fn sql_lines(text: &str) -> Vec<egui::text::LayoutJob> {
-    let fmt = |c: Color32| egui::TextFormat { font_id: FontId::monospace(TXT_BODY), color: c, ..Default::default() };
-    let mut lines = vec![egui::text::LayoutJob::default()];
-    for (tok, range) in lex::tokens(text) {
-        let piece = &text[range];
-        let color = match tok {
-            lex::Tok::Comment => FAINT(),
-            lex::Tok::Str => C_STRING(),
-            lex::Tok::Word => {
-                let up = piece.to_ascii_uppercase();
-                if piece.starts_with(|c: char| c.is_ascii_digit()) { C_NUMBER() } else if KEYWORDS.contains(&up.as_str()) || TYPES.contains(&up.as_str()) { C_KEYWORD() } else { TEXT() }
-            }
-            _ => TEXT(),
-        };
-        for (i, part) in piece.split('\n').enumerate() {
-            if i > 0 {
-                lines.push(egui::text::LayoutJob::default());
-            }
-            if !part.is_empty() {
-                lines.last_mut().unwrap().append(part, 0.0, fmt(color));
-            }
-        }
-    }
-    lines
-}
-
 /// A read-only code area with line numbers, scrolling both ways inside `height`.
 fn code_view(ui: &mut egui::Ui, salt: &str, text: &str, height: f32) {
     const GUTTER: f32 = 44.0;
     const LINE_H: f32 = 20.0;
-    let galleys: Vec<_> = sql_lines(text).into_iter().map(|j| ui.painter().layout_job(j)).collect();
+    let galleys: Vec<_> = split_lines(&sql_job(text, TXT_BODY)).into_iter().map(|j| ui.painter().layout_job(j)).collect();
     let widest = galleys.iter().map(|g| g.size().x).fold(0.0, f32::max);
     let h = galleys.len() as f32 * LINE_H + 16.0;
     egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).show(ui, |ui| {

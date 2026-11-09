@@ -669,3 +669,95 @@ pub(crate) fn pager(ui: &mut egui::Ui, page: usize, pages: usize) -> Option<usiz
     });
     go.filter(|&p| p != page)
 }
+
+/// A painted check mark.
+pub(crate) fn paint_check(p: &egui::Painter, c: egui::Pos2, color: Color32) {
+    let pts = [c + egui::vec2(-4.0, 0.0), c + egui::vec2(-1.5, 3.0), c + egui::vec2(4.0, -3.5)];
+    p.line_segment([pts[0], pts[1]], Stroke::new(1.6, color));
+    p.line_segment([pts[1], pts[2]], Stroke::new(1.6, color));
+}
+
+/// One row of a menu: a check column, the label in `color`, a faint note on the right.
+pub(crate) fn menu_row(ui: &mut egui::Ui, label: &str, color: Color32, checked: bool, note: &str) -> egui::Response {
+    menu_row_in(ui, label, color, checked, note, "", false)
+}
+
+/// A menu row whose label shows the typed part `hl` in the primary color, and that can be held
+/// highlighted (`active`) by the keyboard selection of a searchable list.
+pub(crate) fn menu_row_in(ui: &mut egui::Ui, label: &str, color: Color32, checked: bool, note: &str, hl: &str, active: bool) -> egui::Response {
+    let w = ui.available_width().max(190.0);
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(w, 24.0), Sense::click());
+    let state = state_of(&r);
+    if !ui.is_rect_visible(rect) {
+        return r;
+    }
+    if state > 0 || active {
+        ui.painter().rect_filled(rect, R_SM, if state == 2 { menu_pressed() } else { MENU_HOVER() });
+    }
+    if checked {
+        paint_check(ui.painter(), egui::pos2(rect.left() + 12.0, rect.center().y), TEXT());
+    }
+    // The note is laid out first so a long label is cut with an ellipsis before it instead of running under it.
+    let mut note_left = rect.right() - 8.0;
+    if !note.is_empty() {
+        let n = ui.painter().layout_no_wrap(note.to_string(), FontId::monospace(TXT_CAPTION), FAINT());
+        let dy = optical_dy(&n);
+        note_left -= n.size().x;
+        ui.painter().galley(egui::pos2(note_left, rect.center().y - n.size().y / 2.0 + dy), n, FAINT());
+    }
+    let mut job = egui::text::LayoutJob::default();
+    let fmt = |c: Color32| egui::TextFormat::simple(FontId::monospace(TXT_SMALL), c);
+    match find_ci(label, hl) {
+        Some((i, j)) => {
+            job.append(&label[..i], 0.0, fmt(color));
+            job.append(&label[i..j], 0.0, fmt(PRIMARY()));
+            job.append(&label[j..], 0.0, fmt(color));
+        }
+        None => job.append(label, 0.0, fmt(color)),
+    }
+    job.wrap = egui::text::TextWrapping::truncate_at_width((note_left - 12.0 - (rect.left() + 26.0)).max(20.0));
+    let g = ui.painter().layout_job(job);
+    let dy = optical_dy(&g);
+    ui.painter().galley(egui::pos2(rect.left() + 26.0, rect.center().y - g.size().y / 2.0 + dy), g, color);
+    focus_ring(ui, &r, rect, R_SM as f32);
+    let label = label.to_string();
+    let enabled = ui.is_enabled();
+    r.widget_info(|| egui::WidgetInfo::selected(egui::Role::MenuItem, enabled, checked, label.clone()));
+    r.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Byte range of the first case-insensitive (ASCII) occurrence of `q` in `name`. ASCII lowering keeps
+/// byte offsets, so the range indexes `name` itself.
+pub(crate) fn find_ci(name: &str, q: &str) -> Option<(usize, usize)> {
+    if q.is_empty() {
+        return None;
+    }
+    let i = name.to_ascii_lowercase().find(&q.to_ascii_lowercase())?;
+    Some((i, i + q.len()))
+}
+
+/// A clause popover. egui keeps one memory popup open at a time, so opening the column or direction
+/// menu inside would close it; it keeps its own open flag instead and closes on Esc or a click on the page.
+/// `open_first` is the state before the first frame stores one.
+pub(crate) fn popover<R>(r: &egui::Response, w: f32, open_first: bool, add: impl FnOnce(&mut egui::Ui) -> R) -> Option<R> {
+    let ctx = r.ctx.clone();
+    let id = r.id.with("clause-popover");
+    let mut open = ctx.data(|d| d.get_temp::<bool>(id)).unwrap_or(open_first);
+    if r.clicked() {
+        open = !open;
+    }
+    let out = if open {
+        egui::Popup::new(id, ctx.clone(), r, r.layer_id).kind(egui::PopupKind::Menu).layout(egui::Layout::top_down_justified(egui::Align::Min)).style(egui::containers::menu::menu_style).gap(0.0).open_bool(&mut open).close_behavior(egui::PopupCloseBehavior::IgnoreClicks).width(w).show(add)
+    } else {
+        None
+    };
+    // Its own menus are popups too, so only a click on a page layer counts as outside.
+    if open && !r.clicked() {
+        let page_click = ctx.input(|i| i.pointer.any_click().then(|| i.pointer.interact_pos()).flatten()).is_some_and(|p| !r.rect.contains(p) && ctx.layer_id_at(p).is_none_or(|l| l.order != egui::Order::Foreground));
+        if page_click || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            open = false;
+        }
+    }
+    ctx.data_mut(|d| d.insert_temp(id, open));
+    out.map(|o| o.inner)
+}
