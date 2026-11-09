@@ -80,7 +80,8 @@ fn digits(s: &str, min: usize, max: usize) -> Option<u32> {
 
 fn date_ok(s: &str) -> bool {
     let p: Vec<&str> = s.split('-').collect();
-    matches!(p[..], [y, m, d] if digits(y, 4, 4).is_some() && digits(m, 2, 2).is_some_and(|m| m <= 12) && digits(d, 2, 2).is_some_and(|d| d <= 31))
+    // Month and day 00 only exist in the whole zero date, which the callers check first.
+    matches!(p[..], [y, m, d] if digits(y, 4, 4).is_some() && digits(m, 2, 2).is_some_and(|m| (1..=12).contains(&m)) && digits(d, 2, 2).is_some_and(|d| (1..=31).contains(&d)))
 }
 
 /// [-]H:MM:SS[.ffffff], with the hour limits of the column type.
@@ -116,9 +117,9 @@ pub fn parse_edit(kind: Kind, text: &str) -> Result<Bson, String> {
             let ok = !(int.is_empty() && frac.is_empty()) && int.bytes().chain(frac.bytes()).all(|b| b.is_ascii_digit());
             if ok { Ok(Bson::String(t.into())) } else { Err("Enter a plain decimal number, like -12.50.".into()) }
         }
-        Kind::Date => if date_ok(t) { Ok(Bson::String(t.into())) } else { Err("Use the form YYYY-MM-DD.".into()) },
+        Kind::Date => if t == "0000-00-00" || date_ok(t) { Ok(Bson::String(t.into())) } else { Err("Use the form YYYY-MM-DD.".into()) },
         Kind::DateTime => {
-            let ok = t.split_once([' ', 'T']).is_some_and(|(d, tm)| date_ok(d) && time_ok(tm, 2, 23));
+            let ok = t == "0000-00-00 00:00:00" || t.split_once([' ', 'T']).is_some_and(|(d, tm)| date_ok(d) && time_ok(tm, 2, 23));
             if ok { Ok(Bson::String(t.into())) } else { Err("Use the form YYYY-MM-DD HH:MM:SS.".into()) }
         }
         Kind::Time => if time_ok(t.strip_prefix('-').unwrap_or(t), 3, 838) { Ok(Bson::String(t.into())) } else { Err("Use the form HH:MM:SS.".into()) },
@@ -133,7 +134,25 @@ pub fn parse_edit(kind: Kind, text: &str) -> Result<Bson, String> {
             }
             None => Ok(Bson::String(text.into())),
         },
-        Kind::Text | Kind::Bit | Kind::Enum | Kind::Set | Kind::Geometry => Ok(Bson::String(text.into())),
+        Kind::Bit => {
+            let (digits, radix) = if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+                (h, 16)
+            } else if let Some(q) = t.strip_prefix("b'").or_else(|| t.strip_prefix("B'")).and_then(|q| q.strip_suffix('\'')) {
+                (q, 2)
+            } else {
+                (t, 10)
+            };
+            if digits.is_empty() || !digits.bytes().all(|b| (b as char).is_digit(radix)) {
+                return Err("Enter a number, b'0101' or 0x1F.".into());
+            }
+            // Bson has no unsigned 64 bit integer, so BIT(64) values above i64::MAX cannot be staged.
+            match u64::from_str_radix(digits, radix).ok().and_then(|v| i64::try_from(v).ok()) {
+                Some(v) => Ok(Bson::Int64(v)),
+                None => Err("Too large to edit here, BIT values above 63 bits are not supported. Use SQL and a hex value like 0xFFFF.".into()),
+            }
+        }
+        Kind::Geometry => Err("Geometry values cannot be edited as text yet.".into()),
+        Kind::Text | Kind::Enum | Kind::Set => Ok(Bson::String(text.into())),
     }
 }
 
@@ -143,12 +162,24 @@ pub fn parse_edit(kind: Kind, text: &str) -> Result<Bson, String> {
 pub enum Param {
     Null,
     Int(i64),
+    /// An unsigned value above i64::MAX, which BSON cannot hold.
+    UInt(u64),
     Float(f64),
     Text(String),
     Bytes(Vec<u8>),
 }
 
 impl Param {
+    /// Like `from_bson`, but a UInt column's text above i64::MAX binds as a number, not as text.
+    pub fn for_kind(kind: Kind, v: &Bson) -> Param {
+        if let (Kind::UInt, Bson::String(s)) = (kind, v) {
+            if let Some(u) = s.parse::<u64>().ok().filter(|u| i64::try_from(*u).is_err()) {
+                return Param::UInt(u);
+            }
+        }
+        Param::from_bson(v)
+    }
+
     pub fn from_bson(v: &Bson) -> Param {
         match v {
             Bson::Null | Bson::Undefined => Param::Null,
@@ -267,5 +298,31 @@ mod tests {
         assert_eq!(Param::from_bson(&Bson::String("x".into())), Param::Text("x".into()));
         assert_eq!(Param::from_bson(&Bson::Boolean(true)), Param::Int(1));
         assert_eq!(Param::from_bson(&bytes(&[9])), Param::Bytes(vec![9]));
+    }
+
+    #[test]
+    fn bit_geometry_and_zero_dates() {
+        let p = parse_edit;
+        assert_eq!(p(Kind::Bit, "1"), Ok(Bson::Int64(1)));
+        assert_eq!(p(Kind::Bit, "b'0101'"), Ok(Bson::Int64(5)));
+        assert_eq!(p(Kind::Bit, "0x1F"), Ok(Bson::Int64(31)));
+        assert!(p(Kind::Bit, "x").is_err());
+        assert!(p(Kind::Bit, "b''").is_err());
+        assert!(p(Kind::Bit, "18446744073709551615").unwrap_err().contains("hex"));
+        assert!(p(Kind::Geometry, "POINT(1 1)").unwrap_err().contains("Geometry"));
+        assert!(p(Kind::Date, "2024-00-10").is_err());
+        assert!(p(Kind::Date, "2024-10-00").is_err());
+        assert_eq!(p(Kind::Date, "0000-00-00"), Ok(Bson::String("0000-00-00".into())));
+        assert!(p(Kind::DateTime, "2024-00-10 01:02:03").is_err());
+        assert_eq!(p(Kind::DateTime, "0000-00-00 00:00:00"), Ok(Bson::String("0000-00-00 00:00:00".into())));
+    }
+
+    #[test]
+    fn unsigned_params_follow_the_kind() {
+        let big = Bson::String("18446744073709551615".into());
+        assert_eq!(Param::for_kind(Kind::UInt, &big), Param::UInt(u64::MAX));
+        assert_eq!(Param::for_kind(Kind::UInt, &Bson::String("5".into())), Param::Text("5".into()));
+        assert_eq!(Param::for_kind(Kind::Decimal, &big), Param::Text("18446744073709551615".into()));
+        assert_eq!(Param::for_kind(Kind::UInt, &Bson::Int64(3)), Param::Int(3));
     }
 }

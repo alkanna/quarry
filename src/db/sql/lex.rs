@@ -23,9 +23,49 @@ fn is_word(c: u8) -> bool {
     c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || c >= 0x80
 }
 
+/// How the server may read the text. sql_mode and the server version change where strings and
+/// comments end, and the guard cannot know them, so it checks every combination.
+#[derive(Clone, Copy)]
+struct Opts {
+    /// A backslash escapes the next char inside quotes (off under NO_BACKSLASH_ESCAPES).
+    backslash: bool,
+    /// Double quotes hold identifiers with no backslash escape (ANSI_QUOTES).
+    ansi: bool,
+    /// Executable comments are skipped like plain ones, as when their version is above the server's
+    /// (and MySQL treats `/*M!` as a plain comment).
+    skip_exec: bool,
+}
+
+const DEFAULT: Opts = Opts { backslash: true, ansi: false, skip_exec: false };
+
+/// Index just past the closing quote of the quoted text that opens at `i`. Unterminated text runs
+/// to the end.
+fn quote_end(b: &[u8], i: usize, esc: bool) -> usize {
+    let (n, c) = (b.len(), b[i]);
+    let mut i = i + 1;
+    while i < n {
+        if b[i] == b'\\' && esc {
+            i += 2;
+        } else if b[i] == c {
+            if b.get(i + 1) == Some(&c) {
+                i += 2;
+            } else {
+                return i + 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    n
+}
+
 /// Splits text into tokens that cover it completely. Delimiters are ASCII, so every range sits on a
 /// char boundary. Unterminated strings and comments run to the end of the text.
 pub fn tokens(text: &str) -> Vec<(Tok, Range<usize>)> {
+    lex(text, DEFAULT)
+}
+
+fn lex(text: &str, o: Opts) -> Vec<(Tok, Range<usize>)> {
     let b = text.as_bytes();
     let n = b.len();
     let mut out = Vec::new();
@@ -41,24 +81,10 @@ pub fn tokens(text: &str) -> Vec<(Tok, Range<usize>)> {
             }
             Tok::Space
         } else if c == b'\'' || c == b'"' || c == b'`' {
-            i += 1;
-            while i < n {
-                // Backticks have no backslash escape, quotes do (default sql_mode).
-                if b[i] == b'\\' && c != b'`' {
-                    i += 2;
-                } else if b[i] == c {
-                    if b.get(i + 1) == Some(&c) {
-                        i += 2;
-                    } else {
-                        i += 1;
-                        break;
-                    }
-                } else {
-                    i += 1;
-                }
-            }
-            i = i.min(n);
-            if c == b'`' { Tok::Quoted } else { Tok::Str }
+            // Backticks have no backslash escape, quotes do unless the mode says otherwise.
+            let ident = c == b'`' || (c == b'"' && o.ansi);
+            i = quote_end(b, i, o.backslash && !ident);
+            if ident { Tok::Quoted } else { Tok::Str }
         } else if c == b'#' || (c == b'-' && next == Some(b'-') && b.get(i + 2).is_none_or(|x| x.is_ascii_whitespace() || x.is_ascii_control())) {
             while i < n && b[i] != b'\n' {
                 i += 1;
@@ -69,7 +95,7 @@ pub fn tokens(text: &str) -> Vec<(Tok, Range<usize>)> {
             if b.get(j) == Some(&b'M') && b.get(j + 1) == Some(&b'!') {
                 j += 1;
             }
-            if b.get(j) == Some(&b'!') {
+            if b.get(j) == Some(&b'!') && !o.skip_exec {
                 j += 1;
                 while j < n && b[j].is_ascii_digit() {
                     j += 1;
@@ -85,10 +111,27 @@ pub fn tokens(text: &str) -> Vec<(Tok, Range<usize>)> {
             exec = false;
             i += 2;
             Tok::ExecClose
-        } else if c == b'@' || is_word(c) {
-            while i < n && b[i] == b'@' {
-                i += 1;
+        } else if c == b'@' {
+            // A user variable is @ glued to a name or a quoted name. A lone @ is punctuation, so a
+            // comment between the two cannot pass as a variable.
+            let mut j = i;
+            while j < n && j < i + 2 && b[j] == b'@' {
+                j += 1;
             }
+            if j < n && is_word(b[j]) {
+                while j < n && is_word(b[j]) {
+                    j += 1;
+                }
+                i = j;
+                Tok::Word
+            } else if j < n && (b[j] == b'`' || b[j] == b'\'' || b[j] == b'"') {
+                i = quote_end(b, j, o.backslash && b[j] != b'`' && !(b[j] == b'"' && o.ansi));
+                Tok::Word
+            } else {
+                i += 1;
+                Tok::Punct
+            }
+        } else if is_word(c) {
             while i < n && is_word(b[i]) {
                 i += 1;
             }
@@ -114,6 +157,10 @@ fn split(text: &str) -> Vec<(Range<usize>, usize)> {
                     out.push((s..last, r.end));
                 }
                 (start, code) = (None, false);
+            }
+            // A trailing comment belongs to no statement, so it never moves the end.
+            Tok::Comment => {
+                start.get_or_insert(r.start);
             }
             _ => {
                 start.get_or_insert(r.start);
@@ -154,16 +201,33 @@ fn punct(t: &Code, p: &str) -> bool {
 const REFUSED: &str = "Unlock writes first.";
 
 /// Allow-list on the first keyword, because the session guard (`TRANSACTION READ ONLY`) does not
-/// stop everything, for example SET SESSION or INTO OUTFILE. The text between `/*!` and `*/` is
-/// checked as code since the server runs it. Several statements are all checked.
+/// stop everything, for example SET SESSION or INTO OUTFILE. Several statements are all checked.
+/// The server may or may not run `/*! */` text and may read quotes differently, so the text must pass
+/// under every combination of those readings. The default reading goes first for its messages.
 pub fn read_only_check(stmt: &str) -> Result<(), String> {
-    let code: Vec<Code> = tokens(stmt).into_iter().filter(|(t, _)| matches!(t, Tok::Word | Tok::Quoted | Tok::Str | Tok::Punct)).map(|(t, r)| (t, &stmt[r])).collect();
-    code.split(|t| punct(t, ";")).try_for_each(check_one)
+    for skip_exec in [false, true] {
+        for ansi in [false, true] {
+            for backslash in [true, false] {
+                let code: Vec<Code> = lex(stmt, Opts { backslash, ansi, skip_exec }).into_iter().filter(|(t, _)| matches!(t, Tok::Word | Tok::Quoted | Tok::Str | Tok::Punct)).map(|(t, r)| (t, &stmt[r])).collect();
+                code.split(|t| punct(t, ";")).try_for_each(check_one)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn check_one(part: &[Code]) -> Result<(), String> {
     if part.windows(2).any(|w| is(&w[0], "INTO") && (is(&w[1], "OUTFILE") || is(&w[1], "DUMPFILE"))) {
         return Err("INTO OUTFILE writes a file on the server and is not allowed.".into());
+    }
+    // A READ ONLY transaction may not stop MariaDB sequences from advancing.
+    let seq = part.iter().enumerate().any(|(i, t)| {
+        let call = part.get(i + 1).is_some_and(|n| punct(n, "("));
+        let dotted = i > 0 && punct(&part[i - 1], ".");
+        ((is(t, "SETVAL") || is(t, "NEXTVAL")) && (call || dotted)) || (is(t, "NEXT") && part.get(i + 1).is_some_and(|n| is(n, "VALUE")) && part.get(i + 2).is_some_and(|n| is(n, "FOR")))
+    });
+    if seq {
+        return Err("Advancing a sequence changes data and is not allowed on a read-only connection.".into());
     }
     // A statement may open with parentheses, as in (SELECT 1) UNION (SELECT 2).
     let at = part.iter().take_while(|t| punct(t, "(")).count();
@@ -247,7 +311,7 @@ mod tests {
     fn splits_outside_strings_and_comments() {
         assert_eq!(texts("SELECT 1; SELECT 2;"), ["SELECT 1", "SELECT 2"]);
         assert_eq!(texts("SELECT 'a;b', \"c;d\", `e;f`; SELECT 2"), ["SELECT 'a;b', \"c;d\", `e;f`", "SELECT 2"]);
-        assert_eq!(texts("SELECT 1 -- x; y\n; SELECT 2 # a;b\n; SELECT /* ; */ 3"), ["SELECT 1 -- x; y", "SELECT 2 # a;b", "SELECT /* ; */ 3"]);
+        assert_eq!(texts("SELECT 1 -- x; y\n; SELECT 2 # a;b\n; SELECT /* ; */ 3"), ["SELECT 1", "SELECT 2", "SELECT /* ; */ 3"]);
         assert_eq!(texts(";; ;\n-- only a comment\n;/* c */;"), Vec::<&str>::new());
     }
 
@@ -265,9 +329,9 @@ mod tests {
     fn double_dash_needs_a_space() {
         assert_eq!(texts("SELECT 1--1; SELECT 2"), ["SELECT 1--1", "SELECT 2"]);
         assert_eq!(texts("SELECT 1 --; SELECT 2"), ["SELECT 1 --", "SELECT 2"]);
-        assert_eq!(texts("SELECT 1 -- ; SELECT 2"), ["SELECT 1 -- ; SELECT 2"]);
-        assert_eq!(texts("SELECT 1 --\t; SELECT 2"), ["SELECT 1 --\t; SELECT 2"]);
-        assert_eq!(texts("SELECT 1 --"), ["SELECT 1 --"]);
+        assert_eq!(texts("SELECT 1 -- ; SELECT 2"), ["SELECT 1"]);
+        assert_eq!(texts("SELECT 1 --\t; SELECT 2"), ["SELECT 1"]);
+        assert_eq!(texts("SELECT 1 --"), ["SELECT 1"]);
     }
 
     #[test]
@@ -406,5 +470,54 @@ mod tests {
         assert!(refused("/*M!100100 DELETE FROM t */").starts_with("DELETE"));
         assert!(refused("SELECT 1 /*!80000 INTO OUTFILE 'x' */").contains("OUTFILE"));
         assert_eq!(read_only_check("SELECT 1 /*!80000 , 2 */"), Ok(()));
+    }
+
+    #[test]
+    fn versioned_comments_are_checked_both_ways() {
+        for s in [
+            "/*!99999 SELECT */ DROP DATABASE shop",
+            "/*M! SELECT */ DROP TABLE t",
+            "/*M!999999 SELECT */ DROP TABLE t",
+            "SELECT 1 INTO /*!99999 x */ OUTFILE '/tmp/f'",
+            "WITH c AS (SELECT 1) /*!99999 ( */ DELETE FROM t",
+            "SET @x = /*!99999 ( */ 1, GLOBAL read_only = 0",
+        ] {
+            assert!(read_only_check(s).is_err(), "{s}");
+        }
+    }
+
+    #[test]
+    fn quote_modes_cannot_hide_a_statement() {
+        assert!(read_only_check(r"SELECT 'a\'; DROP TABLE t; -- '").is_err());
+        assert!(read_only_check(r#"SELECT "a\"; DROP TABLE t; -- ""#).is_err());
+        for s in [r"SELECT 'it\'s'", r#"SELECT "a" FROM t"#, "SELECT 'a''b'", r"SELECT 'C:\\' , 1"] {
+            assert_eq!(read_only_check(s), Ok(()), "{s}");
+        }
+    }
+
+    #[test]
+    fn user_variable_needs_no_gap() {
+        assert!(read_only_check("SET @/**/@sql_mode = ''").is_err());
+        assert!(read_only_check("SET @ x = 1").is_err());
+        assert_eq!(read_only_check("SET @`a b` = 1, @'c' = 2, @x := 3"), Ok(()));
+        assert!(read_only_check("SET @@sql_mode = ''").is_err());
+    }
+
+    #[test]
+    fn sequence_changes_are_refused() {
+        for s in ["SELECT NEXTVAL(s)", "SELECT SETVAL(s, 10)", "SELECT NEXT VALUE FOR s", "SELECT s.nextval", "SELECT nextval (s)"] {
+            assert!(refused(s).contains("sequence"), "{s}");
+        }
+        assert_eq!(read_only_check("SELECT LASTVAL(s), PREVIOUS VALUE FOR s"), Ok(()));
+        assert_eq!(read_only_check("SELECT nextval FROM t"), Ok(()));
+    }
+
+    #[test]
+    fn ranges_stop_at_the_last_code_token() {
+        let s = "SELECT 1 -- note\n;\nSELECT 2  /* c */  \n";
+        assert_eq!(texts(s), ["SELECT 1", "SELECT 2"]);
+        assert_eq!(statement_at(s, 12), Some(0..8));
+        assert_eq!(statement_at(s, 30), Some(19..27));
+        assert_eq!(statement_at(s, 33), Some(19..27));
     }
 }
