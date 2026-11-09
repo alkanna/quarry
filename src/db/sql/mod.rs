@@ -43,6 +43,8 @@ impl Engine {
 pub struct Db {
     pub pool: Pool,
     pub dialect: Dialect,
+    /// How the pool connects, so Stop can open a connection of its own when the pool is busy.
+    pub opts: sqlx::mysql::MySqlConnectOptions,
     /// The server's `VERSION()`, such as "8.4.3" or "10.11.6-MariaDB".
     pub version: String,
     /// Whether the session is encrypted, which `ssl-mode=PREFERRED` leaves to the server.
