@@ -189,6 +189,8 @@ pub struct App {
     tools_installing: bool,
     /// Tree row the palette jumped to, as (connection, database, collection), scrolled into view once drawn.
     reveal: Option<(u64, String, Option<String>)>,
+    /// Ids of the open connections in the order they were first seen open, for the rail shortcuts.
+    rail_order: Vec<u64>,
     /// Scroll the selected document row into view on its next draw, after keyboard selection.
     scroll_sel: bool,
     /// The active tab the tab strip last scrolled to; it scrolls again when this differs.
@@ -306,6 +308,7 @@ impl App {
             tree_filter: String::new(),
             tools_installing: false,
             reveal: None,
+            rail_order: Vec::new(),
             scroll_sel: false,
             tab_seen: None,
             demo,

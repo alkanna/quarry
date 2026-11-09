@@ -231,40 +231,7 @@ impl App {
             ui.add_space(2.0);
         });
         if let Some(id) = edit {
-            if let Some(meta) = self.conn(id).map(|c| c.meta.clone()) {
-                self.conn_test = None;
-                // Opening the form with an empty address would overwrite the stored one on save,
-                // unless there is none, which is when re-entering it is the way out.
-                // Demo ids overlap real ones, so the demo must not show the user's real secrets.
-                let uri = if self.demo {
-                    self.conn(id).map(|c| c.masked_uri.clone()).unwrap_or_default()
-                } else {
-                    match stored_uri(id) {
-                        Ok(u) => u,
-                        Err(keyring::Error::NoEntry) => String::new(),
-                        Err(e) => return self.err(uri_err(e)),
-                    }
-                };
-                let stored = |what: &str| if self.demo { String::new() } else { secret(id, what).unwrap_or_default() };
-                self.modal = Some(Modal::Conn(Box::new(ConnForm {
-                    id: Some(id),
-                    name: meta.name.clone(),
-                    tag: meta.tag.clone(),
-                    engine: meta.engine,
-                    addr: if meta.engine.is_sql() { db::sql::Addr::parse(&uri).unwrap_or_default() } else { Default::default() },
-                    uri: if meta.engine.is_sql() { String::new() } else { uri },
-                    ssh_on: meta.ssh.is_some(),
-                    ssh: meta.ssh.clone().unwrap_or_default(),
-                    ssh_pwd: stored("ssh-password"),
-                    ssh_pass: stored("ssh-passphrase"),
-                    proxy_on: meta.proxy.is_some(),
-                    proxy: meta.proxy.clone().unwrap_or_default(),
-                    proxy_pwd: stored("proxy-password"),
-                    show: false,
-                    testing: false,
-                    tab: Default::default(),
-                })));
-            }
+            self.edit_conn(id);
         }
         if let Some(id) = refresh {
             if !self.demo {
@@ -284,6 +251,44 @@ impl App {
                 typed: String::new(),
                 action: Danger::RemoveConnection(id),
             });
+        }
+    }
+
+    /// Opens the connection form for a saved connection.
+    pub(super) fn edit_conn(&mut self, id: u64) {
+        if let Some(meta) = self.conn(id).map(|c| c.meta.clone()) {
+            self.conn_test = None;
+            // Opening the form with an empty address would overwrite the stored one on save,
+            // unless there is none, which is when re-entering it is the way out.
+            // Demo ids overlap real ones, so the demo must not show the user's real secrets.
+            let uri = if self.demo {
+                self.conn(id).map(|c| c.masked_uri.clone()).unwrap_or_default()
+            } else {
+                match stored_uri(id) {
+                    Ok(u) => u,
+                    Err(keyring::Error::NoEntry) => String::new(),
+                    Err(e) => return self.err(uri_err(e)),
+                }
+            };
+            let stored = |what: &str| if self.demo { String::new() } else { secret(id, what).unwrap_or_default() };
+            self.modal = Some(Modal::Conn(Box::new(ConnForm {
+                id: Some(id),
+                name: meta.name.clone(),
+                tag: meta.tag.clone(),
+                engine: meta.engine,
+                addr: if meta.engine.is_sql() { db::sql::Addr::parse(&uri).unwrap_or_default() } else { Default::default() },
+                uri: if meta.engine.is_sql() { String::new() } else { uri },
+                ssh_on: meta.ssh.is_some(),
+                ssh: meta.ssh.clone().unwrap_or_default(),
+                ssh_pwd: stored("ssh-password"),
+                ssh_pass: stored("ssh-passphrase"),
+                proxy_on: meta.proxy.is_some(),
+                proxy: meta.proxy.clone().unwrap_or_default(),
+                proxy_pwd: stored("proxy-password"),
+                show: false,
+                testing: false,
+                tab: Default::default(),
+            })));
         }
     }
 

@@ -402,7 +402,7 @@ impl App {
                             // Next to the current tab, like the original's nextToActive.
                             let at = (self.cur + 1).min(self.tabs.len());
                             self.tabs.insert(at, t);
-                            self.cur = at;
+                            self.set_cur(at);
                             self.reset_doc_state();
                             self.run_pipeline(pipeline.clone());
                             keep = false;

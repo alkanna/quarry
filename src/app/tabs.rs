@@ -31,12 +31,27 @@ impl App {
         self.new_field = None;
     }
 
+    /// The one place the current tab changes. The explorer follows the tab's connection and scrolls
+    /// to its database and collection. Picking a connection without changing tabs never comes here,
+    /// so the explorer may show another connection than the tab.
+    pub(super) fn set_cur(&mut self, i: usize) {
+        self.cur = i;
+        let Some(sel) = self.tabs.get(i).map(|t| t.sel.clone()) else { return };
+        if let Some(id) = follow_conn(&sel, |id| self.conn(id).is_some()) {
+            self.active = Some(id);
+            if !sel.db.is_empty() {
+                self.open_dbs.insert((id, sel.db.clone()));
+                self.reveal = Some((id, sel.db, (!sel.coll.is_empty()).then_some(sel.coll)));
+            }
+        }
+    }
+
     /// Opens a collection. Like the original (treeOpenInNewTab), a new tab is used unless one
     /// already shows that collection; `replace` reuses the current tab instead.
     pub(super) fn open_collection(&mut self, sel: Sel, replace: bool) {
         self.reset_doc_state();
         if let Some(i) = self.tabs.iter().position(|t| t.sel == sel) {
-            self.cur = i;
+            self.set_cur(i);
             return;
         }
         let engine = self.conn(sel.conn).map(|c| c.meta.engine).unwrap_or_default();
@@ -45,7 +60,7 @@ impl App {
             self.tabs[self.cur] = Tab { view, ..Tab::new(sel).for_engine(engine) };
         } else {
             self.tabs.push(Tab::new(sel).for_engine(engine));
-            self.cur = self.tabs.len() - 1;
+            self.set_cur(self.tabs.len() - 1);
         }
         self.reload();
     }
@@ -63,7 +78,7 @@ impl App {
         }
         let t = self.closed.remove(0);
         self.tabs.push(t);
-        self.cur = self.tabs.len() - 1;
+        self.set_cur(self.tabs.len() - 1);
         self.reset_doc_state();
         self.reload();
     }
@@ -76,13 +91,35 @@ impl App {
         // A closed tab is kept for reopening; its stream must not keep reading meanwhile.
         t.watch.stop();
         self.remember_closed(t);
+        let was_cur = self.cur == i;
         if self.cur > i || self.cur >= self.tabs.len() {
             self.cur = self.cur.saturating_sub(1);
+        }
+        // The tab that took the closed one's place is now current.
+        if was_cur {
+            self.set_cur(self.cur);
         }
         self.reset_doc_state();
     }
 
     pub(super) fn tab_by_req(&mut self, req: u64) -> Option<&mut Tab> {
         self.tabs.iter_mut().find(|t| t.req == req)
+    }
+}
+
+/// The connection the explorer should show for a tab, unless the tab's connection was removed.
+fn follow_conn(sel: &Sel, exists: impl Fn(u64) -> bool) -> Option<u64> {
+    exists(sel.conn).then_some(sel.conn)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explorer_follows_the_tab_connection() {
+        let sel = Sel { conn: 2, db: "shop".into(), coll: "orders".into() };
+        assert_eq!(follow_conn(&sel, |id| id == 2), Some(2));
+        assert_eq!(follow_conn(&sel, |id| id == 1), None);
     }
 }

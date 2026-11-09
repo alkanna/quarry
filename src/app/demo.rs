@@ -74,6 +74,26 @@ impl App {
         self.tabs.push(t);
         self.tabs.push(Tab::new(sel("analytics", "events")));
         self.cur = 1;
+        // QUARRY_TEST_RAIL=1 adds the MySQL demo connection and a connecting one beside the Mongo demo, for the rail shortcuts.
+        if std::env::var("QUARRY_TEST_RAIL").is_ok() && std::env::var("QUARRY_TEST_SQL").is_err() {
+            // The SQL demo replaces the tabs, which the Mongo demo keeps.
+            let tabs = std::mem::take(&mut self.tabs);
+            self.load_sql_demo();
+            self.tabs = tabs;
+            self.cur = 1;
+            self.active = Some(1);
+            self.conns.push(Conn {
+                meta: ConnMeta { id: 4, name: "reports".into(), tag: "Staging".into(), engine: db::sql::Engine::MySql, ..Default::default() },
+                client: None,
+                sql: None,
+                status: Status::Connecting,
+                writable: false,
+                dbs: Vec::new(),
+                masked_uri: "mysql://app:****@reports.internal:3306".into(),
+                tunnel: None,
+                server: Default::default(),
+            });
+        }
         // QUARRY_TEST_SQL=content swaps the demo for a MySQL connection with its orders table open.
         if std::env::var("QUARRY_TEST_SQL").is_ok() {
             self.load_sql_demo();

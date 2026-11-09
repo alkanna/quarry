@@ -190,7 +190,7 @@ impl App {
 
     pub(super) fn go_tab(&mut self, i: usize) {
         if i != self.cur && i < self.tabs.len() {
-            self.cur = i;
+            self.set_cur(i);
             self.reset_doc_state();
         }
     }
@@ -615,6 +615,7 @@ impl App {
             }
             // Stay on the same tab when it survives, else on the clicked one, else the nearest.
             self.cur = if keep(cur) { (0..cur).filter(|&k| keep(k)).count() } else if keep(i) { (0..i).filter(|&k| keep(k)).count() } else { i.saturating_sub(1) }.min(self.tabs.len().saturating_sub(1));
+            self.set_cur(self.cur);
             self.reset_doc_state();
         } else if let Some(i) = close {
             self.close_tab(i);
