@@ -113,10 +113,15 @@ pub(super) struct Pill<'a> {
 
 /// One connection in the toolbar: its engine mark, "name · db", a note such as read-only and, for an
 /// attachment, a painted x. Returns true when the x was clicked.
-pub(super) fn conn_pill(ui: &mut egui::Ui, id: egui::Id, p: &Pill, close: bool) -> bool {
-    let label = pill_galley(ui, &p.label, egui::TextFormat::simple(FontId::proportional(TXT_BODY), BRIGHT()));
+/// `max_w` is the pill's share of the toolbar: a longer "name · db" is cut with an ellipsis, so the pills
+/// never run under the buttons on the right. The hover text keeps the whole name.
+pub(super) fn conn_pill(ui: &mut egui::Ui, id: egui::Id, p: &Pill, close: bool, max_w: f32) -> bool {
     let note = p.note.map(|(t, c)| pill_galley(ui, t, mono_fmt(TXT_CAPTION, c, 400.0)));
     let (pad, gap, mark_d, x_d) = (6.0, 6.0, 18.0, 16.0);
+    let fixed = pad + mark_d + gap + note.as_ref().map_or(0.0, |n| gap + n.size().x) + if close { gap + x_d } else { 0.0 } + pad;
+    let mut job = egui::text::LayoutJob::single_section(p.label.clone(), egui::TextFormat::simple(FontId::proportional(TXT_BODY), BRIGHT()));
+    job.wrap = egui::text::TextWrapping::truncate_at_width((max_w - fixed).max(40.0));
+    let label = ui.painter().layout_job(job);
     let w = pad + mark_d + gap + label.size().x + note.as_ref().map_or(0.0, |n| gap + n.size().x) + if close { gap + x_d } else { 0.0 } + pad;
     let (rect, body) = ui.allocate_exact_size(egui::vec2(w, CHIP_H + 4.0), Sense::hover());
     let x_rect = egui::Rect::from_center_size(egui::pos2(rect.right() - pad - x_d / 2.0, rect.center().y), egui::vec2(x_d, x_d));
@@ -145,7 +150,11 @@ pub(super) fn conn_pill(ui: &mut egui::Ui, id: egui::Id, p: &Pill, close: bool) 
         x.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Detach {}", p.label)));
         removed = x.on_hover_text("Detach").on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
     }
-    body.on_hover_text(&p.hint);
+    if label.elided {
+        body.on_hover_text(format!("{}\n{}", p.label, p.hint));
+    } else {
+        body.on_hover_text(&p.hint);
+    }
     removed
 }
 

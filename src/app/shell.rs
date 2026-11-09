@@ -445,9 +445,15 @@ impl App {
             let (r, _) = ui.allocate_exact_size(egui::vec2(1.0, 16.0), Sense::hover());
             ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0, LINE()));
             ui.label(RichText::new("Connections").color(MUTED()));
-            conn_pill(ui, ui.make_persistent_id("pill-own"), &own_pill, false);
+            // The pills share what the Attach button and the Packages, History and Help buttons on the right leave.
+            let text_w = |t: &str| ui.painter().layout_no_wrap(t.to_string(), FontId::proportional(TXT_BODY), TEXT()).size().x;
+            let pad = ui.spacing().button_padding.x * 2.0 + ui.spacing().item_spacing.x;
+            let right = text_w("Help") + text_w("History") + text_w(&format!("Packages {}", packages.len())) + 3.0 * pad + 110.0;
+            let n = 1 + att_pills.len();
+            let pill_w = ((ui.available_width() - right) / n as f32 - ui.spacing().item_spacing.x).max(120.0);
+            conn_pill(ui, ui.make_persistent_id("pill-own"), &own_pill, false, pill_w);
             for (i, p) in att_pills.iter().enumerate() {
-                if conn_pill(ui, ui.make_persistent_id(("pill", i)), p, true) {
+                if conn_pill(ui, ui.make_persistent_id(("pill", i)), p, true, pill_w) {
                     detach = Some(i);
                 }
             }
