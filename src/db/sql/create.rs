@@ -761,6 +761,20 @@ impl Worker {
         });
     }
 
+    /// The database list and the tables of `schema`, for what a script may have created or dropped anywhere.
+    pub fn sql_lists(&self, conn: u64, db: Db, schema: String) {
+        self.spawn(async move {
+            let res = async {
+                let mut c = db.acquire().await?;
+                let dbs = database_names(&mut *c).await?;
+                let tables = if schema.is_empty() || !dbs.contains(&schema) { None } else { Some(table_names(&mut *c, db.dialect, &schema).await?) };
+                Ok((dbs, tables))
+            }
+            .await;
+            Msg::SqlLists { conn, schema, res }
+        });
+    }
+
     /// DROP DATABASE, DROP TABLE, DROP VIEW or TRUNCATE; `table` is empty for a database. No undo.
     #[allow(clippy::too_many_arguments)]
     pub fn sql_drop(&self, conn: u64, db: Db, schema: String, table: String, view: bool, truncate: bool, read_only: bool) {

@@ -283,8 +283,12 @@ fn status(rows: &[MySqlRow]) -> Status {
     }
 }
 
+/// A LIMIT of its own overrides the session's sql_select_limit, which a server's globals can set and which would
+/// show a table with only its first columns or indexes, and let an edit of that structure drop the rest.
+pub(super) const ALL_ROWS: &str = " LIMIT 18446744073709551615";
+
 async fn query(pool: &sqlx::MySqlPool, sql: &str, schema: &str, table: &str) -> Res<Vec<MySqlRow>> {
-    sqlx::query(sql).bind(schema).bind(table).fetch_all(pool).await.map_err(e)
+    sqlx::query(&format!("{sql}{ALL_ROWS}")).bind(schema).bind(table).fetch_all(pool).await.map_err(e)
 }
 
 /// What the main queries cannot ask every server version for: SRIDs, invisible indexes and functional key parts on

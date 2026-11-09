@@ -638,9 +638,9 @@ impl App {
             }
             DocsAct::Delete => {
                 if n > 1 {
-                    self.modal = Some(Modal::Typed { title: format!("Delete {n} rows of {}?", sel.coll), expect: sel.coll.clone(), typed: String::new(), action: Danger::DeleteRows(rows) });
+                    self.modal = Some(Modal::Typed { title: format!("Delete {n} rows of {}?", sel.coll), expect: sel.coll.clone(), typed: String::new(), action: Danger::DeleteRows(sel.clone(), rows) });
                 } else {
-                    self.modal = Some(Modal::Delete(rows));
+                    self.modal = Some(Modal::Delete(sel.clone(), rows));
                 }
             }
             DocsAct::CopyJs | DocsAct::CopyJson | DocsAct::CopyLines | DocsAct::Update => {}

@@ -316,7 +316,8 @@ impl App {
         };
         let n = staged.iter().filter(|c| matches!(c, Change::Drop(_))).count();
         if n > 0 || plan.undo.is_err() {
-            let table = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
+            let Some(sel) = self.t().map(|t| t.sel.clone()) else { return };
+            let table = sel.coll.clone();
             let mut title = format!("Apply {} to {table}?", plural_changes(staged.len()));
             if n > 0 {
                 title.push_str(&format!(" Dropping {} deletes {} values for good.", if n == 1 { "a column" } else { "columns" }, if n == 1 { "its" } else { "their" }));
@@ -326,7 +327,7 @@ impl App {
                 Ok(_) => {}
                 Err(why) => title.push_str(&format!(" This change cannot be undone: {why}")),
             }
-            self.modal = Some(Modal::Typed { title, expect: table, typed: String::new(), action: Danger::ApplyAlter });
+            self.modal = Some(Modal::Typed { title, expect: table, typed: String::new(), action: Danger::ApplyAlter(sel) });
             return;
         }
         self.run_alter();

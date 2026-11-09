@@ -211,13 +211,19 @@ pub(super) async fn writer(db: &Db, schema: &str, read_only: bool) -> Res<sqlx::
     if read_only {
         return Err("Writes are locked on this connection. Unlock them first.".into());
     }
-    let Pool::My(pool) = &db.pool;
-    let mut c = pool.acquire().await.map_err(e)?.detach();
+    let mut c = db.acquire().await?.detach();
     if !schema.is_empty() {
         let q = format!("USE {}", db.dialect.quote_ident(schema));
         c.execute(q.as_str()).await.map_err(e)?;
     }
     c.execute(db.dialect.session_read_only(false)).await.map_err(e)?;
+    // With autocommit 0 from the server's globals, a script, a dump run back or a DDL undo would report success
+    // and roll back on close. sql_select_limit would cut the reads that check a table before a change.
+    c.execute("SET SESSION autocommit = 1, SESSION sql_select_limit = DEFAULT").await.map_err(e)?;
+    // MariaDB's max_statement_time limits every statement, so the app timeout would cut an ALTER of a big table
+    // short. MySQL's only limits SELECT; it is reset too so both engines behave the same.
+    let timeout = db.dialect.session_timeout(0);
+    let _ = c.execute(timeout.as_str()).await;
     Ok(c)
 }
 
@@ -292,6 +298,34 @@ async fn apply_inserts(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[S
     }
     tx.commit().await.map_err(e)?;
     Ok(keys)
+}
+
+/// Whether the key columns a row undo recorded are still the table's primary key. Names compare without case, as
+/// the server compares column names.
+fn same_key(recorded: &[String], now: &[String]) -> bool {
+    let low = |v: &[String]| {
+        let mut v: Vec<String> = v.iter().map(|n| n.to_lowercase()).collect();
+        v.sort();
+        v
+    };
+    low(recorded) == low(now)
+}
+
+/// A row undo finds its rows by the key columns it recorded, `<=> ? LIMIT 1` each. Once the primary key is made of
+/// other columns those may match several rows, and the undo could delete or overwrite one the change never touched.
+async fn key_unchanged(db: &Db, schema: &str, table: &str, recorded: &[String]) -> Res<()> {
+    if recorded.is_empty() {
+        return Ok(());
+    }
+    let Pool::My(pool) = &db.pool;
+    let sql = format!("SELECT COLUMN_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = 'PRIMARY' ORDER BY SEQ_IN_INDEX{}", super::structure::ALL_ROWS);
+    let rows = sqlx::query(&sql).bind(schema).bind(table).fetch_all(pool).await.map_err(e)?;
+    let now: Vec<String> = rows.iter().filter_map(|r| super::worker::raw(r, 0).map(|b| String::from_utf8_lossy(b).into_owned())).collect();
+    if same_key(recorded, &now) {
+        return Ok(());
+    }
+    let now = if now.is_empty() { "none".to_string() } else { now.join(", ") };
+    Err(format!("Undo refused: the primary key of {table} is now ({now}), not ({}) as when the change ran, so its rows cannot be told apart. Nothing was changed.", recorded.join(", ")))
 }
 
 fn plural(n: usize, word: &str) -> String {
@@ -372,6 +406,10 @@ impl Worker {
                 return super::ddl::undo_trigger(&db, UndoAction { at: when, conn, db: schema, coll: table, kind }, u, read_only).await;
             }
             let UndoKind::Sql { cols, undo } = kind else { return Msg::Written { at, res: Err("Not a SQL change".into()), undo: None, reload: false, retry: None } };
+            if let Err(err) = key_unchanged(&db, &schema, &table, &undo.pk_names()).await {
+                let undo = Some(UndoAction { at: when, conn, db: schema, coll: table, kind: UndoKind::Sql { cols, undo } });
+                return Msg::Written { at, res: Err(err), undo, reload: false, retry: None };
+            }
             let res = match undo.clone() {
                 SqlUndo::Update(edits) => {
                     let back: Vec<RowEdit> = edits.into_iter().map(|r| RowEdit { pk: r.pk, changes: r.changes.into_iter().map(|(n, old, new)| (n, new, old)).collect() }).collect();

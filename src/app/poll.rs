@@ -128,6 +128,7 @@ impl App {
                 Msg::SqlCount { req, idx, res } => self.sql_counted(req, idx, res),
                 Msg::SqlExport { req, res } => self.export_done(ctx, req, res),
                 Msg::SqlJob { req, res } => self.sql_job_done(req, res),
+                Msg::SqlLists { conn, schema, res } => self.sql_lists_done(conn, schema, res),
                 Msg::SqlTableInfo { req, res } => self.import_info(req, res),
                 Msg::SqlSchema { conn, schema, res } => {
                     // A failed read leaves the database without a schema until the next Refresh; typing still works.

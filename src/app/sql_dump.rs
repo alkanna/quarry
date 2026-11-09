@@ -317,24 +317,56 @@ impl App {
     /// An import or a script finished: report it, keep its undo, and reload what it changed.
     pub(super) fn sql_job_done(&mut self, req: u64, res: db::Res<JobDone>) {
         let Some(j) = self.sql_job.take_if(|j| j.req == req) else { return };
+        // A script can create or drop anything anywhere, and one that failed or was stopped kept what ran before.
+        if j.kind == JobKind::Script {
+            self.worker.sql_lists(j.conn, j.db.clone(), j.schema.clone());
+        }
         match res {
             Ok(d) => {
                 self.ok(d.msg);
                 if let Some(u) = d.undo {
                     self.push_undo(u);
                 }
-                let tabs: Vec<usize> = (0..self.tabs.len()).filter(|&i| self.tabs[i].sel.conn == j.conn && self.tabs[i].sel.db == d.schema && d.table.as_ref().is_none_or(|t| self.tabs[i].sel.coll == *t)).collect();
-                for i in tabs {
-                    self.reload_of(i);
-                }
-                if d.tables_changed {
-                    self.side_act(j.conn, SideAct::Refresh(j.schema.clone()));
+                // A script's tabs and lists follow in `sql_lists_done`.
+                if j.kind == JobKind::Import {
+                    let tabs: Vec<usize> = (0..self.tabs.len()).filter(|&i| self.tabs[i].sel.conn == j.conn && self.tabs[i].sel.db == d.schema && d.table.as_ref().is_none_or(|t| self.tabs[i].sel.coll == *t)).collect();
+                    for i in tabs {
+                        self.reload_of(i);
+                    }
+                    if d.tables_changed {
+                        self.side_act(j.conn, SideAct::Refresh(j.schema.clone()));
+                    }
                 }
             }
             Err(e) if e == "Import cancelled" => self.ok("Import stopped. Nothing was imported."),
             // A table that cannot roll back: the message counts the rows that stayed.
             Err(e) if e.starts_with("Import stopped.") => self.ok(e),
             Err(e) => self.err(e),
+        }
+    }
+
+    /// After a script, finished or not: the database list, the tables of its database and the open tabs follow what
+    /// the server has now. Tabs of a database or table that is gone close; the others of its database reload.
+    pub(super) fn sql_lists_done(&mut self, conn: u64, schema: String, res: db::Res<(Vec<String>, Option<Vec<String>>)>) {
+        let Ok((dbs, tables)) = res else { return };
+        let mut dropped = Vec::new();
+        if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
+            let old = std::mem::take(&mut c.dbs);
+            dropped = old.iter().filter(|o| !dbs.contains(&o.0)).map(|o| o.0.clone()).collect();
+            c.dbs = dbs.iter().map(|d| (d.clone(), old.iter().find(|o| o.0 == *d).and_then(|o| o.1.clone()))).collect();
+        }
+        for d in &dropped {
+            self.open_dbs.remove(&(conn, d.clone()));
+            self.sql_asked.remove(&(conn, d.clone()));
+            self.forget_schema(conn, d);
+        }
+        self.remove_tabs(|t| t.sel.conn == conn && tab_gone(&t.sel, &dbs, &schema, tables.as_deref()));
+        let open: Vec<usize> = (0..self.tabs.len()).filter(|&i| self.tabs[i].sel.conn == conn && self.tabs[i].sel.db == schema && !self.tabs[i].sel.coll.is_empty()).collect();
+        for i in open {
+            self.reload_of(i);
+        }
+        if tables.is_some() {
+            self.side_act(conn, SideAct::Refresh(schema));
         }
     }
 
@@ -373,5 +405,38 @@ impl App {
             Row { name: "revenue_by_day".into(), view: true, on: false, structure: false, content: false, drop: false, rows: None },
         ];
         self.modal = Some(Modal::SqlDump(Box::new(DumpForm { conn, db: "shop".into(), conn_name: "shop-prod".into(), what: What::Selected, filtered: Some(("orders".into(), "status = 'paid'".into(), 312)), rows, extended: true, snapshot: false, extras: true, path: "~/Downloads/shop-2026-11-09.sql".into() })));
+    }
+}
+
+/// Whether a tab shows a database the server no longer lists, or a table of `schema` that is not among `tables`.
+/// `tables` is None when they could not be read, which closes nothing on its own.
+fn tab_gone(sel: &Sel, dbs: &[String], schema: &str, tables: Option<&[String]>) -> bool {
+    if sel.db.is_empty() {
+        return false;
+    }
+    if !dbs.contains(&sel.db) {
+        return true;
+    }
+    sel.db == schema && !sel.coll.is_empty() && tables.is_some_and(|t| !t.contains(&sel.coll))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Final review finding 8: after a script the tabs of what it dropped close, wherever it was.
+    #[test]
+    fn tabs_of_what_a_script_dropped_close() {
+        let sel = |db: &str, coll: &str| Sel { conn: 1, db: db.into(), coll: coll.into() };
+        let dbs = vec!["shop".to_string(), "other".to_string()];
+        let tables = vec!["orders".to_string()];
+        let t = Some(tables.as_slice());
+        assert!(!tab_gone(&sel("shop", "orders"), &dbs, "shop", t));
+        assert!(tab_gone(&sel("shop", "items"), &dbs, "shop", t), "a table the script dropped");
+        assert!(tab_gone(&sel("gone", "x"), &dbs, "shop", t), "a database the script dropped");
+        assert!(tab_gone(&sel("gone", ""), &dbs, "shop", t), "a Query tab of a dropped database");
+        assert!(!tab_gone(&sel("shop", ""), &dbs, "shop", t), "a Query tab of the database stays");
+        assert!(!tab_gone(&sel("other", "items"), &dbs, "shop", t), "tables of other databases were not read");
+        assert!(!tab_gone(&sel("shop", "items"), &dbs, "shop", None));
     }
 }

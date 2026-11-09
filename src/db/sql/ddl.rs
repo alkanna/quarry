@@ -808,6 +808,19 @@ pub struct AlterUndo {
     pub fks: Vec<String>,
     /// `snapshot` of those right after the change ran, filled by the worker.
     pub expect: Vec<(String, Option<String>)>,
+    /// The inverse changes `steps` were written from, one group per step, kept so the steps can be written again
+    /// when the session's sql_mode changes before the undo runs.
+    pub groups: Vec<Vec<Change>>,
+}
+
+impl AlterUndo {
+    /// The steps as the session in mode `m` must read them: the stored ones, or the same inverse written again.
+    pub fn steps_for(&self, d: Dialect, version: &str, table: &str, m: Mode) -> Result<Vec<String>, String> {
+        if m == self.mode {
+            return Ok(self.steps.clone());
+        }
+        self.groups.iter().map(|g| alter(d, version, m, table, g)).collect()
+    }
 }
 
 /// The staged changes as they run, and their undo or why there is none. The preview and Apply both use it, so
@@ -833,7 +846,7 @@ fn undo_of(d: Dialect, version: &str, m: Mode, table: &str, before: &Structure, 
     let steps = groups.iter().map(|g| alter(d, version, m, table, g)).collect::<Result<Vec<_>, _>>()?;
     let loss = undo_loss(&sim, &groups);
     let (cols, idx, fks) = touched(&groups);
-    Ok(AlterUndo { steps, label: String::new(), loss, mode: m, cols, idx, fks, expect: Vec::new() })
+    Ok(AlterUndo { steps, label: String::new(), loss, mode: m, cols, idx, fks, expect: Vec::new(), groups })
 }
 
 /// The statements that put the table back, from the structure read before the changes ran. Err says why
@@ -1523,7 +1536,7 @@ fn undo_action(conn: u64, schema: &str, table: &str, u: AlterUndo) -> UndoAction
 /// applying one; the action comes back for another try only when nothing ran.
 pub(super) async fn undo(db: &Db, a: UndoAction, u: AlterUndo, read_only: bool) -> Msg {
     let UndoAction { at, conn, db: schema, coll: table, .. } = a;
-    let (mut ran, mut seen) = (0, None);
+    let (mut ran, mut seen, mut lost) = (0, None, false);
     let res: Res<String> = async {
         let st = load(db, &schema, &table).await?;
         let now = snapshot(&st, &u.cols, &u.idx, &u.fks);
@@ -1533,21 +1546,26 @@ pub(super) async fn undo(db: &Db, a: UndoAction, u: AlterUndo, read_only: bool) 
         if let Some((what, _)) = u.expect.iter().zip(&now).find(|(a, b)| a != b).map(|(a, _)| a) {
             return Err(format!("Undo refused: {what} changed after this change ran, so undoing it now would not put the table back."));
         }
-        let mut c = match session(db, &schema, read_only, u.mode).await {
-            Ok(c) => c,
-            Err((why, now)) => {
-                seen = now;
-                return Err(why);
-            }
-        };
-        for s in &u.steps {
-            exec(&mut c, s).await.map_err(|err| if ran == 0 { err } else { format!("Undo stopped at step {} of {}: {err}. The steps before it ran, so the table is only partly put back.", ran + 1, u.steps.len()) })?;
+        let mut c = super::write::writer(db, &schema, read_only).await?;
+        let mode: String = sqlx::query_scalar("SELECT @@SESSION.sql_mode").fetch_one(&mut c).await.map_err(e)?;
+        let m = Mode::of(&mode);
+        // The steps were written for the mode of the change. A session that reads quotes or backslashes another
+        // way now gets the same inverse written for it, instead of a refusal that would hold forever.
+        if m != u.mode {
+            seen = Some(mode.clone());
+        }
+        let steps = u.steps_for(db.dialect, &db.version, &table, m).map_err(|why| {
+            lost = true;
+            format!("Undo removed from Recent changes: the server's sql_mode is now {mode:?}, and the undo cannot be written for it ({why}). Nothing ran.")
+        })?;
+        for s in &steps {
+            exec(&mut c, s).await.map_err(|err| if ran == 0 { err } else { format!("Undo stopped at step {} of {}: {err}. The steps before it ran, so the table is only partly put back.", ran + 1, steps.len()) })?;
             ran += 1;
         }
         Ok("Undid the structure change".to_string())
     }
     .await;
-    let keep = (res.is_err() && ran == 0).then(|| {
+    let keep = (res.is_err() && ran == 0 && !lost).then(|| {
         let mut k = undo_action(conn, &schema, &table, u);
         // Keeps the age of the original so a failed undo does not live longer.
         k.at = at;
@@ -2117,6 +2135,23 @@ mod tests {
         assert!(inverse(M, "8.4.0", B, "orders", &t, &[Change::Drop("note".into())]).unwrap()[0].contains("CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci"));
         assert!(same_name("Note", "NOTE") && !same_name("note", "notes"));
         assert_eq!(free_name(&["A_copy".into()], "a"), "a_copy2");
+    }
+
+    /// Final review finding 6: an undo kept its steps in the mode of the change, and a session whose sql_mode changed
+    /// since refused it with "Nothing ran" forever. The same inverse is now written again for the new mode.
+    #[test]
+    fn an_undo_is_written_again_for_a_changed_sql_mode() {
+        let mut t = table();
+        let i = t.columns.iter().position(|c| c.name == "total").unwrap();
+        t.columns[i].comment = "C:\\temp".into();
+        let c = [Change::Drop("total".into())];
+        let u = plan(M, "8.4.0", B, "orders", &t, &c).unwrap().undo.unwrap();
+        let nb = plan(M, "8.4.0", NB, "orders", &t, &c).unwrap().undo.unwrap().steps;
+        assert!(u.steps[0].contains("'C:\\\\temp'") && nb[0].contains("'C:\\temp'"), "{:?} {nb:?}", u.steps);
+        assert_eq!(u.steps_for(M, "8.4.0", "orders", B).unwrap(), u.steps);
+        assert_eq!(u.steps_for(M, "8.4.0", "orders", NB).unwrap(), nb);
+        // One that cannot be written for the new mode says so; the worker then drops the entry.
+        assert!(AlterUndo { groups: vec![Vec::new()], ..u }.steps_for(M, "8.4.0", "orders", NB).is_err());
     }
 
     /// Review finding 6: the inverse used to be one ALTER, which the server rejects when a clause names a column
@@ -3039,6 +3074,7 @@ mod review_live {
         finding_4_binary_and_bit_defaults(&mut r, &db);
         finding_5_attributes(&mut r, &db, maria);
         finding_6_and_8_undo_steps(&mut r, &db);
+        final_6_undo_after_the_sql_mode_changed(&mut r, &db);
         if !maria {
             finding_7_functional_index(&mut r, &db);
         }
@@ -3190,6 +3226,27 @@ mod review_live {
             });
             r.trip(db, t, &create, "drop srid column", |_| vec![Change::Drop("p".into())], |_, after| assert!(!has_col(after, "p")));
         }
+    }
+
+    /// Final review finding 6: the change ran in the default mode, the undo in a session with NO_BACKSLASH_ESCAPES. It
+    /// used to be refused with "Nothing ran" for good; now its steps are written again for that session.
+    fn final_6_undo_after_the_sql_mode_changed(r: &mut R, db: &Db) {
+        let t = "sf_mode_undo";
+        r.fresh(t, &format!(r"CREATE TABLE {S}.{t} (id INT PRIMARY KEY, note VARCHAR(20) NULL DEFAULT 'C:\\temp' COMMENT 'it''s \\ here')"));
+        let before = r.st(db, t);
+        assert_eq!(col(&before, "note").default.as_deref(), Some(r"C:\temp"));
+        let (res, undo, ..) = r.apply(db, t, &[Change::Drop("note".into())]);
+        res.unwrap();
+        let nb = r.moded("NO_BACKSLASH_ESCAPES");
+        r.w.sql_undo(nb.clone(), undo.expect("an undo"), Vec::new(), false);
+        let Msg::SqlAltered { res, undo, sql_mode, .. } = recv(&r.rx) else { panic!("expected SqlAltered") };
+        res.unwrap_or_else(|e| panic!("{e}"));
+        assert!(undo.is_none());
+        assert!(sql_mode.is_some_and(|m| !Mode::of(&m).bs), "the answer carries the mode the undo was written for");
+        let after = r.st(db, t);
+        assert_eq!(col(&after, "note").default.as_deref(), Some(r"C:\temp"));
+        assert_eq!(col(&after, "note").comment, r"it's \ here");
+        assert_eq!(shape(&after), shape(&before));
     }
 
     fn finding_6_and_8_undo_steps(r: &mut R, db: &Db) {

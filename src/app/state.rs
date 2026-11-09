@@ -642,16 +642,16 @@ pub(super) enum Danger {
     Sync { conn: u64 },
     Restore { conn: u64, args: Vec<String> },
     Validator(Document),
-    /// Rows of the open SQL table, by key.
-    DeleteRows(Vec<Document>),
+    /// Rows of a SQL table, by key, with the table they were picked in.
+    DeleteRows(Sel, Vec<Document>),
     /// The staged ALTER TABLE of the open SQL table, confirmed because it drops a column or cannot be undone.
-    ApplyAlter,
+    ApplyAlter(Sel),
     /// The structure undo recorded at this time, confirmed because it drops a column or converts a type back.
     UndoAlter(std::time::Instant),
     /// Drop a SQL database, table or view, or empty a table; `table` is empty for a database.
     SqlDrop { conn: u64, schema: String, table: String, kind: DropKind },
-    /// A trigger of the open SQL table, by name.
-    DropTrigger(String),
+    /// A trigger of a SQL table, by name.
+    DropTrigger(Sel, String),
 }
 
 /// What to run once writes are allowed.
@@ -664,7 +664,8 @@ pub(super) enum Modal {
     Unlock(u64, Option<Retry>),
     Save { tag: String, changes: Vec<(String, Option<Bson>, Option<Bson>)> },
     SaveAll(Vec<String>),
-    Delete(Vec<Document>),
+    /// The rows or documents, with the table or collection they were picked in.
+    Delete(Sel, Vec<Document>),
     SqlSet(Box<SetForm>),
     SqlRow(Box<RowForm>),
     /// Add or edit a column of the open SQL table, with its ALTER preview.

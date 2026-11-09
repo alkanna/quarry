@@ -16,6 +16,8 @@ pub mod import;
 pub mod dump;
 #[cfg(test)]
 mod testing;
+#[cfg(test)]
+mod review_final;
 pub mod rules;
 pub mod schema;
 pub use advanced::{Advanced, Charset, TestInfo, Zone};

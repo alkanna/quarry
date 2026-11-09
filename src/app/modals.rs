@@ -154,9 +154,9 @@ impl App {
                         }
                     });
                 }
-                Modal::Delete(docs) => {
+                Modal::Delete(at, docs) => {
                     const SHOWN: usize = 5;
-                    let sql = self.t().is_some_and(|t| t.sql.is_some());
+                    let sql = self.conn(at.conn).is_some_and(|c| c.sql.is_some());
                     let ids: Vec<String> = docs.iter().take(SHOWN).map(|d| d.get("_id").map(|k| if sql { k.as_document().map(|k| k.values().map(db::short).collect::<Vec<_>>().join("-")).unwrap_or_default() } else { db::short(k) }).unwrap_or_default()).collect();
                     let more = if docs.len() > SHOWN { format!(" and {} more", docs.len() - SHOWN) } else { String::new() };
                     let noun = if sql { "row" } else { "document" };
@@ -164,20 +164,25 @@ impl App {
                     ui.label(RichText::new(format!("{} {}{more}. You can undo this for 24 hours.", if sql { "Key" } else { "_id" }, ids.join(", "))).monospace().color(MUTED()));
                     dialog_actions(ui, |ui| {
                         let del = primary(ui, "Delete", ALERT()).clicked();
+                        // Run on the tab the rows were picked in: tabs can close or move while the dialog is open.
                         if del && sql {
-                            self.sql_delete(docs.clone());
+                            let docs = docs.clone();
+                            self.on_tab(&at.clone(), |a| a.sql_delete(docs));
                             keep = false;
                         } else if del {
-                            if let Some((conn, target)) = self.writable_target() {
-                                match docs.as_slice() {
-                                    [d] => self.worker.delete(conn, target, d.clone(), true),
-                                    _ => self.worker.delete_docs(conn, target, docs.clone()),
+                            let docs = docs.clone();
+                            self.on_tab(&at.clone(), |a| {
+                                if let Some((conn, target)) = a.writable_target() {
+                                    match docs.as_slice() {
+                                        [d] => a.worker.delete(conn, target, d.clone(), true),
+                                        _ => a.worker.delete_docs(conn, target, docs.clone()),
+                                    }
+                                    // The reload drops deleted rows from the checks; others stay checked.
+                                    if let Some(t) = a.tm() {
+                                        t.selected = None;
+                                    }
                                 }
-                                // The reload drops deleted rows from the checks; others stay checked.
-                                if let Some(t) = self.tm() {
-                                    t.selected = None;
-                                }
-                            }
+                            });
                             keep = false;
                         }
                         if ui.button("Cancel").clicked() {

@@ -100,7 +100,8 @@ impl App {
         if !self.sel_writable() {
             return self.err("This connection is read-only. Unlock writes in the top bar first.");
         }
-        self.modal = Some(Modal::Typed { title: format!("Drop the trigger {name}? Undo brings it back as it was."), expect: name.clone(), typed: String::new(), action: Danger::DropTrigger(name) });
+        let Some(sel) = self.t().map(|t| t.sel.clone()) else { return };
+        self.modal = Some(Modal::Typed { title: format!("Drop the trigger {name}? Undo brings it back as it was."), expect: name.clone(), typed: String::new(), action: Danger::DropTrigger(sel, name) });
     }
 
     /// The editor, its preview and the Save row for `key`.

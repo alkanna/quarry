@@ -718,4 +718,32 @@ mod tests {
             l.sql(&format!("DROP DATABASE {db}"));
         });
     }
+
+    /// Final review finding 5: row undo deletes by the key it recorded, `id <=> ? LIMIT 1`. After the key grew to
+    /// (id, region) two rows share id 2, and the undo could take the one the import never wrote.
+    #[test]
+    fn live_row_undo_is_refused_once_the_primary_key_changed() {
+        every_server(|l, var| {
+            let db = "quarry_ff_pk";
+            l.sql(&format!("DROP DATABASE IF EXISTS {db}; CREATE DATABASE {db}; CREATE TABLE {db}.t (id INT PRIMARY KEY, region VARCHAR(10) NOT NULL DEFAULT 'us')"));
+            let plan = plan_for(l, db, "t", "id\n1\n2\n3\n".into(), &["id"], Dup::Stop);
+            let (r, _) = run_import(l, db, "t", &plan);
+            let undo = r.unwrap_or_else(|x| panic!("{var}: {x}")).undo.unwrap_or_else(|| panic!("{var}: no undo"));
+            l.sql(&format!("ALTER TABLE {db}.t DROP PRIMARY KEY, ADD PRIMARY KEY (id, region); INSERT INTO {db}.t VALUES (2, 'eu')"));
+            l.w.sql_undo(l.db.clone(), undo, vec!["id".into()], false);
+            let Msg::Written { res, undo, .. } = l.rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap() else { panic!("written") };
+            let err = res.err().unwrap_or_else(|| panic!("{var}: the undo must be refused"));
+            assert!(err.contains("primary key of t is now (id, region), not (id)"), "{var}: {err}");
+            assert!(undo.is_some(), "{var}: the entry stays for when the key is put back");
+            assert_eq!(l.one(&format!("SELECT GROUP_CONCAT(region ORDER BY region) FROM {db}.t WHERE id = 2")), "eu,us", "{var}: both id=2 rows remain");
+            assert_eq!(l.count(&format!("{db}.t")), 4, "{var}");
+            // With the key as it was, the same undo runs.
+            l.sql(&format!("DELETE FROM {db}.t WHERE region = 'eu'; ALTER TABLE {db}.t DROP PRIMARY KEY, ADD PRIMARY KEY (id)"));
+            l.w.sql_undo(l.db.clone(), undo.unwrap(), vec!["id".into()], false);
+            let Msg::Written { res, .. } = l.rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap() else { panic!("written") };
+            res.unwrap_or_else(|x| panic!("{var}: {x}"));
+            assert_eq!(l.count(&format!("{db}.t")), 0, "{var}");
+            l.sql(&format!("DROP DATABASE {db}"));
+        });
+    }
 }

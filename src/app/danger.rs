@@ -16,19 +16,18 @@ impl App {
                 }
             }
             self.conns.retain(|c| c.meta.id != id);
-            self.tabs.retain(|t| t.sel.conn != id);
-            self.cur = self.cur.min(self.tabs.len().saturating_sub(1));
+            self.remove_tabs(|t| t.sel.conn == id);
             if self.active == Some(id) {
                 self.active = self.conns.first().map(|c| c.meta.id);
             }
             self.save_conns();
             return self.ok("Connection removed");
         }
-        if let Danger::DeleteRows(rows) = action {
-            return self.sql_delete(rows);
+        if let Danger::DeleteRows(sel, rows) = action {
+            return self.on_tab(&sel, |a| a.sql_delete(rows));
         }
-        if let Danger::ApplyAlter = action {
-            return self.run_alter();
+        if let Danger::ApplyAlter(sel) = action {
+            return self.on_tab(&sel, |a| a.run_alter());
         }
         if let Danger::UndoAlter(at) = action {
             // Found by time, since the list may have moved while the dialog was open.
@@ -40,8 +39,8 @@ impl App {
         if let Danger::SqlDrop { conn, schema, table, kind } = action {
             return self.sql_drop_run(conn, schema, table, kind);
         }
-        if let Danger::DropTrigger(name) = action {
-            return self.drop_trigger(name);
+        if let Danger::DropTrigger(sel, name) = action {
+            return self.on_tab(&sel, |a| a.drop_trigger(name));
         }
         let conn_specific = match &action {
             Danger::DropDatabase { conn, .. } | Danger::DropCollAt { conn, .. } | Danger::DropUser { conn, .. } | Danger::Sync { conn } | Danger::Restore { conn, .. } => Some(*conn),
@@ -53,8 +52,7 @@ impl App {
             };
             match action {
                 Danger::DropDatabase { db, .. } => {
-                    self.tabs.retain(|t| !(t.sel.conn == conn && t.sel.db == db));
-                    self.cur = self.cur.min(self.tabs.len().saturating_sub(1));
+                    self.remove_tabs(|t| t.sel.conn == conn && t.sel.db == db);
                     self.worker.db_change(conn, client, db.clone(), doc! { "dropDatabase": 1 }, format!("Dropped database {db}"));
                     if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
                         c.dbs.retain(|d| d.0 != db);
@@ -62,8 +60,7 @@ impl App {
                     self.dropping_db = Some((conn, db));
                 }
                 Danger::DropCollAt { db, coll, .. } => {
-                    self.tabs.retain(|t| !(t.sel.conn == conn && t.sel.db == db && t.sel.coll == coll));
-                    self.cur = self.cur.min(self.tabs.len().saturating_sub(1));
+                    self.remove_tabs(|t| t.sel.conn == conn && t.sel.db == db && t.sel.coll == coll);
                     self.worker.db_change(conn, client, db, doc! { "drop": &coll }, format!("Dropped {coll}"));
                 }
                 Danger::DropUser { db, user, .. } => self.worker.db_change(conn, client, db, doc! { "dropUser": &user }, format!("Dropped user {user}")),
@@ -103,7 +100,7 @@ impl App {
                     self.worker.import(conn, target, docs, Some(key));
                 }
             }
-            Danger::DeleteRows(_) | Danger::ApplyAlter | Danger::UndoAlter(_) | Danger::DropTrigger(_) | Danger::SqlDrop { .. } | Danger::RemoveConnection(_) | Danger::DropDatabase { .. } | Danger::DropCollAt { .. } | Danger::DropUser { .. } | Danger::Sync { .. } | Danger::Restore { .. } => unreachable!(),
+            Danger::DeleteRows(..) | Danger::ApplyAlter(_) | Danger::UndoAlter(_) | Danger::DropTrigger(..) | Danger::SqlDrop { .. } | Danger::RemoveConnection(_) | Danger::DropDatabase { .. } | Danger::DropCollAt { .. } | Danger::DropUser { .. } | Danger::Sync { .. } | Danger::Restore { .. } => unreachable!(),
         }
     }
 }

@@ -200,15 +200,13 @@ impl App {
                 }
             }
             Ddl::DroppedDb => {
-                self.tabs.retain(|t| !gone(t));
-                self.cur = self.cur.min(self.tabs.len().saturating_sub(1));
+                self.remove_tabs(gone);
                 self.open_dbs.remove(&(conn, schema.clone()));
                 self.sql_asked.remove(&(conn, schema.clone()));
-                self.sql_schema.remove(&(conn, schema));
+                self.forget_schema(conn, &schema);
             }
             Ddl::DroppedTable => {
-                self.tabs.retain(|t| !gone(t));
-                self.cur = self.cur.min(self.tabs.len().saturating_sub(1));
+                self.remove_tabs(gone);
                 self.side_act(conn, SideAct::Refresh(schema));
             }
             Ddl::Emptied => {

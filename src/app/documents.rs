@@ -764,7 +764,11 @@ impl App {
                 );
                 self.open_in_shell(code);
             }
-            DocsAct::Delete => self.modal = Some(Modal::Delete(docs)),
+            DocsAct::Delete => {
+                if let Some(sel) = self.t().map(|t| t.sel.clone()) {
+                    self.modal = Some(Modal::Delete(sel, docs));
+                }
+            }
             DocsAct::SetValue | DocsAct::EditQuery => {}
         }
     }

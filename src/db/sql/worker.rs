@@ -4,6 +4,7 @@
 
 use super::value::{self, Kind};
 use super::schema::{Schema, SchemaCol, SchemaTable};
+use super::structure::ALL_ROWS;
 use super::{lex, Addr, Advanced, TestInfo, Col, Db, Dialect, Page, PageQuery, Pool, ResultSet, SslMode, RUN_ROWS_MAX};
 use crate::db::{e, Msg, Net, Res, Row, Worker};
 use mongodb::bson::{Bson, Document};
@@ -122,6 +123,9 @@ pub(super) async fn prepare(conn: &mut sqlx::MySqlConnection, d: Dialect, schema
     if let Ok(r) = conn.fetch_one("SELECT CONNECTION_ID()").await {
         id.store(raw(&r, 0).and_then(|b| std::str::from_utf8(b).ok()?.parse().ok()).unwrap_or(0), Ordering::SeqCst);
     }
+    // With autocommit 0 from the server's globals, every write of the script is rolled back when the connection
+    // closes, and reads keep a snapshot and metadata locks. The script can still turn it off itself.
+    conn.execute("SET SESSION autocommit = 1").await?;
     if !schema.is_empty() {
         let q = format!("USE {}", d.quote_ident(schema));
         conn.execute(q.as_str()).await?;
@@ -129,6 +133,14 @@ pub(super) async fn prepare(conn: &mut sqlx::MySqlConnection, d: Dialect, schema
     if !read_only {
         conn.execute(d.session_read_only(false)).await?;
     }
+    Ok(())
+}
+
+/// Pins what a read of every row as stored depends on: UTF-8 both ways, and no sql_select_limit cutting a SELECT
+/// short. A session can get either from the server's globals.
+pub(super) async fn pin_reads(c: &mut sqlx::MySqlConnection) -> Result<(), sqlx::Error> {
+    c.execute("SET NAMES utf8mb4").await?;
+    c.execute("SET SESSION sql_select_limit = DEFAULT").await?;
     Ok(())
 }
 
@@ -292,8 +304,8 @@ async fn count(pool: &sqlx::MySqlPool, d: Dialect, schema: &str, table: &str, q:
 
 /// Column types and the primary key, from information_schema.
 async fn table_meta(pool: &sqlx::MySqlPool, d: Dialect, schema: &str, table: &str) -> Res<(HashMap<String, (String, bool, String)>, Vec<String>)> {
-    let cols = sqlx::query(d.columns()).bind(schema).bind(table).fetch_all(pool).await.map_err(e)?;
-    let idx = sqlx::query(d.indexes()).bind(schema).bind(table).fetch_all(pool).await.map_err(e)?;
+    let cols = sqlx::query(&format!("{}{ALL_ROWS}", d.columns())).bind(schema).bind(table).fetch_all(pool).await.map_err(e)?;
+    let idx = sqlx::query(&format!("{}{ALL_ROWS}", d.indexes())).bind(schema).bind(table).fetch_all(pool).await.map_err(e)?;
     let meta = cols
         .iter()
         .filter_map(|r| {
@@ -593,7 +605,10 @@ impl Relay {
     pub async fn open(db: &Db, schema: &str, read_only: bool, id: &AtomicU64) -> Res<Relay> {
         let mut conn = db.acquire().await?.detach();
         prepare(&mut conn, db.dialect, schema, read_only, id).await.map_err(e)?;
-        Ok(Relay { conn, read_only, backslash: db.backslash_escapes(), ansi: db.sql_mode.to_ascii_uppercase().contains("ANSI_QUOTES"), dead: false })
+        // Values are filled in for this session's mode, which may differ from the one read at connect.
+        let mode: String = sqlx::query_scalar("SELECT @@SESSION.sql_mode").fetch_one(&mut conn).await.map_err(e)?;
+        let m = super::ddl::Mode::of(&mode);
+        Ok(Relay { conn, read_only, backslash: m.bs, ansi: m.ansi, dead: false })
     }
 
     /// Interrupts the statement running on connection `id`, from a connection of its own.
@@ -674,9 +689,9 @@ async fn load_schema(db: &Db, schema: &str) -> Res<Schema> {
     let Pool::My(pool) = &db.pool;
     let d = db.dialect;
     let (tables, cols, fks) = tokio::try_join!(
-        async { sqlx::query(d.tables()).bind(schema).fetch_all(pool).await.map_err(e) },
-        async { sqlx::query(d.all_columns()).bind(schema).fetch_all(pool).await.map_err(e) },
-        async { sqlx::query(d.all_foreign_keys()).bind(schema).fetch_all(pool).await.map_err(e) },
+        async { sqlx::query(&format!("{}{ALL_ROWS}", d.tables())).bind(schema).fetch_all(pool).await.map_err(e) },
+        async { sqlx::query(&format!("{}{ALL_ROWS}", d.all_columns())).bind(schema).fetch_all(pool).await.map_err(e) },
+        async { sqlx::query(&format!("{}{ALL_ROWS}", d.all_foreign_keys())).bind(schema).fetch_all(pool).await.map_err(e) },
     )?;
     let fk: HashSet<(String, String)> = fks.iter().filter_map(|r| Some((text(r, "tbl")?, text(r, "name")?))).collect();
     let mut out: Vec<SchemaTable> = tables
@@ -783,7 +798,7 @@ impl Worker {
         self.spawn(async move {
             let res = async {
                 let Pool::My(pool) = &db.pool;
-                let rows = sqlx::query(db.dialect.tables()).bind(&schema).fetch_all(pool).await.map_err(e)?;
+                let rows = sqlx::query(&format!("{}{ALL_ROWS}", db.dialect.tables())).bind(&schema).fetch_all(pool).await.map_err(e)?;
                 let mut names = Vec::new();
                 let mut views = Vec::new();
                 for r in &rows {

@@ -8,9 +8,9 @@ use super::export::Done;
 use super::import::{JobDone, Progress};
 use super::lex::{self, Piece, ScriptSplitter};
 use super::value::Kind;
-use super::worker::{make_cols, prepare, raw, text, to_row};
+use super::worker::{make_cols, pin_reads, prepare, raw, text, to_row};
 use super::write::writer;
-use super::{Db, Dialect, Pool};
+use super::{Db, Dialect};
 use crate::db::copy::{CopyCol, Fmt, Writer};
 use crate::db::{e, Msg, Res, Worker};
 use mongodb::bson::Document;
@@ -222,10 +222,11 @@ fn delimited(sql_mode: Option<&str>, stmt: &str) -> String {
 
 /// Runs the whole dump on a read-only connection of its own.
 pub async fn dump(db: &Db, plan: &DumpPlan, out: &mut (dyn Write + Send), count: &AtomicU64, cancel: &AtomicBool, id: &AtomicU64) -> Res<u64> {
-    let Pool::My(pool) = &db.pool;
     let d = db.dialect;
-    let mut c = pool.acquire().await.map_err(e)?.detach();
+    let mut c = db.acquire().await?.detach();
     prepare(&mut c, d, &plan.schema, true, id).await.map_err(e)?;
+    // The file says SET NAMES utf8mb4, so the values must be read as UTF-8, and every row of them.
+    pin_reads(&mut c).await.map_err(e)?;
     // The statement timeout of the pool would cut the read of a big table short.
     let timeout = d.session_timeout(0);
     let _ = c.execute(timeout.as_str()).await;

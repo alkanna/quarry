@@ -26,6 +26,16 @@ impl App {
         }
     }
 
+    /// A dropped database: its cached schema and the mark that it was asked for go with it, or a database made again
+    /// under that name would never get its autocomplete and shell types back.
+    pub(super) fn forget_schema(&mut self, conn: u64, db: &str) {
+        let key = (conn, db.to_string());
+        self.sql_schema.remove(&key);
+        self.sql_schema_asked.remove(&key);
+        self.sql_values.remove(&key);
+        self.sql_values_asked.retain(|k| !(k.0 == conn && k.1 == db));
+    }
+
     /// The sidebar's Refresh: the schema is read again and looked up values are forgotten.
     pub(super) fn sql_refresh_schema(&mut self, conn: u64, db: &str) {
         self.sql_values.remove(&(conn, db.to_string()));

@@ -3,8 +3,8 @@
 //! never sits in memory.
 
 use super::value::Kind;
-use super::worker::{make_cols, prepare, to_row};
-use super::{lex, Db, Pool};
+use super::worker::{make_cols, pin_reads, prepare, to_row};
+use super::{lex, Db};
 use crate::db::copy::{CopyCol, Fmt, Writer};
 use crate::db::{e, Msg, Res, Worker};
 use mongodb::bson::Document;
@@ -95,9 +95,10 @@ fn write_err(err: std::io::Error) -> String {
 /// a read-only session, whatever the connection allows. `count` follows the rows written for a progress readout.
 pub async fn stream(db: &Db, schema: &str, stmt: &str, plan: &Plan, out: &mut (dyn Write + Send), count: &AtomicU64, cancel: &AtomicBool, id: &AtomicU64) -> Res<(u64, usize)> {
     lex::read_only_check(stmt).map_err(|why| format!("Export all only runs statements that read: {why}"))?;
-    let Pool::My(pool) = &db.pool;
-    let mut conn = pool.acquire().await.map_err(e)?.detach();
+    let mut conn = db.acquire().await?.detach();
     prepare(&mut conn, db.dialect, schema, true, id).await.map_err(e)?;
+    // All rows means all of them, and the file is written as UTF-8 from what the server sends.
+    pin_reads(&mut conn).await.map_err(e)?;
     let r = stream_conn(&mut conn, stmt, plan, out, count, cancel, &Wrap::default()).await?;
     let _ = conn.close().await;
     let (rows, peak) = r.unwrap_or_default();
@@ -350,9 +351,9 @@ pub async fn export_all(db: &Db, schema: &str, stmts: &[String], ap: &AllPlan, p
 
 #[allow(clippy::too_many_arguments)]
 async fn run_all(db: &Db, schema: &str, stmts: &[String], ap: &AllPlan, path: &std::path::Path, count: &AtomicU64, step: &AtomicU64, cancel: &AtomicBool, id: &AtomicU64, parts: &mut Vec<(PathBuf, PathBuf)>, open: &mut Option<PathBuf>) -> Res<u64> {
-    let Pool::My(pool) = &db.pool;
-    let mut conn = pool.acquire().await.map_err(e)?.detach();
+    let mut conn = db.acquire().await?.detach();
     prepare(&mut conn, db.dialect, schema, true, id).await.map_err(e)?;
+    pin_reads(&mut conn).await.map_err(e)?;
     let fmt = ap.plan.fmt;
     let (mut total, mut results) = (0u64, 0usize);
     let mut shared = Lazy::new(part_of(path));
