@@ -1,6 +1,16 @@
 //! SQL engines (MySQL and MariaDB for now). Engine differences live in enums here, not traits:
 //! a new engine is a new arm.
 
+// The worker (step 4) and the views use these; until then they only have tests.
+#[allow(dead_code)]
+mod dialect;
+#[allow(dead_code)]
+pub mod lex;
+#[allow(dead_code)]
+pub mod value;
+#[allow(unused_imports)]
+pub use dialect::{Dialect, FUNCTIONS, KEYWORDS};
+
 /// Which kind of server a saved connection talks to. Saved connections from before SQL support
 /// have no engine field and load as Mongo.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
