@@ -654,6 +654,10 @@ impl App {
         });
         if keep && !r.should_close() && self.modal.is_none() {
             self.modal = Some(m);
+        } else if matches!(m, Modal::Conn(_)) {
+            // A Test still running when the form closes must not show in the next form.
+            self.conn_test = None;
+            self.test_info = None;
         }
     }
 }

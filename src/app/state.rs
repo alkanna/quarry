@@ -867,9 +867,37 @@ pub(super) struct ConnForm {
     pub(super) t_idle: String,
     /// (charset, collation) pairs the last Test read from the server.
     pub(super) collations: Vec<(String, String)>,
+    /// The request id of this form's last Test, so an answer meant for another form or an older Test is ignored.
+    pub(super) test_req: u64,
+    /// The server's own sql_mode as the last Test read it, where Custom starts from.
+    pub(super) server_mode: Option<String>,
+    /// The Custom mode holds a choice (saved, clicked, or the server's once), so a Test never replaces it, even
+    /// when that choice is no flags at all.
+    pub(super) mode_seeded: bool,
 }
 
 impl ConnForm {
+    /// Applies what a Test learned, if it answers this form's last Test.
+    pub(super) fn take_test_info(&mut self, req: u64, info: db::sql::TestInfo) -> bool {
+        if req == 0 || req != self.test_req {
+            return false;
+        }
+        self.server_mode = Some(info.sql_mode);
+        self.collations = info.collations;
+        self.seed_mode();
+        true
+    }
+
+    /// Starts Custom from the server's mode, once.
+    pub(super) fn seed_mode(&mut self) {
+        use db::sql::advanced::{parse_flags, MODE_FLAGS};
+        let Some(mode) = self.server_mode.as_deref().filter(|_| self.mode_custom && !self.mode_seeded) else { return };
+        let flags = parse_flags(mode).unwrap_or_default();
+        self.mode_on = MODE_FLAGS.map(|m| flags.iter().any(|x| x == m));
+        self.mode_extra = flags.iter().filter(|x| !MODE_FLAGS.contains(&x.as_str())).cloned().collect::<Vec<_>>().join(", ");
+        self.mode_seeded = true;
+    }
+
     /// The form's Advanced tab as saved settings, or the first thing wrong with it.
     pub(super) fn advanced(&self) -> Result<db::sql::Advanced, String> {
         use db::sql::advanced::{parse_flags, MODE_FLAGS};
@@ -913,6 +941,7 @@ impl ConnForm {
             db::sql::Zone::Custom(z) => (ZoneKind::Custom, z.clone()),
         };
         self.mode_custom = a.sql_mode.is_some();
+        self.mode_seeded = a.sql_mode.is_some();
         let flags = a.sql_mode.clone().unwrap_or_default();
         self.mode_on = MODE_FLAGS.map(|f| flags.iter().any(|x| x == f));
         self.mode_extra = flags.iter().filter(|f| !MODE_FLAGS.contains(&f.as_str())).cloned().collect::<Vec<_>>().join(", ");
@@ -1165,6 +1194,36 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_test_answer_seeds_custom_mode_once_and_only_for_its_own_form() {
+        let info = |mode: &str| db::sql::TestInfo { sql_mode: mode.into(), collations: vec![("utf8mb4".into(), "utf8mb4_bin".into())] };
+        let mut f = ConnForm { engine: db::sql::Engine::MySql, mode_custom: true, test_req: 7, ..Default::default() };
+        // Another form's or an older Test's answer changes nothing, and a form that never tested takes none.
+        assert!(!f.take_test_info(6, info("ANSI_QUOTES")));
+        assert!(!ConnForm::default().take_test_info(0, info("ANSI_QUOTES")));
+        assert!(f.collations.is_empty() && f.mode_on.iter().all(|on| !on));
+        assert!(f.take_test_info(7, info("STRICT_TRANS_TABLES,IGNORE_SPACE")));
+        assert_eq!(f.advanced().unwrap().sql_mode, Some(vec!["STRICT_TRANS_TABLES".into(), "IGNORE_SPACE".into()]));
+        assert_eq!(f.collations.len(), 1);
+        // The user turns every flag off on purpose; a second Test keeps that.
+        f.mode_on = [false; 8];
+        f.mode_extra.clear();
+        f.test_req = 8;
+        assert!(f.take_test_info(8, info("STRICT_TRANS_TABLES")));
+        assert_eq!(f.advanced().unwrap().sql_mode, Some(vec![]));
+        // A saved Custom mode with no flags is a choice too.
+        let mut g = ConnForm { engine: db::sql::Engine::MySql, test_req: 3, ..Default::default() };
+        g.set_advanced(&db::sql::Advanced { sql_mode: Some(vec![]), ..Default::default() });
+        assert!(g.take_test_info(3, info("ANSI_QUOTES")));
+        assert_eq!(g.advanced().unwrap().sql_mode, Some(vec![]));
+        // Server default at Test time, Custom picked later: Custom still starts from the server's mode.
+        let mut h = ConnForm { engine: db::sql::Engine::MySql, test_req: 4, ..Default::default() };
+        assert!(h.take_test_info(4, info("NO_ZERO_DATE")));
+        h.mode_custom = true;
+        h.seed_mode();
+        assert_eq!(h.advanced().unwrap().sql_mode, Some(vec!["NO_ZERO_DATE".into()]));
+    }
 
     #[test]
     fn shell_keeps_documents_once_as_rows() {

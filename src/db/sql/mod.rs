@@ -174,6 +174,8 @@ pub struct Db {
     pub tls: bool,
     /// `@@sql_mode`, which changes how quotes and backslashes lex (ANSI_QUOTES, NO_BACKSLASH_ESCAPES).
     pub sql_mode: String,
+    /// The Advanced tab's session setup, for connections opened outside the pool.
+    pub(crate) setup: worker::Setup,
 }
 
 #[derive(Clone)]

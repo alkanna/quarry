@@ -133,7 +133,7 @@ impl Worker {
     }
 
     /// Connects and lists databases without keeping anything, for the connection form.
-    pub fn test(&self, uri: String, timeout: Duration, net: Net) {
+    pub fn test(&self, req: u64, uri: String, timeout: Duration, net: Net) {
         self.spawn(async move {
             let res = open_client(0, &uri, timeout, &net).await.map(|(_, dbs, t)| {
                 let via = match (&t, &net.proxy) {
@@ -143,7 +143,7 @@ impl Worker {
                 };
                 format!("Connected{via}: {} databases.", dbs.len())
             });
-            Msg::Tested { res, info: None }
+            Msg::Tested { req, res, info: None }
         });
     }
 

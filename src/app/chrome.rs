@@ -704,6 +704,7 @@ impl App {
 
     pub(super) fn new_conn_modal(&mut self) {
         self.conn_test = None;
+        self.test_info = None;
         self.modal = Some(Modal::Conn(Box::new(ConnForm { uri: "mongodb://localhost:27017".into(), ..Default::default() })));
     }
 }

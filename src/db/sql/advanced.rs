@@ -72,16 +72,18 @@ fn word(s: &str, extra: &str) -> bool {
     !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || extra.contains(c))
 }
 
-/// "+02:00" style offsets (hours 0 to 14) or a zone name. A name needs the server's zone tables; the server
-/// says so itself when it has none.
+/// "+02:00" style offsets in the range the server takes (-13:59 to +14:00) or a zone name. A name needs the
+/// server's zone tables; the server says so itself when it has none.
 pub fn check_zone(z: &str) -> Result<(), String> {
     let z = z.trim();
     if z.is_empty() {
         return Err("Time zone: enter an offset like +02:00 or a zone name like Europe/Paris".into());
     }
     if let Some(rest) = z.strip_prefix(['+', '-']) {
-        let ok = rest.split_once(':').is_some_and(|(h, m)| (1..=2).contains(&h.len()) && m.len() == 2 && h.bytes().all(|b| b.is_ascii_digit()) && m.bytes().all(|b| b.is_ascii_digit()) && h.parse::<u32>().is_ok_and(|h| h <= 14) && m.parse::<u32>().is_ok_and(|m| m < 60));
-        return if ok { Ok(()) } else { Err(format!("Time zone: {z:?} is not an offset like +02:00")) };
+        let east = z.starts_with('+');
+        let hm = rest.split_once(':').filter(|(h, m)| (1..=2).contains(&h.len()) && m.len() == 2 && h.bytes().all(|b| b.is_ascii_digit()) && m.bytes().all(|b| b.is_ascii_digit()));
+        let ok = hm.and_then(|(h, m)| Some((h.parse::<u32>().ok()?, m.parse::<u32>().ok()?))).is_some_and(|(h, m)| m < 60 && if east { h * 60 + m <= 14 * 60 } else { h <= 13 });
+        return if ok { Ok(()) } else { Err(format!("Time zone: {z:?} is not an offset from -13:59 to +14:00")) };
     }
     if z.starts_with(|c: char| c.is_ascii_alphabetic()) && word(z, "+-/") {
         Ok(())
@@ -128,9 +130,18 @@ pub fn local_offset_secs() -> Option<i32> {
     }
 }
 
+/// Seconds east of UTC from what Windows reports: Bias is minutes west of UTC, and the daylight or standard bias
+/// in force is added to it. Kept apart from the call so it is compiled and tested on every platform.
+#[cfg(any(windows, test))]
+pub fn bias_offset_secs(daylight: bool, bias: i32, standard_bias: i32, daylight_bias: i32) -> i32 {
+    -(bias + if daylight { daylight_bias } else { standard_bias }) * 60
+}
+
 #[cfg(windows)]
 pub fn local_offset_secs() -> Option<i32> {
-    use windows_sys::Win32::System::Time::{GetTimeZoneInformation, TIME_ZONE_INFORMATION, TIME_ZONE_ID_DAYLIGHT, TIME_ZONE_ID_INVALID};
+    use windows_sys::Win32::System::Time::{GetTimeZoneInformation, TIME_ZONE_ID_INVALID, TIME_ZONE_INFORMATION};
+    // windows-sys 0.61 has this constant only in Win32::System::SystemServices; 2 is its documented value.
+    const TIME_ZONE_ID_DAYLIGHT: u32 = 2;
     // SAFETY: the struct is plain data that the call fills.
     unsafe {
         let mut tz: TIME_ZONE_INFORMATION = std::mem::zeroed();
@@ -138,9 +149,7 @@ pub fn local_offset_secs() -> Option<i32> {
         if id == TIME_ZONE_ID_INVALID {
             return None;
         }
-        // Bias is minutes west of UTC; daylight time adds its own bias.
-        let bias = tz.Bias + if id == TIME_ZONE_ID_DAYLIGHT { tz.DaylightBias } else { tz.StandardBias };
-        Some(-bias * 60)
+        Some(bias_offset_secs(id == TIME_ZONE_ID_DAYLIGHT, tz.Bias, tz.StandardBias, tz.DaylightBias))
     }
 }
 
@@ -149,39 +158,150 @@ pub fn local_offset_secs() -> Option<i32> {
     None
 }
 
-/// The init command's statements, each as the user wrote it.
-pub fn init_statements(text: &str) -> Vec<String> {
-    lex::split_statements(text).into_iter().map(|(_, s)| s.to_string()).collect()
+/// Session variables an init command may set. Each is session scoped, leaves the read-only guard and autocommit
+/// alone, and does not change how Quarry quotes or decodes text (the SQL mode, Charset and Time zone fields own
+/// those). Names are compared lower case, without quotes or a `@@session.` style prefix.
+pub const INIT_VARS: &[&str] = &[
+    "group_concat_max_len", "innodb_lock_wait_timeout", "lock_wait_timeout", "sql_safe_updates", "max_execution_time", "max_statement_time", "wait_timeout", "interactive_timeout", "net_read_timeout", "net_write_timeout",
+    "max_heap_table_size", "tmp_table_size", "sort_buffer_size", "join_buffer_size", "read_buffer_size", "read_rnd_buffer_size", "cte_max_recursion_depth", "max_recursive_iterations", "div_precision_increment", "default_week_format",
+    "lc_time_names", "max_sort_length", "optimizer_search_depth", "optimizer_prune_level", "eq_range_index_dive_limit", "long_query_time", "profiling", "transaction_isolation", "tx_isolation",
+];
+
+/// Why a variable that is not on the list is refused, for the ones a user is likely to try.
+fn refusal(name: &str) -> String {
+    if name == "time_zone" {
+        "set the time zone with the Time zone field above".into()
+    } else if name == "sql_mode" {
+        "set the SQL mode with the SQL mode field above".into()
+    } else if name == "names" || name == "character" || name == "charset" || name.starts_with("character_set") || name.starts_with("collation") {
+        "set the character set with the Charset field above".into()
+    } else if name.contains("read_only") || name == "transaction" {
+        "it would lift the read-only guard".into()
+    } else if matches!(name, "autocommit" | "completion_type") {
+        format!("{name} stays as Quarry sets it, or a write would report success and then be rolled back")
+    } else if matches!(name, "sql_select_limit" | "max_join_size" | "sql_big_selects") {
+        format!("{name} would cut what Quarry itself reads, such as dumps, exports and table structure")
+    } else {
+        format!("{name} is not one of the session variables it may set ({})", INIT_VARS.join(", "))
+    }
 }
 
-/// Which statements an init command may hold. Every connection starts read-only and the init command runs right
-/// after that guard, so it may configure the session but must not lift the guard, write, change where the session
-/// points, or move the escaping that Quarry quotes by (the SQL mode and Charset fields own that). The server's
-/// READ ONLY session stays the real boundary; this refuses early and says why.
-pub fn init_check(text: &str) -> Result<(), String> {
-    for (_, stmt) in lex::split_statements(text) {
-        let words: Vec<String> = lex::tokens(stmt).into_iter().filter(|(t, _)| *t == Tok::Word).map(|(_, r)| stmt[r].to_ascii_lowercase()).collect();
-        let first = words.first().map(String::as_str).unwrap_or("");
-        let short = || stmt.lines().next().unwrap_or("").chars().take(60).collect::<String>();
-        if first == "use" {
-            return Err(format!("Init command: USE is not allowed, the connection picks its database elsewhere ({})", short()));
+/// A value token an init command may use: literals and arithmetic on them, nothing that reads or calls.
+fn literal_ok(t: Tok, s: &str) -> bool {
+    let l = s.to_ascii_lowercase();
+    let digits = |x: &str| !x.is_empty() && x.bytes().all(|b| b.is_ascii_digit());
+    match t {
+        Tok::Str => s.len() >= 2 && s.starts_with('\'') && s.ends_with('\'') && !s.contains('\\'),
+        Tok::Word => matches!(l.as_str(), "on" | "off" | "default" | "true" | "false" | "null") || digits(&l) || l.strip_prefix("0x").is_some_and(|h| !h.is_empty() && h.bytes().all(|b| b.is_ascii_hexdigit())) || l.split_once('e').is_some_and(|(m, x)| digits(m) && digits(x)),
+        Tok::Punct => matches!(s, "+" | "-" | "*" | "/" | "%" | "(" | ")" | "."),
+        _ => false,
+    }
+}
+
+/// Checks one statement's code tokens (no spaces or comments): `SET` and assignments separated by commas.
+fn check_set(toks: &[(Tok, &str)], short: &str) -> Result<(), String> {
+    let fail = |why: String| Err(format!("Init command: {why} ({short})"));
+    let low = |i: usize| toks.get(i).map(|(_, s)| s.to_ascii_lowercase()).unwrap_or_default();
+    if low(0) != "set" {
+        return fail("only SET statements are allowed".into());
+    }
+    let mut i = 1;
+    loop {
+        let w = low(i);
+        let at_scope = w.strip_prefix("@@").filter(|_| matches!(toks.get(i + 1), Some((Tok::Punct, ".")))).map(str::to_string);
+        if matches!(w.as_str(), "global" | "persist" | "persist_only") || at_scope.as_deref().is_some_and(|s| s != "session" && s != "local") {
+            return fail("only the session may be set, not GLOBAL or PERSIST".into());
         }
-        if lex::uses_prepared(stmt) {
-            return Err(format!("Init command: prepared statements are not allowed ({})", short()));
+        if w == "session" || w == "local" {
+            i += 1;
+        } else if at_scope.is_some() {
+            i += 2;
         }
-        if lex::changes_escaping(stmt) {
-            return Err(format!("Init command: change the character set or SQL mode with the fields above ({})", short()));
-        }
-        if first == "set" {
-            let reach = words.iter().any(|w| matches!(w.as_str(), "global" | "persist" | "persist_only") || w.starts_with("@@global") || w.starts_with("@@persist") || w.contains("read_only"));
-            if reach || words.get(1).is_some_and(|w| w == "password" || w == "default") || words.windows(2).any(|w| w[0] == "read" && w[1] == "write") {
-                return Err(format!("Init command: this SET changes more than the session or lifts the read-only guard ({})", short()));
+        let Some(&(t, raw)) = toks.get(i) else { return fail("a variable name is missing".into()) };
+        let user = t == Tok::Word && raw.starts_with('@') && !raw.starts_with("@@");
+        if !user {
+            let after_dot = at_scope.is_some() && matches!(toks.get(i - 1), Some((Tok::Punct, ".")));
+            let bare = if after_dot { raw } else { raw.strip_prefix("@@").unwrap_or(raw) };
+            if !matches!(t, Tok::Word | Tok::Quoted) || bare.starts_with('@') {
+                return fail(format!("{raw} is not a variable name"));
             }
-        } else {
-            lex::read_only_check(stmt).map_err(|m| format!("Init command: {m} ({})", short()))?;
+            // Backticks or ANSI double quotes around a name do not change which variable it is.
+            let name = bare.chars().filter(|c| *c != '`' && *c != '"').collect::<String>().to_ascii_lowercase();
+            if !INIT_VARS.contains(&name.as_str()) {
+                return fail(refusal(&name));
+            }
+        }
+        i += 1;
+        match (toks.get(i).map(|(_, s)| *s), toks.get(i + 1).map(|(_, s)| *s)) {
+            (Some(":"), Some("=")) => i += 2,
+            (Some("="), _) => i += 1,
+            _ => return fail(format!("{raw} must be followed by =")),
+        }
+        let (start, mut depth) = (i, 0i32);
+        while let Some(&(t, s)) = toks.get(i) {
+            if t == Tok::Punct && s == "," && depth == 0 {
+                break;
+            }
+            if !literal_ok(t, s) {
+                return fail(format!("{s} is not allowed in a value, which takes numbers, quoted strings without backslashes, ON, OFF, DEFAULT or NULL"));
+            }
+            depth += (s == "(") as i32 - (s == ")") as i32;
+            if depth < 0 {
+                return fail("unbalanced parentheses".into());
+            }
+            i += 1;
+        }
+        if i == start || depth != 0 {
+            return fail(format!("{raw} has no complete value"));
+        }
+        if i == toks.len() {
+            return Ok(());
+        }
+        i += 1;
+    }
+}
+
+/// The init command's statements, checked. Every connection starts read-only and the init command runs right
+/// after that guard, so it may only set user variables and the session variables in `INIT_VARS`, to literal
+/// values. The text must lex the same under every reading a server may apply (quote modes, backslash escapes,
+/// executable comments), so what was checked is what any server runs; the worker then sends each statement on
+/// its own as a prepared statement, which the server parses as exactly one.
+pub fn init_statements(text: &str) -> Result<Vec<String>, String> {
+    let readings = lex::every_reading(text);
+    if readings[0].iter().any(|(t, _)| *t == Tok::ExecOpen) {
+        return Err("Init command: executable comments (/*! and /*M!) are not allowed".into());
+    }
+    if readings.iter().any(|r| *r != readings[0]) {
+        return Err("Init command: it reads differently under ANSI_QUOTES or NO_BACKSLASH_ESCAPES; use single quotes and no backslashes".into());
+    }
+    let mut out = Vec::new();
+    let mut code: Vec<(Tok, &str)> = Vec::new();
+    let mut span: Option<std::ops::Range<usize>> = None;
+    let mut flush = |code: &mut Vec<(Tok, &str)>, span: &mut Option<std::ops::Range<usize>>| -> Result<(), String> {
+        if let Some(r) = span.take() {
+            let stmt = &text[r];
+            check_set(code, &stmt.lines().next().unwrap_or("").chars().take(60).collect::<String>())?;
+            out.push(stmt.to_string());
+        }
+        code.clear();
+        Ok(())
+    };
+    for (t, r) in &readings[0] {
+        match t {
+            Tok::Space | Tok::Comment => {}
+            Tok::Punct if &text[r.clone()] == ";" => flush(&mut code, &mut span)?,
+            _ => {
+                code.push((*t, &text[r.clone()]));
+                span = Some(span.map_or(r.clone(), |s| s.start..r.end));
+            }
         }
     }
-    Ok(())
+    flush(&mut code, &mut span)?;
+    Ok(out)
+}
+
+pub fn init_check(text: &str) -> Result<(), String> {
+    init_statements(text).map(|_| ())
 }
 
 impl Advanced {
@@ -247,6 +367,12 @@ impl Advanced {
         self.query_secs.map_or(default_ms, |s| s as u64 * 1000)
     }
 
+    /// The connect timeout and the statement timeout in ms, from the Settings timeout. An empty field follows
+    /// Settings, so an empty Query never takes the Connect field's value.
+    pub fn timeouts(&self, settings: Duration) -> (Duration, u64) {
+        (self.connect_timeout(settings), self.query_ms(settings.as_millis() as u64))
+    }
+
     /// None keeps sqlx's own 600 seconds.
     pub fn idle_timeout(&self) -> Option<Duration> {
         self.idle_secs.map(|s| Duration::from_secs(s as u64))
@@ -259,10 +385,11 @@ mod tests {
 
     #[test]
     fn zones() {
-        for ok in ["+02:00", "-05:30", "+0:00", "+14:00", "Europe/Paris", "UTC", "Etc/GMT+5", "EST5EDT", "America/Port-au-Prince", "SYSTEM"] {
+        for ok in ["+02:00", "-05:30", "+0:00", "+14:00", "-13:59", "+13:59", "Europe/Paris", "UTC", "Etc/GMT+5", "EST5EDT", "America/Port-au-Prince", "SYSTEM"] {
             assert!(check_zone(ok).is_ok(), "{ok}");
         }
-        for bad in ["", " ", "+2", "+15:00", "+02:60", "02:00", "+02:0", "+ab:cd", "Europe/Paris'; DROP", "1Europe", "a b", "+02:00 ", "'+00:00'", "+-02:00"] {
+        // The server takes -13:59 to +14:00 only.
+        for bad in ["", " ", "+2", "+15:00", "+14:59", "+14:01", "-14:00", "-13:60", "+02:60", "02:00", "+02:0", "+ab:cd", "Europe/Paris'; DROP", "1Europe", "a b", "+02:00 ", "'+00:00'", "+-02:00"] {
             if bad == "+02:00 " {
                 continue; // surrounding space is trimmed
             }
@@ -278,6 +405,12 @@ mod tests {
         assert_eq!(offset_text(-19800), "-05:30");
         assert_eq!(offset_text(20700), "+05:45");
         assert!(local_offset_secs().is_some_and(|s| s.abs() <= 14 * 3600));
+        // What GetTimeZoneInformation gives for Paris (Bias -60, daylight -60), New York (300, -60) and India.
+        assert_eq!(bias_offset_secs(false, -60, 0, -60), 3600);
+        assert_eq!(bias_offset_secs(true, -60, 0, -60), 7200);
+        assert_eq!(bias_offset_secs(true, 300, 0, -60), -4 * 3600);
+        assert_eq!(bias_offset_secs(false, 300, 0, -60), -5 * 3600);
+        assert_eq!(offset_text(bias_offset_secs(false, -330, 0, 0)), "+05:30");
     }
 
     #[test]
@@ -312,6 +445,11 @@ mod tests {
         assert_eq!(a.connect_timeout(Duration::from_secs(9)), Duration::from_secs(9));
         assert_eq!(Advanced { idle_secs: Some(60), ..Default::default() }.idle_timeout(), Some(Duration::from_secs(60)));
         assert_eq!(Advanced::default().idle_timeout(), None);
+        // An empty Query follows Settings, not the Connect field.
+        let settings = Duration::from_secs(30);
+        assert_eq!(Advanced { connect_secs: Some(5), ..Default::default() }.timeouts(settings), (Duration::from_secs(5), 30_000));
+        assert_eq!(Advanced { connect_secs: Some(5), query_secs: Some(2), ..Default::default() }.timeouts(settings), (Duration::from_secs(5), 2_000));
+        assert_eq!(Advanced::default().timeouts(settings), (settings, 30_000));
     }
 
     #[test]
@@ -333,11 +471,18 @@ mod tests {
     #[test]
     fn init_command_rules() {
         let design = "SET SESSION group_concat_max_len = 1048576;\nSET SESSION innodb_lock_wait_timeout = 10;\nSET SESSION sql_safe_updates = 1;";
-        assert!(init_check(design).is_ok());
-        assert_eq!(init_statements(design).len(), 3);
-        assert!(init_check("").is_ok());
-        assert!(init_check("SET @a = 1; SELECT 1; SHOW VARIABLES LIKE 'x%'").is_ok());
-        assert!(init_check("SET @@SESSION.max_execution_time = 10").is_ok());
+        assert_eq!(init_statements(design).unwrap(), ["SET SESSION group_concat_max_len = 1048576", "SET SESSION innodb_lock_wait_timeout = 10", "SET SESSION sql_safe_updates = 1"]);
+        assert!(init_statements("").unwrap().is_empty());
+        for ok in [
+            "SET @a = 1",
+            "SET @@SESSION.max_execution_time = 10",
+            "set local sort_buffer_size = 1024 * 1024, @x := 'it''s', @@lc_time_names = 'fr_FR'",
+            "SET SESSION `group_concat_max_len` = DEFAULT; -- a note\nSET @@local.sql_safe_updates = ON",
+            "SET SESSION transaction_isolation = 'READ-COMMITTED'",
+            "SET SESSION div_precision_increment = (2 + 2) % 3, long_query_time = 0.5, tmp_table_size = 0x1000000, @n = NULL, @e = 1e3",
+        ] {
+            assert!(init_check(ok).is_ok(), "{ok}: {:?}", init_check(ok));
+        }
         for bad in [
             "INSERT INTO t VALUES (1)",
             "CREATE TABLE t (a int)",
@@ -355,11 +500,82 @@ mod tests {
             "PREPARE s FROM 'SET @a = 1'",
             "SELECT 1 INTO OUTFILE '/tmp/x'",
             "SET @a = 1; DELETE FROM t",
+            "SELECT 1",
+            "SET STATEMENT max_statement_time = 1 FOR SELECT 1",
+            "SET SESSION no_such_var_x = 1",
+            "SET @a = (SELECT 1)",
+            "SET @a = SLEEP(5)",
+            "SET @a = @@global.max_connections",
+            "SET @a = `x`",
+            "SET @a = 'x\\'",
+            "SET @a = ",
+            "SET @a = (1",
+            "SET @a 1",
+            "SET SESSION",
+            "SET @@persist.max_connections = 10",
+            "SET LOCAL @@session.wait_timeout = 1",
         ] {
             assert!(init_check(bad).is_err(), "{bad}");
         }
         // The text of the statement is in the error, trimmed to a line.
         assert!(init_check("USE shop").unwrap_err().contains("USE shop"));
+    }
+
+    /// The review's proven bypasses: each passed the old check, connected with transaction_read_only=0 and ran a
+    /// CREATE DATABASE.
+    #[test]
+    fn init_command_refuses_the_proven_bypasses() {
+        for bad in [
+            // Executable comments: the old check read them as plain comments, the server as code.
+            "SET @x = 1 /*!99999 ' */ ; SET SESSION TRANSACTION READ WRITE; CREATE DATABASE IF NOT EXISTS quarry_probe_pwn; -- '",
+            "SET @x = 1 /*M! ' */ ; SET SESSION TRANSACTION READ WRITE; CREATE DATABASE IF NOT EXISTS quarry_probe_pwn; -- '",
+            "SET @x = 1 /*!999999 ' */ ; SET SESSION TRANSACTION READ WRITE; CREATE DATABASE IF NOT EXISTS quarry_probe_pwn; -- '",
+            // NO_BACKSLASH_ESCAPES ends the string at the backslash.
+            "SET @x = 'a\\'; SET SESSION TRANSACTION READ WRITE; CREATE DATABASE IF NOT EXISTS quarry_probe_nbe; -- '",
+            // ANSI_QUOTES makes the double quotes an identifier with no escape.
+            "SET @x = (SELECT 1 AS \"a\\\"); SET SESSION TRANSACTION READ WRITE; -- \")",
+            // Quoted names skipped the word check.
+            "SET SESSION `transaction_read_only` = 0",
+            "SET @@session.`transaction_read_only` = 0",
+            "SET SESSION `tx_read_only` = 0",
+            "SET SESSION \"transaction_read_only\" = 0",
+            "SET @@`transaction_read_only` = 0",
+        ] {
+            let err = init_check(bad).expect_err(bad);
+            assert!(err.starts_with("Init command:"), "{bad}: {err}");
+        }
+        assert!(init_check("SET SESSION `transaction_read_only` = 0").unwrap_err().contains("read-only guard"));
+        assert!(init_check("SET @x = 1 /*!99999 ' */ ;").unwrap_err().contains("executable comments"));
+    }
+
+    /// Variables that lose data or move what another field owns are not on the list, and the refusal says where to go.
+    #[test]
+    fn init_command_refuses_session_breaking_and_owned_variables() {
+        for (bad, says) in [
+            ("SET SESSION autocommit = 0", "rolled back"),
+            ("SET autocommit = 0", "rolled back"),
+            ("SET SESSION sql_select_limit = 1", "cut what Quarry itself reads"),
+            ("SET SESSION max_join_size = 1", "cut what Quarry itself reads"),
+            ("SET SESSION sql_big_selects = 0", "cut what Quarry itself reads"),
+            ("SET @@session.completion_type = 2", "rolled back"),
+            ("SET SESSION sql_log_bin = 0", "not one of"),
+            ("SET SESSION foreign_key_checks = 0", "not one of"),
+            ("SET SESSION unique_checks = 0", "not one of"),
+            ("SET SESSION character_set_results = latin1", "Charset field"),
+            ("SET SESSION character_set_results = 'latin1'", "Charset field"),
+            ("SET collation_connection = 'latin1_swedish_ci'", "Charset field"),
+            ("SET character_set_database = 'latin1'", "Charset field"),
+            ("SET @@session.character_set_client = 'latin1'", "Charset field"),
+            ("SET character_set_connection = 'latin1'", "Charset field"),
+            ("SET collation_database = 'latin1_bin'", "Charset field"),
+            ("SET NAMES latin1", "Charset field"),
+            ("SET CHARACTER SET latin1", "Charset field"),
+            ("SET SESSION time_zone = '+01:00'", "Time zone field"),
+            ("SET SESSION sql_mode = ''", "SQL mode field"),
+        ] {
+            let err = init_check(bad).expect_err(bad);
+            assert!(err.contains(says), "{bad}: {err}");
+        }
     }
 
     #[test]
@@ -379,9 +595,11 @@ mod tests {
 /// QUARRY_TEST_MARIADB (a server whose variable is unset is skipped).
 #[cfg(test)]
 mod live {
-    use super::super::{testing::ENVS, worker::raw, Db, Dialect};
+    use super::super::worker::{raw, session, Setup};
+    use super::super::{testing::ENVS, Db, Dialect};
     use super::*;
     use crate::db::{Msg, Net, Worker};
+    use sqlx::Connection;
     use std::time::Instant;
 
     struct Conn {
@@ -412,6 +630,33 @@ mod live {
                 let r = sqlx::raw_sql(q).fetch_one(p).await.unwrap_or_else(|x| panic!("{q}: {x}"));
                 String::from_utf8_lossy(raw(&r, 0).unwrap_or_default()).into_owned()
             })
+        }
+
+        /// Runs `q` as the test login on a connection outside the app's setup, for fixtures and checks.
+        fn admin(&self, q: &str) -> Vec<String> {
+            self.w.rt.block_on(async {
+                let mut c = sqlx::MySqlConnection::connect(&self.uri).await.unwrap();
+                let rows = sqlx::raw_sql(q).fetch_all(&mut c).await.unwrap_or_else(|x| panic!("{q}: {x}"));
+                let _ = c.close().await;
+                rows.iter().map(|r| String::from_utf8_lossy(raw(r, 0).unwrap_or_default()).into_owned()).collect()
+            })
+        }
+
+        /// `db` with a pool whose connections run `setup` as the app's own setup would, without the init check.
+        fn with_setup(&self, db: &Db, setup: Setup) -> Db {
+            let hook = setup.clone();
+            let pool = self.w.rt.block_on(async {
+                sqlx::mysql::MySqlPoolOptions::new()
+                    .max_connections(2)
+                    .after_connect(move |c, _| {
+                        let hook = hook.clone();
+                        Box::pin(async move { session(c, 30_000, &hook).await })
+                    })
+                    .connect_with(db.opts.clone())
+                    .await
+                    .unwrap()
+            });
+            Db { pool: super::super::Pool::My(pool), setup, ..db.clone() }
         }
     }
 
@@ -503,21 +748,112 @@ mod live {
         });
     }
 
-    #[test]
-    fn live_init_command_cannot_lift_the_guard_or_write() {
-        each(|c, var| {
-            for bad in ["SET SESSION TRANSACTION READ WRITE", "CREATE TABLE quarry_adv_x (a int)", "USE mysql"] {
-                let err = c.fails(&Advanced { init: bad.into(), ..Default::default() });
-                assert!(err.starts_with("Init command:"), "{var} {bad}: {err}");
-            }
-        });
+    /// The review's proven bypasses, with the sql_mode each needs, as the connect sees them.
+    const HOSTILE: [(&str, &str); 6] = [
+        ("", "SET @x = 1 /*!99999 ' */ ; SET SESSION TRANSACTION READ WRITE; CREATE DATABASE IF NOT EXISTS quarry_probe_af2_pwn; -- '"),
+        ("", "SET @x = 1 /*M! ' */ ; SET SESSION TRANSACTION READ WRITE; CREATE DATABASE IF NOT EXISTS quarry_probe_af2_pwn; -- '"),
+        ("", "SET @x = 1 /*!999999 ' */ ; SET SESSION TRANSACTION READ WRITE; CREATE DATABASE IF NOT EXISTS quarry_probe_af2_pwn; -- '"),
+        ("NO_BACKSLASH_ESCAPES", "SET @x = 'a\\'; SET SESSION TRANSACTION READ WRITE; CREATE DATABASE IF NOT EXISTS quarry_probe_af2_nbe; -- '"),
+        ("ANSI_QUOTES", "SET @x = (SELECT 1 AS \"a\\\"); SET SESSION TRANSACTION READ WRITE; CREATE DATABASE IF NOT EXISTS quarry_probe_af2_ansi; -- \")"),
+        ("", "SET SESSION `transaction_read_only` = 0"),
+    ];
+
+    fn probes(c: &Conn) -> Vec<String> {
+        c.admin("SHOW DATABASES LIKE 'quarry_probe_af2%'")
     }
 
     #[test]
-    fn live_failing_init_command_fails_the_connect_with_its_text() {
+    fn live_init_command_cannot_lift_the_guard_or_write() {
         each(|c, var| {
-            let err = c.fails(&Advanced { init: "SET @a = 1;\nSET SESSION no_such_variable_here = 1;".into(), ..Default::default() });
-            assert!(err.contains("Init command failed on") && err.contains("no_such_variable_here"), "{var}: {err}");
+            let mut bad: Vec<(&str, &str)> = ["SET SESSION TRANSACTION READ WRITE", "CREATE TABLE quarry_adv_x (a int)", "USE mysql", "SET SESSION autocommit = 0", "SET SESSION character_set_results = latin1", "SET SESSION tx_read_only = 0"].map(|b| ("", b)).to_vec();
+            bad.extend(HOSTILE);
+            for (mode, bad) in bad {
+                let sql_mode = (!mode.is_empty()).then(|| vec![mode.to_string()]);
+                let err = c.fails(&Advanced { init: bad.into(), sql_mode, ..Default::default() });
+                assert!(err.starts_with("Init command:"), "{var} {bad}: {err}");
+            }
+            let err = c.fails(&Advanced { init: "SET SESSION character_set_results = latin1".into(), ..Default::default() });
+            assert!(err.contains("Charset field"), "{var}: {err}");
+            let err = c.fails(&Advanced { init: "SET SESSION autocommit = 0".into(), ..Default::default() });
+            assert!(err.contains("rolled back"), "{var}: {err}");
+            assert!(probes(c).is_empty(), "{var}");
+        });
+    }
+
+    /// Even with the check skipped, the setup sends each statement prepared, then sets the guard and autocommit
+    /// again and reads them back, so a hostile init command fails the connect or leaves the session read-only.
+    #[test]
+    fn live_session_setup_holds_without_the_init_check() {
+        each(|c, var| {
+            let mut all: Vec<(&str, &str)> = HOSTILE.to_vec();
+            all.extend(["SET SESSION TRANSACTION READ WRITE", "SET SESSION transaction_read_only = 0", "SET @@session.tx_read_only = 0", "SET SESSION autocommit = 0", "SET SESSION completion_type = 2"].map(|b| ("", b)));
+            for (mode, bad) in all {
+                let statements = if mode.is_empty() { vec![] } else { vec![format!("SET SESSION sql_mode = '{mode}'")] };
+                let setup = Setup::new(statements, vec![bad.to_string()]);
+                let got = c.w.rt.block_on(async {
+                    let mut conn = sqlx::MySqlConnection::connect(&c.uri).await.unwrap();
+                    let res = session(&mut conn, 30_000, &setup).await;
+                    let flags = sqlx::raw_sql("SELECT @@SESSION.transaction_read_only, @@SESSION.autocommit").fetch_one(&mut conn).await.ok().map(|r| (raw(&r, 0).map(<[u8]>::to_vec), raw(&r, 1).map(<[u8]>::to_vec)));
+                    let _ = conn.close().await;
+                    (res.map_err(|x| x.to_string()), flags)
+                });
+                match got {
+                    (Ok(()), Some((ro, ac))) => assert_eq!((ro.as_deref(), ac.as_deref()), (Some(&b"1"[..]), Some(&b"1"[..])), "{var} {bad}"),
+                    (Ok(()), None) => panic!("{var} {bad}: the flags could not be read"),
+                    (Err(m), _) => assert!(!m.is_empty(), "{var} {bad}"),
+                }
+            }
+            assert!(probes(c).is_empty(), "{var}: {:?}", probes(c));
+        });
+    }
+
+    /// With autocommit off an unlocked INSERT reported one row and was rolled back on close. The setup forces it on.
+    #[test]
+    fn live_unlocked_insert_persists_with_autocommit_forced() {
+        each(|c, var| {
+            let schema = "quarry_af2_autocommit";
+            c.admin(&format!("DROP DATABASE IF EXISTS {schema}; CREATE DATABASE {schema}; CREATE TABLE {schema}.t (id INT PRIMARY KEY)"));
+            let base = c.open(&Advanced::default()).unwrap();
+            let db = c.with_setup(&base, Setup::new(vec![], vec!["SET SESSION autocommit = 0".into()]));
+            let n = c.w.rt.block_on(async {
+                let mut w = super::super::write::writer(&db, schema, false).await.unwrap();
+                let n = sqlx::query("INSERT INTO t VALUES (1)").execute(&mut w).await.unwrap().rows_affected();
+                let _ = w.close().await;
+                n
+            });
+            assert_eq!(n, 1, "{var}");
+            assert_eq!(c.admin(&format!("SELECT COUNT(*) FROM {schema}.t")), ["1"], "{var}");
+            c.admin(&format!("DROP DATABASE {schema}"));
+        });
+    }
+
+    /// A failing setting or init command used to wait the whole connect timeout while the pool retried it.
+    #[test]
+    fn live_failing_setup_fails_fast_with_its_text() {
+        each(|c, var| {
+            let t = Instant::now();
+            let err = c.fails(&Advanced { init: "SET @a = 1;\nSET SESSION group_concat_max_len = 'x';".into(), ..Default::default() });
+            assert!(err.contains("Init command failed on") && err.contains("group_concat_max_len"), "{var}: {err}");
+            assert!(t.elapsed() < Duration::from_secs(3), "{var} took {:?}", t.elapsed());
+            let t = Instant::now();
+            let err = c.fails(&Advanced { zone: Zone::Custom("Nowhere/Atlantis".into()), ..Default::default() });
+            assert!(err.contains("time_zone") && err.contains("Nowhere/Atlantis"), "{var}: {err}");
+            assert!(t.elapsed() < Duration::from_secs(3), "{var} took {:?}", t.elapsed());
+        });
+    }
+
+    /// Value suggestions open their own connection, which now gets the same session as the grid.
+    #[test]
+    fn live_field_values_follow_the_custom_zone() {
+        each(|c, var| {
+            let schema = "quarry_af2_values";
+            c.admin(&format!("DROP DATABASE IF EXISTS {schema}; CREATE DATABASE {schema}; CREATE TABLE {schema}.t (id INT PRIMARY KEY, ts TIMESTAMP NULL, KEY (ts)); SET time_zone = '+00:00'; INSERT INTO {schema}.t VALUES (1, '2024-01-01 00:00:00')"));
+            let db = c.open(&Advanced { zone: Zone::Custom("+05:00".into()), ..Default::default() }).unwrap();
+            c.w.sql_field_values(1, db, schema.into(), "t".into(), "ts".into(), None);
+            let Msg::SqlValues { res, .. } = c.rx.recv_timeout(Duration::from_secs(20)).unwrap() else { panic!("expected SqlValues") };
+            let vals = res.unwrap().expect("a small indexed table is looked in");
+            assert_eq!(vals.iter().map(|(v, _)| v.as_str()).collect::<Vec<_>>(), ["2024-01-01 05:00:00"], "{var}");
+            c.admin(&format!("DROP DATABASE {schema}"));
         });
     }
 
@@ -558,8 +894,8 @@ mod live {
     #[test]
     fn live_test_reads_the_server_mode_and_collations() {
         each(|c, var| {
-            c.w.sql_test_with(c.uri.clone(), Duration::from_secs(10), Net::default(), Advanced::default());
-            let Msg::Tested { res, info } = c.rx.recv_timeout(Duration::from_secs(30)).unwrap() else { panic!("expected Tested") };
+            c.w.sql_test_with(0, c.uri.clone(), Duration::from_secs(10), Net::default(), Advanced::default());
+            let Msg::Tested { res, info, .. } = c.rx.recv_timeout(Duration::from_secs(30)).unwrap() else { panic!("expected Tested") };
             res.unwrap();
             let info = info.unwrap();
             assert!(info.collations.iter().any(|(cs, n)| cs == "utf8mb4" && n == "utf8mb4_bin"), "{var}");

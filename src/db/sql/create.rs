@@ -497,7 +497,7 @@ const COUNT_WAIT: Duration = Duration::from_secs(3);
 async fn table_info(db: &Db, schema: &str, table: &str) -> Res<DropInfo> {
     let Pool::My(pool) = &db.pool;
     let d = db.dialect;
-    let mut c = pool.acquire().await.map_err(e)?.detach();
+    let mut c = db.acquire().await?.detach();
     fresh_stats(&mut c, d).await;
     let st = sqlx::query("SELECT TABLE_ROWS AS est, TABLE_TYPE AS kind FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?").bind(schema).bind(table).fetch_optional(&mut c).await.map_err(e);
     let st = match st {

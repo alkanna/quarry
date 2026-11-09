@@ -113,7 +113,10 @@ fn advanced_tab(ui: &mut egui::Ui, f: &mut ConnForm, default_s: u64) {
             ui.label("");
             ui.vertical(|ui| {
                 ui.set_max_width(field_w);
-                note(ui, "UTF-8 charsets only, since Quarry decodes every result as UTF-8. Test reads the server's collations.")
+                note(ui, "UTF-8 charsets only, since Quarry decodes every result as UTF-8. Test reads the server's collations.");
+                if f.adv.charset == db::sql::Charset::Utf8mb3 {
+                    note(ui, "With utf8mb3, characters outside the BMP (such as emoji) come back as '?', and rows holding them cannot be edited in the grid.");
+                }
             });
             ui.end_row();
         });
@@ -125,6 +128,7 @@ fn advanced_tab(ui: &mut egui::Ui, f: &mut ConnForm, default_s: u64) {
                 let mut custom = f.mode_custom as u8;
                 segmented(ui, &mut custom, &[(0, "Server default"), (1, "Custom")]);
                 f.mode_custom = custom == 1;
+                f.seed_mode();
                 if f.mode_custom {
                     ui.label(RichText::new("Starts from the server's mode on Test").size(TXT_SMALL).color(FAINT()));
                 }
@@ -138,11 +142,14 @@ fn advanced_tab(ui: &mut egui::Ui, f: &mut ConnForm, default_s: u64) {
                         for (flag, on) in MODE_FLAGS.iter().zip(f.mode_on.iter_mut()) {
                             if chip(ui, flag, PRIMARY(), *on).clicked() {
                                 *on = !*on;
+                                f.mode_seeded = true;
                             }
                         }
                     });
                     ui.add_space(4.0);
-                    ui.add(egui::TextEdit::singleline(&mut f.mode_extra).hint_text("More flags, comma separated").desired_width(ui.available_width()).margin(egui::Margin::symmetric(8, 5)));
+                    if ui.add(egui::TextEdit::singleline(&mut f.mode_extra).hint_text("More flags, comma separated").desired_width(ui.available_width()).margin(egui::Margin::symmetric(8, 5))).changed() {
+                        f.mode_seeded = true;
+                    }
                 });
                 ui.end_row();
             }
@@ -344,13 +351,8 @@ impl App {
         let mut test = false;
         let default_s = self.prefs.timeout_ms / 1000;
         // Custom starts from what the server runs, once, so a mode the user already shaped is never replaced.
-        if let Some(info) = self.test_info.take() {
-            if f.mode_custom && f.mode_on.iter().all(|on| !on) && f.mode_extra.trim().is_empty() {
-                let flags = db::sql::advanced::parse_flags(&info.sql_mode).unwrap_or_default();
-                f.mode_on = db::sql::advanced::MODE_FLAGS.map(|m| flags.iter().any(|x| x == m));
-                f.mode_extra = flags.iter().filter(|x| !db::sql::advanced::MODE_FLAGS.contains(&x.as_str())).cloned().collect::<Vec<_>>().join(", ");
-            }
-            f.collations = info.collations;
+        if let Some((req, info)) = self.test_info.take() {
+            f.take_test_info(req, info);
         }
         ui.set_width(760.0);
         dialog_title(ui, if f.id.is_some() { "Edit connection" } else { "New connection" });
@@ -408,7 +410,11 @@ impl App {
                 });
             });
         });
-        match &self.conn_test {
+        // An answer for an older Test or another form is not this form's.
+        if self.conn_test.as_ref().is_some_and(|(req, _)| *req != f.test_req) {
+            self.conn_test = None;
+        }
+        match self.conn_test.as_ref().map(|(_, r)| r) {
             None if f.testing => {
                 ui.horizontal(|ui| {
                     spin(ui);
@@ -440,12 +446,14 @@ impl App {
             f.testing = true;
             self.conn_test = None;
             self.test_info = None;
+            self.req += 1;
+            f.test_req = self.req;
             let net = f.net();
             if f.engine.is_sql() {
                 let addr = db::sql::Addr { host: f.addr.host.trim().into(), user: f.addr.user.trim().into(), database: f.addr.database.trim().into(), ..f.addr.clone() };
-                self.worker.sql_test_with(addr.to_uri(), self.timeout(), net, adv.clone().unwrap_or_default());
+                self.worker.sql_test_with(f.test_req, addr.to_uri(), self.timeout(), net, adv.clone().unwrap_or_default());
             } else {
-                self.worker.test(f.uri.trim().to_string(), self.timeout(), net);
+                self.worker.test(f.test_req, f.uri.trim().to_string(), self.timeout(), net);
             }
         }
         if save {

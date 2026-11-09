@@ -236,7 +236,7 @@ pub enum Msg {
     /// A column's most frequent values with their counts, for SQL autocomplete. None when the table is too big to look in.
     SqlValues { conn: u64, schema: String, table: String, column: String, prefix: Option<String>, res: Res<Option<Vec<(String, u64)>>> },
     /// Result of the connection form's Test button.
-    Tested { res: Res<String>, info: Option<sql::TestInfo> },
+    Tested { req: u64, res: Res<String>, info: Option<sql::TestInfo> },
     /// Collection names (sorted) and which of them are views.
     Collections { conn: u64, db: String, res: Res<(Vec<String>, Vec<String>)> },
     /// A read command answered (users, roles, stats, view definition); `tag` says which.

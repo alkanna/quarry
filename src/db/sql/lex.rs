@@ -198,6 +198,20 @@ pub fn tokens_with(text: &str, backslash: bool, ansi: bool) -> Vec<(Tok, Range<u
     lex(text, Opts { backslash, ansi, skip_exec: false })
 }
 
+/// Every way a server may read `text`: backslash escapes on and off, ANSI_QUOTES on and off, and executable
+/// comments as code and as comments. A text that lexes the same in all of them means the same to any server.
+pub fn every_reading(text: &str) -> Vec<Vec<(Tok, Range<usize>)>> {
+    let mut out = Vec::with_capacity(8);
+    for backslash in [true, false] {
+        for ansi in [false, true] {
+            for skip_exec in [false, true] {
+                out.push(lex(text, Opts { backslash, ansi, skip_exec }));
+            }
+        }
+    }
+    out
+}
+
 /// Statements counted under the server's own quote rules.
 pub fn count_with(text: &str, backslash: bool, ansi: bool) -> usize {
     split_with(text, Opts { backslash, ansi, skip_exec: false }).len()

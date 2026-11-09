@@ -175,9 +175,10 @@ pub struct App {
     sql_values_asked: HashSet<(u64, String, String, String, Option<String>)>,
     users: Option<UsersWin>,
     server: Option<ServerWin>,
-    conn_test: Option<db::Res<String>>,
+    /// The answer to a connection form Test, with the request id it answers.
+    conn_test: Option<(u64, db::Res<String>)>,
     /// What the last Test learned from a SQL server, for the Advanced tab to offer.
-    test_info: Option<db::sql::TestInfo>,
+    test_info: Option<(u64, db::sql::TestInfo)>,
     /// Usage and suggestions of the collection "db.coll" the Indexes view last asked about.
     idx_info: Option<(String, db::IndexInfo)>,
     undo: Vec<UndoAction>,

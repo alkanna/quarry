@@ -272,6 +272,7 @@ impl App {
     pub(super) fn edit_conn(&mut self, id: u64) {
         if let Some(meta) = self.conn(id).map(|c| c.meta.clone()) {
             self.conn_test = None;
+            self.test_info = None;
             // Opening the form with an empty address would overwrite the stored one on save,
             // unless there is none, which is when re-entering it is the way out.
             // Demo ids overlap real ones, so the demo must not show the user's real secrets.
