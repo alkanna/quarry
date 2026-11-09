@@ -1340,6 +1340,74 @@ mod tests {
     }
 
     #[test]
+    fn live_export_all_statements_runs_one_session_and_writes_json_or_csv_files() {
+        use super::super::export::{check_script, export_all, AllPlan, Plan};
+        use crate::db::copy::Fmt;
+        let Some((w, _rx, db, p)) = live("t_exp", "id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(20)") else { return };
+        exec(&w, &p, "INSERT INTO quarry_test.t_exp (name) VALUES ('a'), ('b'), ('c')");
+        let dir = std::env::temp_dir().join(format!("quarry-export-all-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let names = |d: &std::path::Path| {
+            let mut v: Vec<String> = std::fs::read_dir(d).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+            v.sort();
+            v
+        };
+        // USE and @variables carry over: the table has no schema in front of it and the variable is still set.
+        let script = "USE quarry_test; SET @lim = 2; SELECT id, name FROM t_exp ORDER BY id; SELECT @lim AS lim, COUNT(*) AS n FROM t_exp";
+        let stmts = check_script(script).unwrap();
+        let run = |stmts: &[String], fmt: Fmt, single: bool, file: &str, cancel: bool| {
+            let ap = AllPlan { plan: Plan { fmt, header: true, table: "t_exp".into(), bs: true }, single };
+            let (count, step) = (AtomicU64::new(0), AtomicU64::new(0));
+            let r = w.rt.block_on(export_all(&db, "", stmts, &ap, &dir.join(file), &count, &step, &AtomicBool::new(cancel), &AtomicU64::new(0)));
+            (r, count.load(Ordering::Relaxed), step.load(Ordering::Relaxed))
+        };
+
+        let (r, count, step) = run(&stmts, Fmt::Json, true, "all.json", false);
+        let done = r.unwrap();
+        // The count the status bar reads is every row of every result, and the step is the last statement.
+        assert_eq!((done.rows, done.files, count, step), (4, 1, 4, 4));
+        let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("all.json")).unwrap()).unwrap();
+        assert_eq!(json.as_array().map(|a| a.len()), Some(2));
+        assert_eq!(json[0]["statement"], "SELECT id, name FROM t_exp ORDER BY id");
+        assert_eq!(json[0]["rows"].as_array().map(|a| a.len()), Some(3));
+        assert_eq!(json[1]["rows"][0]["lim"], 2);
+        assert_eq!(json[1]["rows"][0]["n"], 3);
+
+        let done = run(&stmts, Fmt::Csv, false, "res.csv", false).0.unwrap();
+        assert_eq!((done.rows, done.files), (4, 2));
+        assert_eq!(std::fs::read_to_string(dir.join("res-1.csv")).unwrap(), "id,name\n1,a\n2,b\n3,c\n");
+        assert_eq!(std::fs::read_to_string(dir.join("res-2.csv")).unwrap(), "lim,n\n2,3\n");
+        // No temporary file is left, and USE and SET made no file of their own.
+        assert_eq!(names(&dir), ["all.json", "res-1.csv", "res-2.csv"]);
+
+        // A statement that fails midway leaves nothing, not even the first result's file.
+        let bad = check_script("SELECT 1 AS a; SELECT * FROM quarry_test.no_such_table_here").unwrap();
+        let err = run(&bad, Fmt::Csv, false, "bad.csv", false).0.err().unwrap();
+        assert!(err.contains("no_such_table_here"), "{err}");
+        let err = run(&bad, Fmt::Json, true, "bad.json", false).0.err().unwrap();
+        assert!(err.contains("no_such_table_here"), "{err}");
+        assert_eq!(names(&dir), ["all.json", "res-1.csv", "res-2.csv"]);
+
+        // Cancel before the first statement writes nothing either.
+        let err = run(&stmts, Fmt::Csv, false, "stop.csv", true).0.err().unwrap();
+        assert_eq!(err, "Export cancelled");
+        assert_eq!(names(&dir).len(), 3);
+
+        // A script with a DELETE is refused up front and the table stays whole.
+        let refused = check_script("SELECT 1; DELETE FROM t_exp");
+        assert!(refused.is_err());
+        let n = |rt: &tokio::runtime::Handle, pool: &sqlx::MySqlPool| -> i64 { rt.block_on(async { sqlx::query_scalar("SELECT COUNT(*) FROM quarry_test.t_exp").fetch_one(pool).await.unwrap() }) };
+        assert_eq!(n(&p.rt, &p.pool), 3);
+        // The worker itself refuses it too, when a caller skips check_script.
+        let sneaky = vec!["SELECT 1".to_string(), "DELETE FROM t_exp".to_string()];
+        let err = run(&sneaky, Fmt::Csv, false, "sneaky.csv", false).0.err().unwrap();
+        assert!(err.contains("read"), "{err}");
+        assert_eq!(n(&p.rt, &p.pool), 3);
+        assert_eq!(names(&dir).len(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn live_a_capped_result_ends_the_script() {
         let Some((w, rx, db, _p)) = live("", "") else { return };
         exec(&w, &_p, "DROP PROCEDURE IF EXISTS quarry_test.p_big");

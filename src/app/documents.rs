@@ -136,7 +136,12 @@ pub(super) fn opt_chip(ui: &mut egui::Ui, name: &str, id: egui::Id, text: &mut S
     egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, edge)).corner_radius(BUTTON_H / 2.0).inner_margin(egui::Margin { left: 10, right: 3, top: 0, bottom: 0 }).show(ui, |ui| {
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            ui.add_sized([0.0, BUTTON_H], egui::Label::new(RichText::new(name).font(FontId::monospace(TXT_CAPTION)).color(chip_name_color(name))));
+            // Painted and centered on its ink like the other chips, because a label sits about 1 px high.
+            let color = chip_name_color(name);
+            let g = ui.painter().layout_no_wrap(name.to_string(), FontId::monospace(TXT_CAPTION), color);
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(g.size().x, BUTTON_H), Sense::hover());
+            let dy = optical_dy(&g);
+            ui.painter().galley(egui::pos2(rect.left(), rect.center().y - g.size().y / 2.0 + dy), g, color);
             // Centered on the label: the editor is shorter than the chip.
             enter = ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), BUTTON_H), egui::Layout::left_to_right(egui::Align::Center), |ui| edit(ui, text)).inner;
             ui.allocate_ui_with_layout(egui::vec2(CLOSE_W, BUTTON_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {

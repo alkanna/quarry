@@ -27,9 +27,9 @@ Update this list when a step lands. Each step is reviewed before it is ticked.
 
 **Open before v2 (do these first, in order):**
 - [x] Cleanup from /simplify merged (c50f17d): shared escaping, hex, quote_ident and highlighter helpers, stale allows and dead code removed, per-frame work cached, width cache keyed by a rows generation, `refused` flag on ResultSet, popover in widgets. Kept as is on purpose: `size` vs `human_bytes` (different text), the Include column names row, `sets_req` vs `run_req`.
-- [ ] Export "All statements in the editor" (user request): run every statement of the Query editor on one connection (USE and @vars carry over), refuse the export if any statement fails `lex::read_only_check` even when unlocked, stream every result set; output "one file per result" (name-1.csv, name-2.csv, any format) or "one file" for SQL INSERT (appended), JSON lines (rows get a `statement` field), JSON (array of {statement, rows}), Markdown and HTML (a heading per statement); progress "Statement 2 of 5, 340k rows" with Cancel; .part files renamed at the end.
+- [x] Export "All statements in the editor" (user request): run every statement of the Query editor on one connection (USE and @vars carry over), refuse the export if any statement fails `lex::read_only_check` even when unlocked, stream every result set; output "one file per result" (name-1.csv, name-2.csv, any format) or "one file" for SQL INSERT (appended), JSON lines (rows get a `statement` field), JSON (array of {statement, rows}), Markdown and HTML (a heading per statement); progress "Statement 2 of 5, 340k rows" with Cancel; .part files renamed at the end.
 - [x] Polish: the shell popup footer is cut with an ellipsis to the popup width, and views get their own `w` badge (the demo schema now holds a view).
-- [ ] Polish: the LIMIT clause chip text sits 1 px high.
+- [x] Polish: the LIMIT clause chip text is centered on its ink like the other chips.
 - [ ] Ask the user to verify by hand: slow drag of the editor divider (if it still jerks, check the `hi` limit that depends on the results space), rail right-click menu, Export from Content, Shell and Mongo, the column combobox.
 - [ ] User decisions: smoke test on real MySQL/MariaDB servers (SSH tunnel, big tables), open the PR feat/mysql into master with the `ci` label, and push/PR `fix/linux-wayland-fallback` (its Linux-only code was never compiled; CI on ubuntu-22.04 will).
 
@@ -55,7 +55,7 @@ The plan and its progress list live in this file; update it whenever something l
 - **Reviews:** security-sensitive steps get an independent opus review before they are ticked; findings go to a fix agent with each failing input as a test.
 - **Environment:** if cargo says sccache is missing, prefix with `RUSTC_WRAPPER=`. Many parallel worktrees saturate the machine (each builds its own target dir); keep at most three agents compiling at once.
 - **Designs:** `docs/sql/designs.figcraft`; read a frame with `figcraft-cli export docs/sql/designs.figcraft -o /tmp/x.png --node "<frame name>"`. New screens are designed in FigCraft (Workbench and Paper frames side by side, real theme tokens) and shown to the user before they are built. The generator scripts that drew them were in a session scratchpad and are gone; draw new frames with the FigCraft MCP tools directly or rebuild a small generator.
-- **Demo switches** for screenshots: `QUARRY_TEST_SQL=<view>` (content, rules, sqlmode, grouped, edit, select, colpick, structure, info, relations, triggers, query, shell, shellac, ac, acquery), `QUARRY_TEST_SQL_JSON=<file>`, `QUARRY_TEST_RAIL=1`, `QUARRY_TEST_CHECKED=1`, `QUARRY_TEST_EXPORT=1`; `bench.py --sql-only` for memory and frame time.
+- **Demo switches** for screenshots: `QUARRY_TEST_SQL=<view>` (content, rules, sqlmode, grouped, edit, select, colpick, structure, info, relations, triggers, query, shell, shellac, ac, acquery), `QUARRY_TEST_SQL_JSON=<file>`, `QUARRY_TEST_RAIL=1`, `QUARRY_TEST_CHECKED=1`, `QUARRY_TEST_EXPORT=1` (or `script`, `script-ok` for the All statements scope); `bench.py --sql-only` for memory and frame time.
 
 ## Designs
 

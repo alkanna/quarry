@@ -51,6 +51,8 @@ pub(super) enum Scope {
     Selected,
     Shown,
     All,
+    /// Every statement of the Query editor, run in order on one connection.
+    Script,
 }
 
 /// Which grid the rows come from.
@@ -72,6 +74,14 @@ pub(super) struct AllRows {
     pub(super) refused: Option<String>,
 }
 
+/// The Query editor's whole text as an export source.
+pub(super) struct Script {
+    pub(super) db: db::sql::Db,
+    pub(super) schema: String,
+    /// The statements, or why the script may not be exported.
+    pub(super) stmts: Result<Vec<String>, String>,
+}
+
 pub(super) struct ExportForm {
     pub(super) src: Src,
     pub(super) sql: bool,
@@ -81,6 +91,9 @@ pub(super) struct ExportForm {
     pub(super) selected: Vec<Document>,
     pub(super) shown: usize,
     pub(super) all: Option<AllRows>,
+    pub(super) script: Option<Script>,
+    /// For the script: one file instead of one per result.
+    pub(super) single: bool,
     /// The result is one page of a longer one.
     pub(super) paged: bool,
 }
@@ -93,6 +106,9 @@ pub(super) struct ExportJob {
     pub(super) id: Arc<AtomicU64>,
     pub(super) db: db::sql::Db,
     pub(super) copy: bool,
+    /// Progress of a script: the statement being run and how many there are. `of` is 0 for a single statement.
+    pub(super) step: Arc<AtomicU64>,
+    pub(super) of: usize,
 }
 
 /// "1.2M" from a million up, the exact count below.
@@ -175,9 +191,28 @@ impl App {
             let refused = db::sql::lex::read_only_check(&x.stmt).err();
             Some(AllRows { db, schema: t.sql.as_ref().map(|s| s.run_db.clone()).filter(|d| !d.is_empty()).unwrap_or_else(|| t.sel.db.clone()), stmt: x.stmt.clone(), total: x.page.and_then(|p| p.total), paged, refused })
         });
+        let script = t.sql.as_ref().filter(|_| src == Src::Query).and_then(|s| {
+            let db = self.conn(t.sel.conn).and_then(|c| c.sql.clone())?;
+            let schema = Some(s.run_db.clone()).filter(|d| !d.is_empty()).unwrap_or_else(|| t.sel.db.clone());
+            Some(Script { db, schema, stmts: db::sql::export::check_script(&s.query) })
+        });
         let scope = pick_scope(Ask { all_pages, all_ok: all.as_ref().is_some_and(|a| a.refused.is_none()), has_selected: !selected.is_empty() });
         let fmt = if sql { Format::T(Fmt::Csv) } else { Format::MongoJson };
-        self.modal = Some(Modal::Export(Box::new(ExportForm { src, sql, fmt, header: true, scope, selected, shown, all, paged })));
+        self.modal = Some(Modal::Export(Box::new(ExportForm { src, sql, fmt, header: true, scope, selected, shown, all, script, single: false, paged })));
+    }
+
+    /// Demo only: gives the open dialog the editor script as a source with a pool that never connects, so the scope can be drawn offline.
+    /// `text` replaces the editor's text when given, to show a script that passes the check.
+    pub(super) fn demo_script_scope(&mut self, text: Option<&str>) {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+        let _guard = rt.enter();
+        let opts = "mysql://root@127.0.0.1:1/shop".parse::<sqlx::mysql::MySqlConnectOptions>().expect("demo address");
+        let db = db::sql::Db { pool: db::sql::Pool::My(sqlx::mysql::MySqlPoolOptions::new().connect_lazy_with(opts.clone())), dialect: db::sql::Dialect::MySql, opts, version: "8.4.3".into(), tls: false, sql_mode: String::new() };
+        let query = text.map(str::to_string).or_else(|| self.t().and_then(|t| t.sql.as_ref().map(|s| s.query.clone()))).unwrap_or_default();
+        if let Some(Modal::Export(f)) = &mut self.modal {
+            f.script = Some(Script { db, schema: "shop".into(), stmts: db::sql::export::check_script(&query) });
+            f.scope = Scope::Script;
+        }
     }
 
     pub(super) fn export_dialog(&mut self, ui: &mut egui::Ui, f: &mut ExportForm, keep: &mut bool) {
@@ -225,17 +260,38 @@ impl App {
                         ui.label(RichText::new(format!("Not available: {why}")).size(TXT_SMALL).color(ALERT()));
                     }
                 }
+                if let Some(sc) = &f.script {
+                    let n = sc.stmts.as_ref().map_or(0, Vec::len);
+                    let table = matches!(f.fmt, Format::T(_));
+                    ui.add_enabled_ui(sc.stmts.is_ok() && table, |ui| ui.radio_value(&mut f.scope, Scope::Script, format!("All statements in the editor ({n}): runs them in order and streams each result")));
+                    if let Err(why) = &sc.stmts {
+                        ui.label(RichText::new(format!("Not available: {why}")).size(TXT_SMALL).color(ALERT()));
+                    }
+                }
             });
             ui.end_row();
+            if f.scope == Scope::Script {
+                form_label(ui, "Output");
+                let one_ok = matches!(f.fmt, Format::T(x) if db::sql::export::can_single(x));
+                if !one_ok {
+                    f.single = false;
+                }
+                ui.vertical(|ui| {
+                    ui.radio_value(&mut f.single, false, "One file per result (name-1, name-2, and so on)");
+                    ui.add_enabled_ui(one_ok, |ui| ui.radio_value(&mut f.single, true, "One file, a section for each statement")).response.on_disabled_hover_text("CSV, TSV and Values only: they have no place for a second header");
+                });
+                ui.end_row();
+            }
         });
         // A format only the Shell and Documents know cannot come from a statement.
-        if f.scope == Scope::All && !matches!(f.fmt, Format::T(_)) {
+        if matches!(f.scope, Scope::All | Scope::Script) && !matches!(f.fmt, Format::T(_)) {
             f.scope = Scope::Shown;
         }
         let ready = match f.scope {
             Scope::Selected => !f.selected.is_empty(),
             Scope::Shown => f.shown > 0,
             Scope::All => f.all.as_ref().is_some_and(|a| a.refused.is_none()),
+            Scope::Script => f.script.as_ref().is_some_and(|s| s.stmts.is_ok()),
         };
         dialog_actions(ui, |ui| {
             if ui.add_enabled(ready, primary_button(ui, "Export…", PRIMARY())).clicked() {
@@ -270,6 +326,12 @@ impl App {
             self.start_stream(a, plan, Sink::File(path), false);
             return;
         }
+        if f.scope == Scope::Script {
+            let (Some(sc), Format::T(fmt)) = (&f.script, f.fmt) else { return };
+            let Ok(stmts) = &sc.stmts else { return };
+            let ap = db::sql::export::AllPlan { plan: Plan { fmt, header: f.header, table, bs: self.sql_bs() }, single: f.single };
+            return self.start_script(sc, stmts.clone(), ap, path);
+        }
         let rows = if f.scope == Scope::Selected { f.selected.clone() } else { self.shown_rows(f.src) };
         let text = match f.fmt {
             Format::T(fmt) => {
@@ -297,8 +359,19 @@ impl App {
             return self.err("An export is already running.");
         }
         self.req += 1;
-        let job = ExportJob { req: self.req, count: Arc::new(AtomicU64::new(0)), cancel: Arc::new(AtomicBool::new(false)), id: Arc::new(AtomicU64::new(0)), db: a.db.clone(), copy };
+        let job = ExportJob { req: self.req, count: Arc::new(AtomicU64::new(0)), cancel: Arc::new(AtomicBool::new(false)), id: Arc::new(AtomicU64::new(0)), db: a.db.clone(), copy, step: Arc::new(AtomicU64::new(0)), of: 0 };
         self.worker.sql_export(job.req, a.db.clone(), a.schema.clone(), a.stmt.clone(), plan, sink, job.count.clone(), job.id.clone(), job.cancel.clone());
+        self.export_job = Some(job);
+    }
+
+    /// Runs the editor's statements in a worker task and streams their results to files.
+    fn start_script(&mut self, sc: &Script, stmts: Vec<String>, ap: db::sql::export::AllPlan, path: PathBuf) {
+        if self.export_job.is_some() {
+            return self.err("An export is already running.");
+        }
+        self.req += 1;
+        let job = ExportJob { req: self.req, count: Arc::new(AtomicU64::new(0)), cancel: Arc::new(AtomicBool::new(false)), id: Arc::new(AtomicU64::new(0)), db: sc.db.clone(), copy: false, step: Arc::new(AtomicU64::new(0)), of: stmts.len() };
+        self.worker.sql_export_all(job.req, sc.db.clone(), sc.schema.clone(), stmts, ap, path, job.count.clone(), job.step.clone(), job.id.clone(), job.cancel.clone());
         self.export_job = Some(job);
     }
 
@@ -324,6 +397,7 @@ impl App {
         }
         self.export_job = None;
         match res {
+            Ok(Done { rows, path: Some(p), files, .. }) if files > 1 => self.ok(format!("Exported {} rows to {files} files, from {}", human_rows(rows), p.display())),
             Ok(Done { rows, path: Some(p), .. }) => self.ok(format!("Exported {} rows to {}", human_rows(rows), p.display())),
             Ok(Done { rows, text: Some(t), .. }) => {
                 ctx.copy_text(t);
@@ -340,7 +414,8 @@ impl App {
         let Some(j) = &self.export_job else { return false };
         let (n, copy) = (j.count.load(Ordering::Relaxed), j.copy);
         spin(ui);
-        ui.label(RichText::new(format!("{} {} rows", if copy { "Copied" } else { "Exported" }, human_rows(n))).size(TXT_CAPTION).color(MUTED()));
+        let text = if j.of > 0 { format!("Statement {} of {}, {} rows", j.step.load(Ordering::Relaxed), j.of, human_rows(n)) } else { format!("{} {} rows", if copy { "Copied" } else { "Exported" }, human_rows(n)) };
+        ui.label(RichText::new(text).size(TXT_CAPTION).color(MUTED()));
         if quiet(ui, RichText::new("Cancel").size(TXT_CAPTION)).on_hover_text("Stop and discard the output").clicked() {
             if let Some(j) = &self.export_job {
                 self.worker.sql_kill(j.db.clone(), j.id.load(Ordering::SeqCst), j.cancel.clone());

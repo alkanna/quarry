@@ -720,9 +720,16 @@ impl App {
         self.tabs.push(t);
         self.cur = self.tabs.len() - 1;
         // QUARRY_TEST_EXPORT=1 opens the Export dialog on the checked rows.
-        if std::env::var("QUARRY_TEST_EXPORT").is_ok() {
+        // QUARRY_TEST_EXPORT=script shows the scope "All statements in the editor" on the demo script, which has a write in it
+        // and so is refused; =script-ok shows it on a script of reads.
+        if let Ok(v) = std::env::var("QUARRY_TEST_EXPORT") {
             let rows = self.checked_rows();
             self.open_export(rows, false);
+            match v.as_str() {
+                "script" => self.demo_script_scope(None),
+                "script-ok" => self.demo_script_scope(Some("USE shop;\nSET @since = '2024-01-01';\nSELECT id, status, total FROM orders WHERE created_at > @since;\nSELECT carrier, COUNT(*) AS n FROM shipments GROUP BY carrier")),
+                _ => {}
+            }
         }
     }
 }

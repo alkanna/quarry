@@ -103,7 +103,7 @@ fn md_cell(s: &str) -> String {
     s.replace('|', "\\|").replace("\r\n", "<br>").replace(['\n', '\r'], "<br>")
 }
 
-fn html_cell(s: &str) -> String {
+pub fn html_cell(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
