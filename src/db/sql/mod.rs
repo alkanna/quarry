@@ -9,6 +9,11 @@ pub mod ddl;
 pub mod export;
 pub mod lex;
 pub mod value;
+pub mod csv;
+pub mod import;
+pub mod dump;
+#[cfg(test)]
+mod testing;
 pub mod rules;
 pub mod schema;
 pub use dialect::{Dialect, FUNCTIONS, KEYWORDS};

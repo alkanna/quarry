@@ -181,7 +181,7 @@ pub fn preview(sql: &str, params: &[Param], bs: bool) -> String {
 
 type Query<'q> = sqlx::query::Query<'q, sqlx::MySql, sqlx::mysql::MySqlArguments>;
 
-fn bound<'q>(sql: &'q str, params: &'q [Param]) -> Query<'q> {
+pub(super) fn bound<'q>(sql: &'q str, params: &'q [Param]) -> Query<'q> {
     let mut q = sqlx::query(sql);
     for p in params {
         q = match p {
@@ -288,7 +288,7 @@ fn plural(n: usize, word: &str) -> String {
     format!("{n} {word}{}", if n == 1 { "" } else { "s" })
 }
 
-fn action(conn: u64, schema: &str, table: &str, cols: &[Col], undo: SqlUndo) -> UndoAction {
+pub(super) fn action(conn: u64, schema: &str, table: &str, cols: &[Col], undo: SqlUndo) -> UndoAction {
     UndoAction { at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { cols: cols.to_vec(), undo } }
 }
 

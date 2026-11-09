@@ -186,6 +186,9 @@ impl App {
                     });
                 }
                 Modal::Export(f) => self.export_dialog(ui, f, &mut keep),
+                Modal::SqlImport(f) => self.sql_import_dialog(ui, f, &mut keep),
+                Modal::SqlDump(f) => self.sql_dump_dialog(ui, f, &mut keep),
+                Modal::SqlRunFile(f) => self.sql_run_file_dialog(ui, f, &mut keep),
                 Modal::SqlSet(f) => self.sql_set_dialog(ui, f, &mut keep),
                 Modal::SqlRow(f) => self.sql_row_dialog(ui, f, &mut keep),
                 Modal::ColEdit(f) => self.col_dialog(ui, f, &mut keep),

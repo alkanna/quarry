@@ -427,7 +427,7 @@ impl App {
                                 }
                             }
                         }
-                        if self.export_progress(ui) {
+                        if self.export_progress(ui) || self.sql_job_progress(ui) {
                             return;
                         }
                         let (msg, is_err) = &self.status;

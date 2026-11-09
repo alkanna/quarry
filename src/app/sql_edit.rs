@@ -471,6 +471,12 @@ impl App {
         if quiet_enabled(ui, why.is_none(), "+ Row").on_hover_text("Insert a row").on_disabled_hover_text(why.unwrap_or_default()).clicked() {
             self.sql_new_row(None);
         }
+        let view = self.sel_is_view();
+        if quiet_enabled(ui, !view, "Import…").on_hover_text("Add the rows of a CSV file to this table").on_disabled_hover_text("A view has no rows to add").clicked() {
+            if let Some(s) = self.t().map(|t| t.sel.clone()) {
+                self.open_sql_import(s.conn, s.db, s.coll);
+            }
+        }
         vsep(ui, 4.0);
     }
 

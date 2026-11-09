@@ -421,6 +421,130 @@ fn check_with(rest: &[Code]) -> Result<(), String> {
     Ok(())
 }
 
+/// One piece of a script: a statement to send to the server, or a client side `DELIMITER` line that only
+/// changes where the next statements end.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Piece {
+    Stmt(String),
+    Delimiter(String),
+}
+
+/// Splits a script that arrives in chunks into statements, the way the mysql client reads a dump: it
+/// understands `DELIMITER`, so a procedure body with its own `;` stays one statement. Quotes, backticks and
+/// comments hide a delimiter. A `/*! ... */` comment is kept whole, since the server runs what is inside it.
+/// A statement is never cut by a chunk edge, so a dump of any size needs only its longest statement in memory.
+pub struct ScriptSplitter {
+    buf: String,
+    pos: usize,
+    delim: String,
+    backslash: bool,
+    eof: bool,
+    /// Bytes dropped from the front of `buf`, so `offset` keeps counting from the start of the script.
+    dropped: u64,
+}
+
+impl ScriptSplitter {
+    /// `backslash` is false when the session runs with NO_BACKSLASH_ESCAPES.
+    pub fn new(backslash: bool) -> ScriptSplitter {
+        ScriptSplitter { buf: String::new(), pos: 0, delim: ";".into(), backslash, eof: false, dropped: 0 }
+    }
+
+    /// A SET of sql_mode inside the script changes how the server reads the text that follows.
+    pub fn set_backslash(&mut self, on: bool) {
+        self.backslash = on;
+    }
+
+    /// Bytes of the script read so far, for a progress bar.
+    pub fn offset(&self) -> u64 {
+        self.dropped + self.pos as u64
+    }
+
+    pub fn feed(&mut self, text: &str) {
+        if self.pos > 0 {
+            self.buf.drain(..self.pos);
+            self.dropped += self.pos as u64;
+            self.pos = 0;
+        }
+        self.buf.push_str(text);
+    }
+
+    /// No more text follows, so a last statement without its delimiter is complete.
+    pub fn finish(&mut self) {
+        self.eof = true;
+    }
+
+    /// The next piece, or None when it needs more text (or the script is over). A statement is only returned
+    /// once its delimiter was seen inside the text fed so far, so what comes next cannot change how it reads.
+    pub fn next_piece(&mut self) -> Result<Option<Piece>, String> {
+        loop {
+            let b = self.buf.as_bytes();
+            let n = b.len();
+            let mut i = self.pos;
+            while i < n && b[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            self.pos = i;
+            if i >= n {
+                return Ok(None);
+            }
+            if n >= i + 10 && b[i..i + 9].eq_ignore_ascii_case(b"delimiter") && (b[i + 9] == b' ' || b[i + 9] == b'\t') {
+                let Some(nl) = self.buf[i..].find('\n').map(|p| i + p).or(self.eof.then_some(n)) else { return Ok(None) };
+                let arg = self.buf[i + 10..nl].split_whitespace().next().unwrap_or_default().to_string();
+                if arg.is_empty() {
+                    return Err("DELIMITER needs the text that ends a statement.".into());
+                }
+                if arg.contains('\\') {
+                    return Err("A delimiter cannot contain a backslash.".into());
+                }
+                self.pos = (nl + 1).min(n);
+                self.delim = arg.clone();
+                return Ok(Some(Piece::Delimiter(arg)));
+            }
+            let start = i;
+            let delim = self.delim.clone().into_bytes();
+            let mut code = false;
+            loop {
+                if i >= n {
+                    if !self.eof {
+                        return Ok(None);
+                    }
+                    let text = self.buf[start..n].trim_end().to_string();
+                    self.pos = n;
+                    return Ok(code.then_some(Piece::Stmt(text)));
+                }
+                if b[i..].starts_with(&delim) {
+                    let text = self.buf[start..i].trim_end().to_string();
+                    self.pos = i + delim.len();
+                    if code {
+                        return Ok(Some(Piece::Stmt(text)));
+                    }
+                    break;
+                }
+                let c = b[i];
+                if c == b'\'' || c == b'"' {
+                    code = true;
+                    i = quote_end(b, i, self.backslash);
+                } else if c == b'`' {
+                    code = true;
+                    i = quote_end(b, i, false);
+                } else if c == b'#' || (c == b'-' && b.get(i + 1) == Some(&b'-') && b.get(i + 2).map_or(self.eof, |x| x.is_ascii_whitespace() || x.is_ascii_control())) {
+                    while i < n && b[i] != b'\n' {
+                        i += 1;
+                    }
+                } else if c == b'/' && b.get(i + 1) == Some(&b'*') {
+                    // `/*!` and MariaDB's `/*M!` hold code, so a comment of only those counts as a statement.
+                    let exec = b.get(i + 2) == Some(&b'!') || (b.get(i + 2) == Some(&b'M') && b.get(i + 3) == Some(&b'!'));
+                    code |= exec;
+                    i = self.buf[i + 2..].find("*/").map_or(n, |p| i + 2 + p + 2);
+                } else {
+                    code |= !c.is_ascii_whitespace();
+                    i += 1;
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -691,5 +815,115 @@ mod tests {
         assert_eq!(count_sql("SELECT 1;"), "SELECT COUNT(*) FROM (\nSELECT 1\n) AS q");
         // A statement that is refused stays refused inside the wrapper.
         assert!(read_only_check(&page_sql("SELECT 1 INTO OUTFILE '/tmp/x'", 0, 1000)).is_err());
+    }
+
+    /// Every piece of `text` when it arrives `chunk` bytes at a time, cut on char boundaries.
+    fn pieces(text: &str, chunk: usize, bs: bool) -> Result<Vec<Piece>, String> {
+        let mut sp = ScriptSplitter::new(bs);
+        let mut out = Vec::new();
+        let mut at = 0;
+        while at < text.len() {
+            let mut end = (at + chunk).min(text.len());
+            while !text.is_char_boundary(end) {
+                end += 1;
+            }
+            sp.feed(&text[at..end]);
+            at = end;
+            if at >= text.len() {
+                sp.finish();
+            }
+            while let Some(p) = sp.next_piece()? {
+                out.push(p);
+            }
+        }
+        sp.finish();
+        while let Some(p) = sp.next_piece()? {
+            out.push(p);
+        }
+        Ok(out)
+    }
+
+    fn stmts(text: &str) -> Vec<String> {
+        // Chunk sizes that cut inside quotes, comments and delimiters must all agree.
+        let whole = pieces(text, text.len().max(1), true).unwrap();
+        for chunk in [1, 2, 3, 5, 7, 16] {
+            assert_eq!(pieces(text, chunk, true).unwrap(), whole, "chunk {chunk} of {text:?}");
+        }
+        whole.into_iter().map(|p| match p { Piece::Stmt(s) => s, Piece::Delimiter(d) => format!("DELIMITER {d}") }).collect()
+    }
+
+    #[test]
+    fn a_script_splits_on_semicolons_outside_quotes_and_comments() {
+        assert_eq!(stmts("SELECT 1; SELECT ';'; SELECT \"a;b\"; SELECT `x;y`"), ["SELECT 1", "SELECT ';'", "SELECT \"a;b\"", "SELECT `x;y`"]);
+        assert_eq!(stmts("SELECT 1 -- ; not here\n; # nor ;\nSELECT 2; /* ; */ SELECT 3"), ["SELECT 1 -- ; not here", "# nor ;\nSELECT 2", "/* ; */ SELECT 3"]);
+        // A comment alone is not a statement, the server would answer "query was empty".
+        assert_eq!(stmts("/* a */; -- b\n; SELECT 1;"), ["SELECT 1"]);
+        assert!(stmts("   \n ; ;; \n").is_empty());
+    }
+
+    #[test]
+    fn delimiter_lines_change_where_statements_end() {
+        let dump = "DELIMITER $$\nCREATE PROCEDURE p()\nBEGIN\n  SELECT 1;\n  SELECT 2;\nEND$$\nDELIMITER ;\nSELECT 3;\n";
+        assert_eq!(stmts(dump), ["DELIMITER $$", "CREATE PROCEDURE p()\nBEGIN\n  SELECT 1;\n  SELECT 2;\nEND", "DELIMITER ;", "SELECT 3"]);
+        let dump = "delimiter //\nCREATE TRIGGER t BEFORE INSERT ON a FOR EACH ROW BEGIN SET NEW.x = 1; END//\nDELIMITER ;\n";
+        assert_eq!(stmts(dump), ["DELIMITER //", "CREATE TRIGGER t BEFORE INSERT ON a FOR EACH ROW BEGIN SET NEW.x = 1; END", "DELIMITER ;"]);
+        // Two characters long, and `;;` as mysqldump writes it.
+        assert_eq!(stmts("DELIMITER ;;\nSELECT 1;SELECT 2;;\nDELIMITER ;\nSELECT 3;"), ["DELIMITER ;;", "SELECT 1;SELECT 2", "DELIMITER ;", "SELECT 3"]);
+    }
+
+    #[test]
+    fn a_delimiter_inside_a_string_or_comment_does_not_end_the_statement() {
+        let dump = "DELIMITER $$\nSELECT '$$', \"$$\", `a$$b` $$\nSELECT 1 /* $$ */ -- $$\n, 2 $$\nDELIMITER ;\n";
+        assert_eq!(stmts(dump), ["DELIMITER $$", "SELECT '$$', \"$$\", `a$$b`", "SELECT 1 /* $$ */ -- $$\n, 2", "DELIMITER ;"]);
+        // A value that tries to end the statement stays inside its quotes, escaped or doubled.
+        assert_eq!(stmts("INSERT INTO t VALUES ('a\\'; DROP TABLE t; --'); SELECT 1"), ["INSERT INTO t VALUES ('a\\'; DROP TABLE t; --')", "SELECT 1"]);
+        assert_eq!(stmts("INSERT INTO t VALUES ('a''; DROP TABLE t; --'); SELECT 1"), ["INSERT INTO t VALUES ('a''; DROP TABLE t; --')", "SELECT 1"]);
+    }
+
+    #[test]
+    fn backslashes_follow_the_servers_sql_mode() {
+        // Under NO_BACKSLASH_ESCAPES the backslash is a plain character, so this quote ends the string.
+        let text = "SELECT 'a\\'; SELECT 2";
+        let normal = pieces(text, 100, true).unwrap();
+        assert_eq!(normal, [Piece::Stmt("SELECT 'a\\'; SELECT 2".into())]);
+        let plain = pieces(text, 100, false).unwrap();
+        assert_eq!(plain, [Piece::Stmt("SELECT 'a\\'".into()), Piece::Stmt("SELECT 2".into())]);
+    }
+
+    #[test]
+    fn executable_comments_stay_in_one_piece() {
+        let dump = "/*!40101 SET @OLD=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */;\n/*!50003 CREATE*/ /*!50017 DEFINER=`root`@`%`*/ /*!50003 TRIGGER t BEFORE INSERT ON a FOR EACH ROW SET NEW.x = 1 */;;\n/*M!100100 SET x=1 */;";
+        let got = stmts(dump);
+        assert_eq!(got.len(), 3, "{got:?}");
+        assert!(got[0].starts_with("/*!40101 SET @OLD") && got[0].ends_with("*/"));
+        assert!(got[1].contains("TRIGGER t BEFORE INSERT"));
+        assert!(stmts("/*!40101 SET x=1 */;").len() == 1);
+    }
+
+    #[test]
+    fn a_last_statement_needs_no_delimiter_and_a_bad_delimiter_line_is_an_error() {
+        assert_eq!(stmts("SELECT 1; SELECT 2"), ["SELECT 1", "SELECT 2"]);
+        assert_eq!(stmts("DELIMITER //\nSELECT 1; SELECT 2"), ["DELIMITER //", "SELECT 1; SELECT 2"]);
+        assert!(pieces("DELIMITER a\\b\nSELECT 1", 100, true).is_err());
+        // The word as a column or table name is just a statement.
+        assert_eq!(stmts("SELECT delimiter FROM t; delimiters;"), ["SELECT delimiter FROM t", "delimiters"]);
+    }
+
+    #[test]
+    fn progress_counts_the_bytes_that_were_turned_into_pieces() {
+        let text = "SELECT 1;\nSELECT 2;\n";
+        let mut sp = ScriptSplitter::new(true);
+        sp.feed(text);
+        sp.finish();
+        assert_eq!(sp.next_piece().unwrap(), Some(Piece::Stmt("SELECT 1".into())));
+        assert_eq!(sp.offset(), 9);
+        assert_eq!(sp.next_piece().unwrap(), Some(Piece::Stmt("SELECT 2".into())));
+        assert_eq!(sp.next_piece().unwrap(), None);
+        assert_eq!(sp.offset(), text.len() as u64);
+    }
+
+    #[test]
+    fn multibyte_text_survives_a_chunk_cut() {
+        assert_eq!(stmts("SELECT 'héllo; wörld ✓'; SELECT 'ü'"), ["SELECT 'héllo; wörld ✓'", "SELECT 'ü'"]);
     }
 }

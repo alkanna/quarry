@@ -435,6 +435,12 @@ impl App {
             _ => {}
         }
         self.sql_json_demo();
+        // QUARRY_TEST_SQL=import or dump open their dialogs over the orders table.
+        match std::env::var("QUARRY_TEST_SQL").as_deref() {
+            Ok("import") => self.demo_sql_import(),
+            Ok("dump") => self.demo_sql_dump(),
+            _ => {}
+        }
     }
 
     /// QUARRY_TEST_SQL_JSON=<file> swaps the demo rows of the orders grid (content, rules, select, edit) or of

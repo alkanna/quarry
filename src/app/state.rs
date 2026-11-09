@@ -684,6 +684,12 @@ pub(super) enum Modal {
     Palette { query: String, sel: usize },
     /// Export or copy-to-file of the rows of a result, in any of the Copy as formats.
     Export(Box<super::export::ExportForm>),
+    /// Import a CSV file into a SQL table.
+    SqlImport(Box<super::sql_import::ImportForm>),
+    /// Export a SQL database or some of its tables as a dump script.
+    SqlDump(Box<super::sql_dump::DumpForm>),
+    /// Run a script file on a SQL database.
+    SqlRunFile(Box<super::sql_dump::RunForm>),
     /// Values of a field with how many documents hold each, and the pipeline that counted them.
     Grouped { sel: Sel, path: String, pipeline: Vec<Document>, rows: Vec<Document> },
     /// The column header's Customize window; `key` is the column prefs key it edits.
@@ -873,6 +879,12 @@ pub(super) enum SideAct {
     Analyze(String, String),
     /// A Query tab for a SQL database.
     NewQuery(String),
+    /// Import a CSV file into a SQL table (database, table).
+    SqlImport(String, String),
+    /// Export a SQL dump of a database, with the table to start from when there is one.
+    SqlDump(String, Option<String>),
+    /// Run a script file on a SQL database.
+    SqlRunFile(String),
 }
 
 pub(super) enum QAct {

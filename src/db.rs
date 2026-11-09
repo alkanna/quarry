@@ -209,6 +209,10 @@ pub enum Msg {
     SqlCount { req: u64, idx: usize, res: Res<u64> },
     /// A Query result streamed to a file or the clipboard text; see `sql::export`.
     SqlExport { req: u64, res: Res<sql::export::Done> },
+    /// A CSV import or a script file run finished; see `sql::import` and `sql::dump`.
+    SqlJob { req: u64, res: Res<sql::import::JobDone> },
+    /// The columns and key of a table, for the Import dialog that asked with `req`.
+    SqlTableInfo { req: u64, res: Res<sql::csv::TableInfo> },
     /// A SQL table's columns, indexes, keys, triggers, status and CREATE statement. Answers the tab whose `idx_req` is `req`.
     SqlStructure { req: u64, res: Res<sql::Structure> },
     /// An ALTER TABLE or its undo ran (or failed). `undo` is what reverses it. `sql_mode` is the server's mode

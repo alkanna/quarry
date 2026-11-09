@@ -304,6 +304,15 @@ impl App {
             if ui.button("Cancel").clicked() {
                 *keep = false;
             }
+            // A table of the Content view can also leave as a dump with its structure.
+            if f.sql && f.src == Src::Content {
+                if quiet(ui, "SQL dump…").on_hover_text("The table with its structure, or the whole database, as a script").clicked() {
+                    *keep = false;
+                    if let Some(s) = self.t().map(|t| t.sel.clone()) {
+                        self.open_sql_dump(s.conn, s.db, Some(s.coll));
+                    }
+                }
+            }
         });
     }
 

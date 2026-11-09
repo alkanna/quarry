@@ -410,6 +410,13 @@ impl App {
                         if ui.button("Refresh").clicked() {
                             side.push(SideAct::Refresh(db_name.clone()));
                         }
+                        ui.separator();
+                        if ui.button("Export as SQL dump…").on_hover_text("Tables, views, triggers and routines as a script, with the rows").clicked() {
+                            side.push(SideAct::SqlDump(db_name.clone(), None));
+                        }
+                        if ui.button("Run SQL file…").on_hover_text("Runs a dump or any script file here").clicked() {
+                            side.push(SideAct::SqlRunFile(db_name.clone()));
+                        }
                         return;
                     }
                     if ui.button("New collection…").clicked() {
@@ -517,8 +524,16 @@ impl App {
                             if ui.button("Open").clicked() {
                                 open = Some(Sel { conn: id, db: db_name.clone(), coll: coll.clone() });
                             }
-                            // The rest is Mongo only until SQL has its own actions.
                             if sql {
+                                if !is_view {
+                                    ui.separator();
+                                    if ui.button("Import CSV…").on_hover_text("Adds the rows of a CSV file to this table").clicked() {
+                                        side.push(SideAct::SqlImport(db_name.clone(), coll.clone()));
+                                    }
+                                }
+                                if ui.button("Export as SQL dump…").clicked() {
+                                    side.push(SideAct::SqlDump(db_name.clone(), Some(coll.clone())));
+                                }
                                 return;
                             }
                             if ui.button("Statistics").clicked() {
@@ -584,6 +599,12 @@ impl App {
         if let SideAct::NewQuery(db) = a {
             return self.sql_new_query(conn, db);
         }
+        match a {
+            SideAct::SqlImport(db, table) => return self.open_sql_import(conn, db, table),
+            SideAct::SqlDump(db, table) => return self.open_sql_dump(conn, db, table),
+            SideAct::SqlRunFile(db) => return self.open_sql_run_file(conn, db),
+            _ => {}
+        }
         if let (SideAct::Refresh(db), Some(sql)) = (&a, self.conn(conn).and_then(|c| c.sql.clone())) {
             self.sql_refresh_schema(conn, db);
             return self.worker.sql_tables(conn, sql, db.clone());
@@ -633,7 +654,7 @@ impl App {
             }
             SideAct::Relations(db) => self.modal = Some(Modal::Relations { conn, db }),
             SideAct::Analyze(db, coll) => self.analyze_relations(conn, client, db, coll),
-            SideAct::NewQuery(_) => {}
+            SideAct::NewQuery(_) | SideAct::SqlImport(..) | SideAct::SqlDump(..) | SideAct::SqlRunFile(_) => {}
             SideAct::DropColl(db, coll) => {
                 self.modal = Some(Modal::Typed { title: format!("Drop {db}.{coll} with all its documents and indexes? This cannot be undone."), expect: coll.clone(), typed: String::new(), action: Danger::DropCollAt { conn, db, coll } })
             }

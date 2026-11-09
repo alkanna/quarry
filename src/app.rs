@@ -46,6 +46,8 @@ mod sql_edit;
 mod sql_bar;
 mod sql_views;
 mod sql_query;
+mod sql_import;
+mod sql_dump;
 mod state;
 mod table;
 mod tabs;
@@ -143,6 +145,8 @@ pub struct App {
     copying: std::collections::HashSet<(u64, String, String)>,
     /// The Query result being streamed to a file or the clipboard, shown in the status bar with a Cancel.
     export_job: Option<export::ExportJob>,
+    /// A CSV import or a script file running, shown in the status bar with a Cancel.
+    sql_job: Option<sql_dump::SqlJob>,
     prefs: UiPrefs,
     new_col: String,
     col_filter: String,
@@ -279,6 +283,7 @@ impl App {
             dropping_db: None,
             copying: Default::default(),
             export_job: None,
+            sql_job: None,
             prefs: UiPrefs::default(),
             new_col: String::new(),
             col_filter: String::new(),
