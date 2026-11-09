@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.27.0](https://github.com/alkanna/quarry/compare/v0.26.0...v0.27.0) (2026-11-09)
+
+
+### Features
+
+* duplicate a collection from the sidebar under a new name ([#143](https://github.com/alkanna/quarry/issues/143)) ([97e5d91](https://github.com/alkanna/quarry/commit/97e5d916f833736c9a4ce2f55a59eb308a323cb7))
+
+
+### Bug Fixes
+
+* schema row menu opens on right click, the field list scrolls sideways, and fields expand or collapse all at once ([#142](https://github.com/alkanna/quarry/issues/142)) ([f8f51dc](https://github.com/alkanna/quarry/commit/f8f51dc44479f3cd71382f0984e1923226c0b806))
+
 ## [0.26.0](https://github.com/alkanna/quarry/compare/v0.25.0...v0.26.0) (2026-11-09)
 
 
