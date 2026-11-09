@@ -397,5 +397,31 @@ impl App {
             Ok("select") => self.tabs[0].checked = [1, 2, 4, 5].into(),
             _ => {}
         }
+        self.sql_json_demo();
+    }
+
+    /// QUARRY_TEST_SQL_JSON=<file> swaps the demo rows of the orders grid (content, rules, select, edit) or of
+    /// the first Query result set for `{"cols":[{"name","ty"}],"rows":[[text or null]]}`. Rows are converted
+    /// like the worker's, so memory matches real use. Offline only: nothing here reads the keychain.
+    fn sql_json_demo(&mut self) {
+        let Some(v) = std::env::var("QUARRY_TEST_SQL_JSON").ok().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()) else { return };
+        use db::sql::{value::Kind, Col};
+        let cols: Vec<Col> = v["cols"].as_array().into_iter().flatten().map(|c| { let ty = c["ty"].as_str().unwrap_or("TEXT"); Col::plain(c["name"].as_str().unwrap_or(""), ty, Kind::from_column_type(ty), true) }).collect();
+        let query = std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("query");
+        let rows: Vec<db::Row> = v["rows"].as_array().into_iter().flatten().filter_map(|r| {
+            let vals: Vec<Bson> = cols.iter().zip(r.as_array()?).map(|(c, x)| db::sql::value::to_bson(c.kind, x.as_str().map(str::as_bytes))).collect();
+            let mut d = Document::new();
+            if !query { d.insert("_id", doc! { cols[0].name.clone(): vals[0].clone() }); }
+            for (c, x) in cols.iter().zip(vals) { d.insert(c.name.clone(), x); }
+            db::Row::from_doc(&d).ok()
+        }).collect();
+        if query {
+            if let Some(set) = self.tabs.last_mut().and_then(|t| t.sql.as_mut()).and_then(|s| s.sets.first_mut()) { (set.cols, set.rows) = (cols, rows); }
+        } else if let Some(t) = self.tabs.first_mut() {
+            t.fields = cols.iter().map(|c| c.name.clone()).collect();
+            t.count = rows.len() as u64;
+            t.docs = rows;
+            if let Some(s) = t.sql.as_mut() { (s.cols, s.pk) = (cols.clone(), vec![cols[0].name.clone()]); }
+        }
     }
 }
