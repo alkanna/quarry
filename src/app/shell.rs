@@ -130,8 +130,17 @@ fn default_table_ref(coll: &str) -> String {
 
 pub(super) fn default_script(coll: &str, sql: bool) -> String {
     if sql {
-        let target = if coll.is_empty() { "sql`SELECT 1 AS one`".to_string() } else { format!("{}.find({{}}, {{ limit: 20 }})", default_table_ref(coll)) };
-        return format!("async function run() {{\n  return await {target};\n}}");
+        if coll.is_empty() {
+            return "async function run() {\n  // sql`...` runs SQL; ${values} are sent as escaped parameters, never pasted as text.\n  return await sql`SELECT 1 AS one`;\n}".into();
+        }
+        let r = default_table_ref(coll);
+        // A name that is not a plain word cannot sit unquoted in SQL, and backticks would end the template, so it gets the helper.
+        if r != coll {
+            return format!("async function run() {{\n  // Table helpers: find, findOne, count, insert, update, delete. sql`...` runs any SQL.\n  return await {r}.find({{}}, {{ limit: 20 }});\n}}");
+        }
+        return format!(
+            "async function run() {{\n  // sql`...` runs SQL; ${{values}} are sent as escaped parameters, never pasted as text.\n  const rows = await sql`SELECT * FROM {coll} LIMIT 20`;\n  // Or the table helpers: {r}.find({{ status: 'open' }}, {{ limit: 20 }}), {r}.findOne(..), {r}.count(..)\n  return rows;\n}}"
+        );
     }
     let target = collection_ref(coll);
     format!("async function run() {{\n  return await {target}.find({{}}).limit(20).toArray();\n}}")
