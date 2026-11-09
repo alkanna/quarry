@@ -177,6 +177,11 @@ pub enum Pool {
 }
 
 impl Db {
+    /// False under NO_BACKSLASH_ESCAPES, where a backslash in a string is a plain character.
+    pub fn backslash_escapes(&self) -> bool {
+        !self.sql_mode.to_ascii_uppercase().contains("NO_BACKSLASH_ESCAPES")
+    }
+
     /// "MySQL 8.4.3" or "MariaDB 10.11.6", without the build suffix of the version string.
     pub fn label(&self) -> String {
         let num = self.version.split('-').next().unwrap_or_default();
@@ -188,10 +193,24 @@ impl Db {
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct Col {
+    /// The key in a row document. Unique within the result, so a column named `_id` or a repeated
+    /// name is renamed here.
     pub name: String,
+    /// The column's own name on the server, which every statement written back must use.
+    pub src: String,
     pub ty: String,
     pub kind: value::Kind,
     pub nullable: bool,
+    /// A generated column cannot be written, so inserts leave it out.
+    pub generated: bool,
+    pub auto_increment: bool,
+}
+
+impl Col {
+    /// A column that is its own source name and has no table flags, for computed results.
+    pub fn plain(name: &str, ty: &str, kind: value::Kind, nullable: bool) -> Col {
+        Col { name: name.into(), src: name.into(), ty: ty.into(), kind, nullable, generated: false, auto_increment: false }
+    }
 }
 
 /// The outcome of one statement of a Custom Query run. An `error` means the statement did not run

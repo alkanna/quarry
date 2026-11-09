@@ -29,6 +29,8 @@ pub struct Sheet<'a> {
     pub cols: &'a [CopyCol],
     pub table: &'a str,
     pub pk: &'a [String],
+    /// Whether the server reads backslash escapes in strings; false under NO_BACKSLASH_ESCAPES.
+    pub bs: bool,
 }
 
 /// Text of one cell, None for NULL or a missing field.
@@ -65,15 +67,21 @@ fn quote_ident(s: &str) -> String {
     format!("`{}`", s.replace('`', "``"))
 }
 
-pub fn sql_literal(b: Option<&Bson>, numeric: bool) -> String {
+/// `bs` is false when the server has NO_BACKSLASH_ESCAPES, where doubling a backslash would change the text.
+pub fn sql_literal(b: Option<&Bson>, numeric: bool, bs: bool) -> String {
     match b {
         None | Some(Bson::Null) | Some(Bson::Undefined) => "NULL".into(),
         Some(Bson::Int32(_) | Bson::Int64(_)) => text(b).unwrap_or_default(),
         Some(Bson::Double(f)) if f.is_finite() => f.to_string(),
         Some(Bson::Boolean(v)) => if *v { "TRUE" } else { "FALSE" }.into(),
-        Some(Bson::Binary(x)) if !x.bytes.is_empty() => hex(&x.bytes),
+        // A bare 0x is not valid SQL, and '' would turn a binary value into text.
+        Some(Bson::Binary(x)) if x.bytes.is_empty() => "X''".into(),
+        Some(Bson::Binary(x)) => hex(&x.bytes),
         Some(Bson::String(s)) if numeric && plain_number(s) => s.clone(),
-        _ => format!("'{}'", text(b).unwrap_or_default().replace('\\', "\\\\").replace('\'', "''")),
+        _ => {
+            let t = text(b).unwrap_or_default();
+            format!("'{}'", if bs { t.replace('\\', "\\\\") } else { t }.replace('\'', "''"))
+        }
     }
 }
 
@@ -112,19 +120,18 @@ pub fn text_table(cols: &[String], rows: &[Document]) -> String {
     out.join("\n")
 }
 
-/// The text for `f`. `header` is the "Include column names" switch: SQL INSERT leaves out its column
-/// list, CSV, TSV and HTML their header row, Markdown keeps a blank one because a table needs it.
+/// The text for `f`. `header` is the "Include column names" switch: CSV, TSV and HTML leave out their
+/// header row, Markdown keeps a blank one because a table needs it. SQL INSERT always names its columns,
+/// since without them the values land in the table's order, not the order shown.
 pub fn format(f: Fmt, s: &Sheet, header: bool) -> String {
     let cell = |d: &Document, c: &CopyCol| text(value(d, c)).unwrap_or_default();
     let names: Vec<&str> = s.cols.iter().map(|c| c.name.as_str()).collect();
     match f {
         Fmt::SqlInsert => {
             let mut out = format!("INSERT INTO {}", quote_ident(s.table));
-            if header {
-                out.push_str(&format!(" ({})", names.iter().map(|n| quote_ident(n)).collect::<Vec<_>>().join(", ")));
-            }
+            out.push_str(&format!(" ({})", names.iter().map(|n| quote_ident(n)).collect::<Vec<_>>().join(", ")));
             out.push_str(" VALUES\n");
-            let rows: Vec<String> = s.rows.iter().map(|d| format!("({})", s.cols.iter().map(|c| sql_literal(value(d, c), c.numeric)).collect::<Vec<_>>().join(", "))).collect();
+            let rows: Vec<String> = s.rows.iter().map(|d| format!("({})", s.cols.iter().map(|c| sql_literal(value(d, c), c.numeric, s.bs)).collect::<Vec<_>>().join(", "))).collect();
             out + &rows.join(",\n") + ";"
         }
         Fmt::SqlUpdate => {
@@ -135,8 +142,8 @@ pub fn format(f: Fmt, s: &Sheet, header: bool) -> String {
                 if sets.is_empty() || s.pk.is_empty() || !s.pk.iter().all(|p| key.contains_key(p)) {
                     continue;
                 }
-                let set = sets.iter().map(|c| format!("{} = {}", quote_ident(&c.name), sql_literal(value(d, c), c.numeric))).collect::<Vec<_>>().join(", ");
-                let wh = s.pk.iter().map(|p| format!("{} = {}", quote_ident(p), sql_literal(key.get(p), false))).collect::<Vec<_>>().join(" AND ");
+                let set = sets.iter().map(|c| format!("{} = {}", quote_ident(&c.name), sql_literal(value(d, c), c.numeric, s.bs))).collect::<Vec<_>>().join(", ");
+                let wh = s.pk.iter().map(|p| format!("{} = {}", quote_ident(p), sql_literal(key.get(p), false, s.bs))).collect::<Vec<_>>().join(" AND ");
                 out.push(format!("UPDATE {} SET {set} WHERE {wh};", quote_ident(s.table)));
             }
             out.join("\n")
@@ -217,20 +224,30 @@ mod tests {
     fn out(f: Fmt, header: bool) -> String {
         let (c, r) = (cols(), rows());
         let pk = vec!["id".to_string()];
-        format(f, &Sheet { rows: &r, cols: &c, table: "orders", pk: &pk }, header)
+        format(f, &Sheet { rows: &r, cols: &c, table: "orders", pk: &pk, bs: true }, header)
     }
 
     #[test]
     fn sql_insert_quotes_text_and_leaves_numbers() {
         assert_eq!(out(Fmt::SqlInsert, true), "INSERT INTO `orders` (`id`, `status`, `total`) VALUES\n(1, 'it''s', 26.75),\n(2, 'a|b\nc', NULL);");
-        assert!(out(Fmt::SqlInsert, false).starts_with("INSERT INTO `orders` VALUES\n(1,"));
+        // The column list stays whatever the header switch says, so hidden or moved columns land right.
+        assert!(out(Fmt::SqlInsert, false).starts_with("INSERT INTO `orders` (`id`, `status`, `total`) VALUES\n(1,"));
+    }
+
+    #[test]
+    fn literals_follow_the_server_escape_mode() {
+        let s = Bson::String("a\\b'c".into());
+        assert_eq!(sql_literal(Some(&s), false, true), "'a\\\\b''c'");
+        assert_eq!(sql_literal(Some(&s), false, false), "'a\\b''c'");
+        let empty = Bson::Binary(mongodb::bson::Binary { subtype: mongodb::bson::spec::BinarySubtype::Generic, bytes: vec![] });
+        assert_eq!(sql_literal(Some(&empty), false, true), "X''");
     }
 
     #[test]
     fn sql_update_sets_non_key_columns_by_key() {
         assert_eq!(out(Fmt::SqlUpdate, true), "UPDATE `orders` SET `status` = 'it''s', `total` = 26.75 WHERE `id` = 1;\nUPDATE `orders` SET `status` = 'a|b\nc', `total` = NULL WHERE `id` = 2;");
         let (c, r) = (cols(), rows());
-        assert_eq!(format(Fmt::SqlUpdate, &Sheet { rows: &r, cols: &c, table: "t", pk: &[] }, true), "");
+        assert_eq!(format(Fmt::SqlUpdate, &Sheet { rows: &r, cols: &c, table: "t", pk: &[], bs: true }, true), "");
     }
 
     #[test]
@@ -241,14 +258,14 @@ mod tests {
         assert_eq!(out(Fmt::Tsv, true), "id\tstatus\ttotal\n1\tit's\t26.75\n2\ta|b c\t");
         let c = [CopyCol { name: "a,\"b\"".into(), numeric: false }];
         let r = [doc! { "a,\"b\"": "x,y" }];
-        assert_eq!(format(Fmt::Csv, &Sheet { rows: &r, cols: &c, table: "", pk: &[] }, true), "\"a,\"\"b\"\"\"\n\"x,y\"");
+        assert_eq!(format(Fmt::Csv, &Sheet { rows: &r, cols: &c, table: "", pk: &[], bs: true }, true), "\"a,\"\"b\"\"\"\n\"x,y\"");
     }
 
     #[test]
     fn json_is_an_array_of_objects() {
         assert_eq!(out(Fmt::Json, true), "[\n  {\n    \"id\": 1,\n    \"status\": \"it's\",\n    \"total\": 26.75\n  },\n  {\n    \"id\": 2,\n    \"status\": \"a|b\\nc\",\n    \"total\": null\n  }\n]");
         let (c, r) = (cols(), Vec::new());
-        assert_eq!(format(Fmt::Json, &Sheet { rows: &r, cols: &c, table: "", pk: &[] }, true), "[]");
+        assert_eq!(format(Fmt::Json, &Sheet { rows: &r, cols: &c, table: "", pk: &[], bs: true }, true), "[]");
     }
 
     #[test]
@@ -266,7 +283,7 @@ mod tests {
     fn html_escapes_and_has_thead() {
         let c = [CopyCol { name: "a<b".into(), numeric: false }];
         let r = [doc! { "a<b": "x & \"y\" <z>" }];
-        let s = Sheet { rows: &r, cols: &c, table: "", pk: &[] };
+        let s = Sheet { rows: &r, cols: &c, table: "", pk: &[], bs: true };
         assert_eq!(format(Fmt::Html, &s, true), "<table>\n  <thead><tr><th>a&lt;b</th></tr></thead>\n  <tbody>\n    <tr><td>x &amp; &quot;y&quot; &lt;z&gt;</td></tr>\n  </tbody>\n</table>");
         assert!(!format(Fmt::Html, &s, false).contains("<thead>"));
     }
@@ -276,6 +293,6 @@ mod tests {
         assert_eq!(out(Fmt::Values, true), "1\nit's\n26.75\n2\na|b\nc\n");
         let c = [CopyCol { name: "a.b".into(), numeric: false }, CopyCol { name: "bin".into(), numeric: false }];
         let r = [doc! { "a": { "b": 5 }, "bin": Bson::Binary(mongodb::bson::Binary { subtype: mongodb::bson::spec::BinarySubtype::Generic, bytes: vec![1, 255] }) }];
-        assert_eq!(format(Fmt::Values, &Sheet { rows: &r, cols: &c, table: "", pk: &[] }, true), "5\n0x01FF");
+        assert_eq!(format(Fmt::Values, &Sheet { rows: &r, cols: &c, table: "", pk: &[], bs: true }, true), "5\n0x01FF");
     }
 }

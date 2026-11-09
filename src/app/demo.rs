@@ -312,7 +312,7 @@ impl App {
         }
         let sel = |coll: &str| Sel { conn: 3, db: "shop".into(), coll: coll.into() };
         let engine = db::sql::Engine::MySql;
-        let col = |name: &str, ty: &str, nullable: bool| Col { name: name.into(), ty: ty.into(), kind: Kind::from_type_name(ty.split('(').next().unwrap_or(ty)), nullable };
+        let col = |name: &str, ty: &str, nullable: bool| Col::plain(name, ty, Kind::from_type_name(ty.split('(').next().unwrap_or(ty)), nullable);
         let cols = vec![col("id", "INT UNSIGNED", false), col("customer_id", "INT", false), col("status", "ENUM('pending','paid','shipped','refunded','cancelled')", false), col("total", "DECIMAL(10,2)", false), col("currency", "CHAR(3)", false), col("note", "TEXT", true), col("created_at", "DATETIME", false)];
         // id, customer_id, status, total, currency, note, created_at
         let data: [(i64, i64, &str, &str, &str, Option<&str>, &str); 13] = [
@@ -363,7 +363,7 @@ impl App {
             Ok("grouped") => {
                 t.filter_txt = "`status` IN ('paid', 'shipped') AND `total` > 50".into();
                 t.sort_txt = "`revenue` DESC".into();
-                let col = |name: &str, ty: &str| Col { name: name.into(), ty: ty.into(), kind: Kind::from_type_name(ty), nullable: false };
+                let col = |name: &str, ty: &str| Col::plain(name, ty, Kind::from_type_name(ty), false);
                 let rows: [(&str, &str, i64, &str, &str); 5] = [("paid", "EUR", 61, "6912.40", "113.32"), ("shipped", "EUR", 24, "2301.75", "95.91"), ("paid", "USD", 22, "1980.00", "90.00"), ("shipped", "USD", 14, "1204.10", "86.01"), ("paid", "GBP", 12, "840.25", "70.02")];
                 t.docs = rows.iter().filter_map(|&(st, cur, n, rev, avg)| db::Row::from_doc(&doc! { "status": st, "currency": cur, "orders": n, "revenue": rev, "avg_total": avg }).ok()).collect();
                 t.fields = ["status", "currency", "orders", "revenue", "avg_total"].map(String::from).to_vec();

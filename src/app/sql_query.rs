@@ -432,7 +432,7 @@ impl App {
             let cols: Vec<CopyCol> = cols_for_copy.iter().map(|c| CopyCol { name: c.name.clone(), numeric: is_numeric(c.kind) }).collect();
             let table = if tab_coll.is_empty() { "result".to_string() } else { tab_coll };
             let ctx = ui.ctx().clone();
-            self.copy_sheet(&ctx, fmt, &rows, &cols, &table, &[]);
+            self.copy_sheet(&ctx, fmt, &rows, &cols, &table, &[], self.sql_bs());
         }
     }
 
@@ -440,7 +440,7 @@ impl App {
     pub(super) fn sql_query_demo(&mut self) {
         let mut t = Tab::new(Sel { conn: 3, db: "shop".into(), coll: String::new() }).for_engine(db::sql::Engine::MySql);
         t.view = View::Sql;
-        let col = |name: &str, ty: &str| Col { name: name.into(), ty: ty.into(), kind: Kind::from_type_name(ty), nullable: false };
+        let col = |name: &str, ty: &str| Col::plain(name, ty, Kind::from_type_name(ty), false);
         let people: [(&str, &str, i64, &str); 7] = [
             ("Ada Byron", "ada@example.com", 6, "1412.40"),
             ("Grace Hopper", "grace@example.com", 5, "988.15"),

@@ -18,6 +18,19 @@ impl App {
         self.worker.sql_page(req, db, t.sel.db.clone(), t.sel.coll.clone(), q, size, t.page * size);
     }
 
+    /// The open tab's dialect, and whether its server reads backslash escapes in strings.
+    fn sql_dialect(&self) -> (db::sql::Dialect, bool) {
+        let d = self.conn(self.t().map(|t| t.sel.conn).unwrap_or(0)).and_then(|c| c.sql.as_ref());
+        (d.map(|s| s.dialect).unwrap_or_default(), d.is_none_or(|s| s.backslash_escapes()))
+    }
+
+    /// Double click on a grouped row: its rows replace the grouped result.
+    pub(super) fn sql_drill(&mut self, row: usize) {
+        let (dialect, bs) = self.sql_dialect();
+        super::sql_bar::drill(self.tm().unwrap(), row, dialect, bs);
+        self.reload();
+    }
+
     /// The centered note for SQL views that a later step builds.
     pub(super) fn sql_soon(&self, ui: &mut egui::Ui) {
         ui.add_space(40.0);
@@ -32,21 +45,23 @@ impl App {
             t.page = 0;
             self.reload();
         }
-        let dialect = self.conn(self.t().map(|t| t.sel.conn).unwrap_or(0)).and_then(|c| c.sql.as_ref()).map(|s| s.dialect).unwrap_or_default();
+        let (dialect, bs) = self.sql_dialect();
         let t = &mut self.tabs[self.cur];
-        let run = super::sql_bar::bar(ui, t, dialect);
+        let run = super::sql_bar::bar(ui, t, dialect, bs);
         if run {
             self.tm().unwrap().page = 0;
             self.reload();
         }
         ui.add_space(10.0);
         let t = self.t().unwrap();
+        let grouped = t.sql.as_ref().and_then(|s| s.matched);
         let (count, ms, loading, page) = (t.count, t.ms, t.loading, t.page);
         let approx = if t.sql.as_ref().is_some_and(|s| s.estimated) { "~" } else { "" };
         let pages = count.div_ceil(self.page_size()).max(1);
         let mut go: Option<u64> = None;
         ui.horizontal(|ui| {
-            ui.label(semibold(RichText::new(format!("{approx}{} rows", group(&count.to_string()))).font(FontId::monospace(TXT_SMALL)).color(BRIGHT())));
+            let unit = if grouped.is_some() { if count == 1 { "group" } else { "groups" } } else { "rows" };
+            ui.label(semibold(RichText::new(format!("{approx}{} {unit}", group(&count.to_string()))).font(FontId::monospace(TXT_SMALL)).color(BRIGHT())));
             ui.label(RichText::new(format!("{ms} ms")).font(FontId::monospace(TXT_SMALL)).color(SUCCESS()));
             if loading {
                 spin(ui);
@@ -90,7 +105,6 @@ impl App {
             self.reload();
         }
         ui.add_space(4.0);
-        let grouped = self.t().and_then(|t| t.sql.as_ref()).and_then(|s| s.matched);
         if let Some(rows) = grouped {
             if super::sql_bar::grouped_note(ui, self.t().map_or(0, |t| t.count), rows) {
                 super::sql_bar::ungroup(self.tm().unwrap());
@@ -98,18 +112,6 @@ impl App {
             }
             ui.add_space(6.0);
         }
-        let top = ui.cursor().top();
         self.sql_results(ui);
-        // The table has no hook for a double click on a SQL row, so it is read here: the first click already selected the row.
-        let below_header = ui.input(|i| i.pointer.latest_pos()).is_some_and(|p| p.y > top + 34.0 && ui.max_rect().contains(p));
-        let dbl = ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary));
-        let sel = self.t().and_then(|t| t.selected).map(|(_, i)| i);
-        if let (true, true, Some(row)) = (grouped.is_some() && dbl, below_header, sel) {
-            super::sql_bar::drill(self.tm().unwrap(), row, dialect);
-            self.reload();
-        }
-        if let Some(s) = self.tm().and_then(|t| t.sql.as_mut()) {
-            s.bar.shift = ui.input(|i| i.modifiers.shift);
-        }
     }
 }

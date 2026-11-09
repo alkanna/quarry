@@ -64,6 +64,12 @@ pub(super) fn row_menu(ui: &mut egui::Ui, i: usize, checked: &BTreeSet<usize>, s
     docs_menu(ui, if checked.contains(&i) { checked.len() } else { 1 }, true, sql).map(|a| (i, a))
 }
 
+/// SQL clause names (ORDER BY, LIMIT) read as keywords; Mongo's lowercase option names and plain
+/// words such as Columns stay faint.
+pub(super) fn chip_name_color(name: &str) -> Color32 {
+    if name.chars().any(|c| c.is_ascii_lowercase()) { FAINT() } else { C_KEYWORD() }
+}
+
 /// One option of the find bar: a pill holding its editor while it is set or being edited, else a
 /// "+ name" chip that opens it. `edit` returns whether Enter was pressed. Returns whether the
 /// query should run: on Enter, or when the cross removed the option.
@@ -82,7 +88,7 @@ pub(super) fn opt_chip(ui: &mut egui::Ui, name: &str, id: egui::Id, text: &mut S
     egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, edge)).corner_radius(BUTTON_H / 2.0).inner_margin(egui::Margin { left: 10, right: 3, top: 0, bottom: 0 }).show(ui, |ui| {
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            ui.add_sized([0.0, BUTTON_H], egui::Label::new(RichText::new(name).font(FontId::monospace(TXT_CAPTION)).color(FAINT())));
+            ui.add_sized([0.0, BUTTON_H], egui::Label::new(RichText::new(name).font(FontId::monospace(TXT_CAPTION)).color(chip_name_color(name))));
             // Centered on the label: the editor is shorter than the chip.
             enter = ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), BUTTON_H), egui::Layout::left_to_right(egui::Align::Center), |ui| edit(ui, text)).inner;
             ui.allocate_ui_with_layout(egui::vec2(CLOSE_W, BUTTON_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {

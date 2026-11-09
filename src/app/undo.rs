@@ -11,17 +11,20 @@ impl App {
     pub(super) fn apply_undo(&mut self, i: usize) {
         let a = &self.undo[i];
         let Some(c) = self.conn(a.conn) else { return };
-        if !c.writable {
+        let writable = c.writable;
+        if !writable {
             self.err("Undo is a write: unlock writes on that connection first.");
             return;
         }
         // SQL actions carry their own columns; the pool is read-only, so the worker switches a connection of its own.
         if let (Some(sql), UndoKind::Sql { .. }) = (c.sql.clone(), &a.kind) {
             let a = self.undo.remove(i);
-            if let UndoKind::Sql { cols, undo } = a.kind {
-                let pk = undo.pk_names();
-                self.worker.sql_undo(sql, a.db, a.coll, cols, pk, undo, false);
-            }
+            let pk = match &a.kind {
+                UndoKind::Sql { undo, .. } => undo.pk_names(),
+                _ => Vec::new(),
+            };
+            // The worker hands the action back if the undo fails, so it is not lost.
+            self.worker.sql_undo(sql, a, pk, !writable);
             return;
         }
         let Some(client) = c.client.clone() else {

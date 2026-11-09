@@ -47,11 +47,30 @@ impl SqlUndo {
     }
 }
 
-/// A row to insert: only the columns given a value; the rest take the column default.
+/// A row to insert: only the columns given a value; the rest take the column default. `insert_sql`
+/// wants server column names, `apply_inserts` accepts the row document's own.
 pub type NewRow = Vec<(String, Bson)>;
 
+/// Row documents are keyed by `Col::name`, statements must use `Col::src`. Keys of `_id` already use server names.
 fn kind_of(cols: &[Col], name: &str) -> Kind {
     cols.iter().find(|c| c.name == name).map_or(Kind::Text, |c| c.kind)
+}
+
+fn kind_of_src(cols: &[Col], src: &str) -> Kind {
+    cols.iter().find(|c| c.src == src).map_or(Kind::Text, |c| c.kind)
+}
+
+fn src_of(cols: &[Col], name: &str) -> String {
+    cols.iter().find(|c| c.name == name).map_or_else(|| name.to_string(), |c| c.src.clone())
+}
+
+/// A write needs the whole key and nothing else: with a missing part it would address more rows than
+/// the one shown, and an empty key would address every row.
+fn check_key(pk: &[String], key: &Document) -> Res<()> {
+    if pk.is_empty() || key.len() != pk.len() || !pk.iter().all(|p| key.contains_key(p)) {
+        return Err("Not written: a row has no complete primary key.".into());
+    }
+    Ok(())
 }
 
 /// `col <=> ?` with the casts that keep exact numbers exact: a decimal or a big unsigned value sent as
@@ -71,13 +90,17 @@ fn checkable(kind: Kind) -> bool {
     !matches!(kind, Kind::Float | Kind::Json | Kind::Bit | Kind::Geometry)
 }
 
-fn key_where(d: Dialect, cols: &[Col], pk: &Document, sql: &mut String, params: &mut Vec<Param>) {
-    for (i, (name, v)) in pk.iter().enumerate() {
-        let kind = kind_of(cols, name);
-        sql.push_str(if i == 0 { " WHERE " } else { " AND " });
-        sql.push_str(&equals(d, kind, name));
+fn key_conds(d: Dialect, cols: &[Col], pk: &Document, conds: &mut Vec<String>, params: &mut Vec<Param>) {
+    for (name, v) in pk {
+        let kind = kind_of_src(cols, name);
+        conds.push(equals(d, kind, name));
         params.push(Param::for_kind(kind, v));
     }
+}
+
+/// Joined conditions, never empty: a statement without a key matches nothing instead of every row.
+fn where_of(conds: Vec<String>) -> String {
+    format!(" WHERE {}", if conds.is_empty() { "1 = 0".to_string() } else { conds.join(" AND ") })
 }
 
 /// The UPDATE of one row: SET the changed columns, WHERE the key and every checkable changed column
@@ -89,26 +112,30 @@ pub fn update_sql(d: Dialect, schema: &str, table: &str, cols: &[Col], edit: &Ro
         .iter()
         .map(|(n, _, new)| {
             params.push(Param::for_kind(kind_of(cols, n), new));
-            format!("{} = ?", d.quote_ident(n))
+            format!("{} = ?", d.quote_ident(&src_of(cols, n)))
         })
         .collect();
     let mut sql = format!("UPDATE {} SET {}", d.qualified(schema, table), sets.join(", "));
-    key_where(d, cols, &edit.pk, &mut sql, &mut params);
+    let mut conds = Vec::new();
+    key_conds(d, cols, &edit.pk, &mut conds, &mut params);
     for (n, old, _) in &edit.changes {
         let kind = kind_of(cols, n);
         if checkable(kind) {
-            sql.push_str(" AND ");
-            sql.push_str(&equals(d, kind, n));
+            conds.push(equals(d, kind, &src_of(cols, n)));
             params.push(Param::for_kind(kind, old));
         }
     }
+    sql.push_str(&where_of(conds));
+    sql.push_str(" LIMIT 1");
     (sql, params)
 }
 
 pub fn delete_sql(d: Dialect, schema: &str, table: &str, cols: &[Col], pk: &Document) -> (String, Vec<Param>) {
     let mut params = Vec::new();
     let mut sql = format!("DELETE FROM {}", d.qualified(schema, table));
-    key_where(d, cols, pk, &mut sql, &mut params);
+    let mut conds = Vec::new();
+    key_conds(d, cols, pk, &mut conds, &mut params);
+    sql.push_str(&where_of(conds));
     sql.push_str(" LIMIT 1");
     (sql, params)
 }
@@ -120,12 +147,13 @@ pub fn insert_sql(d: Dialect, schema: &str, table: &str, cols: &[Col], row: &New
     }
     let names: Vec<String> = row.iter().map(|(n, _)| d.quote_ident(n)).collect();
     let marks = vec!["?"; row.len()].join(", ");
-    let params = row.iter().map(|(n, v)| Param::for_kind(kind_of(cols, n), v)).collect();
+    let params = row.iter().map(|(n, v)| Param::for_kind(kind_of_src(cols, n), v)).collect();
     (format!("INSERT INTO {t} ({}) VALUES ({marks})", names.join(", ")), params)
 }
 
 /// The same statement as it reads with its values filled in, for the Preview SQL window. Never sent.
-pub fn preview(sql: &str, params: &[Param]) -> String {
+/// `bs` is whether the server reads backslash escapes (false under NO_BACKSLASH_ESCAPES).
+pub fn preview(sql: &str, params: &[Param], bs: bool) -> String {
     let mut out = String::new();
     let mut it = params.iter();
     for ch in sql.chars() {
@@ -135,7 +163,9 @@ pub fn preview(sql: &str, params: &[Param]) -> String {
                 Some(Param::Int(i)) => out.push_str(&i.to_string()),
                 Some(Param::UInt(u)) => out.push_str(&u.to_string()),
                 Some(Param::Float(f)) => out.push_str(&f.to_string()),
-                Some(Param::Text(s)) => out.push_str(&format!("'{}'", s.replace('\\', "\\\\").replace('\'', "''"))),
+                Some(Param::Text(s)) => out.push_str(&format!("'{}'", if bs { s.replace('\\', "\\\\") } else { s.clone() }.replace('\'', "''"))),
+                // A bare 0x is a syntax error, so an empty value has its own spelling.
+                Some(Param::Bytes(b)) if b.is_empty() => out.push_str("X''"),
                 Some(Param::Bytes(b)) => out.push_str(&format!("0x{}", b.iter().map(|x| format!("{x:02X}")).collect::<String>())),
             }
         } else {
@@ -181,7 +211,10 @@ fn pk_of(row: &Document) -> Document {
     row.get_document("_id").cloned().unwrap_or_default()
 }
 
-async fn apply_updates(db: &Db, schema: &str, table: &str, cols: &[Col], edits: &[RowEdit], read_only: bool) -> Res<()> {
+async fn apply_updates(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[String], edits: &[RowEdit], read_only: bool) -> Res<()> {
+    for ed in edits {
+        check_key(pk, &ed.pk)?;
+    }
     let mut c = writer(db, schema, read_only).await?;
     let mut tx = c.begin().await.map_err(e)?;
     for ed in edits {
@@ -196,16 +229,23 @@ async fn apply_updates(db: &Db, schema: &str, table: &str, cols: &[Col], edits: 
     Ok(())
 }
 
-async fn apply_deletes(db: &Db, schema: &str, table: &str, cols: &[Col], pks: &[Document], read_only: bool) -> Res<u64> {
+/// Deletes by key and returns the keys that really went: a row someone else deleted first is not
+/// ours to bring back on undo.
+async fn apply_deletes(db: &Db, schema: &str, table: &str, cols: &[Col], key_cols: &[String], pks: &[Document], read_only: bool) -> Res<Vec<Document>> {
+    for pk in pks {
+        check_key(key_cols, pk)?;
+    }
     let mut c = writer(db, schema, read_only).await?;
     let mut tx = c.begin().await.map_err(e)?;
-    let mut n = 0;
+    let mut gone = Vec::new();
     for pk in pks {
         let (sql, params) = delete_sql(db.dialect, schema, table, cols, pk);
-        n += bound(&sql, &params).execute(&mut *tx).await.map_err(e)?.rows_affected();
+        if bound(&sql, &params).execute(&mut *tx).await.map_err(e)?.rows_affected() == 1 {
+            gone.push(pk.clone());
+        }
     }
     tx.commit().await.map_err(e)?;
-    Ok(n)
+    Ok(gone)
 }
 
 /// Inserts the rows and returns each one's key document when it is known: the values given for the key
@@ -214,21 +254,24 @@ async fn apply_inserts(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[S
     let mut c = writer(db, schema, read_only).await?;
     let mut tx = c.begin().await.map_err(e)?;
     let mut keys = Vec::new();
-    for row in rows {
+    // Generated columns cannot be given a value, and a column renamed on read goes back under its own name.
+    let rows: Vec<NewRow> = rows.iter().map(|r| r.iter().filter(|(n, _)| !cols.iter().any(|c| c.name == *n && c.generated)).map(|(n, v)| (src_of(cols, n), v.clone())).collect()).collect();
+    for row in &rows {
         let (sql, params) = insert_sql(db.dialect, schema, table, cols, row);
         let r = bound(&sql, &params).execute(&mut *tx).await.map_err(e)?;
         let mut key = Document::new();
         for p in pk {
-            match row.iter().find(|(n, _)| n == p) {
-                Some((_, v)) if *v != Bson::Null => {
+            let given = row.iter().find(|(n, _)| n == p).map(|(_, v)| v).filter(|v| **v != Bson::Null);
+            match given {
+                Some(v) => {
                     key.insert(p.clone(), v.clone());
                 }
-                // Only a single auto-increment column leaves a key behind; id 0 means the table has none.
-                None if pk.len() == 1 && r.last_insert_id() > 0 => {
+                // LAST_INSERT_ID() only belongs to the key when that column counts up by itself.
+                None if pk.len() == 1 && cols.iter().any(|c| c.src == *p && c.auto_increment) && r.last_insert_id() > 0 => {
                     let id = r.last_insert_id();
                     key.insert(p.clone(), i64::try_from(id).map_or_else(|_| Bson::String(id.to_string()), Bson::Int64));
                 }
-                _ => {}
+                None => {}
             }
         }
         keys.push((key.len() == pk.len() && !pk.is_empty()).then_some(key));
@@ -249,10 +292,10 @@ impl Worker {
     /// Saves staged edits in one transaction. Each of `tags` (one per staged row, the Mongo draft keys)
     /// gets its own `Saved` so the app can settle every draft; only the first carries the undo.
     #[allow(clippy::too_many_arguments)]
-    pub fn sql_save(&self, tags: Vec<String>, conn: u64, db: Db, schema: String, table: String, cols: Vec<Col>, edits: Vec<RowEdit>, read_only: bool) {
+    pub fn sql_save(&self, tags: Vec<String>, conn: u64, db: Db, schema: String, table: String, cols: Vec<Col>, pk: Vec<String>, edits: Vec<RowEdit>, read_only: bool) {
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
-            let res = apply_updates(&db, &schema, &table, &cols, &edits, read_only).await;
+            let res = apply_updates(&db, &schema, &table, &cols, &pk, &edits, read_only).await;
             let n = edits.len();
             let mut undo = res.is_ok().then(|| action(conn, &schema, &table, &cols, SqlUndo::Update(edits)));
             for tag in tags {
@@ -265,12 +308,16 @@ impl Worker {
 
     /// Deletes rows by key. `rows` are the full rows as read, kept so undo can put them back.
     #[allow(clippy::too_many_arguments)]
-    pub fn sql_delete_rows(&self, conn: u64, db: Db, schema: String, table: String, cols: Vec<Col>, rows: Vec<Document>, read_only: bool) {
+    pub fn sql_delete_rows(&self, conn: u64, db: Db, schema: String, table: String, cols: Vec<Col>, pk: Vec<String>, rows: Vec<Document>, read_only: bool) {
         self.spawn(async move {
             let at = (schema.clone(), table.clone());
             let pks: Vec<Document> = rows.iter().map(pk_of).collect();
-            let (res, undo) = match apply_deletes(&db, &schema, &table, &cols, &pks, read_only).await {
-                Ok(n) => (Ok(format!("Deleted {}", plural(n as usize, "row"))), (n > 0).then(|| action(conn, &schema, &table, &cols, SqlUndo::Delete(rows)))),
+            let (res, undo) = match apply_deletes(&db, &schema, &table, &cols, &pk, &pks, read_only).await {
+                Ok(gone) => {
+                    let n = gone.len();
+                    let rows: Vec<Document> = rows.into_iter().filter(|r| gone.contains(&pk_of(r))).collect();
+                    (Ok(format!("Deleted {}", plural(n, "row"))), (n > 0).then(|| action(conn, &schema, &table, &cols, SqlUndo::Delete(rows))))
+                }
                 Err(err) => (Err(err), None),
             };
             Msg::Written { at, res, undo, reload: true, retry: None }
@@ -293,24 +340,27 @@ impl Worker {
         });
     }
 
-    /// Reverts a SQL write. Updates need the new values to still be there, like the original save.
-    #[allow(clippy::too_many_arguments)]
-    pub fn sql_undo(&self, db: Db, schema: String, table: String, cols: Vec<Col>, pk: Vec<String>, undo: SqlUndo, read_only: bool) {
+    /// Reverts a SQL write. Updates need the new values to still be there, like the original save. When it
+    /// fails the action comes back in the answer so the app can keep it in the list.
+    pub fn sql_undo(&self, db: Db, a: UndoAction, pk: Vec<String>, read_only: bool) {
         self.spawn(async move {
-            let at = (schema.clone(), table.clone());
-            let res = match undo {
+            let at = (a.db.clone(), a.coll.clone());
+            let UndoAction { at: when, conn, db: schema, coll: table, kind } = a;
+            let UndoKind::Sql { cols, undo } = kind else { return Msg::Written { at, res: Err("Not a SQL change".into()), undo: None, reload: false, retry: None } };
+            let res = match undo.clone() {
                 SqlUndo::Update(edits) => {
                     let back: Vec<RowEdit> = edits.into_iter().map(|r| RowEdit { pk: r.pk, changes: r.changes.into_iter().map(|(n, old, new)| (n, new, old)).collect() }).collect();
-                    apply_updates(&db, &schema, &table, &cols, &back, read_only).await.map(|_| "Undid the edit".to_string())
+                    apply_updates(&db, &schema, &table, &cols, &pk, &back, read_only).await.map(|_| "Undid the edit".to_string())
                 }
                 SqlUndo::Delete(rows) => {
                     // The whole row goes back, the key included, so auto-increment values come back as they were.
                     let rows: Vec<NewRow> = rows.iter().map(|r| r.iter().filter(|(k, _)| *k != "_id").map(|(k, v)| (k.clone(), v.clone())).collect()).collect();
                     apply_inserts(&db, &schema, &table, &cols, &pk, &rows, read_only).await.map(|_| "Restored the deleted rows".to_string())
                 }
-                SqlUndo::Insert(pks) => apply_deletes(&db, &schema, &table, &cols, &pks, read_only).await.map(|_| "Removed the inserted rows".to_string()),
+                SqlUndo::Insert(pks) => apply_deletes(&db, &schema, &table, &cols, &pk, &pks, read_only).await.map(|_| "Removed the inserted rows".to_string()),
             };
-            Msg::Written { at, res, undo: None, reload: true, retry: None }
+            let undo = res.is_err().then(|| UndoAction { at: when, conn, db: schema, coll: table, kind: UndoKind::Sql { cols, undo } });
+            Msg::Written { at, res, undo, reload: true, retry: None }
         });
     }
 }
@@ -323,7 +373,7 @@ mod tests {
     use std::time::Duration;
 
     fn col(name: &str, kind: Kind) -> Col {
-        Col { name: name.into(), ty: String::new(), kind, nullable: true }
+        Col::plain(name, "", kind, true)
     }
 
     #[test]
@@ -334,9 +384,43 @@ mod tests {
             changes: vec![("price".into(), Bson::String("1.10".into()), Bson::String("2.20".into())), ("f".into(), Bson::Double(1.0), Bson::Double(2.0)), ("j".into(), Bson::String("{}".into()), Bson::Null)],
         };
         let (sql, p) = update_sql(Dialect::MySql, "s", "t", &cols, &ed);
-        assert_eq!(sql, "UPDATE `s`.`t` SET `price` = ?, `f` = ?, `j` = ? WHERE `a` <=> ? AND `b` <=> CAST(? AS UNSIGNED) AND `price` <=> CAST(? AS DECIMAL(65,30))");
+        assert_eq!(sql, "UPDATE `s`.`t` SET `price` = ?, `f` = ?, `j` = ? WHERE `a` <=> ? AND `b` <=> CAST(? AS UNSIGNED) AND `price` <=> CAST(? AS DECIMAL(65,30)) LIMIT 1");
         assert_eq!(p.len(), 6);
         assert_eq!(p[4], Param::UInt(u64::MAX));
+    }
+
+    #[test]
+    fn update_without_a_key_never_runs_wide() {
+        // Only float and JSON changes have no value check, so an empty key used to leave no WHERE at all.
+        let cols = [col("f", Kind::Float)];
+        let ed = RowEdit { pk: Document::new(), changes: vec![("f".into(), Bson::Double(1.0), Bson::Double(2.0))] };
+        let (sql, _) = update_sql(Dialect::MySql, "s", "t", &cols, &ed);
+        assert_eq!(sql, "UPDATE `s`.`t` SET `f` = ? WHERE 1 = 0 LIMIT 1");
+        // With a value check but no key the check must not start the WHERE with AND.
+        let cols = [col("n", Kind::Int)];
+        let ed = RowEdit { pk: Document::new(), changes: vec![("n".into(), Bson::Int64(1), Bson::Int64(2))] };
+        assert_eq!(update_sql(Dialect::MySql, "s", "t", &cols, &ed).0, "UPDATE `s`.`t` SET `n` = ? WHERE `n` <=> ? LIMIT 1");
+        assert_eq!(delete_sql(Dialect::MySql, "s", "t", &cols, &Document::new()).0, "DELETE FROM `s`.`t` WHERE 1 = 0 LIMIT 1");
+    }
+
+    #[test]
+    fn keys_must_be_the_whole_table_key() {
+        let pk = vec!["a".to_string(), "b".to_string()];
+        assert!(check_key(&pk, &doc! { "a": 1, "b": 2 }).is_ok());
+        assert!(check_key(&pk, &doc! { "a": 1 }).is_err());
+        assert!(check_key(&pk, &doc! { "a": 1, "c": 2 }).is_err());
+        assert!(check_key(&pk, &doc! { "a": 1, "b": 2, "c": 3 }).is_err());
+        assert!(check_key(&pk, &Document::new()).is_err());
+        assert!(check_key(&[], &Document::new()).is_err());
+    }
+
+    #[test]
+    fn statements_use_server_names_for_renamed_columns() {
+        let mut c = col("_id_2", Kind::Text);
+        c.src = "_id".into();
+        let cols = [c, col("a", Kind::Int)];
+        let ed = RowEdit { pk: doc! { "a": 1 }, changes: vec![("_id_2".into(), Bson::String("x".into()), Bson::String("y".into()))] };
+        assert_eq!(update_sql(Dialect::MySql, "s", "t", &cols, &ed).0, "UPDATE `s`.`t` SET `_id` = ? WHERE `a` <=> ? AND `_id` <=> ? LIMIT 1");
     }
 
     #[test]
@@ -351,8 +435,11 @@ mod tests {
 
     #[test]
     fn preview_fills_values() {
-        let s = preview("UPDATE t SET a = ?, b = ? WHERE id <=> ?", &[Param::Text("it's".into()), Param::Null, Param::Int(4)]);
+        let s = preview("UPDATE t SET a = ?, b = ? WHERE id <=> ?", &[Param::Text("it's".into()), Param::Null, Param::Int(4)], true);
         assert_eq!(s, "UPDATE t SET a = 'it''s', b = NULL WHERE id <=> 4");
+        let q = [Param::Text("a\\b".into()), Param::Bytes(vec![])];
+        assert_eq!(preview("? ?", &q, true), "'a\\\\b' X''");
+        assert_eq!(preview("? ?", &q, false), "'a\\b' X''");
     }
 
     // Live tests need QUARRY_TEST_MYSQL and use their own database so they never meet the worker tests.
@@ -406,13 +493,23 @@ mod tests {
             (res, undo)
         }
         fn save(&self, cols: &[Col], edits: Vec<RowEdit>, read_only: bool) -> (Res<String>, Option<UndoAction>) {
-            self.w.sql_save(vec!["k".into()], 1, self.db.clone(), "quarry_write_test".into(), self.table.clone(), cols.to_vec(), edits, read_only);
+            let pk: Vec<String> = edits.first().map(|e| e.pk.keys().cloned().collect()).unwrap_or_default();
+            self.save_pk(cols, &pk.iter().map(String::as_str).collect::<Vec<_>>(), edits, read_only)
+        }
+        fn save_pk(&self, cols: &[Col], pk: &[&str], edits: Vec<RowEdit>, read_only: bool) -> (Res<String>, Option<UndoAction>) {
+            self.w.sql_save(vec!["k".into()], 1, self.db.clone(), "quarry_write_test".into(), self.table.clone(), cols.to_vec(), pk.iter().map(|s| s.to_string()).collect(), edits, read_only);
             self.saved("k")
         }
+        fn undo_full(&self, a: UndoAction, pk: &[&str]) -> (Res<String>, Option<UndoAction>) {
+            self.w.sql_undo(self.db.clone(), a, pk.iter().map(|s| s.to_string()).collect(), false);
+            self.written()
+        }
         fn undo(&self, a: UndoAction, pk: &[&str]) -> Res<String> {
-            let UndoKind::Sql { cols, undo } = a.kind else { panic!("sql undo") };
-            self.w.sql_undo(self.db.clone(), a.db, a.coll, cols, pk.iter().map(|s| s.to_string()).collect(), undo, false);
-            self.written().0
+            self.undo_full(a, pk).0
+        }
+        fn delete(&self, cols: &[Col], pk: &[&str], rows: Vec<Document>, read_only: bool) -> (Res<String>, Option<UndoAction>) {
+            self.w.sql_delete_rows(1, self.db.clone(), "quarry_write_test".into(), self.table.clone(), cols.to_vec(), pk.iter().map(|s| s.to_string()).collect(), rows, read_only);
+            self.written()
         }
     }
 
@@ -483,16 +580,14 @@ mod tests {
         l.exec_t("INSERT INTO quarry_write_test.{T} (name) VALUES ('a'),('b'),('c')");
         let (cols, _, rows) = l.page();
         let docs = vec![rows[0].clone(), rows[2].clone()];
-        l.w.sql_delete_rows(1, l.db.clone(), "quarry_write_test".into(), l.table.clone(), cols.clone(), docs, false);
-        let (res, undo) = l.written();
+        let (res, undo) = l.delete(&cols, &["id"], docs, false);
         assert_eq!(res.unwrap(), "Deleted 2 rows");
         assert_eq!(l.page().2.len(), 1);
         assert!(l.undo(undo.unwrap(), &["id"]).is_ok());
         let back = l.page().2;
         assert_eq!(back.len(), 3);
         assert_eq!((back[0].get_i64("id").unwrap(), back[0].get_str("name").unwrap()), (1, "a"));
-        l.w.sql_delete_rows(1, l.db.clone(), "quarry_write_test".into(), l.table.clone(), cols, vec![rows[1].clone()], true);
-        assert!(l.written().0.unwrap_err().contains("locked"));
+        assert!(l.delete(&cols, &["id"], vec![rows[1].clone()], true).0.unwrap_err().contains("locked"));
         l.exec_t("DROP TABLE quarry_write_test.{T}");
     }
 
@@ -512,6 +607,97 @@ mod tests {
         assert_eq!(keys, [doc! { "id": 1_i64 }, doc! { "id": 2_i64 }, doc! { "id": 3_i64 }]);
         assert!(l.undo(undo.unwrap(), &["id"]).is_ok());
         assert!(l.page().2.is_empty());
+        l.exec_t("DROP TABLE quarry_write_test.{T}");
+    }
+
+    #[test]
+    fn live_empty_or_partial_key_writes_nothing() {
+        let Some(l) = live("t_nokey", "a INT, f FLOAT, g FLOAT") else { return };
+        l.exec_t("INSERT INTO quarry_write_test.{T} VALUES (1, 1.5, 2.5), (2, 1.5, 2.5)");
+        let (cols, pk, rows) = l.page();
+        assert!(pk.is_empty());
+        let e = RowEdit { pk: Document::new(), changes: vec![("f".into(), Bson::Double(1.5), Bson::Double(9.0))] };
+        let (res, undo) = l.save_pk(&cols, &[], vec![e], false);
+        assert!(res.unwrap_err().contains("primary key"));
+        assert!(undo.is_none());
+        assert!(l.delete(&cols, &[], rows.clone(), false).0.is_err());
+        assert_eq!(l.page().2.len(), 2);
+        let n: i64 = l.w.rt.block_on(async { sqlx::query_scalar(&format!("SELECT COUNT(*) FROM quarry_write_test.{} WHERE f = 9", l.table)).fetch_one(&l.pool).await.unwrap() });
+        assert_eq!(n, 0);
+        l.exec_t("DROP TABLE quarry_write_test.{T}");
+        // A key that lacks one of the table's key columns is refused too.
+        let l = live("t_part", "a INT, b INT, v INT, PRIMARY KEY (a, b)").unwrap();
+        l.exec_t("INSERT INTO quarry_write_test.{T} VALUES (1, 1, 0), (1, 2, 0)");
+        let (cols, _, _) = l.page();
+        let e = edit(doc! { "a": 1_i64 }, "v", Bson::Int64(0), Bson::Int64(5));
+        assert!(l.save_pk(&cols, &["a", "b"], vec![e], false).0.is_err());
+        assert_eq!(l.page().2.iter().filter(|r| r.get_i64("v") == Ok(0)).count(), 2);
+        l.exec_t("DROP TABLE quarry_write_test.{T}");
+    }
+
+    #[test]
+    fn live_undo_delete_with_generated_and_id_columns() {
+        let Some(l) = live("t_gen", "id INT PRIMARY KEY AUTO_INCREMENT, `_id` VARCHAR(10), a INT, b INT GENERATED ALWAYS AS (a * 2) STORED") else { return };
+        l.exec_t("INSERT INTO quarry_write_test.{T} (`_id`, a) VALUES ('x', 3), ('y', 4)");
+        let (cols, pk, rows) = l.page();
+        let real = cols.iter().find(|c| c.name == "_id_2").unwrap();
+        assert_eq!(real.src, "_id");
+        assert!(cols.iter().find(|c| c.name == "b").unwrap().generated);
+        assert!(cols.iter().find(|c| c.name == "id").unwrap().auto_increment);
+        // An edit of the renamed column is written to the real one.
+        let (res, _) = l.save_pk(&cols, &["id"], vec![edit(rows[0].get_document("_id").unwrap().clone(), "_id_2", Bson::String("x".into()), Bson::String("z".into()))], false);
+        assert!(res.is_ok(), "{res:?}");
+        let rows = l.page().2;
+        assert_eq!(rows[0].get_str("_id_2").unwrap(), "z");
+        let pk: Vec<&str> = pk.iter().map(String::as_str).collect();
+        let (res, undo) = l.delete(&cols, &pk, vec![rows[0].clone()], false);
+        assert!(res.is_ok(), "{res:?}");
+        let (res, _) = l.undo_full(undo.unwrap(), &pk);
+        assert!(res.is_ok(), "{res:?}");
+        let back = l.page().2;
+        assert_eq!((back[0].get_str("_id_2").unwrap(), back[0].get_i64("a").unwrap(), back[0].get_i64("b").unwrap()), ("z", 3, 6));
+        l.exec_t("DROP TABLE quarry_write_test.{T}");
+    }
+
+    #[test]
+    fn live_partial_delete_and_failed_undo() {
+        let Some(l) = live("t_part_del", "id INT PRIMARY KEY, v INT") else { return };
+        l.exec_t("INSERT INTO quarry_write_test.{T} VALUES (1, 1), (2, 2), (3, 3)");
+        let (cols, _, rows) = l.page();
+        // Someone else deletes row 2 after the page was read.
+        l.exec_t("DELETE FROM quarry_write_test.{T} WHERE id = 2");
+        let (res, undo) = l.delete(&cols, &["id"], rows[..2].to_vec(), false);
+        assert_eq!(res.unwrap(), "Deleted 1 row");
+        let undo = undo.unwrap();
+        let UndoKind::Sql { undo: SqlUndo::Delete(kept), .. } = &undo.kind else { panic!("delete undo") };
+        assert_eq!(kept.len(), 1, "only the row this delete removed is brought back");
+        // A row with the same key appears, so the undo fails and the entry must come back.
+        l.exec_t("INSERT INTO quarry_write_test.{T} VALUES (1, 99)");
+        let (res, back) = l.undo_full(undo, &["id"]);
+        assert!(res.is_err());
+        let back = back.expect("a failed undo keeps its entry");
+        l.exec_t("DELETE FROM quarry_write_test.{T} WHERE id = 1");
+        assert!(l.undo(back, &["id"]).is_ok());
+        let ids: Vec<i64> = l.page().2.iter().map(|r| r.get_i64("id").unwrap()).collect();
+        assert_eq!(ids, [1, 3]);
+        l.exec_t("DROP TABLE quarry_write_test.{T}");
+    }
+
+    #[test]
+    fn live_insert_undo_trusts_only_auto_increment_keys() {
+        let Some(l) = live("t_na", "id INT PRIMARY KEY DEFAULT 7, seq INT AUTO_INCREMENT UNIQUE") else { return };
+        let (cols, pk, _) = l.page();
+        assert!(cols.iter().find(|c| c.name == "seq").unwrap().auto_increment);
+        // LAST_INSERT_ID() belongs to seq here, not to the key.
+        l.w.sql_insert(1, l.db.clone(), "quarry_write_test".into(), l.table.clone(), cols.clone(), pk.clone(), vec![vec![]], false);
+        let (res, undo) = l.written();
+        assert!(res.is_ok(), "{res:?}");
+        assert!(undo.is_none());
+        // A key given in the values is known.
+        l.w.sql_insert(1, l.db.clone(), "quarry_write_test".into(), l.table.clone(), cols, pk, vec![vec![("id".into(), Bson::Int64(9))]], false);
+        let (_, undo) = l.written();
+        let UndoKind::Sql { undo: SqlUndo::Insert(keys), .. } = undo.unwrap().kind else { panic!("insert undo") };
+        assert_eq!(keys, [doc! { "id": 9_i64 }]);
         l.exec_t("DROP TABLE quarry_write_test.{T}");
     }
 }

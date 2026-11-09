@@ -201,9 +201,11 @@ pub fn is_keyword(op: Op) -> bool {
     matches!(op, In | NotInOrNull | Between | IsNull | NotNull | Like | NotLike)
 }
 
-/// A string literal. Backslashes are escaped too, since MySQL reads them as escapes by default.
-pub fn lit(s: &str) -> String {
-    format!("'{}'", s.replace('\\', "\\\\").replace('\'', "''"))
+/// A string literal. Backslashes are escaped too, since MySQL reads them as escapes by default; `bs`
+/// is false under NO_BACKSLASH_ESCAPES, where doubling them would change the value.
+pub fn lit(s: &str, bs: bool) -> String {
+    let s = if bs { s.replace('\\', "\\\\") } else { s.to_string() };
+    format!("'{}'", s.replace('\'', "''"))
 }
 
 fn is_number(s: &str) -> bool {
@@ -217,14 +219,14 @@ fn is_hex(s: &str) -> bool {
 }
 
 /// A value as SQL text: number columns get a bare number when it parses, everything else a quoted string.
-fn val(kind: Kind, s: &str) -> String {
+fn val(kind: Kind, s: &str, bs: bool) -> String {
     let s = s.trim();
-    if group_of(kind) == Group::Number && is_number(s) { s.to_string() } else { lit(s) }
+    if group_of(kind) == Group::Number && is_number(s) { s.to_string() } else { lit(s, bs) }
 }
 
-fn hex(s: &str) -> String {
+fn hex(s: &str, bs: bool) -> String {
     let s = s.trim();
-    if is_hex(s) { format!("0x{}", s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s).to_ascii_uppercase()) } else { lit(s) }
+    if is_hex(s) { format!("0x{}", s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s).to_ascii_uppercase()) } else { lit(s, bs) }
 }
 
 /// LIKE patterns treat % and _ as wildcards, so a search for them literally needs backslashes.
@@ -257,39 +259,39 @@ fn unit_sql(u: &str) -> &'static str {
 }
 
 /// The SQL of one rule.
-pub fn rule_sql(r: &Rule, d: Dialect) -> String {
+pub fn rule_sql(r: &Rule, d: Dialect, bs: bool) -> String {
     use Op::*;
     let c = d.quote_ident(&r.col);
     let v = |i: usize| r.values.get(i).map(|s| s.as_str()).unwrap_or("");
-    let list = || r.values.iter().filter(|s| !s.trim().is_empty()).map(|s| val(r.kind, s)).collect::<Vec<_>>().join(", ");
+    let list = || r.values.iter().filter(|s| !s.trim().is_empty()).map(|s| val(r.kind, s, bs)).collect::<Vec<_>>().join(", ");
     let other = group_of(r.kind) == Group::Other;
     let len = if group_of(r.kind) == Group::Text { "CHAR_LENGTH" } else { "LENGTH" };
     let n = || if is_number(v(0)) { v(0).trim().to_string() } else { "0".into() };
     match r.op {
-        Eq if other => format!("{c} = {}", hex(v(0))),
-        Ne if other => format!("{c} <> {}", hex(v(0))),
-        Eq => format!("{c} = {}", val(r.kind, v(0))),
-        Ne => format!("{c} <> {}", val(r.kind, v(0))),
-        Gt => format!("{c} > {}", val(r.kind, v(0))),
-        Lt => format!("{c} < {}", val(r.kind, v(0))),
-        Ge => format!("{c} >= {}", val(r.kind, v(0))),
-        Le => format!("{c} <= {}", val(r.kind, v(0))),
+        Eq if other => format!("{c} = {}", hex(v(0), bs)),
+        Ne if other => format!("{c} <> {}", hex(v(0), bs)),
+        Eq => format!("{c} = {}", val(r.kind, v(0), bs)),
+        Ne => format!("{c} <> {}", val(r.kind, v(0), bs)),
+        Gt => format!("{c} > {}", val(r.kind, v(0), bs)),
+        Lt => format!("{c} < {}", val(r.kind, v(0), bs)),
+        Ge => format!("{c} >= {}", val(r.kind, v(0), bs)),
+        Le => format!("{c} <= {}", val(r.kind, v(0), bs)),
         In => format!("{c} IN ({})", list()),
         NotIn => format!("{c} NOT IN ({})", list()),
         NotInOrNull => format!("({c} NOT IN ({}) OR {c} IS NULL)", list()),
-        Between => format!("{c} BETWEEN {} AND {}", val(r.kind, v(0)), val(r.kind, v(1))),
+        Between => format!("{c} BETWEEN {} AND {}", val(r.kind, v(0), bs), val(r.kind, v(1), bs)),
         IsNull => format!("{c} IS NULL"),
         NotNull => format!("{c} IS NOT NULL"),
-        Contains => format!("{c} LIKE {}", lit(&format!("%{}%", like_escape(v(0))))),
-        NotContains => format!("{c} NOT LIKE {}", lit(&format!("%{}%", like_escape(v(0))))),
-        StartsWith => format!("{c} LIKE {}", lit(&format!("{}%", like_escape(v(0))))),
-        NotStartsWith => format!("{c} NOT LIKE {}", lit(&format!("{}%", like_escape(v(0))))),
-        EndsWith => format!("{c} LIKE {}", lit(&format!("%{}", like_escape(v(0))))),
-        NotEndsWith => format!("{c} NOT LIKE {}", lit(&format!("%{}", like_escape(v(0))))),
-        Like => format!("{c} LIKE {}", lit(v(0))),
-        NotLike => format!("{c} NOT LIKE {}", lit(v(0))),
-        Regexp => format!("{c} REGEXP {}", lit(v(0))),
-        NotRegexp => format!("{c} NOT REGEXP {}", lit(v(0))),
+        Contains => format!("{c} LIKE {}", lit(&format!("%{}%", like_escape(v(0))), bs)),
+        NotContains => format!("{c} NOT LIKE {}", lit(&format!("%{}%", like_escape(v(0))), bs)),
+        StartsWith => format!("{c} LIKE {}", lit(&format!("{}%", like_escape(v(0))), bs)),
+        NotStartsWith => format!("{c} NOT LIKE {}", lit(&format!("{}%", like_escape(v(0))), bs)),
+        EndsWith => format!("{c} LIKE {}", lit(&format!("%{}", like_escape(v(0))), bs)),
+        NotEndsWith => format!("{c} NOT LIKE {}", lit(&format!("%{}", like_escape(v(0))), bs)),
+        Like => format!("{c} LIKE {}", lit(v(0), bs)),
+        NotLike => format!("{c} NOT LIKE {}", lit(v(0), bs)),
+        Regexp => format!("{c} REGEXP {}", lit(v(0), bs)),
+        NotRegexp => format!("{c} NOT REGEXP {}", lit(v(0), bs)),
         Empty => format!("{c} = ''"),
         NotEmpty => format!("{c} <> ''"),
         LenEq => format!("{len}({c}) = {}", n()),
@@ -300,16 +302,16 @@ pub fn rule_sql(r: &Rule, d: Dialect) -> String {
         ThisWeek => format!("YEARWEEK({c}, 1) = YEARWEEK(CURDATE(), 1)"),
         ThisMonth => format!("(YEAR({c}) = YEAR(CURDATE()) AND MONTH({c}) = MONTH(CURDATE()))"),
         AfterCol => format!("{c} > {}", d.quote_ident(v(0))),
-        SetContains => format!("FIND_IN_SET({}, {c}) > 0", lit(v(0))),
-        JsonPathEq => format!("JSON_UNQUOTE(JSON_EXTRACT({c}, {})) = {}", lit(v(0)), lit(v(1))),
-        JsonContains => format!("JSON_CONTAINS({c}, {})", lit(v(0))),
-        JsonHasPath => format!("JSON_CONTAINS_PATH({c}, 'one', {})", lit(v(0))),
+        SetContains => format!("FIND_IN_SET({}, {c}) > 0", lit(v(0), bs)),
+        JsonPathEq => format!("JSON_UNQUOTE(JSON_EXTRACT({c}, {})) = {}", lit(v(0), bs), lit(v(1), bs)),
+        JsonContains => format!("JSON_CONTAINS({c}, {})", lit(v(0), bs)),
+        JsonHasPath => format!("JSON_CONTAINS_PATH({c}, 'one', {})", lit(v(0), bs)),
     }
 }
 
 /// The WHERE text of a rule list: complete rules only, joined with AND (or OR when `any`).
-pub fn to_sql(rules: &[Rule], any: bool, d: Dialect) -> String {
-    rules.iter().filter(|r| r.complete()).map(|r| rule_sql(r, d)).collect::<Vec<_>>().join(if any { " OR " } else { " AND " })
+pub fn to_sql(rules: &[Rule], any: bool, d: Dialect, bs: bool) -> String {
+    rules.iter().filter(|r| r.complete()).map(|r| rule_sql(r, d, bs)).collect::<Vec<_>>().join(if any { " OR " } else { " AND " })
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -561,7 +563,7 @@ fn rule_of(t: &[T], cols: &[(String, Kind)]) -> Option<Rule> {
         };
         // A pattern that is not what the structured form would write stays a plain LIKE.
         let probe = Rule { col: c.clone(), kind, op, values: vec![v.clone()] };
-        if rule_sql(&probe, Dialect::MySql).ends_with(&lit(s)) { Some(probe) } else { None }
+        if rule_sql(&probe, Dialect::MySql, true).ends_with(&lit(s, true)) { Some(probe) } else { None }
     };
     match rest {
         [i, nu] if word(i, "IS") && word(nu, "NULL") => mk(c, Op::IsNull, vec![]),
@@ -592,7 +594,11 @@ fn rule_of(t: &[T], cols: &[(String, Kind)]) -> Option<Rule> {
 /// the rules and whether they are joined with OR. Anything else (subqueries, mixed AND/OR, other
 /// functions) gives None, which keeps the bar in SQL mode. The result is checked by writing it
 /// out again, so a successful parse never changes the query.
-pub fn parse(text: &str, cols: &[(String, Kind)]) -> Option<(Vec<Rule>, bool)> {
+pub fn parse(text: &str, cols: &[(String, Kind)], bs: bool) -> Option<(Vec<Rule>, bool)> {
+    // The reader below decodes backslash escapes, which this server does not have, so such text stays SQL.
+    if !bs && text.contains('\\') {
+        return None;
+    }
     let toks = lex(text, cols)?;
     if toks.is_empty() {
         return Some((Vec::new(), false));
@@ -603,7 +609,7 @@ pub fn parse(text: &str, cols: &[(String, Kind)]) -> Option<(Vec<Rule>, bool)> {
     if !rules.iter().all(|r| ops_for(r.kind).contains(&r.op) && r.complete()) {
         return None;
     }
-    (lex(&to_sql(&rules, any, Dialect::MySql), cols)? == toks).then_some((rules, any))
+    (lex(&to_sql(&rules, any, Dialect::MySql, true), cols)? == toks).then_some((rules, any))
 }
 
 /// How a date column is grouped.
@@ -683,8 +689,8 @@ mod tests {
                 }
                 let r = Rule { col: col.clone(), kind, op, values: v };
                 assert!(r.complete(), "{op:?}");
-                let sql = to_sql(&[r.clone()], false, Dialect::MySql);
-                let (back, any) = parse(&sql, &cols()).unwrap_or_else(|| panic!("no parse for {op:?} on {col}: {sql}"));
+                let sql = to_sql(&[r.clone()], false, Dialect::MySql, true);
+                let (back, any) = parse(&sql, &cols(), true).unwrap_or_else(|| panic!("no parse for {op:?} on {col}: {sql}"));
                 assert!(!any);
                 assert_eq!(back, vec![r], "{sql}");
             }
@@ -695,34 +701,40 @@ mod tests {
     fn lists_join_with_and_or_or_and_reject_mixes() {
         let a = Rule { col: "status".into(), kind: Kind::Enum, op: Op::In, values: vec!["paid".into(), "shipped".into()] };
         let b = Rule { col: "total".into(), kind: Kind::Decimal, op: Op::Gt, values: vec!["50".into()] };
-        let and = to_sql(&[a.clone(), b.clone()], false, Dialect::MySql);
+        let and = to_sql(&[a.clone(), b.clone()], false, Dialect::MySql, true);
         assert_eq!(and, "`status` IN ('paid', 'shipped') AND `total` > 50");
-        assert_eq!(parse(&and, &cols()), Some((vec![a.clone(), b.clone()], false)));
-        let or = to_sql(&[a.clone(), b.clone()], true, Dialect::MySql);
-        assert_eq!(parse(&or, &cols()), Some((vec![a, b], true)));
-        assert!(parse("total > 50 AND total < 5 OR id = 1", &cols()).is_none());
-        assert!(parse("total > 50 AND id IN (SELECT 1)", &cols()).is_none());
-        assert!(parse("LOWER(name) = 'x'", &cols()).is_none());
-        assert_eq!(parse("", &cols()), Some((vec![], false)));
+        assert_eq!(parse(&and, &cols(), true), Some((vec![a.clone(), b.clone()], false)));
+        let or = to_sql(&[a.clone(), b.clone()], true, Dialect::MySql, true);
+        assert_eq!(parse(&or, &cols(), true), Some((vec![a, b], true)));
+        assert!(parse("total > 50 AND total < 5 OR id = 1", &cols(), true).is_none());
+        assert!(parse("total > 50 AND id IN (SELECT 1)", &cols(), true).is_none());
+        assert!(parse("LOWER(name) = 'x'", &cols(), true).is_none());
+        assert_eq!(parse("", &cols(), true), Some((vec![], false)));
         // Bare column names and lower case keywords are fine.
-        assert_eq!(parse("status = 'paid' and total between 1 and 2", &cols()).unwrap().0.len(), 2);
+        assert_eq!(parse("status = 'paid' and total between 1 and 2", &cols(), true).unwrap().0.len(), 2);
     }
 
     #[test]
     fn values_are_escaped_and_numbers_stay_bare_only_in_number_columns() {
         let t = Rule { col: "name".into(), kind: Kind::Text, op: Op::Eq, values: vec!["5".into()] };
-        assert_eq!(rule_sql(&t, Dialect::MySql), "`name` = '5'");
+        assert_eq!(rule_sql(&t, Dialect::MySql, true), "`name` = '5'");
         let n = Rule { col: "total".into(), kind: Kind::Decimal, op: Op::Eq, values: vec!["5 OR 1=1".into()] };
-        assert_eq!(rule_sql(&n, Dialect::MySql), "`total` = '5 OR 1=1'");
+        assert_eq!(rule_sql(&n, Dialect::MySql, true), "`total` = '5 OR 1=1'");
         let q = Rule { col: "na`me".into(), kind: Kind::Text, op: Op::Eq, values: vec!["a'\\".into()] };
-        assert_eq!(rule_sql(&q, Dialect::MySql), "`na``me` = 'a''\\\\'");
+        assert_eq!(rule_sql(&q, Dialect::MySql, true), "`na``me` = 'a''\\\\'");
+        // Without backslash escapes the backslash is a plain character, and text with one stays SQL.
+        assert_eq!(rule_sql(&q, Dialect::MySql, false), "`na``me` = 'a''\\'");
+        assert!(parse("name = 'a\\b'", &cols(), false).is_none());
+        // Without backslash escapes the backslash is a plain character, and text with one stays SQL.
+        assert_eq!(rule_sql(&q, Dialect::MySql, false), "`na``me` = 'a''\\'");
+        assert!(parse("name = 'a\\b'", &cols(), false).is_none());
     }
 
     #[test]
     fn incomplete_rules_are_left_out() {
         let r = Rule::new("total", Kind::Decimal);
         assert!(!r.complete());
-        assert_eq!(to_sql(&[r], false, Dialect::MySql), "");
+        assert_eq!(to_sql(&[r], false, Dialect::MySql, true), "");
     }
 
     #[test]

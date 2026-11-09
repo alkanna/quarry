@@ -42,6 +42,8 @@ struct GroupDlg {
     keys: Vec<(String, Option<Grain>)>,
     aggs: Vec<Agg>,
     having: Option<Rule>,
+    /// Whether the server reads backslash escapes, for the HAVING preview.
+    bs: bool,
 }
 
 /// Runtime state of the bar. Only `c` is saved.
@@ -53,10 +55,6 @@ pub(super) struct Bar {
     draft: Option<Rule>,
     /// The WHERE text the rules were last written as; a different `filter_txt` came from elsewhere.
     src: String,
-    /// The ORDER BY text last seen, to tell a header click from an edit made here.
-    sort_seen: String,
-    /// Shift was down during the last frame, which turns a header sort into an added key.
-    pub(super) shift: bool,
     fold_open: bool,
     gdlg: GroupDlg,
     /// The table's own columns, kept when a grouped answer replaces the result columns.
@@ -104,6 +102,22 @@ fn parse_order(text: &str) -> Option<Vec<(String, bool)>> {
             Some((plain_ident(col)?, desc))
         })
         .collect()
+}
+
+/// Shift-click on a header: the column becomes the last sort key, or flips direction when it already
+/// is one. Text that is not plain keys (expressions) is left as it is.
+pub(super) fn add_sort_key(text: &str, col: &str, d: Dialect) -> String {
+    let Some(mut keys) = parse_order(text) else { return text.to_string() };
+    match keys.iter_mut().find(|(c, _)| c == col) {
+        Some(k) => k.1 = !k.1,
+        None => keys.push((col.to_string(), false)),
+    }
+    order_text(&keys, d)
+}
+
+/// The names of the GROUP BY columns of a grouped result, as they head its columns.
+pub(super) fn group_names(s: &SqlTab) -> Vec<String> {
+    split_top(&s.bar.c.group).iter().filter_map(|g| plain_ident(g)).collect()
 }
 
 fn order_text(keys: &[(String, bool)], d: Dialect) -> String {
@@ -484,7 +498,8 @@ fn rule_editor(ui: &mut egui::Ui, r: &mut Rule, cols: &[Col], salt: egui::Id) ->
 
 /// A clause pill that opens a popover: keyword, summary and a cross. Returns (response, cleared).
 fn clause_chip(ui: &mut egui::Ui, name: &str, summary: &str, open: bool) -> (egui::Response, bool) {
-    let gn = ui.painter().layout_no_wrap(name.to_string(), FontId::monospace(TXT_CAPTION), FAINT());
+    let kw = chip_name_color(name);
+    let gn = ui.painter().layout_no_wrap(name.to_string(), FontId::monospace(TXT_CAPTION), kw);
     let gs = ui.painter().layout_no_wrap(summary.to_string(), FontId::monospace(TXT_CAPTION), TEXT());
     let w = 10.0 + gn.size().x + 8.0 + gs.size().x + 6.0 + CLOSE_W + 3.0;
     let (rect, r) = ui.allocate_exact_size(egui::vec2(w, BUTTON_H), Sense::click());
@@ -493,7 +508,7 @@ fn clause_chip(ui: &mut egui::Ui, name: &str, summary: &str, open: bool) -> (egu
     ui.painter().rect(rect, BUTTON_H / 2.0, if state == 2 { PRESSED() } else { PANEL() }, Stroke::new(1.0, edge), egui::StrokeKind::Inside);
     let (dn, ds) = (optical_dy(&gn), optical_dy(&gs));
     let nw = gn.size().x;
-    ui.painter().galley(egui::pos2(rect.left() + 10.0, rect.center().y - gn.size().y / 2.0 + dn), gn, FAINT());
+    ui.painter().galley(egui::pos2(rect.left() + 10.0, rect.center().y - gn.size().y / 2.0 + dn), gn, kw);
     ui.painter().galley(egui::pos2(rect.left() + 18.0 + nw, rect.center().y - gs.size().y / 2.0 + ds), gs, TEXT());
     focus_ring(ui, &r, rect, BUTTON_H / 2.0);
     let close = egui::Rect::from_center_size(egui::pos2(rect.right() - CLOSE_W / 2.0 - 3.0, rect.center().y), egui::vec2(CLOSE_W, CLOSE_W));
@@ -722,7 +737,7 @@ fn group_popover(ui: &mut egui::Ui, g: &mut GroupDlg, c: &mut Clauses, cols: &[C
     }
     ui.add_space(6.0);
     caption(ui, "HAVING");
-    let aliases: Vec<Col> = g.aggs.iter().filter(|a| !a.alias.trim().is_empty()).map(|a| Col { name: a.alias.trim().to_string(), ty: "DECIMAL".into(), kind: Kind::Decimal, nullable: true }).collect();
+    let aliases: Vec<Col> = g.aggs.iter().filter(|a| !a.alias.trim().is_empty()).map(|a| Col::plain(a.alias.trim(), "DECIMAL", Kind::Decimal, true)).collect();
     ui.horizontal(|ui| {
         if g.having.is_none() {
             if quiet(ui, RichText::new("+ Condition").color(PRIMARY())).clicked() {
@@ -742,7 +757,7 @@ fn group_popover(ui: &mut egui::Ui, g: &mut GroupDlg, c: &mut Clauses, cols: &[C
     });
     ui.add_space(6.0);
     let (sel, grp) = group_texts(g, d);
-    let hav = g.having.as_ref().filter(|r| r.complete()).map(|r| rules::rule_sql(r, d)).unwrap_or_default();
+    let hav = g.having.as_ref().filter(|r| r.complete()).map(|r| rules::rule_sql(r, d, g.bs)).unwrap_or_default();
     let mut job = sql_job(&format!("SELECT {sel}\n  GROUP BY {grp}{}", if hav.is_empty() { String::new() } else { format!(" HAVING {hav}") }));
     job.wrap.max_width = 520.0;
     egui::Frame::new().fill(BG()).corner_radius(R_SM).inner_margin(8).show(ui, |ui| {
@@ -794,27 +809,16 @@ fn group_texts(g: &GroupDlg, d: Dialect) -> (String, String) {
 }
 
 /// Draws the bar and the clause chips. Returns true when the query should run.
-pub(super) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect) -> bool {
+pub(super) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool) -> bool {
     let Some(s) = t.sql.as_mut() else { return false };
     let cols = if s.bar.table_cols.is_empty() { s.cols.clone() } else { s.bar.table_cols.clone() };
     let pairs: Vec<(String, Kind)> = cols.iter().map(|c| (c.name.clone(), c.kind)).collect();
     let b = &mut s.bar;
     let mut run = false;
-    // A header sort with Shift held adds a key instead of replacing the others.
-    if t.sort_txt != b.sort_seen {
-        if b.shift && !b.sort_seen.is_empty() && !t.sort_txt.is_empty() {
-            if let (Some(mut old), Some(new)) = (parse_order(&b.sort_seen), parse_order(&t.sort_txt)) {
-                old.retain(|(c, _)| !new.iter().any(|(n, _)| n == c));
-                old.extend(new);
-                t.sort_txt = order_text(&old, d);
-                run = true;
-            }
-        }
-        b.sort_seen = t.sort_txt.clone();
-    }
+    b.gdlg.bs = bs;
     // The WHERE text changed from elsewhere (Filter to these, a restored tab): read it back into rules.
     if !b.c.sql && t.filter_txt != b.src && (!pairs.is_empty() || t.filter_txt.trim().is_empty()) {
-        match rules::parse(&t.filter_txt, &pairs) {
+        match rules::parse(&t.filter_txt, &pairs, bs) {
             Some((mut r, any)) => {
                 b.draft = r.pop();
                 b.rules = r;
@@ -843,7 +847,7 @@ pub(super) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect) -> bool {
             ui.allocate_ui_with_layout(egui::vec2(ui.available_width() - run_w, BUTTON_H), egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true), |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
                 // Rules mode needs text this module wrote; anything else stays in SQL mode.
-                let can_rules = rules::parse(&t.filter_txt, &pairs).is_some() || pairs.is_empty();
+                let can_rules = rules::parse(&t.filter_txt, &pairs, bs).is_some() || pairs.is_empty();
                 let mut sql = b.c.sql;
                 let r0 = ui.cursor().min;
                 segmented(ui, &mut sql, &[(false, "Rules"), (true, "SQL")]);
@@ -908,7 +912,7 @@ pub(super) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect) -> bool {
                     // Write the rules out as the WHERE text, so Run, Copy as SQL and the fold line see them.
                     let mut all = b.rules.clone();
                     all.extend(b.draft.clone());
-                    let text = rules::to_sql(&all, b.any, d);
+                    let text = rules::to_sql(&all, b.any, d, bs);
                     if text != t.filter_txt {
                         t.filter_txt = text;
                     }
@@ -1163,7 +1167,7 @@ pub(super) fn ungroup(t: &mut Tab) {
 }
 
 /// Turns the double-clicked group into conditions on the WHERE text and ungroups.
-pub(super) fn drill(t: &mut Tab, row: usize, d: Dialect) {
+pub(super) fn drill(t: &mut Tab, row: usize, d: Dialect, bs: bool) {
     let Some(doc) = t.docs.get(row).and_then(|r| r.decode().ok()) else { return };
     let Some(s) = t.sql.as_ref() else { return };
     let (select, group_list) = (split_top(&s.bar.c.select), split_top(&s.bar.c.group));
@@ -1184,14 +1188,31 @@ pub(super) fn drill(t: &mut Tab, row: usize, d: Dialect) {
         };
         conds.push(match bson_text(v) {
             Some(text) => match tcols(s).iter().find(|c| c.name == name && expr.is_none()) {
-                Some(c) => rules::rule_sql(&Rule { col: name.clone(), kind: c.kind, op: Op::Eq, values: vec![text] }, d),
-                None => format!("{lhs} = {}", rules::lit(&text)),
+                Some(c) => rules::rule_sql(&Rule { col: name.clone(), kind: c.kind, op: Op::Eq, values: vec![text] }, d, bs),
+                None => format!("{lhs} = {}", rules::lit(&text, bs)),
             },
             None => format!("{lhs} IS NULL"),
         });
     }
     let existing = t.filter_txt.trim().to_string();
-    let existing = if existing.is_empty() { None } else if matches!(rules::parse(&existing, &tcols(s).iter().map(|c| (c.name.clone(), c.kind)).collect::<Vec<_>>()), Some((_, false))) { Some(existing) } else { Some(format!("({existing})")) };
+    let existing = if existing.is_empty() { None } else if matches!(rules::parse(&existing, &tcols(s).iter().map(|c| (c.name.clone(), c.kind)).collect::<Vec<_>>(), bs), Some((_, false))) { Some(existing) } else { Some(format!("({existing})")) };
     t.filter_txt = existing.into_iter().chain(conds).collect::<Vec<_>>().join(" AND ");
     ungroup(t);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shift_click_appends_or_flips_a_sort_key() {
+        let d = Dialect::MySql;
+        assert_eq!(add_sort_key("", "a", d), "`a` ASC");
+        assert_eq!(add_sort_key("`a` ASC", "b", d), "`a` ASC, `b` ASC");
+        // A key already there keeps its place and flips.
+        assert_eq!(add_sort_key("`a` ASC, `b` DESC", "a", d), "`a` DESC, `b` DESC");
+        assert_eq!(add_sort_key("a, b DESC", "b", d), "`a` ASC, `b` ASC");
+        // Expressions are not rewritten.
+        assert_eq!(add_sort_key("LOWER(a)", "b", d), "LOWER(a)");
+    }
 }

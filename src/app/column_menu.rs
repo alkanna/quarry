@@ -15,6 +15,8 @@ pub(super) enum WidthPreset {
 /// What the popover asked for, applied once the table is drawn.
 pub(super) enum HeadAct {
     Sort(Option<i64>),
+    /// Shift-click on a SQL header: add the column as a further sort key.
+    AddSort,
     Width(WidthPreset),
     Data(ColOp),
     /// Rename in the documents matching the filter (true) or in the whole collection.
@@ -239,6 +241,13 @@ impl App {
         let Some(t) = self.t() else { return };
         let label = self.prefs.cols.get(&key).map(|p| p.label(c).to_string()).unwrap_or_else(|| c.into());
         match act {
+            HeadAct::AddSort if t.sql.is_some() => {
+                let t = self.tm().unwrap();
+                t.sort_txt = super::sql_bar::add_sort_key(&t.sort_txt, c, db::sql::Dialect::MySql);
+                t.page = 0;
+                self.reload();
+            }
+            HeadAct::AddSort => {}
             HeadAct::Sort(next) if t.sql.is_some() => {
                 let t = self.tm().unwrap();
                 t.sort_txt = next.map(|d| format!("{} {}", db::sql::Dialect::MySql.quote_ident(c), if d > 0 { "ASC" } else { "DESC" })).unwrap_or_default();

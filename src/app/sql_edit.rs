@@ -9,7 +9,8 @@ use db::sql::Col;
 
 /// A cell being edited in place. `done` is set by the editor: Some(true) to commit, Some(false) to cancel.
 pub(super) struct CellEdit {
-    pub(super) row: usize,
+    /// The row's key, because a reload while the editor is open moves rows around.
+    pub(super) id: Option<Bson>,
     pub(super) col: String,
     pub(super) text: String,
     pub(super) err: Option<String>,
@@ -142,10 +143,17 @@ pub(super) fn copy_as_menu(ui: &mut egui::Ui, sql: bool) -> Option<DocsAct> {
         item(ui, "Values only", "one per line", DocsAct::CopyAs(Fmt::Values));
     }
     ui.separator();
+    // A stable id: the copy action reads the switch back by it.
     let id = egui::Id::unique("copy-with-header");
-    let mut on = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(true);
-    if ui.checkbox(&mut on, "Include column names").changed() {
-        ui.data_mut(|d| d.insert_temp(id, on));
+    let on = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(true);
+    let (row, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), ui.spacing().interact_size.y), Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(row, R_SM, MENU_HOVER());
+    }
+    let boxed = check_box(ui, egui::pos2(row.left() + 14.0, row.center().y), id.with("box"), on, false);
+    ui.painter().text(egui::pos2(row.left() + 30.0, row.center().y), egui::Align2::LEFT_CENTER, "Include column names", FontId::proportional(TXT_BODY), TEXT());
+    if boxed.clicked() || resp.clicked() {
+        ui.data_mut(|d| d.insert_temp(id, !on));
     }
     act
 }
@@ -174,10 +182,17 @@ impl App {
         Some((t.sel.clone(), s.cols.clone(), s.pk.clone()))
     }
 
+    /// Whether the open connection's server reads backslash escapes in strings.
+    pub(super) fn sql_bs(&self) -> bool {
+        self.t().and_then(|t| self.conn(t.sel.conn)).and_then(|c| c.sql.as_ref()).map_or(true, |d| d.backslash_escapes())
+    }
+
     /// Why the open table cannot be edited at all, if so.
     pub(super) fn sql_edit_block(&self) -> Option<&'static str> {
         let s = self.t()?.sql.as_ref()?;
-        if self.sel_is_view() {
+        if s.matched.is_some() {
+            Some("Grouped rows are summaries, not table rows. Ungroup to edit.")
+        } else if self.sel_is_view() {
             Some("Views cannot be edited.")
         } else if s.pk.is_empty() {
             Some("This table has no usable primary key, so its rows cannot be edited.")
@@ -192,7 +207,11 @@ impl App {
         if s.pk.iter().any(|p| p == col) {
             return Some("Primary key columns are not edited here: undo could no longer find the row.");
         }
-        (s.cols.iter().find(|c| c.name == col)?.kind == Kind::Geometry).then_some("Geometry values cannot be edited as text yet.")
+        let c = s.cols.iter().find(|c| c.name == col)?;
+        if c.generated {
+            return Some("Generated columns are computed by the server and cannot be written.");
+        }
+        (c.kind == Kind::Geometry).then_some("Geometry values cannot be edited as text yet.")
     }
 
     /// Everything a write needs, or None with the reason shown. The one gate for SQL writes.
@@ -224,7 +243,7 @@ impl App {
         let Some(t) = self.t() else { return };
         let rows = Rows::Raw(&t.docs);
         let v = self.shown_row(rows, i, false).and_then(|d| d.get(&col).cloned()).or_else(|| rows.value(i, &col).map(|v| v.bson().into_owned())).unwrap_or(Bson::Null);
-        self.sql_cell = Some(CellEdit { row: i, col, text: edit_text(&v), err: None, focus: true, done: None });
+        self.sql_cell = Some(CellEdit { id: rows.id(i), col, text: edit_text(&v), err: None, focus: true, done: None });
     }
 
     /// Draws the editor over a cell and records Enter, Esc and a click elsewhere.
@@ -266,8 +285,10 @@ impl App {
             Some(false) => {}
             Some(true) => {
                 let kind = self.t().and_then(|t| t.sql.as_ref()).and_then(|s| s.cols.iter().find(|c| c.name == e.col)).map_or(Kind::Text, |c| c.kind);
+                let row = self.t().and_then(|t| (0..t.docs.len()).find(|&j| Rows::Raw(&t.docs).id(j) == e.id));
                 match value::parse_edit(kind, &e.text) {
-                    Ok(v) => self.sql_set_cell(e.row, &e.col, v),
+                    Ok(_) if row.is_none() => self.err("That row is no longer in the table, so the edit was cancelled."),
+                    Ok(v) => self.sql_set_cell(row.unwrap_or_default(), &e.col, v),
                     Err(m) => {
                         (e.err, e.done, e.focus) = (Some(m), None, true);
                         self.sql_cell = Some(e);
@@ -322,7 +343,18 @@ impl App {
         };
         let Some(db) = self.conn(first.conn).and_then(|c| c.sql.clone()) else { return put_back(self, drafts, "Not connected.") };
         let read_only = !self.conn(first.conn).is_some_and(|c| c.writable);
-        let Some(cols) = self.tabs.iter().find(|t| t.sel == first).and_then(|t| t.sql.as_ref()).map(|s| s.cols.clone()) else { return put_back(self, drafts, "Open the table to save its edits.") };
+        let Some((cols, pk)) = self.tabs.iter().find(|t| t.sel == first).and_then(|t| t.sql.as_ref()).map(|s| (s.cols.clone(), s.pk.clone())) else { return put_back(self, drafts, "Open the table to save its edits.") };
+        // A row without its key could address any row, so it is never sent; its edits stay staged.
+        let (keyed, keyless): (Vec<_>, Vec<_>) = drafts.into_iter().partition(|(_, d)| d.current.get_document("_id").is_ok_and(|k| !k.is_empty()));
+        let skipped = keyless.len();
+        self.drafts.extend(keyless);
+        if skipped > 0 {
+            self.err(format!("{skipped} row{} without a primary key {} not saved.", if skipped == 1 { "" } else { "s" }, if skipped == 1 { "was" } else { "were" }));
+        }
+        let drafts = keyed;
+        if drafts.is_empty() {
+            return;
+        }
         let edits: Vec<RowEdit> = drafts
             .iter()
             .map(|(_, d)| RowEdit {
@@ -332,7 +364,7 @@ impl App {
             .collect();
         let tags: Vec<String> = drafts.iter().map(|d| d.0.clone()).collect();
         self.saving.extend(drafts);
-        self.worker.sql_save(tags, first.conn, db, first.db, first.coll, cols, edits, read_only);
+        self.worker.sql_save(tags, first.conn, db, first.db, first.coll, cols, pk, edits, read_only);
     }
 
     /// Cmd+S, the bar's Save: asks for write access first, then confirms like Mongo's Save all when the setting says so.
@@ -363,14 +395,14 @@ impl App {
 
     fn sql_staged_bar(&mut self, ui: &mut egui::Ui, keys: Vec<String>) {
         let Some((sel, cols, _)) = self.sql_ctx() else { return };
-        let d = db::sql::Dialect::MySql;
+        let (d, bs) = (db::sql::Dialect::MySql, self.sql_bs());
         let (mut cells, mut summary) = (0, String::new());
         for k in &keys {
             let Some(dr) = self.drafts.get(k) else { continue };
             let ch: Vec<_> = db::diff(&dr.original, &dr.current).into_iter().filter(|c| c.0 != "_id").collect();
             cells += ch.len();
             if summary.is_empty() {
-                let lit = |n: &str, v: Option<&Bson>| copy::sql_literal(v, cols.iter().find(|c| c.name == n).is_some_and(|c| is_numeric(c.kind)));
+                let lit = |n: &str, v: Option<&Bson>| copy::sql_literal(v, cols.iter().find(|c| c.name == n).is_some_and(|c| is_numeric(c.kind)), bs);
                 let set: Vec<String> = ch.iter().take(2).map(|(p, _, b)| format!("{} = {}", d.quote_ident(p), lit(p, b.as_ref()))).collect();
                 let wh: Vec<String> = dr.current.get_document("_id").map(|k| k.iter().map(|(n, v)| format!("{} = {}", d.quote_ident(n), lit(n, Some(v)))).collect()).unwrap_or_default();
                 summary = format!("UPDATE {} SET {}{} WHERE {}", d.quote_ident(&sel.coll), set.join(", "), if ch.len() > 2 { ", …" } else { "" }, wh.join(" AND "));
@@ -407,7 +439,7 @@ impl App {
                     changes: db::diff(&dr.original, &dr.current).into_iter().filter(|c| c.0 != "_id").map(|(p, a, b)| (p, a.unwrap_or(Bson::Null), b.unwrap_or(Bson::Null))).collect(),
                 };
                 let (sql, params) = write::update_sql(d, &sel.db, &sel.coll, &cols, &edit);
-                body.push(format!("{};", write::preview(&sql, &params)));
+                body.push(format!("{};", write::preview(&sql, &params, bs)));
             }
             self.modal = Some(Modal::Text { title: "SQL that Save will run".into(), body: body.join("\n"), code: false });
         }
@@ -525,7 +557,8 @@ impl App {
 
     fn sql_insert_rows(&mut self, rows: Vec<NewRow>) {
         let Some((conn, db, sel, cols, pk)) = self.writable_sql() else { return };
-        self.worker.sql_insert(conn, db, sel.db, sel.coll, cols, pk, rows, false);
+        let read_only = !self.conn(conn).is_some_and(|c| c.writable);
+        self.worker.sql_insert(conn, db, sel.db, sel.coll, cols, pk, rows, read_only);
     }
 
     /// Rows are the loaded documents of the checked or clicked rows, each with its key in `_id`.
@@ -545,9 +578,9 @@ impl App {
             }
         }
         let (sel, cols, pk) = self.sql_ctx().unwrap_or_else(|| (Sel { conn: 0, db: String::new(), coll: String::new() }, Vec::new(), Vec::new()));
-        let d = db::sql::Dialect::MySql;
+        let (d, bs) = (db::sql::Dialect::MySql, self.sql_bs());
         let numeric = |name: &str| cols.iter().find(|c| c.name == name).is_some_and(|c| is_numeric(c.kind));
-        let key_lit = |r: &Document, p: &String| copy::sql_literal(r.get_document("_id").ok().and_then(|k| k.get(p)), numeric(p));
+        let key_lit = |r: &Document, p: &String| copy::sql_literal(r.get_document("_id").ok().and_then(|k| k.get(p)), numeric(p), bs);
         // `pk IN (...)` for one key column, a row-value list for several.
         let key_list = || -> String {
             if pk.len() == 1 {
@@ -618,7 +651,7 @@ impl App {
 
     /// Deletes rows by key once confirmed. Their staged edits go with them.
     pub(super) fn sql_delete(&mut self, rows: Vec<Document>) {
-        let Some((conn, db, sel, cols, _)) = self.writable_sql() else { return };
+        let Some((conn, db, sel, cols, pk)) = self.writable_sql() else { return };
         for r in &rows {
             let key = self.draft_key(r);
             self.drafts.remove(&key);
@@ -626,12 +659,13 @@ impl App {
         if let Some(t) = self.tm() {
             t.selected = None;
         }
-        self.worker.sql_delete_rows(conn, db, sel.db, sel.coll, cols, rows, false);
+        let read_only = !self.conn(conn).is_some_and(|c| c.writable);
+        self.worker.sql_delete_rows(conn, db, sel.db, sel.coll, cols, pk, rows, read_only);
     }
 
     pub(super) fn sql_set_dialog(&mut self, ui: &mut egui::Ui, f: &mut SetForm, keep: &mut bool) {
         let Some((sel, cols, pk)) = self.sql_ctx() else { return *keep = false };
-        let d = db::sql::Dialect::MySql;
+        let (d, bs) = (db::sql::Dialect::MySql, self.sql_bs());
         ui.set_width(560.0);
         let n = f.rows.len();
         dialog_title(ui, format!("Set value on {n} row{}", if n == 1 { "" } else { "s" }));
@@ -677,10 +711,10 @@ impl App {
         ui.label(RichText::new(format!("Staged as {n} cell edit{}. Nothing runs until Save, and Undo reverts them together.", if n == 1 { "" } else { "s" })).size(TXT_SMALL).color(FAINT()));
         ui.add_space(6.0);
         let lit = match &parsed {
-            Ok(v) => copy::sql_literal(Some(v), is_numeric(col.kind)),
+            Ok(v) => copy::sql_literal(Some(v), is_numeric(col.kind), bs),
             Err(_) => "…".into(),
         };
-        let keys = if pk.len() == 1 { format!("{} IN ({})", d.quote_ident(&pk[0]), f.rows.iter().map(|r| copy::sql_literal(r.get_document("_id").ok().and_then(|k| k.get(&pk[0])), cols.iter().any(|c| c.name == pk[0] && is_numeric(c.kind)))).collect::<Vec<_>>().join(", ")) } else { format!("{} composite keys", n) };
+        let keys = if pk.len() == 1 { format!("{} IN ({})", d.quote_ident(&pk[0]), f.rows.iter().map(|r| copy::sql_literal(r.get_document("_id").ok().and_then(|k| k.get(&pk[0])), cols.iter().any(|c| c.name == pk[0] && is_numeric(c.kind)), bs)).collect::<Vec<_>>().join(", ")) } else { format!("{} composite keys", n) };
         egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(10).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(RichText::new(format!("UPDATE {}\n  SET {} = {lit}\n  WHERE {keys};", d.quote_ident(&sel.coll), d.quote_ident(&col.name))).monospace().size(TXT_SMALL).color(TEXT()));
@@ -736,13 +770,14 @@ impl App {
             Some(t) => (t.sel.coll.clone(), t.sql.as_ref().map(|s| s.pk.clone()).unwrap_or_default()),
             None => return,
         };
-        self.copy_sheet(ctx, fmt, rows, &cols, &table, &pk);
+        let bs = self.sql_bs();
+        self.copy_sheet(ctx, fmt, rows, &cols, &table, &pk, bs);
     }
 
     /// `copy_rows_as` for rows whose columns and table are given, such as a Query result.
-    pub(super) fn copy_sheet(&mut self, ctx: &egui::Context, fmt: Fmt, rows: &[Document], cols: &[CopyCol], table: &str, pk: &[String]) {
+    pub(super) fn copy_sheet(&mut self, ctx: &egui::Context, fmt: Fmt, rows: &[Document], cols: &[CopyCol], table: &str, pk: &[String], bs: bool) {
         let header = ctx.data(|d| d.get_temp::<bool>(egui::Id::unique("copy-with-header"))).unwrap_or(true);
-        let sheet = Sheet { rows, cols, table, pk };
+        let sheet = Sheet { rows, cols, table, pk, bs };
         let text = copy::format(fmt, &sheet, header);
         if text.is_empty() {
             return self.err(if fmt == Fmt::SqlUpdate { "SQL UPDATE needs a table with a primary key." } else { "Nothing to copy." });
@@ -791,7 +826,7 @@ impl App {
                 CellAct::FilterValue => {
                     let numeric = self.t().and_then(|t| t.sql.as_ref()).and_then(|s| s.cols.iter().find(|c| c.name == col)).is_some_and(|c| is_numeric(c.kind));
                     let q = db::sql::Dialect::MySql.quote_ident(&col);
-                    let text = if v == Bson::Null { format!("{q} IS NULL") } else { format!("{q} = {}", copy::sql_literal(Some(&v), numeric)) };
+                    let text = if v == Bson::Null { format!("{q} IS NULL") } else { format!("{q} = {}", copy::sql_literal(Some(&v), numeric, self.sql_bs())) };
                     let t = self.tm().unwrap();
                     t.filter_txt = text;
                     t.page = 0;

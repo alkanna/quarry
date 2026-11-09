@@ -132,14 +132,17 @@ fn unique(cols: &mut [Col], reserve_id: bool) {
 
 /// Columns as the result reports them. `meta` (name to COLUMN_TYPE and nullability) wins when the
 /// result column is a table column.
-fn make_cols(cols: &[MySqlColumn], meta: &HashMap<String, (String, bool)>, reserve_id: bool) -> Vec<Col> {
+fn make_cols(cols: &[MySqlColumn], meta: &HashMap<String, (String, bool, String)>, reserve_id: bool) -> Vec<Col> {
     let mut out: Vec<Col> = cols
         .iter()
         .map(|c| {
             let ty = c.type_info().name().to_string();
             match meta.get(c.name()) {
-                Some((full, nullable)) => Col { name: c.name().into(), kind: kind_of_full(full), ty: full.clone(), nullable: *nullable },
-                None => Col { name: c.name().into(), kind: Kind::from_type_name(&ty), ty, nullable: true },
+                Some((full, nullable, extra)) => {
+                    let extra = extra.to_ascii_uppercase();
+                    Col { generated: extra.contains("GENERATED"), auto_increment: extra.contains("AUTO_INCREMENT"), ..Col::plain(c.name(), full, kind_of_full(full), *nullable) }
+                }
+                None => Col::plain(c.name(), &ty, Kind::from_type_name(&ty), true),
             }
         })
         .collect();
@@ -200,14 +203,14 @@ async fn count(pool: &sqlx::MySqlPool, d: Dialect, schema: &str, table: &str, q:
 }
 
 /// Column types and the primary key, from information_schema.
-async fn table_meta(pool: &sqlx::MySqlPool, d: Dialect, schema: &str, table: &str) -> Res<(HashMap<String, (String, bool)>, Vec<String>)> {
+async fn table_meta(pool: &sqlx::MySqlPool, d: Dialect, schema: &str, table: &str) -> Res<(HashMap<String, (String, bool, String)>, Vec<String>)> {
     let cols = sqlx::query(d.columns()).bind(schema).bind(table).fetch_all(pool).await.map_err(e)?;
     let idx = sqlx::query(d.indexes()).bind(schema).bind(table).fetch_all(pool).await.map_err(e)?;
     let meta = cols
         .iter()
         .filter_map(|r| {
             let nullable = r.try_get::<i64, _>("nullable").map(|n| n != 0).unwrap_or(true);
-            Some((text(r, "name")?, (text(r, "full_type")?, nullable)))
+            Some((text(r, "name")?, (text(r, "full_type")?, nullable, text(r, "extra").unwrap_or_default())))
         })
         .collect();
     let pk = idx.iter().filter(|r| text(r, "name").as_deref() == Some("PRIMARY")).filter_map(|r| text(r, "col")).collect();

@@ -357,6 +357,8 @@ impl App {
         let view_w = ui.available_width();
         let mut click = None;
         let mut edit_cell = None;
+        // A double click on a row of grouped results: open that group's rows.
+        let mut drill = None;
         let mut resized = None;
         let mut save_widths = false;
         let mut fit = None;
@@ -368,6 +370,8 @@ impl App {
         // A SQL tab's sort is the ORDER BY text, which a header click writes as "`col` ASC".
         let sql_sort = self.t().filter(|t| t.sql.is_some()).map(|t| t.sort_txt.clone());
         let sql = sql_sort.is_some();
+        let group_cols: Vec<String> = self.t().and_then(|t| t.sql.as_ref()).filter(|s| sql && s.matched.is_some()).map(|s| super::sql_bar::group_names(s)).unwrap_or_default();
+        let sql_grouped = sql && self.t().and_then(|t| t.sql.as_ref()).is_some_and(|s| s.matched.is_some());
         let dir_of = |c: &str| match &sql_sort {
             Some(s) => {
                 let q = db::sql::Dialect::MySql.quote_ident(c);
@@ -448,7 +452,12 @@ impl App {
                     if ix.is_some() {
                         paint_bolt(&clip, egui::pos2(gx + g.size().x + 4.0, cell.center().y));
                     }
-                    clip.galley(egui::pos2(gx, cell.center().y - g.size().y / 2.0), g, color);
+                    let (gw, gh) = (g.size().x, g.size().y);
+                    clip.galley(egui::pos2(gx, cell.center().y - gh / 2.0), g, color);
+                    if group_cols.contains(c) {
+                        let tag = ui.fonts_mut(|f| f.layout_no_wrap("group".into(), FontId::monospace(TXT_CAPTION - 1.0), FAINT()));
+                        clip.galley(egui::pos2(gx + gw + 6.0, cell.center().y - tag.size().y / 2.0), tag, FAINT());
+                    }
                     // Built only while hovered, not for every header on every frame.
                     let hresp = if label != c || ix.is_some() {
                         hresp.on_hover_ui(|ui| {
@@ -464,7 +473,12 @@ impl App {
                         hresp.on_hover_text("Click for column options")
                     };
                     // Left and right click both open it; a second left click closes it.
-                    let open = if hresp.secondary_clicked() { Some(egui::SetOpenCommand::Bool(true)) } else if hresp.clicked() { Some(egui::SetOpenCommand::Toggle) } else { None };
+                    // Shift-click on a SQL header adds a sort key instead of opening the menu.
+                    let shift_sort = sql && hresp.clicked() && ui.input(|i| i.modifiers.shift);
+                    if shift_sort {
+                        head_acts.push((c.clone(), HeadAct::AddSort));
+                    }
+                    let open = if hresp.secondary_clicked() { Some(egui::SetOpenCommand::Bool(true)) } else if hresp.clicked() && !shift_sort { Some(egui::SetOpenCommand::Toggle) } else { None };
                     let mut acts = Vec::new();
                     // Clicks inside, such as the Data scope switch, keep it open; each action closes it itself.
                     egui::Popup::menu(&hresp).open_memory(open).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(190.0).show(|ui| col_popover(ui, c, agg, sql, dir, &prefs, &mut scope_query, &mut acts));
@@ -535,7 +549,7 @@ impl App {
                                 ui.painter().rect_filled(cell, 0, tint(WARNING(), 34));
                                 ui.painter().rect_filled(egui::Rect::from_min_size(cell.min, egui::vec2(2.0, cell.height())), 0, WARNING());
                             }
-                            if sql && self.sql_cell.as_ref().is_some_and(|e| e.row == i && e.col == *c) {
+                            if sql && self.sql_cell.as_ref().is_some_and(|e| e.id == docs.id(i) && e.col == *c) {
                                 self.sql_cell_editor(ui, cell);
                                 x += w;
                                 continue;
@@ -572,7 +586,9 @@ impl App {
                             if let Some(why) = &sql_why[ci] {
                                 cr = cr.on_hover_text(why.as_str());
                             }
-                            if cr.double_clicked() {
+                            if cr.double_clicked() && sql_grouped {
+                                drill = Some(i);
+                            } else if cr.double_clicked() {
                                 edit_cell = Some((i, c.clone()));
                             } else if cr.clicked() {
                                 click = Some(i);
@@ -674,6 +690,9 @@ impl App {
             self.select(agg, i, false);
             let Some(d) = self.shown_row(docs, i, agg).or_else(|| docs.owned(i)) else { continue };
             self.handle_acts(&d, acts);
+        }
+        if let Some(i) = drill {
+            self.sql_drill(i);
         }
         if let (Some((i, c)), true) = (&edit_cell, sql) {
             self.sql_open_cell(*i, c.clone());
