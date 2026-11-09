@@ -105,15 +105,15 @@ pub(super) fn sql_block(ui: &mut egui::Ui, salt: &str, text: &str, max_h: f32) {
 }
 
 impl App {
-    fn structure(&self) -> Option<&Structure> {
+    pub(super) fn structure(&self) -> Option<&Structure> {
         self.t()?.sql.as_ref()?.st.data.as_ref()
     }
 
-    fn staged(&self) -> &[Change] {
+    pub(super) fn staged(&self) -> &[Change] {
         self.t().and_then(|t| t.sql.as_ref()).map_or(&[], |s| &s.st.staged)
     }
 
-    fn set_staged(&mut self, v: Vec<Change>) {
+    pub(super) fn set_staged(&mut self, v: Vec<Change>) {
         if let Some(s) = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()) {
             s.st.staged = v;
         }
@@ -122,14 +122,14 @@ impl App {
     /// The engine, its version and how its sessions read quotes and backslashes, as the statements need them.
     /// The mode is the last one the server reported; the worker checks it again on the connection that runs the
     /// statement. The offline demo has no server and uses MySQL 8.4.
-    fn alter_env(&self) -> (Dialect, String, Mode) {
+    pub(super) fn alter_env(&self) -> (Dialect, String, Mode) {
         match self.t().and_then(|t| self.conn(t.sel.conn)).and_then(|c| c.sql.as_ref()) {
             Some(d) => (d.dialect, d.version.clone(), Mode::of(&d.sql_mode)),
             None => (Dialect::MySql, "8.4.0".into(), Mode::DEFAULT),
         }
     }
 
-    fn applying(&self) -> bool {
+    pub(super) fn applying(&self) -> bool {
         self.t().and_then(|t| t.sql.as_ref()).is_some_and(|s| s.st.applying)
     }
 
@@ -140,12 +140,12 @@ impl App {
         ddl::plan(d, &v, m, &self.t().map(|t| t.sel.coll.clone()).unwrap_or_default(), st, changes)
     }
 
-    fn engine_label(&self) -> String {
+    pub(super) fn engine_label(&self) -> String {
         self.t().and_then(|t| self.conn(t.sel.conn)).and_then(|c| c.sql.as_ref()).map_or_else(|| "MySQL 8.4".into(), |d| d.label())
     }
 
     /// The ALTER for these changes, as it will run.
-    fn alter_text(&self, st: &Structure, changes: &[Change]) -> Result<String, String> {
+    pub(super) fn alter_text(&self, st: &Structure, changes: &[Change]) -> Result<String, String> {
         self.plan_of(st, changes).map(|p| p.sql)
     }
 
@@ -801,5 +801,5 @@ fn plural_changes(n: usize) -> String {
 }
 
 /// Shown under a disabled Apply now button.
-const READ_ONLY_NOTE: &str = "Read-only: unlock writes to change the structure";
-const BUSY_NOTE: &str = "A structure change is still running.";
+pub(super) const READ_ONLY_NOTE: &str = "Read-only: unlock writes to change the structure";
+pub(super) const BUSY_NOTE: &str = "A structure change is still running.";

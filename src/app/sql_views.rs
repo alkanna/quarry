@@ -19,7 +19,7 @@ impl App {
     }
 
     /// The open tab's dialect, and whether its server reads backslash escapes in strings.
-    fn sql_dialect(&self) -> (db::sql::Dialect, bool) {
+    pub(super) fn sql_dialect(&self) -> (db::sql::Dialect, bool) {
         let d = self.conn(self.t().map(|t| t.sel.conn).unwrap_or(0)).and_then(|c| c.sql.as_ref());
         (d.map(|s| s.dialect).unwrap_or_default(), d.is_none_or(|s| s.backslash_escapes()))
     }

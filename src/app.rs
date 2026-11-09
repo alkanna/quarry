@@ -43,6 +43,8 @@ mod sql_ac;
 mod sql_create;
 mod sql_structure;
 mod sql_alter;
+mod sql_rel;
+mod sql_trig;
 mod sql_edit;
 mod sql_bar;
 mod sql_views;
@@ -75,6 +77,7 @@ use drafts::*;
 use sql_edit::*;
 use sql_alter::*;
 use sql_create::*;
+use sql_rel::*;
 use table::Rows;
 
 const SYSTEM_DBS: [&str; 3] = ["admin", "config", "local"];

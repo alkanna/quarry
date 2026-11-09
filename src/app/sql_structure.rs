@@ -4,6 +4,7 @@
 
 use super::*;
 use super::sql_alter::staged_marks;
+use super::sql_trig;
 use db::sql::ddl::Change;
 use db::sql::structure::{Column, ForeignKey, Index, Structure, Trigger};
 use egui::{pos2, vec2, Rect};
@@ -20,8 +21,12 @@ pub(super) struct StructState {
     sel: [Option<usize>; 5],
     /// Column and index changes waiting to become one ALTER TABLE.
     pub(super) staged: Vec<Change>,
-    /// The ALTER is running.
+    /// The ALTER or trigger statement is running.
     pub(super) applying: bool,
+    /// Trigger edits not saved yet, by trigger name; the new trigger's is under the empty name.
+    pub(super) trig: HashMap<String, db::sql::ddl::TrigDef>,
+    /// The editor shows the new trigger instead of the selected one.
+    pub(super) trig_new: bool,
 }
 
 #[derive(Default)]
@@ -51,6 +56,10 @@ pub(super) enum Act {
     DuplicateColumn(usize),
     DropColumn(usize),
     MoveColumn(usize, isize),
+    NewRelation,
+    DropRelation(usize),
+    NewTrigger,
+    DropTrigger(String),
     NewIndex,
     EditIndex(usize),
     DropIndex(usize),
@@ -72,6 +81,17 @@ impl App {
             s.st.load = Load::Loading;
         }
         self.worker.sql_structure(req, db, t.sel.db.clone(), t.sel.coll.clone());
+    }
+
+    /// The foreign keys of the open table, for the key cells of Content. The structure is asked for the first time
+    /// they are wanted and kept until a change to it clears it.
+    pub(super) fn sql_fks(&mut self) -> Vec<db::sql::structure::ForeignKey> {
+        let Some(st) = self.tabs.get(self.cur).and_then(|t| t.sql.as_ref()).map(|s| &s.st) else { return Vec::new() };
+        if st.data.is_none() && matches!(st.load, Load::Idle) && !self.demo {
+            self.request_structure();
+            return Vec::new();
+        }
+        self.tabs.get(self.cur).and_then(|t| t.sql.as_ref()).and_then(|s| s.st.data.as_ref()).map(|d| d.foreign_keys.clone()).unwrap_or_default()
     }
 
     /// The loaded structure, taken out of the tab while the view draws it (put back with `keep`).
@@ -128,6 +148,10 @@ impl App {
             Act::DuplicateColumn(i) => self.duplicate_column(i),
             Act::DropColumn(i) => self.stage_drop_column(i),
             Act::MoveColumn(i, by) => self.stage_move_column(i, by),
+            Act::NewRelation => self.open_fk_form(),
+            Act::DropRelation(i) => self.stage_drop_fk(i),
+            Act::NewTrigger => self.trig_new(),
+            Act::DropTrigger(n) => self.trig_ask_drop(n),
             Act::NewIndex => self.open_idx_form(None),
             Act::EditIndex(i) => self.open_idx_form(Some(i)),
             Act::DropIndex(i) => self.stage_drop_index(i),
@@ -284,23 +308,65 @@ impl App {
         let Some((d, mut sel)) = self.take_structure(ui) else { return };
         let mut acts = Vec::new();
         let mut open = None;
-        edit_row(ui, &["+ Relation", "Delete"], READ_ONLY, |ui| {
+        let editable = self.sel_writable();
+        let why = if self.sel_is_view() { "Views cannot be changed here" } else { READ_ONLY };
+        let (staged, applying) = self.tabs[self.cur].sql.as_ref().map_or((Vec::new(), false), |s| (s.st.staged.clone(), s.st.applying));
+        let dropped: Vec<String> = staged.iter().filter_map(|c| if let Change::DropFk(n) = c { Some(n.to_ascii_lowercase()) } else { None }).collect();
+        let fk = sel[2].filter(|i| *i < d.foreign_keys.len());
+        let mut left = Vec::new();
+        edit_row_with(ui, editable, if editable { "" } else { why }, |ui, on| {
+            if quiet_enabled(ui, on, "+ Relation").on_hover_text("Add a foreign key").on_disabled_hover_text(why).clicked() {
+                left.push(Act::NewRelation);
+            }
+            let hint = if on { "Select a relation first" } else { why };
+            let r = quiet_enabled(ui, on && fk.is_some(), "Delete").on_hover_text("Drop the selected foreign key").on_disabled_hover_text(hint);
+            if let (true, Some(i)) = (r.clicked(), fk) {
+                left.push(Act::DropRelation(i));
+            }
+        }, |ui| {
             if refresh_button(ui) {
                 acts.push(Act::Refresh);
             }
+            ui.label(RichText::new("Click a foreign key cell in Content to open the row it points to").size(TXT_SMALL).color(FAINT()));
         });
+        acts.extend(left);
         ui.add_space(8.0);
+        if !staged.is_empty() {
+            self.staged_bar(ui, &d, &staged, editable, applying, &mut acts);
+            ui.add_space(8.0);
+        }
         egui::ScrollArea::vertical().id_salt("sql-relations").auto_shrink([false, false]).show(ui, |ui| {
             caption(ui, "THIS TABLE POINTS TO");
             ui.add_space(6.0);
             let heads = [gc("Name", 2.0), gc("Column", 1.6), gc("References", 2.0), gc("On update", 1.2), gc("On delete", 1.2), gc("Index", 2.0)];
-            if let Some(r) = grid(ui, "fk-out", &heads, d.foreign_keys.len(), sel[2], |ui, rect, r, c| {
+            let mut menu = |ui: &mut egui::Ui, r: usize| {
+                ui.add_enabled_ui(editable, |ui| {
+                    if danger_item(ui, "Drop relation").clicked() {
+                        acts.push(Act::DropRelation(r));
+                        ui.close();
+                    }
+                })
+                .response
+                .on_disabled_hover_text(why);
+                ui.separator();
+                if ui.button("Copy name").clicked() {
+                    acts.push(Act::Copy(d.foreign_keys[r].name.clone()));
+                    ui.close();
+                }
+            };
+            let hit = grid_ex(ui, "fk-out", &heads, d.foreign_keys.len(), sel[2], |ui, rect, r, c| {
                 let fk = &d.foreign_keys[r];
                 match c {
-                    0 => put(ui, rect, &fk.name, mono(TXT_SMALL), TEXT(), false),
+                    0 => {
+                        if dropped.contains(&fk.name.to_ascii_lowercase()) {
+                            ui.painter().rect_filled(Rect::from_min_size(pos2(rect.left() - 40.0, rect.top()), vec2(3.0, rect.height())), 0.0, ALERT());
+                        }
+                        put(ui, rect, &fk.name, mono(TXT_SMALL), TEXT(), false);
+                    }
                     1 => put(ui, rect, &fk.cols.join(", "), mono(TXT_SMALL), TEXT(), false),
                     2 => {
-                        if link(ui, rect, ("fk-out-link", r), &format!("{}.{}", fk.ref_table, fk.ref_cols.join(", "))) {
+                        let other = if fk.ref_db == fk.db { String::new() } else { format!("{}.", fk.ref_db) };
+                        if link(ui, rect, ("fk-out-link", r), &format!("{other}{}.{}", fk.ref_table, fk.ref_cols.join(", "))) {
                             open = Some((fk.ref_db.clone(), fk.ref_table.clone()));
                         }
                     }
@@ -308,7 +374,8 @@ impl App {
                     4 => put(ui, rect, &fk.on_delete, mono(TXT_SMALL), C_KEYWORD(), false),
                     _ => put(ui, rect, d.index_for(fk).map_or("", |i| i.name.as_str()), mono(TXT_SMALL), MUTED(), false),
                 }
-            }) {
+            }, Some(&mut menu));
+            if let Some(r) = hit.click {
                 sel[2] = Some(r);
             }
             ui.add_space(16.0);
@@ -319,7 +386,8 @@ impl App {
                 let fk = &d.referenced_by[r];
                 match c {
                     0 => {
-                        if link(ui, rect, ("fk-in-link", r), &fk.table) {
+                        let other = if fk.db == fk.ref_db { String::new() } else { format!("{}.", fk.db) };
+                        if link(ui, rect, ("fk-in-link", r), &format!("{other}{}", fk.table)) {
                             open = Some((fk.db.clone(), fk.table.clone()));
                         }
                     }
@@ -339,17 +407,50 @@ impl App {
     pub(super) fn sql_triggers_view(&mut self, ui: &mut egui::Ui) {
         let Some((d, mut sel)) = self.take_structure(ui) else { return };
         let mut acts = Vec::new();
-        edit_row(ui, &["+ Trigger", "Delete"], READ_ONLY, |ui| {
+        let editable = self.sel_writable();
+        let why = if self.sel_is_view() { "Views cannot be changed here" } else { "Read-only: unlock writes to change triggers" };
+        // A trigger that was just created is listed now, so its draft has done its job.
+        if let Some(s) = self.tabs[self.cur].sql.as_mut() {
+            if let Some(i) = s.st.trig.get(sql_trig::NEW).and_then(|nd| d.triggers.iter().position(|t| sql_trig::same(&sql_trig::def_of(t), nd))) {
+                s.st.trig.remove(sql_trig::NEW);
+                (s.st.trig_new, sel[4]) = (false, Some(i));
+            }
+        }
+        let creating = self.tabs[self.cur].sql.as_ref().is_some_and(|s| s.st.trig_new);
+        let drafts: HashMap<String, db::sql::ddl::TrigDef> = self.tabs[self.cur].sql.as_ref().map(|s| s.st.trig.clone()).unwrap_or_default();
+        let key = self.trig_key(&d, sel[4]);
+        let existing = key.as_ref().filter(|k| !k.is_empty()).cloned();
+        let mut left = Vec::new();
+        edit_row_with(ui, editable, if editable { "" } else { why }, |ui, on| {
+            if quiet_enabled(ui, on, "+ Trigger").on_hover_text("Write a new trigger").on_disabled_hover_text(why).clicked() {
+                left.push(Act::NewTrigger);
+            }
+            let hint = if on { "Select a trigger first" } else { why };
+            let r = quiet_enabled(ui, on && existing.is_some(), "Delete").on_hover_text("Drop the selected trigger").on_disabled_hover_text(hint);
+            if let (true, Some(n)) = (r.clicked(), existing.clone()) {
+                left.push(Act::DropTrigger(n));
+            }
+        }, |ui| {
             if refresh_button(ui) {
                 acts.push(Act::Refresh);
             }
+            if let Some(t) = existing.as_ref().and_then(|n| d.triggers.iter().find(|t| &t.name == n)) {
+                if quiet(ui, "Copy CREATE").clicked() {
+                    acts.push(Act::Copy(t.create_sql(&self.tabs[self.cur].sel.coll)));
+                }
+            }
         });
+        acts.extend(left);
         ui.add_space(8.0);
         let heads = [gc("Name", 2.0), gc("Timing", 0.9), gc("Event", 0.9), gc("Definer", 1.5), gc("Statement", 4.0)];
-        if let Some(r) = grid(ui, "triggers", &heads, d.triggers.len(), sel[4], |ui, rect, r, c| {
+        let hl = if creating { None } else { sel[4] };
+        if let Some(r) = grid(ui, "triggers", &heads, d.triggers.len(), hl, |ui, rect, r, c| {
             let t = &d.triggers[r];
             match c {
-                0 => put(ui, rect, &t.name, mono(TXT_SMALL), TEXT(), false),
+                0 => {
+                    let edited = drafts.get(&t.name).is_some_and(|x| !sql_trig::same(&sql_trig::def_of(t), x));
+                    put(ui, rect, &t.name, mono(TXT_SMALL), if edited { WARNING() } else { TEXT() }, false)
+                }
                 1 => put(ui, rect, &t.timing, mono(TXT_SMALL), C_KEYWORD(), false),
                 2 => put(ui, rect, &t.event, mono(TXT_SMALL), C_KEYWORD(), false),
                 3 => put(ui, rect, &t.definer, mono(TXT_SMALL), MUTED(), false),
@@ -357,18 +458,18 @@ impl App {
             }
         }) {
             sel[4] = Some(r);
+            if let Some(s) = self.tabs[self.cur].sql.as_mut() {
+                s.st.trig_new = false;
+            }
         }
-        let shown = sel[4].filter(|i| *i < d.triggers.len()).or(if d.triggers.is_empty() { None } else { Some(0) });
         ui.add_space(12.0);
-        match shown {
-            Some(i) => code_view(ui, "trigger-code", &d.triggers[i].create_sql(&self.tabs[self.cur].sel.coll), ui.available_height() - 36.0),
+        match &key {
+            Some(k) => self.trig_editor(ui, &d, k, editable),
             None => {
                 ui.add_space(20.0);
                 ui.vertical_centered(|ui| ui.label(RichText::new("This table has no triggers").size(TXT_SMALL).color(FAINT())));
             }
         }
-        ui.add_space(8.0);
-        ui.label(RichText::new("Read-only: unlock writes to change triggers").size(TXT_SMALL).color(FAINT()));
         self.keep(&ui.ctx().clone(), d, sel, acts);
     }
 
@@ -437,18 +538,6 @@ impl App {
 
 fn refresh_button(ui: &mut egui::Ui) -> bool {
     icon_button(ui, "⟳", true).on_hover_text("Reload the structure").clicked()
-}
-
-/// The row above a grid: actions that need writes, shown disabled, then a note, then `right`.
-fn edit_row(ui: &mut egui::Ui, buttons: &[&str], note: &str, right: impl FnOnce(&mut egui::Ui)) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 8.0;
-        for b in buttons {
-            quiet_enabled(ui, false, *b).on_disabled_hover_text(READ_ONLY);
-        }
-        ui.label(RichText::new(note).size(TXT_SMALL).color(FAINT()));
-        right_group(ui, right);
-    });
 }
 
 /// The Structure view's row: `buttons` draws the actions given whether writes are allowed, then the note.
@@ -712,9 +801,10 @@ impl App {
     pub(super) fn sql_structure_demo(&mut self, which: &str) {
         let view = match which {
             "structure" | "coledit" | "stagebar" => View::Structure,
+            "fkcell" => View::Documents,
             "info" => View::Info,
-            "relations" => View::Relations,
-            "triggers" => View::Triggers,
+            "relations" | "addrel" => View::Relations,
+            "triggers" | "trigedit" => View::Triggers,
             _ => return,
         };
         let col = |name: &str, ty: &str, nullable: bool, key: &str, default: Option<&str>, expr: bool, extra: &str, coll: bool, comment: &str| Column {
@@ -765,6 +855,12 @@ impl App {
                 event: "UPDATE".into(),
                 definer: "app@%".into(),
                 body: "BEGIN\n  IF NEW.status = 'refunded' AND OLD.status <> 'paid' THEN\n    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Only paid orders can be refunded';\n  END IF;\nEND".into(),
+            }, Trigger {
+                name: "orders_after_insert".into(),
+                timing: "AFTER".into(),
+                event: "INSERT".into(),
+                definer: "app@%".into(),
+                body: "INSERT INTO audit_log (tbl, row_id, action) VALUES ('orders', NEW.id, 'insert')".into(),
             }],
             status: db::sql::structure::Status {
                 engine: "InnoDB".into(),

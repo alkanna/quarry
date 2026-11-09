@@ -102,7 +102,18 @@ impl App {
                         (s.cols, s.pk, s.estimated, s.matched) = (cols, pk, estimated, matched);
                     }
                 }
+                Msg::SqlOrphans { req, res } => {
+                    if let Some(Modal::FkEdit(f)) = self.modal.as_mut() {
+                        f.orphans_done(req, res);
+                    }
+                }
                 Msg::SqlStructure { req, res } => {
+                    // The Add relation dialog asks for the table it points at on a request of its own.
+                    if let Some(Modal::FkEdit(f)) = self.modal.as_mut() {
+                        if f.parent_loaded(req, res.clone()) {
+                            continue;
+                        }
+                    }
                     if let Some(s) = self.tabs.iter_mut().find(|t| t.idx_req == req).and_then(|t| t.sql.as_mut()) {
                         s.st.finish(res);
                     }

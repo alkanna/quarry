@@ -647,6 +647,8 @@ pub(super) enum Danger {
     UndoAlter(std::time::Instant),
     /// Drop a SQL database, table or view, or empty a table; `table` is empty for a database.
     SqlDrop { conn: u64, schema: String, table: String, kind: DropKind },
+    /// A trigger of the open SQL table, by name.
+    DropTrigger(String),
 }
 
 /// What to run once writes are allowed.
@@ -668,6 +670,8 @@ pub(super) enum Modal {
     SqlNewDb(Box<NewDb>),
     SqlNewTable(Box<NewTable>),
     SqlDrop(Box<DropForm>),
+    /// Add a foreign key to the open SQL table, with its ALTER preview.
+    FkEdit(Box<FkForm>),
     Typed { title: String, expect: String, typed: String, action: Danger },
     CreateIndex(Box<IndexForm>),
     AggWrite(Vec<Document>),

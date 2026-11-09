@@ -30,6 +30,9 @@ pub enum SqlUndo {
     CreatedDb,
     /// `made` is the table's CREATE_TIME right after the create, so the undo can tell it is still that table.
     CreatedTable { made: Option<String> },
+    /// A trigger change: the statements that reverse it, each run on its own, and what the live structure must show
+    /// before they do.
+    Ddl { steps: Vec<String>, guards: Vec<super::ddl::Guard>, label: String },
 }
 
 impl SqlUndo {
@@ -39,7 +42,7 @@ impl SqlUndo {
             SqlUndo::Update(r) => r.first().map(|r| r.pk.clone()),
             SqlUndo::Delete(r) => r.first().map(pk_of),
             SqlUndo::Insert(r) => r.first().cloned(),
-            SqlUndo::Alter(_) => None,
+            SqlUndo::Alter(_) | SqlUndo::Ddl { .. } => None,
             SqlUndo::CreatedDb | SqlUndo::CreatedTable { .. } => None,
         };
         first.map(|d| d.keys().cloned().collect()).unwrap_or_default()
@@ -54,6 +57,7 @@ impl SqlUndo {
             SqlUndo::Alter(u) => u.label.clone(),
             SqlUndo::CreatedDb => "created database".into(),
             SqlUndo::CreatedTable { .. } => "created table".into(),
+            SqlUndo::Ddl { label, .. } => label.clone(),
         }
     }
 }
@@ -364,6 +368,10 @@ impl Worker {
                 let u = (**u).clone();
                 return super::ddl::undo(&db, UndoAction { at: when, conn, db: schema, coll: table, kind }, u, read_only).await;
             }
+            if let UndoKind::Sql { undo: SqlUndo::Ddl { steps, guards, label }, .. } = &kind {
+                let (steps, guards, label) = (steps.clone(), guards.clone(), label.clone());
+                return super::ddl::undo_ddl(&db, UndoAction { at: when, conn, db: schema, coll: table, kind }, steps, guards, label, read_only).await;
+            }
             let UndoKind::Sql { cols, undo } = kind else { return Msg::Written { at, res: Err("Not a SQL change".into()), undo: None, reload: false, retry: None } };
             let res = match undo.clone() {
                 SqlUndo::Update(edits) => {
@@ -377,7 +385,7 @@ impl Worker {
                 }
                 SqlUndo::Insert(pks) => apply_deletes(&db, &schema, &table, &cols, &pk, &pks, read_only).await.map(|_| "Removed the inserted rows".to_string()),
                 // Taken before this match, where the structure statements run.
-                SqlUndo::Alter(_) => Err("Not a row change".into()),
+                SqlUndo::Alter(_) | SqlUndo::Ddl { .. } => Err("Not a row change".into()),
                 SqlUndo::CreatedDb | SqlUndo::CreatedTable { .. } => Err("Handled by sql_undo_create".to_string()),
             };
             let undo = res.is_err().then(|| UndoAction { at: when, conn, db: schema, coll: table, kind: UndoKind::Sql { cols, undo } });

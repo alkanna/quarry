@@ -38,7 +38,7 @@ Update this list when a step lands. Each step is reviewed before it is ticked.
 **v2 progress** (branch, state):
 - [x] 1. Attached connections in the shell: runtime 371fb4d, review fixes d848044, UI 5e1fcbd. Opus review of the relay done (findings fixed, see "Review (c5761a5)").
 - [x] 2. Structure editing: built e993e30, opus review found 14 issues, all fixed in c8d5a09 (see "Review (e993e30)").
-- [ ] 3. Relations and 4. triggers: building on `relations-triggers` (from e993e30).
+- [ ] 3. Relations and 4. triggers: built 49a4432 and c5c77f1 on `relations-triggers`, rebased onto feat/mysql on `reltrig-fix` (FK changes take the same planned, checked ALTER path as column and index changes); opus review found 14 issues, fixes pending.
 - [x] 5. Import and export: built 16bb646, opus review found 13 issues, all fixed in 90ff5fc (see "Review (16bb646)").
 - [x] 6. Create and drop database and table: built ee27114 on `create-drop`, rebased onto feat/mysql as 339c804 on `create-fix`; opus review found 6 issues (9 points), all fixed in 305b250 (see "Review (ee27114)"). New database and New table dialogs with the statement preview, typed confirmation for drop database, drop table, drop view and empty table (`Danger::SqlDrop`), the "+" in the sidebar, undo of a create while the object is still empty (`SqlUndo::CreatedDb`, `CreatedTable`), everything disabled while locked. Statement builders and live tests in src/db/sql/create.rs, dialogs in src/app/sql_create.rs.
 - [ ] 7. Connection form Advanced tab: design approved by the user on 2026-11-09 (page "Connection · Advanced tab", frames 12544 and 12617, commit 2f71228); build not started.

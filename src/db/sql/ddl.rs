@@ -4,9 +4,9 @@
 //! `quote_ident`, strings through `lit`, and the few places that take SQL from the user (an expression
 //! default) are checked. Every statement runs as a prepared statement, which holds exactly one.
 
-use super::structure::{load, split_type, Column, Index, Structure};
+use super::structure::{load, split_type, Column, ForeignKey, Index, Structure, Trigger};
 use super::value::lit;
-use super::{Db, Dialect};
+use super::{Db, Dialect, Pool};
 use crate::db::{e, Msg, Res, UndoAction, UndoKind, Worker};
 use std::collections::HashSet;
 use std::time::Instant;
@@ -185,6 +185,9 @@ pub enum Change {
     DropIndex(String),
     /// `def` is the index as it is now, for servers that cannot RENAME INDEX.
     RenameIndex { from: String, to: String, def: IndexDef },
+    /// `db` of the key is the table's own schema; a `ref_db` equal to it is written without a schema.
+    AddFk(ForeignKey),
+    DropFk(String),
 }
 
 impl Change {
@@ -199,6 +202,8 @@ impl Change {
             Change::AddIndex(d) => format!("Add index {}", if d.kind == IndexKind::Primary { "PRIMARY" } else { &d.name }),
             Change::DropIndex(n) => format!("Drop index {n}"),
             Change::RenameIndex { from, to, .. } => format!("Rename index {from} to {to}"),
+            Change::AddFk(k) => format!("Add foreign key {}", k.name),
+            Change::DropFk(n) => format!("Drop foreign key {n}"),
         }
     }
 }
@@ -517,6 +522,21 @@ fn add_index(d: Dialect, m: Mode, ix: &IndexDef) -> Result<String, String> {
     Ok(format!("ADD {kind}INDEX {} ({cols}){comment}{hidden}", d.quote_ident(&ix.name)))
 }
 
+/// The actions a foreign key can take, as the server writes them.
+pub const FK_ACTIONS: [&str; 4] = ["RESTRICT", "CASCADE", "SET NULL", "NO ACTION"];
+
+fn add_fk(d: Dialect, k: &ForeignKey) -> Result<String, String> {
+    check_ident(&k.name, "A foreign key")?;
+    check_ident(&k.ref_table, "The referenced table")?;
+    if k.cols.is_empty() || k.cols.len() != k.ref_cols.len() {
+        return Err("Pick the same number of columns on both sides.".into());
+    }
+    let action = |a: &str| FK_ACTIONS.iter().find(|x| x.eq_ignore_ascii_case(a.trim())).copied().ok_or_else(|| format!("{a:?} is not a foreign key action."));
+    let names = |v: &[String]| v.iter().map(|c| d.quote_ident(c)).collect::<Vec<_>>().join(", ");
+    let target = if k.ref_db.is_empty() || k.ref_db == k.db { d.quote_ident(&k.ref_table) } else { d.qualified(&k.ref_db, &k.ref_table) };
+    Ok(format!("ADD CONSTRAINT {}\n    FOREIGN KEY ({})\n    REFERENCES {} ({})\n    ON UPDATE {} ON DELETE {}", d.quote_ident(&k.name), names(&k.cols), target, names(&k.ref_cols), action(&k.on_update)?, action(&k.on_delete)?))
+}
+
 fn drop_index(d: Dialect, name: &str) -> String {
     if name == "PRIMARY" { "DROP PRIMARY KEY".into() } else { format!("DROP INDEX {}", d.quote_ident(name)) }
 }
@@ -530,6 +550,8 @@ fn clause(d: Dialect, m: Mode, can_rename: bool, c: &Change) -> Result<Vec<Strin
         Change::Drop(n) => vec![format!("DROP COLUMN {}", d.quote_ident(n))],
         Change::AddIndex(ix) => vec![add_index(d, m, ix)?],
         Change::DropIndex(n) => vec![drop_index(d, n)],
+        Change::AddFk(k) => vec![add_fk(d, k)?],
+        Change::DropFk(n) => vec![format!("DROP FOREIGN KEY {}", d.quote_ident(n))],
         Change::RenameIndex { from, to, def } => {
             check_ident(to, "An index")?;
             if can_rename {
@@ -561,11 +583,30 @@ pub fn alter(d: Dialect, version: &str, m: Mode, table: &str, changes: &[Change]
 struct Sim {
     cols: Vec<(String, Result<ColDef, String>)>,
     idx: Vec<IndexDef>,
+    fks: Vec<ForeignKey>,
 }
 
 impl Sim {
     fn of(st: &Structure) -> Sim {
-        Sim { cols: st.columns.iter().map(|c| (c.name.clone(), ColDef::in_table(st, c))).collect(), idx: st.indexes.iter().map(IndexDef::from_index).collect() }
+        Sim { cols: st.columns.iter().map(|c| (c.name.clone(), ColDef::in_table(st, c))).collect(), idx: st.indexes.iter().map(IndexDef::from_index).collect(), fks: st.foreign_keys.clone() }
+    }
+
+    /// An index the server can use for a key on these columns: it starts with them, in order, whole.
+    fn serves(&self, cols: &[String]) -> bool {
+        self.idx.iter().any(|ix| matches!(ix.kind, IndexKind::Index | IndexKind::Unique | IndexKind::Primary) && ix.cols.len() >= cols.len() && ix.cols.iter().zip(cols).all(|(a, b)| a.prefix.is_none() && same_name(&a.name, b)))
+    }
+
+    fn fk_at(&self, name: &str) -> Option<usize> {
+        self.fks.iter().position(|k| same_name(&k.name, name))
+    }
+
+    /// The index to drop along with a key: one named like the key on exactly its columns is what the server
+    /// (or this app) made for it. Another key that relies on it keeps it.
+    fn backing_index(&self, name: &str) -> Option<String> {
+        let fk = &self.fks[self.fk_at(name)?];
+        let ix = self.idx.iter().find(|ix| ix.kind == IndexKind::Index && same_name(&ix.name, &fk.name) && ix.cols.len() == fk.cols.len() && ix.cols.iter().zip(&fk.cols).all(|(a, b)| a.prefix.is_none() && !a.desc && same_name(&a.name, b)))?;
+        let shared = self.fks.iter().any(|o| !same_name(&o.name, &fk.name) && o.cols.len() <= ix.cols.len() && ix.cols.iter().zip(&o.cols).all(|(a, b)| same_name(&a.name, b)));
+        (!shared).then(|| ix.name.clone())
     }
 
     fn at(&self, name: &str) -> Option<usize> {
@@ -586,10 +627,16 @@ impl Sim {
         self.cols.insert(at.min(self.cols.len()), col);
     }
 
+    /// The server renames a column in the indexes and foreign keys that hold it.
     fn rename_in_indexes(&mut self, from: &str, to: &str) {
         for ix in &mut self.idx {
             for c in ix.cols.iter_mut().filter(|c| same_name(&c.name, from)) {
                 c.name = to.into();
+            }
+        }
+        for k in &mut self.fks {
+            for c in k.cols.iter_mut().filter(|c| same_name(c, from)) {
+                *c = to.into();
             }
         }
     }
@@ -656,6 +703,17 @@ impl Sim {
                 self.idx[i].name = to.clone();
                 Ok(vec![Change::RenameIndex { from: to.clone(), to: from.clone(), def: IndexDef { name: to.clone(), ..def.clone() } }])
             }
+            Change::AddFk(k) => {
+                if self.fk_at(&k.name).is_some() {
+                    return Err(format!("The table already has a foreign key called {}.", k.name));
+                }
+                self.fks.push(k.clone());
+                Ok(vec![Change::DropFk(k.name.clone())])
+            }
+            Change::DropFk(name) => {
+                let i = self.fk_at(name).ok_or_else(|| format!("Foreign key {name} is not on the table."))?;
+                Ok(vec![Change::AddFk(self.fks.remove(i))])
+            }
         }
     }
 }
@@ -686,33 +744,46 @@ fn final_name(name: &str, later: &[Change]) -> String {
     })
 }
 
-/// The changes with the index edits the engine will not do by itself: MariaDB refuses to drop a column that an
+/// The changes with the index edits the engine will not do by itself. MariaDB refuses to drop a column that an
 /// index holds, so each such index is dropped first and added again without the column (or left out when the
-/// column was its only one).
+/// column was its only one). A new foreign key gets an index of its own when none serves its columns, written
+/// out so the preview shows it, and dropping a key takes the index made for it along.
 pub fn expand(d: Dialect, st: &Structure, changes: &[Change]) -> Vec<Change> {
-    if d.drops_index_with_column() {
-        return changes.to_vec();
-    }
     let mut sim = Sim::of(st);
     let mut out = Vec::new();
     for (k, c) in changes.iter().enumerate() {
-        if let Change::Drop(col) = c {
-            for ix in sim.idx.iter().filter(|ix| ix.cols.iter().any(|c| same_name(&c.name, col))) {
-                out.push(Change::DropIndex(if ix.kind == IndexKind::Primary { "PRIMARY".into() } else { ix.name.clone() }));
-                let mut rest = ix.clone();
-                rest.cols.retain(|c| !same_name(&c.name, col));
-                // The server reads the columns of an added index by the names the whole ALTER leaves, so a column a
-                // later change renames goes in by its new name.
-                for ic in &mut rest.cols {
-                    ic.name = final_name(&ic.name, &changes[k + 1..]);
-                }
-                if !rest.cols.is_empty() {
-                    out.push(Change::AddIndex(rest));
+        match c {
+            Change::Drop(col) if !d.drops_index_with_column() => {
+                for ix in sim.idx.iter().filter(|ix| ix.cols.iter().any(|c| same_name(&c.name, col))) {
+                    out.push(Change::DropIndex(if ix.kind == IndexKind::Primary { "PRIMARY".into() } else { ix.name.clone() }));
+                    let mut rest = ix.clone();
+                    rest.cols.retain(|c| !same_name(&c.name, col));
+                    // The server reads the columns of an added index by the names the whole ALTER leaves, so a column a
+                    // later change renames goes in by its new name.
+                    for ic in &mut rest.cols {
+                        ic.name = final_name(&ic.name, &changes[k + 1..]);
+                    }
+                    if !rest.cols.is_empty() {
+                        out.push(Change::AddIndex(rest));
+                    }
                 }
             }
+            Change::AddFk(fk) if !sim.serves(&fk.cols) => {
+                let taken = |n: &str| sim.idx.iter().any(|x| same_name(&x.name, n));
+                let name = if taken(&fk.name) { format!("{}_idx", fk.name) } else { fk.name.clone() };
+                let ix = IndexDef { name, kind: IndexKind::Index, cols: fk.cols.iter().map(|c| IdxCol { name: c.clone(), prefix: None, desc: false }).collect(), ..Default::default() };
+                let _ = sim.apply(&Change::AddIndex(ix.clone()));
+                out.push(Change::AddIndex(ix));
+            }
+            _ => {}
         }
+        let backing = if let Change::DropFk(n) = c { sim.backing_index(n) } else { None };
         let _ = sim.apply(c);
         out.push(c.clone());
+        if let Some(ix) = backing {
+            let _ = sim.apply(&Change::DropIndex(ix.clone()));
+            out.push(Change::DropIndex(ix));
+        }
     }
     out
 }
@@ -731,9 +802,10 @@ pub struct AlterUndo {
     pub loss: Vec<String>,
     /// The sql_mode the steps' literals are written for.
     pub mode: Mode,
-    /// The columns and indexes the steps touch.
+    /// The columns, indexes and foreign keys the steps touch.
     pub cols: Vec<String>,
     pub idx: Vec<String>,
+    pub fks: Vec<String>,
     /// `snapshot` of those right after the change ran, filled by the worker.
     pub expect: Vec<(String, Option<String>)>,
 }
@@ -760,8 +832,8 @@ fn undo_of(d: Dialect, version: &str, m: Mode, table: &str, before: &Structure, 
     groups.reverse();
     let steps = groups.iter().map(|g| alter(d, version, m, table, g)).collect::<Result<Vec<_>, _>>()?;
     let loss = undo_loss(&sim, &groups);
-    let (cols, idx) = touched(&groups);
-    Ok(AlterUndo { steps, label: String::new(), loss, mode: m, cols, idx, expect: Vec::new() })
+    let (cols, idx, fks) = touched(&groups);
+    Ok(AlterUndo { steps, label: String::new(), loss, mode: m, cols, idx, fks, expect: Vec::new() })
 }
 
 /// The statements that put the table back, from the structure read before the changes ran. Err says why
@@ -801,9 +873,9 @@ fn undo_loss(after: &Sim, groups: &[Vec<Change>]) -> Vec<String> {
     out
 }
 
-/// The column and index names the undo steps read or write, with no repeats.
-fn touched(groups: &[Vec<Change>]) -> (Vec<String>, Vec<String>) {
-    let (mut cols, mut idx): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
+/// The column, index and foreign key names the undo steps read or write, with no repeats.
+fn touched(groups: &[Vec<Change>]) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let (mut cols, mut idx, mut fks): (Vec<String>, Vec<String>, Vec<String>) = (Vec::new(), Vec::new(), Vec::new());
     fn add(v: &mut Vec<String>, n: &str) {
         if !v.iter().any(|x| same_name(x, n)) {
             v.push(n.to_string());
@@ -840,17 +912,29 @@ fn touched(groups: &[Vec<Change>]) -> (Vec<String>, Vec<String>) {
                 add(&mut idx, to);
                 None
             }
+            Change::AddFk(k) => {
+                add(&mut fks, &k.name);
+                for c in &k.cols {
+                    add(&mut cols, c);
+                }
+                None
+            }
+            Change::DropFk(n) => {
+                add(&mut fks, n);
+                None
+            }
         };
         if let Some(Pos::After(n)) = pos {
             add(&mut cols, n);
         }
     }
-    (cols, idx)
+    (cols, idx, fks)
 }
 
-/// How the server shows each named column and index, or None when it is not there. Two snapshots are equal
-/// when nothing an undo relies on changed in between.
-pub fn snapshot(st: &Structure, cols: &[String], idx: &[String]) -> Vec<(String, Option<String>)> {
+/// How the server shows each named column, index and foreign key, or None when it is not there. Two snapshots are
+/// equal when nothing an undo relies on changed in between. Every part is compared exactly, table names too: both
+/// snapshots come from the same server, which spells a name the same way each time whatever lower_case_table_names is.
+pub fn snapshot(st: &Structure, cols: &[String], idx: &[String], fks: &[String]) -> Vec<(String, Option<String>)> {
     let col = |n: &String| {
         let c = st.columns.iter().find(|c| same_name(&c.name, n));
         (format!("column {n}"), c.map(|c| format!("{}|{}|{}|{:?}|{}|{}|{:?}|{}|{:?}|{:?}", c.name, c.full_type, c.nullable, c.default, c.default_expr, c.extra, c.collation, c.comment, c.srid, c.check)))
@@ -859,14 +943,25 @@ pub fn snapshot(st: &Structure, cols: &[String], idx: &[String]) -> Vec<(String,
         let i = st.indexes.iter().find(|i| same_name(&i.name, n));
         (format!("index {n}"), i.map(|i| format!("{}|{}|{}|{}|{}|{}", i.name, i.unique, i.kind, i.comment, i.invisible, i.cols.iter().map(|c| format!("{}:{:?}:{}:{:?}", c.name, c.prefix, c.desc, c.expr)).collect::<Vec<_>>().join(","))))
     };
-    cols.iter().map(col).chain(idx.iter().map(index)).collect()
+    let fk = |n: &String| {
+        let k = st.foreign_keys.iter().find(|k| same_name(&k.name, n));
+        (format!("foreign key {n}"), k.map(|k| format!("{}|{}|{}|{}|{}|{}|{}", k.name, k.cols.join(","), k.ref_db, k.ref_table, k.ref_cols.join(","), k.on_update, k.on_delete)))
+    };
+    cols.iter().map(col).chain(idx.iter().map(index)).chain(fks.iter().map(fk)).collect()
 }
 
 /// What the staged changes cost that undo cannot give back. Shown in the preview.
 pub fn warnings(before: &Structure, changes: &[Change]) -> Vec<String> {
     let mut out = Vec::new();
+    let mut fk_sim = Sim::of(before);
     let sim = Sim::of(before);
     for c in changes {
+        if let Change::DropFk(n) = c {
+            if let Some(ix) = fk_sim.backing_index(n) {
+                out.push(format!("Dropping {n} also drops the index {ix}, which was made for it. Undo brings both back."));
+            }
+        }
+        let _ = fk_sim.apply(c);
         match c {
             Change::Drop(n) => out.push(format!("Dropping {n} deletes its values for good. Undo brings the column back empty.")),
             Change::Modify { from, def, .. } => {
@@ -908,6 +1003,164 @@ pub fn free_name(taken: &[String], base: &str) -> String {
     (2..).map(|n| format!("{first}{n}")).find(|n| !set.contains(&n.to_lowercase())).unwrap_or(first)
 }
 
+/// Why a column pair cannot be the two sides of a foreign key, in the words of the person adding it. The
+/// server's own answer ("incompatible") names no column, so the rules it enforces are checked first.
+pub fn fk_pair_problem(child_table: &str, child: &Column, parent_table: &str, parent: &Column) -> Option<String> {
+    let (c, p) = (format!("{child_table}.{}", child.name), format!("{parent_table}.{}", parent.name));
+    let (ct, cargs, cu) = split_type(&child.full_type);
+    let (pt, pargs, pu) = split_type(&parent.full_type);
+    let show = |col: &Column| col.full_type.to_ascii_uppercase();
+    #[derive(PartialEq)]
+    enum Fam {
+        Int,
+        Decimal,
+        Float,
+        Double,
+        Text,
+        Bin,
+        Other(String),
+    }
+    let fam = |t: &str| -> Option<Fam> {
+        Some(match t {
+            "TINYINT" | "SMALLINT" | "MEDIUMINT" | "INT" | "INTEGER" | "BIGINT" => Fam::Int,
+            "DECIMAL" | "NUMERIC" => Fam::Decimal,
+            "FLOAT" => Fam::Float,
+            "DOUBLE" | "REAL" => Fam::Double,
+            "CHAR" | "VARCHAR" => Fam::Text,
+            "BINARY" | "VARBINARY" => Fam::Bin,
+            "DATE" | "DATETIME" | "TIMESTAMP" | "TIME" | "YEAR" | "BIT" | "ENUM" | "SET" => Fam::Other(t.to_string()),
+            _ => return None,
+        })
+    };
+    for (name, t, col) in [(&c, &ct, child), (&p, &pt, parent)] {
+        if fam(t).is_none() {
+            return Some(format!("{name} is {}, which cannot be part of a foreign key.", show(col)));
+        }
+    }
+    let (fc, fp) = (fam(&ct)?, fam(&pt)?);
+    if fc != fp {
+        return Some(format!("{c} is {} but {p} is {}. A foreign key needs the same kind of type on both sides.", show(child), show(parent)));
+    }
+    let size = |t: &str| if t == "INTEGER" { "INT".to_string() } else { t.to_string() };
+    match fc {
+        Fam::Int if size(&ct) != size(&pt) || cu != pu => Some(format!("{c} is {} but {p} is {}. Integer columns must have the same size and the same signedness.", show(child), show(parent))),
+        Fam::Decimal | Fam::Float | Fam::Double if cargs != pargs || cu != pu || (fc == Fam::Float && ct != pt) => Some(format!("{c} is {} but {p} is {}. Number columns must match exactly.", show(child), show(parent))),
+        Fam::Other(_) if child.full_type.to_ascii_lowercase() != parent.full_type.to_ascii_lowercase() => Some(format!("{c} is {} but {p} is {}. These types must match exactly.", show(child), show(parent))),
+        Fam::Text => {
+            let (a, b) = (child.collation.as_deref().map(str::to_ascii_lowercase), parent.collation.as_deref().map(str::to_ascii_lowercase));
+            (a != b).then(|| format!("{c} uses {} but {p} uses {}. Give both columns the same collation.", child.collation.as_deref().unwrap_or("the default collation"), parent.collation.as_deref().unwrap_or("the default collation")))
+        }
+        _ => None,
+    }
+}
+
+/// The first problem with a whole key, before the server is asked: column pairs that do not fit, SET NULL on a
+/// column that cannot be NULL, and a referenced side with no index to lean on.
+pub fn fk_problem(own: &Structure, table: &str, parent: &Structure, fk: &ForeignKey) -> Option<String> {
+    let find = |st: &Structure, n: &str| st.columns.iter().find(|c| c.name.eq_ignore_ascii_case(n)).cloned();
+    for (a, b) in fk.cols.iter().zip(&fk.ref_cols) {
+        let (Some(ca), Some(cb)) = (find(own, a), find(parent, b)) else { return Some("A picked column is not in its table any more.".into()) };
+        if let Some(p) = fk_pair_problem(table, &ca, &fk.ref_table, &cb) {
+            return Some(p);
+        }
+        let set_null = fk.on_delete.eq_ignore_ascii_case("SET NULL") || fk.on_update.eq_ignore_ascii_case("SET NULL");
+        if set_null && !ca.nullable {
+            return Some(format!("SET NULL needs a column that allows NULL, and {table}.{a} does not."));
+        }
+    }
+    let led = parent.indexes.iter().any(|ix| ix.cols.len() >= fk.ref_cols.len() && ix.cols.iter().zip(&fk.ref_cols).all(|(x, y)| x.prefix.is_none() && x.name.eq_ignore_ascii_case(y)));
+    (!led).then(|| format!("{} has no index that starts with ({}). Add an index there first.", fk.ref_table, fk.ref_cols.join(", ")))
+}
+
+/// Counts the rows of the table whose key points at nothing, which is what makes ADD FOREIGN KEY fail.
+pub fn orphans_sql(d: Dialect, schema: &str, table: &str, fk: &ForeignKey) -> String {
+    let q = |n: &str| d.quote_ident(n);
+    let parent = d.qualified(if fk.ref_db.is_empty() { schema } else { &fk.ref_db }, &fk.ref_table);
+    let set = |t: &str, cols: &[String]| cols.iter().map(|c| format!("{t}.{}", q(c))).collect::<Vec<_>>();
+    let present = set("c", &fk.cols).iter().map(|c| format!("{c} IS NOT NULL")).collect::<Vec<_>>().join(" AND ");
+    let same = set("c", &fk.cols).iter().zip(set("p", &fk.ref_cols)).map(|(a, b)| format!("{b} = {a}")).collect::<Vec<_>>().join(" AND ");
+    format!("SELECT COUNT(*) AS n FROM {} c WHERE {present} AND NOT EXISTS (SELECT 1 FROM {parent} p WHERE {same})", d.qualified(schema, table))
+}
+
+/// A trigger as the editor holds it. The body is the user's own SQL, written after FOR EACH ROW as typed.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TrigDef {
+    pub name: String,
+    pub timing: String,
+    pub event: String,
+    pub body: String,
+}
+
+/// The body without its trailing `;`. A body that is not BEGIN ... END must be one statement, so a second
+/// statement typed after a `;` is refused instead of running.
+pub fn check_body(body: &str, bs: bool, ansi: bool) -> Result<String, String> {
+    use super::lex::{tokens_with, Tok};
+    let text = body.trim();
+    let text = text.strip_suffix(';').unwrap_or(text).trim_end();
+    let toks = tokens_with(text, bs, ansi);
+    let code: Vec<_> = toks.iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment)).collect();
+    let Some((first, r)) = code.first() else { return Err("The trigger body is empty.".into()) };
+    if *first == Tok::Word && text[r.clone()].eq_ignore_ascii_case("BEGIN") {
+        return Ok(text.to_string());
+    }
+    if code.iter().any(|(t, r)| *t == Tok::Punct && &text[r.clone()] == ";") {
+        return Err("A body of several statements goes inside BEGIN ... END.".into());
+    }
+    Ok(text.to_string())
+}
+
+fn trigger_head(d: Dialect, bs: bool, ansi: bool, table: &str, t: &TrigDef, replace: bool) -> Result<String, String> {
+    check_ident(&t.name, "A trigger")?;
+    let timing = t.timing.trim().to_ascii_uppercase();
+    let event = t.event.trim().to_ascii_uppercase();
+    if !matches!(timing.as_str(), "BEFORE" | "AFTER") {
+        return Err("Timing is BEFORE or AFTER.".into());
+    }
+    if !matches!(event.as_str(), "INSERT" | "UPDATE" | "DELETE") {
+        return Err("The event is INSERT, UPDATE or DELETE.".into());
+    }
+    let body = check_body(&t.body, bs, ansi)?;
+    let head = if replace && d == Dialect::MariaDb { "CREATE OR REPLACE TRIGGER" } else { "CREATE TRIGGER" };
+    Ok(format!("{head} {} {timing} {event} ON {}\nFOR EACH ROW\n{body}", d.quote_ident(&t.name), d.quote_ident(table)))
+}
+
+/// The statements that save a trigger, each run on its own: one CREATE for a new trigger; for an edit MariaDB
+/// replaces in place and MySQL, which cannot, drops first.
+pub fn trigger_steps(d: Dialect, bs: bool, ansi: bool, table: &str, t: &TrigDef, exists: bool) -> Result<Vec<String>, String> {
+    let create = trigger_head(d, bs, ansi, table, t, exists)?;
+    Ok(if exists && d == Dialect::MySql { vec![drop_trigger(d, &t.name, false), create] } else { vec![create] })
+}
+
+pub fn drop_trigger(d: Dialect, name: &str, if_exists: bool) -> String {
+    format!("DROP TRIGGER {}{}", if if_exists { "IF EXISTS " } else { "" }, d.quote_ident(name))
+}
+
+/// The statements as the preview shows them.
+pub fn script(steps: &[String]) -> String {
+    steps.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n\n")
+}
+
+/// What a trigger undo expects to find before it runs, so it never overwrites a change made since: the trigger as
+/// the change left it, or None for one that must be absent.
+#[derive(Clone, Debug)]
+pub struct Guard {
+    pub name: String,
+    pub present: Option<Trigger>,
+}
+
+impl Guard {
+    /// Err says what changed.
+    pub fn check(&self, st: &Structure) -> Result<(), String> {
+        let same = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
+        let live = st.triggers.iter().find(|t| same(&t.name, &self.name));
+        match (live, &self.present) {
+            (Some(l), Some(w)) if same(&l.timing, &w.timing) && same(&l.event, &w.event) && l.body.trim() == w.body.trim() => Ok(()),
+            (None, None) => Ok(()),
+            _ => Err(format!("The trigger {} is not as this change left it, so undo would overwrite a newer change. Undo it by hand.", self.name)),
+        }
+    }
+}
+
 /// A writable connection whose session reads text the way the statements were written for. When the server's
 /// sql_mode changed since, nothing runs and the error carries the mode now in force.
 pub(super) async fn session(db: &Db, schema: &str, read_only: bool, m: Mode) -> Result<sqlx::MySqlConnection, (String, Option<String>)> {
@@ -936,7 +1189,7 @@ pub(super) async fn undo(db: &Db, a: UndoAction, u: AlterUndo, read_only: bool) 
     let (mut ran, mut seen) = (0, None);
     let res: Res<String> = async {
         let st = load(db, &schema, &table).await?;
-        let now = snapshot(&st, &u.cols, &u.idx);
+        let now = snapshot(&st, &u.cols, &u.idx, &u.fks);
         if now.len() != u.expect.len() {
             return Err("Undo refused: the table could not be compared with how the change left it.".to_string());
         }
@@ -980,7 +1233,7 @@ impl Worker {
             let undo = match (res.is_ok(), undo) {
                 (true, Some(mut u)) => match load(&db, &schema, &table).await {
                     Ok(st) => {
-                        u.expect = snapshot(&st, &u.cols, &u.idx);
+                        u.expect = snapshot(&st, &u.cols, &u.idx, &u.fks);
                         Some(undo_action(conn, &schema, &table, u))
                     }
                     Err(err) => {
@@ -991,6 +1244,101 @@ impl Worker {
                 _ => None,
             };
             Msg::SqlAltered { conn, schema, table, res: res.map(|_| done), undo, sql_mode: seen }
+        });
+    }
+}
+
+fn ddl_undo(conn: u64, schema: &str, table: &str, steps: Vec<String>, guards: Vec<Guard>, label: String) -> UndoAction {
+    UndoAction { at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { cols: Vec::new(), undo: super::write::SqlUndo::Ddl { steps, guards, label } } }
+}
+
+/// Runs the statements one at a time on one connection, each as a call of its own.
+async fn run_steps(c: &mut sqlx::MySqlConnection, steps: &[String]) -> Res<()> {
+    for s in steps {
+        sqlx::Executor::execute(&mut *c, s.as_str()).await.map_err(e)?;
+    }
+    Ok(())
+}
+
+/// Runs a recorded undo of a trigger change. The live structure is read first, and anything that is not as the
+/// change left it stops the undo.
+pub(super) async fn undo_ddl(db: &Db, a: UndoAction, steps: Vec<String>, guards: Vec<Guard>, label: String, read_only: bool) -> Msg {
+    let UndoAction { at, conn, db: schema, coll: table, .. } = a;
+    let res = async {
+        let mut c = super::write::writer(db, &schema, read_only).await?;
+        let st = load(db, &schema, &table).await?;
+        for g in &guards {
+            g.check(&st)?;
+        }
+        run_steps(&mut c, &steps).await
+    }
+    .await
+    .map(|_| "Undid the change".to_string());
+    let keep = res.is_err().then(|| UndoAction { at, ..ddl_undo(conn, &schema, &table, steps, guards, label) });
+    Msg::SqlAltered { conn, schema, table, res, undo: keep, sql_mode: None }
+}
+
+/// Reads the trigger being replaced, runs the statements and reads the trigger as it is now. A named fn rather than
+/// an async block, which the compiler cannot prove Send around a borrowed connection.
+async fn trigger_job(db: &Db, schema: &str, table: &str, name: &str, steps: &[String], existed: bool, read_only: bool) -> Res<(Option<String>, Option<Trigger>)> {
+    let mut c = super::write::writer(db, schema, read_only).await?;
+    // Read from the pool with the schema spelled out, since the writer's own connection trips the borrow checker here.
+    let Pool::My(pool) = &db.pool;
+    let show = format!("SHOW CREATE TRIGGER {}", db.dialect.qualified(schema, name));
+    let old = sqlx::raw_sql(&show).fetch_one(pool).await.ok().and_then(|r| super::worker::raw(&r, 2).map(|b| String::from_utf8_lossy(b).into_owned()));
+    if existed && old.is_none() {
+        return Err(format!("Could not read the current definition of {name}, so it was left as it is."));
+    }
+    for (i, s) in steps.iter().enumerate() {
+        if let Err(err) = sqlx::Executor::execute(&mut c, s.as_str()).await {
+            let err = e(err);
+            // Only a step after the DROP can leave the trigger missing.
+            return Err(match (i, &old) {
+                (1.., Some(o)) => match sqlx::Executor::execute(&mut c, o.as_str()).await {
+                    Ok(_) => format!("{err}. The previous trigger was put back."),
+                    Err(back) => format!("{err}. The previous trigger could not be put back ({}). Its definition:\n{o}", e(back)),
+                },
+                _ => err,
+            });
+        }
+    }
+    let live = load(db, schema, table).await.ok().and_then(|st| st.triggers.into_iter().find(|t| t.name.eq_ignore_ascii_case(name)));
+    Ok((old, live))
+}
+
+impl Worker {
+    /// Saves or drops a trigger. The definition it replaces is read first with SHOW CREATE TRIGGER: it is put
+    /// back when the new one is refused (MySQL has to drop before it creates) and it is what undo restores.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sql_trigger(&self, conn: u64, db: Db, schema: String, table: String, name: String, steps: Vec<String>, existed: bool, dropping: bool, read_only: bool, done: String) {
+        self.spawn(async move {
+            let res = trigger_job(&db, &schema, &table, &name, &steps, existed, read_only).await;
+            let (res, undo) = match res {
+                Ok((old, live)) => {
+                    let d = db.dialect;
+                    let (back, present, label) = match (&old, dropping) {
+                        (Some(o), true) => (Some(vec![o.clone()]), None, format!("dropped trigger {name}")),
+                        (Some(o), false) => (Some(vec![drop_trigger(d, &name, true), o.clone()]), live, format!("changed trigger {name}")),
+                        (None, false) => (Some(vec![drop_trigger(d, &name, true)]), live, format!("created trigger {name}")),
+                        (None, true) => (None, None, String::new()),
+                    };
+                    let usable = dropping || present.is_some();
+                    let undo = back.filter(|_| usable).map(|s| ddl_undo(conn, &schema, &table, s, vec![Guard { name: name.clone(), present }], label));
+                    (Ok(done), undo)
+                }
+                Err(err) => (Err(err), None),
+            };
+            Msg::SqlAltered { conn, schema, table, res, undo, sql_mode: None }
+        });
+    }
+
+    /// How many rows of `table` hold a key that `fk` would find nothing for.
+    pub fn sql_orphans(&self, req: u64, db: Db, schema: String, table: String, fk: ForeignKey) {
+        self.spawn(async move {
+            let Pool::My(pool) = &db.pool;
+            let sql = orphans_sql(db.dialect, &schema, &table, &fk);
+            let res = sqlx::query(&sql).fetch_one(pool).await.map_err(e).map(|r| super::structure::num(&r, "n").unwrap_or(0));
+            Msg::SqlOrphans { req, res }
         });
     }
 }
@@ -1398,17 +1746,17 @@ mod tests {
     fn snapshots_differ_when_a_touched_column_changed() {
         let t = table();
         let names = (vec!["note".to_string(), "gone".to_string()], vec!["uq_note".to_string()]);
-        let a = snapshot(&t, &names.0, &names.1);
+        let a = snapshot(&t, &names.0, &names.1, &[]);
         assert_eq!(a.len(), 3);
         assert!(a[1].1.is_none());
         let mut t2 = t.clone();
         t2.columns[2].comment = "other".into();
-        assert_eq!(snapshot(&t2, &names.0, &names.1), a, "an untouched column does not count");
+        assert_eq!(snapshot(&t2, &names.0, &names.1, &[]), a, "an untouched column does not count");
         t2.columns[3].full_type = "varchar(60)".into();
-        assert_ne!(snapshot(&t2, &names.0, &names.1), a);
+        assert_ne!(snapshot(&t2, &names.0, &names.1, &[]), a);
         let mut t3 = t.clone();
         t3.indexes[2].invisible = true;
-        assert_ne!(snapshot(&t3, &names.0, &names.1), a);
+        assert_ne!(snapshot(&t3, &names.0, &names.1, &[]), a);
     }
 
     /// Review finding 7: a functional key part has no column name, so its drop has no undo.
@@ -1468,6 +1816,218 @@ mod tests {
     fn copy_names_are_free() {
         assert_eq!(free_name(&["a".into()], "a"), "a_copy");
         assert_eq!(free_name(&["a_copy".into(), "a_copy2".into()], "a"), "a_copy3");
+    }
+
+    fn fk(name: &str, cols: &[&str], rt: &str, rc: &[&str]) -> ForeignKey {
+        ForeignKey { name: name.into(), db: "shop".into(), table: "orders".into(), cols: cols.iter().map(|c| (*c).into()).collect(), ref_db: "shop".into(), ref_table: rt.into(), ref_cols: rc.iter().map(|c| (*c).into()).collect(), on_update: "CASCADE".into(), on_delete: "RESTRICT".into() }
+    }
+
+    fn fcol(name: &str, ty: &str, coll: Option<&str>) -> Column {
+        Column { name: name.into(), full_type: ty.into(), nullable: false, collation: coll.map(Into::into), ..Default::default() }
+    }
+
+    #[test]
+    fn add_a_foreign_key() {
+        let k = fk("fk_orders_customer", &["customer_id"], "customers", &["id"]);
+        assert_eq!(alt(&[Change::AddFk(k.clone())]), "ALTER TABLE `orders`\n  ADD CONSTRAINT `fk_orders_customer`\n    FOREIGN KEY (`customer_id`)\n    REFERENCES `customers` (`id`)\n    ON UPDATE CASCADE ON DELETE RESTRICT");
+        // Composite keys keep their column order, and another schema is written out.
+        let c = ForeignKey { ref_db: "other".into(), on_delete: "set null".into(), ..fk("fk_c", &["a", "b"], "t", &["x", "y"]) };
+        assert_eq!(alt(&[Change::AddFk(c)]), "ALTER TABLE `orders`\n  ADD CONSTRAINT `fk_c`\n    FOREIGN KEY (`a`, `b`)\n    REFERENCES `other`.`t` (`x`, `y`)\n    ON UPDATE CASCADE ON DELETE SET NULL");
+        assert_eq!(alt(&[Change::DropFk("fk_orders_customer".into())]), "ALTER TABLE `orders`\n  DROP FOREIGN KEY `fk_orders_customer`");
+    }
+
+    #[test]
+    fn foreign_key_names_are_quoted_and_checked() {
+        // A backtick in any name is doubled, under both escaping modes, since no string literal is involved.
+        for bs in [true, false] {
+            let k = fk("fk`; DROP TABLE x; --", &["we`ird"], "ta`ble", &["c\"ol"]);
+            let sql = alter(M, "8.4.0", Mode { bs, ansi: false }, "or`ders", &[Change::AddFk(k)]).unwrap();
+            assert_eq!(sql, "ALTER TABLE `or``ders`\n  ADD CONSTRAINT `fk``; DROP TABLE x; --`\n    FOREIGN KEY (`we``ird`)\n    REFERENCES `ta``ble` (`c\"ol`)\n    ON UPDATE CASCADE ON DELETE RESTRICT", "bs={bs}");
+            assert_eq!(alter(M, "8.4.0", Mode { bs, ansi: false }, "t", &[Change::DropFk("a`b".into())]).unwrap(), "ALTER TABLE `t`\n  DROP FOREIGN KEY `a``b`");
+        }
+        let bad = |k: ForeignKey| alter(M, "8.4.0", B, "t", &[Change::AddFk(k)]);
+        assert!(bad(fk("", &["a"], "t", &["b"])).is_err());
+        assert!(bad(fk("n", &[], "t", &[])).is_err());
+        assert!(bad(fk("n", &["a", "b"], "t", &["x"])).is_err());
+        assert!(bad(ForeignKey { on_delete: "CASCADE; DROP".into(), ..fk("n", &["a"], "t", &["b"]) }).is_err());
+        assert!(bad(fk("n", &["a"], "", &["b"])).is_err());
+    }
+
+    fn fk_table() -> Structure {
+        let mut s = table();
+        s.foreign_keys = vec![fk("fk_cust", &["customer_id"], "customers", &["id"])];
+        s.indexes.push(ix("fk_cust", false, &["customer_id"]));
+        s.indexes.retain(|i| i.name != "idx_cust_total");
+        s
+    }
+
+    #[test]
+    fn a_new_key_gets_the_index_it_needs_written_out() {
+        let t = table();
+        let k = fk("fk_note", &["total"], "notes", &["n"]);
+        let e = expand(M, &t, &[Change::AddFk(k.clone())]);
+        assert_eq!(e.len(), 2);
+        assert!(matches!(&e[0], Change::AddIndex(d) if d.name == "fk_note" && d.cols[0].name == "total"));
+        // idx_cust_total starts with customer_id, so a key on it needs nothing more.
+        let served = fk("fk_cust", &["customer_id"], "customers", &["id"]);
+        assert_eq!(expand(M, &t, &[Change::AddFk(served)]).len(), 1);
+        // The index name follows the key's unless that is taken.
+        let taken = fk("uq_note", &["note"], "notes", &["n"]);
+        assert!(matches!(&expand(M, &t, &[Change::AddFk(ForeignKey { cols: vec!["total".into()], ..taken })])[0], Change::AddIndex(d) if d.name == "uq_note_idx"));
+        let sql = alter(M, "8.4.0", B, "orders", &e).unwrap();
+        assert!(sql.starts_with("ALTER TABLE `orders`\n  ADD INDEX `fk_note` (`total`),\n  ADD CONSTRAINT `fk_note`"), "{sql}");
+    }
+
+    #[test]
+    fn dropping_a_key_takes_only_the_index_made_for_it() {
+        let t = fk_table();
+        let e = expand(M, &t, &[Change::DropFk("FK_CUST".into())]);
+        assert_eq!(e, vec![Change::DropFk("FK_CUST".into()), Change::DropIndex("fk_cust".into())]);
+        assert_eq!(alter(M, "8.4.0", B, "orders", &e).unwrap(), "ALTER TABLE `orders`\n  DROP FOREIGN KEY `FK_CUST`,\n  DROP INDEX `fk_cust`");
+        assert_eq!(warnings(&t, &[Change::DropFk("fk_cust".into())]).len(), 1);
+        // An index with another name, or on more columns, was made by someone, so it stays.
+        let mut other = t.clone();
+        other.indexes.iter_mut().find(|i| i.name == "fk_cust").unwrap().name = "mine".into();
+        assert_eq!(expand(M, &other, &[Change::DropFk("fk_cust".into())]).len(), 1);
+        assert!(warnings(&other, &[Change::DropFk("fk_cust".into())]).is_empty());
+        let mut wide = t.clone();
+        wide.indexes.iter_mut().find(|i| i.name == "fk_cust").unwrap().cols.push(IndexCol { name: "total".into(), ..Default::default() });
+        assert_eq!(expand(M, &wide, &[Change::DropFk("fk_cust".into())]).len(), 1);
+        // Another key that leans on the same index keeps it.
+        let mut shared = t.clone();
+        shared.foreign_keys.push(fk("fk_other", &["customer_id"], "customers", &["id"]));
+        assert_eq!(expand(M, &shared, &[Change::DropFk("fk_cust".into())]).len(), 1);
+    }
+
+    #[test]
+    fn foreign_key_undo_is_the_exact_inverse() {
+        let t = table();
+        let k = fk("fk_note", &["total"], "notes", &["n"]);
+        let added = expand(M, &t, &[Change::AddFk(k.clone())]);
+        assert_eq!(inverse(M, "8.4.0", B, "orders", &t, &added).unwrap(), ["ALTER TABLE `orders`\n  DROP FOREIGN KEY `fk_note`", "ALTER TABLE `orders`\n  DROP INDEX `fk_note`"]);
+        let f = fk_table();
+        let dropped = expand(M, &f, &[Change::DropFk("fk_cust".into())]);
+        assert_eq!(inverse(M, "8.4.0", B, "orders", &f, &dropped).unwrap(), ["ALTER TABLE `orders`\n  ADD INDEX `fk_cust` (`customer_id`)", "ALTER TABLE `orders`\n  ADD CONSTRAINT `fk_cust`\n    FOREIGN KEY (`customer_id`)\n    REFERENCES `customers` (`id`)\n    ON UPDATE CASCADE ON DELETE RESTRICT"]);
+        // A key that is not there cannot be dropped, and one that is cannot be added twice.
+        assert!(inverse(M, "8.4.0", B, "orders", &t, &[Change::DropFk("nope".into())]).is_err());
+        assert!(inverse(M, "8.4.0", B, "orders", &f, &[Change::AddFk(fk("fk_cust", &["total"], "x", &["y"]))]).is_err());
+        // The undo is checked against the key and the index made for it, like any other structure undo.
+        let u = plan(M, "8.4.0", B, "orders", &t, &[Change::AddFk(k)]).unwrap().undo.unwrap();
+        assert_eq!((u.fks, u.idx, u.cols), (vec!["fk_note".to_string()], vec!["fk_note".to_string()], Vec::<String>::new()));
+    }
+
+    #[test]
+    fn foreign_key_column_types_must_fit() {
+        let p = |a: Column, b: Column| fk_pair_problem("orders", &a, "customers", &b);
+        let int_u = fcol("id", "int unsigned", None);
+        assert!(p(fcol("customer_id", "int unsigned", None), int_u.clone()).is_none());
+        assert!(p(fcol("customer_id", "int", None), int_u.clone()).unwrap().contains("signedness"));
+        assert!(p(fcol("customer_id", "bigint unsigned", None), int_u.clone()).unwrap().contains("same size"));
+        assert!(p(fcol("c", "varchar(10)", None), int_u.clone()).unwrap().contains("same kind"));
+        assert!(p(fcol("c", "text", None), fcol("d", "text", None)).unwrap().contains("cannot be part"));
+        assert!(p(fcol("c", "json", None), fcol("d", "json", None)).is_some());
+        // Strings may differ in length, not in collation.
+        assert!(p(fcol("c", "char(3)", Some("utf8mb4_0900_ai_ci")), fcol("code", "varchar(10)", Some("utf8mb4_0900_ai_ci"))).is_none());
+        assert!(p(fcol("c", "char(3)", Some("utf8mb4_0900_ai_ci")), fcol("code", "char(3)", Some("latin1_swedish_ci"))).unwrap().contains("collation"));
+        assert!(p(fcol("c", "decimal(10,2)", None), fcol("d", "decimal(12,2)", None)).is_some());
+        assert!(p(fcol("c", "decimal(10,2)", None), fcol("d", "decimal(10,2)", None)).is_none());
+        assert!(p(fcol("c", "datetime", None), fcol("d", "datetime(3)", None)).is_some());
+        assert!(p(fcol("c", "datetime(3)", None), fcol("d", "DATETIME(3)", None)).is_none());
+    }
+
+    #[test]
+    fn a_whole_key_is_checked_before_it_is_staged() {
+        let own = Structure { columns: vec![fcol("customer_id", "int unsigned", None), Column { nullable: true, ..fcol("opt", "int unsigned", None) }], ..Default::default() };
+        let parent = Structure { columns: vec![fcol("id", "int unsigned", None)], indexes: vec![ix("PRIMARY", true, &["id"])], ..Default::default() };
+        let k = fk("fk", &["customer_id"], "customers", &["id"]);
+        assert!(fk_problem(&own, "orders", &parent, &k).is_none());
+        let set_null = ForeignKey { on_delete: "SET NULL".into(), ..k.clone() };
+        assert!(fk_problem(&own, "orders", &parent, &set_null).unwrap().contains("allows NULL"));
+        assert!(fk_problem(&own, "orders", &parent, &ForeignKey { cols: vec!["opt".into()], ..set_null }).is_none());
+        let unindexed = Structure { indexes: vec![], ..parent.clone() };
+        assert!(fk_problem(&own, "orders", &unindexed, &k).unwrap().contains("no index"));
+        assert!(fk_problem(&own, "orders", &parent, &ForeignKey { cols: vec!["gone".into()], ..k }).is_some());
+    }
+
+    #[test]
+    fn orphan_count_statement_quotes_every_name() {
+        let k = ForeignKey { ref_db: "o`b".into(), ..fk("n", &["a`1", "b"], "pa`rent", &["x", "y`2"]) };
+        assert_eq!(orphans_sql(M, "sh`op", "or`ders", &k), "SELECT COUNT(*) AS n FROM `sh``op`.`or``ders` c WHERE c.`a``1` IS NOT NULL AND c.`b` IS NOT NULL AND NOT EXISTS (SELECT 1 FROM `o``b`.`pa``rent` p WHERE p.`x` = c.`a``1` AND p.`y``2` = c.`b`)");
+        let same = ForeignKey { ref_db: String::new(), ..fk("n", &["a"], "p", &["x"]) };
+        assert!(orphans_sql(M, "shop", "orders", &same).contains("FROM `shop`.`p` p"));
+    }
+
+    fn trig(name: &str, body: &str) -> TrigDef {
+        TrigDef { name: name.into(), timing: "before".into(), event: "update".into(), body: body.into() }
+    }
+
+    #[test]
+    fn trigger_statements_by_engine() {
+        let t = trig("orders_bu", "SET NEW.tag = 'x';");
+        let one = |d, exists| trigger_steps(d, true, false, "orders", &t, exists).unwrap();
+        assert_eq!(one(M, false), ["CREATE TRIGGER `orders_bu` BEFORE UPDATE ON `orders`\nFOR EACH ROW\nSET NEW.tag = 'x'"]);
+        assert_eq!(one(M, true), ["DROP TRIGGER `orders_bu`", "CREATE TRIGGER `orders_bu` BEFORE UPDATE ON `orders`\nFOR EACH ROW\nSET NEW.tag = 'x'"]);
+        // MariaDB replaces in place, so an edit is one statement and a new trigger is a plain CREATE.
+        assert_eq!(one(Dialect::MariaDb, true), ["CREATE OR REPLACE TRIGGER `orders_bu` BEFORE UPDATE ON `orders`\nFOR EACH ROW\nSET NEW.tag = 'x'"]);
+        assert!(one(Dialect::MariaDb, false)[0].starts_with("CREATE TRIGGER "));
+        assert_eq!(drop_trigger(M, "a`b", false), "DROP TRIGGER `a``b`");
+        assert_eq!(drop_trigger(M, "a", true), "DROP TRIGGER IF EXISTS `a`");
+        assert_eq!(script(&one(M, true)), "DROP TRIGGER `orders_bu`;\n\nCREATE TRIGGER `orders_bu` BEFORE UPDATE ON `orders`\nFOR EACH ROW\nSET NEW.tag = 'x';");
+    }
+
+    #[test]
+    fn trigger_names_are_quoted_and_the_body_stays_the_users() {
+        for bs in [true, false] {
+            let t = TrigDef { name: "t`; DROP TABLE x; --".into(), timing: "AFTER".into(), event: "DELETE".into(), body: "BEGIN\n  INSERT INTO log VALUES ('a''b');\nEND".into() };
+            let s = trigger_steps(M, bs, false, "or`ders", &t, false).unwrap();
+            assert_eq!(s, ["CREATE TRIGGER `t``; DROP TABLE x; --` AFTER DELETE ON `or``ders`\nFOR EACH ROW\nBEGIN\n  INSERT INTO log VALUES ('a''b');\nEND"], "bs={bs}");
+        }
+        let bad = |t: TrigDef| trigger_steps(M, true, false, "orders", &t, false);
+        assert!(bad(trig("", "SET NEW.a = 1")).is_err());
+        assert!(bad(TrigDef { timing: "INSTEAD OF".into(), ..trig("a", "SET NEW.a = 1") }).is_err());
+        assert!(bad(TrigDef { event: "TRUNCATE".into(), ..trig("a", "SET NEW.a = 1") }).is_err());
+        assert!(bad(trig("a", "  ")).is_err());
+    }
+
+    #[test]
+    fn a_second_statement_in_a_trigger_body_is_refused() {
+        assert_eq!(check_body("SET NEW.a = 1;", true, false).unwrap(), "SET NEW.a = 1");
+        assert!(check_body("SET NEW.a = 1; DROP TABLE users", true, false).is_err());
+        assert!(check_body("-- note\nBEGIN SET NEW.a = 1; SET NEW.b = 2; END;", true, false).is_ok());
+        assert!(check_body("begin\nset new.a = 1;\nend", true, false).is_ok());
+        // The same text is one statement or two depending on whether a backslash escapes the quote.
+        let tricky = r"SET NEW.a = 'x\'; DROP TABLE users; --'";
+        assert!(check_body(tricky, true, false).is_ok());
+        assert!(check_body(tricky, false, false).is_err());
+        // Under ANSI_QUOTES a double quoted ; is an identifier, and either way it is not a statement end.
+        assert!(check_body(r#"SET NEW.a = "x;y""#, true, false).is_ok());
+        assert!(check_body(r#"SET NEW.a = "x;y""#, true, true).is_ok());
+    }
+
+    #[test]
+    fn a_foreign_key_snapshot_sees_every_part_of_the_key() {
+        let st = fk_table();
+        let names = vec!["fk_cust".to_string()];
+        let a = snapshot(&st, &[], &[], &names);
+        assert!(a[0].1.is_some());
+        let mut b = st.clone();
+        b.foreign_keys[0].on_delete = "CASCADE".into();
+        assert_ne!(snapshot(&b, &[], &[], &names), a);
+        b.foreign_keys.clear();
+        assert!(snapshot(&b, &[], &[], &names)[0].1.is_none());
+    }
+
+    #[test]
+    fn trigger_undo_guards_compare_names_without_case() {
+        let mut st = fk_table();
+        let t = crate::db::sql::structure::Trigger { name: "Tr".into(), timing: "BEFORE".into(), event: "UPDATE".into(), body: " SET a = 1 ".into(), ..Default::default() };
+        let tg = Guard { name: "tr".into(), present: Some(crate::db::sql::structure::Trigger { body: "SET a = 1".into(), ..t.clone() }) };
+        st.triggers = vec![t.clone()];
+        assert!(tg.check(&st).is_ok());
+        st.triggers[0].body = "SET a = 2".into();
+        assert!(tg.check(&st).is_err());
+        st.triggers.clear();
+        assert!(Guard { name: "tr".into(), present: None }.check(&st).is_ok());
     }
 }
 
@@ -2032,5 +2592,322 @@ mod review_live {
     #[test]
     fn review_live_mariadb() {
         review("QUARRY_TEST_MARIADB");
+    }
+}
+
+/// Foreign keys and triggers against real servers: QUARRY_TEST_MYSQL and QUARRY_TEST_MARIADB, each skipped when
+/// unset. Its own schemas (quarry_rt, quarry_rt_b) and `rt_` tables keep it clear of the other live tests; the
+/// tests take a lock because they share those schemas.
+#[cfg(test)]
+mod live_rel {
+    use super::*;
+    use crate::db::sql::structure::Structure;
+    use std::sync::mpsc::Receiver;
+    use std::time::Duration;
+
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn recv(rx: &Receiver<Msg>) -> Msg {
+        rx.recv_timeout(Duration::from_secs(30)).expect("no answer from the worker")
+    }
+
+    /// Keys and indexes as a table holds them, for comparing before and after.
+    fn shape(st: &Structure) -> Vec<String> {
+        let mut v: Vec<String> = st.indexes.iter().map(|i| format!("idx {}|{}|{}", i.name, i.unique, i.cols.iter().map(|c| c.name.clone()).collect::<Vec<_>>().join(","))).collect();
+        v.extend(st.foreign_keys.iter().map(|k| format!("fk {}|{}|{}.{}|{}|{}|{}", k.name, k.cols.join(","), k.ref_db, k.ref_table, k.ref_cols.join(","), k.on_update, k.on_delete)));
+        v.sort();
+        v
+    }
+
+    struct Env {
+        w: Worker,
+        rx: Receiver<Msg>,
+        db: Db,
+        pool: sqlx::MySqlPool,
+        n: u64,
+    }
+
+    impl Env {
+        fn try_exec(&self, sql: &str) -> Result<(), String> {
+            self.w.rt.block_on(async { sqlx::raw_sql(sql).execute(&self.pool).await.map(|_| ()).map_err(|e| e.to_string()) })
+        }
+
+        fn exec(&self, sql: &str) {
+            self.try_exec(sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
+        }
+
+        fn scalar(&self, sql: &str) -> Option<String> {
+            self.w.rt.block_on(async { sqlx::raw_sql(sql).fetch_one(&self.pool).await.ok().and_then(|r| super::super::worker::raw(&r, 0).map(|b| String::from_utf8_lossy(b).into_owned())) })
+        }
+
+        fn structure_in(&mut self, schema: &str, table: &str) -> Structure {
+            self.n += 1;
+            self.w.sql_structure(self.n, self.db.clone(), schema.into(), table.into());
+            match recv(&self.rx) {
+                Msg::SqlStructure { res, .. } => res.unwrap(),
+                _ => panic!("expected SqlStructure"),
+            }
+        }
+
+        fn structure(&mut self, table: &str) -> Structure {
+            self.structure_in("quarry_rt", table)
+        }
+
+        /// What Apply does for staged changes with foreign keys in them: the same plan and checked ALTER as any other.
+        fn apply(&mut self, table: &str, changes: &[Change]) -> Result<UndoAction, String> {
+            let before = self.structure(table);
+            let m = Mode::of(&self.db.sql_mode);
+            let p = plan(self.db.dialect, &self.db.version, m, table, &before, changes)?;
+            let mut u = p.undo?;
+            u.label = "label".into();
+            self.w.sql_alter(1, self.db.clone(), "quarry_rt".into(), table.into(), p.sql.clone(), m, Some(u), false, "done".into());
+            let Msg::SqlAltered { res, undo, .. } = recv(&self.rx) else { panic!("expected SqlAltered") };
+            res.map_err(|e| format!("{e}\n{}", p.sql))?;
+            Ok(undo.expect("an undo"))
+        }
+
+        fn undo(&mut self, a: UndoAction) -> Result<(), String> {
+            self.w.sql_undo(self.db.clone(), a, Vec::new(), false);
+            let Msg::SqlAltered { res, .. } = recv(&self.rx) else { panic!("expected SqlAltered") };
+            res.map(|_| ())
+        }
+
+        fn trigger(&mut self, table: &str, def: &TrigDef, exists: bool) -> Result<UndoAction, String> {
+            let steps = trigger_steps(self.db.dialect, self.db.backslash_escapes(), false, table, def, exists)?;
+            self.w.sql_trigger(1, self.db.clone(), "quarry_rt".into(), table.into(), def.name.clone(), steps, exists, false, false, "done".into());
+            let Msg::SqlAltered { res, undo, .. } = recv(&self.rx) else { panic!("expected SqlAltered") };
+            res?;
+            Ok(undo.expect("an undo"))
+        }
+
+        fn drop_trigger(&mut self, table: &str, name: &str) -> Result<UndoAction, String> {
+            self.w.sql_trigger(1, self.db.clone(), "quarry_rt".into(), table.into(), name.into(), vec![drop_trigger(self.db.dialect, name, false)], true, true, false, "done".into());
+            let Msg::SqlAltered { res, undo, .. } = recv(&self.rx) else { panic!("expected SqlAltered") };
+            res?;
+            Ok(undo.expect("an undo"))
+        }
+
+        /// The tag a fresh row gets from the BEFORE INSERT trigger.
+        fn tag(&self) -> Option<String> {
+            self.exec("INSERT INTO quarry_rt.rt_trig (tag) VALUES (NULL)");
+            self.scalar("SELECT tag FROM quarry_rt.rt_trig ORDER BY id DESC LIMIT 1")
+        }
+    }
+
+    fn start(var: &str) -> Option<Env> {
+        let uri = std::env::var(var).ok()?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let w = Worker::new(tx, eframe::egui::Context::default());
+        let pool = w.rt.block_on(async {
+            let p = sqlx::MySqlPool::connect(&uri).await.unwrap();
+            for sql in [
+                "DROP DATABASE IF EXISTS quarry_rt",
+                "DROP DATABASE IF EXISTS quarry_rt_b",
+                "CREATE DATABASE quarry_rt",
+                "CREATE DATABASE quarry_rt_b",
+                "CREATE TABLE quarry_rt_b.rt_currencies (code CHAR(3) NOT NULL PRIMARY KEY, label VARCHAR(20))",
+                "INSERT INTO quarry_rt_b.rt_currencies VALUES ('EUR', 'Euro')",
+                "CREATE TABLE quarry_rt.rt_customers (id INT UNSIGNED NOT NULL PRIMARY KEY, email VARCHAR(40) NOT NULL)",
+                "INSERT INTO quarry_rt.rt_customers VALUES (1, 'a@x'), (2, 'b@x')",
+                "CREATE TABLE quarry_rt.rt_orders (id INT NOT NULL PRIMARY KEY, customer_id INT UNSIGNED NULL, cur CHAR(3) NULL, note TEXT, wrong INT NULL)",
+                "CREATE TABLE quarry_rt.rt_regions (a INT NOT NULL, b INT NOT NULL, PRIMARY KEY (a, b))",
+                "INSERT INTO quarry_rt.rt_regions VALUES (1, 2)",
+                "CREATE TABLE quarry_rt.rt_lines (id INT NOT NULL PRIMARY KEY, ra INT NULL, rb INT NULL)",
+                "CREATE TABLE quarry_rt.rt_trig (id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, tag VARCHAR(20) NULL)",
+            ] {
+                sqlx::raw_sql(sql).execute(&p).await.unwrap_or_else(|e| panic!("{sql}: {e}"));
+            }
+            p
+        });
+        w.sql_connect(1, uri, Duration::from_secs(30), crate::db::Net::default());
+        let Msg::SqlConnected { res: Ok((db, ..)), .. } = recv(&rx) else { panic!("expected SqlConnected") };
+        Some(Env { w, rx, db, pool, n: 100 })
+    }
+
+    fn key(name: &str, table: &str, cols: &[&str], ref_db: &str, ref_table: &str, ref_cols: &[&str]) -> ForeignKey {
+        ForeignKey { name: name.into(), db: "quarry_rt".into(), table: table.into(), cols: cols.iter().map(|c| (*c).into()).collect(), ref_db: ref_db.into(), ref_table: ref_table.into(), ref_cols: ref_cols.iter().map(|c| (*c).into()).collect(), on_update: "CASCADE".into(), on_delete: "RESTRICT".into() }
+    }
+
+    fn foreign_keys(var: &str) {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(mut e) = start(var) else { return };
+        let before = shape(&e.structure("rt_orders"));
+        let k = key("fk_rt_cust", "rt_orders", &["customer_id"], "quarry_rt", "rt_customers", &["id"]);
+        let (own, parent) = (e.structure("rt_orders"), e.structure("rt_customers"));
+        assert_eq!(fk_problem(&own, "rt_orders", &parent, &k), None, "{var}");
+
+        // The orphan count says what would make the ALTER fail, and the ALTER does fail on it.
+        e.exec("INSERT INTO quarry_rt.rt_orders (id, customer_id) VALUES (90, 777), (91, NULL), (92, 1)");
+        e.w.sql_orphans(5, e.db.clone(), "quarry_rt".into(), "rt_orders".into(), k.clone());
+        let Msg::SqlOrphans { res, .. } = recv(&e.rx) else { panic!("expected SqlOrphans") };
+        assert_eq!(res.unwrap(), 1, "{var}: only the row pointing at 777 is an orphan");
+        assert!(e.apply("rt_orders", &[Change::AddFk(k.clone())]).is_err(), "{var}: ADD with an orphan row must fail");
+        e.exec("DELETE FROM quarry_rt.rt_orders");
+
+        // Add: the index is made, a bad row is refused, a good one is taken.
+        let undo = e.apply("rt_orders", &[Change::AddFk(k.clone())]).unwrap_or_else(|er| panic!("{var}: {er}"));
+        let after = e.structure("rt_orders");
+        assert_eq!(after.foreign_keys.len(), 1);
+        assert!(after.indexes.iter().any(|i| i.name == "fk_rt_cust"), "{var}: {:?}", shape(&after));
+        assert!(e.try_exec("INSERT INTO quarry_rt.rt_orders (id, customer_id) VALUES (1, 4242)").is_err(), "{var}: the key must refuse a missing customer");
+        e.exec("INSERT INTO quarry_rt.rt_orders (id, customer_id) VALUES (2, 1)");
+        e.exec("DELETE FROM quarry_rt.rt_orders");
+        // Undo is refused when someone changed the key meanwhile.
+        e.exec("ALTER TABLE quarry_rt.rt_orders DROP FOREIGN KEY fk_rt_cust");
+        let refused = e.undo(undo).unwrap_err();
+        assert!(refused.contains("foreign key fk_rt_cust changed"), "{var}: {refused}");
+        e.exec("ALTER TABLE quarry_rt.rt_orders DROP INDEX fk_rt_cust");
+        assert_eq!(shape(&e.structure("rt_orders")), before, "{var}");
+
+        // Undo of an add restores the table.
+        let undo = e.apply("rt_orders", &[Change::AddFk(k.clone())]).unwrap();
+        let with_key = shape(&e.structure("rt_orders"));
+        e.undo(undo).unwrap_or_else(|er| panic!("{var}: {er}"));
+        assert_eq!(shape(&e.structure("rt_orders")), before, "{var}: undo of add");
+
+        // Drop takes the index made for the key, and undo brings both back as they were.
+        e.apply("rt_orders", &[Change::AddFk(k.clone())]).unwrap();
+        let undo = e.apply("rt_orders", &[Change::DropFk("fk_rt_cust".into())]).unwrap_or_else(|er| panic!("{var}: {er}"));
+        assert_eq!(shape(&e.structure("rt_orders")), before, "{var}: drop took key and index");
+        e.undo(undo).unwrap_or_else(|er| panic!("{var}: {er}"));
+        assert_eq!(shape(&e.structure("rt_orders")), with_key, "{var}: undo of drop");
+        e.exec("ALTER TABLE quarry_rt.rt_orders DROP FOREIGN KEY fk_rt_cust, DROP INDEX fk_rt_cust");
+
+        // An index somebody made stays when the key goes.
+        e.exec("ALTER TABLE quarry_rt.rt_orders ADD INDEX mine (customer_id)");
+        let mine = shape(&e.structure("rt_orders"));
+        e.apply("rt_orders", &[Change::AddFk(k.clone())]).unwrap();
+        assert!(!e.structure("rt_orders").indexes.iter().any(|i| i.name == "fk_rt_cust"), "{var}: the key had an index to use");
+        e.apply("rt_orders", &[Change::DropFk("fk_rt_cust".into())]).unwrap();
+        assert_eq!(shape(&e.structure("rt_orders")), mine, "{var}: their index stays");
+        e.exec("ALTER TABLE quarry_rt.rt_orders DROP INDEX mine");
+
+        // SET NULL acts as asked.
+        let sn = ForeignKey { on_delete: "SET NULL".into(), ..k.clone() };
+        let undo = e.apply("rt_orders", &[Change::AddFk(sn)]).unwrap();
+        e.exec("INSERT INTO quarry_rt.rt_orders (id, customer_id) VALUES (3, 2)");
+        e.exec("DELETE FROM quarry_rt.rt_customers WHERE id = 2");
+        assert_eq!(e.scalar("SELECT customer_id IS NULL FROM quarry_rt.rt_orders WHERE id = 3").as_deref(), Some("1"), "{var}");
+        e.exec("INSERT INTO quarry_rt.rt_customers VALUES (2, 'b@x')");
+        e.undo(undo).unwrap();
+        e.exec("DELETE FROM quarry_rt.rt_orders");
+        assert_eq!(shape(&e.structure("rt_orders")), before);
+
+        // A composite key checks both columns together.
+        let before_l = shape(&e.structure("rt_lines"));
+        let c = key("fk_rt_region", "rt_lines", &["ra", "rb"], "quarry_rt", "rt_regions", &["a", "b"]);
+        let undo = e.apply("rt_lines", &[Change::AddFk(c)]).unwrap_or_else(|er| panic!("{var}: {er}"));
+        let st = e.structure("rt_lines");
+        assert_eq!((st.foreign_keys[0].cols.clone(), st.foreign_keys[0].ref_cols.clone()), (vec!["ra".to_string(), "rb".to_string()], vec!["a".to_string(), "b".to_string()]));
+        assert!(e.try_exec("INSERT INTO quarry_rt.rt_lines VALUES (1, 1, 9)").is_err(), "{var}: (1, 9) is not a region");
+        e.exec("INSERT INTO quarry_rt.rt_lines VALUES (2, 1, 2)");
+        e.exec("DELETE FROM quarry_rt.rt_lines");
+        e.undo(undo).unwrap();
+        assert_eq!(shape(&e.structure("rt_lines")), before_l, "{var}: composite undo");
+
+        // A key into another schema.
+        let x = key("fk_rt_cur", "rt_orders", &["cur"], "quarry_rt_b", "rt_currencies", &["code"]);
+        let own = e.structure("rt_orders");
+        let parent = e.structure_in("quarry_rt_b", "rt_currencies");
+        assert_eq!(fk_problem(&own, "rt_orders", &parent, &x), None, "{var}");
+        let undo = e.apply("rt_orders", &[Change::AddFk(x)]).unwrap_or_else(|er| panic!("{var}: {er}"));
+        let st = e.structure("rt_orders");
+        assert_eq!(st.foreign_keys[0].ref_db, "quarry_rt_b", "{var}");
+        assert!(e.try_exec("INSERT INTO quarry_rt.rt_orders (id, cur) VALUES (5, 'XXX')").is_err());
+        e.exec("INSERT INTO quarry_rt.rt_orders (id, cur) VALUES (6, 'EUR')");
+        e.exec("DELETE FROM quarry_rt.rt_orders");
+        e.undo(undo).unwrap();
+        assert_eq!(shape(&e.structure("rt_orders")), before, "{var}: cross schema undo");
+
+        // The check agrees with the server about a pair that does not fit.
+        let bad = key("fk_rt_bad", "rt_orders", &["wrong"], "quarry_rt", "rt_customers", &["id"]);
+        let (own, parent) = (e.structure("rt_orders"), e.structure("rt_customers"));
+        assert!(fk_problem(&own, "rt_orders", &parent, &bad).is_some());
+        assert!(e.apply("rt_orders", &[Change::AddFk(bad)]).is_err(), "{var}: the server refuses INT against INT UNSIGNED too");
+
+        e.exec("DROP DATABASE quarry_rt");
+        e.exec("DROP DATABASE quarry_rt_b");
+    }
+
+    fn triggers(var: &str) {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(mut e) = start(var) else { return };
+        let def = |name: &str, body: &str| TrigDef { name: name.into(), timing: "BEFORE".into(), event: "INSERT".into(), body: body.into() };
+        let body_of = |e: &mut Env, name: &str| e.structure("rt_trig").triggers.iter().find(|t| t.name == name).map(|t| t.body.clone());
+
+        let a = def("rt_bi", "SET NEW.tag = 'a'");
+        let create_undo = e.trigger("rt_trig", &a, false).unwrap_or_else(|er| panic!("{var}: {er}"));
+        assert_eq!(e.tag().as_deref(), Some("a"), "{var}: the trigger fires");
+
+        // Edit: the new body fires.
+        let b = def("rt_bi", "SET NEW.tag = 'b'");
+        let edit_undo = e.trigger("rt_trig", &b, true).unwrap_or_else(|er| panic!("{var}: {er}"));
+        assert_eq!(e.tag().as_deref(), Some("b"), "{var}");
+
+        // A refused edit leaves the old trigger in place (MySQL dropped it first and has to put it back).
+        let bad = def("rt_bi", "SET NEW.nope_column = 1");
+        let Err(err) = e.trigger("rt_trig", &bad, true) else { panic!("{var}: a body that names a missing column must be refused") };
+        assert!(!err.is_empty());
+        assert_eq!(e.tag().as_deref(), Some("b"), "{var}: the old trigger survived {err}");
+        assert_eq!(body_of(&mut e, "rt_bi").as_deref(), Some("SET NEW.tag = 'b'"));
+
+        // Undo restores the old body.
+        e.undo(edit_undo).unwrap_or_else(|er| panic!("{var}: {er}"));
+        assert_eq!(e.tag().as_deref(), Some("a"), "{var}: undo restored the previous body");
+        // Undo is refused when the trigger was changed by someone else.
+        let again = e.trigger("rt_trig", &b, true).unwrap();
+        e.exec("DROP TRIGGER quarry_rt.rt_bi");
+        e.exec("CREATE TRIGGER quarry_rt.rt_bi BEFORE INSERT ON quarry_rt.rt_trig FOR EACH ROW SET NEW.tag = 'z'");
+        let refused = e.undo(again).unwrap_err();
+        assert!(refused.contains("not as this change left it"), "{var}: {refused}");
+        assert_eq!(e.tag().as_deref(), Some("z"), "{var}: a refused undo changes nothing");
+        e.exec("DROP TRIGGER quarry_rt.rt_bi");
+        drop(create_undo);
+
+        // Drop, and undo of a drop.
+        e.trigger("rt_trig", &a, false).unwrap();
+        let drop_undo = e.drop_trigger("rt_trig", "rt_bi").unwrap_or_else(|er| panic!("{var}: {er}"));
+        assert!(body_of(&mut e, "rt_bi").is_none());
+        e.undo(drop_undo).unwrap_or_else(|er| panic!("{var}: {er}"));
+        assert_eq!(e.tag().as_deref(), Some("a"), "{var}: undo of drop");
+        e.drop_trigger("rt_trig", "rt_bi").unwrap();
+
+        // A compound body with a SIGNAL, a hostile name and a quote in a string.
+        let guard = TrigDef { name: "rt`;x".into(), timing: "BEFORE".into(), event: "UPDATE".into(), body: "BEGIN\n  IF NEW.tag = 'it''s bad' THEN\n    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'no';\n  END IF;\nEND".into() };
+        let undo = e.trigger("rt_trig", &guard, false).unwrap_or_else(|er| panic!("{var}: {er}"));
+        e.exec("INSERT INTO quarry_rt.rt_trig (id, tag) VALUES (500, 'fine')");
+        assert!(e.try_exec("UPDATE quarry_rt.rt_trig SET tag = 'it''s bad' WHERE id = 500").is_err(), "{var}: the body ran");
+        assert!(e.structure("rt_trig").triggers.iter().any(|t| t.name == "rt`;x"));
+        e.undo(undo).unwrap_or_else(|er| panic!("{var}: {er}"));
+        assert!(e.structure("rt_trig").triggers.is_empty(), "{var}: undo of create");
+        e.exec("UPDATE quarry_rt.rt_trig SET tag = 'it''s bad' WHERE id = 500");
+
+        // Writes stay locked until the caller unlocks them.
+        e.w.sql_trigger(1, e.db.clone(), "quarry_rt".into(), "rt_trig".into(), "rt_bi".into(), vec![drop_trigger(e.db.dialect, "rt_bi", true)], false, true, true, "done".into());
+        let Msg::SqlAltered { res, .. } = recv(&e.rx) else { panic!() };
+        assert!(res.is_err());
+
+        e.exec("DROP DATABASE quarry_rt");
+        e.exec("DROP DATABASE quarry_rt_b");
+    }
+
+    #[test]
+    fn live_foreign_keys_mysql() {
+        foreign_keys("QUARRY_TEST_MYSQL");
+    }
+
+    #[test]
+    fn live_foreign_keys_mariadb() {
+        foreign_keys("QUARRY_TEST_MARIADB");
+    }
+
+    #[test]
+    fn live_triggers_mysql() {
+        triggers("QUARRY_TEST_MYSQL");
+    }
+
+    #[test]
+    fn live_triggers_mariadb() {
+        triggers("QUARRY_TEST_MARIADB");
     }
 }

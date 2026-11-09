@@ -69,7 +69,7 @@ pub struct Index {
 
 /// One foreign key constraint, its columns in order. In `Structure::foreign_keys` the key belongs
 /// to the table itself; in `referenced_by` it belongs to `table`, which points here.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ForeignKey {
     pub name: String,
     pub db: String,
@@ -82,7 +82,7 @@ pub struct ForeignKey {
     pub on_delete: String,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Trigger {
     pub name: String,
     pub timing: String,
@@ -95,6 +95,14 @@ impl Trigger {
     /// The statement as the Triggers view shows it. The server stores only the body.
     pub fn create_sql(&self, table: &str) -> String {
         format!("CREATE TRIGGER {} {} {} ON {}\nFOR EACH ROW\n{}", self.name, self.timing, self.event, table, self.body)
+    }
+}
+
+impl ForeignKey {
+    /// The WHERE text that finds the row this key points to, from the literals of the key columns in order.
+    /// Written as a flat AND list of equalities so the Content bar can read it back as rules.
+    pub fn row_where(&self, d: Dialect, lits: &[String]) -> String {
+        self.ref_cols.iter().zip(lits).map(|(c, v)| format!("{} = {v}", d.quote_ident(c))).collect::<Vec<_>>().join(" AND ")
     }
 }
 
@@ -377,8 +385,14 @@ mod tests {
 
     #[test]
     fn trigger_statement_is_composed() {
-        let t = Trigger { name: "t1".into(), timing: "BEFORE".into(), event: "UPDATE".into(), body: "BEGIN\nEND".into(), definer: String::new() };
+        let t = Trigger { name: "t1".into(), timing: "BEFORE".into(), event: "UPDATE".into(), body: "BEGIN\nEND".into(), ..Default::default() };
         assert_eq!(t.create_sql("orders"), "CREATE TRIGGER t1 BEFORE UPDATE ON orders\nFOR EACH ROW\nBEGIN\nEND");
+    }
+
+    #[test]
+    fn fk_row_where_quotes_names_and_joins_with_and() {
+        let fk = ForeignKey { ref_cols: vec!["a`b".into(), "c".into()], ..Default::default() };
+        assert_eq!(fk.row_where(Dialect::MySql, &["1".into(), "'x'".into()]), "`a``b` = 1 AND `c` = 'x'");
     }
 
     #[test]

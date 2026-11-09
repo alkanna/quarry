@@ -419,6 +419,8 @@ impl App {
         self.status = ("Offline demo: no database is connected.".into(), false);
         self.sql_structure_demo(&std::env::var("QUARRY_TEST_SQL").unwrap_or_default());
         self.sql_alter_demo(&std::env::var("QUARRY_TEST_SQL").unwrap_or_default());
+        self.sql_rel_demo(&std::env::var("QUARRY_TEST_SQL").unwrap_or_default());
+        self.sql_trig_demo(&std::env::var("QUARRY_TEST_SQL").unwrap_or_default());
         if std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("query") {
             self.sql_query_demo();
         }

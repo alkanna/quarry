@@ -94,6 +94,30 @@ pub(super) fn optimal_width(ui: &egui::Ui, docs: Rows, col: &str, header: &str, 
 
 /// Left edge for text `gw` wide in a cell at `x`, `w` wide, by the column's alignment. Text wider
 /// than the cell starts at its left padding so its beginning stays visible.
+/// Width kept at the right of a foreign key cell for its link.
+const FK_W: f32 = 22.0;
+
+/// The small link at the right edge of a foreign key cell: a box with an arrow leaving it, painted as shapes.
+fn fk_link(ui: &mut egui::Ui, cell: egui::Rect, id: egui::Id, fk: &db::sql::structure::ForeignKey) -> egui::Response {
+    let area = egui::Rect::from_min_max(egui::pos2(cell.right() - FK_W, cell.top()), cell.right_bottom());
+    let r = ui.interact(area, id, Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("Open the row in {}", fk.ref_table));
+    let btn = egui::Rect::from_center_size(area.center(), egui::vec2(16.0, 16.0));
+    if r.is_pointer_button_down_on() {
+        ui.painter().rect_filled(btn, R_SM, PRESSED());
+    } else if r.hovered() {
+        ui.painter().rect_filled(btn, R_SM, HOVER());
+    }
+    let color = if r.hovered() { C_LINK() } else { tint(C_LINK(), 170) };
+    let stroke = Stroke::new(1.4, color);
+    let c = btn.center();
+    let (a, b) = (c + egui::vec2(-3.0, 3.0), c + egui::vec2(3.0, -3.0));
+    let p = ui.painter();
+    p.line_segment([a, b], stroke);
+    p.line_segment([b + egui::vec2(-3.5, 0.0), b], stroke);
+    p.line_segment([b + egui::vec2(0.0, 3.5), b], stroke);
+    r
+}
+
 fn align_x(align: u8, x: f32, w: f32, gw: f32) -> f32 {
     match align {
         1 => x + (w - gw) / 2.0,
@@ -415,6 +439,10 @@ impl App {
         let sql_edit_ok: Vec<bool> = cols.iter().map(|c| sql && self.sql_edit_block().is_none() && self.sql_col_block(c).is_none()).collect();
         let sql_nullable: Vec<bool> = cols.iter().map(|c| self.t().and_then(|t| t.sql.as_ref()).and_then(|s| s.cols.iter().find(|k| &k.name == c)).is_some_and(|k| k.nullable)).collect();
         let mut sql_acts: Vec<(usize, String, CellAct)> = Vec::new();
+        // A column that belongs to a foreign key gets a link that opens the row it points to.
+        let fks = if sql && !agg && !sql_grouped { self.sql_fks() } else { Vec::new() };
+        let fk_of: Vec<Option<usize>> = cols.iter().map(|c| self.t().and_then(|t| t.sql.as_ref()).and_then(|s| s.cols.iter().find(|k| &k.name == c)).and_then(|k| fks.iter().position(|f| f.cols.iter().any(|x| *x == k.src)))).collect();
+        let mut fk_open: Option<(usize, usize)> = None;
         let hl_cols: Vec<bool> = cols.iter().map(|c| prefs.highlight.contains(&db::strip_indices(c))).collect();
         let related = if agg { HashMap::new() } else { self.t().map(|t| t.related.clone()).unwrap_or_default() };
         let in_coll = self.in_coll();
@@ -577,7 +605,8 @@ impl App {
                                         None => column_job(v, summarize),
                                     };
                                     // Ends in an ellipsis at the cell's padding instead of being cut mid-glyph by the clip.
-                                    job.wrap = egui::text::TextWrapping::truncate_at_width(w - 14.0);
+                                    let fk_room = if fk_of[ci].is_some() { FK_W } else { 0.0 };
+                                    job.wrap = egui::text::TextWrapping::truncate_at_width(w - 14.0 - fk_room);
                                     let g = ui.fonts_mut(|f| f.layout_job(job));
                                     let gw = g.size().x;
                                     // Ids only, checked before compact(): that turns the whole value into JSON,
@@ -585,7 +614,7 @@ impl App {
                                     let rel = (!related.is_empty() && v.id_like()).then(|| related.get(&db::compact(&v.bson()))).flatten();
                                     let rg = rel.map(|p| ui.fonts_mut(|f| f.layout_no_wrap(p.clone(), FontId::proportional(TXT_SMALL), C_LINK())));
                                     // The value and its preview are aligned as one, so the preview stays inside the cell.
-                                    let vx = align_x(aligns[ci], x, *w, gw + rg.as_ref().map_or(0.0, |r| 6.0 + r.size().x));
+                                    let vx = align_x(aligns[ci], x, *w - fk_room, gw + rg.as_ref().map_or(0.0, |r| 6.0 + r.size().x));
                                     clip.galley(egui::pos2(vx, cell.center().y - g.size().y / 2.0), g, TEXT());
                                     if let Some(r) = rg {
                                         clip.galley(egui::pos2(vx + gw + 6.0, cell.center().y - r.size().y / 2.0), r, C_LINK());
@@ -599,6 +628,15 @@ impl App {
                             let mut cr = ui.interact(cell, ui.scope_id().with(("c", i, ci)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
                             if let Some(why) = &sql_why[ci] {
                                 cr = cr.on_hover_text(why.as_str());
+                            }
+                            // Added after the cell so it takes the click; a NULL points to nothing and gets no link.
+                            if let (Some(k), Some(val)) = (fk_of[ci], v) {
+                                if !matches!(*val.bson(), Bson::Null) {
+                                    let fr = fk_link(ui, cell, ui.scope_id().with(("fk", i, ci)), &fks[k]);
+                                    if fr.clicked() {
+                                        fk_open = Some((i, k));
+                                    }
+                                }
                             }
                             if cr.double_clicked() && sql_grouped {
                                 drill = Some(i);
@@ -707,6 +745,11 @@ impl App {
         }
         if let Some(i) = drill {
             self.sql_drill(i);
+        }
+        if let Some((i, k)) = fk_open {
+            if let Some(d) = self.shown_row(docs, i, agg).or_else(|| docs.owned(i)) {
+                self.open_fk_row(&fks[k], &d);
+            }
         }
         if let (Some((i, c)), true) = (&edit_cell, sql) {
             self.sql_open_cell(*i, c.clone());

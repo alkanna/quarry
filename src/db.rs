@@ -215,8 +215,9 @@ pub enum Msg {
     SqlTableInfo { req: u64, res: Res<sql::csv::TableInfo> },
     /// A SQL table's columns, indexes, keys, triggers, status and CREATE statement. Answers the tab whose `idx_req` is `req`.
     SqlStructure { req: u64, res: Res<sql::Structure> },
-    /// An ALTER TABLE or its undo ran (or failed). `undo` is what reverses it. `sql_mode` is the server's mode
-    /// when it no longer matched the one the statement was written for, so the previews follow it.
+    /// An ALTER TABLE, a trigger change or one of their undos ran (or failed). `undo` is what reverses it.
+    /// `sql_mode` is the server's mode when it no longer matched the one the statement was written for, so the
+    /// previews follow it.
     SqlAltered { conn: u64, schema: String, table: String, res: Res<String>, undo: Option<UndoAction>, sql_mode: Option<String> },
     /// Charsets, collations and engines for the New database and New table dialogs; `schema` is empty for a new database.
     SqlMeta { conn: u64, schema: String, res: Res<sql::create::Meta> },
@@ -226,6 +227,8 @@ pub enum Msg {
     /// for a create (or the one a refused undo hands back). `sql_mode` is the session's mode when it no longer
     /// matched the one the app had, so the previews follow it.
     SqlDdl { conn: u64, schema: String, table: String, what: sql::create::Ddl, res: Res<String>, undo: Option<UndoAction>, dbs: Option<Vec<String>>, sql_mode: Option<String> },
+    /// How many rows of a table point at nothing for a foreign key being added. Answers the open dialog by `req`.
+    SqlOrphans { req: u64, res: Res<u64> },
     /// Every table, view and column of one database, for SQL autocomplete.
     SqlSchema { conn: u64, schema: String, res: Res<sql::schema::Schema> },
     /// A column's most frequent values with their counts, for SQL autocomplete. None when the table is too big to look in.
