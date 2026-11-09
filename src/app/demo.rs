@@ -415,7 +415,7 @@ impl App {
         if std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("query") {
             self.sql_query_demo();
         }
-        if std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("shell") {
+        if matches!(std::env::var("QUARRY_TEST_SQL").as_deref(), Ok("shell" | "shellac")) {
             self.sql_shell_demo();
         }
         if matches!(std::env::var("QUARRY_TEST_SQL").as_deref(), Ok("ac" | "acquery")) {

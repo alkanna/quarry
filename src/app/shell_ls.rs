@@ -3,6 +3,7 @@
 //! never lands on text that changed, a list that was dismissed, or another tab.
 
 use super::*;
+use super::sql_bar::sql_job;
 use crate::ui::js_doc::doc_popup;
 use std::time::Instant;
 
@@ -90,6 +91,80 @@ fn word_span(code: &str, at: usize) -> Option<(usize, usize)> {
 }
 
 /// Hash of what the globals declarations are built from, besides the collection types.
+/// The Shell's colours, with the text of SQL templates coloured as SQL and their `${ }` parts as JS.
+/// The JS around is lexed in pieces that each end at an opening backtick, so the closing one of a
+/// template cannot start a string that swallows the rest.
+pub(super) fn js_sql_job(text: &str) -> LayoutJob {
+    let tpls = sql_templates(text);
+    if tpls.is_empty() {
+        return js_job(text);
+    }
+    let mut job = LayoutJob::default();
+    let mut add = |part: LayoutJob, sql: bool| {
+        for s in part.sections {
+            let mut fmt = s.format;
+            // One size per line so the columns stay aligned with the JS beside it.
+            if sql {
+                fmt.font_id = FontId::monospace(TXT_BODY);
+            }
+            job.append(&part.text[s.byte_range.start.0..s.byte_range.end.0], 0.0, fmt);
+        }
+    };
+    let mut at = 0;
+    // The JS between templates, minus the closing backtick the previous one left at its start.
+    let js = |add: &mut dyn FnMut(LayoutJob, bool), from: usize, to: usize| {
+        let skip = (from > 0 && text[from..to].starts_with('`')) as usize;
+        if skip > 0 {
+            add(js_job("`"), false);
+        }
+        add(js_job(&text[from + skip..to]), false);
+    };
+    for t in &tpls {
+        // Nested templates sit inside a part of the outer one and are coloured as JS there.
+        if t.range.start < at {
+            continue;
+        }
+        js(&mut add, at, t.range.start);
+        let mut seg = t.range.start;
+        for h in &t.holes {
+            let (hs, he) = (h.start.max(seg), h.end.min(t.range.end));
+            add(sql_job(&text[seg..hs]), true);
+            add(js_job(&text[hs..he]), false);
+            seg = he;
+        }
+        add(sql_job(&text[seg..t.range.end]), true);
+        at = t.range.end;
+    }
+    js(&mut add, at, text.len());
+    job
+}
+
+/// The rest of the template after the caret as SQL, as it was before this frame's edit, which is what
+/// aliases after the caret are looked up in. The caret is the one the editor held then.
+pub(super) fn template_tail(ctx: &egui::Context, id: egui::Id, code: &str) -> String {
+    let caret = egui::TextEdit::load_state(ctx, id).and_then(|s| s.cursor.char_range()).map(|r| usize::from(r.primary.index));
+    let at = caret.map_or(code.len(), |c| code.char_indices().nth(c).map_or(code.len(), |x| x.0));
+    let Some(tpl) = sql_at(code, at) else { return String::new() };
+    let (before, full) = sql_text(code, &tpl, at);
+    full[before.len()..].to_string()
+}
+
+/// QUARRY_TEST_SQL=shellac: opens the list as if `FROM ord` had just been typed inside the script's template.
+pub(super) fn shell_ac_demo(ui: &egui::Ui, id: egui::Id, code: &str, ac: &mut Ac, scope: &crate::ui::sql_complete::Scope, values: &Fields) {
+    let Some(at) = code.find("FROM ord").map(|i| i + 8).filter(|_| ac.id.is_none()) else { return };
+    let Some(tpl) = sql_at(code, at) else { return };
+    let (before, full) = sql_text(code, &tpl, at);
+    let (b, f) = crate::ui::sql_complete::split_statement(&before, &full[before.len()..]);
+    if let Some(o) = crate::ui::sql_complete::analyze(&b, &f, scope, values).filter(|o| !o.sugs.is_empty()) {
+        let n = code[..at].chars().count();
+        *ac = Ac { id: Some(id), token: b[o.from..].chars().count(), items: o.sugs, cursor: n, title: o.title, foot: o.foot, ..Default::default() };
+        ui.memory_mut(|m| m.request_focus(id));
+        let mut st = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
+        st.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(n))));
+        st.store(ui.ctx(), id);
+    }
+}
+
 fn globals_key(colls: &[String], packages: &[String]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -235,11 +310,16 @@ impl App {
     fn js_ask(&mut self, id: egui::Id, caret: usize, colls: &[String]) {
         self.js.complete = None;
         self.js.resolve = None;
+        let before: String = self.tabs[self.cur].shell.code.chars().take(caret).collect();
+        // SQL templates complete from the schema, not from the TypeScript server.
+        if self.tabs[self.cur].sql.is_some() && sql_at(&before, before.len()).is_some() {
+            self.js.sig = None;
+            return;
+        }
         let req = self.js_send(db::JsAsk::Signature, caret, colls);
         // The hints on screen stay until the answer replaces them, so they do not flicker while typing.
         let doc = self.js.sig.take().and_then(|s| s.doc);
         self.js.sig = Some(Sig { caret, req, doc });
-        let before: String = self.tabs[self.cur].shell.code.chars().take(caret).collect();
         let token = before.chars().rev().take_while(|c| is_js_ident(*c)).count();
         let ask = match js_spot(&before) {
             // A query value's string: the server knows the field's values from its type.
