@@ -503,6 +503,9 @@ impl App {
     }
 
     pub(super) fn side_act(&mut self, conn: u64, a: SideAct) {
+        if let (SideAct::Refresh(db), Some(sql)) = (&a, self.conn(conn).and_then(|c| c.sql.clone())) {
+            return self.worker.sql_tables(conn, sql, db.clone());
+        }
         let Some(client) = self.conn(conn).and_then(|c| c.client.clone()) else {
             return self.err("Connect first.");
         };
@@ -558,7 +561,7 @@ mod tests {
 
     #[test]
     fn palette_jumps() {
-        let conn = |id, name: &str, status, dbs| Conn { meta: ConnMeta { id, name: name.into(), ..Default::default() }, client: None, status, writable: false, dbs, masked_uri: String::new(), tunnel: None, server: Default::default() };
+        let conn = |id, name: &str, status, dbs| Conn { meta: ConnMeta { id, name: name.into(), ..Default::default() }, client: None, sql: None, status, writable: false, dbs, masked_uri: String::new(), tunnel: None, server: Default::default() };
         let conns = [conn(1, "prod", Status::Ready, vec![("shop".into(), Some(vec!["users".into(), "orders".into()]))]), conn(2, "staging", Status::Idle, Vec::new())];
         let labels = |active, q| jumps(&conns, active, q).into_iter().map(|j| j.0).collect::<Vec<_>>();
         assert_eq!(labels(Some(2), ""), ["staging", "prod", "shop", "shop.users", "shop.orders"]);

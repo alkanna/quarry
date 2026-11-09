@@ -3,9 +3,9 @@
 use super::*;
 
 pub struct Worker {
-    rt: tokio::runtime::Runtime,
-    tx: Sender<Msg>,
-    ctx: eframe::egui::Context,
+    pub(in crate::db) rt: tokio::runtime::Runtime,
+    pub(in crate::db) tx: Sender<Msg>,
+    pub(in crate::db) ctx: eframe::egui::Context,
 }
 
 /// How many leading documents of an ordered insert_many batch were written before `err`.
@@ -114,7 +114,7 @@ impl Worker {
         self.spawn(async move { m });
     }
 
-    fn spawn(&self, f: impl Future<Output = Msg> + Send + 'static) {
+    pub(in crate::db) fn spawn(&self, f: impl Future<Output = Msg> + Send + 'static) {
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         self.rt.spawn(async move {

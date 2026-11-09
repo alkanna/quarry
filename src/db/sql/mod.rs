@@ -1,9 +1,10 @@
 //! SQL engines (MySQL and MariaDB for now). Engine differences live in enums here, not traits:
 //! a new engine is a new arm.
 
-// The worker (step 4) and the views use these; until then they only have tests.
+// The views (step 5 on) use parts of these; until then they only have tests.
 #[allow(dead_code)]
 mod dialect;
+mod worker;
 #[allow(dead_code)]
 pub mod lex;
 #[allow(dead_code)]
@@ -34,6 +35,63 @@ impl Engine {
         self != Engine::Mongo
     }
 }
+
+/// A connected SQL server. Cloning shares the pool.
+// Read by the views from step 5 on.
+#[allow(dead_code)]
+#[derive(Clone)]
+pub struct Db {
+    pub pool: Pool,
+    pub dialect: Dialect,
+    /// The server's `VERSION()`, such as "8.4.3" or "10.11.6-MariaDB".
+    pub version: String,
+    /// Whether the session is encrypted, which `ssl-mode=PREFERRED` leaves to the server.
+    pub tls: bool,
+    /// `@@sql_mode`, which changes how quotes and backslashes lex (ANSI_QUOTES, NO_BACKSLASH_ESCAPES).
+    pub sql_mode: String,
+}
+
+#[derive(Clone)]
+pub enum Pool {
+    My(sqlx::MySqlPool),
+}
+
+impl Db {
+    /// "MySQL 8.4.3" or "MariaDB 10.11.6", without the build suffix of the version string.
+    pub fn label(&self) -> String {
+        let num = self.version.split('-').next().unwrap_or_default();
+        format!("{} {num}", if self.dialect == Dialect::MariaDb { "MariaDB" } else { "MySQL" })
+    }
+}
+
+/// One result column. `ty` is the type name the server reported, such as "INT UNSIGNED".
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+pub struct Col {
+    pub name: String,
+    pub ty: String,
+    pub kind: value::Kind,
+    pub nullable: bool,
+}
+
+/// The outcome of one statement of a Custom Query run. An `error` means the statement did not run
+/// or failed; `affected` is set for statements that return no rows.
+#[allow(dead_code)]
+#[derive(Clone)]
+pub struct ResultSet {
+    pub stmt: String,
+    pub cols: Vec<Col>,
+    pub rows: Vec<crate::db::Row>,
+    pub affected: Option<u64>,
+    pub error: Option<String>,
+    pub ms: u128,
+    /// More rows came back than `RUN_ROWS_MAX`; the rest were dropped.
+    pub capped: bool,
+}
+
+/// Most rows of one statement a Custom Query keeps.
+#[allow(dead_code)]
+pub const RUN_ROWS_MAX: usize = 1000;
 
 /// How hard the client insists on TLS, named like the mysql client's --ssl-mode.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]

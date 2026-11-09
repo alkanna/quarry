@@ -288,9 +288,7 @@ impl App {
             let address_ok = if f.engine.is_sql() { !f.addr.host.trim().is_empty() && !f.addr.user.trim().is_empty() } else { f.uri.starts_with("mongodb://") || f.uri.starts_with("mongodb+srv://") };
             let valid = !f.name.trim().is_empty() && address_ok && (!f.ssh_on || (!f.ssh.host.trim().is_empty() && !f.ssh.user.trim().is_empty())) && (!f.proxy_on || f.ssh_on || f.engine.is_sql() || !f.proxy.host.trim().is_empty());
             save = ui.add_enabled(valid, primary_button(ui, "Save and connect", PRIMARY())).clicked();
-            // Temporary until the SQL worker lands (docs/sql/PLAN.md step 4).
-            let sql = f.engine.is_sql();
-            test = ui.add_enabled(valid && !sql, egui::Button::new("Test")).on_disabled_hover_text(if sql { "MySQL connections arrive in a later step" } else { "" }).clicked();
+            test = ui.add_enabled(valid, egui::Button::new("Test")).clicked();
             if ui.button("Cancel").clicked() {
                 *keep = false;
             }
@@ -299,7 +297,12 @@ impl App {
             f.testing = true;
             self.conn_test = None;
             let net = f.net();
-            self.worker.test(f.uri.trim().to_string(), self.timeout(), net);
+            if f.engine.is_sql() {
+                let addr = db::sql::Addr { host: f.addr.host.trim().into(), user: f.addr.user.trim().into(), database: f.addr.database.trim().into(), ..f.addr.clone() };
+                self.worker.sql_test(addr.to_uri(), self.timeout(), net);
+            } else {
+                self.worker.test(f.uri.trim().to_string(), self.timeout(), net);
+            }
         }
         if save {
             let id = f.id.unwrap_or_else(|| self.conns.iter().map(|c| c.meta.id).max().unwrap_or(0) + 1);
@@ -334,7 +337,7 @@ impl App {
                             c.dbs.clear();
                             c.server = Default::default();
                         }
-                        None => self.conns.push(Conn { meta, client: None, status: Status::Idle, writable: false, dbs: Vec::new(), masked_uri: db::mask_uri(&uri), tunnel: None, server: Default::default() }),
+                        None => self.conns.push(Conn { meta, client: None, sql: None, status: Status::Idle, writable: false, dbs: Vec::new(), masked_uri: db::mask_uri(&uri), tunnel: None, server: Default::default() }),
                     }
                     self.active = Some(id);
                     self.save_conns();

@@ -316,7 +316,7 @@ impl App {
             };
             drop(text);
             let sel = Sel { conn: 1, db: "fixture".into(), coll: "documents".into() };
-            app.conns.push(Conn { meta: ConnMeta { id: 1, name: "Fixture".into(), ..Default::default() }, client: None, status: Status::Ready, writable: false, dbs: vec![("fixture".into(), Some(vec!["documents".into()]))], masked_uri: String::new(), tunnel: None, server: Default::default() });
+            app.conns.push(Conn { meta: ConnMeta { id: 1, name: "Fixture".into(), ..Default::default() }, client: None, sql: None, status: Status::Ready, writable: false, dbs: vec![("fixture".into(), Some(vec!["documents".into()]))], masked_uri: String::new(), tunnel: None, server: Default::default() });
             app.active = Some(1);
             app.open_dbs.insert((1, "fixture".into()));
             app.open_collection(sel, false);
@@ -347,7 +347,7 @@ impl App {
             app.prefs.appearance.apply(&cc.egui_ctx);
             for meta in metas {
                 let masked = keychain(meta.id).and_then(|k| k.get_password().ok()).map(|u| db::mask_uri(&u)).unwrap_or_default();
-                app.conns.push(Conn { meta, client: None, status: Status::Idle, writable: false, dbs: Vec::new(), masked_uri: masked, tunnel: None, server: Default::default() });
+                app.conns.push(Conn { meta, client: None, sql: None, status: Status::Idle, writable: false, dbs: Vec::new(), masked_uri: masked, tunnel: None, server: Default::default() });
             }
             app.active = app.conns.first().map(|c| c.meta.id);
             // Values of deleted connections go with them.

@@ -34,16 +34,18 @@ impl App {
         self.conns.push(Conn {
             meta: ConnMeta { id: 1, name: "Local sample".into(), tag: "Local".into(), ..Default::default() },
             client: None,
+            sql: None,
             status: Status::Ready,
             writable: false,
             dbs,
             masked_uri: "mongodb://localhost:27017".into(),
             tunnel: None,
-            server: ServerInfo { version: "7.0.12".into(), set_name: "rs0".into(), host: "localhost:27017".into() },
+            server: ServerInfo { version: "7.0.12".into(), set_name: "rs0".into(), host: "localhost:27017".into(), ..Default::default() },
         });
         self.conns.push(Conn {
             meta: ConnMeta { id: 2, name: "Staging".into(), tag: "Staging".into(), ..Default::default() },
             client: None,
+            sql: None,
             status: Status::Idle,
             writable: false,
             dbs: Vec::new(),

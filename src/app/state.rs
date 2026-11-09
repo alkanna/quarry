@@ -67,6 +67,8 @@ pub(super) enum Status {
 pub(super) struct Conn {
     pub(super) meta: ConnMeta,
     pub(super) client: Option<Client>,
+    /// Set instead of `client` for SQL connections.
+    pub(super) sql: Option<db::sql::Db>,
     pub(super) status: Status,
     /// Writes are locked at every launch and only unlocked for this session.
     pub(super) writable: bool,
@@ -91,14 +93,17 @@ pub(super) struct ServerInfo {
     pub(super) version: String,
     pub(super) set_name: String,
     pub(super) host: String,
+    /// "MySQL" or "MariaDB" for SQL connections; empty for Mongo, which shows "mongod".
+    pub(super) product: String,
+    pub(super) tls: bool,
 }
 
 impl ServerInfo {
     /// The status bar's "host · mongod version · set", with the host from `uri` until the server says.
     pub(super) fn status_line(&self, uri: &str) -> String {
         let host = if self.host.is_empty() { host_of(uri) } else { self.host.clone() };
-        let version = (!self.version.is_empty()).then(|| format!("mongod {}", self.version));
-        [Some(host), version, Some(self.set_name.clone())].into_iter().flatten().filter(|p| !p.is_empty()).collect::<Vec<_>>().join("  ·  ")
+        let version = (!self.version.is_empty()).then(|| format!("{} {}", if self.product.is_empty() { "mongod" } else { &self.product }, self.version));
+        [Some(host), version, Some(self.set_name.clone()), self.tls.then(|| "TLS".to_string())].into_iter().flatten().filter(|p| !p.is_empty()).collect::<Vec<_>>().join("  ·  ")
     }
 
 }
@@ -921,13 +926,6 @@ impl App {
         if self.demo {
             return self.ok("Offline demo: no database is connected.");
         }
-        // Temporary until the SQL worker lands (docs/sql/PLAN.md step 4).
-        if self.conn(id).is_some_and(|c| c.meta.engine.is_sql()) {
-            if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == id) {
-                c.status = Status::Failed("MySQL connections are not wired yet".into());
-            }
-            return;
-        }
         let uri = match stored_uri(id) {
             Ok(u) => u,
             Err(e) => return self.err(uri_err(e)),
@@ -935,11 +933,16 @@ impl App {
         let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == id) else { return };
         c.status = Status::Connecting;
         c.client = None;
+        c.sql = None;
         c.tunnel = None;
         // Asked again once connected, so a changed or failed server never shows the old one.
         c.server = ServerInfo::default();
         let net = net_of(&c.meta);
-        self.worker.connect(id, uri, self.timeout(), net);
+        if c.meta.engine.is_sql() {
+            self.worker.sql_connect(id, uri, self.timeout(), net);
+        } else {
+            self.worker.connect(id, uri, self.timeout(), net);
+        }
     }
 
     /// Something a restart would lose: unsaved edits, writes in flight, running scripts or tools.

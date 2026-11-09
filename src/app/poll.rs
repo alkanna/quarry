@@ -51,6 +51,40 @@ impl App {
                         }
                     }
                 }
+                Msg::SqlConnected { conn, res } => {
+                    let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) else { continue };
+                    match res {
+                        Ok((sql, dbs, tunnel)) => {
+                            let mut trusted = None;
+                            if let (Some(t), Some(sc)) = (&tunnel, c.meta.ssh.as_mut()) {
+                                if sc.known_host.is_none() && !t.fingerprint.is_empty() {
+                                    sc.known_host = Some(t.fingerprint.clone());
+                                    trusted = Some(t.fingerprint.clone());
+                                }
+                            }
+                            c.tunnel = tunnel;
+                            for d in &dbs {
+                                self.worker.sql_tables(conn, sql.clone(), d.clone());
+                            }
+                            c.server = ServerInfo { version: sql.label().split_once(' ').map(|(_, v)| v.to_string()).unwrap_or_default(), product: if sql.dialect == db::sql::Dialect::MariaDb { "MariaDB" } else { "MySQL" }.into(), host: host_of(&c.masked_uri), tls: sql.tls, ..Default::default() };
+                            c.sql = Some(sql);
+                            c.status = Status::Ready;
+                            c.dbs = dbs.into_iter().map(|d| (d, None)).collect();
+                            let n = c.meta.name.clone();
+                            self.ok(format!("Connected to {n} (read-only)"));
+                            if let Some(fp) = trusted {
+                                self.save_conns();
+                                self.ok(format!("Connected to {n} through SSH (read-only). Host key remembered: {fp}"));
+                            }
+                        }
+                        Err(e) => {
+                            c.status = Status::Failed(e.clone());
+                            self.err(e);
+                        }
+                    }
+                }
+                // Applied by the table and query views (docs/sql/PLAN.md step 5 and 8).
+                Msg::SqlCols { .. } | Msg::SqlRan { .. } => {}
                 Msg::Collections { conn, db, res } => match res {
                     Ok((v, views)) => {
                         self.views.retain(|(c, d, _)| !(*c == conn && *d == db));
