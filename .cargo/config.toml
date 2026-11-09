@@ -1,0 +1,7 @@
+# Signs macOS dev builds with a stable identity so the keychain "Always Allow" survives
+# rebuilds instead of prompting on every new ad-hoc signature. Setup is in the README.
+[target.aarch64-apple-darwin]
+runner = ".cargo/run-signed.sh"
+
+[target.x86_64-apple-darwin]
+runner = ".cargo/run-signed.sh"

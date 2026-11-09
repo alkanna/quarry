@@ -79,6 +79,16 @@ cargo run --release      # run it
 cargo test               # run the tests
 ```
 
+### Stop the Keychain prompts on macOS
+
+Every build gets a new ad-hoc signature, so macOS treats it as a new app and asks for your password again for each saved connection. `cargo run` signs the build with a certificate named `Quarry Dev` when it finds one (see `.cargo/run-signed.sh`), which keeps the signature stable across rebuilds. To create it once:
+
+1. Open Keychain Access and choose **Keychain Access > Certificate Assistant > Create a Certificate**.
+2. Name it `Quarry Dev`, set Identity Type to **Self Signed Root** and Certificate Type to **Code Signing**, and click Create.
+3. Run `cargo run`, then click **Always Allow** at each prompt. Later builds won't ask again.
+
+Without the certificate, `cargo run` prints a warning and runs the build unsigned.
+
 `quarry --screenshot out.png` draws the offline demo, saves a picture and exits. It never connects to a database.
 
 ## Releasing
