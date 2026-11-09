@@ -72,7 +72,7 @@ impl Dialect {
     /// data_bytes, index_bytes, free_bytes, auto_increment, created, updated, collation, options,
     /// comment.
     pub fn table_status(self) -> &'static str {
-        "SELECT TABLE_NAME AS name, ENGINE AS engine, ROW_FORMAT AS row_format, TABLE_ROWS AS row_estimate, AVG_ROW_LENGTH AS avg_row_bytes, DATA_LENGTH AS data_bytes, INDEX_LENGTH AS index_bytes, DATA_FREE AS free_bytes, AUTO_INCREMENT AS auto_increment, CREATE_TIME AS created, UPDATE_TIME AS updated, TABLE_COLLATION AS collation, CREATE_OPTIONS AS options, TABLE_COMMENT AS comment FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?"
+        "SELECT TABLE_NAME AS name, ENGINE AS engine, ROW_FORMAT AS row_format, TABLE_ROWS AS row_estimate, AVG_ROW_LENGTH AS avg_row_bytes, DATA_LENGTH AS data_bytes, INDEX_LENGTH AS index_bytes, DATA_FREE AS free_bytes, AUTO_INCREMENT AS auto_increment, CAST(CREATE_TIME AS CHAR) AS created, CAST(UPDATE_TIME AS CHAR) AS updated, TABLE_COLLATION AS collation, CREATE_OPTIONS AS options, TABLE_COMMENT AS comment FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?"
     }
 
     /// Every column of a database in one round trip, for autocomplete. Params: [schema]. Columns:

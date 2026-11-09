@@ -20,11 +20,11 @@ const ESTIMATE_MIN: u64 = 10_000;
 
 /// A cell of a text-protocol row as the server's own bytes. Metadata queries read strings through this
 /// too, because a `_bin` collation makes sqlx report text as VARBINARY.
-fn raw(row: &MySqlRow, i: usize) -> Option<&[u8]> {
+pub(super) fn raw(row: &MySqlRow, i: usize) -> Option<&[u8]> {
     row.try_get_unchecked::<Option<&[u8]>, _>(i).ok().flatten()
 }
 
-fn text(row: &MySqlRow, name: &str) -> Option<String> {
+pub(super) fn text(row: &MySqlRow, name: &str) -> Option<String> {
     row.try_get_unchecked::<Option<&[u8]>, _>(name).ok().flatten().map(|b| String::from_utf8_lossy(b).into_owned())
 }
 

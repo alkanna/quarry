@@ -37,6 +37,7 @@ mod settings;
 mod shell;
 mod shell_ls;
 mod sidebar;
+mod sql_structure;
 mod sql_views;
 mod state;
 mod table;

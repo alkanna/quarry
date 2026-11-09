@@ -97,6 +97,11 @@ impl App {
                         (s.cols, s.pk, s.estimated) = (cols, pk, estimated);
                     }
                 }
+                Msg::SqlStructure { req, res } => {
+                    if let Some(s) = self.tabs.iter_mut().find(|t| t.idx_req == req).and_then(|t| t.sql.as_mut()) {
+                        s.st.finish(res);
+                    }
+                }
                 // Applied by the Custom Query view (docs/sql/PLAN.md step 8).
                 Msg::SqlRan { .. } => {}
                 Msg::Collections { conn, db, res } => match res {

@@ -159,6 +159,10 @@ impl App {
                     ui.add_space(-16.0);
                     stat_chip(ui, &n.to_string());
                 }
+                if let (true, Some(n)) = (sql, self.sql_view_count(v)) {
+                    ui.add_space(-16.0);
+                    stat_chip(ui, &n.to_string());
+                }
             }
             if sql && view == View::Documents {
                 right_group(ui, |ui| self.columns_menu(ui, false));
@@ -183,7 +187,11 @@ impl App {
         ui.add_space(12.0);
         match view {
             View::Documents if sql => self.sql_content(ui),
-            View::Structure | View::Relations | View::Triggers | View::Info | View::Sql => self.sql_soon(ui),
+            View::Structure => self.sql_structure_view(ui),
+            View::Relations => self.sql_relations_view(ui),
+            View::Triggers => self.sql_triggers_view(ui),
+            View::Info => self.sql_info_view(ui),
+            View::Sql => self.sql_soon(ui),
             View::Shell if sql => self.sql_soon(ui),
             View::Documents => self.documents(ui),
             View::Aggregate => self.aggregate(ui),

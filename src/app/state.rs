@@ -242,6 +242,8 @@ pub(super) struct SqlTab {
     /// Server connection id of the running Custom Query, for Stop (step 8).
     #[allow(dead_code)]
     pub(super) run_conn:Arc<std::sync::atomic::AtomicU64>,
+    /// What the Structure, Relations, Triggers and Info views show.
+    pub(super) st: super::sql_structure::StructState,
 }
 
 /// The Compare view: this tab's collection (source) against a chosen target.

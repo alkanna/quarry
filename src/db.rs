@@ -204,6 +204,8 @@ pub enum Msg {
     /// A Custom Query run: one result per statement.
     #[allow(dead_code)]
     SqlRan { req: u64, sets: Vec<sql::ResultSet>, ms: u128 },
+    /// A SQL table's columns, indexes, keys, triggers, status and CREATE statement. Answers the tab whose `idx_req` is `req`.
+    SqlStructure { req: u64, res: Res<sql::Structure> },
     /// Result of the connection form's Test button.
     Tested { res: Res<String> },
     /// Collection names (sorted) and which of them are views.

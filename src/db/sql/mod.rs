@@ -5,12 +5,14 @@
 #[allow(dead_code)]
 mod dialect;
 mod worker;
+pub mod structure;
 #[allow(dead_code)]
 pub mod lex;
 #[allow(dead_code)]
 pub mod value;
 #[allow(unused_imports)]
 pub use dialect::{Dialect, FUNCTIONS, KEYWORDS};
+pub use structure::Structure;
 
 /// Which kind of server a saved connection talks to. Saved connections from before SQL support
 /// have no engine field and load as Mongo.

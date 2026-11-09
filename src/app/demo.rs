@@ -345,5 +345,6 @@ impl App {
         self.tabs = vec![t, Tab::new(sel("customers")).for_engine(engine)];
         self.cur = 0;
         self.status = ("Offline demo: no database is connected.".into(), false);
+        self.sql_structure_demo(&std::env::var("QUARRY_TEST_SQL").unwrap_or_default());
     }
 }
