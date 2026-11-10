@@ -267,7 +267,7 @@ fn check_set(toks: &[(Tok, &str)], short: &str) -> Result<(), String> {
 /// executable comments), so what was checked is what any server runs; the worker then sends each statement on
 /// its own as a prepared statement, which the server parses as exactly one.
 pub fn init_statements(text: &str) -> Result<Vec<String>, String> {
-    let readings = lex::every_reading(text);
+    let readings = lex::every_reading(text, super::Dialect::MySql);
     if readings[0].iter().any(|(t, _)| *t == Tok::ExecOpen) {
         return Err("Init command: executable comments (/*! and /*M!) are not allowed".into());
     }

@@ -31,7 +31,7 @@ pub(super) struct CaretInfo {
 impl SqlTab {
     /// The caret's place in the script. Lexing the script is costly next to a frame, so the answer is kept
     /// until the text or the caret changes.
-    pub(super) fn caret_info(&self) -> CaretInfo {
+    pub(super) fn caret_info(&self, d: db::sql::Dialect) -> CaretInfo {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         self.query.hash(&mut h);
@@ -40,7 +40,7 @@ impl SqlTab {
         match &*slot {
             Some(c) if c.key == key => c.clone(),
             _ => {
-                let c = CaretInfo { key, line_col: line_col(&self.query, self.caret), stmt: statement_pos(&self.query, self.caret) };
+                let c = CaretInfo { key, line_col: line_col(&self.query, self.caret), stmt: statement_pos(&self.query, self.caret, d) };
                 *slot = Some(c.clone());
                 c
             }
@@ -49,9 +49,9 @@ impl SqlTab {
 }
 
 /// The statement under a caret (a char index) as a byte range, with its 1-based number and the count of statements.
-pub(super) fn statement_pos(text: &str, caret: usize) -> Option<(Range<usize>, usize, usize)> {
-    let r = lex::statement_at(text, byte_at(text, caret))?;
-    let all = lex::split_statements(text);
+pub(super) fn statement_pos(text: &str, caret: usize, d: db::sql::Dialect) -> Option<(Range<usize>, usize, usize)> {
+    let r = lex::statement_at(text, byte_at(text, caret), d)?;
+    let all = lex::split_statements(text, d);
     let i = all.iter().position(|(a, _)| *a == r)?;
     Some((r, i + 1, all.len()))
 }
@@ -219,8 +219,9 @@ impl App {
     pub(super) fn sql_run(&mut self, all: bool, explain: bool) {
         let Some(t) = self.t() else { return };
         let (conn, schema) = (t.sel.conn, run_db(t));
+        let dialect = self.sql_dialect().0;
         let Some(s) = t.sql.as_ref().filter(|s| s.run_req == 0) else { return };
-        let text = if all { s.query.clone() } else { s.caret_info().stmt.map(|(r, _, _)| s.query[r].to_string()).unwrap_or_default() };
+        let text = if all { s.query.clone() } else { s.caret_info(dialect).stmt.map(|(r, _, _)| s.query[r].to_string()).unwrap_or_default() };
         if text.trim().is_empty() {
             return self.warn("Nothing to run.");
         }
@@ -358,7 +359,7 @@ impl App {
         ui.add_space(4.0);
         let (mut run, mut run_all, mut stop, mut explain, mut format) = (false, false, false, false, false);
         let status = self.t().and_then(|t| t.sql.as_ref()).map(|s| {
-            let CaretInfo { line_col: (l, c), stmt, .. } = s.caret_info();
+            let CaretInfo { line_col: (l, c), stmt, .. } = s.caret_info(self.sql_dialect().0);
             let n = stmt.map_or(String::new(), |(_, i, n)| format!("  ·  statement {i} of {n}"));
             format!("Ln {l}, Col {c}{n}")
         });
@@ -463,7 +464,7 @@ impl App {
         let picked = egui::TextEdit::load_state(ctx, Self::sql_editor_id(self.cur)).and_then(|st| st.cursor.char_range()).filter(|r| r.primary != r.secondary);
         let (new, select, f) = match picked {
             None => {
-                let f = db::sql::format::format_script(&text);
+                let f = db::sql::format::format_script(&text, self.sql_dialect().0);
                 (f.text.clone(), None, f)
             }
             Some(r) => {
@@ -471,15 +472,18 @@ impl App {
                 let (a, b) = (p.min(q), p.max(q));
                 let (a, b) = (byte_at(&text, a), byte_at(&text, b));
                 // A cut through a string or comment would be formatted as something it is not.
-                if lex::tokens(&text).iter().any(|(t, tr)| matches!(t, lex::Tok::Str | lex::Tok::Quoted | lex::Tok::Comment) && ((tr.start < a && a < tr.end) || (tr.start < b && b < tr.end))) {
+                if lex::tokens(&text, self.sql_dialect().0).iter().any(|(t, tr)| matches!(t, lex::Tok::Str | lex::Tok::Quoted | lex::Tok::Comment) && ((tr.start < a && a < tr.end) || (tr.start < b && b < tr.end))) {
                     return self.warn("The selection starts or ends inside a string or comment. Select whole statements, or nothing to format the script.");
                 }
-                let f = db::sql::format::format_script(&text[a..b]);
+                let f = db::sql::format::format_script(&text[a..b], self.sql_dialect().0);
                 let new = format!("{}{}{}", &text[..a], f.text, &text[b..]);
                 let from = text[..a].chars().count();
                 (new, Some(from..from + f.text.chars().count()), f)
             }
         };
+        if f.unsupported {
+            return self.warn(f.summary());
+        }
         let note = if new == text && f.special == 0 && f.refused == 0 { "Already formatted".to_string() } else { f.summary() };
         self.sql_replace(ctx, new, select);
         if f.refused > 0 { self.warn(note) } else { self.ok(note) }
@@ -492,6 +496,7 @@ impl App {
         let avail = ui.available_height();
         let Some((conn, db)) = self.tabs.get(self.cur).map(|t| (t.sel.conn, run_db(t))) else { return };
         let scope = Self::sql_scope(&self.conns, &self.sql_schema, &self.views, conn, &db, None);
+        let dialect = scope.dialect;
         let none = Fields::new();
         let values = self.sql_values.get(&(conn, db.clone())).unwrap_or(&none);
         let Some(s) = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()) else { return };
@@ -502,7 +507,7 @@ impl App {
         let h = if custom { self.prefs.query_editor_h.clamp(lo, hi.max(lo)) } else { (lines as f32 * LINE_H + 24.0).clamp(96.0, (avail * 0.5).max(96.0)) };
         let mut layout = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
             crate::ui::editor::memo_galley(ui, 1, buf.as_str(), wrap, || {
-                let mut job = sql_job(buf.as_str(), TXT_SMALL);
+                let mut job = crate::ui::editor::sql_job_in(buf.as_str(), TXT_SMALL, dialect);
                 for sec in &mut job.sections {
                     sec.format.line_height = Some(LINE_H);
                 }
@@ -533,7 +538,7 @@ impl App {
                     s.caret = usize::from(r.primary.index);
                 }
                 let (g, gp, rect) = (&out.galley, out.galley_pos, out.response.rect);
-                let info = s.caret_info();
+                let info = s.caret_info(dialect);
                 if let Some((r, _, _)) = info.stmt.filter(|p| p.2 > 1) {
                     let at = |b: usize| s.query[..b].chars().count();
                     let (a, z) = (g.pos_from_cursor(CCursor::new(at(r.start))), g.pos_from_cursor(CCursor::new(at(r.end))));
@@ -773,7 +778,7 @@ impl App {
             let saved = |name: &str, sql: &str| SavedQuery { name: name.into(), sql: Some(sql.into()), ..Default::default() };
             self.prefs.library.insert(Self::sql_lib_key(3), vec![saved("Late shipments", "SELECT o.id, o.created_at, s.carrier\nFROM orders o\nLEFT JOIN shipments s ON s.order_id = o.id\nWHERE o.status = 'paid' AND s.id IS NULL;"), saved("Revenue by tier", "SELECT tier, SUM(total) AS revenue FROM orders GROUP BY tier ORDER BY revenue DESC;")]);
         }
-        let query = if std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("format") { db::sql::format::format_script(raw).text } else { raw.to_string() };
+        let query = if std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("format") { db::sql::format::format_script(raw, db::sql::Dialect::MySql).text } else { raw.to_string() };
         let query = query.as_str();
         let stmt = query.lines().skip(1).take(7).collect::<Vec<_>>().join("\n");
         let first = ResultSet {
@@ -830,14 +835,15 @@ mod tests {
 
     #[test]
     fn statement_under_the_caret() {
+        const D: db::sql::Dialect = db::sql::Dialect::MySql;
         let t = "SELECT 1;\n\nUPDATE a SET b = 2;\nSELECT 'x;y';";
-        let (r, i, n) = statement_pos(t, 3).unwrap();
+        let (r, i, n) = statement_pos(t, 3, D).unwrap();
         assert_eq!((&t[r], i, n), ("SELECT 1", 1, 3));
-        let (_, i, _) = statement_pos(t, 14).unwrap();
+        let (_, i, _) = statement_pos(t, 14, D).unwrap();
         assert_eq!(i, 2);
         // A caret past the end stays with the last statement.
-        assert_eq!(statement_pos(t, 999).unwrap().1, 3);
-        assert!(statement_pos("  ", 0).is_none());
+        assert_eq!(statement_pos(t, 999, D).unwrap().1, 3);
+        assert!(statement_pos("  ", 0, D).is_none());
     }
 
     #[test]

@@ -1178,7 +1178,7 @@ impl Blk {
 /// server runs or skips them by version.
 pub fn check_body(body: &str, m: Mode) -> Result<String, String> {
     use super::lex::{tokens_with, Tok};
-    let toks: Vec<(Tok, std::ops::Range<usize>)> = tokens_with(body, m.bs, m.ansi).into_iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment)).collect();
+    let toks: Vec<(Tok, std::ops::Range<usize>)> = tokens_with(body, super::Dialect::MySql, m.bs, m.ansi).into_iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment)).collect();
     if toks.iter().any(|(t, _)| matches!(t, Tok::ExecOpen | Tok::ExecClose)) {
         return Err("A trigger body cannot hold an executable comment (/*! ... */): whether the server runs it depends on its version.".into());
     }
@@ -1404,7 +1404,7 @@ pub fn create_trigger(d: Dialect, m: Mode, table: &str, s: &TrigSave, replace: b
 /// EACH ROW and its order clause holds no `;` and no executable comment, and the rest is one body by `check_body`.
 pub fn one_trigger_statement(sql: &str, m: Mode) -> Result<(), String> {
     use super::lex::{count_with, tokens_with, Tok};
-    let toks: Vec<_> = tokens_with(sql, m.bs, m.ansi).into_iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment)).collect();
+    let toks: Vec<_> = tokens_with(sql, super::Dialect::MySql, m.bs, m.ansi).into_iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment)).collect();
     let w = |k: usize, s: &str| toks.get(k).is_some_and(|(t, r)| *t == Tok::Word && sql[r.clone()].eq_ignore_ascii_case(s));
     let at = (0..toks.len()).find(|&k| w(k, "FOR") && w(k + 1, "EACH") && w(k + 2, "ROW")).ok_or("The statement has no FOR EACH ROW.")?;
     let mut k = at + 3;
@@ -1412,7 +1412,7 @@ pub fn one_trigger_statement(sql: &str, m: Mode) -> Result<(), String> {
         k += 2;
     }
     let head = &sql[..toks.get(k).map_or(sql.len(), |(_, r)| r.start)];
-    if toks[..k.min(toks.len())].iter().any(|(t, r)| matches!(t, Tok::ExecOpen | Tok::ExecClose) || (*t == Tok::Punct && &sql[r.clone()] == ";")) || count_with(head, m.bs, m.ansi) != 1 {
+    if toks[..k.min(toks.len())].iter().any(|(t, r)| matches!(t, Tok::ExecOpen | Tok::ExecClose) || (*t == Tok::Punct && &sql[r.clone()] == ";")) || count_with(head, super::Dialect::MySql, m.bs, m.ansi) != 1 {
         return Err("The trigger statement is not one statement.".into());
     }
     let body = toks.get(k).map_or("", |(_, r)| &sql[r.start..]);
@@ -1424,7 +1424,7 @@ pub fn one_trigger_statement(sql: &str, m: Mode) -> Result<(), String> {
 /// stored with.
 pub fn restate(d: Dialect, stmt: &str, m: Mode, order: Option<&TrigOrder>, replace: bool) -> Result<String, String> {
     use super::lex::{tokens_with, Tok};
-    let toks: Vec<_> = tokens_with(stmt, m.bs, m.ansi).into_iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment)).collect();
+    let toks: Vec<_> = tokens_with(stmt, d, m.bs, m.ansi).into_iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment)).collect();
     let w = |k: usize, s: &str| toks.get(k).is_some_and(|(t, r)| *t == Tok::Word && stmt[r.clone()].eq_ignore_ascii_case(s));
     if !w(0, "CREATE") {
         return Err("The stored trigger does not start with CREATE.".into());
@@ -2035,9 +2035,9 @@ mod tests {
                 let ixd = IndexDef { name: n.into(), kind: IndexKind::Index, cols: vec![IdxCol { name: n.into(), prefix: None, desc: false }], comment: n.into(), ..Default::default() };
                 let c = [Change::Add { def: d.clone(), pos: Pos::After(n.into()) }, Change::Modify { from: n.into(), def: ColDef { name: format!("{n}2"), ..d }, pos: Pos::Keep }, Change::Drop(n.into()), Change::AddIndex(ixd), Change::DropIndex(n.into())];
                 let sql = alter(M, "8.4.0", Mode { bs, ansi: false }, n, &c).unwrap();
-                assert_eq!(lex::split_statements(&sql).len(), 1, "{n} bs={bs}: {sql}");
+                assert_eq!(lex::split_statements(&sql, Dialect::MySql).len(), 1, "{n} bs={bs}: {sql}");
                 // Every backtick that is not a doubled one of an identifier closes an identifier we opened.
-                assert!(lex::read_only_check(&sql).is_err());
+                assert!(lex::read_only_check(&sql, Dialect::MySql).is_err());
             }
         }
         let mut d = def("c", "VARCHAR");
@@ -2089,7 +2089,7 @@ mod tests {
         assert!(definition(M, ansi, &d).is_err());
         // Without ANSI_QUOTES it is one string, and the statement stays one statement.
         let sql = alter(M, "8.4.0", B, "t", &[Change::Add { def: d, pos: Pos::Keep }]).unwrap();
-        assert_eq!(lex::count_with(&sql, true, false), 1, "{sql}");
+        assert_eq!(lex::count_with(&sql, Dialect::MySql, true, false), 1, "{sql}");
         assert!(check_expr("\"a\"\"b\"", ansi).is_ok() && check_expr("'it''s'", ansi).is_ok());
         assert_eq!(Mode::of("ANSI_QUOTES,NO_BACKSLASH_ESCAPES"), Mode { bs: false, ansi: true });
         assert_eq!(Mode::of("REAL_AS_FLOAT,PIPES_AS_CONCAT,ANSI_QUOTES,IGNORE_SPACE,ONLY_FULL_GROUP_BY,ANSI"), Mode { bs: true, ansi: true });

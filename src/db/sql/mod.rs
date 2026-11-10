@@ -268,7 +268,7 @@ pub struct ResultSet {
 impl ResultSet {
     /// An empty outcome of `stmt`.
     pub fn new(stmt: &str) -> ResultSet {
-        let kind = lex::tokens(stmt).into_iter().find(|(t, _)| *t == lex::Tok::Word).map(|(_, r)| stmt[r].to_ascii_uppercase()).unwrap_or_default();
+        let kind = lex::tokens(stmt, Dialect::MySql).into_iter().find(|(t, _)| *t == lex::Tok::Word).map(|(_, r)| stmt[r].to_ascii_uppercase()).unwrap_or_default();
         ResultSet { stmt: stmt.into(), cols: Vec::new(), rows: Vec::new(), affected: None, error: None, ms: 0, capped: false, page: None, kind, refused: false, widest: Default::default() }
     }
 }

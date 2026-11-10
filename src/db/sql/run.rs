@@ -131,8 +131,8 @@ pub(super) async fn run_one(conn: &mut Conn, stmt: &str, cap: usize) -> Vec<Resu
 
 /// One statement as a page of at most `RUN_ROWS_MAX` rows, when it is a plain read. A column name that
 /// repeats cannot sit in a derived table, so such a statement falls back to a plain capped run.
-pub(super) async fn run_stmt(conn: &mut Conn, stmt: &str, page: usize) -> Vec<ResultSet> {
-    if !lex::pageable(stmt) {
+pub(super) async fn run_stmt(conn: &mut Conn, d: super::Dialect, stmt: &str, page: usize) -> Vec<ResultSet> {
+    if !lex::pageable(stmt, d) {
         return run_one(conn, stmt, RUN_ROWS_MAX).await;
     }
     let mut rs = run_one(conn, &lex::page_sql(stmt, page, RUN_ROWS_MAX), RUN_ROWS_MAX + 1).await;
@@ -144,7 +144,7 @@ pub(super) async fn run_stmt(conn: &mut Conn, stmt: &str, page: usize) -> Vec<Re
         if r.error.is_none() {
             let next = r.rows.len() > RUN_ROWS_MAX;
             r.rows.truncate(RUN_ROWS_MAX);
-            r.page = Some(Page { n: page, next, total: None, ordered: lex::has_order_by(stmt) });
+            r.page = Some(Page { n: page, next, total: None, ordered: lex::has_order_by(stmt, d) });
         }
     }
     rs
@@ -163,7 +163,7 @@ pub(super) async fn run(db: &Db, schema: &str, text: &str, read_only: bool, id: 
     }
     let mut sets = Vec::new();
     // Each statement goes alone, so user text is never sent as one multi-statement string.
-    let stmts = lex::split_statements(text);
+    let stmts = lex::split_statements(text, d);
     let mut why: Option<&str> = None;
     // A USE in the script changes the database the later statements run in, and so the one the log names.
     let mut here = schema.to_string();
@@ -177,15 +177,15 @@ pub(super) async fn run(db: &Db, schema: &str, text: &str, read_only: bool, id: 
             continue;
         }
         if read_only {
-            if let Err(why) = lex::read_only_check(stmt) {
+            if let Err(why) = lex::read_only_check(stmt, d) {
                 sets.push(ResultSet { refused: true, ..failed(stmt, why) });
                 continue;
             }
         }
-        let rs = run_stmt(&mut conn, stmt, page).await;
+        let rs = run_stmt(&mut conn, d, stmt, page).await;
         let failed = rs.iter().find_map(|r| r.error.as_deref());
         crate::db::log_sql(db.conn, &here, stmt, rs.first().map_or(0, |r| r.ms), failed);
-        if let (None, Some(to)) = (failed, lex::use_target(stmt)) {
+        if let (None, Some(to)) = (failed, lex::use_target(stmt, d)) {
             here = to;
         }
         if rs.iter().any(|r| r.error.is_some()) {

@@ -6,7 +6,7 @@ use super::value::Kind;
 use super::exec::{Conn, Item};
 use super::run::{pin_reads, prepare};
 use super::worker::{make_cols, to_row};
-use super::{lex, Db};
+use super::{lex, Db, Dialect};
 use crate::db::copy::{CopyCol, Fmt, Writer};
 use crate::db::{e, Msg, Res, Worker};
 use mongodb::bson::Document;
@@ -95,7 +95,7 @@ fn write_err(err: std::io::Error) -> String {
 /// Runs `stmt` and writes every row to `out`. Only a statement that passes the read-only check runs, on
 /// a read-only session, whatever the connection allows. `count` follows the rows written for a progress readout.
 pub async fn stream(db: &Db, schema: &str, stmt: &str, plan: &Plan, out: &mut (dyn Write + Send), count: &AtomicU64, cancel: &AtomicBool, id: &AtomicU64) -> Res<(u64, usize)> {
-    lex::read_only_check(stmt).map_err(|why| format!("Export all only runs statements that read: {why}"))?;
+    lex::read_only_check(stmt, db.dialect).map_err(|why| format!("Export all only runs statements that read: {why}"))?;
     let mut conn = db.acquire_conn().await?;
     prepare(&mut conn, db.dialect, schema, true, id).await?;
     // All rows means all of them, and the file is written as UTF-8 from what the server sends.
@@ -230,13 +230,13 @@ pub fn can_single(f: Fmt) -> bool {
 
 /// The statements of a script, or why the export must not start. Every statement is checked before any
 /// runs, so a script with a write in it never half runs, whatever the connection's lock says.
-pub fn check_script(text: &str) -> Result<Vec<String>, String> {
-    let stmts: Vec<String> = lex::split_statements(text).into_iter().map(|(_, s)| s.to_string()).collect();
+pub fn check_script(text: &str, d: Dialect) -> Result<Vec<String>, String> {
+    let stmts: Vec<String> = lex::split_statements(text, d).into_iter().map(|(_, s)| s.to_string()).collect();
     if stmts.is_empty() {
         return Err("The editor has no statements.".into());
     }
     for (i, s) in stmts.iter().enumerate() {
-        lex::read_only_check(s).map_err(|why| format!("Statement {} does not only read, so nothing was exported: {why}", i + 1))?;
+        lex::read_only_check(s, d).map_err(|why| format!("Statement {} does not only read, so nothing was exported: {why}", i + 1))?;
     }
     Ok(stmts)
 }
@@ -325,7 +325,7 @@ pub fn numbered(path: &std::path::Path, n: usize) -> PathBuf {
 #[allow(clippy::too_many_arguments)]
 pub async fn export_all(db: &Db, schema: &str, stmts: &[String], ap: &AllPlan, path: &std::path::Path, count: &AtomicU64, step: &AtomicU64, cancel: &AtomicBool, id: &AtomicU64) -> Res<Done> {
     for s in stmts {
-        lex::read_only_check(s).map_err(|why| format!("Export all only runs statements that read: {why}"))?;
+        lex::read_only_check(s, db.dialect).map_err(|why| format!("Export all only runs statements that read: {why}"))?;
     }
     let mut parts: Vec<(PathBuf, PathBuf)> = Vec::new();
     // The file being written when a statement fails, which `parts` does not hold yet.
@@ -450,12 +450,12 @@ mod tests {
     #[test]
     fn a_script_with_a_write_is_refused_before_anything_runs() {
         for w in ["SELECT 1; DELETE FROM t", "USE a; SELECT 1; UPDATE t SET a = 1", "SELECT 1; SET SESSION transaction_read_only = 0; SELECT 2", "SELECT 1; SELECT * FROM t INTO OUTFILE '/tmp/x'"] {
-            let why = check_script(w).unwrap_err();
+            let why = check_script(w, Dialect::MySql).unwrap_err();
             assert!(why.contains("nothing was exported"), "{w}: {why}");
         }
-        assert!(check_script("SELECT 1; DELETE FROM t").unwrap_err().starts_with("Statement 2 "));
-        assert!(check_script("  ;; ").is_err());
-        let ok = check_script("USE shop; SET @n = 3; SELECT @n; SELECT 'a;b'").unwrap();
+        assert!(check_script("SELECT 1; DELETE FROM t", Dialect::MySql).unwrap_err().starts_with("Statement 2 "));
+        assert!(check_script("  ;; ", Dialect::MySql).is_err());
+        let ok = check_script("USE shop; SET @n = 3; SELECT @n; SELECT 'a;b'", Dialect::MySql).unwrap();
         assert_eq!(ok, ["USE shop", "SET @n = 3", "SELECT @n", "SELECT 'a;b'"]);
     }
 

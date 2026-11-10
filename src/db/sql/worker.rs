@@ -291,11 +291,11 @@ pub(super) fn to_row<R: Cells>(cols: &[Col], row: &R, pk: &[String]) -> Res<Row>
 }
 
 /// Text the user typed is spliced into a SELECT, so it must stay one read-only statement.
-fn one_read(sql: &str) -> Res<()> {
-    if lex::split_statements(sql).len() != 1 {
+fn one_read(sql: &str, d: Dialect) -> Res<()> {
+    if lex::split_statements(sql, d).len() != 1 {
         return Err("The filter and sort must not contain another statement".into());
     }
-    lex::read_only_check(sql)
+    lex::read_only_check(sql, d)
 }
 
 /// The count and whether it is the information_schema estimate rather than an exact count. A
@@ -320,7 +320,7 @@ async fn count(db: &Db, schema: &str, table: &str, q: &PageQuery) -> Res<(u64, b
         }
     }
     let sql = q.count_sql(d, schema, table);
-    one_read(&sql)?;
+    one_read(&sql, d)?;
     let t = Instant::now();
     let res = raw_sql(&sql).fetch_one(pool).await;
     db.note(schema, &sql, t, &res);
@@ -368,7 +368,7 @@ async fn page(db: &Db, schema: &str, table: &str, q: &PageQuery, limit: u64, off
         pk.clear();
     }
     let sql = q.select_sql(d, schema, table, &pk, Some((limit, offset)));
-    one_read(&sql)?;
+    one_read(&sql, d)?;
     let data = async {
         let t = Instant::now();
         let res = raw_sql(&sql).fetch_all(pool).await;
@@ -380,7 +380,7 @@ async fn page(db: &Db, schema: &str, table: &str, q: &PageQuery, limit: u64, off
     let count = total.saturating_sub(q.skip).min(q.limit.unwrap_or(u64::MAX));
     let matched = if q.grouped() {
         let sql = q.rows_sql(d, schema, table);
-        one_read(&sql)?;
+        one_read(&sql, d)?;
         let t = Instant::now();
         let r = raw_sql(&sql).fetch_one(pool).await;
         db.note(schema, &sql, t, &r);
@@ -899,7 +899,7 @@ mod tests {
         assert_eq!(f("SELECT X?, a?, @?", &[Param::Int(1), Param::Int(2), Param::Int(3)], false).unwrap(), "SELECT X 1 , a 2 , @ 3 ");
         // A value that tries to end the string stays inside it, so the text is still one statement.
         let evil = f("SELECT ?", &[Param::Text("'; DROP TABLE t; --".into())], false).unwrap();
-        assert_eq!(lex::split_statements(&evil).len(), 1);
+        assert_eq!(lex::split_statements(&evil, Dialect::MySql).len(), 1);
         assert!(f("?", &[], false).is_err() && f("1", &[Param::Null], false).is_err());
         assert!(f("?", &[Param::Float(f64::NAN)], false).is_err() && f("?", &[Param::Text("a\0".into())], false).is_err());
     }
@@ -1460,7 +1460,7 @@ mod tests {
         };
         // USE and @variables carry over: the table has no schema in front of it and the variable is still set.
         let script = "USE quarry_test; SET @lim = 2; SELECT id, name FROM t_exp ORDER BY id; SELECT @lim AS lim, COUNT(*) AS n FROM t_exp";
-        let stmts = check_script(script).unwrap();
+        let stmts = check_script(script, Dialect::MySql).unwrap();
         let run = |stmts: &[String], fmt: Fmt, single: bool, file: &str, cancel: bool| {
             let ap = AllPlan { plan: Plan { fmt, header: true, table: "t_exp".into(), bs: true }, single };
             let (count, step) = (AtomicU64::new(0), AtomicU64::new(0));
@@ -1487,7 +1487,7 @@ mod tests {
         assert_eq!(names(&dir), ["all.json", "res-1.csv", "res-2.csv"]);
 
         // A statement that fails midway leaves nothing, not even the first result's file.
-        let bad = check_script("SELECT 1 AS a; SELECT * FROM quarry_test.no_such_table_here").unwrap();
+        let bad = check_script("SELECT 1 AS a; SELECT * FROM quarry_test.no_such_table_here", Dialect::MySql).unwrap();
         let err = run(&bad, Fmt::Csv, false, "bad.csv", false).0.err().unwrap();
         assert!(err.contains("no_such_table_here"), "{err}");
         let err = run(&bad, Fmt::Json, true, "bad.json", false).0.err().unwrap();
@@ -1500,7 +1500,7 @@ mod tests {
         assert_eq!(names(&dir).len(), 3);
 
         // A script with a DELETE is refused up front and the table stays whole.
-        let refused = check_script("SELECT 1; DELETE FROM t_exp");
+        let refused = check_script("SELECT 1; DELETE FROM t_exp", Dialect::MySql);
         assert!(refused.is_err());
         let n = |rt: &tokio::runtime::Handle, pool: &sqlx::MySqlPool| -> i64 { rt.block_on(async { sqlx::query_scalar("SELECT COUNT(*) FROM quarry_test.t_exp").fetch_one(pool).await.unwrap() }) };
         assert_eq!(n(&p.rt, &p.pool), 3);

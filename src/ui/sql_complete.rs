@@ -314,7 +314,8 @@ fn table_sug(dl: Dialect, t: &SchemaTable, in_tick: bool) -> Sug {
 /// script before and after the caret. They are lexed together, so a `;` inside a string does not split.
 pub(crate) fn split_statement(before: &str, tail: &str) -> (String, String) {
     let all = format!("{before}{tail}");
-    let semis: Vec<usize> = lex::tokens(&all).into_iter().filter(|(t, r)| *t == Tok::Punct && &all[r.clone()] == ";").map(|(_, r)| r.start).collect();
+    // The dialect is not known here yet, so a statement is cut by MySQL rules until autocomplete is per dialect.
+    let semis: Vec<usize> = lex::tokens(&all, Dialect::default()).into_iter().filter(|(t, r)| *t == Tok::Punct && &all[r.clone()] == ";").map(|(_, r)| r.start).collect();
     let start = semis.iter().rev().find(|&&p| p < before.len()).map_or(0, |p| p + 1);
     let end = semis.iter().find(|&&p| p >= before.len()).copied().unwrap_or(all.len());
     (all[start..before.len()].to_string(), all[start..end].to_string())
@@ -326,9 +327,9 @@ pub(crate) fn analyze(before: &str, full_stmt: &str, scope: &Scope, values: &Fie
     // A space after the text shows whether it ends inside a string, comment or backtick name: such a
     // token swallows the space, while a finished one leaves it as a token of its own.
     let probe = format!("{before} ");
-    let ptoks = lex::tokens(&probe);
+    let ptoks = lex::tokens(&probe, scope.dialect);
     let (open, orng) = ptoks.last().filter(|(t, r)| r.start < before.len() && r.end == probe.len() && matches!(t, Tok::Str | Tok::Quoted | Tok::Comment)).map(|(t, r)| (Some(*t), r.clone())).unwrap_or((None, 0..0));
-    let toks = lex::tokens(before);
+    let toks = lex::tokens(before, scope.dialect);
     let prev_all = sig(before, &toks);
     // A backtick typed and not yet closed would swallow the rest of the statement, aliases included.
     let closed;
@@ -338,7 +339,7 @@ pub(crate) fn analyze(before: &str, full_stmt: &str, scope: &Scope, values: &Fie
     } else {
         full_stmt
     };
-    let full_toks = lex::tokens(full_stmt);
+    let full_toks = lex::tokens(full_stmt, scope.dialect);
     let full_sig = sig(full_stmt, &full_toks);
     let rts = resolve(&parse_refs(&full_sig), scope);
     match open {
@@ -574,10 +575,10 @@ pub(crate) struct Help {
 pub(crate) fn sql_help(before: &str) -> Option<Help> {
     let probe = format!("{before} ");
     // Inside a string or comment a parenthesis is only text.
-    if lex::tokens(&probe).last().is_some_and(|(t, r)| r.start < before.len() && r.end == probe.len() && matches!(t, Tok::Str | Tok::Comment)) {
+    if lex::tokens(&probe, Dialect::default()).last().is_some_and(|(t, r)| r.start < before.len() && r.end == probe.len() && matches!(t, Tok::Str | Tok::Comment)) {
         return None;
     }
-    let toks = lex::tokens(before);
+    let toks = lex::tokens(before, Dialect::default());
     let t = sig(before, &toks);
     // Walk outward through the open parentheses to the first that belongs to a known function.
     let mut depth = 0;

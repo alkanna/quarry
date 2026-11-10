@@ -855,7 +855,7 @@ mod tests {
     /// Every mode the server may read a statement under: one statement either way.
     fn one_statement(sql: &str) {
         for (bs, ansi) in [(true, false), (false, false), (true, true), (false, true)] {
-            assert_eq!(lex::count_with(sql, bs, ansi), 1, "bs={bs} ansi={ansi}: {sql}");
+            assert_eq!(lex::count_with(sql, crate::db::sql::Dialect::MySql, bs, ansi), 1, "bs={bs} ansi={ansi}: {sql}");
         }
     }
 
@@ -1002,7 +1002,7 @@ mod tests {
                 let sql = create_table_sql(Dialect::MySql, bs, &s, &m).unwrap_or_else(|err| panic!("{name}: {err}"));
                 let q = Dialect::MySql.quote_ident(name);
                 assert!(sql.contains(&format!("  {q} VARCHAR(20) NULL DEFAULT '")), "{sql}");
-                assert_eq!(lex::count_with(&sql, bs, ansi), 1, "bs={bs} ansi={ansi}: {sql}");
+                assert_eq!(lex::count_with(&sql, crate::db::sql::Dialect::MySql, bs, ansi), 1, "bs={bs} ansi={ansi}: {sql}");
             }
         }
         // The literal doubles quotes always and backslashes only where the server reads them as escapes.

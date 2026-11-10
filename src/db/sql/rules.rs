@@ -319,7 +319,9 @@ enum T {
 
 /// Splits text into the few token kinds the rule SQL uses. Bare words that name a column become
 /// identifiers, so `status` and `` `status` `` read the same.
-fn lex(text: &str, cols: &[(String, Kind)]) -> Option<Vec<T>> {
+fn lex(text: &str, cols: &[(String, Kind)], d: Dialect) -> Option<Vec<T>> {
+    // Backticks hold names on MySQL, double quotes on PostgreSQL. The other mark is not a name there.
+    let quote = if d == Dialect::Postgres { '"' } else { '`' };
     let ch: Vec<char> = text.chars().collect();
     let mut i = 0;
     let mut out = Vec::new();
@@ -327,16 +329,16 @@ fn lex(text: &str, cols: &[(String, Kind)]) -> Option<Vec<T>> {
         let c = ch[i];
         if c.is_whitespace() {
             i += 1;
-        } else if c == '`' {
+        } else if c == quote {
             let mut s = String::new();
             i += 1;
             loop {
                 match ch.get(i)? {
-                    '`' if ch.get(i + 1) == Some(&'`') => {
-                        s.push('`');
+                    q if *q == quote && ch.get(i + 1) == Some(&quote) => {
+                        s.push(quote);
                         i += 2;
                     }
-                    '`' => break,
+                    q if *q == quote => break,
                     c => {
                         s.push(*c);
                         i += 1;
@@ -592,7 +594,7 @@ pub fn parse(text: &str, cols: &[(String, Kind)], d: Dialect, bs: bool) -> Optio
     if !bs && text.contains('\\') {
         return None;
     }
-    let toks = lex(text, cols)?;
+    let toks = lex(text, cols, d)?;
     if toks.is_empty() {
         return Some((Vec::new(), false));
     }
@@ -602,7 +604,7 @@ pub fn parse(text: &str, cols: &[(String, Kind)], d: Dialect, bs: bool) -> Optio
     if !rules.iter().all(|r| ops_for(r.kind).contains(&r.op) && r.complete()) {
         return None;
     }
-    (lex(&to_sql(&rules, any, d, true), cols)? == toks).then_some((rules, any))
+    (lex(&to_sql(&rules, any, d, true), cols, d)? == toks).then_some((rules, any))
 }
 
 /// How a date column is grouped.
@@ -688,6 +690,19 @@ mod tests {
                 assert_eq!(back, vec![r], "{sql}");
             }
         }
+    }
+
+    #[test]
+    fn postgres_rules_round_trip_through_double_quoted_names() {
+        let d = Dialect::Postgres;
+        let a = Rule { col: "status".into(), kind: Kind::Enum, op: Op::In, values: vec!["paid".into(), "shipped".into()] };
+        let b = Rule { col: "to\"tal".into(), kind: Kind::Decimal, op: Op::Gt, values: vec!["50".into()] };
+        let sql = to_sql(&[a.clone(), b.clone()], false, d, false);
+        assert_eq!(sql, "\"status\" IN ('paid', 'shipped') AND \"to\"\"tal\" > 50");
+        assert_eq!(parse(&sql, &[("status".into(), Kind::Enum), ("to\"tal".into(), Kind::Decimal)], d, false), Some((vec![a, b], false)));
+        // A backtick name is not a name on PostgreSQL, and a double quoted one is not on MySQL.
+        assert!(parse("`status` = 'paid'", &cols(), d, false).is_none());
+        assert!(parse("\"status\" = 'paid'", &cols(), Dialect::MySql, true).is_none());
     }
 
     #[test]

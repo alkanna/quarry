@@ -97,10 +97,13 @@ type Span = std::ops::Range<usize>;
 /// Where each secret string of a statement sits. Every reading the server may take of the quotes is tried, one at a
 /// time, and the ranges are merged, so a literal that one reading would end early is still covered to its end.
 fn secret_ranges(sql: &str) -> Vec<Span> {
-    use super::sql::lex::{nth_reading, Tok, READINGS};
+    use super::sql::{lex::{nth_reading, readings, Tok}, Dialect};
     let mut hits: Vec<Span> = Vec::new();
-    for n in 0..READINGS {
-        let toks = nth_reading(sql, n);
+    // The log does not know the dialect of what it was handed, so every reading of both is tried: PostgreSQL's dollar
+    // quotes and E'' strings can hold a password that no MySQL reading sees as one string.
+    let all = [(Dialect::MySql, readings(Dialect::MySql)), (Dialect::Postgres, readings(Dialect::Postgres))];
+    for (d, n) in all.into_iter().flat_map(|(d, count)| (0..count).map(move |n| (d, n))) {
+        let toks = nth_reading(sql, d, n);
         // Executable comment marks are not tokens of the statement: `/*!80000 'pw' */` reads as the string itself.
         let code: Vec<&(Tok, Span)> = toks.iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment | Tok::ExecOpen | Tok::ExecClose)).collect();
         let text = |i: usize| code.get(i).map(|(_, r)| &sql[r.clone()]).unwrap_or("");
@@ -229,7 +232,7 @@ pub fn log_sql(conn: u64, db: &str, sql: &str, ms: u128, err: Option<&str>) {
         text.push_str(" …");
     }
     // The verb fills the name column like a Mongo command name, so the filter and the columns work the same.
-    let name = super::sql::lex::tokens(&text).into_iter().find(|(t, _)| *t == super::sql::lex::Tok::Word).map_or(String::new(), |(_, r)| text[r].to_ascii_uppercase());
+    let name = super::sql::lex::tokens(&text, super::sql::Dialect::MySql).into_iter().find(|(t, _)| *t == super::sql::lex::Tok::Word).map_or(String::new(), |(_, r)| text[r].to_ascii_uppercase());
     let entry = LogEntry { conn, at: std::time::SystemTime::now(), db: db.into(), name, cmd: text, ms: Some(ms), err, req: 0 };
     let Ok(mut log) = LOG.lock() else { return };
     if log.len() >= LOG_MAX {
@@ -244,6 +247,19 @@ mod tests {
 
     fn r(s: &str) -> String {
         redact_sql(s).0
+    }
+
+    #[test]
+    fn postgres_role_passwords_are_redacted_in_every_literal_form() {
+        assert_eq!(r("CREATE ROLE a LOGIN PASSWORD 'pw'"), "CREATE ROLE a LOGIN PASSWORD '***'");
+        assert_eq!(r("create user a with encrypted password 'pw' valid until 'infinity'"), "create user a with encrypted password '***' valid until 'infinity'");
+        assert_eq!(r("ALTER ROLE a WITH PASSWORD E'p\\'w'"), "ALTER ROLE a WITH PASSWORD '***'");
+        assert_eq!(r("ALTER USER a PASSWORD $$p'w; x$$ CREATEDB"), "ALTER USER a PASSWORD '***' CREATEDB");
+        assert_eq!(r("ALTER ROLE a PASSWORD $tag$p$$w$tag$"), "ALTER ROLE a PASSWORD '***'");
+        // With standard_conforming_strings off the literal runs on, so the redaction covers the longer reading.
+        assert_eq!(r("ALTER ROLE a PASSWORD 'p\\' -- x\n; SELECT 1"), "ALTER ROLE a PASSWORD '***'");
+        assert_eq!(r("CREATE ROLE a PASSWORD NULL"), "CREATE ROLE a PASSWORD NULL");
+        assert_eq!(r("SELECT 1"), "SELECT 1");
     }
 
     #[test]

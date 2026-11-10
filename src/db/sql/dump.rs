@@ -81,7 +81,7 @@ fn view_order(d: Dialect, views: &[(String, String)]) -> Vec<usize> {
         .iter()
         .enumerate()
         .map(|(i, (_, sql))| {
-            let toks = lex::tokens(sql);
+            let toks = lex::tokens(sql, d);
             let word = |k: usize, w: &str| toks[k].0 == lex::Tok::Word && sql[toks[k].1.clone()].eq_ignore_ascii_case(w);
             let view = (0..toks.len()).find(|&k| word(k, "VIEW")).unwrap_or(0);
             let body = (view..toks.len()).find(|&k| word(k, "AS")).map_or(0, |k| k + 1);
@@ -168,10 +168,10 @@ async fn write_rows(c: &mut sqlx::MySqlConnection, d: Dialect, plan: &DumpPlan, 
     if let Some(f) = plan.filter.as_ref().filter(|f| !f.trim().is_empty()) {
         // The clause is the user's text, so the whole statement must still be one statement that only reads.
         sql.push_str(&format!("\nWHERE (\n{}\n)", f.trim()));
-        if lex::split_statements(&sql).len() != 1 {
+        if lex::split_statements(&sql, d).len() != 1 {
             return Err("The filter must not contain another statement.".into());
         }
-        lex::read_only_check(&sql)?;
+        lex::read_only_check(&sql, d)?;
     }
     let per = plan.rows_per_insert.max(1);
     let started = std::time::Instant::now();
@@ -431,7 +431,7 @@ pub async fn run_file(db: Db, schema: String, src: Source, read_only: bool, prog
 Statements before it ran and stay applied.", excerpt(&stmt)));
                     }
                     // A SET of sql_mode changes how the rest of the file must be read.
-                    if lex::changes_escaping(&String::from_utf8_lossy(&stmt)) {
+                    if lex::changes_escaping(&String::from_utf8_lossy(&stmt), Dialect::MySql) {
                         let bs = mode_of(&mut c).await;
                         sp.set_backslash(bs);
                     }

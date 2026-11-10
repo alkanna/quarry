@@ -1,0 +1,678 @@
+//! The PostgreSQL side of the lexer: how its text is tokenised and what the read-only check refuses.
+//! This is the first of three layers (the session default and a rolled back READ ONLY transaction are the
+//! others), so it refuses whatever it cannot read with certainty.
+
+use super::{is, punct, Code, Tok, REFUSED};
+use std::ops::Range;
+
+fn ident_start(c: u8) -> bool {
+    c.is_ascii_alphabetic() || c == b'_' || c >= 0x80
+}
+
+fn ident_cont(c: u8) -> bool {
+    ident_start(c) || c.is_ascii_digit() || c == b'$'
+}
+
+/// Index just past the closing quote of the quoted text that opens at `i`, with the quote doubled as the only
+/// way to hold it, or a backslash that takes the next char with it when `esc` is set.
+fn quote_end(b: &[u8], i: usize, esc: bool) -> usize {
+    let (n, c) = (b.len(), b[i]);
+    let mut i = i + 1;
+    while i < n {
+        if b[i] == b'\\' && esc {
+            i += 2;
+        } else if b[i] == c {
+            if b.get(i + 1) == Some(&c) {
+                i += 2;
+            } else {
+                return i + 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    n
+}
+
+/// Splits PostgreSQL text into tokens that cover it completely. `plain_backslash` is the reading where
+/// standard_conforming_strings is off and a plain '...' honours backslashes; E'...' always does. Unterminated
+/// strings and comments run to the end of the text, as they are a syntax error on the server anyway.
+pub(super) fn lex(text: &str, plain_backslash: bool) -> Vec<(Tok, Range<usize>)> {
+    let b = text.as_bytes();
+    let n = b.len();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < n {
+        let s = i;
+        let c = b[i];
+        let next = b.get(i + 1).copied();
+        let tok = if c.is_ascii_whitespace() || c == 0x0b {
+            while i < n && (b[i].is_ascii_whitespace() || b[i] == 0x0b) {
+                i += 1;
+            }
+            Tok::Space
+        } else if c == b'\'' {
+            i = quote_end(b, i, plain_backslash);
+            Tok::Str
+        } else if c == b'"' {
+            i = quote_end(b, i, false);
+            Tok::Quoted
+        } else if c == b'-' && next == Some(b'-') {
+            // A carriage return ends a comment on the server as well, and text after it is code.
+            while i < n && b[i] != b'\n' && b[i] != b'\r' {
+                i += 1;
+            }
+            Tok::Comment
+        } else if c == b'/' && next == Some(b'*') {
+            // Block comments nest, so an inner */ does not end the outer one.
+            let (mut depth, mut j) = (1, i + 2);
+            while j < n && depth > 0 {
+                if b[j] == b'/' && b.get(j + 1) == Some(&b'*') {
+                    depth += 1;
+                    j += 2;
+                } else if b[j] == b'*' && b.get(j + 1) == Some(&b'/') {
+                    depth -= 1;
+                    j += 2;
+                } else {
+                    j += 1;
+                }
+            }
+            i = j;
+            Tok::Comment
+        } else if c == b'$' {
+            // $1 is a parameter. $tag$ or $$ opens a string that only the same mark closes. A `$` glued to a
+            // word never gets here because the word swallows it.
+            let mut j = i + 1;
+            if next.is_some_and(|d| d.is_ascii_digit()) {
+                while j < n && b[j].is_ascii_digit() {
+                    j += 1;
+                }
+                i = j;
+                Tok::Word
+            } else {
+                // The tag follows identifier rules except that it cannot hold a `$`.
+                if j < n && ident_start(b[j]) {
+                    while j < n && (ident_start(b[j]) || b[j].is_ascii_digit()) {
+                        j += 1;
+                    }
+                }
+                if j < n && b[j] == b'$' {
+                    let mark = &text[i..=j];
+                    i = text[j + 1..].find(mark).map_or(n, |p| j + 1 + p + mark.len());
+                    Tok::Str
+                } else {
+                    i += 1;
+                    Tok::Punct
+                }
+            }
+        } else if ident_start(c) {
+            while i < n && ident_cont(b[i]) {
+                i += 1;
+            }
+            let one = i - s == 1;
+            let q = b.get(i).copied();
+            if one && q == Some(b'\'') && matches!(c, b'e' | b'E' | b'b' | b'B' | b'x' | b'X') {
+                // E'' honours backslashes in every reading; B'' and X'' never do.
+                i = quote_end(b, i, matches!(c, b'e' | b'E'));
+                Tok::Str
+            } else if one && matches!(c, b'u' | b'U') && q == Some(b'&') && matches!(b.get(i + 1), Some(b'\'' | b'"')) {
+                let quote = b[i + 1];
+                i = quote_end(b, i + 1, false);
+                if quote == b'"' { Tok::Quoted } else { Tok::Str }
+            } else {
+                Tok::Word
+            }
+        } else if c.is_ascii_digit() {
+            // A `$` inside a number-led word reads differently before and after PostgreSQL 16, so the whole run
+            // is one word here and the read-only check refuses it.
+            while i < n && ident_cont(b[i]) {
+                i += 1;
+            }
+            Tok::Word
+        } else {
+            i += 1;
+            Tok::Punct
+        };
+        out.push((tok, s..i));
+    }
+    out
+}
+
+/// Whether a word token is `$1`, `$2`, ... and which number.
+pub(super) fn param_number(w: &str) -> Option<usize> {
+    let d = w.strip_prefix('$')?;
+    if d.is_empty() || !d.bytes().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    d.parse().ok()
+}
+
+/// The name an identifier token spells, folded to lower case. A Unicode escape name cannot be decoded here
+/// (the escape character may be changed), so it comes back as a marker no list contains.
+const UNSURE: &str = "\0unicode escape";
+
+fn ident(t: &Code) -> Option<String> {
+    match t.0 {
+        Tok::Word => Some(t.1.to_ascii_lowercase()),
+        Tok::Quoted if t.1.len() >= 2 && t.1.get(..2).is_some_and(|p| p.eq_ignore_ascii_case("u&")) => Some(UNSURE.into()),
+        Tok::Quoted => Some(t.1.trim_start_matches('"').trim_end_matches('"').replace("\"\"", "\"").to_ascii_lowercase()),
+        _ => None,
+    }
+}
+
+/// Functions that change state or reach outside the database. A READ ONLY transaction stops many of them but
+/// not all (set_config on a session, advisory locks, sequences, pg_cancel_backend), and a lexer that lets one
+/// through would be the only guard on a connection whose session default someone turned off.
+pub(super) const REFUSED_FUNCTIONS_EXACT: &[&str] = &[
+    "set_config", "pg_terminate_backend", "pg_cancel_backend", "pg_reload_conf", "pg_rotate_logfile", "pg_switch_wal", "pg_create_restore_point", "pg_promote",
+    "pg_logical_emit_message", "pg_stat_statements_reset", "pg_start_backup", "pg_stop_backup", "pg_log_backend_memory_contexts", "pg_log_standby_snapshot",
+    "pg_import_system_collations", "pg_notify", "nextval", "setval", "pg_read_file", "pg_read_binary_file", "pg_ls_dir", "txid_current", "pg_current_xact_id",
+    "lowrite", "loread", "pg_prewarm", "brin_summarize_new_values", "brin_summarize_range", "brin_desummarize_range", "gin_clean_pending_list",
+    "pg_restore_relation_stats", "pg_restore_attribute_stats", "pg_clear_relation_stats", "pg_clear_attribute_stats", "cursor_to_xml", "xpath_table",
+];
+
+/// Families of functions, matched on the start of the name.
+pub(super) const REFUSED_FUNCTIONS_PREFIX: &[&str] = &[
+    "pg_advisory", "pg_try_advisory", "pg_logical_slot_", "dblink", "lo_", "pg_file_", "pg_replication_origin_", "pg_stat_reset", "pg_backup_", "pg_wal_replay_",
+    // These run the SQL text they are given, which this check never sees.
+    "query_to_xml",
+];
+
+/// Names matched anywhere inside.
+pub(super) const REFUSED_FUNCTIONS_CONTAIN: &[&str] = &["replication_slot"];
+
+fn refused_function(name: &str) -> bool {
+    REFUSED_FUNCTIONS_EXACT.contains(&name) || REFUSED_FUNCTIONS_PREFIX.iter().any(|p| name.starts_with(p)) || REFUSED_FUNCTIONS_CONTAIN.iter().any(|p| name.contains(p))
+}
+
+/// Statements that read, besides EXPLAIN which is checked for ANALYZE and then for its inner statement.
+const READS: [&str; 5] = ["SELECT", "WITH", "VALUES", "TABLE", "SHOW"];
+
+fn code_of(stmt: &str, plain_backslash: bool) -> Vec<Code<'_>> {
+    lex(stmt, plain_backslash).into_iter().filter(|(t, _)| matches!(t, Tok::Word | Tok::Quoted | Tok::Str | Tok::Punct)).map(|(t, r)| (t, &stmt[r])).collect()
+}
+
+/// Allow-list on the first keyword, then a scan of the whole statement for locking clauses, INTO, data
+/// modifying CTEs and the functions above. The text must pass with standard_conforming_strings on and off.
+pub(super) fn read_only_check(stmt: &str) -> Result<(), String> {
+    for plain_backslash in [false, true] {
+        let code = code_of(stmt, plain_backslash);
+        if code.iter().any(|t| t.0 == Tok::Word && t.1.as_bytes()[0].is_ascii_digit() && t.1.contains('$')) {
+            return Err(format!("A number followed by $ reads differently on different servers, so this statement is not allowed on a read-only connection. {REFUSED}"));
+        }
+        code.split(|t| punct(t, ";")).try_for_each(check_one)?;
+    }
+    Ok(())
+}
+
+fn check_one(part: &[Code]) -> Result<(), String> {
+    // psql commands start with a backslash, and \g or \gexec can follow a statement on the same line.
+    if part.iter().any(|t| punct(t, "\\")) {
+        return Err(format!("psql backslash commands are not allowed on a read-only connection. {REFUSED}"));
+    }
+    // A statement may open with parentheses, as in (SELECT 1) UNION (SELECT 2).
+    let at = part.iter().take_while(|t| punct(t, "(")).count();
+    let Some(first) = part.get(at) else { return Ok(()) };
+    if first.0 != Tok::Word {
+        return Err(format!("This statement is not allowed on a read-only connection. {REFUSED}"));
+    }
+    let verb = first.1.to_ascii_uppercase();
+    if verb == "EXPLAIN" {
+        return check_explain(&part[at + 1..]);
+    }
+    if !READS.contains(&verb.as_str()) {
+        return Err(match verb.as_str() {
+            "INSERT" | "UPDATE" | "DELETE" | "MERGE" | "TRUNCATE" | "CREATE" | "ALTER" | "DROP" | "GRANT" | "REVOKE" | "COMMENT" | "REASSIGN" | "IMPORT" | "SECURITY" => format!("{verb} writes data and this connection is read-only. {REFUSED}"),
+            _ => format!("{verb} is not allowed on a read-only connection. {REFUSED}"),
+        });
+    }
+    check_body(part)
+}
+
+/// ANALYZE runs the statement it explains, in either spelling and in the option list too.
+fn check_explain(rest: &[Code]) -> Result<(), String> {
+    let analyze = |t: &Code| ident(t).is_some_and(|w| w == "analyze" || w == "analyse" || w == UNSURE);
+    let mut j = 0;
+    if rest.first().is_some_and(|t| punct(t, "(")) {
+        let mut depth = 0i32;
+        let mut close = None;
+        for (k, t) in rest.iter().enumerate() {
+            if punct(t, "(") {
+                depth += 1;
+            } else if punct(t, ")") {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(k);
+                    break;
+                }
+            }
+        }
+        let Some(close) = close else { return Err(format!("EXPLAIN options are not closed. {REFUSED}")) };
+        if rest[1..close].iter().any(analyze) {
+            return Err(format!("EXPLAIN ANALYZE runs the statement it explains. {REFUSED}"));
+        }
+        j = close + 1;
+    } else {
+        while rest.get(j).is_some_and(|t| t.0 == Tok::Word && (analyze(t) || t.1.eq_ignore_ascii_case("verbose"))) {
+            if analyze(&rest[j]) {
+                return Err(format!("EXPLAIN ANALYZE runs the statement it explains. {REFUSED}"));
+            }
+            j += 1;
+        }
+    }
+    let inner = &rest[j..];
+    if inner.is_empty() {
+        return Err(format!("EXPLAIN needs a statement to explain. {REFUSED}"));
+    }
+    check_one(inner)
+}
+
+/// What no statement that reads may hold, wherever it sits.
+fn check_body(part: &[Code]) -> Result<(), String> {
+    for (i, t) in part.iter().enumerate() {
+        let next = part.get(i + 1);
+        if t.0 == Tok::Word {
+            let w = t.1.to_ascii_uppercase();
+            if w == "INTO" {
+                return Err(format!("SELECT INTO creates a table and is not allowed on a read-only connection. {REFUSED}"));
+            }
+            if w == "FOR" && next.is_some_and(|n| n.0 == Tok::Word && ["UPDATE", "SHARE", "NO", "KEY"].contains(&n.1.to_ascii_uppercase().as_str())) {
+                return Err(format!("A locking clause (FOR UPDATE, FOR SHARE) takes row locks and is not allowed on a read-only connection. {REFUSED}"));
+            }
+        }
+        if next.is_some_and(|n| punct(n, "(")) {
+            if let Some(name) = ident(t) {
+                if name == UNSURE {
+                    return Err(format!("A function named with a Unicode escape cannot be checked and is not allowed on a read-only connection. {REFUSED}"));
+                }
+                if refused_function(&name) {
+                    return Err(format!("{name}() changes state and is not allowed on a read-only connection. {REFUSED}"));
+                }
+            }
+        }
+    }
+    // A data modifying statement can only sit in a WITH, but a column or alias may share its name, so look
+    // only when a WITH is there.
+    if part.iter().any(|t| is(t, "WITH")) {
+        if let Some(t) = part.iter().find(|t| ["INSERT", "UPDATE", "DELETE", "MERGE"].iter().any(|k| is(t, k))) {
+            return Err(format!("{} inside WITH writes data and this connection is read-only. {REFUSED}", t.1.to_ascii_uppercase()));
+        }
+    }
+    Ok(())
+}
+
+/// Whether the text prepares or runs a statement from a name or a string.
+pub(super) fn uses_prepared(stmt: &str) -> bool {
+    [false, true].into_iter().any(|bs| code_of(stmt, bs).split(|t| punct(t, ";")).any(|part| part.first().is_some_and(|t| is(t, "PREPARE") || is(t, "EXECUTE") || is(t, "DEALLOCATE"))))
+}
+
+/// Settings that decide how text is read or whether a session may write. Quarry escapes values for what it
+/// read at connect and sets the search path itself, so a script must not move any of them.
+const ESCAPING_SETTINGS: [&str; 10] = [
+    "standard_conforming_strings", "backslash_quote", "escape_string_warning", "client_encoding", "search_path", "default_transaction_read_only",
+    "transaction_read_only", "tx_read_only", "session_authorization", "role",
+];
+
+/// Words that stand for one of the settings in SET and RESET: SET NAMES, SET SCHEMA, SET SESSION AUTHORIZATION,
+/// SET SESSION CHARACTERISTICS, SET TRANSACTION READ WRITE and RESET ALL.
+const ESCAPING_WORDS: [&str; 6] = ["names", "schema", "authorization", "characteristics", "write", "all"];
+
+pub(super) fn changes_escaping(stmt: &str) -> bool {
+    [false, true].into_iter().any(|bs| {
+        let code = code_of(stmt, bs);
+        code.split(|t| punct(t, ";")).any(|part| {
+            let first = part.iter().find(|t| !punct(t, "("));
+            // A DO block is code the check cannot read, and set_config takes the setting name as text.
+            if first.is_some_and(|t| is(t, "DO") || is(t, "DISCARD")) {
+                return true;
+            }
+            if part.iter().enumerate().any(|(i, t)| part.get(i + 1).is_some_and(|n| punct(n, "(")) && ident(t).is_some_and(|w| w == "set_config" || w == UNSURE)) {
+                return true;
+            }
+            if !first.is_some_and(|t| is(t, "SET") || is(t, "RESET")) {
+                return false;
+            }
+            part[1..].iter().filter_map(ident).any(|w| ESCAPING_SETTINGS.contains(&w.as_str()) || ESCAPING_WORDS.contains(&w.as_str()) || w == UNSURE)
+        })
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{changes_escaping, read_only_check, split_statements, tokens, uses_prepared, Dialect};
+    use super::*;
+
+    const PG: Dialect = Dialect::Postgres;
+
+    fn ro(s: &str) -> Result<(), String> {
+        read_only_check(s, PG)
+    }
+
+    fn kinds(s: &str) -> Vec<(Tok, &str)> {
+        tokens(s, PG).into_iter().filter(|(t, _)| *t != Tok::Space).map(|(t, r)| (t, &s[r])).collect()
+    }
+
+    #[test]
+    fn strings_comments_and_names_end_where_postgres_ends_them() {
+        use Tok::*;
+        // `$` glued to a word is part of the word, so no dollar quote opens.
+        assert_eq!(kinds("a$b$c"), [(Word, "a$b$c")]);
+        assert_eq!(kinds("SELECT $$a;b$$"), [(Word, "SELECT"), (Str, "$$a;b$$")]);
+        assert_eq!(kinds("$tag$ $$ ; $tag$ x"), [(Str, "$tag$ $$ ; $tag$"), (Word, "x")]);
+        // Tags are case sensitive and a different tag does not close.
+        assert_eq!(kinds("$A$ x $a$ y $A$ z"), [(Str, "$A$ x $a$ y $A$"), (Word, "z")]);
+        assert_eq!(kinds("$a$ x $b$ y"), [(Str, "$a$ x $b$ y")]);
+        assert_eq!(kinds("$1 + $22"), [(Word, "$1"), (Punct, "+"), (Word, "$22")]);
+        assert_eq!(kinds("$1$$ x $$"), [(Word, "$1"), (Str, "$$ x $$")]);
+        // A tag cannot start with a digit, so this is a parameter and a word.
+        assert_eq!(kinds("$1a$"), [(Word, "$1"), (Word, "a$")]);
+        assert_eq!(kinds(r"E'a\'b' 'c\' x"), [(Str, r"E'a\'b'"), (Str, r"'c\'"), (Word, "x")]);
+        assert_eq!(kinds(r"U&'a\' B'01' X'1f' n'x'"), [(Str, r"U&'a\'"), (Str, "B'01'"), (Str, "X'1f'"), (Word, "n"), (Str, "'x'")]);
+        assert_eq!(kinds(r#"U&"a""b" "c""d" `e`"#), [(Quoted, r#"U&"a""b""#), (Quoted, r#""c""d""#), (Punct, "`"), (Word, "e"), (Punct, "`")]);
+        // A word before the quote means the letter is part of a name, not a prefix.
+        assert_eq!(kinds("xE'a'"), [(Word, "xE"), (Str, "'a'")]);
+        assert_eq!(kinds("a::int"), [(Word, "a"), (Punct, ":"), (Punct, ":"), (Word, "int")]);
+        assert_eq!(kinds("1 --c\n2 -- d\n3 #4"), [(Word, "1"), (Comment, "--c"), (Word, "2"), (Comment, "-- d"), (Word, "3"), (Punct, "#"), (Word, "4")]);
+        // A carriage return ends a line comment.
+        assert_eq!(kinds("1 --c\r2"), [(Word, "1"), (Comment, "--c"), (Word, "2")]);
+        assert_eq!(kinds("/* a /* b */ c */ d"), [(Comment, "/* a /* b */ c */"), (Word, "d")]);
+        assert_eq!(kinds("/*! x */ y"), [(Comment, "/*! x */"), (Word, "y")]);
+        assert_eq!(kinds("/* open"), [(Comment, "/* open")]);
+        // Plain strings take backslashes only in the reading where standard_conforming_strings is off.
+        assert_eq!(super::lex(r"'a\' b", true).len(), 1);
+        assert_eq!(super::lex(r"'a\' b", false).len(), 3);
+        assert_eq!(split_statements("SELECT $$;$$; SELECT 2", PG).len(), 2);
+    }
+
+    const WRITES: &[&str] = &[
+        "SET x = 1", "SET LOCAL x TO 1", "SET SESSION x = 1", "RESET ALL", "RESET x", "BEGIN", "START TRANSACTION", "COMMIT", "END", "ROLLBACK", "SAVEPOINT a", "COPY t TO '/tmp/x'", "COPY t FROM PROGRAM 'id'",
+        "DO $$ BEGIN END $$", "CALL p()", "SELECT 1 INTO t2", "SELECT * INTO TEMP t2 FROM t", "LISTEN c", "NOTIFY c", "UNLISTEN *", "PREPARE p AS SELECT 1", "EXECUTE p", "DEALLOCATE p",
+        "DECLARE c CURSOR FOR SELECT 1", "FETCH 1 FROM c", "MOVE 1 IN c", "LOCK TABLE t", "MERGE INTO t USING s ON true WHEN MATCHED THEN DELETE", "VACUUM", "ANALYZE", "ANALYSE", "CLUSTER t", "REINDEX TABLE t",
+        "REFRESH MATERIALIZED VIEW m", "CHECKPOINT", "DISCARD ALL", "LOAD 'x'", r"\dt", r"\gexec", r"SELECT 1 \gexec", "INSERT INTO t VALUES (1)", "UPDATE t SET a = 1", "DELETE FROM t", "TRUNCATE t",
+        "CREATE TABLE t (a int)", "ALTER TABLE t ADD c int", "DROP TABLE t", "GRANT ALL ON t TO u", "REVOKE ALL ON t FROM u", "COMMENT ON TABLE t IS 'x'", "CREATE TABLE t AS SELECT 1", "SECURITY LABEL ON TABLE t IS 'x'",
+        "SELECT * FROM t FOR UPDATE", "SELECT * FROM t FOR SHARE", "SELECT * FROM t FOR NO KEY UPDATE", "SELECT * FROM t FOR KEY SHARE", "select * from t for update skip locked", "(SELECT 1) UNION (SELECT 2 FOR UPDATE)",
+        "SELECT * FROM (SELECT * FROM t FOR UPDATE) s", "WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x", "WITH x AS (INSERT INTO t VALUES (1) RETURNING *) SELECT * FROM x",
+        "WITH x AS (UPDATE t SET a = 1 RETURNING *) SELECT * FROM x", "WITH x AS (MERGE INTO t USING s ON true WHEN MATCHED THEN DELETE RETURNING *) SELECT * FROM x",
+        "WITH a AS (SELECT 1), b AS (WITH c AS (DELETE FROM t RETURNING 1) SELECT * FROM c) SELECT * FROM b", "WITH RECURSIVE x AS (SELECT 1 UNION ALL SELECT 2) INSERT INTO t SELECT * FROM x",
+        "EXPLAIN ANALYZE SELECT 1", "explain analyse select 1", "EXPLAIN (ANALYZE) SELECT 1", "EXPLAIN (ANALYZE true, VERBOSE) SELECT 1", "EXPLAIN (ANALYZE false) SELECT 1", "EXPLAIN (FORMAT JSON, analyze) SELECT 1",
+        r#"EXPLAIN ("analyze") SELECT 1"#, "EXPLAIN ANALYZE VERBOSE SELECT 1", "EXPLAIN VERBOSE ANALYZE SELECT 1", "EXPLAIN INSERT INTO t VALUES (1)", "EXPLAIN (FORMAT JSON) DELETE FROM t", "EXPLAIN", "EXPLAIN (VERBOSE",
+        "EXPLAIN (ANALYZE) WITH x AS (DELETE FROM t RETURNING 1) SELECT * FROM x", "SELECT 1; DROP TABLE t", "SELECT 1; SET x = 1", "SELECT 1;\nCOMMIT", "SELECT 1 -- c\n; DROP TABLE t", "\"select\" 1", "1",
+        // A number with a `$` inside reads differently across server versions, so it hides nothing.
+        "SELECT 1$$ ; DROP TABLE t; $$", "SELECT 1e5$a$ ; DROP TABLE t; $a$",
+    ];
+
+    #[test]
+    fn every_write_is_refused() {
+        for w in WRITES {
+            assert!(ro(w).is_err(), "{w}");
+        }
+        // Nothing runs for an empty text.
+        assert!(ro("").is_ok() && ro(" ; ;").is_ok());
+    }
+
+    const FUNCTIONS: &[&str] = &[
+        "set_config", "pg_terminate_backend", "pg_cancel_backend", "pg_reload_conf", "pg_rotate_logfile", "pg_switch_wal", "pg_create_restore_point", "pg_promote", "pg_advisory_lock", "pg_advisory_xact_lock_shared",
+        "pg_try_advisory_lock", "pg_try_advisory_xact_lock", "pg_logical_slot_get_changes", "pg_logical_slot_get_binary_changes", "dblink", "dblink_exec", "dblink_connect", "lo_import", "lo_export", "lo_unlink", "lo_create", "lo_put", "lowrite", "loread", "pg_file_write", "pg_file_unlink",
+        "pg_logical_emit_message", "pg_create_logical_replication_slot", "pg_drop_replication_slot", "pg_replication_slot_advance", "pg_replication_origin_create", "pg_replication_origin_advance", "pg_stat_reset",
+        "pg_stat_reset_shared", "pg_stat_reset_single_table_counters", "pg_stat_statements_reset", "pg_backup_start", "pg_backup_stop", "pg_start_backup", "pg_stop_backup", "pg_wal_replay_pause", "pg_wal_replay_resume",
+        "pg_log_backend_memory_contexts", "pg_import_system_collations", "pg_notify", "nextval", "setval", "pg_read_file", "pg_read_binary_file", "pg_ls_dir", "txid_current", "pg_current_xact_id", "query_to_xml",
+        "query_to_xml_and_xmlschema", "cursor_to_xml", "xpath_table",
+    ];
+
+    /// Every way a call to `f` may be written, as statements.
+    fn spellings(f: &str) -> Vec<String> {
+        let up = f.to_ascii_uppercase();
+        vec![
+            format!("SELECT {f}('a')"),
+            format!("select pg_catalog.{f}('a')"),
+            format!("SELECT \"{f}\"('a')"),
+            format!("SELECT \"pg_catalog\".\"{f}\"('a')"),
+            format!("SELECT {up}('a')"),
+            format!("SELECT \"{up}\"('a')"),
+            format!("SELECT Pg_Catalog.{up}('a')"),
+            format!("SELECT {f} /* c */ ('a')"),
+            format!("SELECT {f} /* a /* b */ c */ ('a')"),
+            format!("SELECT {f} -- c\n('a')"),
+            format!("SELECT {f}\n\t ('a')"),
+            format!("SELECT {f}('a'), 1"),
+            format!("SELECT * FROM {f}('a')"),
+            format!("SELECT 1 WHERE {f}('a') IS NULL"),
+            format!("WITH x AS (SELECT {f}('a')) SELECT * FROM x"),
+            format!("SELECT * FROM (SELECT {f}('a')) s"),
+            format!("EXPLAIN SELECT {f}('a')"),
+            format!("EXPLAIN (VERBOSE) SELECT {f}('a')"),
+            format!("(SELECT {f}('a'))"),
+            format!("SELECT 1; SELECT {f}('a')"),
+            format!("VALUES ({f}('a'))"),
+            format!("SELECT 'x' || {f}('a')"),
+        ]
+    }
+
+    #[test]
+    fn every_refused_function_is_refused_in_every_spelling() {
+        for f in FUNCTIONS {
+            for s in spellings(f) {
+                assert!(ro(&s).is_err(), "{s}");
+                // The same text after a string that only ends under standard_conforming_strings on.
+                assert!(ro(&format!("SELECT 'a\\' ; {s}")).is_err(), "{s}");
+            }
+        }
+        // A Unicode escape can spell any name, and its escape character can change, so none is accepted.
+        for s in [r#"SELECT U&"set\005fconfig"('a', 'b', false)"#, r#"SELECT U&"set!005fconfig"('a', 'b', false) UESCAPE '!'"#, r#"select u&"x"(1)"#] {
+            assert!(ro(s).is_err(), "{s}");
+        }
+        // Names that only start like a refused one, or are not called, stay usable.
+        for s in ["SELECT nextval_x(1)", "SELECT my_set_config(1)", "SELECT setval FROM t", "SELECT t.nextval FROM t", "SELECT lo FROM t", "SELECT lower(a) FROM t", "SELECT pg_advisory FROM t", "SELECT \"set_config\" FROM t", "SELECT set_config$(1)", "SELECT dbl FROM t"] {
+            assert!(ro(s).is_ok(), "{s}");
+        }
+    }
+
+    #[test]
+    fn dollar_quotes_hide_keywords_only_when_they_are_quotes() {
+        for s in [
+            "SELECT $$ ; DROP TABLE t; $$",
+            "SELECT $a$ ; DROP TABLE t; $a$",
+            "SELECT $a$ x $b$; DROP TABLE t; $a$",
+            "SELECT $a$ x $$ ; DROP TABLE t; $$ y $a$",
+            "SELECT $é$ ; DROP TABLE t; $é$",
+            "SELECT $$ set_config('a', 'b', false) $$",
+            "SELECT $$ x $$ || $q$ FOR UPDATE $q$",
+            "SELECT $_1$ ; DROP TABLE t; $_1$",
+            "SELECT * FROM t WHERE a = $1 AND b = $2::int",
+        ] {
+            assert!(ro(s).is_ok(), "{s}");
+        }
+        for s in [
+            "SELECT $a$ x $a$; DROP TABLE t; SELECT $a$ y $a$",
+            "SELECT $$ x $$; DROP TABLE t; SELECT $$ y $$",
+            // The mark must be exact: a different case does not close it.
+            "SELECT $A$ x $a$ ; DROP TABLE t; $A$ ; DROP TABLE t",
+            // A `$` glued to a word is part of the word, so nothing is quoted here.
+            "SELECT a$b$c; DROP TABLE t; SELECT 1 AS a$b$",
+            "SELECT 1 AS a$$; DROP TABLE t; --$$",
+            // A `$` and a digit cannot open a quote, so the text between stays code.
+            "SELECT $1$ ; DROP TABLE t; $1$",
+        ] {
+            assert!(ro(s).is_err(), "{s}");
+        }
+    }
+
+    #[test]
+    fn comments_hide_keywords_the_way_postgres_nests_them() {
+        for s in [
+            "SELECT 1 /* a /* b */ ; DROP TABLE t; */",
+            "SELECT 1 /* ; DROP TABLE t */",
+            "SELECT 1 --; DROP TABLE t",
+            "SELECT 1 -- x\n",
+            "SELECT 1 /*! DROP TABLE t */",
+            "SELECT 1 /*+ DROP TABLE t */",
+            "SELECT 1 /* a /* b /* c */ */ ; DROP TABLE t; */",
+            "SELECT /* FOR UPDATE */ 1",
+        ] {
+            assert!(ro(s).is_ok(), "{s}");
+        }
+        for s in [
+            "SELECT 1 /* a /* b */ */ ; DROP TABLE t",
+            "SELECT 1 /* a */ ; DROP TABLE t; /* b */",
+            "SELECT 1 /* a /* b */ c */ ; DROP TABLE t; /* d */",
+            "SELECT 1 --x\n; DROP TABLE t",
+            "SELECT 1 --x\r; DROP TABLE t",
+            "SELECT 1 #x\n; DROP TABLE t",
+            "SELECT 1 /**/ ; DROP TABLE t",
+        ] {
+            assert!(ro(s).is_err(), "{s}");
+        }
+    }
+
+    #[test]
+    fn escape_strings_and_plain_strings_are_read_under_both_settings() {
+        for s in [
+            r"SELECT E'it\'s'",
+            r"SELECT E'\'; DROP TABLE t; --'",
+            r"SELECT 'it''s'",
+            r"SELECT E'a\\' || 'b'",
+            r"SELECT U&'\0041', U&'a''b', U&'\+000061'",
+            r#"SELECT U&"d\0061ta" FROM t"#,
+            "SELECT B'101', X'1F', b'1', x'a'",
+            // A backslash not before a quote reads the same either way.
+            r"SELECT 'a\b'",
+        ] {
+            assert!(ro(s).is_ok(), "{s}: {:?}", ro(s));
+        }
+        for s in [
+            // Under standard_conforming_strings on the first string ends at the quote after the backslash, off keeps it open.
+            r"SELECT 'a\' , '; DROP TABLE t; --'",
+            r"SELECT 'a\'; DROP TABLE t; --'",
+            r"SELECT E'a\\'; DROP TABLE t; --'",
+            r"SELECT U&'a\'; DROP TABLE t; --'",
+            r"SELECT X'a\'; DROP TABLE t; --'",
+            r"SELECT B'1'; DROP TABLE t",
+            r"SELECT xE'a'; DROP TABLE t; SELECT 'b",
+        ] {
+            assert!(ro(s).is_err(), "{s}");
+        }
+    }
+
+    #[test]
+    fn ordinary_reads_pass() {
+        for s in [
+            "SELECT 1",
+            "select * from t",
+            "SELECT * FROM \"My Table\" WHERE \"insert\" = 1",
+            "SELECT \"insert\", \"delete\", \"update\" FROM \"update\"",
+            "SELECT a AS \"into\" FROM t",
+            "SELECT update, delete, insert FROM t",
+            "WITH x AS (SELECT 1) SELECT * FROM x",
+            "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 5) SELECT * FROM r",
+            "WITH x AS MATERIALIZED (SELECT 1) SELECT * FROM x ORDER BY 1 LIMIT ALL",
+            "VALUES (1), (2)",
+            "TABLE t",
+            "SHOW search_path",
+            "SHOW ALL",
+            "EXPLAIN SELECT 1",
+            "EXPLAIN VERBOSE SELECT 1",
+            "EXPLAIN (VERBOSE, FORMAT JSON) SELECT 1",
+            "EXPLAIN (COSTS off, BUFFERS) SELECT 1",
+            "EXPLAIN WITH x AS (SELECT 1) SELECT * FROM x",
+            "SELECT 1; SELECT 2;",
+            "(SELECT 1) UNION (SELECT 2)",
+            "SELECT 1;;",
+            "SELECT substring('abc' FROM 1 FOR 2)",
+            "SELECT overlay('abc' PLACING 'x' FROM 2 FOR 1)",
+            "SELECT 'for update', 'INTO', 'DROP TABLE t', 'set_config('",
+            "SELECT * FROM t WHERE j ? 'a' AND j ?| array['a', 'b'] AND j ?& array['a'] AND j @> '{\"a\": 1}'::jsonb",
+            "SELECT j #> '{a,b}', j #>> '{a}', j -> 'a' ->> 'b', j - 'a' FROM t",
+            "SELECT 1::int, '2020-01-01'::date, a::text, (a)::numeric(10, 2), ARRAY[1, 2]::int[] FROM t",
+            "SELECT * FROM t WHERE a = $1 AND b = $2::int OR c = ANY($3)",
+            "SELECT count(*) FROM pg_stat_activity WHERE pid <> pg_backend_pid()",
+            "SELECT currval('s'), lastval(), pg_sleep(0)",
+            "SELECT 1 -- DROP TABLE t",
+            "SELECT 1 /* DROP TABLE t */",
+            "SELECT a || E'\\n' FROM t",
+            "SELECT 'x' WHERE 1 < 2 AND 3 > 2 AND 1 <> 2 AND 1 != 2",
+            "SELECT * FROM generate_series(1, 3) AS g(n)",
+            "SELECT * FROM t t1 CROSS JOIN LATERAL (SELECT 1) l",
+            "SELECT 'é' AS é, 日本 FROM t",
+        ] {
+            assert!(ro(s).is_ok(), "{s}: {:?}", ro(s));
+        }
+    }
+
+    #[test]
+    fn refusals_are_worded_like_the_mysql_ones() {
+        assert_eq!(ro("DELETE FROM t").unwrap_err(), "DELETE writes data and this connection is read-only. Unlock writes first.");
+        assert_eq!(ro("SET x = 1").unwrap_err(), "SET is not allowed on a read-only connection. Unlock writes first.");
+        assert!(ro("WITH x AS (DELETE FROM t RETURNING 1) SELECT 1").unwrap_err().starts_with("DELETE inside WITH writes data and this connection is read-only."));
+        assert!(ro("SELECT set_config('a', 'b', false)").unwrap_err().contains("set_config()"));
+    }
+
+    #[test]
+    fn settings_that_change_how_text_is_read_are_caught() {
+        for s in [
+            "SET standard_conforming_strings = off",
+            "set standard_conforming_strings to 'off'",
+            "SET SESSION standard_conforming_strings = off",
+            "SET LOCAL backslash_quote = on",
+            "SET escape_string_warning = off",
+            "SET client_encoding = 'SQL_ASCII'",
+            "SET NAMES 'utf8'",
+            "SET search_path TO other",
+            "SET \"search_path\" = other",
+            "SET SCHEMA 'other'",
+            "SET default_transaction_read_only = off",
+            "SET transaction_read_only = off",
+            "SET SESSION AUTHORIZATION postgres",
+            "SET ROLE postgres",
+            "SET LOCAL role = postgres",
+            "RESET ALL",
+            "RESET role",
+            "RESET standard_conforming_strings",
+            "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE",
+            "SET TRANSACTION READ WRITE",
+            "SELECT set_config('standard_conforming_strings', 'off', false)",
+            "SELECT pg_catalog.set_config('search_path', 'x', false)",
+            "SELECT \"set_config\" /* c */ ('role', 'x', false)",
+            "DO $$ BEGIN SET standard_conforming_strings = off; END $$",
+            "DISCARD ALL",
+            "SELECT 1; SET ROLE x",
+            "BEGIN; SET LOCAL client_encoding = 'x'",
+            "SELECT 'a\\' ; SET ROLE x",
+        ] {
+            assert!(changes_escaping(s, PG), "{s}");
+        }
+        for s in [
+            "SELECT 1",
+            "SELECT 'SET ROLE x'",
+            "/* SET ROLE x */ SELECT 1",
+            "SELECT $$ SET ROLE x $$",
+            "SET statement_timeout = 1000",
+            "SET TIME ZONE 'UTC'",
+            "SET LOCAL lock_timeout = '1s'",
+            "SET work_mem = '64MB'",
+            "SET application_name = 'x'",
+            "SELECT * FROM t WHERE role = 'x'",
+        ] {
+            assert!(!changes_escaping(s, PG), "{s}");
+        }
+    }
+
+    #[test]
+    fn prepared_statements_are_found_under_both_readings() {
+        for s in ["PREPARE p AS SELECT 1", "execute p", "DEALLOCATE ALL", "SELECT 1; EXECUTE p", "/* c */ PREPARE p AS SELECT 1", "SELECT 'a\\' ; PREPARE p AS SELECT 1"] {
+            assert!(uses_prepared(s, PG), "{s}");
+        }
+        for s in ["SELECT 1", "SELECT 'PREPARE p'", "SELECT $$ EXECUTE p $$", "SELECT prepare FROM t"] {
+            assert!(!uses_prepared(s, PG), "{s}");
+        }
+    }
+
+    #[test]
+    fn the_lists_are_lowercase_and_cover_what_the_tests_spell() {
+        for n in REFUSED_FUNCTIONS_EXACT.iter().chain(REFUSED_FUNCTIONS_PREFIX).chain(REFUSED_FUNCTIONS_CONTAIN) {
+            assert_eq!(*n, n.to_ascii_lowercase());
+        }
+        for f in FUNCTIONS {
+            assert!(refused_function(f), "{f}");
+        }
+    }
+}

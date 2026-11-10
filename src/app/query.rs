@@ -162,7 +162,7 @@ pub(super) fn library_menu(ui: &mut egui::Ui, lib: &[SavedQuery], new_name: &mut
                             // Counted once per script text, not every frame.
                             let key = ui.make_persistent_id(("lib-stmts", &q.name, sql.len()));
                             let n = ui.data(|d| d.get_temp::<usize>(key)).unwrap_or_else(|| {
-                                let n = crate::db::sql::lex::split_statements(sql).iter().filter(|(_, s)| !s.trim().is_empty()).count();
+                                let n = crate::db::sql::lex::split_statements(sql, crate::db::sql::Dialect::default()).iter().filter(|(_, s)| !s.trim().is_empty()).count();
                                 ui.data_mut(|d| d.insert_temp(key, n));
                                 n
                             });
