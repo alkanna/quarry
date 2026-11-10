@@ -38,6 +38,21 @@ Update this list when a step lands. Each step is reviewed before it is ticked.
 - [ ] 6. Create and drop database, schema and table
 - [ ] 7. Connection form Advanced tab (design first)
 
+**Review (63aa8c0, step 3 lexer)**, opus, verified on postgres:18.6 inside `BEGIN READ ONLY`: 3 critical, 2 high, 2 medium, 3 low.
+- C1: field notation calls a function without `(`: `(42::bigint).pg_advisory_lock`, `x.pg_advisory_lock`, `('...'::text).dblink_exec` (dropped a table through dblink's own session), `(pid).pg_terminate_backend`. Fix: refuse a listed name after `.` too; `lo_` prefix becomes exact names.
+- C2: built-ins that run SQL text (`ts_stat`, `ts_rewrite`, `crosstab`, `connectby`) reached `pg_terminate_backend`, `pg_reload_conf`, `pg_switch_wal` and a replication slot that survived ROLLBACK. Fix: refuse them and known extension runners. The deny list can never be complete, so layer 2 must be strict.
+- C3: `set_config('client_encoding','SJIS',false)` hidden in a string makes the server split the next statement differently from the lexer (`E'ā\'; COMMIT; BEGIN READ WRITE; DROP ...'`). Fix: one user statement per rolled-back transaction (layer 2 rule below).
+- H1: heap_force_kill/freeze (pg_surgery), pg_truncate_visibility_map, pg_buffercache_evict*, setseed missing. H2: COPY TO PROGRAM runs in a read-only transaction; only the COPY refusal and C1 stop it.
+- M1: session advisory locks and dblink connections outlive ROLLBACK on pooled connections. M2: the PgBouncer fallback uses session SETs that can land on another backend and leak to other clients.
+- Low: `UPDATE pg_settings` not seen as an escaping change; URI passwords not redacted; pg_stat_file and pg_ls_*dir allowed while pg_read_file is refused.
+- Fixes: lexer findings (C1, C2, H1, low) on `pg-3-fix`; C3 and M1 are layer 2 rules applied in steps 4, 6 and 7; M2 after step 4.
+
+**Layer 2 rules** (every step that runs user text: Content filter, Query, shell relay):
+- Each user statement runs alone in `BEGIN READ ONLY` and is always rolled back, never committed, never sharing a transaction with another user statement.
+- A pooled connection that ran user text gets `DISCARD ALL` before going back to the pool (startup `-c` options survive it). In pooler fallback mode the connection is closed instead.
+- Pooler fallback mode: no session SETs; read-only, timeouts and formats are applied with `SET LOCAL` inside each transaction; the writer uses `BEGIN READ WRITE` plus `SET LOCAL`; statement pooling (where BEGIN fails) is refused with a clear message.
+- Known limit: a user-defined or extension function that wraps a side effect is invisible to the lexer, and non-transactional effects (signals, WAL switches, slots, COPY TO PROGRAM through such a wrapper) are not undone by the rollback. A locked connection is therefore only as safe as the role's privileges; the README and the connection form should say so.
+
 ## How this work is run
 
 As in PLAN.md "How this work is run" (delegation, reviews, merging, cleanup, environment), with these differences:
