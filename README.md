@@ -4,43 +4,26 @@
 
 <p align="center">A fast, stable and full-featured client for MongoDB, MySQL and MariaDB, written in Rust with egui.<br>Inspired by <a href="https://mingo.io">Mingo</a>.</p>
 
+<p align="center">
+  <a href="https://github.com/alkanna/quarry/releases/latest"><img src="https://img.shields.io/github/v/release/alkanna/quarry" alt="Latest release"></a>
+  <a href="https://github.com/alkanna/quarry/releases"><img src="https://img.shields.io/github/downloads/alkanna/quarry/total" alt="Downloads"></a>
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-informational" alt="macOS, Linux and Windows">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/alkanna/quarry" alt="MIT license"></a>
+</p>
+
 ![Documents view](docs/documents.png)
 
 ## Features
 
-**One app for every database**
-- MongoDB, MySQL (5.7, 8.x, 9.x) and MariaDB (10.6+) side by side, in tabs with a table or JSON view.
-- Open connections sit in the rail and come back when Quarry starts. Cmd+K jumps to any collection or table, Cmd+/ shows every shortcut (Ctrl on Linux and Windows).
-
-**Edit without worrying**
-- Every connection opens read-only until you unlock it.
-- Edits are staged, saved together and can be undone, and Quarry won't overwrite a change someone else made meanwhile.
-- Bulk updates, structure changes and drops show exactly what they will run first.
-
-**Query**
-- MongoDB: paste `db.orders.find(...)` or `aggregate([...])`, type `#today` or `#last2months`, build a pipeline one stage at a time with a preview after each, read explain plans, copy as driver code.
-- SQL: filter a table with typed rules or plain SQL. The Query editor runs several statements at once, with autocomplete for tables, columns and values, Format, Explain and Stop.
-- Keep the queries you reuse in a library, and get older ones back from the history.
-- See every command and statement sent, with its duration and errors, in the query log (Cmd+L). Passwords never show.
-
-**Script it**
-- A JavaScript shell on [Bun](https://bun.sh), with npm packages and autocomplete: the official driver for MongoDB, `` sql`...` `` templates and typed tables for SQL. Attach other connections to read MongoDB and SQL in one script.
-
-**Shape your data**
-- MongoDB: see which indexes are used and get suggestions, create them with every option, see each field's types, write validators, follow references to the document they point to, and watch changes live.
-- SQL: edit columns, indexes, foreign keys and triggers through a previewed ALTER, click a foreign key to open its row, and create or drop databases and tables.
-
-**Move data around**
-- MongoDB: import and export JSON, CSV or TSV, compare and sync two collections, dump and restore with the Database Tools (installed for you).
-- SQL: import CSV and SQL dumps, and export streamed SQL dumps (gzip optional) or any Copy as format.
-
-**Run the server**
-- Health, status, variables and running operations, with Kill for the slow ones, and users, roles and privileges.
-
-**Connect from anywhere**
-- SSH tunnels (password, key file or agent), SOCKS5 proxies, and TLS.
-- Passwords stay in your system keychain: the macOS Keychain, Windows Credential Manager, or the Secret Service on Linux.
-- Tag connections as Production, Staging or anything you like, so you always know which one you're on.
+- **MongoDB, MySQL and MariaDB** side by side (MySQL 5.7, 8 and 9, MariaDB 10.6+), in tabs with a table or JSON view.
+- **Safe editing.** Every connection opens read-only until you unlock it. Edits are staged, saved together and can be undone, and never overwrite a change someone else made meanwhile. Bulk updates, structure changes and drops show what they will run first.
+- **Queries.** Paste `db.orders.find(...)` or `aggregate([...])`, use date shortcuts like `#today`, build a pipeline with a preview after each stage, read explain plans and copy as driver code. For SQL, filter with typed rules or plain SQL, or run several statements at once with autocomplete, Format, Explain and Stop. Saved queries, history and a query log (Cmd+L).
+- **Scripting.** A JavaScript shell on [Bun](https://bun.sh) with npm packages and autocomplete: the MongoDB driver, `` sql`...` `` templates, and other connections attached to the same script.
+- **Structure.** MongoDB indexes with usage and suggestions, field types, validators, references and live change streams. SQL columns, indexes, foreign keys and triggers through a previewed ALTER.
+- **Import and export.** JSON, CSV, TSV and SQL dumps, compare and sync two collections, dump and restore with the MongoDB Database Tools (installed for you).
+- **Server.** Status, variables, running operations with Kill, users, roles and privileges.
+- **Connections.** SSH tunnels, SOCKS5 proxies and TLS. Passwords stay in the system keychain. Tag connections as Production, Staging or anything you like.
+- **Keyboard and reading.** Cmd+K searches every connection and runs commands, Cmd+[ and Cmd+] move through visited tabs, Cmd+/ lists every shortcut (Ctrl on Linux and Windows). Reading options: larger text, the OpenDyslexic font, a soft background, a line that follows the pointer across wide tables, and grouped digits.
 
 | | |
 |---|---|
@@ -52,44 +35,64 @@
 
 ## Install
 
-Download the latest build for your system from [Releases](https://github.com/alkanna/quarry/releases).
+Download the file for your system from the [latest release](https://github.com/alkanna/quarry/releases/latest):
 
-**macOS** (Apple silicon or Intel): unzip `Quarry-macos-*.zip` into Applications. The app is signed and notarized by Apple.
+| System | File |
+|---|---|
+| macOS, Apple silicon | `Quarry-macos-arm64.zip` |
+| macOS, Intel | `Quarry-macos-x86_64.zip` |
+| Linux x86_64 | `quarry-linux-x86_64.tar.gz` |
+| Linux ARM64 | `quarry-linux-aarch64.tar.gz` |
+| Windows x86_64 | `quarry-windows-x86_64.zip` |
+| Windows ARM64 | `quarry-windows-aarch64.zip` |
 
-**Linux** (x86_64 and ARM64): extract `quarry-linux-*.tar.gz` and put the `quarry` binary somewhere on your `PATH`, such as `~/.local/bin`. It needs GTK 3 and xkbcommon (`sudo apt install libgtk-3-0 libxkbcommon0` on Debian and Ubuntu) and either `libwayland-client0` or the X11 libraries (`libx11-6 libxcursor1`). On NixOS, add wayland, libxkbcommon, libGL, vulkan-loader and gtk3 to `programs.nix-ld.libraries` (or set `LD_LIBRARY_PATH`), and a Secret Service provider such as GNOME Keyring or KWallet to store passwords.
+**macOS.** Unzip and drag `Quarry.app` into Applications. The app is signed and notarized.
 
-**Windows** (x86_64 and ARM64): unzip `quarry-windows-*.zip` and run `quarry.exe`. The binary is not signed, so SmartScreen may warn the first time: choose More info, then Run anyway.
+**Linux.** Extract the binary somewhere on your `PATH`:
 
-Quarry then updates itself: it checks for new releases shortly after launch and once a day, installs them in the background, and restarts once you have been idle for a minute with nothing unsaved. It shows what's new after an update. You can turn updates off in Settings.
+```sh
+tar -xzf quarry-linux-x86_64.tar.gz -C ~/.local/bin
+quarry
+```
+
+Quarry needs GTK 3, xkbcommon, Wayland or X11, and a keyring such as GNOME Keyring or KWallet to store passwords. Most desktops have them; on Debian and Ubuntu, `sudo apt install libgtk-3-0 libxkbcommon0` covers what is usually missing.
+
+<details>
+<summary>NixOS</summary>
+
+Add `wayland`, `libxkbcommon`, `libGL`, `vulkan-loader` and `gtk3` to `programs.nix-ld.libraries` (or set `LD_LIBRARY_PATH`).
+</details>
+
+**Windows.** Unzip and run `quarry.exe`. The binary is not signed, so SmartScreen may warn the first time: choose **More info**, then **Run anyway**.
+
+Quarry keeps itself up to date: it installs new releases in the background and restarts once you have been idle for a minute with nothing unsaved. You can turn this off in Settings.
 
 ## Build
 
-Needs Rust (stable). The Shell needs [Bun](https://bun.sh), and MongoDB dump/restore needs the [MongoDB Database Tools](https://www.mongodb.com/docs/database-tools/), which Quarry can install for you. Quarry finds both automatically, or you can set their paths in Settings.
+Needs Rust (stable). The Shell needs [Bun](https://bun.sh) and MongoDB dump and restore need the [Database Tools](https://www.mongodb.com/docs/database-tools/). Quarry finds both, or you can set their paths in Settings.
 
 ```sh
-cargo run --release      # run it
-./bundle.sh              # package for this machine into dist/
-./bundle.sh linux-x86_64 # or for a given platform (./bundle.sh --help lists them)
-cargo test               # run the tests
+cargo run --release                              # run it
+cargo test                                       # run the tests
+./bundle.sh                                      # package for this machine into dist/ (--help lists other targets)
+./target/release/quarry --screenshot out.png     # draw the offline demo to a picture and exit
 ```
 
-On Linux and Windows, `bundle.sh` makes the archive that a release publishes, not something to run. To use Quarry on your own machine, run `cargo build --release` and take the binary from `target/release/quarry` (`quarry.exe` on Windows).
+On Linux and Windows, `bundle.sh` makes a release archive. To run your own build, take the binary from `target/release/`.
 
-### Stop the Keychain prompts on macOS
+<details>
+<summary>Stop the Keychain prompts on macOS</summary>
 
-Every build gets a new ad-hoc signature, so macOS treats it as a new app and asks for your password again for each saved connection. `cargo run` signs the build with your Developer ID Application certificate when you have one, or else with a certificate named `Quarry Dev` (see `.cargo/run-signed.sh`), which keeps the signature stable across rebuilds. To create `Quarry Dev` once:
+Each build gets a new ad-hoc signature, so macOS asks for your password again for every saved connection. `cargo run` signs with your Developer ID Application certificate if you have one, or else with a certificate named `Quarry Dev` (see `.cargo/run-signed.sh`), which keeps the signature stable. To create `Quarry Dev` once:
 
-1. Open Keychain Access and choose **Keychain Access > Certificate Assistant > Create a Certificate**.
+1. In Keychain Access, choose **Keychain Access > Certificate Assistant > Create a Certificate**.
 2. Name it `Quarry Dev`, set Identity Type to **Self Signed Root** and Certificate Type to **Code Signing**, and click Create.
-3. Run `cargo run`, then click **Always Allow** at each prompt. Later builds won't ask again.
-
-Without the certificate, `cargo run` prints a warning and runs the build unsigned.
-
-`quarry --screenshot out.png` draws the offline demo, saves a picture and exits. It never connects to a database.
+3. Run `cargo run` and click **Always Allow** at each prompt. Later builds won't ask again.
+</details>
 
 ## Releasing
 
-Commits to `master` follow [Conventional Commits](https://www.conventionalcommits.org) (`feat:`, `fix:`, ...). [release-please](https://github.com/googleapis/release-please) keeps a release PR open; merging it tags the version and the release workflow attaches the builds. In the repository settings, under Actions > General, allow GitHub Actions to create pull requests.
+Commits to `master` follow [Conventional Commits](https://www.conventionalcommits.org). [release-please](https://github.com/googleapis/release-please) keeps a release PR open; merging it tags the version and the release workflow attaches the builds. GitHub Actions needs permission to create pull requests (Settings > Actions > General).
 
 ## License
 
