@@ -799,7 +799,8 @@ mod tests {
     fn wait_listed(l: &super::super::testing::Live, id: u64, secs: u64) -> Option<Proc> {
         for _ in 0..secs * 10 {
             let p = l.w.rt.block_on(processes(&l.db)).unwrap();
-            if let Some(r) = p.rows.into_iter().find(|r| r.id == id && r.info.contains("SLEEP")) {
+            // sqlx prepares first, so the text shows for a moment under Command "Prepare" before it runs.
+            if let Some(r) = p.rows.into_iter().find(|r| r.id == id && r.info.contains("SLEEP") && r.command != "Prepare") {
                 return Some(r);
             }
             std::thread::sleep(Duration::from_millis(100));
