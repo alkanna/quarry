@@ -505,7 +505,7 @@ impl App {
         let writable = self.conn_writable(f.conn);
         let conn = self.conn_name(f.conn);
         let tag = self.conn(f.conn).map(|c| c.meta.tag.clone()).unwrap_or_default();
-        let uri_db = self.conn(f.conn).and_then(|c| c.sql.as_ref()).and_then(|d| d.opts.get_database().map(String::from));
+        let uri_db = self.conn(f.conn).and_then(|c| c.sql.as_ref()).and_then(|d| d.opts.database().map(String::from));
         let (name, noun, button) = match f.kind {
             DropKind::Database => (f.schema.as_str(), "database", "Drop database"),
             DropKind::Table => (f.table.as_str(), "table", "Drop table"),

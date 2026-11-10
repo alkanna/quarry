@@ -3021,7 +3021,7 @@ mod review_live {
         fn moded(&self, extra: &str) -> Db {
             let mut db = self.db.clone();
             let q = format!("SET SESSION sql_mode = CONCAT(@@SESSION.sql_mode, ',{extra}')");
-            let opts = (*db.opts).clone();
+            let opts = db.opts.my().unwrap().clone();
             let pool = self.w.rt.block_on(async move {
                 sqlx::mysql::MySqlPoolOptions::new()
                     .max_connections(2)
@@ -3462,9 +3462,9 @@ mod live_rel {
         w.sql_connect(1, uri.clone(), Duration::from_secs(30), crate::db::Net::default());
         let Msg::SqlConnected { res: Ok((mut db, ..)), .. } = recv(&rx) else { panic!("expected SqlConnected") };
         let mode = db.sql_mode.split(',').filter(|m| !m.trim().eq_ignore_ascii_case("NO_BACKSLASH_ESCAPES")).collect::<Vec<_>>().join(",");
-        db.pool = Pool::My(pinned(&w, (*db.opts).clone(), &mode));
+        db.pool = Pool::My(pinned(&w, db.opts.my().unwrap().clone(), &mode));
         db.sql_mode = mode.clone();
-        let p = pinned(&w, (*db.opts).clone(), &mode);
+        let p = pinned(&w, db.opts.my().unwrap().clone(), &mode);
         let pool = w.rt.block_on(async {
             for sql in [
                 "DROP DATABASE IF EXISTS quarry_rt",
@@ -3781,7 +3781,7 @@ mod live_rel {
         e.undo(u).unwrap();
         assert_eq!(definer(&e).as_deref(), Some("qrf_owner@%"));
         let low = {
-            let pool = pinned(&e.w, (*e.db.opts).clone().username("qrf_low").password("qrf_low_pw"), &e.mode);
+            let pool = pinned(&e.w, e.db.opts.my().unwrap().clone().username("qrf_low").password("qrf_low_pw"), &e.mode);
             Db { pool: Pool::My(pool), ..e.db.clone() }
         };
         let all = e.structure("rt_trig").triggers;
@@ -3798,7 +3798,7 @@ mod live_rel {
 
         // Finding 12: the worker reads the writer's own sql_mode, so a session in ANSI_QUOTES the app did not know of
         // runs nothing and hands the mode back.
-        let ansi = Db { pool: Pool::My(pinned(&e.w, (*e.db.opts).clone(), &format!("{},ANSI_QUOTES", e.mode))), ..e.db.clone() };
+        let ansi = Db { pool: Pool::My(pinned(&e.w, e.db.opts.my().unwrap().clone(), &format!("{},ANSI_QUOTES", e.mode))), ..e.db.clone() };
         let (res, _, seen) = e.job_on(&ansi, "rt_trig", TrigJob::Create(TrigSave { def: def("rt_m", r#"SET NEW.tag = "m""#), definer: None, order: None }));
         assert!(res.unwrap_err().contains("Nothing ran"), "{var}");
         assert!(seen.is_some_and(|m| Mode::of(&m).ansi), "{var}");

@@ -126,7 +126,10 @@ impl Setup {
 impl Db {
     /// A pooled connection taken out of the pool for good, so its session can be changed.
     pub(super) async fn acquire_conn(&self) -> Res<Conn> {
-        Ok(Conn::My(self.acquire().await?.detach()))
+        match &self.pool {
+            Pool::Pg(p) => Ok(Conn::Pg(p.acquire(self.opts.database()).await?.detach())),
+            Pool::My(_) => Ok(Conn::My(self.acquire().await?.detach())),
+        }
     }
 
     /// A pooled connection. When the pool gave up because new connections failed their session setup, the error
@@ -152,9 +155,12 @@ async fn open(uri: &str, timeout: Duration, net: &Net, adv: &Advanced) -> Res<(D
 /// `info` also reads what the form's Test button shows: the server's default sql_mode and its UTF-8 collations.
 async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info: bool) -> Res<(Db, Vec<String>, Option<crate::ssh::Tunnel>, TestInfo)> {
     // Checked before anything connects, so a bad value never costs a tunnel or a login.
+    let a = Addr::parse(uri).ok_or("Not a SQL address")?;
+    if a.engine() == super::Engine::Postgres {
+        return super::pg::open(a, timeout, net, adv, info).await;
+    }
     let setup = Setup::new(adv.session_statements(super::advanced::local_offset_secs())?, super::advanced::init_statements(&adv.init)?);
     let (timeout, ms) = adv.timeouts(timeout);
-    let a = Addr::parse(uri).ok_or("Not a MySQL address")?;
     let tunnel = match &net.ssh {
         Some((conf, secrets)) => Some(crate::ssh::open(conf, secrets, timeout, Some((a.host.clone(), a.port))).await?),
         None => None,
@@ -1607,7 +1613,7 @@ mod tests {
         // Every session of this pool starts in NO_BACKSLASH_ESCAPES, as on a server set that way. A pool of its own
         // rather than SET GLOBAL, which raced the other live tests: their new sessions changed mode under them.
         let mut db = db;
-        let opts = (*db.opts).clone();
+        let opts = db.opts.my().unwrap().clone();
         let pool = w.rt.block_on(async move {
             sqlx::mysql::MySqlPoolOptions::new()
                 .max_connections(2)

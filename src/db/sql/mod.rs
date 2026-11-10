@@ -1,10 +1,11 @@
-//! SQL engines (MySQL and MariaDB for now). Engine differences live in enums here, not traits:
+//! SQL engines (MySQL, MariaDB and PostgreSQL). Engine differences live in enums here, not traits:
 //! a new engine is a new arm.
 
 mod dialect;
 pub mod advanced;
 mod worker;
 mod run;
+pub mod pg;
 pub mod exec;
 mod relay;
 pub mod structure;
@@ -39,6 +40,7 @@ pub enum Engine {
     #[default]
     Mongo,
     MySql,
+    Postgres,
 }
 
 impl Engine {
@@ -47,6 +49,7 @@ impl Engine {
         match scheme.as_str() {
             "mongodb" | "mongodb+srv" => Some(Engine::Mongo),
             "mysql" | "mariadb" => Some(Engine::MySql),
+            "postgres" | "postgresql" => Some(Engine::Postgres),
             _ => None,
         }
     }
@@ -192,6 +195,8 @@ pub struct Db {
 #[derive(Clone)]
 pub enum Pool {
     My(sqlx::MySqlPool),
+    /// One pool per database, made on first use, because a Postgres connection belongs to one database.
+    Pg(std::sync::Arc<pg::PgPools>),
 }
 
 impl Db {
@@ -204,7 +209,8 @@ impl Db {
 
     /// False under NO_BACKSLASH_ESCAPES, where a backslash in a string is a plain character.
     pub fn backslash_escapes(&self) -> bool {
-        !self.sql_mode.to_ascii_uppercase().contains("NO_BACKSLASH_ESCAPES")
+        // The connect readback refuses a Postgres session with standard_conforming_strings off.
+        self.dialect != Dialect::Postgres && !self.sql_mode.to_ascii_uppercase().contains("NO_BACKSLASH_ESCAPES")
     }
 
     /// "MySQL 8.4.3" or "MariaDB 10.11.6", without the build suffix of the version string.
@@ -313,13 +319,36 @@ impl SslMode {
     fn from_param(s: &str) -> Option<SslMode> {
         SslMode::ALL.iter().map(|(m, _)| *m).find(|m| m.param().eq_ignore_ascii_case(s))
     }
+
+    /// The libpq spelling of `sslmode`.
+    fn pg_param(self) -> &'static str {
+        match self {
+            SslMode::Disabled => "disable",
+            SslMode::Preferred => "prefer",
+            SslMode::Required => "require",
+            SslMode::VerifyCa => "verify-ca",
+            SslMode::VerifyIdentity => "verify-full",
+        }
+    }
+
+    /// `allow` tries plain first, which Quarry has no mode for, so it reads as Preferred.
+    fn from_pg_param(s: &str) -> Option<SslMode> {
+        match s.to_ascii_lowercase().as_str() {
+            "disable" => Some(SslMode::Disabled),
+            "allow" | "prefer" => Some(SslMode::Preferred),
+            "require" => Some(SslMode::Required),
+            "verify-ca" => Some(SslMode::VerifyCa),
+            "verify-full" => Some(SslMode::VerifyIdentity),
+            _ => None,
+        }
+    }
 }
 
-/// A MySQL address split into the fields the connection form edits. It is kept in the Keychain as
+/// A SQL address split into the fields the connection form edits. It is kept in the Keychain as
 /// one URL, like Mongo addresses, so the password is percent-encoded there.
 #[derive(Clone, Default, PartialEq, Debug)]
 pub struct Addr {
-    /// "mysql" or "mariadb"; both reach the same driver, the scheme only records the user's pick.
+    /// "mysql" or "mariadb" (the same driver, the scheme only records the user's pick), or "postgres".
     pub scheme: String,
     pub host: String,
     pub port: u16,
@@ -331,8 +360,17 @@ pub struct Addr {
 }
 
 pub const DEFAULT_PORT: u16 = 3306;
+pub const PG_PORT: u16 = 5432;
 
 impl Addr {
+    pub fn engine(&self) -> Engine {
+        Engine::from_uri(&format!("{}://", self.scheme)).unwrap_or(Engine::MySql)
+    }
+
+    fn default_port(scheme: &str) -> u16 {
+        if matches!(Engine::from_uri(&format!("{scheme}://")), Some(Engine::Postgres)) { PG_PORT } else { DEFAULT_PORT }
+    }
+
     pub fn parse(uri: &str) -> Option<Addr> {
         let (scheme, rest) = uri.trim().split_once("://")?;
         Engine::from_uri(uri).filter(|e| e.is_sql())?;
@@ -344,12 +382,22 @@ impl Addr {
         // A bare IPv6 address has colons of its own; it needs brackets to carry a port.
         let (host, port) = match host.rsplit_once(':') {
             Some((h, p)) if !h.contains(':') || h.ends_with(']') => (h, p.parse().ok()?),
-            _ => (host, DEFAULT_PORT),
+            _ => (host, Addr::default_port(scheme)),
         };
         let mut a = Addr { scheme: scheme.to_ascii_lowercase(), host: host.into(), port, user: decode(user), password: decode(password), database: decode(database), ..Default::default() };
+        let pg = a.engine() == Engine::Postgres;
         for kv in query.split('&').filter(|s| !s.is_empty()) {
             let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
-            match k.to_ascii_lowercase().replace('_', "-").as_str() {
+            let k = k.to_ascii_lowercase();
+            if pg {
+                match k.as_str() {
+                    "sslmode" => a.ssl_mode = SslMode::from_pg_param(v).unwrap_or_default(),
+                    "sslrootcert" => a.ssl_ca = decode(v),
+                    _ => {}
+                }
+                continue;
+            }
+            match k.replace('_', "-").as_str() {
                 "ssl-mode" | "sslmode" => a.ssl_mode = SslMode::from_param(v).unwrap_or_default(),
                 "ssl-ca" | "sslca" => a.ssl_ca = decode(v),
                 _ => {}
@@ -365,13 +413,14 @@ impl Addr {
             (_, true) => format!("{}@", encode(&self.user)),
             _ => format!("{}:{}@", encode(&self.user), encode(&self.password)),
         };
-        let port = if self.port == 0 { DEFAULT_PORT } else { self.port };
+        let port = if self.port == 0 { Addr::default_port(scheme) } else { self.port };
+        let pg = self.engine() == Engine::Postgres;
         let mut q = Vec::new();
         if self.ssl_mode != SslMode::Preferred {
-            q.push(format!("ssl-mode={}", self.ssl_mode.param()));
+            q.push(if pg { format!("sslmode={}", self.ssl_mode.pg_param()) } else { format!("ssl-mode={}", self.ssl_mode.param()) });
         }
         if !self.ssl_ca.is_empty() {
-            q.push(format!("ssl-ca={}", encode(&self.ssl_ca)));
+            q.push(format!("{}={}", if pg { "sslrootcert" } else { "ssl-ca" }, encode(&self.ssl_ca)));
         }
         let q = if q.is_empty() { String::new() } else { format!("?{}", q.join("&")) };
         format!("{scheme}://{auth}{}:{port}/{}{q}", self.host.trim(), encode(&self.database))
@@ -419,7 +468,9 @@ mod tests {
         assert_eq!(Engine::from_uri("mongodb+srv://x"), Some(Engine::Mongo));
         assert_eq!(Engine::from_uri("MySQL://x"), Some(Engine::MySql));
         assert_eq!(Engine::from_uri("mariadb://x"), Some(Engine::MySql));
-        assert_eq!(Engine::from_uri("postgres://x"), None);
+        assert_eq!(Engine::from_uri("postgres://x"), Some(Engine::Postgres));
+        assert_eq!(Engine::from_uri("PostgreSQL://x"), Some(Engine::Postgres));
+        assert_eq!(Engine::from_uri("sqlite://x"), None);
     }
 
     #[test]
@@ -437,6 +488,29 @@ mod tests {
         let uri = a.to_uri();
         assert_eq!(uri, "mariadb://app:p%40ss%3Aw%2Frd%25@db.internal:3307/shop?ssl-mode=VERIFY_CA&ssl-ca=%2Fcerts%2Fca.pem");
         assert_eq!(Addr::parse(&uri), Some(a));
+    }
+
+    #[test]
+    fn postgres_address_uses_libpq_spellings_and_its_own_port() {
+        let a = Addr::parse("postgresql://app:pw@db.internal/shop?sslmode=verify-full&sslrootcert=%2Fcerts%2Fca.pem").unwrap();
+        assert_eq!((a.scheme.as_str(), a.port, a.ssl_mode, a.ssl_ca.as_str(), a.database.as_str()), ("postgresql", 5432, SslMode::VerifyIdentity, "/certs/ca.pem", "shop"));
+        assert_eq!(a.engine(), Engine::Postgres);
+        assert_eq!(a.to_uri(), "postgresql://app:pw@db.internal:5432/shop?sslmode=verify-full&sslrootcert=%2Fcerts%2Fca.pem");
+        assert_eq!(Addr::parse(&a.to_uri()), Some(a));
+        // allow tries plain first, which has no mode of its own here.
+        assert_eq!(Addr::parse("postgres://h/d?sslmode=allow").unwrap().ssl_mode, SslMode::Preferred);
+        for (word, mode) in [("disable", SslMode::Disabled), ("prefer", SslMode::Preferred), ("require", SslMode::Required), ("verify-ca", SslMode::VerifyCa), ("verify-full", SslMode::VerifyIdentity)] {
+            let a = Addr { scheme: "postgres".into(), host: "h".into(), port: 6000, ssl_mode: mode, ..Default::default() };
+            assert_eq!(Addr::parse(&a.to_uri()), Some(a.clone()), "{word}");
+            assert_eq!(Addr::parse(&format!("postgres://h:6000/?sslmode={word}")).unwrap().ssl_mode, mode);
+        }
+        // The default port follows the scheme and a zero port is written out as it.
+        assert_eq!(Addr::parse("postgres://u@h").unwrap().port, 5432);
+        assert_eq!(Addr::parse("mysql://u@h").unwrap().port, 3306);
+        assert_eq!(Addr { scheme: "postgres".into(), host: "h".into(), ..Default::default() }.to_uri(), "postgres://h:5432/");
+        // The MySQL spelling means nothing on a Postgres address, and the reverse.
+        assert_eq!(Addr::parse("postgres://h/?ssl-mode=REQUIRED").unwrap().ssl_mode, SslMode::Preferred);
+        assert_eq!(Addr::parse("mysql://h/?sslmode=REQUIRED").unwrap().ssl_mode, SslMode::Required);
     }
 
     #[test]

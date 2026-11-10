@@ -1256,7 +1256,7 @@ mod tests {
             assert_eq!(l.scalar(&format!("SELECT CAST(COALESCE(TABLE_ROWS, 0) AS SIGNED) FROM information_schema.TABLES WHERE TABLE_SCHEMA = '{schema}' AND TABLE_NAME = 't'")), 0);
             let values = (1..=1000).map(|i| format!("({i})")).collect::<Vec<_>>().join(",");
             let mut lock = l.w.rt.block_on(async {
-                let mut c = sqlx::MySqlConnection::connect_with(&l.db.opts).await.unwrap();
+                let mut c = sqlx::MySqlConnection::connect_with(l.db.opts.my().unwrap()).await.unwrap();
                 c.execute(format!("LOCK TABLES `{schema}`.t WRITE").as_str()).await.unwrap();
                 c.execute(format!("INSERT INTO `{schema}`.t (v) VALUES {values}").as_str()).await.unwrap();
                 c

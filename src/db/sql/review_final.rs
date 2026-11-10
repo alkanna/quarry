@@ -97,7 +97,7 @@ fn live_an_alter_runs_past_the_statement_timeout() {
         l.sql(&format!("DROP DATABASE IF EXISTS {db}; CREATE DATABASE {db}; CREATE TABLE {db}.t (id INT PRIMARY KEY); INSERT INTO {db}.t VALUES (1)"));
         let set = if l.db.dialect == Dialect::MariaDb { "SET SESSION max_statement_time = 1" } else { "SET SESSION max_execution_time = 1000" };
         let odd = l.with_session(set);
-        let mut hold = l.w.rt.block_on(sqlx::MySqlConnection::connect_with(&l.db.opts)).unwrap();
+        let mut hold = l.w.rt.block_on(sqlx::MySqlConnection::connect_with(l.db.opts.my().unwrap())).unwrap();
         l.w.rt.block_on(async {
             sqlx::Executor::execute(&mut hold, "START TRANSACTION").await.unwrap();
             sqlx::Executor::execute(&mut hold, format!("SELECT * FROM {db}.t").as_str()).await.unwrap();

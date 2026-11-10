@@ -652,7 +652,7 @@ mod live {
                         let hook = hook.clone();
                         Box::pin(async move { session(c, 30_000, &hook).await })
                     })
-                    .connect_with((*db.opts).clone())
+                    .connect_with(db.opts.my().unwrap().clone())
                     .await
                     .unwrap()
             });

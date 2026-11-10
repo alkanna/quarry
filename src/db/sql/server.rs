@@ -815,7 +815,7 @@ mod tests {
 
     /// A SELECT SLEEP on its own connection, and that connection's id.
     fn sleeper(l: &super::super::testing::Live) -> (std::sync::mpsc::Receiver<(Result<String, String>, bool)>, u64) {
-        let opts = (*l.db.opts).clone();
+        let opts = l.db.opts.my().unwrap().clone();
         let (tx, rx) = std::sync::mpsc::channel();
         let (idtx, idrx) = std::sync::mpsc::channel();
         l.w.rt.spawn(async move {
@@ -933,7 +933,7 @@ mod tests {
             wait_listed(l, id, 10).expect("listed");
             l.sql("DROP USER IF EXISTS 'q_nokill'@'%'");
             l.sql("CREATE USER 'q_nokill'@'%' IDENTIFIED BY 'nokill-pw'");
-            let opts = (*l.db.opts).clone().username("q_nokill").password("nokill-pw");
+            let opts = l.db.opts.my().unwrap().clone().username("q_nokill").password("nokill-pw");
             let low = Db { opts: super::super::exec::Opts::My(opts), ..l.db.clone() };
             let err = l.w.rt.block_on(kill_query(&low, id)).unwrap_err();
             l.sql("DROP USER 'q_nokill'@'%'");

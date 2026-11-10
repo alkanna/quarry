@@ -12,7 +12,7 @@ eframe = "0.37"
 egui = { version = "0.37", default-features = false, features = ["monochrome_emoji_fonts"] }
 mongodb = { version = "3", features = ["socks5-proxy"] }
 # MySQL and MariaDB. Postgres and SQLite are one feature each when they come. Runtime queries only, no macros.
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "mysql"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "mysql", "postgres"] }
 tokio = { version = "1", features = ["rt-multi-thread", "process", "io-util", "macros", "sync"] }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }

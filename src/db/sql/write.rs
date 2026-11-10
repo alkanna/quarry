@@ -198,6 +198,10 @@ pub(super) async fn writer_conn(db: &Db, schema: &str, read_only: bool) -> Res<C
         return Err("Writes are locked on this connection. Unlock them first.".into());
     }
     let mut c = db.acquire_conn().await?;
+    if db.dialect == Dialect::Postgres {
+        super::pg::writer(&mut c).await?;
+        return Ok(c);
+    }
     if !schema.is_empty() {
         let q = format!("USE {}", db.dialect.quote_ident(schema));
         c.execute(q.as_str()).await.map_err(e)?;

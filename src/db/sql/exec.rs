@@ -12,7 +12,8 @@ use crate::db::{e, Res};
 use futures_util::stream::BoxStream;
 use futures_util::StreamExt;
 use sqlx::mysql::{MySqlColumn, MySqlConnectOptions, MySqlRow};
-use sqlx::{raw_sql, Column, Connection, Either, Executor, Row as _, TypeInfo};
+use sqlx::postgres::{PgColumn, PgConnectOptions, PgRow};
+use sqlx::{raw_sql, Column, Connection, Either, Executor, Row as _, TypeInfo, ValueRef};
 
 /// How one statement ended: the rows it changed and the key its insert made, when the engine says so.
 #[derive(Clone, Copy, Debug, Default)]
@@ -62,6 +63,16 @@ impl ColMeta for ColInfo {
 }
 
 impl ColMeta for MySqlColumn {
+    fn col_name(&self) -> &str {
+        self.name()
+    }
+
+    fn col_type(&self) -> String {
+        self.type_info().name().to_string()
+    }
+}
+
+impl ColMeta for PgColumn {
     fn col_name(&self) -> &str {
         self.name()
     }
@@ -130,9 +141,48 @@ impl Cells for MySqlRow {
     }
 }
 
+impl Cells for PgRow {
+    /// Through the raw value, because decoding a text-protocol bytea to `&[u8]` is refused by sqlx. A text row
+    /// holds the server's own text and a binary row of a `::text` column holds the same bytes.
+    fn cell(&self, i: usize) -> Option<&[u8]> {
+        let v = self.try_get_raw(i).ok()?;
+        if v.is_null() { None } else { v.as_bytes().ok() }
+    }
+
+    fn cell_named(&self, name: &str) -> Option<&[u8]> {
+        let v = self.try_get_raw(name).ok()?;
+        if v.is_null() { None } else { v.as_bytes().ok() }
+    }
+
+    fn col_pos(&self, name: &str) -> Option<usize> {
+        self.columns().iter().position(|c| c.name() == name)
+    }
+
+    fn int(&self, name: &str) -> Option<i64> {
+        let v = self.try_get_raw(name).ok()?;
+        if v.is_null() {
+            return None;
+        }
+        if matches!(v.format(), sqlx::postgres::PgValueFormat::Text) {
+            return std::str::from_utf8(v.as_bytes().ok()?).ok()?.trim().parse().ok();
+        }
+        // Binary rows carry the column's own width.
+        self.try_get::<i64, _>(name).ok().or_else(|| self.try_get::<i32, _>(name).ok().map(i64::from)).or_else(|| self.try_get::<i16, _>(name).ok().map(i64::from))
+    }
+
+    fn uint(&self, name: &str) -> Option<u64> {
+        self.int(name).and_then(|n| u64::try_from(n).ok())
+    }
+}
+
 /// A row of either engine. Cells are borrowed from the row, never copied.
 pub enum SqlRow {
     My(MySqlRow),
+    Pg(PgRow),
+}
+
+fn col_infos<C: Column>(cols: &[C]) -> Vec<ColInfo> {
+    cols.iter().map(|c| ColInfo { name: c.name().to_string(), ty: c.type_info().name().to_string() }).collect()
 }
 
 impl SqlRow {
@@ -140,36 +190,52 @@ impl SqlRow {
         rows.into_iter().map(SqlRow::My).collect()
     }
 
+    pub fn wrap_pg(rows: Vec<PgRow>) -> Vec<SqlRow> {
+        rows.into_iter().map(SqlRow::Pg).collect()
+    }
+
     pub fn cols(&self) -> Vec<ColInfo> {
-        let SqlRow::My(r) = self;
-        r.columns().iter().map(|c| ColInfo { name: c.name().to_string(), ty: c.type_info().name().to_string() }).collect()
+        match self {
+            SqlRow::My(r) => col_infos(r.columns()),
+            SqlRow::Pg(r) => col_infos(r.columns()),
+        }
     }
 }
 
 impl Cells for SqlRow {
     fn cell(&self, i: usize) -> Option<&[u8]> {
-        let SqlRow::My(r) = self;
-        r.cell(i)
+        match self {
+            SqlRow::My(r) => r.cell(i),
+            SqlRow::Pg(r) => r.cell(i),
+        }
     }
 
     fn cell_named(&self, name: &str) -> Option<&[u8]> {
-        let SqlRow::My(r) = self;
-        r.cell_named(name)
+        match self {
+            SqlRow::My(r) => r.cell_named(name),
+            SqlRow::Pg(r) => r.cell_named(name),
+        }
     }
 
     fn col_pos(&self, name: &str) -> Option<usize> {
-        let SqlRow::My(r) = self;
-        r.col_pos(name)
+        match self {
+            SqlRow::My(r) => r.col_pos(name),
+            SqlRow::Pg(r) => r.col_pos(name),
+        }
     }
 
     fn int(&self, name: &str) -> Option<i64> {
-        let SqlRow::My(r) = self;
-        r.int(name)
+        match self {
+            SqlRow::My(r) => r.int(name),
+            SqlRow::Pg(r) => r.int(name),
+        }
     }
 
     fn uint(&self, name: &str) -> Option<u64> {
-        let SqlRow::My(r) = self;
-        r.uint(name)
+        match self {
+            SqlRow::My(r) => r.uint(name),
+            SqlRow::Pg(r) => r.uint(name),
+        }
     }
 }
 
@@ -177,102 +243,151 @@ impl Cells for SqlRow {
 #[derive(Clone)]
 pub enum Opts {
     My(MySqlConnectOptions),
+    Pg(PgConnectOptions),
 }
 
-/// Lets the MySQL-only modules keep reading their options as sqlx's own type. It goes away with the first
-/// engine that has no such options, which is when those modules start asking for the MySQL arm explicitly.
-impl std::ops::Deref for Opts {
-    type Target = MySqlConnectOptions;
+impl Opts {
+    /// The MySQL options, for the modules that only exist for MySQL.
+    #[cfg_attr(not(test), allow(dead_code))] // only the live tests ask for the MySQL options
+    pub fn my(&self) -> Res<&MySqlConnectOptions> {
+        match self {
+            Opts::My(o) => Ok(o),
+            Opts::Pg(_) => Err(super::pg::NOT_YET.into()),
+        }
+    }
 
-    fn deref(&self) -> &MySqlConnectOptions {
-        let Opts::My(o) = self;
-        o
+    /// The database the options connect to, when they name one.
+    pub fn database(&self) -> Option<&str> {
+        match self {
+            Opts::My(o) => o.get_database(),
+            Opts::Pg(o) => o.get_database(),
+        }
     }
 }
 
 /// A connection of its own, outside any pool.
 pub enum Conn {
     My(sqlx::MySqlConnection),
+    Pg(sqlx::PgConnection),
+}
+
+fn done_my(r: sqlx::mysql::MySqlQueryResult) -> Done {
+    Done { affected: r.rows_affected(), last_id: r.last_insert_id() }
+}
+
+/// Postgres reports no generated key in the result, so inserts ask for it with RETURNING.
+fn done_pg(r: sqlx::postgres::PgQueryResult) -> Done {
+    Done { affected: r.rows_affected(), last_id: 0 }
 }
 
 impl Conn {
     pub async fn connect(opts: &Opts) -> Result<Conn, sqlx::Error> {
-        let Opts::My(o) = opts;
-        sqlx::MySqlConnection::connect_with(o).await.map(Conn::My)
+        match opts {
+            Opts::My(o) => sqlx::MySqlConnection::connect_with(o).await.map(Conn::My),
+            Opts::Pg(o) => sqlx::PgConnection::connect_with(o).await.map(Conn::Pg),
+        }
     }
 
     /// The MySQL connection, for the modules that only exist for MySQL.
     pub fn my(&mut self) -> Res<&mut sqlx::MySqlConnection> {
-        let Conn::My(c) = self;
-        Ok(c)
+        match self {
+            Conn::My(c) => Ok(c),
+            Conn::Pg(_) => Err(super::pg::NOT_YET.into()),
+        }
     }
 
     pub fn into_my(self) -> Res<sqlx::MySqlConnection> {
-        let Conn::My(c) = self;
-        Ok(c)
+        match self {
+            Conn::My(c) => Ok(c),
+            Conn::Pg(_) => Err(super::pg::NOT_YET.into()),
+        }
     }
 
     /// Runs `sql` through the text protocol and streams what comes back, so values arrive as the server
     /// wrote them. A CALL ends several results, each with an `Item::End`.
     pub fn fetch_text<'c>(&'c mut self, sql: &'c str) -> BoxStream<'c, Result<Item, sqlx::Error>> {
-        let Conn::My(c) = self;
-        raw_sql(sql)
-            .fetch_many(&mut *c)
-            .map(|item| {
-                item.map(|x| match x {
-                    Either::Right(row) => Item::Row(SqlRow::My(row)),
-                    Either::Left(r) => Item::End(Done { affected: r.rows_affected(), last_id: r.last_insert_id() }),
+        match self {
+            Conn::My(c) => raw_sql(sql)
+                .fetch_many(&mut *c)
+                .map(|item| {
+                    item.map(|x| match x {
+                        Either::Right(row) => Item::Row(SqlRow::My(row)),
+                        Either::Left(r) => Item::End(done_my(r)),
+                    })
                 })
-            })
-            .boxed()
+                .boxed(),
+            Conn::Pg(c) => raw_sql(sql)
+                .fetch_many(&mut *c)
+                .map(|item| {
+                    item.map(|x| match x {
+                        Either::Right(row) => Item::Row(SqlRow::Pg(row)),
+                        Either::Left(r) => Item::End(done_pg(r)),
+                    })
+                })
+                .boxed(),
+        }
     }
 
     /// Runs `sql` through the text protocol and collects its rows.
     pub async fn fetch_all(&mut self, sql: &str) -> Result<Vec<SqlRow>, sqlx::Error> {
-        let Conn::My(c) = self;
-        c.fetch_all(sql).await.map(SqlRow::wrap)
+        match self {
+            Conn::My(c) => c.fetch_all(sql).await.map(SqlRow::wrap),
+            Conn::Pg(c) => c.fetch_all(sql).await.map(SqlRow::wrap_pg),
+        }
     }
 
     /// Runs one statement and drops its rows.
     pub async fn execute(&mut self, sql: &str) -> Result<Done, sqlx::Error> {
-        let Conn::My(c) = self;
-        c.execute(sql).await.map(|r| Done { affected: r.rows_affected(), last_id: r.last_insert_id() })
+        match self {
+            Conn::My(c) => c.execute(sql).await.map(done_my),
+            Conn::Pg(c) => c.execute(sql).await.map(done_pg),
+        }
     }
 
     /// The columns a statement would return, without running it. Empty for a write.
     pub async fn describe(&mut self, sql: &str) -> Result<Vec<ColInfo>, sqlx::Error> {
-        let Conn::My(c) = self;
-        let d = c.describe(sql).await?;
-        Ok(d.columns().iter().map(|c| ColInfo { name: c.name().to_string(), ty: c.type_info().name().to_string() }).collect())
+        match self {
+            Conn::My(c) => Ok(col_infos(c.describe(sql).await?.columns())),
+            Conn::Pg(c) => Ok(col_infos(c.describe(sql).await?.columns())),
+        }
     }
 
     /// Starts a transaction that rolls back unless it is committed.
     pub async fn begin(&mut self) -> Result<Tx<'_>, sqlx::Error> {
-        let Conn::My(c) = self;
-        c.begin().await.map(Tx::My)
+        match self {
+            Conn::My(c) => c.begin().await.map(Tx::My),
+            Conn::Pg(c) => c.begin().await.map(Tx::Pg),
+        }
     }
 
     pub async fn close(self) -> Result<(), sqlx::Error> {
-        let Conn::My(c) = self;
-        c.close().await
+        match self {
+            Conn::My(c) => c.close().await,
+            Conn::Pg(c) => c.close().await,
+        }
     }
 }
 
 /// A transaction on a `Conn`.
 pub enum Tx<'c> {
     My(sqlx::Transaction<'c, sqlx::MySql>),
+    Pg(sqlx::Transaction<'c, sqlx::Postgres>),
 }
 
 impl Tx<'_> {
     /// Runs one statement with its values bound, so none of them is ever spliced into the text.
     pub async fn exec_bound(&mut self, sql: &str, params: &[Param]) -> Result<Done, sqlx::Error> {
-        let Tx::My(t) = self;
-        bound(sql, params).execute(&mut **t).await.map(|r| Done { affected: r.rows_affected(), last_id: r.last_insert_id() })
+        match self {
+            Tx::My(t) => bound(sql, params).execute(&mut **t).await.map(done_my),
+            Tx::Pg(t) => bound_pg(sql, params).execute(&mut **t).await.map(done_pg),
+        }
     }
 
     pub async fn commit(self) -> Result<(), sqlx::Error> {
-        let Tx::My(t) = self;
-        t.commit().await
+        match self {
+            Tx::My(t) => t.commit().await,
+            Tx::Pg(t) => t.commit().await,
+        }
     }
 }
 
@@ -293,15 +408,41 @@ pub(super) fn bound<'q>(sql: &'q str, params: &'q [Param]) -> Query<'q> {
     q
 }
 
+type PgQuery<'q> = sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>;
+
+/// Postgres has no unsigned integers, so a value above i64::MAX is sent as text and left to the server's cast.
+pub(super) fn bound_pg<'q>(sql: &'q str, params: &'q [Param]) -> PgQuery<'q> {
+    let mut q = sqlx::query(sql);
+    for p in params {
+        q = match p {
+            Param::Null => q.bind(None::<String>),
+            Param::Int(i) => q.bind(*i),
+            Param::UInt(u) => match i64::try_from(*u) {
+                Ok(i) => q.bind(i),
+                Err(_) => q.bind(u.to_string()),
+            },
+            Param::Float(f) => q.bind(*f),
+            Param::Text(s) => q.bind(s.as_str()),
+            Param::Bytes(b) => q.bind(b.as_slice()),
+        };
+    }
+    q
+}
+
 impl Db {
     /// A connection of its own, outside the pool, so a busy or exhausted pool never blocks it.
     pub async fn detached(&self) -> Res<Conn> {
-        Conn::connect(&self.opts).await.map_err(e)
+        match &self.pool {
+            Pool::Pg(p) => p.detached(&self.opts).await,
+            Pool::My(_) => Conn::connect(&self.opts).await.map_err(e),
+        }
     }
 
     /// The MySQL pool, for the modules that only exist for MySQL.
     pub fn my_pool(&self) -> Res<&sqlx::MySqlPool> {
-        let Pool::My(p) = &self.pool;
-        Ok(p)
+        match &self.pool {
+            Pool::My(p) => Ok(p),
+            Pool::Pg(_) => Err(super::pg::NOT_YET.into()),
+        }
     }
 }

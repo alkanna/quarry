@@ -12,6 +12,10 @@ use std::time::{Duration, Instant};
 
 /// Readies the script's own connection: its id for Stop, the database, and write access when unlocked.
 pub(super) async fn prepare(conn: &mut Conn, d: Dialect, schema: &str, read_only: bool, id: &AtomicU64) -> Res<()> {
+    if let Conn::Pg(c) = conn {
+        // No USE: the database is the pool's, and the schema is picked per statement.
+        return super::pg::prepare(c, read_only, id).await.map_err(e);
+    }
     prepare_my(conn.my()?, d, schema, read_only, id).await.map_err(e)
 }
 
@@ -36,6 +40,10 @@ pub(super) async fn prepare_my(conn: &mut sqlx::MySqlConnection, d: Dialect, sch
 /// Pins what a read of every row as stored depends on: UTF-8 both ways, and no sql_select_limit cutting a SELECT
 /// short. A session can get either from the server's globals.
 pub(super) async fn pin_reads(c: &mut Conn) -> Res<()> {
+    // The startup parameters already fix the encoding, and Postgres has no select limit.
+    if matches!(c, Conn::Pg(_)) {
+        return Ok(());
+    }
     pin_reads_my(c.my()?).await.map_err(e)
 }
 
@@ -203,6 +211,9 @@ pub(super) async fn side_conn(db: &Db, why: &str) -> Res<Conn> {
 /// KILL QUERY from a connection of its own. A plain function, because inside a spawned block the
 /// executor lifetimes of a local connection do not infer.
 pub(super) async fn kill_query(db: &Db, id: u64) -> Res<String> {
+    if db.dialect == Dialect::Postgres {
+        return super::pg::cancel(db, id).await;
+    }
     let mut c = side_conn(db, "Could not reach the server to stop the statement").await?;
     let q = db.dialect.cancel(id);
     let r = c.execute(q.as_str()).await.map(|_| "Stopped the running statement".to_string()).map_err(|x| super::server::kill_error(&x));

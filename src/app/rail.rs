@@ -132,6 +132,7 @@ fn sync_order(order: &mut Vec<u64>, open: &[u64]) {
 pub(super) fn engine_mark(engine: db::sql::Engine, product: &str) -> (&'static str, &'static str) {
     match (engine, product) {
         (db::sql::Engine::Mongo, _) => ("MO", "MongoDB"),
+        (db::sql::Engine::Postgres, _) => ("PG", "PostgreSQL"),
         (_, "MariaDB") => ("MA", "MariaDB"),
         _ => ("MY", "MySQL"),
     }
