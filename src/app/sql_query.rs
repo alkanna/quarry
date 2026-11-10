@@ -213,7 +213,7 @@ impl App {
         let mut t = Tab::new(Sel { conn, db, coll: String::new() }).for_engine(engine);
         t.view = View::Sql;
         self.tabs.push(t);
-        self.cur = self.tabs.len() - 1;
+        self.set_cur(self.tabs.len() - 1);
         self.reset_doc_state();
     }
 

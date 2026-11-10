@@ -35,6 +35,23 @@ impl App {
     /// to its database and collection. Picking a connection without changing tabs never comes here,
     /// so the explorer may show another connection than the tab.
     pub(super) fn set_cur(&mut self, i: usize) {
+        if i != self.cur
+            && let Some(prev) = self.tabs.get(self.cur).map(|t| t.uid)
+        {
+            if self.nav_back.last() != Some(&prev) {
+                self.nav_back.push(prev);
+            }
+            // ponytail: 50 steps of history, plenty for tab hopping.
+            if self.nav_back.len() > 50 {
+                self.nav_back.remove(0);
+            }
+            self.nav_fwd.clear();
+        }
+        self.show_tab(i);
+    }
+
+    /// Makes tab `i` current without touching the back and forward history.
+    fn show_tab(&mut self, i: usize) {
         self.cur = i;
         let Some(sel) = self.tabs.get(i).map(|t| t.sel.clone()) else { return };
         if let Some(id) = follow_conn(&sel, |id| self.conn(id).is_some()) {
@@ -43,6 +60,17 @@ impl App {
                 self.open_dbs.insert((id, sel.db.clone()));
                 self.reveal = Some((id, sel.db, (!sel.coll.is_empty()).then_some(sel.coll)));
             }
+        }
+    }
+
+    /// Cmd+[ and Cmd+]: the previously shown tab, or the one gone back from. Tabs closed since are skipped.
+    pub(super) fn nav(&mut self, back: bool) {
+        let Some(cur) = self.t().map(|t| t.uid) else { return };
+        let (from, to) = if back { (&mut self.nav_back, &mut self.nav_fwd) } else { (&mut self.nav_fwd, &mut self.nav_back) };
+        if let Some(i) = nav_target(from, &self.tabs, self.cur) {
+            to.push(cur);
+            self.show_tab(i);
+            self.reset_doc_state();
         }
     }
 
@@ -160,9 +188,31 @@ fn follow_conn(sel: &Sel, exists: impl Fn(u64) -> bool) -> Option<u64> {
     exists(sel.conn).then_some(sel.conn)
 }
 
+/// Pops `from` until a tab still open other than `cur`, and returns its index.
+fn nav_target(from: &mut Vec<u64>, tabs: &[Tab], cur: usize) -> Option<usize> {
+    while let Some(uid) = from.pop() {
+        if let Some(i) = tabs.iter().position(|t| t.uid == uid).filter(|&i| i != cur) {
+            return Some(i);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn back_skips_closed_and_current_tabs() {
+        // Two Query tabs on one database share a Sel; history must still tell them apart.
+        let tabs: Vec<Tab> = ["", "", "c"].map(|c| Tab::new(sel(c))).into();
+        let gone = Tab::new(sel("gone")).uid;
+        // History 1, gone, c with c (index 2) current: back skips c itself and the closed tab.
+        let mut back = vec![tabs[1].uid, gone, tabs[2].uid];
+        assert_eq!(nav_target(&mut back, &tabs, 2), Some(1));
+        assert!(back.is_empty());
+        assert_eq!(nav_target(&mut back, &tabs, 2), None);
+    }
 
     #[test]
     fn explorer_follows_the_tab_connection() {
