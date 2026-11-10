@@ -73,6 +73,8 @@ cargo run --release      # run it
 cargo test               # run the tests
 ```
 
+On Linux and Windows, `bundle.sh` makes the archive that a release publishes, not something to run. To use Quarry on your own machine, run `cargo build --release` and take the binary from `target/release/quarry` (`quarry.exe` on Windows).
+
 ### Stop the Keychain prompts on macOS
 
 Every build gets a new ad-hoc signature, so macOS treats it as a new app and asks for your password again for each saved connection. `cargo run` signs the build with your Developer ID Application certificate when you have one, or else with a certificate named `Quarry Dev` (see `.cargo/run-signed.sh`), which keeps the signature stable across rebuilds. To create `Quarry Dev` once:
