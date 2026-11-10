@@ -6,10 +6,35 @@ pub struct ShellJob {
     pub runtime: std::path::PathBuf,
     /// Folder holding the runner script and its installed MongoDB driver.
     pub dir: std::path::PathBuf,
-    /// JSON for the runner: uri, db, code, collections, readOnly, timeoutMs.
+    /// First line for the runner: code, packages, timeoutMs, main, mongo entries and sql entries (see shell_runner.mjs).
     pub input: String,
     /// Extra npm packages the person added ("name" or "name@version").
     pub packages: Vec<String>,
+    /// The SQL connections of the script by their name in the input. Their queries are answered here.
+    pub sql: Vec<(String, SqlRelay)>,
+}
+
+/// Where a SQL script's queries run. The runner never gets a driver or a password.
+pub struct SqlRelay {
+    pub db: sql::Db,
+    pub schema: String,
+    pub read_only: bool,
+    /// Server connection id of the script, set once it opens so Stop can interrupt the statement.
+    pub conn_id: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// One query a script ran, for the Queries panel.
+#[derive(Clone)]
+pub struct ShellQuery {
+    /// Name of the connection the query ran on.
+    pub conn: String,
+    pub text: String,
+    /// The values, shortened, as the script passed them.
+    pub params: String,
+    pub rows: Option<usize>,
+    pub affected: Option<u64>,
+    pub error: Option<String>,
+    pub ms: u128,
 }
 
 /// Splits "name@version" (scoped names keep their leading @).
@@ -105,8 +130,11 @@ pub(crate) async fn prepare_shell_dir(runtime: &std::path::Path, dir: &std::path
 }
 
 pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + Send + Sync), mut cancel: tokio::sync::oneshot::Receiver<()>) -> Res<String> {
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::process::Command;
+    if let Some(n) = repeated_name(job.sql.iter().map(|(n, _)| n.as_str())) {
+        return Err(format!("The connection name \"{n}\" is used more than once in this script. Give each connection its own name."));
+    }
     let note = |t: &str| send(Msg::ShellLog { req, level: "info".into(), text: t.into() });
     tokio::select! {
         r = prepare_shell_dir(&job.runtime, &job.dir, &job.packages, &note) => r?,
@@ -126,8 +154,10 @@ pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + S
         .map_err(|err| format!("Could not start Bun ({}): {err}", job.runtime.display()))?;
     let mut stdin = child.stdin.take().ok_or("no stdin")?;
     stdin.write_all(job.input.as_bytes()).await.map_err(e)?;
-    drop(stdin);
-    let mut lines = tokio::io::BufReader::new(child.stdout.take().ok_or("no stdout")?).lines();
+    // The runner reads one line and then the answers to SQL queries, so stdin stays open until the result arrives.
+    stdin.write_all(b"\n").await.map_err(e)?;
+    let mut stdin = Some(stdin);
+    let mut lines = tokio::io::BufReader::new(child.stdout.take().ok_or("no stdout")?);
     let mut stderr = child.stderr.take().ok_or("no stderr")?;
     // Read alongside stdout: a full stderr pipe would block the child before stdout closes.
     let errs = tokio::spawn(async move {
@@ -137,7 +167,8 @@ pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + S
     });
     let read = async {
         let mut result: Option<Res<String>> = None;
-        while let Some(line) = lines.next_line().await.map_err(e)? {
+        let mut relays: std::collections::HashMap<String, sql::Relay> = std::collections::HashMap::new();
+        while let Some(line) = next_line(&mut lines).await? {
             let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
                 send(Msg::ShellLog { req, level: "log".into(), text: line });
                 continue;
@@ -145,8 +176,67 @@ pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + S
             let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
             match v.get("type").and_then(|t| t.as_str()) {
                 Some("log") => send(Msg::ShellLog { req, level: s("level"), text: s("text") }),
-                Some("result") if v.get("ok").and_then(|o| o.as_bool()) == Some(true) => result = Some(Ok(s("ejson"))),
-                Some("result") => result = Some(Err(s("error"))),
+                Some("result") => {
+                    result = Some(if v.get("ok").and_then(|o| o.as_bool()) == Some(true) { Ok(s("ejson")) } else { Err(s("error")) });
+                    // Closing the pipe lets the runner exit.
+                    stdin = None;
+                }
+                Some("query") => {
+                    // A command the runner's own MongoDB client ran.
+                    let q = ShellQuery {
+                        conn: s("conn"),
+                        text: s("text"),
+                        params: String::new(),
+                        rows: v.get("rows").and_then(|x| x.as_u64()).map(|n| n as usize),
+                        affected: v.get("affected").and_then(|x| x.as_u64()),
+                        error: v.get("error").and_then(|x| x.as_str()).map(String::from),
+                        ms: v.get("ms").and_then(|x| x.as_f64()).unwrap_or(0.0) as u128,
+                    };
+                    send(Msg::ShellQuery { req, q });
+                }
+                Some("sql") => {
+                    let conn = s("conn");
+                    let params = sql_params(v.get("params"));
+                    let text = s("text");
+                    let t = Instant::now();
+                    let res = async {
+                        let Some((_, cfg)) = job.sql.iter().find(|(n, _)| *n == conn) else { return Err(format!("There is no SQL connection named \"{conn}\" in this script.")) };
+                        if !relays.contains_key(&conn) {
+                            relays.insert(conn.clone(), sql::Relay::open(&cfg.db, &cfg.schema, cfg.read_only, &cfg.conn_id).await?);
+                        }
+                        let p = params.as_ref().map_err(|x| x.clone())?;
+                        match relays.get_mut(&conn) {
+                            Some(r) => r.query(&text, p).await,
+                            None => Err("No connection".to_string()),
+                        }
+                    }
+                    .await;
+                    let mut q = ShellQuery { conn, text, params: params_summary(v.get("params")), rows: None, affected: None, error: None, ms: t.elapsed().as_millis() };
+                    let mut answer = serde_json::json!({ "type": "sqlres", "id": v.get("id") });
+                    match res {
+                        Ok(sql::Answer::Rows(rows)) => {
+                            q.rows = Some(rows.len());
+                            answer["ok"] = true.into();
+                            answer["rows"] = rows.into();
+                        }
+                        Ok(sql::Answer::Wrote { affected, insert_id }) => {
+                            q.affected = Some(affected);
+                            answer["ok"] = true.into();
+                            answer["affected"] = affected.into();
+                            answer["insertId"] = insert_id.into();
+                        }
+                        Err(err) => {
+                            q.error = Some(err.clone());
+                            answer["ok"] = false.into();
+                            answer["error"] = err.into();
+                        }
+                    }
+                    send(Msg::ShellQuery { req, q });
+                    if let Some(w) = stdin.as_mut() {
+                        let _ = w.write_all(format!("{answer}\n").as_bytes()).await;
+                        let _ = w.flush().await;
+                    }
+                }
                 _ => {}
             }
         }
@@ -164,10 +254,101 @@ pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + S
             }
         }
         _ = cancel => {
+            // The statement in flight keeps running on the server unless it is interrupted too.
+            for (_, c) in &job.sql {
+                let id = c.conn_id.load(std::sync::atomic::Ordering::SeqCst);
+                if id != 0 {
+                    let _ = sql::Relay::kill(&c.db, id).await;
+                }
+            }
             let _ = child.kill().await;
             Err("Stopped.".into())
         }
     }
+}
+
+/// The first name that appears twice. Queries find their relay by name, so a repeat would answer on the wrong connection.
+fn repeated_name<'a>(names: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    let mut seen = std::collections::HashSet::new();
+    names.into_iter().find(|n| !seen.insert(*n))
+}
+
+/// The longest line the runner may print. A script that prints more would otherwise grow this buffer until memory runs out.
+const LINE_MAX: usize = 64 << 20;
+
+/// The next line of the runner's stdout, ended by an error when it passes `LINE_MAX`.
+async fn next_line(r: &mut tokio::io::BufReader<tokio::process::ChildStdout>) -> Res<Option<String>> {
+    use tokio::io::AsyncBufReadExt;
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        let chunk = r.fill_buf().await.map_err(e)?;
+        if chunk.is_empty() {
+            return Ok(if buf.is_empty() { None } else { Some(String::from_utf8_lossy(&buf).into_owned()) });
+        }
+        let (take, done) = match chunk.iter().position(|b| *b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (chunk.len(), false),
+        };
+        buf.extend_from_slice(&chunk[..take]);
+        r.consume(take);
+        if buf.len() > LINE_MAX {
+            return Err(format!("The shell printed a line longer than {} MB and was stopped.", LINE_MAX >> 20));
+        }
+        if done {
+            buf.pop();
+            if buf.last() == Some(&b'\r') {
+                buf.pop();
+            }
+            return Ok(Some(String::from_utf8_lossy(&buf).into_owned()));
+        }
+    }
+}
+
+/// The values a script sent with a query, as bind values. A `{ "$hex": ... }` object is bytes, any other
+/// object or array is its JSON text, which is what a JSON column takes.
+fn sql_params(v: Option<&serde_json::Value>) -> Res<Vec<sql::value::Param>> {
+    use serde_json::Value;
+    use sql::value::Param;
+    let Some(Value::Array(a)) = v else { return Ok(Vec::new()) };
+    a.iter()
+        .map(|x| {
+            Ok(match x {
+                Value::Null => Param::Null,
+                Value::Bool(b) => Param::Int(*b as i64),
+                Value::Number(n) => match (n.as_i64(), n.as_u64()) {
+                    (Some(i), _) => Param::Int(i),
+                    (_, Some(u)) => Param::UInt(u),
+                    _ => Param::Float(n.as_f64().unwrap_or(f64::NAN)),
+                },
+                Value::String(s) => Param::Text(s.clone()),
+                // A BigInt beyond 2^53, which a JSON number would round.
+                Value::Object(o) if o.len() == 1 && o.contains_key("$int") => {
+                    let t = o["$int"].as_str().unwrap_or_default();
+                    match (t.parse::<i64>(), t.parse::<u64>()) {
+                        (Ok(i), _) => Param::Int(i),
+                        (_, Ok(u)) => Param::UInt(u),
+                        _ => return Err("A BigInt value does not fit in 64 bits".to_string()),
+                    }
+                }
+                Value::Object(o) if o.len() == 1 && o.contains_key("$hex") => {
+                    let h = o["$hex"].as_str().unwrap_or_default();
+                    Param::Bytes((0..h.len() / 2).map(|i| u8::from_str_radix(h.get(i * 2..i * 2 + 2).unwrap_or("zz"), 16)).collect::<Result<_, _>>().map_err(|_| "Bad binary value".to_string())?)
+                }
+                other => Param::Text(other.to_string()),
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+pub(crate) fn sql_params_for_test(v: &serde_json::Value) -> Res<Vec<sql::value::Param>> {
+    sql_params(Some(v))
+}
+
+/// The values of a query for the Queries panel, cut to one short line.
+fn params_summary(v: Option<&serde_json::Value>) -> String {
+    let s = v.filter(|v| v.as_array().is_some_and(|a| !a.is_empty())).map(|v| v.to_string()).unwrap_or_default();
+    if s.chars().count() > 80 { format!("{}…", s.chars().take(80).collect::<String>()) } else { s }
 }
 
 /// Readable shell syntax for a stage body: short values stay on one line, longer objects and
@@ -373,6 +554,12 @@ pub fn shell_text(b: &Bson) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_repeated_connection_name_is_found() {
+        assert_eq!(repeated_name(["shop", "other", "shop"].into_iter()), Some("shop"));
+        assert_eq!(repeated_name(["shop", "other"].into_iter()), None);
+    }
 
     #[test]
     fn package_validation() {

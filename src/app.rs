@@ -22,6 +22,7 @@ mod demo;
 mod documents;
 mod drafts;
 mod explain;
+mod export;
 mod import;
 mod rail;
 mod indexes;
@@ -33,10 +34,25 @@ mod relations;
 mod run;
 mod schema;
 mod server;
+mod sql_server;
 mod settings;
 mod shell;
+mod shell_attach;
 mod shell_ls;
 mod sidebar;
+mod sql_ac;
+mod sql_create;
+mod sql_structure;
+mod sql_alter;
+mod sql_rel;
+mod sql_trig;
+mod sql_edit;
+mod sql_bar;
+mod sql_views;
+mod sql_query;
+mod sql_import;
+mod sql_dump;
+mod sql_users;
 mod state;
 mod table;
 mod tabs;
@@ -49,6 +65,7 @@ use column_menu::*;
 use config::*;
 use documents::*;
 use shell::*;
+use shell_attach::*;
 use sidebar::*;
 use state::*;
 use query::*;
@@ -57,8 +74,13 @@ use tree::*;
 use users::*;
 use indexes::*;
 use server::*;
+use sql_server::*;
 use watch::*;
 use drafts::*;
+use sql_edit::*;
+use sql_alter::*;
+use sql_create::*;
+use sql_rel::*;
 use table::Rows;
 
 const SYSTEM_DBS: [&str; 3] = ["admin", "config", "local"];
@@ -66,7 +88,7 @@ const SYSTEM_DBS: [&str; 3] = ["admin", "config", "local"];
 const DEFAULT_COLS: usize = 8;
 
 /// Shortcuts listed by Cmd+/. Cmd is Ctrl on Linux and Windows.
-const SHORTCUTS: [(&str, &str); 22] = [
+const SHORTCUTS: [(&str, &str); 23] = [
     ("Cmd+K, Cmd+T", "Jump to a connection, database or collection"),
     ("Cmd+R", "Reload the current tab"),
     ("Cmd+Shift+R", "Refresh the connection's databases"),
@@ -82,8 +104,9 @@ const SHORTCUTS: [(&str, &str); 22] = [
     ("Up, Down", "Select the previous or next document"),
     ("PageUp, PageDown", "Previous or next page"),
     ("Enter", "Run the query"),
-    ("Cmd+E", "Explain the query or pipeline"),
-    ("Cmd+Enter", "Run the pipeline or script"),
+    ("Cmd+E", "Explain the query, pipeline or SQL statement"),
+    ("Cmd+Enter", "Run the pipeline, script or SQL statement under the caret"),
+    ("Cmd+Shift+Enter", "Run every statement of a SQL Query view"),
     ("Esc", "Close or deselect"),
     ("Cmd+,", "Settings"),
     ("Cmd+N", "New connection"),
@@ -97,6 +120,10 @@ pub struct App {
     conns: Vec<Conn>,
     active: Option<u64>,
     open_dbs: HashSet<(u64, String)>,
+    /// Sidebar TABLES / VIEWS groups folded shut, by connection, database and whether it is the views group.
+    side_closed: HashSet<(u64, String, bool)>,
+    /// SQL databases whose table list was asked for; lists load when a database opens, not all at connect.
+    sql_asked: HashSet<(u64, String)>,
     tabs: Vec<Tab>,
     cur: usize,
     req: u64,
@@ -106,6 +133,8 @@ pub struct App {
     /// Paths changed in the document being drawn, for tinting.
     changed: HashSet<String>,
     inline: Option<Inline>,
+    /// The SQL grid cell being edited in place.
+    sql_cell: Option<CellEdit>,
     new_field: Option<NewField>,
     /// Pending expand/collapse from the tree menu: document, path prefix, open.
     fold: Option<(egui::Id, Vec<String>, bool)>,
@@ -122,6 +151,10 @@ pub struct App {
     dropping_db: Option<(u64, String)>,
     /// Collections being written by a duplicate, as (connection, database, new name), shown with a spinner.
     copying: std::collections::HashSet<(u64, String, String)>,
+    /// The Query result being streamed to a file or the clipboard, shown in the status bar with a Cancel.
+    export_job: Option<export::ExportJob>,
+    /// A CSV import or a script file running, shown in the status bar with a Cancel.
+    sql_job: Option<sql_dump::SqlJob>,
     prefs: UiPrefs,
     new_col: String,
     col_filter: String,
@@ -136,9 +169,24 @@ pub struct App {
     new_lib: String,
     /// Views per (connection, database), shown differently in the sidebar.
     views: HashSet<(u64, String, String)>,
+    /// Tables and columns of SQL databases, per (connection, database), for autocomplete. Loaded when a
+    /// SQL input there first has focus, and again on the sidebar's Refresh.
+    sql_schema: HashMap<(u64, String), Arc<db::sql::schema::Schema>>,
+    sql_schema_asked: HashSet<(u64, String)>,
+    /// Looked up column values per (connection, database), keyed `table.column`, and the lookups already sent.
+    sql_values: HashMap<(u64, String), Fields>,
+    sql_values_asked: HashSet<(u64, String, String, String, Option<String>)>,
     users: Option<UsersWin>,
+    sql_users: Option<sql_users::SqlUsersWin>,
     server: Option<ServerWin>,
-    conn_test: Option<db::Res<String>>,
+    sql_server: Option<SqlServerWin>,
+    /// Kill requests sent from the Server window and not answered yet. Kept here so an answer that arrives after
+    /// the window was closed still reaches the person.
+    sql_kills: HashSet<u64>,
+    /// The answer to a connection form Test, with the request id it answers.
+    conn_test: Option<(u64, db::Res<String>)>,
+    /// What the last Test learned from a SQL server, for the Advanced tab to offer.
+    test_info: Option<(u64, db::sql::TestInfo)>,
     /// Usage and suggestions of the collection "db.coll" the Indexes view last asked about.
     idx_info: Option<(String, db::IndexInfo)>,
     undo: Vec<UndoAction>,
@@ -168,6 +216,8 @@ pub struct App {
     tools_installing: bool,
     /// Tree row the palette jumped to, as (connection, database, collection), scrolled into view once drawn.
     reveal: Option<(u64, String, Option<String>)>,
+    /// Ids of the open connections in the order they were first seen open, for the rail shortcuts.
+    rail_order: Vec<u64>,
     /// Scroll the selected document row into view on its next draw, after keyboard selection.
     scroll_sel: bool,
     /// The active tab the tab strip last scrolled to; it scrolls again when this differs.
@@ -181,7 +231,7 @@ pub struct App {
     /// Frame rate readout: seconds and frames counted so far, and the rate last shown.
     fps: (f32, u32, f32),
     /// Measured column widths per result set and column.
-    width_cache: HashMap<(usize, usize, String, Option<String>, bool), f32>,
+    width_cache: HashMap<(u64, usize, usize, String, Option<String>, bool), f32>,
     /// Recently closed tabs, newest first.
     closed: Vec<Tab>,
     /// Version installed by the updater, waiting for a restart.
@@ -227,6 +277,8 @@ impl App {
             conns: Vec::new(),
             active: None,
             open_dbs: HashSet::new(),
+            side_closed: HashSet::new(),
+            sql_asked: HashSet::new(),
             tabs: Vec::new(),
             cur: 0,
             req: 0,
@@ -235,6 +287,7 @@ impl App {
             saving: HashMap::new(),
             changed: HashSet::new(),
             inline: None,
+            sql_cell: None,
             new_field: None,
             fold: None,
             fold_busy: false,
@@ -245,6 +298,8 @@ impl App {
             insert: None,
             dropping_db: None,
             copying: Default::default(),
+            export_job: None,
+            sql_job: None,
             prefs: UiPrefs::default(),
             new_col: String::new(),
             col_filter: String::new(),
@@ -257,9 +312,17 @@ impl App {
             new_pkg: String::new(),
             new_lib: String::new(),
             views: HashSet::new(),
+            sql_schema: HashMap::new(),
+            sql_schema_asked: HashSet::new(),
+            sql_values: HashMap::new(),
+            sql_values_asked: HashSet::new(),
             users: None,
+            sql_users: None,
             server: None,
+            sql_server: None,
+            sql_kills: HashSet::new(),
             conn_test: None,
+            test_info: None,
             idx_info: None,
             undo: Vec::new(),
             explain_req: 0,
@@ -278,6 +341,7 @@ impl App {
             tree_filter: String::new(),
             tools_installing: false,
             reveal: None,
+            rail_order: Vec::new(),
             scroll_sel: false,
             tab_seen: None,
             demo,
@@ -316,7 +380,7 @@ impl App {
             };
             drop(text);
             let sel = Sel { conn: 1, db: "fixture".into(), coll: "documents".into() };
-            app.conns.push(Conn { meta: ConnMeta { id: 1, name: "Fixture".into(), ..Default::default() }, client: None, status: Status::Ready, writable: false, dbs: vec![("fixture".into(), Some(vec!["documents".into()]))], masked_uri: String::new(), tunnel: None, server: Default::default() });
+            app.conns.push(Conn { meta: ConnMeta { id: 1, name: "Fixture".into(), ..Default::default() }, client: None, sql: None, status: Status::Ready, writable: false, dbs: vec![("fixture".into(), Some(vec!["documents".into()]))], masked_uri: String::new(), tunnel: None, server: Default::default() });
             app.active = Some(1);
             app.open_dbs.insert((1, "fixture".into()));
             app.open_collection(sel, false);
@@ -347,7 +411,7 @@ impl App {
             app.prefs.appearance.apply(&cc.egui_ctx);
             for meta in metas {
                 let masked = keychain(meta.id).and_then(|k| k.get_password().ok()).map(|u| db::mask_uri(&u)).unwrap_or_default();
-                app.conns.push(Conn { meta, client: None, status: Status::Idle, writable: false, dbs: Vec::new(), masked_uri: masked, tunnel: None, server: Default::default() });
+                app.conns.push(Conn { meta, client: None, sql: None, status: Status::Idle, writable: false, dbs: Vec::new(), masked_uri: masked, tunnel: None, server: Default::default() });
             }
             app.active = app.conns.first().map(|c| c.meta.id);
             // Values of deleted connections go with them.
@@ -357,7 +421,8 @@ impl App {
                 if app.conn(st.conn).is_none() {
                     continue;
                 }
-                let mut t = Tab::new(Sel { conn: st.conn, db: st.db, coll: st.coll });
+                let engine = app.conn(st.conn).map(|c| c.meta.engine).unwrap_or_default();
+                let mut t = Tab::new(Sel { conn: st.conn, db: st.db, coll: st.coll }).for_engine(engine);
                 t.view = match st.view.as_str() {
                     "Aggregate" => View::Aggregate,
                     "Indexes" => View::Indexes,
@@ -366,9 +431,22 @@ impl App {
                     "Import" => View::Import,
                     "Compare" => View::Compare,
                     "Watch" => View::Watch,
+                    "Structure" => View::Structure,
+                    "Relations" => View::Relations,
+                    "Triggers" => View::Triggers,
+                    "Info" => View::Info,
+                    "Sql" => View::Sql,
                     _ => View::Documents,
                 };
                 (t.filter_txt, t.sort_txt, t.proj_txt, t.shell.code) = (st.filter, st.sort, st.project, st.shell);
+                // A connection deleted since the last session cannot be attached any more.
+                t.shell.attached = st.attached.into_iter().filter(|a| app.conn(a.conn).is_some()).collect();
+                if let (Some(s), Ok(c)) = (t.sql.as_mut(), serde_json::from_str(&st.clauses)) {
+                    s.bar.c = c;
+                }
+                if let Some(s) = t.sql.as_mut() {
+                    s.query = st.query;
+                }
                 if !st.agg.is_empty() {
                     t.agg_txt = st.agg;
                 }
@@ -388,7 +466,12 @@ impl App {
             if let Some(id) = app.prefs.last_conn.filter(|&id| app.conn(id).is_some()) {
                 app.active = Some(id);
             }
-            if let Some(id) = app.active {
+            // Every connection open last time comes back open, in its rail order. The connections of reopened tabs
+            // count too, for settings saved before open_conns existed.
+            let mut seen = std::collections::HashSet::new();
+            let open: Vec<u64> = app.prefs.open_conns.iter().copied().chain(app.active).chain(app.tabs.iter().map(|t| t.sel.conn)).filter(|id| app.conn(*id).is_some() && seen.insert(*id)).collect();
+            app.rail_order = open.clone();
+            for id in open {
                 app.connect(id);
             }
             if app.prefs.last_version != current {
@@ -437,7 +520,8 @@ impl App {
 impl eframe::App for App {
     /// Test switch for the demo picture: QUARRY_TEST_POINTER="x,y" hovers that point,
     /// "x,y,down" also holds the primary button there, to check hover and press states, and
-    /// "x,y,right" right-clicks there once on frame 60, so the capture shows the context menu.
+    /// "x,y,right" right-clicks there once on frame 60, so the capture shows the context menu;
+    /// "x,y,right,x2,y2" then moves the pointer to x2,y2 to open a submenu.
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
         #[cfg(not(target_os = "macos"))]
         let _ = ctx;
@@ -452,9 +536,16 @@ impl eframe::App for App {
         let Ok(spec) = std::env::var("QUARRY_TEST_POINTER") else { return };
         let mut parts = spec.split(',');
         let (Some(Ok(x)), Some(Ok(y))) = (parts.next().map(str::parse::<f32>), parts.next().map(str::parse::<f32>)) else { return };
-        let pos = egui::pos2(x, y);
+        let mut pos = egui::pos2(x, y);
+        let mode = parts.next();
+        // "x,y,right,x2,y2": after the menu opened, the pointer moves on to x2,y2, to open a submenu.
+        if let (Some("right"), Some(Ok(x2)), Some(Ok(y2))) = (mode, parts.next().map(str::parse::<f32>), parts.next().map(str::parse::<f32>)) {
+            if self.shot.as_ref().is_some_and(|s| s.1 > 62) {
+                pos = egui::pos2(x2, y2);
+            }
+        }
         raw.events.push(egui::Event::PointerMoved(pos));
-        match parts.next() {
+        match mode {
             Some("down") => raw.events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() }),
             // One right-click partway through, so the capture shows the context menu settled.
             Some("right") if self.shot.as_ref().is_some_and(|s| s.1 == 60) => {
@@ -527,7 +618,9 @@ impl eframe::App for App {
         self.keys(&ctx);
         self.modals(&ctx);
         self.users_window(&ctx);
+        self.sql_users_window(&ctx);
         self.server_window(&ctx);
+        self.sql_server_window(&ctx);
         self.tool_window(&ctx);
         self.toast(&ctx);
         self.screenshot(&ctx);
@@ -542,7 +635,7 @@ fn human_bytes(n: usize) -> String {
     }
 }
 
-fn group(n: &str) -> String {
+pub(crate) fn group(n: &str) -> String {
     let mut out = String::new();
     for (i, ch) in n.chars().enumerate() {
         if i > 0 && (n.len() - i) % 3 == 0 {

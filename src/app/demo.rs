@@ -34,16 +34,18 @@ impl App {
         self.conns.push(Conn {
             meta: ConnMeta { id: 1, name: "Local sample".into(), tag: "Local".into(), ..Default::default() },
             client: None,
+            sql: None,
             status: Status::Ready,
             writable: false,
             dbs,
             masked_uri: "mongodb://localhost:27017".into(),
             tunnel: None,
-            server: ServerInfo { version: "7.0.12".into(), set_name: "rs0".into(), host: "localhost:27017".into() },
+            server: ServerInfo { version: "7.0.12".into(), set_name: "rs0".into(), host: "localhost:27017".into(), ..Default::default() },
         });
         self.conns.push(Conn {
             meta: ConnMeta { id: 2, name: "Staging".into(), tag: "Staging".into(), ..Default::default() },
             client: None,
+            sql: None,
             status: Status::Idle,
             writable: false,
             dbs: Vec::new(),
@@ -72,6 +74,31 @@ impl App {
         self.tabs.push(t);
         self.tabs.push(Tab::new(sel("analytics", "events")));
         self.cur = 1;
+        // QUARRY_TEST_RAIL=1 adds the MySQL demo connection and a connecting one beside the Mongo demo, for the rail shortcuts.
+        if std::env::var("QUARRY_TEST_RAIL").is_ok() && std::env::var("QUARRY_TEST_SQL").is_err() {
+            // The SQL demo replaces the tabs, which the Mongo demo keeps.
+            let tabs = std::mem::take(&mut self.tabs);
+            self.load_sql_demo();
+            self.tabs = tabs;
+            self.cur = 1;
+            self.active = Some(1);
+            self.conns.push(Conn {
+                meta: ConnMeta { id: 4, name: "reports".into(), tag: "Staging".into(), engine: db::sql::Engine::MySql, ..Default::default() },
+                client: None,
+                sql: None,
+                status: Status::Connecting,
+                writable: false,
+                dbs: Vec::new(),
+                masked_uri: "mysql://app:****@reports.internal:3306".into(),
+                tunnel: None,
+                server: Default::default(),
+            });
+        }
+        // QUARRY_TEST_SQL=content swaps the demo for a MySQL connection with its orders table open.
+        if std::env::var("QUARRY_TEST_SQL").is_ok() {
+            self.load_sql_demo();
+            return;
+        }
         if let Ok(mut log) = db::LOG.lock() {
             let q = r#"{ "status": { "$in": ["paid", "shipped", "pending"] } }"#;
             log.extend([
@@ -88,7 +115,35 @@ impl App {
         let key = self.col_key(false);
         self.prefs.cols.insert(key, ColPrefs { pinned: vec!["status".into()], highlight: vec!["customer.name".into()], ..Default::default() });
         self.status = ("Offline demo: no database is connected.".into(), false);
-        if std::env::var("QUARRY_TEST_CONNFORM").is_ok() {
+        if std::env::var("QUARRY_TEST_CONNFORM").as_deref() == Ok("mysql") {
+            // QUARRY_TEST_CONNFORM_TAB=advanced opens the Advanced tab with the design's example values.
+            let advanced = std::env::var("QUARRY_TEST_CONNFORM_TAB").as_deref() == Ok("advanced");
+            let mut form = ConnForm {
+                id: Some(2),
+                name: "shop-prod".into(),
+                tag: "Production".into(),
+                engine: db::sql::Engine::MySql,
+                addr: db::sql::Addr { scheme: "mysql".into(), host: "shop-prod.internal".into(), port: 3306, user: "app".into(), password: "hunter2hunter".into(), database: "shop".into(), ..Default::default() },
+                ssh_on: true,
+                ssh: crate::ssh::SshConf { host: "bastion-eu.example.com".into(), port: 22, user: "deploy".into(), auth: crate::ssh::SshAuth::Agent, ..Default::default() },
+                ..Default::default()
+            };
+            if advanced {
+                use db::sql::advanced::MODE_FLAGS;
+                let mode = ["STRICT_TRANS_TABLES", "NO_ZERO_DATE", "NO_ZERO_IN_DATE", "ERROR_FOR_DIVISION_BY_ZERO", "NO_ENGINE_SUBSTITUTION"];
+                debug_assert!(mode.iter().all(|m| MODE_FLAGS.contains(m)));
+                form.set_advanced(&db::sql::Advanced {
+                    zone: db::sql::Zone::Custom("+02:00".into()),
+                    sql_mode: Some(mode.map(String::from).to_vec()),
+                    init: "SET SESSION group_concat_max_len = 1048576;\nSET SESSION innodb_lock_wait_timeout = 10;\nSET SESSION sql_safe_updates = 1;".into(),
+                    connect_secs: Some(15),
+                    query_secs: Some(5),
+                    ..Default::default()
+                });
+                form.tab = ConnTab::Advanced;
+            }
+            self.modal = Some(Modal::Conn(Box::new(form)));
+        } else if std::env::var("QUARRY_TEST_CONNFORM").is_ok() {
             self.modal = Some(Modal::Conn(Box::new(ConnForm {
                 id: Some(2),
                 name: "Staging".into(),
@@ -202,6 +257,12 @@ impl App {
             t.shell.ms = Some(42);
             t.shell.help = std::env::var("QUARRY_TEST_HELP").is_ok();
         }
+        // Test switch: the shell with parameter hints and a suggestion list, see shell_sig_demo.
+        if let Some(code) = shell_ls::shell_sig_code().filter(|_| std::env::var("QUARRY_TEST_SQL").is_err()) {
+            let t = &mut self.tabs[1];
+            t.view = View::Shell;
+            t.shell.code = code;
+        }
         // Test switch: show the "Group by and count" window.
         if std::env::var("QUARRY_TEST_GROUP").is_ok() {
             let rows = vec![doc! { "_id": "paid", "count": 321 }, doc! { "_id": "shipped", "count": 321 }, doc! { "_id": "pending", "count": 321 }, doc! { "_id": "refunded", "count": 321 }];
@@ -264,6 +325,214 @@ impl App {
             self.drafts.insert(self.draft_key(&d), Draft { conn: 1, db: "shop".into(), coll: "orders".into(), original: d.clone(), current: changed.clone() });
             let items = changed.get("items").cloned().unwrap();
             self.json_edit = Some(JsonEdit { base: changed, path: vec!["items".into()], text: db::to_edit_value(&items), kind: "array", focus: false });
+        }
+    }
+
+    /// The MySQL demo: a production connection and an open orders table. Nothing here reads the Keychain or the network.
+    fn load_sql_demo(&mut self) {
+        use db::sql::{Col, value::Kind};
+        let which = std::env::var("QUARRY_TEST_SQL").unwrap_or_default();
+        let which = which.as_str();
+        let mut shop: Vec<String> = ["customers", "invoices", "order_items", "orders", "payments", "products", "shipments", "order_totals", "top_customers"].map(String::from).to_vec();
+        shop.sort();
+        self.conns.push(Conn {
+            meta: ConnMeta { id: 3, name: "shop-prod".into(), tag: "Production".into(), engine: db::sql::Engine::MySql, ..Default::default() },
+            client: None,
+            sql: None,
+            status: Status::Ready,
+            writable: false,
+            dbs: vec![("information_schema".into(), None), ("mysql".into(), None), ("shop".into(), Some(shop)), ("analytics".into(), None), ("sys".into(), None)],
+            masked_uri: "mysql://app:****@shop-prod.internal:3306/shop".into(),
+            tunnel: None,
+            server: ServerInfo { version: "8.4.3".into(), product: "MySQL".into(), host: "shop-prod.internal:3306".into(), tls: true, ..Default::default() },
+        });
+        self.active = Some(3);
+        self.open_dbs.insert((3, "shop".into()));
+        // The demo never lists tables, so every database counts as asked.
+        for d in ["information_schema", "mysql", "analytics", "sys"] {
+            self.sql_asked.insert((3, d.into()));
+        }
+        for v in ["order_totals", "top_customers"] {
+            self.views.insert((3, "shop".into(), v.into()));
+        }
+        let sel = |coll: &str| Sel { conn: 3, db: "shop".into(), coll: coll.into() };
+        let engine = db::sql::Engine::MySql;
+        let col = |name: &str, ty: &str, nullable: bool| Col::plain(name, ty, Kind::from_type_name(ty.split('(').next().unwrap_or(ty)), nullable);
+        let cols = vec![col("id", "INT UNSIGNED", false), col("customer_id", "INT", false), col("status", "ENUM('pending','paid','shipped','refunded','cancelled')", false), col("total", "DECIMAL(10,2)", false), col("currency", "CHAR(3)", false), col("note", "TEXT", true), col("created_at", "DATETIME", false)];
+        // id, customer_id, status, total, currency, note, created_at
+        let data: [(i64, i64, &str, &str, &str, Option<&str>, &str); 13] = [
+            (4410, 1284, "paid", "112.50", "EUR", None, "2026-11-09 12:41:07"),
+            (4409, 877, "shipped", "26.75", "EUR", Some("Leave at the door"), "2026-11-09 12:38:52"),
+            (4408, 1102, "shipped", "34.00", "USD", Some("Ring twice"), "2026-11-09 12:30:19"),
+            (4407, 61, "paid", "1204.10", "EUR", Some("Gift wrap, two boxes"), "2026-11-09 11:58:44"),
+            (4406, 1284, "refunded", "8.90", "GBP", None, "2026-11-09 11:51:02"),
+            (4405, 430, "paid", "54.20", "EUR", Some("Call before delivery"), "2026-11-09 11:47:30"),
+            (4404, 919, "shipped", "71.00", "USD", None, "2026-11-09 11:22:15"),
+            (4403, 12, "paid", "15.25", "EUR", None, "2026-11-09 11:09:58"),
+            (4402, 1190, "pending", "220.00", "EUR", Some("B2B, invoice monthly"), "2026-11-09 10:57:41"),
+            (4401, 877, "paid", "9.99", "USD", None, "2026-11-09 10:44:03"),
+            (4400, 305, "shipped", "63.40", "EUR", None, "2026-11-09 10:31:27"),
+            (4399, 2201, "paid", "37.80", "USD", None, "2026-11-09 10:12:50"),
+            (4398, 742, "cancelled", "45.00", "EUR", None, "2026-11-09 09:58:36"),
+        ];
+        let mut t = Tab::new(sel("orders")).for_engine(engine);
+        t.docs = data
+            .iter()
+            .filter_map(|&(id, cust, status, total, cur, note, at)| db::Row::from_doc(&doc! { "_id": { "id": id }, "id": id, "customer_id": cust, "status": status, "total": total, "currency": cur, "note": note.map_or(Bson::Null, Bson::from), "created_at": at }).ok())
+            .collect();
+        t.fields = cols.iter().map(|c| c.name.clone()).collect();
+        if let Some(s) = t.sql.as_mut() {
+            (s.cols, s.pk) = (Arc::new(cols), vec!["id".into()]);
+        }
+        (t.count, t.ms, t.size) = (4410, 18, self.page_size());
+        t.sort_txt = "created_at DESC".into();
+        t.filter_txt = "status = 'paid' AND total > 50".into();
+        // QUARRY_TEST_SQL=rules, sqlmode or grouped pick the query bar's state; anything else is the plain Content view.
+        match which {
+            "rules" => {
+                t.filter_txt = "`status` IN ('paid', 'shipped') AND `total` > 50".into();
+                t.sort_txt = "`created_at` DESC, `total` ASC".into();
+                if let Some(s) = t.sql.as_mut() {
+                    s.bar.c.limit = "100".into();
+                }
+            }
+            "sqlmode" => {
+                t.filter_txt = "status IN ('paid','shipped') AND total > 50".into();
+                t.sort_txt = "created_at DESC, total ASC".into();
+                if let Some(s) = t.sql.as_mut() {
+                    s.bar.c.sql = true;
+                    s.bar.c.group = "status, cu".into();
+                    s.bar.c.limit = "100".into();
+                }
+            }
+            "colpick" => {
+                if let Some(s) = t.sql.as_mut() {
+                    s.bar.preset = super::sql_bar::Preset { order: true, pick: Some("stat".into()), ..Default::default() };
+                }
+            }
+            "ac" => {
+                t.filter_txt = "status = 'paid' AND total > 50 AND cur".into();
+                if let Some(s) = t.sql.as_mut() {
+                    s.bar.preset.ac = true;
+                    s.bar.c.sql = true;
+                    s.bar.c.limit = "100".into();
+                }
+            }
+            "grouped" => {
+                t.filter_txt = "`status` IN ('paid', 'shipped') AND `total` > 50".into();
+                t.sort_txt = "`revenue` DESC".into();
+                let col = |name: &str, ty: &str| Col::plain(name, ty, Kind::from_type_name(ty), false);
+                let rows: [(&str, &str, i64, &str, &str); 5] = [("paid", "EUR", 61, "6912.40", "113.32"), ("shipped", "EUR", 24, "2301.75", "95.91"), ("paid", "USD", 22, "1980.00", "90.00"), ("shipped", "USD", 14, "1204.10", "86.01"), ("paid", "GBP", 12, "840.25", "70.02")];
+                t.docs = rows.iter().filter_map(|&(st, cur, n, rev, avg)| db::Row::from_doc(&doc! { "status": st, "currency": cur, "orders": n, "revenue": rev, "avg_total": avg }).ok()).collect();
+                t.fields = ["status", "currency", "orders", "revenue", "avg_total"].map(String::from).to_vec();
+                t.count = 9;
+                t.selected = Some((false, 1));
+                if let Some(s) = t.sql.as_mut() {
+                    s.bar.table_cols = std::mem::take(&mut s.cols);
+                    s.cols = Arc::new(vec![col("status", "ENUM"), col("currency", "CHAR"), col("orders", "BIGINT"), col("revenue", "DECIMAL"), col("avg_total", "DECIMAL")]);
+                    s.pk.clear();
+                    s.matched = Some(148);
+                    s.bar.c.group = "`status`, `currency`".into();
+                    s.bar.c.select = "`status`, `currency`, COUNT(*) AS `orders`, SUM(`total`) AS `revenue`, AVG(`total`) AS `avg_total`".into();
+                    s.bar.c.having = "`orders` > 10".into();
+                }
+            }
+            _ => {}
+        }
+        self.tabs = vec![t, Tab::new(sel("customers")).for_engine(engine)];
+        self.cur = 0;
+        self.status = ("Offline demo: no database is connected.".into(), false);
+        self.sql_structure_demo(which);
+        self.sql_alter_demo(which);
+        self.sql_rel_demo(which);
+        self.sql_trig_demo(which);
+        self.sql_users_demo(which);
+        // QUARRY_TEST_SQL=processes, variables, overview or status opens the SQL Server window on that tab.
+        if let v @ ("processes" | "variables" | "overview" | "status") = which {
+            self.sql_server = Some(SqlServerWin::demo(3, v));
+        }
+        if matches!(which, "query" | "log" | "format" | "library") {
+            self.sql_query_demo();
+        }
+        if which == "log" {
+            self.sql_log_demo();
+        }
+        if matches!(which, "shell" | "shellac" | "shellattach" | "attach") {
+            self.sql_shell_demo();
+        }
+        if matches!(which, "ac" | "acquery" | "shellac" | "relations") {
+            self.sql_ac_demo();
+        }
+        // QUARRY_TEST_SQL=edit stages two cells of row 3; =select checks four rows.
+        match which {
+            "edit" => self.sql_demo_stage(),
+            "select" => self.tabs[0].checked = [1, 2, 4, 5].into(),
+            _ => {}
+        }
+        self.sql_json_demo();
+        // QUARRY_TEST_SQL=import or dump open their dialogs over the orders table.
+        match which {
+            "import" => self.demo_sql_import(),
+            "dump" => self.demo_sql_dump(),
+            _ => {}
+        }
+        self.sql_create_demo(which);
+    }
+
+    /// QUARRY_TEST_SQL_JSON=<file> swaps the demo rows of the orders grid (content, rules, select, edit) or of
+    /// the first Query result set for `{"cols":[{"name","ty"}],"rows":[[text or null]]}`. Rows are converted
+    /// like the worker's, so memory matches real use. Offline only: nothing here reads the keychain.
+    fn sql_json_demo(&mut self) {
+        let Some(v) = std::env::var("QUARRY_TEST_SQL_JSON").ok().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()) else { return };
+        use db::sql::{value::Kind, Col};
+        let cols: Vec<Col> = v["cols"].as_array().into_iter().flatten().map(|c| { let ty = c["ty"].as_str().unwrap_or("TEXT"); Col::plain(c["name"].as_str().unwrap_or(""), ty, Kind::from_column_type(ty), true) }).collect();
+        let query = std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("query");
+        let rows: Vec<db::Row> = v["rows"].as_array().into_iter().flatten().filter_map(|r| {
+            let vals: Vec<Bson> = cols.iter().zip(r.as_array()?).map(|(c, x)| db::sql::value::to_bson(c.kind, x.as_str().map(str::as_bytes))).collect();
+            let mut d = Document::new();
+            if !query { d.insert("_id", doc! { cols[0].name.clone(): vals[0].clone() }); }
+            for (c, x) in cols.iter().zip(vals) { d.insert(c.name.clone(), x); }
+            db::Row::from_doc(&d).ok()
+        }).collect();
+        if query {
+            if let Some(set) = self.tabs.last_mut().and_then(|t| t.sql.as_mut()).and_then(|s| s.sets.first_mut()) { (set.cols, set.rows) = (cols, rows); }
+        } else if let Some(t) = self.tabs.first_mut() {
+            t.fields = cols.iter().map(|c| c.name.clone()).collect();
+            t.count = rows.len() as u64;
+            t.docs = rows;
+            if let Some(s) = t.sql.as_mut() { (s.cols, s.pk) = (Arc::new(cols.clone()), vec![cols[0].name.clone()]); }
+        }
+    }
+
+    /// QUARRY_TEST_SQL=ac or acquery: the schema and column values the suggestions come from, and for `acquery`
+    /// a Query tab with the caret after `c.`. The list is opened by the bar preset (see `open_list`).
+    fn sql_ac_demo(&mut self) {
+        use db::sql::schema::{Schema, SchemaCol, SchemaTable};
+        use db::sql::value::Kind;
+        let col = |name: &str, ty: &str, key: &str, fk: bool| SchemaCol { name: name.into(), ty: ty.into(), kind: Kind::from_type_name(ty.split('(').next().unwrap_or(ty).trim_end_matches(" unsigned")), key: key.into(), nullable: false, fk };
+        let table = |name: &str, rows: Option<u64>, cols: Vec<SchemaCol>| SchemaTable { name: name.into(), view: rows.is_none(), rows, cols };
+        let orders = table("orders", Some(4410), vec![col("id", "int unsigned", "PRI", false), col("customer_id", "int", "MUL", true), col("status", "enum('pending','paid','shipped','refunded','cancelled')", "", false), col("total", "decimal(10,2)", "", false), col("currency", "char(3)", "", false), col("note", "text", "", false), col("created_at", "datetime", "", false)]);
+        let customers = table("customers", Some(1284), vec![col("id", "int unsigned", "PRI", false), col("email", "varchar(255)", "UNI", false), col("name", "varchar(120)", "", false), col("country", "char(2)", "", false), col("created_at", "datetime", "", false)]);
+        let order_items = table("order_items", Some(9120), vec![col("order_id", "int unsigned", "PRI", true), col("sku", "varchar(40)", "PRI", false)]);
+        // A view has no row count, which is how the completion list tells it from a table.
+        let order_totals = table("order_totals", None, vec![col("order_id", "int unsigned", "", false), col("total", "decimal(10,2)", "", false)]);
+        let payments = table("payments", Some(4377), vec![col("id", "int unsigned", "PRI", false), col("order_id", "int unsigned", "MUL", true)]);
+        let shipments = table("shipments", Some(3120), vec![col("id", "int unsigned", "PRI", false), col("order_id", "int unsigned", "MUL", true)]);
+        self.sql_schema.insert((3, "shop".into()), Arc::new(Schema { tables: vec![customers, order_items, orders, payments, shipments, order_totals] }));
+        let mut vals = Fields::new();
+        vals.insert(crate::ui::sql_complete::value_key("orders", "currency"), FieldInfo { kind: "string", values: ["EUR", "USD", "GBP"].map(Bson::from).to_vec(), freq: vec![61, 27, 12] });
+        vals.insert(crate::ui::sql_complete::value_key("orders", "status"), FieldInfo { kind: "string", values: ["paid", "shipped", "pending", "refunded", "cancelled"].map(Bson::from).to_vec(), freq: vec![61, 22, 9, 5, 3] });
+        self.sql_values.insert((3, "shop".into()), vals);
+        if std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("acquery") {
+            let mut t = Tab::new(Sel { conn: 3, db: "shop".into(), coll: String::new() }).for_engine(db::sql::Engine::MySql);
+            t.view = View::Sql;
+            if let Some(s) = t.sql.as_mut() {
+                s.query = "SELECT o.id, c.name FROM orders o\nJOIN customers c ON c.".into();
+                s.caret = s.query.chars().count();
+                s.bar.preset.ac = true;
+            }
+            self.tabs.push(t);
+            self.cur = self.tabs.len() - 1;
         }
     }
 }

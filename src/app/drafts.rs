@@ -71,6 +71,9 @@ impl App {
     }
 
     pub(super) fn write_draft(&mut self, key: &str) {
+        if self.drafts.get(key).is_some_and(|d| self.conn(d.conn).is_some_and(|c| c.sql.is_some())) {
+            return self.write_sql_drafts(vec![key.to_string()]);
+        }
         let Some(dr) = self.drafts.remove(key) else { return };
         let Some(target) = self.target_for(&Sel { conn: dr.conn, db: dr.db.clone(), coll: dr.coll.clone() }) else {
             self.drafts.insert(key.to_string(), dr);

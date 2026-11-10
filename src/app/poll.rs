@@ -51,6 +51,99 @@ impl App {
                         }
                     }
                 }
+                Msg::SqlConnected { conn, res } => {
+                    let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) else { continue };
+                    match res {
+                        Ok((sql, dbs, tunnel)) => {
+                            let mut trusted = None;
+                            if let (Some(t), Some(sc)) = (&tunnel, c.meta.ssh.as_mut()) {
+                                if sc.known_host.is_none() && !t.fingerprint.is_empty() {
+                                    sc.known_host = Some(t.fingerprint.clone());
+                                    trusted = Some(t.fingerprint.clone());
+                                }
+                            }
+                            c.tunnel = tunnel;
+                            // A server can hold hundreds of schemas, so only those on screen load now.
+                            self.sql_asked.retain(|k| k.0 != conn);
+                            let wanted: Vec<String> = dbs.iter().filter(|d| self.open_dbs.contains(&(conn, (*d).clone())) || self.tabs.iter().any(|t| t.sel.conn == conn && t.sel.db == **d)).cloned().collect();
+                            for d in wanted {
+                                self.sql_asked.insert((conn, d.clone()));
+                                self.worker.sql_tables(conn, sql.clone(), d);
+                            }
+                            c.server = ServerInfo { version: sql.label().split_once(' ').map(|(_, v)| v.to_string()).unwrap_or_default(), product: if sql.dialect == db::sql::Dialect::MariaDb { "MariaDB" } else { "MySQL" }.into(), host: host_of(&c.masked_uri), tls: sql.tls, ..Default::default() };
+                            c.sql = Some(sql);
+                            c.status = Status::Ready;
+                            c.dbs = dbs.into_iter().map(|d| (d, None)).collect();
+                            let n = c.meta.name.clone();
+                            self.ok(format!("Connected to {n} (read-only)"));
+                            if let Some(fp) = trusted {
+                                self.save_conns();
+                                self.ok(format!("Connected to {n} through SSH (read-only). Host key remembered: {fp}"));
+                            }
+                            for i in 0..self.tabs.len() {
+                                if self.tabs[i].sel.conn == conn && self.tabs[i].docs.is_empty() {
+                                    self.reload_of(i);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            c.status = Status::Failed(e.clone());
+                            self.err(e);
+                        }
+                    }
+                }
+                Msg::SqlCols { req, cols, pk, estimated, matched } => {
+                    if let Some(s) = self.tab_by_req(req).and_then(|t| t.sql.as_mut()) {
+                        // The rules pick from table columns, which a grouped answer does not have.
+                        let cols = Arc::new(cols);
+                        if matched.is_none() {
+                            s.bar.table_cols = cols.clone();
+                        }
+                        (s.cols, s.pk, s.estimated, s.matched) = (cols, pk, estimated, matched);
+                    }
+                }
+                Msg::SqlOrphans { req, res } => {
+                    if let Some(Modal::FkEdit(f)) = self.modal.as_mut() {
+                        f.orphans_done(req, res);
+                    }
+                }
+                Msg::SqlFkRules { req, strict } => {
+                    if let Some(Modal::FkEdit(f)) = self.modal.as_mut() {
+                        f.rules_done(req, strict);
+                    }
+                }
+                Msg::SqlStructure { req, res } => {
+                    // The Add relation dialog asks for the table it points at on a request of its own.
+                    if let Some(Modal::FkEdit(f)) = self.modal.as_mut() {
+                        if f.parent_loaded(req, res.clone()) {
+                            continue;
+                        }
+                    }
+                    if let Some(s) = self.tabs.iter_mut().find(|t| t.idx_req == req).and_then(|t| t.sql.as_mut()) {
+                        s.st.finish(res);
+                    }
+                }
+                Msg::SqlAltered { conn, schema, table, res, undo, sql_mode, alter } => self.sql_altered(conn, schema, table, res, undo, sql_mode, alter),
+                Msg::SqlRan { req, sets, .. } => self.sql_ran(req, sets),
+                Msg::SqlCount { req, idx, res } => self.sql_counted(req, idx, res),
+                Msg::SqlExport { req, res } => self.export_done(ctx, req, res),
+                Msg::SqlJob { req, res } => self.sql_job_done(req, res),
+                Msg::SqlServer { req, ans } => self.sql_server_done(req, ans),
+                Msg::SqlLists { conn, schema, res } => self.sql_lists_done(conn, schema, res),
+                Msg::SqlTableInfo { req, res } => self.import_info(req, res),
+                Msg::SqlSchema { conn, schema, res } => {
+                    // A failed read leaves the database without a schema until the next Refresh; typing still works.
+                    if let Ok(s) = res {
+                        self.sql_schema.insert((conn, schema), Arc::new(s));
+                    }
+                }
+                Msg::SqlMeta { conn, schema, res } => self.sql_meta_done(conn, schema, res),
+                Msg::SqlUsers { conn, req, res } => self.sql_users_loaded(conn, req, res),
+                Msg::SqlUserGrants { conn, req, res } => self.sql_user_grants_loaded(conn, req, res),
+                Msg::SqlUserDone { conn, account, op, res, undo } => self.sql_user_done(conn, account, op, res, undo),
+                Msg::SqlDropInfo { conn, schema, table, res } => self.sql_drop_info_done(conn, schema, table, res),
+                Msg::SqlDdl { conn, schema, table, what, res, undo, dbs, sql_mode } => self.sql_ddl_done(conn, schema, table, what, res, undo, dbs, sql_mode),
+                Msg::SqlValues { conn, schema, table, column, prefix, res } => self.sql_values_done(conn, schema, table, column, prefix, res),
                 Msg::Collections { conn, db, res } => match res {
                     Ok((v, views)) => {
                         self.views.retain(|(c, d, _)| !(*c == conn && *d == db));
@@ -210,6 +303,7 @@ impl App {
                 },
                 Msg::Docs { req, res } => {
                     let Some(t) = self.tab_by_req(req) else { continue };
+                    t.rows_replaced();
                     t.loading = false;
                     match res {
                         Ok((docs, count, ms)) => {
@@ -219,7 +313,11 @@ impl App {
                             }
                             let Self { tabs, values, .. } = self;
                             let t = tabs.iter_mut().find(|t| t.req == req).unwrap();
-                            t.fields = auto_fields(&docs);
+                            // SQL columns keep the table's order and never include the hidden _id.
+                            t.fields = match &t.sql {
+                                Some(s) => s.cols.iter().map(|c| c.name.clone()).collect(),
+                                None => auto_fields(&docs),
+                            };
                             t.paths = doc_paths(&docs);
                             let mut f = field_info(&docs);
                             if let Some(v) = values.get(&t.coll_key()) {
@@ -248,7 +346,7 @@ impl App {
                                 t.selected = None;
                             }
                             t.related.clear();
-                            let ask = (!t.stats_asked).then(|| t.sel.clone());
+                            let ask = (!t.stats_asked && t.sql.is_none()).then(|| t.sel.clone());
                             t.stats_asked = true;
                             self.load_related(req);
                             if let Some(s) = ask
@@ -306,6 +404,7 @@ impl App {
                         continue;
                     };
                     t.agg_req = 0;
+                    t.rows_replaced();
                     match res {
                         Ok((d, ms)) => {
                             t.agg_fields = auto_fields(&d);
@@ -480,7 +579,10 @@ impl App {
                         Err(e) => self.err(e),
                     }
                 }
-                Msg::Tested { res } => self.conn_test = Some(res),
+                Msg::Tested { req, res, info } => {
+                    self.conn_test = Some((req, res));
+                    self.test_info = info.map(|i| (req, i));
+                }
                 Msg::Schema { req, res } => {
                     let Some(t) = self.tabs.iter_mut().find(|t| t.schema.req == req) else { continue };
                     t.schema.running = false;
@@ -494,10 +596,27 @@ impl App {
                         t.shell.logs.push((level, text));
                     }
                 }
+                Msg::ShellQuery { req, q } => {
+                    if let Some(t) = self.tabs.iter_mut().find(|t| t.shell.req == req) {
+                        // The panel keeps the latest queries only, a loop can run millions.
+                        let mut q = q;
+                        if q.text.len() > 2000 {
+                            q.text = q.text.chars().take(2000).collect();
+                        }
+                        t.shell.queries.push(q);
+                        // Trimmed in batches so a loop does not shift a thousand entries per query.
+                        if t.shell.queries.len() > 1500 {
+                            let over = t.shell.queries.len() - 1000;
+                            t.shell.queries.drain(..over);
+                        }
+                    }
+                }
                 Msg::JsLs { req, out } => self.js_answer(ctx, req, out),
                 Msg::JsLsStopped { failed } => self.js_stopped(failed),
                 Msg::ShellDone { req, res, ms } => {
                     let Some(t) = self.tabs.iter_mut().find(|t| t.shell.req == req) else { continue };
+                    t.rows_replaced();
+                    let sql = t.sql.is_some();
                     let sh = &mut t.shell;
                     sh.cancel = None;
                     sh.started = None;
@@ -510,7 +629,12 @@ impl App {
                         }
                     });
                     match parsed {
-                        Ok(v) => sh.set_value(v),
+                        Ok(v) => {
+                            sh.set_value(v);
+                            if sql {
+                                sh.hide_absent_id();
+                            }
+                        }
                         Err(e) => {
                             sh.value = None;
                             sh.docs.clear();
@@ -536,6 +660,9 @@ impl App {
     pub(super) fn reload_of(&mut self, i: usize) {
         if self.demo {
             return;
+        }
+        if self.tabs.get(i).is_some_and(|t| t.sql.is_some()) {
+            return self.reload_sql(i);
         }
         let Some(target) = self.tabs.get(i).and_then(|t| self.target_for(&t.sel)) else { return };
         // Each answer is matched to its tab by id; a slower older one never overwrites a newer one.

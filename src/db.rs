@@ -11,11 +11,14 @@ use std::time::{Duration, Instant};
 mod analysis;
 mod code;
 mod dates;
+pub(crate) use dates::civil_from_days;
 mod explain;
 mod import;
 mod js_ls;
 mod log;
 mod shell;
+pub mod sql;
+pub mod copy;
 mod tools;
 mod worker;
 pub use analysis::*;
@@ -176,6 +179,8 @@ pub enum UndoKind {
     Delete { old: Document },
     /// Undo puts these documents back.
     DeleteMany { old: Vec<Document> },
+    /// A SQL write; `db` and `coll` of the action are the schema and table.
+    Sql { cols: Vec<sql::Col>, undo: sql::write::SqlUndo },
 }
 
 pub struct UndoAction {
@@ -194,8 +199,56 @@ pub enum ExplainOf {
 pub enum Msg {
     /// Connected (or not); a tunnel, if any, must be kept alive as long as the client is used.
     Connected { conn: u64, res: Res<(Client, Vec<String>, Option<crate::ssh::Tunnel>)> },
+    /// A SQL connection opened (or not): the databases, and the SSH tunnel to keep alive.
+    SqlConnected { conn: u64, res: Res<(sql::Db, Vec<String>, Option<crate::ssh::Tunnel>)> },
+    /// The columns of a SQL table page and its primary key columns, sent just before the page's `Docs`.
+    /// `estimated` says the count in that `Docs` is the information_schema estimate, not exact.
+    SqlCols { req: u64, cols: Vec<sql::Col>, pk: Vec<String>, estimated: bool, matched: Option<u64> },
+    /// A Custom Query run: one result per statement.
+    SqlRan { req: u64, sets: Vec<sql::ResultSet> },
+    /// The row count of result tab `idx` of run `req`.
+    SqlCount { req: u64, idx: usize, res: Res<u64> },
+    /// A Query result streamed to a file or the clipboard text; see `sql::export`.
+    SqlExport { req: u64, res: Res<sql::export::Done> },
+    /// A CSV import or a script file run finished; see `sql::import` and `sql::dump`.
+    SqlJob { req: u64, res: Res<sql::import::JobDone> },
+    /// An answer of the SQL Server window, matched to its request by `req`.
+    SqlServer { req: u64, ans: sql::server::Answer },
+    /// The databases of a connection and the tables of `schema` (None when it is gone), read after a script ran.
+    SqlLists { conn: u64, schema: String, res: Res<(Vec<String>, Option<Vec<String>>)> },
+    /// The columns and key of a table, for the Import dialog that asked with `req`.
+    SqlTableInfo { req: u64, res: Res<sql::csv::TableInfo> },
+    /// A SQL table's columns, indexes, keys, triggers, status and CREATE statement. Answers the tab whose `idx_req` is `req`.
+    SqlStructure { req: u64, res: Res<sql::Structure> },
+    /// An ALTER TABLE, a trigger change or one of their undos ran (or failed). `undo` is what reverses it.
+    /// `sql_mode` is the server's mode when it no longer matched the one the statement was written for, so the
+    /// previews follow it. `alter` is false for a trigger change, which leaves the staged ALTER changes valid.
+    SqlAltered { conn: u64, schema: String, table: String, res: Res<String>, undo: Option<UndoAction>, sql_mode: Option<String>, alter: bool },
+    /// Charsets, collations and engines for the New database and New table dialogs; `schema` is empty for a new database.
+    SqlMeta { conn: u64, schema: String, res: Res<sql::create::Meta> },
+    /// What a drop confirmation says will be lost; `table` is empty for a database.
+    SqlDropInfo { conn: u64, schema: String, table: String, res: Res<sql::create::DropInfo> },
+    /// A create or drop finished. `dbs` is the new database list after a change to it, and `undo` the entry
+    /// for a create (or the one a refused undo hands back). `sql_mode` is the session's mode when it no longer
+    /// matched the one the app had, so the previews follow it.
+    SqlDdl { conn: u64, schema: String, table: String, what: sql::create::Ddl, res: Res<String>, undo: Option<UndoAction>, dbs: Option<Vec<String>>, sql_mode: Option<String> },
+    /// The accounts of a SQL server for the Users window that asked with `req`.
+    SqlUsers { conn: u64, req: u64, res: Res<sql::users::UserList> },
+    /// What SHOW GRANTS says for the account the Users window asked about with `req`.
+    SqlUserGrants { conn: u64, req: u64, res: Res<sql::users::Loaded> },
+    /// A privilege edit, create, drop or undo of an account finished. `undo` holds the entries to record, or the one a
+    /// refused undo hands back.
+    SqlUserDone { conn: u64, account: sql::users::Account, op: sql::users::Op, res: Res<String>, undo: Vec<UndoAction> },
+    /// How many rows of a table point at nothing for a foreign key being added. Answers the open dialog by `req`.
+    SqlOrphans { req: u64, res: Res<u64> },
+    /// Whether the server takes a foreign key only on a whole primary or unique key. Answers the open dialog by `req`.
+    SqlFkRules { req: u64, strict: bool },
+    /// Every table, view and column of one database, for SQL autocomplete.
+    SqlSchema { conn: u64, schema: String, res: Res<sql::schema::Schema> },
+    /// A column's most frequent values with their counts, for SQL autocomplete. None when the table is too big to look in.
+    SqlValues { conn: u64, schema: String, table: String, column: String, prefix: Option<String>, res: Res<Option<Vec<(String, u64)>>> },
     /// Result of the connection form's Test button.
-    Tested { res: Res<String> },
+    Tested { req: u64, res: Res<String>, info: Option<sql::TestInfo> },
     /// Collection names (sorted) and which of them are views.
     Collections { conn: u64, db: String, res: Res<(Vec<String>, Vec<String>)> },
     /// A read command answered (users, roles, stats, view definition); `tag` says which.
@@ -225,6 +278,9 @@ pub enum Msg {
     Schema { req: u64, res: Res<(Vec<FieldStat>, usize, u128)> },
     /// A line the Shell script printed (console.log/warn/error), or a progress note.
     ShellLog { req: u64, level: String, text: String },
+    /// A query the Shell script sent to the SQL relay, with what came back.
+    ShellQuery { req: u64, q: ShellQuery },
+    /// Every column of a SQL database, for the shell editor types.
     /// The Shell script finished: its return value as canonical Extended JSON `{"v": ...}`.
     ShellDone { req: u64, res: Res<String>, ms: u128 },
     /// One change event from the Watch view's change stream `req`.

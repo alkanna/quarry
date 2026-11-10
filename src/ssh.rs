@@ -181,8 +181,9 @@ async fn authenticate(h: &mut Session, conf: &SshConf, s: &SshSecrets) -> Result
     if ok { Ok(()) } else { Err(format!("The SSH server refused the login for {}.", conf.user)) }
 }
 
-/// Opens the SSH session and the local SOCKS5 gateway.
-pub async fn open(conf: &SshConf, secrets: &SshSecrets, timeout: std::time::Duration) -> Result<Tunnel, String> {
+/// Opens the SSH session and a local gateway. With `to` set, every connection is forwarded to that
+/// host and port as is, for clients that cannot speak SOCKS5. Otherwise the gateway is SOCKS5.
+pub async fn open(conf: &SshConf, secrets: &SshSecrets, timeout: std::time::Duration, to: Option<(String, u16)>) -> Result<Tunnel, String> {
     let seen = Arc::new(Mutex::new(None));
     let config = client::Config {
         keepalive_interval: Some(std::time::Duration::from_secs(30)),
@@ -212,8 +213,12 @@ pub async fn open(conf: &SshConf, secrets: &SshSecrets, timeout: std::time::Dura
     let task = tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
             let s = session.clone();
+            let to = to.clone();
             tokio::spawn(async move {
-                let _ = socks5(stream, s).await;
+                let _ = match to {
+                    Some((host, port)) => forward(stream, &s, host, port, &[], &[]).await,
+                    None => socks5(stream, s).await,
+                };
             });
         }
     });
@@ -259,14 +264,20 @@ async fn socks5(mut s: TcpStream, ssh: Arc<Session>) -> std::io::Result<()> {
         // Only CONNECT is supported.
         return s.write_all(&[5, 7, 0, 1, 0, 0, 0, 0, 0, 0]).await;
     }
+    forward(s, &ssh, host, port, &[5, 0, 0, 1, 0, 0, 0, 0, 0, 0], &[5, 5, 0, 1, 0, 0, 0, 0, 0, 0]).await
+}
+
+/// Opens a direct-tcpip channel to `host:port` and copies bytes both ways. `opened` and `failed` are
+/// written to the client first, which lets SOCKS5 answer its handshake while a plain forward sends nothing.
+async fn forward(mut s: TcpStream, ssh: &Session, host: String, port: u16, opened: &[u8], failed: &[u8]) -> std::io::Result<()> {
     match ssh.channel_open_direct_tcpip(host, port as u32, "127.0.0.1", 0).await {
         Ok(ch) => {
-            s.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
+            s.write_all(opened).await?;
             let mut stream = ch.into_stream();
             tokio::io::copy_bidirectional(&mut s, &mut stream).await?;
             Ok(())
         }
-        Err(_) => s.write_all(&[5, 5, 0, 1, 0, 0, 0, 0, 0, 0]).await,
+        Err(_) => s.write_all(failed).await,
     }
 }
 

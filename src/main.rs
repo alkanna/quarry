@@ -46,7 +46,8 @@ fn main() -> eframe::Result {
     let opts = eframe::NativeOptions {
         viewport: viewport
             .with_title("Quarry")
-            .with_inner_size([1400.0, 860.0])
+            // QUARRY_TEST_TALL=1 gives screenshots room for long dialogs such as the whole Advanced tab.
+            .with_inner_size([1400.0, if std::env::var("QUARRY_TEST_TALL").is_ok() { 1180.0 } else { 860.0 }])
             .with_min_inner_size([900.0, 560.0])
             .with_active(takes_focus())
             // macOS: draw our own header under a transparent title bar, keeping the window buttons.

@@ -3,7 +3,61 @@
 use super::complete::{JS_GLOBALS, JS_KEYWORDS, open_quote};
 use super::theme::*;
 use eframe::egui::{self, Color32, FontId, Key, RichText, TextFormat, text::LayoutJob};
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, OnceLock};
+
+/// Types the keyword list does not hold, colored like keywords in a CREATE statement.
+const SQL_TYPES: &[&str] = &["TINYINT", "SMALLINT", "MEDIUMINT", "INT", "INTEGER", "BIGINT", "DECIMAL", "NUMERIC", "FLOAT", "DOUBLE", "BIT", "CHAR", "VARCHAR", "BINARY", "VARBINARY", "TINYTEXT", "TEXT", "MEDIUMTEXT", "LONGTEXT", "TINYBLOB", "BLOB", "MEDIUMBLOB", "LONGBLOB", "ENUM", "SET", "DATE", "TIME", "DATETIME", "TIMESTAMP", "YEAR", "JSON", "BOOLEAN", "BOOL", "CURRENT_TIMESTAMP", "ENGINE", "CHARSET"];
+
+/// Every SQL keyword and type, lowercase, so a word is looked up without scanning the lists.
+fn sql_words() -> &'static HashSet<String> {
+    static WORDS: OnceLock<HashSet<String>> = OnceLock::new();
+    WORDS.get_or_init(|| crate::db::sql::KEYWORDS.iter().chain(SQL_TYPES).map(|w| w.to_ascii_lowercase()).collect())
+}
+
+fn is_sql_word(w: &str) -> bool {
+    let mut buf = [0u8; 32];
+    let Some(dst) = buf.get_mut(..w.len()) else { return false };
+    dst.copy_from_slice(w.as_bytes());
+    dst.make_ascii_lowercase();
+    std::str::from_utf8(dst).is_ok_and(|l| sql_words().contains(l))
+}
+
+/// SQL text colored by token: keywords, types, numbers, strings and comments, in mono at `size`.
+pub(crate) fn sql_job(text: &str, size: f32) -> LayoutJob {
+    use crate::db::sql::lex::{self, Tok};
+    let mut job = LayoutJob::default();
+    for (tok, r) in lex::tokens(text) {
+        let s = &text[r];
+        let color = match tok {
+            Tok::Word if is_sql_word(s) => C_KEYWORD(),
+            Tok::Word if s.starts_with(|c: char| c.is_ascii_digit()) => C_NUMBER(),
+            Tok::Str => C_STRING(),
+            Tok::Comment => FAINT(),
+            Tok::Punct => MUTED(),
+            _ => TEXT(),
+        };
+        job.append(s, 0.0, mono_fmt(size, color, 400.0));
+    }
+    job
+}
+
+/// A job cut into one job per line. Strings and comments can span lines, so a highlighter colors the
+/// whole text first and the cut comes after.
+pub(crate) fn split_lines(job: &LayoutJob) -> Vec<LayoutJob> {
+    let mut lines = vec![LayoutJob::default()];
+    for sec in &job.sections {
+        for (i, part) in job.text[sec.byte_range.start.0..sec.byte_range.end.0].split('\n').enumerate() {
+            if i > 0 {
+                lines.push(LayoutJob::default());
+            }
+            if !part.is_empty() {
+                lines.last_mut().unwrap().append(part, 0.0, sec.format.clone());
+            }
+        }
+    }
+    lines
+}
 
 /// Colours JSON and shell-style query text by token, for every code editor in the app.
 pub(crate) fn json_job(text: &str) -> LayoutJob {
@@ -203,6 +257,173 @@ pub(crate) fn closer_dedent(text: &str, ci: usize) -> Option<(String, usize)> {
     Some((out, ci - INDENT.len()))
 }
 
+/// The drag bar between an editor and the results under it: a 6 px hit area with a hairline that
+/// darkens on hover and takes the accent while dragged. Returns the response for the caller to size with.
+pub(crate) fn splitter(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 6.0), egui::Sense::click_and_drag());
+    if r.hovered() || r.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+    }
+    let color = if r.dragged() { PRIMARY() } else if r.hovered() { BORDER() } else { LINE() };
+    ui.painter().hline(rect.x_range(), rect.center().y, egui::Stroke::new(1.0, color));
+    r
+}
+
+/// Sizes an editor with its `splitter`. `pref` is the saved height, 0 for sized to the text, and
+/// `rendered` the height drawn this frame, which a drag starts from. Returns true when the drag
+/// ended or was reset, which is when to save.
+pub(crate) fn resize_editor(r: &egui::Response, pref: &mut f32, rendered: f32, lo: f32, hi: f32) -> bool {
+    // The drawn height snaps to whole lines, so adding each frame's delta to it fights the pointer
+    // and the bar jumps back. The height is taken from where the drag started instead.
+    let id = r.id.with("drag-start");
+    if r.drag_started() {
+        let y = r.interact_pointer_pos().map_or(0.0, |p| p.y);
+        r.ctx.data_mut(|d| d.insert_temp(id, (rendered, y)));
+    }
+    if r.dragged() {
+        if let (Some((h0, y0)), Some(p)) = (r.ctx.data(|d| d.get_temp::<(f32, f32)>(id)), r.interact_pointer_pos()) {
+            *pref = (h0 + p.y - y0).clamp(lo, hi.max(lo));
+        }
+    }
+    if r.double_clicked() {
+        *pref = 0.0;
+    }
+    r.drag_stopped() || r.double_clicked()
+}
+
+/// A SQL template in a script: the byte range of its text between the quotes, and the byte ranges of
+/// its `${...}` parts, delimiters included. An unclosed template runs to the end, as while typing.
+#[derive(Debug, PartialEq)]
+pub(crate) struct SqlTpl {
+    pub(crate) range: std::ops::Range<usize>,
+    pub(crate) holes: Vec<std::ops::Range<usize>>,
+}
+
+enum Fr {
+    /// Code, with the depth of `{` opened inside it. A `${` part starts one.
+    Code(usize),
+    Tpl { tagged: bool, start: usize, holes: Vec<std::ops::Range<usize>>, hole: usize },
+}
+
+/// Whether the quote at the end of `before` opens SQL: sql`...` or the string of sql.unsafe(...).
+fn sql_tag(before: &str, quote: u8) -> bool {
+    let b = before.trim_end();
+    // A longer name or a member access like db.sql is not the tag.
+    let at = |w: &str| b.strip_suffix(w).is_some_and(|h| !h.ends_with(|c: char| c.is_alphanumeric() || matches!(c, '_' | '$' | '.')));
+    at("sql.unsafe(") || (quote == b'`' && at("sql"))
+}
+
+/// Every SQL template of a script. The scan follows JS well enough that comments, strings, escaped
+/// quotes and templates nested in `${ }` parts do not fool it.
+pub(crate) fn sql_templates(code: &str) -> Vec<SqlTpl> {
+    let b = code.as_bytes();
+    let (mut out, mut st, mut i) = (Vec::new(), vec![Fr::Code(0)], 0);
+    while i < b.len() {
+        if matches!(st.last(), Some(Fr::Tpl { .. })) {
+            match b[i] {
+                b'\\' => i += 2,
+                b'`' => {
+                    if let Some(Fr::Tpl { tagged: true, start, holes, .. }) = st.pop() {
+                        out.push(SqlTpl { range: start..i, holes });
+                    }
+                    i += 1;
+                }
+                b'$' if b.get(i + 1) == Some(&b'{') => {
+                    if let Some(Fr::Tpl { hole, .. }) = st.last_mut() {
+                        *hole = i;
+                    }
+                    st.push(Fr::Code(0));
+                    i += 2;
+                }
+                _ => i += 1,
+            }
+            continue;
+        }
+        match b[i] {
+            b'/' if b.get(i + 1) == Some(&b'/') => i += code[i..].find('\n').unwrap_or(b.len() - i),
+            b'/' if b.get(i + 1) == Some(&b'*') => i += code[i + 2..].find("*/").map_or(b.len() - i, |e| e + 4),
+            q @ (b'"' | b'\'') => {
+                let (tagged, start) = (sql_tag(&code[..i], q), i + 1);
+                i = start;
+                while i < b.len() && b[i] != q && b[i] != b'\n' {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+                let end = i.min(b.len());
+                if tagged {
+                    out.push(SqlTpl { range: start..end, holes: Vec::new() });
+                }
+                i = end + (end < b.len() && b[end] == q) as usize;
+            }
+            b'`' => {
+                st.push(Fr::Tpl { tagged: sql_tag(&code[..i], b'`'), start: i + 1, holes: Vec::new(), hole: 0 });
+                i += 1;
+            }
+            b'{' => {
+                if let Some(Fr::Code(d)) = st.last_mut() {
+                    *d += 1;
+                }
+                i += 1;
+            }
+            b'}' => {
+                let nested = matches!(st.last(), Some(Fr::Code(d)) if *d > 0);
+                if nested {
+                    if let Some(Fr::Code(d)) = st.last_mut() {
+                        *d -= 1;
+                    }
+                } else if st.len() > 1 {
+                    // The close of a `${` part.
+                    st.pop();
+                    if let Some(Fr::Tpl { holes, hole, .. }) = st.last_mut() {
+                        holes.push(*hole..i + 1);
+                    }
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    // Open templates while typing. A part still open reaches one past the end, so a caret at the end is inside it.
+    let open: Vec<bool> = (0..st.len()).map(|k| matches!(st.get(k + 1), Some(Fr::Code(_)))).collect();
+    for (k, f) in st.into_iter().enumerate() {
+        if let Fr::Tpl { tagged: true, start, mut holes, hole } = f {
+            if open[k] {
+                holes.push(hole..b.len() + 1);
+            }
+            out.push(SqlTpl { range: start.min(b.len())..b.len(), holes });
+        }
+    }
+    out.sort_by_key(|t| t.range.start);
+    out
+}
+
+/// The innermost SQL template the caret (a byte offset) is in, none while it is inside a `${ }` part.
+pub(crate) fn sql_at(code: &str, caret: usize) -> Option<SqlTpl> {
+    sql_templates(code).into_iter().filter(|t| t.range.start <= caret && caret <= t.range.end && !t.holes.iter().any(|h| h.start < caret && caret < h.end)).min_by_key(|t| t.range.len())
+}
+
+/// A template's text as one SQL statement text: up to the caret, and whole. Each `${ }` part becomes
+/// a `?`, which the SQL completer reads as a value and which cannot run into a neighbouring word.
+pub(crate) fn sql_text(code: &str, t: &SqlTpl, caret: usize) -> (String, String) {
+    let (mut before, mut full, mut at) = (String::new(), String::new(), t.range.start);
+    let text = |from: usize, to: usize, before: &mut String, full: &mut String| {
+        full.push_str(&code[from..to]);
+        if from < caret {
+            before.push_str(&code[from..to.min(caret)]);
+        }
+    };
+    for h in &t.holes {
+        let (hs, he) = (h.start.max(at), h.end.min(t.range.end));
+        text(at, hs, &mut before, &mut full);
+        full.push('?');
+        if he <= caret {
+            before.push('?');
+        }
+        at = he;
+    }
+    text(at, t.range.end, &mut before, &mut full);
+    (before, full)
+}
+
 /// JavaScript colouring for the Shell editor.
 pub(crate) fn js_job(text: &str) -> LayoutJob {
     let fmt = |c: Color32| TextFormat { font_id: FontId::monospace(TXT_BODY), color: c, ..Default::default() };
@@ -269,16 +490,59 @@ pub(crate) fn js_job(text: &str) -> LayoutJob {
     job
 }
 
-pub(crate) fn js_layout(ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32) -> Arc<egui::Galley> {
-    let mut job = js_job(buf.as_str());
-    job.wrap.max_width = wrap;
-    ui.fonts_mut(|f| f.layout_job(job))
+pub(crate) fn code_layout(ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32) -> Arc<egui::Galley> {
+    memo_galley(ui, 0, buf.as_str(), wrap, || json_job(buf.as_str()))
 }
 
-pub(crate) fn code_layout(ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32) -> Arc<egui::Galley> {
-    let mut job = json_job(buf.as_str());
+/// Lays out a highlighted job, keeping the last galleys by text, theme, wrap width and scale. A layouter runs
+/// every frame and the highlighter lexes the whole text, so a still editor should not pay for that again.
+/// `kind` tells apart highlighters that would color the same text differently.
+pub(crate) fn memo_galley(ui: &egui::Ui, kind: u8, text: &str, wrap: f32, build: impl FnOnce() -> LayoutJob) -> Arc<egui::Galley> {
+    use std::hash::{Hash, Hasher};
+    thread_local! {
+        static MEMO: std::cell::RefCell<std::collections::HashMap<u64, Arc<egui::Galley>>> = Default::default();
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (kind, is_light(), wrap.to_bits(), ui.ctx().pixels_per_point().to_bits()).hash(&mut h);
+    text.hash(&mut h);
+    let key = h.finish();
+    if let Some(g) = MEMO.with(|m| m.borrow().get(&key).cloned()) {
+        return g;
+    }
+    let mut job = build();
     job.wrap.max_width = wrap;
-    ui.fonts_mut(|f| f.layout_job(job))
+    let g = ui.fonts_mut(|f| f.layout_job(job));
+    MEMO.with(|m| {
+        let mut m = m.borrow_mut();
+        // Small on purpose: only the editors on screen are re-asked each frame.
+        if m.len() >= 24 {
+            m.clear();
+        }
+        m.insert(key, g.clone());
+    });
+    g
+}
+
+/// Width the line numbers of a code editor take on the left.
+pub(crate) const GUTTER_W: f32 = 52.0;
+
+/// The text area frame of a code editor: room on the left for the line numbers.
+pub(crate) fn gutter_frame() -> egui::Frame {
+    egui::Frame::new().inner_margin(egui::Margin { left: GUTTER_W as i8, right: 12, top: 10, bottom: 10 })
+}
+
+/// Paints the line numbers of an editor shown with `gutter_frame`, one per source line, the caret line brighter.
+pub(crate) fn paint_gutter(ui: &egui::Ui, out: &egui::text_edit::TextEditOutput, cur_line: Option<usize>) {
+    let (gp, rect) = (out.galley_pos, out.response.rect);
+    let (mut n, mut fresh) = (0, true);
+    for row in &out.galley.rows {
+        if fresh {
+            n += 1;
+            let y = gp.y + row.pos.y + row.height() / 2.0;
+            ui.painter().text(egui::pos2(rect.left() + GUTTER_W - 14.0, y), egui::Align2::RIGHT_CENTER, n.to_string(), FontId::monospace(TXT_CAPTION), if Some(n) == cur_line { MUTED() } else { FAINT() });
+        }
+        fresh = row.ends_with_newline;
+    }
 }
 
 /// Cmd+F for a big text area, kept in egui memory under the area's id.
@@ -458,6 +722,58 @@ mod tests {
         assert_eq!(colour_of("const"), C_KEYWORD());
         assert_eq!(colour_of("find"), C_DATE());
         assert_eq!(colour_of("// hi"), FAINT());
+    }
+
+    fn tpl_at(code: &str, marker: &str) -> Option<String> {
+        let caret = code.find(marker).unwrap();
+        let t = sql_at(code, caret)?;
+        Some(sql_text(code, &t, caret).1)
+    }
+
+    #[test]
+    fn finds_sql_templates() {
+        let code = "const r = await sql`SELECT * FROM Tick WHERE id = ${id} AND x = ${ f(`a`) }`;";
+        let t = sql_templates(code);
+        assert_eq!(t.len(), 1);
+        assert_eq!(&code[t[0].range.clone()], "SELECT * FROM Tick WHERE id = ${id} AND x = ${ f(`a`) }");
+        assert_eq!(t[0].holes.len(), 2);
+        assert_eq!(tpl_at(code, "FROM").unwrap(), "SELECT * FROM Tick WHERE id = ? AND x = ?");
+        // Inside a part the caret is in JS.
+        assert!(tpl_at(code, "id}").is_none());
+        // Plain templates and other tags are not SQL.
+        assert!(sql_templates("const a = `SELECT 1`; html`<b>`; mysql`x`; db.sql`x`").is_empty());
+    }
+
+    #[test]
+    fn sql_template_scan_ignores_js_noise() {
+        // A backtick in a comment or a string, and an escaped one in the template.
+        let code = "// sql`no`\nconst s = \"sql`no`\"; /* sql`no` */ await sql`SELECT '\\`' FROM t`; x";
+        let t = sql_templates(code);
+        assert_eq!(t.len(), 1);
+        assert_eq!(&code[t[0].range.clone()], "SELECT '\\`' FROM t");
+        // A nested template with its own part, and braces of an object in a part.
+        let code = "sql`A ${ sql`B ${y}` } C ${ {a: 1}.a } D`";
+        let t = sql_templates(code);
+        assert_eq!(t.len(), 2);
+        assert_eq!(&code[t[0].range.clone()], "A ${ sql`B ${y}` } C ${ {a: 1}.a } D");
+        assert_eq!(&code[t[1].range.clone()], "B ${y}");
+        assert_eq!(tpl_at(code, "B ").unwrap(), "B ?");
+        assert_eq!(tpl_at(code, " C").unwrap(), "A ? C ? D");
+        // The string argument of sql.unsafe.
+        assert_eq!(tpl_at("await sql.unsafe(\"SELECT 1 FROM t\")", "1 FROM").unwrap(), "SELECT 1 FROM t");
+    }
+
+    #[test]
+    fn unclosed_template_while_typing() {
+        let code = "await sql`SELECT * FROM T";
+        let t = sql_at(code, code.len()).unwrap();
+        assert_eq!(sql_text(code, &t, code.len()).0, "SELECT * FROM T");
+        // Typing inside a part that is still open is JS.
+        let code = "await sql`SELECT ${ a.";
+        assert!(sql_at(code, code.len()).is_none());
+        // Once closed, the template ends at its backtick and the code after it is JS.
+        let code = "await sql`SELECT 1`; foo";
+        assert!(sql_at(code, code.len()).is_none());
     }
 
     #[test]

@@ -9,10 +9,32 @@ impl App {
     }
 
     pub(super) fn apply_undo(&mut self, i: usize) {
+        self.apply_undo_as(i, false);
+    }
+
+    /// `confirmed` once a structure undo that loses data passed its typed confirmation.
+    pub(super) fn apply_undo_as(&mut self, i: usize, confirmed: bool) {
         let a = &self.undo[i];
         let Some(c) = self.conn(a.conn) else { return };
-        if !c.writable {
+        let writable = c.writable;
+        if !writable {
             self.err("Undo is a write: unlock writes on that connection first.");
+            return;
+        }
+        if !confirmed && self.alter_undo_gate(i) {
+            return;
+        }
+        let Some(c) = self.conn(self.undo[i].conn) else { return };
+        let a = &self.undo[i];
+        // SQL actions carry their own columns; the pool is read-only, so the worker switches a connection of its own.
+        if let (Some(sql), UndoKind::Sql { .. }) = (c.sql.clone(), &a.kind) {
+            let a = self.undo.remove(i);
+            let pk = match &a.kind {
+                UndoKind::Sql { undo, .. } => undo.pk_names(),
+                _ => Vec::new(),
+            };
+            // The worker hands the action back if the undo fails, so it is not lost.
+            self.worker.sql_undo(sql, a, pk, !writable);
             return;
         }
         let Some(client) = c.client.clone() else {
@@ -27,6 +49,7 @@ impl App {
             UndoKind::Delete { old } => self.worker.insert(a.conn, t, old, None),
             UndoKind::DeleteMany { old } => self.worker.import(a.conn, t, old, None),
             UndoKind::Update { old, new } => self.worker.replace(a.conn, t, new, old, false),
+            UndoKind::Sql { .. } => {}
         }
     }
 }

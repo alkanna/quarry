@@ -7,11 +7,17 @@ pub(super) enum DocsAct {
     CopyJs,
     CopyJson,
     CopyLines,
+    /// A table or text format shared by Mongo documents and SQL rows.
+    CopyAs(db::copy::Fmt),
     Duplicate,
     Export,
     Filter,
     Update,
     Delete,
+    /// SQL rows: stage one value on every row.
+    SetValue,
+    /// SQL rows: open an UPDATE for these rows in the Query view.
+    EditQuery,
 }
 
 /// Positions in `new` of the documents at `rows` in `old`, matched by _id.
@@ -24,40 +30,98 @@ pub(super) fn follow_ids(old: &[db::Row], new: &[db::Row], rows: impl Iterator<I
 }
 
 /// Actions on one document or the checked ones, shared by the selection bar and the row menus.
-pub(super) fn docs_menu(ui: &mut egui::Ui, n: usize, heading: bool) -> Option<DocsAct> {
+pub(super) fn docs_menu(ui: &mut egui::Ui, n: usize, heading: bool, sql: bool, grouped: bool) -> Option<DocsAct> {
     if heading {
-        ui.label(RichText::new(if n == 1 { "Document".to_string() } else { format!("{n} selected documents") }).size(TXT_CAPTION).color(FAINT()));
+        let (one, many) = if sql { ("Row".to_string(), format!("{n} selected rows")) } else { ("Document".to_string(), format!("{n} selected documents")) };
+        ui.label(RichText::new(if n == 1 { one } else { many }).size(TXT_CAPTION).color(FAINT()));
     }
-    let items: [(&str, DocsAct); 8] = [
-        ("Copy as JS", DocsAct::CopyJs),
-        ("Copy as JSON", DocsAct::CopyJson),
-        ("Copy as JSON lines", DocsAct::CopyLines),
-        ("Duplicate", DocsAct::Duplicate),
-        ("Export…", DocsAct::Export),
-        ("Filter to these", DocsAct::Filter),
-        ("Update in shell", DocsAct::Update),
-        ("Delete…", DocsAct::Delete),
-    ];
     let mut act = None;
+    if let Some(a) = ui.menu_button("Copy as", |ui| copy_as_menu(ui, sql)).inner.flatten() {
+        act = Some(a);
+        ui.close();
+    }
+    let items: Vec<(&str, DocsAct)> = if sql {
+        vec![("Duplicate", DocsAct::Duplicate), ("Export…", DocsAct::Export), ("Filter to these", DocsAct::Filter), ("Set value…", DocsAct::SetValue), ("Edit in Query", DocsAct::EditQuery), ("Delete…", DocsAct::Delete)]
+    } else {
+        vec![("Duplicate", DocsAct::Duplicate), ("Export…", DocsAct::Export), ("Filter to these", DocsAct::Filter), ("Update in shell", DocsAct::Update), ("Delete…", DocsAct::Delete)]
+    };
     for (label, a) in items {
-        let text = if matches!(a, DocsAct::Delete) { RichText::new(label).color(ALERT()) } else { RichText::new(label) };
-        if ui.button(text).clicked() {
+        let is_delete = matches!(a, DocsAct::Delete);
+        if is_delete && sql {
+            ui.separator();
+        }
+        let text = if is_delete { RichText::new(label).color(ALERT()) } else { RichText::new(label) };
+        // Rows of a grouped answer are summaries, so these would only fail with a toast.
+        let off = grouped && matches!(a, DocsAct::Duplicate | DocsAct::Delete | DocsAct::SetValue | DocsAct::EditQuery);
+        if ui.add_enabled(!off, egui::Button::new(text)).on_disabled_hover_text("Grouped rows are summaries, not table rows. Ungroup to use this.").clicked() {
             act = Some(a);
         }
     }
     act
 }
 
+/// The floating bar over the bottom of the results while rows are checked: how many, the actions and Cancel.
+/// Returns whether Cancel was pressed and the action picked.
+pub(super) fn selection_area(ui: &mut egui::Ui, n: usize, hidden: bool, results_view: bool, sql: bool, grouped: bool) -> (bool, Option<DocsAct>) {
+    if n == 0 || hidden {
+        return (false, None);
+    }
+    let mut cancel = false;
+    // Floats over the bottom of the results so checking rows never shifts the table.
+    let area = ui.available_rect_before_wrap();
+    let act = egui::Area::new(egui::Id::unique("selection-toolbar"))
+        .order(egui::Order::Foreground)
+        .pivot(egui::Align2::CENTER_BOTTOM)
+        .fixed_pos(egui::pos2(area.center().x, area.bottom() - 16.0))
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).inner_margin(egui::Margin::symmetric(12, 8)).corner_radius(R_LG).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(semibold(RichText::new(format!("{n} selected")).color(BRIGHT())));
+                    ui.add_space(8.0);
+                    let act = if results_view { results_menu(ui, n, false, sql) } else { docs_menu(ui, n, false, sql, grouped) };
+                    cancel = ui.button("Cancel").on_hover_text("Clear the selection").clicked();
+                    act
+                })
+                .inner
+            })
+            .inner
+        })
+        .inner;
+    (cancel, act)
+}
+
+/// Actions on rows of a result that is only read: Query and Shell results. Copy as and Export.
+pub(super) fn results_menu(ui: &mut egui::Ui, n: usize, heading: bool, sql: bool) -> Option<DocsAct> {
+    if heading {
+        let (one, many) = if sql { ("Row".to_string(), format!("{n} selected rows")) } else { ("Document".to_string(), format!("{n} selected documents")) };
+        ui.label(RichText::new(if n == 1 { one } else { many }).size(TXT_CAPTION).color(FAINT()));
+    }
+    let mut act = ui.menu_button("Copy as", |ui| copy_as_menu(ui, sql)).inner.flatten();
+    if act.is_some() {
+        ui.close();
+    }
+    if ui.button("Export…").clicked() {
+        act = Some(DocsAct::Export);
+    }
+    act
+}
+
 /// The row menu: acts on every checked document when the row is one of them, else on that row.
-pub(super) fn row_menu(ui: &mut egui::Ui, i: usize, checked: &BTreeSet<usize>) -> Option<(usize, DocsAct)> {
+pub(super) fn row_menu(ui: &mut egui::Ui, i: usize, checked: &BTreeSet<usize>, sql: bool, grouped: bool) -> Option<(usize, DocsAct)> {
     menu_look(ui);
-    docs_menu(ui, if checked.contains(&i) { checked.len() } else { 1 }, true).map(|a| (i, a))
+    docs_menu(ui, if checked.contains(&i) { checked.len() } else { 1 }, true, sql, grouped).map(|a| (i, a))
+}
+
+/// SQL clause names (ORDER BY, LIMIT) read as keywords; Mongo's lowercase option names and plain
+/// words such as Columns stay faint.
+pub(super) fn chip_name_color(name: &str) -> Color32 {
+    if name.chars().any(|c| c.is_ascii_lowercase()) { FAINT() } else { C_KEYWORD() }
 }
 
 /// One option of the find bar: a pill holding its editor while it is set or being edited, else a
 /// "+ name" chip that opens it. `edit` returns whether Enter was pressed. Returns whether the
 /// query should run: on Enter, or when the cross removed the option.
-fn opt_chip(ui: &mut egui::Ui, name: &str, id: egui::Id, text: &mut String, edit: impl FnOnce(&mut egui::Ui, &mut String) -> bool) -> bool {
+pub(super) fn opt_chip(ui: &mut egui::Ui, name: &str, id: egui::Id, text: &mut String, edit: impl FnOnce(&mut egui::Ui, &mut String) -> bool) -> bool {
     let focused = ui.memory(|m| m.has_focus(id));
     if text.is_empty() && !focused {
         // The editor appears next frame; egui keeps a focus requested for a widget not yet drawn.
@@ -72,7 +136,12 @@ fn opt_chip(ui: &mut egui::Ui, name: &str, id: egui::Id, text: &mut String, edit
     egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, edge)).corner_radius(BUTTON_H / 2.0).inner_margin(egui::Margin { left: 10, right: 3, top: 0, bottom: 0 }).show(ui, |ui| {
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            ui.add_sized([0.0, BUTTON_H], egui::Label::new(RichText::new(name).font(FontId::monospace(TXT_CAPTION)).color(FAINT())));
+            // Painted and centered on its ink like the other chips, because a label sits about 1 px high.
+            let color = chip_name_color(name);
+            let g = ui.painter().layout_no_wrap(name.to_string(), FontId::monospace(TXT_CAPTION), color);
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(g.size().x, BUTTON_H), Sense::hover());
+            let dy = optical_dy(&g);
+            ui.painter().galley(egui::pos2(rect.left(), rect.center().y - g.size().y / 2.0 + dy), g, color);
             // Centered on the label: the editor is shorter than the chip.
             enter = ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), BUTTON_H), egui::Layout::left_to_right(egui::Align::Center), |ui| edit(ui, text)).inner;
             ui.allocate_ui_with_layout(egui::vec2(CLOSE_W, BUTTON_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
@@ -90,7 +159,13 @@ fn opt_chip(ui: &mut egui::Ui, name: &str, id: egui::Id, text: &mut String, edit
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum RowMenu {
     Docs,
+    /// SQL rows: the document actions with SQL's own.
+    Sql,
+    /// SQL rows of a GROUP BY answer, where the actions that write are off.
+    SqlGrouped,
     Indexes,
+    /// Rows of a result that is only read, such as the Shell's: Copy as and Export.
+    Results(bool),
     None,
 }
 
@@ -103,7 +178,13 @@ pub(super) enum RowAct {
 /// The menu of row `i`: document actions for Documents rows, index actions for Indexes rows.
 pub(super) fn any_row_menu(ui: &mut egui::Ui, kind: RowMenu, i: usize, rows: Rows, checked: &BTreeSet<usize>) -> Option<(usize, RowAct)> {
     match kind {
-        RowMenu::Docs => row_menu(ui, i, checked).map(|(i, a)| (i, RowAct::Doc(a))),
+        RowMenu::Docs => row_menu(ui, i, checked, false, false).map(|(i, a)| (i, RowAct::Doc(a))),
+        RowMenu::Sql => row_menu(ui, i, checked, true, false).map(|(i, a)| (i, RowAct::Doc(a))),
+        RowMenu::SqlGrouped => row_menu(ui, i, checked, true, true).map(|(i, a)| (i, RowAct::Doc(a))),
+        RowMenu::Results(sql) => {
+            menu_look(ui);
+            results_menu(ui, if checked.contains(&i) { checked.len() } else { 1 }, true, sql).map(|a| (i, RowAct::Doc(a)))
+        }
         RowMenu::Indexes => index_menu(ui, rows.doc(i)?).map(|a| (i, RowAct::Idx(a))),
         RowMenu::None => None,
     }
@@ -112,6 +193,10 @@ pub(super) fn any_row_menu(ui: &mut egui::Ui, kind: RowMenu, i: usize, rows: Row
 impl App {
     pub(super) fn collection(&mut self, ui: &mut egui::Ui) {
         let Some(t) = self.t() else { return };
+        // A Query tab that belongs to no table has no header or view tabs of a table.
+        if t.sql.is_some() && t.sel.coll.is_empty() {
+            return self.sql_query_view(ui);
+        }
         let (coll, view, db) = (t.sel.coll.clone(), t.view, t.sel.db.clone());
         // What the collection holds: documents, data size and indexes. The whole collection's
         // count, not the filter's, which the results line shows. Without statistics only an
@@ -127,6 +212,13 @@ impl App {
             None => {}
         }
         let nidx = t.stats.map(|s| s.2);
+        let sql = t.sql.is_some();
+        if sql {
+            stats.clear();
+            if t.filter_txt.is_empty() {
+                stats.push(format!("{} rows", group(&t.count.to_string())));
+            }
+        }
         ui.horizontal(|ui| {
             ui.label(semibold(RichText::new(&coll).size(TXT_HEADING).color(BRIGHT())));
             ui.add_space(6.0);
@@ -142,7 +234,9 @@ impl App {
         // Wrapped, so on a narrow workspace the toggles move under the tabs instead of over them.
         let tabs = ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 22.0;
-            for (v, label) in [(View::Documents, "Documents"), (View::Aggregate, "Aggregate"), (View::Indexes, "Indexes"), (View::Schema, "Schema"), (View::Import, "Import"), (View::Compare, "Compare"), (View::Shell, "Shell"), (View::Watch, "Watch")] {
+            let mongo_tabs = [(View::Documents, "Documents"), (View::Aggregate, "Aggregate"), (View::Indexes, "Indexes"), (View::Schema, "Schema"), (View::Import, "Import"), (View::Compare, "Compare"), (View::Shell, "Shell"), (View::Watch, "Watch")];
+            let sql_tabs = [(View::Documents, "Content"), (View::Structure, "Structure"), (View::Relations, "Relations"), (View::Triggers, "Triggers"), (View::Info, "Info"), (View::Sql, "Query"), (View::Shell, "Shell")];
+            for (v, label) in if sql { &sql_tabs[..] } else { &mongo_tabs[..] }.iter().copied() {
                 if view_tab(ui, label, view == v).clicked() {
                     self.set_view(v);
                 }
@@ -150,8 +244,14 @@ impl App {
                     ui.add_space(-16.0);
                     stat_chip(ui, &n.to_string());
                 }
+                if let (true, Some(n)) = (sql, self.sql_view_count(v)) {
+                    ui.add_space(-16.0);
+                    stat_chip(ui, &n.to_string());
+                }
             }
-            if matches!(view, View::Documents | View::Aggregate | View::Indexes | View::Watch) {
+            if sql && view == View::Documents {
+                right_group(ui, |ui| self.columns_menu(ui, false));
+            } else if !sql && matches!(view, View::Documents | View::Aggregate | View::Indexes | View::Watch) {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 right_group(ui, |ui| {
                     if self.prefs.table {
@@ -171,6 +271,12 @@ impl App {
         ui.painter().hline(ui.max_rect().x_range(), y, Stroke::new(1.0, LINE()));
         ui.add_space(12.0);
         match view {
+            View::Documents if sql => self.sql_content(ui),
+            View::Structure => self.sql_structure_view(ui),
+            View::Relations => self.sql_relations_view(ui),
+            View::Triggers => self.sql_triggers_view(ui),
+            View::Info => self.sql_info_view(ui),
+            View::Sql => self.sql_query_view(ui),
             View::Documents => self.documents(ui),
             View::Aggregate => self.aggregate(ui),
             View::Indexes => self.indexes_view(ui),
@@ -195,7 +301,7 @@ impl App {
         let key = self.col_key(false);
         let hist = self.prefs.history.get(&key).cloned().unwrap_or_default();
         let index_sorts: Vec<String> = self.t().map(|t| t.indexes.iter().filter_map(|ix| ix.get_document("keys").ok()).map(|k| db::shell_text(&Bson::Document(k.clone()))).collect()).unwrap_or_default();
-        let lib: Vec<SavedQuery> = self.prefs.library.get(&key).map(|v| v.iter().filter(|q| q.pipeline.is_none()).cloned().collect()).unwrap_or_default();
+        let lib: Vec<SavedQuery> = library_of(&self.prefs.library, &key, LibKind::Query);
         let mut qacts = Vec::new();
         let (t, ac, new_lib) = (&mut self.tabs[self.cur], &mut self.ac, &mut self.new_lib);
         // Not asked yet (it is, right after this frame) or asked and not back.
@@ -232,7 +338,7 @@ impl App {
                         run = true;
                     }
                     vsep(ui, 6.0);
-                    library_menu(ui, &lib, new_lib, false, true, &mut qacts);
+                    library_menu(ui, &lib, new_lib, LibKind::Query, true, &mut qacts);
                     history_menu(ui, &hist, &index_sorts, &mut qacts);
                 });
             });
@@ -314,7 +420,7 @@ impl App {
                     run = true;
                 }
                 QAct::Save(name) => {
-                    let q = SavedQuery { name: name.clone(), filter: t.filter_txt.clone(), sort: t.sort_txt.clone(), project: t.proj_txt.clone(), pipeline: None };
+                    let q = SavedQuery { name: name.clone(), filter: t.filter_txt.clone(), sort: t.sort_txt.clone(), project: t.proj_txt.clone(), pipeline: None, sql: None };
                     self.save_to_library(q);
                 }
                 QAct::Delete(name) => self.delete_from_library(&name, false),
@@ -495,10 +601,11 @@ impl App {
             ui.add_space(20.0);
             ui.label(RichText::new(if loading { "Loading…" } else { "No documents" }).color(MUTED()));
         } else {
-            if !agg {
+            let sql = self.t().is_some_and(|t| t.sql.is_some());
+            if !agg || view == View::Shell {
                 self.selection_bar(ui, docs);
             }
-            if self.prefs.table {
+            if self.prefs.table || sql {
                 self.doc_table(ui, agg, docs, &fields, base);
             } else {
                 self.doc_list(ui, agg, docs);
@@ -517,7 +624,7 @@ impl App {
     /// Row click: Cmd toggles the row's check, Shift checks a range, a plain click opens it.
     pub(super) fn row_click(&mut self, ui: &egui::Ui, agg: bool, i: usize) {
         let m = ui.input(|i| i.modifiers);
-        if !agg && (m.command || m.shift) {
+        if (!agg || self.t().is_some_and(|t| t.view == View::Shell)) && (m.command || m.shift) {
             self.toggle_check(i, m.shift);
         } else if self.prefs.open_inline {
             // Rows open and close on their own; the last one opened takes edits and keys.
@@ -543,17 +650,36 @@ impl App {
         }
     }
 
-    pub(super) fn toggle_check(&mut self, i: usize, range: bool) {
+    /// The checked rows of the grid the current view shows: Content, a Query result or the Shell's result.
+    pub(super) fn checks(&self) -> &BTreeSet<usize> {
+        let t = self.t().unwrap();
+        match (t.view, t.sql.as_ref()) {
+            (View::Shell, _) => &t.shell_checked,
+            (View::Sql, Some(s)) => &s.qchecked,
+            _ => &t.checked,
+        }
+    }
+
+    pub(super) fn checks_mut(&mut self) -> (&mut BTreeSet<usize>, &mut Option<usize>) {
         let t = self.tm().unwrap();
-        match t.check_anchor.filter(|_| range) {
-            Some(a) => t.checked.extend(a.min(i)..=a.max(i)),
+        match (t.view, t.sql.as_mut()) {
+            (View::Shell, _) => (&mut t.shell_checked, &mut t.check_anchor),
+            (View::Sql, Some(s)) => (&mut s.qchecked, &mut s.qanchor),
+            _ => (&mut t.checked, &mut t.check_anchor),
+        }
+    }
+
+    pub(super) fn toggle_check(&mut self, i: usize, range: bool) {
+        let (checked, anchor) = self.checks_mut();
+        match anchor.filter(|_| range) {
+            Some(a) => checked.extend(a.min(i)..=a.max(i)),
             None => {
-                if !t.checked.insert(i) {
-                    t.checked.remove(&i);
+                if !checked.insert(i) {
+                    checked.remove(&i);
                 }
             }
         }
-        t.check_anchor = Some(i);
+        *anchor = Some(i);
     }
 
     /// The documents a row action applies to: every checked one when the row is checked, else that row.
@@ -566,36 +692,18 @@ impl App {
     }
 
     pub(super) fn selection_bar(&mut self, ui: &mut egui::Ui, docs: Rows) {
-        let n = self.t().unwrap().checked.len();
+        let n = self.checks().len();
         // Hidden under dialogs, which would otherwise sit behind it.
-        if n == 0 || self.modal.is_some() || self.insert.is_some() {
-            return;
-        }
-        let mut cancel = false;
-        // Floats over the bottom of the results so checking rows never shifts the table.
-        let area = ui.available_rect_before_wrap();
-        let act = egui::Area::new(egui::Id::unique("selection-toolbar"))
-            .order(egui::Order::Foreground)
-            .pivot(egui::Align2::CENTER_BOTTOM)
-            .fixed_pos(egui::pos2(area.center().x, area.bottom() - 16.0))
-            .show(ui.ctx(), |ui| {
-                egui::Frame::popup(ui.style()).inner_margin(egui::Margin::symmetric(12, 8)).corner_radius(R_LG).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(semibold(RichText::new(format!("{n} selected")).color(BRIGHT())));
-                        ui.add_space(8.0);
-                        let act = docs_menu(ui, n, false);
-                        cancel = ui.button("Cancel").on_hover_text("Clear the selection").clicked();
-                        act
-                    })
-                    .inner
-                })
-                .inner
-            })
-            .inner;
+        let hidden = self.modal.is_some() || self.insert.is_some();
+        let sql = self.t().is_some_and(|t| t.sql.is_some());
+        let grouped = self.t().and_then(|t| t.sql.as_ref()).is_some_and(|s| s.matched.is_some());
+        // Query and Shell results are read only: no edit or delete actions.
+        let results_view = self.t().is_some_and(|t| matches!(t.view, View::Sql | View::Shell));
+        let (cancel, act) = selection_area(ui, n, hidden, results_view, sql, grouped);
         if cancel {
-            self.tm().unwrap().checked.clear();
+            self.checks_mut().0.clear();
         } else if let Some(a) = act {
-            let sel = Self::checked_docs(&self.t().unwrap().checked, docs);
+            let sel = Self::checked_docs(self.checks(), docs);
             self.docs_act(ui.ctx(), a, sel);
         }
     }
@@ -603,6 +711,9 @@ impl App {
     pub(super) fn docs_act(&mut self, ctx: &egui::Context, act: DocsAct, docs: Vec<Document>) {
         if docs.is_empty() {
             return;
+        }
+        if self.t().is_some_and(|t| t.sql.is_some()) {
+            return self.sql_docs_act(ctx, act, docs);
         }
         let what = if docs.len() == 1 { "1 document".to_string() } else { format!("{} documents", docs.len()) };
         let value = || if docs.len() == 1 { Bson::Document(docs[0].clone()) } else { Bson::Array(docs.iter().cloned().map(Bson::Document).collect()) };
@@ -619,6 +730,7 @@ impl App {
                 ctx.copy_text(db::to_edit_value(&value()));
                 self.ok(format!("Copied {what} as JSON"));
             }
+            DocsAct::CopyAs(f) => self.copy_rows_as(ctx, f, &docs),
             DocsAct::CopyLines => {
                 let lines: Vec<String> = docs.iter().map(|d| db::to_edit_line(&Bson::Document(d.clone()))).collect();
                 ctx.copy_text(lines.join("\n"));
@@ -636,16 +748,7 @@ impl App {
                     self.worker.import(conn, target, copies, None);
                 }
             }
-            DocsAct::Export => {
-                let coll = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
-                let file = rfd::FileDialog::new().set_file_name(format!("{coll}-selection.json")).add_filter("JSON", &["json"]).add_filter("CSV", &["csv"]).add_filter("TSV", &["tsv"]).save_file();
-                let Some(path) = file else { return };
-                let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("json").to_ascii_lowercase();
-                match db::export_body(&docs, &ext).and_then(|b| std::fs::write(&path, b).map_err(|e| format!("Could not write {}: {e}", path.display()))) {
-                    Ok(()) => self.ok(format!("Exported {what} to {}", path.display())),
-                    Err(e) => self.err(e),
-                }
-            }
+            DocsAct::Export => self.open_export(docs, false),
             DocsAct::Filter => {
                 let t = self.tm().unwrap();
                 t.filter_txt = db::shell_text(&by_id());
@@ -661,7 +764,12 @@ impl App {
                 );
                 self.open_in_shell(code);
             }
-            DocsAct::Delete => self.modal = Some(Modal::Delete(docs)),
+            DocsAct::Delete => {
+                if let Some(sel) = self.t().map(|t| t.sel.clone()) {
+                    self.modal = Some(Modal::Delete(sel, docs));
+                }
+            }
+            DocsAct::SetValue | DocsAct::EditQuery => {}
         }
     }
 

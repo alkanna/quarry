@@ -25,6 +25,11 @@ impl App {
                     View::Import => "Import",
                     View::Compare => "Compare",
                     View::Watch => "Watch",
+                    View::Structure => "Structure",
+                    View::Relations => "Relations",
+                    View::Triggers => "Triggers",
+                    View::Info => "Info",
+                    View::Sql => "Sql",
                 }
                 .into(),
                 filter: t.filter_txt.clone(),
@@ -32,22 +37,27 @@ impl App {
                 project: t.proj_txt.clone(),
                 agg: t.agg_txt.clone(),
                 shell: t.shell.code.clone(),
+                attached: t.shell.attached.clone(),
+                clauses: t.sql.as_ref().and_then(|s| serde_json::to_string(&s.bar.c).ok()).unwrap_or_default(),
+                query: t.sql.as_ref().map(|s| s.query.clone()).unwrap_or_default(),
                 stages: if t.stages_src == t.agg_txt { t.stages.iter().map(|s| SavedStage { op: s.op.clone(), text: s.text.clone(), on: s.on }).collect() } else { Vec::new() },
                 agg_text_mode: t.agg_text_mode,
             })
             .collect();
-        if tabs != self.prefs.open_tabs || self.cur != self.prefs.cur_tab || self.active != self.prefs.last_conn {
+        let open: Vec<u64> = self.rail_order.iter().copied().filter(|id| self.conn(*id).is_some_and(|c| matches!(c.status, Status::Ready | Status::Connecting))).collect();
+        if tabs != self.prefs.open_tabs || self.cur != self.prefs.cur_tab || self.active != self.prefs.last_conn || open != self.prefs.open_conns {
             self.prefs.open_tabs = tabs;
             self.prefs.cur_tab = self.cur;
             self.prefs.last_conn = self.active;
+            self.prefs.open_conns = open;
             self.save_prefs();
         }
     }
 
     /// A dialog or window over the page. It takes its own keys, Esc included, so page shortcuts
     /// stay off while it is open; a new kind of window belongs in this list.
-    fn window_open(&self) -> bool {
-        self.modal.is_some() || self.insert.is_some() || self.json_edit.is_some() || self.users.is_some() || self.server.is_some() || self.tool.is_some()
+    pub(super) fn window_open(&self) -> bool {
+        self.modal.is_some() || self.insert.is_some() || self.json_edit.is_some() || self.users.is_some() || self.server.is_some() || self.sql_users.is_some() || self.sql_server.is_some() || self.tool.is_some()
     }
 
     pub(super) fn keys(&mut self, ctx: &egui::Context) {
@@ -66,8 +76,18 @@ impl App {
         if k(cmd, Key::K) || k(cmd, Key::T) {
             self.modal = Some(Modal::Palette { query: String::new(), sel: 0 });
         }
+        let query_view = self.t().is_some_and(|t| t.view == View::Sql && t.sql.is_some());
+        if query_view && k(cmd | shift, Key::Enter) {
+            self.sql_run(true, false);
+        } else if query_view && k(cmd, Key::Enter) {
+            self.sql_run(false, false);
+        }
         if k(cmd, Key::E) {
-            self.explain();
+            if query_view {
+                self.sql_run(false, true);
+            } else {
+                self.explain();
+            }
         }
         if k(cmd | shift, Key::R) {
             if let Some(id) = self.active.filter(|_| !self.demo) {
@@ -173,7 +193,7 @@ impl App {
 
     pub(super) fn go_tab(&mut self, i: usize) {
         if i != self.cur && i < self.tabs.len() {
-            self.cur = i;
+            self.set_cur(i);
             self.reset_doc_state();
         }
     }
@@ -275,8 +295,10 @@ impl App {
                 if let Some(s) = self.t().map(|t| t.sel.clone()) {
                     let (name, writable) = self.conn(s.conn).map(|c| (c.meta.name.clone(), c.writable)).unwrap_or_default();
                     let mut job = LayoutJob::default();
+                    // A query tab has no table, so its own name ends the path.
+                    let last = self.tab_name(self.cur);
                     job.append(&format!("{name} / {} / ", s.db), 0.0, mono_fmt(12.0, MUTED(), 400.0));
-                    job.append(&s.coll, 0.0, mono_fmt(12.0, BRIGHT(), W_SEMIBOLD));
+                    job.append(&last, 0.0, mono_fmt(12.0, BRIGHT(), W_SEMIBOLD));
                     ui.label(job);
                     ui.add_space(4.0);
                     if self.prefs.always_writable {
@@ -407,6 +429,9 @@ impl App {
                                 }
                             }
                         }
+                        if self.export_progress(ui) || self.sql_job_progress(ui) {
+                            return;
+                        }
                         let (msg, is_err) = &self.status;
                         let first = msg.lines().next().unwrap_or_default();
                         let r = ui.add(egui::Label::new(RichText::new(first).size(TXT_CAPTION).color(if *is_err { ALERT() } else { FAINT() })).truncate().sense(egui::Sense::click()));
@@ -436,7 +461,7 @@ impl App {
         // The name is left as a placeholder so its color can follow hover, which is known only after layout.
         let titles: Vec<_> = self.tabs.iter().enumerate().map(|(i, t)| {
             let mut job = LayoutJob::default();
-            job.append(&t.sel.coll, 0.0, ui_fmt(TXT_BODY, Color32::PLACEHOLDER, if i == self.cur { W_MEDIUM } else { 400.0 }, 0.0));
+            job.append(&self.tab_name(i), 0.0, ui_fmt(TXT_BODY, Color32::PLACEHOLDER, if i == self.cur { W_MEDIUM } else { 400.0 }, 0.0));
             job.append(&t.sel.db, 6.0, mono_fmt(10.0, FAINT(), 400.0));
             let v = match t.view {
                 View::Aggregate => Some("aggregate"),
@@ -446,6 +471,11 @@ impl App {
                 View::Import => Some("import"),
                 View::Compare => Some("compare"),
                 View::Watch => Some("watch"),
+                View::Structure => Some("structure"),
+                View::Relations => Some("relations"),
+                View::Triggers => Some("triggers"),
+                View::Info => Some("info"),
+                View::Sql => Some("sql"),
                 View::Documents => None,
             };
             if let Some(v) = v {
@@ -513,7 +543,7 @@ impl App {
                                 ui.painter().line_segment([c + egui::vec2(3.5, -3.5), c + egui::vec2(-3.5, 3.5)], s);
                             }
                             let conn_name = self.conn(t.sel.conn).map_or("", |c| c.meta.name.as_str());
-                            let resp = resp.on_hover_text(format!("{conn_name} / {} / {}\nMiddle-click closes, right-click for more", t.sel.db, t.sel.coll));
+                            let resp = resp.on_hover_text(format!("{conn_name} / {} / {}\nMiddle-click closes, right-click for more", t.sel.db, self.tab_name(i)));
                             resp.context_menu(|ui| {
                                 menu_look(ui);
                                 ui.set_min_width(190.0);
@@ -591,6 +621,7 @@ impl App {
             }
             // Stay on the same tab when it survives, else on the clicked one, else the nearest.
             self.cur = if keep(cur) { (0..cur).filter(|&k| keep(k)).count() } else if keep(i) { (0..i).filter(|&k| keep(k)).count() } else { i.saturating_sub(1) }.min(self.tabs.len().saturating_sub(1));
+            self.set_cur(self.cur);
             self.reset_doc_state();
         } else if let Some(i) = close {
             self.close_tab(i);
@@ -627,7 +658,7 @@ impl App {
             let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
             for (i, t) in self.tabs.iter().enumerate() {
                 let conn = self.conn(t.sel.conn).map_or("", |c| c.meta.name.as_str());
-                if !format!("{} {} {conn}", t.sel.coll, t.sel.db).to_lowercase().contains(&q) {
+                if !format!("{} {} {conn}", self.tab_name(i), t.sel.db).to_lowercase().contains(&q) {
                     continue;
                 }
                 let key = format!("{conn} / {}", t.sel.db);
@@ -644,7 +675,7 @@ impl App {
                     ui.add_space(4.0);
                     caption(ui, db);
                     for i in idx {
-                        let mut b = egui::Button::selectable(i == self.cur, &self.tabs[i].sel.coll);
+                        let mut b = egui::Button::selectable(i == self.cur, self.tab_name(i));
                         // Cmd+1 to 8 jump to those tabs and Cmd+9 to the last one, as in browsers.
                         let key = if i == n - 1 { Some(9) } else if i < 8 { Some(i + 1) } else { None };
                         if let Some(k) = key {
@@ -675,6 +706,7 @@ impl App {
 
     pub(super) fn new_conn_modal(&mut self) {
         self.conn_test = None;
+        self.test_info = None;
         self.modal = Some(Modal::Conn(Box::new(ConnForm { uri: "mongodb://localhost:27017".into(), ..Default::default() })));
     }
 }

@@ -150,10 +150,11 @@ impl App {
                 ui.add_space(6.0);
                 self.conn_picker(ui);
                 ui.add_space(8.0);
+                let hint = if self.active.and_then(|id| self.conn(id)).is_some_and(|c| c.meta.engine.is_sql()) { "Filter tables" } else { "Filter collections" };
                 let r = ui.add(
                     egui::TextEdit::singleline(&mut self.tree_filter)
                         .id(egui::Id::unique("tree-filter"))
-                        .hint_text(RichText::new("Filter collections").color(FAINT()))
+                        .hint_text(RichText::new(hint).color(FAINT()))
                         .desired_width(f32::INFINITY)
                         .margin(egui::Margin { left: 10, right: 28, top: 5, bottom: 5 }),
                 );
@@ -164,7 +165,21 @@ impl App {
                 }
                 r.on_hover_text("Press / or Cmd+Shift+F");
                 ui.add_space(14.0);
-                ui.label(LayoutJob::single_section("Databases".into(), ui_fmt(10.5, FAINT(), W_SEMIBOLD, 0.8)));
+                let sql_conn = self.active.and_then(|id| self.conn(id)).filter(|c| c.meta.engine.is_sql() && c.status == Status::Ready).map(|c| (c.meta.id, c.writable));
+                let mut new_db = None;
+                ui.horizontal(|ui| {
+                    ui.label(LayoutJob::single_section("Databases".into(), ui_fmt(10.5, FAINT(), W_SEMIBOLD, 0.8)));
+                    if let Some((id, writable)) = sql_conn {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if plus_button(ui, writable).on_hover_text(if writable { "New database…" } else { "Read-only: unlock writes to create a database" }).clicked() && writable {
+                                new_db = Some(id);
+                            }
+                        });
+                    }
+                });
+                if let Some(id) = new_db {
+                    self.side_act(id, SideAct::NewDb);
+                }
                 ui.add_space(2.0);
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| self.db_tree(ui));
             });
@@ -192,6 +207,7 @@ impl App {
         let mut remove = None;
         let mut edit = None;
         let mut refresh = None;
+        let mut sql_users = None;
         egui::Popup::menu(&resp).width(rect.width().max(320.0)).show(|ui| {
             menu_look(ui);
             ui.spacing_mut().item_spacing.y = 2.0;
@@ -220,6 +236,9 @@ impl App {
                 if ui.button("Refresh databases").on_hover_text("Reconnect and reload the list of databases and collections").clicked() {
                     refresh = Some(c.meta.id);
                 }
+                if c.meta.engine.is_sql() && c.status == Status::Ready && ui.button("Users and privileges…").clicked() {
+                    sql_users = Some(c.meta.id);
+                }
                 ui.add_space(2.0);
                 ui.separator();
                 ui.add_space(2.0);
@@ -230,37 +249,10 @@ impl App {
             ui.add_space(2.0);
         });
         if let Some(id) = edit {
-            if let Some(meta) = self.conn(id).map(|c| c.meta.clone()) {
-                self.conn_test = None;
-                // Opening the form with an empty address would overwrite the stored one on save,
-                // unless there is none, which is when re-entering it is the way out.
-                // Demo ids overlap real ones, so the demo must not show the user's real secrets.
-                let uri = if self.demo {
-                    self.conn(id).map(|c| c.masked_uri.clone()).unwrap_or_default()
-                } else {
-                    match stored_uri(id) {
-                        Ok(u) => u,
-                        Err(keyring::Error::NoEntry) => String::new(),
-                        Err(e) => return self.err(uri_err(e)),
-                    }
-                };
-                let stored = |what: &str| if self.demo { String::new() } else { secret(id, what).unwrap_or_default() };
-                self.modal = Some(Modal::Conn(Box::new(ConnForm {
-                    id: Some(id),
-                    name: meta.name.clone(),
-                    tag: meta.tag.clone(),
-                    uri,
-                    ssh_on: meta.ssh.is_some(),
-                    ssh: meta.ssh.clone().unwrap_or_default(),
-                    ssh_pwd: stored("ssh-password"),
-                    ssh_pass: stored("ssh-passphrase"),
-                    proxy_on: meta.proxy.is_some(),
-                    proxy: meta.proxy.clone().unwrap_or_default(),
-                    proxy_pwd: stored("proxy-password"),
-                    show: false,
-                    testing: false,
-                })));
-            }
+            self.edit_conn(id);
+        }
+        if let Some(id) = sql_users {
+            self.side_act(id, SideAct::SqlUsers);
         }
         if let Some(id) = refresh {
             if !self.demo {
@@ -280,6 +272,48 @@ impl App {
                 typed: String::new(),
                 action: Danger::RemoveConnection(id),
             });
+        }
+    }
+
+    /// Opens the connection form for a saved connection.
+    pub(super) fn edit_conn(&mut self, id: u64) {
+        if let Some(meta) = self.conn(id).map(|c| c.meta.clone()) {
+            self.conn_test = None;
+            self.test_info = None;
+            // Opening the form with an empty address would overwrite the stored one on save,
+            // unless there is none, which is when re-entering it is the way out.
+            // Demo ids overlap real ones, so the demo must not show the user's real secrets.
+            let uri = if self.demo {
+                self.conn(id).map(|c| c.masked_uri.clone()).unwrap_or_default()
+            } else {
+                match stored_uri(id) {
+                    Ok(u) => u,
+                    Err(keyring::Error::NoEntry) => String::new(),
+                    Err(e) => return self.err(uri_err(e)),
+                }
+            };
+            let stored = |what: &str| if self.demo { String::new() } else { secret(id, what).unwrap_or_default() };
+            let mut form = ConnForm {
+                id: Some(id),
+                name: meta.name.clone(),
+                tag: meta.tag.clone(),
+                engine: meta.engine,
+                addr: if meta.engine.is_sql() { db::sql::Addr::parse(&uri).unwrap_or_default() } else { Default::default() },
+                uri: if meta.engine.is_sql() { String::new() } else { uri },
+                ssh_on: meta.ssh.is_some(),
+                ssh: meta.ssh.clone().unwrap_or_default(),
+                ssh_pwd: stored("ssh-password"),
+                ssh_pass: stored("ssh-passphrase"),
+                proxy_on: meta.proxy.is_some(),
+                proxy: meta.proxy.clone().unwrap_or_default(),
+                proxy_pwd: stored("proxy-password"),
+                show: false,
+                testing: false,
+                tab: Default::default(),
+                ..Default::default()
+            };
+            form.set_advanced(&meta.advanced);
+            self.modal = Some(Modal::Conn(Box::new(form)));
         }
     }
 
@@ -332,6 +366,8 @@ impl App {
         let mut side: Vec<SideAct> = Vec::new();
         let mut connect = false;
         let mut revealed = false;
+        let mut lazy: Vec<String> = Vec::new();
+        let mut folded: Vec<(u64, String, bool)> = Vec::new();
         {
             let Some(c) = self.conn(id) else { return };
             match &c.status {
@@ -350,6 +386,8 @@ impl App {
                     connect = primary(ui, "Connect", PRIMARY()).clicked();
                 }
             }
+            let sql = c.meta.engine.is_sql();
+            let writable = c.writable;
             for (db_name, colls) in &c.dbs {
                 let mut matches: Vec<&String> = colls.iter().flatten().filter(|n| filter.is_empty() || n.to_lowercase().contains(&filter)).collect();
                 // Copies still running are not listed by the server yet, so they are drawn from `copying`.
@@ -362,7 +400,18 @@ impl App {
                 if !filter.is_empty() && matches.is_empty() {
                     continue;
                 }
+                // Tables first, then views, each under its own caption.
+                let db_views: HashSet<&str> = self.views.iter().filter(|v| v.0 == id && v.1 == *db_name).map(|v| v.2.as_str()).collect();
+                let is_view_of = |n: &String| db_views.contains(n.as_str());
+                let n_views = if sql { matches.iter().filter(|n| is_view_of(n)).count() } else { 0 };
+                if sql {
+                    matches.sort_by_key(|n| is_view_of(n));
+                }
+                let mut group: Option<bool> = None;
                 let is_open = !filter.is_empty() || self.open_dbs.contains(&(id, db_name.clone()));
+                if sql && is_open && colls.is_none() && c.status == Status::Ready && !self.sql_asked.contains(&(id, db_name.clone())) {
+                    lazy.push(db_name.clone());
+                }
                 let dim = SYSTEM_DBS.contains(&db_name.as_str());
                 let count = colls.as_ref().map(|v| v.len().to_string()).unwrap_or_else(|| "…".into());
                 let r = side_row(ui, SIDE_ROW_H, 0.0, false, |p, r| {
@@ -380,6 +429,34 @@ impl App {
                 r.context_menu(|ui| {
                     menu_look(ui);
                     ui.label(RichText::new(format!("Database: {db_name}")).size(TXT_SMALL).color(MUTED()));
+                    if sql {
+                        if ui.button("New query").on_hover_text("Open a SQL editor for this database").clicked() {
+                            side.push(SideAct::NewQuery(db_name.clone()));
+                        }
+                        if ui.button("Refresh").clicked() {
+                            side.push(SideAct::Refresh(db_name.clone()));
+                        }
+                        if ui.button("Users and privileges…").clicked() {
+                            side.push(SideAct::SqlUsers);
+                        }
+                        ui.separator();
+                        if ui.button("Export as SQL dump…").on_hover_text("Tables, views, triggers and routines as a script, with the rows").clicked() {
+                            side.push(SideAct::SqlDump(db_name.clone(), None));
+                        }
+                        if ui.button("Run SQL file…").on_hover_text("Runs a dump or any script file here").clicked() {
+                            side.push(SideAct::SqlRunFile(db_name.clone()));
+                        }
+                        // Creating and dropping are writes, so they stay disabled until the connection is unlocked.
+                        let system = db::sql::create::SYSTEM_SCHEMAS.contains(&db_name.as_str());
+                        ui.separator();
+                        if ui.add_enabled(writable && !system, egui::Button::new("New table…")).on_disabled_hover_text(if system { "Belongs to the server" } else { "Read-only: unlock writes to create a table" }).clicked() {
+                            side.push(SideAct::NewTable(db_name.clone()));
+                        }
+                        if ui.add_enabled_ui(writable && !system, |ui| danger_item(ui, "Drop database…")).inner.on_disabled_hover_text(if system { "Belongs to the server" } else { "Read-only: unlock writes to drop a database" }).clicked() {
+                            side.push(SideAct::SqlDrop(db_name.clone(), String::new(), DropKind::Database));
+                        }
+                        return;
+                    }
                     if ui.button("New collection…").clicked() {
                         side.push(SideAct::NewColl(db_name.clone(), false));
                     }
@@ -411,21 +488,57 @@ impl App {
                     }
                 });
                 if is_open {
+                    let matches_len = matches.len();
+                    let schema = if sql { self.sql_schema.get(&(id, db_name.clone())).cloned() } else { None };
+                    let est_rows: HashMap<&str, u64> = schema.iter().flat_map(|sc| sc.tables.iter().filter_map(|t| Some((t.name.as_str(), t.rows?)))).collect();
+                    let group_hidden = [false, true].map(|v| sql && self.side_closed.contains(&(id, db_name.clone(), v)));
                     for coll in matches {
-                        let sel = Sel { conn: id, db: db_name.clone(), coll: coll.clone() };
-                        let active = cur_sel.as_ref() == Some(&sel);
-                        let is_view = self.views.contains(&(id, db_name.clone(), coll.clone()));
+                        let active = cur_sel.as_ref().is_some_and(|s| s.conn == id && s.db == *db_name && s.coll == *coll);
+                        let is_view = is_view_of(coll);
                         let busy = pending.contains(&coll);
+                        if sql && group != Some(is_view) {
+                            group = Some(is_view);
+                            let (label, n) = if is_view { ("VIEWS", n_views) } else { ("TABLES", matches_len - n_views) };
+                            let (cap, hr) = ui.allocate_exact_size(egui::vec2(ui.available_width(), SIDE_ROW_H - 4.0), Sense::click());
+                            let key = (id, db_name.clone(), is_view);
+                            if hr.clicked() {
+                                folded.push(key.clone());
+                            }
+                            let hidden = group_hidden[is_view as usize];
+                            let g = ui.painter().layout_job(LayoutJob::single_section(label.into(), ui_fmt(10.0, FAINT(), W_SEMIBOLD, 0.6)));
+                            if state_of(&hr) > 0 {
+                                ui.painter().rect_filled(cap, R_SM, hover_fill(state_of(&hr)));
+                            }
+                            // A painted chevron, since the glyph sits off center.
+                            let c = egui::pos2(cap.left() + 12.0, cap.center().y + 1.0);
+                            let tri = if hidden { vec![c + egui::vec2(-2.0, -3.5), c + egui::vec2(-2.0, 3.5), c + egui::vec2(2.5, 0.0)] } else { vec![c + egui::vec2(-3.5, -2.0), c + egui::vec2(3.5, -2.0), c + egui::vec2(0.0, 2.5)] };
+                            ui.painter().add(egui::Shape::convex_polygon(tri, FAINT(), Stroke::NONE));
+                            ui.painter().galley(egui::pos2(cap.left() + 22.0, cap.center().y - g.size().y / 2.0 + 2.0), g, FAINT());
+                            ui.painter().text(egui::pos2(cap.right() - 8.0, cap.center().y + 2.0), egui::Align2::RIGHT_CENTER, n.to_string(), FontId::monospace(TXT_CAPTION), FAINT());
+                            hr.on_hover_cursor(egui::CursorIcon::PointingHand);
+                        }
+                        if group_hidden[is_view as usize] {
+                            continue;
+                        }
                         let mut glyph_at = egui::Rect::NOTHING;
                         let r = side_row(ui, SIDE_ROW_H, 18.0, active, |p, r| {
                             // Collections are marked as documents, views with a hollow diamond so
                             // they read as derived data. A collection still being copied gets a spinner.
                             glyph_at = egui::Rect::from_center_size(egui::pos2(r.left() + 6.0, r.center().y), egui::Vec2::splat(TXT_SMALL));
-                            if !busy {
+                            if !busy && sql && !is_view {
+                                table_glyph(p, egui::pos2(r.left() + 6.0, r.center().y), if active { PRIMARY() } else { FAINT() });
+                            } else if !busy {
                                 let (glyph, gc) = if is_view { ("◇", C_DATE()) } else { ("{}", if active { PRIMARY() } else { FAINT() }) };
                                 p.text(egui::pos2(r.left(), r.center().y), egui::Align2::LEFT_CENTER, glyph, FontId::monospace(10.0), gc);
                             }
-                            let w = r.width() - 20.0;
+                            // The server's estimate, once the schema is loaded for autocomplete.
+                            let est = if sql && !is_view { est_rows.get(coll.as_str()).copied().or_else(|| schema.as_ref().and_then(|sc| sc.table(coll)).and_then(|t| t.rows)) } else { None };
+                            let mut w = r.width() - 20.0;
+                            if let Some(n) = est {
+                                let g = p.layout_no_wrap(rows_short(n), FontId::monospace(TXT_CAPTION), FAINT());
+                                p.galley(egui::pos2(r.right() - 8.0 - g.size().x, r.center().y - g.size().y / 2.0 + optical_dy(&g)), g.clone(), FAINT());
+                                w -= g.size().x + 12.0;
+                            }
                             let galley = p.layout(coll.clone(), FontId::proportional(TXT_TITLE), if active { BRIGHT() } else if is_view { C_DATE() } else { TEXT() }, w);
                             p.galley(egui::pos2(r.left() + 20.0, r.center().y - galley.size().y / 2.0), galley, TEXT());
                         });
@@ -441,13 +554,35 @@ impl App {
                             revealed = true;
                         }
                         if r.clicked() {
-                            open = Some(sel.clone());
+                            open = Some(Sel { conn: id, db: db_name.clone(), coll: coll.clone() });
                         }
                         r.context_menu(|ui| {
                             menu_look(ui);
-                            ui.label(RichText::new(format!("{}: {coll}", if is_view { "View" } else { "Collection" })).size(TXT_SMALL).color(MUTED()));
+                            ui.label(RichText::new(format!("{}: {coll}", if is_view { "View" } else if sql { "Table" } else { "Collection" })).size(TXT_SMALL).color(MUTED()));
                             if ui.button("Open").clicked() {
-                                open = Some(sel.clone());
+                                open = Some(Sel { conn: id, db: db_name.clone(), coll: coll.clone() });
+                            }
+                            if sql {
+                                if !is_view {
+                                    ui.separator();
+                                    if ui.button("Import CSV…").on_hover_text("Adds the rows of a CSV file to this table").clicked() {
+                                        side.push(SideAct::SqlImport(db_name.clone(), coll.clone()));
+                                    }
+                                }
+                                if ui.button("Export as SQL dump…").clicked() {
+                                    side.push(SideAct::SqlDump(db_name.clone(), Some(coll.clone())));
+                                }
+                                let system = db::sql::create::SYSTEM_SCHEMAS.contains(&db_name.as_str());
+                                let on = writable && !system;
+                                let note = if system { "Belongs to the server" } else { "Read-only: unlock writes to change this table" };
+                                ui.separator();
+                                if !is_view && ui.add_enabled(on, egui::Button::new("Empty table…")).on_disabled_hover_text(note).on_hover_text("Deletes every row and keeps the table").clicked() {
+                                    side.push(SideAct::SqlDrop(db_name.clone(), coll.clone(), DropKind::Truncate));
+                                }
+                                if ui.add_enabled_ui(on, |ui| danger_item(ui, if is_view { "Drop view…" } else { "Drop table…" })).inner.on_disabled_hover_text(note).clicked() {
+                                    side.push(SideAct::SqlDrop(db_name.clone(), coll.clone(), if is_view { DropKind::View } else { DropKind::Table }));
+                                }
+                                return;
                             }
                             if ui.button("Statistics").clicked() {
                                 side.push(SideAct::Stats(db_name.clone(), coll.clone()));
@@ -483,6 +618,15 @@ impl App {
         if revealed {
             self.reveal = None;
         }
+        for k in folded {
+            if !self.side_closed.remove(&k) {
+                self.side_closed.insert(k);
+            }
+        }
+        for d in lazy {
+            self.sql_asked.insert((id, d.clone()));
+            self.side_act(id, SideAct::Refresh(d));
+        }
         if connect {
             self.connect(id);
         }
@@ -500,6 +644,24 @@ impl App {
     }
 
     pub(super) fn side_act(&mut self, conn: u64, a: SideAct) {
+        let a = match a {
+            SideAct::NewQuery(db) => return self.sql_new_query(conn, db),
+            SideAct::NewDb => return self.sql_new_db(conn),
+            SideAct::SqlUsers => return self.open_sql_users(conn),
+            SideAct::NewTable(db) => return self.sql_new_table(conn, db),
+            SideAct::SqlDrop(db, table, kind) => return self.sql_drop_ask(conn, db, table, kind),
+            SideAct::SqlImport(db, table) => return self.open_sql_import(conn, db, table),
+            SideAct::SqlDump(db, table) => return self.open_sql_dump(conn, db, table),
+            SideAct::SqlRunFile(db) => return self.open_sql_run_file(conn, db),
+            a => a,
+        };
+        if let (SideAct::Refresh(db), Some(sql)) = (&a, self.conn(conn).and_then(|c| c.sql.clone())) {
+            self.sql_refresh_schema(conn, db);
+            return self.worker.sql_tables(conn, sql, db.clone());
+        }
+        if self.conn(conn).is_some_and(|c| c.meta.engine.is_sql()) {
+            return self.err(if self.conn(conn).is_some_and(|c| c.sql.is_some()) { "Not available for SQL connections yet." } else { "Connect first." });
+        }
         let Some(client) = self.conn(conn).and_then(|c| c.client.clone()) else {
             return self.err("Connect first.");
         };
@@ -542,10 +704,33 @@ impl App {
             }
             SideAct::Relations(db) => self.modal = Some(Modal::Relations { conn, db }),
             SideAct::Analyze(db, coll) => self.analyze_relations(conn, client, db, coll),
+            SideAct::NewQuery(_) | SideAct::SqlImport(..) | SideAct::SqlDump(..) | SideAct::SqlRunFile(_) | SideAct::NewDb | SideAct::NewTable(_) | SideAct::SqlDrop(..) | SideAct::SqlUsers => {}
             SideAct::DropColl(db, coll) => {
                 self.modal = Some(Modal::Typed { title: format!("Drop {db}.{coll} with all its documents and indexes? This cannot be undone."), expect: coll.clone(), typed: String::new(), action: Danger::DropCollAt { conn, db, coll } })
             }
         }
+    }
+}
+
+/// A small painted plus, since the glyph from a fallback font sits off center. Dimmed while writes are locked.
+fn plus_button(ui: &mut egui::Ui, enabled: bool) -> egui::Response {
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), Sense::click());
+    let state = if enabled { state_of(&r) } else { 0 };
+    let color = if !enabled { tint(FAINT(), 120) } else if state > 0 { BRIGHT() } else { MUTED() };
+    ui.painter().rect_filled(rect, R_SM, hover_fill(state));
+    let (c, s) = (rect.center(), Stroke::new(1.4, color));
+    ui.painter().line_segment([c + egui::vec2(-4.5, 0.0), c + egui::vec2(4.5, 0.0)], s);
+    ui.painter().line_segment([c + egui::vec2(0.0, -4.5), c + egui::vec2(0.0, 4.5)], s);
+    focus_ring(ui, &r, rect, R_SM as f32);
+    r.on_hover_cursor(if enabled { egui::CursorIcon::PointingHand } else { egui::CursorIcon::NotAllowed })
+}
+
+/// A row estimate in few characters: 842, 4.4k, 1.2M. Under 10,000 it is exact, so it never rounds up a count.
+fn rows_short(n: u64) -> String {
+    match n {
+        0..=9_999 => n.to_string(),
+        10_000..=999_999 => format!("{}k", n / 1000),
+        _ => format!("{:.1}M", n as f64 / 1e6),
     }
 }
 
@@ -554,8 +739,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn row_estimates_are_short() {
+        assert_eq!([842, 9_999, 12_345, 1_250_000].map(rows_short), ["842", "9999", "12k", "1.2M"]);
+    }
+
+    #[test]
     fn palette_jumps() {
-        let conn = |id, name: &str, status, dbs| Conn { meta: ConnMeta { id, name: name.into(), ..Default::default() }, client: None, status, writable: false, dbs, masked_uri: String::new(), tunnel: None, server: Default::default() };
+        let conn = |id, name: &str, status, dbs| Conn { meta: ConnMeta { id, name: name.into(), ..Default::default() }, client: None, sql: None, status, writable: false, dbs, masked_uri: String::new(), tunnel: None, server: Default::default() };
         let conns = [conn(1, "prod", Status::Ready, vec![("shop".into(), Some(vec!["users".into(), "orders".into()]))]), conn(2, "staging", Status::Idle, Vec::new())];
         let labels = |active, q| jumps(&conns, active, q).into_iter().map(|j| j.0).collect::<Vec<_>>();
         assert_eq!(labels(Some(2), ""), ["staging", "prod", "shop", "shop.users", "shop.orders"]);

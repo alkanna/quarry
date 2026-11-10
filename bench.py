@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
-"""Memory and CPU benchmarks for Quarry, run from the repo root: python3 bench.py [--quick]
+"""Memory and CPU benchmarks for Quarry, run from the repo root: python3 bench.py [--quick] [--sql-only]
 
 Uses the app's offline test hooks, so no MongoDB server is needed:
   idle    QUARRY_DEMO=1 (+ QUARRY_TEST_JSON fixture), window left alone, RSS and CPU sampled with ps.
   render  --screenshot mode, which repaints nonstop for 120 frames, with QUARRY_FRAME_LOG per-frame CPU times.
+
+SQL scenarios (rows prefixed "sql ") use QUARRY_TEST_SQL=<view> with QUARRY_TEST_SQL_JSON, a file of
+generated MySQL rows (server text, converted like the worker does) shown in the orders grid or the
+Query result set. The 50,000 rows case is a stress case, tables hold at most 1,000 rows in real use.
+--sql-only skips the Mongo scenarios.
 
 HOME points at a temp dir for every run: fixture mode without --screenshot saves open tabs
 to ui.json, and that must not land in the real settings.
@@ -13,8 +18,11 @@ import json, os, random, re, statistics, subprocess, sys, tempfile, time
 BIN = "target/release/quarry"
 QUICK = "--quick" in sys.argv
 SIZES = [1_000, 10_000] if QUICK else [1_000, 10_000, 50_000]
+SQL_SIZES = [1_000, 10_000] if QUICK else [1_000, 10_000, 50_000]
 IDLE_S = 5 if QUICK else 10
 SETTLE_S = 3
+SQL_ONLY = "--sql-only" in sys.argv
+SQL_VIEWS = ["rules", "grouped", "structure", "shell"]
 
 
 def doc(i):
@@ -51,6 +59,27 @@ def fixture(tmp, n, make=doc):
     with open(path, "w") as f:
         for i in range(n):
             f.write(json.dumps(make(i)) + "\n")
+    return path
+
+
+def sql_row(i):
+    r = random.Random(i)
+    note = None if r.random() < 0.6 else "customer note " * r.randint(1, 60)
+    js = json.dumps({"gift": r.random() > 0.8, "channel": r.choice(["web", "app", "pos"]), "items": r.randint(1, 9)})
+    return [str(i + 1), str(r.randint(1, 5000)), r.choice(["pending", "paid", "shipped", "refunded", "cancelled"]), f"{r.random() * 1000:.2f}", r.choice(["EUR", "USD", "GBP"]), note, f"2026-{r.randint(1, 12):02d}-{r.randint(1, 28):02d} {r.randint(0, 23):02d}:{r.randint(0, 59):02d}:00", js, f"{r.randint(1, 999)} Main Street, Paris"]
+
+
+SQL_COLS = [("id", "INT UNSIGNED"), ("customer_id", "INT"), ("status", "ENUM('pending','paid','shipped','refunded','cancelled')"), ("total", "DECIMAL(10,2)"), ("currency", "CHAR(3)"), ("note", "TEXT"), ("created_at", "DATETIME"), ("meta", "JSON"), ("address", "VARCHAR(255)")]
+
+
+def sql_fixture(tmp, name, n, wide=False):
+    rows = [sql_row(i) for i in range(n)]
+    if wide:
+        for i, row in enumerate(rows):
+            row[5] = random.Random(i).choice("abcdefghij") * 100_000
+    path = os.path.join(tmp, f"{name}.json")
+    with open(path, "w") as f:
+        json.dump({"cols": [{"name": c, "ty": t} for c, t in SQL_COLS], "rows": rows}, f)
     return path
 
 
@@ -108,12 +137,19 @@ def main():
     subprocess.run(["cargo", "build", "--release"], check=True)
     with tempfile.TemporaryDirectory() as tmp:
         env = {**os.environ, "HOME": tmp, "QUARRY_NO_FOCUS": "1"}
-        fixtures = {f"{n:,} docs": fixture(tmp, n) for n in SIZES}
-        fixtures["50 docs x 1 MB"] = fixture(tmp, 50, big_doc)
-        idles = [idle("demo", {**env, "QUARRY_DEMO": "1"})]
-        idles += [idle(name, {**env, "QUARRY_DEMO": "1", "QUARRY_TEST_JSON": f}) for name, f in fixtures.items()]
-        renders = [render("demo", env, tmp)]
-        renders += [render(name, {**env, "QUARRY_TEST_JSON": f}, tmp) for name, f in fixtures.items()]
+        scen = []  # (name, env additions)
+        if not SQL_ONLY:
+            fixtures = {f"{n:,} docs": fixture(tmp, n) for n in SIZES}
+            fixtures["50 docs x 1 MB"] = fixture(tmp, 50, big_doc)
+            scen.append(("demo", {}))
+            scen += [(name, {"QUARRY_TEST_JSON": f}) for name, f in fixtures.items()]
+        sql = {f"sql content {n:,} rows" + (" (stress)" if n == 50_000 else ""): sql_fixture(tmp, f"sql{n}", n) for n in SQL_SIZES}
+        sql["sql content 200 rows x 100 KB"] = sql_fixture(tmp, "sqlwide", 200, wide=True)
+        scen += [(name, {"QUARRY_TEST_SQL": "content", "QUARRY_TEST_SQL_JSON": f}) for name, f in sql.items()]
+        scen.append(("sql query 1,000 rows", {"QUARRY_TEST_SQL": "query", "QUARRY_TEST_SQL_JSON": sql["sql content 1,000 rows"]}))
+        scen += [(f"sql {v}", {"QUARRY_TEST_SQL": v}) for v in SQL_VIEWS]
+        idles = [idle(name, {**env, **x, "QUARRY_DEMO": "1"}) for name, x in scen]
+        renders = [render(name, {**env, **x}, tmp) for name, x in scen]
     print(f"\n## Idle ({IDLE_S}s after {SETTLE_S}s settle; CPU in % of one core)\n")
     table(idles)
     print("## Render (120 frames, continuous repaint; frame times in ms of CPU)\n")

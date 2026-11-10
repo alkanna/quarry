@@ -15,6 +15,8 @@ pub(super) enum WidthPreset {
 /// What the popover asked for, applied once the table is drawn.
 pub(super) enum HeadAct {
     Sort(Option<i64>),
+    /// Shift-click on a SQL header: add the column as a further sort key.
+    AddSort,
     Width(WidthPreset),
     Data(ColOp),
     /// Rename in the documents matching the filter (true) or in the whole collection.
@@ -153,7 +155,7 @@ fn icon_row(ui: &mut egui::Ui, items: [(Icon, bool, bool, &str, HeadAct); 3], ac
 }
 
 /// Contents of a column header's popover; `dir` is the column's current sort direction.
-pub(super) fn col_popover(ui: &mut egui::Ui, c: &str, agg: bool, dir: Option<i64>, prefs: &ColPrefs, scope_query: &mut bool, acts: &mut Vec<HeadAct>) {
+pub(super) fn col_popover(ui: &mut egui::Ui, c: &str, agg: bool, sql: bool, dir: Option<i64>, prefs: &ColPrefs, scope_query: &mut bool, acts: &mut Vec<HeadAct>) {
     menu_look(ui);
     ui.add_space(4.0);
     ui.vertical_centered(|ui| caption(ui, "COLUMN"));
@@ -176,7 +178,8 @@ pub(super) fn col_popover(ui: &mut egui::Ui, c: &str, agg: bool, dir: Option<i64
         (Icon::WMax, false, true, "Maximum width: the widest value", HeadAct::Width(WidthPreset::Max)),
     ], acts);
     ui.separator();
-    ui.menu_button("Data", |ui| {
+    // Data summaries and the rewrites below run Mongo pipelines.
+    ui.add_enabled_ui(!sql, |ui| ui.menu_button("Data", |ui| {
         menu_look(ui);
         if !agg {
             segmented(ui, scope_query, &[(false, "This page"), (true, "Whole query")]);
@@ -185,9 +188,9 @@ pub(super) fn col_popover(ui: &mut egui::Ui, c: &str, agg: bool, dir: Option<i64
         for op in ColOp::ALL {
             item(ui, op.label(), HeadAct::Data(op), acts);
         }
-    });
+    }));
     // Aggregation results are not documents of the collection, so there is nothing to write back to.
-    if !agg {
+    if !agg && !sql {
         ui.add_enabled_ui(!indexed(c), |ui| {
             let why = "Not available for a path through an array position";
             ui.menu_button("Rename field", |ui| {
@@ -238,6 +241,19 @@ impl App {
         let Some(t) = self.t() else { return };
         let label = self.prefs.cols.get(&key).map(|p| p.label(c).to_string()).unwrap_or_else(|| c.into());
         match act {
+            HeadAct::AddSort if t.sql.is_some() => {
+                let t = self.tm().unwrap();
+                t.sort_txt = super::sql_bar::add_sort_key(&t.sort_txt, c, db::sql::Dialect::MySql);
+                t.page = 0;
+                self.reload();
+            }
+            HeadAct::AddSort => {}
+            HeadAct::Sort(next) if t.sql.is_some() => {
+                let t = self.tm().unwrap();
+                t.sort_txt = next.map(|d| format!("{} {}", db::sql::Dialect::MySql.quote_ident(c), if d > 0 { "ASC" } else { "DESC" })).unwrap_or_default();
+                t.page = 0;
+                self.reload();
+            }
             HeadAct::Sort(next) => {
                 let t = self.tm().unwrap();
                 t.query.sort = next.map(|d| doc! { c: d });

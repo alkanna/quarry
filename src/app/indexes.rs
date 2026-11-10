@@ -353,6 +353,7 @@ impl App {
                 t.expanded = t.expanded.iter().filter_map(|&(agg, i)| if agg { pos(i).map(|p| (true, p)) } else { Some((agg, i)) }).collect();
             }
             t.idx_rows = rows;
+            t.rows_replaced();
         }
     }
 

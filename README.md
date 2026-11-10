@@ -2,59 +2,53 @@
 
 <h1 align="center">Quarry</h1>
 
-<p align="center">A fast, stable and full-featured MongoDB client, written in Rust with egui.<br>Inspired by <a href="https://mingo.io">Mingo</a>.</p>
+<p align="center">A fast, stable and full-featured client for MongoDB, MySQL and MariaDB, written in Rust with egui.<br>Inspired by <a href="https://mingo.io">Mingo</a>.</p>
 
 ![Documents view](docs/documents.png)
 
 ## Features
 
-**Find your way around**
-- Tabs, a table or JSON view, and columns you can pin and reorder for each collection.
-- Paste `db.orders.find(...)` or `aggregate([...])` straight into the query bar.
-- Type `#today` or `#last2months` instead of writing date filters by hand.
-- Keep the queries you reuse in a library, and get back older ones from the history.
-- Press Cmd+K to jump to any collection, and Cmd+/ to see every shortcut. On Linux and Windows, Cmd is Ctrl.
+**One app for every database**
+- MongoDB, MySQL (5.7, 8.x, 9.x) and MariaDB (10.6+) side by side, in tabs with a table or JSON view.
+- Open connections sit in the rail and come back when Quarry starts. Cmd+K jumps to any collection or table, Cmd+/ shows every shortcut (Ctrl on Linux and Windows).
 
 **Edit without worrying**
 - Every connection opens read-only until you unlock it.
-- Edits are staged, saved together, and can be undone.
-- Quarry won't overwrite a change someone else made in the meantime.
-- Preview the result before you update every matching document.
+- Edits are staged, saved together and can be undone, and Quarry won't overwrite a change someone else made meanwhile.
+- Bulk updates, structure changes and drops show exactly what they will run first.
 
-**See what your queries do**
-- Watch a collection's inserts, updates and deletes as they happen (needs a replica set).
-- Build a pipeline one stage at a time and see what comes out of each stage.
-- Read the explain plan of a query or pipeline.
-- Check the server's health and replica set, and find and kill slow operations (Server status, in a database's menu). It asks the server only while that window is open.
-- Watch every command sent to the server, with its duration and errors, in the query log (Cmd+L).
-- Copy a query or pipeline as code for the official MongoDB drivers.
-
-**Look after your collections**
-- See which indexes are used, hide one to see what happens without it, and get suggestions from slow queries.
-- Create indexes with every option: unique, sparse, hidden, TTL, partial filter and collation.
-- See each field's types and how often it appears, and write or generate a validator from that.
-- Follow references: Quarry shows a preview next to an id and opens the document it points to. It can find these relations for you.
-
-**Move data around**
-- Import, and export to JSON, CSV or TSV.
-- Compare two collections and sync the differences.
-- Dump and restore with the MongoDB Database Tools. Quarry installs them if they're missing.
-- Manage users and roles.
+**Query**
+- MongoDB: paste `db.orders.find(...)` or `aggregate([...])`, type `#today` or `#last2months`, build a pipeline one stage at a time with a preview after each, read explain plans, copy as driver code.
+- SQL: filter a table with typed rules or plain SQL. The Query editor runs several statements at once, with autocomplete for tables, columns and values, Format, Explain and Stop.
+- Keep the queries you reuse in a library, and get older ones back from the history.
+- See every command and statement sent, with its duration and errors, in the query log (Cmd+L). Passwords never show.
 
 **Script it**
-- A JavaScript shell running on [Bun](https://bun.sh), with the official MongoDB driver, npm packages and autocomplete. Results come back as a table.
+- A JavaScript shell on [Bun](https://bun.sh), with npm packages and autocomplete: the official driver for MongoDB, `` sql`...` `` templates and typed tables for SQL. Attach other connections to read MongoDB and SQL in one script.
+
+**Shape your data**
+- MongoDB: see which indexes are used and get suggestions, create them with every option, see each field's types, write validators, follow references to the document they point to, and watch changes live.
+- SQL: edit columns, indexes, foreign keys and triggers through a previewed ALTER, click a foreign key to open its row, and create or drop databases and tables.
+
+**Move data around**
+- MongoDB: import and export JSON, CSV or TSV, compare and sync two collections, dump and restore with the Database Tools (installed for you).
+- SQL: import CSV and SQL dumps, and export streamed SQL dumps (gzip optional) or any Copy as format.
+
+**Run the server**
+- Health, status, variables and running operations, with Kill for the slow ones, and users, roles and privileges.
 
 **Connect from anywhere**
-- Go through an SSH tunnel (password, key file or agent) or a SOCKS5 proxy.
+- SSH tunnels (password, key file or agent), SOCKS5 proxies, and TLS.
 - Passwords stay in your system keychain: the macOS Keychain, Windows Credential Manager, or the Secret Service on Linux.
 - Tag connections as Production, Staging or anything you like, so you always know which one you're on.
-- Quarry reconnects to your last connection when it starts.
 
 | | |
 |---|---|
-| ![Editing a document](docs/edit.png) | ![Shell](docs/shell.png) |
+| ![A MySQL table filtered with rules](docs/sql-content.png) | ![SQL Query with several statements](docs/sql-query.png) |
+| ![Structure with staged column and index changes](docs/sql-structure.png) | ![A SQL shell reading a MongoDB connection in the same script](docs/shell-attach.png) |
+| ![Editing a document](docs/edit.png) | ![Aggregation pipeline with a preview after each stage](docs/aggregate.png) |
 | ![Schema](docs/schema.png) | ![Compare and sync](docs/compare.png) |
-| ![Aggregation pipeline with a preview after each stage](docs/aggregate.png) | ![Connection with a tag and an SSH tunnel](docs/connection.png) |
+| ![Server processes](docs/sql-server.png) | ![Connection with a tag and an SSH tunnel](docs/connection.png) |
 
 ## Install
 
@@ -70,7 +64,7 @@ Quarry then updates itself: it checks for new releases shortly after launch and 
 
 ## Build
 
-Needs Rust (stable). The Shell needs [Bun](https://bun.sh), and dump/restore needs the [MongoDB Database Tools](https://www.mongodb.com/docs/database-tools/), which Quarry can install for you. Quarry finds both automatically, or you can set their paths in Settings.
+Needs Rust (stable). The Shell needs [Bun](https://bun.sh), and MongoDB dump/restore needs the [MongoDB Database Tools](https://www.mongodb.com/docs/database-tools/), which Quarry can install for you. Quarry finds both automatically, or you can set their paths in Settings.
 
 ```sh
 cargo run --release      # run it

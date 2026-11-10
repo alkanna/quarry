@@ -31,20 +31,36 @@ impl App {
         self.new_field = None;
     }
 
+    /// The one place the current tab changes. The explorer follows the tab's connection and scrolls
+    /// to its database and collection. Picking a connection without changing tabs never comes here,
+    /// so the explorer may show another connection than the tab.
+    pub(super) fn set_cur(&mut self, i: usize) {
+        self.cur = i;
+        let Some(sel) = self.tabs.get(i).map(|t| t.sel.clone()) else { return };
+        if let Some(id) = follow_conn(&sel, |id| self.conn(id).is_some()) {
+            self.active = Some(id);
+            if !sel.db.is_empty() {
+                self.open_dbs.insert((id, sel.db.clone()));
+                self.reveal = Some((id, sel.db, (!sel.coll.is_empty()).then_some(sel.coll)));
+            }
+        }
+    }
+
     /// Opens a collection. Like the original (treeOpenInNewTab), a new tab is used unless one
     /// already shows that collection; `replace` reuses the current tab instead.
     pub(super) fn open_collection(&mut self, sel: Sel, replace: bool) {
         self.reset_doc_state();
         if let Some(i) = self.tabs.iter().position(|t| t.sel == sel) {
-            self.cur = i;
+            self.set_cur(i);
             return;
         }
+        let engine = self.conn(sel.conn).map(|c| c.meta.engine).unwrap_or_default();
         if replace && !self.tabs.is_empty() {
             let view = self.tabs[self.cur].view;
-            self.tabs[self.cur] = Tab { view, ..Tab::new(sel) };
+            self.tabs[self.cur] = Tab { view, ..Tab::new(sel).for_engine(engine) };
         } else {
-            self.tabs.push(Tab::new(sel));
-            self.cur = self.tabs.len() - 1;
+            self.tabs.push(Tab::new(sel).for_engine(engine));
+            self.set_cur(self.tabs.len() - 1);
         }
         self.reload();
     }
@@ -62,7 +78,7 @@ impl App {
         }
         let t = self.closed.remove(0);
         self.tabs.push(t);
-        self.cur = self.tabs.len() - 1;
+        self.set_cur(self.tabs.len() - 1);
         self.reset_doc_state();
         self.reload();
     }
@@ -75,13 +91,123 @@ impl App {
         // A closed tab is kept for reopening; its stream must not keep reading meanwhile.
         t.watch.stop();
         self.remember_closed(t);
+        let was_cur = self.cur == i;
         if self.cur > i || self.cur >= self.tabs.len() {
             self.cur = self.cur.saturating_sub(1);
+        }
+        // The tab that took the closed one's place is now current.
+        if was_cur {
+            self.set_cur(self.cur);
         }
         self.reset_doc_state();
     }
 
+    /// Removes every tab `gone` picks. The current tab stays current when it is kept, wherever it moves to; when it
+    /// goes, the tab that takes its place becomes current, as with `close_tab`.
+    pub(super) fn remove_tabs(&mut self, gone: impl Fn(&Tab) -> bool) {
+        let marks: Vec<bool> = self.tabs.iter().map(&gone).collect();
+        if !marks.contains(&true) {
+            return;
+        }
+        let was_cur = marks.get(self.cur).copied().unwrap_or(false);
+        self.cur = cur_after(&marks, self.cur);
+        let mut i = 0;
+        self.tabs.retain(|_| {
+            i += 1;
+            !marks[i - 1]
+        });
+        if was_cur {
+            self.set_cur(self.cur);
+            self.reset_doc_state();
+        }
+    }
+
+    /// Runs `f` with the tab a confirmation was raised for as the current one, then puts the current tab back. A
+    /// tab can close or move while the dialog is open, so the action is refused rather than run on another table.
+    pub(super) fn on_tab(&mut self, sel: &Sel, f: impl FnOnce(&mut App)) {
+        let Some(i) = tab_for(self.tabs.iter().map(|t| &t.sel), self.cur, sel) else {
+            return self.err(format!("Nothing ran: {} is no longer open in a tab.", sel.coll));
+        };
+        let back = self.cur;
+        self.cur = i;
+        f(self);
+        if back < self.tabs.len() {
+            self.cur = back;
+        }
+    }
+
     pub(super) fn tab_by_req(&mut self, req: u64) -> Option<&mut Tab> {
         self.tabs.iter_mut().find(|t| t.req == req)
+    }
+}
+
+/// The index of the current tab once the tabs marked in `gone` are removed: the same tab when it is kept, else the
+/// first kept tab after it, else the last one.
+fn cur_after(gone: &[bool], cur: usize) -> usize {
+    let left = gone.iter().filter(|g| !**g).count();
+    let before = gone.iter().take(cur).filter(|g| **g).count();
+    cur.saturating_sub(before).min(left.saturating_sub(1))
+}
+
+/// The tab showing `sel`: the current one when it does, else the first that does.
+fn tab_for<'a>(sels: impl Iterator<Item = &'a Sel>, cur: usize, sel: &Sel) -> Option<usize> {
+    let hits: Vec<usize> = sels.enumerate().filter(|(_, s)| *s == sel).map(|(i, _)| i).collect();
+    hits.iter().copied().find(|&i| i == cur).or(hits.first().copied())
+}
+
+/// The connection the explorer should show for a tab, unless the tab's connection was removed.
+fn follow_conn(sel: &Sel, exists: impl Fn(u64) -> bool) -> Option<u64> {
+    exists(sel.conn).then_some(sel.conn)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explorer_follows_the_tab_connection() {
+        let sel = Sel { conn: 2, db: "shop".into(), coll: "orders".into() };
+        assert_eq!(follow_conn(&sel, |id| id == 2), Some(2));
+        assert_eq!(follow_conn(&sel, |id| id == 1), None);
+    }
+
+    fn sel(coll: &str) -> Sel {
+        Sel { conn: 1, db: "shop".into(), coll: coll.into() }
+    }
+
+    /// Final review finding 3: a dropped table's tab before the current one used to leave `cur` on the next tab, so a
+    /// confirmation still open ran on another table.
+    #[test]
+    fn removing_a_tab_before_the_current_one_keeps_the_current_tab() {
+        // a, b, c, d with b current; a is dropped. Clamping kept index 1, which is now c.
+        let tabs = [sel("a"), sel("b"), sel("c"), sel("d")];
+        let gone: Vec<bool> = tabs.iter().map(|s| s.coll == "a").collect();
+        let left: Vec<&Sel> = tabs.iter().zip(&gone).filter(|(_, g)| !**g).map(|(s, _)| s).collect();
+        assert_eq!(left[cur_after(&gone, 1)].coll, "b");
+        assert_eq!(cur_after(&gone, 1).min(left.len() - 1), 0);
+        // The current tab itself goes: the next one takes its place, or the last one at the end.
+        assert_eq!(cur_after(&[false, true, false], 1), 1);
+        assert_eq!(cur_after(&[false, false, true], 2), 1);
+        assert_eq!(cur_after(&[true, true], 1), 0);
+        // Several before it, one after it.
+        assert_eq!(cur_after(&[true, false, true, false, true], 3), 1);
+    }
+
+    /// Final review finding 3: Delete rows, Apply and Drop trigger carry the table they were confirmed for and run on
+    /// the tab showing it, or not at all.
+    #[test]
+    fn a_confirmation_finds_its_table_after_the_tabs_moved() {
+        let want = sel("b");
+        // b moved from index 1 to 0 when a closed, and the current index now points at c.
+        let after = [sel("b"), sel("c")];
+        assert_eq!(tab_for(after.iter(), 1, &want), Some(0));
+        // The current tab wins when two tabs show the table.
+        let two = [sel("b"), sel("c"), sel("b")];
+        assert_eq!(tab_for(two.iter(), 2, &want), Some(2));
+        assert_eq!(tab_for(two.iter(), 1, &want), Some(0));
+        // b itself was dropped: refused.
+        assert_eq!(tab_for([sel("c")].iter(), 0, &want), None);
+        // Another connection or database with the same table name is not the table.
+        assert_eq!(tab_for([Sel { conn: 2, ..sel("b") }, Sel { db: "x".into(), ..sel("b") }].iter(), 0, &want), None);
     }
 }

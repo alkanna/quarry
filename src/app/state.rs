@@ -26,6 +26,14 @@ impl ShellTab {
         self.error = None;
     }
 
+    /// SQL rows have no `_id` unless the query selects one, so the column the Mongo layout adds first
+    /// is dropped when no row holds it.
+    pub(super) fn hide_absent_id(&mut self) {
+        if !self.docs.iter().any(|r| r.value("_id").is_some()) {
+            self.fields.retain(|f| f != "_id");
+        }
+    }
+
     /// The whole result as one value, for Copy, Export and the JSON view. Documents are decoded
     /// from their rows for the moment.
     pub(super) fn result(&self) -> Option<Bson> {
@@ -42,6 +50,9 @@ impl ShellTab {
 pub(super) struct ConnMeta {
     pub(super) id: u64,
     pub(super) name: String,
+    /// Old saved connections have no engine and are Mongo.
+    #[serde(default)]
+    pub(super) engine: db::sql::Engine,
     /// Reach the server through an SSH tunnel; passwords and passphrases live in the Keychain.
     #[serde(default)]
     pub(super) ssh: Option<crate::ssh::SshConf>,
@@ -51,6 +62,9 @@ pub(super) struct ConnMeta {
     /// Environment label shown next to the name, such as Production.
     #[serde(default)]
     pub(super) tag: String,
+    /// Session settings, init command and timeouts of a SQL connection. None of it is secret.
+    #[serde(default, skip_serializing_if = "db::sql::Advanced::is_default")]
+    pub(super) advanced: db::sql::Advanced,
 }
 
 #[derive(PartialEq)]
@@ -64,6 +78,8 @@ pub(super) enum Status {
 pub(super) struct Conn {
     pub(super) meta: ConnMeta,
     pub(super) client: Option<Client>,
+    /// Set instead of `client` for SQL connections.
+    pub(super) sql: Option<db::sql::Db>,
     pub(super) status: Status,
     /// Writes are locked at every launch and only unlocked for this session.
     pub(super) writable: bool,
@@ -88,14 +104,17 @@ pub(super) struct ServerInfo {
     pub(super) version: String,
     pub(super) set_name: String,
     pub(super) host: String,
+    /// "MySQL" or "MariaDB" for SQL connections; empty for Mongo, which shows "mongod".
+    pub(super) product: String,
+    pub(super) tls: bool,
 }
 
 impl ServerInfo {
     /// The status bar's "host · mongod version · set", with the host from `uri` until the server says.
     pub(super) fn status_line(&self, uri: &str) -> String {
         let host = if self.host.is_empty() { host_of(uri) } else { self.host.clone() };
-        let version = (!self.version.is_empty()).then(|| format!("mongod {}", self.version));
-        [Some(host), version, Some(self.set_name.clone())].into_iter().flatten().filter(|p| !p.is_empty()).collect::<Vec<_>>().join("  ·  ")
+        let version = (!self.version.is_empty()).then(|| format!("{} {}", if self.product.is_empty() { "mongod" } else { &self.product }, self.version));
+        [Some(host), version, Some(self.set_name.clone()), self.tls.then(|| "TLS".to_string())].into_iter().flatten().filter(|p| !p.is_empty()).collect::<Vec<_>>().join("  ·  ")
     }
 
 }
@@ -132,6 +151,13 @@ pub(super) enum View {
     Import,
     Compare,
     Watch,
+    /// SQL tabs only. Documents is their Content view.
+    Structure,
+    Relations,
+    Triggers,
+    Info,
+    /// The SQL Custom Query.
+    Sql,
 }
 
 /// Where a results view keeps its rows: decoded, or as BSON bytes like the Documents view
@@ -173,6 +199,8 @@ pub(super) struct Tab {
     /// Rows of the current page checked for bulk actions, and the last one clicked for Shift ranges.
     pub(super) checked: BTreeSet<usize>,
     pub(super) check_anchor: Option<usize>,
+    /// Checked rows of the Shell result's page, which has its own table and so its own checks.
+    pub(super) shell_checked: BTreeSet<usize>,
     /// Rows open inline besides the selected one, keyed like `selected`.
     pub(super) expanded: BTreeSet<(bool, usize)>,
     pub(super) agg_txt: String,
@@ -200,6 +228,9 @@ pub(super) struct Tab {
     /// The Indexes view's table rows: each index with its usage merged in. Rebuilt only when the
     /// indexes or their stats arrive, since column widths are cached by the rows' address.
     pub(super) idx_rows: Vec<Document>,
+    /// Names the rows on screen, changed by `rows_replaced` whenever an answer replaces them. Measured column
+    /// widths are kept per generation, because the allocator may give a new answer an old one's address.
+    pub(super) rows_gen: u64,
     pub(super) shell: ShellTab,
     pub(super) schema: SchemaTab,
     pub(super) import: ImportTab,
@@ -211,6 +242,49 @@ pub(super) struct Tab {
     /// its name; asked once per tab.
     pub(super) stats: Option<(u64, u64, u64)>,
     pub(super) stats_asked: bool,
+    /// Set for tabs of a SQL connection, whose rows come from `sql_page` instead of `find`.
+    pub(super) sql: Option<Box<SqlTab>>,
+}
+
+/// What a SQL tab keeps besides the shared row fields of `Tab`.
+#[derive(Default)]
+pub(super) struct SqlTab {
+    /// Columns in table order, from the last page answer.
+    pub(super) cols: Arc<Vec<db::sql::Col>>,
+    /// Primary key column names; empty means the rows cannot be edited.
+    pub(super) pk: Vec<String>,
+    /// The row count is the server's table estimate, shown with a ~.
+    pub(super) estimated: bool,
+    /// Text for the Query view, set by "Edit in Query" on checked rows.
+    pub(super) query: String,
+    /// Rows before grouping when the last answer was grouped; None for an ordinary answer.
+    pub(super) matched: Option<u64>,
+    /// The Content bar: rules, clause chips and their text.
+    pub(super) bar: super::sql_bar::Bar,
+    /// What Stop reaches of the running Custom Query.
+    pub(super) run: db::sql::RunHandle,
+    /// The outcome of each statement of the last run, the one shown, and the request still awaited (0 when idle).
+    pub(super) sets: Vec<db::sql::ResultSet>,
+    pub(super) set_sel: usize,
+    pub(super) run_req: u64,
+    /// Database the Query view runs in when it is not the tab's own.
+    pub(super) run_db: String,
+    /// Caret of the Query editor as a char index, and what the script says about it.
+    pub(super) caret: usize,
+    pub(super) caret_cache: std::cell::RefCell<Option<super::sql_query::CaretInfo>>,
+    /// Results as text instead of a grid, and that text for the set it was built from.
+    pub(super) text_mode: bool,
+    pub(super) text_cache: Option<(usize, String)>,
+    /// Checked rows of the shown page of the selected result, and the anchor of a Shift range. A page change
+    /// or a new run clears them: checks belong to the page they were made on.
+    pub(super) qchecked: BTreeSet<usize>,
+    pub(super) qanchor: Option<usize>,
+    /// The run the shown results belong to, which their row counts answer to, and the result tab being
+    /// read at another page (its answer replaces only that tab).
+    pub(super) sets_req: u64,
+    pub(super) paging: Option<usize>,
+    /// What the Structure, Relations, Triggers and Info views show.
+    pub(super) st: super::sql_structure::StructState,
 }
 
 /// The Compare view: this tab's collection (source) against a chosen target.
@@ -363,6 +437,8 @@ impl Default for ImportTab {
 #[derive(Default)]
 pub(super) struct ShellTab {
     pub(super) code: String,
+    /// Other saved connections whose data is a global of the script, saved with the tab.
+    pub(super) attached: Vec<Attached>,
     pub(super) logs: Vec<(String, String)>,
     /// The returned value when it is not documents; see `result` for the whole of it.
     pub(super) value: Option<Bson>,
@@ -380,6 +456,13 @@ pub(super) struct ShellTab {
     pub(super) started: Option<std::time::Instant>,
     pub(super) ms: Option<u128>,
     pub(super) count: Option<usize>,
+    /// Every query a SQL script ran, in order.
+    pub(super) queries: Vec<db::ShellQuery>,
+    /// The bottom panel shows the Queries tab instead of the Console.
+    pub(super) queries_tab: bool,
+    /// The server connection of each SQL relay of the running script (app connection id, its thread id), so the
+    /// Server window can mark them as Quarry's own. Ids are only read while the script runs.
+    pub(super) relays: Vec<(u64, std::sync::Arc<std::sync::atomic::AtomicU64>)>,
 }
 
 /// Which of `len` rows a page shows (all of them for None), and the number of the first one minus one.
@@ -390,6 +473,12 @@ pub(super) fn page_window(page: Option<usize>, len: usize) -> (std::ops::Range<u
 }
 
 impl Tab {
+    /// Call wherever an answer replaces the rows this tab shows.
+    pub(super) fn rows_replaced(&mut self) {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        self.rows_gen = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// "conn/db/coll", the key of per-collection settings.
     pub(super) fn coll_key(&self) -> String {
         format!("{}/{}/{}", self.sel.conn, self.sel.db, self.sel.coll)
@@ -481,6 +570,12 @@ impl Tab {
         if self.query.limit.is_some() || self.query.skip > 0 { "every match, ignoring the limit and skip".into() } else { format!("about {}", self.count) }
     }
 
+    /// Marks the tab as one of a SQL connection.
+    pub(super) fn for_engine(mut self, engine: db::sql::Engine) -> Self {
+        self.sql = engine.is_sql().then(Default::default);
+        self
+    }
+
     pub(super) fn new(sel: Sel) -> Self {
         Self {
             sel,
@@ -506,6 +601,7 @@ impl Tab {
             selected: None,
             checked: BTreeSet::new(),
             check_anchor: None,
+            shell_checked: BTreeSet::new(),
             expanded: BTreeSet::new(),
             agg_txt: "[\n  { $match: {} },\n  { $limit: 20 }\n]".into(),
             agg_docs: Vec::new(),
@@ -521,6 +617,7 @@ impl Tab {
             indexed: HashMap::new(),
             size: 0,
             idx_rows: Vec::new(),
+            rows_gen: 0,
             shell: ShellTab::default(),
             schema: SchemaTab::default(),
             import: ImportTab::default(),
@@ -529,6 +626,7 @@ impl Tab {
             related: HashMap::new(),
             stats: None,
             stats_asked: false,
+            sql: None,
         }
     }
 }
@@ -547,6 +645,18 @@ pub(super) enum Danger {
     Sync { conn: u64 },
     Restore { conn: u64, args: Vec<String> },
     Validator(Document),
+    /// Rows of a SQL table, by key, with the table they were picked in.
+    DeleteRows(Sel, Vec<Document>),
+    /// The staged ALTER TABLE of the open SQL table, confirmed because it drops a column or cannot be undone.
+    ApplyAlter(Sel),
+    /// The structure undo recorded at this time, confirmed because it drops a column or converts a type back.
+    UndoAlter(std::time::Instant),
+    /// Drop a SQL database, table or view, or empty a table; `table` is empty for a database.
+    SqlDrop { conn: u64, schema: String, table: String, kind: DropKind },
+    /// A trigger of a SQL table, by name.
+    DropTrigger(Sel, String),
+    /// Drop a SQL user or role.
+    SqlDropUser { conn: u64, acct: db::sql::users::Account },
 }
 
 /// What to run once writes are allowed.
@@ -559,7 +669,20 @@ pub(super) enum Modal {
     Unlock(u64, Option<Retry>),
     Save { tag: String, changes: Vec<(String, Option<Bson>, Option<Bson>)> },
     SaveAll(Vec<String>),
-    Delete(Vec<Document>),
+    /// The rows or documents, with the table or collection they were picked in.
+    Delete(Sel, Vec<Document>),
+    SqlSet(Box<SetForm>),
+    SqlRow(Box<RowForm>),
+    /// Add or edit a column of the open SQL table, with its ALTER preview.
+    ColEdit(Box<ColForm>),
+    IdxEdit(Box<IdxForm>),
+    SqlNewDb(Box<NewDb>),
+    SqlNewTable(Box<NewTable>),
+    SqlDrop(Box<DropForm>),
+    SqlNewUser(Box<super::sql_users::NewUser>),
+    SqlPassword(Box<super::sql_users::PwForm>),
+    /// Add a foreign key to the open SQL table, with its ALTER preview.
+    FkEdit(Box<FkForm>),
     Typed { title: String, expect: String, typed: String, action: Danger },
     CreateIndex(Box<IndexForm>),
     AggWrite(Vec<Document>),
@@ -579,10 +702,20 @@ pub(super) enum Modal {
     Tool(Box<ToolForm>),
     Relations { conn: u64, db: String },
     Palette { query: String, sel: usize },
+    /// Export or copy-to-file of the rows of a result, in any of the Copy as formats.
+    Export(Box<super::export::ExportForm>),
+    /// Import a CSV file into a SQL table.
+    SqlImport(Box<super::sql_import::ImportForm>),
+    /// Export a SQL database or some of its tables as a dump script.
+    SqlDump(Box<super::sql_dump::DumpForm>),
+    /// Run a script file on a SQL database.
+    SqlRunFile(Box<super::sql_dump::RunForm>),
     /// Values of a field with how many documents hold each, and the pipeline that counted them.
     Grouped { sel: Sel, path: String, pipeline: Vec<Document>, rows: Vec<Document> },
     /// The column header's Customize window; `key` is the column prefs key it edits.
     ColumnCustomize { key: String, agg: bool, col: String, label: String, path: String },
+    /// Attach another saved connection to the current Shell tab.
+    Attach(Box<super::shell_attach::AttachForm>),
 }
 
 /// A value being edited in place in the document tree.
@@ -690,10 +823,34 @@ pub(super) fn stage_pipeline(stages: &[Stage], i: usize) -> db::Res<Vec<Document
         .collect()
 }
 
+/// The tabs of the connection form. Proxy is Mongo only and TLS is SQL only.
+#[derive(Default, Clone, Copy, PartialEq)]
+pub(super) enum ConnTab {
+    #[default]
+    Standard,
+    Ssh,
+    Proxy,
+    Tls,
+    Advanced,
+}
+
+/// The time zone choice of the Advanced tab; the Custom text lives beside it.
+#[derive(Default, Clone, Copy, PartialEq)]
+pub(super) enum ZoneKind {
+    #[default]
+    Server,
+    Utc,
+    System,
+    Custom,
+}
+
 /// The new/edit connection form.
 #[derive(Default)]
 pub(super) struct ConnForm {
     pub(super) id: Option<u64>,
+    pub(super) engine: db::sql::Engine,
+    pub(super) addr: db::sql::Addr,
+    pub(super) tab: ConnTab,
     pub(super) name: String,
     pub(super) tag: String,
     pub(super) uri: String,
@@ -706,13 +863,105 @@ pub(super) struct ConnForm {
     pub(super) proxy: db::Proxy,
     pub(super) proxy_pwd: String,
     pub(super) testing: bool,
+    /// Charset, collation and init command are edited in place; the rest has form state of its own below.
+    pub(super) adv: db::sql::Advanced,
+    pub(super) zone_kind: ZoneKind,
+    pub(super) zone_text: String,
+    pub(super) mode_custom: bool,
+    pub(super) mode_on: [bool; 8],
+    pub(super) mode_extra: String,
+    pub(super) t_connect: String,
+    pub(super) t_query: String,
+    pub(super) t_idle: String,
+    /// (charset, collation) pairs the last Test read from the server.
+    pub(super) collations: Vec<(String, String)>,
+    /// The request id of this form's last Test, so an answer meant for another form or an older Test is ignored.
+    pub(super) test_req: u64,
+    /// The server's own sql_mode as the last Test read it, where Custom starts from.
+    pub(super) server_mode: Option<String>,
+    /// The Custom mode holds a choice (saved, clicked, or the server's once), so a Test never replaces it, even
+    /// when that choice is no flags at all.
+    pub(super) mode_seeded: bool,
 }
 
 impl ConnForm {
+    /// Applies what a Test learned, if it answers this form's last Test.
+    pub(super) fn take_test_info(&mut self, req: u64, info: db::sql::TestInfo) -> bool {
+        if req == 0 || req != self.test_req {
+            return false;
+        }
+        self.server_mode = Some(info.sql_mode);
+        self.collations = info.collations;
+        self.seed_mode();
+        true
+    }
+
+    /// Starts Custom from the server's mode, once.
+    pub(super) fn seed_mode(&mut self) {
+        use db::sql::advanced::{parse_flags, MODE_FLAGS};
+        let Some(mode) = self.server_mode.as_deref().filter(|_| self.mode_custom && !self.mode_seeded) else { return };
+        let flags = parse_flags(mode).unwrap_or_default();
+        self.mode_on = MODE_FLAGS.map(|m| flags.iter().any(|x| x == m));
+        self.mode_extra = flags.iter().filter(|x| !MODE_FLAGS.contains(&x.as_str())).cloned().collect::<Vec<_>>().join(", ");
+        self.mode_seeded = true;
+    }
+
+    /// The form's Advanced tab as saved settings, or the first thing wrong with it.
+    pub(super) fn advanced(&self) -> Result<db::sql::Advanced, String> {
+        use db::sql::advanced::{parse_flags, MODE_FLAGS};
+        if !self.engine.is_sql() {
+            return Ok(Default::default());
+        }
+        let zone = match self.zone_kind {
+            ZoneKind::Server => db::sql::Zone::Server,
+            ZoneKind::Utc => db::sql::Zone::Utc,
+            ZoneKind::System => db::sql::Zone::System,
+            ZoneKind::Custom => db::sql::Zone::Custom(self.zone_text.trim().into()),
+        };
+        let sql_mode = if self.mode_custom {
+            let mut flags: Vec<String> = MODE_FLAGS.iter().zip(self.mode_on).filter(|(_, on)| *on).map(|(f, _)| f.to_string()).collect();
+            for f in parse_flags(&self.mode_extra)? {
+                if !flags.contains(&f) {
+                    flags.push(f);
+                }
+            }
+            Some(flags)
+        } else {
+            None
+        };
+        let secs = |text: &str, name: &str| -> Result<Option<u32>, String> {
+            let t = text.trim();
+            if t.is_empty() { Ok(None) } else { t.parse().map(Some).map_err(|_| format!("{name} timeout: {t:?} is not a number of seconds")) }
+        };
+        let a = db::sql::Advanced { zone, collation: self.adv.collation.trim().into(), sql_mode, connect_secs: secs(&self.t_connect, "Connect")?, query_secs: secs(&self.t_query, "Query")?, idle_secs: secs(&self.t_idle, "Idle")?, ..self.adv.clone() };
+        a.validate()?;
+        Ok(a)
+    }
+
+    /// Fills the form from saved settings.
+    pub(super) fn set_advanced(&mut self, a: &db::sql::Advanced) {
+        use db::sql::advanced::MODE_FLAGS;
+        self.adv = a.clone();
+        (self.zone_kind, self.zone_text) = match &a.zone {
+            db::sql::Zone::Server => (ZoneKind::Server, String::new()),
+            db::sql::Zone::Utc => (ZoneKind::Utc, String::new()),
+            db::sql::Zone::System => (ZoneKind::System, String::new()),
+            db::sql::Zone::Custom(z) => (ZoneKind::Custom, z.clone()),
+        };
+        self.mode_custom = a.sql_mode.is_some();
+        self.mode_seeded = a.sql_mode.is_some();
+        let flags = a.sql_mode.clone().unwrap_or_default();
+        self.mode_on = MODE_FLAGS.map(|f| flags.iter().any(|x| x == f));
+        self.mode_extra = flags.iter().filter(|f| !MODE_FLAGS.contains(&f.as_str())).cloned().collect::<Vec<_>>().join(", ");
+        let t = |s: Option<u32>| s.map(|s| s.to_string()).unwrap_or_default();
+        (self.t_connect, self.t_query, self.t_idle) = (t(a.connect_secs), t(a.query_secs), t(a.idle_secs));
+    }
+
     pub(super) fn net(&self) -> db::Net {
         db::Net {
             ssh: self.ssh_on.then(|| (crate::ssh::SshConf { host: self.ssh.host.trim().into(), user: self.ssh.user.trim().into(), ..self.ssh.clone() }, crate::ssh::SshSecrets { password: Some(self.ssh_pwd.clone()), passphrase: Some(self.ssh_pass.clone()) })),
-            proxy: (self.proxy_on && !self.ssh_on).then(|| db::Proxy { host: self.proxy.host.trim().into(), password: Some(self.proxy_pwd.clone()), ..self.proxy.clone() }),
+            // SQL drivers cannot use SOCKS, so a stale proxy setting must not apply.
+            proxy: (self.proxy_on && !self.ssh_on && !self.engine.is_sql()).then(|| db::Proxy { host: self.proxy.host.trim().into(), password: Some(self.proxy_pwd.clone()), ..self.proxy.clone() }),
         }
     }
 }
@@ -750,6 +999,20 @@ pub(super) enum SideAct {
     Relations(String),
     /// Analyze relations of one collection, or of every collection when empty.
     Analyze(String, String),
+    /// A Query tab for a SQL database.
+    NewQuery(String),
+    /// Import a CSV file into a SQL table (database, table).
+    SqlImport(String, String),
+    /// Export a SQL dump of a database, with the table to start from when there is one.
+    SqlDump(String, Option<String>),
+    /// Run a script file on a SQL database.
+    SqlRunFile(String),
+    /// SQL create and drop: a database, a table in a database, and a drop or empty of a table or database (name empty).
+    NewDb,
+    NewTable(String),
+    SqlDrop(String, String, DropKind),
+    /// The Users and privileges window of a SQL connection.
+    SqlUsers,
 }
 
 pub(super) enum QAct {
@@ -911,11 +1174,17 @@ impl App {
         let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == id) else { return };
         c.status = Status::Connecting;
         c.client = None;
+        c.sql = None;
         c.tunnel = None;
         // Asked again once connected, so a changed or failed server never shows the old one.
         c.server = ServerInfo::default();
         let net = net_of(&c.meta);
-        self.worker.connect(id, uri, self.timeout(), net);
+        let adv = c.meta.advanced.clone();
+        if c.meta.engine.is_sql() {
+            self.worker.sql_connect_with(id, uri, self.timeout(), net, adv);
+        } else {
+            self.worker.connect(id, uri, self.timeout(), net);
+        }
     }
 
     /// Something a restart would lose: unsaved edits, writes in flight, running scripts or tools.
@@ -937,6 +1206,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_test_answer_seeds_custom_mode_once_and_only_for_its_own_form() {
+        let info = |mode: &str| db::sql::TestInfo { sql_mode: mode.into(), collations: vec![("utf8mb4".into(), "utf8mb4_bin".into())] };
+        let mut f = ConnForm { engine: db::sql::Engine::MySql, mode_custom: true, test_req: 7, ..Default::default() };
+        // Another form's or an older Test's answer changes nothing, and a form that never tested takes none.
+        assert!(!f.take_test_info(6, info("ANSI_QUOTES")));
+        assert!(!ConnForm::default().take_test_info(0, info("ANSI_QUOTES")));
+        assert!(f.collations.is_empty() && f.mode_on.iter().all(|on| !on));
+        assert!(f.take_test_info(7, info("STRICT_TRANS_TABLES,IGNORE_SPACE")));
+        assert_eq!(f.advanced().unwrap().sql_mode, Some(vec!["STRICT_TRANS_TABLES".into(), "IGNORE_SPACE".into()]));
+        assert_eq!(f.collations.len(), 1);
+        // The user turns every flag off on purpose; a second Test keeps that.
+        f.mode_on = [false; 8];
+        f.mode_extra.clear();
+        f.test_req = 8;
+        assert!(f.take_test_info(8, info("STRICT_TRANS_TABLES")));
+        assert_eq!(f.advanced().unwrap().sql_mode, Some(vec![]));
+        // A saved Custom mode with no flags is a choice too.
+        let mut g = ConnForm { engine: db::sql::Engine::MySql, test_req: 3, ..Default::default() };
+        g.set_advanced(&db::sql::Advanced { sql_mode: Some(vec![]), ..Default::default() });
+        assert!(g.take_test_info(3, info("ANSI_QUOTES")));
+        assert_eq!(g.advanced().unwrap().sql_mode, Some(vec![]));
+        // Server default at Test time, Custom picked later: Custom still starts from the server's mode.
+        let mut h = ConnForm { engine: db::sql::Engine::MySql, test_req: 4, ..Default::default() };
+        assert!(h.take_test_info(4, info("NO_ZERO_DATE")));
+        h.mode_custom = true;
+        h.seed_mode();
+        assert_eq!(h.advanced().unwrap().sql_mode, Some(vec!["NO_ZERO_DATE".into()]));
+    }
+
+    #[test]
     fn shell_keeps_documents_once_as_rows() {
         let mut sh = ShellTab::default();
         let docs = vec![Bson::Document(doc! { "_id": 1, "a": "x" }), Bson::Document(doc! { "_id": 2 })];
@@ -951,6 +1250,17 @@ mod tests {
             assert!(sh.docs.is_empty() && sh.raw);
             assert_eq!(sh.result(), Some(v));
         }
+    }
+
+    #[test]
+    fn sql_result_hides_missing_id() {
+        let mut sh = ShellTab::default();
+        sh.set_value(Bson::Array(vec![Bson::Document(doc! { "a": 1 })]));
+        sh.hide_absent_id();
+        assert_eq!(sh.fields, ["a"]);
+        sh.set_value(Bson::Array(vec![Bson::Document(doc! { "_id": 1, "a": 1 })]));
+        sh.hide_absent_id();
+        assert_eq!(sh.fields, ["_id", "a"]);
     }
 
     #[test]

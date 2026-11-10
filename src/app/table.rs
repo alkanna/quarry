@@ -92,6 +92,30 @@ pub(super) fn optimal_width(ui: &egui::Ui, docs: Rows, col: &str, header: &str, 
     widest.clamp(OPTIMAL_MIN_W, cap) + OPTIMAL_PAD + CELL_PAD
 }
 
+/// Width kept at the right of a foreign key cell for its link.
+const FK_W: f32 = 22.0;
+
+/// The small link at the right edge of a foreign key cell: a box with an arrow leaving it, painted as shapes.
+fn fk_link(ui: &mut egui::Ui, cell: egui::Rect, id: egui::Id, fk: &db::sql::structure::ForeignKey) -> egui::Response {
+    let area = egui::Rect::from_min_max(egui::pos2(cell.right() - FK_W, cell.top()), cell.right_bottom());
+    let r = ui.interact(area, id, Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("Open the row in {}", fk.ref_table));
+    let btn = egui::Rect::from_center_size(area.center(), egui::vec2(16.0, 16.0));
+    if r.is_pointer_button_down_on() {
+        ui.painter().rect_filled(btn, R_SM, PRESSED());
+    } else if r.hovered() {
+        ui.painter().rect_filled(btn, R_SM, HOVER());
+    }
+    let color = if r.hovered() { C_LINK() } else { tint(C_LINK(), 170) };
+    let stroke = Stroke::new(1.4, color);
+    let c = btn.center();
+    let (a, b) = (c + egui::vec2(-3.0, 3.0), c + egui::vec2(3.0, -3.0));
+    let p = ui.painter();
+    p.line_segment([a, b], stroke);
+    p.line_segment([b + egui::vec2(-3.5, 0.0), b], stroke);
+    p.line_segment([b + egui::vec2(0.0, 3.5), b], stroke);
+    r
+}
+
 /// Left edge for text `gw` wide in a cell at `x`, `w` wide, by the column's alignment. Text wider
 /// than the cell starts at its left padding so its beginning stays visible.
 fn align_x(align: u8, x: f32, w: f32, gw: f32) -> f32 {
@@ -114,13 +138,23 @@ pub(super) fn visible_cols(p: Option<&ColPrefs>, fields: &[String], n: usize) ->
     out
 }
 
+/// How many columns show before the user picks some. SQL tables are narrow enough to show whole,
+/// while Mongo documents can have hundreds of fields.
+fn default_n(sql: bool, setting: usize) -> usize {
+    if sql { usize::MAX } else { setting }
+}
+
 impl App {
+    pub(super) fn default_cols(&self) -> usize {
+        default_n(self.t().is_some_and(|t| t.sql.is_some()), self.prefs.default_cols)
+    }
+
     pub(super) fn columns_menu(&mut self, ui: &mut egui::Ui, agg: bool) {
         let key = self.col_key(agg);
         let t = self.t().unwrap();
         let fields = if agg { t.agg_source().1.to_vec() } else { t.fields.clone() };
         let prefs = self.prefs.cols.get(&key).cloned().unwrap_or_default();
-        let n = self.prefs.default_cols;
+        let n = self.default_cols();
         let shown = visible_cols(Some(&prefs), &fields, n);
         let mut acts = Vec::new();
         let mut add = None;
@@ -186,7 +220,7 @@ impl App {
                     .iter()
                     .filter(|p| !typed.is_empty() && p.to_lowercase().contains(&typed) && !shown.contains(p))
                     .take(50)
-                    .map(|p| Sug { back: 0, text: p.clone(), note: "field", insert: p.clone(), caret: p.chars().count() })
+                    .map(|p| Sug { sql: None, back: 0, text: p.clone(), note: "field", insert: p.clone(), caret: p.chars().count() })
                     .collect();
                 (!items.is_empty()).then(|| (b.chars().count(), items))
             };
@@ -222,7 +256,7 @@ impl App {
     }
 
     pub(super) fn apply_col_acts(&mut self, key: &str, fields: &[String], acts: Vec<ColAct>) {
-        let n = self.prefs.default_cols;
+        let n = self.default_cols();
         let p = self.prefs.cols.entry(key.to_string()).or_default();
         for a in acts {
             let mut shown = visible_cols(Some(p), fields, n);
@@ -319,17 +353,19 @@ impl App {
     pub(super) fn doc_table(&mut self, ui: &mut egui::Ui, agg: bool, docs: Rows, fields: &[String], base: u64) {
         let key = self.col_key(agg);
         let prefs = self.prefs.cols.get(&key).cloned().unwrap_or_default();
-        let cols = visible_cols(Some(&prefs), fields, self.prefs.default_cols);
+        let cols = visible_cols(Some(&prefs), fields, self.default_cols());
         let indexed: Vec<Option<String>> = cols.iter().map(|c| self.t().and_then(|t| t.indexes_on(c)).map(str::to_string)).collect();
         let summarize = !self.prefs.object_preview;
-        // Measuring lays out every loaded cell of the column, so it is done once per result set
-        // (keyed by where the documents live and how many) instead of on every frame.
+        // Measuring lays out every loaded cell of the column, so it is done once per result set instead of
+        // on every frame. The generation says which answer the rows came from; where they live and how
+        // many say which window of it is on screen.
+        let answer = self.t().map_or(0, |t| t.rows_gen);
         let widths: Vec<f32> = cols
             .iter()
             .map(|c| {
                 prefs.widths.get(c).copied().unwrap_or_else(|| {
                     // The header text is measured too, so a custom label is part of the key.
-                    let k = (docs.addr(), docs.len(), c.clone(), prefs.labels.get(c).cloned(), summarize);
+                    let k = (answer, docs.addr(), docs.len(), c.clone(), prefs.labels.get(c).cloned(), summarize);
                     if let Some(w) = self.width_cache.get(&k) {
                         return *w;
                     }
@@ -346,10 +382,12 @@ impl App {
             .map(|(w, (c, ix))| if ix.is_none() || prefs.widths.contains_key(c) { w } else { w + BOLT_ROOM })
             .collect();
         // The documents view adds a checkbox in front of the row number.
-        let num_w = if agg { NUM_W } else { NUM_W + CHECK_W };
+        // The Documents view and the Shell's result take checks; other results do not.
+        let checks = !agg || self.t().is_some_and(|t| t.view == View::Shell);
+        let num_w = if checks { NUM_W + CHECK_W } else { NUM_W };
         let total: f32 = num_w + widths.iter().sum::<f32>();
         let selected = self.t().unwrap().selected;
-        let checked = if agg { BTreeSet::new() } else { self.t().unwrap().checked.clone() };
+        let checked = if checks { self.checks().clone() } else { BTreeSet::new() };
         let expanded = self.t().unwrap().expanded.clone();
         let mut check_click = None;
         let mut check_all = None;
@@ -357,6 +395,8 @@ impl App {
         let view_w = ui.available_width();
         let mut click = None;
         let mut edit_cell = None;
+        // A double click on a row of grouped results: open that group's rows.
+        let mut drill = None;
         let mut resized = None;
         let mut save_widths = false;
         let mut fit = None;
@@ -365,13 +405,44 @@ impl App {
         let mut cell_acts: Vec<(usize, Vec<TreeAct>)> = Vec::new();
         // Single-field sort shown in the header and set from the column popover.
         let sort = if agg { None } else { self.t().and_then(|t| t.query.sort.clone()).filter(|s| s.len() == 1) };
-        let dir_of = |c: &str| sort.as_ref().and_then(|s| s.get(c)).and_then(|v| match v {
-            Bson::Int32(n) => Some(*n as i64),
-            Bson::Int64(n) => Some(*n),
-            Bson::Double(f) => Some(*f as i64),
-            _ => None,
-        });
-        let aligns: Vec<u8> = cols.iter().map(|c| prefs.align.get(c).copied().unwrap_or(0)).collect();
+        // A SQL tab's sort is the ORDER BY text, which a header click writes as "`col` ASC".
+        let sql_sort = self.t().filter(|t| t.sql.is_some()).map(|t| t.sort_txt.clone());
+        let sql = sql_sort.is_some();
+        let group_cols: Vec<String> = self.t().and_then(|t| t.sql.as_ref()).filter(|s| sql && s.matched.is_some()).map(|s| super::sql_bar::group_names(s)).unwrap_or_default();
+        let sql_grouped = sql && self.t().and_then(|t| t.sql.as_ref()).is_some_and(|s| s.matched.is_some());
+        let dir_of = |c: &str| match &sql_sort {
+            Some(s) => {
+                let q = db::sql::Dialect::MySql.quote_ident(c);
+                if *s == format!("{q} ASC") { Some(1) } else if *s == format!("{q} DESC") { Some(-1) } else { None }
+            }
+            None => sort.as_ref().and_then(|s| s.get(c)).and_then(|v| match v {
+                Bson::Int32(n) => Some(*n as i64),
+                Bson::Int64(n) => Some(*n),
+                Bson::Double(f) => Some(*f as i64),
+                _ => None,
+            }),
+        };
+        let kinds: Vec<Option<db::sql::value::Kind>> = cols.iter().map(|c| self.t().and_then(|t| t.sql.as_ref()).and_then(|s| s.cols.iter().find(|k| &k.name == c)).map(|k| k.kind)).collect();
+        // Numbers read best right-aligned, so SQL numeric columns start that way unless the user chose otherwise.
+        let aligns: Vec<u8> = cols.iter().zip(&kinds).map(|(c, k)| prefs.align.get(c).copied().unwrap_or(if k.is_some_and(is_numeric) { 2 } else { 0 })).collect();
+        // Why a SQL column cannot be edited, or that writes are still locked; shown when a cell is hovered.
+        let locked = sql && !self.sel_writable() && !self.sel_is_view();
+        let sql_why: Vec<Option<String>> = cols
+            .iter()
+            .map(|c| {
+                if !sql {
+                    return None;
+                }
+                self.sql_edit_block().or_else(|| self.sql_col_block(c)).map(String::from).or_else(|| locked.then(|| "Read-only connection. Double-click to unlock writes and edit.".to_string()))
+            })
+            .collect();
+        let sql_edit_ok: Vec<bool> = cols.iter().map(|c| sql && self.sql_edit_block().is_none() && self.sql_col_block(c).is_none()).collect();
+        let sql_nullable: Vec<bool> = cols.iter().map(|c| self.t().and_then(|t| t.sql.as_ref()).and_then(|s| s.cols.iter().find(|k| &k.name == c)).is_some_and(|k| k.nullable)).collect();
+        let mut sql_acts: Vec<(usize, String, CellAct)> = Vec::new();
+        // A column that belongs to a foreign key gets a link that opens the row it points to.
+        let fks = if sql && !agg && !sql_grouped { self.sql_fks() } else { Vec::new() };
+        let fk_of: Vec<Option<usize>> = cols.iter().map(|c| self.t().and_then(|t| t.sql.as_ref()).and_then(|s| s.cols.iter().find(|k| &k.name == c)).and_then(|k| fks.iter().position(|f| f.cols.iter().any(|x| *x == k.src)))).collect();
+        let mut fk_open: Option<(usize, usize)> = None;
         let hl_cols: Vec<bool> = cols.iter().map(|c| prefs.highlight.contains(&db::strip_indices(c))).collect();
         let related = if agg { HashMap::new() } else { self.t().map(|t| t.related.clone()).unwrap_or_default() };
         let in_coll = self.in_coll();
@@ -390,7 +461,7 @@ impl App {
                 let p = ui.painter();
                 p.rect_filled(hr, egui::CornerRadius { nw: R_MD - 1, ne: R_MD - 1, sw: 0, se: 0 }, HDR());
                 p.text(egui::pos2(hr.left() + (num_w - NUM_W) + 18.0, hr.center().y), egui::Align2::LEFT_CENTER, "#", FontId::monospace(TXT_CAPTION), FAINT());
-                if !agg {
+                if checks {
                     let all = checked.len() == docs.len();
                     let r = check_box(ui, egui::pos2(hr.left() + 13.0, hr.center().y), ui.scope_id().with("check-all"), all, !all && !checked.is_empty());
                     if r.on_hover_text("Select every document on this page").clicked() {
@@ -423,7 +494,12 @@ impl App {
                     if ix.is_some() {
                         paint_bolt(&clip, egui::pos2(gx + g.size().x + 4.0, cell.center().y));
                     }
-                    clip.galley(egui::pos2(gx, cell.center().y - g.size().y / 2.0), g, color);
+                    let (gw, gh) = (g.size().x, g.size().y);
+                    clip.galley(egui::pos2(gx, cell.center().y - gh / 2.0), g, color);
+                    if group_cols.contains(c) {
+                        let tag = ui.fonts_mut(|f| f.layout_no_wrap("group".into(), FontId::monospace(TXT_CAPTION - 1.0), FAINT()));
+                        clip.galley(egui::pos2(gx + gw + 6.0, cell.center().y - tag.size().y / 2.0), tag, FAINT());
+                    }
                     // Built only while hovered, not for every header on every frame.
                     let hresp = if label != c || ix.is_some() {
                         hresp.on_hover_ui(|ui| {
@@ -439,10 +515,15 @@ impl App {
                         hresp.on_hover_text("Click for column options")
                     };
                     // Left and right click both open it; a second left click closes it.
-                    let open = if hresp.secondary_clicked() { Some(egui::SetOpenCommand::Bool(true)) } else if hresp.clicked() { Some(egui::SetOpenCommand::Toggle) } else { None };
+                    // Shift-click on a SQL header adds a sort key instead of opening the menu.
+                    let shift_sort = sql && hresp.clicked() && ui.input(|i| i.modifiers.shift);
+                    if shift_sort {
+                        head_acts.push((c.clone(), HeadAct::AddSort));
+                    }
+                    let open = if hresp.secondary_clicked() { Some(egui::SetOpenCommand::Bool(true)) } else if hresp.clicked() && !shift_sort { Some(egui::SetOpenCommand::Toggle) } else { None };
                     let mut acts = Vec::new();
                     // Clicks inside, such as the Data scope switch, keep it open; each action closes it itself.
-                    egui::Popup::menu(&hresp).open_memory(open).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(190.0).show(|ui| col_popover(ui, c, agg, dir, &prefs, &mut scope_query, &mut acts));
+                    egui::Popup::menu(&hresp).open_memory(open).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(190.0).show(|ui| col_popover(ui, c, agg, sql, dir, &prefs, &mut scope_query, &mut acts));
                     head_acts.extend(acts.into_iter().map(|a| (c.clone(), a)));
                     // Drag the right edge to resize.
                     let handle = egui::Rect::from_min_max(egui::pos2(cell.right() - 3.0, cell.top() + 6.0), egui::pos2(cell.right() + 3.0, cell.bottom() - 6.0));
@@ -469,6 +550,7 @@ impl App {
                         Some(d) => db::get_path(d, c).map(Val::B),
                         None => docs.value(i, c),
                     };
+                    let staged = if sql && drafted.is_some() { self.sql_staged_cols(docs, i) } else { Vec::new() };
                     let active = selected == Some((agg, i));
                     let (rr, resp) = ui.allocate_exact_size(egui::vec2(row_w, ROW_H), Sense::click());
                     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -484,13 +566,13 @@ impl App {
                             p.rect_filled(rr, 0, fill);
                         }
                         let off = num_w - NUM_W;
-                        if self.prefs.open_inline {
+                        if self.prefs.open_inline && !sql {
                             chevron(p, egui::pos2(rr.left() + off + 9.0, rr.center().y), active || expanded.contains(&(agg, i)), if active { PRIMARY() } else { FAINT() });
                         }
                         let num = (base + i as u64 + 1).to_string();
                         let (num, nc) = if drafted.is_some() { (format!("{num}●"), WARNING()) } else { (num, FAINT()) };
                         p.text(egui::pos2(rr.left() + off + 18.0, rr.center().y), egui::Align2::LEFT_CENTER, num, FontId::monospace(TXT_CAPTION), nc);
-                        if !agg && check_box(ui, egui::pos2(rr.left() + 13.0, rr.center().y), ui.scope_id().with(("check", i)), checked.contains(&i), false).clicked() {
+                        if checks && check_box(ui, egui::pos2(rr.left() + 13.0, rr.center().y), ui.scope_id().with(("check", i)), checked.contains(&i), false).clicked() {
                             check_click = Some(i);
                         }
                         let mut x = rr.left() + num_w;
@@ -504,13 +586,27 @@ impl App {
                             if hl_cols[ci] {
                                 ui.painter().rect_filled(cell, 0, HIGHLIGHT());
                             }
+                            // An unsaved edit: the warning tint with a bar on the left edge.
+                            if staged.iter().any(|s| s == c) {
+                                ui.painter().rect_filled(cell, 0, tint(WARNING(), 34));
+                                ui.painter().rect_filled(egui::Rect::from_min_size(cell.min, egui::vec2(2.0, cell.height())), 0, WARNING());
+                            }
+                            if sql && self.sql_cell.as_ref().is_some_and(|e| e.id == docs.id(i) && e.col == *c) {
+                                self.sql_cell_editor(ui, cell);
+                                x += w;
+                                continue;
+                            }
                             let clip = ui.painter().with_clip_rect(cell.shrink2(egui::vec2(6.0, 0.0)));
                             let v = value(c);
                             match v {
                                 Some(v) => {
-                                    let mut job = column_job(v, summarize);
+                                    let mut job = match kinds[ci] {
+                                        Some(k) => sql_cell_job(v, k, true),
+                                        None => column_job(v, summarize),
+                                    };
                                     // Ends in an ellipsis at the cell's padding instead of being cut mid-glyph by the clip.
-                                    job.wrap = egui::text::TextWrapping::truncate_at_width(w - 14.0);
+                                    let fk_room = if fk_of[ci].is_some() { FK_W } else { 0.0 };
+                                    job.wrap = egui::text::TextWrapping::truncate_at_width(w - 14.0 - fk_room);
                                     let g = ui.fonts_mut(|f| f.layout_job(job));
                                     let gw = g.size().x;
                                     // Ids only, checked before compact(): that turns the whole value into JSON,
@@ -518,7 +614,7 @@ impl App {
                                     let rel = (!related.is_empty() && v.id_like()).then(|| related.get(&db::compact(&v.bson()))).flatten();
                                     let rg = rel.map(|p| ui.fonts_mut(|f| f.layout_no_wrap(p.clone(), FontId::proportional(TXT_SMALL), C_LINK())));
                                     // The value and its preview are aligned as one, so the preview stays inside the cell.
-                                    let vx = align_x(aligns[ci], x, *w, gw + rg.as_ref().map_or(0.0, |r| 6.0 + r.size().x));
+                                    let vx = align_x(aligns[ci], x, *w - fk_room, gw + rg.as_ref().map_or(0.0, |r| 6.0 + r.size().x));
                                     clip.galley(egui::pos2(vx, cell.center().y - g.size().y / 2.0), g, TEXT());
                                     if let Some(r) = rg {
                                         clip.galley(egui::pos2(vx + gw + 6.0, cell.center().y - r.size().y / 2.0), r, C_LINK());
@@ -529,14 +625,41 @@ impl App {
                                     clip.galley(egui::pos2(align_x(aligns[ci], x, *w, g.size().x), cell.center().y - g.size().y / 2.0), g, FAINT());
                                 }
                             }
-                            let cr = ui.interact(cell, ui.scope_id().with(("c", i, ci)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
-                            if cr.double_clicked() {
+                            let mut cr = ui.interact(cell, ui.scope_id().with(("c", i, ci)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                            if let Some(why) = &sql_why[ci] {
+                                cr = cr.on_hover_text(why.as_str());
+                            }
+                            // Added after the cell so it takes the click; a NULL points to nothing and gets no link.
+                            if let (Some(k), Some(val)) = (fk_of[ci], v) {
+                                if !matches!(*val.bson(), Bson::Null) {
+                                    let fr = fk_link(ui, cell, ui.scope_id().with(("fk", i, ci)), &fks[k]);
+                                    if fr.clicked() {
+                                        fk_open = Some((i, k));
+                                    }
+                                }
+                            }
+                            if cr.double_clicked() && sql_grouped {
+                                drill = Some(i);
+                            } else if cr.double_clicked() {
                                 edit_cell = Some((i, c.clone()));
                             } else if cr.clicked() {
                                 click = Some(i);
                             }
                             let mut acts = Vec::new();
-                            if let Some(v) = v {
+                            if sql && !agg {
+                                cr.context_menu(|ui| {
+                                    menu_look(ui);
+                                    // A checked row's menu is the selection's; a single cell also offers its value actions.
+                                    if !checked.contains(&i) {
+                                        if let Some(a) = sql_cell_menu(ui, sql_nullable[ci], sql_edit_ok[ci]) {
+                                            sql_acts.push((i, c.clone(), a));
+                                            ui.close();
+                                        }
+                                        ui.separator();
+                                    }
+                                    row_act = any_row_menu(ui, menu, i, docs, &checked).or(row_act.take());
+                                });
+                            } else if let (Some(v), false) = (v, sql) {
                                 let path: Vec<String> = c.split('.').map(String::from).collect();
                                 cr.context_menu(|ui| {
                                     menu_look(ui);
@@ -573,7 +696,7 @@ impl App {
                     if menu != RowMenu::None {
                         resp.context_menu(|ui| row_act = any_row_menu(ui, menu, i, docs, &checked).or(row_act.take()));
                     }
-                    if (active || expanded.contains(&(agg, i))) && self.prefs.open_inline {
+                    if (active || expanded.contains(&(agg, i))) && self.prefs.open_inline && !sql {
                         ui.add_space(4.0);
                         // Spans every column like the rows above it, not just the visible part.
                         let w = row_w.max(320.0);
@@ -612,7 +735,7 @@ impl App {
             self.toggle_check(i, ui.input(|i| i.modifiers.shift));
         }
         if let Some(on) = check_all {
-            self.tm().unwrap().checked = if on { (0..docs.len()).collect() } else { BTreeSet::new() };
+            *self.checks_mut().0 = if on { (0..docs.len()).collect() } else { BTreeSet::new() };
         }
         self.row_act(ui, row_act, docs, &checked);
         for (i, acts) in cell_acts {
@@ -620,7 +743,22 @@ impl App {
             let Some(d) = self.shown_row(docs, i, agg).or_else(|| docs.owned(i)) else { continue };
             self.handle_acts(&d, acts);
         }
-        if let (Some((i, c)), false) = (edit_cell, agg) {
+        if let Some(i) = drill {
+            self.sql_drill(i);
+        }
+        let fk_row = fk_open.and_then(|(i, k)| self.shown_row(docs, i, agg).or_else(|| docs.owned(i)).map(|d| (k, d)));
+        if let (Some((i, c)), true) = (&edit_cell, sql) {
+            self.sql_open_cell(*i, c.clone());
+        }
+        if sql {
+            self.sql_cell_finish();
+            self.sql_cell_acts(ui.ctx(), sql_acts);
+        }
+        // After the cell editor finished on this tab: the link click that took its focus stages its edit here first.
+        if let Some((k, d)) = fk_row {
+            self.open_fk_row(&fks[k], &d);
+        }
+        if let (Some((i, c)), false) = (edit_cell, agg || sql) {
             self.select(agg, i, false);
             let path: Vec<String> = c.split('.').map(String::from).collect();
             let d = self.shown_row(docs, i, false).or_else(|| docs.owned(i)).unwrap_or_default();
@@ -689,8 +827,11 @@ impl App {
     /// Documents rows get the document menu, Indexes rows the index menu, other result rows none.
     fn row_menu_kind(&self, agg: bool) -> RowMenu {
         match (agg, self.t().map(|t| t.view)) {
+            (false, _) if self.t().and_then(|t| t.sql.as_ref()).is_some_and(|s| s.matched.is_some()) => RowMenu::SqlGrouped,
+            (false, _) if self.t().is_some_and(|t| t.sql.is_some()) => RowMenu::Sql,
             (false, _) => RowMenu::Docs,
             (true, Some(View::Indexes)) => RowMenu::Indexes,
+            (true, Some(View::Shell)) => RowMenu::Results(self.t().is_some_and(|t| t.sql.is_some())),
             _ => RowMenu::None,
         }
     }
@@ -713,6 +854,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sql_shows_every_column_by_default() {
+        let fields: Vec<String> = (0..30).map(|i| format!("f{i}")).collect();
+        assert_eq!(visible_cols(None, &fields, default_n(true, DEFAULT_COLS)).len(), 30);
+        assert_eq!(visible_cols(None, &fields, default_n(false, DEFAULT_COLS)).len(), DEFAULT_COLS);
+    }
+
+    #[test]
     fn columns_default_pin_and_move() {
         let fields: Vec<String> = (0..12).map(|i| format!("f{i}")).collect();
         assert_eq!(visible_cols(None, &fields, DEFAULT_COLS).len(), DEFAULT_COLS);
@@ -724,7 +872,7 @@ mod tests {
 }
 
 /// A result row's fill: selection, then checked, pressed and hovered, then the zebra stripe.
-fn row_fill(active: bool, checked: bool, hovered: bool, pressed: bool, odd: bool) -> Color32 {
+pub(super) fn row_fill(active: bool, checked: bool, hovered: bool, pressed: bool, odd: bool) -> Color32 {
     match () {
         _ if active => if hovered { SEL_HOVER() } else { SEL() },
         _ if checked => tint(PRIMARY(), if hovered { 38 } else { 26 }),

@@ -146,7 +146,7 @@ impl App {
         let mut run = false;
         let mut explain = false;
         let key = self.col_key(false);
-        let agg_lib: Vec<SavedQuery> = self.prefs.library.get(&key).map(|v| v.iter().filter(|q| q.pipeline.is_some()).cloned().collect()).unwrap_or_default();
+        let agg_lib: Vec<SavedQuery> = library_of(&self.prefs.library, &key, LibKind::Pipeline);
         let mut agg_acts = Vec::new();
         let mut code_lang = None;
         let mut agg_new = std::mem::take(&mut self.new_lib);
@@ -175,7 +175,7 @@ impl App {
                     ui.checkbox(&mut auto_now, "Auto preview").on_hover_text("Preview each stage a second after you stop typing. Every preview runs two read-only aggregations on the server.");
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    library_menu(ui, &agg_lib, &mut agg_new, true, false, &mut agg_acts);
+                    library_menu(ui, &agg_lib, &mut agg_new, LibKind::Pipeline, false, &mut agg_acts);
                 });
             });
             if builder {

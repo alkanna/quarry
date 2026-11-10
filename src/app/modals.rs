@@ -109,6 +109,7 @@ impl App {
             match &mut m {
                 Modal::Conn(f) => self.conn_dialog(ui, f, &mut keep),
                 Modal::Settings => self.settings_dialog(ui, &mut keep),
+                Modal::Attach(f) => self.attach_dialog(ui, f, &mut keep),
                 Modal::Unlock(id, then) => {
                     let name = self.conn(*id).map(|c| c.meta.name.clone()).unwrap_or_default();
                     dialog_title(ui, format!("Allow writes on \"{name}\"?"));
@@ -153,24 +154,35 @@ impl App {
                         }
                     });
                 }
-                Modal::Delete(docs) => {
+                Modal::Delete(at, docs) => {
                     const SHOWN: usize = 5;
-                    let ids: Vec<String> = docs.iter().take(SHOWN).map(|d| d.get("_id").map(db::short).unwrap_or_default()).collect();
+                    let sql = self.conn(at.conn).is_some_and(|c| c.sql.is_some());
+                    let ids: Vec<String> = docs.iter().take(SHOWN).map(|d| d.get("_id").map(|k| if sql { k.as_document().map(|k| k.values().map(db::short).collect::<Vec<_>>().join("-")).unwrap_or_default() } else { db::short(k) }).unwrap_or_default()).collect();
                     let more = if docs.len() > SHOWN { format!(" and {} more", docs.len() - SHOWN) } else { String::new() };
-                    dialog_title(ui, if docs.len() == 1 { "Delete this document?".to_string() } else { format!("Delete {} documents?", docs.len()) });
-                    ui.label(RichText::new(format!("_id {}{more}. You can undo this for 24 hours.", ids.join(", "))).monospace().color(MUTED()));
+                    let noun = if sql { "row" } else { "document" };
+                    dialog_title(ui, if docs.len() == 1 { format!("Delete this {noun}?") } else { format!("Delete {} {noun}s?", docs.len()) });
+                    ui.label(RichText::new(format!("{} {}{more}. You can undo this for 24 hours.", if sql { "Key" } else { "_id" }, ids.join(", "))).monospace().color(MUTED()));
                     dialog_actions(ui, |ui| {
-                        if primary(ui, "Delete", ALERT()).clicked() {
-                            if let Some((conn, target)) = self.writable_target() {
-                                match docs.as_slice() {
-                                    [d] => self.worker.delete(conn, target, d.clone(), true),
-                                    _ => self.worker.delete_docs(conn, target, docs.clone()),
+                        let del = primary(ui, "Delete", ALERT()).clicked();
+                        // Run on the tab the rows were picked in: tabs can close or move while the dialog is open.
+                        if del && sql {
+                            let docs = docs.clone();
+                            self.on_tab(&at.clone(), |a| a.sql_delete(docs));
+                            keep = false;
+                        } else if del {
+                            let docs = docs.clone();
+                            self.on_tab(&at.clone(), |a| {
+                                if let Some((conn, target)) = a.writable_target() {
+                                    match docs.as_slice() {
+                                        [d] => a.worker.delete(conn, target, d.clone(), true),
+                                        _ => a.worker.delete_docs(conn, target, docs.clone()),
+                                    }
+                                    // The reload drops deleted rows from the checks; others stay checked.
+                                    if let Some(t) = a.tm() {
+                                        t.selected = None;
+                                    }
                                 }
-                                // The reload drops deleted rows from the checks; others stay checked.
-                                if let Some(t) = self.tm() {
-                                    t.selected = None;
-                                }
-                            }
+                            });
                             keep = false;
                         }
                         if ui.button("Cancel").clicked() {
@@ -178,6 +190,20 @@ impl App {
                         }
                     });
                 }
+                Modal::Export(f) => self.export_dialog(ui, f, &mut keep),
+                Modal::SqlImport(f) => self.sql_import_dialog(ui, f, &mut keep),
+                Modal::SqlDump(f) => self.sql_dump_dialog(ui, f, &mut keep),
+                Modal::SqlRunFile(f) => self.sql_run_file_dialog(ui, f, &mut keep),
+                Modal::SqlSet(f) => self.sql_set_dialog(ui, f, &mut keep),
+                Modal::SqlRow(f) => self.sql_row_dialog(ui, f, &mut keep),
+                Modal::ColEdit(f) => self.col_dialog(ui, f, &mut keep),
+                Modal::IdxEdit(f) => self.idx_dialog(ui, f, &mut keep),
+                Modal::SqlNewDb(f) => self.sql_new_db_dialog(ui, f, &mut keep),
+                Modal::SqlNewTable(f) => self.sql_new_table_dialog(ui, f, &mut keep),
+                Modal::SqlDrop(f) => self.sql_drop_dialog(ui, f, &mut keep),
+                Modal::SqlNewUser(f) => self.sql_new_user_dialog(ui, f, &mut keep),
+                Modal::SqlPassword(f) => self.sql_password_dialog(ui, f, &mut keep),
+                Modal::FkEdit(f) => self.fk_dialog(ui, f, &mut keep),
                 Modal::Typed { title, expect, typed, action } => {
                     ui.label(semibold(RichText::new(title.as_str()).color(BRIGHT())));
                     ui.label(RichText::new(format!("Type {expect} to confirm (case sensitive).")).color(MUTED()));
@@ -339,13 +365,23 @@ impl App {
                     });
                 }
                 Modal::SaveAll(keys) => {
+                    let sql = self.t().is_some_and(|t| t.sql.is_some());
                     let n: usize = keys.iter().filter_map(|k| self.drafts.get(k)).map(|d| db::diff(&d.original, &d.current).len()).sum();
-                    dialog_title(ui, format!("Save {} documents ({n} changes)?", keys.len()));
-                    ui.label(RichText::new("Each document is refused if someone else changed it since you opened it; its edits are kept.").color(MUTED()));
+                    if sql {
+                        dialog_title(ui, format!("Save {n} cell{} in {} row{}?", if n == 1 { "" } else { "s" }, keys.len(), if keys.len() == 1 { "" } else { "s" }));
+                        ui.label(RichText::new("They are written in one transaction. If a row changed on the server since you opened it, nothing is written and the edits stay staged.").color(MUTED()));
+                    } else {
+                        dialog_title(ui, format!("Save {} documents ({n} changes)?", keys.len()));
+                        ui.label(RichText::new("Each document is refused if someone else changed it since you opened it; its edits are kept.").color(MUTED()));
+                    }
                     dialog_actions(ui, |ui| {
                         if primary(ui, "Save all", PRIMARY()).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
-                            for k in keys.iter() {
-                                self.write_draft(k);
+                            if sql {
+                                self.write_sql_drafts(keys.clone());
+                            } else {
+                                for k in keys.iter() {
+                                    self.write_draft(k);
+                                }
                             }
                             keep = false;
                         }
@@ -384,7 +420,7 @@ impl App {
                             // Next to the current tab, like the original's nextToActive.
                             let at = (self.cur + 1).min(self.tabs.len());
                             self.tabs.insert(at, t);
-                            self.cur = at;
+                            self.set_cur(at);
                             self.reset_doc_state();
                             self.run_pipeline(pipeline.clone());
                             keep = false;
@@ -557,9 +593,10 @@ impl App {
                                     UndoKind::Delete { old } => format!("deleted {}", old.get("_id").map(db::short).unwrap_or_default()),
                                     UndoKind::DeleteMany { old } => format!("deleted {} documents", old.len()),
                                     UndoKind::Update { old, .. } => format!("edited {}", old.get("_id").map(db::short).unwrap_or_default()),
+                                    UndoKind::Sql { undo, .. } => undo.describe(),
                                 };
                                 let mins = a.at.elapsed().as_secs() / 60;
-                                ui.label(RichText::new(format!("{}.{}  {what}", a.db, a.coll)).monospace());
+                                ui.label(RichText::new(format!("{}{}{}  {what}", a.db, if a.coll.is_empty() { "" } else { "." }, a.coll)).monospace());
                                 ui.label(RichText::new(format!("{mins} min ago")).color(MUTED()));
                                 if ui.button("Undo").clicked() {
                                     pick = Some(i);
@@ -593,8 +630,9 @@ impl App {
                     }
                     let mut pick = if enter { items.get(*sel).map(|x| x.2.clone()) } else { None };
                     ui.add_space(4.0);
-                    // Full width, so the scrollbar sits on the dialog edge rather than after the longest row.
-                    egui::ScrollArea::vertical().max_height(360.0).auto_shrink([false, true]).show(ui, |ui| {
+                    // Full width, so the scrollbar sits on the dialog edge rather than after the longest row. The
+                    // dialog sizes itself from its content, so without a minimum the list starts scrolling at egui's 64 px.
+                    egui::ScrollArea::vertical().max_height(360.0).min_scrolled_height(360.0).auto_shrink([false, true]).show(ui, |ui| {
                         if items.is_empty() {
                             ui.label(RichText::new("No matches").color(MUTED()));
                         }
@@ -623,6 +661,10 @@ impl App {
         });
         if keep && !r.should_close() && self.modal.is_none() {
             self.modal = Some(m);
+        } else if matches!(m, Modal::Conn(_)) {
+            // A Test still running when the form closes must not show in the next form.
+            self.conn_test = None;
+            self.test_info = None;
         }
     }
 }

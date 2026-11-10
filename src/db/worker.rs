@@ -3,9 +3,9 @@
 use super::*;
 
 pub struct Worker {
-    rt: tokio::runtime::Runtime,
-    tx: Sender<Msg>,
-    ctx: eframe::egui::Context,
+    pub(in crate::db) rt: tokio::runtime::Runtime,
+    pub(in crate::db) tx: Sender<Msg>,
+    pub(in crate::db) ctx: eframe::egui::Context,
 }
 
 /// How many leading documents of an ordered insert_many batch were written before `err`.
@@ -114,7 +114,7 @@ impl Worker {
         self.spawn(async move { m });
     }
 
-    fn spawn(&self, f: impl Future<Output = Msg> + Send + 'static) {
+    pub(in crate::db) fn spawn(&self, f: impl Future<Output = Msg> + Send + 'static) {
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         self.rt.spawn(async move {
@@ -125,6 +125,12 @@ impl Worker {
         });
     }
 
+    /// `spawn` for a job that runs SQL, with its statements logged under this connection and database. A job
+    /// that skipped the scope would log nothing and nobody would notice, so every SQL job starts here.
+    pub(in crate::db) fn spawn_sql(&self, conn: u64, schema: &str, f: impl Future<Output = Msg> + Send + 'static) {
+        self.spawn(sql_scope(conn, schema, f));
+    }
+
     pub fn connect(&self, conn: u64, uri: String, timeout: Duration, net: Net) {
         self.spawn(async move {
             let res = open_client(conn, &uri, timeout, &net).await;
@@ -133,7 +139,7 @@ impl Worker {
     }
 
     /// Connects and lists databases without keeping anything, for the connection form.
-    pub fn test(&self, uri: String, timeout: Duration, net: Net) {
+    pub fn test(&self, req: u64, uri: String, timeout: Duration, net: Net) {
         self.spawn(async move {
             let res = open_client(0, &uri, timeout, &net).await.map(|(_, dbs, t)| {
                 let via = match (&t, &net.proxy) {
@@ -143,7 +149,7 @@ impl Worker {
                 };
                 format!("Connected{via}: {} databases.", dbs.len())
             });
-            Msg::Tested { res }
+            Msg::Tested { req, res, info: None }
         });
     }
 
@@ -186,8 +192,12 @@ impl Worker {
             let res = async {
                 let d = client.database(&db);
                 // Independent reads, so they share one round trip.
-                let (info, indexes) = tokio::try_join!(d.run_command(doc! { "listCollections": 1, "filter": { "name": &from } }), d.run_command(doc! { "listIndexes": &from })).map_err(e)?;
+                let (info, indexes, taken) = tokio::try_join!(d.run_command(doc! { "listCollections": 1, "filter": { "name": &from } }), d.run_command(doc! { "listIndexes": &from }), d.run_command(doc! { "listCollections": 1, "filter": { "name": &to }, "nameOnly": true })).map_err(e)?;
                 let (info, indexes) = (first_batch(info)?, first_batch(indexes)?);
+                // Since MongoDB 7 create succeeds on a collection that exists with the same options, so it alone no longer refuses a taken name.
+                if !first_batch(taken)?.is_empty() {
+                    return Err(format!("{to} already exists in {db}"));
+                }
                 let mut opts = info.first().and_then(Bson::as_document).and_then(|c| c.get_document("options").ok()).cloned().unwrap_or_default();
                 // $merge cannot write into either kind, and a plain copy would quietly drop what makes them special.
                 if opts.get_bool("capped").unwrap_or(false) || opts.contains_key("timeseries") {
@@ -196,8 +206,8 @@ impl Worker {
                 if let Ok(ci) = opts.get_document_mut("clusteredIndex") {
                     ci.remove("v");
                 }
-                // Creating the copy first refuses a taken name atomically, where $out would replace that collection,
-                // and keeps the source's validator, collation and other settings.
+                // Creating the copy first refuses a name taken since the check above with other options, where $out would
+                // replace that collection, and keeps the source's validator, collation and other settings.
                 let mut create = doc! { "create": &to };
                 create.extend(opts);
                 d.run_command(create).await.map_err(e)?;
@@ -1042,7 +1052,7 @@ impl Worker {
 pub(crate) async fn open_client(conn: u64, uri: &str, timeout: Duration, net: &Net) -> Res<(Client, Vec<String>, Option<crate::ssh::Tunnel>)> {
     use mongodb::options::Socks5Proxy;
     let tunnel = match &net.ssh {
-        Some((conf, secrets)) => Some(crate::ssh::open(conf, secrets, timeout).await?),
+        Some((conf, secrets)) => Some(crate::ssh::open(conf, secrets, timeout, None).await?),
         None => None,
     };
     let mut o = ClientOptions::parse(uri).await.map_err(e)?;
@@ -1277,7 +1287,8 @@ mod tests {
         // A second copy onto the same name is refused instead of replacing it.
         w.duplicate_coll(0, t.client.clone(), t.db.clone(), t.coll.clone(), copy.coll.clone());
         let Msg::DbChanged { res, .. } = next(&rx) else { panic!("expected DbChanged") };
-        assert!(res.unwrap_err().contains("already exists"));
+        let err = res.unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
     }
 
     #[test]

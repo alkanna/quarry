@@ -65,6 +65,8 @@ pub(super) struct UiPrefs {
     pub(super) schema_maps: HashMap<String, Vec<String>>,
     /// The connection picked when the app was last used, connected again at launch.
     pub(super) last_conn: Option<u64>,
+    /// Every connection open when the app was last used, in rail order, connected again at launch.
+    pub(super) open_conns: Vec<u64>,
     /// Per "conn/db": fields that point to documents of another collection.
     pub(super) relations: HashMap<String, Vec<Relation>>,
     /// Paths to mongodump and mongorestore; empty means find them automatically.
@@ -87,6 +89,9 @@ pub(super) struct UiPrefs {
     pub(super) appearance: Appearance,
     /// The database explorer collapsed from the activity rail.
     pub(super) sidebar_hidden: bool,
+    /// Height the person dragged the SQL Query and Shell editors to; 0 sizes them to their text.
+    pub(super) query_editor_h: f32,
+    pub(super) shell_editor_h: f32,
     /// The version that last ran, to show the changelog once after an update.
     pub(super) last_version: String,
 }
@@ -141,6 +146,8 @@ pub(super) struct SavedQuery {
     pub(super) sort: String,
     pub(super) project: String,
     pub(super) pipeline: Option<String>,
+    /// A SQL script, for the Query view of a SQL connection. Those live under `{conn}/#sql`, apart from the Mongo lists.
+    pub(super) sql: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Default)]
@@ -159,6 +166,12 @@ pub(super) struct SavedTab {
     pub(super) project: String,
     pub(super) agg: String,
     pub(super) shell: String,
+    /// Connections attached to the tab's shell.
+    pub(super) attached: Vec<Attached>,
+    /// The SQL Content bar's clauses as JSON (`sql_bar::Clauses`); empty for other tabs.
+    pub(super) clauses: String,
+    /// The text of a SQL tab's Query view.
+    pub(super) query: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Default)]
@@ -171,7 +184,7 @@ pub(super) struct SavedStage {
 
 impl Default for UiPrefs {
     fn default() -> Self {
-        Self { open_inline: true, table: true, confirm_save: false, auto_save: false, always_writable: false, default_cols: DEFAULT_COLS, page_size: db::PAGE_SIZE, timeout_ms: db::DEFAULT_TIMEOUT_MS, shell_runtime: String::new(), shell_histories: HashMap::new(), shell_packages: Vec::new(), history: HashMap::new(), library: HashMap::new(), open_tabs: Vec::new(), cur_tab: 0, last_conn: None, cols: HashMap::new(), schema_maps: HashMap::new(), relations: HashMap::new(), mongodump: String::new(), mongorestore: String::new(), auto_update: true, auto_preview: true, show_server: false, show_fps: false, show_mem: false, show_cpu: false, object_preview: false, appearance: Appearance::System, sidebar_hidden: false, last_version: String::new() }
+        Self { open_inline: true, table: true, confirm_save: false, auto_save: false, always_writable: false, default_cols: DEFAULT_COLS, page_size: db::PAGE_SIZE, timeout_ms: db::DEFAULT_TIMEOUT_MS, shell_runtime: String::new(), shell_histories: HashMap::new(), shell_packages: Vec::new(), history: HashMap::new(), library: HashMap::new(), open_tabs: Vec::new(), cur_tab: 0, last_conn: None, open_conns: Vec::new(), cols: HashMap::new(), schema_maps: HashMap::new(), relations: HashMap::new(), mongodump: String::new(), mongorestore: String::new(), auto_update: true, auto_preview: true, show_server: false, show_fps: false, show_mem: false, show_cpu: false, object_preview: false, appearance: Appearance::System, sidebar_hidden: false, query_editor_h: 0.0, shell_editor_h: 0.0, last_version: String::new() }
     }
 }
 
@@ -461,5 +474,17 @@ mod tests {
         assert!(err.is_some());
         assert!(p.exists() && dir.join("connections.json.bak").exists());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_connection_saved_before_the_advanced_tab_loads_with_defaults_and_saves_unchanged() {
+        let old = r#"{"id": 3, "name": "shop", "engine": "MySql", "tag": "Production"}"#;
+        let m: ConnMeta = serde_json::from_str(old).unwrap();
+        assert!(m.advanced.is_default());
+        // A default is not written, so a file stays as it was for older builds too.
+        assert!(!serde_json::to_string(&m).unwrap().contains("advanced"));
+        let set = ConnMeta { advanced: db::sql::Advanced { query_secs: Some(5), sql_mode: Some(vec!["ANSI_QUOTES".into()]), ..Default::default() }, ..m };
+        let back: ConnMeta = serde_json::from_str(&serde_json::to_string(&set).unwrap()).unwrap();
+        assert_eq!(back.advanced, set.advanced);
     }
 }
