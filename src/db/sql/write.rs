@@ -422,7 +422,7 @@ impl Worker {
             }
             if let UndoKind::Sql { undo: SqlUndo::Account(u), .. } = &kind {
                 let u = (**u).clone();
-                return super::users::undo(&db, UndoAction { at: when, conn, db: schema, coll: table, kind }, u, read_only).await;
+                return crate::db::sql_scope(db.conn, "", super::users::undo(&db, UndoAction { at: when, conn, db: schema, coll: table, kind }, u, read_only)).await;
             }
             let UndoKind::Sql { cols, undo } = kind else { return Msg::Written { at, res: Err("Not a SQL change".into()), undo: None, reload: false, retry: None } };
             if let Err(err) = key_unchanged(&db, &schema, &table, &undo.pk_names()).await {

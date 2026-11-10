@@ -521,7 +521,11 @@ pub fn target_matches(t: &KillTarget, user: &str, host: &str, info: &str) -> boo
 
 /// KILL QUERY or KILL on a connection of its own (a busy or exhausted pool never blocks it), after checking on
 /// that same connection that it reached the same server and that the thread is still the one the list showed.
-async fn kill_checked(db: &Db, t: &KillTarget, whole: bool) -> Res<String> {
+async fn kill_checked(db: &Db, t: &KillTarget, whole: bool, read_only: bool) -> Res<String> {
+    // The window hides Kill on a locked connection; this keeps a stale or forged request from getting through.
+    if read_only {
+        return Err("Kill is locked on this connection. Unlock writes first.".into());
+    }
     let mut c = tokio::time::timeout(Duration::from_secs(10), sqlx::MySqlConnection::connect_with(&db.opts)).await.map_err(|_| "Could not reach the server to kill it".to_string())?.map_err(e)?;
     let r = kill_on(&mut c, db.dialect, t, whole).await;
     let _ = c.close().await;
@@ -559,9 +563,9 @@ impl Worker {
     }
 
     /// `whole` ends the connection (KILL), otherwise only its running statement (KILL QUERY).
-    pub fn sql_server_kill(&self, db: Db, req: u64, target: KillTarget, whole: bool) {
+    pub fn sql_server_kill(&self, db: Db, req: u64, target: KillTarget, whole: bool, read_only: bool) {
         self.spawn(async move {
-            let res = kill_checked(&db, &target, whole).await;
+            let res = kill_checked(&db, &target, whole, read_only).await;
             Msg::SqlServer { req, ans: Answer::Kill { whole, res } }
         });
     }
@@ -817,7 +821,7 @@ mod tests {
             let all = l.w.rt.block_on(processes(&l.db)).unwrap();
             assert!(all.rows.iter().any(|r| r.id == all.me && r.info.contains("PROCESSLIST")));
             assert!(all.uptime.is_some_and(|u| u > 0) && !all.identity.is_empty());
-            l.w.rt.block_on(kill_checked(&l.db, &target(l, &p), false)).unwrap();
+            l.w.rt.block_on(kill_checked(&l.db, &target(l, &p), false, false)).unwrap();
         });
     }
 
@@ -826,7 +830,7 @@ mod tests {
         every_server(|l, _| {
             let (rx, id) = sleeper(l);
             let p = wait_listed(l, id, 10).expect("listed");
-            l.w.rt.block_on(kill_checked(&l.db, &target(l, &p), false)).unwrap();
+            l.w.rt.block_on(kill_checked(&l.db, &target(l, &p), false, false)).unwrap();
             let (out, alive) = rx.recv_timeout(Duration::from_secs(10)).unwrap();
             assert!(alive, "the connection answers the next statement after KILL QUERY");
             // The error is the statement's own.
@@ -841,14 +845,30 @@ mod tests {
             let (rx, id) = sleeper(l);
             let p = wait_listed(l, id, 10).expect("listed");
             let t = target(l, &p);
-            l.w.rt.block_on(kill_checked(&l.db, &t, true)).unwrap();
+            l.w.rt.block_on(kill_checked(&l.db, &t, true, false)).unwrap();
             let _ = rx.recv_timeout(Duration::from_secs(10));
             std::thread::sleep(Duration::from_millis(300));
             let after = l.w.rt.block_on(processes(&l.db)).unwrap();
             assert!(!after.rows.iter().any(|r| r.id == id), "the connection is gone after KILL");
             // A second kill of the same id says it is gone instead of a raw code.
-            assert_eq!(l.w.rt.block_on(kill_checked(&l.db, &t, true)).unwrap_err(), "That connection is already gone.");
+            assert_eq!(l.w.rt.block_on(kill_checked(&l.db, &t, true, false)).unwrap_err(), "That connection is already gone.");
             assert_eq!(l.w.rt.block_on(kill_query(&l.db, 4_000_000_000)).unwrap_err(), "That connection is already gone.");
+        });
+    }
+
+    #[test]
+    fn live_a_kill_on_a_locked_connection_is_refused_and_kills_nothing() {
+        every_server(|l, _| {
+            let (rx, id) = sleeper(l);
+            let p = wait_listed(l, id, 10).expect("listed");
+            let t = target(l, &p);
+            for whole in [false, true] {
+                let err = l.w.rt.block_on(kill_checked(&l.db, &t, whole, true)).unwrap_err();
+                assert!(err.contains("locked"), "{err}");
+            }
+            assert!(rx.recv_timeout(Duration::from_millis(500)).is_err(), "the statement still runs");
+            l.w.rt.block_on(kill_checked(&l.db, &t, false, false)).unwrap();
+            let _ = rx.recv_timeout(Duration::from_secs(10));
         });
     }
 
@@ -860,13 +880,13 @@ mod tests {
             // The id now runs another statement, another client, or lives on another server: nothing dies.
             let ok = target(l, &p);
             for bad in [KillTarget { info: "SELECT 1".into(), ..ok.clone() }, KillTarget { user: "someone".into(), ..ok.clone() }, KillTarget { host: "10.9.9.9:1".into(), ..ok.clone() }] {
-                let err = l.w.rt.block_on(kill_checked(&l.db, &bad, true)).unwrap_err();
+                let err = l.w.rt.block_on(kill_checked(&l.db, &bad, true, false)).unwrap_err();
                 assert!(err.contains("running something else"), "{err}");
             }
-            let err = l.w.rt.block_on(kill_checked(&l.db, &KillTarget { identity: "other-server".into(), ..ok.clone() }, false)).unwrap_err();
+            let err = l.w.rt.block_on(kill_checked(&l.db, &KillTarget { identity: "other-server".into(), ..ok.clone() }, false, false)).unwrap_err();
             assert!(err.contains("different server"), "{err}");
             assert!(rx.recv_timeout(Duration::from_millis(500)).is_err(), "the statement still runs");
-            l.w.rt.block_on(kill_checked(&l.db, &ok, false)).unwrap();
+            l.w.rt.block_on(kill_checked(&l.db, &ok, false, false)).unwrap();
             let _ = rx.recv_timeout(Duration::from_secs(10));
         });
     }

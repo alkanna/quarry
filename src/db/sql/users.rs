@@ -1164,10 +1164,15 @@ async fn default_roles(c: &mut sqlx::MySqlConnection, d: Dialect, acct: &Account
 }
 
 /// One prepared statement; a server that cannot prepare it (error 1295) gets the text as is, which holds only quoted
-/// names and the one secret the caller scrubs from errors.
+/// names and the one secret the caller scrubs from errors. The log redacts the secret, so both readings are noted.
 async fn exec_any(c: &mut sqlx::MySqlConnection, sql: &str) -> Res<()> {
     match ddl::exec(c, sql).await {
-        Err(x) if x.contains("1295") || x.contains("prepared statement protocol") => c.execute(sql).await.map(|_| ()).map_err(e),
+        Err(x) if x.contains("1295") || x.contains("prepared statement protocol") => {
+            let t = std::time::Instant::now();
+            let res = c.execute(sql).await.map(|_| ());
+            crate::db::note_here(sql, t, &res);
+            res.map_err(e)
+        }
         r => r,
     }
 }
@@ -1295,7 +1300,7 @@ impl Worker {
     /// Runs privilege edits for one account. Undo is offered for the part that ran, also when a later
     /// statement failed.
     pub fn sql_user_edit(&self, conn: u64, db: Db, acct: Account, edits: Vec<Edit>, read_only: bool) {
-        self.spawn(async move {
+        self.spawn(crate::db::sql_scope(db.conn, "", async move {
             let mut undo = None;
             let res: Res<String> = async {
                 let mut c = writer(&db, "", read_only).await?;
@@ -1326,12 +1331,12 @@ impl Worker {
             }
             .await;
             Msg::SqlUserDone { conn, account: acct, op: Op::Granted, res, undo: undo.into_iter().collect() }
-        });
+        }));
     }
 
     /// CREATE USER. The password is used for the one statement and dropped with this task.
     pub fn sql_user_create(&self, conn: u64, db: Db, acct: Account, password: String, read_only: bool) {
-        self.spawn(async move {
+        self.spawn(crate::db::sql_scope(db.conn, "", async move {
             let mut undo = None;
             let res: Res<String> = async {
                 check_new_user(&acct.user, &acct.host, &password)?;
@@ -1349,12 +1354,12 @@ impl Worker {
             }
             .await;
             Msg::SqlUserDone { conn, account: acct, op: Op::Created, res, undo: undo.into_iter().collect() }
-        });
+        }));
     }
 
     /// ALTER USER ... IDENTIFIED BY. Nothing is recorded to undo it, and the password is scrubbed from any error.
     pub fn sql_user_password(&self, conn: u64, db: Db, acct: Account, plugin: Option<String>, password: String, read_only: bool) {
-        self.spawn(async move {
+        self.spawn(crate::db::sql_scope(db.conn, "", async move {
             let res: Res<String> = async {
                 check_password(&password)?;
                 let mut c = writer(&db, "", read_only).await?;
@@ -1378,12 +1383,12 @@ impl Worker {
             }
             .await;
             Msg::SqlUserDone { conn, account: acct, op: Op::Password, res, undo: Vec::new() }
-        });
+        }));
     }
 
     /// Runs a plan: the rename, the ALTER USER and the role changes, each recorded for undo as it succeeds.
     pub fn sql_user_account(&self, conn: u64, db: Db, acct: Account, plan: AccountPlan, read_only: bool) {
-        self.spawn(async move {
+        self.spawn(crate::db::sql_scope(db.conn, "", async move {
             let mut undo = Vec::new();
             let mut cur = acct.clone();
             let mut renamed = false;
@@ -1395,12 +1400,12 @@ impl Worker {
             }
             .await;
             Msg::SqlUserDone { conn, account: cur, op: if renamed { Op::Renamed } else { Op::Granted }, res, undo }
-        });
+        }));
     }
 
     /// DROP USER. No undo: the password and every grant are gone with it.
     pub fn sql_user_drop(&self, conn: u64, db: Db, acct: Account, read_only: bool) {
-        self.spawn(async move {
+        self.spawn(crate::db::sql_scope(db.conn, "", async move {
             let res: Res<String> = async {
                 let mut c = writer(&db, "", read_only).await?;
                 let out = async {
@@ -1414,7 +1419,7 @@ impl Worker {
             }
             .await;
             Msg::SqlUserDone { conn, account: acct, op: Op::Dropped, res, undo: Vec::new() }
-        });
+        }));
     }
 }
 
@@ -2484,6 +2489,66 @@ mod tests {
                 assert!(!res.unwrap_err().contains(secret), "{var}");
             }
             drop_it(l, &a);
+        });
+    }
+
+    #[test]
+    fn the_log_never_holds_the_password_of_create_or_change() {
+        // Quotes and backslashes in the password end a literal early under one reading or the other; none may leak.
+        let secrets = ["Zq9Marker", "Zq9'Marker", "Zq9\\'Marker", "Zq9\\Marker\\", "Zq9\"Marker`x", "Zq9''Marker\\\\"];
+        let a = Account::named("log_pw_user", "%");
+        let mut n = 0u64;
+        for bs in [true, false] {
+            let m = Mode { bs, ansi: false };
+            for d in [Dialect::MySql, Dialect::MariaDb] {
+                for secret in secrets {
+                    let mut stmts = vec![create_user_sql(m, &a, secret, false)];
+                    for plugin in [None, Some("caching_sha2_password")] {
+                        if let Ok(sql) = password_sql(m, d, &a, plugin, secret, false) {
+                            stmts.push(sql);
+                        }
+                    }
+                    for sql in stmts {
+                        n += 1;
+                        let conn = 991_000 + n;
+                        crate::db::log_sql(conn, "", &sql, 1, None);
+                        // And once more as a failure whose message quotes the statement from where it broke.
+                        crate::db::log_sql(conn, "", &sql, 1, Some(&format!("You have an error in your SQL syntax; check the manual for the right syntax to use near '{}' at line 1", &sql[sql.find("BY ").or_else(|| sql.find("PASSWORD(")).unwrap_or(0)..])));
+                        let log = crate::db::LOG.lock().unwrap();
+                        for l in log.iter().filter(|l| l.conn == conn) {
+                            let all = format!("{} {}", l.cmd, l.err.clone().unwrap_or_default());
+                            assert!(!all.contains("Marker") && !all.contains("Zq9"), "bs={bs} {d:?} {secret:?}: {all}");
+                            assert!(l.cmd.contains("'***'"), "{}", l.cmd);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn live_users_writes_reach_the_query_log_with_passwords_redacted() {
+        every_server(|l, var| {
+            let a = Account::named(&unique("lg"), "%");
+            let secret = "Zq9'Marker\\x";
+            l.w.sql_user_create(1, l.db.clone(), a.clone(), secret.into(), false);
+            done(l).1.unwrap_or_else(|x| panic!("{var}: {x}"));
+            let ed = Edit { db: pattern_of("shop_lg"), grant: vec!["SELECT".into()], revoke: vec![] };
+            l.w.sql_user_edit(1, l.db.clone(), a.clone(), vec![ed], false);
+            let (_, res, undo) = done(l);
+            res.unwrap_or_else(|x| panic!("{var}: {x}"));
+            l.w.sql_undo(l.db.clone(), undo.expect("undo"), Vec::new(), false);
+            done(l).1.unwrap_or_else(|x| panic!("{var}: {x}"));
+            l.w.sql_user_password(1, l.db.clone(), a.clone(), None, secret.into(), false);
+            done(l).1.unwrap_or_else(|x| panic!("{var}: {x}"));
+            l.w.sql_user_drop(1, l.db.clone(), a.clone(), false);
+            done(l).1.unwrap_or_else(|x| panic!("{var}: {x}"));
+            let log = crate::db::LOG.lock().unwrap();
+            let mine: Vec<&str> = log.iter().filter(|e| e.conn == l.db.conn && e.cmd.contains(&a.user)).map(|e| e.cmd.as_str()).collect();
+            let has = |w: &str| mine.iter().any(|c| c.starts_with(w));
+            assert!(has("CREATE USER") && has("GRANT SELECT") && has("REVOKE SELECT") && has("DROP USER"), "{var}: {mine:?}");
+            assert!(mine.iter().any(|c| c.contains("PASSWORD(") || c.starts_with("ALTER USER") || c.starts_with("SET PASSWORD")), "{var}: {mine:?}");
+            assert!(mine.iter().all(|c| !c.contains("Marker") && !c.contains("Zq9")), "{var}: {mine:?}");
         });
     }
 }

@@ -460,6 +460,9 @@ pub(super) struct ShellTab {
     pub(super) queries: Vec<db::ShellQuery>,
     /// The bottom panel shows the Queries tab instead of the Console.
     pub(super) queries_tab: bool,
+    /// The server connection of each SQL relay of the running script (app connection id, its thread id), so the
+    /// Server window can mark them as Quarry's own. Ids are only read while the script runs.
+    pub(super) relays: Vec<(u64, std::sync::Arc<std::sync::atomic::AtomicU64>)>,
 }
 
 /// Which of `len` rows a page shows (all of them for None), and the number of the first one minus one.

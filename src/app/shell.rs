@@ -382,6 +382,7 @@ impl App {
         let sh = &mut self.tabs[self.cur].shell;
         *sh = ShellTab { code: std::mem::take(&mut sh.code), attached: std::mem::take(&mut sh.attached), req, cancel: Some(tx), started: Some(std::time::Instant::now()), queries_tab: sh.queries_tab, ..Default::default() };
         let packages = self.prefs.shell_packages.clone();
+        self.tabs[self.cur].shell.relays = sql.iter().map(|(_, r)| (r.db.conn, r.conn_id.clone())).collect();
         self.worker.shell(req, db::ShellJob { runtime, dir: config_dir().join("shell"), input, packages, sql }, rx);
     }
 

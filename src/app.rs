@@ -180,6 +180,9 @@ pub struct App {
     sql_users: Option<sql_users::SqlUsersWin>,
     server: Option<ServerWin>,
     sql_server: Option<SqlServerWin>,
+    /// Kill requests sent from the Server window and not answered yet. Kept here so an answer that arrives after
+    /// the window was closed still reaches the person.
+    sql_kills: HashSet<u64>,
     /// The answer to a connection form Test, with the request id it answers.
     conn_test: Option<(u64, db::Res<String>)>,
     /// What the last Test learned from a SQL server, for the Advanced tab to offer.
@@ -317,6 +320,7 @@ impl App {
             sql_users: None,
             server: None,
             sql_server: None,
+            sql_kills: HashSet::new(),
             conn_test: None,
             test_info: None,
             idx_info: None,

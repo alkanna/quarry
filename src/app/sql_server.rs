@@ -4,6 +4,8 @@
 
 use super::*;
 use db::sql::server::{metrics, rate, Answer, KillTarget, Metrics, Overview, Proc, Processes, Replica, Snap, StatusGroup, Var, Variables};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 const POLL: Duration = Duration::from_secs(2);
@@ -27,6 +29,22 @@ pub(super) struct Confirm {
 /// Whether the confirmation still points at the same statement of the same connection on the same server.
 fn confirm_ok(c: &Confirm, p: &Processes) -> bool {
     c.identity == p.identity && p.rows.iter().any(|r| c.p.same_thread(r))
+}
+
+/// Whether a Kill may be offered for a row: only on an unlocked connection (like Mongo's Operations tab), never on
+/// one of Quarry's own sessions (the person stops those with Stop, which also sets the cancel flag), and a statement
+/// kill only while something runs.
+fn can_kill(writable: bool, own: &HashMap<u64, String>, p: &Proc, whole: bool) -> bool {
+    writable && !own.contains_key(&p.id) && if whole { !p.daemon() } else { p.running() }
+}
+
+/// What to tell the person about a Kill answer, and only for a request that was really sent: the answer can arrive
+/// after the Server window was closed, so it is matched by request id on App and not on the window.
+fn kill_toast(kills: &mut HashSet<u64>, req: u64, ans: &Answer) -> Option<Result<String, String>> {
+    match ans {
+        Answer::Kill { whole, res } if kills.remove(&req) => Some(res.clone().map(|_| if *whole { "Ended the connection".to_string() } else { "Stopped the statement".to_string() })),
+        _ => None,
+    }
 }
 
 /// The sample before the latest and the seconds between them, from the two instants themselves; a failed read
@@ -78,8 +96,13 @@ pub(super) struct SqlServerWin {
     sel: Option<u64>,
     /// The thread waiting for its second click, and whether the whole connection or only its statement ends.
     confirm: Option<Confirm>,
-    /// Kill requests in flight.
-    kills: Vec<u64>,
+    /// Whether the connection is unlocked, read each frame. Kill needs it.
+    writable: bool,
+    /// Quarry's own sessions on this server by thread id, with what each one is, read each frame. The list
+    /// itself marks only the connection that ran SHOW PROCESSLIST.
+    own: HashMap<u64, String>,
+    /// Unlock was clicked in the note above the list.
+    unlock: bool,
     global: bool,
     var_filter: String,
     vars: Option<db::Res<Variables>>,
@@ -99,7 +122,7 @@ pub(super) struct SqlServerWin {
 
 impl SqlServerWin {
     pub(super) fn new(conn: u64, quarry: Vec<String>) -> Self {
-        Self { conn, tab: SqlServerTab::default(), quarry, uptime: None, procs_req: 0, vars_req: 0, procs_wait: false, vars_wait: false, next: None, refresh: false, procs: None, auto: true, hide_sleeping: true, filter: String::new(), sel: None, confirm: None, kills: Vec::new(), global: false, var_filter: String::new(), vars: None, ov_req: 0, ov_wait: false, ov: None, ov_prev: None, st_req: 0, st_wait: false, st: None, st_prev: None, st_auto: true, st_filter: String::new(), st_group: StatusGroup::All }
+        Self { conn, tab: SqlServerTab::default(), quarry, uptime: None, procs_req: 0, vars_req: 0, procs_wait: false, vars_wait: false, next: None, refresh: false, procs: None, auto: true, hide_sleeping: true, filter: String::new(), sel: None, confirm: None, writable: true, own: HashMap::new(), unlock: false, global: false, var_filter: String::new(), vars: None, ov_req: 0, ov_wait: false, ov: None, ov_prev: None, st_req: 0, st_wait: false, st: None, st_prev: None, st_auto: true, st_filter: String::new(), st_group: StatusGroup::All }
     }
 
     /// Canned answers for the offline demo: `variables` opens that tab, anything else the processes.
@@ -180,6 +203,12 @@ impl App {
         let mut open = true;
         let mut kill: Option<Confirm> = None;
         let live = db.is_some() || self.demo;
+        // A locked connection offers no Kill, and a confirmation armed before the lock is dropped.
+        s.writable = self.conn(conn).map_or(self.demo, |c| c.writable);
+        s.own = self.own_sessions(conn);
+        if !s.writable {
+            s.confirm = None;
+        }
         let screen = ctx.content_rect();
         let r = dialog(egui::Id::unique(("quarry-layer", "sql-server-window"))).show(ctx, |ui| {
             ui.set_width((screen.width() * 0.7).clamp(700.0, 1100.0));
@@ -212,10 +241,13 @@ impl App {
             }
             open = !done(ui);
         });
+        if std::mem::take(&mut s.unlock) {
+            self.modal = Some(Modal::Unlock(conn, None));
+        }
         if let (Some(c), Some(db)) = (kill, db) {
             self.req += 1;
-            s.kills.push(self.req);
-            self.worker.sql_server_kill(db, self.req, KillTarget::of(&c.p, &c.identity), c.whole);
+            self.sql_kills.insert(self.req);
+            self.worker.sql_server_kill(db, self.req, KillTarget::of(&c.p, &c.identity), c.whole, !s.writable);
         }
         if open && !(r.should_close() && self.modal.is_none()) {
             self.sql_server = Some(s);
@@ -273,9 +305,51 @@ impl App {
         }
     }
 
+    /// Quarry's own sessions on connection `conn` by server thread id, with what each one is: the ids kept for Stop
+    /// (a Query run, a running export, an import or script file, the shell's relays). They get no Kill, because
+    /// Stop also sets the cancel flag so the work ends instead of carrying on after the statement is cut.
+    fn own_sessions(&self, conn: u64) -> HashMap<u64, String> {
+        let mut own = HashMap::new();
+        let mut add = |id: u64, what: &str| {
+            if id != 0 {
+                own.insert(id, what.to_string());
+            }
+        };
+        for t in &self.tabs {
+            if let Some(s) = t.sql.as_ref().filter(|s| s.run_req != 0 && t.sel.conn == conn) {
+                add(s.run.conn.load(Ordering::SeqCst), "Query tab");
+            }
+            if t.shell.cancel.is_some() {
+                for (c, id) in &t.shell.relays {
+                    if *c == conn {
+                        add(id.load(Ordering::SeqCst), "Shell");
+                    }
+                }
+            }
+        }
+        if let Some(j) = self.export_job.as_ref().filter(|j| j.db.conn == conn) {
+            add(j.id.load(Ordering::SeqCst), "Export");
+        }
+        if let Some(j) = self.sql_job.as_ref().filter(|j| j.conn == conn) {
+            add(j.id.load(Ordering::SeqCst), if j.kind == sql_dump::JobKind::Import { "Import" } else { "Script file" });
+        }
+        own
+    }
+
     pub(super) fn sql_server_done(&mut self, req: u64, ans: Answer) {
+        // A Kill answer is told even when the window is gone, so a failure is never silent.
+        if let Some(told) = kill_toast(&mut self.sql_kills, req, &ans) {
+            if let (Ok(_), Some(s)) = (&told, self.sql_server.as_mut()) {
+                s.refresh = true;
+                s.next = None;
+            }
+            match told {
+                Ok(m) => self.ok(m),
+                Err(e) => self.err(e),
+            }
+            return;
+        }
         let Some(s) = self.sql_server.as_mut() else { return };
-        let mut told: Option<Result<String, String>> = None;
         match ans {
             Answer::Procs(r) if req == s.procs_req => {
                 s.procs_wait = false;
@@ -319,20 +393,7 @@ impl App {
                 }
                 s.st = Some(r.map(|v| (now, v)));
             }
-            Answer::Kill { whole, res } if s.kills.contains(&req) => {
-                s.kills.retain(|k| *k != req);
-                if res.is_ok() {
-                    s.refresh = true;
-                    s.next = None;
-                }
-                told = Some(res.map(|_| if whole { "Ended the connection".to_string() } else { "Stopped the statement".to_string() }));
-            }
             _ => {}
-        }
-        match told {
-            Some(Ok(m)) => self.ok(m),
-            Some(Err(e)) => self.err(e),
-            None => {}
         }
     }
 }
@@ -375,7 +436,16 @@ fn procs_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32, kill: &mut Op
     if s.confirm.as_ref().is_some_and(|c| !rows.iter().any(|r| c.p.same_thread(r))) {
         s.confirm = None;
     }
-    let sel_row = s.sel.and_then(|id| rows.iter().find(|r| r.id == id)).filter(|r| r.id != me && r.running());
+    let (writable, mut own) = (s.writable, s.own.clone());
+    // The thread that reads the list is Quarry's too.
+    own.entry(me).or_insert_with(|| "Server window".to_string());
+    let sel_row = s.sel.and_then(|id| rows.iter().find(|r| r.id == id)).filter(|r| can_kill(writable, &own, r, false));
+    if !writable {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Read-only: unlock writes to kill operations.").color(SUCCESS()));
+            s.unlock = ui.button("Unlock…").clicked();
+        });
+    }
     ui.horizontal(|ui| {
         ui.add(egui::TextEdit::singleline(&mut s.filter).hint_text("Filter by user, database or query").desired_width(240.0));
         ui.checkbox(&mut s.hide_sleeping, "Hide sleeping");
@@ -429,13 +499,13 @@ fn procs_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32, kill: &mut Op
                 (false, st) => hover_fill(st),
             };
             ui.painter().rect_filled(rect, 0.0, fill);
-            let mine = p.id == me;
+            let mine = own.get(&p.id);
             let mut x = rect.left();
             let slow = p.running() && p.secs >= 60.0;
             let cells: [(String, Color32, bool, bool); 7] = [
                 (p.id.to_string(), if p.daemon() { C_NUMBER().gamma_multiply(0.8) } else { C_NUMBER() }, true, true),
                 (p.user.clone(), if p.daemon() { MUTED() } else { BRIGHT() }, true, false),
-                (if mine { "quarry (you)".into() } else { p.host.clone() }, if mine { PRIMARY() } else { MUTED() }, true, false),
+                (if mine.is_some() { "quarry (you)".into() } else { p.host.clone() }, if mine.is_some() { PRIMARY() } else { MUTED() }, true, false),
                 (p.db.clone(), TEXT(), true, false),
                 (p.command.clone(), if p.running() { WARNING() } else if p.sleeping() { FAINT() } else { MUTED() }, true, false),
                 (format!("{} s", group(&(p.secs as i64).to_string())), if slow { ALERT() } else { BRIGHT() }, true, false),
@@ -451,12 +521,15 @@ fn procs_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32, kill: &mut Op
             if resp.clicked() || resp.secondary_clicked() {
                 sel = Some(p.id);
             }
-            if resp.hovered() && !confirming && !p.info.is_empty() && resp.hover_pos().is_some_and(|h| h.x >= info_x) {
+            let host_x = rect.left() + COLS[..2].iter().map(|c| c.1).sum::<f32>();
+            if let (Some(what), true) = (mine, resp.hover_pos().is_some_and(|h| h.x >= host_x && h.x < host_x + COLS[2].1)) {
+                resp.clone().on_hover_text(format!("Quarry's own session ({what}). Stop it there: Kill is not offered for it."));
+            } else if resp.hovered() && !confirming && !p.info.is_empty() && resp.hover_pos().is_some_and(|h| h.x >= info_x) {
                 let long: String = p.info.chars().take(1200).collect();
                 resp.clone().on_hover_text(long);
             }
-            let can_query = p.running() && !mine;
-            let can_end = !mine && !p.daemon();
+            let can_query = can_kill(writable, &own, p, false);
+            let can_end = can_kill(writable, &own, p, true);
             let arm = |whole: bool| Confirm { p: p.clone(), identity: identity.clone(), whole };
             resp.context_menu(|ui| {
                 menu_look(ui);
@@ -768,6 +841,38 @@ mod tests {
 
     fn p(id: u64, user: &str, db: &str, command: &str, info: &str) -> Proc {
         Proc::new(id, user, "", db, command, 0.0, "", info)
+    }
+
+    #[test]
+    fn kill_needs_an_unlocked_connection_and_never_reaches_quarrys_own_sessions() {
+        let running = p(7, "app", "shop", "Query", "SELECT SLEEP(9)");
+        let sleeping = p(8, "app", "shop", "Sleep", "");
+        let daemon = p(9, "event_scheduler", "", "Daemon", "");
+        let none = HashMap::new();
+        // A locked connection offers neither kind of Kill.
+        assert!(!can_kill(false, &none, &running, false) && !can_kill(false, &none, &running, true));
+        assert!(can_kill(true, &none, &running, false) && can_kill(true, &none, &running, true));
+        // A sleeping thread has no statement to stop but its connection can end; a daemon cannot.
+        assert!(!can_kill(true, &none, &sleeping, false) && can_kill(true, &none, &sleeping, true));
+        assert!(!can_kill(true, &none, &daemon, true));
+        // Quarry's own session (a Query run, the shell) is stopped with Stop, never with Kill.
+        let own: HashMap<u64, String> = [(7, "Query tab".to_string())].into();
+        assert!(!can_kill(true, &own, &running, false) && !can_kill(true, &own, &running, true));
+        assert!(can_kill(true, &own, &sleeping, true));
+    }
+
+    #[test]
+    fn a_kill_answer_is_told_without_a_window_and_only_once() {
+        let mut kills: HashSet<u64> = [5].into();
+        let ok = Answer::Kill { whole: false, res: Ok("x".into()) };
+        let bad = Answer::Kill { whole: true, res: Err("nope".into()) };
+        assert_eq!(kill_toast(&mut kills, 5, &ok), Some(Ok("Stopped the statement".to_string())));
+        assert!(kills.is_empty());
+        // The same request answered again, or one that was never sent, says nothing.
+        assert_eq!(kill_toast(&mut kills, 5, &ok), None);
+        kills.insert(6);
+        assert_eq!(kill_toast(&mut kills, 6, &bad), Some(Err("nope".to_string())));
+        assert_eq!(kill_toast(&mut kills, 6, &Answer::Procs(Err("x".into()))), None);
     }
 
     #[test]
