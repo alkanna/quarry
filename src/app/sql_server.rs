@@ -3,10 +3,49 @@
 //! errors in the window so a missing privilege is not announced every 2 seconds. View only: no SET anywhere.
 
 use super::*;
-use db::sql::server::{metrics, rate, Answer, Metrics, Overview, Proc, Processes, Replica, Snap, StatusGroup, Var, Variables};
+use db::sql::server::{metrics, rate, Answer, KillTarget, Metrics, Overview, Proc, Processes, Replica, Snap, StatusGroup, Var, Variables};
 use std::time::Instant;
 
 const POLL: Duration = Duration::from_secs(2);
+/// After a failed read a polling tab tries again this often, so one dropped packet does not end the polling and a
+/// missing privilege is not asked about every 2 seconds.
+const BACKOFF: Duration = Duration::from_secs(10);
+
+fn retry_after(ok: bool) -> Duration {
+    if ok { POLL } else { BACKOFF }
+}
+
+/// A Kill waiting for its second click, with everything the list showed about its target.
+#[derive(Clone)]
+pub(super) struct Confirm {
+    p: Proc,
+    identity: String,
+    /// The whole connection ends (KILL) instead of only its statement (KILL QUERY).
+    whole: bool,
+}
+
+/// Whether the confirmation still points at the same statement of the same connection on the same server.
+fn confirm_ok(c: &Confirm, p: &Processes) -> bool {
+    c.identity == p.identity && p.rows.iter().any(|r| c.p.same_thread(r))
+}
+
+/// The sample before the latest and the seconds between them, from the two instants themselves; a failed read
+/// in between leaves no sample, so a rate never spans an unknown gap.
+fn prev_of<T>(old: Option<db::Res<(Instant, T)>>, now: Instant) -> Option<(f64, T)> {
+    match old {
+        Some(Ok((at, t))) => Some((now.duration_since(at).as_secs_f64(), t)),
+        _ => None,
+    }
+}
+
+/// An error with the way to try again, true when Refresh was clicked.
+fn error_row(ui: &mut egui::Ui, text: String) -> bool {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(text).color(ALERT()));
+        quiet(ui, "Refresh").clicked()
+    })
+    .inner
+}
 
 #[derive(Clone, Copy, PartialEq, Default)]
 pub(super) enum SqlServerTab {
@@ -38,7 +77,7 @@ pub(super) struct SqlServerWin {
     /// The selected thread by id, so a refresh keeps it.
     sel: Option<u64>,
     /// The thread waiting for its second click, and whether the whole connection or only its statement ends.
-    confirm: Option<(u64, bool)>,
+    confirm: Option<Confirm>,
     /// Kill requests in flight.
     kills: Vec<u64>,
     global: bool,
@@ -65,7 +104,7 @@ impl SqlServerWin {
 
     /// Canned answers for the offline demo: `variables` opens that tab, anything else the processes.
     pub(super) fn demo(conn: u64, tab: &str) -> Self {
-        let p = |id: u64, user: &str, host: &str, db: &str, command: &str, secs: f64, state: &str, info: &str| Proc { id, user: user.into(), host: host.into(), db: db.into(), command: command.into(), secs, state: state.into(), info: info.into() };
+        let p = Proc::new;
         let mut rows = vec![
             p(8812, "report", "10.0.4.12:51522", "analytics", "Query", 142.0, "Sending data", "SELECT customer_id, SUM(total) FROM orders GROUP BY customer_id"),
             p(8790, "app", "10.0.2.31:40118", "shop", "Query", 3.0, "updating", "UPDATE payments SET state = 'captured' WHERE id = 90211"),
@@ -96,15 +135,15 @@ impl SqlServerWin {
             )
         };
         let ovars: HashMap<String, String> = [("max_connections", "151"), ("version", "8.4.3"), ("version_comment", "MySQL Community Server (GPL)"), ("hostname", "db-prod-1.internal"), ("port", "3306"), ("datadir", "/var/lib/mysql/"), ("character_set_server", "utf8mb4"), ("collation_server", "utf8mb4_0900_ai_ci"), ("time_zone", "SYSTEM"), ("system_time_zone", "UTC"), ("innodb_buffer_pool_size", "8589934592")].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-        let replica = Replica { source: "db-prod-0.internal:3306".into(), io: "Yes".into(), sql: "Yes".into(), behind: Some(0), gtid: "3e11fa47-71ca:1-88412".into(), error: String::new() };
-        s.ov = Some(Ok((Instant::now(), Overview { snap: sample(0), vars: ovars, tls: "TLSv1.3, TLS_AES_256_GCM_SHA384".into(), replica: Ok(Some(replica)) })));
+        let replica = Replica { channel: String::new(), source: "db-prod-0.internal:3306".into(), io: "Yes".into(), sql: "Yes".into(), behind: Some(0), gtid: "3e11fa47-71ca:1-88412".into(), error: String::new() };
+        s.ov = Some(Ok((Instant::now(), Overview { snap: sample(0), vars: ovars, tls: "TLSv1.3, TLS_AES_256_GCM_SHA384".into(), replica: Ok(vec![replica]) })));
         s.ov_prev = Some((2.5, sample(1)));
         s.st = Some(Ok((Instant::now(), sample(0))));
         s.st_prev = Some((2.5, sample(1)));
         s.uptime = Some(41 * 86_400 + 3 * 3600);
         s.sel = Some(8812);
         s.auto = true;
-        s.procs = Some(Ok(Processes { rows, me: 8901, uptime: s.uptime }));
+        s.procs = Some(Ok(Processes { rows, me: 8901, uptime: s.uptime, identity: String::new() }));
         s.var_filter = "timeout".into();
         s.vars = Some(Ok(Variables { rows: vars, global: false, defaults: true, uptime: s.uptime }));
         s
@@ -120,7 +159,7 @@ fn up_text(secs: u64) -> String {
 /// The process list rows the filter and "Hide sleeping" leave: the filter matches user, database or query.
 fn shown<'a>(rows: &'a [Proc], filter: &str, hide_sleeping: bool) -> Vec<&'a Proc> {
     let f = filter.trim().to_lowercase();
-    rows.iter().filter(|p| !(hide_sleeping && p.sleeping())).filter(|p| f.is_empty() || [&p.user, &p.db, &p.info].iter().any(|t| t.to_lowercase().contains(&f))).collect()
+    rows.iter().filter(|p| !(hide_sleeping && p.sleeping())).filter(|p| f.is_empty() || p.search.contains(&f)).collect()
 }
 
 /// Variable rows by name, for the session or global view.
@@ -139,7 +178,8 @@ impl App {
             self.sql_server_poll(ctx, &mut s, db);
         }
         let mut open = true;
-        let mut kill = None;
+        let mut kill: Option<Confirm> = None;
+        let live = db.is_some() || self.demo;
         let screen = ctx.content_rect();
         let r = dialog(egui::Id::unique(("quarry-layer", "sql-server-window"))).show(ctx, |ui| {
             ui.set_width((screen.width() * 0.7).clamp(700.0, 1100.0));
@@ -159,18 +199,23 @@ impl App {
             });
             ui.add_space(8.0);
             let max = screen.height() - 300.0;
-            match s.tab {
+            if !live {
+                // The pool is gone, so nothing here can be read or killed any more.
+                ui.label(RichText::new("This connection is closed. Reconnect to see the server again.").color(MUTED()));
+            } else {
+                match s.tab {
                 SqlServerTab::Overview => overview_view(ui, &mut s),
                 SqlServerTab::Status => status_view(ui, &mut s, max),
                 SqlServerTab::Processes => procs_view(ui, &mut s, max, &mut kill),
                 SqlServerTab::Variables => vars_view(ui, &mut s, max),
+                }
             }
             open = !done(ui);
         });
-        if let (Some((id, whole)), Some(db)) = (kill, db) {
+        if let (Some(c), Some(db)) = (kill, db) {
             self.req += 1;
             s.kills.push(self.req);
-            self.worker.sql_server_kill(db, self.req, id, whole);
+            self.worker.sql_server_kill(db, self.req, KillTarget::of(&c.p, &c.identity), c.whole);
         }
         if open && !(r.should_close() && self.modal.is_none()) {
             self.sql_server = Some(s);
@@ -189,9 +234,7 @@ impl App {
                 if s.auto {
                     ctx.request_repaint_after(POLL);
                 }
-                // A failed read is not asked again until Refresh, so a missing privilege costs one call.
-                let failed = matches!(s.procs, Some(Err(_)));
-                let due = s.refresh || s.procs.is_none() || (s.auto && !failed && s.next.is_none_or(|t| now >= t));
+                let due = s.refresh || s.procs.is_none() || (s.auto && s.next.is_none_or(|t| now >= t));
                 if s.procs_wait || !due {
                     return;
                 }
@@ -201,11 +244,11 @@ impl App {
             }
             SqlServerTab::Overview | SqlServerTab::Status => {
                 let overview = s.tab == SqlServerTab::Overview;
-                let (auto, failed, empty, wait) = if overview { (true, matches!(s.ov, Some(Err(_))), s.ov.is_none(), s.ov_wait) } else { (s.st_auto, matches!(s.st, Some(Err(_))), s.st.is_none(), s.st_wait) };
+                let (auto, empty, wait) = if overview { (true, s.ov.is_none(), s.ov_wait) } else { (s.st_auto, s.st.is_none(), s.st_wait) };
                 if auto {
                     ctx.request_repaint_after(POLL);
                 }
-                let due = s.refresh || empty || (auto && !failed && s.next.is_none_or(|t| now >= t));
+                let due = s.refresh || empty || (auto && s.next.is_none_or(|t| now >= t));
                 if wait || !due {
                     return;
                 }
@@ -236,13 +279,16 @@ impl App {
         match ans {
             Answer::Procs(r) if req == s.procs_req => {
                 s.procs_wait = false;
-                s.next = Some(Instant::now() + POLL);
-                if let Ok(p) = &r {
-                    s.uptime = p.uptime.or(s.uptime);
-                    // The selection and a pending confirmation follow the thread by id; a thread that ended drops both.
-                    let has = |id: u64| p.rows.iter().any(|x| x.id == id);
-                    s.sel = s.sel.filter(|id| has(*id));
-                    s.confirm = s.confirm.filter(|(id, _)| has(*id));
+                s.next = Some(Instant::now() + retry_after(r.is_ok()));
+                match &r {
+                    Ok(p) => {
+                        s.uptime = p.uptime.or(s.uptime);
+                        // The selection follows the thread by id. A pending Kill follows it only while it is the same
+                        // statement on the same server: ids are reused, and a restart starts them over.
+                        s.sel = s.sel.filter(|id| p.rows.iter().any(|x| x.id == *id));
+                        s.confirm = s.confirm.take().filter(|c| confirm_ok(c, p));
+                    }
+                    Err(_) => s.confirm = None,
                 }
                 s.procs = Some(r);
             }
@@ -255,11 +301,9 @@ impl App {
             }
             Answer::Overview(r) if req == s.ov_req => {
                 s.ov_wait = false;
-                s.next = Some(Instant::now() + POLL);
                 let now = Instant::now();
-                if let Some(Ok((at, old))) = s.ov.take() {
-                    s.ov_prev = Some((now.duration_since(at).as_secs_f64(), old.snap));
-                }
+                s.next = Some(now + retry_after(r.is_ok()));
+                s.ov_prev = prev_of(s.ov.take().map(|o| o.map(|(at, o)| (at, o.snap))), now);
                 if let Ok(o) = &r {
                     s.uptime = o.snap.num("Uptime").map(|u| u as u64).or(s.uptime);
                 }
@@ -267,11 +311,9 @@ impl App {
             }
             Answer::Status(r) if req == s.st_req => {
                 s.st_wait = false;
-                s.next = Some(Instant::now() + POLL);
                 let now = Instant::now();
-                if let Some(Ok((at, old))) = s.st.take() {
-                    s.st_prev = Some((now.duration_since(at).as_secs_f64(), old));
-                }
+                s.next = Some(now + retry_after(r.is_ok()));
+                s.st_prev = prev_of(s.st.take(), now);
                 if let Ok(v) = &r {
                     s.uptime = v.num("Uptime").map(|u| u as u64).or(s.uptime);
                 }
@@ -323,11 +365,17 @@ fn header(ui: &mut egui::Ui, cols: &[(&str, f32, bool)]) {
     }
 }
 
-fn procs_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32, kill: &mut Option<(u64, bool)>) {
-    let (me, total, running, killable_sel) = match &s.procs {
-        Some(Ok(p)) => (p.me, p.rows.len(), p.rows.iter().filter(|r| r.running()).count(), s.sel.and_then(|id| p.rows.iter().find(|r| r.id == id)).is_some_and(|r| r.id != p.me && r.running())),
-        _ => (0, 0, 0, false),
+fn procs_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32, kill: &mut Option<Confirm>) {
+    let (filter, hide) = (s.filter.clone(), s.hide_sleeping);
+    let (me, total, running, identity, rows): (u64, usize, usize, String, Vec<&Proc>) = match &s.procs {
+        Some(Ok(p)) => (p.me, p.rows.len(), p.rows.iter().filter(|r| r.running()).count(), p.identity.clone(), shown(&p.rows, &filter, hide)),
+        _ => (0, 0, 0, String::new(), Vec::new()),
     };
+    // A Kill waiting for its second click is dropped when its row is hidden by the filter or has changed.
+    if s.confirm.as_ref().is_some_and(|c| !rows.iter().any(|r| c.p.same_thread(r))) {
+        s.confirm = None;
+    }
+    let sel_row = s.sel.and_then(|id| rows.iter().find(|r| r.id == id)).filter(|r| r.id != me && r.running());
     ui.horizontal(|ui| {
         ui.add(egui::TextEdit::singleline(&mut s.filter).hint_text("Filter by user, database or query").desired_width(240.0));
         ui.checkbox(&mut s.hide_sleeping, "Hide sleeping");
@@ -339,21 +387,23 @@ fn procs_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32, kill: &mut Op
             ui.label(RichText::new(format!("{total} connections, {running} running")).size(TXT_SMALL).color(MUTED()));
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let r = ui.add_enabled_ui(killable_sel, |ui| danger(ui, "Kill query")).inner;
-            if r.clicked() {
-                s.confirm = s.sel.map(|id| (id, false));
+            let r = ui.add_enabled_ui(sel_row.is_some(), |ui| danger(ui, "Kill query")).inner;
+            if let (true, Some(p)) = (r.clicked(), sel_row) {
+                s.confirm = Some(Confirm { p: (*p).clone(), identity: identity.clone(), whole: false });
             }
         });
     });
     ui.add_space(8.0);
-    let rows = match &s.procs {
+    match &s.procs {
         None => return spin(ui),
         Some(Err(e)) => {
-            ui.label(RichText::new(format!("Could not list the processes: {e}")).color(ALERT()));
+            if error_row(ui, format!("Could not list the processes: {e}")) {
+                s.refresh = true;
+            }
             return;
         }
-        Some(Ok(p)) => shown(&p.rows, &s.filter, s.hide_sleeping),
-    };
+        Some(Ok(_)) => {}
+    }
     let w = ui.available_width();
     let info_w = (w - COLS.iter().map(|c| c.1).sum::<f32>()).max(120.0);
     let mut cols: Vec<(&str, f32, bool)> = COLS.iter().map(|(l, w)| (*l, *w, *l == "Time")).collect();
@@ -365,10 +415,11 @@ fn procs_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32, kill: &mut Op
         return;
     }
     let mut sel = s.sel;
-    let mut confirm = s.confirm;
-    egui::ScrollArea::vertical().max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
+    let mut confirm = s.confirm.clone();
+    egui::ScrollArea::vertical().max_height(max_h).auto_shrink([false, true]).show_rows(ui, ROW_H, rows.len(), |ui, range| {
         ui.spacing_mut().item_spacing.y = 0.0;
-        for (i, p) in rows.iter().enumerate() {
+        for i in range {
+            let p = rows[i];
             let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, ROW_H), Sense::click());
             let selected = sel == Some(p.id);
             let fill = match (selected, state_of(&resp)) {
@@ -394,10 +445,9 @@ fn procs_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32, kill: &mut Op
                 paint_cell(ui, rect, x, *w, text, *color, *mono, *right);
                 x += w;
             }
-            let info = p.info.split_whitespace().collect::<Vec<_>>().join(" ");
-            let confirming = confirm.is_some_and(|(id, _)| id == p.id);
+            let confirming = confirm.as_ref().is_some_and(|c| c.p.id == p.id);
             let info_x = rect.left() + COLS.iter().map(|c| c.1).sum::<f32>();
-            paint_cell(ui, rect, info_x, info_w - if confirming { CONFIRM_W } else { KILL_W }, &info, MUTED(), true, false);
+            paint_cell(ui, rect, info_x, info_w - if confirming { CONFIRM_W } else { KILL_W }, &p.line, MUTED(), true, false);
             if resp.clicked() || resp.secondary_clicked() {
                 sel = Some(p.id);
             }
@@ -407,14 +457,15 @@ fn procs_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32, kill: &mut Op
             }
             let can_query = p.running() && !mine;
             let can_end = !mine && !p.daemon();
+            let arm = |whole: bool| Confirm { p: p.clone(), identity: identity.clone(), whole };
             resp.context_menu(|ui| {
                 menu_look(ui);
                 if ui.add_enabled(can_query, egui::Button::new("Kill query").frame_when_inactive(false)).clicked() {
-                    confirm = Some((p.id, false));
+                    confirm = Some(arm(false));
                     ui.close();
                 }
-                if ui.add_enabled(can_end, egui::Button::new("Kill connection").frame_when_inactive(false)).clicked() {
-                    confirm = Some((p.id, true));
+                if ui.add_enabled_ui(can_end, |ui| danger_item(ui, "Kill connection")).inner.clicked() {
+                    confirm = Some(arm(true));
                     ui.close();
                 }
                 if ui.add_enabled(!p.info.is_empty(), egui::Button::new("Copy query").frame_when_inactive(false)).clicked() {
@@ -430,20 +481,20 @@ fn procs_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32, kill: &mut Op
             }
             if confirming || can_query {
                 let mut k = ui.new_child(egui::UiBuilder::new().max_rect(area).layout(egui::Layout::right_to_left(egui::Align::Center)));
-                match confirm.filter(|(id, _)| *id == p.id) {
-                    Some((_, whole)) => {
-                        if k.button("Keep").clicked() {
+                match confirm.clone().filter(|c| c.p.id == p.id) {
+                    Some(c) => {
+                        if quiet(&mut k, "Keep").clicked() {
                             confirm = None;
                         }
-                        if danger(&mut k, if whole { "Kill connection" } else { "Kill it" }).clicked() {
-                            *kill = Some((p.id, whole));
+                        if danger(&mut k, if c.whole { "Kill connection" } else { "Kill it" }).clicked() {
+                            *kill = Some(c.clone());
                             confirm = None;
                         }
-                        k.label(RichText::new(if whole { "End the connection?" } else { "Stop the statement?" }).size(TXT_SMALL).color(MUTED()));
+                        k.label(RichText::new(if c.whole { "End the connection?" } else { "Stop the statement?" }).size(TXT_SMALL).color(MUTED()));
                     }
                     None => {
                         if danger(&mut k, "Kill").clicked() {
-                            confirm = Some((p.id, false));
+                            confirm = Some(arm(false));
                             sel = Some(p.id);
                         }
                     }
@@ -476,7 +527,9 @@ fn vars_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32) {
     let v = match &s.vars {
         None => return spin(ui),
         Some(Err(e)) => {
-            ui.label(RichText::new(format!("Could not read the variables: {e}")).color(ALERT()));
+            if error_row(ui, format!("Could not read the variables: {e}")) {
+                s.refresh = true;
+            }
             return;
         }
         Some(Ok(v)) => v,
@@ -580,7 +633,9 @@ fn overview_view(ui: &mut egui::Ui, s: &mut SqlServerWin) {
     let (o, m): (&Overview, Metrics) = match &s.ov {
         None => return spin(ui),
         Some(Err(e)) => {
-            ui.label(RichText::new(format!("Could not read the server status: {e}")).color(ALERT()));
+            if error_row(ui, format!("Could not read the server status: {e}")) {
+                s.refresh = true;
+            }
             return;
         }
         Some(Ok((_, o))) => (o, metrics(&o.snap, &o.vars, s.ov_prev.as_ref())),
@@ -625,27 +680,31 @@ fn overview_view(ui: &mut egui::Ui, s: &mut SqlServerWin) {
             Err(e) => {
                 ui.label(RichText::new(e).color(MUTED()));
             }
-            Ok(None) => {
+            Ok(list) if list.is_empty() => {
                 ui.label(RichText::new("Not a replica").color(MUTED()));
             }
-            Ok(Some(r)) => {
+            Ok(list) => {
                 let w = ui.available_width();
                 ui.spacing_mut().item_spacing.y = 0.0;
                 let cw = [w * 0.4, w * 0.2, w * 0.2, w * 0.2];
                 header(ui, &[("Source", cw[0], false), ("IO thread", cw[1], false), ("SQL thread", cw[2], false), ("Behind", cw[3], true)]);
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(w, ROW_H), Sense::hover());
-                ui.painter().rect_filled(rect, 0.0, BG());
-                let (io, io_c) = thread_state(&r.io);
-                let (sql, sql_c) = thread_state(&r.sql);
-                paint_cell(ui, rect, rect.left(), cw[0], &r.source, BRIGHT(), true, false);
-                paint_cell(ui, rect, rect.left() + cw[0], cw[1], io, io_c, true, false);
-                paint_cell(ui, rect, rect.left() + cw[0] + cw[1], cw[2], sql, sql_c, true, false);
-                paint_cell(ui, rect, rect.left() + cw[0] + cw[1] + cw[2], cw[3], &r.behind.map(|b| format!("{b} s")).unwrap_or_default(), C_NUMBER(), true, true);
-                let mut extra = vec![("GTID set", r.gtid.clone(), TEXT())];
-                if !r.error.is_empty() {
-                    extra.push(("Last error", r.error.clone(), ALERT()));
+                // One block per channel, so a multi-source replica shows every source.
+                for r in list {
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, ROW_H), Sense::hover());
+                    ui.painter().rect_filled(rect, 0.0, BG());
+                    let (io, io_c) = thread_state(&r.io);
+                    let (sql, sql_c) = thread_state(&r.sql);
+                    let source = if r.channel.is_empty() { r.source.clone() } else { format!("{}: {}", r.channel, r.source) };
+                    paint_cell(ui, rect, rect.left(), cw[0], &source, BRIGHT(), true, false);
+                    paint_cell(ui, rect, rect.left() + cw[0], cw[1], io, io_c, true, false);
+                    paint_cell(ui, rect, rect.left() + cw[0] + cw[1], cw[2], sql, sql_c, true, false);
+                    paint_cell(ui, rect, rect.left() + cw[0] + cw[1] + cw[2], cw[3], &r.behind.map(|b| format!("{b} s")).unwrap_or_default(), C_NUMBER(), true, true);
+                    let mut extra = vec![("GTID set", r.gtid.clone(), TEXT())];
+                    if !r.error.is_empty() {
+                        extra.push(("Last error", r.error.clone(), ALERT()));
+                    }
+                    kv_rows(ui, w, &extra.iter().filter(|(_, v, _)| !v.is_empty()).map(|(k, v, c)| (*k, v.clone(), *c)).collect::<Vec<_>>());
                 }
-                kv_rows(ui, w, &extra.iter().filter(|(_, v, _)| !v.is_empty()).map(|(k, v, c)| (*k, v.clone(), *c)).collect::<Vec<_>>());
             }
         }
     });
@@ -666,7 +725,9 @@ fn status_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32) {
     let snap = match &s.st {
         None => return spin(ui),
         Some(Err(e)) => {
-            ui.label(RichText::new(format!("Could not read the server status: {e}")).color(ALERT()));
+            if error_row(ui, format!("Could not read the server status: {e}")) {
+                s.refresh = true;
+            }
             return;
         }
         Some(Ok((_, v))) => v,
@@ -706,7 +767,7 @@ mod tests {
     use super::*;
 
     fn p(id: u64, user: &str, db: &str, command: &str, info: &str) -> Proc {
-        Proc { id, user: user.into(), host: String::new(), db: db.into(), command: command.into(), secs: 0.0, state: String::new(), info: info.into() }
+        Proc::new(id, user, "", db, command, 0.0, "", info)
     }
 
     #[test]
@@ -732,6 +793,44 @@ mod tests {
         assert_eq!(fmt_rate("Bytes_received", 1_258_291.0), "1.2 MB/s");
         assert_eq!(thread_state("Yes").0, "Running");
         assert_eq!(thread_state("No").0, "Stopped");
+    }
+
+    fn procs(rows: Vec<Proc>, identity: &str) -> Processes {
+        Processes { rows, me: 1, uptime: None, identity: identity.into() }
+    }
+
+    #[test]
+    fn a_pending_kill_dies_with_any_change_of_its_target() {
+        let c = Confirm { p: p(9, "app", "shop", "Query", "SELECT 1"), identity: "uuid-a".into(), whole: false };
+        assert!(confirm_ok(&c, &procs(vec![p(9, "app", "shop", "Query", "SELECT 1")], "uuid-a")));
+        // The id went to another statement, to Sleep, to another user, or is gone.
+        for rows in [vec![p(9, "app", "shop", "Query", "SELECT 2")], vec![p(9, "app", "shop", "Sleep", "")], vec![p(9, "other", "shop", "Query", "SELECT 1")], vec![p(10, "app", "shop", "Query", "SELECT 1")]] {
+            assert!(!confirm_ok(&c, &procs(rows, "uuid-a")));
+        }
+        // The same row on another server (a restart, a failover): ids repeat but nothing may be killed.
+        assert!(!confirm_ok(&c, &procs(vec![p(9, "app", "shop", "Query", "SELECT 1")], "uuid-b")));
+    }
+
+    #[test]
+    fn a_hidden_row_is_not_killable_through_the_toolbar() {
+        let rows = vec![p(1, "report", "analytics", "Query", "SELECT 1"), p(2, "app", "shop", "Query", "SELECT 2")];
+        let vis = shown(&rows, "analytics", false);
+        assert!(vis.iter().any(|r| r.id == 1) && !vis.iter().any(|r| r.id == 2));
+    }
+
+    #[test]
+    fn rates_never_span_a_failed_read() {
+        let t0 = Instant::now();
+        let now = t0 + Duration::from_secs(2);
+        assert_eq!(prev_of(Some(Ok((t0, 5))), now).map(|(s, v)| (s.round(), v)), Some((2.0, 5)));
+        assert!(prev_of::<i32>(Some(Err("gone".into())), now).is_none());
+        assert!(prev_of::<i32>(None, now).is_none());
+    }
+
+    #[test]
+    fn a_failed_read_is_retried_after_a_backoff() {
+        assert_eq!(retry_after(true), Duration::from_secs(2));
+        assert_eq!(retry_after(false), Duration::from_secs(10));
     }
 
     #[test]

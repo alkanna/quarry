@@ -2,7 +2,7 @@
 //! answers through `Msg::SqlServer`, tagged with the window's request id so a slow old answer is dropped.
 //! View only: nothing here runs a SET.
 
-use super::worker::{kill_query, text};
+use super::worker::text;
 use super::{Advanced, Db, Dialect};
 use crate::db::{e, Msg, Res, Worker};
 use sqlx::{Connection, Executor};
@@ -20,9 +20,40 @@ pub struct Proc {
     pub secs: f64,
     pub state: String,
     pub info: String,
+    /// The query on one line and cut for display, made once per answer so a megabyte INSERT costs nothing per frame.
+    pub line: String,
+    /// Lower case user, database and the start of the query, for the filter.
+    pub search: String,
+}
+
+/// The query as one line of at most `n` characters.
+pub fn one_line(info: &str, n: usize) -> String {
+    let mut out = String::new();
+    for w in info.split_whitespace() {
+        if out.chars().count() >= n {
+            break;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(w);
+    }
+    out.chars().take(n).collect()
 }
 
 impl Proc {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(id: u64, user: &str, host: &str, db: &str, command: &str, secs: f64, state: &str, info: &str) -> Proc {
+        let search = format!("{} {} {}", user, db, one_line(info, 4000)).to_lowercase();
+        Proc { id, user: user.into(), host: host.into(), db: db.into(), command: command.into(), secs, state: state.into(), info: info.into(), line: one_line(info, 300), search }
+    }
+
+    /// Whether `other` is still the same statement on the same connection: an id can move to another client or
+    /// another statement between two reads, and a Kill must not follow it there.
+    pub fn same_thread(&self, other: &Proc) -> bool {
+        self.id == other.id && self.user == other.user && self.host == other.host && self.command == other.command && self.info == other.info
+    }
+
     /// A thread that is only waiting, which "Hide sleeping" hides.
     pub fn sleeping(&self) -> bool {
         self.command == "Sleep"
@@ -31,7 +62,8 @@ impl Proc {
     /// Background threads of the server (the event scheduler, replication and binlog senders) cannot be killed
     /// like a client's, and are not counted as running.
     pub fn daemon(&self) -> bool {
-        matches!(self.command.as_str(), "Daemon" | "Binlog Dump" | "Binlog Dump GTID") || self.user == "event_scheduler"
+        // MySQL runs replication threads as "system user" with Command Connect; MariaDB names them by role.
+        matches!(self.command.as_str(), "Daemon" | "Binlog Dump" | "Binlog Dump GTID" | "Slave_IO" | "Slave_SQL" | "Slave_worker") || self.user == "event_scheduler" || self.user == "system user"
     }
 
     pub fn running(&self) -> bool {
@@ -44,6 +76,9 @@ pub struct Processes {
     /// The connection that ran the SHOW, so the window can mark it as Quarry's own.
     pub me: u64,
     pub uptime: Option<u64>,
+    /// Which server answered (its UUID, or hostname and id on MariaDB), so a Kill that lands on another backend
+    /// behind a proxy is refused.
+    pub identity: String,
 }
 
 /// A row from the first of `names` the server gave. MySQL names the database column `db`, MariaDB too, but a
@@ -56,7 +91,7 @@ fn pick(get: &dyn Fn(&str) -> Option<String>, name: &str) -> Option<String> {
 /// shift anything.
 pub fn proc_from(get: &dyn Fn(&str) -> Option<String>) -> Option<Proc> {
     let s = |n: &str| pick(get, n).unwrap_or_default();
-    Some(Proc { id: pick(get, "Id")?.trim().parse().ok()?, user: s("User"), host: s("Host"), db: s("db"), command: s("Command"), secs: pick(get, "Time").and_then(|t| t.trim().parse().ok()).unwrap_or(0.0), state: s("State"), info: s("Info") })
+    Some(Proc::new(pick(get, "Id")?.trim().parse().ok()?, &s("User"), &s("Host"), &s("db"), &s("Command"), pick(get, "Time").and_then(|t| t.trim().parse().ok()).unwrap_or(0.0), &s("State"), &s("Info")))
 }
 
 /// One variable as the window shows it.
@@ -111,14 +146,13 @@ pub fn mysql_var(name: &str, value: &str, global_value: Option<&str>, source: Op
 /// The variables Quarry sets on every session of a connection, lower case, so the window can say so. The charset
 /// ones come from SET NAMES, which only a non-default charset or collation sends.
 pub fn set_by_quarry(adv: &Advanced, dialect: Dialect, system_offset: Option<i32>) -> Vec<String> {
-    let mut v: Vec<String> = ["autocommit", "transaction_read_only", "tx_read_only"].map(String::from).to_vec();
+    // sqlx sends SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci on every connect, so these are always Quarry's.
+    let mut v: Vec<String> = ["autocommit", "transaction_read_only", "tx_read_only", "character_set_client", "character_set_connection", "character_set_results", "collation_connection"].map(String::from).to_vec();
     v.push(if dialect == Dialect::MySql { "max_execution_time" } else { "max_statement_time" }.into());
     for q in adv.session_statements(system_offset).unwrap_or_default() {
         let l = q.to_ascii_lowercase();
         if l.contains("time_zone") {
             v.push("time_zone".into());
-        } else if l.starts_with("set names") {
-            v.extend(["character_set_client", "character_set_connection", "character_set_results", "collation_connection"].map(String::from));
         } else if l.contains("sql_mode") {
             v.push("sql_mode".into());
         }
@@ -154,10 +188,12 @@ fn init_names(stmt: &str) -> Vec<String> {
     parts
         .iter()
         .filter_map(|p| {
-            let lhs = p.split([':', '=']).next()?.trim().to_ascii_lowercase();
-            let lhs = lhs.trim_start_matches("session ").trim_start_matches("local ").trim_start_matches("@@session.").trim_start_matches("@@local.").trim_start_matches("@@");
-            let lhs: String = lhs.chars().filter(|c| *c != '`' && *c != '"').collect();
-            (!lhs.is_empty() && !lhs.starts_with('@')).then_some(lhs)
+            let lhs = p.split([':', '=']).next()?.to_ascii_lowercase();
+            // "SET SESSION   x", "SET SESSION\nx" and "@@session.x" all name x.
+            let mut words = lhs.split_whitespace().skip_while(|w| matches!(*w, "session" | "local"));
+            let w = words.next()?;
+            let name: String = w.trim_start_matches("@@session.").trim_start_matches("@@local.").trim_start_matches("@@").chars().filter(|c| *c != '`' && *c != '"').collect();
+            (!name.is_empty() && !name.starts_with('@')).then_some(name)
         })
         .collect()
 }
@@ -291,6 +327,8 @@ pub fn metrics(cur: &Snap, vars: &HashMap<String, String>, prev: Option<&(f64, S
 /// MySQL's and MariaDB's.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Replica {
+    /// The channel of a multi-source replica, or the named connection on MariaDB; empty for the default one.
+    pub channel: String,
     pub source: String,
     pub io: String,
     pub sql: String,
@@ -304,6 +342,7 @@ pub fn replica_from(get: &dyn Fn(&str) -> Option<String>) -> Replica {
     let host = first(&["Source_Host", "Master_Host"]);
     let port = first(&["Source_Port", "Master_Port"]);
     Replica {
+        channel: first(&["Channel_Name", "Connection_name"]),
         source: if port.is_empty() { host } else { format!("{host}:{port}") },
         io: first(&["Replica_IO_Running", "Slave_IO_Running"]),
         sql: first(&["Replica_SQL_Running", "Slave_SQL_Running"]),
@@ -318,7 +357,16 @@ pub struct Overview {
     pub vars: HashMap<String, String>,
     pub tls: String,
     /// None is "Not a replica"; an error is the server's words, with a plain one for a missing privilege.
-    pub replica: Res<Option<Replica>>,
+    pub replica: Res<Vec<Replica>>,
+}
+
+/// What a missing replication privilege is called: MariaDB 10.5.9 and later asks for REPLICA MONITOR, which
+/// SLAVE MONITOR and REPLICATION CLIENT stood for before.
+pub fn replica_denied(d: Dialect) -> String {
+    match d {
+        Dialect::MySql => "Not available for this account: it needs the REPLICATION CLIENT privilege.".into(),
+        Dialect::MariaDb => "Not available for this account: it needs the REPLICA MONITOR privilege (SLAVE MONITOR or REPLICATION CLIENT on older MariaDB).".into(),
+    }
 }
 
 /// Variables the Overview reads.
@@ -353,7 +401,8 @@ async fn processes(db: &Db) -> Res<Processes> {
         if denied { "Your account cannot list the processes: it needs the PROCESS privilege.".to_string() } else { e(x) }
     })?;
     let rows = list.iter().filter_map(|r| proc_from(&|n| text(r, n))).collect();
-    Ok(Processes { rows, me, uptime: uptime(&mut c).await })
+    let identity = identity(&mut c, db.dialect).await;
+    Ok(Processes { rows, me, uptime: uptime(&mut c).await, identity })
 }
 
 async fn variables(db: &Db, global: bool) -> Res<Variables> {
@@ -400,15 +449,17 @@ fn mysql_number(x: &sqlx::Error) -> Option<u16> {
     }
 }
 
-/// MySQL 8.4 only knows REPLICA, older MySQL only SLAVE, MariaDB both from 10.5.1.
-async fn replica(c: &mut sqlx::MySqlConnection) -> Res<Option<Replica>> {
+/// Every replication channel. MySQL 8.4 only knows REPLICA, older MySQL only SLAVE; MariaDB's plain statement shows
+/// the default connection only, so ALL SLAVES is what lists the named ones of a multi-source replica.
+async fn replicas(c: &mut sqlx::MySqlConnection, d: Dialect) -> Res<Vec<Replica>> {
+    let qs: &[&str] = if d == Dialect::MariaDb { &["SHOW ALL SLAVES STATUS"] } else { &["SHOW REPLICA STATUS", "SHOW SLAVE STATUS"] };
     let mut last = None;
-    for q in ["SHOW REPLICA STATUS", "SHOW SLAVE STATUS"] {
+    for q in qs {
         match rows(c, q).await {
-            Ok(list) => return Ok(list.first().map(|r| replica_from(&|n| text(r, n)))),
+            Ok(list) => return Ok(list.iter().map(|r| replica_from(&|n| text(r, n))).collect()),
             // 1064 is the syntax error of a server that lacks the other spelling; any other error is the answer.
             Err(x) if mysql_number(&x) == Some(1064) => last = Some("This server does not report replication status.".to_string()),
-            Err(x) if matches!(mysql_number(&x), Some(1227 | 1045)) => return Err("Not available for this account: it needs the REPLICATION CLIENT privilege.".to_string()),
+            Err(x) if matches!(mysql_number(&x), Some(1227 | 1045)) => return Err(replica_denied(d)),
             Err(x) => return Err(e(x)),
         }
     }
@@ -428,7 +479,7 @@ async fn overview(db: &Db) -> Res<Overview> {
         }
         Err(_) => String::new(),
     };
-    let replica = replica(&mut c).await;
+    let replica = replicas(&mut c, db.dialect).await;
     Ok(Overview { snap, vars, tls, replica })
 }
 
@@ -437,12 +488,57 @@ async fn status(db: &Db) -> Res<Snap> {
     status_snap(&mut c).await
 }
 
-/// KILL <id> on a connection of its own, so a busy or exhausted pool never blocks it.
-async fn kill_connection(db: &Db, id: u64) -> Res<String> {
-    let mut c = tokio::time::timeout(Duration::from_secs(10), sqlx::MySqlConnection::connect_with(&db.opts)).await.map_err(|_| "Could not reach the server to end the connection".to_string())?.map_err(e)?;
-    let r = c.execute(db.dialect.kill_connection(id).as_str()).await.map(|_| "Ended the connection".to_string()).map_err(|x| kill_error(&x));
+/// What the window read about the thread it is about to kill, to check again on the connection that kills.
+#[derive(Clone, Debug, PartialEq)]
+pub struct KillTarget {
+    pub id: u64,
+    pub user: String,
+    pub host: String,
+    pub info: String,
+    pub identity: String,
+}
+
+impl KillTarget {
+    pub fn of(p: &Proc, identity: &str) -> KillTarget {
+        KillTarget { id: p.id, user: p.user.clone(), host: p.host.clone(), info: p.info.clone(), identity: identity.to_string() }
+    }
+}
+
+/// Which server a connection reached. MySQL has a UUID; MariaDB's hostname and server id are what tell a
+/// replica or a cluster node apart.
+async fn identity(c: &mut sqlx::MySqlConnection, d: Dialect) -> String {
+    let q = if d == Dialect::MariaDb { "SELECT @@hostname, @@server_id" } else { "SELECT @@server_uuid" };
+    match rows(c, q).await {
+        Ok(r) => r.first().map(|r| (0..if d == Dialect::MariaDb { 2 } else { 1 }).map(|i| super::worker::raw(r, i).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default()).collect::<Vec<_>>().join("/")).unwrap_or_default(),
+        Err(_) => String::new(),
+    }
+}
+
+/// Whether the thread the server now has under `t.id` is the one the list showed.
+pub fn target_matches(t: &KillTarget, user: &str, host: &str, info: &str) -> bool {
+    t.user == user && t.host == host && t.info.trim() == info.trim()
+}
+
+/// KILL QUERY or KILL on a connection of its own (a busy or exhausted pool never blocks it), after checking on
+/// that same connection that it reached the same server and that the thread is still the one the list showed.
+async fn kill_checked(db: &Db, t: &KillTarget, whole: bool) -> Res<String> {
+    let mut c = tokio::time::timeout(Duration::from_secs(10), sqlx::MySqlConnection::connect_with(&db.opts)).await.map_err(|_| "Could not reach the server to kill it".to_string())?.map_err(e)?;
+    let r = kill_on(&mut c, db.dialect, t, whole).await;
     let _ = c.close().await;
     r
+}
+
+async fn kill_on(c: &mut sqlx::MySqlConnection, d: Dialect, t: &KillTarget, whole: bool) -> Res<String> {
+    if identity(c, d).await != t.identity {
+        return Err("The connection now reaches a different server than the list was read from, so nothing was killed. Refresh and try again.".into());
+    }
+    let r = rows(c, &format!("SELECT USER, HOST, INFO FROM information_schema.PROCESSLIST WHERE ID = {}", t.id)).await.map_err(e)?;
+    let Some(r) = r.first() else { return Err("That connection is already gone.".into()) };
+    if !target_matches(t, &text(r, "USER").unwrap_or_default(), &text(r, "HOST").unwrap_or_default(), &text(r, "INFO").unwrap_or_default()) {
+        return Err("That connection is now running something else, so nothing was killed. Refresh and try again.".into());
+    }
+    let q = if whole { d.kill_connection(t.id) } else { d.cancel(t.id) };
+    c.execute(q.as_str()).await.map(|_| if whole { "Ended the connection" } else { "Stopped the statement" }.to_string()).map_err(|x| kill_error(&x))
 }
 
 impl Worker {
@@ -463,9 +559,9 @@ impl Worker {
     }
 
     /// `whole` ends the connection (KILL), otherwise only its running statement (KILL QUERY).
-    pub fn sql_server_kill(&self, db: Db, req: u64, id: u64, whole: bool) {
+    pub fn sql_server_kill(&self, db: Db, req: u64, target: KillTarget, whole: bool) {
         self.spawn(async move {
-            let res = if whole { kill_connection(&db, id).await } else { kill_query(&db, id).await };
+            let res = kill_checked(&db, &target, whole).await;
             Msg::SqlServer { req, ans: Answer::Kill { whole, res } }
         });
     }
@@ -475,6 +571,7 @@ impl Worker {
 mod tests {
     use super::*;
     use crate::db::sql::testing::every_server;
+    use crate::db::sql::worker::kill_query;
     use std::collections::HashMap;
 
     fn row(cols: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
@@ -543,6 +640,68 @@ mod tests {
         assert!(set_by_quarry(&adv, Dialect::MySql, None).contains(&"collation_connection".to_string()));
     }
 
+    #[test]
+    fn system_and_replication_threads_are_not_client_threads() {
+        for (user, cmd) in [("system user", "Connect"), ("system user", "Query"), ("root", "Slave_IO"), ("root", "Slave_SQL"), ("root", "Slave_worker"), ("repl", "Binlog Dump GTID"), ("event_scheduler", "Daemon")] {
+            let p = proc_from(&row(&[("Id", "7"), ("User", user), ("Command", cmd), ("Time", "10")])).unwrap();
+            assert!(p.daemon() && !p.running(), "{user} {cmd}");
+        }
+        assert!(proc_from(&row(&[("Id", "7"), ("User", "app"), ("Command", "Query")])).unwrap().running());
+    }
+
+    #[test]
+    fn a_thread_that_moved_is_not_the_same_thread() {
+        let p = |id, user: &str, cmd: &str, info: &str| Proc::new(id, user, "10.0.0.1:5", "shop", cmd, 1.0, "", info);
+        let a = p(9, "app", "Query", "SELECT 1");
+        assert!(a.same_thread(&p(9, "app", "Query", "SELECT 1")));
+        assert!(!a.same_thread(&p(9, "app", "Query", "SELECT 2")));
+        assert!(!a.same_thread(&p(9, "app", "Sleep", "")));
+        assert!(!a.same_thread(&p(9, "other", "Query", "SELECT 1")));
+        assert!(!a.same_thread(&p(10, "app", "Query", "SELECT 1")));
+        let t = KillTarget::of(&a, "uuid");
+        assert!(target_matches(&t, "app", "10.0.0.1:5", "SELECT 1 ") && !target_matches(&t, "app", "10.0.0.1:5", "SELECT 3"));
+    }
+
+    #[test]
+    fn long_queries_are_cut_once_for_display() {
+        let long = format!("INSERT INTO t VALUES {}", "(1, 'a'),\n\t".repeat(100_000));
+        let p = Proc::new(1, "u", "h", "d", "Query", 0.0, "", &long);
+        assert!(p.line.chars().count() <= 300 && !p.line.contains('\n') && p.line.starts_with("INSERT INTO t VALUES (1, 'a'),"));
+        assert!(p.search.len() <= 4100 && p.search.contains("insert into"));
+        assert_eq!(one_line("  SELECT\n  1  ", 300), "SELECT 1");
+    }
+
+    #[test]
+    fn init_names_ignore_odd_spacing_and_charset_is_always_quarrys() {
+        assert_eq!(init_names("SET SESSION   wait_timeout = 1"), ["wait_timeout"]);
+        assert_eq!(init_names("SET SESSION\nwait_timeout=1, @@local.lock_wait_timeout := 2, @u = 3"), ["wait_timeout", "lock_wait_timeout"]);
+        assert_eq!(init_names("SET\tLOCAL  `group_concat_max_len` = 5;"), ["group_concat_max_len"]);
+        let v = set_by_quarry(&Advanced::default(), Dialect::MariaDb, None);
+        for n in ["character_set_client", "character_set_connection", "character_set_results", "collation_connection"] {
+            assert!(v.contains(&n.to_string()), "{n}");
+        }
+    }
+
+    #[test]
+    fn replication_channels_and_privilege_names() {
+        let r = replica_from(&row(&[("Channel_Name", "east"), ("Source_Host", "h")]));
+        assert_eq!(r.channel, "east");
+        assert_eq!(replica_from(&row(&[("Connection_name", "west"), ("Master_Host", "m")])).channel, "west");
+        assert!(replica_denied(Dialect::MySql).contains("REPLICATION CLIENT"));
+        assert!(replica_denied(Dialect::MariaDb).contains("REPLICA MONITOR"));
+    }
+
+    #[test]
+    fn live_replication_reads_on_both_servers_and_a_plain_one_has_none() {
+        every_server(|l, _| {
+            let r = l.w.rt.block_on(async {
+                let mut c = l.db.acquire().await.unwrap();
+                replicas(&mut c, l.db.dialect).await
+            });
+            assert!(r.unwrap().is_empty());
+        });
+    }
+
     fn snap(v: &[(&str, &str)]) -> Snap {
         Snap::new(v.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
     }
@@ -607,7 +766,7 @@ mod tests {
             let m = metrics(&ov.snap, &ov.vars, None);
             assert!(m.connected.is_some() && m.max_connections.is_some() && m.hit.is_some() && m.pool_size.is_some());
             // A fresh container is not a replica.
-            assert_eq!(ov.replica.unwrap(), None);
+            assert!(ov.replica.unwrap().is_empty());
             // Two samples apart give a rate for a counter that moved.
             l.one("SELECT 1");
             std::thread::sleep(Duration::from_millis(1100));
@@ -644,6 +803,11 @@ mod tests {
         None
     }
 
+    fn target(l: &super::super::testing::Live, p: &Proc) -> KillTarget {
+        let ident = l.w.rt.block_on(processes(&l.db)).unwrap().identity;
+        KillTarget::of(p, &ident)
+    }
+
     #[test]
     fn live_processlist_lists_a_running_statement_and_marks_ours() {
         every_server(|l, _| {
@@ -652,8 +816,8 @@ mod tests {
             assert!(p.running() && matches!(p.command.as_str(), "Query" | "Execute") && p.info.contains("SLEEP(30)"), "{p:?}");
             let all = l.w.rt.block_on(processes(&l.db)).unwrap();
             assert!(all.rows.iter().any(|r| r.id == all.me && r.info.contains("PROCESSLIST")));
-            assert!(all.uptime.is_some_and(|u| u > 0));
-            l.w.rt.block_on(kill_query(&l.db, id)).unwrap();
+            assert!(all.uptime.is_some_and(|u| u > 0) && !all.identity.is_empty());
+            l.w.rt.block_on(kill_checked(&l.db, &target(l, &p), false)).unwrap();
         });
     }
 
@@ -661,13 +825,11 @@ mod tests {
     fn live_kill_query_interrupts_and_keeps_the_connection() {
         every_server(|l, _| {
             let (rx, id) = sleeper(l);
-            wait_listed(l, id, 10).expect("listed");
-            l.w.rt.block_on(kill_query(&l.db, id)).unwrap();
-            // MySQL answers the interrupted SLEEP with 1 (or error 1317 for a killed query); either way the same
-            // connection answers the next statement.
+            let p = wait_listed(l, id, 10).expect("listed");
+            l.w.rt.block_on(kill_checked(&l.db, &target(l, &p), false)).unwrap();
             let (out, alive) = rx.recv_timeout(Duration::from_secs(10)).unwrap();
             assert!(alive, "the connection answers the next statement after KILL QUERY");
-            // The error is the statement's own; the connection answers the next one.
+            // The error is the statement's own.
             let err = out.unwrap_err();
             assert!(err.contains("interrupted") || err.contains("1317"), "{err}");
         });
@@ -677,15 +839,53 @@ mod tests {
     fn live_kill_connection_drops_it() {
         every_server(|l, _| {
             let (rx, id) = sleeper(l);
-            wait_listed(l, id, 10).expect("listed");
-            l.w.rt.block_on(kill_connection(&l.db, id)).unwrap();
+            let p = wait_listed(l, id, 10).expect("listed");
+            let t = target(l, &p);
+            l.w.rt.block_on(kill_checked(&l.db, &t, true)).unwrap();
             let _ = rx.recv_timeout(Duration::from_secs(10));
             std::thread::sleep(Duration::from_millis(300));
             let after = l.w.rt.block_on(processes(&l.db)).unwrap();
             assert!(!after.rows.iter().any(|r| r.id == id), "the connection is gone after KILL");
             // A second kill of the same id says it is gone instead of a raw code.
-            let err = l.w.rt.block_on(kill_connection(&l.db, id)).unwrap_err();
-            assert_eq!(err, "That connection is already gone.");
+            assert_eq!(l.w.rt.block_on(kill_checked(&l.db, &t, true)).unwrap_err(), "That connection is already gone.");
+            assert_eq!(l.w.rt.block_on(kill_query(&l.db, 4_000_000_000)).unwrap_err(), "That connection is already gone.");
+        });
+    }
+
+    #[test]
+    fn live_a_kill_of_something_else_is_refused() {
+        every_server(|l, _| {
+            let (rx, id) = sleeper(l);
+            let p = wait_listed(l, id, 10).expect("listed");
+            // The id now runs another statement, another client, or lives on another server: nothing dies.
+            let ok = target(l, &p);
+            for bad in [KillTarget { info: "SELECT 1".into(), ..ok.clone() }, KillTarget { user: "someone".into(), ..ok.clone() }, KillTarget { host: "10.9.9.9:1".into(), ..ok.clone() }] {
+                let err = l.w.rt.block_on(kill_checked(&l.db, &bad, true)).unwrap_err();
+                assert!(err.contains("running something else"), "{err}");
+            }
+            let err = l.w.rt.block_on(kill_checked(&l.db, &KillTarget { identity: "other-server".into(), ..ok.clone() }, false)).unwrap_err();
+            assert!(err.contains("different server"), "{err}");
+            assert!(rx.recv_timeout(Duration::from_millis(500)).is_err(), "the statement still runs");
+            l.w.rt.block_on(kill_checked(&l.db, &ok, false)).unwrap();
+            let _ = rx.recv_timeout(Duration::from_secs(10));
+        });
+    }
+
+    #[test]
+    fn live_killing_another_users_thread_without_the_privilege_says_so() {
+        every_server(|l, _| {
+            let (rx, id) = sleeper(l);
+            wait_listed(l, id, 10).expect("listed");
+            l.sql("DROP USER IF EXISTS 'q_nokill'@'%'");
+            l.sql("CREATE USER 'q_nokill'@'%' IDENTIFIED BY 'nokill-pw'");
+            let opts = l.db.opts.clone().username("q_nokill").password("nokill-pw");
+            let low = Db { opts, ..l.db.clone() };
+            let err = l.w.rt.block_on(kill_query(&low, id)).unwrap_err();
+            l.sql("DROP USER 'q_nokill'@'%'");
+            assert!(err.contains("CONNECTION_ADMIN"), "{err}");
+            assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "the statement still runs");
+            l.w.rt.block_on(kill_query(&l.db, id)).unwrap();
+            let _ = rx.recv_timeout(Duration::from_secs(10));
         });
     }
 
