@@ -173,7 +173,22 @@ Won't fix: the init command no longer takes SELECT, SHOW or DO (nothing it could
 10. The shell relay reads `@@SESSION.sql_mode` on its own connection and fills values for it (`live_the_relay_fills_values_for_its_own_session_mode`: `C:\temp\'x` stored exactly in a NO_BACKSLASH_ESCAPES session).
 Known limits: the Content bar's filter text and "filter to this value" splice literals with the sql_mode read at connect (as noted in Review (e993e30) 13); row writes bind their values and are not affected. Every pooled session now starts with autocommit on (`session()`), so a server with global autocommit off cannot hold reads in one snapshot. The key check of a row undo runs just before its transaction, not inside it.
 
-**v3**: users and privileges, process list, server variables, console log.
+**v3** (started 2026-11-10, decided with the user): users and privileges, the process list with Kill, server overview, status and variables, SQL statements in the Query log, Save to library and Format in Query.
+- Kill (KILL QUERY, KILL connection in the row menu) needs only the two-step confirmation, also on a read-only connection, like Mongo's Operations tab (user's choice).
+- Variables are view only.
+- The Users tabs Account, Global and Limits and the Server tabs Overview and Status have no design: they are drawn first (both themes) and shown to the user before they are built; the designed parts (Users Databases tab, Processes, Variables, Query toolbar Format and Save to library) start meanwhile.
+- Passwords (create user, password change) are never shown in a preview, never logged (the Query log redacts the string after IDENTIFIED BY, PASSWORD( and SET PASSWORD) and not kept in state after Apply.
+- The rail Server button opened the Mongo Server window on SQL connections, where it spun forever; v3 opens the SQL one.
+
+**v3 progress** (builders: A = log, Format, library on `v3-query`; B = server window on `v3-server`; C = users on `v3-users`):
+- [ ] 1. SQL statements in the Query log, passwords redacted.
+- [ ] 2. Format in Query (sqlformat, kept only when the lexer reads the same tokens), undoable.
+- [ ] 3. Save to library in Query (`SavedQuery.sql`, per connection).
+- [ ] 4. Server window for SQL: Processes with Kill, Variables; then Overview and Status after their design.
+- [ ] 5. Users and privileges for SQL: Databases tab, grants preview, create and drop user; then Account, Global and Limits after their design.
+- [ ] 6. Designs for the missing tabs shown to the user and approved.
+
+**v3 definition of done:** as v2's: every item merged and ticked here; every item that writes, kills or redacts had an independent opus review with its findings fixed (failing input as a test) or marked won't fix with the reason; on the final head `cargo check --all-targets` clean, full live `cargo test` on mysql:8.4, mariadb:11.4 and Mongo with Bun, release build, `bench.py --quick` back to back with v2's head, screenshots of every new view in both themes against the designs (at a moment the user agrees to); one final whole-branch opus review; no worktrees, agent branches or test containers left; a v3 summary and known limits here.
 
 ## How this work is run
 
