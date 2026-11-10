@@ -459,12 +459,13 @@ impl App {
                 app.tabs.push(t);
             }
             app.cur = app.prefs.cur_tab.min(app.tabs.len().saturating_sub(1));
-            if let Some(t) = app.tabs.get(app.cur) {
-                app.active = Some(t.sel.conn);
-            }
             let current = env!("CARGO_PKG_VERSION");
             if let Some(id) = app.prefs.last_conn.filter(|&id| app.conn(id).is_some()) {
                 app.active = Some(id);
+            }
+            // The active tab wins over the saved connection, so the sidebar starts on the tab's connection like after a tab switch.
+            if let Some(t) = app.tabs.get(app.cur) {
+                app.active = Some(t.sel.conn);
             }
             // Every connection open last time comes back open, in its rail order. The connections of reopened tabs
             // count too, for settings saved before open_conns existed.
