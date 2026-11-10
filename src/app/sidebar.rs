@@ -17,6 +17,13 @@ pub(super) fn seg_score(t: &str, s: &str) -> Option<u32> {
     }
 }
 
+/// Typed without separators, like "shopord", a token can run across names. It must start where a
+/// name starts, or "ord" would match every table under a connection called "shop-prod".
+fn spans_names(t: &str, segs: &[&str]) -> bool {
+    let Some(first) = t.chars().next() else { return false };
+    segs.iter().enumerate().any(|(k, s)| s.starts_with(first) && fuzzy(t, &segs[k..].join("."), false))
+}
+
 /// Scores an entry's lowercase names (connection, database, collection) against the query
 /// tokens, or None when a token matches nowhere. Each token counts its best name, so
 /// "vairon travels" finds thetreep-api-vairon.travels. A collection whose own name matches
@@ -24,11 +31,12 @@ pub(super) fn seg_score(t: &str, s: &str) -> Option<u32> {
 pub(super) fn jump_score(tokens: &[String], segs: &[&str]) -> Option<u32> {
     let mut total = 0;
     for (n, t) in tokens.iter().enumerate() {
-        let best = segs.iter().enumerate().filter_map(|(i, s)| seg_score(t, s).map(|sc| (sc, i))).max();
+        // A scattered-letter match counts on the item's own name only: "ord" fuzzily matches the
+        // connection "shop-prod", which would pull in every table under it.
+        let best = segs.iter().enumerate().filter_map(|(i, s)| seg_score(t, s).filter(|&sc| sc > 1 || i + 1 == segs.len()).map(|sc| (sc, i))).max();
         let (sc, i) = match best {
             Some(b) => b,
-            // Typed without separators, like "shopord", a token can span names.
-            None if fuzzy(t, &segs.join("."), false) => (1, 0),
+            None if spans_names(t, segs) => (1, 0),
             None => return None,
         };
         total += sc;
@@ -39,12 +47,16 @@ pub(super) fn jump_score(tokens: &[String], segs: &[&str]) -> Option<u32> {
     Some(total)
 }
 
+/// The lowercase words of a palette query; dots and slashes split names like a space.
+pub(super) fn tokens(q: &str) -> Vec<String> {
+    q.to_lowercase().split(|c: char| c.is_whitespace() || c == '.' || c == '/').filter(|t| !t.is_empty()).map(String::from).collect()
+}
+
 /// Palette entries matching `q` as (label, hint, target), best match first. With an empty query
 /// they keep tree order, active connection first.
 pub(super) fn jumps(conns: &[Conn], active: Option<u64>, q: &str) -> Vec<(String, String, Jump)> {
     const MAX: usize = 50;
-    let q = q.to_lowercase();
-    let tokens: Vec<String> = q.split(|c: char| c.is_whitespace() || c == '.' || c == '/').filter(|t| !t.is_empty()).map(String::from).collect();
+    let tokens = tokens(q);
     let mut out = Vec::new();
     let mut order: Vec<&Conn> = conns.iter().collect();
     order.sort_by_key(|c| Some(c.meta.id) != active);
@@ -750,10 +762,16 @@ mod tests {
         let labels = |active, q| jumps(&conns, active, q).into_iter().map(|j| j.0).collect::<Vec<_>>();
         assert_eq!(labels(Some(2), ""), ["staging", "prod", "shop", "shop.users", "shop.orders"]);
         assert_eq!(labels(Some(1), "users"), ["shop.users"]);
-        // "or" fuzzily matches shop.users too, but the substring match ranks first.
-        assert_eq!(labels(Some(1), "or"), ["shop.orders", "shop.users"]);
+        // Letters scattered across names ("o" in shop, "r" in users) are no match.
+        assert_eq!(labels(Some(1), "or"), ["shop.orders"]);
         assert_eq!(labels(Some(1), "prod users")[0], "shop.users");
         assert_eq!(labels(Some(1), "shop")[0], "shop");
+        // Typed without a separator, a word may still run across names from the start of one.
+        assert_eq!(labels(Some(1), "shopord"), ["shop.orders"]);
+
+        // "ord" is scattered through "shop-prod": the connection itself matches, every collection under it does not.
+        let conns = [conn(1, "shop-prod", Status::Ready, vec![("shop".into(), Some(vec!["customers".into(), "orders".into()]))])];
+        assert_eq!(jumps(&conns, Some(1), "ord").into_iter().map(|j| j.0).collect::<Vec<_>>(), ["shop.orders", "shop-prod"]);
 
         let conns = [conn(1, "local", Status::Ready, vec![("thetreep-api-main".into(), Some(vec!["travels".into()])), ("thetreep-api-vairon".into(), Some(vec!["travels".into(), "users".into()]))])];
         let labels = |q| jumps(&conns, Some(1), q).into_iter().map(|j| j.0).collect::<Vec<_>>();

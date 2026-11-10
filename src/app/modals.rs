@@ -102,6 +102,9 @@ impl App {
             }
         }
 
+        if matches!(self.modal, Some(Modal::Palette { .. })) {
+            return self.palette(ctx);
+        }
         let Some(mut m) = self.modal.take() else { return };
         let mut keep = true;
         let r = dialog(egui::Id::unique(("quarry-layer", "modal"))).show(ctx, |ui| {
@@ -612,51 +615,8 @@ impl App {
                     }
                 }
                 Modal::Explain { summary, raw, show_raw } => self.explain_dialog(ui, summary, raw, show_raw, &mut keep),
-                Modal::Palette { query, sel } => {
-                    ui.set_width(560.0);
-                    // Taken before the text field sees them, so arrows move the selection and Enter picks.
-                    let (up, down, enter) = ui.input_mut(|i| (i.consume_key(egui::Modifiers::NONE, Key::ArrowUp), i.consume_key(egui::Modifiers::NONE, Key::ArrowDown), i.consume_key(egui::Modifiers::NONE, Key::Enter)));
-                    let r = ui.add(egui::TextEdit::singleline(query).hint_text("Jump to a connection, database or collection").desired_width(f32::INFINITY).margin(egui::Margin::symmetric(10, 8)));
-                    r.request_focus();
-                    if r.changed() {
-                        *sel = 0;
-                    }
-                    let items = jumps(&self.conns, self.active, query);
-                    if down {
-                        *sel = (*sel + 1).min(items.len().saturating_sub(1));
-                    }
-                    if up {
-                        *sel = sel.saturating_sub(1);
-                    }
-                    let mut pick = if enter { items.get(*sel).map(|x| x.2.clone()) } else { None };
-                    ui.add_space(4.0);
-                    // Full width, so the scrollbar sits on the dialog edge rather than after the longest row. The
-                    // dialog sizes itself from its content, so without a minimum the list starts scrolling at egui's 64 px.
-                    egui::ScrollArea::vertical().max_height(360.0).min_scrolled_height(360.0).auto_shrink([false, true]).show(ui, |ui| {
-                        if items.is_empty() {
-                            ui.label(RichText::new("No matches").color(MUTED()));
-                        }
-                        for (i, (label, hint, j)) in items.iter().enumerate() {
-                            let r = ui
-                                .horizontal(|ui| {
-                                    let r = ui.selectable_label(i == *sel, RichText::new(label).color(BRIGHT()));
-                                    ui.add(egui::Label::new(RichText::new(hint).size(TXT_SMALL).color(FAINT())).truncate());
-                                    r
-                                })
-                                .inner;
-                            if i == *sel && (up || down) {
-                                r.scroll_to_me(None);
-                            }
-                            if r.clicked() {
-                                pick = Some(j.clone());
-                            }
-                        }
-                    });
-                    if let Some(j) = pick {
-                        keep = false;
-                        self.jump(j);
-                    }
-                }
+                // Drawn by `palette`, in its own frame.
+                Modal::Palette { .. } => {}
             }
         });
         if keep && !r.should_close() && self.modal.is_none() {

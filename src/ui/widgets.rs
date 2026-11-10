@@ -345,7 +345,12 @@ fn on_fill(fill: Color32) -> Color32 {
 
 /// Every dialog gets the same frame; egui's popup frame has only 6 px of margin.
 pub(crate) fn dialog(id: egui::Id) -> egui::Modal {
-    egui::Modal::new(id).frame(egui::Frame::new().shadow(window_shadow()).fill(RAISED()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_LG).inner_margin(18))
+    egui::Modal::new(id).frame(dialog_frame().inner_margin(18))
+}
+
+/// The dialog look without padding, for dialogs that lay out their own edges like the Cmd+K palette.
+pub(crate) fn dialog_frame() -> egui::Frame {
+    egui::Frame::new().shadow(window_shadow()).fill(RAISED()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_LG)
 }
 
 /// A form row's label, at the top of its cell so it lines up with the first line of a tall field.

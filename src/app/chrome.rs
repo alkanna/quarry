@@ -74,7 +74,7 @@ impl App {
             self.close_tab(self.cur);
         }
         if k(cmd, Key::K) || k(cmd, Key::T) {
-            self.modal = Some(Modal::Palette { query: String::new(), sel: 0 });
+            self.open_palette();
         }
         let query_view = self.t().is_some_and(|t| t.view == View::Sql && t.sql.is_some());
         if query_view && k(cmd | shift, Key::Enter) {
@@ -117,8 +117,7 @@ impl App {
             self.log.open = !self.log.open;
         }
         if k(cmd, Key::Slash) {
-            let body = SHORTCUTS.iter().map(|(keys, what)| format!("{keys:<30}{what}")).collect::<Vec<_>>().join("\n");
-            self.modal = Some(Modal::Text { title: "Keyboard shortcuts".into(), body, code: false });
+            self.shortcuts_modal();
         }
         let n = self.tabs.len();
         if n > 0 {
@@ -129,8 +128,8 @@ impl App {
                 self.go_tab((self.cur + 1) % n);
             }
             const DIGITS: [Key; 9] = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
-            const VIEWS: [View; 8] = [View::Documents, View::Aggregate, View::Indexes, View::Schema, View::Import, View::Compare, View::Shell, View::Watch];
-            for (d, v) in DIGITS.iter().zip(VIEWS) {
+            // The palette shows these as each view's position in MONGO_VIEWS.
+            for (d, (v, _)) in DIGITS.iter().zip(MONGO_VIEWS) {
                 if k(cmd | alt, *d) {
                     self.set_view(v);
                 }
@@ -196,6 +195,11 @@ impl App {
             }
         }
         self.tree_filter.clear();
+    }
+
+    pub(super) fn shortcuts_modal(&mut self) {
+        let body = SHORTCUTS.iter().map(|(keys, what)| format!("{keys:<30}{what}")).collect::<Vec<_>>().join("\n");
+        self.modal = Some(Modal::Text { title: "Keyboard shortcuts".into(), body, code: false });
     }
 
     pub(super) fn go_tab(&mut self, i: usize) {
@@ -333,7 +337,7 @@ impl App {
                     }
                     ui.add_space(12.0);
                     if search_pill(ui).clicked() {
-                        self.modal = Some(Modal::Palette { query: String::new(), sel: 0 });
+                        self.open_palette();
                     }
                     if let Some(v) = &self.updated {
                         let r = ui.add(primary_button(ui, format!("Restart for {v}"), SUCCESS())).on_hover_text("The update is installed. Quarry restarts by itself once you have no unsaved edits and have been idle for a minute.");
@@ -801,7 +805,7 @@ fn search_pill(ui: &mut egui::Ui) -> egui::Response {
     p.rect(rect, R_MD, fill, Stroke::new(1.0, if r.has_focus() { PRIMARY() } else { edge }), egui::StrokeKind::Inside);
     let hint = p.layout_no_wrap("Search or jump to…".into(), FontId::proportional(TXT_SMALL), if r.hovered() { MUTED() } else { FAINT() });
     p.galley(egui::pos2(rect.left() + 12.0, rect.center().y - hint.size().y / 2.0), hint, Color32::PLACEHOLDER);
-    let k = p.layout_job(LayoutJob::single_section("⌘K".into(), mono_fmt(10.0, MUTED(), 400.0)));
+    let k = p.layout_job(LayoutJob::single_section(keys(false, false, "K"), mono_fmt(10.0, MUTED(), 400.0)));
     let kr = egui::Rect::from_min_size(egui::pos2(rect.right() - 6.0 - (k.size().x + 10.0), rect.center().y - 8.0), egui::vec2(k.size().x + 10.0, 16.0));
     paint_kbd(p, kr, k);
     r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Jump to a connection, database or collection")
