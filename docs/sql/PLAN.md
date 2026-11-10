@@ -186,7 +186,7 @@ Known limits: the Content bar's filter text and "filter to this value" splice li
 - [ ] 3. Save to library in Query (`SavedQuery.sql`, per connection).
 - [ ] 4. Server window for SQL: Processes with Kill, Variables; then Overview and Status after their design.
 - [ ] 5. Users and privileges for SQL: Databases tab, grants preview, create and drop user; then Account, Global and Limits after their design.
-- [ ] 6. Designs for the missing tabs shown to the user and approved.
+- [x] 6. Designs for the missing tabs shown to the user and approved (2026-11-10, page "Server"): Users · Account 12879/12962, Users · Global 13047/13156, Users · Limits 13267/13324, Server · Overview 13383/13450, Server · Status 13519/13575.
 
 **v3 definition of done:** as v2's: every item merged and ticked here; every item that writes, kills or redacts had an independent opus review with its findings fixed (failing input as a test) or marked won't fix with the reason; on the final head `cargo check --all-targets` clean, full live `cargo test` on mysql:8.4, mariadb:11.4 and Mongo with Bun, release build, `bench.py --quick` back to back with v2's head, screenshots of every new view in both themes against the designs (at a moment the user agrees to); one final whole-branch opus review; no worktrees, agent branches or test containers left; a v3 summary and known limits here.
 
