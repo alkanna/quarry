@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 mod analysis;
 mod code;
 mod dates;
+pub(crate) use dates::civil_from_days;
 mod explain;
 mod import;
 mod js_ls;
