@@ -47,7 +47,8 @@ pub const TABLES: &str = concat!(
 );
 
 /// Params: [schema, table]. Columns: name, full_type, nullable, col_key, col_default, extra, collation, comment, position,
-/// and pg_type, pg_cat, pg_typtype for the kind. A serial or identity column says auto_increment in `extra`, an identity
+/// pg_type, pg_cat, pg_typtype for the kind, and attidentity ('a' always, 'd' by default) and attgenerated ('s' stored), which
+/// the write path reads instead of the words of `extra`. A serial or identity column says auto_increment in `extra`, an identity
 /// that is always generated and a computed column say GENERATED, and neither has a `col_default` of its own.
 pub const COLUMNS: &str = concat!(
     "SELECT a.attname::text AS name, format_type(a.atttypid, a.atttypmod) AS full_type, (NOT a.attnotnull)::int AS nullable, ",
@@ -61,7 +62,7 @@ pub const COLUMNS: &str = concat!(
      CASE WHEN a.attcollation <> t.typcollation THEN co.collname::text END AS collation, \
      COALESCE(col_description(a.attrelid, a.attnum), '') AS comment, a.attnum::bigint AS position, ",
     pg_type!(),
-    " FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace ",
+    ", a.attidentity::text AS attidentity, a.attgenerated::text AS attgenerated FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace ",
     type_joins!(),
     " LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum LEFT JOIN pg_collation co ON co.oid = a.attcollation \
      WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum"

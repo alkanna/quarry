@@ -140,6 +140,11 @@ pub fn to_bson_for(pg: bool, kind: Kind, raw: Option<&[u8]>) -> Bson {
     }
     let Some(raw) = raw else { return Bson::Null };
     let text = || String::from_utf8_lossy(raw).into_owned();
+    // PostgreSQL sends a bit string as `0101` and a geometry as its own text, which only the cast it is written back
+    // through can read. Bytes of that text would bind as `\x3031..` and fail the cast.
+    if pg && matches!(kind, Kind::Bit | Kind::Geometry) {
+        return Bson::String(text());
+    }
     let s = std::str::from_utf8(raw).unwrap_or("");
     match kind {
         Kind::Int | Kind::Year => s.parse::<i64>().map_or_else(|_| Bson::String(text()), Bson::Int64),
@@ -345,6 +350,17 @@ mod tests {
         assert_eq!(lit("a\0b\u{1a}c\\d'e", true), "'a\\0b\\Zc\\\\d''e'");
         // Without backslash escapes there is no escape for them, and a backslash is a plain character.
         assert_eq!(lit("a\0b\u{1a}c\\d'e", false), "'a\0b\u{1a}c\\d''e'");
+    }
+
+    #[test]
+    fn postgres_bit_and_geometry_text_binds_back_as_the_same_text() {
+        for kind in [Kind::Bit, Kind::Geometry] {
+            let v = to_bson_for(true, kind, Some(b"0101"));
+            assert_eq!(v, Bson::String("0101".into()));
+            assert_eq!(Param::for_pg(&v), Param::Text("0101".into()));
+        }
+        // MySQL keeps bytes.
+        assert!(matches!(to_bson_for(false, Kind::Bit, Some(&[5])), Bson::Binary(_)));
     }
 
     #[test]

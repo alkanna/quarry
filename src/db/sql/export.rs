@@ -101,14 +101,39 @@ pub async fn stream(db: &Db, schema: &str, stmt: &str, plan: &Plan, out: &mut (d
     // All rows means all of them, and the file is written as UTF-8 from what the server sends.
     pin_reads(&mut conn).await?;
     let t = std::time::Instant::now();
-    let r = stream_conn(&mut conn, db.dialect, stmt, plan, out, count, cancel, &Wrap::default()).await;
+    let r = stream_locked(&mut conn, db.dialect, &db.pg_locals(), stmt, plan, out, count, cancel, &Wrap::default()).await;
     db.note(schema, stmt, t, &r);
+    // A cancelled or failed read leaves its result on the wire inside a transaction, so the connection is closed, not drained.
+    let failed = r.is_err() && db.dialect == Dialect::Postgres;
+    if failed || r.is_ok() {
+        let _ = conn.close().await;
+    }
+    if failed {
+        return r.map(|_| (0, 0));
+    }
     let r = r?;
-    let _ = conn.close().await;
     let (rows, peak) = r.unwrap_or_default();
     // Line formats end with a newline like any text file.
     out.write_all(b"\n").map_err(write_err)?;
     Ok((rows, peak))
+}
+
+/// `stream_conn` for a user statement. On PostgreSQL the statement runs alone in `BEGIN READ ONLY` with the session's
+/// timeout and `locals` (`Db::pg_locals`, which behind a pooler is the only place its settings come from), and the
+/// transaction is always rolled back and never committed, like a Custom Query statement. A transaction that is not
+/// rolled back here is cut off, so the caller must close the connection when this fails.
+pub(super) async fn stream_locked(conn: &mut Conn, dialect: super::Dialect, locals: &str, stmt: &str, plan: &Plan, out: &mut (dyn Write + Send), count: &AtomicU64, cancel: &AtomicBool, wrap: &Wrap<'_>) -> Res<Option<(u64, usize)>> {
+    if let Conn::Pg(c) = conn {
+        let timeout = super::pg_read::statement_timeout(c).await.map_err(e)?;
+        super::pg_read::begin_read_only(c, &timeout, locals).await.map_err(|x| super::pg_read::pg_error(&x, stmt, 0))?;
+    }
+    let r = stream_conn(conn, dialect, stmt, plan, out, count, cancel, wrap).await;
+    if r.is_ok() {
+        if let Conn::Pg(c) = conn {
+            sqlx::Executor::execute(&mut *c, "ROLLBACK").await.map_err(e)?;
+        }
+    }
+    r
 }
 
 /// Streams one statement on an open session, without the closing newline. None when `wrap.lenient` and
@@ -354,7 +379,7 @@ pub async fn export_all(db: &Db, schema: &str, stmts: &[String], ap: &AllPlan, p
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_all(db: &Db, schema: &str, stmts: &[String], ap: &AllPlan, path: &std::path::Path, count: &AtomicU64, step: &AtomicU64, cancel: &AtomicBool, id: &AtomicU64, parts: &mut Vec<(PathBuf, PathBuf)>, open: &mut Option<PathBuf>) -> Res<u64> {
+pub(super) async fn run_all(db: &Db, schema: &str, stmts: &[String], ap: &AllPlan, path: &std::path::Path, count: &AtomicU64, step: &AtomicU64, cancel: &AtomicBool, id: &AtomicU64, parts: &mut Vec<(PathBuf, PathBuf)>, open: &mut Option<PathBuf>) -> Res<u64> {
     let mut conn = db.acquire_conn().await?;
     prepare(&mut conn, db.dialect, schema, true, id).await?;
     pin_reads(&mut conn).await?;
@@ -376,8 +401,12 @@ async fn run_all(db: &Db, schema: &str, stmts: &[String], ap: &AllPlan, path: &s
         let out: &mut Lazy = if ap.single { &mut shared } else { &mut own };
         *open = Some(out.tmp.clone());
         let t = std::time::Instant::now();
-        let streamed = stream_conn(&mut conn, db.dialect, stmt, &ap.plan, out, count, cancel, &wrap).await;
+        let streamed = stream_locked(&mut conn, db.dialect, &db.pg_locals(), stmt, &ap.plan, out, count, cancel, &wrap).await;
         db.note(schema, stmt, t, &streamed);
+        if streamed.is_err() && db.dialect == Dialect::Postgres {
+            let _ = conn.close().await;
+            return streamed.map(|_| 0);
+        }
         let Some((rows, _)) = streamed? else {
             *open = None;
             continue;

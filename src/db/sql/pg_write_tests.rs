@@ -233,7 +233,11 @@ fn inserts_use_identity_defaults_and_return_the_keys() {
         // The computed column was left out, so the server computed it.
         assert_eq!((got[3].get_i64("n").unwrap(), got[3].get_i64("dbl").unwrap()), (3, 6), "{var}");
         let undo = undo.expect("every key is known from RETURNING");
-        let SqlUndo::Insert(keys) = undo_kind(&undo).clone() else { panic!("insert undo") };
+        let SqlUndo::Inserted(keys) = undo_kind(&undo).clone() else { panic!("insert undo") };
+        // The undo also carries the values that were written, but not the computed column.
+        assert_eq!(keys[3].get_i64("n"), Ok(3));
+        assert!(!keys[3].contains_key("dbl"));
+        let keys: Vec<Document> = keys.iter().map(pk_doc).collect();
         assert_eq!(keys, [doc! { "id": 1_i64 }, doc! { "id": 2_i64 }, doc! { "id": 3_i64 }, doc! { "id": 4_i64 }]);
         let (res, _) = t.undo(undo, &["id"]);
         assert_eq!(res.unwrap(), "Removed the inserted rows");
@@ -249,7 +253,8 @@ fn inserts_use_identity_defaults_and_return_the_keys() {
         by_tags.sort_by_key(|r| r.get_bool("ok").unwrap());
         assert_eq!(by_tags[1].get_str("tags").unwrap(), "{a,\"b c\"}");
         assert_eq!(by_tags[0].get_str("ts").unwrap(), "2024-05-05 05:05:05+00");
-        let SqlUndo::Insert(keys) = undo_kind(undo.as_ref().unwrap()).clone() else { panic!("insert undo") };
+        let SqlUndo::Inserted(keys) = undo_kind(undo.as_ref().unwrap()).clone() else { panic!("insert undo") };
+        let keys: Vec<Document> = keys.iter().map(pk_doc).collect();
         assert!(keys.iter().all(|k| k.get_str("id").is_ok_and(|s| s.len() == 36)), "{keys:?}");
         assert!(t.undo(undo.unwrap(), &["id"]).0.is_ok());
         assert!(t.page("t").2.is_empty());
@@ -398,5 +403,177 @@ fn the_writer_writes_while_the_pooled_session_stays_read_only() {
         assert!(started.elapsed() > std::time::Duration::from_secs(8) && started.elapsed() < std::time::Duration::from_secs(20), "{var}: {:?}", started.elapsed());
         assert_eq!(crate::db::explain(&err, &crate::db::ErrCtx::default()).title, "Another session holds a lock on this table");
         drop(hold);
+    });
+}
+
+// Review fixes: the export guard and the tighter write checks.
+
+fn export_plan() -> super::export::AllPlan {
+    super::export::AllPlan { plan: super::export::Plan { fmt: crate::db::copy::Fmt::Csv, header: true, table: "t".into(), bs: false }, single: false }
+}
+
+#[test]
+fn export_all_runs_every_statement_alone_in_a_rolled_back_transaction() {
+    every_pg(|l, var| {
+        let t = fixture(l, "t5f_exp", "CREATE TABLE t (id int)");
+        let dir = std::env::temp_dir().join(format!("quarry_t5f_{}_{}", std::process::id(), var));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("out.csv");
+        // set_config with is_local false is a session setting that only a rollback undoes. The lexer is not involved: run_all is called directly.
+        let stmts = vec!["SELECT set_config('quarry.leak', 'leaked', false) AS a".to_string(), "SELECT coalesce(current_setting('quarry.leak', true), '') AS seen".to_string()];
+        let (mut parts, mut open) = (Vec::new(), None);
+        let (count, step, cancel, id) = (Default::default(), Default::default(), Default::default(), Default::default());
+        let r = l.w.rt.block_on(super::export::run_all(&t.db, "t5f_exp", &stmts, &export_plan(), &path, &count, &step, &cancel, &id, &mut parts, &mut open));
+        assert!(r.is_ok(), "{var}: {r:?}");
+        assert_eq!(parts.len(), 2, "{var}");
+        let second = std::fs::read_to_string(&parts[1].0).unwrap();
+        assert!(second.contains("seen") && !second.contains("leaked"), "{var}: the second statement saw the first one's change: {second}");
+        std::fs::remove_dir_all(&dir).ok();
+    });
+}
+
+#[test]
+fn an_export_without_startup_options_still_cannot_write() {
+    every_pg(|l, var| {
+        let t = fixture(l, "t5f_pool", "CREATE TABLE t (id int)");
+        // A connection with no default_transaction_read_only, as behind a pooler that refused the startup options.
+        let res = l.w.rt.block_on(async {
+            let o = <sqlx::postgres::PgConnectOptions as std::str::FromStr>::from_str(&l.uri).unwrap().database("quarry_test");
+            let mut c = super::exec::Conn::Pg(sqlx::PgConnection::connect_with(&o).await.unwrap());
+            let plan = super::export::Plan { fmt: crate::db::copy::Fmt::Csv, header: true, table: "t".into(), bs: false };
+            let mut out = Vec::new();
+            let r = super::export::stream_locked(&mut c, Dialect::Postgres, "SET LOCAL statement_timeout = 0", "INSERT INTO t5f_pool.t VALUES (1) RETURNING id", &plan, &mut out, &Default::default(), &Default::default(), &Default::default()).await;
+            let _ = c.close().await;
+            r
+        });
+        let err = res.unwrap_err();
+        assert!(err.contains("read-only transaction"), "{var}: {err}");
+        assert_eq!(t.one("SELECT count(*)::text FROM t"), "0", "{var}: the insert ran");
+    });
+}
+
+#[test]
+fn a_user_type_is_named_with_its_schema_in_the_cast() {
+    every_pg(|l, var| {
+        // The domain sits in public, which is on the pool's own search_path, so an unqualified format_type would leave its schema out.
+        let t = fixture(l, "t5f_ty", "DROP DOMAIN IF EXISTS public.t5f_mood CASCADE; CREATE DOMAIN public.t5f_mood AS text CHECK (VALUE <> 'bad'); CREATE TABLE t (id int PRIMARY KEY, m public.t5f_mood); INSERT INTO t VALUES (1, 'ok');");
+        let (cols, _, rows) = t.page("t");
+        let m = cols.iter().find(|c| c.name == "m").unwrap();
+        assert_eq!(m.ty, "public.t5f_mood", "{var}");
+        let ed = RowEdit { pk: pk_doc(&rows[0]), changes: vec![("m".into(), Bson::String("ok".into()), Bson::String("fine".into()))] };
+        let (sql, _) = super::write::update_sql(Dialect::Postgres, "t5f_ty", "t", &cols, &ed);
+        assert!(sql.contains("CAST($1 AS public.t5f_mood)"), "{var}: {sql}");
+        t.sql("DROP SCHEMA t5f_ty CASCADE; DROP DOMAIN public.t5f_mood");
+    });
+}
+
+#[test]
+fn a_computed_column_that_mentions_auto_increment_is_not_an_identity() {
+    every_pg(|l, var| {
+        let t = fixture(l, "t5f_gen", "CREATE TABLE t (id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY, auto_increment int, calc int GENERATED ALWAYS AS (coalesce(auto_increment, 0) * 2) STORED); INSERT INTO t (auto_increment) VALUES (4);");
+        let (cols, _, rows) = t.page("t");
+        let flags = |n: &str| cols.iter().find(|c| c.name == n).map(|c| (c.generated, c.auto_increment)).unwrap();
+        assert_eq!(flags("id"), (true, true), "{var}");
+        assert_eq!(flags("calc"), (true, false), "{var}");
+        assert_eq!(flags("auto_increment"), (false, false), "{var}");
+        // Restoring a deleted row writes the identity back with OVERRIDING SYSTEM VALUE and must leave the computed column out.
+        let (res, undo) = t.delete("t", &cols, &["id"], rows, false);
+        assert!(res.is_ok(), "{var}: {res:?}");
+        let (res, _) = t.undo(undo.unwrap(), &["id"]);
+        assert_eq!(res.unwrap(), "Restored the deleted rows", "{var}");
+        assert_eq!(t.one("SELECT calc::text FROM t"), "8");
+    });
+}
+
+#[test]
+fn a_key_matching_two_rows_is_refused_before_the_write_touches_a_row() {
+    every_pg(|l, var| {
+        let t = fixture(
+            l,
+            "t5f_dup",
+            "CREATE TABLE t (k int, w text); INSERT INTO t VALUES (1, 'same'), (1, 'same');
+             CREATE FUNCTION boom() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'touched a row'; END $$;
+             CREATE TRIGGER u BEFORE UPDATE OR DELETE ON t FOR EACH ROW EXECUTE FUNCTION boom();",
+        );
+        let (cols, _, _) = t.page("t");
+        let ed = RowEdit { pk: doc! { "k": 1_i64 }, changes: vec![("w".into(), Bson::String("same".into()), Bson::String("q".into()))] };
+        assert_eq!(t.save("t", &cols, &["k"], vec![ed], false).0.unwrap_err(), SEVERAL, "{var}");
+        let (res, _) = t.delete("t", &cols, &["k"], vec![doc! { "_id": doc! { "k": 1_i64 }, "k": 1_i64 }], false);
+        assert_eq!(res.unwrap_err(), SEVERAL, "{var}");
+    });
+}
+
+#[test]
+fn undoing_an_insert_leaves_a_row_that_changed_since() {
+    every_pg(|l, var| {
+        let t = fixture(l, "t5f_uins", "CREATE TABLE t (id int GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, name text);");
+        let (cols, _, _) = t.page("t");
+        let (res, undo) = t.insert("t", &cols, &["id"], vec![vec![("name".into(), Bson::String("mine".into()))]], false);
+        assert!(res.is_ok(), "{var}: {res:?}");
+        let undo = undo.unwrap();
+        // Someone edited the row since.
+        t.sql("UPDATE t SET name = 'theirs'");
+        let (res, back) = t.undo(undo, &["id"]);
+        assert_eq!(res.unwrap_err(), CONFLICT, "{var}");
+        let back = back.expect("a refused undo keeps its entry");
+        assert_eq!(t.one("SELECT count(*)::text FROM t"), "1", "{var}: the edited row was removed");
+        // Someone deleted it and inserted another row under the same key.
+        t.sql("DELETE FROM t; INSERT INTO t (id, name) VALUES (1, 'other')");
+        assert_eq!(t.undo(back, &["id"]).0.unwrap_err(), CONFLICT, "{var}");
+        assert_eq!(t.one("SELECT name FROM t"), "other");
+        // An untouched row is still removed.
+        let (_, undo) = t.insert("t", &cols, &["id"], vec![vec![("id".into(), Bson::Int64(9)), ("name".into(), Bson::String("x".into()))]], false);
+        assert_eq!(t.undo(undo.unwrap(), &["id"]).0.unwrap(), "Removed the inserted rows", "{var}");
+        assert_eq!(t.one("SELECT count(*)::text FROM t"), "1");
+    });
+}
+
+#[test]
+fn a_concurrent_change_to_json_jsonb_and_float_cells_is_refused() {
+    every_pg(|l, var| {
+        let t = fixture(l, "t5f_conc", "CREATE TABLE t (id int PRIMARY KEY, j jsonb, jt json, f float8, r float4, b bit(4)); INSERT INTO t VALUES (1, '{\"a\": 1}', '{\"a\":  1}', 1.5, 0.1, B'0101');");
+        let (cols, _, rows) = t.page("t");
+        let key = pk_doc(&rows[0]);
+        let cur = |c: &str| rows[0].get(c).cloned().unwrap();
+        t.sql("UPDATE t SET j = '{\"a\": 2}', jt = '[2]', f = 9.5, r = 0.3, b = B'1111'");
+        for (col, new) in [("j", Bson::String("{\"a\": 5}".into())), ("jt", Bson::String("[5]".into())), ("f", Bson::Double(7.0)), ("r", Bson::Double(0.7)), ("b", Bson::String("0000".into()))] {
+            let ed = RowEdit { pk: key.clone(), changes: vec![(col.into(), cur(col), new)] };
+            assert_eq!(t.save("t", &cols, &["id"], vec![ed], false).0.unwrap_err(), CONFLICT, "{var} {col}");
+        }
+        // With the value as it is now, each goes through.
+        let (cols, _, rows) = t.page("t");
+        for (col, new) in [("j", Bson::String("{\"a\": 5}".into())), ("jt", Bson::String("[5]".into())), ("f", Bson::Double(7.0)), ("r", Bson::Double(0.7)), ("b", Bson::String("0000".into()))] {
+            let ed = RowEdit { pk: key.clone(), changes: vec![(col.into(), rows[0].get(col).cloned().unwrap(), new)] };
+            let (res, _) = t.save("t", &cols, &["id"], vec![ed], false);
+            assert!(res.is_ok(), "{var} {col}: {res:?}");
+        }
+    });
+}
+
+#[test]
+fn a_row_keyed_by_a_bit_column_can_be_edited_and_undone() {
+    every_pg(|l, var| {
+        let t = fixture(l, "t5f_bit", "CREATE TABLE t (b bit(4) PRIMARY KEY, v int); INSERT INTO t VALUES (B'0101', 1), (B'0011', 2);");
+        let (cols, pk, rows) = t.page("t");
+        assert_eq!(pk, ["b"], "{var}");
+        let row = rows.iter().find(|r| r.get_i64("v") == Ok(1)).unwrap().clone();
+        let ed = RowEdit { pk: pk_doc(&row), changes: vec![("v".into(), Bson::Int64(1), Bson::Int64(5))] };
+        let (res, undo) = t.save("t", &cols, &["b"], vec![ed], false);
+        assert!(res.is_ok(), "{var}: {res:?}");
+        assert_eq!(t.one("SELECT v::text FROM t WHERE b = B'0101'"), "5");
+        let (res, _) = t.undo(undo.unwrap(), &["b"]);
+        assert!(res.is_ok(), "{var}: {res:?}");
+        assert_eq!(t.one("SELECT v::text FROM t WHERE b = B'0101'"), "1");
+        // Delete and bring the row back, then insert one and undo that.
+        let (res, undo) = t.delete("t", &cols, &["b"], vec![row], false);
+        assert!(res.is_ok(), "{var}: {res:?}");
+        let (res, _) = t.undo(undo.unwrap(), &["b"]);
+        assert!(res.is_ok(), "{var}: {res:?}");
+        assert_eq!(t.one("SELECT count(*)::text FROM t"), "2");
+        let (res, undo) = t.insert("t", &cols, &["b"], vec![vec![("b".into(), Bson::String("1000".into())), ("v".into(), Bson::Int64(7))]], false);
+        assert!(res.is_ok(), "{var}: {res:?}");
+        let (res, _) = t.undo(undo.expect("the key is known"), &["b"]);
+        assert!(res.is_ok(), "{var}: {res:?}");
+        assert_eq!(t.one("SELECT count(*)::text FROM t"), "2");
     });
 }

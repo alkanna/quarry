@@ -28,6 +28,9 @@ pub enum SqlUndo {
     Update(Vec<RowEdit>),
     Delete(Vec<Document>),
     Insert(Vec<Document>),
+    /// PostgreSQL inserts: each document holds the key under `_id` and the values that were written, so the undo
+    /// removes a row only while it still holds them and never one that was edited or replaced since.
+    Inserted(Vec<Document>),
     /// A structure change: the ALTERs that reverse it and what they rely on.
     Alter(Box<super::ddl::AlterUndo>),
     /// A trigger change: what puts the trigger back and how the change left it.
@@ -47,6 +50,7 @@ impl SqlUndo {
             SqlUndo::Update(r) => r.first().map(|r| r.pk.clone()),
             SqlUndo::Delete(r) => r.first().map(pk_of),
             SqlUndo::Insert(r) => r.first().cloned(),
+            SqlUndo::Inserted(r) => r.first().map(pk_of),
             SqlUndo::Alter(_) | SqlUndo::Trigger(_) | SqlUndo::Account(_) => None,
             SqlUndo::CreatedDb | SqlUndo::CreatedTable { .. } => None,
         };
@@ -58,7 +62,7 @@ impl SqlUndo {
         match self {
             SqlUndo::Update(r) => format!("edited {}", plural(r.len(), "row")),
             SqlUndo::Delete(r) => format!("deleted {}", plural(r.len(), "row")),
-            SqlUndo::Insert(r) => format!("inserted {}", plural(r.len(), "row")),
+            SqlUndo::Insert(r) | SqlUndo::Inserted(r) => format!("inserted {}", plural(r.len(), "row")),
             SqlUndo::Alter(u) => u.label.clone(),
             SqlUndo::Trigger(u) => u.label.clone(),
             SqlUndo::CreatedDb => "created database".into(),
@@ -148,30 +152,75 @@ fn pg_update_sql(schema: &str, table: &str, cols: &[Col], edit: &RowEdit) -> (St
         let v = pg_cast(cols, &src, new, &mut params);
         sets.push(format!("{} = {v}", d.quote_ident(&src)));
     }
-    let mut conds = Vec::new();
-    for (name, v) in &edit.pk {
-        let v = pg_cast(cols, name, v, &mut params);
-        conds.push(format!("{} = {v}", d.quote_ident(name)));
-    }
+    let mut conds = pg_key_conds(cols, &edit.pk, &mut params);
     for (n, old, _) in &edit.changes {
-        if checkable(kind_of(cols, n)) {
-            let src = src_of(cols, n);
-            let v = pg_cast(cols, &src, old, &mut params);
-            conds.push(format!("{} IS NOT DISTINCT FROM {v}", d.quote_ident(&src)));
-        }
+        let src = src_of(cols, n);
+        conds.push(pg_same(cols, &src, kind_of(cols, n), old, &mut params));
     }
     (format!("UPDATE {} SET {}{}", d.qualified(schema, table), sets.join(", "), where_of(conds)), params)
+}
+
+fn pg_key_conds(cols: &[Col], pk: &Document, params: &mut Vec<Param>) -> Vec<String> {
+    let d = Dialect::Postgres;
+    pk.iter()
+        .map(|(name, v)| {
+            let v = pg_cast(cols, name, v, params);
+            format!("{} = {v}", d.quote_ident(name))
+        })
+        .collect()
+}
+
+/// The check that a column still holds the value that was read, `IS NOT DISTINCT FROM` because it may be NULL. Every kind
+/// can be compared on PostgreSQL. jsonb compares as jsonb. json has no equality operator, and a bit string or a geometry
+/// is only read in its text form, so those compare as text, which the server prints the same way it printed the value read.
+/// A float is compared as its own type: the shortest text that reads back as the same number is what both sides use.
+fn pg_same(cols: &[Col], src: &str, kind: Kind, v: &Bson, params: &mut Vec<Param>) -> String {
+    let q = Dialect::Postgres.quote_ident(src);
+    let ty = cols.iter().find(|c| c.src == src).map(|c| c.ty.as_str()).unwrap_or_default();
+    if matches!(kind, Kind::Bit | Kind::Geometry) || (kind == Kind::Json && ty != "jsonb") {
+        params.push(Param::for_pg(v));
+        return format!("{q}::text IS NOT DISTINCT FROM ${}", params.len());
+    }
+    let v = pg_cast(cols, src, v, params);
+    format!("{q} IS NOT DISTINCT FROM {v}")
 }
 
 fn pg_delete_sql(schema: &str, table: &str, cols: &[Col], pk: &Document) -> (String, Vec<Param>) {
     let d = Dialect::Postgres;
     let mut params = Vec::new();
-    let mut conds = Vec::new();
-    for (name, v) in pk {
-        let v = pg_cast(cols, name, v, &mut params);
-        conds.push(format!("{} = {v}", d.quote_ident(name)));
-    }
+    let conds = pg_key_conds(cols, pk, &mut params);
     (format!("DELETE FROM {}{}", d.qualified(schema, table), where_of(conds)), params)
+}
+
+/// How many rows the key matches, stopping at two. PostgreSQL has no `LIMIT 1` on UPDATE and DELETE, so this runs first
+/// and a key that is not unique is refused before the write takes a single row lock.
+fn pg_count_sql(schema: &str, table: &str, cols: &[Col], pk: &Document) -> (String, Vec<Param>) {
+    let mut params = Vec::new();
+    let conds = pg_key_conds(cols, pk, &mut params);
+    (format!("SELECT count(*)::text FROM (SELECT 1 FROM {}{} LIMIT 2) s", Dialect::Postgres.qualified(schema, table), where_of(conds)), params)
+}
+
+/// The DELETE that undoes an insert: the key and every value that was written must still be there.
+fn pg_delete_inserted_sql(schema: &str, table: &str, cols: &[Col], pk: &Document, values: &Document) -> (String, Vec<Param>) {
+    let mut params = Vec::new();
+    let mut conds = pg_key_conds(cols, pk, &mut params);
+    for (name, v) in values {
+        conds.push(pg_same(cols, name, kind_of_src(cols, name), v, &mut params));
+    }
+    (format!("DELETE FROM {}{}", Dialect::Postgres.qualified(schema, table), where_of(conds)), params)
+}
+
+/// Refuses a key that matches more than one row, in the transaction that is about to write.
+async fn pg_one_row(tx: &mut super::exec::Tx<'_>, db: &Db, schema: &str, table: &str, cols: &[Col], pk: &Document) -> Res<()> {
+    let (sql, params) = pg_count_sql(schema, table, cols, pk);
+    let t = Instant::now();
+    let r = tx.fetch_bound(&sql, &params).await;
+    db.note(schema, &sql, t, &r);
+    let n = r.map_err(e)?.first().and_then(|r| r.cell(0)).and_then(|b| std::str::from_utf8(b).ok()?.parse::<u64>().ok()).unwrap_or(0);
+    if n > 1 {
+        return Err(SEVERAL.into());
+    }
+    Ok(())
 }
 
 /// `INSERT` on PostgreSQL: `DEFAULT VALUES` for an empty row, and `RETURNING` the key columns as text so the new keys
@@ -348,6 +397,9 @@ async fn apply_updates(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[S
     let mut c = writer_conn(db, schema, read_only).await?;
     let mut tx = c.begin_write().await.map_err(e)?;
     for ed in edits {
+        if db.dialect == Dialect::Postgres {
+            pg_one_row(&mut tx, db, schema, table, cols, &ed.pk).await?;
+        }
         let (sql, params) = update_sql(db.dialect, schema, table, cols, ed);
         let t = Instant::now();
         let r = tx.exec_bound(&sql, &params).await;
@@ -377,6 +429,9 @@ async fn apply_deletes(db: &Db, schema: &str, table: &str, cols: &[Col], key_col
     let mut tx = c.begin_write().await.map_err(e)?;
     let mut gone = Vec::new();
     for pk in pks {
+        if db.dialect == Dialect::Postgres {
+            pg_one_row(&mut tx, db, schema, table, cols, pk).await?;
+        }
         let (sql, params) = delete_sql(db.dialect, schema, table, cols, pk);
         let t = Instant::now();
         let r = tx.exec_bound(&sql, &params).await;
@@ -460,10 +515,45 @@ async fn apply_inserts_pg(db: &Db, schema: &str, table: &str, cols: &[Col], pk: 
                 }
             }
         }
-        keys.push((key.len() == pk.len() && !pk.is_empty()).then_some(key));
+        // The values go with the key so the undo can tell the row is still the one that was written. A column called `_id`
+        // would collide with the key's slot, so it is left out of the check.
+        let doc = key.len() == pk.len() && !pk.is_empty();
+        let mut kept = Document::new();
+        if doc {
+            kept.insert("_id", key);
+            for (n, v) in &row {
+                if n != "_id" {
+                    kept.insert(n.clone(), v.clone());
+                }
+            }
+        }
+        keys.push(doc.then_some(kept));
     }
     tx.commit().await.map_err(e)?;
     Ok(keys)
+}
+
+/// The undo of `apply_inserts_pg`: each row goes only while it still holds the values that were written, so a row someone
+/// edited since, or deleted and replaced under the same key, stays. A row that no longer matches is a conflict.
+async fn apply_undo_inserted_pg(db: &Db, schema: &str, table: &str, cols: &[Col], key_cols: &[String], rows: &[Document], read_only: bool) -> Res<()> {
+    for r in rows {
+        check_key(key_cols, &pk_of(r))?;
+    }
+    let mut c = writer_conn(db, schema, read_only).await?;
+    let mut tx = c.begin_write().await.map_err(e)?;
+    for r in rows {
+        let (pk, values) = (pk_of(r), r.iter().filter(|(k, _)| *k != "_id").map(|(k, v)| (k.clone(), v.clone())).collect::<Document>());
+        pg_one_row(&mut tx, db, schema, table, cols, &pk).await?;
+        let (sql, params) = pg_delete_inserted_sql(schema, table, cols, &pk, &values);
+        let t = Instant::now();
+        let res = tx.exec_bound(&sql, &params).await;
+        db.note(schema, &sql, t, &res);
+        if res.map_err(e)?.rows_affected() == 0 {
+            return Err(CONFLICT.into());
+        }
+    }
+    tx.commit().await.map_err(e)?;
+    Ok(())
 }
 
 /// Whether the key columns a row undo recorded are still the table's primary key. Names compare without case, as
@@ -559,7 +649,8 @@ impl Worker {
             let (res, undo) = match apply_inserts(&db, &schema, &table, &cols, &pk, &rows, read_only, false).await {
                 Ok(keys) => {
                     let known: Option<Vec<Document>> = keys.into_iter().collect();
-                    (Ok(format!("Inserted {}", plural(rows.len(), "row"))), known.map(|k| action(conn, &schema, &table, &cols, SqlUndo::Insert(k))))
+                    let undo = |k| if db.dialect == Dialect::Postgres { SqlUndo::Inserted(k) } else { SqlUndo::Insert(k) };
+                    (Ok(format!("Inserted {}", plural(rows.len(), "row"))), known.map(|k| action(conn, &schema, &table, &cols, undo(k))))
                 }
                 Err(err) => (Err(err), None),
             };
@@ -604,6 +695,7 @@ impl Worker {
                     apply_inserts(&db, &schema, &table, &cols, &pk, &rows, read_only, true).await.map(|_| "Restored the deleted rows".to_string())
                 }
                 SqlUndo::Insert(pks) => apply_deletes(&db, &schema, &table, &cols, &pk, &pks, read_only).await.map(|_| "Removed the inserted rows".to_string()),
+                SqlUndo::Inserted(rows) => apply_undo_inserted_pg(&db, &schema, &table, &cols, &pk, &rows, read_only).await.map(|_| "Removed the inserted rows".to_string()),
                 // Taken before this match, where the structure statements run.
                 SqlUndo::Alter(_) | SqlUndo::Trigger(_) | SqlUndo::Account(_) => Err("Not a row change".into()),
                 SqlUndo::CreatedDb | SqlUndo::CreatedTable { .. } => Err("Handled by sql_undo_create".to_string()),
@@ -699,8 +791,8 @@ mod tests {
             ],
         };
         let (sql, p) = update_sql(Dialect::Postgres, "S", "T", &cols, &ed);
-        assert_eq!(sql, "UPDATE \"S\".\"T\" SET \"name\" = CAST($1 AS character varying(20)), \"ok\" = CAST($2 AS boolean), \"f\" = CAST($3 AS double precision), \"mood\" = CAST($4 AS \"Mood\") WHERE \"id\" = CAST($5 AS integer) AND \"name\" IS NOT DISTINCT FROM CAST($6 AS character varying(20)) AND \"ok\" IS NOT DISTINCT FROM CAST($7 AS boolean) AND \"mood\" IS NOT DISTINCT FROM CAST($8 AS \"Mood\")");
-        assert_eq!(p, [Param::Null, Param::Text("false".into()), Param::Text("2.5".into()), Param::Text("it's".into()), Param::Text("7".into()), Param::Text("a".into()), Param::Text("true".into()), Param::Text("sad".into())]);
+        assert_eq!(sql, "UPDATE \"S\".\"T\" SET \"name\" = CAST($1 AS character varying(20)), \"ok\" = CAST($2 AS boolean), \"f\" = CAST($3 AS double precision), \"mood\" = CAST($4 AS \"Mood\") WHERE \"id\" = CAST($5 AS integer) AND \"name\" IS NOT DISTINCT FROM CAST($6 AS character varying(20)) AND \"ok\" IS NOT DISTINCT FROM CAST($7 AS boolean) AND \"f\" IS NOT DISTINCT FROM CAST($8 AS double precision) AND \"mood\" IS NOT DISTINCT FROM CAST($9 AS \"Mood\")");
+        assert_eq!(p, [Param::Null, Param::Text("false".into()), Param::Text("2.5".into()), Param::Text("it's".into()), Param::Text("7".into()), Param::Text("a".into()), Param::Text("true".into()), Param::Text("1.5".into()), Param::Text("sad".into())]);
         assert!(!sql.contains("LIMIT") && !sql.contains("<=>"));
         // Bytes bind as their hex text and the cast reads them back.
         let b = RowEdit { pk: doc! { "id": 1_i64 }, changes: vec![("blob".into(), Bson::Null, bytes_doc(&[1, 255]))] };
@@ -710,9 +802,23 @@ mod tests {
         let (sql, p) = delete_sql(Dialect::Postgres, "s", "t", &cols, &doc! { "id": 3 });
         assert_eq!((sql.as_str(), p), ("DELETE FROM \"s\".\"t\" WHERE \"id\" = CAST($1 AS integer)", vec![Param::Text("3".into())]));
         assert_eq!(delete_sql(Dialect::Postgres, "s", "t", &cols, &Document::new()).0, "DELETE FROM \"s\".\"t\" WHERE 1 = 0");
-        // An update with no key and no value check never runs wide either.
+        // An update with no key never runs wide either, and its value check still follows.
         let wide = RowEdit { pk: Document::new(), changes: vec![("f".into(), Bson::Double(1.5), Bson::Double(2.5))] };
-        assert_eq!(update_sql(Dialect::Postgres, "s", "t", &cols, &wide).0, "UPDATE \"s\".\"t\" SET \"f\" = CAST($1 AS double precision) WHERE 1 = 0");
+        assert_eq!(update_sql(Dialect::Postgres, "s", "t", &cols, &wide).0, "UPDATE \"s\".\"t\" SET \"f\" = CAST($1 AS double precision) WHERE \"f\" IS NOT DISTINCT FROM CAST($2 AS double precision)");
+    }
+
+    #[test]
+    fn postgres_checks_json_bit_and_geometry_as_the_server_compares_them() {
+        let cols = [pg_col("id", "integer", Kind::Int), pg_col("jb", "jsonb", Kind::Json), pg_col("js", "json", Kind::Json), pg_col("b", "bit(4)", Kind::Bit), pg_col("g", "geometry", Kind::Geometry)];
+        let ed = RowEdit {
+            pk: doc! { "id": 1_i64 },
+            changes: vec![("jb".into(), Bson::String("{}".into()), Bson::Null), ("js".into(), Bson::String("[]".into()), Bson::Null), ("b".into(), Bson::String("0101".into()), Bson::Null), ("g".into(), Bson::Null, Bson::Null)],
+        };
+        let sql = update_sql(Dialect::Postgres, "s", "t", &cols, &ed).0;
+        assert!(sql.ends_with("WHERE \"id\" = CAST($5 AS integer) AND \"jb\" IS NOT DISTINCT FROM CAST($6 AS jsonb) AND \"js\"::text IS NOT DISTINCT FROM $7 AND \"b\"::text IS NOT DISTINCT FROM $8 AND \"g\"::text IS NOT DISTINCT FROM $9"), "{sql}");
+        let (sql, p) = pg_delete_inserted_sql("s", "t", &cols, &doc! { "id": 1_i64 }, &doc! { "b": "0101" });
+        assert_eq!((sql.as_str(), p), ("DELETE FROM \"s\".\"t\" WHERE \"id\" = CAST($1 AS integer) AND \"b\"::text IS NOT DISTINCT FROM $2", vec![Param::Text("1".into()), Param::Text("0101".into())]));
+        assert_eq!(pg_count_sql("s", "t", &cols, &doc! { "id": 1_i64 }).0, "SELECT count(*)::text FROM (SELECT 1 FROM \"s\".\"t\" WHERE \"id\" = CAST($1 AS integer) LIMIT 2) s");
     }
 
     fn bytes_doc(b: &[u8]) -> Bson {

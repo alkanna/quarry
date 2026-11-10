@@ -339,16 +339,63 @@ async fn count(db: &Db, schema: &str, table: &str, q: &PageQuery) -> Res<(u64, b
     }
 }
 
+/// The column rows of one PostgreSQL table for a write. `format_type` spells a type without its schema when the schema
+/// is on the search_path, and the type is written back as `CAST(.. AS <that text>)`. A user who can create objects in a
+/// schema that comes earlier on the editor's path could then make the name resolve to a domain of their own, whose CHECK
+/// would run with the editor's privileges. With the path reduced to pg_catalog every user type comes back as `schema.type`.
+/// It runs in a read-only transaction of its own that is always rolled back, so a pooler never sees the setting leave it.
+async fn pg_columns(db: &Db, schema: &str, table: &str) -> Res<Vec<SqlRow>> {
+    let mut conn = db.acquire_conn().await?;
+    let Conn::Pg(c) = &mut conn else { return Err("Not a PostgreSQL connection".into()) };
+    let sql = format!("{}{}", db.dialect.columns(), db.dialect.all_rows());
+    let locals = db.pg_locals();
+    let t = Instant::now();
+    let res = async {
+        c.execute("BEGIN READ ONLY").await?;
+        let r = async {
+            if !locals.is_empty() {
+                c.execute(locals.as_str()).await?;
+            }
+            c.execute("SET LOCAL search_path = pg_catalog").await?;
+            sqlx::query(&sql).bind(schema).bind(table).fetch_all(&mut *c).await
+        }
+        .await;
+        let _ = c.execute("ROLLBACK").await;
+        r
+    }
+    .await;
+    db.note(schema, &sql, t, &res);
+    let _ = conn.close().await;
+    res.map(SqlRow::wrap_pg).map_err(e)
+}
+
+/// What `make_cols_kinds` reads as a column's `extra`. On PostgreSQL it is built from the catalog's own identity and
+/// generated flags, never from the words of the column's expression: a computed column whose expression names a column
+/// called auto_increment is not an identity.
+fn pg_extra<R: Cells>(r: &R) -> String {
+    let (ident, generated) = (text(r, "attidentity").unwrap_or_default(), text(r, "attgenerated").unwrap_or_default());
+    let serial = ident.is_empty() && generated.is_empty() && text(r, "extra").as_deref() == Some("auto_increment");
+    let mut v = Vec::new();
+    if !ident.is_empty() || serial {
+        v.push("auto_increment");
+    }
+    if ident == "a" || !generated.is_empty() {
+        v.push("GENERATED");
+    }
+    v.join(" ")
+}
+
 /// Column types and the primary key, from information_schema.
 async fn table_meta(db: &Db, schema: &str, table: &str) -> Res<(HashMap<String, (String, bool, String)>, HashMap<String, Kind>, Vec<String>)> {
     let d = db.dialect;
-    let cols = db.meta(schema, d.columns(), [schema, table]).await?;
+    let cols = if d == Dialect::Postgres { pg_columns(db, schema, table).await? } else { db.meta(schema, d.columns(), [schema, table]).await? };
     let idx = db.meta(schema, d.indexes(), [schema, table]).await?;
     let meta = cols
         .iter()
         .filter_map(|r| {
             let nullable = r.int("nullable").map(|n| n != 0).unwrap_or(true);
-            Some((text(r, "name")?, (text(r, "full_type")?, nullable, text(r, "extra").unwrap_or_default())))
+            let extra = if d == Dialect::Postgres { pg_extra(r) } else { text(r, "extra").unwrap_or_default() };
+            Some((text(r, "name")?, (text(r, "full_type")?, nullable, extra)))
         })
         .collect();
     let kinds = if d == Dialect::Postgres { cols.iter().filter_map(|r| Some((text(r, "name")?, pg_kind(r)))).collect() } else { HashMap::new() };
