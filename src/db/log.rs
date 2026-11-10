@@ -94,6 +94,15 @@ pub(crate) fn note_here<T, X: std::fmt::Display>(sql: &str, start: std::time::In
 
 type Span = std::ops::Range<usize>;
 
+/// Whether the text holds `scheme://user:password@host`, as in a CREATE SUBSCRIPTION or dblink connection string. The
+/// whole literal is dropped because the password cannot be told apart from the rest once quoting is involved.
+fn has_uri_password(s: &str) -> bool {
+    s.match_indices("://").any(|(i, _)| {
+        let auth = s[i + 3..].split(['/', '?', '#', ' ', '\'', '"']).next().unwrap_or("");
+        auth.split_once('@').is_some_and(|(user, _)| user.contains(':'))
+    })
+}
+
 /// Where each secret string of a statement sits. Every reading the server may take of the quotes is tried, one at a
 /// time, and the ranges are merged, so a literal that one reading would end early is still covered to its end.
 fn secret_ranges(sql: &str) -> Vec<Span> {
@@ -149,7 +158,7 @@ fn secret_ranges(sql: &str) -> Vec<Span> {
             // A string that holds a statement about passwords: PREPARE s FROM 'CREATE USER ... IDENTIFIED BY ...'.
             if code[i].0 == Tok::Str {
                 let lower = text(i).to_ascii_lowercase();
-                if lower.contains("identified") || lower.contains("password") {
+                if lower.contains("identified") || lower.contains("password") || has_uri_password(&lower) {
                     hits.push(code[i].1.clone());
                 }
                 continue;
@@ -260,6 +269,19 @@ mod tests {
         assert_eq!(r("ALTER ROLE a PASSWORD 'p\\' -- x\n; SELECT 1"), "ALTER ROLE a PASSWORD '***'");
         assert_eq!(r("CREATE ROLE a PASSWORD NULL"), "CREATE ROLE a PASSWORD NULL");
         assert_eq!(r("SELECT 1"), "SELECT 1");
+    }
+
+    #[test]
+    fn uri_passwords_are_redacted_in_any_string_literal() {
+        assert_eq!(r("CREATE SUBSCRIPTION s CONNECTION 'postgresql://rep:secret@h/db' PUBLICATION p"), "CREATE SUBSCRIPTION s CONNECTION '***' PUBLICATION p");
+        assert_eq!(r("SELECT dblink_connect('postgresql://u:secret@h/db')"), "SELECT dblink_connect('***')");
+        assert_eq!(r("SELECT dblink_connect($$postgres://u:secret@h:5432/db?sslmode=require$$)"), "SELECT dblink_connect('***')");
+        assert_eq!(r("CREATE SERVER x FOREIGN DATA WRAPPER w OPTIONS (url 'mysql://root:secret@h')"), "CREATE SERVER x FOREIGN DATA WRAPPER w OPTIONS (url '***')");
+        assert_eq!(r("CHANGE REPLICATION SOURCE TO SOURCE_HOST='h', SOURCE_PASSWORD='secret'"), "CHANGE REPLICATION SOURCE TO SOURCE_HOST='h', SOURCE_PASSWORD='***'");
+        assert_eq!(r("CHANGE MASTER TO MASTER_PASSWORD='secret'"), "CHANGE MASTER TO MASTER_PASSWORD='***'");
+        // A URI without a password, or text that only has an @ later on, stays readable.
+        assert_eq!(r("SELECT 'postgresql://u@h/db'"), "SELECT 'postgresql://u@h/db'");
+        assert_eq!(r("SELECT 'https://example.com/a:b@c'"), "SELECT 'https://example.com/a:b@c'");
     }
 
     #[test]

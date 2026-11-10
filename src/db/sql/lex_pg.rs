@@ -160,29 +160,63 @@ fn ident(t: &Code) -> Option<String> {
     }
 }
 
-/// Functions that change state or reach outside the database. A READ ONLY transaction stops many of them but
-/// not all (set_config on a session, advisory locks, sequences, pg_cancel_backend), and a lexer that lets one
-/// through would be the only guard on a connection whose session default someone turned off.
+/// Exact names of functions that change state or reach outside the database. A READ ONLY transaction stops many
+/// of them but not all (set_config on a session, advisory locks, sequences, pg_cancel_backend), and a lexer that
+/// lets one through would be the only guard on a connection whose session default someone turned off. These
+/// match after a `.` as well, because `(expr).f` and `alias.f` call `f(expr)`.
 pub(super) const REFUSED_FUNCTIONS_EXACT: &[&str] = &[
+    // Settings, sessions and server control.
     "set_config", "pg_terminate_backend", "pg_cancel_backend", "pg_reload_conf", "pg_rotate_logfile", "pg_switch_wal", "pg_create_restore_point", "pg_promote",
     "pg_logical_emit_message", "pg_stat_statements_reset", "pg_start_backup", "pg_stop_backup", "pg_log_backend_memory_contexts", "pg_log_standby_snapshot",
-    "pg_import_system_collations", "pg_notify", "nextval", "setval", "pg_read_file", "pg_read_binary_file", "pg_ls_dir", "txid_current", "pg_current_xact_id",
-    "lowrite", "loread", "pg_prewarm", "brin_summarize_new_values", "brin_summarize_range", "brin_desummarize_range", "gin_clean_pending_list",
-    "pg_restore_relation_stats", "pg_restore_attribute_stats", "pg_clear_relation_stats", "pg_clear_attribute_stats", "cursor_to_xml", "xpath_table",
-];
-
-/// Families of functions, matched on the start of the name.
-pub(super) const REFUSED_FUNCTIONS_PREFIX: &[&str] = &[
-    "pg_advisory", "pg_try_advisory", "pg_logical_slot_", "dblink", "lo_", "pg_file_", "pg_replication_origin_", "pg_stat_reset", "pg_backup_", "pg_wal_replay_",
+    "pg_import_system_collations", "pg_notify", "pg_export_snapshot", "setseed",
+    // Sequences and transaction ids, which a READ ONLY transaction does not always stop.
+    "nextval", "setval", "txid_current", "pg_current_xact_id",
+    // Server side files: reads of arbitrary paths and the listings of server directories.
+    "pg_read_file", "pg_read_binary_file", "pg_stat_file", "pg_ls_dir", "pg_ls_logdir", "pg_ls_waldir", "pg_ls_tmpdir", "pg_ls_archive_statusdir", "pg_ls_logicalsnapdir",
+    "pg_ls_logicalmapdir", "pg_ls_replslotdir", "pg_ls_summariesdir", "pg_file_write", "pg_file_rename", "pg_file_unlink", "pg_file_sync", "pg_logfile_rotate",
+    // Large objects: they write to pg_largeobject and read server files.
+    "lo_import", "lo_export", "lo_unlink", "lo_create", "lo_creat", "lo_open", "lo_put", "lo_get", "lo_truncate", "lo_truncate64", "lo_from_bytea", "lo_close", "lo_lseek", "lo_lseek64",
+    "lo_tell", "lo_tell64", "lowrite", "loread",
+    // Maintenance that rewrites data, statistics or on-disk state.
+    "pg_prewarm", "brin_summarize_new_values", "brin_summarize_range", "brin_desummarize_range", "gin_clean_pending_list", "pg_restore_relation_stats",
+    "pg_restore_attribute_stats", "pg_clear_relation_stats", "pg_clear_attribute_stats", "heap_force_kill", "heap_force_freeze", "pg_truncate_visibility_map",
+    "pg_buffercache_evict", "pg_buffercache_evict_relation", "pg_buffercache_evict_all",
+    // Replication slots and origins: they create or drop server objects. The view pg_replication_slots must stay readable, so the families are listed by name.
+    "pg_create_physical_replication_slot", "pg_create_logical_replication_slot", "pg_drop_replication_slot", "pg_copy_physical_replication_slot", "pg_copy_logical_replication_slot",
+    "pg_replication_slot_advance", "pg_sync_replication_slots", "pg_alter_replication_slot", "pg_replication_origin_create", "pg_replication_origin_drop", "pg_replication_origin_oid",
+    "pg_replication_origin_session_setup", "pg_replication_origin_session_reset", "pg_replication_origin_session_is_setup", "pg_replication_origin_session_progress",
+    "pg_replication_origin_xact_setup", "pg_replication_origin_xact_reset", "pg_replication_origin_advance", "pg_replication_origin_progress",
     // These run the SQL text they are given, which this check never sees.
-    "query_to_xml",
+    "cursor_to_xml", "xpath_table", "ts_stat", "ts_rewrite", "crosstab", "crosstab2", "crosstab3", "crosstab4", "connectby",
+    // pg_background runs SQL in another session that this transaction does not cover.
+    "pg_background_launch", "pg_background_result", "pg_background_detach",
 ];
 
-/// Names matched anywhere inside.
+/// Families matched on the start of the name, in a call and after a `.`. Only families where no column or
+/// relation name is likely to start the same way.
+pub(super) const REFUSED_FUNCTIONS_PREFIX: &[&str] = &[
+    // Advisory locks, dblink connections and statements, and replay or backup control.
+    "pg_advisory", "pg_try_advisory", "pg_logical_slot_", "dblink", "pg_stat_reset", "pg_backup_", "pg_wal_replay_",
+    // These run the SQL text they are given, on this or another server.
+    "query_to_xml", "run_command_on_",
+];
+
+/// Families matched on the start of the name only when the name is called. They are not matched after a `.`
+/// because ordinary catalog names start the same way (pg_catalog.pg_file_settings, pg_catalog.pg_replication_origin_status,
+/// t.lo_price), and the exact list above names the functions of each family for the `.` case.
+pub(super) const REFUSED_FUNCTIONS_CALL_PREFIX: &[&str] = &["lo_", "pg_file_", "pg_replication_origin_"];
+
+/// Names matched anywhere inside, in a call only, for the same reason as above (pg_replication_slots is a view).
 pub(super) const REFUSED_FUNCTIONS_CONTAIN: &[&str] = &["replication_slot"];
 
+/// Whether the name is refused as the function of a call.
 fn refused_function(name: &str) -> bool {
-    REFUSED_FUNCTIONS_EXACT.contains(&name) || REFUSED_FUNCTIONS_PREFIX.iter().any(|p| name.starts_with(p)) || REFUSED_FUNCTIONS_CONTAIN.iter().any(|p| name.contains(p))
+    refused_field(name) || REFUSED_FUNCTIONS_CALL_PREFIX.iter().any(|p| name.starts_with(p)) || REFUSED_FUNCTIONS_CONTAIN.iter().any(|p| name.contains(p))
+}
+
+/// Whether the name is refused after a `.`, where it may be a column as well as a function.
+fn refused_field(name: &str) -> bool {
+    REFUSED_FUNCTIONS_EXACT.contains(&name) || REFUSED_FUNCTIONS_PREFIX.iter().any(|p| name.starts_with(p))
 }
 
 /// Statements that read, besides EXPLAIN which is checked for ANALYZE and then for its inner statement.
@@ -248,8 +282,25 @@ fn check_explain(rest: &[Code]) -> Result<(), String> {
             }
         }
         let Some(close) = close else { return Err(format!("EXPLAIN options are not closed. {REFUSED}")) };
-        if rest[1..close].iter().any(analyze) {
-            return Err(format!("EXPLAIN ANALYZE runs the statement it explains. {REFUSED}"));
+        // Only `ANALYZE` followed by one plain false word is a plan without execution. Anything else that
+        // mentions it, including a value this cannot read, is refused.
+        let (mut depth, mut start) = (0i32, 1);
+        for k in 1..=close {
+            if punct(&rest[k], "(") {
+                depth += 1;
+            } else if punct(&rest[k], ")") && k < close {
+                depth -= 1;
+            }
+            if k == close || (depth == 0 && punct(&rest[k], ",")) {
+                let opt = &rest[start..k];
+                start = k + 1;
+                if opt.iter().any(analyze) {
+                    let off = opt.len() == 2 && opt[1].0 == Tok::Word && ["false", "off", "0"].iter().any(|v| opt[1].1.eq_ignore_ascii_case(v)) && ident(&opt[0]).is_some_and(|w| w == "analyze" || w == "analyse");
+                    if !off {
+                        return Err(format!("EXPLAIN ANALYZE runs the statement it explains. {REFUSED}"));
+                    }
+                }
+            }
         }
         j = close + 1;
     } else {
@@ -280,12 +331,15 @@ fn check_body(part: &[Code]) -> Result<(), String> {
                 return Err(format!("A locking clause (FOR UPDATE, FOR SHARE) takes row locks and is not allowed on a read-only connection. {REFUSED}"));
             }
         }
-        if next.is_some_and(|n| punct(n, "(")) {
+        // `(expr).f` and `alias.f` call f(expr), so a name after a `.` is as much a call as a name before `(`.
+        let called = next.is_some_and(|n| punct(n, "("));
+        let field = i > 0 && punct(&part[i - 1], ".");
+        if called || field {
             if let Some(name) = ident(t) {
                 if name == UNSURE {
                     return Err(format!("A function named with a Unicode escape cannot be checked and is not allowed on a read-only connection. {REFUSED}"));
                 }
-                if refused_function(&name) {
+                if (called && refused_function(&name)) || (field && refused_field(&name)) {
                     return Err(format!("{name}() changes state and is not allowed on a read-only connection. {REFUSED}"));
                 }
             }
@@ -327,6 +381,10 @@ pub(super) fn changes_escaping(stmt: &str) -> bool {
                 return true;
             }
             if part.iter().enumerate().any(|(i, t)| part.get(i + 1).is_some_and(|n| punct(n, "(")) && ident(t).is_some_and(|w| w == "set_config" || w == UNSURE)) {
+                return true;
+            }
+            // UPDATE pg_settings changes a setting the way SET does.
+            if part.iter().any(|t| ident(t).is_some_and(|w| w == "pg_settings")) && part.iter().any(|t| is(t, "UPDATE")) {
                 return true;
             }
             if !first.is_some_and(|t| is(t, "SET") || is(t, "RESET")) {
@@ -394,7 +452,7 @@ mod tests {
         "SELECT * FROM (SELECT * FROM t FOR UPDATE) s", "WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x", "WITH x AS (INSERT INTO t VALUES (1) RETURNING *) SELECT * FROM x",
         "WITH x AS (UPDATE t SET a = 1 RETURNING *) SELECT * FROM x", "WITH x AS (MERGE INTO t USING s ON true WHEN MATCHED THEN DELETE RETURNING *) SELECT * FROM x",
         "WITH a AS (SELECT 1), b AS (WITH c AS (DELETE FROM t RETURNING 1) SELECT * FROM c) SELECT * FROM b", "WITH RECURSIVE x AS (SELECT 1 UNION ALL SELECT 2) INSERT INTO t SELECT * FROM x",
-        "EXPLAIN ANALYZE SELECT 1", "explain analyse select 1", "EXPLAIN (ANALYZE) SELECT 1", "EXPLAIN (ANALYZE true, VERBOSE) SELECT 1", "EXPLAIN (ANALYZE false) SELECT 1", "EXPLAIN (FORMAT JSON, analyze) SELECT 1",
+        "EXPLAIN ANALYZE SELECT 1", "explain analyse select 1", "EXPLAIN (ANALYZE) SELECT 1", "EXPLAIN (ANALYZE true, VERBOSE) SELECT 1", "EXPLAIN (ANALYZE on) SELECT 1", "EXPLAIN (ANALYZE 1) SELECT 1", "EXPLAIN (ANALYZE false, ANALYZE true) SELECT 1", "EXPLAIN (ANALYZE false, VERBOSE, ANALYZE) SELECT 1", "EXPLAIN (ANALYZE (false)) SELECT 1", "EXPLAIN (ANALYZE 'false') SELECT 1", "EXPLAIN (ANALYZE false off) SELECT 1", "EXPLAIN (ANALYZE, FORMAT JSON) SELECT 1", "EXPLAIN (FORMAT JSON, analyze) SELECT 1",
         r#"EXPLAIN ("analyze") SELECT 1"#, "EXPLAIN ANALYZE VERBOSE SELECT 1", "EXPLAIN VERBOSE ANALYZE SELECT 1", "EXPLAIN INSERT INTO t VALUES (1)", "EXPLAIN (FORMAT JSON) DELETE FROM t", "EXPLAIN", "EXPLAIN (VERBOSE",
         "EXPLAIN (ANALYZE) WITH x AS (DELETE FROM t RETURNING 1) SELECT * FROM x", "SELECT 1; DROP TABLE t", "SELECT 1; SET x = 1", "SELECT 1;\nCOMMIT", "SELECT 1 -- c\n; DROP TABLE t", "\"select\" 1", "1",
         // A number with a `$` inside reads differently across server versions, so it hides nothing.
@@ -416,7 +474,12 @@ mod tests {
         "pg_logical_emit_message", "pg_create_logical_replication_slot", "pg_drop_replication_slot", "pg_replication_slot_advance", "pg_replication_origin_create", "pg_replication_origin_advance", "pg_stat_reset",
         "pg_stat_reset_shared", "pg_stat_reset_single_table_counters", "pg_stat_statements_reset", "pg_backup_start", "pg_backup_stop", "pg_start_backup", "pg_stop_backup", "pg_wal_replay_pause", "pg_wal_replay_resume",
         "pg_log_backend_memory_contexts", "pg_import_system_collations", "pg_notify", "nextval", "setval", "pg_read_file", "pg_read_binary_file", "pg_ls_dir", "txid_current", "pg_current_xact_id", "query_to_xml",
-        "query_to_xml_and_xmlschema", "cursor_to_xml", "xpath_table",
+        "query_to_xml_and_xmlschema", "cursor_to_xml", "xpath_table", "ts_stat", "ts_rewrite", "crosstab", "crosstab2", "crosstab3", "crosstab4", "connectby", "pg_background_launch", "pg_background_result", "pg_background_detach",
+        "run_command_on_workers", "run_command_on_shards", "run_command_on_placements", "run_command_on_colocated_placements", "run_command_on_all_nodes", "heap_force_kill", "heap_force_freeze", "pg_truncate_visibility_map",
+        "pg_buffercache_evict", "pg_buffercache_evict_relation", "pg_buffercache_evict_all", "setseed", "pg_stat_file", "pg_ls_logdir", "pg_ls_waldir", "pg_ls_tmpdir", "pg_ls_archive_statusdir", "pg_ls_logicalsnapdir",
+        "pg_ls_logicalmapdir", "pg_ls_replslotdir", "pg_ls_summariesdir", "pg_create_physical_replication_slot", "pg_copy_physical_replication_slot", "pg_copy_logical_replication_slot", "pg_export_snapshot",
+        "pg_sync_replication_slots", "pg_replication_origin_drop", "pg_replication_origin_session_setup", "pg_replication_origin_xact_setup", "pg_file_rename", "pg_file_sync", "lo_creat", "lo_open", "lo_get", "lo_truncate", "lo_truncate64",
+        "lo_from_bytea", "lo_close", "lo_lseek", "lo_lseek64", "lo_tell", "lo_tell64",
     ];
 
     /// Every way a call to `f` may be written, as statements.
@@ -462,7 +525,7 @@ mod tests {
             assert!(ro(s).is_err(), "{s}");
         }
         // Names that only start like a refused one, or are not called, stay usable.
-        for s in ["SELECT nextval_x(1)", "SELECT my_set_config(1)", "SELECT setval FROM t", "SELECT t.nextval FROM t", "SELECT lo FROM t", "SELECT lower(a) FROM t", "SELECT pg_advisory FROM t", "SELECT \"set_config\" FROM t", "SELECT set_config$(1)", "SELECT dbl FROM t"] {
+        for s in ["SELECT nextval_x(1)", "SELECT my_set_config(1)", "SELECT setval FROM t", "SELECT lo FROM t", "SELECT lower(a) FROM t", "SELECT pg_advisory FROM t", "SELECT \"set_config\" FROM t", "SELECT set_config$(1)", "SELECT dbl FROM t"] {
             assert!(ro(s).is_ok(), "{s}");
         }
     }
@@ -657,6 +720,81 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_name_is_refused_after_a_dot_too() {
+        for s in [
+            "SELECT (42::bigint).pg_advisory_lock",
+            "SELECT x.pg_advisory_lock FROM generate_series(11::bigint,12) x",
+            "SELECT ('dbname=postgres'::text).dblink_connect",
+            "SELECT (pg_backend_pid()).pg_cancel_backend",
+            "SELECT (true).pg_promote",
+            "SELECT ('bgwriter'::text).pg_stat_reset_shared",
+            "SELECT ('/etc/passwd'::text).pg_read_file",
+            "SELECT (1).\"pg_advisory_lock\"",
+            "SELECT (1).PG_ADVISORY_LOCK",
+            "SELECT (1).\"PG_ADVISORY_LOCK\"",
+            "SELECT (1). /* c */ pg_advisory_lock",
+            "SELECT (1).-- c\npg_advisory_lock",
+            "SELECT (1) . pg_advisory_lock",
+            "SELECT t.nextval FROM t",
+            "SELECT t.lo_unlink FROM t",
+            "SELECT t.pg_replication_slot_advance FROM t",
+            "SELECT t.pg_ls_logdir FROM t",
+            "SELECT (1).run_command_on_workers",
+            "SELECT 'a\\' ; SELECT (1).pg_advisory_lock",
+        ] {
+            assert!(ro(s).is_err(), "{s}");
+        }
+        // Columns and catalog relations whose names start like a refused family stay readable.
+        for s in [
+            "SELECT t.lo_price FROM t",
+            "SELECT lo_price FROM t",
+            "SELECT t.pg_file_name FROM t",
+            "SELECT * FROM pg_catalog.pg_file_settings",
+            "SELECT * FROM pg_catalog.pg_replication_slots",
+            "SELECT * FROM pg_catalog.pg_replication_origin_status",
+            "SELECT * FROM pg_catalog.pg_stat_replication_slots",
+            "SELECT t.setval_x, t.crosstab_id, t.lowrite_at FROM t",
+        ] {
+            assert!(ro(s).is_ok(), "{s}: {:?}", ro(s));
+        }
+    }
+
+    #[test]
+    fn functions_that_run_sql_text_are_refused() {
+        for s in [
+            "SELECT * FROM ts_stat($$SELECT to_tsvector(pg_advisory_lock(7)::text)$$)",
+            "SELECT ts_rewrite('a'::tsquery, 'SELECT ''a''::tsquery, ''b''::tsquery FROM (SELECT pg_advisory_lock(8)) s')",
+            "SELECT * FROM crosstab($$SELECT 1::text, 2::text, 3::text$$) AS c(a text, b text)",
+            "SELECT * FROM connectby('t', 'k', 'p', 'a', 0) AS c(k text, p text, l int)",
+            "SELECT pg_background_launch('SELECT 1')",
+            "SELECT query_to_xml_and_xmlschema('SELECT 1', true, true, '')",
+        ] {
+            assert!(ro(s).is_err(), "{s}");
+        }
+    }
+
+    #[test]
+    fn explain_with_analyze_switched_off_is_a_plan_only() {
+        for s in ["EXPLAIN (ANALYZE false) SELECT 1", "EXPLAIN (ANALYZE off) SELECT 1", "EXPLAIN (ANALYZE 0) SELECT 1", "EXPLAIN (ANALYZE FALSE, VERBOSE) SELECT 1", "EXPLAIN (VERBOSE, analyse off, FORMAT JSON) SELECT 1", "EXPLAIN (ANALYZE false) SELECT * FROM t"] {
+            assert!(ro(s).is_ok(), "{s}: {:?}", ro(s));
+        }
+        // The inner statement is still checked.
+        for s in ["EXPLAIN (ANALYZE false) DELETE FROM t", "EXPLAIN (ANALYZE false) SELECT pg_advisory_lock(1)"] {
+            assert!(ro(s).is_err(), "{s}");
+        }
+    }
+
+    #[test]
+    fn updating_pg_settings_changes_escaping() {
+        for s in ["UPDATE pg_settings SET setting = 'off' WHERE name = 'standard_conforming_strings'", "update pg_catalog.pg_settings set setting = 'x'", "UPDATE \"pg_settings\" SET setting = 'x'", "SELECT 1; UPDATE pg_settings SET setting = 'x'", "WITH x AS (UPDATE pg_settings SET setting = 'x' RETURNING 1) SELECT * FROM x"] {
+            assert!(changes_escaping(s, PG), "{s}");
+        }
+        for s in ["SELECT * FROM pg_settings", "UPDATE t SET a = 1", "SELECT 'UPDATE pg_settings'"] {
+            assert!(!changes_escaping(s, PG), "{s}");
+        }
+    }
+
+    #[test]
     fn prepared_statements_are_found_under_both_readings() {
         for s in ["PREPARE p AS SELECT 1", "execute p", "DEALLOCATE ALL", "SELECT 1; EXECUTE p", "/* c */ PREPARE p AS SELECT 1", "SELECT 'a\\' ; PREPARE p AS SELECT 1"] {
             assert!(uses_prepared(s, PG), "{s}");
@@ -668,7 +806,7 @@ mod tests {
 
     #[test]
     fn the_lists_are_lowercase_and_cover_what_the_tests_spell() {
-        for n in REFUSED_FUNCTIONS_EXACT.iter().chain(REFUSED_FUNCTIONS_PREFIX).chain(REFUSED_FUNCTIONS_CONTAIN) {
+        for n in REFUSED_FUNCTIONS_EXACT.iter().chain(REFUSED_FUNCTIONS_PREFIX).chain(REFUSED_FUNCTIONS_CALL_PREFIX).chain(REFUSED_FUNCTIONS_CONTAIN) {
             assert_eq!(*n, n.to_ascii_lowercase());
         }
         for f in FUNCTIONS {
