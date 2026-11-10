@@ -152,7 +152,13 @@ impl MenuBar {
 
         let window = Submenu::new("Window", true);
         let _ = window.append_items(&[&PredefinedMenuItem::minimize(None), &PredefinedMenuItem::maximize(Some("Zoom")), &PredefinedMenuItem::separator()]);
-        add(&window, &[Some(("Show Next Tab", key(CMD_SHIFT, Key::CloseBracket))), Some(("Show Previous Tab", key(CMD_SHIFT, Key::OpenBracket))), None]);
+        add(&window, &[
+            Some(("Show Next Tab", key(CMD_SHIFT, Key::CloseBracket))),
+            Some(("Show Previous Tab", key(CMD_SHIFT, Key::OpenBracket))),
+            Some(("Back", key(CMD, Key::OpenBracket))),
+            Some(("Forward", key(CMD, Key::CloseBracket))),
+            None,
+        ]);
         let _ = window.append(&PredefinedMenuItem::bring_all_to_front(None));
 
         let help = Submenu::new("Help", true);

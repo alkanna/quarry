@@ -167,8 +167,12 @@ pub(super) enum Store<'a> {
     Raw(&'a mut Vec<db::Row>),
 }
 
+static NEXT_TAB: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 /// Everything that belongs to one open tab.
 pub(super) struct Tab {
+    /// Unique for the session. Back and forward history keys on it, since Query tabs and copies share a `Sel`.
+    pub(super) uid: u64,
     pub(super) sel: Sel,
     pub(super) view: View,
     pub(super) filter_txt: String,
@@ -578,6 +582,7 @@ impl Tab {
 
     pub(super) fn new(sel: Sel) -> Self {
         Self {
+            uid: NEXT_TAB.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             sel,
             view: View::Documents,
             filter_txt: String::new(),

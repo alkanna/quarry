@@ -135,6 +135,13 @@ impl App {
                     self.set_view(v);
                 }
             }
+            // After the Cmd+Shift brackets above, which would also match these.
+            if k(cmd, Key::OpenBracket) {
+                self.nav(true);
+            }
+            if k(cmd, Key::CloseBracket) {
+                self.nav(false);
+            }
             for (i, d) in DIGITS.iter().enumerate() {
                 if k(cmd, *d) {
                     self.go_tab(if i == 8 { n - 1 } else { i.min(n - 1) });
@@ -633,7 +640,7 @@ impl App {
             let mut n = Tab::new(t.sel.clone());
             (n.filter_txt, n.sort_txt, n.proj_txt, n.limit_txt, n.skip_txt, n.hint_txt, n.collation_txt, n.query, n.view, n.agg_txt) = (t.filter_txt.clone(), t.sort_txt.clone(), t.proj_txt.clone(), t.limit_txt.clone(), t.skip_txt.clone(), t.hint_txt.clone(), t.collation_txt.clone(), t.query.clone(), t.view, t.agg_txt.clone());
             self.tabs.insert(self.cur + 1, n);
-            self.cur += 1;
+            self.set_cur(self.cur + 1);
             self.reset_doc_state();
             self.reload();
         }

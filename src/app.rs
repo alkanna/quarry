@@ -88,7 +88,7 @@ const SYSTEM_DBS: [&str; 3] = ["admin", "config", "local"];
 const DEFAULT_COLS: usize = 8;
 
 /// Shortcuts listed by Cmd+/. Cmd is Ctrl on Linux and Windows.
-const SHORTCUTS: [(&str, &str); 23] = [
+const SHORTCUTS: [(&str, &str); 24] = [
     ("Cmd+K, Cmd+T", "Jump to a connection, database or collection"),
     ("Cmd+R", "Reload the current tab"),
     ("Cmd+Shift+R", "Refresh the connection's databases"),
@@ -98,6 +98,7 @@ const SHORTCUTS: [(&str, &str); 23] = [
     ("Cmd+9", "Go to the last tab"),
     ("Ctrl+Tab, Cmd+Shift+]", "Next tab"),
     ("Ctrl+Shift+Tab, Cmd+Shift+[", "Previous tab"),
+    ("Cmd+[, Cmd+]", "Back and forward through the tabs you visited"),
     ("Cmd+Alt+1 to Cmd+Alt+8", "Documents, Aggregate, Indexes, Schema, Import, Compare, Shell, Watch"),
     ("Cmd+F", "Focus the query"),
     ("Cmd+Shift+F", "Find a collection in the sidebar"),
@@ -234,6 +235,9 @@ pub struct App {
     width_cache: HashMap<(u64, usize, usize, String, Option<String>, bool), f32>,
     /// Recently closed tabs, newest first.
     closed: Vec<Tab>,
+    /// Uids of tabs left and tabs gone back from, for Cmd+[ and Cmd+], newest last.
+    nav_back: Vec<u64>,
+    nav_fwd: Vec<u64>,
     /// Version installed by the updater, waiting for a restart.
     updated: Option<String>,
     update_note: String,
@@ -351,6 +355,8 @@ impl App {
             usage: (std::time::Instant::now(), Duration::ZERO, 0.0, None),
             fps: (0.0, 0, 0.0),
             closed: Vec::new(),
+            nav_back: Vec::new(),
+            nav_fwd: Vec::new(),
             updated: None,
             update_note: String::new(),
             update_checked: None,
