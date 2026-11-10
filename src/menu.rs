@@ -47,6 +47,9 @@ fn accel(a: &Act) -> Option<Accelerator> {
         Key::Slash => "/".into(),
         Key::OpenBracket => "[".into(),
         Key::CloseBracket => "]".into(),
+        Key::Equals => "=".into(),
+        Key::Minus => "-".into(),
+        Key::Num0 => "0".into(),
         other => other.name().to_string(),
     };
     let mut s = String::from("Cmd+");
@@ -137,6 +140,10 @@ impl MenuBar {
             Some(("Shell", key(CMD_ALT, Key::Num7))),
             None,
             Some(("Query Log", key(CMD, Key::L))),
+            None,
+            Some(("Bigger Interface", key(CMD, Key::Equals))),
+            Some(("Smaller Interface", key(CMD, Key::Minus))),
+            Some(("Actual Size", key(CMD, Key::Num0))),
             None,
         ]);
         let _ = view.append(&PredefinedMenuItem::fullscreen(None));

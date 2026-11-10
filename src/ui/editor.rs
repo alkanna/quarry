@@ -503,7 +503,7 @@ pub(crate) fn memo_galley(ui: &egui::Ui, kind: u8, text: &str, wrap: f32, build:
         static MEMO: std::cell::RefCell<std::collections::HashMap<u64, Arc<egui::Galley>>> = Default::default();
     }
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    (kind, is_light(), wrap.to_bits(), ui.ctx().pixels_per_point().to_bits()).hash(&mut h);
+    (kind, is_light(), look_gen(), wrap.to_bits(), ui.ctx().pixels_per_point().to_bits()).hash(&mut h);
     text.hash(&mut h);
     let key = h.finish();
     if let Some(g) = MEMO.with(|m| m.borrow().get(&key).cloned()) {

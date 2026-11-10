@@ -601,11 +601,8 @@ impl App {
                     // Rows scrolled out of view keep their space but skip all layout and painting.
                     if ui.is_rect_visible(rr) {
                         let hovered = ui.rect_contains_pointer(rr) && !ui.ctx().any_popup_open();
-                        let fill = row_fill(active, checked.contains(&i), hovered, resp.is_pointer_button_down_on(), i % 2 == 1);
+                        paint_row(ui, rr, active, checked.contains(&i), hovered, resp.is_pointer_button_down_on(), i % 2 == 1);
                         let p = ui.painter();
-                        if fill != Color32::TRANSPARENT {
-                            p.rect_filled(rr, 0, fill);
-                        }
                         let off = num_w - NUM_W;
                         if self.prefs.open_inline && !sql {
                             chevron(p, egui::pos2(rr.left() + off + 9.0, rr.center().y), active || expanded.contains(&(agg, i)), if active { PRIMARY() } else { FAINT() });
@@ -831,8 +828,7 @@ impl App {
                     if active && std::mem::take(&mut self.scroll_sel) {
                         resp.scroll_to_me(None);
                     }
-                    let fill = row_fill(active, checked.contains(&i), resp.hovered(), resp.is_pointer_button_down_on(), i % 2 == 1);
-                    ui.painter().rect_filled(rect, 0, fill);
+                    paint_row(ui, rect, active, checked.contains(&i), resp.hovered(), resp.is_pointer_button_down_on(), i % 2 == 1);
                     let job = match &drafted {
                         Some(d) => row_job(DocRef::B(d), w - 16.0),
                         None => row_job(docs.doc_ref(i), w - 16.0),
@@ -917,10 +913,25 @@ pub(super) fn row_fill(active: bool, checked: bool, hovered: bool, pressed: bool
     match () {
         _ if active => if hovered { SEL_HOVER() } else { SEL() },
         _ if checked => tint(PRIMARY(), if hovered { 38 } else { 26 }),
+        // Neutral so it never looks like the accent selection; a press goes one shade further.
+        _ if pressed && reading_line() => shade(PRESSED(), 0.12),
         _ if pressed => PRESSED(),
+        _ if hovered && reading_line() => PRESSED(),
         _ if hovered => HOVER(),
         _ if odd => pal().stripe,
         _ => Color32::TRANSPARENT,
+    }
+}
+
+/// The reading line's bar sits at the visible left edge, so it stays in view when scrolled sideways.
+pub(super) fn paint_row(ui: &egui::Ui, row: egui::Rect, active: bool, checked: bool, hovered: bool, pressed: bool, odd: bool) {
+    let fill = row_fill(active, checked, hovered, pressed, odd);
+    if fill != Color32::TRANSPARENT {
+        ui.painter().rect_filled(row, 0, fill);
+    }
+    if hovered && !active && reading_line() {
+        let x = row.left().max(ui.clip_rect().left());
+        ui.painter().rect_filled(egui::Rect::from_min_size(egui::pos2(x, row.top()), egui::vec2(3.0, row.height())), 0, PRIMARY());
     }
 }
 

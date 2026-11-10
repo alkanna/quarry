@@ -105,13 +105,15 @@ impl App {
         if matches!(self.modal, Some(Modal::Palette { .. })) {
             return self.palette(ctx);
         }
+        if matches!(self.modal, Some(Modal::Settings)) {
+            return self.settings(ctx);
+        }
         let Some(mut m) = self.modal.take() else { return };
         let mut keep = true;
         let r = dialog(egui::Id::unique(("quarry-layer", "modal"))).show(ctx, |ui| {
             ui.set_max_width(620.0);
             match &mut m {
                 Modal::Conn(f) => self.conn_dialog(ui, f, &mut keep),
-                Modal::Settings => self.settings_dialog(ui, &mut keep),
                 Modal::Attach(f) => self.attach_dialog(ui, f, &mut keep),
                 Modal::Unlock(id, then) => {
                     let name = self.conn(*id).map(|c| c.meta.name.clone()).unwrap_or_default();
@@ -616,8 +618,8 @@ impl App {
                     }
                 }
                 Modal::Explain { summary, raw, show_raw } => self.explain_dialog(ui, summary, raw, show_raw, &mut keep),
-                // Drawn by `palette`, in its own frame.
-                Modal::Palette { .. } => {}
+                // Drawn by their own functions before this dialog.
+                Modal::Palette { .. } | Modal::Settings => {}
             }
         });
         if keep && !r.should_close() && self.modal.is_none() {

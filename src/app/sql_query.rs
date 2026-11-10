@@ -118,10 +118,8 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, checked: &BTreeSet<usize>) -> GridOu
                 let shift = ui.input(|i| i.modifiers.shift);
                 for i in range {
                     let (rr, resp) = ui.allocate_exact_size(egui::vec2(total.max(view_w - 2.0), ROW_H), Sense::click());
-                    let fill = table::row_fill(false, checked.contains(&i), ui.rect_contains_pointer(rr) && !ui.ctx().any_popup_open(), resp.is_pointer_button_down_on(), i % 2 == 1);
-                    if fill != Color32::TRANSPARENT {
-                        ui.painter().rect_filled(rr, 0, fill);
-                    }
+                    let hovered = ui.rect_contains_pointer(rr) && !ui.ctx().any_popup_open();
+                    table::paint_row(ui, rr, false, checked.contains(&i), hovered, resp.is_pointer_button_down_on(), i % 2 == 1);
                     ui.painter().text(egui::pos2(rr.left() + CHECK_W + 18.0, rr.center().y), egui::Align2::LEFT_CENTER, (i + 1).to_string(), FontId::monospace(TXT_CAPTION), FAINT());
                     if check_box(ui, egui::pos2(rr.left() + 13.0, rr.center().y), ui.scope_id().with(("check", i)), checked.contains(&i), false).clicked() {
                         out.check = Some((i, shift));

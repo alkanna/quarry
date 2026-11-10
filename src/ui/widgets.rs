@@ -63,10 +63,12 @@ pub(crate) fn caption(ui: &mut egui::Ui, text: impl Into<String>) -> egui::Respo
     ui.label(caption_text(text))
 }
 
-/// A titled card holding a group of settings.
+/// A titled card holding a group of settings; an empty title leaves the caption out.
 pub(crate) fn settings_section(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
-    caption(ui, title);
-    ui.add_space(2.0);
+    if !title.is_empty() {
+        caption(ui, title);
+        ui.add_space(2.0);
+    }
     card(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.spacing_mut().item_spacing.y = 6.0;

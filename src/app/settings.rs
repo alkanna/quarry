@@ -1,130 +1,339 @@
-//! The settings dialog.
+//! The settings dialog: categories on the left, the chosen one's settings on the right.
 
 use super::*;
 
+#[derive(Clone, Copy, PartialEq, Default)]
+pub(super) enum SettingsCat {
+    #[default]
+    Appearance,
+    Reading,
+    Documents,
+    Editing,
+    Tools,
+    StatusBar,
+    Updates,
+}
+
+const CATS: [(SettingsCat, &str); 7] = [
+    (SettingsCat::Appearance, "Appearance"),
+    (SettingsCat::Reading, "Reading"),
+    (SettingsCat::Documents, "Documents"),
+    (SettingsCat::Editing, "Editing"),
+    (SettingsCat::Tools, "Queries and tools"),
+    (SettingsCat::StatusBar, "Status bar"),
+    (SettingsCat::Updates, "Updates"),
+];
+
+impl SettingsCat {
+    /// The category whose name starts with this word, for the QUARRY_TEST_SETTINGS switch.
+    pub(super) fn named(word: &str) -> Self {
+        let w = word.to_lowercase();
+        CATS.iter().find(|(_, n)| n.to_lowercase().split(' ').any(|p| p == w)).map_or_else(Self::default, |c| c.0)
+    }
+}
+
+const SETTINGS_W: f32 = 780.0;
+const SETTINGS_SIDE_W: f32 = 188.0;
+
 impl App {
-    pub(super) fn settings_dialog(&mut self, ui: &mut egui::Ui, keep: &mut bool) {
-        ui.set_width(600.0);
-        dialog_title(ui, "Settings");
-        ui.label(RichText::new("Changes are saved right away.").size(TXT_SMALL).color(FAINT()));
-        ui.add_space(8.0);
-        // Settings that save when changed. Tuples compare up to 12 items, so the readout toggles are grouped.
-        let saved = |p: &UiPrefs| (p.open_inline, p.auto_save, p.always_writable, p.confirm_save, p.default_cols, p.timeout_ms, p.shell_runtime.clone(), p.mongodump.clone(), p.mongorestore.clone(), p.auto_update, (p.show_server, p.show_fps, p.show_mem, p.show_cpu), p.object_preview);
+    /// Opens Settings on the category that holds the Bun and database tool paths.
+    pub(super) fn open_tool_settings(&mut self) {
+        self.settings_cat = SettingsCat::Tools;
+        self.modal = Some(Modal::Settings);
+    }
+
+    /// Cmd+=, Cmd+- and Cmd+0 step through SCALES; they work over dialogs so Settings can stay open.
+    pub(super) fn zoom_keys(&mut self, ctx: &egui::Context) {
+        let cmd = egui::Modifiers::COMMAND;
+        let (up, down, reset) = ctx.input_mut(|i| (i.consume_key(cmd, Key::Equals) || i.consume_key(cmd, Key::Plus), i.consume_key(cmd, Key::Minus), i.consume_key(cmd, Key::Num0)));
+        let at = SCALES.iter().position(|s| s.0 == self.prefs.look().scale).unwrap_or(0);
+        let to = match (up, down, reset) {
+            (_, _, true) => 0,
+            (true, _, _) => (at + 1).min(SCALES.len() - 1),
+            (_, true, _) => at.saturating_sub(1),
+            _ => return,
+        };
+        if SCALES[to].0 != self.prefs.look().scale {
+            self.prefs.ui_scale = SCALES[to].0;
+            style(ctx, self.prefs.look());
+            self.save_prefs();
+        }
+    }
+
+    pub(super) fn settings(&mut self, ctx: &egui::Context) {
+        let mut keep = true;
+        let look = self.prefs.look();
+        // Settings that save when changed. Tuples compare up to 12 items, so small ones are grouped.
+        let saved = |p: &UiPrefs| (p.open_inline, p.auto_save, p.always_writable, p.confirm_save, p.default_cols, p.timeout_ms, p.shell_runtime.clone(), p.mongodump.clone(), p.mongorestore.clone(), p.auto_update, (p.show_server, p.show_fps, p.show_mem, p.show_cpu, p.object_preview), (p.keep_toasts, p.appearance));
         let before = saved(&self.prefs);
-        // The sections scroll inside the dialog, which keeps its title and Done in the window.
-        let max_h = (ui.ctx().content_rect().height() - 190.0).max(200.0);
-        egui::ScrollArea::vertical().id_salt("settings-scroll").max_height(max_h).min_scrolled_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
-            settings_section(ui, "APPEARANCE", |ui| {
-                setting_row(ui, "Theme", "System follows the macOS light or dark setting.", |ui| {
-                    let was = self.prefs.appearance;
-                    segmented(ui, &mut self.prefs.appearance, &[(Appearance::System, "System"), (Appearance::Light, "Light"), (Appearance::Dark, "Dark")]);
-                    if self.prefs.appearance != was {
-                        self.prefs.appearance.apply(ui.ctx());
-                        self.save_prefs();
+        let r = egui::Modal::new(egui::Id::unique(("quarry-layer", "modal"))).frame(dialog_frame()).show(ctx, |ui| {
+            let screen = ui.ctx().content_rect();
+            let w = SETTINGS_W.min(screen.width() - 40.0);
+            let body_h = (screen.height() - 220.0).clamp(240.0, 480.0);
+            ui.set_width(w);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            egui::Frame::new().inner_margin(egui::Margin { left: 20, right: 20, top: 14, bottom: 12 }).show(ui, |ui| {
+                ui.set_width(w - 40.0);
+                dialog_title(ui, "Settings");
+            });
+            ui.painter().hline(egui::Rangef::new(ui.min_rect().left(), ui.min_rect().left() + w), ui.cursor().top(), Stroke::new(1.0, LINE()));
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                // Wide fonts such as OpenDyslexic need a wider list than Inter does.
+                let widest = CATS.iter().map(|(_, l)| ui.painter().layout_job(egui::text::LayoutJob::single_section(l.to_string(), ui_fmt(TXT_BODY, TEXT(), W_MEDIUM, 0.0))).size().x).fold(0.0, f32::max);
+                let side_w = SETTINGS_SIDE_W.max(widest + 60.0);
+                let (side, _) = ui.allocate_exact_size(egui::vec2(side_w, body_h), Sense::hover());
+                ui.painter().rect_filled(side, 0, PANEL());
+                ui.painter().vline(side.right(), side.y_range(), Stroke::new(1.0, LINE()));
+                let mut rows = ui.new_child(egui::UiBuilder::new().max_rect(side.shrink2(egui::vec2(10.0, 12.0))).layout(egui::Layout::top_down(egui::Align::Min)));
+                rows.spacing_mut().item_spacing.y = 2.0;
+                for (cat, label) in CATS {
+                    let on = self.settings_cat == cat;
+                    let resp = side_row(&mut rows, ROW_H, 0.0, on, |p, r| {
+                        let c = r.left_center() + egui::vec2(7.0, 0.0);
+                        cat_icon(p, cat, c, if on { PRIMARY() } else { MUTED() });
+                        let g = p.layout_job(egui::text::LayoutJob::single_section(label.to_string(), ui_fmt(TXT_BODY, if on { BRIGHT() } else { TEXT() }, if on { W_MEDIUM } else { 400.0 }, 0.0)));
+                        let dy = optical_dy(&g);
+                        p.galley(egui::pos2(r.left() + 24.0, r.center().y - g.size().y / 2.0 + dy), g, TEXT());
+                    });
+                    if resp.clicked() {
+                        self.settings_cat = cat;
                     }
+                }
+                ui.allocate_ui_with_layout(egui::vec2(w - side_w, body_h), egui::Layout::top_down(egui::Align::Min), |ui| {
+                    egui::ScrollArea::vertical().id_salt("settings-scroll").max_height(body_h).min_scrolled_height(body_h).auto_shrink([false, false]).show(ui, |ui| {
+                        egui::Frame::new().inner_margin(egui::Margin { left: 24, right: 24, top: 18, bottom: 12 }).show(ui, |ui| {
+                            ui.set_width(w - side_w - 48.0);
+                            ui.spacing_mut().item_spacing.y = 6.0;
+                            let title = CATS.iter().find(|c| c.0 == self.settings_cat).map_or("", |c| c.1);
+                            ui.label(semibold(RichText::new(title).size(TXT_SUBHEAD).color(BRIGHT())));
+                            ui.add_space(6.0);
+                            self.settings_pane(ui);
+                        });
+                    });
                 });
             });
-            settings_section(ui, "DOCUMENTS", |ui| {
-                setting_row(ui, "Open documents", "Where a clicked row shows its document.", |ui| {
-                    segmented(ui, &mut self.prefs.open_inline, &[(false, "Side panel"), (true, "Under the row")]);
-                });
-                ui.separator();
-                setting_row(ui, "Columns shown", "How many fields the table shows before you pick your own.", |ui| {
-                    stepper(ui, &mut self.prefs.default_cols, 3, 30);
-                });
-                ui.separator();
-                setting_row(ui, "Big objects in columns", "Objects and arrays too long for a cell show their size, or their first characters as in Mingo. Small ones always show in full.", |ui| {
-                    segmented(ui, &mut self.prefs.object_preview, &[(false, "Size"), (true, "First characters")]);
-                });
-            });
-            settings_section(ui, "EDITING", |ui| {
-                setting_row(ui, "Auto-save edits", "Write each edit right away and offer Undo for 8 seconds.", |ui| {
-                    toggle(ui, &mut self.prefs.auto_save);
-                });
-                ui.separator();
-                setting_row(ui, "Always allow writes", "Skip read-only mode on every connection and save edits without showing the changes first.", |ui| {
-                    toggle(ui, &mut self.prefs.always_writable);
-                });
-                ui.separator();
-                let auto = self.prefs.auto_save || self.prefs.always_writable;
-                setting_row(ui, "Show changes before saving", "List every changed field before writing unsaved edits.", |ui| {
-                    ui.add_enabled_ui(!auto, |ui| toggle(ui, &mut self.prefs.confirm_save));
-                });
-                ui.label(RichText::new(if self.prefs.always_writable { "A save never overwrites someone else's change." } else { "Writes always need the connection unlocked, and a save never overwrites someone else's change." }).size(TXT_SMALL).color(FAINT()));
-            });
-            settings_section(ui, "QUERIES", |ui| {
-                setting_row(ui, "Query timeout", "How long a query may run before it is stopped.", |ui| {
-                    egui::ComboBox::from_id_salt("timeout").width(90.0).selected_text(format!("{} s", self.prefs.timeout_ms / 1000)).show_ui(ui, |ui| {
-                        menu_look(ui);
-                        // Same presets as the original's preferences.
-                        for s in [5, 10, 30, 60, 300, 3600] {
-                            ui.selectable_value(&mut self.prefs.timeout_ms, s * 1000, format!("{s} s"));
+            ui.painter().hline(egui::Rangef::new(ui.min_rect().left(), ui.min_rect().left() + w), ui.cursor().top(), Stroke::new(1.0, LINE()));
+            egui::Frame::new().inner_margin(egui::Margin::symmetric(20, 12)).show(ui, |ui| {
+                ui.set_width(w - 40.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Changes are saved right away.").size(TXT_SMALL).color(FAINT()));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Done").on_hover_text("Esc").clicked() {
+                            keep = false;
                         }
                     });
                 });
             });
-            settings_section(ui, "SHELL", |ui| {
-                let detected = find_bun("").map(|p| p.display().to_string());
-                let desc = match &detected {
-                    Some(p) => format!("Found automatically at {p}. Set a path only to use another Bun."),
-                    None => "Bun was not found. Install it from bun.sh or enter its path.".to_string(),
-                };
-                setting_row(ui, "Bun runtime", &desc, |ui| {
-                    ui.add(egui::TextEdit::singleline(&mut self.prefs.shell_runtime).hint_text("automatic").desired_width(190.0));
-                });
-            });
-            settings_section(ui, "STATUS BAR", |ui| {
-                setting_row(ui, "Show server", "The connection's host, MongoDB version and replica set, with a dot for whether it is connected.", |ui| {
-                    toggle(ui, &mut self.prefs.show_server);
-                });
-            });
-            settings_section(ui, "PERFORMANCE", |ui| {
-                setting_row(ui, "Show frame rate", "Frames per second and the time each frame takes, in the status bar. Quarry follows your display's refresh rate (vsync), up to 120 Hz on ProMotion screens.", |ui| {
-                    toggle(ui, &mut self.prefs.show_fps);
-                });
-                setting_row(ui, "Show memory", "How much memory Quarry uses, in the status bar. Same number as Activity Monitor's Memory column on macOS, resident memory elsewhere.", |ui| {
-                    toggle(ui, &mut self.prefs.show_mem);
-                });
-                setting_row(ui, "Show CPU", "Quarry's CPU use over the last second, in percent of one core like Activity Monitor.", |ui| {
-                    toggle(ui, &mut self.prefs.show_cpu);
-                });
-            });
-            settings_section(ui, "UPDATES", |ui| {
-                let desc = if self.update_note.is_empty() { format!("Version {}. New releases of {} are installed in the background, then Quarry restarts when idle with nothing unsaved.", env!("CARGO_PKG_VERSION"), crate::update::REPO) } else { format!("Version {}. {}", env!("CARGO_PKG_VERSION"), self.update_note) };
-                setting_row(ui, "Update automatically", &desc, |ui| {
-                    toggle(ui, &mut self.prefs.auto_update);
-                });
-                if !self.demo && !cfg!(debug_assertions) && self.updated.is_none() && ui.button("Check now").clicked() {
-                    self.check_update();
-                }
-            });
-            settings_section(ui, "DATABASE TOOLS", |ui| {
-                for (i, (name, path)) in [("mongodump", &mut self.prefs.mongodump), ("mongorestore", &mut self.prefs.mongorestore)].into_iter().enumerate() {
-                    if i > 0 {
-                        ui.separator();
-                    }
-                    let desc = match find_exe(name, "") {
-                        Some(p) => format!("Found automatically at {}.", p.display()),
-                        None => "Not found. Install the MongoDB Database Tools or enter its path.".to_string(),
-                    };
-                    setting_row(ui, name, &desc, |ui| {
-                        ui.add(egui::TextEdit::singleline(path).hint_text("automatic").desired_width(190.0));
-                    });
-                }
-            });
-            if find_exe("mongodump", "").is_none() || find_exe("mongorestore", "").is_none() {
-                self.install_tools_button(ui);
-            }
         });
-        if done(ui) {
-            *keep = false;
-        }
         // The pref unlocks every connection each frame, so turning it off has to lock them back.
         if before.2 && !self.prefs.always_writable {
             self.conns.iter_mut().for_each(|c| c.writable = false);
         }
-        if before != saved(&self.prefs) {
+        if self.prefs.look() != look {
+            style(ctx, self.prefs.look());
+            // Column widths were measured in the old font and number display.
+            self.width_cache.clear();
+        }
+        if before != saved(&self.prefs) || self.prefs.look() != look {
             self.save_prefs();
+        }
+        if !keep || r.should_close() {
+            self.modal = None;
+        }
+    }
+
+    fn settings_pane(&mut self, ui: &mut egui::Ui) {
+        match self.settings_cat {
+            SettingsCat::Appearance => {
+                settings_section(ui, "THEME", |ui| {
+                    setting_row(ui, "Theme", "System follows the macOS light or dark setting.", |ui| {
+                        let was = self.prefs.appearance;
+                        segmented(ui, &mut self.prefs.appearance, &[(Appearance::System, "System"), (Appearance::Light, "Light"), (Appearance::Dark, "Dark")]);
+                        if self.prefs.appearance != was {
+                            self.prefs.appearance.apply(ui.ctx());
+                        }
+                    });
+                    ui.separator();
+                    setting_row(ui, "Background", "Soft lowers the contrast between text and background, for less glare.", |ui| {
+                        segmented(ui, &mut self.prefs.soft, &[(false, "Standard"), (true, "Soft")]);
+                    });
+                });
+                settings_section(ui, "TEXT", |ui| {
+                    setting_row(ui, "Interface size", "Makes text, buttons and rows bigger together. Also Cmd+= and Cmd+- anywhere.", |ui| {
+                        segmented(ui, &mut self.prefs.ui_scale, &SCALES);
+                    });
+                    ui.separator();
+                    setting_row(ui, "Interface font", "OpenDyslexic has heavier letter bottoms that some people with dyslexia find easier to read. Data stays in JetBrains Mono.", |ui| {
+                        let name = |d: bool| if d { "OpenDyslexic" } else { "Inter" };
+                        egui::ComboBox::from_id_salt("ui-font").width(150.0).selected_text(name(self.prefs.dyslexic_font)).show_ui(ui, |ui| {
+                            menu_look(ui);
+                            for d in [false, true] {
+                                ui.selectable_value(&mut self.prefs.dyslexic_font, d, name(d));
+                            }
+                        });
+                    });
+                });
+            }
+            SettingsCat::Reading => {
+                settings_section(ui, "TABLES", |ui| {
+                    setting_row(ui, "Reading line", "Highlights the whole row under the pointer, so your eye keeps its place across wide tables.", |ui| {
+                        toggle(ui, &mut self.prefs.reading_line);
+                    });
+                    ui.separator();
+                    setting_row(ui, "Group digits", "Shows 1 234 567 instead of 1234567. Only the display changes: copy, edit and export keep the raw value.", |ui| {
+                        toggle(ui, &mut self.prefs.group_digits);
+                    });
+                });
+                settings_section(ui, "MESSAGES", |ui| {
+                    setting_row(ui, "Keep messages until closed", "Warnings and confirmations stay on screen until you close them, instead of fading after a few seconds. An Undo offer still ends on its timer.", |ui| {
+                        toggle(ui, &mut self.prefs.keep_toasts);
+                    });
+                });
+            }
+            SettingsCat::Documents => {
+                settings_section(ui, "", |ui| {
+                    setting_row(ui, "Open documents", "Where a clicked row shows its document.", |ui| {
+                        segmented(ui, &mut self.prefs.open_inline, &[(false, "Side panel"), (true, "Under the row")]);
+                    });
+                    ui.separator();
+                    setting_row(ui, "Columns shown", "How many fields the table shows before you pick your own.", |ui| {
+                        stepper(ui, &mut self.prefs.default_cols, 3, 30);
+                    });
+                    ui.separator();
+                    setting_row(ui, "Big objects in columns", "Objects and arrays too long for a cell show their size, or their first characters as in Mingo. Small ones always show in full.", |ui| {
+                        segmented(ui, &mut self.prefs.object_preview, &[(false, "Size"), (true, "First characters")]);
+                    });
+                });
+            }
+            SettingsCat::Editing => {
+                settings_section(ui, "", |ui| {
+                    setting_row(ui, "Auto-save edits", "Write each edit right away and offer Undo for 8 seconds.", |ui| {
+                        toggle(ui, &mut self.prefs.auto_save);
+                    });
+                    ui.separator();
+                    setting_row(ui, "Always allow writes", "Skip read-only mode on every connection and save edits without showing the changes first.", |ui| {
+                        toggle(ui, &mut self.prefs.always_writable);
+                    });
+                    ui.separator();
+                    let auto = self.prefs.auto_save || self.prefs.always_writable;
+                    setting_row(ui, "Show changes before saving", "List every changed field before writing unsaved edits.", |ui| {
+                        ui.add_enabled_ui(!auto, |ui| toggle(ui, &mut self.prefs.confirm_save));
+                    });
+                });
+                ui.label(RichText::new(if self.prefs.always_writable { "A save never overwrites someone else's change." } else { "Writes always need the connection unlocked, and a save never overwrites someone else's change." }).size(TXT_SMALL).color(FAINT()));
+            }
+            SettingsCat::Tools => {
+                settings_section(ui, "QUERIES", |ui| {
+                    setting_row(ui, "Query timeout", "How long a query may run before it is stopped.", |ui| {
+                        egui::ComboBox::from_id_salt("timeout").width(90.0).selected_text(format!("{} s", self.prefs.timeout_ms / 1000)).show_ui(ui, |ui| {
+                            menu_look(ui);
+                            // Same presets as the original's preferences.
+                            for s in [5, 10, 30, 60, 300, 3600] {
+                                ui.selectable_value(&mut self.prefs.timeout_ms, s * 1000, format!("{s} s"));
+                            }
+                        });
+                    });
+                });
+                settings_section(ui, "SHELL", |ui| {
+                    let desc = match find_bun("").map(|p| p.display().to_string()) {
+                        Some(p) => format!("Found automatically at {p}. Set a path only to use another Bun."),
+                        None => "Bun was not found. Install it from bun.sh or enter its path.".to_string(),
+                    };
+                    setting_row(ui, "Bun runtime", &desc, |ui| {
+                        ui.add(egui::TextEdit::singleline(&mut self.prefs.shell_runtime).hint_text("automatic").desired_width(190.0));
+                    });
+                });
+                settings_section(ui, "DATABASE TOOLS", |ui| {
+                    for (i, (name, path)) in [("mongodump", &mut self.prefs.mongodump), ("mongorestore", &mut self.prefs.mongorestore)].into_iter().enumerate() {
+                        if i > 0 {
+                            ui.separator();
+                        }
+                        let desc = match find_exe(name, "") {
+                            Some(p) => format!("Found automatically at {}.", p.display()),
+                            None => "Not found. Install the MongoDB Database Tools or enter its path.".to_string(),
+                        };
+                        setting_row(ui, name, &desc, |ui| {
+                            ui.add(egui::TextEdit::singleline(path).hint_text("automatic").desired_width(190.0));
+                        });
+                    }
+                });
+                if find_exe("mongodump", "").is_none() || find_exe("mongorestore", "").is_none() {
+                    self.install_tools_button(ui);
+                }
+            }
+            SettingsCat::StatusBar => {
+                settings_section(ui, "", |ui| {
+                    setting_row(ui, "Server", "The connection's host, MongoDB version and replica set, with a dot for whether it is connected.", |ui| {
+                        toggle(ui, &mut self.prefs.show_server);
+                    });
+                    ui.separator();
+                    setting_row(ui, "Frame rate", "Frames per second and the time each frame takes. Quarry follows your display's refresh rate (vsync), up to 120 Hz on ProMotion screens.", |ui| {
+                        toggle(ui, &mut self.prefs.show_fps);
+                    });
+                    ui.separator();
+                    setting_row(ui, "Memory", "How much memory Quarry uses. Same number as Activity Monitor's Memory column on macOS, resident memory elsewhere.", |ui| {
+                        toggle(ui, &mut self.prefs.show_mem);
+                    });
+                    ui.separator();
+                    setting_row(ui, "CPU", "Quarry's CPU use over the last second, in percent of one core like Activity Monitor.", |ui| {
+                        toggle(ui, &mut self.prefs.show_cpu);
+                    });
+                });
+            }
+            SettingsCat::Updates => {
+                settings_section(ui, "", |ui| {
+                    let desc = if self.update_note.is_empty() { format!("Version {}. New releases of {} are installed in the background, then Quarry restarts when idle with nothing unsaved.", env!("CARGO_PKG_VERSION"), crate::update::REPO) } else { format!("Version {}. {}", env!("CARGO_PKG_VERSION"), self.update_note) };
+                    setting_row(ui, "Update automatically", &desc, |ui| {
+                        toggle(ui, &mut self.prefs.auto_update);
+                    });
+                });
+                if !self.demo && !cfg!(debug_assertions) && self.updated.is_none() && ui.button("Check now").clicked() {
+                    self.check_update();
+                }
+            }
+        }
+    }
+}
+
+/// The 14 px line icon of a Settings category, painted as shapes so it sits centered.
+fn cat_icon(p: &egui::Painter, cat: SettingsCat, c: egui::Pos2, color: Color32) {
+    let s = Stroke::new(1.3, color);
+    let pt = |x: f32, y: f32| c + egui::vec2(x, y);
+    let path = |pts: Vec<egui::Pos2>| p.add(egui::Shape::closed_line(pts, s));
+    let line = |a: egui::Pos2, b: egui::Pos2| p.line_segment([a, b], s);
+    match cat {
+        SettingsCat::Appearance => {
+            p.circle_stroke(c, 6.0, s);
+            let half: Vec<_> = (0..=12).map(|i| std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * i as f32 / 12.0).map(|a| pt(6.0 * a.cos(), -6.0 * a.sin())).collect();
+            p.add(egui::Shape::convex_polygon(half, color, Stroke::NONE));
+        }
+        SettingsCat::Reading => {
+            path(vec![pt(0.0, -4.0), pt(-3.5, -5.5), pt(-7.0, -5.0), pt(-7.0, 5.0), pt(-3.5, 4.5), pt(0.0, 6.0), pt(3.5, 4.5), pt(7.0, 5.0), pt(7.0, -5.0), pt(3.5, -5.5)]);
+            line(pt(0.0, -4.0), pt(0.0, 6.0));
+        }
+        SettingsCat::Documents => {
+            path(vec![pt(-5.0, -6.0), pt(2.0, -6.0), pt(5.0, -3.0), pt(5.0, 6.0), pt(-5.0, 6.0)]);
+            line(pt(-2.5, -1.0), pt(2.5, -1.0));
+            line(pt(-2.5, 2.0), pt(2.5, 2.0));
+        }
+        SettingsCat::Editing => {
+            path(vec![pt(-6.0, 6.0), pt(-5.0, 2.0), pt(2.0, -5.0), pt(5.0, -2.0), pt(-2.0, 5.0)]);
+            line(pt(0.5, -3.5), pt(3.5, -0.5));
+        }
+        SettingsCat::Tools => {
+            p.rect_stroke(egui::Rect::from_center_size(c, egui::vec2(14.0, 12.0)), 2.5, s, egui::StrokeKind::Inside);
+            p.add(egui::Shape::line(vec![pt(-4.0, -2.0), pt(-1.5, 0.0), pt(-4.0, 2.0)], s));
+            line(pt(0.0, 2.5), pt(4.0, 2.5));
+        }
+        SettingsCat::StatusBar => {
+            p.rect_stroke(egui::Rect::from_center_size(c, egui::vec2(14.0, 12.0)), 2.5, s, egui::StrokeKind::Inside);
+            line(pt(-6.0, 2.5), pt(6.0, 2.5));
+        }
+        SettingsCat::Updates => {
+            let arc: Vec<_> = (0..=20).map(|i| -0.9 + 5.4 * i as f32 / 20.0).map(|a| pt(5.5 * a.cos(), 5.5 * a.sin())).collect();
+            p.add(egui::Shape::line(arc, s));
+            p.add(egui::Shape::line(vec![pt(4.0, -7.5), pt(4.0, -4.0), pt(0.5, -4.0)], s));
         }
     }
 }
