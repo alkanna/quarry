@@ -88,14 +88,15 @@ impl Account {
         Account { user: user.into(), host: host.into(), ..Default::default() }
     }
 
-    /// `user@host`, or the bare name of a role.
+    /// `user@host`, or the bare name of a MariaDB role.
     pub fn label(&self) -> String {
-        if self.host.is_empty() { self.user.clone() } else { format!("{}@{}", self.user, self.host) }
+        if self.is_role { self.user.clone() } else { format!("{}@{}", self.user, self.host) }
     }
 
-    /// `'user'@'host'` for the session whose backslash rule is `bs`.
+    /// `'user'@'host'` for the session whose backslash rule is `bs`. Only a role is written without a host: a user
+    /// whose host is empty is `'u'@''`, never the role `'u'` or the user `'u'@'%'`.
     pub fn literal(&self, bs: bool) -> String {
-        if self.host.is_empty() { lit(&self.user, bs) } else { format!("{}@{}", lit(&self.user, bs), lit(&self.host, bs)) }
+        if self.is_role { lit(&self.user, bs) } else { format!("{}@{}", lit(&self.user, bs), lit(&self.host, bs)) }
     }
 }
 
@@ -188,13 +189,15 @@ fn tokens(s: &str) -> Vec<Tok> {
         let ch = c[i];
         if ch.is_whitespace() {
             i += 1;
-        } else if ch == '`' {
+        } else if ch == '`' || ch == '"' {
+            // Under ANSI_QUOTES the server writes names in double quotes. A string in a grant line always has
+            // single quotes, so a double-quoted token is only ever a name. No backslash escape applies to either.
             let mut v = String::new();
             i += 1;
             while i < c.len() {
-                if c[i] == '`' {
-                    if c.get(i + 1) == Some(&'`') {
-                        v.push('`');
+                if c[i] == ch {
+                    if c.get(i + 1) == Some(&ch) {
+                        v.push(ch);
                         i += 2;
                         continue;
                     }
@@ -205,7 +208,7 @@ fn tokens(s: &str) -> Vec<Tok> {
             }
             i += 1;
             out.push(Tok::Ident(v));
-        } else if ch == '\'' || ch == '"' {
+        } else if ch == '\'' {
             let mut v = String::new();
             i += 1;
             while i < c.len() {
@@ -257,6 +260,8 @@ pub enum Scope {
     Object(String),
     /// A role given to the account (names).
     Role,
+    /// A MySQL partial revoke (`REVOKE SELECT ON db.* FROM account`): what the account lacks inside a global grant.
+    Revoked(String),
     /// PROXY, partial revokes and anything else this parser does not read.
     Other,
 }
@@ -267,6 +272,10 @@ pub struct Grant {
     /// Upper case privilege names, ALL PRIVILEGES expanded on a database, USAGE dropped and GRANT OPTION added
     /// when WITH GRANT OPTION ends the line. For a role grant the role names.
     pub privs: Vec<String>,
+    /// WITH GRANT OPTION ended the line, which covers every privilege on it.
+    pub with_grant: bool,
+    /// WITH ADMIN OPTION ended a role grant.
+    pub with_admin: bool,
     pub raw: String,
 }
 
@@ -277,15 +286,16 @@ fn is_word(t: Option<&Tok>, w: &str) -> bool {
 /// One SHOW GRANTS line. A line that is not understood is kept as `Scope::Other` with its text, so it is shown
 /// and left alone, never guessed at.
 pub fn parse_grant(line: &str) -> Grant {
-    let other = || Grant { scope: Scope::Other, privs: Vec::new(), raw: line.to_string() };
+    let other = || Grant { scope: Scope::Other, privs: Vec::new(), with_grant: false, with_admin: false, raw: line.to_string() };
     let t = tokens(line);
-    if !is_word(t.first(), "GRANT") {
+    let revoke = is_word(t.first(), "REVOKE");
+    if !is_word(t.first(), "GRANT") && !revoke {
         return other();
     }
     let (mut i, mut items, mut cur, mut depth, mut roles, mut columns) = (1, Vec::<String>::new(), String::new(), 0, Vec::<String>::new(), false);
     while i < t.len() {
         match &t[i] {
-            Tok::Word(w) if depth == 0 && (w.eq_ignore_ascii_case("ON") || w.eq_ignore_ascii_case("TO")) => break,
+            Tok::Word(w) if depth == 0 && (w.eq_ignore_ascii_case("ON") || w.eq_ignore_ascii_case("TO") || w.eq_ignore_ascii_case("FROM")) => break,
             Tok::Word(w) if depth == 0 => {
                 if !cur.is_empty() {
                     cur.push(' ');
@@ -323,8 +333,9 @@ pub fn parse_grant(line: &str) -> Grant {
         items.push(cur);
     }
     // A role grant has names where privileges would be, and no ON.
-    if !roles.is_empty() && is_word(t.get(i), "TO") {
-        return Grant { scope: Scope::Role, privs: roles, raw: line.to_string() };
+    if !roles.is_empty() && is_word(t.get(i), "TO") && !revoke {
+        let admin = t[i..].windows(2).any(|w| is_word(Some(&w[0]), "ADMIN") && is_word(Some(&w[1]), "OPTION"));
+        return Grant { scope: Scope::Role, privs: roles, with_grant: false, with_admin: admin, raw: line.to_string() };
     }
     if !is_word(t.get(i), "ON") {
         return other();
@@ -344,8 +355,14 @@ pub fn parse_grant(line: &str) -> Grant {
     };
     let (Some(a), Some(Tok::Sym('.')), Some(b)) = (part(t.get(i)), t.get(i + 1), part(t.get(i + 2))) else { return other() };
     i += 3;
-    if !is_word(t.get(i), "TO") {
+    if !is_word(t.get(i), if revoke { "FROM" } else { "TO" }) {
         return other();
+    }
+    if revoke {
+        return match (a, b) {
+            (Some(d), None) if !columns && !routine => Grant { scope: Scope::Revoked(d), privs: items.into_iter().filter(|p| p != "USAGE").collect(), with_grant: false, with_admin: false, raw: line.to_string() },
+            _ => other(),
+        };
     }
     let scope = match (a, b) {
         (None, None) => Scope::Global,
@@ -355,6 +372,8 @@ pub fn parse_grant(line: &str) -> Grant {
         (None, Some(_)) => return other(),
     };
     let mut privs: Vec<String> = Vec::new();
+    // On a line of dynamic privileges only, WITH GRANT OPTION belongs to those, not to the global GRANT OPTION.
+    let has_static = items.iter().any(|it| !is_dynamic(it));
     for it in items {
         match it.as_str() {
             "USAGE" => {}
@@ -364,7 +383,8 @@ pub fn parse_grant(line: &str) -> Grant {
         }
     }
     let rest = &t[i..];
-    if rest.windows(2).any(|w| is_word(Some(&w[0]), "GRANT") && is_word(Some(&w[1]), "OPTION")) {
+    let with_grant = rest.windows(2).any(|w| is_word(Some(&w[0]), "GRANT") && is_word(Some(&w[1]), "OPTION"));
+    if with_grant && (has_static || scope != Scope::Global) {
         privs.push("GRANT OPTION".into());
     }
     // MariaDB 10.5 and later print REPLICATION CLIENT as BINLOG MONITOR, which the same statements still accept either way.
@@ -377,7 +397,7 @@ pub fn parse_grant(line: &str) -> Grant {
         privs.sort_by_key(|p| DB_PRIVS.iter().position(|k| k == p).unwrap_or(usize::MAX));
         privs.dedup();
     }
-    Grant { scope, privs, raw: line.to_string() }
+    Grant { scope, privs, with_grant, with_admin: false, raw: line.to_string() }
 }
 
 /// What an account holds on whole databases: (pattern, privileges), merged when a database is on several lines.
@@ -404,6 +424,16 @@ pub fn roles_of(grants: &[Grant]) -> Vec<String> {
     v.sort();
     v.dedup();
     v
+}
+
+/// Dynamic privileges held WITH GRANT OPTION: revoking one here could not be undone exactly, so the window leaves them.
+pub fn dynamic_with_grant(grants: &[Grant]) -> BTreeSet<String> {
+    grants.iter().filter(|g| g.scope == Scope::Global && g.with_grant).flat_map(|g| g.privs.iter().filter(|p| is_dynamic(p)).cloned()).collect()
+}
+
+/// The roles held WITH ADMIN OPTION.
+pub fn roles_with_admin(grants: &[Grant]) -> BTreeSet<String> {
+    grants.iter().filter(|g| g.scope == Scope::Role && g.with_admin).flat_map(|g| g.privs.iter().cloned()).collect()
 }
 
 /// A role as a person reads it: `reader@%` is just `reader`.
@@ -486,6 +516,23 @@ pub fn diff(db: &str, from: &BTreeSet<String>, to: &BTreeSet<String>) -> Edit {
     Edit { db: db.into(), grant: pick(to, from), revoke: pick(from, to) }
 }
 
+/// A global revoke of a privilege that has partial revokes would drop them too (REVOKE ... ON *.* clears the
+/// restrictions), and the undo, a GRANT ON *.*, would then cover the schemas they excluded.
+pub fn check_partial(grants: &[Grant], edits: &[Edit]) -> Res<()> {
+    for ed in edits.iter().filter(|e| e.db.is_empty()) {
+        for p in &ed.revoke {
+            let dbs: Vec<&str> = grants.iter().filter_map(|g| match &g.scope {
+                Scope::Revoked(d) if g.privs.contains(p) => Some(d.as_str()),
+                _ => None,
+            }).collect();
+            if !dbs.is_empty() {
+                return Err(format!("{p} has partial revokes on {}. Revoking it everywhere would drop them, and an undo would then grant it on those schemas too. Remove the partial revokes first.", dbs.join(", ")));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn check_privs(global: bool, privs: &[String]) -> Res<()> {
     match privs.iter().find(|p| !priv_ok(global, p)) {
         Some(p) => Err(format!("{p} is not a privilege this window gives {}.", if global { "globally" } else { "on a database" })),
@@ -540,6 +587,12 @@ pub fn preview(m: Mode, acct: &Account, edits: &[Edit]) -> Res<String> {
     Ok(lines.iter().map(|l| format!("{l};")).collect::<Vec<_>>().join("\n"))
 }
 
+/// `preview` after checking the edits against the grants the account holds now.
+pub fn preview_checked(m: Mode, acct: &Account, edits: &[Edit], grants: &[Grant]) -> Res<String> {
+    check_partial(grants, edits)?;
+    preview(m, acct, edits)
+}
+
 pub const REDACTED: &str = "'***'";
 
 /// Why an account cannot be created, when it cannot.
@@ -578,9 +631,37 @@ pub fn drop_user_sql(m: Mode, acct: &Account, d: Dialect) -> String {
     format!("{} {}", if acct.is_role && d == Dialect::MariaDb { "DROP ROLE" } else { "DROP USER" }, acct.literal(m.bs))
 }
 
-/// An error with the password taken out, in case a server echoes the statement.
+/// An error with the password taken out, in case a server echoes the statement. The statement holds the password
+/// as a quoted string, so the quoted forms are replaced too, and a syntax error, which echoes the statement from the
+/// fault onward, is cut at "near '".
 fn scrub(err: String, password: &str) -> String {
-    if password.is_empty() { err } else { err.replace(password, "***") }
+    if password.is_empty() {
+        return err;
+    }
+    let mut out = err;
+    // Every way the statement or an error may have escaped it: quotes doubled or not, backslashes doubled or not.
+    let mut forms = Vec::new();
+    for dq in [false, true] {
+        for db in [false, true] {
+            let mut f = password.to_string();
+            if db {
+                f = f.replace('\\', "\\\\");
+            }
+            if dq {
+                f = f.replace('\'', "''");
+            }
+            forms.push(f);
+        }
+    }
+    forms.sort_by_key(|f| std::cmp::Reverse(f.len()));
+    for f in forms.iter().filter(|f| !f.is_empty()) {
+        out = out.replace(f.as_str(), "***");
+    }
+    if let Some(i) = out.find("near '") {
+        out.truncate(i);
+        out.push_str("near [the statement is hidden]");
+    }
+    out
 }
 
 // Account settings.
@@ -598,8 +679,16 @@ pub enum Tls {
     None,
     Ssl,
     X509,
-    /// A cipher, issuer or subject requirement: read, shown, never written from here.
+    /// A cipher, issuer or subject requirement, held in `Settings::spec`.
     Specified,
+}
+
+/// The values of REQUIRE CIPHER, ISSUER and SUBJECT; empty ones are not required.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TlsSpec {
+    pub cipher: String,
+    pub issuer: String,
+    pub subject: String,
 }
 
 pub const LIMIT_NAMES: [&str; 4] = ["MAX_QUERIES_PER_HOUR", "MAX_UPDATES_PER_HOUR", "MAX_CONNECTIONS_PER_HOUR", "MAX_USER_CONNECTIONS"];
@@ -612,12 +701,14 @@ pub struct Settings {
     pub locked: bool,
     pub expire: Expire,
     pub tls: Tls,
+    /// What `Tls::Specified` requires.
+    pub spec: TlsSpec,
     pub limits: [u64; 4],
 }
 
 impl Default for Settings {
     fn default() -> Settings {
-        Settings { locked: false, expire: Expire::Default, tls: Tls::None, limits: [0; 4] }
+        Settings { locked: false, expire: Expire::Default, tls: Tls::None, spec: TlsSpec::default(), limits: [0; 4] }
     }
 }
 
@@ -625,6 +716,10 @@ impl Default for Settings {
 pub struct AccountInfo {
     pub plugin: String,
     pub settings: Settings,
+    /// MariaDB: the account has more than one way to log in (`unix_socket OR mysql_native_password`).
+    pub chain: bool,
+    /// Something that changes when the account is dropped and made again, to tell it from a namesake.
+    pub ident: Option<String>,
 }
 
 /// What the grants of an account and its row in mysql.user say, for the window's tabs.
@@ -646,6 +741,10 @@ pub struct Caps {
     pub dynamic: bool,
     /// IDENTIFIED WITH <plugin> BY: MySQL only; MariaDB changes the plugin another way.
     pub plugin_choice: bool,
+    pub caching: bool,
+    /// mysql_native_password is off by default from 8.4 and gone in 9.0.
+    pub native_off: bool,
+    pub sha256: bool,
 }
 
 impl Caps {
@@ -655,9 +754,25 @@ impl Caps {
         let mut n = v.split(|c: char| !c.is_ascii_digit()).filter(|x| !x.is_empty()).map(|x| x.parse::<u32>().unwrap_or(0));
         let at = (n.next().unwrap_or(0), n.next().unwrap_or(0), n.next().unwrap_or(0));
         match d {
-            Dialect::MySql => Caps { alter_user: at >= (5, 7, 6), lock: at >= (5, 7, 6), lifetime: at >= (5, 7, 10), roles: at >= (8, 0, 0), dynamic: at >= (8, 0, 0), plugin_choice: true },
-            Dialect::MariaDb => Caps { alter_user: at >= (10, 2, 0), lock: at >= (10, 4, 2), lifetime: at >= (10, 4, 3), roles: at >= (10, 0, 5), dynamic: false, plugin_choice: false },
+            Dialect::MySql => Caps { alter_user: at >= (5, 7, 6), lock: at >= (5, 7, 6), lifetime: at >= (5, 7, 4), roles: at >= (8, 0, 0), dynamic: at >= (8, 0, 0), plugin_choice: true, caching: at >= (8, 0, 0), native_off: at >= (8, 4, 0), sha256: at >= (5, 6, 0) && at < (9, 0, 0) },
+            Dialect::MariaDb => Caps { alter_user: at >= (10, 2, 0), lock: at >= (10, 4, 2), lifetime: at >= (10, 4, 3), roles: at >= (10, 0, 5), dynamic: false, plugin_choice: false, caching: false, native_off: false, sha256: false },
         }
+    }
+
+    /// The plugins "Change password" offers: mysql_native_password only where it is on by default, or when the
+    /// account already uses it.
+    pub fn plugins(&self, current: &str) -> Vec<&'static str> {
+        let mut v = Vec::new();
+        if self.caching {
+            v.push("caching_sha2_password");
+        }
+        if !self.native_off || current == "mysql_native_password" {
+            v.push("mysql_native_password");
+        }
+        if self.sha256 {
+            v.push("sha256_password");
+        }
+        v
     }
 }
 
@@ -667,16 +782,27 @@ pub const MYSQL_PLUGINS: [&str; 3] = ["caching_sha2_password", "mysql_native_pas
 /// order both servers read them: REQUIRE, WITH limits, PASSWORD EXPIRE, ACCOUNT LOCK.
 pub fn alter_sql(m: Mode, acct: &Account, from: &Settings, to: &Settings) -> Res<Option<String>> {
     let mut parts: Vec<String> = Vec::new();
-    if from.tls != to.tls {
-        parts.push(
-            match to.tls {
-                Tls::None => "REQUIRE NONE",
-                Tls::Ssl => "REQUIRE SSL",
-                Tls::X509 => "REQUIRE X509",
-                Tls::Specified => return Err("A cipher or certificate requirement cannot be written from here.".into()),
+    if from.tls != to.tls || (to.tls == Tls::Specified && from.spec != to.spec) {
+        parts.push(match to.tls {
+            Tls::None => "REQUIRE NONE".into(),
+            Tls::Ssl => "REQUIRE SSL".into(),
+            Tls::X509 => "REQUIRE X509".into(),
+            Tls::Specified => {
+                let mut v = Vec::new();
+                for (word, val) in [("SUBJECT", &to.spec.subject), ("ISSUER", &to.spec.issuer), ("CIPHER", &to.spec.cipher)] {
+                    if !val.is_empty() {
+                        if val.contains('\0') {
+                            return Err("A TLS requirement cannot contain a NUL character.".into());
+                        }
+                        v.push(format!("{word} {}", lit(val, m.bs)));
+                    }
+                }
+                if v.is_empty() {
+                    return Err("Name the subject, issuer or cipher the account must present.".into());
+                }
+                format!("REQUIRE {}", v.join(" AND "))
             }
-            .into(),
-        );
+        });
     }
     let mut with = Vec::new();
     for i in 0..4 {
@@ -704,9 +830,13 @@ pub fn alter_sql(m: Mode, acct: &Account, from: &Settings, to: &Settings) -> Res
     Ok((!parts.is_empty()).then(|| format!("ALTER USER {} {}", acct.literal(m.bs), parts.join(" "))))
 }
 
-/// `ALTER USER ... IDENTIFIED [WITH plugin] BY '...'`; the password is `'***'` when `redact`. The plugin comes from a
-/// fixed list and only MySQL takes it here.
+/// MySQL: `ALTER USER ... IDENTIFIED [WITH plugin] BY '...'`. MariaDB: `SET PASSWORD FOR ... = PASSWORD('...')`, because
+/// its ALTER USER ... IDENTIFIED BY replaces the whole authentication chain. The password is `'***'` when `redact`. The
+/// plugin comes from a fixed list and only MySQL takes it here.
 pub fn password_sql(m: Mode, d: Dialect, acct: &Account, plugin: Option<&str>, password: &str, redact: bool) -> Res<String> {
+    if d == Dialect::MariaDb {
+        return Ok(format!("SET PASSWORD FOR {} = PASSWORD({})", acct.literal(m.bs), if redact { REDACTED.to_string() } else { lit(password, m.bs) }));
+    }
     let with = match plugin.filter(|_| d == Dialect::MySql) {
         Some(p) if MYSQL_PLUGINS.contains(&p) => format!("WITH {p} "),
         Some(p) => return Err(format!("{p} is not an authentication plugin this window sets.")),
@@ -748,9 +878,24 @@ fn role_literal(d: Dialect, role: &str, bs: bool) -> Res<String> {
 }
 
 pub fn role_sql(m: Mode, d: Dialect, acct: &Account, role: &str, revoke: bool) -> Res<String> {
+    role_grant_sql(m, d, acct, role, revoke, false)
+}
+
+/// GRANT or REVOKE of a role; `admin` adds WITH ADMIN OPTION to a grant.
+pub fn role_grant_sql(m: Mode, d: Dialect, acct: &Account, role: &str, revoke: bool, admin: bool) -> Res<String> {
     let r = role_literal(d, role, m.bs)?;
     let who = acct.literal(m.bs);
-    Ok(if revoke { format!("REVOKE {r} FROM {who}") } else { format!("GRANT {r} TO {who}") })
+    Ok(if revoke { format!("REVOKE {r} FROM {who}") } else { format!("GRANT {r} TO {who}{}", if admin { " WITH ADMIN OPTION" } else { "" }) })
+}
+
+/// SET DEFAULT ROLE: MySQL takes the whole list, MariaDB one role.
+pub fn default_roles_sql(m: Mode, d: Dialect, acct: &Account, roles: &[String]) -> Res<Option<String>> {
+    let lits = roles.iter().map(|r| role_literal(d, r, m.bs)).collect::<Res<Vec<_>>>()?;
+    Ok(match (d, lits.first()) {
+        (_, None) => None,
+        (Dialect::MySql, _) => Some(format!("SET DEFAULT ROLE {} TO {}", lits.join(", "), acct.literal(m.bs))),
+        (Dialect::MariaDb, Some(r)) => Some(format!("SET DEFAULT ROLE {r} FOR {}", acct.literal(m.bs))),
+    })
 }
 
 /// What the Account and Limits tabs stage together: a rename, setting changes and role changes.
@@ -822,9 +967,9 @@ fn lifetime_of(v: Option<&str>) -> Expire {
 fn info_query(d: Dialect, joined: bool) -> &'static str {
     match (d, joined) {
         // Numbers are cast to text: a prepared statement sends them as binary, which `text` would misread.
-        (Dialect::MySql, _) => "SELECT plugin, account_locked AS locked, CAST(password_lifetime AS CHAR) AS lifetime, ssl_type, CAST(max_questions AS CHAR) AS q, CAST(max_updates AS CHAR) AS u, CAST(max_connections AS CHAR) AS c, CAST(max_user_connections AS CHAR) AS uc FROM mysql.user WHERE User = ? AND Host = ?",
-        (Dialect::MariaDb, true) => "SELECT u.plugin AS plugin, IFNULL(JSON_VALUE(g.Priv, '$.account_locked'), 'false') AS locked, JSON_VALUE(g.Priv, '$.password_lifetime') AS lifetime, u.ssl_type AS ssl_type, CAST(u.max_questions AS CHAR) AS q, CAST(u.max_updates AS CHAR) AS u, CAST(u.max_connections AS CHAR) AS c, CAST(u.max_user_connections AS CHAR) AS uc FROM mysql.user u LEFT JOIN mysql.global_priv g ON g.User = u.User AND g.Host = u.Host WHERE u.User = ? AND u.Host = ?",
-        (Dialect::MariaDb, false) => "SELECT plugin, 'false' AS locked, NULL AS lifetime, ssl_type, CAST(max_questions AS CHAR) AS q, CAST(max_updates AS CHAR) AS u, CAST(max_connections AS CHAR) AS c, CAST(max_user_connections AS CHAR) AS uc FROM mysql.user WHERE User = ? AND Host = ?",
+        (Dialect::MySql, _) => "SELECT plugin, account_locked AS locked, CAST(password_lifetime AS CHAR) AS lifetime, ssl_type, CONVERT(ssl_cipher USING utf8mb4) AS cipher, CONVERT(x509_issuer USING utf8mb4) AS issuer, CONVERT(x509_subject USING utf8mb4) AS subject, 'N' AS chain, CONCAT_WS('|', password_last_changed, plugin, LEFT(SHA2(authentication_string, 256), 16)) AS ident, CAST(max_questions AS CHAR) AS q, CAST(max_updates AS CHAR) AS u, CAST(max_connections AS CHAR) AS c, CAST(max_user_connections AS CHAR) AS uc FROM mysql.user WHERE User = ? AND Host = ?",
+        (Dialect::MariaDb, true) => "SELECT u.plugin AS plugin, IFNULL(JSON_VALUE(g.Priv, '$.account_locked'), 'false') AS locked, JSON_VALUE(g.Priv, '$.password_lifetime') AS lifetime, u.ssl_type AS ssl_type, CONVERT(u.ssl_cipher USING utf8mb4) AS cipher, CONVERT(u.x509_issuer USING utf8mb4) AS issuer, CONVERT(u.x509_subject USING utf8mb4) AS subject, IF(JSON_QUERY(g.Priv, '$.auth_or') IS NULL, 'N', 'Y') AS chain, CONCAT_WS('|', u.plugin, LEFT(SHA2(u.authentication_string, 256), 16)) AS ident, CAST(u.max_questions AS CHAR) AS q, CAST(u.max_updates AS CHAR) AS u, CAST(u.max_connections AS CHAR) AS c, CAST(u.max_user_connections AS CHAR) AS uc FROM mysql.user u LEFT JOIN mysql.global_priv g ON g.User = u.User AND g.Host = u.Host WHERE u.User = ? AND u.Host = ?",
+        (Dialect::MariaDb, false) => "SELECT plugin, 'false' AS locked, NULL AS lifetime, ssl_type, CONVERT(ssl_cipher USING utf8mb4) AS cipher, CONVERT(x509_issuer USING utf8mb4) AS issuer, CONVERT(x509_subject USING utf8mb4) AS subject, 'N' AS chain, CONCAT_WS('|', plugin, LEFT(SHA2(authentication_string, 256), 16)) AS ident, CAST(max_questions AS CHAR) AS q, CAST(max_updates AS CHAR) AS u, CAST(max_connections AS CHAR) AS c, CAST(max_user_connections AS CHAR) AS uc FROM mysql.user WHERE User = ? AND Host = ?",
     }
 }
 
@@ -841,8 +986,11 @@ async fn read_info(c: &mut sqlx::MySqlConnection, d: Dialect, acct: &Account) ->
                     _ => Tls::Specified,
                 };
                 let locked = matches!(text(&r, "locked").unwrap_or_default().to_ascii_uppercase().as_str(), "Y" | "TRUE" | "1");
-                let settings = Settings { locked, expire: lifetime_of(text(&r, "lifetime").as_deref()), tls, limits: [n("q"), n("u"), n("c"), n("uc")] };
-                return Ok(AccountInfo { plugin: text(&r, "plugin").unwrap_or_default(), settings });
+                // The requirement's values mean something only under a SPECIFIED type.
+                let spec = if tls == Tls::Specified { TlsSpec { cipher: text(&r, "cipher").unwrap_or_default(), issuer: text(&r, "issuer").unwrap_or_default(), subject: text(&r, "subject").unwrap_or_default() } } else { TlsSpec::default() };
+                let settings = Settings { locked, expire: lifetime_of(text(&r, "lifetime").as_deref()), tls, spec, limits: [n("q"), n("u"), n("c"), n("uc")] };
+                let chain = text(&r, "chain").is_some_and(|v| v.eq_ignore_ascii_case("Y"));
+                return Ok(AccountInfo { plugin: text(&r, "plugin").unwrap_or_default(), settings, chain, ident: text(&r, "ident") });
             }
             Ok(None) => return Err(format!("{} has no row in mysql.user.", acct.label())),
             Err(x) => last = e(x),
@@ -866,8 +1014,16 @@ pub enum What {
     Renamed { from: Account },
     /// ALTER USER settings; undo requires the changed fields to still read as `to`.
     Settings { from: Settings, to: Settings },
-    /// Roles given and taken away, and the roles the account held right after.
-    Roles { grant: Vec<String>, revoke: Vec<String>, expect: Vec<String> },
+    /// Roles given and taken away (with what each taken role carried), and how the account's roles read right after.
+    Roles { grant: Vec<String>, revoke: Vec<RoleMeta>, expect: Vec<String> },
+}
+
+/// A role taken away, with what undo must give back besides the role.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RoleMeta {
+    pub role: String,
+    pub admin: bool,
+    pub default: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -875,6 +1031,8 @@ pub struct AccountUndo {
     pub account: Account,
     pub what: What,
     pub label: String,
+    /// What told this account from a namesake when the change ran, when the server let it be read.
+    pub ident: Option<String>,
 }
 
 fn list_text(edits: &[Edit], f: impl Fn(&Edit) -> &Vec<String>) -> String {
@@ -914,10 +1072,15 @@ async fn grants_of(c: &mut sqlx::MySqlConnection, m: Mode, acct: &Account) -> Re
     Ok(rows.iter().filter_map(|r| super::worker::raw(r, 0).map(|b| parse_grant(&String::from_utf8_lossy(b)))).collect())
 }
 
+/// What an account holds in one scope. For everything (`db` empty) the partial revokes are part of it, so an undo
+/// notices when they changed.
 fn held(grants: &[Grant], db: &str) -> Vec<String> {
     if db.is_empty() {
         let mut v: Vec<String> = global_privs(grants).into_iter().filter(|p| priv_ok(true, p)).collect();
         v.sort_by_key(|p| order_key(p));
+        let mut revoked: Vec<String> = grants.iter().filter_map(|g| if let Scope::Revoked(d) = &g.scope { Some(g.privs.iter().map(move |p| format!("-{p} on {d}"))) } else { None }).flatten().collect();
+        revoked.sort();
+        v.extend(revoked);
         return v;
     }
     db_grants(grants).into_iter().find(|(k, _)| k == db).map(|(_, s)| DB_PRIVS.iter().filter(|p| s.contains(**p)).map(|p| p.to_string()).collect()).unwrap_or_default()
@@ -955,10 +1118,62 @@ async fn run_edits(c: &mut sqlx::MySqlConnection, m: Mode, acct: &Account, edits
     (ran, None)
 }
 
+/// Finds each edited database among the grants the server holds now. A server that folds case stores a typed `Shop`
+/// as `shop`, so a missing one is looked for in another case and the edit is renamed to what is stored; when none is
+/// found after a grant, nothing could be compared later and there is no undo.
+fn fold_edits(g: &[Grant], edits: &mut [Edit]) -> Res<Vec<(String, Vec<String>)>> {
+    let rows = db_grants(g);
+    let mut out = Vec::new();
+    for ed in edits.iter_mut() {
+        if !ed.db.is_empty() && !ed.grant.is_empty() && !rows.iter().any(|(k, _)| *k == ed.db) {
+            let alike: Vec<&String> = rows.iter().map(|(k, _)| k).filter(|k| k.eq_ignore_ascii_case(&ed.db)).collect();
+            match alike.as_slice() {
+                [one] => ed.db = (*one).clone(),
+                _ => return Err(format!("{} is not among the account's grants after the change", shown_pattern(&ed.db))),
+            }
+        }
+        out.push((ed.db.clone(), held(g, &ed.db)));
+    }
+    Ok(out)
+}
+
 /// What each touched database holds now, to compare against at undo.
-async fn snapshot(c: &mut sqlx::MySqlConnection, m: Mode, acct: &Account, edits: &[Edit]) -> Res<Vec<(String, Vec<String>)>> {
+async fn snapshot(c: &mut sqlx::MySqlConnection, m: Mode, acct: &Account, edits: &mut [Edit]) -> Res<Vec<(String, Vec<String>)>> {
     let g = grants_of(c, m, acct).await?;
-    Ok(edits.iter().map(|ed| (ed.db.clone(), held(&g, &ed.db))).collect())
+    fold_edits(&g, edits)
+}
+
+/// The roles an account was given, each with its admin and default marks, sorted: what a role undo compares.
+fn roles_state(grants: &[Grant], defaults: &[String]) -> Vec<String> {
+    let admin = roles_with_admin(grants);
+    let mut v: Vec<String> = roles_of(grants).into_iter().map(|r| format!("{r}{}{}", if admin.contains(&r) { " +admin" } else { "" }, if defaults.contains(&r) { " +default" } else { "" })).collect();
+    v.sort();
+    v
+}
+
+/// The roles an account has as default roles. Unreadable counts as none.
+async fn default_roles(c: &mut sqlx::MySqlConnection, d: Dialect, acct: &Account) -> Vec<String> {
+    let sql = match d {
+        Dialect::MySql => "SELECT CONCAT(DEFAULT_ROLE_USER, '@', DEFAULT_ROLE_HOST) AS r FROM mysql.default_roles WHERE USER = ? AND HOST = ?",
+        Dialect::MariaDb => "SELECT default_role AS r FROM mysql.user WHERE User = ? AND Host = ?",
+    };
+    match sqlx::query(sql).bind(&acct.user).bind(&acct.host).persistent(false).fetch_all(&mut *c).await {
+        Ok(rows) => rows.iter().filter_map(|r| text(r, "r")).filter(|r| !r.is_empty()).collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// One prepared statement; a server that cannot prepare it (error 1295) gets the text as is, which holds only quoted
+/// names and the one secret the caller scrubs from errors.
+async fn exec_any(c: &mut sqlx::MySqlConnection, sql: &str) -> Res<()> {
+    match ddl::exec(c, sql).await {
+        Err(x) if x.contains("1295") || x.contains("prepared statement protocol") => c.execute(sql).await.map(|_| ()).map_err(e),
+        r => r,
+    }
+}
+
+async fn ident(c: &mut sqlx::MySqlConnection, d: Dialect, acct: &Account) -> Option<String> {
+    read_info(c, d, acct).await.ok().and_then(|i| i.ident)
 }
 
 /// What a finished account change says to the window.
@@ -967,9 +1182,12 @@ pub enum Op {
     Granted,
     Created,
     Dropped,
+    /// An undo from Recent changes; `account` is the account it acted on.
     Undone,
-    /// A rename, or the undo of one: `account` is the name it has now.
+    /// A rename: `account` is the name it has now.
     Renamed,
+    /// The undo of a rename: `account` is the name it has now.
+    UndoneRename,
     Password,
 }
 
@@ -988,7 +1206,8 @@ async fn run_plan(c: &mut sqlx::MySqlConnection, db: &Db, conn: u64, acct: &Acco
         done += 1;
         *renamed = true;
         *cur = Account { user: to.user.clone(), host: to.host.clone(), ..acct.clone() };
-        undo.push(action(conn, cur, AccountUndo { account: cur.clone(), label: format!("renamed {} to {}", acct.label(), cur.label()), what: What::Renamed { from: acct.clone() } }));
+        let id = ident(c, d, cur).await;
+        undo.push(action(conn, cur, AccountUndo { account: cur.clone(), label: format!("renamed {} to {}", acct.label(), cur.label()), what: What::Renamed { from: acct.clone() }, ident: id }));
     }
     if let Some((a, b)) = plan.settings.as_ref().filter(|(a, b)| a != b) {
         let Some(sql) = alter_sql(m, cur, a, b)? else { return Ok(String::new()) };
@@ -996,17 +1215,32 @@ async fn run_plan(c: &mut sqlx::MySqlConnection, db: &Db, conn: u64, acct: &Acco
             return fail(x, done);
         }
         done += 1;
-        undo.push(action(conn, cur, AccountUndo { account: cur.clone(), label: settings_label(a, b), what: What::Settings { from: a.clone(), to: b.clone() } }));
+        let id = ident(c, d, cur).await;
+        undo.push(action(conn, cur, AccountUndo { account: cur.clone(), label: settings_label(a, b), what: What::Settings { from: a.clone(), to: b.clone() }, ident: id }));
     }
-    let (mut gr, mut rv) = (Vec::new(), Vec::new());
+    // What each role about to be taken away carries, read first: undo gives it back with the role.
+    let (before, defaults) = if plan.roles_revoke.is_empty() { (Vec::new(), Vec::new()) } else { (grants_of(c, m, cur).await.unwrap_or_default(), default_roles(c, d, cur).await) };
+    let admin = roles_with_admin(&before);
+    let (mut gr, mut rv): (Vec<String>, Vec<RoleMeta>) = (Vec::new(), Vec::new());
     let mut stop = None;
-    for (list, revoke, ran) in [(&plan.roles_revoke, true, &mut rv), (&plan.roles_grant, false, &mut gr)] {
-        for r in list {
-            let sql = role_sql(m, d, cur, r, revoke)?;
-            match ddl::exec(c, &sql).await {
+    for r in &plan.roles_revoke {
+        match ddl::exec(c, &role_sql(m, d, cur, r, true)?).await {
+            Ok(()) => {
+                done += 1;
+                rv.push(RoleMeta { role: r.clone(), admin: admin.contains(r), default: defaults.contains(r) });
+            }
+            Err(x) => {
+                stop = Some(x);
+                break;
+            }
+        }
+    }
+    if stop.is_none() {
+        for r in &plan.roles_grant {
+            match ddl::exec(c, &role_sql(m, d, cur, r, false)?).await {
                 Ok(()) => {
                     done += 1;
-                    ran.push(r.clone());
+                    gr.push(r.clone());
                 }
                 Err(x) => {
                     stop = Some(x);
@@ -1014,14 +1248,14 @@ async fn run_plan(c: &mut sqlx::MySqlConnection, db: &Db, conn: u64, acct: &Acco
                 }
             }
         }
-        if stop.is_some() {
-            break;
-        }
     }
     if !gr.is_empty() || !rv.is_empty() {
         if let Ok(g) = grants_of(c, m, cur).await {
-            let label = [(!gr.is_empty()).then(|| format!("gave role {}", gr.iter().map(|r| role_shown(r)).collect::<Vec<_>>().join(", "))), (!rv.is_empty()).then(|| format!("took role {}", rv.iter().map(|r| role_shown(r)).collect::<Vec<_>>().join(", ")))].into_iter().flatten().collect::<Vec<_>>().join(", ");
-            undo.push(action(conn, cur, AccountUndo { account: cur.clone(), label, what: What::Roles { grant: gr, revoke: rv, expect: roles_of(&g) } }));
+            let defaults_now = default_roles(c, d, cur).await;
+            let names = |v: Vec<&String>| v.into_iter().map(|r| role_shown(r)).collect::<Vec<_>>().join(", ");
+            let label = [(!gr.is_empty()).then(|| format!("gave role {}", names(gr.iter().collect()))), (!rv.is_empty()).then(|| format!("took role {}", names(rv.iter().map(|r| &r.role).collect())))].into_iter().flatten().collect::<Vec<_>>().join(", ");
+            let id = ident(c, d, cur).await;
+            undo.push(action(conn, cur, AccountUndo { account: cur.clone(), label, what: What::Roles { grant: gr, revoke: rv, expect: roles_state(&g, &defaults_now) }, ident: id }));
         }
     }
     if let Some(x) = stop {
@@ -1067,17 +1301,23 @@ impl Worker {
                 let mut c = writer(&db, "", read_only).await?;
                 let out = async {
                     let m = session_mode(&mut c).await?;
-                    let (ran, err) = run_edits(&mut c, m, &acct, &edits).await;
+                    // Checked on the writer, against what the server holds now rather than what the window last read.
+                    check_partial(&grants_of(&mut c, m, &acct).await?, &edits)?;
+                    let (mut ran, err) = run_edits(&mut c, m, &acct, &edits).await;
+                    let mut note = String::new();
                     if !ran.is_empty() {
-                        let expect = snapshot(&mut c, m, &acct, &ran).await.unwrap_or_default();
                         // Without a snapshot there is nothing to check against, so no undo is offered.
-                        if expect.len() == ran.len() {
-                            undo = Some(action(conn, &acct, AccountUndo { account: acct.clone(), label: label_of(&ran), what: What::Grants { edits: ran.clone(), expect } }));
+                        match snapshot(&mut c, m, &acct, &mut ran).await {
+                            Ok(expect) => {
+                                let id = ident(&mut c, db.dialect, &acct).await;
+                                undo = Some(action(conn, &acct, AccountUndo { account: acct.clone(), label: label_of(&ran), what: What::Grants { edits: ran.clone(), expect }, ident: id }));
+                            }
+                            Err(why) => note = format!(" There is no undo for it: {why}."),
                         }
                     }
                     match err {
-                        None => Ok(format!("Changed privileges of {}", acct.label())),
-                        Some(x) => Err(format!("{x}. {} of {} changes were made before it stopped.", ran.len(), edits.len())),
+                        None => Ok(format!("Changed privileges of {}.{note}", acct.label())),
+                        Some(x) => Err(format!("{x}. {} of {} changes were made before it stopped.{note}", ran.len(), edits.len())),
                     }
                 }
                 .await;
@@ -1099,7 +1339,8 @@ impl Worker {
                 let out = async {
                     let m = session_mode(&mut c).await?;
                     ddl::exec(&mut c, &create_user_sql(m, &acct, &password, false)).await.map_err(|x| scrub(x, &password))?;
-                    undo = Some(action(conn, &acct, AccountUndo { account: acct.clone(), label: "created user".into(), what: What::Created }));
+                    let id = ident(&mut c, db.dialect, &acct).await;
+                    undo = Some(action(conn, &acct, AccountUndo { account: acct.clone(), label: "created user".into(), what: What::Created, ident: id }));
                     Ok(format!("Created user {}", acct.label()))
                 }
                 .await;
@@ -1119,8 +1360,16 @@ impl Worker {
                 let mut c = writer(&db, "", read_only).await?;
                 let out = async {
                     let m = session_mode(&mut c).await?;
+                    if db.dialect == Dialect::MariaDb {
+                        // SET PASSWORD sets the mysql_native_password part only; any other way in would be left as it was.
+                        if let Ok(i) = read_info(&mut c, db.dialect, &acct).await {
+                            if i.chain || (!i.plugin.is_empty() && i.plugin != "mysql_native_password") {
+                                return Err(format!("{} logs in with {}, and Quarry only sets a mysql_native_password password on MariaDB. Change it in a SQL shell.", acct.label(), if i.chain { "more than one method".to_string() } else { i.plugin }));
+                            }
+                        }
+                    }
                     let sql = password_sql(m, db.dialect, &acct, plugin.as_deref(), &password, false)?;
-                    ddl::exec(&mut c, &sql).await.map_err(|x| scrub(x, &password))?;
+                    exec_any(&mut c, &sql).await.map_err(|x| scrub(x, &password))?;
                     Ok(format!("Changed the password of {}", acct.label()))
                 }
                 .await;
@@ -1173,11 +1422,18 @@ impl Worker {
 /// the answer when nothing ran, so it stays in the list.
 pub(super) async fn undo(db: &Db, a: UndoAction, u: AccountUndo, read_only: bool) -> Msg {
     let (conn, acct) = (a.conn, u.account.clone());
+    // Whether the undo ran something before it stopped; an entry that changed nothing stays in the list.
+    let mut ran_any = false;
     let res: Res<String> = async {
         let mut c = writer(db, "", read_only).await?;
         let out = async {
             let m = session_mode(&mut c).await?;
             let now = grants_of(&mut c, m, &acct).await.map_err(|x| format!("Undo refused: {x}"))?;
+            if let (Some(want), Some(got)) = (&u.ident, ident(&mut c, db.dialect, &acct).await) {
+                if *want != got {
+                    return Err(format!("Undo refused: {} is not the account this change was made on (it was dropped and made again, or its password changed).", acct.label()));
+                }
+            }
             match &u.what {
                 What::Grants { edits, expect } => {
                     for (d, want) in expect {
@@ -1187,6 +1443,7 @@ pub(super) async fn undo(db: &Db, a: UndoAction, u: AccountUndo, read_only: bool
                     }
                     let back: Vec<Edit> = edits.iter().rev().map(Edit::inverse).collect();
                     let (ran, err) = run_edits(&mut c, m, &acct, &back).await;
+                    ran_any = !ran.is_empty();
                     match err {
                         None => Ok(format!("Undid: {}", u.label)),
                         Some(x) => Err(format!("{x}. {} of {} steps were undone before it stopped.", ran.len(), back.len())),
@@ -1198,7 +1455,7 @@ pub(super) async fn undo(db: &Db, a: UndoAction, u: AccountUndo, read_only: bool
                 }
                 What::Settings { from, to } => {
                     let cur = read_info(&mut c, db.dialect, &acct).await.map_err(|x| format!("Undo refused: {x}"))?.settings;
-                    let same = |a: &Settings, b: &Settings| (from.locked == to.locked || a.locked == b.locked) && (from.expire == to.expire || a.expire == b.expire) && (from.tls == to.tls || a.tls == b.tls) && (0..4).all(|i| from.limits[i] == to.limits[i] || a.limits[i] == b.limits[i]);
+                    let same = |a: &Settings, b: &Settings| (from.locked == to.locked || a.locked == b.locked) && (from.expire == to.expire || a.expire == b.expire) && ((from.tls == to.tls && from.spec == to.spec) || (a.tls == b.tls && a.spec == b.spec)) && (0..4).all(|i| from.limits[i] == to.limits[i] || a.limits[i] == b.limits[i]);
                     if !same(&cur, to) {
                         return Err(format!("Undo refused: the settings of {} changed after this change ran, so undoing it now would not put them back.", acct.label()));
                     }
@@ -1210,8 +1467,9 @@ pub(super) async fn undo(db: &Db, a: UndoAction, u: AccountUndo, read_only: bool
                     if from.expire != to.expire {
                         back.expire = from.expire;
                     }
-                    if from.tls != to.tls {
+                    if from.tls != to.tls || from.spec != to.spec {
                         back.tls = from.tls;
+                        back.spec = from.spec.clone();
                     }
                     for i in 0..4 {
                         if from.limits[i] != to.limits[i] {
@@ -1224,14 +1482,27 @@ pub(super) async fn undo(db: &Db, a: UndoAction, u: AccountUndo, read_only: bool
                     Ok(format!("Undid: {}", u.label))
                 }
                 What::Roles { grant, revoke, expect } => {
-                    if roles_of(&now) != *expect {
+                    let defaults = default_roles(&mut c, db.dialect, &acct).await;
+                    if roles_state(&now, &defaults) != *expect {
                         return Err(format!("Undo refused: the roles of {} changed after this change ran, so undoing it now would not put them back.", acct.label()));
                     }
                     for r in grant {
                         ddl::exec(&mut c, &role_sql(m, db.dialect, &acct, r, true)?).await?;
+                        ran_any = true;
                     }
                     for r in revoke {
-                        ddl::exec(&mut c, &role_sql(m, db.dialect, &acct, r, false)?).await?;
+                        ddl::exec(&mut c, &role_grant_sql(m, db.dialect, &acct, &r.role, false, r.admin)?).await?;
+                        ran_any = true;
+                    }
+                    // Default roles go back as they were: MySQL takes the whole list, so the ones it holds now stay in it.
+                    let mut want: Vec<String> = defaults;
+                    want.extend(revoke.iter().filter(|r| r.default).map(|r| r.role.clone()));
+                    want.sort();
+                    want.dedup();
+                    if revoke.iter().any(|r| r.default) {
+                        if let Some(sql) = default_roles_sql(m, db.dialect, &acct, &want)? {
+                            exec_any(&mut c, &sql).await?;
+                        }
                     }
                     Ok(format!("Undid: {}", u.label))
                 }
@@ -1249,11 +1520,13 @@ pub(super) async fn undo(db: &Db, a: UndoAction, u: AccountUndo, read_only: bool
         out
     }
     .await;
-    // A refusal before anything ran keeps the entry, a partial run does not: its expectation no longer holds.
-    let keep = res.as_ref().err().is_some_and(|x| x.starts_with("Undo refused") || x.starts_with("Not undone") || x.contains("locked"));
+    // Any failure that ran nothing keeps the entry, whatever its cause; a partial run does not, since what it
+    // expected no longer holds.
+    let keep = res.is_err() && !ran_any;
     let undo: Vec<UndoAction> = keep.then(|| UndoAction { at: a.at, conn, db: a.db, coll: a.coll, kind: a.kind }).into_iter().collect();
-    let op = if res.is_ok() && matches!(u.what, What::Renamed { .. }) { Op::Renamed } else { Op::Undone };
-    let acct = if op == Op::Renamed { match &u.what { What::Renamed { from } => from.clone(), _ => acct } } else { acct };
+    let renamed = res.is_ok() && matches!(u.what, What::Renamed { .. });
+    let op = if renamed { Op::UndoneRename } else { Op::Undone };
+    let acct = if renamed { match &u.what { What::Renamed { from } => from.clone(), _ => acct } } else { acct };
     Msg::SqlUserDone { conn, account: acct, op, res, undo }
 }
 
@@ -1308,7 +1581,7 @@ mod tests {
         assert_eq!((g.scope, g.privs), (Scope::Role, vec!["reader@%".to_string(), "w@h".to_string()]));
         let g = parse_grant("GRANT `reader`, `writer` TO `u`@`%`");
         assert_eq!((g.scope, g.privs), (Scope::Role, vec!["reader".to_string(), "writer".to_string()]));
-        for l in ["GRANT PROXY ON ''@'' TO `u`@`%`", "REVOKE SELECT ON `mysql`.* FROM `u`@`%`", "something else", "GRANT SELECT ON TO"] {
+        for l in ["GRANT PROXY ON ''@'' TO `u`@`%`", "REVOKE SELECT ON `a`.`t` FROM `u`@`%`", "something else", "GRANT SELECT ON TO"] {
             let g = parse_grant(l);
             assert_eq!(g.scope, Scope::Other, "{l}");
             assert_eq!(g.raw, l);
@@ -1398,7 +1671,7 @@ mod tests {
         assert_eq!(shown, "CREATE USER 'app'@'%' IDENTIFIED BY '***'");
         assert!(!shown.contains("s3cr"));
         assert_eq!(create_user_sql(Mode::DEFAULT, &u, "s3cr'et", false), "CREATE USER 'app'@'%' IDENTIFIED BY 's3cr''et'");
-        assert_eq!(scrub("syntax near 's3cr''et'".into(), "s3cr''et"), "syntax near '***'");
+        assert!(!scrub("syntax near 's3cr''et'".into(), "s3cr'et").contains("s3cr"));
         assert!(check_new_user("app", "%", "").is_err());
         assert!(check_new_user("", "%", "x").is_err());
         assert!(check_new_user("app", "", "x").is_err());
@@ -1432,8 +1705,10 @@ mod tests {
         assert!(grant_sql(Mode::DEFAULT, &u, "db", &["CONNECTION_ADMIN".into()], false).is_err());
         let g = parse_grant("GRANT SELECT, PROCESS ON *.* TO `u`@`%`");
         let h = parse_grant("GRANT CONNECTION_ADMIN, SYSTEM_VARIABLES_ADMIN ON *.* TO `u`@`%` WITH GRANT OPTION");
-        assert_eq!(global_privs(&[g.clone(), h.clone()]), set(&["SELECT", "PROCESS", "CONNECTION_ADMIN", "SYSTEM_VARIABLES_ADMIN", "GRANT OPTION"]));
-        assert_eq!(held(&[g, h], ""), ["SELECT", "GRANT OPTION", "PROCESS", "CONNECTION_ADMIN", "SYSTEM_VARIABLES_ADMIN"]);
+        // A grant option on a line of dynamic privileges belongs to those, not to everything.
+        assert_eq!(global_privs(&[g.clone(), h.clone()]), set(&["SELECT", "PROCESS", "CONNECTION_ADMIN", "SYSTEM_VARIABLES_ADMIN"]));
+        assert_eq!(held(&[g, h.clone()], ""), ["SELECT", "PROCESS", "CONNECTION_ADMIN", "SYSTEM_VARIABLES_ADMIN"]);
+        assert_eq!(dynamic_with_grant(&[h]), set(&["CONNECTION_ADMIN", "SYSTEM_VARIABLES_ADMIN"]));
         let all = parse_grant("GRANT ALL PRIVILEGES ON *.* TO `u`@`%` WITH GRANT OPTION");
         assert!(all.privs.contains(&"SUPER".to_string()) && all.privs.contains(&"GRANT OPTION".to_string()));
     }
@@ -1449,7 +1724,7 @@ mod tests {
         let lim = Settings { limits: [5000, 0, 0, 3], ..base.clone() };
         assert_eq!(alter_sql(Mode::DEFAULT, &u, &base, &lim).unwrap().unwrap(), "ALTER USER 'report'@'10.0.%' WITH MAX_QUERIES_PER_HOUR 5000 MAX_USER_CONNECTIONS 3");
         assert_eq!(alter_sql(Mode::DEFAULT, &u, &lim, &base).unwrap().unwrap(), "ALTER USER 'report'@'10.0.%' WITH MAX_QUERIES_PER_HOUR 0 MAX_USER_CONNECTIONS 0");
-        let all = Settings { locked: true, expire: Expire::Days(90), tls: Tls::X509, limits: [1, 2, 3, 4] };
+        let all = Settings { locked: true, expire: Expire::Days(90), tls: Tls::X509, limits: [1, 2, 3, 4], ..Default::default() };
         assert_eq!(
             alter_sql(Mode::DEFAULT, &u, &base, &all).unwrap().unwrap(),
             "ALTER USER 'report'@'10.0.%' REQUIRE X509 WITH MAX_QUERIES_PER_HOUR 1 MAX_UPDATES_PER_HOUR 2 MAX_CONNECTIONS_PER_HOUR 3 MAX_USER_CONNECTIONS 4 PASSWORD EXPIRE INTERVAL 90 DAY ACCOUNT LOCK"
@@ -1473,7 +1748,9 @@ mod tests {
         assert_eq!(password_sql(Mode::DEFAULT, Dialect::MySql, &u, Some("mysql_native_password"), "p'w", false).unwrap(), "ALTER USER 'a'@'%' IDENTIFIED WITH mysql_native_password BY 'p''w'");
         assert!(password_sql(Mode::DEFAULT, Dialect::MySql, &u, Some("x' BY 'y"), "p", true).is_err());
         // MariaDB has no plugin clause here.
-        assert_eq!(password_sql(Mode::DEFAULT, Dialect::MariaDb, &u, Some("mysql_native_password"), "pw", true).unwrap(), "ALTER USER 'a'@'%' IDENTIFIED BY '***'");
+        // MariaDB's ALTER USER ... IDENTIFIED BY would replace every way of logging in, SET PASSWORD keeps the others.
+        assert_eq!(password_sql(Mode::DEFAULT, Dialect::MariaDb, &u, Some("mysql_native_password"), "pw", true).unwrap(), "SET PASSWORD FOR 'a'@'%' = PASSWORD('***')");
+        assert_eq!(password_sql(Mode::DEFAULT, Dialect::MariaDb, &u, None, "p'w", false).unwrap(), "SET PASSWORD FOR 'a'@'%' = PASSWORD('p''w')");
         assert!(check_password("").is_err() && check_password("a\0b").is_err() && check_password("x").is_ok());
         let shown = password_sql(Mode::DEFAULT, Dialect::MySql, &u, Some("caching_sha2_password"), "hunter2", true).unwrap();
         assert!(!shown.contains("hunter2"));
@@ -1492,7 +1769,9 @@ mod tests {
             plan_sql(Mode::DEFAULT, Dialect::MySql, &u, &plan).unwrap(),
             ["RENAME USER 'report'@'10.0.%' TO 'reporting'@'10.0.%'", "ALTER USER 'reporting'@'10.0.%' ACCOUNT LOCK", "REVOKE 'old' FROM 'reporting'@'10.0.%'", "GRANT 'app_read'@'%' TO 'reporting'@'10.0.%'"]
         );
-        assert_eq!(plan_sql(Mode::DEFAULT, Dialect::MariaDb, &Account::named("u", ""), &AccountPlan { roles_grant: vec!["r".into()], ..Default::default() }).unwrap(), ["GRANT 'r' TO 'u'"]);
+        assert_eq!(plan_sql(Mode::DEFAULT, Dialect::MariaDb, &Account::named("u", ""), &AccountPlan { roles_grant: vec!["r".into()], ..Default::default() }).unwrap(), ["GRANT 'r' TO 'u'@''"]);
+        let role = Account { user: "u".into(), is_role: true, ..Default::default() };
+        assert_eq!(plan_sql(Mode::DEFAULT, Dialect::MariaDb, &role, &AccountPlan { roles_grant: vec!["r".into()], ..Default::default() }).unwrap(), ["GRANT 'r' TO 'u'"]);
         assert!(AccountPlan::default().is_empty());
         assert!(plan_sql(Mode::DEFAULT, Dialect::MySql, &u, &AccountPlan { rename: Some(Account::named("", "%")), ..Default::default() }).is_err());
         assert!(role_sql(Mode::DEFAULT, Dialect::MySql, &u, "", false).is_err());
@@ -1507,9 +1786,11 @@ mod tests {
         let c = Caps::of(Dialect::MySql, "8.4.3");
         assert!(c.alter_user && c.lock && c.lifetime && c.roles && c.dynamic && c.plugin_choice);
         let c = Caps::of(Dialect::MySql, "5.7.5");
-        assert!(!c.alter_user && !c.lock && !c.roles && !c.dynamic);
+        assert!(!c.alter_user && !c.lock && c.lifetime && !c.roles && !c.dynamic);
+        let c = Caps::of(Dialect::MySql, "5.7.3");
+        assert!(!c.lifetime);
         let c = Caps::of(Dialect::MySql, "5.7.8-log");
-        assert!(c.alter_user && c.lock && !c.lifetime && !c.roles);
+        assert!(c.alter_user && c.lock && c.lifetime && !c.roles);
         let c = Caps::of(Dialect::MariaDb, "11.4.5-MariaDB");
         assert!(c.alter_user && c.lock && c.lifetime && c.roles && !c.dynamic && !c.plugin_choice);
         let c = Caps::of(Dialect::MariaDb, "5.5.5-10.3.39-MariaDB");
@@ -1525,6 +1806,132 @@ mod tests {
         assert_eq!(lifetime_of(Some("90")), Expire::Days(90));
         assert_eq!(lifetime_of(Some("-1")), Expire::Default);
         assert_eq!(lifetime_of(Some("junk")), Expire::Default);
+    }
+
+    #[test]
+    fn partial_revokes_are_read_and_a_global_revoke_over_them_is_refused() {
+        let g = [parse_grant("GRANT SELECT, INSERT ON *.* TO `u`@`%`"), parse_grant("REVOKE SELECT ON `mysql`.* FROM `u`@`%`"), parse_grant("REVOKE INSERT, UPDATE ON `sys`.* FROM `u`@`%`")];
+        assert_eq!(g[1].scope, Scope::Revoked("mysql".into()));
+        assert_eq!(g[1].privs, ["SELECT"]);
+        assert_eq!(held(&g, ""), ["SELECT", "INSERT", "-INSERT on sys", "-SELECT on mysql", "-UPDATE on sys"]);
+        let ed = |p: &str| Edit { db: String::new(), grant: vec![], revoke: vec![p.into()] };
+        let err = check_partial(&g, &[ed("SELECT")]).unwrap_err();
+        assert!(err.contains("mysql") && err.contains("partial revokes"), "{err}");
+        assert!(check_partial(&g, &[ed("INSERT")]).unwrap_err().contains("sys"));
+        assert!(check_partial(&g, &[ed("DELETE")]).is_ok());
+        // A database-level edit is not a global revoke.
+        assert!(check_partial(&g, &[Edit { db: "mysql".into(), grant: vec![], revoke: vec!["SELECT".into()] }]).is_ok());
+        assert!(preview_checked(Mode::DEFAULT, &Account::named("u", "%"), &[ed("SELECT")], &g).is_err());
+        // Roles and unreadable lines are not partial revokes.
+        assert_eq!(parse_grant("REVOKE SELECT ON `a`.`t` FROM `u`@`%`").scope, Scope::Other);
+    }
+
+    #[test]
+    fn ansi_quoted_grant_lines_read_like_backtick_ones() {
+        let g = parse_grant("GRANT SELECT, INSERT ON \"shop\".* TO \"report\"@\"10.0.%\"");
+        assert_eq!(g.scope, Scope::Db("shop".into()));
+        assert_eq!(g.privs, ["SELECT", "INSERT"]);
+        let g = parse_grant("GRANT SELECT ON \"my\\_db\".* TO \"u\"@\"%\" WITH GRANT OPTION");
+        assert_eq!(g.scope, Scope::Db("my\\_db".into()));
+        assert_eq!(g.privs, ["SELECT", "GRANT OPTION"]);
+        assert_eq!(parse_grant("GRANT SELECT ON \"a\"\"b\".* TO \"u\"@\"%\"").scope, Scope::Db("a\"b".into()));
+        assert_eq!(parse_grant("GRANT USAGE ON *.* TO \"u\"@\"%\" IDENTIFIED BY PASSWORD '*AB'").scope, Scope::Global);
+        assert_eq!(parse_grant("GRANT \"r\"@\"%\" TO \"u\"@\"%\"").privs, ["r@%"]);
+    }
+
+    #[test]
+    fn a_server_that_folds_case_is_followed_or_no_undo_is_recorded() {
+        let g = [parse_grant("GRANT SELECT ON `shop`.* TO `u`@`%`")];
+        let mut eds = [Edit { db: "Shop".into(), grant: vec!["SELECT".into()], revoke: vec![] }];
+        let snap = fold_edits(&g, &mut eds).unwrap();
+        assert_eq!(eds[0].db, "shop");
+        assert_eq!(snap, vec![("shop".to_string(), vec!["SELECT".to_string()])]);
+        let mut nope = [Edit { db: "Other".into(), grant: vec!["SELECT".into()], revoke: vec![] }];
+        assert!(fold_edits(&g, &mut nope).is_err());
+        // A revoke of everything leaves no row, which is not a miss.
+        let mut gone = [Edit { db: "Other".into(), grant: vec![], revoke: vec!["SELECT".into()] }];
+        assert_eq!(fold_edits(&[], &mut gone).unwrap(), vec![("Other".to_string(), Vec::<String>::new())]);
+        // Two stored names that differ only by case cannot be told apart.
+        let two = [parse_grant("GRANT SELECT ON `ab`.* TO `u`@`%`"), parse_grant("GRANT SELECT ON `aB`.* TO `u`@`%`")];
+        let mut amb = [Edit { db: "AB".into(), grant: vec!["INSERT".into()], revoke: vec![] }];
+        assert!(fold_edits(&two, &mut amb).is_err());
+    }
+
+    #[test]
+    fn grant_option_stays_with_its_line() {
+        let st = parse_grant("GRANT SELECT ON *.* TO `u`@`%` WITH GRANT OPTION");
+        assert_eq!(st.privs, ["SELECT", "GRANT OPTION"]);
+        let dy = parse_grant("GRANT CONNECTION_ADMIN ON *.* TO `u`@`%` WITH GRANT OPTION");
+        assert_eq!(dy.privs, ["CONNECTION_ADMIN"]);
+        assert!(dy.with_grant);
+        let only = parse_grant("GRANT USAGE ON *.* TO `u`@`%` WITH GRANT OPTION");
+        assert_eq!(only.privs, ["GRANT OPTION"]);
+        assert_eq!(dynamic_with_grant(&[st.clone(), dy]), set(&["CONNECTION_ADMIN"]));
+        assert!(dynamic_with_grant(&[st]).is_empty());
+    }
+
+    #[test]
+    fn role_grants_carry_the_admin_option() {
+        let g = [parse_grant("GRANT `a`@`%` TO `u`@`%` WITH ADMIN OPTION"), parse_grant("GRANT `b`@`%` TO `u`@`%`")];
+        assert!(g[0].with_admin && !g[1].with_admin);
+        assert_eq!(roles_with_admin(&g), set(&["a@%"]));
+        assert_eq!(roles_state(&g, &["b@%".to_string()]), ["a@% +admin", "b@% +default"]);
+        let u = Account::named("u", "%");
+        assert_eq!(role_grant_sql(Mode::DEFAULT, Dialect::MySql, &u, "a@%", false, true).unwrap(), "GRANT 'a'@'%' TO 'u'@'%' WITH ADMIN OPTION");
+        assert_eq!(role_grant_sql(Mode::DEFAULT, Dialect::MariaDb, &u, "a", false, true).unwrap(), "GRANT 'a' TO 'u'@'%' WITH ADMIN OPTION");
+        assert_eq!(default_roles_sql(Mode::DEFAULT, Dialect::MySql, &u, &["a@%".into(), "b@%".into()]).unwrap().unwrap(), "SET DEFAULT ROLE 'a'@'%', 'b'@'%' TO 'u'@'%'");
+        assert_eq!(default_roles_sql(Mode::DEFAULT, Dialect::MariaDb, &u, &["a".into()]).unwrap().unwrap(), "SET DEFAULT ROLE 'a' FOR 'u'@'%'");
+        assert_eq!(default_roles_sql(Mode::DEFAULT, Dialect::MySql, &u, &[]).unwrap(), None);
+    }
+
+    #[test]
+    fn tls_requirements_are_written_back_exactly() {
+        let u = Account::named("u", "%");
+        let spec = TlsSpec { cipher: "AES256-SHA".into(), issuer: "/CN=ca'x".into(), subject: "/CN=me".into() };
+        let held = Settings { tls: Tls::Specified, spec: spec.clone(), ..Default::default() };
+        let none = Settings::default();
+        assert_eq!(alter_sql(Mode::DEFAULT, &u, &held, &none).unwrap().unwrap(), "ALTER USER 'u'@'%' REQUIRE NONE");
+        assert_eq!(alter_sql(Mode::DEFAULT, &u, &none, &held).unwrap().unwrap(), "ALTER USER 'u'@'%' REQUIRE SUBJECT '/CN=me' AND ISSUER '/CN=ca''x' AND CIPHER 'AES256-SHA'");
+        // Only the cipher: the others are not required.
+        let c = Settings { tls: Tls::Specified, spec: TlsSpec { cipher: "X".into(), ..Default::default() }, ..Default::default() };
+        assert_eq!(alter_sql(Mode::DEFAULT, &u, &none, &c).unwrap().unwrap(), "ALTER USER 'u'@'%' REQUIRE CIPHER 'X'");
+        // A changed subject under the same kind of requirement is a change.
+        let d = Settings { spec: TlsSpec { subject: "/CN=you".into(), ..spec.clone() }, ..held.clone() };
+        assert!(alter_sql(Mode::DEFAULT, &u, &held, &d).unwrap().unwrap().contains("SUBJECT '/CN=you'"));
+        assert_eq!(alter_sql(Mode::DEFAULT, &u, &held, &held).unwrap(), None);
+    }
+
+    #[test]
+    fn errors_lose_the_password_in_every_quoted_form() {
+        for pw in ["o'k", "a\\b", "plain-secret", "x'y\\z"] {
+            for echoed in [pw.to_string(), lit(pw, true), lit(pw, false), pw.replace('\'', "''"), pw.replace('\\', "\\\\")] {
+                let e = scrub(format!("Access denied for {echoed} in a statement"), pw);
+                assert!(!e.contains(pw) && !e.contains(&echoed), "{pw}: {e}");
+            }
+        }
+        let e = scrub("You have an error in your SQL syntax; check the manual near ''secret'' at line 1".into(), "secret");
+        assert!(!e.contains("secret") && e.contains("hidden"), "{e}");
+    }
+
+    #[test]
+    fn a_user_without_a_host_is_not_a_role() {
+        let u = Account::named("u", "");
+        assert_eq!(u.literal(true), "'u'@''");
+        assert_eq!(u.label(), "u@");
+        let r = Account { user: "r".into(), is_role: true, ..Default::default() };
+        assert_eq!((r.literal(true).as_str(), r.label().as_str()), ("'r'", "r"));
+        assert_eq!(drop_user_sql(Mode::DEFAULT, &u, Dialect::MariaDb), "DROP USER 'u'@''");
+        assert_eq!(drop_user_sql(Mode::DEFAULT, &r, Dialect::MariaDb), "DROP ROLE 'r'");
+    }
+
+    #[test]
+    fn plugin_choices_follow_the_version() {
+        let c = Caps::of(Dialect::MySql, "8.4.3");
+        assert_eq!(c.plugins("caching_sha2_password"), ["caching_sha2_password", "sha256_password"]);
+        assert_eq!(c.plugins("mysql_native_password"), ["caching_sha2_password", "mysql_native_password", "sha256_password"]);
+        assert_eq!(Caps::of(Dialect::MySql, "8.0.36").plugins(""), ["caching_sha2_password", "mysql_native_password", "sha256_password"]);
+        assert_eq!(Caps::of(Dialect::MySql, "5.7.44").plugins(""), ["mysql_native_password", "sha256_password"]);
+        assert_eq!(Caps::of(Dialect::MySql, "9.1.0").plugins("caching_sha2_password"), ["caching_sha2_password"]);
     }
 
     // Live tests. Each makes a user of its own with a unique name and drops it at the end.
@@ -1713,6 +2120,223 @@ mod tests {
     }
 
     #[test]
+    fn live_partial_revokes_are_never_widened() {
+        // Needs a MySQL 8 server started with --partial-revokes=ON.
+        let Some(l) = crate::db::sql::testing::live("QUARRY_TEST_MYSQL_PR") else { return };
+        let a = Account::named(&unique("pr"), "%");
+        create(&l, &a);
+        l.sql(&format!("GRANT SELECT, INSERT ON *.* TO {}", a.literal(true)));
+        l.sql(&format!("REVOKE SELECT ON `mysql`.* FROM {}", a.literal(true)));
+        let before = grants(&l, &a);
+        assert!(before.iter().any(|g| g.starts_with("REVOKE SELECT ON `mysql`")), "{before:?}");
+        // Revoking SELECT everywhere would drop the partial revoke: refused, and nothing changes.
+        l.w.sql_user_edit(1, l.db.clone(), a.clone(), vec![Edit { db: String::new(), grant: vec![], revoke: vec!["SELECT".into()] }], false);
+        let (_, res, undo) = done(&l);
+        let err = res.unwrap_err();
+        assert!(err.contains("partial revokes") && undo.is_none(), "{err}");
+        assert_eq!(grants(&l, &a), before);
+        // INSERT has none: it goes and comes back, with the partial revoke intact.
+        l.w.sql_user_edit(1, l.db.clone(), a.clone(), vec![Edit { db: String::new(), grant: vec![], revoke: vec!["INSERT".into()] }], false);
+        let (_, res, undo) = done(&l);
+        res.unwrap();
+        l.w.sql_undo(l.db.clone(), undo.unwrap(), Vec::new(), false);
+        let (_, res, _) = done(&l);
+        res.unwrap();
+        assert_eq!(grants(&l, &a), before);
+        // An escaped underscore still names the database my_db under partial revokes.
+        let ed = Edit { db: pattern_of("my_db"), grant: vec!["SELECT".into()], revoke: vec![] };
+        l.w.sql_user_edit(1, l.db.clone(), a.clone(), vec![ed], false);
+        let (_, res, undo) = done(&l);
+        res.unwrap_or_else(|x| panic!("{x}"));
+        let rows = db_grants(&grants(&l, &a).iter().map(|g| parse_grant(g)).collect::<Vec<_>>());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(shown_pattern(&rows[0].0), "my_db");
+        l.w.sql_undo(l.db.clone(), undo.unwrap(), Vec::new(), false);
+        done(&l).1.unwrap();
+        assert_eq!(grants(&l, &a), before);
+        drop_it(&l, &a);
+    }
+
+    #[test]
+    fn live_tls_requirements_come_back_with_undo() {
+        every_server(|l, var| {
+            let a = Account::named(&unique("tl"), "%");
+            create(l, &a);
+            l.sql(&format!("ALTER USER {} REQUIRE SUBJECT '/CN=me' AND ISSUER '/CN=ca' AND CIPHER 'AES256-SHA'", a.literal(true)));
+            let before = info(l, &a).settings;
+            assert_eq!(before.tls, Tls::Specified, "{var}");
+            assert_eq!((before.spec.subject.as_str(), before.spec.issuer.as_str(), before.spec.cipher.as_str()), ("/CN=me", "/CN=ca", "AES256-SHA"), "{var}");
+            // Replace the requirement and lock the account in one change.
+            let caps = Caps::of(l.db.dialect, &l.db.version);
+            let to = Settings { locked: caps.lock, tls: Tls::Ssl, spec: TlsSpec::default(), limits: [3, 0, 0, 0], ..before.clone() };
+            let (_, res, undo) = plan_run(l, &a, AccountPlan { settings: Some((before.clone(), to.clone())), ..Default::default() });
+            res.unwrap_or_else(|x| panic!("{var}: {x}"));
+            assert_eq!(info(l, &a).settings.tls, Tls::Ssl, "{var}");
+            l.w.sql_undo(l.db.clone(), undo.into_iter().next().unwrap(), Vec::new(), false);
+            let (_, res, back) = done(l);
+            res.unwrap_or_else(|x| panic!("{var}: {x}"));
+            assert!(back.is_none(), "{var}");
+            assert_eq!(info(l, &a).settings, before, "{var}: lock, limits and the requirement all come back");
+            drop_it(l, &a);
+        });
+    }
+
+    #[test]
+    fn live_a_failed_undo_keeps_its_entry() {
+        every_server(|l, var| {
+            let a = Account::named(&unique("ke"), "%");
+            create(l, &a);
+            let s0 = Settings::default();
+            let s1 = Settings { limits: [4, 0, 0, 0], ..s0.clone() };
+            let (_, res, undo) = plan_run(l, &a, AccountPlan { settings: Some((s0, s1)), ..Default::default() });
+            res.unwrap();
+            // The account is gone, so the undo fails before it runs anything and stays in the list.
+            drop_it(l, &a);
+            l.w.sql_undo(l.db.clone(), undo.into_iter().next().unwrap(), Vec::new(), false);
+            let (_, res, back) = done(l);
+            assert!(res.is_err(), "{var}");
+            assert!(back.is_some(), "{var}");
+        });
+    }
+
+    #[test]
+    fn live_database_grants_are_read_and_checked_under_ansi_quotes() {
+        every_server(|l, var| {
+            let a = Account::named(&unique("an"), "%");
+            create(l, &a);
+            let ansi = l.with_session("SET SESSION sql_mode = CONCAT(@@sql_mode, ',ANSI_QUOTES')");
+            let ed = Edit { db: pattern_of("ansi_db"), grant: vec!["SELECT".into()], revoke: vec![] };
+            l.w.sql_user_edit(1, ansi.clone(), a.clone(), vec![ed], false);
+            let (_, res, undo) = done(l);
+            res.unwrap_or_else(|x| panic!("{var}: {x}"));
+            l.w.sql_user_grants(1, 7, ansi.clone(), a.clone());
+            let Msg::SqlUserGrants { res, .. } = l.rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap() else { panic!() };
+            let rows = db_grants(&res.unwrap().grants);
+            assert_eq!(rows.len(), 1, "{var}: the database row is found");
+            assert_eq!(shown_pattern(&rows[0].0), "ansi_db", "{var}");
+            // The undo check is real: a change made behind its back refuses it.
+            l.sql(&format!("GRANT INSERT ON `ansi\\_db`.* TO {}", a.literal(true)));
+            l.w.sql_undo(ansi.clone(), undo.unwrap(), Vec::new(), false);
+            let (_, res, back) = done(l);
+            assert!(res.unwrap_err().starts_with("Undo refused"), "{var}");
+            assert!(back.is_some(), "{var}");
+            drop_it(l, &a);
+        });
+    }
+
+    #[test]
+    fn live_undo_refuses_a_namesake_made_after_a_drop() {
+        every_server(|l, var| {
+            let a = Account::named(&unique("ns"), "%");
+            create(l, &a);
+            let s0 = Settings::default();
+            let s1 = Settings { limits: [9, 0, 0, 0], ..s0.clone() };
+            let (_, res, undo) = plan_run(l, &a, AccountPlan { settings: Some((s0, s1)), ..Default::default() });
+            res.unwrap();
+            drop_it(l, &a);
+            l.sql(&format!("CREATE USER {} IDENTIFIED BY 'a-different-password'", a.literal(true)));
+            l.sql(&format!("ALTER USER {} WITH MAX_QUERIES_PER_HOUR 9", a.literal(true)));
+            l.w.sql_undo(l.db.clone(), undo.into_iter().next().unwrap(), Vec::new(), false);
+            let (_, res, back) = done(l);
+            let err = res.unwrap_err();
+            assert!(err.starts_with("Undo refused") && err.contains("not the account"), "{var}: {err}");
+            assert!(back.is_some(), "{var}");
+            assert_eq!(info(l, &a).settings.limits[0], 9, "{var}: the namesake was left alone");
+            drop_it(l, &a);
+        });
+    }
+
+    #[test]
+    fn live_roles_give_back_their_admin_option_and_default_status() {
+        every_server(|l, var| {
+            let caps = Caps::of(l.db.dialect, &l.db.version);
+            if !caps.roles {
+                return;
+            }
+            let a = Account::named(&unique("rd"), "%");
+            let role = unique("rr");
+            create(l, &a);
+            l.sql(&format!("CREATE ROLE '{role}'"));
+            l.sql(&format!("GRANT '{role}' TO {} WITH ADMIN OPTION", a.literal(true)));
+            let maria = l.db.dialect == Dialect::MariaDb;
+            l.sql(&if maria { format!("SET DEFAULT ROLE '{role}' FOR {}", a.literal(true)) } else { format!("SET DEFAULT ROLE '{role}' TO {}", a.literal(true)) });
+            let given = if maria { role.clone() } else { format!("{role}@%") };
+            let (_, res, undo) = plan_run(l, &a, AccountPlan { roles_revoke: vec![given.clone()], ..Default::default() });
+            res.unwrap_or_else(|x| panic!("{var}: {x}"));
+            // MariaDB keeps the SET DEFAULT ROLE line after a revoke; only the role grant must be gone.
+            assert!(!grants(l, &a).iter().any(|g| g.starts_with("GRANT") && g.contains(&role)), "{var}");
+            l.w.sql_undo(l.db.clone(), undo.into_iter().next().unwrap(), Vec::new(), false);
+            let (_, res, _) = done(l);
+            res.unwrap_or_else(|x| panic!("{var}: {x}"));
+            let g = grants(l, &a);
+            assert!(g.iter().any(|x| x.contains(&role) && x.contains("WITH ADMIN OPTION")), "{var}: {g:?}");
+            let defaults = if maria { l.one(&format!("SELECT default_role FROM mysql.user WHERE User = {}", lit(&a.user, true))) } else { l.one(&format!("SELECT DEFAULT_ROLE_USER FROM mysql.default_roles WHERE USER = {}", lit(&a.user, true))) };
+            assert_eq!(defaults, role, "{var}");
+            drop_it(l, &a);
+            l.sql(&format!("DROP ROLE '{role}'"));
+        });
+    }
+
+    #[test]
+    fn live_a_grant_option_on_a_dynamic_privilege_is_not_everyones() {
+        every_server(|l, var| {
+            if !Caps::of(l.db.dialect, &l.db.version).dynamic {
+                return;
+            }
+            let a = Account::named(&unique("dg"), "%");
+            create(l, &a);
+            l.sql(&format!("GRANT CONNECTION_ADMIN ON *.* TO {} WITH GRANT OPTION", a.literal(true)));
+            l.sql(&format!("GRANT SELECT ON *.* TO {}", a.literal(true)));
+            let g: Vec<Grant> = grants(l, &a).iter().map(|g| parse_grant(g)).collect();
+            assert_eq!(global_privs(&g), set(&["SELECT", "CONNECTION_ADMIN"]), "{var}: {:?}", grants(l, &a));
+            assert_eq!(dynamic_with_grant(&g), set(&["CONNECTION_ADMIN"]), "{var}");
+            drop_it(l, &a);
+        });
+    }
+
+    #[test]
+    fn live_mariadb_set_password_keeps_the_login_methods_and_refuses_a_chain() {
+        every_server(|l, var| {
+            if l.db.dialect != Dialect::MariaDb {
+                return;
+            }
+            // A chain needs a second plugin; use unix_socket when the server has it.
+            let a = Account::named(&unique("ch"), "localhost");
+            let made = l.w.rt.block_on(async { sqlx::raw_sql(&format!("CREATE USER {} IDENTIFIED VIA unix_socket OR mysql_native_password USING PASSWORD('x1')", a.literal(true))).execute(&l.pool).await.is_ok() });
+            if made {
+                l.w.sql_user_password(1, l.db.clone(), a.clone(), None, "new-secret".into(), false);
+                let err = done(l).1.unwrap_err();
+                assert!(err.contains("more than one method") && !err.contains("new-secret"), "{var}: {err}");
+                // The chain is untouched.
+                assert_eq!(l.one(&format!("SELECT COUNT(*) FROM mysql.global_priv WHERE User = {} AND JSON_QUERY(Priv, '$.auth_or') IS NOT NULL", lit(&a.user, true))), "1", "{var}");
+                drop_it(l, &a);
+            }
+            // A plain account takes the new password and no other plugin appears.
+            let b = Account::named(&unique("pl"), "%");
+            create(l, &b);
+            l.w.sql_user_password(1, l.db.clone(), b.clone(), None, "second-secret".into(), false);
+            done(l).1.unwrap_or_else(|x| panic!("{var}: {x}"));
+            assert_eq!(info(l, &b).plugin, "mysql_native_password", "{var}");
+            drop_it(l, &b);
+        });
+    }
+
+    #[test]
+    fn live_a_mariadb_role_is_dropped_as_a_role() {
+        every_server(|l, var| {
+            if l.db.dialect != Dialect::MariaDb {
+                return;
+            }
+            let role = unique("dr");
+            l.sql(&format!("CREATE ROLE '{role}'"));
+            let acct = Account { user: role.clone(), host: String::new(), is_role: true, ..Default::default() };
+            l.w.sql_user_drop(1, l.db.clone(), acct, false);
+            done(l).1.unwrap_or_else(|x| panic!("{var}: {x}"));
+            assert_eq!(l.one(&format!("SELECT COUNT(*) FROM mysql.user WHERE User = '{role}'")), "0", "{var}");
+        });
+    }
+
+    #[test]
     fn live_settings_read_change_and_undo_exactly() {
         every_server(|l, var| {
             let a = Account::named(&unique("st"), "%");
@@ -1720,7 +2344,7 @@ mod tests {
             let caps = Caps::of(l.db.dialect, &l.db.version);
             let before = info(l, &a);
             assert_eq!(before.settings, Settings::default(), "{var}");
-            let to = Settings { locked: caps.lock, expire: if caps.lifetime { Expire::Days(90) } else { Expire::Default }, tls: Tls::Ssl, limits: [5000, 7, 9, 3] };
+            let to = Settings { locked: caps.lock, expire: if caps.lifetime { Expire::Days(90) } else { Expire::Default }, tls: Tls::Ssl, limits: [5000, 7, 9, 3], ..Default::default() };
             let (_, res, undo) = plan_run(l, &a, AccountPlan { settings: Some((before.settings.clone(), to.clone())), ..Default::default() });
             res.unwrap_or_else(|x| panic!("{var}: {x}"));
             assert_eq!(info(l, &a).settings, to, "{var}");
@@ -1777,7 +2401,7 @@ mod tests {
             l.w.sql_undo(l.db.clone(), undo.into_iter().next().unwrap(), Vec::new(), false);
             let Msg::SqlUserDone { account, res, op, .. } = l.rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap() else { panic!() };
             res.unwrap_or_else(|x| panic!("{var}: {x}"));
-            assert_eq!(op, Op::Renamed, "{var}");
+            assert_eq!(op, Op::UndoneRename, "{var}");
             assert_eq!(account.user, a.user, "{var}");
             assert!(grants(l, &a).iter().any(|g| g.contains("SELECT")), "{var}");
             drop_it(l, &a);

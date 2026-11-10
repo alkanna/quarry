@@ -653,7 +653,7 @@ pub(super) enum Danger {
     /// A trigger of a SQL table, by name.
     DropTrigger(Sel, String),
     /// Drop a SQL user or role.
-    SqlDropUser { conn: u64, user: String, host: String },
+    SqlDropUser { conn: u64, acct: db::sql::users::Account },
 }
 
 /// What to run once writes are allowed.

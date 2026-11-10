@@ -39,8 +39,8 @@ impl App {
         if let Danger::SqlDrop { conn, schema, table, kind } = action {
             return self.sql_drop_run(conn, schema, table, kind);
         }
-        if let Danger::SqlDropUser { conn, user, host } = action {
-            return self.sql_user_drop_run(conn, user, host);
+        if let Danger::SqlDropUser { conn, acct } = action {
+            return self.sql_user_drop_run(conn, acct);
         }
         if let Danger::DropTrigger(sel, name) = action {
             return self.on_tab(&sel, |a| a.drop_trigger(name));

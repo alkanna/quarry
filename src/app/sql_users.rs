@@ -65,6 +65,8 @@ pub(super) struct SqlUsersWin {
     pub(super) g_orig: BTreeSet<String>,
     pub(super) g_now: BTreeSet<String>,
     pub(super) priv_add: Option<String>,
+    /// Dynamic privileges held WITH GRANT OPTION, which this window does not revoke.
+    pub(super) dyn_grant: BTreeSet<String>,
     // Limits tab, as typed.
     pub(super) limits: [String; 4],
 }
@@ -97,6 +99,7 @@ impl SqlUsersWin {
             g_orig: BTreeSet::new(),
             g_now: BTreeSet::new(),
             priv_add: None,
+            dyn_grant: BTreeSet::new(),
             limits: Default::default(),
         }
     }
@@ -124,6 +127,7 @@ impl SqlUsersWin {
         self.priv_add = None;
         self.g_orig = users::global_privs(&l.grants);
         self.g_now = self.g_orig.clone();
+        self.dyn_grant = users::dynamic_with_grant(&l.grants);
         self.roles_orig = users::roles_of(&l.grants);
         self.roles_now = self.roles_orig.clone();
         self.name = acct.user.clone();
@@ -153,7 +157,9 @@ impl SqlUsersWin {
             ExpKind::Default => Expire::Default,
             ExpKind::Days => Expire::Days(self.days.trim().parse().map_err(|_| "Days is a whole number.".to_string())?),
         };
-        let now = Settings { locked: self.locked, expire, tls: self.tls, limits: orig.limits };
+        // The requirement's values stay only while the requirement is the one that was read.
+        let spec = if self.tls == Tls::Specified { orig.spec.clone() } else { Default::default() };
+        let now = Settings { locked: self.locked, expire, tls: self.tls, spec, limits: orig.limits };
         let rename = ((self.name.as_str(), self.host.as_str()) != (acct.user.as_str(), acct.host.as_str())).then(|| Account::named(&self.name, &self.host));
         let diff = |a: &[String], b: &[String]| a.iter().filter(|r| !b.contains(r)).cloned().collect::<Vec<_>>();
         Ok(AccountPlan {
@@ -191,14 +197,21 @@ pub(super) struct NewUser {
     pub(super) host: String,
     /// Typed here and handed to the worker by Create; never shown, logged or kept after.
     pub(super) password: String,
+    /// Makes the password field's id new for each dialog, so the text editor's undo history of an earlier one is out of reach.
+    pub(super) serial: u64,
 }
 
 pub(super) struct PwForm {
     pub(super) conn: u64,
     pub(super) acct: Account,
     pub(super) plugin: String,
+    /// The plugin the account has now, for the plugins on offer.
+    pub(super) current: String,
+    /// Why the password cannot be changed from here (MariaDB accounts with another way in).
+    pub(super) blocked: Option<String>,
     pub(super) password: String,
     pub(super) again: String,
+    pub(super) serial: u64,
 }
 
 enum Act {
@@ -207,7 +220,7 @@ enum Act {
     Close,
     NewUser,
     Drop(Account),
-    Password(Account, String),
+    Password(Account),
     Unlock,
     Refresh,
 }
@@ -222,8 +235,48 @@ struct Env {
     known: Vec<String>,
     /// Existing roles for "+ Role" (MariaDB lists them; MySQL roles are plain accounts).
     roles: Vec<String>,
-    /// The authentication plugin MySQL would pick for a new password.
-    plugin: String,
+}
+
+/// Statements of a plan that has something to run; changes to settings need ALTER USER, a rename and roles do not.
+fn plan_ready(p: &AccountPlan, env: &Env, acct: &Account) -> Result<(), String> {
+    if p.is_empty() {
+        return Err(String::new());
+    }
+    if !env.caps.alter_user && p.settings.as_ref().is_some_and(|(a, b)| a != b) {
+        return Err("This server version cannot change these settings with ALTER USER.".into());
+    }
+    users::plan_sql(env.mode, env.dialect, acct, p).map(|_| ())
+}
+
+/// The preview of a plan, or why it cannot run; an empty plan previews as nothing.
+fn plan_ready_or_empty(p: &AccountPlan, env: &Env, acct: &Account) -> Result<String, String> {
+    if !env.caps.alter_user && p.settings.as_ref().is_some_and(|(a, b)| a != b) {
+        return Err("This server version cannot change these settings with ALTER USER.".into());
+    }
+    users::plan_preview(env.mode, env.dialect, acct, p)
+}
+
+/// The grants the window last read, or none.
+fn held_grants(w: &SqlUsersWin) -> &[Grant] {
+    match &w.grants {
+        Some(Ok(g)) => g,
+        _ => &[],
+    }
+}
+
+/// The id of a password field. egui keeps the cursor and an undo history of each text field under its id, in memory
+/// that outlives the dialog, so a password field gets an id of its own for each dialog.
+fn secret_id(what: &str, serial: u64, n: u8) -> egui::Id {
+    egui::Id::unique(("quarry-secret", what, serial, n))
+}
+
+/// Drops what egui remembers of the password fields of one dialog.
+fn forget_secret(ctx: &egui::Context, what: &str, serial: u64, fields: u8) {
+    ctx.data_mut(|d| {
+        for n in 0..fields {
+            d.remove::<egui::text_edit::TextEditState>(secret_id(what, serial, n));
+        }
+    });
 }
 
 /// "8.4" from "8.4.3" or "11.4.5-MariaDB", the way the design's subtitle says it.
@@ -340,12 +393,19 @@ impl App {
             self.push_undo(u);
         }
         let Some(w) = self.sql_users.as_mut().filter(|w| w.conn == conn) else { return };
-        w.busy = false;
+        // An undo from Recent changes is not the window's Apply, so it does not end the Apply that may be running.
+        if !matches!(op, Op::Undone | Op::UndoneRename) {
+            w.busy = false;
+        }
         match op {
-            Op::Created | Op::Renamed => w.sel = Some((account.user.clone(), account.host.clone())),
+            Op::Created | Op::Renamed | Op::UndoneRename => w.sel = Some((account.user.clone(), account.host.clone())),
             Op::Dropped if w.sel.as_ref() == Some(&(account.user.clone(), account.host.clone())) => w.sel = None,
             _ => {}
         }
+        // What the boxes show was applied or undone: until the server is read again nothing may be applied a second time.
+        w.grants = None;
+        w.rows.clear();
+        w.adding = None;
         self.sql_users_reload();
     }
 
@@ -353,16 +413,17 @@ impl App {
         if !self.conn(conn).is_some_and(|c| c.writable) {
             return self.err(NOTE_USER);
         }
-        self.modal = Some(Modal::SqlNewUser(Box::new(NewUser { conn, user: String::new(), host: "%".into(), password: String::new() })));
+        self.req += 1;
+        self.modal = Some(Modal::SqlNewUser(Box::new(NewUser { conn, user: String::new(), host: "%".into(), password: String::new(), serial: self.req })));
     }
 
     pub(super) fn sql_user_drop_ask(&mut self, conn: u64, acct: Account) {
         let what = if acct.is_role { "role" } else { "user" };
         let title = format!("Drop the {what} {} on {}? Its password and every privilege go with it, and logins that use it stop working. This cannot be undone.", acct.label(), self.conn(conn).map(|c| c.meta.name.clone()).unwrap_or_default());
-        self.modal = Some(Modal::Typed { title, expect: acct.label(), typed: String::new(), action: Danger::SqlDropUser { conn, user: acct.user, host: acct.host } });
+        self.modal = Some(Modal::Typed { title, expect: acct.label(), typed: String::new(), action: Danger::SqlDropUser { conn, acct } });
     }
 
-    pub(super) fn sql_user_drop_run(&mut self, conn: u64, user: String, host: String) {
+    pub(super) fn sql_user_drop_run(&mut self, conn: u64, acct: Account) {
         if self.demo {
             return self.ok("Offline demo: no database is connected.");
         }
@@ -371,8 +432,6 @@ impl App {
             return self.modal = Some(Modal::Unlock(conn, None));
         }
         let Some(sql) = c.sql.clone() else { return self.err("Not connected.") };
-        // Roles are told apart from users by the list the window holds, since DROP ROLE differs on MariaDB.
-        let acct = self.sql_users.as_ref().filter(|w| w.conn == conn).and_then(|w| w.list.as_ref()).and_then(|l| l.as_ref().ok()).and_then(|l| l.accounts.iter().find(|a| a.user == user && a.host == host).cloned()).unwrap_or_else(|| Account::named(&user, &host));
         self.worker.sql_user_drop(conn, sql, acct, false);
     }
 
@@ -423,7 +482,6 @@ impl App {
             // The server's own databases are left out.
             known: self.conn(conn).map(|c| c.dbs.iter().map(|d| d.0.clone()).filter(|d| !db::sql::create::SYSTEM_SCHEMAS.contains(&d.as_str())).collect()).unwrap_or_default(),
             roles: w.list.as_ref().and_then(|l| l.as_ref().ok()).map(|l| l.accounts.iter().filter(|a| a.is_role).map(|a| a.user.clone()).collect()).unwrap_or_default(),
-            plugin: w.info.as_ref().map(|i| i.plugin.clone()).unwrap_or_default(),
         };
         let mut acts: Vec<Act> = Vec::new();
         let screen = ctx.content_rect();
@@ -497,9 +555,13 @@ impl App {
                 Act::Close => open = false,
                 Act::NewUser => self.sql_new_user(conn),
                 Act::Drop(a) => self.sql_user_drop_ask(conn, a),
-                Act::Password(a, plugin) => {
+                Act::Password(a) => {
                     if writable {
-                        self.modal = Some(Modal::SqlPassword(Box::new(PwForm { conn, acct: a, plugin, password: String::new(), again: String::new() })));
+                        let current = w.info.as_ref().map(|i| i.plugin.clone()).unwrap_or_default();
+                        // MariaDB's SET PASSWORD sets the mysql_native_password part only, so an account that logs in another way is left alone.
+                        let blocked = w.info.as_ref().filter(|_| dialect == Dialect::MariaDb).and_then(|i| (i.chain || (!i.plugin.is_empty() && i.plugin != "mysql_native_password")).then(|| format!("{} logs in with {}; Quarry only sets a mysql_native_password password on MariaDB. Change it in a SQL shell.", a.label(), if i.chain { "more than one method".to_string() } else { i.plugin.clone() })));
+                        self.req += 1;
+                        self.modal = Some(Modal::SqlPassword(Box::new(PwForm { conn, acct: a, plugin: String::new(), current, blocked, password: String::new(), again: String::new(), serial: self.req })));
                     } else {
                         self.modal = Some(Modal::Unlock(conn, None));
                     }
@@ -533,9 +595,9 @@ impl App {
         }
         match w.tab {
             UTab::Databases => !w.edits().is_empty() && users::preview(env.mode, &acct, &w.edits()).is_ok(),
-            UTab::Global => !w.global_edits().is_empty() && users::preview(env.mode, &acct, &w.global_edits()).is_ok(),
-            UTab::Account => env.caps.alter_user && w.account_plan(&acct).and_then(|p| if p.is_empty() { Err(String::new()) } else { users::plan_sql(env.mode, env.dialect, &acct, &p) }).is_ok(),
-            UTab::Limits => env.caps.alter_user && w.limits_plan().and_then(|p| if p.is_empty() { Err(String::new()) } else { users::plan_sql(env.mode, env.dialect, &acct, &p) }).is_ok(),
+            UTab::Global => !w.global_edits().is_empty() && users::preview_checked(env.mode, &acct, &w.global_edits(), held_grants(w)).is_ok(),
+            UTab::Account => w.account_plan(&acct).and_then(|p| plan_ready(&p, env, &acct)).is_ok(),
+            UTab::Limits => w.limits_plan().and_then(|p| plan_ready(&p, env, &acct)).is_ok(),
         }
     }
 
@@ -651,7 +713,7 @@ impl App {
             form_label(ui, "Password");
             ui.horizontal(|ui| {
                 if ui.add_enabled(!acct.is_role && env.caps.alter_user, egui::Button::new("Change password…")).on_disabled_hover_text(if env.writable { "Not available for this account" } else { NOTE_APPLY }).clicked() {
-                    acts.push(Act::Password(acct.clone(), env.plugin.clone()));
+                    acts.push(Act::Password(acct.clone()));
                 }
                 ui.label(RichText::new("A new password cannot be undone").size(TXT_SMALL).color(FAINT()));
             });
@@ -684,17 +746,20 @@ impl App {
                     }
                 });
                 ui.end_row();
-                if env.caps.roles && !acct.is_role {
-                    form_label(ui, "Roles");
-                    self.role_chips(ui, w, env);
-                    ui.end_row();
-                }
             });
         });
+        // Roles are GRANT and REVOKE, which older servers have without ALTER USER.
+        if env.caps.roles && !acct.is_role {
+            egui::Grid::new("acc-roles").num_columns(2).spacing([14.0, 10.0]).min_col_width(170.0).show(ui, |ui| {
+                form_label(ui, "Roles");
+                self.role_chips(ui, w, env);
+                ui.end_row();
+            });
+        }
         ui.add_space(10.0);
         caption(ui, "STATEMENTS TO RUN");
         ui.add_space(4.0);
-        preview_block(ui, w.account_plan(acct).and_then(|p| users::plan_preview(env.mode, env.dialect, acct, &p)));
+        preview_block(ui, w.account_plan(acct).and_then(|p| plan_ready_or_empty(&p, env, acct)));
     }
 
     fn role_chips(&self, ui: &mut egui::Ui, w: &mut SqlUsersWin, env: &Env) {
@@ -793,8 +858,10 @@ impl App {
                 }
                 for p in all {
                     let on = w.g_now.contains(&p);
-                    let hint = if !on { "Will be revoked; click to keep" } else if w.g_orig.contains(&p) { "Click to revoke" } else { "Will be granted; click to cancel" };
-                    if chip(ui, &p, PRIMARY(), on).on_hover_text(hint).clicked() {
+                    // One held WITH GRANT OPTION would lose the option when granted back, so it stays as it is.
+                    let kept = w.dyn_grant.contains(&p);
+                    let hint = if kept { "Held WITH GRANT OPTION: change it in a SQL shell" } else if !on { "Will be revoked; click to keep" } else if w.g_orig.contains(&p) { "Click to revoke" } else { "Will be granted; click to cancel" };
+                    if chip(ui, &p, PRIMARY(), on).on_hover_text(hint).clicked() && !kept {
                         if on {
                             w.g_now.remove(&p);
                         } else {
@@ -838,7 +905,7 @@ impl App {
         ui.add_space(10.0);
         caption(ui, "GRANTS TO RUN");
         ui.add_space(4.0);
-        preview_block(ui, users::preview(env.mode, acct, &w.global_edits()));
+        preview_block(ui, users::preview_checked(env.mode, acct, &w.global_edits(), held_grants(w)));
     }
 
     fn tab_limits(&self, ui: &mut egui::Ui, w: &mut SqlUsersWin, env: &Env, acct: &Account) {
@@ -862,7 +929,7 @@ impl App {
         ui.add_space(10.0);
         caption(ui, "STATEMENTS TO RUN");
         ui.add_space(4.0);
-        preview_block(ui, w.limits_plan().and_then(|p| users::plan_preview(env.mode, env.dialect, acct, &p)));
+        preview_block(ui, w.limits_plan().and_then(|p| plan_ready_or_empty(&p, env, acct)));
     }
 
     fn tab_databases(&self, ui: &mut egui::Ui, w: &mut SqlUsersWin, env: &Env, acct: &Account) {
@@ -1004,7 +1071,7 @@ impl App {
             ui.add(egui::TextEdit::singleline(&mut f.host).font(egui::TextStyle::Monospace).hint_text("% for any host").desired_width(340.0));
             ui.end_row();
             form_label(ui, "Password");
-            ui.add(egui::TextEdit::singleline(&mut f.password).password(true).desired_width(340.0));
+            ui.add(egui::TextEdit::singleline(&mut f.password).id(secret_id("new-user", f.serial, 0)).password(true).desired_width(340.0));
             ui.end_row();
         });
         ui.add_space(8.0);
@@ -1032,6 +1099,9 @@ impl App {
                 *keep = false;
             }
         });
+        if !*keep {
+            forget_secret(ui.ctx(), "new-user", f.serial, 1);
+        }
     }
 
     fn sql_user_create_run(&mut self, f: &mut NewUser) {
@@ -1055,13 +1125,13 @@ impl App {
         ui.add_space(8.0);
         egui::Grid::new("newpw").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W + 14.0).show(ui, |ui| {
             form_label(ui, "New password");
-            let r = ui.add(egui::TextEdit::singleline(&mut f.password).password(true).desired_width(340.0));
+            let r = ui.add(egui::TextEdit::singleline(&mut f.password).id(secret_id("change-password", f.serial, 0)).password(true).desired_width(340.0));
             if !r.has_focus() && f.password.is_empty() && f.again.is_empty() {
                 r.request_focus();
             }
             ui.end_row();
             form_label(ui, "Repeat");
-            ui.add(egui::TextEdit::singleline(&mut f.again).password(true).desired_width(340.0));
+            ui.add(egui::TextEdit::singleline(&mut f.again).id(secret_id("change-password", f.serial, 1)).password(true).desired_width(340.0));
             ui.end_row();
             if caps.plugin_choice {
                 form_label(ui, "Plugin");
@@ -1070,7 +1140,7 @@ impl App {
                     if ui.selectable_label(f.plugin.is_empty(), "Server default").clicked() {
                         f.plugin.clear();
                     }
-                    for p in users::MYSQL_PLUGINS {
+                    for p in caps.plugins(&f.current) {
                         if ui.selectable_label(f.plugin == p, p).clicked() {
                             f.plugin = p.to_string();
                         }
@@ -1083,7 +1153,7 @@ impl App {
         let plugin = Some(f.plugin.as_str()).filter(|p| !p.is_empty());
         let shown = users::password_sql(self.users_mode(f.conn), dialect, &f.acct, plugin, "", true);
         sql_block(ui, &shown.as_ref().map_or_else(|e| format!("-- {e}"), |s| format!("{s};")));
-        let check = users::check_password(&f.password).and_then(|_| if f.password == f.again { Ok(()) } else { Err("The two passwords differ.".to_string()) });
+        let check = users::check_password(&f.password).and_then(|_| if f.password == f.again { Ok(()) } else { Err("The two passwords differ.".to_string()) }).and_then(|_| f.blocked.clone().map_or(Ok(()), Err));
         if let Err(e) = &check {
             if !f.password.is_empty() || !f.again.is_empty() {
                 ui.label(RichText::new(e.as_str()).size(TXT_SMALL).color(ALERT()));
@@ -1104,10 +1174,13 @@ impl App {
                 *keep = false;
             }
         });
-        // Whichever way the dialog ends, the typed text does not outlive it.
+        // The typed text is cleared when Change password or Cancel ends the dialog, and the editor's own undo history
+        // of these fields is dropped too. Closing with Esc leaves both to the next dialog's new ids (`serial`), which
+        // cannot reach what was typed here.
         if !*keep {
             f.password.clear();
             f.again.clear();
+            forget_secret(ui.ctx(), "change-password", f.serial, 2);
         }
     }
 
@@ -1131,7 +1204,7 @@ impl App {
             c.writable = true;
         }
         if which == "newuser" {
-            return self.modal = Some(Modal::SqlNewUser(Box::new(NewUser { conn: 3, user: "reporting".into(), host: "10.0.%".into(), password: "demo".into() })));
+            return self.modal = Some(Modal::SqlNewUser(Box::new(NewUser { conn: 3, user: "reporting".into(), host: "10.0.%".into(), password: "demo".into(), serial: 0 })));
         }
         let acct = |u: &str, h: &str| Account { user: u.into(), host: h.into(), plugin: "caching_sha2_password".into(), ..Default::default() };
         let accounts = vec![acct("app", "%"), acct("report", "10.0.%"), acct("backup", "localhost"), Account { expired: true, ..acct("migrate", "%") }, Account { locked: true, ..acct("root", "localhost") }];
@@ -1142,7 +1215,7 @@ impl App {
         w.grants = Some(Ok(Vec::new()));
         w.name = "report".into();
         w.host = "10.0.%".into();
-        w.info = Some(AccountInfo { plugin: "caching_sha2_password".into(), settings: Settings::default() });
+        w.info = Some(AccountInfo { plugin: "caching_sha2_password".into(), settings: Settings::default(), chain: false, ident: None });
         match which {
             "useraccount" => {
                 w.tab = UTab::Account;
