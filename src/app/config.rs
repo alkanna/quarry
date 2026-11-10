@@ -87,6 +87,16 @@ pub(super) struct UiPrefs {
     /// instead of "{12 fields}".
     pub(super) object_preview: bool,
     pub(super) appearance: Appearance,
+    /// Zoom of the whole interface, one of `SCALES`; 1.0 is the designed size.
+    pub(super) ui_scale: f32,
+    /// OpenDyslexic instead of Inter for interface text.
+    pub(super) dyslexic_font: bool,
+    /// The lower-contrast palettes.
+    pub(super) soft: bool,
+    pub(super) reading_line: bool,
+    pub(super) group_digits: bool,
+    /// Warnings and confirmations stay until closed instead of fading.
+    pub(super) keep_toasts: bool,
     /// The database explorer collapsed from the activity rail.
     pub(super) sidebar_hidden: bool,
     /// Height the person dragged the SQL Query and Shell editors to; 0 sizes them to their text.
@@ -111,6 +121,14 @@ impl Appearance {
             Appearance::Light => egui::ThemePreference::Light,
             Appearance::Dark => egui::ThemePreference::Dark,
         });
+    }
+}
+
+impl UiPrefs {
+    pub(super) fn look(&self) -> Look {
+        // A hand-edited ui.json may hold any number; only the offered sizes are applied.
+        let scale = if SCALES.iter().any(|s| s.0 == self.ui_scale) { self.ui_scale } else { 1.0 };
+        Look { scale, dyslexic: self.dyslexic_font, soft: self.soft, reading_line: self.reading_line, group_digits: self.group_digits }
     }
 }
 
@@ -184,7 +202,7 @@ pub(super) struct SavedStage {
 
 impl Default for UiPrefs {
     fn default() -> Self {
-        Self { open_inline: true, table: true, confirm_save: false, auto_save: false, always_writable: false, default_cols: DEFAULT_COLS, page_size: db::PAGE_SIZE, timeout_ms: db::DEFAULT_TIMEOUT_MS, shell_runtime: String::new(), shell_histories: HashMap::new(), shell_packages: Vec::new(), history: HashMap::new(), library: HashMap::new(), open_tabs: Vec::new(), cur_tab: 0, last_conn: None, open_conns: Vec::new(), cols: HashMap::new(), schema_maps: HashMap::new(), relations: HashMap::new(), mongodump: String::new(), mongorestore: String::new(), auto_update: true, auto_preview: true, show_server: false, show_fps: false, show_mem: false, show_cpu: false, object_preview: false, appearance: Appearance::System, sidebar_hidden: false, query_editor_h: 0.0, shell_editor_h: 0.0, last_version: String::new() }
+        Self { open_inline: true, table: true, confirm_save: false, auto_save: false, always_writable: false, default_cols: DEFAULT_COLS, page_size: db::PAGE_SIZE, timeout_ms: db::DEFAULT_TIMEOUT_MS, shell_runtime: String::new(), shell_histories: HashMap::new(), shell_packages: Vec::new(), history: HashMap::new(), library: HashMap::new(), open_tabs: Vec::new(), cur_tab: 0, last_conn: None, open_conns: Vec::new(), cols: HashMap::new(), schema_maps: HashMap::new(), relations: HashMap::new(), mongodump: String::new(), mongorestore: String::new(), auto_update: true, auto_preview: true, show_server: false, show_fps: false, show_mem: false, show_cpu: false, object_preview: false, appearance: Appearance::System, ui_scale: 1.0, dyslexic_font: false, soft: false, reading_line: false, group_digits: false, keep_toasts: false, sidebar_hidden: false, query_editor_h: 0.0, shell_editor_h: 0.0, last_version: String::new() }
     }
 }
 

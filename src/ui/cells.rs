@@ -215,9 +215,9 @@ pub(crate) fn sql_cell_job(v: Val, kind: db::sql::value::Kind, quoted: bool) -> 
         (Bson::String(s), Enum | Set) => (shown(s, quoted), C_STRING()),
         (Bson::String(s), Text) => (shown(s, quoted), str_color(s)),
         (Bson::String(s), Date | DateTime | Time) => (s.clone(), C_DATE()),
-        (Bson::String(s), Decimal | Int | UInt | Float | Year) => (s.clone(), C_NUMBER()),
-        (Bson::Int64(n), _) => (n.to_string(), C_NUMBER()),
-        (Bson::Double(n), _) => (n.to_string(), C_NUMBER()),
+        (Bson::String(s), Decimal | Int | UInt | Float | Year) => return number_job(s),
+        (Bson::Int64(n), _) => return number_job(&n.to_string()),
+        (Bson::Double(n), _) => return number_job(&n.to_string()),
         _ => return cell_job_of(v),
     };
     let mut job = LayoutJob::default();
@@ -289,6 +289,15 @@ fn cell_job_of(v: Val) -> LayoutJob {
             Val::B(Bson::Binary(b)) if b.bytes.len() >= 100 => binary(job, b.bytes.len()),
             Val::R(RawBsonRef::Binary(b)) if b.bytes.len() >= 100 => binary(job, b.bytes.len()),
             Val::B(Bson::ObjectId(o)) => push(job, &o.to_hex(), C_OID()),
+            // A number that would cross the preview cut goes through push, which cuts it.
+            Val::B(n @ (Bson::Int32(_) | Bson::Int64(_) | Bson::Double(_))) if group_digits() => {
+                let t = leaf_text(n);
+                if t.len() >= MAX.saturating_sub(job.text.len()) {
+                    return push(job, &t, C_NUMBER());
+                }
+                number_into(job, &t, C_NUMBER());
+                true
+            }
             Val::B(other) => push(job, &leaf_text(other), color_of(other)),
             // Other raw values are small, so they go through the decoded path.
             Val::R(_) => walk(job, Val::B(&v.bson())),
@@ -297,6 +306,55 @@ fn cell_job_of(v: Val) -> LayoutJob {
     let mut job = LayoutJob::default();
     walk(&mut job, v);
     job
+}
+
+/// Only integer parts of five digits or more are grouped, since four digits are often a year.
+/// The gap is letter spacing, not a character, so copied text stays raw. egui puts a section's
+/// spacing before its characters, so it goes on the digit after the gap.
+pub(crate) fn number_into(job: &mut LayoutJob, s: &str, color: Color32) {
+    let fmt = mono(color);
+    if !group_digits() {
+        return job.append(s, 0.0, fmt);
+    }
+    let gap = egui::TextFormat { extra_letter_spacing: MONO_PX * 0.4, ..fmt.clone() };
+    let mut start = 0;
+    for i in digit_gaps(s) {
+        job.append(&s[start..=i], 0.0, fmt.clone());
+        job.append(&s[i + 1..i + 2], 0.0, gap.clone());
+        start = i + 2;
+    }
+    job.append(&s[start..], 0.0, fmt);
+}
+
+fn number_job(s: &str) -> LayoutJob {
+    let mut job = LayoutJob::default();
+    number_into(&mut job, s, C_NUMBER());
+    job
+}
+
+/// Byte positions of the digits followed by a gap; digits are ASCII, so one byte each.
+fn digit_gaps(s: &str) -> Vec<usize> {
+    let sign = usize::from(s.starts_with('-'));
+    let int_len = s[sign..].find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len() - sign);
+    if int_len < 5 {
+        return Vec::new();
+    }
+    (sign..sign + int_len - 1).filter(|i| (sign + int_len - 1 - i) % 3 == 0).collect()
+}
+
+#[cfg(test)]
+mod digit_tests {
+    use super::digit_gaps;
+
+    #[test]
+    fn digit_gaps_split_thousands_of_the_integer_part_only() {
+        assert_eq!(digit_gaps("2024"), Vec::<usize>::new());
+        assert_eq!(digit_gaps("12345"), vec![1]);
+        assert_eq!(digit_gaps("1234567"), vec![0, 3]);
+        assert_eq!(digit_gaps("-1234567.891"), vec![1, 4]);
+        assert_eq!(digit_gaps("18723044.25"), vec![1, 4]);
+        assert_eq!(digit_gaps("1.5e21"), Vec::<usize>::new());
+    }
 }
 
 /// Short text for a table cell. Objects and arrays are summarised, never serialised, so wide

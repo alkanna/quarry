@@ -243,8 +243,10 @@ impl App {
             t.import.file = Some("new-orders.csv".into());
             t.import.text = "number,customer,status,total,createdAt\n10501,Ada Byron,paid,42.5,2024-11-02T10:00:00Z\n10502,Grace Hopper,pending,18,2024-11-02T11:30:00Z\n10503,Linus Ito,shipped,99.9,2024-11-03T08:15:00Z\n".into();
         }
-        if std::env::var("QUARRY_TEST_SETTINGS").is_ok() {
+        // QUARRY_TEST_SETTINGS=1 opens Settings; a category's first word (reading, tools...) opens that one.
+        if let Ok(cat) = std::env::var("QUARRY_TEST_SETTINGS") {
             self.modal = Some(Modal::Settings);
+            self.settings_cat = settings::SettingsCat::named(&cat);
         }
         // Test switch: show the Shell view with a finished run in the demo picture.
         if std::env::var("QUARRY_TEST_SHELL").is_ok() {

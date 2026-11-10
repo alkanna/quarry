@@ -146,6 +146,51 @@ pub(crate) const LIGHT_PAL: Palette = Palette {
     well: hex(0xfbfaf7),
 };
 
+/// The Soft background: less contrast between text and background, with no near-black or near-white.
+pub(crate) const DARK_SOFT_PAL: Palette = Palette {
+    bg: hex(0x25272b),
+    panel: hex(0x2e3034),
+    chrome: hex(0x2e3034),
+    raised: hex(0x3a3c41),
+    hover: hex(0x383a3f),
+    pressed: hex(0x404247),
+    menu_hover: hex(0x46484d),
+    border: hex(0x45474c),
+    line: hex(0x3a3c41),
+    raised_line: hex(0x45474c),
+    hdr: hex(0x2e3034),
+    text: hex(0xb3b6bb),
+    bright: hex(0xcfd1d5),
+    muted: hex(0x8a8d93),
+    stripe: hex(0x292b2f),
+    well: hex(0x25272b),
+    ..DARK_PAL
+};
+
+pub(crate) const LIGHT_SOFT_PAL: Palette = Palette {
+    bg: hex(0xf7f0e1),
+    panel: hex(0xf1e9d7),
+    chrome: hex(0xede4d0),
+    raised: hex(0xfbf6ea),
+    hover: hex(0xe9dfc9),
+    pressed: hex(0xe0d5bd),
+    menu_hover: hex(0xede4d0),
+    border: hex(0xd8ccb4),
+    line: hex(0xe3d9c4),
+    raised_line: hex(0xe3d9c4),
+    hdr: hex(0xefe7d4),
+    text: hex(0x45403a),
+    bright: hex(0x2b2722),
+    muted: hex(0x6d665b),
+    faint: hex(0xa0978a),
+    sel: hex(0xf3e2cf),
+    sel_hover: hex(0xf1dcc6),
+    stripe: hex(0xf4ecdb),
+    track: hex(0xcdc2ad),
+    well: hex(0xf7f0e1),
+    ..LIGHT_PAL
+};
+
 /// Set at the start of each frame from egui's resolved theme.
 pub(crate) static LIGHT_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -153,13 +198,58 @@ pub(crate) fn is_light() -> bool {
     LIGHT_MODE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Display choices from Settings, mirrored in statics because free functions draw cells and rows.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) struct Look {
+    pub(crate) scale: f32,
+    pub(crate) dyslexic: bool,
+    pub(crate) soft: bool,
+    pub(crate) reading_line: bool,
+    pub(crate) group_digits: bool,
+}
+
+impl Default for Look {
+    fn default() -> Self {
+        Self { scale: 1.0, dyslexic: false, soft: false, reading_line: false, group_digits: false }
+    }
+}
+
+static SOFT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static READING_LINE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static GROUP_DIGITS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Whether the fonts in use include OpenDyslexic; 2 before the first `style`.
+static DYSLEXIC: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(2);
+static LOOK_GEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Changes each time the fonts, colors or number display change, for caches of laid-out text.
+pub(crate) fn look_gen() -> u32 {
+    LOOK_GEN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The whole row under the pointer stands out, so the eye keeps its place across a wide table.
+pub(crate) fn reading_line() -> bool {
+    READING_LINE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub(crate) fn group_digits() -> bool {
+    GROUP_DIGITS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Interface sizes; 100 % is the designed size.
+pub(crate) const SCALES: [(f32, &str); 4] = [(1.0, "100%"), (1.1, "110%"), (1.25, "125%"), (1.5, "150%")];
+
 /// Dialogs and floating windows: a deeper shadow on the dark theme, where a light one vanishes.
 pub(crate) fn window_shadow() -> egui::Shadow {
     egui::Shadow { offset: [0, 6], blur: 20, spread: 0, color: Color32::from_black_alpha(if is_light() { 30 } else { 90 }) }
 }
 
 pub(crate) fn pal() -> &'static Palette {
-    if is_light() { &LIGHT_PAL } else { &DARK_PAL }
+    match (is_light(), SOFT.load(std::sync::atomic::Ordering::Relaxed)) {
+        (true, false) => &LIGHT_PAL,
+        (true, true) => &LIGHT_SOFT_PAL,
+        (false, false) => &DARK_PAL,
+        (false, true) => &DARK_SOFT_PAL,
+    }
 }
 
 macro_rules! colors {
@@ -284,11 +374,23 @@ pub(crate) const NUM_W: f32 = 40.0;
 pub(crate) const EDITOR_W: f32 = 230.0;
 
 /// Visuals for both themes; egui picks one from the system or the Appearance setting.
-pub(crate) fn style(ctx: &egui::Context) {
-    for (theme, p) in [(egui::Theme::Dark, &DARK_PAL), (egui::Theme::Light, &LIGHT_PAL)] {
+pub(crate) fn style(ctx: &egui::Context, look: Look) {
+    use std::sync::atomic::Ordering::Relaxed;
+    SOFT.store(look.soft, Relaxed);
+    READING_LINE.store(look.reading_line, Relaxed);
+    GROUP_DIGITS.store(look.group_digits, Relaxed);
+    let (dark, light) = if look.soft { (&DARK_SOFT_PAL, &LIGHT_SOFT_PAL) } else { (&DARK_PAL, &LIGHT_PAL) };
+    for (theme, p) in [(egui::Theme::Dark, dark), (egui::Theme::Light, light)] {
         ctx.set_visuals_of(theme, visuals(theme, p));
     }
-    ctx.set_fonts(fonts());
+    // set_fonts compares whole font files, so it runs only when the font choice changes.
+    if DYSLEXIC.swap(u8::from(look.dyslexic), Relaxed) != u8::from(look.dyslexic) {
+        ctx.set_fonts(fonts(look.dyslexic));
+    }
+    LOOK_GEN.fetch_add(1, Relaxed);
+    // egui's own Cmd+= zoom steps by 10 % and is not saved; App::zoom_keys steps through SCALES instead.
+    ctx.options_mut(|o| o.zoom_with_keyboard = false);
+    ctx.set_zoom_factor(look.scale);
     ctx.all_styles_mut(|s| {
         s.spacing.item_spacing = egui::vec2(8.0, 6.0);
         s.spacing.button_padding = egui::vec2(10.0, 4.0);
@@ -313,11 +415,14 @@ pub(crate) fn style(ctx: &egui::Context) {
 
 static INTER: &[u8] = include_bytes!("../../assets/fonts/InterVariable.ttf");
 static JB_MONO: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono-Variable.ttf");
+static OPEN_DYSLEXIC: &[u8] = include_bytes!("../../assets/fonts/OpenDyslexic-Regular.otf");
 
 /// Inter for the interface and JetBrains Mono for data, both variable so one file covers every
 /// weight. egui's own fonts stay behind them as fallbacks for icons and emoji. Inter's metrics
 /// center in buttons as they are, so it needs none of the shift egui's Ubuntu font did.
-fn fonts() -> egui::FontDefinitions {
+/// OpenDyslexic, when chosen, goes in front of Inter for interface text only: it has no mono
+/// version, and data columns need one. It has one weight, so medium and semibold draw as Regular.
+fn fonts(dyslexic: bool) -> egui::FontDefinitions {
     use egui::{FontData, FontFamily, FontTweak, epaint::text::VariationCoords};
     let mut fonts = egui::FontDefinitions::default();
     // Without an explicit weight a variable font draws its default instance, which for
@@ -327,6 +432,10 @@ fn fonts() -> egui::FontDefinitions {
     fonts.font_data.insert("JetBrainsMono".into(), regular(JB_MONO));
     fonts.families.entry(FontFamily::Proportional).or_default().insert(0, "Inter".into());
     fonts.families.entry(FontFamily::Monospace).or_default().insert(0, "JetBrainsMono".into());
+    if dyslexic {
+        fonts.font_data.insert("OpenDyslexic".into(), std::sync::Arc::new(FontData::from_static(OPEN_DYSLEXIC)));
+        fonts.families.entry(FontFamily::Proportional).or_default().insert(0, "OpenDyslexic".into());
+    }
     fonts
 }
 

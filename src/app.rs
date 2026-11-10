@@ -223,6 +223,8 @@ pub struct App {
     js: shell_ls::JsState,
     tree_filter: String,
     tools_installing: bool,
+    /// The Settings category shown, kept while the app runs.
+    settings_cat: settings::SettingsCat,
     /// Tree row the palette jumped to, as (connection, database, collection), scrolled into view once drawn.
     reveal: Option<(u64, String, Option<String>)>,
     /// Ids of the open connections in the order they were first seen open, for the rail shortcuts.
@@ -279,7 +281,7 @@ pub(crate) fn collection_ref(coll: &str) -> String {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, shot: Option<PathBuf>) -> Self {
-        style(&cc.egui_ctx);
+        style(&cc.egui_ctx, Look::default());
         let (tx, rx) = channel();
         // QUARRY_DEMO=1 opens the offline demo to click around in, without screenshot mode closing it.
         let demo = shot.is_some() || std::env::var("QUARRY_DEMO").is_ok();
@@ -354,6 +356,7 @@ impl App {
             log: LogUi::default(),
             tree_filter: String::new(),
             tools_installing: false,
+            settings_cat: Default::default(),
             reveal: None,
             rail_order: Vec::new(),
             scroll_sel: false,
@@ -413,6 +416,11 @@ impl App {
             } else if std::env::var("QUARRY_TEST_DARK").is_ok() {
                 Appearance::Dark.apply(&cc.egui_ctx);
             }
+            if std::env::var("QUARRY_TEST_READING").is_ok() {
+                let p = &mut app.prefs;
+                (p.ui_scale, p.dyslexic_font, p.soft, p.reading_line, p.group_digits, p.keep_toasts) = (1.25, true, true, true, true, true);
+                style(&cc.egui_ctx, p.look());
+            }
             if let Ok(q) = std::env::var("QUARRY_TEST_FIND") {
                 let f = Find { open: true, query: q, ..Default::default() };
                 cc.egui_ctx.data_mut(|d| d.insert_temp(egui::Id::unique("json-editor-text").with("find"), f));
@@ -425,6 +433,11 @@ impl App {
             app.prefs = prefs;
             app.values = load_values();
             app.prefs.appearance.apply(&cc.egui_ctx);
+            // A hand-edited size that is not offered shows and applies as 100 %.
+            app.prefs.ui_scale = app.prefs.look().scale;
+            if app.prefs.look() != Look::default() {
+                style(&cc.egui_ctx, app.prefs.look());
+            }
             for meta in metas {
                 let masked = keychain(meta.id).and_then(|k| k.get_password().ok()).map(|u| db::mask_uri(&u)).unwrap_or_default();
                 app.conns.push(Conn { meta, client: None, sql: None, status: Status::Idle, writable: false, dbs: Vec::new(), masked_uri: masked, tunnel: None, server: Default::default() });
@@ -634,6 +647,7 @@ impl eframe::App for App {
         self.auto_update(&ctx);
         // Before the modals, so one opened by a shortcut draws this frame, and an Esc that closes a
         // modal is not also taken as a second Esc by `keys`.
+        self.zoom_keys(&ctx);
         self.keys(&ctx);
         self.modals(&ctx);
         self.users_window(&ctx);

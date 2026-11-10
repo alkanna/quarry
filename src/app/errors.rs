@@ -407,7 +407,7 @@ impl App {
             }
             Act::Unlock(c) => self.modal = Some(Modal::Unlock(c, None)),
             Act::Connect(c) => self.connect_active(c),
-            Act::Settings => self.modal = Some(Modal::Settings),
+            Act::Settings => self.open_tool_settings(),
             Act::Details => {
                 if let Some(e) = e {
                     self.modal = Some(Modal::ErrorDetails(Box::new(e.clone())));
@@ -465,11 +465,10 @@ impl App {
 
     /// The toasts, newest at the bottom, above the status bar.
     pub(super) fn toasts(&mut self, ctx: &egui::Context) {
-        self.toasts.retain(|t| match t.tone {
-            Tone::Ok => t.at.elapsed().as_secs() < OK_S,
-            Tone::Warn => t.at.elapsed().as_secs() < WARN_S,
-            Tone::Err => true,
-        });
+        let keep = self.prefs.keep_toasts;
+        // An Undo still ends on its timer: one left up for hours would revert an edit long forgotten.
+        let fades = |t: &Toast| t.tone != Tone::Err && (!keep || t.acts.iter().any(|(_, a)| matches!(a, Act::Undo(_))));
+        self.toasts.retain(|t| !fades(t) || t.at.elapsed().as_secs() < if t.tone == Tone::Ok { OK_S } else { WARN_S });
         // Only the latest few fit; older errors stay in the status bar list.
         while self.toasts.len() > 4 {
             let i = self.toasts.iter().position(|t| t.tone != Tone::Err).unwrap_or(0);
@@ -478,7 +477,7 @@ impl App {
         if self.toasts.is_empty() {
             return;
         }
-        if self.toasts.iter().any(|t| t.tone != Tone::Err) {
+        if self.toasts.iter().any(fades) {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
         let mut close = None;
