@@ -207,7 +207,7 @@ impl App {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
         let _guard = rt.enter();
         let opts = "mysql://root@127.0.0.1:1/shop".parse::<sqlx::mysql::MySqlConnectOptions>().expect("demo address");
-        let db = db::sql::Db { pool: db::sql::Pool::My(sqlx::mysql::MySqlPoolOptions::new().connect_lazy_with(opts.clone())), dialect: db::sql::Dialect::MySql, opts, version: "8.4.3".into(), tls: false, sql_mode: String::new(), setup: Default::default(), conn: 0 };
+        let db = db::sql::Db { pool: db::sql::Pool::My(sqlx::mysql::MySqlPoolOptions::new().connect_lazy_with(opts.clone())), dialect: db::sql::Dialect::MySql, opts: db::sql::exec::Opts::My(opts), version: "8.4.3".into(), tls: false, sql_mode: String::new(), setup: Default::default(), conn: 0 };
         let query = text.map(str::to_string).or_else(|| self.t().and_then(|t| t.sql.as_ref().map(|s| s.query.clone()))).unwrap_or_default();
         if let Some(Modal::Export(f)) = &mut self.modal {
             f.script = Some(Script { db, schema: "shop".into(), stmts: db::sql::export::check_script(&query) });

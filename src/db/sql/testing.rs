@@ -79,7 +79,7 @@ pub fn with_session(w: &Worker, db: &Db, set: &str) -> Db {
                 let set = set.clone();
                 Box::pin(async move { sqlx::Executor::execute(c, set.as_str()).await.map(|_| ()) })
             })
-            .connect_with(db.opts.clone())
+            .connect_with((*db.opts).clone())
             .await
             .unwrap()
     });

@@ -3,15 +3,17 @@
 
 
 use super::value::{self, Kind};
-pub(super) use super::run::{kill_query, pin_reads, prepare, side_conn};
+// What the modules that only exist for MySQL call, with sqlx's own connection type. The neutral ones are in `run`.
+pub(super) use super::run::{kill_query, pin_reads_my as pin_reads, prepare_my as prepare};
 use super::run::{run, RunHandle};
 use super::schema::{Schema, SchemaCol, SchemaTable};
 use super::structure::ALL_ROWS;
 use super::{lex, Addr, Advanced, TestInfo, Col, Db, Dialect, PageQuery, Pool, SslMode};
 use crate::db::{e, Msg, Net, Res, Row, Worker};
 use mongodb::bson::{Bson, Document};
-use sqlx::mysql::{MySqlColumn, MySqlConnectOptions, MySqlPoolOptions, MySqlRow, MySqlSslMode};
-use sqlx::{raw_sql, Column, Connection, Executor, Row as _, TypeInfo};
+use super::exec::{Cells, ColMeta, Conn, Opts};
+use sqlx::mysql::{MySqlColumn, MySqlConnectOptions, MySqlPoolOptions, MySqlSslMode};
+use sqlx::{raw_sql, Column, Connection, Executor, Row as _};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -22,22 +24,22 @@ const ESTIMATE_MIN: u64 = 10_000;
 
 /// A cell of a text-protocol row as the server's own bytes. Metadata queries read strings through this
 /// too, because a `_bin` collation makes sqlx report text as VARBINARY.
-pub(super) fn raw(row: &MySqlRow, i: usize) -> Option<&[u8]> {
-    row.try_get_unchecked::<Option<&[u8]>, _>(i).ok().flatten()
+pub(super) fn raw<R: Cells>(row: &R, i: usize) -> Option<&[u8]> {
+    row.cell(i)
 }
 
 /// Column `i` of a text-protocol row as text.
-pub(super) fn text_at(row: &MySqlRow, i: usize) -> Option<String> {
+pub(super) fn text_at<R: Cells>(row: &R, i: usize) -> Option<String> {
     raw(row, i).map(|b| String::from_utf8_lossy(b).into_owned())
 }
 
 /// Column `i` of a text-protocol row as a number, for the counts and ids the server sends as text.
-pub(super) fn num_at(row: &MySqlRow, i: usize) -> Option<u64> {
+pub(super) fn num_at<R: Cells>(row: &R, i: usize) -> Option<u64> {
     raw(row, i).and_then(|b| std::str::from_utf8(b).ok()?.parse().ok())
 }
 
-pub(super) fn text(row: &MySqlRow, name: &str) -> Option<String> {
-    row.try_get_unchecked::<Option<&[u8]>, _>(name).ok().flatten().map(|b| String::from_utf8_lossy(b).into_owned())
+pub(super) fn text<R: Cells>(row: &R, name: &str) -> Option<String> {
+    row.cell_named(name).map(|b| String::from_utf8_lossy(b).into_owned())
 }
 
 fn ssl_mode(m: SslMode) -> MySqlSslMode {
@@ -122,15 +124,25 @@ impl Setup {
 }
 
 impl Db {
+    /// A pooled connection taken out of the pool for good, so its session can be changed.
+    pub(super) async fn acquire_conn(&self) -> Res<Conn> {
+        Ok(Conn::My(self.acquire().await?.detach()))
+    }
+
     /// A pooled connection. When the pool gave up because new connections failed their session setup, the error
     /// names the setting that failed instead of a bare timeout.
     pub(super) async fn acquire(&self) -> Res<sqlx::pool::PoolConnection<sqlx::MySql>> {
-        let Pool::My(p) = &self.pool;
+        let p = self.my_pool()?;
         p.acquire().await.map_err(|x| match x {
             sqlx::Error::PoolTimedOut => self.setup.failed_text().unwrap_or_else(|| e(x)),
             x => e(x),
         })
     }
+}
+
+/// `run::side_conn` for the modules that only exist for MySQL.
+pub(super) async fn side_conn(db: &Db, why: &str) -> Res<sqlx::MySqlConnection> {
+    super::run::side_conn(db, why).await?.into_my()
 }
 
 async fn open(uri: &str, timeout: Duration, net: &Net, adv: &Advanced) -> Res<(Db, Vec<String>, Option<crate::ssh::Tunnel>)> {
@@ -192,7 +204,7 @@ async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info
         let rows = raw_sql("SELECT CHARACTER_SET_NAME, COLLATION_NAME FROM information_schema.COLLATIONS WHERE CHARACTER_SET_NAME IN ('utf8mb4', 'utf8mb3') ORDER BY COLLATION_NAME").fetch_all(&pool).await.unwrap_or_default();
         ti.collations = rows.iter().filter_map(|r| Some((String::from_utf8_lossy(raw(r, 0)?).into_owned(), String::from_utf8_lossy(raw(r, 1)?).into_owned()))).collect();
     }
-    let db = Db { dialect: Dialect::from_version(&version), pool: Pool::My(pool), opts: o, version, tls, sql_mode, setup, conn: 0 };
+    let db = Db { dialect: Dialect::from_version(&version), pool: Pool::My(pool), opts: Opts::My(o), version, tls, sql_mode, setup, conn: 0 };
     Ok((db, dbs, tunnel, ti))
 }
 
@@ -204,7 +216,7 @@ pub(super) async fn database_names(c: &mut sqlx::MySqlConnection) -> Res<Vec<Str
 }
 
 /// The first column of each row, sorted. `open` reads through the pool, where a generic executor does not infer.
-fn sorted_names(rows: &[MySqlRow]) -> Vec<String> {
+fn sorted_names<R: Cells>(rows: &[R]) -> Vec<String> {
     let mut names: Vec<String> = rows.iter().filter_map(|r| text_at(r, 0)).collect();
     names.sort();
     names
@@ -235,17 +247,17 @@ fn unique(cols: &mut [Col], reserve_id: bool) {
 
 /// Columns as the result reports them. `meta` (name to COLUMN_TYPE and nullability) wins when the
 /// result column is a table column.
-pub(super) fn make_cols(cols: &[MySqlColumn], meta: &HashMap<String, (String, bool, String)>, reserve_id: bool) -> Vec<Col> {
+pub(super) fn make_cols<C: ColMeta>(cols: &[C], meta: &HashMap<String, (String, bool, String)>, reserve_id: bool) -> Vec<Col> {
     let mut out: Vec<Col> = cols
         .iter()
         .map(|c| {
-            let ty = c.type_info().name().to_string();
-            match meta.get(c.name()) {
+            let ty = c.col_type();
+            match meta.get(c.col_name()) {
                 Some((full, nullable, extra)) => {
                     let extra = extra.to_ascii_uppercase();
-                    Col { generated: extra.contains("GENERATED"), auto_increment: extra.contains("AUTO_INCREMENT"), ..Col::plain(c.name(), full, kind_of_full(full), *nullable) }
+                    Col { generated: extra.contains("GENERATED"), auto_increment: extra.contains("AUTO_INCREMENT"), ..Col::plain(c.col_name(), full, kind_of_full(full), *nullable) }
                 }
-                None => Col::plain(c.name(), &ty, Kind::from_type_name(&ty), true),
+                None => Col::plain(c.col_name(), &ty, Kind::from_type_name(&ty), true),
             }
         })
         .collect();
@@ -253,12 +265,12 @@ pub(super) fn make_cols(cols: &[MySqlColumn], meta: &HashMap<String, (String, bo
     out
 }
 
-pub(super) fn to_row(cols: &[Col], row: &MySqlRow, pk: &[String]) -> Res<Row> {
+pub(super) fn to_row<R: Cells>(cols: &[Col], row: &R, pk: &[String]) -> Res<Row> {
     let vals: Vec<Bson> = cols.iter().enumerate().map(|(i, c)| value::to_bson(c.kind, raw(row, i))).collect();
     let mut d = Document::new();
     // The key is looked up by the server's column names, since a renamed column keeps its real name there.
     // A key with a missing column would address too many rows, so then there is no key at all.
-    let idx: Option<Vec<usize>> = pk.iter().map(|p| row.columns().iter().position(|c| c.name() == p)).collect();
+    let idx: Option<Vec<usize>> = pk.iter().map(|p| row.col_pos(p)).collect();
     if let Some(idx) = idx.filter(|i| !i.is_empty()) {
         let mut k = Document::new();
         for (p, i) in pk.iter().zip(idx) {
@@ -284,7 +296,7 @@ fn one_read(sql: &str) -> Res<()> {
 /// grouped or distinct count that the server refuses (duplicate output names) falls back to
 /// zero, since the data query reports the same problem.
 async fn count(db: &Db, schema: &str, table: &str, q: &PageQuery) -> Res<(u64, bool)> {
-    let Pool::My(pool) = &db.pool;
+    let pool = db.my_pool()?;
     let d = db.dialect;
     if q.plain() {
         let mut c = pool.acquire().await.map_err(e)?;
@@ -315,7 +327,7 @@ async fn count(db: &Db, schema: &str, table: &str, q: &PageQuery) -> Res<(u64, b
 
 /// Column types and the primary key, from information_schema.
 async fn table_meta(db: &Db, schema: &str, table: &str) -> Res<(HashMap<String, (String, bool, String)>, Vec<String>)> {
-    let Pool::My(pool) = &db.pool;
+    let pool = db.my_pool()?;
     let d = db.dialect;
     let t = Instant::now();
     let cols = sqlx::query(&format!("{}{ALL_ROWS}", d.columns())).bind(schema).bind(table).fetch_all(pool).await;
@@ -342,7 +354,7 @@ type Paged = (Vec<Col>, Vec<String>, Vec<Row>, u64, bool, u128, Option<u64>);
 
 async fn page(db: &Db, schema: &str, table: &str, q: &PageQuery, limit: u64, offset: u64) -> Res<Paged> {
     let start = Instant::now();
-    let Pool::My(pool) = &db.pool;
+    let pool = db.my_pool()?;
     let d = db.dialect;
     // The key is needed before the data query: without a total order, pages overlap and skip rows.
     let (meta, mut pk) = table_meta(db, schema, table).await?;
@@ -389,7 +401,7 @@ async fn page(db: &Db, schema: &str, table: &str, q: &PageQuery, limit: u64, off
 
 /// Tables, views and columns of one database in three round trips run together.
 async fn load_schema(db: &Db, schema: &str) -> Res<Schema> {
-    let Pool::My(pool) = &db.pool;
+    let pool = db.my_pool()?;
     let d = db.dialect;
     let read = |sql: &'static str| async move {
         let t = Instant::now();
@@ -422,7 +434,7 @@ const VALUES_SMALL: u64 = 100_000;
 /// large and no index leads with the column. Both checks read metadata only. The lookup runs on a
 /// connection of its own with a 300 ms limit, so a slow one never holds the pool.
 async fn field_values(db: &Db, schema: &str, table: &str, column: &str, prefix: Option<&str>) -> Res<Option<Vec<(String, u64)>>> {
-    let Pool::My(pool) = &db.pool;
+    let pool = db.my_pool()?;
     let d = db.dialect;
     let Some(gate) = sqlx::query(d.value_gate()).bind(column).bind(schema).bind(table).fetch_optional(pool).await.map_err(e)? else { return Ok(None) };
     let small = super::structure::num(&gate, "est").is_some_and(|n| n < VALUES_SMALL);
@@ -511,7 +523,7 @@ impl Worker {
     pub fn sql_tables(&self, conn: u64, db: Db, schema: String) {
         self.spawn(async move {
             let res = async {
-                let Pool::My(pool) = &db.pool;
+                let pool = db.my_pool()?;
                 let t = Instant::now();
                 let rows = sqlx::query(&format!("{}{ALL_ROWS}", db.dialect.tables())).bind(&schema).fetch_all(pool).await;
                 db.note(&schema, db.dialect.tables(), t, &rows);
@@ -567,14 +579,14 @@ impl Worker {
     pub fn sql_count(&self, req: u64, idx: usize, db: Db, schema: String, stmt: String) {
         self.spawn(async move {
             let res = async {
-                let mut conn = db.acquire().await?.detach();
-                prepare(&mut conn, db.dialect, &schema, true, &AtomicU64::new(0)).await.map_err(e)?;
+                let mut conn = db.acquire_conn().await?;
+                super::run::prepare(&mut conn, db.dialect, &schema, true, &AtomicU64::new(0)).await?;
                 let sql = lex::count_sql(&stmt);
                 let t = Instant::now();
-                let r = conn.fetch_one(sql.as_str()).await;
+                let r = conn.fetch_all(&sql).await;
                 db.note(&schema, &sql, t, &r);
                 let r = r.map_err(e)?;
-                let n = num_at(&r, 0).ok_or("The count was not a number")?;
+                let n = r.first().and_then(|r| num_at(r, 0)).ok_or("The count was not a number")?;
                 let _ = conn.close().await;
                 Ok(n)
             }
@@ -1232,7 +1244,7 @@ mod tests {
         // Even a statement that slipped past the check would hit the read-only session.
         let sets = run_all(&w, &rx, &db, "SELECT 1", false);
         assert!(sets[0].error.is_none());
-        let Pool::My(pool) = &db.pool;
+        let pool = db.my_pool().unwrap();
         let n: i64 = w.rt.block_on(async { sqlx::query_scalar("SELECT COUNT(*) FROM quarry_test.t_ro").fetch_one(pool).await.unwrap() });
         assert_eq!(n, 1);
         // The unlocked run must not leave READ WRITE on a connection that went back to the pool. 1792 is
@@ -1595,7 +1607,7 @@ mod tests {
         // Every session of this pool starts in NO_BACKSLASH_ESCAPES, as on a server set that way. A pool of its own
         // rather than SET GLOBAL, which raced the other live tests: their new sessions changed mode under them.
         let mut db = db;
-        let opts = db.opts.clone();
+        let opts = (*db.opts).clone();
         let pool = w.rt.block_on(async move {
             sqlx::mysql::MySqlPoolOptions::new()
                 .max_connections(2)

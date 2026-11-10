@@ -1,16 +1,22 @@
 //! Running Custom Query scripts: preparing a session, running statements one result at a time, stopping them.
 
+use super::exec::{Conn, Item};
 use super::worker::{make_cols, num_at, to_row};
 use super::{lex, Col, Db, Dialect, Page, ResultSet, RUN_ROWS_MAX};
 use crate::db::{e, Res};
-use sqlx::{raw_sql, Connection, Either, Executor, Row as _};
+use sqlx::Executor;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Readies the script's own connection: its id for Stop, the database, and write access when unlocked.
-pub(super) async fn prepare(conn: &mut sqlx::MySqlConnection, d: Dialect, schema: &str, read_only: bool, id: &AtomicU64) -> Result<(), sqlx::Error> {
+pub(super) async fn prepare(conn: &mut Conn, d: Dialect, schema: &str, read_only: bool, id: &AtomicU64) -> Res<()> {
+    prepare_my(conn.my()?, d, schema, read_only, id).await.map_err(e)
+}
+
+/// `prepare` for the MySQL-only modules, which hold sqlx's own connection.
+pub(super) async fn prepare_my(conn: &mut sqlx::MySqlConnection, d: Dialect, schema: &str, read_only: bool, id: &AtomicU64) -> Result<(), sqlx::Error> {
     if let Ok(r) = conn.fetch_one("SELECT CONNECTION_ID()").await {
         id.store(num_at(&r, 0).unwrap_or(0), Ordering::SeqCst);
     }
@@ -29,7 +35,12 @@ pub(super) async fn prepare(conn: &mut sqlx::MySqlConnection, d: Dialect, schema
 
 /// Pins what a read of every row as stored depends on: UTF-8 both ways, and no sql_select_limit cutting a SELECT
 /// short. A session can get either from the server's globals.
-pub(super) async fn pin_reads(c: &mut sqlx::MySqlConnection) -> Result<(), sqlx::Error> {
+pub(super) async fn pin_reads(c: &mut Conn) -> Res<()> {
+    pin_reads_my(c.my()?).await.map_err(e)
+}
+
+/// `pin_reads` for the MySQL-only modules.
+pub(super) async fn pin_reads_my(c: &mut sqlx::MySqlConnection) -> Result<(), sqlx::Error> {
     c.execute("SET NAMES utf8mb4").await?;
     c.execute("SET SESSION sql_select_limit = DEFAULT").await?;
     Ok(())
@@ -42,19 +53,19 @@ pub(super) fn failed(stmt: &str, error: String) -> ResultSet {
 /// Runs one statement and keeps at most `cap` rows of each result. A CALL can return several
 /// results, each becomes its own set. Reading stops at the cap, which leaves the connection mid-result:
 /// the caller must not reuse it (`capped` on the last set says so).
-pub(super) async fn run_one(conn: &mut sqlx::MySqlConnection, stmt: &str, cap: usize) -> Vec<ResultSet> {
+pub(super) async fn run_one(conn: &mut Conn, stmt: &str, cap: usize) -> Vec<ResultSet> {
     let t = Instant::now();
     let mut sets: Vec<ResultSet> = Vec::new();
     let mut cur = ResultSet::new(stmt);
     let mut cols: Vec<Col> = Vec::new();
     let mut failure = None;
     {
-        let mut s = raw_sql(stmt).fetch_many(&mut *conn);
+        let mut s = conn.fetch_text(stmt);
         while let Some(item) = futures_util::StreamExt::next(&mut s).await {
             match item {
-                Ok(Either::Right(row)) => {
+                Ok(Item::Row(row)) => {
                     if cols.is_empty() {
-                        cols = make_cols(row.columns(), &HashMap::new(), false);
+                        cols = make_cols(&row.cols(), &HashMap::new(), false);
                     }
                     if cur.rows.len() >= cap {
                         cur.capped = true;
@@ -69,7 +80,7 @@ pub(super) async fn run_one(conn: &mut sqlx::MySqlConnection, stmt: &str, cap: u
                     }
                 }
                 // The end of one result set (or the OK of a write).
-                Ok(Either::Left(r)) => {
+                Ok(Item::End(r)) => {
                     let mut done = std::mem::replace(&mut cur, ResultSet::new(stmt));
                     done.cols = std::mem::take(&mut cols);
                     if done.cols.is_empty() {
@@ -96,9 +107,9 @@ pub(super) async fn run_one(conn: &mut sqlx::MySqlConnection, stmt: &str, cap: u
     }
     if sets.len() == 1 && sets[0].error.is_none() && sets[0].cols.is_empty() {
         // No rows came back: a SELECT with an empty result still has headers, a write does not.
-        if let Ok(desc) = (&mut *conn).describe(stmt).await {
-            if !desc.columns().is_empty() {
-                sets[0].cols = make_cols(desc.columns(), &HashMap::new(), false);
+        if let Ok(desc) = conn.describe(stmt).await {
+            if !desc.is_empty() {
+                sets[0].cols = make_cols(&desc, &HashMap::new(), false);
                 sets[0].affected = None;
             }
         }
@@ -112,7 +123,7 @@ pub(super) async fn run_one(conn: &mut sqlx::MySqlConnection, stmt: &str, cap: u
 
 /// One statement as a page of at most `RUN_ROWS_MAX` rows, when it is a plain read. A column name that
 /// repeats cannot sit in a derived table, so such a statement falls back to a plain capped run.
-pub(super) async fn run_stmt(conn: &mut sqlx::MySqlConnection, stmt: &str, page: usize) -> Vec<ResultSet> {
+pub(super) async fn run_stmt(conn: &mut Conn, stmt: &str, page: usize) -> Vec<ResultSet> {
     if !lex::pageable(stmt) {
         return run_one(conn, stmt, RUN_ROWS_MAX).await;
     }
@@ -134,13 +145,13 @@ pub(super) async fn run_stmt(conn: &mut sqlx::MySqlConnection, stmt: &str, page:
 /// Runs the statements of `text`; `page` is the page every pageable statement is read at.
 pub(super) async fn run(db: &Db, schema: &str, text: &str, read_only: bool, id: &AtomicU64, cancel: &AtomicBool, page: usize) -> Vec<ResultSet> {
     // Detached, so a USE or @variable of this script never leaks into the pool.
-    let mut conn = match db.acquire().await {
-        Ok(c) => c.detach(),
+    let mut conn = match db.acquire_conn().await {
+        Ok(c) => c,
         Err(err) => return vec![failed("", err)],
     };
     let d = db.dialect;
     if let Err(err) = prepare(&mut conn, d, schema, read_only, id).await {
-        return vec![failed("", e(err))];
+        return vec![failed("", err)];
     }
     let mut sets = Vec::new();
     // Each statement goes alone, so user text is never sent as one multi-statement string.
@@ -185,8 +196,8 @@ pub(super) async fn run(db: &Db, schema: &str, text: &str, read_only: bool, id: 
 
 /// A connection of its own, outside the pool (a busy or exhausted pool never blocks it), or `why` when the server
 /// does not answer within 10 s.
-pub(super) async fn side_conn(db: &Db, why: &str) -> Res<sqlx::MySqlConnection> {
-    tokio::time::timeout(Duration::from_secs(10), sqlx::MySqlConnection::connect_with(&db.opts)).await.map_err(|_| why.to_string())?.map_err(e)
+pub(super) async fn side_conn(db: &Db, why: &str) -> Res<Conn> {
+    tokio::time::timeout(Duration::from_secs(10), db.detached()).await.map_err(|_| why.to_string())?
 }
 
 /// KILL QUERY from a connection of its own. A plain function, because inside a spawned block the

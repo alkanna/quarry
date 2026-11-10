@@ -1,11 +1,11 @@
 //! The shell script side of SQL: a connection kept for a whole run, and values filled into its statements.
 
+use super::exec::{Conn, Item};
 use super::run::{kill_query, prepare};
 use super::worker::{make_cols, raw};
 use super::{lex, value, Col, Db};
 use crate::db::{e, Res};
 use mongodb::bson::{Bson, Document};
-use sqlx::{raw_sql, Either, Executor, Row as _};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::time::Instant;
@@ -82,7 +82,7 @@ pub fn fill(text: &str, params: &[value::Param], backslash: bool, ansi: bool) ->
 /// A shell script's own connection, kept for the whole run so its @variables and transactions persist.
 /// It is the only way a script reaches the server, so the read-only check below covers every write.
 pub struct Relay {
-    conn: sqlx::MySqlConnection,
+    conn: Conn,
     read_only: bool,
     backslash: bool,
     ansi: bool,
@@ -95,10 +95,10 @@ pub struct Relay {
 
 impl Relay {
     pub async fn open(db: &Db, schema: &str, read_only: bool, id: &AtomicU64) -> Res<Relay> {
-        let mut conn = db.acquire().await?.detach();
-        prepare(&mut conn, db.dialect, schema, read_only, id).await.map_err(e)?;
+        let mut conn = db.acquire_conn().await?;
+        prepare(&mut conn, db.dialect, schema, read_only, id).await?;
         // Values are filled in for this session's mode, which may differ from the one read at connect.
-        let m = super::ddl::session_mode(&mut conn).await?;
+        let m = super::ddl::session_mode(conn.my()?).await?;
         Ok(Relay { conn, read_only, backslash: m.bs, ansi: m.ansi, dead: false, log_conn: db.conn, schema: schema.to_string() })
     }
 
@@ -130,12 +130,12 @@ impl Relay {
         let mut failure = None;
         let started = Instant::now();
         {
-            let mut s = raw_sql(&stmt).fetch_many(&mut self.conn);
+            let mut s = self.conn.fetch_text(&stmt);
             while let Some(item) = futures_util::StreamExt::next(&mut s).await {
                 match item {
-                    Ok(Either::Right(row)) => {
+                    Ok(Item::Row(row)) => {
                         if cols.is_empty() {
-                            cols = make_cols(row.columns(), &HashMap::new(), false);
+                            cols = make_cols(&row.cols(), &HashMap::new(), false);
                         }
                         if rows.len() >= RELAY_ROWS_MAX {
                             failure = Some(format!("A query returned more than {RELAY_ROWS_MAX} rows. Add a LIMIT."));
@@ -150,8 +150,8 @@ impl Relay {
                         rows.push(Bson::Document(d).into_relaxed_extjson());
                     }
                     // A CALL has several results; the first one with rows is what the script gets.
-                    Ok(Either::Left(r)) if cols.is_empty() && wrote.is_none() => wrote = Some((r.rows_affected(), r.last_insert_id())),
-                    Ok(Either::Left(_)) => {}
+                    Ok(Item::End(r)) if cols.is_empty() && wrote.is_none() => wrote = Some((r.rows_affected(), r.last_insert_id())),
+                    Ok(Item::End(_)) => {}
                     Err(err) => {
                         failure = Some(e(err));
                         break;
@@ -170,7 +170,7 @@ impl Relay {
         }
         if cols.is_empty() {
             // An empty SELECT still has headers, a write or SET does not.
-            let empty_read = wrote.is_some_and(|w| w.0 == 0) && (&mut self.conn).describe(&stmt).await.is_ok_and(|d| !d.columns().is_empty());
+            let empty_read = wrote.is_some_and(|w| w.0 == 0) && self.conn.describe(&stmt).await.is_ok_and(|d| !d.is_empty());
             if !empty_read {
                 let (affected, insert_id) = wrote.unwrap_or_default();
                 return Ok(Answer::Wrote { affected, insert_id });

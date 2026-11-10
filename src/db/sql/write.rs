@@ -2,10 +2,10 @@
 //! transaction on a connection of its own that is switched to READ WRITE. The pool stays read-only.
 
 use super::value::{hex_digits, lit, Kind, Param};
-use super::{Col, Db, Dialect, Pool};
+use super::exec::Conn;
+use super::{Col, Db, Dialect};
 use crate::db::{e, Msg, Res, UndoAction, UndoKind, Worker};
 use mongodb::bson::{Bson, Document};
-use sqlx::{Connection, Executor};
 use std::time::Instant;
 
 pub const CONFLICT: &str = "Not saved: a row changed on the server since you opened it. Nothing was written. Reload and try again.";
@@ -192,29 +192,12 @@ pub fn preview(sql: &str, params: &[Param], bs: bool) -> String {
     out
 }
 
-type Query<'q> = sqlx::query::Query<'q, sqlx::MySql, sqlx::mysql::MySqlArguments>;
-
-pub(super) fn bound<'q>(sql: &'q str, params: &'q [Param]) -> Query<'q> {
-    let mut q = sqlx::query(sql);
-    for p in params {
-        q = match p {
-            Param::Null => q.bind(None::<String>),
-            Param::Int(i) => q.bind(*i),
-            Param::UInt(u) => q.bind(*u),
-            Param::Float(f) => q.bind(*f),
-            Param::Text(s) => q.bind(s.as_str()),
-            Param::Bytes(b) => q.bind(b.as_slice()),
-        };
-    }
-    q
-}
-
 /// A connection of its own with write access, so the pool's read-only session is never changed.
-pub(super) async fn writer(db: &Db, schema: &str, read_only: bool) -> Res<sqlx::MySqlConnection> {
+pub(super) async fn writer_conn(db: &Db, schema: &str, read_only: bool) -> Res<Conn> {
     if read_only {
         return Err("Writes are locked on this connection. Unlock them first.".into());
     }
-    let mut c = db.acquire().await?.detach();
+    let mut c = db.acquire_conn().await?;
     if !schema.is_empty() {
         let q = format!("USE {}", db.dialect.quote_ident(schema));
         c.execute(q.as_str()).await.map_err(e)?;
@@ -230,6 +213,13 @@ pub(super) async fn writer(db: &Db, schema: &str, read_only: bool) -> Res<sqlx::
     Ok(c)
 }
 
+/// `writer_conn` for the modules that only exist for MySQL, which hold sqlx's own connection.
+pub(super) async fn writer(db: &Db, schema: &str, read_only: bool) -> Res<sqlx::MySqlConnection> {
+    writer_conn(db, schema, read_only).await?.into_my()
+}
+
+pub(super) use super::exec::bound;
+
 fn pk_of(row: &Document) -> Document {
     row.get_document("_id").cloned().unwrap_or_default()
 }
@@ -238,12 +228,12 @@ async fn apply_updates(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[S
     for ed in edits {
         check_key(pk, &ed.pk)?;
     }
-    let mut c = writer(db, schema, read_only).await?;
+    let mut c = writer_conn(db, schema, read_only).await?;
     let mut tx = c.begin().await.map_err(e)?;
     for ed in edits {
         let (sql, params) = update_sql(db.dialect, schema, table, cols, ed);
         let t = Instant::now();
-        let r = bound(&sql, &params).execute(&mut *tx).await;
+        let r = tx.exec_bound(&sql, &params).await;
         db.note(schema, &sql, t, &r);
         let r = r.map_err(e)?;
         // The session asks for matched rows, so zero means the key or an original value no longer matches.
@@ -261,13 +251,13 @@ async fn apply_deletes(db: &Db, schema: &str, table: &str, cols: &[Col], key_col
     for pk in pks {
         check_key(key_cols, pk)?;
     }
-    let mut c = writer(db, schema, read_only).await?;
+    let mut c = writer_conn(db, schema, read_only).await?;
     let mut tx = c.begin().await.map_err(e)?;
     let mut gone = Vec::new();
     for pk in pks {
         let (sql, params) = delete_sql(db.dialect, schema, table, cols, pk);
         let t = Instant::now();
-        let r = bound(&sql, &params).execute(&mut *tx).await;
+        let r = tx.exec_bound(&sql, &params).await;
         db.note(schema, &sql, t, &r);
         if r.map_err(e)?.rows_affected() == 1 {
             gone.push(pk.clone());
@@ -280,7 +270,7 @@ async fn apply_deletes(db: &Db, schema: &str, table: &str, cols: &[Col], key_col
 /// Inserts the rows and returns each one's key document when it is known: the values given for the key
 /// columns, or LAST_INSERT_ID() for an auto-increment key left out.
 async fn apply_inserts(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[String], rows: &[NewRow], read_only: bool) -> Res<Vec<Option<Document>>> {
-    let mut c = writer(db, schema, read_only).await?;
+    let mut c = writer_conn(db, schema, read_only).await?;
     let mut tx = c.begin().await.map_err(e)?;
     let mut keys = Vec::new();
     // Generated columns cannot be given a value, and a column renamed on read goes back under its own name.
@@ -288,7 +278,7 @@ async fn apply_inserts(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[S
     for row in &rows {
         let (sql, params) = insert_sql(db.dialect, schema, table, cols, row);
         let t = Instant::now();
-        let r = bound(&sql, &params).execute(&mut *tx).await;
+        let r = tx.exec_bound(&sql, &params).await;
         db.note(schema, &sql, t, &r);
         let r = r.map_err(e)?;
         let mut key = Document::new();
@@ -329,7 +319,7 @@ async fn key_unchanged(db: &Db, schema: &str, table: &str, recorded: &[String]) 
     if recorded.is_empty() {
         return Ok(());
     }
-    let Pool::My(pool) = &db.pool;
+    let pool = db.my_pool()?;
     let sql = format!("SELECT COLUMN_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = 'PRIMARY' ORDER BY SEQ_IN_INDEX{}", super::structure::ALL_ROWS);
     let t = Instant::now();
     let rows = sqlx::query(&sql).bind(schema).bind(table).fetch_all(pool).await;

@@ -183,7 +183,7 @@ pub async fn run(db: &Db, schema: &str, table: &str, plan: &ImportPlan, conn: u6
     let timeout = d.session_timeout(0);
     let _ = c.execute(timeout.as_str()).await;
     // Counted on the pool: Cancel kills the import's own connection.
-    let super::Pool::My(pool) = &db.pool;
+    let pool = db.my_pool()?;
     let count_sql = format!("SELECT COUNT(*) FROM {}", d.qualified(schema, table));
     let trans = plan.info.transactional();
     let before: Option<i64> = if trans { None } else { sqlx::query_scalar(&count_sql).fetch_one(pool).await.ok() };
@@ -604,7 +604,7 @@ mod tests {
                 let mut l = live(var).unwrap();
                 if nbe {
                     let mut db = l.with_session("SET SESSION sql_mode = CONCAT(@@sql_mode, ',NO_BACKSLASH_ESCAPES')");
-                    let super::super::Pool::My(p) = &db.pool;
+                    let p = db.my_pool().unwrap();
                     db.sql_mode = l.w.rt.block_on(async { sqlx::query_scalar::<_, String>("SELECT @@SESSION.sql_mode").fetch_one(p).await.unwrap() });
                     l.db = db;
                 }

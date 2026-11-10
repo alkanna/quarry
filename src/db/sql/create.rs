@@ -8,7 +8,7 @@ use super::ddl::{self, Mode};
 use super::value::lit;
 use super::worker::{database_names, text, text_at};
 use super::write::{writer, SqlUndo};
-use super::{Db, Dialect, Pool};
+use super::{Db, Dialect};
 use crate::db::{e, Msg, Res, UndoAction, UndoKind, Worker};
 use sqlx::{Connection, Executor};
 use std::time::{Duration, Instant};
@@ -419,7 +419,7 @@ const SERVER_DEFAULTS: &str = "SELECT @@character_set_server AS cs, @@collation_
 const SCHEMA_DEFAULT: &str = "SELECT DEFAULT_COLLATION_NAME AS co FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?";
 
 async fn load_meta(db: &Db, schema: &str) -> Res<Meta> {
-    let Pool::My(pool) = &db.pool;
+    let pool = db.my_pool()?;
     let (cs, co, en, df) = tokio::try_join!(
         async { sqlx::query(CHARSETS).fetch_all(pool).await.map_err(e) },
         async { sqlx::query(COLLATIONS).fetch_all(pool).await.map_err(e) },
@@ -468,7 +468,7 @@ async fn count(pool: &sqlx::MySqlPool, sql: &str, schema: &str) -> u64 {
 
 /// Counts for the database confirmation: the sum is what DROP DATABASE takes with it.
 async fn db_info(db: &Db, schema: &str) -> Res<DropInfo> {
-    let Pool::My(pool) = &db.pool;
+    let pool = db.my_pool()?;
     let exists = sqlx::query("SELECT 1 AS n FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?").bind(schema).fetch_optional(pool).await.map_err(e)?.is_some();
     let kinds = sqlx::query("SELECT TABLE_TYPE AS kind, COUNT(*) AS n, COALESCE(SUM(TABLE_ROWS), 0) AS r FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? GROUP BY TABLE_TYPE").bind(schema).fetch_all(pool).await.map_err(e)?;
     let mut info = DropInfo { exists, ..Default::default() };
@@ -495,7 +495,7 @@ const COUNT_WAIT: Duration = Duration::from_secs(3);
 /// Rows, and the tables that point at this one. The reads run on a connection taken out of the pool, so the
 /// session setting below stays off the pool and a count cut short never hands a busy connection back to it.
 async fn table_info(db: &Db, schema: &str, table: &str) -> Res<DropInfo> {
-    let Pool::My(pool) = &db.pool;
+    let pool = db.my_pool()?;
     let d = db.dialect;
     let mut c = db.acquire().await?.detach();
     fresh_stats(&mut c, d).await;

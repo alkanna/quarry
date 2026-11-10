@@ -2,11 +2,11 @@
 //! indexes, foreign keys in both directions, triggers, the table status and the CREATE statement.
 //! Everything is read-only here; `ddl` builds the ALTERs from it.
 
+use super::exec::{Cells, SqlRow};
 use super::worker::{text, text_at};
-use super::{Db, Dialect, Pool};
+use super::{Db, Dialect};
 use crate::db::{e, Msg, Res, Worker};
-use sqlx::mysql::MySqlRow;
-use sqlx::{raw_sql, Row as _};
+use sqlx::raw_sql;
 
 #[derive(Clone, Debug, Default)]
 pub struct Column {
@@ -201,21 +201,18 @@ fn unquote(inner: &str) -> String {
 }
 
 /// An unsigned column value, whichever width and signedness the server reports.
-pub(super) fn num(r: &MySqlRow, name: &str) -> Option<u64> {
-    if let Ok(v) = r.try_get::<Option<u64>, _>(name) {
-        return v;
-    }
-    r.try_get::<Option<i64>, _>(name).ok().flatten().and_then(|n| u64::try_from(n).ok())
+pub(super) fn num<R: Cells>(r: &R, name: &str) -> Option<u64> {
+    r.uint(name)
 }
 
-fn s(r: &MySqlRow, name: &str) -> String {
+fn s(r: &SqlRow, name: &str) -> String {
     text(r, name).unwrap_or_default()
 }
 
-fn columns(d: Dialect, rows: &[MySqlRow]) -> Vec<Column> {
+fn columns(d: Dialect, rows: &[SqlRow]) -> Vec<Column> {
     rows.iter()
         .map(|r| {
-            let nullable = r.try_get::<i64, _>("nullable").map(|n| n != 0).unwrap_or(true);
+            let nullable = r.int("nullable").map(|n| n != 0).unwrap_or(true);
             let extra = s(r, "extra");
             let (default, default_expr) = normalize_default(d, text(r, "col_default"), nullable, &extra);
             Column { name: s(r, "name"), full_type: s(r, "full_type"), nullable, key: s(r, "col_key"), default, default_expr, extra, collation: text(r, "collation"), comment: s(r, "comment"), srid: None, check: None }
@@ -224,7 +221,7 @@ fn columns(d: Dialect, rows: &[MySqlRow]) -> Vec<Column> {
 }
 
 /// The rows come ordered by index name and then position, so one index is a run of rows.
-fn indexes(rows: &[MySqlRow]) -> Vec<Index> {
+fn indexes(rows: &[SqlRow]) -> Vec<Index> {
     let mut out: Vec<Index> = Vec::new();
     for r in rows {
         let name = s(r, "name");
@@ -232,7 +229,7 @@ fn indexes(rows: &[MySqlRow]) -> Vec<Index> {
         if out.last().is_some_and(|i| i.name == name) {
             out.last_mut().unwrap().cols.push(col);
         } else {
-            let unique = r.try_get::<i64, _>("non_unique").map(|n| n == 0).unwrap_or(false);
+            let unique = r.int("non_unique").map(|n| n == 0).unwrap_or(false);
             out.push(Index { name, unique, cols: vec![col], kind: s(r, "index_type"), cardinality: num(r, "cardinality"), comment: s(r, "comment"), invisible: false });
         }
     }
@@ -240,7 +237,7 @@ fn indexes(rows: &[MySqlRow]) -> Vec<Index> {
 }
 
 /// One row per key column, ordered by constraint and then position.
-fn foreign_keys(rows: &[MySqlRow]) -> Vec<ForeignKey> {
+fn foreign_keys(rows: &[SqlRow]) -> Vec<ForeignKey> {
     let mut out: Vec<ForeignKey> = Vec::new();
     for r in rows {
         let (name, db, table) = (s(r, "name"), s(r, "db"), s(r, "tbl"));
@@ -254,18 +251,18 @@ fn foreign_keys(rows: &[MySqlRow]) -> Vec<ForeignKey> {
     out
 }
 
-fn triggers(rows: &[MySqlRow]) -> Vec<Trigger> {
+fn triggers(rows: &[SqlRow]) -> Vec<Trigger> {
     rows.iter().map(|r| Trigger { name: s(r, "name"), timing: s(r, "timing"), event: s(r, "event"), body: s(r, "body"), definer: s(r, "definer"), order: num(r, "ord").unwrap_or(0), sql_mode: s(r, "sql_mode") }).collect()
 }
 
 /// The triggers of a table read on a connection of the caller's, for the trigger jobs that must see what the
 /// connection they write on sees.
 pub(super) async fn triggers_on(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str, table: &str) -> Res<Vec<Trigger>> {
-    let rows = sqlx::query(d.triggers()).bind(schema).bind(table).fetch_all(&mut *c).await.map_err(e)?;
+    let rows = SqlRow::wrap(sqlx::query(d.triggers()).bind(schema).bind(table).fetch_all(&mut *c).await.map_err(e)?);
     Ok(triggers(&rows))
 }
 
-fn status(rows: &[MySqlRow]) -> Status {
+fn status(rows: &[SqlRow]) -> Status {
     let Some(r) = rows.first() else { return Status::default() };
     Status {
         engine: s(r, "engine"),
@@ -287,10 +284,10 @@ fn status(rows: &[MySqlRow]) -> Status {
 /// show a table with only its first columns or indexes, and let an edit of that structure drop the rest.
 pub(super) const ALL_ROWS: &str = " LIMIT 18446744073709551615";
 
-async fn query(db: &Db, sql: &str, schema: &str, table: &str) -> Res<Vec<MySqlRow>> {
-    let Pool::My(pool) = &db.pool;
+async fn query(db: &Db, sql: &str, schema: &str, table: &str) -> Res<Vec<SqlRow>> {
+    let pool = db.my_pool()?;
     let t = std::time::Instant::now();
-    let res = sqlx::query(&format!("{sql}{ALL_ROWS}")).bind(schema).bind(table).fetch_all(pool).await;
+    let res = sqlx::query(&format!("{sql}{ALL_ROWS}")).bind(schema).bind(table).fetch_all(pool).await.map(SqlRow::wrap);
     db.note(schema, sql, t, &res);
     res.map_err(e)
 }
@@ -314,7 +311,7 @@ async fn extras(db: &Db, schema: &str, table: &str, st: &mut Structure) {
     for r in idx.unwrap_or_default() {
         let (name, seq) = (s(&r, "name"), num(&r, "seq").unwrap_or(0) as usize);
         let Some(ix) = st.indexes.iter_mut().find(|i| i.name == name) else { continue };
-        ix.invisible |= r.try_get::<i64, _>("hidden").is_ok_and(|n| n != 0);
+        ix.invisible |= r.int("hidden").is_some_and(|n| n != 0);
         if let (Some(e), Some(c)) = (text(&r, "expr"), seq.checked_sub(1).and_then(|k| ix.cols.get_mut(k))) {
             c.expr = Some(e);
         }
@@ -328,7 +325,7 @@ async fn extras(db: &Db, schema: &str, table: &str, st: &mut Structure) {
 }
 
 pub(super) async fn load(db: &Db, schema: &str, table: &str) -> Res<Structure> {
-    let Pool::My(pool) = &db.pool;
+    let pool = db.my_pool()?;
     let d = db.dialect;
     // SHOW CREATE TABLE also answers for a view.
     let create = async {

@@ -3,12 +3,13 @@
 //! never sits in memory.
 
 use super::value::Kind;
-use super::worker::{make_cols, pin_reads, prepare, to_row};
+use super::exec::{Conn, Item};
+use super::run::{pin_reads, prepare};
+use super::worker::{make_cols, to_row};
 use super::{lex, Db};
 use crate::db::copy::{CopyCol, Fmt, Writer};
 use crate::db::{e, Msg, Res, Worker};
 use mongodb::bson::Document;
-use sqlx::{raw_sql, Connection, Either, Executor};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -95,10 +96,10 @@ fn write_err(err: std::io::Error) -> String {
 /// a read-only session, whatever the connection allows. `count` follows the rows written for a progress readout.
 pub async fn stream(db: &Db, schema: &str, stmt: &str, plan: &Plan, out: &mut (dyn Write + Send), count: &AtomicU64, cancel: &AtomicBool, id: &AtomicU64) -> Res<(u64, usize)> {
     lex::read_only_check(stmt).map_err(|why| format!("Export all only runs statements that read: {why}"))?;
-    let mut conn = db.acquire().await?.detach();
-    prepare(&mut conn, db.dialect, schema, true, id).await.map_err(e)?;
+    let mut conn = db.acquire_conn().await?;
+    prepare(&mut conn, db.dialect, schema, true, id).await?;
     // All rows means all of them, and the file is written as UTF-8 from what the server sends.
-    pin_reads(&mut conn).await.map_err(e)?;
+    pin_reads(&mut conn).await?;
     let t = std::time::Instant::now();
     let r = stream_conn(&mut conn, stmt, plan, out, count, cancel, &Wrap::default()).await;
     db.note(schema, stmt, t, &r);
@@ -112,24 +113,24 @@ pub async fn stream(db: &Db, schema: &str, stmt: &str, plan: &Plan, out: &mut (d
 
 /// Streams one statement on an open session, without the closing newline. None when `wrap.lenient` and
 /// the statement has no result set.
-async fn stream_conn(conn: &mut sqlx::MySqlConnection, stmt: &str, plan: &Plan, out: &mut (dyn Write + Send), count: &AtomicU64, cancel: &AtomicBool, wrap: &Wrap<'_>) -> Res<Option<(u64, usize)>> {
+async fn stream_conn(conn: &mut Conn, stmt: &str, plan: &Plan, out: &mut (dyn Write + Send), count: &AtomicU64, cancel: &AtomicBool, wrap: &Wrap<'_>) -> Res<Option<(u64, usize)>> {
     let io = write_err;
     let fix = |t: String| match wrap.tag { Some(tag) => tag_lines(&t, tag), None => t };
     let mut done = false;
     let (mut cols, mut writer, mut batch, mut rows, mut peak) = (Vec::new(), None::<Writer>, Vec::<Document>::new(), 0u64, 0usize);
     let copy_cols = |c: &[super::Col]| c.iter().map(|c| CopyCol { name: c.name.clone(), src: c.src.clone(), numeric: numeric(c.kind) }).collect::<Vec<_>>();
     {
-        let mut s = raw_sql(stmt).fetch_many(&mut *conn);
+        let mut s = conn.fetch_text(stmt);
         while let Some(item) = futures_util::StreamExt::next(&mut s).await {
             if cancel.load(Ordering::SeqCst) {
                 return Err("Export cancelled".into());
             }
             match item.map_err(e)? {
                 // Later results of a CALL are read off the wire and dropped.
-                Either::Right(_) if done => {}
-                Either::Right(row) => {
+                Item::Row(_) if done => {}
+                Item::Row(row) => {
                     if writer.is_none() {
-                        cols = make_cols(sqlx::Row::columns(&row), &Default::default(), false);
+                        cols = make_cols(&row.cols(), &Default::default(), false);
                         let mut w = Writer::new(plan.fmt, plan.header, copy_cols(&cols), &plan.table, &[], plan.bs);
                         out.write_all(wrap.head.as_bytes()).map_err(io)?;
                         out.write_all(w.begin().as_bytes()).map_err(io)?;
@@ -146,20 +147,20 @@ async fn stream_conn(conn: &mut sqlx::MySqlConnection, stmt: &str, plan: &Plan, 
                     }
                 }
                 // The end of the first result. Reading goes on to the end so the connection is clean for `describe`.
-                Either::Left(_) => done = true,
+                Item::End(_) => done = true,
             }
         }
     }
     if writer.is_none() {
         // No rows: the header and footer of an empty table still need the column names.
-        let d = match (&mut *conn).describe(stmt).await {
-            Ok(d) if !(wrap.lenient && d.columns().is_empty()) => d,
+        let d = match conn.describe(stmt).await {
+            Ok(d) if !(wrap.lenient && d.is_empty()) => d,
             // USE and similar statements cannot be prepared and have no columns.
             Ok(_) => return Ok(None),
             Err(_) if wrap.lenient => return Ok(None),
             Err(x) => return Err(e(x)),
         };
-        cols = make_cols(d.columns(), &Default::default(), false);
+        cols = make_cols(&d, &Default::default(), false);
         let mut w = Writer::new(plan.fmt, plan.header, copy_cols(&cols), &plan.table, &[], plan.bs);
         out.write_all(wrap.head.as_bytes()).map_err(io)?;
         out.write_all(w.begin().as_bytes()).map_err(io)?;
@@ -354,9 +355,9 @@ pub async fn export_all(db: &Db, schema: &str, stmts: &[String], ap: &AllPlan, p
 
 #[allow(clippy::too_many_arguments)]
 async fn run_all(db: &Db, schema: &str, stmts: &[String], ap: &AllPlan, path: &std::path::Path, count: &AtomicU64, step: &AtomicU64, cancel: &AtomicBool, id: &AtomicU64, parts: &mut Vec<(PathBuf, PathBuf)>, open: &mut Option<PathBuf>) -> Res<u64> {
-    let mut conn = db.acquire().await?.detach();
-    prepare(&mut conn, db.dialect, schema, true, id).await.map_err(e)?;
-    pin_reads(&mut conn).await.map_err(e)?;
+    let mut conn = db.acquire_conn().await?;
+    prepare(&mut conn, db.dialect, schema, true, id).await?;
+    pin_reads(&mut conn).await?;
     let fmt = ap.plan.fmt;
     let (mut total, mut results) = (0u64, 0usize);
     let mut shared = Lazy::new(part_of(path));
