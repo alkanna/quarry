@@ -1005,7 +1005,7 @@ impl App {
     /// ones beyond the design's nine.
     fn privilege_table(&self, ui: &mut egui::Ui, w: &mut SqlUsersWin) {
         const ROW_H: f32 = 28.0;
-        const NAME_W: f32 = 190.0;
+        const NAME_W: f32 = 160.0;
         let widths: Vec<f32> = DB_PRIVS.iter().map(|p| ui.painter().layout_no_wrap(users::priv_title(p), FontId::proportional(TXT_SMALL), MUTED()).size().x.max(40.0) + 20.0).collect();
         let total = NAME_W + widths.iter().sum::<f32>();
         egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).show(ui, |ui| {
@@ -1049,6 +1049,10 @@ impl App {
                         }
                         x += cw;
                     }
+                }
+                // egui's scroll bar floats over the content, so leave it a strip of its own below the last row.
+                if total > ui.clip_rect().width() {
+                    ui.add_space(ui.spacing().scroll.bar_width + ui.spacing().scroll.bar_inner_margin);
                 }
             });
         });

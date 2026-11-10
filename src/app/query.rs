@@ -100,7 +100,7 @@ pub(super) fn library_menu(ui: &mut egui::Ui, lib: &[SavedQuery], new_name: &mut
                     }
                     ui.label(RichText::new(preview).monospace().size(TXT_CAPTION).color(FAINT()));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("🗙").on_hover_text("Delete").clicked() {
+                        if close_x(ui).on_hover_text("Delete").clicked() {
                             acts.push(QAct::Delete(q.name.clone()));
                         }
                     });
