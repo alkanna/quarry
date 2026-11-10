@@ -487,7 +487,7 @@ impl App {
             ui.spacing_mut().item_spacing.y = 10.0;
             for t in &self.toasts {
                 let color = tone_color(t.tone);
-                let resp = egui::Frame::new().fill(RAISED()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_LG).shadow(egui::epaint::Shadow { offset: [0, 6], blur: 18, spread: 0, color: Color32::from_black_alpha(46) }).inner_margin(egui::Margin { left: 16, right: 10, top: 10, bottom: 10 }).show(ui, |ui| {
+                egui::Frame::new().fill(RAISED()).stroke(Stroke::new(1.0, color)).corner_radius(R_LG).shadow(egui::epaint::Shadow { offset: [0, 6], blur: 18, spread: 0, color: Color32::from_black_alpha(46) }).inner_margin(egui::Margin { left: 16, right: 10, top: 10, bottom: 10 }).show(ui, |ui| {
                     ui.set_width(TOAST_W - 26.0);
                     ui.horizontal(|ui| {
                         let (r, _) = ui.allocate_exact_size(egui::vec2(16.0, 18.0), Sense::hover());
@@ -535,8 +535,6 @@ impl App {
                         });
                     }
                 });
-                let r = resp.response.rect;
-                ui.painter().rect_filled(egui::Rect::from_min_size(r.min, egui::vec2(3.0, r.height())), egui::CornerRadius { nw: R_LG, sw: R_LG, ne: 0, se: 0 }, color);
             }
         });
         if let Some((act, e, id)) = run {
