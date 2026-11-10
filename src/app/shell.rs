@@ -628,7 +628,7 @@ impl App {
         let compute = |b: &str| -> Option<(usize, Vec<Sug>)> {
             let tpl = scope.as_ref().and_then(|_| sql_at(b, b.len()));
             let (Some(tpl), Some(scope)) = (tpl, &scope) else { return suggest_js(b, &known, &colls, &pkg_names) };
-            let (sb, full) = split_statement(&sql_text(b, &tpl, b.len()).0, &tail);
+            let (sb, full) = split_statement(&sql_text(b, &tpl, b.len()).0, &tail, scope.dialect);
             let o = analyze(&sb, &full, scope, values)?;
             *need.borrow_mut() = o.need.clone();
             *meta.borrow_mut() = Some((o.title.clone(), o.foot.clone()));

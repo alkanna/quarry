@@ -74,6 +74,11 @@ fn quote_end(b: &[u8], i: usize, esc: bool) -> usize {
     n
 }
 
+/// Whether the PostgreSQL read-only check refuses `name` as a called function, so autocomplete never offers it.
+pub fn pg_refuses_function(name: &str) -> bool {
+    pg::refused_function(&name.to_ascii_lowercase())
+}
+
 /// Splits text into tokens that cover it completely. Delimiters are ASCII, so every range sits on a
 /// char boundary. Unterminated strings and comments run to the end of the text.
 pub fn tokens(text: &str, d: Dialect) -> Vec<(Tok, Range<usize>)> {

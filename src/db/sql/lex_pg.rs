@@ -215,7 +215,7 @@ pub(super) const REFUSED_FUNCTIONS_CALL_PREFIX: &[&str] = &["lo_", "pg_file_", "
 pub(super) const REFUSED_FUNCTIONS_CONTAIN: &[&str] = &["replication_slot"];
 
 /// Whether the name is refused as the function of a call.
-fn refused_function(name: &str) -> bool {
+pub(super) fn refused_function(name: &str) -> bool {
     refused_field(name) || REFUSED_FUNCTIONS_CALL_PREFIX.iter().any(|p| name.starts_with(p)) || REFUSED_FUNCTIONS_CONTAIN.iter().any(|p| name.contains(p))
 }
 
