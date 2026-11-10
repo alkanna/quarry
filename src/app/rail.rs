@@ -3,7 +3,7 @@
 use super::*;
 
 #[derive(Clone, Copy)]
-enum RailIcon {
+pub(super) enum RailIcon {
     Explorer,
     Search,
     Log,
@@ -25,7 +25,7 @@ impl App {
                 self.save_prefs();
             }
             if rail_button(ui, RailIcon::Search, palette, true, "Jump to a collection (Cmd+K)").clicked() {
-                self.modal = Some(Modal::Palette { query: String::new(), sel: 0 });
+                self.open_palette();
             }
             if rail_button(ui, RailIcon::Log, self.log.open, true, "Query log (Cmd+L)").clicked() {
                 self.log.open = !self.log.open;
@@ -34,12 +34,7 @@ impl App {
             if rail_button(ui, RailIcon::Server, self.server.is_some() || self.sql_server.is_some(), connected, tip).clicked()
                 && let Some(conn) = self.active
             {
-                self.req += 1;
-                match self.conn(conn).map(|c| (c.meta.engine, c.sql.as_ref().map(|d| d.dialect), c.meta.advanced.clone())) {
-                    // The Mongo window would wait forever for commands a SQL server never answers.
-                    Some((db::sql::Engine::MySql, dialect, adv)) => self.sql_server = Some(SqlServerWin::new(conn, dialect.map(|d| db::sql::server::set_by_quarry(&adv, d, db::sql::advanced::local_offset_secs())).unwrap_or_default())),
-                    _ => self.server = Some(ServerWin::new(conn, self.req)),
-                }
+                self.open_server(conn);
             }
             self.conn_shortcuts(ui);
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
@@ -102,8 +97,17 @@ impl App {
         }
     }
 
+    pub(super) fn open_server(&mut self, conn: u64) {
+        self.req += 1;
+        match self.conn(conn).map(|c| (c.meta.engine, c.sql.as_ref().map(|d| d.dialect), c.meta.advanced.clone())) {
+            // The Mongo window would wait forever for commands a SQL server never answers.
+            Some((db::sql::Engine::MySql, dialect, adv)) => self.sql_server = Some(SqlServerWin::new(conn, dialect.map(|d| db::sql::server::set_by_quarry(&adv, d, db::sql::advanced::local_offset_secs())).unwrap_or_default())),
+            _ => self.server = Some(ServerWin::new(conn, self.req)),
+        }
+    }
+
     /// Drops the session but keeps the saved connection, which then leaves the rail.
-    fn disconnect(&mut self, id: u64) {
+    pub(super) fn disconnect(&mut self, id: u64) {
         let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == id) else { return };
         (c.client, c.sql, c.tunnel, c.status, c.writable) = (None, None, None, Status::Idle, false);
         c.dbs.clear();
@@ -144,7 +148,7 @@ pub(super) fn mark_color(mark: &str) -> Color32 {
 
 /// The engine's logo as a white mask, tinted when painted. Decoded once and kept in egui's memory.
 /// The shapes are Simple Icons' (CC0), baked to 64 px PNGs so the binary needs no SVG renderer.
-fn engine_logo(ctx: &egui::Context, mark: &str) -> Option<egui::TextureHandle> {
+pub(super) fn engine_logo(ctx: &egui::Context, mark: &str) -> Option<egui::TextureHandle> {
     let (name, png): (&str, &[u8]) = match mark {
         "MO" => ("engine-mongodb", include_bytes!("../../assets/engines/mongodb.png")),
         "MA" => ("engine-mariadb", include_bytes!("../../assets/engines/mariadb.png")),
@@ -215,7 +219,7 @@ fn rail_button(ui: &mut egui::Ui, icon: RailIcon, active: bool, enabled: bool, t
 }
 
 /// Line icons drawn in a 16 px box, so they need no icon font.
-fn paint_icon(p: &egui::Painter, c: egui::Pos2, icon: RailIcon, s: Stroke) {
+pub(super) fn paint_icon(p: &egui::Painter, c: egui::Pos2, icon: RailIcon, s: Stroke) {
     let v = egui::vec2;
     match icon {
         // A window with a left panel.

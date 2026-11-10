@@ -706,7 +706,8 @@ pub(super) enum Modal {
     UpdateMany { set_txt: String, unset_txt: String, preview: Option<(Vec<Document>, db::Res<(Vec<(Document, Document)>, u64)>)> },
     Tool(Box<ToolForm>),
     Relations { conn: u64, db: String },
-    Palette { query: String, sel: usize },
+    /// `cmds` once ">" switched the palette to commands.
+    Palette { query: String, sel: usize, cmds: bool },
     /// Export or copy-to-file of the rows of a result, in any of the Copy as formats.
     Export(Box<super::export::ExportForm>),
     /// Import a CSV file into a SQL table.

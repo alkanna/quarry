@@ -269,6 +269,10 @@ impl App {
             let pipeline = db::group_count_pipeline("status", &Bson::String("paid".into()), Document::new()).unwrap_or_default();
             self.modal = Some(Modal::Grouped { sel: self.tabs[1].sel.clone(), path: "status".into(), pipeline, rows });
         }
+        // Test switch: the Cmd+K palette with this query; a leading ">" opens command mode.
+        if let Ok(q) = std::env::var("QUARRY_TEST_PALETTE") {
+            self.modal = Some(Modal::Palette { query: q.trim_start_matches('>').into(), sel: 0, cmds: q.starts_with('>') });
+        }
         // Test switch: show the pipeline builder with stage previews.
         if std::env::var("QUARRY_TEST_PIPELINE").is_ok() {
             let t = &mut self.tabs[1];

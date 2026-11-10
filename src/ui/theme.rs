@@ -22,6 +22,8 @@ pub(crate) struct Palette {
     pub(crate) border: Color32,
     /// Hairlines and dividers, quieter than `border`.
     pub(crate) line: Color32,
+    /// Dividers inside popups and dialogs; `line` vanishes on `raised` in the dark theme.
+    pub(crate) raised_line: Color32,
     /// The table header row.
     pub(crate) hdr: Color32,
     pub(crate) text: Color32,
@@ -71,6 +73,7 @@ pub(crate) const DARK_PAL: Palette = Palette {
     menu_hover: hex(0x45474d),
     border: hex(0x43454a),
     line: hex(0x393b40),
+    raised_line: hex(0x43454a),
     hdr: hex(0x2b2d30),
     text: hex(0xbcbec4),
     bright: hex(0xdfe1e5),
@@ -111,6 +114,7 @@ pub(crate) const LIGHT_PAL: Palette = Palette {
     menu_hover: hex(0xf1eee8),
     border: hex(0xdcd7ce),
     line: hex(0xe5e1d9),
+    raised_line: hex(0xe5e1d9),
     hdr: hex(0xf3f1ec),
     text: hex(0x3a3631),
     bright: hex(0x15130f),
@@ -169,7 +173,7 @@ macro_rules! colors {
     };
 }
 
-colors!(BG: bg, PANEL: panel, CHROME: chrome, RAISED: raised, HOVER: hover, PRESSED: pressed, MENU_HOVER: menu_hover, BORDER: border, LINE: line, HDR: hdr, ON_PRIMARY: on_primary, SEL: sel, SEL_HOVER: sel_hover, TEXT: text, BRIGHT: bright, MUTED: muted, FAINT: faint, PRIMARY: primary, ALERT: alert, SUCCESS: success, WARNING: warning, C_STRING: c_string, C_NUMBER: c_number, C_TRUE: c_true, C_FALSE: c_false, C_DATE: c_date, C_NULL: c_null, C_OID: c_oid, C_OBJ: c_obj, KEY: key, C_LINK: c_link, HIGHLIGHT: highlight, C_KEYWORD: c_keyword);
+colors!(BG: bg, PANEL: panel, CHROME: chrome, RAISED: raised, HOVER: hover, PRESSED: pressed, MENU_HOVER: menu_hover, BORDER: border, LINE: line, RAISED_LINE: raised_line, HDR: hdr, ON_PRIMARY: on_primary, SEL: sel, SEL_HOVER: sel_hover, TEXT: text, BRIGHT: bright, MUTED: muted, FAINT: faint, PRIMARY: primary, ALERT: alert, SUCCESS: success, WARNING: warning, C_STRING: c_string, C_NUMBER: c_number, C_TRUE: c_true, C_FALSE: c_false, C_DATE: c_date, C_NULL: c_null, C_OID: c_oid, C_OBJ: c_obj, KEY: key, C_LINK: c_link, HIGHLIGHT: highlight, C_KEYWORD: c_keyword);
 
 /// `c` at `alpha` out of 255, for tints over the background.
 pub(crate) fn tint(c: Color32, alpha: u8) -> Color32 {
@@ -193,6 +197,9 @@ pub(crate) const TXT_TITLE: f32 = 13.0;
 
 /// Dialog titles and the collection heading.
 pub(crate) const TXT_HEADING: f32 = 18.0;
+
+/// The Cmd+K search field, a step above titles so it reads as the palette's heading.
+pub(crate) const TXT_SEARCH: f32 = 15.0;
 
 /// Height of every button and single-line input.
 pub(crate) const BUTTON_H: f32 = 24.0;
@@ -223,6 +230,13 @@ pub(crate) const STATUS_H: f32 = 26.0;
 pub(crate) const RAIL_W: f32 = 44.0;
 
 pub(crate) const TABLE_HEAD_H: f32 = 30.0;
+
+// The Cmd+K palette: search row, two-line result, one-line command, section caption and key-hint footer.
+pub(crate) const PALETTE_HEAD_H: f32 = 54.0;
+pub(crate) const PALETTE_ROW_H: f32 = 44.0;
+pub(crate) const PALETTE_CMD_H: f32 = 34.0;
+pub(crate) const PALETTE_CAPTION_H: f32 = 26.0;
+pub(crate) const PALETTE_FOOT_H: f32 = 36.0;
 
 // Font weights, applied through the variable fonts' wght axis.
 pub(crate) const W_MEDIUM: f32 = 500.0;
