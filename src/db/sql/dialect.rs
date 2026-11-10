@@ -150,6 +150,11 @@ impl Dialect {
     pub fn cancel(self, connection_id: u64) -> String {
         format!("KILL QUERY {connection_id}")
     }
+
+    /// Ends a connection, and with it the statement it runs. Same text on both engines.
+    pub fn kill_connection(self, connection_id: u64) -> String {
+        format!("KILL {connection_id}")
+    }
 }
 
 pub const KEYWORDS: &[&str] = &[

@@ -506,7 +506,7 @@ async fn run(db: &Db, schema: &str, text: &str, read_only: bool, id: &AtomicU64,
 
 /// KILL QUERY from a connection of its own. A plain function, because inside a spawned block the
 /// executor lifetimes of a local connection do not infer.
-async fn kill_query(db: &Db, id: u64) -> Res<String> {
+pub(super) async fn kill_query(db: &Db, id: u64) -> Res<String> {
     let mut c = tokio::time::timeout(Duration::from_secs(10), sqlx::MySqlConnection::connect_with(&db.opts)).await.map_err(|_| "Could not reach the server to stop the statement".to_string())?.map_err(e)?;
     let q = db.dialect.cancel(id);
     let r = c.execute(q.as_str()).await.map(|_| "Stopped the running statement".to_string()).map_err(e);

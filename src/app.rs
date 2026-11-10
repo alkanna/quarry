@@ -34,6 +34,7 @@ mod relations;
 mod run;
 mod schema;
 mod server;
+mod sql_server;
 mod settings;
 mod shell;
 mod shell_attach;
@@ -72,6 +73,7 @@ use tree::*;
 use users::*;
 use indexes::*;
 use server::*;
+use sql_server::*;
 use watch::*;
 use drafts::*;
 use sql_edit::*;
@@ -175,6 +177,7 @@ pub struct App {
     sql_values_asked: HashSet<(u64, String, String, String, Option<String>)>,
     users: Option<UsersWin>,
     server: Option<ServerWin>,
+    sql_server: Option<SqlServerWin>,
     /// The answer to a connection form Test, with the request id it answers.
     conn_test: Option<(u64, db::Res<String>)>,
     /// What the last Test learned from a SQL server, for the Advanced tab to offer.
@@ -310,6 +313,7 @@ impl App {
             sql_values_asked: HashSet::new(),
             users: None,
             server: None,
+            sql_server: None,
             conn_test: None,
             test_info: None,
             idx_info: None,
@@ -608,6 +612,7 @@ impl eframe::App for App {
         self.modals(&ctx);
         self.users_window(&ctx);
         self.server_window(&ctx);
+        self.sql_server_window(&ctx);
         self.tool_window(&ctx);
         self.toast(&ctx);
         self.screenshot(&ctx);

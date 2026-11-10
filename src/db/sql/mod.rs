@@ -14,6 +14,7 @@ pub mod value;
 pub mod csv;
 pub mod import;
 pub mod dump;
+pub mod server;
 #[cfg(test)]
 mod testing;
 #[cfg(test)]

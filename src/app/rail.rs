@@ -31,11 +31,15 @@ impl App {
                 self.log.open = !self.log.open;
             }
             let tip = if connected { "Server status" } else { "Server status (connect first)" };
-            if rail_button(ui, RailIcon::Server, self.server.is_some(), connected, tip).clicked()
+            if rail_button(ui, RailIcon::Server, self.server.is_some() || self.sql_server.is_some(), connected, tip).clicked()
                 && let Some(conn) = self.active
             {
                 self.req += 1;
-                self.server = Some(ServerWin::new(conn, self.req));
+                match self.conn(conn).map(|c| (c.meta.engine, c.sql.as_ref().map(|d| d.dialect), c.meta.advanced.clone())) {
+                    // The Mongo window would wait forever for commands a SQL server never answers.
+                    Some((db::sql::Engine::MySql, dialect, adv)) => self.sql_server = Some(SqlServerWin::new(conn, dialect.map(|d| db::sql::server::set_by_quarry(&adv, d, db::sql::advanced::local_offset_secs())).unwrap_or_default())),
+                    _ => self.server = Some(ServerWin::new(conn, self.req)),
+                }
             }
             self.conn_shortcuts(ui);
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
