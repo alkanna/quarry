@@ -386,6 +386,9 @@ pub(crate) fn optical_dy(g: &egui::Galley) -> f32 {
     if !top.is_finite() {
         return 0.0;
     }
+    // Glyph bitmaps round their top up to a whole pixel, so the real ink starts up to a pixel lower.
+    // Taking the middle of that pixel moved caps from 1 px low to centered at 1x.
+    let top = top + 0.5 / g.pixels_per_point;
     g.size().y / 2.0 - (row.pos.y + (top + base) / 2.0)
 }
 

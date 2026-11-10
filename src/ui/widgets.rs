@@ -525,9 +525,17 @@ pub(crate) fn add_chip(ui: &mut egui::Ui, name: &str) -> egui::Response {
     let color = if state > 0 { BRIGHT() } else { MUTED() };
     let p = ui.painter();
     p.rect(rect, rect.height() / 2.0, hover_fill(state), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
-    let c = egui::pos2(rect.left() + pad + PLUS / 2.0, rect.center().y);
-    p.line_segment([c - egui::vec2(PLUS / 2.0, 0.0), c + egui::vec2(PLUS / 2.0, 0.0)], Stroke::new(1.2, color));
-    p.line_segment([c - egui::vec2(0.0, PLUS / 2.0), c + egui::vec2(0.0, PLUS / 2.0)], Stroke::new(1.2, color));
+    // Bars in whole device pixels: a thin stroke at a fractional center antialiases into uneven arms.
+    let ppp = ui.pixels_per_point();
+    let t = (1.2 * ppp).round().max(1.0);
+    let len = (PLUS * ppp).round();
+    let len = len + (len - t) % 2.0;
+    let arm = (len - t) / 2.0;
+    let (x0, y0) = (((rect.left() + pad + PLUS / 2.0) * ppp - t / 2.0).round(), (rect.center().y * ppp - t / 2.0).round());
+    let bar = |x: f32, y: f32, w: f32, h: f32| egui::Rect::from_min_size(egui::pos2(x, y) / ppp, egui::vec2(w, h) / ppp);
+    p.rect_filled(bar(x0 - arm, y0, len, t), 0.0, color);
+    p.rect_filled(bar(x0, y0 - arm, t, arm), 0.0, color);
+    p.rect_filled(bar(x0, y0 + t, t, arm), 0.0, color);
     let dy = optical_dy(&g);
     p.galley(egui::pos2(rect.left() + pad + PLUS + GAP, rect.center().y - g.size().y / 2.0 + dy), g, color);
     focus_ring(ui, &r, rect, rect.height() / 2.0);
