@@ -205,7 +205,7 @@ pub(super) async fn run(db: &Db, schema: &str, text: &str, read_only: bool, id: 
                 continue;
             }
         }
-        let rs = if read_only && d == Dialect::Postgres { run_locked(&mut conn, d, stmt, page, &timeout).await } else { run_stmt(&mut conn, d, stmt, page).await };
+        let rs = if read_only && d == Dialect::Postgres { run_locked(&mut conn, d, stmt, page, &timeout, &db.pg_locals()).await } else { run_stmt(&mut conn, d, stmt, page).await };
         let failed = rs.iter().find_map(|r| r.error.as_deref());
         crate::db::log_sql(db.conn, &here, stmt, rs.first().map_or(0, |r| r.ms), failed);
         if let (None, Some(to)) = (failed, lex::use_target(stmt, d)) {
@@ -233,9 +233,9 @@ pub(super) async fn run(db: &Db, schema: &str, text: &str, read_only: bool, id: 
 /// One user statement on a locked PostgreSQL connection: alone in `BEGIN READ ONLY` and always rolled back, never
 /// committed, so nothing it does to the session outlives it and it never shares a transaction with another statement.
 /// The paging wrapper and a read's count go through here too.
-pub(super) async fn run_locked(conn: &mut Conn, d: Dialect, stmt: &str, page: usize, timeout: &str) -> Vec<ResultSet> {
+pub(super) async fn run_locked(conn: &mut Conn, d: Dialect, stmt: &str, page: usize, timeout: &str, locals: &str) -> Vec<ResultSet> {
     let Conn::Pg(c) = conn else { return run_stmt(conn, d, stmt, page).await };
-    if let Err(err) = super::pg_read::begin_read_only(c, timeout).await {
+    if let Err(err) = super::pg_read::begin_read_only(c, timeout, locals).await {
         return vec![failed(stmt, super::pg_read::pg_error(&err, stmt, 0))];
     }
     let rs = run_stmt(conn, d, stmt, page).await;
@@ -257,7 +257,7 @@ pub(super) async fn count_rows(db: &Db, schema: &str, stmt: &str) -> Res<u64> {
     let r = match &mut conn {
         Conn::Pg(c) => {
             let timeout = super::pg_read::statement_timeout(c).await.map_err(e)?;
-            super::pg_read::begin_read_only(c, &timeout).await.map_err(|x| super::pg_read::pg_error(&x, &sql, 0))?;
+            super::pg_read::begin_read_only(c, &timeout, &db.pg_locals()).await.map_err(|x| super::pg_read::pg_error(&x, &sql, 0))?;
             let r = c.fetch_all(sql.as_str()).await.map(super::exec::SqlRow::wrap_pg);
             let _ = c.execute("ROLLBACK").await;
             r
@@ -418,14 +418,14 @@ mod pg_tests {
                     "SELECT set_config('client_encoding', 'SJIS', false)",
                     "SELECT set_config('statement_timeout', '1', false)",
                 ] {
-                    let sets = run_locked(&mut conn, d, evil, 0, &timeout).await;
+                    let sets = run_locked(&mut conn, d, evil, 0, &timeout, "").await;
                     assert!(sets[0].error.is_none(), "{var}: {evil}: {:?}", sets[0].error);
                 }
-                let sets = run_locked(&mut conn, d, "SELECT current_setting('default_transaction_read_only') AS ro, current_setting('search_path') AS sp, current_setting('client_encoding') AS enc, current_setting('statement_timeout') AS st", 0, &timeout).await;
+                let sets = run_locked(&mut conn, d, "SELECT current_setting('default_transaction_read_only') AS ro, current_setting('search_path') AS sp, current_setting('client_encoding') AS enc, current_setting('statement_timeout') AS st", 0, &timeout, "").await;
                 assert_eq!((val(&sets[0], 0, "ro"), val(&sets[0], 0, "sp"), val(&sets[0], 0, "enc")), ("on".into(), "\"t6_cfg\"".into(), "UTF8".into()), "{var}");
                 assert_eq!(val(&sets[0], 0, "st"), timeout, "{var}");
                 // A write is refused by the server inside the transaction, whatever the lexer did.
-                let sets = run_locked(&mut conn, d, "INSERT INTO t VALUES (1)", 0, &timeout).await;
+                let sets = run_locked(&mut conn, d, "INSERT INTO t VALUES (1)", 0, &timeout, "").await;
                 assert!(sets[0].error.as_deref().unwrap().contains("25006"), "{var}: {:?}", sets[0].error);
                 let _ = conn.close().await;
             });

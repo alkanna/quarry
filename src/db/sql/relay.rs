@@ -171,6 +171,8 @@ pub struct Relay {
     /// For the query log: the connection's app id and the database the script runs in.
     log_conn: u64,
     schema: String,
+    /// `Db::pg_locals`: behind a pooler the settings each locked transaction starts with.
+    locals: String,
 }
 
 impl Relay {
@@ -180,11 +182,11 @@ impl Relay {
         prepare(&mut conn, db.dialect, schema, read_only, id).await?;
         if let Conn::Pg(_) = &conn {
             // Values are filled as E strings that read the same in either mode, so no session mode is read here.
-            return Ok(Relay { conn, dialect: db.dialect, read_only, backslash: false, ansi: false, dead: false, log_conn: db.conn, schema: schema.to_string() });
+            return Ok(Relay { conn, dialect: db.dialect, read_only, backslash: false, ansi: false, dead: false, log_conn: db.conn, schema: schema.to_string(), locals: db.pg_locals() });
         }
         // Values are filled in for this session's mode, which may differ from the one read at connect.
         let m = super::ddl::session_mode(conn.my()?).await?;
-        Ok(Relay { conn, dialect: db.dialect, read_only, backslash: m.bs, ansi: m.ansi, dead: false, log_conn: db.conn, schema: schema.to_string() })
+        Ok(Relay { conn, dialect: db.dialect, read_only, backslash: m.bs, ansi: m.ansi, dead: false, log_conn: db.conn, schema: schema.to_string(), locals: String::new() })
     }
 
     /// Interrupts the statement running on connection `id`, from a connection of its own.
@@ -249,7 +251,11 @@ impl Relay {
         // Begun here and rolled back below, never committed, so nothing a locked statement did outlives it.
         let begun = pg && self.read_only;
         if begun {
-            if let Err(x) = self.conn.execute("BEGIN READ ONLY").await {
+            let mut begin = self.conn.execute("BEGIN READ ONLY").await.map(|_| ());
+            if begin.is_ok() && !self.locals.is_empty() {
+                begin = self.conn.execute(&self.locals).await.map(|_| ());
+            }
+            if let Err(x) = begin {
                 self.dead = true;
                 return Err(e(x));
             }

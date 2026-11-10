@@ -83,11 +83,16 @@ pub(super) async fn statement_timeout(c: &mut PgConnection) -> Result<String, sq
     Ok(rows.first().and_then(|r| r.cell(0)).map(|b| String::from_utf8_lossy(b).into_owned()).filter(|v| v.chars().all(|c| c.is_ascii_alphanumeric())).unwrap_or_else(|| "0".into()))
 }
 
-/// Opens the transaction a locked statement runs in. When the timeout cannot be set the transaction is rolled back
-/// at once, so the connection is never left inside one.
-pub(super) async fn begin_read_only(c: &mut PgConnection, timeout: &str) -> Result<(), sqlx::Error> {
+/// Opens the transaction a locked statement runs in. When a setting cannot be applied the transaction is rolled back
+/// at once, so the connection is never left inside one. `locals` (`Db::pg_locals`) comes last so that behind a pooler,
+/// where the session has none of Quarry's settings, its timeout and output formats win over the session's.
+pub(super) async fn begin_read_only(c: &mut PgConnection, timeout: &str, locals: &str) -> Result<(), sqlx::Error> {
     c.execute("BEGIN READ ONLY").await?;
-    if let Err(x) = c.execute(format!("SET LOCAL statement_timeout = '{timeout}'").as_str()).await {
+    let mut set = c.execute(format!("SET LOCAL statement_timeout = '{timeout}'").as_str()).await.map(|_| ());
+    if set.is_ok() && !locals.is_empty() {
+        set = c.execute(locals).await.map(|_| ());
+    }
+    if let Err(x) = set {
         let _ = c.execute("ROLLBACK").await;
         return Err(x);
     }
