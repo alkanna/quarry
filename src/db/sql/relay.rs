@@ -176,12 +176,9 @@ pub struct Relay {
 impl Relay {
     pub async fn open(db: &Db, schema: &str, read_only: bool, id: &AtomicU64) -> Res<Relay> {
         let mut conn = db.acquire_conn().await?;
+        // On Postgres this also sets search_path to the schema.
         prepare(&mut conn, db.dialect, schema, read_only, id).await?;
-        if let Conn::Pg(c) = &mut conn {
-            // Bound, not spliced: the schema name is a saved setting but still goes through the server's own quoting.
-            if !schema.is_empty() {
-                sqlx::query("SELECT set_config('search_path', $1, false)").bind(db.dialect.quote_ident(schema)).execute(&mut *c).await.map_err(e)?;
-            }
+        if let Conn::Pg(_) = &conn {
             // Values are filled as E strings that read the same in either mode, so no session mode is read here.
             return Ok(Relay { conn, dialect: db.dialect, read_only, backslash: false, ansi: false, dead: false, log_conn: db.conn, schema: schema.to_string() });
         }
