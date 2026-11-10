@@ -49,7 +49,7 @@ Update this list when a step lands. Each step is reviewed before it is ticked.
 
 **Layer 2 rules** (every step that runs user text: Content filter, Query, shell relay):
 - Each user statement runs alone in `BEGIN READ ONLY` and is always rolled back, never committed, never sharing a transaction with another user statement.
-- A pooled connection that ran user text gets `DISCARD ALL` before going back to the pool (startup `-c` options survive it). In pooler fallback mode the connection is closed instead.
+- A pooled connection that ran user text is closed, not returned to the pool: `DISCARD ALL` releases advisory locks but not dblink connections opened by a wrapper. Pages with no user filter text keep using the pool.
 - Pooler fallback mode: no session SETs; read-only, timeouts and formats are applied with `SET LOCAL` inside each transaction; the writer uses `BEGIN READ WRITE` plus `SET LOCAL`; statement pooling (where BEGIN fails) is refused with a clear message.
 - Known limit: a user-defined or extension function that wraps a side effect is invisible to the lexer, and non-transactional effects (signals, WAL switches, slots, COPY TO PROGRAM through such a wrapper) are not undone by the rollback. A locked connection is therefore only as safe as the role's privileges; the README and the connection form should say so.
 
