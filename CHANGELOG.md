@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.29.1](https://github.com/alkanna/quarry/compare/v0.29.0...v0.29.1) (2026-11-10)
+
+
+### Bug Fixes
+
+* center painted labels on their real ink and draw the add chip plus in whole pixels ([#154](https://github.com/alkanna/quarry/issues/154)) ([ec5f300](https://github.com/alkanna/quarry/commit/ec5f300a85879712759b10ac558925e88c0e9e11))
+* start the sidebar on the restored tab's connection ([#152](https://github.com/alkanna/quarry/issues/152)) ([5aae74f](https://github.com/alkanna/quarry/commit/5aae74fc4fc9f914b8bdffc1b48076dd3fe367ae))
+
 ## [0.29.0](https://github.com/alkanna/quarry/compare/v0.28.0...v0.29.0) (2026-11-10)
 
 
