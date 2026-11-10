@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.30.0](https://github.com/alkanna/quarry/compare/v0.29.1...v0.30.0) (2026-11-10)
+
+
+### Features
+
+* go back and forward through visited tabs with Cmd+[ and Cmd+] ([#156](https://github.com/alkanna/quarry/issues/156)) ([6d58399](https://github.com/alkanna/quarry/commit/6d58399b6da3cc65b39d6abb47fbfd26604b72ba))
+* redesign the Cmd+K palette to search every connection and run commands ([#158](https://github.com/alkanna/quarry/issues/158)) ([1d4295e](https://github.com/alkanna/quarry/commit/1d4295e5459aa5fede748fc91d73add934542866))
+
 ## [0.29.1](https://github.com/alkanna/quarry/compare/v0.29.0...v0.29.1) (2026-11-10)
 
 
