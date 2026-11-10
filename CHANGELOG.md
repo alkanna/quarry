@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.32.0](https://github.com/alkanna/quarry/compare/v0.31.0...v0.32.0) (2026-11-10)
+
+
+### Features
+
+* explain errors where they happen instead of in the status bar ([#162](https://github.com/alkanna/quarry/issues/162)) ([af5cb60](https://github.com/alkanna/quarry/commit/af5cb60762bda22bfa95f68dde594e20927cd588))
+* redesign Settings with categories and add reading options ([#164](https://github.com/alkanna/quarry/issues/164)) ([36e5adf](https://github.com/alkanna/quarry/commit/36e5adfc4e43b89278334db055e0fe799289670a))
+
 ## [0.31.0](https://github.com/alkanna/quarry/compare/v0.30.0...v0.31.0) (2026-11-10)
 
 
