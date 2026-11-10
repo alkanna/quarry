@@ -703,7 +703,9 @@ fn popup_list(ui: &mut egui::Ui, ac: &Ac, typed: &str, moved: bool, width: Optio
         (false, n) => n,
     };
     let status_w = status.map_or(0.0, |s| p.layout_no_wrap(s.to_string(), note_font.clone(), TEXT()).size().x);
-    let fonts = fonts.max(status_w + 16.0);
+    // The heading is drawn further in than the labels, so it needs its own room.
+    let title_w = if ac.title.is_empty() { 0.0 } else { p.layout_no_wrap(ac.title.clone(), note_font.clone(), TEXT()).size().x };
+    let fonts = fonts.max(status_w + 16.0).max(title_w);
     let w = width.unwrap_or((fonts + BADGE + PAD * 5.0 + 16.0).clamp(220.0, 520.0));
     popup_card(ui).inner_margin(egui::Margin::symmetric(0, 4)).show(ui, |ui| {
         ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
@@ -711,7 +713,11 @@ fn popup_list(ui: &mut egui::Ui, ac: &Ac, typed: &str, moved: bool, width: Optio
         // SQL lists name what they list in a heading row.
         if !ac.title.is_empty() {
             let (rect, _) = ui.allocate_exact_size(egui::vec2(w, ROW), egui::Sense::hover());
-            ui.painter().text(egui::pos2(rect.left() + PAD + 6.0, rect.center().y), egui::Align2::LEFT_CENTER, &ac.title, note_font.clone(), FAINT());
+            // Cut with an ellipsis past the width cap rather than spilling out of the card.
+            let mut job = LayoutJob::simple_singleline(ac.title.clone(), note_font.clone(), FAINT());
+            job.wrap = egui::text::TextWrapping::truncate_at_width(w - (PAD + 6.0) * 2.0);
+            let galley = ui.painter().layout_job(job);
+            ui.painter().galley(egui::pos2(rect.left() + PAD + 6.0, rect.center().y - galley.size().y / 2.0), galley, FAINT());
         }
         egui::ScrollArea::vertical().max_height(ROW * VISIBLE as f32).show(ui, |ui| {
             ui.set_width(w);

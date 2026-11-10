@@ -6,3 +6,5 @@ Quarry embeds these fonts in its binary. Both are licensed under the SIL Open Fo
 |---|---|---|
 | Inter (variable) | Copyright (c) 2016 The Inter Project Authors (https://github.com/rsms/inter) | `assets/fonts/Inter-OFL.txt` |
 | JetBrains Mono (variable) | Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono) | `assets/fonts/JetBrainsMono-OFL.txt` |
+
+The engine logos in `assets/engines/` are drawn from Simple Icons (https://simpleicons.org), released under CC0 1.0. MongoDB, MySQL and MariaDB are trademarks of their respective owners and are shown only to name the database a connection uses.
