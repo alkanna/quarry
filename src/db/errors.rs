@@ -324,8 +324,8 @@ pub fn explain(raw: &str, cx: &ErrCtx) -> Explained {
             // Our own messages read "Could not write x: reason"; the part before the colon is the title.
             let first = raw.lines().next().unwrap_or(raw).trim();
             let ours = mongo.is_none() && my.is_none() && pg_code(raw).is_none();
-            match first.split_once(": ").filter(|(t, _)| ours && t.len() < 80 && !t.contains('{')) {
-                Some((t, r)) => (ex.title, ex.hint) = (t.trim_end_matches('.').to_string(), sentence(r)),
+            match pg_wording(&said).or_else(|| first.split_once(": ").filter(|(t, _)| ours && t.len() < 80 && !t.contains('{')).map(|(t, r)| (t.trim_end_matches('.').to_string(), sentence(r)))) {
+                Some((t, r)) => (ex.title, ex.hint) = (t, r),
                 None if ours && first.len() <= 120 => ex.title = first.trim_end_matches('.').to_string(),
                 None => {
                     ex.title = if cx.what.is_empty() { "The request failed".into() } else { format!("Could not {}", cx.what) };
@@ -347,6 +347,32 @@ pub fn explain(raw: &str, cx: &ErrCtx) -> Explained {
         ex.hint.clear();
     }
     ex
+}
+
+/// PostgreSQL's refusals of a written value, told apart by the first words of the server's sentence (sqlx's text does
+/// not carry the SQLSTATE). The title says what is wrong in the user's terms and the hint keeps the server's sentence, which
+/// names the value and the type.
+fn pg_wording(said: &str) -> Option<(String, String)> {
+    let low = said.to_lowercase();
+    let server = sentence(said.lines().next().unwrap_or(said));
+    let (title, hint) = if low.starts_with("invalid input syntax for") || low.starts_with("invalid input value for enum") || low.starts_with("malformed array literal") || low.starts_with("malformed range literal") {
+        ("That value is not valid for the column's type", server)
+    } else if low.contains("out of range") || low.starts_with("numeric field overflow") || low.starts_with("value too long for type") {
+        ("That value is too large for the column", server)
+    } else if low.starts_with("null value in column") && low.contains("violates not-null constraint") {
+        ("This column does not allow NULL", server)
+    } else if low.contains("violates foreign key constraint") {
+        ("Other rows depend on this value", server)
+    } else if low.contains("violates check constraint") {
+        ("The value breaks a check constraint", server)
+    } else if low.contains("canceling statement due to lock timeout") {
+        ("Another session holds a lock on this table", "The write waited 10 seconds for the lock and gave up. Nothing was changed. Try again when the other session is done.".to_string())
+    } else if low.contains("in a read-only transaction") {
+        ("This connection is read-only", server)
+    } else {
+        return None;
+    };
+    Some((title.to_string(), hint))
 }
 
 fn sentence(s: &str) -> String {
@@ -431,6 +457,21 @@ mod tests {
         // A MySQL number is not read as a SQLSTATE.
         assert_eq!(pg_code("error returned from database: 1062 (23000): Duplicate entry"), None);
         assert_eq!(server_text("error returned from database: 42P01: relation \"x\" does not exist\nPosition: 3"), "relation \"x\" does not exist");
+    }
+
+    #[test]
+    fn postgres_write_refusals_are_explained() {
+        let ex = |raw: &str| explain(raw, &cx());
+        let e = ex("error returned from database: invalid input syntax for type integer: \"abc\"");
+        assert_eq!((e.title.as_str(), e.hint.as_str()), ("That value is not valid for the column's type", "Invalid input syntax for type integer: \"abc\""));
+        assert_eq!(ex("error returned from database: invalid input value for enum mood: \"furious\"").title, "That value is not valid for the column's type");
+        assert_eq!(ex("error returned from database: value \"99999999999\" is out of range for type integer").title, "That value is too large for the column");
+        assert_eq!(ex("error returned from database: null value in column \"n\" of relation \"t\" violates not-null constraint").title, "This column does not allow NULL");
+        assert_eq!(ex("error returned from database: update or delete on table \"p\" violates foreign key constraint \"fk\" on table \"c\"").title, "Other rows depend on this value");
+        let lock = ex("error returned from database: canceling statement due to lock timeout");
+        assert_eq!(lock.title, "Another session holds a lock on this table");
+        assert!(lock.hint.contains("Nothing was changed") && !lock.hint.contains("index"));
+        assert_eq!(ex("error returned from database: cannot execute UPDATE in a read-only transaction").title, "This connection is read-only");
     }
 
     #[test]

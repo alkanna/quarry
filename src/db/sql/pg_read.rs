@@ -137,7 +137,11 @@ impl Db {
         let t = Instant::now();
         let res = match &self.pool {
             Pool::My(p) => raw_sql(sql).fetch_all(p).await.map(SqlRow::wrap),
-            Pool::Pg(_) => read_only(&self.pg_pool()?, user_text, before, sql).await.map(SqlRow::wrap_pg),
+            Pool::Pg(p) => {
+                // Behind a pooler the settings are SET LOCAL in the transaction itself.
+                let first = [p.locals(), before].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("; ");
+                read_only(&self.pg_pool()?, user_text, &first, sql).await.map(SqlRow::wrap_pg)
+            }
         };
         self.note(schema, sql, t, &res);
         res.map_err(e)
@@ -168,7 +172,7 @@ impl Worker {
                 }
                 let at = db.at(&database);
                 let t = Instant::now();
-                let rows = raw_sql(Dialect::Postgres.schemas()).fetch_all(&at.pg_pool()?).await.map(SqlRow::wrap_pg);
+                let rows = read_only(&at.pg_pool()?, false, &at.pg_locals(), Dialect::Postgres.schemas()).await.map(SqlRow::wrap_pg);
                 at.note(&database, Dialect::Postgres.schemas(), t, &rows);
                 let mut names: Vec<String> = rows.map_err(e)?.iter().filter_map(|r| super::worker::text(r, "name")).collect();
                 names.sort();

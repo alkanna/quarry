@@ -44,9 +44,10 @@ pub struct PgPools {
     idle: Duration,
     per_db: u32,
     max_pools: usize,
-    /// Set when the server refused startup options (a pooler such as PgBouncer): every connection then runs these
-    /// instead, followed by the same readback.
-    sets: Option<Vec<String>>,
+    /// Set when the server refused startup options (a pooler such as PgBouncer). A session-level SET would land on
+    /// whichever backend answered and could leak to another client of the pooler, so nothing is set on the session:
+    /// every read and write runs in a transaction that starts with these SET LOCAL statements instead.
+    locals: Option<String>,
     /// A pool wraps what a connection hook failed with in a bare timeout, so the real message is kept here.
     failure: Arc<Mutex<Option<String>>>,
     live: Mutex<Live>,
@@ -59,8 +60,14 @@ struct Live {
 }
 
 impl PgPools {
-    fn new(opts: PgConnectOptions, default_db: String, acquire: Duration, sets: Option<Vec<String>>) -> PgPools {
-        PgPools { opts, default_db, acquire, idle: IDLE, per_db: PER_DB, max_pools: MAX_POOLS, sets, failure: Default::default(), live: Default::default() }
+    fn new(opts: PgConnectOptions, default_db: String, acquire: Duration, locals: Option<String>) -> PgPools {
+        PgPools { opts, default_db, acquire, idle: IDLE, per_db: PER_DB, max_pools: MAX_POOLS, locals, failure: Default::default(), live: Default::default() }
+    }
+
+    /// The SET LOCAL statements every transaction of a pooler-fallback connection starts with, or an empty string when
+    /// the startup options carry the session.
+    pub fn locals(&self) -> &str {
+        self.locals.as_deref().unwrap_or_default()
     }
 
     /// The pool of `database`, made on first use. Making it opens no connection. Past the cap the pool used least
@@ -85,15 +92,15 @@ impl PgPools {
                 }
             }
         }
-        let (sets, failure) = (self.sets.clone(), self.failure.clone());
+        let (locals, failure) = (self.locals.clone(), self.failure.clone());
         let pool = PgPoolOptions::new()
             .max_connections(self.per_db)
             .min_connections(0)
             .idle_timeout(self.idle)
             .acquire_timeout(self.acquire)
             .after_connect(move |c, _| {
-                let (sets, failure) = (sets.clone(), failure.clone());
-                Box::pin(async move { session(c, sets.as_deref(), &failure).await })
+                let (locals, failure) = (locals.clone(), failure.clone());
+                Box::pin(async move { session(c, locals.as_deref(), &failure).await })
             })
             .connect_lazy_with(self.opts.clone().database(&name));
         live.pools.insert(name, (pool.clone(), tick));
@@ -121,7 +128,7 @@ impl PgPools {
     pub async fn detached(&self, opts: &Opts) -> Res<Conn> {
         let Opts::Pg(o) = opts else { return Err("Not a PostgreSQL connection".into()) };
         let mut c = sqlx::PgConnection::connect_with(o).await.map_err(|x| e(x))?;
-        session(&mut c, self.sets.as_deref(), &self.failure).await.map_err(|x| self.failure.lock().unwrap().clone().unwrap_or_else(|| e(x)))?;
+        session(&mut c, self.locals.as_deref(), &self.failure).await.map_err(|x| self.failure.lock().unwrap().clone().unwrap_or_else(|| e(x)))?;
         Ok(Conn::Pg(c))
     }
 }
@@ -145,6 +152,17 @@ impl Db {
             _ => Err("Not a PostgreSQL connection".into()),
         }
     }
+
+    /// What a transaction on this connection runs first (`SET LOCAL` for the timeout and the output formats) when the
+    /// server is behind a pooler that refused startup options, and an empty string otherwise. Anything that reads
+    /// through `acquire_conn` and opens its own transaction must run it right after BEGIN.
+    #[allow(dead_code)] // the Query and shell paths of steps 6 and 7 call it
+    pub fn pg_locals(&self) -> String {
+        match &self.pool {
+            Pool::Pg(p) => p.locals().to_string(),
+            Pool::My(_) => String::new(),
+        }
+    }
 }
 
 /// Startup parameters the session needs. `statement_timeout` is left out when the limit is off.
@@ -158,15 +176,21 @@ fn startup(o: PgConnectOptions, ms: u64) -> PgConnectOptions {
     o.application_name("Quarry").options(opts)
 }
 
-/// The same settings as `startup`, for a server that refuses startup options.
-fn fallback_sets(ms: u64) -> Vec<String> {
-    let mut v = vec!["SET default_transaction_read_only = on".to_string()];
+/// The settings of `startup` that are not the read-only guard, as SET LOCAL statements for a server that refuses startup
+/// options. The guard itself is the `BEGIN READ ONLY` every read opens.
+fn locals_for(ms: u64) -> String {
+    let mut v = Vec::new();
     if ms > 0 {
-        v.push(format!("SET statement_timeout = {ms}"));
+        v.push(format!("SET LOCAL statement_timeout = {ms}"));
     }
-    v.extend(["SET bytea_output = 'hex'".to_string(), "SET DateStyle = 'ISO'".to_string(), "SET IntervalStyle = 'postgres'".to_string()]);
-    v
+    v.extend(["SET LOCAL bytea_output = 'hex'".to_string(), "SET LOCAL DateStyle = 'ISO'".to_string(), "SET LOCAL IntervalStyle = 'postgres'".to_string()]);
+    v.join("; ")
 }
+
+/// What every write transaction starts with, whatever the session carries: no statement timeout, because an ALTER or a
+/// big update must not be cut by the limit meant for reads, a lock timeout so a write never queues behind another
+/// session's lock for ever, and the output formats the read path expects.
+pub(super) const WRITE_LOCALS: &str = "SET LOCAL statement_timeout = 0; SET LOCAL lock_timeout = '10s'; SET LOCAL bytea_output = 'hex'; SET LOCAL DateStyle = 'ISO'; SET LOCAL IntervalStyle = 'postgres'";
 
 /// A pooler answers a startup `options` parameter with "unsupported startup parameter".
 fn options_refused(err: &sqlx::Error) -> bool {
@@ -188,17 +212,42 @@ pub(super) async fn readback(c: &mut sqlx::PgConnection) -> Result<(), String> {
     Ok(())
 }
 
-/// What every connection gets after it opens: the fallback settings when startup options are not accepted, then the
-/// guard readback.
-pub(super) async fn session(c: &mut sqlx::PgConnection, sets: Option<&[String]>, failure: &Mutex<Option<String>>) -> Result<(), sqlx::Error> {
+const POOLED: &str = "This server sits behind a connection pooler that gives each statement to a different backend (statement pooling). Quarry needs session or transaction pooling, so the connection was refused";
+
+/// The check of a connection behind a pooler that refused startup options, in one transaction because nothing may be set on
+/// the session. It refuses statement pooling, where BEGIN is not allowed or the statements of one transaction are answered
+/// by different backends, and reads `standard_conforming_strings`. The read-only guard is not read here, since each read
+/// opens its own `BEGIN READ ONLY`.
+async fn pooler_check(c: &mut sqlx::PgConnection, locals: &str) -> Result<(), String> {
+    let mut tx = c.begin_with("BEGIN READ ONLY").await.map_err(|x| format!("{POOLED} ({})", e(x)))?;
+    tx.execute(locals).await.map_err(|x| e(x))?;
+    let mut pid = None;
+    for _ in 0..3 {
+        let rows = (&mut *tx).fetch_all("SELECT pg_backend_pid()::text, current_setting('standard_conforming_strings')").await.map_err(|x| e(x))?;
+        let row = rows.first().ok_or("The server did not report its session settings")?;
+        let now = row.cell(0).map(<[u8]>::to_vec);
+        if pid.get_or_insert_with(|| now.clone()) != &now {
+            return Err(POOLED.into());
+        }
+        if row.cell(1) != Some(b"on") {
+            return Err("The server has standard_conforming_strings off, which Quarry cannot read safely, so the connection was refused".into());
+        }
+    }
+    let _ = tx.rollback().await;
+    Ok(())
+}
+
+/// What every connection gets after it opens. With startup options the guard is read back; behind a pooler (`locals` is
+/// set) nothing is set or read on the session and the pooler is checked instead.
+pub(super) async fn session(c: &mut sqlx::PgConnection, locals: Option<&str>, failure: &Mutex<Option<String>>) -> Result<(), sqlx::Error> {
     let fail = |m: String| {
         *failure.lock().unwrap() = Some(m.clone());
         sqlx::Error::Protocol(m)
     };
-    for q in sets.unwrap_or_default() {
-        c.execute(q.as_str()).await.map_err(|x| fail(format!("{q}: {}", e(x))))?;
+    match locals {
+        Some(l) => pooler_check(c, l).await.map_err(fail),
+        None => readback(c).await.map_err(fail),
     }
-    readback(c).await.map_err(fail)
 }
 
 fn ssl_mode(m: SslMode) -> PgSslMode {
@@ -259,18 +308,18 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
         base = base.ssl_root_cert(&a.ssl_ca);
     }
     let first = async {
-        let mut sets = None;
+        let mut locals = None;
         let (mut c, opts) = match sqlx::PgConnection::connect_with(&startup(base.clone().database(&default_db), ms)).await {
             Ok(c) => (c, startup(base.clone(), ms)),
             Err(x) if options_refused(&x) => {
-                sets = Some(fallback_sets(ms));
+                locals = Some(locals_for(ms));
                 (sqlx::PgConnection::connect_with(&base.clone().database(&default_db)).await.map_err(|x| e(x))?, base.clone())
             }
             Err(x) => return Err(e(x)),
         };
         let failure = Mutex::new(None);
         let res = async {
-            session(&mut c, sets.as_deref(), &failure).await.map_err(|x| failure.lock().unwrap().clone().unwrap_or_else(|| e(x)))?;
+            session(&mut c, locals.as_deref(), &failure).await.map_err(|x| failure.lock().unwrap().clone().unwrap_or_else(|| e(x)))?;
             let f = facts(&mut c).await?;
             // The same visibility rule the sidebar needs: databases that cannot be connected to are left out.
             let rows = c
@@ -283,10 +332,10 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
         .await;
         let _ = c.close().await;
         let (f, dbs) = res?;
-        Ok::<_, String>((f, dbs, opts, sets))
+        Ok::<_, String>((f, dbs, opts, locals))
     };
-    let (f, dbs, opts, sets) = tokio::time::timeout(timeout, first).await.map_err(|_| format!("Could not connect and set up the session within {} s", timeout.as_secs()))??;
-    let pools = PgPools::new(opts.clone(), default_db.clone(), timeout, sets);
+    let (f, dbs, opts, locals) = tokio::time::timeout(timeout, first).await.map_err(|_| format!("Could not connect and set up the session within {} s", timeout.as_secs()))??;
+    let pools = PgPools::new(opts.clone(), default_db.clone(), timeout, locals);
     let db = Db {
         pool: Pool::Pg(Arc::new(pools)),
         dialect: Dialect::Postgres,
@@ -303,7 +352,10 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
 /// Readies a connection of its own for a script: the backend's pid for Stop, and write access when unlocked.
 pub(super) async fn prepare(c: &mut sqlx::PgConnection, read_only: bool, id: &AtomicU64) -> Result<(), sqlx::Error> {
     // The start time travels as text so no timestamp type has to round trip, and is compared as text on Stop.
-    let rows = c.fetch_all("SELECT pg_backend_pid()::text, (SELECT backend_start::text FROM pg_stat_activity WHERE pid = pg_backend_pid())").await?;
+    let rows = c.fetch_all("SELECT pg_backend_pid()::text, (SELECT backend_start::text FROM pg_stat_activity WHERE pid = pg_backend_pid()), current_setting('default_transaction_read_only')").await?;
+    // Behind a pooler the session is not read-only by default and nothing may be set on it, so the caller's own
+    // transactions say READ WRITE instead.
+    let pooled = rows.first().is_some_and(|r| r.cell(2) != Some(b"on"));
     if let Some(r) = rows.first() {
         let pid = r.cell(0).and_then(|b| std::str::from_utf8(b).ok()?.parse::<u64>().ok()).unwrap_or(0);
         if let Some(start) = r.cell(1) {
@@ -311,7 +363,7 @@ pub(super) async fn prepare(c: &mut sqlx::PgConnection, read_only: bool, id: &At
         }
         id.store(pid, Ordering::SeqCst);
     }
-    if !read_only {
+    if !read_only && !pooled {
         c.execute(Dialect::Postgres.session_read_only(false)).await?;
     }
     Ok(())
@@ -330,14 +382,6 @@ pub(super) async fn cancel(db: &Db, pid: u64) -> Res<String> {
         rows if rows.is_empty() => Err("That connection is already gone.".into()),
         _ => Ok("Stopped the running statement".into()),
     }
-}
-
-/// The settings of a connection that may write, applied on top of a pooled connection taken out of its pool.
-pub(super) async fn writer(c: &mut Conn) -> Res<()> {
-    for q in [Dialect::Postgres.session_read_only(false), "SET statement_timeout = 0", "SET lock_timeout = '10s'"] {
-        c.execute(q).await.map_err(|x| e(x))?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -437,9 +481,17 @@ mod tests {
         }
         assert_eq!(o.get_application_name(), Some("Quarry"));
         assert!(!startup(PgConnectOptions::new_without_pgpass(), 0).get_options().unwrap().contains("statement_timeout"));
-        let sets = fallback_sets(15_000);
-        assert_eq!(sets.len(), 5);
-        assert!(sets[0].contains("default_transaction_read_only"));
+        // The fallback is the same settings as SET LOCAL, and never a session-level SET.
+        let locals = locals_for(15_000);
+        for want in ["SET LOCAL statement_timeout = 15000", "SET LOCAL bytea_output = 'hex'", "SET LOCAL DateStyle = 'ISO'", "SET LOCAL IntervalStyle = 'postgres'"] {
+            assert!(locals.contains(want), "{locals}");
+        }
+        assert!(!locals.contains("default_transaction_read_only"), "the guard is the read-only transaction, not a setting");
+        assert!(!locals_for(0).contains("statement_timeout"));
+        for stmt in locals.split("; ").chain(WRITE_LOCALS.split("; ")) {
+            assert!(stmt.starts_with("SET LOCAL "), "{stmt}");
+        }
+        assert!(WRITE_LOCALS.contains("statement_timeout = 0") && WRITE_LOCALS.contains("lock_timeout = '10s'"));
     }
 
     /// Live tests, run on every server named by QUARRY_TEST_POSTGRES and QUARRY_TEST_POSTGRES13.
@@ -452,10 +504,15 @@ mod tests {
             x.as_database_error().and_then(|d| d.code().map(|c| c.to_string()))
         }
 
-        fn pools_of(l: &LivePg, sets: Option<Vec<String>>, acquire: Duration) -> PgPools {
+        fn pools_of(l: &LivePg, locals: Option<String>, acquire: Duration) -> PgPools {
             // Without fallback statements the startup options carry the session, as in the app.
             let o = PgConnectOptions::from_str(&l.uri).unwrap();
-            PgPools::new(if sets.is_none() { startup(o, 30_000) } else { o }, "postgres".into(), acquire, sets)
+            PgPools::new(if locals.is_none() { startup(o, 30_000) } else { o }, "postgres".into(), acquire, locals)
+        }
+
+        /// Pools whose startup options are exactly `opts`, as a server that ignored or changed the guard would leave them.
+        fn pools_with(l: &LivePg, opts: &[(&str, &str)], acquire: Duration) -> PgPools {
+            PgPools::new(PgConnectOptions::from_str(&l.uri).unwrap().options(opts.iter().copied()), "postgres".into(), acquire, None)
         }
 
         #[test]
@@ -503,17 +560,12 @@ mod tests {
                 let _rt = l.w.rt.enter();
                 // A pool whose connections turn the guard off, as a server or pooler that ignores the startup
                 // options would leave them.
-                let off = pools_of(l, Some(vec!["SET default_transaction_read_only = off".into()]), Duration::from_secs(3));
+                let off = pools_with(l, &[("default_transaction_read_only", "off")], Duration::from_secs(3));
                 let err = l.w.rt.block_on(off.acquire(None)).err().expect("must be refused");
                 assert!(err.contains("not read-only"), "{var}: {err}");
-                let scs = pools_of(l, Some(vec!["SET default_transaction_read_only = on".into(), "SET standard_conforming_strings = off".into()]), Duration::from_secs(3));
+                let scs = pools_with(l, &[("default_transaction_read_only", "on"), ("standard_conforming_strings", "off")], Duration::from_secs(3));
                 let err = l.w.rt.block_on(scs.acquire(None)).err().expect("must be refused");
                 assert!(err.contains("standard_conforming_strings"), "{var}: {err}");
-                // The same statements in the right order are the fallback for a server that refuses startup options.
-                let ok = pools_of(l, Some(fallback_sets(30_000)), Duration::from_secs(10));
-                let mut c = l.w.rt.block_on(ok.acquire(None)).unwrap();
-                let rows = l.w.rt.block_on(c.fetch_all("SHOW default_transaction_read_only")).unwrap();
-                assert_eq!(rows[0].cell(0), Some(&b"on"[..]), "{var}");
                 // Direct readback on a connection that was switched.
                 let mut raw = l.w.rt.block_on(sqlx::PgConnection::connect(&l.uri)).unwrap();
                 l.w.rt.block_on(raw.execute("SET default_transaction_read_only = on")).unwrap();
@@ -615,20 +667,114 @@ mod tests {
                 l.w.rt.block_on(async {
                     assert_eq!(crate::db::sql::write::writer_conn(&db, "", true).await.err().as_deref(), Some("Writes are locked on this connection. Unlock them first."));
                     let mut w = crate::db::sql::write::writer_conn(&db, "", false).await.unwrap();
-                    w.execute(&format!("DROP TABLE IF EXISTS {name}")).await.unwrap();
-                    w.execute(&format!("CREATE TABLE {name} (id int)")).await.unwrap();
-                    w.execute(&format!("INSERT INTO {name} VALUES (1), (2)")).await.unwrap();
-                    let rows = w.fetch_all(&format!("SELECT count(*)::text, current_setting('statement_timeout'), current_setting('lock_timeout'), current_setting('default_transaction_read_only') FROM {name}")).await.unwrap();
+                    // The writer's session is the pool's, read-only; a write opens its own READ WRITE transaction.
+                    let rows = w.fetch_all("SHOW default_transaction_read_only").await.unwrap();
+                    assert_eq!(rows[0].cell(0), Some(&b"on"[..]), "{var}");
+                    let err = w.execute(&format!("CREATE TABLE {name} (id int)")).await.unwrap_err();
+                    assert_eq!(code(&err).as_deref(), Some("25006"), "{var}: {err}");
+                    let mut tx = w.begin_write().await.unwrap();
+                    tx.exec_bound(&format!("DROP TABLE IF EXISTS {name}"), &[]).await.unwrap();
+                    tx.exec_bound(&format!("CREATE TABLE {name} (id int)"), &[]).await.unwrap();
+                    tx.exec_bound(&format!("INSERT INTO {name} VALUES (1), (2)"), &[]).await.unwrap();
+                    let rows = tx.fetch_bound(&format!("SELECT count(*)::text, current_setting('statement_timeout'), current_setting('lock_timeout'), current_setting('transaction_read_only') FROM {name}"), &[]).await.unwrap();
                     let cells: Vec<_> = (0..4).map(|i| String::from_utf8_lossy(rows[0].cell(i).unwrap()).into_owned()).collect();
                     assert_eq!(cells, ["2", "0", "10s", "off"], "{var}");
-                    // The next pooled session is read-only whatever the writer did.
+                    tx.commit().await.unwrap();
+                    // The session default was never changed, and the next pooled session is read-only too.
+                    let rows = w.fetch_all("SHOW default_transaction_read_only").await.unwrap();
+                    assert_eq!(rows[0].cell(0), Some(&b"on"[..]), "{var}");
+                    let rows = w.fetch_all("SHOW lock_timeout").await.unwrap();
+                    assert_eq!(rows[0].cell(0), Some(&b"0"[..]), "{var}");
                     let mut r = db.acquire_conn().await.unwrap();
                     let err = r.execute(&format!("INSERT INTO {name} VALUES (3)")).await.unwrap_err();
                     assert_eq!(code(&err).as_deref(), Some("25006"), "{var}: {err}");
-                    let rows = r.fetch_all("SHOW default_transaction_read_only").await.unwrap();
-                    assert_eq!(rows[0].cell(0), Some(&b"on"[..]));
-                    w.execute(&format!("DROP TABLE {name}")).await.unwrap();
+                    let mut tx = w.begin_write().await.unwrap();
+                    tx.exec_bound(&format!("DROP TABLE {name}"), &[]).await.unwrap();
+                    tx.commit().await.unwrap();
                 });
+            });
+        }
+
+        #[test]
+        fn behind_a_pooler_nothing_is_set_on_the_session() {
+            every_pg(|l, var| {
+                let _rt = l.w.rt.enter();
+                // No startup options, as a pooler that refuses them leaves the connection.
+                let p = pools_of(l, Some(locals_for(30_000)), Duration::from_secs(10));
+                let mut c = l.w.rt.block_on(p.acquire(None)).unwrap();
+                // The check ran in a rolled-back transaction: statement_timeout, DateStyle, bytea_output and the read-only
+                // default are all what the server hands every session.
+                let server_default = |name: &str| l.one(&format!("SHOW {name}"));
+                for name in ["statement_timeout", "default_transaction_read_only", "bytea_output", "IntervalStyle", "application_name"] {
+                    let rows = l.w.rt.block_on(c.fetch_all(format!("SHOW {name}").as_str())).unwrap();
+                    assert_eq!(String::from_utf8_lossy(rows[0].cell(0).unwrap()), server_default(name), "{var} {name}");
+                }
+                assert_eq!(p.locals(), locals_for(30_000));
+                // Inside a read transaction the locals apply and the guard holds.
+                let before = p.locals().to_string();
+                let rows = l.w.rt.block_on(crate::db::sql::pg_read::read_only(&p.pool(None), false, &before, "SELECT current_setting('statement_timeout'), current_setting('transaction_read_only'), current_setting('DateStyle')")).unwrap();
+                assert_eq!(rows[0].cell(0), Some(&b"30s"[..]), "{var}");
+                assert_eq!(rows[0].cell(1), Some(&b"on"[..]), "{var}");
+                let err = l.w.rt.block_on(crate::db::sql::pg_read::read_only(&p.pool(None), false, &before, "CREATE TABLE t_pg5_pooled (id int)")).unwrap_err();
+                assert_eq!(code(&err).as_deref(), Some("25006"), "{var}: {err}");
+                // The session is untouched afterwards as well.
+                let rows = l.w.rt.block_on(c.fetch_all("SHOW statement_timeout")).unwrap();
+                assert_eq!(String::from_utf8_lossy(rows[0].cell(0).unwrap()), server_default("statement_timeout"), "{var}");
+            });
+        }
+
+        #[test]
+        fn behind_a_pooler_pages_and_writes_run_in_transactions() {
+            every_pg(|l, var| {
+                let _rt = l.w.rt.enter();
+                let base = l.quarry_test();
+                let pool = l.fixture_pool();
+                let name = format!("t5_pooled_{}", var.to_ascii_lowercase());
+                l.qsql(&pool, &format!("DROP SCHEMA IF EXISTS {name} CASCADE; CREATE SCHEMA {name}; CREATE TABLE {name}.t (id int PRIMARY KEY, v int, b bytea); INSERT INTO {name}.t VALUES (1, 1, '\\x0102')"));
+                let p = PgPools::new(PgConnectOptions::from_str(&l.uri).unwrap(), "postgres".into(), Duration::from_secs(10), Some(locals_for(30_000)));
+                let db = Db { pool: Pool::Pg(Arc::new(p)), ..base };
+                // A page and the metadata behind it are read in READ ONLY transactions with the locals applied.
+                l.w.sql_page(7, db.clone(), name.clone(), "t".into(), Default::default(), 100, 0);
+                let crate::db::Msg::SqlCols { cols, pk, .. } = l.next() else { panic!("expected SqlCols") };
+                let crate::db::Msg::Docs { res: Ok((rows, _, _)), .. } = l.next() else { panic!("expected Docs") };
+                let docs: Vec<_> = rows.iter().map(|r| r.decode().unwrap()).collect();
+                assert_eq!(pk, ["id"], "{var}");
+                assert_eq!(docs[0].get_i64("v").unwrap(), 1);
+                assert!(matches!(docs[0].get("b"), Some(mongodb::bson::Bson::Binary(b)) if b.bytes == [1, 2]), "{var}: bytea is read as hex");
+                // A write goes through its own READ WRITE transaction, and no session setting changed anywhere.
+                let ed = crate::db::sql::write::RowEdit { pk: docs[0].get_document("_id").unwrap().clone(), changes: vec![("v".into(), mongodb::bson::Bson::Int64(1), mongodb::bson::Bson::Int64(2))] };
+                l.w.sql_save(vec!["k".into()], 1, db.clone(), name.clone(), "t".into(), cols, vec!["id".into()], vec![ed], false);
+                let crate::db::Msg::Saved { res, .. } = l.next() else { panic!("expected Saved") };
+                assert!(res.is_ok(), "{var}: {res:?}");
+                assert_eq!(l.qone(&pool, &format!("SELECT v::text FROM {name}.t")), "2");
+                l.w.rt.block_on(async {
+                    let mut c = db.acquire_conn().await.unwrap();
+                    for (setting, want) in [("default_transaction_read_only", "off"), ("statement_timeout", "0"), ("lock_timeout", "0"), ("bytea_output", "hex")] {
+                        let rows = c.fetch_all(format!("SHOW {setting}").as_str()).await.unwrap();
+                        assert_eq!(String::from_utf8_lossy(rows[0].cell(0).unwrap()), want, "{var} {setting}");
+                    }
+                });
+                l.qsql(&pool, &format!("DROP SCHEMA {name} CASCADE"));
+            });
+        }
+
+        #[test]
+        fn a_backend_that_changes_inside_one_transaction_is_refused() {
+            every_pg(|l, var| {
+                // A real server answers every statement of a transaction from one backend; statement pooling does not.
+                // The pid is compared across the statements of the check, so a stand-in that reports another value for the
+                // second one is what the refusal reads.
+                let schema = format!("t5_flip_{}", var.to_ascii_lowercase());
+                let mut raw = l.w.rt.block_on(sqlx::PgConnection::connect(&l.uri)).unwrap();
+                l.w.rt.block_on(raw.execute(format!("DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema}; CREATE FUNCTION {schema}.pg_backend_pid() RETURNS int LANGUAGE sql VOLATILE AS 'SELECT (random() * 1000000000)::int'").as_str())).unwrap();
+                // An unqualified call finds the stand-in before pg_catalog's own.
+                l.w.rt.block_on(raw.execute(format!("SET search_path = {schema}, pg_catalog").as_str())).unwrap();
+                let err = l.w.rt.block_on(pooler_check(&mut raw, "SET LOCAL statement_timeout = 0")).unwrap_err();
+                assert!(err.contains("statement pooling"), "{var}: {err}");
+                // Without the stand-in the same connection passes.
+                l.w.rt.block_on(raw.execute("SET search_path = pg_catalog")).unwrap();
+                assert!(l.w.rt.block_on(pooler_check(&mut raw, "SET LOCAL statement_timeout = 0")).is_ok(), "{var}");
+                l.w.rt.block_on(raw.execute(format!("DROP SCHEMA {schema} CASCADE").as_str())).unwrap();
             });
         }
     }

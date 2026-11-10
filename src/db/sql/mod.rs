@@ -12,6 +12,8 @@ mod pg_read;
 mod pg_read_tests;
 #[cfg(test)]
 mod pg_shell_tests;
+#[cfg(test)]
+mod pg_write_tests;
 pub mod exec;
 mod relay;
 pub mod structure;

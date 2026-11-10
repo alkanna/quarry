@@ -287,7 +287,7 @@ impl App {
             Some(true) => {
                 let kind = self.t().and_then(|t| t.sql.as_ref()).and_then(|s| s.cols.iter().find(|c| c.name == e.col)).map_or(Kind::Text, |c| c.kind);
                 let row = self.t().and_then(|t| (0..t.docs.len()).find(|&j| Rows::Raw(&t.docs).id(j) == e.id));
-                match value::parse_edit(kind, &e.text) {
+                match value::parse_edit_for(self.sql_dialect().0, kind, &e.text) {
                     Ok(_) if row.is_none() => self.warn("That row is no longer in the table, so the edit was cancelled."),
                     Ok(v) => self.sql_set_cell(row.unwrap_or_default(), &e.col, v),
                     Err(m) => {
@@ -440,7 +440,7 @@ impl App {
                     changes: db::diff(&dr.original, &dr.current).into_iter().filter(|c| c.0 != "_id").map(|(p, a, b)| (p, a.unwrap_or(Bson::Null), b.unwrap_or(Bson::Null))).collect(),
                 };
                 let (sql, params) = write::update_sql(d, &sel.db, &sel.coll, &cols, &edit);
-                body.push(format!("{};", write::preview(&sql, &params, bs)));
+                body.push(format!("{};", write::preview_for(d, &sql, &params, bs)));
             }
             self.modal = Some(Modal::Text { title: "SQL that Save will run".into(), body: body.join("\n"), code: false });
         }
@@ -511,6 +511,7 @@ impl App {
 
     pub(super) fn sql_row_dialog(&mut self, ui: &mut egui::Ui, f: &mut RowForm, keep: &mut bool) {
         let table = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
+        let dialect = self.sql_dialect().0;
         ui.set_width(560.0);
         dialog_title(ui, format!("{} in {table}", f.title));
         ui.label(RichText::new("Default leaves the column to the server: its default, or the next auto-increment number.").size(TXT_SMALL).color(MUTED()));
@@ -541,7 +542,7 @@ impl App {
                     match fld.mode {
                         Mode::Default => {}
                         Mode::Null => row.push((fld.col.name.clone(), Bson::Null)),
-                        Mode::Value => match value::parse_edit(fld.col.kind, &fld.text) {
+                        Mode::Value => match value::parse_edit_for(dialect, fld.col.kind, &fld.text) {
                             Ok(v) => row.push((fld.col.name.clone(), v)),
                             Err(m) => {
                                 bad = Some(format!("{}: {m}", fld.col.name));
@@ -704,7 +705,7 @@ impl App {
             });
             ui.end_row();
         });
-        let parsed = if f.null { Ok(Bson::Null) } else if col.kind == Kind::Enum { Ok(Bson::String(f.text.clone())) } else { value::parse_edit(col.kind, &f.text) };
+        let parsed = if f.null { Ok(Bson::Null) } else if col.kind == Kind::Enum { Ok(Bson::String(f.text.clone())) } else { value::parse_edit_for(d, col.kind, &f.text) };
         ui.add_space(4.0);
         ui.label(RichText::new(format!("Staged as {n} cell edit{}. Nothing runs until Save, and Undo reverts them together.", if n == 1 { "" } else { "s" })).size(TXT_SMALL).color(FAINT()));
         ui.add_space(6.0);

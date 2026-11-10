@@ -2,13 +2,17 @@
 //! transaction on a connection of its own that is switched to READ WRITE. The pool stays read-only.
 
 use super::value::{hex_digits, lit, Kind, Param};
-use super::exec::Conn;
+use super::exec::{Cells, Conn};
 use super::{Col, Db, Dialect};
 use crate::db::{e, Msg, Res, UndoAction, UndoKind, Worker};
 use mongodb::bson::{Bson, Document};
 use std::time::Instant;
 
 pub const CONFLICT: &str = "Not saved: a row changed on the server since you opened it. Nothing was written. Reload and try again.";
+
+/// PostgreSQL has no `LIMIT 1` on UPDATE and DELETE, so a key that is not unique (a column set the table does not
+/// enforce) would change every row that shares it. The count is checked before the commit and the write is rolled back.
+pub const SEVERAL: &str = "Nothing was written: the key matches more than one row, so the change would have reached rows that are not on screen. The table has no unique constraint on the columns used as its key.";
 
 /// One row's staged change: the key, and each changed column with its value as read and the new one.
 #[derive(Clone, Debug, PartialEq)]
@@ -120,9 +124,79 @@ fn where_of(conds: Vec<String>) -> String {
     format!(" WHERE {}", if conds.is_empty() { "1 = 0".to_string() } else { conds.join(" AND ") })
 }
 
+/// PostgreSQL refuses a text value for an int column but never a cast from text, so every value is bound as text and its
+/// placeholder is written as `CAST($n AS <the column's type>)`, with the type as the server's `format_type` spells it
+/// (enums, domains, arrays and sized types included). A column the statement cannot place keeps a bare placeholder.
+fn pg_cast(cols: &[Col], src: &str, v: &Bson, params: &mut Vec<Param>) -> String {
+    params.push(Param::for_pg(v));
+    let n = params.len();
+    match cols.iter().find(|c| c.src == src).map(|c| c.ty.as_str()).filter(|t| !t.is_empty()) {
+        Some(ty) => format!("CAST(${n} AS {ty})"),
+        None => format!("${n}"),
+    }
+}
+
+/// `UPDATE` on PostgreSQL. No `LIMIT 1`, which it does not have: `apply_updates` counts the rows instead and rolls back
+/// unless exactly one changed. Key columns compare with `=` so an index is used; the old values are checked with
+/// `IS NOT DISTINCT FROM` because they may be NULL.
+fn pg_update_sql(schema: &str, table: &str, cols: &[Col], edit: &RowEdit) -> (String, Vec<Param>) {
+    let d = Dialect::Postgres;
+    let mut params = Vec::new();
+    let mut sets = Vec::new();
+    for (n, _, new) in &edit.changes {
+        let src = src_of(cols, n);
+        let v = pg_cast(cols, &src, new, &mut params);
+        sets.push(format!("{} = {v}", d.quote_ident(&src)));
+    }
+    let mut conds = Vec::new();
+    for (name, v) in &edit.pk {
+        let v = pg_cast(cols, name, v, &mut params);
+        conds.push(format!("{} = {v}", d.quote_ident(name)));
+    }
+    for (n, old, _) in &edit.changes {
+        if checkable(kind_of(cols, n)) {
+            let src = src_of(cols, n);
+            let v = pg_cast(cols, &src, old, &mut params);
+            conds.push(format!("{} IS NOT DISTINCT FROM {v}", d.quote_ident(&src)));
+        }
+    }
+    (format!("UPDATE {} SET {}{}", d.qualified(schema, table), sets.join(", "), where_of(conds)), params)
+}
+
+fn pg_delete_sql(schema: &str, table: &str, cols: &[Col], pk: &Document) -> (String, Vec<Param>) {
+    let d = Dialect::Postgres;
+    let mut params = Vec::new();
+    let mut conds = Vec::new();
+    for (name, v) in pk {
+        let v = pg_cast(cols, name, v, &mut params);
+        conds.push(format!("{} = {v}", d.quote_ident(name)));
+    }
+    (format!("DELETE FROM {}{}", d.qualified(schema, table), where_of(conds)), params)
+}
+
+/// `INSERT` on PostgreSQL: `DEFAULT VALUES` for an empty row, and `RETURNING` the key columns as text so the new keys
+/// are known without `last_insert_id`. `override_identity` writes values into a `GENERATED ALWAYS` identity column, which
+/// only the undo of a delete needs to bring the old keys back.
+fn pg_insert_sql(schema: &str, table: &str, cols: &[Col], row: &NewRow, pk: &[String], override_identity: bool) -> (String, Vec<Param>) {
+    let d = Dialect::Postgres;
+    let t = d.qualified(schema, table);
+    let ret = if pk.is_empty() { String::new() } else { format!(" RETURNING {}", pk.iter().map(|p| format!("{}::text", d.quote_ident(p))).collect::<Vec<_>>().join(", ")) };
+    if row.is_empty() {
+        return (format!("INSERT INTO {t} DEFAULT VALUES{ret}"), Vec::new());
+    }
+    let mut params = Vec::new();
+    let names: Vec<String> = row.iter().map(|(n, _)| d.quote_ident(n)).collect();
+    let marks: Vec<String> = row.iter().map(|(n, v)| pg_cast(cols, n, v, &mut params)).collect();
+    let over = if override_identity { " OVERRIDING SYSTEM VALUE" } else { "" };
+    (format!("INSERT INTO {t} ({}){over} VALUES ({}){ret}", names.join(", "), marks.join(", ")), params)
+}
+
 /// The UPDATE of one row: SET the changed columns, WHERE the key and every checkable changed column
 /// still hold the value that was read.
 pub fn update_sql(d: Dialect, schema: &str, table: &str, cols: &[Col], edit: &RowEdit) -> (String, Vec<Param>) {
+    if d == Dialect::Postgres {
+        return pg_update_sql(schema, table, cols, edit);
+    }
     let mut params = Vec::new();
     let sets: Vec<String> = edit
         .changes
@@ -148,6 +222,9 @@ pub fn update_sql(d: Dialect, schema: &str, table: &str, cols: &[Col], edit: &Ro
 }
 
 pub fn delete_sql(d: Dialect, schema: &str, table: &str, cols: &[Col], pk: &Document) -> (String, Vec<Param>) {
+    if d == Dialect::Postgres {
+        return pg_delete_sql(schema, table, cols, pk);
+    }
     let mut params = Vec::new();
     let mut sql = format!("DELETE FROM {}", d.qualified(schema, table));
     let mut conds = Vec::new();
@@ -158,6 +235,9 @@ pub fn delete_sql(d: Dialect, schema: &str, table: &str, cols: &[Col], pk: &Docu
 }
 
 pub fn insert_sql(d: Dialect, schema: &str, table: &str, cols: &[Col], row: &NewRow) -> (String, Vec<Param>) {
+    if d == Dialect::Postgres {
+        return pg_insert_sql(schema, table, cols, row, &[], false);
+    }
     let t = d.qualified(schema, table);
     if row.is_empty() {
         return (format!("INSERT INTO {t} () VALUES ()"), Vec::new());
@@ -192,6 +272,39 @@ pub fn preview(sql: &str, params: &[Param], bs: bool) -> String {
     out
 }
 
+/// `preview` for either engine. PostgreSQL's `$n` placeholders are found outside quoted identifiers, and its strings
+/// double the quote and nothing else, because `standard_conforming_strings` is on (the connect readback checks it).
+pub fn preview_for(d: Dialect, sql: &str, params: &[Param], bs: bool) -> String {
+    if d != Dialect::Postgres {
+        return preview(sql, params, bs);
+    }
+    let mut out = String::new();
+    let mut quoted = false;
+    let mut chars = sql.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '"' {
+            quoted = !quoted;
+        }
+        if ch == '$' && !quoted && chars.peek().is_some_and(char::is_ascii_digit) {
+            let mut n = String::new();
+            while let Some(dg) = chars.next_if(char::is_ascii_digit) {
+                n.push(dg);
+            }
+            match n.parse::<usize>().ok().and_then(|n| params.get(n.wrapping_sub(1))) {
+                Some(Param::Text(s)) => out.push_str(&format!("'{}'", s.replace('\'', "''"))),
+                Some(Param::Int(i)) => out.push_str(&i.to_string()),
+                Some(Param::UInt(u)) => out.push_str(&u.to_string()),
+                Some(Param::Float(f)) => out.push_str(&f.to_string()),
+                Some(Param::Bytes(b)) => out.push_str(&format!("'\\x{}'", hex_digits(b, false))),
+                Some(Param::Null) | None => out.push_str("NULL"),
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 /// A connection of its own with write access, so the pool's read-only session is never changed.
 pub(super) async fn writer_conn(db: &Db, schema: &str, read_only: bool) -> Res<Conn> {
     if read_only {
@@ -199,7 +312,7 @@ pub(super) async fn writer_conn(db: &Db, schema: &str, read_only: bool) -> Res<C
     }
     let mut c = db.acquire_conn().await?;
     if db.dialect == Dialect::Postgres {
-        super::pg::writer(&mut c).await?;
+        // The session stays read-only: each write opens a READ WRITE transaction of its own (`Conn::begin_write`).
         return Ok(c);
     }
     if !schema.is_empty() {
@@ -233,7 +346,7 @@ async fn apply_updates(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[S
         check_key(pk, &ed.pk)?;
     }
     let mut c = writer_conn(db, schema, read_only).await?;
-    let mut tx = c.begin().await.map_err(e)?;
+    let mut tx = c.begin_write().await.map_err(e)?;
     for ed in edits {
         let (sql, params) = update_sql(db.dialect, schema, table, cols, ed);
         let t = Instant::now();
@@ -243,6 +356,11 @@ async fn apply_updates(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[S
         // The session asks for matched rows, so zero means the key or an original value no longer matches.
         if r.rows_affected() == 0 {
             return Err(CONFLICT.into());
+        }
+        // MySQL's LIMIT 1 makes this impossible there; PostgreSQL has none, so the count is the promise.
+        if r.rows_affected() > 1 {
+            let _ = tx.rollback().await;
+            return Err(SEVERAL.into());
         }
     }
     tx.commit().await.map_err(e)?;
@@ -256,14 +374,19 @@ async fn apply_deletes(db: &Db, schema: &str, table: &str, cols: &[Col], key_col
         check_key(key_cols, pk)?;
     }
     let mut c = writer_conn(db, schema, read_only).await?;
-    let mut tx = c.begin().await.map_err(e)?;
+    let mut tx = c.begin_write().await.map_err(e)?;
     let mut gone = Vec::new();
     for pk in pks {
         let (sql, params) = delete_sql(db.dialect, schema, table, cols, pk);
         let t = Instant::now();
         let r = tx.exec_bound(&sql, &params).await;
         db.note(schema, &sql, t, &r);
-        if r.map_err(e)?.rows_affected() == 1 {
+        let n = r.map_err(e)?.rows_affected();
+        if n > 1 {
+            let _ = tx.rollback().await;
+            return Err(SEVERAL.into());
+        }
+        if n == 1 {
             gone.push(pk.clone());
         }
     }
@@ -273,9 +396,12 @@ async fn apply_deletes(db: &Db, schema: &str, table: &str, cols: &[Col], key_col
 
 /// Inserts the rows and returns each one's key document when it is known: the values given for the key
 /// columns, or LAST_INSERT_ID() for an auto-increment key left out.
-async fn apply_inserts(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[String], rows: &[NewRow], read_only: bool) -> Res<Vec<Option<Document>>> {
+async fn apply_inserts(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[String], rows: &[NewRow], read_only: bool, restore: bool) -> Res<Vec<Option<Document>>> {
+    if db.dialect == Dialect::Postgres {
+        return apply_inserts_pg(db, schema, table, cols, pk, rows, read_only, restore).await;
+    }
     let mut c = writer_conn(db, schema, read_only).await?;
-    let mut tx = c.begin().await.map_err(e)?;
+    let mut tx = c.begin_write().await.map_err(e)?;
     let mut keys = Vec::new();
     // Generated columns cannot be given a value, and a column renamed on read goes back under its own name.
     let rows: Vec<NewRow> = rows.iter().map(|r| r.iter().filter(|(n, _)| !cols.iter().any(|c| c.name == *n && c.generated)).map(|(n, v)| (src_of(cols, n), v.clone())).collect()).collect();
@@ -306,6 +432,40 @@ async fn apply_inserts(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[S
     Ok(keys)
 }
 
+/// `apply_inserts` on PostgreSQL. The keys come from `RETURNING` (as text, read back by kind), so a key the server made,
+/// from an identity column or a default, is known and an insert can be undone. A computed column cannot be written and is
+/// left out. An identity column that is always generated is left out too, except when `restore` puts back a deleted row:
+/// then its old value is written with OVERRIDING SYSTEM VALUE so the row returns under the key it had.
+#[allow(clippy::too_many_arguments)]
+async fn apply_inserts_pg(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[String], rows: &[NewRow], read_only: bool, restore: bool) -> Res<Vec<Option<Document>>> {
+    let mut c = writer_conn(db, schema, read_only).await?;
+    let mut tx = c.begin_write().await.map_err(e)?;
+    let mut keys = Vec::new();
+    // Identity ALWAYS says both GENERATED and auto_increment in `extra`; a computed column says only GENERATED.
+    let identity_always = |name: &str| cols.iter().any(|c| c.name == name && c.generated && c.auto_increment);
+    let writable = |name: &str| !cols.iter().any(|c| c.name == name && c.generated) || (restore && identity_always(name));
+    for row in rows {
+        let row: NewRow = row.iter().filter(|(n, _)| writable(n)).map(|(n, v)| (src_of(cols, n), v.clone())).collect();
+        let over = restore && row.iter().any(|(n, _)| cols.iter().any(|c| c.src == *n && c.generated && c.auto_increment));
+        let (sql, params) = pg_insert_sql(schema, table, cols, &row, pk, over);
+        let t = Instant::now();
+        let r = tx.fetch_bound(&sql, &params).await;
+        db.note(schema, &sql, t, &r);
+        let r = r.map_err(e)?;
+        let mut key = Document::new();
+        if let Some(got) = r.first() {
+            for (i, p) in pk.iter().enumerate() {
+                if let Some(raw) = got.cell(i) {
+                    key.insert(p.clone(), super::value::to_bson_for(true, kind_of_src(cols, p), Some(raw)));
+                }
+            }
+        }
+        keys.push((key.len() == pk.len() && !pk.is_empty()).then_some(key));
+    }
+    tx.commit().await.map_err(e)?;
+    Ok(keys)
+}
+
 /// Whether the key columns a row undo recorded are still the table's primary key. Names compare without case, as
 /// the server compares column names.
 fn same_key(recorded: &[String], now: &[String]) -> bool {
@@ -323,6 +483,12 @@ async fn key_unchanged(db: &Db, schema: &str, table: &str, recorded: &[String]) 
     if recorded.is_empty() {
         return Ok(());
     }
+    if db.dialect == Dialect::Postgres {
+        // The index query names the primary key by `is_primary`, not by an index called PRIMARY.
+        let rows = db.meta(schema, Dialect::Postgres.indexes(), [schema, table]).await?;
+        let now: Vec<String> = rows.iter().filter(|r| r.int("is_primary") == Some(1)).filter_map(|r| super::worker::text(r, "col")).collect();
+        return key_changed_error(table, recorded, &now);
+    }
     let pool = db.my_pool()?;
     let sql = format!("SELECT COLUMN_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = 'PRIMARY' ORDER BY SEQ_IN_INDEX{}", super::structure::ALL_ROWS);
     let t = Instant::now();
@@ -330,7 +496,11 @@ async fn key_unchanged(db: &Db, schema: &str, table: &str, recorded: &[String]) 
     db.note(schema, &sql, t, &rows);
     let rows = rows.map_err(e)?;
     let now: Vec<String> = rows.iter().filter_map(|r| super::worker::text_at(r, 0)).collect();
-    if same_key(recorded, &now) {
+    key_changed_error(table, recorded, &now)
+}
+
+fn key_changed_error(table: &str, recorded: &[String], now: &[String]) -> Res<()> {
+    if same_key(recorded, now) {
         return Ok(());
     }
     let now = if now.is_empty() { "none".to_string() } else { now.join(", ") };
@@ -386,7 +556,7 @@ impl Worker {
     pub fn sql_insert(&self, conn: u64, db: Db, schema: String, table: String, cols: Vec<Col>, pk: Vec<String>, rows: Vec<NewRow>, read_only: bool) {
         self.spawn(async move {
             let at = (schema.clone(), table.clone());
-            let (res, undo) = match apply_inserts(&db, &schema, &table, &cols, &pk, &rows, read_only).await {
+            let (res, undo) = match apply_inserts(&db, &schema, &table, &cols, &pk, &rows, read_only, false).await {
                 Ok(keys) => {
                     let known: Option<Vec<Document>> = keys.into_iter().collect();
                     (Ok(format!("Inserted {}", plural(rows.len(), "row"))), known.map(|k| action(conn, &schema, &table, &cols, SqlUndo::Insert(k))))
@@ -431,7 +601,7 @@ impl Worker {
                 SqlUndo::Delete(rows) => {
                     // The whole row goes back, the key included, so auto-increment values come back as they were.
                     let rows: Vec<NewRow> = rows.iter().map(|r| r.iter().filter(|(k, _)| *k != "_id").map(|(k, v)| (k.clone(), v.clone())).collect()).collect();
-                    apply_inserts(&db, &schema, &table, &cols, &pk, &rows, read_only).await.map(|_| "Restored the deleted rows".to_string())
+                    apply_inserts(&db, &schema, &table, &cols, &pk, &rows, read_only, true).await.map(|_| "Restored the deleted rows".to_string())
                 }
                 SqlUndo::Insert(pks) => apply_deletes(&db, &schema, &table, &cols, &pk, &pks, read_only).await.map(|_| "Removed the inserted rows".to_string()),
                 // Taken before this match, where the structure statements run.
@@ -510,6 +680,62 @@ mod tests {
         assert_eq!(insert_sql(Dialect::MySql, "s", "t", &cols, &vec![]).0, "INSERT INTO `s`.`t` () VALUES ()");
         let (sql, p) = insert_sql(Dialect::MySql, "s", "t", &cols, &vec![("id".into(), Bson::Null)]);
         assert_eq!((sql.as_str(), p), ("INSERT INTO `s`.`t` (`id`) VALUES (?)", vec![Param::Null]));
+    }
+
+    fn pg_col(name: &str, ty: &str, kind: Kind) -> Col {
+        Col::plain(name, ty, kind, true)
+    }
+
+    #[test]
+    fn postgres_statements_cast_every_placeholder() {
+        let cols = [pg_col("id", "integer", Kind::Int), pg_col("name", "character varying(20)", Kind::Text), pg_col("tags", "text[]", Kind::Array), pg_col("at", "timestamp with time zone", Kind::DateTime), pg_col("blob", "bytea", Kind::Binary), pg_col("ok", "boolean", Kind::Bool), pg_col("f", "double precision", Kind::Float), pg_col("mood", "\"Mood\"", Kind::Enum)];
+        let ed = RowEdit {
+            pk: doc! { "id": 7_i64 },
+            changes: vec![
+                ("name".into(), Bson::String("a".into()), Bson::Null),
+                ("ok".into(), Bson::Boolean(true), Bson::Boolean(false)),
+                ("f".into(), Bson::Double(1.5), Bson::Double(2.5)),
+                ("mood".into(), Bson::String("sad".into()), Bson::String("it's".into())),
+            ],
+        };
+        let (sql, p) = update_sql(Dialect::Postgres, "S", "T", &cols, &ed);
+        assert_eq!(sql, "UPDATE \"S\".\"T\" SET \"name\" = CAST($1 AS character varying(20)), \"ok\" = CAST($2 AS boolean), \"f\" = CAST($3 AS double precision), \"mood\" = CAST($4 AS \"Mood\") WHERE \"id\" = CAST($5 AS integer) AND \"name\" IS NOT DISTINCT FROM CAST($6 AS character varying(20)) AND \"ok\" IS NOT DISTINCT FROM CAST($7 AS boolean) AND \"mood\" IS NOT DISTINCT FROM CAST($8 AS \"Mood\")");
+        assert_eq!(p, [Param::Null, Param::Text("false".into()), Param::Text("2.5".into()), Param::Text("it's".into()), Param::Text("7".into()), Param::Text("a".into()), Param::Text("true".into()), Param::Text("sad".into())]);
+        assert!(!sql.contains("LIMIT") && !sql.contains("<=>"));
+        // Bytes bind as their hex text and the cast reads them back.
+        let b = RowEdit { pk: doc! { "id": 1_i64 }, changes: vec![("blob".into(), Bson::Null, bytes_doc(&[1, 255]))] };
+        let (sql, p) = update_sql(Dialect::Postgres, "s", "t", &cols, &b);
+        assert_eq!(sql, "UPDATE \"s\".\"t\" SET \"blob\" = CAST($1 AS bytea) WHERE \"id\" = CAST($2 AS integer) AND \"blob\" IS NOT DISTINCT FROM CAST($3 AS bytea)");
+        assert_eq!(p[0], Param::Text("\\x01ff".into()));
+        let (sql, p) = delete_sql(Dialect::Postgres, "s", "t", &cols, &doc! { "id": 3 });
+        assert_eq!((sql.as_str(), p), ("DELETE FROM \"s\".\"t\" WHERE \"id\" = CAST($1 AS integer)", vec![Param::Text("3".into())]));
+        assert_eq!(delete_sql(Dialect::Postgres, "s", "t", &cols, &Document::new()).0, "DELETE FROM \"s\".\"t\" WHERE 1 = 0");
+        // An update with no key and no value check never runs wide either.
+        let wide = RowEdit { pk: Document::new(), changes: vec![("f".into(), Bson::Double(1.5), Bson::Double(2.5))] };
+        assert_eq!(update_sql(Dialect::Postgres, "s", "t", &cols, &wide).0, "UPDATE \"s\".\"t\" SET \"f\" = CAST($1 AS double precision) WHERE 1 = 0");
+    }
+
+    fn bytes_doc(b: &[u8]) -> Bson {
+        Bson::Binary(mongodb::bson::Binary { subtype: mongodb::bson::spec::BinarySubtype::Generic, bytes: b.to_vec() })
+    }
+
+    #[test]
+    fn postgres_inserts_use_default_values_and_return_the_key() {
+        let cols = [pg_col("id", "integer", Kind::Int), pg_col("tags", "text[]", Kind::Array)];
+        assert_eq!(insert_sql(Dialect::Postgres, "s", "t", &cols, &vec![]).0, "INSERT INTO \"s\".\"t\" DEFAULT VALUES");
+        let (sql, p) = insert_sql(Dialect::Postgres, "s", "t", &cols, &vec![("tags".into(), Bson::String("{a,b}".into())), ("id".into(), Bson::Null)]);
+        assert_eq!((sql.as_str(), p), ("INSERT INTO \"s\".\"t\" (\"tags\", \"id\") VALUES (CAST($1 AS text[]), CAST($2 AS integer))", vec![Param::Text("{a,b}".into()), Param::Null]));
+        let pk = vec!["id".to_string(), "t\"x".to_string()];
+        assert_eq!(pg_insert_sql("s", "t", &cols, &vec![], &pk, false).0, "INSERT INTO \"s\".\"t\" DEFAULT VALUES RETURNING \"id\"::text, \"t\"\"x\"::text");
+        assert_eq!(pg_insert_sql("s", "t", &cols, &vec![("id".into(), Bson::Int64(4))], &pk[..1], true).0, "INSERT INTO \"s\".\"t\" (\"id\") OVERRIDING SYSTEM VALUE VALUES (CAST($1 AS integer)) RETURNING \"id\"::text");
+    }
+
+    #[test]
+    fn postgres_previews_fill_the_numbered_placeholders() {
+        let p = [Param::Text("it's $2".into()), Param::Null, Param::Text("\\x01".into())];
+        // A `$2` inside a quoted identifier is a name, and a value that looks like a placeholder is not scanned again.
+        assert_eq!(preview_for(Dialect::Postgres, "UPDATE \"a$1\" SET x = CAST($1 AS text), y = $2 WHERE z = CAST($3 AS bytea)", &p, false), "UPDATE \"a$1\" SET x = CAST('it''s $2' AS text), y = NULL WHERE z = CAST('\\x01' AS bytea)");
+        assert_eq!(preview_for(Dialect::MySql, "a = ?", &[Param::Int(1)], true), "a = 1");
     }
 
     #[test]

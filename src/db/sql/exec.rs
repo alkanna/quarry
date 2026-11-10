@@ -384,11 +384,17 @@ impl Conn {
         }
     }
 
-    /// Starts a transaction that rolls back unless it is committed.
-    pub async fn begin(&mut self) -> Result<Tx<'_>, sqlx::Error> {
+    /// Starts the transaction a write runs in. On PostgreSQL the session stays read-only, so the write opens its own
+    /// READ WRITE transaction and lifts the statement timeout and sets a lock timeout for it alone with SET LOCAL, which
+    /// ends with the transaction and so never reaches another client of a connection pooler.
+    pub async fn begin_write(&mut self) -> Result<Tx<'_>, sqlx::Error> {
         match self {
             Conn::My(c) => c.begin().await.map(Tx::My),
-            Conn::Pg(c) => c.begin().await.map(Tx::Pg),
+            Conn::Pg(c) => {
+                let mut tx = c.begin_with("BEGIN READ WRITE").await?;
+                tx.execute(super::pg::WRITE_LOCALS).await?;
+                Ok(Tx::Pg(tx))
+            }
         }
     }
 
@@ -415,10 +421,26 @@ impl Tx<'_> {
         }
     }
 
+    /// Like `exec_bound`, for a statement that returns rows (an INSERT with RETURNING). A PostgreSQL row is binary, so
+    /// the columns the caller reads must be cast to text in the statement.
+    pub async fn fetch_bound(&mut self, sql: &str, params: &[Param]) -> Result<Vec<SqlRow>, sqlx::Error> {
+        match self {
+            Tx::My(t) => bound(sql, params).fetch_all(&mut **t).await.map(SqlRow::wrap),
+            Tx::Pg(t) => bound_pg(sql, params).fetch_all(&mut **t).await.map(SqlRow::wrap_pg),
+        }
+    }
+
     pub async fn commit(self) -> Result<(), sqlx::Error> {
         match self {
             Tx::My(t) => t.commit().await,
             Tx::Pg(t) => t.commit().await,
+        }
+    }
+
+    pub async fn rollback(self) -> Result<(), sqlx::Error> {
+        match self {
+            Tx::My(t) => t.rollback().await,
+            Tx::Pg(t) => t.rollback().await,
         }
     }
 }
@@ -489,13 +511,28 @@ impl Db {
                     }
                     q.fetch_all(p).await.map(SqlRow::wrap)
                 }
-                Pool::Pg(_) => {
+                Pool::Pg(pp) => {
                     let pool = self.pg_pool()?;
+                    let locals = pp.locals().to_string();
                     let mut q = sqlx::query(&full);
                     for x in params {
                         q = q.bind(x);
                     }
-                    q.fetch_all(&pool).await.map(SqlRow::wrap_pg)
+                    if locals.is_empty() {
+                        q.fetch_all(&pool).await.map(SqlRow::wrap_pg)
+                    } else {
+                        // Behind a pooler the session carries no settings, so a read sets them for its own transaction.
+                        async {
+                            let mut conn = pool.acquire().await?;
+                            let mut tx = conn.begin_with("BEGIN READ ONLY").await?;
+                            tx.execute(locals.as_str()).await?;
+                            let r = q.fetch_all(&mut *tx).await;
+                            let _ = tx.rollback().await;
+                            r
+                        }
+                        .await
+                        .map(SqlRow::wrap_pg)
+                    }
                 }
             };
             self.note(schema, &sql, t, &res);
