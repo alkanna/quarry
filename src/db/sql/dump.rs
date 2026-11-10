@@ -421,7 +421,7 @@ pub async fn run_file(db: Db, schema: String, src: Source, read_only: bool, prog
                     // A dump holds thousands of statements that would push everything else out of the log, so
                     // the first few and any that fail are listed, and the rest come as one line at the end.
                     if n <= FILE_LOGGED || outcome.is_err() {
-                        crate::db::note_here(&String::from_utf8_lossy(&stmt), t, &outcome);
+                        crate::db::note_here(&String::from_utf8_lossy(&stmt[..stmt.len().min(16_000)]), t, &outcome);
                     }
                     if let Err(x) = outcome {
                         break 'run Err(format!("Statement {n} failed: {x}

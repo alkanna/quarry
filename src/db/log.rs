@@ -94,23 +94,26 @@ pub(crate) fn note_here<T, X: std::fmt::Display>(sql: &str, start: std::time::In
 
 type Span = std::ops::Range<usize>;
 
-/// Where each secret string of a statement sits. Every reading the server may take of the quotes is tried and the
-/// ranges are merged, so a literal that one reading would end early is still covered to its end.
+/// Where each secret string of a statement sits. Every reading the server may take of the quotes is tried, one at a
+/// time, and the ranges are merged, so a literal that one reading would end early is still covered to its end.
 fn secret_ranges(sql: &str) -> Vec<Span> {
-    use super::sql::lex::{every_reading, Tok};
+    use super::sql::lex::{nth_reading, Tok, READINGS};
     let mut hits: Vec<Span> = Vec::new();
-    for toks in every_reading(sql) {
-        let code: Vec<&(Tok, Span)> = toks.iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment)).collect();
-        let word = |i: usize, w: &str| code.get(i).is_some_and(|(t, r)| *t == Tok::Word && sql[r.clone()].eq_ignore_ascii_case(w));
-        let punct = |i: usize, p: &str| code.get(i).is_some_and(|(t, r)| *t == Tok::Punct && &sql[r.clone()] == p);
-        // The string at or after `i`, past an `=`, a `(`, PASSWORD and a charset introducer such as `_utf8mb4` or `N`.
+    for n in 0..READINGS {
+        let toks = nth_reading(sql, n);
+        // Executable comment marks are not tokens of the statement: `/*!80000 'pw' */` reads as the string itself.
+        let code: Vec<&(Tok, Span)> = toks.iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment | Tok::ExecOpen | Tok::ExecClose)).collect();
+        let text = |i: usize| code.get(i).map(|(_, r)| &sql[r.clone()]).unwrap_or("");
+        let word = |i: usize, w: &str| code.get(i).is_some_and(|(t, _)| *t == Tok::Word) && text(i).eq_ignore_ascii_case(w);
+        let punct = |i: usize, p: &str| code.get(i).is_some_and(|(t, _)| *t == Tok::Punct) && text(i) == p;
+        // The string at or after `i`, past an `=`, a `(`, PASSWORD and a charset or hex introducer such as `_utf8mb4`, `N`, `X` or `B`.
         let secret = |mut i: usize| -> Option<Span> {
             while let Some((t, r)) = code.get(i) {
                 let w = &sql[r.clone()];
                 if *t == Tok::Str {
                     return Some(r.clone());
                 }
-                let skip = (*t == Tok::Punct && (w == "=" || w == "(")) || (*t == Tok::Word && (w.eq_ignore_ascii_case("password") || w.eq_ignore_ascii_case("n") || w.starts_with('_')));
+                let skip = (*t == Tok::Punct && (w == "=" || w == "(")) || (*t == Tok::Word && (["password", "n", "x", "b"].iter().any(|k| w.eq_ignore_ascii_case(k)) || w.starts_with('_')));
                 if !skip {
                     return None;
                 }
@@ -118,10 +121,34 @@ fn secret_ranges(sql: &str) -> Vec<Span> {
             }
             None
         };
+        // Everything between the `(` at `open` and its matching `)`: any expression can build the password.
+        let inside = |open: usize| -> Option<Span> {
+            let (mut depth, mut end) = (0usize, code.len());
+            for j in open..code.len() {
+                if punct(j, "(") {
+                    depth += 1;
+                } else if punct(j, ")") {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = j;
+                        break;
+                    }
+                }
+            }
+            (end > open + 1).then(|| code[open + 1].1.start..code[end - 1].1.end)
+        };
         let (mut identified, mut after_secret) = (false, false);
         for i in 0..code.len() {
             if punct(i, ";") {
                 (identified, after_secret) = (false, false);
+                continue;
+            }
+            // A string that holds a statement about passwords: PREPARE s FROM 'CREATE USER ... IDENTIFIED BY ...'.
+            if code[i].0 == Tok::Str {
+                let lower = text(i).to_ascii_lowercase();
+                if lower.contains("identified") || lower.contains("password") {
+                    hits.push(code[i].1.clone());
+                }
                 continue;
             }
             if code[i].0 != Tok::Word {
@@ -130,11 +157,14 @@ fn secret_ranges(sql: &str) -> Vec<Span> {
             let found = if word(i, "identified") {
                 identified = true;
                 None
-            } else if (word(i, "by") && identified) || (word(i, "using") && word(i + 1, "password")) {
-                secret(i + 1)
+            } else if identified && (word(i, "by") || word(i, "as") || word(i, "using")) {
+                // BY 'x', WITH plugin AS 'hash', VIA plugin USING 'hash' or USING PASSWORD('x')
+                if word(i + 1, "password") && punct(i + 2, "(") { inside(i + 2) } else { secret(i + 1) }
             } else if word(i, "password") && i > 0 && word(i - 1, "set") {
                 // SET PASSWORD [FOR user] = 'x': the user part holds strings of its own, so look for the `=`.
                 (i + 1..code.len()).find(|&j| punct(j, "=") || punct(j, ";")).filter(|&j| punct(j, "=")).and_then(|j| secret(j + 1))
+            } else if (word(i, "password") || word(i, "old_password")) && punct(i + 1, "(") {
+                inside(i + 1)
             } else if word(i, "password") || word(i, "old_password") || word(i, "master_password") || word(i, "source_password") {
                 secret(i + 1)
             } else if word(i, "replace") && after_secret {
@@ -177,10 +207,14 @@ pub(crate) fn redact_sql(sql: &str) -> (String, Vec<String>) {
 /// the text it ran. The server's error may quote the statement from the point it failed at, which can be the password,
 /// so a failing statement that held one loses that quote as well.
 pub fn log_sql(conn: u64, db: &str, sql: &str, ms: u128, err: Option<&str>) {
-    let (mut text, cut) = redact_sql(sql);
+    // Cut first, so a huge INSERT is never lexed whole. A password literal the cut runs through is unterminated, and the
+    // lexer reads an unterminated string to the end of the text, so it stays redacted.
+    let long = sql.char_indices().nth(4000).map(|(i, _)| i);
+    let (mut text, cut) = redact_sql(&sql[..long.unwrap_or(sql.len())]);
+    let guarded = long.is_some() || !cut.is_empty();
     let err = err.map(|m| {
         let mut m = m.to_string();
-        if !cut.is_empty() {
+        if guarded {
             for c in &cut {
                 m = m.replace(c.as_str(), "'***'");
             }
@@ -191,8 +225,7 @@ pub fn log_sql(conn: u64, db: &str, sql: &str, ms: u128, err: Option<&str>) {
         }
         m
     });
-    if let Some((cut, _)) = text.char_indices().nth(4000) {
-        text.truncate(cut);
+    if long.is_some() {
         text.push_str(" …");
     }
     // The verb fills the name column like a Mongo command name, so the filter and the columns work the same.
@@ -244,7 +277,8 @@ mod tests {
         // Comments between the words and the secret.
         assert_eq!(r("ALTER USER a IDENTIFIED /* x */ BY -- c\n 'pw'"), "ALTER USER a IDENTIFIED /* x */ BY -- c\n '***'");
         // A string or comment that only mentions the words is left alone.
-        assert_eq!(r("SELECT 'IDENTIFIED BY ''x'''"), "SELECT 'IDENTIFIED BY ''x'''");
+        // A string that talks about a password is dropped whole: it may be a statement for PREPARE.
+        assert_eq!(r("SELECT 'IDENTIFIED BY ''x'''"), "SELECT '***'");
         assert_eq!(r("SELECT 1 -- IDENTIFIED BY 'x'"), "SELECT 1 -- IDENTIFIED BY 'x'");
         // Unterminated: everything to the end is the secret.
         assert_eq!(r("ALTER USER a IDENTIFIED BY 'pw"), "ALTER USER a IDENTIFIED BY '***'");
@@ -253,6 +287,48 @@ mod tests {
         // Statements after it are untouched and a later one without the keyword is not redacted.
         assert_eq!(r("CREATE USER a IDENTIFIED BY 'pw'; SELECT 'by' AS \"by\""), "CREATE USER a IDENTIFIED BY '***'; SELECT 'by' AS \"by\"");
         assert_eq!(r("SELECT 'it''s'"), "SELECT 'it''s'");
+    }
+
+    #[test]
+    fn executable_comments_do_not_hide_the_secret() {
+        for src in ["ALTER USER a IDENTIFIED BY /*!80000 'pw' */", "ALTER USER a IDENTIFIED /*!BY*/ 'pw'", "ALTER USER a /*!80000 IDENTIFIED BY 'pw' */", "ALTER USER a IDENTIFIED /*M!BY */ 'pw'"] {
+            assert!(!r(src).contains("pw"), "{src}: {}", r(src));
+        }
+        super::log_sql(990_002, "d", "ALTER USER a IDENTIFIED BY /*!80000 'hunter2' */ bogus", 1, Some("syntax error near ''hunter2' */ bogus' at line 1"));
+        let log = super::LOG.lock().unwrap();
+        let l = log.iter().rev().find(|l| l.conn == 990_002).unwrap();
+        assert!(!l.cmd.contains("hunter2") && !l.err.as_deref().unwrap().contains("hunter2"), "{} {:?}", l.cmd, l.err);
+    }
+
+    #[test]
+    fn hashes_expressions_and_prepared_text() {
+        for src in [
+            "CREATE USER a IDENTIFIED WITH caching_sha2_password AS 'hash0123'",
+            "CREATE USER a IDENTIFIED VIA mysql_native_password USING 'hash0123'",
+            "CREATE USER a IDENTIFIED VIA mysql_native_password USING PASSWORD('hash0123')",
+            "SET PASSWORD = PASSWORD(CONCAT('hash','0123'))",
+            "SELECT PASSWORD(x'68756e74657232')",
+            "SELECT OLD_PASSWORD(b'0110')",
+            "PREPARE s FROM 'CREATE USER a IDENTIFIED BY ''hash0123'''",
+            r"SET @q = 'alter user a identified by \'hash0123\''",
+            "SET PASSWORD FOR 'u'@'h' = PASSWORD(CONCAT('hash', (SELECT '0123')))",
+        ] {
+            let out = r(src);
+            assert!(!out.contains("hash") && !out.contains("0123") && !out.contains("6875") && !out.contains("0110"), "{src}: {out}");
+        }
+        assert_eq!(r("SET PASSWORD = PASSWORD(CONCAT('a','b'))"), "SET PASSWORD = PASSWORD('***')");
+        assert_eq!(r("SELECT 1, 'x'"), "SELECT 1, 'x'");
+    }
+
+    #[test]
+    fn a_secret_straddling_the_cut_stays_redacted() {
+        let sql = format!("CREATE USER a IDENTIFIED BY '{}tailsecret'", "p".repeat(3970));
+        assert!(sql.chars().count() > 4000);
+        super::log_sql(990_003, "d", &sql, 1, None);
+        let log = super::LOG.lock().unwrap();
+        let l = log.iter().rev().find(|l| l.conn == 990_003).unwrap();
+        assert!(l.cmd.starts_with("CREATE USER a IDENTIFIED BY '***'") && !l.cmd.contains("ppp") && l.cmd.ends_with(" …"), "{}", &l.cmd[..l.cmd.len().min(80)]);
+        assert!(l.cmd.chars().count() < 100);
     }
 
     #[test]

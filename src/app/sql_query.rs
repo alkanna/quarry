@@ -233,7 +233,8 @@ impl App {
         let Some(db) = self.conn(conn).and_then(|c| c.sql.clone()) else { return self.err("Connect first.") };
         let read_only = !self.conn(conn).is_some_and(|c| c.writable);
         let key = format!("{conn}/{schema}/#query");
-        push_history(&mut self.prefs.history.entry(key).or_default().selector, &text);
+        // History is written to ui.json and listed in the menu, so a password never goes in.
+        push_history(&mut self.prefs.history.entry(key).or_default().selector, &db::redact_sql(&text).0);
         self.save_prefs();
         let text = if explain { format!("EXPLAIN {text}") } else { text };
         self.req += 1;
@@ -410,7 +411,12 @@ impl App {
                     if sql.trim().is_empty() {
                         self.err("Nothing to save: the script is empty.");
                     } else {
+                        let has_password = !db::redact_sql(&sql).1.is_empty();
                         self.save_to_library(SavedQuery { name, sql: Some(sql), ..Default::default() });
+                        // Saved as typed, because a script with its password cut out would not run.
+                        if has_password {
+                            self.err("Saved, but the script holds a password in plain text in the library file.");
+                        }
                     }
                 }
                 QAct::Delete(name) => self.delete_sql_from_library(&name),

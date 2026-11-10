@@ -179,8 +179,14 @@ fn live_sql_statements_reach_the_query_log_without_passwords() {
         assert!(made.iter().all(|s| s.error.is_none()), "{var}: {:?}", made.iter().map(|s| &s.error).collect::<Vec<_>>());
         // A failing statement: the server may quote the text it stopped at.
         assert!(run(&format!("ALTER USER {user} IDENTIFIED BY '{pw}' bogus")).iter().any(|s| s.error.is_some()), "{var}");
+        // Statements after a USE are listed under the database it switched to.
+        let other = "quarry_ff_log2";
+        l.sql(&format!("DROP DATABASE IF EXISTS {other}; CREATE DATABASE {other}"));
+        assert!(run(&format!("SELECT 1 AS before_use; USE {other}; SELECT 2 AS after_use")).iter().all(|s| s.error.is_none()), "{var}");
+        // A password inside an executable comment and one built by an expression.
+        run(&format!("ALTER USER {user} IDENTIFIED BY /*!80000 '{pw}' */ bogus"));
         l.sql(&format!("DROP USER IF EXISTS {user}"));
-        l.sql(&format!("DROP DATABASE {schema}"));
+        l.sql(&format!("DROP DATABASE {schema}; DROP DATABASE {other}"));
         let log = crate::db::LOG.lock().unwrap();
         let mine: Vec<&crate::db::LogEntry> = log.iter().filter(|e| e.conn == conn).collect();
         let has = |what: &str| mine.iter().any(|e| e.cmd.contains(what));
@@ -188,6 +194,7 @@ fn live_sql_statements_reach_the_query_log_without_passwords() {
         assert!(mine.iter().any(|e| e.name == "UPDATE" && e.cmd.contains("UPDATE `quarry_ff_log`.`t`") && e.err.is_none()), "{var}: writer");
         assert!(has("relay_marker"), "{var}: relay");
         assert!(has("CREATE USER 'quarry_ff_log_u'@'%' IDENTIFIED BY '***'"), "{var}: CREATE USER {:?}", mine.iter().map(|e| &e.cmd).collect::<Vec<_>>());
+        assert!(mine.iter().any(|e| e.cmd.contains("before_use") && e.db == schema) && mine.iter().any(|e| e.cmd.contains("after_use") && e.db == other), "{var}: USE is followed");
         assert!(mine.iter().all(|e| e.ms.is_some()), "{var}");
         assert!(mine.iter().any(|e| e.err.is_some() && e.cmd.starts_with("ALTER USER")), "{var}: the failure is logged");
         assert!(mine.iter().all(|e| !e.cmd.contains(pw) && !e.err.as_deref().unwrap_or("").contains(pw)), "{var}: a password reached the log");

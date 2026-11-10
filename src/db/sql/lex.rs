@@ -212,6 +212,35 @@ pub fn every_reading(text: &str) -> Vec<Vec<(Tok, Range<usize>)>> {
     out
 }
 
+/// How many readings `every_reading` holds.
+pub const READINGS: usize = 8;
+
+/// One of the `READINGS` readings of `text`, so a caller that only needs one at a time never holds all of them.
+pub fn nth_reading(text: &str, n: usize) -> Vec<(Tok, Range<usize>)> {
+    lex(text, Opts { backslash: n & 4 == 0, ansi: n & 2 != 0, skip_exec: n & 1 != 0 })
+}
+
+/// The database a `USE name` switches to, with the name unquoted.
+pub fn use_target(stmt: &str) -> Option<String> {
+    // Most statements are not USE, and some are megabytes long: look at their first characters before lexing.
+    let head = stmt.trim_start();
+    if !matches!(head.as_bytes().first(), Some(b'/' | b'-' | b'#')) && !head.get(..3).is_some_and(|h| h.eq_ignore_ascii_case("use")) {
+        return None;
+    }
+    let mut it = tokens(stmt).into_iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment));
+    let (t, r) = it.next()?;
+    if t != Tok::Word || !stmt[r].eq_ignore_ascii_case("use") {
+        return None;
+    }
+    let (t, r) = it.next()?;
+    let name = &stmt[r];
+    match t {
+        Tok::Word => Some(name.to_string()),
+        Tok::Quoted => Some(name.trim_matches('`').replace("``", "`")),
+        _ => None,
+    }
+}
+
 /// Statements counted under the server's own quote rules.
 pub fn count_with(text: &str, backslash: bool, ansi: bool) -> usize {
     split_with(text, Opts { backslash, ansi, skip_exec: false }).len()
@@ -704,6 +733,17 @@ impl ScriptSplitter {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn use_names_its_database() {
+        use super::use_target;
+        assert_eq!(use_target("USE shop").as_deref(), Some("shop"));
+        assert_eq!(use_target("  use `my``db` ").as_deref(), Some("my`db"));
+        assert_eq!(use_target("/* c */ USE x").as_deref(), Some("x"));
+        assert_eq!(use_target("SELECT 1"), None);
+        assert_eq!(use_target("USER_THING"), None);
+        assert_eq!(use_target("USE 'q'"), None);
+    }
+
     use super::*;
 
     fn texts(s: &str) -> Vec<&str> {

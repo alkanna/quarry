@@ -79,21 +79,39 @@ fn delimiter_blocks(text: &str) -> Vec<Range<usize>> {
 
 /// Tokens without whitespace, with comment text compared by its words: reindenting a block comment changes nothing the
 /// server reads, but any other token must be the same bytes.
-fn significant(text: &str, toks: &[(Tok, Range<usize>)]) -> Vec<(Tok, String)> {
-    toks.iter()
-        .filter(|(t, _)| *t != Tok::Space)
-        .map(|(t, r)| {
-            let s = &text[r.clone()];
-            (*t, if *t == Tok::Comment { s.split_whitespace().collect::<Vec<_>>().join(" ") } else { s.to_string() })
-        })
-        .collect()
+/// Each token also says whether it touched the one before it, because `b'01'` and `b '01'` have the same tokens and
+/// not the same meaning.
+fn significant(text: &str, toks: &[(Tok, Range<usize>)]) -> Vec<(Tok, String, bool)> {
+    let mut prev_end = None;
+    let mut out = Vec::new();
+    for (t, r) in toks {
+        if *t == Tok::Space {
+            continue;
+        }
+        let s = &text[r.clone()];
+        out.push((*t, if *t == Tok::Comment { s.split_whitespace().collect::<Vec<_>>().join(" ") } else { s.to_string() }, prev_end == Some(r.start)));
+        prev_end = Some(r.end);
+    }
+    out
+}
+
+/// Whitespace may appear around a comma, a bracket or a semicolon, and between an operator and what it works on.
+/// Between two operator characters it may not (`>=`), nor inside a literal prefix, a number or a name (`a.b`, `\N`).
+fn may_split(a: &(Tok, String, bool), b: &(Tok, String, bool)) -> bool {
+    let op = |t: &(Tok, String, bool)| t.0 == Tok::Punct && "=<>+-*/%&|^~!".contains(t.1.as_str());
+    let free = |t: &(Tok, String, bool)| t.0 == Tok::Comment || (t.0 == Tok::Punct && matches!(t.1.as_str(), "," | "(" | ")" | ";"));
+    free(a) || free(b) || (op(a) && b.0 != Tok::Punct) || (op(b) && a.0 != Tok::Punct)
+}
+
+/// The same tokens, and no two that touched in `before` pulled apart in `after`.
+fn same_tokens(a: &[(Tok, String, bool)], b: &[(Tok, String, bool)]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.0 == y.0 && x.1 == y.1) && (1..a.len()).all(|k| !a[k].2 || b[k].2 || may_split(&a[k - 1], &a[k]))
 }
 
 /// Whether `after` is `before` with different whitespace, under every way a server may read the quotes, and still
 /// one statement under each of them.
 fn reads_the_same(before: &str, after: &str) -> bool {
-    let (a, b) = (lex::every_reading(before), lex::every_reading(after));
-    if a.len() != b.len() || a.iter().zip(&b).any(|(x, y)| significant(before, x) != significant(after, y)) {
+    if (0..lex::READINGS).any(|n| !same_tokens(&significant(before, &lex::nth_reading(before, n)), &significant(after, &lex::nth_reading(after, n)))) {
         return false;
     }
     [(true, false), (true, true), (false, false), (false, true)].into_iter().all(|(bs, ansi)| lex::count_with(before, bs, ansi) == lex::count_with(after, bs, ansi))
@@ -249,6 +267,22 @@ mod tests {
         same(&format_script("  \n"), "  \n");
         same(&format_script("-- only a comment\n"), "-- only a comment\n");
         assert_eq!(format_script("").summary(), "Nothing to format");
+    }
+
+    #[test]
+    fn touching_tokens_stay_touching() {
+        for src in ["select b'01' from t", "select n'x' from t", "select x'4a' from t where a = 1", "select _utf8mb4'x', 1 from t", "select \\N from t", "select a.b, c from t where d >= 1"] {
+            let f = format_script(src);
+            assert!(reads_the_same(src, &f.text), "{src}: {}", f.text);
+            for lit in ["b'01'", "n'x'", "x'4a'", "_utf8mb4'x'", "\\N", "a.b", ">="] {
+                assert_eq!(src.contains(lit), f.text.contains(lit), "{src}: {lit} in {}", f.text);
+            }
+        }
+        assert!(!reads_the_same("select b'01' from t", "select b '01' from t"));
+        assert!(!reads_the_same("select n'x'", "select n 'x'"));
+        assert!(!reads_the_same("select \\N", "select \\ N"));
+        assert!(!reads_the_same("select a >= 1", "select a > = 1"));
+        assert!(reads_the_same("select a>=1,b", "select a >= 1,\n b"));
     }
 
     #[test]

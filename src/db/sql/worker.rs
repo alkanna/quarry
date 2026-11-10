@@ -498,6 +498,8 @@ async fn run(db: &Db, schema: &str, text: &str, read_only: bool, id: &AtomicU64,
     // Each statement goes alone, so user text is never sent as one multi-statement string.
     let stmts = lex::split_statements(text);
     let mut why: Option<&str> = None;
+    // A USE in the script changes the database the later statements run in, and so the one the log names.
+    let mut here = schema.to_string();
     for (_, stmt) in stmts {
         // KILL QUERY only interrupts the statement in flight, so the flag is what keeps the rest from running.
         if cancel.load(Ordering::SeqCst) {
@@ -514,7 +516,11 @@ async fn run(db: &Db, schema: &str, text: &str, read_only: bool, id: &AtomicU64,
             }
         }
         let rs = run_stmt(&mut conn, stmt, page).await;
-        crate::db::log_sql(db.conn, schema, stmt, rs.first().map_or(0, |r| r.ms), rs.iter().find_map(|r| r.error.as_deref()));
+        let failed = rs.iter().find_map(|r| r.error.as_deref());
+        crate::db::log_sql(db.conn, &here, stmt, rs.first().map_or(0, |r| r.ms), failed);
+        if let (None, Some(to)) = (failed, lex::use_target(stmt)) {
+            here = to;
+        }
         if rs.iter().any(|r| r.error.is_some()) {
             sets.extend(rs);
             break;
@@ -700,6 +706,9 @@ impl Relay {
             }
         }
         crate::db::log_sql(self.log_conn, &self.schema, &stmt, started.elapsed().as_millis(), failure.as_deref());
+        if let (None, Some(to)) = (&failure, lex::use_target(&stmt)) {
+            self.schema = to;
+        }
         if let Some(f) = failure {
             // Dropping the stream mid-result leaves unread packets on the wire.
             self.dead = f.contains("more than");
