@@ -54,7 +54,7 @@
 
 Download the latest build for your system from [Releases](https://github.com/alkanna/quarry/releases).
 
-**macOS** (Apple silicon, Intel, or universal): unzip `Quarry-macos-*.zip` into Applications. The app is not notarized, so run `xattr -dr com.apple.quarantine /Applications/Quarry.app` once.
+**macOS** (Apple silicon, Intel, or universal): unzip `Quarry-macos-*.zip` into Applications. The app is signed and notarized by Apple.
 
 **Linux** (x86_64 and ARM64): extract `quarry-linux-*.tar.gz` and put the `quarry` binary somewhere on your `PATH`, such as `~/.local/bin`. It needs GTK 3 and xkbcommon (`sudo apt install libgtk-3-0 libxkbcommon0` on Debian and Ubuntu) and either `libwayland-client0` or the X11 libraries (`libx11-6 libxcursor1`). On NixOS, add wayland, libxkbcommon, libGL, vulkan-loader and gtk3 to `programs.nix-ld.libraries` (or set `LD_LIBRARY_PATH`), and a Secret Service provider such as GNOME Keyring or KWallet to store passwords.
 
@@ -75,7 +75,7 @@ cargo test               # run the tests
 
 ### Stop the Keychain prompts on macOS
 
-Every build gets a new ad-hoc signature, so macOS treats it as a new app and asks for your password again for each saved connection. `cargo run` signs the build with a certificate named `Quarry Dev` when it finds one (see `.cargo/run-signed.sh`), which keeps the signature stable across rebuilds. To create it once:
+Every build gets a new ad-hoc signature, so macOS treats it as a new app and asks for your password again for each saved connection. `cargo run` signs the build with your Developer ID Application certificate when you have one, or else with a certificate named `Quarry Dev` (see `.cargo/run-signed.sh`), which keeps the signature stable across rebuilds. To create `Quarry Dev` once:
 
 1. Open Keychain Access and choose **Keychain Access > Certificate Assistant > Create a Certificate**.
 2. Name it `Quarry Dev`, set Identity Type to **Self Signed Root** and Certificate Type to **Code Signing**, and click Create.
