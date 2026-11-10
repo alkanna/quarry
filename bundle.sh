@@ -106,7 +106,21 @@ cat > "$APP/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
-# ponytail: ad-hoc signature. Downloads from a browser need the quarantine flag removed; sign with a
-# Developer ID and notarize to avoid that.
-codesign --force --deep --sign - "$APP"
+# QUARRY_SIGN_ID is a "Developer ID Application" identity in the keychain. Without it the app gets an ad-hoc
+# signature, which runs locally but makes Gatekeeper block a browser download.
+# Notarization needs the hardened runtime and a secure timestamp, hence --options runtime --timestamp.
+if [ -n "${QUARRY_SIGN_ID:-}" ]; then
+  codesign --force --options runtime --timestamp --sign "$QUARRY_SIGN_ID" "$APP"
+else
+  codesign --force --deep --sign - "$APP"
+fi
+# QUARRY_NOTARY_ARGS are notarytool credentials: "--keychain-profile quarry" locally, or
+# "--key <p8> --key-id <id> --issuer <uuid>" in CI. Stapling fails unless Apple accepted the upload.
+if [ -n "${QUARRY_NOTARY_ARGS:-}" ]; then
+  ditto -c -k --keepParent "$APP" dist/notarize.zip
+  # shellcheck disable=SC2086
+  xcrun notarytool submit dist/notarize.zip $QUARRY_NOTARY_ARGS --wait
+  rm dist/notarize.zip
+  xcrun stapler staple "$APP"
+fi
 echo "Built $APP ($(du -sh "$APP" | cut -f1))"
