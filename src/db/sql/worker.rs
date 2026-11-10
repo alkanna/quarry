@@ -205,7 +205,9 @@ async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info
         let hook = hook.clone();
         Box::pin(async move { session(c, ms, &hook).await })
     }).connect_with(o.clone()).await.map_err(|err| setup.failed_text().unwrap_or_else(|| e(err)))?;
-    let (version, sql_mode): (String, String) = sqlx::query_as("SELECT VERSION(), @@sql_mode").fetch_one(&pool).await.map_err(e)?;
+    let version: String = sqlx::query_scalar("SELECT VERSION()").fetch_one(&pool).await.map_err(e)?;
+    // Read apart from VERSION so a proxy that refuses @@sql_mode still connects, with the default mode.
+    let sql_mode: String = sqlx::query_scalar("SELECT @@sql_mode").fetch_one(&pool).await.unwrap_or_default();
     let tls = raw_sql("SHOW SESSION STATUS LIKE 'Ssl_cipher'").fetch_all(&pool).await.map_err(e)?.iter().any(|r| raw(r, 1).is_some_and(|v| !v.is_empty()));
     let dbs = sorted_names(&raw_sql("SHOW DATABASES").fetch_all(&pool).await.map_err(e)?);
     let mut ti = TestInfo::default();
