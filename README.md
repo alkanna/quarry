@@ -62,7 +62,7 @@ Download the latest build for your system from [Releases](https://github.com/alk
 
 **macOS** (Apple silicon, Intel, or universal): unzip `Quarry-macos-*.zip` into Applications. The app is not notarized, so run `xattr -dr com.apple.quarantine /Applications/Quarry.app` once.
 
-**Linux** (x86_64 and ARM64): extract `quarry-linux-*.tar.gz` and put the `quarry` binary somewhere on your `PATH`, such as `~/.local/bin`. It needs GTK 3 and xkbcommon (`sudo apt install libgtk-3-0 libxkbcommon0` on Debian and Ubuntu), and a Secret Service provider such as GNOME Keyring or KWallet to store passwords.
+**Linux** (x86_64 and ARM64): extract `quarry-linux-*.tar.gz` and put the `quarry` binary somewhere on your `PATH`, such as `~/.local/bin`. It needs GTK 3 and xkbcommon (`sudo apt install libgtk-3-0 libxkbcommon0` on Debian and Ubuntu) and either `libwayland-client0` or the X11 libraries (`libx11-6 libxcursor1`). On NixOS, add wayland, libxkbcommon, libGL, vulkan-loader and gtk3 to `programs.nix-ld.libraries` (or set `LD_LIBRARY_PATH`), and a Secret Service provider such as GNOME Keyring or KWallet to store passwords.
 
 **Windows** (x86_64 and ARM64): unzip `quarry-windows-*.zip` and run `quarry.exe`. The binary is not signed, so SmartScreen may warn the first time: choose More info, then Run anyway.
 
