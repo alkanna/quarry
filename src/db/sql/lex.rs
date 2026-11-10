@@ -321,6 +321,26 @@ pub fn transaction_control(stmt: &str, d: Dialect) -> bool {
     }
 }
 
+/// Whether a PostgreSQL statement leaves state on the session after its transaction commits. Behind a transaction
+/// pooler the backend goes to other clients next, so a session SET, a temp table, a named prepared statement, a held
+/// cursor or a LISTEN would reach them. set_config is refused whatever its third argument, which the lexer cannot read
+/// reliably.
+pub fn session_state(stmt: &str, d: Dialect) -> bool {
+    if d != Dialect::Postgres {
+        return false;
+    }
+    let words: Vec<String> = tokens(stmt, d).into_iter().filter(|(t, _)| *t == Tok::Word || *t == Tok::Quoted).map(|(_, r)| stmt[r].trim_matches('"').to_ascii_uppercase()).collect();
+    let at = |i: usize| words.get(i).map(String::as_str).unwrap_or("");
+    let first = match at(0) {
+        "SET" => !matches!(at(1), "LOCAL" | "TRANSACTION" | "CONSTRAINTS" | "CONSTRAINT"),
+        "RESET" | "DISCARD" | "LISTEN" | "UNLISTEN" | "PREPARE" | "DEALLOCATE" | "LOAD" => true,
+        "DECLARE" => words.windows(2).any(|w| w[0] == "WITH" && w[1] == "HOLD"),
+        "CREATE" => matches!(at(1), "TEMP" | "TEMPORARY") || (matches!(at(1), "LOCAL" | "GLOBAL") && matches!(at(2), "TEMP" | "TEMPORARY")),
+        _ => false,
+    };
+    first || words.iter().any(|w| w == "SET_CONFIG") || words.windows(2).any(|w| w[0] == "INTO" && matches!(w[1].as_str(), "TEMP" | "TEMPORARY"))
+}
+
 /// Whether the statement orders its rows, which keeps rows from moving between pages.
 pub fn has_order_by(stmt: &str, d: Dialect) -> bool {
     top_words(stmt, d).is_some_and(|w| w.windows(2).any(|p| p[0] == "ORDER" && p[1] == "BY"))

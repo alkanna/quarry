@@ -852,4 +852,21 @@ mod tests {
         }
         assert!(!transaction_control("BEGIN", Dialect::MySql));
     }
+
+    #[test]
+    fn statements_that_leave_session_state_are_seen() {
+        use super::super::session_state;
+        for s in [
+            "SET search_path = x", "set statement_timeout = 0", "SET SESSION ROLE r", "SET ROLE r", "RESET ALL", "DISCARD ALL", "LISTEN c", "UNLISTEN *",
+            "PREPARE p AS SELECT 1", "DEALLOCATE p", "LOAD 'auto_explain'", "DECLARE c CURSOR WITH HOLD FOR SELECT 1", "CREATE TEMP TABLE t (a int)",
+            "create temporary table t (a int)", "CREATE LOCAL TEMP TABLE t (a int)", "SELECT 1 INTO TEMP t", "SELECT set_config('x.y', '1', false)",
+            "SELECT pg_catalog.\"set_config\"('x.y', '1', true)", "/* c */ SET x.y = 1",
+        ] {
+            assert!(session_state(s, PG), "{s}");
+        }
+        for s in ["SET LOCAL search_path = x", "SET TRANSACTION READ ONLY", "SET CONSTRAINTS ALL DEFERRED", "DECLARE c CURSOR FOR SELECT 1", "CREATE TABLE t (a int)", "INSERT INTO t VALUES (1)", "SELECT 'SET x = 1'", "UPDATE t SET a = 1"] {
+            assert!(!session_state(s, PG), "{s}");
+        }
+        assert!(!session_state("SET x = 1", Dialect::MySql));
+    }
 }

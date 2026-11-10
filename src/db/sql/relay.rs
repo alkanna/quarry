@@ -188,12 +188,10 @@ impl Relay {
         if let Conn::Pg(c) = &mut conn {
             // Not `prepare`, which sets search_path on the session: behind a pooler that would land on a backend other
             // clients share, so there it travels as SET LOCAL in each transaction instead.
-            pg::prepare(c, read_only, id).await.map_err(e)?;
-            let mut locals = db.pg_locals();
-            if locals.is_empty() {
+            pg::prepare(c, read_only, id, Some(db.pooler())).await.map_err(e)?;
+            let locals = db.pg_run_locals(schema);
+            if !db.pooler() {
                 super::pg_read::set_search_path(c, schema).await.map_err(e)?;
-            } else if !schema.is_empty() {
-                locals = format!("{locals}; SET LOCAL search_path = {}", Dialect::Postgres.quote_ident(schema));
             }
             // Values are filled as E strings that read the same in either mode, so no session mode is read here.
             let pid = id.load(std::sync::atomic::Ordering::SeqCst);
@@ -284,6 +282,9 @@ impl Relay {
                 if matches!(w.as_str(), "BEGIN" | "START" | "COMMIT" | "END" | "ABORT" | "ROLLBACK" | "SAVEPOINT" | "RELEASE" | "PREPARE") {
                     return Err("Transactions you open yourself are not available behind a connection pooler; each statement runs in its own transaction.".into());
                 }
+            }
+            if lex::session_state(&stmt, Dialect::Postgres) {
+                return Err(super::run::POOLER_SESSION.into());
             }
         }
         // A locked statement is begun here and rolled back below, never committed, so nothing it did outlives it.
