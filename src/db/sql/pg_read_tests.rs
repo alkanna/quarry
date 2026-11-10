@@ -116,8 +116,9 @@ fn user_text_cannot_leave_the_session_writable_or_change_how_the_next_statement_
         // The same text as a Content filter: the lexer of this branch may refuse it, and either way the next
         // statement on the pool is unharmed.
         l.w.sql_page(8, db.clone(), "t4_ro".into(), "t".into(), PageQuery { filter: "set_config('default_transaction_read_only', 'off', false) = 'off'".into(), ..Default::default() }, 10, 0);
+        // A refused filter answers once, a page that ran answers twice (rows and count), so the second is optional.
         let _ = l.next();
-        let _ = l.next();
+        let _ = l.rx.recv_timeout(std::time::Duration::from_secs(3));
         assert_eq!(show("default_transaction_read_only"), "on", "{var}");
         // A write is refused inside the transaction as well.
         let err = l.w.rt.block_on(read_only(&pool, false, "", "DELETE FROM t4_ro.t")).unwrap_err();
