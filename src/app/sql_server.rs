@@ -74,6 +74,7 @@ pub(super) enum SqlServerTab {
     Processes,
 }
 
+#[derive(Default)]
 pub(super) struct SqlServerWin {
     pub(super) conn: u64,
     tab: SqlServerTab,
@@ -115,6 +116,8 @@ pub(super) struct SqlServerWin {
     st_wait: bool,
     st: Option<db::Res<(Instant, Snap)>>,
     st_prev: Option<(f64, Snap)>,
+    /// The names of the latest status sample in lowercase, in its order, so the filter does not fold every name each frame.
+    st_lower: Vec<String>,
     st_auto: bool,
     st_filter: String,
     st_group: StatusGroup,
@@ -122,7 +125,14 @@ pub(super) struct SqlServerWin {
 
 impl SqlServerWin {
     pub(super) fn new(conn: u64, quarry: Vec<String>) -> Self {
-        Self { conn, tab: SqlServerTab::default(), quarry, uptime: None, procs_req: 0, vars_req: 0, procs_wait: false, vars_wait: false, next: None, refresh: false, procs: None, auto: true, hide_sleeping: true, filter: String::new(), sel: None, confirm: None, writable: true, own: HashMap::new(), unlock: false, global: false, var_filter: String::new(), vars: None, ov_req: 0, ov_wait: false, ov: None, ov_prev: None, st_req: 0, st_wait: false, st: None, st_prev: None, st_auto: true, st_filter: String::new(), st_group: StatusGroup::All }
+        Self { conn, quarry, auto: true, hide_sleeping: true, writable: true, st_auto: true, ..Default::default() }
+    }
+
+    fn set_lower(&mut self) {
+        self.st_lower = match &self.st {
+            Some(Ok((_, snap))) => snap.vals.iter().map(|(n, _)| n.to_lowercase()).collect(),
+            _ => Vec::new(),
+        };
     }
 
     /// Canned answers for the offline demo: `variables` opens that tab, anything else the processes.
@@ -162,6 +172,7 @@ impl SqlServerWin {
         s.ov = Some(Ok((Instant::now(), Overview { snap: sample(0), vars: ovars, tls: "TLSv1.3, TLS_AES_256_GCM_SHA384".into(), replica: Ok(vec![replica]) })));
         s.ov_prev = Some((2.5, sample(1)));
         s.st = Some(Ok((Instant::now(), sample(0))));
+        s.set_lower();
         s.st_prev = Some((2.5, sample(1)));
         s.uptime = Some(41 * 86_400 + 3 * 3600);
         s.sel = Some(8812);
@@ -392,6 +403,7 @@ impl App {
                     s.uptime = v.num("Uptime").map(|u| u as u64).or(s.uptime);
                 }
                 s.st = Some(r.map(|v| (now, v)));
+                s.set_lower();
             }
             _ => {}
         }
@@ -407,11 +419,7 @@ const CONFIRM_W: f32 = 290.0;
 /// One cell of a painted row: a single line cut with an ellipsis at the cell's width.
 fn paint_cell(ui: &egui::Ui, row: egui::Rect, x: f32, w: f32, text: &str, color: Color32, mono: bool, right: bool) {
     let font = if mono { FontId::monospace(TXT_SMALL) } else { FontId::proportional(TXT_SMALL) };
-    let mut job = LayoutJob::single_section(text.to_string(), egui::TextFormat { font_id: font, color, ..Default::default() });
-    job.wrap = egui::text::TextWrapping { max_width: (w - PAD).max(1.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
-    let g = ui.painter().layout_job(job);
-    let gx = if right { x + w - PAD - g.size().x } else { x + PAD };
-    ui.painter().galley(egui::pos2(gx, row.center().y - g.size().y / 2.0 + optical_dy(&g)), g, color);
+    place(ui, egui::Rect::from_min_max(egui::pos2(x, row.top()), egui::pos2(x + w, row.bottom())), text, font, color, right, PAD);
 }
 
 fn header(ui: &mut egui::Ui, cols: &[(&str, f32, bool)]) {
@@ -806,7 +814,7 @@ fn status_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32) {
         Some(Ok((_, v))) => v,
     };
     let f = s.st_filter.trim().to_lowercase();
-    let rows: Vec<&(String, String)> = snap.vals.iter().filter(|(n, _)| s.st_group.has(n) && (f.is_empty() || n.to_lowercase().contains(&f))).collect();
+    let rows: Vec<&(String, String)> = snap.vals.iter().enumerate().filter(|(i, (n, _))| s.st_group.has(n) && (f.is_empty() || s.st_lower.get(*i).is_some_and(|l| l.contains(&f)))).map(|(_, r)| r).collect();
     let w = ui.available_width();
     let (name_w, val_w) = (w * 0.4, w * 0.2);
     header(ui, &[("Name", name_w, false), ("Value", val_w, true), ("Per second", val_w, true)]);

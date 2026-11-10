@@ -491,9 +491,58 @@ pub(crate) fn js_job(text: &str) -> LayoutJob {
 }
 
 pub(crate) fn code_layout(ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32) -> Arc<egui::Galley> {
-    let mut job = json_job(buf.as_str());
+    memo_galley(ui, 0, buf.as_str(), wrap, || json_job(buf.as_str()))
+}
+
+/// Lays out a highlighted job, keeping the last galleys by text, theme, wrap width and scale. A layouter runs
+/// every frame and the highlighter lexes the whole text, so a still editor should not pay for that again.
+/// `kind` tells apart highlighters that would color the same text differently.
+pub(crate) fn memo_galley(ui: &egui::Ui, kind: u8, text: &str, wrap: f32, build: impl FnOnce() -> LayoutJob) -> Arc<egui::Galley> {
+    use std::hash::{Hash, Hasher};
+    thread_local! {
+        static MEMO: std::cell::RefCell<std::collections::HashMap<u64, Arc<egui::Galley>>> = Default::default();
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (kind, is_light(), wrap.to_bits(), ui.ctx().pixels_per_point().to_bits()).hash(&mut h);
+    text.hash(&mut h);
+    let key = h.finish();
+    if let Some(g) = MEMO.with(|m| m.borrow().get(&key).cloned()) {
+        return g;
+    }
+    let mut job = build();
     job.wrap.max_width = wrap;
-    ui.fonts_mut(|f| f.layout_job(job))
+    let g = ui.fonts_mut(|f| f.layout_job(job));
+    MEMO.with(|m| {
+        let mut m = m.borrow_mut();
+        // Small on purpose: only the editors on screen are re-asked each frame.
+        if m.len() >= 24 {
+            m.clear();
+        }
+        m.insert(key, g.clone());
+    });
+    g
+}
+
+/// Width the line numbers of a code editor take on the left.
+pub(crate) const GUTTER_W: f32 = 52.0;
+
+/// The text area frame of a code editor: room on the left for the line numbers.
+pub(crate) fn gutter_frame() -> egui::Frame {
+    egui::Frame::new().inner_margin(egui::Margin { left: GUTTER_W as i8, right: 12, top: 10, bottom: 10 })
+}
+
+/// Paints the line numbers of an editor shown with `gutter_frame`, one per source line, the caret line brighter.
+pub(crate) fn paint_gutter(ui: &egui::Ui, out: &egui::text_edit::TextEditOutput, cur_line: Option<usize>) {
+    let (gp, rect) = (out.galley_pos, out.response.rect);
+    let (mut n, mut fresh) = (0, true);
+    for row in &out.galley.rows {
+        if fresh {
+            n += 1;
+            let y = gp.y + row.pos.y + row.height() / 2.0;
+            ui.painter().text(egui::pos2(rect.left() + GUTTER_W - 14.0, y), egui::Align2::RIGHT_CENTER, n.to_string(), FontId::monospace(TXT_CAPTION), if Some(n) == cur_line { MUTED() } else { FAINT() });
+        }
+        fresh = row.ends_with_newline;
+    }
 }
 
 /// Cmd+F for a big text area, kept in egui memory under the area's id.

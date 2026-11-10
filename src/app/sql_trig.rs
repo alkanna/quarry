@@ -8,7 +8,6 @@ use db::sql::ddl::{self, TrigDef, TrigJob};
 use db::sql::structure::{Structure, Trigger};
 
 const LINE_H: f32 = 20.0;
-const GUTTER_W: f32 = 52.0;
 
 /// The key of the draft of a trigger that does not exist yet.
 pub(super) const NEW: &str = "";
@@ -37,12 +36,13 @@ fn body_editor(ui: &mut egui::Ui, salt: &str, text: &mut String, height: f32, ed
     let id = egui::Id::unique(("trigger-body", salt));
     let focused = ui.memory(|m| m.has_focus(id));
     let mut layout = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
-        let mut job = sql_job(buf.as_str(), TXT_SMALL);
-        for sec in &mut job.sections {
-            sec.format.line_height = Some(LINE_H);
-        }
-        job.wrap.max_width = wrap;
-        ui.fonts_mut(|f| f.layout_job(job))
+        crate::ui::editor::memo_galley(ui, 1, buf.as_str(), wrap, || {
+            let mut job = sql_job(buf.as_str(), TXT_SMALL);
+            for sec in &mut job.sections {
+                sec.format.line_height = Some(LINE_H);
+            }
+            job
+        })
     };
     let mut changed = false;
     egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, if focused { PRIMARY() } else { BORDER() })).corner_radius(R_MD).show(ui, |ui| {
@@ -51,7 +51,7 @@ fn body_editor(ui: &mut egui::Ui, salt: &str, text: &mut String, height: f32, ed
             let out = egui::TextEdit::multiline(text)
                 .id(id)
                 .font(FontId::monospace(TXT_SMALL))
-                .frame(egui::Frame::new().inner_margin(egui::Margin { left: GUTTER_W as i8, right: 12, top: 10, bottom: 10 }))
+                .frame(gutter_frame())
                 .desired_width(f32::INFINITY)
                 .min_size(egui::vec2(0.0, 96.0))
                 .interactive(editable)
@@ -59,16 +59,7 @@ fn body_editor(ui: &mut egui::Ui, salt: &str, text: &mut String, height: f32, ed
                 .layouter(&mut layout)
                 .show(ui);
             changed = out.response.changed();
-            let (g, gp, rect) = (&out.galley, out.galley_pos, out.response.rect);
-            let (mut n, mut fresh) = (0, true);
-            for row in &g.rows {
-                if fresh {
-                    n += 1;
-                    let y = gp.y + row.pos.y + row.height() / 2.0;
-                    ui.painter().text(egui::pos2(rect.left() + GUTTER_W - 14.0, y), egui::Align2::RIGHT_CENTER, n.to_string(), FontId::monospace(TXT_CAPTION), FAINT());
-                }
-                fresh = row.ends_with_newline;
-            }
+            paint_gutter(ui, &out, None);
         });
     });
     changed

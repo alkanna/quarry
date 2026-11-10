@@ -7,9 +7,6 @@ use super::*;
 use db::sql::ddl::{self, Change, FK_ACTIONS};
 use db::sql::structure::{ForeignKey, Structure};
 
-/// Tables of these schemas are never worth a foreign key.
-const SYSTEM: [&str; 4] = ["information_schema", "performance_schema", "mysql", "sys"];
-
 /// Above this many rows the check for orphans waits for a click, because it joins the whole table.
 const CHECK_ROWS: u64 = 200_000;
 
@@ -199,7 +196,7 @@ impl App {
         ui.label(RichText::new(&table).size(TXT_SMALL).color(MUTED()));
         ui.add_space(8.0);
 
-        let dbs: Vec<String> = self.conn(conn).map(|c| c.dbs.iter().map(|d| d.0.clone()).filter(|d| *d == schema || !SYSTEM.contains(&d.as_str())).collect()).unwrap_or_default();
+        let dbs: Vec<String> = self.conn(conn).map(|c| c.dbs.iter().map(|d| d.0.clone()).filter(|d| *d == schema || !db::sql::create::SYSTEM_SCHEMAS.contains(&d.as_str())).collect()).unwrap_or_default();
         let tables = self.fk_tables(conn, &f.ref_db);
         let dropped: Vec<String> = f.rest.iter().filter_map(|c| if let Change::Drop(n) = c { Some(n.clone()) } else { None }).collect();
         let own_cols: Vec<String> = f.own.columns.iter().map(|c| c.name.clone()).filter(|n| !dropped.contains(n)).collect();

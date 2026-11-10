@@ -331,6 +331,8 @@ impl App {
     /// The MySQL demo: a production connection and an open orders table. Nothing here reads the Keychain or the network.
     fn load_sql_demo(&mut self) {
         use db::sql::{Col, value::Kind};
+        let which = std::env::var("QUARRY_TEST_SQL").unwrap_or_default();
+        let which = which.as_str();
         let mut shop: Vec<String> = ["customers", "invoices", "order_items", "orders", "payments", "products", "shipments", "order_totals", "top_customers"].map(String::from).to_vec();
         shop.sort();
         self.conns.push(Conn {
@@ -386,15 +388,15 @@ impl App {
         t.sort_txt = "created_at DESC".into();
         t.filter_txt = "status = 'paid' AND total > 50".into();
         // QUARRY_TEST_SQL=rules, sqlmode or grouped pick the query bar's state; anything else is the plain Content view.
-        match std::env::var("QUARRY_TEST_SQL").as_deref() {
-            Ok("rules") => {
+        match which {
+            "rules" => {
                 t.filter_txt = "`status` IN ('paid', 'shipped') AND `total` > 50".into();
                 t.sort_txt = "`created_at` DESC, `total` ASC".into();
                 if let Some(s) = t.sql.as_mut() {
                     s.bar.c.limit = "100".into();
                 }
             }
-            Ok("sqlmode") => {
+            "sqlmode" => {
                 t.filter_txt = "status IN ('paid','shipped') AND total > 50".into();
                 t.sort_txt = "created_at DESC, total ASC".into();
                 if let Some(s) = t.sql.as_mut() {
@@ -403,12 +405,12 @@ impl App {
                     s.bar.c.limit = "100".into();
                 }
             }
-            Ok("colpick") => {
+            "colpick" => {
                 if let Some(s) = t.sql.as_mut() {
                     s.bar.preset = super::sql_bar::Preset { order: true, pick: Some("stat".into()), ..Default::default() };
                 }
             }
-            Ok("ac") => {
+            "ac" => {
                 t.filter_txt = "status = 'paid' AND total > 50 AND cur".into();
                 if let Some(s) = t.sql.as_mut() {
                     s.bar.preset.ac = true;
@@ -416,7 +418,7 @@ impl App {
                     s.bar.c.limit = "100".into();
                 }
             }
-            Ok("grouped") => {
+            "grouped" => {
                 t.filter_txt = "`status` IN ('paid', 'shipped') AND `total` > 50".into();
                 t.sort_txt = "`revenue` DESC".into();
                 let col = |name: &str, ty: &str| Col::plain(name, ty, Kind::from_type_name(ty), false);
@@ -440,41 +442,41 @@ impl App {
         self.tabs = vec![t, Tab::new(sel("customers")).for_engine(engine)];
         self.cur = 0;
         self.status = ("Offline demo: no database is connected.".into(), false);
-        self.sql_structure_demo(&std::env::var("QUARRY_TEST_SQL").unwrap_or_default());
-        self.sql_alter_demo(&std::env::var("QUARRY_TEST_SQL").unwrap_or_default());
-        self.sql_rel_demo(&std::env::var("QUARRY_TEST_SQL").unwrap_or_default());
-        self.sql_trig_demo(&std::env::var("QUARRY_TEST_SQL").unwrap_or_default());
-        self.sql_users_demo(&std::env::var("QUARRY_TEST_SQL").unwrap_or_default());
+        self.sql_structure_demo(which);
+        self.sql_alter_demo(which);
+        self.sql_rel_demo(which);
+        self.sql_trig_demo(which);
+        self.sql_users_demo(which);
         // QUARRY_TEST_SQL=processes, variables, overview or status opens the SQL Server window on that tab.
-        if let Ok(v @ ("processes" | "variables" | "overview" | "status")) = std::env::var("QUARRY_TEST_SQL").as_deref() {
+        if let v @ ("processes" | "variables" | "overview" | "status") = which {
             self.sql_server = Some(SqlServerWin::demo(3, v));
         }
-        if matches!(std::env::var("QUARRY_TEST_SQL").as_deref(), Ok("query" | "log" | "format" | "library")) {
+        if matches!(which, "query" | "log" | "format" | "library") {
             self.sql_query_demo();
         }
-        if std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("log") {
+        if which == "log" {
             self.sql_log_demo();
         }
-        if matches!(std::env::var("QUARRY_TEST_SQL").as_deref(), Ok("shell" | "shellac" | "shellattach" | "attach")) {
+        if matches!(which, "shell" | "shellac" | "shellattach" | "attach") {
             self.sql_shell_demo();
         }
-        if matches!(std::env::var("QUARRY_TEST_SQL").as_deref(), Ok("ac" | "acquery" | "shellac" | "relations")) {
+        if matches!(which, "ac" | "acquery" | "shellac" | "relations") {
             self.sql_ac_demo();
         }
         // QUARRY_TEST_SQL=edit stages two cells of row 3; =select checks four rows.
-        match std::env::var("QUARRY_TEST_SQL").as_deref() {
-            Ok("edit") => self.sql_demo_stage(),
-            Ok("select") => self.tabs[0].checked = [1, 2, 4, 5].into(),
+        match which {
+            "edit" => self.sql_demo_stage(),
+            "select" => self.tabs[0].checked = [1, 2, 4, 5].into(),
             _ => {}
         }
         self.sql_json_demo();
         // QUARRY_TEST_SQL=import or dump open their dialogs over the orders table.
-        match std::env::var("QUARRY_TEST_SQL").as_deref() {
-            Ok("import") => self.demo_sql_import(),
-            Ok("dump") => self.demo_sql_dump(),
+        match which {
+            "import" => self.demo_sql_import(),
+            "dump" => self.demo_sql_dump(),
             _ => {}
         }
-        self.sql_create_demo(&std::env::var("QUARRY_TEST_SQL").unwrap_or_default());
+        self.sql_create_demo(which);
     }
 
     /// QUARRY_TEST_SQL_JSON=<file> swaps the demo rows of the orders grid (content, rules, select, edit) or of

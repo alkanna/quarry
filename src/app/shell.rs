@@ -169,7 +169,6 @@ pub(super) fn default_script(coll: &str, sql: bool) -> String {
 
 /// A fixed line height, so the gutter numbers line up with the text.
 const LINE_H: f32 = 20.0;
-const GUTTER_W: f32 = 52.0;
 /// Height of the Console and Queries panel under the result, tab row included.
 const SHELL_PANEL_H: f32 = 150.0;
 
@@ -535,12 +534,13 @@ impl App {
         let custom = pref > 0.0;
         let h = if custom { pref.clamp(lo, hi.max(lo)) } else { (t.shell.code.split('\n').count() as f32 * LINE_H + 24.0).clamp(110.0, (ui.available_height() * 0.4).max(110.0)) };
         let mut layout = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
-            let mut job = if sql { shell_ls::js_sql_job(buf.as_str()) } else { js_job(buf.as_str()) };
-            for sec in &mut job.sections {
-                sec.format.line_height = Some(LINE_H);
-            }
-            job.wrap.max_width = wrap;
-            ui.fonts_mut(|f| f.layout_job(job))
+            crate::ui::editor::memo_galley(ui, if sql { 3 } else { 2 }, buf.as_str(), wrap, || {
+                let mut job = if sql { shell_ls::js_sql_job(buf.as_str()) } else { js_job(buf.as_str()) };
+                for sec in &mut job.sections {
+                    sec.format.line_height = Some(LINE_H);
+                }
+                job
+            })
         };
         // Inside sql`...` the suggestions are SQL ones; elsewhere the built-in and server ones stay.
         let tail = if scope.is_some() && focused { shell_ls::template_tail(ui.ctx(), id, &t.shell.code) } else { String::new() };
@@ -565,7 +565,7 @@ impl App {
                     egui::TextEdit::multiline(text)
                         .id(id)
                         .font(FontId::monospace(TXT_SMALL))
-                        .frame(egui::Frame::new().inner_margin(egui::Margin { left: GUTTER_W as i8, right: 12, top: 10, bottom: 10 }))
+                        .frame(gutter_frame())
                         .desired_width(f32::INFINITY)
                         .min_size(egui::vec2(0.0, if custom { h } else { 96.0 }))
                         .lock_focus(true)
@@ -579,17 +579,8 @@ impl App {
                 }
                 sql_need = need.borrow_mut().take();
                 let caret = out.cursor_range.filter(|r| r.is_empty()).map(|r| r.primary.index.0);
-                let (g, gp, rect) = (&out.galley, out.galley_pos, out.response.rect);
                 let cur_line = caret.map_or(0, |c| t.shell.code.chars().take(c).filter(|ch| *ch == '\n').count() + 1);
-                let (mut n, mut fresh) = (0, true);
-                for row in &g.rows {
-                    if fresh {
-                        n += 1;
-                        let y = gp.y + row.pos.y + row.height() / 2.0;
-                        ui.painter().text(egui::pos2(rect.left() + GUTTER_W - 14.0, y), egui::Align2::RIGHT_CENTER, n.to_string(), FontId::monospace(TXT_CAPTION), if n == cur_line { MUTED() } else { FAINT() });
-                    }
-                    fresh = row.ends_with_newline;
-                }
+                paint_gutter(ui, &out, Some(cur_line));
                 let hover = out.response.hover_pos().and_then(|p| {
                     // The character under the pointer, not just the nearest gap between two.
                     let rel = p - out.galley_pos;

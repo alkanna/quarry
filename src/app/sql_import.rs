@@ -187,7 +187,7 @@ impl App {
     pub(super) fn sql_import_dialog(&mut self, ui: &mut egui::Ui, f: &mut ImportForm, keep: &mut bool) {
         ui.set_width(720.0);
         dialog_title(ui, format!("Import into {}", f.table));
-        let writable = self.conn(f.conn).is_some_and(|c| c.writable);
+        let writable = self.conn_writable(f.conn);
         f.file.poll();
         let ctx = ui.ctx().clone();
         // A changed separator, quote, encoding or header row reads the first records again.

@@ -621,8 +621,8 @@ pub(crate) fn sql_ac_field(
     }
     // The text after the caret, from before this frame's edit: the compute step only sees the text before the caret.
     let prev_caret = egui::TextEdit::load_state(ui.ctx(), id).and_then(|s| s.cursor.char_range()).map(|r| usize::from(r.primary.index));
-    let snap = if focused { text.clone() } else { String::new() };
-    let tail: String = prev_caret.map(|c| snap.chars().skip(c).collect()).unwrap_or_default();
+    // Only the tail is copied, and only while focused: the edit below changes `text` before the compute step reads it.
+    let tail: String = if focused { prev_caret.map(|c| text.chars().skip(c).collect()).unwrap_or_default() } else { String::new() };
     let meta: RefCell<Option<(String, String)>> = RefCell::new(None);
     let need: RefCell<Option<Need>> = RefCell::new(None);
     let compute = |before: &str| -> Option<(usize, Vec<Sug>)> {

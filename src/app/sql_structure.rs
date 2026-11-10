@@ -21,6 +21,8 @@ pub(super) struct StructState {
     sel: [Option<usize>; 5],
     /// Column and index changes waiting to become one ALTER TABLE.
     pub(super) staged: Vec<Change>,
+    /// The statement and warnings of `staged`, kept between frames.
+    pub(super) bar: Option<super::sql_alter::PlanMemo>,
     /// The ALTER or trigger statement is running.
     pub(super) applying: bool,
     /// Trigger edits not saved yet, by trigger name; the new trigger's is under the empty name.
@@ -121,6 +123,18 @@ impl App {
         }
     }
 
+    /// The staged changes and their kept plan, moved out of the tab for the frame so the draw reads them without a
+    /// copy. `hold_staged` puts them back before the frame's actions run.
+    fn take_staged(&mut self) -> (Vec<Change>, Option<super::sql_alter::PlanMemo>, bool) {
+        self.tabs[self.cur].sql.as_mut().map_or((Vec::new(), None, false), |s| (std::mem::take(&mut s.st.staged), s.st.bar.take(), s.st.applying))
+    }
+
+    fn hold_staged(&mut self, staged: Vec<Change>, memo: Option<super::sql_alter::PlanMemo>) {
+        if let Some(s) = self.tabs[self.cur].sql.as_mut() {
+            (s.st.staged, s.st.bar) = (staged, memo);
+        }
+    }
+
     fn keep(&mut self, ctx: &egui::Context, data: Structure, sel: [Option<usize>; 5], acts: Vec<Act>) {
         if let Some(s) = self.tabs[self.cur].sql.as_mut() {
             (s.st.data, s.st.sel) = (Some(data), sel);
@@ -179,7 +193,7 @@ impl App {
         let is_view = self.sel_is_view();
         let why = if is_view { "Views cannot be changed here" } else { READ_ONLY };
         let note = if editable { "" } else { why };
-        let (staged, applying) = self.tabs[self.cur].sql.as_ref().map_or((Vec::new(), false), |s| (s.st.staged.clone(), s.st.applying));
+        let (staged, mut memo, applying) = self.take_staged();
         let (dropped, changed) = staged_marks(&staged);
         let col = sel[0].filter(|i| *i < d.columns.len());
         let mut left = Vec::new();
@@ -205,7 +219,7 @@ impl App {
         acts.extend(left);
         ui.add_space(8.0);
         if !staged.is_empty() {
-            self.staged_bar(ui, &d, &staged, editable, applying, &mut acts);
+            self.staged_bar(ui, &mut memo, &d, &staged, editable, applying, &mut acts);
             ui.add_space(8.0);
         }
         egui::ScrollArea::vertical().id_salt("sql-structure").auto_shrink([false, false]).show(ui, |ui| {
@@ -301,6 +315,7 @@ impl App {
                 acts.push(Act::EditIndex(r));
             }
         });
+        self.hold_staged(staged, memo);
         self.keep(&ui.ctx().clone(), d, sel, acts);
     }
 
@@ -310,7 +325,7 @@ impl App {
         let mut open = None;
         let editable = self.sel_writable();
         let why = if self.sel_is_view() { "Views cannot be changed here" } else { READ_ONLY };
-        let (staged, applying) = self.tabs[self.cur].sql.as_ref().map_or((Vec::new(), false), |s| (s.st.staged.clone(), s.st.applying));
+        let (staged, mut memo, applying) = self.take_staged();
         let dropped: Vec<String> = staged.iter().filter_map(|c| if let Change::DropFk(n) = c { Some(n.to_ascii_lowercase()) } else { None }).collect();
         let fk = sel[2].filter(|i| *i < d.foreign_keys.len());
         let mut left = Vec::new();
@@ -332,7 +347,7 @@ impl App {
         acts.extend(left);
         ui.add_space(8.0);
         if !staged.is_empty() {
-            self.staged_bar(ui, &d, &staged, editable, applying, &mut acts);
+            self.staged_bar(ui, &mut memo, &d, &staged, editable, applying, &mut acts);
             ui.add_space(8.0);
         }
         // The schema's estimate, asked for once per database; a table it has not listed yet shows nothing.
@@ -409,6 +424,7 @@ impl App {
             }
         });
         acts.extend(open.map(|(db, table)| Act::Open { db, table }));
+        self.hold_staged(staged, memo);
         self.keep(&ui.ctx().clone(), d, sel, acts);
     }
 
@@ -593,20 +609,7 @@ fn gc_r(head: &'static str, weight: f32) -> GCol {
 }
 
 fn put(ui: &egui::Ui, cell: Rect, s: &str, font: FontId, color: Color32, right: bool) {
-    place(ui, cell, s, font, color, right);
-}
-
-/// Text cut to its cell with an ellipsis, centered on its ink. Returns where it ended up.
-fn place(ui: &egui::Ui, cell: Rect, s: &str, font: FontId, color: Color32, right: bool) -> Rect {
-    let area = cell.shrink2(vec2(8.0, 0.0));
-    let mut job = egui::text::LayoutJob::single_section(s.to_string(), egui::TextFormat { font_id: font, color, ..Default::default() });
-    job.wrap = egui::text::TextWrapping { max_width: area.width().max(1.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
-    let g = ui.painter().layout_job(job);
-    let x = if right { area.right() - g.size().x } else { area.left() };
-    let pos = pos2(x, cell.center().y - g.size().y / 2.0 + optical_dy(&g));
-    let rect = Rect::from_min_size(pos, g.size());
-    ui.painter().galley(pos, g, color);
-    rect
+    place(ui, cell, s, font, color, right, 8.0);
 }
 
 /// A name that opens another table. True when clicked.
@@ -615,7 +618,7 @@ fn link(ui: &mut egui::Ui, cell: Rect, id: (&str, usize), s: &str) -> bool {
     let g = ui.painter().layout_no_wrap(s.to_string(), FontId::monospace(TXT_SMALL), C_LINK());
     let hit = Rect::from_min_size(pos2(area.left(), cell.top() + 4.0), vec2(g.size().x.min(area.width()), cell.height() - 8.0));
     let r = ui.interact(hit, ui.scope_id().with(id), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
-    let ink = place(ui, cell, s, FontId::monospace(TXT_SMALL), C_LINK(), false);
+    let ink = place(ui, cell, s, FontId::monospace(TXT_SMALL), C_LINK(), false, 8.0);
     if r.hovered() {
         ui.painter().hline(ink.x_range(), ink.bottom() + 0.5, Stroke::new(1.0, C_LINK()));
     }

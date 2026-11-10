@@ -73,7 +73,6 @@ pub(super) struct RunForm {
     conn_name: String,
     src: Source,
     name: String,
-    size: u64,
 }
 
 /// Today as YYYY-MM-DD in UTC, for a default file name.
@@ -132,7 +131,7 @@ impl App {
         let Some(p) = rfd::FileDialog::new().add_filter("SQL", &["sql", "txt"]).pick_file() else { return };
         let src = Source::File(p.clone());
         let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        self.modal = Some(Modal::SqlRunFile(Box::new(RunForm { conn, db, conn_name, size: src.len(), src, name })));
+        self.modal = Some(Modal::SqlRunFile(Box::new(RunForm { conn, db, conn_name, src, name })));
     }
 
     pub(super) fn sql_dump_dialog(&mut self, ui: &mut egui::Ui, f: &mut DumpForm, keep: &mut bool) {
@@ -282,9 +281,9 @@ impl App {
     pub(super) fn sql_run_file_dialog(&mut self, ui: &mut egui::Ui, f: &mut RunForm, keep: &mut bool) {
         ui.set_width(520.0);
         dialog_title(ui, "Run SQL file");
-        ui.label(RichText::new(format!("{} \u{b7} {}", f.name, human_bytes(f.size as usize))).size(TXT_SMALL).color(MUTED()));
+        ui.label(RichText::new(format!("{} \u{b7} {}", f.name, human_bytes(f.src.len() as usize))).size(TXT_SMALL).color(MUTED()));
         ui.add_space(8.0);
-        let writable = self.conn(f.conn).is_some_and(|c| c.writable);
+        let writable = self.conn_writable(f.conn);
         let say = |ui: &mut egui::Ui, t: String, c: Color32| ui.add(egui::Label::new(RichText::new(t).color(c)).wrap());
         say(ui, format!("Runs every statement of the file on {} in the database {}. A DELIMITER line and /*! ... */ comments are understood, and the file may switch database with USE.", f.conn_name, f.db), TEXT());
         ui.add_space(4.0);
@@ -308,15 +307,15 @@ impl App {
         if go {
             let Some(sql) = self.conn(f.conn).and_then(|c| c.sql.clone()) else { return self.err("Connect first.") };
             self.req += 1;
-            let job = SqlJob::new(self.req, f.conn, sql.clone(), f.db.clone(), JobKind::Script, 0, f.size);
+            let job = SqlJob::new(self.req, f.conn, sql.clone(), f.db.clone(), JobKind::Script, 0, f.src.len());
             self.worker.sql_run_file(job.req, sql, f.db.clone(), f.src.clone(), !writable, job.prog.clone(), job.id.clone(), job.cancel.clone());
             self.sql_job = Some(job);
             self.ok(format!("Running {}", f.name));
             *keep = false;
         } else if unlock {
             *keep = false;
-            let (conn, db, src, name, size, conn_name) = (f.conn, f.db.clone(), f.src.clone(), f.name.clone(), f.size, f.conn_name.clone());
-            self.modal = Some(Modal::Unlock(conn, Some(Box::new(move |a: &mut App| a.modal = Some(Modal::SqlRunFile(Box::new(RunForm { conn, db, conn_name, src, name, size })))))));
+            let (conn, db, src, name, conn_name) = (f.conn, f.db.clone(), f.src.clone(), f.name.clone(), f.conn_name.clone());
+            self.modal = Some(Modal::Unlock(conn, Some(Box::new(move |a: &mut App| a.modal = Some(Modal::SqlRunFile(Box::new(RunForm { conn, db, conn_name, src, name })))))));
         }
     }
 

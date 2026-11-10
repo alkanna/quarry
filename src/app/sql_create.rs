@@ -90,7 +90,7 @@ impl App {
         self.conn(conn).map(|c| c.meta.name.clone()).unwrap_or_default()
     }
 
-    fn conn_writable(&self, conn: u64) -> bool {
+    pub(super) fn conn_writable(&self, conn: u64) -> bool {
         self.conn(conn).is_some_and(|c| c.writable)
     }
 
@@ -162,11 +162,7 @@ impl App {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn sql_ddl_done(&mut self, conn: u64, schema: String, table: String, what: Ddl, res: db::Res<String>, undo: Option<UndoAction>, dbs: Option<Vec<String>>, sql_mode: Option<String>) {
         // The create was built for the session's mode, which changed since connecting; the previews follow it now.
-        if let Some(m) = sql_mode {
-            if let Some(d) = self.conns.iter_mut().find(|c| c.meta.id == conn).and_then(|c| c.sql.as_mut()) {
-                d.sql_mode = m;
-            }
-        }
+        self.adopt_sql_mode(conn, sql_mode);
         // A refused undo hands its entry back, so it is kept whether or not the write went through.
         if let Some(u) = undo {
             self.push_undo(u);
@@ -315,10 +311,8 @@ impl App {
     }
 
     fn sql_create_db_run(&mut self, f: &NewDb) {
-        if self.demo {
-            return self.ok("Offline demo: no database is connected.");
-        }
-        let (Some(meta), Some(sql)) = (f.meta.clone(), self.conn(f.conn).and_then(|c| c.sql.clone())) else { return };
+        let Some(sql) = self.sql_db_for(f.conn, None) else { return };
+        let Some(meta) = f.meta.clone() else { return };
         self.worker.sql_create_db(f.conn, sql, f.name.clone(), f.charset.clone(), f.collation.clone(), meta, !self.conn_writable(f.conn));
     }
 
@@ -330,7 +324,7 @@ impl App {
         ui.label(RichText::new(f.schema.as_str()).color(MUTED()));
         ui.add_space(8.0);
         let d = self.conn(f.conn).and_then(|c| c.sql.as_ref().map(|s| s.dialect)).unwrap_or_default();
-        let bs = self.conn(f.conn).and_then(|c| c.sql.as_ref().map(|s| s.backslash_escapes())).unwrap_or(true);
+        let bs = self.sql_mode(f.conn).bs;
         egui::Grid::new("newtable-head").num_columns(4).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
             form_label(ui, "Name");
             let r = ui.add(egui::TextEdit::singleline(&mut f.name).font(egui::TextStyle::Monospace).desired_width(280.0));
@@ -413,10 +407,8 @@ impl App {
     }
 
     fn sql_create_table_run(&mut self, f: &NewTable) {
-        if self.demo {
-            return self.ok("Offline demo: no database is connected.");
-        }
-        let (Some(meta), Some(sql)) = (f.meta.clone(), self.conn(f.conn).and_then(|c| c.sql.clone())) else { return };
+        let Some(sql) = self.sql_db_for(f.conn, None) else { return };
+        let Some(meta) = f.meta.clone() else { return };
         let spec = TableSpec { schema: f.schema.clone(), name: f.name.clone(), engine: f.engine.clone(), collation: f.collation.clone(), columns: f.cols.clone() };
         self.worker.sql_create_table(f.conn, sql, spec, meta, !self.conn_writable(f.conn));
     }

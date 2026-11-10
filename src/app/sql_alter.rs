@@ -35,6 +35,7 @@ pub(super) struct ColForm {
     rest: Vec<Change>,
     /// The other columns in the order the staged changes leave them, for the position list.
     order: Vec<String>,
+    memo: Option<PlanMemo>,
 }
 
 pub(super) struct IdxForm {
@@ -44,6 +45,26 @@ pub(super) struct IdxForm {
     /// The columns of the table with their types, in order.
     avail: Vec<(String, String)>,
     rest: Vec<Change>,
+}
+
+/// The plan and the warnings of a list of changes, kept while the changes, the table definition and the session
+/// mode stay as they are. Both walk the whole structure and a bar or dialog draws them every frame.
+pub(super) struct PlanMemo {
+    changes: Vec<Change>,
+    create: String,
+    mode: Mode,
+    warnings: Vec<String>,
+    plan: Result<Plan, String>,
+}
+
+impl PlanMemo {
+    fn of<'a>(slot: &'a mut Option<PlanMemo>, app: &App, st: &Structure, changes: &[Change]) -> &'a PlanMemo {
+        let mode = app.cur_mode();
+        if !slot.as_ref().is_some_and(|m| m.mode == mode && m.create == st.create && m.changes == changes) {
+            *slot = Some(PlanMemo { changes: changes.to_vec(), create: st.create.clone(), mode, warnings: ddl::warnings(st, changes), plan: app.plan_of(st, changes) });
+        }
+        slot.as_ref().unwrap()
+    }
 }
 
 /// Columns the staged changes drop and columns they change, for marks beside the grid rows.
@@ -133,6 +154,11 @@ impl App {
         self.t().and_then(|t| t.sql.as_ref()).is_some_and(|s| s.st.applying)
     }
 
+    /// The sql_mode the open tab's connection last reported.
+    fn cur_mode(&self) -> Mode {
+        self.t().map_or(Mode::DEFAULT, |t| self.sql_mode(t.sel.conn))
+    }
+
     /// The statement and its undo for these changes, as they will run. `st` is passed in because the Structure
     /// view takes the tab's structure out while it draws.
     fn plan_of(&self, st: &Structure, changes: &[Change]) -> Result<Plan, String> {
@@ -186,7 +212,7 @@ impl App {
         let order: Vec<String> = ddl::columns_after(st, &rest).into_iter().filter(|n| Some(n) != from.as_ref()).collect();
         let (dmode, dtext) = mode_of(&def.default);
         let orig = from.is_some().then(|| (def.clone(), pos.clone()));
-        self.modal = Some(Modal::ColEdit(Box::new(ColForm { from, def, orig, dmode, dtext, pos, rest, order })));
+        self.modal = Some(Modal::ColEdit(Box::new(ColForm { from, def, orig, dmode, dtext, pos, rest, order, memo: None })));
     }
 
     pub(super) fn duplicate_column(&mut self, i: usize) {
@@ -384,11 +410,7 @@ impl App {
         let ok = res.is_ok();
         let (clear, reload) = answer_effects(ok, alter);
         // The statement was refused for a stale mode; the previews follow the new one from now on.
-        if let Some(m) = sql_mode {
-            if let Some(d) = self.conns.iter_mut().find(|c| c.meta.id == conn).and_then(|c| c.sql.as_mut()) {
-                d.sql_mode = m;
-            }
-        }
+        self.adopt_sql_mode(conn, sql_mode);
         match res {
             Ok(s) => {
                 self.toast = Some((s.clone(), std::time::Instant::now(), undo.as_ref().map(|u| u.at)));
@@ -421,7 +443,7 @@ impl App {
     }
 
     /// The staged changes as a bar above the grids: the list, what cannot be undone, and the statement.
-    pub(super) fn staged_bar(&self, ui: &mut egui::Ui, st: &Structure, staged: &[Change], editable: bool, applying: bool, acts: &mut Vec<super::sql_structure::Act>) {
+    pub(super) fn staged_bar(&self, ui: &mut egui::Ui, memo: &mut Option<PlanMemo>, st: &Structure, staged: &[Change], editable: bool, applying: bool, acts: &mut Vec<super::sql_structure::Act>) {
         use super::sql_structure::Act;
         card(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -452,11 +474,12 @@ impl App {
                     });
                 }
             });
-            for w in ddl::warnings(st, staged) {
-                ui.label(RichText::new(w).size(TXT_SMALL).color(WARNING()));
+            let memo = PlanMemo::of(memo, self, st, staged);
+            for w in &memo.warnings {
+                ui.label(RichText::new(w.as_str()).size(TXT_SMALL).color(WARNING()));
             }
             ui.add_space(6.0);
-            match self.plan_of(st, staged) {
+            match &memo.plan {
                 Ok(p) => {
                     if let Err(why) = &p.undo {
                         ui.label(RichText::new(format!("This change cannot be undone: {why}")).size(TXT_SMALL).color(ALERT()));
@@ -465,7 +488,7 @@ impl App {
                     sql_block(ui, "staged-sql", &p.sql, 140.0);
                 }
                 Err(e) => {
-                    ui.label(RichText::new(e).size(TXT_SMALL).color(ALERT()));
+                    ui.label(RichText::new(e.as_str()).size(TXT_SMALL).color(ALERT()));
                 }
             }
         });
@@ -600,13 +623,14 @@ impl App {
         all.push(change);
         let unchanged = f.orig.as_ref().is_some_and(|(d, p)| *d == f.def && *p == f.pos);
         let dup = f.order.iter().any(|n| ddl::same_name(n, &f.def.name));
-        let st = self.structure().cloned();
-        let plan = if dup {
+        let st = self.structure();
+        let memo = st.map(|st| PlanMemo::of(&mut f.memo, self, st, &all));
+        let plan: Result<&Plan, String> = if dup {
             Err(format!("The table already has a column called {}.", f.def.name))
         } else if unchanged {
             Err("Nothing is changed yet.".into())
         } else {
-            st.as_ref().map_or_else(|| Err("The structure is not loaded.".into()), |st| self.plan_of(st, &all))
+            memo.map_or_else(|| Err("The structure is not loaded.".into()), |m| m.plan.as_ref().map_err(Clone::clone))
         };
         let text = plan.as_ref().map(|p| p.sql.clone()).map_err(Clone::clone);
         ui.add_space(6.0);
@@ -621,9 +645,9 @@ impl App {
         if let Ok(Plan { undo: Err(why), .. }) = &plan {
             ui.label(RichText::new(format!("This change cannot be undone: {why}")).size(TXT_SMALL).color(ALERT()));
         }
-        if let Some(st) = &st {
-            for w in ddl::warnings(st, &all) {
-                ui.label(RichText::new(w).size(TXT_SMALL).color(WARNING()));
+        if let (Some(st), Some(memo)) = (st, memo) {
+            for w in &memo.warnings {
+                ui.label(RichText::new(w.as_str()).size(TXT_SMALL).color(WARNING()));
             }
             ui.add_space(4.0);
             let sz = st.status.data.zip(st.status.index).map(|(a, b)| size(a + b)).unwrap_or_default();

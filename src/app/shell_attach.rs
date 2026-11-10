@@ -391,8 +391,8 @@ async function run() {
         if ready && !dbs.contains(&f.db) {
             // The tab's own database when it is the same connection, else the first one a user would look at.
             let own = self.t().filter(|t| Some(t.sel.conn) == f.conn).map(|t| t.sel.db.clone()).filter(|d| dbs.contains(d));
-            const SYSTEM: [&str; 6] = ["admin", "local", "config", "information_schema", "mysql", "performance_schema"];
-            f.db = own.or_else(|| dbs.iter().find(|d| !SYSTEM.contains(&d.as_str()) && d.as_str() != "sys").cloned()).or_else(|| dbs.first().cloned()).unwrap_or_default();
+            let system = |d: &str| ["admin", "local", "config"].contains(&d) || db::sql::create::SYSTEM_SCHEMAS.contains(&d);
+            f.db = own.or_else(|| dbs.iter().find(|d| !system(d)).cloned()).or_else(|| dbs.first().cloned()).unwrap_or_default();
             f.name_set = false;
         }
         if !f.name_set {

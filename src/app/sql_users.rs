@@ -37,6 +37,8 @@ pub(super) struct SqlUsersWin {
     pub(super) conn: u64,
     pub(super) list_req: u64,
     pub(super) list: Option<db::Res<UserList>>,
+    /// The label of each account of `list` in lowercase, for the filter box.
+    search: Vec<String>,
     pub(super) filter: String,
     /// (user, host) of the account on show.
     pub(super) sel: Option<(String, String)>,
@@ -77,6 +79,7 @@ impl SqlUsersWin {
             conn,
             list_req: 0,
             list: None,
+            search: Vec::new(),
             filter: String::new(),
             sel: None,
             tab: UTab::Databases,
@@ -102,6 +105,11 @@ impl SqlUsersWin {
             dyn_grant: BTreeSet::new(),
             limits: Default::default(),
         }
+    }
+
+    fn set_list(&mut self, res: db::Res<UserList>) {
+        self.search = res.as_ref().map(|l| l.accounts.iter().map(|a| a.label().to_lowercase()).collect()).unwrap_or_default();
+        self.list = Some(res);
     }
 
     fn edits(&self) -> Vec<Edit> {
@@ -308,11 +316,6 @@ impl App {
         self.conn(conn).and_then(|c| c.sql.clone())
     }
 
-    /// The sql_mode the connection read, for the previews; Apply quotes for the session's own.
-    fn users_mode(&self, conn: u64) -> Mode {
-        self.users_sql(conn).map_or(Mode::DEFAULT, |s| Mode::of(&s.sql_mode))
-    }
-
     fn users_dialect(&self, conn: u64) -> Dialect {
         self.users_sql(conn).map_or(Dialect::MySql, |s| s.dialect)
     }
@@ -362,7 +365,7 @@ impl App {
                 w.sel = l.current.clone().filter(|c| has(&Some(c.clone()))).or_else(|| l.accounts.first().map(|a| (a.user.clone(), a.host.clone())));
             }
         }
-        w.list = Some(res);
+        w.set_list(res);
         self.sql_users_ask_grants();
     }
 
@@ -410,7 +413,7 @@ impl App {
     }
 
     pub(super) fn sql_new_user(&mut self, conn: u64) {
-        if !self.conn(conn).is_some_and(|c| c.writable) {
+        if !self.conn_writable(conn) {
             return self.err(NOTE_USER);
         }
         self.req += 1;
@@ -470,13 +473,13 @@ impl App {
     pub(super) fn sql_users_window(&mut self, ctx: &egui::Context) {
         let Some(mut w) = self.sql_users.take() else { return };
         let conn = w.conn;
-        let writable = self.conn(conn).is_some_and(|c| c.writable);
+        let writable = self.conn_writable(conn);
         let conn_name = self.conn(conn).map(|c| c.meta.name.clone()).unwrap_or_default();
         let product = self.conn(conn).map(|c| (c.server.product.clone(), short_version(&c.server.version))).filter(|(p, _)| !p.is_empty()).map_or(String::new(), |(p, v)| format!("{p} {v}"));
         let dialect = self.users_dialect(conn);
         let env = Env {
             writable,
-            mode: self.users_mode(conn),
+            mode: self.sql_mode(conn),
             dialect,
             caps: self.users_caps(conn),
             // The server's own databases are left out.
@@ -605,37 +608,49 @@ impl App {
         ui.add(egui::TextEdit::singleline(&mut w.filter).hint_text("Filter users").desired_width(f32::INFINITY));
         ui.add_space(6.0);
         let find = w.filter.trim().to_lowercase();
-        egui::ScrollArea::vertical().id_salt("sql-users-list").max_height(300.0).auto_shrink([false, true]).show(ui, |ui| match &w.list {
-            None => {
-                spin(ui);
-            }
-            Some(Err(e)) => {
-                ui.add(egui::Label::new(RichText::new(format!("Could not list users: {e}")).color(ALERT())).wrap());
-            }
-            Some(Ok(l)) => {
-                for a in l.accounts.iter().filter(|a| find.is_empty() || a.label().to_lowercase().contains(&find)) {
-                    let active = w.sel.as_ref() == Some(&(a.user.clone(), a.host.clone()));
-                    let dot = if a.locked { ALERT() } else if a.expired { WARNING() } else { SUCCESS() };
-                    let r = side_row(ui, 42.0, 0.0, active, |p, r| {
-                        p.circle_filled(egui::pos2(r.left() + 5.0, r.center().y), 4.0, dot);
-                        p.text(egui::pos2(r.left() + 20.0, r.top() + 12.0), egui::Align2::LEFT_CENTER, &a.user, FontId::proportional(TXT_TITLE), if active { BRIGHT() } else { TEXT() });
-                        let sub = if a.is_role { "role".to_string() } else { format!("@{}", a.host) };
-                        p.text(egui::pos2(r.left() + 20.0, r.top() + 29.0), egui::Align2::LEFT_CENTER, sub, FontId::monospace(TXT_CAPTION), FAINT());
-                    });
-                    let state = [(a.locked, "locked"), (a.expired, "password expired")].iter().filter(|(on, _)| *on).map(|(_, t)| *t).collect::<Vec<_>>().join(", ");
-                    let r = if state.is_empty() { r } else { r.on_hover_text(format!("{}: {state}", a.label())) };
-                    if r.clicked() && !active {
-                        acts.push(Act::Pick(a.user.clone(), a.host.clone()));
-                    }
-                    r.context_menu(|ui| {
-                        menu_look(ui);
-                        if ui.add_enabled_ui(writable, |ui| danger_item(ui, "Drop user…")).inner.on_disabled_hover_text("Read-only: unlock writes to drop a user").clicked() {
-                            acts.push(Act::Drop(a.clone()));
+        let shown: Vec<&Account> = match &w.list {
+            Some(Ok(l)) => l.accounts.iter().enumerate().filter(|(i, _)| find.is_empty() || w.search.get(*i).is_some_and(|s| s.contains(&find))).map(|(_, a)| a).collect(),
+            _ => Vec::new(),
+        };
+        let area = egui::ScrollArea::vertical().id_salt("sql-users-list").max_height(300.0).auto_shrink([false, true]);
+        match &w.list {
+            Some(Ok(_)) => {
+                // Every row has the same height, so only the visible ones are laid out.
+                area.show_rows(ui, 42.0, shown.len(), |ui, range| {
+                    for a in &shown[range] {
+                        let active = w.sel.as_ref() == Some(&(a.user.clone(), a.host.clone()));
+                        let dot = if a.locked { ALERT() } else if a.expired { WARNING() } else { SUCCESS() };
+                        let r = side_row(ui, 42.0, 0.0, active, |p, r| {
+                            p.circle_filled(egui::pos2(r.left() + 5.0, r.center().y), 4.0, dot);
+                            p.text(egui::pos2(r.left() + 20.0, r.top() + 12.0), egui::Align2::LEFT_CENTER, &a.user, FontId::proportional(TXT_TITLE), if active { BRIGHT() } else { TEXT() });
+                            let sub = if a.is_role { "role".to_string() } else { format!("@{}", a.host) };
+                            p.text(egui::pos2(r.left() + 20.0, r.top() + 29.0), egui::Align2::LEFT_CENTER, sub, FontId::monospace(TXT_CAPTION), FAINT());
+                        });
+                        let state = [(a.locked, "locked"), (a.expired, "password expired")].iter().filter(|(on, _)| *on).map(|(_, t)| *t).collect::<Vec<_>>().join(", ");
+                        let r = if state.is_empty() { r } else { r.on_hover_text(format!("{}: {state}", a.label())) };
+                        if r.clicked() && !active {
+                            acts.push(Act::Pick(a.user.clone(), a.host.clone()));
                         }
-                    });
-                }
+                        r.context_menu(|ui| {
+                            menu_look(ui);
+                            if ui.add_enabled_ui(writable, |ui| danger_item(ui, "Drop user…")).inner.on_disabled_hover_text("Read-only: unlock writes to drop a user").clicked() {
+                                acts.push(Act::Drop((*a).clone()));
+                            }
+                        });
+                    }
+                });
             }
-        });
+            other => {
+                area.show(ui, |ui| match other {
+                    Some(Err(e)) => {
+                        ui.add(egui::Label::new(RichText::new(format!("Could not list users: {e}")).color(ALERT())).wrap());
+                    }
+                    _ => {
+                        spin(ui);
+                    }
+                });
+            }
+        }
         ui.add_space(6.0);
         if ui.button("+ User").clicked() {
             acts.push(Act::NewUser);
@@ -1060,7 +1075,7 @@ impl App {
 
     pub(super) fn sql_new_user_dialog(&mut self, ui: &mut egui::Ui, f: &mut NewUser, keep: &mut bool) {
         ui.set_width(520.0);
-        let writable = self.conn(f.conn).is_some_and(|c| c.writable);
+        let writable = self.conn_writable(f.conn);
         dialog_title(ui, "New user");
         ui.label(RichText::new(self.conn(f.conn).map(|c| c.meta.name.clone()).unwrap_or_default()).color(MUTED()));
         ui.add_space(8.0);
@@ -1082,7 +1097,7 @@ impl App {
         let acct = Account::named(&f.user, &f.host);
         let check = users::check_new_user(&f.user, &f.host, &f.password);
         // The password never reaches the preview.
-        sql_block(ui, &format!("{};", users::create_user_sql(self.users_mode(f.conn), &acct, &f.password, true)));
+        sql_block(ui, &format!("{};", users::create_user_sql(self.sql_mode(f.conn), &acct, &f.password, true)));
         if let Err(e) = &check {
             if !f.user.is_empty() || !f.password.is_empty() {
                 ui.label(RichText::new(e.as_str()).size(TXT_SMALL).color(ALERT()));
@@ -1111,17 +1126,14 @@ impl App {
     fn sql_user_create_run(&mut self, f: &mut NewUser) {
         // Taken out of the form either way, so no copy stays in app state once Create was pressed.
         let password = std::mem::take(&mut f.password);
-        if self.demo {
-            return self.ok("Offline demo: no database is connected.");
-        }
-        let Some(sql) = self.users_sql(f.conn) else { return };
+        let Some(sql) = self.sql_db_for(f.conn, None) else { return };
         self.worker.sql_user_create(f.conn, sql, Account::named(&f.user, &f.host), password, false);
     }
 
     /// Change password: two masked fields, the plugin on MySQL, and a preview that shows '***'.
     pub(super) fn sql_password_dialog(&mut self, ui: &mut egui::Ui, f: &mut PwForm, keep: &mut bool) {
         ui.set_width(520.0);
-        let writable = self.conn(f.conn).is_some_and(|c| c.writable);
+        let writable = self.conn_writable(f.conn);
         let caps = self.users_caps(f.conn);
         let dialect = self.users_dialect(f.conn);
         dialog_title(ui, "Change password");
@@ -1155,7 +1167,7 @@ impl App {
         });
         ui.add_space(8.0);
         let plugin = Some(f.plugin.as_str()).filter(|p| !p.is_empty());
-        let shown = users::password_sql(self.users_mode(f.conn), dialect, &f.acct, plugin, "", true);
+        let shown = users::password_sql(self.sql_mode(f.conn), dialect, &f.acct, plugin, "", true);
         sql_block(ui, &shown.as_ref().map_or_else(|e| format!("-- {e}"), |s| format!("{s};")));
         let check = users::check_password(&f.password).and_then(|_| if f.password == f.again { Ok(()) } else { Err("The two passwords differ.".to_string()) }).and_then(|_| f.blocked.clone().map_or(Ok(()), Err));
         if let Err(e) = &check {
@@ -1191,10 +1203,7 @@ impl App {
     fn sql_password_run(&mut self, f: &mut PwForm) {
         let password = std::mem::take(&mut f.password);
         f.again.clear();
-        if self.demo {
-            return self.ok("Offline demo: no database is connected.");
-        }
-        let Some(sql) = self.users_sql(f.conn) else { return };
+        let Some(sql) = self.sql_db_for(f.conn, None) else { return };
         let plugin = Some(f.plugin.clone()).filter(|p| !p.is_empty());
         self.worker.sql_user_password(f.conn, sql, f.acct.clone(), plugin, password, false);
     }
@@ -1214,7 +1223,7 @@ impl App {
         let accounts = vec![acct("app", "%"), acct("report", "10.0.%"), acct("backup", "localhost"), Account { expired: true, ..acct("migrate", "%") }, Account { locked: true, ..acct("root", "localhost") }];
         let set = |p: &[&str]| p.iter().map(|s| s.to_string()).collect::<BTreeSet<String>>();
         let mut w = SqlUsersWin::new(3);
-        w.list = Some(Ok(UserList { accounts, current: Some(("app".into(), "%".into())), whole: true, why: None }));
+        w.set_list(Ok(UserList { accounts, current: Some(("app".into(), "%".into())), whole: true, why: None }));
         w.sel = Some(("report".into(), "10.0.%".into()));
         w.grants = Some(Ok(Vec::new()));
         w.name = "report".into();

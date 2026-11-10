@@ -177,10 +177,10 @@ fn put_html(_html: &str, _plain: &str) -> bool {
 
 impl App {
     /// The table, columns and key of the open SQL tab.
-    fn sql_ctx(&self) -> Option<(Sel, Vec<Col>, Vec<String>)> {
+    fn sql_ctx(&self) -> Option<(Sel, Arc<Vec<Col>>, Vec<String>)> {
         let t = self.t()?;
         let s = t.sql.as_ref()?;
-        Some((t.sel.clone(), s.cols.to_vec(), s.pk.clone()))
+        Some((t.sel.clone(), s.cols.clone(), s.pk.clone()))
     }
 
     /// Whether the open connection's server reads backslash escapes in strings.
@@ -216,7 +216,7 @@ impl App {
     }
 
     /// Everything a write needs, or None with the reason shown. The one gate for SQL writes.
-    fn writable_sql(&mut self) -> Option<(u64, db::sql::Db, Sel, Vec<Col>, Vec<String>)> {
+    fn writable_sql(&mut self) -> Option<(u64, db::sql::Db, Sel, Arc<Vec<Col>>, Vec<String>)> {
         let (sel, cols, pk) = self.sql_ctx()?;
         if self.demo {
             self.ok("Offline demo: no database is connected.");
@@ -343,7 +343,7 @@ impl App {
             a.err(why.to_string());
         };
         let Some(db) = self.conn(first.conn).and_then(|c| c.sql.clone()) else { return put_back(self, drafts, "Not connected.") };
-        let read_only = !self.conn(first.conn).is_some_and(|c| c.writable);
+        let read_only = !self.conn_writable(first.conn);
         let Some((cols, pk)) = self.tabs.iter().find(|t| t.sel == first).and_then(|t| t.sql.as_ref()).map(|s| (s.cols.to_vec(), s.pk.clone())) else { return put_back(self, drafts, "Open the table to save its edits.") };
         // A row without its key could address any row, so it is never sent; its edits stay staged.
         let (keyed, keyless): (Vec<_>, Vec<_>) = drafts.into_iter().partition(|(_, d)| d.current.get_document("_id").is_ok_and(|k| !k.is_empty()));
@@ -494,7 +494,7 @@ impl App {
         // A single integer key is almost always generated, so a copy leaves it to the server.
         let auto = pk.len() == 1 && cols.iter().any(|c| c.src == pk[0] && matches!(c.kind, Kind::Int | Kind::UInt));
         let fields = cols
-            .into_iter()
+            .iter()
             .map(|col| {
                 let v = from.as_ref().and_then(|d| d.get(&col.name)).filter(|_| !(auto && col.src == pk[0]));
                 let (mode, text) = match v {
@@ -502,7 +502,7 @@ impl App {
                     Some(Bson::Null) => (Mode::Null, String::new()),
                     Some(v) => (Mode::Value, edit_text(v)),
                 };
-                RowField { col, mode, text }
+                RowField { col: col.clone(), mode, text }
             })
             .collect();
         let title = if from.is_some() { "Duplicate row" } else { "Insert a row" };
@@ -564,8 +564,8 @@ impl App {
 
     fn sql_insert_rows(&mut self, rows: Vec<NewRow>) {
         let Some((conn, db, sel, cols, pk)) = self.writable_sql() else { return };
-        let read_only = !self.conn(conn).is_some_and(|c| c.writable);
-        self.worker.sql_insert(conn, db, sel.db, sel.coll, cols, pk, rows, read_only);
+        let read_only = !self.conn_writable(conn);
+        self.worker.sql_insert(conn, db, sel.db, sel.coll, cols.to_vec(), pk, rows, read_only);
     }
 
     /// Rows are the loaded documents of the checked or clicked rows, each with its key in `_id`.
@@ -584,7 +584,7 @@ impl App {
                 return self.ask_unlock_then(move |a| a.sql_docs_act(&ctx, act, rows));
             }
         }
-        let (sel, cols, pk) = self.sql_ctx().unwrap_or_else(|| (Sel { conn: 0, db: String::new(), coll: String::new() }, Vec::new(), Vec::new()));
+        let (sel, cols, pk) = self.sql_ctx().unwrap_or_else(|| (Sel { conn: 0, db: String::new(), coll: String::new() }, Arc::new(Vec::new()), Vec::new()));
         let (d, bs) = (db::sql::Dialect::MySql, self.sql_bs());
         // The key names are the server's, which differ from the shown name of a renamed column.
         let numeric = |name: &str| cols.iter().find(|c| c.src == name).is_some_and(|c| is_numeric(c.kind));
@@ -657,8 +657,8 @@ impl App {
         if let Some(t) = self.tm() {
             t.selected = None;
         }
-        let read_only = !self.conn(conn).is_some_and(|c| c.writable);
-        self.worker.sql_delete_rows(conn, db, sel.db, sel.coll, cols, pk, rows, read_only);
+        let read_only = !self.conn_writable(conn);
+        self.worker.sql_delete_rows(conn, db, sel.db, sel.coll, cols.to_vec(), pk, rows, read_only);
     }
 
     pub(super) fn sql_set_dialog(&mut self, ui: &mut egui::Ui, f: &mut SetForm, keep: &mut bool) {

@@ -168,9 +168,7 @@ pub(super) fn page_query(t: &Tab) -> PageQuery {
 
 /// SQL text colored by token: keywords, numbers and strings. Plugs into `TextEdit::layouter`.
 pub(super) fn sql_layout(ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32) -> Arc<egui::Galley> {
-    let mut job = sql_job(buf.as_str(), TXT_SMALL);
-    job.wrap.max_width = wrap;
-    ui.fonts_mut(|f| f.layout_job(job))
+    crate::ui::editor::memo_galley(ui, 0, buf.as_str(), wrap, || sql_job(buf.as_str(), TXT_SMALL))
 }
 
 fn type_name(c: &Col) -> String {

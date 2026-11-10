@@ -761,3 +761,16 @@ pub(crate) fn popover<R>(r: &egui::Response, w: f32, open_first: bool, add: impl
     ctx.data_mut(|d| d.insert_temp(id, open));
     out.map(|o| o.inner)
 }
+
+/// Text cut to its cell with an ellipsis, centered on its ink, `pad` clear on each side. Returns where it ended up.
+pub(crate) fn place(ui: &egui::Ui, cell: egui::Rect, s: &str, font: FontId, color: Color32, right: bool, pad: f32) -> egui::Rect {
+    let area = cell.shrink2(egui::vec2(pad, 0.0));
+    let mut job = egui::text::LayoutJob::single_section(s.to_string(), egui::TextFormat { font_id: font, color, ..Default::default() });
+    job.wrap = egui::text::TextWrapping { max_width: area.width().max(1.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    let g = ui.painter().layout_job(job);
+    let x = if right { area.right() - g.size().x } else { area.left() };
+    let pos = egui::pos2(x, cell.center().y - g.size().y / 2.0 + optical_dy(&g));
+    let rect = egui::Rect::from_min_size(pos, g.size());
+    ui.painter().galley(pos, g, color);
+    rect
+}

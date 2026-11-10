@@ -10,7 +10,6 @@ use std::sync::atomic::Ordering;
 
 /// A fixed line height, so the gutter numbers and the statement band line up with the text.
 const LINE_H: f32 = 20.0;
-const GUTTER_W: f32 = 52.0;
 
 /// 1-based line and column of a caret given as a char index.
 pub(super) fn line_col(text: &str, caret: usize) -> (usize, usize) {
@@ -227,11 +226,8 @@ impl App {
         if text.trim().is_empty() {
             return self.err("Nothing to run.");
         }
-        if self.demo {
-            return self.ok("Offline demo: no database is connected.");
-        }
-        let Some(db) = self.conn(conn).and_then(|c| c.sql.clone()) else { return self.err("Connect first.") };
-        let read_only = !self.conn(conn).is_some_and(|c| c.writable);
+        let Some(db) = self.sql_db_for(conn, Some("Connect first.")) else { return };
+        let read_only = !self.conn_writable(conn);
         let key = format!("{conn}/{schema}/#query");
         // History is written to ui.json and listed in the menu, so a password never goes in.
         push_history(&mut self.prefs.history.entry(key).or_default().selector, &db::redact_sql(&text).0);
@@ -304,11 +300,8 @@ impl App {
         let Some(t) = self.t() else { return };
         let (conn, schema) = (t.sel.conn, run_db(t));
         let Some(stmt) = t.sql.as_ref().filter(|s| s.run_req == 0).and_then(|s| s.sets.get(idx)).map(|x| x.stmt.clone()) else { return };
-        if self.demo {
-            return self.ok("Offline demo: no database is connected.");
-        }
-        let Some(db) = self.conn(conn).and_then(|c| c.sql.clone()) else { return self.err("Connect first.") };
-        let read_only = !self.conn(conn).is_some_and(|c| c.writable);
+        let Some(db) = self.sql_db_for(conn, Some("Connect first.")) else { return };
+        let read_only = !self.conn_writable(conn);
         self.req += 1;
         let req = self.req;
         let Some(s) = self.tabs[self.cur].sql.as_mut() else { return };
@@ -321,8 +314,6 @@ impl App {
         let (conn, free, schema) = (t.sel.conn, t.sel.coll.is_empty(), run_db(t));
         let running = t.sql.as_ref().is_some_and(|s| s.run_req != 0);
         let title = if free { self.tab_name(self.cur) } else { "Query".into() };
-        let dbs: Vec<String> = self.conn(conn).map(|c| c.dbs.iter().map(|d| d.0.clone()).collect()).unwrap_or_default();
-        let hist = self.prefs.history.get(&format!("{conn}/{schema}/#query")).map(|h| h.selector.clone()).unwrap_or_default();
         let lib: Vec<SavedQuery> = library_of(&self.prefs.library, &Self::sql_lib_key(conn), LibKind::Sql);
         let (mut lib_new, mut lib_acts) = (std::mem::take(&mut self.new_lib), Vec::new());
         let (mut pick, mut load, mut picked) = (schema.clone(), None, false);
@@ -333,7 +324,7 @@ impl App {
                 quiet_look(ui);
                 egui::ComboBox::from_id_salt("sql-db").selected_text(RichText::new(&schema).font(FontId::monospace(TXT_SMALL))).show_ui(ui, |ui| {
                     menu_look(ui);
-                    for d in &dbs {
+                    for (d, _) in self.conn(conn).map(|c| c.dbs.as_slice()).unwrap_or_default() {
                         picked |= ui.selectable_value(&mut pick, d.clone(), d).clicked();
                     }
                 });
@@ -343,11 +334,12 @@ impl App {
                 icon_menu(ui, paint_clock, true, |ui| {
                     ui.set_min_width(360.0);
                     ui.set_max_width(520.0);
+                    let hist = self.prefs.history.get(&format!("{conn}/{schema}/#query")).map(|h| h.selector.as_slice()).unwrap_or_default();
                     if hist.is_empty() {
                         ui.label(RichText::new("Statements you run appear here.").color(MUTED()));
                     }
                     egui::ScrollArea::vertical().id_salt("sql-hist").max_height(300.0).show(ui, |ui| {
-                        for h in &hist {
+                        for h in hist {
                             let one_line: String = h.split_whitespace().collect::<Vec<_>>().join(" ");
                             let mut job = sql_job(&one_line.chars().take(90).collect::<String>(), TXT_SMALL);
                             job.wrap.max_rows = 1;
@@ -511,12 +503,13 @@ impl App {
         let custom = self.prefs.query_editor_h > 0.0;
         let h = if custom { self.prefs.query_editor_h.clamp(lo, hi.max(lo)) } else { (lines as f32 * LINE_H + 24.0).clamp(96.0, (avail * 0.5).max(96.0)) };
         let mut layout = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
-            let mut job = sql_job(buf.as_str(), TXT_SMALL);
-            for sec in &mut job.sections {
-                sec.format.line_height = Some(LINE_H);
-            }
-            job.wrap.max_width = wrap;
-            ui.fonts_mut(|f| f.layout_job(job))
+            crate::ui::editor::memo_galley(ui, 1, buf.as_str(), wrap, || {
+                let mut job = sql_job(buf.as_str(), TXT_SMALL);
+                for sec in &mut job.sections {
+                    sec.format.line_height = Some(LINE_H);
+                }
+                job
+            })
         };
         let framed = egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, if focused { PRIMARY() } else { BORDER() })).corner_radius(R_MD).show(ui, |ui| {
             egui::ScrollArea::vertical().id_salt("sql-ed").max_height(h).auto_shrink([false, true]).show(ui, |ui| {
@@ -530,7 +523,7 @@ impl App {
                     egui::TextEdit::multiline(text)
                         .id(id)
                         .font(FontId::monospace(TXT_SMALL))
-                        .frame(egui::Frame::new().inner_margin(egui::Margin { left: GUTTER_W as i8, right: 12, top: 10, bottom: 10 }))
+                        .frame(gutter_frame())
                         .desired_width(f32::INFINITY)
                         .min_size(egui::vec2(0.0, if custom { h } else { 96.0 }))
                         .lock_focus(true)
@@ -549,16 +542,7 @@ impl App {
                     let band_rect = egui::Rect::from_min_max(egui::pos2(rect.left(), gp.y + a.top()), egui::pos2(rect.right(), gp.y + z.bottom()));
                     ui.painter().set(band, egui::Shape::rect_filled(band_rect, 0.0, tint(PRIMARY(), 22)));
                 }
-                let cur_line = info.line_col.0;
-                let (mut n, mut fresh) = (0, true);
-                for row in &g.rows {
-                    if fresh {
-                        n += 1;
-                        let y = gp.y + row.pos.y + row.height() / 2.0;
-                        ui.painter().text(egui::pos2(rect.left() + GUTTER_W - 14.0, y), egui::Align2::RIGHT_CENTER, n.to_string(), FontId::monospace(TXT_CAPTION), if n == cur_line { MUTED() } else { FAINT() });
-                    }
-                    fresh = row.ends_with_newline;
-                }
+                paint_gutter(ui, &out, Some(info.line_col.0));
             });
         });
         let wants = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()).map(|s| std::mem::take(&mut s.bar.wants)).unwrap_or_default();

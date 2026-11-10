@@ -18,10 +18,39 @@ impl App {
         self.worker.sql_page(req, db, t.sel.db.clone(), t.sel.coll.clone(), q, size, t.page * size);
     }
 
+    /// How the connection's last reported sql_mode reads quotes and backslashes. A connection without a server, as in
+    /// the offline demo, reads like a stock one.
+    pub(super) fn sql_mode(&self, conn: u64) -> db::sql::ddl::Mode {
+        self.conn(conn).and_then(|c| c.sql.as_ref()).map_or(db::sql::ddl::Mode::DEFAULT, |d| db::sql::ddl::Mode::of(&d.sql_mode))
+    }
+
+    /// The server refused or reported a newer sql_mode than the one the previews follow; they follow the new one now.
+    pub(super) fn adopt_sql_mode(&mut self, conn: u64, mode: Option<String>) {
+        if let Some(m) = mode {
+            if let Some(d) = self.conns.iter_mut().find(|c| c.meta.id == conn).and_then(|c| c.sql.as_mut()) {
+                d.sql_mode = m;
+            }
+        }
+    }
+
+    /// The SQL session of a connection for a statement about to run. The offline demo has no server, so it says so
+    /// and gives none. `missing` is what to say when the connection has no session, or nothing when None.
+    pub(super) fn sql_db_for(&mut self, conn: u64, missing: Option<&str>) -> Option<db::sql::Db> {
+        if self.demo {
+            self.ok("Offline demo: no database is connected.");
+            return None;
+        }
+        let db = self.conn(conn).and_then(|c| c.sql.clone());
+        if let (None, Some(m)) = (&db, missing) {
+            self.err(m);
+        }
+        db
+    }
+
     /// The open tab's dialect, and whether its server reads backslash escapes in strings.
     pub(super) fn sql_dialect(&self) -> (db::sql::Dialect, bool) {
         let d = self.conn(self.t().map(|t| t.sel.conn).unwrap_or(0)).and_then(|c| c.sql.as_ref());
-        (d.map(|s| s.dialect).unwrap_or_default(), d.is_none_or(|s| s.backslash_escapes()))
+        (d.map(|s| s.dialect).unwrap_or_default(), self.sql_mode(self.t().map(|t| t.sel.conn).unwrap_or(0)).bs)
     }
 
     /// Double click on a grouped row: its rows replace the grouped result.
