@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.29.0](https://github.com/alkanna/quarry/compare/v0.28.0...v0.29.0) (2026-11-10)
+
+
+### Features
+
+* engine logos in the rail and typed SQL value suggestions ([#149](https://github.com/alkanna/quarry/issues/149)) ([7c9e3c2](https://github.com/alkanna/quarry/commit/7c9e3c233ce378328962b81a6f7e12eb7c8c3d49))
+* sign and notarize macOS builds with a Developer ID ([#151](https://github.com/alkanna/quarry/issues/151)) ([45ee0ee](https://github.com/alkanna/quarry/commit/45ee0ee1ec109a9b5c1ae73101a846114959f028))
+
 ## [0.28.0](https://github.com/alkanna/quarry/compare/v0.27.0...v0.28.0) (2026-11-10)
 
 
