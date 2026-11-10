@@ -181,6 +181,7 @@ impl App {
                             tab.stats = Some((n("count"), n("size"), n("nindexes")));
                         }
                     }
+                    ("shpg", Ok(d)) => self.shell_pg_listed(d),
                     // Nice to have: a server that refuses these just shows less.
                     (t, Err(_)) if t.starts_with("srv-") || t.starts_with("tabstats\u{1f}") => {}
                     // Atlas and least-privilege users often may not list everyone; show who is logged in instead.

@@ -182,6 +182,7 @@ fn sql_types() -> String {
     out += "type QuarryWhere<R> = { [K in keyof R]?: R[K] | R[K][] | null | QuarryOp<R[K]> };\n";
     out += "type QuarryKey<R> = (keyof R & string) | `-${keyof R & string}`;\n";
     out += "interface QuarryFind<R> { select?: (keyof R & string)[]; orderBy?: QuarryKey<R> | QuarryKey<R>[] | { [K in keyof R]?: 'asc' | 'desc' }; limit?: number; offset?: number }\n";
+    // On PostgreSQL insertId is undefined except after a one-row table.insert, which gives the first column of the row it wrote.
     out += "interface QuarryWrite { affected: number; insertId: number }\n";
     out += "interface QuarryTable<R> {\n  find(where?: QuarryWhere<R>, opts?: QuarryFind<R>): Promise<R[]>;\n  findOne(where?: QuarryWhere<R>, opts?: QuarryFind<R>): Promise<R | null>;\n  count(where?: QuarryWhere<R>): Promise<number>;\n  insert(row: Partial<R> | Partial<R>[]): Promise<QuarryWrite>;\n  update(where: QuarryWhere<R>, set: Partial<R>): Promise<QuarryWrite>;\n  delete(where: QuarryWhere<R>): Promise<QuarryWrite>;\n}\n";
     out += "interface QuarryConn {\n  <R = any>(s: TemplateStringsArray, ...v: unknown[]): Promise<R[]>;\n  sql<R = any>(s: TemplateStringsArray, ...v: unknown[]): Promise<R[]>;\n  unsafe<R = any>(text: string, params?: unknown[]): Promise<R[]>;\n  table<R = any>(name: string): QuarryTable<R>;\n}\n";

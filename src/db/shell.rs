@@ -196,7 +196,7 @@ pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + S
                 }
                 Some("sql") => {
                     let conn = s("conn");
-                    let params = sql_params(v.get("params"));
+                    let params = sql_args(v.get("params"));
                     let text = s("text");
                     let t = Instant::now();
                     let res = async {
@@ -206,7 +206,7 @@ pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + S
                         }
                         let p = params.as_ref().map_err(|x| x.clone())?;
                         match relays.get_mut(&conn) {
-                            Some(r) => r.query(&text, p).await,
+                            Some(r) => r.query_args(&text, p).await,
                             None => Err("No connection".to_string()),
                         }
                     }
@@ -223,7 +223,10 @@ pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + S
                             q.affected = Some(affected);
                             answer["ok"] = true.into();
                             answer["affected"] = affected.into();
-                            answer["insertId"] = insert_id.into();
+                            // PostgreSQL has no generated key to report here, the runner leaves insertId undefined there.
+                            if job.sql.iter().find(|(n, _)| *n == q.conn).is_some_and(|(_, c)| c.db.dialect != sql::Dialect::Postgres) {
+                                answer["insertId"] = insert_id.into();
+                            }
                         }
                         Err(err) => {
                             q.error = Some(err.clone());
@@ -306,38 +309,50 @@ async fn next_line(r: &mut tokio::io::BufReader<tokio::process::ChildStdout>) ->
 
 /// The values a script sent with a query, as bind values. A `{ "$hex": ... }` object is bytes, any other
 /// object or array is its JSON text, which is what a JSON column takes.
+#[cfg(test)]
 fn sql_params(v: Option<&serde_json::Value>) -> Res<Vec<sql::value::Param>> {
-    use serde_json::Value;
-    use sql::value::Param;
-    let Some(Value::Array(a)) = v else { return Ok(Vec::new()) };
+    let Some(serde_json::Value::Array(a)) = v else { return Ok(Vec::new()) };
+    a.iter().map(sql_param).collect()
+}
+
+/// `sql_params` for the relay: a `{ "$bool": true }` object is a boolean, which only a PostgreSQL runner sends.
+fn sql_args(v: Option<&serde_json::Value>) -> Res<Vec<sql::Arg>> {
+    let Some(serde_json::Value::Array(a)) = v else { return Ok(Vec::new()) };
     a.iter()
-        .map(|x| {
-            Ok(match x {
-                Value::Null => Param::Null,
-                Value::Bool(b) => Param::Int(*b as i64),
-                Value::Number(n) => match (n.as_i64(), n.as_u64()) {
-                    (Some(i), _) => Param::Int(i),
-                    (_, Some(u)) => Param::UInt(u),
-                    _ => Param::Float(n.as_f64().unwrap_or(f64::NAN)),
-                },
-                Value::String(s) => Param::Text(s.clone()),
-                // A BigInt beyond 2^53, which a JSON number would round.
-                Value::Object(o) if o.len() == 1 && o.contains_key("$int") => {
-                    let t = o["$int"].as_str().unwrap_or_default();
-                    match (t.parse::<i64>(), t.parse::<u64>()) {
-                        (Ok(i), _) => Param::Int(i),
-                        (_, Ok(u)) => Param::UInt(u),
-                        _ => return Err("A BigInt value does not fit in 64 bits".to_string()),
-                    }
-                }
-                Value::Object(o) if o.len() == 1 && o.contains_key("$hex") => {
-                    let h = o["$hex"].as_str().unwrap_or_default();
-                    Param::Bytes((0..h.len() / 2).map(|i| u8::from_str_radix(h.get(i * 2..i * 2 + 2).unwrap_or("zz"), 16)).collect::<Result<_, _>>().map_err(|_| "Bad binary value".to_string())?)
-                }
-                other => Param::Text(other.to_string()),
-            })
+        .map(|x| match x.as_object().filter(|o| o.len() == 1).and_then(|o| o.get("$bool")) {
+            Some(serde_json::Value::Bool(b)) => Ok(sql::Arg::Bool(*b)),
+            _ => sql_param(x).map(sql::Arg::Val),
         })
         .collect()
+}
+
+fn sql_param(x: &serde_json::Value) -> Res<sql::value::Param> {
+    use serde_json::Value;
+    use sql::value::Param;
+    Ok(match x {
+        Value::Null => Param::Null,
+        Value::Bool(b) => Param::Int(*b as i64),
+        Value::Number(n) => match (n.as_i64(), n.as_u64()) {
+            (Some(i), _) => Param::Int(i),
+            (_, Some(u)) => Param::UInt(u),
+            _ => Param::Float(n.as_f64().unwrap_or(f64::NAN)),
+        },
+        Value::String(s) => Param::Text(s.clone()),
+        // A BigInt beyond 2^53, which a JSON number would round.
+        Value::Object(o) if o.len() == 1 && o.contains_key("$int") => {
+            let t = o["$int"].as_str().unwrap_or_default();
+            match (t.parse::<i64>(), t.parse::<u64>()) {
+                (Ok(i), _) => Param::Int(i),
+                (_, Ok(u)) => Param::UInt(u),
+                _ => return Err("A BigInt value does not fit in 64 bits".to_string()),
+            }
+        }
+        Value::Object(o) if o.len() == 1 && o.contains_key("$hex") => {
+            let h = o["$hex"].as_str().unwrap_or_default();
+            Param::Bytes((0..h.len() / 2).map(|i| u8::from_str_radix(h.get(i * 2..i * 2 + 2).unwrap_or("zz"), 16)).collect::<Result<_, _>>().map_err(|_| "Bad binary value".to_string())?)
+        }
+        other => Param::Text(other.to_string()),
+    })
 }
 
 #[cfg(test)]

@@ -10,6 +10,8 @@ mod pg_catalog;
 mod pg_read;
 #[cfg(test)]
 mod pg_read_tests;
+#[cfg(test)]
+mod pg_shell_tests;
 pub mod exec;
 mod relay;
 pub mod structure;
@@ -34,7 +36,7 @@ pub mod users;
 pub use advanced::{Advanced, Charset, TestInfo, Zone};
 pub use dialect::{Dialect, FUNCTIONS, KEYWORDS};
 pub use structure::Structure;
-pub use relay::{Answer, Relay};
+pub use relay::{Answer, Arg, Relay};
 pub use run::RunHandle;
 
 /// Which kind of server a saved connection talks to. Saved connections from before SQL support

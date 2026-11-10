@@ -352,17 +352,17 @@ fn sql_help(ui: &mut egui::Ui, table: &str, writable: bool) -> Option<String> {
         caption(ui, "HOW IT WORKS");
         ui.label("Write one function and return what you want to see. The script runs with Bun and has your file and network access, but it gets no database driver and no credentials: every query goes through this app, on one connection for the whole run, so @variables and transactions last until the script ends. While writes are locked each query passes Quarry's read-only check. That check guards queries, it is not a sandbox for the script.");
         ui.label(code("async function run() {\n  const rows = await sql`SELECT * FROM orders WHERE status = ${'paid'}`;\n  return rows;\n}"));
-        ui.label(RichText::new("Values in ${} become ? placeholders and are never spliced into the text. Whole numbers beyond 2^53 come back as BigInt, and unsigned values above 9223372036854775807 come back as strings (send them back as a string or BigInt). An array becomes a list for IN (${ids}). Cmd+Enter runs, Stop interrupts the running statement.").color(MUTED()));
+        ui.label(RichText::new("Values in ${} become ? placeholders ($1, $2 on PostgreSQL, where ? is an operator) and are never spliced into the text. Whole numbers beyond 2^53 come back as BigInt, and unsigned values above 9223372036854775807 come back as strings (send them back as a string or BigInt). An array becomes a list for IN (${ids}). Cmd+Enter runs, Stop interrupts the running statement.").color(MUTED()));
         if !writable {
             ui.label(RichText::new("This connection is read-only: only reading statements run, and every write is refused. Unlock writes in the top bar to allow them.").color(SUCCESS()));
         }
         caption(ui, "NAMES YOU CAN USE");
         egui::Grid::new("sql-shell-names").num_columns(2).spacing([16.0, 4.0]).show(ui, |ui| {
             for (n, what) in [
-                ("sql`...`", "run a statement; returns the rows as objects (writes return an empty list with .affected and .insertId)"),
-                ("sql.unsafe(text, params)", "the same with text you built yourself and ? placeholders"),
+                ("sql`...`", "run a statement; returns the rows as objects (writes return an empty list with .affected and .insertId; on PostgreSQL .insertId is undefined, use RETURNING, and table.insert of one row returns that row with .insertId set to its first column)"),
+                ("sql.unsafe(text, params)", "the same with text you built yourself and ? placeholders ($1, $2 on PostgreSQL)"),
                 ("<table>", "every table of the database whose name is a plain word, e.g. orders.find()"),
-                ("table('name')", "any table by its name, also names that are not plain words"),
+                ("table('name')", "any table by its name, also names that are not plain words (table('name', 'schema') on PostgreSQL)"),
                 ("<attached>", "each connection attached in Connections, by its name: travels.users.find() for MongoDB, shop`SELECT 1` or shop.orders.find() for SQL"),
                 ("console.log / warn / error, log", "print to the Console"),
                 ("_ , dayjs, packages", "lodash and dayjs, and every package added in Packages by name"),
@@ -427,6 +427,12 @@ impl App {
         let collections: Vec<String> = self.conn(sel.conn).and_then(|c| c.dbs.iter().find(|d| d.0 == sel.db)).and_then(|d| d.1.clone()).unwrap_or_default();
         let packages: Vec<String> = self.prefs.shell_packages.iter().map(|p| db::package_spec(p).0).collect();
         let read_only = !self.sel_writable();
+        // A PostgreSQL attachment's tables are not saved with the tab, so a restored one lists them again. They arrive
+        // while the script starts, and a table helper missing on this run is there on the next (table('name') always works).
+        let unlisted: Vec<(u64, String)> = self.t().map(|t| t.shell.attached.iter().filter(|a| a.tables.is_empty() && self.conn(a.conn).is_some_and(|c| c.meta.engine == db::sql::Engine::Postgres)).map(|a| (a.conn, a.db.clone())).collect()).unwrap_or_default();
+        for (c, d) in unlisted {
+            self.attach_load(c, &d);
+        }
         let (mut mongo, mut sql_entries, mut sql) = match self.shell_attachments() {
             Ok(v) => v,
             Err(e) => {
@@ -438,8 +444,14 @@ impl App {
         let name = self.conn(sel.conn).map(|c| c.meta.name.clone()).unwrap_or_default();
         if main_sql {
             let Some(db) = self.conn(sel.conn).and_then(|c| c.sql.clone()) else { return self.warn_offline() };
-            sql_entries.insert(0, serde_json::json!({ "name": name, "db": sel.db, "tables": collections }));
-            sql.insert(0, (name.clone(), db::SqlRelay { db, schema: sel.db.clone(), read_only, conn_id: Default::default() }));
+            if db.dialect == db::sql::Dialect::Postgres {
+                // The tab's database picks the pool. The tab has no schema yet, so the script starts in the default one.
+                sql_entries.insert(0, serde_json::json!({ "name": name, "db": sel.db, "tables": collections, "dialect": "postgres" }));
+                sql.insert(0, (name.clone(), db::SqlRelay { db: db.at(&sel.db), schema: PG_SCHEMA.into(), read_only, conn_id: Default::default() }));
+            } else {
+                sql_entries.insert(0, serde_json::json!({ "name": name, "db": sel.db, "tables": collections, "dialect": "mysql" }));
+                sql.insert(0, (name.clone(), db::SqlRelay { db, schema: sel.db.clone(), read_only, conn_id: Default::default() }));
+            }
         } else {
             let uri = match stored_uri(sel.conn) {
                 Ok(u) => u,

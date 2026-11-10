@@ -118,4 +118,47 @@ impl Worker {
             Msg::SqlSchemas { conn, database, res }
         });
     }
+
+    /// The schemas of `database` and, when `schema` is not empty, the tables and views in it, for a shell attachment.
+    /// A PostgreSQL connection belongs to one database, so `database` picks the pool here. Answers
+    /// `Msg::Command { tag: "shpg" }` with `conn`, `database`, `schema`, `schemas`, `tables` and `views`, or an `error`
+    /// text in place of the lists, so the answer still says which attachment it was for.
+    pub fn pg_shell_list(&self, conn: u64, db: Db, database: String, schema: String) {
+        self.spawn(async move {
+            let at = db.at(&database);
+            let res = async {
+                let t = Instant::now();
+                let rows = raw_sql(Dialect::Postgres.schemas()).fetch_all(&at.pg_pool()?).await.map(SqlRow::wrap_pg);
+                at.note(&database, Dialect::Postgres.schemas(), t, &rows);
+                let mut schemas: Vec<String> = rows.map_err(e)?.iter().filter_map(|r| super::worker::text(r, "name")).collect();
+                schemas.sort();
+                let (mut tables, mut views) = (Vec::new(), Vec::new());
+                if !schema.is_empty() {
+                    for r in at.meta(&schema, Dialect::Postgres.tables(), [schema.as_str()]).await? {
+                        let Some(n) = super::worker::text(&r, "name") else { continue };
+                        if super::worker::text(&r, "kind").is_some_and(|k| k.contains("VIEW")) {
+                            views.push(n.clone());
+                        }
+                        tables.push(n);
+                    }
+                    tables.sort();
+                }
+                Ok::<_, String>((schemas, tables, views))
+            }
+            .await;
+            let strings = |v: Vec<String>| v.into_iter().map(mongodb::bson::Bson::String).collect::<Vec<_>>();
+            let mut d = mongodb::bson::doc! { "conn": conn as i64, "database": &database, "schema": &schema };
+            match res {
+                Ok((schemas, tables, views)) => {
+                    d.insert("schemas", strings(schemas));
+                    d.insert("tables", strings(tables));
+                    d.insert("views", strings(views));
+                }
+                Err(x) => {
+                    d.insert("error", x);
+                }
+            }
+            Msg::Command { tag: "shpg".into(), res: Ok(d) }
+        });
+    }
 }

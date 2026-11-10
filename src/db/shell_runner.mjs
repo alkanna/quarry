@@ -2,10 +2,11 @@
 // tab's own connection ("main") and any attached ones, each under a JS name.
 // stdin (JSON lines): the first line is
 //   { code, packages, timeoutMs, main: "<name>",
-//     mongo: [{ name, uri, db, proxy, collections, readOnly }], sql: [{ name, db, tables }] }
+//     mongo: [{ name, uri, db, proxy, collections, readOnly }], sql: [{ name, db, tables, dialect }] }
 // and after it come SQL answers { type: "sqlres", id, ok, rows | affected, insertId | error }.
 // Mongo entries are MongoClients inside this process. SQL entries never get a driver or a password:
-// every query goes to Quarry, which runs it on that connection with its read-only rules.
+// every query goes to Quarry, which runs it on that connection with its read-only rules. dialect is "postgres"
+// for a PostgreSQL entry (placeholders $1..$n, "double quoted" names, ILIKE, RETURNING); any other value is MySQL.
 // stdout (JSON lines): { type: "log", level, text }, { type: "sql", conn, id, text, params } per SQL query,
 //   { type: "query", conn, text, rows?, affected?, ms, error? } per Mongo command, then
 //   { type: "result", ok: true, ejson } or { type: "result", ok: false, error }.
@@ -88,7 +89,8 @@ let first = true;
     if (!m.ok) return p.reject(new Error(m.error));
     const rows = m.rows ?? [];
     rows.affected = m.affected ?? 0;
-    rows.insertId = m.insertId ?? 0;
+    // PostgreSQL reports no generated key with a write, so there it stays undefined unless table.insert found one.
+    rows.insertId = m.insertId ?? (p.pg ? undefined : 0);
     p.resolve(rows);
   };
   for await (const chunk of Bun.stdin.stream()) {
@@ -109,9 +111,10 @@ let first = true;
 })();
 
 // What a value becomes on the wire. Quarry turns each one into a literal; nothing here is spliced into text.
-function wire(v) {
+function wire(v, pg) {
   if (v === undefined || v === null) return null;
-  if (typeof v === "boolean") return v ? 1 : 0;
+  // PostgreSQL has a boolean type that 1 does not satisfy.
+  if (typeof v === "boolean") return pg ? { $bool: v } : v ? 1 : 0;
   if (typeof v === "bigint") return v >= -9007199254740991n && v <= 9007199254740991n ? Number(v) : { $int: v.toString() };
   if (typeof v === "number") {
     if (!Number.isFinite(v)) throw new Error("A query value is not a finite number");
@@ -121,7 +124,7 @@ function wire(v) {
   }
   if (v instanceof Date) {
     if (Number.isNaN(v.getTime())) throw new Error("A query value is an invalid Date");
-    return v.toISOString().replace("T", " ").replace("Z", "");
+    return pg ? v.toISOString() : v.toISOString().replace("T", " ").replace("Z", "");
   }
   if (v instanceof Uint8Array) return { $hex: Buffer.from(v).toString("hex") };
   if (typeof v === "object") return JSON.stringify(walk(v, asLog));
@@ -130,49 +133,57 @@ function wire(v) {
 
 function query(conn, text, params) {
   const id = ++nextId;
+  const pg = dialects.get(conn) === "postgres";
   let wired;
   try {
-    wired = params.map(wire);
+    wired = params.map((v) => wire(v, pg));
   } catch (e) {
     return Promise.reject(e);
   }
   return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject });
+    pending.set(id, { resolve, reject, pg });
     out({ type: "sql", conn, id, text, params: wired });
   });
 }
 
-// sql`... ${v} ...` becomes text with ? placeholders. An array expands to one ? per item, for IN (...).
+// sql`... ${v} ...` becomes text with ? placeholders, or $1..$n on PostgreSQL where ? is a jsonb operator.
+// An array expands to one placeholder per item, for IN (...).
 function makeSql(conn) {
+  const pg = dialects.get(conn) === "postgres";
   const sql = (strings, ...values) => {
     let text = strings[0];
     const params = [];
+    const mark = (v) => {
+      params.push(v);
+      return pg ? "$" + params.length : "?";
+    };
     values.forEach((v, i) => {
-      if (Array.isArray(v)) {
-        text += v.length ? v.map(() => "?").join(", ") : "NULL";
-        params.push(...v);
-      } else {
-        text += "?";
-        params.push(v);
-      }
+      text += Array.isArray(v) ? (v.length ? v.map(mark).join(", ") : "NULL") : mark(v);
       text += strings[i + 1];
     });
     return query(conn, text, params);
   };
   sql.unsafe = (text, params = []) => query(conn, String(text), params);
-  sql.table = (name) => makeTable(conn, name);
+  // On PostgreSQL a second argument names the schema: sql.table("orders", "shop") is "shop"."orders".
+  sql.table = (name, schema) => makeTable(conn, name, schema);
   // An attached connection is the tag itself (other`...`); .sql also works so it reads like the main connection's sql`...`.
   sql.sql = sql;
   return sql;
 }
 
-const ident = (n) => "`" + String(n).replaceAll("`", "``") + "`";
+// What differs per dialect in the SQL a table helper builds. MySQL's text is the reference and must not change.
+const MYSQL = { ident: (n) => "`" + String(n).replaceAll("`", "``") + "`", mark: () => "?", like: "LIKE", all: "18446744073709551615" };
+// ILIKE because MySQL's LIKE ignores case under the default collations, so a script reads the same on both.
+const POSTGRES = { ident: (n) => '"' + String(n).replaceAll('"', '""') + '"', mark: (params) => "$" + params.length, like: "ILIKE", all: "ALL" };
+const dialects = new Map();
+const dialectOf = (conn) => (dialects.get(conn) === "postgres" ? POSTGRES : MYSQL);
 
 const isPlain = (v) => v !== null && typeof v === "object" && (Object.getPrototypeOf(v) === Object.prototype || Object.getPrototypeOf(v) === null);
 
 // where: { col: value } is =, null is IS NULL, an array is IN, and { gt, gte, lt, lte, ne, like, in } compare.
 // Anything unclear throws: a condition that silently vanishes would turn an update or delete into every row.
-function compileWhere(where, params) {
+function compileWhere(where, params, d) {
+  const { ident, mark } = d;
   if (where === undefined) return "";
   if (!isPlain(where)) throw new Error("where must be an object like { id: 1 }. Pass {} for every row.");
   const parts = [];
@@ -181,14 +192,13 @@ function compileWhere(where, params) {
     if (v === null) return `${ident(c)} IS NULL`;
     if (Array.isArray(v)) {
       if (v.includes(undefined)) throw new Error(`A list for "${c}" holds undefined`);
-      params.push(...v);
-      return v.length ? `${ident(c)} IN (${v.map(() => "?").join(", ")})` : "FALSE";
+      return v.length ? `${ident(c)} IN (${v.map((x) => (params.push(x), mark(params))).join(", ")})` : "FALSE";
     }
     if (typeof v === "object" && !(v instanceof Date || v instanceof Uint8Array)) throw new Error(`The value for "${c}" is not a plain value, a list or a condition object`);
     params.push(v);
-    return `${ident(c)} = ?`;
+    return `${ident(c)} = ${mark(params)}`;
   };
-  const ops = { gt: ">", gte: ">=", lt: "<", lte: "<=", like: "LIKE" };
+  const ops = { gt: ">", gte: ">=", lt: "<", lte: "<=", like: d.like };
   for (const [c, v] of Object.entries(where)) {
     if (!isPlain(v)) {
       parts.push(eq(c, v));
@@ -200,10 +210,10 @@ function compileWhere(where, params) {
       if (x === undefined) throw new Error(`The "${op}" value for "${c}" is undefined`);
       if (op in ops) {
         params.push(x);
-        parts.push(`${ident(c)} ${ops[op]} ?`);
+        parts.push(`${ident(c)} ${ops[op]} ${mark(params)}`);
       } else if (op === "ne") {
-        parts.push(x === null ? `${ident(c)} IS NOT NULL` : `${ident(c)} <> ?`);
         if (x !== null) params.push(x);
+        parts.push(x === null ? `${ident(c)} IS NOT NULL` : `${ident(c)} <> ${mark(params)}`);
       } else if (op === "in") {
         parts.push(eq(c, x ?? []));
       } else {
@@ -220,7 +230,7 @@ const whole = (n, what) => {
 };
 
 // orderBy: "col", "-col" for descending, { col: "desc" }, or a list of those.
-function compileOrder(o) {
+function compileOrder(o, { ident }) {
   if (o === undefined) return "";
   const items = [];
   for (const x of Array.isArray(o) ? o : [o]) {
@@ -230,49 +240,61 @@ function compileOrder(o) {
   return items.length ? " ORDER BY " + items.join(", ") : "";
 }
 
-function makeTable(conn, name) {
-  const t = ident(name);
+function makeTable(conn, name, schema) {
+  const d = dialectOf(conn);
+  const { ident, mark } = d;
+  const pg = d === POSTGRES;
+  const t = pg && schema !== undefined && schema !== null ? `${ident(schema)}.${ident(name)}` : ident(name);
   const select = (where, opts = {}) => {
     const params = [];
     const cols = opts.select?.length ? opts.select.map(ident).join(", ") : "*";
-    let text = `SELECT ${cols} FROM ${t}` + compileWhere(where, params) + compileOrder(opts.orderBy);
+    let text = `SELECT ${cols} FROM ${t}` + compileWhere(where, params, d) + compileOrder(opts.orderBy, d);
     if (opts.limit !== undefined) text += ` LIMIT ${whole(opts.limit, "limit")}`;
-    if (opts.offset !== undefined) text += (opts.limit === undefined ? " LIMIT 18446744073709551615" : "") + ` OFFSET ${whole(opts.offset, "offset")}`;
+    if (opts.offset !== undefined) text += (opts.limit === undefined ? ` LIMIT ${d.all}` : "") + ` OFFSET ${whole(opts.offset, "offset")}`;
     return query(conn, text, params);
   };
   const setClause = (set, params) => {
     const keys = Object.keys(set ?? {});
     if (!keys.length) throw new Error("Nothing to set");
-    params.push(...keys.map((k) => set[k]));
-    return keys.map((k) => `${ident(k)} = ?`).join(", ");
+    return keys.map((k) => (params.push(set[k]), `${ident(k)} = ${mark(params)}`)).join(", ");
   };
   return {
     find: select,
     findOne: async (where, opts = {}) => (await select(where, { ...opts, limit: 1 }))[0] ?? null,
     count: async (where) => {
       const params = [];
-      const rows = await query(conn, `SELECT COUNT(*) AS n FROM ${t}` + compileWhere(where, params), params);
+      const rows = await query(conn, `SELECT COUNT(*) AS n FROM ${t}` + compileWhere(where, params, d), params);
       return Number(rows[0].n);
     },
-    insert: (row) => {
+    insert: async (row) => {
       const list = Array.isArray(row) ? row : [row];
       if (!list.length) throw new Error("Nothing to insert");
       const keys = Object.keys(list[0]);
       if (!keys.length) throw new Error("A row needs at least one column");
       if (list.some((r) => Object.keys(r).length !== keys.length || keys.some((k) => !(k in r)))) throw new Error("Every row must have the same columns");
-      const one = `(${keys.map(() => "?").join(", ")})`;
-      return query(conn, `INSERT INTO ${t} (${keys.map(ident).join(", ")}) VALUES ${list.map(() => one).join(", ")}`, list.flatMap((r) => keys.map((k) => r[k])));
+      const params = [];
+      const one = (r) => `(${keys.map((k) => (params.push(r[k]), mark(params))).join(", ")})`;
+      const text = `INSERT INTO ${t} (${keys.map(ident).join(", ")}) VALUES ${list.map(one).join(", ")}`;
+      if (!pg) return query(conn, text, params);
+      // One row asks for its row back, so the first column (the key, by habit) can stand in for insertId. A bulk
+      // insert would return every row, so it reports only how many it wrote.
+      if (list.length > 1) return query(conn, text, params);
+      const rows = await query(conn, text + " RETURNING *", params);
+      rows.affected = rows.length;
+      const first = rows[0] && Object.values(rows[0])[0];
+      rows.insertId = typeof first === "number" || typeof first === "bigint" || typeof first === "string" ? first : undefined;
+      return rows;
     },
     update: (where, set) => {
       if (where === undefined) throw new Error("update needs a where. Pass {} to change every row.");
       const params = [];
       const sets = setClause(set, params);
-      return query(conn, `UPDATE ${t} SET ${sets}` + compileWhere(where, params), params);
+      return query(conn, `UPDATE ${t} SET ${sets}` + compileWhere(where, params, d), params);
     },
     delete: (where) => {
       if (where === undefined) throw new Error("delete needs a where. Pass {} to remove every row.");
       const params = [];
-      return query(conn, `DELETE FROM ${t}` + compileWhere(where, params), params);
+      return query(conn, `DELETE FROM ${t}` + compileWhere(where, params, d), params);
     },
   };
 }
@@ -469,6 +491,7 @@ try {
       attach(m.name, db);
     }
   }
+  for (const s of sqlEntries) dialects.set(s.name, s.dialect);
   for (const s of sqlEntries) {
     const handle = makeSql(s.name);
     if (s.name === input.main) {
