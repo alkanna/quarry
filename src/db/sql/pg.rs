@@ -163,6 +163,39 @@ impl Db {
             Pool::My(_) => String::new(),
         }
     }
+
+    /// Whether the server refused startup options, which is what a connection pooler such as PgBouncer does. Nothing
+    /// may then be set on a session and Stop cannot cancel by pid.
+    pub fn pooler(&self) -> bool {
+        matches!(&self.pool, Pool::Pg(p) if p.locals.is_some())
+    }
+
+    /// What every transaction of one script run starts with behind a pooler: `pg_locals` plus a `SET LOCAL search_path`
+    /// for the tab's schema, because a session search_path would land on whichever backend answered and leak to other
+    /// clients. The name is written as the quoted identifier `quote_ident` makes, not as a string literal, because SET
+    /// reads a literal as one schema named with the quotes in it. Empty when startup options carry the session (normal
+    /// mode sets the search_path once per run).
+    pub fn pg_run_locals(&self, schema: &str) -> String {
+        if !self.pooler() {
+            return String::new();
+        }
+        let base = self.pg_locals();
+        if schema.is_empty() {
+            return base;
+        }
+        format!("{base}; SET LOCAL search_path = {}", Dialect::Postgres.quote_ident(schema))
+    }
+
+    /// The same server as `self` with its pool built the way a pooler that refused startup options leaves it, for
+    /// tests of the fallback mode.
+    #[cfg(test)]
+    pub fn forced_pooler(&self, uri: &str, ms: u64) -> Db {
+        use std::str::FromStr;
+        let base = PgConnectOptions::from_str(uri).unwrap();
+        let Opts::Pg(o) = &self.opts else { panic!("not postgres") };
+        let p = PgPools::new(base.clone(), "postgres".into(), Duration::from_secs(10), Some(locals_for(ms)));
+        Db { pool: Pool::Pg(Arc::new(p)), opts: Opts::Pg(base.database(o.get_database().unwrap_or("postgres"))), ..self.clone() }
+    }
 }
 
 /// Startup parameters the session needs. `statement_timeout` is left out when the limit is off.
@@ -357,14 +390,16 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
     Ok((db, dbs, tunnel, TestInfo::default()))
 }
 
-/// Readies a connection of its own for a script: the backend's pid for Stop, and write access when unlocked.
-pub(super) async fn prepare(c: &mut sqlx::PgConnection, read_only: bool, id: &AtomicU64) -> Result<(), sqlx::Error> {
+/// Readies a connection of its own for a script: the backend's pid for Stop, and write access when unlocked. `pooled`
+/// says the server refused startup options (`Db::pooler`); None reads it off the session, which a pooler leaves at the
+/// server's own default. Returns whether the connection is behind a pooler. There nothing is set on the session, the pid
+/// is not kept (the backend may serve another client by the time Stop is pressed) and write access is a `BEGIN READ WRITE`
+/// of each statement, because a session setting would land on whichever backend answered and leak to other clients.
+pub(super) async fn prepare(c: &mut sqlx::PgConnection, read_only: bool, id: &AtomicU64, pooled: Option<bool>) -> Result<bool, sqlx::Error> {
     // The start time travels as text so no timestamp type has to round trip, and is compared as text on Stop.
     let rows = c.fetch_all("SELECT pg_backend_pid()::text, (SELECT backend_start::text FROM pg_stat_activity WHERE pid = pg_backend_pid()), current_setting('default_transaction_read_only')").await?;
-    // Behind a pooler the session is not read-only by default and nothing may be set on it, so the caller's own
-    // transactions say READ WRITE instead.
-    let pooled = rows.first().is_some_and(|r| r.cell(2) != Some(b"on"));
-    if let Some(r) = rows.first() {
+    let pooled = pooled.unwrap_or_else(|| rows.first().is_some_and(|r| r.cell(2) != Some(b"on")));
+    if let (false, Some(r)) = (pooled, rows.first()) {
         let pid = r.cell(0).and_then(|b| std::str::from_utf8(b).ok()?.parse::<u64>().ok()).unwrap_or(0);
         if let Some(start) = r.cell(1) {
             remember_start(pid, String::from_utf8_lossy(start).into_owned());
@@ -374,12 +409,16 @@ pub(super) async fn prepare(c: &mut sqlx::PgConnection, read_only: bool, id: &At
     if !read_only && !pooled {
         c.execute(Dialect::Postgres.session_read_only(false)).await?;
     }
-    Ok(())
+    Ok(pooled)
 }
 
 /// Stops the statement running on backend `pid` from a connection of its own to the same database. The start time
 /// is part of the match, so a pid the server handed to another session meanwhile is left alone.
 pub(super) async fn cancel(db: &Db, pid: u64) -> Res<String> {
+    // Behind a pooler the backend may be serving another client by now, so Stop closes the connection instead.
+    if db.pooler() {
+        return Ok("Stopped the script".into());
+    }
     let Some(start) = recall_start(pid) else { return Err("That connection is already gone.".into()) };
     let mut c = super::run::side_conn(db, "Could not reach the server to stop the statement").await?;
     let Conn::Pg(pc) = &mut c else { return Err("Not a PostgreSQL connection".into()) };

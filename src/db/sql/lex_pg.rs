@@ -828,4 +828,28 @@ mod tests {
             assert!(refused_function(f), "{f}");
         }
     }
+
+    #[test]
+    fn a_data_modifying_cte_is_not_pageable_at_any_depth() {
+        use super::super::{pageable, transaction_control};
+        for s in [
+            "WITH d AS (DELETE FROM t WHERE a = 1 RETURNING *) SELECT * FROM d",
+            "with i as (insert into t values (1) returning *) select * from i",
+            "WITH a AS (SELECT 1), b AS (UPDATE t SET a = 2 RETURNING a) SELECT * FROM b",
+            "WITH x AS (WITH y AS (DELETE FROM t RETURNING *) SELECT * FROM y) SELECT * FROM x",
+            "WITH m AS (MERGE INTO t USING s ON true WHEN MATCHED THEN DO NOTHING RETURNING *) SELECT * FROM m",
+        ] {
+            assert!(!pageable(s, PG), "{s}");
+        }
+        for s in ["SELECT * FROM t", "WITH a AS (SELECT 1 AS x) SELECT * FROM a", "SELECT \"delete\" FROM t", "SELECT 'insert into' AS s"] {
+            assert!(pageable(s, PG), "{s}");
+        }
+        for s in ["BEGIN", "begin read only", "START TRANSACTION", "COMMIT", "END", "ROLLBACK", "ABORT", "SAVEPOINT a", "RELEASE a", "PREPARE TRANSACTION 'x'", "/* c */ commit", "COMMIT PREPARED 'x'"] {
+            assert!(transaction_control(s, PG), "{s}");
+        }
+        for s in ["SELECT 1", "PREPARE p AS SELECT 1", "INSERT INTO t VALUES (1)", "SELECT 'BEGIN'", "WITH a AS (SELECT 1) SELECT * FROM a", "EXPLAIN SELECT 1"] {
+            assert!(!transaction_control(s, PG), "{s}");
+        }
+        assert!(!transaction_control("BEGIN", Dialect::MySql));
+    }
 }

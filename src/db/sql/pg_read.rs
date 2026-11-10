@@ -87,7 +87,17 @@ pub(super) async fn statement_timeout(c: &mut PgConnection) -> Result<String, sq
 /// at once, so the connection is never left inside one. `locals` (`Db::pg_locals`) comes last so that behind a pooler,
 /// where the session has none of Quarry's settings, its timeout and output formats win over the session's.
 pub(super) async fn begin_read_only(c: &mut PgConnection, timeout: &str, locals: &str) -> Result<(), sqlx::Error> {
-    c.execute("BEGIN READ ONLY").await?;
+    begin_with(c, "BEGIN READ ONLY", timeout, locals).await
+}
+
+/// The transaction of one unlocked statement behind a pooler: `READ WRITE` stated in the transaction itself, because
+/// the session cannot be changed there and its default may be read-only on the backend that answers.
+pub(super) async fn begin_read_write(c: &mut PgConnection, timeout: &str, locals: &str) -> Result<(), sqlx::Error> {
+    begin_with(c, "BEGIN READ WRITE", timeout, locals).await
+}
+
+async fn begin_with(c: &mut PgConnection, begin: &str, timeout: &str, locals: &str) -> Result<(), sqlx::Error> {
+    c.execute(begin).await?;
     let mut set = c.execute(format!("SET LOCAL statement_timeout = '{timeout}'").as_str()).await.map(|_| ());
     if set.is_ok() && !locals.is_empty() {
         set = c.execute(locals).await.map(|_| ());

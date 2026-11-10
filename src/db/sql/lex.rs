@@ -298,8 +298,27 @@ fn top_words(stmt: &str, d: Dialect) -> Option<Vec<String>> {
 /// Whether a statement can sit inside `SELECT * FROM (...) AS q LIMIT ...` to be read a page at a time:
 /// one SELECT, WITH, TABLE or VALUES that writes nothing and has no INTO or locking clause.
 pub fn pageable(stmt: &str, d: Dialect) -> bool {
+    // A data-modifying CTE sits inside parentheses, where top_words does not look, and the server refuses one that is
+    // not at the top level of the statement.
+    if d == Dialect::Postgres && tokens(stmt, d).iter().any(|(t, r)| *t == Tok::Word && ["INSERT", "UPDATE", "DELETE", "MERGE"].iter().any(|w| stmt[r.clone()].eq_ignore_ascii_case(w))) {
+        return false;
+    }
     let Some(w) = top_words(stmt, d) else { return false };
     w.first().is_some_and(|f| ["SELECT", "WITH", "TABLE", "VALUES"].contains(&f.as_str())) && !w.iter().any(|x| ["INTO", "UPDATE", "DELETE", "INSERT", "REPLACE", "MERGE", "LOCK", "SHARE"].contains(&x.as_str()))
+}
+
+/// Whether a PostgreSQL statement controls the transaction around it: BEGIN, START, COMMIT, END, ROLLBACK, ABORT,
+/// SAVEPOINT, RELEASE or PREPARE TRANSACTION. Behind a pooler each statement runs in a transaction of Quarry's own.
+pub fn transaction_control(stmt: &str, d: Dialect) -> bool {
+    if d != Dialect::Postgres {
+        return false;
+    }
+    let mut w = tokens(stmt, d).into_iter().filter(|(t, _)| *t == Tok::Word).map(|(_, r)| stmt[r].to_ascii_uppercase());
+    match w.next().as_deref() {
+        Some("BEGIN" | "START" | "COMMIT" | "END" | "ROLLBACK" | "ABORT" | "SAVEPOINT" | "RELEASE") => true,
+        Some("PREPARE") => w.next().as_deref() == Some("TRANSACTION"),
+        _ => false,
+    }
 }
 
 /// Whether the statement orders its rows, which keeps rows from moving between pages.
