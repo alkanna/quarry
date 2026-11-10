@@ -184,7 +184,7 @@ Known limits: the Content bar's filter text and "filter to this value" splice li
 - [ ] 1. SQL statements in the Query log, passwords redacted.
 - [ ] 2. Format in Query (sqlformat, kept only when the lexer reads the same tokens), undoable.
 - [ ] 3. Save to library in Query (`SavedQuery.sql`, per connection).
-- [ ] 4. Server window for SQL: Processes with Kill, Variables; then Overview and Status after their design.
+- [x] 4. Server window for SQL: Processes with Kill, Variables, Overview and Status (e5bf0c9, 6b61fd4 rebased); opus review found 8 issues, all fixed in 28b5a57 (a Kill re-checks the server identity and the row's user, host and statement on its own connection before it runs and is dropped when the row changes or a read fails; system and replication threads get no Kill; rates use the two read times; failed reads retry after 10 s; kill errors are said plainly; charset variables are marked as set by Quarry; every replica channel is shown; the process table draws only visible rows).
 - [ ] 5. Users and privileges for SQL: Databases tab, grants preview, create and drop user; then Account, Global and Limits after their design.
 - [x] 6. Designs for the missing tabs shown to the user and approved (2026-11-10, page "Server"): Users · Account 12879/12962, Users · Global 13047/13156, Users · Limits 13267/13324, Server · Overview 13383/13450, Server · Status 13519/13575.
 
