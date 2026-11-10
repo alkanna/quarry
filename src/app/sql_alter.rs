@@ -194,14 +194,14 @@ impl App {
         };
         let c = &st.columns[i];
         if staged.iter().any(|ch| matches!(ch, Change::Drop(n) if *n == c.name)) {
-            return self.err(format!("{} is staged to be dropped. Remove that change first.", c.name));
+            return self.warn(format!("{} is staged to be dropped. Remove that change first.", c.name));
         }
         let (mine, rest): (Vec<Change>, Vec<Change>) = staged.into_iter().partition(|ch| matches!(ch, Change::Modify { from, .. } if *from == c.name));
         let (def, pos) = match mine.into_iter().next() {
             Some(Change::Modify { def, pos, .. }) => (def, pos),
             _ => match ColDef::in_table(&st, c) {
                 Ok(d) => (d, Pos::Keep),
-                Err(why) => return self.err(why),
+                Err(why) => return self.warn(why),
             },
         };
         self.show_col_form(Some(c.name.clone()), def, pos, rest);
@@ -220,7 +220,7 @@ impl App {
         let c = &st.columns[i];
         let mut def = match ColDef::in_table(&st, c) {
             Ok(d) => d,
-            Err(why) => return self.err(why),
+            Err(why) => return self.warn(why),
         };
         let names = ddl::columns_after(&st, self.staged());
         def.name = ddl::free_name(&names, &c.name);
@@ -246,7 +246,7 @@ impl App {
         let Some(col) = st.columns.get(i) else { return };
         let mut staged = self.staged().to_vec();
         if staged.iter().any(|ch| matches!(ch, Change::Drop(n) if *n == col.name)) {
-            return self.err(format!("{} is staged to be dropped. Remove that change first.", col.name));
+            return self.warn(format!("{} is staged to be dropped. Remove that change first.", col.name));
         }
         let order = ddl::columns_after(&st, &staged);
         let cur = self.name_after(&col.name);
@@ -263,7 +263,7 @@ impl App {
             Some(Change::Modify { def, .. }) => def,
             _ => match ColDef::in_table(&st, col) {
                 Ok(d) => d,
-                Err(why) => return self.err(why),
+                Err(why) => return self.warn(why),
             },
         };
         staged.push(Change::Modify { from: col.name.clone(), def, pos });
@@ -275,11 +275,11 @@ impl App {
         let staged = self.staged().to_vec();
         let from = i.and_then(|i| st.indexes.get(i)).map(IndexDef::from_index);
         if let Some(f) = from.as_ref().filter(|f| f.functional) {
-            return self.err(format!("{} has an expression part, which this editor cannot write back. Change it with a query.", f.name));
+            return self.warn(format!("{} has an expression part, which this editor cannot write back. Change it with a query.", f.name));
         }
         if let Some(f) = &from {
             if staged.iter().any(|c| matches!(c, Change::DropIndex(n) if *n == f.name) || matches!(c, Change::RenameIndex { from, .. } if *from == f.name)) {
-                return self.err(format!("{} already has a staged change. Remove it first.", f.name));
+                return self.warn(format!("{} already has a staged change. Remove it first.", f.name));
             }
         }
         let after = ddl::columns_after(&st, &staged);
@@ -296,7 +296,7 @@ impl App {
         let Some(ix) = self.structure().and_then(|s| s.indexes.get(i)) else { return };
         // The server reports the expression in a form undo could not add back.
         if ix.cols.iter().any(|c| c.expr.is_some()) {
-            return self.err(format!("{} has an expression part, so dropping it here could not be undone. Drop it with a query.", ix.name));
+            return self.warn(format!("{} has an expression part, so dropping it here could not be undone. Drop it with a query.", ix.name));
         }
         let name = ix.name.clone();
         let mut staged = self.staged().to_vec();
@@ -326,10 +326,10 @@ impl App {
             return self.ok("Offline demo: no database is connected.");
         }
         if !self.sel_writable() {
-            return self.err("This connection is read-only. Unlock writes in the top bar first.");
+            return self.warn_ro();
         }
         if self.applying() {
-            return self.err(BUSY_NOTE);
+            return self.warn(BUSY_NOTE);
         }
         let staged = self.staged().to_vec();
         let Some(st) = self.structure().cloned() else { return };
@@ -362,13 +362,13 @@ impl App {
     /// Sends the staged statement. The undo comes from the structure read before it runs.
     pub(super) fn run_alter(&mut self) {
         let Some((conn, schema, table)) = self.t().map(|t| (t.sel.conn, t.sel.db.clone(), t.sel.coll.clone())) else { return };
-        let Some(db) = self.conn(conn).and_then(|c| c.sql.clone()) else { return self.err("Not connected.") };
+        let Some(db) = self.conn(conn).and_then(|c| c.sql.clone()) else { return self.warn_offline() };
         let writable = self.sel_writable();
         if !writable {
-            return self.err("This connection is read-only. Unlock writes in the top bar first.");
+            return self.warn_ro();
         }
         if self.applying() {
-            return self.err(BUSY_NOTE);
+            return self.warn(BUSY_NOTE);
         }
         let (Some(st), staged) = (self.structure().cloned(), self.staged().to_vec()) else { return };
         let (.., m) = self.alter_env();
@@ -413,7 +413,7 @@ impl App {
         self.adopt_sql_mode(conn, sql_mode);
         match res {
             Ok(s) => {
-                self.toast = Some((s.clone(), std::time::Instant::now(), undo.as_ref().map(|u| u.at)));
+                self.toast_ok(s.clone(), undo.as_ref().map(|u| u.at));
                 self.ok(s);
             }
             Err(e) => self.err(e),

@@ -42,7 +42,7 @@ impl App {
         }
         let db = self.conn(conn).and_then(|c| c.sql.clone());
         if let (None, Some(m)) = (&db, missing) {
-            self.err(m);
+            self.warn(m);
         }
         db
     }

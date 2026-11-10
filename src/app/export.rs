@@ -347,7 +347,7 @@ impl App {
                 let (cols, table, pk) = self.export_sheet(f.src, &rows);
                 let text = copy::format(fmt, &Sheet { rows: &rows, cols: &cols, table: &table, pk: &pk, bs: self.sql_bs() }, f.header);
                 if text.is_empty() {
-                    return self.err(if fmt == Fmt::SqlUpdate { "SQL UPDATE needs a table with a primary key." } else { "Nothing to export." });
+                    return self.warn(if fmt == Fmt::SqlUpdate { "SQL UPDATE needs a table with a primary key." } else { "Nothing to export." });
                 }
                 text
             }
@@ -365,7 +365,7 @@ impl App {
     /// Streams a Query result's statement to `sink` in a worker task, tracked in the status bar.
     fn start_stream(&mut self, a: &AllRows, plan: Plan, sink: Sink, copy: bool) {
         if self.export_job.is_some() {
-            return self.err("An export is already running.");
+            return self.warn("An export is already running.");
         }
         self.req += 1;
         let job = ExportJob { req: self.req, count: Arc::new(AtomicU64::new(0)), cancel: Arc::new(AtomicBool::new(false)), id: Arc::new(AtomicU64::new(0)), db: a.db.clone(), copy, step: Arc::new(AtomicU64::new(0)), of: 0 };
@@ -376,7 +376,7 @@ impl App {
     /// Runs the editor's statements in a worker task and streams their results to files.
     fn start_script(&mut self, sc: &Script, stmts: Vec<String>, ap: db::sql::export::AllPlan, path: PathBuf) {
         if self.export_job.is_some() {
-            return self.err("An export is already running.");
+            return self.warn("An export is already running.");
         }
         self.req += 1;
         let job = ExportJob { req: self.req, count: Arc::new(AtomicU64::new(0)), cancel: Arc::new(AtomicBool::new(false)), id: Arc::new(AtomicU64::new(0)), db: sc.db.clone(), copy: false, step: Arc::new(AtomicU64::new(0)), of: stmts.len() };
@@ -390,9 +390,9 @@ impl App {
         let Some(s) = t.sql.as_ref() else { return };
         let Some(set) = s.sets.get(s.set_sel.min(s.sets.len().saturating_sub(1))) else { return };
         if let Err(why) = lex_check_msg(&set.stmt) {
-            return self.err(why);
+            return self.warn(why);
         }
-        let Some(db) = self.conn(t.sel.conn).and_then(|c| c.sql.clone()) else { return self.err("Connect first.") };
+        let Some(db) = self.conn(t.sel.conn).and_then(|c| c.sql.clone()) else { return self.warn_offline() };
         let a = AllRows { db, schema: if s.run_db.is_empty() { t.sel.db.clone() } else { s.run_db.clone() }, stmt: set.stmt.clone(), total: None, paged: true, refused: None };
         let table = self.export_sheet(Src::Query, &[]).1;
         let plan = Plan { fmt, header, table, bs: self.sql_bs() };

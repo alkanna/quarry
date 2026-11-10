@@ -428,13 +428,13 @@ impl App {
         let Some(conn) = self.t().map(|t| t.sel.conn) else { return };
         // The editor belongs to this tab's rows; it would stage into the wrong table once the tab changes.
         if self.sql_cell.is_some() {
-            return self.err("Finish or cancel the cell edit first.");
+            return self.warn("Finish or cancel the cell edit first.");
         }
         let (d, bs) = self.sql_dialect();
         let cols = self.t().and_then(|t| t.sql.as_ref()).map(|s| s.cols.clone()).unwrap_or_default();
         let text = match fk_row_filter(d, bs, fk, &cols, row) {
             Ok(t) => t,
-            Err(why) => return self.err(why),
+            Err(why) => return self.warn(why),
         };
         let sel = Sel { conn, db: fk.ref_db.clone(), coll: fk.ref_table.clone() };
         self.reset_doc_state();

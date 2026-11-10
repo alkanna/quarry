@@ -224,7 +224,7 @@ impl App {
         let Some(s) = t.sql.as_ref().filter(|s| s.run_req == 0) else { return };
         let text = if all { s.query.clone() } else { s.caret_info().stmt.map(|(r, _, _)| s.query[r].to_string()).unwrap_or_default() };
         if text.trim().is_empty() {
-            return self.err("Nothing to run.");
+            return self.warn("Nothing to run.");
         }
         let Some(db) = self.sql_db_for(conn, Some("Connect first.")) else { return };
         let read_only = !self.conn_writable(conn);
@@ -401,13 +401,13 @@ impl App {
                 QAct::Save(name) => {
                     let sql = self.t().and_then(|t| t.sql.as_ref()).map(|s| s.query.clone()).unwrap_or_default();
                     if sql.trim().is_empty() {
-                        self.err("Nothing to save: the script is empty.");
+                        self.warn("Nothing to save: the script is empty.");
                     } else {
                         let has_password = !db::redact_sql(&sql).1.is_empty();
                         self.save_to_library(SavedQuery { name, sql: Some(sql), ..Default::default() });
                         // Saved as typed, because a script with its password cut out would not run.
                         if has_password {
-                            self.err("Saved, but the script holds a password in plain text in the library file.");
+                            self.warn("Saved, but the script holds a password in plain text in the library file.");
                         }
                     }
                 }
@@ -474,7 +474,7 @@ impl App {
                 let (a, b) = (byte_at(&text, a), byte_at(&text, b));
                 // A cut through a string or comment would be formatted as something it is not.
                 if lex::tokens(&text).iter().any(|(t, tr)| matches!(t, lex::Tok::Str | lex::Tok::Quoted | lex::Tok::Comment) && ((tr.start < a && a < tr.end) || (tr.start < b && b < tr.end))) {
-                    return self.err("The selection starts or ends inside a string or comment. Select whole statements, or nothing to format the script.");
+                    return self.warn("The selection starts or ends inside a string or comment. Select whole statements, or nothing to format the script.");
                 }
                 let f = db::sql::format::format_script(&text[a..b]);
                 let new = format!("{}{}{}", &text[..a], f.text, &text[b..]);
@@ -484,7 +484,7 @@ impl App {
         };
         let note = if new == text && f.special == 0 && f.refused == 0 { "Already formatted".to_string() } else { f.summary() };
         self.sql_replace(ctx, new, select);
-        if f.refused > 0 { self.err(note) } else { self.ok(note) }
+        if f.refused > 0 { self.warn(note) } else { self.ok(note) }
     }
 
     /// The script editor with line numbers, token colors and a faint band behind the statement under the caret.

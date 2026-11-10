@@ -16,6 +16,7 @@ impl App {
         let mut load_colls = None;
         let mut run = false;
         let mut sync = false;
+        let failed = self.tabs[i].failed.iter().any(|f| f.view == View::Compare);
         let c = &mut self.tabs[i].compare;
         toolbar(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -110,12 +111,15 @@ impl App {
                 }
             });
             ui.add_space(4.0);
-        } else if !c.running {
+        } else if !c.running && !failed {
             ui.add_space(20.0);
             ui.label(RichText::new("Pick a target and press Compare. Nothing is written until you sync and type the target's name.").color(FAINT()));
         }
         if moved {
             self.drop_agg_row();
+        }
+        if failed && self.tabs[i].compare.result.is_none() && !self.tabs[i].compare.running {
+            self.failed_panel(ui, View::Compare);
         }
         if self.tabs[i].compare.result.is_some() {
             // The same table as documents, reading the list where the comparison keeps it.
@@ -130,7 +134,7 @@ impl App {
         }
         if run {
             let (Some(a), Some(b)) = (self.conn(src.conn).and_then(|c| c.client.clone()), self.conn(tc).and_then(|c| c.client.clone())) else {
-                return self.err(if self.demo { "Offline demo: nothing to compare." } else { "Connect both sides first." });
+                return self.warn(if self.demo { "Offline demo: nothing to compare." } else { "Connect both sides first." });
             };
             self.req += 1;
             let req = self.req;

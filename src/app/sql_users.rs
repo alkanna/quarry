@@ -414,7 +414,7 @@ impl App {
 
     pub(super) fn sql_new_user(&mut self, conn: u64) {
         if !self.conn_writable(conn) {
-            return self.err(NOTE_USER);
+            return self.warn(NOTE_USER);
         }
         self.req += 1;
         self.modal = Some(Modal::SqlNewUser(Box::new(NewUser { conn, user: String::new(), host: "%".into(), password: String::new(), serial: self.req })));
@@ -434,7 +434,7 @@ impl App {
         if !c.writable {
             return self.modal = Some(Modal::Unlock(conn, None));
         }
-        let Some(sql) = c.sql.clone() else { return self.err("Not connected.") };
+        let Some(sql) = c.sql.clone() else { return self.warn_offline() };
         self.worker.sql_user_drop(conn, sql, acct, false);
     }
 
@@ -448,7 +448,7 @@ impl App {
         if !c.writable {
             return self.modal = Some(Modal::Unlock(conn, None));
         }
-        let Some(sql) = c.sql.clone() else { return self.err("Not connected.") };
+        let Some(sql) = c.sql.clone() else { return self.warn_offline() };
         let Some(w) = self.sql_users.as_mut() else { return };
         let plan = match tab {
             UTab::Databases | UTab::Global => None,

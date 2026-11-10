@@ -114,7 +114,7 @@ impl App {
         self.log.open = std::env::var("QUARRY_TEST_LOG").is_ok();
         let key = self.col_key(false);
         self.prefs.cols.insert(key, ColPrefs { pinned: vec!["status".into()], highlight: vec!["customer.name".into()], ..Default::default() });
-        self.status = ("Offline demo: no database is connected.".into(), false);
+        self.status = "Offline demo: no database is connected.".into();
         if std::env::var("QUARRY_TEST_CONNFORM").as_deref() == Ok("mysql") {
             // QUARRY_TEST_CONNFORM_TAB=advanced opens the Advanced tab with the design's example values.
             let advanced = std::env::var("QUARRY_TEST_CONNFORM_TAB").as_deref() == Ok("advanced");
@@ -330,6 +330,53 @@ impl App {
             let items = changed.get("items").cloned().unwrap();
             self.json_edit = Some(JsonEdit { base: changed, path: vec!["items".into()], text: db::to_edit_value(&items), kind: "array", focus: false });
         }
+        // QUARRY_TEST_ERR shows an error state: view, timeout, bar, toast, log, details or conn.
+        if let Ok(v) = std::env::var("QUARRY_TEST_ERR") {
+            self.demo_error(&v);
+        }
+    }
+
+    fn demo_error(&mut self, which: &str) {
+        const REFUSED: &str = r#"Command failed: Error code 13 (Unauthorized): not authorized on shop to execute command { find: "orders", filter: { status: "paid" }, limit: 50, lsid: { id: UUID("3f1c9e2a-41c8-4bb4-9b1e-6f3c2d1a0b7e") }, $db: "shop" }"#;
+        const DUP: &str = r#"An error occurred when trying to execute a write operation: WriteError(WriteError { code: 11000, code_name: None, message: "E11000 duplicate key error collection: shop.orders index: number_1 dup key: { number: 10402 }", details: None })"#;
+        let i = self.cur;
+        let sel = self.tabs.get(i).map(|t| t.sel.clone());
+        // The demo connection is local and anonymous; a user shows what the panels say about privileges.
+        self.conns[0].masked_uri = "mongodb+srv://report_ro:****@cluster0.mongodb.net/?authSource=admin".into();
+        self.conns[0].server.host = "cluster0.mongodb.net".into();
+        match which {
+            "view" | "timeout" => {
+                let raw = if which == "view" { REFUSED } else { "Command failed: Error code 50 (MaxTimeMSExpired): operation exceeded time limit" };
+                self.tabs[i].docs.clear();
+                self.tabs[i].count = 0;
+                self.fail_view(i, View::Documents, raw.into(), "load the documents");
+            }
+            "bar" => {
+                self.tabs[i].filter_txt = "{ status: 'paid', total: { $gt: 50 } }}".into();
+                self.run_query();
+            }
+            "toast" => {
+                self.err(DUP);
+                self.warn_ro();
+                self.toast_ok("Saved 1 document".into(), None);
+            }
+            "log" | "details" => {
+                self.errors_open = which == "log";
+                self.err("Could not write orders.csv: No space left on device (os error 28)");
+                self.err(DUP);
+                let e = self.log_err(REFUSED, Some(1), sel, "Documents · orders".into(), "load the documents");
+                self.toasts.clear();
+                if which == "details" {
+                    self.modal = Some(Modal::ErrorDetails(Box::new(e)));
+                }
+            }
+            "conn" => {
+                self.conns[0].status = Status::Failed("Command failed: Error code 18 (AuthenticationFailed): Authentication failed.".into());
+                self.tabs.clear();
+                self.cur = 0;
+            }
+            _ => {}
+        }
     }
 
     /// The MySQL demo: a production connection and an open orders table. Nothing here reads the Keychain or the network.
@@ -445,7 +492,7 @@ impl App {
         }
         self.tabs = vec![t, Tab::new(sel("customers")).for_engine(engine)];
         self.cur = 0;
-        self.status = ("Offline demo: no database is connected.".into(), false);
+        self.status = "Offline demo: no database is connected.".into();
         self.sql_structure_demo(which);
         self.sql_alter_demo(which);
         self.sql_rel_demo(which);

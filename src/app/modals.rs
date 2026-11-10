@@ -260,7 +260,7 @@ impl App {
                                     keep = false;
                                 }
                                 (Err(e), _) => self.err(e),
-                                (_, None) => self.err("Not connected."),
+                                (_, None) => self.warn_offline(),
                             }
                         }
                         if ui.button("Cancel").clicked() {
@@ -307,7 +307,7 @@ impl App {
                                     self.copying.insert((*conn, db.clone(), to.to_string()));
                                     self.worker.duplicate_coll(*conn, client, db.clone(), coll.clone(), to.to_string());
                                 }
-                                None => self.err("Not connected."),
+                                None => self.warn_offline(),
                             }
                             keep = false;
                         }
@@ -455,6 +455,7 @@ impl App {
                         }
                     });
                 }
+                Modal::ErrorDetails(e) => keep = self.error_details(ui, e),
                 Modal::Text { title, body, code } => {
                     // Wide enough for the longest line, so column layouts like the Query help do not wrap.
                     let longest = body.lines().map(|l| l.chars().count()).max().unwrap_or(0);

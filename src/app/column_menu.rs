@@ -325,7 +325,7 @@ impl App {
                 out => self.col_result(ctx, &col_title(agg, op, &sel.coll, c), c, out, &scope),
             };
         }
-        let Some(target) = self.target() else { return self.err("Not connected.") };
+        let Some(target) = self.target() else { return self.warn_offline() };
         let sort = self.t().unwrap().query.sort.clone();
         self.ok(format!("Reading {c} from every matching document…"));
         self.worker.column_values(sel.conn, target, op, c.into(), matched, sort);

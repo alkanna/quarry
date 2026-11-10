@@ -119,7 +119,7 @@ impl App {
         if self.demo {
             return self.ok("Offline demo: nothing to watch.");
         }
-        let Some(target) = self.target() else { return self.err("Not connected.") };
+        let Some(target) = self.target() else { return self.warn_offline() };
         self.req += 1;
         let req = self.req;
         let (tx, rx) = tokio::sync::oneshot::channel();

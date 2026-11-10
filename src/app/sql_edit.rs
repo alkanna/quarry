@@ -223,11 +223,11 @@ impl App {
             return None;
         }
         if !self.sel_writable() {
-            self.err("This connection is read-only. Unlock writes in the top bar first.");
+            self.warn_ro();
             return None;
         }
         let Some(db) = self.conn(sel.conn).and_then(|c| c.sql.clone()) else {
-            self.err("Not connected.");
+            self.warn_offline();
             return None;
         };
         Some((sel.conn, db, sel, cols, pk))
@@ -236,7 +236,7 @@ impl App {
     /// Double-click on a cell: opens the editor, after asking for write access when it is locked.
     pub(super) fn sql_open_cell(&mut self, i: usize, col: String) {
         if let Some(why) = self.sql_edit_block().or_else(|| self.sql_col_block(&col)) {
-            return self.err(why);
+            return self.warn(why);
         }
         if !self.sel_writable() {
             return self.ask_unlock_then(move |a| a.sql_open_cell(i, col));
@@ -288,7 +288,7 @@ impl App {
                 let kind = self.t().and_then(|t| t.sql.as_ref()).and_then(|s| s.cols.iter().find(|c| c.name == e.col)).map_or(Kind::Text, |c| c.kind);
                 let row = self.t().and_then(|t| (0..t.docs.len()).find(|&j| Rows::Raw(&t.docs).id(j) == e.id));
                 match value::parse_edit(kind, &e.text) {
-                    Ok(_) if row.is_none() => self.err("That row is no longer in the table, so the edit was cancelled."),
+                    Ok(_) if row.is_none() => self.warn("That row is no longer in the table, so the edit was cancelled."),
                     Ok(v) => self.sql_set_cell(row.unwrap_or_default(), &e.col, v),
                     Err(m) => {
                         (e.err, e.done, e.focus) = (Some(m), None, true);
@@ -577,7 +577,7 @@ impl App {
         let writes = matches!(act, DocsAct::Duplicate | DocsAct::SetValue | DocsAct::Delete);
         if writes {
             if let Some(why) = self.sql_edit_block() {
-                return self.err(why);
+                return self.warn(why);
             }
             if !self.sel_writable() {
                 let ctx = ctx.clone();
@@ -601,7 +601,7 @@ impl App {
             DocsAct::CopyAs(f) => self.copy_rows_as(ctx, f, &rows),
             DocsAct::Filter => {
                 if pk.is_empty() {
-                    return self.err("This table has no usable primary key to filter by.");
+                    return self.warn("This table has no usable primary key to filter by.");
                 }
                 let text = key_list();
                 let t = self.tm().unwrap();
@@ -611,7 +611,7 @@ impl App {
             }
             DocsAct::EditQuery => {
                 if pk.is_empty() {
-                    return self.err("This table has no usable primary key to address these rows.");
+                    return self.warn("This table has no usable primary key to address these rows.");
                 }
                 let text = format!("UPDATE {}\nSET \nWHERE {};", d.qualified(&sel.db, &sel.coll), key_list());
                 let t = self.tm().unwrap();
@@ -633,7 +633,7 @@ impl App {
             }
             DocsAct::SetValue => {
                 let first = cols.iter().find(|c| !pk.contains(&c.src) && c.kind != Kind::Geometry).map(|c| c.name.clone());
-                let Some(col) = first else { return self.err("No column of this table can be set.") };
+                let Some(col) = first else { return self.warn("No column of this table can be set.") };
                 self.modal = Some(Modal::SqlSet(Box::new(SetForm { rows, col, text: String::new(), null: false, err: None })));
             }
             DocsAct::Delete => {
@@ -780,7 +780,7 @@ impl App {
         let sheet = Sheet { rows, cols, table, pk, bs };
         let text = copy::format(fmt, &sheet, header);
         if text.is_empty() {
-            return self.err(if fmt == Fmt::SqlUpdate { "SQL UPDATE needs a table with a primary key." } else { "Nothing to copy." });
+            return self.warn(if fmt == Fmt::SqlUpdate { "SQL UPDATE needs a table with a primary key." } else { "Nothing to copy." });
         }
         let rich = fmt == Fmt::Html && put_html(&text, &copy::format(Fmt::Tsv, &sheet, header));
         if !rich {
@@ -817,7 +817,7 @@ impl App {
                 }
                 CellAct::SetNull => {
                     if let Some(why) = self.sql_edit_block().or_else(|| self.sql_col_block(&col)) {
-                        return self.err(why);
+                        return self.warn(why);
                     }
                     if !self.sel_writable() {
                         return self.ask_unlock_then(move |a| a.sql_set_cell(i, &col, Bson::Null));

@@ -12,6 +12,7 @@ mod analysis;
 mod code;
 mod dates;
 pub(crate) use dates::civil_from_days;
+mod errors;
 mod explain;
 mod import;
 mod js_ls;
@@ -24,6 +25,7 @@ mod worker;
 pub use analysis::*;
 pub use code::*;
 pub use dates::*;
+pub use errors::*;
 pub use explain::*;
 pub use import::*;
 pub use js_ls::*;
@@ -46,11 +48,6 @@ pub const UNDO_MAX: usize = 50; // maxActionsLength
 pub const UNDO_MAX_AGE_S: u64 = 86_400; // maxActionsAge
 
 pub type Res<T> = Result<T, String>;
-
-/// Whether a server error means the user lacks a privilege, in the server's or Atlas's wording.
-pub fn is_unauthorized(e: &str) -> bool {
-    e.contains("(Unauthorized)") || e.contains("not authorized") || e.contains("is not allowed to do action")
-}
 
 /// A loaded document kept as its BSON bytes. Decoded, a document takes about 11 times the memory
 /// (every field and subdocument is its own allocation), so only rows that are open keep a decoded copy.

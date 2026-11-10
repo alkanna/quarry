@@ -115,7 +115,7 @@ impl App {
         if let Some(c) = analyze {
             match self.conn(*conn).and_then(|x| x.client.clone()) {
                 Some(client) => self.analyze_relations(*conn, client, db.clone(), c),
-                None => self.err("Connect first."),
+                None => self.warn_offline(),
             }
         }
         if done(ui) {

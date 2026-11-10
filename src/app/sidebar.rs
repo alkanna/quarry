@@ -392,10 +392,21 @@ impl App {
                 }
                 st => {
                     ui.add_space(6.0);
+                    // The main area explains a failure in full; here a short reason is enough.
                     if let Status::Failed(e) = st {
-                        ui.add(egui::Label::new(RichText::new(e).size(TXT_SMALL).color(ALERT())).wrap());
+                        let why = match db::classify(e) {
+                            db::ErrKind::SignIn => "Sign-in failed",
+                            db::ErrKind::Unreachable => "Server not reachable",
+                            db::ErrKind::Tls => "TLS failed",
+                            db::ErrKind::Tunnel => "SSH tunnel failed",
+                            db::ErrKind::Lost => "Connection lost",
+                            db::ErrKind::Privilege => "Not allowed to list databases",
+                            _ => "Could not connect",
+                        };
+                        ui.label(medium(RichText::new(why).size(TXT_SMALL).color(ALERT()))).on_hover_text(e.as_str());
                     }
-                    connect = primary(ui, "Connect", PRIMARY()).clicked();
+                    let label = if matches!(st, Status::Failed(_)) { "Retry" } else { "Connect" };
+                    connect = primary(ui, label, PRIMARY()).clicked();
                 }
             }
             let sql = c.meta.engine.is_sql();
@@ -672,10 +683,10 @@ impl App {
             return self.worker.sql_tables(conn, sql, db.clone());
         }
         if self.conn(conn).is_some_and(|c| c.meta.engine.is_sql()) {
-            return self.err(if self.conn(conn).is_some_and(|c| c.sql.is_some()) { "Not available for SQL connections yet." } else { "Connect first." });
+            return self.warn(if self.conn(conn).is_some_and(|c| c.sql.is_some()) { "Not available for SQL connections yet." } else { "Not connected. Connect to this server first." });
         }
         let Some(client) = self.conn(conn).and_then(|c| c.client.clone()) else {
-            return self.err("Connect first.");
+            return self.warn_offline();
         };
         let writable = self.conn(conn).is_some_and(|c| c.writable);
         let needs_write = matches!(a, SideAct::NewColl(..) | SideAct::DropDb(_) | SideAct::Rename(..) | SideAct::Duplicate(..) | SideAct::DropColl(..) | SideAct::Restore(_));

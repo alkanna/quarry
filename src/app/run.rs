@@ -22,9 +22,11 @@ impl App {
                 let t = self.tm().unwrap();
                 t.query = q;
                 t.page = 0;
+                t.bar_err = None;
                 self.reload();
             }
-            Err(e) => self.err(e),
+            // Nothing ran, so the message goes under the bar and the rows stay.
+            Err(e) => self.tm().unwrap().bar_err = Some(e),
         }
     }
 
@@ -54,9 +56,18 @@ impl App {
     pub(super) fn run_shell(&mut self, text: &str) {
         let sh = match db::parse_shell(text) {
             Ok(s) => s,
-            Err(e) => return self.err(e),
+            Err(e) => {
+                match self.tm().filter(|t| t.view == View::Documents) {
+                    Some(t) => t.bar_err = Some(e),
+                    None => self.err(e),
+                }
+                return;
+            }
         };
-        let Some(cur) = self.t().map(|t| t.sel.clone()) else { return self.err("Open a collection first.") };
+        let Some(cur) = self.t().map(|t| t.sel.clone()) else { return self.warn("Open a collection first.") };
+        if let Some(t) = self.tm() {
+            t.bar_err = None;
+        }
         if sh.coll != cur.coll {
             self.open_collection(Sel { coll: sh.coll.clone(), ..cur }, true);
         }
@@ -95,7 +106,7 @@ impl App {
                     self.tm().unwrap().agg_req = req;
                     self.worker.aggregate(req, target, p);
                 }
-                None => self.err("Not connected."),
+                None => self.warn_offline(),
             }
         }
     }

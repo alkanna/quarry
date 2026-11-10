@@ -322,7 +322,7 @@ impl App {
         let fid = query_id("QUERY");
         let focused = ui.memory(|m| m.has_focus(fid));
         let hovered = ui.ctx().read_response(fid).is_some_and(|r| r.hovered());
-        let edge = if focused { PRIMARY() } else if hovered { MUTED() } else { BORDER() };
+        let edge = if t.bar_err.is_some() { ALERT() } else if focused { PRIMARY() } else if hovered { MUTED() } else { BORDER() };
         let bar = egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, edge)).corner_radius(R_BAR).inner_margin(egui::Margin { left: 12, right: 6, top: 7, bottom: 7 }).show(ui, |ui| {
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
@@ -435,6 +435,15 @@ impl App {
         }
         if let Some(l) = code_lang {
             self.show_code(l, true);
+        }
+        // Nothing was sent, so the rows below are still those of the last query that ran.
+        if let Some(e) = self.t().and_then(|t| t.bar_err.clone()) {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), Sense::hover());
+                paint_alert(ui.painter(), r.center(), ALERT());
+                ui.add(egui::Label::new(RichText::new(e).size(TXT_SMALL).color(TEXT())).wrap());
+            });
         }
         ui.add_space(10.0);
         let t = self.t().unwrap();
@@ -581,7 +590,12 @@ impl App {
         let docs = if is_raw { Rows::Raw(&raw[range]) } else { Rows::Docs(&all[range]) };
         let loading = t.loading;
         let closed = self.t().and_then(|t| self.conn(t.sel.conn)).filter(|c| c.status != Status::Ready && !self.demo).map(|c| (c.meta.id, c.meta.name.clone(), c.status == Status::Connecting));
-        if let (true, Some((id, name, connecting))) = (docs.is_empty(), closed) {
+        let conn_failed = closed.as_ref().is_some_and(|c| self.conn_card_shown(c.0));
+        let stale = !agg && self.t().is_some_and(|t| t.bar_err.is_some());
+        if let (true, true, Some((id, ..))) = (docs.is_empty(), conn_failed, &closed) {
+            self.conn_failed_card(ui, *id);
+        } else if docs.is_empty() && self.failed_panel(ui, view) {
+        } else if let (true, Some((id, name, connecting))) = (docs.is_empty(), closed) {
             ui.add_space(20.0);
             ui.horizontal(|ui| {
                 if connecting {
@@ -603,11 +617,16 @@ impl App {
             if !agg || view == View::Shell {
                 self.selection_bar(ui, docs);
             }
-            if self.prefs.table || sql {
-                self.doc_table(ui, agg, docs, &fields, base);
-            } else {
-                self.doc_list(ui, agg, docs);
-            }
+            ui.scope(|ui| {
+                if stale {
+                    ui.multiply_opacity(0.45);
+                }
+                if self.prefs.table || sql {
+                    self.doc_table(ui, agg, docs, &fields, base);
+                } else {
+                    self.doc_list(ui, agg, docs);
+                }
+            });
         }
         if let Some(t) = self.tabs.get_mut(cur) {
             match (agg, t.agg_store(view)) {
@@ -781,7 +800,7 @@ impl App {
     }
 
     pub(super) fn export(&mut self) {
-        let Some(target) = self.target() else { return self.err("Not connected.") };
+        let Some(target) = self.target() else { return self.warn_offline() };
         let file = rfd::FileDialog::new()
             .set_file_name(format!("{}.json", target.coll))
             .add_filter("JSON", &["json"])

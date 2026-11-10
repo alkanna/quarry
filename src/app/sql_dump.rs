@@ -87,7 +87,7 @@ impl App {
     pub(super) fn open_sql_dump(&mut self, conn: u64, db: String, table: Option<String>) {
         let Some(c) = self.conn(conn) else { return };
         if c.sql.is_none() {
-            return self.err("Connect first.");
+            return self.warn_offline();
         }
         let names: Vec<String> = c.dbs.iter().find(|d| d.0 == db).and_then(|d| d.1.clone()).unwrap_or_default();
         let schema = self.sql_schema.get(&(conn, db.clone()));
@@ -116,7 +116,7 @@ impl App {
     pub(super) fn open_sql_run_file(&mut self, conn: u64, db: String) {
         let Some(c) = self.conn(conn) else { return };
         if c.sql.is_none() {
-            return self.err("Connect first.");
+            return self.warn_offline();
         }
         let conn_name = c.meta.name.clone();
         let Some(p) = rfd::FileDialog::new().add_filter("SQL", &["sql", "txt"]).pick_file() else { return };
@@ -253,7 +253,7 @@ impl App {
     }
 
     fn start_dump(&mut self, f: &DumpForm, total: u64) {
-        let Some(sql) = self.conn(f.conn).and_then(|c| c.sql.clone()) else { return self.err("Connect first.") };
+        let Some(sql) = self.conn(f.conn).and_then(|c| c.sql.clone()) else { return self.warn_offline() };
         let per = if f.extended { 1000 } else { 1 };
         let plan = match (f.what, &f.filtered) {
             (What::Filtered, Some((t, w, _))) => DumpPlan { schema: f.db.clone(), tables: vec![DumpTable { name: t.clone(), view: false, structure: false, content: true, drop: false }], create_db: false, extras: false, rows_per_insert: per, snapshot: f.snapshot, filter: Some(w.clone()) },
@@ -296,7 +296,7 @@ impl App {
             }
         });
         if go {
-            let Some(sql) = self.conn(f.conn).and_then(|c| c.sql.clone()) else { return self.err("Connect first.") };
+            let Some(sql) = self.conn(f.conn).and_then(|c| c.sql.clone()) else { return self.warn_offline() };
             self.req += 1;
             let job = SqlJob::new(self.req, f.conn, sql.clone(), f.db.clone(), JobKind::Script, 0, f.src.len());
             self.worker.sql_run_file(job.req, sql, f.db.clone(), f.src.clone(), !writable, job.prog.clone(), job.id.clone(), job.cancel.clone());

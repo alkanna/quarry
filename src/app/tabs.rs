@@ -154,7 +154,7 @@ impl App {
     /// tab can close or move while the dialog is open, so the action is refused rather than run on another table.
     pub(super) fn on_tab(&mut self, sel: &Sel, f: impl FnOnce(&mut App)) {
         let Some(i) = tab_for(self.tabs.iter().map(|t| &t.sel), self.cur, sel) else {
-            return self.err(format!("Nothing ran: {} is no longer open in a tab.", sel.coll));
+            return self.warn(format!("Nothing ran: {} is no longer open in a tab.", sel.coll));
         };
         let back = self.cur;
         self.cur = i;
