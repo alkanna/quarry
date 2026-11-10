@@ -158,97 +158,138 @@ impl App {
         let shown = visible_cols(Some(&prefs), &fields, n);
         let mut acts = Vec::new();
         let mut add = None;
-        sticky_menu(ui, format!("Columns ({})", shown.len()), |ui| {
-            ui.set_min_width(360.0);
-            ui.add(egui::TextEdit::singleline(&mut self.col_filter).hint_text("Filter fields").desired_width(f32::INFINITY).margin(egui::Margin::symmetric(10, 6)));
-            let needle = self.col_filter.trim().to_lowercase();
-            let keep = |c: &str| needle.is_empty() || c.to_lowercase().contains(&needle);
-            ui.add_space(6.0);
-            caption(ui, "SHOWN  ·  drag to reorder, pinned columns stay first");
-            egui::ScrollArea::vertical().id_salt("shown").max_height(320.0).show(ui, |ui| {
-                for (i, c) in shown.iter().enumerate().filter(|(_, c)| keep(c)) {
-                    let row = ui.horizontal(|ui| {
-                        ui.set_min_height(28.0);
-                        ui.dnd_drag_source(egui::Id::unique(("col-drag", c)), i, grip).response.on_hover_cursor(egui::CursorIcon::Grab);
-                        let pinned = prefs.pinned.contains(c);
-                        if pin_button(ui, pinned).on_hover_text(if pinned { "Unpin" } else { "Pin: keep this column first" }).clicked() {
-                            acts.push(ColAct::Pin(c.clone()));
-                        }
-                        ui.label(RichText::new(c).monospace().color(if fields.contains(c) { TEXT() } else { PRIMARY() }));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if icon_button(ui, "🗙", true).on_hover_text("Hide").clicked() {
-                                acts.push(ColAct::Hide(c.clone()));
-                            }
-                            if icon_button(ui, "⏷", i + 1 < shown.len()).on_hover_text("Move down").clicked() {
-                                acts.push(ColAct::Move(c.clone(), 1));
-                            }
-                            if icon_button(ui, "⏶", i > 0).on_hover_text("Move up").clicked() {
-                                acts.push(ColAct::Move(c.clone(), -1));
-                            }
-                        });
-                    }).response;
-                    // Drop on the upper half to go before this row, the lower half to go after it.
-                    let below = ui.input(|inp| inp.pointer.hover_pos()).is_some_and(|p| p.y > row.rect.center().y);
-                    if row.dnd_hover_payload::<usize>().is_some() {
-                        let y = if below { row.rect.bottom() } else { row.rect.top() };
-                        ui.painter().hline(row.rect.x_range(), y, Stroke::new(2.0, PRIMARY()));
-                    }
-                    if let Some(from) = row.dnd_release_payload::<usize>() {
-                        acts.push(ColAct::MoveTo(shown[*from].clone(), i + below as usize));
+        sticky_menu(ui, format!("Columns {}", shown.len()), |ui| {
+            popover_body(ui, 360.0, |ui| {
+                let total = shown.len() + fields.iter().filter(|f| !shown.contains(f)).count();
+                popover_head(ui, "Columns", &format!("{} of {total}", shown.len()), "Drag to reorder. Pinned columns stay first.");
+                // One field filters the lists and adds a path the lists do not offer. Its suggestions are
+                // nested paths seen in the loaded documents.
+                let paths: &[String] = if agg { &fields } else { &self.tabs[self.cur].paths };
+                let suggest = |b: &str| {
+                    let typed = b.trim().to_lowercase();
+                    let items: Vec<Sug> = paths
+                        .iter()
+                        .filter(|p| !typed.is_empty() && p.to_lowercase().contains(&typed) && !shown.contains(p))
+                        .take(50)
+                        .map(|p| Sug { sql: None, back: 0, text: p.clone(), note: "field", insert: p.clone(), caret: p.chars().count() })
+                        .collect();
+                    (!items.is_empty()).then(|| (b.chars().count(), items))
+                };
+                let id = ui.make_persistent_id("custom-col");
+                let mut moved = false;
+                let (mut enter, mut picked_path) = (false, false);
+                well_field(ui, id, FieldIcon::Search, None, |ui| {
+                    let w = ui.available_width();
+                    let (out, picked, m) = ac_input(ui, id, &mut self.col_filter, &mut self.ac, &suggest, |ui, text, _| field_edit(text, id, "Filter fields, or type a path to add", w, egui::TextStyle::Monospace).show(ui));
+                    moved = m;
+                    picked_path = picked;
+                    enter = picked || (out.response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)));
+                });
+                // Drawn in the menu, not as a popup: a click on another layer would close the menu.
+                if ac_list(ui, id, &mut self.col_filter, &mut self.ac, moved, Some(ui.available_width() - 2.0)) {
+                    (enter, picked_path) = (true, true);
+                }
+                ui.add_space(12.0);
+                let typed = self.col_filter.trim().to_string();
+                let needle = typed.to_lowercase();
+                let keep = |c: &str| needle.is_empty() || c.to_lowercase().contains(&needle);
+                let hidden: Vec<&String> = fields.iter().filter(|f| !shown.contains(f) && keep(f)).collect();
+                let shown_kept: Vec<(usize, &String)> = shown.iter().enumerate().filter(|(_, c)| keep(c)).collect();
+                // Enter adds a picked suggestion, the one field a filter leaves, or a path nothing matches.
+                // A filter that only narrows the lists adds nothing.
+                if enter && !typed.is_empty() {
+                    if picked_path {
+                        add = Some(typed.clone());
+                    } else if hidden.len() == 1 {
+                        add = Some(hidden[0].clone());
+                    } else if hidden.is_empty() && shown_kept.is_empty() {
+                        add = Some(typed.clone());
                     }
                 }
-            });
-            let hidden: Vec<&String> = fields.iter().filter(|f| !shown.contains(f) && keep(f)).collect();
-            if !hidden.is_empty() {
-                ui.separator();
-                caption(ui, format!("MORE FIELDS ({})", hidden.len()));
-                egui::ScrollArea::vertical().id_salt("more").max_height(200.0).show(ui, |ui| {
-                    for f in hidden {
-                        if ui.add(quiet_button(RichText::new(format!("+ {f}")).monospace()).min_size(egui::vec2(ui.available_width(), 26.0))).clicked() {
-                            acts.push(ColAct::Show(f.clone()));
-                        }
-                    }
-                });
-            }
-            ui.separator();
-            caption(ui, "CUSTOM FIELD");
-            // Nested paths seen in the loaded documents, for paths the field list does not offer.
-            let paths: &[String] = if agg { &fields } else { &self.tabs[self.cur].paths };
-            let suggest = |b: &str| {
-                let typed = b.trim().to_lowercase();
-                let items: Vec<Sug> = paths
-                    .iter()
-                    .filter(|p| !typed.is_empty() && p.to_lowercase().contains(&typed) && !shown.contains(p))
-                    .take(50)
-                    .map(|p| Sug { sql: None, back: 0, text: p.clone(), note: "field", insert: p.clone(), caret: p.chars().count() })
-                    .collect();
-                (!items.is_empty()).then(|| (b.chars().count(), items))
-            };
-            let id = ui.make_persistent_id("custom-col");
-            let mut moved = false;
-            ui.horizontal(|ui| {
-                let w = ui.available_width() - 64.0;
-                let (out, picked, m) = ac_input(ui, id, &mut self.new_col, &mut self.ac, &suggest, |ui, text, _| {
-                    egui::TextEdit::singleline(text).id(id).hint_text("customer.name").desired_width(w).font(egui::TextStyle::Monospace).margin(egui::Margin::symmetric(10, 6)).show(ui)
-                });
-                moved = m;
-                let enter = out.response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                if (ui.add(egui::Button::new("Add").min_size(egui::vec2(56.0, BUTTON_H))).clicked() || enter || picked) && !self.new_col.trim().is_empty() {
-                    add = Some(self.new_col.trim().to_string());
+                // Always drawn, so Reset is there even when every column is hidden or filtered out.
+                if section_head(ui, "SHOWN", Some("Reset")).is_some_and(|r| r.on_hover_text("Show the default columns again").clicked()) {
+                    acts.push(ColAct::Reset);
                 }
+                if !shown_kept.is_empty() {
+                    let last_pin = shown.iter().rposition(|c| prefs.pinned.contains(c));
+                    egui::ScrollArea::vertical().id_salt("shown").max_height(320.0).show(ui, |ui| {
+                        for &(i, c) in &shown_kept {
+                            let (row, hovered) = pop_row(ui, POP_ROW_H);
+                            let rect = row.rect;
+                            let grip_rect = egui::Rect::from_min_size(rect.left_top() + egui::vec2(0.0, 2.0), egui::vec2(14.0, 26.0));
+                            put_at(ui, grip_rect, |ui| ui.dnd_drag_source(egui::Id::unique(("col-drag", c)), i, grip).response.on_hover_cursor(egui::CursorIcon::Grab));
+                            let p = ui.painter().clone();
+                            mono_at(&p, rect.left() + 22.0, rect.center().y, c, BRIGHT());
+                            let pinned = prefs.pinned.contains(c);
+                            let mut right = rect.right();
+                            if hovered {
+                                let at = egui::Rect::from_min_size(egui::pos2(right - BUTTON_H, rect.center().y - BUTTON_H / 2.0), egui::vec2(BUTTON_H, BUTTON_H));
+                                if put_at(ui, at, eye_button).on_hover_text("Hide").clicked() {
+                                    acts.push(ColAct::Hide(c.clone()));
+                                }
+                                right -= BUTTON_H + 2.0;
+                            }
+                            if hovered || pinned {
+                                let at = egui::Rect::from_min_size(egui::pos2(right - BUTTON_H, rect.center().y - BUTTON_H / 2.0), egui::vec2(BUTTON_H, BUTTON_H));
+                                if put_at(ui, at, |ui| pin_button(ui, pinned)).on_hover_text(if pinned { "Unpin" } else { "Pin: keep this column first" }).clicked() {
+                                    acts.push(ColAct::Pin(c.clone()));
+                                }
+                                right -= BUTTON_H + 6.0;
+                            }
+                            if !fields.contains(c) {
+                                tag_at(&p, right, rect.center().y, "path", MUTED());
+                            }
+                            // Pinned columns sit above a dashed line.
+                            if last_pin == Some(i) && i + 1 < shown.len() {
+                                let y = rect.bottom();
+                                p.extend(egui::Shape::dashed_line(&[egui::pos2(rect.left() + 22.0, y), egui::pos2(rect.right(), y)], Stroke::new(1.0, RAISED_LINE()), 3.0, 3.0));
+                            }
+                            // Drop on the upper half to go before this row, the lower half to go after it.
+                            let below = ui.input(|inp| inp.pointer.hover_pos()).is_some_and(|p| p.y > rect.center().y);
+                            if row.dnd_hover_payload::<usize>().is_some() {
+                                let y = if below { rect.bottom() } else { rect.top() };
+                                ui.painter().hline(rect.x_range(), y, Stroke::new(2.0, PRIMARY()));
+                            }
+                            if let Some(from) = row.dnd_release_payload::<usize>() {
+                                acts.push(ColAct::MoveTo(shown[*from].clone(), i + below as usize));
+                            }
+                        }
+                    });
+                }
+                if !hidden.is_empty() {
+                    ui.add_space(8.0);
+                    section_head(ui, &format!("MORE FIELDS {}", hidden.len()), None);
+                    egui::ScrollArea::vertical().id_salt("more").max_height(200.0).show(ui, |ui| {
+                        for f in hidden {
+                            let (row, hovered) = pop_row(ui, POP_ROW_H);
+                            let (rect, p) = (row.rect, ui.painter());
+                            let color = if hovered { BRIGHT() } else { MUTED() };
+                            paint_plus(p, egui::pos2(rect.left() + 6.0, rect.center().y), 4.0, color);
+                            mono_at(p, rect.left() + 22.0, rect.center().y, f, color);
+                            if hovered {
+                                let g = p.layout_no_wrap("Show".into(), FontId::proportional(TXT_CAPTION), MUTED());
+                                galley_at(p, rect.right() - g.size().x, rect.center().y, g, MUTED());
+                            }
+                            if row.clicked() {
+                                acts.push(ColAct::Show(f.clone()));
+                            }
+                        }
+                    });
+                }
+                if shown_kept.is_empty() && !typed.is_empty() && !fields.iter().any(|f| keep(f)) {
+                    empty_state(ui, paint_search, "No field matches", "Not in the loaded documents. Paths still work.", |ui| {
+                        ui.add_space(10.0);
+                        if add_chip(ui, &format!("Add {typed} as a column")).clicked() {
+                            add = Some(typed.clone());
+                        }
+                    });
+                }
+                popover_foot(ui, None, &["Dotted paths reach inside objects and arrays, like items.0.sku."]);
             });
-            // Drawn in the menu, not as a popup: a click on another layer would close the menu.
-            if ac_list(ui, id, &mut self.new_col, &mut self.ac, moved, Some(ui.available_width() - 2.0)) {
-                add = Some(self.new_col.trim().to_string());
-            }
-            ui.label(RichText::new("Dotted paths reach inside objects and arrays, like items.0.sku").size(TXT_CAPTION).color(FAINT()));
-            if ui.button(format!("Reset to the first {n} fields")).clicked() {
-                acts.push(ColAct::Reset);
-            }
         });
         if let Some(c) = add {
             acts.push(ColAct::Show(c));
-            self.new_col.clear();
+            self.col_filter.clear();
         }
         if !acts.is_empty() {
             self.apply_col_acts(&key, &fields, acts);
@@ -881,4 +922,14 @@ pub(super) fn row_fill(active: bool, checked: bool, hovered: bool, pressed: bool
         _ if odd => pal().stripe,
         _ => Color32::TRANSPARENT,
     }
+}
+
+/// The hide button of a Columns row: an eye with a slash.
+fn eye_button(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(BUTTON_H, BUTTON_H), Sense::click());
+    let state = state_of(&r);
+    ui.painter().rect_filled(rect, R_SM, hover_fill_on(ui, state));
+    paint_eye_off(ui.painter(), rect.center(), if state > 0 { BRIGHT() } else { MUTED() });
+    focus_ring(ui, &r, rect, R_SM as f32);
+    r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }

@@ -393,7 +393,7 @@ pub(crate) fn pin_button(ui: &mut egui::Ui, pinned: bool) -> egui::Response {
     let state = state_of(&r);
     let color = if pinned { PRIMARY() } else if state > 0 { BRIGHT() } else { FAINT() };
     let p = ui.painter();
-    p.rect_filled(rect, R_SM, hover_fill(state));
+    p.rect_filled(rect, R_SM, hover_fill_on(ui, state));
     let c = rect.center();
     let head = egui::Rect::from_center_size(c + egui::vec2(0.0, -3.5), egui::vec2(8.0, 7.0));
     if pinned {
@@ -508,7 +508,7 @@ pub(crate) fn vsep(ui: &mut egui::Ui, pad: f32) {
 pub(crate) fn close_x(ui: &mut egui::Ui) -> egui::Response {
     let (rect, r) = ui.allocate_exact_size(egui::vec2(CLOSE_W, CLOSE_W), Sense::click());
     let state = state_of(&r);
-    ui.painter().circle_filled(rect.center(), CLOSE_W / 2.0 - 1.0, hover_fill(state));
+    ui.painter().circle_filled(rect.center(), CLOSE_W / 2.0 - 1.0, hover_fill_on(ui, state));
     let color = if state > 0 { BRIGHT() } else { FAINT() };
     let (c, d) = (rect.center(), 3.0);
     for (a, b) in [(egui::vec2(-d, -d), egui::vec2(d, d)), (egui::vec2(-d, d), egui::vec2(d, -d))] {
@@ -518,31 +518,27 @@ pub(crate) fn close_x(ui: &mut egui::Ui) -> egui::Response {
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+const ADD_CHIP_PLUS: f32 = 7.0;
+const ADD_CHIP_GAP: f32 = 6.0;
+const ADD_CHIP_PAD: f32 = 9.0;
+
+/// The width `add_chip` takes for `name`, to center a row of them.
+pub(crate) fn add_chip_w(ui: &egui::Ui, name: &str) -> f32 {
+    let g = ui.painter().layout_job(egui::text::LayoutJob::single_section(name.to_string(), mono_fmt(TXT_CAPTION, Color32::PLACEHOLDER, 400.0)));
+    ADD_CHIP_PAD * 2.0 + ADD_CHIP_PLUS + ADD_CHIP_GAP + g.size().x
+}
+
 /// An outlined mono pill that adds something, like "+ limit": `paint_chip`'s off look with a
 /// painted plus in front, since the "+" glyph sits off center.
 pub(crate) fn add_chip(ui: &mut egui::Ui, name: &str) -> egui::Response {
-    const PLUS: f32 = 7.0;
-    const GAP: f32 = 6.0;
     let g = ui.painter().layout_job(egui::text::LayoutJob::single_section(name.to_string(), mono_fmt(TXT_CAPTION, Color32::PLACEHOLDER, 400.0)));
-    let pad = 9.0;
-    let (rect, r) = ui.allocate_exact_size(egui::vec2(pad + PLUS + GAP + g.size().x + pad, BUTTON_H), Sense::click());
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(add_chip_w(ui, name), BUTTON_H), Sense::click());
     let state = state_of(&r);
     let color = if state > 0 { BRIGHT() } else { MUTED() };
     let p = ui.painter();
-    p.rect(rect, rect.height() / 2.0, hover_fill(state), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
-    // Bars in whole device pixels: a thin stroke at a fractional center antialiases into uneven arms.
-    let ppp = ui.pixels_per_point();
-    let t = (1.2 * ppp).round().max(1.0);
-    let len = (PLUS * ppp).round();
-    let len = len + (len - t) % 2.0;
-    let arm = (len - t) / 2.0;
-    let (x0, y0) = (((rect.left() + pad + PLUS / 2.0) * ppp - t / 2.0).round(), (rect.center().y * ppp - t / 2.0).round());
-    let bar = |x: f32, y: f32, w: f32, h: f32| egui::Rect::from_min_size(egui::pos2(x, y) / ppp, egui::vec2(w, h) / ppp);
-    p.rect_filled(bar(x0 - arm, y0, len, t), 0.0, color);
-    p.rect_filled(bar(x0, y0 - arm, t, arm), 0.0, color);
-    p.rect_filled(bar(x0, y0 + t, t, arm), 0.0, color);
-    let dy = optical_dy(&g);
-    p.galley(egui::pos2(rect.left() + pad + PLUS + GAP, rect.center().y - g.size().y / 2.0 + dy), g, color);
+    p.rect(rect, rect.height() / 2.0, hover_fill_on(ui, state), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
+    paint_plus(p, egui::pos2(rect.left() + ADD_CHIP_PAD + ADD_CHIP_PLUS / 2.0, rect.center().y), ADD_CHIP_PLUS / 2.0, color);
+    galley_at(p, rect.left() + ADD_CHIP_PAD + ADD_CHIP_PLUS + ADD_CHIP_GAP, rect.center().y, g, color);
     focus_ring(ui, &r, rect, rect.height() / 2.0);
     let enabled = ui.is_enabled();
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, format!("Add {name}")));
@@ -786,4 +782,265 @@ pub(crate) fn place(ui: &egui::Ui, cell: egui::Rect, s: &str, font: FontId, colo
     let rect = egui::Rect::from_min_size(pos, g.size());
     ui.painter().galley(pos, g, color);
     rect
+}
+
+// Popovers (Packages, History, saved queries, Library, Columns) share one layout: a title with a
+// faint note on the right, a subtitle, a well field, small caps sections, hover rows and a footer.
+
+/// The body of a popover at `width`, with the designs' padding. Items have no gaps between them:
+/// each part spaces itself.
+pub(crate) fn popover_body<R>(ui: &mut egui::Ui, width: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    egui::Frame::new().inner_margin(POPOVER_PAD).show(ui, |ui| {
+        ui.set_width(width);
+        ui.spacing_mut().item_spacing.y = 0.0;
+        add(ui)
+    })
+    .inner
+}
+
+/// Added to the menu's own margin, it makes the 14 pt padding of the popover designs.
+const POPOVER_PAD: i8 = 8;
+
+/// The popover's title row with `meta` faint on the right, and a one-line subtitle under it.
+pub(crate) fn popover_head(ui: &mut egui::Ui, title: &str, meta: &str, sub: &str) {
+    ui.horizontal(|ui| {
+        ui.label(semibold(RichText::new(title).size(TXT_TITLE).color(BRIGHT())));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.label(RichText::new(meta).monospace().size(TXT_CAPTION).color(FAINT())));
+    });
+    ui.add_space(4.0);
+    ui.label(RichText::new(sub).size(TXT_SMALL).color(MUTED()));
+    ui.add_space(10.0);
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum FieldIcon {
+    Plus,
+    Search,
+}
+
+/// A well with an icon in front, for `add` to fill with a `field_edit` and any buttons. The
+/// outline is `problem` when given, else the accent while `id` has focus.
+pub(crate) fn well_field<R>(ui: &mut egui::Ui, id: egui::Id, icon: FieldIcon, problem: Option<Color32>, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let ring = problem.unwrap_or_else(|| if ui.memory(|m| m.has_focus(id)) { PRIMARY() } else { BORDER() });
+    egui::Frame::new().fill(pal().well).stroke(Stroke::new(1.0, ring)).corner_radius(R_MD).inner_margin(egui::Margin { left: 10, right: 4, top: 4, bottom: 4 }).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, BUTTON_H), Sense::hover());
+            match icon {
+                FieldIcon::Plus => paint_plus(ui.painter(), r.center(), 4.5, FAINT()),
+                FieldIcon::Search => paint_search(ui.painter(), r.center(), FAINT()),
+            }
+            add(ui)
+        })
+        .inner
+    })
+    .inner
+}
+
+/// The frameless text box that goes inside `well_field`.
+pub(crate) fn field_edit<'t>(text: &'t mut dyn egui::TextBuffer, id: egui::Id, hint: &str, width: f32, font: egui::TextStyle) -> egui::TextEdit<'t> {
+    egui::TextEdit::singleline(text)
+        .id(id)
+        .frame(egui::Frame::NONE)
+        .margin(egui::Margin::symmetric(2, 0))
+        .hint_text(RichText::new(hint).color(FAINT()))
+        .desired_width(width)
+        .min_size(egui::vec2(0.0, BUTTON_H))
+        .align(egui::Align2::LEFT_CENTER)
+        .font(font)
+}
+
+/// A line under a field saying what is wrong with it, or what saving it will do, in `color`.
+pub(crate) fn field_note(ui: &mut egui::Ui, msg: &str, color: Color32) {
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 14.0), Sense::hover());
+        let (p, c) = (ui.painter(), r.center());
+        p.circle_stroke(c, 5.0, Stroke::new(1.1, color));
+        p.line_segment([c - egui::vec2(0.0, 2.5), c + egui::vec2(0.0, 0.5)], Stroke::new(1.2, color));
+        p.circle_filled(c + egui::vec2(0.0, 2.4), 0.7, color);
+        ui.add_space(4.0);
+        ui.label(RichText::new(msg).size(TXT_SMALL).color(color));
+    });
+}
+
+/// A small caps section label, with an optional link on the right; returns the link's response.
+pub(crate) fn section_head(ui: &mut egui::Ui, left: &str, right: Option<&str>) -> Option<egui::Response> {
+    let head = |t: &str, c: Color32| semibold(RichText::new(t).size(TXT_CAPTION).color(c));
+    let r = ui
+        .horizontal(|ui| {
+            ui.label(head(left, FAINT()));
+            right.map(|t| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let c = if next_state(ui) > 0 { BRIGHT() } else { MUTED() };
+                    ui.add(egui::Label::new(RichText::new(t).size(TXT_CAPTION).color(c)).sense(Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand)
+                })
+                .inner
+            })
+        })
+        .inner;
+    ui.add_space(4.0);
+    r
+}
+
+/// A full-width clickable popover row, filled while hovered or pressed. Hover-only buttons go over
+/// it afterwards, so they take the click before the row does.
+pub(crate) fn pop_row(ui: &mut egui::Ui, height: f32) -> (egui::Response, bool) {
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), Sense::click());
+    let hovered = ui.rect_contains_pointer(rect);
+    if hovered {
+        let fill = if r.is_pointer_button_down_on() { menu_pressed() } else { MENU_HOVER() };
+        ui.painter().rect_filled(rect.expand2(egui::vec2(6.0, 0.0)), R_SM, fill);
+    }
+    (r.on_hover_cursor(egui::CursorIcon::PointingHand), hovered)
+}
+
+/// Places a widget in `rect`, over what is already there.
+pub(crate) fn put_at<R>(ui: &mut egui::Ui, rect: egui::Rect, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    // A child, not a scope: a scope moves the parent's cursor to the widget, so the rows after it would overlap.
+    add(&mut ui.new_child(egui::UiBuilder::new().max_rect(rect)))
+}
+
+/// Draws `g` with its left edge at `x`, centered on its ink at `cy`.
+pub(crate) fn galley_at(p: &egui::Painter, x: f32, cy: f32, g: std::sync::Arc<egui::Galley>, color: Color32) {
+    let dy = optical_dy(&g);
+    p.galley(egui::pos2(x, cy - g.size().y / 2.0 + dy), g, color);
+}
+
+/// A tinted mono tag with its right edge at `right`, centered on `cy`; returns its left edge.
+pub(crate) fn tag_at(p: &egui::Painter, right: f32, cy: f32, text: &str, fg: Color32) -> f32 {
+    let g = p.layout_job(egui::text::LayoutJob::single_section(text.to_string(), mono_fmt(TXT_CAPTION, fg, 400.0)));
+    let rect = egui::Rect::from_min_max(egui::pos2(right - g.size().x - 14.0, cy - 9.0), egui::pos2(right, cy + 9.0));
+    p.rect_filled(rect, R_SM, tint(fg, 31));
+    galley_at(p, rect.left() + 7.0, cy, g, fg);
+    rect.left()
+}
+
+/// A dashed box around `add`, for empty lists.
+pub(crate) fn dashed_box<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let r = egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 14)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        add(ui)
+    });
+    let b = r.response.rect;
+    let path = [b.left_top(), b.right_top(), b.right_bottom(), b.left_bottom(), b.left_top()];
+    ui.painter().extend(egui::Shape::dashed_line(&path, Stroke::new(1.0, RAISED_LINE()), 3.0, 3.0));
+    r.inner
+}
+
+/// The empty state of a popover list: a glyph, a line and a hint, centered in a dashed box.
+/// `extra` goes under the hint, for actions like suggestions.
+pub(crate) fn empty_state(ui: &mut egui::Ui, glyph: fn(&egui::Painter, egui::Pos2, Color32), title: &str, hint: &str, extra: impl FnOnce(&mut egui::Ui)) {
+    dashed_box(ui, |ui| {
+        ui.vertical_centered(|ui| {
+            let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
+            glyph(ui.painter(), r.center(), FAINT());
+            ui.add_space(8.0);
+            ui.label(medium(RichText::new(title).color(TEXT())));
+            if !hint.is_empty() {
+                ui.add_space(4.0);
+                ui.label(RichText::new(hint).size(TXT_SMALL).color(MUTED()));
+            }
+            extra(ui);
+        });
+    });
+}
+
+/// The submit button at the right end of a `well_field`, filled only while `ok`, with a faint
+/// "Enter" before it when `hint`. True on a click, or on Enter in the text box `edit` while `ok`.
+pub(crate) fn field_button(ui: &mut egui::Ui, edit: &egui::Response, label: &str, w: f32, ok: bool, hint: bool) -> bool {
+    let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let fill = if ok { PRIMARY() } else { PRESSED() };
+        let clicked = ui.add_enabled(ok, primary_button(ui, label, fill).min_size(egui::vec2(w, BUTTON_H))).clicked();
+        if hint {
+            ui.label(RichText::new("Enter").size(TXT_CAPTION).color(FAINT()));
+        }
+        clicked || (ok && enter)
+    })
+    .inner
+}
+
+/// The remove button a hovered popover row shows at its right end, centered on `cy`. True when clicked.
+pub(crate) fn row_close(ui: &mut egui::Ui, row: egui::Rect, cy: f32, tip: &str) -> bool {
+    let at = egui::Rect::from_center_size(egui::pos2(row.right() - CLOSE_W / 2.0, cy), egui::vec2(CLOSE_W, CLOSE_W));
+    put_at(ui, at, |ui| close_x(ui).on_hover_text(tip)).clicked()
+}
+
+/// `s` in body mono at `x`, centered on `cy`.
+pub(crate) fn mono_at(p: &egui::Painter, x: f32, cy: f32, s: &str, color: Color32) {
+    galley_at(p, x, cy, p.layout_job(egui::text::LayoutJob::single_section(s.to_string(), mono_fmt(TXT_BODY, color, 400.0))), color);
+}
+
+/// A line across the whole popover, out to its edges, with room above and below.
+pub(crate) fn popover_divider(ui: &mut egui::Ui) {
+    ui.add_space(10.0);
+    let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), Sense::hover());
+    // Out through the body's padding and the menu's margin, to the popover's edges.
+    let out = POPOVER_PAD as f32 + ui.spacing().menu_margin.left as f32;
+    ui.painter().hline(r.x_range().expand(out), r.center().y, Stroke::new(1.0, RAISED_LINE()));
+    ui.add_space(10.0);
+}
+
+/// A divider across the whole popover, then caption lines: the first muted, the rest faint.
+pub(crate) fn popover_foot(ui: &mut egui::Ui, glyph: Option<fn(&egui::Painter, egui::Pos2, Color32)>, lines: &[&str]) {
+    popover_divider(ui);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        if let Some(glyph) = glyph {
+            let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 14.0), Sense::hover());
+            glyph(ui.painter(), r.center(), FAINT());
+        }
+        ui.vertical(|ui| {
+            for (i, l) in lines.iter().enumerate() {
+                if i > 0 {
+                    ui.add_space(3.0);
+                }
+                ui.label(RichText::new(*l).size(TXT_CAPTION).color(if i == 0 { MUTED() } else { FAINT() }));
+            }
+        });
+    });
+}
+
+/// A plus `arm` long each way from `c`, in bars of whole device pixels: a thin stroke at a
+/// fractional center antialiases into uneven arms.
+pub(crate) fn paint_plus(p: &egui::Painter, c: egui::Pos2, arm: f32, color: Color32) {
+    let ppp = p.pixels_per_point();
+    let t = (1.2 * ppp).round().max(1.0);
+    let len = (arm * 2.0 * ppp).round();
+    let len = len + (len - t) % 2.0;
+    let arm = (len - t) / 2.0;
+    let (x0, y0) = ((c.x * ppp - t / 2.0).round(), (c.y * ppp - t / 2.0).round());
+    let bar = |x: f32, y: f32, w: f32, h: f32| egui::Rect::from_min_size(egui::pos2(x, y) / ppp, egui::vec2(w, h) / ppp);
+    p.rect_filled(bar(x0 - arm, y0, len, t), 0.0, color);
+    p.rect_filled(bar(x0, y0 - arm, t, arm), 0.0, color);
+    p.rect_filled(bar(x0, y0 + t, t, arm), 0.0, color);
+}
+
+pub(crate) fn paint_search(p: &egui::Painter, c: egui::Pos2, color: Color32) {
+    let s = Stroke::new(1.3, color);
+    p.circle_stroke(c + egui::vec2(-1.0, -1.0), 4.0, s);
+    p.line_segment([c + egui::vec2(2.0, 2.0), c + egui::vec2(5.0, 5.0)], s);
+}
+
+/// An isometric box outline, 12 pt, for packages.
+pub(crate) fn paint_cube(p: &egui::Painter, c: egui::Pos2, color: Color32) {
+    let pt = |x: f32, y: f32| c + egui::vec2(x, y);
+    let s = Stroke::new(1.1, color);
+    p.add(egui::Shape::closed_line(vec![pt(0.0, -6.0), pt(6.0, -3.0), pt(6.0, 3.0), pt(0.0, 6.0), pt(-6.0, 3.0), pt(-6.0, -3.0)], s));
+    p.add(egui::Shape::line(vec![pt(-6.0, -3.0), pt(0.0, 0.0), pt(6.0, -3.0)], s));
+    p.line_segment([pt(0.0, 0.0), pt(0.0, 6.0)], s);
+}
+
+pub(crate) fn paint_shield(p: &egui::Painter, c: egui::Pos2, color: Color32) {
+    let pt = |x: f32, y: f32| c + egui::vec2(x, y);
+    p.add(egui::Shape::closed_line(vec![pt(0.0, -6.0), pt(5.0, -4.0), pt(5.0, 0.0), pt(3.5, 3.5), pt(0.0, 6.0), pt(-3.5, 3.5), pt(-5.0, 0.0), pt(-5.0, -4.0)], Stroke::new(1.1, color)));
+}
+
+/// An eye with a slash through it, for hiding a column.
+pub(crate) fn paint_eye_off(p: &egui::Painter, c: egui::Pos2, color: Color32) {
+    let s = Stroke::new(1.3, color);
+    let pts: Vec<egui::Pos2> = (0..=16).map(|i| std::f32::consts::TAU * i as f32 / 16.0).map(|a| c + egui::vec2(6.5 * a.cos(), 4.0 * a.sin())).collect();
+    p.add(egui::Shape::closed_line(pts, s));
+    p.circle_stroke(c, 1.8, s);
+    p.line_segment([c + egui::vec2(-6.0, 5.0), c + egui::vec2(6.0, -5.0)], s);
 }

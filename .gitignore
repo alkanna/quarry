@@ -39,3 +39,6 @@ __pycache__/
 *.bak
 *.orig
 *.rej
+
+# FigCraft design files stay local
+*.figcraft
