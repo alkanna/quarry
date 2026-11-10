@@ -130,6 +130,8 @@ pub fn text_table(cols: &[String], rows: &[Document]) -> String {
 /// The text for `f`. `header` is the "Include column names" switch: CSV, TSV and HTML leave out their
 /// header row, Markdown keeps a blank one because a table needs it. SQL INSERT always names its columns,
 /// since without them the values land in the table's order, not the order shown.
+/// Tests only: every caller now passes the connection's dialect to `format_in`.
+#[cfg(test)]
 pub fn format(f: Fmt, s: &Sheet, header: bool) -> String {
     format_in(sql::Dialect::MySql, f, s, header)
 }

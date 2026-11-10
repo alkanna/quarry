@@ -16,10 +16,10 @@ Update this list when a step lands. Each step is reviewed before it is ticked.
 **v1**
 - [x] 0. This plan, on branch `feat/postgres`
 - [ ] D1. FigCraft designs: sidebar with schemas (variants A, B, C) and the Postgres connection form, both themes, approved by the user
-- [ ] 1a. Execution boundary (`exec.rs`), file split of worker.rs, `Engine::Postgres` and `Dialect::Postgres` unreachable. MySQL and MariaDB live tests pass unchanged
-- [ ] 1b. Dialect threaded through the app instead of hardcoded `Dialect::MySql`; `== Dialect::X` checks become exhaustive matches; lexer API takes a `Dialect`
-- [ ] 2. Connect: pools per database, session guard and readback, cancel, version gate, TLS, live tests
-- [ ] 3. Postgres lexer mode and read-only check (opus review)
+- [x] 1a. Execution boundary `exec.rs` (Conn, SqlRow, Opts, Tx with a MySQL arm only), worker.rs split into worker, run and relay, every `Pool::My` behind `Db::my_pool()` or `Conn::my()`. Row helpers are generic over two small read traits (`Cells`, `ColMeta`) so the untouched MySQL-only modules still compile. 571 tests passed live on MySQL 8.4 and MariaDB 11.4
+- [x] 1b. `Dialect::Postgres` added (unreachable), `is_mysql_family()`, dialect checks are explicit matches, the tab dialect is threaded through edits, copy, export, rules and autocomplete. Catalog query arms are `unimplemented!` until step 4. The lexer API change moved to step 3
+- [ ] 2. Connect: pools per database, session guard and readback, cancel, version gate, TLS, live tests. Also: drop `impl Deref for Opts` once `Opts::Pg` exists, and add `Engine::Postgres`
+- [ ] 3. Postgres lexer mode and read-only check, lexer API takes a `Dialect` (opus review)
 - [ ] 4. Read path: catalogs, page and count, value kinds, read-only Structure, Info, Relations and Triggers
 - [ ] 5. Writes and undo (opus review)
 - [ ] 6. Custom Query

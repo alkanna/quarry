@@ -101,7 +101,7 @@ pub async fn stream(db: &Db, schema: &str, stmt: &str, plan: &Plan, out: &mut (d
     // All rows means all of them, and the file is written as UTF-8 from what the server sends.
     pin_reads(&mut conn).await?;
     let t = std::time::Instant::now();
-    let r = stream_conn(&mut conn, stmt, plan, out, count, cancel, &Wrap::default()).await;
+    let r = stream_conn(&mut conn, db.dialect, stmt, plan, out, count, cancel, &Wrap::default()).await;
     db.note(schema, stmt, t, &r);
     let r = r?;
     let _ = conn.close().await;
@@ -113,7 +113,7 @@ pub async fn stream(db: &Db, schema: &str, stmt: &str, plan: &Plan, out: &mut (d
 
 /// Streams one statement on an open session, without the closing newline. None when `wrap.lenient` and
 /// the statement has no result set.
-async fn stream_conn(conn: &mut Conn, stmt: &str, plan: &Plan, out: &mut (dyn Write + Send), count: &AtomicU64, cancel: &AtomicBool, wrap: &Wrap<'_>) -> Res<Option<(u64, usize)>> {
+async fn stream_conn(conn: &mut Conn, dialect: super::Dialect, stmt: &str, plan: &Plan, out: &mut (dyn Write + Send), count: &AtomicU64, cancel: &AtomicBool, wrap: &Wrap<'_>) -> Res<Option<(u64, usize)>> {
     let io = write_err;
     let fix = |t: String| match wrap.tag { Some(tag) => tag_lines(&t, tag), None => t };
     let mut done = false;
@@ -131,7 +131,7 @@ async fn stream_conn(conn: &mut Conn, stmt: &str, plan: &Plan, out: &mut (dyn Wr
                 Item::Row(row) => {
                     if writer.is_none() {
                         cols = make_cols(&row.cols(), &Default::default(), false);
-                        let mut w = Writer::new(plan.fmt, plan.header, copy_cols(&cols), &plan.table, &[], plan.bs);
+                        let mut w = Writer::new(plan.fmt, plan.header, copy_cols(&cols), &plan.table, &[], plan.bs).with_dialect(dialect);
                         out.write_all(wrap.head.as_bytes()).map_err(io)?;
                         out.write_all(w.begin().as_bytes()).map_err(io)?;
                         writer = Some(w);
@@ -161,7 +161,7 @@ async fn stream_conn(conn: &mut Conn, stmt: &str, plan: &Plan, out: &mut (dyn Wr
             Err(x) => return Err(e(x)),
         };
         cols = make_cols(&d, &Default::default(), false);
-        let mut w = Writer::new(plan.fmt, plan.header, copy_cols(&cols), &plan.table, &[], plan.bs);
+        let mut w = Writer::new(plan.fmt, plan.header, copy_cols(&cols), &plan.table, &[], plan.bs).with_dialect(dialect);
         out.write_all(wrap.head.as_bytes()).map_err(io)?;
         out.write_all(w.begin().as_bytes()).map_err(io)?;
         writer = Some(w);
@@ -376,7 +376,7 @@ async fn run_all(db: &Db, schema: &str, stmts: &[String], ap: &AllPlan, path: &s
         let out: &mut Lazy = if ap.single { &mut shared } else { &mut own };
         *open = Some(out.tmp.clone());
         let t = std::time::Instant::now();
-        let streamed = stream_conn(&mut conn, stmt, &ap.plan, out, count, cancel, &wrap).await;
+        let streamed = stream_conn(&mut conn, db.dialect, stmt, &ap.plan, out, count, cancel, &wrap).await;
         db.note(schema, stmt, t, &streamed);
         let Some((rows, _)) = streamed? else {
             *open = None;
