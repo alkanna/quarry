@@ -101,7 +101,7 @@ pub async fn stream(db: &Db, schema: &str, stmt: &str, plan: &Plan, out: &mut (d
     // All rows means all of them, and the file is written as UTF-8 from what the server sends.
     pin_reads(&mut conn).await?;
     let t = std::time::Instant::now();
-    let r = stream_locked(&mut conn, db.dialect, &db.pg_locals(), stmt, plan, out, count, cancel, &Wrap::default()).await;
+    let r = stream_locked(&mut conn, db.dialect, &db.pg_run_locals(schema), stmt, plan, out, count, cancel, &Wrap::default()).await;
     db.note(schema, stmt, t, &r);
     // A cancelled or failed read leaves its result on the wire inside a transaction, so the connection is closed, not drained.
     let failed = r.is_err() && db.dialect == Dialect::Postgres;
@@ -401,7 +401,7 @@ pub(super) async fn run_all(db: &Db, schema: &str, stmts: &[String], ap: &AllPla
         let out: &mut Lazy = if ap.single { &mut shared } else { &mut own };
         *open = Some(out.tmp.clone());
         let t = std::time::Instant::now();
-        let streamed = stream_locked(&mut conn, db.dialect, &db.pg_locals(), stmt, &ap.plan, out, count, cancel, &wrap).await;
+        let streamed = stream_locked(&mut conn, db.dialect, &db.pg_run_locals(schema), stmt, &ap.plan, out, count, cancel, &wrap).await;
         db.note(schema, stmt, t, &streamed);
         if streamed.is_err() && db.dialect == Dialect::Postgres {
             let _ = conn.close().await;
