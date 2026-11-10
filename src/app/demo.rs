@@ -448,7 +448,7 @@ impl App {
         if let Ok(v @ ("processes" | "variables" | "overview" | "status")) = std::env::var("QUARRY_TEST_SQL").as_deref() {
             self.sql_server = Some(SqlServerWin::demo(3, v));
         }
-        if matches!(std::env::var("QUARRY_TEST_SQL").as_deref(), Ok("query" | "log" | "format")) {
+        if matches!(std::env::var("QUARRY_TEST_SQL").as_deref(), Ok("query" | "log" | "format" | "library")) {
             self.sql_query_demo();
         }
         if std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("log") {

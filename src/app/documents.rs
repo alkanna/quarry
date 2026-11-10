@@ -301,7 +301,7 @@ impl App {
         let key = self.col_key(false);
         let hist = self.prefs.history.get(&key).cloned().unwrap_or_default();
         let index_sorts: Vec<String> = self.t().map(|t| t.indexes.iter().filter_map(|ix| ix.get_document("keys").ok()).map(|k| db::shell_text(&Bson::Document(k.clone()))).collect()).unwrap_or_default();
-        let lib: Vec<SavedQuery> = self.prefs.library.get(&key).map(|v| v.iter().filter(|q| q.pipeline.is_none()).cloned().collect()).unwrap_or_default();
+        let lib: Vec<SavedQuery> = library_of(&self.prefs.library, &key, LibKind::Query);
         let mut qacts = Vec::new();
         let (t, ac, new_lib) = (&mut self.tabs[self.cur], &mut self.ac, &mut self.new_lib);
         // Not asked yet (it is, right after this frame) or asked and not back.
@@ -338,7 +338,7 @@ impl App {
                         run = true;
                     }
                     vsep(ui, 6.0);
-                    library_menu(ui, &lib, new_lib, false, true, &mut qacts);
+                    library_menu(ui, &lib, new_lib, LibKind::Query, true, &mut qacts);
                     history_menu(ui, &hist, &index_sorts, &mut qacts);
                 });
             });
@@ -420,7 +420,7 @@ impl App {
                     run = true;
                 }
                 QAct::Save(name) => {
-                    let q = SavedQuery { name: name.clone(), filter: t.filter_txt.clone(), sort: t.sort_txt.clone(), project: t.proj_txt.clone(), pipeline: None };
+                    let q = SavedQuery { name: name.clone(), filter: t.filter_txt.clone(), sort: t.sort_txt.clone(), project: t.proj_txt.clone(), pipeline: None, sql: None };
                     self.save_to_library(q);
                 }
                 QAct::Delete(name) => self.delete_from_library(&name, false),

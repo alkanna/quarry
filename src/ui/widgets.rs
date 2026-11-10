@@ -8,15 +8,15 @@ use eframe::egui::{self, Color32, FontId, RichText, Sense, Stroke};
 
 /// A menu that stays open while you type or click inside it, closing on a click outside or Esc.
 /// Plain egui menus close on any click inside, which made their text boxes unusable.
-pub(crate) fn sticky_menu(ui: &mut egui::Ui, title: String, content: impl FnOnce(&mut egui::Ui)) {
+pub(crate) fn sticky_menu(ui: &mut egui::Ui, title: String, content: impl FnOnce(&mut egui::Ui)) -> egui::Response {
     use egui::containers::menu::{MenuButton, MenuConfig};
     ui.scope(|ui| {
         quiet_look(ui);
         MenuButton::new(title).config(MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)).ui(ui, |ui| {
             menu_look(ui);
             content(ui)
-        });
-    });
+        }).0
+    }).inner
 }
 
 /// Menu content that scrolls once it is taller than the window. egui keeps a popup inside the

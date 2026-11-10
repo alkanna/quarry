@@ -146,6 +146,8 @@ pub(super) struct SavedQuery {
     pub(super) sort: String,
     pub(super) project: String,
     pub(super) pipeline: Option<String>,
+    /// A SQL script, for the Query view of a SQL connection. Those live under `{conn}/#sql`, apart from the Mongo lists.
+    pub(super) sql: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Default)]

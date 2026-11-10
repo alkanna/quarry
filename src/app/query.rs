@@ -40,19 +40,59 @@ pub(super) fn history_menu(ui: &mut egui::Ui, h: &QueryHist, index_sorts: &[Stri
     .on_hover_text("History");
 }
 
-/// Named queries (or pipelines) saved for this collection: load, delete, or save the current one.
+/// What a library menu lists.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(super) enum LibKind {
+    Query,
+    Pipeline,
+    /// The scripts of a SQL connection.
+    Sql,
+}
+
+impl LibKind {
+    fn of(q: &SavedQuery) -> LibKind {
+        match (&q.sql, &q.pipeline) {
+            (Some(_), _) => LibKind::Sql,
+            (None, Some(_)) => LibKind::Pipeline,
+            (None, None) => LibKind::Query,
+        }
+    }
+}
+
+/// The saved entries under `key` that one menu lists. Mongo lists never show SQL scripts and the SQL list never shows
+/// Mongo queries, whatever a key holds.
+pub(super) fn library_of(lib: &HashMap<String, Vec<SavedQuery>>, key: &str, kind: LibKind) -> Vec<SavedQuery> {
+    lib.get(key).map(|v| v.iter().filter(|q| LibKind::of(q) == kind).cloned().collect()).unwrap_or_default()
+}
+
+/// Saving under a name that exists in the same list replaces it; the list stays sorted by name.
+fn put_saved(list: &mut Vec<SavedQuery>, q: SavedQuery) {
+    list.retain(|x| !(x.name == q.name && LibKind::of(x) == LibKind::of(&q)));
+    list.push(q);
+    list.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+}
+
+/// Named queries (or pipelines, or SQL scripts) saved for this collection: load, delete, or save the current one.
 /// `icon` shows it as a book icon, as in the find bar.
-pub(super) fn library_menu(ui: &mut egui::Ui, lib: &[SavedQuery], new_name: &mut String, pipeline: bool, icon: bool, acts: &mut Vec<QAct>) {
-    let title = format!("Library ({})", lib.len());
+pub(super) fn library_menu(ui: &mut egui::Ui, lib: &[SavedQuery], new_name: &mut String, kind: LibKind, icon: bool, acts: &mut Vec<QAct>) -> egui::Response {
+    let title = if kind == LibKind::Sql { "Save to library".to_string() } else { format!("Library ({})", lib.len()) };
     let body = |ui: &mut egui::Ui| {
         ui.set_min_width(320.0);
         if lib.is_empty() {
-            ui.label(RichText::new(if pipeline { "No saved pipelines for this collection yet." } else { "No saved queries for this collection yet." }).color(MUTED()));
+            ui.label(RichText::new(match kind {
+                LibKind::Pipeline => "No saved pipelines for this collection yet.",
+                LibKind::Query => "No saved queries for this collection yet.",
+                LibKind::Sql => "No saved scripts for this connection yet.",
+            }).color(MUTED()));
         }
         egui::ScrollArea::vertical().id_salt("lib").max_height(260.0).show(ui, |ui| {
             for q in lib {
                 ui.horizontal(|ui| {
-                    let preview = if pipeline { q.pipeline.clone().unwrap_or_default() } else { q.filter.clone() };
+                    let preview = match kind {
+                        LibKind::Pipeline => q.pipeline.clone().unwrap_or_default(),
+                        LibKind::Query => q.filter.clone(),
+                        LibKind::Sql => q.sql.clone().unwrap_or_default(),
+                    };
                     let preview: String = preview.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(60).collect();
                     if ui.add(quiet_button(RichText::new(&q.name).color(BRIGHT()))).on_hover_text(preview.as_str()).clicked() {
                         acts.push(QAct::Load(q.clone()));
@@ -68,7 +108,11 @@ pub(super) fn library_menu(ui: &mut egui::Ui, lib: &[SavedQuery], new_name: &mut
             }
         });
         ui.separator();
-        caption(ui, if pipeline { "SAVE THIS PIPELINE" } else { "SAVE THIS QUERY (query, sort and project)" });
+        caption(ui, match kind {
+            LibKind::Pipeline => "SAVE THIS PIPELINE",
+            LibKind::Query => "SAVE THIS QUERY (query, sort and project)",
+            LibKind::Sql => "SAVE THIS SCRIPT",
+        });
         ui.horizontal(|ui| {
             let r = ui.add(egui::TextEdit::singleline(new_name).hint_text("name").desired_width(200.0));
             let ok = !new_name.trim().is_empty();
@@ -80,9 +124,18 @@ pub(super) fn library_menu(ui: &mut egui::Ui, lib: &[SavedQuery], new_name: &mut
         ui.label(RichText::new("Saving under an existing name replaces it.").size(TXT_CAPTION).color(FAINT()));
     };
     if icon {
-        icon_menu(ui, paint_book, true, body).on_hover_text(title);
+        icon_menu(ui, paint_book, true, body).on_hover_text(title)
     } else {
-        sticky_menu(ui, title, body);
+        sticky_menu(ui, title, body)
+    }
+}
+
+impl App {
+    /// In the offline demo with QUARRY_TEST_SQL=library, holds the library menu open for the picture.
+    pub(super) fn demo_open_library(&self, ctx: &egui::Context, button: &egui::Response) {
+        if self.demo && std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("library") {
+            egui::Popup::open_id(ctx, egui::Popup::default_response_id(button));
+        }
     }
 }
 
@@ -187,13 +240,18 @@ impl App {
         !picked && out.response.has_focus() && ui.input(|i| i.key_pressed(Key::Enter) && !i.modifiers.shift)
     }
 
+    /// The library list of a SQL connection's scripts.
+    pub(super) fn sql_lib_key(conn: u64) -> String {
+        format!("{conn}/#sql")
+    }
+
     pub(super) fn save_to_library(&mut self, q: SavedQuery) {
-        let key = self.col_key(false);
-        let list = self.prefs.library.entry(key).or_default();
+        let key = match (&q.sql, self.t()) {
+            (Some(_), Some(t)) => Self::sql_lib_key(t.sel.conn),
+            _ => self.col_key(false),
+        };
         let name = q.name.clone();
-        list.retain(|x| !(x.name == q.name && x.pipeline.is_some() == q.pipeline.is_some()));
-        list.push(q);
-        list.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        put_saved(self.prefs.library.entry(key).or_default(), q);
         self.save_prefs();
         self.ok(format!("Saved \"{name}\" to the library"));
     }
@@ -201,8 +259,60 @@ impl App {
     pub(super) fn delete_from_library(&mut self, name: &str, pipeline: bool) {
         let key = self.col_key(false);
         if let Some(list) = self.prefs.library.get_mut(&key) {
-            list.retain(|x| !(x.name == name && x.pipeline.is_some() == pipeline));
+            list.retain(|x| !(x.name == name && x.pipeline.is_some() == pipeline && x.sql.is_none()));
         }
         self.save_prefs();
+    }
+
+    pub(super) fn delete_sql_from_library(&mut self, name: &str) {
+        let Some(conn) = self.t().map(|t| t.sel.conn) else { return };
+        if let Some(list) = self.prefs.library.get_mut(&Self::sql_lib_key(conn)) {
+            list.retain(|x| !(x.name == name && x.sql.is_some()));
+        }
+        self.save_prefs();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn saved(name: &str, filter: &str, pipeline: Option<&str>, sql: Option<&str>) -> SavedQuery {
+        SavedQuery { name: name.into(), filter: filter.into(), pipeline: pipeline.map(Into::into), sql: sql.map(Into::into), ..Default::default() }
+    }
+
+    #[test]
+    fn each_menu_lists_only_its_own_kind() {
+        let mut lib = HashMap::new();
+        // One key holding all three, as a hand-edited ui.json might.
+        lib.insert("1/shop/orders".to_string(), vec![saved("q", "{}", None, None), saved("p", "", Some("[]"), None), saved("s", "", None, Some("SELECT 1"))]);
+        lib.insert("2/#sql".to_string(), vec![saved("s", "", None, Some("SELECT 2"))]);
+        let names = |k: &str, kind| library_of(&lib, k, kind).into_iter().map(|q| q.name).collect::<Vec<_>>();
+        assert_eq!(names("1/shop/orders", LibKind::Query), ["q"]);
+        assert_eq!(names("1/shop/orders", LibKind::Pipeline), ["p"]);
+        assert_eq!(names("1/shop/orders", LibKind::Sql), ["s"]);
+        assert_eq!(names("2/#sql", LibKind::Sql), ["s"]);
+        assert!(names("2/#sql", LibKind::Query).is_empty() && names("2/#sql", LibKind::Pipeline).is_empty());
+        assert!(names("3/#sql", LibKind::Sql).is_empty());
+    }
+
+    #[test]
+    fn saving_replaces_by_name_within_a_kind_and_sorts() {
+        let mut list = vec![];
+        put_saved(&mut list, saved("b", "", None, Some("SELECT 1")));
+        put_saved(&mut list, saved("A", "", None, Some("SELECT 2")));
+        put_saved(&mut list, saved("b", "", None, Some("SELECT 3")));
+        assert_eq!(list.iter().map(|q| (q.name.as_str(), q.sql.as_deref().unwrap())).collect::<Vec<_>>(), [("A", "SELECT 2"), ("b", "SELECT 3")]);
+        // A Mongo query of the same name is another entry.
+        put_saved(&mut list, saved("b", "{}", None, None));
+        assert_eq!(list.len(), 3);
+    }
+
+    #[test]
+    fn old_saved_queries_load_without_sql() {
+        let q: SavedQuery = serde_json::from_str(r#"{"name":"n","filter":"{}","sort":"","project":"","pipeline":null}"#).unwrap();
+        assert!(q.sql.is_none());
+        let q: SavedQuery = serde_json::from_str(r#"{"name":"n","sql":"SELECT 1"}"#).unwrap();
+        assert_eq!(q.sql.as_deref(), Some("SELECT 1"));
     }
 }

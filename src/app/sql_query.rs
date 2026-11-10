@@ -322,6 +322,8 @@ impl App {
         let title = if free { self.tab_name(self.cur) } else { "Query".into() };
         let dbs: Vec<String> = self.conn(conn).map(|c| c.dbs.iter().map(|d| d.0.clone()).collect()).unwrap_or_default();
         let hist = self.prefs.history.get(&format!("{conn}/{schema}/#query")).map(|h| h.selector.clone()).unwrap_or_default();
+        let lib: Vec<SavedQuery> = library_of(&self.prefs.library, &Self::sql_lib_key(conn), LibKind::Sql);
+        let (mut lib_new, mut lib_acts) = (std::mem::take(&mut self.new_lib), Vec::new());
         let (mut pick, mut load, mut picked) = (schema.clone(), None, false);
         ui.horizontal(|ui| {
             ui.label(semibold(RichText::new(&title).size(TXT_HEADING).color(BRIGHT())));
@@ -336,6 +338,7 @@ impl App {
                 });
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // The first one added sits at the right edge: the history, then the library beside it.
                 icon_menu(ui, paint_clock, true, |ui| {
                     ui.set_min_width(360.0);
                     ui.set_max_width(520.0);
@@ -355,8 +358,12 @@ impl App {
                     });
                 })
                 .on_hover_text("History");
+                ui.add_space(6.0);
+                let button = library_menu(ui, &lib, &mut lib_new, LibKind::Sql, false, &mut lib_acts);
+                self.demo_open_library(ui.ctx(), &button);
             });
         });
+        self.new_lib = lib_new;
         ui.add_space(4.0);
         let (mut run, mut run_all, mut stop, mut explain, mut format) = (false, false, false, false, false);
         let status = self.t().and_then(|t| t.sql.as_ref()).map(|s| {
@@ -394,6 +401,21 @@ impl App {
         let ctx = ui.ctx().clone();
         if let Some(text) = load {
             self.sql_replace(&ctx, text, None);
+        }
+        for a in lib_acts {
+            match a {
+                QAct::Load(q) => self.sql_replace(&ctx, q.sql.unwrap_or_default(), None),
+                QAct::Save(name) => {
+                    let sql = self.t().and_then(|t| t.sql.as_ref()).map(|s| s.query.clone()).unwrap_or_default();
+                    if sql.trim().is_empty() {
+                        self.err("Nothing to save: the script is empty.");
+                    } else {
+                        self.save_to_library(SavedQuery { name, sql: Some(sql), ..Default::default() });
+                    }
+                }
+                QAct::Delete(name) => self.delete_sql_from_library(&name),
+                _ => {}
+            }
         }
         if format {
             self.sql_format(&ctx);
@@ -758,6 +780,11 @@ impl App {
         ];
         let raw = "-- Paid orders over the last week, by customer\nSELECT c.name, c.email, COUNT(*) AS orders, SUM(o.total) AS spent\nFROM orders o\nJOIN customers c ON c.id = o.customer_id\nWHERE o.status = 'paid'\n  AND o.created_at >= CURDATE() - INTERVAL 7 DAY\nGROUP BY c.id\nORDER BY spent DESC;\n\nUPDATE orders SET status = 'shipped' WHERE id IN (4405, 4407);\nSELECT * FROM shipments WHERE order_id = 4405;";
         // QUARRY_TEST_SQL=format shows the same script after Format.
+        // QUARRY_TEST_SQL=library has two saved scripts and the menu open.
+        if std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("library") {
+            let saved = |name: &str, sql: &str| SavedQuery { name: name.into(), sql: Some(sql.into()), ..Default::default() };
+            self.prefs.library.insert(Self::sql_lib_key(3), vec![saved("Late shipments", "SELECT o.id, o.created_at, s.carrier\nFROM orders o\nLEFT JOIN shipments s ON s.order_id = o.id\nWHERE o.status = 'paid' AND s.id IS NULL;"), saved("Revenue by tier", "SELECT tier, SUM(total) AS revenue FROM orders GROUP BY tier ORDER BY revenue DESC;")]);
+        }
         let query = if std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("format") { db::sql::format::format_script(raw).text } else { raw.to_string() };
         let query = query.as_str();
         let stmt = query.lines().skip(1).take(7).collect::<Vec<_>>().join("\n");
