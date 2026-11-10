@@ -168,6 +168,9 @@ pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + S
     let read = async {
         let mut result: Option<Res<String>> = None;
         let mut relays: std::collections::HashMap<String, sql::Relay> = std::collections::HashMap::new();
+        // Names whose relay was dropped after a cut result. A later query errors like it does on MySQL, where the relay
+        // stays but is dead, instead of quietly opening a new session that has lost the script's transaction.
+        let mut closed: std::collections::HashSet<String> = std::collections::HashSet::new();
         while let Some(line) = next_line(&mut lines).await? {
             let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
                 send(Msg::ShellLog { req, level: "log".into(), text: line });
@@ -201,14 +204,21 @@ pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + S
                     let t = Instant::now();
                     let res = async {
                         let Some((_, cfg)) = job.sql.iter().find(|(n, _)| *n == conn) else { return Err(format!("There is no SQL connection named \"{conn}\" in this script.")) };
+                        if closed.contains(&conn) {
+                            return Err("The connection was closed after a result was cut. Start the script again.".to_string());
+                        }
                         if !relays.contains_key(&conn) {
                             relays.insert(conn.clone(), sql::Relay::open(&cfg.db, &cfg.schema, cfg.read_only, &cfg.conn_id).await?);
                         }
                         let p = params.as_ref().map_err(|x| x.clone())?;
-                        match relays.get_mut(&conn) {
-                            Some(r) => r.query_args(&text, p).await,
-                            None => Err("No connection".to_string()),
+                        let Some(r) = relays.get_mut(&conn) else { return Err("No connection".to_string()) };
+                        let out = r.query_args(&text, p).await;
+                        // Dropping the relay closes its connection, which ends the transaction and frees its locks.
+                        if r.abandoned() {
+                            relays.remove(&conn);
+                            closed.insert(conn.clone());
                         }
+                        out
                     }
                     .await;
                     let mut q = ShellQuery { conn, text, params: params_summary(v.get("params")), rows: None, affected: None, error: None, ms: t.elapsed().as_millis() };
@@ -260,7 +270,8 @@ pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + S
             // The statement in flight keeps running on the server unless it is interrupted too.
             for (_, c) in &job.sql {
                 let id = c.conn_id.load(std::sync::atomic::Ordering::SeqCst);
-                if id != 0 {
+                // Behind a pooler the pid may now belong to another client's statement, so the connection is just closed.
+                if id != 0 && !sql::Relay::pooled(&c.db) {
                     let _ = sql::Relay::kill(&c.db, id).await;
                 }
             }

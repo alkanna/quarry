@@ -158,8 +158,18 @@ impl Db {
         match &self.pool {
             Pool::My(p) => Ok(col_infos((&*p).describe(sql).await.map_err(e)?.columns(), false)),
             Pool::Pg(_) => {
-                let pool = self.pg_pool()?;
-                Ok(col_infos((&pool).describe(sql).await.map_err(e)?.columns(), true))
+                // Planning with EXPLAIN can evaluate STABLE and IMMUTABLE functions of the text, so it runs inside a
+                // read-only transaction that is rolled back, like every other statement that carries user text.
+                let mut conn = self.pg_pool()?.acquire().await.map_err(e)?;
+                let mut tx = conn.begin_with("BEGIN READ ONLY").await.map_err(e)?;
+                let locals = self.pg_locals();
+                let d = match if locals.is_empty() { Ok(()) } else { (&mut *tx).execute(locals.as_str()).await.map(|_| ()) } {
+                    Ok(()) => (&mut *tx).describe(sql).await.map_err(e),
+                    Err(x) => Err(e(x)),
+                };
+                let _ = tx.rollback().await;
+                conn.close_on_drop();
+                Ok(col_infos(d?.columns(), true))
             }
         }
     }

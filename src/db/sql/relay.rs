@@ -1,6 +1,7 @@
 //! The shell script side of SQL: a connection kept for a whole run, and values filled into its statements.
 
 use super::exec::{Cells, Conn, Item};
+use super::pg;
 use super::run::{kill_query, prepare};
 use super::worker::{make_cols, raw};
 use super::{lex, value, Col, Db, Dialect};
@@ -171,22 +172,48 @@ pub struct Relay {
     /// For the query log: the connection's app id and the database the script runs in.
     log_conn: u64,
     schema: String,
-    /// `Db::pg_locals`: behind a pooler the settings each locked transaction starts with.
+    /// Behind a pooler (`Db::pg_locals` is set) the settings every transaction starts with, search_path included,
+    /// because nothing may be set on a session that another client's statements can share. Empty otherwise.
     locals: String,
+    /// The database handle and backend pid, to cancel a statement the relay abandons.
+    db: Db,
+    pid: u64,
+    /// A result was cut at a cap; on PostgreSQL the owner must drop this relay.
+    cut: bool,
 }
 
 impl Relay {
     pub async fn open(db: &Db, schema: &str, read_only: bool, id: &AtomicU64) -> Res<Relay> {
         let mut conn = db.acquire_conn().await?;
-        // On Postgres this also sets search_path to the schema.
-        prepare(&mut conn, db.dialect, schema, read_only, id).await?;
-        if let Conn::Pg(_) = &conn {
+        if let Conn::Pg(c) = &mut conn {
+            // Not `prepare`, which sets search_path on the session: behind a pooler that would land on a backend other
+            // clients share, so there it travels as SET LOCAL in each transaction instead.
+            pg::prepare(c, read_only, id).await.map_err(e)?;
+            let mut locals = db.pg_locals();
+            if locals.is_empty() {
+                super::pg_read::set_search_path(c, schema).await.map_err(e)?;
+            } else if !schema.is_empty() {
+                locals = format!("{locals}; SET LOCAL search_path = {}", Dialect::Postgres.quote_ident(schema));
+            }
             // Values are filled as E strings that read the same in either mode, so no session mode is read here.
-            return Ok(Relay { conn, dialect: db.dialect, read_only, backslash: false, ansi: false, dead: false, log_conn: db.conn, schema: schema.to_string(), locals: db.pg_locals() });
+            let pid = id.load(std::sync::atomic::Ordering::SeqCst);
+            return Ok(Relay { conn, dialect: db.dialect, read_only, backslash: false, ansi: false, dead: false, log_conn: db.conn, schema: schema.to_string(), locals, db: db.clone(), pid, cut: false });
         }
+        prepare(&mut conn, db.dialect, schema, read_only, id).await?;
         // Values are filled in for this session's mode, which may differ from the one read at connect.
         let m = super::ddl::session_mode(conn.my()?).await?;
-        Ok(Relay { conn, dialect: db.dialect, read_only, backslash: m.bs, ansi: m.ansi, dead: false, log_conn: db.conn, schema: schema.to_string(), locals: String::new() })
+        Ok(Relay { conn, dialect: db.dialect, read_only, backslash: m.bs, ansi: m.ansi, dead: false, log_conn: db.conn, schema: schema.to_string(), locals: String::new(), db: db.clone(), pid: 0, cut: false })
+    }
+
+    /// True once a result was cut on PostgreSQL: the backend was cancelled and this relay must be dropped so the
+    /// transaction and its locks end at once.
+    pub fn abandoned(&self) -> bool {
+        self.cut && self.dialect == Dialect::Postgres
+    }
+
+    /// Behind a pooler, where the session is shared and Stop must not cancel by pid.
+    pub fn pooled(db: &Db) -> bool {
+        db.dialect == Dialect::Postgres && !db.pg_locals().is_empty()
     }
 
     /// Interrupts the statement running on connection `id`, from a connection of its own.
@@ -234,8 +261,12 @@ impl Relay {
             return Err("Prepared statements are not available in the shell; use sql`...` with values instead.".into());
         }
         let pg = self.dialect == Dialect::Postgres;
+        let pooled = pg && !self.locals.is_empty();
         let stmt = if pg {
-            if !self.read_only {
+            // Only a statement with values depends on how text is read, and after a failed transaction the readback
+            // itself would fail and keep the script's own ROLLBACK from being sent. Behind a pooler it runs inside
+            // the statement's transaction instead, below.
+            if !self.read_only && !pooled && !args.is_empty() {
                 self.escaping_intact().await?;
             }
             fill_pg_args(text, args)?
@@ -248,10 +279,19 @@ impl Relay {
         if self.read_only {
             lex::read_only_check(&stmt, self.dialect)?;
         }
-        // Begun here and rolled back below, never committed, so nothing a locked statement did outlives it.
-        let begun = pg && self.read_only;
+        if pooled && !self.read_only {
+            if let Some(w) = lex::tokens(&stmt, Dialect::Postgres).into_iter().find(|(t, _)| *t == lex::Tok::Word).map(|(_, r)| stmt[r].to_ascii_uppercase()) {
+                if matches!(w.as_str(), "BEGIN" | "START" | "COMMIT" | "END" | "ABORT" | "ROLLBACK" | "SAVEPOINT" | "RELEASE" | "PREPARE") {
+                    return Err("Transactions you open yourself are not available behind a connection pooler; each statement runs in its own transaction.".into());
+                }
+            }
+        }
+        // A locked statement is begun here and rolled back below, never committed, so nothing it did outlives it.
+        // Behind a pooler an unlocked one gets its own READ WRITE transaction too, because the session cannot be
+        // trusted to stay on one backend, and it is committed when it succeeds.
+        let begun = pg && (self.read_only || pooled);
         if begun {
-            let mut begin = self.conn.execute("BEGIN READ ONLY").await.map(|_| ());
+            let mut begin = self.conn.execute(if self.read_only { "BEGIN READ ONLY" } else { "BEGIN READ WRITE" }).await.map(|_| ());
             if begin.is_ok() && !self.locals.is_empty() {
                 begin = self.conn.execute(&self.locals).await.map(|_| ());
             }
@@ -259,9 +299,15 @@ impl Relay {
                 self.dead = true;
                 return Err(e(x));
             }
+            if pooled && !self.read_only && !args.is_empty() {
+                if let Err(x) = self.escaping_intact().await {
+                    let _ = self.conn.execute("ROLLBACK").await;
+                    return Err(x);
+                }
+            }
         }
         let (mut cols, mut rows, mut wrote, mut bytes) = (Vec::<Col>::new(), Vec::new(), None, 0usize);
-        let mut failure = None;
+        let (mut failure, mut cut) = (None, false);
         let started = Instant::now();
         {
             let mut s = self.conn.fetch_text(&stmt);
@@ -273,11 +319,13 @@ impl Relay {
                         }
                         if rows.len() >= RELAY_ROWS_MAX {
                             failure = Some(format!("A query returned more than {RELAY_ROWS_MAX} rows. Add a LIMIT."));
+                            cut = true;
                             break;
                         }
                         bytes += (0..cols.len()).map(|i| raw(&row, i).map_or(0, |b| b.len()) + 16).sum::<usize>();
                         if bytes > RELAY_BYTES_MAX {
                             failure = Some(format!("A query returned more than {} MB. Select fewer columns or add a LIMIT.", RELAY_BYTES_MAX >> 20));
+                            cut = true;
                             break;
                         }
                         let d: Document = cols.iter().enumerate().map(|(i, c)| (c.name.clone(), cell(value::to_bson_for(Cells::pg(&row), c.kind, raw(&row, i))))).collect();
@@ -299,22 +347,35 @@ impl Relay {
                 self.schema = to;
             }
         }
-        // Dropping the stream mid-result leaves unread packets on the wire, so nothing more can run on it.
-        let cut = failure.as_deref().is_some_and(|f| f.contains("more than"));
-        if begun && !cut && self.conn.execute("ROLLBACK").await.is_err() {
+        // Dropping the stream mid-result leaves unread packets on the wire, so nothing more can run on it. On PostgreSQL
+        // the backend is cancelled so the transaction and its locks end now, not when the script does.
+        if cut {
             self.dead = true;
+            self.cut = true;
+            if pg && !pooled && self.pid != 0 {
+                let _ = pg::cancel(&self.db, self.pid).await;
+            }
+            return Err(failure.unwrap_or_default());
+        }
+        // The columns of an empty answer are read before the transaction ends, so the planning that describe does
+        // stays inside it.
+        let empty_read = failure.is_none() && cols.is_empty() && wrote.is_some_and(|w| w.0 == 0) && self.conn.describe(&stmt).await.is_ok_and(|d| !d.is_empty());
+        if begun {
+            let end = if self.read_only || failure.is_some() { "ROLLBACK" } else { "COMMIT" };
+            if let Err(x) = self.conn.execute(end).await {
+                self.dead = true;
+                if failure.is_none() {
+                    return Err(e(x));
+                }
+            }
         }
         if let Some(f) = failure {
-            self.dead |= cut;
             return Err(f);
         }
-        if cols.is_empty() {
+        if cols.is_empty() && !empty_read {
             // An empty SELECT still has headers, a write or SET does not.
-            let empty_read = wrote.is_some_and(|w| w.0 == 0) && self.conn.describe(&stmt).await.is_ok_and(|d| !d.is_empty());
-            if !empty_read {
-                let (affected, insert_id) = wrote.unwrap_or_default();
-                return Ok(Answer::Wrote { affected, insert_id });
-            }
+            let (affected, insert_id) = wrote.unwrap_or_default();
+            return Ok(Answer::Wrote { affected, insert_id });
         }
         Ok(Answer::Rows(rows))
     }

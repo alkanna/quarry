@@ -352,14 +352,14 @@ fn sql_help(ui: &mut egui::Ui, table: &str, writable: bool) -> Option<String> {
         caption(ui, "HOW IT WORKS");
         ui.label("Write one function and return what you want to see. The script runs with Bun and has your file and network access, but it gets no database driver and no credentials: every query goes through this app, on one connection for the whole run, so @variables and transactions last until the script ends. While writes are locked each query passes Quarry's read-only check. That check guards queries, it is not a sandbox for the script.");
         ui.label(code("async function run() {\n  const rows = await sql`SELECT * FROM orders WHERE status = ${'paid'}`;\n  return rows;\n}"));
-        ui.label(RichText::new("Values in ${} become ? placeholders ($1, $2 on PostgreSQL, where ? is an operator) and are never spliced into the text. Whole numbers beyond 2^53 come back as BigInt, and unsigned values above 9223372036854775807 come back as strings (send them back as a string or BigInt). An array becomes a list for IN (${ids}). Cmd+Enter runs, Stop interrupts the running statement.").color(MUTED()));
+        ui.label(RichText::new("Values in ${} become ? placeholders ($1, $2 on PostgreSQL, where ? is an operator) and are never spliced into the text. Whole numbers beyond 2^53 come back as BigInt, and unsigned values above 9223372036854775807 come back as strings (send them back as a string or BigInt). An array becomes a list for IN (${ids}). Cmd+Enter runs, Stop interrupts the running statement. Locking or unlocking writes takes effect on the next run, not in a script that is already running.").color(MUTED()));
         if !writable {
             ui.label(RichText::new("This connection is read-only: only reading statements run, and every write is refused. Unlock writes in the top bar to allow them.").color(SUCCESS()));
         }
         caption(ui, "NAMES YOU CAN USE");
         egui::Grid::new("sql-shell-names").num_columns(2).spacing([16.0, 4.0]).show(ui, |ui| {
             for (n, what) in [
-                ("sql`...`", "run a statement; returns the rows as objects (writes return an empty list with .affected and .insertId; on PostgreSQL .insertId is undefined, use RETURNING, and table.insert of one row returns that row with .insertId set to its first column)"),
+                ("sql`...`", "run a statement; returns the rows as objects (writes return an empty list with .affected and .insertId; on PostgreSQL .insertId is undefined, use RETURNING; table.insert(row, { returning: true }) or { returning: ['id'] } returns the written rows and sets .insertId to the first column of a single row)"),
                 ("sql.unsafe(text, params)", "the same with text you built yourself and ? placeholders ($1, $2 on PostgreSQL)"),
                 ("<table>", "every table of the database whose name is a plain word, e.g. orders.find()"),
                 ("table('name')", "any table by its name, also names that are not plain words (table('name', 'schema') on PostgreSQL)"),
@@ -373,7 +373,7 @@ fn sql_help(ui: &mut egui::Ui, table: &str, writable: bool) -> Option<String> {
             }
         });
         caption(ui, "TABLE METHODS");
-        ui.label(RichText::new("find(where?, { select, orderBy, limit, offset })  ·  findOne  ·  count  ·  insert(row or rows)  ·  update(where, set)  ·  delete(where)").monospace().size(TXT_SMALL).color(TEXT()));
+        ui.label(RichText::new("find(where?, { select, orderBy, limit, offset })  ·  findOne  ·  count  ·  insert(row or rows, { returning } on PostgreSQL)  ·  update(where, set)  ·  delete(where)").monospace().size(TXT_SMALL).color(TEXT()));
         ui.label(RichText::new("where: { status: 'paid' } is =, null is IS NULL, a list is IN, and { total: { gt: 100, lte: 500 } } compares (gt, gte, lt, lte, ne, like, in). where must be a plain object, and a value of undefined or an empty condition is an error. update and delete need a where; only {} means every row.").color(MUTED()));
         caption(ui, "EXAMPLES  ·  click Use to load one");
         let examples = [

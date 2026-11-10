@@ -179,32 +179,249 @@ fn a_locked_relay_refuses_writes_and_runs_each_statement_in_a_read_only_transact
 }
 
 #[test]
-fn an_unlocked_relay_writes_in_autocommit_and_insert_returns_its_key() {
+fn an_unlocked_relay_writes_in_autocommit_and_insert_returns_a_row_only_when_asked() {
     if bun_missing() {
         return;
     }
     every_pg(|l, var| {
         let db = fixture(l, &["t7_unlocked"], "CREATE TABLE ins (id serial PRIMARY KEY, note text);");
         let code = r#"async function run() {
-  const a = await ins.insert({ note: 'a' });
+  const a = await ins.insert({ note: 'a' }, { returning: true });
+  const plain = await ins.insert({ note: 'p' });
+  const cols = await ins.insert({ note: 'k' }, { returning: ['id'] });
   const b = await ins.insert([{ note: 'b' }, { note: 'c' }]);
   const c = await sql`INSERT INTO ins (note) VALUES (${'d'}) RETURNING id, note`;
   const d = await sql`UPDATE ins SET note = ${'z'} WHERE note = ANY(ARRAY[${['a', 'b']}])`;
   const none = await ins.update({ id: 99 }, { note: 'q' });
   const del = await ins.delete({ note: 'nope' });
   const [s] = await sql.unsafe("SELECT pg_catalog.current_setting('transaction_read_only') AS ro, (SELECT xact_start < query_start FROM pg_stat_activity WHERE pid = pg_backend_pid()) AS own_tx");
-  return { a: { id: a.insertId, affected: a.affected, row: a[0] }, b: { affected: b.affected, id: typeof b.insertId }, c, d: { affected: d.affected, id: typeof d.insertId }, none: none.affected, del: del.affected, n: await ins.count(), s };
+  return { a: { id: a.insertId, affected: a.affected, row: a[0] }, plain: { id: typeof plain.insertId, affected: plain.affected, rows: plain.length }, cols: { id: cols.insertId, row: cols[0] }, b: { affected: b.affected, id: typeof b.insertId }, c, d: { affected: d.affected, id: typeof d.insertId }, none: none.affected, del: del.affected, n: await ins.count(), s };
 }"#;
         let (_, res) = script(l, &db, "t7_unlocked", code, &["ins"], false);
         let v = res.unwrap_or_else(|x| panic!("{var}: {x}"));
         assert_eq!((v["a"]["id"].clone(), v["a"]["affected"].clone()), (1.into(), 1.into()), "{var}: {v}");
         assert_eq!(v["a"]["row"]["note"], "a");
+        assert_eq!(v["plain"], serde_json::json!({ "id": "undefined", "affected": 1, "rows": 0 }), "{var}: {v}");
+        assert_eq!((v["cols"]["id"].clone(), v["cols"]["row"].clone()), (3.into(), serde_json::json!({ "id": 3 })), "{var}: {v}");
         assert_eq!((v["b"]["affected"].clone(), v["b"]["id"].clone()), (2.into(), "undefined".into()), "{var}: {v}");
-        assert_eq!(v["c"], serde_json::json!([{ "id": 4, "note": "d" }]));
+        assert_eq!(v["c"], serde_json::json!([{ "id": 6, "note": "d" }]));
         assert_eq!((v["d"]["affected"].clone(), v["d"]["id"].clone()), (2.into(), "undefined".into()), "{var}: {v}");
-        assert_eq!((v["none"].clone(), v["del"].clone(), v["n"].clone()), (0.into(), 0.into(), 4.into()), "{var}: {v}");
+        assert_eq!((v["none"].clone(), v["del"].clone(), v["n"].clone()), (0.into(), 0.into(), 6.into()), "{var}: {v}");
         assert_eq!((v["s"]["ro"].clone(), v["s"]["own_tx"].clone()), ("off".into(), false.into()), "{var}: {v}");
         assert_eq!(l.qone(&l.fixture_pool(), "SELECT count(*)::text FROM t7_unlocked.ins WHERE note = 'z'"), "2");
+    });
+}
+
+/// Makes (or keeps) a login-less role the insert tests switch to inside their own session, so no global setting changes.
+fn insert_role(l: &LivePg, pool: &sqlx::PgPool, schema: &str, grants: &str) {
+    l.qsql(pool, "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 't7_ins_role') THEN CREATE ROLE t7_ins_role LOGIN PASSWORD 'pw'; END IF; END $$");
+    l.qsql(pool, "ALTER ROLE t7_ins_role LOGIN PASSWORD 'pw'");
+    l.qsql(pool, &format!("GRANT USAGE ON SCHEMA {schema} TO t7_ins_role; {grants}"));
+}
+
+fn drop_insert_role(l: &LivePg, pool: &sqlx::PgPool) {
+    l.qsql(pool, "DROP OWNED BY t7_ins_role; DROP ROLE t7_ins_role");
+}
+
+#[test]
+fn a_plain_insert_works_with_insert_only_privilege_row_level_security_and_a_do_instead_view() {
+    if bun_missing() {
+        return;
+    }
+    every_pg(|l, var| {
+        let _ = fixture(
+            l,
+            &["t7_plain_ins"],
+            "CREATE TABLE only_ins (id int PRIMARY KEY, note text); CREATE TABLE rls (id int PRIMARY KEY, note text); ALTER TABLE rls ENABLE ROW LEVEL SECURITY;
+             CREATE TABLE base (id int PRIMARY KEY, note text); CREATE VIEW vw AS SELECT * FROM base; CREATE RULE vw_ins AS ON INSERT TO vw DO INSTEAD INSERT INTO base VALUES (NEW.id, NEW.note);",
+        );
+        let pool = l.fixture_pool();
+        insert_role(l, &pool, "t7_plain_ins", "GRANT INSERT ON t7_plain_ins.only_ins TO t7_ins_role; GRANT SELECT, INSERT ON t7_plain_ins.rls TO t7_ins_role; CREATE POLICY p_ins ON t7_plain_ins.rls FOR INSERT TO t7_ins_role WITH CHECK (true); CREATE POLICY p_sel ON t7_plain_ins.rls FOR SELECT TO t7_ins_role USING (false); GRANT SELECT, INSERT ON t7_plain_ins.base, t7_plain_ins.vw TO t7_ins_role;");
+        let code = r#"async function run() {
+  const out = {};
+  for (const [k, f] of [['only', () => only_ins.insert({ id: 1, note: 'a' })], ['rls', () => rls.insert({ id: 1, note: 'b' })], ['view', () => vw.insert({ id: 1, note: 'c' })]]) {
+    try { const r = await f(); out[k] = { affected: r.affected, id: typeof r.insertId } } catch (e) { out[k] = e.message }
+  }
+  return out;
+}"#;
+        // A second login that holds only these privileges, so no session setting of the test login changes.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let w2 = Worker::new(tx, eframe::egui::Context::default());
+        w2.sql_connect(1, l.uri.replacen("postgres:quarry@", "t7_ins_role:pw@", 1), Duration::from_secs(30), crate::db::Net::default());
+        let Msg::SqlConnected { res: Ok((role_db, _, _)), .. } = rx.recv_timeout(Duration::from_secs(20)).unwrap() else { panic!("{var}: the role could not connect") };
+        let (_, res) = run(&w2, &rx, input(code, "pg", serde_json::json!([]), vec![entry("pg", &["only_ins", "rls", "vw"])]), vec![("pg".into(), relay(&role_db.at("quarry_test"), "t7_plain_ins", false))]);
+        let res = res.map(|r| serde_json::from_str::<serde_json::Value>(&r).unwrap()["v"].clone());
+        let v = res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        for k in ["only", "rls", "view"] {
+            assert_eq!(v[k], serde_json::json!({ "affected": 1, "id": "undefined" }), "{var} {k}: {v}");
+        }
+        assert_eq!(l.qone(&pool, "SELECT (SELECT count(*) FROM t7_plain_ins.only_ins) || '/' || (SELECT count(*) FROM t7_plain_ins.rls) || '/' || (SELECT count(*) FROM t7_plain_ins.base)"), "1/1/1");
+        drop_insert_role(l, &pool);
+    });
+}
+
+#[test]
+fn an_unlocked_relay_recovers_from_a_failed_transaction_with_rollback() {
+    if bun_missing() {
+        return;
+    }
+    every_pg(|l, var| {
+        let db = fixture(l, &["t7_abort"], "CREATE TABLE a (id int PRIMARY KEY); INSERT INTO a VALUES (1);");
+        let code = r#"async function run() {
+  await sql.unsafe('BEGIN');
+  let failed;
+  try { await sql`INSERT INTO a VALUES (${1})` } catch (e) { failed = e.message }
+  await sql.unsafe('ROLLBACK');
+  const after = await sql`SELECT count(*)::int AS n FROM a WHERE id = ${1}`;
+  return { failed, n: after[0].n };
+}"#;
+        let (_, res) = script(l, &db, "t7_abort", code, &[], false);
+        let v = res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert!(v["failed"].as_str().unwrap().contains("duplicate key"), "{var}: {v}");
+        assert_eq!(v["n"], 1, "{var}: {v}");
+    });
+}
+
+#[test]
+fn a_server_error_that_says_more_than_is_an_ordinary_error() {
+    if bun_missing() {
+        return;
+    }
+    every_pg(|l, var| {
+        let db = fixture(l, &["t7_more"], "");
+        let code = r#"async function run() {
+  let first;
+  try { await sql.unsafe('SELECT (SELECT i FROM generate_series(1, 2) i)') } catch (e) { first = e.message }
+  const [again] = await sql`SELECT ${7}::int AS n`;
+  return { first, again };
+}"#;
+        for locked in [true, false] {
+            let (_, res) = script(l, &db, "t7_more", code, &[], locked);
+            let v = res.unwrap_or_else(|x| panic!("{var} locked {locked}: {x}"));
+            assert!(v["first"].as_str().unwrap().contains("more than one row"), "{var}: {v}");
+            assert_eq!(v["again"]["n"], 7, "{var} locked {locked}: {v}");
+        }
+    });
+}
+
+#[test]
+fn a_cut_result_cancels_its_backend_and_releases_its_locks() {
+    if bun_missing() {
+        return;
+    }
+    every_pg(|l, var| {
+        let db = fixture(l, &["t7_cut"], "CREATE TABLE lk (id int PRIMARY KEY); INSERT INTO lk VALUES (1);");
+        let code = r#"async function run() {
+  const [{ pid }] = await sql`SELECT pg_backend_pid()::int AS pid`;
+  let cut;
+  try { await sql`SELECT lk.id FROM lk, generate_series(1, 100001) WHERE ${1} = 1` } catch (e) { cut = e.message }
+  let later;
+  try { await sql`SELECT ${1}` } catch (e) { later = e.message }
+  let locks = -1, alive = -1;
+  for (let i = 0; i < 40; i++) {
+    [{ alive }] = await obs`SELECT count(*)::int AS alive FROM pg_stat_activity WHERE pid = ${pid}`;
+    [{ locks }] = await obs`SELECT count(*)::int AS locks FROM pg_locks WHERE pid = ${pid}`;
+    if (alive === 0) break;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return { cut, later, locks, alive };
+}"#;
+        let input = input(code, "pg", serde_json::json!([]), vec![entry("pg", &[]), entry("obs", &[])]);
+        let (_, res) = run(&l.w, &l.rx, input, vec![("pg".into(), relay(&db, "t7_cut", true)), ("obs".into(), relay(&db, "t7_cut", true))]);
+        let v: serde_json::Value = serde_json::from_str(&res.unwrap_or_else(|x| panic!("{var}: {x}"))).unwrap();
+        let v = &v["v"];
+        assert!(v["cut"].as_str().unwrap().contains("more than 100000 rows"), "{var}: {v}");
+        assert!(v["later"].as_str().unwrap().contains("closed after a result was cut"), "{var}: {v}");
+        assert_eq!((v["alive"].clone(), v["locks"].clone()), (0.into(), 0.into()), "{var}: {v}");
+    });
+}
+
+#[test]
+fn a_digit_after_a_value_does_not_join_the_placeholder_number() {
+    if bun_missing() {
+        return;
+    }
+    every_pg(|l, var| {
+        let db = fixture(l, &["t7_digit"], "");
+        let code = r#"async function run() {
+  const v = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+  try { await sql`SELECT ${v[0]}1, ${v[1]}, ${v[2]}, ${v[3]}, ${v[4]}, ${v[5]}, ${v[6]}, ${v[7]}, ${v[8]}, ${v[9]}, ${v[10]}` } catch (e) { return e.message }
+  return 'ran';
+}"#;
+        let (queries, _) = script(l, &db, "t7_digit", code, &[], true);
+        let text = queries.first().map(|q| q.text.clone()).unwrap_or_default();
+        assert!(text.contains("$1 1,") && !text.contains("$11,"), "{var}: {text}");
+    });
+}
+
+#[test]
+fn behind_a_pooler_each_statement_has_its_own_transaction_and_the_session_stays_untouched() {
+    if bun_missing() {
+        return;
+    }
+    every_pg(|l, var| {
+        let db = fixture(l, &["t7_pool"], "CREATE TABLE t (id int PRIMARY KEY, note text);");
+        let pooled = super::pg::pooled_for_test(&db, &l.uri);
+        let want_path = l.one("SHOW search_path");
+        let want_ro = l.one("SHOW default_transaction_read_only");
+        // Locked: the unqualified table is found through the search_path of the statement's own transaction.
+        let code = r#"async function run() {
+  const [a] = await sql`SELECT current_setting('transaction_read_only') AS ro, current_schema() AS s`;
+  let write;
+  try { await sql`INSERT INTO t VALUES (${1}, 'x')` } catch (e) { write = e.message }
+  return { a, write, n: (await t.find()).length };
+}"#;
+        let (_, res) = script(l, &pooled, "t7_pool", code, &["t"], true);
+        let v = res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!((v["a"]["ro"].clone(), v["a"]["s"].clone(), v["n"].clone()), ("on".into(), "t7_pool".into(), 0.into()), "{var}: {v}");
+        assert!(v["write"].as_str().is_some(), "{var}: {v}");
+        // Unlocked: each statement is begun READ WRITE and committed, the script's own transaction control is refused,
+        // and a failed statement is rolled back.
+        let code = r#"async function run() {
+  const refused = [];
+  for (const w of ['BEGIN', 'START TRANSACTION', 'COMMIT', 'END', 'ROLLBACK', 'SAVEPOINT a', 'RELEASE a', 'PREPARE TRANSACTION \'x\'', '/* c */ begin']) {
+    try { await sql.unsafe(w); refused.push(null) } catch (e) { refused.push(e.message) }
+  }
+  await t.insert({ id: 1, note: 'a' });
+  let dup;
+  try { await sql`INSERT INTO t VALUES (${1}, 'b')` } catch (e) { dup = e.message }
+  const [s] = await sql`SELECT current_setting('transaction_read_only') AS ro, current_schema() AS s, ${1}::int AS one`;
+  return { refused, dup, s, n: await t.count() };
+}"#;
+        let (_, res) = script(l, &pooled, "t7_pool", code, &["t"], false);
+        let v = res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        let msg = "not available";
+        assert!(v["refused"].as_array().unwrap().iter().all(|m| m.as_str().is_some_and(|m| m.contains(msg))), "{var}: {v}");
+        assert!(v["dup"].as_str().unwrap().contains("duplicate key"), "{var}: {v}");
+        assert_eq!((v["s"]["ro"].clone(), v["s"]["s"].clone(), v["n"].clone()), ("off".into(), "t7_pool".into(), 1.into()), "{var}: {v}");
+        assert_eq!(l.qone(&l.fixture_pool(), "SELECT count(*)::text FROM t7_pool.t"), "1", "{var}: committed");
+        // Nothing reached a session another client could get.
+        assert_eq!((l.one("SHOW search_path"), l.one("SHOW default_transaction_read_only")), (want_path, want_ro), "{var}");
+    });
+}
+
+#[test]
+fn the_columns_of_an_empty_locked_answer_are_planned_inside_the_read_only_transaction() {
+    if bun_missing() {
+        return;
+    }
+    every_pg(|l, var| {
+        // Behind a pooler the session itself is writable, so only the statement's own transaction protects describe.
+        let db = fixture(
+            l,
+            &["t7_desc"],
+            "CREATE TABLE log (n int); CREATE FUNCTION g(x int) RETURNS int LANGUAGE plpgsql VOLATILE AS $f$ BEGIN IF current_setting('transaction_read_only') = 'off' THEN INSERT INTO t7_desc.log VALUES (x); END IF; RETURN x; END $f$;
+             CREATE FUNCTION f(x int) RETURNS int LANGUAGE plpgsql IMMUTABLE AS 'BEGIN RETURN t7_desc.g(x); END';",
+        );
+        let pooled = super::pg::pooled_for_test(&db, &l.uri);
+        let (_, res) = script(l, &pooled, "t7_desc", "async function run() { return await sql`SELECT t7_desc.f(${1}) AS x WHERE false` }", &[], true);
+        let v = res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(v, serde_json::json!([]), "{var}");
+        let pool = l.fixture_pool();
+        assert_eq!(l.qone(&pool, "SELECT count(*)::text FROM t7_desc.log"), "0", "{var}: planning wrote outside the read-only transaction");
+        // The control: the same call from a writable session does write, so the zero above means something.
+        l.qsql(&pool, "SELECT t7_desc.f(1)");
+        assert_eq!(l.qone(&pool, "SELECT count(*)::text FROM t7_desc.log"), "1", "{var}");
     });
 }
 

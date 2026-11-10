@@ -187,6 +187,14 @@ fn locals_for(ms: u64) -> String {
     v.join("; ")
 }
 
+/// A `Db` that behaves as behind a pooler that refused startup options, so tests of other modules can force that mode.
+#[cfg(test)]
+pub(super) fn pooled_for_test(base: &Db, uri: &str) -> Db {
+    use std::str::FromStr;
+    let p = PgPools::new(PgConnectOptions::from_str(uri).unwrap(), "postgres".into(), Duration::from_secs(10), Some(locals_for(30_000)));
+    Db { pool: Pool::Pg(Arc::new(p)), ..base.clone() }
+}
+
 /// What every write transaction starts with, whatever the session carries: no statement timeout, because an ALTER or a
 /// big update must not be cut by the limit meant for reads, a lock timeout so a write never queues behind another
 /// session's lock for ever, and the output formats the read path expects.

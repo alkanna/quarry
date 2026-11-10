@@ -159,6 +159,8 @@ function makeSql(conn) {
     };
     values.forEach((v, i) => {
       text += Array.isArray(v) ? (v.length ? v.map(mark).join(", ") : "NULL") : mark(v);
+      // A digit right after $n would read as part of the number ($1 then 0 is $10).
+      if (pg && /^\d/.test(strings[i + 1])) text += " ";
       text += strings[i + 1];
     });
     return query(conn, text, params);
@@ -266,7 +268,7 @@ function makeTable(conn, name, schema) {
       const rows = await query(conn, `SELECT COUNT(*) AS n FROM ${t}` + compileWhere(where, params, d), params);
       return Number(rows[0].n);
     },
-    insert: async (row) => {
+    insert: async (row, opts = {}) => {
       const list = Array.isArray(row) ? row : [row];
       if (!list.length) throw new Error("Nothing to insert");
       const keys = Object.keys(list[0]);
@@ -276,12 +278,15 @@ function makeTable(conn, name, schema) {
       const one = (r) => `(${keys.map((k) => (params.push(r[k]), mark(params))).join(", ")})`;
       const text = `INSERT INTO ${t} (${keys.map(ident).join(", ")}) VALUES ${list.map(one).join(", ")}`;
       if (!pg) return query(conn, text, params);
-      // One row asks for its row back, so the first column (the key, by habit) can stand in for insertId. A bulk
-      // insert would return every row, so it reports only how many it wrote.
-      if (list.length > 1) return query(conn, text, params);
-      const rows = await query(conn, text + " RETURNING *", params);
+      // RETURNING is opt-in: it needs SELECT privilege and visibility of the new row, which a valid insert may lack, and an
+      // answer cut after the row was committed would invite a duplicate retry.
+      const ret = opts?.returning;
+      if (ret === undefined || ret === false) return query(conn, text, params);
+      if (ret !== true && !(Array.isArray(ret) && ret.length && ret.every((c) => typeof c === "string"))) throw new Error("returning must be true or a list of column names");
+      const rows = await query(conn, text + " RETURNING " + (ret === true ? "*" : ret.map(ident).join(", ")), params);
       rows.affected = rows.length;
-      const first = rows[0] && Object.values(rows[0])[0];
+      // One row's first returned column (the key, by habit) can stand in for insertId.
+      const first = list.length === 1 && rows[0] && Object.values(rows[0])[0];
       rows.insertId = typeof first === "number" || typeof first === "bigint" || typeof first === "string" ? first : undefined;
       return rows;
     },
