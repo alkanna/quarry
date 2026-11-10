@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.31.0](https://github.com/alkanna/quarry/compare/v0.30.0...v0.31.0) (2026-11-10)
+
+
+### Features
+
+* redesign the Packages, History, saved queries, Library and Columns popovers ([#161](https://github.com/alkanna/quarry/issues/161)) ([89200ca](https://github.com/alkanna/quarry/commit/89200caa26503b734c2dc50255f5c1574454f2ed))
+
+
+### Bug Fixes
+
+* align the SQL editor placeholder with its line number ([#159](https://github.com/alkanna/quarry/issues/159)) ([5bb3e9b](https://github.com/alkanna/quarry/commit/5bb3e9b9274611d4c518fdeb72aefed4c90a9fc0))
+
 ## [0.30.0](https://github.com/alkanna/quarry/compare/v0.29.1...v0.30.0) (2026-11-10)
 
 
