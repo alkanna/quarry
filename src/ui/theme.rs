@@ -330,6 +330,12 @@ pub(crate) const PALETTE_ROW_H: f32 = 44.0;
 pub(crate) const PALETTE_CMD_H: f32 = 34.0;
 pub(crate) const PALETTE_CAPTION_H: f32 = 26.0;
 pub(crate) const PALETTE_FOOT_H: f32 = 36.0;
+/// The message shown in a list with no matches.
+pub(crate) const EMPTY_LIST_H: f32 = 64.0;
+// The tab list behind the strip's "N tabs" button: width, filter row and connection header.
+pub(crate) const TAB_LIST_W: f32 = 380.0;
+pub(crate) const TAB_LIST_HEAD_H: f32 = 40.0;
+pub(crate) const TAB_GROUP_H: f32 = 30.0;
 
 // Font weights, applied through the variable fonts' wght axis.
 pub(crate) const W_MEDIUM: f32 = 500.0;
