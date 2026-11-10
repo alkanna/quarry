@@ -414,6 +414,7 @@ impl App {
         let mut dup = false;
         let mut many: Option<(usize, TabClose)> = None;
         let mut reopen = false;
+        let mut search = None;
         let has_closed = !self.closed.is_empty();
         const TAB_MIN_W: f32 = 120.0;
         const PLUS_W: f32 = 32.0;
@@ -552,7 +553,7 @@ impl App {
             }
             if overflow {
                 ui.add_space(6.0);
-                self.tab_list(ui, &mut pick);
+                self.tab_list(ui, &mut pick, &mut close, &mut search);
             }
         });
         });
@@ -562,6 +563,9 @@ impl App {
         }
         if reopen {
             return self.reopen_tab();
+        }
+        if let Some(query) = search {
+            return self.open_palette_with(query);
         }
         if let Some((i, what)) = many {
             let keep = |j: usize| match what {
@@ -598,58 +602,6 @@ impl App {
             self.reset_doc_state();
             self.reload();
         }
-    }
-
-    /// Every open tab grouped by connection and database, with a filter, for when the strip overflows.
-    fn tab_list(&self, ui: &mut egui::Ui, pick: &mut Option<usize>) {
-        let id = egui::Id::unique("tab-filter");
-        let n = self.tabs.len();
-        sticky_menu(ui, format!("{n} tabs"), |ui| {
-            ui.set_min_width(260.0);
-            // The filter lives only while the menu stays open: a gap of a frame means it was closed.
-            let frame = ui.ctx().cumulative_frame_nr();
-            let mut q = ui.data(|d| d.get_temp::<(String, u64)>(id)).filter(|(_, f)| *f + 1 >= frame).map(|(q, _)| q).unwrap_or_default();
-            let r = ui.add(egui::TextEdit::singleline(&mut q).hint_text("Filter tabs").desired_width(f32::INFINITY));
-            if ui.memory(|m| m.focused().is_none()) {
-                r.request_focus();
-            }
-            ui.data_mut(|d| d.insert_temp(id, (q.clone(), frame)));
-            let q = q.to_lowercase();
-            // Grouped by connection too, so same-named databases on two servers stay apart.
-            let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
-            for (i, t) in self.tabs.iter().enumerate() {
-                let conn = self.conn(t.sel.conn).map_or("", |c| c.meta.name.as_str());
-                if !format!("{} {} {conn}", self.tab_name(i), t.sel.db).to_lowercase().contains(&q) {
-                    continue;
-                }
-                let key = format!("{conn} / {}", t.sel.db);
-                match groups.iter_mut().find(|g| g.0 == key) {
-                    Some(g) => g.1.push(i),
-                    None => groups.push((key, vec![i])),
-                }
-            }
-            if groups.is_empty() {
-                ui.label(RichText::new("No tab matches").color(MUTED()));
-            }
-            menu_scroll(ui, |ui| {
-                for (db, idx) in groups {
-                    ui.add_space(4.0);
-                    caption(ui, db);
-                    for i in idx {
-                        let mut b = egui::Button::selectable(i == self.cur, self.tab_name(i));
-                        // Cmd+1 to 8 jump to those tabs and Cmd+9 to the last one, as in browsers.
-                        let key = if i == n - 1 { Some(9) } else if i < 8 { Some(i + 1) } else { None };
-                        if let Some(k) = key {
-                            b = b.shortcut_text(format!("Cmd+{k}"));
-                        }
-                        if ui.add(b).clicked() {
-                            *pick = Some(i);
-                            ui.close();
-                        }
-                    }
-                }
-            });
-        });
     }
 
     pub(super) fn welcome(&mut self, ui: &mut egui::Ui) {

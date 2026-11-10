@@ -13,10 +13,23 @@ pub(crate) fn sticky_menu(ui: &mut egui::Ui, title: String, content: impl FnOnce
     ui.scope(|ui| {
         quiet_look(ui);
         MenuButton::new(title).config(MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)).ui(ui, |ui| {
+            // A shortcut opened a window over the page: close, or the menu keeps taking its keys and focus.
+            if ui.data(|d| d.get_temp::<bool>(window_over_page_id())).unwrap_or(false) {
+                return ui.close();
+            }
             menu_look(ui);
             content(ui)
         }).0
     }).inner
+}
+
+fn window_over_page_id() -> egui::Id {
+    egui::Id::unique("quarry-window-over-page")
+}
+
+/// Whether a dialog or window covers the page this frame, as `App::window_open` says. Sticky menus close under one.
+pub(crate) fn set_window_over_page(ctx: &egui::Context, open: bool) {
+    ctx.data_mut(|d| d.insert_temp(window_over_page_id(), open));
 }
 
 /// Menu content that scrolls once it is taller than the window. egui keeps a popup inside the

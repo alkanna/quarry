@@ -621,6 +621,7 @@ impl eframe::App for App {
         self.poll(&ctx);
         self.stop_hidden_watches();
         self.remember_tabs();
+        set_window_over_page(&ctx, self.window_open());
         // AppKit resets the window buttons on every layout, so re-centre them in our header each frame.
         frame.set_traffic_lights_position(&ctx, egui::Rangef::new(0.0, HEADER_H), 16.0);
         self.top_bar(ui);

@@ -105,7 +105,16 @@ fn name_score(tok: &[String], name: &str) -> Option<u32> {
 
 impl App {
     pub(super) fn open_palette(&mut self) {
-        self.modal = Some(Modal::Palette { query: String::new(), sel: 0, cmds: false });
+        self.open_palette_with(String::new());
+    }
+
+    /// The palette with `query` typed in, where a leading ">" switches to commands as typing it would.
+    pub(super) fn open_palette_with(&mut self, query: String) {
+        let (query, cmds) = match query.strip_prefix('>') {
+            Some(rest) => (rest.to_string(), true),
+            None => (query, false),
+        };
+        self.modal = Some(Modal::Palette { query, sel: 0, cmds });
     }
 
     fn jump_row(&self, j: Jump) -> Option<Row> {
@@ -334,7 +343,7 @@ impl App {
             egui::ScrollArea::vertical().max_height(LIST_MAX_H).min_scrolled_height(LIST_MAX_H).auto_shrink([false, true]).show(ui, |ui| {
                 ui.add_space(6.0);
                 if n == 0 {
-                    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 64.0), Sense::hover());
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), EMPTY_LIST_H), Sense::hover());
                     let msg = if query.trim().is_empty() { "No commands" } else { "No matches" };
                     ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, msg, FontId::proportional(TXT_TITLE), MUTED());
                 }
@@ -368,6 +377,233 @@ impl App {
             self.modal = Some(Modal::Palette { query, sel, cmds });
         }
     }
+}
+
+impl App {
+    /// Every open tab grouped by connection, with a filter, for when the strip overflows. A click
+    /// or Enter sets `pick`, the cross on a hovered row sets `close`, and Enter with no match hands
+    /// the query to the Cmd+K palette through `search`.
+    pub(super) fn tab_list(&self, ui: &mut egui::Ui, pick: &mut Option<usize>, close: &mut Option<usize>, search: &mut Option<String>) {
+        let id = egui::Id::unique("tab-filter");
+        let n = self.tabs.len();
+        sticky_menu(ui, format!("{n} tabs"), |ui| {
+            ui.set_width(TAB_LIST_W);
+            ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+            let margin = ui.spacing().menu_margin;
+            // The filter and highlight live only while the menu stays open: a gap of a frame means it was closed.
+            // No highlight yet means it was just opened, and it goes on the current tab once the rows are known.
+            let frame = ui.ctx().cumulative_frame_nr();
+            let (mut q, mut sel) = ui.data(|d| d.get_temp::<(String, Option<usize>, u64)>(id)).filter(|s| s.2 + 1 >= frame).map(|s| (s.0, s.1)).unwrap_or_default();
+            // Taken before the text field sees them, so arrows move the highlight and Enter picks.
+            let (up, down, enter) = ui.input_mut(|i| (i.consume_key(egui::Modifiers::NONE, Key::ArrowUp), i.consume_key(egui::Modifiers::NONE, Key::ArrowDown), i.consume_key(egui::Modifiers::NONE, Key::Enter)));
+            let (head, _) = ui.allocate_exact_size(egui::vec2(TAB_LIST_W, TAB_LIST_HEAD_H), Sense::hover());
+            let cy = head.center().y;
+            // The field ends before room for the "n of m" count, so it runs before the rows are filtered
+            // and a keystroke and Enter in the same frame both see the new query.
+            let field = egui::Rect::from_min_max(egui::pos2(head.left() + 30.0, cy - BUTTON_H / 2.0), egui::pos2(head.right() - 70.0, cy + BUTTON_H / 2.0));
+            let hint = RichText::new(format!("Filter {n} tabs")).color(FAINT());
+            let r = ui.new_child(egui::UiBuilder::new().max_rect(field)).add(egui::TextEdit::singleline(&mut q).frame(egui::Frame::NONE).margin(egui::Margin::ZERO).font(FontId::proportional(TXT_SUBHEAD)).text_color(BRIGHT()).hint_text(hint).desired_width(field.width()).align(egui::Align2::LEFT_CENTER));
+            r.request_focus();
+            if r.changed() {
+                sel = Some(0);
+            }
+            let tok = tokens(&q);
+            // Once per frame: a query tab's name counts the query tabs before it.
+            let names: Vec<String> = (0..n).map(|i| self.tab_name(i)).collect();
+            // Grouped by connection id, so same-named connections stay apart.
+            let mut groups: Vec<(u64, Vec<usize>)> = Vec::new();
+            for (i, t) in self.tabs.iter().enumerate() {
+                if !tok.is_empty() {
+                    let conn = self.conn(t.sel.conn).map_or("", |c| c.meta.name.as_str());
+                    let hay = format!("{} {} {conn}", names[i], t.sel.db).to_lowercase();
+                    if !tok.iter().all(|w| hay.contains(w.as_str())) {
+                        continue;
+                    }
+                }
+                match groups.iter_mut().find(|g| g.0 == t.sel.conn) {
+                    Some(g) => g.1.push(i),
+                    None => groups.push((t.sel.conn, vec![i])),
+                }
+            }
+            let flat: Vec<usize> = groups.iter().flat_map(|g| g.1.iter().copied()).collect();
+            let p = ui.painter();
+            paint_icon(p, egui::pos2(head.left() + 16.0, cy), RailIcon::Search, Stroke::new(1.5, FAINT()));
+            if !tok.is_empty() {
+                p.text(egui::pos2(head.right() - 8.0, cy), egui::Align2::RIGHT_CENTER, format!("{} of {n}", flat.len()), FontId::monospace(TXT_CAPTION), FAINT());
+            }
+            p.hline(head.x_range().expand(margin.left as f32), head.bottom() - 0.5, Stroke::new(1.0, RAISED_LINE()));
+            let opened = sel.is_none();
+            let mut sel = sel.unwrap_or_else(|| flat.iter().position(|&i| i == self.cur).unwrap_or(0));
+            if down {
+                sel += 1;
+            }
+            if up {
+                sel = sel.saturating_sub(1);
+            }
+            sel = sel.min(flat.len().saturating_sub(1));
+
+            let max_h = ui.ctx().content_rect().height() - TAB_LIST_HEAD_H - PALETTE_FOOT_H - 80.0;
+            egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
+                ui.add_space(4.0);
+                if flat.is_empty() {
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(TAB_LIST_W, EMPTY_LIST_H), Sense::hover());
+                    let p = ui.painter();
+                    let g = p.layout_job(LayoutJob::single_section("No open tab matches".into(), ui_fmt(TXT_TITLE, TEXT(), W_SEMIBOLD, 0.0)));
+                    p.galley(rect.center() - egui::vec2(g.size().x / 2.0, 9.0 + g.size().y / 2.0), g, TEXT());
+                    p.text(rect.center() + egui::vec2(0.0, 11.0), egui::Align2::CENTER_CENTER, format!("\u{21b5} searches every connection with {}", keys(false, false, "K")), FontId::proportional(TXT_SMALL), MUTED());
+                }
+                let mut k = 0;
+                for (conn, idx) in &groups {
+                    self.tab_group_head(ui, *conn, idx.len());
+                    let mut prev_db = None;
+                    for &i in idx {
+                        let db = self.tabs[i].sel.db.as_str();
+                        let show_db = prev_db != Some(db);
+                        prev_db = Some(db);
+                        let (r, x) = self.tab_list_row(ui, i, &names[i], k == sel, show_db, &tok);
+                        if k == sel && (up || down || opened) {
+                            r.scroll_to_me(None);
+                        }
+                        if x {
+                            *close = Some(i);
+                        } else if r.clicked() {
+                            *pick = Some(i);
+                            ui.close();
+                        }
+                        k += 1;
+                    }
+                    ui.add_space(4.0);
+                }
+            });
+            if enter {
+                match flat.get(sel) {
+                    Some(&i) => *pick = Some(i),
+                    None => *search = Some(q.clone()),
+                }
+                ui.close();
+            }
+            tab_list_footer(ui, margin);
+            ui.data_mut(|d| d.insert_temp(id, (q, Some(sel), frame)));
+        });
+    }
+
+    /// A connection's header in the tab list: engine tile, name, tag and how many tabs it has open.
+    fn tab_group_head(&self, ui: &mut egui::Ui, conn: u64, count: usize) {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(TAB_LIST_W, TAB_GROUP_H), Sense::hover());
+        if !ui.is_rect_visible(rect) {
+            return;
+        }
+        let cy = rect.center().y;
+        let p = ui.painter();
+        let count = p.layout_no_wrap(count.to_string(), FontId::monospace(TXT_CAPTION), FAINT());
+        let right = rect.right() - 8.0 - count.size().x;
+        p.galley(egui::pos2(right, cy - count.size().y / 2.0), count, FAINT());
+        let Some(c) = self.conn(conn) else { return };
+        let (mark, _) = engine_mark(c.meta.engine, &c.server.product);
+        paint_tile(ui, egui::Rect::from_min_size(egui::pos2(rect.left() + 6.0, cy - 10.0), egui::Vec2::splat(20.0)), Glyph::Engine, Some(mark), false);
+        let x = rect.left() + 34.0;
+        // The name and tag share the room before the count, the tag taking at most 40 % of it.
+        let room = right - 10.0 - x;
+        let p = ui.painter();
+        let tag_w = if c.meta.tag.is_empty() { 0.0 } else { (p.layout_no_wrap(c.meta.tag.to_uppercase(), FontId::proportional(TXT_CAPTION), FAINT()).size().x + 14.0).min(room * 0.4) };
+        let mut job = LayoutJob::single_section(c.meta.name.clone(), ui_fmt(TXT_SMALL, TEXT(), W_SEMIBOLD, 0.0));
+        job.wrap = egui::text::TextWrapping::truncate_at_width(room - if tag_w > 0.0 { tag_w + 8.0 } else { 0.0 });
+        let g = p.layout_job(job);
+        let w = g.size().x;
+        p.galley(egui::pos2(x, cy - g.size().y / 2.0 + optical_dy(&g)), g, TEXT());
+        if tag_w > 0.0 {
+            paint_tag(p, x + w + 8.0 + tag_w, cy, &c.meta.tag, tag_w);
+        }
+    }
+
+    /// One tab in the list. Returns the row's response and whether its close cross was clicked.
+    fn tab_list_row(&self, ui: &mut egui::Ui, i: usize, name: &str, lit: bool, show_db: bool, tok: &[String]) -> (egui::Response, bool) {
+        let (rect, r) = ui.allocate_exact_size(egui::vec2(TAB_LIST_W, POP_ROW_H), Sense::click());
+        if !ui.is_rect_visible(rect) {
+            return (r, false);
+        }
+        let cur = i == self.cur;
+        // contains_pointer, since the cross on top of the row takes the hover itself.
+        let over = r.contains_pointer();
+        // As in the palette: SEL marks the row Enter acts on, MENU_HOVER only the pointer.
+        let fill = match (lit, state_of(&r)) {
+            (true, 1 | 2) => SEL_HOVER(),
+            (true, _) => SEL(),
+            (false, 2) => menu_pressed(),
+            _ if over => MENU_HOVER(),
+            _ => Color32::TRANSPARENT,
+        };
+        ui.painter().rect_filled(rect.shrink2(egui::vec2(0.0, 1.0)), R_SM, fill);
+        let cy = rect.center().y;
+        let mut right = rect.right() - 6.0;
+        let mut x_clicked = false;
+        if over {
+            x_clicked = row_close(ui, rect.shrink2(egui::vec2(6.0, 0.0)), cy, "Close tab");
+            right -= CLOSE_W + 8.0;
+        } else {
+            // Cmd+1 to 8 jump to those tabs and Cmd+9 to the last one, as in browsers.
+            let key = if i + 1 == self.tabs.len() { Some(9) } else if i < 8 { Some(i + 1) } else { None };
+            if let Some(k) = key {
+                right = kbd(ui.painter(), right, cy, &keys(false, false, &k.to_string())) - 8.0;
+            }
+        }
+        let p = ui.painter();
+        if cur {
+            p.circle_filled(egui::pos2(rect.left() + 16.0, cy), 3.0, PRIMARY());
+        }
+        let nx = rect.left() + 34.0;
+        let color = if cur || lit { BRIGHT() } else { TEXT() };
+        let g = p.layout_job(name_job(name, tok, color, right - nx));
+        let w = g.size().x;
+        p.galley(egui::pos2(nx, cy - g.size().y / 2.0 + optical_dy(&g)), g, color);
+        if show_db {
+            let db = truncated(p, &self.tabs[i].sel.db, FontId::monospace(TXT_CAPTION), FAINT(), right - nx - w - 8.0);
+            p.galley(egui::pos2(nx + w + 8.0, cy - db.size().y / 2.0), db, FAINT());
+        }
+        (r.on_hover_cursor(egui::CursorIcon::PointingHand), x_clicked)
+    }
+}
+
+/// The footer band of the palette and the tab list, `rect` widened to `band`, with its top line.
+fn paint_footer_band(p: &egui::Painter, band: egui::Rect, corner: u8) {
+    p.rect_filled(band, egui::CornerRadius { nw: 0, ne: 0, sw: corner, se: corner }, RAISED().lerp_to_gamma(PANEL(), 0.5));
+    p.hline(band.x_range(), band.top() + 0.5, Stroke::new(1.0, RAISED_LINE()));
+}
+
+/// Key caps and their labels from `x` along a footer, the labels muted. Returns where they end.
+fn key_hints(p: &egui::Painter, mut x: f32, cy: f32, hints: &[(&[&str], &str)]) -> f32 {
+    for (ks, text) in hints {
+        for k in *ks {
+            let w = kbd_w(p, k);
+            kbd(p, x + w, cy, k);
+            x += w + 3.0;
+        }
+        let g = p.layout_no_wrap(text.to_string(), FontId::proportional(TXT_SMALL), MUTED());
+        let w = g.size().x;
+        p.galley(egui::pos2(x + 3.0, cy - g.size().y / 2.0 + optical_dy(&g)), g, MUTED());
+        x += 3.0 + w + 16.0;
+    }
+    x
+}
+
+/// One key cap and its label ending at `right`.
+fn key_hint_right(p: &egui::Painter, right: f32, cy: f32, key: &str, text: &str) {
+    let g = p.layout_no_wrap(text.into(), FontId::proportional(TXT_SMALL), MUTED());
+    let lx = right - g.size().x;
+    p.galley(egui::pos2(lx, cy - g.size().y / 2.0 + optical_dy(&g)), g, MUTED());
+    kbd(p, lx - 6.0, cy, key);
+}
+
+/// Key hints along the bottom of the tab list, on the palette's footer band.
+fn tab_list_footer(ui: &mut egui::Ui, margin: egui::Margin) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(TAB_LIST_W, PALETTE_FOOT_H), Sense::hover());
+    // Out through the menu's margin, so the band meets the popup's edges and bottom corners.
+    let band = egui::Rect::from_min_max(rect.min - egui::vec2(margin.left as f32, 0.0), rect.max + egui::vec2(margin.right as f32, margin.bottom as f32));
+    let p = ui.painter();
+    paint_footer_band(p, band, ui.visuals().menu_corner_radius.sw);
+    let cy = rect.center().y + margin.bottom as f32 / 2.0;
+    key_hints(p, rect.left() + 8.0, cy, &[(&["\u{2191}", "\u{2193}"], "move"), (&["\u{21b5}"], "switch")]);
+    key_hint_right(p, rect.right() - 8.0, cy, &keys(false, false, "K"), "search everything");
 }
 
 fn palette_header(ui: &mut egui::Ui, query: &mut String, sel: &mut usize, cmds: &mut bool) {
@@ -464,7 +700,7 @@ fn paint_row(ui: &mut egui::Ui, row: &Row, sel: bool, tok: &[String]) -> egui::R
     };
     ui.painter().rect_filled(rect.shrink2(egui::vec2(8.0, 1.0)), R_SM, fill);
     let cy = rect.center().y;
-    paint_tile(ui, egui::Rect::from_center_size(egui::pos2(rect.left() + 29.0, cy), egui::Vec2::splat(if two { 26.0 } else { 24.0 })), row);
+    paint_tile(ui, egui::Rect::from_center_size(egui::pos2(rect.left() + 29.0, cy), egui::Vec2::splat(if two { 26.0 } else { 24.0 })), row.glyph, row.mark, row.warn());
     let p = ui.painter();
     let nx = rect.left() + 52.0;
     let mut xr = rect.right() - 20.0;
@@ -509,18 +745,18 @@ fn arc(c: egui::Pos2, rx: f32, ry: f32, a0: f32, a1: f32, n: usize) -> Vec<egui:
 }
 
 /// The square at the start of a row: tinted by the engine, with the item's kind as a line glyph.
-fn paint_tile(ui: &egui::Ui, rect: egui::Rect, row: &Row) {
+fn paint_tile(ui: &egui::Ui, rect: egui::Rect, glyph: Glyph, mark: Option<&'static str>, warn: bool) {
     use std::f32::consts::PI;
     let p = ui.painter();
-    let color = if row.warn() { WARNING() } else { row.mark.map(mark_color).unwrap_or(MUTED()) };
-    p.rect_filled(rect, R_MD, tint(color, if row.mark.is_some() || row.warn() { 40 } else { 28 }));
+    let color = if warn { WARNING() } else { mark.map(mark_color).unwrap_or(MUTED()) };
+    p.rect_filled(rect, R_MD, tint(color, if mark.is_some() || warn { 40 } else { 28 }));
     let c = rect.center();
     let s = Stroke::new(1.3, color);
     let v = egui::vec2;
     let r = |w: f32, h: f32| egui::Rect::from_center_size(c, v(w, h));
-    match row.glyph {
+    match glyph {
         Glyph::Engine => {
-            if let Some(tex) = row.mark.and_then(|m| engine_logo(ui.ctx(), m)) {
+            if let Some(tex) = mark.and_then(|m| engine_logo(ui.ctx(), m)) {
                 p.image(tex.id(), r(15.0, 15.0), egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), color);
             }
         }
@@ -528,7 +764,7 @@ fn paint_tile(ui: &egui::Ui, rect: egui::Rect, row: &Row) {
             let b = r(13.0, 11.0);
             p.rect_stroke(b, 1.5, s, egui::StrokeKind::Middle);
             p.hline(b.x_range(), b.top() + 3.5, s);
-            if row.glyph == Glyph::Table {
+            if glyph == Glyph::Table {
                 p.vline(b.left() + 4.5, egui::Rangef::new(b.top() + 3.5, b.bottom()), s);
             } else {
                 p.hline(egui::Rangef::new(b.left() + 3.0, b.right() - 3.0), b.top() + 7.0, s);
@@ -570,31 +806,15 @@ fn paint_tile(ui: &egui::Ui, rect: egui::Rect, row: &Row) {
 fn palette_footer(ui: &mut egui::Ui, cmds: bool) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), PALETTE_FOOT_H), Sense::hover());
     let p = ui.painter();
-    p.rect_filled(rect, egui::CornerRadius { nw: 0, ne: 0, sw: R_LG, se: R_LG }, RAISED().lerp_to_gamma(PANEL(), 0.5));
-    p.hline(rect.x_range(), rect.top() + 0.5, Stroke::new(1.0, RAISED_LINE()));
+    paint_footer_band(p, rect, R_LG);
     let cy = rect.center().y;
-    let label = |text: &str| p.layout_no_wrap(text.into(), FontId::proportional(TXT_SMALL), MUTED());
-    let mut x = rect.left() + 16.0;
     let mut left: Vec<(&[&str], &str)> = vec![(&["\u{2191}", "\u{2193}"], "move"), (&["\u{21b5}"], if cmds { "run" } else { "open" })];
     if cmds {
         left.push((&["\u{232b}"], "leave commands"));
     }
-    for (ks, text) in left {
-        for k in ks {
-            let w = kbd_w(p, k);
-            kbd(p, x + w, cy, k);
-            x += w + 3.0;
-        }
-        let g = label(text);
-        let w = g.size().x;
-        p.galley(egui::pos2(x + 3.0, cy - g.size().y / 2.0 + optical_dy(&g)), g, MUTED());
-        x += 3.0 + w + 16.0;
-    }
+    key_hints(p, rect.left() + 16.0, cy, &left);
     if !cmds {
-        let g = label("commands");
-        let lx = rect.right() - 16.0 - g.size().x;
-        p.galley(egui::pos2(lx, cy - g.size().y / 2.0 + optical_dy(&g)), g, MUTED());
-        kbd(p, lx - 6.0, cy, ">");
+        key_hint_right(p, rect.right() - 16.0, cy, ">", "commands");
     }
 }
 
