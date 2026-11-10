@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.28.0](https://github.com/alkanna/quarry/compare/v0.27.0...v0.28.0) (2026-11-10)
+
+
+### Features
+
+* MySQL and MariaDB support ([#147](https://github.com/alkanna/quarry/issues/147)) ([b0fc7c9](https://github.com/alkanna/quarry/commit/b0fc7c9438dec8d3ca140418ebf8f4a6ce3bb695))
+* new app icon, a grid of stone blocks with one lifted out ([#146](https://github.com/alkanna/quarry/issues/146)) ([d3e2d97](https://github.com/alkanna/quarry/commit/d3e2d979619515b5a1f396350595b0277cce395e))
+
+
+### Bug Fixes
+
+* fall back to X11 on Linux when the Wayland client library is missing ([#145](https://github.com/alkanna/quarry/issues/145)) ([aae2e32](https://github.com/alkanna/quarry/commit/aae2e3211b79c6e080adeed8a207ea15033b757e))
+
 ## [0.27.0](https://github.com/alkanna/quarry/compare/v0.26.0...v0.27.0) (2026-11-09)
 
 
