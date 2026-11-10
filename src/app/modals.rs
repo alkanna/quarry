@@ -201,6 +201,7 @@ impl App {
                 Modal::SqlNewDb(f) => self.sql_new_db_dialog(ui, f, &mut keep),
                 Modal::SqlNewTable(f) => self.sql_new_table_dialog(ui, f, &mut keep),
                 Modal::SqlDrop(f) => self.sql_drop_dialog(ui, f, &mut keep),
+                Modal::SqlNewUser(f) => self.sql_new_user_dialog(ui, f, &mut keep),
                 Modal::FkEdit(f) => self.fk_dialog(ui, f, &mut keep),
                 Modal::Typed { title, expect, typed, action } => {
                     ui.label(semibold(RichText::new(title.as_str()).color(BRIGHT())));

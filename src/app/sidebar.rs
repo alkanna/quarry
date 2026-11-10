@@ -207,6 +207,7 @@ impl App {
         let mut remove = None;
         let mut edit = None;
         let mut refresh = None;
+        let mut sql_users = None;
         egui::Popup::menu(&resp).width(rect.width().max(320.0)).show(|ui| {
             menu_look(ui);
             ui.spacing_mut().item_spacing.y = 2.0;
@@ -235,6 +236,9 @@ impl App {
                 if ui.button("Refresh databases").on_hover_text("Reconnect and reload the list of databases and collections").clicked() {
                     refresh = Some(c.meta.id);
                 }
+                if c.meta.engine.is_sql() && c.status == Status::Ready && ui.button("Users and privileges…").clicked() {
+                    sql_users = Some(c.meta.id);
+                }
                 ui.add_space(2.0);
                 ui.separator();
                 ui.add_space(2.0);
@@ -246,6 +250,9 @@ impl App {
         });
         if let Some(id) = edit {
             self.edit_conn(id);
+        }
+        if let Some(id) = sql_users {
+            self.side_act(id, SideAct::SqlUsers);
         }
         if let Some(id) = refresh {
             if !self.demo {
@@ -428,6 +435,9 @@ impl App {
                         }
                         if ui.button("Refresh").clicked() {
                             side.push(SideAct::Refresh(db_name.clone()));
+                        }
+                        if ui.button("Users and privileges…").clicked() {
+                            side.push(SideAct::SqlUsers);
                         }
                         ui.separator();
                         if ui.button("Export as SQL dump…").on_hover_text("Tables, views, triggers and routines as a script, with the rows").clicked() {
@@ -637,6 +647,7 @@ impl App {
         let a = match a {
             SideAct::NewQuery(db) => return self.sql_new_query(conn, db),
             SideAct::NewDb => return self.sql_new_db(conn),
+            SideAct::SqlUsers => return self.open_sql_users(conn),
             SideAct::NewTable(db) => return self.sql_new_table(conn, db),
             SideAct::SqlDrop(db, table, kind) => return self.sql_drop_ask(conn, db, table, kind),
             SideAct::SqlImport(db, table) => return self.open_sql_import(conn, db, table),
@@ -693,7 +704,7 @@ impl App {
             }
             SideAct::Relations(db) => self.modal = Some(Modal::Relations { conn, db }),
             SideAct::Analyze(db, coll) => self.analyze_relations(conn, client, db, coll),
-            SideAct::NewQuery(_) | SideAct::SqlImport(..) | SideAct::SqlDump(..) | SideAct::SqlRunFile(_) | SideAct::NewDb | SideAct::NewTable(_) | SideAct::SqlDrop(..) => {}
+            SideAct::NewQuery(_) | SideAct::SqlImport(..) | SideAct::SqlDump(..) | SideAct::SqlRunFile(_) | SideAct::NewDb | SideAct::NewTable(_) | SideAct::SqlDrop(..) | SideAct::SqlUsers => {}
             SideAct::DropColl(db, coll) => {
                 self.modal = Some(Modal::Typed { title: format!("Drop {db}.{coll} with all its documents and indexes? This cannot be undone."), expect: coll.clone(), typed: String::new(), action: Danger::DropCollAt { conn, db, coll } })
             }

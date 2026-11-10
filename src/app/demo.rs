@@ -444,6 +444,7 @@ impl App {
         self.sql_alter_demo(&std::env::var("QUARRY_TEST_SQL").unwrap_or_default());
         self.sql_rel_demo(&std::env::var("QUARRY_TEST_SQL").unwrap_or_default());
         self.sql_trig_demo(&std::env::var("QUARRY_TEST_SQL").unwrap_or_default());
+        self.sql_users_demo(&std::env::var("QUARRY_TEST_SQL").unwrap_or_default());
         // QUARRY_TEST_SQL=processes, variables, overview or status opens the SQL Server window on that tab.
         if let Ok(v @ ("processes" | "variables" | "overview" | "status")) = std::env::var("QUARRY_TEST_SQL").as_deref() {
             self.sql_server = Some(SqlServerWin::demo(3, v));

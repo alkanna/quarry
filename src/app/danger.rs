@@ -39,6 +39,9 @@ impl App {
         if let Danger::SqlDrop { conn, schema, table, kind } = action {
             return self.sql_drop_run(conn, schema, table, kind);
         }
+        if let Danger::SqlDropUser { conn, user, host } = action {
+            return self.sql_user_drop_run(conn, user, host);
+        }
         if let Danger::DropTrigger(sel, name) = action {
             return self.on_tab(&sel, |a| a.drop_trigger(name));
         }
@@ -100,7 +103,7 @@ impl App {
                     self.worker.import(conn, target, docs, Some(key));
                 }
             }
-            Danger::DeleteRows(..) | Danger::ApplyAlter(_) | Danger::UndoAlter(_) | Danger::DropTrigger(..) | Danger::SqlDrop { .. } | Danger::RemoveConnection(_) | Danger::DropDatabase { .. } | Danger::DropCollAt { .. } | Danger::DropUser { .. } | Danger::Sync { .. } | Danger::Restore { .. } => unreachable!(),
+            Danger::DeleteRows(..) | Danger::ApplyAlter(_) | Danger::UndoAlter(_) | Danger::DropTrigger(..) | Danger::SqlDrop { .. } | Danger::SqlDropUser { .. } | Danger::RemoveConnection(_) | Danger::DropDatabase { .. } | Danger::DropCollAt { .. } | Danger::DropUser { .. } | Danger::Sync { .. } | Danger::Restore { .. } => unreachable!(),
         }
     }
 }

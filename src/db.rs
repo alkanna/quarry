@@ -231,6 +231,13 @@ pub enum Msg {
     /// for a create (or the one a refused undo hands back). `sql_mode` is the session's mode when it no longer
     /// matched the one the app had, so the previews follow it.
     SqlDdl { conn: u64, schema: String, table: String, what: sql::create::Ddl, res: Res<String>, undo: Option<UndoAction>, dbs: Option<Vec<String>>, sql_mode: Option<String> },
+    /// The accounts of a SQL server for the Users window that asked with `req`.
+    SqlUsers { conn: u64, req: u64, res: Res<sql::users::UserList> },
+    /// What SHOW GRANTS says for the account the Users window asked about with `req`.
+    SqlUserGrants { conn: u64, req: u64, res: Res<Vec<sql::users::Grant>> },
+    /// A privilege edit, create, drop or undo of an account finished. `undo` is the entry to record, or the one a
+    /// refused undo hands back.
+    SqlUserDone { conn: u64, account: sql::users::Account, op: sql::users::Op, res: Res<String>, undo: Option<UndoAction> },
     /// How many rows of a table point at nothing for a foreign key being added. Answers the open dialog by `req`.
     SqlOrphans { req: u64, res: Res<u64> },
     /// Whether the server takes a foreign key only on a whole primary or unique key. Answers the open dialog by `req`.

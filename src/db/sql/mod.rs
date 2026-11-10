@@ -22,6 +22,7 @@ mod testing;
 mod review_final;
 pub mod rules;
 pub mod schema;
+pub mod users;
 pub use advanced::{Advanced, Charset, TestInfo, Zone};
 pub use dialect::{Dialect, FUNCTIONS, KEYWORDS};
 pub use structure::Structure;

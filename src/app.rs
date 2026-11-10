@@ -52,6 +52,7 @@ mod sql_views;
 mod sql_query;
 mod sql_import;
 mod sql_dump;
+mod sql_users;
 mod state;
 mod table;
 mod tabs;
@@ -176,6 +177,7 @@ pub struct App {
     sql_values: HashMap<(u64, String), Fields>,
     sql_values_asked: HashSet<(u64, String, String, String, Option<String>)>,
     users: Option<UsersWin>,
+    sql_users: Option<sql_users::SqlUsersWin>,
     server: Option<ServerWin>,
     sql_server: Option<SqlServerWin>,
     /// The answer to a connection form Test, with the request id it answers.
@@ -312,6 +314,7 @@ impl App {
             sql_values: HashMap::new(),
             sql_values_asked: HashSet::new(),
             users: None,
+            sql_users: None,
             server: None,
             sql_server: None,
             conn_test: None,
@@ -611,6 +614,7 @@ impl eframe::App for App {
         self.keys(&ctx);
         self.modals(&ctx);
         self.users_window(&ctx);
+        self.sql_users_window(&ctx);
         self.server_window(&ctx);
         self.sql_server_window(&ctx);
         self.tool_window(&ctx);

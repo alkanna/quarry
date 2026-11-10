@@ -652,6 +652,8 @@ pub(super) enum Danger {
     SqlDrop { conn: u64, schema: String, table: String, kind: DropKind },
     /// A trigger of a SQL table, by name.
     DropTrigger(Sel, String),
+    /// Drop a SQL user or role.
+    SqlDropUser { conn: u64, user: String, host: String },
 }
 
 /// What to run once writes are allowed.
@@ -674,6 +676,7 @@ pub(super) enum Modal {
     SqlNewDb(Box<NewDb>),
     SqlNewTable(Box<NewTable>),
     SqlDrop(Box<DropForm>),
+    SqlNewUser(Box<super::sql_users::NewUser>),
     /// Add a foreign key to the open SQL table, with its ALTER preview.
     FkEdit(Box<FkForm>),
     Typed { title: String, expect: String, typed: String, action: Danger },
@@ -1004,6 +1007,8 @@ pub(super) enum SideAct {
     NewDb,
     NewTable(String),
     SqlDrop(String, String, DropKind),
+    /// The Users and privileges window of a SQL connection.
+    SqlUsers,
 }
 
 pub(super) enum QAct {
