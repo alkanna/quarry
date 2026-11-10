@@ -140,6 +140,105 @@ pub(super) fn code_menu(ui: &mut egui::Ui, pick: &mut Option<db::Lang>) {
     });
 }
 
+/// One click adds these from the empty Packages list. Not lodash, dayjs or uuid: those are always loaded.
+const PACKAGE_SUGGESTIONS: [&str; 4] = ["date-fns", "zod", "nanoid", "ms"];
+
+/// The Packages popover: an add field, the added packages with the names scripts use, and suggestions when empty.
+fn packages_popover(ui: &mut egui::Ui, packages: &mut Vec<String>, new_pkg: &mut String) {
+    popover_body(ui, 340.0, |ui| {
+        popover_head(ui, "Packages", "npm", "Ready in every script by the name on the right.");
+        let spec = new_pkg.trim().to_string();
+        let name = db::package_spec(&spec).0;
+        let problem = if db::PINNED_PACKAGES.contains(&name.as_str()) {
+            Some(format!("{name} is built in, at the version the shell needs."))
+        } else if packages.contains(&spec) {
+            Some(format!("{spec} is already added."))
+        } else {
+            None
+        };
+        let valid = problem.is_none() && db::valid_package(&spec);
+        let field = ui.make_persistent_id("shell-new-pkg");
+        let mut add = None;
+        well_field(ui, field, FieldIcon::Plus, problem.is_some().then(ALERT), |ui| {
+            let w = ui.available_width() - if spec.is_empty() { 100.0 } else { 60.0 };
+            let r = ui.add(field_edit(new_pkg, field, "Add a package, like dayjs@1.11", w, egui::TextStyle::Monospace));
+            if field_button(ui, &r, "Add", 50.0, valid, spec.is_empty()) {
+                add = Some(spec.clone());
+            }
+        });
+        if let Some(msg) = &problem {
+            field_note(ui, msg, ALERT());
+        }
+        ui.add_space(12.0);
+
+        if packages.is_empty() {
+            empty_state(ui, paint_cube, "No packages yet", "", |ui| {
+                ui.add_space(10.0);
+                let gap = 6.0;
+                let total = PACKAGE_SUGGESTIONS.iter().map(|s| add_chip_w(ui, s)).sum::<f32>() + gap * (PACKAGE_SUGGESTIONS.len() - 1) as f32;
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = gap;
+                    ui.add_space(((ui.available_width() - total) / 2.0 - gap).max(0.0));
+                    for s in PACKAGE_SUGGESTIONS {
+                        if add_chip(ui, s).clicked() {
+                            add = Some(s.to_string());
+                        }
+                    }
+                });
+            });
+        } else {
+            section_head(ui, "ADDED", None);
+            // A package Bun has not installed yet is fetched on the next run. Checked at most once a
+            // second, so an open popover does not touch the disk every frame.
+            let cache = ui.make_persistent_id("pkg-installed");
+            let now = ui.input(|i| i.time);
+            let installed: Vec<bool> = match ui.data(|d| d.get_temp::<(f64, Vec<String>, Vec<bool>)>(cache)) {
+                Some((at, list, inst)) if now - at < 1.0 && list == *packages => inst,
+                _ => {
+                    let modules = config_dir().join("shell").join("node_modules");
+                    let inst: Vec<bool> = packages.iter().map(|p| modules.join(db::package_spec(p).0).exists()).collect();
+                    ui.data_mut(|d| d.insert_temp(cache, (now, packages.clone(), inst.clone())));
+                    inst
+                }
+            };
+            let mut drop = None;
+            for (i, p) in packages.iter().enumerate() {
+                let (row, hovered) = pop_row(ui, POP_ROW_H);
+                let (rect, painter) = (row.rect, ui.painter().clone());
+                paint_cube(&painter, egui::pos2(rect.left() + 6.0, rect.center().y), MUTED());
+                let (pkg, ver) = match p.rfind('@') {
+                    Some(i) if i > 0 => (&p[..i], &p[i..]),
+                    _ => (p.as_str(), ""),
+                };
+                let mut job = egui::text::LayoutJob::default();
+                job.append(pkg, 0.0, mono_fmt(TXT_BODY, BRIGHT(), 400.0));
+                job.append(ver, 0.0, mono_fmt(TXT_BODY, FAINT(), 400.0));
+                galley_at(&painter, rect.left() + 22.0, rect.center().y, painter.layout_job(job), BRIGHT());
+                let right = rect.right() - if hovered { CLOSE_W + 6.0 } else { 0.0 };
+                let name = db::package_spec(p).0;
+                if installed[i] {
+                    let alias = if name == "lodash" { format!("{}, _", package_ident(p)) } else { package_ident(p) };
+                    tag_at(&painter, right, rect.center().y, &alias, C_DATE());
+                } else {
+                    let g = painter.layout_no_wrap("installs on next run".into(), FontId::proportional(TXT_CAPTION), FAINT());
+                    galley_at(&painter, right - g.size().x, rect.center().y, g, FAINT());
+                }
+                if hovered && row_close(ui, rect, rect.center().y, "Remove") {
+                    drop = Some(i);
+                }
+            }
+            if let Some(i) = drop {
+                packages.remove(i);
+            }
+        }
+        if let Some(p) = add.filter(|p| !packages.contains(p)) {
+            packages.push(p);
+            new_pkg.clear();
+        }
+        popover_foot(ui, Some(paint_shield), &["Bun installs these on the next run.", "Install scripts never run unless you trust the package."]);
+    });
+}
+
 /// How a SQL script names a table: the plain word, else through table("...").
 fn default_table_ref(coll: &str) -> String {
     if coll.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') && coll.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !JS_RESERVED.contains(&coll) {
@@ -481,38 +580,7 @@ impl App {
                         }
                     }
                 });
-                sticky_menu(ui, format!("Packages {}", packages.len()), |ui| {
-                    ui.set_min_width(300.0);
-                    ui.label(RichText::new("npm packages for your scripts. Each one is loaded for you and ready by the name shown.").size(TXT_SMALL).color(MUTED()));
-                    let mut drop = None;
-                    for (i, p) in packages.iter().enumerate() {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(p).monospace().color(BRIGHT()));
-                            let alias = if db::package_spec(p).0 == "lodash" { format!("{}, _", package_ident(p)) } else { package_ident(p) };
-                            ui.label(RichText::new(format!("ready as {alias}")).monospace().size(TXT_SMALL).color(C_DATE()));
-                            if ui.button("🗙").on_hover_text("Remove").clicked() {
-                                drop = Some(i);
-                            }
-                        });
-                    }
-                    if let Some(i) = drop {
-                        packages.remove(i);
-                    }
-                    ui.horizontal(|ui| {
-                        let r = ui.add(egui::TextEdit::singleline(&mut new_pkg).hint_text("lodash  or  dayjs@1.11").desired_width(190.0).font(egui::TextStyle::Monospace));
-                        let valid = db::valid_package(new_pkg.trim());
-                        let name = db::package_spec(new_pkg.trim()).0;
-                        let mut add = ui.add_enabled(valid, egui::Button::new("Add"));
-                        if db::PINNED_PACKAGES.contains(&name.as_str()) {
-                            add = add.on_disabled_hover_text(format!("{name} is built in, at the version the shell needs"));
-                        }
-                        if (add.clicked() || (valid && r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)))) && !packages.contains(&new_pkg.trim().to_string()) {
-                            packages.push(new_pkg.trim().to_string());
-                            new_pkg.clear();
-                        }
-                    });
-                    ui.label(RichText::new("Installed by Bun on the next run. Bun does not run install scripts of packages unless you trust them.").size(TXT_CAPTION).color(FAINT()));
-                });
+                sticky_menu(ui, format!("Packages {}", packages.len()), |ui| packages_popover(ui, &mut packages, &mut new_pkg));
             });
         });
         ui.add_space(8.0);

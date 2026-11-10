@@ -263,6 +263,10 @@ pub(crate) fn ui_fmt(size: f32, color: Color32, weight: f32, spacing: f32) -> Te
 
 pub(crate) const ROW_H: f32 = 28.0;
 
+/// Rows in popovers: one line, and a name over a code preview.
+pub(crate) const POP_ROW_H: f32 = 30.0;
+pub(crate) const POP_ROW2_H: f32 = 48.0;
+
 pub(crate) const OPTIMAL_MIN_W: f32 = 40.0;
 
 pub(crate) const OPTIMAL_MAX_W: f32 = 400.0;
@@ -419,6 +423,16 @@ pub(crate) fn next_state(ui: &egui::Ui) -> usize {
 /// The fill of a frameless control on a page or panel for state 0 idle, 1 hovered, 2 pressed.
 pub(crate) fn hover_fill(state: usize) -> Color32 {
     [Color32::TRANSPARENT, HOVER(), PRESSED()][state]
+}
+
+/// `hover_fill` for the layer `ui` draws on. Popups, menus and dialogs sit on `RAISED`, where a
+/// hovered row is already `MENU_HOVER`, so a control's states there step past it.
+pub(crate) fn hover_fill_on(ui: &egui::Ui, state: usize) -> Color32 {
+    if ui.layer_id().order == egui::Order::Background {
+        hover_fill(state)
+    } else {
+        [Color32::TRANSPARENT, menu_pressed(), menu_pressed().lerp_to_gamma(TEXT(), 0.08)][state]
+    }
 }
 
 /// A pressed row inside a raised popup or menu.

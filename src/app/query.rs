@@ -3,41 +3,84 @@
 use super::*;
 
 /// Recent Query, Sort and Project inputs of this collection; picking one fills that box.
-/// Like the original's history menu (onHistory, renderer line 96157): each list starts with `{}`
-/// to clear the box, and Sort also offers the key of every index of the collection.
+/// Like the original's history menu (onHistory, renderer line 96157): each list can clear its box,
+/// and Sort also offers the key of every index of the collection.
 pub(super) fn history_menu(ui: &mut egui::Ui, h: &QueryHist, index_sorts: &[String], acts: &mut Vec<QAct>) {
     icon_menu(ui, paint_clock, true, |ui| {
-        ui.set_min_width(360.0);
-        ui.set_max_width(520.0);
-        let mut sort = h.sort.clone();
-        for k in index_sorts {
-            if !sort.contains(k) {
-                sort.push(k.clone());
+        popover_body(ui, 380.0, |ui| {
+            popover_head(ui, "History", "", "Pick an entry to fill its box.");
+            // The open list and the filter outlive the menu, so it reopens where it was left.
+            let (tab_id, filter_id) = (ui.make_persistent_id("hist-tab"), ui.make_persistent_id("hist-filter"));
+            let mut tab: usize = ui.data(|d| d.get_temp(tab_id)).unwrap_or(0);
+            let mut needle: String = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
+            let from_index: Vec<&String> = index_sorts.iter().filter(|k| !h.sort.contains(k)).collect();
+            let labels = [format!("Query  {}", h.selector.len()), format!("Sort  {}", h.sort.len() + from_index.len()), format!("Project  {}", h.project.len())];
+            segmented(ui, &mut tab, &[(0, labels[0].as_str()), (1, labels[1].as_str()), (2, labels[2].as_str())]);
+            ui.add_space(8.0);
+            well_field(ui, filter_id, FieldIcon::Search, None, |ui| ui.add(field_edit(&mut needle, filter_id, "Filter history", ui.available_width(), egui::TextStyle::Body)));
+            ui.data_mut(|d| {
+                d.insert_temp(tab_id, tab);
+                d.insert_temp(filter_id, needle.clone());
+            });
+            ui.add_space(8.0);
+            // Entries, each with whether it comes from an index rather than from history.
+            let entries: Vec<(&String, bool)> = match tab {
+                0 => h.selector.iter().map(|v| (v, false)).collect(),
+                1 => h.sort.iter().map(|v| (v, false)).chain(from_index.iter().map(|v| (*v, true))).collect(),
+                _ => h.project.iter().map(|v| (v, false)).collect(),
+            };
+            let needle = needle.trim().to_lowercase();
+            let entries: Vec<_> = entries.into_iter().filter(|(v, _)| needle.is_empty() || v.to_lowercase().contains(&needle)).collect();
+            let act = |v: String| match tab {
+                0 => QAct::Filter(v),
+                1 => QAct::Sort(v),
+                _ => QAct::Project(v),
+            };
+            let (row, _) = pop_row(ui, POP_ROW_H);
+            let p = ui.painter();
+            mono_at(p, row.rect.left(), row.rect.center().y, "{}", FAINT());
+            let clear = format!("Clear the {} box", ["Query", "Sort", "Project"][tab]);
+            galley_at(p, row.rect.left() + 26.0, row.rect.center().y, p.layout_no_wrap(clear, FontId::proportional(TXT_BODY), MUTED()), MUTED());
+            if row.clicked() {
+                acts.push(act("{}".into()));
+                ui.close();
             }
-        }
-        let with_clear = |l: &Vec<String>| std::iter::once("{}".to_string()).chain(l.iter().cloned()).collect::<Vec<_>>();
-        let (sel, sort, proj) = (with_clear(&h.selector), with_clear(&sort), with_clear(&h.project));
-        for (title, list, kind) in [("QUERY", &sel, 0), ("SORT  ·  history and indexes", &sort, 1), ("PROJECT", &proj, 2)] {
-            caption(ui, title);
-            egui::ScrollArea::vertical().id_salt(("hist", kind)).max_height(170.0).show(ui, |ui| {
-                for v in list {
-                    let one_line: String = v.split_whitespace().collect::<Vec<_>>().join(" ");
-                    let mut job = json_job(&one_line.chars().take(90).collect::<String>());
-                    job.wrap.max_rows = 1;
-                    if ui.add(quiet_button(job)).on_hover_text(v.as_str()).clicked() {
-                        acts.push(match kind {
-                            0 => QAct::Filter(v.clone()),
-                            1 => QAct::Sort(v.clone()),
-                            _ => QAct::Project(v.clone()),
-                        });
+            ui.add_space(4.0);
+            let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), Sense::hover());
+            ui.painter().hline(r.x_range(), r.center().y, Stroke::new(1.0, RAISED_LINE()));
+            ui.add_space(4.0);
+            if entries.is_empty() {
+                ui.add_space(4.0);
+                if needle.is_empty() {
+                    empty_state(ui, paint_clock, "No history yet", "What you run here shows up in this list.", |_| {});
+                } else {
+                    empty_state(ui, paint_search, "Nothing matches", "", |_| {});
+                }
+            }
+            egui::ScrollArea::vertical().id_salt("hist").max_height(300.0).show(ui, |ui| {
+                for (v, from_index) in entries {
+                    let (row, _) = pop_row(ui, POP_ROW_H);
+                    let rect = row.rect;
+                    let p = ui.painter();
+                    let right = if from_index { tag_at(p, rect.right(), rect.center().y, "index", MUTED()) - 8.0 } else { rect.right() };
+                    let mut job = json_job(&one_line(v));
+                    job.wrap = egui::text::TextWrapping::truncate_at_width(right - rect.left());
+                    galley_at(p, rect.left(), rect.center().y, p.layout_job(job), TEXT());
+                    if row.on_hover_text(v.as_str()).clicked() {
+                        acts.push(act(v.clone()));
                         ui.close();
                     }
                 }
             });
-            ui.separator();
-        }
+            popover_foot(ui, None, &["Kept for each collection.", "Sort also lists the key of every index."]);
+        });
     })
     .on_hover_text("History");
+}
+
+/// The start of `s` on one line, for a preview. Only the start shows, so only it gets colored.
+fn one_line(s: &str) -> String {
+    s.chars().take(200).collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// What a library menu lists.
@@ -75,58 +118,94 @@ fn put_saved(list: &mut Vec<SavedQuery>, q: SavedQuery) {
 /// Named queries (or pipelines, or SQL scripts) saved for this collection: load, delete, or save the current one.
 /// `icon` shows it as a book icon, as in the find bar.
 pub(super) fn library_menu(ui: &mut egui::Ui, lib: &[SavedQuery], new_name: &mut String, kind: LibKind, icon: bool, acts: &mut Vec<QAct>) -> egui::Response {
-    let title = if kind == LibKind::Sql { "Save to library".to_string() } else { format!("Library ({})", lib.len()) };
+    let (head, sub, empty, save) = match kind {
+        LibKind::Query => ("Saved queries", "Query, sort and project, kept for this collection.", "No saved queries yet", "SAVE THE CURRENT QUERY"),
+        LibKind::Pipeline => ("Saved pipelines", "Pipelines kept for this collection.", "No saved pipelines yet", "SAVE THIS PIPELINE"),
+        LibKind::Sql => ("Library", "SQL scripts kept for this connection.", "No saved scripts yet", "SAVE THIS SCRIPT"),
+    };
     let body = |ui: &mut egui::Ui| {
-        ui.set_min_width(320.0);
-        if lib.is_empty() {
-            ui.label(RichText::new(match kind {
-                LibKind::Pipeline => "No saved pipelines for this collection yet.",
-                LibKind::Query => "No saved queries for this collection yet.",
-                LibKind::Sql => "No saved scripts for this connection yet.",
-            }).color(MUTED()));
-        }
-        egui::ScrollArea::vertical().id_salt("lib").max_height(260.0).show(ui, |ui| {
-            for q in lib {
-                ui.horizontal(|ui| {
-                    let preview = match kind {
-                        LibKind::Pipeline => q.pipeline.clone().unwrap_or_default(),
-                        LibKind::Query => q.filter.clone(),
-                        LibKind::Sql => q.sql.clone().unwrap_or_default(),
+        popover_body(ui, 360.0, |ui| {
+            popover_head(ui, head, &lib.len().to_string(), sub);
+            // A filter only once the list is long enough to need one.
+            let filter_id = ui.make_persistent_id("lib-filter");
+            let mut needle: String = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
+            let filtered = lib.len() > 5;
+            if filtered {
+                well_field(ui, filter_id, FieldIcon::Search, None, |ui| ui.add(field_edit(&mut needle, filter_id, "Filter by name", ui.available_width(), egui::TextStyle::Body)));
+                ui.data_mut(|d| d.insert_temp(filter_id, needle.clone()));
+                ui.add_space(8.0);
+            }
+            let needle = needle.trim().to_lowercase();
+            if lib.is_empty() {
+                empty_state(ui, paint_book, empty, "Name it below to keep it here.", |_| {});
+            }
+            egui::ScrollArea::vertical().id_salt("lib").max_height(300.0).show(ui, |ui| {
+                for q in lib.iter().filter(|q| !filtered || needle.is_empty() || q.name.to_lowercase().contains(&needle)) {
+                    let (row, hovered) = pop_row(ui, POP_ROW2_H);
+                    let rect = row.rect;
+                    let p = ui.painter().clone();
+                    let (name_y, code_y) = (rect.top() + 15.0, rect.top() + 33.0);
+                    let mut name = egui::text::LayoutJob::single_section(q.name.clone(), ui_fmt(TXT_BODY, BRIGHT(), W_MEDIUM, 0.0));
+                    name.wrap = egui::text::TextWrapping::truncate_at_width(rect.width() - CLOSE_W - 8.0);
+                    galley_at(&p, rect.left(), name_y, p.layout_job(name), BRIGHT());
+                    let mut tags = Vec::new();
+                    let mut job = match kind {
+                        LibKind::Query => {
+                            let set = |s: &str| !matches!(s.trim(), "" | "{}");
+                            tags.extend(set(&q.sort).then_some("sort".to_string()));
+                            tags.extend(set(&q.project).then_some("project".to_string()));
+                            json_job(&one_line(&q.filter))
+                        }
+                        LibKind::Pipeline => json_job(&one_line(q.pipeline.as_deref().unwrap_or_default())),
+                        LibKind::Sql => {
+                            let sql = q.sql.as_deref().unwrap_or_default();
+                            // Counted once per script text, not every frame.
+                            let key = ui.make_persistent_id(("lib-stmts", &q.name, sql.len()));
+                            let n = ui.data(|d| d.get_temp::<usize>(key)).unwrap_or_else(|| {
+                                let n = crate::db::sql::lex::split_statements(sql).iter().filter(|(_, s)| !s.trim().is_empty()).count();
+                                ui.data_mut(|d| d.insert_temp(key, n));
+                                n
+                            });
+                            tags.extend((n > 1).then(|| format!("{n} statements")));
+                            sql_job(&one_line(sql), TXT_BODY)
+                        }
                     };
-                    let preview: String = preview.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(60).collect();
-                    if ui.add(quiet_button(RichText::new(&q.name).color(BRIGHT()))).on_hover_text(preview.as_str()).clicked() {
+                    let mut right = rect.right();
+                    for t in tags.iter().rev() {
+                        right = tag_at(&p, right, code_y, t, MUTED()) - 6.0;
+                    }
+                    job.wrap = egui::text::TextWrapping::truncate_at_width(right - rect.left() - 2.0);
+                    galley_at(&p, rect.left(), code_y, p.layout_job(job), TEXT());
+                    if hovered && row_close(ui, rect, name_y, "Delete") {
+                        acts.push(QAct::Delete(q.name.clone()));
+                    }
+                    if row.clicked() {
                         acts.push(QAct::Load(q.clone()));
                         ui.close();
                     }
-                    ui.label(RichText::new(preview).monospace().size(TXT_CAPTION).color(FAINT()));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if close_x(ui).on_hover_text("Delete").clicked() {
-                            acts.push(QAct::Delete(q.name.clone()));
-                        }
-                    });
-                });
+                }
+            });
+            popover_divider(ui);
+            section_head(ui, save, None);
+            let id = ui.make_persistent_id("lib-new");
+            let name = new_name.trim().to_string();
+            let replaces = lib.iter().any(|q| q.name == name);
+            well_field(ui, id, FieldIcon::Plus, replaces.then(WARNING), |ui| {
+                let r = ui.add(field_edit(new_name, id, "Name", ui.available_width() - 64.0, egui::TextStyle::Body));
+                if field_button(ui, &r, "Save", 56.0, !name.is_empty(), false) {
+                    acts.push(QAct::Save(name.clone()));
+                    new_name.clear();
+                }
+            });
+            if replaces {
+                field_note(ui, &format!("Replaces the saved \"{name}\"."), WARNING());
             }
         });
-        ui.separator();
-        caption(ui, match kind {
-            LibKind::Pipeline => "SAVE THIS PIPELINE",
-            LibKind::Query => "SAVE THIS QUERY (query, sort and project)",
-            LibKind::Sql => "SAVE THIS SCRIPT",
-        });
-        ui.horizontal(|ui| {
-            let r = ui.add(egui::TextEdit::singleline(new_name).hint_text("name").desired_width(200.0));
-            let ok = !new_name.trim().is_empty();
-            if ui.add_enabled(ok, egui::Button::new("Save")).clicked() || (ok && r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))) {
-                acts.push(QAct::Save(new_name.trim().to_string()));
-                new_name.clear();
-            }
-        });
-        ui.label(RichText::new("Saving under an existing name replaces it.").size(TXT_CAPTION).color(FAINT()));
     };
     if icon {
-        icon_menu(ui, paint_book, true, body).on_hover_text(title)
+        icon_menu(ui, paint_book, true, body).on_hover_text(head)
     } else {
-        sticky_menu(ui, title, body)
+        sticky_menu(ui, format!("Library {}", lib.len()), body)
     }
 }
 

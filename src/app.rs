@@ -159,7 +159,6 @@ pub struct App {
     /// A CSV import or a script file running, shown in the status bar with a Cancel.
     sql_job: Option<sql_dump::SqlJob>,
     prefs: UiPrefs,
-    new_col: String,
     col_filter: String,
     /// Column data actions cover the whole query instead of the loaded page.
     col_scope_query: bool,
@@ -307,7 +306,6 @@ impl App {
             export_job: None,
             sql_job: None,
             prefs: UiPrefs::default(),
-            new_col: String::new(),
             col_filter: String::new(),
             col_scope_query: false,
             // Screenshot runs stay off the real menu bar.
@@ -530,7 +528,8 @@ impl eframe::App for App {
     /// Test switch for the demo picture: QUARRY_TEST_POINTER="x,y" hovers that point,
     /// "x,y,down" also holds the primary button there, to check hover and press states, and
     /// "x,y,right" right-clicks there once on frame 60, so the capture shows the context menu;
-    /// "x,y,right,x2,y2" then moves the pointer to x2,y2 to open a submenu.
+    /// "x,y,right,x2,y2" then moves the pointer to x2,y2 to open a submenu; "x,y,click" left-clicks
+    /// there once on frame 60, to open a menu button's popover.
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
         #[cfg(not(target_os = "macos"))]
         let _ = ctx;
@@ -557,9 +556,10 @@ impl eframe::App for App {
         match mode {
             Some("down") => raw.events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() }),
             // One right-click partway through, so the capture shows the context menu settled.
-            Some("right") if self.shot.as_ref().is_some_and(|s| s.1 == 60) => {
+            Some(m @ ("right" | "click")) if self.shot.as_ref().is_some_and(|s| s.1 == 60) => {
+                let button = if m == "right" { egui::PointerButton::Secondary } else { egui::PointerButton::Primary };
                 for pressed in [true, false] {
-                    raw.events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default() });
+                    raw.events.push(egui::Event::PointerButton { pos, button, pressed, modifiers: Default::default() });
                 }
             }
             _ => {}
