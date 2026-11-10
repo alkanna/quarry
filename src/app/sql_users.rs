@@ -1,13 +1,13 @@
-//! The Users and privileges window of a SQL connection and its New user dialog. The statements and
-//! their inverses come from `db::sql::users`; this file draws and routes the answers.
+//! The Users and privileges window of a SQL connection, its New user and Change password dialogs. The
+//! statements and their inverses come from `db::sql::users`; this file draws and routes the answers.
 
 use super::*;
 use db::sql::ddl::Mode;
-use db::sql::users::{self, Account, Edit, Grant, Op, Scope, UserList, DB_PRIVS};
+use db::sql::users::{self, Account, AccountInfo, AccountPlan, Caps, Edit, Expire, Grant, Loaded, Op, Scope, Settings, Tls, UserList, DB_PRIVS};
+use db::sql::Dialect;
 
-const NOTE_APPLY: &str = "Read-only: unlock writes to change privileges";
+const NOTE_APPLY: &str = "Read-only: unlock writes to change this account";
 const NOTE_USER: &str = "Read-only: unlock writes to create a user";
-const SOON: &str = "Coming soon";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum UTab {
@@ -15,6 +15,14 @@ pub(super) enum UTab {
     Global,
     Databases,
     Limits,
+}
+
+/// How the password lifetime is chosen; "After N days" has its number in a field beside it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ExpKind {
+    Never,
+    Default,
+    Days,
 }
 
 /// One database of the Databases tab: what the server holds and what the boxes say now.
@@ -35,20 +43,70 @@ pub(super) struct SqlUsersWin {
     pub(super) tab: UTab,
     pub(super) grants_req: u64,
     pub(super) grants: Option<db::Res<Vec<Grant>>>,
+    pub(super) info: Option<AccountInfo>,
+    /// Why the login settings are not shown.
+    pub(super) info_err: Option<String>,
     pub(super) rows: Vec<GrantRow>,
     /// The name being typed for "+ Database".
     pub(super) adding: Option<String>,
     /// An Apply is running.
     pub(super) busy: bool,
+    // Account tab.
+    pub(super) name: String,
+    pub(super) host: String,
+    pub(super) locked: bool,
+    pub(super) exp: ExpKind,
+    pub(super) days: String,
+    pub(super) tls: Tls,
+    pub(super) roles_orig: Vec<String>,
+    pub(super) roles_now: Vec<String>,
+    pub(super) role_add: Option<String>,
+    // Global tab.
+    pub(super) g_orig: BTreeSet<String>,
+    pub(super) g_now: BTreeSet<String>,
+    pub(super) priv_add: Option<String>,
+    // Limits tab, as typed.
+    pub(super) limits: [String; 4],
 }
 
 impl SqlUsersWin {
     fn new(conn: u64) -> SqlUsersWin {
-        SqlUsersWin { conn, list_req: 0, list: None, filter: String::new(), sel: None, tab: UTab::Databases, grants_req: 0, grants: None, rows: Vec::new(), adding: None, busy: false }
+        SqlUsersWin {
+            conn,
+            list_req: 0,
+            list: None,
+            filter: String::new(),
+            sel: None,
+            tab: UTab::Databases,
+            grants_req: 0,
+            grants: None,
+            info: None,
+            info_err: None,
+            rows: Vec::new(),
+            adding: None,
+            busy: false,
+            name: String::new(),
+            host: String::new(),
+            locked: false,
+            exp: ExpKind::Default,
+            days: "90".into(),
+            tls: Tls::None,
+            roles_orig: Vec::new(),
+            roles_now: Vec::new(),
+            role_add: None,
+            g_orig: BTreeSet::new(),
+            g_now: BTreeSet::new(),
+            priv_add: None,
+            limits: Default::default(),
+        }
     }
 
     fn edits(&self) -> Vec<Edit> {
         self.rows.iter().map(|r| users::diff(&r.pattern, &r.orig, &r.now)).filter(|e| !e.is_empty()).collect()
+    }
+
+    fn global_edits(&self) -> Vec<Edit> {
+        Some(users::diff("", &self.g_orig, &self.g_now)).filter(|e| !e.is_empty()).into_iter().collect()
     }
 
     fn account(&self) -> Option<Account> {
@@ -56,14 +114,91 @@ impl SqlUsersWin {
         let found = self.list.as_ref().and_then(|l| l.as_ref().ok()).and_then(|l| l.accounts.iter().find(|a| &a.user == u && &a.host == h));
         Some(found.cloned().unwrap_or_else(|| Account::named(u, h)))
     }
+
+    /// The fields of the Account tab from the server's values, and the other tabs' too.
+    fn fill(&mut self, acct: &Account, l: &Loaded) {
+        self.rows = users::db_grants(&l.grants).into_iter().map(|(pattern, s)| GrantRow { pattern, orig: s.clone(), now: s }).collect();
+        self.rows.sort_by_key(|r| users::shown_pattern(&r.pattern).to_lowercase());
+        self.adding = None;
+        self.role_add = None;
+        self.priv_add = None;
+        self.g_orig = users::global_privs(&l.grants);
+        self.g_now = self.g_orig.clone();
+        self.roles_orig = users::roles_of(&l.grants);
+        self.roles_now = self.roles_orig.clone();
+        self.name = acct.user.clone();
+        self.host = acct.host.clone();
+        self.info = l.info.clone();
+        self.info_err = l.info_err.clone();
+        let s = l.info.as_ref().map(|i| i.settings.clone()).unwrap_or_default();
+        self.locked = s.locked;
+        (self.exp, self.days) = match s.expire {
+            Expire::Never => (ExpKind::Never, "90".into()),
+            Expire::Default => (ExpKind::Default, "90".into()),
+            Expire::Days(n) => (ExpKind::Days, n.to_string()),
+        };
+        self.tls = s.tls;
+        self.limits = s.limits.map(|n| n.to_string());
+    }
+
+    fn orig_settings(&self) -> Settings {
+        self.info.as_ref().map(|i| i.settings.clone()).unwrap_or_default()
+    }
+
+    /// The Account tab's changes: a rename, the lock, lifetime and TLS, and roles.
+    fn account_plan(&self, acct: &Account) -> Result<AccountPlan, String> {
+        let orig = self.orig_settings();
+        let expire = match self.exp {
+            ExpKind::Never => Expire::Never,
+            ExpKind::Default => Expire::Default,
+            ExpKind::Days => Expire::Days(self.days.trim().parse().map_err(|_| "Days is a whole number.".to_string())?),
+        };
+        let now = Settings { locked: self.locked, expire, tls: self.tls, limits: orig.limits };
+        let rename = ((self.name.as_str(), self.host.as_str()) != (acct.user.as_str(), acct.host.as_str())).then(|| Account::named(&self.name, &self.host));
+        let diff = |a: &[String], b: &[String]| a.iter().filter(|r| !b.contains(r)).cloned().collect::<Vec<_>>();
+        Ok(AccountPlan {
+            rename,
+            settings: self.info.is_some().then_some((orig, now)),
+            roles_grant: diff(&self.roles_now, &self.roles_orig),
+            roles_revoke: diff(&self.roles_orig, &self.roles_now),
+        })
+    }
+
+    /// The Limits tab's changes.
+    fn limits_plan(&self) -> Result<AccountPlan, String> {
+        let orig = self.orig_settings();
+        let mut now = orig.clone();
+        for (i, t) in self.limits.iter().enumerate() {
+            now.limits[i] = t.trim().parse().map_err(|_| "A limit is a whole number, 0 for none.".to_string())?;
+        }
+        Ok(AccountPlan { settings: self.info.is_some().then_some((orig, now)), ..Default::default() })
+    }
+
+    /// Whether a tab holds staged changes, for the mark on its title.
+    fn staged(&self, tab: UTab, acct: &Account) -> bool {
+        match tab {
+            UTab::Databases => !self.edits().is_empty(),
+            UTab::Global => !self.global_edits().is_empty(),
+            UTab::Account => self.account_plan(acct).map_or(true, |p| !p.is_empty()),
+            UTab::Limits => self.limits_plan().map_or(true, |p| !p.is_empty()),
+        }
+    }
 }
 
 pub(super) struct NewUser {
     pub(super) conn: u64,
     pub(super) user: String,
     pub(super) host: String,
-    /// Typed here and handed to the worker by Apply; never shown, logged or kept after.
+    /// Typed here and handed to the worker by Create; never shown, logged or kept after.
     pub(super) password: String,
+}
+
+pub(super) struct PwForm {
+    pub(super) conn: u64,
+    pub(super) acct: Account,
+    pub(super) plugin: String,
+    pub(super) password: String,
+    pub(super) again: String,
 }
 
 enum Act {
@@ -72,8 +207,23 @@ enum Act {
     Close,
     NewUser,
     Drop(Account),
+    Password(Account, String),
     Unlock,
     Refresh,
+}
+
+/// What the tabs need to know about the server and connection.
+struct Env {
+    writable: bool,
+    mode: Mode,
+    dialect: Dialect,
+    caps: Caps,
+    /// Databases for "+ Database".
+    known: Vec<String>,
+    /// Existing roles for "+ Role" (MariaDB lists them; MySQL roles are plain accounts).
+    roles: Vec<String>,
+    /// The authentication plugin MySQL would pick for a new password.
+    plugin: String,
 }
 
 /// "8.4" from "8.4.3" or "11.4.5-MariaDB", the way the design's subtitle says it.
@@ -88,13 +238,16 @@ fn sql_block(ui: &mut egui::Ui, text: &str) {
     });
 }
 
-/// A tab that exists in the design's order but is built later: visible, not clickable.
-fn soon_tab(ui: &mut egui::Ui, label: &str) {
-    let g = ui.painter().layout_no_wrap(label.to_string(), FontId::proportional(13.0), tint(FAINT(), 150));
-    let (rect, r) = ui.allocate_exact_size(egui::vec2(g.size().x, 30.0), Sense::hover());
-    let dy = optical_dy(&g);
-    ui.painter().galley(egui::pos2(rect.left(), rect.center().y - g.size().y / 2.0 + dy - 1.0), g, tint(FAINT(), 150));
-    r.on_hover_text(SOON).on_hover_cursor(egui::CursorIcon::NotAllowed);
+/// A preview block that says why there is none: nothing staged, or a field that is not valid yet.
+fn preview_block(ui: &mut egui::Ui, text: Result<String, String>) {
+    match text {
+        Ok(t) if t.is_empty() => sql_block(ui, "-- No changes yet."),
+        Ok(t) => sql_block(ui, &t),
+        Err(e) => {
+            sql_block(ui, "-- Not valid yet.");
+            ui.label(RichText::new(e).size(TXT_SMALL).color(ALERT()));
+        }
+    }
 }
 
 impl App {
@@ -105,6 +258,15 @@ impl App {
     /// The sql_mode the connection read, for the previews; Apply quotes for the session's own.
     fn users_mode(&self, conn: u64) -> Mode {
         self.users_sql(conn).map_or(Mode::DEFAULT, |s| Mode::of(&s.sql_mode))
+    }
+
+    fn users_dialect(&self, conn: u64) -> Dialect {
+        self.users_sql(conn).map_or(Dialect::MySql, |s| s.dialect)
+    }
+
+    /// The demo has no server, so it assumes a current MySQL.
+    fn users_caps(&self, conn: u64) -> Caps {
+        self.users_sql(conn).map_or_else(|| Caps::of(Dialect::MySql, "8.4.3"), |s| Caps::of(s.dialect, &s.version))
     }
 
     pub(super) fn open_sql_users(&mut self, conn: u64) {
@@ -151,32 +313,36 @@ impl App {
         self.sql_users_ask_grants();
     }
 
-    pub(super) fn sql_user_grants_loaded(&mut self, conn: u64, req: u64, res: db::Res<Vec<Grant>>) {
+    pub(super) fn sql_user_grants_loaded(&mut self, conn: u64, req: u64, res: db::Res<Loaded>) {
         let Some(w) = self.sql_users.as_mut().filter(|w| w.conn == conn && w.grants_req == req) else { return };
-        w.rows = match &res {
-            Ok(g) => {
-                let mut rows: Vec<GrantRow> = users::db_grants(g).into_iter().map(|(pattern, s)| GrantRow { pattern, orig: s.clone(), now: s }).collect();
-                rows.sort_by_key(|r| users::shown_pattern(&r.pattern).to_lowercase());
-                rows
+        match res {
+            Ok(l) => {
+                if let Some(acct) = w.account() {
+                    w.fill(&acct, &l);
+                }
+                w.grants = Some(Ok(l.grants));
             }
-            Err(_) => Vec::new(),
-        };
-        w.grants = Some(res);
+            Err(e) => {
+                w.rows.clear();
+                w.grants = Some(Err(e));
+            }
+        }
     }
 
-    /// An edit, create, drop or undo finished. The window reads the server again, so it shows what is there.
-    pub(super) fn sql_user_done(&mut self, conn: u64, account: Account, op: Op, res: db::Res<String>, undo: Option<UndoAction>) {
+    /// An edit, create, drop, password change or undo finished. The window reads the server again, so it shows what is there.
+    pub(super) fn sql_user_done(&mut self, conn: u64, account: Account, op: Op, res: db::Res<String>, undo: Vec<UndoAction>) {
         match res {
             Ok(s) => self.ok(s),
             Err(e) => self.err(e),
         }
-        if let Some(u) = undo {
+        // Oldest first, so the newest ends on top of Recent changes.
+        for u in undo {
             self.push_undo(u);
         }
         let Some(w) = self.sql_users.as_mut().filter(|w| w.conn == conn) else { return };
         w.busy = false;
         match op {
-            Op::Created => w.sel = Some((account.user.clone(), account.host.clone())),
+            Op::Created | Op::Renamed => w.sel = Some((account.user.clone(), account.host.clone())),
             Op::Dropped if w.sel.as_ref() == Some(&(account.user.clone(), account.host.clone())) => w.sel = None,
             _ => {}
         }
@@ -210,11 +376,9 @@ impl App {
         self.worker.sql_user_drop(conn, sql, acct, false);
     }
 
+    /// Runs what the open tab has staged.
     fn sql_user_apply(&mut self) {
-        let Some((conn, acct, edits)) = self.sql_users.as_ref().and_then(|w| Some((w.conn, w.account()?, w.edits()))) else { return };
-        if edits.is_empty() {
-            return;
-        }
+        let Some((conn, acct, tab)) = self.sql_users.as_ref().and_then(|w| Some((w.conn, w.account()?, w.tab))) else { return };
         if self.demo {
             return self.ok("Offline demo: no database is connected.");
         }
@@ -223,10 +387,25 @@ impl App {
             return self.modal = Some(Modal::Unlock(conn, None));
         }
         let Some(sql) = c.sql.clone() else { return self.err("Not connected.") };
-        if let Some(w) = &mut self.sql_users {
-            w.busy = true;
+        let Some(w) = self.sql_users.as_mut() else { return };
+        let plan = match tab {
+            UTab::Databases | UTab::Global => None,
+            UTab::Account => w.account_plan(&acct).ok(),
+            UTab::Limits => w.limits_plan().ok(),
+        };
+        let edits = match tab {
+            UTab::Databases => w.edits(),
+            UTab::Global => w.global_edits(),
+            _ => Vec::new(),
+        };
+        if edits.is_empty() && plan.as_ref().is_none_or(|p| p.is_empty()) {
+            return;
         }
-        self.worker.sql_user_edit(conn, sql, acct, edits, false);
+        w.busy = true;
+        match plan {
+            Some(p) => self.worker.sql_user_account(conn, sql, acct, p, false),
+            None => self.worker.sql_user_edit(conn, sql, acct, edits, false),
+        }
     }
 
     pub(super) fn sql_users_window(&mut self, ctx: &egui::Context) {
@@ -235,9 +414,17 @@ impl App {
         let writable = self.conn(conn).is_some_and(|c| c.writable);
         let conn_name = self.conn(conn).map(|c| c.meta.name.clone()).unwrap_or_default();
         let product = self.conn(conn).map(|c| (c.server.product.clone(), short_version(&c.server.version))).filter(|(p, _)| !p.is_empty()).map_or(String::new(), |(p, v)| format!("{p} {v}"));
-        let mode = self.users_mode(conn);
-        // Databases the server has, for the "+ Database" picker; the server's own are left out.
-        let known: Vec<String> = self.conn(conn).map(|c| c.dbs.iter().map(|d| d.0.clone()).filter(|d| !db::sql::create::SYSTEM_SCHEMAS.contains(&d.as_str())).collect()).unwrap_or_default();
+        let dialect = self.users_dialect(conn);
+        let env = Env {
+            writable,
+            mode: self.users_mode(conn),
+            dialect,
+            caps: self.users_caps(conn),
+            // The server's own databases are left out.
+            known: self.conn(conn).map(|c| c.dbs.iter().map(|d| d.0.clone()).filter(|d| !db::sql::create::SYSTEM_SCHEMAS.contains(&d.as_str())).collect()).unwrap_or_default(),
+            roles: w.list.as_ref().and_then(|l| l.as_ref().ok()).map(|l| l.accounts.iter().filter(|a| a.is_role).map(|a| a.user.clone()).collect()).unwrap_or_default(),
+            plugin: w.info.as_ref().map(|i| i.plugin.clone()).unwrap_or_default(),
+        };
         let mut acts: Vec<Act> = Vec::new();
         let screen = ctx.content_rect();
         let r = dialog(egui::Id::unique(("quarry-layer", "sql-users-window"))).show(ctx, |ui| {
@@ -266,24 +453,35 @@ impl App {
                 ui.add_space(12.0);
                 ui.vertical(|ui| {
                     ui.set_width(ui.available_width());
-                    self.users_detail(ui, &mut w, writable, mode, &known, &mut acts);
+                    self.users_detail(ui, &mut w, &env, &mut acts);
                 });
             });
             ui.add_space(6.0);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let can = w.tab == UTab::Databases && writable && !w.busy && !w.edits().is_empty() && users::preview(mode, &w.account().unwrap_or_default(), &w.edits()).is_ok();
-                if ui.add_enabled(can, primary_button(ui, "Apply", PRIMARY())).on_disabled_hover_text(if !writable { NOTE_APPLY } else { "Nothing to apply" }).clicked() {
-                    acts.push(Act::Apply);
-                }
-                if ui.button("Cancel").on_hover_text("Esc").clicked() {
-                    acts.push(Act::Close);
-                }
-                if !writable {
-                    if quiet(ui, "Unlock…").clicked() {
-                        acts.push(Act::Unlock);
+            let acct = w.account();
+            let can = self.users_can_apply(&w, &env);
+            ui.horizontal(|ui| {
+                // Dropping sits at the left of the Account tab's footer, as in the design.
+                if w.tab == UTab::Account {
+                    if let Some(a) = acct.clone().filter(|_| w.list.is_some()) {
+                        if ui.add_enabled_ui(writable, |ui| danger(ui, "Drop user…")).inner.on_disabled_hover_text("Read-only: unlock writes to drop a user").clicked() {
+                            acts.push(Act::Drop(a));
+                        }
                     }
-                    ui.label(RichText::new(NOTE_APPLY).size(TXT_SMALL).color(FAINT()));
                 }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add_enabled(can, primary_button(ui, "Apply", PRIMARY())).on_disabled_hover_text(if !writable { NOTE_APPLY } else { "Nothing to apply" }).clicked() {
+                        acts.push(Act::Apply);
+                    }
+                    if ui.button("Cancel").on_hover_text("Esc").clicked() {
+                        acts.push(Act::Close);
+                    }
+                    if !writable {
+                        if quiet(ui, "Unlock…").clicked() {
+                            acts.push(Act::Unlock);
+                        }
+                        ui.label(RichText::new(NOTE_APPLY).size(TXT_SMALL).color(FAINT()));
+                    }
+                });
             });
         });
         let mut open = true;
@@ -299,6 +497,13 @@ impl App {
                 Act::Close => open = false,
                 Act::NewUser => self.sql_new_user(conn),
                 Act::Drop(a) => self.sql_user_drop_ask(conn, a),
+                Act::Password(a, plugin) => {
+                    if writable {
+                        self.modal = Some(Modal::SqlPassword(Box::new(PwForm { conn, acct: a, plugin, password: String::new(), again: String::new() })));
+                    } else {
+                        self.modal = Some(Modal::Unlock(conn, None));
+                    }
+                }
                 Act::Unlock => self.modal = Some(Modal::Unlock(conn, None)),
                 Act::Refresh => {
                     self.sql_users = Some(w);
@@ -317,6 +522,20 @@ impl App {
         self.sql_users = Some(w);
         if picked {
             self.sql_users_ask_grants();
+        }
+    }
+
+    /// Whether the open tab has something valid to run on a connection that allows writes.
+    fn users_can_apply(&self, w: &SqlUsersWin, env: &Env) -> bool {
+        let Some(acct) = w.account() else { return false };
+        if !env.writable || w.busy || !matches!(w.grants, Some(Ok(_))) {
+            return false;
+        }
+        match w.tab {
+            UTab::Databases => !w.edits().is_empty() && users::preview(env.mode, &acct, &w.edits()).is_ok(),
+            UTab::Global => !w.global_edits().is_empty() && users::preview(env.mode, &acct, &w.global_edits()).is_ok(),
+            UTab::Account => env.caps.alter_user && w.account_plan(&acct).and_then(|p| if p.is_empty() { Err(String::new()) } else { users::plan_sql(env.mode, env.dialect, &acct, &p) }).is_ok(),
+            UTab::Limits => env.caps.alter_user && w.limits_plan().and_then(|p| if p.is_empty() { Err(String::new()) } else { users::plan_sql(env.mode, env.dialect, &acct, &p) }).is_ok(),
         }
     }
 
@@ -361,28 +580,24 @@ impl App {
         }
     }
 
-    fn users_detail(&self, ui: &mut egui::Ui, w: &mut SqlUsersWin, writable: bool, mode: Mode, known: &[String], acts: &mut Vec<Act>) {
+    fn users_detail(&self, ui: &mut egui::Ui, w: &mut SqlUsersWin, env: &Env, acts: &mut Vec<Act>) {
+        let acct = w.account();
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 18.0;
             for (tab, label) in [(UTab::Account, "Account"), (UTab::Global, "Global"), (UTab::Databases, "Databases"), (UTab::Limits, "Limits")] {
-                if tab == UTab::Databases {
-                    if view_tab(ui, label, true).clicked() {
-                        w.tab = tab;
-                    }
-                } else {
-                    soon_tab(ui, label);
+                // A staged change is marked on its tab, since Apply only runs the open one.
+                let staged = acct.as_ref().is_some_and(|a| w.grants.is_some() && w.staged(tab, a));
+                let r = view_tab(ui, &if staged { format!("{label} •") } else { label.to_string() }, w.tab == tab);
+                if r.clicked() {
+                    w.tab = tab;
                 }
-            }
-            if let Some(a) = w.account().filter(|_| w.list.is_some()) {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add_enabled_ui(writable, |ui| danger(ui, "Drop user…")).inner.on_disabled_hover_text("Read-only: unlock writes to drop a user").clicked() {
-                        acts.push(Act::Drop(a));
-                    }
-                });
+                if staged {
+                    r.on_hover_text("Has changes that are not applied yet");
+                }
             }
         });
         ui.add_space(8.0);
-        let Some(acct) = w.account() else {
+        let Some(acct) = acct else {
             ui.label(RichText::new("No user chosen.").color(MUTED()));
             return;
         };
@@ -397,6 +612,260 @@ impl App {
             }
             Some(Ok(_)) => {}
         }
+        match w.tab {
+            UTab::Account => self.tab_account(ui, w, env, &acct, acts),
+            UTab::Global => self.tab_global(ui, w, env, &acct),
+            UTab::Databases => self.tab_databases(ui, w, env, &acct),
+            UTab::Limits => self.tab_limits(ui, w, env, &acct),
+        }
+        if w.busy {
+            ui.horizontal(|ui| {
+                spin(ui);
+                ui.label(RichText::new("Applying…").color(MUTED()));
+            });
+        }
+    }
+
+    fn tab_account(&self, ui: &mut egui::Ui, w: &mut SqlUsersWin, env: &Env, acct: &Account, acts: &mut Vec<Act>) {
+        let editable = w.info.is_some() && env.caps.alter_user;
+        if let Some(why) = w.info_err.as_ref().filter(|_| w.info.is_none()) {
+            ui.add(egui::Label::new(RichText::new(format!("The login settings cannot be read: {why}")).size(TXT_SMALL).color(WARNING())).wrap());
+        } else if !env.caps.alter_user {
+            ui.label(RichText::new("This server version cannot change these settings with ALTER USER.").size(TXT_SMALL).color(WARNING()));
+        }
+        caption(ui, "LOGIN");
+        ui.add_space(4.0);
+        egui::Grid::new("acc-login").num_columns(3).spacing([14.0, 10.0]).min_col_width(170.0).show(ui, |ui| {
+            form_label(ui, "User name");
+            ui.add_enabled(!acct.is_role, egui::TextEdit::singleline(&mut w.name).font(egui::TextStyle::Monospace).desired_width(240.0));
+            ui.end_row();
+            form_label(ui, "Host");
+            ui.add_enabled(!acct.is_role, egui::TextEdit::singleline(&mut w.host).font(egui::TextStyle::Monospace).desired_width(240.0));
+            ui.label(RichText::new("% is any host").size(TXT_SMALL).color(FAINT()));
+            ui.end_row();
+            form_label(ui, "Authentication plugin");
+            // Changing the plugin needs a new password, so it is chosen in the Change password dialog.
+            let plugin = w.info.as_ref().map(|i| i.plugin.clone()).unwrap_or_default();
+            ui.add_enabled(false, egui::TextEdit::singleline(&mut plugin.clone()).font(egui::TextStyle::Monospace).desired_width(240.0)).on_disabled_hover_text(if env.caps.plugin_choice { "Pick another plugin in Change password" } else { "The plugin of this account" });
+            ui.end_row();
+            form_label(ui, "Password");
+            ui.horizontal(|ui| {
+                if ui.add_enabled(!acct.is_role && env.caps.alter_user, egui::Button::new("Change password…")).on_disabled_hover_text(if env.writable { "Not available for this account" } else { NOTE_APPLY }).clicked() {
+                    acts.push(Act::Password(acct.clone(), env.plugin.clone()));
+                }
+                ui.label(RichText::new("A new password cannot be undone").size(TXT_SMALL).color(FAINT()));
+            });
+            ui.end_row();
+        });
+        ui.add_space(10.0);
+        caption(ui, "ACCESS");
+        ui.add_space(4.0);
+        ui.add_enabled_ui(editable, |ui| {
+            egui::Grid::new("acc-access").num_columns(2).spacing([14.0, 10.0]).min_col_width(170.0).show(ui, |ui| {
+                form_label(ui, "Account locked");
+                ui.add_enabled(env.caps.lock, egui::Checkbox::new(&mut w.locked, "Refuse new logins for this account")).on_disabled_hover_text("This server version has no ACCOUNT LOCK");
+                ui.end_row();
+                form_label(ui, "Password expires");
+                ui.add_enabled_ui(env.caps.lifetime, |ui| {
+                    ui.horizontal(|ui| {
+                        segmented(ui, &mut w.exp, &[(ExpKind::Never, "Never"), (ExpKind::Default, "Server default"), (ExpKind::Days, "After N days")]);
+                        if w.exp == ExpKind::Days {
+                            ui.add(egui::TextEdit::singleline(&mut w.days).font(egui::TextStyle::Monospace).desired_width(60.0));
+                            ui.label(RichText::new("days").size(TXT_SMALL).color(FAINT()));
+                        }
+                    });
+                });
+                ui.end_row();
+                form_label(ui, "Require TLS");
+                ui.horizontal(|ui| {
+                    segmented(ui, &mut w.tls, &[(Tls::None, "None"), (Tls::Ssl, "TLS"), (Tls::X509, "X509")]);
+                    if w.tls == Tls::Specified {
+                        ui.label(RichText::new("A cipher or certificate requirement is set; pick one to replace it").size(TXT_SMALL).color(FAINT()));
+                    }
+                });
+                ui.end_row();
+                if env.caps.roles && !acct.is_role {
+                    form_label(ui, "Roles");
+                    self.role_chips(ui, w, env);
+                    ui.end_row();
+                }
+            });
+        });
+        ui.add_space(10.0);
+        caption(ui, "STATEMENTS TO RUN");
+        ui.add_space(4.0);
+        preview_block(ui, w.account_plan(acct).and_then(|p| users::plan_preview(env.mode, env.dialect, acct, &p)));
+    }
+
+    fn role_chips(&self, ui: &mut egui::Ui, w: &mut SqlUsersWin, env: &Env) {
+        ui.horizontal_wrapped(|ui| {
+            let mut all: Vec<String> = w.roles_orig.clone();
+            for r in &w.roles_now {
+                if !all.contains(r) {
+                    all.push(r.clone());
+                }
+            }
+            for r in all {
+                let on = w.roles_now.contains(&r);
+                let hint = if !on { "Will be taken away; click to keep" } else if w.roles_orig.contains(&r) { "Click to take this role away" } else { "Will be given; click to cancel" };
+                if chip(ui, &users::role_shown(&r), PRIMARY(), on).on_hover_text(hint).clicked() {
+                    if on {
+                        w.roles_now.retain(|x| *x != r);
+                    } else {
+                        w.roles_now.push(r);
+                    }
+                }
+            }
+            if w.role_add.is_none() {
+                if ui.button("+ Role").clicked() {
+                    w.role_add = Some(String::new());
+                }
+                return;
+            }
+            let mut add = false;
+            let mut cancel = false;
+            let text = w.role_add.as_mut().unwrap();
+            let r = ui.add(egui::TextEdit::singleline(text).hint_text("role name").font(egui::TextStyle::Monospace).desired_width(140.0));
+            if !r.has_focus() && text.is_empty() {
+                r.request_focus();
+            }
+            if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                add = true;
+            }
+            if !env.roles.is_empty() {
+                egui::ComboBox::from_id_salt("sql-users-roles").width(120.0).selected_text("Existing").show_ui(ui, |ui| {
+                    menu_look(ui);
+                    for n in &env.roles {
+                        if ui.selectable_label(false, n.as_str()).clicked() {
+                            *text = n.clone();
+                        }
+                    }
+                });
+            }
+            if ui.add_enabled(!text.trim().is_empty(), primary_button(ui, "Add", PRIMARY())).clicked() {
+                add = true;
+            }
+            if ui.button("Cancel").clicked() {
+                cancel = true;
+            }
+            if add && !text.trim().is_empty() {
+                // MySQL names a role with its host, % when none is given.
+                let name = text.trim().to_string();
+                let role = if env.dialect == Dialect::MySql && !name.contains('@') { format!("{name}@%") } else { name };
+                if !w.roles_now.contains(&role) {
+                    w.roles_now.push(role);
+                }
+                w.role_add = None;
+            } else if cancel {
+                w.role_add = None;
+            }
+        });
+    }
+
+    fn tab_global(&self, ui: &mut egui::Ui, w: &mut SqlUsersWin, env: &Env, acct: &Account) {
+        ui.columns(3, |cols| {
+            for (ui, (title, list)) in cols.iter_mut().zip([("DATA", &users::GLOBAL_DATA[..]), ("STRUCTURE", &users::GLOBAL_STRUCTURE[..]), ("ADMINISTRATION", &users::GLOBAL_ADMIN[..])]) {
+                caption(ui, title);
+                ui.add_space(4.0);
+                for p in list {
+                    let mut on = w.g_now.contains(*p);
+                    if ui.checkbox(&mut on, users::priv_title(p)).changed() {
+                        if on {
+                            w.g_now.insert(p.to_string());
+                        } else {
+                            w.g_now.remove(*p);
+                        }
+                    }
+                }
+            }
+        });
+        if env.caps.dynamic {
+            ui.add_space(6.0);
+            ui.separator();
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Dynamic privileges (MySQL 8)").color(MUTED()));
+                let mut all: Vec<String> = w.g_orig.iter().filter(|p| users::is_dynamic(p)).cloned().collect();
+                for p in w.g_now.iter().filter(|p| users::is_dynamic(p)) {
+                    if !all.contains(p) {
+                        all.push(p.clone());
+                    }
+                }
+                for p in all {
+                    let on = w.g_now.contains(&p);
+                    let hint = if !on { "Will be revoked; click to keep" } else if w.g_orig.contains(&p) { "Click to revoke" } else { "Will be granted; click to cancel" };
+                    if chip(ui, &p, PRIMARY(), on).on_hover_text(hint).clicked() {
+                        if on {
+                            w.g_now.remove(&p);
+                        } else {
+                            w.g_now.insert(p);
+                        }
+                    }
+                }
+                match &mut w.priv_add {
+                    None => {
+                        if ui.button("+ Privilege").clicked() {
+                            w.priv_add = Some(String::new());
+                        }
+                    }
+                    Some(text) => {
+                        let mut done = None;
+                        let r = ui.add(egui::TextEdit::singleline(text).hint_text("CONNECTION_ADMIN").font(egui::TextStyle::Monospace).desired_width(200.0));
+                        if !r.has_focus() && text.is_empty() {
+                            r.request_focus();
+                        }
+                        let name = text.trim().to_ascii_uppercase();
+                        let ok = users::is_dynamic(&name);
+                        if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && ok {
+                            done = Some(true);
+                        }
+                        if ui.add_enabled(ok, primary_button(ui, "Add", PRIMARY())).on_disabled_hover_text("Capitals and underscores, like CONNECTION_ADMIN").clicked() {
+                            done = Some(true);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            done = Some(false);
+                        }
+                        if let Some(add) = done {
+                            if add {
+                                w.g_now.insert(name);
+                            }
+                            w.priv_add = None;
+                        }
+                    }
+                }
+            });
+        }
+        ui.add_space(10.0);
+        caption(ui, "GRANTS TO RUN");
+        ui.add_space(4.0);
+        preview_block(ui, users::preview(env.mode, acct, &w.global_edits()));
+    }
+
+    fn tab_limits(&self, ui: &mut egui::Ui, w: &mut SqlUsersWin, env: &Env, acct: &Account) {
+        let editable = w.info.is_some() && env.caps.alter_user;
+        if let Some(why) = w.info_err.as_ref().filter(|_| w.info.is_none()) {
+            ui.add(egui::Label::new(RichText::new(format!("The limits cannot be read: {why}")).size(TXT_SMALL).color(WARNING())).wrap());
+        }
+        caption(ui, "RESOURCE LIMITS");
+        ui.add_space(4.0);
+        ui.add_enabled_ui(editable, |ui| {
+            egui::Grid::new("limits").num_columns(2).spacing([14.0, 10.0]).min_col_width(190.0).show(ui, |ui| {
+                for (i, label) in ["Queries per hour", "Updates per hour", "Connections per hour", "Simultaneous connections"].into_iter().enumerate() {
+                    form_label(ui, label);
+                    ui.add(egui::TextEdit::singleline(&mut w.limits[i]).font(egui::TextStyle::Monospace).hint_text("0").desired_width(96.0));
+                    ui.end_row();
+                }
+            });
+        });
+        ui.add_space(4.0);
+        ui.label(RichText::new("0 means no limit. Counts reset every hour, or at FLUSH USER_RESOURCES.").size(TXT_SMALL).color(FAINT()));
+        ui.add_space(10.0);
+        caption(ui, "STATEMENTS TO RUN");
+        ui.add_space(4.0);
+        preview_block(ui, w.limits_plan().and_then(|p| users::plan_preview(env.mode, env.dialect, acct, &p)));
+    }
+
+    fn tab_databases(&self, ui: &mut egui::Ui, w: &mut SqlUsersWin, env: &Env, acct: &Account) {
         self.privilege_table(ui, w);
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -424,7 +893,7 @@ impl App {
                 if !r.has_focus() && text.is_empty() {
                     r.request_focus();
                 }
-                let free: Vec<&String> = known.iter().filter(|d| !w.rows.iter().any(|r| r.pattern == users::pattern_of(d))).collect();
+                let free: Vec<&String> = env.known.iter().filter(|d| !w.rows.iter().any(|r| r.pattern == users::pattern_of(d))).collect();
                 if !free.is_empty() {
                     egui::ComboBox::from_id_salt("sql-users-known").width(160.0).selected_text("Existing database").show_ui(ui, |ui| {
                         menu_look(ui);
@@ -462,20 +931,7 @@ impl App {
         ui.add_space(10.0);
         caption(ui, "GRANTS TO RUN");
         ui.add_space(4.0);
-        let edits = w.edits();
-        match users::preview(mode, &acct, &edits) {
-            Ok(t) if t.is_empty() => sql_block(ui, "-- No changes yet. Tick a privilege to stage a GRANT or REVOKE."),
-            Ok(t) => sql_block(ui, &t),
-            Err(e) => {
-                ui.label(RichText::new(e).size(TXT_SMALL).color(ALERT()));
-            }
-        }
-        if w.busy {
-            ui.horizontal(|ui| {
-                spin(ui);
-                ui.label(RichText::new("Applying…").color(MUTED()));
-            });
-        }
+        preview_block(ui, users::preview(env.mode, acct, &w.edits()));
     }
 
     /// The database table of the design: a name column and a checkbox per privilege, sideways scrolling for the
@@ -588,9 +1044,87 @@ impl App {
         self.worker.sql_user_create(f.conn, sql, Account::named(&f.user, &f.host), password, false);
     }
 
-    /// QUARRY_TEST_SQL=users (the window on user "report") or newuser (the + User dialog).
+    /// Change password: two masked fields, the plugin on MySQL, and a preview that shows '***'.
+    pub(super) fn sql_password_dialog(&mut self, ui: &mut egui::Ui, f: &mut PwForm, keep: &mut bool) {
+        ui.set_width(520.0);
+        let writable = self.conn(f.conn).is_some_and(|c| c.writable);
+        let caps = self.users_caps(f.conn);
+        let dialect = self.users_dialect(f.conn);
+        dialog_title(ui, "Change password");
+        ui.label(RichText::new(f.acct.label()).monospace().color(MUTED()));
+        ui.add_space(8.0);
+        egui::Grid::new("newpw").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W + 14.0).show(ui, |ui| {
+            form_label(ui, "New password");
+            let r = ui.add(egui::TextEdit::singleline(&mut f.password).password(true).desired_width(340.0));
+            if !r.has_focus() && f.password.is_empty() && f.again.is_empty() {
+                r.request_focus();
+            }
+            ui.end_row();
+            form_label(ui, "Repeat");
+            ui.add(egui::TextEdit::singleline(&mut f.again).password(true).desired_width(340.0));
+            ui.end_row();
+            if caps.plugin_choice {
+                form_label(ui, "Plugin");
+                egui::ComboBox::from_id_salt("pw-plugin").width(340.0).selected_text(if f.plugin.is_empty() { "Server default".to_string() } else { f.plugin.clone() }).show_ui(ui, |ui| {
+                    menu_look(ui);
+                    if ui.selectable_label(f.plugin.is_empty(), "Server default").clicked() {
+                        f.plugin.clear();
+                    }
+                    for p in users::MYSQL_PLUGINS {
+                        if ui.selectable_label(f.plugin == p, p).clicked() {
+                            f.plugin = p.to_string();
+                        }
+                    }
+                });
+                ui.end_row();
+            }
+        });
+        ui.add_space(8.0);
+        let plugin = Some(f.plugin.as_str()).filter(|p| !p.is_empty());
+        let shown = users::password_sql(self.users_mode(f.conn), dialect, &f.acct, plugin, "", true);
+        sql_block(ui, &shown.as_ref().map_or_else(|e| format!("-- {e}"), |s| format!("{s};")));
+        let check = users::check_password(&f.password).and_then(|_| if f.password == f.again { Ok(()) } else { Err("The two passwords differ.".to_string()) });
+        if let Err(e) = &check {
+            if !f.password.is_empty() || !f.again.is_empty() {
+                ui.label(RichText::new(e.as_str()).size(TXT_SMALL).color(ALERT()));
+            }
+        }
+        ui.add_space(4.0);
+        ui.add(egui::Label::new(RichText::new("A password change cannot be undone. It is sent once and is not shown, logged or kept by Quarry.").size(TXT_SMALL).color(MUTED())).wrap());
+        if !writable {
+            ui.label(RichText::new(NOTE_APPLY).size(TXT_SMALL).color(FAINT()));
+        }
+        ui.add_space(8.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.add_enabled(writable && check.is_ok() && shown.is_ok(), primary_button(ui, "Change password", PRIMARY())).clicked() {
+                self.sql_password_run(f);
+                *keep = false;
+            }
+            if ui.button("Cancel").on_hover_text("Esc").clicked() {
+                *keep = false;
+            }
+        });
+        // Whichever way the dialog ends, the typed text does not outlive it.
+        if !*keep {
+            f.password.clear();
+            f.again.clear();
+        }
+    }
+
+    fn sql_password_run(&mut self, f: &mut PwForm) {
+        let password = std::mem::take(&mut f.password);
+        f.again.clear();
+        if self.demo {
+            return self.ok("Offline demo: no database is connected.");
+        }
+        let Some(sql) = self.users_sql(f.conn) else { return };
+        let plugin = Some(f.plugin.clone()).filter(|p| !p.is_empty());
+        self.worker.sql_user_password(f.conn, sql, f.acct.clone(), plugin, password, false);
+    }
+
+    /// QUARRY_TEST_SQL=users, useraccount, userglobal or userlimits (the window on user "report"), or newuser (the + User dialog).
     pub(super) fn sql_users_demo(&mut self, which: &str) {
-        if !matches!(which, "users" | "newuser") {
+        if !matches!(which, "users" | "newuser" | "useraccount" | "userglobal" | "userlimits") {
             return;
         }
         if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == 3) {
@@ -606,11 +1140,37 @@ impl App {
         w.list = Some(Ok(UserList { accounts, current: Some(("app".into(), "%".into())), whole: true, why: None }));
         w.sel = Some(("report".into(), "10.0.%".into()));
         w.grants = Some(Ok(Vec::new()));
-        w.rows = vec![
-            GrantRow { pattern: "shop".into(), orig: BTreeSet::new(), now: set(&["SELECT"]) },
-            GrantRow { pattern: "analytics".into(), orig: BTreeSet::new(), now: set(&["SELECT", "EXECUTE"]) },
-            GrantRow { pattern: "sys".into(), orig: BTreeSet::new(), now: BTreeSet::new() },
-        ];
+        w.name = "report".into();
+        w.host = "10.0.%".into();
+        w.info = Some(AccountInfo { plugin: "caching_sha2_password".into(), settings: Settings::default() });
+        match which {
+            "useraccount" => {
+                w.tab = UTab::Account;
+                w.locked = true;
+                w.roles_orig = vec!["app_read@%".into(), "dashboards@%".into()];
+                w.roles_now = w.roles_orig.clone();
+            }
+            "userglobal" => {
+                w.tab = UTab::Global;
+                w.g_orig = set(&["SELECT", "SHOW VIEW", "REPLICATION CLIENT", "CONNECTION_ADMIN", "SYSTEM_VARIABLES_ADMIN"]);
+                w.g_now = w.g_orig.clone();
+                w.g_now.insert("PROCESS".into());
+            }
+            "userlimits" => {
+                w.tab = UTab::Limits;
+                w.limits = ["5000".into(), "0".into(), "0".into(), "0".into()];
+            }
+            _ => {
+                w.rows = vec![
+                    GrantRow { pattern: "shop".into(), orig: BTreeSet::new(), now: set(&["SELECT"]) },
+                    GrantRow { pattern: "analytics".into(), orig: BTreeSet::new(), now: set(&["SELECT", "EXECUTE"]) },
+                    GrantRow { pattern: "sys".into(), orig: BTreeSet::new(), now: BTreeSet::new() },
+                ];
+            }
+        }
+        if which != "users" {
+            w.limits = if which == "userlimits" { w.limits } else { ["0".into(), "0".into(), "0".into(), "0".into()] };
+        }
         self.sql_users = Some(w);
     }
 }

@@ -677,6 +677,7 @@ pub(super) enum Modal {
     SqlNewTable(Box<NewTable>),
     SqlDrop(Box<DropForm>),
     SqlNewUser(Box<super::sql_users::NewUser>),
+    SqlPassword(Box<super::sql_users::PwForm>),
     /// Add a foreign key to the open SQL table, with its ALTER preview.
     FkEdit(Box<FkForm>),
     Typed { title: String, expect: String, typed: String, action: Danger },
