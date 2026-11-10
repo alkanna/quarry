@@ -162,7 +162,10 @@ pub fn split_type(full: &str) -> (String, String, bool) {
 /// as current_timestamp(). Returns the default and whether it is an expression.
 pub fn normalize_default(d: Dialect, raw: Option<String>, nullable: bool, extra: &str) -> (Option<String>, bool) {
     let Some(v) = raw else { return (None, false) };
-    if d == Dialect::MySql {
+    if matches!(d, Dialect::Postgres) {
+        unimplemented!("PostgreSQL catalog queries land in step 4")
+    }
+    if matches!(d, Dialect::MySql) {
         return (Some(v), extra.to_ascii_uppercase().contains("DEFAULT_GENERATED"));
     }
     if v == "NULL" && nullable {
@@ -297,6 +300,7 @@ async fn query(db: &Db, sql: &str, schema: &str, table: &str) -> Res<Vec<SqlRow>
 async fn extras(db: &Db, schema: &str, table: &str, st: &mut Structure) {
     let d = db.dialect;
     let (idx, cols) = match d {
+        Dialect::Postgres => unimplemented!("PostgreSQL catalog queries land in step 4"),
         Dialect::MySql => (
             "SELECT INDEX_NAME AS name, SEQ_IN_INDEX AS seq, IS_VISIBLE = 'NO' AS hidden, EXPRESSION AS expr FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
             "SELECT COLUMN_NAME AS name, SRS_ID AS srid, NULL AS clause FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND SRS_ID IS NOT NULL",

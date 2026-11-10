@@ -501,7 +501,7 @@ fn kind_of(cols: &[(String, Kind)], name: &str) -> Option<Kind> {
     cols.iter().find(|(n, _)| n == name).map(|(_, k)| *k)
 }
 
-fn rule_of(t: &[T], cols: &[(String, Kind)]) -> Option<Rule> {
+fn rule_of(t: &[T], cols: &[(String, Kind)], d: Dialect) -> Option<Rule> {
     let mk = |col: &str, op: Op, values: Vec<String>| Some(Rule { col: col.into(), kind: kind_of(cols, col)?, op, values });
     // Wrapped forms: NOT IN ... OR NULL and this month.
     if t.first() == Some(&T::P('(')) && close_of(t, 0) == Some(t.len() - 1) {
@@ -556,7 +556,7 @@ fn rule_of(t: &[T], cols: &[(String, Kind)]) -> Option<Rule> {
         };
         // A pattern that is not what the structured form would write stays a plain LIKE.
         let probe = Rule { col: c.clone(), kind, op, values: vec![v.clone()] };
-        if rule_sql(&probe, Dialect::MySql, true).ends_with(&lit(s, true)) { Some(probe) } else { None }
+        if rule_sql(&probe, d, true).ends_with(&lit(s, true)) { Some(probe) } else { None }
     };
     match rest {
         [i, nu] if word(i, "IS") && word(nu, "NULL") => mk(c, Op::IsNull, vec![]),
@@ -587,7 +587,7 @@ fn rule_of(t: &[T], cols: &[(String, Kind)]) -> Option<Rule> {
 /// the rules and whether they are joined with OR. Anything else (subqueries, mixed AND/OR, other
 /// functions) gives None, which keeps the bar in SQL mode. The result is checked by writing it
 /// out again, so a successful parse never changes the query.
-pub fn parse(text: &str, cols: &[(String, Kind)], bs: bool) -> Option<(Vec<Rule>, bool)> {
+pub fn parse(text: &str, cols: &[(String, Kind)], d: Dialect, bs: bool) -> Option<(Vec<Rule>, bool)> {
     // The reader below decodes backslash escapes, which this server does not have, so such text stays SQL.
     if !bs && text.contains('\\') {
         return None;
@@ -597,12 +597,12 @@ pub fn parse(text: &str, cols: &[(String, Kind)], bs: bool) -> Option<(Vec<Rule>
         return Some((Vec::new(), false));
     }
     let (parts, any) = split(&toks)?;
-    let rules: Vec<Rule> = parts.iter().map(|p| rule_of(p, cols)).collect::<Option<_>>()?;
+    let rules: Vec<Rule> = parts.iter().map(|p| rule_of(p, cols, d)).collect::<Option<_>>()?;
     let any = any && rules.len() > 1;
     if !rules.iter().all(|r| ops_for(r.kind).contains(&r.op) && r.complete()) {
         return None;
     }
-    (lex(&to_sql(&rules, any, Dialect::MySql, true), cols)? == toks).then_some((rules, any))
+    (lex(&to_sql(&rules, any, d, true), cols)? == toks).then_some((rules, any))
 }
 
 /// How a date column is grouped.
@@ -683,7 +683,7 @@ mod tests {
                 let r = Rule { col: col.clone(), kind, op, values: v };
                 assert!(r.complete(), "{op:?}");
                 let sql = to_sql(&[r.clone()], false, Dialect::MySql, true);
-                let (back, any) = parse(&sql, &cols(), true).unwrap_or_else(|| panic!("no parse for {op:?} on {col}: {sql}"));
+                let (back, any) = parse(&sql, &cols(), Dialect::MySql, true).unwrap_or_else(|| panic!("no parse for {op:?} on {col}: {sql}"));
                 assert!(!any);
                 assert_eq!(back, vec![r], "{sql}");
             }
@@ -696,15 +696,15 @@ mod tests {
         let b = Rule { col: "total".into(), kind: Kind::Decimal, op: Op::Gt, values: vec!["50".into()] };
         let and = to_sql(&[a.clone(), b.clone()], false, Dialect::MySql, true);
         assert_eq!(and, "`status` IN ('paid', 'shipped') AND `total` > 50");
-        assert_eq!(parse(&and, &cols(), true), Some((vec![a.clone(), b.clone()], false)));
+        assert_eq!(parse(&and, &cols(), Dialect::MySql, true), Some((vec![a.clone(), b.clone()], false)));
         let or = to_sql(&[a.clone(), b.clone()], true, Dialect::MySql, true);
-        assert_eq!(parse(&or, &cols(), true), Some((vec![a, b], true)));
-        assert!(parse("total > 50 AND total < 5 OR id = 1", &cols(), true).is_none());
-        assert!(parse("total > 50 AND id IN (SELECT 1)", &cols(), true).is_none());
-        assert!(parse("LOWER(name) = 'x'", &cols(), true).is_none());
-        assert_eq!(parse("", &cols(), true), Some((vec![], false)));
+        assert_eq!(parse(&or, &cols(), Dialect::MySql, true), Some((vec![a, b], true)));
+        assert!(parse("total > 50 AND total < 5 OR id = 1", &cols(), Dialect::MySql, true).is_none());
+        assert!(parse("total > 50 AND id IN (SELECT 1)", &cols(), Dialect::MySql, true).is_none());
+        assert!(parse("LOWER(name) = 'x'", &cols(), Dialect::MySql, true).is_none());
+        assert_eq!(parse("", &cols(), Dialect::MySql, true), Some((vec![], false)));
         // Bare column names and lower case keywords are fine.
-        assert_eq!(parse("status = 'paid' and total between 1 and 2", &cols(), true).unwrap().0.len(), 2);
+        assert_eq!(parse("status = 'paid' and total between 1 and 2", &cols(), Dialect::MySql, true).unwrap().0.len(), 2);
     }
 
     #[test]
@@ -717,10 +717,10 @@ mod tests {
         assert_eq!(rule_sql(&q, Dialect::MySql, true), "`na``me` = 'a''\\\\'");
         // Without backslash escapes the backslash is a plain character, and text with one stays SQL.
         assert_eq!(rule_sql(&q, Dialect::MySql, false), "`na``me` = 'a''\\'");
-        assert!(parse("name = 'a\\b'", &cols(), false).is_none());
+        assert!(parse("name = 'a\\b'", &cols(), Dialect::MySql, false).is_none());
         // Without backslash escapes the backslash is a plain character, and text with one stays SQL.
         assert_eq!(rule_sql(&q, Dialect::MySql, false), "`na``me` = 'a''\\'");
-        assert!(parse("name = 'a\\b'", &cols(), false).is_none());
+        assert!(parse("name = 'a\\b'", &cols(), Dialect::MySql, false).is_none());
     }
 
     #[test]

@@ -875,7 +875,7 @@ pub(super) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, mut scop
     b.gdlg.bs = bs;
     // The WHERE text changed from elsewhere (Filter to these, a restored tab): read it back into rules.
     if !b.c.sql && t.filter_txt != b.src && (!pairs.is_empty() || t.filter_txt.trim().is_empty()) {
-        match rules::parse(&t.filter_txt, &pairs, bs) {
+        match rules::parse(&t.filter_txt, &pairs, d, bs) {
             Some((mut r, any)) => {
                 b.draft = r.pop();
                 b.rules = r;
@@ -908,7 +908,7 @@ pub(super) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, mut scop
                     || match &b.parsable {
                         Some((text, p, bs0, ok)) if *text == t.filter_txt && Arc::ptr_eq(p, &pairs) && *bs0 == bs => *ok,
                         _ => {
-                            let ok = rules::parse(&t.filter_txt, &pairs, bs).is_some();
+                            let ok = rules::parse(&t.filter_txt, &pairs, d, bs).is_some();
                             b.parsable = Some((t.filter_txt.clone(), pairs.clone(), bs, ok));
                             ok
                         }
@@ -1268,7 +1268,7 @@ pub(super) fn drill(t: &mut Tab, row: usize, d: Dialect, bs: bool) {
         });
     }
     let existing = t.filter_txt.trim().to_string();
-    let existing = if existing.is_empty() { None } else if matches!(rules::parse(&existing, &tcols(s).iter().map(|c| (c.name.clone(), c.kind)).collect::<Vec<_>>(), bs), Some((_, false))) { Some(existing) } else { Some(format!("({existing})")) };
+    let existing = if existing.is_empty() { None } else if matches!(rules::parse(&existing, &tcols(s).iter().map(|c| (c.name.clone(), c.kind)).collect::<Vec<_>>(), d, bs), Some((_, false))) { Some(existing) } else { Some(format!("({existing})")) };
     t.filter_txt = existing.into_iter().chain(conds).collect::<Vec<_>>().join(" AND ");
     ungroup(t);
 }

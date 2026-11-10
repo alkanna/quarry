@@ -123,6 +123,7 @@ fn split_account(s: &str) -> (String, String) {
 
 fn account_query(d: Dialect, joined: bool) -> &'static str {
     match (d, joined) {
+        (Dialect::Postgres, _) => unreachable!("accounts are MySQL family only"),
         (Dialect::MySql, _) => "SELECT User AS u, Host AS h, account_locked AS locked, password_expired AS expired, plugin, 'N' AS is_role FROM mysql.user ORDER BY User, Host",
         // The lock lives only in the JSON of global_priv, which a plain mysql.user view does not show.
         (Dialect::MariaDb, true) => "SELECT u.User AS u, u.Host AS h, IFNULL(JSON_VALUE(g.Priv, '$.account_locked'), 'false') AS locked, u.password_expired AS expired, u.plugin AS plugin, u.is_role AS is_role FROM mysql.user u LEFT JOIN mysql.global_priv g ON g.User = u.User AND g.Host = u.Host ORDER BY u.User, u.Host",
@@ -151,7 +152,7 @@ async fn read_accounts(c: &mut sqlx::MySqlConnection, d: Dialect) -> Res<Vec<Acc
             Err(x) => last = Some(e(x)),
         }
         // MySQL has one form only.
-        if d == Dialect::MySql {
+        if matches!(d, Dialect::MySql | Dialect::Postgres) {
             break;
         }
     }
@@ -561,6 +562,7 @@ pub fn grant_sql(m: Mode, acct: &Account, db: &str, privs: &[String], revoke: bo
     sorted.sort_by_key(|p| order_key(p));
     sorted.dedup();
     let list = sorted.iter().map(|p| p.as_str()).collect::<Vec<_>>().join(", ");
+    // MySQL and MariaDB quote alike, and GRANT here exists for no other dialect
     let on = if global { "*.*".to_string() } else { format!("{}.*", Dialect::MySql.quote_ident(db)) };
     let who = acct.literal(m.bs);
     Ok(if revoke { format!("REVOKE {list} ON {on} FROM {who}") } else { format!("GRANT {list} ON {on} TO {who}") })
@@ -628,7 +630,7 @@ pub fn create_user_sql(m: Mode, acct: &Account, password: &str, redact: bool) ->
 }
 
 pub fn drop_user_sql(m: Mode, acct: &Account, d: Dialect) -> String {
-    format!("{} {}", if acct.is_role && d == Dialect::MariaDb { "DROP ROLE" } else { "DROP USER" }, acct.literal(m.bs))
+    format!("{} {}", if acct.is_role && matches!(d, Dialect::MariaDb) { "DROP ROLE" } else { "DROP USER" }, acct.literal(m.bs))
 }
 
 /// An error with the password taken out, in case a server echoes the statement. The statement holds the password
@@ -750,12 +752,14 @@ pub struct Caps {
 impl Caps {
     pub fn of(d: Dialect, version: &str) -> Caps {
         // Older MariaDB servers report "5.5.5-10.11.6-MariaDB" for compatibility.
-        let v = version.strip_prefix("5.5.5-").filter(|_| d == Dialect::MariaDb).unwrap_or(version);
+        let v = version.strip_prefix("5.5.5-").filter(|_| matches!(d, Dialect::MariaDb)).unwrap_or(version);
         let mut n = v.split(|c: char| !c.is_ascii_digit()).filter(|x| !x.is_empty()).map(|x| x.parse::<u32>().unwrap_or(0));
         let at = (n.next().unwrap_or(0), n.next().unwrap_or(0), n.next().unwrap_or(0));
         match d {
             Dialect::MySql => Caps { alter_user: at >= (5, 7, 6), lock: at >= (5, 7, 6), lifetime: at >= (5, 7, 4), roles: at >= (8, 0, 0), dynamic: at >= (8, 0, 0), plugin_choice: true, caching: at >= (8, 0, 0), native_off: at >= (8, 4, 0), sha256: at >= (5, 6, 0) && at < (9, 0, 0) },
             Dialect::MariaDb => Caps { alter_user: at >= (10, 2, 0), lock: at >= (10, 4, 2), lifetime: at >= (10, 4, 3), roles: at >= (10, 0, 5), dynamic: false, plugin_choice: false, caching: false, native_off: false, sha256: false },
+            // Nothing here applies to PostgreSQL roles
+            Dialect::Postgres => Caps { alter_user: false, lock: false, lifetime: false, roles: false, dynamic: false, plugin_choice: false, caching: false, native_off: false, sha256: false },
         }
     }
 
@@ -834,10 +838,13 @@ pub fn alter_sql(m: Mode, acct: &Account, from: &Settings, to: &Settings) -> Res
 /// its ALTER USER ... IDENTIFIED BY replaces the whole authentication chain. The password is `'***'` when `redact`. The
 /// plugin comes from a fixed list and only MySQL takes it here.
 pub fn password_sql(m: Mode, d: Dialect, acct: &Account, plugin: Option<&str>, password: &str, redact: bool) -> Res<String> {
-    if d == Dialect::MariaDb {
+    if matches!(d, Dialect::Postgres) {
+        return Err("Passwords of PostgreSQL roles are not set through this window.".into());
+    }
+    if matches!(d, Dialect::MariaDb) {
         return Ok(format!("SET PASSWORD FOR {} = PASSWORD({})", acct.literal(m.bs), if redact { REDACTED.to_string() } else { lit(password, m.bs) }));
     }
-    let with = match plugin.filter(|_| d == Dialect::MySql) {
+    let with = match plugin.filter(|_| matches!(d, Dialect::MySql)) {
         Some(p) if MYSQL_PLUGINS.contains(&p) => format!("WITH {p} "),
         Some(p) => return Err(format!("{p} is not an authentication plugin this window sets.")),
         None => String::new(),
@@ -873,7 +880,7 @@ fn role_literal(d: Dialect, role: &str, bs: bool) -> Res<String> {
     Ok(match (d, role.rsplit_once('@')) {
         (Dialect::MySql, Some((n, h))) => format!("{}@{}", lit(n, bs), lit(h, bs)),
         (Dialect::MySql, None) => lit(role, bs),
-        _ => lit(role, bs),
+        (Dialect::MariaDb | Dialect::Postgres, _) => lit(role, bs),
     })
 }
 
@@ -895,6 +902,7 @@ pub fn default_roles_sql(m: Mode, d: Dialect, acct: &Account, roles: &[String]) 
         (_, None) => None,
         (Dialect::MySql, _) => Some(format!("SET DEFAULT ROLE {} TO {}", lits.join(", "), acct.literal(m.bs))),
         (Dialect::MariaDb, Some(r)) => Some(format!("SET DEFAULT ROLE {r} FOR {}", acct.literal(m.bs))),
+        (Dialect::Postgres, Some(_)) => unreachable!("accounts are MySQL family only"),
     })
 }
 
@@ -966,6 +974,7 @@ fn lifetime_of(v: Option<&str>) -> Expire {
 
 fn info_query(d: Dialect, joined: bool) -> &'static str {
     match (d, joined) {
+        (Dialect::Postgres, _) => unreachable!("accounts are MySQL family only"),
         // Numbers are cast to text: a prepared statement sends them as binary, which `text` would misread.
         (Dialect::MySql, _) => "SELECT plugin, account_locked AS locked, CAST(password_lifetime AS CHAR) AS lifetime, ssl_type, CONVERT(ssl_cipher USING utf8mb4) AS cipher, CONVERT(x509_issuer USING utf8mb4) AS issuer, CONVERT(x509_subject USING utf8mb4) AS subject, 'N' AS chain, CONCAT_WS('|', password_last_changed, plugin, LEFT(SHA2(authentication_string, 256), 16)) AS ident, CAST(max_questions AS CHAR) AS q, CAST(max_updates AS CHAR) AS u, CAST(max_connections AS CHAR) AS c, CAST(max_user_connections AS CHAR) AS uc FROM mysql.user WHERE User = ? AND Host = ?",
         (Dialect::MariaDb, true) => "SELECT u.plugin AS plugin, IFNULL(JSON_VALUE(g.Priv, '$.account_locked'), 'false') AS locked, JSON_VALUE(g.Priv, '$.password_lifetime') AS lifetime, u.ssl_type AS ssl_type, CONVERT(u.ssl_cipher USING utf8mb4) AS cipher, CONVERT(u.x509_issuer USING utf8mb4) AS issuer, CONVERT(u.x509_subject USING utf8mb4) AS subject, IF(JSON_QUERY(g.Priv, '$.auth_or') IS NULL, 'N', 'Y') AS chain, CONCAT_WS('|', u.plugin, LEFT(SHA2(u.authentication_string, 256), 16)) AS ident, CAST(u.max_questions AS CHAR) AS q, CAST(u.max_updates AS CHAR) AS u, CAST(u.max_connections AS CHAR) AS c, CAST(u.max_user_connections AS CHAR) AS uc FROM mysql.user u LEFT JOIN mysql.global_priv g ON g.User = u.User AND g.Host = u.Host WHERE u.User = ? AND u.Host = ?",
@@ -995,7 +1004,7 @@ async fn read_info(c: &mut sqlx::MySqlConnection, d: Dialect, acct: &Account) ->
             Ok(None) => return Err(format!("{} has no row in mysql.user.", acct.label())),
             Err(x) => last = e(x),
         }
-        if d == Dialect::MySql {
+        if matches!(d, Dialect::MySql | Dialect::Postgres) {
             break;
         }
     }
@@ -1150,6 +1159,7 @@ async fn default_roles(c: &mut sqlx::MySqlConnection, d: Dialect, acct: &Account
     let sql = match d {
         Dialect::MySql => "SELECT CONCAT(DEFAULT_ROLE_USER, '@', DEFAULT_ROLE_HOST) AS r FROM mysql.default_roles WHERE USER = ? AND HOST = ?",
         Dialect::MariaDb => "SELECT default_role AS r FROM mysql.user WHERE User = ? AND Host = ?",
+        Dialect::Postgres => unreachable!("accounts are MySQL family only"),
     };
     match sqlx::query(sql).bind(&acct.user).bind(&acct.host).persistent(false).fetch_all(&mut *c).await {
         Ok(rows) => rows.iter().filter_map(|r| text(r, "r")).filter(|r| !r.is_empty()).collect(),
@@ -1359,7 +1369,7 @@ impl Worker {
                 let mut c = writer(&db, "", read_only).await?;
                 let out = async {
                     let m = session_mode(&mut c).await?;
-                    if db.dialect == Dialect::MariaDb {
+                    if matches!(db.dialect, Dialect::MariaDb) {
                         // SET PASSWORD sets the mysql_native_password part only; any other way in would be left as it was.
                         if let Ok(i) = read_info(&mut c, db.dialect, &acct).await {
                             if i.chain || (!i.plugin.is_empty() && i.plugin != "mysql_native_password") {

@@ -451,9 +451,10 @@ impl App {
         let sql = sql_sort.is_some();
         let group_cols: Vec<String> = self.t().and_then(|t| t.sql.as_ref()).filter(|s| sql && s.matched.is_some()).map(|s| super::sql_bar::group_names(s)).unwrap_or_default();
         let sql_grouped = sql && self.t().and_then(|t| t.sql.as_ref()).is_some_and(|s| s.matched.is_some());
+        let sql_dialect = self.sql_dialect().0;
         let dir_of = |c: &str| match &sql_sort {
             Some(s) => {
-                let q = db::sql::Dialect::MySql.quote_ident(c);
+                let q = sql_dialect.quote_ident(c);
                 if *s == format!("{q} ASC") { Some(1) } else if *s == format!("{q} DESC") { Some(-1) } else { None }
             }
             None => sort.as_ref().and_then(|s| s.get(c)).and_then(|v| match v {

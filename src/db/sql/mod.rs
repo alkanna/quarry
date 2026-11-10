@@ -210,7 +210,7 @@ impl Db {
     /// "MySQL 8.4.3" or "MariaDB 10.11.6", without the build suffix of the version string.
     pub fn label(&self) -> String {
         let num = self.version.split('-').next().unwrap_or_default();
-        format!("{} {num}", if self.dialect == Dialect::MariaDb { "MariaDB" } else { "MySQL" })
+        format!("{} {num}", match self.dialect { Dialect::MySql => "MySQL", Dialect::MariaDb => "MariaDB", Dialect::Postgres => "PostgreSQL" })
     }
 }
 

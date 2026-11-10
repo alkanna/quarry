@@ -70,7 +70,7 @@ impl App {
                                 self.sql_asked.insert((conn, d.clone()));
                                 self.worker.sql_tables(conn, sql.clone(), d);
                             }
-                            c.server = ServerInfo { version: sql.label().split_once(' ').map(|(_, v)| v.to_string()).unwrap_or_default(), product: if sql.dialect == db::sql::Dialect::MariaDb { "MariaDB" } else { "MySQL" }.into(), host: host_of(&c.masked_uri), tls: sql.tls, ..Default::default() };
+                            c.server = ServerInfo { version: sql.label().split_once(' ').map(|(_, v)| v.to_string()).unwrap_or_default(), product: match sql.dialect { db::sql::Dialect::MySql => "MySQL", db::sql::Dialect::MariaDb => "MariaDB", db::sql::Dialect::Postgres => "PostgreSQL" }.into(), host: host_of(&c.masked_uri), tls: sql.tls, ..Default::default() };
                             c.sql = Some(sql);
                             c.status = Status::Ready;
                             c.dbs = dbs.into_iter().map(|d| (d, None)).collect();

@@ -3,8 +3,6 @@
 
 use super::*;
 
-const DIALECT: sql::Dialect = sql::Dialect::MySql;
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Fmt {
     SqlInsert,
@@ -133,12 +131,17 @@ pub fn text_table(cols: &[String], rows: &[Document]) -> String {
 /// header row, Markdown keeps a blank one because a table needs it. SQL INSERT always names its columns,
 /// since without them the values land in the table's order, not the order shown.
 pub fn format(f: Fmt, s: &Sheet, header: bool) -> String {
+    format_in(sql::Dialect::MySql, f, s, header)
+}
+
+/// `format` for a given dialect, which quotes the names of the SQL formats.
+pub fn format_in(dialect: sql::Dialect, f: Fmt, s: &Sheet, header: bool) -> String {
     let cell = |d: &Document, c: &CopyCol| text(value(d, c)).unwrap_or_default();
     let names: Vec<&str> = s.cols.iter().map(|c| c.name.as_str()).collect();
     match f {
         Fmt::SqlInsert => {
-            let mut out = format!("INSERT INTO {}", DIALECT.quote_ident(s.table));
-            out.push_str(&format!(" ({})", s.cols.iter().map(|c| DIALECT.quote_ident(&c.src)).collect::<Vec<_>>().join(", ")));
+            let mut out = format!("INSERT INTO {}", dialect.quote_ident(s.table));
+            out.push_str(&format!(" ({})", s.cols.iter().map(|c| dialect.quote_ident(&c.src)).collect::<Vec<_>>().join(", ")));
             out.push_str(" VALUES\n");
             let rows: Vec<String> = s.rows.iter().map(|d| format!("({})", s.cols.iter().map(|c| sql_literal(value(d, c), c.numeric, s.bs)).collect::<Vec<_>>().join(", "))).collect();
             out + &rows.join(",\n") + ";"
@@ -151,9 +154,9 @@ pub fn format(f: Fmt, s: &Sheet, header: bool) -> String {
                 if sets.is_empty() || s.pk.is_empty() || !s.pk.iter().all(|p| key.contains_key(p)) {
                     continue;
                 }
-                let set = sets.iter().map(|c| format!("{} = {}", DIALECT.quote_ident(&c.src), sql_literal(value(d, c), c.numeric, s.bs))).collect::<Vec<_>>().join(", ");
-                let wh = s.pk.iter().map(|p| format!("{} = {}", DIALECT.quote_ident(p), sql_literal(key.get(p), false, s.bs))).collect::<Vec<_>>().join(" AND ");
-                out.push(format!("UPDATE {} SET {set} WHERE {wh};", DIALECT.quote_ident(s.table)));
+                let set = sets.iter().map(|c| format!("{} = {}", dialect.quote_ident(&c.src), sql_literal(value(d, c), c.numeric, s.bs))).collect::<Vec<_>>().join(", ");
+                let wh = s.pk.iter().map(|p| format!("{} = {}", dialect.quote_ident(p), sql_literal(key.get(p), false, s.bs))).collect::<Vec<_>>().join(" AND ");
+                out.push(format!("UPDATE {} SET {set} WHERE {wh};", dialect.quote_ident(s.table)));
             }
             out.join("\n")
         }
@@ -225,13 +228,20 @@ pub struct Writer {
     table: String,
     pk: Vec<String>,
     bs: bool,
+    dialect: sql::Dialect,
     /// Something was written, so the next line or row needs its separator first.
     any: bool,
 }
 
 impl Writer {
     pub fn new(f: Fmt, header: bool, cols: Vec<CopyCol>, table: &str, pk: &[String], bs: bool) -> Writer {
-        Writer { f, header, cols, table: table.to_string(), pk: pk.to_vec(), bs, any: false }
+        Writer { f, header, cols, table: table.to_string(), pk: pk.to_vec(), bs, dialect: sql::Dialect::MySql, any: false }
+    }
+
+    /// Names are quoted for this dialect instead of MySQL's.
+    pub fn with_dialect(mut self, dialect: sql::Dialect) -> Writer {
+        self.dialect = dialect;
+        self
     }
 
     /// Lines of text are joined by newlines, so the first has none in front.
@@ -244,7 +254,7 @@ impl Writer {
     pub fn begin(&mut self) -> String {
         let names: Vec<&str> = self.cols.iter().map(|c| c.name.as_str()).collect();
         match self.f {
-            Fmt::SqlInsert => format!("INSERT INTO {} ({}) VALUES\n", DIALECT.quote_ident(&self.table), self.cols.iter().map(|c| DIALECT.quote_ident(&c.src)).collect::<Vec<_>>().join(", ")),
+            Fmt::SqlInsert => format!("INSERT INTO {} ({}) VALUES\n", self.dialect.quote_ident(&self.table), self.cols.iter().map(|c| self.dialect.quote_ident(&c.src)).collect::<Vec<_>>().join(", ")),
             Fmt::Csv | Fmt::Tsv if self.header => {
                 let (sep, esc): (&str, fn(&str) -> String) = if self.f == Fmt::Csv { (",", csv_cell) } else { ("\t", |x: &str| x.replace(['\t', '\n', '\r'], " ")) };
                 let l = names.iter().map(|n| esc(n)).collect::<Vec<_>>().join(sep);
@@ -284,9 +294,9 @@ impl Writer {
                     if sets.is_empty() || self.pk.is_empty() || !self.pk.iter().all(|p| key.contains_key(p)) {
                         continue;
                     }
-                    let set = sets.iter().map(|c| format!("{} = {}", DIALECT.quote_ident(&c.src), sql_literal(value(d, c), c.numeric, self.bs))).collect::<Vec<_>>().join(", ");
-                    let wh = self.pk.iter().map(|p| format!("{} = {}", DIALECT.quote_ident(p), sql_literal(key.get(p), false, self.bs))).collect::<Vec<_>>().join(" AND ");
-                    let l = self.line(format!("UPDATE {} SET {set} WHERE {wh};", DIALECT.quote_ident(&self.table)));
+                    let set = sets.iter().map(|c| format!("{} = {}", self.dialect.quote_ident(&c.src), sql_literal(value(d, c), c.numeric, self.bs))).collect::<Vec<_>>().join(", ");
+                    let wh = self.pk.iter().map(|p| format!("{} = {}", self.dialect.quote_ident(p), sql_literal(key.get(p), false, self.bs))).collect::<Vec<_>>().join(" AND ");
+                    let l = self.line(format!("UPDATE {} SET {set} WHERE {wh};", self.dialect.quote_ident(&self.table)));
                     out.push_str(&l);
                 }
                 Fmt::Csv | Fmt::Tsv => {

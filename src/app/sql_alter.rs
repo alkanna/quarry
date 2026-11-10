@@ -579,7 +579,7 @@ impl App {
                     if let Some(c) = cur {
                         ui.selectable_value(&mut f.def.collation, Some(c.clone()), c);
                     }
-                    for c in COLLATIONS.iter().filter(|c| (dialect == Dialect::MySql || !c.contains("0900")) && (dialect == Dialect::MariaDb || !c.contains("uca1400"))) {
+                    for c in COLLATIONS.iter().filter(|c| match dialect { Dialect::MySql => !c.contains("uca1400"), Dialect::MariaDb => !c.contains("0900"), Dialect::Postgres => false }) {
                         ui.selectable_value(&mut f.def.collation, Some((*c).to_string()), *c);
                     }
                 });

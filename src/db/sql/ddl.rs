@@ -467,7 +467,7 @@ pub fn definition(d: Dialect, m: Mode, c: &ColDef) -> Result<String, String> {
         Dv::Null => return Err("A NOT NULL column cannot default to NULL.".into()),
         Dv::Value(v) if is_numeric(&ty) && is_number(v.trim()) => s.push_str(&format!(" DEFAULT {}", v.trim())),
         // MySQL reports a binary default as hex, which read as text would store the digits.
-        Dv::Value(v) if d == Dialect::MySql && is_binary(&ty) && is_hex_lit(v) => s.push_str(&format!(" DEFAULT {}", if v.len() == 2 { "X''" } else { v })),
+        Dv::Value(v) if matches!(d, Dialect::MySql) && is_binary(&ty) && is_hex_lit(v) => s.push_str(&format!(" DEFAULT {}", if v.len() == 2 { "X''" } else { v })),
         Dv::Value(v) if ty == "BIT" && is_bit_lit(v) => s.push_str(&format!(" DEFAULT {v}")),
         Dv::Value(v) if ty == "BIT" && !v.is_empty() && v.bytes().all(|b| b == b'0' || b == b'1') => s.push_str(&format!(" DEFAULT b'{v}'")),
         Dv::Value(v) => s.push_str(&format!(" DEFAULT {}", lit(v, m.bs))),
@@ -531,6 +531,8 @@ fn add_index(d: Dialect, m: Mode, ix: &IndexDef) -> Result<String, String> {
         (false, _) => "",
         (true, Dialect::MySql) => " INVISIBLE",
         (true, Dialect::MariaDb) => " IGNORED",
+        // PostgreSQL has no hidden indexes
+        (true, Dialect::Postgres) => "",
     };
     Ok(format!("ADD {kind}INDEX {} ({cols}){comment}{hidden}", d.quote_ident(&ix.name)))
 }
@@ -1109,7 +1111,7 @@ pub fn fk_problem(own: &Structure, table: &str, parent: &Structure, fk: &Foreign
 /// restrict_fk_on_non_standard_key on by default.
 pub fn fk_whole_key_default(d: Dialect, version: &str) -> bool {
     let mut n = version.split(|c: char| !c.is_ascii_digit()).filter_map(|p| p.parse::<u32>().ok());
-    d == Dialect::MySql && (n.next().unwrap_or(0), n.next().unwrap_or(0)) >= (8, 4)
+    matches!(d, Dialect::MySql) && (n.next().unwrap_or(0), n.next().unwrap_or(0)) >= (8, 4)
 }
 
 /// Counts the rows of the table whose key points at nothing, which is what makes ADD FOREIGN KEY fail.
@@ -1501,7 +1503,7 @@ pub fn save_job(all: &[Trigger], was: Option<&Trigger>, def: &TrigDef) -> TrigJo
 pub fn trigger_preview(d: Dialect, m: Mode, table: &str, job: &TrigJob) -> Result<Vec<String>, String> {
     Ok(match job {
         TrigJob::Create(s) => vec![create_trigger(d, m, table, s, false)?],
-        TrigJob::Edit { save, .. } if d == Dialect::MariaDb => vec![create_trigger(d, m, table, save, true)?],
+        TrigJob::Edit { save, .. } if matches!(d, Dialect::MariaDb) => vec![create_trigger(d, m, table, save, true)?],
         TrigJob::Edit { was, save } => vec![drop_trigger(d, &was.name, false), create_trigger(d, m, table, save, false)?],
         TrigJob::Drop(t) => vec![drop_trigger(d, &t.name, false)],
     })
@@ -1751,11 +1753,11 @@ async fn trigger_job(db: &Db, schema: &str, table: &str, job: &TrigJob, m: Mode,
             Ok((s.def.name.clone(), TrigUndo { name: s.def.name.clone(), restore: None, left: live, label: format!("created trigger {}", s.def.name) }))
         }
         TrigJob::Edit { was, save } => {
-            let sql = create_trigger(d, m, table, save, d == Dialect::MariaDb).map_err(fail)?;
+            let sql = create_trigger(d, m, table, save, matches!(d, Dialect::MariaDb)).map_err(fail)?;
             one_trigger_statement(&sql, m).map_err(fail)?;
             let Some(live) = find(&all, &was.name).filter(|l| same_trigger(l, was)) else { return Err(fail(changed(&was.name))) };
             let old = stored(&mut c, d, schema, &all, live).await.map_err(fail)?;
-            if d == Dialect::MariaDb {
+            if matches!(d, Dialect::MariaDb) {
                 run_text(&mut c, &sql).await.map_err(|x| fail(definer_note(x, save.definer.as_deref())))?;
             } else {
                 let scratch = TrigSave { def: TrigDef { name: scratch_name(), ..save.def.clone() }, ..save.clone() };
@@ -1798,7 +1800,7 @@ async fn undo_trigger_job(db: &Db, schema: &str, table: &str, u: &TrigUndo, read
             let o = order_among(&all, &u.name, &old.timing, &old.event, old.before.as_deref(), old.after.as_deref());
             match now {
                 None => replay(&mut c, d, old, o.as_ref(), false).await,
-                Some(_) if d == Dialect::MariaDb => replay(&mut c, d, old, o.as_ref(), true).await,
+                Some(_) if matches!(d, Dialect::MariaDb) => replay(&mut c, d, old, o.as_ref(), true).await,
                 Some(l) => {
                     // The trigger as the edit left it, which is put back if the old one is refused.
                     let cur = stored(&mut c, d, schema, &all, l).await?;

@@ -239,18 +239,19 @@ impl App {
     pub(super) fn head_act(&mut self, ui: &egui::Ui, agg: bool, docs: Rows, fields: &[String], c: &str, act: HeadAct) {
         let key = self.col_key(agg);
         let Some(t) = self.t() else { return };
+        let dialect = self.sql_dialect().0;
         let label = self.prefs.cols.get(&key).map(|p| p.label(c).to_string()).unwrap_or_else(|| c.into());
         match act {
             HeadAct::AddSort if t.sql.is_some() => {
                 let t = self.tm().unwrap();
-                t.sort_txt = super::sql_bar::add_sort_key(&t.sort_txt, c, db::sql::Dialect::MySql);
+                t.sort_txt = super::sql_bar::add_sort_key(&t.sort_txt, c, dialect);
                 t.page = 0;
                 self.reload();
             }
             HeadAct::AddSort => {}
             HeadAct::Sort(next) if t.sql.is_some() => {
                 let t = self.tm().unwrap();
-                t.sort_txt = next.map(|d| format!("{} {}", db::sql::Dialect::MySql.quote_ident(c), if d > 0 { "ASC" } else { "DESC" })).unwrap_or_default();
+                t.sort_txt = next.map(|d| format!("{} {}", dialect.quote_ident(c), if d > 0 { "ASC" } else { "DESC" })).unwrap_or_default();
                 t.page = 0;
                 self.reload();
             }

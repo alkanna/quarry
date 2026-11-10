@@ -147,7 +147,7 @@ pub fn mysql_var(name: &str, value: &str, global_value: Option<&str>, source: Op
 pub fn set_by_quarry(adv: &Advanced, dialect: Dialect, system_offset: Option<i32>) -> Vec<String> {
     // sqlx sends SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci on every connect, so these are always Quarry's.
     let mut v: Vec<String> = ["autocommit", "transaction_read_only", "tx_read_only", "character_set_client", "character_set_connection", "character_set_results", "collation_connection"].map(String::from).to_vec();
-    v.push(if dialect == Dialect::MySql { "max_execution_time" } else { "max_statement_time" }.into());
+    v.push(match dialect { Dialect::MySql => "max_execution_time", Dialect::MariaDb => "max_statement_time", Dialect::Postgres => "statement_timeout" }.into());
     for q in adv.session_statements(system_offset).unwrap_or_default() {
         let l = q.to_ascii_lowercase();
         if l.contains("time_zone") {
@@ -365,6 +365,7 @@ pub fn replica_denied(d: Dialect) -> String {
     match d {
         Dialect::MySql => "Not available for this account: it needs the REPLICATION CLIENT privilege.".into(),
         Dialect::MariaDb => "Not available for this account: it needs the REPLICA MONITOR privilege (SLAVE MONITOR or REPLICATION CLIENT on older MariaDB).".into(),
+        Dialect::Postgres => "Not available for this account: it needs the pg_monitor role.".into(),
     }
 }
 
@@ -405,8 +406,11 @@ async fn processes(db: &Db) -> Res<Processes> {
 
 async fn variables(db: &Db, global: bool) -> Res<Variables> {
     let mut c = db.acquire().await?;
+    if !db.dialect.is_mysql_family() {
+        return Err("Server variables are not available for PostgreSQL.".into());
+    }
     let up = uptime(&mut c).await;
-    if db.dialect == Dialect::MariaDb {
+    if matches!(db.dialect, Dialect::MariaDb) {
         let q = "SELECT VARIABLE_NAME, SESSION_VALUE, GLOBAL_VALUE, DEFAULT_VALUE, READ_ONLY FROM information_schema.SYSTEM_VARIABLES ORDER BY VARIABLE_NAME";
         let list = rows(&mut c, q).await.map_err(e)?;
         let rows = list.iter().filter_map(|r| Some(maria_var(&text(r, "VARIABLE_NAME")?, text(r, "SESSION_VALUE").as_deref(), text(r, "GLOBAL_VALUE").as_deref(), text(r, "DEFAULT_VALUE").as_deref(), text(r, "READ_ONLY").as_deref(), global))).collect();
@@ -450,7 +454,11 @@ fn mysql_number(x: &sqlx::Error) -> Option<u16> {
 /// Every replication channel. MySQL 8.4 only knows REPLICA, older MySQL only SLAVE; MariaDB's plain statement shows
 /// the default connection only, so ALL SLAVES is what lists the named ones of a multi-source replica.
 async fn replicas(c: &mut sqlx::MySqlConnection, d: Dialect) -> Res<Vec<Replica>> {
-    let qs: &[&str] = if d == Dialect::MariaDb { &["SHOW ALL SLAVES STATUS"] } else { &["SHOW REPLICA STATUS", "SHOW SLAVE STATUS"] };
+    let qs: &[&str] = match d {
+        Dialect::MariaDb => &["SHOW ALL SLAVES STATUS"],
+        Dialect::MySql => &["SHOW REPLICA STATUS", "SHOW SLAVE STATUS"],
+        Dialect::Postgres => &[],
+    };
     let mut last = None;
     for q in qs {
         match rows(c, q).await {
@@ -512,12 +520,16 @@ async fn identity(c: &mut sqlx::MySqlConnection, d: Dialect) -> String {
 }
 
 fn identity_columns(d: Dialect) -> &'static str {
-    if d == Dialect::MariaDb { "SELECT @@hostname, @@server_id" } else { "SELECT @@server_uuid" }
+    match d {
+        Dialect::MariaDb => "SELECT @@hostname, @@server_id",
+        Dialect::MySql => "SELECT @@server_uuid",
+        Dialect::Postgres => unimplemented!("PostgreSQL has no server identity columns"),
+    }
 }
 
 /// The identity columns of `identity_columns` starting at column `from`, joined.
 fn identity_of(r: &sqlx::mysql::MySqlRow, from: usize, d: Dialect) -> String {
-    (from..from + if d == Dialect::MariaDb { 2 } else { 1 }).map(|i| super::worker::text_at(r, i).unwrap_or_default()).collect::<Vec<_>>().join("/")
+    (from..from + match d { Dialect::MariaDb => 2, Dialect::MySql | Dialect::Postgres => 1 }).map(|i| super::worker::text_at(r, i).unwrap_or_default()).collect::<Vec<_>>().join("/")
 }
 
 /// This connection's id and the server's identity in one round trip. A server that refuses the identity columns

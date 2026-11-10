@@ -162,7 +162,7 @@ impl App {
         ui.horizontal(|ui| {
             let note = if !editable {
                 "Read-only: unlock writes to change triggers"
-            } else if d == db::sql::Dialect::MySql {
+            } else if matches!(d, db::sql::Dialect::MySql) {
                 "MySQL tries the new trigger under a scratch name, then swaps it in while the table is locked. If it is refused, the old one stays."
             } else {
                 "Changing a trigger replaces it in one statement."

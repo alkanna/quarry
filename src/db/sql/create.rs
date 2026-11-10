@@ -536,8 +536,11 @@ async fn table_info(db: &Db, schema: &str, table: &str) -> Res<DropInfo> {
 /// that filled since reads as 0. Only for this connection, which is never handed back to the pool; MariaDB
 /// has no such cache and no variable.
 async fn fresh_stats(c: &mut sqlx::MySqlConnection, d: Dialect) {
-    if d == Dialect::MySql {
-        let _ = c.execute("SET SESSION information_schema_stats_expiry = 0").await;
+    match d {
+        Dialect::MySql => {
+            let _ = c.execute("SET SESSION information_schema_stats_expiry = 0").await;
+        }
+        Dialect::MariaDb | Dialect::Postgres => {}
     }
 }
 

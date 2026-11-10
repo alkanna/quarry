@@ -396,7 +396,7 @@ impl App {
 
     fn sql_staged_bar(&mut self, ui: &mut egui::Ui, keys: Vec<String>) {
         let Some((sel, cols, _)) = self.sql_ctx() else { return };
-        let (d, bs) = (db::sql::Dialect::MySql, self.sql_bs());
+        let (d, bs) = self.sql_dialect();
         let (mut cells, mut summary) = (0, String::new());
         for k in &keys {
             let Some(dr) = self.drafts.get(k) else { continue };
@@ -585,7 +585,7 @@ impl App {
             }
         }
         let (sel, cols, pk) = self.sql_ctx().unwrap_or_else(|| (Sel { conn: 0, db: String::new(), coll: String::new() }, Arc::new(Vec::new()), Vec::new()));
-        let (d, bs) = (db::sql::Dialect::MySql, self.sql_bs());
+        let (d, bs) = self.sql_dialect();
         // The key names are the server's, which differ from the shown name of a renamed column.
         let numeric = |name: &str| cols.iter().find(|c| c.src == name).is_some_and(|c| is_numeric(c.kind));
         let key_lit = |r: &Document, p: &String| copy::sql_literal(r.get_document("_id").ok().and_then(|k| k.get(p)), numeric(p), bs);
@@ -663,7 +663,7 @@ impl App {
 
     pub(super) fn sql_set_dialog(&mut self, ui: &mut egui::Ui, f: &mut SetForm, keep: &mut bool) {
         let Some((sel, cols, pk)) = self.sql_ctx() else { return *keep = false };
-        let (d, bs) = (db::sql::Dialect::MySql, self.sql_bs());
+        let (d, bs) = self.sql_dialect();
         ui.set_width(560.0);
         let n = f.rows.len();
         dialog_title(ui, format!("Set value on {n} row{}", if n == 1 { "" } else { "s" }));
@@ -777,12 +777,13 @@ impl App {
     /// `copy_rows_as` for rows whose columns and table are given, such as a Query result.
     pub(super) fn copy_sheet(&mut self, ctx: &egui::Context, fmt: Fmt, rows: &[Document], cols: &[CopyCol], table: &str, pk: &[String], bs: bool) {
         let header = ctx.data(|d| d.get_temp::<bool>(egui::Id::unique("copy-with-header"))).unwrap_or(true);
+        let d = self.sql_dialect().0;
         let sheet = Sheet { rows, cols, table, pk, bs };
-        let text = copy::format(fmt, &sheet, header);
+        let text = copy::format_in(d, fmt, &sheet, header);
         if text.is_empty() {
             return self.warn(if fmt == Fmt::SqlUpdate { "SQL UPDATE needs a table with a primary key." } else { "Nothing to copy." });
         }
-        let rich = fmt == Fmt::Html && put_html(&text, &copy::format(Fmt::Tsv, &sheet, header));
+        let rich = fmt == Fmt::Html && put_html(&text, &copy::format_in(d, Fmt::Tsv, &sheet, header));
         if !rich {
             ctx.copy_text(text);
         }
@@ -826,7 +827,7 @@ impl App {
                 }
                 CellAct::FilterValue => {
                     let numeric = self.t().and_then(|t| t.sql.as_ref()).and_then(|s| s.cols.iter().find(|c| c.name == col)).is_some_and(|c| is_numeric(c.kind));
-                    let q = db::sql::Dialect::MySql.quote_ident(&col);
+                    let q = self.sql_dialect().0.quote_ident(&col);
                     let text = if v == Bson::Null { format!("{q} IS NULL") } else { format!("{q} = {}", copy::sql_literal(Some(&v), numeric, self.sql_bs())) };
                     let t = self.tm().unwrap();
                     t.filter_txt = text;

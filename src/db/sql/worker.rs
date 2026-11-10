@@ -302,7 +302,7 @@ async fn count(db: &Db, schema: &str, table: &str, q: &PageQuery) -> Res<(u64, b
         let mut c = pool.acquire().await.map_err(e)?;
         // MySQL 8 caches TABLE_ROWS for a day. Fresh numbers cost a lot per schema, so only this one table's
         // lookup asks for them; 5.7 and MariaDB lack the variable, so a refusal is fine.
-        if d == Dialect::MySql {
+        if matches!(d, Dialect::MySql) {
             let _ = c.execute("SET SESSION information_schema_stats_expiry = 0").await;
         }
         let t = Instant::now();

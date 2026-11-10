@@ -36,6 +36,8 @@ pub(crate) struct Scope<'a> {
     pub(crate) fallback: Arc<Vec<SchemaCol>>,
     /// Names of the views of `db` that the sidebar knows, so the plain table list shown before the schema arrives still marks them.
     pub(crate) views: std::collections::HashSet<String>,
+    /// How identifiers are quoted when a suggestion is inserted.
+    pub(crate) dialect: Dialect,
 }
 
 /// A lookup the caret asks the app to make: the schema of the database, or a column's values.
@@ -108,11 +110,11 @@ fn needs_quote(name: &str) -> bool {
 }
 
 /// A name as it is inserted. A backtick already typed is closed instead of added.
-fn ident(name: &str, in_tick: bool) -> String {
+fn ident(dl: Dialect, name: &str, in_tick: bool) -> String {
     if in_tick {
-        Dialect::MySql.quote_ident(name)[1..].to_string()
+        dl.quote_ident(name)[1..].to_string()
     } else if needs_quote(name) {
-        Dialect::MySql.quote_ident(name)
+        dl.quote_ident(name)
     } else {
         name.to_string()
     }
@@ -286,7 +288,7 @@ fn values_foot(values: &Fields, table: &str, col: &str) -> String {
     if parts.is_empty() { String::new() } else { format!("Values: {}", parts.join("  ")) }
 }
 
-fn col_sug(c: &SchemaCol, table: &str, scope_values: &Fields, qualifier: Option<&str>, in_tick: bool) -> Sug {
+fn col_sug(dl: Dialect, c: &SchemaCol, table: &str, scope_values: &Fields, qualifier: Option<&str>, in_tick: bool) -> Sug {
     let mut detail = type_label(c);
     if c.key == "UNI" {
         detail += " · UNIQUE";
@@ -294,18 +296,18 @@ fn col_sug(c: &SchemaCol, table: &str, scope_values: &Fields, qualifier: Option<
     if c.fk {
         detail += " · FK";
     }
-    let name = ident(&c.name, in_tick);
+    let name = ident(dl, &c.name, in_tick);
     let insert = match qualifier {
-        Some(q) => format!("{}.{name}", ident(q, false)),
+        Some(q) => format!("{}.{name}", ident(dl, q, false)),
         None => name,
     };
     let text = qualifier.map_or_else(|| c.name.clone(), |q| format!("{q}.{}", c.name));
     sug(text, if c.key == "PRI" { "pk" } else { "column" }, insert, detail, values_foot(scope_values, table, &c.name))
 }
 
-fn table_sug(t: &SchemaTable, in_tick: bool) -> Sug {
+fn table_sug(dl: Dialect, t: &SchemaTable, in_tick: bool) -> Sug {
     let detail = if t.view { "view".to_string() } else { t.rows.map_or(String::new(), |n| format!("{} rows", crate::app::group(&n.to_string()))) };
-    sug(t.name.clone(), if t.view { "view" } else { "table" }, ident(&t.name, in_tick), detail, String::new())
+    sug(t.name.clone(), if t.view { "view" } else { "table" }, ident(dl, &t.name, in_tick), detail, String::new())
 }
 
 /// The text of the statement the caret is in, up to the caret and whole. `before` and `tail` are the
@@ -398,7 +400,7 @@ pub(crate) fn analyze(before: &str, full_stmt: &str, scope: &Scope, values: &Fie
         for r in &rts {
             for c in col_matches(r.cols, word) {
                 let ambiguous = multi && rts.iter().filter(|o| o.cols.iter().any(|x| x.name.eq_ignore_ascii_case(&c.name))).count() > 1;
-                sugs.push(col_sug(c, &r.table, values, ambiguous.then_some(r.label.as_str()), in_tick));
+                sugs.push(col_sug(scope.dialect, c, &r.table, values, ambiguous.then_some(r.label.as_str()), in_tick));
             }
         }
         if !in_tick {
@@ -433,47 +435,47 @@ pub(crate) fn analyze(before: &str, full_stmt: &str, scope: &Scope, values: &Fie
 /// Columns of the table or alias `q`, or the tables of a database `q`.
 fn qualified(q: &str, word: &str, from: usize, in_tick: bool, scope: &Scope, rts: &[Rt], values: &Fields) -> Option<Out> {
     if let Some(r) = by_qualifier(rts, q) {
-        return Some(cols_out(q, r.table.as_str(), r.cols, word, from, in_tick, values));
+        return Some(cols_out(scope.dialect, q, r.table.as_str(), r.cols, word, from, in_tick, values));
     }
     if q.eq_ignore_ascii_case(&scope.db) {
-        let mut sugs: Vec<Sug> = scope.schema.tables.iter().filter(|t| starts_ci(&t.name, word)).map(|t| table_sug(t, in_tick)).collect();
+        let mut sugs: Vec<Sug> = scope.schema.tables.iter().filter(|t| starts_ci(&t.name, word)).map(|t| table_sug(scope.dialect, t, in_tick)).collect();
         sugs.truncate(MAX_SUGGESTIONS);
         return Some(Out { from, sugs, ..Default::default() });
     }
     let (_, tables) = scope.dbs.iter().find(|(d, _)| d.eq_ignore_ascii_case(q))?;
-    let sugs: Vec<Sug> = tables.iter().flatten().filter(|t| starts_ci(t, word)).take(MAX_SUGGESTIONS).map(|t| sug(t.clone(), "table", ident(t, in_tick), String::new(), String::new())).collect();
+    let sugs: Vec<Sug> = tables.iter().flatten().filter(|t| starts_ci(t, word)).take(MAX_SUGGESTIONS).map(|t| sug(t.clone(), "table", ident(scope.dialect, t, in_tick), String::new(), String::new())).collect();
     Some(Out { from, sugs, ..Default::default() })
 }
 
 fn by_qualifier_cols(table: &str, word: &str, from: usize, in_tick: bool, scope: &Scope, values: &Fields) -> Option<Out> {
     let (name, cols) = table_cols(scope, table)?;
-    Some(cols_out(name, name, cols, word, from, in_tick, values))
+    Some(cols_out(scope.dialect, name, name, cols, word, from, in_tick, values))
 }
 
-fn cols_out(label: &str, table: &str, cols: &[SchemaCol], word: &str, from: usize, in_tick: bool, values: &Fields) -> Out {
-    let sugs: Vec<Sug> = col_matches(cols, word).into_iter().take(MAX_SUGGESTIONS).map(|c| col_sug(c, table, values, None, in_tick)).collect();
+fn cols_out(dl: Dialect, label: &str, table: &str, cols: &[SchemaCol], word: &str, from: usize, in_tick: bool, values: &Fields) -> Out {
+    let sugs: Vec<Sug> = col_matches(cols, word).into_iter().take(MAX_SUGGESTIONS).map(|c| col_sug(dl, c, table, values, None, in_tick)).collect();
     let title = if label.eq_ignore_ascii_case(table) { table.to_ascii_uppercase() } else { format!("{} = {}", label.to_ascii_uppercase(), table.to_ascii_uppercase()) };
     Out { from, sugs, title, ..Default::default() }
 }
 
 /// Tables and views of the current database first, then the other databases and their tables.
 fn tables_list(word: &str, from: usize, in_tick: bool, scope: &Scope) -> Out {
-    let mut sugs: Vec<Sug> = scope.schema.tables.iter().filter(|t| starts_ci(&t.name, word)).map(|t| table_sug(t, in_tick)).collect();
+    let mut sugs: Vec<Sug> = scope.schema.tables.iter().filter(|t| starts_ci(&t.name, word)).map(|t| table_sug(scope.dialect, t, in_tick)).collect();
     // A name still loading is listed from the sidebar's table list, without the row counts.
     if scope.schema.tables.is_empty() {
         if let Some((_, Some(names))) = scope.dbs.iter().find(|(d, _)| d.eq_ignore_ascii_case(&scope.db)) {
             sugs.extend(names.iter().filter(|t| starts_ci(t, word)).map(|t| {
                 let view = scope.views.contains(t.as_str());
-                sug(t.clone(), if view { "view" } else { "table" }, ident(t, in_tick), if view { "view".to_string() } else { String::new() }, String::new())
+                sug(t.clone(), if view { "view" } else { "table" }, ident(scope.dialect, t, in_tick), if view { "view".to_string() } else { String::new() }, String::new())
             }));
         }
     }
     for (d, tables) in scope.dbs.iter().filter(|(d, _)| !d.eq_ignore_ascii_case(&scope.db)) {
         if starts_ci(d, word) {
-            sugs.push(sug(d.clone(), "schema", format!("{}.", ident(d, in_tick)), "database".into(), String::new()));
+            sugs.push(sug(d.clone(), "schema", format!("{}.", ident(scope.dialect, d, in_tick)), "database".into(), String::new()));
         }
         for t in tables.iter().flatten().filter(|t| starts_ci(t, word)) {
-            sugs.push(sug(format!("{d}.{t}"), "schema", format!("{}.{}", ident(d, false), ident(t, in_tick)), "other db".into(), String::new()));
+            sugs.push(sug(format!("{d}.{t}"), "schema", format!("{}.{}", ident(scope.dialect, d, false), ident(scope.dialect, t, in_tick)), "other db".into(), String::new()));
         }
     }
     sugs.truncate(MAX_SUGGESTIONS);

@@ -76,7 +76,7 @@ fn note(s: &str) -> String {
 /// name and its CREATE statement. A reference is a backtick name after the `AS` of the statement, so a column
 /// that shares a view's name may add an order that is not needed; a loop that this makes is broken in list
 /// order instead of failing.
-fn view_order(views: &[(String, String)]) -> Vec<usize> {
+fn view_order(d: Dialect, views: &[(String, String)]) -> Vec<usize> {
     let deps: Vec<Vec<usize>> = views
         .iter()
         .enumerate()
@@ -86,7 +86,7 @@ fn view_order(views: &[(String, String)]) -> Vec<usize> {
             let view = (0..toks.len()).find(|&k| word(k, "VIEW")).unwrap_or(0);
             let body = (view..toks.len()).find(|&k| word(k, "AS")).map_or(0, |k| k + 1);
             let named: Vec<&str> = toks[body..].iter().filter(|t| t.0 == lex::Tok::Quoted).map(|t| &sql[t.1.clone()]).collect();
-            (0..views.len()).filter(|&j| j != i && named.contains(&Dialect::MySql.quote_ident(&views[j].0).as_str())).collect()
+            (0..views.len()).filter(|&j| j != i && named.contains(&d.quote_ident(&views[j].0).as_str())).collect()
         })
         .collect();
     let (mut done, mut out) = (vec![false; views.len()], Vec::new());
@@ -147,11 +147,11 @@ async fn table_cols(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str, tab
 
 /// One INSERT for the rows in `batch`, which is emptied. A plain function, since a closure held across the awaits
 /// of the stream makes the future too general for the executor to be spawned.
-fn flush_rows(batch: &mut Vec<Document>, copy: &[CopyCol], table: &str, out: &mut (dyn Write + Send)) -> Res<()> {
+fn flush_rows(d: Dialect, batch: &mut Vec<Document>, copy: &[CopyCol], table: &str, out: &mut (dyn Write + Send)) -> Res<()> {
     if batch.is_empty() {
         return Ok(());
     }
-    let mut w = Writer::new(Fmt::SqlInsert, true, copy.to_vec(), table, &[], true);
+    let mut w = Writer::new(Fmt::SqlInsert, true, copy.to_vec(), table, &[], true).with_dialect(d);
     let text = w.begin() + &w.rows(batch) + &w.end() + "\n";
     batch.clear();
     out.write_all(text.as_bytes()).map_err(io)
@@ -189,7 +189,7 @@ async fn write_rows(c: &mut sqlx::MySqlConnection, d: Dialect, plan: &DumpPlan, 
             batch.push(to_row(&kinds, &row, &[])?.owned());
             rows += 1;
             if batch.len() >= per || bytes >= INSERT_BYTES {
-                flush_rows(&mut batch, &copy, table, out)?;
+                flush_rows(d, &mut batch, &copy, table, out)?;
                 bytes = 0;
                 count.store(base + rows, Ordering::Relaxed);
                 stopped(cancel)?;
@@ -200,7 +200,7 @@ async fn write_rows(c: &mut sqlx::MySqlConnection, d: Dialect, plan: &DumpPlan, 
     .await;
     crate::db::note_here(&sql, started, &res);
     res?;
-    flush_rows(&mut batch, &copy, table, out)?;
+    flush_rows(d, &mut batch, &copy, table, out)?;
     count.store(base + rows, Ordering::Relaxed);
     Ok(rows)
 }
@@ -285,7 +285,7 @@ async fn dump_on(c: &mut sqlx::MySqlConnection, d: Dialect, db: &Db, plan: &Dump
         let s = if t.structure { show_create(c, d.create_stmt(true, &plan.schema, &t.name), 1).await?.1 } else { String::new() };
         views.push((t.name.clone(), s));
     }
-    let order = view_order(&views);
+    let order = view_order(d, &views);
     // Tables first, then views, which need them; data before triggers, which would otherwise fire on every row.
     let tables: Vec<&DumpTable> = plan.tables.iter().filter(|t| !t.view).chain(order.iter().map(|&i| view_rows[i])).collect();
     for t in &tables {
@@ -596,14 +596,14 @@ mod tests {
         let v = |n: &str, from: &str| (n.to_string(), format!("CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`%` SQL SECURITY DEFINER VIEW `{n}` AS select `{from}`.`a` AS `a` from `{from}`"));
         // a_top reads z_base, which reads the table t: alphabetical order would create a_top first.
         let views = [v("a_top", "z_base"), v("m_mid", "a_top"), v("z_base", "t")];
-        let order: Vec<&str> = view_order(&views).into_iter().map(|i| views[i].0.as_str()).collect();
+        let order: Vec<&str> = view_order(Dialect::MySql, &views).into_iter().map(|i| views[i].0.as_str()).collect();
         assert_eq!(order, ["z_base", "a_top", "m_mid"]);
         // Independent views keep their order, and a loop (from a column that shares a view's name) still writes all.
-        assert_eq!(view_order(&[v("a", "t"), v("b", "t")]), [0, 1]);
-        assert_eq!(view_order(&[v("a", "b"), v("b", "a")]), [0, 1]);
+        assert_eq!(view_order(Dialect::MySql, &[v("a", "t"), v("b", "t")]), [0, 1]);
+        assert_eq!(view_order(Dialect::MySql, &[v("a", "b"), v("b", "a")]), [0, 1]);
         // The definer and the view's own name are not references.
-        assert_eq!(view_order(&[v("root", "t"), v("b", "t")]), [0, 1]);
-        assert!(view_order(&[]).is_empty());
+        assert_eq!(view_order(Dialect::MySql, &[v("root", "t"), v("b", "t")]), [0, 1]);
+        assert!(view_order(Dialect::MySql, &[]).is_empty());
     }
     use crate::db::sql::testing::every_server;
 
