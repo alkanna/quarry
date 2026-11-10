@@ -75,8 +75,12 @@ impl App {
             });
         });
         ui.add_space(6.0);
-        if let Some(e) = &t.schema.err {
-            ui.label(RichText::new(format!("Analysis failed: {e}")).color(ALERT()));
+        // The panel takes the place of the field list; the toolbar's buttons below still run.
+        if t.schema.err.is_some() {
+            self.failed_panel(ui, View::Schema);
+        }
+        let t = &mut self.tabs[self.cur];
+        if t.schema.err.is_some() {
         } else if let Some(ms) = t.schema.ms {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("{} fields in {} documents  ·  {ms} ms", t.schema.stats.len(), group(&t.schema.docs.to_string()))).color(MUTED()));
@@ -97,6 +101,9 @@ impl App {
         let n = t.schema.docs.max(1) as f32;
         let mut toggle = None;
         egui::ScrollArea::both().id_salt("schema").auto_shrink(false).show(ui, |ui| {
+            if t.schema.err.is_some() {
+                return;
+            }
             egui::Grid::new("schema-grid").num_columns(4).striped(true).spacing([18.0, 6.0]).min_col_width(60.0).show(ui, |ui| {
                 for h in ["FIELD", "PRESENT IN", "TYPES", "EXAMPLES"] {
                     caption(ui, h);

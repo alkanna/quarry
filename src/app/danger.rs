@@ -33,7 +33,7 @@ impl App {
             // Found by time, since the list may have moved while the dialog was open.
             return match self.undo.iter().position(|a| a.at == at) {
                 Some(i) => self.apply_undo_as(i, true),
-                None => self.err("That change is no longer in Recent changes."),
+                None => self.warn("That change is no longer in Recent changes."),
             };
         }
         if let Danger::SqlDrop { conn, schema, table, kind } = action {

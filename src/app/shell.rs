@@ -420,7 +420,7 @@ impl App {
             return self.ok("Offline demo: the shell needs a real connection.");
         }
         let Some(runtime) = find_bun(&self.prefs.shell_runtime) else {
-            return self.err("Bun was not found. Install it from bun.sh, or set its path in Settings.");
+            return self.warn_settings("Bun is needed for the Shell. Install it from bun.sh, or set its path in Settings.");
         };
         let Some(t) = self.t() else { return };
         let (sel, code, main_sql) = (t.sel.clone(), t.shell.code.clone(), t.sql.is_some());
@@ -437,7 +437,7 @@ impl App {
         // The tab's own connection is the main entry. A SQL script gets no address and no password: its queries come back to this app.
         let name = self.conn(sel.conn).map(|c| c.meta.name.clone()).unwrap_or_default();
         if main_sql {
-            let Some(db) = self.conn(sel.conn).and_then(|c| c.sql.clone()) else { return self.err("Connect first.") };
+            let Some(db) = self.conn(sel.conn).and_then(|c| c.sql.clone()) else { return self.warn_offline() };
             sql_entries.insert(0, serde_json::json!({ "name": name, "db": sel.db, "tables": collections }));
             sql.insert(0, (name.clone(), db::SqlRelay { db, schema: sel.db.clone(), read_only, conn_id: Default::default() }));
         } else {

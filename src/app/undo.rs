@@ -18,7 +18,7 @@ impl App {
         let Some(c) = self.conn(a.conn) else { return };
         let writable = c.writable;
         if !writable {
-            self.err("Undo is a write: unlock writes on that connection first.");
+            self.warn("Undo is a write. Unlock writes on that connection first.");
             return;
         }
         if !confirmed && self.alter_undo_gate(i) {
@@ -38,7 +38,7 @@ impl App {
             return;
         }
         let Some(client) = c.client.clone() else {
-            self.err("That connection is closed.");
+            self.warn("That connection is closed.");
             return;
         };
         let a = self.undo.remove(i);

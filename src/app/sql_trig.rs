@@ -89,7 +89,7 @@ impl App {
     /// Asks before dropping the selected trigger.
     pub(super) fn trig_ask_drop(&mut self, name: String) {
         if !self.sel_writable() {
-            return self.err("This connection is read-only. Unlock writes in the top bar first.");
+            return self.warn_ro();
         }
         let Some(sel) = self.t().map(|t| t.sel.clone()) else { return };
         self.modal = Some(Modal::Typed { title: format!("Drop the trigger {name}? Undo brings it back as it was."), expect: name.clone(), typed: String::new(), action: Danger::DropTrigger(sel, name) });
@@ -200,13 +200,13 @@ impl App {
         }
         let writable = self.sel_writable();
         if !writable {
-            return self.err("This connection is read-only. Unlock writes in the top bar first.");
+            return self.warn_ro();
         }
         if self.applying() {
-            return self.err(BUSY_NOTE);
+            return self.warn(BUSY_NOTE);
         }
         let Some((conn, schema, table)) = self.t().map(|t| (t.sel.conn, t.sel.db.clone(), t.sel.coll.clone())) else { return };
-        let Some(db) = self.conn(conn).and_then(|c| c.sql.clone()) else { return self.err("Not connected.") };
+        let Some(db) = self.conn(conn).and_then(|c| c.sql.clone()) else { return self.warn_offline() };
         let (.., m) = self.alter_env();
         if let Some(s) = self.tabs[self.cur].sql.as_mut() {
             s.st.applying = true;
@@ -215,7 +215,7 @@ impl App {
     }
 
     pub(super) fn drop_trigger(&mut self, name: String) {
-        let Some(t) = self.structure().and_then(|s| s.triggers.iter().find(|t| t.name == name)).cloned() else { return self.err(format!("The trigger {name} is not in the structure any more.")) };
+        let Some(t) = self.structure().and_then(|s| s.triggers.iter().find(|t| t.name == name)).cloned() else { return self.warn(format!("The trigger {name} is not in the structure any more.")) };
         self.run_trigger(TrigJob::Drop(t), "Dropped the trigger");
     }
 

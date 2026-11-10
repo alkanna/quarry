@@ -145,7 +145,7 @@ impl App {
     }
 
     fn open_sql_import_with(&mut self, conn: u64, db: String, table: String, src: Option<Source>) {
-        let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) else { return self.err("Connect first.") };
+        let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) else { return self.warn_offline() };
         if self.demo {
             return self.ok("Offline demo: no database is connected.");
         }
@@ -440,7 +440,7 @@ impl App {
     }
 
     fn start_sql_import(&mut self, f: &ImportForm, info: &TableInfo, want_undo: bool) {
-        let Some((sql, writable)) = self.conn(f.conn).and_then(|c| Some((c.sql.clone()?, c.writable))) else { return self.err("Connect first.") };
+        let Some((sql, writable)) = self.conn(f.conn).and_then(|c| Some((c.sql.clone()?, c.writable))) else { return self.warn_offline() };
         let plan = ImportPlan { source: f.file.src.clone(), opts: f.file.opts, header: f.file.header, info: info.clone(), map: f.file.map.clone(), dup: f.dup, want_undo };
         self.req += 1;
         let mut job = super::sql_dump::SqlJob::new(self.req, f.conn, sql.clone(), f.db.clone(), super::sql_dump::JobKind::Import, f.file.report.as_ref().map_or(0, |r| r.rows), f.file.size);

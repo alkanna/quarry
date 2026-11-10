@@ -96,7 +96,7 @@ impl App {
     pub(super) fn start_tool(&mut self, restore: bool, title: String, args: Vec<String>) {
         let (name, setting) = if restore { ("mongorestore", &self.prefs.mongorestore) } else { ("mongodump", &self.prefs.mongodump) };
         let Some(exe) = find_exe(name, setting) else {
-            return self.err(format!("{name} was not found. Install the MongoDB Database Tools from Settings or set its path there."));
+            return self.warn_settings(format!("{name} was not found. Install the MongoDB Database Tools from Settings or set its path there."));
         };
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.tool = Some(ToolRun { title, log: Vec::new(), cancel: Some(tx), done: None });

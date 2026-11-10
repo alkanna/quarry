@@ -73,7 +73,7 @@ impl App {
                 self.explain_req = self.req;
                 self.worker.explain(self.req, target, w, self.page_size());
             }
-            _ => self.err("Not connected."),
+            _ => self.warn_offline(),
         }
     }
 }

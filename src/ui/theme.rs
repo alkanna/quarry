@@ -198,6 +198,9 @@ pub(crate) const TXT_TITLE: f32 = 13.0;
 /// Dialog titles and the collection heading.
 pub(crate) const TXT_HEADING: f32 = 18.0;
 
+/// Titles of error panels and dialogs, between list names and headings.
+pub(crate) const TXT_SUBHEAD: f32 = 15.0;
+
 /// The Cmd+K search field, a step above titles so it reads as the palette's heading.
 pub(crate) const TXT_SEARCH: f32 = 15.0;
 
@@ -378,6 +381,8 @@ pub(crate) fn visuals(theme: egui::Theme, p: &Palette) -> egui::Visuals {
 }
 
 pub(crate) const CHIP_H: f32 = 22.0;
+/// The status bar's own chips, like the error count, which must fit its 26 pt height.
+pub(crate) const STATUS_CHIP_H: f32 = 17.0;
 
 /// `c` moved by `t` away from its own lightness: toward white barely changes an already light color.
 pub(crate) fn shade(c: Color32, t: f32) -> Color32 {

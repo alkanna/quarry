@@ -806,7 +806,7 @@ impl App {
             match db::get_path(&d, &c).cloned() {
                 Some(v) if c != "_id" => self.start_inline(&d, path, v),
                 Some(_) => {}
-                None => self.err(format!("This document has no field {c}. Use + Add field.")),
+                None => self.warn(format!("This document has no field {c}. Use + Add field.")),
             }
         }
     }

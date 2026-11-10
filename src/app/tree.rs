@@ -324,24 +324,24 @@ impl App {
                 TreeAct::AddField(parent) => {
                     if self.sel_writable() {
                         self.inline = None;
-                        self.new_field = Some(NewField { parent, name: String::new(), text: String::new(), kind: "string" });
+                        self.new_field = Some(NewField { parent, name: String::new(), text: String::new(), kind: "string", err: None });
                     } else {
                         let d = d.clone();
                         self.ask_unlock_then(move |a| a.handle_acts(&d, vec![TreeAct::AddField(parent)]));
                     }
                 }
                 TreeAct::CommitNew => {
-                    if let Some(n) = &self.new_field {
+                    if let Some(n) = &mut self.new_field {
                         let is_array = !n.parent.is_empty() && matches!(db::get_path(d, &n.parent.join(".")), Some(Bson::Array(_)));
                         let name = n.name.trim().to_string();
                         if name.is_empty() && !is_array {
-                            self.err("Give the new field a name.");
+                            n.err = Some("Give the new field a name.".into());
                             continue;
                         }
                         let mut path = n.parent.clone();
                         path.push(if is_array { usize::MAX.to_string() } else { name.clone() });
                         if !is_array && db::get_path(d, &path.join(".")).is_some() {
-                            self.err(format!("{name} already exists. Double-click it to change it."));
+                            n.err = Some(format!("{name} already exists. Double-click it in the tree to change it."));
                             continue;
                         }
                         let new = db::make_value(n.kind, &n.text).and_then(|v| db::edit_path(d, &path, Some(v)));
@@ -392,7 +392,7 @@ impl App {
                     // "Open in Aggregate" opens the pipeline in a new tab, as the original does.
                     match (db::group_count_pipeline(&path, &v, filter), self.target()) {
                         (Err(e), _) => self.err(e),
-                        (_, None) => self.err("Not connected."),
+                        (_, None) => self.warn_offline(),
                         (Ok(p), Some(target)) => {
                             let t = self.t().unwrap();
                             let (conn, co) = (t.sel.conn, filtered.then(|| t.query.collation.clone()).flatten());
@@ -406,7 +406,7 @@ impl App {
                         let scope = self.t().unwrap().query.scope();
                         self.worker.distinct_count(target, path, scope);
                     }
-                    None => self.err("Not connected."),
+                    None => self.warn_offline(),
                 },
                 TreeAct::Index(path) => {
                     let t = self.tm().unwrap();
@@ -421,7 +421,7 @@ impl App {
                     let path = db::strip_indices(&path);
                     let rel = self.prefs.relations.get(&format!("{}/{}", s.conn, s.db)).and_then(|l| l.iter().find(|r| r.coll == s.coll && r.path == path)).cloned();
                     match (rel, self.conn(s.conn).and_then(|c| c.client.clone())) {
-                        (_, None) => self.err("Not connected."),
+                        (_, None) => self.warn_offline(),
                         (Some(r), _) => self.go_ref(s.conn, s.db, r.target, v),
                         (None, Some(client)) => {
                             let colls = self.conn(s.conn).and_then(|c| c.dbs.iter().find(|d| d.0 == s.db)).and_then(|d| d.1.clone()).unwrap_or_default();
@@ -456,7 +456,17 @@ impl App {
         let Some(n) = &mut self.new_field else { return };
         ui.horizontal(|ui| {
             ui.add_space(16.0);
-            let r = ui.add(egui::TextEdit::singleline(&mut n.name).hint_text("name").desired_width(120.0).font(egui::TextStyle::Monospace));
+            let bad = n.err.is_some();
+            let r = ui.scope(|ui| {
+                if bad {
+                    ui.visuals_mut().widgets.inactive.bg_stroke = Stroke::new(1.2, ALERT());
+                    ui.visuals_mut().selection.stroke = Stroke::new(1.2, ALERT());
+                }
+                ui.add(egui::TextEdit::singleline(&mut n.name).hint_text("name").desired_width(120.0).font(egui::TextStyle::Monospace))
+            }).inner;
+            if r.changed() {
+                n.err = None;
+            }
             if n.name.is_empty() && !r.has_focus() && !ui.ctx().any_popup_open() {
                 r.request_focus();
             }
@@ -469,6 +479,15 @@ impl App {
                 acts.push(TreeAct::Cancel);
             }
         });
+        // Under the inputs, never in the status bar: the field it is about is right here.
+        if let Some(e) = &n.err {
+            ui.horizontal(|ui| {
+                ui.add_space(16.0);
+                let (r, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), Sense::hover());
+                paint_alert(ui.painter(), r.center(), ALERT());
+                ui.label(RichText::new(e).size(TXT_SMALL).color(ALERT()));
+            });
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

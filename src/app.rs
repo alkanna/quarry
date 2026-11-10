@@ -21,6 +21,7 @@ mod danger;
 mod demo;
 mod documents;
 mod drafts;
+mod errors;
 mod explain;
 mod export;
 mod import;
@@ -63,6 +64,7 @@ mod undo;
 mod users;
 mod watch;
 use column_menu::*;
+use errors::*;
 use config::*;
 use documents::*;
 use shell::*;
@@ -194,11 +196,16 @@ pub struct App {
     undo: Vec<UndoAction>,
     explain_req: u64,
     modal: Option<Modal>,
-    status: (String, bool),
-    status_at: std::time::Instant,
+    status: String,
     log: LogUi,
-    /// Message, when it was shown, and the `at` of the undo entry its Undo button reverts.
-    toast: Option<(String, std::time::Instant, Option<std::time::Instant>)>,
+    toasts: Vec<Toast>,
+    /// This session's errors, oldest first, for the status bar list.
+    errors: Vec<ErrEntry>,
+    /// Errors since the list was last opened, the count the status bar shows.
+    errors_unseen: usize,
+    err_seq: u64,
+    /// Opens the error list on its first frame, for the demo picture.
+    errors_open: bool,
     ac: Ac,
     /// Field values fetched from the server for suggestions, per collection key then path. Kept on
     /// disk, so a new session suggests them before its own fetch comes back.
@@ -331,8 +338,12 @@ impl App {
             undo: Vec::new(),
             explain_req: 0,
             modal: None,
-            status: ("Ready. All connections start read-only.".into(), false),
-            toast: None,
+            status: "Ready. All connections start read-only.".into(),
+            toasts: Vec::new(),
+            errors: Vec::new(),
+            errors_unseen: 0,
+            err_seq: 0,
+            errors_open: false,
             ac: Ac::default(),
             values: HashMap::new(),
             values_asked: HashSet::new(),
@@ -340,7 +351,6 @@ impl App {
             values_note: HashMap::new(),
             values_typed: None,
             js: Default::default(),
-            status_at: std::time::Instant::now(),
             log: LogUi::default(),
             tree_filter: String::new(),
             tools_installing: false,
@@ -631,7 +641,7 @@ impl eframe::App for App {
         self.server_window(&ctx);
         self.sql_server_window(&ctx);
         self.tool_window(&ctx);
-        self.toast(&ctx);
+        self.toasts(&ctx);
         self.screenshot(&ctx);
     }
 }

@@ -47,7 +47,7 @@ impl App {
                         }
                         Err(e) => {
                             c.status = Status::Failed(e.clone());
-                            self.err(e);
+                            self.err_conn(conn, e);
                         }
                     }
                 }
@@ -88,7 +88,7 @@ impl App {
                         }
                         Err(e) => {
                             c.status = Status::Failed(e.clone());
-                            self.err(e);
+                            self.err_conn(conn, e);
                         }
                     }
                 }
@@ -152,7 +152,7 @@ impl App {
                             d.1 = Some(v);
                         }
                     }
-                    Err(e) => self.err(format!("Could not list the collections of {db}: {e}")),
+                    Err(e) => self.err_quiet(e, Some(conn), Some(Sel { conn, db: db.clone(), coll: String::new() }), format!("List collections · {db}")),
                 },
                 Msg::Command { tag, res } => match (tag.as_str(), res) {
                     (t, Ok(d)) if t.starts_with("srv-") => {
@@ -302,17 +302,16 @@ impl App {
                     Err(e) => self.err(e),
                 },
                 Msg::Docs { req, res } => {
-                    let Some(t) = self.tab_by_req(req) else { continue };
+                    let Some(i) = self.tabs.iter().position(|t| t.req == req) else { continue };
+                    let t = &mut self.tabs[i];
                     t.rows_replaced();
                     t.loading = false;
                     match res {
                         Ok((docs, count, ms)) => {
-                            // A query that works again clears an earlier error.
-                            if self.status.1 {
-                                self.status = (format!("Loaded {} documents", docs.len()), false);
-                            }
                             let Self { tabs, values, .. } = self;
-                            let t = tabs.iter_mut().find(|t| t.req == req).unwrap();
+                            let t = &mut tabs[i];
+                            // A query that works again clears an earlier error.
+                            t.clear_failed(View::Documents);
                             // SQL columns keep the table's order and never include the hidden _id.
                             t.fields = match &t.sql {
                                 Some(s) => s.cols.iter().map(|c| c.name.clone()).collect(),
@@ -357,18 +356,22 @@ impl App {
                             }
                         }
                         Err(e) => {
+                            // Old rows under the new query would read as its results.
                             t.docs.clear();
-                            self.err(e);
+                            let what = if t.sql.is_some() { "load the rows" } else { "load the documents" };
+                            self.fail_view(i, View::Documents, e, what);
                         }
                     }
                 }
-                Msg::Indexes { req, res } => match (res, self.tabs.iter_mut().find(|t| t.idx_req == req)) {
-                    (Ok(v), Some(t)) => {
+                Msg::Indexes { req, res } => match (res, self.tabs.iter().position(|t| t.idx_req == req)) {
+                    (Ok(v), Some(i)) => {
+                        let t = &mut self.tabs[i];
+                        t.clear_failed(View::Indexes);
                         t.set_indexes(v);
                         let key = t.sel.key();
                         self.refresh_idx_rows(&key);
                     }
-                    (Err(e), _) => self.err(e),
+                    (Err(e), Some(i)) => self.fail_view(i, View::Indexes, e, "list the indexes"),
                     _ => {}
                 },
                 Msg::Explained { req, res } if req == self.explain_req => match res {
@@ -396,17 +399,19 @@ impl App {
                     }
                 }
                 Msg::Aggregated { req, res } => {
-                    let Some(t) = self.tabs.iter_mut().find(|t| t.agg_req == req) else {
-                        // A superseded run or a closed tab: its error still deserves a mention.
+                    let Some(i) = self.tabs.iter().position(|t| t.agg_req == req) else {
+                        // A superseded run or a closed tab: its error goes to the list, not over the newer run.
                         if let Err(e) = res {
-                            self.err(e);
+                            self.err_quiet(e, None, None, "Aggregate".into());
                         }
                         continue;
                     };
+                    let t = &mut self.tabs[i];
                     t.agg_req = 0;
                     t.rows_replaced();
                     match res {
                         Ok((d, ms)) => {
+                            t.clear_failed(View::Aggregate);
                             t.agg_fields = auto_fields(&d);
                             let n = d.len();
                             t.agg_docs = d;
@@ -417,7 +422,7 @@ impl App {
                         Err(e) => {
                             // Old results under a failed run would read as its output.
                             (t.agg_docs, t.agg_ms) = (Vec::new(), None);
-                            self.err(e);
+                            self.fail_view(i, View::Aggregate, e, "run the pipeline");
                         }
                     }
                 }
@@ -457,7 +462,7 @@ impl App {
                     let sel = dr.as_ref().map(|d| Sel { conn: d.conn, db: d.db.clone(), coll: d.coll.clone() });
                     match res {
                         Ok(s) => {
-                            self.toast = Some((s.clone(), std::time::Instant::now(), undo.as_ref().map(|u| u.at)));
+                            self.toast_ok(s.clone(), undo.as_ref().map(|u| u.at));
                             self.ok(s);
                         }
                         Err(e) => {
@@ -535,11 +540,15 @@ impl App {
                     Err(e) => self.err(format!("Could not analyze relations: {e}")),
                 },
                 Msg::Compared { req, res } => {
-                    let Some(t) = self.tabs.iter_mut().find(|t| t.compare.req == req) else { continue };
+                    let Some(i) = self.tabs.iter().position(|t| t.compare.req == req) else { continue };
+                    let t = &mut self.tabs[i];
                     t.compare.running = false;
                     match res {
-                        Ok(r) => t.compare.set_result(Some(r)),
-                        Err(e) => self.err(e),
+                        Ok(r) => {
+                            t.clear_failed(View::Compare);
+                            t.compare.set_result(Some(r));
+                        }
+                        Err(e) => self.fail_view(i, View::Compare, e, "compare"),
                     }
                 }
                 Msg::ToolLog(line) => {
@@ -584,11 +593,18 @@ impl App {
                     self.test_info = info.map(|i| (req, i));
                 }
                 Msg::Schema { req, res } => {
-                    let Some(t) = self.tabs.iter_mut().find(|t| t.schema.req == req) else { continue };
+                    let Some(i) = self.tabs.iter().position(|t| t.schema.req == req) else { continue };
+                    let t = &mut self.tabs[i];
                     t.schema.running = false;
                     match res {
-                        Ok((stats, n, ms)) => (t.schema.stats, t.schema.docs, t.schema.ms, t.schema.err) = (stats, n, Some(ms), None),
-                        Err(e) => (t.schema.stats, t.schema.ms, t.schema.err) = (Vec::new(), None, Some(e)),
+                        Ok((stats, n, ms)) => {
+                            t.clear_failed(View::Schema);
+                            (t.schema.stats, t.schema.docs, t.schema.ms, t.schema.err) = (stats, n, Some(ms), None);
+                        }
+                        Err(e) => {
+                            (t.schema.stats, t.schema.ms, t.schema.err) = (Vec::new(), None, Some(e.clone()));
+                            self.fail_view(i, View::Schema, e, "analyze the schema");
+                        }
                     }
                 }
                 Msg::ShellLog { req, level, text } => {

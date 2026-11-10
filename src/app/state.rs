@@ -99,6 +99,13 @@ pub(super) fn host_of(uri: &str) -> String {
     authority.rsplit('@').next().unwrap_or_default().to_string()
 }
 
+/// The user part of a connection string's credentials, "ana" in "mongodb://ana:****@host".
+pub(super) fn user_of(uri: &str) -> String {
+    let rest = uri.split_once("://").map_or(uri, |(_, r)| r);
+    let authority = rest.split(['/', '?']).next().unwrap_or_default();
+    authority.rsplit_once('@').map(|(cred, _)| cred.split(':').next().unwrap_or_default().to_string()).unwrap_or_default()
+}
+
 #[derive(Default, Clone)]
 pub(super) struct ServerInfo {
     pub(super) version: String,
@@ -130,6 +137,11 @@ impl Sel {
     /// "db.coll", how index stats are keyed.
     pub(super) fn key(&self) -> String {
         format!("{}.{}", self.db, self.coll)
+    }
+
+    /// "db.coll", or the database alone when no collection is picked.
+    pub(super) fn ns(&self) -> String {
+        if self.coll.is_empty() { self.db.clone() } else { self.key() }
     }
 }
 
@@ -199,6 +211,10 @@ pub(super) struct Tab {
     /// Index list requests have their own id, so they never cancel a documents load.
     pub(super) idx_req: u64,
     pub(super) loading: bool,
+    /// The last read of one of this tab's views failed; that view shows why instead of results.
+    pub(super) failed: Vec<super::errors::Failed>,
+    /// Why the query bar's text could not be run, shown under it; the rows from before stay.
+    pub(super) bar_err: Option<String>,
     pub(super) selected: Option<(bool, usize)>,
     /// Rows of the current page checked for bulk actions, and the last one clicked for Shift ranges.
     pub(super) checked: BTreeSet<usize>,
@@ -477,6 +493,11 @@ pub(super) fn page_window(page: Option<usize>, len: usize) -> (std::ops::Range<u
 }
 
 impl Tab {
+    /// Drops the error panel of `view`, once its read worked or is asked again.
+    pub(super) fn clear_failed(&mut self, view: View) {
+        self.failed.retain(|f| f.view != view);
+    }
+
     /// Call wherever an answer replaces the rows this tab shows.
     pub(super) fn rows_replaced(&mut self) {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -603,6 +624,8 @@ impl Tab {
             req: 0,
             idx_req: 0,
             loading: false,
+            failed: Vec::new(),
+            bar_err: None,
             selected: None,
             checked: BTreeSet::new(),
             check_anchor: None,
@@ -698,6 +721,7 @@ pub(super) enum Modal {
     DuplicateColl { conn: u64, db: String, coll: String, name: String },
     Undo,
     Explain { summary: db::ExplainSummary, raw: String, show_raw: bool },
+    ErrorDetails(Box<super::errors::ErrEntry>),
     /// `code` highlights the body as JSON.
     Text { title: String, body: String, code: bool },
     Rename { doc: Document, path: Vec<String>, name: String },
@@ -758,6 +782,8 @@ pub(super) struct NewField {
     pub(super) name: String,
     pub(super) text: String,
     pub(super) kind: &'static str,
+    /// Why Add was refused, shown under the inputs until the name changes.
+    pub(super) err: Option<String>,
 }
 
 /// One stage of the pipeline builder with its own preview, like the original's AggregatorStage
@@ -1094,13 +1120,7 @@ pub(super) fn net_of(meta: &ConnMeta) -> db::Net {
 
 impl App {
     pub(super) fn ok(&mut self, s: impl Into<String>) {
-        self.status = (s.into(), false);
-        self.status_at = std::time::Instant::now();
-    }
-
-    pub(super) fn err(&mut self, s: impl Into<String>) {
-        self.status = (s.into(), true);
-        self.status_at = std::time::Instant::now();
+        self.status = s.into();
     }
 
     pub(super) fn conn(&self, id: u64) -> Option<&Conn> {
@@ -1143,13 +1163,13 @@ impl App {
     pub(super) fn writable_target(&mut self) -> Option<(u64, Target)> {
         let conn = self.t()?.sel.conn;
         if !self.sel_writable() {
-            self.err("This connection is read-only. Unlock writes in the top bar first.");
+            self.warn_ro();
             return None;
         }
         match self.target() {
             Some(t) => Some((conn, t)),
             None => {
-                self.err("Not connected.");
+                self.warn_offline();
                 None
             }
         }
@@ -1256,6 +1276,13 @@ mod tests {
             assert!(sh.docs.is_empty() && sh.raw);
             assert_eq!(sh.result(), Some(v));
         }
+    }
+
+    #[test]
+    fn user_comes_from_the_masked_address() {
+        assert_eq!(user_of("mongodb://ana:****@h:27017/?tls=true"), "ana");
+        assert_eq!(user_of("mysql://root@db:3306"), "root");
+        assert_eq!(user_of("mongodb://localhost/?x=a@b"), "");
     }
 
     #[test]

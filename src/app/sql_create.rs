@@ -103,7 +103,7 @@ impl App {
 
     pub(super) fn sql_new_db(&mut self, conn: u64) {
         if !self.conn_writable(conn) {
-            return self.err(NOTE_DB);
+            return self.warn(NOTE_DB);
         }
         self.ask_meta(conn, "");
         self.modal = Some(Modal::SqlNewDb(Box::new(NewDb { conn, name: String::new(), charset: String::new(), collation: String::new(), meta: None, load_err: None })));
@@ -111,7 +111,7 @@ impl App {
 
     pub(super) fn sql_new_table(&mut self, conn: u64, schema: String) {
         if !self.conn_writable(conn) {
-            return self.err(NOTE_TABLE);
+            return self.warn(NOTE_TABLE);
         }
         self.ask_meta(conn, &schema);
         self.modal = Some(Modal::SqlNewTable(Box::new(NewTable { conn, schema, name: String::new(), engine: String::new(), collation: String::new(), cols: vec![ColumnSpec::id()], meta: None, load_err: None, show_sql: false })));
@@ -119,7 +119,7 @@ impl App {
 
     pub(super) fn sql_drop_ask(&mut self, conn: u64, schema: String, table: String, kind: DropKind) {
         if !self.conn_writable(conn) {
-            return self.err(NOTE_DROP);
+            return self.warn(NOTE_DROP);
         }
         if let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) {
             self.worker.sql_drop_info(conn, sql, schema.clone(), table.clone());
@@ -224,7 +224,7 @@ impl App {
         if !c.writable {
             return self.modal = Some(Modal::Unlock(conn, None));
         }
-        let Some(sql) = c.sql.clone() else { return self.err("Not connected.") };
+        let Some(sql) = c.sql.clone() else { return self.warn_offline() };
         self.worker.sql_drop(conn, sql, schema, table, kind == DropKind::View, kind == DropKind::Truncate, false);
     }
 

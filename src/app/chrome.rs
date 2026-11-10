@@ -219,39 +219,6 @@ impl App {
         }
     }
 
-    /// "Saved … Undo" notice after a write, for 8 seconds.
-    pub(super) fn toast(&mut self, ctx: &egui::Context) {
-        const TOAST_S: u64 = 8;
-        let Some((msg, at, undo_at)) = self.toast.clone() else { return };
-        // Later writes push newer entries in front, so the toast's own entry is found by its time.
-        let entry = undo_at.and_then(|k| self.undo.iter().position(|a| a.at == k));
-        if at.elapsed().as_secs() >= TOAST_S {
-            self.toast = None;
-            return;
-        }
-        ctx.request_repaint_after(Duration::from_millis(250));
-        let mut undo = false;
-        let mut close = false;
-        egui::Area::new(egui::Id::unique(("quarry-layer", "toast"))).anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -40.0)).show(ctx, |ui| {
-            egui::Frame::new().fill(RAISED()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("✓").color(SUCCESS()));
-                    ui.label(RichText::new(&msg).color(TEXT()));
-                    if entry.is_some() && ui.button(RichText::new("Undo").color(PRIMARY())).clicked() {
-                        undo = true;
-                    }
-                    close = ui.button("🗙").clicked();
-                });
-            });
-        });
-        if let (true, Some(i)) = (undo, entry) {
-            self.apply_undo(i);
-            self.toast = None;
-        } else if close {
-            self.toast = None;
-        }
-    }
-
     pub(super) fn screenshot(&mut self, ctx: &egui::Context) {
         let Some((path, frames, slot)) = &mut self.shot else { return };
         // AppKit draws the window buttons outside our frame, so the capture would lack them.
@@ -343,7 +310,7 @@ impl App {
                         let r = ui.add(primary_button(ui, format!("Restart for {v}"), SUCCESS())).on_hover_text("The update is installed. Quarry restarts by itself once you have no unsaved edits and have been idle for a minute.");
                         if r.clicked() {
                             if self.busy() {
-                                self.err("Save or discard your edits and wait for running scripts first.");
+                                self.warn("Save or discard your edits and wait for running scripts first.");
                             } else {
                                 crate::update::restart();
                             }
@@ -424,34 +391,17 @@ impl App {
                     }
                     ui.add_space(8.0);
                     ui.label(RichText::new("⌘K jump   ↵ run   ⌘/ keys").font(FontId::monospace(TXT_CAPTION)).color(FAINT())).on_hover_text("Cmd+K jumps to a collection, Enter runs the query, double-click a value to edit it, Cmd+/ lists every shortcut");
+                    ui.add_space(10.0);
+                    self.errors_chip(ui);
                     // The message gets only the room left between the connection and the hints, so a
-                    // long error is cut with an ellipsis instead of running under them.
+                    // long one is cut with an ellipsis instead of running under them.
                     ui.add_space(12.0);
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        // Errors fade after 15 s so an old problem does not look current.
-                        const ERROR_S: u64 = 15;
-                        if self.status.1 {
-                            if self.status_at.elapsed().as_secs() >= ERROR_S {
-                                self.status = ("Ready".into(), false);
-                            } else {
-                                ui.ctx().request_repaint_after(Duration::from_secs(1));
-                                if icon_button(ui, "🗙", true).on_hover_text("Dismiss").clicked() {
-                                    self.status = ("Ready".into(), false);
-                                }
-                            }
-                        }
                         if self.export_progress(ui) || self.sql_job_progress(ui) {
                             return;
                         }
-                        let (msg, is_err) = &self.status;
-                        let first = msg.lines().next().unwrap_or_default();
-                        let r = ui.add(egui::Label::new(RichText::new(first).size(TXT_CAPTION).color(if *is_err { ALERT() } else { FAINT() })).truncate().sense(egui::Sense::click()));
-                        // Errors often carry advice on a second line or a long server message.
-                        if !*is_err {
-                            r.on_hover_text(msg.as_str());
-                        } else if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("{msg}\n\nClick to open the whole message.")).clicked() {
-                            self.modal = Some(Modal::Text { title: "Error".into(), body: msg.clone(), code: false });
-                        }
+                        let first = self.status.lines().next().unwrap_or_default();
+                        ui.add(egui::Label::new(RichText::new(first).size(TXT_CAPTION).color(FAINT())).truncate()).on_hover_text(self.status.as_str());
                     });
                 });
             });
@@ -703,6 +653,9 @@ impl App {
     }
 
     pub(super) fn welcome(&mut self, ui: &mut egui::Ui) {
+        if let Some(id) = self.active.filter(|id| self.conn(*id).is_some_and(|c| matches!(c.status, Status::Failed(_)))) {
+            return self.conn_failed_card(ui, id);
+        }
         ui.vertical_centered(|ui| {
             ui.add_space(120.0);
             ui.label(RichText::new("Pick a collection on the left").size(TXT_HEADING).color(BRIGHT()));

@@ -77,7 +77,7 @@ impl App {
         let Some(dr) = self.drafts.remove(key) else { return };
         let Some(target) = self.target_for(&Sel { conn: dr.conn, db: dr.db.clone(), coll: dr.coll.clone() }) else {
             self.drafts.insert(key.to_string(), dr);
-            return self.err("Not connected.");
+            return self.warn_offline();
         };
         self.worker.save(key.to_string(), dr.conn, target, dr.original.clone(), dr.current.clone());
         self.saving.insert(key.to_string(), dr);
