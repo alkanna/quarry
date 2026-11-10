@@ -527,7 +527,7 @@ impl App {
                         .desired_width(f32::INFINITY)
                         .min_size(egui::vec2(0.0, if custom { h } else { 96.0 }))
                         .lock_focus(true)
-                        .hint_text(RichText::new("SELECT * FROM orders;").font(FontId::monospace(TXT_SMALL)).color(FAINT()))
+                        .hint_text(RichText::new("SELECT * FROM orders;").font(FontId::monospace(TXT_SMALL)).color(FAINT()).line_height(Some(LINE_H)))
                         .layouter(&mut layout)
                         .show(ui)
                 });
