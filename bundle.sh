@@ -118,8 +118,12 @@ fi
 # "--key <p8> --key-id <id> --issuer <uuid>" in CI. Stapling fails unless Apple accepted the upload.
 if [ -n "${QUARRY_NOTARY_ARGS:-}" ]; then
   ditto -c -k --keepParent "$APP" dist/notarize.zip
-  # shellcheck disable=SC2086
-  xcrun notarytool submit dist/notarize.zip $QUARRY_NOTARY_ARGS --wait
+  # Apple's notary service sometimes answers 504; a new submission usually goes through.
+  for try in 1 2 3; do
+    # shellcheck disable=SC2086
+    xcrun notarytool submit dist/notarize.zip $QUARRY_NOTARY_ARGS --wait && break
+    [ "$try" = 3 ] || sleep 30
+  done
   rm dist/notarize.zip
   xcrun stapler staple "$APP"
 fi
