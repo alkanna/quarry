@@ -358,6 +358,12 @@ pub(crate) fn analyze(before: &str, full_stmt: &str, scope: &Scope, values: &Fie
             _ => ("", before.len(), &prev_all[..]),
         }
     };
+    // A number typed after a comparison: the values of a numeric column, which go in unquoted.
+    if !in_tick && word.starts_with(|c: char| c.is_ascii_digit()) {
+        if let Some(out) = value_list(prev, word, from, "", &rts, values) {
+            return Some(out);
+        }
+    }
     if !in_tick && word.is_empty() && !prev.last().is_some_and(|t| t.punct(".")) {
         return None;
     }
@@ -508,6 +514,21 @@ fn value_list(toks: &[Tk], typed: &str, from: usize, quote: &str, rts: &[Rt], va
         [q, c] => by_qualifier(rts, q).and_then(|r| r.cols.iter().find(|x| x.name.eq_ignore_ascii_case(c)).map(|x| (r.table.as_str(), x))),
         _ => None,
     }?;
+    let numeric = matches!(col.kind, Kind::Int | Kind::UInt | Kind::Float | Kind::Decimal | Kind::Year);
+    if quote.is_empty() && !numeric {
+        return None;
+    }
+    // A number is written bare, so a quote typed before one is replaced along with the value.
+    if numeric {
+        let from = from - quote.len();
+        let title = format!("{}.{} · {}, MOST FREQUENT", table.to_ascii_uppercase(), col.name.to_ascii_uppercase(), type_label(col).split('(').next().unwrap_or(""));
+        let Some(info) = values.get(&value_key(table, &col.name)) else {
+            return Some(Out { from, title, need: Some(Need { table: table.to_string(), column: col.name.clone(), prefix: None }), ..Default::default() });
+        };
+        let sugs: Vec<Sug> = info.values.iter().enumerate().filter_map(|(i, v)| Some((i, v.as_str()?))).filter(|(_, v)| v.starts_with(typed)).take(MAX_SUGGESTIONS).map(|(i, v)| sug(v.to_string(), "literal", v.to_string(), percent(info, i), String::new())).collect();
+        let need = (info.values.len() >= 200 && !typed.is_empty()).then(|| Need { table: table.to_string(), column: col.name.clone(), prefix: Some(typed.to_string()) });
+        return Some(Out { from, sugs, title, foot: String::new(), need });
+    }
     let q = quote.chars().next().unwrap_or('\'');
     // The quote is closed with the value; one doubled stays inside the string. Values with a
     // backslash or a line break are left out, since how they read depends on the server's mode.
@@ -866,6 +887,22 @@ mod tests {
         assert_eq!(text_of(&o.sugs), ["'shipped'"]);
         assert_eq!(o.title, "ORDERS.STATUS · ENUM, ALL 3 VALUES");
         assert!(o.need.is_none());
+    }
+
+    #[test]
+    fn numeric_values_go_in_bare() {
+        let mut v = Fields::new();
+        v.insert(value_key("orders", "customer_id"), super::super::complete::FieldInfo { kind: "string", values: ["12", "5", "120"].map(Bson::from).to_vec(), freq: vec![5, 3, 2] });
+        // A quote typed first is replaced, since a number needs none.
+        let (from, s) = run_with("SELECT * FROM orders WHERE customer_id = \"1|", &v).unwrap();
+        assert_eq!(from, "SELECT * FROM orders WHERE customer_id = ".len());
+        assert_eq!(text_of(&s), ["12", "120"]);
+        assert_eq!(s[0].insert, "12");
+        let (from, s) = run_with("SELECT * FROM orders WHERE customer_id IN (5, 1|", &v).unwrap();
+        assert_eq!(from, "SELECT * FROM orders WHERE customer_id IN (5, ".len());
+        assert_eq!(text_of(&s), ["12", "120"]);
+        // A digit after a text column is no value.
+        assert!(run_with("SELECT * FROM orders WHERE currency = 1|", &values()).map_or(true, |(_, s)| s.iter().all(|s| s.note != "literal")));
     }
 
     #[test]

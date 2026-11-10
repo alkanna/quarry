@@ -142,7 +142,25 @@ pub(super) fn mark_color(mark: &str) -> Color32 {
     }
 }
 
-/// A 28 px square with the engine mark, a status dot at the bottom right and, for a tagged
+/// The engine's logo as a white mask, tinted when painted. Decoded once and kept in egui's memory.
+/// The shapes are Simple Icons' (CC0), baked to 64 px PNGs so the binary needs no SVG renderer.
+fn engine_logo(ctx: &egui::Context, mark: &str) -> Option<egui::TextureHandle> {
+    let (name, png): (&str, &[u8]) = match mark {
+        "MO" => ("engine-mongodb", include_bytes!("../../assets/engines/mongodb.png")),
+        "MA" => ("engine-mariadb", include_bytes!("../../assets/engines/mariadb.png")),
+        _ => ("engine-mysql", include_bytes!("../../assets/engines/mysql.png")),
+    };
+    let id = egui::Id::unique(name);
+    ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)).or_else(|| {
+        let icon = eframe::icon_data::from_png_bytes(png).ok()?;
+        let img = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
+        let tex = ctx.load_texture(name, img, egui::TextureOptions::LINEAR);
+        ctx.data_mut(|d| d.insert_temp(id, tex.clone()));
+        Some(tex)
+    })
+}
+
+/// A 28 px square with the engine logo, a status dot at the bottom right and, for a tagged
 /// connection, a bar in the tag color on the left edge.
 fn conn_shortcut(ui: &mut egui::Ui, c: &Conn, active: bool) -> egui::Response {
     let (rect, r) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), Sense::click());
@@ -156,8 +174,10 @@ fn conn_shortcut(ui: &mut egui::Ui, c: &Conn, active: bool) -> egui::Response {
         p.rect_filled(rect.shrink(3.0), R_SM, tint(color, 40));
     }
     let fg = if active || state > 0 { BRIGHT() } else { color };
-    let g = p.layout_job(egui::text::LayoutJob::single_section(mark.to_string(), mono_fmt(TXT_SMALL, fg, W_SEMIBOLD)));
-    p.galley(rect.center() - g.size() / 2.0 + egui::vec2(0.0, optical_dy(&g)), g, fg);
+    if let Some(tex) = engine_logo(ui.ctx(), mark) {
+        let uv = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
+        p.image(tex.id(), egui::Rect::from_center_size(rect.center(), egui::vec2(16.0, 16.0)), uv, fg);
+    }
     if !c.meta.tag.is_empty() {
         p.rect_filled(egui::Rect::from_min_size(rect.left_top() + egui::vec2(0.0, 6.0), egui::vec2(2.0, 16.0)), 1, tag_color(&c.meta.tag));
     }
