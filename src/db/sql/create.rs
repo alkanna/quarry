@@ -6,7 +6,7 @@
 
 use super::ddl::{self, Mode};
 use super::value::lit;
-use super::worker::{raw, text};
+use super::worker::{database_names, text, text_at};
 use super::write::{writer, SqlUndo};
 use super::{Db, Dialect, Pool};
 use crate::db::{e, Msg, Res, UndoAction, UndoKind, Worker};
@@ -575,16 +575,9 @@ async fn kill(pool: &sqlx::MySqlPool, id: u64) {
     }
 }
 
-async fn database_names(c: &mut sqlx::MySqlConnection) -> Res<Vec<String>> {
-    let rows = sqlx::query("SHOW DATABASES").fetch_all(&mut *c).await.map_err(e)?;
-    let mut dbs: Vec<String> = rows.iter().filter_map(|r| raw(r, 0).map(|b| String::from_utf8_lossy(b).into_owned())).collect();
-    dbs.sort();
-    Ok(dbs)
-}
-
 async fn table_names(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str) -> Res<Vec<String>> {
     let rows = sqlx::query(&format!("SHOW TABLES FROM {}", d.quote_ident(schema))).persistent(false).fetch_all(&mut *c).await.map_err(e)?;
-    Ok(rows.iter().filter_map(|r| raw(r, 0).map(|b| String::from_utf8_lossy(b).into_owned())).collect())
+    Ok(rows.iter().filter_map(|r| text_at(r, 0)).collect())
 }
 
 /// The name the server lists for what was just created as `name`. With lower_case_table_names=1 it stores
@@ -719,7 +712,7 @@ impl Worker {
     }
 
     pub fn sql_create_db(&self, conn: u64, db: Db, name: String, charset: String, collation: String, meta: Meta, read_only: bool) {
-        self.spawn(crate::db::sql_scope(db.conn, "", async move {
+        self.spawn_sql(db.conn, "", async move {
             let mut meta = meta;
             let res = run(&db, read_only, true, |fold| {
                 meta.fold_case = fold;
@@ -730,11 +723,11 @@ impl Worker {
             let undo = res.is_ok().then(|| created(conn, &name, "", SqlUndo::CreatedDb));
             let (res, dbs) = split(res, format!("Created database {name}"));
             Msg::SqlDdl { conn, schema: name, table: String::new(), what: Ddl::CreatedDb, res, undo, dbs, sql_mode: None }
-        }));
+        });
     }
 
     pub fn sql_create_table(&self, conn: u64, db: Db, spec: TableSpec, meta: Meta, read_only: bool) {
-        self.spawn(crate::db::sql_scope(db.conn, &spec.schema.clone(), async move {
+        self.spawn_sql(db.conn, &spec.schema.clone(), async move {
             let (mut name, mut made, mut seen) = (spec.name.clone(), None, None);
             let res: Res<()> = async {
                 let (mut c, m, now) = mode_session(&db, read_only).await?;
@@ -758,7 +751,7 @@ impl Worker {
             let undo = res.is_ok().then(|| created(conn, &spec.schema, &name, SqlUndo::CreatedTable { made }));
             let (res, dbs) = split(res.map(|_| None), format!("Created table {name}"));
             Msg::SqlDdl { conn, schema: spec.schema, table: name, what: Ddl::CreatedTable, res, undo, dbs, sql_mode: seen }
-        }));
+        });
     }
 
     /// The database list and the tables of `schema`, for what a script may have created or dropped anywhere.
@@ -778,7 +771,7 @@ impl Worker {
     /// DROP DATABASE, DROP TABLE, DROP VIEW or TRUNCATE; `table` is empty for a database. No undo.
     #[allow(clippy::too_many_arguments)]
     pub fn sql_drop(&self, conn: u64, db: Db, schema: String, table: String, view: bool, truncate: bool, read_only: bool) {
-        self.spawn(crate::db::sql_scope(db.conn, &schema.clone(), async move {
+        self.spawn_sql(db.conn, &schema.clone(), async move {
             let d = db.dialect;
             let (what, done) = if table.is_empty() {
                 (Ddl::DroppedDb, format!("Dropped database {schema}"))
@@ -795,13 +788,13 @@ impl Worker {
             .await;
             let (res, dbs) = split(res, done);
             Msg::SqlDdl { conn, schema, table, what, res, undo: None, dbs, sql_mode: None }
-        }));
+        });
     }
 
     /// Undoes a create when the object is still empty. A refused undo hands the entry back.
     pub fn sql_undo_create(&self, db: Db, a: UndoAction, read_only: bool) {
         let scope = a.db.clone();
-        self.spawn(crate::db::sql_scope(db.conn, &scope, async move {
+        self.spawn_sql(db.conn, &scope, async move {
             let UndoAction { at, conn, db: schema, coll: table, kind } = a;
             let made = match &kind {
                 UndoKind::Sql { undo: SqlUndo::CreatedTable { made }, .. } => made.clone(),
@@ -817,7 +810,7 @@ impl Worker {
             let undo = (!undone).then(|| UndoAction { at, conn, db: schema.clone(), coll: table.clone(), kind });
             // A refused undo changes nothing, so the app has nothing to refresh.
             Msg::SqlDdl { conn, schema, table, what, res, undo, dbs, sql_mode: None }
-        }));
+        });
     }
 }
 
@@ -1172,7 +1165,7 @@ mod tests {
             Answer { schema, table, res, undo, sql_mode }
         }
         fn text_of(&self, sql: &str) -> String {
-            self.w.rt.block_on(async { raw(&sqlx::query(sql).fetch_one(&self.pool).await.unwrap_or_else(|x| panic!("{sql}: {x}")), 0).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default() })
+            self.w.rt.block_on(async { crate::db::sql::worker::text_at(&sqlx::query(sql).fetch_one(&self.pool).await.unwrap_or_else(|x| panic!("{sql}: {x}")), 0).unwrap_or_default() })
         }
         fn utf8mb4(&self) -> (Meta, String) {
             let m = self.meta("");

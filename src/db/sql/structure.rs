@@ -2,7 +2,7 @@
 //! indexes, foreign keys in both directions, triggers, the table status and the CREATE statement.
 //! Everything is read-only here; `ddl` builds the ALTERs from it.
 
-use super::worker::{raw, text};
+use super::worker::{text, text_at};
 use super::{Db, Dialect, Pool};
 use crate::db::{e, Msg, Res, Worker};
 use sqlx::mysql::MySqlRow;
@@ -354,7 +354,7 @@ pub(super) async fn load(db: &Db, schema: &str, table: &str) -> Res<Structure> {
         referenced_by: foreign_keys(&refs),
         triggers: triggers(&trig),
         status: status(&stat),
-        create: raw(&create, 1).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default(),
+        create: text_at(&create, 1).unwrap_or_default(),
     };
     extras(db, schema, table, &mut st).await;
     Ok(st)

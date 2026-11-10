@@ -177,7 +177,7 @@ pub async fn run(db: &Db, schema: &str, table: &str, plan: &ImportPlan, conn: u6
     let per = BATCH_ROWS.min(MAX_PLACEHOLDERS / names.len()).max(1);
     let mut c = writer(db, schema, read_only).await?;
     if let Ok(r) = c.fetch_one("SELECT CONNECTION_ID()").await {
-        id.store(super::worker::raw(&r, 0).and_then(|b| std::str::from_utf8(b).ok()?.parse().ok()).unwrap_or(0), Ordering::SeqCst);
+        id.store(super::worker::num_at(&r, 0).unwrap_or(0), Ordering::SeqCst);
     }
     // A long import is not a slow query to cut off.
     let timeout = d.session_timeout(0);
@@ -229,7 +229,7 @@ async fn import_on(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str, tabl
                 } else {
                     // Another session with a bigger step (a Galera cluster) leaves gaps, so the step is read, not assumed.
                     let row = sqlx::query("SELECT CAST(@@auto_increment_increment AS CHAR)").fetch_one(&mut *tx).await.map_err(e)?;
-                    let step: u64 = super::worker::raw(&row, 0).and_then(|b| std::str::from_utf8(b).ok()?.parse().ok()).unwrap_or(1);
+                    let step: u64 = super::worker::num_at(&row, 0).unwrap_or(1);
                     Keys::Counted(plan.info.pk[0].clone(), step.max(1))
                 };
             }

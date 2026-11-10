@@ -42,7 +42,7 @@ impl Live {
     pub fn one(&self, s: &str) -> String {
         self.w.rt.block_on(async {
             let rows = sqlx::raw_sql(s).fetch_all(&self.pool).await.unwrap_or_else(|x| panic!("{s}: {x}"));
-            super::worker::raw(&rows[0], 0).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default()
+            super::worker::text_at(&rows[0], 0).unwrap_or_default()
         })
     }
 
@@ -50,7 +50,7 @@ impl Live {
     pub fn cell(&self, s: &str, col: usize) -> String {
         self.w.rt.block_on(async {
             let rows = sqlx::raw_sql(s).fetch_all(&self.pool).await.unwrap_or_else(|x| panic!("{s}: {x}"));
-            super::worker::raw(&rows[0], col).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default()
+            super::worker::text_at(&rows[0], col).unwrap_or_default()
         })
     }
 

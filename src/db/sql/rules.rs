@@ -223,7 +223,7 @@ fn hex(s: &str, bs: bool) -> String {
 }
 
 /// LIKE patterns treat % and _ as wildcards, so a search for them literally needs backslashes.
-fn like_escape(s: &str) -> String {
+pub(super) fn like_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
 }
 

@@ -7,7 +7,6 @@ use super::{Advanced, Db, Dialect};
 use crate::db::{e, Msg, Res, Worker};
 use sqlx::{Connection, Executor};
 use std::collections::HashMap;
-use std::time::Duration;
 
 /// One row of SHOW FULL PROCESSLIST.
 #[derive(Clone, Debug, PartialEq)]
@@ -395,13 +394,12 @@ async fn uptime(c: &mut sqlx::MySqlConnection) -> Option<u64> {
 
 async fn processes(db: &Db) -> Res<Processes> {
     let mut c = db.acquire().await?;
-    let me: u64 = rows(&mut c, "SELECT CONNECTION_ID()").await.map_err(e)?.first().and_then(|r| super::worker::raw(r, 0)).and_then(|b| std::str::from_utf8(b).ok()?.parse().ok()).unwrap_or(0);
+    let (me, identity) = me_and_identity(&mut c, db.dialect).await?;
     let list = rows(&mut c, "SHOW FULL PROCESSLIST").await.map_err(|x| {
         let denied = matches!(&x, sqlx::Error::Database(d) if d.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>().is_some_and(|m| m.number() == 1227));
         if denied { "Your account cannot list the processes: it needs the PROCESS privilege.".to_string() } else { e(x) }
     })?;
     let rows = list.iter().filter_map(|r| proc_from(&|n| text(r, n))).collect();
-    let identity = identity(&mut c, db.dialect).await;
     Ok(Processes { rows, me, uptime: uptime(&mut c).await, identity })
 }
 
@@ -507,11 +505,34 @@ impl KillTarget {
 /// Which server a connection reached. MySQL has a UUID; MariaDB's hostname and server id are what tell a
 /// replica or a cluster node apart.
 async fn identity(c: &mut sqlx::MySqlConnection, d: Dialect) -> String {
-    let q = if d == Dialect::MariaDb { "SELECT @@hostname, @@server_id" } else { "SELECT @@server_uuid" };
-    match rows(c, q).await {
-        Ok(r) => r.first().map(|r| (0..if d == Dialect::MariaDb { 2 } else { 1 }).map(|i| super::worker::raw(r, i).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default()).collect::<Vec<_>>().join("/")).unwrap_or_default(),
+    match rows(c, identity_columns(d)).await {
+        Ok(r) => r.first().map(|r| identity_of(r, 0, d)).unwrap_or_default(),
         Err(_) => String::new(),
     }
+}
+
+fn identity_columns(d: Dialect) -> &'static str {
+    if d == Dialect::MariaDb { "SELECT @@hostname, @@server_id" } else { "SELECT @@server_uuid" }
+}
+
+/// The identity columns of `identity_columns` starting at column `from`, joined.
+fn identity_of(r: &sqlx::mysql::MySqlRow, from: usize, d: Dialect) -> String {
+    (from..from + if d == Dialect::MariaDb { 2 } else { 1 }).map(|i| super::worker::text_at(r, i).unwrap_or_default()).collect::<Vec<_>>().join("/")
+}
+
+/// This connection's id and the server's identity in one round trip. A server that refuses the identity columns
+/// still answers with the id alone, as the two reads did apart, so the id never depends on the identity. Both are
+/// read on the connection that then lists the processes, and again on every poll, since a changed identity is how
+/// a failover shows.
+async fn me_and_identity(c: &mut sqlx::MySqlConnection, d: Dialect) -> Res<(u64, String)> {
+    let q = identity_columns(d).replacen("SELECT ", "SELECT CONNECTION_ID(), ", 1);
+    if let Ok(r) = rows(c, &q).await {
+        if let Some(r) = r.first() {
+            return Ok((super::worker::num_at(r, 0).unwrap_or(0), identity_of(r, 1, d)));
+        }
+    }
+    let r = rows(c, "SELECT CONNECTION_ID()").await.map_err(e)?;
+    Ok((r.first().and_then(|r| super::worker::num_at(r, 0)).unwrap_or(0), String::new()))
 }
 
 /// Whether the thread the server now has under `t.id` is the one the list showed.
@@ -526,7 +547,7 @@ async fn kill_checked(db: &Db, t: &KillTarget, whole: bool, read_only: bool) -> 
     if read_only {
         return Err("Kill is locked on this connection. Unlock writes first.".into());
     }
-    let mut c = tokio::time::timeout(Duration::from_secs(10), sqlx::MySqlConnection::connect_with(&db.opts)).await.map_err(|_| "Could not reach the server to kill it".to_string())?.map_err(e)?;
+    let mut c = super::worker::side_conn(db, "Could not reach the server to kill it").await?;
     let r = kill_on(&mut c, db.dialect, t, whole).await;
     let _ = c.close().await;
     r
@@ -577,6 +598,7 @@ mod tests {
     use crate::db::sql::testing::every_server;
     use crate::db::sql::worker::kill_query;
     use std::collections::HashMap;
+    use std::time::Duration;
 
     fn row(cols: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
         let m: HashMap<String, String> = cols.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();

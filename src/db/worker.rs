@@ -125,6 +125,12 @@ impl Worker {
         });
     }
 
+    /// `spawn` for a job that runs SQL, with its statements logged under this connection and database. A job
+    /// that skipped the scope would log nothing and nobody would notice, so every SQL job starts here.
+    pub(in crate::db) fn spawn_sql(&self, conn: u64, schema: &str, f: impl Future<Output = Msg> + Send + 'static) {
+        self.spawn(sql_scope(conn, schema, f));
+    }
+
     pub fn connect(&self, conn: u64, uri: String, timeout: Duration, net: Net) {
         self.spawn(async move {
             let res = open_client(conn, &uri, timeout, &net).await;

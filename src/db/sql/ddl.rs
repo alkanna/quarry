@@ -30,6 +30,17 @@ impl Mode {
     }
 }
 
+/// The session's own sql_mode text. Statements and literals are written for the mode of the very connection that
+/// runs them, never for the one read at connect, which may have changed since.
+pub(super) async fn session_sql_mode(c: &mut sqlx::MySqlConnection) -> Res<String> {
+    sqlx::query_scalar("SELECT @@SESSION.sql_mode").fetch_one(&mut *c).await.map_err(e)
+}
+
+/// `session_sql_mode`, read as a `Mode`.
+pub(super) async fn session_mode(c: &mut sqlx::MySqlConnection) -> Res<Mode> {
+    Ok(Mode::of(&session_sql_mode(c).await?))
+}
+
 #[derive(Clone, Debug, PartialEq, Default)]
 pub enum Dv {
     /// No DEFAULT clause.
@@ -1515,7 +1526,7 @@ fn definer_note(err: String, definer: Option<&str>) -> String {
 /// sql_mode changed since, nothing runs and the error carries the mode now in force.
 pub(super) async fn session(db: &Db, schema: &str, read_only: bool, m: Mode) -> Result<sqlx::MySqlConnection, (String, Option<String>)> {
     let mut c = super::write::writer(db, schema, read_only).await.map_err(|x| (x, None))?;
-    let now: String = sqlx::query_scalar("SELECT @@SESSION.sql_mode").fetch_one(&mut c).await.map_err(|x| (e(x), None))?;
+    let now = session_sql_mode(&mut c).await.map_err(|x| (x, None))?;
     if Mode::of(&now) != m {
         return Err((format!("Nothing ran: the server's sql_mode is now {now:?}, which reads quotes or backslashes differently from when the statement was written."), Some(now)));
     }
@@ -1550,7 +1561,7 @@ pub(super) async fn undo(db: &Db, a: UndoAction, u: AlterUndo, read_only: bool) 
             return Err(format!("Undo refused: {what} changed after this change ran, so undoing it now would not put the table back."));
         }
         let mut c = super::write::writer(db, &schema, read_only).await?;
-        let mode: String = sqlx::query_scalar("SELECT @@SESSION.sql_mode").fetch_one(&mut c).await.map_err(e)?;
+        let mode = session_sql_mode(&mut c).await?;
         let m = Mode::of(&mode);
         // The steps were written for the mode of the change. A session that reads quotes or backslashes another
         // way now gets the same inverse written for it, instead of a refusal that would hold forever.
@@ -1582,7 +1593,7 @@ impl Worker {
     /// when there is one; it is handed back with the answer along with how the table looked right after.
     #[allow(clippy::too_many_arguments)]
     pub fn sql_alter(&self, conn: u64, db: Db, schema: String, table: String, sql: String, m: Mode, undo: Option<AlterUndo>, read_only: bool, done: String) {
-        self.spawn(crate::db::sql_scope(db.conn, &schema.clone(), async move {
+        self.spawn_sql(db.conn, &schema.clone(), async move {
             let (res, seen) = match session(&db, &schema, read_only, m).await {
                 Ok(mut c) => (exec(&mut c, &sql).await, None),
                 Err((why, now)) => (Err(why), now),
@@ -1602,7 +1613,7 @@ impl Worker {
                 _ => None,
             };
             Msg::SqlAltered { conn, schema, table, res: res.map(|_| done), undo, sql_mode: seen, alter: true }
-        }));
+        });
     }
 }
 
@@ -1610,7 +1621,7 @@ impl Worker {
 async fn stored(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str, all: &[Trigger], t: &Trigger) -> Res<Stored> {
     let show = format!("SHOW CREATE TRIGGER {}", d.qualified(schema, &t.name));
     let row = raw_first(c, &show).await?.ok_or_else(|| format!("Could not read the definition of {}.", t.name))?;
-    let col = |i: usize| super::worker::raw(&row, i).map(|b| String::from_utf8_lossy(b).into_owned());
+    let col = |i: usize| super::worker::text_at(&row, i);
     let stmt = col(2).ok_or_else(|| format!("Could not read the definition of {}.", t.name))?;
     let (before, after) = neighbours(all, &t.name);
     Ok(Stored { stmt, sql_mode: col(1).unwrap_or_default(), charset: col(3).unwrap_or_default(), collation: col(4).unwrap_or_default(), timing: t.timing.clone(), event: t.event.clone(), before, after })
@@ -1817,7 +1828,7 @@ impl Worker {
     /// SHOW CREATE TRIGGER, with the session it was made in: it is what a refused MySQL swap and undo put back.
     #[allow(clippy::too_many_arguments)]
     pub fn sql_trigger(&self, conn: u64, db: Db, schema: String, table: String, job: TrigJob, m: Mode, read_only: bool, done: String) {
-        self.spawn(crate::db::sql_scope(db.conn, &schema.clone(), async move {
+        self.spawn_sql(db.conn, &schema.clone(), async move {
             let (res, undo, seen) = match trigger_job(&db, &schema, &table, &job, m, read_only).await {
                 Ok((_, u)) => {
                     // A trigger the server shows no more after a create or edit cannot be guarded, so it gets no undo.
@@ -1827,7 +1838,7 @@ impl Worker {
                 Err((why, now)) => (Err(why), None, now),
             };
             Msg::SqlAltered { conn, schema, table, res, undo, sql_mode: seen, alter: false }
-        }));
+        });
     }
 
     /// How many rows of `table` hold a key that `fk` would find nothing for.
@@ -3342,7 +3353,7 @@ mod live_rel {
         }
 
         fn scalar(&self, sql: &str) -> Option<String> {
-            self.w.rt.block_on(async { sqlx::raw_sql(sql).fetch_one(&self.pool).await.ok().and_then(|r| super::super::worker::raw(&r, 0).map(|b| String::from_utf8_lossy(b).into_owned())) })
+            self.w.rt.block_on(async { sqlx::raw_sql(sql).fetch_one(&self.pool).await.ok().and_then(|r| super::super::worker::text_at(&r, 0)) })
         }
 
         fn structure_in(&mut self, schema: &str, table: &str) -> Structure {

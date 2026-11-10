@@ -335,7 +335,7 @@ async fn key_unchanged(db: &Db, schema: &str, table: &str, recorded: &[String]) 
     let rows = sqlx::query(&sql).bind(schema).bind(table).fetch_all(pool).await;
     db.note(schema, &sql, t, &rows);
     let rows = rows.map_err(e)?;
-    let now: Vec<String> = rows.iter().filter_map(|r| super::worker::raw(r, 0).map(|b| String::from_utf8_lossy(b).into_owned())).collect();
+    let now: Vec<String> = rows.iter().filter_map(|r| super::worker::text_at(r, 0)).collect();
     if same_key(recorded, &now) {
         return Ok(());
     }

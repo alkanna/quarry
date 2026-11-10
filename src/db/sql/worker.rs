@@ -24,6 +24,16 @@ pub(super) fn raw(row: &MySqlRow, i: usize) -> Option<&[u8]> {
     row.try_get_unchecked::<Option<&[u8]>, _>(i).ok().flatten()
 }
 
+/// Column `i` of a text-protocol row as text.
+pub(super) fn text_at(row: &MySqlRow, i: usize) -> Option<String> {
+    raw(row, i).map(|b| String::from_utf8_lossy(b).into_owned())
+}
+
+/// Column `i` of a text-protocol row as a number, for the counts and ids the server sends as text.
+pub(super) fn num_at(row: &MySqlRow, i: usize) -> Option<u64> {
+    raw(row, i).and_then(|b| std::str::from_utf8(b).ok()?.parse().ok())
+}
+
 pub(super) fn text(row: &MySqlRow, name: &str) -> Option<String> {
     row.try_get_unchecked::<Option<&[u8]>, _>(name).ok().flatten().map(|b| String::from_utf8_lossy(b).into_owned())
 }
@@ -124,7 +134,7 @@ impl Db {
 /// Readies the script's own connection: its id for Stop, the database, and write access when unlocked.
 pub(super) async fn prepare(conn: &mut sqlx::MySqlConnection, d: Dialect, schema: &str, read_only: bool, id: &AtomicU64) -> Result<(), sqlx::Error> {
     if let Ok(r) = conn.fetch_one("SELECT CONNECTION_ID()").await {
-        id.store(raw(&r, 0).and_then(|b| std::str::from_utf8(b).ok()?.parse().ok()).unwrap_or(0), Ordering::SeqCst);
+        id.store(num_at(&r, 0).unwrap_or(0), Ordering::SeqCst);
     }
     // With autocommit 0 from the server's globals, every write of the script is rolled back when the connection
     // closes, and reads keep a snapshot and metadata locks. The script can still turn it off itself.
@@ -195,11 +205,9 @@ async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info
         let hook = hook.clone();
         Box::pin(async move { session(c, ms, &hook).await })
     }).connect_with(o.clone()).await.map_err(|err| setup.failed_text().unwrap_or_else(|| e(err)))?;
-    let version: String = sqlx::query_scalar("SELECT VERSION()").fetch_one(&pool).await.map_err(e)?;
-    let sql_mode: String = sqlx::query_scalar("SELECT @@sql_mode").fetch_one(&pool).await.unwrap_or_default();
+    let (version, sql_mode): (String, String) = sqlx::query_as("SELECT VERSION(), @@sql_mode").fetch_one(&pool).await.map_err(e)?;
     let tls = raw_sql("SHOW SESSION STATUS LIKE 'Ssl_cipher'").fetch_all(&pool).await.map_err(e)?.iter().any(|r| raw(r, 1).is_some_and(|v| !v.is_empty()));
-    let mut dbs: Vec<String> = raw_sql("SHOW DATABASES").fetch_all(&pool).await.map_err(e)?.iter().filter_map(|r| raw(r, 0).map(|b| String::from_utf8_lossy(b).into_owned())).collect();
-    dbs.sort();
+    let dbs = sorted_names(&raw_sql("SHOW DATABASES").fetch_all(&pool).await.map_err(e)?);
     let mut ti = TestInfo::default();
     if info {
         ti.sql_mode = sqlx::query_scalar("SELECT @@GLOBAL.sql_mode").fetch_one(&pool).await.unwrap_or_default();
@@ -208,6 +216,20 @@ async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info
     }
     let db = Db { dialect: Dialect::from_version(&version), pool: Pool::My(pool), opts: o, version, tls, sql_mode, setup, conn: 0 };
     Ok((db, dbs, tunnel, ti))
+}
+
+/// The databases the login can see, sorted. Text protocol, because SHOW is not preparable on every old server.
+/// `fetch_all` on the connection rather than `raw_sql`, because inside a spawned block the executor lifetimes of a
+/// borrowed connection do not infer for the latter.
+pub(super) async fn database_names(c: &mut sqlx::MySqlConnection) -> Res<Vec<String>> {
+    Ok(sorted_names(&c.fetch_all("SHOW DATABASES").await.map_err(e)?))
+}
+
+/// The first column of each row, sorted. `open` reads through the pool, where a generic executor does not infer.
+fn sorted_names(rows: &[MySqlRow]) -> Vec<String> {
+    let mut names: Vec<String> = rows.iter().filter_map(|r| text_at(r, 0)).collect();
+    names.sort();
+    names
 }
 
 /// A table kind from information_schema's COLUMN_TYPE ("varchar(20)", "bigint unsigned"), which stays
@@ -307,7 +329,7 @@ async fn count(db: &Db, schema: &str, table: &str, q: &PageQuery) -> Res<(u64, b
     let res = raw_sql(&sql).fetch_one(pool).await;
     db.note(schema, &sql, t, &res);
     match res {
-        Ok(r) => Ok((raw(&r, 0).and_then(|b| std::str::from_utf8(b).ok()?.parse().ok()).unwrap_or(0), false)),
+        Ok(r) => Ok((num_at(&r, 0).unwrap_or(0), false)),
         Err(_) if q.grouped() || q.distinct => Ok((0, false)),
         Err(err) => Err(e(err)),
     }
@@ -367,7 +389,7 @@ async fn page(db: &Db, schema: &str, table: &str, q: &PageQuery, limit: u64, off
         let r = raw_sql(&sql).fetch_one(pool).await;
         db.note(schema, &sql, t, &r);
         let r = r.map_err(e)?;
-        Some(raw(&r, 0).and_then(|b| std::str::from_utf8(b).ok()?.parse().ok()).unwrap_or(0))
+        Some(num_at(&r, 0).unwrap_or(0))
     } else {
         None
     };
@@ -535,10 +557,16 @@ async fn run(db: &Db, schema: &str, text: &str, read_only: bool, id: &AtomicU64,
     sets
 }
 
+/// A connection of its own, outside the pool (a busy or exhausted pool never blocks it), or `why` when the server
+/// does not answer within 10 s.
+pub(super) async fn side_conn(db: &Db, why: &str) -> Res<sqlx::MySqlConnection> {
+    tokio::time::timeout(Duration::from_secs(10), sqlx::MySqlConnection::connect_with(&db.opts)).await.map_err(|_| why.to_string())?.map_err(e)
+}
+
 /// KILL QUERY from a connection of its own. A plain function, because inside a spawned block the
 /// executor lifetimes of a local connection do not infer.
 pub(super) async fn kill_query(db: &Db, id: u64) -> Res<String> {
-    let mut c = tokio::time::timeout(Duration::from_secs(10), sqlx::MySqlConnection::connect_with(&db.opts)).await.map_err(|_| "Could not reach the server to stop the statement".to_string())?.map_err(e)?;
+    let mut c = side_conn(db, "Could not reach the server to stop the statement").await?;
     let q = db.dialect.cancel(id);
     let r = c.execute(q.as_str()).await.map(|_| "Stopped the running statement".to_string()).map_err(|x| super::server::kill_error(&x));
     let _ = c.close().await;
@@ -643,8 +671,7 @@ impl Relay {
         let mut conn = db.acquire().await?.detach();
         prepare(&mut conn, db.dialect, schema, read_only, id).await.map_err(e)?;
         // Values are filled in for this session's mode, which may differ from the one read at connect.
-        let mode: String = sqlx::query_scalar("SELECT @@SESSION.sql_mode").fetch_one(&mut conn).await.map_err(e)?;
-        let m = super::ddl::Mode::of(&mode);
+        let m = super::ddl::session_mode(&mut conn).await?;
         Ok(Relay { conn, read_only, backslash: m.bs, ansi: m.ansi, dead: false, log_conn: db.conn, schema: schema.to_string() })
     }
 
@@ -769,7 +796,7 @@ async fn field_values(db: &Db, schema: &str, table: &str, column: &str, prefix: 
     if !small && !leads {
         return Ok(None);
     }
-    let mut c = tokio::time::timeout(Duration::from_secs(10), sqlx::MySqlConnection::connect_with(&db.opts)).await.map_err(|_| "Could not reach the server".to_string())?.map_err(e)?;
+    let mut c = side_conn(db, "Could not reach the server").await?;
     let res = async {
         // The pool's own setup, so values read in the same zone and charset as the grid shows them.
         session(&mut c, 300, &db.setup).await.map_err(|x| db.setup.failed_text().unwrap_or_else(|| e(x)))?;
@@ -779,7 +806,7 @@ async fn field_values(db: &Db, schema: &str, table: &str, column: &str, prefix: 
         let sql = d.value_counts(schema, table, column, prefix.is_some(), 201);
         let mut q = sqlx::query(&sql);
         if let Some(p) = prefix {
-            q = q.bind(format!("{}%", p.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")));
+            q = q.bind(format!("{}%", super::rules::like_escape(p)));
         }
         let t = Instant::now();
         let rows = q.fetch_all(&mut c).await;
@@ -913,7 +940,7 @@ impl Worker {
                 let r = conn.fetch_one(sql.as_str()).await;
                 db.note(&schema, &sql, t, &r);
                 let r = r.map_err(e)?;
-                let n = raw(&r, 0).and_then(|b| std::str::from_utf8(b).ok()?.parse::<u64>().ok()).ok_or("The count was not a number")?;
+                let n = num_at(&r, 0).ok_or("The count was not a number")?;
                 let _ = conn.close().await;
                 Ok(n)
             }

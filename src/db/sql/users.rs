@@ -4,7 +4,7 @@
 //! by `lit` for the sql_mode of the very session that runs them, and every privilege name comes from
 //! `DB_PRIVS`, never from user text. Each statement is sent alone, prepared, on a writer connection.
 
-use super::ddl::{self, Mode};
+use super::ddl::{self, session_mode, Mode};
 use super::value::lit;
 use super::worker::text;
 use super::write::{writer, SqlUndo};
@@ -1055,12 +1055,6 @@ fn action(conn: u64, acct: &Account, undo: AccountUndo) -> UndoAction {
 
 // Running.
 
-/// The session's own sql_mode, which decides how the account strings are quoted.
-async fn session_mode(c: &mut sqlx::MySqlConnection) -> Res<Mode> {
-    let mode: String = sqlx::query_scalar("SELECT @@SESSION.sql_mode").fetch_one(&mut *c).await.map_err(e)?;
-    Ok(Mode::of(&mode))
-}
-
 async fn grants_of(c: &mut sqlx::MySqlConnection, m: Mode, acct: &Account) -> Res<Vec<Grant>> {
     let sql = format!("SHOW GRANTS FOR {}", acct.literal(m.bs));
     let rows = match sqlx::query(&sql).persistent(false).fetch_all(&mut *c).await {
@@ -1300,7 +1294,7 @@ impl Worker {
     /// Runs privilege edits for one account. Undo is offered for the part that ran, also when a later
     /// statement failed.
     pub fn sql_user_edit(&self, conn: u64, db: Db, acct: Account, edits: Vec<Edit>, read_only: bool) {
-        self.spawn(crate::db::sql_scope(db.conn, "", async move {
+        self.spawn_sql(db.conn, "", async move {
             let mut undo = None;
             let res: Res<String> = async {
                 let mut c = writer(&db, "", read_only).await?;
@@ -1331,12 +1325,12 @@ impl Worker {
             }
             .await;
             Msg::SqlUserDone { conn, account: acct, op: Op::Granted, res, undo: undo.into_iter().collect() }
-        }));
+        });
     }
 
     /// CREATE USER. The password is used for the one statement and dropped with this task.
     pub fn sql_user_create(&self, conn: u64, db: Db, acct: Account, password: String, read_only: bool) {
-        self.spawn(crate::db::sql_scope(db.conn, "", async move {
+        self.spawn_sql(db.conn, "", async move {
             let mut undo = None;
             let res: Res<String> = async {
                 check_new_user(&acct.user, &acct.host, &password)?;
@@ -1354,12 +1348,12 @@ impl Worker {
             }
             .await;
             Msg::SqlUserDone { conn, account: acct, op: Op::Created, res, undo: undo.into_iter().collect() }
-        }));
+        });
     }
 
     /// ALTER USER ... IDENTIFIED BY. Nothing is recorded to undo it, and the password is scrubbed from any error.
     pub fn sql_user_password(&self, conn: u64, db: Db, acct: Account, plugin: Option<String>, password: String, read_only: bool) {
-        self.spawn(crate::db::sql_scope(db.conn, "", async move {
+        self.spawn_sql(db.conn, "", async move {
             let res: Res<String> = async {
                 check_password(&password)?;
                 let mut c = writer(&db, "", read_only).await?;
@@ -1383,12 +1377,12 @@ impl Worker {
             }
             .await;
             Msg::SqlUserDone { conn, account: acct, op: Op::Password, res, undo: Vec::new() }
-        }));
+        });
     }
 
     /// Runs a plan: the rename, the ALTER USER and the role changes, each recorded for undo as it succeeds.
     pub fn sql_user_account(&self, conn: u64, db: Db, acct: Account, plan: AccountPlan, read_only: bool) {
-        self.spawn(crate::db::sql_scope(db.conn, "", async move {
+        self.spawn_sql(db.conn, "", async move {
             let mut undo = Vec::new();
             let mut cur = acct.clone();
             let mut renamed = false;
@@ -1400,12 +1394,12 @@ impl Worker {
             }
             .await;
             Msg::SqlUserDone { conn, account: cur, op: if renamed { Op::Renamed } else { Op::Granted }, res, undo }
-        }));
+        });
     }
 
     /// DROP USER. No undo: the password and every grant are gone with it.
     pub fn sql_user_drop(&self, conn: u64, db: Db, acct: Account, read_only: bool) {
-        self.spawn(crate::db::sql_scope(db.conn, "", async move {
+        self.spawn_sql(db.conn, "", async move {
             let res: Res<String> = async {
                 let mut c = writer(&db, "", read_only).await?;
                 let out = async {
@@ -1419,7 +1413,7 @@ impl Worker {
             }
             .await;
             Msg::SqlUserDone { conn, account: acct, op: Op::Dropped, res, undo: Vec::new() }
-        }));
+        });
     }
 }
 
@@ -1956,7 +1950,7 @@ mod tests {
     fn grants(l: &crate::db::sql::testing::Live, a: &Account) -> Vec<String> {
         l.w.rt.block_on(async {
             let sql = format!("SHOW GRANTS FOR {}", a.literal(true));
-            sqlx::raw_sql(&sql).fetch_all(&l.pool).await.unwrap().iter().map(|r| super::super::worker::raw(r, 0).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default()).collect()
+            sqlx::raw_sql(&sql).fetch_all(&l.pool).await.unwrap().iter().map(|r| super::super::worker::text_at(r, 0).unwrap_or_default()).collect()
         })
     }
 

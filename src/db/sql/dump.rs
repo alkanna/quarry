@@ -8,7 +8,7 @@ use super::export::Done;
 use super::import::{JobDone, Progress};
 use super::lex::{self, Piece, ScriptSplitter};
 use super::value::Kind;
-use super::worker::{make_cols, pin_reads, prepare, raw, text, to_row};
+use super::worker::{make_cols, pin_reads, prepare, raw, text, text_at, num_at, to_row};
 use super::write::writer;
 use super::{Db, Dialect};
 use crate::db::copy::{CopyCol, Fmt, Writer};
@@ -222,8 +222,8 @@ async fn show_create(c: &mut sqlx::MySqlConnection, sql: String, at: usize) -> R
             }
         };
         if let sqlx::Either::Right(r) = item {
-            let mode = raw(&r, 1).map(|b| String::from_utf8_lossy(b).into_owned()).filter(|_| at == 2);
-            got = Some((mode, raw(&r, at).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default()));
+            let mode = text_at(&r, 1).filter(|_| at == 2);
+            got = Some((mode, text_at(&r, at).unwrap_or_default()));
         }
     }
     crate::db::note_here(&sql, t, &Ok::<(), String>(()));
@@ -392,7 +392,7 @@ pub struct Ran {
 pub async fn run_file(db: Db, schema: String, src: Source, read_only: bool, prog: Arc<Progress>, cancel: Arc<AtomicBool>, id: Arc<AtomicU64>) -> Res<Ran> {
     let mut c = writer(&db, &schema, read_only).await?;
     if let Ok(r) = c.fetch_one("SELECT CONNECTION_ID()").await {
-        id.store(raw(&r, 0).and_then(|b| std::str::from_utf8(b).ok()?.parse().ok()).unwrap_or(0), Ordering::SeqCst);
+        id.store(num_at(&r, 0).unwrap_or(0), Ordering::SeqCst);
     }
     let timeout = db.dialect.session_timeout(0);
     let _ = c.execute(timeout.as_str()).await;
@@ -503,7 +503,7 @@ async fn max_packet(c: &mut sqlx::MySqlConnection) -> Option<usize> {
     let mut max = None;
     while let Some(item) = futures_util::StreamExt::next(&mut s).await {
         if let Ok(sqlx::Either::Right(r)) = item {
-            max = raw(&r, 0).and_then(|b| std::str::from_utf8(b).ok()?.parse().ok());
+            max = num_at(&r, 0).map(|n| n as usize);
         }
     }
     max
@@ -523,22 +523,22 @@ async fn mode_of(c: &mut sqlx::MySqlConnection) -> bool {
 impl Worker {
     /// Writes a dump to `path`, answering with `SqlExport` like the other exports.
     pub fn sql_dump(&self, req: u64, db: Db, plan: DumpPlan, path: PathBuf, count: Arc<AtomicU64>, id: Arc<AtomicU64>, cancel: Arc<AtomicBool>) {
-        self.spawn(crate::db::sql_scope(db.conn, &plan.schema.clone(), async move {
+        self.spawn_sql(db.conn, &plan.schema.clone(), async move {
             let res = dump_to(&db, &plan, path, &count, &cancel, &id).await;
             id.store(0, Ordering::SeqCst);
             Msg::SqlExport { req, res }
-        }));
+        });
     }
 
     /// Runs a script file, answering with `SqlJob`.
     #[allow(clippy::too_many_arguments)]
     pub fn sql_run_file(&self, req: u64, db: Db, schema: String, src: Source, read_only: bool, prog: Arc<Progress>, id: Arc<AtomicU64>, cancel: Arc<AtomicBool>) {
-        self.spawn(crate::db::sql_scope(db.conn, &schema.clone(), async move {
+        self.spawn_sql(db.conn, &schema.clone(), async move {
             let res = run_file(db, schema.clone(), src, read_only, prog, cancel, id.clone()).await;
             id.store(0, Ordering::SeqCst);
             let res = res.map(|r| JobDone { msg: format!("Ran {} statements", r.statements), undo: None, schema: schema.clone(), table: None, tables_changed: true });
             Msg::SqlJob { req, res }
-        }));
+        });
     }
 }
 
