@@ -4,6 +4,8 @@
 mod dialect;
 pub mod advanced;
 mod worker;
+mod run;
+mod relay;
 pub mod structure;
 pub mod write;
 pub mod ddl;
@@ -26,7 +28,8 @@ pub mod users;
 pub use advanced::{Advanced, Charset, TestInfo, Zone};
 pub use dialect::{Dialect, FUNCTIONS, KEYWORDS};
 pub use structure::Structure;
-pub use worker::{Answer, Relay, RunHandle};
+pub use relay::{Answer, Relay};
+pub use run::RunHandle;
 
 /// Which kind of server a saved connection talks to. Saved connections from before SQL support
 /// have no engine field and load as Mongo.
