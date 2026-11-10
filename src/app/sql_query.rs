@@ -4,7 +4,7 @@ use super::*;
 use crate::db::sql::{lex, value::Kind, Col, ResultSet};
 use db::copy::{CopyCol, Fmt};
 use crate::ui::sql_complete::{open_list, sql_ac_field};
-use egui::text::CCursor;
+use egui::text::{CCursor, CCursorRange};
 use std::ops::Range;
 use std::sync::atomic::Ordering;
 
@@ -358,7 +358,7 @@ impl App {
             });
         });
         ui.add_space(4.0);
-        let (mut run, mut run_all, mut stop, mut explain) = (false, false, false, false);
+        let (mut run, mut run_all, mut stop, mut explain, mut format) = (false, false, false, false, false);
         let status = self.t().and_then(|t| t.sql.as_ref()).map(|s| {
             let CaretInfo { line_col: (l, c), stmt, .. } = s.caret_info();
             let n = stmt.map_or(String::new(), |(_, i, n)| format!("  ·  statement {i} of {n}"));
@@ -374,6 +374,7 @@ impl App {
             let (r, _) = ui.allocate_exact_size(egui::vec2(1.0, 16.0), Sense::hover());
             ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0, LINE()));
             explain = quiet_enabled(ui, !running, "Explain").on_hover_text("EXPLAIN the statement under the caret (Cmd+E)").clicked();
+            format = quiet_enabled(ui, !running, "Format").on_hover_text("Lay out the selection, or the whole script when nothing is selected. A statement that would read differently stays as it is.").clicked();
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if let Some(s) = &status {
                     ui.label(RichText::new(s).font(FontId::monospace(TXT_CAPTION)).color(FAINT()));
@@ -390,8 +391,12 @@ impl App {
                 }
             }
         }
-        if let (Some(text), Some(s)) = (load, self.tm().and_then(|t| t.sql.as_mut())) {
-            s.query = text;
+        let ctx = ui.ctx().clone();
+        if let Some(text) = load {
+            self.sql_replace(&ctx, text, None);
+        }
+        if format {
+            self.sql_format(&ctx);
         }
         self.sql_editor(ui);
         ui.add_space(4.0);
@@ -404,9 +409,67 @@ impl App {
         }
     }
 
+    fn sql_editor_id(cur: usize) -> egui::Id {
+        egui::Id::unique(("sql-editor", cur))
+    }
+
+    /// Puts `new` in the editor so that Cmd+Z brings the old text back. egui's editor keeps its undo history as whole
+    /// states, so the text before the change is added as a point first; changing the string alone would only become
+    /// one after the text had rested for a second. `select` is the range of the new text to leave selected.
+    pub(super) fn sql_replace(&mut self, ctx: &egui::Context, new: String, select: Option<Range<usize>>) {
+        let id = Self::sql_editor_id(self.cur);
+        let Some(s) = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()) else { return };
+        if s.query == new {
+            return;
+        }
+        let mut st = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
+        let before = st.cursor.char_range().unwrap_or_else(|| CCursorRange::one(CCursor::new(s.query.chars().count())));
+        let mut undoer = st.undoer();
+        undoer.add_undo(&(before, std::mem::replace(&mut s.query, new)));
+        st.set_undoer(undoer);
+        let end = s.query.chars().count();
+        let range = match select {
+            Some(r) => CCursorRange::two(CCursor::new(r.start.min(end)), CCursor::new(r.end.min(end))),
+            None => CCursorRange::one(CCursor::new(usize::from(before.primary.index).min(end))),
+        };
+        st.cursor.set_char_range(Some(range));
+        s.caret = usize::from(range.primary.index);
+        st.store(ctx, id);
+        ctx.request_repaint();
+    }
+
+    /// Format: the selection, or the whole script when nothing is selected.
+    fn sql_format(&mut self, ctx: &egui::Context) {
+        let Some(s) = self.tabs.get(self.cur).and_then(|t| t.sql.as_ref()) else { return };
+        let text = s.query.clone();
+        let picked = egui::TextEdit::load_state(ctx, Self::sql_editor_id(self.cur)).and_then(|st| st.cursor.char_range()).filter(|r| r.primary != r.secondary);
+        let (new, select, f) = match picked {
+            None => {
+                let f = db::sql::format::format_script(&text);
+                (f.text.clone(), None, f)
+            }
+            Some(r) => {
+                let (p, q) = (usize::from(r.primary.index), usize::from(r.secondary.index));
+                let (a, b) = (p.min(q), p.max(q));
+                let (a, b) = (byte_at(&text, a), byte_at(&text, b));
+                // A cut through a string or comment would be formatted as something it is not.
+                if lex::tokens(&text).iter().any(|(t, tr)| matches!(t, lex::Tok::Str | lex::Tok::Quoted | lex::Tok::Comment) && ((tr.start < a && a < tr.end) || (tr.start < b && b < tr.end))) {
+                    return self.err("The selection starts or ends inside a string or comment. Select whole statements, or nothing to format the script.");
+                }
+                let f = db::sql::format::format_script(&text[a..b]);
+                let new = format!("{}{}{}", &text[..a], f.text, &text[b..]);
+                let from = text[..a].chars().count();
+                (new, Some(from..from + f.text.chars().count()), f)
+            }
+        };
+        let note = if new == text && f.special == 0 && f.refused == 0 { "Already formatted".to_string() } else { f.summary() };
+        self.sql_replace(ctx, new, select);
+        if f.refused > 0 { self.err(note) } else { self.ok(note) }
+    }
+
     /// The script editor with line numbers, token colors and a faint band behind the statement under the caret.
     fn sql_editor(&mut self, ui: &mut egui::Ui) {
-        let id = egui::Id::unique(("sql-editor", self.cur));
+        let id = Self::sql_editor_id(self.cur);
         let focused = ui.memory(|m| m.has_focus(id));
         let avail = ui.available_height();
         let Some((conn, db)) = self.tabs.get(self.cur).map(|t| (t.sel.conn, run_db(t))) else { return };
@@ -693,7 +756,10 @@ impl App {
             ("Margaret Hamilton", "margaret@example.com", 3, "288.00"),
             ("Dennis Ritchie", "dennis@example.com", 2, "190.50"),
         ];
-        let query = "-- Paid orders over the last week, by customer\nSELECT c.name, c.email, COUNT(*) AS orders, SUM(o.total) AS spent\nFROM orders o\nJOIN customers c ON c.id = o.customer_id\nWHERE o.status = 'paid'\n  AND o.created_at >= CURDATE() - INTERVAL 7 DAY\nGROUP BY c.id\nORDER BY spent DESC;\n\nUPDATE orders SET status = 'shipped' WHERE id IN (4405, 4407);\nSELECT * FROM shipments WHERE order_id = 4405;";
+        let raw = "-- Paid orders over the last week, by customer\nSELECT c.name, c.email, COUNT(*) AS orders, SUM(o.total) AS spent\nFROM orders o\nJOIN customers c ON c.id = o.customer_id\nWHERE o.status = 'paid'\n  AND o.created_at >= CURDATE() - INTERVAL 7 DAY\nGROUP BY c.id\nORDER BY spent DESC;\n\nUPDATE orders SET status = 'shipped' WHERE id IN (4405, 4407);\nSELECT * FROM shipments WHERE order_id = 4405;";
+        // QUARRY_TEST_SQL=format shows the same script after Format.
+        let query = if std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("format") { db::sql::format::format_script(raw).text } else { raw.to_string() };
+        let query = query.as_str();
         let stmt = query.lines().skip(1).take(7).collect::<Vec<_>>().join("\n");
         let first = ResultSet {
             cols: vec![col("name", "VARCHAR"), col("email", "VARCHAR"), col("orders", "BIGINT"), col("spent", "DECIMAL")],

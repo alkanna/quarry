@@ -10,6 +10,7 @@ pub mod ddl;
 pub mod create;
 pub mod export;
 pub mod lex;
+pub mod format;
 pub mod value;
 pub mod csv;
 pub mod import;

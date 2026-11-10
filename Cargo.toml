@@ -27,6 +27,7 @@ russh = { version = "0.65", default-features = false, features = ["ring", "rsa",
 chacha20poly1305 = { version = "0.11.0", features = ["getrandom"] }
 # Already in the build through russh; compresses SQL dumps saved as .gz.
 flate2 = "1"
+sqlformat = "0.5.0"
 
 # Already in the build through other crates; read the app's own memory and CPU time for the status bar.
 [target.'cfg(unix)'.dependencies]
