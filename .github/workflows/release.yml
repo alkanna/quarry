@@ -35,7 +35,10 @@ jobs:
       matrix:
         include:
           # The newest Apple silicon image, so a retired version never stops a release again.
-          - { os: macos-latest, name: macos-universal }
+          # One job per arch so they build in parallel; Intel is cross-compiled. No universal app:
+          # the updater only downloads these two (src/update.rs, asset_name).
+          - { os: macos-latest, name: macos-arm64 }
+          - { os: macos-latest, name: macos-x86_64 }
           # Built on the oldest Ubuntu image: the binary needs that glibc or newer (2.35).
           - { os: ubuntu-22.04, name: linux-x86_64 }
           - { os: ubuntu-22.04-arm, name: linux-aarch64 }
@@ -50,6 +53,10 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
+      # Keeps compiled dependencies between releases. The key splits the two macOS jobs, which share a runner type.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
 
       - name: Linux libraries
         if: runner.os == 'Linux'
@@ -80,17 +87,14 @@ jobs:
           echo "$APPLE_API_KEY" | base64 --decode > "$RUNNER_TEMP/notary.p8"
           echo "QUARRY_NOTARY_ARGS=--key $RUNNER_TEMP/notary.p8 --key-id $APPLE_API_KEY_ID --issuer $APPLE_API_ISSUER" >> "$GITHUB_ENV"
 
-      - name: macOS universal app
+      - name: macOS app
         if: runner.os == 'macOS'
         run: |
-          # Apple silicon, Intel, then both in one app; later runs reuse the compiled targets.
-          for arch in arm64 x86_64 universal; do
-            ./bundle.sh "macos-$arch"
-            ditto -c -k --keepParent dist/Quarry.app "Quarry-macos-$arch.zip"
-          done
-          for f in Quarry-macos-*.zip; do shasum -a 256 "$f" > "$f.sha256"; done
-          gh release upload "$TAG" Quarry-macos-*.zip.sha256 --clobber
-          gh release upload "$TAG" Quarry-macos-arm64.zip Quarry-macos-x86_64.zip Quarry-macos-universal.zip --clobber
+          ./bundle.sh ${{ matrix.name }}
+          ditto -c -k --keepParent dist/Quarry.app Quarry-${{ matrix.name }}.zip
+          shasum -a 256 Quarry-${{ matrix.name }}.zip > Quarry-${{ matrix.name }}.zip.sha256
+          gh release upload "$TAG" Quarry-${{ matrix.name }}.zip.sha256 --clobber
+          gh release upload "$TAG" Quarry-${{ matrix.name }}.zip --clobber
 
       - name: Linux binary
         if: runner.os == 'Linux'
