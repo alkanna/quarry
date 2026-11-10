@@ -287,13 +287,18 @@ fn status(rows: &[MySqlRow]) -> Status {
 /// show a table with only its first columns or indexes, and let an edit of that structure drop the rest.
 pub(super) const ALL_ROWS: &str = " LIMIT 18446744073709551615";
 
-async fn query(pool: &sqlx::MySqlPool, sql: &str, schema: &str, table: &str) -> Res<Vec<MySqlRow>> {
-    sqlx::query(&format!("{sql}{ALL_ROWS}")).bind(schema).bind(table).fetch_all(pool).await.map_err(e)
+async fn query(db: &Db, sql: &str, schema: &str, table: &str) -> Res<Vec<MySqlRow>> {
+    let Pool::My(pool) = &db.pool;
+    let t = std::time::Instant::now();
+    let res = sqlx::query(&format!("{sql}{ALL_ROWS}")).bind(schema).bind(table).fetch_all(pool).await;
+    db.note(schema, sql, t, &res);
+    res.map_err(e)
 }
 
 /// What the main queries cannot ask every server version for: SRIDs, invisible indexes and functional key parts on
 /// MySQL 8, ignored indexes and column CHECKs on MariaDB. An older server fails these queries, and has none of it.
-async fn extras(pool: &sqlx::MySqlPool, d: Dialect, schema: &str, table: &str, st: &mut Structure) {
+async fn extras(db: &Db, schema: &str, table: &str, st: &mut Structure) {
+    let d = db.dialect;
     let (idx, cols) = match d {
         Dialect::MySql => (
             "SELECT INDEX_NAME AS name, SEQ_IN_INDEX AS seq, IS_VISIBLE = 'NO' AS hidden, EXPRESSION AS expr FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
@@ -305,7 +310,7 @@ async fn extras(pool: &sqlx::MySqlPool, d: Dialect, schema: &str, table: &str, s
             "SELECT CONSTRAINT_NAME AS name, NULL AS srid, CHECK_CLAUSE AS clause FROM information_schema.CHECK_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = ? AND TABLE_NAME = ? AND LEVEL = 'Column'",
         ),
     };
-    let (idx, cols) = tokio::join!(query(pool, idx, schema, table), query(pool, cols, schema, table));
+    let (idx, cols) = tokio::join!(query(db, idx, schema, table), query(db, cols, schema, table));
     for r in idx.unwrap_or_default() {
         let (name, seq) = (s(&r, "name"), num(&r, "seq").unwrap_or(0) as usize);
         let Some(ix) = st.indexes.iter_mut().find(|i| i.name == name) else { continue };
@@ -326,14 +331,20 @@ pub(super) async fn load(db: &Db, schema: &str, table: &str) -> Res<Structure> {
     let Pool::My(pool) = &db.pool;
     let d = db.dialect;
     // SHOW CREATE TABLE also answers for a view.
-    let create = async { raw_sql(&d.create_stmt(false, schema, table)).fetch_one(pool).await.map_err(e) };
+    let create = async {
+        let sql = d.create_stmt(false, schema, table);
+        let t = std::time::Instant::now();
+        let res = raw_sql(&sql).fetch_one(pool).await;
+        db.note(schema, &sql, t, &res);
+        res.map_err(e)
+    };
     let (cols, idx, fks, refs, trig, stat, create) = tokio::try_join!(
-        query(pool, d.columns(), schema, table),
-        query(pool, d.indexes(), schema, table),
-        query(pool, d.foreign_keys(), schema, table),
-        query(pool, d.referenced_by(), schema, table),
-        query(pool, d.triggers(), schema, table),
-        query(pool, d.table_status(), schema, table),
+        query(db, d.columns(), schema, table),
+        query(db, d.indexes(), schema, table),
+        query(db, d.foreign_keys(), schema, table),
+        query(db, d.referenced_by(), schema, table),
+        query(db, d.triggers(), schema, table),
+        query(db, d.table_status(), schema, table),
         create,
     )?;
     let mut st = Structure {
@@ -345,7 +356,7 @@ pub(super) async fn load(db: &Db, schema: &str, table: &str) -> Res<Structure> {
         status: status(&stat),
         create: raw(&create, 1).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default(),
     };
-    extras(pool, d, schema, table, &mut st).await;
+    extras(db, schema, table, &mut st).await;
     Ok(st)
 }
 

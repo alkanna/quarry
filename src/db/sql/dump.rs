@@ -174,25 +174,32 @@ async fn write_rows(c: &mut sqlx::MySqlConnection, d: Dialect, plan: &DumpPlan, 
         lex::read_only_check(&sql)?;
     }
     let per = plan.rows_per_insert.max(1);
-    let mut s = raw_sql(&sql).fetch(&mut *c);
+    let started = std::time::Instant::now();
     let (mut kinds, mut copy, mut batch, mut bytes, mut rows) = (Vec::new(), Vec::new(), Vec::<Document>::new(), 0usize, 0u64);
-    while let Some(row) = futures_util::StreamExt::next(&mut s).await {
-        let row = row.map_err(e)?;
-        if kinds.is_empty() {
-            let mc = make_cols(sqlx::Row::columns(&row), &cols.meta, false);
-            copy = mc.iter().map(|c| CopyCol { name: c.name.clone(), src: c.src.clone(), numeric: numeric(c.kind) }).collect();
-            kinds = mc;
+    let res: Res<()> = async {
+        let mut s = raw_sql(&sql).fetch(&mut *c);
+        while let Some(row) = futures_util::StreamExt::next(&mut s).await {
+            let row = row.map_err(e)?;
+            if kinds.is_empty() {
+                let mc = make_cols(sqlx::Row::columns(&row), &cols.meta, false);
+                copy = mc.iter().map(|c| CopyCol { name: c.name.clone(), src: c.src.clone(), numeric: numeric(c.kind) }).collect();
+                kinds = mc;
+            }
+            bytes += (0..row.len()).map(|i| raw(&row, i).map_or(4, <[u8]>::len)).sum::<usize>();
+            batch.push(to_row(&kinds, &row, &[])?.owned());
+            rows += 1;
+            if batch.len() >= per || bytes >= INSERT_BYTES {
+                flush_rows(&mut batch, &copy, table, out)?;
+                bytes = 0;
+                count.store(base + rows, Ordering::Relaxed);
+                stopped(cancel)?;
+            }
         }
-        bytes += (0..row.len()).map(|i| raw(&row, i).map_or(4, <[u8]>::len)).sum::<usize>();
-        batch.push(to_row(&kinds, &row, &[])?.owned());
-        rows += 1;
-        if batch.len() >= per || bytes >= INSERT_BYTES {
-            flush_rows(&mut batch, &copy, table, out)?;
-            bytes = 0;
-            count.store(base + rows, Ordering::Relaxed);
-            stopped(cancel)?;
-        }
+        Ok(())
     }
+    .await;
+    crate::db::note_here(&sql, started, &res);
+    res?;
     flush_rows(&mut batch, &copy, table, out)?;
     count.store(base + rows, Ordering::Relaxed);
     Ok(rows)
@@ -203,14 +210,23 @@ async fn write_rows(c: &mut sqlx::MySqlConnection, d: Dialect, plan: &DumpPlan, 
 async fn show_create(c: &mut sqlx::MySqlConnection, sql: String, at: usize) -> Res<(Option<String>, String)> {
     // Read as a stream like the exports: `fetch_one` of a raw statement on a borrowed connection is refused by the
     // compiler inside a spawned task.
+    let t = std::time::Instant::now();
     let mut s = raw_sql(&sql).fetch_many(&mut *c);
     let mut got = None;
     while let Some(item) = futures_util::StreamExt::next(&mut s).await {
-        if let sqlx::Either::Right(r) = item.map_err(e)? {
+        let item = match item {
+            Ok(i) => i,
+            Err(x) => {
+                crate::db::note_here(&sql, t, &Err::<(), _>(&x));
+                return Err(e(x));
+            }
+        };
+        if let sqlx::Either::Right(r) = item {
             let mode = raw(&r, 1).map(|b| String::from_utf8_lossy(b).into_owned()).filter(|_| at == 2);
             got = Some((mode, raw(&r, at).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default()));
         }
     }
+    crate::db::note_here(&sql, t, &Ok::<(), String>(()));
     got.ok_or_else(|| "The server returned no definition.".to_string())
 }
 
@@ -362,6 +378,9 @@ fn excerpt(s: &[u8]) -> String {
     if s.chars().count() > 600 { format!("{t}...") } else { t }
 }
 
+/// How many statements of a script file the query log lists one by one.
+const FILE_LOGGED: u64 = 20;
+
 pub struct Ran {
     pub statements: u64,
 }
@@ -397,7 +416,13 @@ pub async fn run_file(db: Db, schema: String, src: Source, read_only: bool, prog
                         break 'run Err("Cancelled.".into());
                     }
                     n += 1;
+                    let t = std::time::Instant::now();
                     let outcome = run_stmt(&mut c, &stmt).await;
+                    // A dump holds thousands of statements that would push everything else out of the log, so
+                    // the first few and any that fail are listed, and the rest come as one line at the end.
+                    if n <= FILE_LOGGED || outcome.is_err() {
+                        crate::db::note_here(&String::from_utf8_lossy(&stmt), t, &outcome);
+                    }
                     if let Err(x) = outcome {
                         break 'run Err(format!("Statement {n} failed: {x}
 
@@ -431,6 +456,9 @@ Statements before it ran and stay applied.", excerpt(&stmt)));
             }
         }
         prog.bytes.store(sp.offset(), Ordering::Relaxed);
+        if n > FILE_LOGGED {
+            crate::db::note_here(&format!("-- {n} statements run from a file, the first {FILE_LOGGED} are listed"), std::time::Instant::now(), &Ok::<(), String>(()));
+        }
         Ok(Ran { statements: n })
     };
     let _ = c.close().await;
@@ -495,22 +523,22 @@ async fn mode_of(c: &mut sqlx::MySqlConnection) -> bool {
 impl Worker {
     /// Writes a dump to `path`, answering with `SqlExport` like the other exports.
     pub fn sql_dump(&self, req: u64, db: Db, plan: DumpPlan, path: PathBuf, count: Arc<AtomicU64>, id: Arc<AtomicU64>, cancel: Arc<AtomicBool>) {
-        self.spawn(async move {
+        self.spawn(crate::db::sql_scope(db.conn, &plan.schema.clone(), async move {
             let res = dump_to(&db, &plan, path, &count, &cancel, &id).await;
             id.store(0, Ordering::SeqCst);
             Msg::SqlExport { req, res }
-        });
+        }));
     }
 
     /// Runs a script file, answering with `SqlJob`.
     #[allow(clippy::too_many_arguments)]
     pub fn sql_run_file(&self, req: u64, db: Db, schema: String, src: Source, read_only: bool, prog: Arc<Progress>, id: Arc<AtomicU64>, cancel: Arc<AtomicBool>) {
-        self.spawn(async move {
+        self.spawn(crate::db::sql_scope(db.conn, &schema.clone(), async move {
             let res = run_file(db, schema.clone(), src, read_only, prog, cancel, id.clone()).await;
             id.store(0, Ordering::SeqCst);
             let res = res.map(|r| JobDone { msg: format!("Ran {} statements", r.statements), undo: None, schema: schema.clone(), table: None, tables_changed: true });
             Msg::SqlJob { req, res }
-        });
+        }));
     }
 }
 

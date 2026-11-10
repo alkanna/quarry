@@ -1524,7 +1524,10 @@ pub(super) async fn session(db: &Db, schema: &str, read_only: bool, m: Mode) -> 
 
 /// One statement, prepared, so the server parses exactly one whatever the text holds.
 pub(super) async fn exec(c: &mut sqlx::MySqlConnection, sql: &str) -> Res<()> {
-    sqlx::query(sql).persistent(false).execute(&mut *c).await.map_err(e)?;
+    let t = Instant::now();
+    let res = sqlx::query(sql).persistent(false).execute(&mut *c).await;
+    crate::db::note_here(sql, t, &res);
+    res.map_err(e)?;
     Ok(())
 }
 
@@ -1537,7 +1540,7 @@ fn undo_action(conn: u64, schema: &str, table: &str, u: AlterUndo) -> UndoAction
 pub(super) async fn undo(db: &Db, a: UndoAction, u: AlterUndo, read_only: bool) -> Msg {
     let UndoAction { at, conn, db: schema, coll: table, .. } = a;
     let (mut ran, mut seen, mut lost) = (0, None, false);
-    let res: Res<String> = async {
+    let res: Res<String> = crate::db::sql_scope(db.conn, &schema, async {
         let st = load(db, &schema, &table).await?;
         let now = snapshot(&st, &u.cols, &u.idx, &u.fks);
         if now.len() != u.expect.len() {
@@ -1563,7 +1566,7 @@ pub(super) async fn undo(db: &Db, a: UndoAction, u: AlterUndo, read_only: bool) 
             ran += 1;
         }
         Ok("Undid the structure change".to_string())
-    }
+    })
     .await;
     let keep = (res.is_err() && ran == 0 && !lost).then(|| {
         let mut k = undo_action(conn, &schema, &table, u);
@@ -1579,7 +1582,7 @@ impl Worker {
     /// when there is one; it is handed back with the answer along with how the table looked right after.
     #[allow(clippy::too_many_arguments)]
     pub fn sql_alter(&self, conn: u64, db: Db, schema: String, table: String, sql: String, m: Mode, undo: Option<AlterUndo>, read_only: bool, done: String) {
-        self.spawn(async move {
+        self.spawn(crate::db::sql_scope(db.conn, &schema.clone(), async move {
             let (res, seen) = match session(&db, &schema, read_only, m).await {
                 Ok(mut c) => (exec(&mut c, &sql).await, None),
                 Err((why, now)) => (Err(why), now),
@@ -1599,7 +1602,7 @@ impl Worker {
                 _ => None,
             };
             Msg::SqlAltered { conn, schema, table, res: res.map(|_| done), undo, sql_mode: seen, alter: true }
-        });
+        }));
     }
 }
 
@@ -1644,13 +1647,22 @@ async fn replay(c: &mut sqlx::MySqlConnection, d: Dialect, s: &Stored, order: Op
 /// Read as a stream: `fetch_one` and `execute` of a raw statement on a borrowed connection are refused by the
 /// compiler inside a spawned task.
 async fn raw_first(c: &mut sqlx::MySqlConnection, sql: &str) -> Res<Option<sqlx::mysql::MySqlRow>> {
+    let t = Instant::now();
     let mut s = sqlx::raw_sql(sql).fetch_many(&mut *c);
     let mut first = None;
     while let Some(item) = futures_util::StreamExt::next(&mut s).await {
-        if let sqlx::Either::Right(r) = item.map_err(e)? {
-            first.get_or_insert(r);
+        match item {
+            Ok(sqlx::Either::Right(r)) => {
+                first.get_or_insert(r);
+            }
+            Ok(_) => {}
+            Err(x) => {
+                crate::db::note_here(sql, t, &Err::<(), _>(&x));
+                return Err(e(x));
+            }
         }
     }
+    crate::db::note_here(sql, t, &Ok::<(), String>(()));
     Ok(first)
 }
 
@@ -1791,7 +1803,7 @@ async fn undo_trigger_job(db: &Db, schema: &str, table: &str, u: &TrigUndo, read
 /// safe.
 pub(super) async fn undo_trigger(db: &Db, a: UndoAction, u: TrigUndo, read_only: bool) -> Msg {
     let UndoAction { at, conn, db: schema, coll: table, .. } = a;
-    let res = undo_trigger_job(db, &schema, &table, &u, read_only).await;
+    let res = crate::db::sql_scope(db.conn, &schema, undo_trigger_job(db, &schema, &table, &u, read_only)).await;
     let keep = res.is_err().then(|| UndoAction { at, ..trigger_undo_action(conn, &schema, &table, u) });
     Msg::SqlAltered { conn, schema, table, res, undo: keep, sql_mode: None, alter: false }
 }
@@ -1805,7 +1817,7 @@ impl Worker {
     /// SHOW CREATE TRIGGER, with the session it was made in: it is what a refused MySQL swap and undo put back.
     #[allow(clippy::too_many_arguments)]
     pub fn sql_trigger(&self, conn: u64, db: Db, schema: String, table: String, job: TrigJob, m: Mode, read_only: bool, done: String) {
-        self.spawn(async move {
+        self.spawn(crate::db::sql_scope(db.conn, &schema.clone(), async move {
             let (res, undo, seen) = match trigger_job(&db, &schema, &table, &job, m, read_only).await {
                 Ok((_, u)) => {
                     // A trigger the server shows no more after a create or edit cannot be guarded, so it gets no undo.
@@ -1815,7 +1827,7 @@ impl Worker {
                 Err((why, now)) => (Err(why), None, now),
             };
             Msg::SqlAltered { conn, schema, table, res, undo, sql_mode: seen, alter: false }
-        });
+        }));
     }
 
     /// How many rows of `table` hold a key that `fk` would find nothing for.
@@ -1823,7 +1835,10 @@ impl Worker {
         self.spawn(async move {
             let Pool::My(pool) = &db.pool;
             let sql = orphans_sql(db.dialect, &schema, &table, &fk);
-            let res = sqlx::query(&sql).fetch_one(pool).await.map_err(e).map(|r| super::structure::num(&r, "n").unwrap_or(0));
+            let t = Instant::now();
+            let res = sqlx::query(&sql).fetch_one(pool).await;
+            db.note(&schema, &sql, t, &res);
+            let res = res.map_err(e).map(|r| super::structure::num(&r, "n").unwrap_or(0));
             Msg::SqlOrphans { req, res }
         });
     }

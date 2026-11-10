@@ -12,6 +12,24 @@ pub(super) fn ago(t: std::time::SystemTime) -> String {
 }
 
 impl App {
+    /// QUARRY_TEST_SQL=log: the Query tab with the log open on what Quarry sent to the MySQL connection, including a
+    /// CREATE USER whose password the log keeps out.
+    pub(super) fn sql_log_demo(&mut self) {
+        let user = db::redact_sql("CREATE USER 'report'@'10.0.%' IDENTIFIED BY 'correct horse battery'").0;
+        if let Ok(mut log) = db::LOG.lock() {
+            log.clear();
+            log.extend([
+                db::LogEntry::finished(3, 300, "shop", "SELECT", "SELECT TABLE_NAME AS name, TABLE_TYPE AS kind, TABLE_ROWS AS row_estimate FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME LIMIT 18446744073709551615", 6, None),
+                db::LogEntry::finished(3, 120, "shop", "SELECT", "SELECT c.name, c.email, COUNT(*) AS orders, SUM(o.total) AS spent FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.status = 'paid' GROUP BY c.id ORDER BY spent DESC", 31, None),
+                db::LogEntry::finished(3, 95, "shop", "UPDATE", "UPDATE `shop`.`orders` SET `status` = ? WHERE `id` <=> ? AND `status` <=> ? LIMIT 1", 5, None),
+                db::LogEntry::finished(3, 70, "shop", "ALTER", "ALTER TABLE `shop`.`orders` ADD COLUMN `note` VARCHAR(120) NULL AFTER `status`", 212, None),
+                db::LogEntry::finished(3, 41, "shop", "CREATE", &user, 8, None),
+                db::LogEntry::finished(3, 12, "shop", "DELETE", "DELETE FROM `shop`.`shipments` WHERE `id` <=> ? LIMIT 1", 3, Some("Cannot delete or update a parent row: a foreign key constraint fails (`shop`.`tracking`, CONSTRAINT `fk_tracking_shipment` FOREIGN KEY (`shipment_id`) REFERENCES `shipments` (`id`))")),
+            ]);
+        }
+        self.log.open = true;
+    }
+
     pub(super) fn query_log(&mut self, ui: &mut egui::Ui) {
         if !self.log.open {
             return;
@@ -122,7 +140,9 @@ impl App {
                     Some(g) => p.galley(egui::pos2(x, rect.top() + 3.0), g, TEXT()),
                     None => {
                         let first = l.err.as_deref().map(|e| (e.lines().next().unwrap_or_default(), ALERT()));
-                        for (text, color) in first.into_iter().chain([(l.cmd.as_str(), TEXT())]) {
+                        // A SQL statement spans lines; the row shows it on one.
+                        let flat = l.cmd.replace('\n', " ");
+                        for (text, color) in first.into_iter().chain([(flat.as_str(), TEXT())]) {
                             let g = truncated(&p, text, font.clone(), color, rect.right() - x - 6.0);
                             cut |= g.elided;
                             let gw = g.size().x;

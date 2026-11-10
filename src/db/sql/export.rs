@@ -99,7 +99,10 @@ pub async fn stream(db: &Db, schema: &str, stmt: &str, plan: &Plan, out: &mut (d
     prepare(&mut conn, db.dialect, schema, true, id).await.map_err(e)?;
     // All rows means all of them, and the file is written as UTF-8 from what the server sends.
     pin_reads(&mut conn).await.map_err(e)?;
-    let r = stream_conn(&mut conn, stmt, plan, out, count, cancel, &Wrap::default()).await?;
+    let t = std::time::Instant::now();
+    let r = stream_conn(&mut conn, stmt, plan, out, count, cancel, &Wrap::default()).await;
+    db.note(schema, stmt, t, &r);
+    let r = r?;
     let _ = conn.close().await;
     let (rows, peak) = r.unwrap_or_default();
     // Line formats end with a newline like any text file.
@@ -371,7 +374,10 @@ async fn run_all(db: &Db, schema: &str, stmts: &[String], ap: &AllPlan, path: &s
         let mut own = Lazy::new(part_of(&numbered(path, n)));
         let out: &mut Lazy = if ap.single { &mut shared } else { &mut own };
         *open = Some(out.tmp.clone());
-        let Some((rows, _)) = stream_conn(&mut conn, stmt, &ap.plan, out, count, cancel, &wrap).await? else {
+        let t = std::time::Instant::now();
+        let streamed = stream_conn(&mut conn, stmt, &ap.plan, out, count, cancel, &wrap).await;
+        db.note(schema, stmt, t, &streamed);
+        let Some((rows, _)) = streamed? else {
             *open = None;
             continue;
         };

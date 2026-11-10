@@ -239,7 +239,10 @@ async fn apply_updates(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[S
     let mut tx = c.begin().await.map_err(e)?;
     for ed in edits {
         let (sql, params) = update_sql(db.dialect, schema, table, cols, ed);
-        let r = bound(&sql, &params).execute(&mut *tx).await.map_err(e)?;
+        let t = Instant::now();
+        let r = bound(&sql, &params).execute(&mut *tx).await;
+        db.note(schema, &sql, t, &r);
+        let r = r.map_err(e)?;
         // The session asks for matched rows, so zero means the key or an original value no longer matches.
         if r.rows_affected() == 0 {
             return Err(CONFLICT.into());
@@ -260,7 +263,10 @@ async fn apply_deletes(db: &Db, schema: &str, table: &str, cols: &[Col], key_col
     let mut gone = Vec::new();
     for pk in pks {
         let (sql, params) = delete_sql(db.dialect, schema, table, cols, pk);
-        if bound(&sql, &params).execute(&mut *tx).await.map_err(e)?.rows_affected() == 1 {
+        let t = Instant::now();
+        let r = bound(&sql, &params).execute(&mut *tx).await;
+        db.note(schema, &sql, t, &r);
+        if r.map_err(e)?.rows_affected() == 1 {
             gone.push(pk.clone());
         }
     }
@@ -278,7 +284,10 @@ async fn apply_inserts(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[S
     let rows: Vec<NewRow> = rows.iter().map(|r| r.iter().filter(|(n, _)| !cols.iter().any(|c| c.name == *n && c.generated)).map(|(n, v)| (src_of(cols, n), v.clone())).collect()).collect();
     for row in &rows {
         let (sql, params) = insert_sql(db.dialect, schema, table, cols, row);
-        let r = bound(&sql, &params).execute(&mut *tx).await.map_err(e)?;
+        let t = Instant::now();
+        let r = bound(&sql, &params).execute(&mut *tx).await;
+        db.note(schema, &sql, t, &r);
+        let r = r.map_err(e)?;
         let mut key = Document::new();
         for p in pk {
             let given = row.iter().find(|(n, _)| n == p).map(|(_, v)| v).filter(|v| **v != Bson::Null);
@@ -319,7 +328,10 @@ async fn key_unchanged(db: &Db, schema: &str, table: &str, recorded: &[String]) 
     }
     let Pool::My(pool) = &db.pool;
     let sql = format!("SELECT COLUMN_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = 'PRIMARY' ORDER BY SEQ_IN_INDEX{}", super::structure::ALL_ROWS);
-    let rows = sqlx::query(&sql).bind(schema).bind(table).fetch_all(pool).await.map_err(e)?;
+    let t = Instant::now();
+    let rows = sqlx::query(&sql).bind(schema).bind(table).fetch_all(pool).await;
+    db.note(schema, &sql, t, &rows);
+    let rows = rows.map_err(e)?;
     let now: Vec<String> = rows.iter().filter_map(|r| super::worker::raw(r, 0).map(|b| String::from_utf8_lossy(b).into_owned())).collect();
     if same_key(recorded, &now) {
         return Ok(());

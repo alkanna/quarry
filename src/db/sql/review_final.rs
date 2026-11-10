@@ -144,3 +144,52 @@ fn live_the_relay_fills_values_for_its_own_session_mode() {
         l.sql(&format!("DROP DATABASE {db}"));
     });
 }
+
+/// The query log lists what Quarry sends for the user and its views, and no password ever reaches it, not in a
+/// statement and not in the server's error about one.
+#[test]
+fn live_sql_statements_reach_the_query_log_without_passwords() {
+    every_server(|l, var| {
+        let (schema, conn, pw) = ("quarry_ff_log", 4_242_000 + var.len() as u64, "sup3rs3cretpw");
+        l.sql(&format!("DROP DATABASE IF EXISTS {schema}; CREATE DATABASE {schema}; CREATE TABLE {schema}.t (id INT PRIMARY KEY, name VARCHAR(20)); INSERT INTO {schema}.t VALUES (1, 'a')"));
+        let mut db = l.db.clone();
+        db.conn = conn;
+        let run = |text: &str| {
+            l.w.sql_run(7, db.clone(), schema.into(), text.into(), false, 100, RunHandle { conn: Arc::new(AtomicU64::new(0)), cancel: Arc::new(AtomicBool::new(false)) });
+            let Msg::SqlRan { sets, .. } = l.rx.recv_timeout(Duration::from_secs(30)).unwrap() else { panic!("{var}: SqlRan") };
+            sets
+        };
+        assert!(run("SELECT * FROM t").iter().all(|s| s.error.is_none()), "{var}");
+        // A row edit goes through the writer.
+        l.w.sql_page(8, db.clone(), schema.into(), "t".into(), Default::default(), 100, 0);
+        let Msg::SqlCols { cols, .. } = l.rx.recv_timeout(Duration::from_secs(15)).unwrap() else { panic!("{var}: cols") };
+        let Msg::Docs { res: Ok((rows, _, _)), .. } = l.rx.recv_timeout(Duration::from_secs(15)).unwrap() else { panic!("{var}: docs") };
+        let key = rows[0].decode().unwrap().get_document("_id").unwrap().clone();
+        let change = super::write::RowEdit { pk: key, changes: vec![("name".into(), Bson::String("a".into()), Bson::String("b".into()))] };
+        l.w.sql_save(vec!["k".into()], conn, db.clone(), schema.into(), "t".into(), cols, vec!["id".into()], vec![change], false);
+        let Msg::Saved { res, .. } = l.rx.recv_timeout(Duration::from_secs(15)).unwrap() else { panic!("{var}: Saved") };
+        res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        l.w.rt.block_on(async {
+            let mut r = Relay::open(&db, schema, false, &AtomicU64::new(0)).await.unwrap();
+            r.query("SELECT 41 + 1 AS relay_marker", &[]).await.unwrap();
+        });
+        let user = "'quarry_ff_log_u'@'%'";
+        l.sql(&format!("DROP USER IF EXISTS {user}"));
+        let made = run(&format!("CREATE USER {user} IDENTIFIED BY '{pw}'"));
+        assert!(made.iter().all(|s| s.error.is_none()), "{var}: {:?}", made.iter().map(|s| &s.error).collect::<Vec<_>>());
+        // A failing statement: the server may quote the text it stopped at.
+        assert!(run(&format!("ALTER USER {user} IDENTIFIED BY '{pw}' bogus")).iter().any(|s| s.error.is_some()), "{var}");
+        l.sql(&format!("DROP USER IF EXISTS {user}"));
+        l.sql(&format!("DROP DATABASE {schema}"));
+        let log = crate::db::LOG.lock().unwrap();
+        let mine: Vec<&crate::db::LogEntry> = log.iter().filter(|e| e.conn == conn).collect();
+        let has = |what: &str| mine.iter().any(|e| e.cmd.contains(what));
+        assert!(has("SELECT * FROM t"), "{var}: Query");
+        assert!(mine.iter().any(|e| e.name == "UPDATE" && e.cmd.contains("UPDATE `quarry_ff_log`.`t`") && e.err.is_none()), "{var}: writer");
+        assert!(has("relay_marker"), "{var}: relay");
+        assert!(has("CREATE USER 'quarry_ff_log_u'@'%' IDENTIFIED BY '***'"), "{var}: CREATE USER {:?}", mine.iter().map(|e| &e.cmd).collect::<Vec<_>>());
+        assert!(mine.iter().all(|e| e.ms.is_some()), "{var}");
+        assert!(mine.iter().any(|e| e.err.is_some() && e.cmd.starts_with("ALTER USER")), "{var}: the failure is logged");
+        assert!(mine.iter().all(|e| !e.cmd.contains(pw) && !e.err.as_deref().unwrap_or("").contains(pw)), "{var}: a password reached the log");
+    });
+}

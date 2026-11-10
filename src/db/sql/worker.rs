@@ -206,7 +206,7 @@ async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info
         let rows = raw_sql("SELECT CHARACTER_SET_NAME, COLLATION_NAME FROM information_schema.COLLATIONS WHERE CHARACTER_SET_NAME IN ('utf8mb4', 'utf8mb3') ORDER BY COLLATION_NAME").fetch_all(&pool).await.unwrap_or_default();
         ti.collations = rows.iter().filter_map(|r| Some((String::from_utf8_lossy(raw(r, 0)?).into_owned(), String::from_utf8_lossy(raw(r, 1)?).into_owned()))).collect();
     }
-    let db = Db { dialect: Dialect::from_version(&version), pool: Pool::My(pool), opts: o, version, tls, sql_mode, setup };
+    let db = Db { dialect: Dialect::from_version(&version), pool: Pool::My(pool), opts: o, version, tls, sql_mode, setup, conn: 0 };
     Ok((db, dbs, tunnel, ti))
 }
 
@@ -283,7 +283,9 @@ fn one_read(sql: &str) -> Res<()> {
 /// The count and whether it is the information_schema estimate rather than an exact count. A
 /// grouped or distinct count that the server refuses (duplicate output names) falls back to
 /// zero, since the data query reports the same problem.
-async fn count(pool: &sqlx::MySqlPool, d: Dialect, schema: &str, table: &str, q: &PageQuery) -> Res<(u64, bool)> {
+async fn count(db: &Db, schema: &str, table: &str, q: &PageQuery) -> Res<(u64, bool)> {
+    let Pool::My(pool) = &db.pool;
+    let d = db.dialect;
     if q.plain() {
         let mut c = pool.acquire().await.map_err(e)?;
         // MySQL 8 caches TABLE_ROWS for a day. Fresh numbers cost a lot per schema, so only this one table's
@@ -291,14 +293,20 @@ async fn count(pool: &sqlx::MySqlPool, d: Dialect, schema: &str, table: &str, q:
         if d == Dialect::MySql {
             let _ = c.execute("SET SESSION information_schema_stats_expiry = 0").await;
         }
-        let est = sqlx::query(d.table_status()).bind(schema).bind(table).fetch_optional(&mut *c).await.map_err(e)?;
+        let t = Instant::now();
+        let est = sqlx::query(d.table_status()).bind(schema).bind(table).fetch_optional(&mut *c).await;
+        db.note(schema, d.table_status(), t, &est);
+        let est = est.map_err(e)?;
         if let Some(n) = est.and_then(|r| r.try_get::<Option<u64>, _>("row_estimate").ok().flatten()).filter(|n| *n >= ESTIMATE_MIN) {
             return Ok((n, true));
         }
     }
     let sql = q.count_sql(d, schema, table);
     one_read(&sql)?;
-    match raw_sql(&sql).fetch_one(pool).await {
+    let t = Instant::now();
+    let res = raw_sql(&sql).fetch_one(pool).await;
+    db.note(schema, &sql, t, &res);
+    match res {
         Ok(r) => Ok((raw(&r, 0).and_then(|b| std::str::from_utf8(b).ok()?.parse().ok()).unwrap_or(0), false)),
         Err(_) if q.grouped() || q.distinct => Ok((0, false)),
         Err(err) => Err(e(err)),
@@ -306,9 +314,17 @@ async fn count(pool: &sqlx::MySqlPool, d: Dialect, schema: &str, table: &str, q:
 }
 
 /// Column types and the primary key, from information_schema.
-async fn table_meta(pool: &sqlx::MySqlPool, d: Dialect, schema: &str, table: &str) -> Res<(HashMap<String, (String, bool, String)>, Vec<String>)> {
-    let cols = sqlx::query(&format!("{}{ALL_ROWS}", d.columns())).bind(schema).bind(table).fetch_all(pool).await.map_err(e)?;
-    let idx = sqlx::query(&format!("{}{ALL_ROWS}", d.indexes())).bind(schema).bind(table).fetch_all(pool).await.map_err(e)?;
+async fn table_meta(db: &Db, schema: &str, table: &str) -> Res<(HashMap<String, (String, bool, String)>, Vec<String>)> {
+    let Pool::My(pool) = &db.pool;
+    let d = db.dialect;
+    let t = Instant::now();
+    let cols = sqlx::query(&format!("{}{ALL_ROWS}", d.columns())).bind(schema).bind(table).fetch_all(pool).await;
+    db.note(schema, d.columns(), t, &cols);
+    let cols = cols.map_err(e)?;
+    let t = Instant::now();
+    let idx = sqlx::query(&format!("{}{ALL_ROWS}", d.indexes())).bind(schema).bind(table).fetch_all(pool).await;
+    db.note(schema, d.indexes(), t, &idx);
+    let idx = idx.map_err(e)?;
     let meta = cols
         .iter()
         .filter_map(|r| {
@@ -329,20 +345,28 @@ async fn page(db: &Db, schema: &str, table: &str, q: &PageQuery, limit: u64, off
     let Pool::My(pool) = &db.pool;
     let d = db.dialect;
     // The key is needed before the data query: without a total order, pages overlap and skip rows.
-    let (meta, mut pk) = table_meta(pool, d, schema, table).await?;
+    let (meta, mut pk) = table_meta(db, schema, table).await?;
     if q.grouped() {
         pk.clear();
     }
     let sql = q.select_sql(d, schema, table, &pk, Some((limit, offset)));
     one_read(&sql)?;
-    let data = async { raw_sql(&sql).fetch_all(pool).await.map_err(e) };
-    let ((total, estimated), rows) = tokio::try_join!(count(pool, d, schema, table, q), data)?;
+    let data = async {
+        let t = Instant::now();
+        let res = raw_sql(&sql).fetch_all(pool).await;
+        db.note(schema, &sql, t, &res);
+        res.map_err(e)
+    };
+    let ((total, estimated), rows) = tokio::try_join!(count(db, schema, table, q), data)?;
     // The LIMIT chip caps the whole result, not a page.
     let count = total.saturating_sub(q.skip).min(q.limit.unwrap_or(u64::MAX));
     let matched = if q.grouped() {
         let sql = q.rows_sql(d, schema, table);
         one_read(&sql)?;
-        let r = raw_sql(&sql).fetch_one(pool).await.map_err(e)?;
+        let t = Instant::now();
+        let r = raw_sql(&sql).fetch_one(pool).await;
+        db.note(schema, &sql, t, &r);
+        let r = r.map_err(e)?;
         Some(raw(&r, 0).and_then(|b| std::str::from_utf8(b).ok()?.parse().ok()).unwrap_or(0))
     } else {
         None
@@ -490,6 +514,7 @@ async fn run(db: &Db, schema: &str, text: &str, read_only: bool, id: &AtomicU64,
             }
         }
         let rs = run_stmt(&mut conn, stmt, page).await;
+        crate::db::log_sql(db.conn, schema, stmt, rs.first().map_or(0, |r| r.ms), rs.iter().find_map(|r| r.error.as_deref()));
         if rs.iter().any(|r| r.error.is_some()) {
             sets.extend(rs);
             break;
@@ -602,6 +627,9 @@ pub struct Relay {
     ansi: bool,
     /// A result was abandoned halfway, which leaves the connection unusable.
     dead: bool,
+    /// For the query log: the connection's app id and the database the script runs in.
+    log_conn: u64,
+    schema: String,
 }
 
 impl Relay {
@@ -611,7 +639,7 @@ impl Relay {
         // Values are filled in for this session's mode, which may differ from the one read at connect.
         let mode: String = sqlx::query_scalar("SELECT @@SESSION.sql_mode").fetch_one(&mut conn).await.map_err(e)?;
         let m = super::ddl::Mode::of(&mode);
-        Ok(Relay { conn, read_only, backslash: m.bs, ansi: m.ansi, dead: false })
+        Ok(Relay { conn, read_only, backslash: m.bs, ansi: m.ansi, dead: false, log_conn: db.conn, schema: schema.to_string() })
     }
 
     /// Interrupts the statement running on connection `id`, from a connection of its own.
@@ -640,6 +668,7 @@ impl Relay {
         }
         let (mut cols, mut rows, mut wrote, mut bytes) = (Vec::<Col>::new(), Vec::new(), None, 0usize);
         let mut failure = None;
+        let started = Instant::now();
         {
             let mut s = raw_sql(&stmt).fetch_many(&mut self.conn);
             while let Some(item) = futures_util::StreamExt::next(&mut s).await {
@@ -670,6 +699,7 @@ impl Relay {
                 }
             }
         }
+        crate::db::log_sql(self.log_conn, &self.schema, &stmt, started.elapsed().as_millis(), failure.as_deref());
         if let Some(f) = failure {
             // Dropping the stream mid-result leaves unread packets on the wire.
             self.dead = f.contains("more than");
@@ -691,11 +721,13 @@ impl Relay {
 async fn load_schema(db: &Db, schema: &str) -> Res<Schema> {
     let Pool::My(pool) = &db.pool;
     let d = db.dialect;
-    let (tables, cols, fks) = tokio::try_join!(
-        async { sqlx::query(&format!("{}{ALL_ROWS}", d.tables())).bind(schema).fetch_all(pool).await.map_err(e) },
-        async { sqlx::query(&format!("{}{ALL_ROWS}", d.all_columns())).bind(schema).fetch_all(pool).await.map_err(e) },
-        async { sqlx::query(&format!("{}{ALL_ROWS}", d.all_foreign_keys())).bind(schema).fetch_all(pool).await.map_err(e) },
-    )?;
+    let read = |sql: &'static str| async move {
+        let t = Instant::now();
+        let res = sqlx::query(&format!("{sql}{ALL_ROWS}")).bind(schema).fetch_all(pool).await;
+        db.note(schema, sql, t, &res);
+        res.map_err(e)
+    };
+    let (tables, cols, fks) = tokio::try_join!(read(d.tables()), read(d.all_columns()), read(d.all_foreign_keys()))?;
     let fk: HashSet<(String, String)> = fks.iter().filter_map(|r| Some((text(r, "tbl")?, text(r, "name")?))).collect();
     let mut out: Vec<SchemaTable> = tables
         .iter()
@@ -740,7 +772,10 @@ async fn field_values(db: &Db, schema: &str, table: &str, column: &str, prefix: 
         if let Some(p) = prefix {
             q = q.bind(format!("{}%", p.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")));
         }
-        let rows = q.fetch_all(&mut c).await.map_err(e)?;
+        let t = Instant::now();
+        let rows = q.fetch_all(&mut c).await;
+        db.note(schema, &sql, t, &rows);
+        let rows = rows.map_err(e)?;
         Ok(Some(rows.iter().filter_map(|r| Some((text(r, "v")?, super::structure::num(r, "n")?))).collect()))
     }
     .await;
@@ -772,7 +807,13 @@ impl Worker {
     }
 
     pub fn sql_connect_with(&self, conn: u64, uri: String, timeout: Duration, net: Net, adv: Advanced) {
-        self.spawn(async move { Msg::SqlConnected { conn, res: open(&uri, timeout, &net, &adv).await } });
+        self.spawn(async move {
+            let res = open(&uri, timeout, &net, &adv).await.map(|(mut db, dbs, t)| {
+                db.conn = conn;
+                (db, dbs, t)
+            });
+            Msg::SqlConnected { conn, res }
+        });
     }
 
     /// Connects and drops everything again, for the connection form.
@@ -801,7 +842,10 @@ impl Worker {
         self.spawn(async move {
             let res = async {
                 let Pool::My(pool) = &db.pool;
-                let rows = sqlx::query(&format!("{}{ALL_ROWS}", db.dialect.tables())).bind(&schema).fetch_all(pool).await.map_err(e)?;
+                let t = Instant::now();
+                let rows = sqlx::query(&format!("{}{ALL_ROWS}", db.dialect.tables())).bind(&schema).fetch_all(pool).await;
+                db.note(&schema, db.dialect.tables(), t, &rows);
+                let rows = rows.map_err(e)?;
                 let mut names = Vec::new();
                 let mut views = Vec::new();
                 for r in &rows {
@@ -855,7 +899,11 @@ impl Worker {
             let res = async {
                 let mut conn = db.acquire().await?.detach();
                 prepare(&mut conn, db.dialect, &schema, true, &AtomicU64::new(0)).await.map_err(e)?;
-                let r = conn.fetch_one(lex::count_sql(&stmt).as_str()).await.map_err(e)?;
+                let sql = lex::count_sql(&stmt);
+                let t = Instant::now();
+                let r = conn.fetch_one(sql.as_str()).await;
+                db.note(&schema, &sql, t, &r);
+                let r = r.map_err(e)?;
                 let n = raw(&r, 0).and_then(|b| std::str::from_utf8(b).ok()?.parse::<u64>().ok()).ok_or("The count was not a number")?;
                 let _ = conn.close().await;
                 Ok(n)

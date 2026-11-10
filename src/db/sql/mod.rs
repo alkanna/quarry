@@ -179,6 +179,8 @@ pub struct Db {
     pub sql_mode: String,
     /// The Advanced tab's session setup, for connections opened outside the pool.
     pub(crate) setup: worker::Setup,
+    /// The app's id of this connection, which tags the statements Quarry sends in the query log.
+    pub conn: u64,
 }
 
 #[derive(Clone)]
@@ -187,6 +189,13 @@ pub enum Pool {
 }
 
 impl Db {
+    /// Puts a statement that was just sent in the query log, with how long it took and how it ended. Takes the
+    /// result by reference so the caller still has it to return.
+    pub(crate) fn note<T, X: std::fmt::Display>(&self, schema: &str, sql: &str, start: std::time::Instant, res: &Result<T, X>) {
+        let err = res.as_ref().err().map(|x| x.to_string());
+        crate::db::log_sql(self.conn, schema, sql, start.elapsed().as_millis(), err.as_deref());
+    }
+
     /// False under NO_BACKSLASH_ESCAPES, where a backslash in a string is a plain character.
     pub fn backslash_escapes(&self) -> bool {
         !self.sql_mode.to_ascii_uppercase().contains("NO_BACKSLASH_ESCAPES")
