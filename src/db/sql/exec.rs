@@ -6,7 +6,7 @@
 //! Modules that only make sense on one engine (DDL, users, dump and so on) keep sqlx's own types and reach
 //! them through `Db::my_pool` and `Conn::my`, which answer with an error when the connection is another engine.
 
-use super::value::Param;
+use super::value::{Kind, Param};
 use super::{Db, Pool};
 use crate::db::{e, Res};
 use futures_util::stream::BoxStream;
@@ -43,6 +43,8 @@ pub enum Item {
 pub struct ColInfo {
     pub name: String,
     pub ty: String,
+    /// The column came from a PostgreSQL server, whose type names are not MySQL's.
+    pub pg: bool,
 }
 
 /// What `make_cols` needs of a result column, so rows read through sqlx directly (the MySQL-only modules) and
@@ -50,6 +52,11 @@ pub struct ColInfo {
 pub trait ColMeta {
     fn col_name(&self) -> &str;
     fn col_type(&self) -> String;
+
+    /// The kind of a result column that is not a table column. MySQL names are read as MySQL's, Postgres ones as its own.
+    fn col_kind(&self) -> Kind {
+        Kind::from_type_name(&self.col_type())
+    }
 }
 
 impl ColMeta for ColInfo {
@@ -59,6 +66,10 @@ impl ColMeta for ColInfo {
 
     fn col_type(&self) -> String {
         self.ty.clone()
+    }
+
+    fn col_kind(&self) -> Kind {
+        if self.pg { Kind::from_pg(&self.ty, "", "") } else { Kind::from_type_name(&self.ty) }
     }
 }
 
@@ -79,6 +90,10 @@ impl ColMeta for PgColumn {
 
     fn col_type(&self) -> String {
         self.type_info().name().to_string()
+    }
+
+    fn col_kind(&self) -> Kind {
+        Kind::from_pg(self.type_info().name(), "", "")
     }
 }
 
@@ -102,6 +117,10 @@ impl<T: Cells + ?Sized> Cells for &T {
     fn uint(&self, name: &str) -> Option<u64> {
         (**self).uint(name)
     }
+
+    fn pg(&self) -> bool {
+        (**self).pg()
+    }
 }
 
 /// What the readers need of a row. Implemented for `SqlRow` and, for the MySQL-only modules, for sqlx's row.
@@ -113,6 +132,11 @@ pub trait Cells {
     fn col_pos(&self, name: &str) -> Option<usize>;
     fn int(&self, name: &str) -> Option<i64>;
     fn uint(&self, name: &str) -> Option<u64>;
+
+    /// The row is from PostgreSQL, whose text differs from MySQL's for a few types (bytea is hex text).
+    fn pg(&self) -> bool {
+        false
+    }
 }
 
 impl Cells for MySqlRow {
@@ -173,6 +197,10 @@ impl Cells for PgRow {
     fn uint(&self, name: &str) -> Option<u64> {
         self.int(name).and_then(|n| u64::try_from(n).ok())
     }
+
+    fn pg(&self) -> bool {
+        true
+    }
 }
 
 /// A row of either engine. Cells are borrowed from the row, never copied.
@@ -181,8 +209,8 @@ pub enum SqlRow {
     Pg(PgRow),
 }
 
-fn col_infos<C: Column>(cols: &[C]) -> Vec<ColInfo> {
-    cols.iter().map(|c| ColInfo { name: c.name().to_string(), ty: c.type_info().name().to_string() }).collect()
+pub(super) fn col_infos<C: Column>(cols: &[C], pg: bool) -> Vec<ColInfo> {
+    cols.iter().map(|c| ColInfo { name: c.name().to_string(), ty: c.type_info().name().to_string(), pg }).collect()
 }
 
 impl SqlRow {
@@ -196,8 +224,8 @@ impl SqlRow {
 
     pub fn cols(&self) -> Vec<ColInfo> {
         match self {
-            SqlRow::My(r) => col_infos(r.columns()),
-            SqlRow::Pg(r) => col_infos(r.columns()),
+            SqlRow::My(r) => col_infos(r.columns(), false),
+            SqlRow::Pg(r) => col_infos(r.columns(), true),
         }
     }
 }
@@ -236,6 +264,10 @@ impl Cells for SqlRow {
             SqlRow::My(r) => r.uint(name),
             SqlRow::Pg(r) => r.uint(name),
         }
+    }
+
+    fn pg(&self) -> bool {
+        matches!(self, SqlRow::Pg(_))
     }
 }
 
@@ -347,8 +379,8 @@ impl Conn {
     /// The columns a statement would return, without running it. Empty for a write.
     pub async fn describe(&mut self, sql: &str) -> Result<Vec<ColInfo>, sqlx::Error> {
         match self {
-            Conn::My(c) => Ok(col_infos(c.describe(sql).await?.columns())),
-            Conn::Pg(c) => Ok(col_infos(c.describe(sql).await?.columns())),
+            Conn::My(c) => Ok(col_infos(c.describe(sql).await?.columns(), false)),
+            Conn::Pg(c) => Ok(col_infos(c.describe(sql).await?.columns(), true)),
         }
     }
 
@@ -435,6 +467,39 @@ impl Db {
         match &self.pool {
             Pool::Pg(p) => p.detached(&self.opts).await,
             Pool::My(_) => Conn::connect(&self.opts).await.map_err(e),
+        }
+    }
+
+    /// A metadata query with its values bound as text, never spliced into it, on either engine (the SQL text spells its
+    /// placeholders as the engine wants: `?` or `$1`). Every row is read whole, and a Postgres result is a binary row, so
+    /// the columns are cast to text in the query. The statement goes in the query log under `schema`.
+    pub(super) fn meta<'a, const N: usize>(&'a self, schema: &'a str, sql: &str, params: [&str; N]) -> impl std::future::Future<Output = Res<Vec<SqlRow>>> + Send + use<'a, N> {
+        // The values are taken by value and copied before the first await. A borrowed `&[a, b]` would live across the
+        // caller's await and the compiler then cannot prove the caller's future Send once it is spawned.
+        let full = format!("{sql}{}", self.dialect.all_rows());
+        let sql = sql.to_string();
+        let params: Vec<String> = params.iter().map(|p| p.to_string()).collect();
+        async move {
+            let t = std::time::Instant::now();
+            let res = match &self.pool {
+                Pool::My(p) => {
+                    let mut q = sqlx::query(&full);
+                    for x in params {
+                        q = q.bind(x);
+                    }
+                    q.fetch_all(p).await.map(SqlRow::wrap)
+                }
+                Pool::Pg(_) => {
+                    let pool = self.pg_pool()?;
+                    let mut q = sqlx::query(&full);
+                    for x in params {
+                        q = q.bind(x);
+                    }
+                    q.fetch_all(&pool).await.map(SqlRow::wrap_pg)
+                }
+            };
+            self.note(schema, &sql, t, &res);
+            res.map_err(e)
         }
     }
 

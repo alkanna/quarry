@@ -212,7 +212,7 @@ pub(crate) fn sql_cell_job(v: Val, kind: db::sql::value::Kind, quoted: bool) -> 
             return job;
         }
         (Bson::Binary(bin), _) => (format!("<binary {} B>", bin.bytes.len()), FAINT()),
-        (Bson::String(s), Enum | Set) => (shown(s, quoted), C_STRING()),
+        (Bson::String(s), Enum | Set | Uuid | Array | Interval | Inet | Range) => (shown(s, quoted), C_STRING()),
         (Bson::String(s), Text) => (shown(s, quoted), str_color(s)),
         (Bson::String(s), Date | DateTime | Time) => (s.clone(), C_DATE()),
         (Bson::String(s), Decimal | Int | UInt | Float | Year) => return number_job(s),

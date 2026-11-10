@@ -57,9 +57,10 @@ pub enum Group {
 pub fn group_of(kind: Kind) -> Group {
     match kind {
         Kind::Int | Kind::UInt | Kind::Float | Kind::Decimal | Kind::Year | Kind::Time => Group::Number,
-        Kind::Text => Group::Text,
+        // The PostgreSQL kinds that are text as typed share the text operators until their own are designed.
+        Kind::Text | Kind::Uuid | Kind::Array | Kind::Interval | Kind::Inet | Kind::Range => Group::Text,
         Kind::Date | Kind::DateTime => Group::Date,
-        Kind::Enum | Kind::Set => Group::Choice,
+        Kind::Enum | Kind::Set | Kind::Bool => Group::Choice,
         Kind::Binary | Kind::Json | Kind::Bit | Kind::Geometry => Group::Other,
     }
 }

@@ -6,6 +6,10 @@ pub mod advanced;
 mod worker;
 mod run;
 pub mod pg;
+mod pg_catalog;
+mod pg_read;
+#[cfg(test)]
+mod pg_read_tests;
 pub mod exec;
 mod relay;
 pub mod structure;
@@ -85,6 +89,10 @@ impl PageQuery {
 
     /// `USE INDEX (...)` with every name quoted, so the text cannot carry anything else.
     fn hint(&self, d: Dialect) -> String {
+        // PostgreSQL has no index hints.
+        if d == Dialect::Postgres {
+            return String::new();
+        }
         let names: Vec<String> = self.index_hint.split(',').map(str::trim).filter(|n| !n.is_empty()).map(|n| d.quote_ident(n.trim_matches('`'))).collect();
         if names.is_empty() { String::new() } else { format!(" USE INDEX ({})", names.join(", ")) }
     }
@@ -143,7 +151,7 @@ impl PageQuery {
                 if let Some(l) = self.limit {
                     sql.push_str(&format!("\nLIMIT {l}{}", if self.skip > 0 { format!(" OFFSET {}", self.skip) } else { String::new() }));
                 } else if self.skip > 0 {
-                    sql.push_str(&format!("\nLIMIT 18446744073709551615 OFFSET {}", self.skip));
+                    sql.push_str(&format!("\nLIMIT {} OFFSET {}", d.no_limit(), self.skip));
                 }
             }
         }

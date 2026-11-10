@@ -144,6 +144,8 @@ impl App {
                 Msg::SqlDropInfo { conn, schema, table, res } => self.sql_drop_info_done(conn, schema, table, res),
                 Msg::SqlDdl { conn, schema, table, what, res, undo, dbs, sql_mode } => self.sql_ddl_done(conn, schema, table, what, res, undo, dbs, sql_mode),
                 Msg::SqlValues { conn, schema, table, column, prefix, res } => self.sql_values_done(conn, schema, table, column, prefix, res),
+                // The sidebar learns to show schemas with the app wiring of PostgreSQL.
+                Msg::SqlSchemas { .. } => {}
                 Msg::Collections { conn, db, res } => match res {
                     Ok((v, views)) => {
                         self.views.retain(|(c, d, _)| !(*c == conn && *d == db));

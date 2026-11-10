@@ -891,8 +891,10 @@ impl App {
                 created: "2025-02-11 09:12:40".into(),
                 updated: "2026-11-09 12:41:07".into(),
                 comment: "Customer orders".into(),
+                ..Default::default()
             },
             create: create.into(),
+            ..Default::default()
         };
         let Some(t) = self.tabs.first_mut() else { return };
         t.view = view;

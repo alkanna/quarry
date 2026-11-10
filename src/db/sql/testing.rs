@@ -91,7 +91,6 @@ pub const PG_ENVS: [&str; 2] = ["QUARRY_TEST_POSTGRES", "QUARRY_TEST_POSTGRES13"
 
 pub struct LivePg {
     pub w: Worker,
-    #[allow(dead_code)] // the read path tests of the next steps wait on it
     pub rx: std::sync::mpsc::Receiver<Msg>,
     pub db: Db,
     /// The databases the login can connect to, as the connect answer listed them.
@@ -131,6 +130,32 @@ impl LivePg {
             let rows = sqlx::raw_sql(s).fetch_all(&self.pool).await.unwrap_or_else(|x| panic!("{s}: {x}"));
             super::worker::text_at(&rows[0], 0).unwrap_or_default()
         })
+    }
+
+    /// A plain pool of the shared `quarry_test` database, outside the session guard, for fixtures. Call `quarry_test`
+    /// first so the database exists.
+    pub fn fixture_pool(&self) -> sqlx::PgPool {
+        use std::str::FromStr;
+        let o = sqlx::postgres::PgConnectOptions::from_str(&self.uri).unwrap().database("quarry_test");
+        self.w.rt.block_on(async { sqlx::postgres::PgPoolOptions::new().max_connections(2).connect_with(o).await.unwrap() })
+    }
+
+    /// Runs statements (several are fine) in `quarry_test` as the fixture login.
+    pub fn qsql(&self, pool: &sqlx::PgPool, s: &str) {
+        self.w.rt.block_on(async { sqlx::raw_sql(s).execute(pool).await.unwrap_or_else(|x| panic!("{s}: {x}")) });
+    }
+
+    /// The first cell of the first row of a query in `quarry_test`, as text.
+    pub fn qone(&self, pool: &sqlx::PgPool, s: &str) -> String {
+        self.w.rt.block_on(async {
+            let rows = sqlx::raw_sql(s).fetch_all(pool).await.unwrap_or_else(|x| panic!("{s}: {x}"));
+            super::worker::text_at(&rows[0], 0).unwrap_or_default()
+        })
+    }
+
+    /// The next message the worker sends.
+    pub fn next(&self) -> Msg {
+        self.rx.recv_timeout(std::time::Duration::from_secs(20)).expect("worker answer")
     }
 
     /// The shared database of the live tests, made on first use. Tests of one run take turns making it, because

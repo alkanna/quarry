@@ -38,6 +38,16 @@ pub enum Kind {
     Enum,
     Set,
     Geometry,
+    /// PostgreSQL `bool`, sent as `t` or `f`.
+    Bool,
+    Uuid,
+    /// Arrays of any element type, shown as the server's own `{1,2,3}` text.
+    Array,
+    Interval,
+    /// inet, cidr, macaddr and macaddr8.
+    Inet,
+    /// Ranges and multiranges, shown as the server's own text.
+    Range,
 }
 
 impl Kind {
@@ -69,6 +79,38 @@ impl Kind {
 }
 
 impl Kind {
+    /// A kind from a PostgreSQL type. `name` is `pg_type.typname` of the base type (a domain is resolved to what it
+    /// wraps), or the name sqlx reports for a result column. `category` and `typtype` come from `pg_type` and are empty
+    /// for a result column, which has only the name. A user enum is `typtype` e and arrays are category A.
+    pub fn from_pg(name: &str, category: &str, typtype: &str) -> Kind {
+        let n = name.trim().trim_matches('"').to_ascii_lowercase();
+        if n.ends_with("[]") || category == "A" || (category.is_empty() && n.starts_with('_')) {
+            return Kind::Array;
+        }
+        match n.as_str() {
+            "int2" | "int4" | "int8" | "oid" => return Kind::Int,
+            "float4" | "float8" => return Kind::Float,
+            "numeric" => return Kind::Decimal,
+            "bool" => return Kind::Bool,
+            "text" | "varchar" | "bpchar" | "name" | "citext" | "char" => return Kind::Text,
+            "bytea" => return Kind::Binary,
+            "date" => return Kind::Date,
+            "timestamp" | "timestamptz" => return Kind::DateTime,
+            "time" | "timetz" => return Kind::Time,
+            "json" | "jsonb" => return Kind::Json,
+            "uuid" => return Kind::Uuid,
+            "interval" => return Kind::Interval,
+            "inet" | "cidr" | "macaddr" | "macaddr8" => return Kind::Inet,
+            _ => {}
+        }
+        match (typtype, category) {
+            ("e", _) => Kind::Enum,
+            ("r" | "m", _) | (_, "R") => Kind::Range,
+            ("", "") if n.ends_with("range") => Kind::Range,
+            _ => Kind::Text,
+        }
+    }
+
     /// A kind from information_schema's COLUMN_TYPE ("varchar(20)", "bigint unsigned"), which stays right
     /// for `_bin` text columns that sqlx reports as binary.
     pub fn from_column_type(full: &str) -> Kind {
@@ -85,6 +127,17 @@ fn bytes(b: &[u8]) -> Bson {
 /// Converts the server's text-protocol bytes. Anything that does not parse as its kind falls back to
 /// the server's text, so a value is never lost or silently changed.
 pub fn to_bson(kind: Kind, raw: Option<&[u8]>) -> Bson {
+    to_bson_for(false, kind, raw)
+}
+
+/// `to_bson` for a row of either engine. A Postgres row holds a bytea as `\x` hex text, so it is decoded here, at the
+/// edge, and the rest of the app sees the same bytes as on MySQL.
+pub fn to_bson_for(pg: bool, kind: Kind, raw: Option<&[u8]>) -> Bson {
+    if pg && kind == Kind::Binary {
+        if let Some(b) = raw.and_then(unhex) {
+            return bytes(&b);
+        }
+    }
     let Some(raw) = raw else { return Bson::Null };
     let text = || String::from_utf8_lossy(raw).into_owned();
     let s = std::str::from_utf8(raw).unwrap_or("");
@@ -93,13 +146,28 @@ pub fn to_bson(kind: Kind, raw: Option<&[u8]>) -> Bson {
         // Bson has no unsigned 64 bit integer, so values above i64::MAX stay exact as text.
         Kind::UInt => s.parse::<u64>().ok().and_then(|v| i64::try_from(v).ok()).map_or_else(|| Bson::String(text()), Bson::Int64),
         Kind::Float => s.parse::<f64>().map_or_else(|_| Bson::String(text()), Bson::Double),
-        Kind::Decimal | Kind::Date | Kind::DateTime | Kind::Time | Kind::Json | Kind::Enum | Kind::Set => Bson::String(text()),
+        Kind::Decimal | Kind::Date | Kind::DateTime | Kind::Time | Kind::Json | Kind::Enum | Kind::Set | Kind::Uuid | Kind::Array | Kind::Interval | Kind::Inet | Kind::Range => Bson::String(text()),
+        Kind::Bool => match s {
+            "t" => Bson::Boolean(true),
+            "f" => Bson::Boolean(false),
+            _ => Bson::String(text()),
+        },
         Kind::Text => match std::str::from_utf8(raw) {
             Ok(s) => Bson::String(s.into()),
             Err(_) => bytes(raw),
         },
         Kind::Binary | Kind::Bit | Kind::Geometry => bytes(raw),
     }
+}
+
+/// The bytes of PostgreSQL's hex bytea text: a backslash, an x and pairs of digits.
+fn unhex(raw: &[u8]) -> Option<Vec<u8>> {
+    let h = raw.strip_prefix(b"\\x")?;
+    if h.len() % 2 != 0 || !h.iter().all(u8::is_ascii_hexdigit) {
+        return None;
+    }
+    let d = |b: u8| (b as char).to_digit(16).unwrap_or(0) as u8;
+    Some(h.chunks(2).map(|p| d(p[0]) << 4 | d(p[1])).collect())
 }
 
 fn digits(s: &str, min: usize, max: usize) -> Option<u32> {
@@ -180,7 +248,8 @@ pub fn parse_edit(kind: Kind, text: &str) -> Result<Bson, String> {
             }
         }
         Kind::Geometry => Err("Geometry values cannot be edited as text yet.".into()),
-        Kind::Text | Kind::Enum | Kind::Set => Ok(Bson::String(text.into())),
+        // Text as typed until the Postgres write path checks each of these.
+        Kind::Text | Kind::Enum | Kind::Set | Kind::Bool | Kind::Uuid | Kind::Array | Kind::Interval | Kind::Inet | Kind::Range => Ok(Bson::String(text.into())),
     }
 }
 
@@ -246,6 +315,45 @@ mod tests {
         ] {
             assert_eq!(k(n), want, "{n}");
         }
+    }
+
+    #[test]
+    fn postgres_types_map_to_kinds() {
+        let k = Kind::from_pg;
+        for (n, cat, tt, want) in [
+            ("int2", "N", "b", Kind::Int), ("int4", "N", "b", Kind::Int), ("int8", "N", "b", Kind::Int), ("oid", "N", "b", Kind::Int),
+            ("float4", "N", "b", Kind::Float), ("float8", "N", "b", Kind::Float), ("numeric", "N", "b", Kind::Decimal), ("bool", "B", "b", Kind::Bool),
+            ("text", "S", "b", Kind::Text), ("varchar", "S", "b", Kind::Text), ("bpchar", "S", "b", Kind::Text), ("name", "S", "b", Kind::Text), ("citext", "S", "b", Kind::Text),
+            ("bytea", "U", "b", Kind::Binary), ("date", "D", "b", Kind::Date), ("timestamp", "D", "b", Kind::DateTime), ("timestamptz", "D", "b", Kind::DateTime),
+            ("time", "D", "b", Kind::Time), ("timetz", "D", "b", Kind::Time), ("json", "U", "b", Kind::Json), ("jsonb", "U", "b", Kind::Json),
+            ("uuid", "U", "b", Kind::Uuid), ("_int4", "A", "b", Kind::Array), ("interval", "T", "b", Kind::Interval),
+            ("inet", "I", "b", Kind::Inet), ("cidr", "I", "b", Kind::Inet), ("macaddr", "U", "b", Kind::Inet),
+            ("int4range", "R", "r", Kind::Range), ("tstzmultirange", "R", "m", Kind::Range), ("mood", "E", "e", Kind::Enum),
+            ("money", "N", "b", Kind::Text), ("point", "G", "b", Kind::Text), ("tsvector", "U", "b", Kind::Text), ("mycomposite", "C", "c", Kind::Text),
+        ] {
+            assert_eq!(k(n, cat, tt), want, "{n}");
+        }
+        // The names sqlx gives a result column have no category.
+        for (n, want) in [("INT4", Kind::Int), ("TIMESTAMPTZ", Kind::DateTime), ("INT4[]", Kind::Array), ("INT4RANGE", Kind::Range), ("BOOL", Kind::Bool), ("\"CHAR\"", Kind::Text), ("?", Kind::Text)] {
+            assert_eq!(k(n, "", ""), want, "{n}");
+        }
+    }
+
+    #[test]
+    fn postgres_text_becomes_bson() {
+        assert_eq!(conv(Kind::Bool, "t"), Bson::Boolean(true));
+        assert_eq!(conv(Kind::Bool, "f"), Bson::Boolean(false));
+        assert_eq!(conv(Kind::Bool, "?"), Bson::String("?".into()));
+        assert_eq!(to_bson_for(true, Kind::Binary, Some(b"\\x00ff10")), bytes(&[0, 255, 16]));
+        assert_eq!(to_bson_for(true, Kind::Binary, Some(b"\\x")), bytes(&[]));
+        // MySQL bytes that happen to start with a backslash are not hex.
+        assert_eq!(to_bson_for(false, Kind::Binary, Some(b"\\x00ff")), bytes(b"\\x00ff"));
+        assert_eq!(to_bson_for(true, Kind::Binary, Some(b"\\xzz")), bytes(b"\\xzz"));
+        for k in [Kind::Uuid, Kind::Array, Kind::Interval, Kind::Inet, Kind::Range] {
+            assert_eq!(conv(k, "{1,2}"), Bson::String("{1,2}".into()));
+            assert_eq!(parse_edit(k, "{1,2}"), Ok(Bson::String("{1,2}".into())));
+        }
+        assert_eq!(parse_edit(Kind::Bool, "t"), Ok(Bson::String("t".into())));
     }
 
     fn conv(kind: Kind, s: &str) -> Bson {

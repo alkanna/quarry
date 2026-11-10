@@ -7,13 +7,12 @@ use super::value::{self, Kind};
 pub(super) use super::run::{kill_query, pin_reads_my as pin_reads, prepare_my as prepare};
 use super::run::{run, RunHandle};
 use super::schema::{Schema, SchemaCol, SchemaTable};
-use super::structure::ALL_ROWS;
 use super::{lex, Addr, Advanced, TestInfo, Col, Db, Dialect, PageQuery, Pool, SslMode};
 use crate::db::{e, Msg, Net, Res, Row, Worker};
 use mongodb::bson::{Bson, Document};
-use super::exec::{Cells, ColMeta, Conn, Opts};
-use sqlx::mysql::{MySqlColumn, MySqlConnectOptions, MySqlPoolOptions, MySqlSslMode};
-use sqlx::{raw_sql, Column, Connection, Executor, Row as _};
+use super::exec::{Cells, ColInfo, ColMeta, Conn, Opts, SqlRow};
+use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlSslMode};
+use sqlx::{raw_sql, Connection, Executor, Row as _};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -254,6 +253,12 @@ fn unique(cols: &mut [Col], reserve_id: bool) {
 /// Columns as the result reports them. `meta` (name to COLUMN_TYPE and nullability) wins when the
 /// result column is a table column.
 pub(super) fn make_cols<C: ColMeta>(cols: &[C], meta: &HashMap<String, (String, bool, String)>, reserve_id: bool) -> Vec<Col> {
+    make_cols_kinds(cols, meta, &HashMap::new(), reserve_id)
+}
+
+/// `make_cols` with the kinds the server's catalog gave the table's columns. PostgreSQL's type names say too little
+/// (a domain, an enum), so its kinds are read from `pg_type` and a MySQL table leaves `kinds` empty.
+pub(super) fn make_cols_kinds<C: ColMeta>(cols: &[C], meta: &HashMap<String, (String, bool, String)>, kinds: &HashMap<String, Kind>, reserve_id: bool) -> Vec<Col> {
     let mut out: Vec<Col> = cols
         .iter()
         .map(|c| {
@@ -261,9 +266,10 @@ pub(super) fn make_cols<C: ColMeta>(cols: &[C], meta: &HashMap<String, (String, 
             match meta.get(c.col_name()) {
                 Some((full, nullable, extra)) => {
                     let extra = extra.to_ascii_uppercase();
-                    Col { generated: extra.contains("GENERATED"), auto_increment: extra.contains("AUTO_INCREMENT"), ..Col::plain(c.col_name(), full, kind_of_full(full), *nullable) }
+                    let kind = kinds.get(c.col_name()).copied().unwrap_or_else(|| kind_of_full(full));
+                    Col { generated: extra.contains("GENERATED"), auto_increment: extra.contains("AUTO_INCREMENT"), ..Col::plain(c.col_name(), full, kind, *nullable) }
                 }
-                None => Col::plain(c.col_name(), &ty, Kind::from_type_name(&ty), true),
+                None => Col::plain(c.col_name(), &ty, c.col_kind(), true),
             }
         })
         .collect();
@@ -272,7 +278,7 @@ pub(super) fn make_cols<C: ColMeta>(cols: &[C], meta: &HashMap<String, (String, 
 }
 
 pub(super) fn to_row<R: Cells>(cols: &[Col], row: &R, pk: &[String]) -> Res<Row> {
-    let vals: Vec<Bson> = cols.iter().enumerate().map(|(i, c)| value::to_bson(c.kind, raw(row, i))).collect();
+    let vals: Vec<Bson> = cols.iter().enumerate().map(|(i, c)| value::to_bson_for(row.pg(), c.kind, raw(row, i))).collect();
     let mut d = Document::new();
     // The key is looked up by the server's column names, since a renamed column keeps its real name there.
     // A key with a missing column would address too many rows, so then there is no key at all.
@@ -302,56 +308,64 @@ fn one_read(sql: &str, d: Dialect) -> Res<()> {
 /// grouped or distinct count that the server refuses (duplicate output names) falls back to
 /// zero, since the data query reports the same problem.
 async fn count(db: &Db, schema: &str, table: &str, q: &PageQuery) -> Res<(u64, bool)> {
-    let pool = db.my_pool()?;
     let d = db.dialect;
     if q.plain() {
-        let mut c = pool.acquire().await.map_err(e)?;
-        // MySQL 8 caches TABLE_ROWS for a day. Fresh numbers cost a lot per schema, so only this one table's
-        // lookup asks for them; 5.7 and MariaDB lack the variable, so a refusal is fine.
-        if matches!(d, Dialect::MySql) {
-            let _ = c.execute("SET SESSION information_schema_stats_expiry = 0").await;
-        }
-        let t = Instant::now();
-        let est = sqlx::query(d.table_status()).bind(schema).bind(table).fetch_optional(&mut *c).await;
-        db.note(schema, d.table_status(), t, &est);
-        let est = est.map_err(e)?;
-        if let Some(n) = est.and_then(|r| r.try_get::<Option<u64>, _>("row_estimate").ok().flatten()).filter(|n| *n >= ESTIMATE_MIN) {
+        let est = match &db.pool {
+            Pool::My(pool) => {
+                let mut c = pool.acquire().await.map_err(e)?;
+                // MySQL 8 caches TABLE_ROWS for a day. Fresh numbers cost a lot per schema, so only this one table's
+                // lookup asks for them; 5.7 and MariaDB lack the variable, so a refusal is fine.
+                if matches!(d, Dialect::MySql) {
+                    let _ = c.execute("SET SESSION information_schema_stats_expiry = 0").await;
+                }
+                let t = Instant::now();
+                let est = sqlx::query(d.table_status()).bind(schema).bind(table).fetch_optional(&mut *c).await;
+                db.note(schema, d.table_status(), t, &est);
+                est.map_err(e)?.and_then(|r| r.try_get::<Option<u64>, _>("row_estimate").ok().flatten())
+            }
+            // NULL while the planner has no estimate, and then the count below is exact.
+            Pool::Pg(_) => db.meta(schema, d.table_status(), [schema, table]).await?.first().and_then(|r| r.uint("row_estimate")),
+        };
+        if let Some(n) = est.filter(|n| *n >= ESTIMATE_MIN) {
             return Ok((n, true));
         }
     }
     let sql = q.count_sql(d, schema, table);
     one_read(&sql, d)?;
-    let t = Instant::now();
-    let res = raw_sql(&sql).fetch_one(pool).await;
-    db.note(schema, &sql, t, &res);
-    match res {
-        Ok(r) => Ok((num_at(&r, 0).unwrap_or(0), false)),
+    match db.read_text(schema, &sql, user_text(q)).await {
+        Ok(rows) => Ok((rows.first().and_then(|r| num_at(r, 0)).unwrap_or(0), false)),
         Err(_) if q.grouped() || q.distinct => Ok((0, false)),
-        Err(err) => Err(e(err)),
+        Err(err) => Err(err),
     }
 }
 
 /// Column types and the primary key, from information_schema.
-async fn table_meta(db: &Db, schema: &str, table: &str) -> Res<(HashMap<String, (String, bool, String)>, Vec<String>)> {
-    let pool = db.my_pool()?;
+async fn table_meta(db: &Db, schema: &str, table: &str) -> Res<(HashMap<String, (String, bool, String)>, HashMap<String, Kind>, Vec<String>)> {
     let d = db.dialect;
-    let t = Instant::now();
-    let cols = sqlx::query(&format!("{}{ALL_ROWS}", d.columns())).bind(schema).bind(table).fetch_all(pool).await;
-    db.note(schema, d.columns(), t, &cols);
-    let cols = cols.map_err(e)?;
-    let t = Instant::now();
-    let idx = sqlx::query(&format!("{}{ALL_ROWS}", d.indexes())).bind(schema).bind(table).fetch_all(pool).await;
-    db.note(schema, d.indexes(), t, &idx);
-    let idx = idx.map_err(e)?;
+    let cols = db.meta(schema, d.columns(), [schema, table]).await?;
+    let idx = db.meta(schema, d.indexes(), [schema, table]).await?;
     let meta = cols
         .iter()
         .filter_map(|r| {
-            let nullable = r.try_get::<i64, _>("nullable").map(|n| n != 0).unwrap_or(true);
+            let nullable = r.int("nullable").map(|n| n != 0).unwrap_or(true);
             Some((text(r, "name")?, (text(r, "full_type")?, nullable, text(r, "extra").unwrap_or_default())))
         })
         .collect();
-    let pk = idx.iter().filter(|r| text(r, "name").as_deref() == Some("PRIMARY")).filter_map(|r| text(r, "col")).collect();
-    Ok((meta, pk))
+    let kinds = if d == Dialect::Postgres { cols.iter().filter_map(|r| Some((text(r, "name")?, pg_kind(r)))).collect() } else { HashMap::new() };
+    // A Postgres key is named by the table, so the index query says which one is the primary key.
+    let pk = idx.iter().filter(|r| if d == Dialect::Postgres { r.int("is_primary") == Some(1) } else { text(r, "name").as_deref() == Some("PRIMARY") }).filter_map(|r| text(r, "col")).collect();
+    Ok((meta, kinds, pk))
+}
+
+/// Whether any clause of the page query is text the user typed. The index hint is quoted by `PageQuery`, and the limit
+/// and offset are numbers, so they are not.
+fn user_text(q: &PageQuery) -> bool {
+    [&q.filter, &q.order, &q.having].iter().any(|s| !s.trim().is_empty()) || q.select.iter().chain(&q.group).any(|s| !s.trim().is_empty())
+}
+
+/// The kind of a column of a Postgres catalog row, which carries the resolved base type and its category.
+pub(super) fn pg_kind<R: Cells>(r: &R) -> Kind {
+    Kind::from_pg(&text(r, "pg_type").unwrap_or_default(), &text(r, "pg_cat").unwrap_or_default(), &text(r, "pg_typtype").unwrap_or_default())
 }
 
 /// One page: columns, primary key, rows, the count of what the pages come from (groups when
@@ -360,62 +374,47 @@ type Paged = (Vec<Col>, Vec<String>, Vec<Row>, u64, bool, u128, Option<u64>);
 
 async fn page(db: &Db, schema: &str, table: &str, q: &PageQuery, limit: u64, offset: u64) -> Res<Paged> {
     let start = Instant::now();
-    let pool = db.my_pool()?;
     let d = db.dialect;
     // The key is needed before the data query: without a total order, pages overlap and skip rows.
-    let (meta, mut pk) = table_meta(db, schema, table).await?;
+    let (meta, kinds, mut pk) = table_meta(db, schema, table).await?;
     if q.grouped() {
         pk.clear();
     }
     let sql = q.select_sql(d, schema, table, &pk, Some((limit, offset)));
     one_read(&sql, d)?;
-    let data = async {
-        let t = Instant::now();
-        let res = raw_sql(&sql).fetch_all(pool).await;
-        db.note(schema, &sql, t, &res);
-        res.map_err(e)
-    };
+    let data = db.read_text(schema, &sql, user_text(q));
     let ((total, estimated), rows) = tokio::try_join!(count(db, schema, table, q), data)?;
     // The LIMIT chip caps the whole result, not a page.
     let count = total.saturating_sub(q.skip).min(q.limit.unwrap_or(u64::MAX));
     let matched = if q.grouped() {
         let sql = q.rows_sql(d, schema, table);
         one_read(&sql, d)?;
-        let t = Instant::now();
-        let r = raw_sql(&sql).fetch_one(pool).await;
-        db.note(schema, &sql, t, &r);
-        let r = r.map_err(e)?;
-        Some(num_at(&r, 0).unwrap_or(0))
+        let r = db.read_text(schema, &sql, user_text(q)).await?;
+        Some(r.first().and_then(|r| num_at(r, 0)).unwrap_or(0))
     } else {
         None
     };
-    let rcols: Vec<MySqlColumn> = match rows.first() {
-        Some(r) => r.columns().to_vec(),
+    let rcols: Vec<ColInfo> = match rows.first() {
+        Some(r) => r.cols(),
         // An empty page still needs its headers.
-        None => (&*pool).describe(&sql).await.map_err(e)?.columns().to_vec(),
+        None => db.describe_text(&sql).await?,
     };
     // An invisible primary key is in the index list but not in SELECT *, so the rows cannot carry it.
-    if !pk.iter().all(|p| rcols.iter().any(|c| c.name() == p)) {
+    if !pk.iter().all(|p| rcols.iter().any(|c| c.name == *p)) {
         pk.clear();
     }
     // Output columns of a grouped query are computed, so they have no table type to look up.
-    let meta = if q.grouped() { HashMap::new() } else { meta };
-    let cols = make_cols(&rcols, &meta, !pk.is_empty());
+    let (meta, kinds) = if q.grouped() { (HashMap::new(), HashMap::new()) } else { (meta, kinds) };
+    let cols = make_cols_kinds(&rcols, &meta, &kinds, !pk.is_empty());
     let rows = rows.iter().map(|r| to_row(&cols, r, &pk)).collect::<Res<Vec<_>>>()?;
     Ok((cols, pk, rows, count, estimated, start.elapsed().as_millis(), matched))
 }
 
 /// Tables, views and columns of one database in three round trips run together.
 async fn load_schema(db: &Db, schema: &str) -> Res<Schema> {
-    let pool = db.my_pool()?;
     let d = db.dialect;
-    let read = |sql: &'static str| async move {
-        let t = Instant::now();
-        let res = sqlx::query(&format!("{sql}{ALL_ROWS}")).bind(schema).fetch_all(pool).await;
-        db.note(schema, sql, t, &res);
-        res.map_err(e)
-    };
-    let (tables, cols, fks) = tokio::try_join!(read(d.tables()), read(d.all_columns()), read(d.all_foreign_keys()))?;
+    let p = [schema];
+    let (tables, cols, fks) = tokio::try_join!(db.meta(schema, d.tables(), p), db.meta(schema, d.all_columns(), p), db.meta(schema, d.all_foreign_keys(), p))?;
     let fk: HashSet<(String, String)> = fks.iter().filter_map(|r| Some((text(r, "tbl")?, text(r, "name")?))).collect();
     let mut out: Vec<SchemaTable> = tables
         .iter()
@@ -427,8 +426,9 @@ async fn load_schema(db: &Db, schema: &str) -> Res<Schema> {
     for r in &cols {
         let (Some(t), Some(name), Some(ty)) = (text(r, "tbl"), text(r, "name"), text(r, "full_type")) else { continue };
         let Some(table) = out.iter_mut().find(|x| x.name == t) else { continue };
-        let nullable = r.try_get::<i64, _>("nullable").map(|n| n != 0).unwrap_or(true);
-        table.cols.push(SchemaCol { fk: fk.contains(&(t, name.clone())), kind: kind_of_full(&ty), key: text(r, "col_key").unwrap_or_default(), nullable, name, ty });
+        let nullable = r.int("nullable").map(|n| n != 0).unwrap_or(true);
+        let kind = if d == Dialect::Postgres { pg_kind(r) } else { kind_of_full(&ty) };
+        table.cols.push(SchemaCol { fk: fk.contains(&(t, name.clone())), kind, key: text(r, "col_key").unwrap_or_default(), nullable, name, ty });
     }
     Ok(Schema { tables: out })
 }
@@ -440,8 +440,11 @@ const VALUES_SMALL: u64 = 100_000;
 /// large and no index leads with the column. Both checks read metadata only. The lookup runs on a
 /// connection of its own with a 300 ms limit, so a slow one never holds the pool.
 async fn field_values(db: &Db, schema: &str, table: &str, column: &str, prefix: Option<&str>) -> Res<Option<Vec<(String, u64)>>> {
-    let pool = db.my_pool()?;
     let d = db.dialect;
+    if d == Dialect::Postgres {
+        return pg_field_values(db, schema, table, column, prefix).await;
+    }
+    let pool = db.my_pool()?;
     let Some(gate) = sqlx::query(d.value_gate()).bind(column).bind(schema).bind(table).fetch_optional(pool).await.map_err(e)? else { return Ok(None) };
     let small = super::structure::num(&gate, "est").is_some_and(|n| n < VALUES_SMALL);
     let leads = super::structure::num(&gate, "leads").unwrap_or(0) > 0;
@@ -462,6 +465,45 @@ async fn field_values(db: &Db, schema: &str, table: &str, column: &str, prefix: 
         }
         let t = Instant::now();
         let rows = q.fetch_all(&mut c).await;
+        db.note(schema, &sql, t, &rows);
+        let rows = rows.map_err(e)?;
+        Ok(Some(rows.iter().filter_map(|r| Some((text(r, "v")?, super::structure::num(r, "n")?))).collect()))
+    }
+    .await;
+    let _ = c.close().await;
+    res
+}
+
+/// `field_values` on PostgreSQL. The planner's estimate is NULL until the table has been analyzed, so a bounded count
+/// stands in for it, and a table that is not small is looked up only when an index leads with the column.
+async fn pg_field_values(db: &Db, schema: &str, table: &str, column: &str, prefix: Option<&str>) -> Res<Option<Vec<(String, u64)>>> {
+    let d = db.dialect;
+    let Some(gate) = db.meta(schema, d.value_gate(), [column, schema, table]).await?.into_iter().next() else { return Ok(None) };
+    let est = super::structure::num(&gate, "est");
+    let leads = super::structure::num(&gate, "leads").unwrap_or(0) > 0;
+    if est.is_some_and(|n| n >= VALUES_SMALL) && !leads {
+        return Ok(None);
+    }
+    let mut c = db.detached().await?;
+    let res = async {
+        // The lookup must stay short, so a slow one gives up instead of holding a connection.
+        c.execute(&d.session_timeout(300)).await.map_err(e)?;
+        if est.is_none() && !leads {
+            let sql = format!("SELECT count(*)::text FROM (SELECT 1 FROM {} LIMIT {}) AS q", d.qualified(schema, table), VALUES_SMALL + 1);
+            match c.fetch_all(&sql).await {
+                Ok(rows) if rows.first().and_then(|r| num_at(r, 0)).is_some_and(|n| n <= VALUES_SMALL) => {}
+                // Too big to group, or too slow to tell.
+                _ => return Ok(None),
+            }
+        }
+        let sql = d.value_counts(schema, table, column, prefix.is_some(), 201);
+        let Conn::Pg(pc) = &mut c else { return Err("Not a PostgreSQL connection".to_string()) };
+        let mut q = sqlx::query(&sql);
+        if let Some(p) = prefix {
+            q = q.bind(format!("{}%", super::rules::like_escape(p)));
+        }
+        let t = Instant::now();
+        let rows = q.fetch_all(&mut *pc).await.map(SqlRow::wrap_pg);
         db.note(schema, &sql, t, &rows);
         let rows = rows.map_err(e)?;
         Ok(Some(rows.iter().filter_map(|r| Some((text(r, "v")?, super::structure::num(r, "n")?))).collect()))
@@ -529,11 +571,7 @@ impl Worker {
     pub fn sql_tables(&self, conn: u64, db: Db, schema: String) {
         self.spawn(async move {
             let res = async {
-                let pool = db.my_pool()?;
-                let t = Instant::now();
-                let rows = sqlx::query(&format!("{}{ALL_ROWS}", db.dialect.tables())).bind(&schema).fetch_all(pool).await;
-                db.note(&schema, db.dialect.tables(), t, &rows);
-                let rows = rows.map_err(e)?;
+                let rows = db.meta(&schema, db.dialect.tables(), [schema.as_str()]).await?;
                 let mut names = Vec::new();
                 let mut views = Vec::new();
                 for r in &rows {

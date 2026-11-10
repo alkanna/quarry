@@ -248,6 +248,9 @@ pub enum Msg {
     Tested { req: u64, res: Res<String>, info: Option<sql::TestInfo> },
     /// Collection names (sorted) and which of them are views.
     Collections { conn: u64, db: String, res: Res<(Vec<String>, Vec<String>)> },
+    /// The schemas of one PostgreSQL database, from `Worker::sql_schemas`.
+    #[allow(dead_code)] // sent from step 8 on
+    SqlSchemas { conn: u64, database: String, res: Res<Vec<String>> },
     /// A read command answered (users, roles, stats, view definition); `tag` says which.
     Command { tag: String, res: Res<Document> },
     /// A database-level change finished; the collection list of `db` is reloaded.
