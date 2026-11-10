@@ -118,6 +118,11 @@ fn put_saved(list: &mut Vec<SavedQuery>, q: SavedQuery) {
 /// Named queries (or pipelines, or SQL scripts) saved for this collection: load, delete, or save the current one.
 /// `icon` shows it as a book icon, as in the find bar.
 pub(super) fn library_menu(ui: &mut egui::Ui, lib: &[SavedQuery], new_name: &mut String, kind: LibKind, icon: bool, acts: &mut Vec<QAct>) -> egui::Response {
+    library_menu_for(ui, lib, new_name, kind, icon, acts, crate::db::sql::Dialect::default())
+}
+
+/// `library_menu` for a SQL tab: the statements of a script are counted the way its server splits them.
+pub(super) fn library_menu_for(ui: &mut egui::Ui, lib: &[SavedQuery], new_name: &mut String, kind: LibKind, icon: bool, acts: &mut Vec<QAct>, dialect: crate::db::sql::Dialect) -> egui::Response {
     let (head, sub, empty, save) = match kind {
         LibKind::Query => ("Saved queries", "Query, sort and project, kept for this collection.", "No saved queries yet", "SAVE THE CURRENT QUERY"),
         LibKind::Pipeline => ("Saved pipelines", "Pipelines kept for this collection.", "No saved pipelines yet", "SAVE THIS PIPELINE"),
@@ -162,7 +167,7 @@ pub(super) fn library_menu(ui: &mut egui::Ui, lib: &[SavedQuery], new_name: &mut
                             // Counted once per script text, not every frame.
                             let key = ui.make_persistent_id(("lib-stmts", &q.name, sql.len()));
                             let n = ui.data(|d| d.get_temp::<usize>(key)).unwrap_or_else(|| {
-                                let n = crate::db::sql::lex::split_statements(sql, crate::db::sql::Dialect::default()).iter().filter(|(_, s)| !s.trim().is_empty()).count();
+                                let n = crate::db::sql::lex::split_statements(sql, dialect).iter().filter(|(_, s)| !s.trim().is_empty()).count();
                                 ui.data_mut(|d| d.insert_temp(key, n));
                                 n
                             });

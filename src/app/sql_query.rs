@@ -61,6 +61,20 @@ fn run_db(t: &Tab) -> String {
     t.sql.as_ref().map(|s| s.run_db.clone()).filter(|d| !d.is_empty()).unwrap_or_else(|| t.sel.db.clone())
 }
 
+/// The database a run connects to and the namespace inside it. A PostgreSQL connection is bound to one database, so
+/// the `Db` points at it and the namespace is the tab's schema; MySQL picks the database per statement.
+fn run_target(t: &Tab, db: db::sql::Db) -> (db::sql::Db, String) {
+    if db.dialect == db::sql::Dialect::Postgres {
+        let schema = t.sql.as_ref().map(|s| s.run_schema.clone()).unwrap_or_default();
+        return (db.at(&run_db(t)), schema);
+    }
+    (db, run_db(t))
+}
+
+fn t_schema(t: Option<&Tab>) -> String {
+    t.and_then(|t| t.sql.as_ref()).map(|s| s.run_schema.clone()).unwrap_or_default()
+}
+
 /// One result tab: the statement number, its kind and the outcome in color.
 fn set_tab(ui: &mut egui::Ui, i: usize, set: &ResultSet, on: bool) -> egui::Response {
     let (detail, color) = if set.error.is_some() {
@@ -226,6 +240,7 @@ impl App {
             return self.warn("Nothing to run.");
         }
         let Some(db) = self.sql_db_for(conn, Some("Connect first.")) else { return };
+        let (db, ns) = run_target(&self.tabs[self.cur], db);
         let read_only = !self.conn_writable(conn);
         let key = format!("{conn}/{schema}/#query");
         // History is written to ui.json and listed in the menu, so a password never goes in.
@@ -237,7 +252,7 @@ impl App {
         let Some(s) = self.tabs[self.cur].sql.as_mut() else { return };
         // Fresh handles per run, so a Stop pressed for an old run never reaches this one.
         (s.run_req, s.run) = (req, Default::default());
-        self.worker.sql_run(req, db, schema, text, read_only, 0, s.run.clone());
+        self.worker.sql_run(req, db, ns, text, read_only, 0, s.run.clone());
     }
 
     /// Stops the running script: the statement in flight is interrupted and the rest never starts.
@@ -253,7 +268,7 @@ impl App {
     /// only its result tab and keeps the row count; a new run starts the counts of its paged results.
     pub(super) fn sql_ran(&mut self, req: u64, mut sets: Vec<ResultSet>) {
         let Some(ti) = self.tabs.iter().position(|t| t.sql.as_ref().is_some_and(|s| s.run_req == req)) else { return };
-        let (conn, schema) = (self.tabs[ti].sel.conn, run_db(&self.tabs[ti]));
+        let conn = self.tabs[ti].sel.conn;
         let Some(s) = self.tabs[ti].sql.as_mut() else { return };
         // Checks belong to the page they were made on.
         (s.run_req, s.text_cache, s.qanchor) = (0, None, None);
@@ -279,9 +294,9 @@ impl App {
         (s.set_sel, s.sets) = (0, sets);
         // A last page already knows the total; the others ask the server.
         let wants: Vec<(usize, String)> = s.sets.iter().enumerate().filter(|(_, x)| x.page.is_some_and(|p| p.next)).map(|(i, x)| (i, x.stmt.clone())).collect();
-        if let Some(db) = self.conn(conn).and_then(|c| c.sql.clone()) {
+        if let Some((db, ns)) = self.conn(conn).and_then(|c| c.sql.clone()).map(|db| run_target(&self.tabs[ti], db)) {
             for (i, stmt) in wants {
-                self.worker.sql_count(req, i, db.clone(), schema.clone(), stmt);
+                self.worker.sql_count(req, i, db.clone(), ns.clone(), stmt);
             }
         }
     }
@@ -297,9 +312,10 @@ impl App {
     /// Reads result tab `idx` again at page `n` on a fresh connection, a run of its own that Stop reaches.
     fn sql_goto_page(&mut self, idx: usize, n: usize) {
         let Some(t) = self.t() else { return };
-        let (conn, schema) = (t.sel.conn, run_db(t));
+        let conn = t.sel.conn;
         let Some(stmt) = t.sql.as_ref().filter(|s| s.run_req == 0).and_then(|s| s.sets.get(idx)).map(|x| x.stmt.clone()) else { return };
         let Some(db) = self.sql_db_for(conn, Some("Connect first.")) else { return };
+        let (db, schema) = run_target(&self.tabs[self.cur], db);
         let read_only = !self.conn_writable(conn);
         self.req += 1;
         let req = self.req;
@@ -316,6 +332,8 @@ impl App {
         let lib: Vec<SavedQuery> = library_of(&self.prefs.library, &Self::sql_lib_key(conn), LibKind::Sql);
         let (mut lib_new, mut lib_acts) = (std::mem::take(&mut self.new_lib), Vec::new());
         let (mut pick, mut load, mut picked) = (schema.clone(), None, false);
+        let dialect = self.sql_dialect().0;
+        let mut pg_schema = t_schema(self.t());
         ui.horizontal(|ui| {
             ui.label(semibold(RichText::new(&title).size(TXT_HEADING).color(BRIGHT())));
             ui.add_space(6.0);
@@ -328,6 +346,10 @@ impl App {
                     }
                 });
             });
+            if dialect == db::sql::Dialect::Postgres {
+                ui.add_space(4.0);
+                ui.add(egui::TextEdit::singleline(&mut pg_schema).font(FontId::monospace(TXT_SMALL)).hint_text("schema").desired_width(100.0)).on_hover_text("The schema put first in search_path for this tab. Empty keeps the server's own.");
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // The first one added sits at the right edge: the history, then the library beside it.
                 icon_menu(ui, paint_clock, true, |ui| {
@@ -351,11 +373,14 @@ impl App {
                 })
                 .on_hover_text("History");
                 ui.add_space(6.0);
-                let button = library_menu(ui, &lib, &mut lib_new, LibKind::Sql, false, &mut lib_acts);
+                let button = library_menu_for(ui, &lib, &mut lib_new, LibKind::Sql, false, &mut lib_acts, dialect);
                 self.demo_open_library(ui.ctx(), &button);
             });
         });
         self.new_lib = lib_new;
+        if let Some(s) = self.tm().and_then(|t| t.sql.as_mut()) {
+            s.run_schema = pg_schema.trim().to_string();
+        }
         ui.add_space(4.0);
         let (mut run, mut run_all, mut stop, mut explain, mut format) = (false, false, false, false, false);
         let status = self.t().and_then(|t| t.sql.as_ref()).map(|s| {

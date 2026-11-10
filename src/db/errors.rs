@@ -55,7 +55,21 @@ pub struct ErrCtx {
 
 /// Whether a server error means the user lacks a privilege, in the server's, Atlas's or MySQL's wording.
 pub fn is_unauthorized(e: &str) -> bool {
-    e.contains("(Unauthorized)") || e.contains("not authorized") || e.contains("is not allowed to do action") || matches!(mysql_code(e), Some(1142 | 1143 | 1044 | 1227 | 1370))
+    pg_code(e).as_deref() == Some("42501") || e.contains("(Unauthorized)") || e.contains("not authorized") || e.contains("is not allowed to do action") || matches!(mysql_code(e), Some(1142 | 1143 | 1044 | 1227 | 1370))
+}
+
+/// The SQLSTATE in a PostgreSQL error as `db::sql` words it: "error returned from database: 42P01: relation ...".
+/// A MySQL number is four digits followed by a bracket, so the two never read as each other.
+fn pg_code(e: &str) -> Option<String> {
+    let s = e.strip_prefix("error returned from database: ")?;
+    let code = s.get(..5)?;
+    (code.chars().all(|c| c.is_ascii_digit() || c.is_ascii_uppercase()) && s[5..].starts_with(": ")).then(|| code.to_string())
+}
+
+/// Where a PostgreSQL error points in the statement, from the "Position: 15 (line 1, column 15)" line.
+fn pg_position(e: &str) -> Option<String> {
+    let i = e.find("\nPosition: ")?;
+    Some(e[i + 11..].lines().next()?.trim().to_string())
 }
 
 /// The MongoDB server error code and name in "Error code 13 (Unauthorized)", or a write error's code.
@@ -82,6 +96,9 @@ fn mysql_code(e: &str) -> Option<u32> {
 /// The server's own sentence, without the driver's prefix, the echoed command and our advice line.
 pub fn server_text(e: &str) -> String {
     let first = e.lines().next().unwrap_or(e);
+    if pg_code(first).is_some() {
+        return first["error returned from database: ".len() + 7..].trim().to_string();
+    }
     let s = match first.find("Error code ").and_then(|i| first[i..].find("): ").map(|j| i + j + 3)) {
         Some(i) => &first[i..],
         None => first.strip_prefix("error returned from database: ").map(|s| s.split_once("): ").map_or(s, |x| x.1)).unwrap_or(first),
@@ -126,6 +143,10 @@ fn refused(e: &str, ns: &str) -> (Option<String>, String, Option<&'static str>) 
         let db = between(e, "not authorized on ", " ").unwrap_or_default();
         let coll = between(e, &format!("{c}: \""), "\"").filter(|_| !db.is_empty());
         (Some(c), coll.map_or(db.clone(), |c| format!("{db}.{c}")))
+    } else if pg_code(e).is_some() {
+        // PostgreSQL: "permission denied for table orders"; it names no command.
+        let what = server_text(e);
+        (None, what.strip_prefix("permission denied for ").and_then(|r| r.split_once(' ')).map(|x| x.1.to_string()).unwrap_or_default())
     } else if let Some(c) = mysql_code(e).and_then(|_| server_text(e).split(' ').next().map(str::to_string)).filter(|w| w.chars().all(|c| c.is_ascii_uppercase())) {
         // MySQL: "SELECT command denied to user 'a'@'%' for table 'orders'"
         (Some(c.to_lowercase()), between(e, "for table '", "'").unwrap_or_default())
@@ -164,6 +185,13 @@ fn dup_key(e: &str) -> Option<(String, String)> {
         let v = v.split_once(" }").map_or(v, |x| x.0).replace("\\\"", "\"");
         return Some((f.trim().to_string(), v.trim().to_string()));
     }
+    // PostgreSQL's detail line: "Key (email)=(a@b.c) already exists."
+    if let Some(i) = e.find("Key (") {
+        let r = &e[i + 5..];
+        if let Some((f, v)) = r.split_once(")=(") {
+            return Some((f.to_string(), v.split_once(") already exists").map_or(v, |x| x.0).to_string()));
+        }
+    }
     let i = e.find("Duplicate entry '")?;
     let r = &e[i + 17..];
     let (v, r) = r.split_once("' for key '")?;
@@ -175,25 +203,27 @@ fn dup_key(e: &str) -> Option<(String, String)> {
 pub fn classify(raw: &str) -> ErrKind {
     let low = raw.to_lowercase();
     let n = mongo_code(raw).map(|m| m.0).or(mysql_code(raw));
+    let pg = pg_code(raw);
+    let pg = pg.as_deref();
     if is_unauthorized(raw) {
         ErrKind::Privilege
-    } else if matches!(n, Some(18 | 1045 | 1698)) || low.contains("authentication failed") || low.contains("scram failure") {
+    } else if matches!(n, Some(18 | 1045 | 1698)) || matches!(pg, Some("28P01" | "28000")) || low.contains("authentication failed") || low.contains("scram failure") {
         ErrKind::SignIn
     } else if low.contains("ssh") && (low.contains("tunnel") || low.contains("handshake") || low.contains("ssh:")) {
         ErrKind::Tunnel
     } else if low.contains("certificate") || low.contains("tls") || low.contains("ssl") || n == Some(2026) {
         ErrKind::Tls
-    } else if matches!(n, Some(50 | 262 | 3024 | 1205 | 1969)) || low.contains("exceeded time limit") || low.contains("maximum statement execution time") {
+    } else if matches!(n, Some(50 | 262 | 3024 | 1205 | 1969)) || low.contains("exceeded time limit") || low.contains("maximum statement execution time") || pg == Some("57014") && low.contains("statement timeout") {
         ErrKind::Timeout
-    } else if matches!(n, Some(11000 | 11001 | 1062 | 1586)) || raw.contains("E11000") {
+    } else if matches!(n, Some(11000 | 11001 | 1062 | 1586)) || pg == Some("23505") || raw.contains("E11000") {
         ErrKind::Duplicate
     } else if matches!(n, Some(121 | 3819 | 4025)) || low.contains("document failed validation") {
         ErrKind::Validation
-    } else if matches!(n, Some(26 | 1146 | 1049)) || low.contains("ns does not exist") || low.contains("ns not found") {
+    } else if matches!(n, Some(26 | 1146 | 1049)) || matches!(pg, Some("42P01" | "3F000" | "3D000")) || low.contains("ns does not exist") || low.contains("ns not found") {
         ErrKind::Missing
-    } else if matches!(n, Some(2 | 9 | 14 | 15 | 40324 | 1064 | 1054)) {
+    } else if matches!(n, Some(2 | 9 | 14 | 15 | 40324 | 1064 | 1054)) || pg.is_some_and(|c| c.starts_with("42")) {
         ErrKind::Syntax
-    } else if matches!(n, Some(6 | 89 | 91 | 189 | 2006 | 2013)) || low.contains("connection reset") || low.contains("broken pipe") || low.contains("connection closed") || low.contains("unexpected end of file") {
+    } else if matches!(n, Some(6 | 89 | 91 | 189 | 2006 | 2013)) || pg.is_some_and(|c| c.starts_with("08") || c == "57P01") || low.contains("connection reset") || low.contains("broken pipe") || low.contains("connection closed") || low.contains("unexpected end of file") {
         ErrKind::Lost
     } else if low.contains("server selection timeout") || low.contains("connection refused") || low.contains("failed to lookup address") || low.contains("nodename nor servname") || low.contains("name or service not known") || low.contains("no route to host") || low.contains("pool timed out") || matches!(n, Some(2002 | 2003 | 2005)) || low.contains("timed out") {
         ErrKind::Unreachable
@@ -210,6 +240,7 @@ pub fn explain(raw: &str, cx: &ErrCtx) -> Explained {
     let code = match (&mongo, my) {
         (Some((n, name)), _) if !name.is_empty() => Some(format!("{n} {name}")),
         (Some((n, _)), _) => Some(n.to_string()),
+        _ if pg_code(raw).is_some() => pg_code(raw),
         (_, Some(n)) => raw.split(" (").nth(1).and_then(|s| s.split(')').next()).map(|state| format!("{n} ({state})")).or(Some(n.to_string())),
         _ => None,
     };
@@ -264,7 +295,7 @@ pub fn explain(raw: &str, cx: &ErrCtx) -> Explained {
         }
         ErrKind::Duplicate => {
             let dup = dup_key(raw);
-            let index = raw.find("index: ").map(|i| raw[i + 7..].split(' ').next().unwrap_or_default().to_string());
+            let index = raw.find("index: ").map(|i| raw[i + 7..].split(' ').next().unwrap_or_default().to_string()).or_else(|| raw.find("unique constraint \"").map(|i| raw[i + 19..].split('"').next().unwrap_or_default().to_string()));
             ex.title = match &dup {
                 Some((f, v)) => format!("Another document already has {f} {v}"),
                 None => "Another document already has this unique value".into(),
@@ -292,7 +323,7 @@ pub fn explain(raw: &str, cx: &ErrCtx) -> Explained {
         ErrKind::Other => {
             // Our own messages read "Could not write x: reason"; the part before the colon is the title.
             let first = raw.lines().next().unwrap_or(raw).trim();
-            let ours = mongo.is_none() && my.is_none();
+            let ours = mongo.is_none() && my.is_none() && pg_code(raw).is_none();
             match first.split_once(": ").filter(|(t, _)| ours && t.len() < 80 && !t.contains('{')) {
                 Some((t, r)) => (ex.title, ex.hint) = (t.trim_end_matches('.').to_string(), sentence(r)),
                 None if ours && first.len() <= 120 => ex.title = first.trim_end_matches('.').to_string(),
@@ -306,6 +337,11 @@ pub fn explain(raw: &str, cx: &ErrCtx) -> Explained {
                 ex.hint = if ex.hint.is_empty() { more.trim().to_string() } else { format!("{} {}", ex.hint, more.trim()) };
             }
         }
+    }
+    // A PostgreSQL error says where in the statement it stopped.
+    if let Some(at) = pg_position(raw) {
+        let note = format!("At position {at}.");
+        ex.hint = if ex.hint.is_empty() { note } else { format!("{} {note}", ex.hint) };
     }
     if ex.hint == ex.title {
         ex.hint.clear();
@@ -375,6 +411,26 @@ mod tests {
         assert_eq!((e.title.as_str(), e.hint.as_str()), ("That change is no longer in Recent changes", ""));
         let e = explain("Command failed: Error code 9 (FailedToParse): $lookup requires 'from' to be specified", &ErrCtx { what: "run the pipeline".into(), ..cx() });
         assert_eq!((e.kind, e.title.as_str(), e.hint.as_str()), (ErrKind::Syntax, "The server rejected the pipeline", "$lookup requires 'from' to be specified"));
+    }
+
+    #[test]
+    fn postgres_errors_are_told_apart_by_sqlstate() {
+        let e = explain("error returned from database: 23505: duplicate key value violates unique constraint \"users_email_key\"\nDetail: Key (email)=(a@b.c) already exists.", &cx());
+        assert_eq!((e.kind, e.code.as_deref()), (ErrKind::Duplicate, Some("23505")));
+        assert_eq!(e.dup, Some(("email".into(), "a@b.c".into())));
+        assert!(e.hint.contains("users_email_key"));
+        let e = explain("error returned from database: 42601: syntax error at or near \"FORM\"\nPosition: 10 (line 1, column 10)", &cx());
+        assert_eq!((e.kind, e.hint.as_str()), (ErrKind::Syntax, "syntax error at or near \"FORM\" At position 10 (line 1, column 10)."));
+        let e = explain("error returned from database: 42501: permission denied for table orders", &cx());
+        assert_eq!((e.kind, e.title.as_str()), (ErrKind::Privilege, "Your user can't do this on orders"));
+        assert_eq!(explain("error returned from database: 42P01: relation \"x\" does not exist", &cx()).kind, ErrKind::Missing);
+        assert_eq!(explain("error returned from database: 57014: canceling statement due to statement timeout", &cx()).kind, ErrKind::Timeout);
+        assert_eq!(explain("error returned from database: 57014: canceling statement due to user request", &cx()).kind, ErrKind::Other);
+        assert_eq!(explain("error returned from database: 28P01: password authentication failed for user \"x\"", &cx()).kind, ErrKind::SignIn);
+        assert_eq!(explain("error returned from database: 08006: connection failure", &cx()).kind, ErrKind::Lost);
+        // A MySQL number is not read as a SQLSTATE.
+        assert_eq!(pg_code("error returned from database: 1062 (23000): Duplicate entry"), None);
+        assert_eq!(server_text("error returned from database: 42P01: relation \"x\" does not exist\nPosition: 3"), "relation \"x\" does not exist");
     }
 
     #[test]

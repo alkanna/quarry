@@ -289,6 +289,8 @@ pub(super) struct SqlTab {
     pub(super) run_req: u64,
     /// Database the Query view runs in when it is not the tab's own.
     pub(super) run_db: String,
+    /// PostgreSQL only: the schema the Query view puts first in search_path. Empty keeps the server's own.
+    pub(super) run_schema: String,
     /// Caret of the Query editor as a char index, and what the script says about it.
     pub(super) caret: usize,
     pub(super) caret_cache: std::cell::RefCell<Option<super::sql_query::CaretInfo>>,

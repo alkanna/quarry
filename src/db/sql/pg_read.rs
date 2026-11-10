@@ -6,7 +6,7 @@ use super::{Db, Dialect, Pool};
 use crate::db::{e, Msg, Res, Worker};
 use futures_util::stream::BoxStream;
 use futures_util::StreamExt;
-use sqlx::postgres::{PgConnection, PgPool, PgQueryResult, PgRow};
+use sqlx::postgres::{PgConnection, PgDatabaseError, PgErrorPosition, PgPool, PgQueryResult, PgRow};
 use sqlx::{raw_sql, Connection, Either, Executor};
 use std::time::Instant;
 
@@ -61,6 +61,66 @@ pub(super) async fn read_only(pool: &PgPool, user_text: bool, before: &str, sql:
         conn.close_on_drop();
     }
     res
+}
+
+/// Points the script's session at the tab's schema. Bound, never spliced, and run by Quarry before any user text; the
+/// user cannot change it afterwards, because the lexer refuses SET and set_config and the per-statement rollback would
+/// undo one that got through. An empty schema keeps the server's own search_path.
+pub(super) async fn set_search_path(c: &mut PgConnection, schema: &str) -> Result<(), sqlx::Error> {
+    if schema.is_empty() {
+        return Ok(());
+    }
+    sqlx::query("SELECT set_config('search_path', $1, false)").bind(Dialect::Postgres.quote_ident(schema)).execute(&mut *c).await?;
+    Ok(())
+}
+
+/// The session's statement_timeout as the server spells it ("0", "30s"), to be applied again with SET LOCAL inside
+/// each transaction. A pooler in transaction mode can hand the next statement to another backend, so a session value
+/// alone would not hold there.
+pub(super) async fn statement_timeout(c: &mut PgConnection) -> Result<String, sqlx::Error> {
+    let rows = c.fetch_all("SELECT current_setting('statement_timeout')").await?;
+    use super::exec::Cells;
+    Ok(rows.first().and_then(|r| r.cell(0)).map(|b| String::from_utf8_lossy(b).into_owned()).filter(|v| v.chars().all(|c| c.is_ascii_alphanumeric())).unwrap_or_else(|| "0".into()))
+}
+
+/// Opens the transaction a locked statement runs in. When the timeout cannot be set the transaction is rolled back
+/// at once, so the connection is never left inside one.
+pub(super) async fn begin_read_only(c: &mut PgConnection, timeout: &str) -> Result<(), sqlx::Error> {
+    c.execute("BEGIN READ ONLY").await?;
+    if let Err(x) = c.execute(format!("SET LOCAL statement_timeout = '{timeout}'").as_str()).await {
+        let _ = c.execute("ROLLBACK").await;
+        return Err(x);
+    }
+    Ok(())
+}
+
+/// The characters sent before the user's statement when it sits in a paged wrapper (`lex::page_sql`), which a
+/// server position has to be moved back by.
+pub(super) const PAGE_PREFIX: usize = 16;
+/// The same for `lex::count_sql`.
+pub(super) const COUNT_PREFIX: usize = 23;
+
+/// A server error worded for `db::explain`: the SQLSTATE, the message, the detail and hint when the server sends
+/// them, and where in the user's statement it points. `shift` is how many characters were put in front of the
+/// statement. Anything that is not a PostgreSQL error keeps the plain wording.
+pub(super) fn pg_error(err: &sqlx::Error, stmt: &str, shift: usize) -> String {
+    let Some(d) = err.as_database_error().and_then(|d| d.try_downcast_ref::<PgDatabaseError>()) else { return e(err) };
+    let mut out = format!("error returned from database: {}: {}", d.code(), d.message());
+    if let Some(x) = d.detail() {
+        out.push_str(&format!("\nDetail: {x}"));
+    }
+    if let Some(x) = d.hint() {
+        out.push_str(&format!("\nHint: {x}"));
+    }
+    if let Some(PgErrorPosition::Original(p)) = d.position() {
+        // The server counts characters from 1.
+        if p > shift {
+            let at = p - shift;
+            let (line, col) = stmt.chars().take(at - 1).fold((1, 1), |(l, c), ch| if ch == '\n' { (l + 1, 1) } else { (l, c + 1) });
+            out.push_str(&format!("\nPosition: {at} (line {line}, column {col})"));
+        }
+    }
+    out
 }
 
 impl Db {

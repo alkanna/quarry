@@ -14,7 +14,7 @@ use super::exec::{Cells, ColInfo, ColMeta, Conn, Opts, SqlRow};
 use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlSslMode};
 use sqlx::{raw_sql, Connection, Executor, Row as _};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -622,19 +622,7 @@ impl Worker {
     /// statement timeout. `idx` is the result tab it belongs to.
     pub fn sql_count(&self, req: u64, idx: usize, db: Db, schema: String, stmt: String) {
         self.spawn(async move {
-            let res = async {
-                let mut conn = db.acquire_conn().await?;
-                super::run::prepare(&mut conn, db.dialect, &schema, true, &AtomicU64::new(0)).await?;
-                let sql = lex::count_sql(&stmt);
-                let t = Instant::now();
-                let r = conn.fetch_all(&sql).await;
-                db.note(&schema, &sql, t, &r);
-                let r = r.map_err(e)?;
-                let n = r.first().and_then(|r| num_at(r, 0)).ok_or("The count was not a number")?;
-                let _ = conn.close().await;
-                Ok(n)
-            }
-            .await;
+            let res = super::run::count_rows(&db, &schema, &stmt).await;
             Msg::SqlCount { req, idx, res }
         });
     }
@@ -657,6 +645,7 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicU64;
     use super::super::relay::fill;
     use super::super::{ResultSet, RUN_ROWS_MAX};
     use std::sync::mpsc::Receiver;
