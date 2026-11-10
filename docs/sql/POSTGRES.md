@@ -19,11 +19,11 @@ Update this list when a step lands. Each step is reviewed before it is ticked.
 - [x] 1a. Execution boundary `exec.rs` (Conn, SqlRow, Opts, Tx with a MySQL arm only), worker.rs split into worker, run and relay, every `Pool::My` behind `Db::my_pool()` or `Conn::my()`. Row helpers are generic over two small read traits (`Cells`, `ColMeta`) so the untouched MySQL-only modules still compile. 571 tests passed live on MySQL 8.4 and MariaDB 11.4
 - [x] 1b. `Dialect::Postgres` added (unreachable), `is_mysql_family()`, dialect checks are explicit matches, the tab dialect is threaded through edits, copy, export, rules and autocomplete. Catalog query arms are `unimplemented!` until step 4. The lexer API change moved to step 3
 - [x] 2. Connect: sqlx postgres, `Engine::Postgres`, `pg.rs` with lazy pools per database (3 each, 4 live, LRU), startup `-c` options plus readback (SET fallback for PgBouncer), version gate, TLS, Stop by pid and backend_start, writer with READ WRITE and lock_timeout. 588 passed live on Postgres 13 and 18, MySQL 8.4, MariaDB 11.4. Known limits: sqlx forces `TimeZone=UTC`, so timestamptz shows in UTC until the Advanced tab; `backend_start` is kept in a process-wide map keyed by pid, so a pid shared by two servers makes Stop report "already gone" instead of cancelling; sqlx reads PG* environment variables for fields left unset
-- [ ] 3. Postgres lexer mode and read-only check, lexer API takes a `Dialect` (opus review)
+- [x] 3. Postgres lexer (`lex_pg.rs`) with two readings, read-only check, refused functions in calls and after a `.`, `fill_pg`, `changes_escaping`, redaction, lexer API takes a `Dialect`. Opus review: 3 critical, 2 high fixed in the lexer (67b52ef) or moved to layer 2; re-attack found no bypass, its three low gaps fixed after
 - [ ] 4. Read path: catalogs, page and count, value kinds, read-only Structure, Info, Relations and Triggers
 - [ ] 5. Writes and undo (opus review)
 - [ ] 6. Custom Query
-- [ ] 7. Shell and attached connections (opus review)
+- [ ] 7. Shell and attached connections (opus review). An unlocked relay reads back `client_encoding` (UTF8), `standard_conforming_strings` (on) and `backslash_quote` before each `fill_pg`, because a view or rule over pg_settings can change them unseen
 - [ ] 8. App wiring: schema level per the picked design, Server, Users, create and drop hidden
 - [ ] 9. Connection form, rail mark and logo, `QUARRY_TEST_PG` demo
 - [ ] 10. Autocomplete per dialect

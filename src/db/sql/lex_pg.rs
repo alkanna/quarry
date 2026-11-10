@@ -180,7 +180,7 @@ pub(super) const REFUSED_FUNCTIONS_EXACT: &[&str] = &[
     // Maintenance that rewrites data, statistics or on-disk state.
     "pg_prewarm", "brin_summarize_new_values", "brin_summarize_range", "brin_desummarize_range", "gin_clean_pending_list", "pg_restore_relation_stats",
     "pg_restore_attribute_stats", "pg_clear_relation_stats", "pg_clear_attribute_stats", "heap_force_kill", "heap_force_freeze", "pg_truncate_visibility_map",
-    "pg_buffercache_evict", "pg_buffercache_evict_relation", "pg_buffercache_evict_all",
+    "pg_buffercache_evict", "pg_buffercache_evict_relation", "pg_buffercache_evict_all", "autoprewarm_dump_now", "autoprewarm_start_worker", "pg_nextoid",
     // Replication slots and origins: they create or drop server objects. The view pg_replication_slots must stay readable, so the families are listed by name.
     "pg_create_physical_replication_slot", "pg_create_logical_replication_slot", "pg_drop_replication_slot", "pg_copy_physical_replication_slot", "pg_copy_logical_replication_slot",
     "pg_replication_slot_advance", "pg_sync_replication_slots", "pg_alter_replication_slot", "pg_replication_origin_create", "pg_replication_origin_drop", "pg_replication_origin_oid",
@@ -190,7 +190,12 @@ pub(super) const REFUSED_FUNCTIONS_EXACT: &[&str] = &[
     "cursor_to_xml", "xpath_table", "ts_stat", "ts_rewrite", "crosstab", "crosstab2", "crosstab3", "crosstab4", "connectby",
     // pg_background runs SQL in another session that this transaction does not cover.
     "pg_background_launch", "pg_background_result", "pg_background_detach",
+    // Citus runs this text on worker nodes over connections of its own.
+    "master_run_on_worker",
 ];
+
+/// Functions that run SQL text the check never reads, so the settings that text changes cannot be seen either.
+const RUNS_SQL_TEXT: &[&str] = &["cursor_to_xml", "xpath_table", "ts_stat", "ts_rewrite", "crosstab", "crosstab2", "crosstab3", "crosstab4", "connectby", "pg_background_launch", "master_run_on_worker"];
 
 /// Families matched on the start of the name, in a call and after a `.`. Only families where no column or
 /// relation name is likely to start the same way.
@@ -380,11 +385,18 @@ pub(super) fn changes_escaping(stmt: &str) -> bool {
             if first.is_some_and(|t| is(t, "DO") || is(t, "DISCARD")) {
                 return true;
             }
-            if part.iter().enumerate().any(|(i, t)| part.get(i + 1).is_some_and(|n| punct(n, "(")) && ident(t).is_some_and(|w| w == "set_config" || w == UNSURE)) {
+            // A Unicode-escaped name can spell any setting or table, and SQL-running functions hide their text.
+            let hidden = |w: &str| w == UNSURE || RUNS_SQL_TEXT.contains(&w) || ["query_to_xml", "run_command_on_", "dblink"].iter().any(|p| w.starts_with(p));
+            if part.iter().filter_map(ident).any(|w| hidden(&w)) {
                 return true;
             }
-            // UPDATE pg_settings changes a setting the way SET does.
-            if part.iter().any(|t| ident(t).is_some_and(|w| w == "pg_settings")) && part.iter().any(|t| is(t, "UPDATE")) {
+            if part.iter().enumerate().any(|(i, t)| part.get(i + 1).is_some_and(|n| punct(n, "(")) && ident(t).is_some_and(|w| w == "set_config")) {
+                return true;
+            }
+            // UPDATE pg_settings changes a setting the way SET does, and a view or rule made over it does the same
+            // through another name, so any statement naming it that is not a plain read counts.
+            let reads = first.is_some_and(|t| ["SELECT", "TABLE", "VALUES", "SHOW", "EXPLAIN"].iter().any(|w| is(t, w)));
+            if part.iter().any(|t| ident(t).is_some_and(|w| w == "pg_settings")) && (!reads || part.iter().any(|t| is(t, "UPDATE"))) {
                 return true;
             }
             if !first.is_some_and(|t| is(t, "SET") || is(t, "RESET")) {
@@ -786,7 +798,10 @@ mod tests {
 
     #[test]
     fn updating_pg_settings_changes_escaping() {
-        for s in ["UPDATE pg_settings SET setting = 'off' WHERE name = 'standard_conforming_strings'", "update pg_catalog.pg_settings set setting = 'x'", "UPDATE \"pg_settings\" SET setting = 'x'", "SELECT 1; UPDATE pg_settings SET setting = 'x'", "WITH x AS (UPDATE pg_settings SET setting = 'x' RETURNING 1) SELECT * FROM x"] {
+        for s in ["UPDATE pg_settings SET setting = 'off' WHERE name = 'standard_conforming_strings'", "update pg_catalog.pg_settings set setting = 'x'", "UPDATE \"pg_settings\" SET setting = 'x'", "SELECT 1; UPDATE pg_settings SET setting = 'x'", "WITH x AS (UPDATE pg_settings SET setting = 'x' RETURNING 1) SELECT * FROM x",
+            // A Unicode-escaped table name, a view made over pg_settings, and a setting changed inside SQL text.
+            "UPDATE U&\"pg_setting\\0073\" SET setting='off' WHERE name='standard_conforming_strings'", "CREATE VIEW v AS SELECT * FROM pg_settings",
+            "SELECT * FROM ts_stat($$SELECT to_tsvector(set_config('client_encoding','SJIS',false))$$)", "SELECT * FROM crosstab('x') AS c(a int)"] {
             assert!(changes_escaping(s, PG), "{s}");
         }
         for s in ["SELECT * FROM pg_settings", "UPDATE t SET a = 1", "SELECT 'UPDATE pg_settings'"] {

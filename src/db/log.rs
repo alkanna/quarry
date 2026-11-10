@@ -97,9 +97,11 @@ type Span = std::ops::Range<usize>;
 /// Whether the text holds `scheme://user:password@host`, as in a CREATE SUBSCRIPTION or dblink connection string. The
 /// whole literal is dropped because the password cannot be told apart from the rest once quoting is involved.
 fn has_uri_password(s: &str) -> bool {
+    // libpq ends the user and password part at the first `@` or `/` only, so `?`, `#`, spaces and quotes can sit
+    // inside a password.
     s.match_indices("://").any(|(i, _)| {
-        let auth = s[i + 3..].split(['/', '?', '#', ' ', '\'', '"']).next().unwrap_or("");
-        auth.split_once('@').is_some_and(|(user, _)| user.contains(':'))
+        let rest = &s[i + 3..];
+        rest.find(['@', '/']).is_some_and(|j| rest[j..].starts_with('@') && rest[..j].contains(':'))
     })
 }
 
@@ -279,6 +281,10 @@ mod tests {
         assert_eq!(r("CREATE SERVER x FOREIGN DATA WRAPPER w OPTIONS (url 'mysql://root:secret@h')"), "CREATE SERVER x FOREIGN DATA WRAPPER w OPTIONS (url '***')");
         assert_eq!(r("CHANGE REPLICATION SOURCE TO SOURCE_HOST='h', SOURCE_PASSWORD='secret'"), "CHANGE REPLICATION SOURCE TO SOURCE_HOST='h', SOURCE_PASSWORD='***'");
         assert_eq!(r("CHANGE MASTER TO MASTER_PASSWORD='secret'"), "CHANGE MASTER TO MASTER_PASSWORD='***'");
+        // libpq reads the password up to the `@`, so these characters are part of it.
+        for s in ["SELECT 'postgresql://u:p?w@h/db'", "SELECT 'postgresql://u:p#w@h/db'", "SELECT 'postgresql://u:p w@h/db'", "SELECT 'postgresql://u:it''s@h/db'"] {
+            assert_eq!(r(s), "SELECT '***'", "{s}");
+        }
         // A URI without a password, or text that only has an @ later on, stays readable.
         assert_eq!(r("SELECT 'postgresql://u@h/db'"), "SELECT 'postgresql://u@h/db'");
         assert_eq!(r("SELECT 'https://example.com/a:b@c'"), "SELECT 'https://example.com/a:b@c'");
