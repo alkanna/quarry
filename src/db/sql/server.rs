@@ -176,10 +176,160 @@ pub fn kill_error(err: &sqlx::Error) -> String {
     }
 }
 
+
+/// SHOW GLOBAL STATUS as read: in server order for the table, and by name for rates and the overview.
+#[derive(Clone, Debug, Default)]
+pub struct Snap {
+    pub vals: Vec<(String, String)>,
+    map: HashMap<String, String>,
+}
+
+impl Snap {
+    pub fn new(vals: Vec<(String, String)>) -> Snap {
+        let map = vals.iter().cloned().collect();
+        Snap { vals, map }
+    }
+
+    pub fn get(&self, name: &str) -> Option<&str> {
+        self.map.get(name).map(String::as_str)
+    }
+
+    pub fn num(&self, name: &str) -> Option<f64> {
+        self.get(name)?.trim().parse().ok()
+    }
+}
+
+/// Status variables that only count up since start, so a difference over time is a rate. Everything else is a
+/// level (threads, open tables, cache sizes) or text, which has no per-second value.
+pub fn is_counter(name: &str, value: &str) -> bool {
+    if value.trim().parse::<f64>().is_err() {
+        return false;
+    }
+    const COUNTERS_IN_LEVEL_GROUPS: [&str; 6] = ["Threads_created", "Innodb_buffer_pool_pages_flushed", "Qcache_hits", "Qcache_inserts", "Qcache_lowmem_prunes", "Qcache_not_cached"];
+    if COUNTERS_IN_LEVEL_GROUPS.contains(&name) {
+        return true;
+    }
+    const LEVEL_PREFIXES: [&str; 8] = ["Threads_", "Open_", "Qcache_", "Max_", "Last_", "Ssl_", "Uptime", "Rpl_"];
+    const LEVEL_PARTS: [&str; 5] = ["pending", "current", "_pages_", "_bytes_", "history_list"];
+    !(LEVEL_PREFIXES.iter().any(|p| name.starts_with(p)) || LEVEL_PARTS.iter().any(|p| name.contains(p)) || matches!(name, "Innodb_page_size" | "Innodb_num_open_files" | "Compression" | "Slave_running"))
+}
+
+/// Per second between two samples `secs` apart, or None when it is not a counter, was not in the earlier sample,
+/// went down (a FLUSH STATUS or restart) or the time is zero.
+pub fn rate(cur: &Snap, prev: Option<&(f64, Snap)>, name: &str) -> Option<f64> {
+    let (secs, p) = prev?;
+    let (c, o) = (cur.num(name)?, p.num(name)?);
+    (is_counter(name, cur.get(name)?) && *secs > 0.0 && c >= o).then(|| (c - o) / secs)
+}
+
+/// The groups of the Status tab's switch.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum StatusGroup {
+    #[default]
+    All,
+    Connections,
+    Queries,
+    InnoDb,
+    Network,
+}
+
+impl StatusGroup {
+    pub const ALL: [(StatusGroup, &'static str); 5] = [(StatusGroup::All, "All"), (StatusGroup::Connections, "Connections"), (StatusGroup::Queries, "Queries"), (StatusGroup::InnoDb, "InnoDB"), (StatusGroup::Network, "Network")];
+
+    pub fn has(self, name: &str) -> bool {
+        let any = |p: &[&str]| p.iter().any(|x| name.starts_with(x));
+        match self {
+            StatusGroup::All => true,
+            StatusGroup::Connections => any(&["Connections", "Aborted_", "Threads_", "Max_used_connections", "Connection_errors", "Locked_connects"]),
+            StatusGroup::Queries => any(&["Questions", "Queries", "Com_", "Slow_queries", "Select_", "Sort_", "Handler_", "Created_tmp", "Qcache_"]),
+            StatusGroup::InnoDb => any(&["Innodb_"]),
+            StatusGroup::Network => any(&["Bytes_"]),
+        }
+    }
+}
+
+/// What the Overview tiles show, from a sample, the global variables and the sample before it.
+#[derive(Debug, Default, PartialEq)]
+pub struct Metrics {
+    pub connected: Option<f64>,
+    pub max_connections: Option<f64>,
+    pub running: Option<f64>,
+    pub qps: Option<f64>,
+    pub questions: Option<f64>,
+    pub slow: Option<f64>,
+    /// 0 to 1, since start.
+    pub hit: Option<f64>,
+    pub pool_used: Option<f64>,
+    pub pool_size: Option<f64>,
+    pub net_in: Option<f64>,
+    pub net_out: Option<f64>,
+}
+
+pub fn metrics(cur: &Snap, vars: &HashMap<String, String>, prev: Option<&(f64, Snap)>) -> Metrics {
+    let var = |n: &str| vars.get(n).and_then(|v| v.trim().parse::<f64>().ok());
+    let hit = match (cur.num("Innodb_buffer_pool_reads"), cur.num("Innodb_buffer_pool_read_requests")) {
+        (Some(r), Some(q)) if q > 0.0 => Some((1.0 - r / q).clamp(0.0, 1.0)),
+        _ => None,
+    };
+    let pool_used = cur.num("Innodb_buffer_pool_pages_data").map(|p| p * cur.num("Innodb_page_size").unwrap_or(16384.0));
+    Metrics {
+        connected: cur.num("Threads_connected"),
+        max_connections: var("max_connections"),
+        running: cur.num("Threads_running"),
+        qps: rate(cur, prev, "Questions"),
+        questions: cur.num("Questions"),
+        slow: cur.num("Slow_queries"),
+        hit,
+        pool_used,
+        pool_size: var("innodb_buffer_pool_size"),
+        net_in: rate(cur, prev, "Bytes_received"),
+        net_out: rate(cur, prev, "Bytes_sent"),
+    }
+}
+
+/// The server's own view of a replica: SHOW REPLICA STATUS in MySQL 8.4's names, SHOW SLAVE STATUS in older
+/// MySQL's and MariaDB's.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Replica {
+    pub source: String,
+    pub io: String,
+    pub sql: String,
+    pub behind: Option<u64>,
+    pub gtid: String,
+    pub error: String,
+}
+
+pub fn replica_from(get: &dyn Fn(&str) -> Option<String>) -> Replica {
+    let first = |names: &[&str]| names.iter().filter_map(|n| get(n)).find(|v| !v.is_empty()).unwrap_or_default();
+    let host = first(&["Source_Host", "Master_Host"]);
+    let port = first(&["Source_Port", "Master_Port"]);
+    Replica {
+        source: if port.is_empty() { host } else { format!("{host}:{port}") },
+        io: first(&["Replica_IO_Running", "Slave_IO_Running"]),
+        sql: first(&["Replica_SQL_Running", "Slave_SQL_Running"]),
+        behind: first(&["Seconds_Behind_Source", "Seconds_Behind_Master"]).parse().ok(),
+        gtid: first(&["Executed_Gtid_Set", "Gtid_IO_Pos", "Gtid_Slave_Pos"]),
+        error: first(&["Last_IO_Error", "Last_SQL_Error", "Last_Error"]),
+    }
+}
+
+pub struct Overview {
+    pub snap: Snap,
+    pub vars: HashMap<String, String>,
+    pub tls: String,
+    /// None is "Not a replica"; an error is the server's words, with a plain one for a missing privilege.
+    pub replica: Res<Option<Replica>>,
+}
+
+/// Variables the Overview reads.
+const OVERVIEW_VARS: &str = "'max_connections','version','version_comment','hostname','port','datadir','character_set_server','collation_server','time_zone','system_time_zone','innodb_buffer_pool_size'";
+
 /// What the Server window asked for and got.
 pub enum Answer {
     Procs(Res<Processes>),
     Vars(Res<Variables>),
+    Status(Res<Snap>),
+    Overview(Res<Overview>),
     /// A KILL: whether it was of the whole connection, and the server's answer.
     Kill { whole: bool, res: Res<String> },
 }
@@ -238,6 +388,55 @@ async fn variables(db: &Db, global: bool) -> Res<Variables> {
     Ok(Variables { rows, global, defaults, uptime: up })
 }
 
+async fn status_snap(c: &mut sqlx::MySqlConnection) -> Res<Snap> {
+    let list = rows(c, "SHOW GLOBAL STATUS").await.map_err(e)?;
+    Ok(Snap::new(list.iter().filter_map(|r| Some((text(r, "Variable_name")?, text(r, "Value").unwrap_or_default()))).collect()))
+}
+
+fn mysql_number(x: &sqlx::Error) -> Option<u16> {
+    match x {
+        sqlx::Error::Database(d) => d.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>().map(|m| m.number()),
+        _ => None,
+    }
+}
+
+/// MySQL 8.4 only knows REPLICA, older MySQL only SLAVE, MariaDB both from 10.5.1.
+async fn replica(c: &mut sqlx::MySqlConnection) -> Res<Option<Replica>> {
+    let mut last = None;
+    for q in ["SHOW REPLICA STATUS", "SHOW SLAVE STATUS"] {
+        match rows(c, q).await {
+            Ok(list) => return Ok(list.first().map(|r| replica_from(&|n| text(r, n)))),
+            // 1064 is the syntax error of a server that lacks the other spelling; any other error is the answer.
+            Err(x) if mysql_number(&x) == Some(1064) => last = Some("This server does not report replication status.".to_string()),
+            Err(x) if matches!(mysql_number(&x), Some(1227 | 1045)) => return Err("Not available for this account: it needs the REPLICATION CLIENT privilege.".to_string()),
+            Err(x) => return Err(e(x)),
+        }
+    }
+    Err(last.unwrap_or_default())
+}
+
+async fn overview(db: &Db) -> Res<Overview> {
+    let mut c = db.acquire().await?;
+    let snap = status_snap(&mut c).await?;
+    let q = format!("SHOW GLOBAL VARIABLES WHERE Variable_name IN ({OVERVIEW_VARS})");
+    let vars = rows(&mut c, &q).await.map_err(e)?.iter().filter_map(|r| Some((text(r, "Variable_name")?.to_ascii_lowercase(), text(r, "Value").unwrap_or_default()))).collect();
+    // The connection's own TLS state, which is what Quarry's session uses.
+    let tls = match rows(&mut c, "SHOW SESSION STATUS WHERE Variable_name IN ('Ssl_version','Ssl_cipher')").await {
+        Ok(l) => {
+            let g = |n: &str| l.iter().find(|r| text(r, "Variable_name").as_deref() == Some(n)).and_then(|r| text(r, "Value")).unwrap_or_default();
+            [g("Ssl_version"), g("Ssl_cipher")].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(", ")
+        }
+        Err(_) => String::new(),
+    };
+    let replica = replica(&mut c).await;
+    Ok(Overview { snap, vars, tls, replica })
+}
+
+async fn status(db: &Db) -> Res<Snap> {
+    let mut c = db.acquire().await?;
+    status_snap(&mut c).await
+}
+
 /// KILL <id> on a connection of its own, so a busy or exhausted pool never blocks it.
 async fn kill_connection(db: &Db, id: u64) -> Res<String> {
     let mut c = tokio::time::timeout(Duration::from_secs(10), sqlx::MySqlConnection::connect_with(&db.opts)).await.map_err(|_| "Could not reach the server to end the connection".to_string())?.map_err(e)?;
@@ -253,6 +452,14 @@ impl Worker {
 
     pub fn sql_server_variables(&self, db: Db, req: u64, global: bool) {
         self.spawn(async move { Msg::SqlServer { req, ans: Answer::Vars(variables(&db, global).await) } });
+    }
+
+    pub fn sql_server_overview(&self, db: Db, req: u64) {
+        self.spawn(async move { Msg::SqlServer { req, ans: Answer::Overview(overview(&db).await) } });
+    }
+
+    pub fn sql_server_status(&self, db: Db, req: u64) {
+        self.spawn(async move { Msg::SqlServer { req, ans: Answer::Status(status(&db).await) } });
     }
 
     /// `whole` ends the connection (KILL), otherwise only its running statement (KILL QUERY).
@@ -334,6 +541,79 @@ mod tests {
         assert!(!v.iter().any(|n| n.starts_with('@')));
         let adv = Advanced { charset: crate::db::sql::Charset::Utf8mb3, ..Default::default() };
         assert!(set_by_quarry(&adv, Dialect::MySql, None).contains(&"collation_connection".to_string()));
+    }
+
+    fn snap(v: &[(&str, &str)]) -> Snap {
+        Snap::new(v.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
+    }
+
+    #[test]
+    fn rates_come_from_two_samples_and_only_for_counters() {
+        let a = snap(&[("Questions", "1000"), ("Threads_connected", "14"), ("Bytes_received", "0"), ("Version_x", "abc"), ("Uptime", "100")]);
+        let b = snap(&[("Questions", "1824"), ("Threads_connected", "9"), ("Bytes_received", "2048"), ("Version_x", "abd"), ("Uptime", "102")]);
+        let prev = Some((2.0, a));
+        assert_eq!(rate(&b, prev.as_ref(), "Questions"), Some(412.0));
+        assert_eq!(rate(&b, prev.as_ref(), "Bytes_received"), Some(1024.0));
+        // Levels, text and the first sample have no rate.
+        assert_eq!(rate(&b, prev.as_ref(), "Threads_connected"), None);
+        assert_eq!(rate(&b, prev.as_ref(), "Uptime"), None);
+        assert_eq!(rate(&b, prev.as_ref(), "Version_x"), None);
+        assert_eq!(rate(&b, None, "Questions"), None);
+        // A counter that went down was reset by FLUSH STATUS or a restart.
+        assert_eq!(rate(&prev.as_ref().unwrap().1, Some(&(2.0, b.clone())), "Questions"), None);
+        assert_eq!(rate(&b, Some(&(0.0, b.clone())), "Questions"), None);
+        assert!(is_counter("Threads_created", "5") && !is_counter("Threads_running", "5") && !is_counter("Innodb_buffer_pool_pages_free", "5") && is_counter("Innodb_buffer_pool_reads", "5") && !is_counter("Innodb_row_lock_current_waits", "0"));
+    }
+
+    #[test]
+    fn overview_metrics() {
+        let a = snap(&[("Questions", "1000"), ("Bytes_received", "0"), ("Bytes_sent", "0")]);
+        let b = snap(&[("Threads_connected", "14"), ("Threads_running", "3"), ("Questions", "1824"), ("Slow_queries", "3"), ("Innodb_buffer_pool_reads", "8"), ("Innodb_buffer_pool_read_requests", "1000"), ("Innodb_buffer_pool_pages_data", "65536"), ("Innodb_page_size", "16384"), ("Bytes_received", "2000"), ("Bytes_sent", "6000")]);
+        let vars: HashMap<String, String> = [("max_connections", "151"), ("innodb_buffer_pool_size", "8589934592")].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let m = metrics(&b, &vars, Some(&(2.0, a)));
+        assert_eq!((m.connected, m.max_connections, m.running, m.qps, m.slow), (Some(14.0), Some(151.0), Some(3.0), Some(412.0), Some(3.0)));
+        assert_eq!((m.net_in, m.net_out, m.pool_used, m.pool_size), (Some(1000.0), Some(3000.0), Some(1073741824.0), Some(8589934592.0)));
+        assert!((m.hit.unwrap() - 0.992).abs() < 1e-9);
+        // The first sample has counts since start but no rates.
+        let first = metrics(&b, &vars, None);
+        assert_eq!((first.qps, first.questions, first.net_in), (None, Some(1824.0), None));
+        assert_eq!(metrics(&Snap::default(), &HashMap::new(), None), Metrics::default());
+    }
+
+    #[test]
+    fn status_groups() {
+        use StatusGroup::*;
+        for (g, yes, no) in [(Connections, "Threads_running", "Questions"), (Queries, "Com_select", "Bytes_sent"), (InnoDb, "Innodb_row_lock_waits", "Threads_running"), (Network, "Bytes_received", "Innodb_data_read")] {
+            assert!(g.has(yes) && !g.has(no), "{g:?} {yes} {no}");
+            assert!(All.has(no));
+        }
+    }
+
+    #[test]
+    fn replica_columns_of_both_servers() {
+        let my = replica_from(&row(&[("Source_Host", "db0"), ("Source_Port", "3306"), ("Replica_IO_Running", "Yes"), ("Replica_SQL_Running", "Yes"), ("Seconds_Behind_Source", "0"), ("Executed_Gtid_Set", "3e11:1-5"), ("Last_IO_Error", "")]));
+        assert_eq!((my.source.as_str(), my.io.as_str(), my.behind, my.gtid.as_str(), my.error.as_str()), ("db0:3306", "Yes", Some(0), "3e11:1-5", ""));
+        let maria = replica_from(&row(&[("Master_Host", "m1"), ("Master_Port", "3306"), ("Slave_IO_Running", "Connecting"), ("Slave_SQL_Running", "Yes"), ("Seconds_Behind_Master", ""), ("Gtid_IO_Pos", "0-1-7"), ("Last_IO_Error", "error connecting")]));
+        assert_eq!((maria.source.as_str(), maria.io.as_str(), maria.behind, maria.gtid.as_str(), maria.error.as_str()), ("m1:3306", "Connecting", None, "0-1-7", "error connecting"));
+    }
+
+    #[test]
+    fn live_status_and_overview_read_on_both_servers() {
+        every_server(|l, _| {
+            let st = l.w.rt.block_on(status(&l.db)).unwrap();
+            assert!(st.num("Questions").is_some_and(|q| q > 0.0) && st.num("Uptime").is_some_and(|u| u > 0.0) && st.vals.len() > 100);
+            let ov = l.w.rt.block_on(overview(&l.db)).unwrap();
+            assert!(ov.vars.get("max_connections").is_some_and(|v| v.parse::<u32>().is_ok()) && ov.vars.contains_key("version") && ov.vars.contains_key("datadir"));
+            let m = metrics(&ov.snap, &ov.vars, None);
+            assert!(m.connected.is_some() && m.max_connections.is_some() && m.hit.is_some() && m.pool_size.is_some());
+            // A fresh container is not a replica.
+            assert_eq!(ov.replica.unwrap(), None);
+            // Two samples apart give a rate for a counter that moved.
+            l.one("SELECT 1");
+            std::thread::sleep(Duration::from_millis(1100));
+            let st2 = l.w.rt.block_on(status(&l.db)).unwrap();
+            assert!(rate(&st2, Some(&(1.1, st)), "Questions").is_some_and(|r| r > 0.0));
+        });
     }
 
     /// A SELECT SLEEP on its own connection, and that connection's id.

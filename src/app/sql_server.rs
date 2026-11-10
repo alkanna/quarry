@@ -3,16 +3,18 @@
 //! errors in the window so a missing privilege is not announced every 2 seconds. View only: no SET anywhere.
 
 use super::*;
-use db::sql::server::{Answer, Proc, Processes, Var, Variables};
+use db::sql::server::{metrics, rate, Answer, Metrics, Overview, Proc, Processes, Replica, Snap, StatusGroup, Var, Variables};
 use std::time::Instant;
 
 const POLL: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, PartialEq, Default)]
 pub(super) enum SqlServerTab {
+    Overview,
+    Variables,
+    Status,
     #[default]
     Processes,
-    Variables,
 }
 
 pub(super) struct SqlServerWin {
@@ -42,11 +44,23 @@ pub(super) struct SqlServerWin {
     global: bool,
     var_filter: String,
     vars: Option<db::Res<Variables>>,
+    ov_req: u64,
+    ov_wait: bool,
+    ov: Option<db::Res<(Instant, Overview)>>,
+    /// The sample before the latest and the seconds between them, for per second values.
+    ov_prev: Option<(f64, Snap)>,
+    st_req: u64,
+    st_wait: bool,
+    st: Option<db::Res<(Instant, Snap)>>,
+    st_prev: Option<(f64, Snap)>,
+    st_auto: bool,
+    st_filter: String,
+    st_group: StatusGroup,
 }
 
 impl SqlServerWin {
     pub(super) fn new(conn: u64, quarry: Vec<String>) -> Self {
-        Self { conn, tab: SqlServerTab::default(), quarry, uptime: None, procs_req: 0, vars_req: 0, procs_wait: false, vars_wait: false, next: None, refresh: false, procs: None, auto: true, hide_sleeping: true, filter: String::new(), sel: None, confirm: None, kills: Vec::new(), global: false, var_filter: String::new(), vars: None }
+        Self { conn, tab: SqlServerTab::default(), quarry, uptime: None, procs_req: 0, vars_req: 0, procs_wait: false, vars_wait: false, next: None, refresh: false, procs: None, auto: true, hide_sleeping: true, filter: String::new(), sel: None, confirm: None, kills: Vec::new(), global: false, var_filter: String::new(), vars: None, ov_req: 0, ov_wait: false, ov: None, ov_prev: None, st_req: 0, st_wait: false, st: None, st_prev: None, st_auto: true, st_filter: String::new(), st_group: StatusGroup::All }
     }
 
     /// Canned answers for the offline demo: `variables` opens that tab, anything else the processes.
@@ -63,7 +77,30 @@ impl SqlServerWin {
         let var = |n: &str, v: &str, d: Option<&str>, note: &str| Var { name: n.into(), value: v.into(), default: d.map(str::to_string), note: note.into() };
         let vars: Vec<Var> = [("connect_timeout", "10", "10"), ("innodb_lock_wait_timeout", "15", "50"), ("interactive_timeout", "28800", "28800"), ("lock_wait_timeout", "31536000", "31536000"), ("max_execution_time", "30000", "0"), ("net_read_timeout", "30", "30"), ("wait_timeout", "600", "28800")].iter().map(|(n, v, d)| var(n, v, Some(d), "Dynamic")).collect();
         let mut s = Self::new(conn, vec!["max_execution_time".into()]);
-        s.tab = if tab == "variables" { SqlServerTab::Variables } else { SqlServerTab::Processes };
+        s.tab = match tab {
+            "variables" => SqlServerTab::Variables,
+            "overview" => SqlServerTab::Overview,
+            "status" => SqlServerTab::Status,
+            _ => SqlServerTab::Processes,
+        };
+        // Two samples 2.5 s apart, so the demo goes through the same rate math as a live server.
+        let sample = |n: i64| -> Snap {
+            let d = |full: i64, step: i64| (full - step * n).to_string();
+            Snap::new(
+                [
+                    ("Aborted_connects", d(12, 0)), ("Bytes_received", d(8_697_308_774, 3_145_728)), ("Bytes_sent", d(33_714_349_670, 8_912_896)), ("Innodb_buffer_pool_pages_data", "393216".into()), ("Innodb_buffer_pool_read_requests", d(388_500_000, 0)),
+                    ("Innodb_buffer_pool_reads", d(3108, 1)), ("Innodb_page_size", "16384".into()), ("Innodb_row_lock_waits", d(27, 0)), ("Questions", d(1_204_881, 1030)), ("Slow_queries", d(3, 0)), ("Threads_connected", "14".into()), ("Threads_running", "3".into()), ("Uptime", d(3_542_400, 2)),
+                ]
+                .map(|(k, v)| (k.to_string(), v))
+                .to_vec(),
+            )
+        };
+        let ovars: HashMap<String, String> = [("max_connections", "151"), ("version", "8.4.3"), ("version_comment", "MySQL Community Server (GPL)"), ("hostname", "db-prod-1.internal"), ("port", "3306"), ("datadir", "/var/lib/mysql/"), ("character_set_server", "utf8mb4"), ("collation_server", "utf8mb4_0900_ai_ci"), ("time_zone", "SYSTEM"), ("system_time_zone", "UTC"), ("innodb_buffer_pool_size", "8589934592")].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let replica = Replica { source: "db-prod-0.internal:3306".into(), io: "Yes".into(), sql: "Yes".into(), behind: Some(0), gtid: "3e11fa47-71ca:1-88412".into(), error: String::new() };
+        s.ov = Some(Ok((Instant::now(), Overview { snap: sample(0), vars: ovars, tls: "TLSv1.3, TLS_AES_256_GCM_SHA384".into(), replica: Ok(Some(replica)) })));
+        s.ov_prev = Some((2.5, sample(1)));
+        s.st = Some(Ok((Instant::now(), sample(0))));
+        s.st_prev = Some((2.5, sample(1)));
         s.uptime = Some(41 * 86_400 + 3 * 3600);
         s.sel = Some(8812);
         s.auto = true;
@@ -112,19 +149,19 @@ impl App {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 16.0;
-                // Overview and Status are designed later; shown so the window keeps its final shape.
-                ui.add_enabled_ui(false, |ui| view_tab(ui, "Overview", false)).response.on_disabled_hover_text("Coming soon");
-                if view_tab(ui, "Variables", s.tab == SqlServerTab::Variables).clicked() {
-                    s.tab = SqlServerTab::Variables;
-                }
-                ui.add_enabled_ui(false, |ui| view_tab(ui, "Status", false)).response.on_disabled_hover_text("Coming soon");
-                if view_tab(ui, "Processes", s.tab == SqlServerTab::Processes).clicked() {
-                    s.tab = SqlServerTab::Processes;
+                for (tab, label) in [(SqlServerTab::Overview, "Overview"), (SqlServerTab::Variables, "Variables"), (SqlServerTab::Status, "Status"), (SqlServerTab::Processes, "Processes")] {
+                    if view_tab(ui, label, s.tab == tab).clicked() && s.tab != tab {
+                        s.tab = tab;
+                        // Ask for the new tab's data on the next frame instead of when the old tab's timer ends.
+                        s.next = None;
+                    }
                 }
             });
             ui.add_space(8.0);
             let max = screen.height() - 300.0;
             match s.tab {
+                SqlServerTab::Overview => overview_view(ui, &mut s),
+                SqlServerTab::Status => status_view(ui, &mut s, max),
                 SqlServerTab::Processes => procs_view(ui, &mut s, max, &mut kill),
                 SqlServerTab::Variables => vars_view(ui, &mut s, max),
             }
@@ -162,6 +199,26 @@ impl App {
                 (s.procs_req, s.procs_wait, s.refresh) = (self.req, true, false);
                 self.worker.sql_server_processes(db.clone(), self.req);
             }
+            SqlServerTab::Overview | SqlServerTab::Status => {
+                let overview = s.tab == SqlServerTab::Overview;
+                let (auto, failed, empty, wait) = if overview { (true, matches!(s.ov, Some(Err(_))), s.ov.is_none(), s.ov_wait) } else { (s.st_auto, matches!(s.st, Some(Err(_))), s.st.is_none(), s.st_wait) };
+                if auto {
+                    ctx.request_repaint_after(POLL);
+                }
+                let due = s.refresh || empty || (auto && !failed && s.next.is_none_or(|t| now >= t));
+                if wait || !due {
+                    return;
+                }
+                self.req += 1;
+                s.refresh = false;
+                if overview {
+                    (s.ov_req, s.ov_wait) = (self.req, true);
+                    self.worker.sql_server_overview(db.clone(), self.req);
+                } else {
+                    (s.st_req, s.st_wait) = (self.req, true);
+                    self.worker.sql_server_status(db.clone(), self.req);
+                }
+            }
             SqlServerTab::Variables => {
                 if s.vars_wait || !(s.refresh || s.vars.is_none()) {
                     return;
@@ -195,6 +252,30 @@ impl App {
                     s.uptime = v.uptime.or(s.uptime);
                 }
                 s.vars = Some(r);
+            }
+            Answer::Overview(r) if req == s.ov_req => {
+                s.ov_wait = false;
+                s.next = Some(Instant::now() + POLL);
+                let now = Instant::now();
+                if let Some(Ok((at, old))) = s.ov.take() {
+                    s.ov_prev = Some((now.duration_since(at).as_secs_f64(), old.snap));
+                }
+                if let Ok(o) = &r {
+                    s.uptime = o.snap.num("Uptime").map(|u| u as u64).or(s.uptime);
+                }
+                s.ov = Some(r.map(|o| (now, o)));
+            }
+            Answer::Status(r) if req == s.st_req => {
+                s.st_wait = false;
+                s.next = Some(Instant::now() + POLL);
+                let now = Instant::now();
+                if let Some(Ok((at, old))) = s.st.take() {
+                    s.st_prev = Some((now.duration_since(at).as_secs_f64(), old));
+                }
+                if let Ok(v) = &r {
+                    s.uptime = v.num("Uptime").map(|u| u as u64).or(s.uptime);
+                }
+                s.st = Some(r.map(|v| (now, v)));
             }
             Answer::Kill { whole, res } if s.kills.contains(&req) => {
                 s.kills.retain(|k| *k != req);
@@ -435,6 +516,191 @@ fn vars_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32) {
     }
 }
 
+/// A number of the status as the table shows it: byte counters in units, whole numbers with separators.
+fn status_value(name: &str, v: &str) -> String {
+    let int = v.strip_prefix('-').unwrap_or(v);
+    if name.starts_with("Bytes_") && int.bytes().all(|b| b.is_ascii_digit()) && !int.is_empty() {
+        human_bytes(v.parse::<u64>().unwrap_or(0) as usize)
+    } else if !int.is_empty() && int.bytes().all(|b| b.is_ascii_digit()) {
+        format!("{}{}", if v.starts_with('-') { "-" } else { "" }, group(int))
+    } else {
+        v.to_string()
+    }
+}
+
+/// A per second value: bytes in units, others with one decimal below 100 and none from there, no ".0".
+fn fmt_rate(name: &str, r: f64) -> String {
+    if name.starts_with("Bytes_") {
+        return format!("{}/s", human_bytes(r as usize));
+    }
+    if r >= 100.0 {
+        return format!("{}/s", group(&format!("{r:.0}")));
+    }
+    let t = format!("{r:.1}");
+    format!("{}/s", t.strip_suffix(".0").unwrap_or(&t))
+}
+
+/// The server's running state of a replication thread in words.
+fn thread_state(v: &str) -> (&str, Color32) {
+    match v {
+        "Yes" | "ON" => ("Running", SUCCESS()),
+        "No" | "OFF" => ("Stopped", ALERT()),
+        "Connecting" => ("Connecting", WARNING()),
+        "" => ("", MUTED()),
+        other => (other, WARNING()),
+    }
+}
+
+fn tile(ui: &mut egui::Ui, rect: egui::Rect, title: &str, big: &str, suffix: &str, sub: &str) {
+    ui.painter().rect(rect, R_MD, PANEL(), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
+    let x = rect.left() + 12.0;
+    let t = ui.painter().layout_no_wrap(title.to_string(), FontId::proportional(TXT_SMALL), MUTED());
+    ui.painter().galley(egui::pos2(x, rect.top() + 12.0), t, MUTED());
+    let mut job = LayoutJob::single_section(big.to_string(), ui_fmt(20.0, C_NUMBER(), W_SEMIBOLD, 0.0));
+    if !suffix.is_empty() {
+        job.append(&format!(" {suffix}"), 0.0, mono_fmt(TXT_SMALL, MUTED(), 400.0));
+    }
+    let g = ui.painter().layout_job(job);
+    ui.painter().galley(egui::pos2(x, rect.top() + 32.0), g, C_NUMBER());
+    let sg = ui.painter().layout_no_wrap(sub.to_string(), FontId::proportional(TXT_SMALL), MUTED());
+    ui.painter().galley(egui::pos2(x, rect.bottom() - 12.0 - sg.size().y), sg, MUTED());
+}
+
+/// Label and value rows of a key/value box.
+fn kv_rows(ui: &mut egui::Ui, w: f32, rows: &[(&str, String, Color32)]) {
+    for (i, (k, v, c)) in rows.iter().enumerate() {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(w, ROW_H), Sense::hover());
+        ui.painter().rect_filled(rect, 0.0, if i % 2 == 1 { PANEL() } else { BG() });
+        paint_cell(ui, rect, rect.left(), 130.0, k, MUTED(), false, false);
+        paint_cell(ui, rect, rect.left() + 130.0, w - 130.0, v, *c, true, false);
+    }
+}
+
+fn overview_view(ui: &mut egui::Ui, s: &mut SqlServerWin) {
+    let (o, m): (&Overview, Metrics) = match &s.ov {
+        None => return spin(ui),
+        Some(Err(e)) => {
+            ui.label(RichText::new(format!("Could not read the server status: {e}")).color(ALERT()));
+            return;
+        }
+        Some(Ok((_, o))) => (o, metrics(&o.snap, &o.vars, s.ov_prev.as_ref())),
+    };
+    let int = |v: Option<f64>| v.map(|v| group(&format!("{v:.0}"))).unwrap_or_else(|| "…".into());
+    let bytes = |v: Option<f64>| v.map(|v| human_bytes(v as usize)).unwrap_or_else(|| "…".into());
+    let gap = 12.0;
+    let w = (ui.available_width() - gap * 4.0) / 5.0;
+    let (strip, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 86.0), Sense::hover());
+    let at = |i: usize| egui::Rect::from_min_size(egui::pos2(strip.left() + i as f32 * (w + gap), strip.top()), egui::vec2(w, strip.height()));
+    tile(ui, at(0), "Connections", &int(m.connected), &m.max_connections.map(|v| format!("of {}", group(&format!("{v:.0}")))).unwrap_or_default(), &format!("{} running", int(m.running)));
+    tile(ui, at(1), "Queries per second", &int(m.qps), "", &format!("{} since start", int(m.questions)));
+    tile(ui, at(2), "Slow queries", &int(m.slow), "", "since start");
+    tile(ui, at(3), "Buffer pool", &m.hit.map(|h| format!("{:.1}%", h * 100.0)).unwrap_or_else(|| "…".into()), "hit", &match (m.pool_used, m.pool_size) {
+        (Some(u), Some(z)) => format!("{} of {}", bytes(Some(u)), bytes(Some(z))),
+        _ => String::new(),
+    });
+    tile(ui, at(4), "Network per second", &bytes(m.net_in), "in", &format!("{} out", bytes(m.net_out)));
+    ui.add_space(16.0);
+    let var = |n: &str| o.vars.get(n).cloned().unwrap_or_default();
+    let tz = if var("time_zone") == "SYSTEM" { format!("{} (SYSTEM)", var("system_time_zone")) } else { var("time_zone") };
+    let server = [
+        ("Version", format!("{} {}", var("version"), var("version_comment")).trim().to_string(), BRIGHT()),
+        ("Host", var("hostname"), BRIGHT()),
+        ("Port", var("port"), C_NUMBER()),
+        ("TLS", if o.tls.is_empty() { "Not encrypted".into() } else { o.tls.clone() }, BRIGHT()),
+        ("Data directory", var("datadir"), BRIGHT()),
+        ("Character set", format!("{}, {}", var("character_set_server"), var("collation_server")), BRIGHT()),
+        ("Time zone", tz, BRIGHT()),
+    ];
+    ui.columns(2, |cols| {
+        let ui = &mut cols[0];
+        caption(ui, "SERVER");
+        ui.add_space(4.0);
+        let w = ui.available_width();
+        ui.spacing_mut().item_spacing.y = 0.0;
+        kv_rows(ui, w, &server);
+        let ui = &mut cols[1];
+        caption(ui, "REPLICATION");
+        ui.add_space(4.0);
+        match &o.replica {
+            Err(e) => {
+                ui.label(RichText::new(e).color(MUTED()));
+            }
+            Ok(None) => {
+                ui.label(RichText::new("Not a replica").color(MUTED()));
+            }
+            Ok(Some(r)) => {
+                let w = ui.available_width();
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let cw = [w * 0.4, w * 0.2, w * 0.2, w * 0.2];
+                header(ui, &[("Source", cw[0], false), ("IO thread", cw[1], false), ("SQL thread", cw[2], false), ("Behind", cw[3], true)]);
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(w, ROW_H), Sense::hover());
+                ui.painter().rect_filled(rect, 0.0, BG());
+                let (io, io_c) = thread_state(&r.io);
+                let (sql, sql_c) = thread_state(&r.sql);
+                paint_cell(ui, rect, rect.left(), cw[0], &r.source, BRIGHT(), true, false);
+                paint_cell(ui, rect, rect.left() + cw[0], cw[1], io, io_c, true, false);
+                paint_cell(ui, rect, rect.left() + cw[0] + cw[1], cw[2], sql, sql_c, true, false);
+                paint_cell(ui, rect, rect.left() + cw[0] + cw[1] + cw[2], cw[3], &r.behind.map(|b| format!("{b} s")).unwrap_or_default(), C_NUMBER(), true, true);
+                let mut extra = vec![("GTID set", r.gtid.clone(), TEXT())];
+                if !r.error.is_empty() {
+                    extra.push(("Last error", r.error.clone(), ALERT()));
+                }
+                kv_rows(ui, w, &extra.iter().filter(|(_, v, _)| !v.is_empty()).map(|(k, v, c)| (*k, v.clone(), *c)).collect::<Vec<_>>());
+            }
+        }
+    });
+}
+
+fn status_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32) {
+    ui.horizontal(|ui| {
+        ui.add(egui::TextEdit::singleline(&mut s.st_filter).hint_text("Filter status names").desired_width(300.0));
+        segmented(ui, &mut s.st_group, &StatusGroup::ALL);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.checkbox(&mut s.st_auto, "Refresh every 2 s");
+            if !s.st_auto && quiet(ui, "Refresh").clicked() {
+                s.refresh = true;
+            }
+        });
+    });
+    ui.add_space(8.0);
+    let snap = match &s.st {
+        None => return spin(ui),
+        Some(Err(e)) => {
+            ui.label(RichText::new(format!("Could not read the server status: {e}")).color(ALERT()));
+            return;
+        }
+        Some(Ok((_, v))) => v,
+    };
+    let f = s.st_filter.trim().to_lowercase();
+    let rows: Vec<&(String, String)> = snap.vals.iter().filter(|(n, _)| s.st_group.has(n) && (f.is_empty() || n.to_lowercase().contains(&f))).collect();
+    let w = ui.available_width();
+    let (name_w, val_w) = (w * 0.4, w * 0.2);
+    header(ui, &[("Name", name_w, false), ("Value", val_w, true), ("Per second", val_w, true)]);
+    if rows.is_empty() {
+        ui.add_space(8.0);
+        ui.label(RichText::new("No status variable matches.").color(MUTED()));
+        return;
+    }
+    let prev = s.st_prev.as_ref();
+    egui::ScrollArea::vertical().max_height(max_h).auto_shrink([false, true]).show_rows(ui, ROW_H, rows.len(), |ui, range| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        for i in range {
+            let (name, value) = rows[i];
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, ROW_H), Sense::hover());
+            ui.painter().rect_filled(rect, 0.0, if i % 2 == 1 { PANEL() } else { BG() });
+            let numeric = value.trim().parse::<f64>().is_ok();
+            paint_cell(ui, rect, rect.left(), name_w, name, BRIGHT(), true, false);
+            paint_cell(ui, rect, rect.left() + name_w, val_w, &status_value(name, value), if numeric { C_NUMBER() } else { TEXT() }, true, true);
+            if let Some(r) = rate(snap, prev, name) {
+                paint_cell(ui, rect, rect.left() + name_w + val_w, val_w, &fmt_rate(name, r), if r == 0.0 { FAINT() } else { C_NUMBER() }, true, true);
+            }
+            if value.chars().count() > 30 {
+                resp.on_hover_text(value);
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,6 +717,21 @@ mod tests {
         assert_eq!(shown(&rows, "ANALYTICS", false).iter().map(|r| r.id).collect::<Vec<_>>(), [1]);
         assert_eq!(shown(&rows, "payments", false).iter().map(|r| r.id).collect::<Vec<_>>(), [3]);
         assert_eq!(shown(&rows, "app", true).iter().map(|r| r.id).collect::<Vec<_>>(), [3]);
+    }
+
+    #[test]
+    fn status_values_and_rates_read_like_the_design() {
+        assert_eq!(status_value("Questions", "1204881"), "1,204,881");
+        assert_eq!(status_value("Bytes_received", "8697308774"), "8.1 GB");
+        assert_eq!(status_value("Version", "8.4.3"), "8.4.3");
+        assert_eq!(status_value("Threads_running", "3"), "3");
+        assert_eq!(fmt_rate("Questions", 412.0), "412/s");
+        assert_eq!(fmt_rate("Questions", 0.0), "0/s");
+        assert_eq!(fmt_rate("Innodb_buffer_pool_reads", 0.4), "0.4/s");
+        assert_eq!(fmt_rate("Questions", 12_345.6), "12,346/s");
+        assert_eq!(fmt_rate("Bytes_received", 1_258_291.0), "1.2 MB/s");
+        assert_eq!(thread_state("Yes").0, "Running");
+        assert_eq!(thread_state("No").0, "Stopped");
     }
 
     #[test]
