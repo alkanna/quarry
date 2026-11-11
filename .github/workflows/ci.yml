@@ -23,9 +23,15 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # The runners' apt mirror sometimes fails to resolve for a few minutes, which failed whole runs, so it is tried again.
       - name: Linux libraries
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+        run: |
+          for i in 1 2 3 4 5; do
+            sudo apt-get update && sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev && exit 0
+            sleep $((i * 30))
+          done
+          exit 1
       # ring needs clang for Windows on ARM; the runner image ships LLVM here.
       - name: Clang for Windows on ARM
         if: matrix.os == 'windows-11-arm'
