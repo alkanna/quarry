@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.34.0](https://github.com/alkanna/quarry/compare/v0.33.0...v0.34.0) (2026-11-11)
+
+
+### Features
+
+* add PostgreSQL support ([#169](https://github.com/alkanna/quarry/issues/169)) ([57ac198](https://github.com/alkanna/quarry/commit/57ac198c825e10f784daf9e37e34e61093a19263))
+
 ## [0.33.0](https://github.com/alkanna/quarry/compare/v0.32.0...v0.33.0) (2026-11-10)
 
 
