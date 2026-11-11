@@ -36,7 +36,7 @@ pub mod rules;
 pub mod schema;
 pub mod users;
 pub use advanced::{Advanced, Charset, TestInfo, Zone};
-pub use dialect::{Dialect, FUNCTIONS, KEYWORDS};
+pub use dialect::{Dialect, Feature, FUNCTIONS, KEYWORDS};
 pub use structure::Structure;
 pub use pg_read::PgSchema;
 pub use relay::{Answer, Arg, Relay};

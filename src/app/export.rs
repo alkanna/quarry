@@ -309,8 +309,7 @@ impl App {
                 *keep = false;
             }
             // A table of the Content view can also leave as a dump with its structure.
-            // The dump is built for MySQL only so far.
-            if f.sql && f.src == Src::Content && !self.t().is_some_and(|t| self.is_pg(t.sel.conn)) {
+            if f.sql && f.src == Src::Content && self.t().is_none_or(|t| self.supports(t.sel.conn, db::sql::Feature::SqlDump)) {
                 if quiet(ui, "SQL dump…").on_hover_text("The table with its structure, or the whole database, as a script").clicked() {
                     *keep = false;
                     if let Some(s) = self.t().map(|t| t.sel.clone()) {

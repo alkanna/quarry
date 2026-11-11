@@ -30,6 +30,17 @@ fn engine_card(ui: &mut egui::Ui, code: &str, name: &str, sub: &str, color: Colo
     if enabled { r.on_hover_cursor(egui::CursorIcon::PointingHand) } else { r }
 }
 
+/// The tabs of the connection form: Mongo reaches its servers through a proxy, SQL engines through TLS settings and, where
+/// the engine has them, session settings.
+fn conn_tabs(engine: db::sql::Engine) -> &'static [(ConnTab, &'static str)] {
+    use db::sql::Feature::AdvancedTab;
+    match (engine.is_sql(), engine.supports(AdvancedTab)) {
+        (false, _) => &[(ConnTab::Standard, "Standard"), (ConnTab::Ssh, "SSH"), (ConnTab::Proxy, "Proxy")],
+        (true, true) => &[(ConnTab::Standard, "Standard"), (ConnTab::Ssh, "SSH"), (ConnTab::Tls, "TLS"), (ConnTab::Advanced, "Advanced")],
+        (true, false) => &[(ConnTab::Standard, "Standard"), (ConnTab::Ssh, "SSH"), (ConnTab::Tls, "TLS")],
+    }
+}
+
 fn tls_tab(ui: &mut egui::Ui, f: &mut ConnForm) {
     settings_section(ui, "TLS", |ui| {
         egui::Grid::new("tls").num_columns(2).spacing([FORM_GAP, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
@@ -262,20 +273,37 @@ fn paste_apply(st: &mut Paste, f: &mut ConnForm) {
 
 /// QUARRY_TEST_PG=paste: what the design shows after a paste. The form struct has no egui context at load time, so the
 /// first frame of a fresh paste field seeds it. The design types the password after the paste, so it is set here too.
-fn paste_seed(st: &mut Paste, f: &mut ConnForm) {
-    if std::env::var("QUARRY_TEST_PG").as_deref() != Ok("paste") || st.note.is_some() {
+fn paste_seed(ctx: &egui::Context, f: &mut ConnForm) {
+    let id = paste_id(f);
+    if std::env::var("QUARRY_TEST_PG").as_deref() != Ok("paste") || ctx.data(|d| d.get_temp::<Paste>(id)).is_some_and(|st| st.note.is_some()) {
         return;
     }
-    st.text = "postgresql://analyst@analytics-prod.internal:5432/analytics?sslmode=verify-full".into();
-    paste_apply(st, f);
+    let mut st = Paste { text: "postgresql://analyst@analytics-prod.internal:5432/analytics?sslmode=verify-full".into(), ..Default::default() };
+    paste_apply(&mut st, f);
     f.addr.password = "hunter2hunter".into();
     st.filled[PASTE_PASSWORD] = true;
+    ctx.data_mut(|d| d.insert_temp(id, st));
+}
+
+/// A line of small text led by a dot: a plain one for a result, or with an "i" for a notice.
+fn note_row(ui: &mut egui::Ui, dot: Color32, info: bool, text: &str) {
+    ui.horizontal_top(|ui| {
+        if info {
+            let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
+            ui.painter().circle_filled(r.center(), INFO_DOT_R, tint(dot, 60));
+            let g = ui.painter().layout_job(egui::text::LayoutJob::single_section("i".into(), ui_fmt(TXT_SMALL, dot, W_SEMIBOLD, 0.0)));
+            ui.painter().galley(r.center() - g.size() / 2.0 + egui::vec2(0.0, optical_dy(&g)), g, dot);
+        } else {
+            let (r, _) = ui.allocate_exact_size(egui::vec2(8.0, 14.0), Sense::hover());
+            ui.painter().circle_filled(r.center(), STATUS_DOT_R, dot);
+        }
+        ui.add(egui::Label::new(RichText::new(text).size(TXT_SMALL).color(MUTED())).wrap());
+    });
 }
 
 fn paste_field(ui: &mut egui::Ui, f: &mut ConnForm, field_w: f32) -> Paste {
     let id = paste_id(f);
     let mut st: Paste = ui.data(|d| d.get_temp(id)).unwrap_or_default();
-    paste_seed(&mut st, f);
     ui.horizontal(|ui| {
         caption(ui, "PASTE CONNECTION STRING");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -289,13 +317,7 @@ fn paste_field(ui: &mut egui::Ui, f: &mut ConnForm, field_w: f32) -> Paste {
         st.note = None;
     }
     match &st.note {
-        Some(Ok(m)) => {
-            ui.horizontal(|ui| {
-                let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 14.0), Sense::hover());
-                ui.painter().circle_filled(dot.center(), STATUS_DOT_R, SUCCESS());
-                ui.add(egui::Label::new(RichText::new(m).size(TXT_SMALL).color(MUTED())).wrap());
-            });
-        }
+        Some(Ok(m)) => note_row(ui, SUCCESS(), false, m),
         Some(Err(e)) => {
             ui.add(egui::Label::new(RichText::new(e).size(TXT_SMALL).color(ALERT())).wrap());
         }
@@ -486,6 +508,9 @@ fn proxy_tab(ui: &mut egui::Ui, f: &mut ConnForm) {
 
 impl App {
     pub(super) fn conn_dialog(&mut self, ui: &mut egui::Ui, f: &mut ConnForm, keep: &mut bool) {
+        if self.demo {
+            paste_seed(ui.ctx(), f);
+        }
         let mut save = false;
         let mut test = false;
         let default_s = self.prefs.timeout_ms / 1000;
@@ -532,7 +557,7 @@ impl App {
                         f.addr.scheme = scheme.into();
                     }
                     // The other engine has no tab for the one that was open.
-                    if matches!((engine.is_sql(), f.tab), (true, ConnTab::Proxy) | (false, ConnTab::Tls | ConnTab::Advanced)) || (engine == db::sql::Engine::Postgres && f.tab == ConnTab::Advanced) {
+                    if !conn_tabs(engine).iter().any(|(t, _)| *t == f.tab) {
                         f.tab = ConnTab::Standard;
                     }
                 }
@@ -541,8 +566,7 @@ impl App {
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 18.0;
-                    let tabs: &[(ConnTab, &str)] = if f.engine == db::sql::Engine::Postgres { &[(ConnTab::Standard, "Standard"), (ConnTab::Ssh, "SSH"), (ConnTab::Tls, "TLS")] } else if f.engine.is_sql() { &[(ConnTab::Standard, "Standard"), (ConnTab::Ssh, "SSH"), (ConnTab::Tls, "TLS"), (ConnTab::Advanced, "Advanced")] } else { &[(ConnTab::Standard, "Standard"), (ConnTab::Ssh, "SSH"), (ConnTab::Proxy, "Proxy")] };
-                    for &(t, label) in tabs {
+                    for &(t, label) in conn_tabs(f.engine) {
                         if view_tab(ui, label, f.tab == t).clicked() {
                             f.tab = t;
                         }
@@ -554,7 +578,7 @@ impl App {
                     ConnTab::Ssh => ssh_tab(ui, f),
                     ConnTab::Proxy => proxy_tab(ui, f),
                     ConnTab::Tls => tls_tab(ui, f),
-                    ConnTab::Advanced if f.engine != db::sql::Engine::Postgres => advanced_tab(ui, f, default_s),
+                    ConnTab::Advanced if f.engine.supports(db::sql::Feature::AdvancedTab) => advanced_tab(ui, f, default_s),
                     ConnTab::Advanced => standard_tab(ui, f),
                 });
             });
@@ -563,13 +587,7 @@ impl App {
             ui.add_space(6.0);
             egui::Frame::new().fill(BG()).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.horizontal_top(|ui| {
-                    let (dot, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
-                    ui.painter().circle_filled(dot.center(), INFO_DOT_R, tint(PRIMARY(), 60));
-                    let g = ui.painter().layout_job(egui::text::LayoutJob::single_section("i".into(), ui_fmt(TXT_SMALL, PRIMARY(), W_SEMIBOLD, 0.0)));
-                    ui.painter().galley(dot.center() - g.size() / 2.0 + egui::vec2(0.0, optical_dy(&g)), g, PRIMARY());
-                    ui.add(egui::Label::new(RichText::new("A locked PostgreSQL connection refuses writes Quarry can see. Functions on the server that write by themselves still run with your role's rights; use a read-only role for full safety.").size(TXT_SMALL).color(MUTED())).wrap());
-                });
+                note_row(ui, PRIMARY(), true, "A locked PostgreSQL connection refuses writes Quarry can see. Functions on the server that write by themselves still run with your role's rights; use a read-only role for full safety.");
             });
         }
         // An answer for an older Test or another form is not this form's.
@@ -592,7 +610,7 @@ impl App {
             None => {}
         }
         // The Advanced tab is hidden for PostgreSQL, so what it holds must not block Save or reach the connection.
-        let adv = if f.engine == db::sql::Engine::Postgres { Ok(Default::default()) } else { f.advanced() };
+        let adv = if f.engine.supports(db::sql::Feature::AdvancedTab) { f.advanced() } else { Ok(Default::default()) };
         if let Err(m) = &adv {
             ui.add(egui::Label::new(RichText::new(m).color(ALERT())).wrap());
         }

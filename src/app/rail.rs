@@ -31,9 +31,9 @@ impl App {
                 self.log.open = !self.log.open;
             }
             // The server window reads MongoDB commands and MySQL status; there is no PostgreSQL one yet.
-            let pg = self.active.is_some_and(|id| self.is_pg(id));
-            let tip = if pg { "Server status (not built for PostgreSQL yet)" } else if connected { "Server status" } else { "Server status (connect first)" };
-            if rail_button(ui, RailIcon::Server, self.server.is_some() || self.sql_server.is_some(), connected && !pg, tip).clicked()
+            let lacks = self.active.and_then(|id| self.lacks(id, db::sql::Feature::ServerStatus));
+            let tip = if lacks.is_some() { "Server status (not built for PostgreSQL yet)" } else if connected { "Server status" } else { "Server status (connect first)" };
+            if rail_button(ui, RailIcon::Server, self.server.is_some() || self.sql_server.is_some(), connected && lacks.is_none(), tip).clicked()
                 && let Some(conn) = self.active
             {
                 self.open_server(conn);
@@ -101,9 +101,11 @@ impl App {
 
     pub(super) fn open_server(&mut self, conn: u64) {
         self.req += 1;
+        // The Mongo window would wait forever for commands a SQL server never answers, so a SQL engine without a window stops here.
+        if let Some(why) = self.lacks(conn, db::sql::Feature::ServerStatus) {
+            return self.warn(why);
+        }
         match self.conn(conn).map(|c| (c.meta.engine, c.sql.as_ref().map(|d| d.dialect), c.meta.advanced.clone())) {
-            // The Mongo window would wait forever for commands a SQL server never answers.
-            Some((db::sql::Engine::Postgres, ..)) => self.warn("Server status is not built for PostgreSQL yet."),
             Some((db::sql::Engine::MySql, dialect, adv)) => self.sql_server = Some(SqlServerWin::new(conn, dialect.map(|d| db::sql::server::set_by_quarry(&adv, d, db::sql::advanced::local_offset_secs())).unwrap_or_default())),
             _ => self.server = Some(ServerWin::new(conn, self.req)),
         }

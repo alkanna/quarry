@@ -188,8 +188,7 @@ impl App {
                 }
                 r.on_hover_text("Press / or Cmd+Shift+F");
                 ui.add_space(14.0);
-                // Creating and dropping databases is not built for PostgreSQL yet.
-                let sql_conn = self.active.and_then(|id| self.conn(id)).filter(|c| c.meta.engine == db::sql::Engine::MySql && c.status == Status::Ready).map(|c| (c.meta.id, c.writable));
+                let sql_conn = self.active.and_then(|id| self.conn(id)).filter(|c| c.meta.engine.is_sql() && c.meta.engine.supports(db::sql::Feature::CreateDrop) && c.status == Status::Ready).map(|c| (c.meta.id, c.writable));
                 let mut new_db = None;
                 ui.horizontal(|ui| {
                     ui.label(LayoutJob::single_section("Databases".into(), ui_fmt(10.5, FAINT(), W_SEMIBOLD, 0.8)));

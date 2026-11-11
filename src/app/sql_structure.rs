@@ -197,17 +197,18 @@ impl App {
         let (staged, mut memo, applying) = self.take_staged();
         let (dropped, changed) = staged_marks(&staged);
         let col = sel[0].filter(|i| *i < d.columns.len());
-        let pg = self.t().is_some_and(|t| self.is_pg(t.sel.conn));
+        let conn = self.t().map_or(0, |t| t.sel.conn);
+        let pg = self.is_pg(conn);
+        let (order, unsigned, collation, cardinality) = (self.supports(conn, db::sql::Feature::ColumnOrder), self.supports(conn, db::sql::Feature::Unsigned), self.supports(conn, db::sql::Feature::Collation), self.supports(conn, db::sql::Feature::IndexCardinality));
         let mut left = Vec::new();
         edit_row_with(ui, editable, note, |ui, on| {
             if quiet_enabled(ui, on, "+ Column").on_hover_text("Add a column").on_disabled_hover_text(why).clicked() {
                 left.push(Act::NewColumn);
             }
             let hint = if on { "Select a column first" } else { why };
-            // PostgreSQL has no column order, so there is nothing to move.
             let moves = [("Move up", "Place the column before the one above it", col.map(|i| Act::MoveColumn(i, -1))), ("Move down", "Place the column after the one below it", col.map(|i| Act::MoveColumn(i, 1)))];
             let own = [("Edit", "Change the selected column", col.map(Act::EditColumn)), ("Duplicate", "Add a copy of the selected column", col.map(Act::DuplicateColumn)), ("Delete", "Drop the selected column", col.map(Act::DropColumn))];
-            for (t, tip, act) in own.into_iter().chain(moves.into_iter().filter(|_| !pg)) {
+            for (t, tip, act) in own.into_iter().chain(moves.into_iter().filter(|_| order)) {
                 let r = quiet_enabled(ui, on && act.is_some(), t).on_hover_text(tip).on_disabled_hover_text(hint);
                 if let (true, Some(a)) = (r.clicked(), act) {
                     left.push(a);
@@ -228,13 +229,12 @@ impl App {
             ui.add_space(8.0);
         }
         egui::ScrollArea::vertical().id_salt("sql-structure").auto_shrink([false, false]).show(ui, |ui| {
-            // PostgreSQL has no unsigned integers and no collation worth a column of its own, so those two are left out.
-            let shown: Vec<usize> = (0..10).filter(|i| !pg || !matches!(i, 3 | 8)).collect();
+            let shown: Vec<usize> = (0..10).filter(|i| (unsigned || *i != 3) && (collation || *i != 8)).collect();
             let all = [gc("Name", 1.5), gc("Type", 1.0), gc("Length / values", 1.4), gc("Unsigned", 0.95), gc("Null", 0.6), gc("Key", 0.6), gc("Default", 1.9), gc("Extra", 2.1), gc("Collation", 1.9), gc("Comment", 1.3)];
             let heads: Vec<GCol> = all.into_iter().enumerate().filter(|(i, _)| shown.contains(i)).map(|(_, g)| g).collect();
             let mut menu = |ui: &mut egui::Ui, r: usize| {
                 let mut items = vec![("Edit column", Act::EditColumn(r)), ("Duplicate", Act::DuplicateColumn(r))];
-                if !pg {
+                if order {
                     items.extend([("Move up", Act::MoveColumn(r, -1)), ("Move down", Act::MoveColumn(r, 1))]);
                 }
                 for (label, act) in items {
@@ -303,8 +303,7 @@ impl App {
                 });
             });
             ui.add_space(6.0);
-            // PostgreSQL keeps no cardinality for an index, so its column would be empty.
-            let ishown: Vec<usize> = (0..6).filter(|i| !pg || *i != 4).collect();
+            let ishown: Vec<usize> = (0..6).filter(|i| cardinality || *i != 4).collect();
             let iall = [gc("Key name", 2.0), gc("Columns", 2.4), gc("Unique", 0.8), gc("Type", 0.8), gc_r("Cardinality", 1.2), gc("Comment", 2.4)];
             let heads: Vec<GCol> = iall.into_iter().enumerate().filter(|(i, _)| ishown.contains(i)).map(|(_, g)| g).collect();
             let mut imenu = |ui: &mut egui::Ui, r: usize| {

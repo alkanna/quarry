@@ -52,7 +52,17 @@ impl App {
     /// Why the open table's structure, relations and triggers cannot be changed, when the engine cannot do it yet. The
     /// editing of PostgreSQL structure is a later phase, so its views are read-only whatever the lock says.
     pub(super) fn struct_block(&self) -> Option<&'static str> {
-        self.t().filter(|t| self.is_pg(t.sel.conn)).map(|_| "Changing the structure of a PostgreSQL table is not built yet")
+        self.t().and_then(|t| self.lacks(t.sel.conn, db::sql::Feature::StructureEdit))
+    }
+
+    /// Whether the engine of `conn` has `f`. Mongo and unknown connections answer yes, so their paths stay as they are.
+    pub(super) fn supports(&self, conn: u64, f: db::sql::Feature) -> bool {
+        self.conn(conn).is_none_or(|c| c.meta.engine.supports(f))
+    }
+
+    /// The reason `conn` lacks `f`, for a tooltip or a toast; None when it has it.
+    pub(super) fn lacks(&self, conn: u64, f: db::sql::Feature) -> Option<&'static str> {
+        self.conn(conn).filter(|c| !c.meta.engine.supports(f)).map(|c| c.meta.engine.missing(f))
     }
 
     /// Whether `conn` is a PostgreSQL connection.

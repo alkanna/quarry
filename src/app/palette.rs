@@ -177,9 +177,10 @@ impl App {
                 if lockable && c.writable {
                     add(&g, Row::cmd("Lock writes", Glyph::Lock, "", Cmd::LockWrites));
                 }
-                // Neither window is built for PostgreSQL yet.
-                if c.meta.engine != db::sql::Engine::Postgres {
+                if c.meta.engine.supports(db::sql::Feature::ServerStatus) {
                     add(&g, Row::cmd("Server status", Glyph::Prompt, "", Cmd::Server));
+                }
+                if c.meta.engine.supports(db::sql::Feature::Users) {
                     add(&g, Row::cmd("Users", Glyph::Prompt, "", Cmd::Users));
                 }
                 add(&g, Row::cmd("Disconnect", Glyph::Prompt, "", Cmd::Disconnect));
@@ -296,7 +297,7 @@ impl App {
                 }
             }
             Cmd::Users => match active {
-                Some(id) if self.is_pg(id) => self.warn("Users and privileges are not built for PostgreSQL yet."),
+                Some(id) if !self.supports(id, db::sql::Feature::Users) => self.warn(self.lacks(id, db::sql::Feature::Users).unwrap_or_default()),
                 Some(id) if self.conn(id).is_some_and(|c| c.meta.engine.is_sql()) => self.open_sql_users(id),
                 Some(id) => self.side_act(id, SideAct::Users),
                 None => {}

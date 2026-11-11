@@ -422,8 +422,7 @@ impl App {
             let (r, _) = ui.allocate_exact_size(egui::vec2(1.0, 16.0), Sense::hover());
             ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0, LINE()));
             explain = quiet_enabled(ui, !running, "Explain").on_hover_text("EXPLAIN the statement under the caret (Cmd+E)").clicked();
-            // Formatting is not built for PostgreSQL, where the button would only raise a toast.
-            if dialect != db::sql::Dialect::Postgres {
+            if dialect.supports(db::sql::Feature::Format) {
                 format = quiet_enabled(ui, !running, "Format").on_hover_text("Lay out the selection, or the whole script when nothing is selected. A statement that would read differently stays as it is.").clicked();
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
