@@ -388,17 +388,14 @@ fn cloud_rows(ui: &mut egui::Ui, f: &mut ConnForm, cloud: &super::cloud_sql::Clo
         let was = conf.iam;
         let t = toggle(ui, &mut conf.iam);
         t.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, conf.iam, "Sign in with IAM"));
-        // Turned on, the user becomes the Google identity the proxy signs in as.
+        // Turned on, the user becomes the gcloud account, which is usually also the one Application Default Credentials
+        // were made with. The proxy cannot use the gcloud account for IAM, so the note says which one counts.
         if conf.iam && !was {
             if let Some(a) = account {
                 f.addr.user = crate::cloudsql::iam_user(a);
             }
         }
-        let note = match (conf.iam, account) {
-            (true, Some(_)) => "No password, the proxy signs in as the gcloud account",
-            (true, None) => "No password, the proxy signs in with Application Default Credentials",
-            (false, _) => "The database user signs in with its password",
-        };
+        let note = if conf.iam { "No password. The proxy signs in with Application Default Credentials, which must be this user's account" } else { "The database user signs in with its password" };
         ui.label(RichText::new(note).color(MUTED()));
     });
     ui.end_row();

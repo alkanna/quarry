@@ -299,8 +299,10 @@ pub fn explain(raw: &str, cx: &ErrCtx) -> Explained {
         ErrKind::CloudSql => {
             if low.contains("iam sign-in refused") {
                 ex.title = "Cloud SQL refused the IAM sign-in".into();
-                let used = raw.split_once("(the proxy used ").and_then(|(_, r)| r.split_once(')')).map_or("the Google credentials", |x| x.0);
-                ex.hint = format!("The proxy signed in as {used}, and the database has no IAM user for it, or the instance does not allow IAM sign-in. The database user must be that same account (a service account name ends in .iam, not .gserviceaccount.com), and the instance flag cloudsql.iam_authentication must be on. If the gcloud account and Application Default Credentials differ, run `gcloud auth login` and reconnect.");
+                ex.hint = "The proxy signed in with Application Default Credentials, and the database has no IAM user for that account, or the instance does not allow IAM sign-in. Those credentials are often another account than the gcloud one that filled the user. The database user must be the same account (a service account name ends in .iam, not .gserviceaccount.com), and the instance flag cloudsql.iam_authentication must be on. Run `gcloud auth application-default login` as that account, then Retry.".into();
+            } else if raw.contains(crate::cloudsql::ADC_MISSING) {
+                ex.title = "IAM sign-in needs Application Default Credentials".into();
+                ex.hint = "The Cloud SQL proxy signs in to IAM with Application Default Credentials, not the gcloud account, and this machine has none. Run `gcloud auth application-default login` as the account the database user names, then Retry.".into();
             } else if low.contains("gcloud auth login") {
                 ex.title = "Sign in to Google Cloud first".into();
                 ex.hint = "gcloud is signed out or its sign-in expired. Run `gcloud auth login` in a terminal, then try again.".into();
@@ -313,6 +315,9 @@ pub fn explain(raw: &str, cx: &ErrCtx) -> Explained {
             } else if low.starts_with("cloud sql proxy failed") {
                 ex.title = "Cloud SQL proxy failed".into();
                 ex.hint = "The proxy stopped before it accepted connections.".into();
+            } else if low.contains("gcloud did not answer") {
+                ex.title = "gcloud did not answer".into();
+                ex.hint = "gcloud took too long and was stopped. Run the same gcloud command in a terminal to see what it waits for, then Retry.".into();
             } else {
                 ex.title = "Cloud SQL proxy failed".into();
                 ex.hint = raw.trim().into();
@@ -529,6 +534,14 @@ mod tests {
         assert_eq!(t("Cloud SQL proxy failed: failed to get instance metadata: googleapi: Error 403: not authorized"), "Cloud SQL proxy failed");
         assert_eq!(t("Cloud SQL proxy did not accept connections within 20 s"), "Cloud SQL proxy failed");
         assert_eq!(t("Cloud SQL: gcloud is signed out. Run `gcloud auth login` and try again."), "Sign in to Google Cloud first");
+        assert_eq!(t("Cloud SQL: gcloud did not answer within 30 s and was stopped."), "gcloud did not answer");
+        // IAM never uses the gcloud account, so both IAM cards point at Application Default Credentials.
+        let adc = explain(&format!("{}. Run `gcloud auth application-default login`, then Retry.", crate::cloudsql::ADC_MISSING), &cx());
+        assert_eq!((adc.kind, adc.title.as_str()), (ErrKind::CloudSql, "IAM sign-in needs Application Default Credentials"));
+        assert!(adc.hint.contains("gcloud auth application-default login") && adc.hint.contains("then Retry"));
+        let refused = explain("Cloud SQL IAM sign-in refused (the proxy used Application Default Credentials): error returned from database: 28P01: password authentication failed", &cx());
+        assert_eq!(refused.title, "Cloud SQL refused the IAM sign-in");
+        assert!(refused.hint.contains("Application Default Credentials") && refused.hint.contains("gcloud auth application-default login"));
     }
 
     #[test]

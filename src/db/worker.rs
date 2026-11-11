@@ -131,10 +131,11 @@ impl Worker {
         self.spawn(sql_scope(conn, schema, f));
     }
 
-    pub fn connect(&self, conn: u64, uri: String, timeout: Duration, net: Net) {
+    /// `attempt` comes back with the answer, so the app can drop one for a connect it no longer waits for.
+    pub fn connect(&self, conn: u64, attempt: u64, uri: String, timeout: Duration, net: Net) {
         self.spawn(async move {
             let res = open_client(conn, &uri, timeout, &net).await;
-            Msg::Connected { conn, res }
+            Msg::Connected { conn, attempt, res }
         });
     }
 

@@ -59,7 +59,7 @@ fn open(uri: &str, adv: &Advanced, pooled: bool) -> LivePg {
     let (tx, rx) = std::sync::mpsc::channel();
     let w = crate::db::Worker::new(tx, eframe::egui::Context::default());
     let pool = w.rt.block_on(async { sqlx::PgPool::connect(uri).await.unwrap() });
-    w.sql_connect_with(1, uri.to_string(), Duration::from_secs(30), Net::default(), adv.clone());
+    w.sql_connect_with(1, 0, uri.to_string(), Duration::from_secs(30), Net::default(), adv.clone());
     let Msg::SqlConnected { res, .. } = rx.recv_timeout(Duration::from_secs(30)).unwrap() else { panic!("connect") };
     let (db, dbs, _) = res.unwrap_or_else(|x| panic!("connect: {x}"));
     assert_eq!(db.pooler(), pooled, "{uri}");
@@ -70,7 +70,7 @@ fn open(uri: &str, adv: &Advanced, pooled: bool) -> LivePg {
 fn connect_error(uri: &str, adv: &Advanced) -> String {
     let (tx, rx) = std::sync::mpsc::channel();
     let w = crate::db::Worker::new(tx, eframe::egui::Context::default());
-    w.sql_connect_with(1, uri.to_string(), Duration::from_secs(30), Net::default(), adv.clone());
+    w.sql_connect_with(1, 0, uri.to_string(), Duration::from_secs(30), Net::default(), adv.clone());
     match rx.recv_timeout(Duration::from_secs(30)).unwrap() {
         Msg::SqlConnected { res: Err(x), .. } => x,
         Msg::SqlConnected { .. } => panic!("the connection should have been refused"),
@@ -358,7 +358,7 @@ fn try_open(uri: &str, adv: &Advanced) -> Result<LivePg, String> {
     let (tx, rx) = std::sync::mpsc::channel();
     let w = crate::db::Worker::new(tx, eframe::egui::Context::default());
     let pool = w.rt.block_on(async { sqlx::PgPool::connect(uri).await.unwrap() });
-    w.sql_connect_with(1, uri.to_string(), Duration::from_secs(30), Net::default(), adv.clone());
+    w.sql_connect_with(1, 0, uri.to_string(), Duration::from_secs(30), Net::default(), adv.clone());
     let Msg::SqlConnected { res, .. } = rx.recv_timeout(Duration::from_secs(30)).unwrap() else { panic!("connect") };
     let (db, dbs, _) = res?;
     Ok(LivePg { w, rx, db, dbs, pool, uri: uri.to_string() })

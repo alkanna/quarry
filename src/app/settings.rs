@@ -244,12 +244,8 @@ impl App {
                         ui.add(egui::TextEdit::singleline(&mut self.prefs.shell_runtime).hint_text("automatic").desired_width(190.0));
                     });
                 });
+                let desc = self.gcloud_found_text();
                 settings_section(ui, "CLOUD SQL", |ui| {
-                    let g = crate::cloudsql::find_gcloud("");
-                    let desc = match &g {
-                        Some(p) => format!("Found automatically at {}. Set a path only to use another gcloud.", p.display()),
-                        None => "gcloud was not found. Install the Google Cloud CLI or enter its path.".to_string(),
-                    };
                     setting_row(ui, "gcloud", &desc, |ui| {
                         ui.add(egui::TextEdit::singleline(&mut self.prefs.gcloud).hint_text("automatic").desired_width(190.0));
                     });

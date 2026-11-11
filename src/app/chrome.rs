@@ -320,7 +320,7 @@ impl App {
                             if self.busy() {
                                 self.warn("Save or discard your edits and wait for running scripts first.");
                             } else {
-                                crate::update::restart();
+                                self.restart();
                             }
                         }
                     }

@@ -2,7 +2,8 @@
 //! QUARRY_TEST_SQL builds the MySQL one. Nothing here reads the keychain or the network. The views have the names of the MySQL
 //! demo where the feature exists on PostgreSQL, plus `schemas` (the switcher open), `connform`, `paste` and `tls`, and for
 //! Cloud SQL `cloudsql` (the browser over recorded acme-* instances), `cloudsql-form` (the form after Use) and
-//! `cloudsql-missing` (the browser when no proxy is found). gcloud never runs in the demo.
+//! `cloudsql-missing` (the browser when no proxy is found), `cloudsql-adc` (Use on an IAM instance without Application Default
+//! Credentials). gcloud never runs in the demo.
 
 use super::*;
 use db::sql::schema::{Schema, SchemaCol, SchemaTable};
@@ -174,7 +175,7 @@ impl App {
             "edit" => self.sql_demo_stage(),
             "select" => self.tabs[0].checked = [1, 2, 4, 5].into(),
             "connform" | "paste" | "tls" | "advanced" => self.pg_form_demo(which),
-            "cloudsql" | "cloudsql-form" | "cloudsql-missing" => self.pg_cloud_demo(which),
+            "cloudsql" | "cloudsql-form" | "cloudsql-missing" | "cloudsql-adc" => self.pg_cloud_demo(which),
             _ => {}
         }
     }
@@ -333,7 +334,8 @@ const CLOUD_INSTANCES: [(&str, &str); 3] = [
 ];
 
 impl App {
-    /// The Cloud SQL demo: the browser over recorded instances, the form after Use, or the browser with no proxy found.
+    /// The Cloud SQL demo: the browser over recorded instances, the form after Use, the browser with no proxy found, or with
+    /// no Application Default Credentials for an IAM instance.
     fn pg_cloud_demo(&mut self, which: &str) {
         use crate::cloudsql::{Project, Start};
         let projects = ["acme-prod", "acme-staging", "acme-analytics", "acme-sandbox"].map(|id| Project { id: id.into(), name: String::new() }).to_vec();
@@ -341,7 +343,7 @@ impl App {
         instances.insert("acme-sandbox".into(), Err("Cloud SQL: gcloud failed: ERROR: (gcloud.sql.instances.list) HTTPError 403: Cloud SQL Admin API has not been used in project acme-sandbox before or it is disabled.".into()));
         let proxy = (which != "cloudsql-missing").then(|| PathBuf::from("/opt/homebrew/bin/cloud-sql-proxy"));
         // A load id that is not 0, so nothing asks gcloud.
-        self.cloud = super::cloud_sql::CloudCache { req: 1, start: Some(Start { gcloud: Some("/opt/homebrew/bin/gcloud".into()), proxy, components: true, account: Some("jane@example.com".into()), projects: Ok(projects) }), instances, ..Default::default() };
+        self.cloud = super::cloud_sql::CloudCache { req: 1, start: Some(Start { gcloud: Some("/opt/homebrew/bin/gcloud".into()), proxy, components: true, account: Some("jane@example.com".into()), projects: Ok(projects), adc: which != "cloudsql-adc" }), instances, ..Default::default() };
         if which == "cloudsql-form" {
             let inst = self.cloud.instance("acme-prod:europe-west1:orders-db").cloned();
             let mut f = ConnForm { tag: "Production".into(), ..Default::default() };
@@ -350,7 +352,7 @@ impl App {
             }
             self.modal = Some(Modal::Conn(Box::new(f)));
         } else {
-            self.cloud_browser = Some(super::cloud_sql::CloudBrowser { stopped: true, sel: Some("acme-prod:europe-west1:orders-db".into()), ..Default::default() });
+            self.cloud_browser = Some(super::cloud_sql::CloudBrowser { stopped: true, sel: Some("acme-prod:europe-west1:orders-db".into()), adc_for: (which == "cloudsql-adc").then(|| "acme-prod:europe-west1:orders-db".into()), ..Default::default() });
         }
     }
 }

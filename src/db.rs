@@ -197,9 +197,9 @@ pub enum ExplainOf {
 
 pub enum Msg {
     /// Connected (or not); a tunnel, if any, must be kept alive as long as the client is used.
-    Connected { conn: u64, res: Res<(Client, Vec<String>, Option<crate::ssh::Tunnel>)> },
+    Connected { conn: u64, attempt: u64, res: Res<(Client, Vec<String>, Option<crate::ssh::Tunnel>)> },
     /// A SQL connection opened (or not): the databases, and the SSH tunnel to keep alive.
-    SqlConnected { conn: u64, res: Res<(sql::Db, Vec<String>, Option<Way>)> },
+    SqlConnected { conn: u64, attempt: u64, res: Res<(sql::Db, Vec<String>, Option<Way>)> },
     /// The columns of a SQL table page and its primary key columns, sent just before the page's `Docs`.
     /// `estimated` says the count in that `Docs` is the information_schema estimate, not exact.
     SqlCols { req: u64, cols: Vec<sql::Col>, pk: Vec<String>, estimated: bool, matched: Option<u64> },

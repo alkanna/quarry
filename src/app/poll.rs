@@ -6,8 +6,9 @@ impl App {
     pub(super) fn poll(&mut self, ctx: &egui::Context) {
         while let Ok(m) = self.rx.try_recv() {
             match m {
-                Msg::Connected { conn, res } => {
-                    let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) else { continue };
+                Msg::Connected { conn, attempt, res } => {
+                    // A connect the user stopped (Disconnect, removal) or replaced is dropped, and its tunnel with it.
+                    let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn && c.waits_for(attempt)) else { continue };
                     match res {
                         Ok((client, dbs, tunnel)) => {
                             // Trust the SSH host key the first time; later a different key is refused.
@@ -53,8 +54,9 @@ impl App {
                         }
                     }
                 }
-                Msg::SqlConnected { conn, res } => {
-                    let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) else { continue };
+                Msg::SqlConnected { conn, attempt, res } => {
+                    // Dropping a stopped or replaced connect's answer also stops its Cloud SQL proxy or SSH tunnel.
+                    let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn && c.waits_for(attempt)) else { continue };
                     match res {
                         Ok((sql, dbs, tunnel)) => {
                             let mut trusted = None;

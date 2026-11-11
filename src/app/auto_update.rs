@@ -26,10 +26,24 @@ impl App {
         }
         if self.updated.is_some() && self.prefs.auto_update {
             if self.last_input.elapsed().as_secs() >= 60 && !self.busy() {
-                crate::update::restart();
+                self.restart();
             }
             // Wake up to test idleness even when nothing else repaints.
             ctx.request_repaint_after(std::time::Duration::from_secs(5));
+        }
+    }
+
+    /// Restarts into the installed update. The process exits without running destructors, so every connection's tunnel
+    /// or Cloud SQL proxy is dropped first; on macOS nothing else would stop a proxy.
+    pub(super) fn restart(&mut self) -> ! {
+        self.close_ways();
+        crate::update::restart()
+    }
+
+    /// Drops every SSH tunnel and Cloud SQL proxy, which stops them.
+    pub(super) fn close_ways(&mut self) {
+        for c in &mut self.conns {
+            c.tunnel = None;
         }
     }
 

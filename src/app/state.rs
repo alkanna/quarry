@@ -95,8 +95,10 @@ pub(super) struct Conn {
     /// schema names of the same list, written together with it by `set_schemas`.
     pub(super) pg: HashMap<String, PgNs>,
     pub(super) masked_uri: String,
-    /// Kept alive while connected through SSH; dropping it closes the tunnel.
+    /// Kept alive while connected through SSH or Cloud SQL; dropping it closes the tunnel or stops the proxy.
     pub(super) tunnel: Option<db::Way>,
+    /// The connect in flight, so an answer to one the user stopped or replaced is dropped.
+    pub(super) attempt: u64,
     /// Shown in the status bar and under the sidebar; filled after connecting.
     pub(super) server: ServerInfo,
 }
@@ -112,7 +114,12 @@ pub(super) struct PgNs {
 
 impl Conn {
     pub(super) fn new(meta: ConnMeta, status: Status) -> Conn {
-        Conn { meta, client: None, sql: None, status, writable: false, dbs: Vec::new(), tables: Default::default(), pg: Default::default(), masked_uri: String::new(), tunnel: None, server: Default::default() }
+        Conn { meta, client: None, sql: None, status, writable: false, dbs: Vec::new(), tables: Default::default(), pg: Default::default(), masked_uri: String::new(), tunnel: None, attempt: 0, server: Default::default() }
+    }
+
+    /// Whether a connect answer for `attempt` is still wanted: this connection is connecting, for that attempt.
+    pub(super) fn waits_for(&self, attempt: u64) -> bool {
+        self.status == Status::Connecting && self.attempt == attempt
     }
 
     /// Forgets every list read from the server, for a new session or a closed one.
@@ -1477,8 +1484,11 @@ impl App {
     /// Connects with a known address, so tests need no keychain.
     pub(super) fn connect_uri(&mut self, id: u64, uri: String) {
         let tools = self.cloud_tools();
+        self.req += 1;
+        let attempt = self.req;
         let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == id) else { return };
         c.status = Status::Connecting;
+        c.attempt = attempt;
         c.client = None;
         c.sql = None;
         c.tunnel = None;
@@ -1488,9 +1498,9 @@ impl App {
         let adv = c.meta.advanced.clone();
         net.tools = tools;
         if c.meta.engine.is_sql() {
-            self.worker.sql_connect_with(id, uri, self.timeout(), net, adv);
+            self.worker.sql_connect_with(id, attempt, uri, self.timeout(), net, adv);
         } else {
-            self.worker.connect(id, uri, self.timeout(), net);
+            self.worker.connect(id, attempt, uri, self.timeout(), net);
         }
     }
 

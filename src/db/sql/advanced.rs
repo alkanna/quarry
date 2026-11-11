@@ -633,7 +633,7 @@ mod live {
         }
 
         fn open(&self, adv: &Advanced) -> Result<Db, String> {
-            self.w.sql_connect_with(1, self.uri.clone(), Duration::from_secs(20), Net::default(), adv.clone());
+            self.w.sql_connect_with(1, 0, self.uri.clone(), Duration::from_secs(20), Net::default(), adv.clone());
             let Msg::SqlConnected { res, .. } = self.rx.recv_timeout(Duration::from_secs(40)).unwrap() else { panic!("expected SqlConnected") };
             res.map(|(db, _, _)| db)
         }

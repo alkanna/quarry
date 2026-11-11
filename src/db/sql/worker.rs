@@ -576,16 +576,17 @@ impl Worker {
 
     #[cfg(test)]
     pub fn sql_connect(&self, conn: u64, uri: String, timeout: Duration, net: Net) {
-        self.sql_connect_with(conn, uri, timeout, net, Advanced::default());
+        self.sql_connect_with(conn, 0, uri, timeout, net, Advanced::default());
     }
 
-    pub fn sql_connect_with(&self, conn: u64, uri: String, timeout: Duration, net: Net, adv: Advanced) {
+    /// `attempt` comes back with the answer, so the app can drop one for a connect it no longer waits for.
+    pub fn sql_connect_with(&self, conn: u64, attempt: u64, uri: String, timeout: Duration, net: Net, adv: Advanced) {
         self.spawn(async move {
             let res = open(&uri, timeout, &net, &adv).await.map(|(mut db, dbs, t)| {
                 db.conn = conn;
                 (db, dbs, t)
             });
-            Msg::SqlConnected { conn, res }
+            Msg::SqlConnected { conn, attempt, res }
         });
     }
 
