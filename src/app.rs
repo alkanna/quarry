@@ -15,7 +15,7 @@ mod auto_update;
 mod chrome;
 mod column_menu;
 mod compare;
-mod config;
+pub(crate) mod config;
 mod conn_form;
 mod conn_pg_advanced;
 mod danger;

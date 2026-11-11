@@ -199,7 +199,7 @@ pub enum Msg {
     /// Connected (or not); a tunnel, if any, must be kept alive as long as the client is used.
     Connected { conn: u64, res: Res<(Client, Vec<String>, Option<crate::ssh::Tunnel>)> },
     /// A SQL connection opened (or not): the databases, and the SSH tunnel to keep alive.
-    SqlConnected { conn: u64, res: Res<(sql::Db, Vec<String>, Option<crate::ssh::Tunnel>)> },
+    SqlConnected { conn: u64, res: Res<(sql::Db, Vec<String>, Option<Way>)> },
     /// The columns of a SQL table page and its primary key columns, sent just before the page's `Docs`.
     /// `estimated` says the count in that `Docs` is the information_schema estimate, not exact.
     SqlCols { req: u64, cols: Vec<sql::Col>, pk: Vec<String>, estimated: bool, matched: Option<u64> },
@@ -330,6 +330,16 @@ pub enum Msg {
 pub struct Net {
     pub ssh: Option<(crate::ssh::SshConf, crate::ssh::SshSecrets)>,
     pub proxy: Option<Proxy>,
+    /// A PostgreSQL connection through Google's Cloud SQL proxy, which Quarry starts. Exclusive with `ssh`.
+    pub cloud_sql: Option<crate::cloudsql::CloudSql>,
+    /// Where the proxy and gcloud are, when the app already knows; empty means the worker looks.
+    pub tools: crate::cloudsql::Tools,
+}
+
+/// What a connection keeps alive while it is open. Dropping it closes the tunnel or stops the proxy.
+pub enum Way {
+    Ssh(crate::ssh::Tunnel),
+    CloudSql(crate::cloudsql::CloudProxy),
 }
 
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Debug)]

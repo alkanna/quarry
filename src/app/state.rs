@@ -59,6 +59,9 @@ pub(super) struct ConnMeta {
     /// Reach the server through a SOCKS5 proxy; its password lives in the Keychain.
     #[serde(default)]
     pub(super) proxy: Option<db::Proxy>,
+    /// Reach a PostgreSQL server through Google's Cloud SQL proxy, which Quarry starts. Nothing in it is secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) cloud_sql: Option<crate::cloudsql::CloudSql>,
     /// Environment label shown next to the name, such as Production.
     #[serde(default)]
     pub(super) tag: String,
@@ -93,7 +96,7 @@ pub(super) struct Conn {
     pub(super) pg: HashMap<String, PgNs>,
     pub(super) masked_uri: String,
     /// Kept alive while connected through SSH; dropping it closes the tunnel.
-    pub(super) tunnel: Option<crate::ssh::Tunnel>,
+    pub(super) tunnel: Option<db::Way>,
     /// Shown in the status bar and under the sidebar; filled after connecting.
     pub(super) server: ServerInfo,
 }
@@ -1030,6 +1033,8 @@ pub(super) struct ConnForm {
     pub(super) uri: String,
     pub(super) show: bool,
     pub(super) ssh_on: bool,
+    /// Set when the connection goes through Cloud SQL; refused together with SSH.
+    pub(super) cloud_sql: Option<crate::cloudsql::CloudSql>,
     pub(super) ssh: crate::ssh::SshConf,
     pub(super) ssh_pwd: String,
     pub(super) ssh_pass: String,
@@ -1232,6 +1237,8 @@ impl ConnForm {
             ssh: self.ssh_on.then(|| (crate::ssh::SshConf { host: self.ssh.host.trim().into(), user: self.ssh.user.trim().into(), ..self.ssh.clone() }, crate::ssh::SshSecrets { password: Some(self.ssh_pwd.clone()), passphrase: Some(self.ssh_pass.clone()) })),
             // SQL drivers cannot use SOCKS, so a stale proxy setting must not apply.
             proxy: (self.proxy_on && !self.ssh_on && !self.engine.is_sql()).then(|| db::Proxy { host: self.proxy.host.trim().into(), password: Some(self.proxy_pwd.clone()), ..self.proxy.clone() }),
+            cloud_sql: self.cloud_sql.clone().filter(|_| self.engine == db::sql::Engine::Postgres),
+            tools: Default::default(),
         }
     }
 }
@@ -1356,6 +1363,8 @@ pub(super) fn net_of(meta: &ConnMeta) -> db::Net {
     db::Net {
         ssh: meta.ssh.clone().map(|c| (c, crate::ssh::SshSecrets { password: secret(meta.id, "ssh-password"), passphrase: secret(meta.id, "ssh-passphrase") })),
         proxy: meta.proxy.clone().map(|p| db::Proxy { password: secret(meta.id, "proxy-password"), ..p }),
+        cloud_sql: meta.cloud_sql.clone(),
+        tools: Default::default(),
     }
 }
 
@@ -1450,7 +1459,8 @@ impl App {
         c.tunnel = None;
         // Asked again once connected, so a changed or failed server never shows the old one.
         c.server = ServerInfo::default();
-        let net = net_of(&c.meta);
+        let mut net = net_of(&c.meta);
+        net.tools = crate::cloudsql::Tools { proxy: Some(self.prefs.cloud_sql_proxy.trim()).filter(|s| !s.is_empty()).map(Into::into), gcloud: Some(self.prefs.gcloud.trim()).filter(|s| !s.is_empty()).map(Into::into) };
         let adv = c.meta.advanced.clone();
         if c.meta.engine.is_sql() {
             self.worker.sql_connect_with(id, uri, self.timeout(), net, adv);

@@ -8,6 +8,8 @@ pub enum ErrKind {
     SignIn,
     Unreachable,
     Tunnel,
+    /// The Cloud SQL proxy or gcloud failed, or Cloud SQL refused an IAM sign-in.
+    CloudSql,
     Tls,
     Lost,
     Timeout,
@@ -218,7 +220,10 @@ pub fn classify(raw: &str) -> ErrKind {
     let n = mongo_code(raw).map(|m| m.0).or(mysql_code(raw));
     let pg = pg_code(raw);
     let pg = pg.as_deref();
-    if is_unauthorized(raw) {
+    // Before the others: an IAM refusal also says "authentication failed", and the cause is the Google identity, not a password.
+    if low.contains("cloud sql proxy") || low.contains("cloud sql:") || low.contains("cloud sql iam") {
+        ErrKind::CloudSql
+    } else if is_unauthorized(raw) {
         ErrKind::Privilege
     } else if matches!(n, Some(18 | 1045 | 1698)) || matches!(pg, Some("28P01" | "28000")) || low.contains("authentication failed") || low.contains("scram failure") {
         ErrKind::SignIn
@@ -289,6 +294,20 @@ pub fn explain(raw: &str, cx: &ErrCtx) -> Explained {
         ErrKind::Tunnel => {
             ex.title = "The SSH tunnel could not be opened".into();
             ex.hint = said.clone();
+            ex.fixes = vec![Fix::EditConn, Fix::Retry];
+        }
+        ErrKind::CloudSql => {
+            if low.contains("iam sign-in refused") {
+                ex.title = "Cloud SQL refused the IAM sign-in".into();
+                let used = raw.split_once("(the proxy used ").and_then(|(_, r)| r.split_once(')')).map_or("the Google credentials", |x| x.0);
+                ex.hint = format!("The proxy signed in as {used}, and the database has no IAM user for it, or the instance does not allow IAM sign-in. The database user must be that same account (a service account name ends in .iam, not .gserviceaccount.com), and the instance flag cloudsql.iam_authentication must be on. If the gcloud account and Application Default Credentials differ, run `gcloud auth login` and reconnect.");
+            } else if low.contains("gcloud auth login") {
+                ex.title = "Sign in to Google Cloud first".into();
+                ex.hint = "gcloud is signed out or its sign-in expired. Run `gcloud auth login` in a terminal, then try again.".into();
+            } else {
+                ex.title = "The Cloud SQL proxy failed".into();
+                ex.hint = raw.trim().into();
+            }
             ex.fixes = vec![Fix::EditConn, Fix::Retry];
         }
         ErrKind::Tls => {

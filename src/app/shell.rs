@@ -502,8 +502,11 @@ impl App {
     /// tunnel (a local SOCKS5 port) or through the connection's own proxy.
     pub(super) fn shell_proxy(&self, conn: u64) -> serde_json::Value {
         let Some(c) = self.conn(conn) else { return serde_json::Value::Null };
-        if let Some(t) = &c.tunnel {
-            return serde_json::json!({ "host": "127.0.0.1", "port": t.port });
+        match &c.tunnel {
+            Some(db::Way::Ssh(t)) => return serde_json::json!({ "host": "127.0.0.1", "port": t.port }),
+            // The Cloud SQL proxy is plain TCP and only serves PostgreSQL, which the shell reaches through the app, not SOCKS.
+            Some(db::Way::CloudSql(_)) => return serde_json::Value::Null,
+            None => {}
         }
         match &c.meta.proxy {
             Some(p) => serde_json::json!({ "host": p.host, "port": if p.port == 0 { 1080 } else { p.port }, "user": p.user, "password": secret(conn, "proxy-password") }),

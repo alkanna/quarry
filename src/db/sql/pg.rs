@@ -7,7 +7,7 @@ use super::exec::{Cells, Conn, Opts};
 use super::worker::{num_at, text_at};
 use super::pg_advanced::PgSession;
 use super::{Addr, Db, Dialect, Pool, SslMode, TestInfo};
-use crate::db::{e, Net, Res};
+use crate::db::{classify, e, ErrKind, Net, Res};
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions, PgSslMode};
 use sqlx::{Connection, Executor};
 use std::collections::HashMap;
@@ -655,18 +655,40 @@ async fn probe(c: &mut sqlx::PgConnection, guarded: bool) -> Res<Facts> {
 
 /// Connects the way `worker::open_full` does for MySQL: one plain connection first, so a refusal (the guard, the
 /// version, a login) is reported at once, then the pools that open their connections on first use.
-pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Advanced, info: bool) -> Res<(Db, Vec<String>, Option<crate::ssh::Tunnel>, TestInfo)> {
+pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Advanced, info: bool) -> Res<(Db, Vec<String>, Option<crate::db::Way>, TestInfo)> {
     // Checked before anything connects, so a bad value never costs a tunnel or a login.
     let sess = PgSession::new(adv, super::advanced::system_zone_name())?;
     let (timeout, ms) = adv.timeouts(timeout);
-    let tunnel = match &net.ssh {
-        Some((conf, secrets)) => Some(crate::ssh::open(conf, secrets, timeout, Some((a.host.clone(), a.port))).await?),
-        None => None,
-    };
-    // The certificate names the real host, not the tunnel's 127.0.0.1, so the name check cannot pass.
-    let (host, port, mode) = match &tunnel {
-        Some(t) => ("127.0.0.1".to_string(), t.port, if a.ssl_mode == SslMode::VerifyIdentity { SslMode::VerifyCa } else { a.ssl_mode }),
-        None => (a.host.clone(), a.port, a.ssl_mode),
+    if net.cloud_sql.is_some() && net.ssh.is_some() {
+        return Err("Cloud SQL and an SSH tunnel cannot be used together".into());
+    }
+    let (way, host, port, mode) = if let Some(conf) = &net.cloud_sql {
+        let gcloud = net.tools.gcloud.clone().or_else(|| crate::cloudsql::find_gcloud(""));
+        let exe = match net.tools.proxy.clone() {
+            Some(p) => Some(p),
+            None => {
+                let g = gcloud.clone();
+                tokio::task::spawn_blocking(move || crate::cloudsql::find_proxy("", g.as_deref())).await.ok().flatten()
+            }
+        };
+        let exe = exe.ok_or("Cloud SQL proxy not found. Install it from the connection form, or set its path in Settings.")?;
+        let p = crate::cloudsql::open(conf, &exe, gcloud, timeout).await?;
+        // The proxy already encrypts to the instance, and the server certificate would not match 127.0.0.1.
+        let port = p.port;
+        (Some(crate::db::Way::CloudSql(p)), "127.0.0.1".to_string(), port, SslMode::Disabled)
+    } else {
+        let tunnel = match &net.ssh {
+            Some((conf, secrets)) => Some(crate::ssh::open(conf, secrets, timeout, Some((a.host.clone(), a.port))).await?),
+            None => None,
+        };
+        // The certificate names the real host, not the tunnel's 127.0.0.1, so the name check cannot pass.
+        match tunnel {
+            Some(t) => {
+                let port = t.port;
+                (Some(crate::db::Way::Ssh(t)), "127.0.0.1".to_string(), port, if a.ssl_mode == SslMode::VerifyIdentity { SslMode::VerifyCa } else { a.ssl_mode })
+            }
+            None => (None, a.host.clone(), a.port, a.ssl_mode),
+        }
     };
     let default_db = if a.database.is_empty() { FALLBACK_DB.to_string() } else { a.database.clone() };
     // The environment (PGPASSWORD, PGSSLROOTCERT and so on) and ~/.pgpass would change what a saved connection
@@ -729,7 +751,11 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
         let (f, dbs, schemas) = res?;
         Ok::<_, String>((f, dbs, opts, locals, TestInfo { schemas, setting_errors: errors, ..Default::default() }))
     };
-    let (f, dbs, opts, locals, ti) = tokio::time::timeout(timeout, first).await.map_err(|_| format!("Could not connect and set up the session within {} s", timeout.as_secs()))??;
+    let (f, dbs, opts, locals, ti) = tokio::time::timeout(timeout, first).await.map_err(|_| format!("Could not connect and set up the session within {} s", timeout.as_secs()))?.map_err(|m| match (&net.cloud_sql, &way) {
+        // A refused login is most often the wrong Google identity, so the message names the one the proxy used.
+        (Some(c), Some(crate::db::Way::CloudSql(p))) if c.iam && classify(&m) == ErrKind::SignIn => format!("Cloud SQL IAM sign-in refused (the proxy used {}): {m}", if p.gcloud_account { "the gcloud account" } else { "Application Default Credentials" }),
+        _ => m,
+    })?;
     let pools = PgPools::new(opts.clone(), default_db.clone(), timeout, locals, f.timeout.clone()).with_session(sess);
     let db = Db {
         pool: Pool::Pg(Arc::new(pools)),
@@ -741,7 +767,7 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
         setup: Default::default(),
         conn: 0,
     };
-    Ok((db, dbs, tunnel, ti))
+    Ok((db, dbs, way, ti))
 }
 
 /// Readies a connection of its own for a script: the backend's pid for Stop, and write access when unlocked. Behind a

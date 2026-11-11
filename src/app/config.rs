@@ -71,6 +71,9 @@ pub(super) struct UiPrefs {
     pub(super) relations: HashMap<String, Vec<Relation>>,
     /// Paths to mongodump and mongorestore; empty means find them automatically.
     pub(super) mongodump: String,
+    /// Paths to gcloud and the Cloud SQL proxy; empty means find them automatically.
+    pub(super) gcloud: String,
+    pub(super) cloud_sql_proxy: String,
     pub(super) mongorestore: String,
     /// Install new releases from GitHub and restart into them.
     pub(super) auto_update: bool,
@@ -206,7 +209,7 @@ pub(super) struct SavedStage {
 
 impl Default for UiPrefs {
     fn default() -> Self {
-        Self { open_inline: true, table: true, confirm_save: false, auto_save: false, always_writable: false, default_cols: DEFAULT_COLS, page_size: db::PAGE_SIZE, timeout_ms: db::DEFAULT_TIMEOUT_MS, shell_runtime: String::new(), shell_histories: HashMap::new(), shell_packages: Vec::new(), history: HashMap::new(), library: HashMap::new(), open_tabs: Vec::new(), cur_tab: 0, last_conn: None, open_conns: Vec::new(), cols: HashMap::new(), schema_maps: HashMap::new(), relations: HashMap::new(), mongodump: String::new(), mongorestore: String::new(), auto_update: true, auto_preview: true, show_server: false, show_fps: false, show_mem: false, show_cpu: false, object_preview: false, appearance: Appearance::System, ui_scale: 1.0, dyslexic_font: false, soft: false, reading_line: false, group_digits: false, keep_toasts: false, sidebar_hidden: false, query_editor_h: 0.0, shell_editor_h: 0.0, last_version: String::new() }
+        Self { open_inline: true, table: true, confirm_save: false, auto_save: false, always_writable: false, default_cols: DEFAULT_COLS, page_size: db::PAGE_SIZE, timeout_ms: db::DEFAULT_TIMEOUT_MS, shell_runtime: String::new(), shell_histories: HashMap::new(), shell_packages: Vec::new(), history: HashMap::new(), library: HashMap::new(), open_tabs: Vec::new(), cur_tab: 0, last_conn: None, open_conns: Vec::new(), cols: HashMap::new(), schema_maps: HashMap::new(), relations: HashMap::new(), mongodump: String::new(), gcloud: String::new(), cloud_sql_proxy: String::new(), mongorestore: String::new(), auto_update: true, auto_preview: true, show_server: false, show_fps: false, show_mem: false, show_cpu: false, object_preview: false, appearance: Appearance::System, ui_scale: 1.0, dyslexic_font: false, soft: false, reading_line: false, group_digits: false, keep_toasts: false, sidebar_hidden: false, query_editor_h: 0.0, shell_editor_h: 0.0, last_version: String::new() }
     }
 }
 
@@ -309,7 +312,7 @@ pub(super) fn config_dir() -> PathBuf {
 }
 
 /// Where Quarry installs the MongoDB Database Tools itself when they are missing.
-pub(super) fn tools_dir() -> PathBuf {
+pub(crate) fn tools_dir() -> PathBuf {
     config_dir().join("tools")
 }
 
@@ -517,5 +520,16 @@ mod tests {
         let set = ConnMeta { advanced: db::sql::Advanced { query_secs: Some(5), sql_mode: Some(vec!["ANSI_QUOTES".into()]), ..Default::default() }, ..m };
         let back: ConnMeta = serde_json::from_str(&serde_json::to_string(&set).unwrap()).unwrap();
         assert_eq!(back.advanced, set.advanced);
+    }
+
+    #[test]
+    fn a_connection_saved_before_cloud_sql_loads_without_it_and_saves_unchanged() {
+        let old = r#"{"id": 4, "name": "analytics", "engine": "Postgres"}"#;
+        let m: ConnMeta = serde_json::from_str(old).unwrap();
+        assert!(m.cloud_sql.is_none());
+        assert!(!serde_json::to_string(&m).unwrap().contains("cloud_sql"));
+        let set = ConnMeta { cloud_sql: Some(crate::cloudsql::CloudSql { instance: "p:r:i".into(), iam: true, ip: crate::cloudsql::IpKind::Psc }), ..m };
+        let back: ConnMeta = serde_json::from_str(&serde_json::to_string(&set).unwrap()).unwrap();
+        assert_eq!(back.cloud_sql, set.cloud_sql);
     }
 }

@@ -143,16 +143,19 @@ impl Db {
     }
 }
 
-async fn open(uri: &str, timeout: Duration, net: &Net, adv: &Advanced) -> Res<(Db, Vec<String>, Option<crate::ssh::Tunnel>)> {
+async fn open(uri: &str, timeout: Duration, net: &Net, adv: &Advanced) -> Res<(Db, Vec<String>, Option<crate::db::Way>)> {
     open_full(uri, timeout, net, adv, false).await.map(|(db, dbs, t, _)| (db, dbs, t))
 }
 
 /// `info` also reads what the form's Test button shows: the server's default sql_mode and its UTF-8 collations.
-async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info: bool) -> Res<(Db, Vec<String>, Option<crate::ssh::Tunnel>, TestInfo)> {
+async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info: bool) -> Res<(Db, Vec<String>, Option<crate::db::Way>, TestInfo)> {
     // Checked before anything connects, so a bad value never costs a tunnel or a login.
     let a = Addr::parse(uri).ok_or("Not a SQL address")?;
     if a.engine() == super::Engine::Postgres {
         return super::pg::open(a, timeout, net, adv, info).await;
+    }
+    if net.cloud_sql.is_some() {
+        return Err("Cloud SQL connections are for PostgreSQL only".into());
     }
     let setup = Setup::new(adv.session_statements(super::advanced::local_offset_secs())?, super::advanced::init_statements(&adv.init)?);
     let (timeout, ms) = adv.timeouts(timeout);
@@ -206,7 +209,7 @@ async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info
         ti.collations = rows.iter().filter_map(|r| Some((String::from_utf8_lossy(raw(r, 0)?).into_owned(), String::from_utf8_lossy(raw(r, 1)?).into_owned()))).collect();
     }
     let db = Db { dialect: Dialect::from_version(&version), pool: Pool::My(pool), opts: Opts::My(o), version, tls, sql_mode, setup, conn: 0 };
-    Ok((db, dbs, tunnel, ti))
+    Ok((db, dbs, tunnel.map(crate::db::Way::Ssh), ti))
 }
 
 /// The databases the login can see, sorted. Text protocol, because SHOW is not preparable on every old server.
@@ -602,9 +605,13 @@ impl Worker {
                 if refused > 0 {
                     return Err(format!("Connected, but the server refused {refused} {}. See the marked rows on the Advanced tab.", if refused == 1 { "setting" } else { "settings" }));
                 }
-                let via = t.as_ref().map(|t| format!(" through SSH (host key {})", t.fingerprint)).unwrap_or_default();
+                let via = match &t {
+                    Some(crate::db::Way::Ssh(t)) => format!(" through SSH (host key {})", t.fingerprint),
+                    Some(crate::db::Way::CloudSql(p)) => format!(" through the Cloud SQL proxy (credentials: {})", if p.gcloud_account { "gcloud account" } else { "Application Default Credentials" }),
+                    None => String::new(),
+                };
                 // Over a tunnel the certificate cannot match 127.0.0.1, so `open` checks the CA only.
-                let note = if t.is_some() && Addr::parse(&uri).is_some_and(|a| a.ssl_mode == SslMode::VerifyIdentity) { " (TLS verified against the CA; the host name is the tunnel's)" } else { "" };
+                let note = if matches!(t, Some(crate::db::Way::Ssh(_))) && Addr::parse(&uri).is_some_and(|a| a.ssl_mode == SslMode::VerifyIdentity) { " (TLS verified against the CA; the host name is the tunnel's)" } else { "" };
                 Ok(format!("Connected{via} to {} in {} ms{note}", db.label(), start.elapsed().as_millis()))
             });
             Msg::Tested { req, res, info }

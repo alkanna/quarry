@@ -18,7 +18,7 @@ impl App {
                                     trusted = Some(t.fingerprint.clone());
                                 }
                             }
-                            c.tunnel = tunnel;
+                            c.tunnel = tunnel.map(db::Way::Ssh);
                             // Load every database's collections up front so the list can show counts.
                             for d in &dbs {
                                 self.worker.collections(conn, client.clone(), d.clone());
@@ -58,7 +58,7 @@ impl App {
                     match res {
                         Ok((sql, dbs, tunnel)) => {
                             let mut trusted = None;
-                            if let (Some(t), Some(sc)) = (&tunnel, c.meta.ssh.as_mut()) {
+                            if let (Some(db::Way::Ssh(t)), Some(sc)) = (&tunnel, c.meta.ssh.as_mut()) {
                                 if sc.known_host.is_none() && !t.fingerprint.is_empty() {
                                     sc.known_host = Some(t.fingerprint.clone());
                                     trusted = Some(t.fingerprint.clone());

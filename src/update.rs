@@ -56,7 +56,7 @@ fn old_path(target: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
-fn remove(p: &Path) {
+pub(crate) fn remove(p: &Path) {
     let _ = if p.is_dir() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) };
 }
 
@@ -72,7 +72,7 @@ pub fn cleanup() {
 #[cfg(windows)]
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-fn run(cmd: &mut Command) -> Result<String, String> {
+pub(crate) fn run(cmd: &mut Command) -> Result<String, String> {
     #[cfg(windows)]
     std::os::windows::process::CommandExt::creation_flags(cmd, CREATE_NO_WINDOW);
     let name = cmd.get_program().to_string_lossy().to_string();
@@ -140,7 +140,7 @@ fn parse_checksum(s: &str) -> Option<String> {
     (h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit())).then(|| h.to_ascii_lowercase())
 }
 
-fn sha256_matches(file: &Path, sha: &str) -> Result<bool, String> {
+pub(crate) fn sha256_matches(file: &Path, sha: &str) -> Result<bool, String> {
     use sha2::Digest;
     let bytes = std::fs::read(file).map_err(|e| e.to_string())?;
     let got: String = sha2::Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
@@ -149,7 +149,7 @@ fn sha256_matches(file: &Path, sha: &str) -> Result<bool, String> {
 
 /// A new, empty folder in the temp folder with a name nobody can guess, so another user cannot
 /// plant files or links where the download lands.
-fn fresh_temp_dir(prefix: &str) -> Result<PathBuf, String> {
+pub(crate) fn fresh_temp_dir(prefix: &str) -> Result<PathBuf, String> {
     use std::hash::{BuildHasher, Hasher};
     // RandomState is keyed from the system's random source, which saves a dependency.
     let n = std::collections::hash_map::RandomState::new().build_hasher().finish();

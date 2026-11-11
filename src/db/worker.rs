@@ -1191,7 +1191,7 @@ mod tests {
                 let _ = s.write_all(&[5, 5, 0, 1, 0, 0, 0, 0, 0, 0]).await;
                 (String::from_utf8(name).unwrap(), u16::from_be_bytes(p))
             });
-            let net = Net { ssh: None, proxy: Some(Proxy { host: "127.0.0.1".into(), port, user: String::new(), password: None }) };
+            let net = Net { proxy: Some(Proxy { host: "127.0.0.1".into(), port, user: String::new(), password: None }), ..Default::default() };
             let r = open_client(0, "mongodb://db.internal.example:27018/", Duration::from_millis(1500), &net).await;
             assert!(r.is_err());
             assert_eq!(seen.await.unwrap(), ("db.internal.example".to_string(), 27018));

@@ -664,6 +664,7 @@ impl App {
                         tag: clean_tag(&f.tag).into(),
                         ssh: f.ssh_on.then(|| crate::ssh::SshConf { host: f.ssh.host.trim().into(), user: f.ssh.user.trim().into(), ..f.ssh.clone() }),
                         proxy: (f.proxy_on && !f.ssh_on && !f.engine.is_sql()).then(|| db::Proxy { host: f.proxy.host.trim().into(), password: None, ..f.proxy.clone() }),
+                        cloud_sql: f.net().cloud_sql.filter(|_| !f.ssh_on),
                         advanced: f.advanced().unwrap_or_default(),
                     };
                     match self.conns.iter_mut().find(|c| c.meta.id == id) {
