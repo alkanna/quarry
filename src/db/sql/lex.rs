@@ -932,6 +932,23 @@ mod tests {
         super::use_target(t, D)
     }
 
+    #[test]
+    fn the_head_of_a_statement_reads_as_the_whole_would() {
+        let pg = super::Dialect::Postgres;
+        assert_eq!(super::head_words("  -- note\n/* c */ commit  and chain; x", pg, 3), ["COMMIT", "AND", "CHAIN"]);
+        assert_eq!(super::head_words("begin", pg, 3), ["BEGIN"]);
+        // A long statement is read from its start only, and one whose start has too few words is still read whole.
+        let big = format!("INSERT INTO t VALUES ({})", "'x', ".repeat(5000) + "1");
+        assert_eq!(super::head_words(&big, pg, 3), ["INSERT", "INTO", "T"]);
+        let late = format!("{}SELECT 1", "/* x */ ".repeat(1000));
+        assert_eq!(super::head_words(&late, pg, 2), ["SELECT", "1"]);
+        // A multibyte character at the cut does not split.
+        let wide = format!("{} commit", "é".repeat(3000));
+        assert_eq!(super::head_words(&wide, pg, 2).len(), 2);
+        assert!(!super::needs_no_transaction(&big, pg) && !super::transaction_control(&big, pg));
+        assert!(super::needs_no_transaction("VACUUM t", pg) && super::transaction_control("rollback", pg));
+    }
+
     fn texts(s: &str) -> Vec<&str> {
         split_statements(s).into_iter().map(|(_, t)| t).collect()
     }

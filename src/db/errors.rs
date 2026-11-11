@@ -420,6 +420,22 @@ fn sentence(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_lock_timeout_says_the_wait_that_applied() {
+        assert!(lock_held("\"s\".\"t\"", 3).contains("within 3 seconds") && lock_held("t", 3).contains("Nothing was changed"));
+        assert!(lock_held_cascade(3).contains("3 seconds"));
+        let write = explain("error returned from database: 55P03: canceling statement due to lock timeout", &cx());
+        assert!(write.hint.contains(&format!("{} seconds", crate::db::sql::WRITE_LOCK_SECS)), "{}", write.hint);
+    }
+
+    #[test]
+    fn an_object_in_use_keeps_the_server_text_and_says_what_was_done() {
+        assert!(in_use("srv", InUse::Template).starts_with("srv\nAnother session is using the template"));
+        assert!(in_use("srv", InUse::Drop { name: "d", pooler: true }).contains("connection pooler"));
+        assert!(in_use("srv", InUse::Drop { name: "d", pooler: false }).contains("Another session or application"));
+        assert!(in_use("srv", InUse::Undo { name: "d" }).starts_with("Not undone: another session is connected to d."));
+    }
+
     use super::*;
 
     fn cx() -> ErrCtx {

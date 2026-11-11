@@ -801,12 +801,6 @@ pub(super) fn commit_unknown(err: sqlx::Error, next: &str) -> String {
 
 pub(super) const RELOAD_STRUCTURE: &str = "The structure is being reloaded: check it before running the change again.";
 
-impl From<String> for Fail {
-    fn from(e: String) -> Fail {
-        Fail::Run(e)
-    }
-}
-
 pub(super) fn lock_error(err: &sqlx::Error, name: &str) -> Option<String> {
     // 55P03 is lock_not_available, which lock_timeout raises.
     (sql_state(err)? == "55P03").then(|| crate::db::errors::lock_held(name, LOCK_WAIT_SECS))

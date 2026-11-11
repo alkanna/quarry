@@ -356,6 +356,16 @@ impl Param {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_postgres_literal_reads_the_same_under_both_string_settings() {
+        for (text, want) in [("plain", "'plain'"), ("it's", "'it''s'"), (r"a\b", r"E'a\\b'"), (r"it's \", r"E'it''s \\'"), ("", "''"), ("é'\n", "'é''\n'")] {
+            assert_eq!(pg_lit(text), want);
+            let mut out = String::from("x=");
+            pg_lit_into(&mut out, text);
+            assert_eq!(out, format!("x={want}"));
+        }
+    }
+
     use super::*;
 
     #[test]

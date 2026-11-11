@@ -477,7 +477,7 @@ pub(super) struct Sim {
 
 impl Sim {
     pub(super) fn of(st: &Structure) -> Sim {
-        Sim { cols: st.columns.iter().map(|c| (c.name.clone(), ColDef::in_table(st, c))).collect(), idx: st.indexes.iter().map(IndexDef::from_index).collect(), fks: st.foreign_keys.clone(), pg: st.pg_schema.is_some(), deps: st.pg_deps.clone(), notes: Vec::new() }
+        Sim { cols: st.columns.iter().map(|c| (c.name.clone(), ColDef::in_table(st, c))).collect(), idx: st.indexes.iter().map(IndexDef::from_index).collect(), fks: st.foreign_keys.clone(), pg: st.is_pg(), deps: st.pg_deps.clone(), notes: Vec::new() }
     }
 
     /// An index the server can use for a key on these columns: it starts with them, in order, whole.
@@ -1046,7 +1046,7 @@ pub fn snapshot(st: &Structure, cols: &[String], idx: &[String], fks: &[String])
         (format!("index {n}"), i.map(|i| format!("{}|{}|{}|{}|{}|{}{}", i.name, i.unique, i.kind, i.comment, i.invisible, i.cols.iter().map(|c| format!("{}:{:?}:{}:{:?}", c.name, c.prefix, c.desc, c.expr)).collect::<Vec<_>>().join(","), if i.def.is_empty() { String::new() } else { format!("|{}|{}|{}|{}|{}|{}|{}", i.def, i.constraint, i.primary, i.complex, i.deferrable, i.deferred, i.con_comment) })))
     };
     let fk = |n: &String| {
-        let k = st.foreign_keys.iter().find(|k| fk_name_is(st.pg_schema.is_some(), &k.name, n));
+        let k = st.foreign_keys.iter().find(|k| fk_name_is(st.is_pg(), &k.name, n));
         (format!("foreign key {n}"), k.map(fk_line))
     };
     cols.iter().map(col).chain(idx.iter().map(index)).chain(fks.iter().map(fk)).collect()
@@ -1059,7 +1059,7 @@ pub fn warnings(before: &Structure, changes: &[Change]) -> Vec<String> {
     let sim = Sim::of(before);
     for c in changes {
         if let Change::DropFk(n) = c {
-            if let Some(ix) = fk_sim.backing_index(n).filter(|_| before.pg_schema.is_none()) {
+            if let Some(ix) = fk_sim.backing_index(n).filter(|_| !before.is_pg()) {
                 out.push(format!("Dropping {n} also drops the index {ix}, which was made for it. Undo brings both back."));
             }
         }
@@ -1073,12 +1073,12 @@ pub fn warnings(before: &Structure, changes: &[Change]) -> Vec<String> {
         }
         let _ = fk_sim.apply(c);
         match c {
-            Change::Drop(n) if before.pg_schema.is_some() => {
+            Change::Drop(n) if before.is_pg() => {
                 let blank = sim.at(n).and_then(|i| sim.cols[i].1.as_ref().ok()).is_some_and(|d| !d.nullable && !d.auto_increment && !matches!(d.default, Dv::Value(_) | Dv::Expr(_)));
                 let back = if blank { "allowing NULL and without its primary key, with its other indexes." } else { "with its indexes." };
                 out.push(format!("Dropping {n} deletes its values for good, with every index and constraint that uses it. Undo brings the column back empty and last, {back}"));
             }
-            Change::Add { def, .. } if before.pg_schema.is_some() && !def.auto_increment && before.status.rows.is_some_and(|r| r > 0) => {
+            Change::Add { def, .. } if before.is_pg() && !def.auto_increment && before.status.rows.is_some_and(|r| r > 0) => {
                 if let Dv::Expr(x) = &def.default {
                     if super::ddl_pg::calls_function(x) {
                         out.push(format!("The default of {} calls a function. Any function call is read as volatile here, since the editor does not look the function up. A volatile one runs once for each of the table's rows while PostgreSQL holds an exclusive lock on the table, and again on every later insert.", def.name));
@@ -1213,7 +1213,7 @@ fn pg_family(full_type: &str) -> Option<&'static str> {
 /// where older servers take any index that starts with them.
 pub fn fk_problem(own: &Structure, table: &str, parent: &Structure, fk: &ForeignKey, whole_key: bool) -> Option<String> {
     let find = |st: &Structure, n: &str| st.columns.iter().find(|c| same_name(&c.name, n)).cloned();
-    let pg = own.pg_schema.is_some();
+    let pg = own.is_pg();
     for (a, b) in fk.cols.iter().zip(&fk.ref_cols) {
         let (Some(ca), Some(cb)) = (find(own, a), find(parent, b)) else { return Some("A picked column is not in its table any more.".into()) };
         if let Some(p) = fk_pair_problem(if pg { Dialect::Postgres } else { Dialect::MySql }, table, &ca, &fk.ref_table, &cb) {

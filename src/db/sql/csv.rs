@@ -462,7 +462,7 @@ pub struct TableInfo {
 
 impl TableInfo {
     pub fn from_structure(s: &Structure) -> TableInfo {
-        let pg = s.pg_schema.is_some();
+        let pg = s.is_pg();
         // A PostgreSQL primary key is flagged on its index, whatever the constraint is called.
         let pk = s.indexes.iter().filter(|i| if pg { i.primary } else { i.name == "PRIMARY" }).flat_map(|i| i.cols.iter().map(|c| c.name.clone())).collect();
         let pk_deferrable = pg && s.indexes.iter().any(|i| i.primary && i.deferrable);
