@@ -159,12 +159,16 @@ impl App {
                 Msg::SqlTables { conn, database, schema, res } => self.pg_tables_done(conn, database, schema, res),
                 Msg::Collections { conn, db, res } => match res {
                     Ok((v, views)) => {
+                        self.side_err.remove(&(conn, db.clone()));
                         self.views.set(conn, &db, views);
                         if let Some(d) = self.conns.iter_mut().find(|c| c.meta.id == conn).and_then(|c| c.dbs.iter_mut().find(|d| d.0 == db)) {
                             d.1 = Some(v);
                         }
                     }
-                    Err(e) => self.err_quiet(e, Some(conn), Some(Sel { conn, db: db.clone(), ..Default::default() }), format!("List collections · {db}")),
+                    Err(e) => {
+                        self.side_err.insert((conn, db.clone()), e.clone());
+                        self.err_quiet(e, Some(conn), Some(Sel { conn, db: db.clone(), ..Default::default() }), format!("List collections · {db}"))
+                    }
                 },
                 Msg::Command { tag, res } => match (tag.as_str(), res) {
                     (t, Ok(d)) if t.starts_with("srv-") => {
