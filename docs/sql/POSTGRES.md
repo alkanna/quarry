@@ -34,18 +34,18 @@ Update this list when a step lands. Each step is reviewed before it is ticked.
 **v1 known limits:** a locked connection is only as safe as the role, because a server function that wraps a side effect is invisible to the lexer and non-transactional effects are not undone; structure editing, import, SQL dump, create and drop, users, the server window and the Advanced tab are v2 or v3 and hidden; timestamptz shows in UTC; behind a pooler Stop closes the connection and the statement runs until statement_timeout; no client certificate fields; CREATE TABLE text leaves out partitioning, inheritance and storage options; the logo is a drawn monogram.
 
 **v2** (after v1 ships)
-- [ ] 1. Structure editing (`ddl_pg.rs`)
-- [ ] 2. Relations and FKs
-- [ ] 3. Triggers
-- [ ] 4. CSV import and export
-- [ ] 5. SQL dump
-- [ ] 6. Create and drop database, schema and table
-- [ ] 7. Connection form Advanced tab (design first)
+- [ ] 1. UI tests of the critical paths with `egui_kittest` (requested 2026-11-11, first in v2 so every v2 step lands with UI tests): a test-only `App` constructor that needs no window, then headless flows against the Docker servers (MySQL, MariaDB, PostgreSQL, Mongo) that click and type like a user and check the rows on the server afterwards: inline cell edit and Save, Esc then edit again, multi-row edit and Save, row delete and multi-select delete, insert, undo of each, switching view or tab while an edit is open, and the locked connection refusing all of them. Why: the live tests cover the database layer, but the path from a click to the write batch had no automated test, and the cell editor bug of a664bda lived exactly there. First check that the kittest release matches egui 0.37
+- [ ] 2. Line coverage in CI with `cargo llvm-cov` on the Linux job that runs the live servers, published with each run, so gaps are measured rather than guessed
+- [ ] 3. Structure editing (`ddl_pg.rs`)
+- [ ] 4. Relations and FKs
+- [ ] 5. Triggers
+- [ ] 6. CSV import and export
+- [ ] 7. SQL dump
+- [ ] 8. Create and drop database, schema and table
+- [ ] 9. Connection form Advanced tab (design first)
 
 **v3** (after v2, requested by the user 2026-11-11)
 - [ ] 1. Cloud SQL connections through the Cloud SQL Auth Proxy, with instance discovery from the user's gcloud credentials (see "Cloud SQL (v3)" below; design first)
-- [ ] 2. UI tests of the critical paths with `egui_kittest` (requested 2026-11-11): a test-only `App` constructor that needs no window, then headless flows against the Docker servers (MySQL, MariaDB, PostgreSQL, Mongo) that click and type like a user and check the rows on the server afterwards: inline cell edit and Save, Esc then edit again, multi-row edit and Save, row delete and multi-select delete, insert, undo of each, switching view or tab while an edit is open, and the locked connection refusing all of them. Why: the live tests cover the database layer, but the path from a click to the write batch had no automated test, and the cell editor bug of a664bda lived exactly there. First check that the kittest release matches egui 0.37
-- [ ] 3. Line coverage in CI with `cargo llvm-cov` on the Linux job that runs the live servers, published with each run, so gaps are measured rather than guessed
 
 **Review (63aa8c0, step 3 lexer)**, opus, verified on postgres:18.6 inside `BEGIN READ ONLY`: 3 critical, 2 high, 2 medium, 3 low.
 - C1: field notation calls a function without `(`: `(42::bigint).pg_advisory_lock`, `x.pg_advisory_lock`, `('...'::text).dblink_exec` (dropped a table through dblink's own session), `(pid).pg_terminate_backend`. Fix: refuse a listed name after `.` too; `lo_` prefix becomes exact names.
@@ -86,7 +86,7 @@ As in PLAN.md "How this work is run" (delegation, reviews, merging, cleanup, env
 New pages in `docs/sql/designs.figcraft`, Workbench and Paper side by side:
 - **"Postgres · sidebar":** A, a tree database > schema > table; B, a database switcher with schemas as groups; C, a `schema.table` list per database with a schema filter.
 - **"Postgres · connection form":** the Postgres card enabled (port 5432, database, libpq sslmode), and a variant with a connection string paste.
-- **"Postgres · Advanced tab"** before v2 step 7.
+- **"Postgres · Advanced tab"** before v2 step 9.
 
 Step 8 waits for the user's pick.
 
@@ -150,13 +150,15 @@ Step 8 waits for the user's pick.
 | 11 | lead | CI live services, CLAUDE.md, README, screenshots against the frames, bench.py, whole-branch opus review, summary and known limits | docs, .github/workflows/ci.yml |
 
 **v2** (in order)
-1. **Structure editing.** Pure move of the MySQL emitter out of ddl.rs into `ddl_my.rs`; `Change`, `Sim`, staging and inverse groups stay shared. New `ddl_pg.rs`: `ALTER COLUMN TYPE .. USING col::t`, RENAME COLUMN, SET or DROP DEFAULT and NOT NULL, ADD or DROP CONSTRAINT, separate CREATE and DROP INDEX, COMMENT ON, identity (serial read as an owned sequence). sql_alter.rs hides positions and charset. DDL is transactional, so the plan and its undo each run in one transaction, with the `expect` snapshot checked inside it after `LOCK TABLE` and a `lock_timeout`.
-2. **Relations and FKs** through the same plan path; sql_rel.rs reused.
-3. **Triggers** as a function and trigger pair in one transaction, DROP then CREATE (13 has no CREATE OR REPLACE TRIGGER); undo replays `pg_get_functiondef` and `pg_get_triggerdef`; a warning when the function is shared by other triggers.
-4. **CSV import:** batches of `min(500, 65535 / cols)` rows, `ON CONFLICT (pk) DO NOTHING` or `DO UPDATE SET c = EXCLUDED.c`, undo keys from RETURNING, one transaction. Export: `stream_conn` takes `Conn`.
-5. **SQL dump** from the catalogs in `REPEATABLE READ READ ONLY`: schemas, enums, domains, sequences with setval, tables, INSERT batches, constraints, indexes, views, functions, triggers and comments via `pg_get_*def`. The script splitter gets a dollar-quote mode; `COPY FROM stdin` blocks from pg_dump files are refused. Grants, owners and inheritance are out of scope.
-6. **Create and drop:** a database outside a transaction on the default database's pool, evicting and closing the dropped database's pool and tabs first, `WITH (FORCE)` opt-in inside the typed confirm; schema CREATE and DROP [CASCADE]; a Postgres CREATE TABLE builder; a create undo checks emptiness and drops in the same transaction.
-7. **Advanced tab** (design first): time zone, search_path, statement and lock timeouts, application_name, and an init command limited to an allow-list of SETs. Never the read-only settings, role, session_authorization, client_encoding, standard_conforming_strings, DateStyle, IntervalStyle or bytea_output.
+1. **UI tests** of the critical paths with `egui_kittest` against the Docker servers (see Progress).
+2. **Line coverage** in CI with `cargo llvm-cov`.
+3. **Structure editing.** Pure move of the MySQL emitter out of ddl.rs into `ddl_my.rs`; `Change`, `Sim`, staging and inverse groups stay shared. New `ddl_pg.rs`: `ALTER COLUMN TYPE .. USING col::t`, RENAME COLUMN, SET or DROP DEFAULT and NOT NULL, ADD or DROP CONSTRAINT, separate CREATE and DROP INDEX, COMMENT ON, identity (serial read as an owned sequence). sql_alter.rs hides positions and charset. DDL is transactional, so the plan and its undo each run in one transaction, with the `expect` snapshot checked inside it after `LOCK TABLE` and a `lock_timeout`.
+4. **Relations and FKs** through the same plan path; sql_rel.rs reused.
+5. **Triggers** as a function and trigger pair in one transaction, DROP then CREATE (13 has no CREATE OR REPLACE TRIGGER); undo replays `pg_get_functiondef` and `pg_get_triggerdef`; a warning when the function is shared by other triggers.
+6. **CSV import:** batches of `min(500, 65535 / cols)` rows, `ON CONFLICT (pk) DO NOTHING` or `DO UPDATE SET c = EXCLUDED.c`, undo keys from RETURNING, one transaction. Export: `stream_conn` takes `Conn`.
+7. **SQL dump** from the catalogs in `REPEATABLE READ READ ONLY`: schemas, enums, domains, sequences with setval, tables, INSERT batches, constraints, indexes, views, functions, triggers and comments via `pg_get_*def`. The script splitter gets a dollar-quote mode; `COPY FROM stdin` blocks from pg_dump files are refused. Grants, owners and inheritance are out of scope.
+8. **Create and drop:** a database outside a transaction on the default database's pool, evicting and closing the dropped database's pool and tabs first, `WITH (FORCE)` opt-in inside the typed confirm; schema CREATE and DROP [CASCADE]; a Postgres CREATE TABLE builder; a create undo checks emptiness and drops in the same transaction.
+9. **Advanced tab** (design first): time zone, search_path, statement and lock timeouts, application_name, and an init command limited to an allow-list of SETs. Never the read-only settings, role, session_authorization, client_encoding, standard_conforming_strings, DateStyle, IntervalStyle or bytea_output.
 
 ### Watch out
 
