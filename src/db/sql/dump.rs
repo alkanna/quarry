@@ -536,10 +536,11 @@ impl Worker {
     /// Runs a script file, answering with `SqlJob`.
     #[allow(clippy::too_many_arguments)]
     pub fn sql_run_file(&self, req: u64, db: Db, schema: String, src: Source, read_only: bool, prog: Arc<Progress>, id: Arc<AtomicU64>, cancel: Arc<AtomicBool>) {
+        let database = db.pg_database();
         self.spawn_sql(db.conn, &schema.clone(), async move {
             let res = run_file(db, schema.clone(), src, read_only, prog, cancel, id.clone()).await;
             id.store(0, Ordering::SeqCst);
-            let res = res.map(|r| JobDone { msg: format!("Ran {} statements", r.statements), undo: None, schema: schema.clone(), table: None, tables_changed: true });
+            let res = res.map(|r| JobDone { msg: format!("Ran {} statements", r.statements), undo: None, schema: schema.clone(), database, table: None, tables_changed: true });
             Msg::SqlJob { req, res }
         });
     }

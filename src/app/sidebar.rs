@@ -714,7 +714,11 @@ impl App {
             SideAct::SqlUsers => return self.open_sql_users(conn),
             SideAct::NewTable(db) => return self.sql_new_table(conn, db),
             SideAct::SqlDrop(db, table, kind) => return self.sql_drop_ask(conn, db, table, kind),
-            SideAct::SqlImport(db, table) => return self.open_sql_import(conn, db, table),
+            SideAct::SqlImport(db, table) => {
+                // The schema the sidebar shows is the one the menu was opened on.
+                let schema = self.sel_schema(&Sel { conn, db: db.clone(), schema: String::new(), coll: table.clone() });
+                return self.open_sql_import(conn, db, schema, table);
+            }
             SideAct::SqlDump(db, table) => return self.open_sql_dump(conn, db, table),
             SideAct::SqlRunFile(db) => return self.open_sql_run_file(conn, db),
             a => a,
