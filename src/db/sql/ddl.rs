@@ -226,6 +226,8 @@ pub enum Change {
     /// `db` of the key is the table's own schema; a `ref_db` equal to it is written without a schema.
     AddFk(ForeignKey),
     DropFk(String),
+    /// PostgreSQL only: RENAME CONSTRAINT.
+    RenameFk { from: String, to: String },
 }
 
 impl Change {
@@ -242,6 +244,7 @@ impl Change {
             Change::RenameIndex { from, to, .. } => format!("Rename index {from} to {to}"),
             Change::AddFk(k) => format!("Add foreign key {}", k.name),
             Change::DropFk(n) => format!("Drop foreign key {n}"),
+            Change::RenameFk { from, to } => format!("Rename foreign key {from} to {to}"),
         }
     }
 }
@@ -459,7 +462,7 @@ pub const FK_ACTIONS: [&str; 4] = ["RESTRICT", "CASCADE", "SET NULL", "NO ACTION
 pub(super) struct Sim {
     pub(super) cols: Vec<(String, Result<ColDef, String>)>,
     pub(super) idx: Vec<IndexDef>,
-    fks: Vec<ForeignKey>,
+    pub(super) fks: Vec<ForeignKey>,
     /// PostgreSQL drops a column together with every index that holds it, puts a new column last and cannot place one.
     pg: bool,
     /// PostgreSQL: what the server drops with each column, as read from the catalog.
@@ -548,8 +551,18 @@ impl Sim {
             }
             Change::Drop(name) if self.pg => {
                 let i = self.at(name).ok_or_else(|| format!("Column {name} is not in the table."))?;
-                if let Some(k) = self.fks.iter().find(|k| k.cols.iter().any(|c| same_name(c, name))) {
-                    return Err(format!("Dropping {name} also drops the foreign key {}, which this editor cannot put back.", k.name));
+                // The server drops the table's own foreign keys that hold the column, and refuses to drop a column that a
+                // key of another table points at, so only these have to come back.
+                let (fks_gone, fks_keep): (Vec<ForeignKey>, Vec<ForeignKey>) = std::mem::take(&mut self.fks).into_iter().partition(|k| k.cols.iter().any(|c| same_name(c, name)));
+                self.fks = fks_keep;
+                for k in &fks_gone {
+                    if !k.opaque.is_empty() {
+                        return Err(format!("Dropping {name} also drops the foreign key {}, which this editor cannot put back: {}.", k.name, k.opaque));
+                    }
+                    // The column returns empty, and MATCH FULL refuses a key that is partly NULL.
+                    if k.match_full && k.cols.len() > 1 {
+                        return Err(format!("Dropping {name} also drops the foreign key {}, which is MATCH FULL over several columns: it could not be added back with this column empty.", k.name));
+                    }
                 }
                 let (_, old) = self.cols.remove(i);
                 let old = old?;
@@ -564,10 +577,11 @@ impl Sim {
                     "key" => !gone.iter().any(|ix| same_name(&ix.name, &d.name) && !ix.functional && ix.constraint),
                     "default" => false,
                     "sequence" => !old.auto_increment,
+                    "constraint" => !(d.own && fks_gone.iter().any(|k| same_name(&k.name, &d.name))),
                     _ => true,
                 }).map(|d| d.what.as_str()).collect();
                 if !lost.is_empty() {
-                    return Err(format!("Dropping {name} also drops {}, which this editor cannot put back.", lost.join(", ")));
+                    return Err(format!("Dropping {name} also drops {}, which this editor cannot put back. A foreign key of another table that points at the column makes the server refuse the drop instead.", lost.join(", ")));
                 }
                 // A NOT NULL column with nothing to fill the rows with cannot come back NOT NULL on a table that has rows,
                 // and a primary key needs it, so the column returns nullable and without its primary key.
@@ -579,7 +593,15 @@ impl Sim {
                 }
                 // The column comes back last: PostgreSQL has no column order to restore it to.
                 let mut back = vec![Change::Add { def: back_def, pos: Pos::Keep }];
+                // A key of this table on its own key needs that key back first, and it is not when the primary key is skipped.
+                for k in fks_gone.iter().filter(|k| same_name(&k.ref_table, &k.table) && same_name(&k.ref_db, &k.db)) {
+                    let covered = |ix: &IndexDef| matches!(ix.kind, IndexKind::Unique | IndexKind::Primary) && !ix.functional && ix.cols.len() == k.ref_cols.len() && ix.cols.iter().all(|c| k.ref_cols.iter().any(|r| same_name(r, &c.name)));
+                    if !gone.iter().any(covered) && !self.idx.iter().any(covered) {
+                        return Err(format!("Dropping {name} also drops the foreign key {}, which points at a key of this table that cannot come back with it.", k.name));
+                    }
+                }
                 back.extend(gone.into_iter().map(Change::AddIndex));
+                back.extend(fks_gone.into_iter().map(Change::AddFk));
                 Ok(back)
             }
             Change::Drop(name) => {
@@ -651,7 +673,18 @@ impl Sim {
             }
             Change::DropFk(name) => {
                 let i = self.fk_at(name).ok_or_else(|| format!("Foreign key {name} is not on the table."))?;
+                if !self.fks[i].opaque.is_empty() {
+                    return Err(format!("Foreign key {name} cannot be written back: {}.", self.fks[i].opaque));
+                }
                 Ok(vec![Change::AddFk(self.fks.remove(i))])
+            }
+            Change::RenameFk { from, to } => {
+                let i = self.fk_at(from).ok_or_else(|| format!("Foreign key {from} is not on the table."))?;
+                if !same_name(from, to) && self.fk_at(to).is_some() {
+                    return Err(format!("The table already has a foreign key called {to}."));
+                }
+                self.fks[i].name = to.clone();
+                Ok(vec![Change::RenameFk { from: to.clone(), to: from.clone() }])
             }
         }
     }
@@ -707,7 +740,8 @@ pub fn expand(d: Dialect, st: &Structure, changes: &[Change]) -> Vec<Change> {
                     }
                 }
             }
-            Change::AddFk(fk) if !sim.serves(&fk.cols) => {
+            // PostgreSQL does not make an index for a key, and does not need one to hold it.
+            Change::AddFk(fk) if d != Dialect::Postgres && !sim.serves(&fk.cols) => {
                 let taken = |n: &str| sim.idx.iter().any(|x| same_name(&x.name, n));
                 let name = if taken(&fk.name) { format!("{}_idx", fk.name) } else { fk.name.clone() };
                 let ix = IndexDef { name, kind: IndexKind::Index, cols: fk.cols.iter().map(|c| IdxCol { name: c.clone(), prefix: None, desc: false }).collect(), ..Default::default() };
@@ -716,7 +750,7 @@ pub fn expand(d: Dialect, st: &Structure, changes: &[Change]) -> Vec<Change> {
             }
             _ => {}
         }
-        let backing = if let Change::DropFk(n) = c { sim.backing_index(n) } else { None };
+        let backing = if let (Change::DropFk(n), true) = (c, d != Dialect::Postgres) { sim.backing_index(n) } else { None };
         let _ = sim.apply(c);
         out.push(c.clone());
         if let Some(ix) = backing {
@@ -747,6 +781,10 @@ pub struct AlterUndo {
     pub fks: Vec<String>,
     /// `snapshot` of those right after the change ran, filled by the worker.
     pub expect: Vec<(String, Option<String>)>,
+    /// PostgreSQL: the other tables the steps lock and rely on, and the keys they add whose rows are checked first.
+    /// `seen` of a table is filled by the worker, from how the table looked right after the change ran.
+    pub refs: Vec<RefCheck>,
+    pub orphans: Vec<ForeignKey>,
     /// The inverse changes `steps` were written from, one group per step, kept so the steps can be written again
     /// when the session's sql_mode changes before the undo runs.
     pub groups: Vec<Vec<Change>>,
@@ -788,6 +826,23 @@ pub struct Expect {
     pub all: Option<Vec<String>>,
     /// PostgreSQL: the type texts the plan carries from the person, which the server must resolve as types.
     pub types: Vec<String>,
+    /// PostgreSQL: the other tables the plan locks and relies on (the parents of the keys it adds or drops).
+    pub refs: Vec<RefCheck>,
+    /// PostgreSQL: the keys it adds, whose existing rows are checked under the lock so the person sees the ones that fail.
+    pub orphans: Vec<ForeignKey>,
+}
+
+/// PostgreSQL: a table other than the one being changed that a plan locks. A key that is added relies on the referenced
+/// columns and the unique indexes there (`seen` is how they looked, `ddl_pg::ref_state`), and a key that is dropped only
+/// needs the lock, which PostgreSQL takes on both tables of a key.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RefCheck {
+    pub schema: String,
+    pub table: String,
+    pub cols: Vec<String>,
+    /// A key is being dropped: ACCESS EXCLUSIVE. Adding one needs SHARE ROW EXCLUSIVE.
+    pub exclusive: bool,
+    pub seen: Option<Vec<String>>,
 }
 
 pub fn plan(d: Dialect, version: &str, m: Mode, table: &str, st: &Structure, staged: &[Change]) -> Result<Plan, String> {
@@ -809,7 +864,7 @@ fn undo_of(d: Dialect, version: &str, m: Mode, table: &str, before: &Structure, 
     let steps = groups.iter().map(|g| alter(d, version, m, table, g)).collect::<Result<Vec<_>, _>>()?;
     let loss = undo_loss(&sim, &groups);
     let (cols, idx, fks) = touched(&groups);
-    Ok(AlterUndo { steps, label: String::new(), loss, mode: m, cols, idx, fks, expect: Vec::new(), groups })
+    Ok(AlterUndo { steps, label: String::new(), loss, mode: m, cols, idx, fks, expect: Vec::new(), refs: Vec::new(), orphans: Vec::new(), groups })
 }
 
 /// The statements that put the table back, from the structure read before the changes ran. Err says why
@@ -903,12 +958,33 @@ pub(super) fn touched(groups: &[Vec<Change>]) -> (Vec<String>, Vec<String>, Vec<
                 add(&mut fks, n);
                 None
             }
+            Change::RenameFk { from, to } => {
+                add(&mut fks, from);
+                add(&mut fks, to);
+                None
+            }
         };
         if let Some(Pos::After(n)) = pos {
             add(&mut cols, n);
         }
     }
     (cols, idx, fks)
+}
+
+/// A foreign key in one comparable line, with everything the editor can write back.
+pub(super) fn fk_line(k: &ForeignKey) -> String {
+    format!("{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}", k.name, k.cols.join(","), k.ref_db, k.ref_table, k.ref_cols.join(","), k.on_update, k.on_delete, k.match_full, k.deferrable, k.deferred, k.not_valid, k.comment)
+}
+
+/// PostgreSQL: the referenced columns of a parent table and its unique indexes, in one comparable list. A key that is added
+/// leans on both, so the plan keeps how they looked and the transaction compares them again under the lock.
+pub fn ref_state(st: &Structure, cols: &[String]) -> Vec<String> {
+    let mut v: Vec<String> = cols.iter().map(|n| match st.columns.iter().find(|c| same_name(&c.name, n)) {
+        Some(c) => format!("column {}|{}|{:?}", c.name, c.full_type, c.collation),
+        None => format!("column {n}|missing"),
+    }).collect();
+    v.extend(st.indexes.iter().filter(|i| i.unique).map(|i| format!("unique {}|{}|{}|{}", i.name, i.def, i.deferrable, i.deferred)));
+    v
 }
 
 /// How the server shows each named column, index and foreign key, or None when it is not there. Two snapshots are
@@ -925,7 +1001,7 @@ pub fn snapshot(st: &Structure, cols: &[String], idx: &[String], fks: &[String])
     };
     let fk = |n: &String| {
         let k = st.foreign_keys.iter().find(|k| same_name(&k.name, n));
-        (format!("foreign key {n}"), k.map(|k| format!("{}|{}|{}|{}|{}|{}|{}", k.name, k.cols.join(","), k.ref_db, k.ref_table, k.ref_cols.join(","), k.on_update, k.on_delete)))
+        (format!("foreign key {n}"), k.map(fk_line))
     };
     cols.iter().map(col).chain(idx.iter().map(index)).chain(fks.iter().map(fk)).collect()
 }
@@ -937,8 +1013,16 @@ pub fn warnings(before: &Structure, changes: &[Change]) -> Vec<String> {
     let sim = Sim::of(before);
     for c in changes {
         if let Change::DropFk(n) = c {
-            if let Some(ix) = fk_sim.backing_index(n) {
+            if let Some(ix) = fk_sim.backing_index(n).filter(|_| before.pg_schema.is_none()) {
                 out.push(format!("Dropping {n} also drops the index {ix}, which was made for it. Undo brings both back."));
+            }
+        }
+        if let (Change::AddFk(k), Some(_)) = (c, &before.pg_schema) {
+            if !fk_sim.serves(&k.cols) {
+                out.push(format!("PostgreSQL does not index the columns of a foreign key. Without an index on ({}), deleting or changing a row of {} scans this table.", k.cols.join(", "), k.ref_table));
+            }
+            if k.not_valid {
+                out.push(format!("{} is added NOT VALID: the rows already in the table are not checked, and undo brings back the same unchecked key.", k.name));
             }
         }
         let _ = fk_sim.apply(c);
@@ -1046,21 +1130,65 @@ pub fn fk_pair_problem(child_table: &str, child: &Column, parent_table: &str, pa
     }
 }
 
+/// The comparison family of a PostgreSQL column type, for the types the server compares across names: the integers, the
+/// numeric types, the floats, text and varchar, and the date and time types of one family. A type outside the list (a domain,
+/// an enum, an extension type) has none, so a key on it is left to the server.
+fn pg_family(full_type: &str) -> Option<&'static str> {
+    let base = full_type.split('(').next().unwrap_or("").trim().to_ascii_lowercase();
+    Some(match base.as_str() {
+        "smallint" | "integer" | "bigint" => "int",
+        "numeric" | "decimal" => "numeric",
+        "real" | "double precision" => "float",
+        "text" | "character varying" => "text",
+        "character" => "bpchar",
+        "date" | "timestamp without time zone" | "timestamp with time zone" => "datetime",
+        "uuid" => "uuid",
+        "boolean" => "boolean",
+        "bytea" => "bytea",
+        "time without time zone" => "time",
+        "interval" => "interval",
+        _ => return None,
+    })
+}
+
+/// `fk_pair_problem` for PostgreSQL: a key needs types that the server can compare with `=`, which is any two integer
+/// sizes, an integer against a numeric, text against varchar, and the same type otherwise. Types it cannot place are left
+/// to the server's own answer.
+pub fn fk_pair_problem_pg(child_table: &str, child: &Column, parent_table: &str, parent: &Column) -> Option<String> {
+    let (fc, fp) = (pg_family(&child.full_type)?, pg_family(&parent.full_type)?);
+    let numbers = matches!((fc, fp), ("int", "numeric") | ("numeric", "int"));
+    if fc == fp || numbers {
+        return None;
+    }
+    Some(format!("{child_table}.{} is {} but {parent_table}.{} is {}. A foreign key needs two types that PostgreSQL can compare, such as two integers or two text types.", child.name, child.full_type, parent.name, parent.full_type))
+}
+
 /// The first problem with a whole key, before the server is asked: column pairs that do not fit, SET NULL on a
 /// column that cannot be NULL, and a referenced side with no index to lean on. `whole_key` is MySQL 8.4's
 /// restrict_fk_on_non_standard_key: the referenced columns must then be exactly the primary key or a unique key,
 /// where older servers take any index that starts with them.
 pub fn fk_problem(own: &Structure, table: &str, parent: &Structure, fk: &ForeignKey, whole_key: bool) -> Option<String> {
     let find = |st: &Structure, n: &str| st.columns.iter().find(|c| same_name(&c.name, n)).cloned();
+    let pg = own.pg_schema.is_some();
     for (a, b) in fk.cols.iter().zip(&fk.ref_cols) {
         let (Some(ca), Some(cb)) = (find(own, a), find(parent, b)) else { return Some("A picked column is not in its table any more.".into()) };
-        if let Some(p) = fk_pair_problem(table, &ca, &fk.ref_table, &cb) {
+        if let Some(p) = if pg { fk_pair_problem_pg(table, &ca, &fk.ref_table, &cb) } else { fk_pair_problem(table, &ca, &fk.ref_table, &cb) } {
             return Some(p);
         }
         let set_null = fk.on_delete.eq_ignore_ascii_case("SET NULL") || fk.on_update.eq_ignore_ascii_case("SET NULL");
         if set_null && !ca.nullable {
             return Some(format!("SET NULL needs a column that allows NULL, and {table}.{a} does not."));
         }
+    }
+    if pg {
+        let twice = |v: &[String]| v.iter().enumerate().find(|(i, c)| v[..*i].iter().any(|o| same_name(o, c))).map(|(_, c)| c.clone());
+        if let Some(c) = twice(&fk.cols).or_else(|| twice(&fk.ref_cols)) {
+            return Some(format!("The column {c} is picked twice in one key."));
+        }
+        // PostgreSQL wants a primary key or unique constraint (or a unique index) on exactly the referenced columns, in any
+        // order. A condition on the index is not visible here, so the server has the last word on that.
+        let exact = parent.indexes.iter().any(|ix| ix.unique && !ix.deferrable && ix.cols.len() == fk.ref_cols.len() && ix.cols.iter().all(|c| c.expr.is_none() && fk.ref_cols.iter().any(|r| same_name(r, &c.name))));
+        return (!exact).then(|| format!("PostgreSQL needs a primary key or unique constraint on exactly ({}) of {}, and there is none. Add one there first.", fk.ref_cols.join(", "), fk.ref_table));
     }
     let starts = |ix: &Index| ix.cols.len() >= fk.ref_cols.len() && ix.cols.iter().zip(&fk.ref_cols).all(|(x, y)| x.prefix.is_none() && x.expr.is_none() && same_name(&x.name, y));
     if whole_key {
@@ -1086,6 +1214,18 @@ pub fn orphans_sql(d: Dialect, schema: &str, table: &str, fk: &ForeignKey) -> St
     let present = set("c", &fk.cols).iter().map(|c| format!("{c} IS NOT NULL")).collect::<Vec<_>>().join(" AND ");
     let same = set("c", &fk.cols).iter().zip(set("p", &fk.ref_cols)).map(|(a, b)| format!("{b} = {a}")).collect::<Vec<_>>().join(" AND ");
     format!("SELECT COUNT(*) AS n FROM {} c WHERE {present} AND NOT EXISTS (SELECT 1 FROM {parent} p WHERE {same})", d.qualified(schema, table))
+}
+
+/// A few of the rows `orphans_sql` counts, each as its key values written as text, for the message that shows the person
+/// which rows stop the key from being added. PostgreSQL only. It is a subselect so the LIMIT the metadata reads append
+/// still fits.
+pub fn orphan_sample_sql(d: Dialect, schema: &str, table: &str, fk: &ForeignKey, limit: u32) -> String {
+    let q = |n: &str| d.quote_ident(n);
+    let parent = d.qualified(if fk.ref_db.is_empty() { schema } else { &fk.ref_db }, &fk.ref_table);
+    let present = fk.cols.iter().map(|c| format!("c.{} IS NOT NULL", q(c))).collect::<Vec<_>>().join(" AND ");
+    let same = fk.cols.iter().zip(&fk.ref_cols).map(|(a, b)| format!("p.{} = c.{}", q(b), q(a))).collect::<Vec<_>>().join(" AND ");
+    let shown = fk.cols.iter().enumerate().map(|(i, c)| format!("c.{}::text AS k{i}", q(c))).collect::<Vec<_>>().join(", ");
+    format!("SELECT * FROM (SELECT {shown} FROM {} c WHERE {present} AND NOT EXISTS (SELECT 1 FROM {parent} p WHERE {same}) LIMIT {limit}) s", d.qualified(schema, table))
 }
 
 /// What the orphan count depends on: the name and the actions of a key do not change which rows point at nothing,
@@ -1794,6 +1934,27 @@ fn trigger_undo_action(conn: u64, schema: &str, table: &str, u: TrigUndo) -> Und
     UndoAction { at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database: String::new(), cols: Vec::new(), undo: super::write::SqlUndo::Trigger(Box::new(u)) } }
 }
 
+/// The count of orphan rows on PostgreSQL and a few of them, from reads of their own.
+async fn pg_orphans(db: &Db, schema: &str, table: &str, fk: &ForeignKey) -> (Res<u64>, Vec<String>) {
+    let n = match db.meta(schema, &orphans_sql(db.dialect, schema, table, fk), []).await {
+        Ok(rows) => rows.first().and_then(|r| super::structure::num(r, "n")).unwrap_or(0),
+        Err(e) => return (Err(e), Vec::new()),
+    };
+    if n == 0 {
+        return (Ok(0), Vec::new());
+    }
+    let sample = db.meta(schema, &orphan_sample_sql(db.dialect, schema, table, fk, ORPHAN_SAMPLE), []).await.map(|rows| rows.iter().map(|r| orphan_row(r, fk.cols.len())).collect()).unwrap_or_default();
+    (Ok(n), sample)
+}
+
+/// How many orphan rows are shown.
+pub const ORPHAN_SAMPLE: u32 = 5;
+
+/// One sampled row as `(v1, v2)`.
+pub(super) fn orphan_row(r: &super::exec::SqlRow, n: usize) -> String {
+    format!("({})", (0..n).map(|i| super::worker::text(r, &format!("k{i}")).unwrap_or_else(|| "NULL".into())).collect::<Vec<_>>().join(", "))
+}
+
 impl Worker {
     /// Saves, replaces or drops a trigger written for the sql_mode `m`. The definition it replaces is read first with
     /// SHOW CREATE TRIGGER, with the session it was made in: it is what a refused MySQL swap and undo put back.
@@ -1815,13 +1976,17 @@ impl Worker {
     /// How many rows of `table` hold a key that `fk` would find nothing for.
     pub fn sql_orphans(&self, req: u64, db: Db, schema: String, table: String, fk: ForeignKey) {
         self.spawn(async move {
-            let pool = match db.my_pool() { Ok(p) => p, Err(err) => return Msg::SqlOrphans { req, res: Err(err) } };
+            if db.dialect == Dialect::Postgres {
+                let (res, sample) = pg_orphans(&db, &schema, &table, &fk).await;
+                return Msg::SqlOrphans { req, res, sample };
+            }
+            let pool = match db.my_pool() { Ok(p) => p, Err(err) => return Msg::SqlOrphans { req, res: Err(err), sample: Vec::new() } };
             let sql = orphans_sql(db.dialect, &schema, &table, &fk);
             let t = Instant::now();
             let res = sqlx::query(&sql).fetch_one(pool).await;
             db.note(&schema, &sql, t, &res);
             let res = res.map_err(se).map(|r| super::structure::num(&r, "n").unwrap_or(0));
-            Msg::SqlOrphans { req, res }
+            Msg::SqlOrphans { req, res, sample: Vec::new() }
         });
     }
 
@@ -2329,7 +2494,7 @@ mod tests {
     }
 
     fn fk(name: &str, cols: &[&str], rt: &str, rc: &[&str]) -> ForeignKey {
-        ForeignKey { name: name.into(), db: "shop".into(), table: "orders".into(), cols: cols.iter().map(|c| (*c).into()).collect(), ref_db: "shop".into(), ref_table: rt.into(), ref_cols: rc.iter().map(|c| (*c).into()).collect(), on_update: "CASCADE".into(), on_delete: "RESTRICT".into() }
+        ForeignKey { name: name.into(), db: "shop".into(), table: "orders".into(), cols: cols.iter().map(|c| (*c).into()).collect(), ref_db: "shop".into(), ref_table: rt.into(), ref_cols: rc.iter().map(|c| (*c).into()).collect(), on_update: "CASCADE".into(), on_delete: "RESTRICT".into(), ..Default::default() }
     }
 
     fn fcol(name: &str, ty: &str, coll: Option<&str>) -> Column {
@@ -2457,6 +2622,44 @@ mod tests {
         let unindexed = Structure { indexes: vec![], ..parent.clone() };
         assert!(fk_problem(&own, "orders", &unindexed, &k, false).unwrap().contains("no index"));
         assert!(fk_problem(&own, "orders", &parent, &ForeignKey { cols: vec!["gone".into()], ..k }, false).is_some());
+    }
+
+    #[test]
+    fn postgres_keys_need_types_the_server_compares_and_a_unique_parent() {
+        let pgcol = |n: &str, t: &str| Column { name: n.into(), full_type: t.into(), ..fcol(n, t, None) };
+        let p = |a: &str, b: &str| fk_pair_problem_pg("orders", &pgcol("c", a), "customers", &pgcol("id", b));
+        // every integer size meets every other, and an integer meets a numeric, text meets varchar
+        assert!(p("integer", "bigint").is_none() && p("smallint", "integer").is_none() && p("integer", "numeric(10,2)").is_none());
+        assert!(p("character varying(40)", "text").is_none() && p("date", "timestamp with time zone").is_none());
+        // a different family is named with its types
+        for (a, b) in [("integer", "text"), ("uuid", "integer"), ("boolean", "integer"), ("text", "character(3)"), ("bytea", "text")] {
+            assert!(p(a, b).unwrap().contains("can compare"), "{a} and {b}");
+        }
+        // a domain, an enum or an extension type is the server's to judge
+        assert!(p("my_domain", "integer").is_none() && p("mood", "mood").is_none());
+        let own = Structure { columns: vec![pgcol("a", "integer"), Column { nullable: true, ..pgcol("b", "integer") }, pgcol("c", "text")], pg_schema: Some("public".into()), ..Default::default() };
+        let key = |name: &str, cols: &[&str]| Index { name: name.into(), unique: true, cols: cols.iter().map(|c| IndexCol { name: (*c).into(), ..Default::default() }).collect(), ..Default::default() };
+        let parent = Structure { columns: vec![pgcol("id", "integer"), pgcol("code", "integer"), pgcol("note", "text")], indexes: vec![key("p_pkey", &["id"]), key("p_pair", &["id", "code"]), Index { unique: false, ..key("p_note", &["note"]) }], pg_schema: Some("public".into()), ..Default::default() };
+        let k = fk("k", &["a"], "p", &["id"]);
+        assert!(fk_problem(&own, "orders", &parent, &k, false).is_none());
+        // the referenced columns must be exactly a unique key, in any order, and a plain index does not count
+        assert!(fk_problem(&own, "orders", &parent, &fk("k", &["a", "b"], "p", &["code", "id"]), false).is_none());
+        assert!(fk_problem(&own, "orders", &parent, &fk("k", &["a"], "p", &["code"]), false).unwrap().contains("exactly (code)"));
+        assert!(fk_problem(&own, "orders", &parent, &fk("k", &["c"], "p", &["note"]), false).unwrap().contains("primary key or unique"));
+        let deferrable = Structure { indexes: vec![Index { deferrable: true, ..key("p_pkey", &["id"]) }], ..parent.clone() };
+        assert!(fk_problem(&own, "orders", &deferrable, &k, false).is_some(), "a deferrable unique constraint cannot be referenced");
+        assert!(fk_problem(&own, "orders", &parent, &fk("k", &["a", "a"], "p", &["id", "code"]), false).unwrap().contains("twice"));
+        let set_null = ForeignKey { on_delete: "SET NULL".into(), ..k.clone() };
+        assert!(fk_problem(&own, "orders", &parent, &set_null, false).unwrap().contains("allows NULL"));
+        // MySQL's word for a key on part of a key does not reach PostgreSQL, where the whole key is always needed
+        assert!(fk_problem(&own, "orders", &parent, &k, true).is_none());
+    }
+
+    #[test]
+    fn the_rows_that_stop_a_key_are_selected_as_text() {
+        let k = ForeignKey { ref_db: "o\"b".into(), ..fk("n", &["a", "b"], "p", &["x", "y"]) };
+        assert_eq!(orphan_sample_sql(Dialect::Postgres, "sh", "t", &k, 5), "SELECT * FROM (SELECT c.\"a\"::text AS k0, c.\"b\"::text AS k1 FROM \"sh\".\"t\" c WHERE c.\"a\" IS NOT NULL AND c.\"b\" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM \"o\"\"b\".\"p\" p WHERE p.\"x\" = c.\"a\" AND p.\"y\" = c.\"b\") LIMIT 5) s");
+        assert!(orphans_sql(Dialect::Postgres, "sh", "t", &k).starts_with("SELECT COUNT(*) AS n FROM \"sh\".\"t\" c WHERE"));
     }
 
     #[test]
@@ -3456,7 +3659,7 @@ mod live_rel {
     }
 
     fn key(name: &str, table: &str, cols: &[&str], ref_db: &str, ref_table: &str, ref_cols: &[&str]) -> ForeignKey {
-        ForeignKey { name: name.into(), db: "quarry_rt".into(), table: table.into(), cols: cols.iter().map(|c| (*c).into()).collect(), ref_db: ref_db.into(), ref_table: ref_table.into(), ref_cols: ref_cols.iter().map(|c| (*c).into()).collect(), on_update: "CASCADE".into(), on_delete: "RESTRICT".into() }
+        ForeignKey { name: name.into(), db: "quarry_rt".into(), table: table.into(), cols: cols.iter().map(|c| (*c).into()).collect(), ref_db: ref_db.into(), ref_table: ref_table.into(), ref_cols: ref_cols.iter().map(|c| (*c).into()).collect(), on_update: "CASCADE".into(), on_delete: "RESTRICT".into(), ..Default::default() }
     }
 
     fn foreign_keys(var: &str) {

@@ -112,9 +112,9 @@ impl App {
                         (s.cols, s.pk, s.estimated, s.matched) = (cols, pk, estimated, matched);
                     }
                 }
-                Msg::SqlOrphans { req, res } => {
+                Msg::SqlOrphans { req, res, sample } => {
                     if let Some(Modal::FkEdit(f)) = self.modal.as_mut() {
-                        f.orphans_done(req, res);
+                        f.orphans_done(req, res, sample);
                     }
                 }
                 Msg::SqlFkRules { req, strict } => {

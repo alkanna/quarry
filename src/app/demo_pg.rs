@@ -356,7 +356,7 @@ fn orders_structure() -> Structure {
         Column { name: name.into(), full_type: ty.into(), nullable, key: key.into(), default, default_expr, extra: extra.into(), comment: comment.into(), kind: Some(Kind::from_pg(ty.split('(').next().unwrap_or(ty), cat, typtype)), default_raw: raw.map(Into::into), ..Default::default() }
     };
     let ix = |name: &str, unique: bool, cols: &[(&str, bool)], constraint: bool, def: &str| Index { name: name.into(), unique, cols: cols.iter().map(|(n, d)| IndexCol { name: (*n).into(), desc: *d, ..Default::default() }).collect(), kind: "btree".into(), def: def.into(), constraint, ..Default::default() };
-    let fk = |name: &str, table: &str, c: &str, rt: &str, rc: &str, del: &str| ForeignKey { name: name.into(), db: SCHEMA.into(), table: table.into(), cols: vec![c.into()], ref_db: SCHEMA.into(), ref_table: rt.into(), ref_cols: vec![rc.into()], on_update: "NO ACTION".into(), on_delete: del.into() };
+    let fk = |name: &str, table: &str, c: &str, rt: &str, rc: &str, del: &str| ForeignKey { name: name.into(), db: SCHEMA.into(), table: table.into(), cols: vec![c.into()], ref_db: SCHEMA.into(), ref_table: rt.into(), ref_cols: vec![rc.into()], on_update: "NO ACTION".into(), on_delete: del.into(), ..Default::default() };
     let constraint = |name: &str, kind: char, def: &str| Constraint { name: name.into(), kind, def: def.into() };
     let mut st = Structure {
         columns: vec![

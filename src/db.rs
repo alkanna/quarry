@@ -241,7 +241,7 @@ pub enum Msg {
     /// refused undo hands back.
     SqlUserDone { conn: u64, account: sql::users::Account, op: sql::users::Op, res: Res<String>, undo: Vec<UndoAction> },
     /// How many rows of a table point at nothing for a foreign key being added. Answers the open dialog by `req`.
-    SqlOrphans { req: u64, res: Res<u64> },
+    SqlOrphans { req: u64, res: Res<u64>, sample: Vec<String> },
     /// Whether the server takes a foreign key only on a whole primary or unique key. Answers the open dialog by `req`.
     SqlFkRules { req: u64, strict: bool },
     /// Every table, view and column of one database, for SQL autocomplete.

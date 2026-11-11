@@ -100,6 +100,8 @@ pub struct ColDep {
     pub name: String,
     /// The server's words for the object, for the message that names it.
     pub what: String,
+    /// A constraint of this table itself, as opposed to a foreign key of another table that points at the column.
+    pub own: bool,
 }
 
 /// A PostgreSQL primary key, unique, check or exclusion constraint, in the words of `pg_get_constraintdef`. Foreign
@@ -126,6 +128,19 @@ pub struct ForeignKey {
     pub ref_cols: Vec<String>,
     pub on_update: String,
     pub on_delete: String,
+    /// PostgreSQL: MATCH FULL, DEFERRABLE, INITIALLY DEFERRED, and NOT VALID (the rows that were there when it was added
+    /// were never checked). All false on MySQL.
+    pub match_full: bool,
+    pub deferrable: bool,
+    pub deferred: bool,
+    pub not_valid: bool,
+    /// PostgreSQL: the comment on the constraint.
+    pub comment: String,
+    /// PostgreSQL: why this key cannot be written back (an ON DELETE column list, PERIOD, NOT ENFORCED), empty when it can.
+    pub opaque: String,
+    /// PostgreSQL: the referenced table's key columns and unique indexes as the dialog read them (`ddl_pg::ref_state`),
+    /// which the transaction must find again after it holds the lock. Empty for a key read from the catalog.
+    pub ref_seen: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -351,7 +366,12 @@ pub(super) fn indexes(rows: &[SqlRow]) -> Vec<Index> {
 }
 
 pub(super) fn col_deps(rows: &[SqlRow]) -> Vec<ColDep> {
-    rows.iter().map(|r| ColDep { col: s(r, "col"), kind: s(r, "kind"), name: s(r, "name"), what: s(r, "what") }).collect()
+    rows.iter().map(|r| ColDep { col: s(r, "col"), kind: s(r, "kind"), name: s(r, "name"), what: s(r, "what"), own: flag(r, "own") }).collect()
+}
+
+/// A 0 or 1 column that MySQL's key query does not have, which reads as false there.
+fn flag(r: &SqlRow, name: &str) -> bool {
+    r.int(name).is_some_and(|n| n != 0)
 }
 
 /// One row per key column, ordered by constraint and then position.
@@ -363,7 +383,7 @@ pub(super) fn foreign_keys(rows: &[SqlRow]) -> Vec<ForeignKey> {
             k.cols.push(s(r, "col"));
             k.ref_cols.push(s(r, "ref_col"));
         } else {
-            out.push(ForeignKey { name, db, table, cols: vec![s(r, "col")], ref_db: s(r, "ref_db"), ref_table: s(r, "ref_tbl"), ref_cols: vec![s(r, "ref_col")], on_update: s(r, "on_update"), on_delete: s(r, "on_delete") });
+            out.push(ForeignKey { name, db, table, cols: vec![s(r, "col")], ref_db: s(r, "ref_db"), ref_table: s(r, "ref_tbl"), ref_cols: vec![s(r, "ref_col")], on_update: s(r, "on_update"), on_delete: s(r, "on_delete"), match_full: flag(r, "match_full"), deferrable: flag(r, "defer_ok"), deferred: flag(r, "defer_init"), not_valid: flag(r, "not_valid"), comment: s(r, "comment"), opaque: s(r, "opaque"), ref_seen: Vec::new() });
         }
     }
     out
@@ -578,10 +598,19 @@ pub fn pg_create_table(schema: &str, table: &str, st: &Structure) -> String {
     for fk in &st.foreign_keys {
         let list = |v: &[String]| v.iter().map(|c| q(c)).collect::<Vec<_>>().join(", ");
         let mut l = format!("CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})", q(&fk.name), list(&fk.cols), Dialect::Postgres.qualified(&fk.ref_db, &fk.ref_table), list(&fk.ref_cols));
+        if fk.match_full {
+            l.push_str(" MATCH FULL");
+        }
         for (what, rule) in [("UPDATE", &fk.on_update), ("DELETE", &fk.on_delete)] {
             if !rule.is_empty() && rule != "NO ACTION" {
                 l.push_str(&format!(" ON {what} {rule}"));
             }
+        }
+        if fk.deferrable {
+            l.push_str(if fk.deferred { " DEFERRABLE INITIALLY DEFERRED" } else { " DEFERRABLE" });
+        }
+        if fk.not_valid {
+            l.push_str(" NOT VALID");
         }
         lines.push(l);
     }

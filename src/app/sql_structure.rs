@@ -59,6 +59,7 @@ pub(super) enum Act {
     DropColumn(usize),
     MoveColumn(usize, isize),
     NewRelation,
+    EditRelation(usize),
     DropRelation(usize),
     NewTrigger,
     DropTrigger(String),
@@ -162,7 +163,8 @@ impl App {
             Act::DuplicateColumn(i) => self.duplicate_column(i),
             Act::DropColumn(i) => self.stage_drop_column(i),
             Act::MoveColumn(i, by) => self.stage_move_column(i, by),
-            Act::NewRelation => self.open_fk_form(),
+            Act::NewRelation => self.open_fk_form(None),
+            Act::EditRelation(i) => self.open_fk_form(Some(i)),
             Act::DropRelation(i) => self.stage_drop_fk(i),
             Act::NewTrigger => self.trig_new(),
             Act::DropTrigger(n) => self.trig_ask_drop(n),
@@ -343,12 +345,20 @@ impl App {
         let (staged, mut memo, applying) = self.take_staged();
         let dropped: Vec<String> = staged.iter().filter_map(|c| if let Change::DropFk(n) = c { Some(n.to_ascii_lowercase()) } else { None }).collect();
         let fk = sel[2].filter(|i| *i < d.foreign_keys.len());
+        // Changing a key is a drop and an add in one transaction, which only PostgreSQL does.
+        let pg_rel = d.pg_schema.is_some();
         let mut left = Vec::new();
         edit_row_with(ui, editable, if editable { "" } else { why }, |ui, on| {
             if quiet_enabled(ui, on, "+ Relation").on_hover_text("Add a foreign key").on_disabled_hover_text(why).clicked() {
                 left.push(Act::NewRelation);
             }
             let hint = if on { "Select a relation first" } else { why };
+            if pg_rel {
+                let r = quiet_enabled(ui, on && fk.is_some(), "Edit").on_hover_text("Change the selected foreign key").on_disabled_hover_text(hint);
+                if let (true, Some(i)) = (r.clicked(), fk) {
+                    left.push(Act::EditRelation(i));
+                }
+            }
             let r = quiet_enabled(ui, on && fk.is_some(), "Delete").on_hover_text("Drop the selected foreign key").on_disabled_hover_text(hint);
             if let (true, Some(i)) = (r.clicked(), fk) {
                 left.push(Act::DropRelation(i));
@@ -379,6 +389,16 @@ impl App {
             ui.add_space(6.0);
             let heads = [gc("Name", 2.0), gc("Column", 1.6), gc("References", 2.0), gc("On update", 1.2), gc("On delete", 1.2), gc("Index", 2.0)];
             let mut menu = |ui: &mut egui::Ui, r: usize| {
+                if pg_rel {
+                    ui.add_enabled_ui(editable, |ui| {
+                        if ui.button("Edit relation").clicked() {
+                            acts.push(Act::EditRelation(r));
+                            ui.close();
+                        }
+                    })
+                    .response
+                    .on_disabled_hover_text(why);
+                }
                 ui.add_enabled_ui(editable, |ui| {
                     if danger_item(ui, "Drop relation").clicked() {
                         acts.push(Act::DropRelation(r));
@@ -416,6 +436,9 @@ impl App {
             }, Some(&mut menu));
             if let Some(r) = hit.click {
                 sel[2] = Some(r);
+            }
+            if let (Some(r), true, true) = (hit.double, editable, pg_rel) {
+                acts.push(Act::EditRelation(r));
             }
             ui.add_space(16.0);
             caption(ui, "TABLES THAT POINT HERE");
@@ -890,7 +913,7 @@ impl App {
             comment: comment.into(),
             ..Default::default()
         };
-        let fk = |name: &str, table: &str, c: &str, rt: &str, rc: &str, upd: &str, del: &str| ForeignKey { name: name.into(), db: "shop".into(), table: table.into(), cols: vec![c.into()], ref_db: "shop".into(), ref_table: rt.into(), ref_cols: vec![rc.into()], on_update: upd.into(), on_delete: del.into() };
+        let fk = |name: &str, table: &str, c: &str, rt: &str, rc: &str, upd: &str, del: &str| ForeignKey { name: name.into(), db: "shop".into(), table: table.into(), cols: vec![c.into()], ref_db: "shop".into(), ref_table: rt.into(), ref_cols: vec![rc.into()], on_update: upd.into(), on_delete: del.into(), ..Default::default() };
         let create = "CREATE TABLE `orders` (\n  `id` int unsigned NOT NULL AUTO_INCREMENT,\n  `customer_id` int unsigned NOT NULL,\n  `status` enum('pending','paid','shipped','refunded','cancelled')\n    NOT NULL DEFAULT 'pending',\n  `total` decimal(10,2) unsigned NOT NULL DEFAULT 0.00,\n  `currency` char(3) NOT NULL DEFAULT 'EUR',\n  `note` text,\n  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  `updated_at` datetime DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,\n  PRIMARY KEY (`id`),\n  KEY `idx_status` (`status`),\n  KEY `idx_customer_created` (`customer_id`,`created_at` DESC),\n  CONSTRAINT `fk_orders_customer` FOREIGN KEY (`customer_id`)\n    REFERENCES `customers` (`id`) ON UPDATE CASCADE\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;";
         let d = Structure {
             columns: vec![

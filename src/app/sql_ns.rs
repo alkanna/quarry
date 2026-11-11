@@ -55,7 +55,7 @@ impl App {
         self.t().and_then(|t| self.lacks(t.sel.conn, db::sql::Feature::StructureEdit))
     }
 
-    /// The same for the foreign keys of the Relations view, which PostgreSQL does not edit yet.
+    /// The same for the foreign keys of the Relations view.
     pub(super) fn rel_block(&self) -> Option<&'static str> {
         self.t().and_then(|t| self.lacks(t.sel.conn, db::sql::Feature::RelationEdit))
     }

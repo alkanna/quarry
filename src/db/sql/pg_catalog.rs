@@ -106,7 +106,12 @@ macro_rules! fk_cols {
         "SELECT co.conname::text AS name, n.nspname::text AS db, c.relname::text AS tbl, a.attname::text AS col, k.ord::bigint AS pos, \
          rn.nspname::text AS ref_db, rc.relname::text AS ref_tbl, ra.attname::text AS ref_col, \
          CASE co.confupdtype WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT' WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT' END AS on_update, \
-         CASE co.confdeltype WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT' WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT' END AS on_delete \
+         CASE co.confdeltype WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT' WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT' END AS on_delete, \
+         (co.confmatchtype = 'f')::int AS match_full, co.condeferrable::int AS defer_ok, co.condeferred::int AS defer_init, (NOT co.convalidated)::int AS not_valid, \
+         COALESCE(obj_description(co.oid, 'pg_constraint'), '') AS comment, \
+         concat_ws('; ', CASE WHEN to_jsonb(co) ->> 'confdelsetcols' IS NOT NULL THEN 'its ON DELETE action names columns' END, \
+           CASE WHEN COALESCE(to_jsonb(co) ->> 'conperiod', 'false') <> 'false' THEN 'it is a PERIOD key' END, \
+           CASE WHEN COALESCE(to_jsonb(co) ->> 'conenforced', 'true') = 'false' THEN 'it is NOT ENFORCED' END) AS opaque \
          FROM pg_constraint co JOIN pg_class c ON c.oid = co.conrelid JOIN pg_namespace n ON n.oid = c.relnamespace \
          JOIN pg_class rc ON rc.oid = co.confrelid JOIN pg_namespace rn ON rn.oid = rc.relnamespace \
          CROSS JOIN LATERAL unnest(co.conkey, co.confkey) WITH ORDINALITY AS k(attnum, refattnum, ord) \
@@ -116,7 +121,10 @@ macro_rules! fk_cols {
     };
 }
 
-/// Params: [schema, table]. Columns: name, db, tbl, col, pos, ref_db, ref_tbl, ref_col, on_update, on_delete.
+/// Params: [schema, table]. Columns: name, db, tbl, col, pos, ref_db, ref_tbl, ref_col, on_update, on_delete, and what a
+/// foreign key needs to be written back exactly: match_full, defer_ok, defer_init, not_valid (the rows present when it was
+/// added were never checked), comment, and opaque (why it cannot be written back, empty when it can: a PostgreSQL 15
+/// ON DELETE column list, an 18 PERIOD key or NOT ENFORCED, read through the row's JSON so 13 leaves them out).
 pub const FOREIGN_KEYS: &str = concat!(fk_cols!(), "n.nspname = $1 AND c.relname = $2 ORDER BY co.conname, k.ord");
 
 /// Params: [schema, table] of the referenced table. Same columns.
@@ -192,13 +200,14 @@ pub const CONSTRAINTS: &str = "SELECT co.conname::text AS name, co.contype::text
      ORDER BY CASE co.contype WHEN 'p' THEN 0 WHEN 'u' THEN 1 WHEN 'x' THEN 2 ELSE 3 END, co.conname";
 
 /// Params: [schema, table]. What the server drops together with a column, one row per object that depends on it
-/// through `pg_depend`: the column, the kind (index, constraint, sequence, default or other), the object's name and
-/// `pg_describe_object`'s words for it. A foreign key of another table that points at the column is not here, since the
-/// server refuses that drop instead of cascading.
+/// through `pg_depend`: the column, the kind (index, constraint, sequence, default or other), the object's name,
+/// `pg_describe_object`'s words for it, and whether a constraint is the table's own. A foreign key of another table that
+/// points at the column is here too (own = 0): the server refuses that drop instead of cascading.
 pub const COLUMN_DEPS: &str = "SELECT a.attname::text AS col, \
      CASE WHEN d.classid = 'pg_class'::regclass THEN CASE WHEN d.objsubid > 0 THEN 'other' ELSE CASE c2.relkind WHEN 'i' THEN 'index' WHEN 'I' THEN 'index' WHEN 'S' THEN 'sequence' ELSE 'other' END END \
           WHEN d.classid = 'pg_constraint'::regclass THEN CASE WHEN co.contype IN ('p', 'u') THEN 'key' ELSE 'constraint' END WHEN d.classid = 'pg_attrdef'::regclass THEN CASE WHEN ad.adrelid = d.refobjid AND ad.adnum = d.refobjsubid THEN 'default' ELSE 'other' END ELSE 'other' END AS kind, \
-     COALESCE(c2.relname::text, co.conname::text, '') AS name, pg_describe_object(d.classid, d.objid, d.objsubid) AS what \
+     COALESCE(c2.relname::text, co.conname::text, '') AS name, pg_describe_object(d.classid, d.objid, d.objsubid) AS what, \
+     COALESCE(co.conrelid = t.oid, false)::int AS own \
      FROM pg_depend d JOIN pg_class t ON t.oid = d.refobjid JOIN pg_namespace n ON n.oid = t.relnamespace \
      JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = d.refobjsubid \
      LEFT JOIN pg_class c2 ON d.classid = 'pg_class'::regclass AND c2.oid = d.objid \
