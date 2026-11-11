@@ -321,6 +321,24 @@ fn check_col(def: &ColDef) -> Result<(), String> {
     Ok(())
 }
 
+/// What follows a column's name when it is made, in ALTER TABLE .. ADD COLUMN and in CREATE TABLE alike: type, collation, then
+/// the identity, the serial type or the default and NOT NULL. Checked first, so a bad definition never reaches the server.
+pub(super) fn col_body(def: &ColDef) -> Result<String, String> {
+    check_col(def)?;
+    let ty = type_of(def)?;
+    let collate = collate(&def.collation);
+    Ok(match auto_of(def) {
+        Auto::Serial => {
+            if def.nullable || def.collation.is_some() {
+                return Err("A serial column is NOT NULL and has no collation.".into());
+            }
+            serial_of(&def.ty).ok_or("Only a smallint, integer or bigint column can be a serial.")?.to_string()
+        }
+        Auto::Identity(always) => format!("{ty}{collate} GENERATED {} AS IDENTITY", if always { "ALWAYS" } else { "BY DEFAULT" }),
+        Auto::No => format!("{ty}{collate}{}{}", default_of(def)?.map_or(String::new(), |d| format!(" DEFAULT {d}")), if def.nullable { "" } else { " NOT NULL" }),
+    })
+}
+
 pub(super) fn comment_stmt(on: &str, text: &str) -> Result<String, String> {
     if text.contains('\0') {
         return Err("A comment cannot hold a NUL character.".into());
@@ -404,19 +422,7 @@ pub(super) fn statements(sim: &Sim, schema: &str, table: &str, c: &Change) -> Re
     Ok(match c {
         Change::Add { def, pos } => {
             no_pos(pos)?;
-            check_col(def)?;
-            let (name, ty) = (q(&def.name), type_of(def)?);
-            let collate = collate(&def.collation);
-            let body = match auto_of(def) {
-                Auto::Serial => {
-                    if def.nullable || def.collation.is_some() {
-                        return Err("A serial column is NOT NULL and has no collation.".into());
-                    }
-                    serial_of(&def.ty).ok_or("Only a smallint, integer or bigint column can be a serial.")?.to_string()
-                }
-                Auto::Identity(always) => format!("{ty}{collate} GENERATED {} AS IDENTITY", if always { "ALWAYS" } else { "BY DEFAULT" }),
-                Auto::No => format!("{ty}{collate}{}{}", default_of(def)?.map_or(String::new(), |d| format!(" DEFAULT {d}")), if def.nullable { "" } else { " NOT NULL" }),
-            };
+            let (name, body) = (q(&def.name), col_body(def)?);
             let mut v = vec![format!("{alter} ADD COLUMN {name} {body}")];
             if !def.comment.is_empty() {
                 v.push(comment_stmt(&format!("COLUMN {t}.{name}"), &def.comment)?);
@@ -702,7 +708,7 @@ pub(super) fn plan(table: &str, st: &Structure, changes: &[Change]) -> Result<Pl
 }
 
 /// Every index, constraint and dependent of the table in one comparable list.
-fn table_state(st: &Structure) -> Vec<String> {
+pub(super) fn table_state(st: &Structure) -> Vec<String> {
     let mut v: Vec<String> = st.indexes.iter().map(|i| format!("index {}|{}|{}|{}|{}|{}|{}", i.name, i.def, i.comment, i.deferrable, i.deferred, i.con_comment, i.complex)).collect();
     v.extend(st.constraints.iter().map(|c| format!("constraint {}|{}|{}", c.name, c.kind, c.def)));
     v.extend(st.pg_deps.iter().map(|d| format!("depends {}|{}|{}|{}", d.col, d.kind, d.name, d.own)));
@@ -750,7 +756,7 @@ pub(super) enum Fail {
 
 /// The structure as the catalogs give it inside the transaction, which holds the table's lock by now. The search_path is
 /// already the schema's, as it was for the read the plan was made from, so the two print the same text.
-async fn read_in(tx: &mut Tx<'_>, schema: &str, table: &str) -> Res<Structure> {
+pub(super) async fn read_in(tx: &mut Tx<'_>, schema: &str, table: &str) -> Res<Structure> {
     let args = [Param::Text(schema.into()), Param::Text(table.into())];
     let cols = tx.fetch_bound(D.columns(), &args).await.map_err(se)?;
     let idx = tx.fetch_bound(D.indexes(), &args).await.map_err(se)?;

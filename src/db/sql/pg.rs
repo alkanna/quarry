@@ -21,7 +21,13 @@ const MIN_VERSION: u32 = 130_000;
 /// Several pools per connection count against the server's max_connections, so both caps stay small.
 const PER_DB: u32 = 3;
 const MAX_POOLS: usize = 4;
+/// Pools the cap pushed out that are still remembered, so closing a database can reach them.
+const MAX_RETIRED: usize = 32;
 const IDLE: Duration = Duration::from_secs(300);
+/// How long closing a database's pools waits for connections that are still in use.
+const CLOSE_WAIT: Duration = Duration::from_secs(5);
+/// The databases the sidebar lists: the ones that can be connected to, so a template or a closed database is left out.
+pub(super) const DB_LIST: &str = "SELECT datname::text FROM pg_database WHERE datallowconn AND NOT datistemplate AND has_database_privilege(datname, 'CONNECT') ORDER BY 1";
 /// The database every server has, used when the address names none.
 const FALLBACK_DB: &str = "postgres";
 
@@ -46,15 +52,81 @@ pub struct PgPools {
     /// transaction applies it again with SET LOCAL, because behind a pooler a session value would not hold.
     timeout: String,
     live: Mutex<Live>,
+    held: Arc<Held>,
     /// What the first line of a Stop needs and a pid alone cannot give: the time each backend started, so a pid the server
     /// reused for another session is never cancelled. Kept per connection because two servers hand out the same pids.
     starts: Mutex<HashMap<u64, String>>,
+}
+
+/// Connections taken out of a pool for good (`PgPools::acquire_held`), counted per database. `pool.close()` does not know them,
+/// so without this a drop of the database would find a session of Quarry's own still on it and refuse.
+#[derive(Default)]
+struct Held {
+    n: Mutex<HashMap<String, usize>>,
+    gone: tokio::sync::Notify,
+}
+
+/// Counts one detached connection until the connection is dropped.
+pub struct HeldGuard {
+    held: Arc<Held>,
+    name: String,
+}
+
+impl Drop for HeldGuard {
+    fn drop(&mut self) {
+        let mut n = self.held.n.lock().unwrap();
+        if let Some(c) = n.get_mut(&self.name) {
+            *c = c.saturating_sub(1);
+            if *c == 0 {
+                n.remove(&self.name);
+            }
+        }
+        drop(n);
+        self.held.gone.notify_waiters();
+    }
+}
+
+/// A PostgreSQL connection of its own. One taken from a pool carries a guard that tells the pools it is still open.
+pub struct PgConn {
+    conn: sqlx::PgConnection,
+    _held: Option<HeldGuard>,
+}
+
+impl PgConn {
+    pub(super) fn free(conn: sqlx::PgConnection) -> PgConn {
+        PgConn { conn, _held: None }
+    }
+
+    /// Ends the session. The guard is let go only after the server has the goodbye, so a drop of the database that waits for it
+    /// does not run while the session is still on it.
+    pub(super) async fn close(self) -> Result<(), sqlx::Error> {
+        let PgConn { conn, _held } = self;
+        let r = conn.close().await;
+        drop(_held);
+        r
+    }
+}
+
+impl std::ops::Deref for PgConn {
+    type Target = sqlx::PgConnection;
+    fn deref(&self) -> &sqlx::PgConnection {
+        &self.conn
+    }
+}
+
+impl std::ops::DerefMut for PgConn {
+    fn deref_mut(&mut self) -> &mut sqlx::PgConnection {
+        &mut self.conn
+    }
 }
 
 #[derive(Default)]
 struct Live {
     tick: u64,
     pools: HashMap<String, Entry>,
+    /// Pools the cap pushed out of `pools` while their connections lived on: kept so dropping a database can close them
+    /// too, or an idle connection left in one would make the server refuse the drop for up to the idle timeout.
+    retired: Vec<(String, PgPool)>,
 }
 
 struct Entry {
@@ -67,7 +139,7 @@ struct Entry {
 
 impl PgPools {
     fn new(opts: PgConnectOptions, default_db: String, acquire: Duration, locals: Option<String>, timeout: String) -> PgPools {
-        PgPools { opts, default_db, acquire, idle: IDLE, per_db: PER_DB, max_pools: MAX_POOLS, locals, timeout, live: Default::default(), starts: Default::default() }
+        PgPools { opts, default_db, acquire, idle: IDLE, per_db: PER_DB, max_pools: MAX_POOLS, locals, timeout, live: Default::default(), held: Default::default(), starts: Default::default() }
     }
 
     /// The SET LOCAL statements every transaction of a pooler-fallback connection starts with, or an empty string when
@@ -101,7 +173,7 @@ impl PgPools {
     }
 
     fn entry(&self, database: Option<&str>) -> (PgPool, Arc<Mutex<Option<String>>>) {
-        let name = database.filter(|d| !d.is_empty()).unwrap_or(&self.default_db).to_string();
+        let name = self.name_of(database);
         let mut live = self.live.lock().unwrap();
         live.tick += 1;
         let tick = live.tick;
@@ -111,7 +183,15 @@ impl PgPools {
         }
         while live.pools.len() >= self.max_pools {
             let Some(oldest) = live.pools.iter().min_by_key(|(_, e)| e.used).map(|(k, _)| k.clone()) else { break };
-            live.pools.remove(&oldest);
+            if let Some(gone) = live.pools.remove(&oldest) {
+                // A pool with no connection yet is kept too: a caller that still holds a clone can open one on it later, and the
+                // drop of that database has to find it. Only the list's length is bounded, dropping the oldest first.
+                live.retired.retain(|(_, p)| !p.is_closed());
+                while live.retired.len() >= MAX_RETIRED {
+                    live.retired.remove(0);
+                }
+                live.retired.push((oldest, gone.pool));
+            }
         }
         let failure: Arc<Mutex<Option<String>>> = Default::default();
         let (locals, hook_failure) = (self.locals.clone(), failure.clone());
@@ -127,6 +207,53 @@ impl PgPools {
             .connect_lazy_with(self.opts.clone().database(&name));
         live.pools.insert(name, Entry { pool: pool.clone(), used: tick, failure: failure.clone() });
         (pool, failure)
+    }
+
+    /// The database the connection opened on, which the maintenance work (CREATE and DROP DATABASE) runs on.
+    pub fn default_database(&self) -> &str {
+        &self.default_db
+    }
+
+    /// Closes every pool of `database`, the live one and any the cap pushed out, so none of Quarry's own connections is left
+    /// on it. Unlike eviction this does close: DROP DATABASE is refused while any session is on the database. A connection
+    /// still checked out (a running query) is closed when it comes back, and the wait is bounded so a stuck one cannot hang
+    /// the drop; the server then names the session that is left. A pool made for the name afterwards starts empty.
+    pub(super) async fn close_database(&self, database: &str) {
+        let pools: Vec<PgPool> = {
+            let mut live = self.live.lock().unwrap();
+            let mut v: Vec<PgPool> = live.pools.remove(database).map(|e| e.pool).into_iter().collect();
+            let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut live.retired).into_iter().partition(|(n, _)| n == database);
+            live.retired = rest;
+            v.extend(mine.into_iter().map(|(_, p)| p));
+            v
+        };
+        for p in pools {
+            let _ = tokio::time::timeout(CLOSE_WAIT, p.close()).await;
+        }
+        // Connections taken out of the pool for good (queries, reads) are not closed by the pool, so wait for them to come back.
+        let _ = tokio::time::timeout(CLOSE_WAIT, async {
+            loop {
+                let gone = self.held.gone.notified();
+                if self.held.n.lock().unwrap().get(&self.name_of(Some(database))).is_none_or(|n| *n == 0) {
+                    break;
+                }
+                gone.await;
+            }
+        })
+        .await;
+    }
+
+    fn name_of(&self, database: Option<&str>) -> String {
+        database.filter(|d| !d.is_empty()).unwrap_or(&self.default_db).to_string()
+    }
+
+    /// A connection of `database` taken out of its pool for good, so its session can be changed. It stays counted against the
+    /// database until it is dropped, which `close_database` waits for.
+    pub async fn acquire_held(&self, database: Option<&str>) -> Res<PgConn> {
+        let c = self.acquire(database).await?;
+        let name = self.name_of(database);
+        *self.held.n.lock().unwrap().entry(name.clone()).or_default() += 1;
+        Ok(PgConn { conn: c.detach(), _held: Some(HeldGuard { held: self.held.clone(), name }) })
     }
 
     /// Names of the databases that have a live pool.
@@ -153,7 +280,7 @@ impl PgPools {
         let mut c = sqlx::PgConnection::connect_with(o).await.map_err(se)?;
         let failure = Mutex::new(None);
         session(&mut c, self.locals.as_deref(), &failure).await.map_err(|x| failure.lock().unwrap().clone().unwrap_or_else(|| e(x)))?;
-        Ok(Conn::Pg(c))
+        Ok(Conn::Pg(PgConn::free(c)))
     }
 }
 
@@ -417,7 +544,7 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
             let f = probe(&mut c, locals.is_none()).await?;
             // The same visibility rule the sidebar needs: databases that cannot be connected to are left out.
             let rows = c
-                .fetch_all("SELECT datname::text FROM pg_database WHERE datallowconn AND NOT datistemplate AND has_database_privilege(datname, 'CONNECT') ORDER BY 1")
+                .fetch_all(DB_LIST)
                 .await
                 .map_err(se)?;
             let dbs: Vec<String> = rows.iter().filter_map(|r| text_at(r, 0)).collect();
@@ -478,7 +605,7 @@ pub(super) async fn cancel(db: &Db, pid: u64) -> Res<String> {
     let mut c = super::run::side_conn(db, "Could not reach the server to stop the statement").await?;
     let Conn::Pg(pc) = &mut c else { return Err("Not a PostgreSQL connection".into()) };
     let q = sqlx::query("SELECT pg_cancel_backend(pid)::text FROM pg_stat_activity WHERE pid = $1 AND backend_start::text = $2").persistent(false).bind(pid as i32).bind(start);
-    let r = q.fetch_all(&mut *pc).await.map_err(se);
+    let r = q.fetch_all(&mut **pc).await.map_err(se);
     let _ = c.close().await;
     match r? {
         rows if rows.is_empty() => Err("That connection is already gone.".into()),
@@ -623,6 +750,32 @@ mod tests {
         }
         // Nothing but the formats is shared: the fallback has no more format settings than the list.
         assert_eq!(locals.split("; ").count(), FORMATS.len());
+    }
+
+    /// A pool the cap pushed out of the map still holds its connections for the idle timeout, and the server refuses to drop a
+    /// database while one is open, so closing a database has to reach it too. Pools are lazy, so no server is needed.
+    #[test]
+    fn closing_a_database_reaches_the_pool_the_cap_pushed_out() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let mut p = PgPools::new(PgConnectOptions::new_without_pgpass().host("127.0.0.1").port(1), "postgres".into(), Duration::from_secs(1), None, "0".into());
+            p.max_pools = 2;
+            let a = p.pool(Some("a"));
+            let b = p.pool(Some("b"));
+            let c = p.pool(Some("c"));
+            assert_eq!(p.live_names(), vec!["b", "c"], "the oldest left the map");
+            assert!(!a.is_closed(), "eviction alone does not close it");
+            // A second eviction must not forget the first pool even though it has opened no connection yet: a caller that still holds it can open one later.
+            let _d = p.pool(Some("d"));
+            assert_eq!(p.live.lock().unwrap().retired.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), vec!["a", "b"], "a retired pool is kept until it is closed");
+            p.close_database("a").await;
+            assert!(a.is_closed() && p.live.lock().unwrap().retired.len() == 1, "closing the name reached the retired pool");
+            p.close_database("b").await;
+            assert!(b.is_closed() && p.live_names() == vec!["c", "d"] && !c.is_closed(), "only the named database's pool closed");
+            // A pool made for the name afterwards is a new one.
+            let again = p.pool(Some("b"));
+            assert!(!again.is_closed());
+        });
     }
 
     /// Live tests, run on every server named by QUARRY_TEST_POSTGRES and QUARRY_TEST_POSTGRES13.

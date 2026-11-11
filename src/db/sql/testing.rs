@@ -122,6 +122,12 @@ pub fn every_pg(f: impl Fn(&LivePg, &str)) {
     }
 }
 
+/// The turn a test takes to run CREATE DATABASE, because two at once fail on template1 being in use.
+pub fn db_turn() -> std::sync::MutexGuard<'static, ()> {
+    static MAKE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    MAKE.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 impl LivePg {
     /// The first cell of the first row, as text.
     pub fn one(&self, s: &str) -> String {
@@ -154,19 +160,25 @@ impl LivePg {
 
     /// The next message the worker sends.
     pub fn next(&self) -> Msg {
-        self.rx.recv_timeout(std::time::Duration::from_secs(20)).expect("worker answer")
+        self.rx.recv_timeout(std::time::Duration::from_secs(40)).expect("worker answer")
     }
 
     /// The shared database of the live tests, made on first use. Tests of one run take turns making it, because
     /// two CREATE DATABASE at once fail on template1 being in use.
     pub fn quarry_test(&self) -> Db {
-        static MAKE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _turn = MAKE.lock().unwrap_or_else(|p| p.into_inner());
+        let _turn = db_turn();
         if self.one("SELECT count(*)::text FROM pg_database WHERE datname = 'quarry_test'") == "0" {
-            let made = self.w.rt.block_on(async { sqlx::raw_sql("CREATE DATABASE quarry_test").execute(&self.pool).await });
-            if let Err(x) = made {
+            // Another test process copying template1 at the same moment makes this one fail with 55006, so it is tried again a few times.
+            for attempt in 0..8 {
+                let made = self.w.rt.block_on(async { sqlx::raw_sql("CREATE DATABASE quarry_test").execute(&self.pool).await });
+                let Err(x) = made else { break };
                 let code = x.as_database_error().and_then(|d| d.code().map(|c| c.to_string()));
+                if code.as_deref() == Some("55006") && attempt < 7 {
+                    std::thread::sleep(std::time::Duration::from_millis(300 * (attempt + 1)));
+                    continue;
+                }
                 assert!(matches!(code.as_deref(), Some("42P04" | "23505")), "{x}");
+                break;
             }
         }
         self.db.at("quarry_test")

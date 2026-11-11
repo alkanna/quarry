@@ -228,11 +228,14 @@ pub enum Msg {
     /// Charsets, collations and engines for the New database and New table dialogs; `schema` is empty for a new database.
     SqlMeta { conn: u64, schema: String, res: Res<sql::create::Meta> },
     /// What a drop confirmation says will be lost; `table` is empty for a database.
-    SqlDropInfo { conn: u64, schema: String, table: String, res: Res<sql::create::DropInfo> },
+    /// `database` is the PostgreSQL database the schema or table is in, empty on MySQL and for a database.
+    SqlDropInfo { conn: u64, database: String, schema: String, table: String, res: Res<sql::create::DropInfo> },
+    /// The template databases of a PostgreSQL server, for the New database dialog.
+    PgTemplates { conn: u64, res: Res<Vec<String>> },
     /// A create or drop finished. `dbs` is the new database list after a change to it, and `undo` the entry
     /// for a create (or the one a refused undo hands back). `sql_mode` is the session's mode when it no longer
     /// matched the one the app had, so the previews follow it.
-    SqlDdl { conn: u64, schema: String, table: String, what: sql::create::Ddl, res: Res<String>, undo: Option<UndoAction>, dbs: Option<Vec<String>>, sql_mode: Option<String> },
+    SqlDdl { conn: u64, database: String, schema: String, table: String, what: sql::create::Ddl, res: Res<String>, undo: Option<UndoAction>, dbs: Option<Vec<String>>, sql_mode: Option<String> },
     /// The accounts of a SQL server for the Users window that asked with `req`.
     SqlUsers { conn: u64, req: u64, res: Res<sql::users::UserList> },
     /// What SHOW GRANTS says for the account the Users window asked about with `req`.

@@ -22,7 +22,7 @@ use super::import::Progress;
 use super::pg_script::PgSplitter;
 use super::{lex, se, se_at, Db, Dialect};
 use crate::db::Res;
-use sqlx::{raw_sql, Connection, Executor, PgConnection};
+use sqlx::{raw_sql, Executor, PgConnection};
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

@@ -127,7 +127,7 @@ impl Db {
     /// A pooled connection taken out of the pool for good, so its session can be changed.
     pub(super) async fn acquire_conn(&self) -> Res<Conn> {
         match &self.pool {
-            Pool::Pg(p) => Ok(Conn::Pg(p.acquire(self.opts.database()).await?.detach())),
+            Pool::Pg(p) => Ok(Conn::Pg(p.acquire_held(self.opts.database()).await?)),
             Pool::My(_) => Ok(Conn::My(self.acquire().await?.detach())),
         }
     }

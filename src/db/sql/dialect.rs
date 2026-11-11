@@ -368,7 +368,7 @@ pub enum Feature {
 }
 
 /// The features PostgreSQL has so far. Add one here when its phase lands.
-const PG_FEATURES: &[Feature] = &[Feature::StructureEdit, Feature::RelationEdit, Feature::TriggerEdit, Feature::Import, Feature::SqlDump];
+const PG_FEATURES: &[Feature] = &[Feature::StructureEdit, Feature::RelationEdit, Feature::TriggerEdit, Feature::Import, Feature::SqlDump, Feature::CreateDrop];
 
 impl Dialect {
     pub fn supports(self, f: Feature) -> bool {
