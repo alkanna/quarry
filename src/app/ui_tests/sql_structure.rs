@@ -2,58 +2,39 @@
 //! MariaDB, PostgreSQL 18 and 13. Each flow stages changes in the Structure view, applies them, reads the server's own
 //! catalog to see what happened, and takes them back through the undo list.
 
-use super::sql_edit::{every_engine, open_unlocked, Fx, Server};
+use super::sql_edit::{every_engine, open_unlocked, Fx};
 use super::*;
-
-pub(super) fn one(fx: &Fx, sql: &str) -> String {
-    match &fx.server {
-        Server::My(l) => l.one(sql),
-        Server::Pg(l, pool) => l.qone(pool, sql),
-    }
-}
-
-pub(super) fn is_pg(fx: &Fx) -> bool {
-    matches!(fx.server, Server::Pg(..))
-}
 
 /// The column names in table order, joined with commas.
 fn names(fx: &Fx, table: &str) -> String {
-    if is_pg(fx) {
-        one(fx, &format!("SELECT string_agg(attname::text, ',' ORDER BY attnum) FROM pg_attribute WHERE attrelid = 'public.{table}'::regclass AND attnum > 0 AND NOT attisdropped"))
+    if fx.is_pg() {
+        fx.one(&format!("SELECT string_agg(attname::text, ',' ORDER BY attnum) FROM pg_attribute WHERE attrelid = 'public.{table}'::regclass AND attnum > 0 AND NOT attisdropped"))
     } else {
-        one(fx, &format!("SELECT GROUP_CONCAT(COLUMN_NAME ORDER BY ORDINAL_POSITION SEPARATOR ',') FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = 'quarry_test' AND TABLE_NAME = '{table}'"))
+        fx.one(&format!("SELECT GROUP_CONCAT(COLUMN_NAME ORDER BY ORDINAL_POSITION SEPARATOR ',') FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = 'quarry_test' AND TABLE_NAME = '{table}'"))
     }
 }
 
 /// The type of one column as the server writes it.
 fn ctype(fx: &Fx, table: &str, col: &str) -> String {
-    if is_pg(fx) {
-        one(fx, &format!("SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'public.{table}'::regclass AND attname = '{col}' AND NOT attisdropped"))
+    if fx.is_pg() {
+        fx.one(&format!("SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'public.{table}'::regclass AND attname = '{col}' AND NOT attisdropped"))
     } else {
-        one(fx, &format!("SELECT COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = 'quarry_test' AND TABLE_NAME = '{table}' AND COLUMN_NAME = '{col}'"))
+        fx.one(&format!("SELECT COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = 'quarry_test' AND TABLE_NAME = '{table}' AND COLUMN_NAME = '{col}'"))
     }
 }
 
 fn has_index(fx: &Fx, table: &str, name: &str) -> bool {
-    let n = if is_pg(fx) {
-        one(fx, &format!("SELECT count(*) FROM pg_indexes WHERE schemaname = 'public' AND tablename = '{table}' AND indexname = '{name}'"))
+    let n = if fx.is_pg() {
+        fx.one(&format!("SELECT count(*) FROM pg_indexes WHERE schemaname = 'public' AND tablename = '{table}' AND indexname = '{name}'"))
     } else {
-        one(fx, &format!("SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = 'quarry_test' AND TABLE_NAME = '{table}' AND INDEX_NAME = '{name}'"))
+        fx.one(&format!("SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = 'quarry_test' AND TABLE_NAME = '{table}' AND INDEX_NAME = '{name}'"))
     };
     n.trim() != "0"
 }
 
 /// Steps the UI until `cond` holds: a structure change runs on a worker task and lands a few frames after the click.
 pub(super) fn until(fx: &Fx, ui: &mut UiApp, what: &str, cond: impl Fn(&Fx) -> bool) {
-    let t = std::time::Instant::now();
-    loop {
-        ui.h.step();
-        if cond(fx) {
-            return;
-        }
-        assert!(t.elapsed() < LIMIT, "timed out waiting for {what}; last error: {}", ui.app().last_problem());
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    ui.wait(what, |_| cond(fx));
 }
 
 /// Replaces the text of a field by its accessible name.
@@ -101,7 +82,7 @@ fn staged_structure_changes_apply_and_undo() {
         ui.click("Stage change");
         ui.click("columns row 3");
         ui.click("Edit");
-        if is_pg(fx) {
+        if fx.is_pg() {
             replace(ui, "Column type", "bigint");
         } else {
             ui.click("Column type");

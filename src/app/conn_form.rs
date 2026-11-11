@@ -610,13 +610,13 @@ impl App {
             }
             None => {}
         }
-        let adv = f.advanced();
-        if let Err(m) = &adv {
+        let adv_error = f.advanced_error();
+        if let Some(m) = &adv_error {
             ui.add(egui::Label::new(RichText::new(m).color(ALERT())).wrap());
         }
         dialog_actions(ui, |ui| {
             let address_ok = if f.engine.is_sql() { !f.addr.host.trim().is_empty() && !f.addr.user.trim().is_empty() } else { f.uri.starts_with("mongodb://") || f.uri.starts_with("mongodb+srv://") };
-            let valid = adv.is_ok() && !f.name.trim().is_empty() && address_ok && (!f.ssh_on || (!f.ssh.host.trim().is_empty() && !f.ssh.user.trim().is_empty())) && (!f.proxy_on || f.ssh_on || f.engine.is_sql() || !f.proxy.host.trim().is_empty());
+            let valid = adv_error.is_none() && !f.name.trim().is_empty() && address_ok && (!f.ssh_on || (!f.ssh.host.trim().is_empty() && !f.ssh.user.trim().is_empty())) && (!f.proxy_on || f.ssh_on || f.engine.is_sql() || !f.proxy.host.trim().is_empty());
             save = ui.add_enabled(valid, primary_button(ui, "Save and connect", PRIMARY())).clicked();
             test = ui.add_enabled(valid, egui::Button::new("Test")).clicked();
             if ui.button("Cancel").clicked() {
@@ -635,7 +635,7 @@ impl App {
             let net = f.net();
             if f.engine.is_sql() {
                 let addr = db::sql::Addr { host: f.addr.host.trim().into(), user: f.addr.user.trim().into(), database: f.addr.database.trim().into(), ..f.addr.clone() };
-                self.worker.sql_test_with(f.test_req, addr.to_uri(), self.timeout(), net, adv.clone().unwrap_or_default());
+                self.worker.sql_test_with(f.test_req, addr.to_uri(), self.timeout(), net, f.advanced().unwrap_or_default());
             } else {
                 self.worker.test(f.test_req, f.uri.trim().to_string(), self.timeout(), net);
             }
@@ -664,7 +664,7 @@ impl App {
                         tag: clean_tag(&f.tag).into(),
                         ssh: f.ssh_on.then(|| crate::ssh::SshConf { host: f.ssh.host.trim().into(), user: f.ssh.user.trim().into(), ..f.ssh.clone() }),
                         proxy: (f.proxy_on && !f.ssh_on && !f.engine.is_sql()).then(|| db::Proxy { host: f.proxy.host.trim().into(), password: None, ..f.proxy.clone() }),
-                        advanced: adv.clone().unwrap_or_default(),
+                        advanced: f.advanced().unwrap_or_default(),
                     };
                     match self.conns.iter_mut().find(|c| c.meta.id == id) {
                         Some(c) => {

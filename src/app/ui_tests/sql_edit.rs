@@ -43,6 +43,18 @@ impl Fx {
         }
     }
 
+    /// The first cell of the first row of a query, as text.
+    pub(super) fn one(&self, sql: &str) -> String {
+        match &self.server {
+            Server::My(l) => l.one(sql),
+            Server::Pg(l, pool) => l.qone(pool, sql),
+        }
+    }
+
+    pub(super) fn is_pg(&self) -> bool {
+        matches!(self.server, Server::Pg(..))
+    }
+
     pub(super) fn sql(&self, s: &str) {
         match &self.server {
             Server::My(l) => l.sql(s),

@@ -3,7 +3,7 @@
 //! waits for the answer instead of a number of frames, and reads the server's own catalog to see what happened.
 
 use super::sql_edit::{every_engine, Fx, Server};
-use super::sql_structure::{is_pg, one, replace, until};
+use super::sql_structure::{replace, until};
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -13,20 +13,12 @@ fn name(tag: &str) -> String {
 }
 
 fn table_exists(fx: &Fx, table: &str) -> bool {
-    let n = if is_pg(fx) {
-        one(fx, &format!("SELECT count(*) FROM pg_class WHERE relname = '{table}' AND relnamespace = 'public'::regnamespace"))
+    let n = if fx.is_pg() {
+        fx.one(&format!("SELECT count(*) FROM pg_class WHERE relname = '{table}' AND relnamespace = 'public'::regnamespace"))
     } else {
-        one(fx, &format!("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'quarry_test' AND TABLE_NAME = '{table}'"))
+        fx.one(&format!("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'quarry_test' AND TABLE_NAME = '{table}'"))
     };
     n.trim() != "0"
-}
-
-/// Waits until no tab has a read in flight. A tab that is still reading its table holds a lock on it, and an undo or a drop takes
-/// ACCESS EXCLUSIVE under a 3 s lock timeout, so a loaded machine could make the test fail on the lock and not on what it checks.
-fn quiet(ui: &mut UiApp) {
-    ui.wait("the open tabs to have no read in flight", |a| a.tabs.iter().all(|t| !t.loading && t.sql.as_ref().is_none_or(|s| s.run_req == 0 && !matches!(s.st.load, crate::app::sql_structure::Load::Loading))));
-    ui.settle();
-    ui.wait("the open tabs to have no read in flight", |a| a.tabs.iter().all(|t| !t.loading && t.sql.as_ref().is_none_or(|s| s.run_req == 0 && !matches!(s.st.load, crate::app::sql_structure::Load::Loading))));
 }
 
 fn dialog_ready(a: &App) -> bool {
@@ -55,7 +47,7 @@ fn a_table_is_built_through_the_dialog_and_taken_back() {
         open_builder(fx, ui);
         // The name field has the focus and the first column is the key every table starts with.
         ui.type_text(&table);
-        if is_pg(fx) {
+        if fx.is_pg() {
             replace(ui, "Table comment", "built by a test");
             ui.click("Preview SQL");
             ui.show("Create table");
@@ -63,15 +55,15 @@ fn a_table_is_built_through_the_dialog_and_taken_back() {
         ui.click("Create table");
         until(fx, ui, "the table to be made", |fx| table_exists(fx, &table));
         ui.wait("the new table to open in Structure", |a| a.t().is_some_and(|t| t.sel.coll == table && t.view == View::Structure));
-        if is_pg(fx) {
-            assert_eq!(one(fx, &format!("SELECT string_agg(attname || ':' || format_type(atttypid, atttypmod) || ':' || attidentity::text, ',') FROM pg_attribute WHERE attrelid = 'public.{table}'::regclass AND attnum > 0")), "id:integer:d");
-            assert_eq!(one(fx, &format!("SELECT obj_description('public.{table}'::regclass, 'pg_class')")), "built by a test");
+        if fx.is_pg() {
+            assert_eq!(fx.one(&format!("SELECT string_agg(attname || ':' || format_type(atttypid, atttypmod) || ':' || attidentity::text, ',') FROM pg_attribute WHERE attrelid = 'public.{table}'::regclass AND attnum > 0")), "id:integer:d");
+            assert_eq!(fx.one(&format!("SELECT obj_description('public.{table}'::regclass, 'pg_class')")), "built by a test");
         } else {
-            assert_eq!(one(fx, &format!("SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = 'quarry_test' AND TABLE_NAME = '{table}'")), "id");
+            assert_eq!(fx.one(&format!("SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = 'quarry_test' AND TABLE_NAME = '{table}'")), "id");
         }
         assert_eq!(ui.app().undo.len(), 1, "the create is in the list of recent changes");
         // Take it back through the list: the table is empty, so it goes and its tab closes.
-        quiet(ui);
+        ui.quiet();
         ui.click("Undo (1)");
         ui.click("Undo change 1");
         until(fx, ui, "the undo to land", |fx| !table_exists(fx, &table));
@@ -94,7 +86,7 @@ fn a_table_with_rows_is_not_taken_back() {
         ui.wait("the entry", |a| a.undo.len() == 1);
         let q = fx.qualified(&table);
         fx.sql(&format!("INSERT INTO {q} (id) VALUES (1)"));
-        quiet(ui);
+        ui.quiet();
         ui.click("Undo (1)");
         ui.click("Undo change 1");
         ui.wait("the refusal", |a| a.last_problem().contains("has rows"));
@@ -114,7 +106,7 @@ fn a_table_is_dropped_only_through_the_typed_confirmation() {
         ui.h.state_mut().side_act(CONN, SideAct::SqlDrop(db.to_string(), table.clone(), DropKind::Table));
         ui.wait("the counts", |a| matches!(&a.modal, Some(Modal::SqlDrop(f)) if f.info.is_some()));
         ui.settle();
-        quiet(ui);
+        ui.quiet();
         assert!(ui.h.get_by_label("Drop table").accesskit_node().is_disabled(), "nothing is dropped before the name is typed");
         ui.fill("Confirmation", "not the name");
         ui.settle();
@@ -154,6 +146,23 @@ fn a_locked_connection_asks_to_unlock_before_creating_or_dropping() {
     });
 }
 
+#[test]
+fn a_drop_that_slips_past_the_dialog_on_a_locked_connection_is_refused_by_the_worker() {
+    every_engine("a drop on a locked connection is refused by the worker", |fx, ui| {
+        if !fx.is_pg() {
+            return;
+        }
+        let table = fx.table();
+        fx.open(ui, &table);
+        ui.quiet();
+        assert!(!ui.app().conn(CONN).unwrap().writable);
+        let sql = ui.app().pg_session(CONN).expect("a session");
+        ui.h.state_mut().pg_drop_run(CONN, sql, fx.place().0.to_string(), "public".into(), table.clone(), DropKind::Table, false);
+        ui.wait("the refusal", |a| !a.errors.is_empty());
+        assert!(table_exists(fx, &table), "the worker dropped a table on a locked connection");
+    });
+}
+
 fn pg_only(name: &str, flow: impl Fn(&mut Fx, &mut UiApp)) {
     every_engine(name, |fx, ui| {
         if matches!(fx.server, Server::Pg(..)) {
@@ -174,7 +183,7 @@ fn a_schema_is_made_and_dropped_with_cascade_through_the_dialogs() {
         ui.settle();
         ui.type_text(&schema);
         ui.click("Create schema");
-        until(fx, ui, "the schema to be made", |fx| one(fx, &format!("SELECT count(*) FROM pg_namespace WHERE nspname = '{schema}'")).trim() == "1");
+        until(fx, ui, "the schema to be made", |fx| fx.one(&format!("SELECT count(*) FROM pg_namespace WHERE nspname = '{schema}'")).trim() == "1");
         ui.wait("the sidebar to pick it", |a| a.conn(CONN).and_then(|c| c.pg.get("quarry_test")).is_some_and(|p| p.picked == schema));
         fx.sql(&format!("CREATE TABLE {schema}.t (id int)"));
         ui.h.state_mut().side_act(CONN, SideAct::DropSchema("quarry_test".into(), schema.clone()));
@@ -185,7 +194,7 @@ fn a_schema_is_made_and_dropped_with_cascade_through_the_dialogs() {
         assert!(ui.h.get_by_label("Drop schema").accesskit_node().is_disabled(), "a schema with a table in it cannot be dropped until CASCADE is ticked");
         ui.click("Drop them too (CASCADE)");
         ui.click("Drop schema");
-        until(fx, ui, "the schema to be dropped", |fx| one(fx, &format!("SELECT count(*) FROM pg_namespace WHERE nspname = '{schema}'")).trim() == "0");
+        until(fx, ui, "the schema to be dropped", |fx| fx.one(&format!("SELECT count(*) FROM pg_namespace WHERE nspname = '{schema}'")).trim() == "0");
     });
 }
 
@@ -196,7 +205,7 @@ fn a_database_is_made_and_dropped_with_its_connections_closed() {
         fx.open(ui, &anchor);
         ui.unlock();
         let db = name("db");
-        let exists = |fx: &Fx| one(fx, &format!("SELECT count(*) FROM pg_database WHERE datname = '{db}'")).trim() == "1";
+        let exists = |fx: &Fx| fx.one(&format!("SELECT count(*) FROM pg_database WHERE datname = '{db}'")).trim() == "1";
         ui.h.state_mut().side_act(CONN, SideAct::NewDb);
         ui.wait("the New database dialog", |a| matches!(a.modal, Some(Modal::PgNewDb(_))));
         ui.settle();
@@ -250,7 +259,7 @@ fn a_database_drop_the_server_refuses_leaves_its_tabs_and_their_text_alone() {
         ui.unlock();
         let db = name("keep");
         let Server::Pg(l, _) = &fx.server else { return };
-        let exists = |fx: &Fx| one(fx, &format!("SELECT count(*) FROM pg_database WHERE datname = '{db}'")).trim() == "1";
+        let exists = |fx: &Fx| fx.one(&format!("SELECT count(*) FROM pg_database WHERE datname = '{db}'")).trim() == "1";
         ui.h.state_mut().side_act(CONN, SideAct::NewDb);
         ui.wait("the New database dialog", |a| matches!(a.modal, Some(Modal::PgNewDb(_))));
         ui.settle();

@@ -3,41 +3,41 @@
 //! trigger (and on PostgreSQL its function), makes a row to see it fire, and takes it back through the undo list.
 
 use super::sql_edit::{every_engine, open_unlocked, Fx};
-use super::sql_structure::{is_pg, one, replace, undo_last, until};
+use super::sql_structure::{replace, undo_last, until};
 use super::*;
 
 /// How many triggers of this name the table has, as text.
 fn triggers(fx: &Fx, table: &str, name: &str) -> String {
-    if is_pg(fx) {
-        one(fx, &format!("SELECT count(*) FROM pg_trigger WHERE tgname = '{name}' AND tgrelid = 'public.{table}'::regclass"))
+    if fx.is_pg() {
+        fx.one(&format!("SELECT count(*) FROM pg_trigger WHERE tgname = '{name}' AND tgrelid = 'public.{table}'::regclass"))
     } else {
-        one(fx, &format!("SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE EVENT_OBJECT_SCHEMA = 'quarry_test' AND EVENT_OBJECT_TABLE = '{table}' AND TRIGGER_NAME = '{name}'"))
+        fx.one(&format!("SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE EVENT_OBJECT_SCHEMA = 'quarry_test' AND EVENT_OBJECT_TABLE = '{table}' AND TRIGGER_NAME = '{name}'"))
     }
 }
 
 /// How many functions the schema has with this name: PostgreSQL's triggers run one, and the editor makes it with the trigger.
 fn functions(fx: &Fx, name: &str) -> String {
-    if is_pg(fx) { one(fx, &format!("SELECT count(*) FROM pg_proc WHERE proname = '{name}' AND pronamespace = 'public'::regnamespace")) } else { "0".into() }
+    if fx.is_pg() { fx.one(&format!("SELECT count(*) FROM pg_proc WHERE proname = '{name}' AND pronamespace = 'public'::regnamespace")) } else { "0".into() }
 }
 
 /// The name a new row gets from the trigger: the row is made, read and deleted again, so the table keeps its rows.
 fn fired(fx: &Fx, table: &str) -> String {
     let q = fx.qualified(table);
     fx.sql(&format!("INSERT INTO {q} VALUES (9, 'plain', 1)"));
-    let name = one(fx, &format!("SELECT name FROM {q} WHERE id = 9"));
+    let name = fx.one(&format!("SELECT name FROM {q} WHERE id = 9"));
     fx.sql(&format!("DELETE FROM {q} WHERE id = 9"));
     name
 }
 
 /// A body that sets the name of the new row, written for the engine.
 fn setter(fx: &Fx, to: &str) -> String {
-    if is_pg(fx) { format!("BEGIN NEW.name := '{to}'; RETURN NEW; END") } else { format!("SET NEW.name = '{to}'") }
+    if fx.is_pg() { format!("BEGIN NEW.name := '{to}'; RETURN NEW; END") } else { format!("SET NEW.name = '{to}'") }
 }
 
 /// Makes a trigger the way a person would have before opening the editor, with its function on PostgreSQL.
 fn make_trigger(fx: &Fx, table: &str, name: &str, to: &str) {
     let q = fx.qualified(table);
-    if is_pg(fx) {
+    if fx.is_pg() {
         fx.sql(&format!("CREATE FUNCTION public.{name}_fn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.name := '{to}'; RETURN NEW; END $$; CREATE TRIGGER {name} BEFORE INSERT ON {q} FOR EACH ROW EXECUTE FUNCTION public.{name}_fn()"));
     } else {
         fx.sql(&format!("CREATE TRIGGER quarry_test.{name} BEFORE INSERT ON {q} FOR EACH ROW SET NEW.name = '{to}'"));
@@ -81,7 +81,7 @@ fn a_trigger_is_created_through_the_editor_fires_and_is_taken_back() {
         open_triggers(ui);
         assert_eq!(triggers(fx, &t, &name), "0");
         fill_new(fx, ui, &name, "ui");
-        if is_pg(fx) {
+        if fx.is_pg() {
             // the preview shows the function and the trigger that Save sends, and the function's name
             ui.show("SQL TO RUN");
             let fname = format!("{t}_{name}_fn");
@@ -95,7 +95,7 @@ fn a_trigger_is_created_through_the_editor_fires_and_is_taken_back() {
         }
         ui.click("Save trigger");
         until(fx, ui, "the trigger to land", |fx| triggers(fx, &t, &name) == "1");
-        if is_pg(fx) {
+        if fx.is_pg() {
             assert_eq!(functions(fx, &format!("{t}_{name}_fn")), "1", "the function was made with the trigger");
         }
         assert_eq!(fired(fx, &t), "ui", "the trigger fires");
@@ -129,7 +129,7 @@ fn a_trigger_is_edited_through_the_editor_and_the_undo_puts_it_back() {
         undo_last(ui, 1, &t);
         until(fx, ui, "the old body to run again", |fx| fired(fx, &t) == "old");
         assert_eq!(triggers(fx, &t, &name), "1");
-        if is_pg(fx) {
+        if fx.is_pg() {
             fx.sql(&format!("DROP TRIGGER {name} ON {t}; DROP FUNCTION public.{name}_fn()"));
         }
     });
@@ -138,7 +138,7 @@ fn a_trigger_is_edited_through_the_editor_and_the_undo_puts_it_back() {
 #[test]
 fn a_postgresql_trigger_is_disabled_through_the_switch_and_dropped_with_its_function() {
     every_engine("a postgresql trigger is disabled and dropped", |fx, ui| {
-        if !is_pg(fx) {
+        if !fx.is_pg() {
             return;
         }
         let (t, name) = open_with_trigger(fx, ui, "old");
@@ -161,11 +161,11 @@ fn a_postgresql_trigger_is_disabled_through_the_switch_and_dropped_with_its_func
         ui.show("triggers row 1");
         ui.click("Trigger enabled");
         ui.click("Save trigger");
-        until(fx, ui, "the trigger to be disabled", |fx| one(fx, &format!("SELECT tgenabled::text FROM pg_trigger WHERE tgname = '{name}' AND tgrelid = 'public.{t}'::regclass")) == "D");
+        until(fx, ui, "the trigger to be disabled", |fx| fx.one(&format!("SELECT tgenabled::text FROM pg_trigger WHERE tgname = '{name}' AND tgrelid = 'public.{t}'::regclass")) == "D");
         assert_eq!(fired(fx, &t), "plain", "a disabled trigger does not fire");
         ui.wait("the save to finish", |a| !a.applying());
         undo_last(ui, 1, &t);
-        until(fx, ui, "the trigger to be enabled again", |fx| one(fx, &format!("SELECT tgenabled::text FROM pg_trigger WHERE tgname = '{name}' AND tgrelid = 'public.{t}'::regclass")) == "O");
+        until(fx, ui, "the trigger to be enabled again", |fx| fx.one(&format!("SELECT tgenabled::text FROM pg_trigger WHERE tgname = '{name}' AND tgrelid = 'public.{t}'::regclass")) == "O");
         assert_eq!(fired(fx, &t), "old");
         fx.sql(&format!("DROP TRIGGER {name} ON {t}; DROP FUNCTION public.{name}_fn()"));
     });

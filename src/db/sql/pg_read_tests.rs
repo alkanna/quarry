@@ -12,10 +12,7 @@ use std::time::Duration;
 
 /// A fresh schema of the shared database with `ddl` run in it, and the `Db` pointing at that database.
 fn fixture(l: &LivePg, schema: &str, ddl: &str) -> (Db, sqlx::PgPool) {
-    let db = l.quarry_test();
-    let pool = l.fixture_pool();
-    l.qsql(&pool, &format!("DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema}; SET search_path = {schema}; {ddl}"));
-    (db, pool)
+    l.fresh_schema(schema, ddl)
 }
 
 fn page(l: &LivePg, db: &Db, schema: &str, table: &str, q: PageQuery, limit: u64, offset: u64) -> (Vec<super::Col>, Vec<String>, Vec<Document>, u64) {

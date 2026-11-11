@@ -15,10 +15,7 @@ const ROWS: i64 = 6;
 const POOL_SIZE: usize = 8;
 
 fn fixture(l: &LivePg, schema: &str) -> sqlx::PgPool {
-    l.quarry_test();
-    let pool = l.fixture_pool();
-    l.qsql(&pool, &format!("DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema}; CREATE TABLE {schema}.t (id int PRIMARY KEY, v int, s text); INSERT INTO {schema}.t SELECT g, g, 'a' FROM generate_series(1, {ROWS}) g"));
-    pool
+    l.fresh_schema(schema, &format!("CREATE TABLE {schema}.t (id int PRIMARY KEY, v int, s text); INSERT INTO {schema}.t SELECT g, g, 'a' FROM generate_series(1, {ROWS}) g")).1
 }
 
 /// Waits for `n` answers and files them by request id (pages and structures) or tag (saves).

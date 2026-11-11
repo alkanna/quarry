@@ -3,7 +3,7 @@
 //! holds is read with a plain query after each step.
 
 use super::sql_edit::{every_engine, open_unlocked, ORIGINAL};
-use super::sql_structure::{is_pg, undo_last};
+use super::sql_structure::undo_last;
 use super::*;
 use db::sql::csv::Source;
 
@@ -41,7 +41,7 @@ fn a_csv_file_imports_updates_and_undoes_on_every_engine() {
         ui.click_last("Update");
         ui.click("Import 2 rows");
         fx.expect(ui, &t, "1:updated:11,2:beta:20,3:gamma:30,6:zeta:60,7:eta:70");
-        if is_pg(fx) {
+        if fx.is_pg() {
             // PostgreSQL records what an update overwrote, so its undo puts the old row back and removes the new one.
             undo_last(ui, 2, &t);
             fx.expect(ui, &t, "1:alpha:10,2:beta:20,3:gamma:30,6:zeta:60");
