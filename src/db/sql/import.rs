@@ -46,17 +46,6 @@ pub struct ImportPlan {
     pub want_undo: bool,
 }
 
-/// Rows in one INSERT on PostgreSQL, for the dialog.
-pub fn batch_rows_pg(cols: usize) -> usize {
-    super::import_pg::batch_rows(cols)
-}
-
-/// How the duplicate choice reads in the dialog for a PostgreSQL table: what the statement does with this mapping.
-pub fn pg_clause_text(info: &TableInfo, map: &Mapping, dup: Dup) -> &'static str {
-    let has_set = map.targets().iter().any(|(_, t)| !info.pk.contains(&info.cols[*t].name));
-    super::import_pg::Clause::of(dup, !info.pk.is_empty(), has_set).text()
-}
-
 /// What a running job shares with the status bar.
 #[derive(Default)]
 pub struct Progress {
@@ -81,10 +70,8 @@ pub struct JobDone {
 /// Whether the rows of this import can be taken out again, or why not. The dialog shows the reason before
 /// anything starts.
 pub fn undo_plan(info: &TableInfo, map: &Mapping, dup: Dup, rows: u64) -> Result<(), String> {
-    if info.pg {
-        return super::import_pg::undo_plan(info, dup, rows);
-    }
-    if dup != Dup::Stop {
+    // PostgreSQL reads back what each row held, so it can undo a skip or an update too.
+    if !info.pg && dup != Dup::Stop {
         return Err("Undo is only offered when a duplicate key stops the import: a skipped or updated row cannot be told from a new one.".into());
     }
     if info.pk.is_empty() {
@@ -92,6 +79,9 @@ pub fn undo_plan(info: &TableInfo, map: &Mapping, dup: Dup, rows: u64) -> Result
     }
     if rows > UNDO_MAX_ROWS {
         return Err(format!("Over {UNDO_MAX_ROWS} rows: no undo is recorded for an import this large."));
+    }
+    if info.pg {
+        return Ok(());
     }
     let mapped: Vec<&str> = map.targets().into_iter().map(|(_, t)| info.cols[t].name.as_str()).collect();
     let loose: Vec<&String> = info.pk.iter().filter(|p| !mapped.contains(&p.as_str())).collect();

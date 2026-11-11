@@ -135,7 +135,7 @@ pub fn def(name: &str) -> Option<&'static Def> {
     ALLOWED.iter().find(|d| d.name.eq_ignore_ascii_case(name.trim()))
 }
 
-pub fn kept_reason(name: &str) -> Option<&'static str> {
+pub(super) fn kept_reason(name: &str) -> Option<&'static str> {
     KEPT.iter().find(|(n, _)| n.eq_ignore_ascii_case(name.trim())).map(|(_, r)| *r)
 }
 
@@ -241,7 +241,7 @@ pub fn check_schema(s: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn check_connection(a: &Advanced) -> Result<(), String> {
+pub(super) fn check_connection(a: &Advanced) -> Result<(), String> {
     for (name, v) in [("Connect", a.connect_secs), ("Idle", a.idle_secs)] {
         if v.is_some_and(|v| v == 0 || v > super::advanced::TIMEOUT_MAX) {
             return Err(format!("{name} timeout: use 1 to {} seconds, or leave it empty", super::advanced::TIMEOUT_MAX));
@@ -256,7 +256,7 @@ pub fn literal(v: &str) -> String {
 }
 
 /// The search_path value as the server reads it: each schema a quoted identifier.
-pub fn path_value(schemas: &[String]) -> String {
+pub(super) fn path_value(schemas: &[String]) -> String {
     schemas.iter().map(|s| Dialect::Postgres.quote_ident(s)).collect::<Vec<_>>().join(", ")
 }
 

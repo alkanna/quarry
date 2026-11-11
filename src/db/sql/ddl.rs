@@ -263,11 +263,6 @@ pub fn fk_name_is(pg: bool, a: &str, b: &str) -> bool {
     if pg { a == b } else { same_name(a, b) }
 }
 
-/// Whether a PostgreSQL column of this type text can be an identity, for the column dialog.
-pub fn pg_identity_type(ty: &str) -> bool {
-    super::ddl_pg::identity_type(ty)
-}
-
 /// A server limit on names: 64 characters, no trailing space.
 pub fn check_ident(name: &str, what: &str) -> Result<(), String> {
     if name.is_empty() {
@@ -427,7 +422,7 @@ pub fn parse_values(args: &str) -> Result<Vec<String>, String> {
 
 /// The values as the server writes them and `parse_values` reads them: 'a','it''s','back\\slash'.
 #[cfg(test)]
-pub fn values_text(vals: &[String]) -> String {
+pub(super) fn values_text(vals: &[String]) -> String {
     let one = |v: &String| {
         let mut s = String::from("'");
         for c in v.chars() {
@@ -824,7 +819,7 @@ pub struct AlterUndo {
 
 impl AlterUndo {
     /// The steps as the session in mode `m` must read them: the stored ones, or the same inverse written again.
-    pub fn steps_for(&self, d: Dialect, version: &str, table: &str, m: Mode) -> Result<Vec<String>, String> {
+    pub(super) fn steps_for(&self, d: Dialect, version: &str, table: &str, m: Mode) -> Result<Vec<String>, String> {
         // PostgreSQL's statements do not depend on the session's quoting.
         if m == self.mode || d == Dialect::Postgres {
             return Ok(self.steps.clone());
@@ -837,13 +832,19 @@ impl AlterUndo {
 /// what is shown is what runs.
 #[derive(Debug)]
 pub struct Plan {
-    pub sql: String,
     pub undo: Result<AlterUndo, String>,
     /// The statements that run, one per entry. MySQL has one ALTER; PostgreSQL has one per clause, all in one transaction.
     pub steps: Vec<String>,
     /// PostgreSQL: what the touched columns and indexes looked like when the plan was made. The transaction reads them
     /// again after it holds the lock and refuses to run when they differ. None on MySQL.
     pub expect: Option<Expect>,
+}
+
+impl Plan {
+    /// The statements as the preview shows them. MySQL has the one ALTER as it is; PostgreSQL has a script of its steps.
+    pub fn sql(&self) -> String {
+        if self.expect.is_some() { script(&self.steps) } else { self.steps.join("\n\n") }
+    }
 }
 
 /// The names a plan reads and `snapshot` of them.
@@ -886,7 +887,7 @@ pub fn plan(d: Dialect, version: &str, m: Mode, table: &str, st: &Structure, sta
         return super::ddl_pg::plan(table, st, &changes);
     }
     let sql = alter(d, version, m, table, &changes)?;
-    Ok(Plan { steps: vec![sql.clone()], sql, undo: undo_of(d, version, m, table, st, &changes), expect: None })
+    Ok(Plan { steps: vec![sql], undo: undo_of(d, version, m, table, st, &changes), expect: None })
 }
 
 fn undo_of(d: Dialect, version: &str, m: Mode, table: &str, before: &Structure, changes: &[Change]) -> Result<AlterUndo, String> {
@@ -1125,8 +1126,18 @@ pub fn free_name(taken: &[String], base: &str) -> String {
 }
 
 /// Why a column pair cannot be the two sides of a foreign key, in the words of the person adding it. The
-/// server's own answer ("incompatible") names no column, so the rules it enforces are checked first.
-pub fn fk_pair_problem(child_table: &str, child: &Column, parent_table: &str, parent: &Column) -> Option<String> {
+/// server's own answer ("incompatible") names no column, so the rules it enforces are checked first. On PostgreSQL a key needs
+/// types that the server can compare with `=`, which is any two integer sizes, an integer child against a numeric parent, any
+/// text type against another, and the same type otherwise. A numeric child against an integer parent is refused by the server
+/// ("cannot be implemented"), so it is refused here. Types it cannot place are left to the server's own answer.
+pub fn fk_pair_problem(d: Dialect, child_table: &str, child: &Column, parent_table: &str, parent: &Column) -> Option<String> {
+    if d == Dialect::Postgres {
+        let (fc, fp) = (pg_family(&child.full_type)?, pg_family(&parent.full_type)?);
+        if fc == fp || (fc, fp) == ("int", "numeric") {
+            return None;
+        }
+        return Some(format!("{child_table}.{} is {} but {parent_table}.{} is {}. A foreign key needs two types that PostgreSQL can compare, such as two integers or two text types.", child.name, child.full_type, parent.name, parent.full_type));
+    }
     let (c, p) = (format!("{child_table}.{}", child.name), format!("{parent_table}.{}", parent.name));
     let (ct, cargs, cu) = split_type(&child.full_type);
     let (pt, pargs, pu) = split_type(&parent.full_type);
@@ -1196,18 +1207,6 @@ fn pg_family(full_type: &str) -> Option<&'static str> {
     })
 }
 
-/// `fk_pair_problem` for PostgreSQL: a key needs types that the server can compare with `=`, which is any two integer
-/// sizes, an integer child against a numeric parent, any text type against another, and the same type otherwise. A numeric
-/// child against an integer parent is refused by the server ("cannot be implemented"), so it is refused here. Types it
-/// cannot place are left to the server's own answer.
-pub fn fk_pair_problem_pg(child_table: &str, child: &Column, parent_table: &str, parent: &Column) -> Option<String> {
-    let (fc, fp) = (pg_family(&child.full_type)?, pg_family(&parent.full_type)?);
-    if fc == fp || (fc, fp) == ("int", "numeric") {
-        return None;
-    }
-    Some(format!("{child_table}.{} is {} but {parent_table}.{} is {}. A foreign key needs two types that PostgreSQL can compare, such as two integers or two text types.", child.name, child.full_type, parent.name, parent.full_type))
-}
-
 /// The first problem with a whole key, before the server is asked: column pairs that do not fit, SET NULL on a
 /// column that cannot be NULL, and a referenced side with no index to lean on. `whole_key` is MySQL 8.4's
 /// restrict_fk_on_non_standard_key: the referenced columns must then be exactly the primary key or a unique key,
@@ -1217,7 +1216,7 @@ pub fn fk_problem(own: &Structure, table: &str, parent: &Structure, fk: &Foreign
     let pg = own.pg_schema.is_some();
     for (a, b) in fk.cols.iter().zip(&fk.ref_cols) {
         let (Some(ca), Some(cb)) = (find(own, a), find(parent, b)) else { return Some("A picked column is not in its table any more.".into()) };
-        if let Some(p) = if pg { fk_pair_problem_pg(table, &ca, &fk.ref_table, &cb) } else { fk_pair_problem(table, &ca, &fk.ref_table, &cb) } {
+        if let Some(p) = fk_pair_problem(if pg { Dialect::Postgres } else { Dialect::MySql }, table, &ca, &fk.ref_table, &cb) {
             return Some(p);
         }
         let set_null = fk.on_delete.eq_ignore_ascii_case("SET NULL") || fk.on_update.eq_ignore_ascii_case("SET NULL");
@@ -1529,7 +1528,7 @@ pub fn neighbours(all: &[Trigger], name: &str) -> (Option<String>, Option<String
 
 /// The clause that puts a trigger back between its old neighbours, among the triggers `live` that are there now:
 /// after the one before it, else before the one after it, else none (it is the only one, or both are gone).
-pub fn order_among(live: &[Trigger], name: &str, timing: &str, event: &str, before: Option<&str>, after: Option<&str>) -> Option<TrigOrder> {
+pub(super) fn order_among(live: &[Trigger], name: &str, timing: &str, event: &str, before: Option<&str>, after: Option<&str>) -> Option<TrigOrder> {
     let here = |n: &str| live.iter().any(|t| !same_name(&t.name, name) && same_name(&t.name, n) && t.timing.eq_ignore_ascii_case(timing) && t.event.eq_ignore_ascii_case(event));
     match (before, after) {
         (Some(b), _) if here(b) => Some(TrigOrder::Follows(b.to_string())),
@@ -1547,7 +1546,7 @@ fn order_clause(d: Dialect, o: Option<&TrigOrder>) -> String {
 }
 
 /// `DEFINER=`user`@`host`` from information_schema's `user@host`. The host never holds an @, so the last one splits.
-pub fn definer_clause(d: Dialect, definer: &str) -> Result<String, String> {
+pub(super) fn definer_clause(d: Dialect, definer: &str) -> Result<String, String> {
     let (user, host) = definer.rsplit_once('@').ok_or_else(|| format!("The definer {definer:?} cannot be written back."))?;
     Ok(format!("DEFINER={}@{}", d.quote_ident(user), d.quote_ident(host)))
 }
@@ -1563,7 +1562,7 @@ pub struct TrigSave {
 
 /// The CREATE TRIGGER statement. `replace` writes MariaDB's CREATE OR REPLACE, which swaps an existing trigger in
 /// one statement.
-pub fn create_trigger(d: Dialect, m: Mode, table: &str, s: &TrigSave, replace: bool) -> Result<String, String> {
+pub(super) fn create_trigger(d: Dialect, m: Mode, table: &str, s: &TrigSave, replace: bool) -> Result<String, String> {
     let t = &s.def;
     check_ident(&t.name, "A trigger")?;
     let timing = t.timing.trim().to_ascii_uppercase();
@@ -1585,7 +1584,7 @@ pub fn create_trigger(d: Dialect, m: Mode, table: &str, s: &TrigSave, replace: b
 
 /// Checks a whole CREATE TRIGGER text again where it runs, under the session's own quote rules: the head up to FOR
 /// EACH ROW and its order clause holds no `;` and no executable comment, and the rest is one body by `check_body`.
-pub fn one_trigger_statement(sql: &str, m: Mode) -> Result<(), String> {
+pub(super) fn one_trigger_statement(sql: &str, m: Mode) -> Result<(), String> {
     use super::lex::{count_with, tokens_with, Tok};
     let toks: Vec<_> = tokens_with(sql, super::Dialect::MySql, m.bs, m.ansi).into_iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment)).collect();
     let w = |k: usize, s: &str| toks.get(k).is_some_and(|(t, r)| *t == Tok::Word && sql[r.clone()].eq_ignore_ascii_case(s));
@@ -1605,7 +1604,7 @@ pub fn one_trigger_statement(sql: &str, m: Mode) -> Result<(), String> {
 /// A stored trigger statement made ready to run again: MariaDB's OR REPLACE after CREATE, and the order clause after
 /// FOR EACH ROW in place of one the text may already hold. The text is read with the quote rules of the mode it was
 /// stored with.
-pub fn restate(d: Dialect, stmt: &str, m: Mode, order: Option<&TrigOrder>, replace: bool) -> Result<String, String> {
+pub(super) fn restate(d: Dialect, stmt: &str, m: Mode, order: Option<&TrigOrder>, replace: bool) -> Result<String, String> {
     use super::lex::{tokens_with, Tok};
     let toks: Vec<_> = tokens_with(stmt, d, m.bs, m.ansi).into_iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment)).collect();
     let w = |k: usize, s: &str| toks.get(k).is_some_and(|(t, r)| *t == Tok::Word && stmt[r.clone()].eq_ignore_ascii_case(s));
@@ -1632,7 +1631,7 @@ pub fn same_modes(a: &str, b: &str) -> bool {
 
 /// Whether the live trigger is the one a change left or an editor saw: every part that decides what it does, its
 /// owner and its place.
-pub fn same_trigger(live: &Trigger, want: &Trigger) -> bool {
+pub(super) fn same_trigger(live: &Trigger, want: &Trigger) -> bool {
     same_name(&live.name, &want.name) && live.timing.eq_ignore_ascii_case(&want.timing) && live.event.eq_ignore_ascii_case(&want.event) && live.body.trim() == want.body.trim() && live.definer == want.definer && same_modes(&live.sql_mode, &want.sql_mode) && live.order == want.order
 }
 
@@ -2462,7 +2461,7 @@ mod tests {
         let e = expand(Dialect::MariaDb, &t, &c);
         assert!(e.contains(&Change::AddIndex(IndexDef { name: "uq_price".into(), kind: IndexKind::Unique, cols: vec![IdxCol { name: "title".into(), prefix: None, desc: false }], ..Default::default() })), "{e:?}");
         let p = plan(Dialect::MariaDb, "11.4.0-MariaDB", B, "t", &t, &c).unwrap();
-        assert!(p.sql.contains("ADD UNIQUE INDEX `uq_price` (`title`)") && !p.sql.contains("(`name`)"), "{}", p.sql);
+        assert!(p.sql().contains("ADD UNIQUE INDEX `uq_price` (`title`)") && !p.sql().contains("(`name`)"), "{}", p.sql());
         assert!(p.undo.is_ok());
     }
 
@@ -2473,8 +2472,8 @@ mod tests {
         let t = table();
         let c = [Change::Drop("note".into())];
         let p = plan(Dialect::MariaDb, "11.4.0-MariaDB", B, "orders", &t, &c).unwrap();
-        assert_eq!(p.sql, alter(Dialect::MariaDb, "11.4.0-MariaDB", B, "orders", &expand(Dialect::MariaDb, &t, &c)).unwrap());
-        assert_eq!(p.sql, "ALTER TABLE `orders`\n  DROP INDEX `uq_note`,\n  DROP COLUMN `note`");
+        assert_eq!(p.sql(), alter(Dialect::MariaDb, "11.4.0-MariaDB", B, "orders", &expand(Dialect::MariaDb, &t, &c)).unwrap());
+        assert_eq!(p.sql(), "ALTER TABLE `orders`\n  DROP INDEX `uq_note`,\n  DROP COLUMN `note`");
     }
 
     /// Review findings 1 and 10: what the undo loses and why there is none are known before Apply.
@@ -2501,7 +2500,7 @@ mod tests {
         let mut g = table();
         g.columns[3].extra = "STORED GENERATED".into();
         let none = plan(M, "8.4.0", B, "orders", &g, &[Change::Drop("note".into())]).unwrap();
-        assert_eq!(none.sql, "ALTER TABLE `orders`\n  DROP COLUMN `note`");
+        assert_eq!(none.sql(), "ALTER TABLE `orders`\n  DROP COLUMN `note`");
         assert!(none.undo.unwrap_err().contains("generated"));
     }
 
@@ -2681,7 +2680,7 @@ mod tests {
 
     #[test]
     fn foreign_key_column_types_must_fit() {
-        let p = |a: Column, b: Column| fk_pair_problem("orders", &a, "customers", &b);
+        let p = |a: Column, b: Column| fk_pair_problem(Dialect::MySql, "orders", &a, "customers", &b);
         let int_u = fcol("id", "int unsigned", None);
         assert!(p(fcol("customer_id", "int unsigned", None), int_u.clone()).is_none());
         assert!(p(fcol("customer_id", "int", None), int_u.clone()).unwrap().contains("signedness"));
@@ -2715,7 +2714,7 @@ mod tests {
     #[test]
     fn postgres_keys_need_types_the_server_compares_and_a_unique_parent() {
         let pgcol = |n: &str, t: &str| Column { name: n.into(), full_type: t.into(), ..fcol(n, t, None) };
-        let p = |a: &str, b: &str| fk_pair_problem_pg("orders", &pgcol("c", a), "customers", &pgcol("id", b));
+        let p = |a: &str, b: &str| fk_pair_problem(Dialect::Postgres, "orders", &pgcol("c", a), "customers", &pgcol("id", b));
         // every integer size meets every other, and an integer meets a numeric, text meets varchar
         assert!(p("integer", "bigint").is_none() && p("smallint", "integer").is_none() && p("integer", "numeric(10,2)").is_none());
         assert!(p("character varying(40)", "text").is_none() && p("date", "timestamp with time zone").is_none());
@@ -3065,9 +3064,9 @@ mod live {
             let (d, v) = (self.db.dialect, self.db.version.clone());
             let m = Mode::of(&self.db.sql_mode);
             let p = plan(d, &v, m, "t", &before, &changes).unwrap_or_else(|e| panic!("{label}: {e}"));
+            let sql = p.sql();
             let mut back = p.undo.unwrap_or_else(|e| panic!("{label}: {e}"));
             back.label = label.into();
-            let sql = p.sql;
             self.w.sql_alter(1, self.db.clone(), "quarry_ddl".into(), "t".into(), sql.clone(), m, Some(back), false, "done".into());
             let Msg::SqlAltered { res, undo, .. } = recv(&self.rx) else { panic!("expected SqlAltered") };
             res.unwrap_or_else(|e| panic!("{label}: {e}\n{sql}"));
@@ -3324,13 +3323,14 @@ mod review_live {
             let st = self.st(db, table);
             let m = Mode::of(&db.sql_mode);
             let p = plan(db.dialect, &db.version, m, table, &st, changes).unwrap_or_else(|e| panic!("{table}: {e}"));
+            let sql = p.sql();
             let undo = p.undo.ok().map(|mut u| {
                 u.label = "test".into();
                 u
             });
-            self.w.sql_alter(1, db.clone(), S.into(), table.into(), p.sql.clone(), m, undo, false, "done".into());
+            self.w.sql_alter(1, db.clone(), S.into(), table.into(), sql.clone(), m, undo, false, "done".into());
             let Msg::SqlAltered { res, undo, sql_mode, .. } = recv(&self.rx) else { panic!("expected SqlAltered") };
-            (res, undo, sql_mode, p.sql)
+            (res, undo, sql_mode, sql)
         }
 
         fn undo(&mut self, db: &Db, a: UndoAction) -> (Res<String>, Option<UndoAction>) {
@@ -3654,11 +3654,12 @@ mod live_rel {
             let before = self.structure(table);
             let m = Mode::of(&self.db.sql_mode);
             let p = plan(self.db.dialect, &self.db.version, m, table, &before, changes)?;
+            let sql = p.sql();
             let mut u = p.undo?;
             u.label = "label".into();
-            self.w.sql_alter(1, self.db.clone(), "quarry_rt".into(), table.into(), p.sql.clone(), m, Some(u), false, "done".into());
+            self.w.sql_alter(1, self.db.clone(), "quarry_rt".into(), table.into(), sql.clone(), m, Some(u), false, "done".into());
             let Msg::SqlAltered { res, undo, .. } = recv(&self.rx) else { panic!("expected SqlAltered") };
-            res.map_err(|e| format!("{e}\n{}", p.sql))?;
+            res.map_err(|e| format!("{e}\n{sql}"))?;
             Ok(undo.expect("an undo"))
         }
 

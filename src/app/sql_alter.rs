@@ -177,7 +177,7 @@ impl App {
 
     /// The ALTER for these changes, as it will run.
     pub(super) fn alter_text(&self, st: &Structure, changes: &[Change]) -> Result<String, String> {
-        self.plan_of(st, changes).map(|p| p.sql)
+        self.plan_of(st, changes).map(|p| p.sql())
     }
 
     /// The name a column has once the staged changes ran.
@@ -382,10 +382,12 @@ impl App {
         }
         let (Some(st), staged) = (self.structure().cloned(), self.staged().to_vec()) else { return };
         let (.., m) = self.alter_env();
-        let Plan { sql, undo, steps, expect } = match self.plan_of(&st, &staged) {
+        let plan = match self.plan_of(&st, &staged) {
             Ok(p) => p,
             Err(e) => return self.err(e),
         };
+        let sql = plan.sql();
+        let Plan { undo, steps, expect, .. } = plan;
         let (undo, done) = match undo {
             Ok(mut u) => {
                 let what = if staged.len() == 1 { staged[0].describe().to_lowercase() } else { plural_changes(staged.len()) };
@@ -507,7 +509,7 @@ impl App {
                         ui.label(RichText::new(format!("This change cannot be undone: {why}")).size(TXT_SMALL).color(ALERT()));
                         ui.add_space(4.0);
                     }
-                    sql_block(ui, "staged-sql", &p.sql, 140.0);
+                    sql_block(ui, "staged-sql", &p.sql(), 140.0);
                 }
                 Err(e) => {
                     ui.label(RichText::new(e.as_str()).size(TXT_SMALL).color(ALERT()));
@@ -590,7 +592,7 @@ impl App {
             ui.horizontal(|ui| {
                 if pg {
                     ui.checkbox(&mut f.def.nullable, "Allow NULL");
-                    ui.add_enabled(db::sql::ddl::pg_identity_type(&f.def.ty), egui::Checkbox::new(&mut f.def.auto_increment, "Identity (auto increment)"));
+                    ui.add_enabled(db::sql::ddl_pg::identity_type(&f.def.ty), egui::Checkbox::new(&mut f.def.auto_increment, "Identity (auto increment)"));
                     // An identity is never NULL.
                     if f.def.auto_increment {
                         f.def.nullable = false;
@@ -684,7 +686,7 @@ impl App {
         } else {
             memo.map_or_else(|| Err("The structure is not loaded.".into()), |m| m.plan.as_ref().map_err(Clone::clone))
         };
-        let text = plan.as_ref().map(|p| p.sql.clone()).map_err(Clone::clone);
+        let text = plan.as_ref().map(|p| p.sql()).map_err(Clone::clone);
         ui.add_space(6.0);
         caption(ui, "SQL TO RUN");
         ui.add_space(4.0);

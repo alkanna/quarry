@@ -23,24 +23,15 @@ pub fn pg_lit(s: &str) -> String {
 
 /// `pg_lit` appended to `out`, for a writer that builds a long text and should not allocate per value.
 pub fn pg_lit_into(out: &mut String, s: &str) {
-    if s.contains('\\') {
-        out.push_str("E'");
-        for c in s.chars() {
-            match c {
-                '\\' => out.push_str("\\\\"),
-                '\'' => out.push_str("''"),
-                c => out.push(c),
-            }
-        }
-    } else {
-        out.push('\'');
-        for c in s.chars() {
-            if c == '\'' {
-                out.push('\'');
-            }
-            out.push(c);
-        }
+    out.push_str(if s.contains('\\') { "E'" } else { "'" });
+    let mut last = 0;
+    // Both specials are ASCII, so the pieces between them are copied whole. A backslash can only be found in the E form.
+    for (i, c) in s.match_indices(['\'', '\\']) {
+        out.push_str(&s[last..i]);
+        out.push_str(if c == "'" { "''" } else { "\\\\" });
+        last = i + 1;
     }
+    out.push_str(&s[last..]);
     out.push('\'');
 }
 

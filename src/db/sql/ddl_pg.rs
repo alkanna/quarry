@@ -139,7 +139,7 @@ fn scan(s: &str, what: Text) -> Result<(), String> {
 }
 
 /// A default expression typed by the person must stay one expression. See `scan`.
-pub fn check_expr_pg(s: &str) -> Result<(), String> {
+pub(super) fn check_expr_pg(s: &str) -> Result<(), String> {
     scan(s, Text::Expr)
 }
 
@@ -149,7 +149,7 @@ pub fn check_cond_pg(s: &str) -> Result<(), String> {
 }
 
 /// A column type typed by the person must stay one type name. See `scan`.
-pub fn check_type_pg(s: &str) -> Result<(), String> {
+pub(super) fn check_type_pg(s: &str) -> Result<(), String> {
     scan(s, Text::Type)
 }
 
@@ -260,7 +260,7 @@ fn collation_ok(c: &str) -> Result<(), String> {
 }
 
 /// Whether a column of this type can be an identity or a serial.
-pub(super) fn identity_type(ty: &str) -> bool {
+pub fn identity_type(ty: &str) -> bool {
     serial_of(ty).is_some()
 }
 
@@ -707,7 +707,7 @@ pub(super) fn plan(table: &str, st: &Structure, changes: &[Change]) -> Result<Pl
     let all = changes.iter().any(|c| matches!(c, Change::Drop(_))).then(|| table_state(st));
     let (refs, orphans) = others(&Sim::of(st), schema, changes);
     let expect = Expect { snap: snapshot(st, &cols, &idx, &fks), cols, idx, fks, all, types, refs, orphans, own_share: shares_only(changes) };
-    Ok(Plan { sql: super::ddl::script(&steps), steps, undo: undo_of(schema, table, st, changes), expect: Some(expect) })
+    Ok(Plan { steps, undo: undo_of(schema, table, st, changes), expect: Some(expect) })
 }
 
 /// Every index, constraint and dependent of the table in one comparable list.

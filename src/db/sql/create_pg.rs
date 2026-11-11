@@ -38,7 +38,7 @@ pub fn system_db(name: &str) -> bool {
 }
 
 /// How many dependent objects a confirmation lists before it says "and N more".
-pub const LISTED: usize = 20;
+pub(super) const LISTED: usize = 20;
 
 const LOCKED: &str = "Writes are locked on this connection. Unlock them first.";
 

@@ -531,10 +531,29 @@ pub(super) fn server_text(x: &sqlx::Error) -> String {
 /// set_config, never spliced, and the names are the allow-list's. The guard is read back after this, so nothing here can
 /// leave the session writable.
 pub(super) async fn apply_session(c: &mut sqlx::PgConnection, adv: &PgSession) -> Result<(), String> {
+    if adv.settings.is_empty() {
+        return Ok(());
+    }
+    // One statement for all of them, in the order of the list (a VALUES list is read in order), so a connect costs one round trip.
+    // When the server refuses one, the statement is undone as a whole, so they are tried one by one to say which.
+    if set_config_all(c, &adv.settings, false).await.is_ok() {
+        return Ok(());
+    }
     for (name, value) in &adv.settings {
         sqlx::query("SELECT set_config($1, $2, false)").persistent(false).bind(name.as_str()).bind(value.as_str()).execute(&mut *c).await.map_err(|x| refused(name, value, &x))?;
     }
     Ok(())
+}
+
+/// `set_config` for every setting in one statement, each name and value bound.
+async fn set_config_all(c: &mut sqlx::PgConnection, settings: &[(String, String)], local: bool) -> Result<(), sqlx::Error> {
+    let values = (0..settings.len()).map(|i| format!("(${}::text, ${}::text)", 2 * i + 1, 2 * i + 2)).collect::<Vec<_>>().join(", ");
+    let sql = format!("SELECT set_config(s.n, s.v, {local}) FROM (VALUES {values}) AS s(n, v)");
+    let mut q = sqlx::query(&sql).persistent(false);
+    for (name, value) in settings {
+        q = q.bind(name.as_str()).bind(value.as_str());
+    }
+    q.execute(&mut *c).await.map(|_| ())
 }
 
 fn refused(name: &str, value: &str, x: &sqlx::Error) -> String {
@@ -546,6 +565,15 @@ fn refused(name: &str, value: &str, x: &sqlx::Error) -> String {
 pub(super) async fn validate_session(c: &mut sqlx::PgConnection, adv: &PgSession) -> Vec<(String, String)> {
     let mut bad = Vec::new();
     if adv.settings.is_empty() || c.execute("BEGIN").await.is_err() {
+        return bad;
+    }
+    // Most often nothing is refused, and one statement says so. Otherwise it starts over to find each refused row.
+    if set_config_all(c, &adv.settings, true).await.is_ok() {
+        let _ = c.execute("ROLLBACK").await;
+        return bad;
+    }
+    let _ = c.execute("ROLLBACK").await;
+    if c.execute("BEGIN").await.is_err() {
         return bad;
     }
     for (name, value) in &adv.settings {
@@ -725,7 +753,7 @@ pub(super) async fn prepare(c: &mut sqlx::PgConnection, read_only: bool, id: &At
         return Ok(());
     }
     // The start time travels as text so no timestamp type has to round trip, and is compared as text on Stop.
-    let rows = c.fetch_all("SELECT pg_backend_pid()::text, (SELECT backend_start::text FROM pg_stat_activity WHERE pid = pg_backend_pid())").await?;
+    let rows = c.fetch_all("SELECT pg_backend_pid()::text, s.backend_start::text FROM pg_stat_get_activity(pg_backend_pid()) AS s").await?;
     if let Some(r) = rows.first() {
         let pid = num_at(r, 0).unwrap_or(0);
         if let (Some(start), Pool::Pg(p)) = (text_at(r, 1), &db.pool) {

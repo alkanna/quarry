@@ -342,10 +342,10 @@ fn sample_records(sample: &[u8], opts: Opts, max: usize) -> Vec<Vec<String>> {
     out
 }
 
-pub const DELIMS: [char; 4] = [',', ';', '\t', '|'];
+pub(super) const DELIMS: [char; 4] = [',', ';', '\t', '|'];
 
 /// The delimiter that splits the sample into the most rows of one width. A comma wins a tie.
-pub fn detect_delim(sample: &[u8], enc: Enc, quote: Option<char>) -> char {
+pub(super) fn detect_delim(sample: &[u8], enc: Enc, quote: Option<char>) -> char {
     let mut best = (',', 0usize);
     for d in DELIMS {
         let recs = sample_records(sample, Opts { delim: d, quote, enc }, 30);
@@ -362,7 +362,7 @@ pub fn detect_delim(sample: &[u8], enc: Enc, quote: Option<char>) -> char {
 }
 
 /// Whether the first record looks like column names: all filled in, all different, none a number.
-pub fn guess_header(rows: &[Vec<String>]) -> bool {
+pub(super) fn guess_header(rows: &[Vec<String>]) -> bool {
     let Some(first) = rows.first() else { return true };
     let mut seen = std::collections::HashSet::new();
     first.iter().all(|c| !c.trim().is_empty() && c.trim().parse::<f64>().is_err() && seen.insert(c.trim().to_lowercase()))
@@ -408,7 +408,7 @@ pub struct TCol {
 }
 
 /// The values listed in `'a','b''c'`, the way COLUMN_TYPE writes an ENUM or SET.
-pub fn quoted_list(args: &str) -> Vec<String> {
+pub(super) fn quoted_list(args: &str) -> Vec<String> {
     let (mut out, mut cur, mut open) = (Vec::new(), String::new(), false);
     let mut it = args.chars().peekable();
     while let Some(c) = it.next() {
@@ -552,7 +552,7 @@ pub fn has_local_dates(values: &[&str]) -> bool {
 
 /// `2026-11-09 12:41:00` for `09/11/2026 12:41`, or the text as it is when it is already in the server's form
 /// or is not a date at all (the type check then reports it).
-pub fn to_iso(s: &str, fmt: DateFmt) -> String {
+pub(super) fn to_iso(s: &str, fmt: DateFmt) -> String {
     if is_iso(s) {
         return s.trim().to_string();
     }

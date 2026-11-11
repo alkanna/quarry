@@ -253,7 +253,7 @@ impl App {
                     (Dup::Skip, false) => "INSERT ... ON DUPLICATE KEY, NO CHANGE",
                     (Dup::Update, false) => "INSERT ... ON DUPLICATE KEY UPDATE",
                     // The statement names the key only when the table has one, and updates only when the file fills a column besides it.
-                    (dup, true) => import::pg_clause_text(&info, &f.file.map, dup),
+                    (dup, true) => db::sql::import_pg::clause_text(&info, &f.file.map, dup),
                 };
                 ui.label(RichText::new(how).font(FontId::monospace(TXT_CAPTION)).color(FAINT()));
             });
@@ -373,7 +373,7 @@ impl App {
         let missing: Vec<&str> = info.cols.iter().enumerate().filter(|(i, c)| !c.generated && !c.fills_itself && !mapped.iter().any(|(_, t)| t == i)).map(|(_, c)| c.name.as_str()).collect();
         ui.add_space(6.0);
         let undo = import::undo_plan(&info, &f.file.map, f.dup, rows);
-        let per = if info.pg { import::batch_rows_pg(mapped.len()) } else { 500.min(60_000 / mapped.len().max(1)).max(1) };
+        let per = if info.pg { db::sql::import_pg::batch_rows(mapped.len()) } else { 500.min(60_000 / mapped.len().max(1)).max(1) };
         egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
             ui.set_width(ui.available_width());
             let say = |ui: &mut egui::Ui, t: String, c: Color32| ui.add(egui::Label::new(RichText::new(t).size(TXT_SMALL).color(c)).wrap());
