@@ -391,6 +391,7 @@ impl App {
         let mut lazy: Vec<String> = Vec::new();
         let mut folded: Vec<(u64, String, bool)> = Vec::new();
         let mut pick_schema: Option<(String, String)> = None;
+        let mut retry: Option<String> = None;
         {
             let Some(c) = self.conn(id) else { return };
             match &c.status {
@@ -539,6 +540,24 @@ impl App {
                             pick_schema = Some((db_name.clone(), p));
                         }
                     }
+                    // Nothing listed yet: a row says the list is on its way, or why it failed with a retry, so an open
+                    // database never sits empty. A PostgreSQL database loads its schemas, then the picked schema's tables.
+                    let loaded = if pg { c.pg.contains_key(db_name) && (picked.is_empty() || c.tables_in(db_name, picked).is_some()) } else { colls.is_some() };
+                    let failed = self.side_err.get(&(id, db_name.clone())).or_else(|| self.side_err.get(&(id, ns.clone())));
+                    if let Some(e) = failed {
+                        let r = side_row(ui, SIDE_ROW_H, 18.0, false, "Could not list. Retry", |p, r| {
+                            p.text(egui::pos2(r.left() + 6.0, r.center().y), egui::Align2::LEFT_CENTER, "Could not list. Retry", FontId::proportional(TXT_SMALL), ALERT());
+                        });
+                        if r.on_hover_text(e.as_str()).clicked() {
+                            retry = Some(db_name.clone());
+                        }
+                    } else if !loaded && c.status == Status::Ready {
+                        ui.horizontal(|ui| {
+                            ui.add_space(24.0);
+                            spin(ui);
+                            ui.label(RichText::new("Loading…").size(TXT_SMALL).color(MUTED()));
+                        });
+                    }
                     let matches_len = matches.len();
                     let schema = if sql { self.sql_schema.get(&(id, ns.clone())).cloned() } else { None };
                     let est_rows = self.sql_rows.get(&(id, ns.clone()));
@@ -682,6 +701,13 @@ impl App {
         }
         if connect {
             self.connect(id);
+        }
+        if let Some(d) = retry {
+            let pre = ns_key(&d, "x");
+            let pre = &pre[..pre.len() - 1];
+            self.side_err.retain(|k, _| k.0 != id || (k.1 != d && !k.1.starts_with(pre)));
+            self.sql_asked.insert((id, d.clone()));
+            self.side_act(id, SideAct::Refresh(d));
         }
         if let Some((d, schema)) = pick_schema {
             self.pg_set_schema(id, &d, schema);
