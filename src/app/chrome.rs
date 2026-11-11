@@ -42,7 +42,7 @@ impl App {
                 clauses: t.sql.as_ref().and_then(|s| serde_json::to_string(&s.bar.c).ok()).unwrap_or_default(),
                 query: t.sql.as_ref().map(|s| s.query.clone()).unwrap_or_default(),
                 run_db: t.sql.as_ref().map(|s| s.run_db.clone()).unwrap_or_default(),
-                run_schema: t.sql.as_ref().map(|s| s.run_schema.clone()).unwrap_or_default(),
+                run_schema: t.sql.as_ref().map(|s| s.run_schema.trim().to_string()).unwrap_or_default(),
                 stages: if t.stages_src == t.agg_txt { t.stages.iter().map(|s| SavedStage { op: s.op.clone(), text: s.text.clone(), on: s.on }).collect() } else { Vec::new() },
                 agg_text_mode: t.agg_text_mode,
             })
