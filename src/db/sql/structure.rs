@@ -102,6 +102,9 @@ pub struct ColDep {
     pub what: String,
     /// A constraint of this table itself, as opposed to a foreign key of another table that points at the column.
     pub own: bool,
+    /// The schema and table a constraint belongs to, empty for anything else.
+    pub rel_schema: String,
+    pub rel_table: String,
 }
 
 /// A PostgreSQL primary key, unique, check or exclusion constraint, in the words of `pg_get_constraintdef`. Foreign
@@ -366,7 +369,7 @@ pub(super) fn indexes(rows: &[SqlRow]) -> Vec<Index> {
 }
 
 pub(super) fn col_deps(rows: &[SqlRow]) -> Vec<ColDep> {
-    rows.iter().map(|r| ColDep { col: s(r, "col"), kind: s(r, "kind"), name: s(r, "name"), what: s(r, "what"), own: flag(r, "own") }).collect()
+    rows.iter().map(|r| ColDep { col: s(r, "col"), kind: s(r, "kind"), name: s(r, "name"), what: s(r, "what"), own: flag(r, "own"), rel_schema: s(r, "rel_schema"), rel_table: s(r, "rel_table") }).collect()
 }
 
 /// A 0 or 1 column that MySQL's key query does not have, which reads as false there.

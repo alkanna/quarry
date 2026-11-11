@@ -6,9 +6,6 @@ use super::sql_edit::{every_engine, open_unlocked, Fx};
 use super::sql_structure::{is_pg, one, undo_last, until};
 use super::*;
 
-/// The flows share the servers' catalogs and the same app windows' timing, so they take turns.
-static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 /// The names of the foreign keys of a table, joined with commas.
 fn keys(fx: &Fx, table: &str) -> String {
     if is_pg(fx) {
@@ -54,10 +51,16 @@ fn select_row(ui: &mut UiApp, row: &str) {
     ui.settle();
 }
 
-/// Clicks Apply now once the dialog has stopped changing size: the answers that fill it in (the rows with no match, the SQL)
-/// move the buttons, and a click on the spot a button was a frame ago is lost.
+/// Clicks Apply now once it is enabled, which it is when the SQL is there and the dialog's own count of the rows with no match
+/// has answered. The space of that answer is reserved, so the button does not move under the click.
 fn apply_now(ui: &mut UiApp) {
-    ui.h.run_steps(8);
+    ui.show("Apply now");
+    let t = std::time::Instant::now();
+    while ui.h.get_by_label("Apply now").accesskit_node().is_disabled() {
+        assert!(t.elapsed() < LIMIT, "Apply now stayed disabled: {}", ui.app().last_problem());
+        ui.h.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
     ui.click("Apply now");
 }
 
@@ -72,7 +75,6 @@ fn point_at(ui: &mut UiApp, parent: &str, column: &str) {
 
 #[test]
 fn a_relation_is_added_through_the_dialog_and_taken_back() {
-    let _one_at_a_time = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     every_engine("a relation is added through the dialog and taken back", |fx, ui| {
         let (child, parent) = pair(fx);
         fx.open(ui, &child);
@@ -96,7 +98,6 @@ fn a_relation_is_added_through_the_dialog_and_taken_back() {
 
 #[test]
 fn rows_that_point_at_nothing_are_shown_and_the_key_is_not_added() {
-    let _one_at_a_time = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     every_engine("rows that point at nothing are shown", |fx, ui| {
         let (child, parent) = pair(fx);
         fx.open(ui, &child);
@@ -127,8 +128,38 @@ fn rows_that_point_at_nothing_are_shown_and_the_key_is_not_added() {
 }
 
 #[test]
+fn the_buttons_stay_put_and_apply_waits_while_the_rows_are_counted() {
+    every_engine("the buttons stay put while the rows are counted", |fx, ui| {
+        let (child, parent) = pair(fx);
+        fx.open(ui, &child);
+        ui.unlock();
+        open_relations(ui);
+        ui.click("+ Relation");
+        ui.click("Column 1");
+        ui.click_last("qty");
+        ui.click("Referenced table");
+        ui.click_last(&parent);
+        ui.click("Referenced column 1");
+        ui.click_last("id");
+        // the answer is a box of a few lines, and Apply now is there to be clicked
+        see(ui, "3 rows have values in qty missing from");
+        ui.h.run_steps(2);
+        let answered = ui.h.get_by_label("Apply now").rect();
+        assert!(!ui.h.get_by_label("Apply now").accesskit_node().is_disabled());
+        // the count is asked again and not answered: the box gives way to a line, and the buttons neither move nor work yet,
+        // since the count holds a read lock that a change of the table would meet as another session
+        if let Some(Modal::FkEdit(f)) = ui.h.state_mut().modal.as_mut() {
+            f.forget_orphan_answer();
+        }
+        see(ui, "Checking the existing rows");
+        ui.h.run_steps(2);
+        assert_eq!(ui.h.get_by_label("Apply now").rect(), answered, "the buttons moved when the answer went away");
+        assert!(ui.h.get_by_label("Apply now").accesskit_node().is_disabled(), "Apply now works while the rows are being counted");
+    });
+}
+
+#[test]
 fn a_locked_connection_asks_to_unlock_before_a_relation_is_applied() {
-    let _one_at_a_time = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     every_engine("a locked connection asks to unlock before a relation is applied", |fx, ui| {
         let (child, parent) = pair(fx);
         fx.open(ui, &child);
@@ -155,16 +186,14 @@ fn a_locked_connection_asks_to_unlock_before_a_relation_is_applied() {
 
 #[test]
 fn a_relation_can_point_into_another_schema() {
-    let _one_at_a_time = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     every_engine("a relation can point into another schema", |fx, ui| {
         // only PostgreSQL has schemas inside a database
         if !is_pg(fx) {
             return;
         }
-        // A fixed name that sorts before every other schema: the popup lists them in order and scrolls, and the servers keep
-        // the schemas of other tests, so a later name would be below what the popup shows. A schema left behind by a failed run
-        // is dropped by the next one.
-        let other = "a_ui_rel_other".to_string();
+        // The popup lists every schema of the database and scrolls, and the click helpers scroll an item into view. A schema left
+        // behind by a failed run is dropped by the next one.
+        let other = "ui_rel_other".to_string();
         fx.sql(&format!("DROP SCHEMA IF EXISTS {other} CASCADE; CREATE SCHEMA {other}; CREATE TABLE {other}.q (id int PRIMARY KEY)"));
         fx.sql(&format!("INSERT INTO {other}.q VALUES (1), (2), (3)"));
         let child = open_unlocked(fx, ui);
@@ -194,7 +223,6 @@ fn a_relation_can_point_into_another_schema() {
 
 #[test]
 fn a_relation_is_changed_through_the_dialog_and_the_undo_brings_it_back() {
-    let _one_at_a_time = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     every_engine("a relation is changed through the dialog", |fx, ui| {
         // changing a key is a drop and an add in one transaction, which only PostgreSQL does
         if !is_pg(fx) {
@@ -214,13 +242,8 @@ fn a_relation_is_changed_through_the_dialog_and_the_undo_brings_it_back() {
         // either Cascade will do: one is On update and one On delete, and the test does not rely on which comes first
         ui.click_nth("Cascade", 0);
         see(ui, "Change relation");
-        // the referenced table is read again for the edit, and Apply now waits for it
-        let waited = std::time::Instant::now();
-        while ui.h.get_by_label("Apply now").accesskit_node().is_disabled() {
-            ui.h.step();
-            assert!(waited.elapsed() < LIMIT, "Apply now stayed disabled: {}", ui.app().last_problem());
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        // the referenced table is read again for the edit and its rows counted, and Apply now waits for both
+        see(ui, "Every existing row has a match");
         apply_now(ui);
         let started = std::time::Instant::now();
         while actions(fx) == "aa" {

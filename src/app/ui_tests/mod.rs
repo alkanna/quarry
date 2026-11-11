@@ -17,6 +17,14 @@ use egui_kittest::kittest::{NodeT, Queryable};
 const LIMIT: Duration = Duration::from_secs(20);
 const CONN: u64 = 1;
 
+/// Which of the widgets with one accessible name a click is for.
+#[derive(Clone, Copy)]
+enum Pick {
+    Only,
+    Last,
+    Nth(usize),
+}
+
 pub(super) struct UiApp {
     pub h: Harness<'static, App>,
 }
@@ -59,11 +67,30 @@ impl UiApp {
         self.h.run_steps(4);
     }
 
+    /// The widget with this accessible name that `pick` names.
+    fn node<'a>(&'a self, label: &'a str, pick: Pick) -> egui_kittest::Node<'a> {
+        match pick {
+            Pick::Only => self.h.get_by_label(label),
+            Pick::Last => self.h.get_all_by_label(label).last().expect("a widget"),
+            Pick::Nth(n) => self.h.get_all_by_label(label).nth(n).expect("a widget"),
+        }
+    }
+
+    /// Clicks a widget after scrolling it into view. A list longer than its popup or window keeps an item outside the area that
+    /// is drawn, and egui drops a pointer click there, so a click on a far item of a picker would do nothing.
+    fn click_pick(&mut self, label: &str, pick: Pick) {
+        self.show(label);
+        self.node(label, pick).scroll_to_me();
+        // The scroll area takes the offset on one frame and lays the items out at it on the next, and the node's rect is read from
+        // the frame before the click.
+        self.h.run_steps(3);
+        self.node(label, pick).click();
+        self.settle();
+    }
+
     /// Waits for a widget with this exact accessible name, then clicks it.
     pub fn click(&mut self, label: &str) {
-        self.show(label);
-        self.h.get_by_label(label).click();
-        self.settle();
+        self.click_pick(label, Pick::Only);
     }
 
     /// Waits for a widget whose accessible name contains `part`, then clicks it. For a menu item whose name carries more
@@ -154,16 +181,12 @@ impl UiApp {
     /// Clicks the last widget with this accessible name: a dialog is drawn after the page, so its button comes
     /// last when the page has one of the same name ("Delete").
     pub fn click_last(&mut self, label: &str) {
-        self.show(label);
-        self.h.get_all_by_label(label).last().expect("a widget").click();
-        self.settle();
+        self.click_pick(label, Pick::Last);
     }
 
     /// Clicks the nth widget with this accessible name.
     pub fn click_nth(&mut self, label: &str, n: usize) {
-        self.show(label);
-        self.h.get_all_by_label(label).nth(n).expect("a widget").click();
-        self.settle();
+        self.click_pick(label, Pick::Nth(n));
     }
 
     /// Clicks a text field by its accessible name and types into it.

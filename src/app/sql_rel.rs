@@ -10,6 +10,11 @@ use db::sql::structure::{ForeignKey, Structure};
 /// Above this many rows the check for orphans waits for a click, because it joins the whole table.
 const CHECK_ROWS: u64 = 200_000;
 
+/// The height kept for the line or box that reports the rows with no match, which is a one line note, a box of a few lines or
+/// nothing as the answer comes in. It is kept whatever is shown so the buttons below never move when the answer lands, where a
+/// click aimed at one could hit the space it just left.
+const ORPHAN_BOX_H: f32 = 64.0;
+
 /// The Add relation dialog.
 pub(super) struct FkForm {
     name: String,
@@ -73,6 +78,12 @@ impl FkForm {
         }
         (self.orphans, self.sample) = (Some(res), sample);
         true
+    }
+
+    /// Puts the form back in the state where the count of the rows with no match is asked and not answered yet.
+    #[cfg(test)]
+    pub(super) fn forget_orphan_answer(&mut self) {
+        self.orphans = None;
     }
 
     /// The key the form describes once every part is picked.
@@ -169,7 +180,8 @@ impl App {
             if !k.opaque.is_empty() {
                 return self.warn(format!("{} cannot be edited here: {}.", k.name, k.opaque));
             }
-            if self.staged().iter().any(|c| matches!(c, Change::DropFk(n) | Change::RenameFk { from: n, .. } if n.eq_ignore_ascii_case(&k.name))) {
+            let pg = self.t().is_some_and(|t| self.is_pg(t.sel.conn));
+            if self.staged().iter().any(|c| matches!(c, Change::DropFk(n) | Change::RenameFk { from: n, .. } | Change::SetFkDeferral { name: n, .. } if ddl::fk_name_is(pg, n, &k.name))) {
                 return self.warn(format!("{} already has a staged change. Remove it first.", k.name));
             }
         }
@@ -227,7 +239,8 @@ impl App {
     pub(super) fn stage_drop_fk(&mut self, i: usize) {
         let Some(name) = self.structure().and_then(|s| s.foreign_keys.get(i)).map(|k| k.name.clone()) else { return };
         let mut staged = self.staged().to_vec();
-        if staged.iter().any(|c| matches!(c, Change::DropFk(n) if n.eq_ignore_ascii_case(&name))) {
+        let pg = self.t().is_some_and(|t| self.is_pg(t.sel.conn));
+        if staged.iter().any(|c| matches!(c, Change::DropFk(n) if ddl::fk_name_is(pg, n, &name))) {
             return;
         }
         staged.push(Change::DropFk(name));
@@ -419,7 +432,7 @@ impl App {
             problem = ddl::fk_problem(&f.own, &table, par, k, f.strict);
             hard = problem.is_some();
             if problem.is_none() {
-                let taken = |n: &str| f.own.foreign_keys.iter().any(|x| x.name.eq_ignore_ascii_case(n) && f.from.as_ref().is_none_or(|o| o.name != x.name)) || f.rest.iter().any(|c| matches!(c, Change::AddFk(x) if x.name.eq_ignore_ascii_case(n))) || f.own.constraints.iter().any(|x| x.name == n);
+                let taken = |n: &str| f.own.foreign_keys.iter().any(|x| ddl::fk_name_is(pg, &x.name, n) && f.from.as_ref().is_none_or(|o| o.name != x.name)) || f.rest.iter().any(|c| matches!(c, Change::AddFk(x) if ddl::fk_name_is(pg, &x.name, n))) || f.own.constraints.iter().any(|x| x.name == n);
                 if taken(&k.name) {
                     problem = Some(format!("The table already has a foreign key called {}.", k.name));
                     hard = true;
@@ -462,39 +475,43 @@ impl App {
             text = Err(p.clone());
         }
 
-        if let (Some(k), None) = (&key, &problem) {
-            ui.add_space(2.0);
-            let (col, rc) = (k.cols.join(", "), format!("{}.{}", k.ref_table, k.ref_cols.join(", ")));
-            match &f.orphans {
-                Some(Ok(n)) if *n > 0 && f.orphan_for.as_ref() == Some(&ddl::orphan_key(k)) => {
-                    egui::Frame::new().fill(tint(WARNING(), 34)).corner_radius(R_MD).inner_margin(10).show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        let them = if *n == 1 { "it" } else { "them" };
-                        let fix = if k.not_valid { "They stay as they are.".to_string() } else if pg { format!("Fix {them} first, or add the key as NOT VALID.") } else { format!("Fix {them} first or the ALTER fails.") };
-                        let mut msg = format!("{n} row{} {} {col} missing from {rc}. {fix}", if *n == 1 { "" } else { "s" }, if *n == 1 { "has a value in" } else { "have values in" });
-                        if !f.sample.is_empty() {
-                            msg.push_str(&format!(" For example {}.", f.sample.join(", ")));
-                        }
-                        ui.label(RichText::new(msg).size(TXT_SMALL).color(WARNING()));
-                    });
-                }
-                Some(Ok(_)) => {
-                    ui.label(RichText::new("Every existing row has a match.").size(TXT_SMALL).color(FAINT()));
-                }
-                Some(Err(e)) => {
-                    ui.label(RichText::new(format!("Could not check the existing rows: {e}")).size(TXT_SMALL).color(FAINT()));
-                }
-                None if f.orphan_for.is_some() => {
-                    ui.label(RichText::new("Checking the existing rows...").size(TXT_SMALL).color(FAINT()));
-                }
-                None if live.is_some() && f.own.status.rows.is_some_and(|n| n > CHECK_ROWS) => {
-                    if quiet(ui, "Check existing rows").on_hover_text("Joins the whole table, which can take a while on a big one").clicked() {
-                        f.check = true;
+        ui.add_space(2.0);
+        ui.scope(|ui| {
+            ui.set_min_height(ORPHAN_BOX_H);
+            ui.set_width(ui.available_width());
+            if let (Some(k), None) = (&key, &problem) {
+                let (col, rc) = (k.cols.join(", "), format!("{}.{}", k.ref_table, k.ref_cols.join(", ")));
+                match &f.orphans {
+                    Some(Ok(n)) if *n > 0 && f.orphan_for.as_ref() == Some(&ddl::orphan_key(k)) => {
+                        egui::Frame::new().fill(tint(WARNING(), 34)).corner_radius(R_MD).inner_margin(10).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            let them = if *n == 1 { "it" } else { "them" };
+                            let fix = if k.not_valid { "They stay as they are.".to_string() } else if pg { format!("Fix {them} first, or add the key as NOT VALID.") } else { format!("Fix {them} first or the ALTER fails.") };
+                            let mut msg = format!("{n} row{} {} {col} missing from {rc}. {fix}", if *n == 1 { "" } else { "s" }, if *n == 1 { "has a value in" } else { "have values in" });
+                            if !f.sample.is_empty() {
+                                msg.push_str(&format!(" For example {}.", f.sample.join(", ")));
+                            }
+                            ui.label(RichText::new(msg).size(TXT_SMALL).color(WARNING()));
+                        });
                     }
+                    Some(Ok(_)) => {
+                        ui.label(RichText::new("Every existing row has a match.").size(TXT_SMALL).color(FAINT()));
+                    }
+                    Some(Err(e)) => {
+                        ui.label(RichText::new(format!("Could not check the existing rows: {e}")).size(TXT_SMALL).color(FAINT()));
+                    }
+                    None if f.orphan_for.is_some() => {
+                        ui.label(RichText::new("Checking the existing rows...").size(TXT_SMALL).color(FAINT()));
+                    }
+                    None if live.is_some() && f.own.status.rows.is_some_and(|n| n > CHECK_ROWS) => {
+                        if quiet(ui, "Check existing rows").on_hover_text("Joins the whole table, which can take a while on a big one").clicked() {
+                            f.check = true;
+                        }
+                    }
+                    None => {}
                 }
-                None => {}
             }
-        }
+        });
         ui.add_space(6.0);
         caption(ui, "SQL TO RUN");
         ui.add_space(4.0);
@@ -513,7 +530,10 @@ impl App {
         dialog_actions(ui, |ui| {
             stage = ui.add_enabled(text.is_ok(), primary_button(ui, if f.from.is_some() { "Change relation" } else { "Add relation" }, PRIMARY())).clicked();
             let busy = self.applying();
-            now = ui.add_enabled(text.is_ok() && !self.sel_is_view() && !busy, egui::Button::new("Apply now")).on_hover_text("Stage this change and run everything staged. A locked connection asks to unlock first.").on_disabled_hover_text(if busy { BUSY_NOTE } else { "A view cannot be changed here" }).clicked();
+            // The dialog's own count of the rows with no match holds a read lock on the table until it answers, which a change that
+            // locks the table harder would meet as another session.
+            let counting = f.orphan_for.is_some() && f.orphans.is_none();
+            now = ui.add_enabled(text.is_ok() && !self.sel_is_view() && !busy && !counting, egui::Button::new("Apply now")).on_hover_text("Stage this change and run everything staged. A locked connection asks to unlock first.").on_disabled_hover_text(if busy { BUSY_NOTE } else if counting { "Checking the existing rows first" } else { "A view cannot be changed here" }).clicked();
             if ui.button("Cancel").clicked() {
                 *keep = false;
             }

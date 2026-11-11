@@ -207,7 +207,9 @@ pub const COLUMN_DEPS: &str = "SELECT a.attname::text AS col, \
      CASE WHEN d.classid = 'pg_class'::regclass THEN CASE WHEN d.objsubid > 0 THEN 'other' ELSE CASE c2.relkind WHEN 'i' THEN 'index' WHEN 'I' THEN 'index' WHEN 'S' THEN 'sequence' ELSE 'other' END END \
           WHEN d.classid = 'pg_constraint'::regclass THEN CASE WHEN co.contype IN ('p', 'u') THEN 'key' ELSE 'constraint' END WHEN d.classid = 'pg_attrdef'::regclass THEN CASE WHEN ad.adrelid = d.refobjid AND ad.adnum = d.refobjsubid THEN 'default' ELSE 'other' END ELSE 'other' END AS kind, \
      COALESCE(c2.relname::text, co.conname::text, '') AS name, pg_describe_object(d.classid, d.objid, d.objsubid) AS what, \
-     COALESCE(co.conrelid = t.oid, false)::int AS own \
+     COALESCE(co.conrelid = t.oid, false)::int AS own, \
+     COALESCE((SELECT n3.nspname::text FROM pg_class c3 JOIN pg_namespace n3 ON n3.oid = c3.relnamespace WHERE c3.oid = co.conrelid), '') AS rel_schema, \
+     COALESCE((SELECT c3.relname::text FROM pg_class c3 WHERE c3.oid = co.conrelid), '') AS rel_table \
      FROM pg_depend d JOIN pg_class t ON t.oid = d.refobjid JOIN pg_namespace n ON n.oid = t.relnamespace \
      JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = d.refobjsubid \
      LEFT JOIN pg_class c2 ON d.classid = 'pg_class'::regclass AND c2.oid = d.objid \

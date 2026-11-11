@@ -40,17 +40,33 @@ fn drop_fk(n: &str) -> Change {
     Change::DropFk(n.into())
 }
 
-/// Holds a lock on `table` from another session until the returned transaction is rolled back.
-fn hold(t: &T, table: &str, mode: &str) -> sqlx::Transaction<'static, sqlx::Postgres> {
-    t.l.w.rt.block_on(async {
+/// A lock held on a table by another session, given up when the guard is dropped, so a test that fails with it held does not
+/// abort the run (a connection dropped outside the runtime panics).
+struct Held<'a> {
+    t: &'a T<'a>,
+    tx: Option<sqlx::Transaction<'static, sqlx::Postgres>>,
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        if let Some(tx) = self.tx.take() {
+            self.t.l.w.rt.block_on(async { tx.rollback().await.ok() });
+        }
+    }
+}
+
+/// Holds a lock on `table` from another session until the guard is released or dropped.
+fn hold<'a>(t: &'a T<'a>, table: &str, mode: &str) -> Held<'a> {
+    let tx = t.l.w.rt.block_on(async {
         let mut tx = t.pool.begin().await.unwrap();
         sqlx::raw_sql(&format!("LOCK TABLE {}.{table} IN {mode} MODE", t.schema)).execute(&mut *tx).await.unwrap();
         tx
-    })
+    });
+    Held { t, tx: Some(tx) }
 }
 
-fn release(t: &T, tx: sqlx::Transaction<'static, sqlx::Postgres>) {
-    t.l.w.rt.block_on(async { tx.rollback().await.ok() });
+fn release(_t: &T, held: Held) {
+    drop(held);
 }
 
 #[test]
@@ -388,4 +404,274 @@ fn a_foreign_key_applies_and_undoes_through_a_pooler() {
     assert!(err.contains("(77)") && err.contains("Nothing was changed"), "{err}");
     assert_eq!(fks(&t), "");
     assert_eq!(t.one("SHOW lock_timeout"), "0");
+}
+
+/// A login that owns `t` and may only read and reference `p`, which is what ADD FOREIGN KEY and DROP CONSTRAINT need. It is dropped
+/// with the guard, which is made after the fixture so the fixture's schema is still there to take its grants. Role names are shared
+/// by the whole cluster, so the name carries the process.
+struct Role<'a> {
+    t: &'a T<'a>,
+    name: String,
+}
+
+impl<'a> Role<'a> {
+    fn new(t: &'a T<'a>, tag: &str) -> Role<'a> {
+        let name = format!("qfk_{}_{tag}", std::process::id());
+        let r = Role { t, name };
+        r.t.sql(&r.cleanup());
+        let n = &r.name;
+        r.t.sql(&format!("CREATE ROLE {n} LOGIN PASSWORD 'quarry'; GRANT USAGE ON SCHEMA {} TO {n}; ALTER TABLE t OWNER TO {n}; GRANT SELECT, REFERENCES ON p TO {n}", r.t.schema));
+        r
+    }
+
+    fn cleanup(&self) -> String {
+        let n = &self.name;
+        format!("DO $$ BEGIN IF EXISTS (SELECT FROM pg_roles WHERE rolname = '{n}') THEN EXECUTE 'DROP OWNED BY {n}'; EXECUTE 'DROP ROLE {n}'; END IF; END $$")
+    }
+
+    /// A worker connected as the role.
+    fn connect(&self) -> AsRole {
+        let (scheme, rest) = self.t.l.uri.split_once("://").unwrap();
+        let (_, host) = rest.split_once('@').unwrap();
+        let l = crate::db::sql::testing::live_pg_at(format!("{scheme}://{}:quarry@{host}", self.name));
+        let db = l.quarry_test();
+        AsRole { l, db, schema: self.t.schema.clone() }
+    }
+}
+
+impl Drop for Role<'_> {
+    fn drop(&mut self) {
+        let _ = self.t.l.w.rt.block_on(async { sqlx::raw_sql(&self.cleanup()).execute(&self.t.pool).await });
+    }
+}
+
+struct AsRole {
+    l: LivePg,
+    db: Db,
+    schema: String,
+}
+
+impl AsRole {
+    fn run(&self, table: &str, plan: ddl::Plan) -> (Res<String>, Option<UndoAction>) {
+        let undo = plan.undo.ok().map(|mut u| {
+            u.label = "changed the structure".into();
+            u
+        });
+        self.l.w.pg_alter(1, self.db.clone(), self.schema.clone(), table.into(), plan.steps, plan.expect.unwrap(), undo, false, "Changed the structure".into());
+        let Msg::SqlAltered { res, undo, .. } = self.l.next() else { panic!("expected SqlAltered") };
+        (res, undo)
+    }
+
+    fn apply(&self, t: &T, changes: &[Change]) -> UndoAction {
+        let (res, undo) = self.run("t", t.plan(changes).unwrap_or_else(|x| panic!("plan: {x}")));
+        res.unwrap_or_else(|x| panic!("apply as the role: {x}"));
+        undo.expect("an undo")
+    }
+
+    fn undo(&self, a: UndoAction) -> Res<String> {
+        self.l.w.sql_undo(self.db.clone(), a, Vec::new(), false);
+        let Msg::SqlAltered { res, .. } = self.l.next() else { panic!("expected SqlAltered") };
+        res
+    }
+}
+
+#[test]
+fn a_role_that_owns_the_child_and_may_only_reference_the_parent_changes_its_keys_and_undoes_them() {
+    every_pg(|l, var| {
+        let t = fixture(l, var, "fkpriv", DDL);
+        let role = Role::new(&t, "priv");
+        let r = role.connect();
+        // the role cannot lock the parent: that is the point of the test
+        assert_eq!(t.one(&format!("SELECT has_table_privilege('{}', '{}.p', 'UPDATE')::text", role.name, t.schema)), "false", "{var}");
+        // add, and the undo of the add (a drop)
+        let k = seen(&t, ForeignKey { on_delete: "CASCADE".into(), ..key("t_pid_fk", &["pid"], "", "p", &["id"]) });
+        let a = r.apply(&t, &[add_fk(k.clone())]);
+        assert!(fks(&t).starts_with("t_pid_fk|"), "{var}");
+        r.undo(a).unwrap_or_else(|x| panic!("{var}: undo of the add: {x}"));
+        assert_eq!(fks(&t), "", "{var}");
+        // drop, and the undo of the drop (an add)
+        r.apply(&t, &[add_fk(k.clone())]);
+        let before = fks(&t);
+        let a = r.apply(&t, &[drop_fk("t_pid_fk")]);
+        assert_eq!(fks(&t), "", "{var}");
+        r.undo(a).unwrap_or_else(|x| panic!("{var}: undo of the drop: {x}"));
+        assert_eq!(fks(&t), before, "{var}");
+        // edit: a drop and an add, with the actions changed
+        let changed = seen(&t, ForeignKey { on_delete: "SET NULL".into(), ..k });
+        let a = r.apply(&t, &[drop_fk("t_pid_fk"), add_fk(changed)]);
+        assert!(fks(&t).contains("ON DELETE SET NULL"), "{var}: {}", fks(&t));
+        r.undo(a).unwrap_or_else(|x| panic!("{var}: undo of the edit: {x}"));
+        assert_eq!(fks(&t), before, "{var}");
+        // a column drop that carries the key, and its undo, which puts the key back
+        let a = r.apply(&t, &[Change::Drop("pid".into())]);
+        assert_eq!(fks(&t), "", "{var}");
+        r.undo(a).unwrap_or_else(|x| panic!("{var}: undo of the column drop: {x}"));
+        assert_eq!(fks(&t), before, "{var}");
+    });
+}
+
+#[test]
+fn adding_a_key_reads_the_rows_of_the_child_once() {
+    every_pg(|l, var| {
+        let t = fixture(l, var, "fkscan", DDL);
+        let role = Role::new(&t, "scan");
+        let r = role.connect();
+        // The role may lock the parent here, so that this test is about the rows of the child only. The owner is held to a policy that counts every row it lets through, which the server's own check of a new key (it runs
+        // as the owner and is not held to it) never does: a count of the rows before the key is added would show here.
+        t.sql(&format!("GRANT UPDATE ON p TO {}", role.name));
+        t.sql(&format!("CREATE SEQUENCE calls; GRANT USAGE ON SEQUENCE calls TO {}; ALTER TABLE t ENABLE ROW LEVEL SECURITY; ALTER TABLE t FORCE ROW LEVEL SECURITY; CREATE POLICY every_row ON t USING (nextval('calls') > 0)", role.name));
+        let k = seen(&t, key("t_pid_fk", &["pid"], "", "p", &["id"]));
+        let plan = t.plan(&[add_fk(k)]).unwrap();
+        let next = || t.one("SELECT nextval('calls')::text").parse::<i64>().unwrap();
+        // what the server's own check of the key costs, from the same login with a plain statement
+        let plain = r.l.fixture_pool();
+        let before = next();
+        r.l.qsql(&plain, &format!("ALTER TABLE {}.t ADD CONSTRAINT t_pid_fk FOREIGN KEY (pid) REFERENCES {}.p (id)", t.schema, t.schema));
+        let server_only = next() - before - 1;
+        t.sql("ALTER TABLE t DROP CONSTRAINT t_pid_fk");
+        let before = next();
+        let (res, _) = r.run("t", plan);
+        let during = next() - before - 1;
+        res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert!(fks(&t).starts_with("t_pid_fk|"), "{var}");
+        assert_eq!(during, server_only, "{var}: the rows of the child were read once more than the server does to add the key");
+    });
+}
+
+#[test]
+fn keys_that_differ_only_in_case_are_dropped_and_renamed_by_their_exact_name() {
+    every_pg(|l, var| {
+        let t = fixture(l, var, "fkcase", DDL);
+        t.sql("ALTER TABLE t ADD CONSTRAINT \"T_fk\" FOREIGN KEY (pid) REFERENCES p (id); ALTER TABLE t ADD CONSTRAINT t_fk FOREIGN KEY (pcode) REFERENCES p (code)");
+        let names = || t.one("SELECT string_agg(conname, ',' ORDER BY conname) FROM pg_constraint WHERE contype = 'f' AND conrelid = 't'::regclass");
+        assert_eq!(names(), "T_fk,t_fk", "{var}");
+        let a = t.apply(&[drop_fk("t_fk")]);
+        assert_eq!(names(), "T_fk", "{var}: the other key was dropped");
+        t.undo(a).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(names(), "T_fk,t_fk", "{var}");
+        let a = t.apply(&[drop_fk("T_fk")]);
+        assert_eq!(names(), "t_fk", "{var}");
+        t.undo(a).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        let a = t.apply(&[Change::RenameFk { from: "t_fk".into(), to: "t_renamed".into() }]);
+        assert_eq!(names(), "T_fk,t_renamed", "{var}");
+        t.undo(a).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(names(), "T_fk,t_fk", "{var}");
+    });
+}
+
+#[test]
+fn a_change_of_only_when_a_key_is_checked_keeps_the_key_and_takes_no_lock_on_the_tables_it_does_not_change() {
+    every_pg(|l, var| {
+        let t = fixture(l, var, "fkdefer", DDL);
+        t.sql("ALTER TABLE t ADD CONSTRAINT t_pid_fk FOREIGN KEY (pid) REFERENCES p (id) ON DELETE SET NULL; COMMENT ON CONSTRAINT t_pid_fk ON t IS 'kept'");
+        let oid = || t.one("SELECT oid::text FROM pg_constraint WHERE conname = 't_pid_fk' AND conrelid = 't'::regclass");
+        let flags = || t.one("SELECT condeferrable::text || '|' || condeferred::text || '|' || convalidated::text FROM pg_constraint WHERE conname = 't_pid_fk' AND conrelid = 't'::regclass");
+        let (old_oid, old_fks) = (oid(), fks(&t));
+        let old = structure_of(&t, &t.schema, "t").foreign_keys[0].clone();
+        let deferred = ForeignKey { deferrable: true, deferred: true, ..old };
+        // a reader of the parent does not stop it: ALTER CONSTRAINT needs no more than SHARE ROW EXCLUSIVE there, where dropping the key
+        // and adding it again takes ACCESS EXCLUSIVE
+        let tx = hold(&t, "p", "ACCESS SHARE");
+        let a = t.apply(&[drop_fk("t_pid_fk"), add_fk(deferred)]);
+        assert_eq!((flags(), oid()), ("true|true|true".to_string(), old_oid.clone()), "{var}: the key was dropped and added again");
+        assert!(fks(&t).contains("kept"), "{var}");
+        t.undo(a).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        release(&t, tx);
+        assert_eq!((oid(), fks(&t)), (old_oid, old_fks), "{var}");
+        // a plan that only adds a key takes SHARE ROW EXCLUSIVE on the child as well, which a reader of the child does not stop
+        t.sql("ALTER TABLE t DROP CONSTRAINT t_pid_fk");
+        let tx = hold(&t, "t", "ACCESS SHARE");
+        let a = t.apply(&[add_fk(seen(&t, key("t_pid_fk", &["pid"], "", "p", &["id"])))]);
+        release(&t, tx);
+        t.undo(a).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(fks(&t), "", "{var}");
+    });
+}
+
+#[test]
+fn a_column_that_changes_type_takes_the_other_table_of_its_key_under_the_lock_timeout() {
+    every_pg(|l, var| {
+        let t = fixture(l, var, "fkretype", DDL);
+        t.sql("ALTER TABLE t ADD CONSTRAINT t_pid_fk FOREIGN KEY (pid) REFERENCES p (id)");
+        let retype = |table: &str, col: &str| {
+            let st = structure_of(&t, &t.schema, table);
+            let mut d = ColDef::in_table(&st, st.columns.iter().find(|c| c.name == col).unwrap()).unwrap();
+            d.ty = "bigint".into();
+            ddl::plan(Dialect::Postgres, &t.db.version, Mode::DEFAULT, table, &st, &[Change::Modify { from: col.into(), def: d, pos: Pos::Keep }]).unwrap()
+        };
+        let run = |table: &str, plan: ddl::Plan| {
+            t.l.w.pg_alter(1, t.db.clone(), t.schema.clone(), table.into(), plan.steps, plan.expect.unwrap(), None, false, "done".into());
+            let Msg::SqlAltered { res, .. } = t.l.next() else { panic!("expected SqlAltered") };
+            res
+        };
+        // the referenced column: the key's child is locked by the server on the way, so it is locked first under the timeout
+        let tx = hold(&t, "t", "ACCESS SHARE");
+        let err = run("p", retype("p", "id")).unwrap_err();
+        assert!(err.contains("locked by another session") && err.contains(&format!("\"{}\".\"t\"", t.schema)) && err.contains("Nothing was changed"), "{var}: {err}");
+        release(&t, tx);
+        // the key's own column: the parent
+        let tx = hold(&t, "p", "ACCESS SHARE");
+        let err = run("t", retype("t", "pid")).unwrap_err();
+        assert!(err.contains("locked by another session") && err.contains(&format!("\"{}\".\"p\"", t.schema)) && err.contains("Nothing was changed"), "{var}: {err}");
+        release(&t, tx);
+        // with nothing held both go through
+        run("p", retype("p", "id")).unwrap_or_else(|x| panic!("{var}: {x}"));
+        run("t", retype("t", "pid")).unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert!(fks(&t).starts_with("t_pid_fk|"), "{var}");
+    });
+}
+
+#[test]
+fn a_match_full_key_counts_the_rows_that_are_part_null_and_the_run_names_them() {
+    every_pg(|l, var| {
+        let t = fixture(l, var, "fkfull", DDL);
+        // the id is set and the code is not: MATCH SIMPLE lets it through, MATCH FULL refuses it
+        t.sql("INSERT INTO t VALUES (4, 1, NULL, 'half')");
+        let full = ForeignKey { match_full: true, ..key("t_full_fk", &["pid", "pcode"], "", "p", &["id", "code"]) };
+        t.l.w.sql_orphans(5, t.db.clone(), t.schema.clone(), "t".into(), full.clone());
+        let Msg::SqlOrphans { res, sample, .. } = t.l.next() else { panic!("expected SqlOrphans") };
+        assert_eq!((res.unwrap(), sample), (1, vec!["(1, NULL)".to_string()]), "{var}");
+        let err = t.run(t.plan(&[add_fk(seen(&t, full.clone()))]).unwrap()).0.unwrap_err();
+        assert!(err.starts_with("1 row of") && err.contains("(1, NULL)") && err.contains("Nothing was changed"), "{var}: {err}");
+        // the same rows are no trouble to a MATCH SIMPLE key, which the count agrees with
+        let simple = ForeignKey { match_full: false, ..full };
+        t.l.w.sql_orphans(6, t.db.clone(), t.schema.clone(), "t".into(), simple.clone());
+        let Msg::SqlOrphans { res, .. } = t.l.next() else { panic!("expected SqlOrphans") };
+        assert_eq!(res.unwrap(), 0, "{var}");
+        t.apply(&[add_fk(seen(&t, simple))]);
+    });
+}
+
+#[test]
+fn the_editor_refuses_the_pairs_of_types_the_server_refuses_and_only_those() {
+    every_pg(|l, var| {
+        let t = fixture(l, var, "fktypes", "CREATE TABLE unused (id integer)");
+        let s = &t.schema;
+        let col = |name: &str, ty: &str| Column { name: name.into(), full_type: ty.into(), ..Default::default() };
+        for (child, parent) in [("text", "character(3)"), ("character(3)", "text"), ("character(3)", "character varying(9)"), ("integer", "numeric"), ("numeric", "integer"), ("integer", "bigint"), ("bigint", "smallint"), ("text", "integer"), ("uuid", "text")] {
+            t.sql(&format!("DROP TABLE IF EXISTS {s}.a; DROP TABLE IF EXISTS {s}.b; CREATE TABLE {s}.b (y {parent} PRIMARY KEY); CREATE TABLE {s}.a (x {child})"));
+            let server = l.w.rt.block_on(async { sqlx::raw_sql(&format!("ALTER TABLE {s}.a ADD FOREIGN KEY (x) REFERENCES {s}.b (y)")).execute(&t.pool).await });
+            let editor = ddl::fk_pair_problem_pg("a", &col("x", child), "b", &col("y", parent));
+            assert_eq!(editor.is_none(), server.is_ok(), "{var}: {child} to {parent}: the server says {:?}, the editor {editor:?}", server.err().map(|e| e.to_string()));
+        }
+    });
+}
+
+#[test]
+fn an_undo_refused_for_rows_that_point_at_nothing_says_to_fix_the_rows() {
+    every_pg(|l, var| {
+        let t = fixture(l, var, "fkundorph", DDL);
+        t.sql("ALTER TABLE t ADD CONSTRAINT t_pid_fk FOREIGN KEY (pid) REFERENCES p (id)");
+        let before = fks(&t);
+        let a = t.apply(&[drop_fk("t_pid_fk")]);
+        t.sql("INSERT INTO t VALUES (4, 77, 'a', 'orphan')");
+        let (res, kept) = t.undo(a);
+        let err = res.unwrap_err();
+        // the undo cannot add the key NOT VALID, which is not how it was, so the message must not offer that
+        assert!(err.contains("(77)") && err.contains("put back") && err.contains("undo again") && !err.contains("NOT VALID") && err.contains("Nothing was changed"), "{var}: {err}");
+        assert!(kept.is_some() && fks(&t) == "", "{var}");
+        t.sql("DELETE FROM t WHERE id = 4");
+        t.undo(kept.unwrap()).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(fks(&t), before, "{var}");
+    });
 }
