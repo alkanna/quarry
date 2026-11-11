@@ -290,7 +290,7 @@ pub fn explain(raw: &str, cx: &ErrCtx) -> Explained {
         }
         ErrKind::Timeout => {
             ex.title = "The query ran past its time limit".into();
-            ex.hint = "The server stopped it. A filter on an unindexed field scans every document; Explain shows whether an index is used.".into();
+            ex.hint = if pg_code(raw).is_some() { "The server stopped it at the statement timeout. A filter or sort on a column without an index reads the whole table; Explain shows the plan.".into() } else { "The server stopped it. A filter on an unindexed field scans every document; Explain shows whether an index is used.".into() };
             ex.fixes = vec![Fix::Retry, Fix::Explain, Fix::RaiseLimit];
         }
         ErrKind::Duplicate => {
@@ -324,7 +324,7 @@ pub fn explain(raw: &str, cx: &ErrCtx) -> Explained {
             // Our own messages read "Could not write x: reason"; the part before the colon is the title.
             let first = raw.lines().next().unwrap_or(raw).trim();
             let ours = mongo.is_none() && my.is_none() && pg_code(raw).is_none();
-            match pg_wording(&said).or_else(|| first.split_once(": ").filter(|(t, _)| ours && t.len() < 80 && !t.contains('{')).map(|(t, r)| (t.trim_end_matches('.').to_string(), sentence(r)))) {
+            match (mongo.is_none() && my.is_none()).then(|| pg_wording(&said)).flatten().or_else(|| first.split_once(": ").filter(|(t, _)| ours && t.len() < 80 && !t.contains('{')).map(|(t, r)| (t.trim_end_matches('.').to_string(), sentence(r)))) {
                 Some((t, r)) => (ex.title, ex.hint) = (t, r),
                 None if ours && first.len() <= 120 => ex.title = first.trim_end_matches('.').to_string(),
                 None => {
@@ -457,6 +457,23 @@ mod tests {
         // A MySQL number is not read as a SQLSTATE.
         assert_eq!(pg_code("error returned from database: 1062 (23000): Duplicate entry"), None);
         assert_eq!(server_text("error returned from database: 42P01: relation \"x\" does not exist\nPosition: 3"), "relation \"x\" does not exist");
+    }
+
+    #[test]
+    fn postgres_errors_of_content_reads_and_grid_writes_keep_their_kind() {
+        // The texts `db::sql::se` makes for a Content read and a grid write, which carry the SQLSTATE and no position.
+        let e = explain("error returned from database: 23505: duplicate key value violates unique constraint \"t_pkey\"\nDetail: Key (id)=(1) already exists.", &cx());
+        assert_eq!((e.kind, e.code.as_deref()), (ErrKind::Duplicate, Some("23505")));
+        let e = explain("error returned from database: 57014: canceling statement due to statement timeout", &ErrCtx { what: "read the rows".into(), ..cx() });
+        assert_eq!(e.kind, ErrKind::Timeout);
+        assert!(e.title.contains("time limit") && !e.hint.contains("non-indexed") && !e.hint.contains("unindexed field"), "{e:?}");
+    }
+
+    #[test]
+    fn mysql_errors_do_not_get_postgres_wording() {
+        let e = explain("error returned from database: 1690 (22003): BIGINT UNSIGNED value is out of range in '(`s`.`t`.`a` - 1)'", &cx());
+        assert_eq!(e.title, "Could not load the documents");
+        assert!(e.hint.starts_with("BIGINT UNSIGNED value is out of range"), "{e:?}");
     }
 
     #[test]

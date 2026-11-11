@@ -268,7 +268,7 @@ function makeTable(conn, name, schema) {
       const rows = await query(conn, `SELECT COUNT(*) AS n FROM ${t}` + compileWhere(where, params, d), params);
       return Number(rows[0].n);
     },
-    insert: async (row, opts = {}) => {
+    insert: (row, opts = {}) => {
       const list = Array.isArray(row) ? row : [row];
       if (!list.length) throw new Error("Nothing to insert");
       const keys = Object.keys(list[0]);
@@ -283,12 +283,14 @@ function makeTable(conn, name, schema) {
       const ret = opts?.returning;
       if (ret === undefined || ret === false) return query(conn, text, params);
       if (ret !== true && !(Array.isArray(ret) && ret.length && ret.every((c) => typeof c === "string"))) throw new Error("returning must be true or a list of column names");
-      const rows = await query(conn, text + " RETURNING " + (ret === true ? "*" : ret.map(ident).join(", ")), params);
-      rows.affected = rows.length;
-      // One row's first returned column (the key, by habit) can stand in for insertId.
-      const first = list.length === 1 && rows[0] && Object.values(rows[0])[0];
-      rows.insertId = typeof first === "number" || typeof first === "bigint" || typeof first === "string" ? first : undefined;
-      return rows;
+      // Every argument error above throws before this point, synchronously like the MySQL path, not as a rejected promise.
+      return query(conn, text + " RETURNING " + (ret === true ? "*" : ret.map(ident).join(", ")), params).then((rows) => {
+        rows.affected = rows.length;
+        // One row's first returned column (the key, by habit) can stand in for insertId.
+        const first = list.length === 1 && rows[0] && Object.values(rows[0])[0];
+        rows.insertId = typeof first === "number" || typeof first === "bigint" || typeof first === "string" ? first : undefined;
+        return rows;
+      });
     },
     update: (where, set) => {
       if (where === undefined) throw new Error("update needs a where. Pass {} to change every row.");

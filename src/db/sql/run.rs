@@ -1,5 +1,6 @@
 //! Running Custom Query scripts: preparing a session, running statements one result at a time, stopping them.
 
+use super::se;
 use super::exec::{Conn, Item};
 use super::worker::{make_cols, num_at, to_row};
 use super::{lex, Col, Db, Dialect, Page, ResultSet, RUN_ROWS_MAX};
@@ -11,23 +12,23 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Readies the script's own connection: its id for Stop, the database, and write access when unlocked.
-pub(super) async fn prepare(conn: &mut Conn, d: Dialect, schema: &str, read_only: bool, id: &AtomicU64) -> Res<()> {
-    prepare_as(conn, d, schema, read_only, id, None).await.map(|_| ())
+pub(super) async fn prepare(conn: &mut Conn, db: &Db, schema: &str, read_only: bool, id: &AtomicU64) -> Res<()> {
+    prepare_as(conn, db, schema, read_only, id, None).await.map(|_| ())
 }
 
 /// `prepare` with the pooler mode stated (`Db::pooler`) instead of read off the session. Returns whether the
 /// connection is behind a pooler, where nothing is set on the session: the schema is a `SET LOCAL search_path` of
 /// every transaction (`Db::pg_run_locals`) and write access a `BEGIN READ WRITE` of every statement.
-pub(super) async fn prepare_as(conn: &mut Conn, d: Dialect, schema: &str, read_only: bool, id: &AtomicU64, pooled: Option<bool>) -> Res<bool> {
+pub(super) async fn prepare_as(conn: &mut Conn, db: &Db, schema: &str, read_only: bool, id: &AtomicU64, pooled: Option<bool>) -> Res<bool> {
     if let Conn::Pg(c) = conn {
         // No USE: the database is the pool's, and the schema comes in as the search_path.
-        let pooled = super::pg::prepare(c, read_only, id, pooled).await.map_err(e)?;
+        let pooled = super::pg::prepare(c, read_only, id, pooled, db).await.map_err(se)?;
         if !pooled {
-            super::pg_read::set_search_path(c, schema).await.map_err(e)?;
+            super::pg_read::set_search_path(c, schema).await.map_err(se)?;
         }
         return Ok(pooled);
     }
-    prepare_my(conn.my()?, d, schema, read_only, id).await.map_err(e)?;
+    prepare_my(conn.my()?, db.dialect, schema, read_only, id).await.map_err(se)?;
     Ok(false)
 }
 
@@ -56,7 +57,7 @@ pub(super) async fn pin_reads(c: &mut Conn) -> Res<()> {
     if matches!(c, Conn::Pg(_)) {
         return Ok(());
     }
-    pin_reads_my(c.my()?).await.map_err(e)
+    pin_reads_my(c.my()?).await.map_err(se)
 }
 
 /// `pin_reads` for the MySQL-only modules.
@@ -207,7 +208,7 @@ pub(super) async fn run(db: &Db, schema: &str, text: &str, read_only: bool, id: 
     let d = db.dialect;
     // Behind a pooler nothing is set on the session, so the schema travels in the locals of every transaction.
     let (pooler, locals) = (db.pooler(), db.pg_run_locals(schema));
-    if let Err(err) = prepare_as(&mut conn, d, schema, read_only, id, Some(pooler)).await {
+    if let Err(err) = prepare_as(&mut conn, db, schema, read_only, id, Some(pooler)).await {
         return vec![failed("", err)];
     }
     // PostgreSQL: the timeout the session got at startup, kept to be applied again where a session value would not hold.
@@ -385,12 +386,12 @@ async fn run_write_pooled(conn: &mut Conn, stmt: &str, timeout: &str, locals: &s
 /// transaction like every other statement that carries user text.
 pub(super) async fn count_rows(db: &Db, schema: &str, stmt: &str) -> Res<u64> {
     let mut conn = db.acquire_conn().await?;
-    prepare_as(&mut conn, db.dialect, schema, true, &AtomicU64::new(0), Some(db.pooler())).await?;
+    prepare_as(&mut conn, db, schema, true, &AtomicU64::new(0), Some(db.pooler())).await?;
     let sql = lex::count_sql(stmt);
     let t = Instant::now();
     let r = match &mut conn {
         Conn::Pg(c) => {
-            let timeout = super::pg_read::statement_timeout(c).await.map_err(e)?;
+            let timeout = super::pg_read::statement_timeout(c).await.map_err(se)?;
             super::pg_read::begin_read_only(c, &timeout, &db.pg_run_locals(schema)).await.map_err(|x| super::pg_read::pg_error(&x, &sql, 0))?;
             let r = c.fetch_all(sql.as_str()).await.map(super::exec::SqlRow::wrap_pg);
             // The connection is closed below whatever happens, so a failed ROLLBACK cannot reach another statement.
@@ -544,7 +545,7 @@ mod pg_tests {
             let d = Dialect::Postgres;
             l.w.rt.block_on(async {
                 let mut conn = db.acquire_conn().await.unwrap();
-                prepare(&mut conn, d, "t6_cfg", true, &AtomicU64::new(0)).await.unwrap();
+                prepare(&mut conn, &db, "t6_cfg", true, &AtomicU64::new(0)).await.unwrap();
                 let Conn::Pg(c) = &mut conn else { unreachable!() };
                 let timeout = crate::db::sql::pg_read::statement_timeout(c).await.unwrap();
                 // The lexer would refuse these; they are sent straight to layer 2, which must hold on its own.
@@ -788,7 +789,7 @@ mod pg_tests {
     fn pooled_conn(l: &LivePg, db: &Db, schema: &str, read_only: bool) -> (Conn, String, String) {
         l.w.rt.block_on(async {
             let mut conn = db.acquire_conn().await.unwrap();
-            prepare_as(&mut conn, Dialect::Postgres, schema, read_only, &AtomicU64::new(0), Some(true)).await.unwrap();
+            prepare_as(&mut conn, db, schema, read_only, &AtomicU64::new(0), Some(true)).await.unwrap();
             let Conn::Pg(c) = &mut conn else { unreachable!() };
             let timeout = crate::db::sql::pg_read::statement_timeout(c).await.unwrap();
             (conn, timeout, db.pg_run_locals(schema))
@@ -931,7 +932,7 @@ mod pg_tests {
             // The same through run_locked, which says why it stopped.
             l.w.rt.block_on(async {
                 let mut conn = db.acquire_conn().await.unwrap();
-                prepare(&mut conn, Dialect::Postgres, "t6f_rb", true, &AtomicU64::new(0)).await.unwrap();
+                prepare(&mut conn, &db, "t6f_rb", true, &AtomicU64::new(0)).await.unwrap();
                 let Conn::Pg(c) = &mut conn else { unreachable!() };
                 let timeout = crate::db::sql::pg_read::statement_timeout(c).await.unwrap();
                 tests_hook::MARK.lock().unwrap().push("t6f_direct".into());

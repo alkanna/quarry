@@ -42,6 +42,13 @@ pub use pg_read::PgSchema;
 pub use relay::{Answer, Arg, Relay};
 pub use run::RunHandle;
 
+/// A sqlx error worded for `db::explain`. A PostgreSQL server error keeps its SQLSTATE, so a duplicate key or a timeout is
+/// recognised, and has no statement to point into here, so it carries no position. Anything else, MySQL included, keeps
+/// the plain wording of `db::e`.
+pub(crate) fn se(err: sqlx::Error) -> String {
+    pg_read::pg_error(&err, "", usize::MAX)
+}
+
 /// Which kind of server a saved connection talks to. Saved connections from before SQL support
 /// have no engine field and load as Mongo.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]

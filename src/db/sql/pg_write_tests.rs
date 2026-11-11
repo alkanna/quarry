@@ -577,3 +577,16 @@ fn a_row_keyed_by_a_bit_column_can_be_edited_and_undone() {
         assert_eq!(t.one("SELECT count(*)::text FROM t"), "2");
     });
 }
+
+#[test]
+fn a_duplicate_insert_reaches_the_app_with_its_sqlstate() {
+    every_pg(|l, var| {
+        let t = fixture(l, "t11_dup", "CREATE TABLE t (id int PRIMARY KEY, n int); INSERT INTO t VALUES (1, 1);");
+        let (cols, _, _) = t.page("t");
+        let (res, _) = t.insert("t", &cols, &["id"], vec![vec![("id".into(), Bson::Int64(1))]], false);
+        let err = res.unwrap_err();
+        assert!(err.starts_with("error returned from database: 23505: "), "{var}: {err}");
+        let ex = crate::db::explain(&err, &Default::default());
+        assert_eq!(ex.kind, crate::db::ErrKind::Duplicate, "{var}");
+    });
+}

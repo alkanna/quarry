@@ -1,6 +1,7 @@
 //! What the read path needs of PostgreSQL beyond the catalog queries: running text that carries user SQL inside a
 //! read-only transaction that is always rolled back, and listing the schemas of a database.
 
+use super::se;
 use super::exec::{col_infos, Cells, ColInfo, SqlRow};
 use super::{Db, Dialect, Pool};
 use crate::db::{e, Msg, Res, Worker};
@@ -159,23 +160,23 @@ impl Db {
             }
         };
         self.note(schema, sql, t, &res);
-        res.map_err(e)
+        res.map_err(se)
     }
 
     /// The columns `sql` would return, without running it, for a page that came back empty and still needs its headers.
     /// Preparing runs nothing, so no transaction is needed.
     pub(super) async fn describe_text(&self, sql: &str) -> Res<Vec<ColInfo>> {
         match &self.pool {
-            Pool::My(p) => Ok(col_infos((&*p).describe(sql).await.map_err(e)?.columns(), false)),
+            Pool::My(p) => Ok(col_infos((&*p).describe(sql).await.map_err(se)?.columns(), false)),
             Pool::Pg(_) => {
                 // Planning with EXPLAIN can evaluate STABLE and IMMUTABLE functions of the text, so it runs inside a
                 // read-only transaction that is rolled back, like every other statement that carries user text.
-                let mut conn = self.pg_pool()?.acquire().await.map_err(e)?;
-                let mut tx = conn.begin_with("BEGIN READ ONLY").await.map_err(e)?;
+                let mut conn = self.pg_pool()?.acquire().await.map_err(se)?;
+                let mut tx = conn.begin_with("BEGIN READ ONLY").await.map_err(se)?;
                 let locals = self.pg_locals();
                 let d = match if locals.is_empty() { Ok(()) } else { (&mut *tx).execute(locals.as_str()).await.map(|_| ()) } {
-                    Ok(()) => (&mut *tx).describe(sql).await.map_err(e),
-                    Err(x) => Err(e(x)),
+                    Ok(()) => (&mut *tx).describe(sql).await.map_err(se),
+                    Err(x) => Err(se(x)),
                 };
                 let _ = tx.rollback().await;
                 conn.close_on_drop();
@@ -211,7 +212,7 @@ impl Worker {
                 let rows = read_only(&at.pg_pool()?, false, &at.pg_locals(), sql).await.map(SqlRow::wrap_pg);
                 at.note(&database, sql, t, &rows);
                 let mut list: Vec<PgSchema> = rows
-                    .map_err(e)?
+                    .map_err(se)?
                     .iter()
                     .filter_map(|r| Some(PgSchema { name: super::worker::text(r, "name")?, tables: super::structure::num(r, "tables").unwrap_or(0), system: r.int("system").is_some_and(|n| n != 0) }))
                     .collect();
@@ -234,7 +235,7 @@ impl Worker {
                 let t = Instant::now();
                 let rows = raw_sql(Dialect::Postgres.schemas()).fetch_all(&at.pg_pool()?).await.map(SqlRow::wrap_pg);
                 at.note(&database, Dialect::Postgres.schemas(), t, &rows);
-                let mut schemas: Vec<String> = rows.map_err(e)?.iter().filter_map(|r| super::worker::text(r, "name")).collect();
+                let mut schemas: Vec<String> = rows.map_err(se)?.iter().filter_map(|r| super::worker::text(r, "name")).collect();
                 schemas.sort();
                 let (mut tables, mut views) = (Vec::new(), Vec::new());
                 if !schema.is_empty() {

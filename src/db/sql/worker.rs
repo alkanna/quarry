@@ -2,6 +2,7 @@
 //! scripts. Rows leave here as BSON like Mongo's, see `Row`.
 
 
+use super::se;
 use super::value::{self, Kind};
 // What the modules that only exist for MySQL call, with sqlx's own connection type. The neutral ones are in `run`.
 pub(super) use super::run::{kill_query, pin_reads_my as pin_reads, prepare_my as prepare};
@@ -183,7 +184,7 @@ async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info
     // The pool retries a connection whose setup failed until its timeout, so one plain connection runs the setup
     // first and a failing setting or init command is reported at once, with its statement.
     let first = async {
-        let mut c = sqlx::MySqlConnection::connect_with(&o).await.map_err(e)?;
+        let mut c = sqlx::MySqlConnection::connect_with(&o).await.map_err(se)?;
         let r = session(&mut c, ms, &setup).await;
         let _ = c.close().await;
         r.map_err(|err| setup.failed_text().unwrap_or_else(|| e(err)))
@@ -198,11 +199,11 @@ async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info
         let hook = hook.clone();
         Box::pin(async move { session(c, ms, &hook).await })
     }).connect_with(o.clone()).await.map_err(|err| setup.failed_text().unwrap_or_else(|| e(err)))?;
-    let version: String = sqlx::query_scalar("SELECT VERSION()").fetch_one(&pool).await.map_err(e)?;
+    let version: String = sqlx::query_scalar("SELECT VERSION()").fetch_one(&pool).await.map_err(se)?;
     // Read apart from VERSION so a proxy that refuses @@sql_mode still connects, with the default mode.
     let sql_mode: String = sqlx::query_scalar("SELECT @@sql_mode").fetch_one(&pool).await.unwrap_or_default();
-    let tls = raw_sql("SHOW SESSION STATUS LIKE 'Ssl_cipher'").fetch_all(&pool).await.map_err(e)?.iter().any(|r| raw(r, 1).is_some_and(|v| !v.is_empty()));
-    let dbs = sorted_names(&raw_sql("SHOW DATABASES").fetch_all(&pool).await.map_err(e)?);
+    let tls = raw_sql("SHOW SESSION STATUS LIKE 'Ssl_cipher'").fetch_all(&pool).await.map_err(se)?.iter().any(|r| raw(r, 1).is_some_and(|v| !v.is_empty()));
+    let dbs = sorted_names(&raw_sql("SHOW DATABASES").fetch_all(&pool).await.map_err(se)?);
     let mut ti = TestInfo::default();
     if info {
         ti.sql_mode = sqlx::query_scalar("SELECT @@GLOBAL.sql_mode").fetch_one(&pool).await.unwrap_or_default();
@@ -217,7 +218,7 @@ async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info
 /// `fetch_all` on the connection rather than `raw_sql`, because inside a spawned block the executor lifetimes of a
 /// borrowed connection do not infer for the latter.
 pub(super) async fn database_names(c: &mut sqlx::MySqlConnection) -> Res<Vec<String>> {
-    Ok(sorted_names(&c.fetch_all("SHOW DATABASES").await.map_err(e)?))
+    Ok(sorted_names(&c.fetch_all("SHOW DATABASES").await.map_err(se)?))
 }
 
 /// The first column of each row, sorted. `open` reads through the pool, where a generic executor does not infer.
@@ -312,7 +313,7 @@ async fn count(db: &Db, schema: &str, table: &str, q: &PageQuery) -> Res<(u64, b
     if q.plain() {
         let est = match &db.pool {
             Pool::My(pool) => {
-                let mut c = pool.acquire().await.map_err(e)?;
+                let mut c = pool.acquire().await.map_err(se)?;
                 // MySQL 8 caches TABLE_ROWS for a day. Fresh numbers cost a lot per schema, so only this one table's
                 // lookup asks for them; 5.7 and MariaDB lack the variable, so a refusal is fine.
                 if matches!(d, Dialect::MySql) {
@@ -321,7 +322,7 @@ async fn count(db: &Db, schema: &str, table: &str, q: &PageQuery) -> Res<(u64, b
                 let t = Instant::now();
                 let est = sqlx::query(d.table_status()).bind(schema).bind(table).fetch_optional(&mut *c).await;
                 db.note(schema, d.table_status(), t, &est);
-                est.map_err(e)?.and_then(|r| r.try_get::<Option<u64>, _>("row_estimate").ok().flatten())
+                est.map_err(se)?.and_then(|r| r.try_get::<Option<u64>, _>("row_estimate").ok().flatten())
             }
             // NULL while the planner has no estimate, and then the count below is exact.
             Pool::Pg(_) => db.meta(schema, d.table_status(), [schema, table]).await?.first().and_then(|r| r.uint("row_estimate")),
@@ -366,7 +367,7 @@ async fn pg_columns(db: &Db, schema: &str, table: &str) -> Res<Vec<SqlRow>> {
     .await;
     db.note(schema, &sql, t, &res);
     let _ = conn.close().await;
-    res.map(SqlRow::wrap_pg).map_err(e)
+    res.map(SqlRow::wrap_pg).map_err(se)
 }
 
 /// What `make_cols_kinds` reads as a column's `extra`. On PostgreSQL it is built from the catalog's own identity and
@@ -492,7 +493,7 @@ async fn field_values(db: &Db, schema: &str, table: &str, column: &str, prefix: 
         return pg_field_values(db, schema, table, column, prefix).await;
     }
     let pool = db.my_pool()?;
-    let Some(gate) = sqlx::query(d.value_gate()).bind(column).bind(schema).bind(table).fetch_optional(pool).await.map_err(e)? else { return Ok(None) };
+    let Some(gate) = sqlx::query(d.value_gate()).bind(column).bind(schema).bind(table).fetch_optional(pool).await.map_err(se)? else { return Ok(None) };
     let small = super::structure::num(&gate, "est").is_some_and(|n| n < VALUES_SMALL);
     let leads = super::structure::num(&gate, "leads").unwrap_or(0) > 0;
     if !small && !leads {
@@ -513,7 +514,7 @@ async fn field_values(db: &Db, schema: &str, table: &str, column: &str, prefix: 
         let t = Instant::now();
         let rows = q.fetch_all(&mut c).await;
         db.note(schema, &sql, t, &rows);
-        let rows = rows.map_err(e)?;
+        let rows = rows.map_err(se)?;
         Ok(Some(rows.iter().filter_map(|r| Some((text(r, "v")?, super::structure::num(r, "n")?))).collect()))
     }
     .await;
@@ -534,7 +535,7 @@ async fn pg_field_values(db: &Db, schema: &str, table: &str, column: &str, prefi
     let mut c = db.detached().await?;
     let res = async {
         // The lookup must stay short, so a slow one gives up instead of holding a connection.
-        c.execute(&d.session_timeout(300)).await.map_err(e)?;
+        c.execute(&d.session_timeout(300)).await.map_err(se)?;
         if est.is_none() && !leads {
             let sql = format!("SELECT count(*)::text FROM (SELECT 1 FROM {} LIMIT {}) AS q", d.qualified(schema, table), VALUES_SMALL + 1);
             match c.fetch_all(&sql).await {
@@ -552,7 +553,7 @@ async fn pg_field_values(db: &Db, schema: &str, table: &str, column: &str, prefi
         let t = Instant::now();
         let rows = q.fetch_all(&mut *pc).await.map(SqlRow::wrap_pg);
         db.note(schema, &sql, t, &rows);
-        let rows = rows.map_err(e)?;
+        let rows = rows.map_err(se)?;
         Ok(Some(rows.iter().filter_map(|r| Some((text(r, "v")?, super::structure::num(r, "n")?))).collect()))
     }
     .await;

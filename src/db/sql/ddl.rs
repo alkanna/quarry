@@ -4,6 +4,7 @@
 //! `quote_ident`, strings through `lit`, and the few places that take SQL from the user (an expression
 //! default) are checked. Every statement runs as a prepared statement, which holds exactly one.
 
+use super::se;
 use super::structure::{load, split_type, Column, ForeignKey, Index, Structure, Trigger};
 use super::value::lit;
 use super::{Db, Dialect};
@@ -35,7 +36,7 @@ impl Mode {
 /// The session's own sql_mode text. Statements and literals are written for the mode of the very connection that
 /// runs them, never for the one read at connect, which may have changed since.
 pub(super) async fn session_sql_mode(c: &mut sqlx::MySqlConnection) -> Res<String> {
-    sqlx::query_scalar("SELECT @@SESSION.sql_mode").fetch_one(&mut *c).await.map_err(e)
+    sqlx::query_scalar("SELECT @@SESSION.sql_mode").fetch_one(&mut *c).await.map_err(se)
 }
 
 /// `session_sql_mode`, read as a `Mode`.
@@ -1542,7 +1543,7 @@ pub(super) async fn exec(c: &mut sqlx::MySqlConnection, sql: &str) -> Res<()> {
     let t = Instant::now();
     let res = sqlx::query(sql).persistent(false).execute(&mut *c).await;
     crate::db::note_here(sql, t, &res);
-    res.map_err(e)?;
+    res.map_err(se)?;
     Ok(())
 }
 
@@ -1633,9 +1634,9 @@ async fn stored(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str, all: &[
 
 /// Sets the session's sql_mode, client character set and connection collation, each bound as a value.
 async fn set_session(c: &mut sqlx::MySqlConnection, mode: &str, charset: &str, collation: &str) -> Res<()> {
-    sqlx::query("SET SESSION sql_mode = ?").bind(mode).execute(&mut *c).await.map_err(e)?;
-    sqlx::query("SET SESSION character_set_client = ?").bind(charset).execute(&mut *c).await.map_err(e)?;
-    sqlx::query("SET SESSION collation_connection = ?").bind(collation).execute(&mut *c).await.map_err(e)?;
+    sqlx::query("SET SESSION sql_mode = ?").bind(mode).execute(&mut *c).await.map_err(se)?;
+    sqlx::query("SET SESSION character_set_client = ?").bind(charset).execute(&mut *c).await.map_err(se)?;
+    sqlx::query("SET SESSION collation_connection = ?").bind(collation).execute(&mut *c).await.map_err(se)?;
     Ok(())
 }
 
@@ -1645,7 +1646,7 @@ async fn set_session(c: &mut sqlx::MySqlConnection, mode: &str, charset: &str, c
 /// decides what its strings are, is always the stored one.
 async fn replay(c: &mut sqlx::MySqlConnection, d: Dialect, s: &Stored, order: Option<&TrigOrder>, replace: bool) -> Res<()> {
     let sql = restate(d, &s.stmt, Mode::of(&s.sql_mode), order, replace)?;
-    let (mode, charset, collation): (String, String, String) = sqlx::query_as("SELECT @@SESSION.sql_mode, @@SESSION.character_set_client, @@SESSION.collation_connection").fetch_one(&mut *c).await.map_err(e)?;
+    let (mode, charset, collation): (String, String, String) = sqlx::query_as("SELECT @@SESSION.sql_mode, @@SESSION.character_set_client, @@SESSION.collation_connection").fetch_one(&mut *c).await.map_err(se)?;
     let utf8 = s.charset.to_ascii_lowercase().starts_with("utf8");
     let cs = if s.charset.is_empty() || !(utf8 || sql.is_ascii()) { charset.as_str() } else { s.charset.as_str() };
     let coll = if s.collation.is_empty() { collation.as_str() } else { s.collation.as_str() };
@@ -1853,7 +1854,7 @@ impl Worker {
             let t = Instant::now();
             let res = sqlx::query(&sql).fetch_one(pool).await;
             db.note(&schema, &sql, t, &res);
-            let res = res.map_err(e).map(|r| super::structure::num(&r, "n").unwrap_or(0));
+            let res = res.map_err(se).map(|r| super::structure::num(&r, "n").unwrap_or(0));
             Msg::SqlOrphans { req, res }
         });
     }

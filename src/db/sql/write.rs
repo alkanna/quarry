@@ -1,10 +1,11 @@
 //! Writing SQL rows: saving staged cell edits, deleting rows and inserting them, each in one
 //! transaction on a connection of its own that is switched to READ WRITE. The pool stays read-only.
 
+use super::se;
 use super::value::{hex_digits, lit, Kind, Param};
 use super::exec::{Cells, Conn};
 use super::{Col, Db, Dialect};
-use crate::db::{e, Msg, Res, UndoAction, UndoKind, Worker};
+use crate::db::{Msg, Res, UndoAction, UndoKind, Worker};
 use mongodb::bson::{Bson, Document};
 use std::time::Instant;
 
@@ -216,7 +217,7 @@ async fn pg_one_row(tx: &mut super::exec::Tx<'_>, db: &Db, schema: &str, table: 
     let t = Instant::now();
     let r = tx.fetch_bound(&sql, &params).await;
     db.note(schema, &sql, t, &r);
-    let n = r.map_err(e)?.first().and_then(|r| r.cell(0)).and_then(|b| std::str::from_utf8(b).ok()?.parse::<u64>().ok()).unwrap_or(0);
+    let n = r.map_err(se)?.first().and_then(|r| r.cell(0)).and_then(|b| std::str::from_utf8(b).ok()?.parse::<u64>().ok()).unwrap_or(0);
     if n > 1 {
         return Err(SEVERAL.into());
     }
@@ -366,12 +367,12 @@ pub(super) async fn writer_conn(db: &Db, schema: &str, read_only: bool) -> Res<C
     }
     if !schema.is_empty() {
         let q = format!("USE {}", db.dialect.quote_ident(schema));
-        c.execute(q.as_str()).await.map_err(e)?;
+        c.execute(q.as_str()).await.map_err(se)?;
     }
-    c.execute(db.dialect.session_read_only(false)).await.map_err(e)?;
+    c.execute(db.dialect.session_read_only(false)).await.map_err(se)?;
     // With autocommit 0 from the server's globals, a script, a dump run back or a DDL undo would report success
     // and roll back on close. sql_select_limit would cut the reads that check a table before a change.
-    c.execute("SET SESSION autocommit = 1, SESSION sql_select_limit = DEFAULT").await.map_err(e)?;
+    c.execute("SET SESSION autocommit = 1, SESSION sql_select_limit = DEFAULT").await.map_err(se)?;
     // MariaDB's max_statement_time limits every statement, so the app timeout would cut an ALTER of a big table
     // short. MySQL's only limits SELECT; it is reset too so both engines behave the same.
     let timeout = db.dialect.session_timeout(0);
@@ -395,7 +396,7 @@ async fn apply_updates(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[S
         check_key(pk, &ed.pk)?;
     }
     let mut c = writer_conn(db, schema, read_only).await?;
-    let mut tx = c.begin_write().await.map_err(e)?;
+    let mut tx = c.begin_write().await.map_err(se)?;
     for ed in edits {
         if db.dialect == Dialect::Postgres {
             pg_one_row(&mut tx, db, schema, table, cols, &ed.pk).await?;
@@ -404,7 +405,7 @@ async fn apply_updates(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[S
         let t = Instant::now();
         let r = tx.exec_bound(&sql, &params).await;
         db.note(schema, &sql, t, &r);
-        let r = r.map_err(e)?;
+        let r = r.map_err(se)?;
         // The session asks for matched rows, so zero means the key or an original value no longer matches.
         if r.rows_affected() == 0 {
             return Err(CONFLICT.into());
@@ -415,7 +416,7 @@ async fn apply_updates(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[S
             return Err(SEVERAL.into());
         }
     }
-    tx.commit().await.map_err(e)?;
+    tx.commit().await.map_err(se)?;
     Ok(())
 }
 
@@ -426,7 +427,7 @@ async fn apply_deletes(db: &Db, schema: &str, table: &str, cols: &[Col], key_col
         check_key(key_cols, pk)?;
     }
     let mut c = writer_conn(db, schema, read_only).await?;
-    let mut tx = c.begin_write().await.map_err(e)?;
+    let mut tx = c.begin_write().await.map_err(se)?;
     let mut gone = Vec::new();
     for pk in pks {
         if db.dialect == Dialect::Postgres {
@@ -436,7 +437,7 @@ async fn apply_deletes(db: &Db, schema: &str, table: &str, cols: &[Col], key_col
         let t = Instant::now();
         let r = tx.exec_bound(&sql, &params).await;
         db.note(schema, &sql, t, &r);
-        let n = r.map_err(e)?.rows_affected();
+        let n = r.map_err(se)?.rows_affected();
         if n > 1 {
             let _ = tx.rollback().await;
             return Err(SEVERAL.into());
@@ -445,7 +446,7 @@ async fn apply_deletes(db: &Db, schema: &str, table: &str, cols: &[Col], key_col
             gone.push(pk.clone());
         }
     }
-    tx.commit().await.map_err(e)?;
+    tx.commit().await.map_err(se)?;
     Ok(gone)
 }
 
@@ -456,7 +457,7 @@ async fn apply_inserts(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[S
         return apply_inserts_pg(db, schema, table, cols, pk, rows, read_only, restore).await;
     }
     let mut c = writer_conn(db, schema, read_only).await?;
-    let mut tx = c.begin_write().await.map_err(e)?;
+    let mut tx = c.begin_write().await.map_err(se)?;
     let mut keys = Vec::new();
     // Generated columns cannot be given a value, and a column renamed on read goes back under its own name.
     let rows: Vec<NewRow> = rows.iter().map(|r| r.iter().filter(|(n, _)| !cols.iter().any(|c| c.name == *n && c.generated)).map(|(n, v)| (src_of(cols, n), v.clone())).collect()).collect();
@@ -465,7 +466,7 @@ async fn apply_inserts(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[S
         let t = Instant::now();
         let r = tx.exec_bound(&sql, &params).await;
         db.note(schema, &sql, t, &r);
-        let r = r.map_err(e)?;
+        let r = r.map_err(se)?;
         let mut key = Document::new();
         for p in pk {
             let given = row.iter().find(|(n, _)| n == p).map(|(_, v)| v).filter(|v| **v != Bson::Null);
@@ -483,7 +484,7 @@ async fn apply_inserts(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[S
         }
         keys.push((key.len() == pk.len() && !pk.is_empty()).then_some(key));
     }
-    tx.commit().await.map_err(e)?;
+    tx.commit().await.map_err(se)?;
     Ok(keys)
 }
 
@@ -494,7 +495,7 @@ async fn apply_inserts(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[S
 #[allow(clippy::too_many_arguments)]
 async fn apply_inserts_pg(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[String], rows: &[NewRow], read_only: bool, restore: bool) -> Res<Vec<Option<Document>>> {
     let mut c = writer_conn(db, schema, read_only).await?;
-    let mut tx = c.begin_write().await.map_err(e)?;
+    let mut tx = c.begin_write().await.map_err(se)?;
     let mut keys = Vec::new();
     // Identity ALWAYS says both GENERATED and auto_increment in `extra`; a computed column says only GENERATED.
     let identity_always = |name: &str| cols.iter().any(|c| c.name == name && c.generated && c.auto_increment);
@@ -506,7 +507,7 @@ async fn apply_inserts_pg(db: &Db, schema: &str, table: &str, cols: &[Col], pk: 
         let t = Instant::now();
         let r = tx.fetch_bound(&sql, &params).await;
         db.note(schema, &sql, t, &r);
-        let r = r.map_err(e)?;
+        let r = r.map_err(se)?;
         let mut key = Document::new();
         if let Some(got) = r.first() {
             for (i, p) in pk.iter().enumerate() {
@@ -529,7 +530,7 @@ async fn apply_inserts_pg(db: &Db, schema: &str, table: &str, cols: &[Col], pk: 
         }
         keys.push(doc.then_some(kept));
     }
-    tx.commit().await.map_err(e)?;
+    tx.commit().await.map_err(se)?;
     Ok(keys)
 }
 
@@ -540,7 +541,7 @@ async fn apply_undo_inserted_pg(db: &Db, schema: &str, table: &str, cols: &[Col]
         check_key(key_cols, &pk_of(r))?;
     }
     let mut c = writer_conn(db, schema, read_only).await?;
-    let mut tx = c.begin_write().await.map_err(e)?;
+    let mut tx = c.begin_write().await.map_err(se)?;
     for r in rows {
         let (pk, values) = (pk_of(r), r.iter().filter(|(k, _)| *k != "_id").map(|(k, v)| (k.clone(), v.clone())).collect::<Document>());
         pg_one_row(&mut tx, db, schema, table, cols, &pk).await?;
@@ -548,11 +549,11 @@ async fn apply_undo_inserted_pg(db: &Db, schema: &str, table: &str, cols: &[Col]
         let t = Instant::now();
         let res = tx.exec_bound(&sql, &params).await;
         db.note(schema, &sql, t, &res);
-        if res.map_err(e)?.rows_affected() == 0 {
+        if res.map_err(se)?.rows_affected() == 0 {
             return Err(CONFLICT.into());
         }
     }
-    tx.commit().await.map_err(e)?;
+    tx.commit().await.map_err(se)?;
     Ok(())
 }
 
@@ -584,7 +585,7 @@ async fn key_unchanged(db: &Db, schema: &str, table: &str, recorded: &[String]) 
     let t = Instant::now();
     let rows = sqlx::query(&sql).bind(schema).bind(table).fetch_all(pool).await;
     db.note(schema, &sql, t, &rows);
-    let rows = rows.map_err(e)?;
+    let rows = rows.map_err(se)?;
     let now: Vec<String> = rows.iter().filter_map(|r| super::worker::text_at(r, 0)).collect();
     key_changed_error(table, recorded, &now)
 }

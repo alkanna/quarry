@@ -119,11 +119,6 @@ pub fn every_pg(f: impl Fn(&LivePg, &str)) {
 }
 
 impl LivePg {
-    #[allow(dead_code)] // fixtures of the next steps
-    pub fn sql(&self, s: &str) {
-        self.w.rt.block_on(async { sqlx::raw_sql(s).execute(&self.pool).await.unwrap_or_else(|x| panic!("{s}: {x}")) });
-    }
-
     /// The first cell of the first row, as text.
     pub fn one(&self, s: &str) -> String {
         self.w.rt.block_on(async {

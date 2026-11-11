@@ -3,6 +3,7 @@
 //! rows or one statement in memory. A dump is written next to its name as a hidden .part file and renamed at the
 //! end, so a stopped or failed one leaves nothing behind.
 
+use super::se;
 use super::csv::Source;
 use super::export::Done;
 use super::import::{JobDone, Progress};
@@ -128,7 +129,7 @@ struct Cols {
 }
 
 async fn table_cols(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str, table: &str) -> Res<Cols> {
-    let rows = sqlx::query(d.columns()).bind(schema).bind(table).fetch_all(&mut *c).await.map_err(e)?;
+    let rows = sqlx::query(d.columns()).bind(schema).bind(table).fetch_all(&mut *c).await.map_err(se)?;
     let (mut names, mut meta) = (Vec::new(), HashMap::new());
     for r in &rows {
         let (Some(name), Some(full)) = (text(r, "name"), text(r, "full_type")) else { continue };
@@ -179,7 +180,7 @@ async fn write_rows(c: &mut sqlx::MySqlConnection, d: Dialect, plan: &DumpPlan, 
     let res: Res<()> = async {
         let mut s = raw_sql(&sql).fetch(&mut *c);
         while let Some(row) = futures_util::StreamExt::next(&mut s).await {
-            let row = row.map_err(e)?;
+            let row = row.map_err(se)?;
             if kinds.is_empty() {
                 let mc = make_cols(sqlx::Row::columns(&row), &cols.meta, false);
                 copy = mc.iter().map(|c| CopyCol { name: c.name.clone(), src: c.src.clone(), numeric: numeric(c.kind) }).collect();
@@ -240,9 +241,9 @@ fn delimited(sql_mode: Option<&str>, stmt: &str) -> String {
 pub async fn dump(db: &Db, plan: &DumpPlan, out: &mut (dyn Write + Send), count: &AtomicU64, cancel: &AtomicBool, id: &AtomicU64) -> Res<u64> {
     let d = db.dialect;
     let mut c = db.acquire().await?.detach();
-    prepare(&mut c, d, &plan.schema, true, id).await.map_err(e)?;
+    prepare(&mut c, d, &plan.schema, true, id).await.map_err(se)?;
     // The file says SET NAMES utf8mb4, so the values must be read as UTF-8, and every row of them.
-    pin_reads(&mut c).await.map_err(e)?;
+    pin_reads(&mut c).await.map_err(se)?;
     // The statement timeout of the pool would cut the read of a big table short.
     let timeout = d.session_timeout(0);
     let _ = c.execute(timeout.as_str()).await;
@@ -250,13 +251,13 @@ pub async fn dump(db: &Db, plan: &DumpPlan, out: &mut (dyn Write + Send), count:
     // server's mode would write "t", which the file cannot run back. A filter is the user's text, read under the
     // mode they typed it in, and a filtered dump writes no CREATE, so it keeps the mode.
     if plan.filter.is_none() {
-        c.execute("SET SESSION sql_mode = '', SESSION sql_quote_show_create = 1").await.map_err(e)?;
+        c.execute("SET SESSION sql_mode = '', SESSION sql_quote_show_create = 1").await.map_err(se)?;
     }
     // TIMESTAMP values are read in the session's zone; the file says which zone that is, so a restore in any
     // zone stores the same instants.
-    c.execute("SET SESSION time_zone = '+00:00'").await.map_err(e)?;
+    c.execute("SET SESSION time_zone = '+00:00'").await.map_err(se)?;
     if plan.snapshot {
-        c.execute("START TRANSACTION WITH CONSISTENT SNAPSHOT").await.map_err(e)?;
+        c.execute("START TRANSACTION WITH CONSISTENT SNAPSHOT").await.map_err(se)?;
     }
     let r = dump_on(&mut c, d, db, plan, out, count, cancel).await;
     let _ = c.close().await;
@@ -314,14 +315,14 @@ async fn dump_on(c: &mut sqlx::MySqlConnection, d: Dialect, db: &Db, plan: &Dump
         // Collected first: an iterator with a closure alive across the awaits below makes the future too general to spawn.
         let with_triggers: Vec<&DumpTable> = tables.iter().copied().filter(|t| t.structure && !t.view).collect();
         for t in with_triggers {
-            let names: Vec<String> = sqlx::query("SELECT TRIGGER_NAME AS name FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ? AND EVENT_OBJECT_TABLE = ? ORDER BY TRIGGER_NAME").bind(&plan.schema).bind(&t.name).fetch_all(&mut *c).await.map_err(e)?.iter().filter_map(|r| text(r, "name")).collect();
+            let names: Vec<String> = sqlx::query("SELECT TRIGGER_NAME AS name FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ? AND EVENT_OBJECT_TABLE = ? ORDER BY TRIGGER_NAME").bind(&plan.schema).bind(&t.name).fetch_all(&mut *c).await.map_err(se)?.iter().filter_map(|r| text(r, "name")).collect();
             for n in names {
                 stopped(cancel)?;
                 let (mode, stmt) = show_create(c, format!("SHOW CREATE TRIGGER {}", d.qualified(&plan.schema, &n)), 2).await?;
                 put(out, &format!("--\n-- Trigger {}\n--\n\nDROP TRIGGER IF EXISTS {};\n{}\n", note(&n), q(&n), delimited(mode.as_deref(), &stmt)))?;
             }
         }
-        let routines: Vec<(String, String)> = sqlx::query("SELECT ROUTINE_NAME AS name, ROUTINE_TYPE AS kind FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ? ORDER BY ROUTINE_TYPE, ROUTINE_NAME").bind(&plan.schema).fetch_all(&mut *c).await.map_err(e)?.iter().filter_map(|r| Some((text(r, "name")?, text(r, "kind")?.to_ascii_uppercase()))).collect();
+        let routines: Vec<(String, String)> = sqlx::query("SELECT ROUTINE_NAME AS name, ROUTINE_TYPE AS kind FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ? ORDER BY ROUTINE_TYPE, ROUTINE_NAME").bind(&plan.schema).fetch_all(&mut *c).await.map_err(se)?.iter().filter_map(|r| Some((text(r, "name")?, text(r, "kind")?.to_ascii_uppercase()))).collect();
         for (n, kind) in routines {
             stopped(cancel)?;
             let kind = if kind == "FUNCTION" { "FUNCTION" } else { "PROCEDURE" };
@@ -476,9 +477,9 @@ Statements before it ran and stay applied.", excerpt(&stmt)));
 /// the bytes of the file, as the mysql client would send them.
 async fn run_stmt(c: &mut sqlx::MySqlConnection, stmt: &[u8]) -> Result<(), String> {
     if let Ok(text) = std::str::from_utf8(stmt) {
-        return run_text(c, text).await.map_err(e);
+        return run_text(c, text).await.map_err(se);
     }
-    sqlx::query("SET @quarry_stmt = ?").bind(stmt).execute(&mut *c).await.map_err(e)?;
+    sqlx::query("SET @quarry_stmt = ?").bind(stmt).execute(&mut *c).await.map_err(se)?;
     let mut r = run_text(c, "PREPARE quarry_stmt FROM @quarry_stmt").await;
     if r.is_ok() {
         r = run_text(c, "EXECUTE quarry_stmt").await;

@@ -2,6 +2,7 @@
 //! answers through `Msg::SqlServer`, tagged with the window's request id so a slow old answer is dropped.
 //! View only: nothing here runs a SET.
 
+use super::se;
 use super::worker::text;
 use super::{Advanced, Db, Dialect};
 use crate::db::{e, Msg, Res, Worker};
@@ -412,12 +413,12 @@ async fn variables(db: &Db, global: bool) -> Res<Variables> {
     let up = uptime(&mut c).await;
     if matches!(db.dialect, Dialect::MariaDb) {
         let q = "SELECT VARIABLE_NAME, SESSION_VALUE, GLOBAL_VALUE, DEFAULT_VALUE, READ_ONLY FROM information_schema.SYSTEM_VARIABLES ORDER BY VARIABLE_NAME";
-        let list = rows(&mut c, q).await.map_err(e)?;
+        let list = rows(&mut c, q).await.map_err(se)?;
         let rows = list.iter().filter_map(|r| Some(maria_var(&text(r, "VARIABLE_NAME")?, text(r, "SESSION_VALUE").as_deref(), text(r, "GLOBAL_VALUE").as_deref(), text(r, "DEFAULT_VALUE").as_deref(), text(r, "READ_ONLY").as_deref(), global))).collect();
         return Ok(Variables { rows, global, defaults: true, uptime: up });
     }
     let pairs = |rows: Vec<sqlx::mysql::MySqlRow>| -> Vec<(String, String)> { rows.iter().filter_map(|r| Some((text(r, "Variable_name")?, text(r, "Value").unwrap_or_default()))).collect() };
-    let vals = pairs(rows(&mut c, if global { "SHOW GLOBAL VARIABLES" } else { "SHOW SESSION VARIABLES" }).await.map_err(e)?);
+    let vals = pairs(rows(&mut c, if global { "SHOW GLOBAL VARIABLES" } else { "SHOW SESSION VARIABLES" }).await.map_err(se)?);
     // Either read can be refused or missing (performance_schema off, an old server), and the values stand alone then.
     let sources: Option<HashMap<String, String>> = rows(&mut c, "SELECT VARIABLE_NAME, VARIABLE_SOURCE FROM performance_schema.variables_info").await.ok().map(|list| list.iter().filter_map(|r| Some((text(r, "VARIABLE_NAME")?.to_ascii_lowercase(), text(r, "VARIABLE_SOURCE")?))).collect()).filter(|m: &HashMap<_, _>| !m.is_empty());
     let globals: Option<HashMap<String, String>> = match (global, &sources) {
@@ -440,7 +441,7 @@ async fn variables(db: &Db, global: bool) -> Res<Variables> {
 }
 
 async fn status_snap(c: &mut sqlx::MySqlConnection) -> Res<Snap> {
-    let list = rows(c, "SHOW GLOBAL STATUS").await.map_err(e)?;
+    let list = rows(c, "SHOW GLOBAL STATUS").await.map_err(se)?;
     Ok(Snap::new(list.iter().filter_map(|r| Some((text(r, "Variable_name")?, text(r, "Value").unwrap_or_default()))).collect()))
 }
 
@@ -476,7 +477,7 @@ async fn overview(db: &Db) -> Res<Overview> {
     let mut c = db.acquire().await?;
     let snap = status_snap(&mut c).await?;
     let q = format!("SHOW GLOBAL VARIABLES WHERE Variable_name IN ({OVERVIEW_VARS})");
-    let vars = rows(&mut c, &q).await.map_err(e)?.iter().filter_map(|r| Some((text(r, "Variable_name")?.to_ascii_lowercase(), text(r, "Value").unwrap_or_default()))).collect();
+    let vars = rows(&mut c, &q).await.map_err(se)?.iter().filter_map(|r| Some((text(r, "Variable_name")?.to_ascii_lowercase(), text(r, "Value").unwrap_or_default()))).collect();
     // The connection's own TLS state, which is what Quarry's session uses.
     let tls = match rows(&mut c, "SHOW SESSION STATUS WHERE Variable_name IN ('Ssl_version','Ssl_cipher')").await {
         Ok(l) => {
@@ -543,7 +544,7 @@ async fn me_and_identity(c: &mut sqlx::MySqlConnection, d: Dialect) -> Res<(u64,
             return Ok((super::worker::num_at(r, 0).unwrap_or(0), identity_of(r, 1, d)));
         }
     }
-    let r = rows(c, "SELECT CONNECTION_ID()").await.map_err(e)?;
+    let r = rows(c, "SELECT CONNECTION_ID()").await.map_err(se)?;
     Ok((r.first().and_then(|r| super::worker::num_at(r, 0)).unwrap_or(0), String::new()))
 }
 
@@ -569,7 +570,7 @@ async fn kill_on(c: &mut sqlx::MySqlConnection, d: Dialect, t: &KillTarget, whol
     if identity(c, d).await != t.identity {
         return Err("The connection now reaches a different server than the list was read from, so nothing was killed. Refresh and try again.".into());
     }
-    let r = rows(c, &format!("SELECT USER, HOST, INFO FROM information_schema.PROCESSLIST WHERE ID = {}", t.id)).await.map_err(e)?;
+    let r = rows(c, &format!("SELECT USER, HOST, INFO FROM information_schema.PROCESSLIST WHERE ID = {}", t.id)).await.map_err(se)?;
     let Some(r) = r.first() else { return Err("That connection is already gone.".into()) };
     if !target_matches(t, &text(r, "USER").unwrap_or_default(), &text(r, "HOST").unwrap_or_default(), &text(r, "INFO").unwrap_or_default()) {
         return Err("That connection is now running something else, so nothing was killed. Refresh and try again.".into());
@@ -823,7 +824,7 @@ mod tests {
             let id: u64 = sqlx::query_scalar("SELECT CONNECTION_ID()").fetch_one(&mut c).await.unwrap();
             idtx.send(id).unwrap();
             // SLEEP itself answers 1 when interrupted, so a second row is what turns the kill into an error.
-            let r = sqlx::query_scalar::<_, i64>("SELECT SLEEP(30) FROM (SELECT 1 UNION ALL SELECT 2) t").fetch_all(&mut c).await.map(|n| format!("slept {n:?}")).map_err(|x| e(x));
+            let r = sqlx::query_scalar::<_, i64>("SELECT SLEEP(30) FROM (SELECT 1 UNION ALL SELECT 2) t").fetch_all(&mut c).await.map(|n| format!("slept {n:?}")).map_err(se);
             let alive = sqlx::query_scalar::<_, i64>("SELECT 1").fetch_one(&mut c).await.is_ok();
             let _ = tx.send((r, alive));
         });

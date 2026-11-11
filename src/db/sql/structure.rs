@@ -2,11 +2,12 @@
 //! indexes, foreign keys in both directions, triggers, the table status and the CREATE statement.
 //! Everything is read-only here; `ddl` builds the ALTERs from it.
 
+use super::se;
 use super::exec::{Cells, SqlRow};
 use super::value::Kind;
 use super::worker::{pg_kind, text, text_at};
 use super::{Db, Dialect};
-use crate::db::{e, Msg, Res, Worker};
+use crate::db::{Msg, Res, Worker};
 use sqlx::raw_sql;
 
 #[derive(Clone, Debug, Default)]
@@ -340,7 +341,7 @@ fn triggers(rows: &[SqlRow]) -> Vec<Trigger> {
 /// The triggers of a table read on a connection of the caller's, for the trigger jobs that must see what the
 /// connection they write on sees.
 pub(super) async fn triggers_on(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str, table: &str) -> Res<Vec<Trigger>> {
-    let rows = SqlRow::wrap(sqlx::query(d.triggers()).bind(schema).bind(table).fetch_all(&mut *c).await.map_err(e)?);
+    let rows = SqlRow::wrap(sqlx::query(d.triggers()).bind(schema).bind(table).fetch_all(&mut *c).await.map_err(se)?);
     Ok(triggers(&rows))
 }
 
@@ -428,7 +429,7 @@ pub(super) async fn load(db: &Db, schema: &str, table: &str) -> Res<Structure> {
         let t = std::time::Instant::now();
         let res = raw_sql(&sql).fetch_one(pool).await;
         db.note(schema, &sql, t, &res);
-        res.map(|r| Some(SqlRow::My(r))).map_err(e)
+        res.map(|r| Some(SqlRow::My(r))).map_err(se)
     };
     let (cols, idx, fks, refs, trig, stat, create) = tokio::try_join!(
         query(db, d.columns(), schema, table),

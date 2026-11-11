@@ -2,6 +2,7 @@
 //! statement runs again and rows go through a `copy::Writer` a batch at a time, so a result of any size
 //! never sits in memory.
 
+use super::se;
 use super::value::Kind;
 use super::exec::{Conn, Item};
 use super::run::{pin_reads, prepare};
@@ -97,7 +98,7 @@ fn write_err(err: std::io::Error) -> String {
 pub async fn stream(db: &Db, schema: &str, stmt: &str, plan: &Plan, out: &mut (dyn Write + Send), count: &AtomicU64, cancel: &AtomicBool, id: &AtomicU64) -> Res<(u64, usize)> {
     lex::read_only_check(stmt, db.dialect).map_err(|why| format!("Export all only runs statements that read: {why}"))?;
     let mut conn = db.acquire_conn().await?;
-    prepare(&mut conn, db.dialect, schema, true, id).await?;
+    prepare(&mut conn, db, schema, true, id).await?;
     // All rows means all of them, and the file is written as UTF-8 from what the server sends.
     pin_reads(&mut conn).await?;
     let t = std::time::Instant::now();
@@ -124,13 +125,13 @@ pub async fn stream(db: &Db, schema: &str, stmt: &str, plan: &Plan, out: &mut (d
 /// rolled back here is cut off, so the caller must close the connection when this fails.
 pub(super) async fn stream_locked(conn: &mut Conn, dialect: super::Dialect, locals: &str, stmt: &str, plan: &Plan, out: &mut (dyn Write + Send), count: &AtomicU64, cancel: &AtomicBool, wrap: &Wrap<'_>) -> Res<Option<(u64, usize)>> {
     if let Conn::Pg(c) = conn {
-        let timeout = super::pg_read::statement_timeout(c).await.map_err(e)?;
+        let timeout = super::pg_read::statement_timeout(c).await.map_err(se)?;
         super::pg_read::begin_read_only(c, &timeout, locals).await.map_err(|x| super::pg_read::pg_error(&x, stmt, 0))?;
     }
     let r = stream_conn(conn, dialect, stmt, plan, out, count, cancel, wrap).await;
     if r.is_ok() {
         if let Conn::Pg(c) = conn {
-            sqlx::Executor::execute(&mut *c, "ROLLBACK").await.map_err(e)?;
+            sqlx::Executor::execute(&mut *c, "ROLLBACK").await.map_err(se)?;
         }
     }
     r
@@ -150,7 +151,7 @@ async fn stream_conn(conn: &mut Conn, dialect: super::Dialect, stmt: &str, plan:
             if cancel.load(Ordering::SeqCst) {
                 return Err("Export cancelled".into());
             }
-            match item.map_err(e)? {
+            match item.map_err(se)? {
                 // Later results of a CALL are read off the wire and dropped.
                 Item::Row(_) if done => {}
                 Item::Row(row) => {
@@ -381,7 +382,7 @@ pub async fn export_all(db: &Db, schema: &str, stmts: &[String], ap: &AllPlan, p
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_all(db: &Db, schema: &str, stmts: &[String], ap: &AllPlan, path: &std::path::Path, count: &AtomicU64, step: &AtomicU64, cancel: &AtomicBool, id: &AtomicU64, parts: &mut Vec<(PathBuf, PathBuf)>, open: &mut Option<PathBuf>) -> Res<u64> {
     let mut conn = db.acquire_conn().await?;
-    prepare(&mut conn, db.dialect, schema, true, id).await?;
+    prepare(&mut conn, db, schema, true, id).await?;
     pin_reads(&mut conn).await?;
     let fmt = ap.plan.fmt;
     let (mut total, mut results) = (0u64, 0usize);

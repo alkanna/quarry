@@ -6,9 +6,10 @@
 //! Modules that only make sense on one engine (DDL, users, dump and so on) keep sqlx's own types and reach
 //! them through `Db::my_pool` and `Conn::my`, which answer with an error when the connection is another engine.
 
+use super::se;
 use super::value::{Kind, Param};
 use super::{Db, Pool};
-use crate::db::{e, Res};
+use crate::db::Res;
 use futures_util::stream::BoxStream;
 use futures_util::StreamExt;
 use sqlx::mysql::{MySqlColumn, MySqlConnectOptions, MySqlRow};
@@ -392,7 +393,7 @@ impl Conn {
             Conn::My(c) => c.begin().await.map(Tx::My),
             Conn::Pg(c) => {
                 let mut tx = c.begin_with("BEGIN READ WRITE").await?;
-                tx.execute(super::pg::WRITE_LOCALS).await?;
+                tx.execute(super::pg::write_locals().as_str()).await?;
                 Ok(Tx::Pg(tx))
             }
         }
@@ -488,7 +489,7 @@ impl Db {
     pub async fn detached(&self) -> Res<Conn> {
         match &self.pool {
             Pool::Pg(p) => p.detached(&self.opts).await,
-            Pool::My(_) => Conn::connect(&self.opts).await.map_err(e),
+            Pool::My(_) => Conn::connect(&self.opts).await.map_err(se),
         }
     }
 
@@ -536,7 +537,7 @@ impl Db {
                 }
             };
             self.note(schema, &sql, t, &res);
-            res.map_err(e)
+            res.map_err(se)
         }
     }
 

@@ -309,7 +309,7 @@ pub fn pageable(stmt: &str, d: Dialect) -> bool {
         return false;
     }
     let Some(w) = top_words(stmt, d) else { return false };
-    w.first().is_some_and(|f| ["SELECT", "WITH", "TABLE", "VALUES"].contains(&f.as_str())) && !w.iter().any(|x| ["INTO", "UPDATE", "DELETE", "INSERT", "REPLACE", "MERGE", "LOCK", "SHARE"].contains(&x.as_str()))
+    w.first().is_some_and(|f| ["SELECT", "WITH", "TABLE", "VALUES"].contains(&f.as_str())) && !w.iter().any(|x| ["INTO", "UPDATE", "DELETE", "INSERT", "REPLACE", "LOCK", "SHARE"].contains(&x.as_str()))
 }
 
 /// Whether a PostgreSQL statement controls the transaction around it: BEGIN, START, COMMIT, END, ROLLBACK, ABORT,
@@ -1106,6 +1106,15 @@ mod tests {
         assert_eq!(placeholders("SELECT ?, '?'", true, false), placeholders("SELECT ?, '?'", false, false));
         assert_eq!(count_with("SELECT '\\''; SELECT 2", false, false), 1);
         assert_eq!(count_with("SELECT '\\''; SELECT 2", true, false), 2);
+    }
+
+    #[test]
+    fn merge_stops_paging_on_postgres_only() {
+        // MERGE is a keyword of PostgreSQL's DML, and an ordinary name on MySQL.
+        assert!(super::pageable("SELECT merge FROM t", Dialect::MySql));
+        assert!(!super::pageable("SELECT merge FROM t", Dialect::Postgres));
+        assert!(!super::pageable("MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE", Dialect::Postgres));
+        assert!(!super::pageable("MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE", Dialect::MySql));
     }
 
     #[test]

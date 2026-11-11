@@ -4,6 +4,7 @@
 //! by `lit` for the sql_mode of the very session that runs them, and every privilege name comes from
 //! `DB_PRIVS`, never from user text. Each statement is sent alone, prepared, on a writer connection.
 
+use super::se;
 use super::ddl::{self, session_mode, Mode};
 use super::value::lit;
 use super::worker::text;
@@ -1069,7 +1070,7 @@ async fn grants_of(c: &mut sqlx::MySqlConnection, m: Mode, acct: &Account) -> Re
     let rows = match sqlx::query(&sql).persistent(false).fetch_all(&mut *c).await {
         Ok(r) => r,
         // Not every server prepares SHOW GRANTS; the text holds only the quoted account.
-        Err(x) if e(&x).contains("1295") || e(&x).contains("prepared statement protocol") => c.fetch_all(sql.as_str()).await.map_err(e)?,
+        Err(x) if e(&x).contains("1295") || e(&x).contains("prepared statement protocol") => c.fetch_all(sql.as_str()).await.map_err(se)?,
         Err(x) => return Err(e(x)),
     };
     Ok(rows.iter().filter_map(|r| super::worker::raw(r, 0).map(|b| parse_grant(&String::from_utf8_lossy(b)))).collect())
@@ -1175,7 +1176,7 @@ async fn exec_any(c: &mut sqlx::MySqlConnection, sql: &str) -> Res<()> {
             let t = std::time::Instant::now();
             let res = c.execute(sql).await.map(|_| ());
             crate::db::note_here(sql, t, &res);
-            res.map_err(e)
+            res.map_err(se)
         }
         r => r,
     }

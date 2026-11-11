@@ -8,7 +8,7 @@ pub enum Dialect {
     #[default]
     MySql,
     MariaDb,
-    /// Not reachable yet: `from_version` never returns it. The catalog queries land in step 4.
+    /// Chosen by the connection's engine, never by a version string.
     Postgres,
 }
 

@@ -2,6 +2,7 @@
 //! A Postgres connection belongs to one database and there is no USE, so the pool is picked by the database the
 //! `Db`'s options name (see `Db::at`).
 
+use super::se;
 use super::exec::{Cells, Conn, Opts};
 use super::{Addr, Db, Dialect, Pool, SslMode, TestInfo};
 use crate::db::{e, Net, Res};
@@ -23,17 +24,9 @@ const IDLE: Duration = Duration::from_secs(300);
 /// The database every server has, used when the address names none.
 const FALLBACK_DB: &str = "postgres";
 
-/// What the first line of a Stop needs and a pid alone cannot give: the time the backend started, so a pid the
-/// server reused for another session is never cancelled. Kept here because `prepare` only sees the pid slot.
-static STARTS: Mutex<Option<HashMap<u64, String>>> = Mutex::new(None);
-
-fn remember_start(pid: u64, start: String) {
-    STARTS.lock().unwrap().get_or_insert_with(HashMap::new).insert(pid, start);
-}
-
-fn recall_start(pid: u64) -> Option<String> {
-    STARTS.lock().unwrap().as_ref().and_then(|m| m.get(&pid).cloned())
-}
+/// Most start times kept per connection. A run that ends without Stop leaves its entry, so the map is cleared past this
+/// instead of growing for the life of the connection.
+const MAX_STARTS: usize = 256;
 
 /// The pools of one Postgres connection.
 pub struct PgPools {
@@ -51,6 +44,9 @@ pub struct PgPools {
     /// A pool wraps what a connection hook failed with in a bare timeout, so the real message is kept here.
     failure: Arc<Mutex<Option<String>>>,
     live: Mutex<Live>,
+    /// What the first line of a Stop needs and a pid alone cannot give: the time each backend started, so a pid the server
+    /// reused for another session is never cancelled. Kept per connection because two servers hand out the same pids.
+    starts: Mutex<HashMap<u64, String>>,
 }
 
 #[derive(Default)]
@@ -61,7 +57,7 @@ struct Live {
 
 impl PgPools {
     fn new(opts: PgConnectOptions, default_db: String, acquire: Duration, locals: Option<String>) -> PgPools {
-        PgPools { opts, default_db, acquire, idle: IDLE, per_db: PER_DB, max_pools: MAX_POOLS, locals, failure: Default::default(), live: Default::default() }
+        PgPools { opts, default_db, acquire, idle: IDLE, per_db: PER_DB, max_pools: MAX_POOLS, locals, failure: Default::default(), live: Default::default(), starts: Default::default() }
     }
 
     /// The SET LOCAL statements every transaction of a pooler-fallback connection starts with, or an empty string when
@@ -70,8 +66,21 @@ impl PgPools {
         self.locals.as_deref().unwrap_or_default()
     }
 
+    pub(super) fn remember_start(&self, pid: u64, start: String) {
+        let mut m = self.starts.lock().unwrap();
+        if m.len() >= MAX_STARTS {
+            m.clear();
+        }
+        m.insert(pid, start);
+    }
+
+    pub(super) fn recall_start(&self, pid: u64) -> Option<String> {
+        self.starts.lock().unwrap().get(&pid).cloned()
+    }
+
     /// The pool of `database`, made on first use. Making it opens no connection. Past the cap the pool used least
-    /// recently is closed, in a task of its own because closing waits for connections still in use.
+    /// recently leaves the map but is not closed: closing makes every acquire on a clone someone still holds fail with
+    /// PoolClosed. The last handle and the idle timeout reap it.
     pub fn pool(&self, database: Option<&str>) -> PgPool {
         let name = database.filter(|d| !d.is_empty()).unwrap_or(&self.default_db).to_string();
         let mut live = self.live.lock().unwrap();
@@ -83,14 +92,7 @@ impl PgPools {
         }
         while live.pools.len() >= self.max_pools {
             let Some(oldest) = live.pools.iter().min_by_key(|(_, (_, used))| *used).map(|(k, _)| k.clone()) else { break };
-            if let Some((p, _)) = live.pools.remove(&oldest) {
-                match tokio::runtime::Handle::try_current() {
-                    Ok(h) => {
-                        h.spawn(async move { p.close().await });
-                    }
-                    Err(_) => drop(p),
-                }
-            }
+            live.pools.remove(&oldest);
         }
         let (locals, failure) = (self.locals.clone(), self.failure.clone());
         let pool = PgPoolOptions::new()
@@ -127,7 +129,7 @@ impl PgPools {
     /// A connection of its own, outside the pools, with the same session as theirs.
     pub async fn detached(&self, opts: &Opts) -> Res<Conn> {
         let Opts::Pg(o) = opts else { return Err("Not a PostgreSQL connection".into()) };
-        let mut c = sqlx::PgConnection::connect_with(o).await.map_err(|x| e(x))?;
+        let mut c = sqlx::PgConnection::connect_with(o).await.map_err(se)?;
         session(&mut c, self.locals.as_deref(), &self.failure).await.map_err(|x| self.failure.lock().unwrap().clone().unwrap_or_else(|| e(x)))?;
         Ok(Conn::Pg(c))
     }
@@ -204,14 +206,22 @@ impl Db {
     }
 }
 
+/// The output formats the read path expects. sqlx sends DateStyle "ISO, MDY", TimeZone UTC and extra_float_digits 2 itself;
+/// these are the ones it leaves out. One list feeds the startup options, the pooler fallback and every write transaction,
+/// so a setting added here cannot go missing behind a pooler.
+const FORMATS: [(&str, &str); 3] = [("bytea_output", "hex"), ("DateStyle", "ISO"), ("IntervalStyle", "postgres")];
+
+fn set_local(k: &str, v: &str) -> String {
+    format!("SET LOCAL {k} = '{v}'")
+}
+
 /// Startup parameters the session needs. `statement_timeout` is left out when the limit is off.
 fn startup(o: PgConnectOptions, ms: u64) -> PgConnectOptions {
     let mut opts: Vec<(&str, String)> = vec![("default_transaction_read_only", "on".into())];
     if ms > 0 {
         opts.push(("statement_timeout", ms.to_string()));
     }
-    // sqlx sends DateStyle "ISO, MDY", TimeZone UTC and extra_float_digits 2 itself; these are the ones it leaves out.
-    opts.extend([("bytea_output", "hex".to_string()), ("DateStyle", "ISO".to_string()), ("IntervalStyle", "postgres".to_string())]);
+    opts.extend(FORMATS.map(|(k, v)| (k, v.to_string())));
     o.application_name("Quarry").options(opts)
 }
 
@@ -222,7 +232,7 @@ fn locals_for(ms: u64) -> String {
     if ms > 0 {
         v.push(format!("SET LOCAL statement_timeout = {ms}"));
     }
-    v.extend(["SET LOCAL bytea_output = 'hex'".to_string(), "SET LOCAL DateStyle = 'ISO'".to_string(), "SET LOCAL IntervalStyle = 'postgres'".to_string()]);
+    v.extend(FORMATS.map(|(k, v)| set_local(k, v)));
     v.join("; ")
 }
 
@@ -237,7 +247,11 @@ pub(super) fn pooled_for_test(base: &Db, uri: &str) -> Db {
 /// What every write transaction starts with, whatever the session carries: no statement timeout, because an ALTER or a
 /// big update must not be cut by the limit meant for reads, a lock timeout so a write never queues behind another
 /// session's lock for ever, and the output formats the read path expects.
-pub(super) const WRITE_LOCALS: &str = "SET LOCAL statement_timeout = 0; SET LOCAL lock_timeout = '10s'; SET LOCAL bytea_output = 'hex'; SET LOCAL DateStyle = 'ISO'; SET LOCAL IntervalStyle = 'postgres'";
+pub(super) fn write_locals() -> String {
+    let mut v = vec!["SET LOCAL statement_timeout = 0".to_string(), "SET LOCAL lock_timeout = '10s'".to_string()];
+    v.extend(FORMATS.map(|(k, x)| set_local(k, x)));
+    v.join("; ")
+}
 
 /// A pooler answers a startup `options` parameter with "unsupported startup parameter".
 fn options_refused(err: &sqlx::Error) -> bool {
@@ -248,7 +262,7 @@ fn options_refused(err: &sqlx::Error) -> bool {
 /// Reads the two settings the read-only guard depends on. A session that could write, or whose strings read a
 /// backslash as an escape, would make the lexer's reading of user text wrong, so either one refuses the connection.
 pub(super) async fn readback(c: &mut sqlx::PgConnection) -> Result<(), String> {
-    let rows = c.fetch_all("SELECT current_setting('default_transaction_read_only'), current_setting('standard_conforming_strings')").await.map_err(|x| e(x))?;
+    let rows = c.fetch_all("SELECT current_setting('default_transaction_read_only'), current_setting('standard_conforming_strings')").await.map_err(se)?;
     let row = rows.first().ok_or("The server did not report its session settings")?;
     if row.cell(0) != Some(b"on") {
         return Err("The session was not read-only, so the connection was refused".into());
@@ -267,10 +281,10 @@ const POOLED: &str = "This server sits behind a connection pooler that gives eac
 /// opens its own `BEGIN READ ONLY`.
 async fn pooler_check(c: &mut sqlx::PgConnection, locals: &str) -> Result<(), String> {
     let mut tx = c.begin_with("BEGIN READ ONLY").await.map_err(|x| format!("{POOLED} ({})", e(x)))?;
-    tx.execute(locals).await.map_err(|x| e(x))?;
+    tx.execute(locals).await.map_err(se)?;
     let mut pid = None;
     for _ in 0..3 {
-        let rows = (&mut *tx).fetch_all("SELECT pg_backend_pid()::text, current_setting('standard_conforming_strings')").await.map_err(|x| e(x))?;
+        let rows = (&mut *tx).fetch_all("SELECT pg_backend_pid()::text, current_setting('standard_conforming_strings')").await.map_err(se)?;
         let row = rows.first().ok_or("The server did not report its session settings")?;
         let now = row.cell(0).map(<[u8]>::to_vec);
         if pid.get_or_insert_with(|| now.clone()) != &now {
@@ -322,7 +336,7 @@ async fn facts(c: &mut sqlx::PgConnection) -> Res<Facts> {
     let rows = c
         .fetch_all("SELECT current_setting('server_version_num'), split_part(current_setting('server_version'), ' ', 1), COALESCE((SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()), false)::text")
         .await
-        .map_err(|x| e(x))?;
+        .map_err(se)?;
     let r = rows.first().ok_or("The server did not report its version")?;
     let text = |i| r.cell(i).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default();
     let (num, version) = (text(0), text(1));
@@ -360,7 +374,7 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
             Ok(c) => (c, startup(base.clone(), ms)),
             Err(x) if options_refused(&x) => {
                 locals = Some(locals_for(ms));
-                (sqlx::PgConnection::connect_with(&base.clone().database(&default_db)).await.map_err(|x| e(x))?, base.clone())
+                (sqlx::PgConnection::connect_with(&base.clone().database(&default_db)).await.map_err(se)?, base.clone())
             }
             Err(x) => return Err(e(x)),
         };
@@ -372,7 +386,7 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
             let rows = c
                 .fetch_all("SELECT datname::text FROM pg_database WHERE datallowconn AND NOT datistemplate AND has_database_privilege(datname, 'CONNECT') ORDER BY 1")
                 .await
-                .map_err(|x| e(x))?;
+                .map_err(se)?;
             let dbs: Vec<String> = rows.iter().filter_map(|r| r.cell(0).map(|b| String::from_utf8_lossy(b).into_owned())).collect();
             Ok::<_, String>((f, dbs))
         }
@@ -401,14 +415,14 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
 /// server's own default. Returns whether the connection is behind a pooler. There nothing is set on the session, the pid
 /// is not kept (the backend may serve another client by the time Stop is pressed) and write access is a `BEGIN READ WRITE`
 /// of each statement, because a session setting would land on whichever backend answered and leak to other clients.
-pub(super) async fn prepare(c: &mut sqlx::PgConnection, read_only: bool, id: &AtomicU64, pooled: Option<bool>) -> Result<bool, sqlx::Error> {
+pub(super) async fn prepare(c: &mut sqlx::PgConnection, read_only: bool, id: &AtomicU64, pooled: Option<bool>, db: &Db) -> Result<bool, sqlx::Error> {
     // The start time travels as text so no timestamp type has to round trip, and is compared as text on Stop.
     let rows = c.fetch_all("SELECT pg_backend_pid()::text, (SELECT backend_start::text FROM pg_stat_activity WHERE pid = pg_backend_pid()), current_setting('default_transaction_read_only')").await?;
     let pooled = pooled.unwrap_or_else(|| rows.first().is_some_and(|r| r.cell(2) != Some(b"on")));
     if let (false, Some(r)) = (pooled, rows.first()) {
         let pid = r.cell(0).and_then(|b| std::str::from_utf8(b).ok()?.parse::<u64>().ok()).unwrap_or(0);
-        if let Some(start) = r.cell(1) {
-            remember_start(pid, String::from_utf8_lossy(start).into_owned());
+        if let (Some(start), Pool::Pg(p)) = (r.cell(1), &db.pool) {
+            p.remember_start(pid, String::from_utf8_lossy(start).into_owned());
         }
         id.store(pid, Ordering::SeqCst);
     }
@@ -425,11 +439,12 @@ pub(super) async fn cancel(db: &Db, pid: u64) -> Res<String> {
     if db.pooler() {
         return Ok("Stopped the script".into());
     }
-    let Some(start) = recall_start(pid) else { return Err("That connection is already gone.".into()) };
+    let Pool::Pg(pools) = &db.pool else { return Err("Not a PostgreSQL connection".into()) };
+    let Some(start) = pools.recall_start(pid) else { return Err("That connection is already gone.".into()) };
     let mut c = super::run::side_conn(db, "Could not reach the server to stop the statement").await?;
     let Conn::Pg(pc) = &mut c else { return Err("Not a PostgreSQL connection".into()) };
     let q = sqlx::query("SELECT pg_cancel_backend(pid)::text FROM pg_stat_activity WHERE pid = $1 AND backend_start::text = $2").bind(pid as i32).bind(start);
-    let r = q.fetch_all(&mut *pc).await.map_err(|x| e(x));
+    let r = q.fetch_all(&mut *pc).await.map_err(se);
     let _ = c.close().await;
     match r? {
         rows if rows.is_empty() => Err("That connection is already gone.".into()),
@@ -498,6 +513,20 @@ mod tests {
     }
 
     #[test]
+    fn two_connections_keep_their_own_start_times_for_one_pid() {
+        let (a, b) = (pools(4), pools(4));
+        a.remember_start(4242, "2024-01-01 00:00:00+00".into());
+        b.remember_start(4242, "2025-06-01 00:00:00+00".into());
+        assert_eq!(a.recall_start(4242).as_deref(), Some("2024-01-01 00:00:00+00"));
+        assert_eq!(b.recall_start(4242).as_deref(), Some("2025-06-01 00:00:00+00"));
+        assert_eq!(a.recall_start(7), None);
+        for pid in 0..(MAX_STARTS as u64 * 2) {
+            a.remember_start(pid, "x".into());
+        }
+        assert!(a.starts.lock().unwrap().len() <= MAX_STARTS);
+    }
+
+    #[test]
     fn at_changes_only_the_database() {
         rt().block_on(async {
             let o = PgConnectOptions::new_without_pgpass().host("127.0.0.1").port(1).database("postgres");
@@ -541,10 +570,24 @@ mod tests {
         }
         assert!(!locals.contains("default_transaction_read_only"), "the guard is the read-only transaction, not a setting");
         assert!(!locals_for(0).contains("statement_timeout"));
-        for stmt in locals.split("; ").chain(WRITE_LOCALS.split("; ")) {
+        let write = write_locals();
+        for stmt in locals.split("; ").chain(write.split("; ")) {
             assert!(stmt.starts_with("SET LOCAL "), "{stmt}");
         }
-        assert!(WRITE_LOCALS.contains("statement_timeout = 0") && WRITE_LOCALS.contains("lock_timeout = '10s'"));
+        assert!(write.contains("statement_timeout = 0") && write.contains("lock_timeout = '10s'"));
+    }
+
+    #[test]
+    fn the_three_places_agree_on_the_output_formats() {
+        let startup_opts = startup(PgConnectOptions::new_without_pgpass(), 0).get_options().unwrap().to_string();
+        let (locals, write) = (locals_for(0), write_locals());
+        for (k, v) in FORMATS {
+            assert!(startup_opts.contains(&format!("{k}={v}")), "startup lacks {k}");
+            assert!(locals.split("; ").any(|s| s == set_local(k, v)), "fallback lacks {k}");
+            assert!(write.split("; ").any(|s| s == set_local(k, v)), "write lacks {k}");
+        }
+        // Nothing but the formats is shared: the fallback has no more format settings than the list.
+        assert_eq!(locals.split("; ").count(), FORMATS.len());
     }
 
     /// Live tests, run on every server named by QUARRY_TEST_POSTGRES and QUARRY_TEST_POSTGRES13.
@@ -653,7 +696,7 @@ mod tests {
                 let run_id = id.clone();
                 l.w.rt.spawn(async move {
                     let mut c = db.acquire_conn().await.unwrap();
-                    crate::db::sql::run::prepare(&mut c, Dialect::Postgres, "", true, &run_id).await.unwrap();
+                    crate::db::sql::run::prepare(&mut c, &db, "", true, &run_id).await.unwrap();
                     let t = std::time::Instant::now();
                     let r = c.execute("SELECT pg_sleep(30)").await;
                     let _ = tx.send((r.err().and_then(|x| code(&x)), t.elapsed()));
@@ -666,16 +709,40 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(300));
                 let pid = id.load(Ordering::SeqCst);
                 // The server gave this pid to another session in the meantime: the start time differs, so nothing is hit.
-                let real = recall_start(pid).unwrap();
-                remember_start(pid, "2001-01-01 00:00:00+00".into());
+                let Pool::Pg(pools) = &l.db.pool else { unreachable!() };
+                let real = pools.recall_start(pid).unwrap();
+                pools.remember_start(pid, "2001-01-01 00:00:00+00".into());
                 let err = l.w.rt.block_on(cancel(&l.db, pid)).unwrap_err();
                 assert_eq!(err, "That connection is already gone.", "{var}");
                 assert!(rx.recv_timeout(Duration::from_millis(800)).is_err(), "{var}: a reused pid was cancelled");
-                remember_start(pid, real);
+                pools.remember_start(pid, real);
                 assert_eq!(l.w.rt.block_on(cancel(&l.db, pid)).unwrap(), "Stopped the running statement", "{var}");
                 let (state, took) = rx.recv_timeout(Duration::from_secs(5)).unwrap_or_else(|_| panic!("{var}: still running after Stop"));
                 assert_eq!(state.as_deref(), Some("57014"), "{var}");
                 assert!(took < Duration::from_secs(10), "{var}: {took:?}");
+            });
+        }
+
+        #[test]
+        fn an_evicted_pool_stays_usable_for_its_holders() {
+            every_pg(|l, var| {
+                let _rt = l.w.rt.enter();
+                let a = "postgres";
+                let da = l.db.at(a);
+                let mut held = l.w.rt.block_on(da.acquire_conn()).unwrap();
+                // A clone handed out before the eviction, as a restored tab holds it.
+                let before = da.pg_pool().unwrap();
+                for d in ["pg11_e1", "pg11_e2", "pg11_e3", "pg11_e4"] {
+                    l.db.at(d).pg_pool().unwrap();
+                }
+                let Pool::Pg(pools) = &l.db.pool else { unreachable!() };
+                assert!(!pools.live_names().contains(&a.to_string()), "{var}: the pool was not evicted");
+                let Conn::Pg(c) = &mut held else { unreachable!() };
+                l.w.rt.block_on(c.execute("SELECT pg_sleep(0.2)")).unwrap_or_else(|x| panic!("{var}: in-flight query failed: {x}"));
+                std::thread::sleep(Duration::from_millis(300));
+                l.w.rt.block_on(before.acquire()).unwrap_or_else(|x| panic!("{var}: an evicted pool refused an acquire: {x}"));
+                drop(held);
+                assert!(l.w.rt.block_on(da.acquire_conn()).is_ok(), "{var}");
             });
         }
 

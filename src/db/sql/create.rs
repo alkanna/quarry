@@ -4,12 +4,13 @@
 //! sent alone, as a prepared statement so the server takes exactly one, on a connection of its own that is
 //! switched to READ WRITE, like the row writes.
 
+use super::se;
 use super::ddl::{self, Mode};
 use super::value::lit;
 use super::worker::{database_names, text, text_at};
 use super::write::{writer, SqlUndo};
 use super::{Db, Dialect};
-use crate::db::{e, Msg, Res, UndoAction, UndoKind, Worker};
+use crate::db::{Msg, Res, UndoAction, UndoKind, Worker};
 use sqlx::{Connection, Executor};
 use std::time::{Duration, Instant};
 
@@ -421,10 +422,10 @@ const SCHEMA_DEFAULT: &str = "SELECT DEFAULT_COLLATION_NAME AS co FROM informati
 async fn load_meta(db: &Db, schema: &str) -> Res<Meta> {
     let pool = db.my_pool()?;
     let (cs, co, en, df) = tokio::try_join!(
-        async { sqlx::query(CHARSETS).fetch_all(pool).await.map_err(e) },
-        async { sqlx::query(COLLATIONS).fetch_all(pool).await.map_err(e) },
-        async { sqlx::query(ENGINES).fetch_all(pool).await.map_err(e) },
-        async { sqlx::query(SERVER_DEFAULTS).fetch_one(pool).await.map_err(e) },
+        async { sqlx::query(CHARSETS).fetch_all(pool).await.map_err(se) },
+        async { sqlx::query(COLLATIONS).fetch_all(pool).await.map_err(se) },
+        async { sqlx::query(ENGINES).fetch_all(pool).await.map_err(se) },
+        async { sqlx::query(SERVER_DEFAULTS).fetch_one(pool).await.map_err(se) },
     )?;
     let charsets: Vec<Charset> = cs.iter().filter_map(|r| Some(Charset { name: text(r, "name")?, desc: text(r, "descr").unwrap_or_default(), default_collation: text(r, "def").unwrap_or_default() })).collect();
     let mut meta = Meta {
@@ -438,7 +439,7 @@ async fn load_meta(db: &Db, schema: &str) -> Res<Meta> {
         fold_case: super::structure::num(&df, "lc").unwrap_or(0) != 0,
     };
     if !schema.is_empty() {
-        meta.schema_collation = sqlx::query(SCHEMA_DEFAULT).bind(schema).fetch_optional(pool).await.map_err(e)?.and_then(|r| text(&r, "co"));
+        meta.schema_collation = sqlx::query(SCHEMA_DEFAULT).bind(schema).fetch_optional(pool).await.map_err(se)?.and_then(|r| text(&r, "co"));
     }
     Ok(meta)
 }
@@ -469,8 +470,8 @@ async fn count(pool: &sqlx::MySqlPool, sql: &str, schema: &str) -> u64 {
 /// Counts for the database confirmation: the sum is what DROP DATABASE takes with it.
 async fn db_info(db: &Db, schema: &str) -> Res<DropInfo> {
     let pool = db.my_pool()?;
-    let exists = sqlx::query("SELECT 1 AS n FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?").bind(schema).fetch_optional(pool).await.map_err(e)?.is_some();
-    let kinds = sqlx::query("SELECT TABLE_TYPE AS kind, COUNT(*) AS n, COALESCE(SUM(TABLE_ROWS), 0) AS r FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? GROUP BY TABLE_TYPE").bind(schema).fetch_all(pool).await.map_err(e)?;
+    let exists = sqlx::query("SELECT 1 AS n FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?").bind(schema).fetch_optional(pool).await.map_err(se)?.is_some();
+    let kinds = sqlx::query("SELECT TABLE_TYPE AS kind, COUNT(*) AS n, COALESCE(SUM(TABLE_ROWS), 0) AS r FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? GROUP BY TABLE_TYPE").bind(schema).fetch_all(pool).await.map_err(se)?;
     let mut info = DropInfo { exists, ..Default::default() };
     for r in &kinds {
         let n = super::structure::num(r, "n").unwrap_or(0);
@@ -499,7 +500,7 @@ async fn table_info(db: &Db, schema: &str, table: &str) -> Res<DropInfo> {
     let d = db.dialect;
     let mut c = db.acquire().await?.detach();
     fresh_stats(&mut c, d).await;
-    let st = sqlx::query("SELECT TABLE_ROWS AS est, TABLE_TYPE AS kind FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?").bind(schema).bind(table).fetch_optional(&mut c).await.map_err(e);
+    let st = sqlx::query("SELECT TABLE_ROWS AS est, TABLE_TYPE AS kind FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?").bind(schema).bind(table).fetch_optional(&mut c).await.map_err(se);
     let st = match st {
         Ok(Some(st)) => st,
         other => {
@@ -518,7 +519,7 @@ async fn table_info(db: &Db, schema: &str, table: &str) -> Res<DropInfo> {
             None => (super::structure::num(&st, "est"), true),
         };
     }
-    let refs = sqlx::query(d.referenced_by()).bind(schema).bind(table).fetch_all(pool).await.map_err(e)?;
+    let refs = sqlx::query(d.referenced_by()).bind(schema).bind(table).fetch_all(pool).await.map_err(se)?;
     for r in &refs {
         let (rdb, rt) = (text(r, "db").unwrap_or_default(), text(r, "tbl").unwrap_or_default());
         if rdb == schema && rt == table {
@@ -579,7 +580,7 @@ async fn kill(pool: &sqlx::MySqlPool, id: u64) {
 }
 
 async fn table_names(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str) -> Res<Vec<String>> {
-    let rows = sqlx::query(&format!("SHOW TABLES FROM {}", d.quote_ident(schema))).persistent(false).fetch_all(&mut *c).await.map_err(e)?;
+    let rows = sqlx::query(&format!("SHOW TABLES FROM {}", d.quote_ident(schema))).persistent(false).fetch_all(&mut *c).await.map_err(se)?;
     Ok(rows.iter().filter_map(|r| text_at(r, 0)).collect())
 }
 
@@ -595,7 +596,7 @@ pub fn stored_name(listed: &[String], name: &str) -> String {
 
 /// Whether the server compares database and table names without case (lower_case_table_names 1 or 2).
 async fn folds_case(c: &mut sqlx::MySqlConnection) -> Res<bool> {
-    let r = sqlx::query("SELECT @@lower_case_table_names AS n").fetch_one(&mut *c).await.map_err(e)?;
+    let r = sqlx::query("SELECT @@lower_case_table_names AS n").fetch_one(&mut *c).await.map_err(se)?;
     Ok(super::structure::num(&r, "n").unwrap_or(0) != 0)
 }
 
@@ -649,7 +650,7 @@ async fn drop_if_same_and_empty(c: &mut sqlx::MySqlConnection, schema: &str, tab
             return Err(format!("Not undone: {table} was dropped and made again since, so it is not the table this created."));
         }
     }
-    let has = sqlx::query(&format!("SELECT 1 AS n FROM {q} LIMIT 1")).persistent(false).fetch_optional(&mut *c).await.map_err(e)?.is_some();
+    let has = sqlx::query(&format!("SELECT 1 AS n FROM {q} LIMIT 1")).persistent(false).fetch_optional(&mut *c).await.map_err(se)?.is_some();
     if has {
         return Err(format!("Not undone: {table} has rows now."));
     }
@@ -673,7 +674,7 @@ async fn undo_create(db: &Db, schema: &str, table: &str, made: Option<&str>, rea
                 .bind(schema)
                 .fetch_one(&mut c)
                 .await
-                .map_err(e)?;
+                .map_err(se)?;
             if super::structure::num(&n, "n").unwrap_or(0) > 0 {
                 return Err(format!("Not undone: {schema} has tables or other objects in it now."));
             }

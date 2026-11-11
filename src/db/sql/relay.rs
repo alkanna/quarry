@@ -1,5 +1,6 @@
 //! The shell script side of SQL: a connection kept for a whole run, and values filled into its statements.
 
+use super::se;
 use super::exec::{Cells, Conn, Item};
 use super::pg;
 use super::run::{kill_query, prepare};
@@ -188,16 +189,16 @@ impl Relay {
         if let Conn::Pg(c) = &mut conn {
             // Not `prepare`, which sets search_path on the session: behind a pooler that would land on a backend other
             // clients share, so there it travels as SET LOCAL in each transaction instead.
-            pg::prepare(c, read_only, id, Some(db.pooler())).await.map_err(e)?;
+            pg::prepare(c, read_only, id, Some(db.pooler()), db).await.map_err(se)?;
             let locals = db.pg_run_locals(schema);
             if !db.pooler() {
-                super::pg_read::set_search_path(c, schema).await.map_err(e)?;
+                super::pg_read::set_search_path(c, schema).await.map_err(se)?;
             }
             // Values are filled as E strings that read the same in either mode, so no session mode is read here.
             let pid = id.load(std::sync::atomic::Ordering::SeqCst);
             return Ok(Relay { conn, dialect: db.dialect, read_only, backslash: false, ansi: false, dead: false, log_conn: db.conn, schema: schema.to_string(), locals, db: db.clone(), pid, cut: false });
         }
-        prepare(&mut conn, db.dialect, schema, read_only, id).await?;
+        prepare(&mut conn, db, schema, read_only, id).await?;
         // Values are filled in for this session's mode, which may differ from the one read at connect.
         let m = super::ddl::session_mode(conn.my()?).await?;
         Ok(Relay { conn, dialect: db.dialect, read_only, backslash: m.bs, ansi: m.ansi, dead: false, log_conn: db.conn, schema: schema.to_string(), locals: String::new(), db: db.clone(), pid: 0, cut: false })
@@ -228,7 +229,7 @@ impl Relay {
             .conn
             .fetch_all("SELECT pg_catalog.current_setting('client_encoding'), pg_catalog.current_setting('standard_conforming_strings'), pg_catalog.current_setting('backslash_quote')")
             .await
-            .map_err(e)?;
+            .map_err(se)?;
         let at = |i| rows.first().and_then(|r| raw(r, i)).map(|b| String::from_utf8_lossy(b).to_ascii_lowercase()).unwrap_or_default();
         let (enc, scs, bq) = (at(0), at(1), at(2));
         if enc != "utf8" || scs != "on" || !matches!(bq.as_str(), "safe_encoding" | "off") {
