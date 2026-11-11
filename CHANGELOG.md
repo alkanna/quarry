@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.33.0](https://github.com/alkanna/quarry/compare/v0.32.0...v0.33.0) (2026-11-10)
+
+
+### Features
+
+* redesign the tab list grouped by connection ([#168](https://github.com/alkanna/quarry/issues/168)) ([62522a5](https://github.com/alkanna/quarry/commit/62522a51cc93ee57cf27c7e9a46ad6bcd0e064b1))
+
+
+### Bug Fixes
+
+* draw toast borders in their tone color ([#166](https://github.com/alkanna/quarry/issues/166)) ([2c98f68](https://github.com/alkanna/quarry/commit/2c98f6872b2584d245d74f0b2b16f18865973ee8))
+
 ## [0.32.0](https://github.com/alkanna/quarry/compare/v0.31.0...v0.32.0) (2026-11-10)
 
 
