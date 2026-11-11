@@ -16,11 +16,15 @@ mod pg_shell_tests;
 mod pg_write_tests;
 #[cfg(test)]
 mod pg_pgbouncer_tests;
+#[cfg(test)]
+mod pg_ddl_tests;
 pub mod exec;
 mod relay;
 pub mod structure;
 pub mod write;
 pub mod ddl;
+mod ddl_my;
+mod ddl_pg;
 pub mod create;
 pub mod export;
 pub mod lex;

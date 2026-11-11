@@ -337,7 +337,7 @@ impl App {
         let Some((d, mut sel)) = self.take_structure(ui) else { return };
         let mut acts = Vec::new();
         let mut open = None;
-        let block = self.struct_block();
+        let block = self.struct_block().or(self.rel_block());
         let editable = self.sel_writable() && block.is_none();
         let why = if let Some(b) = block { b } else if self.sel_is_view() { "Views cannot be changed here" } else { READ_ONLY };
         let (staged, mut memo, applying) = self.take_staged();
@@ -448,7 +448,7 @@ impl App {
     pub(super) fn sql_triggers_view(&mut self, ui: &mut egui::Ui) {
         let Some((d, mut sel)) = self.take_structure(ui) else { return };
         let mut acts = Vec::new();
-        let block = self.struct_block();
+        let block = self.struct_block().or(self.trig_block());
         let editable = self.sel_writable() && block.is_none();
         let why = if let Some(b) = block { b } else if self.sel_is_view() { "Views cannot be changed here" } else { "Read-only: unlock writes to change triggers" };
         // A trigger that was just created is listed now, so its draft has done its job.
@@ -806,6 +806,7 @@ fn grid_ex(ui: &mut egui::Ui, salt: &str, cols: &[GCol], rows: usize, sel: Optio
     for r in 0..rows {
         let row = Rect::from_min_size(pos2(rect.left(), rect.top() + TABLE_HEAD_H + r as f32 * ROW_H), vec2(w, ROW_H));
         let resp = ui.interact(row, ui.scope_id().with(("sql-grid", salt, r)), Sense::click());
+        resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, sel == Some(r), format!("{salt} row {}", r + 1)));
         let fill = if sel == Some(r) { if resp.hovered() { SEL_HOVER() } else { SEL() } } else if resp.hovered() { HOVER() } else if r % 2 == 1 { stripe } else { BG() };
         ui.painter().rect_filled(row, 0.0, fill);
         put(ui, Rect::from_min_size(row.min, vec2(NUM, ROW_H)), &(r + 1).to_string(), FontId::monospace(TXT_CAPTION), FAINT(), false);

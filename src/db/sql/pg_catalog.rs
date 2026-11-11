@@ -49,7 +49,9 @@ pub const TABLES: &str = concat!(
 /// Params: [schema, table]. Columns: name, full_type, nullable, col_key, col_default, extra, collation, comment, position,
 /// pg_type, pg_cat, pg_typtype for the kind, and attidentity ('a' always, 'd' by default) and attgenerated ('s' stored), which
 /// the write path reads instead of the words of `extra`. A serial or identity column says auto_increment in `extra`, an identity
-/// that is always generated and a computed column say GENERATED, and neither has a `col_default` of its own.
+/// that is always generated and a computed column say GENERATED, and neither has a `col_default` of its own. Only a default that
+/// is the `nextval` of the sequence the column owns reads as a serial: a column on a shared sequence keeps its default as an
+/// expression. A collation outside pg_catalog is written with its schema, as a ready SQL name.
 pub const COLUMNS: &str = concat!(
     "SELECT a.attname::text AS name, format_type(a.atttypid, a.atttypmod) AS full_type, (NOT a.attnotnull)::int AS nullable, ",
     col_key!(),
@@ -57,30 +59,42 @@ pub const COLUMNS: &str = concat!(
      concat_ws(' ', \
        CASE WHEN a.attidentity = 'a' THEN 'auto_increment GENERATED ALWAYS AS IDENTITY' \
             WHEN a.attidentity = 'd' THEN 'auto_increment IDENTITY BY DEFAULT' \
-            WHEN pg_get_expr(d.adbin, d.adrelid) LIKE 'nextval(%' THEN 'auto_increment' END, \
+            WHEN pg_get_expr(d.adbin, d.adrelid) = 'nextval(''' || pg_get_serial_sequence(quote_ident(n.nspname) || '.' || quote_ident(c.relname), a.attname)::regclass::text || '''::regclass)' THEN 'auto_increment' END, \
        CASE WHEN a.attgenerated <> '' THEN 'GENERATED ALWAYS AS (' || pg_get_expr(d.adbin, d.adrelid) || ') ' || CASE a.attgenerated WHEN 's' THEN 'STORED' ELSE 'VIRTUAL' END END) AS extra, \
-     CASE WHEN a.attcollation <> t.typcollation THEN co.collname::text END AS collation, \
+     CASE WHEN a.attcollation <> t.typcollation THEN CASE WHEN cn.nspname = 'pg_catalog' THEN co.collname::text ELSE chr(34) || replace(cn.nspname::text, chr(34), chr(34) || chr(34)) || chr(34) || '.' || chr(34) || replace(co.collname::text, chr(34), chr(34) || chr(34)) || chr(34) END END AS collation, \
      COALESCE(col_description(a.attrelid, a.attnum), '') AS comment, a.attnum::bigint AS position, ",
     pg_type!(),
     ", a.attidentity::text AS attidentity, a.attgenerated::text AS attgenerated FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace ",
     type_joins!(),
-    " LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum LEFT JOIN pg_collation co ON co.oid = a.attcollation \
+    " LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum LEFT JOIN pg_collation co ON co.oid = a.attcollation LEFT JOIN pg_namespace cn ON cn.oid = co.collnamespace \
      WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum"
 );
 
 /// Params: [schema, table]. One row per key column, the primary key first. Columns: name, non_unique, seq, col,
 /// direction, cardinality, sub_part, index_type, nullable, comment, and expr (the text of an expression key part, whose
 /// `col` is empty), def (`pg_get_indexdef`), is_primary and backs_constraint (a primary key, unique or exclusion
-/// constraint owns the index, so a CREATE TABLE writes it as a constraint and not as CREATE INDEX).
+/// constraint owns the index, so a CREATE TABLE writes it as a constraint and not as CREATE INDEX), defer_ok and
+/// defer_init (the constraint is DEFERRABLE, INITIALLY DEFERRED), con_comment (the constraint's own comment) and complex
+/// (the index has a part its key columns do not say: a condition, expressions, included columns, a non-default operator
+/// class, collation or NULLS order, storage options, a tablespace or NULLS NOT DISTINCT). `complex` is read from the
+/// catalog fields and not from the text of `def`, which a quoted name could confuse; PostgreSQL 13 has no
+/// `indnullsnotdistinct`, so it is read through the row's JSON, which leaves it out there.
 pub const INDEXES: &str = "SELECT ic.relname::text AS name, (NOT i.indisunique)::int AS non_unique, k.n::bigint AS seq, \
      COALESCE(a.attname::text, '') AS col, CASE WHEN (i.indoption[k.n - 1]::int & 1) = 1 THEN 'D' ELSE 'A' END AS direction, \
      NULL::bigint AS cardinality, NULL::bigint AS sub_part, upper(am.amname)::text AS index_type, \
      CASE WHEN a.attnotnull THEN '' ELSE 'YES' END AS nullable, COALESCE(obj_description(ic.oid, 'pg_class'), '') AS comment, \
      CASE WHEN i.indkey[k.n - 1] = 0 THEN pg_get_indexdef(i.indexrelid, k.n, true) END AS expr, \
      pg_get_indexdef(i.indexrelid) AS def, i.indisprimary::int AS is_primary, \
-     EXISTS (SELECT 1 FROM pg_constraint co WHERE co.conindid = i.indexrelid AND co.conrelid = i.indrelid AND co.contype IN ('p', 'u', 'x'))::int AS backs_constraint \
+     (cc.oid IS NOT NULL)::int AS backs_constraint, COALESCE(cc.condeferrable, false)::int AS defer_ok, COALESCE(cc.condeferred, false)::int AS defer_init, \
+     COALESCE(obj_description(cc.oid, 'pg_constraint'), '') AS con_comment, \
+     (i.indpred IS NOT NULL OR i.indexprs IS NOT NULL OR i.indnatts <> i.indnkeyatts OR ic.reloptions IS NOT NULL OR ic.reltablespace <> 0 \
+      OR COALESCE(to_jsonb(i) ->> 'indnullsnotdistinct', 'false') <> 'false' \
+      OR NOT COALESCE((SELECT oc.opcdefault FROM pg_opclass oc WHERE oc.oid = i.indclass[k.n - 1]), false) \
+      OR i.indcollation[k.n - 1] <> COALESCE(a.attcollation, 0) \
+      OR ((i.indoption[k.n - 1]::int & 1) = 1) <> ((i.indoption[k.n - 1]::int & 2) = 2))::int AS complex \
      FROM pg_index i JOIN pg_class tc ON tc.oid = i.indrelid JOIN pg_namespace n ON n.oid = tc.relnamespace \
      JOIN pg_class ic ON ic.oid = i.indexrelid JOIN pg_am am ON am.oid = ic.relam \
+     LEFT JOIN LATERAL (SELECT co.oid, co.condeferrable, co.condeferred FROM pg_constraint co WHERE co.conindid = i.indexrelid AND co.conrelid = i.indrelid AND co.contype IN ('p', 'u', 'x') LIMIT 1) cc ON true \
      CROSS JOIN LATERAL generate_series(1, i.indnkeyatts::int) AS k(n) \
      LEFT JOIN pg_attribute a ON a.attrelid = tc.oid AND a.attnum = i.indkey[k.n - 1] \
      WHERE n.nspname = $1 AND tc.relname = $2 ORDER BY NOT i.indisprimary, ic.relname, k.n";
@@ -176,3 +190,19 @@ pub const CONSTRAINTS: &str = "SELECT co.conname::text AS name, co.contype::text
      FROM pg_constraint co JOIN pg_class c ON c.oid = co.conrelid JOIN pg_namespace n ON n.oid = c.relnamespace \
      WHERE co.contype IN ('p', 'u', 'c', 'x') AND co.conparentid = 0 AND n.nspname = $1 AND c.relname = $2 \
      ORDER BY CASE co.contype WHEN 'p' THEN 0 WHEN 'u' THEN 1 WHEN 'x' THEN 2 ELSE 3 END, co.conname";
+
+/// Params: [schema, table]. What the server drops together with a column, one row per object that depends on it
+/// through `pg_depend`: the column, the kind (index, constraint, sequence, default or other), the object's name and
+/// `pg_describe_object`'s words for it. A foreign key of another table that points at the column is not here, since the
+/// server refuses that drop instead of cascading.
+pub const COLUMN_DEPS: &str = "SELECT a.attname::text AS col, \
+     CASE WHEN d.classid = 'pg_class'::regclass THEN CASE WHEN d.objsubid > 0 THEN 'other' ELSE CASE c2.relkind WHEN 'i' THEN 'index' WHEN 'I' THEN 'index' WHEN 'S' THEN 'sequence' ELSE 'other' END END \
+          WHEN d.classid = 'pg_constraint'::regclass THEN CASE WHEN co.contype IN ('p', 'u') THEN 'key' ELSE 'constraint' END WHEN d.classid = 'pg_attrdef'::regclass THEN CASE WHEN ad.adrelid = d.refobjid AND ad.adnum = d.refobjsubid THEN 'default' ELSE 'other' END ELSE 'other' END AS kind, \
+     COALESCE(c2.relname::text, co.conname::text, '') AS name, pg_describe_object(d.classid, d.objid, d.objsubid) AS what \
+     FROM pg_depend d JOIN pg_class t ON t.oid = d.refobjid JOIN pg_namespace n ON n.oid = t.relnamespace \
+     JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = d.refobjsubid \
+     LEFT JOIN pg_class c2 ON d.classid = 'pg_class'::regclass AND c2.oid = d.objid \
+     LEFT JOIN pg_constraint co ON d.classid = 'pg_constraint'::regclass AND co.oid = d.objid \
+     LEFT JOIN pg_attrdef ad ON d.classid = 'pg_attrdef'::regclass AND ad.oid = d.objid \
+     WHERE d.refclassid = 'pg_class'::regclass AND d.refobjsubid > 0 AND NOT a.attisdropped AND co.contype IS DISTINCT FROM 'n' AND n.nspname = $1 AND t.relname = $2 \
+     ORDER BY a.attnum, 2, 3, 4";
