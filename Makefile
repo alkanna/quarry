@@ -121,9 +121,11 @@ servers-up:
 	@$(call UP,$(N)-pgb-pg,--network $(N)-pgb -e POSTGRES_PASSWORD=quarry postgres:18)
 	@$(call UP,$(N)-pgbouncer,--network $(N)-pgb -p $(call P,56432):5432 -e DB_HOST=$(N)-pgb-pg -e DB_USER=postgres -e DB_PASSWORD=quarry -e AUTH_TYPE=scram-sha-256 -e POOL_MODE=transaction -e MAX_PREPARED_STATEMENTS=0 -e IGNORE_STARTUP_PARAMETERS=extra_float_digits -e DEFAULT_POOL_SIZE=8 -e MAX_CLIENT_CONN=200 edoburu/pgbouncer)
 	@echo "waiting for the servers"
+	@# Over TCP: on first start the MySQL and MariaDB images run a temporary server on the socket only, then restart,
+	@# so a socket ping answers before the real server is up.
 	@until $(DOCKER) exec $(N)-mongo mongosh --quiet --eval 'try { rs.status() } catch (e) { rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "localhost:27017" }] }) }; quit(db.hello().isWritablePrimary ? 0 : 1)' >/dev/null 2>&1; do sleep 1; done
-	@until $(DOCKER) exec $(N)-mysql mysqladmin -uroot -pquarry ping --silent >/dev/null 2>&1; do sleep 1; done
-	@until $(DOCKER) exec $(N)-mariadb mariadb-admin -uroot -pquarry ping --silent >/dev/null 2>&1; do sleep 1; done
+	@until $(DOCKER) exec $(N)-mysql mysqladmin -uroot -pquarry -h127.0.0.1 --protocol=tcp ping --silent >/dev/null 2>&1; do sleep 1; done
+	@until $(DOCKER) exec $(N)-mariadb mariadb-admin -uroot -pquarry -h127.0.0.1 --protocol=tcp ping --silent >/dev/null 2>&1; do sleep 1; done
 	@until $(DOCKER) exec $(N)-pg18 pg_isready -U postgres -q && $(DOCKER) exec $(N)-pg13 pg_isready -U postgres -q && $(DOCKER) exec $(N)-pgb-pg pg_isready -U postgres -q; do sleep 1; done
 	@until $(DOCKER) run --rm --network $(N)-pgb -e PGPASSWORD=quarry postgres:18 psql -h $(N)-pgbouncer -U postgres -At -c 'select 1' >/dev/null 2>&1; do sleep 1; done
 	@echo "servers ready"

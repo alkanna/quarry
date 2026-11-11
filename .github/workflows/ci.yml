@@ -60,8 +60,10 @@ jobs:
           docker run -d --name mariadb -p 3307:3306 -e MARIADB_ROOT_PASSWORD=quarry mariadb:11.4
           docker run -d --name pg18 -p 5432:5432 -e POSTGRES_PASSWORD=quarry postgres:18
           docker run -d --name pg13 -p 5433:5432 -e POSTGRES_PASSWORD=quarry postgres:13
-          until docker exec mysql mysqladmin -uroot -pquarry ping --silent; do sleep 1; done
-          until docker exec mariadb mariadb-admin -uroot -pquarry ping --silent; do sleep 1; done
+          # Over TCP: on first start the image runs a temporary server on the socket only, then restarts, so a socket ping
+          # answers before the real server is up.
+          until docker exec mysql mysqladmin -uroot -pquarry -h127.0.0.1 --protocol=tcp ping --silent; do sleep 1; done
+          until docker exec mariadb mariadb-admin -uroot -pquarry -h127.0.0.1 --protocol=tcp ping --silent; do sleep 1; done
           until docker exec pg18 pg_isready -U postgres -q && docker exec pg13 pg_isready -U postgres -q; do sleep 1; done
       # PgBouncer in transaction mode with no prepared statement support, the worst case for the PostgreSQL pooler
       # fallback. It refuses the startup options and hands every transaction to any backend, so named statements and
