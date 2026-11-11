@@ -1290,13 +1290,36 @@ pub fn orphan_key(fk: &ForeignKey) -> (Vec<String>, String, String, Vec<String>)
     (fk.cols.clone(), fk.ref_db.clone(), fk.ref_table.clone(), fk.ref_cols.clone())
 }
 
-/// A trigger as the editor holds it. The body is the user's own SQL, written after FOR EACH ROW as typed.
+/// A trigger as the editor holds it. The body is the user's own SQL, written after FOR EACH ROW as typed. On PostgreSQL the
+/// body is the source of the trigger's function, the event is the events joined with OR, and `pg` holds the rest.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TrigDef {
     pub name: String,
     pub timing: String,
     pub event: String,
     pub body: String,
+    pub pg: PgDef,
+}
+
+/// What a PostgreSQL trigger has that MySQL's does not.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PgDef {
+    /// FOR EACH ROW, else FOR EACH STATEMENT.
+    pub per_row: bool,
+    /// The UPDATE OF columns as typed, separated by commas; empty for any column.
+    pub of_cols: String,
+    /// The WHEN condition without its parentheses.
+    pub when: String,
+    /// tgenabled: O enabled, D disabled, R replica only, A always.
+    pub mode: String,
+    /// The name of the function, which a new trigger gets made; empty lets `ddl_pg_trig::func_name` pick one.
+    pub func: String,
+}
+
+impl Default for PgDef {
+    fn default() -> Self {
+        PgDef { per_row: true, of_cols: String::new(), when: String::new(), mode: "O".into(), func: String::new() }
+    }
 }
 
 /// The blocks a trigger body nests. A CASE inside an expression ends at a bare END, a CASE statement at END CASE.
@@ -1637,6 +1660,9 @@ pub struct TrigUndo {
     /// The trigger as the change left it, or None when the change dropped it.
     pub left: Option<Trigger>,
     pub label: String,
+    /// PostgreSQL: the statements that put the trigger and its function back and the state they rely on. The two fields above
+    /// are MySQL's and stay empty then.
+    pub pg: Option<super::ddl_pg_trig::PgUndo>,
 }
 
 /// A trigger change for the worker.
@@ -1913,7 +1939,7 @@ async fn trigger_job(db: &Db, schema: &str, table: &str, job: &TrigJob, m: Mode,
             }
             run_text(&mut c, &sql).await.map_err(fail)?;
             let live = super::structure::triggers_on(&mut c, d, schema, table).await.ok().and_then(|v| find(&v, &s.def.name).cloned());
-            Ok((s.def.name.clone(), TrigUndo { name: s.def.name.clone(), restore: None, left: live, label: format!("created trigger {}", s.def.name) }))
+            Ok((s.def.name.clone(), TrigUndo { name: s.def.name.clone(), restore: None, left: live, label: format!("created trigger {}", s.def.name), pg: None }))
         }
         TrigJob::Edit { was, save } => {
             let sql = create_trigger(d, m, table, save, matches!(d, Dialect::MariaDb)).map_err(fail)?;
@@ -1930,13 +1956,13 @@ async fn trigger_job(db: &Db, schema: &str, table: &str, job: &TrigJob, m: Mode,
                 swap_locked(&mut c, d, schema, table, &was.name, Some((&trial, &scratch.def.name)), Swap::Text(&sql), &old, back_order.as_ref()).await.map_err(|x| fail(definer_note(x, save.definer.as_deref())))?;
             }
             let left = super::structure::triggers_on(&mut c, d, schema, table).await.ok().and_then(|v| find(&v, &save.def.name).cloned());
-            Ok((was.name.clone(), TrigUndo { name: was.name.clone(), restore: Some(old), left, label: format!("changed trigger {}", was.name) }))
+            Ok((was.name.clone(), TrigUndo { name: was.name.clone(), restore: Some(old), left, label: format!("changed trigger {}", was.name), pg: None }))
         }
         TrigJob::Drop(was) => {
             let Some(live) = find(&all, &was.name).filter(|l| same_trigger(l, was)) else { return Err(fail(changed(&was.name))) };
             let old = stored(&mut c, d, schema, &all, live).await.map_err(fail)?;
             run_text(&mut c, &drop_trigger(d, &was.name, false)).await.map_err(fail)?;
-            Ok((was.name.clone(), TrigUndo { name: was.name.clone(), restore: Some(old), left: None, label: format!("dropped trigger {}", was.name) }))
+            Ok((was.name.clone(), TrigUndo { name: was.name.clone(), restore: Some(old), left: None, label: format!("dropped trigger {}", was.name), pg: None }))
         }
     }
 }
@@ -1980,6 +2006,9 @@ async fn undo_trigger_job(db: &Db, schema: &str, table: &str, u: &TrigUndo, read
 /// Runs a recorded undo of a trigger change. On failure the action stays in the list: the checks above make a retry
 /// safe.
 pub(super) async fn undo_trigger(db: &Db, a: UndoAction, u: TrigUndo, read_only: bool) -> Msg {
+    if u.pg.is_some() {
+        return super::ddl_pg_trig::undo(db, a, u, read_only).await;
+    }
     let UndoAction { at, conn, db: schema, coll: table, .. } = a;
     let res = crate::db::sql_scope(db.conn, &schema, undo_trigger_job(db, &schema, &table, &u, read_only)).await;
     let keep = res.is_err().then(|| UndoAction { at, ..trigger_undo_action(conn, &schema, &table, u) });
@@ -2016,6 +2045,9 @@ impl Worker {
     /// SHOW CREATE TRIGGER, with the session it was made in: it is what a refused MySQL swap and undo put back.
     #[allow(clippy::too_many_arguments)]
     pub fn sql_trigger(&self, conn: u64, db: Db, schema: String, table: String, job: TrigJob, m: Mode, read_only: bool, done: String) {
+        if db.dialect == Dialect::Postgres {
+            return self.pg_trigger(conn, db, schema, table, job, read_only, done);
+        }
         self.spawn_sql(db.conn, &schema.clone(), async move {
             let (res, undo, seen) = match trigger_job(&db, &schema, &table, &job, m, read_only).await {
                 Ok((_, u)) => {
@@ -2745,7 +2777,7 @@ mod tests {
     }
 
     fn trig(name: &str, body: &str) -> TrigDef {
-        TrigDef { name: name.into(), timing: "before".into(), event: "update".into(), body: body.into() }
+        TrigDef { name: name.into(), timing: "before".into(), event: "update".into(), body: body.into(), pg: PgDef::default() }
     }
 
     fn save(def: TrigDef) -> TrigSave {
@@ -2774,7 +2806,7 @@ mod tests {
     #[test]
     fn trigger_names_are_quoted_and_the_body_stays_the_users() {
         for bs in [true, false] {
-            let t = TrigDef { name: "t`; DROP TABLE x; --".into(), timing: "AFTER".into(), event: "DELETE".into(), body: "BEGIN\n  INSERT INTO log VALUES ('a''b');\nEND".into() };
+            let t = TrigDef { name: "t`; DROP TABLE x; --".into(), timing: "AFTER".into(), event: "DELETE".into(), body: "BEGIN\n  INSERT INTO log VALUES ('a''b');\nEND".into(), pg: PgDef::default() };
             let s = create_trigger(M, Mode { bs, ansi: false }, "or`ders", &save(t), false).unwrap();
             assert_eq!(s, "CREATE TRIGGER `t``; DROP TABLE x; --` AFTER DELETE ON `or``ders`\nFOR EACH ROW\nBEGIN\n  INSERT INTO log VALUES ('a''b');\nEND", "bs={bs}");
         }
@@ -2894,7 +2926,7 @@ mod tests {
     }
 
     fn live_trig(name: &str, order: u64) -> crate::db::sql::structure::Trigger {
-        crate::db::sql::structure::Trigger { name: name.into(), timing: "BEFORE".into(), event: "INSERT".into(), body: "SET NEW.a = 1".into(), definer: "root@%".into(), order, sql_mode: "STRICT_TRANS_TABLES".into() }
+        crate::db::sql::structure::Trigger { name: name.into(), timing: "BEFORE".into(), event: "INSERT".into(), body: "SET NEW.a = 1".into(), definer: "root@%".into(), order, sql_mode: "STRICT_TRANS_TABLES".into(), pg: None }
     }
 
     /// Review finding 5: a trigger goes back between the triggers it sat between.
@@ -3840,7 +3872,7 @@ mod live_rel {
     fn triggers(var: &str) {
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let Some(mut e) = start(var) else { return };
-        let def = |name: &str, body: &str| TrigDef { name: name.into(), timing: "BEFORE".into(), event: "INSERT".into(), body: body.into() };
+        let def = |name: &str, body: &str| TrigDef { name: name.into(), timing: "BEFORE".into(), event: "INSERT".into(), body: body.into(), pg: PgDef::default() };
         let body_of = |e: &mut Env, name: &str| e.structure("rt_trig").triggers.iter().find(|t| t.name == name).map(|t| t.body.clone());
 
         let a = def("rt_bi", "SET NEW.tag = 'a'");
@@ -3888,7 +3920,7 @@ mod live_rel {
         e.drop_trigger("rt_trig", "rt_bi").unwrap();
 
         // A compound body with a SIGNAL, a hostile name and a quote in a string.
-        let guard = TrigDef { name: "rt`;x".into(), timing: "BEFORE".into(), event: "UPDATE".into(), body: "BEGIN\n  IF NEW.tag = 'it''s bad' THEN\n    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'no';\n  END IF;\nEND".into() };
+        let guard = TrigDef { name: "rt`;x".into(), timing: "BEFORE".into(), event: "UPDATE".into(), body: "BEGIN\n  IF NEW.tag = 'it''s bad' THEN\n    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'no';\n  END IF;\nEND".into(), pg: PgDef::default() };
         let undo = e.trigger("rt_trig", &guard, false).unwrap_or_else(|er| panic!("{var}: {er}"));
         e.exec("INSERT INTO quarry_rt.rt_trig (id, tag) VALUES (500, 'fine')");
         assert!(e.try_exec("UPDATE quarry_rt.rt_trig SET tag = 'it''s bad' WHERE id = 500").is_err(), "{var}: the body ran");
@@ -3912,7 +3944,7 @@ mod live_rel {
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let Some(mut e) = start(var) else { return };
         let mysql = e.db.dialect == Dialect::MySql;
-        let def = |name: &str, body: &str| TrigDef { name: name.into(), timing: "BEFORE".into(), event: "INSERT".into(), body: body.into() };
+        let def = |name: &str, body: &str| TrigDef { name: name.into(), timing: "BEFORE".into(), event: "INSERT".into(), body: body.into(), pg: PgDef::default() };
         let exists = |e: &mut Env, name: &str| e.live_trigger("rt_trig", name).is_some();
         let clear = |e: &Env| e.exec("DELETE FROM quarry_rt.rt_trig");
 

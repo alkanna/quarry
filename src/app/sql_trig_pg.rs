@@ -1,0 +1,142 @@
+//! The PostgreSQL half of the trigger editor: the fields above the body (name, timing, events, columns, row or statement,
+//! WHEN, enabled, and the function the trigger runs). The statements come from `db::sql::ddl_pg_trig`, which also checks the
+//! draft; this file only draws it and says what the person should know before saving.
+
+use super::*;
+use db::sql::ddl::TrigDef;
+use db::sql::ddl_pg_trig::{canonical, cols_of, events_of, func_name};
+use db::sql::structure::PgTrig;
+
+/// What the head needs besides the draft.
+pub(super) struct Env<'a> {
+    pub exists: bool,
+    pub editable: bool,
+    pub live: Option<&'a PgTrig>,
+    pub table: &'a str,
+}
+
+/// The UPDATE OF list names a column the table does not have: PostgreSQL would refuse it, and the message names it.
+pub(super) fn column_problem(def: &TrigDef, cols: &[String]) -> Option<String> {
+    cols_of(&def.pg.of_cols).into_iter().find(|c| !cols.contains(c)).map(|c| format!("The table has no column {c}."))
+}
+
+pub(super) fn head(ui: &mut egui::Ui, def: &mut TrigDef, env: &Env) {
+    let (editable, exists) = (env.editable, env.exists);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        ui.label(RichText::new("Name").color(MUTED()));
+        ui.add_enabled(editable && !exists, egui::TextEdit::singleline(&mut def.name).font(egui::TextStyle::Monospace).desired_width(240.0).hint_text("orders_audit")).widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, editable && !exists, "Trigger name"));
+        ui.add_space(8.0);
+        ui.label(RichText::new("Timing").color(MUTED()));
+        ui.add_enabled_ui(editable, |ui| {
+            let timings = ["BEFORE", "AFTER", "INSTEAD OF"];
+            let mut i = timings.iter().position(|t| *t == def.timing).unwrap_or(0);
+            segmented(ui, &mut i, &[(0, "BEFORE"), (1, "AFTER"), (2, "INSTEAD OF")]);
+            def.timing = timings[i].into();
+            // INSTEAD OF fires for each row, which the segmented control for row or statement below shows.
+            if i == 2 {
+                def.pg.per_row = true;
+            }
+        });
+        ui.add_space(8.0);
+        ui.label(RichText::new("For each").color(MUTED()));
+        ui.add_enabled_ui(editable, |ui| {
+            let mut i = usize::from(!def.pg.per_row);
+            segmented(ui, &mut i, &[(0, "ROW"), (1, "STATEMENT")]);
+            def.pg.per_row = i == 0;
+        });
+    });
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        ui.label(RichText::new("Events").color(MUTED()));
+        let mut events = events_of(&def.event);
+        ui.add_enabled_ui(editable, |ui| {
+            for e in ["INSERT", "UPDATE", "DELETE", "TRUNCATE"] {
+                let on = events.iter().any(|x| x == e);
+                if chip(ui, e, C_KEYWORD(), on).clicked() {
+                    if on {
+                        events.retain(|x| x != e);
+                    } else {
+                        events.push(e.to_string());
+                        // TRUNCATE has no rows to fire for.
+                        if e == "TRUNCATE" {
+                            def.pg.per_row = false;
+                        }
+                    }
+                }
+            }
+        });
+        def.event = canonical(&events);
+        if events.iter().any(|e| e == "UPDATE") {
+            ui.add_space(8.0);
+            ui.label(RichText::new("Columns").color(MUTED()));
+            ui.add_enabled(editable, egui::TextEdit::singleline(&mut def.pg.of_cols).font(egui::TextStyle::Monospace).desired_width(220.0).hint_text("any column")).widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, editable, "Trigger columns"));
+        } else {
+            def.pg.of_cols.clear();
+        }
+        ui.add_space(8.0);
+        ui.label(RichText::new("Enabled").color(MUTED()));
+        let was = env.live.map_or("O", |l| l.mode.as_str());
+        let mut on = def.pg.mode != "D";
+        ui.add_enabled_ui(editable, |ui| toggle(ui, &mut on)).inner.widget_info(|| egui::WidgetInfo::selected(egui::Role::Switch, editable, on, "Trigger enabled"));
+        // A trigger that fires only on a replica or always keeps that when it is turned on again.
+        def.pg.mode = if !on { "D".into() } else if matches!(was, "R" | "A") { was.into() } else { "O".into() };
+        if matches!(def.pg.mode.as_str(), "R" | "A") {
+            ui.label(RichText::new(if def.pg.mode == "R" { "fires on replicas only" } else { "fires always" }).size(TXT_SMALL).color(FAINT()));
+        }
+    });
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        ui.label(RichText::new("When").color(MUTED()));
+        ui.add_enabled(editable, egui::TextEdit::singleline(&mut def.pg.when).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY).hint_text("NEW.status IS DISTINCT FROM OLD.status")).widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, editable, "Trigger when"));
+    });
+    ui.add_space(8.0);
+    function_line(ui, def, env);
+    notes(ui, env);
+}
+
+/// The function the trigger runs: its name where it exists, the name field where it is about to be made.
+fn function_line(ui: &mut egui::Ui, def: &mut TrigDef, env: &Env) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        ui.label(RichText::new("Function").color(MUTED()));
+        match env.live {
+            Some(p) => {
+                ui.label(RichText::new(format!("{}.{}()", p.func_schema, p.func)).font(FontId::monospace(TXT_SMALL)).color(TEXT()));
+                let mut facts = vec![p.lang.clone()];
+                if p.func_others > 0 {
+                    facts.push(if p.func_others == 1 { "also run by 1 other trigger".into() } else { format!("also run by {} other triggers", p.func_others) });
+                }
+                if p.func_secdef {
+                    facts.push("SECURITY DEFINER".into());
+                }
+                if !p.func_mine {
+                    facts.push(format!("owned by {}", p.func_owner));
+                }
+                ui.label(RichText::new(facts.join(", ")).size(TXT_SMALL).color(FAINT()));
+            }
+            None => {
+                let auto = func_name(env.table, &def.name);
+                ui.add_enabled(env.editable, egui::TextEdit::singleline(&mut def.pg.func).font(egui::TextStyle::Monospace).desired_width(300.0).hint_text(auto)).widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, env.editable, "Function name"));
+                ui.label(RichText::new("a new plpgsql function that returns trigger").size(TXT_SMALL).color(FAINT()));
+            }
+        }
+    });
+}
+
+/// Why a trigger cannot be changed, or what part of it can.
+fn notes(ui: &mut egui::Ui, env: &Env) {
+    let Some(p) = env.live else { return };
+    if !p.refuse.is_empty() {
+        ui.add_space(6.0);
+        ui.label(RichText::new(p.refuse.as_str()).size(TXT_SMALL).color(WARNING()));
+    } else if !p.no_rewrite.is_empty() {
+        ui.add_space(6.0);
+        ui.label(RichText::new(format!("{} Its function body and enabled state can still be changed.", p.no_rewrite)).size(TXT_SMALL).color(WARNING()));
+    } else if p.lang != "plpgsql" {
+        ui.add_space(6.0);
+        ui.label(RichText::new(format!("The function is written in {}, so its body is shown but not changed here.", p.lang)).size(TXT_SMALL).color(WARNING()));
+    }
+}

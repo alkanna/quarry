@@ -157,6 +157,48 @@ pub struct Trigger {
     pub order: u64,
     /// The sql_mode it was created under, which its body runs with.
     pub sql_mode: String,
+    /// PostgreSQL: what editing the trigger and its function needs. None on MySQL.
+    pub pg: Option<Box<PgTrig>>,
+}
+
+/// A PostgreSQL trigger as the catalogs hold it, read with `pg_catalog::TRIGGERS`. The trigger is the part on the table; the
+/// function it runs is a separate object, often shared, and is read along because the editor writes both.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PgTrig {
+    pub per_row: bool,
+    /// The columns of UPDATE OF, empty for any column.
+    pub of_cols: Vec<String>,
+    /// The WHEN condition without its parentheses.
+    pub when: String,
+    /// tgenabled: O (enabled), D (disabled), R (replica only) or A (always).
+    pub mode: String,
+    pub comment: String,
+    /// The relkind of the table: r, p, v or f.
+    pub rel_kind: String,
+    pub func_schema: String,
+    pub func: String,
+    pub lang: String,
+    /// The function's body, which is the text between its dollar quotes.
+    pub src: String,
+    /// `pg_get_functiondef`: the statement that creates the function again.
+    pub func_def: String,
+    /// How many other triggers, on this table or others, run the function.
+    pub func_others: u64,
+    pub func_owner: String,
+    pub func_mine: bool,
+    pub func_can: bool,
+    pub func_secdef: bool,
+    pub func_acl: bool,
+    pub func_comment: String,
+    pub func_ext: bool,
+    /// `pg_get_triggerdef`: the statement that creates the trigger again.
+    pub trig_def: String,
+    /// What the transaction must find again under the table's lock (`pg_catalog::SEEN_TRIGGER` and `SEEN_FUNCTION`).
+    pub seen_trig: String,
+    pub seen_func: String,
+    /// Why no change of the trigger can be written back, and why it cannot be created again (its function can still change).
+    pub refuse: String,
+    pub no_rewrite: String,
 }
 
 impl Trigger {
@@ -393,7 +435,38 @@ pub(super) fn foreign_keys(rows: &[SqlRow]) -> Vec<ForeignKey> {
 }
 
 fn triggers(rows: &[SqlRow]) -> Vec<Trigger> {
-    rows.iter().map(|r| Trigger { name: s(r, "name"), timing: s(r, "timing"), event: s(r, "event"), body: s(r, "body"), definer: s(r, "definer"), order: num(r, "ord").unwrap_or(0), sql_mode: s(r, "sql_mode") }).collect()
+    rows.iter().map(|r| Trigger { name: s(r, "name"), timing: s(r, "timing"), event: s(r, "event"), body: s(r, "body"), definer: s(r, "definer"), order: num(r, "ord").unwrap_or(0), sql_mode: s(r, "sql_mode"), pg: pg_trigger(r) }).collect()
+}
+
+/// The PostgreSQL columns of a trigger row, absent on MySQL's.
+fn pg_trigger(r: &SqlRow) -> Option<Box<PgTrig>> {
+    text(r, "fn_name")?;
+    Some(Box::new(PgTrig {
+        per_row: flag(r, "per_row"),
+        of_cols: serde_json::from_str(&s(r, "of_cols")).unwrap_or_default(),
+        when: s(r, "when_text"),
+        mode: s(r, "mode"),
+        comment: s(r, "comment"),
+        rel_kind: s(r, "rel_kind"),
+        func_schema: s(r, "fn_schema"),
+        func: s(r, "fn_name"),
+        lang: s(r, "fn_lang"),
+        src: s(r, "fn_src"),
+        func_def: s(r, "fn_def"),
+        func_others: num(r, "fn_others").unwrap_or(0),
+        func_owner: s(r, "fn_owner"),
+        func_mine: flag(r, "fn_mine"),
+        func_can: flag(r, "fn_can"),
+        func_secdef: flag(r, "fn_secdef"),
+        func_acl: flag(r, "fn_acl"),
+        func_comment: s(r, "fn_comment"),
+        func_ext: flag(r, "fn_ext"),
+        trig_def: s(r, "trig_def"),
+        seen_trig: s(r, "seen_trig"),
+        seen_func: s(r, "seen_func"),
+        refuse: s(r, "refuse"),
+        no_rewrite: s(r, "no_rewrite"),
+    }))
 }
 
 /// The triggers of a table read on a connection of the caller's, for the trigger jobs that must see what the
