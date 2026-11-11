@@ -22,6 +22,10 @@ const MIN_VERSION: u32 = 130_000;
 const PER_DB: u32 = 3;
 const MAX_POOLS: usize = 4;
 const IDLE: Duration = Duration::from_secs(300);
+/// How long closing a database's pools waits for connections that are still in use.
+const CLOSE_WAIT: Duration = Duration::from_secs(5);
+/// The databases the sidebar lists: the ones that can be connected to, so a template or a closed database is left out.
+pub(super) const DB_LIST: &str = "SELECT datname::text FROM pg_database WHERE datallowconn AND NOT datistemplate AND has_database_privilege(datname, 'CONNECT') ORDER BY 1";
 /// The database every server has, used when the address names none.
 const FALLBACK_DB: &str = "postgres";
 
@@ -55,6 +59,9 @@ pub struct PgPools {
 struct Live {
     tick: u64,
     pools: HashMap<String, Entry>,
+    /// Pools the cap pushed out of `pools` while their connections lived on: kept so dropping a database can close them
+    /// too, or an idle connection left in one would make the server refuse the drop for up to the idle timeout.
+    retired: Vec<(String, PgPool)>,
 }
 
 struct Entry {
@@ -111,7 +118,10 @@ impl PgPools {
         }
         while live.pools.len() >= self.max_pools {
             let Some(oldest) = live.pools.iter().min_by_key(|(_, e)| e.used).map(|(k, _)| k.clone()) else { break };
-            live.pools.remove(&oldest);
+            if let Some(gone) = live.pools.remove(&oldest) {
+                live.retired.retain(|(_, p)| !p.is_closed() && p.size() > 0);
+                live.retired.push((oldest, gone.pool));
+            }
         }
         let failure: Arc<Mutex<Option<String>>> = Default::default();
         let (locals, hook_failure) = (self.locals.clone(), failure.clone());
@@ -127,6 +137,29 @@ impl PgPools {
             .connect_lazy_with(self.opts.clone().database(&name));
         live.pools.insert(name, Entry { pool: pool.clone(), used: tick, failure: failure.clone() });
         (pool, failure)
+    }
+
+    /// The database the connection opened on, which the maintenance work (CREATE and DROP DATABASE) runs on.
+    pub fn default_database(&self) -> &str {
+        &self.default_db
+    }
+
+    /// Closes every pool of `database`, the live one and any the cap pushed out, so none of Quarry's own connections is left
+    /// on it. Unlike eviction this does close: DROP DATABASE is refused while any session is on the database. A connection
+    /// still checked out (a running query) is closed when it comes back, and the wait is bounded so a stuck one cannot hang
+    /// the drop; the server then names the session that is left. A pool made for the name afterwards starts empty.
+    pub(super) async fn close_database(&self, database: &str) {
+        let pools: Vec<PgPool> = {
+            let mut live = self.live.lock().unwrap();
+            let mut v: Vec<PgPool> = live.pools.remove(database).map(|e| e.pool).into_iter().collect();
+            let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut live.retired).into_iter().partition(|(n, _)| n == database);
+            live.retired = rest;
+            v.extend(mine.into_iter().map(|(_, p)| p));
+            v
+        };
+        for p in pools {
+            let _ = tokio::time::timeout(CLOSE_WAIT, p.close()).await;
+        }
     }
 
     /// Names of the databases that have a live pool.
@@ -417,7 +450,7 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
             let f = probe(&mut c, locals.is_none()).await?;
             // The same visibility rule the sidebar needs: databases that cannot be connected to are left out.
             let rows = c
-                .fetch_all("SELECT datname::text FROM pg_database WHERE datallowconn AND NOT datistemplate AND has_database_privilege(datname, 'CONNECT') ORDER BY 1")
+                .fetch_all(DB_LIST)
                 .await
                 .map_err(se)?;
             let dbs: Vec<String> = rows.iter().filter_map(|r| text_at(r, 0)).collect();
@@ -623,6 +656,29 @@ mod tests {
         }
         // Nothing but the formats is shared: the fallback has no more format settings than the list.
         assert_eq!(locals.split("; ").count(), FORMATS.len());
+    }
+
+    /// A pool the cap pushed out of the map still holds its connections for the idle timeout, and the server refuses to drop a
+    /// database while one is open, so closing a database has to reach it too. Pools are lazy, so no server is needed.
+    #[test]
+    fn closing_a_database_reaches_the_pool_the_cap_pushed_out() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let mut p = PgPools::new(PgConnectOptions::new_without_pgpass().host("127.0.0.1").port(1), "postgres".into(), Duration::from_secs(1), None, "0".into());
+            p.max_pools = 2;
+            let a = p.pool(Some("a"));
+            let b = p.pool(Some("b"));
+            let c = p.pool(Some("c"));
+            assert_eq!(p.live_names(), vec!["b", "c"], "the oldest left the map");
+            assert!(!a.is_closed(), "eviction alone does not close it");
+            p.close_database("a").await;
+            assert!(a.is_closed() && p.live.lock().unwrap().retired.is_empty(), "closing the name reached the retired pool");
+            p.close_database("b").await;
+            assert!(b.is_closed() && p.live_names() == vec!["c"] && !c.is_closed(), "only the named database's pool closed");
+            // A pool made for the name afterwards is a new one.
+            let again = p.pool(Some("b"));
+            assert!(!again.is_closed());
+        });
     }
 
     /// Live tests, run on every server named by QUARRY_TEST_POSTGRES and QUARRY_TEST_POSTGRES13.

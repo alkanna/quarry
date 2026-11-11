@@ -36,8 +36,8 @@ impl App {
                 None => self.warn("That change is no longer in Recent changes."),
             };
         }
-        if let Danger::SqlDrop { conn, schema, table, kind } = action {
-            return self.sql_drop_run(conn, schema, table, kind);
+        if let Danger::SqlDrop { conn, database, schema, table, kind, opt } = action {
+            return self.sql_drop_run(conn, database, schema, table, kind, opt);
         }
         if let Danger::SqlDropUser { conn, acct } = action {
             return self.sql_user_drop_run(conn, acct);

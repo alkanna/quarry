@@ -46,6 +46,7 @@ mod sidebar;
 mod sql_ac;
 mod sql_ns;
 mod sql_create;
+mod sql_create_pg;
 mod sql_structure;
 mod sql_alter;
 mod sql_rel;

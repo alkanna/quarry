@@ -122,6 +122,12 @@ pub fn every_pg(f: impl Fn(&LivePg, &str)) {
     }
 }
 
+/// The turn a test takes to run CREATE DATABASE, because two at once fail on template1 being in use.
+pub fn db_turn() -> std::sync::MutexGuard<'static, ()> {
+    static MAKE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    MAKE.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 impl LivePg {
     /// The first cell of the first row, as text.
     pub fn one(&self, s: &str) -> String {
@@ -160,8 +166,7 @@ impl LivePg {
     /// The shared database of the live tests, made on first use. Tests of one run take turns making it, because
     /// two CREATE DATABASE at once fail on template1 being in use.
     pub fn quarry_test(&self) -> Db {
-        static MAKE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _turn = MAKE.lock().unwrap_or_else(|p| p.into_inner());
+        let _turn = db_turn();
         if self.one("SELECT count(*)::text FROM pg_database WHERE datname = 'quarry_test'") == "0" {
             let made = self.w.rt.block_on(async { sqlx::raw_sql("CREATE DATABASE quarry_test").execute(&self.pool).await });
             if let Err(x) = made {

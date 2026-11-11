@@ -6,6 +6,7 @@
 //! cell, "Select row {n}" for its checkbox, the column name for a header, the text of a sidebar row.
 
 mod mongo_edit;
+mod sql_create;
 mod sql_edit;
 mod sql_relations;
 mod sql_structure;

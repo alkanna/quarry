@@ -27,6 +27,7 @@ mod ddl_my;
 mod ddl_pg;
 pub mod ddl_pg_trig;
 pub mod create;
+pub mod create_pg;
 pub mod export;
 pub mod lex;
 pub mod format;

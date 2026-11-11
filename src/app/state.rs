@@ -818,7 +818,7 @@ pub(super) enum Danger {
     /// The structure undo recorded at this time, confirmed because it drops a column or converts a type back.
     UndoAlter(std::time::Instant),
     /// Drop a SQL database, table or view, or empty a table; `table` is empty for a database.
-    SqlDrop { conn: u64, schema: String, table: String, kind: DropKind },
+    SqlDrop { conn: u64, database: String, schema: String, table: String, kind: DropKind, opt: bool },
     /// A trigger of a SQL table, by name.
     DropTrigger(Sel, String),
     /// Drop a SQL user or role.
@@ -845,6 +845,9 @@ pub(super) enum Modal {
     SqlNewDb(Box<NewDb>),
     SqlNewTable(Box<NewTable>),
     SqlDrop(Box<DropForm>),
+    PgNewDb(Box<super::sql_create_pg::PgNewDb>),
+    PgNewSchema(Box<super::sql_create_pg::PgNewSchema>),
+    PgNewTable(Box<super::sql_create_pg::PgNewTable>),
     SqlNewUser(Box<super::sql_users::NewUser>),
     SqlPassword(Box<super::sql_users::PwForm>),
     /// Add a foreign key to the open SQL table, with its ALTER preview.
@@ -1182,6 +1185,9 @@ pub(super) enum SideAct {
     NewDb,
     NewTable(String),
     SqlDrop(String, String, DropKind),
+    /// PostgreSQL: a schema of a database, and dropping one (database, schema).
+    NewSchema(String),
+    DropSchema(String, String),
     /// The Users and privileges window of a SQL connection.
     SqlUsers,
 }

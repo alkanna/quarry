@@ -613,5 +613,6 @@ fn a_commit_that_fails_does_not_claim_nothing_was_changed() {
     });
 }
 
+mod create;
 mod fk;
 mod trig;
