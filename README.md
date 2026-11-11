@@ -78,6 +78,8 @@ cargo test                                       # run the tests
 ./target/release/quarry --screenshot out.png     # draw the offline demo to a picture and exit
 ```
 
+`make` lists shortcuts: `make demo` opens the offline demo, and `make test-live` starts throwaway MongoDB, MySQL, MariaDB, PostgreSQL and PgBouncer servers in Docker and runs every test against them, including the headless UI tests.
+
 On Linux and Windows, `bundle.sh` makes a release archive. To run your own build, take the binary from `target/release/`.
 
 <details>
