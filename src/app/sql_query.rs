@@ -403,7 +403,8 @@ impl App {
         });
         self.new_lib = lib_new;
         if let Some(s) = self.tm().and_then(|t| t.sql.as_mut()) {
-            s.run_schema = pg_schema.trim().to_string();
+            // Kept as typed: trimming here would eat a space the user is still typing. Every reader trims.
+            s.run_schema = pg_schema;
         }
         ui.add_space(4.0);
         let (mut run, mut run_all, mut stop, mut explain, mut format) = (false, false, false, false, false);
@@ -884,6 +885,8 @@ mod tests {
     fn another_database_never_inherits_the_tabs_schema() {
         // Typed wins, and the tab's own schema serves only its own database.
         assert_eq!(run_schema_choice(" audit ", "b", "a", "public"), "audit");
+        assert_eq!(run_schema_choice("sales data ", "b", "a", "public"), "sales data");
+        assert_eq!(run_schema_choice("  ", "a", "a", "public"), "public");
         assert_eq!(run_schema_choice("", "", "a", "public"), "public");
         assert_eq!(run_schema_choice("", "a", "a", "public"), "public");
         assert_eq!(run_schema_choice("", "b", "a", "public"), "");

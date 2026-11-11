@@ -135,7 +135,8 @@ impl App {
     }
 
     /// Refresh: the schema list, the tables of every schema already loaded and the autocomplete cache are read again.
-    /// Schemas never opened stay unloaded; they load when picked.
+    /// Every loaded schema is reloaded, not only the picked one, because the command palette lists the tables of all of
+    /// them and a schema left alone would keep offering dropped tables. Schemas never opened stay unloaded.
     pub(super) fn pg_refresh(&mut self, conn: u64, db: &str) {
         let held = self.pg_tables_asked.held(conn, db);
         self.pg_tables_asked.forget(conn, Some(db), None);
@@ -143,10 +144,9 @@ impl App {
             self.sql_refresh_schema(conn, db, s);
         }
         self.pg_ask_schemas(conn, db);
-        // The schemas answer loads the picked one; the others wait for a pick.
         let picked = self.ns_of(conn, db).to_string();
-        if !picked.is_empty() {
-            self.pg_load_tables(conn, db, &picked);
+        for s in schemas_to_reload(&held, &picked) {
+            self.pg_load_tables(conn, db, &s);
         }
     }
 
@@ -171,7 +171,7 @@ impl App {
             if t.sel.db == database && t.sel.schema.is_empty() && t.sel.coll.is_empty() && t.sql.is_some() {
                 t.sel.schema = picked.clone();
             }
-            if let Some(s) = t.sql.as_mut().filter(|s| s.run_db == database && s.run_schema.is_empty()) {
+            if let Some(s) = t.sql.as_mut().filter(|s| s.run_db == database && s.run_schema.trim().is_empty()) {
                 s.run_schema = picked.clone();
             }
         }
@@ -196,10 +196,30 @@ impl App {
     }
 }
 
+/// The schemas a refresh reads the tables of: every one that was loaded plus the picked one, each once.
+fn schemas_to_reload(held: &[String], picked: &str) -> Vec<String> {
+    let mut out: Vec<String> = held.to_vec();
+    out.sort();
+    out.dedup();
+    if !picked.is_empty() && !out.iter().any(|s| s == picked) {
+        out.push(picked.to_string());
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use db::sql::{Dialect, PgSchema};
+
+    #[test]
+    fn a_refresh_reloads_every_loaded_schema_and_the_picked_one_once() {
+        let v = |x: &[&str]| x.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(schemas_to_reload(&v(&["public", "audit"]), "public"), v(&["audit", "public"]));
+        assert_eq!(schemas_to_reload(&v(&["audit"]), "public"), v(&["audit", "public"]));
+        assert_eq!(schemas_to_reload(&v(&["audit"]), ""), v(&["audit"]));
+        assert!(schemas_to_reload(&[], "").is_empty());
+    }
 
     fn sel(db: &str, schema: &str) -> Sel {
         Sel { conn: 1, db: db.into(), schema: schema.into(), coll: "t".into() }
