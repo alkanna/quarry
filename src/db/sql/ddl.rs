@@ -4,9 +4,12 @@
 //! `quote_ident`, strings through `lit`, and the few places that take SQL from the user (an expression
 //! default) are checked. Every statement runs as a prepared statement, which holds exactly one.
 
+use super::se;
 use super::structure::{load, split_type, Column, ForeignKey, Index, Structure, Trigger};
 use super::value::lit;
-use super::{Db, Dialect, Pool};
+use super::{Db, Dialect};
+#[cfg(test)]
+use super::Pool;
 use crate::db::{e, Msg, Res, UndoAction, UndoKind, Worker};
 use std::collections::HashSet;
 use std::time::Instant;
@@ -33,7 +36,7 @@ impl Mode {
 /// The session's own sql_mode text. Statements and literals are written for the mode of the very connection that
 /// runs them, never for the one read at connect, which may have changed since.
 pub(super) async fn session_sql_mode(c: &mut sqlx::MySqlConnection) -> Res<String> {
-    sqlx::query_scalar("SELECT @@SESSION.sql_mode").fetch_one(&mut *c).await.map_err(e)
+    sqlx::query_scalar("SELECT @@SESSION.sql_mode").fetch_one(&mut *c).await.map_err(se)
 }
 
 /// `session_sql_mode`, read as a `Mode`.
@@ -465,7 +468,7 @@ pub fn definition(d: Dialect, m: Mode, c: &ColDef) -> Result<String, String> {
         Dv::Null => return Err("A NOT NULL column cannot default to NULL.".into()),
         Dv::Value(v) if is_numeric(&ty) && is_number(v.trim()) => s.push_str(&format!(" DEFAULT {}", v.trim())),
         // MySQL reports a binary default as hex, which read as text would store the digits.
-        Dv::Value(v) if d == Dialect::MySql && is_binary(&ty) && is_hex_lit(v) => s.push_str(&format!(" DEFAULT {}", if v.len() == 2 { "X''" } else { v })),
+        Dv::Value(v) if matches!(d, Dialect::MySql) && is_binary(&ty) && is_hex_lit(v) => s.push_str(&format!(" DEFAULT {}", if v.len() == 2 { "X''" } else { v })),
         Dv::Value(v) if ty == "BIT" && is_bit_lit(v) => s.push_str(&format!(" DEFAULT {v}")),
         Dv::Value(v) if ty == "BIT" && !v.is_empty() && v.bytes().all(|b| b == b'0' || b == b'1') => s.push_str(&format!(" DEFAULT b'{v}'")),
         Dv::Value(v) => s.push_str(&format!(" DEFAULT {}", lit(v, m.bs))),
@@ -529,6 +532,8 @@ fn add_index(d: Dialect, m: Mode, ix: &IndexDef) -> Result<String, String> {
         (false, _) => "",
         (true, Dialect::MySql) => " INVISIBLE",
         (true, Dialect::MariaDb) => " IGNORED",
+        // PostgreSQL has no hidden indexes
+        (true, Dialect::Postgres) => "",
     };
     Ok(format!("ADD {kind}INDEX {} ({cols}){comment}{hidden}", d.quote_ident(&ix.name)))
 }
@@ -1107,7 +1112,7 @@ pub fn fk_problem(own: &Structure, table: &str, parent: &Structure, fk: &Foreign
 /// restrict_fk_on_non_standard_key on by default.
 pub fn fk_whole_key_default(d: Dialect, version: &str) -> bool {
     let mut n = version.split(|c: char| !c.is_ascii_digit()).filter_map(|p| p.parse::<u32>().ok());
-    d == Dialect::MySql && (n.next().unwrap_or(0), n.next().unwrap_or(0)) >= (8, 4)
+    matches!(d, Dialect::MySql) && (n.next().unwrap_or(0), n.next().unwrap_or(0)) >= (8, 4)
 }
 
 /// Counts the rows of the table whose key points at nothing, which is what makes ADD FOREIGN KEY fail.
@@ -1174,7 +1179,7 @@ impl Blk {
 /// server runs or skips them by version.
 pub fn check_body(body: &str, m: Mode) -> Result<String, String> {
     use super::lex::{tokens_with, Tok};
-    let toks: Vec<(Tok, std::ops::Range<usize>)> = tokens_with(body, m.bs, m.ansi).into_iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment)).collect();
+    let toks: Vec<(Tok, std::ops::Range<usize>)> = tokens_with(body, super::Dialect::MySql, m.bs, m.ansi).into_iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment)).collect();
     if toks.iter().any(|(t, _)| matches!(t, Tok::ExecOpen | Tok::ExecClose)) {
         return Err("A trigger body cannot hold an executable comment (/*! ... */): whether the server runs it depends on its version.".into());
     }
@@ -1400,7 +1405,7 @@ pub fn create_trigger(d: Dialect, m: Mode, table: &str, s: &TrigSave, replace: b
 /// EACH ROW and its order clause holds no `;` and no executable comment, and the rest is one body by `check_body`.
 pub fn one_trigger_statement(sql: &str, m: Mode) -> Result<(), String> {
     use super::lex::{count_with, tokens_with, Tok};
-    let toks: Vec<_> = tokens_with(sql, m.bs, m.ansi).into_iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment)).collect();
+    let toks: Vec<_> = tokens_with(sql, super::Dialect::MySql, m.bs, m.ansi).into_iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment)).collect();
     let w = |k: usize, s: &str| toks.get(k).is_some_and(|(t, r)| *t == Tok::Word && sql[r.clone()].eq_ignore_ascii_case(s));
     let at = (0..toks.len()).find(|&k| w(k, "FOR") && w(k + 1, "EACH") && w(k + 2, "ROW")).ok_or("The statement has no FOR EACH ROW.")?;
     let mut k = at + 3;
@@ -1408,7 +1413,7 @@ pub fn one_trigger_statement(sql: &str, m: Mode) -> Result<(), String> {
         k += 2;
     }
     let head = &sql[..toks.get(k).map_or(sql.len(), |(_, r)| r.start)];
-    if toks[..k.min(toks.len())].iter().any(|(t, r)| matches!(t, Tok::ExecOpen | Tok::ExecClose) || (*t == Tok::Punct && &sql[r.clone()] == ";")) || count_with(head, m.bs, m.ansi) != 1 {
+    if toks[..k.min(toks.len())].iter().any(|(t, r)| matches!(t, Tok::ExecOpen | Tok::ExecClose) || (*t == Tok::Punct && &sql[r.clone()] == ";")) || count_with(head, super::Dialect::MySql, m.bs, m.ansi) != 1 {
         return Err("The trigger statement is not one statement.".into());
     }
     let body = toks.get(k).map_or("", |(_, r)| &sql[r.start..]);
@@ -1420,7 +1425,7 @@ pub fn one_trigger_statement(sql: &str, m: Mode) -> Result<(), String> {
 /// stored with.
 pub fn restate(d: Dialect, stmt: &str, m: Mode, order: Option<&TrigOrder>, replace: bool) -> Result<String, String> {
     use super::lex::{tokens_with, Tok};
-    let toks: Vec<_> = tokens_with(stmt, m.bs, m.ansi).into_iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment)).collect();
+    let toks: Vec<_> = tokens_with(stmt, d, m.bs, m.ansi).into_iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment)).collect();
     let w = |k: usize, s: &str| toks.get(k).is_some_and(|(t, r)| *t == Tok::Word && stmt[r.clone()].eq_ignore_ascii_case(s));
     if !w(0, "CREATE") {
         return Err("The stored trigger does not start with CREATE.".into());
@@ -1499,7 +1504,7 @@ pub fn save_job(all: &[Trigger], was: Option<&Trigger>, def: &TrigDef) -> TrigJo
 pub fn trigger_preview(d: Dialect, m: Mode, table: &str, job: &TrigJob) -> Result<Vec<String>, String> {
     Ok(match job {
         TrigJob::Create(s) => vec![create_trigger(d, m, table, s, false)?],
-        TrigJob::Edit { save, .. } if d == Dialect::MariaDb => vec![create_trigger(d, m, table, save, true)?],
+        TrigJob::Edit { save, .. } if matches!(d, Dialect::MariaDb) => vec![create_trigger(d, m, table, save, true)?],
         TrigJob::Edit { was, save } => vec![drop_trigger(d, &was.name, false), create_trigger(d, m, table, save, false)?],
         TrigJob::Drop(t) => vec![drop_trigger(d, &t.name, false)],
     })
@@ -1525,7 +1530,7 @@ fn definer_note(err: String, definer: Option<&str>) -> String {
 /// A writable connection whose session reads text the way the statements were written for. When the server's
 /// sql_mode changed since, nothing runs and the error carries the mode now in force.
 pub(super) async fn session(db: &Db, schema: &str, read_only: bool, m: Mode) -> Result<sqlx::MySqlConnection, (String, Option<String>)> {
-    let mut c = super::write::writer(db, schema, read_only).await.map_err(|x| (x, None))?;
+    let mut c = super::write::writer_conn(db, schema, read_only).await.and_then(|c| c.into_my()).map_err(|x| (x, None))?;
     let now = session_sql_mode(&mut c).await.map_err(|x| (x, None))?;
     if Mode::of(&now) != m {
         return Err((format!("Nothing ran: the server's sql_mode is now {now:?}, which reads quotes or backslashes differently from when the statement was written."), Some(now)));
@@ -1538,12 +1543,12 @@ pub(super) async fn exec(c: &mut sqlx::MySqlConnection, sql: &str) -> Res<()> {
     let t = Instant::now();
     let res = sqlx::query(sql).persistent(false).execute(&mut *c).await;
     crate::db::note_here(sql, t, &res);
-    res.map_err(e)?;
+    res.map_err(se)?;
     Ok(())
 }
 
 fn undo_action(conn: u64, schema: &str, table: &str, u: AlterUndo) -> UndoAction {
-    UndoAction { at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { cols: Vec::new(), undo: super::write::SqlUndo::Alter(Box::new(u)) } }
+    UndoAction { at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database: String::new(), cols: Vec::new(), undo: super::write::SqlUndo::Alter(Box::new(u)) } }
 }
 
 /// Runs a recorded undo after checking the table is still as the change left it. The answer is the same as for
@@ -1560,7 +1565,7 @@ pub(super) async fn undo(db: &Db, a: UndoAction, u: AlterUndo, read_only: bool) 
         if let Some((what, _)) = u.expect.iter().zip(&now).find(|(a, b)| a != b).map(|(a, _)| a) {
             return Err(format!("Undo refused: {what} changed after this change ran, so undoing it now would not put the table back."));
         }
-        let mut c = super::write::writer(db, &schema, read_only).await?;
+        let mut c = super::write::writer_conn(db, &schema, read_only).await?.into_my()?;
         let mode = session_sql_mode(&mut c).await?;
         let m = Mode::of(&mode);
         // The steps were written for the mode of the change. A session that reads quotes or backslashes another
@@ -1629,9 +1634,9 @@ async fn stored(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str, all: &[
 
 /// Sets the session's sql_mode, client character set and connection collation, each bound as a value.
 async fn set_session(c: &mut sqlx::MySqlConnection, mode: &str, charset: &str, collation: &str) -> Res<()> {
-    sqlx::query("SET SESSION sql_mode = ?").bind(mode).execute(&mut *c).await.map_err(e)?;
-    sqlx::query("SET SESSION character_set_client = ?").bind(charset).execute(&mut *c).await.map_err(e)?;
-    sqlx::query("SET SESSION collation_connection = ?").bind(collation).execute(&mut *c).await.map_err(e)?;
+    sqlx::query("SET SESSION sql_mode = ?").bind(mode).execute(&mut *c).await.map_err(se)?;
+    sqlx::query("SET SESSION character_set_client = ?").bind(charset).execute(&mut *c).await.map_err(se)?;
+    sqlx::query("SET SESSION collation_connection = ?").bind(collation).execute(&mut *c).await.map_err(se)?;
     Ok(())
 }
 
@@ -1641,7 +1646,7 @@ async fn set_session(c: &mut sqlx::MySqlConnection, mode: &str, charset: &str, c
 /// decides what its strings are, is always the stored one.
 async fn replay(c: &mut sqlx::MySqlConnection, d: Dialect, s: &Stored, order: Option<&TrigOrder>, replace: bool) -> Res<()> {
     let sql = restate(d, &s.stmt, Mode::of(&s.sql_mode), order, replace)?;
-    let (mode, charset, collation): (String, String, String) = sqlx::query_as("SELECT @@SESSION.sql_mode, @@SESSION.character_set_client, @@SESSION.collation_connection").fetch_one(&mut *c).await.map_err(e)?;
+    let (mode, charset, collation): (String, String, String) = sqlx::query_as("SELECT @@SESSION.sql_mode, @@SESSION.character_set_client, @@SESSION.collation_connection").fetch_one(&mut *c).await.map_err(se)?;
     let utf8 = s.charset.to_ascii_lowercase().starts_with("utf8");
     let cs = if s.charset.is_empty() || !(utf8 || sql.is_ascii()) { charset.as_str() } else { s.charset.as_str() };
     let coll = if s.collation.is_empty() { collation.as_str() } else { s.collation.as_str() };
@@ -1749,11 +1754,11 @@ async fn trigger_job(db: &Db, schema: &str, table: &str, job: &TrigJob, m: Mode,
             Ok((s.def.name.clone(), TrigUndo { name: s.def.name.clone(), restore: None, left: live, label: format!("created trigger {}", s.def.name) }))
         }
         TrigJob::Edit { was, save } => {
-            let sql = create_trigger(d, m, table, save, d == Dialect::MariaDb).map_err(fail)?;
+            let sql = create_trigger(d, m, table, save, matches!(d, Dialect::MariaDb)).map_err(fail)?;
             one_trigger_statement(&sql, m).map_err(fail)?;
             let Some(live) = find(&all, &was.name).filter(|l| same_trigger(l, was)) else { return Err(fail(changed(&was.name))) };
             let old = stored(&mut c, d, schema, &all, live).await.map_err(fail)?;
-            if d == Dialect::MariaDb {
+            if matches!(d, Dialect::MariaDb) {
                 run_text(&mut c, &sql).await.map_err(|x| fail(definer_note(x, save.definer.as_deref())))?;
             } else {
                 let scratch = TrigSave { def: TrigDef { name: scratch_name(), ..save.def.clone() }, ..save.clone() };
@@ -1778,7 +1783,7 @@ async fn trigger_job(db: &Db, schema: &str, table: &str, job: &TrigJob, m: Mode,
 /// where a previous undo stopped halfway, so it never overwrites a newer change; done twice it changes nothing.
 async fn undo_trigger_job(db: &Db, schema: &str, table: &str, u: &TrigUndo, read_only: bool) -> Res<String> {
     let d = db.dialect;
-    let mut c = super::write::writer(db, schema, read_only).await?;
+    let mut c = super::write::writer_conn(db, schema, read_only).await?.into_my()?;
     let all = super::structure::triggers_on(&mut c, d, schema, table).await?;
     let live = find(&all, &u.name).cloned();
     let refused = format!("Undo refused: the trigger {} changed after this change ran, so undoing it now would overwrite that. Undo it by hand.", u.name);
@@ -1796,7 +1801,7 @@ async fn undo_trigger_job(db: &Db, schema: &str, table: &str, u: &TrigUndo, read
             let o = order_among(&all, &u.name, &old.timing, &old.event, old.before.as_deref(), old.after.as_deref());
             match now {
                 None => replay(&mut c, d, old, o.as_ref(), false).await,
-                Some(_) if d == Dialect::MariaDb => replay(&mut c, d, old, o.as_ref(), true).await,
+                Some(_) if matches!(d, Dialect::MariaDb) => replay(&mut c, d, old, o.as_ref(), true).await,
                 Some(l) => {
                     // The trigger as the edit left it, which is put back if the old one is refused.
                     let cur = stored(&mut c, d, schema, &all, l).await?;
@@ -1820,7 +1825,7 @@ pub(super) async fn undo_trigger(db: &Db, a: UndoAction, u: TrigUndo, read_only:
 }
 
 fn trigger_undo_action(conn: u64, schema: &str, table: &str, u: TrigUndo) -> UndoAction {
-    UndoAction { at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { cols: Vec::new(), undo: super::write::SqlUndo::Trigger(Box::new(u)) } }
+    UndoAction { at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database: String::new(), cols: Vec::new(), undo: super::write::SqlUndo::Trigger(Box::new(u)) } }
 }
 
 impl Worker {
@@ -1844,12 +1849,12 @@ impl Worker {
     /// How many rows of `table` hold a key that `fk` would find nothing for.
     pub fn sql_orphans(&self, req: u64, db: Db, schema: String, table: String, fk: ForeignKey) {
         self.spawn(async move {
-            let Pool::My(pool) = &db.pool;
+            let pool = match db.my_pool() { Ok(p) => p, Err(err) => return Msg::SqlOrphans { req, res: Err(err) } };
             let sql = orphans_sql(db.dialect, &schema, &table, &fk);
             let t = Instant::now();
             let res = sqlx::query(&sql).fetch_one(pool).await;
             db.note(&schema, &sql, t, &res);
-            let res = res.map_err(e).map(|r| super::structure::num(&r, "n").unwrap_or(0));
+            let res = res.map_err(se).map(|r| super::structure::num(&r, "n").unwrap_or(0));
             Msg::SqlOrphans { req, res }
         });
     }
@@ -1858,7 +1863,7 @@ impl Worker {
     /// restrict_fk_on_non_standard_key). Servers without the variable take any index that starts with the columns.
     pub fn sql_fk_rules(&self, req: u64, db: Db) {
         self.spawn(async move {
-            let Pool::My(pool) = &db.pool;
+            let Ok(pool) = db.my_pool() else { return Msg::SqlFkRules { req, strict: false } };
             let strict = sqlx::query_scalar::<_, i64>("SELECT @@restrict_fk_on_non_standard_key").fetch_one(pool).await.is_ok_and(|n| n != 0);
             Msg::SqlFkRules { req, strict }
         });
@@ -2031,9 +2036,9 @@ mod tests {
                 let ixd = IndexDef { name: n.into(), kind: IndexKind::Index, cols: vec![IdxCol { name: n.into(), prefix: None, desc: false }], comment: n.into(), ..Default::default() };
                 let c = [Change::Add { def: d.clone(), pos: Pos::After(n.into()) }, Change::Modify { from: n.into(), def: ColDef { name: format!("{n}2"), ..d }, pos: Pos::Keep }, Change::Drop(n.into()), Change::AddIndex(ixd), Change::DropIndex(n.into())];
                 let sql = alter(M, "8.4.0", Mode { bs, ansi: false }, n, &c).unwrap();
-                assert_eq!(lex::split_statements(&sql).len(), 1, "{n} bs={bs}: {sql}");
+                assert_eq!(lex::split_statements(&sql, Dialect::MySql).len(), 1, "{n} bs={bs}: {sql}");
                 // Every backtick that is not a doubled one of an identifier closes an identifier we opened.
-                assert!(lex::read_only_check(&sql).is_err());
+                assert!(lex::read_only_check(&sql, Dialect::MySql).is_err());
             }
         }
         let mut d = def("c", "VARCHAR");
@@ -2085,7 +2090,7 @@ mod tests {
         assert!(definition(M, ansi, &d).is_err());
         // Without ANSI_QUOTES it is one string, and the statement stays one statement.
         let sql = alter(M, "8.4.0", B, "t", &[Change::Add { def: d, pos: Pos::Keep }]).unwrap();
-        assert_eq!(lex::count_with(&sql, true, false), 1, "{sql}");
+        assert_eq!(lex::count_with(&sql, Dialect::MySql, true, false), 1, "{sql}");
         assert!(check_expr("\"a\"\"b\"", ansi).is_ok() && check_expr("'it''s'", ansi).is_ok());
         assert_eq!(Mode::of("ANSI_QUOTES,NO_BACKSLASH_ESCAPES"), Mode { bs: false, ansi: true });
         assert_eq!(Mode::of("REAL_AS_FLOAT,PIPES_AS_CONCAT,ANSI_QUOTES,IGNORE_SPACE,ONLY_FULL_GROUP_BY,ANSI"), Mode { bs: true, ansi: true });
@@ -3017,7 +3022,7 @@ mod review_live {
         fn moded(&self, extra: &str) -> Db {
             let mut db = self.db.clone();
             let q = format!("SET SESSION sql_mode = CONCAT(@@SESSION.sql_mode, ',{extra}')");
-            let opts = db.opts.clone();
+            let opts = db.opts.my().unwrap().clone();
             let pool = self.w.rt.block_on(async move {
                 sqlx::mysql::MySqlPoolOptions::new()
                     .max_connections(2)
@@ -3458,9 +3463,9 @@ mod live_rel {
         w.sql_connect(1, uri.clone(), Duration::from_secs(30), crate::db::Net::default());
         let Msg::SqlConnected { res: Ok((mut db, ..)), .. } = recv(&rx) else { panic!("expected SqlConnected") };
         let mode = db.sql_mode.split(',').filter(|m| !m.trim().eq_ignore_ascii_case("NO_BACKSLASH_ESCAPES")).collect::<Vec<_>>().join(",");
-        db.pool = Pool::My(pinned(&w, db.opts.clone(), &mode));
+        db.pool = Pool::My(pinned(&w, db.opts.my().unwrap().clone(), &mode));
         db.sql_mode = mode.clone();
-        let p = pinned(&w, db.opts.clone(), &mode);
+        let p = pinned(&w, db.opts.my().unwrap().clone(), &mode);
         let pool = w.rt.block_on(async {
             for sql in [
                 "DROP DATABASE IF EXISTS quarry_rt",
@@ -3777,7 +3782,7 @@ mod live_rel {
         e.undo(u).unwrap();
         assert_eq!(definer(&e).as_deref(), Some("qrf_owner@%"));
         let low = {
-            let pool = pinned(&e.w, e.db.opts.clone().username("qrf_low").password("qrf_low_pw"), &e.mode);
+            let pool = pinned(&e.w, e.db.opts.my().unwrap().clone().username("qrf_low").password("qrf_low_pw"), &e.mode);
             Db { pool: Pool::My(pool), ..e.db.clone() }
         };
         let all = e.structure("rt_trig").triggers;
@@ -3794,7 +3799,7 @@ mod live_rel {
 
         // Finding 12: the worker reads the writer's own sql_mode, so a session in ANSI_QUOTES the app did not know of
         // runs nothing and hands the mode back.
-        let ansi = Db { pool: Pool::My(pinned(&e.w, e.db.opts.clone(), &format!("{},ANSI_QUOTES", e.mode))), ..e.db.clone() };
+        let ansi = Db { pool: Pool::My(pinned(&e.w, e.db.opts.my().unwrap().clone(), &format!("{},ANSI_QUOTES", e.mode))), ..e.db.clone() };
         let (res, _, seen) = e.job_on(&ansi, "rt_trig", TrigJob::Create(TrigSave { def: def("rt_m", r#"SET NEW.tag = "m""#), definer: None, order: None }));
         assert!(res.unwrap_err().contains("Nothing ran"), "{var}");
         assert!(seen.is_some_and(|m| Mode::of(&m).ansi), "{var}");

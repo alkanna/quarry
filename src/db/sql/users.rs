@@ -4,10 +4,11 @@
 //! by `lit` for the sql_mode of the very session that runs them, and every privilege name comes from
 //! `DB_PRIVS`, never from user text. Each statement is sent alone, prepared, on a writer connection.
 
+use super::se;
 use super::ddl::{self, session_mode, Mode};
 use super::value::lit;
 use super::worker::text;
-use super::write::{writer, SqlUndo};
+use super::write::{writer_conn, SqlUndo};
 use super::{Db, Dialect};
 use crate::db::{e, Msg, Res, UndoAction, UndoKind, Worker};
 use sqlx::{Connection, Executor};
@@ -121,19 +122,20 @@ fn split_account(s: &str) -> (String, String) {
     }
 }
 
-fn account_query(d: Dialect, joined: bool) -> &'static str {
-    match (d, joined) {
+fn account_query(d: Dialect, joined: bool) -> Res<&'static str> {
+    Ok(match (d, joined) {
+        (Dialect::Postgres, _) => return Err(super::pg::NOT_YET.into()),
         (Dialect::MySql, _) => "SELECT User AS u, Host AS h, account_locked AS locked, password_expired AS expired, plugin, 'N' AS is_role FROM mysql.user ORDER BY User, Host",
         // The lock lives only in the JSON of global_priv, which a plain mysql.user view does not show.
         (Dialect::MariaDb, true) => "SELECT u.User AS u, u.Host AS h, IFNULL(JSON_VALUE(g.Priv, '$.account_locked'), 'false') AS locked, u.password_expired AS expired, u.plugin AS plugin, u.is_role AS is_role FROM mysql.user u LEFT JOIN mysql.global_priv g ON g.User = u.User AND g.Host = u.Host ORDER BY u.User, u.Host",
         (Dialect::MariaDb, false) => "SELECT User AS u, Host AS h, 'false' AS locked, password_expired AS expired, plugin, is_role FROM mysql.user ORDER BY User, Host",
-    }
+    })
 }
 
 async fn read_accounts(c: &mut sqlx::MySqlConnection, d: Dialect) -> Res<Vec<Account>> {
     let mut last = None;
     for joined in [true, false] {
-        match sqlx::query(account_query(d, joined)).persistent(false).fetch_all(&mut *c).await {
+        match sqlx::query(account_query(d, joined)?).persistent(false).fetch_all(&mut *c).await {
             Ok(rows) => {
                 let yes = |v: Option<String>| v.is_some_and(|v| matches!(v.to_ascii_uppercase().as_str(), "Y" | "TRUE" | "1"));
                 return Ok(rows
@@ -151,7 +153,7 @@ async fn read_accounts(c: &mut sqlx::MySqlConnection, d: Dialect) -> Res<Vec<Acc
             Err(x) => last = Some(e(x)),
         }
         // MySQL has one form only.
-        if d == Dialect::MySql {
+        if matches!(d, Dialect::MySql | Dialect::Postgres) {
             break;
         }
     }
@@ -159,6 +161,7 @@ async fn read_accounts(c: &mut sqlx::MySqlConnection, d: Dialect) -> Res<Vec<Acc
 }
 
 async fn load_list(db: &Db) -> Res<UserList> {
+    db.mysql_only()?;
     let mut c = db.acquire().await?;
     let current = sqlx::query("SELECT CURRENT_USER() AS who").persistent(false).fetch_one(&mut *c).await.ok().and_then(|r| text(&r, "who")).map(|w| split_account(&w));
     match read_accounts(&mut c, db.dialect).await {
@@ -561,6 +564,7 @@ pub fn grant_sql(m: Mode, acct: &Account, db: &str, privs: &[String], revoke: bo
     sorted.sort_by_key(|p| order_key(p));
     sorted.dedup();
     let list = sorted.iter().map(|p| p.as_str()).collect::<Vec<_>>().join(", ");
+    // MySQL and MariaDB quote alike, and GRANT here exists for no other dialect
     let on = if global { "*.*".to_string() } else { format!("{}.*", Dialect::MySql.quote_ident(db)) };
     let who = acct.literal(m.bs);
     Ok(if revoke { format!("REVOKE {list} ON {on} FROM {who}") } else { format!("GRANT {list} ON {on} TO {who}") })
@@ -628,7 +632,7 @@ pub fn create_user_sql(m: Mode, acct: &Account, password: &str, redact: bool) ->
 }
 
 pub fn drop_user_sql(m: Mode, acct: &Account, d: Dialect) -> String {
-    format!("{} {}", if acct.is_role && d == Dialect::MariaDb { "DROP ROLE" } else { "DROP USER" }, acct.literal(m.bs))
+    format!("{} {}", if acct.is_role && matches!(d, Dialect::MariaDb) { "DROP ROLE" } else { "DROP USER" }, acct.literal(m.bs))
 }
 
 /// An error with the password taken out, in case a server echoes the statement. The statement holds the password
@@ -750,12 +754,14 @@ pub struct Caps {
 impl Caps {
     pub fn of(d: Dialect, version: &str) -> Caps {
         // Older MariaDB servers report "5.5.5-10.11.6-MariaDB" for compatibility.
-        let v = version.strip_prefix("5.5.5-").filter(|_| d == Dialect::MariaDb).unwrap_or(version);
+        let v = version.strip_prefix("5.5.5-").filter(|_| matches!(d, Dialect::MariaDb)).unwrap_or(version);
         let mut n = v.split(|c: char| !c.is_ascii_digit()).filter(|x| !x.is_empty()).map(|x| x.parse::<u32>().unwrap_or(0));
         let at = (n.next().unwrap_or(0), n.next().unwrap_or(0), n.next().unwrap_or(0));
         match d {
             Dialect::MySql => Caps { alter_user: at >= (5, 7, 6), lock: at >= (5, 7, 6), lifetime: at >= (5, 7, 4), roles: at >= (8, 0, 0), dynamic: at >= (8, 0, 0), plugin_choice: true, caching: at >= (8, 0, 0), native_off: at >= (8, 4, 0), sha256: at >= (5, 6, 0) && at < (9, 0, 0) },
             Dialect::MariaDb => Caps { alter_user: at >= (10, 2, 0), lock: at >= (10, 4, 2), lifetime: at >= (10, 4, 3), roles: at >= (10, 0, 5), dynamic: false, plugin_choice: false, caching: false, native_off: false, sha256: false },
+            // Nothing here applies to PostgreSQL roles
+            Dialect::Postgres => Caps { alter_user: false, lock: false, lifetime: false, roles: false, dynamic: false, plugin_choice: false, caching: false, native_off: false, sha256: false },
         }
     }
 
@@ -834,10 +840,13 @@ pub fn alter_sql(m: Mode, acct: &Account, from: &Settings, to: &Settings) -> Res
 /// its ALTER USER ... IDENTIFIED BY replaces the whole authentication chain. The password is `'***'` when `redact`. The
 /// plugin comes from a fixed list and only MySQL takes it here.
 pub fn password_sql(m: Mode, d: Dialect, acct: &Account, plugin: Option<&str>, password: &str, redact: bool) -> Res<String> {
-    if d == Dialect::MariaDb {
+    if matches!(d, Dialect::Postgres) {
+        return Err("Passwords of PostgreSQL roles are not set through this window.".into());
+    }
+    if matches!(d, Dialect::MariaDb) {
         return Ok(format!("SET PASSWORD FOR {} = PASSWORD({})", acct.literal(m.bs), if redact { REDACTED.to_string() } else { lit(password, m.bs) }));
     }
-    let with = match plugin.filter(|_| d == Dialect::MySql) {
+    let with = match plugin.filter(|_| matches!(d, Dialect::MySql)) {
         Some(p) if MYSQL_PLUGINS.contains(&p) => format!("WITH {p} "),
         Some(p) => return Err(format!("{p} is not an authentication plugin this window sets.")),
         None => String::new(),
@@ -873,7 +882,7 @@ fn role_literal(d: Dialect, role: &str, bs: bool) -> Res<String> {
     Ok(match (d, role.rsplit_once('@')) {
         (Dialect::MySql, Some((n, h))) => format!("{}@{}", lit(n, bs), lit(h, bs)),
         (Dialect::MySql, None) => lit(role, bs),
-        _ => lit(role, bs),
+        (Dialect::MariaDb | Dialect::Postgres, _) => lit(role, bs),
     })
 }
 
@@ -895,6 +904,7 @@ pub fn default_roles_sql(m: Mode, d: Dialect, acct: &Account, roles: &[String]) 
         (_, None) => None,
         (Dialect::MySql, _) => Some(format!("SET DEFAULT ROLE {} TO {}", lits.join(", "), acct.literal(m.bs))),
         (Dialect::MariaDb, Some(r)) => Some(format!("SET DEFAULT ROLE {r} FOR {}", acct.literal(m.bs))),
+        (Dialect::Postgres, Some(_)) => return Err(super::pg::NOT_YET.into()),
     })
 }
 
@@ -964,19 +974,20 @@ fn lifetime_of(v: Option<&str>) -> Expire {
     }
 }
 
-fn info_query(d: Dialect, joined: bool) -> &'static str {
-    match (d, joined) {
+fn info_query(d: Dialect, joined: bool) -> Res<&'static str> {
+    Ok(match (d, joined) {
+        (Dialect::Postgres, _) => return Err(super::pg::NOT_YET.into()),
         // Numbers are cast to text: a prepared statement sends them as binary, which `text` would misread.
         (Dialect::MySql, _) => "SELECT plugin, account_locked AS locked, CAST(password_lifetime AS CHAR) AS lifetime, ssl_type, CONVERT(ssl_cipher USING utf8mb4) AS cipher, CONVERT(x509_issuer USING utf8mb4) AS issuer, CONVERT(x509_subject USING utf8mb4) AS subject, 'N' AS chain, CONCAT_WS('|', password_last_changed, plugin, LEFT(SHA2(authentication_string, 256), 16)) AS ident, CAST(max_questions AS CHAR) AS q, CAST(max_updates AS CHAR) AS u, CAST(max_connections AS CHAR) AS c, CAST(max_user_connections AS CHAR) AS uc FROM mysql.user WHERE User = ? AND Host = ?",
         (Dialect::MariaDb, true) => "SELECT u.plugin AS plugin, IFNULL(JSON_VALUE(g.Priv, '$.account_locked'), 'false') AS locked, JSON_VALUE(g.Priv, '$.password_lifetime') AS lifetime, u.ssl_type AS ssl_type, CONVERT(u.ssl_cipher USING utf8mb4) AS cipher, CONVERT(u.x509_issuer USING utf8mb4) AS issuer, CONVERT(u.x509_subject USING utf8mb4) AS subject, IF(JSON_QUERY(g.Priv, '$.auth_or') IS NULL, 'N', 'Y') AS chain, CONCAT_WS('|', u.plugin, LEFT(SHA2(u.authentication_string, 256), 16)) AS ident, CAST(u.max_questions AS CHAR) AS q, CAST(u.max_updates AS CHAR) AS u, CAST(u.max_connections AS CHAR) AS c, CAST(u.max_user_connections AS CHAR) AS uc FROM mysql.user u LEFT JOIN mysql.global_priv g ON g.User = u.User AND g.Host = u.Host WHERE u.User = ? AND u.Host = ?",
         (Dialect::MariaDb, false) => "SELECT plugin, 'false' AS locked, NULL AS lifetime, ssl_type, CONVERT(ssl_cipher USING utf8mb4) AS cipher, CONVERT(x509_issuer USING utf8mb4) AS issuer, CONVERT(x509_subject USING utf8mb4) AS subject, 'N' AS chain, CONCAT_WS('|', plugin, LEFT(SHA2(authentication_string, 256), 16)) AS ident, CAST(max_questions AS CHAR) AS q, CAST(max_updates AS CHAR) AS u, CAST(max_connections AS CHAR) AS c, CAST(max_user_connections AS CHAR) AS uc FROM mysql.user WHERE User = ? AND Host = ?",
-    }
+    })
 }
 
 async fn read_info(c: &mut sqlx::MySqlConnection, d: Dialect, acct: &Account) -> Res<AccountInfo> {
     let mut last = String::new();
     for joined in [true, false] {
-        match sqlx::query(info_query(d, joined)).bind(&acct.user).bind(&acct.host).persistent(false).fetch_optional(&mut *c).await {
+        match sqlx::query(info_query(d, joined)?).bind(&acct.user).bind(&acct.host).persistent(false).fetch_optional(&mut *c).await {
             Ok(Some(r)) => {
                 let n = |k: &str| text(&r, k).and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0);
                 let tls = match text(&r, "ssl_type").unwrap_or_default().to_ascii_uppercase().as_str() {
@@ -995,7 +1006,7 @@ async fn read_info(c: &mut sqlx::MySqlConnection, d: Dialect, acct: &Account) ->
             Ok(None) => return Err(format!("{} has no row in mysql.user.", acct.label())),
             Err(x) => last = e(x),
         }
-        if d == Dialect::MySql {
+        if matches!(d, Dialect::MySql | Dialect::Postgres) {
             break;
         }
     }
@@ -1050,7 +1061,7 @@ pub fn label_of(edits: &[Edit]) -> String {
 }
 
 fn action(conn: u64, acct: &Account, undo: AccountUndo) -> UndoAction {
-    UndoAction { at: Instant::now(), conn, db: acct.label(), coll: String::new(), kind: UndoKind::Sql { cols: Vec::new(), undo: SqlUndo::Account(Box::new(undo)) } }
+    UndoAction { at: Instant::now(), conn, db: acct.label(), coll: String::new(), kind: UndoKind::Sql { database: String::new(), cols: Vec::new(), undo: SqlUndo::Account(Box::new(undo)) } }
 }
 
 // Running.
@@ -1060,7 +1071,7 @@ async fn grants_of(c: &mut sqlx::MySqlConnection, m: Mode, acct: &Account) -> Re
     let rows = match sqlx::query(&sql).persistent(false).fetch_all(&mut *c).await {
         Ok(r) => r,
         // Not every server prepares SHOW GRANTS; the text holds only the quoted account.
-        Err(x) if e(&x).contains("1295") || e(&x).contains("prepared statement protocol") => c.fetch_all(sql.as_str()).await.map_err(e)?,
+        Err(x) if e(&x).contains("1295") || e(&x).contains("prepared statement protocol") => c.fetch_all(sql.as_str()).await.map_err(se)?,
         Err(x) => return Err(e(x)),
     };
     Ok(rows.iter().filter_map(|r| super::worker::raw(r, 0).map(|b| parse_grant(&String::from_utf8_lossy(b)))).collect())
@@ -1150,6 +1161,8 @@ async fn default_roles(c: &mut sqlx::MySqlConnection, d: Dialect, acct: &Account
     let sql = match d {
         Dialect::MySql => "SELECT CONCAT(DEFAULT_ROLE_USER, '@', DEFAULT_ROLE_HOST) AS r FROM mysql.default_roles WHERE USER = ? AND HOST = ?",
         Dialect::MariaDb => "SELECT default_role AS r FROM mysql.user WHERE User = ? AND Host = ?",
+        // Accounts exist only on the MySQL family, so there is nothing to read.
+        Dialect::Postgres => return Vec::new(),
     };
     match sqlx::query(sql).bind(&acct.user).bind(&acct.host).persistent(false).fetch_all(&mut *c).await {
         Ok(rows) => rows.iter().filter_map(|r| text(r, "r")).filter(|r| !r.is_empty()).collect(),
@@ -1165,7 +1178,7 @@ async fn exec_any(c: &mut sqlx::MySqlConnection, sql: &str) -> Res<()> {
             let t = std::time::Instant::now();
             let res = c.execute(sql).await.map(|_| ());
             crate::db::note_here(sql, t, &res);
-            res.map_err(e)
+            res.map_err(se)
         }
         r => r,
     }
@@ -1273,6 +1286,7 @@ impl Worker {
     pub fn sql_user_grants(&self, conn: u64, req: u64, db: Db, acct: Account) {
         self.spawn(async move {
             let res = async {
+                db.mysql_only()?;
                 let mut c = db.acquire().await?;
                 let m = session_mode(&mut c).await?;
                 let grants = grants_of(&mut c, m, &acct).await?;
@@ -1297,7 +1311,8 @@ impl Worker {
         self.spawn_sql(db.conn, "", async move {
             let mut undo = None;
             let res: Res<String> = async {
-                let mut c = writer(&db, "", read_only).await?;
+                db.mysql_only()?;
+                let mut c = writer_conn(&db, "", read_only).await?.into_my()?;
                 let out = async {
                     let m = session_mode(&mut c).await?;
                     // Checked on the writer, against what the server holds now rather than what the window last read.
@@ -1334,7 +1349,8 @@ impl Worker {
             let mut undo = None;
             let res: Res<String> = async {
                 check_new_user(&acct.user, &acct.host, &password)?;
-                let mut c = writer(&db, "", read_only).await?;
+                db.mysql_only()?;
+                let mut c = writer_conn(&db, "", read_only).await?.into_my()?;
                 let out = async {
                     let m = session_mode(&mut c).await?;
                     ddl::exec(&mut c, &create_user_sql(m, &acct, &password, false)).await.map_err(|x| scrub(x, &password))?;
@@ -1356,10 +1372,11 @@ impl Worker {
         self.spawn_sql(db.conn, "", async move {
             let res: Res<String> = async {
                 check_password(&password)?;
-                let mut c = writer(&db, "", read_only).await?;
+                db.mysql_only()?;
+                let mut c = writer_conn(&db, "", read_only).await?.into_my()?;
                 let out = async {
                     let m = session_mode(&mut c).await?;
-                    if db.dialect == Dialect::MariaDb {
+                    if matches!(db.dialect, Dialect::MariaDb) {
                         // SET PASSWORD sets the mysql_native_password part only; any other way in would be left as it was.
                         if let Ok(i) = read_info(&mut c, db.dialect, &acct).await {
                             if i.chain || (!i.plugin.is_empty() && i.plugin != "mysql_native_password") {
@@ -1387,7 +1404,8 @@ impl Worker {
             let mut cur = acct.clone();
             let mut renamed = false;
             let res: Res<String> = async {
-                let mut c = writer(&db, "", read_only).await?;
+                db.mysql_only()?;
+                let mut c = writer_conn(&db, "", read_only).await?.into_my()?;
                 let out = run_plan(&mut c, &db, conn, &acct, &plan, &mut cur, &mut renamed, &mut undo).await;
                 let _ = c.close().await;
                 out
@@ -1401,7 +1419,8 @@ impl Worker {
     pub fn sql_user_drop(&self, conn: u64, db: Db, acct: Account, read_only: bool) {
         self.spawn_sql(db.conn, "", async move {
             let res: Res<String> = async {
-                let mut c = writer(&db, "", read_only).await?;
+                db.mysql_only()?;
+                let mut c = writer_conn(&db, "", read_only).await?.into_my()?;
                 let out = async {
                     let m = session_mode(&mut c).await?;
                     ddl::exec(&mut c, &drop_user_sql(m, &acct, db.dialect)).await?;
@@ -1424,7 +1443,8 @@ pub(super) async fn undo(db: &Db, a: UndoAction, u: AccountUndo, read_only: bool
     // Whether the undo ran something before it stopped; an entry that changed nothing stays in the list.
     let mut ran_any = false;
     let res: Res<String> = async {
-        let mut c = writer(db, "", read_only).await?;
+        db.mysql_only()?;
+        let mut c = writer_conn(db, "", read_only).await?.into_my()?;
         let out = async {
             let m = session_mode(&mut c).await?;
             let now = grants_of(&mut c, m, &acct).await.map_err(|x| format!("Undo refused: {x}"))?;

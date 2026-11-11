@@ -2,7 +2,7 @@
 
 <h1 align="center">Quarry</h1>
 
-<p align="center">A fast, stable and full-featured client for MongoDB, MySQL and MariaDB, written in Rust with egui.<br>Inspired by <a href="https://mingo.io">Mingo</a>.</p>
+<p align="center">A fast, stable and full-featured client for MongoDB, MySQL, MariaDB and PostgreSQL, written in Rust with egui.<br>Inspired by <a href="https://mingo.io">Mingo</a>.</p>
 
 <p align="center">
   <a href="https://github.com/alkanna/quarry/releases/latest"><img src="https://img.shields.io/github/v/release/alkanna/quarry" alt="Latest release"></a>
@@ -15,14 +15,14 @@
 
 ## Features
 
-- **MongoDB, MySQL and MariaDB** side by side (MySQL 5.7, 8 and 9, MariaDB 10.6+), in tabs with a table or JSON view.
-- **Safe editing.** Every connection opens read-only until you unlock it. Edits are staged, saved together and can be undone, and never overwrite a change someone else made meanwhile. Bulk updates, structure changes and drops show what they will run first.
+- **MongoDB, MySQL, MariaDB and PostgreSQL** side by side (MySQL 5.7, 8 and 9, MariaDB 10.6+, PostgreSQL 13+), in tabs with a table or JSON view. PostgreSQL databases show their schemas in a picker in the sidebar.
+- **Safe editing.** Every connection opens read-only until you unlock it. Edits are staged, saved together and can be undone, and never overwrite a change someone else made meanwhile. Bulk updates, structure changes and drops show what they will run first. On PostgreSQL every statement of a locked connection runs in a read-only transaction that is rolled back; a function on the server that writes by itself still runs with your role's rights, so use a read-only role where that matters.
 - **Queries.** Paste `db.orders.find(...)` or `aggregate([...])`, use date shortcuts like `#today`, build a pipeline with a preview after each stage, read explain plans and copy as driver code. For SQL, filter with typed rules or plain SQL, or run several statements at once with autocomplete, Format, Explain and Stop. Saved queries, history and a query log (Cmd+L).
 - **Scripting.** A JavaScript shell on [Bun](https://bun.sh) with npm packages and autocomplete: the MongoDB driver, `` sql`...` `` templates, and other connections attached to the same script.
-- **Structure.** MongoDB indexes with usage and suggestions, field types, validators, references and live change streams. SQL columns, indexes, foreign keys and triggers through a previewed ALTER.
-- **Import and export.** JSON, CSV, TSV and SQL dumps, compare and sync two collections, dump and restore with the MongoDB Database Tools (installed for you).
-- **Server.** Status, variables, running operations with Kill, users, roles and privileges.
-- **Connections.** SSH tunnels, SOCKS5 proxies and TLS. Passwords stay in the system keychain. Tag connections as Production, Staging or anything you like.
+- **Structure.** MongoDB indexes with usage and suggestions, field types, validators, references and live change streams. SQL columns, indexes, foreign keys and triggers through a previewed ALTER (PostgreSQL structure is read-only for now).
+- **Import and export.** JSON, CSV, TSV and SQL dumps (on PostgreSQL, export of results only for now), compare and sync two collections, dump and restore with the MongoDB Database Tools (installed for you).
+- **Server.** Status, variables, running operations with Kill, users, roles and privileges (MongoDB, MySQL and MariaDB).
+- **Connections.** SSH tunnels, SOCKS5 proxies and TLS. Paste a `postgresql://` string to fill the form. Passwords stay in the system keychain. Tag connections as Production, Staging or anything you like.
 - **Keyboard and reading.** Cmd+K searches every connection and runs commands, Cmd+[ and Cmd+] move through visited tabs, Cmd+/ lists every shortcut (Ctrl on Linux and Windows). Reading options: larger text, the OpenDyslexic font, a soft background, a line that follows the pointer across wide tables, and grouped digits.
 
 | | |

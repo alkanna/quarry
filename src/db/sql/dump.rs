@@ -3,13 +3,15 @@
 //! rows or one statement in memory. A dump is written next to its name as a hidden .part file and renamed at the
 //! end, so a stopped or failed one leaves nothing behind.
 
+use super::se;
 use super::csv::Source;
 use super::export::Done;
 use super::import::{JobDone, Progress};
 use super::lex::{self, Piece, ScriptSplitter};
 use super::value::Kind;
-use super::worker::{make_cols, pin_reads, prepare, raw, text, text_at, num_at, to_row};
-use super::write::writer;
+use super::worker::{make_cols, pin_reads, raw, text, text_at, num_at, to_row};
+use super::write::writer_conn;
+use super::exec::Conn;
 use super::{Db, Dialect};
 use crate::db::copy::{CopyCol, Fmt, Writer};
 use crate::db::{e, Msg, Res, Worker};
@@ -76,17 +78,17 @@ fn note(s: &str) -> String {
 /// name and its CREATE statement. A reference is a backtick name after the `AS` of the statement, so a column
 /// that shares a view's name may add an order that is not needed; a loop that this makes is broken in list
 /// order instead of failing.
-fn view_order(views: &[(String, String)]) -> Vec<usize> {
+fn view_order(d: Dialect, views: &[(String, String)]) -> Vec<usize> {
     let deps: Vec<Vec<usize>> = views
         .iter()
         .enumerate()
         .map(|(i, (_, sql))| {
-            let toks = lex::tokens(sql);
+            let toks = lex::tokens(sql, d);
             let word = |k: usize, w: &str| toks[k].0 == lex::Tok::Word && sql[toks[k].1.clone()].eq_ignore_ascii_case(w);
             let view = (0..toks.len()).find(|&k| word(k, "VIEW")).unwrap_or(0);
             let body = (view..toks.len()).find(|&k| word(k, "AS")).map_or(0, |k| k + 1);
             let named: Vec<&str> = toks[body..].iter().filter(|t| t.0 == lex::Tok::Quoted).map(|t| &sql[t.1.clone()]).collect();
-            (0..views.len()).filter(|&j| j != i && named.contains(&Dialect::MySql.quote_ident(&views[j].0).as_str())).collect()
+            (0..views.len()).filter(|&j| j != i && named.contains(&d.quote_ident(&views[j].0).as_str())).collect()
         })
         .collect();
     let (mut done, mut out) = (vec![false; views.len()], Vec::new());
@@ -128,7 +130,7 @@ struct Cols {
 }
 
 async fn table_cols(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str, table: &str) -> Res<Cols> {
-    let rows = sqlx::query(d.columns()).bind(schema).bind(table).fetch_all(&mut *c).await.map_err(e)?;
+    let rows = sqlx::query(d.columns()).bind(schema).bind(table).fetch_all(&mut *c).await.map_err(se)?;
     let (mut names, mut meta) = (Vec::new(), HashMap::new());
     for r in &rows {
         let (Some(name), Some(full)) = (text(r, "name"), text(r, "full_type")) else { continue };
@@ -147,11 +149,11 @@ async fn table_cols(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str, tab
 
 /// One INSERT for the rows in `batch`, which is emptied. A plain function, since a closure held across the awaits
 /// of the stream makes the future too general for the executor to be spawned.
-fn flush_rows(batch: &mut Vec<Document>, copy: &[CopyCol], table: &str, out: &mut (dyn Write + Send)) -> Res<()> {
+fn flush_rows(d: Dialect, batch: &mut Vec<Document>, copy: &[CopyCol], table: &str, out: &mut (dyn Write + Send)) -> Res<()> {
     if batch.is_empty() {
         return Ok(());
     }
-    let mut w = Writer::new(Fmt::SqlInsert, true, copy.to_vec(), table, &[], true);
+    let mut w = Writer::new(d, Fmt::SqlInsert, true, copy.to_vec(), table, &[], true);
     let text = w.begin() + &w.rows(batch) + &w.end() + "\n";
     batch.clear();
     out.write_all(text.as_bytes()).map_err(io)
@@ -168,10 +170,10 @@ async fn write_rows(c: &mut sqlx::MySqlConnection, d: Dialect, plan: &DumpPlan, 
     if let Some(f) = plan.filter.as_ref().filter(|f| !f.trim().is_empty()) {
         // The clause is the user's text, so the whole statement must still be one statement that only reads.
         sql.push_str(&format!("\nWHERE (\n{}\n)", f.trim()));
-        if lex::split_statements(&sql).len() != 1 {
+        if lex::split_statements(&sql, d).len() != 1 {
             return Err("The filter must not contain another statement.".into());
         }
-        lex::read_only_check(&sql)?;
+        lex::read_only_check(&sql, d)?;
     }
     let per = plan.rows_per_insert.max(1);
     let started = std::time::Instant::now();
@@ -179,7 +181,7 @@ async fn write_rows(c: &mut sqlx::MySqlConnection, d: Dialect, plan: &DumpPlan, 
     let res: Res<()> = async {
         let mut s = raw_sql(&sql).fetch(&mut *c);
         while let Some(row) = futures_util::StreamExt::next(&mut s).await {
-            let row = row.map_err(e)?;
+            let row = row.map_err(se)?;
             if kinds.is_empty() {
                 let mc = make_cols(sqlx::Row::columns(&row), &cols.meta, false);
                 copy = mc.iter().map(|c| CopyCol { name: c.name.clone(), src: c.src.clone(), numeric: numeric(c.kind) }).collect();
@@ -189,7 +191,7 @@ async fn write_rows(c: &mut sqlx::MySqlConnection, d: Dialect, plan: &DumpPlan, 
             batch.push(to_row(&kinds, &row, &[])?.owned());
             rows += 1;
             if batch.len() >= per || bytes >= INSERT_BYTES {
-                flush_rows(&mut batch, &copy, table, out)?;
+                flush_rows(d, &mut batch, &copy, table, out)?;
                 bytes = 0;
                 count.store(base + rows, Ordering::Relaxed);
                 stopped(cancel)?;
@@ -200,7 +202,7 @@ async fn write_rows(c: &mut sqlx::MySqlConnection, d: Dialect, plan: &DumpPlan, 
     .await;
     crate::db::note_here(&sql, started, &res);
     res?;
-    flush_rows(&mut batch, &copy, table, out)?;
+    flush_rows(d, &mut batch, &copy, table, out)?;
     count.store(base + rows, Ordering::Relaxed);
     Ok(rows)
 }
@@ -239,10 +241,11 @@ fn delimited(sql_mode: Option<&str>, stmt: &str) -> String {
 /// Runs the whole dump on a read-only connection of its own.
 pub async fn dump(db: &Db, plan: &DumpPlan, out: &mut (dyn Write + Send), count: &AtomicU64, cancel: &AtomicBool, id: &AtomicU64) -> Res<u64> {
     let d = db.dialect;
-    let mut c = db.acquire().await?.detach();
-    prepare(&mut c, d, &plan.schema, true, id).await.map_err(e)?;
+    let mut conn = Conn::My(db.acquire().await?.detach());
+    super::run::prepare(&mut conn, db, &plan.schema, true, id).await?;
+    let mut c = conn.into_my()?;
     // The file says SET NAMES utf8mb4, so the values must be read as UTF-8, and every row of them.
-    pin_reads(&mut c).await.map_err(e)?;
+    pin_reads(&mut c).await.map_err(se)?;
     // The statement timeout of the pool would cut the read of a big table short.
     let timeout = d.session_timeout(0);
     let _ = c.execute(timeout.as_str()).await;
@@ -250,13 +253,13 @@ pub async fn dump(db: &Db, plan: &DumpPlan, out: &mut (dyn Write + Send), count:
     // server's mode would write "t", which the file cannot run back. A filter is the user's text, read under the
     // mode they typed it in, and a filtered dump writes no CREATE, so it keeps the mode.
     if plan.filter.is_none() {
-        c.execute("SET SESSION sql_mode = '', SESSION sql_quote_show_create = 1").await.map_err(e)?;
+        c.execute("SET SESSION sql_mode = '', SESSION sql_quote_show_create = 1").await.map_err(se)?;
     }
     // TIMESTAMP values are read in the session's zone; the file says which zone that is, so a restore in any
     // zone stores the same instants.
-    c.execute("SET SESSION time_zone = '+00:00'").await.map_err(e)?;
+    c.execute("SET SESSION time_zone = '+00:00'").await.map_err(se)?;
     if plan.snapshot {
-        c.execute("START TRANSACTION WITH CONSISTENT SNAPSHOT").await.map_err(e)?;
+        c.execute("START TRANSACTION WITH CONSISTENT SNAPSHOT").await.map_err(se)?;
     }
     let r = dump_on(&mut c, d, db, plan, out, count, cancel).await;
     let _ = c.close().await;
@@ -285,7 +288,7 @@ async fn dump_on(c: &mut sqlx::MySqlConnection, d: Dialect, db: &Db, plan: &Dump
         let s = if t.structure { show_create(c, d.create_stmt(true, &plan.schema, &t.name), 1).await?.1 } else { String::new() };
         views.push((t.name.clone(), s));
     }
-    let order = view_order(&views);
+    let order = view_order(d, &views);
     // Tables first, then views, which need them; data before triggers, which would otherwise fire on every row.
     let tables: Vec<&DumpTable> = plan.tables.iter().filter(|t| !t.view).chain(order.iter().map(|&i| view_rows[i])).collect();
     for t in &tables {
@@ -314,14 +317,14 @@ async fn dump_on(c: &mut sqlx::MySqlConnection, d: Dialect, db: &Db, plan: &Dump
         // Collected first: an iterator with a closure alive across the awaits below makes the future too general to spawn.
         let with_triggers: Vec<&DumpTable> = tables.iter().copied().filter(|t| t.structure && !t.view).collect();
         for t in with_triggers {
-            let names: Vec<String> = sqlx::query("SELECT TRIGGER_NAME AS name FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ? AND EVENT_OBJECT_TABLE = ? ORDER BY TRIGGER_NAME").bind(&plan.schema).bind(&t.name).fetch_all(&mut *c).await.map_err(e)?.iter().filter_map(|r| text(r, "name")).collect();
+            let names: Vec<String> = sqlx::query("SELECT TRIGGER_NAME AS name FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ? AND EVENT_OBJECT_TABLE = ? ORDER BY TRIGGER_NAME").bind(&plan.schema).bind(&t.name).fetch_all(&mut *c).await.map_err(se)?.iter().filter_map(|r| text(r, "name")).collect();
             for n in names {
                 stopped(cancel)?;
                 let (mode, stmt) = show_create(c, format!("SHOW CREATE TRIGGER {}", d.qualified(&plan.schema, &n)), 2).await?;
                 put(out, &format!("--\n-- Trigger {}\n--\n\nDROP TRIGGER IF EXISTS {};\n{}\n", note(&n), q(&n), delimited(mode.as_deref(), &stmt)))?;
             }
         }
-        let routines: Vec<(String, String)> = sqlx::query("SELECT ROUTINE_NAME AS name, ROUTINE_TYPE AS kind FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ? ORDER BY ROUTINE_TYPE, ROUTINE_NAME").bind(&plan.schema).fetch_all(&mut *c).await.map_err(e)?.iter().filter_map(|r| Some((text(r, "name")?, text(r, "kind")?.to_ascii_uppercase()))).collect();
+        let routines: Vec<(String, String)> = sqlx::query("SELECT ROUTINE_NAME AS name, ROUTINE_TYPE AS kind FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ? ORDER BY ROUTINE_TYPE, ROUTINE_NAME").bind(&plan.schema).fetch_all(&mut *c).await.map_err(se)?.iter().filter_map(|r| Some((text(r, "name")?, text(r, "kind")?.to_ascii_uppercase()))).collect();
         for (n, kind) in routines {
             stopped(cancel)?;
             let kind = if kind == "FUNCTION" { "FUNCTION" } else { "PROCEDURE" };
@@ -390,7 +393,7 @@ pub struct Ran {
 /// with one owned connection: split in two, the compiler cannot prove the future is Send inside a spawned task.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_file(db: Db, schema: String, src: Source, read_only: bool, prog: Arc<Progress>, cancel: Arc<AtomicBool>, id: Arc<AtomicU64>) -> Res<Ran> {
-    let mut c = writer(&db, &schema, read_only).await?;
+    let mut c = writer_conn(&db, &schema, read_only).await?.into_my()?;
     if let Ok(r) = c.fetch_one("SELECT CONNECTION_ID()").await {
         id.store(num_at(&r, 0).unwrap_or(0), Ordering::SeqCst);
     }
@@ -431,7 +434,7 @@ pub async fn run_file(db: Db, schema: String, src: Source, read_only: bool, prog
 Statements before it ran and stay applied.", excerpt(&stmt)));
                     }
                     // A SET of sql_mode changes how the rest of the file must be read.
-                    if lex::changes_escaping(&String::from_utf8_lossy(&stmt)) {
+                    if lex::changes_escaping(&String::from_utf8_lossy(&stmt), Dialect::MySql) {
                         let bs = mode_of(&mut c).await;
                         sp.set_backslash(bs);
                     }
@@ -476,9 +479,9 @@ Statements before it ran and stay applied.", excerpt(&stmt)));
 /// the bytes of the file, as the mysql client would send them.
 async fn run_stmt(c: &mut sqlx::MySqlConnection, stmt: &[u8]) -> Result<(), String> {
     if let Ok(text) = std::str::from_utf8(stmt) {
-        return run_text(c, text).await.map_err(e);
+        return run_text(c, text).await.map_err(se);
     }
-    sqlx::query("SET @quarry_stmt = ?").bind(stmt).execute(&mut *c).await.map_err(e)?;
+    sqlx::query("SET @quarry_stmt = ?").bind(stmt).execute(&mut *c).await.map_err(se)?;
     let mut r = run_text(c, "PREPARE quarry_stmt FROM @quarry_stmt").await;
     if r.is_ok() {
         r = run_text(c, "EXECUTE quarry_stmt").await;
@@ -596,14 +599,14 @@ mod tests {
         let v = |n: &str, from: &str| (n.to_string(), format!("CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`%` SQL SECURITY DEFINER VIEW `{n}` AS select `{from}`.`a` AS `a` from `{from}`"));
         // a_top reads z_base, which reads the table t: alphabetical order would create a_top first.
         let views = [v("a_top", "z_base"), v("m_mid", "a_top"), v("z_base", "t")];
-        let order: Vec<&str> = view_order(&views).into_iter().map(|i| views[i].0.as_str()).collect();
+        let order: Vec<&str> = view_order(Dialect::MySql, &views).into_iter().map(|i| views[i].0.as_str()).collect();
         assert_eq!(order, ["z_base", "a_top", "m_mid"]);
         // Independent views keep their order, and a loop (from a column that shares a view's name) still writes all.
-        assert_eq!(view_order(&[v("a", "t"), v("b", "t")]), [0, 1]);
-        assert_eq!(view_order(&[v("a", "b"), v("b", "a")]), [0, 1]);
+        assert_eq!(view_order(Dialect::MySql, &[v("a", "t"), v("b", "t")]), [0, 1]);
+        assert_eq!(view_order(Dialect::MySql, &[v("a", "b"), v("b", "a")]), [0, 1]);
         // The definer and the view's own name are not references.
-        assert_eq!(view_order(&[v("root", "t"), v("b", "t")]), [0, 1]);
-        assert!(view_order(&[]).is_empty());
+        assert_eq!(view_order(Dialect::MySql, &[v("root", "t"), v("b", "t")]), [0, 1]);
+        assert!(view_order(Dialect::MySql, &[]).is_empty());
     }
     use crate::db::sql::testing::every_server;
 

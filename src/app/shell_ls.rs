@@ -224,7 +224,7 @@ pub(super) fn shell_ac_demo(ui: &egui::Ui, id: egui::Id, code: &str, ac: &mut Ac
     let Some(at) = code.find("FROM ord").map(|i| i + 8).filter(|_| ac.id.is_none()) else { return };
     let Some(tpl) = sql_at(code, at) else { return };
     let (before, full) = sql_text(code, &tpl, at);
-    let (b, f) = crate::ui::sql_complete::split_statement(&before, &full[before.len()..]);
+    let (b, f) = crate::ui::sql_complete::split_statement(&before, &full[before.len()..], scope.dialect);
     if let Some(o) = crate::ui::sql_complete::analyze(&b, &f, scope, values).filter(|o| !o.sugs.is_empty()) {
         let n = code[..at].chars().count();
         *ac = Ac { id: Some(id), token: b[o.from..].chars().count(), items: o.sugs, cursor: n, title: o.title, foot: o.foot, ..Default::default() };
@@ -318,7 +318,7 @@ impl App {
     /// The key of the current tab's database in the column cache.
     fn sql_key(&self) -> (u64, String) {
         let t = &self.tabs[self.cur];
-        (t.sel.conn, t.sel.db.clone())
+        (t.sel.conn, ns_key(&t.sel.db, &self.sel_schema(&t.sel)))
     }
 
     /// Asks for the schema of the current SQL tab's database, which autocomplete shares. `again`
@@ -328,9 +328,9 @@ impl App {
         if self.demo || (self.sql_schema_asked.contains(&key) && !again) {
             return;
         }
-        let Some(db) = self.conn(key.0).and_then(|c| c.sql.clone()) else { return };
+        let Some((db, space)) = self.sql_target(&self.tabs[self.cur].sel) else { return };
         self.sql_schema_asked.insert(key.clone());
-        self.worker.sql_schema(key.0, db, key.1);
+        self.worker.sql_schema(key.0, db, space);
     }
 
     /// Sends a request about character `at` of the current script, starting the server first if

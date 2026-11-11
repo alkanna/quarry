@@ -1,7 +1,11 @@
-//! A small MySQL tokenizer, the statement splitter and the read-only guard. Shared by the worker,
-//! the highlighter and autocomplete, so all of them agree on where strings and comments end.
+//! A small SQL tokenizer (MySQL, MariaDB and PostgreSQL), the statement splitter and the read-only guard. Shared by
+//! the worker, the highlighter and autocomplete, so all of them agree on where strings and comments end.
 
+use super::Dialect;
 use std::ops::Range;
+
+#[path = "lex_pg.rs"]
+mod pg;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tok {
@@ -34,9 +38,20 @@ struct Opts {
     /// Executable comments are skipped like plain ones, as when their version is above the server's
     /// (and MySQL treats `/*M!` as a plain comment).
     skip_exec: bool,
+    /// With PostgreSQL text, `backslash` means a plain '...' honours backslashes (standard_conforming_strings off).
+    dialect: Dialect,
 }
 
-const DEFAULT: Opts = Opts { backslash: true, ansi: false, skip_exec: false };
+const DEFAULT: Opts = Opts { backslash: true, ansi: false, skip_exec: false, dialect: Dialect::MySql };
+const DEFAULT_PG: Opts = Opts { backslash: false, ansi: false, skip_exec: false, dialect: Dialect::Postgres };
+
+fn default_for(d: Dialect) -> Opts {
+    if d == Dialect::Postgres { DEFAULT_PG } else { DEFAULT }
+}
+
+fn opts(d: Dialect, backslash: bool, ansi: bool) -> Opts {
+    Opts { backslash, ansi, skip_exec: false, dialect: d }
+}
 
 /// Index just past the closing quote of the quoted text that opens at `i`. Unterminated text runs
 /// to the end.
@@ -59,13 +74,21 @@ fn quote_end(b: &[u8], i: usize, esc: bool) -> usize {
     n
 }
 
+/// Whether the PostgreSQL read-only check refuses `name` as a called function, so autocomplete never offers it.
+pub fn pg_refuses_function(name: &str) -> bool {
+    pg::refused_function(&name.to_ascii_lowercase())
+}
+
 /// Splits text into tokens that cover it completely. Delimiters are ASCII, so every range sits on a
 /// char boundary. Unterminated strings and comments run to the end of the text.
-pub fn tokens(text: &str) -> Vec<(Tok, Range<usize>)> {
-    lex(text, DEFAULT)
+pub fn tokens(text: &str, d: Dialect) -> Vec<(Tok, Range<usize>)> {
+    lex(text, default_for(d))
 }
 
 fn lex(text: &str, o: Opts) -> Vec<(Tok, Range<usize>)> {
+    if o.dialect == Dialect::Postgres {
+        return pg::lex(text, o.backslash);
+    }
     let b = text.as_bytes();
     let n = b.len();
     let mut out = Vec::new();
@@ -146,8 +169,8 @@ fn lex(text: &str, o: Opts) -> Vec<(Tok, Range<usize>)> {
 }
 
 /// Each statement as (range without the `;`, end including the `;`). Empty ones are dropped.
-fn split(text: &str) -> Vec<(Range<usize>, usize)> {
-    split_with(text, DEFAULT)
+fn split(text: &str, d: Dialect) -> Vec<(Range<usize>, usize)> {
+    split_with(text, default_for(d))
 }
 
 fn split_with(text: &str, o: Opts) -> Vec<(Range<usize>, usize)> {
@@ -181,53 +204,62 @@ fn split_with(text: &str, o: Opts) -> Vec<(Range<usize>, usize)> {
 
 /// Splits on `;` outside strings and comments. Ranges are byte offsets into `text`, trimmed of
 /// surrounding whitespace, so the editor can map a caret to a statement.
-pub fn split_statements(text: &str) -> Vec<(Range<usize>, &str)> {
-    split(text).into_iter().map(|(r, _)| (r.clone(), &text[r])).collect()
+pub fn split_statements(text: &str, d: Dialect) -> Vec<(Range<usize>, &str)> {
+    split(text, d).into_iter().map(|(r, _)| (r.clone(), &text[r])).collect()
 }
 
-/// The `?` placeholders and the statement count of `text` as a server with these quote rules reads it.
-/// The worker compares two readings, because a text that reads differently is not safe to fill.
-pub fn placeholders(text: &str, backslash: bool, ansi: bool) -> (Vec<usize>, usize) {
-    let o = Opts { backslash, ansi, skip_exec: false };
-    let at = lex(text, o).into_iter().filter(|(t, r)| *t == Tok::Punct && &text[r.clone()] == "?").map(|(_, r)| r.start).collect();
+/// The `?` placeholders (`$1`, `$2` on PostgreSQL) and the statement count of `text` as a server with these quote
+/// rules reads it. The worker compares two readings, because a text that reads differently is not safe to fill.
+pub fn placeholders(text: &str, d: Dialect, backslash: bool, ansi: bool) -> (Vec<usize>, usize) {
+    let o = opts(d, backslash, ansi);
+    let at = lex(text, o).into_iter().filter(|(t, r)| if o.dialect == Dialect::Postgres { *t == Tok::Word && pg::param_number(&text[r.clone()]).is_some() } else { *t == Tok::Punct && &text[r.clone()] == "?" }).map(|(_, r)| r.start).collect();
     (at, split_with(text, o).len())
 }
 
 /// Like `tokens`, but read with the server's own quote rules.
-pub fn tokens_with(text: &str, backslash: bool, ansi: bool) -> Vec<(Tok, Range<usize>)> {
-    lex(text, Opts { backslash, ansi, skip_exec: false })
+pub fn tokens_with(text: &str, d: Dialect, backslash: bool, ansi: bool) -> Vec<(Tok, Range<usize>)> {
+    lex(text, opts(d, backslash, ansi))
+}
+
+/// The number of a `$n` parameter token, for PostgreSQL text.
+pub fn param_number(token: &str) -> Option<usize> {
+    pg::param_number(token)
 }
 
 /// Every way a server may read `text`: backslash escapes on and off, ANSI_QUOTES on and off, and executable
 /// comments as code and as comments. A text that lexes the same in all of them means the same to any server.
-pub fn every_reading(text: &str) -> Vec<Vec<(Tok, Range<usize>)>> {
-    let mut out = Vec::with_capacity(8);
-    for backslash in [true, false] {
-        for ansi in [false, true] {
-            for skip_exec in [false, true] {
-                out.push(lex(text, Opts { backslash, ansi, skip_exec }));
-            }
-        }
-    }
-    out
+pub fn every_reading(text: &str, d: Dialect) -> Vec<Vec<(Tok, Range<usize>)>> {
+    (0..readings(d)).map(|n| nth_reading(text, d, n)).collect()
 }
 
-/// How many readings `every_reading` holds.
+/// How many readings MySQL text has.
 pub const READINGS: usize = 8;
 
-/// One of the `READINGS` readings of `text`, so a caller that only needs one at a time never holds all of them.
-pub fn nth_reading(text: &str, n: usize) -> Vec<(Tok, Range<usize>)> {
-    lex(text, Opts { backslash: n & 4 == 0, ansi: n & 2 != 0, skip_exec: n & 1 != 0 })
+/// How many readings `every_reading` holds. PostgreSQL has two: standard_conforming_strings on and off.
+pub fn readings(d: Dialect) -> usize {
+    if d == Dialect::Postgres { 2 } else { READINGS }
+}
+
+/// One of the `readings` of `text`, so a caller that only needs one at a time never holds all of them.
+pub fn nth_reading(text: &str, d: Dialect, n: usize) -> Vec<(Tok, Range<usize>)> {
+    if d == Dialect::Postgres {
+        return lex(text, Opts { backslash: n & 1 != 0, ..DEFAULT_PG });
+    }
+    lex(text, Opts { backslash: n & 4 == 0, ansi: n & 2 != 0, skip_exec: n & 1 != 0, dialect: Dialect::MySql })
 }
 
 /// The database a `USE name` switches to, with the name unquoted.
-pub fn use_target(stmt: &str) -> Option<String> {
+pub fn use_target(stmt: &str, d: Dialect) -> Option<String> {
+    // PostgreSQL has no USE: a connection is bound to one database.
+    if d == Dialect::Postgres {
+        return None;
+    }
     // Most statements are not USE, and some are megabytes long: look at their first characters before lexing.
     let head = stmt.trim_start();
     if !matches!(head.as_bytes().first(), Some(b'/' | b'-' | b'#')) && !head.get(..3).is_some_and(|h| h.eq_ignore_ascii_case("use")) {
         return None;
     }
-    let mut it = tokens(stmt).into_iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment));
+    let mut it = tokens(stmt, d).into_iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment));
     let (t, r) = it.next()?;
     if t != Tok::Word || !stmt[r].eq_ignore_ascii_case("use") {
         return None;
@@ -242,21 +274,21 @@ pub fn use_target(stmt: &str) -> Option<String> {
 }
 
 /// Statements counted under the server's own quote rules.
-pub fn count_with(text: &str, backslash: bool, ansi: bool) -> usize {
-    split_with(text, Opts { backslash, ansi, skip_exec: false }).len()
+pub fn count_with(text: &str, d: Dialect, backslash: bool, ansi: bool) -> usize {
+    split_with(text, opts(d, backslash, ansi)).len()
 }
 
 /// The statement the caret belongs to. A caret right after a `;` stays with that statement, and one
 /// past the last statement picks the last one.
-pub fn statement_at(text: &str, caret: usize) -> Option<Range<usize>> {
-    let all = split(text);
+pub fn statement_at(text: &str, caret: usize, d: Dialect) -> Option<Range<usize>> {
+    let all = split(text, d);
     all.iter().find(|(_, semi)| *semi >= caret).or(all.last()).map(|(r, _)| r.clone())
 }
 
 /// Words of a statement outside parentheses, in capitals. None when the text holds a comment the server may run.
-fn top_words(stmt: &str) -> Option<Vec<String>> {
+fn top_words(stmt: &str, d: Dialect) -> Option<Vec<String>> {
     let (mut depth, mut out) = (0i32, Vec::new());
-    for (t, r) in tokens(stmt) {
+    for (t, r) in tokens(stmt, d) {
         match t {
             Tok::ExecOpen | Tok::ExecClose => return None,
             Tok::Punct if &stmt[r.clone()] == "(" => depth += 1,
@@ -270,14 +302,77 @@ fn top_words(stmt: &str) -> Option<Vec<String>> {
 
 /// Whether a statement can sit inside `SELECT * FROM (...) AS q LIMIT ...` to be read a page at a time:
 /// one SELECT, WITH, TABLE or VALUES that writes nothing and has no INTO or locking clause.
-pub fn pageable(stmt: &str) -> bool {
-    let Some(w) = top_words(stmt) else { return false };
+pub fn pageable(stmt: &str, d: Dialect) -> bool {
+    // A data-modifying CTE sits inside parentheses, where top_words does not look, and the server refuses one that is
+    // not at the top level of the statement.
+    if d == Dialect::Postgres && tokens(stmt, d).iter().any(|(t, r)| *t == Tok::Word && ["INSERT", "UPDATE", "DELETE", "MERGE"].iter().any(|w| stmt[r.clone()].eq_ignore_ascii_case(w))) {
+        return false;
+    }
+    let Some(w) = top_words(stmt, d) else { return false };
     w.first().is_some_and(|f| ["SELECT", "WITH", "TABLE", "VALUES"].contains(&f.as_str())) && !w.iter().any(|x| ["INTO", "UPDATE", "DELETE", "INSERT", "REPLACE", "LOCK", "SHARE"].contains(&x.as_str()))
 }
 
+/// Whether a PostgreSQL statement controls the transaction around it: BEGIN, START, COMMIT, END, ROLLBACK, ABORT,
+/// SAVEPOINT, RELEASE or PREPARE TRANSACTION. Behind a pooler each statement runs in a transaction of Quarry's own.
+pub fn transaction_control(stmt: &str, d: Dialect) -> bool {
+    if d != Dialect::Postgres {
+        return false;
+    }
+    let mut w = tokens(stmt, d).into_iter().filter(|(t, _)| *t == Tok::Word).map(|(_, r)| stmt[r].to_ascii_uppercase());
+    match w.next().as_deref() {
+        Some("BEGIN" | "START" | "COMMIT" | "END" | "ROLLBACK" | "ABORT" | "SAVEPOINT" | "RELEASE") => true,
+        Some("PREPARE") => w.next().as_deref() == Some("TRANSACTION"),
+        _ => false,
+    }
+}
+
+/// Whether a PostgreSQL statement leaves state on the session after its transaction commits. Behind a transaction
+/// pooler the backend goes to other clients next, so a session SET, a temp table, a named prepared statement, a held
+/// cursor or a LISTEN would reach them. set_config is refused whatever its third argument, which the lexer cannot read
+/// reliably.
+pub fn session_state(stmt: &str, d: Dialect) -> bool {
+    if d != Dialect::Postgres {
+        return false;
+    }
+    let words: Vec<String> = tokens(stmt, d).into_iter().filter(|(t, _)| *t == Tok::Word || *t == Tok::Quoted).map(|(_, r)| stmt[r].trim_matches('"').to_ascii_uppercase()).collect();
+    let at = |i: usize| words.get(i).map(String::as_str).unwrap_or("");
+    let first = match at(0) {
+        "SET" => !matches!(at(1), "LOCAL" | "TRANSACTION" | "CONSTRAINTS" | "CONSTRAINT"),
+        "RESET" | "DISCARD" | "LISTEN" | "UNLISTEN" | "PREPARE" | "DEALLOCATE" | "LOAD" => true,
+        "DECLARE" => words.windows(2).any(|w| w[0] == "WITH" && w[1] == "HOLD"),
+        "CREATE" => matches!(at(1), "TEMP" | "TEMPORARY") || (matches!(at(1), "LOCAL" | "GLOBAL") && matches!(at(2), "TEMP" | "TEMPORARY")),
+        _ => false,
+    };
+    first || words.iter().any(|w| w == "SET_CONFIG") || words.windows(2).any(|w| w[0] == "INTO" && matches!(w[1].as_str(), "TEMP" | "TEMPORARY")) || pg::session_function(stmt)
+}
+
+/// Whether a PostgreSQL statement is one the server refuses inside a transaction block. Behind a pooler every statement
+/// is wrapped in a transaction of Quarry's own, so these can never run there. ALTER TYPE ... ADD VALUE and REFRESH
+/// MATERIALIZED VIEW CONCURRENTLY are not listed because supported servers run them in a block. Only the first statement
+/// of the text is read, like `transaction_control`.
+pub fn needs_no_transaction(stmt: &str, d: Dialect) -> bool {
+    if d != Dialect::Postgres {
+        return false;
+    }
+    let w: Vec<String> = tokens(stmt, d).into_iter().take_while(|(t, r)| !(*t == Tok::Punct && &stmt[r.clone()] == ";")).filter(|(t, _)| *t == Tok::Word).map(|(_, r)| stmt[r].to_ascii_uppercase()).collect();
+    let at = |i: usize| w.get(i).map(String::as_str).unwrap_or("");
+    let has = |word: &str| w.iter().any(|x| x == word);
+    match at(0) {
+        "VACUUM" => true,
+        "CREATE" => matches!(at(1), "DATABASE" | "TABLESPACE" | "SUBSCRIPTION") || (at(1) == "INDEX" && at(2) == "CONCURRENTLY") || (at(1) == "UNIQUE" && at(2) == "INDEX" && at(3) == "CONCURRENTLY"),
+        "DROP" => matches!(at(1), "DATABASE" | "TABLESPACE" | "SUBSCRIPTION") || (at(1) == "INDEX" && at(2) == "CONCURRENTLY"),
+        // The option list of REINDEX (CONCURRENTLY) comes before the object kind. SCHEMA, DATABASE and SYSTEM refuse a block with or without it.
+        "REINDEX" => has("CONCURRENTLY") || matches!(at(1), "SCHEMA" | "DATABASE" | "SYSTEM"),
+        "ALTER" => at(1) == "SYSTEM" || (at(1) == "DATABASE" && has("TABLESPACE")) || (at(1) == "TABLE" && has("DETACH") && has("PARTITION") && has("CONCURRENTLY")),
+        // CLUSTER of one table runs in a block; CLUSTER alone, or with only VERBOSE, does not.
+        "CLUSTER" => w.len() == 1 || (w.len() == 2 && at(1) == "VERBOSE"),
+        _ => false,
+    }
+}
+
 /// Whether the statement orders its rows, which keeps rows from moving between pages.
-pub fn has_order_by(stmt: &str) -> bool {
-    top_words(stmt).is_some_and(|w| w.windows(2).any(|p| p[0] == "ORDER" && p[1] == "BY"))
+pub fn has_order_by(stmt: &str, d: Dialect) -> bool {
+    top_words(stmt, d).is_some_and(|w| w.windows(2).any(|p| p[0] == "ORDER" && p[1] == "BY"))
 }
 
 /// The statement without its end: spaces and `;`.
@@ -313,11 +408,14 @@ const REFUSED: &str = "Unlock writes first.";
 /// is the only boundary. Several statements are all checked.
 /// The server may or may not run `/*! */` text and may read quotes differently, so the text must pass
 /// under every combination of those readings. The default reading goes first for its messages.
-pub fn read_only_check(stmt: &str) -> Result<(), String> {
+pub fn read_only_check(stmt: &str, d: Dialect) -> Result<(), String> {
+    if d == Dialect::Postgres {
+        return pg::read_only_check(stmt);
+    }
     for skip_exec in [false, true] {
         for ansi in [false, true] {
             for backslash in [true, false] {
-                let code: Vec<Code> = lex(stmt, Opts { backslash, ansi, skip_exec }).into_iter().filter(|(t, _)| matches!(t, Tok::Word | Tok::Quoted | Tok::Str | Tok::Punct)).map(|(t, r)| (t, &stmt[r])).collect();
+                let code: Vec<Code> = lex(stmt, Opts { backslash, ansi, skip_exec, dialect: Dialect::MySql }).into_iter().filter(|(t, _)| matches!(t, Tok::Word | Tok::Quoted | Tok::Str | Tok::Punct)).map(|(t, r)| (t, &stmt[r])).collect();
                 code.split(|t| punct(t, ";")).try_for_each(check_one)?;
             }
         }
@@ -328,11 +426,14 @@ pub fn read_only_check(stmt: &str) -> Result<(), String> {
 /// True when any statement starts with PREPARE, EXECUTE or DEALLOCATE. A prepared statement is built
 /// from a string at run time, so it could hold a SET that `changes_escaping` cannot see. Checked under
 /// every reading of the text, like the read-only guard.
-pub fn uses_prepared(stmt: &str) -> bool {
+pub fn uses_prepared(stmt: &str, d: Dialect) -> bool {
+    if d == Dialect::Postgres {
+        return pg::uses_prepared(stmt);
+    }
     for skip_exec in [false, true] {
         for ansi in [false, true] {
             for backslash in [true, false] {
-                let code: Vec<Code> = lex(stmt, Opts { backslash, ansi, skip_exec }).into_iter().filter(|(t, _)| matches!(t, Tok::Word | Tok::Quoted | Tok::Str | Tok::Punct)).map(|(t, r)| (t, &stmt[r])).collect();
+                let code: Vec<Code> = lex(stmt, Opts { backslash, ansi, skip_exec, dialect: Dialect::MySql }).into_iter().filter(|(t, _)| matches!(t, Tok::Word | Tok::Quoted | Tok::Str | Tok::Punct)).map(|(t, r)| (t, &stmt[r])).collect();
                 if code.split(|t| punct(t, ";")).any(|part| part.first().is_some_and(|t| is(t, "PREPARE") || is(t, "EXECUTE") || is(t, "DEALLOCATE"))) {
                     return true;
                 }
@@ -345,13 +446,16 @@ pub fn uses_prepared(stmt: &str) -> bool {
 /// True for a SET that changes how the server reads literals (character set, SQL mode). Quarry
 /// escapes values for the mode it saw at connect, so a script must not move it. Checked under every
 /// reading of the text, like the read-only guard.
-pub fn changes_escaping(stmt: &str) -> bool {
+pub fn changes_escaping(stmt: &str, d: Dialect) -> bool {
+    if d == Dialect::Postgres {
+        return pg::changes_escaping(stmt);
+    }
     const VARS: [&str; 3] = ["character_set_client", "character_set_connection", "sql_mode"];
     const HEADS: [&str; 3] = ["names", "charset", "character"];
     for skip_exec in [false, true] {
         for ansi in [false, true] {
             for backslash in [true, false] {
-                let code: Vec<Code> = lex(stmt, Opts { backslash, ansi, skip_exec }).into_iter().filter(|(t, _)| matches!(t, Tok::Word | Tok::Quoted | Tok::Str | Tok::Punct)).map(|(t, r)| (t, &stmt[r])).collect();
+                let code: Vec<Code> = lex(stmt, Opts { backslash, ansi, skip_exec, dialect: Dialect::MySql }).into_iter().filter(|(t, _)| matches!(t, Tok::Word | Tok::Quoted | Tok::Str | Tok::Punct)).map(|(t, r)| (t, &stmt[r])).collect();
                 for part in code.split(|t| punct(t, ";")) {
                     if !part.first().is_some_and(|t| is(t, "SET")) {
                         continue;
@@ -735,7 +839,6 @@ impl ScriptSplitter {
 mod tests {
     #[test]
     fn use_names_its_database() {
-        use super::use_target;
         assert_eq!(use_target("USE shop").as_deref(), Some("shop"));
         assert_eq!(use_target("  use `my``db` ").as_deref(), Some("my`db"));
         assert_eq!(use_target("/* c */ USE x").as_deref(), Some("x"));
@@ -745,6 +848,42 @@ mod tests {
     }
 
     use super::*;
+
+    // The MySQL tests below keep their one-argument calls through these.
+    const D: Dialect = Dialect::MySql;
+    fn tokens(t: &str) -> Vec<(Tok, Range<usize>)> {
+        super::tokens(t, D)
+    }
+    fn split_statements(t: &str) -> Vec<(Range<usize>, &str)> {
+        super::split_statements(t, D)
+    }
+    fn statement_at(t: &str, c: usize) -> Option<Range<usize>> {
+        super::statement_at(t, c, D)
+    }
+    fn read_only_check(t: &str) -> Result<(), String> {
+        super::read_only_check(t, D)
+    }
+    fn uses_prepared(t: &str) -> bool {
+        super::uses_prepared(t, D)
+    }
+    fn changes_escaping(t: &str) -> bool {
+        super::changes_escaping(t, D)
+    }
+    fn count_with(t: &str, bs: bool, ansi: bool) -> usize {
+        super::count_with(t, D, bs, ansi)
+    }
+    fn placeholders(t: &str, bs: bool, ansi: bool) -> (Vec<usize>, usize) {
+        super::placeholders(t, D, bs, ansi)
+    }
+    fn pageable(t: &str) -> bool {
+        super::pageable(t, D)
+    }
+    fn has_order_by(t: &str) -> bool {
+        super::has_order_by(t, D)
+    }
+    fn use_target(t: &str) -> Option<String> {
+        super::use_target(t, D)
+    }
 
     fn texts(s: &str) -> Vec<&str> {
         split_statements(s).into_iter().map(|(_, t)| t).collect()
@@ -991,6 +1130,15 @@ mod tests {
         assert_eq!(placeholders("SELECT ?, '?'", true, false), placeholders("SELECT ?, '?'", false, false));
         assert_eq!(count_with("SELECT '\\''; SELECT 2", false, false), 1);
         assert_eq!(count_with("SELECT '\\''; SELECT 2", true, false), 2);
+    }
+
+    #[test]
+    fn merge_stops_paging_on_postgres_only() {
+        // MERGE is a keyword of PostgreSQL's DML, and an ordinary name on MySQL.
+        assert!(super::pageable("SELECT merge FROM t", Dialect::MySql));
+        assert!(!super::pageable("SELECT merge FROM t", Dialect::Postgres));
+        assert!(!super::pageable("MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE", Dialect::Postgres));
+        assert!(!super::pageable("MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE", Dialect::MySql));
     }
 
     #[test]

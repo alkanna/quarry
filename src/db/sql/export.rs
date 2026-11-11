@@ -2,13 +2,15 @@
 //! statement runs again and rows go through a `copy::Writer` a batch at a time, so a result of any size
 //! never sits in memory.
 
+use super::se;
 use super::value::Kind;
-use super::worker::{make_cols, pin_reads, prepare, to_row};
-use super::{lex, Db};
+use super::exec::{Conn, Item};
+use super::run::{pin_reads, prepare};
+use super::worker::{make_cols, to_row};
+use super::{lex, Db, Dialect};
 use crate::db::copy::{CopyCol, Fmt, Writer};
 use crate::db::{e, Msg, Res, Worker};
 use mongodb::bson::Document;
-use sqlx::{raw_sql, Connection, Either, Executor};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -94,43 +96,67 @@ fn write_err(err: std::io::Error) -> String {
 /// Runs `stmt` and writes every row to `out`. Only a statement that passes the read-only check runs, on
 /// a read-only session, whatever the connection allows. `count` follows the rows written for a progress readout.
 pub async fn stream(db: &Db, schema: &str, stmt: &str, plan: &Plan, out: &mut (dyn Write + Send), count: &AtomicU64, cancel: &AtomicBool, id: &AtomicU64) -> Res<(u64, usize)> {
-    lex::read_only_check(stmt).map_err(|why| format!("Export all only runs statements that read: {why}"))?;
-    let mut conn = db.acquire().await?.detach();
-    prepare(&mut conn, db.dialect, schema, true, id).await.map_err(e)?;
+    lex::read_only_check(stmt, db.dialect).map_err(|why| format!("Export all only runs statements that read: {why}"))?;
+    let mut conn = db.acquire_conn().await?;
+    prepare(&mut conn, db, schema, true, id).await?;
     // All rows means all of them, and the file is written as UTF-8 from what the server sends.
-    pin_reads(&mut conn).await.map_err(e)?;
+    pin_reads(&mut conn).await?;
     let t = std::time::Instant::now();
-    let r = stream_conn(&mut conn, stmt, plan, out, count, cancel, &Wrap::default()).await;
+    let r = stream_locked(&mut conn, db, &db.pg_run_locals(schema), stmt, plan, out, count, cancel, &Wrap::default()).await;
     db.note(schema, stmt, t, &r);
+    // A cancelled or failed read leaves its result on the wire inside a transaction, so the connection is closed, not drained.
+    let failed = r.is_err() && db.dialect == Dialect::Postgres;
+    if failed || r.is_ok() {
+        let _ = conn.close().await;
+    }
+    if failed {
+        return r.map(|_| (0, 0));
+    }
     let r = r?;
-    let _ = conn.close().await;
     let (rows, peak) = r.unwrap_or_default();
     // Line formats end with a newline like any text file.
     out.write_all(b"\n").map_err(write_err)?;
     Ok((rows, peak))
 }
 
+/// `stream_conn` for a user statement. On PostgreSQL the statement runs alone in `BEGIN READ ONLY` with the session's
+/// timeout and the settings of `Db::pg_begin` (which behind a pooler are the only place its settings come from), and the
+/// transaction is always rolled back and never committed, like a Custom Query statement. A transaction that is not
+/// rolled back here is cut off, so the caller must close the connection when this fails.
+pub(super) async fn stream_locked(conn: &mut Conn, db: &Db, locals: &str, stmt: &str, plan: &Plan, out: &mut (dyn Write + Send), count: &AtomicU64, cancel: &AtomicBool, wrap: &Wrap<'_>) -> Res<Option<(u64, usize)>> {
+    if let Conn::Pg(c) = conn {
+        super::pg_read::begin_read_only(c, db, locals).await.map_err(|x| super::se_at(&x, stmt, 0))?;
+    }
+    let r = stream_conn(conn, db.dialect, stmt, plan, out, count, cancel, wrap).await;
+    if r.is_ok() {
+        if let Conn::Pg(c) = conn {
+            sqlx::Executor::execute(&mut *c, "ROLLBACK").await.map_err(se)?;
+        }
+    }
+    r
+}
+
 /// Streams one statement on an open session, without the closing newline. None when `wrap.lenient` and
 /// the statement has no result set.
-async fn stream_conn(conn: &mut sqlx::MySqlConnection, stmt: &str, plan: &Plan, out: &mut (dyn Write + Send), count: &AtomicU64, cancel: &AtomicBool, wrap: &Wrap<'_>) -> Res<Option<(u64, usize)>> {
+async fn stream_conn(conn: &mut Conn, dialect: super::Dialect, stmt: &str, plan: &Plan, out: &mut (dyn Write + Send), count: &AtomicU64, cancel: &AtomicBool, wrap: &Wrap<'_>) -> Res<Option<(u64, usize)>> {
     let io = write_err;
     let fix = |t: String| match wrap.tag { Some(tag) => tag_lines(&t, tag), None => t };
     let mut done = false;
     let (mut cols, mut writer, mut batch, mut rows, mut peak) = (Vec::new(), None::<Writer>, Vec::<Document>::new(), 0u64, 0usize);
     let copy_cols = |c: &[super::Col]| c.iter().map(|c| CopyCol { name: c.name.clone(), src: c.src.clone(), numeric: numeric(c.kind) }).collect::<Vec<_>>();
     {
-        let mut s = raw_sql(stmt).fetch_many(&mut *conn);
+        let mut s = conn.fetch_text(stmt);
         while let Some(item) = futures_util::StreamExt::next(&mut s).await {
             if cancel.load(Ordering::SeqCst) {
                 return Err("Export cancelled".into());
             }
-            match item.map_err(e)? {
+            match item.map_err(se)? {
                 // Later results of a CALL are read off the wire and dropped.
-                Either::Right(_) if done => {}
-                Either::Right(row) => {
+                Item::Row(_) if done => {}
+                Item::Row(row) => {
                     if writer.is_none() {
-                        cols = make_cols(sqlx::Row::columns(&row), &Default::default(), false);
-                        let mut w = Writer::new(plan.fmt, plan.header, copy_cols(&cols), &plan.table, &[], plan.bs);
+                        cols = make_cols(&row.cols(), &Default::default(), false);
+                        let mut w = Writer::new(dialect, plan.fmt, plan.header, copy_cols(&cols), &plan.table, &[], plan.bs);
                         out.write_all(wrap.head.as_bytes()).map_err(io)?;
                         out.write_all(w.begin().as_bytes()).map_err(io)?;
                         writer = Some(w);
@@ -146,21 +172,21 @@ async fn stream_conn(conn: &mut sqlx::MySqlConnection, stmt: &str, plan: &Plan, 
                     }
                 }
                 // The end of the first result. Reading goes on to the end so the connection is clean for `describe`.
-                Either::Left(_) => done = true,
+                Item::End(_) => done = true,
             }
         }
     }
     if writer.is_none() {
         // No rows: the header and footer of an empty table still need the column names.
-        let d = match (&mut *conn).describe(stmt).await {
-            Ok(d) if !(wrap.lenient && d.columns().is_empty()) => d,
+        let d = match conn.describe(stmt).await {
+            Ok(d) if !(wrap.lenient && d.is_empty()) => d,
             // USE and similar statements cannot be prepared and have no columns.
             Ok(_) => return Ok(None),
             Err(_) if wrap.lenient => return Ok(None),
             Err(x) => return Err(e(x)),
         };
-        cols = make_cols(d.columns(), &Default::default(), false);
-        let mut w = Writer::new(plan.fmt, plan.header, copy_cols(&cols), &plan.table, &[], plan.bs);
+        cols = make_cols(&d, &Default::default(), false);
+        let mut w = Writer::new(dialect, plan.fmt, plan.header, copy_cols(&cols), &plan.table, &[], plan.bs);
         out.write_all(wrap.head.as_bytes()).map_err(io)?;
         out.write_all(w.begin().as_bytes()).map_err(io)?;
         writer = Some(w);
@@ -229,13 +255,13 @@ pub fn can_single(f: Fmt) -> bool {
 
 /// The statements of a script, or why the export must not start. Every statement is checked before any
 /// runs, so a script with a write in it never half runs, whatever the connection's lock says.
-pub fn check_script(text: &str) -> Result<Vec<String>, String> {
-    let stmts: Vec<String> = lex::split_statements(text).into_iter().map(|(_, s)| s.to_string()).collect();
+pub fn check_script(text: &str, d: Dialect) -> Result<Vec<String>, String> {
+    let stmts: Vec<String> = lex::split_statements(text, d).into_iter().map(|(_, s)| s.to_string()).collect();
     if stmts.is_empty() {
         return Err("The editor has no statements.".into());
     }
     for (i, s) in stmts.iter().enumerate() {
-        lex::read_only_check(s).map_err(|why| format!("Statement {} does not only read, so nothing was exported: {why}", i + 1))?;
+        lex::read_only_check(s, d).map_err(|why| format!("Statement {} does not only read, so nothing was exported: {why}", i + 1))?;
     }
     Ok(stmts)
 }
@@ -324,7 +350,7 @@ pub fn numbered(path: &std::path::Path, n: usize) -> PathBuf {
 #[allow(clippy::too_many_arguments)]
 pub async fn export_all(db: &Db, schema: &str, stmts: &[String], ap: &AllPlan, path: &std::path::Path, count: &AtomicU64, step: &AtomicU64, cancel: &AtomicBool, id: &AtomicU64) -> Res<Done> {
     for s in stmts {
-        lex::read_only_check(s).map_err(|why| format!("Export all only runs statements that read: {why}"))?;
+        lex::read_only_check(s, db.dialect).map_err(|why| format!("Export all only runs statements that read: {why}"))?;
     }
     let mut parts: Vec<(PathBuf, PathBuf)> = Vec::new();
     // The file being written when a statement fails, which `parts` does not hold yet.
@@ -353,10 +379,10 @@ pub async fn export_all(db: &Db, schema: &str, stmts: &[String], ap: &AllPlan, p
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_all(db: &Db, schema: &str, stmts: &[String], ap: &AllPlan, path: &std::path::Path, count: &AtomicU64, step: &AtomicU64, cancel: &AtomicBool, id: &AtomicU64, parts: &mut Vec<(PathBuf, PathBuf)>, open: &mut Option<PathBuf>) -> Res<u64> {
-    let mut conn = db.acquire().await?.detach();
-    prepare(&mut conn, db.dialect, schema, true, id).await.map_err(e)?;
-    pin_reads(&mut conn).await.map_err(e)?;
+pub(super) async fn run_all(db: &Db, schema: &str, stmts: &[String], ap: &AllPlan, path: &std::path::Path, count: &AtomicU64, step: &AtomicU64, cancel: &AtomicBool, id: &AtomicU64, parts: &mut Vec<(PathBuf, PathBuf)>, open: &mut Option<PathBuf>) -> Res<u64> {
+    let mut conn = db.acquire_conn().await?;
+    prepare(&mut conn, db, schema, true, id).await?;
+    pin_reads(&mut conn).await?;
     let fmt = ap.plan.fmt;
     let (mut total, mut results) = (0u64, 0usize);
     let mut shared = Lazy::new(part_of(path));
@@ -375,8 +401,12 @@ async fn run_all(db: &Db, schema: &str, stmts: &[String], ap: &AllPlan, path: &s
         let out: &mut Lazy = if ap.single { &mut shared } else { &mut own };
         *open = Some(out.tmp.clone());
         let t = std::time::Instant::now();
-        let streamed = stream_conn(&mut conn, stmt, &ap.plan, out, count, cancel, &wrap).await;
+        let streamed = stream_locked(&mut conn, db, &db.pg_run_locals(schema), stmt, &ap.plan, out, count, cancel, &wrap).await;
         db.note(schema, stmt, t, &streamed);
+        if streamed.is_err() && db.dialect == Dialect::Postgres {
+            let _ = conn.close().await;
+            return streamed.map(|_| 0);
+        }
         let Some((rows, _)) = streamed? else {
             *open = None;
             continue;
@@ -432,7 +462,7 @@ mod tests {
         for (i, (stmt, rows)) in sets.iter().enumerate() {
             let tag = (fmt == Fmt::JsonLines).then(|| json_str(stmt));
             out += &single_head(fmt, i + 1, stmt, i == 0);
-            let mut w = Writer::new(fmt, true, cols(), "t", &[], true);
+            let mut w = Writer::new(Dialect::MySql, fmt, true, cols(), "t", &[], true);
             out += &w.begin();
             let text = w.rows(rows);
             out += &match &tag { Some(t) => tag_lines(&text, t), None => text };
@@ -449,12 +479,12 @@ mod tests {
     #[test]
     fn a_script_with_a_write_is_refused_before_anything_runs() {
         for w in ["SELECT 1; DELETE FROM t", "USE a; SELECT 1; UPDATE t SET a = 1", "SELECT 1; SET SESSION transaction_read_only = 0; SELECT 2", "SELECT 1; SELECT * FROM t INTO OUTFILE '/tmp/x'"] {
-            let why = check_script(w).unwrap_err();
+            let why = check_script(w, Dialect::MySql).unwrap_err();
             assert!(why.contains("nothing was exported"), "{w}: {why}");
         }
-        assert!(check_script("SELECT 1; DELETE FROM t").unwrap_err().starts_with("Statement 2 "));
-        assert!(check_script("  ;; ").is_err());
-        let ok = check_script("USE shop; SET @n = 3; SELECT @n; SELECT 'a;b'").unwrap();
+        assert!(check_script("SELECT 1; DELETE FROM t", Dialect::MySql).unwrap_err().starts_with("Statement 2 "));
+        assert!(check_script("  ;; ", Dialect::MySql).is_err());
+        let ok = check_script("USE shop; SET @n = 3; SELECT @n; SELECT 'a;b'", Dialect::MySql).unwrap();
         assert_eq!(ok, ["USE shop", "SET @n = 3", "SELECT @n", "SELECT 'a;b'"]);
     }
 

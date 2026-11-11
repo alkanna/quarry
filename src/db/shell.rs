@@ -168,6 +168,9 @@ pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + S
     let read = async {
         let mut result: Option<Res<String>> = None;
         let mut relays: std::collections::HashMap<String, sql::Relay> = std::collections::HashMap::new();
+        // Names whose relay was dropped after a cut result. A later query errors like it does on MySQL, where the relay
+        // stays but is dead, instead of quietly opening a new session that has lost the script's transaction.
+        let mut closed: std::collections::HashSet<String> = std::collections::HashSet::new();
         while let Some(line) = next_line(&mut lines).await? {
             let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
                 send(Msg::ShellLog { req, level: "log".into(), text: line });
@@ -196,19 +199,26 @@ pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + S
                 }
                 Some("sql") => {
                     let conn = s("conn");
-                    let params = sql_params(v.get("params"));
+                    let params = sql_args(v.get("params"), job.sql.iter().find(|(n, _)| *n == conn).map_or(sql::Dialect::MySql, |(_, c)| c.db.dialect));
                     let text = s("text");
                     let t = Instant::now();
                     let res = async {
                         let Some((_, cfg)) = job.sql.iter().find(|(n, _)| *n == conn) else { return Err(format!("There is no SQL connection named \"{conn}\" in this script.")) };
+                        if closed.contains(&conn) {
+                            return Err("The connection was closed after a result was cut. Start the script again.".to_string());
+                        }
                         if !relays.contains_key(&conn) {
                             relays.insert(conn.clone(), sql::Relay::open(&cfg.db, &cfg.schema, cfg.read_only, &cfg.conn_id).await?);
                         }
                         let p = params.as_ref().map_err(|x| x.clone())?;
-                        match relays.get_mut(&conn) {
-                            Some(r) => r.query(&text, p).await,
-                            None => Err("No connection".to_string()),
+                        let Some(r) = relays.get_mut(&conn) else { return Err("No connection".to_string()) };
+                        let out = r.query_args(&text, p).await;
+                        // Dropping the relay closes its connection, which ends the transaction and frees its locks.
+                        if r.abandoned() {
+                            relays.remove(&conn);
+                            closed.insert(conn.clone());
                         }
+                        out
                     }
                     .await;
                     let mut q = ShellQuery { conn, text, params: params_summary(v.get("params")), rows: None, affected: None, error: None, ms: t.elapsed().as_millis() };
@@ -223,7 +233,10 @@ pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + S
                             q.affected = Some(affected);
                             answer["ok"] = true.into();
                             answer["affected"] = affected.into();
-                            answer["insertId"] = insert_id.into();
+                            // PostgreSQL has no generated key to report here, the runner leaves insertId undefined there.
+                            if job.sql.iter().find(|(n, _)| *n == q.conn).is_some_and(|(_, c)| c.db.dialect != sql::Dialect::Postgres) {
+                                answer["insertId"] = insert_id.into();
+                            }
                         }
                         Err(err) => {
                             q.error = Some(err.clone());
@@ -257,7 +270,8 @@ pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + S
             // The statement in flight keeps running on the server unless it is interrupted too.
             for (_, c) in &job.sql {
                 let id = c.conn_id.load(std::sync::atomic::Ordering::SeqCst);
-                if id != 0 {
+                // Behind a pooler the pid may now belong to another client's statement, so the connection is just closed.
+                if id != 0 && !sql::Relay::pooled(&c.db) {
                     let _ = sql::Relay::kill(&c.db, id).await;
                 }
             }
@@ -306,38 +320,51 @@ async fn next_line(r: &mut tokio::io::BufReader<tokio::process::ChildStdout>) ->
 
 /// The values a script sent with a query, as bind values. A `{ "$hex": ... }` object is bytes, any other
 /// object or array is its JSON text, which is what a JSON column takes.
+#[cfg(test)]
 fn sql_params(v: Option<&serde_json::Value>) -> Res<Vec<sql::value::Param>> {
-    use serde_json::Value;
-    use sql::value::Param;
-    let Some(Value::Array(a)) = v else { return Ok(Vec::new()) };
+    let Some(serde_json::Value::Array(a)) = v else { return Ok(Vec::new()) };
+    a.iter().map(sql_param).collect()
+}
+
+/// `sql_params` for the relay: on PostgreSQL a `{ "$bool": true }` object is a boolean, which only that runner sends. On
+/// MySQL the same JSON is an ordinary value and keeps the reading it always had.
+fn sql_args(v: Option<&serde_json::Value>, d: sql::Dialect) -> Res<Vec<sql::Arg>> {
+    let Some(serde_json::Value::Array(a)) = v else { return Ok(Vec::new()) };
     a.iter()
-        .map(|x| {
-            Ok(match x {
-                Value::Null => Param::Null,
-                Value::Bool(b) => Param::Int(*b as i64),
-                Value::Number(n) => match (n.as_i64(), n.as_u64()) {
-                    (Some(i), _) => Param::Int(i),
-                    (_, Some(u)) => Param::UInt(u),
-                    _ => Param::Float(n.as_f64().unwrap_or(f64::NAN)),
-                },
-                Value::String(s) => Param::Text(s.clone()),
-                // A BigInt beyond 2^53, which a JSON number would round.
-                Value::Object(o) if o.len() == 1 && o.contains_key("$int") => {
-                    let t = o["$int"].as_str().unwrap_or_default();
-                    match (t.parse::<i64>(), t.parse::<u64>()) {
-                        (Ok(i), _) => Param::Int(i),
-                        (_, Ok(u)) => Param::UInt(u),
-                        _ => return Err("A BigInt value does not fit in 64 bits".to_string()),
-                    }
-                }
-                Value::Object(o) if o.len() == 1 && o.contains_key("$hex") => {
-                    let h = o["$hex"].as_str().unwrap_or_default();
-                    Param::Bytes((0..h.len() / 2).map(|i| u8::from_str_radix(h.get(i * 2..i * 2 + 2).unwrap_or("zz"), 16)).collect::<Result<_, _>>().map_err(|_| "Bad binary value".to_string())?)
-                }
-                other => Param::Text(other.to_string()),
-            })
+        .map(|x| match x.as_object().filter(|o| d == sql::Dialect::Postgres && o.len() == 1).and_then(|o| o.get("$bool")) {
+            Some(serde_json::Value::Bool(b)) => Ok(sql::Arg::Bool(*b)),
+            _ => sql_param(x).map(sql::Arg::Val),
         })
         .collect()
+}
+
+fn sql_param(x: &serde_json::Value) -> Res<sql::value::Param> {
+    use serde_json::Value;
+    use sql::value::Param;
+    Ok(match x {
+        Value::Null => Param::Null,
+        Value::Bool(b) => Param::Int(*b as i64),
+        Value::Number(n) => match (n.as_i64(), n.as_u64()) {
+            (Some(i), _) => Param::Int(i),
+            (_, Some(u)) => Param::UInt(u),
+            _ => Param::Float(n.as_f64().unwrap_or(f64::NAN)),
+        },
+        Value::String(s) => Param::Text(s.clone()),
+        // A BigInt beyond 2^53, which a JSON number would round.
+        Value::Object(o) if o.len() == 1 && o.contains_key("$int") => {
+            let t = o["$int"].as_str().unwrap_or_default();
+            match (t.parse::<i64>(), t.parse::<u64>()) {
+                (Ok(i), _) => Param::Int(i),
+                (_, Ok(u)) => Param::UInt(u),
+                _ => return Err("A BigInt value does not fit in 64 bits".to_string()),
+            }
+        }
+        Value::Object(o) if o.len() == 1 && o.contains_key("$hex") => {
+            let h = o["$hex"].as_str().unwrap_or_default();
+            Param::Bytes((0..h.len() / 2).map(|i| u8::from_str_radix(h.get(i * 2..i * 2 + 2).unwrap_or("zz"), 16)).collect::<Result<_, _>>().map_err(|_| "Bad binary value".to_string())?)
+        }
+        other => Param::Text(other.to_string()),
+    })
 }
 
 #[cfg(test)]
@@ -554,6 +581,14 @@ pub fn shell_text(b: &Bson) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_bool_marker_is_read_on_postgres_only() {
+        let v = serde_json::json!([{ "$bool": true }, 3]);
+        assert_eq!(sql_args(Some(&v), sql::Dialect::Postgres).unwrap()[0], sql::Arg::Bool(true));
+        // On MySQL the same object is a plain value, as it was before PostgreSQL support.
+        assert_eq!(sql_args(Some(&v), sql::Dialect::MySql).unwrap()[0], sql::Arg::Val(sql_param(&v[0]).unwrap()));
+    }
 
     #[test]
     fn a_repeated_connection_name_is_found() {

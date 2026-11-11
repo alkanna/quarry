@@ -51,6 +51,8 @@ pub(crate) struct Palette {
     pub(crate) c_link: Color32,
     pub(crate) highlight: Color32,
     pub(crate) c_keyword: Color32,
+    /// The PostgreSQL engine accent.
+    pub(crate) engine_pg: Color32,
     /// Alternate table rows.
     pub(crate) stripe: Color32,
     /// An off switch and checkbox troughs.
@@ -99,6 +101,7 @@ pub(crate) const DARK_PAL: Palette = Palette {
     // #E0A84E at 25%, premultiplied.
     highlight: Color32::from_rgba_premultiplied(56, 42, 20, 64),
     c_keyword: hex(0xcf8e6d),
+    engine_pg: hex(0x2aacb8),
     stripe: hex(0x232427),
     track: hex(0x4e5157),
     well: hex(0x1e1f22),
@@ -141,6 +144,7 @@ pub(crate) const LIGHT_PAL: Palette = Palette {
     // #A86A00 at 20%, premultiplied.
     highlight: Color32::from_rgba_premultiplied(34, 21, 0, 51),
     c_keyword: hex(0x8a3fb5),
+    engine_pg: hex(0x00796b),
     stripe: hex(0xf9f7f3),
     track: hex(0xcfc9bf),
     well: hex(0xfbfaf7),
@@ -263,7 +267,7 @@ macro_rules! colors {
     };
 }
 
-colors!(BG: bg, PANEL: panel, CHROME: chrome, RAISED: raised, HOVER: hover, PRESSED: pressed, MENU_HOVER: menu_hover, BORDER: border, LINE: line, RAISED_LINE: raised_line, HDR: hdr, ON_PRIMARY: on_primary, SEL: sel, SEL_HOVER: sel_hover, TEXT: text, BRIGHT: bright, MUTED: muted, FAINT: faint, PRIMARY: primary, ALERT: alert, SUCCESS: success, WARNING: warning, C_STRING: c_string, C_NUMBER: c_number, C_TRUE: c_true, C_FALSE: c_false, C_DATE: c_date, C_NULL: c_null, C_OID: c_oid, C_OBJ: c_obj, KEY: key, C_LINK: c_link, HIGHLIGHT: highlight, C_KEYWORD: c_keyword);
+colors!(BG: bg, PANEL: panel, CHROME: chrome, RAISED: raised, HOVER: hover, PRESSED: pressed, MENU_HOVER: menu_hover, BORDER: border, LINE: line, RAISED_LINE: raised_line, HDR: hdr, ON_PRIMARY: on_primary, SEL: sel, SEL_HOVER: sel_hover, TEXT: text, BRIGHT: bright, MUTED: muted, FAINT: faint, PRIMARY: primary, ALERT: alert, SUCCESS: success, WARNING: warning, C_STRING: c_string, C_NUMBER: c_number, C_TRUE: c_true, C_FALSE: c_false, C_DATE: c_date, C_NULL: c_null, C_OID: c_oid, C_OBJ: c_obj, KEY: key, C_LINK: c_link, HIGHLIGHT: highlight, C_KEYWORD: c_keyword, ENGINE_PG: engine_pg);
 
 /// `c` at `alpha` out of 255, for tints over the background.
 pub(crate) fn tint(c: Color32, alpha: u8) -> Color32 {
@@ -312,6 +316,14 @@ pub(crate) const R_LG: u8 = 10;
 pub(crate) const R_BAR: u8 = R_MD + 2;
 
 pub(crate) const SIDE_ROW_H: f32 = 26.0;
+
+// The PostgreSQL schema switcher under an open database: indented to the tree's children, `PICK_PAD` inside its edges,
+// `PICK_GAP` between its label and the name, and `PICK_CHEVRON` of room on the right for the chevron.
+pub(crate) const PICK_INDENT: f32 = 18.0;
+pub(crate) const PICK_H: f32 = BUTTON_H + 2.0;
+pub(crate) const PICK_PAD: f32 = 8.0;
+pub(crate) const PICK_GAP: f32 = 6.0;
+pub(crate) const PICK_CHEVRON: f32 = 26.0;
 
 /// Also where the macOS traffic lights are centered, so it stays 40.
 pub(crate) const HEADER_H: f32 = 40.0;
@@ -579,6 +591,14 @@ pub(crate) fn state_fill(ui: &egui::Ui, base: Color32) -> Color32 {
 
 /// Label column width of dialog form grids, so fields in every section start at the same x.
 pub(crate) const FORM_LABEL_W: f32 = 84.0;
+/// The gap between a form's label column and its fields, which fields that span both columns must add back.
+pub(crate) const FORM_GAP: f32 = 14.0;
+/// Inner margin of a single-line form field, and of the taller connection string fields.
+pub(crate) const FIELD_MARGIN: egui::Margin = egui::Margin::symmetric(8, 5);
+pub(crate) const FIELD_MARGIN_TALL: egui::Margin = egui::Margin::symmetric(8, 6);
+/// Radius of the filled dot beside a form's status line, and of the disc behind an info note's "i".
+pub(crate) const STATUS_DOT_R: f32 = 3.0;
+pub(crate) const INFO_DOT_R: f32 = 6.0;
 
 pub(crate) const MONO_PX: f32 = TXT_BODY;
 

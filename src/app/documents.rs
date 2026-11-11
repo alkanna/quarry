@@ -197,7 +197,7 @@ impl App {
         if t.sql.is_some() && t.sel.coll.is_empty() {
             return self.sql_query_view(ui);
         }
-        let (coll, view, db) = (t.sel.coll.clone(), t.view, t.sel.db.clone());
+        let (coll, view, db) = (t.sel.coll.clone(), t.view, t.sel.scope_label().to_string());
         // What the collection holds: documents, data size and indexes. The whole collection's
         // count, not the filter's, which the results line shows. Without statistics only an
         // unfiltered count says what the collection holds.
@@ -336,7 +336,7 @@ impl App {
                         run = true;
                     }
                     vsep(ui, 6.0);
-                    library_menu(ui, &lib, new_lib, LibKind::Query, true, &mut qacts);
+                    library_menu(ui, &lib, new_lib, LibMenu::Query, true, &mut qacts);
                     history_menu(ui, &hist, &index_sorts, &mut qacts);
                 });
             });
@@ -588,6 +588,7 @@ impl App {
             }
         }
         let docs = if is_raw { Rows::Raw(&raw[range]) } else { Rows::Docs(&all[range]) };
+        let mut after = None;
         let loading = t.loading;
         let closed = self.t().and_then(|t| self.conn(t.sel.conn)).filter(|c| c.status != Status::Ready && !self.demo).map(|c| (c.meta.id, c.meta.name.clone(), c.status == Status::Connecting));
         let conn_failed = closed.as_ref().is_some_and(|c| self.conn_card_shown(c.0));
@@ -622,7 +623,7 @@ impl App {
                     ui.multiply_opacity(0.45);
                 }
                 if self.prefs.table || sql {
-                    self.doc_table(ui, agg, docs, &fields, base);
+                    after = Some(self.doc_table(ui, agg, docs, &fields, base));
                 } else {
                     self.doc_list(ui, agg, docs);
                 }
@@ -635,6 +636,11 @@ impl App {
                 (true, Some(Store::Raw(v))) => *v = raw,
                 (true, None) => {}
             }
+        }
+        // Only now does the tab hold its page again, and SQL cell work finds its rows there. A link followed while
+        // drawing may have moved to another tab, whose rows these indexes are not.
+        if let Some(a) = after.filter(|_| self.cur == cur) {
+            self.sql_after(ui.ctx(), a);
         }
     }
 

@@ -15,6 +15,7 @@ impl App {
             .map(|t| SavedTab {
                 conn: t.sel.conn,
                 db: t.sel.db.clone(),
+                schema: t.sel.schema.clone(),
                 coll: t.sel.coll.clone(),
                 view: match t.view {
                     View::Documents => "Documents",
@@ -40,6 +41,8 @@ impl App {
                 attached: t.shell.attached.clone(),
                 clauses: t.sql.as_ref().and_then(|s| serde_json::to_string(&s.bar.c).ok()).unwrap_or_default(),
                 query: t.sql.as_ref().map(|s| s.query.clone()).unwrap_or_default(),
+                run_db: t.sql.as_ref().map(|s| s.run_db.clone()).unwrap_or_default(),
+                run_schema: t.sql.as_ref().map(|s| s.run_schema.trim().to_string()).unwrap_or_default(),
                 stages: if t.stages_src == t.agg_txt { t.stages.iter().map(|s| SavedStage { op: s.op.clone(), text: s.text.clone(), on: s.on }).collect() } else { Vec::new() },
                 agg_text_mode: t.agg_text_mode,
             })
@@ -129,9 +132,10 @@ impl App {
             }
             const DIGITS: [Key; 9] = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
             // The palette shows these as each view's position in MONGO_VIEWS.
-            for (d, (v, _)) in DIGITS.iter().zip(MONGO_VIEWS) {
+            let views: &[(View, &str)] = if self.t().is_some_and(|t| t.sql.is_some()) { &SQL_VIEWS } else { &MONGO_VIEWS };
+            for (d, (v, _)) in DIGITS.iter().zip(views) {
                 if k(cmd | alt, *d) {
-                    self.set_view(v);
+                    self.set_view(*v);
                 }
             }
             // After the Cmd+Shift brackets above, which would also match these.
@@ -213,6 +217,8 @@ impl App {
         let Some(t) = self.tm().filter(|t| t.view != v) else { return };
         t.view = v;
         t.selected = None;
+        // The editor belongs to the Content grid; another view must never inherit it.
+        self.sql_cell = None;
         self.reset_doc_state();
         if v == View::Indexes {
             self.load_indexes();
@@ -275,7 +281,9 @@ impl App {
                     let mut job = LayoutJob::default();
                     // A query tab has no table, so its own name ends the path.
                     let last = self.tab_name(self.cur);
-                    job.append(&format!("{name} / {} / ", s.db), 0.0, mono_fmt(12.0, MUTED(), 400.0));
+                    // A PostgreSQL path has a schema level between the database and the table.
+                    let place = if s.schema.is_empty() || s.coll.is_empty() { s.db.clone() } else { format!("{} / {}", s.db, s.schema) };
+                    job.append(&format!("{name} / {place} / "), 0.0, mono_fmt(12.0, MUTED(), 400.0));
                     job.append(&last, 0.0, mono_fmt(12.0, BRIGHT(), W_SEMIBOLD));
                     ui.label(job);
                     ui.add_space(4.0);
@@ -424,7 +432,7 @@ impl App {
         let titles: Vec<_> = self.tabs.iter().enumerate().map(|(i, t)| {
             let mut job = LayoutJob::default();
             job.append(&self.tab_name(i), 0.0, ui_fmt(TXT_BODY, Color32::PLACEHOLDER, if i == self.cur { W_MEDIUM } else { 400.0 }, 0.0));
-            job.append(&t.sel.db, 6.0, mono_fmt(10.0, FAINT(), 400.0));
+            job.append(t.sel.scope_label(), 6.0, mono_fmt(10.0, FAINT(), 400.0));
             let v = match t.view {
                 View::Aggregate => Some("aggregate"),
                 View::Indexes => Some("indexes"),
@@ -505,7 +513,8 @@ impl App {
                                 ui.painter().line_segment([c + egui::vec2(3.5, -3.5), c + egui::vec2(-3.5, 3.5)], s);
                             }
                             let conn_name = self.conn(t.sel.conn).map_or("", |c| c.meta.name.as_str());
-                            let resp = resp.on_hover_text(format!("{conn_name} / {} / {}\nMiddle-click closes, right-click for more", t.sel.db, self.tab_name(i)));
+                            let place = if t.sel.schema.is_empty() || t.sel.coll.is_empty() { t.sel.db.clone() } else { format!("{} / {}", t.sel.db, t.sel.schema) };
+                            let resp = resp.on_hover_text(format!("{conn_name} / {place} / {}\nMiddle-click closes, right-click for more", self.tab_name(i)));
                             resp.context_menu(|ui| {
                                 menu_look(ui);
                                 ui.set_min_width(190.0);

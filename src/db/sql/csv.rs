@@ -4,6 +4,7 @@
 
 use super::structure::{self, Structure};
 use super::value::{self, Kind, Param};
+use super::Dialect;
 use mongodb::bson::Bson;
 use std::io::Read;
 use std::path::PathBuf;
@@ -563,8 +564,8 @@ pub fn convert(col: &TCol, raw: &str, empty_null: bool, fmt: DateFmt) -> Result<
         Kind::Binary if !raw.starts_with("0x") && !raw.starts_with("0X") => Bson::String(raw.into()),
         Kind::Int | Kind::UInt | Kind::Year if raw.eq_ignore_ascii_case("true") => Bson::Int64(1),
         Kind::Int | Kind::UInt | Kind::Year if raw.eq_ignore_ascii_case("false") => Bson::Int64(0),
-        Kind::Date | Kind::DateTime => value::parse_edit(col.kind, &to_iso(raw, fmt))?,
-        k => value::parse_edit(k, raw)?,
+        Kind::Date | Kind::DateTime => value::parse_edit(Dialect::MySql, col.kind, &to_iso(raw, fmt))?,
+        k => value::parse_edit(Dialect::MySql, k, raw)?,
     };
     if let (Some(max), Bson::String(s)) = (col.max_chars, &parsed) {
         let n = s.chars().count();

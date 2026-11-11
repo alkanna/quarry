@@ -1,6 +1,7 @@
 //! Column kinds and value conversion: server text to BSON, editor text to BSON, BSON to a bind
 //! value. Exact types (DECIMAL, dates, JSON) stay as the server's own text so nothing is rounded.
 
+use super::Dialect;
 use mongodb::bson::{spec::BinarySubtype, Binary, Bson};
 
 /// A SQL string literal. Backslashes are escaped too, since MySQL reads them as escapes by default; `bs`
@@ -38,6 +39,16 @@ pub enum Kind {
     Enum,
     Set,
     Geometry,
+    /// PostgreSQL `bool`, sent as `t` or `f`.
+    Bool,
+    Uuid,
+    /// Arrays of any element type, shown as the server's own `{1,2,3}` text.
+    Array,
+    Interval,
+    /// inet, cidr, macaddr and macaddr8.
+    Inet,
+    /// Ranges and multiranges, shown as the server's own text.
+    Range,
 }
 
 impl Kind {
@@ -69,6 +80,38 @@ impl Kind {
 }
 
 impl Kind {
+    /// A kind from a PostgreSQL type. `name` is `pg_type.typname` of the base type (a domain is resolved to what it
+    /// wraps), or the name sqlx reports for a result column. `category` and `typtype` come from `pg_type` and are empty
+    /// for a result column, which has only the name. A user enum is `typtype` e and arrays are category A.
+    pub fn from_pg(name: &str, category: &str, typtype: &str) -> Kind {
+        let n = name.trim().trim_matches('"').to_ascii_lowercase();
+        if n.ends_with("[]") || category == "A" || (category.is_empty() && n.starts_with('_')) {
+            return Kind::Array;
+        }
+        match n.as_str() {
+            "int2" | "int4" | "int8" | "oid" => return Kind::Int,
+            "float4" | "float8" => return Kind::Float,
+            "numeric" => return Kind::Decimal,
+            "bool" => return Kind::Bool,
+            "text" | "varchar" | "bpchar" | "name" | "citext" | "char" => return Kind::Text,
+            "bytea" => return Kind::Binary,
+            "date" => return Kind::Date,
+            "timestamp" | "timestamptz" => return Kind::DateTime,
+            "time" | "timetz" => return Kind::Time,
+            "json" | "jsonb" => return Kind::Json,
+            "uuid" => return Kind::Uuid,
+            "interval" => return Kind::Interval,
+            "inet" | "cidr" | "macaddr" | "macaddr8" => return Kind::Inet,
+            _ => {}
+        }
+        match (typtype, category) {
+            ("e", _) => Kind::Enum,
+            ("r" | "m", _) | (_, "R") => Kind::Range,
+            ("", "") if n.ends_with("range") => Kind::Range,
+            _ => Kind::Text,
+        }
+    }
+
     /// A kind from information_schema's COLUMN_TYPE ("varchar(20)", "bigint unsigned"), which stays right
     /// for `_bin` text columns that sqlx reports as binary.
     pub fn from_column_type(full: &str) -> Kind {
@@ -82,24 +125,51 @@ fn bytes(b: &[u8]) -> Bson {
     Bson::Binary(Binary { subtype: BinarySubtype::Generic, bytes: b.to_vec() })
 }
 
-/// Converts the server's text-protocol bytes. Anything that does not parse as its kind falls back to
-/// the server's text, so a value is never lost or silently changed.
-pub fn to_bson(kind: Kind, raw: Option<&[u8]>) -> Bson {
+/// Converts the server's text-protocol bytes. Anything that does not parse as its kind falls back to the server's text,
+/// so a value is never lost or silently changed. A Postgres row holds a bytea as `\x` hex text, so it is decoded here, at
+/// the edge, and the rest of the app sees the same bytes as on MySQL.
+pub fn to_bson(d: Dialect, kind: Kind, raw: Option<&[u8]>) -> Bson {
+    let pg = d == Dialect::Postgres;
+    if pg && kind == Kind::Binary {
+        if let Some(b) = raw.and_then(unhex) {
+            return bytes(&b);
+        }
+    }
     let Some(raw) = raw else { return Bson::Null };
     let text = || String::from_utf8_lossy(raw).into_owned();
+    // PostgreSQL sends a bit string as `0101` and a geometry as its own text, which only the cast it is written back
+    // through can read. Bytes of that text would bind as `\x3031..` and fail the cast.
+    if pg && matches!(kind, Kind::Bit | Kind::Geometry) {
+        return Bson::String(text());
+    }
     let s = std::str::from_utf8(raw).unwrap_or("");
     match kind {
         Kind::Int | Kind::Year => s.parse::<i64>().map_or_else(|_| Bson::String(text()), Bson::Int64),
         // Bson has no unsigned 64 bit integer, so values above i64::MAX stay exact as text.
         Kind::UInt => s.parse::<u64>().ok().and_then(|v| i64::try_from(v).ok()).map_or_else(|| Bson::String(text()), Bson::Int64),
         Kind::Float => s.parse::<f64>().map_or_else(|_| Bson::String(text()), Bson::Double),
-        Kind::Decimal | Kind::Date | Kind::DateTime | Kind::Time | Kind::Json | Kind::Enum | Kind::Set => Bson::String(text()),
+        Kind::Decimal | Kind::Date | Kind::DateTime | Kind::Time | Kind::Json | Kind::Enum | Kind::Set | Kind::Uuid | Kind::Array | Kind::Interval | Kind::Inet | Kind::Range => Bson::String(text()),
+        Kind::Bool => match s {
+            "t" => Bson::Boolean(true),
+            "f" => Bson::Boolean(false),
+            _ => Bson::String(text()),
+        },
         Kind::Text => match std::str::from_utf8(raw) {
             Ok(s) => Bson::String(s.into()),
             Err(_) => bytes(raw),
         },
         Kind::Binary | Kind::Bit | Kind::Geometry => bytes(raw),
     }
+}
+
+/// The bytes of PostgreSQL's hex bytea text: a backslash, an x and pairs of digits.
+fn unhex(raw: &[u8]) -> Option<Vec<u8>> {
+    let h = raw.strip_prefix(b"\\x")?;
+    if h.len() % 2 != 0 || !h.iter().all(u8::is_ascii_hexdigit) {
+        return None;
+    }
+    let d = |b: u8| (b as char).to_digit(16).unwrap_or(0) as u8;
+    Some(h.chunks(2).map(|p| d(p[0]) << 4 | d(p[1])).collect())
 }
 
 fn digits(s: &str, min: usize, max: usize) -> Option<u32> {
@@ -122,12 +192,17 @@ fn time_ok(s: &str, hour_digits: usize, max_hour: u32) -> bool {
     matches!(p[..], [h, m, sec] if digits(h, 2, hour_digits).is_some_and(|h| h <= max_hour) && digits(m, 2, 2).is_some_and(|m| m < 60) && digits(sec, 2, 2).is_some_and(|s| s < 60))
 }
 
-/// Checks text typed into the grid editor and turns it into the value to stage. The word NULL, in
-/// any case, is a NULL. Errors are short enough to show under the cell.
-pub fn parse_edit(kind: Kind, text: &str) -> Result<Bson, String> {
+/// Checks text typed into the grid editor and turns it into the value to stage. The word NULL, in any case, is a NULL.
+/// Errors are short enough to show under the cell. PostgreSQL's dates and times have more spellings than MySQL's
+/// (`2024-01-01 00:00:00+02`, `infinity`, `12:00:00+01`, five digit years), and the cast the write is made through
+/// reads all of them and names what it refuses, so they go through as typed.
+pub fn parse_edit(d: Dialect, kind: Kind, text: &str) -> Result<Bson, String> {
     let t = text.trim();
     if t.eq_ignore_ascii_case("null") {
         return Ok(Bson::Null);
+    }
+    if d == Dialect::Postgres && matches!(kind, Kind::Date | Kind::DateTime | Kind::Time) {
+        return if t.is_empty() { Err("Enter a date or time, like 2024-01-31 12:30:00.".into()) } else { Ok(Bson::String(t.into())) };
     }
     match kind {
         Kind::Int | Kind::Year => t.parse::<i64>().map(Bson::Int64).map_err(|_| "Enter a whole number.".to_string()),
@@ -180,8 +255,27 @@ pub fn parse_edit(kind: Kind, text: &str) -> Result<Bson, String> {
             }
         }
         Kind::Geometry => Err("Geometry values cannot be edited as text yet.".into()),
-        Kind::Text | Kind::Enum | Kind::Set => Ok(Bson::String(text.into())),
+        Kind::Bool => match t.to_ascii_lowercase().as_str() {
+            "true" | "t" | "1" | "yes" => Ok(Bson::Boolean(true)),
+            "false" | "f" | "0" | "no" => Ok(Bson::Boolean(false)),
+            _ => Err("Enter true or false.".into()),
+        },
+        Kind::Uuid => uuid_text(t).map(Bson::String).ok_or_else(|| "Enter a UUID like 123e4567-e89b-12d3-a456-426614174000.".to_string()),
+        // The server's cast is the only parser that knows every spelling of these, and it names what it refused.
+        Kind::Text | Kind::Enum | Kind::Set | Kind::Array | Kind::Interval | Kind::Inet | Kind::Range => Ok(Bson::String(text.into())),
     }
+}
+
+/// A UUID in the canonical lowercase form, from the spellings PostgreSQL reads: optional braces, and hyphens after any
+/// group of four digits. Written back canonical so a cell edited to the value it already has stays unchanged.
+fn uuid_text(t: &str) -> Option<String> {
+    let body = t.strip_prefix('{').and_then(|r| r.strip_suffix('}')).unwrap_or(t);
+    let hex: String = body.chars().filter(|c| *c != '-').collect();
+    if hex.len() != 32 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) || body.starts_with('-') || body.ends_with('-') || body.contains("--") {
+        return None;
+    }
+    let h = hex.to_ascii_lowercase();
+    Some(format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..]))
 }
 
 /// A value to bind to a `?` placeholder. The worker maps it to its driver, so this module stays free
@@ -206,6 +300,22 @@ impl Param {
             }
         }
         Param::from_bson(v)
+    }
+
+    /// A value for PostgreSQL, where every bound value travels as text and the `CAST($n AS type)` around its placeholder
+    /// converts it: the server refuses a text value for an int column, but never a cast from text. A boolean is `true`
+    /// or `false`, bytes are the `\x` hex that bytea reads, and NULL stays NULL.
+    pub fn for_pg(v: &Bson) -> Param {
+        match v {
+            Bson::Null | Bson::Undefined => Param::Null,
+            Bson::Boolean(b) => Param::Text(b.to_string()),
+            Bson::Int32(i) => Param::Text(i.to_string()),
+            Bson::Int64(i) => Param::Text(i.to_string()),
+            Bson::Double(f) => Param::Text(f.to_string()),
+            Bson::String(s) => Param::Text(s.clone()),
+            Bson::Binary(b) => Param::Text(format!("\\x{}", hex_digits(&b.bytes, false))),
+            other => Param::Text(other.to_string()),
+        }
     }
 
     pub fn from_bson(v: &Bson) -> Param {
@@ -234,6 +344,17 @@ mod tests {
     }
 
     #[test]
+    fn postgres_bit_and_geometry_text_binds_back_as_the_same_text() {
+        for kind in [Kind::Bit, Kind::Geometry] {
+            let v = to_bson(Dialect::Postgres, kind, Some(b"0101"));
+            assert_eq!(v, Bson::String("0101".into()));
+            assert_eq!(Param::for_pg(&v), Param::Text("0101".into()));
+        }
+        // MySQL keeps bytes.
+        assert!(matches!(to_bson(Dialect::MySql, Kind::Bit, Some(&[5])), Bson::Binary(_)));
+    }
+
+    #[test]
     fn type_names_map_to_kinds() {
         let k = Kind::from_type_name;
         for (n, want) in [
@@ -248,13 +369,97 @@ mod tests {
         }
     }
 
+    #[test]
+    fn postgres_types_map_to_kinds() {
+        let k = Kind::from_pg;
+        for (n, cat, tt, want) in [
+            ("int2", "N", "b", Kind::Int), ("int4", "N", "b", Kind::Int), ("int8", "N", "b", Kind::Int), ("oid", "N", "b", Kind::Int),
+            ("float4", "N", "b", Kind::Float), ("float8", "N", "b", Kind::Float), ("numeric", "N", "b", Kind::Decimal), ("bool", "B", "b", Kind::Bool),
+            ("text", "S", "b", Kind::Text), ("varchar", "S", "b", Kind::Text), ("bpchar", "S", "b", Kind::Text), ("name", "S", "b", Kind::Text), ("citext", "S", "b", Kind::Text),
+            ("bytea", "U", "b", Kind::Binary), ("date", "D", "b", Kind::Date), ("timestamp", "D", "b", Kind::DateTime), ("timestamptz", "D", "b", Kind::DateTime),
+            ("time", "D", "b", Kind::Time), ("timetz", "D", "b", Kind::Time), ("json", "U", "b", Kind::Json), ("jsonb", "U", "b", Kind::Json),
+            ("uuid", "U", "b", Kind::Uuid), ("_int4", "A", "b", Kind::Array), ("interval", "T", "b", Kind::Interval),
+            ("inet", "I", "b", Kind::Inet), ("cidr", "I", "b", Kind::Inet), ("macaddr", "U", "b", Kind::Inet),
+            ("int4range", "R", "r", Kind::Range), ("tstzmultirange", "R", "m", Kind::Range), ("mood", "E", "e", Kind::Enum),
+            ("money", "N", "b", Kind::Text), ("point", "G", "b", Kind::Text), ("tsvector", "U", "b", Kind::Text), ("mycomposite", "C", "c", Kind::Text),
+        ] {
+            assert_eq!(k(n, cat, tt), want, "{n}");
+        }
+        // The names sqlx gives a result column have no category.
+        for (n, want) in [("INT4", Kind::Int), ("TIMESTAMPTZ", Kind::DateTime), ("INT4[]", Kind::Array), ("INT4RANGE", Kind::Range), ("BOOL", Kind::Bool), ("\"CHAR\"", Kind::Text), ("?", Kind::Text)] {
+            assert_eq!(k(n, "", ""), want, "{n}");
+        }
+    }
+
+    #[test]
+    fn postgres_text_becomes_bson() {
+        assert_eq!(conv(Kind::Bool, "t"), Bson::Boolean(true));
+        assert_eq!(conv(Kind::Bool, "f"), Bson::Boolean(false));
+        assert_eq!(conv(Kind::Bool, "?"), Bson::String("?".into()));
+        assert_eq!(to_bson(Dialect::Postgres, Kind::Binary, Some(b"\\x00ff10")), bytes(&[0, 255, 16]));
+        assert_eq!(to_bson(Dialect::Postgres, Kind::Binary, Some(b"\\x")), bytes(&[]));
+        // MySQL bytes that happen to start with a backslash are not hex.
+        assert_eq!(to_bson(Dialect::MySql, Kind::Binary, Some(b"\\x00ff")), bytes(b"\\x00ff"));
+        assert_eq!(to_bson(Dialect::Postgres, Kind::Binary, Some(b"\\xzz")), bytes(b"\\xzz"));
+        for k in [Kind::Uuid, Kind::Array, Kind::Interval, Kind::Inet, Kind::Range] {
+            assert_eq!(conv(k, "{1,2}"), Bson::String("{1,2}".into()));
+        }
+        for k in [Kind::Array, Kind::Interval, Kind::Inet, Kind::Range] {
+            assert_eq!(parse_edit(Dialect::MySql, k, "{1,2}"), Ok(Bson::String("{1,2}".into())));
+        }
+    }
+
+    #[test]
+    fn postgres_edits_are_checked() {
+        for t in ["true", "T", "1", "Yes", " TRUE "] {
+            assert_eq!(parse_edit(Dialect::MySql, Kind::Bool, t), Ok(Bson::Boolean(true)), "{t}");
+        }
+        for f in ["false", "F", "0", "no", "No"] {
+            assert_eq!(parse_edit(Dialect::MySql, Kind::Bool, f), Ok(Bson::Boolean(false)), "{f}");
+        }
+        assert!(parse_edit(Dialect::MySql, Kind::Bool, "maybe").is_err() && parse_edit(Dialect::MySql, Kind::Bool, "").is_err() && parse_edit(Dialect::MySql, Kind::Bool, "2").is_err());
+        assert_eq!(parse_edit(Dialect::MySql, Kind::Bool, "null"), Ok(Bson::Null));
+        let canon = Bson::String("123e4567-e89b-12d3-a456-426614174000".into());
+        for u in ["123e4567-e89b-12d3-a456-426614174000", "123E4567-E89B-12D3-A456-426614174000", "{123e4567-e89b-12d3-a456-426614174000}", "123e4567e89b12d3a456426614174000", "123e-4567-e89b-12d3-a456-4266-14174000"] {
+            assert_eq!(parse_edit(Dialect::MySql, Kind::Uuid, u), Ok(canon.clone()), "{u}");
+        }
+        for bad in ["", "abc", "123e4567-e89b-12d3-a456-42661417400", "123e4567-e89b-12d3-a456-42661417400g", "-123e4567e89b12d3a456426614174000", "123e4567--e89b12d3a456426614174000"] {
+            assert!(parse_edit(Dialect::MySql, Kind::Uuid, bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn postgres_dates_and_times_go_to_the_server_as_typed() {
+        for (k, t) in [(Kind::DateTime, "2024-01-01 00:00:00+02"), (Kind::DateTime, "infinity"), (Kind::Date, "-infinity"), (Kind::Time, "12:00:00+01"), (Kind::Date, "12345-01-01")] {
+            assert_eq!(parse_edit(Dialect::Postgres, k, &format!(" {t} ")), Ok(Bson::String(t.into())), "{t}");
+            assert!(parse_edit(Dialect::MySql, k, t).is_err(), "{t}");
+        }
+        assert_eq!(parse_edit(Dialect::Postgres, Kind::Date, "NULL"), Ok(Bson::Null));
+        assert!(parse_edit(Dialect::Postgres, Kind::Date, "  ").is_err());
+        assert_eq!(parse_edit(Dialect::Postgres, Kind::Int, "4"), Ok(Bson::Int64(4)));
+        assert_eq!(parse_edit(Dialect::MySql, Kind::Date, "2024-02-29"), parse_edit(Dialect::MySql, Kind::Date, "2024-02-29"));
+    }
+
+    #[test]
+    fn postgres_params_are_text() {
+        assert_eq!(Param::for_pg(&Bson::Boolean(true)), Param::Text("true".into()));
+        assert_eq!(Param::for_pg(&Bson::Boolean(false)), Param::Text("false".into()));
+        assert_eq!(Param::for_pg(&Bson::Int64(-4)), Param::Text("-4".into()));
+        assert_eq!(Param::for_pg(&Bson::Double(0.5)), Param::Text("0.5".into()));
+        assert_eq!(Param::for_pg(&bytes(&[0, 255, 16])), Param::Text("\\x00ff10".into()));
+        assert_eq!(Param::for_pg(&bytes(&[])), Param::Text("\\x".into()));
+        assert_eq!(Param::for_pg(&Bson::Null), Param::Null);
+        // MySQL keeps its integer for a boolean.
+        assert_eq!(Param::from_bson(&Bson::Boolean(true)), Param::Int(1));
+    }
+
     fn conv(kind: Kind, s: &str) -> Bson {
-        to_bson(kind, Some(s.as_bytes()))
+        to_bson(Dialect::MySql, kind, Some(s.as_bytes()))
     }
 
     #[test]
     fn server_text_becomes_bson() {
-        assert_eq!(to_bson(Kind::Int, None), Bson::Null);
+        assert_eq!(to_bson(Dialect::MySql, Kind::Int, None), Bson::Null);
         assert_eq!(conv(Kind::Int, "-42"), Bson::Int64(-42));
         assert_eq!(conv(Kind::Year, "2024"), Bson::Int64(2024));
         assert_eq!(conv(Kind::UInt, "9223372036854775807"), Bson::Int64(i64::MAX));
@@ -268,10 +473,10 @@ mod tests {
         assert_eq!(conv(Kind::Enum, "red"), Bson::String("red".into()));
         assert_eq!(conv(Kind::Set, "a,b"), Bson::String("a,b".into()));
         assert_eq!(conv(Kind::Text, "héllo"), Bson::String("héllo".into()));
-        assert_eq!(to_bson(Kind::Text, Some(&[0xff, 0xfe])), bytes(&[0xff, 0xfe]));
-        assert_eq!(to_bson(Kind::Binary, Some(&[1, 2])), bytes(&[1, 2]));
-        assert_eq!(to_bson(Kind::Bit, Some(&[1])), bytes(&[1]));
-        assert_eq!(to_bson(Kind::Geometry, Some(&[0, 0, 0, 0])), bytes(&[0, 0, 0, 0]));
+        assert_eq!(to_bson(Dialect::MySql, Kind::Text, Some(&[0xff, 0xfe])), bytes(&[0xff, 0xfe]));
+        assert_eq!(to_bson(Dialect::MySql, Kind::Binary, Some(&[1, 2])), bytes(&[1, 2]));
+        assert_eq!(to_bson(Dialect::MySql, Kind::Bit, Some(&[1])), bytes(&[1]));
+        assert_eq!(to_bson(Dialect::MySql, Kind::Geometry, Some(&[0, 0, 0, 0])), bytes(&[0, 0, 0, 0]));
         // A value that does not parse keeps the server's text.
         assert_eq!(conv(Kind::Int, "oops"), Bson::String("oops".into()));
         assert_eq!(conv(Kind::Float, "nope"), Bson::String("nope".into()));
@@ -279,7 +484,7 @@ mod tests {
 
     #[test]
     fn edits_are_checked_per_kind() {
-        let p = parse_edit;
+        let p = |k, t| parse_edit(Dialect::MySql, k, t);
         assert_eq!(p(Kind::Text, " NuLl "), Ok(Bson::Null));
         assert_eq!(p(Kind::Int, "NULL"), Ok(Bson::Null));
         assert_eq!(p(Kind::Int, " 7 "), Ok(Bson::Int64(7)));
@@ -337,7 +542,7 @@ mod tests {
 
     #[test]
     fn bit_geometry_and_zero_dates() {
-        let p = parse_edit;
+        let p = |k, t| parse_edit(Dialect::MySql, k, t);
         assert_eq!(p(Kind::Bit, "1"), Ok(Bson::Int64(1)));
         assert_eq!(p(Kind::Bit, "b'0101'"), Ok(Bson::Int64(5)));
         assert_eq!(p(Kind::Bit, "0x1F"), Ok(Bson::Int64(31)));

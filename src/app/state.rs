@@ -83,12 +83,110 @@ pub(super) struct Conn {
     pub(super) status: Status,
     /// Writes are locked at every launch and only unlocked for this session.
     pub(super) writable: bool,
+    /// On PostgreSQL the inner list holds the database's user schemas, and `tables` the tables of each one.
     pub(super) dbs: Vec<(String, Option<Vec<String>>)>,
+    /// PostgreSQL only: the tables and views of each schema that was loaded, by database then schema. Nested so a lookup
+    /// can borrow both names.
+    pub(super) tables: HashMap<String, HashMap<String, Vec<String>>>,
+    /// PostgreSQL only: per database the schemas the server listed and the one the sidebar shows. `dbs` holds the user
+    /// schema names of the same list, written together with it by `set_schemas`.
+    pub(super) pg: HashMap<String, PgNs>,
     pub(super) masked_uri: String,
     /// Kept alive while connected through SSH; dropping it closes the tunnel.
     pub(super) tunnel: Option<crate::ssh::Tunnel>,
     /// Shown in the status bar and under the sidebar; filled after connecting.
     pub(super) server: ServerInfo,
+}
+
+/// What a PostgreSQL database holds beside its tables: every schema with its table count and whether it is a system one,
+/// and the schema the sidebar lists. The pick is kept for the session only, since the open tabs carry their own schema
+/// and the list of schemas can change between launches. An empty pick means none was made yet.
+#[derive(Default)]
+pub(super) struct PgNs {
+    pub(super) schemas: Vec<db::sql::PgSchema>,
+    pub(super) picked: String,
+}
+
+impl Conn {
+    pub(super) fn new(meta: ConnMeta, status: Status) -> Conn {
+        Conn { meta, client: None, sql: None, status, writable: false, dbs: Vec::new(), tables: Default::default(), pg: Default::default(), masked_uri: String::new(), tunnel: None, server: Default::default() }
+    }
+
+    /// Forgets every list read from the server, for a new session or a closed one.
+    pub(super) fn forget_lists(&mut self) {
+        self.dbs.clear();
+        self.tables.clear();
+        self.pg.clear();
+    }
+
+    /// The tables and views of one PostgreSQL schema, once loaded.
+    pub(super) fn tables_in(&self, db: &str, schema: &str) -> Option<&Vec<String>> {
+        self.tables.get(db)?.get(schema)
+    }
+
+    /// The schema the sidebar lists for a PostgreSQL database: the one picked, else `public`, else the first user schema.
+    pub(super) fn pg_picked(&self, db: &str) -> &str {
+        match self.pg.get(db) {
+            Some(p) if !p.picked.is_empty() => &p.picked,
+            _ => default_schema(self.dbs.iter().find(|d| d.0 == db).and_then(|d| d.1.as_deref()).unwrap_or_default()),
+        }
+    }
+
+    /// The schemas of a database arrived: the user names go to `dbs` next to the full list.
+    pub(super) fn set_schemas(&mut self, db: &str, list: Vec<db::sql::PgSchema>, picked: String) {
+        let user: Vec<String> = list.iter().filter(|s| !s.system).map(|s| s.name.clone()).collect();
+        if let Some(d) = self.dbs.iter_mut().find(|d| d.0 == db) {
+            d.1 = Some(user);
+        }
+        self.pg.insert(db.to_string(), PgNs { schemas: list, picked });
+    }
+}
+
+/// The (connection, database, schema) whose PostgreSQL table list was asked for, so a list loads once.
+#[derive(Default)]
+pub(super) struct Asked(HashSet<(u64, String, String)>);
+
+impl Asked {
+    /// Marks a list as asked; false when it already was.
+    pub(super) fn insert(&mut self, conn: u64, db: &str, schema: &str) -> bool {
+        self.0.insert((conn, db.to_string(), schema.to_string()))
+    }
+
+    /// The schemas of a database that were asked for.
+    pub(super) fn held(&self, conn: u64, db: &str) -> Vec<String> {
+        self.0.iter().filter(|k| k.0 == conn && k.1 == db).map(|k| k.2.clone()).collect()
+    }
+
+    /// Forgets that lists were asked for, so they load again: one schema's, one database's or the whole connection's.
+    /// A new session, a refresh and a failed list each need it.
+    pub(super) fn forget(&mut self, conn: u64, db: Option<&str>, schema: Option<&str>) {
+        self.0.retain(|k| !(k.0 == conn && db.is_none_or(|d| k.1 == d) && schema.is_none_or(|s| k.2 == s)));
+    }
+}
+
+/// The views of each namespace, by connection and then the namespace key (`ns_key`), for the sidebar, the palette and
+/// autocomplete. A set is shared out by `Arc`, so a scope keeps it without copying.
+#[derive(Default)]
+pub(super) struct Views(HashMap<u64, HashMap<String, Arc<HashSet<String>>>>);
+
+impl Views {
+    pub(super) fn of(&self, conn: u64, key: &str) -> Option<&Arc<HashSet<String>>> {
+        self.0.get(&conn)?.get(key)
+    }
+
+    pub(super) fn has(&self, conn: u64, key: &str, name: &str) -> bool {
+        self.of(conn, key).is_some_and(|s| s.contains(name))
+    }
+
+    /// Replaces the views of a namespace with what the server listed.
+    pub(super) fn set(&mut self, conn: u64, key: &str, names: impl IntoIterator<Item = String>) {
+        self.0.entry(conn).or_default().insert(key.to_string(), Arc::new(names.into_iter().collect()));
+    }
+
+    pub(super) fn add(&mut self, conn: u64, key: &str, name: &str) {
+        let set = self.0.entry(conn).or_default().entry(key.to_string()).or_default();
+        Arc::make_mut(set).insert(name.to_string());
+    }
 }
 
 /// The host part of a connection string: after the scheme and any credentials, before the path
@@ -126,14 +224,52 @@ impl ServerInfo {
 
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Default)]
 pub(super) struct Sel {
     pub(super) conn: u64,
     pub(super) db: String,
+    /// PostgreSQL only: the schema inside the database. Empty for Mongo and MySQL, where `db` is the whole namespace.
+    pub(super) schema: String,
     pub(super) coll: String,
 }
 
+/// The schema a PostgreSQL database opens on when it has one.
+pub(super) const PG_PUBLIC: &str = super::shell_attach::PG_SCHEMA;
+
+/// Key of one namespace in the caches that hold a list per database (autocomplete schema, values, views). A PostgreSQL
+/// schema name repeats across databases, so the database is part of the key; MySQL has no schema and keeps the bare name.
+pub(super) fn ns_key(db: &str, schema: &str) -> String {
+    if schema.is_empty() { db.to_string() } else { format!("{db}\u{1f}{schema}") }
+}
+
+/// The schema a database opens on: `public` when the user can see it, else the first user schema, else none.
+pub(super) fn default_schema(schemas: &[String]) -> &str {
+    if schemas.iter().any(|s| s == PG_PUBLIC) { PG_PUBLIC } else { schemas.first().map_or("", String::as_str) }
+}
+
 impl Sel {
+    /// The namespace the worker calls take: the schema on PostgreSQL, the database on MySQL. A PostgreSQL connection is
+    /// bound to one database, so `db` only picks the pool there (`Db::at`).
+    pub(super) fn space(&self) -> &str {
+        if self.schema.is_empty() { &self.db } else { &self.schema }
+    }
+
+    /// The cache key of this selection's namespace, see `ns_key`.
+    pub(super) fn nskey(&self) -> String {
+        ns_key(&self.db, &self.schema)
+    }
+
+    /// The faint label beside a tab's name: the schema of a PostgreSQL table, else the database. A Query tab has no
+    /// table, so it names its database.
+    pub(super) fn scope_label(&self) -> &str {
+        if !self.schema.is_empty() && !self.coll.is_empty() { &self.schema } else { &self.db }
+    }
+
+    /// "schema.table" outside `public`, the plain table name otherwise, for places with a single name.
+    pub(super) fn shown(&self) -> String {
+        if self.schema.is_empty() || self.schema == PG_PUBLIC { self.coll.clone() } else { format!("{}.{}", self.schema, self.coll) }
+    }
+
     /// "db.coll", how index stats are keyed.
     pub(super) fn key(&self) -> String {
         format!("{}.{}", self.db, self.coll)
@@ -289,6 +425,8 @@ pub(super) struct SqlTab {
     pub(super) run_req: u64,
     /// Database the Query view runs in when it is not the tab's own.
     pub(super) run_db: String,
+    /// PostgreSQL only: the schema the Query view puts first in search_path. Empty keeps the server's own.
+    pub(super) run_schema: String,
     /// Caret of the Query editor as a char index, and what the script says about it.
     pub(super) caret: usize,
     pub(super) caret_cache: std::cell::RefCell<Option<super::sql_query::CaretInfo>>,
@@ -506,7 +644,7 @@ impl Tab {
 
     /// "conn/db/coll", the key of per-collection settings.
     pub(super) fn coll_key(&self) -> String {
-        format!("{}/{}/{}", self.sel.conn, self.sel.db, self.sel.coll)
+        if self.sel.schema.is_empty() { format!("{}/{}/{}", self.sel.conn, self.sel.db, self.sel.coll) } else { format!("{}/{}/{}.{}", self.sel.conn, self.sel.db, self.sel.schema, self.sel.coll) }
     }
 
     /// The page decoded, for a scan of every row; the tab itself keeps only BSON bytes.
@@ -771,6 +909,7 @@ pub(super) struct JsonEdit {
 pub(super) struct Draft {
     pub(super) conn: u64,
     pub(super) db: String,
+    pub(super) schema: String,
     pub(super) coll: String,
     pub(super) original: Document,
     pub(super) current: Document,
@@ -1136,7 +1275,7 @@ impl App {
     }
 
     pub(super) fn sel_is_view(&self) -> bool {
-        self.t().is_some_and(|t| self.views.contains(&(t.sel.conn, t.sel.db.clone(), t.sel.coll.clone())))
+        self.t().is_some_and(|t| self.views.has(t.sel.conn, &t.sel.nskey(), &t.sel.coll))
     }
 
     pub(super) fn sel_writable(&self) -> bool {

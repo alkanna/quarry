@@ -40,7 +40,7 @@ pub(super) fn jump_score(tokens: &[String], segs: &[&str]) -> Option<u32> {
             None => return None,
         };
         total += sc;
-        if n + 1 == tokens.len() && segs.len() == 3 && i == 2 {
+        if n + 1 == tokens.len() && segs.len() >= 3 && i + 1 == segs.len() {
             total += 3;
         }
     }
@@ -73,8 +73,19 @@ pub(super) fn jumps(conns: &[Conn], active: Option<u64>, q: &str) -> Vec<(String
         for (db, colls) in &c.dbs {
             let dbl = db.to_lowercase();
             push(&[&name, &dbl], db.clone(), &c.meta.name, Jump::Db(id, db.clone()));
+            if c.meta.engine == db::sql::Engine::Postgres {
+                // Only the schemas that were opened have their tables loaded, and those are what the palette knows.
+                let mut loaded: Vec<(&String, &Vec<String>)> = c.tables.get(db).into_iter().flatten().collect();
+                loaded.sort_by(|a, b| a.0.cmp(b.0));
+                for (schema, tables) in loaded {
+                    for coll in tables {
+                        push(&[&name, &dbl, &schema.to_lowercase(), &coll.to_lowercase()], format!("{db}.{schema}.{coll}"), &c.meta.name, Jump::Coll(Sel { conn: id, db: db.clone(), schema: schema.clone(), coll: coll.clone() }));
+                    }
+                }
+                continue;
+            }
             for coll in colls.iter().flatten() {
-                push(&[&name, &dbl, &coll.to_lowercase()], format!("{db}.{coll}"), &c.meta.name, Jump::Coll(Sel { conn: id, db: db.clone(), coll: coll.clone() }));
+                push(&[&name, &dbl, &coll.to_lowercase()], format!("{db}.{coll}"), &c.meta.name, Jump::Coll(Sel { conn: id, db: db.clone(), coll: coll.clone(), ..Default::default() }));
             }
         }
     }
@@ -177,7 +188,7 @@ impl App {
                 }
                 r.on_hover_text("Press / or Cmd+Shift+F");
                 ui.add_space(14.0);
-                let sql_conn = self.active.and_then(|id| self.conn(id)).filter(|c| c.meta.engine.is_sql() && c.status == Status::Ready).map(|c| (c.meta.id, c.writable));
+                let sql_conn = self.active.and_then(|id| self.conn(id)).filter(|c| c.meta.engine.is_sql() && c.meta.engine.supports(db::sql::Feature::CreateDrop) && c.status == Status::Ready).map(|c| (c.meta.id, c.writable));
                 let mut new_db = None;
                 ui.horizontal(|ui| {
                     ui.label(LayoutJob::single_section("Databases".into(), ui_fmt(10.5, FAINT(), W_SEMIBOLD, 0.8)));
@@ -204,9 +215,8 @@ impl App {
             None => ("Add a connection".to_string(), String::new(), FAINT()),
         };
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 32.0), Sense::click());
+        field_frame(ui, rect, &resp, false);
         let p = ui.painter();
-        let (fill, edge) = if resp.is_pointer_button_down_on() { (PRESSED(), MUTED()) } else if resp.hovered() { (RAISED(), MUTED()) } else { (RAISED(), BORDER()) };
-        p.rect(rect, R_MD, fill, Stroke::new(1.0, if resp.has_focus() { PRIMARY() } else { edge }), egui::StrokeKind::Inside);
         p.circle_filled(egui::pos2(rect.left() + 14.0, rect.center().y), 4.0, dot);
         chevron(p, egui::pos2(rect.right() - 14.0, rect.center().y), true, if resp.hovered() { MUTED() } else { FAINT() });
         paint_name_tag(p, egui::Rangef::new(rect.left() + 26.0, rect.right() - 28.0), rect.center().y, &name, FontId::proportional(TXT_TITLE), BRIGHT(), &tag);
@@ -248,7 +258,7 @@ impl App {
                 if ui.button("Refresh databases").on_hover_text("Reconnect and reload the list of databases and collections").clicked() {
                     refresh = Some(c.meta.id);
                 }
-                if c.meta.engine.is_sql() && c.status == Status::Ready && ui.button("Users and privileges…").clicked() {
+                if c.meta.engine == db::sql::Engine::MySql && c.status == Status::Ready && ui.button("Users and privileges…").clicked() {
                     sql_users = Some(c.meta.id);
                 }
                 ui.add_space(2.0);
@@ -380,6 +390,7 @@ impl App {
         let mut revealed = false;
         let mut lazy: Vec<String> = Vec::new();
         let mut folded: Vec<(u64, String, bool)> = Vec::new();
+        let mut pick_schema: Option<(String, String)> = None;
         {
             let Some(c) = self.conn(id) else { return };
             match &c.status {
@@ -410,13 +421,19 @@ impl App {
                 }
             }
             let sql = c.meta.engine.is_sql();
+            let pg = c.meta.engine == db::sql::Engine::Postgres;
+            let engine = c.meta.engine;
             let writable = c.writable;
             for (db_name, colls) in &c.dbs {
-                let mut matches: Vec<&String> = colls.iter().flatten().filter(|n| filter.is_empty() || n.to_lowercase().contains(&filter)).collect();
+                // A PostgreSQL database lists the tables of the schema picked in its switcher; `colls` holds its schemas.
+                let picked = self.ns_of(id, db_name);
+                let ns = ns_key(db_name, picked);
+                let shown: Vec<&String> = if pg { c.tables_in(db_name, picked).into_iter().flatten().collect() } else { colls.iter().flatten().collect() };
+                let mut matches: Vec<&String> = shown.into_iter().filter(|n| contains_ci(n, &filter)).collect();
                 // Copies still running are not listed by the server yet, so they are drawn from `copying`.
                 let pending: Vec<&String> = self.copying.iter().filter(|c| c.0 == id && c.1 == *db_name).map(|c| &c.2).collect();
                 if !pending.is_empty() {
-                    let extra: Vec<&String> = pending.iter().copied().filter(|n| !matches.contains(n) && (filter.is_empty() || n.to_lowercase().contains(&filter))).collect();
+                    let extra: Vec<&String> = pending.iter().copied().filter(|n| !matches.contains(n) && contains_ci(n, &filter)).collect();
                     matches.extend(extra);
                     matches.sort();
                 }
@@ -424,8 +441,8 @@ impl App {
                     continue;
                 }
                 // Tables first, then views, each under its own caption.
-                let db_views: HashSet<&str> = self.views.iter().filter(|v| v.0 == id && v.1 == *db_name).map(|v| v.2.as_str()).collect();
-                let is_view_of = |n: &String| db_views.contains(n.as_str());
+                let db_views = self.views.of(id, &ns);
+                let is_view_of = |n: &String| db_views.is_some_and(|v| v.contains(n.as_str()));
                 let n_views = if sql { matches.iter().filter(|n| is_view_of(n)).count() } else { 0 };
                 if sql {
                     matches.sort_by_key(|n| is_view_of(n));
@@ -459,24 +476,30 @@ impl App {
                         if ui.button("Refresh").clicked() {
                             side.push(SideAct::Refresh(db_name.clone()));
                         }
-                        if ui.button("Users and privileges…").clicked() {
-                            side.push(SideAct::SqlUsers);
+                        if engine.supports(db::sql::Feature::Users) {
+                            if ui.button("Users and privileges…").clicked() {
+                                side.push(SideAct::SqlUsers);
+                            }
                         }
-                        ui.separator();
-                        if ui.button("Export as SQL dump…").on_hover_text("Tables, views, triggers and routines as a script, with the rows").clicked() {
-                            side.push(SideAct::SqlDump(db_name.clone(), None));
+                        if engine.supports(db::sql::Feature::SqlDump) {
+                            ui.separator();
+                            if ui.button("Export as SQL dump…").on_hover_text("Tables, views, triggers and routines as a script, with the rows").clicked() {
+                                side.push(SideAct::SqlDump(db_name.clone(), None));
+                            }
+                            if ui.button("Run SQL file…").on_hover_text("Runs a dump or any script file here").clicked() {
+                                side.push(SideAct::SqlRunFile(db_name.clone()));
+                            }
                         }
-                        if ui.button("Run SQL file…").on_hover_text("Runs a dump or any script file here").clicked() {
-                            side.push(SideAct::SqlRunFile(db_name.clone()));
-                        }
-                        // Creating and dropping are writes, so they stay disabled until the connection is unlocked.
-                        let system = db::sql::create::SYSTEM_SCHEMAS.contains(&db_name.as_str());
-                        ui.separator();
-                        if ui.add_enabled(writable && !system, egui::Button::new("New table…")).on_disabled_hover_text(if system { "Belongs to the server" } else { "Read-only: unlock writes to create a table" }).clicked() {
-                            side.push(SideAct::NewTable(db_name.clone()));
-                        }
-                        if ui.add_enabled_ui(writable && !system, |ui| danger_item(ui, "Drop database…")).inner.on_disabled_hover_text(if system { "Belongs to the server" } else { "Read-only: unlock writes to drop a database" }).clicked() {
-                            side.push(SideAct::SqlDrop(db_name.clone(), String::new(), DropKind::Database));
+                        if engine.supports(db::sql::Feature::CreateDrop) {
+                            // Creating and dropping are writes, so they stay disabled until the connection is unlocked.
+                            let system = db::sql::create::SYSTEM_SCHEMAS.contains(&db_name.as_str());
+                            ui.separator();
+                            if ui.add_enabled(writable && !system, egui::Button::new("New table…")).on_disabled_hover_text(if system { "Belongs to the server" } else { "Read-only: unlock writes to create a table" }).clicked() {
+                                side.push(SideAct::NewTable(db_name.clone()));
+                            }
+                            if ui.add_enabled_ui(writable && !system, |ui| danger_item(ui, "Drop database…")).inner.on_disabled_hover_text(if system { "Belongs to the server" } else { "Read-only: unlock writes to drop a database" }).clicked() {
+                                side.push(SideAct::SqlDrop(db_name.clone(), String::new(), DropKind::Database));
+                            }
                         }
                         return;
                     }
@@ -511,19 +534,24 @@ impl App {
                     }
                 });
                 if is_open {
+                    if pg {
+                        if let Some(p) = self.pg_schema_row(ui, c, db_name, picked) {
+                            pick_schema = Some((db_name.clone(), p));
+                        }
+                    }
                     let matches_len = matches.len();
-                    let schema = if sql { self.sql_schema.get(&(id, db_name.clone())).cloned() } else { None };
-                    let est_rows: HashMap<&str, u64> = schema.iter().flat_map(|sc| sc.tables.iter().filter_map(|t| Some((t.name.as_str(), t.rows?)))).collect();
-                    let group_hidden = [false, true].map(|v| sql && self.side_closed.contains(&(id, db_name.clone(), v)));
+                    let schema = if sql { self.sql_schema.get(&(id, ns.clone())).cloned() } else { None };
+                    let est_rows = self.sql_rows.get(&(id, ns.clone()));
+                    let group_hidden = [false, true].map(|v| sql && self.side_closed.contains(&(id, ns.clone(), v)));
                     for coll in matches {
-                        let active = cur_sel.as_ref().is_some_and(|s| s.conn == id && s.db == *db_name && s.coll == *coll);
+                        let active = cur_sel.as_ref().is_some_and(|s| s.conn == id && s.db == *db_name && s.schema == picked && s.coll == *coll);
                         let is_view = is_view_of(coll);
                         let busy = pending.contains(&coll);
                         if sql && group != Some(is_view) {
                             group = Some(is_view);
                             let (label, n) = if is_view { ("VIEWS", n_views) } else { ("TABLES", matches_len - n_views) };
                             let (cap, hr) = ui.allocate_exact_size(egui::vec2(ui.available_width(), SIDE_ROW_H - 4.0), Sense::click());
-                            let key = (id, db_name.clone(), is_view);
+                            let key = (id, ns.clone(), is_view);
                             if hr.clicked() {
                                 folded.push(key.clone());
                             }
@@ -555,7 +583,7 @@ impl App {
                                 p.text(egui::pos2(r.left(), r.center().y), egui::Align2::LEFT_CENTER, glyph, FontId::monospace(10.0), gc);
                             }
                             // The server's estimate, once the schema is loaded for autocomplete.
-                            let est = if sql && !is_view { est_rows.get(coll.as_str()).copied().or_else(|| schema.as_ref().and_then(|sc| sc.table(coll)).and_then(|t| t.rows)) } else { None };
+                            let est = if sql && !is_view { est_rows.and_then(|m| m.get(coll.as_str()).copied()).or_else(|| schema.as_ref().and_then(|sc| sc.table(coll)).and_then(|t| t.rows)) } else { None };
                             let mut w = r.width() - 20.0;
                             if let Some(n) = est {
                                 let g = p.layout_no_wrap(rows_short(n), FontId::monospace(TXT_CAPTION), FAINT());
@@ -577,33 +605,35 @@ impl App {
                             revealed = true;
                         }
                         if r.clicked() {
-                            open = Some(Sel { conn: id, db: db_name.clone(), coll: coll.clone() });
+                            open = Some(Sel { conn: id, db: db_name.clone(), schema: picked.to_string(), coll: coll.clone() });
                         }
                         r.context_menu(|ui| {
                             menu_look(ui);
                             ui.label(RichText::new(format!("{}: {coll}", if is_view { "View" } else if sql { "Table" } else { "Collection" })).size(TXT_SMALL).color(MUTED()));
                             if ui.button("Open").clicked() {
-                                open = Some(Sel { conn: id, db: db_name.clone(), coll: coll.clone() });
+                                open = Some(Sel { conn: id, db: db_name.clone(), schema: picked.to_string(), coll: coll.clone() });
                             }
                             if sql {
-                                if !is_view {
+                                if engine.supports(db::sql::Feature::Import) && !is_view {
                                     ui.separator();
                                     if ui.button("Import CSV…").on_hover_text("Adds the rows of a CSV file to this table").clicked() {
                                         side.push(SideAct::SqlImport(db_name.clone(), coll.clone()));
                                     }
                                 }
-                                if ui.button("Export as SQL dump…").clicked() {
+                                if engine.supports(db::sql::Feature::SqlDump) && ui.button("Export as SQL dump…").clicked() {
                                     side.push(SideAct::SqlDump(db_name.clone(), Some(coll.clone())));
                                 }
-                                let system = db::sql::create::SYSTEM_SCHEMAS.contains(&db_name.as_str());
-                                let on = writable && !system;
-                                let note = if system { "Belongs to the server" } else { "Read-only: unlock writes to change this table" };
-                                ui.separator();
-                                if !is_view && ui.add_enabled(on, egui::Button::new("Empty table…")).on_disabled_hover_text(note).on_hover_text("Deletes every row and keeps the table").clicked() {
-                                    side.push(SideAct::SqlDrop(db_name.clone(), coll.clone(), DropKind::Truncate));
-                                }
-                                if ui.add_enabled_ui(on, |ui| danger_item(ui, if is_view { "Drop view…" } else { "Drop table…" })).inner.on_disabled_hover_text(note).clicked() {
-                                    side.push(SideAct::SqlDrop(db_name.clone(), coll.clone(), if is_view { DropKind::View } else { DropKind::Table }));
+                                if engine.supports(db::sql::Feature::CreateDrop) {
+                                    let system = db::sql::create::SYSTEM_SCHEMAS.contains(&db_name.as_str());
+                                    let on = writable && !system;
+                                    let note = if system { "Belongs to the server" } else { "Read-only: unlock writes to change this table" };
+                                    ui.separator();
+                                    if !is_view && ui.add_enabled(on, egui::Button::new("Empty table…")).on_disabled_hover_text(note).on_hover_text("Deletes every row and keeps the table").clicked() {
+                                        side.push(SideAct::SqlDrop(db_name.clone(), coll.clone(), DropKind::Truncate));
+                                    }
+                                    if ui.add_enabled_ui(on, |ui| danger_item(ui, if is_view { "Drop view…" } else { "Drop table…" })).inner.on_disabled_hover_text(note).clicked() {
+                                        side.push(SideAct::SqlDrop(db_name.clone(), coll.clone(), if is_view { DropKind::View } else { DropKind::Table }));
+                                    }
                                 }
                                 return;
                             }
@@ -653,6 +683,9 @@ impl App {
         if connect {
             self.connect(id);
         }
+        if let Some((d, schema)) = pick_schema {
+            self.pg_set_schema(id, &d, schema);
+        }
         if let Some(d) = toggle {
             if !self.open_dbs.remove(&(id, d.clone())) {
                 self.open_dbs.insert((id, d));
@@ -664,6 +697,14 @@ impl App {
         for a in side {
             self.side_act(id, a);
         }
+    }
+
+    /// The switcher row of an open PostgreSQL database, with the pick made this frame. Nothing until its schemas arrived.
+    fn pg_schema_row(&self, ui: &mut egui::Ui, c: &Conn, db_name: &str, picked: &str) -> Option<String> {
+        let list = &c.pg.get(db_name)?.schemas;
+        let pick = schema_picker(ui, db_name, picked, list, self.demo_opens_schema_menu(ui.ctx()));
+        ui.add_space(2.0);
+        pick
     }
 
     pub(super) fn side_act(&mut self, conn: u64, a: SideAct) {
@@ -679,7 +720,10 @@ impl App {
             a => a,
         };
         if let (SideAct::Refresh(db), Some(sql)) = (&a, self.conn(conn).and_then(|c| c.sql.clone())) {
-            self.sql_refresh_schema(conn, db);
+            if sql.dialect == db::sql::Dialect::Postgres {
+                return self.pg_refresh(conn, db);
+            }
+            self.sql_refresh_schema(conn, db, "");
             return self.worker.sql_tables(conn, sql, db.clone());
         }
         if self.conn(conn).is_some_and(|c| c.meta.engine.is_sql()) {
@@ -718,7 +762,7 @@ impl App {
             }
             SideAct::Restore(db) => self.modal = Some(Modal::Tool(Box::new(ToolForm { conn, from_db: db.clone(), db, restore: true, gzip: true, ..Default::default() }))),
             SideAct::Compare(db, coll) => {
-                self.open_collection(Sel { conn, db: db.clone(), coll }, false);
+                self.open_collection(Sel { conn, db: db.clone(), coll, ..Default::default() }, false);
                 let t = self.tm().unwrap();
                 t.view = View::Compare;
                 if t.compare.conn == 0 {
@@ -733,6 +777,72 @@ impl App {
             }
         }
     }
+}
+
+/// Whether `name` holds `needle`, which is already lower case, ignoring case. Names are mostly ASCII, so this compares bytes
+/// instead of lower-casing every name on every frame the filter is on.
+fn contains_ci(name: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if name.is_ascii() && needle.is_ascii() {
+        return name.as_bytes().windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle.as_bytes()));
+    }
+    name.to_lowercase().contains(needle)
+}
+
+/// The schema switcher under an open PostgreSQL database: the schema shown in the tree, and a menu to pick another with
+/// each one's table count and a switch for the system schemas. Returns the schema picked this frame.
+fn schema_picker(ui: &mut egui::Ui, db_name: &str, picked: &str, list: &[db::sql::PgSchema], auto_open: bool) -> Option<String> {
+    // One switch for every switcher, kept in egui memory since only this widget reads it.
+    let system_id = egui::Id::NULL.with("pg-show-system");
+    let mut show_system: bool = ui.data(|d| d.get_temp(system_id)).unwrap_or(false);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), PICK_H), Sense::click());
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if auto_open {
+        egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&resp));
+    }
+    let mut pick = None;
+    let menu = egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(rect.width() - PICK_INDENT).show(|ui| {
+        menu_look(ui);
+        ui.spacing_mut().item_spacing.y = 2.0;
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.add_space(PICK_PAD);
+            caption(ui, format!("SCHEMAS IN {db_name}"));
+        });
+        ui.add_space(2.0);
+        for s in super::sql_ns::listed_schemas(list, show_system) {
+            if menu_row_in(ui, &s.name, if s.system { MUTED() } else { TEXT() }, s.name == picked, &s.tables.to_string(), "", false).clicked() {
+                pick = Some(s.name.clone());
+                ui.close();
+            }
+        }
+        ui.add_space(2.0);
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.add_space(PICK_PAD);
+            ui.label(RichText::new("Show system schemas").size(TXT_SMALL).color(MUTED()));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(PICK_PAD);
+                toggle(ui, &mut show_system);
+            });
+        });
+        ui.add_space(2.0);
+    });
+    ui.data_mut(|d| d.insert_temp(system_id, show_system));
+    let open = menu.is_some();
+    let body = egui::Rect::from_min_max(egui::pos2(rect.left() + PICK_INDENT, rect.top() + 1.0), egui::pos2(rect.right(), rect.bottom() - 1.0));
+    field_frame(ui, body, &resp, open);
+    let p = ui.painter();
+    let label = p.layout_no_wrap("schema".into(), FontId::proportional(TXT_CAPTION), FAINT());
+    p.galley(egui::pos2(body.left() + PICK_PAD, body.center().y - label.size().y / 2.0 + optical_dy(&label)), label.clone(), FAINT());
+    let name = truncated(p, picked, FontId::proportional(TXT_BODY), BRIGHT(), body.width() - PICK_PAD - label.size().x - PICK_GAP - PICK_CHEVRON);
+    p.galley(egui::pos2(body.left() + PICK_PAD + label.size().x + PICK_GAP, body.center().y - name.size().y / 2.0 + optical_dy(&name)), name, BRIGHT());
+    chevron(p, egui::pos2(body.right() - 12.0, body.center().y), true, if resp.hovered() || open { MUTED() } else { FAINT() });
+    focus_ring(ui, &resp, body, R_MD as f32);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, format!("Schema {picked}")));
+    pick
 }
 
 /// A small painted plus, since the glyph from a fallback font sits off center. Dimmed while writes are locked.
@@ -767,8 +877,20 @@ mod tests {
     }
 
     #[test]
+    fn postgres_jumps_name_the_schema() {
+        let mut c = Conn { dbs: vec![("shop".into(), Some(vec!["public".into(), "billing".into()]))], ..Conn::new(ConnMeta { id: 1, name: "pg".into(), engine: db::sql::Engine::Postgres, ..Default::default() }, Status::Ready) };
+        c.tables.entry("shop".into()).or_default().insert("billing".into(), vec!["invoices".into()]);
+        c.tables.entry("shop".into()).or_default().insert("public".into(), vec!["orders".into()]);
+        let all = jumps(&[c], Some(1), "");
+        let labels: Vec<&str> = all.iter().map(|j| j.0.as_str()).collect();
+        assert_eq!(labels, ["pg", "shop", "shop.billing.invoices", "shop.public.orders"]);
+        let Jump::Coll(sel) = &all[2].2 else { panic!("a table jumps to a table") };
+        assert_eq!((sel.db.as_str(), sel.schema.as_str(), sel.coll.as_str()), ("shop", "billing", "invoices"));
+    }
+
+    #[test]
     fn palette_jumps() {
-        let conn = |id, name: &str, status, dbs| Conn { meta: ConnMeta { id, name: name.into(), ..Default::default() }, client: None, sql: None, status, writable: false, dbs, masked_uri: String::new(), tunnel: None, server: Default::default() };
+        let conn = |id, name: &str, status, dbs| Conn { dbs, ..Conn::new(ConnMeta { id, name: name.into(), ..Default::default() }, status) };
         let conns = [conn(1, "prod", Status::Ready, vec![("shop".into(), Some(vec!["users".into(), "orders".into()]))]), conn(2, "staging", Status::Idle, Vec::new())];
         let labels = |active, q| jumps(&conns, active, q).into_iter().map(|j| j.0).collect::<Vec<_>>();
         assert_eq!(labels(Some(2), ""), ["staging", "prod", "shop", "shop.users", "shop.orders"]);

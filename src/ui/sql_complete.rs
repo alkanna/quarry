@@ -3,6 +3,7 @@
 //! server. The popup itself is the one the Mongo inputs use.
 
 use super::complete::{ac_input_with, fuzzy, Ac, Fields, SqlInfo, Sug};
+use super::sql_words_pg::{FUNCTIONS_PG, KEYWORDS_PG, RESERVED_PG, TYPES_PG};
 use super::theme::*;
 use crate::db::sql::{
     lex::{self, Tok},
@@ -24,6 +25,14 @@ const RESERVED: &[&str] = &[
     "RENAME", "REPLACE", "RIGHT", "ROW", "ROWS", "SCHEMA", "SELECT", "SET", "SHOW", "SYSTEM", "TABLE", "THEN", "TO", "TRIGGER", "TRUE", "UNION", "UNIQUE", "UPDATE", "USE", "USING", "VALUES", "WHEN", "WHERE", "WITH",
 ];
 
+fn keywords(dl: Dialect) -> &'static [&'static str] {
+    if dl == Dialect::Postgres { KEYWORDS_PG } else { KEYWORDS }
+}
+
+fn functions(dl: Dialect) -> &'static [(&'static str, &'static str)] {
+    if dl == Dialect::Postgres { FUNCTIONS_PG } else { FUNCTIONS }
+}
+
 /// What completion knows about the place being edited. `table` is the implicit table of the Content
 /// bar, whose text has no FROM; `fallback` holds its columns until the schema has arrived.
 #[derive(Default)]
@@ -35,7 +44,11 @@ pub(crate) struct Scope<'a> {
     pub(crate) table: Option<String>,
     pub(crate) fallback: Arc<Vec<SchemaCol>>,
     /// Names of the views of `db` that the sidebar knows, so the plain table list shown before the schema arrives still marks them.
-    pub(crate) views: std::collections::HashSet<String>,
+    pub(crate) views: Arc<std::collections::HashSet<String>>,
+    /// How identifiers are quoted when a suggestion is inserted.
+    pub(crate) dialect: Dialect,
+    /// The schemas of a PostgreSQL database, so `sch` and `sch.` can be completed. Empty until the sidebar loads them.
+    pub(crate) schemas: Vec<String>,
 }
 
 /// A lookup the caret asks the app to make: the schema of the database, or a column's values.
@@ -93,26 +106,31 @@ impl Tk<'_> {
     /// The name this token spells, backticks removed.
     fn name(&self) -> Option<String> {
         match self.tok {
-            Tok::Word if !self.s.starts_with(|c: char| c.is_ascii_digit() || c == '@') => Some(self.s.to_string()),
+            Tok::Word if !self.s.starts_with(|c: char| c.is_ascii_digit() || c == '@' || c == '$') => Some(self.s.to_string()),
             Tok::Quoted => {
-                let inner = self.s.strip_prefix('`')?.strip_suffix('`')?;
-                Some(inner.replace("``", "`"))
+                let q = self.s.chars().next().filter(|c| matches!(c, '`' | '"'))?;
+                let inner = self.s.strip_prefix(q)?.strip_suffix(q)?;
+                Some(inner.replace(&format!("{q}{q}"), &q.to_string()))
             }
             _ => None,
         }
     }
 }
 
-fn needs_quote(name: &str) -> bool {
+fn needs_quote(dl: Dialect, name: &str) -> bool {
+    // PostgreSQL folds a bare name to lower case, so anything else has to be quoted to keep its spelling.
+    if dl == Dialect::Postgres {
+        return name.is_empty() || name.starts_with(|c: char| c.is_ascii_digit()) || !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') || RESERVED_PG.contains(&name.to_ascii_uppercase().as_str());
+    }
     name.is_empty() || name.starts_with(|c: char| c.is_ascii_digit()) || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') || RESERVED.contains(&name.to_ascii_uppercase().as_str())
 }
 
 /// A name as it is inserted. A backtick already typed is closed instead of added.
-fn ident(name: &str, in_tick: bool) -> String {
+fn ident(dl: Dialect, name: &str, in_tick: bool) -> String {
     if in_tick {
-        Dialect::MySql.quote_ident(name)[1..].to_string()
-    } else if needs_quote(name) {
-        Dialect::MySql.quote_ident(name)
+        dl.quote_ident(name)[1..].to_string()
+    } else if needs_quote(dl, name) {
+        dl.quote_ident(name)
     } else {
         name.to_string()
     }
@@ -160,7 +178,7 @@ struct Ref {
 
 /// The tables a statement reads from or writes to, in order, found anywhere in it so a SELECT list
 /// before the FROM still sees its aliases.
-fn parse_refs(toks: &[Tk]) -> Vec<Ref> {
+fn parse_refs(toks: &[Tk], dl: Dialect) -> Vec<Ref> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < toks.len() {
@@ -184,7 +202,7 @@ fn parse_refs(toks: &[Tk]) -> Vec<Ref> {
             if toks.get(i).is_some_and(|t| t.is("AS")) {
                 alias = toks.get(i + 1).and_then(Tk::name);
                 i += 2;
-            } else if let Some(t) = toks.get(i).filter(|t| t.tok == Tok::Quoted || (t.tok == Tok::Word && !KEYWORDS.contains(&t.s.to_ascii_uppercase().as_str()))) {
+            } else if let Some(t) = toks.get(i).filter(|t| t.tok == Tok::Quoted || (t.tok == Tok::Word && !keywords(dl).contains(&t.s.to_ascii_uppercase().as_str()))) {
                 alias = t.name();
                 i += 1;
             }
@@ -286,7 +304,7 @@ fn values_foot(values: &Fields, table: &str, col: &str) -> String {
     if parts.is_empty() { String::new() } else { format!("Values: {}", parts.join("  ")) }
 }
 
-fn col_sug(c: &SchemaCol, table: &str, scope_values: &Fields, qualifier: Option<&str>, in_tick: bool) -> Sug {
+fn col_sug(dl: Dialect, c: &SchemaCol, table: &str, scope_values: &Fields, qualifier: Option<&str>, in_tick: bool) -> Sug {
     let mut detail = type_label(c);
     if c.key == "UNI" {
         detail += " · UNIQUE";
@@ -294,25 +312,25 @@ fn col_sug(c: &SchemaCol, table: &str, scope_values: &Fields, qualifier: Option<
     if c.fk {
         detail += " · FK";
     }
-    let name = ident(&c.name, in_tick);
+    let name = ident(dl, &c.name, in_tick);
     let insert = match qualifier {
-        Some(q) => format!("{}.{name}", ident(q, false)),
+        Some(q) => format!("{}.{name}", ident(dl, q, false)),
         None => name,
     };
     let text = qualifier.map_or_else(|| c.name.clone(), |q| format!("{q}.{}", c.name));
     sug(text, if c.key == "PRI" { "pk" } else { "column" }, insert, detail, values_foot(scope_values, table, &c.name))
 }
 
-fn table_sug(t: &SchemaTable, in_tick: bool) -> Sug {
+fn table_sug(dl: Dialect, t: &SchemaTable, in_tick: bool) -> Sug {
     let detail = if t.view { "view".to_string() } else { t.rows.map_or(String::new(), |n| format!("{} rows", crate::app::group(&n.to_string()))) };
-    sug(t.name.clone(), if t.view { "view" } else { "table" }, ident(&t.name, in_tick), detail, String::new())
+    sug(t.name.clone(), if t.view { "view" } else { "table" }, ident(dl, &t.name, in_tick), detail, String::new())
 }
 
 /// The text of the statement the caret is in, up to the caret and whole. `before` and `tail` are the
 /// script before and after the caret. They are lexed together, so a `;` inside a string does not split.
-pub(crate) fn split_statement(before: &str, tail: &str) -> (String, String) {
+pub(crate) fn split_statement(before: &str, tail: &str, dl: Dialect) -> (String, String) {
     let all = format!("{before}{tail}");
-    let semis: Vec<usize> = lex::tokens(&all).into_iter().filter(|(t, r)| *t == Tok::Punct && &all[r.clone()] == ";").map(|(_, r)| r.start).collect();
+    let semis: Vec<usize> = lex::tokens(&all, dl).into_iter().filter(|(t, r)| *t == Tok::Punct && &all[r.clone()] == ";").map(|(_, r)| r.start).collect();
     let start = semis.iter().rev().find(|&&p| p < before.len()).map_or(0, |p| p + 1);
     let end = semis.iter().find(|&&p| p >= before.len()).copied().unwrap_or(all.len());
     (all[start..before.len()].to_string(), all[start..end].to_string())
@@ -324,26 +342,29 @@ pub(crate) fn analyze(before: &str, full_stmt: &str, scope: &Scope, values: &Fie
     // A space after the text shows whether it ends inside a string, comment or backtick name: such a
     // token swallows the space, while a finished one leaves it as a token of its own.
     let probe = format!("{before} ");
-    let ptoks = lex::tokens(&probe);
+    let ptoks = lex::tokens(&probe, scope.dialect);
     let (open, orng) = ptoks.last().filter(|(t, r)| r.start < before.len() && r.end == probe.len() && matches!(t, Tok::Str | Tok::Quoted | Tok::Comment)).map(|(t, r)| (Some(*t), r.clone())).unwrap_or((None, 0..0));
-    let toks = lex::tokens(before);
+    let toks = lex::tokens(before, scope.dialect);
     let prev_all = sig(before, &toks);
     // A backtick typed and not yet closed would swallow the rest of the statement, aliases included.
     let closed;
     let full_stmt = if open == Some(Tok::Quoted) && full_stmt.starts_with(before) {
-        closed = format!("{before}`{}", &full_stmt[before.len()..]);
+        closed = format!("{before}{}{}", if scope.dialect == Dialect::Postgres { '"' } else { '`' }, &full_stmt[before.len()..]);
         closed.as_str()
     } else {
         full_stmt
     };
-    let full_toks = lex::tokens(full_stmt);
+    let full_toks = lex::tokens(full_stmt, scope.dialect);
     let full_sig = sig(full_stmt, &full_toks);
-    let rts = resolve(&parse_refs(&full_sig), scope);
+    let rts = resolve(&parse_refs(&full_sig, scope.dialect), scope);
     match open {
         Some(Tok::Comment) => return None,
         Some(Tok::Str) => {
+            // A dollar quoted body is text, and a prefix such as E or B sits before the opening quote.
+            let qoff = before[orng.start..].find(['\'', '"']).filter(|_| !before[orng.start..].starts_with('$'))?;
             let upto = prev_all.iter().position(|t| t.start >= orng.start).unwrap_or(prev_all.len());
-            return value_list(&prev_all[..upto], &before[orng.start + 1..], orng.start + 1, &before[orng.start..orng.start + 1], &rts, values);
+            let at = orng.start + qoff;
+            return value_list(&prev_all[..upto], &before[at + 1..], at + 1, &before[at..at + 1], &rts, values);
         }
         _ => {}
     }
@@ -351,10 +372,11 @@ pub(crate) fn analyze(before: &str, full_stmt: &str, scope: &Scope, values: &Fie
     // The word being typed, and the tokens before it.
     let (word, from, prev) = if in_tick {
         let upto = prev_all.iter().position(|t| t.start >= orng.start).unwrap_or(prev_all.len());
-        (&before[orng.start + 1..], orng.start + 1, &prev_all[..upto])
+        let at = orng.start + before[orng.start..].find(['`', '"']).unwrap_or(0);
+        (&before[at + 1..], at + 1, &prev_all[..upto])
     } else {
         match prev_all.last() {
-            Some(t) if t.tok == Tok::Word && t.start + t.s.len() == before.len() && !t.s.starts_with('@') => (t.s, t.start, &prev_all[..prev_all.len() - 1]),
+            Some(t) if t.tok == Tok::Word && t.start + t.s.len() == before.len() && !t.s.starts_with(['@', '$']) => (t.s, t.start, &prev_all[..prev_all.len() - 1]),
             _ => ("", before.len(), &prev_all[..]),
         }
     };
@@ -363,6 +385,11 @@ pub(crate) fn analyze(before: &str, full_stmt: &str, scope: &Scope, values: &Fie
         if let Some(out) = value_list(prev, word, from, "", &rts, values) {
             return Some(out);
         }
+    }
+    // After `::` PostgreSQL wants a type, and nothing else fits.
+    if !in_tick && scope.dialect == Dialect::Postgres && prev.len() >= 2 && prev[prev.len() - 1].punct(":") && prev[prev.len() - 2].punct(":") && prev[prev.len() - 2].start + 1 == prev[prev.len() - 1].start {
+        let sugs: Vec<Sug> = TYPES_PG.iter().filter(|t| starts_ci(t, word)).map(|t| sug((*t).to_string(), "type", (*t).to_string(), String::new(), String::new())).collect();
+        return (!sugs.is_empty() && !(sugs.len() == 1 && sugs[0].text.eq_ignore_ascii_case(word))).then_some(Out { from, sugs, ..Default::default() });
     }
     if !in_tick && word.is_empty() && !prev.last().is_some_and(|t| t.punct(".")) {
         return None;
@@ -398,24 +425,25 @@ pub(crate) fn analyze(before: &str, full_stmt: &str, scope: &Scope, values: &Fie
         for r in &rts {
             for c in col_matches(r.cols, word) {
                 let ambiguous = multi && rts.iter().filter(|o| o.cols.iter().any(|x| x.name.eq_ignore_ascii_case(&c.name))).count() > 1;
-                sugs.push(col_sug(c, &r.table, values, ambiguous.then_some(r.label.as_str()), in_tick));
+                sugs.push(col_sug(scope.dialect, c, &r.table, values, ambiguous.then_some(r.label.as_str()), in_tick));
             }
         }
         if !in_tick {
-            let mut fns: Vec<&(&str, &str)> = FUNCTIONS.iter().filter(|(n, _)| starts_ci(n, word)).collect();
+            let mut fns: Vec<&(&str, &str)> = functions(scope.dialect).iter().filter(|(n, _)| starts_ci(n, word) && !(scope.dialect == Dialect::Postgres && lex::pg_refuses_function(n))).collect();
             fns.sort_by_key(|(n, _)| (n.len(), *n));
             for (name, sigtxt) in fns {
                 let ret = sigtxt.split_once(" -> ").map_or("", |x| x.1).to_ascii_lowercase();
                 // Functions are always capitals, as in the design; keywords follow what is typed.
                 let name = name.to_string();
                 // A call with no arguments is complete, one with arguments leaves the caret inside.
-                let insert = if sigtxt.contains("()") { format!("{name}()") } else { format!("{name}(") };
-                sugs.push(sug(format!("{name}()"), "fn", insert, ret, (*sigtxt).to_string()));
+                // A keyword form such as CURRENT_DATE is written without a call.
+                let (insert, text) = if !sigtxt.contains('(') { (name.clone(), name.clone()) } else if sigtxt.contains("()") { (format!("{name}()"), format!("{name}()")) } else { (format!("{name}("), format!("{name}()")) };
+                sugs.push(sug(text, "fn", insert, ret, (*sigtxt).to_string()));
             }
         }
     }
     if !in_tick {
-        let mut kws: Vec<&&str> = KEYWORDS.iter().filter(|k| starts_ci(k, word)).collect();
+        let mut kws: Vec<&&str> = keywords(scope.dialect).iter().filter(|k| starts_ci(k, word)).collect();
         kws.sort_by_key(|k| (k.len(), **k));
         for k in kws {
             let k = kw_case(word, k);
@@ -433,48 +461,51 @@ pub(crate) fn analyze(before: &str, full_stmt: &str, scope: &Scope, values: &Fie
 /// Columns of the table or alias `q`, or the tables of a database `q`.
 fn qualified(q: &str, word: &str, from: usize, in_tick: bool, scope: &Scope, rts: &[Rt], values: &Fields) -> Option<Out> {
     if let Some(r) = by_qualifier(rts, q) {
-        return Some(cols_out(q, r.table.as_str(), r.cols, word, from, in_tick, values));
+        return Some(cols_out(scope.dialect, q, r.table.as_str(), r.cols, word, from, in_tick, values));
     }
     if q.eq_ignore_ascii_case(&scope.db) {
-        let mut sugs: Vec<Sug> = scope.schema.tables.iter().filter(|t| starts_ci(&t.name, word)).map(|t| table_sug(t, in_tick)).collect();
+        let mut sugs: Vec<Sug> = scope.schema.tables.iter().filter(|t| starts_ci(&t.name, word)).map(|t| table_sug(scope.dialect, t, in_tick)).collect();
         sugs.truncate(MAX_SUGGESTIONS);
         return Some(Out { from, sugs, ..Default::default() });
     }
     let (_, tables) = scope.dbs.iter().find(|(d, _)| d.eq_ignore_ascii_case(q))?;
-    let sugs: Vec<Sug> = tables.iter().flatten().filter(|t| starts_ci(t, word)).take(MAX_SUGGESTIONS).map(|t| sug(t.clone(), "table", ident(t, in_tick), String::new(), String::new())).collect();
+    let sugs: Vec<Sug> = tables.iter().flatten().filter(|t| starts_ci(t, word)).take(MAX_SUGGESTIONS).map(|t| sug(t.clone(), "table", ident(scope.dialect, t, in_tick), String::new(), String::new())).collect();
     Some(Out { from, sugs, ..Default::default() })
 }
 
 fn by_qualifier_cols(table: &str, word: &str, from: usize, in_tick: bool, scope: &Scope, values: &Fields) -> Option<Out> {
     let (name, cols) = table_cols(scope, table)?;
-    Some(cols_out(name, name, cols, word, from, in_tick, values))
+    Some(cols_out(scope.dialect, name, name, cols, word, from, in_tick, values))
 }
 
-fn cols_out(label: &str, table: &str, cols: &[SchemaCol], word: &str, from: usize, in_tick: bool, values: &Fields) -> Out {
-    let sugs: Vec<Sug> = col_matches(cols, word).into_iter().take(MAX_SUGGESTIONS).map(|c| col_sug(c, table, values, None, in_tick)).collect();
+fn cols_out(dl: Dialect, label: &str, table: &str, cols: &[SchemaCol], word: &str, from: usize, in_tick: bool, values: &Fields) -> Out {
+    let sugs: Vec<Sug> = col_matches(cols, word).into_iter().take(MAX_SUGGESTIONS).map(|c| col_sug(dl, c, table, values, None, in_tick)).collect();
     let title = if label.eq_ignore_ascii_case(table) { table.to_ascii_uppercase() } else { format!("{} = {}", label.to_ascii_uppercase(), table.to_ascii_uppercase()) };
     Out { from, sugs, title, ..Default::default() }
 }
 
 /// Tables and views of the current database first, then the other databases and their tables.
 fn tables_list(word: &str, from: usize, in_tick: bool, scope: &Scope) -> Out {
-    let mut sugs: Vec<Sug> = scope.schema.tables.iter().filter(|t| starts_ci(&t.name, word)).map(|t| table_sug(t, in_tick)).collect();
+    let mut sugs: Vec<Sug> = scope.schema.tables.iter().filter(|t| starts_ci(&t.name, word)).map(|t| table_sug(scope.dialect, t, in_tick)).collect();
     // A name still loading is listed from the sidebar's table list, without the row counts.
     if scope.schema.tables.is_empty() {
         if let Some((_, Some(names))) = scope.dbs.iter().find(|(d, _)| d.eq_ignore_ascii_case(&scope.db)) {
             sugs.extend(names.iter().filter(|t| starts_ci(t, word)).map(|t| {
                 let view = scope.views.contains(t.as_str());
-                sug(t.clone(), if view { "view" } else { "table" }, ident(t, in_tick), if view { "view".to_string() } else { String::new() }, String::new())
+                sug(t.clone(), if view { "view" } else { "table" }, ident(scope.dialect, t, in_tick), if view { "view".to_string() } else { String::new() }, String::new())
             }));
         }
     }
     for (d, tables) in scope.dbs.iter().filter(|(d, _)| !d.eq_ignore_ascii_case(&scope.db)) {
         if starts_ci(d, word) {
-            sugs.push(sug(d.clone(), "schema", format!("{}.", ident(d, in_tick)), "database".into(), String::new()));
+            sugs.push(sug(d.clone(), "schema", format!("{}.", ident(scope.dialect, d, in_tick)), "database".into(), String::new()));
         }
         for t in tables.iter().flatten().filter(|t| starts_ci(t, word)) {
-            sugs.push(sug(format!("{d}.{t}"), "schema", format!("{}.{}", ident(d, false), ident(t, in_tick)), "other db".into(), String::new()));
+            sugs.push(sug(format!("{d}.{t}"), "schema", format!("{}.{}", ident(scope.dialect, d, false), ident(scope.dialect, t, in_tick)), "other db".into(), String::new()));
         }
+    }
+    for sch in scope.schemas.iter().filter(|x| !x.eq_ignore_ascii_case(&scope.db) && starts_ci(x, word) && !scope.dbs.iter().any(|(d, _)| d == *x)) {
+        sugs.push(sug(sch.clone(), "schema", format!("{}.", ident(scope.dialect, sch, in_tick)), "schema".into(), String::new()));
     }
     sugs.truncate(MAX_SUGGESTIONS);
     let foot = if scope.dbs.iter().any(|(d, _)| !d.eq_ignore_ascii_case(&scope.db)) { format!("Tables and views of {}, then other databases", scope.db) } else { format!("Tables and views of {}", scope.db) };
@@ -511,7 +542,7 @@ fn value_list(toks: &[Tk], typed: &str, from: usize, quote: &str, rts: &[Rt], va
     let parts = operand(toks, end);
     let (table, col) = match parts.as_slice() {
         [c] => rts.iter().find_map(|r| r.cols.iter().find(|x| x.name.eq_ignore_ascii_case(c)).map(|x| (r.table.as_str(), x))),
-        [q, c] => by_qualifier(rts, q).and_then(|r| r.cols.iter().find(|x| x.name.eq_ignore_ascii_case(c)).map(|x| (r.table.as_str(), x))),
+        [q, c] | [_, q, c] => by_qualifier(rts, q).and_then(|r| r.cols.iter().find(|x| x.name.eq_ignore_ascii_case(c)).map(|x| (r.table.as_str(), x))),
         _ => None,
     }?;
     let numeric = matches!(col.kind, Kind::Int | Kind::UInt | Kind::Float | Kind::Decimal | Kind::Year);
@@ -569,13 +600,13 @@ pub(crate) struct Help {
     pub(crate) ret: String,
 }
 
-pub(crate) fn sql_help(before: &str) -> Option<Help> {
+pub(crate) fn sql_help(before: &str, dl: Dialect) -> Option<Help> {
     let probe = format!("{before} ");
     // Inside a string or comment a parenthesis is only text.
-    if lex::tokens(&probe).last().is_some_and(|(t, r)| r.start < before.len() && r.end == probe.len() && matches!(t, Tok::Str | Tok::Comment)) {
+    if lex::tokens(&probe, dl).last().is_some_and(|(t, r)| r.start < before.len() && r.end == probe.len() && matches!(t, Tok::Str | Tok::Comment)) {
         return None;
     }
-    let toks = lex::tokens(before);
+    let toks = lex::tokens(before, dl);
     let t = sig(before, &toks);
     // Walk outward through the open parentheses to the first that belongs to a known function.
     let mut depth = 0;
@@ -590,7 +621,7 @@ pub(crate) fn sql_help(before: &str) -> Option<Help> {
                 depth -= 1;
                 continue;
             }
-            if let Some((name, sigtxt)) = i.checked_sub(1).filter(|_| t[i - 1].tok == Tok::Word).and_then(|k| FUNCTIONS.iter().find(|(n, _)| t[k].s.eq_ignore_ascii_case(n))) {
+            if let Some((name, sigtxt)) = i.checked_sub(1).filter(|_| t[i - 1].tok == Tok::Word).and_then(|k| functions(dl).iter().find(|(n, s)| s.contains('(') && t[k].s.eq_ignore_ascii_case(n))) {
                 let inner = sigtxt.split_once('(')?.1;
                 let close = inner.rfind(')')?;
                 let ret = sigtxt.split_once(" -> ").map_or("", |x| x.1).to_string();
@@ -647,7 +678,7 @@ pub(crate) fn sql_ac_field(
     let meta: RefCell<Option<(String, String)>> = RefCell::new(None);
     let need: RefCell<Option<Need>> = RefCell::new(None);
     let compute = |before: &str| -> Option<(usize, Vec<Sug>)> {
-        let (b, full) = split_statement(before, &tail);
+        let (b, full) = split_statement(before, &tail, scope.dialect);
         let out = analyze(&b, &full, scope, values)?;
         // `from` is relative to the statement; the popup wants the typed length.
         *need.borrow_mut() = out.need.clone();
@@ -686,7 +717,7 @@ pub(crate) fn sql_ac_field(
         // The call's signature while no list is open, as soon as the caret is past `(` or `,`.
         if let (true, Some(ci)) = (focused && !picked, caret) {
             let before: String = text.chars().take(ci).collect();
-            if let Some(h) = sql_help(&before) {
+            if let Some(h) = sql_help(&before, scope.dialect) {
                 let at = out.galley.pos_from_cursor(egui::text::CCursor::new(ci));
                 let pos = out.galley_pos + at.left_bottom().to_vec2() + egui::vec2(-6.0, 4.0);
                 egui::Area::new(id.with("sql-help")).order(egui::Order::Foreground).fixed_pos(pos).interactable(false).show(ui.ctx(), |ui| {
@@ -712,7 +743,7 @@ pub(crate) fn open_list(ui: &egui::Ui, id: egui::Id, text: &str, ac: &mut Ac, sc
     if ac.id.is_some() {
         return;
     }
-    let (b, full) = split_statement(text, "");
+    let (b, full) = split_statement(text, "", scope.dialect);
     if let Some(out) = analyze(&b, &full, scope, values).filter(|o| !o.sugs.is_empty()) {
         let n = text.chars().count();
         *ac = Ac { id: Some(id), token: b[out.from..].chars().count(), items: out.sugs, cursor: n, title: out.title, foot: out.foot, ..Default::default() };
@@ -774,7 +805,7 @@ mod tests {
     /// The caret is where the `|` stands.
     fn run_with(sql: &str, values: &Fields) -> Option<(usize, Vec<Sug>)> {
         let (before, tail) = sql.split_once('|').unwrap();
-        let (b, full) = split_statement(before, tail);
+        let (b, full) = split_statement(before, tail, Dialect::MySql);
         suggest(&b, &full, &scope(), values).map(|(from, s)| (from + (before.len() - b.len()), s))
     }
 
@@ -989,7 +1020,7 @@ mod tests {
         let mut sc = scope();
         sc.table = Some("orders".into());
         let sug = |text: &str| {
-            let (b, full) = split_statement(text, "");
+            let (b, full) = split_statement(text, "", Dialect::MySql);
             suggest(&b, &full, &sc, &values()).map(|x| x.1)
         };
         let s = sug("status = 'paid' AND cur").unwrap();
@@ -999,10 +1030,10 @@ mod tests {
         // Before the schema arrives the bar's own columns serve.
         sc.schema = Arc::new(Schema::default());
         sc.fallback = Arc::new(vec![col("currency", "char(3)", "", false)]);
-        let (b, full) = split_statement("cur", "");
+        let (b, full) = split_statement("cur", "", Dialect::MySql);
         assert_eq!(text_of(&suggest(&b, &full, &sc, &Fields::new()).unwrap().1)[0], "currency");
         // Values work from the fallback too.
-        let (b, full) = split_statement("currency = '", "");
+        let (b, full) = split_statement("currency = '", "", Dialect::MySql);
         assert!(analyze(&b, &full, &sc, &Fields::new()).unwrap().need.is_some());
     }
 
@@ -1043,9 +1074,9 @@ mod tests {
 
     #[test]
     fn statements_are_split_outside_strings() {
-        let (b, full) = split_statement("SELECT 1; SELECT * FROM or", "ders; SELECT 3");
+        let (b, full) = split_statement("SELECT 1; SELECT * FROM or", "ders; SELECT 3", Dialect::MySql);
         assert_eq!((b.trim(), full.trim()), ("SELECT * FROM or", "SELECT * FROM orders"));
-        let (b, full) = split_statement("SELECT ';' FROM o", "");
+        let (b, full) = split_statement("SELECT ';' FROM o", "", Dialect::MySql);
         assert_eq!((b.as_str(), full.as_str()), ("SELECT ';' FROM o", "SELECT ';' FROM o"));
         // Suggestions in the second statement do not see the first one's aliases.
         assert!(run("SELECT 1 FROM orders x; SELECT x.|").is_none());
@@ -1053,19 +1084,152 @@ mod tests {
 
     #[test]
     fn signature_help_names_the_current_argument() {
-        let h = sql_help("SELECT DATE_FORMAT(o.created_at, ").unwrap();
+        let h = sql_help("SELECT DATE_FORMAT(o.created_at, ", Dialect::MySql).unwrap();
         assert_eq!((h.name, h.active, h.ret.as_str()), ("DATE_FORMAT", 1, "VARCHAR"));
         assert_eq!(h.params, ["date", "format"]);
-        assert_eq!(sql_help("SELECT date_format(").unwrap().active, 0);
+        assert_eq!(sql_help("SELECT date_format(", Dialect::MySql).unwrap().active, 0);
         // A nested call that is finished does not count, an inner call wins, a list is not a call.
-        assert_eq!(sql_help("SELECT CONCAT(LOWER(a), ").unwrap().active, 1);
-        assert_eq!(sql_help("SELECT CONCAT(LOWER(a, ").unwrap().name, "LOWER");
-        assert_eq!(sql_help("SELECT COALESCE(a IN (1, 2, ").map(|h| h.name), Some("COALESCE"));
-        assert!(sql_help("SELECT 1 WHERE a IN (1, ").is_none());
+        assert_eq!(sql_help("SELECT CONCAT(LOWER(a), ", Dialect::MySql).unwrap().active, 1);
+        assert_eq!(sql_help("SELECT CONCAT(LOWER(a, ", Dialect::MySql).unwrap().name, "LOWER");
+        assert_eq!(sql_help("SELECT COALESCE(a IN (1, 2, ", Dialect::MySql).map(|h| h.name), Some("COALESCE"));
+        assert!(sql_help("SELECT 1 WHERE a IN (1, ", Dialect::MySql).is_none());
         // Closed calls, strings and comments show nothing; a long argument list stays on the last parameter.
-        assert!(sql_help("SELECT NOW() ").is_none());
-        assert!(sql_help("SELECT 'DATE_FORMAT(").is_none());
-        assert!(sql_help("-- DATE_FORMAT(").is_none());
-        assert_eq!(sql_help("SELECT CONCAT(a, b, c, d, ").unwrap().active, 2);
+        assert!(sql_help("SELECT NOW() ", Dialect::MySql).is_none());
+        assert!(sql_help("SELECT 'DATE_FORMAT(", Dialect::MySql).is_none());
+        assert!(sql_help("-- DATE_FORMAT(", Dialect::MySql).is_none());
+        assert_eq!(sql_help("SELECT CONCAT(a, b, c, d, ", Dialect::MySql).unwrap().active, 2);
+    }
+
+    fn pg_scope() -> Scope<'static> {
+        let users = SchemaTable { name: "users".into(), view: false, rows: Some(10), cols: vec![col("id", "int4", "PRI", false), col("email", "text", "", false), col("Full Name", "text", "", false)] };
+        let order = SchemaTable { name: "order".into(), view: false, rows: None, cols: vec![col("total", "numeric", "", false)] };
+        Scope {
+            schema: Arc::new(Schema { tables: vec![users, order] }),
+            db: "public".into(),
+            dbs: Box::leak(vec![("sales".into(), Some(vec!["invoices".into()])), ("public".into(), Some(vec![]))].into_boxed_slice()),
+            dialect: Dialect::Postgres,
+            schemas: vec!["audit".into()],
+            ..Default::default()
+        }
+    }
+
+    fn run_pg(sql: &str) -> Option<(usize, Vec<Sug>)> {
+        let (before, tail) = sql.split_once('|').unwrap();
+        let sc = pg_scope();
+        let (b, full) = split_statement(before, tail, sc.dialect);
+        suggest(&b, &full, &sc, &Fields::new()).map(|(from, s)| (from + (before.len() - b.len()), s))
+    }
+
+    #[test]
+    fn keywords_and_functions_follow_the_dialect() {
+        let (_, pg) = run_pg("SELECT * FROM users WHERE a IL|").unwrap();
+        assert_eq!(text_of(&pg), ["ILIKE"]);
+        assert!(run("SELECT * FROM orders WHERE a IL|").is_none());
+        let (_, pg) = run_pg("SELECT gen_r|").unwrap();
+        assert_eq!(text_of(&pg), ["GEN_RANDOM_UUID()"]);
+        assert!(run("SELECT gen_r|").is_none());
+        let (_, my) = run("SELECT date_for|").unwrap();
+        assert_eq!(text_of(&my), ["DATE_FORMAT()"]);
+        assert!(run_pg("SELECT date_for|").is_none());
+        let (_, pg) = run_pg("SELECT * FROM users RETU|").unwrap();
+        assert!(text_of(&pg).contains(&"RETURNING"));
+        let (_, pg) = run_pg("SELECT curr|").unwrap();
+        let cd = pg.iter().find(|s| s.text == "CURRENT_DATE").unwrap();
+        assert_eq!(cd.insert, "CURRENT_DATE");
+    }
+
+    #[test]
+    fn types_follow_a_double_colon() {
+        let (from, s) = run_pg("SELECT id::|").unwrap();
+        assert_eq!(from, "SELECT id::".len());
+        assert!(text_of(&s).contains(&"jsonb") && text_of(&s).contains(&"double precision") && text_of(&s).contains(&"text[]"));
+        let (_, s) = run_pg("SELECT id::ti|").unwrap();
+        assert_eq!(text_of(&s), ["timestamp", "timestamptz", "time"]);
+        assert_eq!(s[0].note, "type");
+        // A single colon is not a cast, and MySQL has no casts of this kind.
+        assert!(run_pg("SELECT id:|").is_none());
+        assert!(run("SELECT id::|").is_none());
+    }
+
+    #[test]
+    fn postgres_quotes_what_it_would_fold_or_reject() {
+        let pg = Dialect::Postgres;
+        for name in ["order", "User", "full name", "1abc", "a-b", "", "select", "caf\u{e9}"] {
+            assert!(needs_quote(pg, name), "{name}");
+        }
+        for name in ["users", "order_items", "col1", "_x"] {
+            assert!(!needs_quote(pg, name), "{name}");
+        }
+        assert_eq!(ident(pg, "order", false), "\"order\"");
+        assert_eq!(ident(pg, "Full Name", false), "\"Full Name\"");
+        assert_eq!(ident(pg, "a\"b", false), "\"a\"\"b\"");
+        assert_eq!(ident(pg, "users", false), "users");
+        assert_eq!(ident(pg, "users", true), "users\"");
+        // MySQL keeps its rules: mixed case is fine, backticks are used.
+        assert!(!needs_quote(Dialect::MySql, "Users"));
+        assert_eq!(ident(Dialect::MySql, "order", false), "`order`");
+        let (_, s) = run_pg("SELECT * FROM or|").unwrap();
+        assert_eq!(s[0].insert, "\"order\"");
+        let (_, s) = run_pg("SELECT fu| FROM users").unwrap();
+        assert_eq!(s[0].insert, "\"Full Name\"");
+    }
+
+    #[test]
+    fn schema_qualified_tables_and_columns() {
+        let (_, s) = run_pg("SELECT * FROM sales.in|").unwrap();
+        assert_eq!(text_of(&s), ["invoices"]);
+        let (_, s) = run_pg("SELECT * FROM public.us|").unwrap();
+        assert_eq!(text_of(&s), ["users"]);
+        let (_, s) = run_pg("SELECT public.users.| FROM public.users").unwrap();
+        assert!(text_of(&s).contains(&"email"));
+        let (_, s) = run_pg("SELECT public.users.em| FROM public.users").unwrap();
+        assert_eq!(text_of(&s), ["email"]);
+        let (_, s) = run_pg("SELECT u.em| FROM public.users u").unwrap();
+        assert_eq!(text_of(&s), ["email"]);
+        // The schemas the app lists complete before their tables are known.
+        let (_, s) = run_pg("SELECT * FROM au|").unwrap();
+        assert_eq!((s[0].text.as_str(), s[0].insert.as_str()), ("audit", "audit."));
+        // Unknown schemas offer nothing and do not panic.
+        assert!(run_pg("SELECT * FROM nope.|").is_none());
+        assert!(run_pg("SELECT nope.users.|").is_none());
+        assert!(run_pg("SELECT * FROM audit.|").is_none());
+        assert!(run_pg("SELECT a.b.c.d.|").is_none());
+    }
+
+    #[test]
+    fn dollar_quotes_and_escape_strings_do_not_break_completion() {
+        let (_, s) = run_pg("DO $$ BEGIN PERFORM 1; END $$; SELECT * FROM us|").unwrap();
+        assert_eq!(text_of(&s), ["users"]);
+        let (_, s) = run_pg("SELECT $tag$ a; b $tag$, em| FROM users").unwrap();
+        assert_eq!(text_of(&s), ["email"]);
+        let (_, s) = run_pg(r"SELECT E'it\'s; here', em| FROM users").unwrap();
+        assert_eq!(text_of(&s), ["email"]);
+        // Inside the body there is nothing to offer.
+        assert!(run_pg("SELECT $$ FROM us| $$").is_none());
+        let (b, full) = split_statement("SELECT $$;$$; SELECT 2 FROM us", "ers; SELECT 3", Dialect::Postgres);
+        assert_eq!((b.as_str(), full.as_str()), (" SELECT 2 FROM us", " SELECT 2 FROM users"));
+    }
+
+    #[test]
+    fn postgres_signature_help() {
+        let h = sql_help("SELECT date_trunc('day', ", Dialect::Postgres).unwrap();
+        assert_eq!((h.name, h.active, h.params.len()), ("DATE_TRUNC", 1, 2));
+        assert_eq!(sql_help("SELECT CONCAT_WS(a, $$x,y$$, ", Dialect::Postgres).unwrap().active, 2);
+        assert!(sql_help("SELECT $$ date_trunc(", Dialect::Postgres).is_none());
+        assert!(sql_help("SELECT date_trunc(", Dialect::MySql).is_none());
+        assert!(sql_help("SELECT CURRENT_DATE (", Dialect::Postgres).is_none());
+    }
+
+    #[test]
+    fn no_refused_function_is_ever_offered() {
+        for (name, _) in FUNCTIONS_PG {
+            assert!(!lex::pg_refuses_function(name), "{name}");
+        }
+        for pre in ["n", "pg_", "lo_", "set", "db", "txid", "cross", "pg_ad", "next"] {
+            let (_, s) = run_pg(&format!("SELECT {pre}|")).unwrap_or((0, vec![]));
+            for x in s.iter().filter(|x| x.note == "fn") {
+                assert!(!lex::pg_refuses_function(x.text.trim_end_matches("()")), "{}", x.text);
+            }
+        }
     }
 }

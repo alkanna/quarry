@@ -2,16 +2,20 @@
 //! scripts. Rows leave here as BSON like Mongo's, see `Row`.
 
 
+use super::se;
 use super::value::{self, Kind};
+// What the modules that only exist for MySQL call, with sqlx's own connection type. The neutral ones are in `run`.
+pub(super) use super::run::pin_reads_my as pin_reads;
+use super::run::{run, RunHandle};
 use super::schema::{Schema, SchemaCol, SchemaTable};
-use super::structure::ALL_ROWS;
-use super::{lex, Addr, Advanced, TestInfo, Col, Db, Dialect, Page, PageQuery, Pool, ResultSet, SslMode, RUN_ROWS_MAX};
+use super::{lex, Addr, Advanced, TestInfo, Col, Db, Dialect, PageQuery, Pool, SslMode};
 use crate::db::{e, Msg, Net, Res, Row, Worker};
 use mongodb::bson::{Bson, Document};
-use sqlx::mysql::{MySqlColumn, MySqlConnectOptions, MySqlPoolOptions, MySqlRow, MySqlSslMode};
-use sqlx::{raw_sql, Column, Connection, Either, Executor, Row as _, TypeInfo};
+use super::exec::{Cells, ColInfo, ColMeta, Conn, Opts, SqlRow};
+use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlSslMode};
+use sqlx::{raw_sql, Connection, Executor, Row as _};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -20,22 +24,22 @@ const ESTIMATE_MIN: u64 = 10_000;
 
 /// A cell of a text-protocol row as the server's own bytes. Metadata queries read strings through this
 /// too, because a `_bin` collation makes sqlx report text as VARBINARY.
-pub(super) fn raw(row: &MySqlRow, i: usize) -> Option<&[u8]> {
-    row.try_get_unchecked::<Option<&[u8]>, _>(i).ok().flatten()
+pub(super) fn raw<R: Cells>(row: &R, i: usize) -> Option<&[u8]> {
+    row.cell(i)
 }
 
 /// Column `i` of a text-protocol row as text.
-pub(super) fn text_at(row: &MySqlRow, i: usize) -> Option<String> {
+pub(super) fn text_at<R: Cells>(row: &R, i: usize) -> Option<String> {
     raw(row, i).map(|b| String::from_utf8_lossy(b).into_owned())
 }
 
 /// Column `i` of a text-protocol row as a number, for the counts and ids the server sends as text.
-pub(super) fn num_at(row: &MySqlRow, i: usize) -> Option<u64> {
+pub(super) fn num_at<R: Cells>(row: &R, i: usize) -> Option<u64> {
     raw(row, i).and_then(|b| std::str::from_utf8(b).ok()?.parse().ok())
 }
 
-pub(super) fn text(row: &MySqlRow, name: &str) -> Option<String> {
-    row.try_get_unchecked::<Option<&[u8]>, _>(name).ok().flatten().map(|b| String::from_utf8_lossy(b).into_owned())
+pub(super) fn text<R: Cells>(row: &R, name: &str) -> Option<String> {
+    row.cell_named(name).map(|b| String::from_utf8_lossy(b).into_owned())
 }
 
 fn ssl_mode(m: SslMode) -> MySqlSslMode {
@@ -120,41 +124,23 @@ impl Setup {
 }
 
 impl Db {
+    /// A pooled connection taken out of the pool for good, so its session can be changed.
+    pub(super) async fn acquire_conn(&self) -> Res<Conn> {
+        match &self.pool {
+            Pool::Pg(p) => Ok(Conn::Pg(p.acquire(self.opts.database()).await?.detach())),
+            Pool::My(_) => Ok(Conn::My(self.acquire().await?.detach())),
+        }
+    }
+
     /// A pooled connection. When the pool gave up because new connections failed their session setup, the error
     /// names the setting that failed instead of a bare timeout.
     pub(super) async fn acquire(&self) -> Res<sqlx::pool::PoolConnection<sqlx::MySql>> {
-        let Pool::My(p) = &self.pool;
+        let p = self.my_pool()?;
         p.acquire().await.map_err(|x| match x {
             sqlx::Error::PoolTimedOut => self.setup.failed_text().unwrap_or_else(|| e(x)),
             x => e(x),
         })
     }
-}
-
-/// Readies the script's own connection: its id for Stop, the database, and write access when unlocked.
-pub(super) async fn prepare(conn: &mut sqlx::MySqlConnection, d: Dialect, schema: &str, read_only: bool, id: &AtomicU64) -> Result<(), sqlx::Error> {
-    if let Ok(r) = conn.fetch_one("SELECT CONNECTION_ID()").await {
-        id.store(num_at(&r, 0).unwrap_or(0), Ordering::SeqCst);
-    }
-    // With autocommit 0 from the server's globals, every write of the script is rolled back when the connection
-    // closes, and reads keep a snapshot and metadata locks. The script can still turn it off itself.
-    conn.execute("SET SESSION autocommit = 1").await?;
-    if !schema.is_empty() {
-        let q = format!("USE {}", d.quote_ident(schema));
-        conn.execute(q.as_str()).await?;
-    }
-    if !read_only {
-        conn.execute(d.session_read_only(false)).await?;
-    }
-    Ok(())
-}
-
-/// Pins what a read of every row as stored depends on: UTF-8 both ways, and no sql_select_limit cutting a SELECT
-/// short. A session can get either from the server's globals.
-pub(super) async fn pin_reads(c: &mut sqlx::MySqlConnection) -> Result<(), sqlx::Error> {
-    c.execute("SET NAMES utf8mb4").await?;
-    c.execute("SET SESSION sql_select_limit = DEFAULT").await?;
-    Ok(())
 }
 
 async fn open(uri: &str, timeout: Duration, net: &Net, adv: &Advanced) -> Res<(Db, Vec<String>, Option<crate::ssh::Tunnel>)> {
@@ -164,9 +150,12 @@ async fn open(uri: &str, timeout: Duration, net: &Net, adv: &Advanced) -> Res<(D
 /// `info` also reads what the form's Test button shows: the server's default sql_mode and its UTF-8 collations.
 async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info: bool) -> Res<(Db, Vec<String>, Option<crate::ssh::Tunnel>, TestInfo)> {
     // Checked before anything connects, so a bad value never costs a tunnel or a login.
+    let a = Addr::parse(uri).ok_or("Not a SQL address")?;
+    if a.engine() == super::Engine::Postgres {
+        return super::pg::open(a, timeout, net, adv, info).await;
+    }
     let setup = Setup::new(adv.session_statements(super::advanced::local_offset_secs())?, super::advanced::init_statements(&adv.init)?);
     let (timeout, ms) = adv.timeouts(timeout);
-    let a = Addr::parse(uri).ok_or("Not a MySQL address")?;
     let tunnel = match &net.ssh {
         Some((conf, secrets)) => Some(crate::ssh::open(conf, secrets, timeout, Some((a.host.clone(), a.port))).await?),
         None => None,
@@ -190,7 +179,7 @@ async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info
     // The pool retries a connection whose setup failed until its timeout, so one plain connection runs the setup
     // first and a failing setting or init command is reported at once, with its statement.
     let first = async {
-        let mut c = sqlx::MySqlConnection::connect_with(&o).await.map_err(e)?;
+        let mut c = sqlx::MySqlConnection::connect_with(&o).await.map_err(se)?;
         let r = session(&mut c, ms, &setup).await;
         let _ = c.close().await;
         r.map_err(|err| setup.failed_text().unwrap_or_else(|| e(err)))
@@ -205,18 +194,18 @@ async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info
         let hook = hook.clone();
         Box::pin(async move { session(c, ms, &hook).await })
     }).connect_with(o.clone()).await.map_err(|err| setup.failed_text().unwrap_or_else(|| e(err)))?;
-    let version: String = sqlx::query_scalar("SELECT VERSION()").fetch_one(&pool).await.map_err(e)?;
+    let version: String = sqlx::query_scalar("SELECT VERSION()").fetch_one(&pool).await.map_err(se)?;
     // Read apart from VERSION so a proxy that refuses @@sql_mode still connects, with the default mode.
     let sql_mode: String = sqlx::query_scalar("SELECT @@sql_mode").fetch_one(&pool).await.unwrap_or_default();
-    let tls = raw_sql("SHOW SESSION STATUS LIKE 'Ssl_cipher'").fetch_all(&pool).await.map_err(e)?.iter().any(|r| raw(r, 1).is_some_and(|v| !v.is_empty()));
-    let dbs = sorted_names(&raw_sql("SHOW DATABASES").fetch_all(&pool).await.map_err(e)?);
+    let tls = raw_sql("SHOW SESSION STATUS LIKE 'Ssl_cipher'").fetch_all(&pool).await.map_err(se)?.iter().any(|r| raw(r, 1).is_some_and(|v| !v.is_empty()));
+    let dbs = sorted_names(&raw_sql("SHOW DATABASES").fetch_all(&pool).await.map_err(se)?);
     let mut ti = TestInfo::default();
     if info {
         ti.sql_mode = sqlx::query_scalar("SELECT @@GLOBAL.sql_mode").fetch_one(&pool).await.unwrap_or_default();
         let rows = raw_sql("SELECT CHARACTER_SET_NAME, COLLATION_NAME FROM information_schema.COLLATIONS WHERE CHARACTER_SET_NAME IN ('utf8mb4', 'utf8mb3') ORDER BY COLLATION_NAME").fetch_all(&pool).await.unwrap_or_default();
         ti.collations = rows.iter().filter_map(|r| Some((String::from_utf8_lossy(raw(r, 0)?).into_owned(), String::from_utf8_lossy(raw(r, 1)?).into_owned()))).collect();
     }
-    let db = Db { dialect: Dialect::from_version(&version), pool: Pool::My(pool), opts: o, version, tls, sql_mode, setup, conn: 0 };
+    let db = Db { dialect: Dialect::from_version(&version), pool: Pool::My(pool), opts: Opts::My(o), version, tls, sql_mode, setup, conn: 0 };
     Ok((db, dbs, tunnel, ti))
 }
 
@@ -224,11 +213,11 @@ async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info
 /// `fetch_all` on the connection rather than `raw_sql`, because inside a spawned block the executor lifetimes of a
 /// borrowed connection do not infer for the latter.
 pub(super) async fn database_names(c: &mut sqlx::MySqlConnection) -> Res<Vec<String>> {
-    Ok(sorted_names(&c.fetch_all("SHOW DATABASES").await.map_err(e)?))
+    Ok(sorted_names(&c.fetch_all("SHOW DATABASES").await.map_err(se)?))
 }
 
 /// The first column of each row, sorted. `open` reads through the pool, where a generic executor does not infer.
-fn sorted_names(rows: &[MySqlRow]) -> Vec<String> {
+fn sorted_names<R: Cells>(rows: &[R]) -> Vec<String> {
     let mut names: Vec<String> = rows.iter().filter_map(|r| text_at(r, 0)).collect();
     names.sort();
     names
@@ -259,17 +248,24 @@ fn unique(cols: &mut [Col], reserve_id: bool) {
 
 /// Columns as the result reports them. `meta` (name to COLUMN_TYPE and nullability) wins when the
 /// result column is a table column.
-pub(super) fn make_cols(cols: &[MySqlColumn], meta: &HashMap<String, (String, bool, String)>, reserve_id: bool) -> Vec<Col> {
+pub(super) fn make_cols<C: ColMeta>(cols: &[C], meta: &HashMap<String, (String, bool, String)>, reserve_id: bool) -> Vec<Col> {
+    make_cols_kinds(cols, meta, &HashMap::new(), reserve_id)
+}
+
+/// `make_cols` with the kinds the server's catalog gave the table's columns. PostgreSQL's type names say too little
+/// (a domain, an enum), so its kinds are read from `pg_type` and a MySQL table leaves `kinds` empty.
+pub(super) fn make_cols_kinds<C: ColMeta>(cols: &[C], meta: &HashMap<String, (String, bool, String)>, kinds: &HashMap<String, Kind>, reserve_id: bool) -> Vec<Col> {
     let mut out: Vec<Col> = cols
         .iter()
         .map(|c| {
-            let ty = c.type_info().name().to_string();
-            match meta.get(c.name()) {
+            let ty = c.col_type();
+            match meta.get(c.col_name()) {
                 Some((full, nullable, extra)) => {
                     let extra = extra.to_ascii_uppercase();
-                    Col { generated: extra.contains("GENERATED"), auto_increment: extra.contains("AUTO_INCREMENT"), ..Col::plain(c.name(), full, kind_of_full(full), *nullable) }
+                    let kind = kinds.get(c.col_name()).copied().unwrap_or_else(|| kind_of_full(full));
+                    Col { generated: extra.contains("GENERATED"), auto_increment: extra.contains("AUTO_INCREMENT"), ..Col::plain(c.col_name(), full, kind, *nullable) }
                 }
-                None => Col::plain(c.name(), &ty, Kind::from_type_name(&ty), true),
+                None => Col::plain(c.col_name(), &ty, c.col_kind(), true),
             }
         })
         .collect();
@@ -277,12 +273,12 @@ pub(super) fn make_cols(cols: &[MySqlColumn], meta: &HashMap<String, (String, bo
     out
 }
 
-pub(super) fn to_row(cols: &[Col], row: &MySqlRow, pk: &[String]) -> Res<Row> {
-    let vals: Vec<Bson> = cols.iter().enumerate().map(|(i, c)| value::to_bson(c.kind, raw(row, i))).collect();
+pub(super) fn to_row<R: Cells>(cols: &[Col], row: &R, pk: &[String]) -> Res<Row> {
+    let vals: Vec<Bson> = cols.iter().enumerate().map(|(i, c)| value::to_bson(row.dialect(), c.kind, raw(row, i))).collect();
     let mut d = Document::new();
     // The key is looked up by the server's column names, since a renamed column keeps its real name there.
     // A key with a missing column would address too many rows, so then there is no key at all.
-    let idx: Option<Vec<usize>> = pk.iter().map(|p| row.columns().iter().position(|c| c.name() == p)).collect();
+    let idx: Option<Vec<usize>> = pk.iter().map(|p| row.col_pos(p)).collect();
     if let Some(idx) = idx.filter(|i| !i.is_empty()) {
         let mut k = Document::new();
         for (p, i) in pk.iter().zip(idx) {
@@ -297,67 +293,111 @@ pub(super) fn to_row(cols: &[Col], row: &MySqlRow, pk: &[String]) -> Res<Row> {
 }
 
 /// Text the user typed is spliced into a SELECT, so it must stay one read-only statement.
-fn one_read(sql: &str) -> Res<()> {
-    if lex::split_statements(sql).len() != 1 {
+fn one_read(sql: &str, d: Dialect) -> Res<()> {
+    if lex::split_statements(sql, d).len() != 1 {
         return Err("The filter and sort must not contain another statement".into());
     }
-    lex::read_only_check(sql)
+    lex::read_only_check(sql, d)
 }
 
 /// The count and whether it is the information_schema estimate rather than an exact count. A
 /// grouped or distinct count that the server refuses (duplicate output names) falls back to
 /// zero, since the data query reports the same problem.
 async fn count(db: &Db, schema: &str, table: &str, q: &PageQuery) -> Res<(u64, bool)> {
-    let Pool::My(pool) = &db.pool;
     let d = db.dialect;
     if q.plain() {
-        let mut c = pool.acquire().await.map_err(e)?;
-        // MySQL 8 caches TABLE_ROWS for a day. Fresh numbers cost a lot per schema, so only this one table's
-        // lookup asks for them; 5.7 and MariaDB lack the variable, so a refusal is fine.
-        if d == Dialect::MySql {
-            let _ = c.execute("SET SESSION information_schema_stats_expiry = 0").await;
-        }
-        let t = Instant::now();
-        let est = sqlx::query(d.table_status()).bind(schema).bind(table).fetch_optional(&mut *c).await;
-        db.note(schema, d.table_status(), t, &est);
-        let est = est.map_err(e)?;
-        if let Some(n) = est.and_then(|r| r.try_get::<Option<u64>, _>("row_estimate").ok().flatten()).filter(|n| *n >= ESTIMATE_MIN) {
+        let est = match &db.pool {
+            Pool::My(pool) => {
+                let mut c = pool.acquire().await.map_err(se)?;
+                // MySQL 8 caches TABLE_ROWS for a day. Fresh numbers cost a lot per schema, so only this one table's
+                // lookup asks for them; 5.7 and MariaDB lack the variable, so a refusal is fine.
+                if matches!(d, Dialect::MySql) {
+                    let _ = c.execute("SET SESSION information_schema_stats_expiry = 0").await;
+                }
+                let t = Instant::now();
+                let est = sqlx::query(d.table_status()).bind(schema).bind(table).fetch_optional(&mut *c).await;
+                db.note(schema, d.table_status(), t, &est);
+                est.map_err(se)?.and_then(|r| r.try_get::<Option<u64>, _>("row_estimate").ok().flatten())
+            }
+            // NULL while the planner has no estimate, and then the count below is exact.
+            Pool::Pg(_) => db.meta(schema, d.table_status(), [schema, table]).await?.first().and_then(|r| r.uint("row_estimate")),
+        };
+        if let Some(n) = est.filter(|n| *n >= ESTIMATE_MIN) {
             return Ok((n, true));
         }
     }
     let sql = q.count_sql(d, schema, table);
-    one_read(&sql)?;
-    let t = Instant::now();
-    let res = raw_sql(&sql).fetch_one(pool).await;
-    db.note(schema, &sql, t, &res);
-    match res {
-        Ok(r) => Ok((num_at(&r, 0).unwrap_or(0), false)),
+    one_read(&sql, d)?;
+    match db.read_text(schema, &sql, user_text(q)).await {
+        Ok(rows) => Ok((rows.first().and_then(|r| num_at(r, 0)).unwrap_or(0), false)),
         Err(_) if q.grouped() || q.distinct => Ok((0, false)),
-        Err(err) => Err(e(err)),
+        Err(err) => Err(err),
     }
 }
 
+/// The column rows of one PostgreSQL table for a write. `format_type` spells a type without its schema when the schema
+/// is on the search_path, and the type is written back as `CAST(.. AS <that text>)`. A user who can create objects in a
+/// schema that comes earlier on the editor's path could then make the name resolve to a domain of their own, whose CHECK
+/// would run with the editor's privileges. With the path reduced to pg_catalog every user type comes back as `schema.type`.
+/// It runs in a read-only transaction of its own that is always rolled back, so a pooler never sees the setting leave it.
+async fn pg_columns(db: &Db, schema: &str, table: &str) -> Res<Vec<SqlRow>> {
+    // Quarry's own query, no user text, so the connection goes back to the pool.
+    let Pool::Pg(pools) = &db.pool else { return Err("Not a PostgreSQL connection".into()) };
+    let mut conn = pools.acquire(db.opts.database()).await?;
+    let sql = format!("{}{}", db.dialect.columns(), db.dialect.all_rows());
+    let t = Instant::now();
+    let res = super::pg_read::in_read_only(&mut conn, db, "SET LOCAL search_path = pg_catalog", async |c| sqlx::query(&sql).persistent(false).bind(schema).bind(table).fetch_all(c).await).await;
+    db.note(schema, &sql, t, &res);
+    if res.is_err() {
+        conn.close_on_drop();
+    }
+    res.map(SqlRow::wrap_pg).map_err(se)
+}
+
+/// What `make_cols_kinds` reads as a column's `extra`. On PostgreSQL it is built from the catalog's own identity and
+/// generated flags, never from the words of the column's expression: a computed column whose expression names a column
+/// called auto_increment is not an identity.
+fn pg_extra<R: Cells>(r: &R) -> String {
+    let (ident, generated) = (text(r, "attidentity").unwrap_or_default(), text(r, "attgenerated").unwrap_or_default());
+    let serial = ident.is_empty() && generated.is_empty() && text(r, "extra").as_deref() == Some("auto_increment");
+    let mut v = Vec::new();
+    if !ident.is_empty() || serial {
+        v.push("auto_increment");
+    }
+    if ident == "a" || !generated.is_empty() {
+        v.push("GENERATED");
+    }
+    v.join(" ")
+}
+
 /// Column types and the primary key, from information_schema.
-async fn table_meta(db: &Db, schema: &str, table: &str) -> Res<(HashMap<String, (String, bool, String)>, Vec<String>)> {
-    let Pool::My(pool) = &db.pool;
+async fn table_meta(db: &Db, schema: &str, table: &str) -> Res<(HashMap<String, (String, bool, String)>, HashMap<String, Kind>, Vec<String>)> {
     let d = db.dialect;
-    let t = Instant::now();
-    let cols = sqlx::query(&format!("{}{ALL_ROWS}", d.columns())).bind(schema).bind(table).fetch_all(pool).await;
-    db.note(schema, d.columns(), t, &cols);
-    let cols = cols.map_err(e)?;
-    let t = Instant::now();
-    let idx = sqlx::query(&format!("{}{ALL_ROWS}", d.indexes())).bind(schema).bind(table).fetch_all(pool).await;
-    db.note(schema, d.indexes(), t, &idx);
-    let idx = idx.map_err(e)?;
+    let cols = async { if d == Dialect::Postgres { pg_columns(db, schema, table).await } else { db.meta(schema, d.columns(), [schema, table]).await } };
+    let (cols, idx) = tokio::try_join!(cols, db.meta(schema, d.indexes(), [schema, table]))?;
     let meta = cols
         .iter()
         .filter_map(|r| {
-            let nullable = r.try_get::<i64, _>("nullable").map(|n| n != 0).unwrap_or(true);
-            Some((text(r, "name")?, (text(r, "full_type")?, nullable, text(r, "extra").unwrap_or_default())))
+            let nullable = r.int("nullable").map(|n| n != 0).unwrap_or(true);
+            let extra = if d == Dialect::Postgres { pg_extra(r) } else { text(r, "extra").unwrap_or_default() };
+            Some((text(r, "name")?, (text(r, "full_type")?, nullable, extra)))
         })
         .collect();
-    let pk = idx.iter().filter(|r| text(r, "name").as_deref() == Some("PRIMARY")).filter_map(|r| text(r, "col")).collect();
-    Ok((meta, pk))
+    let kinds = if d == Dialect::Postgres { cols.iter().filter_map(|r| Some((text(r, "name")?, pg_kind(r)))).collect() } else { HashMap::new() };
+    // A Postgres key is named by the table, so the index query says which one is the primary key.
+    let pk = idx.iter().filter(|r| if d == Dialect::Postgres { r.int("is_primary") == Some(1) } else { text(r, "name").as_deref() == Some("PRIMARY") }).filter_map(|r| text(r, "col")).collect();
+    Ok((meta, kinds, pk))
+}
+
+/// Whether any clause of the page query is text the user typed. The index hint is quoted by `PageQuery`, and the limit
+/// and offset are numbers, so they are not.
+fn user_text(q: &PageQuery) -> bool {
+    [&q.filter, &q.order, &q.having].iter().any(|s| !s.trim().is_empty()) || q.select.iter().chain(&q.group).any(|s| !s.trim().is_empty())
+}
+
+/// The kind of a column of a Postgres catalog row, which carries the resolved base type and its category.
+pub(super) fn pg_kind<R: Cells>(r: &R) -> Kind {
+    Kind::from_pg(&text(r, "pg_type").unwrap_or_default(), &text(r, "pg_cat").unwrap_or_default(), &text(r, "pg_typtype").unwrap_or_default())
 }
 
 /// One page: columns, primary key, rows, the count of what the pages come from (groups when
@@ -366,406 +406,47 @@ type Paged = (Vec<Col>, Vec<String>, Vec<Row>, u64, bool, u128, Option<u64>);
 
 async fn page(db: &Db, schema: &str, table: &str, q: &PageQuery, limit: u64, offset: u64) -> Res<Paged> {
     let start = Instant::now();
-    let Pool::My(pool) = &db.pool;
     let d = db.dialect;
     // The key is needed before the data query: without a total order, pages overlap and skip rows.
-    let (meta, mut pk) = table_meta(db, schema, table).await?;
+    let (meta, kinds, mut pk) = table_meta(db, schema, table).await?;
     if q.grouped() {
         pk.clear();
     }
     let sql = q.select_sql(d, schema, table, &pk, Some((limit, offset)));
-    one_read(&sql)?;
-    let data = async {
-        let t = Instant::now();
-        let res = raw_sql(&sql).fetch_all(pool).await;
-        db.note(schema, &sql, t, &res);
-        res.map_err(e)
-    };
+    one_read(&sql, d)?;
+    let data = db.read_text(schema, &sql, user_text(q));
     let ((total, estimated), rows) = tokio::try_join!(count(db, schema, table, q), data)?;
     // The LIMIT chip caps the whole result, not a page.
     let count = total.saturating_sub(q.skip).min(q.limit.unwrap_or(u64::MAX));
     let matched = if q.grouped() {
         let sql = q.rows_sql(d, schema, table);
-        one_read(&sql)?;
-        let t = Instant::now();
-        let r = raw_sql(&sql).fetch_one(pool).await;
-        db.note(schema, &sql, t, &r);
-        let r = r.map_err(e)?;
-        Some(num_at(&r, 0).unwrap_or(0))
+        one_read(&sql, d)?;
+        let r = db.read_text(schema, &sql, user_text(q)).await?;
+        Some(r.first().and_then(|r| num_at(r, 0)).unwrap_or(0))
     } else {
         None
     };
-    let rcols: Vec<MySqlColumn> = match rows.first() {
-        Some(r) => r.columns().to_vec(),
+    let rcols: Vec<ColInfo> = match rows.first() {
+        Some(r) => r.cols(),
         // An empty page still needs its headers.
-        None => (&*pool).describe(&sql).await.map_err(e)?.columns().to_vec(),
+        None => db.describe_text(&sql).await?,
     };
     // An invisible primary key is in the index list but not in SELECT *, so the rows cannot carry it.
-    if !pk.iter().all(|p| rcols.iter().any(|c| c.name() == p)) {
+    if !pk.iter().all(|p| rcols.iter().any(|c| c.name == *p)) {
         pk.clear();
     }
     // Output columns of a grouped query are computed, so they have no table type to look up.
-    let meta = if q.grouped() { HashMap::new() } else { meta };
-    let cols = make_cols(&rcols, &meta, !pk.is_empty());
+    let (meta, kinds) = if q.grouped() { (HashMap::new(), HashMap::new()) } else { (meta, kinds) };
+    let cols = make_cols_kinds(&rcols, &meta, &kinds, !pk.is_empty());
     let rows = rows.iter().map(|r| to_row(&cols, r, &pk)).collect::<Res<Vec<_>>>()?;
     Ok((cols, pk, rows, count, estimated, start.elapsed().as_millis(), matched))
 }
 
-fn failed(stmt: &str, error: String) -> ResultSet {
-    ResultSet { error: Some(error), ..ResultSet::new(stmt) }
-}
-
-/// Runs one statement and keeps at most `cap` rows of each result. A CALL can return several
-/// results, each becomes its own set. Reading stops at the cap, which leaves the connection mid-result:
-/// the caller must not reuse it (`capped` on the last set says so).
-async fn run_one(conn: &mut sqlx::MySqlConnection, stmt: &str, cap: usize) -> Vec<ResultSet> {
-    let t = Instant::now();
-    let mut sets: Vec<ResultSet> = Vec::new();
-    let mut cur = ResultSet::new(stmt);
-    let mut cols: Vec<Col> = Vec::new();
-    let mut failure = None;
-    {
-        let mut s = raw_sql(stmt).fetch_many(&mut *conn);
-        while let Some(item) = futures_util::StreamExt::next(&mut s).await {
-            match item {
-                Ok(Either::Right(row)) => {
-                    if cols.is_empty() {
-                        cols = make_cols(row.columns(), &HashMap::new(), false);
-                    }
-                    if cur.rows.len() >= cap {
-                        cur.capped = true;
-                        break;
-                    }
-                    match to_row(&cols, &row, &[]) {
-                        Ok(r) => cur.rows.push(r),
-                        Err(err) => {
-                            failure = Some(err);
-                            break;
-                        }
-                    }
-                }
-                // The end of one result set (or the OK of a write).
-                Ok(Either::Left(r)) => {
-                    let mut done = std::mem::replace(&mut cur, ResultSet::new(stmt));
-                    done.cols = std::mem::take(&mut cols);
-                    if done.cols.is_empty() {
-                        done.affected = Some(r.rows_affected());
-                    }
-                    sets.push(done);
-                }
-                Err(err) => {
-                    failure = Some(e(err));
-                    break;
-                }
-            }
-        }
-    }
-    // A CALL ends with a bare OK after its results, which is not a result of its own.
-    if sets.len() > 1 && sets.last().is_some_and(|l| l.cols.is_empty() && l.affected == Some(0)) && sets.iter().any(|x| !x.cols.is_empty()) {
-        sets.pop();
-    }
-    // Stopped in the middle of a result: keep what was read.
-    if !cur.rows.is_empty() || cur.capped || failure.is_some() || sets.is_empty() {
-        cur.cols = cols;
-        cur.error = failure;
-        sets.push(cur);
-    }
-    if sets.len() == 1 && sets[0].error.is_none() && sets[0].cols.is_empty() {
-        // No rows came back: a SELECT with an empty result still has headers, a write does not.
-        if let Ok(desc) = (&mut *conn).describe(stmt).await {
-            if !desc.columns().is_empty() {
-                sets[0].cols = make_cols(desc.columns(), &HashMap::new(), false);
-                sets[0].affected = None;
-            }
-        }
-    }
-    let ms = t.elapsed().as_millis();
-    for x in &mut sets {
-        x.ms = ms;
-    }
-    sets
-}
-
-/// One statement as a page of at most `RUN_ROWS_MAX` rows, when it is a plain read. A column name that
-/// repeats cannot sit in a derived table, so such a statement falls back to a plain capped run.
-async fn run_stmt(conn: &mut sqlx::MySqlConnection, stmt: &str, page: usize) -> Vec<ResultSet> {
-    if !lex::pageable(stmt) {
-        return run_one(conn, stmt, RUN_ROWS_MAX).await;
-    }
-    let mut rs = run_one(conn, &lex::page_sql(stmt, page, RUN_ROWS_MAX), RUN_ROWS_MAX + 1).await;
-    if rs.len() == 1 && rs[0].error.as_deref().is_some_and(|m| m.contains("Duplicate column name")) {
-        return run_one(conn, stmt, RUN_ROWS_MAX).await;
-    }
-    for r in &mut rs {
-        r.stmt = stmt.to_string();
-        if r.error.is_none() {
-            let next = r.rows.len() > RUN_ROWS_MAX;
-            r.rows.truncate(RUN_ROWS_MAX);
-            r.page = Some(Page { n: page, next, total: None, ordered: lex::has_order_by(stmt) });
-        }
-    }
-    rs
-}
-
-/// Runs the statements of `text`; `page` is the page every pageable statement is read at.
-async fn run(db: &Db, schema: &str, text: &str, read_only: bool, id: &AtomicU64, cancel: &AtomicBool, page: usize) -> Vec<ResultSet> {
-    // Detached, so a USE or @variable of this script never leaks into the pool.
-    let mut conn = match db.acquire().await {
-        Ok(c) => c.detach(),
-        Err(err) => return vec![failed("", err)],
-    };
-    let d = db.dialect;
-    if let Err(err) = prepare(&mut conn, d, schema, read_only, id).await {
-        return vec![failed("", e(err))];
-    }
-    let mut sets = Vec::new();
-    // Each statement goes alone, so user text is never sent as one multi-statement string.
-    let stmts = lex::split_statements(text);
-    let mut why: Option<&str> = None;
-    // A USE in the script changes the database the later statements run in, and so the one the log names.
-    let mut here = schema.to_string();
-    for (_, stmt) in stmts {
-        // KILL QUERY only interrupts the statement in flight, so the flag is what keeps the rest from running.
-        if cancel.load(Ordering::SeqCst) {
-            why = Some("Stopped before running");
-        }
-        if let Some(w) = why {
-            sets.push(failed(stmt, w.into()));
-            continue;
-        }
-        if read_only {
-            if let Err(why) = lex::read_only_check(stmt) {
-                sets.push(ResultSet { refused: true, ..failed(stmt, why) });
-                continue;
-            }
-        }
-        let rs = run_stmt(&mut conn, stmt, page).await;
-        let failed = rs.iter().find_map(|r| r.error.as_deref());
-        crate::db::log_sql(db.conn, &here, stmt, rs.first().map_or(0, |r| r.ms), failed);
-        if let (None, Some(to)) = (failed, lex::use_target(stmt)) {
-            here = to;
-        }
-        if rs.iter().any(|r| r.error.is_some()) {
-            sets.extend(rs);
-            break;
-        }
-        if rs.last().is_some_and(|r| r.capped) {
-            // The rest of the big result is still on the wire; draining it could take as long as the query, and
-            // a fresh connection would lose the script's variables and USE, so the script ends here.
-            why = Some("Not run: the previous result was cut at the row limit");
-        }
-        sets.extend(rs);
-    }
-    sets
-}
-
-/// A connection of its own, outside the pool (a busy or exhausted pool never blocks it), or `why` when the server
-/// does not answer within 10 s.
-pub(super) async fn side_conn(db: &Db, why: &str) -> Res<sqlx::MySqlConnection> {
-    tokio::time::timeout(Duration::from_secs(10), sqlx::MySqlConnection::connect_with(&db.opts)).await.map_err(|_| why.to_string())?.map_err(e)
-}
-
-/// KILL QUERY from a connection of its own. A plain function, because inside a spawned block the
-/// executor lifetimes of a local connection do not infer.
-pub(super) async fn kill_query(db: &Db, id: u64) -> Res<String> {
-    let mut c = side_conn(db, "Could not reach the server to stop the statement").await?;
-    let q = db.dialect.cancel(id);
-    let r = c.execute(q.as_str()).await.map(|_| "Stopped the running statement".to_string()).map_err(|x| super::server::kill_error(&x));
-    let _ = c.close().await;
-    r
-}
-
-/// The most rows one query of a shell script may return; past it the script gets an error instead of
-/// the server's whole table through a pipe.
-const RELAY_ROWS_MAX: usize = 100_000;
-/// And the most bytes of values one answer may hold, so a few huge cells cannot fill memory or the pipe.
-const RELAY_BYTES_MAX: usize = 64 << 20;
-
-/// What a shell script's query gave back: rows as relaxed Extended JSON, or the effect of a write.
-pub enum Answer {
-    Rows(Vec<serde_json::Value>),
-    Wrote { affected: u64, insert_id: u64 },
-}
-
-/// Where an unsafe JSON number would lose digits.
-const JS_SAFE: u64 = (1 << 53) - 1;
-
-/// A literal for one bound value. The script's text goes through the text protocol so rows convert
-/// exactly like the Custom Query's, so values are escaped here instead of bound.
-fn literal(p: &value::Param, no_backslash: bool) -> Res<String> {
-    use value::Param;
-    Ok(match p {
-        Param::Null => "NULL".into(),
-        Param::Int(i) => i.to_string(),
-        Param::UInt(u) => u.to_string(),
-        Param::Float(f) if f.is_finite() => format!("{f:e}"),
-        Param::Float(_) => return Err("A value is not a finite number".into()),
-        Param::Text(s) => {
-            if s.contains('\0') {
-                return Err("A text value contains a NUL character".into());
-            }
-            // The backslash only escapes when the server reads it as an escape.
-            value::lit(s, !no_backslash)
-        }
-        Param::Bytes(b) => format!("X'{}'", value::hex_digits(b, false)),
-    })
-}
-
-/// A row cell as the script gets it. An Int64 beyond 2^53 is sent as {"$numberLong"} because a plain
-/// JSON number would round in the script.
-fn cell(b: Bson) -> Bson {
-    match b {
-        Bson::Int64(i) if i.unsigned_abs() > JS_SAFE => mongodb::bson::doc! { "$numberLong": i.to_string() }.into(),
-        b => b,
-    }
-}
-
-/// The text with every `?` outside strings and comments replaced by the next value's literal. The text is
-/// read with the server's quote rules, and refused when the other backslash reading finds other
-/// placeholders or statements, since the server could then see code where this sees a string.
-pub fn fill(text: &str, params: &[value::Param], backslash: bool, ansi: bool) -> Res<String> {
-    let (at, count) = lex::placeholders(text, backslash, ansi);
-    if lex::placeholders(text, !backslash, ansi) != (at, count) {
-        return Err("This text reads differently with and without backslash escapes. Use ? for values and keep backslashes out of quotes".into());
-    }
-    let (mut out, mut last, mut n) = (String::new(), 0, 0);
-    for (t, r) in lex::tokens_with(text, backslash, ansi) {
-        if t == lex::Tok::Punct && &text[r.clone()] == "?" {
-            let p = params.get(n).ok_or("The query has more ? than values")?;
-            out.push_str(&text[last..r.start]);
-            // Padded, so a literal never fuses with a word before or after it (X?, @?).
-            out.push_str(&format!(" {} ", literal(p, !backslash)?));
-            (last, n) = (r.end, n + 1);
-        }
-    }
-    if n != params.len() {
-        return Err(format!("The query has {n} placeholders but {} values", params.len()));
-    }
-    out.push_str(&text[last..]);
-    Ok(out)
-}
-
-/// What Stop needs of a running Custom Query: the server connection id once it is known, and the flag
-/// that keeps the rest of the script from starting. Each run gets a fresh one, so a late Stop never
-/// reaches the next run.
-#[derive(Clone, Default)]
-pub struct RunHandle {
-    pub conn: Arc<AtomicU64>,
-    pub cancel: Arc<AtomicBool>,
-}
-
-/// A shell script's own connection, kept for the whole run so its @variables and transactions persist.
-/// It is the only way a script reaches the server, so the read-only check below covers every write.
-pub struct Relay {
-    conn: sqlx::MySqlConnection,
-    read_only: bool,
-    backslash: bool,
-    ansi: bool,
-    /// A result was abandoned halfway, which leaves the connection unusable.
-    dead: bool,
-    /// For the query log: the connection's app id and the database the script runs in.
-    log_conn: u64,
-    schema: String,
-}
-
-impl Relay {
-    pub async fn open(db: &Db, schema: &str, read_only: bool, id: &AtomicU64) -> Res<Relay> {
-        let mut conn = db.acquire().await?.detach();
-        prepare(&mut conn, db.dialect, schema, read_only, id).await.map_err(e)?;
-        // Values are filled in for this session's mode, which may differ from the one read at connect.
-        let m = super::ddl::session_mode(&mut conn).await?;
-        Ok(Relay { conn, read_only, backslash: m.bs, ansi: m.ansi, dead: false, log_conn: db.conn, schema: schema.to_string() })
-    }
-
-    /// Interrupts the statement running on connection `id`, from a connection of its own.
-    pub async fn kill(db: &Db, id: u64) -> Res<String> {
-        kill_query(db, id).await
-    }
-
-    /// Runs one statement. On a locked connection the same check as the Custom Query runs on the final
-    /// text, and the session itself is READ ONLY.
-    pub async fn query(&mut self, text: &str, params: &[value::Param]) -> Res<Answer> {
-        if self.dead {
-            return Err("The connection of this script was lost after an earlier error".into());
-        }
-        if lex::changes_escaping(text) {
-            return Err("This statement changes how values are escaped; not allowed in the shell".into());
-        }
-        if lex::uses_prepared(text) {
-            return Err("Prepared statements are not available in the shell; use sql`...` with values instead.".into());
-        }
-        let stmt = fill(text, params, self.backslash, self.ansi)?;
-        if lex::count_with(&stmt, self.backslash, self.ansi) != 1 || lex::count_with(&stmt, !self.backslash, self.ansi) != 1 {
-            return Err("Send one statement per query".into());
-        }
-        if self.read_only {
-            lex::read_only_check(&stmt)?;
-        }
-        let (mut cols, mut rows, mut wrote, mut bytes) = (Vec::<Col>::new(), Vec::new(), None, 0usize);
-        let mut failure = None;
-        let started = Instant::now();
-        {
-            let mut s = raw_sql(&stmt).fetch_many(&mut self.conn);
-            while let Some(item) = futures_util::StreamExt::next(&mut s).await {
-                match item {
-                    Ok(Either::Right(row)) => {
-                        if cols.is_empty() {
-                            cols = make_cols(row.columns(), &HashMap::new(), false);
-                        }
-                        if rows.len() >= RELAY_ROWS_MAX {
-                            failure = Some(format!("A query returned more than {RELAY_ROWS_MAX} rows. Add a LIMIT."));
-                            break;
-                        }
-                        bytes += (0..cols.len()).map(|i| raw(&row, i).map_or(0, |b| b.len()) + 16).sum::<usize>();
-                        if bytes > RELAY_BYTES_MAX {
-                            failure = Some(format!("A query returned more than {} MB. Select fewer columns or add a LIMIT.", RELAY_BYTES_MAX >> 20));
-                            break;
-                        }
-                        let d: Document = cols.iter().enumerate().map(|(i, c)| (c.name.clone(), cell(value::to_bson(c.kind, raw(&row, i))))).collect();
-                        rows.push(Bson::Document(d).into_relaxed_extjson());
-                    }
-                    // A CALL has several results; the first one with rows is what the script gets.
-                    Ok(Either::Left(r)) if cols.is_empty() && wrote.is_none() => wrote = Some((r.rows_affected(), r.last_insert_id())),
-                    Ok(Either::Left(_)) => {}
-                    Err(err) => {
-                        failure = Some(e(err));
-                        break;
-                    }
-                }
-            }
-        }
-        crate::db::log_sql(self.log_conn, &self.schema, &stmt, started.elapsed().as_millis(), failure.as_deref());
-        if let (None, Some(to)) = (&failure, lex::use_target(&stmt)) {
-            self.schema = to;
-        }
-        if let Some(f) = failure {
-            // Dropping the stream mid-result leaves unread packets on the wire.
-            self.dead = f.contains("more than");
-            return Err(f);
-        }
-        if cols.is_empty() {
-            // An empty SELECT still has headers, a write or SET does not.
-            let empty_read = wrote.is_some_and(|w| w.0 == 0) && (&mut self.conn).describe(&stmt).await.is_ok_and(|d| !d.columns().is_empty());
-            if !empty_read {
-                let (affected, insert_id) = wrote.unwrap_or_default();
-                return Ok(Answer::Wrote { affected, insert_id });
-            }
-        }
-        Ok(Answer::Rows(rows))
-    }
-}
-
 /// Tables, views and columns of one database in three round trips run together.
 async fn load_schema(db: &Db, schema: &str) -> Res<Schema> {
-    let Pool::My(pool) = &db.pool;
     let d = db.dialect;
-    let read = |sql: &'static str| async move {
-        let t = Instant::now();
-        let res = sqlx::query(&format!("{sql}{ALL_ROWS}")).bind(schema).fetch_all(pool).await;
-        db.note(schema, sql, t, &res);
-        res.map_err(e)
-    };
-    let (tables, cols, fks) = tokio::try_join!(read(d.tables()), read(d.all_columns()), read(d.all_foreign_keys()))?;
+    let p = [schema];
+    let (tables, cols, fks) = tokio::try_join!(db.meta(schema, d.tables(), p), db.meta(schema, d.all_columns(), p), db.meta(schema, d.all_foreign_keys(), p))?;
     let fk: HashSet<(String, String)> = fks.iter().filter_map(|r| Some((text(r, "tbl")?, text(r, "name")?))).collect();
     let mut out: Vec<SchemaTable> = tables
         .iter()
@@ -777,8 +458,9 @@ async fn load_schema(db: &Db, schema: &str) -> Res<Schema> {
     for r in &cols {
         let (Some(t), Some(name), Some(ty)) = (text(r, "tbl"), text(r, "name"), text(r, "full_type")) else { continue };
         let Some(table) = out.iter_mut().find(|x| x.name == t) else { continue };
-        let nullable = r.try_get::<i64, _>("nullable").map(|n| n != 0).unwrap_or(true);
-        table.cols.push(SchemaCol { fk: fk.contains(&(t, name.clone())), kind: kind_of_full(&ty), key: text(r, "col_key").unwrap_or_default(), nullable, name, ty });
+        let nullable = r.int("nullable").map(|n| n != 0).unwrap_or(true);
+        let kind = if d == Dialect::Postgres { pg_kind(r) } else { kind_of_full(&ty) };
+        table.cols.push(SchemaCol { fk: fk.contains(&(t, name.clone())), kind, key: text(r, "col_key").unwrap_or_default(), nullable, name, ty });
     }
     Ok(Schema { tables: out })
 }
@@ -790,15 +472,18 @@ const VALUES_SMALL: u64 = 100_000;
 /// large and no index leads with the column. Both checks read metadata only. The lookup runs on a
 /// connection of its own with a 300 ms limit, so a slow one never holds the pool.
 async fn field_values(db: &Db, schema: &str, table: &str, column: &str, prefix: Option<&str>) -> Res<Option<Vec<(String, u64)>>> {
-    let Pool::My(pool) = &db.pool;
     let d = db.dialect;
-    let Some(gate) = sqlx::query(d.value_gate()).bind(column).bind(schema).bind(table).fetch_optional(pool).await.map_err(e)? else { return Ok(None) };
+    if d == Dialect::Postgres {
+        return pg_field_values(db, schema, table, column, prefix).await;
+    }
+    let pool = db.my_pool()?;
+    let Some(gate) = sqlx::query(d.value_gate()).bind(column).bind(schema).bind(table).fetch_optional(pool).await.map_err(se)? else { return Ok(None) };
     let small = super::structure::num(&gate, "est").is_some_and(|n| n < VALUES_SMALL);
     let leads = super::structure::num(&gate, "leads").unwrap_or(0) > 0;
     if !small && !leads {
         return Ok(None);
     }
-    let mut c = side_conn(db, "Could not reach the server").await?;
+    let mut c = super::run::side_conn(db, "Could not reach the server").await?.into_my()?;
     let res = async {
         // The pool's own setup, so values read in the same zone and charset as the grid shows them.
         session(&mut c, 300, &db.setup).await.map_err(|x| db.setup.failed_text().unwrap_or_else(|| e(x)))?;
@@ -813,7 +498,52 @@ async fn field_values(db: &Db, schema: &str, table: &str, column: &str, prefix: 
         let t = Instant::now();
         let rows = q.fetch_all(&mut c).await;
         db.note(schema, &sql, t, &rows);
-        let rows = rows.map_err(e)?;
+        let rows = rows.map_err(se)?;
+        Ok(Some(rows.iter().filter_map(|r| Some((text(r, "v")?, super::structure::num(r, "n")?))).collect()))
+    }
+    .await;
+    let _ = c.close().await;
+    res
+}
+
+/// `field_values` on PostgreSQL. The planner's estimate is NULL until the table has been analyzed, so a bounded count
+/// stands in for it, and a table that is not small is looked up only when an index leads with the column.
+async fn pg_field_values(db: &Db, schema: &str, table: &str, column: &str, prefix: Option<&str>) -> Res<Option<Vec<(String, u64)>>> {
+    let d = db.dialect;
+    let Some(gate) = db.meta(schema, d.value_gate(), [column, schema, table]).await?.into_iter().next() else { return Ok(None) };
+    let est = super::structure::num(&gate, "est");
+    let leads = super::structure::num(&gate, "leads").unwrap_or(0) > 0;
+    if est.is_some_and(|n| n >= VALUES_SMALL) && !leads {
+        return Ok(None);
+    }
+    let mut c = db.detached().await?;
+    let res = async {
+        let Conn::Pg(pc) = &mut c else { return Err("Not a PostgreSQL connection".to_string()) };
+        // The lookup must stay short, so a slow one gives up instead of holding a connection. The limit is a SET LOCAL in
+        // the read-only transaction of each read, never a session value, because a pooler would hand the session on.
+        let short = super::pg::set_timeout("300");
+        if est.is_none() && !leads {
+            let sql = format!("SELECT count(*)::text FROM (SELECT 1 FROM {} LIMIT {}) AS q", d.qualified(schema, table), VALUES_SMALL + 1);
+            match super::pg_read::in_read_only(pc, db, &short, async |c| c.fetch_all(sql.as_str()).await).await {
+                Ok(rows) if rows.first().and_then(|r| r.try_get::<String, _>(0).ok()).and_then(|n| n.parse::<u64>().ok()).is_some_and(|n| n <= VALUES_SMALL) => {}
+                // Too big to group, or too slow to tell.
+                _ => return Ok(None),
+            }
+        }
+        let sql = d.value_counts(schema, table, column, prefix.is_some(), 201);
+        let pattern = prefix.map(|p| format!("{}%", super::rules::like_escape(p)));
+        let t = Instant::now();
+        let rows = super::pg_read::in_read_only(pc, db, &short, async |c| {
+            let mut q = sqlx::query(&sql).persistent(false);
+            if let Some(p) = &pattern {
+                q = q.bind(p.as_str());
+            }
+            q.fetch_all(c).await
+        })
+        .await
+        .map(SqlRow::wrap_pg);
+        db.note(schema, &sql, t, &rows);
+        let rows = rows.map_err(se)?;
         Ok(Some(rows.iter().filter_map(|r| Some((text(r, "v")?, super::structure::num(r, "n")?))).collect()))
     }
     .await;
@@ -825,8 +555,9 @@ impl Worker {
     /// Every table, view and column of `schema`, for autocomplete.
     pub fn sql_schema(&self, conn: u64, db: Db, schema: String) {
         self.spawn(async move {
+            let database = db.pg_database();
             let res = load_schema(&db, &schema).await;
-            Msg::SqlSchema { conn, schema, res }
+            Msg::SqlSchema { conn, database, schema, res }
         });
     }
 
@@ -834,8 +565,9 @@ impl Worker {
     /// (None) for big tables unless an index leads with the column.
     pub fn sql_field_values(&self, conn: u64, db: Db, schema: String, table: String, column: String, prefix: Option<String>) {
         self.spawn(async move {
+            let database = db.pg_database();
             let res = field_values(&db, &schema, &table, &column, prefix.as_deref()).await;
-            Msg::SqlValues { conn, schema, table, column, prefix, res }
+            Msg::SqlValues { conn, database, schema, table, column, prefix, res }
         });
     }
 
@@ -878,12 +610,9 @@ impl Worker {
     /// Tables sorted, and which of them are views.
     pub fn sql_tables(&self, conn: u64, db: Db, schema: String) {
         self.spawn(async move {
+            let database = db.pg_database();
             let res = async {
-                let Pool::My(pool) = &db.pool;
-                let t = Instant::now();
-                let rows = sqlx::query(&format!("{}{ALL_ROWS}", db.dialect.tables())).bind(&schema).fetch_all(pool).await;
-                db.note(&schema, db.dialect.tables(), t, &rows);
-                let rows = rows.map_err(e)?;
+                let rows = db.meta(&schema, db.dialect.tables(), [schema.as_str()]).await?;
                 let mut names = Vec::new();
                 let mut views = Vec::new();
                 for r in &rows {
@@ -897,7 +626,12 @@ impl Worker {
                 Ok((names, views))
             }
             .await;
-            Msg::Collections { conn, db: schema, res }
+            // A PostgreSQL schema name repeats across databases, so its answer says which database it belongs to.
+            if database.is_empty() {
+                Msg::Collections { conn, db: schema, res }
+            } else {
+                Msg::SqlTables { conn, database, schema, res }
+            }
         });
     }
 
@@ -934,19 +668,7 @@ impl Worker {
     /// statement timeout. `idx` is the result tab it belongs to.
     pub fn sql_count(&self, req: u64, idx: usize, db: Db, schema: String, stmt: String) {
         self.spawn(async move {
-            let res = async {
-                let mut conn = db.acquire().await?.detach();
-                prepare(&mut conn, db.dialect, &schema, true, &AtomicU64::new(0)).await.map_err(e)?;
-                let sql = lex::count_sql(&stmt);
-                let t = Instant::now();
-                let r = conn.fetch_one(sql.as_str()).await;
-                db.note(&schema, &sql, t, &r);
-                let r = r.map_err(e)?;
-                let n = num_at(&r, 0).ok_or("The count was not a number")?;
-                let _ = conn.close().await;
-                Ok(n)
-            }
-            .await;
+            let res = super::run::count_rows(&db, &schema, &stmt).await;
             Msg::SqlCount { req, idx, res }
         });
     }
@@ -960,7 +682,7 @@ impl Worker {
             if connection_id == 0 {
                 return Msg::Info(Ok("Stopped the script".to_string()));
             }
-            let res = kill_query(&db, connection_id).await;
+            let res = db.stop(connection_id).await;
             Msg::Info(res)
         });
     }
@@ -969,6 +691,9 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicU64;
+    use super::super::relay::fill;
+    use super::super::{ResultSet, RUN_ROWS_MAX};
     use std::sync::mpsc::Receiver;
     use std::sync::Mutex;
 
@@ -1247,7 +972,7 @@ mod tests {
         assert_eq!(f("SELECT X?, a?, @?", &[Param::Int(1), Param::Int(2), Param::Int(3)], false).unwrap(), "SELECT X 1 , a 2 , @ 3 ");
         // A value that tries to end the string stays inside it, so the text is still one statement.
         let evil = f("SELECT ?", &[Param::Text("'; DROP TABLE t; --".into())], false).unwrap();
-        assert_eq!(lex::split_statements(&evil).len(), 1);
+        assert_eq!(lex::split_statements(&evil, Dialect::MySql).len(), 1);
         assert!(f("?", &[], false).is_err() && f("1", &[Param::Null], false).is_err());
         assert!(f("?", &[Param::Float(f64::NAN)], false).is_err() && f("?", &[Param::Text("a\0".into())], false).is_err());
     }
@@ -1598,7 +1323,7 @@ mod tests {
         // Even a statement that slipped past the check would hit the read-only session.
         let sets = run_all(&w, &rx, &db, "SELECT 1", false);
         assert!(sets[0].error.is_none());
-        let Pool::My(pool) = &db.pool;
+        let pool = db.my_pool().unwrap();
         let n: i64 = w.rt.block_on(async { sqlx::query_scalar("SELECT COUNT(*) FROM quarry_test.t_ro").fetch_one(pool).await.unwrap() });
         assert_eq!(n, 1);
         // The unlocked run must not leave READ WRITE on a connection that went back to the pool. 1792 is
@@ -1808,7 +1533,7 @@ mod tests {
         };
         // USE and @variables carry over: the table has no schema in front of it and the variable is still set.
         let script = "USE quarry_test; SET @lim = 2; SELECT id, name FROM t_exp ORDER BY id; SELECT @lim AS lim, COUNT(*) AS n FROM t_exp";
-        let stmts = check_script(script).unwrap();
+        let stmts = check_script(script, Dialect::MySql).unwrap();
         let run = |stmts: &[String], fmt: Fmt, single: bool, file: &str, cancel: bool| {
             let ap = AllPlan { plan: Plan { fmt, header: true, table: "t_exp".into(), bs: true }, single };
             let (count, step) = (AtomicU64::new(0), AtomicU64::new(0));
@@ -1835,7 +1560,7 @@ mod tests {
         assert_eq!(names(&dir), ["all.json", "res-1.csv", "res-2.csv"]);
 
         // A statement that fails midway leaves nothing, not even the first result's file.
-        let bad = check_script("SELECT 1 AS a; SELECT * FROM quarry_test.no_such_table_here").unwrap();
+        let bad = check_script("SELECT 1 AS a; SELECT * FROM quarry_test.no_such_table_here", Dialect::MySql).unwrap();
         let err = run(&bad, Fmt::Csv, false, "bad.csv", false).0.err().unwrap();
         assert!(err.contains("no_such_table_here"), "{err}");
         let err = run(&bad, Fmt::Json, true, "bad.json", false).0.err().unwrap();
@@ -1848,7 +1573,7 @@ mod tests {
         assert_eq!(names(&dir).len(), 3);
 
         // A script with a DELETE is refused up front and the table stays whole.
-        let refused = check_script("SELECT 1; DELETE FROM t_exp");
+        let refused = check_script("SELECT 1; DELETE FROM t_exp", Dialect::MySql);
         assert!(refused.is_err());
         let n = |rt: &tokio::runtime::Handle, pool: &sqlx::MySqlPool| -> i64 { rt.block_on(async { sqlx::query_scalar("SELECT COUNT(*) FROM quarry_test.t_exp").fetch_one(pool).await.unwrap() }) };
         assert_eq!(n(&p.rt, &p.pool), 3);
@@ -1961,7 +1686,7 @@ mod tests {
         // Every session of this pool starts in NO_BACKSLASH_ESCAPES, as on a server set that way. A pool of its own
         // rather than SET GLOBAL, which raced the other live tests: their new sessions changed mode under them.
         let mut db = db;
-        let opts = db.opts.clone();
+        let opts = db.opts.my().unwrap().clone();
         let pool = w.rt.block_on(async move {
             sqlx::mysql::MySqlPoolOptions::new()
                 .max_connections(2)

@@ -2,6 +2,7 @@
 //! answers through `Msg::SqlServer`, tagged with the window's request id so a slow old answer is dropped.
 //! View only: nothing here runs a SET.
 
+use super::se;
 use super::worker::text;
 use super::{Advanced, Db, Dialect};
 use crate::db::{e, Msg, Res, Worker};
@@ -147,7 +148,7 @@ pub fn mysql_var(name: &str, value: &str, global_value: Option<&str>, source: Op
 pub fn set_by_quarry(adv: &Advanced, dialect: Dialect, system_offset: Option<i32>) -> Vec<String> {
     // sqlx sends SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci on every connect, so these are always Quarry's.
     let mut v: Vec<String> = ["autocommit", "transaction_read_only", "tx_read_only", "character_set_client", "character_set_connection", "character_set_results", "collation_connection"].map(String::from).to_vec();
-    v.push(if dialect == Dialect::MySql { "max_execution_time" } else { "max_statement_time" }.into());
+    v.push(match dialect { Dialect::MySql => "max_execution_time", Dialect::MariaDb => "max_statement_time", Dialect::Postgres => "statement_timeout" }.into());
     for q in adv.session_statements(system_offset).unwrap_or_default() {
         let l = q.to_ascii_lowercase();
         if l.contains("time_zone") {
@@ -365,6 +366,7 @@ pub fn replica_denied(d: Dialect) -> String {
     match d {
         Dialect::MySql => "Not available for this account: it needs the REPLICATION CLIENT privilege.".into(),
         Dialect::MariaDb => "Not available for this account: it needs the REPLICA MONITOR privilege (SLAVE MONITOR or REPLICATION CLIENT on older MariaDB).".into(),
+        Dialect::Postgres => "Not available for this account: it needs the pg_monitor role.".into(),
     }
 }
 
@@ -393,6 +395,7 @@ async fn uptime(c: &mut sqlx::MySqlConnection) -> Option<u64> {
 }
 
 async fn processes(db: &Db) -> Res<Processes> {
+    db.mysql_only()?;
     let mut c = db.acquire().await?;
     let (me, identity) = me_and_identity(&mut c, db.dialect).await?;
     let list = rows(&mut c, "SHOW FULL PROCESSLIST").await.map_err(|x| {
@@ -404,16 +407,17 @@ async fn processes(db: &Db) -> Res<Processes> {
 }
 
 async fn variables(db: &Db, global: bool) -> Res<Variables> {
+    db.mysql_only()?;
     let mut c = db.acquire().await?;
     let up = uptime(&mut c).await;
-    if db.dialect == Dialect::MariaDb {
+    if matches!(db.dialect, Dialect::MariaDb) {
         let q = "SELECT VARIABLE_NAME, SESSION_VALUE, GLOBAL_VALUE, DEFAULT_VALUE, READ_ONLY FROM information_schema.SYSTEM_VARIABLES ORDER BY VARIABLE_NAME";
-        let list = rows(&mut c, q).await.map_err(e)?;
+        let list = rows(&mut c, q).await.map_err(se)?;
         let rows = list.iter().filter_map(|r| Some(maria_var(&text(r, "VARIABLE_NAME")?, text(r, "SESSION_VALUE").as_deref(), text(r, "GLOBAL_VALUE").as_deref(), text(r, "DEFAULT_VALUE").as_deref(), text(r, "READ_ONLY").as_deref(), global))).collect();
         return Ok(Variables { rows, global, defaults: true, uptime: up });
     }
     let pairs = |rows: Vec<sqlx::mysql::MySqlRow>| -> Vec<(String, String)> { rows.iter().filter_map(|r| Some((text(r, "Variable_name")?, text(r, "Value").unwrap_or_default()))).collect() };
-    let vals = pairs(rows(&mut c, if global { "SHOW GLOBAL VARIABLES" } else { "SHOW SESSION VARIABLES" }).await.map_err(e)?);
+    let vals = pairs(rows(&mut c, if global { "SHOW GLOBAL VARIABLES" } else { "SHOW SESSION VARIABLES" }).await.map_err(se)?);
     // Either read can be refused or missing (performance_schema off, an old server), and the values stand alone then.
     let sources: Option<HashMap<String, String>> = rows(&mut c, "SELECT VARIABLE_NAME, VARIABLE_SOURCE FROM performance_schema.variables_info").await.ok().map(|list| list.iter().filter_map(|r| Some((text(r, "VARIABLE_NAME")?.to_ascii_lowercase(), text(r, "VARIABLE_SOURCE")?))).collect()).filter(|m: &HashMap<_, _>| !m.is_empty());
     let globals: Option<HashMap<String, String>> = match (global, &sources) {
@@ -436,7 +440,7 @@ async fn variables(db: &Db, global: bool) -> Res<Variables> {
 }
 
 async fn status_snap(c: &mut sqlx::MySqlConnection) -> Res<Snap> {
-    let list = rows(c, "SHOW GLOBAL STATUS").await.map_err(e)?;
+    let list = rows(c, "SHOW GLOBAL STATUS").await.map_err(se)?;
     Ok(Snap::new(list.iter().filter_map(|r| Some((text(r, "Variable_name")?, text(r, "Value").unwrap_or_default()))).collect()))
 }
 
@@ -450,7 +454,11 @@ fn mysql_number(x: &sqlx::Error) -> Option<u16> {
 /// Every replication channel. MySQL 8.4 only knows REPLICA, older MySQL only SLAVE; MariaDB's plain statement shows
 /// the default connection only, so ALL SLAVES is what lists the named ones of a multi-source replica.
 async fn replicas(c: &mut sqlx::MySqlConnection, d: Dialect) -> Res<Vec<Replica>> {
-    let qs: &[&str] = if d == Dialect::MariaDb { &["SHOW ALL SLAVES STATUS"] } else { &["SHOW REPLICA STATUS", "SHOW SLAVE STATUS"] };
+    let qs: &[&str] = match d {
+        Dialect::MariaDb => &["SHOW ALL SLAVES STATUS"],
+        Dialect::MySql => &["SHOW REPLICA STATUS", "SHOW SLAVE STATUS"],
+        Dialect::Postgres => &[],
+    };
     let mut last = None;
     for q in qs {
         match rows(c, q).await {
@@ -465,10 +473,11 @@ async fn replicas(c: &mut sqlx::MySqlConnection, d: Dialect) -> Res<Vec<Replica>
 }
 
 async fn overview(db: &Db) -> Res<Overview> {
+    db.mysql_only()?;
     let mut c = db.acquire().await?;
     let snap = status_snap(&mut c).await?;
     let q = format!("SHOW GLOBAL VARIABLES WHERE Variable_name IN ({OVERVIEW_VARS})");
-    let vars = rows(&mut c, &q).await.map_err(e)?.iter().filter_map(|r| Some((text(r, "Variable_name")?.to_ascii_lowercase(), text(r, "Value").unwrap_or_default()))).collect();
+    let vars = rows(&mut c, &q).await.map_err(se)?.iter().filter_map(|r| Some((text(r, "Variable_name")?.to_ascii_lowercase(), text(r, "Value").unwrap_or_default()))).collect();
     // The connection's own TLS state, which is what Quarry's session uses.
     let tls = match rows(&mut c, "SHOW SESSION STATUS WHERE Variable_name IN ('Ssl_version','Ssl_cipher')").await {
         Ok(l) => {
@@ -482,6 +491,7 @@ async fn overview(db: &Db) -> Res<Overview> {
 }
 
 async fn status(db: &Db) -> Res<Snap> {
+    db.mysql_only()?;
     let mut c = db.acquire().await?;
     status_snap(&mut c).await
 }
@@ -505,19 +515,24 @@ impl KillTarget {
 /// Which server a connection reached. MySQL has a UUID; MariaDB's hostname and server id are what tell a
 /// replica or a cluster node apart.
 async fn identity(c: &mut sqlx::MySqlConnection, d: Dialect) -> String {
-    match rows(c, identity_columns(d)).await {
+    let Ok(q) = identity_columns(d) else { return String::new() };
+    match rows(c, q).await {
         Ok(r) => r.first().map(|r| identity_of(r, 0, d)).unwrap_or_default(),
         Err(_) => String::new(),
     }
 }
 
-fn identity_columns(d: Dialect) -> &'static str {
-    if d == Dialect::MariaDb { "SELECT @@hostname, @@server_id" } else { "SELECT @@server_uuid" }
+fn identity_columns(d: Dialect) -> Res<&'static str> {
+    Ok(match d {
+        Dialect::MariaDb => "SELECT @@hostname, @@server_id",
+        Dialect::MySql => "SELECT @@server_uuid",
+        Dialect::Postgres => return Err(super::pg::NOT_YET.into()),
+    })
 }
 
 /// The identity columns of `identity_columns` starting at column `from`, joined.
 fn identity_of(r: &sqlx::mysql::MySqlRow, from: usize, d: Dialect) -> String {
-    (from..from + if d == Dialect::MariaDb { 2 } else { 1 }).map(|i| super::worker::text_at(r, i).unwrap_or_default()).collect::<Vec<_>>().join("/")
+    (from..from + match d { Dialect::MariaDb => 2, Dialect::MySql | Dialect::Postgres => 1 }).map(|i| super::worker::text_at(r, i).unwrap_or_default()).collect::<Vec<_>>().join("/")
 }
 
 /// This connection's id and the server's identity in one round trip. A server that refuses the identity columns
@@ -525,13 +540,13 @@ fn identity_of(r: &sqlx::mysql::MySqlRow, from: usize, d: Dialect) -> String {
 /// read on the connection that then lists the processes, and again on every poll, since a changed identity is how
 /// a failover shows.
 async fn me_and_identity(c: &mut sqlx::MySqlConnection, d: Dialect) -> Res<(u64, String)> {
-    let q = identity_columns(d).replacen("SELECT ", "SELECT CONNECTION_ID(), ", 1);
+    let q = identity_columns(d)?.replacen("SELECT ", "SELECT CONNECTION_ID(), ", 1);
     if let Ok(r) = rows(c, &q).await {
         if let Some(r) = r.first() {
             return Ok((super::worker::num_at(r, 0).unwrap_or(0), identity_of(r, 1, d)));
         }
     }
-    let r = rows(c, "SELECT CONNECTION_ID()").await.map_err(e)?;
+    let r = rows(c, "SELECT CONNECTION_ID()").await.map_err(se)?;
     Ok((r.first().and_then(|r| super::worker::num_at(r, 0)).unwrap_or(0), String::new()))
 }
 
@@ -543,11 +558,12 @@ pub fn target_matches(t: &KillTarget, user: &str, host: &str, info: &str) -> boo
 /// KILL QUERY or KILL on a connection of its own (a busy or exhausted pool never blocks it), after checking on
 /// that same connection that it reached the same server and that the thread is still the one the list showed.
 async fn kill_checked(db: &Db, t: &KillTarget, whole: bool, read_only: bool) -> Res<String> {
+    db.mysql_only()?;
     // The window hides Kill on a locked connection; this keeps a stale or forged request from getting through.
     if read_only {
         return Err("Kill is locked on this connection. Unlock writes first.".into());
     }
-    let mut c = super::worker::side_conn(db, "Could not reach the server to kill it").await?;
+    let mut c = super::run::side_conn(db, "Could not reach the server to kill it").await?.into_my()?;
     let r = kill_on(&mut c, db.dialect, t, whole).await;
     let _ = c.close().await;
     r
@@ -557,7 +573,7 @@ async fn kill_on(c: &mut sqlx::MySqlConnection, d: Dialect, t: &KillTarget, whol
     if identity(c, d).await != t.identity {
         return Err("The connection now reaches a different server than the list was read from, so nothing was killed. Refresh and try again.".into());
     }
-    let r = rows(c, &format!("SELECT USER, HOST, INFO FROM information_schema.PROCESSLIST WHERE ID = {}", t.id)).await.map_err(e)?;
+    let r = rows(c, &format!("SELECT USER, HOST, INFO FROM information_schema.PROCESSLIST WHERE ID = {}", t.id)).await.map_err(se)?;
     let Some(r) = r.first() else { return Err("That connection is already gone.".into()) };
     if !target_matches(t, &text(r, "USER").unwrap_or_default(), &text(r, "HOST").unwrap_or_default(), &text(r, "INFO").unwrap_or_default()) {
         return Err("That connection is now running something else, so nothing was killed. Refresh and try again.".into());
@@ -596,7 +612,6 @@ impl Worker {
 mod tests {
     use super::*;
     use crate::db::sql::testing::every_server;
-    use crate::db::sql::worker::kill_query;
     use std::collections::HashMap;
     use std::time::Duration;
 
@@ -803,7 +818,7 @@ mod tests {
 
     /// A SELECT SLEEP on its own connection, and that connection's id.
     fn sleeper(l: &super::super::testing::Live) -> (std::sync::mpsc::Receiver<(Result<String, String>, bool)>, u64) {
-        let opts = l.db.opts.clone();
+        let opts = l.db.opts.my().unwrap().clone();
         let (tx, rx) = std::sync::mpsc::channel();
         let (idtx, idrx) = std::sync::mpsc::channel();
         l.w.rt.spawn(async move {
@@ -811,7 +826,7 @@ mod tests {
             let id: u64 = sqlx::query_scalar("SELECT CONNECTION_ID()").fetch_one(&mut c).await.unwrap();
             idtx.send(id).unwrap();
             // SLEEP itself answers 1 when interrupted, so a second row is what turns the kill into an error.
-            let r = sqlx::query_scalar::<_, i64>("SELECT SLEEP(30) FROM (SELECT 1 UNION ALL SELECT 2) t").fetch_all(&mut c).await.map(|n| format!("slept {n:?}")).map_err(|x| e(x));
+            let r = sqlx::query_scalar::<_, i64>("SELECT SLEEP(30) FROM (SELECT 1 UNION ALL SELECT 2) t").fetch_all(&mut c).await.map(|n| format!("slept {n:?}")).map_err(se);
             let alive = sqlx::query_scalar::<_, i64>("SELECT 1").fetch_one(&mut c).await.is_ok();
             let _ = tx.send((r, alive));
         });
@@ -875,7 +890,7 @@ mod tests {
             assert!(!after.rows.iter().any(|r| r.id == id), "the connection is gone after KILL");
             // A second kill of the same id says it is gone instead of a raw code.
             assert_eq!(l.w.rt.block_on(kill_checked(&l.db, &t, true, false)).unwrap_err(), "That connection is already gone.");
-            assert_eq!(l.w.rt.block_on(kill_query(&l.db, 4_000_000_000)).unwrap_err(), "That connection is already gone.");
+            assert_eq!(l.w.rt.block_on(l.db.stop(4_000_000_000)).unwrap_err(), "That connection is already gone.");
         });
     }
 
@@ -921,13 +936,13 @@ mod tests {
             wait_listed(l, id, 10).expect("listed");
             l.sql("DROP USER IF EXISTS 'q_nokill'@'%'");
             l.sql("CREATE USER 'q_nokill'@'%' IDENTIFIED BY 'nokill-pw'");
-            let opts = l.db.opts.clone().username("q_nokill").password("nokill-pw");
-            let low = Db { opts, ..l.db.clone() };
-            let err = l.w.rt.block_on(kill_query(&low, id)).unwrap_err();
+            let opts = l.db.opts.my().unwrap().clone().username("q_nokill").password("nokill-pw");
+            let low = Db { opts: super::super::exec::Opts::My(opts), ..l.db.clone() };
+            let err = l.w.rt.block_on(low.stop(id)).unwrap_err();
             l.sql("DROP USER 'q_nokill'@'%'");
             assert!(err.contains("CONNECTION_ADMIN"), "{err}");
             assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "the statement still runs");
-            l.w.rt.block_on(kill_query(&l.db, id)).unwrap();
+            l.w.rt.block_on(l.db.stop(id)).unwrap();
             let _ = rx.recv_timeout(Duration::from_secs(10));
         });
     }

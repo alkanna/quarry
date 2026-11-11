@@ -25,9 +25,14 @@ fn is_sql_word(w: &str) -> bool {
 
 /// SQL text colored by token: keywords, types, numbers, strings and comments, in mono at `size`.
 pub(crate) fn sql_job(text: &str, size: f32) -> LayoutJob {
+    sql_job_in(text, size, crate::db::sql::Dialect::default())
+}
+
+/// Like `sql_job`, with the strings and comments of that dialect: dollar quotes on PostgreSQL, `#` comments on MySQL.
+pub(crate) fn sql_job_in(text: &str, size: f32, d: crate::db::sql::Dialect) -> LayoutJob {
     use crate::db::sql::lex::{self, Tok};
     let mut job = LayoutJob::default();
-    for (tok, r) in lex::tokens(text) {
+    for (tok, r) in lex::tokens(text, d) {
         let s = &text[r];
         let color = match tok {
             Tok::Word if is_sql_word(s) => C_KEYWORD(),

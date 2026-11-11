@@ -9,13 +9,13 @@ impl App {
         if self.tabs.get(i).is_some_and(|t| t.sel.coll.is_empty()) {
             return;
         }
-        let Some(db) = self.tabs.get(i).and_then(|t| self.conn(t.sel.conn)).and_then(|c| c.sql.clone()) else { return };
+        let Some((db, space)) = self.tabs.get(i).and_then(|t| self.sql_target(&t.sel)) else { return };
         self.req += 1;
         let (req, size) = (self.req, self.page_size());
         let t = &mut self.tabs[i];
         (t.req, t.loading, t.size) = (req, true, size);
         let q = super::sql_bar::page_query(t);
-        self.worker.sql_page(req, db, t.sel.db.clone(), t.sel.coll.clone(), q, size, t.page * size);
+        self.worker.sql_page(req, db, space, t.sel.coll.clone(), q, size, t.page * size);
     }
 
     /// How the connection's last reported sql_mode reads quotes and backslashes. A connection without a server, as in
@@ -47,15 +47,14 @@ impl App {
         db
     }
 
-    /// The open tab's dialect, and whether its server reads backslash escapes in strings.
-    pub(super) fn sql_dialect(&self) -> (db::sql::Dialect, bool) {
-        let d = self.conn(self.t().map(|t| t.sel.conn).unwrap_or(0)).and_then(|c| c.sql.as_ref());
-        (d.map(|s| s.dialect).unwrap_or_default(), self.sql_mode(self.t().map(|t| t.sel.conn).unwrap_or(0)).bs)
+    /// The open tab's dialect.
+    pub(super) fn sql_dialect(&self) -> db::sql::Dialect {
+        self.dialect_of(self.t().map_or(0, |t| t.sel.conn))
     }
 
     /// Double click on a grouped row: its rows replace the grouped result.
     pub(super) fn sql_drill(&mut self, row: usize) {
-        let (dialect, bs) = self.sql_dialect();
+        let (dialect, bs) = (self.sql_dialect(), self.sql_bs());
         super::sql_bar::drill(self.tm().unwrap(), row, dialect, bs);
         self.reload();
     }
@@ -68,14 +67,15 @@ impl App {
             t.page = 0;
             self.reload();
         }
-        let (dialect, bs) = self.sql_dialect();
+        let (dialect, bs) = (self.sql_dialect(), self.sql_bs());
         let (conn, db) = (self.tabs[self.cur].sel.conn, self.tabs[self.cur].sel.db.clone());
-        let scope = Self::sql_scope(&self.conns, &self.sql_schema, &self.views, conn, &db, None);
+        let schema = self.sel_schema(&self.tabs[self.cur].sel);
+        let scope = Self::sql_scope(&self.conns, &self.sql_schema, &self.views, conn, &db, &schema, None);
         let none = Fields::new();
         let t = &mut self.tabs[self.cur];
-        let run = super::sql_bar::bar(ui, t, dialect, bs, scope, self.sql_values.get(&(conn, db.clone())).unwrap_or(&none));
+        let run = super::sql_bar::bar(ui, t, dialect, bs, scope, self.sql_values.get(&(conn, ns_key(&db, &schema))).unwrap_or(&none));
         let wants = t.sql.as_mut().map(|s| std::mem::take(&mut s.bar.wants)).unwrap_or_default();
-        self.sql_serve(conn, &db, wants);
+        self.sql_serve(conn, &db, &schema, wants);
         if run {
             self.tm().unwrap().page = 0;
             self.reload();

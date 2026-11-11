@@ -562,7 +562,7 @@ impl App {
                     if writable {
                         let current = w.info.as_ref().map(|i| i.plugin.clone()).unwrap_or_default();
                         // MariaDB's SET PASSWORD sets the mysql_native_password part only, so an account that logs in another way is left alone.
-                        let blocked = w.info.as_ref().filter(|_| dialect == Dialect::MariaDb).and_then(|i| (i.chain || (!i.plugin.is_empty() && i.plugin != "mysql_native_password")).then(|| format!("{} logs in with {}; Quarry only sets a mysql_native_password password on MariaDB. Change it in a SQL shell.", a.label(), if i.chain { "more than one method".to_string() } else { i.plugin.clone() })));
+                        let blocked = w.info.as_ref().filter(|_| matches!(dialect, Dialect::MariaDb)).and_then(|i| (i.chain || (!i.plugin.is_empty() && i.plugin != "mysql_native_password")).then(|| format!("{} logs in with {}; Quarry only sets a mysql_native_password password on MariaDB. Change it in a SQL shell.", a.label(), if i.chain { "more than one method".to_string() } else { i.plugin.clone() })));
                         self.req += 1;
                         self.modal = Some(Modal::SqlPassword(Box::new(PwForm { conn, acct: a, plugin: String::new(), current, blocked, password: String::new(), again: String::new(), serial: self.req })));
                     } else {
@@ -831,7 +831,7 @@ impl App {
             if add && !text.trim().is_empty() {
                 // MySQL names a role with its host, % when none is given.
                 let name = text.trim().to_string();
-                let role = if env.dialect == Dialect::MySql && !name.contains('@') { format!("{name}@%") } else { name };
+                let role = if matches!(env.dialect, Dialect::MySql) && !name.contains('@') { format!("{name}@%") } else { name };
                 if !w.roles_now.contains(&role) {
                     w.roles_now.push(role);
                 }

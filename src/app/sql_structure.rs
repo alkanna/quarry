@@ -18,7 +18,7 @@ pub(super) struct StructState {
     pub(super) load: Load,
     pub(super) data: Option<Structure>,
     /// The selected row of each grid: columns, indexes, keys out, keys in, triggers.
-    sel: [Option<usize>; 5],
+    pub(super) sel: [Option<usize>; 5],
     /// Column and index changes waiting to become one ALTER TABLE.
     pub(super) staged: Vec<Change>,
     /// The statement and warnings of `staged`, kept between frames.
@@ -74,7 +74,7 @@ impl App {
     /// Asks for the current tab's structure. The answer is matched back by `idx_req`.
     fn request_structure(&mut self) {
         let i = self.cur;
-        let Some(db) = self.tabs.get(i).and_then(|t| self.conn(t.sel.conn)).and_then(|c| c.sql.clone()) else { return };
+        let Some((db, space)) = self.tabs.get(i).and_then(|t| self.sql_target(&t.sel)) else { return };
         self.req += 1;
         let req = self.req;
         let t = &mut self.tabs[i];
@@ -82,7 +82,7 @@ impl App {
         if let Some(s) = t.sql.as_mut() {
             s.st.load = Load::Loading;
         }
-        self.worker.sql_structure(req, db, t.sel.db.clone(), t.sel.coll.clone());
+        self.worker.sql_structure(req, db, space, t.sel.coll.clone());
     }
 
     /// The foreign keys of the open table, for the key cells of Content. The structure is asked for the first time
@@ -148,8 +148,8 @@ impl App {
         match a {
             Act::Copy(text) => ctx.copy_text(text),
             Act::Open { db, table } => {
-                let conn = self.tabs[self.cur].sel.conn;
-                self.open_collection(Sel { conn, db, coll: table }, false);
+                let base = self.tabs[self.cur].sel.clone();
+                self.open_collection(sql_ns::with_ns(self.dialect_of(base.conn), &base, &db, table), false);
             }
             Act::Refresh => {
                 if let Some(s) = self.tabs[self.cur].sql.as_mut() {
@@ -189,20 +189,26 @@ impl App {
     pub(super) fn sql_structure_view(&mut self, ui: &mut egui::Ui) {
         let Some((d, mut sel)) = self.take_structure(ui) else { return };
         let mut acts = Vec::new();
-        let editable = self.sel_writable();
+        let block = self.struct_block();
+        let editable = self.sel_writable() && block.is_none();
         let is_view = self.sel_is_view();
-        let why = if is_view { "Views cannot be changed here" } else { READ_ONLY };
+        let why = if let Some(b) = block { b } else if is_view { "Views cannot be changed here" } else { READ_ONLY };
         let note = if editable { "" } else { why };
         let (staged, mut memo, applying) = self.take_staged();
         let (dropped, changed) = staged_marks(&staged);
         let col = sel[0].filter(|i| *i < d.columns.len());
+        let conn = self.t().map_or(0, |t| t.sel.conn);
+        let pg = self.is_pg(conn);
+        let (order, unsigned, collation, cardinality) = (self.supports(conn, db::sql::Feature::ColumnOrder), self.supports(conn, db::sql::Feature::Unsigned), self.supports(conn, db::sql::Feature::Collation), self.supports(conn, db::sql::Feature::IndexCardinality));
         let mut left = Vec::new();
         edit_row_with(ui, editable, note, |ui, on| {
             if quiet_enabled(ui, on, "+ Column").on_hover_text("Add a column").on_disabled_hover_text(why).clicked() {
                 left.push(Act::NewColumn);
             }
             let hint = if on { "Select a column first" } else { why };
-            for (t, tip, act) in [("Edit", "Change the selected column", col.map(Act::EditColumn)), ("Duplicate", "Add a copy of the selected column", col.map(Act::DuplicateColumn)), ("Delete", "Drop the selected column", col.map(Act::DropColumn)), ("Move up", "Place the column before the one above it", col.map(|i| Act::MoveColumn(i, -1))), ("Move down", "Place the column after the one below it", col.map(|i| Act::MoveColumn(i, 1)))] {
+            let moves = [("Move up", "Place the column before the one above it", col.map(|i| Act::MoveColumn(i, -1))), ("Move down", "Place the column after the one below it", col.map(|i| Act::MoveColumn(i, 1)))];
+            let own = [("Edit", "Change the selected column", col.map(Act::EditColumn)), ("Duplicate", "Add a copy of the selected column", col.map(Act::DuplicateColumn)), ("Delete", "Drop the selected column", col.map(Act::DropColumn))];
+            for (t, tip, act) in own.into_iter().chain(moves.into_iter().filter(|_| order)) {
                 let r = quiet_enabled(ui, on && act.is_some(), t).on_hover_text(tip).on_disabled_hover_text(hint);
                 if let (true, Some(a)) = (r.clicked(), act) {
                     left.push(a);
@@ -223,9 +229,15 @@ impl App {
             ui.add_space(8.0);
         }
         egui::ScrollArea::vertical().id_salt("sql-structure").auto_shrink([false, false]).show(ui, |ui| {
-            let heads = [gc("Name", 1.5), gc("Type", 1.0), gc("Length / values", 1.4), gc("Unsigned", 0.95), gc("Null", 0.6), gc("Key", 0.6), gc("Default", 1.9), gc("Extra", 2.1), gc("Collation", 1.9), gc("Comment", 1.3)];
+            let shown: Vec<usize> = (0..10).filter(|i| (unsigned || *i != 3) && (collation || *i != 8)).collect();
+            let all = [gc("Name", 1.5), gc("Type", 1.0), gc("Length / values", 1.4), gc("Unsigned", 0.95), gc("Null", 0.6), gc("Key", 0.6), gc("Default", 1.9), gc("Extra", 2.1), gc("Collation", 1.9), gc("Comment", 1.3)];
+            let heads: Vec<GCol> = all.into_iter().enumerate().filter(|(i, _)| shown.contains(i)).map(|(_, g)| g).collect();
             let mut menu = |ui: &mut egui::Ui, r: usize| {
-                for (label, act) in [("Edit column", Act::EditColumn(r)), ("Duplicate", Act::DuplicateColumn(r)), ("Move up", Act::MoveColumn(r, -1)), ("Move down", Act::MoveColumn(r, 1))] {
+                let mut items = vec![("Edit column", Act::EditColumn(r)), ("Duplicate", Act::DuplicateColumn(r))];
+                if order {
+                    items.extend([("Move up", Act::MoveColumn(r, -1)), ("Move down", Act::MoveColumn(r, 1))]);
+                }
+                for (label, act) in items {
                     if ui.add_enabled(editable, egui::Button::new(label)).on_disabled_hover_text(why).clicked() {
                         acts.push(act);
                         ui.close();
@@ -260,7 +272,7 @@ impl App {
                             ui.painter().rect_filled(Rect::from_min_size(pos2(rect.left() - 40.0, rect.top()), vec2(3.0, rect.height())), 0.0, m);
                         }
                     }
-                    column_cell(ui, rect, &d.columns[r], c)
+                    column_cell(ui, rect, &d.columns[r], shown[c], pg)
                 },
                 Some(&mut menu),
             );
@@ -291,7 +303,9 @@ impl App {
                 });
             });
             ui.add_space(6.0);
-            let heads = [gc("Key name", 2.0), gc("Columns", 2.4), gc("Unique", 0.8), gc("Type", 0.8), gc_r("Cardinality", 1.2), gc("Comment", 2.4)];
+            let ishown: Vec<usize> = (0..6).filter(|i| cardinality || *i != 4).collect();
+            let iall = [gc("Key name", 2.0), gc("Columns", 2.4), gc("Unique", 0.8), gc("Type", 0.8), gc_r("Cardinality", 1.2), gc("Comment", 2.4)];
+            let heads: Vec<GCol> = iall.into_iter().enumerate().filter(|(i, _)| ishown.contains(i)).map(|(_, g)| g).collect();
             let mut imenu = |ui: &mut egui::Ui, r: usize| {
                 if ui.add_enabled(editable, egui::Button::new("Edit index")).on_disabled_hover_text(why).clicked() {
                     acts.push(Act::EditIndex(r));
@@ -307,7 +321,7 @@ impl App {
                 .response
                 .on_disabled_hover_text(why);
             };
-            let hit = grid_ex(ui, "indexes", &heads, d.indexes.len(), sel[1], |ui, rect, r, c| index_cell(ui, rect, &d.indexes[r], c), Some(&mut imenu));
+            let hit = grid_ex(ui, "indexes", &heads, d.indexes.len(), sel[1], |ui, rect, r, c| index_cell(ui, rect, &d.indexes[r], ishown[c]), Some(&mut imenu));
             if let Some(r) = hit.click {
                 sel[1] = Some(r);
             }
@@ -323,8 +337,9 @@ impl App {
         let Some((d, mut sel)) = self.take_structure(ui) else { return };
         let mut acts = Vec::new();
         let mut open = None;
-        let editable = self.sel_writable();
-        let why = if self.sel_is_view() { "Views cannot be changed here" } else { READ_ONLY };
+        let block = self.struct_block();
+        let editable = self.sel_writable() && block.is_none();
+        let why = if let Some(b) = block { b } else if self.sel_is_view() { "Views cannot be changed here" } else { READ_ONLY };
         let (staged, mut memo, applying) = self.take_staged();
         let dropped: Vec<String> = staged.iter().filter_map(|c| if let Change::DropFk(n) = c { Some(n.to_ascii_lowercase()) } else { None }).collect();
         let fk = sel[2].filter(|i| *i < d.foreign_keys.len());
@@ -351,12 +366,14 @@ impl App {
             ui.add_space(8.0);
         }
         // The schema's estimate, asked for once per database; a table it has not listed yet shows nothing.
-        let conn = self.tabs[self.cur].sel.conn;
+        let (conn, base_db) = (self.tabs[self.cur].sel.conn, self.tabs[self.cur].sel.db.clone());
+        let dialect = self.dialect_of(conn);
         let dbs: std::collections::BTreeSet<String> = d.referenced_by.iter().map(|fk| fk.db.clone()).collect();
-        for db in dbs {
-            self.sql_serve(conn, &db, crate::ui::sql_complete::Wants { schema: true, values: None });
+        for ns in dbs {
+            let (db, schema) = sql_ns::split_ns(dialect, &base_db, &ns);
+            self.sql_serve(conn, &db, &schema, crate::ui::sql_complete::Wants { schema: true, values: None });
         }
-        let in_rows: Vec<Option<u64>> = d.referenced_by.iter().map(|fk| self.sql_schema.get(&(conn, fk.db.clone())).and_then(|s| s.table(&fk.table)).and_then(|t| t.rows)).collect();
+        let in_rows: Vec<Option<u64>> = d.referenced_by.iter().map(|fk| { let (db, schema) = sql_ns::split_ns(dialect, &base_db, &fk.db); self.sql_schema.get(&(conn, ns_key(&db, &schema))).and_then(|s| s.table(&fk.table)).and_then(|t| t.rows) }).collect();
         egui::ScrollArea::vertical().id_salt("sql-relations").auto_shrink([false, false]).show(ui, |ui| {
             caption(ui, "THIS TABLE POINTS TO");
             ui.add_space(6.0);
@@ -431,8 +448,9 @@ impl App {
     pub(super) fn sql_triggers_view(&mut self, ui: &mut egui::Ui) {
         let Some((d, mut sel)) = self.take_structure(ui) else { return };
         let mut acts = Vec::new();
-        let editable = self.sel_writable();
-        let why = if self.sel_is_view() { "Views cannot be changed here" } else { "Read-only: unlock writes to change triggers" };
+        let block = self.struct_block();
+        let editable = self.sel_writable() && block.is_none();
+        let why = if let Some(b) = block { b } else if self.sel_is_view() { "Views cannot be changed here" } else { "Read-only: unlock writes to change triggers" };
         // A trigger that was just created is listed now, so its draft has done its job.
         if let Some(s) = self.tabs[self.cur].sql.as_mut() {
             if let Some(i) = s.st.trig.get(sql_trig::NEW).and_then(|nd| d.triggers.iter().position(|t| sql_trig::same(&sql_trig::def_of(t), nd))) {
@@ -504,7 +522,18 @@ impl App {
         let s = &d.status;
         let none = || "-".to_string();
         let bytes = |n: Option<u64>| n.map_or_else(none, size);
-        let rows = [
+        let pg = self.is_pg(self.tabs[self.cur].sel.conn);
+        let rows: Vec<(&str, String)> = if pg {
+            // PostgreSQL has no engine, row format or auto increment to report: the sizes come from the catalog.
+            vec![
+                ("Rows (estimate)", s.rows.map_or_else(none, |n| format!("~{}", group(&n.to_string())))),
+                ("Data", bytes(s.data)),
+                ("Indexes", bytes(s.index)),
+                ("Total", bytes(s.total)),
+                ("Comment", s.comment.clone()),
+            ]
+        } else {
+            vec![
             ("Engine", s.engine.clone()),
             ("Row format", s.row_format.clone()),
             ("Collation", s.collation.clone()),
@@ -517,7 +546,8 @@ impl App {
             ("Created", if s.created.is_empty() { none() } else { s.created.clone() }),
             ("Updated", if s.updated.is_empty() { none() } else { s.updated.clone() }),
             ("Comment", s.comment.clone()),
-        ];
+            ]
+        };
         let h = ui.available_height();
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 16.0;
@@ -533,13 +563,15 @@ impl App {
                         });
                     }
                 });
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    for name in ["Analyze", "Optimize", "Check"] {
-                        ui.add_enabled_ui(false, |ui| ui.button(name)).response.on_disabled_hover_text(LATER);
-                    }
-                    ui.add_enabled_ui(false, |ui| danger(ui, "Truncate...")).response.on_disabled_hover_text(LATER);
-                });
+                if !pg {
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        for name in ["Analyze", "Optimize", "Check"] {
+                            ui.add_enabled_ui(false, |ui| ui.button(name)).response.on_disabled_hover_text(LATER);
+                        }
+                        ui.add_enabled_ui(false, |ui| danger(ui, "Truncate...")).response.on_disabled_hover_text(LATER);
+                    });
+                }
             });
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
@@ -646,7 +678,23 @@ fn named(ui: &egui::Ui, cell: Rect, name: &str, pk: bool, font: FontId) {
     }
 }
 
-fn column_cell(ui: &egui::Ui, rect: Rect, c: &Column, col: usize) {
+/// What a PostgreSQL column's Extra says: its catalog text names MySQL's auto_increment and the full GENERATED clause, which
+/// the Structure table shortens to the two things a reader looks for.
+fn pg_extra(extra: &str) -> String {
+    if extra.contains("GENERATED ALWAYS AS IDENTITY") {
+        "identity (ALWAYS)".into()
+    } else if extra.contains("IDENTITY BY DEFAULT") {
+        "identity (BY DEFAULT)".into()
+    } else if extra.starts_with("GENERATED ALWAYS AS (") {
+        "generated".into()
+    } else if extra == "auto_increment" {
+        "serial".into()
+    } else {
+        extra.to_string()
+    }
+}
+
+fn column_cell(ui: &egui::Ui, rect: Rect, c: &Column, col: usize, pg: bool) {
     let mono = || FontId::monospace(TXT_SMALL);
     let (base, args, unsigned) = (c.base_type(), c.args(), c.unsigned());
     match col {
@@ -674,7 +722,8 @@ fn column_cell(ui: &egui::Ui, rect: Rect, c: &Column, col: usize) {
             Some(d) if c.default_expr => {
                 put(ui, rect, d, mono(), C_KEYWORD(), false);
             }
-            Some(d) if matches!(base.as_str(), "TINYINT" | "SMALLINT" | "MEDIUMINT" | "INT" | "INTEGER" | "BIGINT" | "DECIMAL" | "NUMERIC" | "FLOAT" | "DOUBLE" | "BIT" | "YEAR") => {
+            // PostgreSQL types carry the kind its catalog gave them, which sees through domains and enums.
+            Some(d) if c.kind.map_or_else(|| matches!(base.as_str(), "TINYINT" | "SMALLINT" | "MEDIUMINT" | "INT" | "INTEGER" | "BIGINT" | "DECIMAL" | "NUMERIC" | "FLOAT" | "DOUBLE" | "BIT" | "YEAR"), super::sql_edit::is_numeric) => {
                 put(ui, rect, d, mono(), C_NUMBER(), false);
             }
             Some(d) => {
@@ -682,7 +731,7 @@ fn column_cell(ui: &egui::Ui, rect: Rect, c: &Column, col: usize) {
             }
         },
         7 => {
-            let extra = c.extra.replace("DEFAULT_GENERATED", "");
+            let extra = if pg { pg_extra(&c.extra) } else { c.extra.replace("DEFAULT_GENERATED", "") };
             put(ui, rect, extra.trim(), mono(), TEXT(), false);
         }
         8 => {
@@ -891,8 +940,10 @@ impl App {
                 created: "2025-02-11 09:12:40".into(),
                 updated: "2026-11-09 12:41:07".into(),
                 comment: "Customer orders".into(),
+                ..Default::default()
             },
             create: create.into(),
+            ..Default::default()
         };
         let Some(t) = self.tabs.first_mut() else { return };
         t.view = view;
@@ -901,5 +952,19 @@ impl App {
             s.st.data = Some(d);
             s.st.sel = [Some(3), None, Some(0), None, Some(0)];
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn postgres_extra_names_identity_and_generated_columns() {
+        assert_eq!(pg_extra("auto_increment GENERATED ALWAYS AS IDENTITY"), "identity (ALWAYS)");
+        assert_eq!(pg_extra("auto_increment IDENTITY BY DEFAULT"), "identity (BY DEFAULT)");
+        assert_eq!(pg_extra("GENERATED ALWAYS AS (id * 2) STORED"), "generated");
+        assert_eq!(pg_extra("auto_increment"), "serial");
+        assert_eq!(pg_extra(""), "");
     }
 }

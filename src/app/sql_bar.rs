@@ -875,7 +875,7 @@ pub(super) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, mut scop
     b.gdlg.bs = bs;
     // The WHERE text changed from elsewhere (Filter to these, a restored tab): read it back into rules.
     if !b.c.sql && t.filter_txt != b.src && (!pairs.is_empty() || t.filter_txt.trim().is_empty()) {
-        match rules::parse(&t.filter_txt, &pairs, bs) {
+        match rules::parse(&t.filter_txt, &pairs, d, bs) {
             Some((mut r, any)) => {
                 b.draft = r.pop();
                 b.rules = r;
@@ -908,7 +908,7 @@ pub(super) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, mut scop
                     || match &b.parsable {
                         Some((text, p, bs0, ok)) if *text == t.filter_txt && Arc::ptr_eq(p, &pairs) && *bs0 == bs => *ok,
                         _ => {
-                            let ok = rules::parse(&t.filter_txt, &pairs, bs).is_some();
+                            let ok = rules::parse(&t.filter_txt, &pairs, d, bs).is_some();
                             b.parsable = Some((t.filter_txt.clone(), pairs.clone(), bs, ok));
                             ok
                         }
@@ -1007,7 +1007,7 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col], scope: &Sco
     let matched = t.sql.as_ref().and_then(|s| s.matched).unwrap_or(0);
     let rows = t.count;
     // The statement is built only where it is shown (SQL mode) or copied.
-    let select = |t: &Tab| page_query(t).select_sql(d, &t.sel.db, &t.sel.coll, t.sql.as_ref().map_or(&[][..], |s| s.pk.as_slice()), None);
+    let select = |t: &Tab| page_query(t).select_sql(d, t.sel.space(), &t.sel.coll, t.sql.as_ref().map_or(&[][..], |s| s.pk.as_slice()), None);
     let stmt = t.sql.as_ref().is_some_and(|s| s.bar.c.sql).then(|| select(t));
     let mut copy = false;
     let Some(s) = t.sql.as_mut() else { return false };
@@ -1140,11 +1140,13 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col], scope: &Sco
                 r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))
             });
             // ponytail: the index names are free text; list them from SHOW INDEX when someone asks for a picker.
-            let id = query_id("SQL-INDEX");
-            run |= opt_chip(ui, "USE INDEX", id, &mut b.c.hint, |ui, text| {
-                let r = ui.add(egui::TextEdit::singleline(text).id(id).frame(editor_margin()).font(mono.clone()).hint_text("index_name").desired_width(90.0));
-                r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))
-            });
+            if d.supports(db::sql::Feature::IndexHint) {
+                let id = query_id("SQL-INDEX");
+                run |= opt_chip(ui, "USE INDEX", id, &mut b.c.hint, |ui, text| {
+                    let r = ui.add(egui::TextEdit::singleline(text).id(id).frame(editor_margin()).font(mono.clone()).hint_text("index_name").desired_width(90.0));
+                    r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))
+                });
+            }
         });
         ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), BUTTON_H), egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
@@ -1268,7 +1270,7 @@ pub(super) fn drill(t: &mut Tab, row: usize, d: Dialect, bs: bool) {
         });
     }
     let existing = t.filter_txt.trim().to_string();
-    let existing = if existing.is_empty() { None } else if matches!(rules::parse(&existing, &tcols(s).iter().map(|c| (c.name.clone(), c.kind)).collect::<Vec<_>>(), bs), Some((_, false))) { Some(existing) } else { Some(format!("({existing})")) };
+    let existing = if existing.is_empty() { None } else if matches!(rules::parse(&existing, &tcols(s).iter().map(|c| (c.name.clone(), c.kind)).collect::<Vec<_>>(), d, bs), Some((_, false))) { Some(existing) } else { Some(format!("({existing})")) };
     t.filter_txt = existing.into_iter().chain(conds).collect::<Vec<_>>().join(" AND ");
     ungroup(t);
 }

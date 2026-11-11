@@ -94,7 +94,7 @@ impl App {
         let rows: Vec<Row> = names
             .iter()
             .map(|n| {
-                let view = self.views.contains(&(conn, db.clone(), n.clone()));
+                let view = self.views.has(conn, &db, &n);
                 Row { name: n.clone(), view, on: true, structure: true, content: !view, drop: false, rows: schema.and_then(|s| s.table(n)).and_then(|t| t.rows) }
             })
             .collect();
@@ -423,7 +423,7 @@ mod tests {
     /// Final review finding 8: after a script the tabs of what it dropped close, wherever it was.
     #[test]
     fn tabs_of_what_a_script_dropped_close() {
-        let sel = |db: &str, coll: &str| Sel { conn: 1, db: db.into(), coll: coll.into() };
+        let sel = |db: &str, coll: &str| Sel { conn: 1, db: db.into(), coll: coll.into(), ..Default::default() };
         let dbs = vec!["shop".to_string(), "other".to_string()];
         let tables = vec!["orders".to_string()];
         let t = Some(tables.as_slice());

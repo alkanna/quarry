@@ -32,31 +32,16 @@ impl App {
             ("users".to_string(), colls(&["accounts", "profiles"])),
         ];
         self.conns.push(Conn {
-            meta: ConnMeta { id: 1, name: "Local sample".into(), tag: "Local".into(), ..Default::default() },
-            client: None,
-            sql: None,
-            status: Status::Ready,
-            writable: false,
             dbs,
             masked_uri: "mongodb://localhost:27017".into(),
-            tunnel: None,
             server: ServerInfo { version: "7.0.12".into(), set_name: "rs0".into(), host: "localhost:27017".into(), ..Default::default() },
+            ..Conn::new(ConnMeta { id: 1, name: "Local sample".into(), tag: "Local".into(), ..Default::default() }, Status::Ready)
         });
-        self.conns.push(Conn {
-            meta: ConnMeta { id: 2, name: "Staging".into(), tag: "Staging".into(), ..Default::default() },
-            client: None,
-            sql: None,
-            status: Status::Idle,
-            writable: false,
-            dbs: Vec::new(),
-            masked_uri: "mongodb+srv://app:****@staging.example.net".into(),
-            tunnel: None,
-            server: Default::default(),
-        });
+        self.conns.push(Conn { masked_uri: "mongodb+srv://app:****@staging.example.net".into(), ..Conn::new(ConnMeta { id: 2, name: "Staging".into(), tag: "Staging".into(), ..Default::default() }, Status::Idle) });
         self.active = Some(1);
         self.open_dbs.insert((1, "shop".into()));
-        self.views.insert((1, "shop".into(), "paid_orders".into()));
-        let sel = |db: &str, coll: &str| Sel { conn: 1, db: db.into(), coll: coll.into() };
+        self.views.add(1, "shop", "paid_orders");
+        let sel = |db: &str, coll: &str| Sel { conn: 1, db: db.into(), coll: coll.into(), ..Default::default() };
         self.tabs.push(Tab::new(sel("shop", "customers")));
         let mut t = Tab::new(sel("shop", "orders"));
         t.fields = auto_fields(&docs);
@@ -82,17 +67,12 @@ impl App {
             self.tabs = tabs;
             self.cur = 1;
             self.active = Some(1);
-            self.conns.push(Conn {
-                meta: ConnMeta { id: 4, name: "reports".into(), tag: "Staging".into(), engine: db::sql::Engine::MySql, ..Default::default() },
-                client: None,
-                sql: None,
-                status: Status::Connecting,
-                writable: false,
-                dbs: Vec::new(),
-                masked_uri: "mysql://app:****@reports.internal:3306".into(),
-                tunnel: None,
-                server: Default::default(),
-            });
+            self.conns.push(Conn { masked_uri: "mysql://app:****@reports.internal:3306".into(), ..Conn::new(ConnMeta { id: 4, name: "reports".into(), tag: "Staging".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Connecting) });
+        }
+        // QUARRY_TEST_PG=<view> does the same with an offline PostgreSQL connection, see demo_pg.rs.
+        if std::env::var("QUARRY_TEST_PG").is_ok() {
+            self.load_pg_demo();
+            return;
         }
         // QUARRY_TEST_SQL=content swaps the demo for a MySQL connection with its orders table open.
         if std::env::var("QUARRY_TEST_SQL").is_ok() {
@@ -328,7 +308,7 @@ impl App {
             let d = self.tabs[1].docs[2].owned();
             let mut changed = d.clone();
             changed.insert("status", "shipped");
-            self.drafts.insert(self.draft_key(&d), Draft { conn: 1, db: "shop".into(), coll: "orders".into(), original: d.clone(), current: changed.clone() });
+            self.drafts.insert(self.draft_key(&d), Draft { conn: 1, db: "shop".into(), schema: String::new(), coll: "orders".into(), original: d.clone(), current: changed.clone() });
             let items = changed.get("items").cloned().unwrap();
             self.json_edit = Some(JsonEdit { base: changed, path: vec!["items".into()], text: db::to_edit_value(&items), kind: "array", focus: false });
         }
@@ -389,15 +369,10 @@ impl App {
         let mut shop: Vec<String> = ["customers", "invoices", "order_items", "orders", "payments", "products", "shipments", "order_totals", "top_customers"].map(String::from).to_vec();
         shop.sort();
         self.conns.push(Conn {
-            meta: ConnMeta { id: 3, name: "shop-prod".into(), tag: "Production".into(), engine: db::sql::Engine::MySql, ..Default::default() },
-            client: None,
-            sql: None,
-            status: Status::Ready,
-            writable: false,
             dbs: vec![("information_schema".into(), None), ("mysql".into(), None), ("shop".into(), Some(shop)), ("analytics".into(), None), ("sys".into(), None)],
             masked_uri: "mysql://app:****@shop-prod.internal:3306/shop".into(),
-            tunnel: None,
             server: ServerInfo { version: "8.4.3".into(), product: "MySQL".into(), host: "shop-prod.internal:3306".into(), tls: true, ..Default::default() },
+            ..Conn::new(ConnMeta { id: 3, name: "shop-prod".into(), tag: "Production".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Ready)
         });
         self.active = Some(3);
         self.open_dbs.insert((3, "shop".into()));
@@ -406,9 +381,9 @@ impl App {
             self.sql_asked.insert((3, d.into()));
         }
         for v in ["order_totals", "top_customers"] {
-            self.views.insert((3, "shop".into(), v.into()));
+            self.views.add(3, "shop", v);
         }
-        let sel = |coll: &str| Sel { conn: 3, db: "shop".into(), coll: coll.into() };
+        let sel = |coll: &str| Sel { conn: 3, db: "shop".into(), coll: coll.into(), ..Default::default() };
         let engine = db::sql::Engine::MySql;
         let col = |name: &str, ty: &str, nullable: bool| Col::plain(name, ty, Kind::from_type_name(ty.split('(').next().unwrap_or(ty)), nullable);
         let cols = vec![col("id", "INT UNSIGNED", false), col("customer_id", "INT", false), col("status", "ENUM('pending','paid','shipped','refunded','cancelled')", false), col("total", "DECIMAL(10,2)", false), col("currency", "CHAR(3)", false), col("note", "TEXT", true), col("created_at", "DATETIME", false)];
@@ -541,7 +516,7 @@ impl App {
         let cols: Vec<Col> = v["cols"].as_array().into_iter().flatten().map(|c| { let ty = c["ty"].as_str().unwrap_or("TEXT"); Col::plain(c["name"].as_str().unwrap_or(""), ty, Kind::from_column_type(ty), true) }).collect();
         let query = std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("query");
         let rows: Vec<db::Row> = v["rows"].as_array().into_iter().flatten().filter_map(|r| {
-            let vals: Vec<Bson> = cols.iter().zip(r.as_array()?).map(|(c, x)| db::sql::value::to_bson(c.kind, x.as_str().map(str::as_bytes))).collect();
+            let vals: Vec<Bson> = cols.iter().zip(r.as_array()?).map(|(c, x)| db::sql::value::to_bson(db::sql::Dialect::MySql, c.kind, x.as_str().map(str::as_bytes))).collect();
             let mut d = Document::new();
             if !query { d.insert("_id", doc! { cols[0].name.clone(): vals[0].clone() }); }
             for (c, x) in cols.iter().zip(vals) { d.insert(c.name.clone(), x); }
@@ -571,13 +546,13 @@ impl App {
         let order_totals = table("order_totals", None, vec![col("order_id", "int unsigned", "", false), col("total", "decimal(10,2)", "", false)]);
         let payments = table("payments", Some(4377), vec![col("id", "int unsigned", "PRI", false), col("order_id", "int unsigned", "MUL", true)]);
         let shipments = table("shipments", Some(3120), vec![col("id", "int unsigned", "PRI", false), col("order_id", "int unsigned", "MUL", true)]);
-        self.sql_schema.insert((3, "shop".into()), Arc::new(Schema { tables: vec![customers, order_items, orders, payments, shipments, order_totals] }));
+        self.put_sql_schema(3, "shop".into(), Arc::new(Schema { tables: vec![customers, order_items, orders, payments, shipments, order_totals] }));
         let mut vals = Fields::new();
         vals.insert(crate::ui::sql_complete::value_key("orders", "currency"), FieldInfo { kind: "string", values: ["EUR", "USD", "GBP"].map(Bson::from).to_vec(), freq: vec![61, 27, 12] });
         vals.insert(crate::ui::sql_complete::value_key("orders", "status"), FieldInfo { kind: "string", values: ["paid", "shipped", "pending", "refunded", "cancelled"].map(Bson::from).to_vec(), freq: vec![61, 22, 9, 5, 3] });
         self.sql_values.insert((3, "shop".into()), vals);
         if std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("acquery") {
-            let mut t = Tab::new(Sel { conn: 3, db: "shop".into(), coll: String::new() }).for_engine(db::sql::Engine::MySql);
+            let mut t = Tab::new(Sel { conn: 3, db: "shop".into(), coll: String::new(), ..Default::default() }).for_engine(db::sql::Engine::MySql);
             t.view = View::Sql;
             if let Some(s) = t.sql.as_mut() {
                 s.query = "SELECT o.id, c.name FROM orders o\nJOIN customers c ON c.".into();

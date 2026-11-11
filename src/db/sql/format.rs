@@ -3,7 +3,11 @@
 //! change what a script means, so anything it cannot prove equal stays as it was.
 
 use super::lex::{self, Tok};
+use super::Dialect;
 use std::ops::Range;
+
+/// The only dialect the formatter knows: `sqlformat` reads MySQL text and nothing here is checked against another.
+const D: Dialect = Dialect::MySql;
 
 /// What a format did to a script.
 #[derive(Debug, Default, PartialEq)]
@@ -15,11 +19,16 @@ pub struct Formatted {
     pub special: usize,
     /// Statements whose formatted text would not read the same, so the original stays.
     pub refused: usize,
+    /// The text is another dialect than the formatter reads, so nothing was touched.
+    pub unsupported: bool,
 }
 
 impl Formatted {
     /// The line the status shows after a format.
     pub fn summary(&self) -> String {
+        if self.unsupported {
+            return "Format is not available for PostgreSQL yet".into();
+        }
         let plural = |n: usize| if n == 1 { "statement" } else { "statements" };
         let mut s = if self.formatted == 0 && self.special == 0 && self.refused == 0 { "Nothing to format".to_string() } else { format!("Formatted {} {}", self.formatted, plural(self.formatted)) };
         if self.special > 0 {
@@ -36,7 +45,7 @@ impl Formatted {
 /// end. A lone `DELIMITER ;` line is a block of its own. A statement that touches one is not ours to reflow, because
 /// the splitter of the Query view does not know about delimiters and would cut a body at its first `;`.
 fn delimiter_blocks(text: &str) -> Vec<Range<usize>> {
-    let toks = lex::tokens(text);
+    let toks = lex::tokens(text, D);
     let mut lines: Vec<(Range<usize>, bool)> = Vec::new();
     let mut open = false;
     let mut prev: Option<&str> = None;
@@ -111,10 +120,10 @@ fn same_tokens(a: &[(Tok, String, bool)], b: &[(Tok, String, bool)]) -> bool {
 /// Whether `after` is `before` with different whitespace, under every way a server may read the quotes, and still
 /// one statement under each of them.
 fn reads_the_same(before: &str, after: &str) -> bool {
-    if (0..lex::READINGS).any(|n| !same_tokens(&significant(before, &lex::nth_reading(before, n)), &significant(after, &lex::nth_reading(after, n)))) {
+    if (0..lex::READINGS).any(|n| !same_tokens(&significant(before, &lex::nth_reading(before, D, n)), &significant(after, &lex::nth_reading(after, D, n)))) {
         return false;
     }
-    [(true, false), (true, true), (false, false), (false, true)].into_iter().all(|(bs, ansi)| lex::count_with(before, bs, ansi) == lex::count_with(after, bs, ansi))
+    [(true, false), (true, true), (false, false), (false, true)].into_iter().all(|(bs, ansi)| lex::count_with(before, D, bs, ansi) == lex::count_with(after, D, bs, ansi))
 }
 
 fn options() -> sqlformat::FormatOptions<'static> {
@@ -130,12 +139,17 @@ fn one(stmt: &str) -> Option<String> {
 }
 
 /// Formats every statement of `text`. Comments between statements and the `;` that end them stay where they are.
-pub fn format_script(text: &str) -> Formatted {
+pub fn format_script(text: &str, d: Dialect) -> Formatted {
+    // The lexer reads PostgreSQL text correctly, but the formatter would still split a dollar quoted body or a
+    // `::` cast as it sees fit, and a layout that changes what the server runs must never happen.
+    if d == Dialect::Postgres {
+        return Formatted { text: text.to_string(), unsupported: true, ..Default::default() };
+    }
     let blocks = delimiter_blocks(text);
     let mut res = Formatted::default();
     let mut last = 0;
-    for (r, stmt) in lex::split_statements(text) {
-        let special = blocks.iter().any(|b| b.start < r.end && r.start < b.end) || lex::tokens(stmt).iter().any(|(t, _)| *t == Tok::ExecOpen);
+    for (r, stmt) in lex::split_statements(text, D) {
+        let special = blocks.iter().any(|b| b.start < r.end && r.start < b.end) || lex::tokens(stmt, D).iter().any(|(t, _)| *t == Tok::ExecOpen);
         if special {
             res.special += 1;
             continue;
@@ -157,6 +171,10 @@ pub fn format_script(text: &str) -> Formatted {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn format_script(t: &str) -> Formatted {
+        super::format_script(t, Dialect::MySql)
+    }
 
     fn same(f: &Formatted, text: &str) {
         assert_eq!(f.text, text);
@@ -183,7 +201,7 @@ mod tests {
         assert_eq!(f.formatted, 2, "{f:?}");
         assert!(f.text.contains("-- first") && f.text.contains("# note") && f.text.ends_with(";\n-- end"), "{}", f.text);
         assert!(f.text.contains("/* block"), "{}", f.text);
-        assert_eq!(lex::split_statements(&f.text).len(), 2);
+        assert_eq!(lex::split_statements(&f.text, D).len(), 2);
     }
 
     #[test]
@@ -255,7 +273,7 @@ mod tests {
         let src = "insert into t(a,b) values (1,'x;y'),(2,'z');update t set a=a+1 where b='z';delete from t where a>5 limit 2";
         let f = format_script(src);
         assert_eq!(f.formatted, 3, "{f:?}");
-        let parts: Vec<&str> = lex::split_statements(&f.text).iter().map(|p| p.1).collect();
+        let parts: Vec<&str> = lex::split_statements(&f.text, D).iter().map(|p| p.1).collect();
         assert_eq!(parts.len(), 3);
         assert!(parts[0].to_lowercase().starts_with("insert") && parts[2].to_lowercase().starts_with("delete"));
         assert!(f.text.contains("'x;y'"));
@@ -292,7 +310,7 @@ mod tests {
         assert!(!reads_the_same("select 'a' 'b'", "select 'a''b'"));
         assert!(!reads_the_same("select a -- x\nfrom t", "select a -- x from t"));
         assert!(reads_the_same("select  a ,b", "select a,\n  b"));
-        let s = Formatted { formatted: 2, special: 1, refused: 1, text: String::new() }.summary();
+        let s = Formatted { formatted: 2, special: 1, refused: 1, text: String::new(), unsupported: false }.summary();
         assert!(s.contains("Formatted 2 statements") && s.contains("DELIMITER") && s.contains("would change"), "{s}");
     }
 }

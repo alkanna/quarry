@@ -4,5 +4,6 @@ pub mod editor;
 pub mod js_doc;
 pub mod js_elide;
 pub mod sql_complete;
+pub mod sql_words_pg;
 pub mod theme;
 pub mod widgets;

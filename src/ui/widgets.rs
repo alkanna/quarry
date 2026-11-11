@@ -154,6 +154,15 @@ pub(crate) fn focus_ring(ui: &egui::Ui, r: &egui::Response, rect: egui::Rect, ra
 }
 
 /// 0 idle, 1 hovered, 2 pressed.
+/// The look of a dropdown field: a raised fill that follows hover and press, a stronger edge while pointed at, and the
+/// accent edge with focus or while its menu is open.
+pub(crate) fn field_frame(ui: &egui::Ui, rect: egui::Rect, resp: &egui::Response, open: bool) {
+    let state = state_of(resp);
+    let fill = [RAISED(), shade(RAISED(), 0.12), shade(RAISED(), 0.24)][state];
+    let edge = if open || resp.has_focus() { PRIMARY() } else if state > 0 { MUTED() } else { BORDER() };
+    ui.painter().rect(rect, R_MD, fill, Stroke::new(1.0, edge), egui::StrokeKind::Inside);
+}
+
 pub(crate) fn state_of(r: &egui::Response) -> usize {
     if r.is_pointer_button_down_on() {
         2

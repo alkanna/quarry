@@ -8,16 +8,27 @@ pub enum Dialect {
     #[default]
     MySql,
     MariaDb,
+    /// Chosen by the connection's engine, never by a version string.
+    Postgres,
 }
 
 impl Dialect {
+    /// Users, server variables, sql_mode and charsets exist only on these two. Anything gated on it
+    /// takes the not supported path for PostgreSQL.
+    pub fn is_mysql_family(self) -> bool {
+        matches!(self, Dialect::MySql | Dialect::MariaDb)
+    }
+
     /// From `SELECT VERSION()`, such as "8.4.0" or "10.11.6-MariaDB".
     pub fn from_version(version: &str) -> Dialect {
         if version.to_ascii_lowercase().contains("mariadb") { Dialect::MariaDb } else { Dialect::MySql }
     }
 
     pub fn quote_ident(self, name: &str) -> String {
-        format!("`{}`", name.replace('`', "``"))
+        match self {
+            Dialect::MySql | Dialect::MariaDb => format!("`{}`", name.replace('`', "``")),
+            Dialect::Postgres => format!("\"{}\"", name.replace('"', "\"\"")),
+        }
     }
 
     pub fn qualified(self, db: &str, table: &str) -> String {
@@ -33,12 +44,14 @@ impl Dialect {
     /// or "SYSTEM VIEW"), engine, row_estimate, data_bytes, index_bytes, comment. The row estimate is
     /// approximate for InnoDB.
     pub fn tables(self) -> &'static str {
+        if self == Dialect::Postgres { return super::pg_catalog::TABLES }
         "SELECT TABLE_NAME AS name, TABLE_TYPE AS kind, ENGINE AS engine, TABLE_ROWS AS row_estimate, DATA_LENGTH AS data_bytes, INDEX_LENGTH AS index_bytes, TABLE_COMMENT AS comment FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME"
     }
 
     /// Columns of one table. Params: [schema, table]. Columns: name, full_type, nullable (1 or 0),
     /// col_key ("PRI", "UNI", "MUL" or empty), col_default, extra, collation, comment, position.
     pub fn columns(self) -> &'static str {
+        if self == Dialect::Postgres { return super::pg_catalog::COLUMNS }
         "SELECT COLUMN_NAME AS name, COLUMN_TYPE AS full_type, IS_NULLABLE = 'YES' AS nullable, COLUMN_KEY AS col_key, COLUMN_DEFAULT AS col_default, EXTRA AS extra, COLLATION_NAME AS collation, COLUMN_COMMENT AS comment, ORDINAL_POSITION AS position FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION"
     }
 
@@ -46,24 +59,28 @@ impl Dialect {
     /// non_unique (1 or 0), seq, col, direction ("A", "D" or NULL), cardinality, sub_part,
     /// index_type, nullable ("YES" or empty), comment.
     pub fn indexes(self) -> &'static str {
+        if self == Dialect::Postgres { return super::pg_catalog::INDEXES }
         "SELECT INDEX_NAME AS name, NON_UNIQUE AS non_unique, SEQ_IN_INDEX AS seq, COLUMN_NAME AS col, COLLATION AS direction, CARDINALITY AS cardinality, SUB_PART AS sub_part, INDEX_TYPE AS index_type, NULLABLE AS nullable, INDEX_COMMENT AS comment FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY INDEX_NAME <> 'PRIMARY', INDEX_NAME, SEQ_IN_INDEX"
     }
 
     /// Foreign keys defined on a table. Params: [schema, table]. Columns: name, db, tbl, col, pos,
     /// ref_db, ref_tbl, ref_col, on_update, on_delete, where db and tbl are the table that owns the key.
     pub fn foreign_keys(self) -> &'static str {
+        if self == Dialect::Postgres { return super::pg_catalog::FOREIGN_KEYS }
         "SELECT k.CONSTRAINT_NAME AS name, k.TABLE_SCHEMA AS db, k.TABLE_NAME AS tbl, k.COLUMN_NAME AS col, k.ORDINAL_POSITION AS pos, k.REFERENCED_TABLE_SCHEMA AS ref_db, k.REFERENCED_TABLE_NAME AS ref_tbl, k.REFERENCED_COLUMN_NAME AS ref_col, r.UPDATE_RULE AS on_update, r.DELETE_RULE AS on_delete FROM information_schema.KEY_COLUMN_USAGE k JOIN information_schema.REFERENTIAL_CONSTRAINTS r ON r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND r.TABLE_NAME = k.TABLE_NAME WHERE k.TABLE_SCHEMA = ? AND k.TABLE_NAME = ? AND k.REFERENCED_TABLE_NAME IS NOT NULL ORDER BY k.CONSTRAINT_NAME, k.ORDINAL_POSITION"
     }
 
     /// Foreign keys in other tables that point to this one. Params: [schema, table] of the
     /// referenced table. Same columns as `foreign_keys`.
     pub fn referenced_by(self) -> &'static str {
+        if self == Dialect::Postgres { return super::pg_catalog::REFERENCED_BY }
         "SELECT k.CONSTRAINT_NAME AS name, k.TABLE_SCHEMA AS db, k.TABLE_NAME AS tbl, k.COLUMN_NAME AS col, k.ORDINAL_POSITION AS pos, k.REFERENCED_TABLE_SCHEMA AS ref_db, k.REFERENCED_TABLE_NAME AS ref_tbl, k.REFERENCED_COLUMN_NAME AS ref_col, r.UPDATE_RULE AS on_update, r.DELETE_RULE AS on_delete FROM information_schema.KEY_COLUMN_USAGE k JOIN information_schema.REFERENTIAL_CONSTRAINTS r ON r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND r.TABLE_NAME = k.TABLE_NAME WHERE k.REFERENCED_TABLE_SCHEMA = ? AND k.REFERENCED_TABLE_NAME = ? ORDER BY k.TABLE_SCHEMA, k.TABLE_NAME, k.CONSTRAINT_NAME, k.ORDINAL_POSITION"
     }
 
     /// Triggers on a table. Params: [schema, table]. Columns: name, timing ("BEFORE" or "AFTER"),
     /// event ("INSERT", "UPDATE" or "DELETE"), body, definer, ord (ACTION_ORDER), sql_mode.
     pub fn triggers(self) -> &'static str {
+        if self == Dialect::Postgres { return super::pg_catalog::TRIGGERS }
         "SELECT TRIGGER_NAME AS name, ACTION_TIMING AS timing, EVENT_MANIPULATION AS event, ACTION_STATEMENT AS body, DEFINER AS definer, ACTION_ORDER AS ord, SQL_MODE AS sql_mode FROM information_schema.TRIGGERS WHERE EVENT_OBJECT_SCHEMA = ? AND EVENT_OBJECT_TABLE = ? ORDER BY ACTION_TIMING, EVENT_MANIPULATION, ACTION_ORDER"
     }
 
@@ -72,24 +89,28 @@ impl Dialect {
     /// data_bytes, index_bytes, free_bytes, auto_increment, created, updated, collation, options,
     /// comment.
     pub fn table_status(self) -> &'static str {
+        if self == Dialect::Postgres { return super::pg_catalog::TABLE_STATUS }
         "SELECT TABLE_NAME AS name, ENGINE AS engine, ROW_FORMAT AS row_format, TABLE_ROWS AS row_estimate, AVG_ROW_LENGTH AS avg_row_bytes, DATA_LENGTH AS data_bytes, INDEX_LENGTH AS index_bytes, DATA_FREE AS free_bytes, AUTO_INCREMENT AS auto_increment, CAST(CREATE_TIME AS CHAR) AS created, CAST(UPDATE_TIME AS CHAR) AS updated, TABLE_COLLATION AS collation, CREATE_OPTIONS AS options, TABLE_COMMENT AS comment FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?"
     }
 
     /// Every column of a database in one round trip, for autocomplete. Params: [schema]. Columns:
     /// tbl, name, full_type, col_key, nullable (1 or 0).
     pub fn all_columns(self) -> &'static str {
+        if self == Dialect::Postgres { return super::pg_catalog::ALL_COLUMNS }
         "SELECT TABLE_NAME AS tbl, COLUMN_NAME AS name, COLUMN_TYPE AS full_type, COLUMN_KEY AS col_key, IS_NULLABLE = 'YES' AS nullable FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME, ORDINAL_POSITION"
     }
 
     /// Which columns of a database hold a foreign key, for autocomplete. Params: [schema]. Columns:
     /// tbl, name.
     pub fn all_foreign_keys(self) -> &'static str {
+        if self == Dialect::Postgres { return super::pg_catalog::ALL_FOREIGN_KEYS }
         "SELECT TABLE_NAME AS tbl, COLUMN_NAME AS name FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = ? AND REFERENCED_TABLE_NAME IS NOT NULL"
     }
 
     /// What decides whether a column's values may be looked up: the table's row estimate and how
     /// many indexes lead with the column. Params: [column, schema, table]. Columns: est, leads.
     pub fn value_gate(self) -> &'static str {
+        if self == Dialect::Postgres { return super::pg_catalog::VALUE_GATE }
         "SELECT t.TABLE_ROWS AS est, (SELECT COUNT(*) FROM information_schema.STATISTICS s WHERE s.TABLE_SCHEMA = t.TABLE_SCHEMA AND s.TABLE_NAME = t.TABLE_NAME AND s.COLUMN_NAME = ? AND s.SEQ_IN_INDEX = 1) AS leads FROM information_schema.TABLES t WHERE t.TABLE_SCHEMA = ? AND t.TABLE_NAME = ?"
     }
 
@@ -97,18 +118,65 @@ impl Dialect {
     /// LIKE pattern. Identifiers cannot be bound, so the names are quoted into the text.
     pub fn value_counts(self, db: &str, table: &str, col: &str, prefix: bool, limit: u32) -> String {
         let c = self.quote_ident(col);
+        if self == Dialect::Postgres {
+            // Grouped by the text, so a json column (which has no equality) and every other type counts the same way.
+            let filter = if prefix { format!(" WHERE {c}::text LIKE $1") } else { format!(" WHERE {c} IS NOT NULL") };
+            return format!("SELECT {c}::text AS v, COUNT(*) AS n FROM {}{filter} GROUP BY 1 ORDER BY 2 DESC LIMIT {limit}", self.qualified(db, table));
+        }
         let filter = if prefix { format!(" WHERE {c} LIKE ?") } else { format!(" WHERE {c} IS NOT NULL") };
         format!("SELECT CAST({c} AS CHAR) AS v, COUNT(*) AS n FROM {}{filter} GROUP BY {c} ORDER BY 2 DESC LIMIT {limit}", self.qualified(db, table))
     }
 
     /// Identifiers cannot be bound, so the names are quoted into the text.
     pub fn create_stmt(self, is_view: bool, db: &str, table: &str) -> String {
+        if self == Dialect::Postgres {
+            // A view's text comes from the server in one cell. A table has no such function: `structure::pg_create_table`
+            // writes it from the columns, constraints and indexes, so this statement asks for nothing.
+            if !is_view {
+                return "SELECT NULL::text".to_string();
+            }
+            let name = super::value::lit(&self.qualified(db, table), false);
+            return format!("SELECT 'CREATE ' || CASE c.relkind WHEN 'm' THEN 'MATERIALIZED ' ELSE '' END || 'VIEW ' || {name} || E' AS\\n' || pg_get_viewdef(c.oid, true) FROM pg_class c WHERE c.oid = {name}::regclass");
+        }
         format!("SHOW CREATE {} {}", if is_view { "VIEW" } else { "TABLE" }, self.qualified(db, table))
+    }
+
+    /// Appended to a metadata query to read every row. A LIMIT of its own overrides MySQL's sql_select_limit, and
+    /// PostgreSQL has no such setting, so there it only says what is meant.
+    pub fn all_rows(self) -> &'static str {
+        match self {
+            Dialect::Postgres => " LIMIT ALL",
+            Dialect::MySql | Dialect::MariaDb => " LIMIT 18446744073709551615",
+        }
+    }
+
+    /// The row count of a LIMIT that cuts nothing.
+    pub fn no_limit(self) -> &'static str {
+        match self {
+            Dialect::Postgres => "ALL",
+            Dialect::MySql | Dialect::MariaDb => "18446744073709551615",
+        }
+    }
+
+    /// The schemas of the connected database that hold user objects, PostgreSQL only. Empty on the MySQL family, whose
+    /// databases are listed by `SHOW DATABASES`.
+    pub fn schemas(self) -> &'static str {
+        if self == Dialect::Postgres { super::pg_catalog::SCHEMAS } else { "" }
+    }
+
+    /// Like `schemas` with the system schemas flagged and a table count per schema, for the sidebar's switcher.
+    pub fn schemas_all(self) -> &'static str {
+        if self == Dialect::Postgres { super::pg_catalog::SCHEMAS_ALL } else { "" }
     }
 
     /// Works on both engines and stops writes inside the session.
     pub fn session_read_only(self, on: bool) -> &'static str {
-        if on { "SET SESSION TRANSACTION READ ONLY" } else { "SET SESSION TRANSACTION READ WRITE" }
+        match (self, on) {
+            (Dialect::Postgres, true) => "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY",
+            (Dialect::Postgres, false) => "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE",
+            (_, true) => "SET SESSION TRANSACTION READ ONLY",
+            (_, false) => "SET SESSION TRANSACTION READ WRITE",
+        }
     }
 
     /// MySQL counts milliseconds but only limits SELECT statements. MariaDB counts seconds, as a
@@ -117,12 +185,14 @@ impl Dialect {
         match self {
             Dialect::MySql => format!("SET SESSION max_execution_time = {ms}"),
             Dialect::MariaDb => format!("SET SESSION max_statement_time = {}", ms as f64 / 1000.0),
+            Dialect::Postgres => format!("SET statement_timeout = {ms}"),
         }
     }
 
     /// MySQL drops an index along with its last column. MariaDB refuses to drop a column an index still needs.
     pub fn drops_index_with_column(self) -> bool {
-        self == Dialect::MySql
+        // PostgreSQL drops the index together with its last column
+        matches!(self, Dialect::MySql | Dialect::Postgres)
     }
 
     /// RENAME INDEX exists from MySQL 5.7 and MariaDB 10.5.2. Older servers need a drop and an add in one ALTER.
@@ -133,6 +203,7 @@ impl Dialect {
         match self {
             Dialect::MySql => (at(0), at(1)) >= (5, 7),
             Dialect::MariaDb => (at(0), at(1), at(2)) >= (10, 5, 2),
+            Dialect::Postgres => true,
         }
     }
 
@@ -148,12 +219,18 @@ impl Dialect {
 
     /// Stops the running statement and keeps the connection. Run it from a second connection.
     pub fn cancel(self, connection_id: u64) -> String {
-        format!("KILL QUERY {connection_id}")
+        match self {
+            Dialect::Postgres => format!("SELECT pg_cancel_backend({connection_id})"),
+            _ => format!("KILL QUERY {connection_id}"),
+        }
     }
 
     /// Ends a connection, and with it the statement it runs. Same text on both engines.
     pub fn kill_connection(self, connection_id: u64) -> String {
-        format!("KILL {connection_id}")
+        match self {
+            Dialect::Postgres => format!("SELECT pg_terminate_backend({connection_id})"),
+            _ => format!("KILL {connection_id}"),
+        }
     }
 }
 
@@ -269,6 +346,72 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("FOUND_ROWS", "FOUND_ROWS() -> BIGINT"),
 ];
 
+/// What the app hides or disables per engine. Each gate in the UI asks `supports` and words its tooltip or toast from
+/// `missing`, so a feature a PostgreSQL phase builds is switched on in one place.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Feature {
+    StructureEdit,
+    Users,
+    ServerStatus,
+    Format,
+    IndexHint,
+    CreateDrop,
+    SqlDump,
+    Import,
+    AdvancedTab,
+    ColumnOrder,
+    Unsigned,
+    Collation,
+    IndexCardinality,
+}
+
+/// The features PostgreSQL has so far. Add one here when its phase lands.
+const PG_FEATURES: &[Feature] = &[];
+
+impl Dialect {
+    pub fn supports(self, f: Feature) -> bool {
+        match self {
+            Dialect::Postgres => PG_FEATURES.contains(&f),
+            Dialect::MySql | Dialect::MariaDb => true,
+        }
+    }
+
+    /// The one reason text for a feature this dialect lacks, for tooltips and toasts.
+    pub fn missing(self, f: Feature) -> &'static str {
+        match f {
+            Feature::StructureEdit => "Changing the structure of a PostgreSQL table is not built yet",
+            Feature::Users => "Users and privileges are not built for PostgreSQL yet.",
+            Feature::ServerStatus => "Server status is not built for PostgreSQL yet.",
+            Feature::Format => "Formatting is not built for PostgreSQL yet.",
+            Feature::IndexHint => "PostgreSQL has no index hints.",
+            Feature::CreateDrop => "Creating and dropping databases is not built for PostgreSQL yet.",
+            Feature::SqlDump => "The SQL dump is not built for PostgreSQL yet.",
+            Feature::Import => "CSV import is not built for PostgreSQL yet.",
+            Feature::AdvancedTab => "PostgreSQL has no advanced session settings.",
+            Feature::ColumnOrder => "PostgreSQL has no column order.",
+            Feature::Unsigned => "PostgreSQL has no unsigned integers.",
+            Feature::Collation => "PostgreSQL collations are not shown per column.",
+            Feature::IndexCardinality => "PostgreSQL keeps no cardinality for an index.",
+        }
+    }
+}
+
+impl super::Engine {
+    /// Mongo has no SQL features to lack, so it always answers yes and keeps its own paths.
+    pub fn supports(self, f: Feature) -> bool {
+        match self {
+            super::Engine::Mongo => true,
+            super::Engine::MySql => Dialect::MySql.supports(f),
+            super::Engine::Postgres => Dialect::Postgres.supports(f),
+        }
+    }
+
+    /// The dialect to word a missing feature in; MySQL stands for the MariaDB family too.
+    pub fn missing(self, f: Feature) -> &'static str {
+        if self == super::Engine::Postgres { Dialect::Postgres.missing(f) } else { Dialect::MySql.missing(f) }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,6 +449,21 @@ mod tests {
     }
 
     #[test]
+    fn postgres_text() {
+        let d = Dialect::Postgres;
+        assert_eq!(d.quote_ident("we\"ird"), "\"we\"\"ird\"");
+        assert_eq!(d.qualified("public", "or\"ders"), "\"public\".\"or\"\"ders\"");
+        assert_eq!(d.page(50, 100), "LIMIT 50 OFFSET 100");
+        assert_eq!(d.session_timeout(30000), "SET statement_timeout = 30000");
+        assert_eq!(d.cancel(42), "SELECT pg_cancel_backend(42)");
+        assert_eq!(d.kill_connection(42), "SELECT pg_terminate_backend(42)");
+        assert_eq!(d.session_read_only(true), "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY");
+        assert_eq!(d.session_read_only(false), "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE");
+        assert!(!d.is_mysql_family() && Dialect::MariaDb.is_mysql_family());
+        assert_eq!(Dialect::from_version("16.2"), Dialect::MySql);
+    }
+
+    #[test]
     fn metadata_queries_bind_values() {
         let d = Dialect::MySql;
         for (q, params) in [(d.tables(), 1), (d.columns(), 2), (d.indexes(), 2), (d.foreign_keys(), 2), (d.referenced_by(), 2), (d.triggers(), 2), (d.table_status(), 2), (d.all_columns(), 1), (d.all_foreign_keys(), 1), (d.value_gate(), 3)] {
@@ -313,6 +471,23 @@ mod tests {
             assert!(q.starts_with("SELECT "));
             assert!(q.contains("information_schema."));
         }
+    }
+
+    #[test]
+    fn postgres_queries_bind_dollar_placeholders() {
+        let d = Dialect::Postgres;
+        for (q, params) in [(d.tables(), 1), (d.columns(), 2), (d.indexes(), 2), (d.foreign_keys(), 2), (d.referenced_by(), 2), (d.triggers(), 2), (d.table_status(), 2), (d.all_columns(), 1), (d.all_foreign_keys(), 1), (d.value_gate(), 3), (super::super::pg_catalog::CONSTRAINTS, 2)] {
+            assert!(!q.contains('?'), "{q}");
+            assert!(q.contains(&format!("${params}")) && !q.contains(&format!("${}", params + 1)), "{q}");
+            assert!(q.starts_with("SELECT "));
+        }
+        assert_eq!(d.all_rows(), " LIMIT ALL");
+        assert_eq!(d.value_counts("s", "t", "c", false, 5), "SELECT \"c\"::text AS v, COUNT(*) AS n FROM \"s\".\"t\" WHERE \"c\" IS NOT NULL GROUP BY 1 ORDER BY 2 DESC LIMIT 5");
+        assert!(d.value_counts("s", "t", "c", true, 5).contains("WHERE \"c\"::text LIKE $1"));
+        assert!(d.create_stmt(true, "s", "v").contains("pg_get_viewdef") && d.create_stmt(true, "s", "o'v").contains("'\"s\".\"o''v\"'"));
+        assert!(d.schemas().contains("pg_namespace") && Dialect::MySql.schemas().is_empty());
+        assert_eq!(crate::db::sql::PageQuery { skip: 5, ..Default::default() }.select_sql(d, "s", "t", &[], None), "SELECT *\nFROM \"s\".\"t\"\nLIMIT ALL OFFSET 5");
+        assert!(!crate::db::sql::PageQuery { index_hint: "k".into(), ..Default::default() }.select_sql(d, "s", "t", &[], None).contains("USE INDEX"));
     }
 
     #[test]

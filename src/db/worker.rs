@@ -25,7 +25,7 @@ pub(crate) fn e(err: impl std::fmt::Display) -> String {
         Some(r) => r.split(", labels: ").next().unwrap_or(r).to_string(),
         None => s,
     };
-    if s.contains("imeout") || s.contains("exceeded time limit") {
+    if (s.contains("imeout") && !s.contains("lock timeout")) || s.contains("exceeded time limit") {
         // Same advice the original gives on timeouts.
         format!("{s}\nThis usually means a query on a non-indexed field of a big collection. Raise the timeout or add an index.")
     } else {

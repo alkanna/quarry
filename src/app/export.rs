@@ -188,13 +188,16 @@ impl App {
         let paged = set.is_some_and(|x| x.page.is_some());
         let all = set.filter(|x| x.error.is_none() && !x.stmt.trim().is_empty()).and_then(|x| {
             let db = self.conn(t.sel.conn).and_then(|c| c.sql.clone())?;
-            let refused = db::sql::lex::read_only_check(&x.stmt).err();
-            Some(AllRows { db, schema: t.sql.as_ref().map(|s| s.run_db.clone()).filter(|d| !d.is_empty()).unwrap_or_else(|| t.sel.db.clone()), stmt: x.stmt.clone(), total: x.page.and_then(|p| p.total), paged, refused })
+            let refused = db::sql::lex::read_only_check(&x.stmt, db.dialect).err();
+            // The same database and schema the statement ran in, so it reads what the grid showed.
+            let (db, schema) = super::sql_query::run_target(t, db);
+            Some(AllRows { db, schema, stmt: x.stmt.clone(), total: x.page.and_then(|p| p.total), paged, refused })
         });
         let script = t.sql.as_ref().filter(|_| src == Src::Query).and_then(|s| {
             let db = self.conn(t.sel.conn).and_then(|c| c.sql.clone())?;
-            let schema = Some(s.run_db.clone()).filter(|d| !d.is_empty()).unwrap_or_else(|| t.sel.db.clone());
-            Some(Script { db, schema, stmts: db::sql::export::check_script(&s.query) })
+            let (db, schema) = super::sql_query::run_target(t, db);
+            let stmts = db::sql::export::check_script(&s.query, db.dialect);
+            Some(Script { db, schema, stmts })
         });
         let scope = pick_scope(Ask { all_pages, all_ok: all.as_ref().is_some_and(|a| a.refused.is_none()), has_selected: !selected.is_empty() });
         let fmt = if sql { Format::T(Fmt::Csv) } else { Format::MongoJson };
@@ -207,10 +210,11 @@ impl App {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
         let _guard = rt.enter();
         let opts = "mysql://root@127.0.0.1:1/shop".parse::<sqlx::mysql::MySqlConnectOptions>().expect("demo address");
-        let db = db::sql::Db { pool: db::sql::Pool::My(sqlx::mysql::MySqlPoolOptions::new().connect_lazy_with(opts.clone())), dialect: db::sql::Dialect::MySql, opts, version: "8.4.3".into(), tls: false, sql_mode: String::new(), setup: Default::default(), conn: 0 };
+        let db = db::sql::Db { pool: db::sql::Pool::My(sqlx::mysql::MySqlPoolOptions::new().connect_lazy_with(opts.clone())), dialect: db::sql::Dialect::MySql, opts: db::sql::exec::Opts::My(opts), version: "8.4.3".into(), tls: false, sql_mode: String::new(), setup: Default::default(), conn: 0 };
         let query = text.map(str::to_string).or_else(|| self.t().and_then(|t| t.sql.as_ref().map(|s| s.query.clone()))).unwrap_or_default();
         if let Some(Modal::Export(f)) = &mut self.modal {
-            f.script = Some(Script { db, schema: "shop".into(), stmts: db::sql::export::check_script(&query) });
+            let stmts = db::sql::export::check_script(&query, db.dialect);
+            f.script = Some(Script { db, schema: "shop".into(), stmts });
             f.scope = Scope::Script;
         }
     }
@@ -305,7 +309,7 @@ impl App {
                 *keep = false;
             }
             // A table of the Content view can also leave as a dump with its structure.
-            if f.sql && f.src == Src::Content {
+            if f.sql && f.src == Src::Content && self.t().is_none_or(|t| self.supports(t.sel.conn, db::sql::Feature::SqlDump)) {
                 if quiet(ui, "SQL dump…").on_hover_text("The table with its structure, or the whole database, as a script").clicked() {
                     *keep = false;
                     if let Some(s) = self.t().map(|t| t.sel.clone()) {
@@ -345,7 +349,7 @@ impl App {
         let text = match f.fmt {
             Format::T(fmt) => {
                 let (cols, table, pk) = self.export_sheet(f.src, &rows);
-                let text = copy::format(fmt, &Sheet { rows: &rows, cols: &cols, table: &table, pk: &pk, bs: self.sql_bs() }, f.header);
+                let text = copy::format(self.sql_dialect(), fmt, &Sheet { rows: &rows, cols: &cols, table: &table, pk: &pk, bs: self.sql_bs() }, f.header);
                 if text.is_empty() {
                     return self.warn(if fmt == Fmt::SqlUpdate { "SQL UPDATE needs a table with a primary key." } else { "Nothing to export." });
                 }
@@ -389,11 +393,12 @@ impl App {
         let Some(t) = self.t() else { return };
         let Some(s) = t.sql.as_ref() else { return };
         let Some(set) = s.sets.get(s.set_sel.min(s.sets.len().saturating_sub(1))) else { return };
-        if let Err(why) = lex_check_msg(&set.stmt) {
+        if let Err(why) = lex_check_msg(&set.stmt, self.sql_dialect()) {
             return self.warn(why);
         }
         let Some(db) = self.conn(t.sel.conn).and_then(|c| c.sql.clone()) else { return self.warn_offline() };
-        let a = AllRows { db, schema: if s.run_db.is_empty() { t.sel.db.clone() } else { s.run_db.clone() }, stmt: set.stmt.clone(), total: None, paged: true, refused: None };
+        let (db, schema) = super::sql_query::run_target(t, db);
+        let a = AllRows { db, schema, stmt: set.stmt.clone(), total: None, paged: true, refused: None };
         let table = self.export_sheet(Src::Query, &[]).1;
         let plan = Plan { fmt, header, table, bs: self.sql_bs() };
         self.start_stream(&a, plan, Sink::Clipboard, true);
@@ -453,8 +458,8 @@ fn pick_scope(a: Ask) -> Scope {
     }
 }
 
-fn lex_check_msg(stmt: &str) -> Result<(), String> {
-    db::sql::lex::read_only_check(stmt).map_err(|why| format!("Only statements that read can be copied in full: {why}"))
+fn lex_check_msg(stmt: &str, d: db::sql::Dialect) -> Result<(), String> {
+    db::sql::lex::read_only_check(stmt, d).map_err(|why| format!("Only statements that read can be copied in full: {why}"))
 }
 
 #[cfg(test)]
@@ -475,10 +480,10 @@ mod tests {
     #[test]
     fn all_rows_export_refuses_what_writes() {
         for w in ["DELETE FROM t", "UPDATE t SET a = 1", "SELECT * FROM t INTO OUTFILE '/tmp/x'", "SET SESSION transaction_read_only = 0", "DROP TABLE t"] {
-            assert!(lex_check_msg(w).is_err(), "{w}");
+            assert!(lex_check_msg(w, db::sql::Dialect::MySql).is_err(), "{w}");
         }
         for r in ["SELECT * FROM t", "WITH c AS (SELECT 1) SELECT * FROM c", "SHOW TABLES"] {
-            assert!(lex_check_msg(r).is_ok(), "{r}");
+            assert!(lex_check_msg(r, db::sql::Dialect::MySql).is_ok(), "{r}");
         }
     }
 

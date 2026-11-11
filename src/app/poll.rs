@@ -28,7 +28,9 @@ impl App {
                             self.worker.command(client.clone(), "admin".into(), doc! { "hello": 1 }, &format!("srv-hello:{conn}"));
                             c.client = Some(client);
                             c.status = Status::Ready;
+                            c.forget_lists();
                             c.dbs = dbs.into_iter().map(|d| (d, None)).collect();
+                            self.pg_tables_asked.forget(conn, None, None);
                             let n = c.meta.name.clone();
                             self.ok(format!("Connected to {n} (read-only)"));
                             if let Some(fp) = trusted {
@@ -66,14 +68,22 @@ impl App {
                             // A server can hold hundreds of schemas, so only those on screen load now.
                             self.sql_asked.retain(|k| k.0 != conn);
                             let wanted: Vec<String> = dbs.iter().filter(|d| self.open_dbs.contains(&(conn, (*d).clone())) || self.tabs.iter().any(|t| t.sel.conn == conn && t.sel.db == **d)).cloned().collect();
+                            let pg = sql.dialect == db::sql::Dialect::Postgres;
                             for d in wanted {
                                 self.sql_asked.insert((conn, d.clone()));
-                                self.worker.sql_tables(conn, sql.clone(), d);
+                                // A PostgreSQL database lists its schemas first; the tables of the picked one follow.
+                                if pg {
+                                    self.worker.sql_schemas(conn, sql.clone(), d);
+                                } else {
+                                    self.worker.sql_tables(conn, sql.clone(), d);
+                                }
                             }
-                            c.server = ServerInfo { version: sql.label().split_once(' ').map(|(_, v)| v.to_string()).unwrap_or_default(), product: if sql.dialect == db::sql::Dialect::MariaDb { "MariaDB" } else { "MySQL" }.into(), host: host_of(&c.masked_uri), tls: sql.tls, ..Default::default() };
+                            c.server = ServerInfo { version: sql.label().split_once(' ').map(|(_, v)| v.to_string()).unwrap_or_default(), product: match sql.dialect { db::sql::Dialect::MySql => "MySQL", db::sql::Dialect::MariaDb => "MariaDB", db::sql::Dialect::Postgres => "PostgreSQL" }.into(), host: host_of(&c.masked_uri), tls: sql.tls, ..Default::default() };
                             c.sql = Some(sql);
                             c.status = Status::Ready;
+                            c.forget_lists();
                             c.dbs = dbs.into_iter().map(|d| (d, None)).collect();
+                            self.pg_tables_asked.forget(conn, None, None);
                             let n = c.meta.name.clone();
                             self.ok(format!("Connected to {n} (read-only)"));
                             if let Some(fp) = trusted {
@@ -131,10 +141,11 @@ impl App {
                 Msg::SqlServer { req, ans } => self.sql_server_done(req, ans),
                 Msg::SqlLists { conn, schema, res } => self.sql_lists_done(conn, schema, res),
                 Msg::SqlTableInfo { req, res } => self.import_info(req, res),
-                Msg::SqlSchema { conn, schema, res } => {
+                Msg::SqlSchema { conn, database, schema, res } => {
                     // A failed read leaves the database without a schema until the next Refresh; typing still works.
                     if let Ok(s) = res {
-                        self.sql_schema.insert((conn, schema), Arc::new(s));
+                        let key = if database.is_empty() { schema } else { ns_key(&database, &schema) };
+                        self.put_sql_schema(conn, key, Arc::new(s));
                     }
                 }
                 Msg::SqlMeta { conn, schema, res } => self.sql_meta_done(conn, schema, res),
@@ -143,16 +154,17 @@ impl App {
                 Msg::SqlUserDone { conn, account, op, res, undo } => self.sql_user_done(conn, account, op, res, undo),
                 Msg::SqlDropInfo { conn, schema, table, res } => self.sql_drop_info_done(conn, schema, table, res),
                 Msg::SqlDdl { conn, schema, table, what, res, undo, dbs, sql_mode } => self.sql_ddl_done(conn, schema, table, what, res, undo, dbs, sql_mode),
-                Msg::SqlValues { conn, schema, table, column, prefix, res } => self.sql_values_done(conn, schema, table, column, prefix, res),
+                Msg::SqlValues { conn, database, schema, table, column, prefix, res } => self.sql_values_done(conn, database, schema, table, column, prefix, res),
+                Msg::SqlSchemas { conn, database, res } => self.pg_schemas_done(conn, database, res),
+                Msg::SqlTables { conn, database, schema, res } => self.pg_tables_done(conn, database, schema, res),
                 Msg::Collections { conn, db, res } => match res {
                     Ok((v, views)) => {
-                        self.views.retain(|(c, d, _)| !(*c == conn && *d == db));
-                        self.views.extend(views.into_iter().map(|n| (conn, db.clone(), n)));
+                        self.views.set(conn, &db, views);
                         if let Some(d) = self.conns.iter_mut().find(|c| c.meta.id == conn).and_then(|c| c.dbs.iter_mut().find(|d| d.0 == db)) {
                             d.1 = Some(v);
                         }
                     }
-                    Err(e) => self.err_quiet(e, Some(conn), Some(Sel { conn, db: db.clone(), coll: String::new() }), format!("List collections · {db}")),
+                    Err(e) => self.err_quiet(e, Some(conn), Some(Sel { conn, db: db.clone(), ..Default::default() }), format!("List collections · {db}")),
                 },
                 Msg::Command { tag, res } => match (tag.as_str(), res) {
                     (t, Ok(d)) if t.starts_with("srv-") => {
@@ -179,6 +191,7 @@ impl App {
                             tab.stats = Some((n("count"), n("size"), n("nindexes")));
                         }
                     }
+                    ("shpg", Ok(d)) => self.shell_pg_listed(d),
                     // Nice to have: a server that refuses these just shows less.
                     (t, Err(_)) if t.starts_with("srv-") || t.starts_with("tabstats\u{1f}") => {}
                     // Atlas and least-privilege users often may not list everyone; show who is logged in instead.
@@ -436,7 +449,7 @@ impl App {
                             // Reopen the refused insert so the typed document is not lost, but
                             // only over the collection it was meant for.
                             if let Some((db, coll, text)) = retry {
-                                if self.t().is_some_and(|t| t.sel.db == db && t.sel.coll == coll) {
+                                if self.t().is_some_and(|t| t.sel.space() == db && t.sel.coll == coll) {
                                     self.insert = Some(text);
                                 }
                             }
@@ -448,7 +461,7 @@ impl App {
                     }
                     // The worker only knows the database and collection, so a same-named
                     // collection on another connection may reload too, which is harmless.
-                    let tabs: Vec<usize> = (0..self.tabs.len()).filter(|&i| self.tabs[i].sel.db == at.0 && self.tabs[i].sel.coll == at.1).collect();
+                    let tabs: Vec<usize> = (0..self.tabs.len()).filter(|&i| self.tabs[i].sel.space() == at.0 && self.tabs[i].sel.coll == at.1).collect();
                     for i in tabs {
                         if reload {
                             self.reload_of(i);
@@ -459,7 +472,7 @@ impl App {
                 }
                 Msg::Saved { tag, res, undo } => {
                     let dr = self.saving.remove(&tag);
-                    let sel = dr.as_ref().map(|d| Sel { conn: d.conn, db: d.db.clone(), coll: d.coll.clone() });
+                    let sel = dr.as_ref().map(|d| Sel { conn: d.conn, db: d.db.clone(), schema: d.schema.clone(), coll: d.coll.clone() });
                     match res {
                         Ok(s) => {
                             self.toast_ok(s.clone(), undo.as_ref().map(|u| u.at));
@@ -477,7 +490,7 @@ impl App {
                         self.push_undo(u);
                     }
                     // Waits for the collection's other saves so the reload shows all of them.
-                    if let Some(sel) = sel.filter(|s| !self.saving.values().any(|d| d.conn == s.conn && d.db == s.db && d.coll == s.coll)) {
+                    if let Some(sel) = sel.filter(|s| !self.saving.values().any(|d| d.conn == s.conn && d.db == s.db && d.schema == s.schema && d.coll == s.coll)) {
                         let tabs: Vec<usize> = (0..self.tabs.len()).filter(|&i| self.tabs[i].sel == sel).collect();
                         for i in tabs {
                             self.reload_of(i);
@@ -494,7 +507,7 @@ impl App {
                 Msg::Grouped { conn, db, coll, path, pipeline, res } => match res {
                     Ok(rows) => {
                         self.ok(format!("{} distinct values of {path}", rows.len()));
-                        self.modal = Some(Modal::Grouped { sel: Sel { conn, db, coll }, path, pipeline, rows });
+                        self.modal = Some(Modal::Grouped { sel: Sel { conn, db, coll, ..Default::default() }, path, pipeline, rows });
                     }
                     Err(e) => self.err(e),
                 },

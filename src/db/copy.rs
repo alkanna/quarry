@@ -3,8 +3,6 @@
 
 use super::*;
 
-const DIALECT: sql::Dialect = sql::Dialect::MySql;
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Fmt {
     SqlInsert,
@@ -131,14 +129,15 @@ pub fn text_table(cols: &[String], rows: &[Document]) -> String {
 
 /// The text for `f`. `header` is the "Include column names" switch: CSV, TSV and HTML leave out their
 /// header row, Markdown keeps a blank one because a table needs it. SQL INSERT always names its columns,
-/// since without them the values land in the table's order, not the order shown.
-pub fn format(f: Fmt, s: &Sheet, header: bool) -> String {
+/// since without them the values land in the table's order, not the order shown. The dialect quotes the names of the
+/// SQL formats.
+pub fn format(dialect: sql::Dialect, f: Fmt, s: &Sheet, header: bool) -> String {
     let cell = |d: &Document, c: &CopyCol| text(value(d, c)).unwrap_or_default();
     let names: Vec<&str> = s.cols.iter().map(|c| c.name.as_str()).collect();
     match f {
         Fmt::SqlInsert => {
-            let mut out = format!("INSERT INTO {}", DIALECT.quote_ident(s.table));
-            out.push_str(&format!(" ({})", s.cols.iter().map(|c| DIALECT.quote_ident(&c.src)).collect::<Vec<_>>().join(", ")));
+            let mut out = format!("INSERT INTO {}", dialect.quote_ident(s.table));
+            out.push_str(&format!(" ({})", s.cols.iter().map(|c| dialect.quote_ident(&c.src)).collect::<Vec<_>>().join(", ")));
             out.push_str(" VALUES\n");
             let rows: Vec<String> = s.rows.iter().map(|d| format!("({})", s.cols.iter().map(|c| sql_literal(value(d, c), c.numeric, s.bs)).collect::<Vec<_>>().join(", "))).collect();
             out + &rows.join(",\n") + ";"
@@ -151,9 +150,9 @@ pub fn format(f: Fmt, s: &Sheet, header: bool) -> String {
                 if sets.is_empty() || s.pk.is_empty() || !s.pk.iter().all(|p| key.contains_key(p)) {
                     continue;
                 }
-                let set = sets.iter().map(|c| format!("{} = {}", DIALECT.quote_ident(&c.src), sql_literal(value(d, c), c.numeric, s.bs))).collect::<Vec<_>>().join(", ");
-                let wh = s.pk.iter().map(|p| format!("{} = {}", DIALECT.quote_ident(p), sql_literal(key.get(p), false, s.bs))).collect::<Vec<_>>().join(" AND ");
-                out.push(format!("UPDATE {} SET {set} WHERE {wh};", DIALECT.quote_ident(s.table)));
+                let set = sets.iter().map(|c| format!("{} = {}", dialect.quote_ident(&c.src), sql_literal(value(d, c), c.numeric, s.bs))).collect::<Vec<_>>().join(", ");
+                let wh = s.pk.iter().map(|p| format!("{} = {}", dialect.quote_ident(p), sql_literal(key.get(p), false, s.bs))).collect::<Vec<_>>().join(" AND ");
+                out.push(format!("UPDATE {} SET {set} WHERE {wh};", dialect.quote_ident(s.table)));
             }
             out.join("\n")
         }
@@ -225,13 +224,14 @@ pub struct Writer {
     table: String,
     pk: Vec<String>,
     bs: bool,
+    dialect: sql::Dialect,
     /// Something was written, so the next line or row needs its separator first.
     any: bool,
 }
 
 impl Writer {
-    pub fn new(f: Fmt, header: bool, cols: Vec<CopyCol>, table: &str, pk: &[String], bs: bool) -> Writer {
-        Writer { f, header, cols, table: table.to_string(), pk: pk.to_vec(), bs, any: false }
+    pub fn new(dialect: sql::Dialect, f: Fmt, header: bool, cols: Vec<CopyCol>, table: &str, pk: &[String], bs: bool) -> Writer {
+        Writer { f, header, cols, table: table.to_string(), pk: pk.to_vec(), bs, dialect, any: false }
     }
 
     /// Lines of text are joined by newlines, so the first has none in front.
@@ -244,7 +244,7 @@ impl Writer {
     pub fn begin(&mut self) -> String {
         let names: Vec<&str> = self.cols.iter().map(|c| c.name.as_str()).collect();
         match self.f {
-            Fmt::SqlInsert => format!("INSERT INTO {} ({}) VALUES\n", DIALECT.quote_ident(&self.table), self.cols.iter().map(|c| DIALECT.quote_ident(&c.src)).collect::<Vec<_>>().join(", ")),
+            Fmt::SqlInsert => format!("INSERT INTO {} ({}) VALUES\n", self.dialect.quote_ident(&self.table), self.cols.iter().map(|c| self.dialect.quote_ident(&c.src)).collect::<Vec<_>>().join(", ")),
             Fmt::Csv | Fmt::Tsv if self.header => {
                 let (sep, esc): (&str, fn(&str) -> String) = if self.f == Fmt::Csv { (",", csv_cell) } else { ("\t", |x: &str| x.replace(['\t', '\n', '\r'], " ")) };
                 let l = names.iter().map(|n| esc(n)).collect::<Vec<_>>().join(sep);
@@ -284,9 +284,9 @@ impl Writer {
                     if sets.is_empty() || self.pk.is_empty() || !self.pk.iter().all(|p| key.contains_key(p)) {
                         continue;
                     }
-                    let set = sets.iter().map(|c| format!("{} = {}", DIALECT.quote_ident(&c.src), sql_literal(value(d, c), c.numeric, self.bs))).collect::<Vec<_>>().join(", ");
-                    let wh = self.pk.iter().map(|p| format!("{} = {}", DIALECT.quote_ident(p), sql_literal(key.get(p), false, self.bs))).collect::<Vec<_>>().join(" AND ");
-                    let l = self.line(format!("UPDATE {} SET {set} WHERE {wh};", DIALECT.quote_ident(&self.table)));
+                    let set = sets.iter().map(|c| format!("{} = {}", self.dialect.quote_ident(&c.src), sql_literal(value(d, c), c.numeric, self.bs))).collect::<Vec<_>>().join(", ");
+                    let wh = self.pk.iter().map(|p| format!("{} = {}", self.dialect.quote_ident(p), sql_literal(key.get(p), false, self.bs))).collect::<Vec<_>>().join(" AND ");
+                    let l = self.line(format!("UPDATE {} SET {set} WHERE {wh};", self.dialect.quote_ident(&self.table)));
                     out.push_str(&l);
                 }
                 Fmt::Csv | Fmt::Tsv => {
@@ -351,8 +351,8 @@ mod tests {
         let r = [doc! { "_id": { "_id": 1 }, "_id_2": 1, "a": "x" }];
         let pk = vec!["_id".to_string()];
         let sheet = Sheet { rows: &r, cols: &c, table: "t", pk: &pk, bs: true };
-        assert_eq!(format(Fmt::SqlInsert, &sheet, true), "INSERT INTO `t` (`_id`, `a`) VALUES\n(1, 'x');");
-        assert_eq!(format(Fmt::SqlUpdate, &sheet, true), "UPDATE `t` SET `a` = 'x' WHERE `_id` = 1;");
+        assert_eq!(format(sql::Dialect::MySql, Fmt::SqlInsert, &sheet, true), "INSERT INTO `t` (`_id`, `a`) VALUES\n(1, 'x');");
+        assert_eq!(format(sql::Dialect::MySql, Fmt::SqlUpdate, &sheet, true), "UPDATE `t` SET `a` = 'x' WHERE `_id` = 1;");
     }
 
     #[test]
@@ -366,7 +366,7 @@ mod tests {
     fn out(f: Fmt, header: bool) -> String {
         let (c, r) = (cols(), rows());
         let pk = vec!["id".to_string()];
-        format(f, &Sheet { rows: &r, cols: &c, table: "orders", pk: &pk, bs: true }, header)
+        format(sql::Dialect::MySql, f, &Sheet { rows: &r, cols: &c, table: "orders", pk: &pk, bs: true }, header)
     }
 
     #[test]
@@ -415,7 +415,7 @@ mod tests {
     fn sql_update_sets_non_key_columns_by_key() {
         assert_eq!(out(Fmt::SqlUpdate, true), "UPDATE `orders` SET `status` = 'it''s', `total` = 26.75 WHERE `id` = 1;\nUPDATE `orders` SET `status` = 'a|b\nc', `total` = NULL WHERE `id` = 2;");
         let (c, r) = (cols(), rows());
-        assert_eq!(format(Fmt::SqlUpdate, &Sheet { rows: &r, cols: &c, table: "t", pk: &[], bs: true }, true), "");
+        assert_eq!(format(sql::Dialect::MySql, Fmt::SqlUpdate, &Sheet { rows: &r, cols: &c, table: "t", pk: &[], bs: true }, true), "");
     }
 
     #[test]
@@ -426,14 +426,14 @@ mod tests {
         assert_eq!(out(Fmt::Tsv, true), "id\tstatus\ttotal\n1\tit's\t26.75\n2\ta|b c\t");
         let c = [CopyCol { name: "a,\"b\"".into(), src: "a,\"b\"".into(), numeric: false }];
         let r = [doc! { "a,\"b\"": "x,y" }];
-        assert_eq!(format(Fmt::Csv, &Sheet { rows: &r, cols: &c, table: "", pk: &[], bs: true }, true), "\"a,\"\"b\"\"\"\n\"x,y\"");
+        assert_eq!(format(sql::Dialect::MySql, Fmt::Csv, &Sheet { rows: &r, cols: &c, table: "", pk: &[], bs: true }, true), "\"a,\"\"b\"\"\"\n\"x,y\"");
     }
 
     #[test]
     fn json_is_an_array_of_objects() {
         assert_eq!(out(Fmt::Json, true), "[\n  {\n    \"id\": 1,\n    \"status\": \"it's\",\n    \"total\": 26.75\n  },\n  {\n    \"id\": 2,\n    \"status\": \"a|b\\nc\",\n    \"total\": null\n  }\n]");
         let (c, r) = (cols(), Vec::new());
-        assert_eq!(format(Fmt::Json, &Sheet { rows: &r, cols: &c, table: "", pk: &[], bs: true }, true), "[]");
+        assert_eq!(format(sql::Dialect::MySql, Fmt::Json, &Sheet { rows: &r, cols: &c, table: "", pk: &[], bs: true }, true), "[]");
     }
 
     #[test]
@@ -452,8 +452,8 @@ mod tests {
         let c = [CopyCol { name: "a<b".into(), src: "a<b".into(), numeric: false }];
         let r = [doc! { "a<b": "x & \"y\" <z>" }];
         let s = Sheet { rows: &r, cols: &c, table: "", pk: &[], bs: true };
-        assert_eq!(format(Fmt::Html, &s, true), "<table>\n  <thead><tr><th>a&lt;b</th></tr></thead>\n  <tbody>\n    <tr><td>x &amp; &quot;y&quot; &lt;z&gt;</td></tr>\n  </tbody>\n</table>");
-        assert!(!format(Fmt::Html, &s, false).contains("<thead>"));
+        assert_eq!(format(sql::Dialect::MySql, Fmt::Html, &s, true), "<table>\n  <thead><tr><th>a&lt;b</th></tr></thead>\n  <tbody>\n    <tr><td>x &amp; &quot;y&quot; &lt;z&gt;</td></tr>\n  </tbody>\n</table>");
+        assert!(!format(sql::Dialect::MySql, Fmt::Html, &s, false).contains("<thead>"));
     }
 
     #[test]
@@ -461,6 +461,6 @@ mod tests {
         assert_eq!(out(Fmt::Values, true), "1\nit's\n26.75\n2\na|b\nc\n");
         let c = [CopyCol { name: "a.b".into(), src: "a.b".into(), numeric: false }, CopyCol { name: "bin".into(), src: "bin".into(), numeric: false }];
         let r = [doc! { "a": { "b": 5 }, "bin": Bson::Binary(mongodb::bson::Binary { subtype: mongodb::bson::spec::BinarySubtype::Generic, bytes: vec![1, 255] }) }];
-        assert_eq!(format(Fmt::Values, &Sheet { rows: &r, cols: &c, table: "", pk: &[], bs: true }, true), "5\n0x01FF");
+        assert_eq!(format(sql::Dialect::MySql, Fmt::Values, &Sheet { rows: &r, cols: &c, table: "", pk: &[], bs: true }, true), "5\n0x01FF");
     }
 }

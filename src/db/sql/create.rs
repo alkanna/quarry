@@ -4,12 +4,13 @@
 //! sent alone, as a prepared statement so the server takes exactly one, on a connection of its own that is
 //! switched to READ WRITE, like the row writes.
 
+use super::se;
 use super::ddl::{self, Mode};
 use super::value::lit;
 use super::worker::{database_names, text, text_at};
-use super::write::{writer, SqlUndo};
-use super::{Db, Dialect, Pool};
-use crate::db::{e, Msg, Res, UndoAction, UndoKind, Worker};
+use super::write::{writer_conn, SqlUndo};
+use super::{Db, Dialect};
+use crate::db::{Msg, Res, UndoAction, UndoKind, Worker};
 use sqlx::{Connection, Executor};
 use std::time::{Duration, Instant};
 
@@ -419,12 +420,12 @@ const SERVER_DEFAULTS: &str = "SELECT @@character_set_server AS cs, @@collation_
 const SCHEMA_DEFAULT: &str = "SELECT DEFAULT_COLLATION_NAME AS co FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?";
 
 async fn load_meta(db: &Db, schema: &str) -> Res<Meta> {
-    let Pool::My(pool) = &db.pool;
+    let pool = db.my_pool()?;
     let (cs, co, en, df) = tokio::try_join!(
-        async { sqlx::query(CHARSETS).fetch_all(pool).await.map_err(e) },
-        async { sqlx::query(COLLATIONS).fetch_all(pool).await.map_err(e) },
-        async { sqlx::query(ENGINES).fetch_all(pool).await.map_err(e) },
-        async { sqlx::query(SERVER_DEFAULTS).fetch_one(pool).await.map_err(e) },
+        async { sqlx::query(CHARSETS).fetch_all(pool).await.map_err(se) },
+        async { sqlx::query(COLLATIONS).fetch_all(pool).await.map_err(se) },
+        async { sqlx::query(ENGINES).fetch_all(pool).await.map_err(se) },
+        async { sqlx::query(SERVER_DEFAULTS).fetch_one(pool).await.map_err(se) },
     )?;
     let charsets: Vec<Charset> = cs.iter().filter_map(|r| Some(Charset { name: text(r, "name")?, desc: text(r, "descr").unwrap_or_default(), default_collation: text(r, "def").unwrap_or_default() })).collect();
     let mut meta = Meta {
@@ -438,7 +439,7 @@ async fn load_meta(db: &Db, schema: &str) -> Res<Meta> {
         fold_case: super::structure::num(&df, "lc").unwrap_or(0) != 0,
     };
     if !schema.is_empty() {
-        meta.schema_collation = sqlx::query(SCHEMA_DEFAULT).bind(schema).fetch_optional(pool).await.map_err(e)?.and_then(|r| text(&r, "co"));
+        meta.schema_collation = sqlx::query(SCHEMA_DEFAULT).bind(schema).fetch_optional(pool).await.map_err(se)?.and_then(|r| text(&r, "co"));
     }
     Ok(meta)
 }
@@ -468,9 +469,9 @@ async fn count(pool: &sqlx::MySqlPool, sql: &str, schema: &str) -> u64 {
 
 /// Counts for the database confirmation: the sum is what DROP DATABASE takes with it.
 async fn db_info(db: &Db, schema: &str) -> Res<DropInfo> {
-    let Pool::My(pool) = &db.pool;
-    let exists = sqlx::query("SELECT 1 AS n FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?").bind(schema).fetch_optional(pool).await.map_err(e)?.is_some();
-    let kinds = sqlx::query("SELECT TABLE_TYPE AS kind, COUNT(*) AS n, COALESCE(SUM(TABLE_ROWS), 0) AS r FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? GROUP BY TABLE_TYPE").bind(schema).fetch_all(pool).await.map_err(e)?;
+    let pool = db.my_pool()?;
+    let exists = sqlx::query("SELECT 1 AS n FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?").bind(schema).fetch_optional(pool).await.map_err(se)?.is_some();
+    let kinds = sqlx::query("SELECT TABLE_TYPE AS kind, COUNT(*) AS n, COALESCE(SUM(TABLE_ROWS), 0) AS r FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? GROUP BY TABLE_TYPE").bind(schema).fetch_all(pool).await.map_err(se)?;
     let mut info = DropInfo { exists, ..Default::default() };
     for r in &kinds {
         let n = super::structure::num(r, "n").unwrap_or(0);
@@ -495,11 +496,11 @@ const COUNT_WAIT: Duration = Duration::from_secs(3);
 /// Rows, and the tables that point at this one. The reads run on a connection taken out of the pool, so the
 /// session setting below stays off the pool and a count cut short never hands a busy connection back to it.
 async fn table_info(db: &Db, schema: &str, table: &str) -> Res<DropInfo> {
-    let Pool::My(pool) = &db.pool;
+    let pool = db.my_pool()?;
     let d = db.dialect;
     let mut c = db.acquire().await?.detach();
     fresh_stats(&mut c, d).await;
-    let st = sqlx::query("SELECT TABLE_ROWS AS est, TABLE_TYPE AS kind FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?").bind(schema).bind(table).fetch_optional(&mut c).await.map_err(e);
+    let st = sqlx::query("SELECT TABLE_ROWS AS est, TABLE_TYPE AS kind FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?").bind(schema).bind(table).fetch_optional(&mut c).await.map_err(se);
     let st = match st {
         Ok(Some(st)) => st,
         other => {
@@ -518,7 +519,7 @@ async fn table_info(db: &Db, schema: &str, table: &str) -> Res<DropInfo> {
             None => (super::structure::num(&st, "est"), true),
         };
     }
-    let refs = sqlx::query(d.referenced_by()).bind(schema).bind(table).fetch_all(pool).await.map_err(e)?;
+    let refs = sqlx::query(d.referenced_by()).bind(schema).bind(table).fetch_all(pool).await.map_err(se)?;
     for r in &refs {
         let (rdb, rt) = (text(r, "db").unwrap_or_default(), text(r, "tbl").unwrap_or_default());
         if rdb == schema && rt == table {
@@ -536,8 +537,11 @@ async fn table_info(db: &Db, schema: &str, table: &str) -> Res<DropInfo> {
 /// that filled since reads as 0. Only for this connection, which is never handed back to the pool; MariaDB
 /// has no such cache and no variable.
 async fn fresh_stats(c: &mut sqlx::MySqlConnection, d: Dialect) {
-    if d == Dialect::MySql {
-        let _ = c.execute("SET SESSION information_schema_stats_expiry = 0").await;
+    match d {
+        Dialect::MySql => {
+            let _ = c.execute("SET SESSION information_schema_stats_expiry = 0").await;
+        }
+        Dialect::MariaDb | Dialect::Postgres => {}
     }
 }
 
@@ -576,7 +580,7 @@ async fn kill(pool: &sqlx::MySqlPool, id: u64) {
 }
 
 async fn table_names(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str) -> Res<Vec<String>> {
-    let rows = sqlx::query(&format!("SHOW TABLES FROM {}", d.quote_ident(schema))).persistent(false).fetch_all(&mut *c).await.map_err(e)?;
+    let rows = sqlx::query(&format!("SHOW TABLES FROM {}", d.quote_ident(schema))).persistent(false).fetch_all(&mut *c).await.map_err(se)?;
     Ok(rows.iter().filter_map(|r| text_at(r, 0)).collect())
 }
 
@@ -592,7 +596,7 @@ pub fn stored_name(listed: &[String], name: &str) -> String {
 
 /// Whether the server compares database and table names without case (lower_case_table_names 1 or 2).
 async fn folds_case(c: &mut sqlx::MySqlConnection) -> Res<bool> {
-    let r = sqlx::query("SELECT @@lower_case_table_names AS n").fetch_one(&mut *c).await.map_err(e)?;
+    let r = sqlx::query("SELECT @@lower_case_table_names AS n").fetch_one(&mut *c).await.map_err(se)?;
     Ok(super::structure::num(&r, "n").unwrap_or(0) != 0)
 }
 
@@ -622,7 +626,7 @@ async fn mode_session(db: &Db, read_only: bool) -> Res<(sqlx::MySqlConnection, M
 /// its own, prepared so the server takes exactly one statement, and for changes to the list of databases
 /// reads that list back on the same connection.
 async fn run(db: &Db, read_only: bool, list: bool, build: impl FnOnce(bool) -> Res<String>) -> Res<Option<Vec<String>>> {
-    let mut c = writer(db, "", read_only).await?;
+    let mut c = writer_conn(db, "", read_only).await?.into_my()?;
     let out = async {
         let sql = build(folds_case(&mut c).await?)?;
         ddl::exec(&mut c, &sql).await?;
@@ -634,7 +638,7 @@ async fn run(db: &Db, read_only: bool, list: bool, build: impl FnOnce(bool) -> R
 }
 
 fn created(conn: u64, schema: &str, table: &str, undo: SqlUndo) -> UndoAction {
-    UndoAction { at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { cols: Vec::new(), undo } }
+    UndoAction { at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database: String::new(), cols: Vec::new(), undo } }
 }
 
 /// The part of a table undo that runs with the table locked: it must still be the table the create made,
@@ -646,7 +650,7 @@ async fn drop_if_same_and_empty(c: &mut sqlx::MySqlConnection, schema: &str, tab
             return Err(format!("Not undone: {table} was dropped and made again since, so it is not the table this created."));
         }
     }
-    let has = sqlx::query(&format!("SELECT 1 AS n FROM {q} LIMIT 1")).persistent(false).fetch_optional(&mut *c).await.map_err(e)?.is_some();
+    let has = sqlx::query(&format!("SELECT 1 AS n FROM {q} LIMIT 1")).persistent(false).fetch_optional(&mut *c).await.map_err(se)?.is_some();
     if has {
         return Err(format!("Not undone: {table} has rows now."));
     }
@@ -659,7 +663,7 @@ async fn drop_if_same_and_empty(c: &mut sqlx::MySqlConnection, schema: &str, tab
 /// A database cannot be locked, so a table created in it in that instant would go with it.
 async fn undo_create(db: &Db, schema: &str, table: &str, made: Option<&str>, read_only: bool) -> Res<(Ddl, Option<Vec<String>>)> {
     let d = db.dialect;
-    let mut c = writer(db, "", read_only).await?;
+    let mut c = writer_conn(db, "", read_only).await?.into_my()?;
     let res = async {
         let fold = folds_case(&mut c).await?;
         if table.is_empty() {
@@ -670,7 +674,7 @@ async fn undo_create(db: &Db, schema: &str, table: &str, made: Option<&str>, rea
                 .bind(schema)
                 .fetch_one(&mut c)
                 .await
-                .map_err(e)?;
+                .map_err(se)?;
             if super::structure::num(&n, "n").unwrap_or(0) > 0 {
                 return Err(format!("Not undone: {schema} has tables or other objects in it now."));
             }
@@ -852,7 +856,7 @@ mod tests {
     /// Every mode the server may read a statement under: one statement either way.
     fn one_statement(sql: &str) {
         for (bs, ansi) in [(true, false), (false, false), (true, true), (false, true)] {
-            assert_eq!(lex::count_with(sql, bs, ansi), 1, "bs={bs} ansi={ansi}: {sql}");
+            assert_eq!(lex::count_with(sql, crate::db::sql::Dialect::MySql, bs, ansi), 1, "bs={bs} ansi={ansi}: {sql}");
         }
     }
 
@@ -999,7 +1003,7 @@ mod tests {
                 let sql = create_table_sql(Dialect::MySql, bs, &s, &m).unwrap_or_else(|err| panic!("{name}: {err}"));
                 let q = Dialect::MySql.quote_ident(name);
                 assert!(sql.contains(&format!("  {q} VARCHAR(20) NULL DEFAULT '")), "{sql}");
-                assert_eq!(lex::count_with(&sql, bs, ansi), 1, "bs={bs} ansi={ansi}: {sql}");
+                assert_eq!(lex::count_with(&sql, crate::db::sql::Dialect::MySql, bs, ansi), 1, "bs={bs} ansi={ansi}: {sql}");
             }
         }
         // The literal doubles quotes always and backslashes only where the server reads them as escapes.
@@ -1253,7 +1257,7 @@ mod tests {
             assert_eq!(l.scalar(&format!("SELECT CAST(COALESCE(TABLE_ROWS, 0) AS SIGNED) FROM information_schema.TABLES WHERE TABLE_SCHEMA = '{schema}' AND TABLE_NAME = 't'")), 0);
             let values = (1..=1000).map(|i| format!("({i})")).collect::<Vec<_>>().join(",");
             let mut lock = l.w.rt.block_on(async {
-                let mut c = sqlx::MySqlConnection::connect_with(&l.db.opts).await.unwrap();
+                let mut c = sqlx::MySqlConnection::connect_with(l.db.opts.my().unwrap()).await.unwrap();
                 c.execute(format!("LOCK TABLES `{schema}`.t WRITE").as_str()).await.unwrap();
                 c.execute(format!("INSERT INTO `{schema}`.t (v) VALUES {values}").as_str()).await.unwrap();
                 c

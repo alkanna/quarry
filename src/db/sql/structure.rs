@@ -2,11 +2,13 @@
 //! indexes, foreign keys in both directions, triggers, the table status and the CREATE statement.
 //! Everything is read-only here; `ddl` builds the ALTERs from it.
 
-use super::worker::{text, text_at};
-use super::{Db, Dialect, Pool};
-use crate::db::{e, Msg, Res, Worker};
-use sqlx::mysql::MySqlRow;
-use sqlx::{raw_sql, Row as _};
+use super::se;
+use super::exec::{Cells, SqlRow};
+use super::value::Kind;
+use super::worker::{pg_kind, text, text_at};
+use super::{Db, Dialect};
+use crate::db::{Msg, Res, Worker};
+use sqlx::raw_sql;
 
 #[derive(Clone, Debug, Default)]
 pub struct Column {
@@ -27,6 +29,11 @@ pub struct Column {
     pub srid: Option<u32>,
     /// MariaDB's CHECK written on the column itself, which MODIFY would drop. MySQL keeps every CHECK on the table.
     pub check: Option<String>,
+    /// The kind the server's catalog gave the column, set on PostgreSQL where the type name alone cannot say (a domain
+    /// over int, an enum). MySQL leaves it None and `Kind::from_column_type` reads `full_type`.
+    pub kind: Option<Kind>,
+    /// PostgreSQL's default exactly as `pg_get_expr` wrote it, with its cast, so a CREATE TABLE can repeat it.
+    pub default_raw: Option<String>,
 }
 
 impl Column {
@@ -65,6 +72,21 @@ pub struct Index {
     pub comment: String,
     /// INVISIBLE on MySQL, IGNORED on MariaDB: kept up to date but not used by the optimizer.
     pub invisible: bool,
+    /// PostgreSQL's `pg_get_indexdef`, the CREATE INDEX statement. Empty on MySQL.
+    pub def: String,
+    /// PostgreSQL: a primary key, unique or exclusion constraint owns the index, so it is written as that constraint.
+    pub constraint: bool,
+}
+
+/// A PostgreSQL primary key, unique, check or exclusion constraint, in the words of `pg_get_constraintdef`. Foreign
+/// keys are in `Structure::foreign_keys`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Constraint {
+    pub name: String,
+    /// "p", "u", "c" or "x".
+    pub kind: char,
+    /// Such as "PRIMARY KEY (a, b)" or "CHECK ((total >= 0))".
+    pub def: String,
 }
 
 /// One foreign key constraint, its columns in order. In `Structure::foreign_keys` the key belongs
@@ -96,8 +118,12 @@ pub struct Trigger {
 }
 
 impl Trigger {
-    /// The statement as the Triggers view shows it. The server stores only the body.
+    /// The statement as the Triggers view shows it. MySQL stores only the body. PostgreSQL's body is the whole CREATE
+    /// TRIGGER statement, because the trigger runs a function that lives apart from it.
     pub fn create_sql(&self, table: &str) -> String {
+        if self.body.trim_start().get(..7).is_some_and(|p| p.eq_ignore_ascii_case("CREATE ")) {
+            return self.body.clone();
+        }
         format!("CREATE TRIGGER {} {} {} ON {}\nFOR EACH ROW\n{}", self.name, self.timing, self.event, table, self.body)
     }
 }
@@ -124,6 +150,8 @@ pub struct Status {
     pub created: String,
     pub updated: String,
     pub comment: String,
+    /// PostgreSQL's `pg_total_relation_size`: the heap, its TOAST table and the indexes.
+    pub total: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -135,6 +163,9 @@ pub struct Structure {
     pub triggers: Vec<Trigger>,
     pub status: Status,
     pub create: String,
+    /// PostgreSQL primary key, unique, check and exclusion constraints. Empty on MySQL, whose keys are indexes and
+    /// whose CHECKs are not read here.
+    pub constraints: Vec<Constraint>,
 }
 
 impl Structure {
@@ -162,7 +193,10 @@ pub fn split_type(full: &str) -> (String, String, bool) {
 /// as current_timestamp(). Returns the default and whether it is an expression.
 pub fn normalize_default(d: Dialect, raw: Option<String>, nullable: bool, extra: &str) -> (Option<String>, bool) {
     let Some(v) = raw else { return (None, false) };
-    if d == Dialect::MySql {
+    if matches!(d, Dialect::Postgres) {
+        return pg_default(&v);
+    }
+    if matches!(d, Dialect::MySql) {
         return (Some(v), extra.to_ascii_uppercase().contains("DEFAULT_GENERATED"));
     }
     if v == "NULL" && nullable {
@@ -173,6 +207,52 @@ pub fn normalize_default(d: Dialect, raw: Option<String>, nullable: bool, extra:
     }
     let literal = v == "NULL" || v.parse::<f64>().is_ok();
     (Some(v), !literal)
+}
+
+/// Reads `pg_get_expr` of a column default into what MySQL's readers give: a literal without its quotes and cast, or an
+/// expression as written. `'pending'::character varying` is the literal pending, `0` and `true` are literals, `now()` and
+/// `nextval('s'::regclass)` are expressions, and `NULL::text` is no default.
+fn pg_default(v: &str) -> (Option<String>, bool) {
+    let t = v.trim();
+    let first = t.chars().next().unwrap_or(' ');
+    if t.eq_ignore_ascii_case("null") || t.get(..6).is_some_and(|p| p.eq_ignore_ascii_case("null::")) && is_cast(&t[4..]) {
+        return (None, false);
+    }
+    if let Some((inner, escapes, rest)) = split_literal(t) {
+        if rest.is_empty() || is_cast(rest) {
+            return (Some(if escapes { unquote(&inner) } else { inner.replace("''", "'") }), false);
+        }
+    }
+    if (first.is_ascii_digit() || first == '-' || first == '.') && t.parse::<f64>().is_ok() || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("false") {
+        return (Some(t.to_string()), false);
+    }
+    (Some(t.to_string()), true)
+}
+
+/// `::type` repeated, where a type is words, a schema dot, a length or a `[]`, never a quote or an operator.
+fn is_cast(s: &str) -> bool {
+    s.starts_with("::") && s.bytes().all(|b| b.is_ascii_alphanumeric() || b" _.\"(),[]:".contains(&b))
+}
+
+/// The inside of a leading `'...'` or `E'...'` literal (still with doubled quotes), whether it is the escape kind, and
+/// what follows it.
+fn split_literal(t: &str) -> Option<(String, bool, &str)> {
+    let (escapes, body) = match t.strip_prefix(['E', 'e']) {
+        Some(b) if b.starts_with('\'') => (true, b),
+        _ => (false, t),
+    };
+    let b = body.strip_prefix('\'')?;
+    let bytes = b.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if escapes => i += 2,
+            b'\'' if bytes.get(i + 1) == Some(&b'\'') => i += 2,
+            b'\'' => return Some((b[..i].to_string(), escapes, &b[i + 1..])),
+            _ => i += 1,
+        }
+    }
+    None
 }
 
 /// The text inside a MariaDB default literal: it doubles quotes and writes backslashes as escapes.
@@ -201,46 +281,46 @@ fn unquote(inner: &str) -> String {
 }
 
 /// An unsigned column value, whichever width and signedness the server reports.
-pub(super) fn num(r: &MySqlRow, name: &str) -> Option<u64> {
-    if let Ok(v) = r.try_get::<Option<u64>, _>(name) {
-        return v;
-    }
-    r.try_get::<Option<i64>, _>(name).ok().flatten().and_then(|n| u64::try_from(n).ok())
+pub(super) fn num<R: Cells>(r: &R, name: &str) -> Option<u64> {
+    r.uint(name)
 }
 
-fn s(r: &MySqlRow, name: &str) -> String {
+fn s(r: &SqlRow, name: &str) -> String {
     text(r, name).unwrap_or_default()
 }
 
-fn columns(d: Dialect, rows: &[MySqlRow]) -> Vec<Column> {
+fn columns(d: Dialect, rows: &[SqlRow]) -> Vec<Column> {
     rows.iter()
         .map(|r| {
-            let nullable = r.try_get::<i64, _>("nullable").map(|n| n != 0).unwrap_or(true);
+            let nullable = r.int("nullable").map(|n| n != 0).unwrap_or(true);
             let extra = s(r, "extra");
-            let (default, default_expr) = normalize_default(d, text(r, "col_default"), nullable, &extra);
-            Column { name: s(r, "name"), full_type: s(r, "full_type"), nullable, key: s(r, "col_key"), default, default_expr, extra, collation: text(r, "collation"), comment: s(r, "comment"), srid: None, check: None }
+            let raw = text(r, "col_default");
+            let (default, default_expr) = normalize_default(d, raw.clone(), nullable, &extra);
+            let pg = d == Dialect::Postgres;
+            Column { name: s(r, "name"), full_type: s(r, "full_type"), nullable, key: s(r, "col_key"), default, default_expr, extra, collation: text(r, "collation"), comment: s(r, "comment"), srid: None, check: None, kind: pg.then(|| pg_kind(r)), default_raw: if pg { raw } else { None } }
         })
         .collect()
 }
 
 /// The rows come ordered by index name and then position, so one index is a run of rows.
-fn indexes(rows: &[MySqlRow]) -> Vec<Index> {
+fn indexes(rows: &[SqlRow]) -> Vec<Index> {
     let mut out: Vec<Index> = Vec::new();
     for r in rows {
         let name = s(r, "name");
-        let col = IndexCol { name: s(r, "col"), desc: text(r, "direction").as_deref() == Some("D"), prefix: num(r, "sub_part"), expr: None };
+        // Only PostgreSQL has key parts that are expressions, and it gives their text in `expr` with an empty name.
+        let col = IndexCol { name: s(r, "col"), desc: text(r, "direction").as_deref() == Some("D"), prefix: num(r, "sub_part"), expr: text(r, "expr") };
         if out.last().is_some_and(|i| i.name == name) {
             out.last_mut().unwrap().cols.push(col);
         } else {
-            let unique = r.try_get::<i64, _>("non_unique").map(|n| n == 0).unwrap_or(false);
-            out.push(Index { name, unique, cols: vec![col], kind: s(r, "index_type"), cardinality: num(r, "cardinality"), comment: s(r, "comment"), invisible: false });
+            let unique = r.int("non_unique").map(|n| n == 0).unwrap_or(false);
+            out.push(Index { name, unique, cols: vec![col], kind: s(r, "index_type"), cardinality: num(r, "cardinality"), comment: s(r, "comment"), invisible: false, def: s(r, "def"), constraint: r.int("backs_constraint") == Some(1) });
         }
     }
     out
 }
 
 /// One row per key column, ordered by constraint and then position.
-fn foreign_keys(rows: &[MySqlRow]) -> Vec<ForeignKey> {
+fn foreign_keys(rows: &[SqlRow]) -> Vec<ForeignKey> {
     let mut out: Vec<ForeignKey> = Vec::new();
     for r in rows {
         let (name, db, table) = (s(r, "name"), s(r, "db"), s(r, "tbl"));
@@ -254,18 +334,23 @@ fn foreign_keys(rows: &[MySqlRow]) -> Vec<ForeignKey> {
     out
 }
 
-fn triggers(rows: &[MySqlRow]) -> Vec<Trigger> {
+fn triggers(rows: &[SqlRow]) -> Vec<Trigger> {
     rows.iter().map(|r| Trigger { name: s(r, "name"), timing: s(r, "timing"), event: s(r, "event"), body: s(r, "body"), definer: s(r, "definer"), order: num(r, "ord").unwrap_or(0), sql_mode: s(r, "sql_mode") }).collect()
 }
 
 /// The triggers of a table read on a connection of the caller's, for the trigger jobs that must see what the
 /// connection they write on sees.
 pub(super) async fn triggers_on(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str, table: &str) -> Res<Vec<Trigger>> {
-    let rows = sqlx::query(d.triggers()).bind(schema).bind(table).fetch_all(&mut *c).await.map_err(e)?;
+    let rows = SqlRow::wrap(sqlx::query(d.triggers()).bind(schema).bind(table).fetch_all(&mut *c).await.map_err(se)?);
     Ok(triggers(&rows))
 }
 
-fn status(rows: &[MySqlRow]) -> Status {
+/// The rows of a bound metadata query that `Db::meta` read, as the Postgres and MySQL readers share them.
+fn first_text(rows: &[SqlRow]) -> String {
+    rows.first().and_then(|r| text_at(r, 0)).unwrap_or_default()
+}
+
+fn status(rows: &[SqlRow]) -> Status {
     let Some(r) = rows.first() else { return Status::default() };
     Status {
         engine: s(r, "engine"),
@@ -280,6 +365,7 @@ fn status(rows: &[MySqlRow]) -> Status {
         created: s(r, "created"),
         updated: s(r, "updated"),
         comment: s(r, "comment"),
+        total: num(r, "total_bytes"),
     }
 }
 
@@ -287,12 +373,8 @@ fn status(rows: &[MySqlRow]) -> Status {
 /// show a table with only its first columns or indexes, and let an edit of that structure drop the rest.
 pub(super) const ALL_ROWS: &str = " LIMIT 18446744073709551615";
 
-async fn query(db: &Db, sql: &str, schema: &str, table: &str) -> Res<Vec<MySqlRow>> {
-    let Pool::My(pool) = &db.pool;
-    let t = std::time::Instant::now();
-    let res = sqlx::query(&format!("{sql}{ALL_ROWS}")).bind(schema).bind(table).fetch_all(pool).await;
-    db.note(schema, sql, t, &res);
-    res.map_err(e)
+async fn query(db: &Db, sql: &str, schema: &str, table: &str) -> Res<Vec<SqlRow>> {
+    db.meta(schema, sql, [schema, table]).await
 }
 
 /// What the main queries cannot ask every server version for: SRIDs, invisible indexes and functional key parts on
@@ -300,6 +382,14 @@ async fn query(db: &Db, sql: &str, schema: &str, table: &str) -> Res<Vec<MySqlRo
 async fn extras(db: &Db, schema: &str, table: &str, st: &mut Structure) {
     let d = db.dialect;
     let (idx, cols) = match d {
+        // The key parts, hidden state and SRIDs are already in the main queries. What a CREATE TABLE still needs is the
+        // constraints that are not foreign keys.
+        Dialect::Postgres => {
+            if let Ok(rows) = query(db, super::pg_catalog::CONSTRAINTS, schema, table).await {
+                st.constraints = rows.iter().map(|r| Constraint { name: s(r, "name"), kind: s(r, "kind").chars().next().unwrap_or('c'), def: s(r, "def") }).collect();
+            }
+            return;
+        }
         Dialect::MySql => (
             "SELECT INDEX_NAME AS name, SEQ_IN_INDEX AS seq, IS_VISIBLE = 'NO' AS hidden, EXPRESSION AS expr FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
             "SELECT COLUMN_NAME AS name, SRS_ID AS srid, NULL AS clause FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND SRS_ID IS NOT NULL",
@@ -314,7 +404,7 @@ async fn extras(db: &Db, schema: &str, table: &str, st: &mut Structure) {
     for r in idx.unwrap_or_default() {
         let (name, seq) = (s(&r, "name"), num(&r, "seq").unwrap_or(0) as usize);
         let Some(ix) = st.indexes.iter_mut().find(|i| i.name == name) else { continue };
-        ix.invisible |= r.try_get::<i64, _>("hidden").is_ok_and(|n| n != 0);
+        ix.invisible |= r.int("hidden").is_some_and(|n| n != 0);
         if let (Some(e), Some(c)) = (text(&r, "expr"), seq.checked_sub(1).and_then(|k| ix.cols.get_mut(k))) {
             c.expr = Some(e);
         }
@@ -328,15 +418,18 @@ async fn extras(db: &Db, schema: &str, table: &str, st: &mut Structure) {
 }
 
 pub(super) async fn load(db: &Db, schema: &str, table: &str) -> Res<Structure> {
-    let Pool::My(pool) = &db.pool;
     let d = db.dialect;
-    // SHOW CREATE TABLE also answers for a view.
+    // SHOW CREATE TABLE also answers for a view. PostgreSQL composes a table's text from what is read below.
     let create = async {
+        if d == Dialect::Postgres {
+            return Ok(None);
+        }
+        let pool = db.my_pool()?;
         let sql = d.create_stmt(false, schema, table);
         let t = std::time::Instant::now();
         let res = raw_sql(&sql).fetch_one(pool).await;
         db.note(schema, &sql, t, &res);
-        res.map_err(e)
+        res.map(|r| Some(SqlRow::My(r))).map_err(se)
     };
     let (cols, idx, fks, refs, trig, stat, create) = tokio::try_join!(
         query(db, d.columns(), schema, table),
@@ -354,10 +447,109 @@ pub(super) async fn load(db: &Db, schema: &str, table: &str) -> Res<Structure> {
         referenced_by: foreign_keys(&refs),
         triggers: triggers(&trig),
         status: status(&stat),
-        create: text_at(&create, 1).unwrap_or_default(),
+        create: create.and_then(|r| text_at(&r, 1)).unwrap_or_default(),
+        constraints: Vec::new(),
     };
     extras(db, schema, table, &mut st).await;
+    if d == Dialect::Postgres {
+        let kind = stat.first().and_then(|r| text(r, "kind")).unwrap_or_default();
+        pg_finish(db, schema, table, &kind, &mut st).await?;
+    }
     Ok(st)
+}
+
+/// The two things a PostgreSQL table needs after the catalogs: its row count when the planner has none, and its CREATE
+/// text. `kind` is the relkind: r table, p partitioned table, v view, m materialized view, f foreign table.
+async fn pg_finish(db: &Db, schema: &str, table: &str, kind: &str, st: &mut Structure) -> Res<()> {
+    let d = db.dialect;
+    // A table nobody has analyzed has no estimate (-1 from 14 on, 0 on 13), so it is counted. A guard keeps a huge one
+    // from holding the view up, and a foreign table is somebody else's server.
+    if st.status.rows.is_none() && matches!(kind, "r" | "p" | "m") {
+        let sql = format!("SELECT count(*)::text FROM {}", d.qualified(schema, table));
+        if let Ok(rows) = db.read_text_with(schema, &super::pg::set_timeout("5s"), &sql, false).await {
+            st.status.rows = rows.first().and_then(|r| super::worker::num_at(r, 0));
+        }
+    }
+    if matches!(kind, "v" | "m") {
+        let rows = db.read_text(schema, &d.create_stmt(true, schema, table), false).await?;
+        let mut out = first_text(&rows);
+        if !out.is_empty() {
+            out = out.trim_end().to_string();
+            if !out.ends_with(';') {
+                out.push(';');
+            }
+        }
+        // A materialized view keeps its own indexes.
+        for ix in &st.indexes {
+            out.push_str(&format!("\n{};", ix.def));
+        }
+        st.create = out;
+    } else {
+        st.create = pg_create_table(schema, table, st);
+    }
+    Ok(())
+}
+
+/// The CREATE TABLE of a PostgreSQL table, written from what the catalogs gave: the columns with their defaults,
+/// identity and generated expressions, the primary key, unique, check and exclusion constraints, the foreign keys with
+/// their referenced table spelled with its schema, then the indexes no constraint owns and the comments. Partition keys,
+/// inheritance, storage options and ownership are not written. The dump of a later step reuses this.
+pub fn pg_create_table(schema: &str, table: &str, st: &Structure) -> String {
+    let q = |n: &str| Dialect::Postgres.quote_ident(n);
+    let lit = |t: &str| super::value::lit(t, false);
+    let name = Dialect::Postgres.qualified(schema, table);
+    let mut lines: Vec<String> = Vec::new();
+    for c in &st.columns {
+        // A serial column's default points at a sequence the new table would not have, so it is written as serial.
+        let serial = c.default_raw.as_deref().is_some_and(|d| d.starts_with("nextval(")).then(|| match c.full_type.as_str() {
+            "integer" => Some("serial"),
+            "bigint" => Some("bigserial"),
+            "smallint" => Some("smallserial"),
+            _ => None,
+        });
+        let mut l = format!("{} {}", q(&c.name), serial.flatten().unwrap_or(&c.full_type));
+        if let Some(co) = &c.collation {
+            l.push_str(&format!(" COLLATE {}", q(co)));
+        }
+        if let Some(at) = c.extra.find("GENERATED ALWAYS AS (") {
+            l.push(' ');
+            l.push_str(&c.extra[at..]);
+        } else if c.extra.contains("GENERATED ALWAYS AS IDENTITY") {
+            l.push_str(" GENERATED ALWAYS AS IDENTITY");
+        } else if c.extra.contains("IDENTITY BY DEFAULT") {
+            l.push_str(" GENERATED BY DEFAULT AS IDENTITY");
+        } else if let (Some(def), None) = (&c.default_raw, serial.flatten()) {
+            l.push_str(&format!(" DEFAULT {def}"));
+        }
+        if !c.nullable {
+            l.push_str(" NOT NULL");
+        }
+        lines.push(l);
+    }
+    for k in &st.constraints {
+        lines.push(format!("CONSTRAINT {} {}", q(&k.name), k.def));
+    }
+    for fk in &st.foreign_keys {
+        let list = |v: &[String]| v.iter().map(|c| q(c)).collect::<Vec<_>>().join(", ");
+        let mut l = format!("CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})", q(&fk.name), list(&fk.cols), Dialect::Postgres.qualified(&fk.ref_db, &fk.ref_table), list(&fk.ref_cols));
+        for (what, rule) in [("UPDATE", &fk.on_update), ("DELETE", &fk.on_delete)] {
+            if !rule.is_empty() && rule != "NO ACTION" {
+                l.push_str(&format!(" ON {what} {rule}"));
+            }
+        }
+        lines.push(l);
+    }
+    let mut out = format!("CREATE TABLE {name} (\n    {}\n);", lines.join(",\n    "));
+    for ix in st.indexes.iter().filter(|i| !i.constraint && !i.def.is_empty()) {
+        out.push_str(&format!("\n{};", ix.def));
+    }
+    if !st.status.comment.is_empty() {
+        out.push_str(&format!("\nCOMMENT ON TABLE {name} IS {};", lit(&st.status.comment)));
+    }
+    for c in st.columns.iter().filter(|c| !c.comment.is_empty()) {
+        out.push_str(&format!("\nCOMMENT ON COLUMN {name}.{} IS {};", q(&c.name), lit(&c.comment)));
+    }
+    out
 }
 
 impl Worker {
@@ -399,6 +591,48 @@ mod tests {
         assert_eq!(n("-1", false), (Some("-1".into()), false));
         assert_eq!(n("current_timestamp()", false), (Some("current_timestamp()".into()), true));
         assert_eq!(normalize_default(m, None, true, ""), (None, false));
+    }
+
+    #[test]
+    fn postgres_defaults_read_like_mysql() {
+        let n = |v: &str| normalize_default(Dialect::Postgres, Some(v.into()), true, "");
+        assert_eq!(n("'pending'::character varying"), (Some("pending".into()), false));
+        assert_eq!(n("'it''s'::text"), (Some("it's".into()), false));
+        assert_eq!(n("''::text"), (Some(String::new()), false));
+        assert_eq!(n(r"E'a\\b'::text"), (Some(r"a\b".into()), false));
+        assert_eq!(n("'-5'::integer"), (Some("-5".into()), false));
+        assert_eq!(n("'2024-01-01'::date"), (Some("2024-01-01".into()), false));
+        assert_eq!(n("0"), (Some("0".into()), false));
+        assert_eq!(n("-1.5"), (Some("-1.5".into()), false));
+        assert_eq!(n("true"), (Some("true".into()), false));
+        assert_eq!(n("NULL::text"), (None, false));
+        assert_eq!(n("now()"), (Some("now()".into()), true));
+        assert_eq!(n("CURRENT_TIMESTAMP"), (Some("CURRENT_TIMESTAMP".into()), true));
+        assert_eq!(n("nextval('t_id_seq'::regclass)"), (Some("nextval('t_id_seq'::regclass)".into()), true));
+        // A literal followed by an operator is an expression.
+        assert_eq!(n("'a'::text || 'b'::text"), (Some("'a'::text || 'b'::text".into()), true));
+        assert_eq!(normalize_default(Dialect::Postgres, None, true, ""), (None, false));
+    }
+
+    #[test]
+    fn postgres_create_table_is_composed_from_the_catalogs() {
+        let col = |name: &str, ty: &str, nullable: bool, raw: Option<&str>, extra: &str, comment: &str| Column { name: name.into(), full_type: ty.into(), nullable, default_raw: raw.map(Into::into), extra: extra.into(), comment: comment.into(), ..Default::default() };
+        let st = Structure {
+            columns: vec![
+                col("id", "integer", false, None, "auto_increment IDENTITY BY DEFAULT", ""),
+                col("status", "text", true, Some("'new'::text"), "", "State"),
+                col("dbl", "integer", true, None, "GENERATED ALWAYS AS (id * 2) STORED", ""),
+            ],
+            indexes: vec![Index { name: "t_pkey".into(), constraint: true, def: "CREATE UNIQUE INDEX t_pkey ON public.t USING btree (id)".into(), ..Default::default() }, Index { name: "i".into(), def: "CREATE INDEX i ON public.t USING btree (status)".into(), ..Default::default() }],
+            constraints: vec![Constraint { name: "t_pkey".into(), kind: 'p', def: "PRIMARY KEY (id)".into() }],
+            foreign_keys: vec![ForeignKey { name: "fk".into(), cols: vec!["status".into()], ref_db: "other".into(), ref_table: "s".into(), ref_cols: vec!["code".into()], on_update: "NO ACTION".into(), on_delete: "SET NULL".into(), ..Default::default() }],
+            status: Status { comment: "It's a table".into(), ..Default::default() },
+            ..Default::default()
+        };
+        assert_eq!(
+            pg_create_table("public", "t", &st),
+            "CREATE TABLE \"public\".\"t\" (\n    \"id\" integer GENERATED BY DEFAULT AS IDENTITY NOT NULL,\n    \"status\" text DEFAULT 'new'::text,\n    \"dbl\" integer GENERATED ALWAYS AS (id * 2) STORED,\n    CONSTRAINT \"t_pkey\" PRIMARY KEY (id),\n    CONSTRAINT \"fk\" FOREIGN KEY (\"status\") REFERENCES \"other\".\"s\" (\"code\") ON DELETE SET NULL\n);\nCREATE INDEX i ON public.t USING btree (status);\nCOMMENT ON TABLE \"public\".\"t\" IS 'It''s a table';\nCOMMENT ON COLUMN \"public\".\"t\".\"status\" IS 'State';"
+        );
     }
 
     #[test]

@@ -94,13 +94,27 @@ pub(crate) fn note_here<T, X: std::fmt::Display>(sql: &str, start: std::time::In
 
 type Span = std::ops::Range<usize>;
 
+/// Whether the text holds `scheme://user:password@host`, as in a CREATE SUBSCRIPTION or dblink connection string. The
+/// whole literal is dropped because the password cannot be told apart from the rest once quoting is involved.
+fn has_uri_password(s: &str) -> bool {
+    // libpq ends the user and password part at the first `@` or `/` only, so `?`, `#`, spaces and quotes can sit
+    // inside a password.
+    s.match_indices("://").any(|(i, _)| {
+        let rest = &s[i + 3..];
+        rest.find(['@', '/']).is_some_and(|j| rest[j..].starts_with('@') && rest[..j].contains(':'))
+    })
+}
+
 /// Where each secret string of a statement sits. Every reading the server may take of the quotes is tried, one at a
 /// time, and the ranges are merged, so a literal that one reading would end early is still covered to its end.
 fn secret_ranges(sql: &str) -> Vec<Span> {
-    use super::sql::lex::{nth_reading, Tok, READINGS};
+    use super::sql::{lex::{nth_reading, readings, Tok}, Dialect};
     let mut hits: Vec<Span> = Vec::new();
-    for n in 0..READINGS {
-        let toks = nth_reading(sql, n);
+    // The log does not know the dialect of what it was handed, so every reading of both is tried: PostgreSQL's dollar
+    // quotes and E'' strings can hold a password that no MySQL reading sees as one string.
+    let all = [(Dialect::MySql, readings(Dialect::MySql)), (Dialect::Postgres, readings(Dialect::Postgres))];
+    for (d, n) in all.into_iter().flat_map(|(d, count)| (0..count).map(move |n| (d, n))) {
+        let toks = nth_reading(sql, d, n);
         // Executable comment marks are not tokens of the statement: `/*!80000 'pw' */` reads as the string itself.
         let code: Vec<&(Tok, Span)> = toks.iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment | Tok::ExecOpen | Tok::ExecClose)).collect();
         let text = |i: usize| code.get(i).map(|(_, r)| &sql[r.clone()]).unwrap_or("");
@@ -146,7 +160,7 @@ fn secret_ranges(sql: &str) -> Vec<Span> {
             // A string that holds a statement about passwords: PREPARE s FROM 'CREATE USER ... IDENTIFIED BY ...'.
             if code[i].0 == Tok::Str {
                 let lower = text(i).to_ascii_lowercase();
-                if lower.contains("identified") || lower.contains("password") {
+                if lower.contains("identified") || lower.contains("password") || has_uri_password(&lower) {
                     hits.push(code[i].1.clone());
                 }
                 continue;
@@ -229,7 +243,7 @@ pub fn log_sql(conn: u64, db: &str, sql: &str, ms: u128, err: Option<&str>) {
         text.push_str(" …");
     }
     // The verb fills the name column like a Mongo command name, so the filter and the columns work the same.
-    let name = super::sql::lex::tokens(&text).into_iter().find(|(t, _)| *t == super::sql::lex::Tok::Word).map_or(String::new(), |(_, r)| text[r].to_ascii_uppercase());
+    let name = super::sql::lex::tokens(&text, super::sql::Dialect::MySql).into_iter().find(|(t, _)| *t == super::sql::lex::Tok::Word).map_or(String::new(), |(_, r)| text[r].to_ascii_uppercase());
     let entry = LogEntry { conn, at: std::time::SystemTime::now(), db: db.into(), name, cmd: text, ms: Some(ms), err, req: 0 };
     let Ok(mut log) = LOG.lock() else { return };
     if log.len() >= LOG_MAX {
@@ -244,6 +258,36 @@ mod tests {
 
     fn r(s: &str) -> String {
         redact_sql(s).0
+    }
+
+    #[test]
+    fn postgres_role_passwords_are_redacted_in_every_literal_form() {
+        assert_eq!(r("CREATE ROLE a LOGIN PASSWORD 'pw'"), "CREATE ROLE a LOGIN PASSWORD '***'");
+        assert_eq!(r("create user a with encrypted password 'pw' valid until 'infinity'"), "create user a with encrypted password '***' valid until 'infinity'");
+        assert_eq!(r("ALTER ROLE a WITH PASSWORD E'p\\'w'"), "ALTER ROLE a WITH PASSWORD '***'");
+        assert_eq!(r("ALTER USER a PASSWORD $$p'w; x$$ CREATEDB"), "ALTER USER a PASSWORD '***' CREATEDB");
+        assert_eq!(r("ALTER ROLE a PASSWORD $tag$p$$w$tag$"), "ALTER ROLE a PASSWORD '***'");
+        // With standard_conforming_strings off the literal runs on, so the redaction covers the longer reading.
+        assert_eq!(r("ALTER ROLE a PASSWORD 'p\\' -- x\n; SELECT 1"), "ALTER ROLE a PASSWORD '***'");
+        assert_eq!(r("CREATE ROLE a PASSWORD NULL"), "CREATE ROLE a PASSWORD NULL");
+        assert_eq!(r("SELECT 1"), "SELECT 1");
+    }
+
+    #[test]
+    fn uri_passwords_are_redacted_in_any_string_literal() {
+        assert_eq!(r("CREATE SUBSCRIPTION s CONNECTION 'postgresql://rep:secret@h/db' PUBLICATION p"), "CREATE SUBSCRIPTION s CONNECTION '***' PUBLICATION p");
+        assert_eq!(r("SELECT dblink_connect('postgresql://u:secret@h/db')"), "SELECT dblink_connect('***')");
+        assert_eq!(r("SELECT dblink_connect($$postgres://u:secret@h:5432/db?sslmode=require$$)"), "SELECT dblink_connect('***')");
+        assert_eq!(r("CREATE SERVER x FOREIGN DATA WRAPPER w OPTIONS (url 'mysql://root:secret@h')"), "CREATE SERVER x FOREIGN DATA WRAPPER w OPTIONS (url '***')");
+        assert_eq!(r("CHANGE REPLICATION SOURCE TO SOURCE_HOST='h', SOURCE_PASSWORD='secret'"), "CHANGE REPLICATION SOURCE TO SOURCE_HOST='h', SOURCE_PASSWORD='***'");
+        assert_eq!(r("CHANGE MASTER TO MASTER_PASSWORD='secret'"), "CHANGE MASTER TO MASTER_PASSWORD='***'");
+        // libpq reads the password up to the `@`, so these characters are part of it.
+        for s in ["SELECT 'postgresql://u:p?w@h/db'", "SELECT 'postgresql://u:p#w@h/db'", "SELECT 'postgresql://u:p w@h/db'", "SELECT 'postgresql://u:it''s@h/db'"] {
+            assert_eq!(r(s), "SELECT '***'", "{s}");
+        }
+        // A URI without a password, or text that only has an @ later on, stays readable.
+        assert_eq!(r("SELECT 'postgresql://u@h/db'"), "SELECT 'postgresql://u@h/db'");
+        assert_eq!(r("SELECT 'https://example.com/a:b@c'"), "SELECT 'https://example.com/a:b@c'");
     }
 
     #[test]

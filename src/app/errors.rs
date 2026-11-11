@@ -845,7 +845,7 @@ impl App {
 
 /// "Documents · orders", where an error happened.
 fn place_of(v: View, sel: &Sel) -> String {
-    format!("{} · {}", view_name(v), if sel.coll.is_empty() { &sel.db } else { &sel.coll })
+    format!("{} · {}", view_name(v), if sel.coll.is_empty() { sel.db.clone() } else { sel.shown() })
 }
 
 fn view_name(v: View) -> &'static str {

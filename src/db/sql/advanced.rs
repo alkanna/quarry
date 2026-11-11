@@ -267,7 +267,7 @@ fn check_set(toks: &[(Tok, &str)], short: &str) -> Result<(), String> {
 /// executable comments), so what was checked is what any server runs; the worker then sends each statement on
 /// its own as a prepared statement, which the server parses as exactly one.
 pub fn init_statements(text: &str) -> Result<Vec<String>, String> {
-    let readings = lex::every_reading(text);
+    let readings = lex::every_reading(text, super::Dialect::MySql);
     if readings[0].iter().any(|(t, _)| *t == Tok::ExecOpen) {
         return Err("Init command: executable comments (/*! and /*M!) are not allowed".into());
     }
@@ -625,7 +625,7 @@ mod live {
         }
 
         fn one(&self, db: &Db, q: &str) -> String {
-            let crate::db::sql::Pool::My(p) = &db.pool;
+            let p = db.my_pool().unwrap();
             self.w.rt.block_on(async {
                 let r = sqlx::raw_sql(q).fetch_one(p).await.unwrap_or_else(|x| panic!("{q}: {x}"));
                 String::from_utf8_lossy(raw(&r, 0).unwrap_or_default()).into_owned()
@@ -652,7 +652,7 @@ mod live {
                         let hook = hook.clone();
                         Box::pin(async move { session(c, 30_000, &hook).await })
                     })
-                    .connect_with(db.opts.clone())
+                    .connect_with(db.opts.my().unwrap().clone())
                     .await
                     .unwrap()
             });
@@ -726,7 +726,7 @@ mod live {
         each(|c, var| {
             let adv = Advanced { init: "SET SESSION group_concat_max_len = 2048;\nSET @quarry_init = 7;".into(), ..Default::default() };
             let db = c.open(&adv).unwrap();
-            let crate::db::sql::Pool::My(p) = &db.pool;
+            let p = db.my_pool().unwrap();
             // Four connections held at once force the pool to open its whole size.
             let got = c.w.rt.block_on(async {
                 let mut held = Vec::new();
@@ -816,7 +816,7 @@ mod live {
             let base = c.open(&Advanced::default()).unwrap();
             let db = c.with_setup(&base, Setup::new(vec![], vec!["SET SESSION autocommit = 0".into()]));
             let n = c.w.rt.block_on(async {
-                let mut w = super::super::write::writer(&db, schema, false).await.unwrap();
+                let mut w = super::super::write::writer_conn(&db, schema, false).await.unwrap().into_my().unwrap();
                 let n = sqlx::query("INSERT INTO t VALUES (1)").execute(&mut w).await.unwrap().rows_affected();
                 let _ = w.close().await;
                 n
@@ -861,7 +861,7 @@ mod live {
     fn live_query_timeout_stops_select_on_mysql_and_everything_on_mariadb() {
         each(|c, var| {
             let db = c.open(&Advanced { query_secs: Some(1), ..Default::default() }).unwrap();
-            let crate::db::sql::Pool::My(p) = &db.pool;
+            let p = db.my_pool().unwrap();
             let time = |q: &str| {
                 let t = Instant::now();
                 let _ = c.w.rt.block_on(async { sqlx::raw_sql(q).execute(p).await });
@@ -882,11 +882,11 @@ mod live {
     fn live_idle_and_connect_timeouts_apply() {
         each(|c, var| {
             let db = c.open(&Advanced { idle_secs: Some(30), connect_secs: Some(5), ..Default::default() }).unwrap();
-            let crate::db::sql::Pool::My(p) = &db.pool;
+            let p = db.my_pool().unwrap();
             assert_eq!(p.options().get_idle_timeout(), Some(Duration::from_secs(30)), "{var}");
             assert_eq!(p.options().get_acquire_timeout(), Duration::from_secs(5), "{var}");
             let db = c.open(&Advanced::default()).unwrap();
-            let crate::db::sql::Pool::My(p) = &db.pool;
+            let p = db.my_pool().unwrap();
             assert_eq!(p.options().get_idle_timeout(), Some(Duration::from_secs(600)), "{var}");
         });
     }

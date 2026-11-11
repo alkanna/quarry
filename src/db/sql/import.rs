@@ -4,9 +4,10 @@
 //! MEMORY), where the rows written so far stay and the message says how many. Undo needs the keys of the rows
 //! that went in, so it is only recorded when they are certain.
 
+use super::se;
 use super::csv::{Mapping, Opts, Reader, Source, TableInfo};
 use super::value::{Kind, Param};
-use super::write::{action, bound, writer};
+use super::write::{action, bound, writer_conn};
 use super::{Col, Db, Dialect};
 use crate::db::{e, Msg, Res, UndoAction, Worker};
 use mongodb::bson::{Bson, Document};
@@ -175,7 +176,7 @@ pub async fn run(db: &Db, schema: &str, table: &str, plan: &ImportPlan, conn: u6
     let names: Vec<&str> = targets.iter().map(|(_, t)| plan.info.cols[*t].name.as_str()).collect();
     let d = db.dialect;
     let per = BATCH_ROWS.min(MAX_PLACEHOLDERS / names.len()).max(1);
-    let mut c = writer(db, schema, read_only).await?;
+    let mut c = writer_conn(db, schema, read_only).await?.into_my()?;
     if let Ok(r) = c.fetch_one("SELECT CONNECTION_ID()").await {
         id.store(super::worker::num_at(&r, 0).unwrap_or(0), Ordering::SeqCst);
     }
@@ -183,7 +184,7 @@ pub async fn run(db: &Db, schema: &str, table: &str, plan: &ImportPlan, conn: u6
     let timeout = d.session_timeout(0);
     let _ = c.execute(timeout.as_str()).await;
     // Counted on the pool: Cancel kills the import's own connection.
-    let super::Pool::My(pool) = &db.pool;
+    let pool = db.my_pool()?;
     let count_sql = format!("SELECT COUNT(*) FROM {}", d.qualified(schema, table));
     let trans = plan.info.transactional();
     let before: Option<i64> = if trans { None } else { sqlx::query_scalar(&count_sql).fetch_one(pool).await.ok() };
@@ -206,9 +207,9 @@ pub async fn run(db: &Db, schema: &str, table: &str, plan: &ImportPlan, conn: u6
 // The last flush resets the counters of a batch that no longer exists.
 #[allow(clippy::too_many_arguments, unused_assignments)]
 async fn import_on(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str, table: &str, plan: &ImportPlan, names: &[&str], per: usize, conn: u64, prog: &Progress, cancel: &AtomicBool) -> Res<Done> {
-    let mut tx = c.begin().await.map_err(e)?;
+    let mut tx = c.begin().await.map_err(se)?;
     let count_sql = format!("SELECT COUNT(*) FROM {}", d.qualified(schema, table));
-    let before: i64 = if plan.dup == Dup::Stop { 0 } else { sqlx::query_scalar(&count_sql).fetch_one(&mut *tx).await.map_err(e)? };
+    let before: i64 = if plan.dup == Dup::Stop { 0 } else { sqlx::query_scalar(&count_sql).fetch_one(&mut *tx).await.map_err(se)? };
     let mut keys = Keys::Off;
     let mut found: Vec<Document> = Vec::new();
     let mut why_not = None;
@@ -221,14 +222,14 @@ async fn import_on(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str, tabl
                     // Without NO_AUTO_VALUE_ON_ZERO a 0 in the auto-increment key is replaced by the next number,
                     // so recording it would make Undo delete a row 0 that was there before.
                     if given.iter().any(|(n, _)| plan.info.col(n).is_some_and(|c| c.auto_increment)) {
-                        let row = sqlx::query("SELECT @@SESSION.sql_mode").fetch_one(&mut *tx).await.map_err(e)?;
+                        let row = sqlx::query("SELECT @@SESSION.sql_mode").fetch_one(&mut *tx).await.map_err(se)?;
                         let mode = super::worker::raw(&row, 0).map(|b| String::from_utf8_lossy(b).to_ascii_uppercase()).unwrap_or_default();
                         zero_is_new = !mode.contains("NO_AUTO_VALUE_ON_ZERO");
                     }
                     Keys::Given(given)
                 } else {
                     // Another session with a bigger step (a Galera cluster) leaves gaps, so the step is read, not assumed.
-                    let row = sqlx::query("SELECT CAST(@@auto_increment_increment AS CHAR)").fetch_one(&mut *tx).await.map_err(e)?;
+                    let row = sqlx::query("SELECT CAST(@@auto_increment_increment AS CHAR)").fetch_one(&mut *tx).await.map_err(se)?;
                     let step: u64 = super::worker::num_at(&row, 0).unwrap_or(1);
                     Keys::Counted(plan.info.pk[0].clone(), step.max(1))
                 };
@@ -320,17 +321,17 @@ async fn import_on(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str, tabl
     let inserted = if plan.dup == Dup::Stop {
         rows
     } else {
-        let after: i64 = sqlx::query_scalar(&count_sql).fetch_one(&mut *tx).await.map_err(e)?;
+        let after: i64 = sqlx::query_scalar(&count_sql).fetch_one(&mut *tx).await.map_err(se)?;
         (after - before).max(0) as u64
     };
-    tx.commit().await.map_err(e)?;
+    tx.commit().await.map_err(se)?;
     prog.bytes.store(rd.bytes(), Ordering::Relaxed);
     let undo = match keys {
         Keys::Off => None,
         _ if found.is_empty() => None,
         _ => {
             let cols: Vec<Col> = plan.info.cols.iter().map(|c| Col { generated: c.generated, auto_increment: c.auto_increment, ..Col::plain(&c.name, &c.full_type, Kind::from_column_type(&c.full_type), c.nullable) }).collect();
-            Some(action(conn, schema, table, &cols, super::write::SqlUndo::Insert(found)))
+            Some(action(String::new(), conn, schema, table, &cols, super::write::SqlUndo::Insert(found)))
         }
     };
     Ok(Done { rows, inserted, undo, why_not })
@@ -604,7 +605,7 @@ mod tests {
                 let mut l = live(var).unwrap();
                 if nbe {
                     let mut db = l.with_session("SET SESSION sql_mode = CONCAT(@@sql_mode, ',NO_BACKSLASH_ESCAPES')");
-                    let super::super::Pool::My(p) = &db.pool;
+                    let p = db.my_pool().unwrap();
                     db.sql_mode = l.w.rt.block_on(async { sqlx::query_scalar::<_, String>("SELECT @@SESSION.sql_mode").fetch_one(p).await.unwrap() });
                     l.db = db;
                 }

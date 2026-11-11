@@ -13,7 +13,15 @@ pub(super) struct Attached {
     pub(super) name: String,
     /// Writes also need the connection itself to be unlocked, so this alone never allows one.
     pub(super) allow_writes: bool,
+    /// PostgreSQL only: the schema the script runs in (its search_path). `db` is then the database.
+    pub(super) schema: String,
+    /// PostgreSQL only: the tables of `schema`, listed when attaching and before a run. Not saved, since they go stale.
+    #[serde(skip)]
+    pub(super) tables: Vec<String>,
 }
+
+/// The schema a PostgreSQL script starts in when none was picked, as a new database has it.
+pub(super) const PG_SCHEMA: &str = "public";
 
 /// The state of the Attach dialog.
 #[derive(Default)]
@@ -21,6 +29,11 @@ pub(super) struct AttachForm {
     filter: String,
     conn: Option<u64>,
     db: String,
+    /// PostgreSQL only: the schema to attach, and the schemas of `db` once they are listed.
+    schema: String,
+    schemas: Vec<String>,
+    /// The (connection, database) whose schemas were asked for, so each is asked once.
+    asked: Option<(u64, String)>,
     name: String,
     /// The name was typed, so a new database no longer renames it.
     name_set: bool,
@@ -212,17 +225,17 @@ impl App {
     /// QUARRY_TEST_SQL=attach: the Attach dialog with that connection picked. Nothing here touches the Keychain or a server.
     pub(super) fn attach_demo(&mut self) {
         let colls = |v: &[&str]| Some(v.iter().map(|s| s.to_string()).collect::<Vec<_>>());
-        let mongo = |id: u64, name: &str, tag: &str, status: Status, dbs: Vec<(String, Option<Vec<String>>)>, version: &str| Conn { meta: ConnMeta { id, name: name.into(), tag: tag.into(), ..Default::default() }, client: None, sql: None, status, writable: false, dbs, masked_uri: "mongodb://app:****@travels.internal:27017".into(), tunnel: None, server: ServerInfo { version: version.into(), ..Default::default() } };
+        let mongo = |id: u64, name: &str, tag: &str, status: Status, dbs: Vec<(String, Option<Vec<String>>)>, version: &str| Conn { dbs, masked_uri: "mongodb://app:****@travels.internal:27017".into(), server: ServerInfo { version: version.into(), ..Default::default() }, ..Conn::new(ConnMeta { id, name: name.into(), tag: tag.into(), ..Default::default() }, status) };
         self.conns.insert(0, mongo(5, "travels", "Production", Status::Ready, vec![("admin".into(), colls(&["system.users"])), ("app".into(), colls(&["bookings", "trips", "users"]))], "8.0.4"));
         for (id, name, tag, product, version) in [(6, "shop-staging", "Staging", "MySQL", "8.0.36"), (7, "analytics", "Internal", "MariaDB", "11.4.2")] {
-            self.conns.push(Conn { meta: ConnMeta { id, name: name.into(), tag: tag.into(), engine: db::sql::Engine::MySql, ..Default::default() }, client: None, sql: None, status: Status::Idle, writable: false, dbs: Vec::new(), masked_uri: String::new(), tunnel: None, server: ServerInfo { version: version.into(), product: product.into(), ..Default::default() } });
+            self.conns.push(Conn { server: ServerInfo { version: version.into(), product: product.into(), ..Default::default() }, ..Conn::new(ConnMeta { id, name: name.into(), tag: tag.into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Idle) });
         }
         if std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("attach") {
             self.modal = Some(Modal::Attach(Box::new(AttachForm { conn: Some(5), db: "app".into(), name: "travels".into(), name_set: true, focused: true, ..Default::default() })));
             return;
         }
         let t = &mut self.tabs[0];
-        t.shell.attached = vec![Attached { conn: 5, db: "app".into(), name: "travels".into(), allow_writes: false }];
+        t.shell.attached = vec![Attached { conn: 5, db: "app".into(), name: "travels".into(), ..Default::default() }];
         t.shell.code = "// Paid orders this week, with the traveller tier stored in Mongo
 async function run() {
   const orders = await sql`
@@ -256,6 +269,14 @@ async function run() {
     pub(super) fn attach_load(&mut self, conn: u64, db: &str) {
         let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) else { return };
         if self.demo {
+            return;
+        }
+        if sql.dialect == db::sql::Dialect::Postgres {
+            // The schema is the attachment's own, so each PostgreSQL attachment of this tab on `db` asks for its tables.
+            let schemas: Vec<String> = self.t().map(|t| t.shell.attached.iter().filter(|a| a.conn == conn && a.db == db).map(|a| a.schema.clone()).collect()).unwrap_or_default();
+            for s in schemas {
+                self.worker.pg_shell_list(conn, sql.clone(), db.to_string(), if s.is_empty() { PG_SCHEMA.into() } else { s });
+            }
             return;
         }
         if self.sql_asked.insert((conn, db.to_string())) {
@@ -303,8 +324,9 @@ async function run() {
                 let ready = c.is_some_and(|c| c.status == Status::Ready);
                 let writable = a.allow_writes && c.is_some_and(|c| c.writable);
                 let note = if c.is_none() { Some(("deleted", ALERT())) } else if !ready { Some(("not connected", WARNING())) } else if !writable { Some(("read-only", PRIMARY())) } else { None };
-                let what = c.map_or("a connection that no longer exists".to_string(), |c| format!("{}, database {}", c.meta.name, a.db));
-                Pill { mark, color, label: format!("{}  ·  {}", a.name, a.db), note, own: false, hint: format!("{} is {what}", a.name) }
+                let place = if a.schema.is_empty() { a.db.clone() } else { format!("{}.{}", a.db, a.schema) };
+                let what = c.map_or("a connection that no longer exists".to_string(), |c| format!("{}, database {}", c.meta.name, place));
+                Pill { mark, color, label: format!("{}  ·  {}", a.name, place), note, own: false, hint: format!("{} is {what}", a.name) }
             })
             .collect()
     }
@@ -318,7 +340,14 @@ async function run() {
             // Attached connections are read-only unless the tab allows writes and the connection itself is unlocked.
             let read_only = !(a.allow_writes && c.writable);
             if let Some(db) = c.sql.clone() {
-                sql.push(serde_json::json!({ "name": a.name, "db": a.db, "tables": list }));
+                let pg = db.dialect == db::sql::Dialect::Postgres;
+                // A PostgreSQL connection belongs to one database, so the database picks the pool and the schema is the search_path.
+                if pg {
+                    sql.push(serde_json::json!({ "name": a.name, "db": a.db, "tables": a.tables, "dialect": "postgres" }));
+                    relays.push((a.name.clone(), db::SqlRelay { db: db.at(&a.db), schema: if a.schema.is_empty() { PG_SCHEMA.into() } else { a.schema.clone() }, read_only, conn_id: Default::default() }));
+                    continue;
+                }
+                sql.push(serde_json::json!({ "name": a.name, "db": a.db, "tables": list, "dialect": "mysql" }));
                 relays.push((a.name.clone(), db::SqlRelay { db, schema: a.db.clone(), read_only, conn_id: Default::default() }));
             } else if c.client.is_some() {
                 let uri = stored_uri(a.conn).map_err(uri_err)?;
@@ -339,8 +368,12 @@ async function run() {
             .iter()
             .filter_map(|a| {
                 let c = self.conn(a.conn)?;
-                let names: Vec<String> = c.dbs.iter().find(|d| d.0 == a.db).and_then(|d| d.1.clone()).unwrap_or_default();
-                let typed = if c.meta.engine.is_sql() { AttTyped::Sql(self.sql_schema.get(&(a.conn, a.db.clone())).cloned()) } else { AttTyped::Mongo(self.fields_of(a.conn, &a.db)) };
+                let pg = c.meta.engine == db::sql::Engine::Postgres;
+                let names: Vec<String> = if pg { a.tables.clone() } else { c.dbs.iter().find(|d| d.0 == a.db).and_then(|d| d.1.clone()).unwrap_or_default() };
+                // Columns of a PostgreSQL attachment are not read yet, so its tables are typed loosely.
+                let typed = if pg {
+                    AttTyped::Sql(None)
+                } else if c.meta.engine.is_sql() { AttTyped::Sql(self.sql_schema.get(&(a.conn, a.db.clone())).cloned()) } else { AttTyped::Mongo(self.fields_of(a.conn, &a.db)) };
                 Some(AttachedInfo { name: a.name.clone(), names, typed })
             })
             .collect()
@@ -395,6 +428,16 @@ async function run() {
             f.db = own.or_else(|| dbs.iter().find(|d| !system(d)).cloned()).or_else(|| dbs.first().cloned()).unwrap_or_default();
             f.name_set = false;
         }
+        let pg = chosen.is_some_and(|c| c.meta.engine == db::sql::Engine::Postgres);
+        // The schemas of a PostgreSQL database are listed once per picked database; they arrive in `shell_pg_listed`.
+        if pg && ready && !f.db.is_empty() && f.asked != f.conn.map(|c| (c, f.db.clone())) {
+            f.asked = f.conn.map(|c| (c, f.db.clone()));
+            f.schemas.clear();
+            f.schema.clear();
+            if let (Some(conn), Some(sql)) = (f.conn, chosen.and_then(|c| c.sql.clone())) {
+                self.worker.pg_shell_list(conn, sql, f.db.clone(), String::new());
+            }
+        }
         if !f.name_set {
             f.name = if f.db.is_empty() { String::new() } else { default_name(&f.db) };
         }
@@ -428,6 +471,25 @@ async function run() {
                 }
             }
             ui.end_row();
+            if pg && ready {
+                form_label(ui, "Schema");
+                if f.schemas.is_empty() {
+                    ui.horizontal(|ui| {
+                        spin(ui);
+                        ui.label(RichText::new("Listing schemas").color(MUTED()));
+                    });
+                } else {
+                    egui::ComboBox::from_id_salt("attach-schema").selected_text(&f.schema).width(220.0).show_ui(ui, |ui| {
+                        menu_look(ui);
+                        for s in &f.schemas {
+                            if ui.selectable_label(f.schema == *s, s).clicked() {
+                                f.schema = s.clone();
+                            }
+                        }
+                    });
+                }
+                ui.end_row();
+            }
             form_label(ui, "Name in scripts");
             ui.horizontal(|ui| {
                 let edit = egui::TextEdit::singleline(&mut f.name).font(egui::TextStyle::Monospace).desired_width(220.0).margin(egui::Margin::symmetric(8, 4));
@@ -449,7 +511,7 @@ async function run() {
             ui.end_row();
         });
         ui.add_space(4.0);
-        let can = ready && !f.db.is_empty() && problem.is_none() && !f.name.is_empty();
+        let can = ready && !f.db.is_empty() && problem.is_none() && !f.name.is_empty() && (!pg || !f.schema.is_empty());
         let mut attach = false;
         dialog_actions(ui, |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -461,10 +523,37 @@ async function run() {
         });
         if attach {
             if let (Some(conn), Some(t)) = (f.conn, self.tm()) {
-                t.shell.attached.push(Attached { conn, db: f.db.clone(), name: f.name.clone(), allow_writes: f.writes });
+                t.shell.attached.push(Attached { conn, db: f.db.clone(), name: f.name.clone(), allow_writes: f.writes, schema: if pg { f.schema.clone() } else { String::new() }, tables: Vec::new() });
                 self.attach_load(conn, &f.db);
             }
             *keep = false;
+        }
+    }
+
+    /// The answer of `pg_shell_list`: the schemas fill the open Attach dialog, and the tables go to the attachments of every
+    /// tab that match, so a script run after this has its table helpers.
+    pub(super) fn shell_pg_listed(&mut self, d: Document) {
+        let (conn, database, schema) = (d.get_i64("conn").unwrap_or_default() as u64, d.get_str("database").unwrap_or_default().to_string(), d.get_str("schema").unwrap_or_default().to_string());
+        if let Ok(e) = d.get_str("error") {
+            return self.err_quiet(e.to_string(), Some(conn), None, format!("List schemas · {database}"));
+        }
+        let names = |k: &str| d.get_array(k).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect::<Vec<_>>()).unwrap_or_default();
+        if let Some(Modal::Attach(f)) = &mut self.modal {
+            if f.conn == Some(conn) && f.db == database && schema.is_empty() {
+                f.schemas = names("schemas");
+                // Where a new database starts, else the first one a person would look at.
+                if !f.schemas.contains(&f.schema) {
+                    f.schema = if f.schemas.iter().any(|s| s == PG_SCHEMA) { PG_SCHEMA.to_string() } else { f.schemas.first().cloned().unwrap_or_default() };
+                }
+            }
+        }
+        if !schema.is_empty() {
+            let tables = names("tables");
+            for t in &mut self.tabs {
+                for a in t.shell.attached.iter_mut().filter(|a| a.conn == conn && a.db == database && (a.schema == schema || a.schema.is_empty() && schema == PG_SCHEMA)) {
+                    a.tables = tables.clone();
+                }
+            }
         }
     }
 }

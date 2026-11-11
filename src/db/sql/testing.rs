@@ -79,9 +79,103 @@ pub fn with_session(w: &Worker, db: &Db, set: &str) -> Db {
                 let set = set.clone();
                 Box::pin(async move { sqlx::Executor::execute(c, set.as_str()).await.map(|_| ()) })
             })
-            .connect_with(db.opts.clone())
+            .connect_with(db.opts.my().unwrap().clone())
             .await
             .unwrap()
     });
     Db { pool: super::Pool::My(pool), ..db.clone() }
+}
+
+/// Postgres 18 and 13, the two servers the Postgres code is tested on. A test skips a server whose variable is unset.
+pub const PG_ENVS: [&str; 2] = ["QUARRY_TEST_POSTGRES", "QUARRY_TEST_POSTGRES13"];
+
+pub struct LivePg {
+    pub w: Worker,
+    pub rx: std::sync::mpsc::Receiver<Msg>,
+    pub db: Db,
+    /// The databases the login can connect to, as the connect answer listed them.
+    pub dbs: Vec<String>,
+    /// A plain pool of the URI's own database, outside the session guard, for fixtures.
+    pub pool: sqlx::PgPool,
+    pub uri: String,
+}
+
+pub fn live_pg(var: &str) -> Option<LivePg> {
+    let uri = std::env::var(var).ok()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let w = Worker::new(tx, eframe::egui::Context::default());
+    let pool = w.rt.block_on(async { sqlx::PgPool::connect(&uri).await.unwrap() });
+    w.sql_connect(1, uri.clone(), std::time::Duration::from_secs(30), crate::db::Net::default());
+    let Msg::SqlConnected { res: Ok((db, dbs, _)), .. } = rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap() else { panic!("connect") };
+    Some(LivePg { w, rx, db, dbs, pool, uri })
+}
+
+pub fn every_pg(f: impl Fn(&LivePg, &str)) {
+    for var in PG_ENVS {
+        if let Some(l) = live_pg(var) {
+            f(&l, var);
+        }
+    }
+}
+
+impl LivePg {
+    /// The first cell of the first row, as text.
+    pub fn one(&self, s: &str) -> String {
+        self.w.rt.block_on(async {
+            let rows = sqlx::raw_sql(s).fetch_all(&self.pool).await.unwrap_or_else(|x| panic!("{s}: {x}"));
+            super::worker::text_at(&rows[0], 0).unwrap_or_default()
+        })
+    }
+
+    /// A plain pool of the shared `quarry_test` database, outside the session guard, for fixtures. Call `quarry_test`
+    /// first so the database exists.
+    pub fn fixture_pool(&self) -> sqlx::PgPool {
+        use std::str::FromStr;
+        let o = sqlx::postgres::PgConnectOptions::from_str(&self.uri).unwrap().database("quarry_test");
+        self.w.rt.block_on(async { sqlx::postgres::PgPoolOptions::new().max_connections(2).connect_with(o).await.unwrap() })
+    }
+
+    /// Runs statements (several are fine) in `quarry_test` as the fixture login.
+    pub fn qsql(&self, pool: &sqlx::PgPool, s: &str) {
+        self.w.rt.block_on(async { sqlx::raw_sql(s).execute(pool).await.unwrap_or_else(|x| panic!("{s}: {x}")) });
+    }
+
+    /// The first cell of the first row of a query in `quarry_test`, as text.
+    pub fn qone(&self, pool: &sqlx::PgPool, s: &str) -> String {
+        self.w.rt.block_on(async {
+            let rows = sqlx::raw_sql(s).fetch_all(pool).await.unwrap_or_else(|x| panic!("{s}: {x}"));
+            super::worker::text_at(&rows[0], 0).unwrap_or_default()
+        })
+    }
+
+    /// The next message the worker sends.
+    pub fn next(&self) -> Msg {
+        self.rx.recv_timeout(std::time::Duration::from_secs(20)).expect("worker answer")
+    }
+
+    /// The shared database of the live tests, made on first use. Tests of one run take turns making it, because
+    /// two CREATE DATABASE at once fail on template1 being in use.
+    pub fn quarry_test(&self) -> Db {
+        static MAKE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _turn = MAKE.lock().unwrap_or_else(|p| p.into_inner());
+        if self.one("SELECT count(*)::text FROM pg_database WHERE datname = 'quarry_test'") == "0" {
+            let made = self.w.rt.block_on(async { sqlx::raw_sql("CREATE DATABASE quarry_test").execute(&self.pool).await });
+            if let Err(x) = made {
+                let code = x.as_database_error().and_then(|d| d.code().map(|c| c.to_string()));
+                assert!(matches!(code.as_deref(), Some("42P04" | "23505")), "{x}");
+            }
+        }
+        self.db.at("quarry_test")
+    }
+}
+
+/// A real PgBouncer in transaction mode with `max_prepared_statements=0` in front of postgres:18, named by
+/// QUARRY_TEST_PGBOUNCER. It refuses the startup options, so the connection runs in Quarry's pooler fallback.
+pub const PGBOUNCER_ENV: &str = "QUARRY_TEST_PGBOUNCER";
+
+/// `live_pg` for the PgBouncer, which checks that the connection really took the fallback path.
+pub fn live_pgbouncer() -> Option<LivePg> {
+    let l = live_pg(PGBOUNCER_ENV)?;
+    assert!(l.db.pooler(), "the PgBouncer should have refused the startup options");
+    Some(l)
 }

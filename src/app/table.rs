@@ -2,6 +2,36 @@
 
 use super::*;
 
+/// SQL cell work found while the grid was drawn, done by `results` once the page is back in the tab.
+#[derive(Default)]
+pub(super) struct SqlAfter {
+    drill: Option<usize>,
+    edit: Option<(usize, String)>,
+    finish: bool,
+    acts: Vec<(usize, String, CellAct)>,
+    fk: Option<(db::sql::structure::ForeignKey, Document)>,
+}
+
+impl App {
+    /// In the order the grid used to do it: drill into a group, open, finish, the cell menu, then a link click, which stages the edit its
+    /// click finished before it moves to the other row.
+    pub(super) fn sql_after(&mut self, ctx: &egui::Context, a: SqlAfter) {
+        if let Some(i) = a.drill {
+            self.sql_drill(i);
+        }
+        if let Some((i, c)) = a.edit {
+            self.sql_open_cell(i, c);
+        }
+        if a.finish {
+            self.sql_cell_finish();
+            self.sql_cell_acts(ctx, a.acts);
+        }
+        if let Some((fk, d)) = a.fk {
+            self.open_fk_row(&fk, &d);
+        }
+    }
+}
+
 /// The rows a results table draws: result documents, or the Documents view's rows kept as BSON bytes.
 #[derive(Clone, Copy)]
 pub(super) enum Rows<'a> {
@@ -391,7 +421,9 @@ impl App {
         self.save_prefs();
     }
 
-    pub(super) fn doc_table(&mut self, ui: &mut egui::Ui, agg: bool, docs: Rows, fields: &[String], base: u64) {
+    /// Draws the rows. SQL cell work found on the way comes back in `SqlAfter`, because the page is out of the tab
+    /// while it is drawn (see `results`) and that work looks rows up in the tab.
+    pub(super) fn doc_table(&mut self, ui: &mut egui::Ui, agg: bool, docs: Rows, fields: &[String], base: u64) -> SqlAfter {
         let key = self.col_key(agg);
         let prefs = self.prefs.cols.get(&key).cloned().unwrap_or_default();
         let cols = visible_cols(Some(&prefs), fields, self.default_cols());
@@ -450,10 +482,13 @@ impl App {
         let sql_sort = self.t().filter(|t| t.sql.is_some()).map(|t| t.sort_txt.clone());
         let sql = sql_sort.is_some();
         let group_cols: Vec<String> = self.t().and_then(|t| t.sql.as_ref()).filter(|s| sql && s.matched.is_some()).map(|s| super::sql_bar::group_names(s)).unwrap_or_default();
+        // A Shell result shows the same tab but is not the table's rows: its indexes and keys mean nothing to the editor.
+        let sql_rows = sql && !agg;
         let sql_grouped = sql && self.t().and_then(|t| t.sql.as_ref()).is_some_and(|s| s.matched.is_some());
+        let sql_dialect = self.sql_dialect();
         let dir_of = |c: &str| match &sql_sort {
             Some(s) => {
-                let q = db::sql::Dialect::MySql.quote_ident(c);
+                let q = sql_dialect.quote_ident(c);
                 if *s == format!("{q} ASC") { Some(1) } else if *s == format!("{q} DESC") { Some(-1) } else { None }
             }
             None => sort.as_ref().and_then(|s| s.get(c)).and_then(|v| match v {
@@ -471,13 +506,13 @@ impl App {
         let sql_why: Vec<Option<String>> = cols
             .iter()
             .map(|c| {
-                if !sql {
+                if !sql_rows {
                     return None;
                 }
                 self.sql_edit_block().or_else(|| self.sql_col_block(c)).map(String::from).or_else(|| locked.then(|| "Read-only connection. Double-click to unlock writes and edit.".to_string()))
             })
             .collect();
-        let sql_edit_ok: Vec<bool> = cols.iter().map(|c| sql && self.sql_edit_block().is_none() && self.sql_col_block(c).is_none()).collect();
+        let sql_edit_ok: Vec<bool> = cols.iter().map(|c| sql_rows && self.sql_edit_block().is_none() && self.sql_col_block(c).is_none()).collect();
         let sql_nullable: Vec<bool> = cols.iter().map(|c| self.t().and_then(|t| t.sql.as_ref()).and_then(|s| s.cols.iter().find(|k| &k.name == c)).is_some_and(|k| k.nullable)).collect();
         let mut sql_acts: Vec<(usize, String, CellAct)> = Vec::new();
         // A column that belongs to a foreign key gets a link that opens the row it points to.
@@ -629,7 +664,7 @@ impl App {
                                 ui.painter().rect_filled(cell, 0, tint(WARNING(), 34));
                                 ui.painter().rect_filled(egui::Rect::from_min_size(cell.min, egui::vec2(2.0, cell.height())), 0, WARNING());
                             }
-                            if sql && self.sql_cell.as_ref().is_some_and(|e| e.id == docs.id(i) && e.col == *c) {
+                            if sql_rows && self.sql_cell.as_ref().is_some_and(|e| e.is_at(docs.id(i), c)) {
                                 self.sql_cell_editor(ui, cell);
                                 x += w;
                                 continue;
@@ -781,21 +816,13 @@ impl App {
             let Some(d) = self.shown_row(docs, i, agg).or_else(|| docs.owned(i)) else { continue };
             self.handle_acts(&d, acts);
         }
-        if let Some(i) = drill {
-            self.sql_drill(i);
-        }
-        let fk_row = fk_open.and_then(|(i, k)| self.shown_row(docs, i, agg).or_else(|| docs.owned(i)).map(|d| (k, d)));
-        if let (Some((i, c)), true) = (&edit_cell, sql) {
-            self.sql_open_cell(*i, c.clone());
-        }
-        if sql {
-            self.sql_cell_finish();
-            self.sql_cell_acts(ui.ctx(), sql_acts);
-        }
-        // After the cell editor finished on this tab: the link click that took its focus stages its edit here first.
-        if let Some((k, d)) = fk_row {
-            self.open_fk_row(&fks[k], &d);
-        }
+        let after = SqlAfter {
+            drill,
+            edit: edit_cell.clone().filter(|_| sql_rows),
+            finish: sql,
+            acts: sql_acts,
+            fk: fk_open.and_then(|(i, k)| self.shown_row(docs, i, agg).or_else(|| docs.owned(i)).map(|d| (fks[k].clone(), d))),
+        };
         if let (Some((i, c)), false) = (edit_cell, agg || sql) {
             self.select(agg, i, false);
             let path: Vec<String> = c.split('.').map(String::from).collect();
@@ -806,6 +833,7 @@ impl App {
                 None => self.warn(format!("This document has no field {c}. Use + Add field.")),
             }
         }
+        after
     }
 
     pub(super) fn doc_list(&mut self, ui: &mut egui::Ui, agg: bool, docs: Rows) {
