@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.35.0](https://github.com/alkanna/quarry/compare/v0.34.0...v0.35.0) (2026-11-11)
+
+
+### Features
+
+* PostgreSQL v2 (structure, keys, triggers, import, dump, create and drop) ([#171](https://github.com/alkanna/quarry/issues/171)) ([9e10ac1](https://github.com/alkanna/quarry/commit/9e10ac1ca9d4eda7fb460e62dbecb59b2f3b83e9))
+
 ## [0.34.0](https://github.com/alkanna/quarry/compare/v0.33.0...v0.34.0) (2026-11-11)
 
 
