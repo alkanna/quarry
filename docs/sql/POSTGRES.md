@@ -180,6 +180,13 @@ Step 8 waits for the user's pick.
   # the same with postgres:18 on 55418
   QUARRY_TEST_POSTGRES13='postgres://postgres:quarry@127.0.0.1:55413/postgres' QUARRY_TEST_POSTGRES='postgres://postgres:quarry@127.0.0.1:55418/postgres' cargo test
   ```
+- Pooler mode against a real PgBouncer in transaction mode with `max_prepared_statements=0` (`QUARRY_TEST_PGBOUNCER`, also in CI):
+  ```sh
+  docker network create pgb
+  docker run -d --name pgb-pg --network pgb -e POSTGRES_PASSWORD=quarry postgres:18
+  docker run -d --name pgbouncer --network pgb -p 6432:5432 -e DB_HOST=pgb-pg -e DB_USER=postgres -e DB_PASSWORD=quarry -e AUTH_TYPE=scram-sha-256 -e POOL_MODE=transaction -e MAX_PREPARED_STATEMENTS=0 -e IGNORE_STARTUP_PARAMETERS=extra_float_digits -e DEFAULT_POOL_SIZE=8 -e MAX_CLIENT_CONN=200 edoburu/pgbouncer
+  QUARRY_TEST_PGBOUNCER='postgres://postgres:quarry@127.0.0.1:6432/postgres' cargo test
+  ```
 - Read-only guard: a test per refused statement and function in every spelling, and a live test that `set_config('default_transaction_read_only','off',false)` through Query leaves the next pooled statement read-only.
 - CI: mysql:8.4, mariadb:11.4, postgres:13 and postgres:18 containers with wait loops in the ubuntu-22.04 job next to mongo (runs only under the `ci` label).
 - UI: `QUARRY_TEST_PG=<view>` screenshots compared with the FigCraft frames in both themes.
