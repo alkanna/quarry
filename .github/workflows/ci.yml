@@ -69,8 +69,14 @@ jobs:
           until docker exec pgb-pg pg_isready -U postgres -q; do sleep 1; done
           docker run -d --name pgbouncer --network pgb -p 6432:5432 -e DB_HOST=pgb-pg -e DB_USER=postgres -e DB_PASSWORD=quarry -e AUTH_TYPE=scram-sha-256 -e POOL_MODE=transaction -e MAX_PREPARED_STATEMENTS=0 -e IGNORE_STARTUP_PARAMETERS=extra_float_digits -e DEFAULT_POOL_SIZE=8 -e MAX_CLIENT_CONN=200 edoburu/pgbouncer
           until docker run --rm --network pgb -e PGPASSWORD=quarry postgres:18 psql -h pgbouncer -U postgres -At -c 'select 1' >/dev/null 2>&1; do sleep 1; done
+      # The tests run under line coverage here, the one job with every live server, so the report counts the live and UI
+      # tests too. The summary goes on the run page and the HTML report is attached to the run.
+      - uses: taiki-e/install-action@cargo-llvm-cov
+        if: matrix.os == 'ubuntu-22.04'
       - if: matrix.os == 'ubuntu-22.04'
-        run: cargo test --locked
+        run: rustup component add llvm-tools-preview
+      - if: matrix.os == 'ubuntu-22.04'
+        run: cargo llvm-cov --locked --no-report
         env:
           QUARRY_TEST_MONGO: mongodb://localhost:27017/?directConnection=true
           QUARRY_TEST_MONGO_RS: mongodb://localhost:27017/?directConnection=true
@@ -79,5 +85,15 @@ jobs:
           QUARRY_TEST_POSTGRES: postgres://postgres:quarry@127.0.0.1:5432/postgres
           QUARRY_TEST_POSTGRES13: postgres://postgres:quarry@127.0.0.1:5433/postgres
           QUARRY_TEST_PGBOUNCER: postgres://postgres:quarry@127.0.0.1:6432/postgres
+      - name: Coverage report
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          { echo '## Line coverage'; echo '```'; cargo llvm-cov report; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          cargo llvm-cov report --html
+      - uses: actions/upload-artifact@v4
+        if: matrix.os == 'ubuntu-22.04'
+        with:
+          name: coverage-html
+          path: target/llvm-cov/html
       - if: matrix.os != 'ubuntu-22.04'
         run: cargo check --locked --all-targets

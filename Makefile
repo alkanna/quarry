@@ -31,6 +31,7 @@ help:
 	@echo "  make test-live               every test against the Docker servers (starts them)"
 	@echo "  make test-ui                 the headless UI tests against the Docker servers"
 	@echo "  make test-one T=<name>       tests matching a name, against the Docker servers"
+	@echo "  make coverage                every test against the Docker servers under line coverage, HTML report opened"
 	@echo "  make servers-up | servers-down | servers-status"
 	@echo "Build"
 	@echo "  make build                   release binary"
@@ -58,6 +59,12 @@ test-ui: servers-up
 
 test-one: servers-up
 	$(LIVE) cargo test $(T)
+
+# Needs cargo-llvm-cov (cargo install cargo-llvm-cov) and rustup's llvm-tools-preview component.
+coverage: servers-up
+	$(LIVE) cargo llvm-cov --no-report
+	cargo llvm-cov report
+	cargo llvm-cov report --open
 
 demo:
 	QUARRY_DEMO=1 cargo run --release
@@ -107,4 +114,4 @@ servers-status:
 release-mac:
 	QUARRY_SIGN_ID=167E682A9DE81BC21DED6018673F23E6EA9DB831 QUARRY_NOTARY_ARGS="--keychain-profile quarry" ./bundle.sh
 
-.PHONY: help run build check test test-live test-ui test-one demo demo-sql demo-pg screenshot bench bundle servers-up servers-down servers-status release-mac
+.PHONY: help run build check test test-live test-ui test-one coverage demo demo-sql demo-pg screenshot bench bundle servers-up servers-down servers-status release-mac
