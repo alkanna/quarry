@@ -57,6 +57,12 @@ pub struct Advanced {
     pub connect_secs: Option<u32>,
     pub query_secs: Option<u32>,
     pub idle_secs: Option<u32>,
+    /// PostgreSQL only: the rows of the Advanced tab as (name, value), names from `pg_advanced::ALLOWED`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pg_settings: Vec<(String, String)>,
+    /// PostgreSQL only: the saved search_path list. The schema picked in the sidebar goes in front of it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub search_path: Vec<String>,
 }
 
 /// What the Test button learns beyond "it connected".
@@ -66,6 +72,10 @@ pub struct TestInfo {
     pub sql_mode: String,
     /// (charset, collation) of the UTF-8 charsets.
     pub collations: Vec<(String, String)>,
+    /// PostgreSQL: the schemas of the default database, for the search_path list to offer.
+    pub schemas: Vec<String>,
+    /// PostgreSQL: (setting, the server's refusal) of each row the server did not accept.
+    pub setting_errors: Vec<(String, String)>,
 }
 
 fn word(s: &str, extra: &str) -> bool {
@@ -108,6 +118,14 @@ pub fn parse_flags(text: &str) -> Result<Vec<String>, String> {
         }
     }
     Ok(out)
+}
+
+/// This computer's IANA zone name such as Europe/Paris, which is what PostgreSQL takes for "System": an offset would
+/// freeze today's daylight saving state.
+pub fn system_zone_name() -> Option<String> {
+    // Read once: the form asks on every frame, and the platform call reads files or system settings.
+    static ZONE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    ZONE.get_or_init(|| iana_time_zone::get_timezone().ok()).clone()
 }
 
 /// Seconds as "+HH:MM", the form `SET time_zone` takes for an offset.

@@ -69,7 +69,7 @@ fn tls_tab(ui: &mut egui::Ui, f: &mut ConnForm) {
 }
 
 /// A timeout box: seconds, empty for the default, with the unit inside the box's right edge.
-fn secs_field(ui: &mut egui::Ui, text: &mut String, hint: &str) {
+pub(super) fn secs_field(ui: &mut egui::Ui, text: &mut String, hint: &str) {
     ui.add(egui::TextEdit::singleline(text).hint_text(hint).desired_width(58.0).margin(FIELD_MARGIN));
     ui.label(RichText::new("s").size(TXT_SMALL).color(FAINT()));
 }
@@ -286,7 +286,7 @@ fn paste_seed(ctx: &egui::Context, f: &mut ConnForm) {
 }
 
 /// A line of small text led by a dot: a plain one for a result, or with an "i" for a notice.
-fn note_row(ui: &mut egui::Ui, dot: Color32, info: bool, text: &str) {
+pub(super) fn note_row(ui: &mut egui::Ui, dot: Color32, info: bool, text: &str) {
     ui.horizontal_top(|ui| {
         if info {
             let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
@@ -578,6 +578,7 @@ impl App {
                     ConnTab::Ssh => ssh_tab(ui, f),
                     ConnTab::Proxy => proxy_tab(ui, f),
                     ConnTab::Tls => tls_tab(ui, f),
+                    ConnTab::Advanced if f.engine == db::sql::Engine::Postgres => super::conn_pg_advanced::pg_advanced_tab(ui, f, default_s),
                     ConnTab::Advanced if f.engine.supports(db::sql::Feature::AdvancedTab) => advanced_tab(ui, f, default_s),
                     ConnTab::Advanced => standard_tab(ui, f),
                 });
@@ -609,8 +610,7 @@ impl App {
             }
             None => {}
         }
-        // The Advanced tab is hidden for PostgreSQL, so what it holds must not block Save or reach the connection.
-        let adv = if f.engine.supports(db::sql::Feature::AdvancedTab) { f.advanced() } else { Ok(Default::default()) };
+        let adv = f.advanced();
         if let Err(m) = &adv {
             ui.add(egui::Label::new(RichText::new(m).color(ALERT())).wrap());
         }

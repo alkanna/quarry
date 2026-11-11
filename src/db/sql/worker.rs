@@ -596,12 +596,16 @@ impl Worker {
         self.spawn(async move {
             let start = Instant::now();
             let mut info = None;
-            let res = open_full(&uri, timeout, &net, &adv, true).await.map(|(db, _, t, ti)| {
+            let res = open_full(&uri, timeout, &net, &adv, true).await.and_then(|(db, _, t, ti)| {
+                let refused = ti.setting_errors.len();
                 info = Some(ti);
+                if refused > 0 {
+                    return Err(format!("Connected, but the server refused {refused} {}. See the marked rows on the Advanced tab.", if refused == 1 { "setting" } else { "settings" }));
+                }
                 let via = t.as_ref().map(|t| format!(" through SSH (host key {})", t.fingerprint)).unwrap_or_default();
                 // Over a tunnel the certificate cannot match 127.0.0.1, so `open` checks the CA only.
                 let note = if t.is_some() && Addr::parse(&uri).is_some_and(|a| a.ssl_mode == SslMode::VerifyIdentity) { " (TLS verified against the CA; the host name is the tunnel's)" } else { "" };
-                format!("Connected{via} to {} in {} ms{note}", db.label(), start.elapsed().as_millis())
+                Ok(format!("Connected{via} to {} in {} ms{note}", db.label(), start.elapsed().as_millis()))
             });
             Msg::Tested { req, res, info }
         });

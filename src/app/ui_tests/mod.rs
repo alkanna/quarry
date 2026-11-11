@@ -5,6 +5,7 @@
 //! Widgets are found by their accessible names (`Response::widget_info`): "{col} row {n}" for a grid
 //! cell, "Select row {n}" for its checkbox, the column name for a header, the text of a sidebar row.
 
+mod conn_advanced;
 mod mongo_edit;
 mod sidebar;
 mod sql_dump;
@@ -84,10 +85,19 @@ impl UiApp {
     /// is drawn, and egui drops a pointer click there, so a click on a far item of a picker would do nothing.
     fn click_pick(&mut self, label: &str, pick: Pick) {
         self.show(label);
-        self.node(label, pick).scroll_to_me();
         // The scroll area takes the offset on one frame and lays the items out at it on the next, and the node's rect is read from
-        // the frame before the click.
-        self.h.run_steps(3);
+        // the frame before the click. A form that has just opened lays out its content over several frames and a first scroll can
+        // land short, so it scrolls again until the item stops moving.
+        let mut at = self.node(label, pick).rect();
+        for _ in 0..5 {
+            self.node(label, pick).scroll_to_me();
+            self.h.run_steps(3);
+            let now = self.node(label, pick).rect();
+            if now == at {
+                break;
+            }
+            at = now;
+        }
         self.node(label, pick).click();
         self.settle();
     }

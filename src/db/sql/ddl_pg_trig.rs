@@ -450,7 +450,7 @@ struct Unit<'a> {
 /// slip in between.
 async fn run(db: &Db, schema: &str, table: &str, u: &Unit<'_>, read_only: bool) -> Result<Seen, Fail> {
     let mut conn = write::writer_conn(db, schema, read_only).await.map_err(Fail::Run)?;
-    let mut tx = conn.begin_write().await.map_err(|e| Fail::Run(se(e)))?;
+    let mut tx = conn.begin_write(db).await.map_err(|e| Fail::Run(se(e)))?;
     match locked(&mut tx, db, schema, table, u).await {
         // The connection can drop after the server committed, so a failed COMMIT does not say that nothing changed.
         Ok(after) => tx.commit().await.map(|_| after).map_err(|e| Fail::Unknown(format!("{}. The server did not confirm the commit, so the change may or may not have been applied. The structure is being reloaded: check it before running the change again.", se(e)))),
@@ -481,7 +481,7 @@ async fn locked(tx: &mut Tx<'_>, db: &Db, schema: &str, table: &str, u: &Unit<'_
     }
     // The editor read the catalogs under this path, and the statements resolve every name under it, so what the server prints
     // for a function outside the schema is the same text now and when it is replayed.
-    exec(tx, db, schema, &format!("SET LOCAL search_path = {}", q(schema))).await.map_err(fail)?;
+    exec(tx, db, schema, &db.pg_set_path(schema)).await.map_err(fail)?;
     // A role or a database can turn the body check off, and the check is what stops a body that does not parse.
     exec(tx, db, schema, "SET LOCAL check_function_bodies = on").await.map_err(fail)?;
     let now = seen(tx, schema, table, u.trig, u.func_schema, u.func).await?;

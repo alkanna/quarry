@@ -381,7 +381,7 @@ async fn apply_updates(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[S
         check_key(pk, &ed.pk)?;
     }
     let mut c = writer_conn(db, schema, read_only).await?;
-    let mut tx = c.begin_write().await.map_err(se)?;
+    let mut tx = c.begin_write(db).await.map_err(se)?;
     for ed in edits {
         if db.dialect == Dialect::Postgres {
             pg_one_row(&mut tx, db, schema, table, cols, &ed.pk).await?;
@@ -412,7 +412,7 @@ async fn apply_deletes(db: &Db, schema: &str, table: &str, cols: &[Col], key_col
         check_key(key_cols, pk)?;
     }
     let mut c = writer_conn(db, schema, read_only).await?;
-    let mut tx = c.begin_write().await.map_err(se)?;
+    let mut tx = c.begin_write(db).await.map_err(se)?;
     let mut gone = Vec::new();
     for pk in pks {
         if db.dialect == Dialect::Postgres {
@@ -442,7 +442,7 @@ async fn apply_inserts(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[S
         return apply_inserts_pg(db, schema, table, cols, pk, rows, read_only, restore).await;
     }
     let mut c = writer_conn(db, schema, read_only).await?;
-    let mut tx = c.begin_write().await.map_err(se)?;
+    let mut tx = c.begin_write(db).await.map_err(se)?;
     let mut keys = Vec::new();
     // Generated columns cannot be given a value, and a column renamed on read goes back under its own name.
     let rows: Vec<NewRow> = rows.iter().map(|r| r.iter().filter(|(n, _)| !cols.iter().any(|c| c.name == *n && c.generated)).map(|(n, v)| (src_of(cols, n), v.clone())).collect()).collect();
@@ -480,7 +480,7 @@ async fn apply_inserts(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[S
 #[allow(clippy::too_many_arguments)]
 async fn apply_inserts_pg(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[String], rows: &[NewRow], read_only: bool, restore: bool) -> Res<Vec<Option<Document>>> {
     let mut c = writer_conn(db, schema, read_only).await?;
-    let mut tx = c.begin_write().await.map_err(se)?;
+    let mut tx = c.begin_write(db).await.map_err(se)?;
     let mut keys = Vec::new();
     // Identity ALWAYS says both GENERATED and auto_increment in `extra`; a computed column says only GENERATED.
     let identity_always = |name: &str| cols.iter().any(|c| c.name == name && c.generated && c.auto_increment);
@@ -526,7 +526,7 @@ async fn apply_undo_inserted_pg(db: &Db, schema: &str, table: &str, cols: &[Col]
         check_key(key_cols, &pk_of(r))?;
     }
     let mut c = writer_conn(db, schema, read_only).await?;
-    let mut tx = c.begin_write().await.map_err(se)?;
+    let mut tx = c.begin_write(db).await.map_err(se)?;
     for r in rows {
         let (pk, values) = (pk_of(r), r.iter().filter(|(k, _)| *k != "_id").map(|(k, v)| (k.clone(), v.clone())).collect::<Document>());
         pg_one_row(&mut tx, db, schema, table, cols, &pk).await?;

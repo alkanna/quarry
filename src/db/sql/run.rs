@@ -22,7 +22,7 @@ pub(super) async fn prepare(conn: &mut Conn, db: &Db, schema: &str, read_only: b
         Conn::Pg(c) => {
             super::pg::prepare(c, read_only, id, db).await.map_err(se)?;
             if !pooled {
-                super::pg_read::set_search_path(c, schema).await.map_err(se)?;
+                super::pg_read::set_search_path(c, &db.pg_path(schema)).await.map_err(se)?;
             }
         }
         Conn::My(c) => {

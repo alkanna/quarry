@@ -171,7 +171,7 @@ impl App {
             "acquery" => self.pg_acquery_demo(),
             "edit" => self.sql_demo_stage(),
             "select" => self.tabs[0].checked = [1, 2, 4, 5].into(),
-            "connform" | "paste" | "tls" => self.pg_form_demo(which),
+            "connform" | "paste" | "tls" | "advanced" => self.pg_form_demo(which),
             _ => {}
         }
     }
@@ -285,15 +285,29 @@ impl App {
     /// (seeded by the form itself), `tls` on the TLS tab.
     fn pg_form_demo(&mut self, which: &str) {
         let tls = which == "tls";
+        let advanced = which == "advanced";
         self.modal = Some(Modal::Conn(Box::new(ConnForm {
             id: Some(2),
             name: "analytics-prod".into(),
             tag: "Production".into(),
             engine: db::sql::Engine::Postgres,
             addr: db::sql::Addr { scheme: "postgres".into(), host: "analytics-prod.internal".into(), port: 5432, user: "analyst".into(), password: "hunter2hunter".into(), database: "analytics".into(), ssl_mode: if tls { db::sql::SslMode::VerifyIdentity } else { Default::default() }, ssl_ca: if tls { "~/.postgresql/root.crt".into() } else { String::new() } },
-            tab: if tls { ConnTab::Tls } else { ConnTab::Standard },
+            tab: if tls { ConnTab::Tls } else if advanced { ConnTab::Advanced } else { ConnTab::Standard },
             ..Default::default()
         })));
+        // The design's example: a path with a schema the last Test did not find, a lock timeout, a bad size and a picker open on "cost".
+        if let (true, Some(Modal::Conn(form))) = (advanced, self.modal.as_mut()) {
+            form.set_advanced(&db::sql::Advanced {
+                zone: db::sql::Zone::System,
+                search_path: vec!["reporting".into(), "public".into(), "staging_old".into()],
+                pg_settings: vec![("lock_timeout".into(), "10s".into()), ("work_mem".into(), "64 megs".into()), ("jit".into(), "off".into())],
+                connect_secs: Some(15),
+                ..Default::default()
+            });
+            form.pg_schemas = vec!["public".into(), "reporting".into(), "staging".into()];
+            form.pg_tested = true;
+            form.pg_picker = Some("cost".into());
+        }
     }
 }
 

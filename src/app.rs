@@ -17,6 +17,7 @@ mod column_menu;
 mod compare;
 mod config;
 mod conn_form;
+mod conn_pg_advanced;
 mod danger;
 mod demo;
 mod demo_pg;
