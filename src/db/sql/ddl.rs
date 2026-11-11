@@ -78,17 +78,24 @@ pub struct ColDef {
     pub comment: String,
     /// MySQL's SRID of a spatial column, which a MODIFY without it would drop.
     pub srid: Option<u32>,
+    /// PostgreSQL: the identity column is GENERATED ALWAYS, not BY DEFAULT. `auto_increment` says it is an identity (or
+    /// a serial, which carries its nextval default) at all.
+    pub identity_always: bool,
 }
 
 impl ColDef {
     pub fn new(name: &str, ty: &str) -> ColDef {
-        ColDef { name: name.into(), ty: ty.into(), args: String::new(), unsigned: false, zerofill: false, nullable: true, default: Dv::Null, auto_increment: false, collation: None, on_update: None, comment: String::new(), srid: None }
+        ColDef { name: name.into(), ty: ty.into(), args: String::new(), unsigned: false, zerofill: false, nullable: true, default: Dv::Null, auto_increment: false, collation: None, on_update: None, comment: String::new(), srid: None, identity_always: false }
     }
 
     /// What the structure read holds about a column. Generated, invisible and compressed columns and MariaDB
     /// column CHECKs carry attributes this definition does not write, so redefining them would lose them:
     /// those are refused.
     pub fn from_column(c: &Column) -> Result<ColDef, String> {
+        // Only a PostgreSQL column has a catalog kind.
+        if c.kind.is_some() {
+            return super::ddl_pg::col_def(c);
+        }
         let extra = c.extra.to_ascii_uppercase().replace("DEFAULT_GENERATED", "");
         if extra.contains("GENERATED") || extra.contains("INVISIBLE") || extra.contains("PERSISTENT") {
             return Err(format!("Column {} is generated or invisible. Edit it with a query.", c.name));
@@ -122,7 +129,7 @@ impl ColDef {
             (None, _) if c.nullable => Dv::Null,
             (None, _) => Dv::None,
         };
-        Ok(ColDef { name: c.name.clone(), ty, args, unsigned, zerofill, nullable: c.nullable, default, auto_increment: lower.contains("auto_increment"), collation, on_update, comment: c.comment.clone(), srid: c.srid })
+        Ok(ColDef { name: c.name.clone(), ty, args, unsigned, zerofill, nullable: c.nullable, default, auto_increment: lower.contains("auto_increment"), collation, on_update, comment: c.comment.clone(), srid: c.srid, identity_always: false })
     }
 
     /// `from_column` for a column of `st`. A collation that is the table's default is left out, so an edit or an
@@ -171,11 +178,17 @@ pub struct IndexDef {
     pub invisible: bool,
     /// A key part is an expression, which `cols` cannot hold, so the index cannot be written back.
     pub functional: bool,
+    /// PostgreSQL: a primary key or unique constraint owns the index, so it is dropped and renamed as the constraint.
+    pub constraint: bool,
+    /// PostgreSQL: the access method when it is not btree (hash, gin, gist, brin, spgist), lower case.
+    pub method: String,
 }
 
 impl IndexDef {
     pub fn from_index(ix: &Index) -> IndexDef {
-        let kind = if ix.name == "PRIMARY" {
+        // PostgreSQL's index text says what the columns alone do not: a condition, included columns, an operator class.
+        let pg = !ix.def.is_empty();
+        let kind = if ix.name == "PRIMARY" || ix.primary {
             IndexKind::Primary
         } else if ix.kind.eq_ignore_ascii_case("FULLTEXT") {
             IndexKind::Fulltext
@@ -186,8 +199,9 @@ impl IndexDef {
         } else {
             IndexKind::Index
         };
-        let functional = ix.cols.iter().any(|c| c.expr.is_some());
-        IndexDef { name: ix.name.clone(), kind, cols: ix.cols.iter().map(|c| IdxCol { name: c.name.clone(), prefix: c.prefix, desc: c.desc }).collect(), comment: ix.comment.clone(), invisible: ix.invisible, functional }
+        let functional = ix.cols.iter().any(|c| c.expr.is_some()) || (pg && !super::ddl_pg::index_is_plain(ix)) || (ix.constraint && !ix.primary && !ix.unique);
+        let method = if pg && !ix.kind.eq_ignore_ascii_case("btree") { ix.kind.to_ascii_lowercase() } else { String::new() };
+        IndexDef { name: ix.name.clone(), kind, cols: ix.cols.iter().map(|c| IdxCol { name: c.name.clone(), prefix: c.prefix, desc: c.desc }).collect(), comment: ix.comment.clone(), invisible: ix.invisible, functional, constraint: ix.constraint, method }
     }
 }
 
@@ -227,6 +241,11 @@ impl Change {
 /// Column and index names compare without case on both engines.
 pub fn same_name(a: &str, b: &str) -> bool {
     a.to_lowercase() == b.to_lowercase()
+}
+
+/// Whether a PostgreSQL column of this type text can be an identity, for the column dialog.
+pub fn pg_identity_type(ty: &str) -> bool {
+    super::ddl_pg::identity_type(ty)
 }
 
 /// A server limit on names: 64 characters, no trailing space.
@@ -429,15 +448,17 @@ pub const FK_ACTIONS: [&str; 4] = ["RESTRICT", "CASCADE", "SET NULL", "NO ACTION
 /// The table as the changes leave it, tracked while their inverses are collected. A column whose definition
 /// cannot be read back keeps the reason.
 #[derive(Clone)]
-struct Sim {
-    cols: Vec<(String, Result<ColDef, String>)>,
-    idx: Vec<IndexDef>,
+pub(super) struct Sim {
+    pub(super) cols: Vec<(String, Result<ColDef, String>)>,
+    pub(super) idx: Vec<IndexDef>,
     fks: Vec<ForeignKey>,
+    /// PostgreSQL drops a column together with every index that holds it, puts a new column last and cannot place one.
+    pg: bool,
 }
 
 impl Sim {
-    fn of(st: &Structure) -> Sim {
-        Sim { cols: st.columns.iter().map(|c| (c.name.clone(), ColDef::in_table(st, c))).collect(), idx: st.indexes.iter().map(IndexDef::from_index).collect(), fks: st.foreign_keys.clone() }
+    pub(super) fn of(st: &Structure) -> Sim {
+        Sim { cols: st.columns.iter().map(|c| (c.name.clone(), ColDef::in_table(st, c))).collect(), idx: st.indexes.iter().map(IndexDef::from_index).collect(), fks: st.foreign_keys.clone(), pg: st.pg_schema.is_some() }
     }
 
     /// An index the server can use for a key on these columns: it starts with them, in order, whole.
@@ -458,7 +479,7 @@ impl Sim {
         (!shared).then(|| ix.name.clone())
     }
 
-    fn at(&self, name: &str) -> Option<usize> {
+    pub(super) fn at(&self, name: &str) -> Option<usize> {
         self.cols.iter().position(|(n, _)| same_name(n, name))
     }
 
@@ -469,6 +490,7 @@ impl Sim {
 
     fn insert(&mut self, col: (String, Result<ColDef, String>), pos: &Pos) {
         let at = match pos {
+            _ if self.pg => self.cols.len(),
             Pos::Keep => self.cols.len(),
             Pos::First => 0,
             Pos::After(c) => self.at(c).map_or(self.cols.len(), |i| i + 1),
@@ -491,7 +513,7 @@ impl Sim {
     }
 
     /// Applies one change and returns the changes that undo it, in the order to run them.
-    fn apply(&mut self, c: &Change) -> Result<Vec<Change>, String> {
+    pub(super) fn apply(&mut self, c: &Change) -> Result<Vec<Change>, String> {
         match c {
             Change::Add { def, pos } => {
                 self.insert((def.name.clone(), Ok(def.clone())), pos);
@@ -511,6 +533,20 @@ impl Sim {
                 }
                 let back_pos = if *pos == Pos::Keep { Pos::Keep } else { old_pos };
                 Ok(vec![Change::Modify { from: def.name.clone(), def: old?, pos: back_pos }])
+            }
+            Change::Drop(name) if self.pg => {
+                let i = self.at(name).ok_or_else(|| format!("Column {name} is not in the table."))?;
+                if let Some(k) = self.fks.iter().find(|k| k.cols.iter().any(|c| same_name(c, name))) {
+                    return Err(format!("Dropping {name} also drops the foreign key {}, which this editor cannot put back.", k.name));
+                }
+                let (_, old) = self.cols.remove(i);
+                // The column comes back last: PostgreSQL has no column order to restore it to.
+                let mut back = vec![Change::Add { def: old?, pos: Pos::Keep }];
+                // Every index and constraint that holds the column goes whole, so undo adds each one back as it was.
+                let (gone, keep): (Vec<IndexDef>, Vec<IndexDef>) = std::mem::take(&mut self.idx).into_iter().partition(|ix| ix.cols.iter().any(|c| same_name(&c.name, name)));
+                back.extend(gone.into_iter().map(Change::AddIndex));
+                self.idx = keep;
+                Ok(back)
             }
             Change::Drop(name) => {
                 let i = self.at(name).ok_or_else(|| format!("Column {name} is not in the table."))?;
@@ -538,6 +574,26 @@ impl Sim {
             }
             Change::AddIndex(def) => {
                 self.idx.push(def.clone());
+                if self.pg {
+                    if let Some(last) = self.idx.last_mut() {
+                        last.constraint |= last.kind == IndexKind::Primary;
+                    }
+                    // A primary key makes its columns NOT NULL and dropping it does not undo that, so undo says it too.
+                    let mut back = vec![Change::DropIndex(def.name.clone())];
+                    if def.kind == IndexKind::Primary {
+                        for ic in &def.cols {
+                            if let Some(i) = self.at(&ic.name) {
+                                if let Ok(old) = &self.cols[i].1.clone() {
+                                    if old.nullable {
+                                        self.cols[i].1 = Ok(ColDef { nullable: false, ..old.clone() });
+                                        back.push(Change::Modify { from: old.name.clone(), def: old.clone(), pos: Pos::Keep });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return Ok(back);
+                }
                 Ok(vec![Change::DropIndex(if def.kind == IndexKind::Primary { "PRIMARY".into() } else { def.name.clone() })])
             }
             Change::DropIndex(name) => {
@@ -665,7 +721,8 @@ pub struct AlterUndo {
 impl AlterUndo {
     /// The steps as the session in mode `m` must read them: the stored ones, or the same inverse written again.
     pub fn steps_for(&self, d: Dialect, version: &str, table: &str, m: Mode) -> Result<Vec<String>, String> {
-        if m == self.mode {
+        // PostgreSQL's statements do not depend on the session's quoting.
+        if m == self.mode || d == Dialect::Postgres {
             return Ok(self.steps.clone());
         }
         self.groups.iter().map(|g| alter(d, version, m, table, g)).collect()
@@ -674,15 +731,33 @@ impl AlterUndo {
 
 /// The staged changes as they run, and their undo or why there is none. The preview and Apply both use it, so
 /// what is shown is what runs.
+#[derive(Debug)]
 pub struct Plan {
     pub sql: String,
     pub undo: Result<AlterUndo, String>,
+    /// The statements that run, one per entry. MySQL has one ALTER; PostgreSQL has one per clause, all in one transaction.
+    pub steps: Vec<String>,
+    /// PostgreSQL: what the touched columns and indexes looked like when the plan was made. The transaction reads them
+    /// again after it holds the lock and refuses to run when they differ. None on MySQL.
+    pub expect: Option<Expect>,
+}
+
+/// The names a plan reads and `snapshot` of them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Expect {
+    pub cols: Vec<String>,
+    pub idx: Vec<String>,
+    pub fks: Vec<String>,
+    pub snap: Vec<(String, Option<String>)>,
 }
 
 pub fn plan(d: Dialect, version: &str, m: Mode, table: &str, st: &Structure, staged: &[Change]) -> Result<Plan, String> {
     let changes = expand(d, st, staged);
+    if d == Dialect::Postgres {
+        return super::ddl_pg::plan(table, st, &changes);
+    }
     let sql = alter(d, version, m, table, &changes)?;
-    Ok(Plan { sql, undo: undo_of(d, version, m, table, st, &changes) })
+    Ok(Plan { steps: vec![sql.clone()], sql, undo: undo_of(d, version, m, table, st, &changes), expect: None })
 }
 
 fn undo_of(d: Dialect, version: &str, m: Mode, table: &str, before: &Structure, changes: &[Change]) -> Result<AlterUndo, String> {
@@ -715,7 +790,7 @@ fn type_text(c: &ColDef) -> String {
 }
 
 /// What the undo steps destroy, run on the table the change left.
-fn undo_loss(after: &Sim, groups: &[Vec<Change>]) -> Vec<String> {
+pub(super) fn undo_loss(after: &Sim, groups: &[Vec<Change>]) -> Vec<String> {
     let mut sim = after.clone();
     let mut out = Vec::new();
     for c in groups.iter().flatten() {
@@ -736,7 +811,7 @@ fn undo_loss(after: &Sim, groups: &[Vec<Change>]) -> Vec<String> {
 }
 
 /// The column, index and foreign key names the undo steps read or write, with no repeats.
-fn touched(groups: &[Vec<Change>]) -> (Vec<String>, Vec<String>, Vec<String>) {
+pub(super) fn touched(groups: &[Vec<Change>]) -> (Vec<String>, Vec<String>, Vec<String>) {
     let (mut cols, mut idx, mut fks): (Vec<String>, Vec<String>, Vec<String>) = (Vec::new(), Vec::new(), Vec::new());
     fn add(v: &mut Vec<String>, n: &str) {
         if !v.iter().any(|x| same_name(x, n)) {
@@ -799,11 +874,11 @@ fn touched(groups: &[Vec<Change>]) -> (Vec<String>, Vec<String>, Vec<String>) {
 pub fn snapshot(st: &Structure, cols: &[String], idx: &[String], fks: &[String]) -> Vec<(String, Option<String>)> {
     let col = |n: &String| {
         let c = st.columns.iter().find(|c| same_name(&c.name, n));
-        (format!("column {n}"), c.map(|c| format!("{}|{}|{}|{:?}|{}|{}|{:?}|{}|{:?}|{:?}", c.name, c.full_type, c.nullable, c.default, c.default_expr, c.extra, c.collation, c.comment, c.srid, c.check)))
+        (format!("column {n}"), c.map(|c| format!("{}|{}|{}|{:?}|{}|{}|{:?}|{}|{:?}|{:?}{}", c.name, c.full_type, c.nullable, c.default, c.default_expr, c.extra, c.collation, c.comment, c.srid, c.check, c.default_raw.as_ref().map_or(String::new(), |r| format!("|{r}")))))
     };
     let index = |n: &String| {
         let i = st.indexes.iter().find(|i| same_name(&i.name, n));
-        (format!("index {n}"), i.map(|i| format!("{}|{}|{}|{}|{}|{}", i.name, i.unique, i.kind, i.comment, i.invisible, i.cols.iter().map(|c| format!("{}:{:?}:{}:{:?}", c.name, c.prefix, c.desc, c.expr)).collect::<Vec<_>>().join(","))))
+        (format!("index {n}"), i.map(|i| format!("{}|{}|{}|{}|{}|{}{}", i.name, i.unique, i.kind, i.comment, i.invisible, i.cols.iter().map(|c| format!("{}:{:?}:{}:{:?}", c.name, c.prefix, c.desc, c.expr)).collect::<Vec<_>>().join(","), if i.def.is_empty() { String::new() } else { format!("|{}|{}|{}", i.def, i.constraint, i.primary) })))
     };
     let fk = |n: &String| {
         let k = st.foreign_keys.iter().find(|k| same_name(&k.name, n));
@@ -825,6 +900,7 @@ pub fn warnings(before: &Structure, changes: &[Change]) -> Vec<String> {
         }
         let _ = fk_sim.apply(c);
         match c {
+            Change::Drop(n) if before.pg_schema.is_some() => out.push(format!("Dropping {n} deletes its values for good, with every index and constraint that uses it. Undo brings the column back empty and last, with its indexes.")),
             Change::Drop(n) => out.push(format!("Dropping {n} deletes its values for good. Undo brings the column back empty.")),
             Change::Modify { from, def, .. } => {
                 if let Some(Ok(old)) = sim.at(from).map(|i| &sim.cols[i].1) {
@@ -833,7 +909,7 @@ pub fn warnings(before: &Structure, changes: &[Change]) -> Vec<String> {
                     }
                 }
             }
-            Change::DropIndex(n) if n == "PRIMARY" => out.push("Dropping the primary key makes the rows read-only here until the table has a key again.".into()),
+            Change::DropIndex(n) if n == "PRIMARY" || before.indexes.iter().any(|i| i.primary && i.name == *n) => out.push("Dropping the primary key makes the rows read-only here until the table has a key again.".into()),
             _ => {}
         }
     }
@@ -1380,13 +1456,16 @@ pub(super) async fn exec(c: &mut sqlx::MySqlConnection, sql: &str) -> Res<()> {
     Ok(())
 }
 
-fn undo_action(conn: u64, schema: &str, table: &str, u: AlterUndo) -> UndoAction {
+pub(super) fn undo_action(conn: u64, schema: &str, table: &str, u: AlterUndo) -> UndoAction {
     UndoAction { at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database: String::new(), cols: Vec::new(), undo: super::write::SqlUndo::Alter(Box::new(u)) } }
 }
 
 /// Runs a recorded undo after checking the table is still as the change left it. The answer is the same as for
 /// applying one; the action comes back for another try only when nothing ran.
 pub(super) async fn undo(db: &Db, a: UndoAction, u: AlterUndo, read_only: bool) -> Msg {
+    if db.dialect == Dialect::Postgres {
+        return super::ddl_pg::undo(db, a, u, read_only).await;
+    }
     let UndoAction { at, conn, db: schema, coll: table, .. } = a;
     let (mut ran, mut seen, mut lost) = (0, None, false);
     let res: Res<String> = crate::db::sql_scope(db.conn, &schema, async {

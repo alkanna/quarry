@@ -10,6 +10,10 @@ use db::sql::Dialect;
 
 const TYPES: &[&str] = &["TINYINT", "SMALLINT", "MEDIUMINT", "INT", "BIGINT", "DECIMAL", "FLOAT", "DOUBLE", "BIT", "CHAR", "VARCHAR", "BINARY", "VARBINARY", "TINYTEXT", "TEXT", "MEDIUMTEXT", "LONGTEXT", "TINYBLOB", "BLOB", "MEDIUMBLOB", "LONGBLOB", "ENUM", "SET", "DATE", "TIME", "DATETIME", "TIMESTAMP", "YEAR", "JSON", "GEOMETRY", "POINT", "LINESTRING", "POLYGON"];
 
+/// Types worth a menu entry on PostgreSQL. A type there is free text, so the list only saves typing: a length goes in the
+/// text, as in numeric(10,2).
+const PG_TYPES: &[&str] = &["smallint", "integer", "bigint", "numeric(10,2)", "real", "double precision", "boolean", "text", "character varying(255)", "character(1)", "uuid", "date", "time", "timestamp", "timestamp with time zone", "interval", "json", "jsonb", "bytea", "inet"];
+
 /// Collations worth a menu entry. The charset follows from the name, so one choice sets both.
 const COLLATIONS: &[&str] = &["utf8mb4_0900_ai_ci", "utf8mb4_0900_as_cs", "utf8mb4_uca1400_ai_ci", "utf8mb4_unicode_ci", "utf8mb4_general_ci", "utf8mb4_bin", "utf8mb3_general_ci", "utf8mb3_bin", "latin1_swedish_ci", "latin1_bin", "ascii_general_ci", "ascii_bin"];
 
@@ -146,6 +150,7 @@ impl App {
     pub(super) fn alter_env(&self) -> (Dialect, String, Mode) {
         match self.t().and_then(|t| self.conn(t.sel.conn)).and_then(|c| c.sql.as_ref()) {
             Some(d) => (d.dialect, d.version.clone(), Mode::of(&d.sql_mode)),
+            None if self.t().is_some_and(|t| self.is_pg(t.sel.conn)) => (Dialect::Postgres, "18.0".into(), Mode::DEFAULT),
             None => (Dialect::MySql, "8.4.0".into(), Mode::DEFAULT),
         }
     }
@@ -190,6 +195,9 @@ impl App {
         let Some(i) = i else {
             let mut def = ColDef::new("", "VARCHAR");
             def.args = "255".into();
+            if self.alter_env().0 == Dialect::Postgres {
+                (def.ty, def.args) = ("character varying(255)".into(), String::new());
+            }
             return self.show_col_form(None, def, Pos::Keep, staged);
         };
         let c = &st.columns[i];
@@ -226,8 +234,9 @@ impl App {
         def.name = ddl::free_name(&names, &c.name);
         // A second counter or a second copy of a unique key would not be a copy.
         def.auto_increment = false;
-        let after = self.name_after(&c.name);
-        self.show_col_form(None, def, Pos::After(after), self.staged().to_vec());
+        // PostgreSQL has no column order, so the copy goes last.
+        let pos = if self.alter_env().0 == Dialect::Postgres { Pos::Keep } else { Pos::After(self.name_after(&c.name)) };
+        self.show_col_form(None, def, pos, self.staged().to_vec());
     }
 
     pub(super) fn stage_drop_column(&mut self, i: usize) {
@@ -326,7 +335,7 @@ impl App {
             return self.ok("Offline demo: no database is connected.");
         }
         if !self.sel_writable() {
-            return self.warn_ro();
+            return self.ask_unlock_then(|a| a.request_alter_apply());
         }
         if self.applying() {
             return self.warn(BUSY_NOTE);
@@ -361,8 +370,9 @@ impl App {
 
     /// Sends the staged statement. The undo comes from the structure read before it runs.
     pub(super) fn run_alter(&mut self) {
-        let Some((conn, schema, table)) = self.t().map(|t| (t.sel.conn, t.sel.db.clone(), t.sel.coll.clone())) else { return };
-        let Some(db) = self.conn(conn).and_then(|c| c.sql.clone()) else { return self.warn_offline() };
+        let Some(sel) = self.t().map(|t| t.sel.clone()) else { return };
+        let (conn, table) = (sel.conn, sel.coll.clone());
+        let Some((db, schema)) = self.sql_target(&sel) else { return self.warn_offline() };
         let writable = self.sel_writable();
         if !writable {
             return self.warn_ro();
@@ -372,7 +382,7 @@ impl App {
         }
         let (Some(st), staged) = (self.structure().cloned(), self.staged().to_vec()) else { return };
         let (.., m) = self.alter_env();
-        let Plan { sql, undo } = match self.plan_of(&st, &staged) {
+        let Plan { sql, undo, steps, expect } = match self.plan_of(&st, &staged) {
             Ok(p) => p,
             Err(e) => return self.err(e),
         };
@@ -387,7 +397,10 @@ impl App {
         if let Some(s) = self.tabs[self.cur].sql.as_mut() {
             s.st.applying = true;
         }
-        self.worker.sql_alter(conn, db, schema, table, sql, m, undo, !writable, done);
+        match expect {
+            Some(expect) => self.worker.pg_alter(conn, db, schema, table, steps, expect, undo, !writable, done),
+            None => self.worker.sql_alter(conn, db, schema, table, sql, m, undo, !writable, done),
+        }
     }
 
     /// Before a structure undo runs: one that drops a column or converts a type back loses what was written since,
@@ -421,7 +434,8 @@ impl App {
         if let Some(u) = undo {
             self.push_undo(u);
         }
-        let tabs: Vec<usize> = (0..self.tabs.len()).filter(|&i| self.tabs[i].sel.conn == conn && self.tabs[i].sel.db == schema && self.tabs[i].sel.coll == table && self.tabs[i].sql.is_some()).collect();
+        let tabs: Vec<usize> = (0..self.tabs.len()).filter(|&i| self.tabs[i].sel.conn == conn && self.tabs[i].sel.space() == schema && self.tabs[i].sel.coll == table && self.tabs[i].sql.is_some()).collect();
+        let at = tabs.first().map(|&i| (self.tabs[i].sel.db.clone(), self.tabs[i].sel.schema.clone())).unwrap_or((schema.clone(), String::new()));
         for i in tabs {
             if let Some(s) = self.tabs[i].sql.as_mut() {
                 s.st.applying = false;
@@ -438,7 +452,7 @@ impl App {
             }
         }
         if ok && alter {
-            self.sql_refresh_schema(conn, &schema, "");
+            self.sql_refresh_schema(conn, &at.0, &at.1);
         }
     }
 
@@ -454,8 +468,10 @@ impl App {
                 ui.label(RichText::new("Nothing runs until Apply.").size(TXT_SMALL).color(FAINT()));
                 right_group(ui, |ui| {
                     let label = if applying { "Applying..." } else { "Apply" };
-                    let why = if editable { "" } else { "Unlock writes to apply" };
-                    if ui.add_enabled(editable && !applying, primary_button(ui, label, PRIMARY())).on_disabled_hover_text(why).clicked() {
+                    // A locked connection is asked to unlock when Apply is pressed; only a view or an engine that cannot edit stops it.
+                    let can = editable || (self.struct_block().is_none() && !self.sel_is_view());
+                    let why = if can { "" } else { "This table cannot be changed here" };
+                    if ui.add_enabled(can && !applying, primary_button(ui, label, PRIMARY())).on_disabled_hover_text(why).clicked() {
                         acts.push(Act::Apply);
                     }
                     if quiet_enabled(ui, !applying, "Discard").on_hover_text("Drop every staged change").clicked() {
@@ -496,6 +512,7 @@ impl App {
 
     pub(super) fn col_dialog(&mut self, ui: &mut egui::Ui, f: &mut ColForm, keep: &mut bool) {
         let (dialect, ..) = self.alter_env();
+        let pg = dialect == Dialect::Postgres;
         let table = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
         ui.set_width(600.0);
         dialog_title(ui, if f.from.is_some() { "Edit column" } else { "Add column" });
@@ -504,13 +521,26 @@ impl App {
         let ty = f.def.ty.to_ascii_uppercase();
         egui::Grid::new("colform").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W + 20.0).show(ui, |ui| {
             form_label(ui, "Name");
-            ui.add(egui::TextEdit::singleline(&mut f.def.name).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
+            ui.add(egui::TextEdit::singleline(&mut f.def.name).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY)).widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Column name"));
             ui.end_row();
 
             form_label(ui, "Type");
+            if pg {
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut f.def.ty).font(egui::TextStyle::Monospace).desired_width(280.0).hint_text("numeric(10,2)")).widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Column type"));
+                    egui::ComboBox::from_id_salt("coltype").width(150.0).selected_text("Common types").show_ui(ui, |ui| {
+                        menu_look(ui);
+                        for t in PG_TYPES {
+                            if ui.selectable_label(f.def.ty == *t, *t).clicked() {
+                                f.def.ty = (*t).to_string();
+                            }
+                        }
+                    });
+                });
+            } else {
             ui.horizontal(|ui| {
                 let before = f.def.ty.clone();
-                egui::ComboBox::from_id_salt("coltype").width(170.0).selected_text(f.def.ty.to_ascii_uppercase()).show_ui(ui, |ui| {
+                let combo = egui::ComboBox::from_id_salt("coltype").width(170.0).selected_text(f.def.ty.to_ascii_uppercase()).show_ui(ui, |ui| {
                     menu_look(ui);
                     if !TYPES.contains(&ty.as_str()) {
                         ui.selectable_value(&mut f.def.ty, ty.clone(), ty.as_str());
@@ -519,6 +549,7 @@ impl App {
                         ui.selectable_value(&mut f.def.ty, (*t).to_string(), *t);
                     }
                 });
+                combo.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Column type"));
                 if f.def.ty != before {
                     let t = f.def.ty.to_ascii_uppercase();
                     f.def.args = default_args(&t).into();
@@ -540,9 +571,10 @@ impl App {
                 }
             });
             ui.end_row();
+            }
 
             let t = f.def.ty.to_ascii_uppercase();
-            if matches!(t.as_str(), "ENUM" | "SET") {
+            if !pg && matches!(t.as_str(), "ENUM" | "SET") {
                 form_label(ui, "Values");
                 ui.add(egui::TextEdit::singleline(&mut f.def.args).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY).hint_text("'a','b','c'"));
                 ui.end_row();
@@ -550,10 +582,19 @@ impl App {
 
             form_label(ui, "Options");
             ui.horizontal(|ui| {
+                if pg {
+                    ui.checkbox(&mut f.def.nullable, "Allow NULL");
+                    ui.add_enabled(db::sql::ddl::pg_identity_type(&f.def.ty), egui::Checkbox::new(&mut f.def.auto_increment, "Identity (auto increment)"));
+                    // An identity is never NULL.
+                    if f.def.auto_increment {
+                        f.def.nullable = false;
+                    }
+                } else {
                 ui.add_enabled(ddl::is_numeric(&t), egui::Checkbox::new(&mut f.def.unsigned, "Unsigned"));
                 ui.checkbox(&mut f.def.nullable, "Allow NULL");
                 ui.add_enabled(ddl::is_numeric(&t), egui::Checkbox::new(&mut f.def.zerofill, "Zero fill"));
                 ui.add_enabled(ddl::is_integer(&t), egui::Checkbox::new(&mut f.def.auto_increment, "Auto increment"));
+                }
             });
             ui.end_row();
 
@@ -564,10 +605,11 @@ impl App {
                 }
                 segmented(ui, &mut f.dmode, &[(DMode::None, "None"), (DMode::Null, "NULL"), (DMode::Value, "Value"), (DMode::Expr, "Expression")]);
                 let on = matches!(f.dmode, DMode::Value | DMode::Expr);
-                ui.add_enabled(on, egui::TextEdit::singleline(&mut f.dtext).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY).hint_text(if f.dmode == DMode::Expr { "CURRENT_TIMESTAMP" } else { "" }));
+                ui.add_enabled(on, egui::TextEdit::singleline(&mut f.dtext).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY).hint_text(if f.dmode == DMode::Expr { if pg { "now()" } else { "CURRENT_TIMESTAMP" } } else { "" })).widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, on, "Column default"));
             });
             ui.end_row();
 
+            if !pg {
             form_label(ui, "Collation");
             let text = ddl::is_text(&t);
             let shown = if text { f.def.collation.clone().unwrap_or_else(|| "Table default".into()) } else if ddl::is_numeric(&t) { "Not used for numbers".into() } else { "Not used for this type".into() };
@@ -586,10 +628,13 @@ impl App {
             });
             ui.end_row();
 
+            }
+
             form_label(ui, "Comment");
-            ui.add(egui::TextEdit::singleline(&mut f.def.comment).desired_width(f32::INFINITY));
+            ui.add(egui::TextEdit::singleline(&mut f.def.comment).desired_width(f32::INFINITY)).widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Column comment"));
             ui.end_row();
 
+            if !pg {
             form_label(ui, "Position");
             let keep_label = if f.from.is_some() { "Unchanged" } else { "Last" };
             let shown = match &f.pos {
@@ -606,6 +651,7 @@ impl App {
                 }
             });
             ui.end_row();
+            }
         });
         f.def.default = dflt_of(f.dmode, &f.dtext);
         // A position that names a column that no longer exists would break the statement.
@@ -651,7 +697,11 @@ impl App {
             }
             ui.add_space(4.0);
             let sz = st.status.data.zip(st.status.index).map(|(a, b)| size(a + b)).unwrap_or_default();
-            let note = format!("The server may copy the table{} on {}. Other sessions can still read.", if sz.is_empty() { String::new() } else { format!(" ({sz})") }, self.engine_label());
+            let note = if pg {
+                format!("Runs in one transaction that locks the table{} against every other session until it commits, and rolls back whole if anything fails.", if sz.is_empty() { String::new() } else { format!(" ({sz})") })
+            } else {
+                format!("The server may copy the table{} on {}. Other sessions can still read.", if sz.is_empty() { String::new() } else { format!(" ({sz})") }, self.engine_label())
+            };
             ui.label(RichText::new(note).size(TXT_SMALL).color(FAINT()));
         }
         let (mut stage, mut now) = (false, false);
@@ -673,6 +723,7 @@ impl App {
     }
 
     pub(super) fn idx_dialog(&mut self, ui: &mut egui::Ui, f: &mut IdxForm, keep: &mut bool) {
+        let pg = self.alter_env().0 == Dialect::Postgres;
         let table = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
         ui.set_width(560.0);
         dialog_title(ui, if f.from.is_some() { "Edit index" } else { "Add index" });
@@ -681,16 +732,29 @@ impl App {
         egui::Grid::new("idxform").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
             form_label(ui, "Name");
             let primary = f.def.kind == IndexKind::Primary;
+            // A PostgreSQL primary key is a named constraint, and its usual name is the table's with _pkey.
+            let pkey = format!("{table}_pkey");
             if primary {
-                f.def.name = "PRIMARY".into();
-            } else if f.def.name == "PRIMARY" {
+                if !pg {
+                    f.def.name = "PRIMARY".into();
+                } else if f.def.name.is_empty() || f.def.name == "PRIMARY" {
+                    f.def.name = pkey.clone();
+                }
+            } else if f.def.name == "PRIMARY" || (pg && f.def.name == pkey && f.from.as_ref().is_none_or(|o| o.name != pkey)) {
                 f.def.name.clear();
             }
-            ui.add_enabled(!primary, egui::TextEdit::singleline(&mut f.def.name).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
+            if f.def.kind == IndexKind::Index {
+                f.def.constraint = false;
+            }
+            ui.add_enabled(!primary || pg, egui::TextEdit::singleline(&mut f.def.name).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY)).widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, !primary || pg, "Index name"));
             ui.end_row();
 
             form_label(ui, "Type");
-            segmented(ui, &mut f.def.kind, &[(IndexKind::Index, "Index"), (IndexKind::Unique, "Unique"), (IndexKind::Fulltext, "Fulltext"), (IndexKind::Spatial, "Spatial"), (IndexKind::Primary, "Primary key")]);
+            if pg {
+                segmented(ui, &mut f.def.kind, &[(IndexKind::Index, "Index"), (IndexKind::Unique, "Unique"), (IndexKind::Primary, "Primary key")]);
+            } else {
+                segmented(ui, &mut f.def.kind, &[(IndexKind::Index, "Index"), (IndexKind::Unique, "Unique"), (IndexKind::Fulltext, "Fulltext"), (IndexKind::Spatial, "Spatial"), (IndexKind::Primary, "Primary key")]);
+            }
             ui.end_row();
 
             form_label(ui, "Columns");
@@ -699,9 +763,11 @@ impl App {
                 for (i, c) in f.def.cols.iter_mut().enumerate() {
                     ui.horizontal(|ui| {
                         ui.add_sized([180.0, BUTTON_H], egui::Label::new(RichText::new(c.name.as_str()).monospace().color(TEXT())).truncate());
-                        let mut p = c.prefix.map(|n| n.to_string()).unwrap_or_default();
-                        ui.add(egui::TextEdit::singleline(&mut p).desired_width(54.0).hint_text("length"));
-                        c.prefix = p.trim().parse().ok().filter(|n: &u64| *n > 0);
+                        if !pg {
+                            let mut p = c.prefix.map(|n| n.to_string()).unwrap_or_default();
+                            ui.add(egui::TextEdit::singleline(&mut p).desired_width(54.0).hint_text("length"));
+                            c.prefix = p.trim().parse().ok().filter(|n: &u64| *n > 0);
+                        }
                         ui.checkbox(&mut c.desc, "DESC");
                         if quiet_enabled(ui, i > 0, "Up").clicked() {
                             act = Some((i, -1));
@@ -725,7 +791,7 @@ impl App {
                 }
                 let free: Vec<&(String, String)> = f.avail.iter().filter(|(n, _)| !f.def.cols.iter().any(|c| c.name == *n)).collect();
                 let mut add = None;
-                egui::ComboBox::from_id_salt("idxadd").width(260.0).selected_text(if free.is_empty() { "Every column is used" } else { "Add a column" }).show_ui(ui, |ui| {
+                let combo = egui::ComboBox::from_id_salt("idxadd").width(260.0).selected_text(if free.is_empty() { "Every column is used" } else { "Add a column" }).show_ui(ui, |ui| {
                     menu_look(ui);
                     for (n, ty) in &free {
                         if ui.selectable_label(false, format!("{n}  {}", ty.to_ascii_uppercase())).clicked() {
@@ -733,6 +799,7 @@ impl App {
                         }
                     }
                 });
+                combo.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Add a column"));
                 if let Some(n) = add {
                     if f.def.name.is_empty() && f.def.cols.is_empty() {
                         f.def.name = format!("idx_{n}");
@@ -760,7 +827,7 @@ impl App {
         // Against the indexes the other staged changes leave, without case, as the server compares them.
         let taken = self.structure().map(|s| ddl::indexes_after(s, &f.rest)).unwrap_or_default();
         let dup = f.def.kind != IndexKind::Primary && taken.iter().any(|x| ddl::same_name(x, &f.def.name) && f.from.as_ref().is_none_or(|o| !ddl::same_name(&o.name, x)));
-        let primary_taken = f.def.kind == IndexKind::Primary && f.from.as_ref().map(|o| o.kind) != Some(IndexKind::Primary) && self.structure().is_some_and(|s| s.indexes.iter().any(|x| x.name == "PRIMARY")) && !all.iter().any(|c| matches!(c, Change::DropIndex(n) if n == "PRIMARY"));
+        let primary_taken = f.def.kind == IndexKind::Primary && f.from.as_ref().map(|o| o.kind) != Some(IndexKind::Primary) && self.structure().is_some_and(|s| s.indexes.iter().any(|x| x.name == "PRIMARY" || x.primary)) && !all.iter().any(|c| matches!(c, Change::DropIndex(n) if n == "PRIMARY" || self.structure().is_some_and(|s| s.indexes.iter().any(|x| x.primary && x.name == *n))));
         let text = if changes.is_empty() {
             Err("Nothing is changed yet.".to_string())
         } else if dup {

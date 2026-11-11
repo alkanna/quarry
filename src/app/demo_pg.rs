@@ -382,6 +382,7 @@ fn orders_structure() -> Structure {
         foreign_keys: vec![fk("orders_customer_id_fkey", "orders", "customer_id", "customers", "id", "RESTRICT")],
         referenced_by: vec![fk("order_items_order_id_fkey", "order_items", "order_id", "orders", "id", "CASCADE"), fk("events_order_id_fkey", "events", "order_id", "orders", "id", "SET NULL")],
         triggers: vec![Trigger { name: "orders_audit".into(), timing: "AFTER".into(), event: "UPDATE".into(), body: "CREATE TRIGGER orders_audit AFTER UPDATE ON public.orders FOR EACH ROW EXECUTE FUNCTION log_order_change()".into(), ..Default::default() }],
+        pg_schema: Some(SCHEMA.into()),
         status: db::sql::structure::Status { engine: "heap".into(), rows: Some(ORDERS_ROWS), avg_row: Some(264), data: Some(318_767_104), index: Some(105_906_176), total: Some(424_673_280), comment: "Customer orders".into(), ..Default::default() },
         ..Default::default()
     };

@@ -76,6 +76,8 @@ pub struct Index {
     pub def: String,
     /// PostgreSQL: a primary key, unique or exclusion constraint owns the index, so it is written as that constraint.
     pub constraint: bool,
+    /// PostgreSQL: the index is the table's primary key, whose name is the constraint's, not "PRIMARY".
+    pub primary: bool,
 }
 
 /// A PostgreSQL primary key, unique, check or exclusion constraint, in the words of `pg_get_constraintdef`. Foreign
@@ -166,6 +168,9 @@ pub struct Structure {
     /// PostgreSQL primary key, unique, check and exclusion constraints. Empty on MySQL, whose keys are indexes and
     /// whose CHECKs are not read here.
     pub constraints: Vec<Constraint>,
+    /// The schema of a PostgreSQL table, which also says the structure came from PostgreSQL. None on MySQL, where the
+    /// database is the namespace and the statements are written for a session switched to it.
+    pub pg_schema: Option<String>,
 }
 
 impl Structure {
@@ -289,7 +294,7 @@ fn s(r: &SqlRow, name: &str) -> String {
     text(r, name).unwrap_or_default()
 }
 
-fn columns(d: Dialect, rows: &[SqlRow]) -> Vec<Column> {
+pub(super) fn columns(d: Dialect, rows: &[SqlRow]) -> Vec<Column> {
     rows.iter()
         .map(|r| {
             let nullable = r.int("nullable").map(|n| n != 0).unwrap_or(true);
@@ -303,7 +308,7 @@ fn columns(d: Dialect, rows: &[SqlRow]) -> Vec<Column> {
 }
 
 /// The rows come ordered by index name and then position, so one index is a run of rows.
-fn indexes(rows: &[SqlRow]) -> Vec<Index> {
+pub(super) fn indexes(rows: &[SqlRow]) -> Vec<Index> {
     let mut out: Vec<Index> = Vec::new();
     for r in rows {
         let name = s(r, "name");
@@ -313,14 +318,14 @@ fn indexes(rows: &[SqlRow]) -> Vec<Index> {
             out.last_mut().unwrap().cols.push(col);
         } else {
             let unique = r.int("non_unique").map(|n| n == 0).unwrap_or(false);
-            out.push(Index { name, unique, cols: vec![col], kind: s(r, "index_type"), cardinality: num(r, "cardinality"), comment: s(r, "comment"), invisible: false, def: s(r, "def"), constraint: r.int("backs_constraint") == Some(1) });
+            out.push(Index { name, unique, cols: vec![col], kind: s(r, "index_type"), cardinality: num(r, "cardinality"), comment: s(r, "comment"), invisible: false, def: s(r, "def"), constraint: r.int("backs_constraint") == Some(1), primary: r.int("is_primary") == Some(1) });
         }
     }
     out
 }
 
 /// One row per key column, ordered by constraint and then position.
-fn foreign_keys(rows: &[SqlRow]) -> Vec<ForeignKey> {
+pub(super) fn foreign_keys(rows: &[SqlRow]) -> Vec<ForeignKey> {
     let mut out: Vec<ForeignKey> = Vec::new();
     for r in rows {
         let (name, db, table) = (s(r, "name"), s(r, "db"), s(r, "tbl"));
@@ -369,6 +374,10 @@ fn status(rows: &[SqlRow]) -> Status {
     }
 }
 
+pub(super) fn constraints(rows: &[SqlRow]) -> Vec<Constraint> {
+    rows.iter().map(|r| Constraint { name: s(r, "name"), kind: s(r, "kind").chars().next().unwrap_or('c'), def: s(r, "def") }).collect()
+}
+
 /// A LIMIT of its own overrides the session's sql_select_limit, which a server's globals can set and which would
 /// show a table with only its first columns or indexes, and let an edit of that structure drop the rest.
 pub(super) const ALL_ROWS: &str = " LIMIT 18446744073709551615";
@@ -386,7 +395,7 @@ async fn extras(db: &Db, schema: &str, table: &str, st: &mut Structure) {
         // constraints that are not foreign keys.
         Dialect::Postgres => {
             if let Ok(rows) = query(db, super::pg_catalog::CONSTRAINTS, schema, table).await {
-                st.constraints = rows.iter().map(|r| Constraint { name: s(r, "name"), kind: s(r, "kind").chars().next().unwrap_or('c'), def: s(r, "def") }).collect();
+                st.constraints = constraints(&rows);
             }
             return;
         }
@@ -449,6 +458,7 @@ pub(super) async fn load(db: &Db, schema: &str, table: &str) -> Res<Structure> {
         status: status(&stat),
         create: create.and_then(|r| text_at(&r, 1)).unwrap_or_default(),
         constraints: Vec::new(),
+        pg_schema: (d == Dialect::Postgres).then(|| schema.to_string()),
     };
     extras(db, schema, table, &mut st).await;
     if d == Dialect::Postgres {

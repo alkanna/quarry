@@ -7,21 +7,21 @@ use crate::db::sql::testing::{ENVS, Live, LivePg, PG_ENVS, live, live_pg};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// The rows of a fresh fixture table, as `Fx::rows` reports them.
-const ORIGINAL: &str = "1:alpha:10,2:beta:20,3:gamma:30";
+pub(super) const ORIGINAL: &str = "1:alpha:10,2:beta:20,3:gamma:30";
 
-enum Server {
+pub(super) enum Server {
     My(Live),
     Pg(LivePg, sqlx::PgPool),
 }
 
 /// Fixture tables on one server. They are dropped with it, also when a flow fails half way.
-struct Fx {
-    server: Server,
+pub(super) struct Fx {
+    pub(super) server: Server,
     tables: Vec<String>,
 }
 
 impl Fx {
-    fn new(var: &'static str) -> Option<Fx> {
+    pub(super) fn new(var: &'static str) -> Option<Fx> {
         let server = if ENVS.contains(&var) {
             let l = live(var)?;
             l.sql("CREATE DATABASE IF NOT EXISTS quarry_test");
@@ -36,14 +36,14 @@ impl Fx {
     }
 
     /// The database and schema of the sidebar: MySQL has no schemas.
-    fn place(&self) -> (&'static str, &'static str) {
+    pub(super) fn place(&self) -> (&'static str, &'static str) {
         match self.server {
             Server::My(_) => ("quarry_test", ""),
             Server::Pg(..) => ("quarry_test", "public"),
         }
     }
 
-    fn sql(&self, s: &str) {
+    pub(super) fn sql(&self, s: &str) {
         match &self.server {
             Server::My(l) => l.sql(s),
             Server::Pg(l, pool) => l.qsql(pool, s),
@@ -51,7 +51,7 @@ impl Fx {
     }
 
     /// The table name as the server's SQL wants it.
-    fn qualified(&self, table: &str) -> String {
+    pub(super) fn qualified(&self, table: &str) -> String {
         match self.server {
             Server::My(_) => format!("quarry_test.{table}"),
             Server::Pg(..) => table.to_string(),
@@ -59,7 +59,7 @@ impl Fx {
     }
 
     /// A uniquely named table holding the ORIGINAL rows. Tests run in parallel on shared servers, so no two share a name.
-    fn table(&mut self) -> String {
+    pub(super) fn table(&mut self) -> String {
         static N: AtomicUsize = AtomicUsize::new(0);
         let name = format!("ui_edit_{}_{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed));
         self.tables.push(name.clone());
@@ -70,7 +70,7 @@ impl Fx {
     }
 
     /// Every row as `id:name:qty`, ordered by id and joined with commas, read with a plain query.
-    fn rows(&self, table: &str) -> String {
+    pub(super) fn rows(&self, table: &str) -> String {
         let q = self.qualified(table);
         let one = match &self.server {
             Server::My(l) => l.one(&format!("SELECT COALESCE(GROUP_CONCAT(CONCAT(id, ':', name, ':', qty) ORDER BY id SEPARATOR ','), '') FROM {q}")),
@@ -80,7 +80,7 @@ impl Fx {
     }
 
     /// Steps the UI until the server holds `want`: a write goes out on a worker task, so it lands a few frames after the click.
-    fn expect(&self, ui: &mut UiApp, table: &str, want: &str) {
+    pub(super) fn expect(&self, ui: &mut UiApp, table: &str, want: &str) {
         let t = std::time::Instant::now();
         loop {
             ui.h.step();
@@ -94,13 +94,13 @@ impl Fx {
     }
 
     /// Steps the UI for a while and then checks that the server still holds `want`, for flows that must write nothing.
-    fn expect_unchanged(&self, ui: &mut UiApp, table: &str, want: &str) {
+    pub(super) fn expect_unchanged(&self, ui: &mut UiApp, table: &str, want: &str) {
         ui.h.run_steps(8);
         assert_eq!(self.rows(table), want, "the server changed");
     }
 
     /// Opens the fixture table in a UI with the connection unlocked or not.
-    fn open(&self, ui: &mut UiApp, table: &str) {
+    pub(super) fn open(&self, ui: &mut UiApp, table: &str) {
         let (db, schema) = self.place();
         ui.open_table(db, schema, table);
     }
@@ -119,7 +119,7 @@ impl Drop for Fx {
 }
 
 /// Runs `flow` once per configured server, with a UI connected to it. A failure is reported with the flow and the server.
-fn every_engine(name: &str, flow: impl Fn(&mut Fx, &mut UiApp)) {
+pub(super) fn every_engine(name: &str, flow: impl Fn(&mut Fx, &mut UiApp)) {
     for var in ENVS.into_iter().chain(PG_ENVS) {
         let Some(mut fx) = Fx::new(var) else { continue };
         let mut ui = ui_app(var).unwrap();
@@ -132,7 +132,7 @@ fn every_engine(name: &str, flow: impl Fn(&mut Fx, &mut UiApp)) {
 }
 
 /// Opens the fixture table unlocked.
-fn open_unlocked(fx: &mut Fx, ui: &mut UiApp) -> String {
+pub(super) fn open_unlocked(fx: &mut Fx, ui: &mut UiApp) -> String {
     let table = fx.table();
     fx.open(ui, &table);
     ui.unlock();
