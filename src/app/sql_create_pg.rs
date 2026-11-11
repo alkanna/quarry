@@ -159,11 +159,13 @@ impl App {
         if let Some(why) = self.pg_job_blocks(conn, &database, &schema, kind) {
             return self.warn(why);
         }
+        // The worker checks again so a lock taken while the confirmation was open still holds.
+        let ro = !self.conn_writable(conn);
         match kind {
-            DropKind::Database => self.worker.pg_drop_db(conn, sql, database, opt, false),
-            DropKind::Schema => self.worker.pg_drop_schema(conn, sql.at(&database), schema, opt, false),
-            DropKind::Table | DropKind::View => self.worker.pg_drop_table(conn, sql.at(&database), schema, table, kind == DropKind::View, opt, false),
-            DropKind::Truncate => {}
+            DropKind::Database => self.worker.pg_drop_db(conn, sql, database, opt, ro),
+            DropKind::Schema => self.worker.pg_drop_schema(conn, sql.at(&database), schema, opt, ro),
+            DropKind::Table | DropKind::View => self.worker.pg_drop_table(conn, sql.at(&database), schema, table, kind == DropKind::View, opt, ro),
+            DropKind::Truncate => unreachable!("the PostgreSQL menus never offer Empty table"),
         }
     }
 
@@ -245,7 +247,7 @@ impl App {
                 self.remove_tabs(|t| in_schema(t, &schema) && t.sel.coll == table);
                 self.pg_refresh(conn, &database);
             }
-            Ddl::Emptied => {}
+            Ddl::Emptied => unreachable!("PostgreSQL never empties a table through the drop path"),
         }
     }
 
@@ -584,7 +586,7 @@ impl App {
                     }
                 }
             }
-            DropKind::Truncate => {}
+            DropKind::Truncate => unreachable!("the PostgreSQL menus never offer Empty table"),
         }
         blocked
     }

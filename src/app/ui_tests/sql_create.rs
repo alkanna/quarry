@@ -154,6 +154,23 @@ fn a_locked_connection_asks_to_unlock_before_creating_or_dropping() {
     });
 }
 
+#[test]
+fn a_drop_that_slips_past_the_dialog_on_a_locked_connection_is_refused_by_the_worker() {
+    every_engine("a drop on a locked connection is refused by the worker", |fx, ui| {
+        if !is_pg(fx) {
+            return;
+        }
+        let table = fx.table();
+        fx.open(ui, &table);
+        quiet(ui);
+        assert!(!ui.app().conn(CONN).unwrap().writable);
+        let sql = ui.app().pg_session(CONN).expect("a session");
+        ui.h.state_mut().pg_drop_run(CONN, sql, fx.place().0.to_string(), "public".into(), table.clone(), DropKind::Table, false);
+        ui.wait("the refusal", |a| !a.last_problem().is_empty());
+        assert!(table_exists(fx, &table), "the worker dropped a table on a locked connection");
+    });
+}
+
 fn pg_only(name: &str, flow: impl Fn(&mut Fx, &mut UiApp)) {
     every_engine(name, |fx, ui| {
         if matches!(fx.server, Server::Pg(..)) {
