@@ -1,9 +1,10 @@
-//! Cloud SQL for PostgreSQL: starts Google's cloud-sql-proxy on a free localhost port for the life of a
-//! connection, finds instances through the gcloud CLI, and finds or downloads the proxy program.
+//! Cloud SQL for PostgreSQL: starts Google's cloud-sql-proxy for the life of a connection, on a private unix socket (a
+//! localhost port on Windows), finds instances through the gcloud CLI, and finds or downloads the proxy program.
 
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::AsyncBufReadExt;
@@ -57,12 +58,45 @@ fn valid_project(s: &str) -> bool {
     !s.is_empty() && s.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit()) && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | ':' | '.'))
 }
 
-/// The proxy's command line. Nothing secret is on it: the proxy reads the same Google credentials itself.
-pub fn proxy_args(conf: &CloudSql, port: u16, gcloud_account: bool) -> Vec<String> {
-    let mut a = vec![conf.instance.clone(), "--port".into(), port.to_string(), "--address".into(), "127.0.0.1".into(), "--quiet".into()];
-    // With a gcloud account the proxy signs in as the account that listed the instances; without one it uses
-    // Application Default Credentials.
-    if gcloud_account {
+/// Where the proxy listens for Quarry.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Listen {
+    /// macOS and Linux: this socket file, in a folder only this user may open, so no other local user can reach the proxy
+    /// or stand in for it.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Socket(PathBuf),
+    /// Windows: a localhost port, because sqlx has no other way to connect there.
+    Tcp(u16),
+}
+
+/// The socket file name sqlx looks for in a socket folder, for port 5432.
+#[cfg_attr(not(unix), allow(dead_code))]
+const SOCKET_FILE: &str = ".s.PGSQL.5432";
+/// sun_path holds 104 bytes on macOS and 108 on Linux, the closing NUL included.
+#[cfg_attr(not(unix), allow(dead_code))]
+const MAX_SOCKET_PATH: usize = if cfg!(target_os = "macos") { 103 } else { 107 };
+/// What the proxy prints on stdout once every listener is open.
+const READY_LINE: &str = "ready for new connections";
+
+/// Windows has no socket the driver can use, so it listens on a port there.
+fn native_tcp() -> bool {
+    !cfg!(unix)
+}
+
+/// A path as a query value: the proxy splits its instance argument at `?` and decodes the rest like a URL query.
+fn query_value(p: &Path) -> String {
+    p.as_os_str().as_encoded_bytes().iter().map(|&b| if b.is_ascii_alphanumeric() || b"-._~/".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+}
+
+/// The proxy's command line. Nothing secret is on it: the proxy reads the Google credentials itself.
+pub fn proxy_args(conf: &CloudSql, at: &Listen, gcloud_account: bool) -> Vec<String> {
+    let mut a = match at {
+        Listen::Socket(p) => vec![format!("{}?unix-socket-path={}", conf.instance, query_value(p))],
+        Listen::Tcp(port) => vec![conf.instance.clone(), "--port".into(), port.to_string(), "--address".into(), "127.0.0.1".into()],
+    };
+    // The proxy refuses --gcloud-auth with --auto-iam-authn, so IAM always signs in with Application Default Credentials.
+    // A password sign-in uses the account that listed the instances when gcloud has one.
+    if gcloud_account && !conf.iam {
         a.push("--gcloud-auth".into());
     }
     if conf.iam {
@@ -76,6 +110,30 @@ pub fn proxy_args(conf: &CloudSql, port: u16, gcloud_account: bool) -> Vec<Strin
     a
 }
 
+/// The start of the error an IAM connection gets when this machine has no Application Default Credentials.
+pub const ADC_MISSING: &str = "Cloud SQL: Application Default Credentials not found";
+
+/// The Application Default Credentials file the proxy reads, found the way Google's Go auth library looks: the file
+/// GOOGLE_APPLICATION_CREDENTIALS names (only that one when it is set), else the one `gcloud auth application-default
+/// login` writes into gcloud's config folder.
+fn adc_path(env: impl Fn(&str) -> Option<std::ffi::OsString>, home: Option<PathBuf>, windows: bool) -> Option<PathBuf> {
+    let set = |k: &str| env(k).filter(|v| !v.is_empty()).map(PathBuf::from);
+    if let Some(f) = set("GOOGLE_APPLICATION_CREDENTIALS") {
+        return Some(f);
+    }
+    let dir = match set("CLOUDSDK_CONFIG") {
+        Some(d) => d,
+        None if windows => set("APPDATA")?.join("gcloud"),
+        None => set("HOME").or(home)?.join(".config").join("gcloud"),
+    };
+    Some(dir.join("application_default_credentials.json"))
+}
+
+/// Whether Application Default Credentials exist. Only a file counts: the metadata server of a Google Cloud VM is not seen.
+pub fn adc_exists() -> bool {
+    adc_path(|k| std::env::var_os(k), dirs::home_dir(), cfg!(windows)).is_some_and(|p| p.is_file())
+}
+
 /// The database user for an IAM account: a service account drops its `.gserviceaccount.com`, a user stays as is.
 pub fn iam_user(account: &str) -> String {
     let a = account.trim();
@@ -85,15 +143,41 @@ pub fn iam_user(account: &str) -> String {
     }
 }
 
-/// A running proxy. Dropping it kills the process.
+/// A folder only this user may open, removed with everything in it when dropped.
+#[cfg_attr(not(unix), allow(dead_code))]
+struct SockDir(PathBuf);
+
+impl Drop for SockDir {
+    fn drop(&mut self) {
+        crate::update::remove(&self.0);
+    }
+}
+
+/// A running proxy. Dropping it kills the process, then removes its socket folder.
 pub struct CloudProxy {
+    /// The localhost port on Windows; 5432 with a socket, since sqlx names the socket file after the port.
     pub port: u16,
     /// Whether the proxy signs in with the gcloud account (else Application Default Credentials).
     pub gcloud_account: bool,
-    /// Held only so the process dies with the handle (kill_on_drop).
+    /// Held only so the process dies with the handle (kill_on_drop). Declared before `dir`, so it is dropped first.
     _child: tokio::process::Child,
     #[cfg(windows)]
     _job: Option<Job>,
+    dir: Option<SockDir>,
+}
+
+impl CloudProxy {
+    /// The folder of the proxy's socket, which sqlx takes in place of a host; None when it listens on a port.
+    pub fn socket_dir(&self) -> Option<&Path> {
+        self.dir.as_ref().map(|d| d.0.as_path())
+    }
+}
+
+/// The variables that change what the proxy does (socket folder, credentials file, API endpoint and so on). Another
+/// program's settings must not redirect Quarry's proxy, so they are removed from its environment.
+fn proxy_vars(vars: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>) -> Vec<std::ffi::OsString> {
+    // Windows names are case-insensitive.
+    vars.map(|(k, _)| k).filter(|k| k.to_string_lossy().to_ascii_uppercase().starts_with("CSQL_PROXY_")).collect()
 }
 
 /// Starts the proxy for `conf` and waits until it accepts connections.
@@ -105,8 +189,8 @@ pub async fn open(conf: &CloudSql, exe: &Path, gcloud: Option<PathBuf>, timeout:
     #[cfg(test)]
     if std::env::current_exe().ok().as_deref() == Some(exe) {
         let target = tests::STUB_TARGET.lock().unwrap().clone();
-        return open_with(timeout, false, move |port| {
-            let mut c = tests::stub(if target.is_some() { "forward" } else { "listen" })(port);
+        return open_with(timeout, native_tcp(), false, move |at| {
+            let mut c = tests::stub(if target.is_some() { "forward" } else { "listen" })(at);
             if let Some(t) = &target {
                 c.env("QUARRY_STUB_TARGET", t);
             }
@@ -114,15 +198,19 @@ pub async fn open(conf: &CloudSql, exe: &Path, gcloud: Option<PathBuf>, timeout:
         })
         .await;
     }
-    let acct = match gcloud.clone() {
+    // Refused here: the proxy itself only says so after it gave up on the API.
+    if conf.iam && !adc_exists() {
+        return Err(format!("{ADC_MISSING}. Run `gcloud auth application-default login`, then Retry."));
+    }
+    let acct = match gcloud.clone().filter(|_| !conf.iam) {
         Some(g) => tokio::task::spawn_blocking(move || matches!(account(&g), Ok(Some(_)))).await.unwrap_or(false),
         None => false,
     };
     // The proxy runs gcloud itself with --gcloud-auth, and an app opened from Finder has no gcloud on its PATH.
     let path = gcloud.as_deref().and_then(path_with_parent);
-    open_with(timeout, acct, |port| {
+    open_with(timeout, native_tcp(), acct, |at| {
         let mut c = tokio::process::Command::new(exe);
-        c.args(proxy_args(conf, port, acct));
+        c.args(proxy_args(conf, at, acct));
         if let Some(p) = &path {
             c.env("PATH", p);
         }
@@ -131,12 +219,56 @@ pub async fn open(conf: &CloudSql, exe: &Path, gcloud: Option<PathBuf>, timeout:
     .await
 }
 
-async fn open_with(timeout: Duration, gcloud_account: bool, build: impl Fn(u16) -> tokio::process::Command) -> Result<CloudProxy, String> {
+/// A fresh socket folder, or a free port when `tcp`.
+fn local(tcp: bool) -> Result<(Listen, Option<SockDir>), String> {
+    #[cfg(unix)]
+    if !tcp {
+        use std::os::unix::fs::PermissionsExt;
+        // A short prefix: the whole socket path must fit in sun_path.
+        let dir = SockDir(crate::update::fresh_temp_dir("qcsql").map_err(|e| format!("Cloud SQL proxy not started: {e}"))?);
+        std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o700)).map_err(|e| format!("Cloud SQL proxy not started: {e}"))?;
+        let sock = dir.0.join(SOCKET_FILE);
+        socket_fits(&sock)?;
+        return Ok((Listen::Socket(sock), Some(dir)));
+    }
+    let _ = tcp;
+    Ok((Listen::Tcp(free_port()?), None))
+}
+
+#[cfg_attr(not(unix), allow(dead_code))]
+fn socket_fits(sock: &Path) -> Result<(), String> {
+    let n = sock.as_os_str().len();
+    if n > MAX_SOCKET_PATH {
+        return Err(format!("Cloud SQL proxy not started: the local socket path {} is {n} bytes, more than the {MAX_SOCKET_PATH} this system allows. Set TMPDIR to a shorter folder.", sock.display()));
+    }
+    Ok(())
+}
+
+/// Whether the proxy itself, and not some other program, accepts connections at `at`.
+async fn accepts(at: &Listen, ready: &AtomicBool) -> bool {
+    match at {
+        // Nobody else can create a file in the 0700 folder, so a socket that answers is the proxy's.
+        #[cfg(unix)]
+        Listen::Socket(p) => tokio::net::UnixStream::connect(p).await.is_ok(),
+        #[cfg(not(unix))]
+        Listen::Socket(_) => false,
+        // Any local program may listen on a port, so the proxy must first say it is ready.
+        // ponytail: the port is free when picked and only bound when the proxy starts, and once it is up any local user
+        // can connect to it, which with IAM sign-in lends them the IAM identity. That is the ceiling on Windows, where
+        // sqlx has no unix socket or named pipe; move to one if sqlx gains it there.
+        Listen::Tcp(port) => ready.load(Ordering::Acquire) && TcpStream::connect(("127.0.0.1", *port)).await.is_ok(),
+    }
+}
+
+async fn open_with(timeout: Duration, tcp: bool, gcloud_account: bool, build: impl Fn(&Listen) -> tokio::process::Command) -> Result<CloudProxy, String> {
     let mut last = String::new();
     for _ in 0..2 {
-        let port = free_port()?;
-        let mut cmd = build(port);
-        cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
+        let (at, dir) = local(tcp)?;
+        let mut cmd = build(&at);
+        for k in proxy_vars(std::env::vars_os()) {
+            cmd.env_remove(k);
+        }
+        cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
         #[cfg(windows)]
         cmd.creation_flags(crate::update::CREATE_NO_WINDOW);
         // The proxy dies with Quarry even when Quarry is killed. The flag follows the spawning thread, and this runs on a
@@ -149,11 +281,24 @@ async fn open_with(timeout: Duration, gcloud_account: bool, build: impl Fn(u16) 
             });
         }
         // ponytail: macOS has no parent-death signal, so only kill_on_drop covers it. A crash of Quarry leaves the proxy
-        // listening on 127.0.0.1 until it is killed; add a pid file sweep at startup if that shows up.
+        // running on its socket in the temp folder until it is killed; add a pid file sweep at startup if that shows up.
         let mut child = cmd.spawn().map_err(|e| format!("Cloud SQL proxy could not start: {e}"))?;
         #[cfg(windows)]
-        let job = job_for(&child);
+        let job = child.raw_handle().and_then(job_for);
         let tail: Arc<Mutex<VecDeque<String>>> = Arc::default();
+        let ready = Arc::new(AtomicBool::new(false));
+        // Errors come on stderr. stdout carries the ready line and is read to the end, so its pipe never fills.
+        if let Some(out) = child.stdout.take() {
+            let ready = ready.clone();
+            tokio::spawn(async move {
+                let mut lines = tokio::io::BufReader::new(out).lines();
+                while let Ok(Some(l)) = lines.next_line().await {
+                    if l.contains(READY_LINE) {
+                        ready.store(true, Ordering::Release);
+                    }
+                }
+            });
+        }
         let drain = child.stderr.take().map(|err| {
             let tail = tail.clone();
             tokio::spawn(async move {
@@ -170,13 +315,15 @@ async fn open_with(timeout: Duration, gcloud_account: bool, build: impl Fn(u16) 
         let text = |tail: &Arc<Mutex<VecDeque<String>>>| tail.lock().unwrap().iter().map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n");
         let start = Instant::now();
         let err = loop {
-            if TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+            // Alive before and after, so a listener left by a proxy that just died is not taken for it.
+            if matches!(child.try_wait(), Ok(None)) && accepts(&at, &ready).await && matches!(child.try_wait(), Ok(None)) {
                 return Ok(CloudProxy {
-                    port,
+                    port: if let Listen::Tcp(p) = at { p } else { 5432 },
                     gcloud_account,
                     _child: child,
                     #[cfg(windows)]
                     _job: job,
+                    dir,
                 });
             }
             if let Ok(Some(status)) = child.try_wait() {
@@ -195,7 +342,7 @@ async fn open_with(timeout: Duration, gcloud_account: bool, build: impl Fn(u16) 
             tokio::time::sleep(Duration::from_millis(100)).await;
         };
         // Another program may take the port between picking it and the proxy binding it.
-        let busy = err.to_lowercase().contains("address already in use") || err.contains("Only one usage of each socket address");
+        let busy = matches!(at, Listen::Tcp(_)) && (err.to_lowercase().contains("address already in use") || err.contains("Only one usage of each socket address"));
         last = err;
         if !busy {
             break;
@@ -235,9 +382,8 @@ impl Drop for Job {
 }
 
 #[cfg(windows)]
-fn job_for(child: &tokio::process::Child) -> Option<Job> {
+fn job_for(process: std::os::windows::io::RawHandle) -> Option<Job> {
     use windows_sys::Win32::System::JobObjects::*;
-    let process = child.raw_handle()?;
     unsafe {
         let h = CreateJobObjectW(std::ptr::null(), std::ptr::null());
         if h.is_null() {
@@ -262,15 +408,31 @@ fn proxy_file() -> String {
     format!("cloud-sql-proxy{}", std::env::consts::EXE_SUFFIX)
 }
 
-/// A program from its Settings path, else PATH, `extra` and the folder Quarry installs tools in.
+/// A program from its Settings path, else PATH, the folder Quarry installs tools in, then `extra`.
 pub fn find_program(file: &str, setting: &str, extra: &[PathBuf]) -> Option<PathBuf> {
     if !setting.trim().is_empty() {
         return Some(PathBuf::from(setting.trim()));
     }
-    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    search(file, std::env::var_os("PATH"), &crate::app::config::tools_dir(), extra)
+}
+
+/// Quarry's tools folder holds only verified downloads, so it comes before the guessed folders. A relative PATH entry
+/// (empty or `.`) would run a program from whatever folder Quarry was started in, so it is skipped.
+fn search(file: &str, path: Option<std::ffi::OsString>, tools: &Path, extra: &[PathBuf]) -> Option<PathBuf> {
+    let mut dirs: Vec<PathBuf> = path.map(|p| std::env::split_paths(&p).filter(|d| d.is_absolute()).collect()).unwrap_or_default();
+    dirs.push(tools.to_path_buf());
     dirs.extend(extra.iter().cloned());
-    dirs.push(crate::app::config::tools_dir());
     dirs.into_iter().map(|d| d.join(file)).find(|p| p.is_file())
+}
+
+/// Homebrew's folders, which a Finder-opened app does not have on PATH. Only on macOS: elsewhere the same paths are
+/// ordinary folders, and on Windows `C:\opt\homebrew\bin` is one any user may create.
+pub fn brew_dirs() -> Vec<PathBuf> {
+    brew_dirs_on(std::env::consts::OS)
+}
+
+fn brew_dirs_on(os: &str) -> Vec<PathBuf> {
+    if os == "macos" { ["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from).to_vec() } else { Vec::new() }
 }
 
 /// Where the Google Cloud SDK usually puts `gcloud`. An app opened from Finder has no shell PATH, so these are checked directly.
@@ -292,8 +454,8 @@ pub fn find_gcloud(setting: &str) -> Option<PathBuf> {
     find_program(gcloud_file(), setting, &gcloud_dirs())
 }
 
-/// The proxy: Settings, PATH, the gcloud SDK's own `bin` (where `gcloud components install` puts it), Homebrew, Quarry's tools folder.
-/// May run gcloud, so call it off the UI thread.
+/// The proxy: Settings, PATH, Quarry's tools folder, the gcloud SDK's own `bin` (where `gcloud components install` puts
+/// it), Homebrew. May run gcloud, so call it off the UI thread.
 pub fn find_proxy(setting: &str, gcloud: Option<&Path>) -> Option<PathBuf> {
     let file = proxy_file();
     let mut extra = Vec::new();
@@ -301,7 +463,7 @@ pub fn find_proxy(setting: &str, gcloud: Option<&Path>) -> Option<PathBuf> {
     if let Some(d) = gcloud.and_then(|g| std::fs::canonicalize(g).ok()).and_then(|g| g.parent().map(Path::to_path_buf)) {
         extra.push(d);
     }
-    extra.extend(["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from));
+    extra.extend(brew_dirs());
     if let Some(p) = find_program(&file, setting, &extra) {
         return Some(p);
     }
@@ -310,21 +472,91 @@ pub fn find_proxy(setting: &str, gcloud: Option<&Path>) -> Option<PathBuf> {
     p.is_file().then_some(p)
 }
 
+/// How long one gcloud call may take before it is stopped, so a hung gcloud cannot keep a connection or the browser
+/// waiting forever.
+const GCLOUD_LIMIT: Duration = Duration::from_secs(30);
+/// `components install` downloads, so it gets longer.
+const INSTALL_LIMIT: Duration = Duration::from_secs(300);
+
 fn run_gcloud(gcloud: &Path, args: &[&str]) -> Result<String, String> {
+    run_gcloud_for(gcloud, args, GCLOUD_LIMIT)
+}
+
+fn run_gcloud_for(gcloud: &Path, args: &[&str], limit: Duration) -> Result<String, String> {
     let mut cmd = std::process::Command::new(gcloud);
-    cmd.arg("--quiet").args(args).stdin(std::process::Stdio::null());
+    cmd.arg("--quiet").args(args);
     cmd.env("CLOUDSDK_CORE_DISABLE_PROMPTS", "1");
+    // gcloud is Python, which on Windows would otherwise write in the console's code page.
+    cmd.env("PYTHONUTF8", "1");
     if let Some(p) = path_with_parent(gcloud) {
         cmd.env("PATH", p);
     }
-    #[cfg(windows)]
-    std::os::windows::process::CommandExt::creation_flags(&mut cmd, crate::update::CREATE_NO_WINDOW);
-    let out = cmd.output().map_err(|e| format!("Cloud SQL: gcloud could not start ({e})"))?;
+    let out = match run_limited(cmd, limit) {
+        Ok(o) => o,
+        Err(Limited::Start(e)) => return Err(format!("Cloud SQL: gcloud could not start ({e})")),
+        Err(Limited::Late) => return Err(format!("Cloud SQL: gcloud did not answer within {} s and was stopped.", limit.as_secs())),
+    };
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
         Err(gcloud_error(&String::from_utf8_lossy(&out.stderr)))
     }
+}
+
+enum Limited {
+    Start(std::io::Error),
+    Late,
+}
+
+/// Runs `cmd` with its output captured, and stops it and what it started once `limit` has passed.
+fn run_limited(mut cmd: std::process::Command, limit: Duration) -> Result<std::process::Output, Limited> {
+    use std::io::Read;
+    use std::sync::mpsc;
+    cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut cmd, crate::update::CREATE_NO_WINDOW);
+    // A group of its own, so a timeout also stops what gcloud started.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    let mut child = cmd.spawn().map_err(Limited::Start)?;
+    // On Windows gcloud is a batch file that starts Python; the job stops both, and whatever is left when it closes.
+    #[cfg(windows)]
+    let job = job_for(std::os::windows::io::AsRawHandle::as_raw_handle(&child));
+    fn read(r: Option<impl Read + Send + 'static>) -> mpsc::Receiver<Vec<u8>> {
+        let (tx, rx) = mpsc::channel();
+        if let Some(mut r) = r {
+            std::thread::spawn(move || {
+                let mut b = Vec::new();
+                let _ = r.read_to_end(&mut b);
+                let _ = tx.send(b);
+            });
+        }
+        rx
+    }
+    let (out, err) = (read(child.stdout.take()), read(child.stderr.take()));
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break Some(s),
+            Ok(None) if start.elapsed() < limit => std::thread::sleep(Duration::from_millis(50)),
+            _ => break None,
+        }
+    };
+    let Some(status) = status else {
+        // Not yet waited for, so the id is still this process group's.
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+        }
+        #[cfg(windows)]
+        drop(job);
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(Limited::Late);
+    };
+    // Something gcloud left running may still hold the pipes, so the output is not waited for long.
+    let take = |rx: mpsc::Receiver<Vec<u8>>| rx.recv_timeout(Duration::from_secs(2)).unwrap_or_default();
+    Ok(std::process::Output { status, stdout: take(out), stderr: take(err) })
 }
 
 /// gcloud's own wording is long and full of advice for its terminal, so the known cases get a short one.
@@ -501,7 +733,7 @@ pub fn download_proxy(dir: &Path) -> Result<PathBuf, String> {
 
 /// `gcloud components install cloud-sql-proxy`. Package-manager installs of gcloud refuse it.
 pub fn install_component(gcloud: &Path) -> Result<String, String> {
-    run_gcloud(gcloud, &["components", "install", "cloud-sql-proxy"]).map_err(|m| {
+    run_gcloud_for(gcloud, &["components", "install", "cloud-sql-proxy"], INSTALL_LIMIT).map_err(|m| {
         let low = m.to_lowercase();
         if low.contains("component manager") && low.contains("disabled") {
             "Cloud SQL: this gcloud was installed with a package manager, so it cannot install components. Use Download instead.".into()
@@ -530,6 +762,8 @@ pub struct Start {
     pub components: bool,
     pub account: Option<String>,
     pub projects: Result<Vec<Project>, String>,
+    /// Application Default Credentials exist, which IAM sign-in needs.
+    pub adc: bool,
 }
 
 /// An answer to the Cloud SQL browser.
@@ -540,12 +774,14 @@ pub enum Found {
     Instances { project: String, res: Result<Vec<Instance>, String> },
     /// The proxy was downloaded or installed at this path.
     Proxy(Result<PathBuf, String>),
+    /// Where gcloud is without a Settings path, for the Settings dialog.
+    Gcloud(Option<PathBuf>),
 }
 
 /// Finds gcloud and the proxy and lists the projects. Runs gcloud, so call it off the UI thread.
 pub fn start(gcloud_setting: &str, proxy_setting: &str) -> Start {
     let Some(g) = find_gcloud(gcloud_setting) else {
-        return Start { gcloud: None, proxy: find_proxy(proxy_setting, None), components: false, account: None, projects: Ok(Vec::new()) };
+        return Start { gcloud: None, proxy: find_proxy(proxy_setting, None), components: false, account: None, projects: Ok(Vec::new()), adc: adc_exists() };
     };
     let proxy = find_proxy(proxy_setting, Some(&g));
     let components = proxy.is_none() && components_manageable(&g);
@@ -553,7 +789,7 @@ pub fn start(gcloud_setting: &str, proxy_setting: &str) -> Start {
         Ok(a) => (a, projects(&g)),
         Err(e) => (None, Err(e)),
     };
-    Start { gcloud: Some(g), proxy, components, account, projects }
+    Start { gcloud: Some(g), proxy, components, account, projects, adc: adc_exists() }
 }
 
 /// Installs the proxy as a gcloud component, then finds where gcloud put it.
@@ -572,12 +808,77 @@ pub(crate) mod tests {
 
     #[test]
     fn args_follow_the_credential_source_iam_and_ip_kind() {
-        let a = proxy_args(&conf(false, IpKind::Public), 5500, false);
-        assert_eq!(a, ["proj-1:europe-west1:db-main", "--port", "5500", "--address", "127.0.0.1", "--quiet"]);
-        let a = proxy_args(&conf(true, IpKind::Private), 5500, true);
-        assert_eq!(&a[6..], ["--gcloud-auth", "--auto-iam-authn", "--private-ip"]);
-        assert_eq!(proxy_args(&conf(false, IpKind::Psc), 1, false).last().unwrap(), "--psc");
-        assert!(!proxy_args(&conf(true, IpKind::Public), 1, false).contains(&"--gcloud-auth".to_string()));
+        let tcp = Listen::Tcp(5500);
+        let a = proxy_args(&conf(false, IpKind::Public), &tcp, false);
+        assert_eq!(a, ["proj-1:europe-west1:db-main", "--port", "5500", "--address", "127.0.0.1"]);
+        // A password sign-in uses the gcloud account when there is one.
+        assert_eq!(&proxy_args(&conf(false, IpKind::Private), &tcp, true)[5..], ["--gcloud-auth", "--private-ip"]);
+        // The proxy refuses --gcloud-auth with --auto-iam-authn, so IAM always goes through Application Default Credentials.
+        assert_eq!(&proxy_args(&conf(true, IpKind::Private), &tcp, true)[5..], ["--auto-iam-authn", "--private-ip"]);
+        assert_eq!(proxy_args(&conf(false, IpKind::Psc), &tcp, false).last().unwrap(), "--psc");
+        // The socket is given to the instance alone, so no port is opened, and its path is query-encoded.
+        let a = proxy_args(&conf(true, IpKind::Public), &Listen::Socket("/tmp/q a+b/.s.PGSQL.5432".into()), false);
+        assert_eq!(a, ["proj-1:europe-west1:db-main?unix-socket-path=/tmp/q%20a%2Bb/.s.PGSQL.5432", "--auto-iam-authn"]);
+    }
+
+    #[test]
+    fn adc_is_looked_for_where_google_auth_looks() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| move |k: &str| pairs.iter().find(|p| p.0 == k).map(|p| std::ffi::OsString::from(p.1));
+        let home = Some(PathBuf::from("/home/u"));
+        assert_eq!(adc_path(env(&[("GOOGLE_APPLICATION_CREDENTIALS", "/k.json"), ("CLOUDSDK_CONFIG", "/c")]), home.clone(), false), Some("/k.json".into()));
+        assert_eq!(adc_path(env(&[("CLOUDSDK_CONFIG", "/c")]), home.clone(), true), Some(PathBuf::from("/c").join("application_default_credentials.json")));
+        assert_eq!(adc_path(env(&[("HOME", "/h")]), home.clone(), false), Some(PathBuf::from("/h/.config/gcloud").join("application_default_credentials.json")));
+        assert_eq!(adc_path(env(&[("GOOGLE_APPLICATION_CREDENTIALS", "")]), home.clone(), false), Some(PathBuf::from("/home/u/.config/gcloud").join("application_default_credentials.json")));
+        assert_eq!(adc_path(env(&[("APPDATA", "C:\\Users\\u\\AppData\\Roaming")]), home.clone(), true), Some(PathBuf::from("C:\\Users\\u\\AppData\\Roaming").join("gcloud").join("application_default_credentials.json")));
+        assert_eq!(adc_path(env(&[]), None, true), None);
+    }
+
+    #[test]
+    fn proxy_settings_from_the_environment_are_removed() {
+        let vars = [("CSQL_PROXY_UNIX_SOCKET", "/x"), ("csql_proxy_credentials_file", "/k"), ("PATH", "/bin"), ("GOOGLE_APPLICATION_CREDENTIALS", "/a"), ("MY_CSQL_PROXY_X", "1")];
+        let gone = proxy_vars(vars.iter().map(|(k, v)| (k.into(), v.into())));
+        assert_eq!(gone, ["CSQL_PROXY_UNIX_SOCKET", "csql_proxy_credentials_file"]);
+    }
+
+    #[test]
+    fn programs_are_never_found_in_relative_or_homebrew_folders_off_macos() {
+        assert!(brew_dirs_on("windows").is_empty() && brew_dirs_on("linux").is_empty());
+        assert_eq!(brew_dirs_on("macos").len(), 2);
+        let file = format!("quarry-search-test{}", std::env::consts::EXE_SUFFIX);
+        // A relative folder under the working directory, which a PATH entry like `.` resolves into.
+        let rel = PathBuf::from("target").join(format!("search-test-{}", std::process::id()));
+        std::fs::create_dir_all(&rel).unwrap();
+        std::fs::write(rel.join(&file), b"").unwrap();
+        let (tools, extra) = (crate::update::fresh_temp_dir("quarry-search-tools").unwrap(), crate::update::fresh_temp_dir("quarry-search-extra").unwrap());
+        let path = std::env::join_paths([rel.clone(), PathBuf::new()]).unwrap();
+        assert_eq!(search(&file, Some(path.clone()), &tools, &[]), None, "a relative PATH entry is skipped");
+        std::fs::write(extra.join(&file), b"").unwrap();
+        std::fs::write(tools.join(&file), b"").unwrap();
+        assert_eq!(search(&file, Some(path), &tools, &[extra.clone()]), Some(tools.join(&file)), "Quarry's tools folder comes before the guessed folders");
+        for d in [&rel, &tools, &extra] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    #[test]
+    fn a_socket_path_too_long_for_the_system_is_refused() {
+        assert!(socket_fits(Path::new("/tmp/qcsql-0123456789abcdef/.s.PGSQL.5432")).is_ok());
+        let long = PathBuf::from(format!("/{}", "d".repeat(100))).join(SOCKET_FILE);
+        assert!(socket_fits(&long).unwrap_err().contains("TMPDIR"));
+    }
+
+    #[test]
+    fn a_hung_gcloud_is_stopped_and_output_is_captured() {
+        let stub = |mode: &str| {
+            let mut c = std::process::Command::new(std::env::current_exe().unwrap());
+            c.args(["--exact", "cloudsql::tests::stub_proxy", "--ignored", "--nocapture", "--test-threads=1"]).env("QUARRY_STUB_PROXY", mode);
+            c
+        };
+        let t = Instant::now();
+        assert!(matches!(run_limited(stub("hang"), Duration::from_millis(800)), Err(Limited::Late)));
+        assert!(t.elapsed() < Duration::from_secs(10), "stopped at the limit, not when it ended");
+        let out = run_limited(stub("fail"), Duration::from_secs(20)).ok().unwrap();
+        assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("instance not found"));
     }
 
     #[test]
@@ -664,34 +965,57 @@ pub(crate) mod tests {
 
     /// The test binary run again as a stand-in for the proxy, so no script or extra program is needed on any system.
     /// Does nothing unless QUARRY_STUB_PROXY is set.
+    /// One accepted connection: a handle to read from it and one to write to it.
+    type Halves = (Box<dyn std::io::Read + Send>, Box<dyn std::io::Write + Send>);
+
+    /// Listens where the stub was told, on the socket path or the port, prints the proxy's ready line when `ready`, and
+    /// hands each connection to `each`.
+    fn serve(ready: bool, each: impl Fn(Halves) + Send + Sync + 'static) {
+        let each = Arc::new(each);
+        let say = || {
+            if ready {
+                println!("The proxy has started successfully and is {READY_LINE}!");
+            }
+        };
+        #[cfg(unix)]
+        if let Ok(p) = std::env::var("QUARRY_STUB_SOCKET") {
+            let l = std::os::unix::net::UnixListener::bind(p).unwrap();
+            say();
+            for s in l.incoming().flatten() {
+                let each = each.clone();
+                std::thread::spawn(move || each((Box::new(s.try_clone().unwrap()), Box::new(s))));
+            }
+            return;
+        }
+        let l = std::net::TcpListener::bind(("127.0.0.1", std::env::var("QUARRY_STUB_PORT").unwrap().parse::<u16>().unwrap())).unwrap();
+        say();
+        for s in l.incoming().flatten() {
+            let each = each.clone();
+            std::thread::spawn(move || each((Box::new(s.try_clone().unwrap()), Box::new(s))));
+        }
+    }
+
+    /// The test binary run again as a stand-in for the proxy, so no script or extra program is needed on any system.
+    /// Does nothing unless QUARRY_STUB_PROXY is set.
     #[test]
     #[ignore]
     fn stub_proxy() {
         let Ok(mode) = std::env::var("QUARRY_STUB_PROXY") else { return };
         match mode.as_str() {
-            "listen" => {
-                let l = std::net::TcpListener::bind(("127.0.0.1", std::env::var("QUARRY_STUB_PORT").unwrap().parse::<u16>().unwrap())).unwrap();
-                loop {
-                    let _ = l.accept();
-                }
-            }
+            "listen" => serve(true, drop),
+            // Another program on the port, which never says it is the proxy.
+            "squat" => serve(false, drop),
             "forward" => {
-                let l = std::net::TcpListener::bind(("127.0.0.1", std::env::var("QUARRY_STUB_PORT").unwrap().parse::<u16>().unwrap())).unwrap();
                 let target = std::env::var("QUARRY_STUB_TARGET").unwrap();
-                for s in l.incoming().flatten() {
-                    let target = target.clone();
+                serve(true, move |(mut r, mut w)| {
+                    let Ok(t) = std::net::TcpStream::connect(&target) else { return };
+                    let (mut up_w, mut down_r) = (t.try_clone().unwrap(), t);
                     std::thread::spawn(move || {
-                        let Ok(t) = std::net::TcpStream::connect(&target) else { return };
-                        let (mut up_r, mut up_w) = (s.try_clone().unwrap(), t.try_clone().unwrap());
-                        std::thread::spawn(move || {
-                            let _ = std::io::copy(&mut up_r, &mut up_w);
-                            let _ = up_w.shutdown(std::net::Shutdown::Write);
-                        });
-                        let (mut down_r, mut down_w) = (t, s);
-                        let _ = std::io::copy(&mut down_r, &mut down_w);
-                        let _ = down_w.shutdown(std::net::Shutdown::Write);
+                        let _ = std::io::copy(&mut r, &mut up_w);
+                        let _ = up_w.shutdown(std::net::Shutdown::Write);
                     });
-                }
+                    let _ = std::io::copy(&mut down_r, &mut w);
+                });
             }
             "fail" => {
                 eprintln!("first line");
@@ -702,10 +1026,14 @@ pub(crate) mod tests {
         }
     }
 
-    pub(super) fn stub(mode: &'static str) -> impl Fn(u16) -> tokio::process::Command {
-        move |port| {
+    pub(super) fn stub(mode: &'static str) -> impl Fn(&Listen) -> tokio::process::Command {
+        move |at| {
             let mut c = tokio::process::Command::new(std::env::current_exe().unwrap());
-            c.args(["--exact", "cloudsql::tests::stub_proxy", "--ignored", "--nocapture", "--test-threads=1"]).env("QUARRY_STUB_PROXY", mode).env("QUARRY_STUB_PORT", port.to_string());
+            c.args(["--exact", "cloudsql::tests::stub_proxy", "--ignored", "--nocapture", "--test-threads=1"]).env("QUARRY_STUB_PROXY", mode);
+            match at {
+                Listen::Socket(p) => c.env("QUARRY_STUB_SOCKET", p),
+                Listen::Tcp(port) => c.env("QUARRY_STUB_PORT", port.to_string()),
+            };
             c
         }
     }
@@ -721,24 +1049,46 @@ pub(crate) mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_ready_proxy_accepts_and_dropping_it_stops_it() {
-        let p = open_with(Duration::from_secs(20), false, stub("listen")).await.unwrap();
+    async fn a_ready_proxy_on_a_port_accepts_and_dropping_it_stops_it() {
+        let p = open_with(Duration::from_secs(20), true, false, stub("listen")).await.unwrap();
         let port = p.port;
+        assert!(p.socket_dir().is_none());
         assert!(TcpStream::connect(("127.0.0.1", port)).await.is_ok());
         drop(p);
         assert!(refused(port).await, "the child should be killed with the handle");
     }
 
+    /// The socket sits in a folder only this user may open, and the folder goes with the handle.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_ready_proxy_on_a_private_socket_accepts_and_dropping_it_removes_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let p = open_with(Duration::from_secs(20), false, false, stub("listen")).await.unwrap();
+        let dir = p.socket_dir().unwrap().to_path_buf();
+        assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(p.port, 5432);
+        assert!(tokio::net::UnixStream::connect(dir.join(SOCKET_FILE)).await.is_ok());
+        drop(p);
+        assert!(!dir.exists(), "the socket folder is removed with the handle");
+    }
+
+    /// A program that took the port first passes a connect check, but it never prints the proxy's ready line.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_listener_that_is_not_the_proxy_is_not_taken_for_it() {
+        let e = open_with(Duration::from_millis(1500), true, false, stub("squat")).await.err().unwrap();
+        assert!(e.starts_with("Cloud SQL proxy did not accept connections"), "{e}");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_failing_proxy_reports_its_stderr() {
-        let e = open_with(Duration::from_secs(20), false, stub("fail")).await.err().unwrap();
+        let e = open_with(Duration::from_secs(20), native_tcp(), false, stub("fail")).await.err().unwrap();
         assert!(e.starts_with("Cloud SQL proxy failed:") && e.contains("instance not found"), "{e}");
         assert_eq!(crate::db::classify(&e), crate::db::ErrKind::CloudSql);
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_proxy_that_never_listens_times_out() {
-        let e = open_with(Duration::from_millis(800), false, stub("hang")).await.err().unwrap();
+        let e = open_with(Duration::from_millis(800), native_tcp(), false, stub("hang")).await.err().unwrap();
         assert!(e.starts_with("Cloud SQL proxy did not accept connections"), "{e}");
     }
 }

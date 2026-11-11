@@ -694,6 +694,10 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
     // The environment (PGPASSWORD, PGSSLROOTCERT and so on) and ~/.pgpass would change what a saved connection
     // does depending on where Quarry was started, so neither is read.
     let mut base = PgConnectOptions::new_without_pgpass().host(&host).port(port).username(&a.user).ssl_mode(ssl_mode(mode));
+    // On macOS and Linux the proxy listens on a socket in a private folder; sqlx adds `.s.PGSQL.<port>` to it.
+    if let Some(dir) = way.as_ref().and_then(|w| if let crate::db::Way::CloudSql(p) = w { p.socket_dir() } else { None }) {
+        base = base.socket(dir);
+    }
     base = base.password(&a.password);
     if !a.ssl_ca.is_empty() {
         base = base.ssl_root_cert(&a.ssl_ca);
@@ -752,8 +756,9 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
         Ok::<_, String>((f, dbs, opts, locals, TestInfo { schemas, setting_errors: errors, ..Default::default() }))
     };
     let (f, dbs, opts, locals, ti) = tokio::time::timeout(timeout, first).await.map_err(|_| format!("Could not connect and set up the session within {} s", timeout.as_secs()))?.map_err(|m| match (&net.cloud_sql, &way) {
-        // A refused login is most often the wrong Google identity, so the message names the one the proxy used.
-        (Some(c), Some(crate::db::Way::CloudSql(p))) if c.iam && classify(&m) == ErrKind::SignIn => format!("Cloud SQL IAM sign-in refused (the proxy used {}): {m}", if p.gcloud_account { "the gcloud account" } else { "Application Default Credentials" }),
+        // A refused login is most often the wrong Google identity. IAM always signs in with Application Default
+        // Credentials, which may be another account than the gcloud one that filled the user.
+        (Some(c), Some(crate::db::Way::CloudSql(_))) if c.iam && classify(&m) == ErrKind::SignIn => format!("Cloud SQL IAM sign-in refused (the proxy used Application Default Credentials): {m}"),
         _ => m,
     })?;
     let pools = PgPools::new(opts.clone(), default_db.clone(), timeout, locals, f.timeout.clone()).with_session(sess);

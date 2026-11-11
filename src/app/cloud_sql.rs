@@ -29,14 +29,47 @@ pub(super) struct CloudCache {
     pub(super) req: u64,
     pub(super) start: Option<Start>,
     pub(super) instances: HashMap<String, Result<Vec<Instance>, String>>,
-    /// Projects still to ask for, and how many are being asked.
+    /// Projects still to ask for, and how many gcloud lists are running, those of a load Refresh replaced included.
     pub(super) queue: VecDeque<String>,
     pub(super) running: usize,
     /// What the running download or install of the proxy says while it works.
     pub(super) busy: Option<&'static str>,
+    /// Where gcloud is without a Settings path, for Settings: None until asked, then the answer once it came.
+    pub(super) gcloud_seen: Option<Option<PathBuf>>,
+    pub(super) gcloud_asked: bool,
 }
 
 impl CloudCache {
+    /// A new load `req`. Lists still running keep counting against `PARALLEL` until they end or time out, so Refresh
+    /// never runs more gcloud processes at once.
+    pub(super) fn reload(&mut self, req: u64) {
+        let old = std::mem::take(self);
+        *self = CloudCache { req, busy: old.busy, running: old.running, gcloud_seen: old.gcloud_seen, gcloud_asked: old.gcloud_asked, ..Default::default() };
+    }
+
+    /// The next project to list, when fewer than `PARALLEL` lists run.
+    fn next_project(&mut self) -> Option<String> {
+        if self.running >= PARALLEL {
+            return None;
+        }
+        let p = self.queue.pop_front()?;
+        self.running += 1;
+        Some(p)
+    }
+
+    /// A list ended; it is kept only when it belongs to the current load.
+    fn listed(&mut self, req: u64, project: String, res: Result<Vec<Instance>, String>) {
+        self.running = self.running.saturating_sub(1);
+        if req == self.req {
+            self.instances.insert(project, res);
+        }
+    }
+
+    /// Whether IAM sign-in can start: the last load found Application Default Credentials.
+    pub(super) fn adc(&self) -> bool {
+        self.start.as_ref().is_some_and(|s| s.adc)
+    }
+
     pub(super) fn account(&self) -> Option<&str> {
         self.start.as_ref().and_then(|s| s.account.as_deref())
     }
@@ -60,6 +93,8 @@ pub(super) struct CloudBrowser {
     pub(super) sel: Option<String>,
     /// Opened from a connection form: Use fills that form instead of a new one.
     pub(super) change: bool,
+    /// An IAM instance whose Use found no Application Default Credentials, which the browser then asks for.
+    pub(super) adc_for: Option<String>,
 }
 
 /// The states a Cloud SQL card explains.
@@ -68,7 +103,12 @@ pub(super) enum Card {
     NoGcloud,
     NoProxy,
     SignedOut,
+    /// IAM sign-in, and this machine has no Application Default Credentials.
+    NoAdc,
 }
+
+/// The command that makes Application Default Credentials.
+const ADC_LOGIN: &str = "gcloud auth application-default login";
 
 /// What a click on a card asks for.
 #[derive(Clone, Copy, PartialEq)]
@@ -321,14 +361,26 @@ pub(super) fn state_card(ui: &mut egui::Ui, card: Card, account: Option<&str>, c
                 };
                 small(ui, &body, MUTED());
                 ui.add_space(4.0);
+                run_line(ui, "gcloud auth login", again);
+            });
+            card_rule(ui);
+            card_indent(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    ui.label(RichText::new("Run").color(TEXT()));
-                    egui::Frame::new().fill(pal().well).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_SM).inner_margin(egui::Margin::symmetric(6, 2)).show(ui, |ui| {
-                        ui.add(egui::Label::new(RichText::new("gcloud auth login").monospace().size(TXT_SMALL).color(TEXT())).selectable(true));
-                    });
-                    ui.label(RichText::new(format!(", then {again}.")).color(TEXT()));
+                    ui.label(RichText::new(format!("Quarry checks again on {again}.")).size(TXT_SMALL).color(FAINT()));
+                    again_button(ui, true);
                 });
+            });
+        }),
+        Card::NoAdc => card_frame(ui, None, |ui| {
+            card_title(ui, paint_warn, WARNING(), "IAM sign-in needs Application Default Credentials", BRIGHT());
+            card_indent(ui, |ui| {
+                small(ui, "The Cloud SQL proxy signs in to IAM with Application Default Credentials, not the gcloud account, and this machine has none yet.", MUTED());
+                ui.add_space(4.0);
+                run_line(ui, ADC_LOGIN, again);
+                small(ui, &match account {
+                    Some(a) => format!("Sign in as the account the database user names, such as {a}."),
+                    None => "Sign in as the account the database user names.".to_string(),
+                }, FAINT());
             });
             card_rule(ui);
             card_indent(ui, |ui| {
@@ -340,6 +392,18 @@ pub(super) fn state_card(ui: &mut egui::Ui, card: Card, account: Option<&str>, c
         }),
     }
     act
+}
+
+/// "Run `command`, then Retry." with the command in a box that can be selected and copied.
+fn run_line(ui: &mut egui::Ui, command: &str, again: &str) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.label(RichText::new("Run").color(TEXT()));
+        egui::Frame::new().fill(pal().well).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_SM).inner_margin(egui::Margin::symmetric(6, 2)).show(ui, |ui| {
+            ui.add(egui::Label::new(RichText::new(command).monospace().size(TXT_SMALL).color(TEXT())).selectable(true));
+        });
+        ui.label(RichText::new(format!(", then {again}.")).color(TEXT()));
+    });
 }
 
 /// A card at its design width in the middle of the page, under the "CLOUD SQL" caption.
@@ -379,19 +443,38 @@ impl App {
         }
         self.req += 1;
         let req = self.req;
-        let busy = self.cloud.busy.take();
-        self.cloud = CloudCache { req, busy, ..Default::default() };
+        self.cloud.reload(req);
         let (g, p) = (self.prefs.gcloud.clone(), self.prefs.cloud_sql_proxy.clone());
         self.worker.blocking(move || Msg::CloudSql { req, found: Found::Start(crate::cloudsql::start(&g, &p)) });
+    }
+
+    /// Where gcloud is found, for Settings: asked once each time Settings opens, off the UI thread. The demo shows a
+    /// fixed path and never looks.
+    pub(super) fn gcloud_found_text(&mut self) -> String {
+        if self.demo {
+            return "Found automatically at ~/google-cloud-sdk/bin/gcloud. Set a path only to use another gcloud.".into();
+        }
+        if !self.cloud.gcloud_asked {
+            self.cloud.gcloud_asked = true;
+            self.worker.blocking(|| Msg::CloudSql { req: 0, found: Found::Gcloud(crate::cloudsql::find_gcloud("")) });
+        }
+        match &self.cloud.gcloud_seen {
+            None => "Looking for gcloud\u{2026}".into(),
+            Some(Some(p)) => format!("Found automatically at {}. Set a path only to use another gcloud.", p.display()),
+            Some(None) => "gcloud was not found. Install the Google Cloud CLI or enter its path.".into(),
+        }
+    }
+
+    /// Settings closed: it looks again the next time it opens.
+    pub(super) fn gcloud_forget(&mut self) {
+        (self.cloud.gcloud_asked, self.cloud.gcloud_seen) = (false, None);
     }
 
     /// Starts the next instance lists, up to `PARALLEL` at once.
     fn cloud_pump(&mut self) {
         let req = self.cloud.req;
         let Some(g) = self.cloud.start.as_ref().and_then(|s| s.gcloud.clone()) else { return };
-        while self.cloud.running < PARALLEL {
-            let Some(project) = self.cloud.queue.pop_front() else { return };
-            self.cloud.running += 1;
+        while let Some(project) = self.cloud.next_project() {
             let g = g.clone();
             self.worker.blocking(move || {
                 let res = crate::cloudsql::instances(&g, &project);
@@ -402,6 +485,17 @@ impl App {
 
     pub(super) fn cloud_found(&mut self, req: u64, found: Found) {
         match found {
+            Found::Gcloud(p) => {
+                // An answer for a Settings that has closed since is dropped, so the next opening looks again.
+                if self.cloud.gcloud_asked {
+                    self.cloud.gcloud_seen = Some(p);
+                }
+            }
+            // Counted whatever load it was for, since it ran until now.
+            Found::Instances { project, res } => {
+                self.cloud.listed(req, project, res);
+                self.cloud_pump();
+            }
             Found::Proxy(res) => {
                 self.cloud.busy = None;
                 match res {
@@ -422,11 +516,6 @@ impl App {
                     self.cloud.queue = ps.iter().filter(|p| !self.cloud.instances.contains_key(&p.id)).map(|p| p.id.clone()).collect();
                 }
                 self.cloud.start = Some(s);
-                self.cloud_pump();
-            }
-            Found::Instances { project, res } => {
-                self.cloud.running = self.cloud.running.saturating_sub(1);
-                self.cloud.instances.insert(project, res);
                 self.cloud_pump();
             }
         }
@@ -489,14 +578,19 @@ impl App {
         ui.add_space(70.0);
         let missing = raw.contains(crate::cloudsql::PROXY_MISSING);
         let signed_out = raw.to_lowercase().contains("gcloud auth login");
-        if missing || signed_out {
+        let no_adc = raw.contains(crate::cloudsql::ADC_MISSING);
+        if missing || signed_out || no_adc {
             let account = self.cloud.account().map(str::to_string);
-            act = centered(ui, |ui| if missing { self.proxy_missing_card(ui, "Retry") } else { state_card(ui, Card::SignedOut, account.as_deref(), false, None, "Retry") });
+            act = centered(ui, |ui| match (missing, no_adc) {
+                (true, _) => self.proxy_missing_card(ui, "Retry"),
+                (_, true) => state_card(ui, Card::NoAdc, account.as_deref(), false, None, "Retry"),
+                _ => state_card(ui, Card::SignedOut, account.as_deref(), false, None, "Retry"),
+            });
         } else {
             let project = instance.split(':').rev().nth(2).unwrap_or_default().to_string();
             let iam = e.raw.to_lowercase().contains("iam sign-in refused");
             let steps: Vec<String> = if iam {
-                vec!["The database user is the IAM account (a service account ends in .iam).".into(), "The instance flag cloudsql.iam_authentication is on.".into(), "Run gcloud auth login if the account changed.".into()]
+                vec!["The database user is the IAM account (a service account ends in .iam).".into(), "The instance flag cloudsql.iam_authentication is on.".into(), format!("Run {ADC_LOGIN} as that account: the proxy signs in with Application Default Credentials, not the gcloud account.")]
             } else {
                 vec![format!("Ask for the Cloud SQL Client role on {}.", if project.is_empty() { "the project" } else { &project }), "Check that the instance is RUNNABLE.".into(), "Run gcloud auth login if the account changed.".into()]
             };
@@ -590,6 +684,12 @@ impl App {
                         act = act.or(state_card(ui, Card::NoProxy, None, self.cloud.components(), self.cloud.busy, "Refresh"));
                         ui.add_space(10.0);
                     }
+                    if self.cloud.adc() {
+                        b.adc_for = None;
+                    } else if b.adc_for.is_some() {
+                        act = act.or(state_card(ui, Card::NoAdc, self.cloud.account(), false, None, "Refresh"));
+                        ui.add_space(10.0);
+                    }
                     ui.horizontal_top(|ui| {
                         ui.spacing_mut().item_spacing.x = PANEL_GAP;
                         self.cloud_projects(ui, &mut b);
@@ -613,7 +713,11 @@ impl App {
         });
         self.cloud_card_act(act, |a| a.cloud_load(true));
         if let Some(i) = pick {
-            return self.cloud_use(&i, b.change);
+            // Without Application Default Credentials the proxy cannot sign in to IAM, so the browser asks for them first.
+            if !(i.iam && !self.cloud.adc()) {
+                return self.cloud_use(&i, b.change);
+            }
+            (b.adc_for, b.sel) = (Some(i.connection_name.clone()), Some(i.connection_name));
         }
         if !(close || r.should_close()) {
             self.cloud_browser = Some(b);
@@ -884,6 +988,23 @@ mod tests {
         assert_eq!((f.name.as_str(), f.cloud_sql.as_ref().unwrap().ip, f.cloud_sql.as_ref().unwrap().iam), ("mine", IpKind::Psc, false));
         use_host(&mut f);
         assert!(f.cloud_sql.is_none() && f.addr.host.is_empty());
+    }
+
+    #[test]
+    fn refresh_never_runs_more_than_parallel_gcloud_lists() {
+        let projects = |p: &str| (0..10).map(|i| format!("{p}{i}")).collect::<VecDeque<_>>();
+        let mut c = CloudCache { req: 1, queue: projects("old"), ..Default::default() };
+        while c.next_project().is_some() {}
+        assert_eq!(c.running, PARALLEL);
+        c.reload(2);
+        c.queue = projects("new");
+        assert_eq!(c.next_project(), None, "the lists of the replaced load still run, so they still count");
+        c.listed(1, "old0".into(), Ok(Vec::new()));
+        assert!(!c.instances.contains_key("old0"), "an answer for the replaced load is not kept");
+        assert_eq!(c.next_project().as_deref(), Some("new0"));
+        assert_eq!(c.next_project(), None);
+        c.listed(2, "new0".into(), Ok(Vec::new()));
+        assert!(c.instances.contains_key("new0"));
     }
 
     #[test]

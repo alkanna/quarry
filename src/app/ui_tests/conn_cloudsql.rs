@@ -50,7 +50,7 @@ fn the_cloud_sql_browser_fills_the_form_and_saves_the_instance_without_a_passwor
     feed(&mut ui, Found::Instances { project: "acme-prod".into(), res: crate::cloudsql::parse_instances(PROD) }, "the acme-prod instances", |a| a.cloud.instances.contains_key("acme-prod"));
     let refused = "Cloud SQL: gcloud failed: ERROR: (gcloud.sql.instances.list) HTTPError 403: Cloud SQL Admin API has not been used in project acme-sandbox before or it is disabled.";
     feed(&mut ui, Found::Instances { project: "acme-sandbox".into(), res: Err(refused.into()) }, "the acme-sandbox refusal", |a| a.cloud.instances.contains_key("acme-sandbox"));
-    let start = Start { gcloud: Some("/nonexistent/gcloud".into()), proxy: Some("/nonexistent/cloud-sql-proxy".into()), components: false, account: Some("jane@example.com".into()), projects: Ok(["acme-prod", "acme-sandbox"].map(|id| Project { id: id.into(), name: String::new() }).to_vec()) };
+    let start = Start { gcloud: Some("/nonexistent/gcloud".into()), proxy: Some("/nonexistent/cloud-sql-proxy".into()), components: false, account: Some("jane@example.com".into()), projects: Ok(["acme-prod", "acme-sandbox"].map(|id| Project { id: id.into(), name: String::new() }).to_vec()), adc: false };
     feed(&mut ui, Found::Start(start), "the project list", |a| a.cloud.start.is_some());
     assert_eq!(ui.app().cloud.running, 0, "no gcloud was started for projects that had answered");
 
@@ -60,12 +60,20 @@ fn the_cloud_sql_browser_fills_the_form_and_saves_the_instance_without_a_passwor
     ui.click("Show stopped instances");
     ui.show("acme-prod:us-central1:billing-legacy");
 
+    // The proxy signs in to IAM with Application Default Credentials only, so without them Use asks for them first.
+    ui.click("Use acme-prod:europe-west1:orders-db");
+    ui.show("IAM sign-in needs Application Default Credentials");
+    assert!(ui.app().cloud_browser.is_some() && ui.app().modal.is_none(), "no form is filled for a sign-in that cannot work");
+    ui.h.state_mut().cloud.start.as_mut().unwrap().adc = true;
+    ui.settle();
+    assert!(ui.h.query_all_by_label("IAM sign-in needs Application Default Credentials").next().is_none(), "the card goes once they exist");
     ui.click("Use acme-prod:europe-west1:orders-db");
     ui.wait("the form", |a| a.cloud_browser.is_none() && matches!(a.modal, Some(Modal::Conn(_))));
     let f = form(ui.app());
     assert_eq!(f.cloud_sql, Some(CloudSql { instance: "acme-prod:europe-west1:orders-db".into(), iam: true, ip: IpKind::Public }));
     assert_eq!((f.name.as_str(), f.addr.user.as_str(), f.engine), ("orders-db", "jane@example.com", db::sql::Engine::Postgres));
     ui.show("From gcloud, editable");
+    ui.show("No password. The proxy signs in with Application Default Credentials, which must be this user's account");
     ui.show("PSC is off for orders-db");
     assert!(ui.h.get_by_label("PSC").accesskit_node().is_disabled(), "orders-db has no PSC");
     assert!(!ui.h.get_by_label("Private").accesskit_node().is_disabled(), "orders-db has a private IP");
@@ -113,4 +121,42 @@ fn the_cloud_sql_browser_fills_the_form_and_saves_the_instance_without_a_passwor
     ui.wait("the connection through the proxy", |a| a.conn(id).is_some_and(|c| c.status == Status::Ready));
     assert!(matches!(ui.app().conn(id).unwrap().tunnel, Some(db::Way::CloudSql(_))), "the proxy is kept with the connection");
     *crate::cloudsql::tests::STUB_TARGET.lock().unwrap() = None;
+}
+
+/// An answer to a connect the user stopped, or one a newer connect replaced, changes nothing: dropping it is what stops
+/// its proxy or tunnel. No server is needed, since the answers are sent the way the worker sends them.
+#[test]
+fn a_connect_answer_after_disconnect_or_a_newer_connect_is_dropped() {
+    let mut ui = bare();
+    // 71 was disconnected while connecting, 72 was connected again since, 73 still waits for attempt 5.
+    for (id, engine, status, attempt) in [(71, db::sql::Engine::Postgres, Status::Idle, 3), (72, db::sql::Engine::Mongo, Status::Connecting, 4), (73, db::sql::Engine::Postgres, Status::Connecting, 5)] {
+        let mut c = Conn::new(ConnMeta { id, name: format!("c{id}"), engine, ..Default::default() }, status);
+        c.attempt = attempt;
+        ui.h.state_mut().conns.push(c);
+    }
+    let w = &ui.app().worker;
+    w.send(Msg::SqlConnected { conn: 71, attempt: 3, res: Err("late".into()) });
+    w.send(Msg::Connected { conn: 72, attempt: 2, res: Err("late".into()) });
+    w.send(Msg::SqlConnected { conn: 73, attempt: 5, res: Err("refused".into()) });
+    ui.wait("the answer that is still wanted", |a| a.conn(73).is_some_and(|c| matches!(c.status, Status::Failed(_))));
+    assert!(ui.app().conn(71).unwrap().status == Status::Idle, "a disconnected connection stays disconnected");
+    assert!(ui.app().conn(72).unwrap().status == Status::Connecting, "an older attempt does not end the newer one");
+}
+
+/// Settings looks for gcloud off the UI thread once it opens, and the demo shows a fixed path instead of the real one.
+#[test]
+fn settings_finds_gcloud_once_and_the_demo_shows_no_real_path() {
+    let mut ui = bare();
+    let app = ui.h.state_mut();
+    app.demo = true;
+    app.settings_cat = super::super::settings::SettingsCat::Tools;
+    app.modal = Some(Modal::Settings);
+    ui.settle();
+    ui.show("Found automatically at ~/google-cloud-sdk/bin/gcloud. Set a path only to use another gcloud.");
+    assert!(!ui.app().cloud.gcloud_asked, "the demo never looks for gcloud");
+    ui.h.state_mut().demo = false;
+    ui.wait("the answer from the worker", |a| a.cloud.gcloud_seen.is_some());
+    ui.h.state_mut().modal = None;
+    ui.settle();
+    assert!(!ui.app().cloud.gcloud_asked && ui.app().cloud.gcloud_seen.is_none(), "closed, Settings looks again next time");
 }

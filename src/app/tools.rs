@@ -10,7 +10,7 @@ pub(super) fn find_bun(setting: &str) -> Option<PathBuf> {
 
 /// A program from its Settings path, else from PATH and the usual install folders.
 pub(super) fn find_exe(name: &str, setting: &str) -> Option<PathBuf> {
-    let mut extra = ["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from).to_vec();
+    let mut extra = crate::cloudsql::brew_dirs();
     if let Some(h) = dirs::home_dir() {
         extra.push(h.join(".bun").join("bin"));
     }

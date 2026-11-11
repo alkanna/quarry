@@ -657,7 +657,7 @@ impl App {
             ErrKind::Unreachable | ErrKind::Lost => &["The host name and port are right.", "A VPN is needed to reach this network.", "The server only accepts connections through an SSH tunnel."],
             ErrKind::Tls => &["The CA file in the connection's TLS settings signs this server's certificate.", "The host name matches the certificate."],
             ErrKind::Tunnel => &["The SSH host, port, user and key are right.", "The SSH server's host key has not changed."],
-            ErrKind::CloudSql => &["gcloud is signed in (`gcloud auth login`), or Application Default Credentials exist.", "The account may connect to the instance (Cloud SQL Client role).", "The instance name is project:region:instance, and its IP kind (public, private or PSC) is reachable from here."],
+            ErrKind::CloudSql => &["IAM sign-in has Application Default Credentials (`gcloud auth application-default login`); a password sign-in has gcloud signed in (`gcloud auth login`) or those credentials.", "The account may connect to the instance (Cloud SQL Client role).", "The instance name is project:region:instance, and its IP kind (public, private or PSC) is reachable from here."],
             ErrKind::Privilege => &["The user may sign in but not list databases. Name a database in the connection string."],
             _ => &[],
         };
