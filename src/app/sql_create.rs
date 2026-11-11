@@ -4,9 +4,9 @@
 use super::*;
 use db::sql::create::{self, ColumnSpec, DefaultKind, Ddl, DropInfo, Meta, TableSpec, TYPES};
 
-const NOTE_DB: &str = "Read-only: unlock writes to create a database";
-const NOTE_TABLE: &str = "Read-only: unlock writes to create a table";
-const NOTE_DROP: &str = "Read-only: unlock writes to drop or empty";
+pub(super) const NOTE_DB: &str = "Read-only: unlock writes to create a database";
+pub(super) const NOTE_TABLE: &str = "Read-only: unlock writes to create a table";
+pub(super) const NOTE_DROP: &str = "Read-only: unlock writes to drop or empty";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum DropKind {
@@ -15,6 +15,8 @@ pub(super) enum DropKind {
     View,
     /// Delete every row and keep the table.
     Truncate,
+    /// A PostgreSQL schema.
+    Schema,
 }
 
 pub(super) struct NewDb {
@@ -41,21 +43,25 @@ pub(super) struct NewTable {
 
 pub(super) struct DropForm {
     pub(super) conn: u64,
+    /// PostgreSQL: the database the schema or table is in, or the database itself for a database drop. Empty on MySQL.
+    pub(super) database: String,
     pub(super) schema: String,
     /// Empty for a database.
     pub(super) table: String,
     pub(super) kind: DropKind,
     pub(super) typed: String,
+    /// PostgreSQL: CASCADE for a schema or table, WITH (FORCE) for a database. Ticked inside the dialog, never by default.
+    pub(super) opt: bool,
     /// None while the counts load.
     pub(super) info: Option<Result<DropInfo, String>>,
 }
 
-fn plural(n: u64, word: &str) -> String {
+pub(super) fn plural(n: u64, word: &str) -> String {
     format!("{} {word}{}", group(&n.to_string()), if n == 1 { "" } else { "s" })
 }
 
 /// "a, b and c".
-fn list_and(items: &[String]) -> String {
+pub(super) fn list_and(items: &[String]) -> String {
     match items {
         [] => String::new(),
         [one] => one.clone(),
@@ -63,7 +69,7 @@ fn list_and(items: &[String]) -> String {
     }
 }
 
-fn pick(ui: &mut egui::Ui, id: &str, width: f32, shown: &str, items: impl FnOnce(&mut egui::Ui)) {
+pub(super) fn pick(ui: &mut egui::Ui, id: &str, width: f32, shown: &str, items: impl FnOnce(&mut egui::Ui)) {
     egui::ComboBox::from_id_salt(id).width(width).selected_text(shown.to_string()).show_ui(ui, |ui| {
         menu_look(ui);
         items(ui);
@@ -71,7 +77,7 @@ fn pick(ui: &mut egui::Ui, id: &str, width: f32, shown: &str, items: impl FnOnce
 }
 
 /// The preview block of the design: the statement in mono on the page color.
-fn sql_block(ui: &mut egui::Ui, text: &str) {
+pub(super) fn sql_block(ui: &mut egui::Ui, text: &str) {
     egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(12, 10)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.add(egui::Label::new(sql_job(text, TXT_BODY)).selectable(true));
@@ -80,13 +86,13 @@ fn sql_block(ui: &mut egui::Ui, text: &str) {
 
 /// The row of buttons at the bottom, right aligned as in the designs: the main action first in the
 /// code so it ends up rightmost.
-fn right_actions(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+pub(super) fn right_actions(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     ui.add_space(8.0);
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add);
 }
 
 impl App {
-    fn conn_name(&self, conn: u64) -> String {
+    pub(super) fn conn_name(&self, conn: u64) -> String {
         self.conn(conn).map(|c| c.meta.name.clone()).unwrap_or_default()
     }
 
@@ -101,9 +107,17 @@ impl App {
         }
     }
 
+    /// A create or drop on a locked connection asks to allow writes first, then goes on with what was asked.
+    pub(super) fn ask_unlock_on(&mut self, conn: u64, then: impl FnOnce(&mut App) + 'static) {
+        self.modal = Some(Modal::Unlock(conn, Some(Box::new(then))));
+    }
+
     pub(super) fn sql_new_db(&mut self, conn: u64) {
+        if self.is_pg(conn) {
+            return self.pg_new_db(conn);
+        }
         if !self.conn_writable(conn) {
-            return self.warn(NOTE_DB);
+            return self.ask_unlock_on(conn, move |a| a.sql_new_db(conn));
         }
         self.ask_meta(conn, "");
         self.modal = Some(Modal::SqlNewDb(Box::new(NewDb { conn, name: String::new(), charset: String::new(), collation: String::new(), meta: None, load_err: None })));
@@ -111,7 +125,7 @@ impl App {
 
     pub(super) fn sql_new_table(&mut self, conn: u64, schema: String) {
         if !self.conn_writable(conn) {
-            return self.warn(NOTE_TABLE);
+            return self.ask_unlock_on(conn, move |a| a.sql_new_table(conn, schema));
         }
         self.ask_meta(conn, &schema);
         self.modal = Some(Modal::SqlNewTable(Box::new(NewTable { conn, schema, name: String::new(), engine: String::new(), collation: String::new(), cols: vec![ColumnSpec::id()], meta: None, load_err: None, show_sql: false })));
@@ -119,12 +133,12 @@ impl App {
 
     pub(super) fn sql_drop_ask(&mut self, conn: u64, schema: String, table: String, kind: DropKind) {
         if !self.conn_writable(conn) {
-            return self.warn(NOTE_DROP);
+            return self.ask_unlock_on(conn, move |a| a.sql_drop_ask(conn, schema, table, kind));
         }
         if let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) {
             self.worker.sql_drop_info(conn, sql, schema.clone(), table.clone());
         }
-        self.modal = Some(Modal::SqlDrop(Box::new(DropForm { conn, schema, table, kind, typed: String::new(), info: None })));
+        self.modal = Some(Modal::SqlDrop(Box::new(DropForm { conn, database: String::new(), schema, table, kind, typed: String::new(), opt: false, info: None })));
     }
 
     /// The lists arrived: fill the open dialog and pick the server's defaults.
@@ -150,9 +164,9 @@ impl App {
         }
     }
 
-    pub(super) fn sql_drop_info_done(&mut self, conn: u64, schema: String, table: String, res: db::Res<DropInfo>) {
+    pub(super) fn sql_drop_info_done(&mut self, conn: u64, database: String, schema: String, table: String, res: db::Res<DropInfo>) {
         if let Some(Modal::SqlDrop(f)) = &mut self.modal {
-            if f.conn == conn && f.schema == schema && f.table == table {
+            if f.conn == conn && f.database == database && f.schema == schema && f.table == table {
                 f.info = Some(res);
             }
         }
@@ -160,12 +174,15 @@ impl App {
 
     /// A create or drop finished: refresh what the sidebar and the tabs show of it.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn sql_ddl_done(&mut self, conn: u64, schema: String, table: String, what: Ddl, res: db::Res<String>, undo: Option<UndoAction>, dbs: Option<Vec<String>>, sql_mode: Option<String>) {
+    pub(super) fn sql_ddl_done(&mut self, conn: u64, database: String, schema: String, table: String, what: Ddl, res: db::Res<String>, undo: Option<UndoAction>, dbs: Option<Vec<String>>, sql_mode: Option<String>) {
         // The create was built for the session's mode, which changed since connecting; the previews follow it now.
         self.adopt_sql_mode(conn, sql_mode);
         // A refused undo hands its entry back, so it is kept whether or not the write went through.
         if let Some(u) = undo {
             self.push_undo(u);
+        }
+        if self.is_pg(conn) {
+            return self.pg_ddl_done(conn, database, schema, table, what, res, dbs);
         }
         match res {
             Ok(s) => self.ok(s),
@@ -196,15 +213,18 @@ impl App {
                 }
             }
             Ddl::DroppedDb => {
+                self.purge_undo(conn, "", &schema, "");
                 self.remove_tabs(gone);
                 self.open_dbs.remove(&(conn, schema.clone()));
                 self.sql_asked.remove(&(conn, schema.clone()));
                 self.forget_schema(conn, &schema);
             }
             Ddl::DroppedTable => {
+                self.purge_undo(conn, "", &schema, &table);
                 self.remove_tabs(gone);
                 self.side_act(conn, SideAct::Refresh(schema));
             }
+            Ddl::CreatedSchema | Ddl::DroppedSchema => {}
             Ddl::Emptied => {
                 let open: Vec<usize> = (0..self.tabs.len()).filter(|&i| gone(&self.tabs[i])).collect();
                 for i in open {
@@ -216,7 +236,7 @@ impl App {
     }
 
     /// Runs a confirmed drop. Tabs close and the sidebar updates when the server says it worked.
-    pub(super) fn sql_drop_run(&mut self, conn: u64, schema: String, table: String, kind: DropKind) {
+    pub(super) fn sql_drop_run(&mut self, conn: u64, database: String, schema: String, table: String, kind: DropKind, opt: bool) {
         if self.demo {
             return self.ok("Offline demo: no database is connected.");
         }
@@ -225,6 +245,9 @@ impl App {
             return self.modal = Some(Modal::Unlock(conn, None));
         }
         let Some(sql) = c.sql.clone() else { return self.warn_offline() };
+        if c.meta.engine == db::sql::Engine::Postgres {
+            return self.pg_drop_run(conn, sql, database, schema, table, kind, opt);
+        }
         self.worker.sql_drop(conn, sql, schema, table, kind == DropKind::View, kind == DropKind::Truncate, false);
     }
 
@@ -511,13 +534,21 @@ impl App {
             DropKind::Table => (f.table.as_str(), "table", "Drop table"),
             DropKind::View => (f.table.as_str(), "view", "Drop view"),
             DropKind::Truncate => (f.table.as_str(), "table", "Empty table"),
+            DropKind::Schema => (f.schema.as_str(), "schema", "Drop schema"),
         };
-        dialog_title(ui, if f.kind == DropKind::Truncate { format!("Empty table {name}?") } else { format!("Drop {noun} {name}?") });
+        let pg = self.is_pg(f.conn);
+        let name = if pg && f.kind == DropKind::Database { f.database.as_str() } else { name }.to_string();
+        let name = name.as_str();
+        let mut blocked = false;
+        // A table or view of PostgreSQL is named with its schema and database, because the same name lives in several.
+        let shown = if pg && matches!(f.kind, DropKind::Table | DropKind::View) { format!("{}.{}.{name}", f.database, f.schema) } else { name.to_string() };
+        dialog_title(ui, if f.kind == DropKind::Truncate { format!("Empty table {name}?") } else { format!("Drop {noun} {shown}?") });
         let wrap = |ui: &mut egui::Ui, text: String, color: Color32| {
             ui.add(egui::Label::new(RichText::new(text).color(color)).wrap());
         };
         let mut loaded = false;
-        match &f.info {
+        let shown = f.info.clone();
+        match &shown {
             None => {
                 ui.horizontal(|ui| {
                     spin(ui);
@@ -529,6 +560,10 @@ impl App {
             }
             Some(Ok(info)) if !info.exists => {
                 wrap(ui, format!("The {noun} {name} is not on {conn} any more."), ALERT());
+            }
+            Some(Ok(info)) if pg => {
+                loaded = true;
+                blocked = self.pg_drop_notes(ui, f, info, name, &conn);
             }
             Some(Ok(info)) => {
                 loaded = true;
@@ -547,7 +582,7 @@ impl App {
         }
         ui.add_space(10.0);
         ui.label(RichText::new(format!("Type the {noun} name to confirm")).color(MUTED()));
-        ui.add(egui::TextEdit::singleline(&mut f.typed).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
+        ui.add(egui::TextEdit::singleline(&mut f.typed).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY)).widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Confirmation"));
         if !tag.is_empty() {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -558,11 +593,11 @@ impl App {
         if !writable {
             ui.label(RichText::new(NOTE_DROP).size(TXT_SMALL).color(FAINT()));
         }
-        let ok = writable && loaded && f.typed == name;
+        let ok = writable && loaded && !blocked && f.typed == name;
         right_actions(ui, |ui| {
             if ui.add_enabled_ui(ok, |ui| danger(ui, button)).inner.clicked() {
                 *keep = false;
-                self.danger(Danger::SqlDrop { conn: f.conn, schema: f.schema.clone(), table: f.table.clone(), kind: f.kind });
+                self.danger(Danger::SqlDrop { conn: f.conn, database: f.database.clone(), schema: f.schema.clone(), table: f.table.clone(), kind: f.kind, opt: f.opt });
             }
             if ui.button("Cancel").on_hover_text("Esc").clicked() {
                 *keep = false;
@@ -606,10 +641,12 @@ impl App {
             }
             _ => Modal::SqlDrop(Box::new(DropForm {
                 conn: 3,
+                database: String::new(),
                 schema: "shop".into(),
                 table: "orders".into(),
                 kind: DropKind::Table,
                 typed: "order".into(),
+                opt: false,
                 info: Some(Ok(DropInfo { exists: true, rows: Some(4410), referenced_by: vec!["order_items".into(), "payments".into(), "shipments".into()], ..Default::default() })),
             })),
         });
@@ -646,6 +683,7 @@ fn drop_lead(kind: DropKind, name: &str, conn: &str, info: &DropInfo) -> String 
             None => format!("This deletes the table, its rows (row count unknown) and its structure on {conn}. It cannot be undone."),
         },
         DropKind::View => format!("This deletes the view on {conn}. The tables it reads from are not touched. It cannot be undone."),
+        DropKind::Schema => String::new(),
         DropKind::Truncate => match rows_said(info) {
             Some(r) if !info.rows_estimated => format!("This deletes all {r} of {name} on {conn}. The table and its structure stay and the auto-increment counter restarts. It cannot be undone."),
             Some(r) => format!("This deletes every row of {name} ({r}) on {conn}. The table and its structure stay and the auto-increment counter restarts. It cannot be undone."),

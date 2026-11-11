@@ -305,7 +305,7 @@ impl Opts {
 /// A connection of its own, outside any pool.
 pub enum Conn {
     My(sqlx::MySqlConnection),
-    Pg(sqlx::PgConnection),
+    Pg(super::pg::PgConn),
 }
 
 fn done_my(r: sqlx::mysql::MySqlQueryResult) -> Done {
@@ -321,7 +321,7 @@ impl Conn {
     pub async fn connect(opts: &Opts) -> Result<Conn, sqlx::Error> {
         match opts {
             Opts::My(o) => sqlx::MySqlConnection::connect_with(o).await.map(Conn::My),
-            Opts::Pg(o) => sqlx::PgConnection::connect_with(o).await.map(Conn::Pg),
+            Opts::Pg(o) => sqlx::PgConnection::connect_with(o).await.map(|c| Conn::Pg(super::pg::PgConn::free(c))),
         }
     }
 
@@ -354,7 +354,7 @@ impl Conn {
                 })
                 .boxed(),
             Conn::Pg(c) => raw_sql(sql)
-                .fetch_many(&mut *c)
+                .fetch_many(&mut **c)
                 .map(|item| {
                     item.map(|x| match x {
                         Either::Right(row) => Item::Row(SqlRow::Pg(row)),
@@ -398,11 +398,14 @@ impl Conn {
     /// Starts the transaction a write runs in. On PostgreSQL the session stays read-only, so the write opens its own
     /// READ WRITE transaction and lifts the statement timeout and sets a lock timeout for it alone with SET LOCAL, which
     /// ends with the transaction and so never reaches another client of a connection pooler.
-    pub async fn begin_write(&mut self) -> Result<Tx<'_>, sqlx::Error> {
+    pub async fn begin_write(&mut self, db: &Db) -> Result<Tx<'_>, sqlx::Error> {
         match self {
             Conn::My(c) => c.begin().await.map(Tx::My),
             Conn::Pg(c) => {
-                let tx = c.begin_with(format!("BEGIN READ WRITE; {}", super::pg::write_locals())).await?;
+                // Behind a pooler the session carries none of the Advanced tab's settings, so they follow the writer's own.
+                let extra = db.pg_writer_locals();
+                let sep = if extra.is_empty() { "" } else { "; " };
+                let tx = c.begin_with(format!("BEGIN READ WRITE; {}{sep}{extra}", super::pg::write_locals())).await?;
                 Ok(Tx::Pg(tx))
             }
         }
@@ -512,6 +515,14 @@ impl Db {
     /// placeholders as the engine wants: `?` or `$1`). Every row is read whole, and a Postgres result is a binary row, so
     /// the columns are cast to text in the query. The statement goes in the query log under `schema`.
     pub(super) fn meta<'a, const N: usize>(&'a self, schema: &'a str, sql: &str, params: [&str; N]) -> impl std::future::Future<Output = Res<Vec<SqlRow>>> + Send + use<'a, N> {
+        self.meta_with(schema, sql, params, false)
+    }
+
+    /// `meta`, and on PostgreSQL with `schema` as the search_path of the read when `in_schema` is set. The catalog prints a
+    /// type, function or sequence unqualified only when it is on the path, so a read made under the path the statements
+    /// will run under (see `ddl_pg`) is text that resolves the same way when it is written back.
+    pub(super) fn meta_with<'a, const N: usize>(&'a self, schema: &'a str, sql: &str, params: [&str; N], in_schema: bool) -> impl std::future::Future<Output = Res<Vec<SqlRow>>> + Send + use<'a, N> {
+        let path = if in_schema && self.dialect == Dialect::Postgres { self.pg_set_path(schema) } else { String::new() };
         // The values are taken by value and copied before the first await. A borrowed `&[a, b]` would live across the
         // caller's await and the compiler then cannot prove the caller's future Send once it is spawned.
         let full = format!("{sql}{}", self.dialect.all_rows());
@@ -533,13 +544,13 @@ impl Db {
                     for x in params {
                         q = q.bind(x);
                     }
-                    if pp.locals().is_empty() {
+                    if pp.locals().is_empty() && path.is_empty() {
                         q.fetch_all(&pool).await.map(SqlRow::wrap_pg)
                     } else {
                         // Behind a pooler the session carries no settings, so a read sets them for its own transaction.
                         async {
                             let mut conn = pool.acquire().await?;
-                            let r = super::pg_read::in_read_only(&mut conn, self, "", async move |tx| q.fetch_all(&mut *tx).await).await;
+                            let r = super::pg_read::in_read_only(&mut conn, self, &path, async move |tx| q.fetch_all(&mut *tx).await).await;
                             if r.is_err() {
                                 conn.close_on_drop();
                             }

@@ -28,6 +28,8 @@ chacha20poly1305 = { version = "0.11.0", features = ["getrandom"] }
 # Already in the build through russh; compresses SQL dumps saved as .gz.
 flate2 = "1"
 sqlformat = "0.5.0"
+# Already in the build through chrono; names this computer's IANA time zone for the PostgreSQL Advanced tab.
+iana-time-zone = "0.1"
 
 # Already in the build through other crates; read the app's own memory and CPU time for the status bar.
 [target.'cfg(unix)'.dependencies]
@@ -35,6 +37,10 @@ libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_System_Time"] }
+
+[dev-dependencies]
+# Drives the real App without a window in the tests under src/app/ui_tests.
+egui_kittest = { version = "0.37", features = ["eframe"] }
 
 [profile.release]
 lto = "thin"

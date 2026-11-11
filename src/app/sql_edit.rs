@@ -486,7 +486,8 @@ impl App {
         if self.t().is_none_or(|t| self.supports(t.sel.conn, db::sql::Feature::Import)) {
             if quiet_enabled(ui, !view, "Import…").on_hover_text("Add the rows of a CSV file to this table").on_disabled_hover_text("A view has no rows to add").clicked() {
                 if let Some(s) = self.t().map(|t| t.sel.clone()) {
-                    self.open_sql_import(s.conn, s.db, s.coll);
+                    let schema = self.sel_schema(&s);
+                    self.open_sql_import(s.conn, s.db, schema, s.coll);
                 }
             }
         }
@@ -539,7 +540,7 @@ impl App {
                     let opts: Vec<(Mode, &str)> = if fld.col.nullable { vec![(Mode::Default, "Default"), (Mode::Null, "NULL"), (Mode::Value, "Value")] } else { vec![(Mode::Default, "Default"), (Mode::Value, "Value")] };
                     segmented(ui, &mut fld.mode, &opts);
                     let enabled = fld.mode == Mode::Value;
-                    ui.add_enabled(enabled, egui::TextEdit::singleline(&mut fld.text).font(egui::TextStyle::Monospace).desired_width(220.0));
+                    ui.add_enabled(enabled, egui::TextEdit::singleline(&mut fld.text).font(egui::TextStyle::Monospace).desired_width(220.0)).widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, enabled, format!("Value of {}", fld.col.name)));
                     ui.end_row();
                 }
             });

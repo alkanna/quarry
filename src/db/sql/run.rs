@@ -22,7 +22,7 @@ pub(super) async fn prepare(conn: &mut Conn, db: &Db, schema: &str, read_only: b
         Conn::Pg(c) => {
             super::pg::prepare(c, read_only, id, db).await.map_err(se)?;
             if !pooled {
-                super::pg_read::set_search_path(c, schema).await.map_err(se)?;
+                super::pg_read::set_search_path(c, &db.pg_path(schema)).await.map_err(se)?;
             }
         }
         Conn::My(c) => {
@@ -179,7 +179,7 @@ pub(super) async fn run_stmt(conn: &mut Conn, d: super::Dialect, stmt: &str, pag
 /// Why a script ends after a statement whose connection cannot be reused.
 const CUT: &str = "Not run: the previous result was cut at the row limit";
 const DEAD: &str = "Not run: the connection could not end the transaction of the previous statement";
-pub(super) const POOLER_SESSION: &str = "Behind a connection pooler this statement would leave state on a server connection other clients share (a session SET, set_config, a temporary table, a named prepared statement, a held cursor or LISTEN). Use SET LOCAL, or connect without the pooler.";
+pub(super) const POOLER_SESSION: &str = "Behind a connection pooler this statement would leave state on a server connection other clients share (a session SET, set_config, a temporary table or anything in pg_temp, a DO block, a named prepared statement, a held cursor or LISTEN). Use SET LOCAL, or connect without the pooler.";
 pub(super) const POOLER_TX: &str = "Transactions you open yourself are not available behind a connection pooler; each statement runs in its own transaction.";
 pub(super) const POOLER_NO_TX: &str = "Behind a connection pooler each statement runs in its own transaction, and the server refuses this statement inside one (VACUUM, CONCURRENTLY, CREATE or DROP DATABASE, ALTER SYSTEM and similar), so it cannot run here. Connect without the pooler to run it.";
 /// Behind a pooler Stop cannot cancel by pid, because the backend may be serving another client by then.
@@ -255,6 +255,14 @@ pub(super) async fn run(db: &Db, schema: &str, text: &str, read_only: bool, id: 
             sets.push(failed(stmt, STOPPED_POOLED.into()));
             continue;
         };
+        let mut rs = rs;
+        if cancel.load(Ordering::SeqCst) {
+            for r in rs.iter_mut() {
+                if let Some(e) = r.error.as_mut() {
+                    *e = crate::db::errors::stopped(std::mem::take(e));
+                }
+            }
+        }
         let failed = rs.iter().find_map(|r| r.error.as_deref());
         crate::db::log_sql(db.conn, &here, stmt, rs.first().map_or(0, |r| r.ms), failed);
         if let (None, Some(to)) = (failed, lex::use_target(stmt, d)) {
@@ -575,7 +583,7 @@ mod pg_tests {
             assert!(start.elapsed() < Duration::from_secs(8), "{var}: the sleep was not interrupted");
             let sets = ran.unwrap();
             let err = sets[0].error.as_deref().unwrap();
-            assert!(err.contains("57014") && err.contains("user request"), "{var}: {err}");
+            assert!(err.contains("57014") && err.contains("user request") && err.contains(crate::db::errors::STOP_MARK.trim()), "{var}: {err}");
             // The error ends the script; the second statement never starts.
             assert_eq!(sets.len(), 1, "{var}");
             assert_eq!(id.load(Ordering::SeqCst), 0);

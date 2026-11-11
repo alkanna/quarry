@@ -3,6 +3,9 @@
 
 mod dialect;
 pub mod advanced;
+pub mod pg_advanced;
+#[cfg(test)]
+mod pg_advanced_tests;
 mod worker;
 mod run;
 pub mod pg;
@@ -15,23 +18,36 @@ mod pg_shell_tests;
 #[cfg(test)]
 mod pg_write_tests;
 #[cfg(test)]
+mod pg_import_tests;
+#[cfg(test)]
 mod pg_pgbouncer_tests;
+#[cfg(test)]
+mod pg_ddl_tests;
 pub mod exec;
 mod relay;
 pub mod structure;
 pub mod write;
 pub mod ddl;
+mod ddl_my;
+mod ddl_pg;
+pub mod ddl_pg_trig;
 pub mod create;
+pub mod create_pg;
 pub mod export;
 pub mod lex;
 pub mod format;
 pub mod value;
 pub mod csv;
 pub mod import;
+mod import_pg;
 pub mod dump;
+mod pg_script;
+mod pg_dump;
+#[cfg(test)]
+mod pg_dump_tests;
 pub mod server;
 #[cfg(test)]
-mod testing;
+pub(crate) mod testing;
 #[cfg(test)]
 mod review_final;
 pub mod rules;

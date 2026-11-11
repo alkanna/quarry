@@ -61,12 +61,13 @@ pub(super) async fn in_read_only<T>(conn: &mut PgConnection, db: &Db, extra: &st
 
 /// Points the script's session at the tab's schema. Bound, never spliced, and run by Quarry before any user text; the
 /// user cannot change it afterwards, because the lexer refuses SET and set_config and the per-statement rollback would
-/// undo one that got through. An empty schema keeps the server's own search_path.
-pub(super) async fn set_search_path(c: &mut PgConnection, schema: &str) -> Result<(), sqlx::Error> {
-    if schema.is_empty() {
+/// undo one that got through. `path` is `Db::pg_path` of the tab's schema: the schema first, then the list saved on the
+/// Advanced tab. An empty one keeps the session's own search_path.
+pub(super) async fn set_search_path(c: &mut PgConnection, path: &str) -> Result<(), sqlx::Error> {
+    if path.is_empty() {
         return Ok(());
     }
-    sqlx::query("SELECT set_config('search_path', $1, false)").persistent(false).bind(Dialect::Postgres.quote_ident(schema)).execute(&mut *c).await?;
+    sqlx::query("SELECT set_config('search_path', $1, false)").persistent(false).bind(path).execute(&mut *c).await?;
     Ok(())
 }
 

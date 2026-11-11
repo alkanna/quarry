@@ -171,7 +171,7 @@ impl App {
             "acquery" => self.pg_acquery_demo(),
             "edit" => self.sql_demo_stage(),
             "select" => self.tabs[0].checked = [1, 2, 4, 5].into(),
-            "connform" | "paste" | "tls" => self.pg_form_demo(which),
+            "connform" | "paste" | "tls" | "advanced" => self.pg_form_demo(which),
             _ => {}
         }
     }
@@ -285,15 +285,29 @@ impl App {
     /// (seeded by the form itself), `tls` on the TLS tab.
     fn pg_form_demo(&mut self, which: &str) {
         let tls = which == "tls";
+        let advanced = which == "advanced";
         self.modal = Some(Modal::Conn(Box::new(ConnForm {
             id: Some(2),
             name: "analytics-prod".into(),
             tag: "Production".into(),
             engine: db::sql::Engine::Postgres,
             addr: db::sql::Addr { scheme: "postgres".into(), host: "analytics-prod.internal".into(), port: 5432, user: "analyst".into(), password: "hunter2hunter".into(), database: "analytics".into(), ssl_mode: if tls { db::sql::SslMode::VerifyIdentity } else { Default::default() }, ssl_ca: if tls { "~/.postgresql/root.crt".into() } else { String::new() } },
-            tab: if tls { ConnTab::Tls } else { ConnTab::Standard },
+            tab: if tls { ConnTab::Tls } else if advanced { ConnTab::Advanced } else { ConnTab::Standard },
             ..Default::default()
         })));
+        // The design's example: a path with a schema the last Test did not find, a lock timeout, a bad size and a picker open on "cost".
+        if let (true, Some(Modal::Conn(form))) = (advanced, self.modal.as_mut()) {
+            form.set_advanced(&db::sql::Advanced {
+                zone: db::sql::Zone::System,
+                search_path: vec!["reporting".into(), "public".into(), "staging_old".into()],
+                pg_settings: vec![("lock_timeout".into(), "10s".into()), ("work_mem".into(), "64 megs".into()), ("jit".into(), "off".into())],
+                connect_secs: Some(15),
+                ..Default::default()
+            });
+            form.pg_schemas = vec!["public".into(), "reporting".into(), "staging".into()];
+            form.pg_tested = true;
+            form.pg_picker = Some("cost".into());
+        }
     }
 }
 
@@ -356,7 +370,7 @@ fn orders_structure() -> Structure {
         Column { name: name.into(), full_type: ty.into(), nullable, key: key.into(), default, default_expr, extra: extra.into(), comment: comment.into(), kind: Some(Kind::from_pg(ty.split('(').next().unwrap_or(ty), cat, typtype)), default_raw: raw.map(Into::into), ..Default::default() }
     };
     let ix = |name: &str, unique: bool, cols: &[(&str, bool)], constraint: bool, def: &str| Index { name: name.into(), unique, cols: cols.iter().map(|(n, d)| IndexCol { name: (*n).into(), desc: *d, ..Default::default() }).collect(), kind: "btree".into(), def: def.into(), constraint, ..Default::default() };
-    let fk = |name: &str, table: &str, c: &str, rt: &str, rc: &str, del: &str| ForeignKey { name: name.into(), db: SCHEMA.into(), table: table.into(), cols: vec![c.into()], ref_db: SCHEMA.into(), ref_table: rt.into(), ref_cols: vec![rc.into()], on_update: "NO ACTION".into(), on_delete: del.into() };
+    let fk = |name: &str, table: &str, c: &str, rt: &str, rc: &str, del: &str| ForeignKey { name: name.into(), db: SCHEMA.into(), table: table.into(), cols: vec![c.into()], ref_db: SCHEMA.into(), ref_table: rt.into(), ref_cols: vec![rc.into()], on_update: "NO ACTION".into(), on_delete: del.into(), ..Default::default() };
     let constraint = |name: &str, kind: char, def: &str| Constraint { name: name.into(), kind, def: def.into() };
     let mut st = Structure {
         columns: vec![
@@ -381,7 +395,28 @@ fn orders_structure() -> Structure {
         constraints: vec![constraint("orders_pkey", 'p', "PRIMARY KEY (id)"), constraint("orders_public_id_key", 'u', "UNIQUE (public_id)"), constraint("orders_total_check", 'c', "CHECK ((total >= (0)::numeric))")],
         foreign_keys: vec![fk("orders_customer_id_fkey", "orders", "customer_id", "customers", "id", "RESTRICT")],
         referenced_by: vec![fk("order_items_order_id_fkey", "order_items", "order_id", "orders", "id", "CASCADE"), fk("events_order_id_fkey", "events", "order_id", "orders", "id", "SET NULL")],
-        triggers: vec![Trigger { name: "orders_audit".into(), timing: "AFTER".into(), event: "UPDATE".into(), body: "CREATE TRIGGER orders_audit AFTER UPDATE ON public.orders FOR EACH ROW EXECUTE FUNCTION log_order_change()".into(), ..Default::default() }],
+        triggers: vec![Trigger {
+            name: "orders_audit".into(),
+            timing: "AFTER".into(),
+            event: "UPDATE".into(),
+            body: "CREATE TRIGGER orders_audit AFTER UPDATE ON public.orders FOR EACH ROW EXECUTE FUNCTION log_order_change()".into(),
+            pg: Some(Box::new(db::sql::structure::PgTrig {
+                per_row: true,
+                mode: "O".into(),
+                rel_kind: "r".into(),
+                func_schema: SCHEMA.into(),
+                func: "log_order_change".into(),
+                lang: "plpgsql".into(),
+                src: "\nBEGIN\n  INSERT INTO events (order_id, kind) VALUES (NEW.id, 'updated');\n  RETURN NEW;\nEND\n".into(),
+                func_owner: "app".into(),
+                func_mine: true,
+                func_can: true,
+                func_create: true,
+                ..Default::default()
+            })),
+            ..Default::default()
+        }],
+        pg_schema: Some(SCHEMA.into()),
         status: db::sql::structure::Status { engine: "heap".into(), rows: Some(ORDERS_ROWS), avg_row: Some(264), data: Some(318_767_104), index: Some(105_906_176), total: Some(424_673_280), comment: "Customer orders".into(), ..Default::default() },
         ..Default::default()
     };

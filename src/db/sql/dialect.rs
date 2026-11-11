@@ -351,6 +351,8 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Feature {
     StructureEdit,
+    RelationEdit,
+    TriggerEdit,
     Users,
     ServerStatus,
     Format,
@@ -366,7 +368,7 @@ pub enum Feature {
 }
 
 /// The features PostgreSQL has so far. Add one here when its phase lands.
-const PG_FEATURES: &[Feature] = &[];
+const PG_FEATURES: &[Feature] = &[Feature::StructureEdit, Feature::RelationEdit, Feature::TriggerEdit, Feature::Import, Feature::SqlDump, Feature::CreateDrop, Feature::AdvancedTab];
 
 impl Dialect {
     pub fn supports(self, f: Feature) -> bool {
@@ -379,7 +381,9 @@ impl Dialect {
     /// The one reason text for a feature this dialect lacks, for tooltips and toasts.
     pub fn missing(self, f: Feature) -> &'static str {
         match f {
-            Feature::StructureEdit => "Changing the structure of a PostgreSQL table is not built yet",
+            Feature::StructureEdit => "Changing the structure of this table is not supported",
+            Feature::RelationEdit => "Changing the foreign keys of a PostgreSQL table is not built yet",
+            Feature::TriggerEdit => "Changing the triggers of a PostgreSQL table is not built yet",
             Feature::Users => "Users and privileges are not built for PostgreSQL yet.",
             Feature::ServerStatus => "Server status is not built for PostgreSQL yet.",
             Feature::Format => "Formatting is not built for PostgreSQL yet.",

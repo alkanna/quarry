@@ -112,9 +112,9 @@ impl App {
                         (s.cols, s.pk, s.estimated, s.matched) = (cols, pk, estimated, matched);
                     }
                 }
-                Msg::SqlOrphans { req, res } => {
+                Msg::SqlOrphans { req, res, sample } => {
                     if let Some(Modal::FkEdit(f)) = self.modal.as_mut() {
-                        f.orphans_done(req, res);
+                        f.orphans_done(req, res, sample);
                     }
                 }
                 Msg::SqlFkRules { req, strict } => {
@@ -133,7 +133,7 @@ impl App {
                         s.st.finish(res);
                     }
                 }
-                Msg::SqlAltered { conn, schema, table, res, undo, sql_mode, alter } => self.sql_altered(conn, schema, table, res, undo, sql_mode, alter),
+                Msg::SqlAltered { conn, database, schema, table, res, undo, sql_mode, alter, unsure } => self.sql_altered(conn, database, schema, table, res, undo, sql_mode, alter, unsure),
                 Msg::SqlRan { req, sets, .. } => self.sql_ran(req, sets),
                 Msg::SqlCount { req, idx, res } => self.sql_counted(req, idx, res),
                 Msg::SqlExport { req, res } => self.export_done(ctx, req, res),
@@ -152,19 +152,24 @@ impl App {
                 Msg::SqlUsers { conn, req, res } => self.sql_users_loaded(conn, req, res),
                 Msg::SqlUserGrants { conn, req, res } => self.sql_user_grants_loaded(conn, req, res),
                 Msg::SqlUserDone { conn, account, op, res, undo } => self.sql_user_done(conn, account, op, res, undo),
-                Msg::SqlDropInfo { conn, schema, table, res } => self.sql_drop_info_done(conn, schema, table, res),
-                Msg::SqlDdl { conn, schema, table, what, res, undo, dbs, sql_mode } => self.sql_ddl_done(conn, schema, table, what, res, undo, dbs, sql_mode),
+                Msg::SqlDropInfo { conn, database, schema, table, res } => self.sql_drop_info_done(conn, database, schema, table, res),
+                Msg::PgTemplates { conn, res } => self.pg_templates_done(conn, res),
+                Msg::SqlDdl { conn, database, schema, table, what, res, undo, dbs, sql_mode } => self.sql_ddl_done(conn, database, schema, table, what, res, undo, dbs, sql_mode),
                 Msg::SqlValues { conn, database, schema, table, column, prefix, res } => self.sql_values_done(conn, database, schema, table, column, prefix, res),
                 Msg::SqlSchemas { conn, database, res } => self.pg_schemas_done(conn, database, res),
                 Msg::SqlTables { conn, database, schema, res } => self.pg_tables_done(conn, database, schema, res),
                 Msg::Collections { conn, db, res } => match res {
                     Ok((v, views)) => {
+                        self.side_err.remove(&(conn, db.clone()));
                         self.views.set(conn, &db, views);
                         if let Some(d) = self.conns.iter_mut().find(|c| c.meta.id == conn).and_then(|c| c.dbs.iter_mut().find(|d| d.0 == db)) {
                             d.1 = Some(v);
                         }
                     }
-                    Err(e) => self.err_quiet(e, Some(conn), Some(Sel { conn, db: db.clone(), ..Default::default() }), format!("List collections · {db}")),
+                    Err(e) => {
+                        self.side_err.insert((conn, db.clone()), e.clone());
+                        self.err_quiet(e, Some(conn), Some(Sel { conn, db: db.clone(), ..Default::default() }), format!("List collections · {db}"))
+                    }
                 },
                 Msg::Command { tag, res } => match (tag.as_str(), res) {
                     (t, Ok(d)) if t.starts_with("srv-") => {

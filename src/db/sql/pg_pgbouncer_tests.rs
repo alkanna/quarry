@@ -194,6 +194,40 @@ fn session_advisory_locks_and_dblink_are_refused_before_they_reach_a_shared_back
     l.qsql(&pool, &format!("DROP SCHEMA {schema} CASCADE"));
 }
 
+/// A DO block and anything made in pg_temp run on a backend other clients get next, where a lock stays held and a table stays
+/// there. The checks read the whole statement, so neither is let through behind some other first word.
+#[test]
+fn do_blocks_and_pg_temp_are_refused_behind_a_pooler_in_a_query_a_shell_and_a_file() {
+    let Some(l) = live_pgbouncer() else { return };
+    let schema = "pgb_do_temp";
+    let pool = fixture(&l, schema);
+    let db = l.quarry_test();
+    let held = |key: i64| l.qone(&pool, &format!("SELECT count(*)::text FROM pg_locks WHERE locktype = 'advisory' AND objid = {key} AND granted"));
+    let release = |key: i64| l.qsql(&pool, &format!("SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype = 'advisory' AND objid = {key}"));
+    let lock = "DO $$BEGIN PERFORM pg_advisory_lock(424243); END$$";
+    let sets = script(&l, &db, schema, lock);
+    let (refused, leaked) = (sets[0].error.as_deref() == Some(super::run::POOLER_SESSION), held(424243) != "0");
+    release(424243);
+    assert!(refused && !leaked, "Custom Query: a DO block took a session lock on a shared backend (refused: {refused}, held: {leaked}): {:?}", sets[0].error);
+    for stmt in [
+        "DO $$BEGIN CREATE TEMP TABLE pgb_tmp_do (a int); END$$", "CREATE TABLE pg_temp.pgb_tmp_a (a int)", "SELECT 1 AS a INTO pg_temp.pgb_tmp_b", "CREATE TABLE pgb_tmp_c AS SELECT 1 AS a FROM pg_temp.pgb_tmp_a",
+        "CREATE FUNCTION pg_temp.pgb_tmp_f() RETURNS int LANGUAGE sql AS 'select 1'",
+    ] {
+        let sets = script(&l, &db, schema, stmt);
+        assert_eq!(sets[0].error.as_deref(), Some(super::run::POOLER_SESSION), "Custom Query: {stmt}");
+        // The shell refuses a DO block earlier still, as something that changes how values are escaped.
+        let shell = relay_query(&l, &db, schema, stmt).err();
+        assert!(if stmt.starts_with("DO") { shell.is_some() } else { shell.as_deref() == Some(super::run::POOLER_SESSION) }, "shell: {stmt}: {shell:?}");
+    }
+    assert!(relay_query(&l, &db, schema, lock).is_err());
+    assert_eq!(held(424243), "0");
+    release(424243);
+    // A plain statement and one transaction-scoped lock still run.
+    let sets = script(&l, &db, schema, "CREATE TABLE pgb_do_ok AS SELECT 1 AS a; SELECT pg_advisory_xact_lock(7131)");
+    assert!(sets.iter().all(|s| s.error.is_none()), "{:?}", sets.iter().map(|s| &s.error).collect::<Vec<_>>());
+    l.qsql(&pool, &format!("DROP SCHEMA {schema} CASCADE"));
+}
+
 #[test]
 fn statements_that_cannot_run_in_a_transaction_block_say_so_behind_a_pooler() {
     let Some(l) = live_pgbouncer() else { return };

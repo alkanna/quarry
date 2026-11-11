@@ -19,8 +19,8 @@
 - **Safe editing.** Every connection opens read-only until you unlock it. Edits are staged, saved together and can be undone, and never overwrite a change someone else made meanwhile. Bulk updates, structure changes and drops show what they will run first. On PostgreSQL every statement of a locked connection runs in a read-only transaction that is rolled back; a function on the server that writes by itself still runs with your role's rights, so use a read-only role where that matters.
 - **Queries.** Paste `db.orders.find(...)` or `aggregate([...])`, use date shortcuts like `#today`, build a pipeline with a preview after each stage, read explain plans and copy as driver code. For SQL, filter with typed rules or plain SQL, or run several statements at once with autocomplete, Format, Explain and Stop. Saved queries, history and a query log (Cmd+L).
 - **Scripting.** A JavaScript shell on [Bun](https://bun.sh) with npm packages and autocomplete: the MongoDB driver, `` sql`...` `` templates, and other connections attached to the same script.
-- **Structure.** MongoDB indexes with usage and suggestions, field types, validators, references and live change streams. SQL columns, indexes, foreign keys and triggers through a previewed ALTER (PostgreSQL structure is read-only for now).
-- **Import and export.** JSON, CSV, TSV and SQL dumps (on PostgreSQL, export of results only for now), compare and sync two collections, dump and restore with the MongoDB Database Tools (installed for you).
+- **Structure.** MongoDB indexes with usage and suggestions, field types, validators, references and live change streams. SQL columns, indexes, foreign keys and triggers through a previewed ALTER. On PostgreSQL each change runs in one transaction that checks nobody changed the table since, and undo puts back exactly what it can or says what it cannot.
+- **Import and export.** JSON, CSV, TSV and SQL dumps, on every engine, compare and sync two collections, dump and restore with the MongoDB Database Tools (installed for you).
 - **Server.** Status, variables, running operations with Kill, users, roles and privileges (MongoDB, MySQL and MariaDB).
 - **Connections.** SSH tunnels, SOCKS5 proxies and TLS. Paste a `postgresql://` string to fill the form. Passwords stay in the system keychain. Tag connections as Production, Staging or anything you like.
 - **Keyboard and reading.** Cmd+K searches every connection and runs commands, Cmd+[ and Cmd+] move through visited tabs, Cmd+/ lists every shortcut (Ctrl on Linux and Windows). Reading options: larger text, the OpenDyslexic font, a soft background, a line that follows the pointer across wide tables, and grouped digits.
@@ -77,6 +77,8 @@ cargo test                                       # run the tests
 ./bundle.sh                                      # package for this machine into dist/ (--help lists other targets)
 ./target/release/quarry --screenshot out.png     # draw the offline demo to a picture and exit
 ```
+
+`make` lists shortcuts: `make demo` opens the offline demo, and `make test-live` starts throwaway MongoDB, MySQL, MariaDB, PostgreSQL and PgBouncer servers in Docker and runs every test against them, including the headless UI tests.
 
 On Linux and Windows, `bundle.sh` makes a release archive. To run your own build, take the binary from `target/release/`.
 

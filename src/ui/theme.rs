@@ -221,8 +221,6 @@ impl Default for Look {
 static SOFT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static READING_LINE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static GROUP_DIGITS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// Whether the fonts in use include OpenDyslexic; 2 before the first `style`.
-static DYSLEXIC: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(2);
 static LOOK_GEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// Changes each time the fonts, colors or number display change, for caches of laid-out text.
@@ -401,9 +399,12 @@ pub(crate) fn style(ctx: &egui::Context, look: Look) {
     for (theme, p) in [(egui::Theme::Dark, dark), (egui::Theme::Light, light)] {
         ctx.set_visuals_of(theme, visuals(theme, p));
     }
-    // set_fonts compares whole font files, so it runs only when the font choice changes.
-    if DYSLEXIC.swap(u8::from(look.dyslexic), Relaxed) != u8::from(look.dyslexic) {
+    // set_fonts compares whole font files, so it runs only when the font choice changes. The choice is kept
+    // in the context, not in a static, because fonts belong to a context and tests build many.
+    let id = egui::Id::unique("quarry-dyslexic-fonts");
+    if ctx.data(|d| d.get_temp::<bool>(id)) != Some(look.dyslexic) {
         ctx.set_fonts(fonts(look.dyslexic));
+        ctx.data_mut(|d| d.insert_temp(id, look.dyslexic));
     }
     LOOK_GEN.fetch_add(1, Relaxed);
     // egui's own Cmd+= zoom steps by 10 % and is not saved; App::zoom_keys steps through SCALES instead.

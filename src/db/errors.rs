@@ -199,6 +199,19 @@ fn dup_key(e: &str) -> Option<(String, String)> {
     Some((k.rsplit('.').next().unwrap_or(k).to_string(), v.to_string()))
 }
 
+/// Closing line the worker adds to a 57014 that came after Stop was pressed, so a stop is told from a statement timeout
+/// by what Quarry did and not by the server's sentence, which follows its lc_messages.
+pub const STOP_MARK: &str = "\nStopped by you.";
+
+/// `raw` told as a stop when it is a cancelled statement (57014) and the person pressed Stop. Every path that sees a job's cancel flag
+/// set calls this on the error it hands on, so a stop is never taken for a statement timeout, whichever path surfaced it.
+pub fn stopped(mut raw: String) -> String {
+    if pg_code(&raw).as_deref() == Some("57014") && !raw.contains(STOP_MARK) {
+        raw.push_str(STOP_MARK);
+    }
+    raw
+}
+
 /// What went wrong, without the wording: cheap enough for a label drawn every frame.
 pub fn classify(raw: &str) -> ErrKind {
     let low = raw.to_lowercase();
@@ -213,7 +226,7 @@ pub fn classify(raw: &str) -> ErrKind {
         ErrKind::Tunnel
     } else if low.contains("certificate") || low.contains("tls") || low.contains("ssl") || n == Some(2026) {
         ErrKind::Tls
-    } else if matches!(n, Some(50 | 262 | 3024 | 1205 | 1969)) || low.contains("exceeded time limit") || low.contains("maximum statement execution time") || pg == Some("57014") && low.contains("statement timeout") {
+    } else if matches!(n, Some(50 | 262 | 3024 | 1205 | 1969)) || low.contains("exceeded time limit") || low.contains("maximum statement execution time") || pg == Some("57014") && !raw.contains(STOP_MARK) {
         ErrKind::Timeout
     } else if matches!(n, Some(11000 | 11001 | 1062 | 1586)) || pg == Some("23505") || raw.contains("E11000") {
         ErrKind::Duplicate
@@ -324,7 +337,7 @@ pub fn explain(raw: &str, cx: &ErrCtx) -> Explained {
             // Our own messages read "Could not write x: reason"; the part before the colon is the title.
             let first = raw.lines().next().unwrap_or(raw).trim();
             let ours = mongo.is_none() && my.is_none() && pg_code(raw).is_none();
-            match (mongo.is_none() && my.is_none()).then(|| pg_wording(&said)).flatten().or_else(|| first.split_once(": ").filter(|(t, _)| ours && t.len() < 80 && !t.contains('{')).map(|(t, r)| (t.trim_end_matches('.').to_string(), sentence(r)))) {
+            match (mongo.is_none() && my.is_none()).then(|| pg_wording(pg_code(raw).as_deref(), &said)).flatten().or_else(|| first.split_once(": ").filter(|(t, _)| ours && t.len() < 80 && !t.contains('{')).map(|(t, r)| (t.trim_end_matches('.').to_string(), sentence(r)))) {
                 Some((t, r)) => (ex.title, ex.hint) = (t, r),
                 None if ours && first.len() <= 120 => ex.title = first.trim_end_matches('.').to_string(),
                 None => {
@@ -349,28 +362,20 @@ pub fn explain(raw: &str, cx: &ErrCtx) -> Explained {
     ex
 }
 
-/// PostgreSQL's refusals of a written value, told apart by the first words of the server's sentence (sqlx's text does
-/// not carry the SQLSTATE). The title says what is wrong in the user's terms and the hint keeps the server's sentence, which
-/// names the value and the type.
-fn pg_wording(said: &str) -> Option<(String, String)> {
-    let low = said.to_lowercase();
+/// PostgreSQL's refusals of a written value, told apart by SQLSTATE, because the server's sentence follows its lc_messages
+/// and reads in another language on many servers. The title says what is wrong in the user's terms and the hint keeps
+/// the server's sentence, which names the value and the type.
+fn pg_wording(code: Option<&str>, said: &str) -> Option<(String, String)> {
     let server = sentence(said.lines().next().unwrap_or(said));
-    let (title, hint) = if low.starts_with("invalid input syntax for") || low.starts_with("invalid input value for enum") || low.starts_with("malformed array literal") || low.starts_with("malformed range literal") {
-        ("That value is not valid for the column's type", server)
-    } else if low.contains("out of range") || low.starts_with("numeric field overflow") || low.starts_with("value too long for type") {
-        ("That value is too large for the column", server)
-    } else if low.starts_with("null value in column") && low.contains("violates not-null constraint") {
-        ("This column does not allow NULL", server)
-    } else if low.contains("violates foreign key constraint") {
-        ("Other rows depend on this value", server)
-    } else if low.contains("violates check constraint") {
-        ("The value breaks a check constraint", server)
-    } else if low.contains("canceling statement due to lock timeout") {
-        ("Another session holds a lock on this table", "The write waited 10 seconds for the lock and gave up. Nothing was changed. Try again when the other session is done.".to_string())
-    } else if low.contains("in a read-only transaction") {
-        ("This connection is read-only", server)
-    } else {
-        return None;
+    let (title, hint) = match code? {
+        "22P02" => ("That value is not valid for the column's type", server),
+        "22003" | "22001" => ("That value is too large for the column", server),
+        "23502" => ("This column does not allow NULL", server),
+        "23503" => ("Other rows depend on this value", server),
+        "23514" => ("The value breaks a check constraint", server),
+        "55P03" => ("Another session holds a lock on this table", "The write waited 10 seconds for the lock and gave up. Nothing was changed. Try again when the other session is done.".to_string()),
+        "25006" => ("This connection is read-only", server),
+        _ => return None,
     };
     Some((title.to_string(), hint))
 }
@@ -451,7 +456,12 @@ mod tests {
         assert_eq!((e.kind, e.title.as_str()), (ErrKind::Privilege, "Your user can't do this on orders"));
         assert_eq!(explain("error returned from database: 42P01: relation \"x\" does not exist", &cx()).kind, ErrKind::Missing);
         assert_eq!(explain("error returned from database: 57014: canceling statement due to statement timeout", &cx()).kind, ErrKind::Timeout);
-        assert_eq!(explain("error returned from database: 57014: canceling statement due to user request", &cx()).kind, ErrKind::Other);
+        assert_eq!(explain(&format!("error returned from database: 57014: storniere Anfrage auf Benutzerwunsch{STOP_MARK}"), &cx()).kind, ErrKind::Other);
+        // Whatever path surfaced the cancelled statement, `stopped` makes it a stop, once, and leaves other errors alone.
+        let cancelled = "error returned from database: 57014: canceling statement due to user request".to_string();
+        assert_eq!(classify(&stopped(cancelled.clone())), ErrKind::Other);
+        assert_eq!(stopped(stopped(cancelled)).matches("Stopped by you").count(), 1);
+        assert_eq!(stopped("error returned from database: 23505: duplicate key".into()), "error returned from database: 23505: duplicate key");
         assert_eq!(explain("error returned from database: 28P01: password authentication failed for user \"x\"", &cx()).kind, ErrKind::SignIn);
         assert_eq!(explain("error returned from database: 08006: connection failure", &cx()).kind, ErrKind::Lost);
         // A MySQL number is not read as a SQLSTATE.
@@ -479,16 +489,36 @@ mod tests {
     #[test]
     fn postgres_write_refusals_are_explained() {
         let ex = |raw: &str| explain(raw, &cx());
-        let e = ex("error returned from database: invalid input syntax for type integer: \"abc\"");
+        let e = ex("error returned from database: 22P02: invalid input syntax for type integer: \"abc\"");
         assert_eq!((e.title.as_str(), e.hint.as_str()), ("That value is not valid for the column's type", "Invalid input syntax for type integer: \"abc\""));
-        assert_eq!(ex("error returned from database: invalid input value for enum mood: \"furious\"").title, "That value is not valid for the column's type");
-        assert_eq!(ex("error returned from database: value \"99999999999\" is out of range for type integer").title, "That value is too large for the column");
-        assert_eq!(ex("error returned from database: null value in column \"n\" of relation \"t\" violates not-null constraint").title, "This column does not allow NULL");
-        assert_eq!(ex("error returned from database: update or delete on table \"p\" violates foreign key constraint \"fk\" on table \"c\"").title, "Other rows depend on this value");
-        let lock = ex("error returned from database: canceling statement due to lock timeout");
+        assert_eq!(ex("error returned from database: 22P02: invalid input value for enum mood: \"furious\"").title, "That value is not valid for the column's type");
+        assert_eq!(ex("error returned from database: 22003: value \"99999999999\" is out of range for type integer").title, "That value is too large for the column");
+        assert_eq!(ex("error returned from database: 22001: value too long for type character varying(3)").title, "That value is too large for the column");
+        assert_eq!(ex("error returned from database: 23502: null value in column \"n\" of relation \"t\" violates not-null constraint").title, "This column does not allow NULL");
+        assert_eq!(ex("error returned from database: 23503: update or delete on table \"p\" violates foreign key constraint \"fk\" on table \"c\"").title, "Other rows depend on this value");
+        assert_eq!(ex("error returned from database: 23514: new row for relation \"t\" violates check constraint \"c\"").title, "The value breaks a check constraint");
+        let lock = ex("error returned from database: 55P03: canceling statement due to lock timeout");
         assert_eq!(lock.title, "Another session holds a lock on this table");
         assert!(lock.hint.contains("Nothing was changed") && !lock.hint.contains("index"));
-        assert_eq!(ex("error returned from database: cannot execute UPDATE in a read-only transaction").title, "This connection is read-only");
+        assert_eq!(ex("error returned from database: 25006: cannot execute UPDATE in a read-only transaction").title, "This connection is read-only");
+        // A sentence without a SQLSTATE is not guessed at from its words.
+        assert_ne!(ex("error returned from database: cannot execute UPDATE in a read-only transaction").title, "This connection is read-only");
+    }
+
+    #[test]
+    fn postgres_errors_are_told_apart_by_sqlstate_in_any_language() {
+        let ex = |raw: &str| explain(raw, &cx());
+        // The sentences of a server whose lc_messages is German or French: nothing of the English wording is left to match.
+        assert_eq!(ex("error returned from database: 22P02: ung\u{fc}ltige Eingabesyntax f\u{fc}r Typ integer: \"abc\"").title, "That value is not valid for the column's type");
+        assert_eq!(ex("error returned from database: 22003: Wert \"99999999999\" ist au\u{df}erhalb des g\u{fc}ltigen Bereichs f\u{fc}r Typ integer").title, "That value is too large for the column");
+        assert_eq!(ex("error returned from database: 23502: NULL-Wert in Spalte \"n\" verletzt Not-Null-Constraint").title, "This column does not allow NULL");
+        assert_eq!(ex("error returned from database: 23503: la mise \u{e0} jour viole la contrainte de cl\u{e9} \u{e9}trang\u{e8}re \"fk\"").title, "Other rows depend on this value");
+        assert_eq!(ex("error returned from database: 23514: la nouvelle ligne viole la contrainte de v\u{e9}rification \"c\"").title, "The value breaks a check constraint");
+        assert_eq!(ex("error returned from database: 55P03: storniere Anfrage wegen Sperr-Timeout").title, "Another session holds a lock on this table");
+        assert_eq!(ex("error returned from database: 25006: kann UPDATE in einer Read-Only-Transaktion nicht ausf\u{fc}hren").title, "This connection is read-only");
+        let t = ex("error returned from database: 57014: storniere Anfrage wegen Statement-Timeout");
+        assert_eq!(t.kind, ErrKind::Timeout);
+        assert_eq!(classify("error returned from database: 57014: annulation de la requ\u{ea}te \u{e0} cause du d\u{e9}lai d'expiration"), ErrKind::Timeout);
     }
 
     #[test]

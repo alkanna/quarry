@@ -165,9 +165,10 @@ fn a_connection_that_ran_user_text_does_not_go_back_to_the_pool() {
         assert_eq!(alive(&user), "0", "{var}: the connection went back to the pool");
         settle(&|| locks() == "0");
         assert_eq!(locks(), "0", "{var}");
+        // Asking the pool again is not checked: under load it may hand another idle connection, which would then wait
+        // on the lock this one holds. That this one stays open and keeps the lock is the contrast that matters.
         let own = pid_of(false);
         assert_eq!(alive(&own), "1", "{var}");
-        assert_eq!(pid_of(false), own, "{var}: the pool should hand the same connection back");
         // That one holds the lock, as the contrast to the closed ones. Closing it releases it.
         assert_eq!(locks(), "1", "{var}");
         l.w.rt.block_on(pool.close());

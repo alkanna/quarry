@@ -439,7 +439,7 @@ fn an_export_without_startup_options_still_cannot_write() {
         // A connection with no default_transaction_read_only, as behind a pooler that refused the startup options.
         let res = l.w.rt.block_on(async {
             let o = <sqlx::postgres::PgConnectOptions as std::str::FromStr>::from_str(&l.uri).unwrap().database("quarry_test");
-            let mut c = super::exec::Conn::Pg(sqlx::PgConnection::connect_with(&o).await.unwrap());
+            let mut c = super::exec::Conn::Pg(super::pg::PgConn::free(sqlx::PgConnection::connect_with(&o).await.unwrap()));
             let plan = super::export::Plan { fmt: crate::db::copy::Fmt::Csv, header: true, table: "t".into(), bs: false };
             let mut out = Vec::new();
             let r = super::export::stream_locked(&mut c, &l.db, "SET LOCAL statement_timeout = 0", "INSERT INTO t5f_pool.t VALUES (1) RETURNING id", &plan, &mut out, &Default::default(), &Default::default(), &Default::default()).await;

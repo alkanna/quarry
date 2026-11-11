@@ -6,7 +6,7 @@ impl App {
     pub(super) fn danger(&mut self, action: Danger) {
         if let Danger::RemoveConnection(id) = action {
             // Demo ids overlap real ones, so removing a demo connection must not touch the Keychain.
-            if !self.demo {
+            if !self.ephemeral {
                 if let Some(k) = keychain(id) {
                     let _ = k.delete_credential();
                 }
@@ -36,8 +36,8 @@ impl App {
                 None => self.warn("That change is no longer in Recent changes."),
             };
         }
-        if let Danger::SqlDrop { conn, schema, table, kind } = action {
-            return self.sql_drop_run(conn, schema, table, kind);
+        if let Danger::SqlDrop { conn, database, schema, table, kind, opt } = action {
+            return self.sql_drop_run(conn, database, schema, table, kind, opt);
         }
         if let Danger::SqlDropUser { conn, acct } = action {
             return self.sql_user_drop_run(conn, acct);

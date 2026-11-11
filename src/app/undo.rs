@@ -8,6 +8,12 @@ impl App {
         trim_undo(&mut self.undo, std::time::Instant::now());
     }
 
+    /// Forgets the undo entries of what a drop just removed. A database or table made again under the name would otherwise get them.
+    /// `database` is the PostgreSQL database (empty on MySQL, where `schema` is the database); `schema` and `table` narrow it, empty for the whole of it.
+    pub(super) fn purge_undo(&mut self, conn: u64, database: &str, schema: &str, table: &str) {
+        self.undo.retain(|a| !undo_is_under(a, conn, database, schema, table));
+    }
+
     pub(super) fn apply_undo(&mut self, i: usize) {
         self.apply_undo_as(i, false);
     }
@@ -56,6 +62,20 @@ impl App {
     }
 }
 
+/// Whether the action acts on the dropped database, schema or table (see `purge_undo`).
+pub(super) fn undo_is_under(a: &UndoAction, conn: u64, database: &str, schema: &str, table: &str) -> bool {
+    let UndoKind::Sql { database: d, undo, .. } = &a.kind else { return false };
+    // An account is not under any schema, whatever its label looks like.
+    if a.conn != conn || matches!(undo, db::sql::write::SqlUndo::Account(_)) {
+        return false;
+    }
+    if schema.is_empty() && table.is_empty() && !database.is_empty() {
+        // A created database's entry sits on the maintenance database and names the new one as its schema.
+        return d == database || (matches!(undo, db::sql::write::SqlUndo::CreatedDb { .. }) && a.db == database);
+    }
+    d == database && a.db == schema && (table.is_empty() || a.coll == table)
+}
+
 /// Drops actions older than a day and keeps the newest `UNDO_MAX`, like the original.
 pub(super) fn trim_undo(undo: &mut Vec<UndoAction>, now: std::time::Instant) {
     undo.retain(|a| now.saturating_duration_since(a.at).as_secs() <= db::UNDO_MAX_AGE_S);
@@ -81,5 +101,23 @@ mod tests {
         undo.insert(0, action(later));
         trim_undo(&mut undo, later);
         assert_eq!(undo.len(), 1, "only the action from within the last day stays");
+    }
+
+    fn sql_action(conn: u64, database: &str, schema: &str, table: &str) -> UndoAction {
+        let kind = UndoKind::Sql { database: database.into(), cols: Vec::new(), undo: db::sql::write::SqlUndo::Inserted(Vec::new()), ids: Default::default() };
+        UndoAction { at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind }
+    }
+
+    #[test]
+    fn a_drop_forgets_the_undo_entries_under_it_and_no_others() {
+        let all = || vec![sql_action(1, "shop", "public", "orders"), sql_action(1, "shop", "public", "items"), sql_action(1, "shop", "ext", "orders"), sql_action(1, "other", "public", "orders"), sql_action(2, "shop", "public", "orders")];
+        let left = |database: &str, schema: &str, table: &str| all().iter().filter(|a| !undo_is_under(a, 1, database, schema, table)).count();
+        assert_eq!(left("shop", "public", "orders"), 4, "a table");
+        assert_eq!(left("shop", "public", ""), 3, "a schema takes its tables");
+        assert_eq!(left("shop", "", ""), 2, "a database takes all of its own");
+        // MySQL has no separate database name: the schema is the database.
+        let my = vec![sql_action(1, "", "shop", "orders"), sql_action(1, "", "shop", "items"), sql_action(1, "", "other", "orders")];
+        assert_eq!(my.iter().filter(|a| !undo_is_under(a, 1, "", "shop", "")).count(), 1);
+        assert_eq!(my.iter().filter(|a| !undo_is_under(a, 1, "", "shop", "orders")).count(), 2);
     }
 }

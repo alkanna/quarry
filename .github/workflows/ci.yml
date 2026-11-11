@@ -23,9 +23,15 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # The runners' apt mirror sometimes fails to resolve for a few minutes, which failed whole runs, so it is tried again.
       - name: Linux libraries
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+        run: |
+          for i in 1 2 3 4 5; do
+            sudo apt-get update && sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev && exit 0
+            sleep $((i * 30))
+          done
+          exit 1
       # ring needs clang for Windows on ARM; the runner image ships LLVM here.
       - name: Clang for Windows on ARM
         if: matrix.os == 'windows-11-arm'
@@ -54,8 +60,10 @@ jobs:
           docker run -d --name mariadb -p 3307:3306 -e MARIADB_ROOT_PASSWORD=quarry mariadb:11.4
           docker run -d --name pg18 -p 5432:5432 -e POSTGRES_PASSWORD=quarry postgres:18
           docker run -d --name pg13 -p 5433:5432 -e POSTGRES_PASSWORD=quarry postgres:13
-          until docker exec mysql mysqladmin -uroot -pquarry ping --silent; do sleep 1; done
-          until docker exec mariadb mariadb-admin -uroot -pquarry ping --silent; do sleep 1; done
+          # Over TCP: on first start the image runs a temporary server on the socket only, then restarts, so a socket ping
+          # answers before the real server is up.
+          until docker exec mysql mysqladmin -uroot -pquarry -h127.0.0.1 --protocol=tcp ping --silent; do sleep 1; done
+          until docker exec mariadb mariadb-admin -uroot -pquarry -h127.0.0.1 --protocol=tcp ping --silent; do sleep 1; done
           until docker exec pg18 pg_isready -U postgres -q && docker exec pg13 pg_isready -U postgres -q; do sleep 1; done
       # PgBouncer in transaction mode with no prepared statement support, the worst case for the PostgreSQL pooler
       # fallback. It refuses the startup options and hands every transaction to any backend, so named statements and
@@ -69,8 +77,14 @@ jobs:
           until docker exec pgb-pg pg_isready -U postgres -q; do sleep 1; done
           docker run -d --name pgbouncer --network pgb -p 6432:5432 -e DB_HOST=pgb-pg -e DB_USER=postgres -e DB_PASSWORD=quarry -e AUTH_TYPE=scram-sha-256 -e POOL_MODE=transaction -e MAX_PREPARED_STATEMENTS=0 -e IGNORE_STARTUP_PARAMETERS=extra_float_digits -e DEFAULT_POOL_SIZE=8 -e MAX_CLIENT_CONN=200 edoburu/pgbouncer
           until docker run --rm --network pgb -e PGPASSWORD=quarry postgres:18 psql -h pgbouncer -U postgres -At -c 'select 1' >/dev/null 2>&1; do sleep 1; done
+      # The tests run under line coverage here, the one job with every live server, so the report counts the live and UI
+      # tests too. The summary goes on the run page and the HTML report is attached to the run.
+      - uses: taiki-e/install-action@cargo-llvm-cov
+        if: matrix.os == 'ubuntu-22.04'
       - if: matrix.os == 'ubuntu-22.04'
-        run: cargo test --locked
+        run: rustup component add llvm-tools-preview
+      - if: matrix.os == 'ubuntu-22.04'
+        run: cargo llvm-cov --locked --no-report
         env:
           QUARRY_TEST_MONGO: mongodb://localhost:27017/?directConnection=true
           QUARRY_TEST_MONGO_RS: mongodb://localhost:27017/?directConnection=true
@@ -79,5 +93,15 @@ jobs:
           QUARRY_TEST_POSTGRES: postgres://postgres:quarry@127.0.0.1:5432/postgres
           QUARRY_TEST_POSTGRES13: postgres://postgres:quarry@127.0.0.1:5433/postgres
           QUARRY_TEST_PGBOUNCER: postgres://postgres:quarry@127.0.0.1:6432/postgres
+      - name: Coverage report
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          { echo '## Line coverage'; echo '```'; cargo llvm-cov report; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          cargo llvm-cov report --html
+      - uses: actions/upload-artifact@v4
+        if: matrix.os == 'ubuntu-22.04'
+        with:
+          name: coverage-html
+          path: target/llvm-cov/html
       - if: matrix.os != 'ubuntu-22.04'
         run: cargo check --locked --all-targets

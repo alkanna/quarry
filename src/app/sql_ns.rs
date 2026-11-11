@@ -50,10 +50,19 @@ impl App {
         Some(self.ns_of(sel.conn, &sel.db)).filter(|s| !s.is_empty()).unwrap_or(PG_PUBLIC).to_string()
     }
 
-    /// Why the open table's structure, relations and triggers cannot be changed, when the engine cannot do it yet. The
-    /// editing of PostgreSQL structure is a later phase, so its views are read-only whatever the lock says.
+    /// Why the open table's columns and indexes cannot be changed, when the engine cannot do it.
     pub(super) fn struct_block(&self) -> Option<&'static str> {
         self.t().and_then(|t| self.lacks(t.sel.conn, db::sql::Feature::StructureEdit))
+    }
+
+    /// The same for the foreign keys of the Relations view.
+    pub(super) fn rel_block(&self) -> Option<&'static str> {
+        self.t().and_then(|t| self.lacks(t.sel.conn, db::sql::Feature::RelationEdit))
+    }
+
+    /// The same for the triggers.
+    pub(super) fn trig_block(&self) -> Option<&'static str> {
+        self.t().and_then(|t| self.lacks(t.sel.conn, db::sql::Feature::TriggerEdit))
     }
 
     /// Whether the engine of `conn` has `f`. Mongo and unknown connections answer yes, so their paths stay as they are.
@@ -155,8 +164,12 @@ impl App {
     pub(super) fn pg_schemas_done(&mut self, conn: u64, database: String, res: db::Res<Vec<db::sql::PgSchema>>) {
         let list = match res {
             Ok(l) => l,
-            Err(e) => return self.err_quiet(e, Some(conn), Some(Sel { conn, db: database.clone(), ..Default::default() }), format!("List schemas · {database}")),
+            Err(e) => {
+                self.side_err.insert((conn, database.clone()), e.clone());
+                return self.err_quiet(e, Some(conn), Some(Sel { conn, db: database.clone(), ..Default::default() }), format!("List schemas · {database}"));
+            }
         };
+        self.side_err.remove(&(conn, database.clone()));
         let user: Vec<String> = list.iter().filter(|s| !s.system).map(|s| s.name.clone()).collect();
         let listed = |name: &String| list.iter().any(|s| &s.name == name);
         let keep = self.conn(conn).and_then(|c| c.pg.get(&database)).map(|p| p.picked.clone()).filter(|p| listed(p));
@@ -182,6 +195,7 @@ impl App {
     pub(super) fn pg_tables_done(&mut self, conn: u64, database: String, schema: String, res: db::Res<(Vec<String>, Vec<String>)>) {
         match res {
             Ok((names, views)) => {
+                self.side_err.remove(&(conn, ns_key(&database, &schema)));
                 self.views.set(conn, &ns_key(&database, &schema), views);
                 if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
                     c.tables.entry(database).or_default().insert(schema, names);
@@ -190,6 +204,7 @@ impl App {
             Err(e) => {
                 // A schema that failed to list may be asked again by picking it once more.
                 self.pg_tables_asked.forget(conn, Some(&database), Some(&schema));
+                self.side_err.insert((conn, ns_key(&database, &schema)), e.clone());
                 self.err_quiet(e, Some(conn), Some(Sel { conn, db: database.clone(), schema: schema.clone(), ..Default::default() }), format!("List tables · {database}.{schema}"))
             }
         }

@@ -620,7 +620,7 @@ impl App {
                     for a in &shown[range] {
                         let active = w.sel.as_ref() == Some(&(a.user.clone(), a.host.clone()));
                         let dot = if a.locked { ALERT() } else if a.expired { WARNING() } else { SUCCESS() };
-                        let r = side_row(ui, 42.0, 0.0, active, |p, r| {
+                        let r = side_row(ui, 42.0, 0.0, active, &a.user, |p, r| {
                             p.circle_filled(egui::pos2(r.left() + 5.0, r.center().y), 4.0, dot);
                             p.text(egui::pos2(r.left() + 20.0, r.top() + 12.0), egui::Align2::LEFT_CENTER, &a.user, FontId::proportional(TXT_TITLE), if active { BRIGHT() } else { TEXT() });
                             let sub = if a.is_role { "role".to_string() } else { format!("@{}", a.host) };

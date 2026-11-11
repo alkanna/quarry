@@ -178,7 +178,8 @@ pub enum UndoKind {
     DeleteMany { old: Vec<Document> },
     /// A SQL write; `db` and `coll` of the action are the schema and table. `database` is the PostgreSQL database the
     /// write ran in, which picks the pool the undo runs on, and empty on MySQL.
-    Sql { database: String, cols: Vec<sql::Col>, undo: sql::write::SqlUndo },
+    /// `ids` is who the change ran on by oid (PostgreSQL), so an undo never acts on an object dropped and made again under the same name.
+    Sql { database: String, cols: Vec<sql::Col>, undo: sql::write::SqlUndo, ids: sql::write::PgIds },
 }
 
 pub struct UndoAction {
@@ -220,16 +221,22 @@ pub enum Msg {
     SqlStructure { req: u64, res: Res<sql::Structure> },
     /// An ALTER TABLE, a trigger change or one of their undos ran (or failed). `undo` is what reverses it.
     /// `sql_mode` is the server's mode when it no longer matched the one the statement was written for, so the
-    /// previews follow it. `alter` is false for a trigger change, which leaves the staged ALTER changes valid.
-    SqlAltered { conn: u64, schema: String, table: String, res: Res<String>, undo: Option<UndoAction>, sql_mode: Option<String>, alter: bool },
+    /// previews follow it. `alter` is false for a trigger change, which leaves the staged ALTER changes valid. `database` is
+    /// the PostgreSQL database the table is in (empty on MySQL, where `schema` is the database), so a table of the same
+    /// name in another database of the connection is not taken for it. `unsure` says a failed answer may still have run
+    /// (a COMMIT that did not come back), so the structure is read again.
+    SqlAltered { conn: u64, database: String, schema: String, table: String, res: Res<String>, undo: Option<UndoAction>, sql_mode: Option<String>, alter: bool, unsure: bool },
     /// Charsets, collations and engines for the New database and New table dialogs; `schema` is empty for a new database.
     SqlMeta { conn: u64, schema: String, res: Res<sql::create::Meta> },
     /// What a drop confirmation says will be lost; `table` is empty for a database.
-    SqlDropInfo { conn: u64, schema: String, table: String, res: Res<sql::create::DropInfo> },
+    /// `database` is the PostgreSQL database the schema or table is in, empty on MySQL and for a database.
+    SqlDropInfo { conn: u64, database: String, schema: String, table: String, res: Res<sql::create::DropInfo> },
+    /// The template databases of a PostgreSQL server, for the New database dialog.
+    PgTemplates { conn: u64, res: Res<Vec<String>> },
     /// A create or drop finished. `dbs` is the new database list after a change to it, and `undo` the entry
     /// for a create (or the one a refused undo hands back). `sql_mode` is the session's mode when it no longer
     /// matched the one the app had, so the previews follow it.
-    SqlDdl { conn: u64, schema: String, table: String, what: sql::create::Ddl, res: Res<String>, undo: Option<UndoAction>, dbs: Option<Vec<String>>, sql_mode: Option<String> },
+    SqlDdl { conn: u64, database: String, schema: String, table: String, what: sql::create::Ddl, res: Res<String>, undo: Option<UndoAction>, dbs: Option<Vec<String>>, sql_mode: Option<String> },
     /// The accounts of a SQL server for the Users window that asked with `req`.
     SqlUsers { conn: u64, req: u64, res: Res<sql::users::UserList> },
     /// What SHOW GRANTS says for the account the Users window asked about with `req`.
@@ -238,7 +245,7 @@ pub enum Msg {
     /// refused undo hands back.
     SqlUserDone { conn: u64, account: sql::users::Account, op: sql::users::Op, res: Res<String>, undo: Vec<UndoAction> },
     /// How many rows of a table point at nothing for a foreign key being added. Answers the open dialog by `req`.
-    SqlOrphans { req: u64, res: Res<u64> },
+    SqlOrphans { req: u64, res: Res<u64>, sample: Vec<String> },
     /// Whether the server takes a foreign key only on a whole primary or unique key. Answers the open dialog by `req`.
     SqlFkRules { req: u64, strict: bool },
     /// Every table, view and column of one database, for SQL autocomplete.

@@ -2,13 +2,18 @@
 //! points to from Content. Changes are staged like column and index edits (`sql_alter.rs`), so the statement
 //! the preview shows is the one that runs and the inverse comes from the structure read before.
 
-use super::sql_alter::{sql_block, BUSY_NOTE, READ_ONLY_NOTE};
+use super::sql_alter::{sql_block, BUSY_NOTE};
 use super::*;
 use db::sql::ddl::{self, Change, FK_ACTIONS};
 use db::sql::structure::{ForeignKey, Structure};
 
 /// Above this many rows the check for orphans waits for a click, because it joins the whole table.
 const CHECK_ROWS: u64 = 200_000;
+
+/// The height kept for the line or box that reports the rows with no match, which is a one line note, a box of a few lines or
+/// nothing as the answer comes in. It is kept whatever is shown so the buttons below never move when the answer lands, where a
+/// click aimed at one could hit the space it just left.
+const ORPHAN_BOX_H: f32 = 64.0;
 
 /// The Add relation dialog.
 pub(super) struct FkForm {
@@ -37,6 +42,16 @@ pub(super) struct FkForm {
     rules_req: u64,
     /// The person asked for the check on a big table.
     check: bool,
+    /// A few of the rows the count found, as their key values.
+    sample: Vec<String>,
+    /// PostgreSQL: the namespace is a schema of the tab's database, and these are the options only it has.
+    pg: bool,
+    match_full: bool,
+    deferrable: bool,
+    deferred: bool,
+    not_valid: bool,
+    /// The key being edited, which a change replaces (PostgreSQL). None for a new one.
+    from: Option<ForeignKey>,
 }
 
 impl FkForm {
@@ -57,12 +72,18 @@ impl FkForm {
         }
     }
 
-    pub(super) fn orphans_done(&mut self, req: u64, res: db::Res<u64>) -> bool {
+    pub(super) fn orphans_done(&mut self, req: u64, res: db::Res<u64>, sample: Vec<String>) -> bool {
         if req != self.orphan_req || req == 0 {
             return false;
         }
-        self.orphans = Some(res);
+        (self.orphans, self.sample) = (Some(res), sample);
         true
+    }
+
+    /// Puts the form back in the state where the count of the rows with no match is asked and not answered yet.
+    #[cfg(test)]
+    pub(super) fn forget_orphan_answer(&mut self) {
+        self.orphans = None;
     }
 
     /// The key the form describes once every part is picked.
@@ -80,16 +101,42 @@ impl FkForm {
             ref_cols: self.pairs.iter().map(|p| p.1.clone()).collect(),
             on_update: self.on_update.clone(),
             on_delete: self.on_delete.clone(),
+            match_full: self.pg && self.match_full,
+            deferrable: self.pg && self.deferrable,
+            deferred: self.pg && self.deferrable && self.deferred,
+            not_valid: self.pg && self.not_valid,
+            comment: self.from.as_ref().map(|o| o.comment.clone()).unwrap_or_default(),
+            // The parent as the form saw it, so the transaction can refuse when it changed before the key was added.
+            ref_seen: self.parent.as_ref().filter(|p| self.pg && p.pg_schema.is_some()).map(|p| ddl::ref_state(p, &self.pairs.iter().map(|x| x.1.clone()).collect::<Vec<_>>())).unwrap_or_default(),
+            ..Default::default()
         })
     }
 }
 
-fn action_index(a: &str) -> usize {
-    FK_ACTIONS.iter().position(|x| x.eq_ignore_ascii_case(a)).unwrap_or(0)
+/// What changing key `old` into `new` stages: a rename when only the name differs, else the key dropped and added again,
+/// which PostgreSQL does in the one transaction.
+fn edit_changes(old: &ForeignKey, new: &ForeignKey) -> Vec<Change> {
+    let same = old.cols == new.cols && old.ref_db == new.ref_db && old.ref_table == new.ref_table && old.ref_cols == new.ref_cols && old.on_update.eq_ignore_ascii_case(&new.on_update) && old.on_delete.eq_ignore_ascii_case(&new.on_delete)
+        && (old.match_full, old.deferrable, old.deferred, old.not_valid) == (new.match_full, new.deferrable, new.deferred, new.not_valid);
+    match (same, old.name == new.name) {
+        (true, true) => Vec::new(),
+        (true, false) => vec![Change::RenameFk { from: old.name.clone(), to: new.name.clone() }],
+        _ => vec![Change::DropFk(old.name.clone()), Change::AddFk(new.clone())],
+    }
+}
+
+/// The actions the dialog offers, in the order of the buttons. PostgreSQL also has SET DEFAULT.
+fn actions(pg: bool) -> &'static [&'static str] {
+    const PG: [&str; 5] = ["RESTRICT", "CASCADE", "SET NULL", "NO ACTION", "SET DEFAULT"];
+    if pg { &PG } else { &FK_ACTIONS }
+}
+
+fn action_index(a: &str, pg: bool) -> usize {
+    actions(pg).iter().position(|x| x.eq_ignore_ascii_case(a)).unwrap_or(0)
 }
 
 fn action_label(i: usize) -> &'static str {
-    ["Restrict", "Cascade", "Set null", "No action"][i]
+    ["Restrict", "Cascade", "Set null", "No action", "Set default"][i]
 }
 
 fn type_text(st: &Structure, col: &str) -> String {
@@ -125,28 +172,48 @@ pub(super) fn fk_row_filter(d: db::sql::Dialect, bs: bool, fk: &ForeignKey, cols
 }
 
 impl App {
-    pub(super) fn open_fk_form(&mut self) {
+    /// The Add relation dialog, or with `edit` the dialog on that key of the table (PostgreSQL).
+    pub(super) fn open_fk_form(&mut self, edit: Option<usize>) {
         let Some(own) = self.structure().cloned() else { return };
-        let Some(db_name) = self.t().map(|t| t.sel.db.clone()) else { return };
+        let from = edit.and_then(|i| own.foreign_keys.get(i).cloned());
+        if let Some(k) = &from {
+            if !k.opaque.is_empty() {
+                return self.warn(format!("{} cannot be edited here: {}.", k.name, k.opaque));
+            }
+            let pg = self.t().is_some_and(|t| self.is_pg(t.sel.conn));
+            if self.staged().iter().any(|c| matches!(c, Change::DropFk(n) | Change::RenameFk { from: n, .. } | Change::SetFkDeferral { name: n, .. } if ddl::fk_name_is(pg, n, &k.name))) {
+                return self.warn(format!("{} already has a staged change. Remove it first.", k.name));
+            }
+        }
+        let Some(sel) = self.t().map(|t| t.sel.clone()) else { return };
+        // The namespace the key points into: the database on MySQL, a schema of this database on PostgreSQL.
+        let pg = self.is_pg(sel.conn);
+        let ns = if pg { self.sel_schema(&sel) } else { sel.db.clone() };
         let rest = self.staged().to_vec();
         let first = own.columns.first().map(|c| c.name.clone()).unwrap_or_default();
         let (d, version, _) = self.alter_env();
         // Until the server answers, a MySQL that has the rule on by default is taken to have it.
         let strict = ddl::fk_whole_key_default(d, &version);
         let mut rules_req = 0;
-        if let Some(sql) = self.t().and_then(|t| self.conn(t.sel.conn)).and_then(|c| c.sql.clone()) {
+        if let Some(sql) = self.t().and_then(|t| self.conn(t.sel.conn)).and_then(|c| c.sql.clone()).filter(|_| !pg) {
             self.req += 1;
             rules_req = self.req;
             self.worker.sql_fk_rules(rules_req, sql);
         }
+        let (name, pairs) = match &from {
+            Some(k) => (k.name.clone(), k.cols.iter().cloned().zip(k.ref_cols.iter().cloned()).collect()),
+            None => (String::new(), vec![(first, String::new())]),
+        };
+        let (ref_db, ref_table) = from.as_ref().map(|k| (k.ref_db.clone(), k.ref_table.clone())).unwrap_or((ns, String::new()));
+        let (on_update, on_delete) = from.as_ref().map(|k| (k.on_update.clone(), k.on_delete.clone())).unwrap_or_else(|| if pg { ("NO ACTION".into(), "NO ACTION".into()) } else { ("CASCADE".into(), "RESTRICT".into()) });
         self.modal = Some(Modal::FkEdit(Box::new(FkForm {
-            name: String::new(),
-            named: false,
-            pairs: vec![(first, String::new())],
-            ref_db: db_name,
-            ref_table: String::new(),
-            on_update: "CASCADE".into(),
-            on_delete: "RESTRICT".into(),
+            name,
+            named: from.is_some(),
+            pairs,
+            ref_db,
+            ref_table,
+            on_update,
+            on_delete,
             own,
             rest,
             parent: None,
@@ -159,21 +226,36 @@ impl App {
             strict,
             rules_req,
             check: false,
+            sample: Vec::new(),
+            pg,
+            match_full: from.as_ref().is_some_and(|k| k.match_full),
+            deferrable: from.as_ref().is_some_and(|k| k.deferrable),
+            deferred: from.as_ref().is_some_and(|k| k.deferred),
+            not_valid: from.as_ref().is_some_and(|k| k.not_valid),
+            from,
         })));
     }
 
     pub(super) fn stage_drop_fk(&mut self, i: usize) {
         let Some(name) = self.structure().and_then(|s| s.foreign_keys.get(i)).map(|k| k.name.clone()) else { return };
         let mut staged = self.staged().to_vec();
-        if staged.iter().any(|c| matches!(c, Change::DropFk(n) if n.eq_ignore_ascii_case(&name))) {
+        let pg = self.t().is_some_and(|t| self.is_pg(t.sel.conn));
+        if staged.iter().any(|c| matches!(c, Change::DropFk(n) if ddl::fk_name_is(pg, n, &name))) {
             return;
         }
         staged.push(Change::DropFk(name));
         self.set_staged(staged);
     }
 
-    /// The tables a key can point at in a schema, views left out. None while the list is still loading.
-    fn fk_tables(&mut self, conn: u64, schema: &str) -> Option<Vec<String>> {
+    /// The tables a key can point at in a namespace (a database, or a schema of `db` on PostgreSQL), views left out. None
+    /// while the list is still loading.
+    fn fk_tables(&mut self, conn: u64, db: &str, schema: &str) -> Option<Vec<String>> {
+        if self.is_pg(conn) {
+            self.pg_load_tables(conn, db, schema);
+            let list = self.conn(conn)?.tables_in(db, schema)?.clone();
+            let key = Sel { conn, db: db.to_string(), schema: schema.to_string(), coll: String::new() }.nskey();
+            return Some(list.into_iter().filter(|t| !self.views.has(conn, &key, t)).collect());
+        }
         let list = self.conn(conn)?.dbs.iter().find(|d| d.0 == schema)?.1.clone();
         match list {
             Some(l) => Some(l.into_iter().filter(|t| !self.views.has(conn, schema, t)).collect()),
@@ -189,15 +271,24 @@ impl App {
     }
 
     pub(super) fn fk_dialog(&mut self, ui: &mut egui::Ui, f: &mut FkForm, keep: &mut bool) {
-        let Some((conn, schema, table)) = self.t().map(|t| (t.sel.conn, t.sel.db.clone(), t.sel.coll.clone())) else { return };
-        let live = self.conn(conn).and_then(|c| c.sql.clone());
+        let Some(sel) = self.t().map(|t| t.sel.clone()) else { return };
+        let (conn, base_db, table) = (sel.conn, sel.db.clone(), sel.coll.clone());
+        let pg = f.pg;
+        // The session of the tab's database and the namespace its table is in.
+        let live = self.sql_target(&sel).map(|t| t.0);
+        let schema = if pg { self.sel_schema(&sel) } else { base_db.clone() };
         ui.set_width(600.0);
-        dialog_title(ui, "Add relation");
+        dialog_title(ui, if f.from.is_some() { "Edit relation" } else { "Add relation" });
         ui.label(RichText::new(&table).size(TXT_SMALL).color(MUTED()));
         ui.add_space(8.0);
 
-        let dbs: Vec<String> = self.conn(conn).map(|c| c.dbs.iter().map(|d| d.0.clone()).filter(|d| *d == schema || !db::sql::create::SYSTEM_SCHEMAS.contains(&d.as_str())).collect()).unwrap_or_default();
-        let tables = self.fk_tables(conn, &f.ref_db);
+        let dbs: Vec<String> = if pg {
+            // Every schema of this database that holds user objects, and the table's own.
+            self.conn(conn).and_then(|c| c.pg.get(&base_db)).map(|p| p.schemas.iter().filter(|s| !s.system || s.name == schema).map(|s| s.name.clone()).collect()).unwrap_or_else(|| vec![schema.clone()])
+        } else {
+            self.conn(conn).map(|c| c.dbs.iter().map(|d| d.0.clone()).filter(|d| *d == schema || !db::sql::create::SYSTEM_SCHEMAS.contains(&d.as_str())).collect()).unwrap_or_default()
+        };
+        let tables = self.fk_tables(conn, &base_db, &f.ref_db.clone());
         let dropped: Vec<String> = f.rest.iter().filter_map(|c| if let Change::Drop(n) = c { Some(n.clone()) } else { None }).collect();
         let own_cols: Vec<String> = f.own.columns.iter().map(|c| c.name.clone()).filter(|n| !dropped.contains(n)).collect();
         let parent_cols: Vec<String> = f.parent.as_ref().map(|p| p.columns.iter().map(|c| c.name.clone()).collect()).unwrap_or_default();
@@ -215,12 +306,13 @@ impl App {
             form_label(ui, "References");
             ui.horizontal(|ui| {
                 let before = (f.ref_db.clone(), f.ref_table.clone());
-                egui::ComboBox::from_id_salt("fkdb").width(150.0).selected_text(f.ref_db.as_str()).show_ui(ui, |ui| {
+                let combo = egui::ComboBox::from_id_salt("fkdb").width(150.0).selected_text(f.ref_db.as_str()).show_ui(ui, |ui| {
                     menu_look(ui);
                     for d in &dbs {
                         ui.selectable_value(&mut f.ref_db, d.clone(), d.as_str());
                     }
                 });
+                combo.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, if pg { "Referenced schema" } else { "Referenced database" }));
                 if f.ref_db != before.0 {
                     f.ref_table.clear();
                     for p in &mut f.pairs {
@@ -228,12 +320,13 @@ impl App {
                     }
                 }
                 let shown = if f.ref_table.is_empty() { if tables.is_none() { "Loading tables..." } else { "Pick a table" } } else { f.ref_table.as_str() };
-                egui::ComboBox::from_id_salt("fktable").width(ui.available_width()).selected_text(shown).show_ui(ui, |ui| {
+                let combo = egui::ComboBox::from_id_salt("fktable").width(ui.available_width()).selected_text(shown).show_ui(ui, |ui| {
                     menu_look(ui);
                     for t in tables.iter().flatten() {
                         ui.selectable_value(&mut f.ref_table, t.clone(), t.as_str());
                     }
                 });
+                combo.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Referenced table"));
                 if f.ref_table != before.1 {
                     for p in &mut f.pairs {
                         p.1.clear();
@@ -247,20 +340,22 @@ impl App {
                 let many = f.pairs.len() > 1;
                 for (i, p) in f.pairs.iter_mut().enumerate() {
                     ui.horizontal(|ui| {
-                        egui::ComboBox::from_id_salt(("fkown", i)).width(170.0).selected_text(if p.0.is_empty() { "Column" } else { p.0.as_str() }).show_ui(ui, |ui| {
+                        let combo = egui::ComboBox::from_id_salt(("fkown", i)).width(170.0).selected_text(if p.0.is_empty() { "Column" } else { p.0.as_str() }).show_ui(ui, |ui| {
                             menu_look(ui);
                             for c in &own_cols {
                                 ui.selectable_value(&mut p.0, c.clone(), c.as_str());
                             }
                         });
+                        combo.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, format!("Column {}", i + 1)));
                         ui.label(RichText::new(type_text(&f.own, &p.0)).monospace().size(TXT_SMALL).color(FAINT()));
                         ui.label(RichText::new("to").color(MUTED()));
-                        egui::ComboBox::from_id_salt(("fkref", i)).width(170.0).selected_text(if p.1.is_empty() { "Column" } else { p.1.as_str() }).show_ui(ui, |ui| {
+                        let combo = egui::ComboBox::from_id_salt(("fkref", i)).width(170.0).selected_text(if p.1.is_empty() { "Column" } else { p.1.as_str() }).show_ui(ui, |ui| {
                             menu_look(ui);
                             for c in &parent_cols {
                                 ui.selectable_value(&mut p.1, c.clone(), c.as_str());
                             }
                         });
+                        combo.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, format!("Referenced column {}", i + 1)));
                         if let Some(par) = &f.parent {
                             ui.label(RichText::new(type_text(par, &p.1)).monospace().size(TXT_SMALL).color(FAINT()));
                         }
@@ -277,9 +372,20 @@ impl App {
 
             for (label, value) in [("On update", &mut f.on_update), ("On delete", &mut f.on_delete)] {
                 form_label(ui, label);
-                let mut i = action_index(value);
-                segmented(ui, &mut i, &[(0, action_label(0)), (1, action_label(1)), (2, action_label(2)), (3, action_label(3))]);
-                *value = FK_ACTIONS[i].to_string();
+                let mut i = action_index(value, pg);
+                let items: Vec<(usize, &str)> = (0..actions(pg).len()).map(|k| (k, action_label(k))).collect();
+                segmented(ui, &mut i, &items);
+                *value = actions(pg)[i].to_string();
+                ui.end_row();
+            }
+            if pg {
+                form_label(ui, "Options");
+                ui.vertical(|ui| {
+                    ui.checkbox(&mut f.match_full, "Match full").on_hover_text("A key with several columns must be all NULL or all set. The default lets any NULL column skip the check.");
+                    ui.checkbox(&mut f.deferrable, "Deferrable").on_hover_text("Lets a transaction postpone the check to its end.");
+                    ui.add_enabled(f.deferrable, egui::Checkbox::new(&mut f.deferred, "Initially deferred"));
+                    ui.checkbox(&mut f.not_valid, "Do not check the rows already there (NOT VALID)").on_hover_text("The key holds for new and changed rows only, and the existing ones are left as they are.");
+                });
                 ui.end_row();
             }
         });
@@ -304,6 +410,7 @@ impl App {
             f.parent_err = None;
             f.orphans = None;
             f.orphan_for = None;
+            f.sample.clear();
             if f.ref_db == schema && f.ref_table == table {
                 f.parent = Some(f.own.clone());
                 f.parent_req = 0;
@@ -325,7 +432,7 @@ impl App {
             problem = ddl::fk_problem(&f.own, &table, par, k, f.strict);
             hard = problem.is_some();
             if problem.is_none() {
-                let taken = |n: &str| f.own.foreign_keys.iter().any(|x| x.name.eq_ignore_ascii_case(n)) || f.rest.iter().any(|c| matches!(c, Change::AddFk(x) if x.name.eq_ignore_ascii_case(n)));
+                let taken = |n: &str| f.own.foreign_keys.iter().any(|x| ddl::fk_name_is(pg, &x.name, n) && f.from.as_ref().is_none_or(|o| o.name != x.name)) || f.rest.iter().any(|c| matches!(c, Change::AddFk(x) if ddl::fk_name_is(pg, &x.name, n))) || f.own.constraints.iter().any(|x| x.name == n);
                 if taken(&k.name) {
                     problem = Some(format!("The table already has a foreign key called {}.", k.name));
                     hard = true;
@@ -340,6 +447,7 @@ impl App {
                 if f.parent.is_some() && (!big || f.check) {
                     self.req += 1;
                     (f.orphan_req, f.orphan_for, f.orphans) = (self.req, Some(ddl::orphan_key(k)), None);
+                    f.sample.clear();
                     self.worker.sql_orphans(self.req, sql.clone(), schema.clone(), table.clone(), k.clone());
                 }
             }
@@ -348,13 +456,18 @@ impl App {
         let mut text: Result<String, String> = Err(String::new());
         let mut all = f.rest.clone();
         if let Some(k) = &key {
-            all.push(Change::AddFk(k.clone()));
+            match &f.from {
+                Some(old) => all.extend(edit_changes(old, k)),
+                None => all.push(Change::AddFk(k.clone())),
+            }
             text = if let Some(p) = &problem {
                 Err(p.clone())
             } else if loading {
                 Err("Reading the referenced table...".into())
             } else if k.name.is_empty() {
                 Err("Name the relation.".into())
+            } else if all.len() == f.rest.len() {
+                Err("Nothing is changed.".into())
             } else {
                 self.alter_text(&f.own, &all)
             };
@@ -362,33 +475,43 @@ impl App {
             text = Err(p.clone());
         }
 
-        if let (Some(k), None) = (&key, &problem) {
-            ui.add_space(2.0);
-            let (col, rc) = (k.cols.join(", "), format!("{}.{}", k.ref_table, k.ref_cols.join(", ")));
-            match &f.orphans {
-                Some(Ok(n)) if *n > 0 && f.orphan_for.as_ref() == Some(&ddl::orphan_key(k)) => {
-                    egui::Frame::new().fill(tint(WARNING(), 34)).corner_radius(R_MD).inner_margin(10).show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.label(RichText::new(format!("{n} row{} {} {col} missing from {rc}. Fix {} first or the ALTER fails.", if *n == 1 { "" } else { "s" }, if *n == 1 { "has a value in" } else { "have values in" }, if *n == 1 { "it" } else { "them" })).size(TXT_SMALL).color(WARNING()));
-                    });
-                }
-                Some(Ok(_)) => {
-                    ui.label(RichText::new("Every existing row has a match.").size(TXT_SMALL).color(FAINT()));
-                }
-                Some(Err(e)) => {
-                    ui.label(RichText::new(format!("Could not check the existing rows: {e}")).size(TXT_SMALL).color(FAINT()));
-                }
-                None if f.orphan_for.is_some() => {
-                    ui.label(RichText::new("Checking the existing rows...").size(TXT_SMALL).color(FAINT()));
-                }
-                None if live.is_some() && f.own.status.rows.is_some_and(|n| n > CHECK_ROWS) => {
-                    if quiet(ui, "Check existing rows").on_hover_text("Joins the whole table, which can take a while on a big one").clicked() {
-                        f.check = true;
+        ui.add_space(2.0);
+        ui.scope(|ui| {
+            ui.set_min_height(ORPHAN_BOX_H);
+            ui.set_width(ui.available_width());
+            if let (Some(k), None) = (&key, &problem) {
+                let (col, rc) = (k.cols.join(", "), format!("{}.{}", k.ref_table, k.ref_cols.join(", ")));
+                match &f.orphans {
+                    Some(Ok(n)) if *n > 0 && f.orphan_for.as_ref() == Some(&ddl::orphan_key(k)) => {
+                        egui::Frame::new().fill(tint(WARNING(), 34)).corner_radius(R_MD).inner_margin(10).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            let them = if *n == 1 { "it" } else { "them" };
+                            let fix = if k.not_valid { "They stay as they are.".to_string() } else if pg { format!("Fix {them} first, or add the key as NOT VALID.") } else { format!("Fix {them} first or the ALTER fails.") };
+                            let mut msg = format!("{n} row{} {} {col} missing from {rc}. {fix}", if *n == 1 { "" } else { "s" }, if *n == 1 { "has a value in" } else { "have values in" });
+                            if !f.sample.is_empty() {
+                                msg.push_str(&format!(" For example {}.", f.sample.join(", ")));
+                            }
+                            ui.label(RichText::new(msg).size(TXT_SMALL).color(WARNING()));
+                        });
                     }
+                    Some(Ok(_)) => {
+                        ui.label(RichText::new("Every existing row has a match.").size(TXT_SMALL).color(FAINT()));
+                    }
+                    Some(Err(e)) => {
+                        ui.label(RichText::new(format!("Could not check the existing rows: {e}")).size(TXT_SMALL).color(FAINT()));
+                    }
+                    None if f.orphan_for.is_some() => {
+                        ui.label(RichText::new("Checking the existing rows...").size(TXT_SMALL).color(FAINT()));
+                    }
+                    None if live.is_some() && f.own.status.rows.is_some_and(|n| n > CHECK_ROWS) => {
+                        if quiet(ui, "Check existing rows").on_hover_text("Joins the whole table, which can take a while on a big one").clicked() {
+                            f.check = true;
+                        }
+                    }
+                    None => {}
                 }
-                None => {}
             }
-        }
+        });
         ui.add_space(6.0);
         caption(ui, "SQL TO RUN");
         ui.add_space(4.0);
@@ -405,9 +528,12 @@ impl App {
         }
         let (mut stage, mut now) = (false, false);
         dialog_actions(ui, |ui| {
-            stage = ui.add_enabled(text.is_ok(), primary_button(ui, "Add relation", PRIMARY())).clicked();
+            stage = ui.add_enabled(text.is_ok(), primary_button(ui, if f.from.is_some() { "Change relation" } else { "Add relation" }, PRIMARY())).clicked();
             let busy = self.applying();
-            now = ui.add_enabled(text.is_ok() && self.sel_writable() && !busy, egui::Button::new("Apply now")).on_hover_text("Stage this change and run everything staged").on_disabled_hover_text(if busy { BUSY_NOTE } else { READ_ONLY_NOTE }).clicked();
+            // The dialog's own count of the rows with no match holds a read lock on the table until it answers, which a change that
+            // locks the table harder would meet as another session.
+            let counting = f.orphan_for.is_some() && f.orphans.is_none();
+            now = ui.add_enabled(text.is_ok() && !self.sel_is_view() && !busy && !counting, egui::Button::new("Apply now")).on_hover_text("Stage this change and run everything staged. A locked connection asks to unlock first.").on_disabled_hover_text(if busy { BUSY_NOTE } else if counting { "Checking the existing rows first" } else { "A view cannot be changed here" }).clicked();
             if ui.button("Cancel").clicked() {
                 *keep = false;
             }
@@ -460,7 +586,7 @@ impl App {
         if which != "addrel" {
             return;
         }
-        self.open_fk_form();
+        self.open_fk_form(None);
         let Some(Modal::FkEdit(f)) = self.modal.as_mut() else { return };
         use db::sql::structure::{Column, Index, IndexCol};
         let code = Column { name: "code".into(), full_type: "char(3)".into(), collation: Some("utf8mb4_0900_ai_ci".into()), key: "PRI".into(), ..Default::default() };

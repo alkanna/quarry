@@ -22,8 +22,10 @@ pub const SYSTEM_SCHEMAS: [&str; 4] = ["information_schema", "mysql", "performan
 pub enum Ddl {
     CreatedDb,
     CreatedTable,
+    CreatedSchema,
     DroppedDb,
     DroppedTable,
+    DroppedSchema,
     Emptied,
 }
 
@@ -96,6 +98,16 @@ pub struct DropInfo {
     pub events: u64,
     /// lower_case_table_names is not 0, so names compare without case; read for a database only.
     pub fold_case: bool,
+    /// PostgreSQL: the database is a template, which the server refuses to drop until it is turned back into a plain one.
+    pub is_template: bool,
+    /// PostgreSQL: the size of a database in bytes, and how many other sessions are connected to it right now.
+    pub size: Option<u64>,
+    pub sessions: Option<u64>,
+    /// PostgreSQL: the connection opens on this database, so it cannot be dropped from here.
+    pub own_database: bool,
+    /// PostgreSQL: what a CASCADE would drop with a schema or table, the first few as the server describes them, and how many there are.
+    pub dependents: Vec<String>,
+    pub dependents_total: u64,
 }
 
 // Identifiers.
@@ -638,7 +650,7 @@ async fn run(db: &Db, read_only: bool, list: bool, build: impl FnOnce(bool) -> R
 }
 
 fn created(conn: u64, schema: &str, table: &str, undo: SqlUndo) -> UndoAction {
-    UndoAction { at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database: String::new(), cols: Vec::new(), undo } }
+    UndoAction { at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database: String::new(), cols: Vec::new(), undo, ids: Default::default() } }
 }
 
 /// The part of a table undo that runs with the table locked: it must still be the table the create made,
@@ -711,7 +723,7 @@ impl Worker {
     pub fn sql_drop_info(&self, conn: u64, db: Db, schema: String, table: String) {
         self.spawn(async move {
             let res = if table.is_empty() { db_info(&db, &schema).await } else { table_info(&db, &schema, &table).await };
-            Msg::SqlDropInfo { conn, schema, table, res }
+            Msg::SqlDropInfo { conn, database: String::new(), schema, table, res }
         });
     }
 
@@ -724,9 +736,9 @@ impl Worker {
             })
             .await;
             let name = res.as_ref().ok().and_then(|l| l.as_deref()).map_or(name.clone(), |l| stored_name(l, &name));
-            let undo = res.is_ok().then(|| created(conn, &name, "", SqlUndo::CreatedDb));
+            let undo = res.is_ok().then(|| created(conn, &name, "", SqlUndo::CreatedDb { oid: String::new(), baseline: 0 }));
             let (res, dbs) = split(res, format!("Created database {name}"));
-            Msg::SqlDdl { conn, schema: name, table: String::new(), what: Ddl::CreatedDb, res, undo, dbs, sql_mode: None }
+            Msg::SqlDdl { conn, database: String::new(), schema: name, table: String::new(), what: Ddl::CreatedDb, res, undo, dbs, sql_mode: None }
         });
     }
 
@@ -754,7 +766,7 @@ impl Worker {
             .await;
             let undo = res.is_ok().then(|| created(conn, &spec.schema, &name, SqlUndo::CreatedTable { made }));
             let (res, dbs) = split(res.map(|_| None), format!("Created table {name}"));
-            Msg::SqlDdl { conn, schema: spec.schema, table: name, what: Ddl::CreatedTable, res, undo, dbs, sql_mode: seen }
+            Msg::SqlDdl { conn, database: String::new(), schema: spec.schema, table: name, what: Ddl::CreatedTable, res, undo, dbs, sql_mode: seen }
         });
     }
 
@@ -791,13 +803,16 @@ impl Worker {
             })
             .await;
             let (res, dbs) = split(res, done);
-            Msg::SqlDdl { conn, schema, table, what, res, undo: None, dbs, sql_mode: None }
+            Msg::SqlDdl { conn, database: String::new(), schema, table, what, res, undo: None, dbs, sql_mode: None }
         });
     }
 
     /// Undoes a create when the object is still empty. A refused undo hands the entry back.
     pub fn sql_undo_create(&self, db: Db, a: UndoAction, read_only: bool) {
         let scope = a.db.clone();
+        if db.dialect == Dialect::Postgres {
+            return self.spawn_sql(db.conn, &scope, super::create_pg::undo(db.clone(), a, read_only));
+        }
         self.spawn_sql(db.conn, &scope, async move {
             let UndoAction { at, conn, db: schema, coll: table, kind } = a;
             let made = match &kind {
@@ -813,7 +828,7 @@ impl Worker {
             let (res, dbs) = split(res.map(|(_, l)| l), said);
             let undo = (!undone).then(|| UndoAction { at, conn, db: schema.clone(), coll: table.clone(), kind });
             // A refused undo changes nothing, so the app has nothing to refresh.
-            Msg::SqlDdl { conn, schema, table, what, res, undo, dbs, sql_mode: None }
+            Msg::SqlDdl { conn, database: String::new(), schema, table, what, res, undo, dbs, sql_mode: None }
         });
     }
 }
@@ -1563,7 +1578,7 @@ mod tests {
             }
             assert!(l.exists_table(&name, "t") && !l.exists_table(&name, "t2"));
             // A refused undo hands its entry back.
-            let undo = created(1, &name, "", SqlUndo::CreatedDb);
+            let undo = created(1, &name, "", SqlUndo::CreatedDb { oid: String::new(), baseline: 0 });
             let (_, res, back, _) = l.undo(undo, true);
             assert!(res.is_err() && back.is_some());
             l.exec(&format!("DROP DATABASE `{name}`"));

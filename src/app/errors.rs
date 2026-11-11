@@ -220,6 +220,13 @@ fn raw_block(ui: &mut egui::Ui, label: &str, e: &ErrEntry, open_first: bool) {
 }
 
 impl App {
+    /// The newest error and the toasts on screen, for the message a timed-out UI test panics with.
+    #[cfg(test)]
+    pub(super) fn last_problem(&self) -> String {
+        let toasts: Vec<String> = self.toasts.iter().map(|t| format!("{}: {}", t.title, t.body)).collect();
+        format!("{} (toasts: {toasts:?})", self.errors.last().map_or_else(|| "no error logged".into(), |e| e.raw.clone()))
+    }
+
     /// Records an error for the session list and explains it with what is known of where it happened.
     pub(super) fn log_err(&mut self, raw: impl Into<String>, conn: Option<u64>, sel: Option<Sel>, place: String, what: &str) -> ErrEntry {
         self.err_seq += 1;

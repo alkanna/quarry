@@ -17,6 +17,7 @@ mod column_menu;
 mod compare;
 mod config;
 mod conn_form;
+mod conn_pg_advanced;
 mod danger;
 mod demo;
 mod demo_pg;
@@ -46,10 +47,12 @@ mod sidebar;
 mod sql_ac;
 mod sql_ns;
 mod sql_create;
+mod sql_create_pg;
 mod sql_structure;
 mod sql_alter;
 mod sql_rel;
 mod sql_trig;
+mod sql_trig_pg;
 mod sql_edit;
 mod sql_bar;
 mod sql_views;
@@ -64,6 +67,8 @@ mod tools;
 mod tree;
 mod undo;
 mod users;
+#[cfg(test)]
+mod ui_tests;
 mod watch;
 use column_menu::*;
 use errors::*;
@@ -133,6 +138,9 @@ pub struct App {
     sql_asked: HashSet<(u64, String)>,
     /// PostgreSQL: (connection, database, schema) whose table list was asked for.
     pg_tables_asked: Asked,
+    /// Sidebar lists that failed to load, by connection and namespace key (a database, or a PostgreSQL database and
+    /// schema), so the sidebar shows the failure with a retry instead of an empty list that never fills.
+    side_err: HashMap<(u64, String), String>,
     tabs: Vec<Tab>,
     cur: usize,
     req: u64,
@@ -240,6 +248,8 @@ pub struct App {
     /// The active tab the tab strip last scrolled to; it scrolls again when this differs.
     tab_seen: Option<usize>,
     demo: bool,
+    /// Nothing is read from or written to disk or the keychain. True in the demo and in tests; `demo` alone means fake offline data.
+    ephemeral: bool,
     tool: Option<ToolRun>,
     /// CPU time of the last frame in milliseconds, for the frame rate readout.
     frame_ms: f32,
@@ -286,12 +296,10 @@ pub(crate) fn collection_ref(coll: &str) -> String {
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>, shot: Option<PathBuf>) -> Self {
-        style(&cc.egui_ctx, Look::default());
+    /// The empty state both `new` and the test constructor start from, so a new field is added in one place.
+    fn blank(cc: &eframe::CreationContext<'_>, demo: bool, menu: bool, shot: Option<PathBuf>) -> Self {
         let (tx, rx) = channel();
-        // QUARRY_DEMO=1 opens the offline demo to click around in, without screenshot mode closing it.
-        let demo = shot.is_some() || std::env::var("QUARRY_DEMO").is_ok();
-        let mut app = Self {
+        Self {
             worker: Worker::new(tx, cc.egui_ctx.clone()),
             rx,
             conns: Vec::new(),
@@ -300,6 +308,7 @@ impl App {
             side_closed: HashSet::new(),
             sql_asked: HashSet::new(),
             pg_tables_asked: Asked::default(),
+            side_err: HashMap::new(),
             tabs: Vec::new(),
             cur: 0,
             req: 0,
@@ -324,9 +333,8 @@ impl App {
             prefs: UiPrefs::default(),
             col_filter: String::new(),
             col_scope_query: false,
-            // Screenshot runs stay off the real menu bar.
             #[cfg(target_os = "macos")]
-            menu: (!demo || std::env::var("QUARRY_DEMO").is_ok()).then(|| crate::menu::MenuBar::new(&cc.egui_ctx)),
+            menu: menu.then(|| crate::menu::MenuBar::new(&cc.egui_ctx)),
             #[cfg(target_os = "macos")]
             menu_acts: Vec::new(),
             new_pkg: String::new(),
@@ -370,6 +378,7 @@ impl App {
             scroll_sel: false,
             tab_seen: None,
             demo,
+            ephemeral: demo,
             tool: None,
             width_cache: HashMap::new(),
             frame_ms: 0.0,
@@ -384,7 +393,26 @@ impl App {
             last_input: std::time::Instant::now(),
             started: std::time::Instant::now(),
             shot: shot.map(|p| (p, 0, Arc::new(Mutex::new(None)))),
-        };
+        }
+    }
+
+    /// An app with no disk, keychain, menu bar or demo data, for the headless UI tests. Connections are added by the test.
+    #[cfg(test)]
+    pub fn for_test(cc: &eframe::CreationContext<'_>) -> Self {
+        style(&cc.egui_ctx, Look::default());
+        let mut app = Self::blank(cc, false, false, None);
+        app.ephemeral = true;
+        // A save runs on the click alone, and no timer-driven save can change the draft under a test.
+        (app.prefs.confirm_save, app.prefs.auto_save) = (false, false);
+        app
+    }
+
+    pub fn new(cc: &eframe::CreationContext<'_>, shot: Option<PathBuf>) -> Self {
+        style(&cc.egui_ctx, Look::default());
+        // QUARRY_DEMO=1 opens the offline demo to click around in, without screenshot mode closing it.
+        let demo = shot.is_some() || std::env::var("QUARRY_DEMO").is_ok();
+        // Screenshot runs stay off the real menu bar.
+        let mut app = Self::blank(cc, demo, !demo || std::env::var("QUARRY_DEMO").is_ok(), shot);
         // Test switch: the frame rate, memory and CPU readouts, which demo mode leaves off.
         if demo && std::env::var("QUARRY_TEST_STATUS").is_ok() {
             (app.prefs.show_fps, app.prefs.show_mem, app.prefs.show_cpu) = (true, true, true);

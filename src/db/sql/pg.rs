@@ -5,6 +5,7 @@
 use super::se;
 use super::exec::{Cells, Conn, Opts};
 use super::worker::{num_at, text_at};
+use super::pg_advanced::PgSession;
 use super::{Addr, Db, Dialect, Pool, SslMode, TestInfo};
 use crate::db::{e, Net, Res};
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions, PgSslMode};
@@ -21,7 +22,13 @@ const MIN_VERSION: u32 = 130_000;
 /// Several pools per connection count against the server's max_connections, so both caps stay small.
 const PER_DB: u32 = 3;
 const MAX_POOLS: usize = 4;
+/// Pools the cap pushed out that are still remembered, so closing a database can reach them.
+const MAX_RETIRED: usize = 32;
 const IDLE: Duration = Duration::from_secs(300);
+/// How long closing a database's pools waits for connections that are still in use.
+const CLOSE_WAIT: Duration = Duration::from_secs(5);
+/// The databases the sidebar lists: the ones that can be connected to, so a template or a closed database is left out.
+pub(super) const DB_LIST: &str = "SELECT datname::text FROM pg_database WHERE datallowconn AND NOT datistemplate AND has_database_privilege(datname, 'CONNECT') ORDER BY 1";
 /// The database every server has, used when the address names none.
 const FALLBACK_DB: &str = "postgres";
 
@@ -45,16 +52,85 @@ pub struct PgPools {
     /// The statement_timeout the server gave the session at connect, spelled as the server spells it ("0", "30s"). A
     /// transaction applies it again with SET LOCAL, because behind a pooler a session value would not hold.
     timeout: String,
+    /// The Advanced tab's settings. A direct connection applies them when a session opens; behind a pooler they are the
+    /// tail of `locals`. The saved search_path list also follows the schema of a tab wherever the path is set.
+    adv: PgSession,
     live: Mutex<Live>,
+    held: Arc<Held>,
     /// What the first line of a Stop needs and a pid alone cannot give: the time each backend started, so a pid the server
     /// reused for another session is never cancelled. Kept per connection because two servers hand out the same pids.
     starts: Mutex<HashMap<u64, String>>,
+}
+
+/// Connections taken out of a pool for good (`PgPools::acquire_held`), counted per database. `pool.close()` does not know them,
+/// so without this a drop of the database would find a session of Quarry's own still on it and refuse.
+#[derive(Default)]
+struct Held {
+    n: Mutex<HashMap<String, usize>>,
+    gone: tokio::sync::Notify,
+}
+
+/// Counts one detached connection until the connection is dropped.
+pub struct HeldGuard {
+    held: Arc<Held>,
+    name: String,
+}
+
+impl Drop for HeldGuard {
+    fn drop(&mut self) {
+        let mut n = self.held.n.lock().unwrap();
+        if let Some(c) = n.get_mut(&self.name) {
+            *c = c.saturating_sub(1);
+            if *c == 0 {
+                n.remove(&self.name);
+            }
+        }
+        drop(n);
+        self.held.gone.notify_waiters();
+    }
+}
+
+/// A PostgreSQL connection of its own. One taken from a pool carries a guard that tells the pools it is still open.
+pub struct PgConn {
+    conn: sqlx::PgConnection,
+    _held: Option<HeldGuard>,
+}
+
+impl PgConn {
+    pub(super) fn free(conn: sqlx::PgConnection) -> PgConn {
+        PgConn { conn, _held: None }
+    }
+
+    /// Ends the session. The guard is let go only after the server has the goodbye, so a drop of the database that waits for it
+    /// does not run while the session is still on it.
+    pub(super) async fn close(self) -> Result<(), sqlx::Error> {
+        let PgConn { conn, _held } = self;
+        let r = conn.close().await;
+        drop(_held);
+        r
+    }
+}
+
+impl std::ops::Deref for PgConn {
+    type Target = sqlx::PgConnection;
+    fn deref(&self) -> &sqlx::PgConnection {
+        &self.conn
+    }
+}
+
+impl std::ops::DerefMut for PgConn {
+    fn deref_mut(&mut self) -> &mut sqlx::PgConnection {
+        &mut self.conn
+    }
 }
 
 #[derive(Default)]
 struct Live {
     tick: u64,
     pools: HashMap<String, Entry>,
+    /// Pools the cap pushed out of `pools` while their connections lived on: kept so dropping a database can close them
+    /// too, or an idle connection left in one would make the server refuse the drop for up to the idle timeout.
+    retired: Vec<(String, PgPool)>,
 }
 
 struct Entry {
@@ -67,7 +143,12 @@ struct Entry {
 
 impl PgPools {
     fn new(opts: PgConnectOptions, default_db: String, acquire: Duration, locals: Option<String>, timeout: String) -> PgPools {
-        PgPools { opts, default_db, acquire, idle: IDLE, per_db: PER_DB, max_pools: MAX_POOLS, locals, timeout, live: Default::default(), starts: Default::default() }
+        PgPools { opts, default_db, acquire, idle: IDLE, per_db: PER_DB, max_pools: MAX_POOLS, locals, timeout, adv: PgSession::default(), live: Default::default(), held: Default::default(), starts: Default::default() }
+    }
+
+    fn with_session(mut self, adv: PgSession) -> PgPools {
+        self.adv = adv;
+        self
     }
 
     /// The SET LOCAL statements every transaction of a pooler-fallback connection starts with, or an empty string when
@@ -101,7 +182,7 @@ impl PgPools {
     }
 
     fn entry(&self, database: Option<&str>) -> (PgPool, Arc<Mutex<Option<String>>>) {
-        let name = database.filter(|d| !d.is_empty()).unwrap_or(&self.default_db).to_string();
+        let name = self.name_of(database);
         let mut live = self.live.lock().unwrap();
         live.tick += 1;
         let tick = live.tick;
@@ -111,22 +192,79 @@ impl PgPools {
         }
         while live.pools.len() >= self.max_pools {
             let Some(oldest) = live.pools.iter().min_by_key(|(_, e)| e.used).map(|(k, _)| k.clone()) else { break };
-            live.pools.remove(&oldest);
+            if let Some(gone) = live.pools.remove(&oldest) {
+                // A pool with no connection yet is kept too: a caller that still holds a clone can open one on it later, and the
+                // drop of that database has to find it. Only the list's length is bounded, dropping the oldest first.
+                live.retired.retain(|(_, p)| !p.is_closed());
+                while live.retired.len() >= MAX_RETIRED {
+                    live.retired.remove(0);
+                }
+                live.retired.push((oldest, gone.pool));
+            }
         }
         let failure: Arc<Mutex<Option<String>>> = Default::default();
-        let (locals, hook_failure) = (self.locals.clone(), failure.clone());
+        let (locals, hook_failure, adv) = (self.locals.clone(), failure.clone(), self.adv.clone());
         let pool = PgPoolOptions::new()
             .max_connections(self.per_db)
             .min_connections(0)
             .idle_timeout(self.idle)
             .acquire_timeout(self.acquire)
             .after_connect(move |c, _| {
-                let (locals, failure) = (locals.clone(), hook_failure.clone());
-                Box::pin(async move { session(c, locals.as_deref(), &failure).await })
+                let (locals, failure, adv) = (locals.clone(), hook_failure.clone(), adv.clone());
+                Box::pin(async move { session_with(c, locals.as_deref(), &adv, &failure).await })
             })
             .connect_lazy_with(self.opts.clone().database(&name));
         live.pools.insert(name, Entry { pool: pool.clone(), used: tick, failure: failure.clone() });
         (pool, failure)
+    }
+
+    /// The database the connection opened on, which the maintenance work (CREATE and DROP DATABASE) runs on.
+    pub fn default_database(&self) -> &str {
+        &self.default_db
+    }
+
+    /// Closes every pool of `database`, the live one and any the cap pushed out, so none of Quarry's own connections is left
+    /// on it. Unlike eviction this does close: DROP DATABASE is refused while any session is on the database. A connection
+    /// still checked out (a running query) is closed when it comes back, and the wait is bounded so a stuck one cannot hang
+    /// the drop; the server then names the session that is left. A pool made for the name afterwards starts empty. The answer is how
+    /// many connections of Quarry's own are still out on the database after the wait, which a drop must not blame on another session.
+    pub(super) async fn close_database(&self, database: &str) -> usize {
+        let pools: Vec<PgPool> = {
+            let mut live = self.live.lock().unwrap();
+            let mut v: Vec<PgPool> = live.pools.remove(database).map(|e| e.pool).into_iter().collect();
+            let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut live.retired).into_iter().partition(|(n, _)| n == database);
+            live.retired = rest;
+            v.extend(mine.into_iter().map(|(_, p)| p));
+            v
+        };
+        for p in pools {
+            let _ = tokio::time::timeout(CLOSE_WAIT, p.close()).await;
+        }
+        // Connections taken out of the pool for good (queries, reads) are not closed by the pool, so wait for them to come back.
+        let _ = tokio::time::timeout(CLOSE_WAIT, async {
+            loop {
+                let gone = self.held.gone.notified();
+                if self.held.n.lock().unwrap().get(&self.name_of(Some(database))).is_none_or(|n| *n == 0) {
+                    break;
+                }
+                gone.await;
+            }
+        })
+        .await;
+        self.held.n.lock().unwrap().get(&self.name_of(Some(database))).copied().unwrap_or(0) as usize
+    }
+
+    fn name_of(&self, database: Option<&str>) -> String {
+        database.filter(|d| !d.is_empty()).unwrap_or(&self.default_db).to_string()
+    }
+
+    /// A connection of `database` taken out of its pool for good, so its session can be changed. It stays counted against the
+    /// database until it is dropped, which `close_database` waits for.
+    pub async fn acquire_held(&self, database: Option<&str>) -> Res<PgConn> {
+        let c = self.acquire(database).await?;
+        let name = self.name_of(database);
+        *self.held.n.lock().unwrap().entry(name.clone()).or_default() += 1;
+        Ok(PgConn { conn: c.detach(), _held: Some(HeldGuard { held: self.held.clone(), name }) })
     }
 
     /// Names of the databases that have a live pool.
@@ -152,8 +290,8 @@ impl PgPools {
         let Opts::Pg(o) = opts else { return Err("Not a PostgreSQL connection".into()) };
         let mut c = sqlx::PgConnection::connect_with(o).await.map_err(se)?;
         let failure = Mutex::new(None);
-        session(&mut c, self.locals.as_deref(), &failure).await.map_err(|x| failure.lock().unwrap().clone().unwrap_or_else(|| e(x)))?;
-        Ok(Conn::Pg(c))
+        session_with(&mut c, self.locals.as_deref(), &self.adv, &failure).await.map_err(|x| failure.lock().unwrap().clone().unwrap_or_else(|| e(x)))?;
+        Ok(Conn::Pg(PgConn::free(c)))
     }
 }
 
@@ -199,7 +337,33 @@ impl Db {
         if !self.pooler() || schema.is_empty() {
             return String::new();
         }
-        format!("SET LOCAL search_path = {}", Dialect::Postgres.quote_ident(schema))
+        self.pg_set_path(schema)
+    }
+
+    /// The search_path of a tab as the server reads it: the schema picked in the sidebar first, then the list saved on the
+    /// Advanced tab. With no saved list it is the schema alone, as it was before that tab.
+    pub fn pg_path(&self, schema: &str) -> String {
+        match &self.pool {
+            Pool::Pg(p) => p.adv.path(schema),
+            Pool::My(_) => Dialect::Postgres.quote_ident(schema),
+        }
+    }
+
+    /// `pg_path` as a SET LOCAL. It is a list of identifiers, not a literal, because SET reads one literal as one schema.
+    pub fn pg_set_path(&self, schema: &str) -> String {
+        match self.pg_path(schema) {
+            p if p.is_empty() => "SET LOCAL search_path TO DEFAULT".to_string(),
+            p => format!("SET LOCAL search_path = {p}"),
+        }
+    }
+
+    /// What a write transaction adds behind a pooler for the Advanced tab's settings: nothing on the session carries them
+    /// there. Its own timeouts and path are left out, because the writer sets those itself (`write_locals`).
+    pub(super) fn pg_writer_locals(&self) -> String {
+        match &self.pool {
+            Pool::Pg(p) if p.locals.is_some() => p.adv.locals(true),
+            _ => String::new(),
+        }
     }
 
     /// The same server as `self` with its pool built the way a pooler that refused startup options leaves it, for
@@ -228,24 +392,43 @@ pub(super) fn set_timeout(v: &str) -> String {
     set_local("statement_timeout", v)
 }
 
+#[cfg(test)]
 /// Startup parameters the session needs. `statement_timeout` is left out when the limit is off.
 fn startup(o: PgConnectOptions, ms: u64) -> PgConnectOptions {
+    startup_with(o, ms, &PgSession::default())
+}
+
+/// `startup`, with the application name the Advanced tab gives: it is an ordinary startup parameter, so a pooler passes it
+/// and pg_stat_activity shows it from the first statement.
+fn startup_with(o: PgConnectOptions, ms: u64, adv: &PgSession) -> PgConnectOptions {
+    let name = adv.settings.iter().find(|(n, _)| n == "application_name").map_or("Quarry", |(_, v)| v.as_str());
     let mut opts: Vec<(&str, String)> = vec![("default_transaction_read_only", "on".into())];
     if ms > 0 {
         opts.push(("statement_timeout", ms.to_string()));
     }
     opts.extend(FORMATS.map(|(k, v)| (k, v.to_string())));
-    o.application_name("Quarry").options(opts)
+    o.application_name(name).options(opts)
 }
 
+#[cfg(test)]
 /// The settings of `startup` that are not the read-only guard, as SET LOCAL statements for a server that refuses startup
 /// options. The guard itself is the `BEGIN READ ONLY` every read opens.
 fn locals_for(ms: u64) -> String {
+    locals_with(ms, &PgSession::default())
+}
+
+/// `locals_for` and the Advanced tab's settings after it, so a row such as statement_timeout wins over the limit taken from
+/// Settings.
+fn locals_with(ms: u64, adv: &PgSession) -> String {
     let mut v = Vec::new();
     if ms > 0 {
         v.push(set_timeout(&ms.to_string()));
     }
     v.extend(FORMATS.map(|(k, v)| set_local(k, v)));
+    let own = adv.locals(false);
+    if !own.is_empty() {
+        v.push(own);
+    }
     v.join("; ")
 }
 
@@ -261,7 +444,9 @@ pub(super) fn pooled_for_test(base: &Db, uri: &str) -> Db {
 /// big update must not be cut by the limit meant for reads, a lock timeout so a write never queues behind another
 /// session's lock for ever, and the output formats the read path expects.
 pub(super) fn write_locals() -> String {
-    let mut v = vec![set_timeout("0"), set_local("lock_timeout", "10s")];
+    // The writers of literals (`value::lit` with no backslash escapes) are right only with this on, and a role or database
+    // can set it off for the session.
+    let mut v = vec![set_timeout("0"), set_local("lock_timeout", "10s"), set_local("standard_conforming_strings", "on")];
     v.extend(FORMATS.map(|(k, x)| set_local(k, x)));
     v.join("; ")
 }
@@ -312,16 +497,65 @@ async fn pooler_check(c: &mut sqlx::PgConnection, locals: &str) -> Result<(), St
     Ok(())
 }
 
+#[cfg(test)]
 /// What every connection of a pool gets after it opens. With startup options the guard is read back; behind a pooler
 /// (`locals` is set) nothing is set or read on the session and the pooler is checked instead.
 pub(super) async fn session(c: &mut sqlx::PgConnection, locals: Option<&str>, failure: &Mutex<Option<String>>) -> Result<(), sqlx::Error> {
+    session_with(c, locals, &PgSession::default(), failure).await
+}
+
+/// The text of a refusal as the server words it, without the code: it is shown under the row of the setting.
+pub(super) fn server_text(x: &sqlx::Error) -> String {
+    match x.as_database_error() {
+        Some(d) => d.message().to_string(),
+        None => e(x),
+    }
+}
+
+/// Sets the Advanced tab's settings on the session of a connection that is not behind a pooler. Each value is bound to
+/// set_config, never spliced, and the names are the allow-list's. The guard is read back after this, so nothing here can
+/// leave the session writable.
+pub(super) async fn apply_session(c: &mut sqlx::PgConnection, adv: &PgSession) -> Result<(), String> {
+    for (name, value) in &adv.settings {
+        sqlx::query("SELECT set_config($1, $2, false)").persistent(false).bind(name.as_str()).bind(value.as_str()).execute(&mut *c).await.map_err(|x| refused(name, value, &x))?;
+    }
+    Ok(())
+}
+
+fn refused(name: &str, value: &str, x: &sqlx::Error) -> String {
+    format!("The server refused {name} = {value}: {}. Change it on the Advanced tab of the connection.", server_text(x))
+}
+
+/// Asks the server about every setting in a transaction that is rolled back, so one refusal does not hide the next and
+/// nothing is left on the session. Returns (setting, the server's message) of each refused row.
+pub(super) async fn validate_session(c: &mut sqlx::PgConnection, adv: &PgSession) -> Vec<(String, String)> {
+    let mut bad = Vec::new();
+    if adv.settings.is_empty() || c.execute("BEGIN").await.is_err() {
+        return bad;
+    }
+    for (name, value) in &adv.settings {
+        let _ = c.execute("SAVEPOINT quarry_adv").await;
+        let r = sqlx::query("SELECT set_config($1, $2, true)").persistent(false).bind(name.as_str()).bind(value.as_str()).execute(&mut *c).await;
+        if let Err(x) = r {
+            bad.push((name.clone(), server_text(&x)));
+            let _ = c.execute("ROLLBACK TO SAVEPOINT quarry_adv").await;
+        }
+    }
+    let _ = c.execute("ROLLBACK").await;
+    bad
+}
+
+pub(super) async fn session_with(c: &mut sqlx::PgConnection, locals: Option<&str>, adv: &PgSession, failure: &Mutex<Option<String>>) -> Result<(), sqlx::Error> {
     let fail = |m: String| {
         *failure.lock().unwrap() = Some(m.clone());
         sqlx::Error::Protocol(m)
     };
     let res = match locals {
         Some(l) => pooler_check(c, l).await.map_err(fail),
-        None => readback(c).await.map_err(fail),
+        None => match apply_session(c, adv).await {
+            Ok(()) => readback(c).await.map_err(fail),
+            Err(m) => Err(fail(m)),
+        },
     };
     if res.is_ok() {
         *failure.lock().unwrap() = None;
@@ -378,7 +612,9 @@ async fn probe(c: &mut sqlx::PgConnection, guarded: bool) -> Res<Facts> {
 
 /// Connects the way `worker::open_full` does for MySQL: one plain connection first, so a refusal (the guard, the
 /// version, a login) is reported at once, then the pools that open their connections on first use.
-pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Advanced, _info: bool) -> Res<(Db, Vec<String>, Option<crate::ssh::Tunnel>, TestInfo)> {
+pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Advanced, info: bool) -> Res<(Db, Vec<String>, Option<crate::ssh::Tunnel>, TestInfo)> {
+    // Checked before anything connects, so a bad value never costs a tunnel or a login.
+    let sess = PgSession::new(adv, super::advanced::system_zone_name())?;
     let (timeout, ms) = adv.timeouts(timeout);
     let tunnel = match &net.ssh {
         Some((conf, secrets)) => Some(crate::ssh::open(conf, secrets, timeout, Some((a.host.clone(), a.port))).await?),
@@ -397,17 +633,34 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
     if !a.ssl_ca.is_empty() {
         base = base.ssl_root_cert(&a.ssl_ca);
     }
+    // Also a plain startup parameter, so a pooler that refuses `options` still shows the name.
+    base = base.application_name(sess.settings.iter().find(|(n, _)| n == "application_name").map_or("Quarry", |(_, v)| v.as_str()));
     let first = async {
-        let mut locals = None;
-        let (mut c, opts) = match sqlx::PgConnection::connect_with(&startup(base.clone().database(&default_db), ms)).await {
-            Ok(c) => (c, startup(base.clone(), ms)),
+        let mut pooled = false;
+        let (mut c, opts) = match sqlx::PgConnection::connect_with(&startup_with(base.clone().database(&default_db), ms, &sess)).await {
+            Ok(c) => (c, startup_with(base.clone(), ms, &sess)),
             Err(x) if options_refused(&x) => {
-                locals = Some(locals_for(ms));
+                pooled = true;
                 (sqlx::PgConnection::connect_with(&base.clone().database(&default_db)).await.map_err(se)?, base.clone())
             }
             Err(x) => return Err(e(x)),
         };
+        let mut locals = None;
+        let mut errors = Vec::new();
         let res = async {
+            // Every row is asked of the server first, in a transaction that is rolled back. A connect stops at the first
+            // refusal and names it; Test reports all of them and goes on without the settings.
+            errors = validate_session(&mut c, &sess).await;
+            if let Some((name, msg)) = errors.first().filter(|_| !info) {
+                let value = sess.settings.iter().find(|(n, _)| n == name).map_or("", |(_, v)| v.as_str());
+                return Err(format!("The server refused {name} = {value}: {msg}. Change it on the Advanced tab of the connection."));
+            }
+            let used = if errors.is_empty() { sess.clone() } else { PgSession::default() };
+            if pooled {
+                locals = Some(locals_with(ms, &used));
+            } else {
+                apply_session(&mut c, &used).await?;
+            }
             // Behind a pooler the check runs in a transaction first; otherwise one probe reads the guard with the rest.
             if let Some(l) = &locals {
                 pooler_check(&mut c, l).await?;
@@ -415,19 +668,26 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
             let f = probe(&mut c, locals.is_none()).await?;
             // The same visibility rule the sidebar needs: databases that cannot be connected to are left out.
             let rows = c
-                .fetch_all("SELECT datname::text FROM pg_database WHERE datallowconn AND NOT datistemplate AND has_database_privilege(datname, 'CONNECT') ORDER BY 1")
+                .fetch_all(DB_LIST)
                 .await
                 .map_err(se)?;
             let dbs: Vec<String> = rows.iter().filter_map(|r| text_at(r, 0)).collect();
-            Ok::<_, String>((f, dbs))
+            // What the search_path list offers. A failed read only leaves the list without suggestions.
+            let schemas = if info {
+                let rows = c.fetch_all("SELECT nspname::text FROM pg_namespace WHERE nspname !~ '^pg_' AND nspname <> 'information_schema' ORDER BY 1").await.unwrap_or_default();
+                rows.iter().filter_map(|r| text_at(r, 0)).collect()
+            } else {
+                Vec::new()
+            };
+            Ok::<_, String>((f, dbs, schemas))
         }
         .await;
         let _ = c.close().await;
-        let (f, dbs) = res?;
-        Ok::<_, String>((f, dbs, opts, locals))
+        let (f, dbs, schemas) = res?;
+        Ok::<_, String>((f, dbs, opts, locals, TestInfo { schemas, setting_errors: errors, ..Default::default() }))
     };
-    let (f, dbs, opts, locals) = tokio::time::timeout(timeout, first).await.map_err(|_| format!("Could not connect and set up the session within {} s", timeout.as_secs()))??;
-    let pools = PgPools::new(opts.clone(), default_db.clone(), timeout, locals, f.timeout.clone());
+    let (f, dbs, opts, locals, ti) = tokio::time::timeout(timeout, first).await.map_err(|_| format!("Could not connect and set up the session within {} s", timeout.as_secs()))??;
+    let pools = PgPools::new(opts.clone(), default_db.clone(), timeout, locals, f.timeout.clone()).with_session(sess);
     let db = Db {
         pool: Pool::Pg(Arc::new(pools)),
         dialect: Dialect::Postgres,
@@ -438,7 +698,7 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
         setup: Default::default(),
         conn: 0,
     };
-    Ok((db, dbs, tunnel, TestInfo::default()))
+    Ok((db, dbs, tunnel, ti))
 }
 
 /// Readies a connection of its own for a script: the backend's pid for Stop, and write access when unlocked. Behind a
@@ -476,7 +736,7 @@ pub(super) async fn cancel(db: &Db, pid: u64) -> Res<String> {
     let mut c = super::run::side_conn(db, "Could not reach the server to stop the statement").await?;
     let Conn::Pg(pc) = &mut c else { return Err("Not a PostgreSQL connection".into()) };
     let q = sqlx::query("SELECT pg_cancel_backend(pid)::text FROM pg_stat_activity WHERE pid = $1 AND backend_start::text = $2").persistent(false).bind(pid as i32).bind(start);
-    let r = q.fetch_all(&mut *pc).await.map_err(se);
+    let r = q.fetch_all(&mut **pc).await.map_err(se);
     let _ = c.close().await;
     match r? {
         rows if rows.is_empty() => Err("That connection is already gone.".into()),
@@ -587,6 +847,22 @@ mod tests {
     }
 
     #[test]
+    fn the_advanced_tab_follows_the_limit_from_settings_and_never_touches_the_guard() {
+        let adv = PgSession::new(&crate::db::sql::Advanced { pg_settings: vec![("statement_timeout".into(), "45s".into()), ("application_name".into(), "mine".into()), ("work_mem".into(), "7MB".into())], search_path: vec!["a".into()], ..Default::default() }, None).unwrap();
+        // The row comes after the limit taken from Settings, so it wins in a transaction behind a pooler.
+        let locals = locals_with(15_000, &adv);
+        assert!(locals.find("statement_timeout = '15000'").unwrap() < locals.find("statement_timeout = '45s'").unwrap(), "{locals}");
+        assert!(locals.contains("SET LOCAL work_mem = '7MB'") && locals.contains("SET LOCAL search_path = \"a\"") && locals.ends_with("SET LOCAL work_mem = '7MB'"), "{locals}");
+        assert!(!locals.contains("default_transaction_read_only") && !locals.contains("standard_conforming_strings"), "{locals}");
+        for stmt in locals.split("; ") {
+            assert!(stmt.starts_with("SET LOCAL "), "{stmt}");
+        }
+        // The name is an ordinary startup parameter, so a pooler that refuses `options` passes it on.
+        assert_eq!(startup_with(PgConnectOptions::new_without_pgpass(), 0, &adv).get_application_name(), Some("mine"));
+        assert_eq!(locals_with(15_000, &PgSession::default()), locals_for(15_000));
+    }
+
+    #[test]
     fn startup_and_fallback_carry_the_same_settings() {
         let o = startup(PgConnectOptions::new_without_pgpass(), 15_000);
         let opts = o.get_options().unwrap();
@@ -607,6 +883,7 @@ mod tests {
             assert!(stmt.starts_with("SET LOCAL "), "{stmt}");
         }
         assert!(write.contains("statement_timeout = '0'") && write.contains("lock_timeout = '10s'"));
+        assert!(write.contains("SET LOCAL standard_conforming_strings = 'on'"), "a write transaction must not depend on the session's setting");
     }
 
     #[test]
@@ -620,6 +897,32 @@ mod tests {
         }
         // Nothing but the formats is shared: the fallback has no more format settings than the list.
         assert_eq!(locals.split("; ").count(), FORMATS.len());
+    }
+
+    /// A pool the cap pushed out of the map still holds its connections for the idle timeout, and the server refuses to drop a
+    /// database while one is open, so closing a database has to reach it too. Pools are lazy, so no server is needed.
+    #[test]
+    fn closing_a_database_reaches_the_pool_the_cap_pushed_out() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let mut p = PgPools::new(PgConnectOptions::new_without_pgpass().host("127.0.0.1").port(1), "postgres".into(), Duration::from_secs(1), None, "0".into());
+            p.max_pools = 2;
+            let a = p.pool(Some("a"));
+            let b = p.pool(Some("b"));
+            let c = p.pool(Some("c"));
+            assert_eq!(p.live_names(), vec!["b", "c"], "the oldest left the map");
+            assert!(!a.is_closed(), "eviction alone does not close it");
+            // A second eviction must not forget the first pool even though it has opened no connection yet: a caller that still holds it can open one later.
+            let _d = p.pool(Some("d"));
+            assert_eq!(p.live.lock().unwrap().retired.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), vec!["a", "b"], "a retired pool is kept until it is closed");
+            p.close_database("a").await;
+            assert!(a.is_closed() && p.live.lock().unwrap().retired.len() == 1, "closing the name reached the retired pool");
+            p.close_database("b").await;
+            assert!(b.is_closed() && p.live_names() == vec!["c", "d"] && !c.is_closed(), "only the named database's pool closed");
+            // A pool made for the name afterwards is a new one.
+            let again = p.pool(Some("b"));
+            assert!(!again.is_closed());
+        });
     }
 
     /// Live tests, run on every server named by QUARRY_TEST_POSTGRES and QUARRY_TEST_POSTGRES13.
@@ -844,7 +1147,7 @@ mod tests {
                     assert_eq!(rows[0].cell(0), Some(&b"on"[..]), "{var}");
                     let err = w.execute(&format!("CREATE TABLE {name} (id int)")).await.unwrap_err();
                     assert_eq!(code(&err).as_deref(), Some("25006"), "{var}: {err}");
-                    let mut tx = w.begin_write().await.unwrap();
+                    let mut tx = w.begin_write(&db).await.unwrap();
                     tx.exec_bound(&format!("DROP TABLE IF EXISTS {name}"), &[]).await.unwrap();
                     tx.exec_bound(&format!("CREATE TABLE {name} (id int)"), &[]).await.unwrap();
                     tx.exec_bound(&format!("INSERT INTO {name} VALUES (1), (2)"), &[]).await.unwrap();
@@ -860,7 +1163,7 @@ mod tests {
                     let mut r = db.acquire_conn().await.unwrap();
                     let err = r.execute(&format!("INSERT INTO {name} VALUES (3)")).await.unwrap_err();
                     assert_eq!(code(&err).as_deref(), Some("25006"), "{var}: {err}");
-                    let mut tx = w.begin_write().await.unwrap();
+                    let mut tx = w.begin_write(&db).await.unwrap();
                     tx.exec_bound(&format!("DROP TABLE {name}"), &[]).await.unwrap();
                     tx.commit().await.unwrap();
                 });
