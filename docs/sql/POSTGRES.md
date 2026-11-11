@@ -15,7 +15,7 @@ Update this list when a step lands. Each step is reviewed before it is ticked.
 
 **v1**
 - [x] 0. This plan, on branch `feat/postgres`
-- [ ] D1. FigCraft designs: sidebar with schemas (variants A, B, C) and the Postgres connection form, both themes, approved by the user
+- [x] D1. Designs in `docs/sql/postgres.figcraft` (pages "Postgres · sidebar" and "Postgres · connection form"). Picked by the user 2026-11-11: sidebar **B · Schema switcher** (the MySQL two-level tree plus a schema picker at the top of each open database, default `public`), connection form **2 with paste** (a "Paste connection string" field that fills the form from a `postgresql://` URI, libpq `sslmode` names, Advanced tab hidden in v1), branding as designed (rail mark "PG", card subtitle "13 and later", teal accent `#2aacb8` Workbench and `#00796b` Paper), and the locked note in the form footer
 - [x] 1a. Execution boundary `exec.rs` (Conn, SqlRow, Opts, Tx with a MySQL arm only), worker.rs split into worker, run and relay, every `Pool::My` behind `Db::my_pool()` or `Conn::my()`. Row helpers are generic over two small read traits (`Cells`, `ColMeta`) so the untouched MySQL-only modules still compile. 571 tests passed live on MySQL 8.4 and MariaDB 11.4
 - [x] 1b. `Dialect::Postgres` added (unreachable), `is_mysql_family()`, dialect checks are explicit matches, the tab dialect is threaded through edits, copy, export, rules and autocomplete. Catalog query arms are `unimplemented!` until step 4. The lexer API change moved to step 3
 - [x] 2. Connect: sqlx postgres, `Engine::Postgres`, `pg.rs` with lazy pools per database (3 each, 4 live, LRU), startup `-c` options plus readback (SET fallback for PgBouncer), version gate, TLS, Stop by pid and backend_start, writer with READ WRITE and lock_timeout. 588 passed live on Postgres 13 and 18, MySQL 8.4, MariaDB 11.4. Known limits: sqlx forces `TimeZone=UTC`, so timestamptz shows in UTC until the Advanced tab; `backend_start` is kept in a process-wide map keyed by pid, so a pid shared by two servers makes Stop report "already gone" instead of cancelling; sqlx reads PG* environment variables for fields left unset
@@ -26,8 +26,8 @@ Update this list when a step lands. Each step is reviewed before it is ticked.
 - [x] 7. Shell and attached connections (opus review). An unlocked relay reads back `client_encoding` (UTF8), `standard_conforming_strings` (on) and `backslash_quote` before each `fill_pg`, because a view or rule over pg_settings can change them unseen. Merged 1aacb9b; review found no lock escape, its 3 medium and 3 low findings fixed in 2aedbfe (plain INSERT with opt-in `returning`, readback only before a fill, a cut cancels its backend and drops the relay, describe inside the transaction, `$n` never joins a following digit, pooler mode wraps every statement in its own transaction and refuses script transaction control). Known limit: locking a connection takes effect on the next run
 - [ ] 8. App wiring: schema level per the picked design, Server, Users, create and drop hidden
 - [ ] 9. Connection form, rail mark and logo, `QUARRY_TEST_PG` demo
-- [ ] 10. Autocomplete per dialect
-- [ ] 11. CI live services, docs, screenshots, bench, whole-branch review, summary and known limits
+- [x] 10. Autocomplete per dialect (44b2a8a): `sql_words_pg.rs` with 281 keywords, 101 reserved words, 112 functions with signatures and 25 types after `::`; Postgres quoting rules; `schema.table` and `schema.table.column`; dialect-aware statement splitting so dollar quotes and E'' strings do not break completion; refused functions are never offered. `Scope.schemas` is empty until step 8
+- [ ] 11. CI live services (done in 33a6e3f: MySQL, MariaDB, Postgres 13 and 18 and Bun in the Linux job), docs, screenshots, bench, whole-branch review, summary and known limits
 
 **v2** (after v1 ships)
 - [ ] 1. Structure editing (`ddl_pg.rs`)
