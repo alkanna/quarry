@@ -19,6 +19,7 @@ mod config;
 mod conn_form;
 mod danger;
 mod demo;
+mod demo_pg;
 mod documents;
 mod drafts;
 mod errors;

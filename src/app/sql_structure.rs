@@ -18,7 +18,7 @@ pub(super) struct StructState {
     pub(super) load: Load,
     pub(super) data: Option<Structure>,
     /// The selected row of each grid: columns, indexes, keys out, keys in, triggers.
-    sel: [Option<usize>; 5],
+    pub(super) sel: [Option<usize>; 5],
     /// Column and index changes waiting to become one ALTER TABLE.
     pub(super) staged: Vec<Change>,
     /// The statement and warnings of `staged`, kept between frames.

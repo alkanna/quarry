@@ -784,6 +784,10 @@ fn schema_picker(ui: &mut egui::Ui, db_name: &str, picked: &str, list: &[db::sql
     const INDENT: f32 = 18.0;
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), BUTTON_H + 2.0), Sense::click());
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    // QUARRY_TEST_PG=schemas has no pointer to click with, so the demo opens the menu itself once the first frames settled.
+    if (60..63).contains(&ui.ctx().cumulative_frame_nr()) && std::env::var("QUARRY_TEST_PG").as_deref() == Ok("schemas") {
+        egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&resp));
+    }
     let mut pick = None;
     let menu = egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(rect.width() - INDENT).show(|ui| {
         menu_look(ui);

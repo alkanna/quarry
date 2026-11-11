@@ -228,9 +228,53 @@ fn filled_border(ui: &egui::Ui, r: &egui::Response, mark: &mut bool) {
     }
 }
 
+/// Fills the form from the pasted text and records what it did. Shared with the offline demo, which seeds the same state.
+fn paste_apply(st: &mut Paste, f: &mut ConnForm) {
+    match db::sql::Addr::from_paste(&st.text) {
+        Ok(a) => {
+            let had_password = !a.password.is_empty();
+            st.filled = [true, true, !a.user.is_empty(), had_password, !a.database.is_empty(), a.ssl_mode != db::sql::SslMode::Preferred || !a.ssl_ca.is_empty()];
+            let mut parts = vec!["host", "port"];
+            for (i, w) in [(PASTE_USER, "user"), (PASTE_PASSWORD, "password"), (PASTE_DATABASE, "database")] {
+                if st.filled[i] {
+                    parts.push(w);
+                }
+            }
+            let mut note = format!("Filled {}", parts.join(", "));
+            if st.filled[PASTE_TLS] {
+                note += &format!(" and TLS {}", a.ssl_mode.pg_name());
+            }
+            note += if had_password { "." } else { ". No password in the URL, type it below." };
+            f.addr = db::sql::Addr { ssl_mode: a.ssl_mode, ..a };
+            // A password in the box would stay readable on screen, so it moves to the masked field.
+            if had_password {
+                st.text.clear();
+            }
+            st.note = Some(Ok(note));
+        }
+        Err(e) => {
+            st.filled = [false; 6];
+            st.note = Some(Err(e));
+        }
+    }
+}
+
+/// QUARRY_TEST_PG=paste: what the design shows after a paste. The form struct has no egui context at load time, so the
+/// first frame of a fresh paste field seeds it. The design types the password after the paste, so it is set here too.
+fn paste_seed(st: &mut Paste, f: &mut ConnForm) {
+    if std::env::var("QUARRY_TEST_PG").as_deref() != Ok("paste") || st.note.is_some() {
+        return;
+    }
+    st.text = "postgresql://analyst@analytics-prod.internal:5432/analytics?sslmode=verify-full".into();
+    paste_apply(st, f);
+    f.addr.password = "hunter2hunter".into();
+    st.filled[PASTE_PASSWORD] = true;
+}
+
 fn paste_field(ui: &mut egui::Ui, f: &mut ConnForm, field_w: f32) -> Paste {
     let id = paste_id(f);
     let mut st: Paste = ui.data(|d| d.get_temp(id)).unwrap_or_default();
+    paste_seed(&mut st, f);
     ui.horizontal(|ui| {
         caption(ui, "PASTE CONNECTION STRING");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -239,33 +283,7 @@ fn paste_field(ui: &mut egui::Ui, f: &mut ConnForm, field_w: f32) -> Paste {
     });
     let r = ui.add(egui::TextEdit::singleline(&mut st.text).font(egui::TextStyle::Monospace).hint_text("postgresql://user@host:5432/database?sslmode=verify-full").desired_width(field_w + FORM_LABEL_W + 14.0).margin(egui::Margin::symmetric(8, 6)));
     if r.changed() && !st.text.trim().is_empty() {
-        match db::sql::Addr::from_paste(&st.text) {
-            Ok(a) => {
-                let had_password = !a.password.is_empty();
-                st.filled = [true, true, !a.user.is_empty(), had_password, !a.database.is_empty(), a.ssl_mode != db::sql::SslMode::Preferred || !a.ssl_ca.is_empty()];
-                let mut parts = vec!["host", "port"];
-                for (i, w) in [(PASTE_USER, "user"), (PASTE_PASSWORD, "password"), (PASTE_DATABASE, "database")] {
-                    if st.filled[i] {
-                        parts.push(w);
-                    }
-                }
-                let mut note = format!("Filled {}", parts.join(", "));
-                if st.filled[PASTE_TLS] {
-                    note += &format!(" and TLS {}", a.ssl_mode.pg_name());
-                }
-                note += if had_password { "." } else { ". No password in the URL, type it below." };
-                f.addr = db::sql::Addr { ssl_mode: a.ssl_mode, ..a };
-                // A password in the box would stay readable on screen, so it moves to the masked field.
-                if had_password {
-                    st.text.clear();
-                }
-                st.note = Some(Ok(note));
-            }
-            Err(e) => {
-                st.filled = [false; 6];
-                st.note = Some(Err(e));
-            }
-        }
+        paste_apply(&mut st, f);
     } else if r.changed() {
         st.note = None;
     }

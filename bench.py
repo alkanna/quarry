@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Memory and CPU benchmarks for Quarry, run from the repo root: python3 bench.py [--quick] [--sql-only]
+"""Memory and CPU benchmarks for Quarry, run from the repo root: python3 bench.py [--quick] [--sql-only] [--pg-only]
 
 Uses the app's offline test hooks, so no MongoDB server is needed:
   idle    QUARRY_DEMO=1 (+ QUARRY_TEST_JSON fixture), window left alone, RSS and CPU sampled with ps.
@@ -8,7 +8,7 @@ Uses the app's offline test hooks, so no MongoDB server is needed:
 SQL scenarios (rows prefixed "sql ") use QUARRY_TEST_SQL=<view> with QUARRY_TEST_SQL_JSON, a file of
 generated MySQL rows (server text, converted like the worker does) shown in the orders grid or the
 Query result set. The 50,000 rows case is a stress case, tables hold at most 1,000 rows in real use.
---sql-only skips the Mongo scenarios.
+--sql-only skips the Mongo scenarios. --pg-only runs only the PostgreSQL views of QUARRY_TEST_PG, which has no row fixture.
 
 HOME points at a temp dir for every run: fixture mode without --screenshot saves open tabs
 to ui.json, and that must not land in the real settings.
@@ -22,6 +22,8 @@ SQL_SIZES = [1_000, 10_000] if QUICK else [1_000, 10_000, 50_000]
 IDLE_S = 5 if QUICK else 10
 SETTLE_S = 3
 SQL_ONLY = "--sql-only" in sys.argv
+PG_ONLY = "--pg-only" in sys.argv
+PG_VIEWS = ["content", "rules", "grouped", "structure", "shell"]
 SQL_VIEWS = ["rules", "grouped", "structure", "shell"]
 
 
@@ -138,16 +140,19 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         env = {**os.environ, "HOME": tmp, "QUARRY_NO_FOCUS": "1"}
         scen = []  # (name, env additions)
-        if not SQL_ONLY:
+        if not SQL_ONLY and not PG_ONLY:
             fixtures = {f"{n:,} docs": fixture(tmp, n) for n in SIZES}
             fixtures["50 docs x 1 MB"] = fixture(tmp, 50, big_doc)
             scen.append(("demo", {}))
             scen += [(name, {"QUARRY_TEST_JSON": f}) for name, f in fixtures.items()]
-        sql = {f"sql content {n:,} rows" + (" (stress)" if n == 50_000 else ""): sql_fixture(tmp, f"sql{n}", n) for n in SQL_SIZES}
-        sql["sql content 200 rows x 100 KB"] = sql_fixture(tmp, "sqlwide", 200, wide=True)
-        scen += [(name, {"QUARRY_TEST_SQL": "content", "QUARRY_TEST_SQL_JSON": f}) for name, f in sql.items()]
-        scen.append(("sql query 1,000 rows", {"QUARRY_TEST_SQL": "query", "QUARRY_TEST_SQL_JSON": sql["sql content 1,000 rows"]}))
-        scen += [(f"sql {v}", {"QUARRY_TEST_SQL": v}) for v in SQL_VIEWS]
+        sql = {} if PG_ONLY else {f"sql content {n:,} rows" + (" (stress)" if n == 50_000 else ""): sql_fixture(tmp, f"sql{n}", n) for n in SQL_SIZES}
+        if not PG_ONLY:
+            sql["sql content 200 rows x 100 KB"] = sql_fixture(tmp, "sqlwide", 200, wide=True)
+            scen += [(name, {"QUARRY_TEST_SQL": "content", "QUARRY_TEST_SQL_JSON": f}) for name, f in sql.items()]
+            scen.append(("sql query 1,000 rows", {"QUARRY_TEST_SQL": "query", "QUARRY_TEST_SQL_JSON": sql["sql content 1,000 rows"]}))
+            scen += [(f"sql {v}", {"QUARRY_TEST_SQL": v}) for v in SQL_VIEWS]
+        if PG_ONLY:
+            scen += [(f"pg {v}", {"QUARRY_TEST_PG": v}) for v in PG_VIEWS]
         idles = [idle(name, {**env, **x, "QUARRY_DEMO": "1"}) for name, x in scen]
         renders = [render(name, {**env, **x}, tmp) for name, x in scen]
     print(f"\n## Idle ({IDLE_S}s after {SETTLE_S}s settle; CPU in % of one core)\n")

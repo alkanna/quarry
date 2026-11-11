@@ -97,6 +97,11 @@ impl App {
                 server: Default::default(),
             });
         }
+        // QUARRY_TEST_PG=<view> does the same with an offline PostgreSQL connection, see demo_pg.rs.
+        if std::env::var("QUARRY_TEST_PG").is_ok() {
+            self.load_pg_demo();
+            return;
+        }
         // QUARRY_TEST_SQL=content swaps the demo for a MySQL connection with its orders table open.
         if std::env::var("QUARRY_TEST_SQL").is_ok() {
             self.load_sql_demo();
