@@ -440,7 +440,7 @@ static OPEN_DYSLEXIC: &[u8] = include_bytes!("../../assets/fonts/OpenDyslexic-Re
 /// center in buttons as they are, so it needs none of the shift egui's Ubuntu font did.
 /// OpenDyslexic, when chosen, goes in front of Inter for interface text only: it has no mono
 /// version, and data columns need one. It has one weight, so medium and semibold draw as Regular.
-fn fonts(dyslexic: bool) -> egui::FontDefinitions {
+pub(crate) fn fonts(dyslexic: bool) -> egui::FontDefinitions {
     use egui::{FontData, FontFamily, FontTweak, epaint::text::VariationCoords};
     let mut fonts = egui::FontDefinitions::default();
     // Without an explicit weight a variable font draws its default instance, which for
