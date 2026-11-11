@@ -3,15 +3,15 @@
 //! server's own catalog to see the key, and takes it back through the undo list.
 
 use super::sql_edit::{every_engine, open_unlocked, Fx};
-use super::sql_structure::{is_pg, one, undo_last, until};
+use super::sql_structure::{undo_last, until};
 use super::*;
 
 /// The names of the foreign keys of a table, joined with commas.
 fn keys(fx: &Fx, table: &str) -> String {
-    if is_pg(fx) {
-        one(fx, &format!("SELECT COALESCE(string_agg(conname::text, ',' ORDER BY conname), '') FROM pg_constraint WHERE contype = 'f' AND conrelid = 'public.{table}'::regclass"))
+    if fx.is_pg() {
+        fx.one(&format!("SELECT COALESCE(string_agg(conname::text, ',' ORDER BY conname), '') FROM pg_constraint WHERE contype = 'f' AND conrelid = 'public.{table}'::regclass"))
     } else {
-        one(fx, &format!("SELECT COALESCE(GROUP_CONCAT(CONSTRAINT_NAME ORDER BY CONSTRAINT_NAME SEPARATOR ','), '') FROM information_schema.TABLE_CONSTRAINTS WHERE CONSTRAINT_TYPE = 'FOREIGN KEY' AND TABLE_SCHEMA = 'quarry_test' AND TABLE_NAME = '{table}'"))
+        fx.one(&format!("SELECT COALESCE(GROUP_CONCAT(CONSTRAINT_NAME ORDER BY CONSTRAINT_NAME SEPARATOR ','), '') FROM information_schema.TABLE_CONSTRAINTS WHERE CONSTRAINT_TYPE = 'FOREIGN KEY' AND TABLE_SCHEMA = 'quarry_test' AND TABLE_NAME = '{table}'"))
     }
 }
 
@@ -112,7 +112,7 @@ fn rows_that_point_at_nothing_are_shown_and_the_key_is_not_added() {
         ui.click("Referenced column 1");
         ui.click_last("id");
         see(ui, "3 rows have values in qty missing from");
-        if is_pg(fx) {
+        if fx.is_pg() {
             // PostgreSQL's check names the rows and offers NOT VALID
             see(ui, "For example (");
             see(ui, "add the key as NOT VALID");
@@ -120,7 +120,7 @@ fn rows_that_point_at_nothing_are_shown_and_the_key_is_not_added() {
         apply_now(ui);
         ui.wait("the server to refuse the key", |a| !a.errors.is_empty());
         assert_eq!(keys(fx, &child), "", "the key was added over rows that point at nothing");
-        if is_pg(fx) {
+        if fx.is_pg() {
             assert!(ui.app().last_problem().contains("3 rows of"), "{}", ui.app().last_problem());
         }
         assert_eq!(fx.rows(&child), "1:alpha:10,2:beta:20,3:gamma:30");
@@ -188,7 +188,7 @@ fn a_locked_connection_asks_to_unlock_before_a_relation_is_applied() {
 fn a_relation_can_point_into_another_schema() {
     every_engine("a relation can point into another schema", |fx, ui| {
         // only PostgreSQL has schemas inside a database
-        if !is_pg(fx) {
+        if !fx.is_pg() {
             return;
         }
         // The popup lists every schema of the database and scrolls, and the click helpers scroll an item into view. A schema left
@@ -212,7 +212,7 @@ fn a_relation_can_point_into_another_schema() {
         apply_now(ui);
         let name = format!("fk_{child}_id");
         until(fx, ui, "the key to land", |fx| keys(fx, &child) == name);
-        assert_eq!(one(fx, &format!("SELECT confrelid::regclass::text || '|' || condeferrable FROM pg_constraint WHERE conname = '{name}'")), format!("{other}.q|true"));
+        assert_eq!(fx.one(&format!("SELECT confrelid::regclass::text || '|' || condeferrable FROM pg_constraint WHERE conname = '{name}'")), format!("{other}.q|true"));
         ui.wait("the staged changes to clear", |a| a.staged().is_empty());
         ui.wait("the key to be listed", |a| a.structure().is_some_and(|s| s.foreign_keys.iter().any(|k| k.name == name && k.ref_db == other)));
         undo_last(ui, 1, &child);
@@ -225,7 +225,7 @@ fn a_relation_can_point_into_another_schema() {
 fn a_relation_is_changed_through_the_dialog_and_the_undo_brings_it_back() {
     every_engine("a relation is changed through the dialog", |fx, ui| {
         // changing a key is a drop and an add in one transaction, which only PostgreSQL does
-        if !is_pg(fx) {
+        if !fx.is_pg() {
             return;
         }
         let (child, parent) = pair(fx);
@@ -235,7 +235,7 @@ fn a_relation_is_changed_through_the_dialog_and_the_undo_brings_it_back() {
         ui.unlock();
         open_relations(ui);
         ui.wait("the key to be listed", |a| a.structure().is_some_and(|s| s.foreign_keys.iter().any(|k| k.name == name)));
-        let actions = |fx: &Fx| one(fx, &format!("SELECT confupdtype::text || confdeltype::text FROM pg_constraint WHERE conname = '{name}'"));
+        let actions = |fx: &Fx| fx.one(&format!("SELECT confupdtype::text || confdeltype::text FROM pg_constraint WHERE conname = '{name}'"));
         assert_eq!(actions(fx), "aa");
         select_row(ui, "fk-out row 1");
         ui.click("Edit");
@@ -258,7 +258,7 @@ fn a_relation_is_changed_through_the_dialog_and_the_undo_brings_it_back() {
         }
         // one of the two actions is CASCADE now, and the key came back whole: still deferrable, still on the same columns
         assert!(actions(fx).contains('c'), "{}", actions(fx));
-        assert_eq!(one(fx, &format!("SELECT condeferrable::text || '|' || confrelid::regclass::text FROM pg_constraint WHERE conname = '{name}'")), format!("true|{parent}"));
+        assert_eq!(fx.one(&format!("SELECT condeferrable::text || '|' || confrelid::regclass::text FROM pg_constraint WHERE conname = '{name}'")), format!("true|{parent}"));
         ui.wait("the staged changes to clear", |a| a.staged().is_empty());
         undo_last(ui, 1, &child);
         until(fx, ui, "the undo to land", |fx| actions(fx) == "aa");

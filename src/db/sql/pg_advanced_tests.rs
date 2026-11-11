@@ -167,7 +167,7 @@ fn the_sidebar_schema_comes_first_and_the_saved_list_follows() {
         let l = open(uri, &adv, pooled);
         let db = l.quarry_test();
         let pool = l.fixture_pool();
-        l.qsql(&pool, "DROP SCHEMA IF EXISTS adv_s1 CASCADE; DROP SCHEMA IF EXISTS adv_p1 CASCADE; DROP SCHEMA IF EXISTS adv_p2 CASCADE; CREATE SCHEMA adv_s1; CREATE SCHEMA adv_p1; CREATE SCHEMA adv_p2; CREATE TABLE adv_s1.t_who (v int); INSERT INTO adv_s1.t_who VALUES (1); CREATE TABLE adv_p1.t_who (v int); INSERT INTO adv_p1.t_who VALUES (2); CREATE TABLE adv_p2.t_only (v int); INSERT INTO adv_p2.t_only VALUES (3)");
+        l.reset_schemas(&pool, &["adv_s1", "adv_p1", "adv_p2"], "CREATE TABLE adv_s1.t_who (v int); INSERT INTO adv_s1.t_who VALUES (1); CREATE TABLE adv_p1.t_who (v int); INSERT INTO adv_p1.t_who VALUES (2); CREATE TABLE adv_p2.t_only (v int); INSERT INTO adv_p2.t_only VALUES (3)");
         assert_eq!(db.pg_path("adv_s1"), "\"adv_s1\", \"adv_p1\", \"adv_p2\"", "{var}");
         // The session default is the saved list alone.
         assert_eq!(show(&l, &db, "search_path").replace('"', ""), "adv_p1, adv_p2", "{var}");
@@ -195,7 +195,7 @@ fn a_schema_with_a_quote_in_its_name_is_quoted_in_the_path() {
         let l = open(uri, &adv, pooled);
         let db = l.quarry_test();
         let pool = l.fixture_pool();
-        l.qsql(&pool, "DROP SCHEMA IF EXISTS \"adv \"\"q\"\" x\" CASCADE; CREATE SCHEMA \"adv \"\"q\"\" x\"; CREATE TABLE \"adv \"\"q\"\" x\".odd (v int); INSERT INTO \"adv \"\"q\"\" x\".odd VALUES (5)");
+        l.reset_schemas(&pool, &["adv \"q\" x"], "CREATE TABLE \"adv \"\"q\"\" x\".odd (v int); INSERT INTO \"adv \"\"q\"\" x\".odd VALUES (5)");
         let sets = go(&l, &db, "public", "SELECT (SELECT v FROM odd) AS v", true);
         assert!(sets[0].error.is_none(), "{var}: {:?}", sets[0].error);
         assert_eq!(val(&sets[0], "v"), "5", "{var}");
@@ -424,7 +424,7 @@ fn floats_and_money_keep_their_spelling_whatever_the_form_asked_for() {
         };
         let db = l.quarry_test();
         let pool = l.fixture_pool();
-        l.qsql(&pool, "DROP SCHEMA IF EXISTS adv_flt CASCADE; CREATE SCHEMA adv_flt; CREATE TABLE adv_flt.t (id int PRIMARY KEY, f float8); INSERT INTO adv_flt.t VALUES (1, 0.1::float8 + 0.2::float8), (2, 1234567.891), (3, 1e-7)");
+        l.reset_schemas(&pool, &["adv_flt"], "CREATE TABLE adv_flt.t (id int PRIMARY KEY, f float8); INSERT INTO adv_flt.t VALUES (1, 0.1::float8 + 0.2::float8), (2, 1234567.891), (3, 1e-7)");
         l.w.sql_page(7, db.clone(), "adv_flt".into(), "t".into(), Default::default(), 100, 0);
         let Msg::SqlCols { cols, .. } = l.next() else { panic!("expected SqlCols") };
         let Msg::Docs { res: Ok((rows, _, _)), .. } = l.next() else { panic!("expected Docs") };
@@ -475,7 +475,7 @@ fn a_write_refusal_is_worded_by_its_sqlstate_with_lc_messages_set() {
         let l = open(uri, &adv, pooled);
         let db = l.quarry_test();
         let pool = l.fixture_pool();
-        l.qsql(&pool, "DROP SCHEMA IF EXISTS adv_msg CASCADE; CREATE SCHEMA adv_msg; CREATE TABLE adv_msg.t (id int PRIMARY KEY, n int NOT NULL); INSERT INTO adv_msg.t VALUES (1, 1)");
+        l.reset_schemas(&pool, &["adv_msg"], "CREATE TABLE adv_msg.t (id int PRIMARY KEY, n int NOT NULL); INSERT INTO adv_msg.t VALUES (1, 1)");
         let sets = go(&l, &db, "adv_msg", "UPDATE t SET n = NULL", false);
         let err = sets[0].error.clone().expect("the NOT NULL refuses");
         assert!(err.starts_with("error returned from database: 23502: "), "{var}: {err}");
@@ -492,7 +492,7 @@ fn a_table_is_made_with_a_type_from_the_saved_search_path() {
         let l = open(uri, &adv, pooled);
         let db = l.quarry_test();
         let pool = l.fixture_pool();
-        l.qsql(&pool, "DROP SCHEMA IF EXISTS adv_mk CASCADE; DROP SCHEMA IF EXISTS adv_ext CASCADE; CREATE SCHEMA adv_mk; CREATE SCHEMA adv_ext; CREATE TYPE adv_ext.adv_mood AS ENUM ('a', 'b')");
+        l.reset_schemas(&pool, &["adv_mk", "adv_ext"], "CREATE TYPE adv_ext.adv_mood AS ENUM ('a', 'b')");
         let spec = super::create_pg::TableSpec { schema: "adv_mk".into(), name: "made".into(), cols: vec![super::ddl::ColDef::new("m", "adv_mood")], ..Default::default() };
         l.w.pg_create_table(1, db.clone(), spec, false);
         let Msg::SqlDdl { res, undo, .. } = l.next() else { panic!("expected SqlDdl") };

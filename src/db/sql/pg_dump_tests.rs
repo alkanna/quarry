@@ -780,7 +780,7 @@ fn live_a_dump_and_its_run_work_through_a_transaction_pooler() {
     let db = l.quarry_test();
     let pool = l.fixture_pool();
     let schema = "pgdump_bouncer";
-    sql(&l, &pool, &format!("DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema}; CREATE TYPE {schema}.mood AS ENUM ('a', 'b\\c'); CREATE TABLE {schema}.t (id serial PRIMARY KEY, m {schema}.mood, s text, b bytea); INSERT INTO {schema}.t (m, s, b) SELECT 'a', 'it''s \\ ' || g, '\\x00ff'::bytea FROM generate_series(1, 3000) g; CREATE VIEW {schema}.v AS SELECT id FROM {schema}.t; CREATE FUNCTION {schema}.f() RETURNS int LANGUAGE sql AS $$ SELECT 1; $$"));
+    l.reset_schemas(&pool, &[schema], &format!("CREATE TYPE {schema}.mood AS ENUM ('a', 'b\\c'); CREATE TABLE {schema}.t (id serial PRIMARY KEY, m {schema}.mood, s text, b bytea); INSERT INTO {schema}.t (m, s, b) SELECT 'a', 'it''s \\ ' || g, '\\x00ff'::bytea FROM generate_series(1, 3000) g; CREATE VIEW {schema}.v AS SELECT id FROM {schema}.t; CREATE FUNCTION {schema}.f() RETURNS int LANGUAGE sql AS $$ SELECT 1; $$"));
     let before = one(&l, &pool, &format!("SELECT md5(string_agg(x::text, E'\\n' ORDER BY x::text)) FROM {schema}.t x"));
     let path = file("bouncer");
     let p = plan(schema, false, vec![table("t", false, true, true, false), table("v", true, true, false, false)]);

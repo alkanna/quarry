@@ -1142,7 +1142,7 @@ mod tests {
     }
 
     fn unique(base: &str) -> String {
-        format!("{base}_{}_{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos())
+        crate::db::sql::testing::unique_name(base)
     }
 
     impl Live {
