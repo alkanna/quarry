@@ -47,6 +47,8 @@ pub const TABLES: &str = concat!(
 );
 
 /// Params: [schema, table]. Columns: name, full_type, nullable, col_key, col_default, extra, collation, comment, position,
+/// cast_type (the type without its length, precision or bit width, a domain as its base type, char as varchar and bit as bit
+/// varying, since a bare `character` or `bit` means length 1),
 /// pg_type, pg_cat, pg_typtype for the kind, and attidentity ('a' always, 'd' by default) and attgenerated ('s' stored), which
 /// the write path reads instead of the words of `extra`. A serial or identity column says auto_increment in `extra`, an identity
 /// that is always generated and a computed column say GENERATED, and neither has a `col_default` of its own. Only a default that
@@ -62,7 +64,8 @@ pub const COLUMNS: &str = concat!(
             WHEN pg_get_expr(d.adbin, d.adrelid) = 'nextval(''' || pg_get_serial_sequence(quote_ident(n.nspname) || '.' || quote_ident(c.relname), a.attname)::regclass::text || '''::regclass)' THEN 'auto_increment' END, \
        CASE WHEN a.attgenerated <> '' THEN 'GENERATED ALWAYS AS (' || pg_get_expr(d.adbin, d.adrelid) || ') ' || CASE a.attgenerated WHEN 's' THEN 'STORED' ELSE 'VIRTUAL' END END) AS extra, \
      CASE WHEN a.attcollation <> t.typcollation THEN CASE WHEN cn.nspname = 'pg_catalog' THEN co.collname::text ELSE chr(34) || replace(cn.nspname::text, chr(34), chr(34) || chr(34)) || chr(34) || '.' || chr(34) || replace(co.collname::text, chr(34), chr(34) || chr(34)) || chr(34) END END AS collation, \
-     COALESCE(col_description(a.attrelid, a.attnum), '') AS comment, a.attnum::bigint AS position, ",
+     COALESCE(col_description(a.attrelid, a.attnum), '') AS comment, a.attnum::bigint AS position, \
+     format_type(CASE COALESCE(b2.oid, b1.oid, t.oid) WHEN 1042 THEN 1043 WHEN 1014 THEN 1015 WHEN 1560 THEN 1562 WHEN 1561 THEN 1563 ELSE COALESCE(b2.oid, b1.oid, t.oid) END, NULL) AS cast_type, ",
     pg_type!(),
     ", a.attidentity::text AS attidentity, a.attgenerated::text AS attgenerated FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace ",
     type_joins!(),

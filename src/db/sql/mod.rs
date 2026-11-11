@@ -15,6 +15,8 @@ mod pg_shell_tests;
 #[cfg(test)]
 mod pg_write_tests;
 #[cfg(test)]
+mod pg_import_tests;
+#[cfg(test)]
 mod pg_pgbouncer_tests;
 #[cfg(test)]
 mod pg_ddl_tests;
@@ -33,6 +35,7 @@ pub mod format;
 pub mod value;
 pub mod csv;
 pub mod import;
+mod import_pg;
 pub mod dump;
 pub mod server;
 #[cfg(test)]

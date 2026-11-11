@@ -8,6 +8,7 @@
 mod mongo_edit;
 mod sidebar;
 mod sql_edit;
+mod sql_import;
 mod sql_relations;
 mod sql_structure;
 mod sql_triggers;

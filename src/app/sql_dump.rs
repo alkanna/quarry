@@ -325,7 +325,9 @@ impl App {
                 }
                 // A script's tabs and lists follow in `sql_lists_done`.
                 if j.kind == JobKind::Import {
-                    let tabs: Vec<usize> = (0..self.tabs.len()).filter(|&i| self.tabs[i].sel.conn == j.conn && self.tabs[i].sel.db == d.schema && d.table.as_ref().is_none_or(|t| self.tabs[i].sel.coll == *t)).collect();
+                    // A tab is the table's when its database and namespace, resolved as a read of it resolves them, are the job's: another
+                    // PostgreSQL database or schema can hold a table of the same name.
+                    let tabs: Vec<usize> = (0..self.tabs.len()).filter(|&i| d.table.as_ref().is_some_and(|t| super::sql_alter::answers_tab(&self.tabs[i].sel, self.sql_target(&self.tabs[i].sel).map(|(x, ns)| (x.pg_database(), ns)), (j.conn, &d.database, &d.schema, t)))).collect();
                     for i in tabs {
                         self.reload_of(i);
                     }

@@ -31,7 +31,10 @@ pub(super) struct FileState {
 
 pub(super) struct ImportForm {
     conn: u64,
+    /// The database on MySQL, the PostgreSQL database of the connection otherwise.
     db: String,
+    /// The PostgreSQL schema of the table, empty on MySQL where the database is the whole namespace.
+    schema: String,
     table: String,
     req: u64,
     info: Option<Result<TableInfo, String>>,
@@ -140,12 +143,14 @@ fn quote_label(q: Option<char>) -> &'static str {
 
 impl App {
     /// Opens the Import dialog for `table`, asking for the file first.
-    pub(super) fn open_sql_import(&mut self, conn: u64, db: String, table: String) {
-        self.open_sql_import_with(conn, db, table, None);
+    pub(super) fn open_sql_import(&mut self, conn: u64, db: String, schema: String, table: String) {
+        self.open_sql_import_with(conn, db, schema, table, None);
     }
 
-    fn open_sql_import_with(&mut self, conn: u64, db: String, table: String, src: Option<Source>) {
-        let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) else { return self.warn_offline() };
+    /// `src` is the file to read; None asks for one in the system dialog, so a test hands it in.
+    pub(super) fn open_sql_import_with(&mut self, conn: u64, db: String, schema: String, table: String, src: Option<Source>) {
+        // The pool of the table's database and the namespace a worker call takes: the schema on PostgreSQL, the database on MySQL.
+        let Some((sql, ns)) = self.sql_target(&Sel { conn, db: db.clone(), schema: schema.clone(), coll: table.clone() }) else { return self.warn_offline() };
         if self.demo {
             return self.ok("Offline demo: no database is connected.");
         }
@@ -165,8 +170,8 @@ impl App {
             Err(e) => return self.err(e),
         };
         self.req += 1;
-        self.worker.sql_table_info(self.req, sql, db.clone(), table.clone());
-        self.modal = Some(Modal::SqlImport(Box::new(ImportForm { conn, db, table, req: self.req, info: None, file, dup: Dup::Stop })));
+        self.worker.sql_table_info(self.req, sql, ns, table.clone());
+        self.modal = Some(Modal::SqlImport(Box::new(ImportForm { conn, db, schema, table, req: self.req, info: None, file, dup: Dup::Stop })));
     }
 
     /// The columns of the table arrived.
@@ -243,10 +248,12 @@ impl App {
             ui.horizontal(|ui| {
                 segmented(ui, &mut f.dup, &[(Dup::Stop, "Stop"), (Dup::Skip, "Skip"), (Dup::Update, "Update")]);
                 ui.add_space(14.0);
-                let how = match f.dup {
-                    Dup::Stop => "INSERT, STOPS AT A DUPLICATE",
-                    Dup::Skip => "INSERT ... ON DUPLICATE KEY, NO CHANGE",
-                    Dup::Update => "INSERT ... ON DUPLICATE KEY UPDATE",
+                let how = match (f.dup, info.pg) {
+                    (Dup::Stop, _) => "INSERT, STOPS AT A DUPLICATE",
+                    (Dup::Skip, false) => "INSERT ... ON DUPLICATE KEY, NO CHANGE",
+                    (Dup::Update, false) => "INSERT ... ON DUPLICATE KEY UPDATE",
+                    // The statement names the key only when the table has one, and updates only when the file fills a column besides it.
+                    (dup, true) => import::pg_clause_text(&info, &f.file.map, dup),
                 };
                 ui.label(RichText::new(how).font(FontId::monospace(TXT_CAPTION)).color(FAINT()));
             });
@@ -366,11 +373,13 @@ impl App {
         let missing: Vec<&str> = info.cols.iter().enumerate().filter(|(i, c)| !c.generated && !c.fills_itself && !mapped.iter().any(|(_, t)| t == i)).map(|(_, c)| c.name.as_str()).collect();
         ui.add_space(6.0);
         let undo = import::undo_plan(&info, &f.file.map, f.dup, rows);
-        let per = 500.min(60_000 / mapped.len().max(1)).max(1);
+        let per = if info.pg { import::batch_rows_pg(mapped.len()) } else { 500.min(60_000 / mapped.len().max(1)).max(1) };
         egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
             ui.set_width(ui.available_width());
             let say = |ui: &mut egui::Ui, t: String, c: Color32| ui.add(egui::Label::new(RichText::new(t).size(TXT_SMALL).color(c)).wrap());
             say(ui, format!("Runs in one transaction in batches of {per}. {}", match &undo {
+                Ok(()) if info.pg && f.dup == Dup::Update => format!("Undo removes the new rows and puts back what an update overwrote, if nothing changed since."),
+                Ok(()) if info.pg => format!("Undo removes the new rows again, if nothing changed since."),
                 Ok(()) => format!("Undo removes the {} rows again.", group(&rows.to_string())),
                 Err(why) => why.clone(),
             }), MUTED());
@@ -391,6 +400,10 @@ impl App {
             Some("Allow writes on this connection first")
         } else if self.sql_job.is_some() {
             Some("Another import or script is running")
+        } else if f.dup == Dup::Update && info.pg && info.pk.is_empty() {
+            Some("Update needs a primary key")
+        } else if f.dup != Dup::Stop && info.pk_deferrable {
+            Some("The primary key is DEFERRABLE, which ON CONFLICT does not support. Choose Stop")
         } else if mapped.is_empty() {
             Some("Map at least one column")
         } else if f.file.map.duplicate_target().is_some() {
@@ -434,18 +447,19 @@ impl App {
             }
         } else if unlock {
             *keep = false;
-            let (conn, db, table, src) = (f.conn, f.db.clone(), f.table.clone(), f.file.src.clone());
-            self.modal = Some(Modal::Unlock(conn, Some(Box::new(move |a: &mut App| a.open_sql_import_with(conn, db, table, Some(src))))));
+            let (conn, db, schema, table, src) = (f.conn, f.db.clone(), f.schema.clone(), f.table.clone(), f.file.src.clone());
+            self.modal = Some(Modal::Unlock(conn, Some(Box::new(move |a: &mut App| a.open_sql_import_with(conn, db, schema, table, Some(src))))));
         }
     }
 
     fn start_sql_import(&mut self, f: &ImportForm, info: &TableInfo, want_undo: bool) {
-        let Some((sql, writable)) = self.conn(f.conn).and_then(|c| Some((c.sql.clone()?, c.writable))) else { return self.warn_offline() };
+        let Some(writable) = self.conn(f.conn).map(|c| c.writable) else { return self.warn_offline() };
+        let Some((sql, ns)) = self.sql_target(&Sel { conn: f.conn, db: f.db.clone(), schema: f.schema.clone(), coll: f.table.clone() }) else { return self.warn_offline() };
         let plan = ImportPlan { source: f.file.src.clone(), opts: f.file.opts, header: f.file.header, info: info.clone(), map: f.file.map.clone(), dup: f.dup, want_undo };
         self.req += 1;
-        let mut job = super::sql_dump::SqlJob::new(self.req, f.conn, sql.clone(), f.db.clone(), super::sql_dump::JobKind::Import, f.file.report.as_ref().map_or(0, |r| r.rows), f.file.size);
+        let mut job = super::sql_dump::SqlJob::new(self.req, f.conn, sql.clone(), ns.clone(), super::sql_dump::JobKind::Import, f.file.report.as_ref().map_or(0, |r| r.rows), f.file.size);
         job.rolls_back = info.transactional();
-        self.worker.sql_import(job.req, f.conn, sql, f.db.clone(), f.table.clone(), plan, !writable, job.prog.clone(), job.id.clone(), job.cancel.clone());
+        self.worker.sql_import(job.req, f.conn, sql, ns, f.table.clone(), plan, !writable, job.prog.clone(), job.id.clone(), job.cancel.clone());
         self.sql_job = Some(job);
         self.ok(format!("Importing {} rows into {}", group(&job_rows(&self.sql_job).to_string()), f.table));
     }
@@ -460,14 +474,14 @@ impl App {
         let src = Source::Mem(Arc::new(csv.into_bytes()));
         let Ok(mut file) = FileState::open(src, "orders-2026-11.csv".into()) else { return };
         file.size = 182 * 1024;
-        let col = |name: &str, ty: &str, nullable: bool, auto: bool| db::sql::csv::TCol::from_column(&db::sql::structure::Column { name: name.into(), full_type: ty.into(), nullable, extra: if auto { "auto_increment".into() } else { String::new() }, ..Default::default() });
-        let info = TableInfo { cols: vec![col("id", "int unsigned", false, true), col("customer_id", "int unsigned", false, false), col("status", "enum('pending','paid','shipped','refunded')", false, false), col("total", "decimal(10,2)", false, false), col("currency", "char(3)", false, false), col("created_at", "datetime", false, false)], pk: vec!["id".into()], engine: "InnoDB".into() };
+        let col = |name: &str, ty: &str, nullable: bool, auto: bool| db::sql::csv::TCol::from_column(&db::sql::structure::Column { name: name.into(), full_type: ty.into(), nullable, extra: if auto { "auto_increment".into() } else { String::new() }, ..Default::default() }, false);
+        let info = TableInfo { cols: vec![col("id", "int unsigned", false, true), col("customer_id", "int unsigned", false, false), col("status", "enum('pending','paid','shipped','refunded')", false, false), col("total", "decimal(10,2)", false, false), col("currency", "char(3)", false, false), col("created_at", "datetime", false, false)], pk: vec!["id".into()], engine: "InnoDB".into(), pg: false, pk_deferrable: false };
         file.remap(&info);
         // The design maps the file's names to these columns, which only differ in spelling.
         file.map.map = vec![Some(0), Some(1), Some(2), Some(3), Some(4), Some(5), None];
         file.refmt(5, &info);
         let conn = self.t().map_or(0, |t| t.sel.conn);
-        self.modal = Some(Modal::SqlImport(Box::new(ImportForm { conn, db: "shop".into(), table: "orders".into(), req: 0, info: Some(Ok(info)), file, dup: Dup::Stop })));
+        self.modal = Some(Modal::SqlImport(Box::new(ImportForm { conn, db: "shop".into(), schema: String::new(), table: "orders".into(), req: 0, info: Some(Ok(info)), file, dup: Dup::Stop })));
     }
 }
 

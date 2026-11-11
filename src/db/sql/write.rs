@@ -33,6 +33,8 @@ pub enum SqlUndo {
     /// PostgreSQL inserts: each document holds the key under `_id` and the values that were written, so the undo
     /// removes a row only while it still holds them and never one that was edited or replaced since.
     Inserted(Vec<Document>),
+    /// A PostgreSQL CSV import: the rows it inserted and the old values of the rows it overwrote.
+    Import(std::sync::Arc<super::import_pg::ImportUndo>),
     /// A structure change: the ALTERs that reverse it and what they rely on.
     Alter(Box<super::ddl::AlterUndo>),
     /// A trigger change: what puts the trigger back and how the change left it.
@@ -48,12 +50,15 @@ pub enum SqlUndo {
 impl SqlUndo {
     /// Key column names, read off the first row: undo of a delete re-inserts the rows and needs them.
     pub fn pk_names(&self) -> Vec<String> {
+        if let SqlUndo::Import(u) = self {
+            return u.pk.clone();
+        }
         let first = match self {
             SqlUndo::Update(r) => r.first().map(|r| r.pk.clone()),
             SqlUndo::Delete(r) => r.first().map(pk_of),
             SqlUndo::Insert(r) => r.first().cloned(),
             SqlUndo::Inserted(r) => r.first().map(pk_of),
-            SqlUndo::Alter(_) | SqlUndo::Trigger(_) | SqlUndo::Account(_) => None,
+            SqlUndo::Alter(_) | SqlUndo::Trigger(_) | SqlUndo::Account(_) | SqlUndo::Import(_) => None,
             SqlUndo::CreatedDb | SqlUndo::CreatedTable { .. } => None,
         };
         first.map(|d| d.keys().cloned().collect()).unwrap_or_default()
@@ -65,6 +70,7 @@ impl SqlUndo {
             SqlUndo::Update(r) => format!("edited {}", plural(r.len(), "row")),
             SqlUndo::Delete(r) => format!("deleted {}", plural(r.len(), "row")),
             SqlUndo::Insert(r) | SqlUndo::Inserted(r) => format!("inserted {}", plural(r.len(), "row")),
+            SqlUndo::Import(u) => u.describe(),
             SqlUndo::Alter(u) => u.label.clone(),
             SqlUndo::Trigger(u) => u.label.clone(),
             SqlUndo::CreatedDb => "created database".into(),
@@ -677,6 +683,7 @@ impl Worker {
                 }
                 SqlUndo::Insert(pks) => apply_deletes(&db, &schema, &table, &cols, &pk, &pks, read_only).await.map(|_| "Removed the inserted rows".to_string()),
                 SqlUndo::Inserted(rows) => apply_undo_inserted_pg(&db, &schema, &table, &cols, &pk, &rows, read_only).await.map(|_| "Removed the inserted rows".to_string()),
+                SqlUndo::Import(u) => super::import_pg::undo(&db, &schema, &table, &u, read_only).await,
                 // Taken before this match, where the structure statements run.
                 SqlUndo::Alter(_) | SqlUndo::Trigger(_) | SqlUndo::Account(_) => Err("Not a row change".into()),
                 SqlUndo::CreatedDb | SqlUndo::CreatedTable { .. } => Err("Handled by sql_undo_create".to_string()),

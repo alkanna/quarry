@@ -904,7 +904,7 @@ impl App {
 /// Whether the answer of a structure change, as (connection, PostgreSQL database or empty, namespace, table), is about the
 /// table `sel` points at. `target` is what a read of the tab resolves to: the database of its pool and its namespace, which
 /// is not `sel.schema` when a PostgreSQL tab leaves its schema to the one the sidebar shows.
-fn answers_tab(sel: &Sel, target: Option<(String, String)>, answer: (u64, &str, &str, &str)) -> bool {
+pub(super) fn answers_tab(sel: &Sel, target: Option<(String, String)>, answer: (u64, &str, &str, &str)) -> bool {
     let (conn, database, schema, table) = answer;
     sel.conn == conn && sel.coll == table && target.is_some_and(|(d, ns)| ns == schema && d == database)
 }

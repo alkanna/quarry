@@ -389,6 +389,10 @@ pub fn sniff(src: &Source) -> Result<(Opts, bool), String> {
 pub struct TCol {
     pub name: String,
     pub full_type: String,
+    /// PostgreSQL: the type a value is cast to, `full_type` without its length, precision or bit width. An explicit cast to
+    /// `varchar(3)` or `bit(4)` cuts or pads silently, so the cast goes to the bare type and the INSERT applies the length
+    /// by assignment, which refuses a value that does not fit. Equal to `full_type` on MySQL.
+    pub cast_type: String,
     pub kind: Kind,
     pub nullable: bool,
     pub auto_increment: bool,
@@ -399,6 +403,8 @@ pub struct TCol {
     pub max_chars: Option<usize>,
     /// The values of an ENUM or SET.
     pub choices: Vec<String>,
+    /// A PostgreSQL column: `full_type` is what format_type wrote, so values are checked by the server's cast and not by MySQL's rules.
+    pub pg: bool,
 }
 
 /// The values listed in `'a','b''c'`, the way COLUMN_TYPE writes an ENUM or SET.
@@ -424,14 +430,20 @@ pub fn quoted_list(args: &str) -> Vec<String> {
 }
 
 impl TCol {
-    pub fn from_column(c: &structure::Column) -> TCol {
+    pub fn from_column(c: &structure::Column, pg: bool) -> TCol {
         let extra = c.extra.to_ascii_uppercase();
         let (base, args) = (c.base_type(), c.args());
-        let kind = Kind::from_column_type(&c.full_type);
+        // The catalog's own kind tells a domain over int or an enum apart, which the type name alone cannot.
+        let kind = c.kind.unwrap_or_else(|| Kind::from_column_type(&c.full_type));
         let auto_increment = extra.contains("AUTO_INCREMENT");
-        let max_chars = matches!(base.as_str(), "CHAR" | "VARCHAR").then(|| args.trim().parse().ok()).flatten();
-        let choices = if matches!(kind, Kind::Enum | Kind::Set) { quoted_list(&args) } else { Vec::new() };
-        TCol { name: c.name.clone(), full_type: c.full_type.clone(), kind, nullable: c.nullable, auto_increment, generated: extra.contains("VIRTUAL") || extra.contains("STORED GENERATED") || extra.contains("PERSISTENT"), fills_itself: c.default.is_some() || c.default_expr || c.nullable || auto_increment, max_chars, choices }
+        // `character varying(20)[]` has the length of its elements, not of the text of the array.
+        let sized = if pg { matches!(base.as_str(), "CHARACTER" | "VARCHAR") && kind == Kind::Text && !c.full_type.ends_with(']') } else { matches!(base.as_str(), "CHAR" | "VARCHAR") };
+        let max_chars = sized.then(|| args.trim().parse().ok()).flatten();
+        let choices = if !pg && matches!(kind, Kind::Enum | Kind::Set) { quoted_list(&args) } else { Vec::new() };
+        // A computed column and an identity that is always generated cannot be given a value.
+        let generated = if pg { extra.contains("GENERATED ALWAYS AS") } else { extra.contains("VIRTUAL") || extra.contains("STORED GENERATED") || extra.contains("PERSISTENT") };
+        let cast_type = c.cast_type.clone().filter(|_| pg).unwrap_or_else(|| c.full_type.clone());
+        TCol { name: c.name.clone(), cast_type, full_type: c.full_type.clone(), kind, nullable: c.nullable, auto_increment, generated, fills_itself: c.default.is_some() || c.default_expr || c.nullable || auto_increment, max_chars, choices, pg }
     }
 }
 
@@ -442,12 +454,19 @@ pub struct TableInfo {
     pub pk: Vec<String>,
     /// ENGINE of information_schema.TABLES, which decides whether a failed import can be rolled back.
     pub engine: String,
+    /// A PostgreSQL table: every write there is transactional and the keys of new rows come from RETURNING.
+    pub pg: bool,
+    /// The primary key is DEFERRABLE, which ON CONFLICT refuses, so Skip and Update cannot work.
+    pub pk_deferrable: bool,
 }
 
 impl TableInfo {
     pub fn from_structure(s: &Structure) -> TableInfo {
-        let pk = s.indexes.iter().filter(|i| i.name == "PRIMARY").flat_map(|i| i.cols.iter().map(|c| c.name.clone())).collect();
-        TableInfo { cols: s.columns.iter().map(TCol::from_column).collect(), pk, engine: s.status.engine.clone() }
+        let pg = s.pg_schema.is_some();
+        // A PostgreSQL primary key is flagged on its index, whatever the constraint is called.
+        let pk = s.indexes.iter().filter(|i| if pg { i.primary } else { i.name == "PRIMARY" }).flat_map(|i| i.cols.iter().map(|c| c.name.clone())).collect();
+        let pk_deferrable = pg && s.indexes.iter().any(|i| i.primary && i.deferrable);
+        TableInfo { cols: s.columns.iter().map(|c| TCol::from_column(c, pg)).collect(), pk, engine: s.status.engine.clone(), pg, pk_deferrable }
     }
 
     /// Whether rows written inside a transaction go away on a rollback. MyISAM, Aria, MEMORY, CSV and ARCHIVE
@@ -466,20 +485,25 @@ fn norm(s: &str) -> String {
 }
 
 /// For each CSV column the table column of the same name, ignoring case and punctuation (`Order ID` finds
-/// `order_id`). A table column is used once, and generated columns are never filled.
+/// `order_id`). A table column is used once, and generated columns are never filled. Exact names are matched first, so a
+/// table with `Name` and `name` gives each its own file column whatever order the header is in.
 pub fn auto_map(names: &[String], cols: &[TCol]) -> Vec<Option<usize>> {
     let mut used = vec![false; cols.len()];
-    names
-        .iter()
-        .map(|n| {
+    let mut out: Vec<Option<usize>> = vec![None; names.len()];
+    for exact in [true, false] {
+        for (ni, n) in names.iter().enumerate() {
+            if out[ni].is_some() {
+                continue;
+            }
             let key = norm(n);
-            let at = (!key.is_empty()).then(|| cols.iter().enumerate().position(|(i, c)| !used[i] && !c.generated && (c.name == *n || norm(&c.name) == key))).flatten();
+            let at = (!key.is_empty()).then(|| cols.iter().enumerate().position(|(i, c)| !used[i] && !c.generated && if exact { c.name == *n } else { norm(&c.name) == key })).flatten();
             if let Some(i) = at {
                 used[i] = true;
+                out[ni] = Some(i);
             }
-            at
-        })
-        .collect()
+        }
+    }
+    out
 }
 
 /// How a date written with slashes or dots is read: 09/11/2026 is the 9th of November or the 11th of September.
@@ -549,6 +573,9 @@ pub fn to_iso(s: &str, fmt: DateFmt) -> String {
 
 /// What a cell becomes for its column: a value to bind, or why it cannot be one.
 pub fn convert(col: &TCol, raw: &str, empty_null: bool, fmt: DateFmt) -> Result<Param, String> {
+    if col.pg {
+        return convert_pg(col, raw, empty_null, fmt);
+    }
     let text_like = matches!(col.kind, Kind::Text | Kind::Binary);
     let null = raw == "\\N" || (raw.is_empty() && (empty_null || !text_like));
     if null {
@@ -584,6 +611,84 @@ pub fn convert(col: &TCol, raw: &str, empty_null: bool, fmt: DateFmt) -> Result<
         }
     }
     Ok(Param::for_kind(col.kind, &parsed))
+}
+
+/// `convert` for a PostgreSQL column. Every value travels as text and the `CAST($n AS type)` around its placeholder makes the
+/// value, so what is checked here is what the server would refuse late and with a worse message: a number that is not one, a
+/// UUID, JSON, hex. Dates and times are left to the cast, which reads more spellings than MySQL does.
+fn convert_pg(col: &TCol, raw: &str, empty_null: bool, fmt: DateFmt) -> Result<Param, String> {
+    let text_like = matches!(col.kind, Kind::Text | Kind::Binary);
+    let null = raw == "\\N" || (raw.is_empty() && (empty_null || !text_like));
+    if null {
+        return if col.nullable || col.auto_increment { Ok(Param::Null) } else { Err("Empty, but the column does not allow NULL. Skip it or fill it in the file.".into()) };
+    }
+    if raw.contains('\0') {
+        return Err("PostgreSQL text cannot hold a NUL character.".into());
+    }
+    let word = raw.trim().to_ascii_lowercase();
+    let parsed = match col.kind {
+        // Text is taken as it is: parse_edit reads the word NULL as a NULL, which would turn a name into one.
+        Kind::Text | Kind::Enum | Kind::Set => Bson::String(raw.into()),
+        Kind::Json => {
+            serde_json::from_str::<serde_json::Value>(raw).map_err(|e| format!("Not valid JSON: {e}"))?;
+            Bson::String(raw.into())
+        }
+        // bytea reads hex written as \x.. (what the server prints) or 0x.. (what Export writes). Any other text is its own bytes,
+        // never the escape format, where a backslash would mean something else.
+        Kind::Binary => match raw.strip_prefix("\\x").or_else(|| raw.strip_prefix("0x")).or_else(|| raw.strip_prefix("0X")) {
+            Some(_) => value::parse_edit(Dialect::Postgres, Kind::Binary, &format!("0x{}", raw[2..].trim())).map_err(|_| "Hex needs pairs of digits after \\x or 0x.".to_string())?,
+            None => Bson::Binary(mongodb::bson::Binary { subtype: mongodb::bson::spec::BinarySubtype::Generic, bytes: raw.as_bytes().to_vec() }),
+        },
+        // The words the server writes and its cast reads, with the sign it also takes. numeric reads Infinity since PostgreSQL 14,
+        // and an older server says so itself when it refuses it.
+        Kind::Float | Kind::Decimal if matches!(word.as_str(), "nan" | "infinity" | "+infinity" | "-infinity" | "inf" | "+inf" | "-inf") => Bson::String(word),
+        // The whole text goes to the cast: an exponent is a number to numeric, which parse_edit's plain decimal check refuses.
+        Kind::Decimal if decimal_ok(raw.trim()) => Bson::String(raw.trim().into()),
+        Kind::Decimal => return Err("Enter a number, like -12.50 or 1.5e3.".into()),
+        // The spellings and the prefixes of them that the server's bool input takes.
+        Kind::Bool => Bson::Boolean(pg_bool(&word).ok_or_else(|| "Enter true or false (also yes, no, on, off, t, f, y, n, 1, 0).".to_string())?),
+        Kind::Geometry => Bson::String(raw.trim().into()),
+        Kind::Date | Kind::DateTime => value::parse_edit(Dialect::Postgres, col.kind, &to_iso(raw, fmt))?,
+        k => value::parse_edit(Dialect::Postgres, k, raw)?,
+    };
+    if parsed == Bson::Null && !col.nullable && !col.auto_increment {
+        return Err("NULL, but the column does not allow NULL. Skip it or fill it in the file.".into());
+    }
+    if let (Some(max), Bson::String(s)) = (col.max_chars, &parsed) {
+        // The server drops spaces past the length of a char(n) or varchar(n) without an error, so only other characters count.
+        let n = s.trim_end_matches(' ').chars().count();
+        if n > max {
+            return Err(format!("{n} characters, the column holds {max}."));
+        }
+    }
+    Ok(Param::for_pg(&parsed))
+}
+
+/// What numeric accepts: digits with an optional point, sign and exponent, as `-12.50`, `.5`, `5.` and `1.5e-3`.
+fn decimal_ok(t: &str) -> bool {
+    let body = t.strip_prefix(['-', '+']).unwrap_or(t);
+    let (mant, exp) = match body.split_once(['e', 'E']) {
+        Some((m, e)) => (m, Some(e.strip_prefix(['-', '+']).unwrap_or(e))),
+        None => (body, None),
+    };
+    let (int, frac) = mant.split_once('.').unwrap_or((mant, ""));
+    let digits = |x: &str| x.bytes().all(|b| b.is_ascii_digit());
+    !(int.is_empty() && frac.is_empty()) && digits(int) && digits(frac) && exp.is_none_or(|e| !e.is_empty() && digits(e))
+}
+
+/// The server's boolean input: true, yes, on, 1, false, no, off, 0, and any unambiguous start of those words.
+fn pg_bool(word: &str) -> Option<bool> {
+    let is = |full: &str| !word.is_empty() && full.starts_with(word);
+    match word {
+        "1" => Some(true),
+        "0" => Some(false),
+        // "o" could be on or off, which the server refuses too.
+        "of" | "off" => Some(false),
+        "on" => Some(true),
+        _ if is("true") || is("yes") => Some(true),
+        _ if is("false") || is("no") => Some(false),
+        _ => None,
+    }
 }
 
 /// How the columns of a file go into the table.
@@ -740,7 +845,7 @@ mod tests {
     }
 
     fn col(name: &str, ty: &str, nullable: bool) -> TCol {
-        TCol { name: name.into(), full_type: ty.into(), kind: Kind::from_column_type(ty), nullable, auto_increment: false, generated: false, fills_itself: nullable, max_chars: None, choices: Vec::new() }
+        TCol { name: name.into(), full_type: ty.into(), cast_type: ty.into(), kind: Kind::from_column_type(ty), nullable, auto_increment: false, generated: false, fills_itself: nullable, max_chars: None, choices: Vec::new(), pg: false }
     }
 
     #[test]
@@ -811,10 +916,46 @@ mod tests {
     }
 
     #[test]
+    fn postgres_text_is_read_as_the_server_reads_it() {
+        let c = |ty: &str, kind: Kind| TCol { cast_type: ty.into(), kind, max_chars: None, pg: true, ..col("c", ty, true) };
+        let p = |col: &TCol, raw: &str| convert(col, raw, true, DateFmt::DayFirst);
+        let t = |s: &str| Ok(Param::Text(s.into()));
+        let b = c("boolean", Kind::Bool);
+        for (raw, want) in [("on", "true"), ("Y", "true"), ("tr", "true"), ("1", "true"), ("of", "false"), ("off", "false"), ("n", "false"), ("f", "false"), (" NO ", "false")] {
+            assert_eq!(p(&b, raw), t(want), "{raw}");
+        }
+        assert!(p(&b, "o").is_err() && p(&b, "maybe").is_err() && p(&b, "2").is_err());
+        let n = c("numeric", Kind::Decimal);
+        for raw in ["1e3", "1.5E-2", "+5", ".5", "5.", "-1.5e+2", "Infinity", "-infinity", "+inf", "NaN"] {
+            assert!(p(&n, raw).is_ok(), "{raw}");
+        }
+        for raw in ["e3", "1e", "1.2.3", "1,5", "--1", "."] {
+            assert!(p(&n, raw).is_err(), "{raw}");
+        }
+        let f = c("double precision", Kind::Float);
+        for raw in ["+Infinity", "-inf", "1e3", "NaN"] {
+            assert!(p(&f, raw).is_ok(), "{raw}");
+        }
+        // Spaces past the length are dropped by the server, other characters are an error.
+        let mut v = c("character varying(3)", Kind::Text);
+        v.max_chars = Some(3);
+        assert!(p(&v, "abc  ").is_ok() && p(&v, "abcd").is_err());
+    }
+
+    #[test]
     fn columns_are_matched_by_name_once() {
         let cols = [col("id", "int", false), col("Order Date", "date", true), col("total", "decimal(10,2)", true)];
         let names: Vec<String> = ["ID", "order_date", "id", "Total", "extra"].map(String::from).to_vec();
-        assert_eq!(auto_map(&names, &cols), [Some(0), Some(1), None, Some(2), None]);
+        // The file's own `id` is the exact match, so the first column `ID` is the one left without a table column.
+        assert_eq!(auto_map(&names, &cols), [None, Some(1), Some(0), Some(2), None]);
+        // MySQL names are not case sensitive, so a lone `ID` still finds `id`.
+        assert_eq!(auto_map(&["ID".to_string(), "Order_Date".to_string()], &cols), [Some(0), Some(1)]);
+        // Columns that differ only in case each get their own, in either order of the header.
+        let two = [col("id", "int", false), col("Name", "text", true), col("name", "text", true)];
+        assert_eq!(auto_map(&["name", "Name"].map(String::from), &two), [Some(2), Some(1)]);
+        assert_eq!(auto_map(&["Name", "name"].map(String::from), &two), [Some(1), Some(2)]);
+        // Neither spelling is exact: the first takes the first free column.
+        assert_eq!(auto_map(&["NAME".to_string(), "nAME".to_string()], &two), [Some(1), Some(2)]);
         let mut generated_col = col("g", "int", true);
         generated_col.generated = true;
         assert_eq!(auto_map(&["g".to_string()], &[generated_col]), [None]);
@@ -872,14 +1013,14 @@ mod tests {
         assert!(convert(&v, "caf\u{e9}s", true, DateFmt::DayFirst).unwrap_err().contains("5 characters"));
         // Characters, not bytes.
         assert!(convert(&v, "\u{e9}\u{e9}\u{e9}", true, DateFmt::DayFirst).is_ok());
-        let e = TCol::from_column(&structure::Column { name: "s".into(), full_type: "enum('new','it''s','a,b')".into(), nullable: false, ..Default::default() });
+        let e = TCol::from_column(&structure::Column { name: "s".into(), full_type: "enum('new','it''s','a,b')".into(), nullable: false, ..Default::default() }, false);
         assert_eq!(e.choices, ["new", "it's", "a,b"]);
         assert!(convert(&e, "IT'S", true, DateFmt::DayFirst).is_ok());
         assert!(convert(&e, "old", true, DateFmt::DayFirst).unwrap_err().contains("Not one of"));
-        let s = TCol::from_column(&structure::Column { name: "s".into(), full_type: "set('a','b','c')".into(), nullable: true, ..Default::default() });
+        let s = TCol::from_column(&structure::Column { name: "s".into(), full_type: "set('a','b','c')".into(), nullable: true, ..Default::default() }, false);
         assert!(convert(&s, "a,c", true, DateFmt::DayFirst).is_ok());
         assert!(convert(&s, "a,z", true, DateFmt::DayFirst).unwrap_err().starts_with("z is not"));
-        let ch = TCol::from_column(&structure::Column { name: "c".into(), full_type: "char(2)".into(), nullable: true, ..Default::default() });
+        let ch = TCol::from_column(&structure::Column { name: "c".into(), full_type: "char(2)".into(), nullable: true, ..Default::default() }, false);
         assert_eq!(ch.max_chars, Some(2));
     }
 

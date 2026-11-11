@@ -46,6 +46,17 @@ pub struct ImportPlan {
     pub want_undo: bool,
 }
 
+/// Rows in one INSERT on PostgreSQL, for the dialog.
+pub fn batch_rows_pg(cols: usize) -> usize {
+    super::import_pg::batch_rows(cols)
+}
+
+/// How the duplicate choice reads in the dialog for a PostgreSQL table: what the statement does with this mapping.
+pub fn pg_clause_text(info: &TableInfo, map: &Mapping, dup: Dup) -> &'static str {
+    let has_set = map.targets().iter().any(|(_, t)| !info.pk.contains(&info.cols[*t].name));
+    super::import_pg::Clause::of(dup, !info.pk.is_empty(), has_set).text()
+}
+
 /// What a running job shares with the status bar.
 #[derive(Default)]
 pub struct Progress {
@@ -58,6 +69,9 @@ pub struct JobDone {
     pub msg: String,
     pub undo: Option<UndoAction>,
     pub schema: String,
+    /// The PostgreSQL database the job ran in, empty on MySQL, so the answer finds the tabs of this database and not of
+    /// another one that holds a table of the same name.
+    pub database: String,
     /// The table whose open tabs are reloaded, when one changed.
     pub table: Option<String>,
     /// The list of tables of the database changed.
@@ -67,6 +81,9 @@ pub struct JobDone {
 /// Whether the rows of this import can be taken out again, or why not. The dialog shows the reason before
 /// anything starts.
 pub fn undo_plan(info: &TableInfo, map: &Mapping, dup: Dup, rows: u64) -> Result<(), String> {
+    if info.pg {
+        return super::import_pg::undo_plan(info, dup, rows);
+    }
     if dup != Dup::Stop {
         return Err("Undo is only offered when a duplicate key stops the import: a skipped or updated row cannot be told from a new one.".into());
     }
@@ -166,6 +183,9 @@ pub struct Done {
 /// Runs the import. `read_only` is the connection's lock: a locked connection never gets this far.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(db: &Db, schema: &str, table: &str, plan: &ImportPlan, conn: u64, read_only: bool, prog: &Progress, cancel: &AtomicBool, id: &AtomicU64) -> Res<Done> {
+    if db.dialect == Dialect::Postgres {
+        return super::import_pg::run(db, schema, table, plan, conn, read_only, prog, cancel, id).await;
+    }
     let targets = plan.map.targets();
     if targets.is_empty() {
         return Err("No column is mapped, so there is nothing to import.".into());
@@ -349,6 +369,8 @@ pub fn summary(table: &str, plan: &ImportPlan, d: &Done) -> String {
         Dup::Update => format!("Imported {} into {table}, updated {} that already existed", plural(d.inserted, "new row", "new rows"), d.rows - d.inserted.min(d.rows)),
     };
     match (&d.undo, &d.why_not) {
+        (Some(_), _) if plan.info.pg && plan.dup == Dup::Update => s.push_str(". Undo removes the new rows and puts the old values back."),
+        (Some(_), _) if plan.info.pg => s.push_str(". Undo removes the new rows again."),
         (Some(_), _) => s.push_str(". Undo removes them again."),
         (None, Some(why)) => s.push_str(&format!(". {why}")),
         (None, None) => {}
@@ -368,7 +390,7 @@ impl Worker {
         self.spawn(async move {
             let res = run(&db, &schema, &table, &plan, conn, read_only, &prog, &cancel, &id).await;
             id.store(0, Ordering::SeqCst);
-            let res = res.map(|d| JobDone { msg: summary(&table, &plan, &d), undo: d.undo, schema: schema.clone(), table: Some(table.clone()), tables_changed: false });
+            let res = res.map(|d| JobDone { msg: summary(&table, &plan, &d), undo: d.undo, schema: schema.clone(), database: db.pg_database(), table: Some(table.clone()), tables_changed: false });
             Msg::SqlJob { req, res }
         });
     }
@@ -380,11 +402,11 @@ mod tests {
     use crate::db::sql::csv::{DateFmt, TCol};
 
     fn tcol(name: &str, ty: &str, nullable: bool, auto: bool) -> TCol {
-        TCol { name: name.into(), full_type: ty.into(), kind: Kind::from_column_type(ty), nullable, auto_increment: auto, generated: false, fills_itself: nullable || auto, max_chars: None, choices: Vec::new() }
+        TCol { name: name.into(), full_type: ty.into(), cast_type: ty.into(), kind: Kind::from_column_type(ty), nullable, auto_increment: auto, generated: false, fills_itself: nullable || auto, max_chars: None, choices: Vec::new(), pg: false }
     }
 
     fn info() -> TableInfo {
-        TableInfo { cols: vec![tcol("id", "int", false, true), tcol("name", "varchar(20)", true, false), tcol("qty", "int", true, false)], pk: vec!["id".into()], engine: "InnoDB".into() }
+        TableInfo { cols: vec![tcol("id", "int", false, true), tcol("name", "varchar(20)", true, false), tcol("qty", "int", true, false)], pk: vec!["id".into()], engine: "InnoDB".into(), pg: false, pk_deferrable: false }
     }
 
     fn map(m: &[Option<usize>]) -> Mapping {
