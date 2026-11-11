@@ -395,6 +395,7 @@ async fn uptime(c: &mut sqlx::MySqlConnection) -> Option<u64> {
 }
 
 async fn processes(db: &Db) -> Res<Processes> {
+    db.mysql_only()?;
     let mut c = db.acquire().await?;
     let (me, identity) = me_and_identity(&mut c, db.dialect).await?;
     let list = rows(&mut c, "SHOW FULL PROCESSLIST").await.map_err(|x| {
@@ -406,10 +407,8 @@ async fn processes(db: &Db) -> Res<Processes> {
 }
 
 async fn variables(db: &Db, global: bool) -> Res<Variables> {
+    db.mysql_only()?;
     let mut c = db.acquire().await?;
-    if !db.dialect.is_mysql_family() {
-        return Err("Server variables are not available for PostgreSQL.".into());
-    }
     let up = uptime(&mut c).await;
     if matches!(db.dialect, Dialect::MariaDb) {
         let q = "SELECT VARIABLE_NAME, SESSION_VALUE, GLOBAL_VALUE, DEFAULT_VALUE, READ_ONLY FROM information_schema.SYSTEM_VARIABLES ORDER BY VARIABLE_NAME";
@@ -474,6 +473,7 @@ async fn replicas(c: &mut sqlx::MySqlConnection, d: Dialect) -> Res<Vec<Replica>
 }
 
 async fn overview(db: &Db) -> Res<Overview> {
+    db.mysql_only()?;
     let mut c = db.acquire().await?;
     let snap = status_snap(&mut c).await?;
     let q = format!("SHOW GLOBAL VARIABLES WHERE Variable_name IN ({OVERVIEW_VARS})");
@@ -491,6 +491,7 @@ async fn overview(db: &Db) -> Res<Overview> {
 }
 
 async fn status(db: &Db) -> Res<Snap> {
+    db.mysql_only()?;
     let mut c = db.acquire().await?;
     status_snap(&mut c).await
 }
@@ -514,18 +515,19 @@ impl KillTarget {
 /// Which server a connection reached. MySQL has a UUID; MariaDB's hostname and server id are what tell a
 /// replica or a cluster node apart.
 async fn identity(c: &mut sqlx::MySqlConnection, d: Dialect) -> String {
-    match rows(c, identity_columns(d)).await {
+    let Ok(q) = identity_columns(d) else { return String::new() };
+    match rows(c, q).await {
         Ok(r) => r.first().map(|r| identity_of(r, 0, d)).unwrap_or_default(),
         Err(_) => String::new(),
     }
 }
 
-fn identity_columns(d: Dialect) -> &'static str {
-    match d {
+fn identity_columns(d: Dialect) -> Res<&'static str> {
+    Ok(match d {
         Dialect::MariaDb => "SELECT @@hostname, @@server_id",
         Dialect::MySql => "SELECT @@server_uuid",
-        Dialect::Postgres => unimplemented!("PostgreSQL has no server identity columns"),
-    }
+        Dialect::Postgres => return Err(super::pg::NOT_YET.into()),
+    })
 }
 
 /// The identity columns of `identity_columns` starting at column `from`, joined.
@@ -538,7 +540,7 @@ fn identity_of(r: &sqlx::mysql::MySqlRow, from: usize, d: Dialect) -> String {
 /// read on the connection that then lists the processes, and again on every poll, since a changed identity is how
 /// a failover shows.
 async fn me_and_identity(c: &mut sqlx::MySqlConnection, d: Dialect) -> Res<(u64, String)> {
-    let q = identity_columns(d).replacen("SELECT ", "SELECT CONNECTION_ID(), ", 1);
+    let q = identity_columns(d)?.replacen("SELECT ", "SELECT CONNECTION_ID(), ", 1);
     if let Ok(r) = rows(c, &q).await {
         if let Some(r) = r.first() {
             return Ok((super::worker::num_at(r, 0).unwrap_or(0), identity_of(r, 1, d)));
@@ -556,6 +558,7 @@ pub fn target_matches(t: &KillTarget, user: &str, host: &str, info: &str) -> boo
 /// KILL QUERY or KILL on a connection of its own (a busy or exhausted pool never blocks it), after checking on
 /// that same connection that it reached the same server and that the thread is still the one the list showed.
 async fn kill_checked(db: &Db, t: &KillTarget, whole: bool, read_only: bool) -> Res<String> {
+    db.mysql_only()?;
     // The window hides Kill on a locked connection; this keeps a stale or forged request from getting through.
     if read_only {
         return Err("Kill is locked on this connection. Unlock writes first.".into());

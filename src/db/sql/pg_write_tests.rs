@@ -3,7 +3,7 @@
 
 use super::exec::Cells;
 use super::testing::{every_pg, LivePg};
-use super::value::{parse_edit_for, Kind};
+use super::value::{parse_edit, Kind};
 use super::write::{NewRow, RowEdit, SqlUndo, CONFLICT, SEVERAL};
 use super::{Col, Db, Dialect, PageQuery};
 use crate::db::{Msg, Res, UndoAction, UndoKind};
@@ -127,7 +127,7 @@ fn every_kind_updates_and_sets_null() {
         ];
         for (col, text, want) in steps {
             let old = t.row("t", "id", 1).get(col).cloned().unwrap();
-            let new = parse_edit_for(Dialect::Postgres, kind_of(&cols, col), text).unwrap_or_else(|x| panic!("{var} {col}: {x}"));
+            let new = parse_edit(Dialect::Postgres, kind_of(&cols, col), text).unwrap_or_else(|x| panic!("{var} {col}: {x}"));
             let (res, undo) = t.save("t", &cols, &["id"], vec![RowEdit { pk: key.clone(), changes: vec![(col.into(), old.clone(), new)] }], false);
             assert!(res.is_ok(), "{var} {col}: {res:?}");
             assert_eq!(t.row("t", "id", 1).get(col), Some(&want), "{var} {col}");

@@ -324,7 +324,7 @@ impl Relay {
                             cut = true;
                             break;
                         }
-                        let d: Document = cols.iter().enumerate().map(|(i, c)| (c.name.clone(), cell(value::to_bson_for(Cells::pg(&row), c.kind, raw(&row, i))))).collect();
+                        let d: Document = cols.iter().enumerate().map(|(i, c)| (c.name.clone(), cell(value::to_bson(row.dialect(), c.kind, raw(&row, i))))).collect();
                         rows.push(Bson::Document(d).into_relaxed_extjson());
                     }
                     // A CALL has several results; the first one with rows is what the script gets.

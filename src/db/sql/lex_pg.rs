@@ -2,7 +2,7 @@
 //! This is the first of three layers (the session default and a rolled back READ ONLY transaction are the
 //! others), so it refuses whatever it cannot read with certainty.
 
-use super::{is, punct, Code, Tok, REFUSED};
+use super::{is, punct, quote_end, Code, Tok, REFUSED};
 use std::ops::Range;
 
 fn ident_start(c: u8) -> bool {
@@ -11,27 +11,6 @@ fn ident_start(c: u8) -> bool {
 
 fn ident_cont(c: u8) -> bool {
     ident_start(c) || c.is_ascii_digit() || c == b'$'
-}
-
-/// Index just past the closing quote of the quoted text that opens at `i`, with the quote doubled as the only
-/// way to hold it, or a backslash that takes the next char with it when `esc` is set.
-fn quote_end(b: &[u8], i: usize, esc: bool) -> usize {
-    let (n, c) = (b.len(), b[i]);
-    let mut i = i + 1;
-    while i < n {
-        if b[i] == b'\\' && esc {
-            i += 2;
-        } else if b[i] == c {
-            if b.get(i + 1) == Some(&c) {
-                i += 2;
-            } else {
-                return i + 1;
-            }
-        } else {
-            i += 1;
-        }
-    }
-    n
 }
 
 /// Splits PostgreSQL text into tokens that cover it completely. `plain_backslash` is the reading where

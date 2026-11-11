@@ -199,7 +199,7 @@ pub(crate) async fn run_shell(req: u64, job: &ShellJob, send: &(impl Fn(Msg) + S
                 }
                 Some("sql") => {
                     let conn = s("conn");
-                    let params = sql_args(v.get("params"), job.sql.iter().any(|(n, c)| *n == conn && c.db.dialect == sql::Dialect::Postgres));
+                    let params = sql_args(v.get("params"), job.sql.iter().find(|(n, _)| *n == conn).map_or(sql::Dialect::MySql, |(_, c)| c.db.dialect));
                     let text = s("text");
                     let t = Instant::now();
                     let res = async {
@@ -328,10 +328,10 @@ fn sql_params(v: Option<&serde_json::Value>) -> Res<Vec<sql::value::Param>> {
 
 /// `sql_params` for the relay: on PostgreSQL a `{ "$bool": true }` object is a boolean, which only that runner sends. On
 /// MySQL the same JSON is an ordinary value and keeps the reading it always had.
-fn sql_args(v: Option<&serde_json::Value>, pg: bool) -> Res<Vec<sql::Arg>> {
+fn sql_args(v: Option<&serde_json::Value>, d: sql::Dialect) -> Res<Vec<sql::Arg>> {
     let Some(serde_json::Value::Array(a)) = v else { return Ok(Vec::new()) };
     a.iter()
-        .map(|x| match x.as_object().filter(|o| pg && o.len() == 1).and_then(|o| o.get("$bool")) {
+        .map(|x| match x.as_object().filter(|o| d == sql::Dialect::Postgres && o.len() == 1).and_then(|o| o.get("$bool")) {
             Some(serde_json::Value::Bool(b)) => Ok(sql::Arg::Bool(*b)),
             _ => sql_param(x).map(sql::Arg::Val),
         })
@@ -585,9 +585,9 @@ mod tests {
     #[test]
     fn the_bool_marker_is_read_on_postgres_only() {
         let v = serde_json::json!([{ "$bool": true }, 3]);
-        assert_eq!(sql_args(Some(&v), true).unwrap()[0], sql::Arg::Bool(true));
+        assert_eq!(sql_args(Some(&v), sql::Dialect::Postgres).unwrap()[0], sql::Arg::Bool(true));
         // On MySQL the same object is a plain value, as it was before PostgreSQL support.
-        assert_eq!(sql_args(Some(&v), false).unwrap()[0], sql::Arg::Val(sql_param(&v[0]).unwrap()));
+        assert_eq!(sql_args(Some(&v), sql::Dialect::MySql).unwrap()[0], sql::Arg::Val(sql_param(&v[0]).unwrap()));
     }
 
     #[test]

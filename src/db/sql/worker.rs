@@ -274,7 +274,7 @@ pub(super) fn make_cols_kinds<C: ColMeta>(cols: &[C], meta: &HashMap<String, (St
 }
 
 pub(super) fn to_row<R: Cells>(cols: &[Col], row: &R, pk: &[String]) -> Res<Row> {
-    let vals: Vec<Bson> = cols.iter().enumerate().map(|(i, c)| value::to_bson_for(row.pg(), c.kind, raw(row, i))).collect();
+    let vals: Vec<Bson> = cols.iter().enumerate().map(|(i, c)| value::to_bson(row.dialect(), c.kind, raw(row, i))).collect();
     let mut d = Document::new();
     // The key is looked up by the server's column names, since a renamed column keeps its real name there.
     // A key with a missing column would address too many rows, so then there is no key at all.

@@ -141,14 +141,14 @@ impl Db {
     /// Preparing runs nothing, so no transaction is needed.
     pub(super) async fn describe_text(&self, sql: &str) -> Res<Vec<ColInfo>> {
         match &self.pool {
-            Pool::My(p) => Ok(col_infos((&*p).describe(sql).await.map_err(se)?.columns(), false)),
+            Pool::My(p) => Ok(col_infos((&*p).describe(sql).await.map_err(se)?.columns(), self.dialect)),
             Pool::Pg(_) => {
                 // Planning with EXPLAIN can evaluate STABLE and IMMUTABLE functions of the text, so it runs inside a
                 // read-only transaction that is rolled back, like every other statement that carries user text.
                 let mut conn = self.pg_pool()?.acquire().await.map_err(se)?;
                 let d = in_read_only(&mut conn, self, "", async |tx| tx.describe(sql).await).await;
                 conn.close_on_drop();
-                Ok(col_infos(d.map_err(se)?.columns(), true))
+                Ok(col_infos(d.map_err(se)?.columns(), Dialect::Postgres))
             }
         }
     }

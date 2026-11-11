@@ -287,7 +287,7 @@ impl App {
             Some(true) => {
                 let kind = self.t().and_then(|t| t.sql.as_ref()).and_then(|s| s.cols.iter().find(|c| c.name == e.col)).map_or(Kind::Text, |c| c.kind);
                 let row = self.t().and_then(|t| (0..t.docs.len()).find(|&j| Rows::Raw(&t.docs).id(j) == e.id));
-                match value::parse_edit_for(self.sql_dialect(), kind, &e.text) {
+                match value::parse_edit(self.sql_dialect(), kind, &e.text) {
                     Ok(_) if row.is_none() => self.warn("That row is no longer in the table, so the edit was cancelled."),
                     Ok(v) => self.sql_set_cell(row.unwrap_or_default(), &e.col, v),
                     Err(m) => {
@@ -544,7 +544,7 @@ impl App {
                     match fld.mode {
                         Mode::Default => {}
                         Mode::Null => row.push((fld.col.name.clone(), Bson::Null)),
-                        Mode::Value => match value::parse_edit_for(dialect, fld.col.kind, &fld.text) {
+                        Mode::Value => match value::parse_edit(dialect, fld.col.kind, &fld.text) {
                             Ok(v) => row.push((fld.col.name.clone(), v)),
                             Err(m) => {
                                 bad = Some(format!("{}: {m}", fld.col.name));
@@ -707,7 +707,7 @@ impl App {
             });
             ui.end_row();
         });
-        let parsed = if f.null { Ok(Bson::Null) } else if col.kind == Kind::Enum { Ok(Bson::String(f.text.clone())) } else { value::parse_edit_for(d, col.kind, &f.text) };
+        let parsed = if f.null { Ok(Bson::Null) } else if col.kind == Kind::Enum { Ok(Bson::String(f.text.clone())) } else { value::parse_edit(d, col.kind, &f.text) };
         ui.add_space(4.0);
         ui.label(RichText::new(format!("Staged as {n} cell edit{}. Nothing runs until Save, and Undo reverts them together.", if n == 1 { "" } else { "s" })).size(TXT_SMALL).color(FAINT()));
         ui.add_space(6.0);
@@ -863,6 +863,7 @@ const STAGED_H: f32 = 40.0;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::sql::Dialect;
 
     #[test]
     fn enum_options_are_read_from_the_type() {
@@ -875,9 +876,9 @@ mod tests {
     #[test]
     fn edit_text_round_trips_through_parse_edit() {
         for (k, v) in [(Kind::Int, Bson::Int64(-5)), (Kind::Decimal, Bson::String("12.50".into())), (Kind::Text, Bson::String("a b".into())), (Kind::Binary, Bson::Binary(mongodb::bson::Binary { subtype: mongodb::bson::spec::BinarySubtype::Generic, bytes: vec![1, 2] }))] {
-            assert_eq!(value::parse_edit(k, &edit_text(&v)), Ok(v.clone()), "{k:?}");
+            assert_eq!(value::parse_edit(Dialect::MySql, k, &edit_text(&v)), Ok(v.clone()), "{k:?}");
         }
-        assert_eq!(value::parse_edit(Kind::Int, &edit_text(&Bson::Null)), Ok(Bson::Null));
+        assert_eq!(value::parse_edit(Dialect::MySql, Kind::Int, &edit_text(&Bson::Null)), Ok(Bson::Null));
     }
 
     #[test]

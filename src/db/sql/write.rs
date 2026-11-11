@@ -507,7 +507,7 @@ async fn apply_inserts_pg(db: &Db, schema: &str, table: &str, cols: &[Col], pk: 
         if let Some(got) = r.first() {
             for (i, p) in pk.iter().enumerate() {
                 if let Some(raw) = got.cell(i) {
-                    key.insert(p.clone(), super::value::to_bson_for(true, kind_of_src(cols, p), Some(raw)));
+                    key.insert(p.clone(), super::value::to_bson(db.dialect, kind_of_src(cols, p), Some(raw)));
                 }
             }
         }

@@ -516,7 +516,7 @@ impl App {
         let cols: Vec<Col> = v["cols"].as_array().into_iter().flatten().map(|c| { let ty = c["ty"].as_str().unwrap_or("TEXT"); Col::plain(c["name"].as_str().unwrap_or(""), ty, Kind::from_column_type(ty), true) }).collect();
         let query = std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("query");
         let rows: Vec<db::Row> = v["rows"].as_array().into_iter().flatten().filter_map(|r| {
-            let vals: Vec<Bson> = cols.iter().zip(r.as_array()?).map(|(c, x)| db::sql::value::to_bson(c.kind, x.as_str().map(str::as_bytes))).collect();
+            let vals: Vec<Bson> = cols.iter().zip(r.as_array()?).map(|(c, x)| db::sql::value::to_bson(db::sql::Dialect::MySql, c.kind, x.as_str().map(str::as_bytes))).collect();
             let mut d = Document::new();
             if !query { d.insert("_id", doc! { cols[0].name.clone(): vals[0].clone() }); }
             for (c, x) in cols.iter().zip(vals) { d.insert(c.name.clone(), x); }

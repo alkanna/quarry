@@ -466,7 +466,7 @@ async fn pg_finish(db: &Db, schema: &str, table: &str, kind: &str, st: &mut Stru
     // from holding the view up, and a foreign table is somebody else's server.
     if st.status.rows.is_none() && matches!(kind, "r" | "p" | "m") {
         let sql = format!("SELECT count(*)::text FROM {}", d.qualified(schema, table));
-        if let Ok(rows) = db.read_text_with(schema, "SET LOCAL statement_timeout = '5s'", &sql, false).await {
+        if let Ok(rows) = db.read_text_with(schema, &super::pg::set_timeout("5s"), &sql, false).await {
             st.status.rows = rows.first().and_then(|r| super::worker::num_at(r, 0));
         }
     }

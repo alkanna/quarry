@@ -122,20 +122,20 @@ fn split_account(s: &str) -> (String, String) {
     }
 }
 
-fn account_query(d: Dialect, joined: bool) -> &'static str {
-    match (d, joined) {
-        (Dialect::Postgres, _) => unreachable!("accounts are MySQL family only"),
+fn account_query(d: Dialect, joined: bool) -> Res<&'static str> {
+    Ok(match (d, joined) {
+        (Dialect::Postgres, _) => return Err(super::pg::NOT_YET.into()),
         (Dialect::MySql, _) => "SELECT User AS u, Host AS h, account_locked AS locked, password_expired AS expired, plugin, 'N' AS is_role FROM mysql.user ORDER BY User, Host",
         // The lock lives only in the JSON of global_priv, which a plain mysql.user view does not show.
         (Dialect::MariaDb, true) => "SELECT u.User AS u, u.Host AS h, IFNULL(JSON_VALUE(g.Priv, '$.account_locked'), 'false') AS locked, u.password_expired AS expired, u.plugin AS plugin, u.is_role AS is_role FROM mysql.user u LEFT JOIN mysql.global_priv g ON g.User = u.User AND g.Host = u.Host ORDER BY u.User, u.Host",
         (Dialect::MariaDb, false) => "SELECT User AS u, Host AS h, 'false' AS locked, password_expired AS expired, plugin, is_role FROM mysql.user ORDER BY User, Host",
-    }
+    })
 }
 
 async fn read_accounts(c: &mut sqlx::MySqlConnection, d: Dialect) -> Res<Vec<Account>> {
     let mut last = None;
     for joined in [true, false] {
-        match sqlx::query(account_query(d, joined)).persistent(false).fetch_all(&mut *c).await {
+        match sqlx::query(account_query(d, joined)?).persistent(false).fetch_all(&mut *c).await {
             Ok(rows) => {
                 let yes = |v: Option<String>| v.is_some_and(|v| matches!(v.to_ascii_uppercase().as_str(), "Y" | "TRUE" | "1"));
                 return Ok(rows
@@ -161,6 +161,7 @@ async fn read_accounts(c: &mut sqlx::MySqlConnection, d: Dialect) -> Res<Vec<Acc
 }
 
 async fn load_list(db: &Db) -> Res<UserList> {
+    db.mysql_only()?;
     let mut c = db.acquire().await?;
     let current = sqlx::query("SELECT CURRENT_USER() AS who").persistent(false).fetch_one(&mut *c).await.ok().and_then(|r| text(&r, "who")).map(|w| split_account(&w));
     match read_accounts(&mut c, db.dialect).await {
@@ -903,7 +904,7 @@ pub fn default_roles_sql(m: Mode, d: Dialect, acct: &Account, roles: &[String]) 
         (_, None) => None,
         (Dialect::MySql, _) => Some(format!("SET DEFAULT ROLE {} TO {}", lits.join(", "), acct.literal(m.bs))),
         (Dialect::MariaDb, Some(r)) => Some(format!("SET DEFAULT ROLE {r} FOR {}", acct.literal(m.bs))),
-        (Dialect::Postgres, Some(_)) => unreachable!("accounts are MySQL family only"),
+        (Dialect::Postgres, Some(_)) => return Err(super::pg::NOT_YET.into()),
     })
 }
 
@@ -973,20 +974,20 @@ fn lifetime_of(v: Option<&str>) -> Expire {
     }
 }
 
-fn info_query(d: Dialect, joined: bool) -> &'static str {
-    match (d, joined) {
-        (Dialect::Postgres, _) => unreachable!("accounts are MySQL family only"),
+fn info_query(d: Dialect, joined: bool) -> Res<&'static str> {
+    Ok(match (d, joined) {
+        (Dialect::Postgres, _) => return Err(super::pg::NOT_YET.into()),
         // Numbers are cast to text: a prepared statement sends them as binary, which `text` would misread.
         (Dialect::MySql, _) => "SELECT plugin, account_locked AS locked, CAST(password_lifetime AS CHAR) AS lifetime, ssl_type, CONVERT(ssl_cipher USING utf8mb4) AS cipher, CONVERT(x509_issuer USING utf8mb4) AS issuer, CONVERT(x509_subject USING utf8mb4) AS subject, 'N' AS chain, CONCAT_WS('|', password_last_changed, plugin, LEFT(SHA2(authentication_string, 256), 16)) AS ident, CAST(max_questions AS CHAR) AS q, CAST(max_updates AS CHAR) AS u, CAST(max_connections AS CHAR) AS c, CAST(max_user_connections AS CHAR) AS uc FROM mysql.user WHERE User = ? AND Host = ?",
         (Dialect::MariaDb, true) => "SELECT u.plugin AS plugin, IFNULL(JSON_VALUE(g.Priv, '$.account_locked'), 'false') AS locked, JSON_VALUE(g.Priv, '$.password_lifetime') AS lifetime, u.ssl_type AS ssl_type, CONVERT(u.ssl_cipher USING utf8mb4) AS cipher, CONVERT(u.x509_issuer USING utf8mb4) AS issuer, CONVERT(u.x509_subject USING utf8mb4) AS subject, IF(JSON_QUERY(g.Priv, '$.auth_or') IS NULL, 'N', 'Y') AS chain, CONCAT_WS('|', u.plugin, LEFT(SHA2(u.authentication_string, 256), 16)) AS ident, CAST(u.max_questions AS CHAR) AS q, CAST(u.max_updates AS CHAR) AS u, CAST(u.max_connections AS CHAR) AS c, CAST(u.max_user_connections AS CHAR) AS uc FROM mysql.user u LEFT JOIN mysql.global_priv g ON g.User = u.User AND g.Host = u.Host WHERE u.User = ? AND u.Host = ?",
         (Dialect::MariaDb, false) => "SELECT plugin, 'false' AS locked, NULL AS lifetime, ssl_type, CONVERT(ssl_cipher USING utf8mb4) AS cipher, CONVERT(x509_issuer USING utf8mb4) AS issuer, CONVERT(x509_subject USING utf8mb4) AS subject, 'N' AS chain, CONCAT_WS('|', plugin, LEFT(SHA2(authentication_string, 256), 16)) AS ident, CAST(max_questions AS CHAR) AS q, CAST(max_updates AS CHAR) AS u, CAST(max_connections AS CHAR) AS c, CAST(max_user_connections AS CHAR) AS uc FROM mysql.user WHERE User = ? AND Host = ?",
-    }
+    })
 }
 
 async fn read_info(c: &mut sqlx::MySqlConnection, d: Dialect, acct: &Account) -> Res<AccountInfo> {
     let mut last = String::new();
     for joined in [true, false] {
-        match sqlx::query(info_query(d, joined)).bind(&acct.user).bind(&acct.host).persistent(false).fetch_optional(&mut *c).await {
+        match sqlx::query(info_query(d, joined)?).bind(&acct.user).bind(&acct.host).persistent(false).fetch_optional(&mut *c).await {
             Ok(Some(r)) => {
                 let n = |k: &str| text(&r, k).and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0);
                 let tls = match text(&r, "ssl_type").unwrap_or_default().to_ascii_uppercase().as_str() {
@@ -1160,7 +1161,8 @@ async fn default_roles(c: &mut sqlx::MySqlConnection, d: Dialect, acct: &Account
     let sql = match d {
         Dialect::MySql => "SELECT CONCAT(DEFAULT_ROLE_USER, '@', DEFAULT_ROLE_HOST) AS r FROM mysql.default_roles WHERE USER = ? AND HOST = ?",
         Dialect::MariaDb => "SELECT default_role AS r FROM mysql.user WHERE User = ? AND Host = ?",
-        Dialect::Postgres => unreachable!("accounts are MySQL family only"),
+        // Accounts exist only on the MySQL family, so there is nothing to read.
+        Dialect::Postgres => return Vec::new(),
     };
     match sqlx::query(sql).bind(&acct.user).bind(&acct.host).persistent(false).fetch_all(&mut *c).await {
         Ok(rows) => rows.iter().filter_map(|r| text(r, "r")).filter(|r| !r.is_empty()).collect(),
@@ -1284,6 +1286,7 @@ impl Worker {
     pub fn sql_user_grants(&self, conn: u64, req: u64, db: Db, acct: Account) {
         self.spawn(async move {
             let res = async {
+                db.mysql_only()?;
                 let mut c = db.acquire().await?;
                 let m = session_mode(&mut c).await?;
                 let grants = grants_of(&mut c, m, &acct).await?;
@@ -1308,6 +1311,7 @@ impl Worker {
         self.spawn_sql(db.conn, "", async move {
             let mut undo = None;
             let res: Res<String> = async {
+                db.mysql_only()?;
                 let mut c = writer_conn(&db, "", read_only).await?.into_my()?;
                 let out = async {
                     let m = session_mode(&mut c).await?;
@@ -1345,6 +1349,7 @@ impl Worker {
             let mut undo = None;
             let res: Res<String> = async {
                 check_new_user(&acct.user, &acct.host, &password)?;
+                db.mysql_only()?;
                 let mut c = writer_conn(&db, "", read_only).await?.into_my()?;
                 let out = async {
                     let m = session_mode(&mut c).await?;
@@ -1367,6 +1372,7 @@ impl Worker {
         self.spawn_sql(db.conn, "", async move {
             let res: Res<String> = async {
                 check_password(&password)?;
+                db.mysql_only()?;
                 let mut c = writer_conn(&db, "", read_only).await?.into_my()?;
                 let out = async {
                     let m = session_mode(&mut c).await?;
@@ -1398,6 +1404,7 @@ impl Worker {
             let mut cur = acct.clone();
             let mut renamed = false;
             let res: Res<String> = async {
+                db.mysql_only()?;
                 let mut c = writer_conn(&db, "", read_only).await?.into_my()?;
                 let out = run_plan(&mut c, &db, conn, &acct, &plan, &mut cur, &mut renamed, &mut undo).await;
                 let _ = c.close().await;
@@ -1412,6 +1419,7 @@ impl Worker {
     pub fn sql_user_drop(&self, conn: u64, db: Db, acct: Account, read_only: bool) {
         self.spawn_sql(db.conn, "", async move {
             let res: Res<String> = async {
+                db.mysql_only()?;
                 let mut c = writer_conn(&db, "", read_only).await?.into_my()?;
                 let out = async {
                     let m = session_mode(&mut c).await?;
@@ -1435,6 +1443,7 @@ pub(super) async fn undo(db: &Db, a: UndoAction, u: AccountUndo, read_only: bool
     // Whether the undo ran something before it stopped; an entry that changed nothing stays in the list.
     let mut ran_any = false;
     let res: Res<String> = async {
+        db.mysql_only()?;
         let mut c = writer_conn(db, "", read_only).await?.into_my()?;
         let out = async {
             let m = session_mode(&mut c).await?;

@@ -38,19 +38,19 @@ struct Opts {
     /// Executable comments are skipped like plain ones, as when their version is above the server's
     /// (and MySQL treats `/*M!` as a plain comment).
     skip_exec: bool,
-    /// PostgreSQL text. `backslash` then means a plain '...' honours backslashes (standard_conforming_strings off).
-    pg: bool,
+    /// With PostgreSQL text, `backslash` means a plain '...' honours backslashes (standard_conforming_strings off).
+    dialect: Dialect,
 }
 
-const DEFAULT: Opts = Opts { backslash: true, ansi: false, skip_exec: false, pg: false };
-const DEFAULT_PG: Opts = Opts { backslash: false, ansi: false, skip_exec: false, pg: true };
+const DEFAULT: Opts = Opts { backslash: true, ansi: false, skip_exec: false, dialect: Dialect::MySql };
+const DEFAULT_PG: Opts = Opts { backslash: false, ansi: false, skip_exec: false, dialect: Dialect::Postgres };
 
 fn default_for(d: Dialect) -> Opts {
     if d == Dialect::Postgres { DEFAULT_PG } else { DEFAULT }
 }
 
 fn opts(d: Dialect, backslash: bool, ansi: bool) -> Opts {
-    Opts { backslash, ansi, skip_exec: false, pg: d == Dialect::Postgres }
+    Opts { backslash, ansi, skip_exec: false, dialect: d }
 }
 
 /// Index just past the closing quote of the quoted text that opens at `i`. Unterminated text runs
@@ -86,7 +86,7 @@ pub fn tokens(text: &str, d: Dialect) -> Vec<(Tok, Range<usize>)> {
 }
 
 fn lex(text: &str, o: Opts) -> Vec<(Tok, Range<usize>)> {
-    if o.pg {
+    if o.dialect == Dialect::Postgres {
         return pg::lex(text, o.backslash);
     }
     let b = text.as_bytes();
@@ -212,7 +212,7 @@ pub fn split_statements(text: &str, d: Dialect) -> Vec<(Range<usize>, &str)> {
 /// rules reads it. The worker compares two readings, because a text that reads differently is not safe to fill.
 pub fn placeholders(text: &str, d: Dialect, backslash: bool, ansi: bool) -> (Vec<usize>, usize) {
     let o = opts(d, backslash, ansi);
-    let at = lex(text, o).into_iter().filter(|(t, r)| if o.pg { *t == Tok::Word && pg::param_number(&text[r.clone()]).is_some() } else { *t == Tok::Punct && &text[r.clone()] == "?" }).map(|(_, r)| r.start).collect();
+    let at = lex(text, o).into_iter().filter(|(t, r)| if o.dialect == Dialect::Postgres { *t == Tok::Word && pg::param_number(&text[r.clone()]).is_some() } else { *t == Tok::Punct && &text[r.clone()] == "?" }).map(|(_, r)| r.start).collect();
     (at, split_with(text, o).len())
 }
 
@@ -245,7 +245,7 @@ pub fn nth_reading(text: &str, d: Dialect, n: usize) -> Vec<(Tok, Range<usize>)>
     if d == Dialect::Postgres {
         return lex(text, Opts { backslash: n & 1 != 0, ..DEFAULT_PG });
     }
-    lex(text, Opts { backslash: n & 4 == 0, ansi: n & 2 != 0, skip_exec: n & 1 != 0, pg: false })
+    lex(text, Opts { backslash: n & 4 == 0, ansi: n & 2 != 0, skip_exec: n & 1 != 0, dialect: Dialect::MySql })
 }
 
 /// The database a `USE name` switches to, with the name unquoted.
@@ -391,7 +391,7 @@ pub fn read_only_check(stmt: &str, d: Dialect) -> Result<(), String> {
     for skip_exec in [false, true] {
         for ansi in [false, true] {
             for backslash in [true, false] {
-                let code: Vec<Code> = lex(stmt, Opts { backslash, ansi, skip_exec, pg: false }).into_iter().filter(|(t, _)| matches!(t, Tok::Word | Tok::Quoted | Tok::Str | Tok::Punct)).map(|(t, r)| (t, &stmt[r])).collect();
+                let code: Vec<Code> = lex(stmt, Opts { backslash, ansi, skip_exec, dialect: Dialect::MySql }).into_iter().filter(|(t, _)| matches!(t, Tok::Word | Tok::Quoted | Tok::Str | Tok::Punct)).map(|(t, r)| (t, &stmt[r])).collect();
                 code.split(|t| punct(t, ";")).try_for_each(check_one)?;
             }
         }
@@ -409,7 +409,7 @@ pub fn uses_prepared(stmt: &str, d: Dialect) -> bool {
     for skip_exec in [false, true] {
         for ansi in [false, true] {
             for backslash in [true, false] {
-                let code: Vec<Code> = lex(stmt, Opts { backslash, ansi, skip_exec, pg: false }).into_iter().filter(|(t, _)| matches!(t, Tok::Word | Tok::Quoted | Tok::Str | Tok::Punct)).map(|(t, r)| (t, &stmt[r])).collect();
+                let code: Vec<Code> = lex(stmt, Opts { backslash, ansi, skip_exec, dialect: Dialect::MySql }).into_iter().filter(|(t, _)| matches!(t, Tok::Word | Tok::Quoted | Tok::Str | Tok::Punct)).map(|(t, r)| (t, &stmt[r])).collect();
                 if code.split(|t| punct(t, ";")).any(|part| part.first().is_some_and(|t| is(t, "PREPARE") || is(t, "EXECUTE") || is(t, "DEALLOCATE"))) {
                     return true;
                 }
@@ -431,7 +431,7 @@ pub fn changes_escaping(stmt: &str, d: Dialect) -> bool {
     for skip_exec in [false, true] {
         for ansi in [false, true] {
             for backslash in [true, false] {
-                let code: Vec<Code> = lex(stmt, Opts { backslash, ansi, skip_exec, pg: false }).into_iter().filter(|(t, _)| matches!(t, Tok::Word | Tok::Quoted | Tok::Str | Tok::Punct)).map(|(t, r)| (t, &stmt[r])).collect();
+                let code: Vec<Code> = lex(stmt, Opts { backslash, ansi, skip_exec, dialect: Dialect::MySql }).into_iter().filter(|(t, _)| matches!(t, Tok::Word | Tok::Quoted | Tok::Str | Tok::Punct)).map(|(t, r)| (t, &stmt[r])).collect();
                 for part in code.split(|t| punct(t, ";")) {
                     if !part.first().is_some_and(|t| is(t, "SET")) {
                         continue;

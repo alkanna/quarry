@@ -8,7 +8,7 @@
 
 use super::se;
 use super::value::{Kind, Param};
-use super::{Db, Pool};
+use super::{Db, Dialect, Pool};
 use crate::db::Res;
 use futures_util::stream::BoxStream;
 use futures_util::StreamExt;
@@ -44,8 +44,8 @@ pub enum Item {
 pub struct ColInfo {
     pub name: String,
     pub ty: String,
-    /// The column came from a PostgreSQL server, whose type names are not MySQL's.
-    pub pg: bool,
+    /// The engine it came from, whose type names differ. `MySql` stands for the whole MySQL family.
+    pub dialect: Dialect,
 }
 
 /// What `make_cols` needs of a result column, so rows read through sqlx directly (the MySQL-only modules) and
@@ -70,7 +70,7 @@ impl ColMeta for ColInfo {
     }
 
     fn col_kind(&self) -> Kind {
-        if self.pg { Kind::from_pg(&self.ty, "", "") } else { Kind::from_type_name(&self.ty) }
+        if self.dialect == Dialect::Postgres { Kind::from_pg(&self.ty, "", "") } else { Kind::from_type_name(&self.ty) }
     }
 }
 
@@ -119,8 +119,8 @@ impl<T: Cells + ?Sized> Cells for &T {
         (**self).uint(name)
     }
 
-    fn pg(&self) -> bool {
-        (**self).pg()
+    fn dialect(&self) -> Dialect {
+        (**self).dialect()
     }
 }
 
@@ -134,9 +134,10 @@ pub trait Cells {
     fn int(&self, name: &str) -> Option<i64>;
     fn uint(&self, name: &str) -> Option<u64>;
 
-    /// The row is from PostgreSQL, whose text differs from MySQL's for a few types (bytea is hex text).
-    fn pg(&self) -> bool {
-        false
+    /// The engine the row is from, whose text differs for a few types (PostgreSQL's bytea is hex text). A MySQL
+    /// row cannot tell MariaDB apart and says `MySql` for both.
+    fn dialect(&self) -> Dialect {
+        Dialect::MySql
     }
 }
 
@@ -199,8 +200,8 @@ impl Cells for PgRow {
         self.int(name).and_then(|n| u64::try_from(n).ok())
     }
 
-    fn pg(&self) -> bool {
-        true
+    fn dialect(&self) -> Dialect {
+        Dialect::Postgres
     }
 }
 
@@ -210,8 +211,8 @@ pub enum SqlRow {
     Pg(PgRow),
 }
 
-pub(super) fn col_infos<C: Column>(cols: &[C], pg: bool) -> Vec<ColInfo> {
-    cols.iter().map(|c| ColInfo { name: c.name().to_string(), ty: c.type_info().name().to_string(), pg }).collect()
+pub(super) fn col_infos<C: Column>(cols: &[C], dialect: Dialect) -> Vec<ColInfo> {
+    cols.iter().map(|c| ColInfo { name: c.name().to_string(), ty: c.type_info().name().to_string(), dialect }).collect()
 }
 
 impl SqlRow {
@@ -225,8 +226,8 @@ impl SqlRow {
 
     pub fn cols(&self) -> Vec<ColInfo> {
         match self {
-            SqlRow::My(r) => col_infos(r.columns(), false),
-            SqlRow::Pg(r) => col_infos(r.columns(), true),
+            SqlRow::My(r) => col_infos(r.columns(), Dialect::MySql),
+            SqlRow::Pg(r) => col_infos(r.columns(), Dialect::Postgres),
         }
     }
 }
@@ -267,8 +268,11 @@ impl Cells for SqlRow {
         }
     }
 
-    fn pg(&self) -> bool {
-        matches!(self, SqlRow::Pg(_))
+    fn dialect(&self) -> Dialect {
+        match self {
+            SqlRow::My(_) => Dialect::MySql,
+            SqlRow::Pg(_) => Dialect::Postgres,
+        }
     }
 }
 
@@ -380,8 +384,8 @@ impl Conn {
     /// The columns a statement would return, without running it. Empty for a write.
     pub async fn describe(&mut self, sql: &str) -> Result<Vec<ColInfo>, sqlx::Error> {
         match self {
-            Conn::My(c) => Ok(col_infos(c.describe(sql).await?.columns(), false)),
-            Conn::Pg(c) => Ok(col_infos(c.describe(sql).await?.columns(), true)),
+            Conn::My(c) => Ok(col_infos(c.describe(sql).await?.columns(), Dialect::MySql)),
+            Conn::Pg(c) => Ok(col_infos(c.describe(sql).await?.columns(), Dialect::Postgres)),
         }
     }
 
@@ -537,6 +541,12 @@ impl Db {
             self.note(schema, &sql, t, &res);
             res.map_err(se)
         }
+    }
+
+    /// The gate at the entry of every worker call of a module that only exists for MySQL and MariaDB (accounts, the
+    /// server window), so nothing below it has to be written for PostgreSQL.
+    pub(super) fn mysql_only(&self) -> Res<()> {
+        if self.dialect.is_mysql_family() { Ok(()) } else { Err(super::pg::NOT_YET.into()) }
     }
 
     /// The MySQL pool, for the modules that only exist for MySQL.
