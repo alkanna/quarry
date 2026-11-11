@@ -340,10 +340,32 @@ pub fn session_state(stmt: &str, d: Dialect) -> bool {
         "SET" => !matches!(at(1), "LOCAL" | "TRANSACTION" | "CONSTRAINTS" | "CONSTRAINT"),
         "RESET" | "DISCARD" | "LISTEN" | "UNLISTEN" | "PREPARE" | "DEALLOCATE" | "LOAD" => true,
         "DECLARE" => words.windows(2).any(|w| w[0] == "WITH" && w[1] == "HOLD"),
+        // A DO block is code the lexer cannot read: it can take an advisory lock or make a temporary table.
+        "DO" => !quarry_guard_block(stmt),
         "CREATE" => matches!(at(1), "TEMP" | "TEMPORARY") || (matches!(at(1), "LOCAL" | "GLOBAL") && matches!(at(2), "TEMP" | "TEMPORARY")),
         _ => false,
     };
-    first || words.iter().any(|w| w == "SET_CONFIG") || words.windows(2).any(|w| w[0] == "INTO" && matches!(w[1].as_str(), "TEMP" | "TEMPORARY")) || pg::session_function(stmt)
+    // Anything made in pg_temp (CREATE, SELECT INTO, CREATE TABLE AS, a function) stays on the backend, so the name is
+    // refused wherever it appears in the statement, not only after a leading CREATE.
+    let temp_schema = words.iter().any(|w| w == "PG_TEMP" || w.starts_with("PG_TEMP_"));
+    first || temp_schema || words.iter().any(|w| w == "SET_CONFIG") || words.windows(2).any(|w| w[0] == "INTO" && matches!(w[1].as_str(), "TEMP" | "TEMPORARY")) || pg::session_function(stmt)
+}
+
+/// The one DO block Quarry writes itself in a dump of some tables: a single CREATE TYPE, CREATE DOMAIN or ALTER DOMAIN
+/// that ignores "already exists". It is let through behind a pooler, and only when what is inside passes every check
+/// again, because any other DO block can do what the checks refuse.
+fn quarry_guard_block(stmt: &str) -> bool {
+    const HEAD: &str = "BEGIN ";
+    const TAIL: &str = "; EXCEPTION WHEN duplicate_object THEN NULL; END";
+    let toks: Vec<(Tok, &str)> = tokens(stmt, Dialect::Postgres).into_iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment)).map(|(t, r)| (t, &stmt[r])).collect();
+    let [(Tok::Word, _), (Tok::Str, body)] = toks.as_slice() else { return false };
+    let Some(tag_end) = body.strip_prefix('$').and_then(|r| r.find('$')).map(|i| i + 2) else { return false };
+    let tag = &body[..tag_end];
+    let Some(inner) = body[tag_end..].strip_suffix(tag) else { return false };
+    let Some(mid) = inner.strip_prefix(HEAD).and_then(|m| m.strip_suffix(TAIL)) else { return false };
+    let w: Vec<String> = tokens(mid, Dialect::Postgres).into_iter().filter(|(t, r)| *t == Tok::Word || (*t == Tok::Punct && &mid[r.clone()] == ";")).map(|(_, r)| mid[r].to_ascii_uppercase()).collect();
+    let shape = matches!((w.first().map(String::as_str), w.get(1).map(String::as_str)), (Some("CREATE"), Some("TYPE" | "DOMAIN")) | (Some("ALTER"), Some("DOMAIN")));
+    shape && !w.iter().any(|x| x == ";") && !session_state(mid, Dialect::Postgres)
 }
 
 /// Whether a PostgreSQL statement is one the server refuses inside a transaction block. Behind a pooler every statement

@@ -7,6 +7,7 @@
 
 mod mongo_edit;
 mod sidebar;
+mod sql_dump;
 mod sql_edit;
 mod sql_import;
 mod sql_relations;

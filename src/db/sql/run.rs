@@ -179,7 +179,7 @@ pub(super) async fn run_stmt(conn: &mut Conn, d: super::Dialect, stmt: &str, pag
 /// Why a script ends after a statement whose connection cannot be reused.
 const CUT: &str = "Not run: the previous result was cut at the row limit";
 const DEAD: &str = "Not run: the connection could not end the transaction of the previous statement";
-pub(super) const POOLER_SESSION: &str = "Behind a connection pooler this statement would leave state on a server connection other clients share (a session SET, set_config, a temporary table, a named prepared statement, a held cursor or LISTEN). Use SET LOCAL, or connect without the pooler.";
+pub(super) const POOLER_SESSION: &str = "Behind a connection pooler this statement would leave state on a server connection other clients share (a session SET, set_config, a temporary table or anything in pg_temp, a DO block, a named prepared statement, a held cursor or LISTEN). Use SET LOCAL, or connect without the pooler.";
 pub(super) const POOLER_TX: &str = "Transactions you open yourself are not available behind a connection pooler; each statement runs in its own transaction.";
 pub(super) const POOLER_NO_TX: &str = "Behind a connection pooler each statement runs in its own transaction, and the server refuses this statement inside one (VACUUM, CONCURRENTLY, CREATE or DROP DATABASE, ALTER SYSTEM and similar), so it cannot run here. Connect without the pooler to run it.";
 /// Behind a pooler Stop cannot cancel by pid, because the backend may be serving another client by then.

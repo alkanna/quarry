@@ -50,7 +50,7 @@ pub struct DumpPlan {
 }
 
 /// An INSERT stops growing at this much text, so a table of large cells stays under max_allowed_packet.
-const INSERT_BYTES: usize = 1 << 20;
+pub(super) const INSERT_BYTES: usize = 1 << 20;
 /// The mode every dump runs under: backslash escapes on and no ANSI quotes, which is what the values are written for.
 const DUMP_MODE: &str = "NO_AUTO_VALUE_ON_ZERO";
 
@@ -58,7 +58,7 @@ fn io(x: std::io::Error) -> String {
     format!("Could not write: {x}")
 }
 
-fn put(out: &mut dyn Write, s: &str) -> Res<()> {
+pub(super) fn put(out: &mut dyn Write, s: &str) -> Res<()> {
     out.write_all(s.as_bytes()).map_err(io)
 }
 
@@ -70,7 +70,7 @@ fn lit(s: &str) -> String {
 /// A name as it is written in a `--` comment line. A line break in a name would end the comment and turn the
 /// rest of the name into a statement when the file is run (the class of CVE-2016-5483), so every control
 /// character becomes a space.
-fn note(s: &str) -> String {
+pub(super) fn note(s: &str) -> String {
     s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
 }
 
@@ -104,7 +104,7 @@ fn numeric(k: Kind) -> bool {
     matches!(k, Kind::Int | Kind::UInt | Kind::Float | Kind::Decimal)
 }
 
-fn stopped(cancel: &AtomicBool) -> Res<()> {
+pub(super) fn stopped(cancel: &AtomicBool) -> Res<()> {
     if cancel.load(Ordering::SeqCst) { Err("Export cancelled".into()) } else { Ok(()) }
 }
 
@@ -240,6 +240,9 @@ fn delimited(sql_mode: Option<&str>, stmt: &str) -> String {
 
 /// Runs the whole dump on a read-only connection of its own.
 pub async fn dump(db: &Db, plan: &DumpPlan, out: &mut (dyn Write + Send), count: &AtomicU64, cancel: &AtomicBool, id: &AtomicU64) -> Res<u64> {
+    if db.dialect == Dialect::Postgres {
+        return super::pg_dump::dump(db, plan, out, count, cancel, id).await;
+    }
     let d = db.dialect;
     let mut conn = Conn::My(db.acquire().await?.detach());
     super::run::prepare(&mut conn, db, &plan.schema, true, id).await?;
@@ -375,15 +378,16 @@ pub async fn dump_to(db: &Db, plan: &DumpPlan, path: PathBuf, count: &AtomicU64,
 }
 
 /// The statement as the error message shows it.
-fn excerpt(s: &[u8]) -> String {
+pub(super) fn excerpt(s: &[u8]) -> String {
     let s = String::from_utf8_lossy(&s[..s.len().min(2400)]);
     let t: String = s.chars().take(600).collect();
     if s.chars().count() > 600 { format!("{t}...") } else { t }
 }
 
 /// How many statements of a script file the query log lists one by one.
-const FILE_LOGGED: u64 = 20;
+pub(super) const FILE_LOGGED: u64 = 20;
 
+#[derive(Debug)]
 pub struct Ran {
     pub statements: u64,
 }
@@ -393,6 +397,9 @@ pub struct Ran {
 /// with one owned connection: split in two, the compiler cannot prove the future is Send inside a spawned task.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_file(db: Db, schema: String, src: Source, read_only: bool, prog: Arc<Progress>, cancel: Arc<AtomicBool>, id: Arc<AtomicU64>) -> Res<Ran> {
+    if db.dialect == Dialect::Postgres {
+        return super::pg_dump::run_file(db, schema, src, read_only, prog, cancel, id).await;
+    }
     let mut c = writer_conn(&db, &schema, read_only).await?.into_my()?;
     if let Ok(r) = c.fetch_one("SELECT CONNECTION_ID()").await {
         id.store(num_at(&r, 0).unwrap_or(0), Ordering::SeqCst);
