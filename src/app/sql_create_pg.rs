@@ -128,16 +128,37 @@ impl App {
                 (db, s, name)
             }
         };
+        if let Some(why) = self.pg_job_blocks(conn, &database, &schema, kind) {
+            return self.warn(why);
+        }
         if let Some(sql) = self.pg_session(conn) {
-            self.worker.pg_drop_info(conn, sql, database.clone(), schema.clone(), table.clone());
+            self.worker.pg_drop_info(conn, sql, database.clone(), schema.clone(), table.clone(), !self.conn_writable(conn));
         }
         self.modal = Some(Modal::SqlDrop(Box::new(DropForm { conn, database, schema, table, kind, typed: String::new(), opt: false, info: None })));
+    }
+
+    /// Why a drop cannot start: an import, script file or shell of Quarry's own is running in that database (or schema). The server would
+    /// refuse the drop for its connections and blame another session, and WITH (FORCE) would kill the work halfway.
+    /// A script can touch anything in its database, and an import is known by its schema only, so a table drop is held for both.
+    pub(super) fn pg_job_blocks(&self, conn: u64, database: &str, schema: &str, kind: DropKind) -> Option<String> {
+        let job = self.sql_job.as_ref().filter(|j| j.conn == conn && j.db.pg_database() == database).filter(|j| kind == DropKind::Database || j.kind == sql_dump::JobKind::Script || j.schema == schema);
+        let what = match job {
+            Some(j) if j.kind == sql_dump::JobKind::Import => "an import",
+            Some(_) => "a script file",
+            None if self.tabs.iter().any(|t| t.sel.conn == conn && t.sel.db == database && t.shell.cancel.is_some()) => "a shell script",
+            None => return None,
+        };
+        Some(format!("Quarry is running {what} in {database}. Stop it first, then drop."))
     }
 
     /// Runs a confirmed drop. Tabs and sidebar state go when the server says it worked (`pg_ddl_done`), never before: a drop that is
     /// refused (another session, a pooler) must leave the person's query text and staged changes where they were.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn pg_drop_run(&mut self, conn: u64, sql: db::sql::Db, database: String, schema: String, table: String, kind: DropKind, opt: bool) {
+        // A job can start while the confirmation is open, so the check is made again here.
+        if let Some(why) = self.pg_job_blocks(conn, &database, &schema, kind) {
+            return self.warn(why);
+        }
         match kind {
             DropKind::Database => self.worker.pg_drop_db(conn, sql, database, opt, false),
             DropKind::Schema => self.worker.pg_drop_schema(conn, sql.at(&database), schema, opt, false),
@@ -181,6 +202,7 @@ impl App {
                 self.reveal = Some((conn, schema, None));
             }
             Ddl::DroppedDb => {
+                self.purge_undo(conn, &schema, "", "");
                 self.remove_tabs(|t| t.sel.conn == conn && t.sel.db == schema);
                 self.open_dbs.remove(&(conn, schema.clone()));
                 self.sql_asked.remove(&(conn, schema.clone()));
@@ -198,6 +220,7 @@ impl App {
                 self.pg_refresh(conn, &database);
             }
             Ddl::DroppedSchema => {
+                self.purge_undo(conn, &database, &schema, "");
                 self.remove_tabs(|t| in_schema(t, &schema));
                 self.forget_schema(conn, &ns_key(&database, &schema));
                 if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
@@ -218,6 +241,7 @@ impl App {
                 }
             }
             Ddl::DroppedTable => {
+                self.purge_undo(conn, &database, &schema, &table);
                 self.remove_tabs(|t| in_schema(t, &schema) && t.sel.coll == table);
                 self.pg_refresh(conn, &database);
             }
@@ -547,9 +571,9 @@ impl App {
                 if info.dependents_total > 0 {
                     let more = info.dependents_total.saturating_sub(info.dependents.len() as u64);
                     let tail = if more > 0 { format!(" and {more} more") } else { String::new() };
-                    // Read off the server by running the drop CASCADE and rolling it back, so the list is what the server takes and not a guess.
+                    // Read off the server by running the drop CASCADE and rolling it back, so the list is what the server takes and not a guess. The listing takes the locks the drop would take, for a moment.
                     let lead = format!("Dropping it also drops {}", plural(info.dependents_total, "object"));
-                    wrap(ui, format!("{lead}: {}{tail}.", list_and(&info.dependents)), MUTED());
+                    wrap(ui, format!("{lead}: {}{tail}. Listing them took the locks the drop would take, for a moment, and gave them back.", list_and(&info.dependents)), MUTED());
                     ui.add_space(4.0);
                     ui.checkbox(&mut f.opt, if f.kind == DropKind::Schema { "Drop them too (CASCADE)" } else { "Drop what depends on it too (CASCADE)" });
                     if !f.opt {

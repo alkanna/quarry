@@ -287,7 +287,7 @@ impl App {
             // The draft of a trigger that is being made is cleared once the structure lists it under this name.
             s.st.trig_made = if let TrigJob::Create(c) = &job { Some(c.def.name.clone()) } else { None };
         }
-        self.worker.sql_trigger(sel.conn, db, schema, sel.coll, job, m, false, done.to_string());
+        self.worker.sql_trigger(sel.conn, db, schema, sel.coll, job, m, !self.tab_writable(), done.to_string());
     }
 
     pub(super) fn drop_trigger(&mut self, name: String) {

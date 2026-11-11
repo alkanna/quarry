@@ -213,12 +213,14 @@ impl App {
                 }
             }
             Ddl::DroppedDb => {
+                self.purge_undo(conn, "", &schema, "");
                 self.remove_tabs(gone);
                 self.open_dbs.remove(&(conn, schema.clone()));
                 self.sql_asked.remove(&(conn, schema.clone()));
                 self.forget_schema(conn, &schema);
             }
             Ddl::DroppedTable => {
+                self.purge_undo(conn, "", &schema, &table);
                 self.remove_tabs(gone);
                 self.side_act(conn, SideAct::Refresh(schema));
             }

@@ -147,7 +147,7 @@ fn undo_of(l: &LivePg, a: UndoAction) -> Ans {
 }
 
 fn info(l: &LivePg, database: &str, schema: &str, table: &str) -> DropInfo {
-    l.w.pg_drop_info(1, l.db.clone(), database.into(), schema.into(), table.into());
+    l.w.pg_drop_info(1, l.db.clone(), database.into(), schema.into(), table.into(), false);
     let Msg::SqlDropInfo { res, .. } = l.next() else { panic!("expected SqlDropInfo") };
     res.unwrap_or_else(|x| panic!("drop info: {x}"))
 }
@@ -997,5 +997,80 @@ fn closing_a_database_waits_for_a_connection_that_a_query_still_holds() {
         // With the connection gone the plain drop works at the first try.
         let d = drop_db(l, &name, false);
         d.res.unwrap_or_else(|x| panic!("{var}: {x}"));
+    });
+}
+
+/// One value from another database of the server, outside Quarry's pools.
+fn one_in(l: &LivePg, name: &str, sql: &str) -> String {
+    use sqlx::Connection;
+    let o = sqlx::postgres::PgConnectOptions::from_str(&l.uri).unwrap().database(name);
+    l.w.rt.block_on(async {
+        let mut c = sqlx::PgConnection::connect_with(&o).await.unwrap();
+        let rows = sqlx::raw_sql(sql).fetch_all(&mut c).await.unwrap_or_else(|x| panic!("{sql}: {x}"));
+        let v = crate::db::sql::worker::text_at(&rows[0], 0).unwrap_or_default();
+        c.close().await.unwrap();
+        v
+    })
+}
+
+#[test]
+fn an_undo_does_not_reach_a_database_dropped_and_made_again_under_its_name() {
+    use crate::db::sql::value::Kind;
+    use crate::db::sql::Col;
+    use mongodb::bson::Bson;
+    every_pg(|l, var| {
+        let tidy = Tidy::new(l);
+        let name = tidy.db("again");
+        make_db(l, &name, None).res.unwrap();
+        let shape = "CREATE TABLE public.orders (id int PRIMARY KEY, note text)";
+        in_db(l, &name, shape);
+        let at = l.db.at(&name);
+        let cols = vec![Col::plain("id", "integer", Kind::Int, false), Col::plain("note", "text", Kind::Text, true)];
+        let row = vec![("id".to_string(), Bson::Int64(100)), ("note".to_string(), Bson::String("x".into()))];
+        l.w.sql_insert(1, at.clone(), "public".into(), "orders".into(), cols, vec!["id".into()], vec![row], false);
+        let Msg::Written { res, undo, .. } = l.next() else { panic!("expected Written") };
+        res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        let undo = undo.expect("an undo");
+        // The database goes and comes back with the same table and the same row, which is what a DROP-first dump does.
+        drop_db(l, &name, true).res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        make_db(l, &name, None).res.unwrap();
+        in_db(l, &name, &format!("{shape}; INSERT INTO public.orders VALUES (100, 'x')"));
+        l.w.sql_undo(at, undo, vec!["id".into()], false);
+        let Msg::Written { res, undo, .. } = l.next() else { panic!("expected Written") };
+        let why = res.unwrap_err();
+        assert!(why.contains("dropped and made again") && undo.is_none(), "{var}: {why}");
+        assert_eq!(one_in(l, &name, "SELECT count(*)::text FROM public.orders"), "1", "{var}: the row of the new database is still there");
+    });
+}
+
+#[test]
+fn a_drop_does_not_go_on_while_quarrys_own_connection_holds_the_database() {
+    every_pg(|l, var| {
+        let tidy = Tidy::new(l);
+        let name = tidy.db("held");
+        make_db(l, &name, None).res.unwrap();
+        // What a running import, script or shell holds: a connection taken out of its pool for good.
+        let held = l.w.rt.block_on(l.db.at(&name).acquire_conn()).unwrap();
+        for force in [false, true] {
+            let why = err(&drop_db(l, &name, force));
+            assert!(why.contains("Quarry itself") && why.contains("Nothing was dropped") && !why.contains("Another session"), "{var}: force {force}: {why}");
+            assert!(exists(l, &name), "{var}: force {force}: its own job was not killed");
+        }
+        drop(held);
+        drop_db(l, &name, false).res.unwrap_or_else(|x| panic!("{var}: {x}"));
+    });
+}
+
+#[test]
+fn what_a_drop_takes_is_not_read_through_a_locked_connection() {
+    every_pg(|l, var| {
+        let tidy = Tidy::new(l);
+        let name = tidy.db("locked");
+        make_db(l, &name, None).res.unwrap();
+        in_db(l, &name, "CREATE TABLE public.t (id int)");
+        l.w.pg_drop_info(1, l.db.clone(), name.clone(), "public".into(), "t".into(), true);
+        let Msg::SqlDropInfo { res, .. } = l.next() else { panic!("expected SqlDropInfo") };
+        let why = res.unwrap_err();
+        assert!(why.contains("locked"), "{var}: a rolled back DROP is still a write: {why}");
     });
 }

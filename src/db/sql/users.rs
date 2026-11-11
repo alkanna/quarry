@@ -1061,7 +1061,7 @@ pub fn label_of(edits: &[Edit]) -> String {
 }
 
 fn action(conn: u64, acct: &Account, undo: AccountUndo) -> UndoAction {
-    UndoAction { at: Instant::now(), conn, db: acct.label(), coll: String::new(), kind: UndoKind::Sql { database: String::new(), cols: Vec::new(), undo: SqlUndo::Account(Box::new(undo)) } }
+    UndoAction { at: Instant::now(), conn, db: acct.label(), coll: String::new(), kind: UndoKind::Sql { database: String::new(), cols: Vec::new(), undo: SqlUndo::Account(Box::new(undo)), ids: Default::default() } }
 }
 
 // Running.

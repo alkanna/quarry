@@ -178,7 +178,8 @@ pub enum UndoKind {
     DeleteMany { old: Vec<Document> },
     /// A SQL write; `db` and `coll` of the action are the schema and table. `database` is the PostgreSQL database the
     /// write ran in, which picks the pool the undo runs on, and empty on MySQL.
-    Sql { database: String, cols: Vec<sql::Col>, undo: sql::write::SqlUndo },
+    /// `ids` is who the change ran on by oid (PostgreSQL), so an undo never acts on an object dropped and made again under the same name.
+    Sql { database: String, cols: Vec<sql::Col>, undo: sql::write::SqlUndo, ids: sql::write::PgIds },
 }
 
 pub struct UndoAction {

@@ -226,8 +226,9 @@ impl PgPools {
     /// Closes every pool of `database`, the live one and any the cap pushed out, so none of Quarry's own connections is left
     /// on it. Unlike eviction this does close: DROP DATABASE is refused while any session is on the database. A connection
     /// still checked out (a running query) is closed when it comes back, and the wait is bounded so a stuck one cannot hang
-    /// the drop; the server then names the session that is left. A pool made for the name afterwards starts empty.
-    pub(super) async fn close_database(&self, database: &str) {
+    /// the drop; the server then names the session that is left. A pool made for the name afterwards starts empty. The answer is how
+    /// many connections of Quarry's own are still out on the database after the wait, which a drop must not blame on another session.
+    pub(super) async fn close_database(&self, database: &str) -> usize {
         let pools: Vec<PgPool> = {
             let mut live = self.live.lock().unwrap();
             let mut v: Vec<PgPool> = live.pools.remove(database).map(|e| e.pool).into_iter().collect();
@@ -250,6 +251,7 @@ impl PgPools {
             }
         })
         .await;
+        self.held.n.lock().unwrap().get(&self.name_of(Some(database))).copied().unwrap_or(0) as usize
     }
 
     fn name_of(&self, database: Option<&str>) -> String {

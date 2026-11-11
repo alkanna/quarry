@@ -18,6 +18,7 @@ use super::exec::Tx;
 use super::lex::{every_reading, Tok};
 use super::structure::{col_deps, columns, constraints, foreign_keys, indexes, load, Column, ForeignKey, Structure};
 use super::value::{lit, Param};
+use super::write::PgIds;
 use super::{se, write, Db, Dialect};
 use crate::db::{Msg, Res, UndoAction, UndoKind, Worker};
 use std::time::Instant;
@@ -930,16 +931,21 @@ fn fail_text(f: Fail, undo: bool) -> String {
 
 /// The undo entry for the table, which remembers the database it ran in: a PostgreSQL connection is bound to one, and
 /// the undo has to run on that one's pool.
-fn action(db: &Db, conn: u64, schema: &str, table: &str, u: AlterUndo) -> UndoAction {
+fn action(db: &Db, conn: u64, schema: &str, table: &str, u: AlterUndo, ids: PgIds) -> UndoAction {
     let mut a = undo_action(conn, schema, table, u);
-    if let UndoKind::Sql { database, .. } = &mut a.kind {
+    if let UndoKind::Sql { database, ids: own, .. } = &mut a.kind {
         *database = db.pg_database();
+        *own = ids;
     }
     a
 }
 
 /// Runs a recorded undo in one transaction, after the same check as an apply against how the change left the table.
 pub(super) async fn undo(db: &Db, a: UndoAction, u: AlterUndo, read_only: bool) -> Msg {
+    let ids = match &a.kind {
+        UndoKind::Sql { ids, .. } => ids.clone(),
+        _ => PgIds::default(),
+    };
     let UndoAction { at, conn, db: schema, coll: table, .. } = a;
     let expect = Expect { cols: u.cols.clone(), idx: u.idx.clone(), fks: u.fks.clone(), snap: u.expect.clone(), all: None, types: Vec::new(), refs: u.refs.clone(), orphans: u.orphans.clone(), own_share: shares_only(&u.groups.iter().flatten().cloned().collect::<Vec<_>>()) };
     let out = crate::db::sql_scope(db.conn, &schema, async { run(db, &schema, &table, &u.steps, &expect, read_only, true).await }).await;
@@ -948,7 +954,7 @@ pub(super) async fn undo(db: &Db, a: UndoAction, u: AlterUndo, read_only: bool) 
     // The whole undo is one transaction, so a failure ran nothing and the action stays for another try, unless the commit
     // is the one that failed, when it may have run.
     let keep = (res.is_err() && !unsure).then(|| {
-        let mut k = action(db, conn, &schema, &table, u);
+        let mut k = action(db, conn, &schema, &table, u, ids);
         k.at = at;
         k
     });
@@ -978,7 +984,7 @@ impl Worker {
                             }
                         }
                         match unread {
-                            None => Some(action(&db, conn, &schema, &table, u)),
+                            None => Some(action(&db, conn, &schema, &table, u, super::create_pg::ids_of(&db, &schema, &table).await)),
                             Some(err) => {
                                 done = format!("{done}. It cannot be undone: a referenced table could not be read back ({err})");
                                 None

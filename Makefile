@@ -89,8 +89,7 @@ remote-test:
 # Needs cargo-llvm-cov (cargo install cargo-llvm-cov) and rustup's llvm-tools-preview component.
 coverage: servers-up
 	$(LIVE) cargo llvm-cov --no-report
-	cargo llvm-cov report
-	cargo llvm-cov report --open
+	cargo llvm-cov report --html --open
 
 demo:
 	QUARRY_DEMO=1 cargo run --release

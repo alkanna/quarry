@@ -258,8 +258,8 @@ pub(super) async fn run(db: &Db, schema: &str, text: &str, read_only: bool, id: 
         let mut rs = rs;
         if cancel.load(Ordering::SeqCst) {
             for r in rs.iter_mut() {
-                if let Some(e) = r.error.as_mut().filter(|e| e.starts_with("error returned from database: 57014: ")) {
-                    e.push_str(crate::db::errors::STOP_MARK);
+                if let Some(e) = r.error.as_mut() {
+                    *e = crate::db::errors::stopped(std::mem::take(e));
                 }
             }
         }

@@ -1733,7 +1733,7 @@ pub(super) async fn exec(c: &mut sqlx::MySqlConnection, sql: &str) -> Res<()> {
 }
 
 pub(super) fn undo_action(conn: u64, schema: &str, table: &str, u: AlterUndo) -> UndoAction {
-    UndoAction { at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database: String::new(), cols: Vec::new(), undo: super::write::SqlUndo::Alter(Box::new(u)) } }
+    UndoAction { at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database: String::new(), cols: Vec::new(), undo: super::write::SqlUndo::Alter(Box::new(u)), ids: Default::default() } }
 }
 
 /// Runs a recorded undo after checking the table is still as the change left it. The answer is the same as for
@@ -2016,7 +2016,7 @@ pub(super) async fn undo_trigger(db: &Db, a: UndoAction, u: TrigUndo, read_only:
 }
 
 fn trigger_undo_action(conn: u64, schema: &str, table: &str, u: TrigUndo) -> UndoAction {
-    UndoAction { at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database: String::new(), cols: Vec::new(), undo: super::write::SqlUndo::Trigger(Box::new(u)) } }
+    UndoAction { at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database: String::new(), cols: Vec::new(), undo: super::write::SqlUndo::Trigger(Box::new(u)), ids: Default::default() } }
 }
 
 /// The count of orphan rows on PostgreSQL and a few of them, from reads of their own.

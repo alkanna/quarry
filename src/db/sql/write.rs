@@ -52,6 +52,14 @@ pub enum SqlUndo {
     Account(Box<super::users::AccountUndo>),
 }
 
+/// The oids a PostgreSQL write ran on, as text. A name says nothing about which object it was: a database or table dropped and made
+/// again under it has other oids, and an undo must not act on that one. Empty (MySQL, or unreadable) skips the check.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PgIds {
+    pub db: String,
+    pub table: String,
+}
+
 impl SqlUndo {
     /// Key column names, read off the first row: undo of a delete re-inserts the rows and needs them.
     pub fn pk_names(&self) -> Vec<String> {
@@ -594,8 +602,9 @@ fn plural(n: usize, word: &str) -> String {
 }
 
 /// `database` is the PostgreSQL database the write ran in (`Db::pg_database`), empty on MySQL.
-pub(super) fn action(database: String, conn: u64, schema: &str, table: &str, cols: &[Col], undo: SqlUndo) -> UndoAction {
-    UndoAction { at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database, cols: cols.to_vec(), undo } }
+/// `ids` is the database and table oids read right after the write (`create_pg::ids_of`), empty on MySQL.
+pub(super) fn action(database: String, ids: PgIds, conn: u64, schema: &str, table: &str, cols: &[Col], undo: SqlUndo) -> UndoAction {
+    UndoAction { at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database, cols: cols.to_vec(), undo, ids } }
 }
 
 impl Worker {
@@ -607,7 +616,8 @@ impl Worker {
         self.rt.spawn(async move {
             let res = apply_updates(&db, &schema, &table, &cols, &pk, &edits, read_only).await;
             let n = edits.len();
-            let mut undo = res.is_ok().then(|| action(db.pg_database(), conn, &schema, &table, &cols, SqlUndo::Update(edits)));
+            let ids = if res.is_ok() { super::create_pg::ids_of(&db, &schema, &table).await } else { PgIds::default() };
+            let mut undo = res.is_ok().then(|| action(db.pg_database(), ids, conn, &schema, &table, &cols, SqlUndo::Update(edits)));
             for tag in tags {
                 let res = res.clone().map(|_| format!("Saved {}", plural(n, "row")));
                 let _ = tx.send(Msg::Saved { tag, res, undo: undo.take() });
@@ -626,7 +636,8 @@ impl Worker {
                 Ok(gone) => {
                     let n = gone.len();
                     let rows: Vec<Document> = rows.into_iter().filter(|r| gone.contains(&pk_of(r))).collect();
-                    (Ok(format!("Deleted {}", plural(n, "row"))), (n > 0).then(|| action(db.pg_database(), conn, &schema, &table, &cols, SqlUndo::Delete(rows))))
+                    let ids = if n > 0 { super::create_pg::ids_of(&db, &schema, &table).await } else { PgIds::default() };
+                    (Ok(format!("Deleted {}", plural(n, "row"))), (n > 0).then(|| action(db.pg_database(), ids, conn, &schema, &table, &cols, SqlUndo::Delete(rows))))
                 }
                 Err(err) => (Err(err), None),
             };
@@ -643,7 +654,8 @@ impl Worker {
                 Ok(keys) => {
                     let known: Option<Vec<Document>> = keys.into_iter().collect();
                     let undo = |k| if db.dialect == Dialect::Postgres { SqlUndo::Inserted(k) } else { SqlUndo::Insert(k) };
-                    (Ok(format!("Inserted {}", plural(rows.len(), "row"))), known.map(|k| action(db.pg_database(), conn, &schema, &table, &cols, undo(k))))
+                    let ids = if known.is_some() { super::create_pg::ids_of(&db, &schema, &table).await } else { PgIds::default() };
+                    (Ok(format!("Inserted {}", plural(rows.len(), "row"))), known.map(|k| action(db.pg_database(), ids, conn, &schema, &table, &cols, undo(k))))
                 }
                 Err(err) => (Err(err), None),
             };
@@ -660,6 +672,16 @@ impl Worker {
         self.spawn(async move {
             let at = (a.db.clone(), a.coll.clone());
             let UndoAction { at: when, conn, db: schema, coll: table, kind } = a;
+            // The entry is dropped, not kept, when the target is another object now: nothing it does could ever apply again.
+            if let UndoKind::Sql { ids, .. } = &kind {
+                if let Err(err) = super::create_pg::check_ids(&db, &schema, &table, ids).await {
+                    // Structure undos are answered the way their own run answers.
+                    return match &kind {
+                        UndoKind::Sql { undo: u @ (SqlUndo::Alter(_) | SqlUndo::Trigger(_)), .. } => Msg::SqlAltered { conn, database: db.pg_database(), schema, table, res: Err(err), undo: None, sql_mode: None, alter: matches!(u, SqlUndo::Alter(_)), unsure: false },
+                        _ => Msg::Written { at, res: Err(err), undo: None, reload: false, retry: None },
+                    };
+                }
+            }
             if let UndoKind::Sql { undo: SqlUndo::Alter(u), .. } = &kind {
                 let u = (**u).clone();
                 return super::ddl::undo(&db, UndoAction { at: when, conn, db: schema, coll: table, kind }, u, read_only).await;
@@ -672,9 +694,9 @@ impl Worker {
                 let u = (**u).clone();
                 return crate::db::sql_scope(db.conn, "", super::users::undo(&db, UndoAction { at: when, conn, db: schema, coll: table, kind }, u, read_only)).await;
             }
-            let UndoKind::Sql { database, cols, undo } = kind else { return Msg::Written { at, res: Err("Not a SQL change".into()), undo: None, reload: false, retry: None } };
+            let UndoKind::Sql { database, cols, undo, ids } = kind else { return Msg::Written { at, res: Err("Not a SQL change".into()), undo: None, reload: false, retry: None } };
             if let Err(err) = key_unchanged(&db, &schema, &table, &undo.pk_names()).await {
-                let undo = Some(UndoAction { at: when, conn, db: schema, coll: table, kind: UndoKind::Sql { database, cols, undo } });
+                let undo = Some(UndoAction { at: when, conn, db: schema, coll: table, kind: UndoKind::Sql { database, cols, undo, ids } });
                 return Msg::Written { at, res: Err(err), undo, reload: false, retry: None };
             }
             let res = match undo.clone() {
@@ -694,7 +716,7 @@ impl Worker {
                 SqlUndo::Alter(_) | SqlUndo::Trigger(_) | SqlUndo::Account(_) => Err("Not a row change".into()),
                 SqlUndo::CreatedDb { .. } | SqlUndo::CreatedTable { .. } | SqlUndo::CreatedSchema { .. } | SqlUndo::PgCreatedTable { .. } => Err("Handled by sql_undo_create".to_string()),
             };
-            let undo = res.is_err().then(|| UndoAction { at: when, conn, db: schema, coll: table, kind: UndoKind::Sql { database, cols, undo } });
+            let undo = res.is_err().then(|| UndoAction { at: when, conn, db: schema, coll: table, kind: UndoKind::Sql { database, cols, undo, ids } });
             Msg::Written { at, res, undo, reload: true, retry: None }
         });
     }

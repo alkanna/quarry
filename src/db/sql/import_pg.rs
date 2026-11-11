@@ -431,12 +431,13 @@ async fn import_on(c: &mut Conn, db: &Db, schema: &str, table: &str, plan: &Impo
         None => format!("The server did not confirm the import ({}). Check the table: it may or may not have been applied.", se(x)),
     })?;
     let Imp { rec, why_not, inserted_n, mapped, rec_names, only, .. } = imp;
+    let ids = if rec.on && !(rec.inserted.is_empty() && rec.updated.is_empty()) { super::create_pg::ids_of(db, schema, table).await } else { super::write::PgIds::default() };
     let undo = (rec.on && !(rec.inserted.is_empty() && rec.updated.is_empty())).then(|| {
         let by_name = |n: &str| mapped.iter().copied().chain(plan.info.cols.iter()).find(|c| c.name == n).map(ucol);
         let cols: Vec<UCol> = rec_names.iter().filter_map(|n| by_name(n)).collect();
         let u = ImportUndo { pk: pk.clone(), cols, only, inserted: rec.inserted, updated: rec.updated };
         let all: Vec<Col> = plan.info.cols.iter().map(|c| Col { generated: c.generated, auto_increment: c.auto_increment, src: c.name.clone(), ..Col::plain(&c.name, &c.full_type, c.kind, c.nullable) }).collect();
-        action(db.pg_database(), conn, schema, table, &all, SqlUndo::Import(Arc::new(u)))
+        action(db.pg_database(), ids, conn, schema, table, &all, SqlUndo::Import(Arc::new(u)))
     });
     Ok(Done { rows, inserted: inserted_n, undo, why_not })
 }

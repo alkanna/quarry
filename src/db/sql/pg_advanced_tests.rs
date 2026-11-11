@@ -484,3 +484,57 @@ fn a_write_refusal_is_worded_by_its_sqlstate_with_lc_messages_set() {
         l.qsql(&pool, "DROP SCHEMA adv_msg CASCADE");
     });
 }
+
+#[test]
+fn a_table_is_made_with_a_type_from_the_saved_search_path() {
+    each(|var, uri, pooled| {
+        let adv = Advanced { search_path: vec!["adv_ext".into()], ..Default::default() };
+        let l = open(uri, &adv, pooled);
+        let db = l.quarry_test();
+        let pool = l.fixture_pool();
+        l.qsql(&pool, "DROP SCHEMA IF EXISTS adv_mk CASCADE; DROP SCHEMA IF EXISTS adv_ext CASCADE; CREATE SCHEMA adv_mk; CREATE SCHEMA adv_ext; CREATE TYPE adv_ext.adv_mood AS ENUM ('a', 'b')");
+        let spec = super::create_pg::TableSpec { schema: "adv_mk".into(), name: "made".into(), cols: vec![super::ddl::ColDef::new("m", "adv_mood")], ..Default::default() };
+        l.w.pg_create_table(1, db.clone(), spec, false);
+        let Msg::SqlDdl { res, undo, .. } = l.next() else { panic!("expected SqlDdl") };
+        res.unwrap_or_else(|x| panic!("{var}: a type of the saved list resolves in a create, as it does everywhere else: {x}"));
+        // The undo reads the table back under the same path, so it still sees the table as the create left it.
+        l.w.sql_undo(db.clone(), undo.expect("an undo"), Vec::new(), false);
+        let Msg::SqlDdl { res, .. } = l.next() else { panic!("expected SqlDdl") };
+        res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        l.qsql(&pool, "DROP SCHEMA adv_mk CASCADE; DROP SCHEMA adv_ext CASCADE");
+    });
+}
+
+/// The review's probe: a pooled or direct connection with a saved search_path and a TimeZone runs a subset dump (an enum and a domain made
+/// behind the dump's guard DO blocks) and then saves a grid edit of the enum and the timestamp.
+#[test]
+fn a_file_with_guarded_types_and_a_grid_edit_work_under_a_saved_path_and_zone() {
+    use super::dump::run_file;
+    use super::import::Progress;
+    use super::write::RowEdit;
+    use mongodb::bson::doc;
+    each(|var, uri, pooled| {
+        let adv = Advanced { search_path: vec!["adv_wr".into()], zone: Zone::Custom("Europe/Paris".into()), ..Default::default() };
+        let l = open(uri, &adv, pooled);
+        let db = l.quarry_test();
+        let pool = l.fixture_pool();
+        l.qsql(&pool, "DROP SCHEMA IF EXISTS adv_wr CASCADE");
+        let text = "CREATE SCHEMA adv_wr;\n\
+                    DO $q$BEGIN CREATE TYPE adv_wr.mood AS ENUM ('a', 'b'); EXCEPTION WHEN duplicate_object THEN NULL; END$q$;\n\
+                    DO $q$BEGIN CREATE DOMAIN adv_wr.posint AS integer CHECK (VALUE > 0); EXCEPTION WHEN duplicate_object THEN NULL; END$q$;\n\
+                    CREATE TABLE adv_wr.t (id integer PRIMARY KEY, m adv_wr.mood, p adv_wr.posint, ts timestamptz);\n\
+                    INSERT INTO adv_wr.t VALUES (1, 'a', 5, '2024-01-01 00:00:00+00');\n";
+        let src = super::csv::Source::Mem(std::sync::Arc::new(text.as_bytes().to_vec()));
+        let ran = l.w.rt.block_on(run_file(db.clone(), "public".into(), src, false, std::sync::Arc::new(Progress::default()), std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)), std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0))));
+        ran.unwrap_or_else(|x| panic!("{var}: {x}"));
+        l.w.sql_page(7, db.clone(), "adv_wr".into(), "t".into(), super::PageQuery::default(), 100, 0);
+        let Msg::SqlCols { cols, .. } = l.next() else { panic!("expected SqlCols") };
+        let Msg::Docs { res: Ok(_), .. } = l.next() else { panic!("expected Docs") };
+        let edit = RowEdit { pk: doc! { "id": 1_i64 }, changes: vec![("m".into(), Bson::String("a".into()), Bson::String("b".into())), ("p".into(), Bson::Int64(5), Bson::Int64(7))] };
+        l.w.sql_save(vec!["k".into()], 1, db.clone(), "adv_wr".into(), "t".into(), cols, vec!["id".into()], vec![edit], false);
+        let Msg::Saved { res, .. } = l.next() else { panic!("expected Saved") };
+        res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(l.qone(&pool, "SELECT m::text || p::text FROM adv_wr.t"), "b7", "{var}");
+        l.qsql(&pool, "DROP SCHEMA adv_wr CASCADE");
+    });
+}

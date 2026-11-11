@@ -516,12 +516,16 @@ fn fail_text(f: Fail, undo: bool) -> String {
     }
 }
 
-fn undo_action(db: &Db, conn: u64, schema: &str, table: &str, u: TrigUndo) -> UndoAction {
-    UndoAction { at: std::time::Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database: db.pg_database(), cols: Vec::new(), undo: write::SqlUndo::Trigger(Box::new(u)) } }
+fn undo_action(db: &Db, conn: u64, schema: &str, table: &str, u: TrigUndo, ids: write::PgIds) -> UndoAction {
+    UndoAction { at: std::time::Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database: db.pg_database(), cols: Vec::new(), undo: write::SqlUndo::Trigger(Box::new(u)), ids } }
 }
 
 /// Runs a recorded undo in one transaction, after checking the trigger and its function are as the change left them.
 pub(super) async fn undo(db: &Db, a: UndoAction, u: TrigUndo, read_only: bool) -> Msg {
+    let ids = match &a.kind {
+        UndoKind::Sql { ids, .. } => ids.clone(),
+        _ => write::PgIds::default(),
+    };
     let UndoAction { at, conn, db: schema, coll: table, .. } = a;
     let Some(p) = u.pg.clone() else { return Msg::SqlAltered { conn, database: db.pg_database(), schema, table, res: Err("This undo is not a PostgreSQL one.".into()), undo: None, sql_mode: None, alter: false, unsure: false } };
     let unit = Unit { steps: &p.steps, exclusive: p.exclusive, trig: &p.trig, func_schema: &p.func_schema, func: &p.func, before: &p.expect, undo: true };
@@ -530,7 +534,7 @@ pub(super) async fn undo(db: &Db, a: UndoAction, u: TrigUndo, read_only: bool) -
     let res: Res<String> = out.map(|_| p.said.clone()).map_err(|f| fail_text(f, true));
     // The whole undo is one transaction, so a failure ran nothing and the action stays for another try, unless the commit is
     // the one that failed, when it may have run.
-    let keep = (res.is_err() && !unsure).then(|| UndoAction { at, ..undo_action(db, conn, &schema, &table, u) });
+    let keep = (res.is_err() && !unsure).then(|| UndoAction { at, ..undo_action(db, conn, &schema, &table, u, ids) });
     Msg::SqlAltered { conn, database: db.pg_database(), schema, table, res, undo: keep, sql_mode: None, alter: false, unsure }
 }
 
@@ -549,7 +553,7 @@ impl Worker {
                             // After the change the trigger exists and its function exists, or the drop took the function too.
                             pg.expect = after;
                             let u = TrigUndo { name: p.trig.clone(), restore: None, left: None, label: p.label.clone(), pg: Some(pg) };
-                            (Ok(done), Some(undo_action(&db, conn, &schema, &table, u)), false)
+                            (Ok(done), Some(undo_action(&db, conn, &schema, &table, u, super::create_pg::ids_of(&db, &schema, &table).await)), false)
                         }
                         Err(f) => {
                             let unsure = matches!(f, Fail::Unknown(_));

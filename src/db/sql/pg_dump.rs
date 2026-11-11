@@ -1218,7 +1218,7 @@ pub async fn run_file(db: Db, schema: String, src: Source, read_only: bool, prog
     };
     let _ = c.close().await;
     match res {
-        Err(x) if cancel.load(Ordering::SeqCst) => Err(format!("Run stopped. {}\n{x}", stay(in_tx))),
+        Err(x) if cancel.load(Ordering::SeqCst) => Err(format!("Run stopped. {}\n{}", stay(in_tx), crate::db::errors::stopped(x))),
         r => r,
     }
 }

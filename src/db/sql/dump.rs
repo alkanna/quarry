@@ -474,7 +474,7 @@ Statements before it ran and stay applied.", excerpt(&stmt)));
     let _ = c.close().await;
     match res {
         Err(x) if cancel.load(Ordering::SeqCst) => Err(format!("Run stopped. Statements that already ran stay applied.
-{x}")),
+{}", crate::db::errors::stopped(x))),
         r => r,
     }
 }

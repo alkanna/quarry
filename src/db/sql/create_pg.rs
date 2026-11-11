@@ -356,8 +356,9 @@ fn rows_word(n: i64) -> String {
 /// person agrees to. An object that is only part of another dropped one (an index of its table) is folded into it, the object
 /// `skip` is the target itself, and `schema_oid` marks the objects of a schema being dropped, so the ones outside it come first.
 /// Tables name their rows. The lines are returned with the full count.
-async fn cascade_effects(db: &Db, scope: &str, drop_sql: &str, skip: Option<&str>, schema_oid: Option<&str>) -> Res<(u64, Vec<String>)> {
-    let mut c = db.acquire_conn().await?;
+async fn cascade_effects(db: &Db, scope: &str, drop_sql: &str, skip: Option<&str>, schema_oid: Option<&str>, read_only: bool) -> Res<(u64, Vec<String>)> {
+    // The statement really runs, in a transaction that is rolled back, so a locked connection must not get as far as a READ WRITE one.
+    let mut c = write::writer_conn(db, "", read_only).await?;
     let mut out = Err(String::new());
     // A session that drops or changes an object while this reads makes the server answer "cache lookup failed" (XX000) or a
     // serialization failure (40001), which says nothing about this drop, so the reading starts over a few times, a little later each time.
@@ -436,14 +437,14 @@ async fn effects_in(tx: &mut Tx<'_>, drop_sql: &str, skip: Option<&str>, schema_
     Ok((total, lines))
 }
 
-async fn schema_info(db: &Db, schema: &str) -> Res<DropInfo> {
+async fn schema_info(db: &Db, schema: &str, read_only: bool) -> Res<DropInfo> {
     let found = read(db, schema, &[("SELECT oid::text AS what FROM pg_namespace WHERE nspname = $1", vec![Param::Text(schema.into())])]).await?.remove(0);
     let Some(oid) = found.first().and_then(|r| text(r, "what")) else { return Ok(DropInfo::default()) };
-    let (total, lines) = cascade_effects(db, schema, &drop_schema_sql(schema, true)?, None, Some(&oid)).await?;
+    let (total, lines) = cascade_effects(db, schema, &drop_schema_sql(schema, true)?, None, Some(&oid), read_only).await?;
     Ok(DropInfo { exists: true, dependents_total: total, dependents: lines, ..Default::default() })
 }
 
-async fn table_info(db: &Db, schema: &str, table: &str) -> Res<DropInfo> {
+async fn table_info(db: &Db, schema: &str, table: &str, read_only: bool) -> Res<DropInfo> {
     let name = D.qualified(schema, table);
     let sql = "SELECT c.oid::text AS what, c.reltuples::bigint AS est, c.relkind::text AS kind FROM pg_class c WHERE c.oid = to_regclass($1)";
     let found = read(db, schema, &[(sql, vec![Param::Text(name.clone())])]).await?.remove(0);
@@ -458,7 +459,7 @@ async fn table_info(db: &Db, schema: &str, table: &str) -> Res<DropInfo> {
         "S" => "SEQUENCE",
         _ => "TABLE",
     };
-    let (total, lines) = cascade_effects(db, schema, &format!("DROP {word} {name} CASCADE"), Some(&format!("pg_class:{oid}")), None).await?;
+    let (total, lines) = cascade_effects(db, schema, &format!("DROP {word} {name} CASCADE"), Some(&format!("pg_class:{oid}")), None, read_only).await?;
     let mut info = DropInfo { exists: true, rows: est, rows_estimated: true, dependents_total: total, dependents: lines, ..Default::default() };
     // An exact count within a short wait, else the estimate stays and the dialog says "about".
     let count = format!("SELECT count(*)::bigint AS n FROM {name}");
@@ -551,6 +552,12 @@ async fn template_list(c: &mut Conn) -> Res<Vec<String>> {
     Ok(c.fetch_all("SELECT datname::text AS datname FROM pg_database WHERE datistemplate ORDER BY 1").await.map_err(se)?.iter().filter_map(|r| text(r, "datname")).collect())
 }
 
+/// A drop must not go on while Quarry's own import, script or shell still holds a connection to the database: the server would refuse it
+/// and the refusal would blame another session, or WITH (FORCE) would kill that work halfway.
+fn ours_still_open(name: &str, ours: usize) -> Option<String> {
+    (ours > 0).then(|| format!("Quarry itself still has {ours} connection{} open on {name}, for a running import, script file or shell. Stop it first, then drop the database. Nothing was dropped.", if ours == 1 { "" } else { "s" }))
+}
+
 async fn drop_db(db: &Db, name: &str, force: bool, read_only: bool) -> Res<Vec<String>> {
     let sql = drop_db_sql(name, force)?;
     let Pool::Pg(pools) = &db.pool else { return Err("Not a PostgreSQL connection".into()) };
@@ -561,7 +568,10 @@ async fn drop_db(db: &Db, name: &str, force: bool, read_only: bool) -> Res<Vec<S
     let mut c = maintenance(db, read_only).await?;
     let out = async {
         // Quarry's own connections go first: an idle one in a pool is a session on the database, and the server refuses the drop for it.
-        pools.close_database(name).await;
+        let ours = pools.close_database(name).await;
+        if let Some(why) = ours_still_open(name, ours) {
+            return Err(why);
+        }
         let mut r = alone(&mut c, db, &sql).await;
         // A read that was already on its way when the pools closed can make a new pool and a new session before the drop runs, and
         // so can a session that is still ending. Each retry closes what the last one left. The server waits about five seconds for the
@@ -574,7 +584,10 @@ async fn drop_db(db: &Db, name: &str, force: bool, read_only: bool) -> Res<Vec<S
             }
             tokio::time::sleep(wait).await;
             wait *= 2;
-            pools.close_database(name).await;
+            let ours = pools.close_database(name).await;
+            if let Some(why) = ours_still_open(name, ours) {
+                return Err(why);
+            }
             r = alone(&mut c, db, &sql).await;
         }
         match r {
@@ -614,6 +627,36 @@ async fn finish<T>(tx: Tx<'_>, out: Res<T>) -> Res<T> {
 async fn namespace_oid(tx: &mut Tx<'_>, schema: &str) -> Res<Option<String>> {
     let rows = tx.fetch_bound("SELECT oid::text AS n FROM pg_namespace WHERE nspname = $1", &[Param::Text(schema.into())]).await.map_err(se)?;
     Ok(rows.first().and_then(|r| text(r, "n")))
+}
+
+/// The oids of the database this `Db` points at and of the table or view, as the server has them now. Empty when they cannot be
+/// read, which only skips the later check; a write is never refused over it.
+pub(super) async fn ids_of(db: &Db, schema: &str, table: &str) -> write::PgIds {
+    let (d, t) = pg_ids_now(db, schema, table).await.unwrap_or_default();
+    write::PgIds { db: d.unwrap_or_default(), table: t.unwrap_or_default() }
+}
+
+async fn pg_ids_now(db: &Db, schema: &str, table: &str) -> Res<(Option<String>, Option<String>)> {
+    let sql = "SELECT (SELECT oid::text FROM pg_database WHERE datname = current_database()) AS d, to_regclass($1)::oid::text AS t";
+    let rows = read(db, "", &[(sql, vec![Param::Text(D.qualified(schema, table))])]).await?.remove(0);
+    Ok((rows.first().and_then(|r| text(r, "d")), rows.first().and_then(|r| text(r, "t"))))
+}
+
+/// Refuses an undo whose database or table is not the one the change ran on, by oid. A drop of the database (or a dump that drops
+/// first) followed by a create under the same name gives the same structure, and the undo would otherwise act on the new one.
+pub(super) async fn check_ids(db: &Db, schema: &str, table: &str, ids: &write::PgIds) -> Res<()> {
+    if ids.db.is_empty() && ids.table.is_empty() {
+        return Ok(());
+    }
+    let (d, t) = pg_ids_now(db, schema, table).await.map_err(|e| format!("Undo refused: the table could not be checked ({e}). Nothing was changed."))?;
+    if !ids.db.is_empty() && d.as_deref() != Some(ids.db.as_str()) {
+        return Err(format!("Undo refused: the database was dropped and made again since this change ran, so {table} is not the table it changed. Nothing was changed."));
+    }
+    match t {
+        None if !ids.table.is_empty() => Err(format!("Undo refused: {table} is gone. Nothing was changed.")),
+        Some(now) if !ids.table.is_empty() && now != ids.table => Err(format!("Undo refused: {table} was dropped and made again since this change ran, so it is not the table it changed. Nothing was changed.")),
+        _ => Ok(()),
+    }
 }
 
 async fn relation_oid(tx: &mut Tx<'_>, name: &str) -> Res<Option<String>> {
@@ -668,8 +711,8 @@ async fn create_table(db: &Db, spec: &TableSpec, read_only: bool) -> Res<Made> {
     let out = async {
         let mut tx = begin(&mut c, db, &spec.schema).await?;
         let r = async {
-            // The types and the default expressions resolve under the schema's own path, as they will when the structure editor reads the table back.
-            exec(&mut tx, db, &spec.schema, &format!("SET LOCAL search_path = {}", q(&spec.schema))).await.map_err(se)?;
+            // The types and the default expressions resolve under the schema first and then the Advanced saved list, the path every other writer and the structure editor read under, so a type from a saved schema works here too.
+            exec(&mut tx, db, &spec.schema, &db.pg_set_path(&spec.schema)).await.map_err(se)?;
             for col in &spec.cols {
                 let said = tx.fetch_bound("SELECT to_regtype($1)::text AS t", &[Param::Text(col.ty.trim().to_string())]).await;
                 // PostgreSQL before 16 raises an error for text that is not a type name, later ones answer NULL.
@@ -761,7 +804,7 @@ async fn undo_table(db: &Db, schema: &str, table: &str, made: &Made, read_only: 
                 Some(now) if now != made.oid => return Err(format!("Not undone: {table} was dropped and made again since, so it is not the table this created.")),
                 Some(_) => {}
             }
-            exec(&mut tx, db, schema, &format!("SET LOCAL search_path = {}", q(schema))).await.map_err(se)?;
+            exec(&mut tx, db, schema, &db.pg_set_path(schema)).await.map_err(se)?;
             if state_in(&mut tx, schema, table).await? != made.state {
                 return Err(format!("Not undone: the structure of {table} changed since it was made, so dropping it would lose more than the create made."));
             }
@@ -854,7 +897,7 @@ async fn undo_db(db: &Db, name: &str, oid: &str, baseline: i64, read_only: bool)
 }
 
 fn entry(db: &Db, conn: u64, schema: &str, table: &str, undo: SqlUndo) -> UndoAction {
-    UndoAction { at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database: db.pg_database(), cols: Vec::new(), undo } }
+    UndoAction { at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database: db.pg_database(), cols: Vec::new(), undo, ids: write::PgIds::default() } }
 }
 
 fn answer(res: Res<Option<Vec<String>>>, said: String) -> (Res<String>, Option<Vec<String>>) {
@@ -881,13 +924,13 @@ impl Worker {
 
     /// What dropping a database (`schema` and `table` empty), a schema (`table` empty) or a table or view will take, read from
     /// the database `database` where it lives.
-    pub fn pg_drop_info(&self, conn: u64, db: Db, database: String, schema: String, table: String) {
+    pub fn pg_drop_info(&self, conn: u64, db: Db, database: String, schema: String, table: String, read_only: bool) {
         self.spawn_sql(db.conn, &schema.clone(), async move {
             let at = db.at(&database);
             let res = match (schema.is_empty(), table.is_empty()) {
                 (true, true) => db_info(&db, &database).await,
-                (false, true) => schema_info(&at, &schema).await,
-                _ => table_info(&at, &schema, &table).await,
+                (false, true) => schema_info(&at, &schema, read_only).await,
+                _ => table_info(&at, &schema, &table, read_only).await,
             };
             Msg::SqlDropInfo { conn, database, schema, table, res }
         });
@@ -952,7 +995,7 @@ impl Worker {
 /// refused undo hands the entry back, so it stays in the list with the reason.
 pub(super) async fn undo(db: Db, a: UndoAction, read_only: bool) -> Msg {
     let UndoAction { at, conn, db: schema, coll: table, kind } = a;
-    let UndoKind::Sql { database, cols, undo } = kind else { return Msg::SqlDdl { conn, database: String::new(), schema, table, what: Ddl::DroppedTable, res: Err("Not a create".into()), undo: None, dbs: None, sql_mode: None } };
+    let UndoKind::Sql { database, cols, undo, ids } = kind else { return Msg::SqlDdl { conn, database: String::new(), schema, table, what: Ddl::DroppedTable, res: Err("Not a create".into()), undo: None, dbs: None, sql_mode: None } };
     let (what, res, dbs, said) = match &undo {
         SqlUndo::CreatedDb { oid, baseline } => {
             let r = undo_db(&db, &schema, oid, *baseline, read_only).await;
@@ -962,7 +1005,7 @@ pub(super) async fn undo(db: Db, a: UndoAction, read_only: bool) -> Msg {
         SqlUndo::PgCreatedTable { oid, state } => (Ddl::DroppedTable, undo_table(&db, &schema, &table, &Made { oid: oid.clone(), state: state.clone() }, read_only).await, None, format!("Removed table {table}")),
         _ => (Ddl::DroppedTable, Err("Not a create".into()), None, String::new()),
     };
-    let kept = res.is_err().then(|| UndoAction { at, conn, db: schema.clone(), coll: table.clone(), kind: UndoKind::Sql { database: database.clone(), cols, undo } });
+    let kept = res.is_err().then(|| UndoAction { at, conn, db: schema.clone(), coll: table.clone(), kind: UndoKind::Sql { database: database.clone(), cols, undo, ids } });
     // A refused undo changes nothing, so the app has nothing to refresh.
     Msg::SqlDdl { conn, database, schema, table, what, res: res.map(|_| said), undo: kept, dbs, sql_mode: None }
 }

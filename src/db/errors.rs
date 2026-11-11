@@ -203,6 +203,15 @@ fn dup_key(e: &str) -> Option<(String, String)> {
 /// by what Quarry did and not by the server's sentence, which follows its lc_messages.
 pub const STOP_MARK: &str = "\nStopped by you.";
 
+/// `raw` told as a stop when it is a cancelled statement (57014) and the person pressed Stop. Every path that sees a job's cancel flag
+/// set calls this on the error it hands on, so a stop is never taken for a statement timeout, whichever path surfaced it.
+pub fn stopped(mut raw: String) -> String {
+    if pg_code(&raw).as_deref() == Some("57014") && !raw.contains(STOP_MARK) {
+        raw.push_str(STOP_MARK);
+    }
+    raw
+}
+
 /// What went wrong, without the wording: cheap enough for a label drawn every frame.
 pub fn classify(raw: &str) -> ErrKind {
     let low = raw.to_lowercase();
@@ -448,6 +457,11 @@ mod tests {
         assert_eq!(explain("error returned from database: 42P01: relation \"x\" does not exist", &cx()).kind, ErrKind::Missing);
         assert_eq!(explain("error returned from database: 57014: canceling statement due to statement timeout", &cx()).kind, ErrKind::Timeout);
         assert_eq!(explain(&format!("error returned from database: 57014: storniere Anfrage auf Benutzerwunsch{STOP_MARK}"), &cx()).kind, ErrKind::Other);
+        // Whatever path surfaced the cancelled statement, `stopped` makes it a stop, once, and leaves other errors alone.
+        let cancelled = "error returned from database: 57014: canceling statement due to user request".to_string();
+        assert_eq!(classify(&stopped(cancelled.clone())), ErrKind::Other);
+        assert_eq!(stopped(stopped(cancelled)).matches("Stopped by you").count(), 1);
+        assert_eq!(stopped("error returned from database: 23505: duplicate key".into()), "error returned from database: 23505: duplicate key");
         assert_eq!(explain("error returned from database: 28P01: password authentication failed for user \"x\"", &cx()).kind, ErrKind::SignIn);
         assert_eq!(explain("error returned from database: 08006: connection failure", &cx()).kind, ErrKind::Lost);
         // A MySQL number is not read as a SQLSTATE.
