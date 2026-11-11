@@ -136,7 +136,6 @@ impl PgPools {
 impl Db {
     /// The same server with the options pointing at `database`, which is what picks the pool. A MySQL connection
     /// selects its database per statement, so it is returned as it is.
-    #[allow(dead_code)] // the read path and the sidebar pick databases from step 4 on
     pub fn at(&self, database: &str) -> Db {
         match &self.opts {
             Opts::Pg(o) if !database.is_empty() => Db { opts: Opts::Pg(o.clone().database(database)), ..self.clone() },
@@ -144,8 +143,16 @@ impl Db {
         }
     }
 
+    /// The database a PostgreSQL `Db` points at, empty on MySQL. Answers that name it tell the app which database of a
+    /// connection they belong to.
+    pub fn pg_database(&self) -> String {
+        match &self.opts {
+            Opts::Pg(o) => o.get_database().unwrap_or_default().to_string(),
+            Opts::My(_) => String::new(),
+        }
+    }
+
     /// The pool of the database this `Db` points at.
-    #[allow(dead_code)] // used by the read path from step 4 on
     pub fn pg_pool(&self) -> Res<PgPool> {
         match (&self.pool, &self.opts) {
             (Pool::Pg(p), Opts::Pg(o)) => Ok(p.pool(o.get_database())),
@@ -156,7 +163,6 @@ impl Db {
     /// What a transaction on this connection runs first (`SET LOCAL` for the timeout and the output formats) when the
     /// server is behind a pooler that refused startup options, and an empty string otherwise. Anything that reads
     /// through `acquire_conn` and opens its own transaction must run it right after BEGIN.
-    #[allow(dead_code)] // the Query and shell paths of steps 6 and 7 call it
     pub fn pg_locals(&self) -> String {
         match &self.pool {
             Pool::Pg(p) => p.locals().to_string(),

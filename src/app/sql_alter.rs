@@ -438,7 +438,7 @@ impl App {
             }
         }
         if ok && alter {
-            self.sql_refresh_schema(conn, &schema);
+            self.sql_refresh_schema(conn, &schema, "");
         }
     }
 

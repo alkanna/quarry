@@ -436,7 +436,8 @@ impl App {
             Ok(t) => t,
             Err(why) => return self.warn(why),
         };
-        let sel = Sel { conn, db: fk.ref_db.clone(), coll: fk.ref_table.clone() };
+        let base = self.t().map(|t| t.sel.clone()).unwrap_or_default();
+        let sel = sql_ns::with_ns(self.is_pg(conn), &base, &fk.ref_db, fk.ref_table.clone());
         self.reset_doc_state();
         match self.tabs.iter().position(|t| t.sel == sel && !has_clauses(t)) {
             Some(i) => self.set_cur(i),
@@ -508,7 +509,7 @@ mod tests {
     /// Review finding 13: a tab with the person's own clauses is not replaced by the row's filter.
     #[test]
     fn a_tab_with_clauses_is_not_reused() {
-        let sel = Sel { conn: 1, db: "shop".into(), coll: "orders".into() };
+        let sel = Sel { conn: 1, db: "shop".into(), coll: "orders".into(), ..Default::default() };
         let mut t = Tab::new(sel);
         assert!(!has_clauses(&t));
         t.sort_txt = "id DESC".into();

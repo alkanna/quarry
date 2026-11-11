@@ -38,6 +38,7 @@ impl App {
             status: Status::Ready,
             writable: false,
             dbs,
+            tables: Default::default(),
             masked_uri: "mongodb://localhost:27017".into(),
             tunnel: None,
             server: ServerInfo { version: "7.0.12".into(), set_name: "rs0".into(), host: "localhost:27017".into(), ..Default::default() },
@@ -49,6 +50,7 @@ impl App {
             status: Status::Idle,
             writable: false,
             dbs: Vec::new(),
+            tables: Default::default(),
             masked_uri: "mongodb+srv://app:****@staging.example.net".into(),
             tunnel: None,
             server: Default::default(),
@@ -56,7 +58,7 @@ impl App {
         self.active = Some(1);
         self.open_dbs.insert((1, "shop".into()));
         self.views.insert((1, "shop".into(), "paid_orders".into()));
-        let sel = |db: &str, coll: &str| Sel { conn: 1, db: db.into(), coll: coll.into() };
+        let sel = |db: &str, coll: &str| Sel { conn: 1, db: db.into(), coll: coll.into(), ..Default::default() };
         self.tabs.push(Tab::new(sel("shop", "customers")));
         let mut t = Tab::new(sel("shop", "orders"));
         t.fields = auto_fields(&docs);
@@ -89,6 +91,7 @@ impl App {
                 status: Status::Connecting,
                 writable: false,
                 dbs: Vec::new(),
+                tables: Default::default(),
                 masked_uri: "mysql://app:****@reports.internal:3306".into(),
                 tunnel: None,
                 server: Default::default(),
@@ -328,7 +331,7 @@ impl App {
             let d = self.tabs[1].docs[2].owned();
             let mut changed = d.clone();
             changed.insert("status", "shipped");
-            self.drafts.insert(self.draft_key(&d), Draft { conn: 1, db: "shop".into(), coll: "orders".into(), original: d.clone(), current: changed.clone() });
+            self.drafts.insert(self.draft_key(&d), Draft { conn: 1, db: "shop".into(), schema: String::new(), coll: "orders".into(), original: d.clone(), current: changed.clone() });
             let items = changed.get("items").cloned().unwrap();
             self.json_edit = Some(JsonEdit { base: changed, path: vec!["items".into()], text: db::to_edit_value(&items), kind: "array", focus: false });
         }
@@ -394,6 +397,7 @@ impl App {
             sql: None,
             status: Status::Ready,
             writable: false,
+            tables: Default::default(),
             dbs: vec![("information_schema".into(), None), ("mysql".into(), None), ("shop".into(), Some(shop)), ("analytics".into(), None), ("sys".into(), None)],
             masked_uri: "mysql://app:****@shop-prod.internal:3306/shop".into(),
             tunnel: None,
@@ -408,7 +412,7 @@ impl App {
         for v in ["order_totals", "top_customers"] {
             self.views.insert((3, "shop".into(), v.into()));
         }
-        let sel = |coll: &str| Sel { conn: 3, db: "shop".into(), coll: coll.into() };
+        let sel = |coll: &str| Sel { conn: 3, db: "shop".into(), coll: coll.into(), ..Default::default() };
         let engine = db::sql::Engine::MySql;
         let col = |name: &str, ty: &str, nullable: bool| Col::plain(name, ty, Kind::from_type_name(ty.split('(').next().unwrap_or(ty)), nullable);
         let cols = vec![col("id", "INT UNSIGNED", false), col("customer_id", "INT", false), col("status", "ENUM('pending','paid','shipped','refunded','cancelled')", false), col("total", "DECIMAL(10,2)", false), col("currency", "CHAR(3)", false), col("note", "TEXT", true), col("created_at", "DATETIME", false)];
@@ -577,7 +581,7 @@ impl App {
         vals.insert(crate::ui::sql_complete::value_key("orders", "status"), FieldInfo { kind: "string", values: ["paid", "shipped", "pending", "refunded", "cancelled"].map(Bson::from).to_vec(), freq: vec![61, 22, 9, 5, 3] });
         self.sql_values.insert((3, "shop".into()), vals);
         if std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("acquery") {
-            let mut t = Tab::new(Sel { conn: 3, db: "shop".into(), coll: String::new() }).for_engine(db::sql::Engine::MySql);
+            let mut t = Tab::new(Sel { conn: 3, db: "shop".into(), coll: String::new(), ..Default::default() }).for_engine(db::sql::Engine::MySql);
             t.view = View::Sql;
             if let Some(s) = t.sql.as_mut() {
                 s.query = "SELECT o.id, c.name FROM orders o\nJOIN customers c ON c.".into();

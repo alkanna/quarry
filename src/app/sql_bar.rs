@@ -1007,7 +1007,7 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col], scope: &Sco
     let matched = t.sql.as_ref().and_then(|s| s.matched).unwrap_or(0);
     let rows = t.count;
     // The statement is built only where it is shown (SQL mode) or copied.
-    let select = |t: &Tab| page_query(t).select_sql(d, &t.sel.db, &t.sel.coll, t.sql.as_ref().map_or(&[][..], |s| s.pk.as_slice()), None);
+    let select = |t: &Tab| page_query(t).select_sql(d, t.sel.space(), &t.sel.coll, t.sql.as_ref().map_or(&[][..], |s| s.pk.as_slice()), None);
     let stmt = t.sql.as_ref().is_some_and(|s| s.bar.c.sql).then(|| select(t));
     let mut copy = false;
     let Some(s) = t.sql.as_mut() else { return false };

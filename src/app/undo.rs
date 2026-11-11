@@ -27,7 +27,9 @@ impl App {
         let Some(c) = self.conn(self.undo[i].conn) else { return };
         let a = &self.undo[i];
         // SQL actions carry their own columns; the pool is read-only, so the worker switches a connection of its own.
-        if let (Some(sql), UndoKind::Sql { .. }) = (c.sql.clone(), &a.kind) {
+        if let (Some(sql), UndoKind::Sql { database, .. }) = (c.sql.as_ref(), &a.kind) {
+            // A PostgreSQL write ran in one database, and the undo runs on that one's pool.
+            let sql = sql.at(database);
             let a = self.undo.remove(i);
             let pk = match &a.kind {
                 UndoKind::Sql { undo, .. } => undo.pk_names(),

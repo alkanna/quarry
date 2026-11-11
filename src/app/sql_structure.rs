@@ -74,7 +74,7 @@ impl App {
     /// Asks for the current tab's structure. The answer is matched back by `idx_req`.
     fn request_structure(&mut self) {
         let i = self.cur;
-        let Some(db) = self.tabs.get(i).and_then(|t| self.conn(t.sel.conn)).and_then(|c| c.sql.clone()) else { return };
+        let Some((db, space)) = self.tabs.get(i).and_then(|t| self.sql_target(&t.sel)) else { return };
         self.req += 1;
         let req = self.req;
         let t = &mut self.tabs[i];
@@ -82,7 +82,7 @@ impl App {
         if let Some(s) = t.sql.as_mut() {
             s.st.load = Load::Loading;
         }
-        self.worker.sql_structure(req, db, t.sel.db.clone(), t.sel.coll.clone());
+        self.worker.sql_structure(req, db, space, t.sel.coll.clone());
     }
 
     /// The foreign keys of the open table, for the key cells of Content. The structure is asked for the first time
@@ -148,8 +148,8 @@ impl App {
         match a {
             Act::Copy(text) => ctx.copy_text(text),
             Act::Open { db, table } => {
-                let conn = self.tabs[self.cur].sel.conn;
-                self.open_collection(Sel { conn, db, coll: table }, false);
+                let base = self.tabs[self.cur].sel.clone();
+                self.open_collection(sql_ns::with_ns(self.is_pg(base.conn), &base, &db, table), false);
             }
             Act::Refresh => {
                 if let Some(s) = self.tabs[self.cur].sql.as_mut() {
@@ -189,9 +189,10 @@ impl App {
     pub(super) fn sql_structure_view(&mut self, ui: &mut egui::Ui) {
         let Some((d, mut sel)) = self.take_structure(ui) else { return };
         let mut acts = Vec::new();
-        let editable = self.sel_writable();
+        let block = self.struct_block();
+        let editable = self.sel_writable() && block.is_none();
         let is_view = self.sel_is_view();
-        let why = if is_view { "Views cannot be changed here" } else { READ_ONLY };
+        let why = if let Some(b) = block { b } else if is_view { "Views cannot be changed here" } else { READ_ONLY };
         let note = if editable { "" } else { why };
         let (staged, mut memo, applying) = self.take_staged();
         let (dropped, changed) = staged_marks(&staged);
@@ -323,8 +324,9 @@ impl App {
         let Some((d, mut sel)) = self.take_structure(ui) else { return };
         let mut acts = Vec::new();
         let mut open = None;
-        let editable = self.sel_writable();
-        let why = if self.sel_is_view() { "Views cannot be changed here" } else { READ_ONLY };
+        let block = self.struct_block();
+        let editable = self.sel_writable() && block.is_none();
+        let why = if let Some(b) = block { b } else if self.sel_is_view() { "Views cannot be changed here" } else { READ_ONLY };
         let (staged, mut memo, applying) = self.take_staged();
         let dropped: Vec<String> = staged.iter().filter_map(|c| if let Change::DropFk(n) = c { Some(n.to_ascii_lowercase()) } else { None }).collect();
         let fk = sel[2].filter(|i| *i < d.foreign_keys.len());
@@ -351,12 +353,14 @@ impl App {
             ui.add_space(8.0);
         }
         // The schema's estimate, asked for once per database; a table it has not listed yet shows nothing.
-        let conn = self.tabs[self.cur].sel.conn;
+        let (conn, base_db) = (self.tabs[self.cur].sel.conn, self.tabs[self.cur].sel.db.clone());
+        let pg = self.is_pg(conn);
         let dbs: std::collections::BTreeSet<String> = d.referenced_by.iter().map(|fk| fk.db.clone()).collect();
-        for db in dbs {
-            self.sql_serve(conn, &db, crate::ui::sql_complete::Wants { schema: true, values: None });
+        for ns in dbs {
+            let (db, schema) = sql_ns::split_ns(pg, &base_db, &ns);
+            self.sql_serve(conn, &db, &schema, crate::ui::sql_complete::Wants { schema: true, values: None });
         }
-        let in_rows: Vec<Option<u64>> = d.referenced_by.iter().map(|fk| self.sql_schema.get(&(conn, fk.db.clone())).and_then(|s| s.table(&fk.table)).and_then(|t| t.rows)).collect();
+        let in_rows: Vec<Option<u64>> = d.referenced_by.iter().map(|fk| { let (db, schema) = sql_ns::split_ns(pg, &base_db, &fk.db); self.sql_schema.get(&(conn, ns_key(&db, &schema))).and_then(|s| s.table(&fk.table)).and_then(|t| t.rows) }).collect();
         egui::ScrollArea::vertical().id_salt("sql-relations").auto_shrink([false, false]).show(ui, |ui| {
             caption(ui, "THIS TABLE POINTS TO");
             ui.add_space(6.0);
@@ -431,8 +435,9 @@ impl App {
     pub(super) fn sql_triggers_view(&mut self, ui: &mut egui::Ui) {
         let Some((d, mut sel)) = self.take_structure(ui) else { return };
         let mut acts = Vec::new();
-        let editable = self.sel_writable();
-        let why = if self.sel_is_view() { "Views cannot be changed here" } else { "Read-only: unlock writes to change triggers" };
+        let block = self.struct_block();
+        let editable = self.sel_writable() && block.is_none();
+        let why = if let Some(b) = block { b } else if self.sel_is_view() { "Views cannot be changed here" } else { "Read-only: unlock writes to change triggers" };
         // A trigger that was just created is listed now, so its draft has done its job.
         if let Some(s) = self.tabs[self.cur].sql.as_mut() {
             if let Some(i) = s.st.trig.get(sql_trig::NEW).and_then(|nd| d.triggers.iter().position(|t| sql_trig::same(&sql_trig::def_of(t), nd))) {
@@ -504,7 +509,18 @@ impl App {
         let s = &d.status;
         let none = || "-".to_string();
         let bytes = |n: Option<u64>| n.map_or_else(none, size);
-        let rows = [
+        let pg = self.is_pg(self.tabs[self.cur].sel.conn);
+        let rows: Vec<(&str, String)> = if pg {
+            // PostgreSQL has no engine, row format or auto increment to report: the sizes come from the catalog.
+            vec![
+                ("Rows (estimate)", s.rows.map_or_else(none, |n| format!("~{}", group(&n.to_string())))),
+                ("Data", bytes(s.data)),
+                ("Indexes", bytes(s.index)),
+                ("Total", bytes(s.total)),
+                ("Comment", s.comment.clone()),
+            ]
+        } else {
+            vec![
             ("Engine", s.engine.clone()),
             ("Row format", s.row_format.clone()),
             ("Collation", s.collation.clone()),
@@ -517,7 +533,8 @@ impl App {
             ("Created", if s.created.is_empty() { none() } else { s.created.clone() }),
             ("Updated", if s.updated.is_empty() { none() } else { s.updated.clone() }),
             ("Comment", s.comment.clone()),
-        ];
+            ]
+        };
         let h = ui.available_height();
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 16.0;
@@ -533,13 +550,15 @@ impl App {
                         });
                     }
                 });
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    for name in ["Analyze", "Optimize", "Check"] {
-                        ui.add_enabled_ui(false, |ui| ui.button(name)).response.on_disabled_hover_text(LATER);
-                    }
-                    ui.add_enabled_ui(false, |ui| danger(ui, "Truncate...")).response.on_disabled_hover_text(LATER);
-                });
+                if !pg {
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        for name in ["Analyze", "Optimize", "Check"] {
+                            ui.add_enabled_ui(false, |ui| ui.button(name)).response.on_disabled_hover_text(LATER);
+                        }
+                        ui.add_enabled_ui(false, |ui| danger(ui, "Truncate...")).response.on_disabled_hover_text(LATER);
+                    });
+                }
             });
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
@@ -674,7 +693,8 @@ fn column_cell(ui: &egui::Ui, rect: Rect, c: &Column, col: usize) {
             Some(d) if c.default_expr => {
                 put(ui, rect, d, mono(), C_KEYWORD(), false);
             }
-            Some(d) if matches!(base.as_str(), "TINYINT" | "SMALLINT" | "MEDIUMINT" | "INT" | "INTEGER" | "BIGINT" | "DECIMAL" | "NUMERIC" | "FLOAT" | "DOUBLE" | "BIT" | "YEAR") => {
+            // PostgreSQL types carry the kind its catalog gave them, which sees through domains and enums.
+            Some(d) if c.kind.map_or_else(|| matches!(base.as_str(), "TINYINT" | "SMALLINT" | "MEDIUMINT" | "INT" | "INTEGER" | "BIGINT" | "DECIMAL" | "NUMERIC" | "FLOAT" | "DOUBLE" | "BIT" | "YEAR"), super::sql_edit::is_numeric) => {
                 put(ui, rect, d, mono(), C_NUMBER(), false);
             }
             Some(d) => {

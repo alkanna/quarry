@@ -132,13 +132,16 @@ impl App {
             }
             Jump::Db(_, db) => {
                 let n = c.dbs.iter().find(|d| d.0 == *db).and_then(|d| d.1.as_ref()).map(|v| v.len());
-                let meta = n.map(|n| format!("{n} {}", if sql { "tables" } else { "collections" })).unwrap_or_default();
+                // A PostgreSQL database lists its schemas, and its tables sit one level down.
+                let unit = if c.meta.engine == db::sql::Engine::Postgres { "schemas" } else if sql { "tables" } else { "collections" };
+                let meta = n.map(|n| format!("{n} {unit}")).unwrap_or_default();
                 (db.clone(), c.meta.name.clone(), Glyph::Db, meta, None)
             }
             Jump::Coll(s) => {
-                let view = self.views.contains(&(s.conn, s.db.clone(), s.coll.clone()));
+                let view = self.views.contains(&(s.conn, s.nskey(), s.coll.clone()));
                 let glyph = if view { Glyph::View } else if sql { Glyph::Table } else { Glyph::Coll };
-                (s.coll.clone(), format!("{} \u{203a} {}{}", c.meta.name, s.db, if view { " \u{b7} view" } else { "" }), glyph, String::new(), None)
+                let place = if s.schema.is_empty() { s.db.clone() } else { format!("{} \u{203a} {}", s.db, s.schema) };
+                (s.coll.clone(), format!("{} \u{203a} {}{}", c.meta.name, place, if view { " \u{b7} view" } else { "" }), glyph, String::new(), None)
             }
         };
         Some(Row { name, sub, glyph, mark: Some(mark), tag: c.meta.tag.clone(), meta, keys: String::new(), status, act: Act::Jump(j) })
@@ -174,8 +177,11 @@ impl App {
                 if lockable && c.writable {
                     add(&g, Row::cmd("Lock writes", Glyph::Lock, "", Cmd::LockWrites));
                 }
-                add(&g, Row::cmd("Server status", Glyph::Prompt, "", Cmd::Server));
-                add(&g, Row::cmd("Users", Glyph::Prompt, "", Cmd::Users));
+                // Neither window is built for PostgreSQL yet.
+                if c.meta.engine != db::sql::Engine::Postgres {
+                    add(&g, Row::cmd("Server status", Glyph::Prompt, "", Cmd::Server));
+                    add(&g, Row::cmd("Users", Glyph::Prompt, "", Cmd::Users));
+                }
                 add(&g, Row::cmd("Disconnect", Glyph::Prompt, "", Cmd::Disconnect));
             } else if c.status != Status::Connecting {
                 add(&g, Row::cmd("Connect", Glyph::Reload, keys(true, false, "R"), Cmd::Connect));
@@ -266,6 +272,10 @@ impl App {
             Cmd::NewQuery => {
                 if let Some(s) = self.t().map(|t| t.sel.clone()) {
                     self.sql_new_query(s.conn, s.db);
+                    // The new tab starts in the schema of the one it was opened from, not the sidebar's.
+                    if !s.schema.is_empty() && let Some(t) = self.tm() {
+                        t.sel.schema = s.schema;
+                    }
                 }
             }
             Cmd::Connect if !self.demo => {
@@ -286,6 +296,7 @@ impl App {
                 }
             }
             Cmd::Users => match active {
+                Some(id) if self.is_pg(id) => self.warn("Users and privileges are not built for PostgreSQL yet."),
                 Some(id) if self.conn(id).is_some_and(|c| c.meta.engine.is_sql()) => self.open_sql_users(id),
                 Some(id) => self.side_act(id, SideAct::Users),
                 None => {}
@@ -415,7 +426,7 @@ impl App {
             for (i, t) in self.tabs.iter().enumerate() {
                 if !tok.is_empty() {
                     let conn = self.conn(t.sel.conn).map_or("", |c| c.meta.name.as_str());
-                    let hay = format!("{} {} {conn}", names[i], t.sel.db).to_lowercase();
+                    let hay = format!("{} {} {} {conn}", names[i], t.sel.db, t.sel.schema).to_lowercase();
                     if !tok.iter().all(|w| hay.contains(w.as_str())) {
                         continue;
                     }
@@ -457,7 +468,7 @@ impl App {
                     self.tab_group_head(ui, *conn, idx.len());
                     let mut prev_db = None;
                     for &i in idx {
-                        let db = self.tabs[i].sel.db.as_str();
+                        let db = self.tabs[i].sel.scope_label();
                         let show_db = prev_db != Some(db);
                         prev_db = Some(db);
                         let (r, x) = self.tab_list_row(ui, i, &names[i], k == sel, show_db, &tok);
@@ -557,7 +568,7 @@ impl App {
         let w = g.size().x;
         p.galley(egui::pos2(nx, cy - g.size().y / 2.0 + optical_dy(&g)), g, color);
         if show_db {
-            let db = truncated(p, &self.tabs[i].sel.db, FontId::monospace(TXT_CAPTION), FAINT(), right - nx - w - 8.0);
+            let db = truncated(p, self.tabs[i].sel.scope_label(), FontId::monospace(TXT_CAPTION), FAINT(), right - nx - w - 8.0);
             p.galley(egui::pos2(nx + w + 8.0, cy - db.size().y / 2.0), db, FAINT());
         }
         (r.on_hover_cursor(egui::CursorIcon::PointingHand), x_clicked)

@@ -30,8 +30,10 @@ impl App {
             if rail_button(ui, RailIcon::Log, self.log.open, true, "Query log (Cmd+L)").clicked() {
                 self.log.open = !self.log.open;
             }
-            let tip = if connected { "Server status" } else { "Server status (connect first)" };
-            if rail_button(ui, RailIcon::Server, self.server.is_some() || self.sql_server.is_some(), connected, tip).clicked()
+            // The server window reads MongoDB commands and MySQL status; there is no PostgreSQL one yet.
+            let pg = self.active.is_some_and(|id| self.is_pg(id));
+            let tip = if pg { "Server status (not built for PostgreSQL yet)" } else if connected { "Server status" } else { "Server status (connect first)" };
+            if rail_button(ui, RailIcon::Server, self.server.is_some() || self.sql_server.is_some(), connected && !pg, tip).clicked()
                 && let Some(conn) = self.active
             {
                 self.open_server(conn);
@@ -101,6 +103,7 @@ impl App {
         self.req += 1;
         match self.conn(conn).map(|c| (c.meta.engine, c.sql.as_ref().map(|d| d.dialect), c.meta.advanced.clone())) {
             // The Mongo window would wait forever for commands a SQL server never answers.
+            Some((db::sql::Engine::Postgres, ..)) => self.warn("Server status is not built for PostgreSQL yet."),
             Some((db::sql::Engine::MySql, dialect, adv)) => self.sql_server = Some(SqlServerWin::new(conn, dialect.map(|d| db::sql::server::set_by_quarry(&adv, d, db::sql::advanced::local_offset_secs())).unwrap_or_default())),
             _ => self.server = Some(ServerWin::new(conn, self.req)),
         }
@@ -111,6 +114,7 @@ impl App {
         let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == id) else { return };
         (c.client, c.sql, c.tunnel, c.status, c.writable) = (None, None, None, Status::Idle, false);
         c.dbs.clear();
+        c.tables.clear();
         let name = c.meta.name.clone();
         self.ok(format!("Disconnected from {name}"));
     }

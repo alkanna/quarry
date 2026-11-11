@@ -160,9 +160,13 @@ impl Dialect {
 
     /// The schemas of the connected database that hold user objects, PostgreSQL only. Empty on the MySQL family, whose
     /// databases are listed by `SHOW DATABASES`.
-    #[allow(dead_code)] // the sidebar asks from step 8 on
     pub fn schemas(self) -> &'static str {
         if self == Dialect::Postgres { super::pg_catalog::SCHEMAS } else { "" }
+    }
+
+    /// Like `schemas` with the system schemas flagged and a table count per schema, for the sidebar's switcher.
+    pub fn schemas_all(self) -> &'static str {
+        if self == Dialect::Postgres { super::pg_catalog::SCHEMAS_ALL } else { "" }
     }
 
     /// Works on both engines and stops writes inside the session.

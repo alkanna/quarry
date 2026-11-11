@@ -189,11 +189,13 @@ impl App {
         let all = set.filter(|x| x.error.is_none() && !x.stmt.trim().is_empty()).and_then(|x| {
             let db = self.conn(t.sel.conn).and_then(|c| c.sql.clone())?;
             let refused = db::sql::lex::read_only_check(&x.stmt, db.dialect).err();
-            Some(AllRows { db, schema: t.sql.as_ref().map(|s| s.run_db.clone()).filter(|d| !d.is_empty()).unwrap_or_else(|| t.sel.db.clone()), stmt: x.stmt.clone(), total: x.page.and_then(|p| p.total), paged, refused })
+            // The same database and schema the statement ran in, so it reads what the grid showed.
+            let (db, schema) = super::sql_query::run_target(t, db);
+            Some(AllRows { db, schema, stmt: x.stmt.clone(), total: x.page.and_then(|p| p.total), paged, refused })
         });
         let script = t.sql.as_ref().filter(|_| src == Src::Query).and_then(|s| {
             let db = self.conn(t.sel.conn).and_then(|c| c.sql.clone())?;
-            let schema = Some(s.run_db.clone()).filter(|d| !d.is_empty()).unwrap_or_else(|| t.sel.db.clone());
+            let (db, schema) = super::sql_query::run_target(t, db);
             let stmts = db::sql::export::check_script(&s.query, db.dialect);
             Some(Script { db, schema, stmts })
         });
@@ -307,7 +309,8 @@ impl App {
                 *keep = false;
             }
             // A table of the Content view can also leave as a dump with its structure.
-            if f.sql && f.src == Src::Content {
+            // The dump is built for MySQL only so far.
+            if f.sql && f.src == Src::Content && !self.t().is_some_and(|t| self.is_pg(t.sel.conn)) {
                 if quiet(ui, "SQL dump…").on_hover_text("The table with its structure, or the whole database, as a script").clicked() {
                     *keep = false;
                     if let Some(s) = self.t().map(|t| t.sel.clone()) {
@@ -395,7 +398,8 @@ impl App {
             return self.warn(why);
         }
         let Some(db) = self.conn(t.sel.conn).and_then(|c| c.sql.clone()) else { return self.warn_offline() };
-        let a = AllRows { db, schema: if s.run_db.is_empty() { t.sel.db.clone() } else { s.run_db.clone() }, stmt: set.stmt.clone(), total: None, paged: true, refused: None };
+        let (db, schema) = super::sql_query::run_target(t, db);
+        let a = AllRows { db, schema, stmt: set.stmt.clone(), total: None, paged: true, refused: None };
         let table = self.export_sheet(Src::Query, &[]).1;
         let plan = Plan { fmt, header, table, bs: self.sql_bs() };
         self.start_stream(&a, plan, Sink::Clipboard, true);

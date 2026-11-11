@@ -75,7 +75,7 @@ impl App {
             return self.write_sql_drafts(vec![key.to_string()]);
         }
         let Some(dr) = self.drafts.remove(key) else { return };
-        let Some(target) = self.target_for(&Sel { conn: dr.conn, db: dr.db.clone(), coll: dr.coll.clone() }) else {
+        let Some(target) = self.target_for(&Sel { conn: dr.conn, db: dr.db.clone(), schema: dr.schema.clone(), coll: dr.coll.clone() }) else {
             self.drafts.insert(key.to_string(), dr);
             return self.warn_offline();
         };
@@ -98,7 +98,7 @@ pub(super) fn stage_draft(drafts: &mut HashMap<String, Draft>, key: &str, sel: &
     if n == 0 {
         drafts.remove(key);
     } else {
-        drafts.insert(key.to_string(), Draft { conn: sel.conn, db: sel.db.clone(), coll: sel.coll.clone(), original, current: new });
+        drafts.insert(key.to_string(), Draft { conn: sel.conn, db: sel.db.clone(), schema: sel.schema.clone(), coll: sel.coll.clone(), original, current: new });
     }
     n
 }
@@ -106,7 +106,7 @@ pub(super) fn stage_draft(drafts: &mut HashMap<String, Draft>, key: &str, sel: &
 /// Keys of the drafts in one collection. Matched on the draft's own fields, not a key prefix:
 /// collection names may contain `#`, so `a#` would also match drafts of `a#b`.
 pub(super) fn drafts_of(drafts: &HashMap<String, Draft>, sel: &Sel) -> Vec<String> {
-    drafts.iter().filter(|(_, d)| d.conn == sel.conn && d.db == sel.db && d.coll == sel.coll).map(|(k, _)| k.clone()).collect()
+    drafts.iter().filter(|(_, d)| d.conn == sel.conn && d.db == sel.db && d.schema == sel.schema && d.coll == sel.coll).map(|(k, _)| k.clone()).collect()
 }
 
 /// The document as stored on the server: deletes must match that, not its unsaved edits.
@@ -119,7 +119,7 @@ mod tests {
     use super::*;
 
     fn sel(coll: &str) -> Sel {
-        Sel { conn: 1, db: "shop".into(), coll: coll.into() }
+        Sel { conn: 1, db: "shop".into(), coll: coll.into(), ..Default::default() }
     }
 
     #[test]

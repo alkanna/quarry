@@ -424,7 +424,8 @@ impl App {
         };
         let Some(t) = self.t() else { return };
         let (sel, code, main_sql) = (t.sel.clone(), t.shell.code.clone(), t.sql.is_some());
-        let collections: Vec<String> = self.conn(sel.conn).and_then(|c| c.dbs.iter().find(|d| d.0 == sel.db)).and_then(|d| d.1.clone()).unwrap_or_default();
+        let collections: Vec<String> = self.tables_of(&sel);
+        let schema = self.sel_schema(&sel);
         let packages: Vec<String> = self.prefs.shell_packages.iter().map(|p| db::package_spec(p).0).collect();
         let read_only = !self.sel_writable();
         // A PostgreSQL attachment's tables are not saved with the tab, so a restored one lists them again. They arrive
@@ -445,9 +446,9 @@ impl App {
         if main_sql {
             let Some(db) = self.conn(sel.conn).and_then(|c| c.sql.clone()) else { return self.warn_offline() };
             if db.dialect == db::sql::Dialect::Postgres {
-                // The tab's database picks the pool. The tab has no schema yet, so the script starts in the default one.
+                // The tab's database picks the pool, and the script starts in the tab's schema.
                 sql_entries.insert(0, serde_json::json!({ "name": name, "db": sel.db, "tables": collections, "dialect": "postgres" }));
-                sql.insert(0, (name.clone(), db::SqlRelay { db: db.at(&sel.db), schema: PG_SCHEMA.into(), read_only, conn_id: Default::default() }));
+                sql.insert(0, (name.clone(), db::SqlRelay { db: db.at(&sel.db), schema, read_only, conn_id: Default::default() }));
             } else {
                 sql_entries.insert(0, serde_json::json!({ "name": name, "db": sel.db, "tables": collections, "dialect": "mysql" }));
                 sql.insert(0, (name.clone(), db::SqlRelay { db, schema: sel.db.clone(), read_only, conn_id: Default::default() }));
@@ -481,7 +482,8 @@ impl App {
             self.sql_columns_ask(true);
         }
         for a in self.tabs[self.cur].shell.attached.clone() {
-            if let Some(db) = self.conn(a.conn).and_then(|c| c.sql.clone()) {
+            // A PostgreSQL attachment lists its tables through its own request and is typed loosely.
+            if let Some(db) = self.conn(a.conn).filter(|c| c.meta.engine != db::sql::Engine::Postgres).and_then(|c| c.sql.clone()) {
                 self.sql_schema_asked.insert((a.conn, a.db.clone()));
                 self.worker.sql_schema(a.conn, db, a.db);
             }
@@ -528,13 +530,13 @@ impl App {
             pkg_names.push("_".into());
         }
         let mut new_pkg = std::mem::take(&mut self.new_pkg);
-        let colls: Vec<String> = self.t().and_then(|t| self.conn(t.sel.conn).and_then(|c| c.dbs.iter().find(|d| d.0 == t.sel.db)).and_then(|d| d.1.clone())).unwrap_or_default();
+        let colls: Vec<String> = self.t().map(|t| self.tables_of(&t.sel)).unwrap_or_default();
         let known = if sql { Vec::new() } else { self.db_fields() };
         // What SQL templates in the script complete from: the tab's database and its looked up values.
-        let sql_cx = sql.then(|| (self.tabs[self.cur].sel.conn, self.tabs[self.cur].sel.db.clone()));
-        let scope = sql_cx.as_ref().map(|(c, d)| Self::sql_scope(&self.conns, &self.sql_schema, &self.views, *c, d, None));
+        let sql_cx = sql.then(|| (self.tabs[self.cur].sel.conn, self.tabs[self.cur].sel.db.clone(), self.sel_schema(&self.tabs[self.cur].sel)));
+        let scope = sql_cx.as_ref().map(|(c, d, s)| Self::sql_scope(&self.conns, &self.sql_schema, &self.views, *c, d, s, None));
         let none = Fields::new();
-        let values = sql_cx.as_ref().and_then(|k| self.sql_values.get(k)).unwrap_or(&none);
+        let values = sql_cx.as_ref().and_then(|(c, d, s)| self.sql_values.get(&(*c, ns_key(d, s)))).unwrap_or(&none);
         let (t, ac) = (&mut self.tabs[self.cur], &mut self.ac);
         if t.shell.code.is_empty() {
             t.shell.code = default_script(&coll, sql);
@@ -809,8 +811,8 @@ impl App {
         if saved {
             self.save_prefs();
         }
-        if let (Some(n), Some((c, d))) = (sql_need, &sql_cx) {
-            self.sql_serve(*c, d, Wants { schema: false, values: Some(n) });
+        if let (Some(n), Some((c, d, s))) = (sql_need, &sql_cx) {
+            self.sql_serve(*c, d, s, Wants { schema: false, values: Some(n) });
         }
         if let Some(f) = editor {
             self.js_editor(ui.ctx(), f, &colls);

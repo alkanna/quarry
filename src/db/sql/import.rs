@@ -330,7 +330,7 @@ async fn import_on(c: &mut sqlx::MySqlConnection, d: Dialect, schema: &str, tabl
         _ if found.is_empty() => None,
         _ => {
             let cols: Vec<Col> = plan.info.cols.iter().map(|c| Col { generated: c.generated, auto_increment: c.auto_increment, ..Col::plain(&c.name, &c.full_type, Kind::from_column_type(&c.full_type), c.nullable) }).collect();
-            Some(action(conn, schema, table, &cols, super::write::SqlUndo::Insert(found)))
+            Some(action(String::new(), conn, schema, table, &cols, super::write::SqlUndo::Insert(found)))
         }
     };
     Ok(Done { rows, inserted, undo, why_not })

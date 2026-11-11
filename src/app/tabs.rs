@@ -58,6 +58,10 @@ impl App {
             self.active = Some(id);
             if !sel.db.is_empty() {
                 self.open_dbs.insert((id, sel.db.clone()));
+                // The tree lists the schema of the tab, or its table would not be there to reveal.
+                if !sel.schema.is_empty() && self.is_pg(id) {
+                    self.pg_set_schema(id, &sel.db, sel.schema.clone());
+                }
                 self.reveal = Some((id, sel.db, (!sel.coll.is_empty()).then_some(sel.coll)));
             }
         }
@@ -216,13 +220,13 @@ mod tests {
 
     #[test]
     fn explorer_follows_the_tab_connection() {
-        let sel = Sel { conn: 2, db: "shop".into(), coll: "orders".into() };
+        let sel = Sel { conn: 2, db: "shop".into(), coll: "orders".into(), ..Default::default() };
         assert_eq!(follow_conn(&sel, |id| id == 2), Some(2));
         assert_eq!(follow_conn(&sel, |id| id == 1), None);
     }
 
     fn sel(coll: &str) -> Sel {
-        Sel { conn: 1, db: "shop".into(), coll: coll.into() }
+        Sel { conn: 1, db: "shop".into(), coll: coll.into(), ..Default::default() }
     }
 
     /// Final review finding 3: a dropped table's tab before the current one used to leave `cur` on the next tab, so a

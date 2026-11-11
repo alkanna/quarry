@@ -38,6 +38,7 @@ pub mod users;
 pub use advanced::{Advanced, Charset, TestInfo, Zone};
 pub use dialect::{Dialect, FUNCTIONS, KEYWORDS};
 pub use structure::Structure;
+pub use pg_read::PgSchema;
 pub use relay::{Answer, Arg, Relay};
 pub use run::RunHandle;
 

@@ -61,12 +61,18 @@ fn run_db(t: &Tab) -> String {
     t.sql.as_ref().map(|s| s.run_db.clone()).filter(|d| !d.is_empty()).unwrap_or_else(|| t.sel.db.clone())
 }
 
+/// The schema a PostgreSQL Query view runs in: the one typed in its schema field, else the tab's own, which is the one
+/// the sidebar showed when the tab was opened.
+fn run_schema_of(t: &Tab) -> String {
+    Some(t.sql.as_ref().map(|s| s.run_schema.trim().to_string()).unwrap_or_default()).filter(|s| !s.is_empty()).unwrap_or_else(|| t.sel.schema.clone())
+}
+
 /// The database a run connects to and the namespace inside it. A PostgreSQL connection is bound to one database, so
-/// the `Db` points at it and the namespace is the tab's schema; MySQL picks the database per statement.
-fn run_target(t: &Tab, db: db::sql::Db) -> (db::sql::Db, String) {
+/// the `Db` points at it and the namespace is the tab's schema; MySQL picks the database per statement. Export of a
+/// result uses it too, so the statement reads the same tables it ran against.
+pub(super) fn run_target(t: &Tab, db: db::sql::Db) -> (db::sql::Db, String) {
     if db.dialect == db::sql::Dialect::Postgres {
-        let schema = t.sql.as_ref().map(|s| s.run_schema.clone()).unwrap_or_default();
-        return (db.at(&run_db(t)), schema);
+        return (db.at(&run_db(t)), run_schema_of(t));
     }
     (db, run_db(t))
 }
@@ -222,7 +228,8 @@ impl App {
     /// Opens a Query tab for a database. It has no table, so its collection name stays empty.
     pub(super) fn sql_new_query(&mut self, conn: u64, db: String) {
         let engine = self.conn(conn).map(|c| c.meta.engine).unwrap_or_default();
-        let mut t = Tab::new(Sel { conn, db, coll: String::new() }).for_engine(engine);
+        // A PostgreSQL Query tab starts in the schema the sidebar shows for its database.
+        let mut t = Tab::new(self.sel_in(conn, &db, String::new())).for_engine(engine);
         t.view = View::Sql;
         self.tabs.push(t);
         self.set_cur(self.tabs.len() - 1);
@@ -334,6 +341,7 @@ impl App {
         let (mut pick, mut load, mut picked) = (schema.clone(), None, false);
         let dialect = self.sql_dialect().0;
         let mut pg_schema = t_schema(self.t());
+        let tab_schema = self.t().map(|t| t.sel.schema.clone()).unwrap_or_default();
         ui.horizontal(|ui| {
             ui.label(semibold(RichText::new(&title).size(TXT_HEADING).color(BRIGHT())));
             ui.add_space(6.0);
@@ -348,7 +356,7 @@ impl App {
             });
             if dialect == db::sql::Dialect::Postgres {
                 ui.add_space(4.0);
-                ui.add(egui::TextEdit::singleline(&mut pg_schema).font(FontId::monospace(TXT_SMALL)).hint_text("schema").desired_width(100.0)).on_hover_text("The schema put first in search_path for this tab. Empty keeps the server's own.");
+                ui.add(egui::TextEdit::singleline(&mut pg_schema).font(FontId::monospace(TXT_SMALL)).hint_text(RichText::new(&tab_schema).color(FAINT())).desired_width(100.0)).on_hover_text("The schema put first in search_path for this tab. Empty uses the schema this tab was opened in.");
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // The first one added sits at the right edge: the history, then the library beside it.
@@ -407,10 +415,15 @@ impl App {
         });
         ui.add_space(8.0);
         if picked {
+            // Another PostgreSQL database has its own schemas, so the tab moves to the one its sidebar shows.
+            let schema = if self.is_pg(conn) { self.pg_picked(conn, &pick) } else { String::new() };
+            if self.is_pg(conn) && !self.sql_asked.contains(&(conn, pick.clone())) {
+                self.pg_ask_schemas(conn, &pick);
+            }
             if let Some(t) = self.tm() {
                 match (free, t.sql.as_mut()) {
-                    (true, _) => t.sel.db = pick,
-                    (false, Some(s)) => s.run_db = pick,
+                    (true, _) => (t.sel.db, t.sel.schema) = (pick, schema),
+                    (false, Some(s)) => (s.run_db, s.run_schema) = (pick, schema),
                     _ => {}
                 }
             }
@@ -519,11 +532,11 @@ impl App {
         let id = Self::sql_editor_id(self.cur);
         let focused = ui.memory(|m| m.has_focus(id));
         let avail = ui.available_height();
-        let Some((conn, db)) = self.tabs.get(self.cur).map(|t| (t.sel.conn, run_db(t))) else { return };
-        let scope = Self::sql_scope(&self.conns, &self.sql_schema, &self.views, conn, &db, None);
+        let Some((conn, db, schema)) = self.tabs.get(self.cur).map(|t| (t.sel.conn, run_db(t), if self.is_pg(t.sel.conn) { Some(run_schema_of(t)).filter(|s| !s.is_empty()).unwrap_or_else(|| self.sel_schema(&t.sel)) } else { String::new() })) else { return };
+        let scope = Self::sql_scope(&self.conns, &self.sql_schema, &self.views, conn, &db, &schema, None);
         let dialect = scope.dialect;
         let none = Fields::new();
-        let values = self.sql_values.get(&(conn, db.clone())).unwrap_or(&none);
+        let values = self.sql_values.get(&(conn, ns_key(&db, &schema))).unwrap_or(&none);
         let Some(s) = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()) else { return };
         let lines = s.query.split('\n').count();
         // The editor keeps three lines, and the results below it their tabs, header and three rows.
@@ -574,7 +587,7 @@ impl App {
             });
         });
         let wants = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()).map(|s| std::mem::take(&mut s.bar.wants)).unwrap_or_default();
-        self.sql_serve(conn, &db, wants);
+        self.sql_serve(conn, &db, &schema, wants);
         let bar = splitter(ui);
         if resize_editor(&bar, &mut self.prefs.query_editor_h, framed.response.rect.height(), lo, hi) {
             self.save_prefs();
@@ -784,7 +797,7 @@ impl App {
 
     /// QUARRY_TEST_SQL=query: a Query tab with the multi-statement script of the design and its three outcomes.
     pub(super) fn sql_query_demo(&mut self) {
-        let mut t = Tab::new(Sel { conn: 3, db: "shop".into(), coll: String::new() }).for_engine(db::sql::Engine::MySql);
+        let mut t = Tab::new(Sel { conn: 3, db: "shop".into(), coll: String::new(), ..Default::default() }).for_engine(db::sql::Engine::MySql);
         t.view = View::Sql;
         let col = |name: &str, ty: &str| Col::plain(name, ty, Kind::from_type_name(ty), false);
         let people: [(&str, &str, i64, &str); 7] = [

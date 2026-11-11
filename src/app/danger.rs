@@ -92,7 +92,7 @@ impl App {
             Danger::Validator(cmd) => self.worker.db_change(conn, target.client, target.db, cmd, "Validator updated".into()),
             Danger::DropCollection => {
                 // The sidebar's drop also reloads the collection list, which keeps a refused drop visible.
-                let Sel { conn, db, coll } = self.t().unwrap().sel.clone();
+                let Sel { conn, db, coll, .. } = self.t().unwrap().sel.clone();
                 self.danger(Danger::DropCollAt { conn, db, coll });
             }
             Danger::RenameMany { scope, from, to } => self.worker.rename_many(target, scope, from, to),

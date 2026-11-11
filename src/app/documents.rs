@@ -197,7 +197,7 @@ impl App {
         if t.sql.is_some() && t.sel.coll.is_empty() {
             return self.sql_query_view(ui);
         }
-        let (coll, view, db) = (t.sel.coll.clone(), t.view, t.sel.db.clone());
+        let (coll, view, db) = (t.sel.coll.clone(), t.view, t.sel.scope_label().to_string());
         // What the collection holds: documents, data size and indexes. The whole collection's
         // count, not the filter's, which the results line shows. Without statistics only an
         // unfiltered count says what the collection holds.

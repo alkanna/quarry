@@ -167,7 +167,7 @@ impl App {
 
     /// Opens the referenced document in its collection's tab.
     pub(super) fn go_ref(&mut self, conn: u64, db: String, coll: String, id: Bson) {
-        self.open_collection(Sel { conn, db, coll }, false);
+        self.open_collection(Sel { conn, db, coll, ..Default::default() }, false);
         let t = self.tm().unwrap();
         t.view = View::Documents;
         t.filter_txt = format!("{{ _id: {} }}", db::shell_text(&id));

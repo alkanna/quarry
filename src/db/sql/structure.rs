@@ -30,7 +30,6 @@ pub struct Column {
     pub check: Option<String>,
     /// The kind the server's catalog gave the column, set on PostgreSQL where the type name alone cannot say (a domain
     /// over int, an enum). MySQL leaves it None and `Kind::from_column_type` reads `full_type`.
-    #[allow(dead_code)] // the structure view reads it from step 8 on
     pub kind: Option<Kind>,
     /// PostgreSQL's default exactly as `pg_get_expr` wrote it, with its cast, so a CREATE TABLE can repeat it.
     pub default_raw: Option<String>,
@@ -151,7 +150,6 @@ pub struct Status {
     pub updated: String,
     pub comment: String,
     /// PostgreSQL's `pg_total_relation_size`: the heap, its TOAST table and the indexes.
-    #[allow(dead_code)] // the Info view shows it from step 8 on
     pub total: Option<u64>,
 }
 

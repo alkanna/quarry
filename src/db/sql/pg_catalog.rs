@@ -156,9 +156,18 @@ pub const VALUE_GATE: &str = "SELECT CASE WHEN c.reltuples > 0 THEN c.reltuples:
 
 /// No parameters. The schemas of the database the connection points at that hold user objects: not the system ones,
 /// not TOAST or temporary ones, and only those the login may use.
-#[allow(dead_code)] // see `Dialect::schemas`
 pub const SCHEMAS: &str = "SELECT n.nspname::text AS name FROM pg_namespace n WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') \
      AND n.nspname NOT LIKE 'pg\\_toast%' AND n.nspname NOT LIKE 'pg\\_temp\\_%' AND has_schema_privilege(n.oid, 'USAGE') ORDER BY n.nspname";
+
+/// No parameters. Every schema the login may use, with how many tables and views the sidebar would list in it and
+/// whether it is a system one (the catalogs, TOAST and temporary schemas), so the schema switcher can hide those until
+/// asked. Columns: name, system (0 or 1), tables.
+pub const SCHEMAS_ALL: &str = concat!(
+    "SELECT n.nspname::text AS name, (n.nspname IN ('pg_catalog', 'information_schema') OR n.nspname LIKE 'pg\\_toast%' OR n.nspname LIKE 'pg\\_temp\\_%')::int AS system, \
+     (SELECT count(*) FROM pg_class c WHERE c.relnamespace = n.oid AND ",
+    listed!(),
+    ")::bigint AS tables FROM pg_namespace n WHERE has_schema_privilege(n.oid, 'USAGE') ORDER BY n.nspname"
+);
 
 /// Params: [schema, table]. The constraints a CREATE TABLE writes in its own text: primary key, unique, check and
 /// exclusion, as `pg_get_constraintdef` words them. Foreign keys come from `FOREIGN_KEYS`, which spells the referenced

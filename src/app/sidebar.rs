@@ -40,7 +40,7 @@ pub(super) fn jump_score(tokens: &[String], segs: &[&str]) -> Option<u32> {
             None => return None,
         };
         total += sc;
-        if n + 1 == tokens.len() && segs.len() == 3 && i == 2 {
+        if n + 1 == tokens.len() && segs.len() >= 3 && i + 1 == segs.len() {
             total += 3;
         }
     }
@@ -73,8 +73,19 @@ pub(super) fn jumps(conns: &[Conn], active: Option<u64>, q: &str) -> Vec<(String
         for (db, colls) in &c.dbs {
             let dbl = db.to_lowercase();
             push(&[&name, &dbl], db.clone(), &c.meta.name, Jump::Db(id, db.clone()));
+            if c.meta.engine == db::sql::Engine::Postgres {
+                // Only the schemas that were opened have their tables loaded, and those are what the palette knows.
+                let mut loaded: Vec<(&(String, String), &Vec<String>)> = c.tables.iter().filter(|(k, _)| k.0 == *db).collect();
+                loaded.sort_by(|a, b| a.0.cmp(b.0));
+                for ((_, schema), tables) in loaded {
+                    for coll in tables {
+                        push(&[&name, &dbl, &schema.to_lowercase(), &coll.to_lowercase()], format!("{db}.{schema}.{coll}"), &c.meta.name, Jump::Coll(Sel { conn: id, db: db.clone(), schema: schema.clone(), coll: coll.clone() }));
+                    }
+                }
+                continue;
+            }
             for coll in colls.iter().flatten() {
-                push(&[&name, &dbl, &coll.to_lowercase()], format!("{db}.{coll}"), &c.meta.name, Jump::Coll(Sel { conn: id, db: db.clone(), coll: coll.clone() }));
+                push(&[&name, &dbl, &coll.to_lowercase()], format!("{db}.{coll}"), &c.meta.name, Jump::Coll(Sel { conn: id, db: db.clone(), coll: coll.clone(), ..Default::default() }));
             }
         }
     }
@@ -177,7 +188,8 @@ impl App {
                 }
                 r.on_hover_text("Press / or Cmd+Shift+F");
                 ui.add_space(14.0);
-                let sql_conn = self.active.and_then(|id| self.conn(id)).filter(|c| c.meta.engine.is_sql() && c.status == Status::Ready).map(|c| (c.meta.id, c.writable));
+                // Creating and dropping databases is not built for PostgreSQL yet.
+                let sql_conn = self.active.and_then(|id| self.conn(id)).filter(|c| c.meta.engine == db::sql::Engine::MySql && c.status == Status::Ready).map(|c| (c.meta.id, c.writable));
                 let mut new_db = None;
                 ui.horizontal(|ui| {
                     ui.label(LayoutJob::single_section("Databases".into(), ui_fmt(10.5, FAINT(), W_SEMIBOLD, 0.8)));
@@ -248,7 +260,7 @@ impl App {
                 if ui.button("Refresh databases").on_hover_text("Reconnect and reload the list of databases and collections").clicked() {
                     refresh = Some(c.meta.id);
                 }
-                if c.meta.engine.is_sql() && c.status == Status::Ready && ui.button("Users and privileges…").clicked() {
+                if c.meta.engine == db::sql::Engine::MySql && c.status == Status::Ready && ui.button("Users and privileges…").clicked() {
                     sql_users = Some(c.meta.id);
                 }
                 ui.add_space(2.0);
@@ -380,6 +392,9 @@ impl App {
         let mut revealed = false;
         let mut lazy: Vec<String> = Vec::new();
         let mut folded: Vec<(u64, String, bool)> = Vec::new();
+        let mut pick_schema: Option<(String, String)> = None;
+        // The switcher's toggle is edited while the connection is borrowed, so it is written back afterwards.
+        let mut show_system = self.pg_show_system;
         {
             let Some(c) = self.conn(id) else { return };
             match &c.status {
@@ -410,9 +425,14 @@ impl App {
                 }
             }
             let sql = c.meta.engine.is_sql();
+            let pg = c.meta.engine == db::sql::Engine::Postgres;
             let writable = c.writable;
             for (db_name, colls) in &c.dbs {
-                let mut matches: Vec<&String> = colls.iter().flatten().filter(|n| filter.is_empty() || n.to_lowercase().contains(&filter)).collect();
+                // A PostgreSQL database lists the tables of the schema picked in its switcher; `colls` holds its schemas.
+                let picked = if pg { self.pg_picked(id, db_name) } else { String::new() };
+                let ns = ns_key(db_name, &picked);
+                let shown: Vec<&String> = if pg { c.tables.get(&(db_name.clone(), picked.clone())).into_iter().flatten().collect() } else { colls.iter().flatten().collect() };
+                let mut matches: Vec<&String> = shown.into_iter().filter(|n| filter.is_empty() || n.to_lowercase().contains(&filter)).collect();
                 // Copies still running are not listed by the server yet, so they are drawn from `copying`.
                 let pending: Vec<&String> = self.copying.iter().filter(|c| c.0 == id && c.1 == *db_name).map(|c| &c.2).collect();
                 if !pending.is_empty() {
@@ -424,7 +444,7 @@ impl App {
                     continue;
                 }
                 // Tables first, then views, each under its own caption.
-                let db_views: HashSet<&str> = self.views.iter().filter(|v| v.0 == id && v.1 == *db_name).map(|v| v.2.as_str()).collect();
+                let db_views: HashSet<&str> = self.views.iter().filter(|v| v.0 == id && v.1 == ns).map(|v| v.2.as_str()).collect();
                 let is_view_of = |n: &String| db_views.contains(n.as_str());
                 let n_views = if sql { matches.iter().filter(|n| is_view_of(n)).count() } else { 0 };
                 if sql {
@@ -458,6 +478,10 @@ impl App {
                         }
                         if ui.button("Refresh").clicked() {
                             side.push(SideAct::Refresh(db_name.clone()));
+                        }
+                        // Users, dump, script files, create and drop are built for MySQL only so far.
+                        if pg {
+                            return;
                         }
                         if ui.button("Users and privileges…").clicked() {
                             side.push(SideAct::SqlUsers);
@@ -511,19 +535,27 @@ impl App {
                     }
                 });
                 if is_open {
+                    if pg {
+                        if let Some(list) = self.pg_schemas.get(&(id, db_name.clone())) {
+                            if let Some(p) = schema_picker(ui, db_name, &picked, list, &mut show_system) {
+                                pick_schema = Some((db_name.clone(), p));
+                            }
+                            ui.add_space(2.0);
+                        }
+                    }
                     let matches_len = matches.len();
-                    let schema = if sql { self.sql_schema.get(&(id, db_name.clone())).cloned() } else { None };
+                    let schema = if sql { self.sql_schema.get(&(id, ns.clone())).cloned() } else { None };
                     let est_rows: HashMap<&str, u64> = schema.iter().flat_map(|sc| sc.tables.iter().filter_map(|t| Some((t.name.as_str(), t.rows?)))).collect();
-                    let group_hidden = [false, true].map(|v| sql && self.side_closed.contains(&(id, db_name.clone(), v)));
+                    let group_hidden = [false, true].map(|v| sql && self.side_closed.contains(&(id, ns.clone(), v)));
                     for coll in matches {
-                        let active = cur_sel.as_ref().is_some_and(|s| s.conn == id && s.db == *db_name && s.coll == *coll);
+                        let active = cur_sel.as_ref().is_some_and(|s| s.conn == id && s.db == *db_name && s.schema == picked && s.coll == *coll);
                         let is_view = is_view_of(coll);
                         let busy = pending.contains(&coll);
                         if sql && group != Some(is_view) {
                             group = Some(is_view);
                             let (label, n) = if is_view { ("VIEWS", n_views) } else { ("TABLES", matches_len - n_views) };
                             let (cap, hr) = ui.allocate_exact_size(egui::vec2(ui.available_width(), SIDE_ROW_H - 4.0), Sense::click());
-                            let key = (id, db_name.clone(), is_view);
+                            let key = (id, ns.clone(), is_view);
                             if hr.clicked() {
                                 folded.push(key.clone());
                             }
@@ -577,13 +609,17 @@ impl App {
                             revealed = true;
                         }
                         if r.clicked() {
-                            open = Some(Sel { conn: id, db: db_name.clone(), coll: coll.clone() });
+                            open = Some(Sel { conn: id, db: db_name.clone(), schema: picked.clone(), coll: coll.clone() });
                         }
                         r.context_menu(|ui| {
                             menu_look(ui);
                             ui.label(RichText::new(format!("{}: {coll}", if is_view { "View" } else if sql { "Table" } else { "Collection" })).size(TXT_SMALL).color(MUTED()));
                             if ui.button("Open").clicked() {
-                                open = Some(Sel { conn: id, db: db_name.clone(), coll: coll.clone() });
+                                open = Some(Sel { conn: id, db: db_name.clone(), schema: picked.clone(), coll: coll.clone() });
+                            }
+                            // Import, dump, empty and drop are built for MySQL only so far.
+                            if pg {
+                                return;
                             }
                             if sql {
                                 if !is_view {
@@ -653,6 +689,10 @@ impl App {
         if connect {
             self.connect(id);
         }
+        self.pg_show_system = show_system;
+        if let Some((d, schema)) = pick_schema {
+            self.pg_set_schema(id, &d, schema);
+        }
         if let Some(d) = toggle {
             if !self.open_dbs.remove(&(id, d.clone())) {
                 self.open_dbs.insert((id, d));
@@ -679,7 +719,10 @@ impl App {
             a => a,
         };
         if let (SideAct::Refresh(db), Some(sql)) = (&a, self.conn(conn).and_then(|c| c.sql.clone())) {
-            self.sql_refresh_schema(conn, db);
+            if sql.dialect == db::sql::Dialect::Postgres {
+                return self.pg_refresh(conn, db);
+            }
+            self.sql_refresh_schema(conn, db, "");
             return self.worker.sql_tables(conn, sql, db.clone());
         }
         if self.conn(conn).is_some_and(|c| c.meta.engine.is_sql()) {
@@ -718,7 +761,7 @@ impl App {
             }
             SideAct::Restore(db) => self.modal = Some(Modal::Tool(Box::new(ToolForm { conn, from_db: db.clone(), db, restore: true, gzip: true, ..Default::default() }))),
             SideAct::Compare(db, coll) => {
-                self.open_collection(Sel { conn, db: db.clone(), coll }, false);
+                self.open_collection(Sel { conn, db: db.clone(), coll, ..Default::default() }, false);
                 let t = self.tm().unwrap();
                 t.view = View::Compare;
                 if t.compare.conn == 0 {
@@ -733,6 +776,55 @@ impl App {
             }
         }
     }
+}
+
+/// The schema switcher under an open PostgreSQL database: the schema shown in the tree, and a menu to pick another with
+/// each one's table count and a switch for the system schemas. Returns the schema picked this frame.
+fn schema_picker(ui: &mut egui::Ui, db_name: &str, picked: &str, list: &[db::sql::PgSchema], show_system: &mut bool) -> Option<String> {
+    const INDENT: f32 = 18.0;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), BUTTON_H + 2.0), Sense::click());
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let mut pick = None;
+    let menu = egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(rect.width() - INDENT).show(|ui| {
+        menu_look(ui);
+        ui.spacing_mut().item_spacing.y = 2.0;
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            caption(ui, format!("SCHEMAS IN {db_name}"));
+        });
+        ui.add_space(2.0);
+        for s in super::sql_ns::listed_schemas(list, *show_system) {
+            if menu_row_in(ui, &s.name, if s.system { MUTED() } else { TEXT() }, s.name == picked, &s.tables.to_string(), "", false).clicked() {
+                pick = Some(s.name.clone());
+                ui.close();
+            }
+        }
+        ui.add_space(2.0);
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(RichText::new("Show system schemas").size(TXT_SMALL).color(MUTED()));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(8.0);
+                toggle(ui, show_system);
+            });
+        });
+        ui.add_space(2.0);
+    });
+    let open = menu.is_some();
+    let body = egui::Rect::from_min_max(egui::pos2(rect.left() + INDENT, rect.top() + 1.0), egui::pos2(rect.right(), rect.bottom() - 1.0));
+    let (fill, edge) = if resp.is_pointer_button_down_on() { (PRESSED(), MUTED()) } else if resp.hovered() { (RAISED(), MUTED()) } else { (RAISED(), BORDER()) };
+    let p = ui.painter();
+    p.rect(body, R_MD, fill, Stroke::new(1.0, if open || resp.has_focus() { PRIMARY() } else { edge }), egui::StrokeKind::Inside);
+    let label = p.layout_no_wrap("schema".into(), FontId::proportional(TXT_CAPTION), FAINT());
+    p.galley(egui::pos2(body.left() + 8.0, body.center().y - label.size().y / 2.0 + optical_dy(&label)), label.clone(), FAINT());
+    let name = truncated(p, picked, FontId::proportional(TXT_BODY), BRIGHT(), body.width() - 8.0 - label.size().x - 6.0 - 26.0);
+    p.galley(egui::pos2(body.left() + 8.0 + label.size().x + 6.0, body.center().y - name.size().y / 2.0 + optical_dy(&name)), name, BRIGHT());
+    chevron(p, egui::pos2(body.right() - 12.0, body.center().y), true, if resp.hovered() || open { MUTED() } else { FAINT() });
+    focus_ring(ui, &resp, body, R_MD as f32);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, format!("Schema {picked}")));
+    pick
 }
 
 /// A small painted plus, since the glyph from a fallback font sits off center. Dimmed while writes are locked.
@@ -767,8 +859,20 @@ mod tests {
     }
 
     #[test]
+    fn postgres_jumps_name_the_schema() {
+        let mut c = Conn { meta: ConnMeta { id: 1, name: "pg".into(), engine: db::sql::Engine::Postgres, ..Default::default() }, client: None, sql: None, status: Status::Ready, writable: false, dbs: vec![("shop".into(), Some(vec!["public".into(), "billing".into()]))], tables: Default::default(), masked_uri: String::new(), tunnel: None, server: Default::default() };
+        c.tables.insert(("shop".into(), "billing".into()), vec!["invoices".into()]);
+        c.tables.insert(("shop".into(), "public".into()), vec!["orders".into()]);
+        let all = jumps(&[c], Some(1), "");
+        let labels: Vec<&str> = all.iter().map(|j| j.0.as_str()).collect();
+        assert_eq!(labels, ["pg", "shop", "shop.billing.invoices", "shop.public.orders"]);
+        let Jump::Coll(sel) = &all[2].2 else { panic!("a table jumps to a table") };
+        assert_eq!((sel.db.as_str(), sel.schema.as_str(), sel.coll.as_str()), ("shop", "billing", "invoices"));
+    }
+
+    #[test]
     fn palette_jumps() {
-        let conn = |id, name: &str, status, dbs| Conn { meta: ConnMeta { id, name: name.into(), ..Default::default() }, client: None, sql: None, status, writable: false, dbs, masked_uri: String::new(), tunnel: None, server: Default::default() };
+        let conn = |id, name: &str, status, dbs| Conn { meta: ConnMeta { id, name: name.into(), ..Default::default() }, client: None, sql: None, status, writable: false, dbs, tables: Default::default(), masked_uri: String::new(), tunnel: None, server: Default::default() };
         let conns = [conn(1, "prod", Status::Ready, vec![("shop".into(), Some(vec!["users".into(), "orders".into()]))]), conn(2, "staging", Status::Idle, Vec::new())];
         let labels = |active, q| jumps(&conns, active, q).into_iter().map(|j| j.0).collect::<Vec<_>>();
         assert_eq!(labels(Some(2), ""), ["staging", "prod", "shop", "shop.users", "shop.orders"]);

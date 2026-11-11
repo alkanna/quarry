@@ -177,6 +177,7 @@ pub(super) struct SavedTab {
     pub(super) agg_text_mode: bool,
     pub(super) conn: u64,
     pub(super) db: String,
+    pub(super) schema: String,
     pub(super) coll: String,
     pub(super) view: String,
     pub(super) filter: String,

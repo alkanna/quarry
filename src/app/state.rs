@@ -83,7 +83,10 @@ pub(super) struct Conn {
     pub(super) status: Status,
     /// Writes are locked at every launch and only unlocked for this session.
     pub(super) writable: bool,
+    /// On PostgreSQL the inner list holds the database's user schemas, and `tables` the tables of each one.
     pub(super) dbs: Vec<(String, Option<Vec<String>>)>,
+    /// PostgreSQL only: the tables and views of each (database, schema) that was loaded.
+    pub(super) tables: HashMap<(String, String), Vec<String>>,
     pub(super) masked_uri: String,
     /// Kept alive while connected through SSH; dropping it closes the tunnel.
     pub(super) tunnel: Option<crate::ssh::Tunnel>,
@@ -126,14 +129,52 @@ impl ServerInfo {
 
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Default)]
 pub(super) struct Sel {
     pub(super) conn: u64,
     pub(super) db: String,
+    /// PostgreSQL only: the schema inside the database. Empty for Mongo and MySQL, where `db` is the whole namespace.
+    pub(super) schema: String,
     pub(super) coll: String,
 }
 
+/// The schema a PostgreSQL database opens on when it has one.
+pub(super) const PG_PUBLIC: &str = super::shell_attach::PG_SCHEMA;
+
+/// Key of one namespace in the caches that hold a list per database (autocomplete schema, values, views). A PostgreSQL
+/// schema name repeats across databases, so the database is part of the key; MySQL has no schema and keeps the bare name.
+pub(super) fn ns_key(db: &str, schema: &str) -> String {
+    if schema.is_empty() { db.to_string() } else { format!("{db}\u{1f}{schema}") }
+}
+
+/// The schema a database opens on: `public` when the user can see it, else the first user schema, else none.
+pub(super) fn default_schema(schemas: &[String]) -> String {
+    if schemas.iter().any(|s| s == PG_PUBLIC) { PG_PUBLIC.to_string() } else { schemas.first().cloned().unwrap_or_default() }
+}
+
 impl Sel {
+    /// The namespace the worker calls take: the schema on PostgreSQL, the database on MySQL. A PostgreSQL connection is
+    /// bound to one database, so `db` only picks the pool there (`Db::at`).
+    pub(super) fn space(&self) -> &str {
+        if self.schema.is_empty() { &self.db } else { &self.schema }
+    }
+
+    /// The cache key of this selection's namespace, see `ns_key`.
+    pub(super) fn nskey(&self) -> String {
+        ns_key(&self.db, &self.schema)
+    }
+
+    /// The faint label beside a tab's name: the schema of a PostgreSQL table, else the database. A Query tab has no
+    /// table, so it names its database.
+    pub(super) fn scope_label(&self) -> &str {
+        if !self.schema.is_empty() && !self.coll.is_empty() { &self.schema } else { &self.db }
+    }
+
+    /// "schema.table" outside `public`, the plain table name otherwise, for places with a single name.
+    pub(super) fn shown(&self) -> String {
+        if self.schema.is_empty() || self.schema == PG_PUBLIC { self.coll.clone() } else { format!("{}.{}", self.schema, self.coll) }
+    }
+
     /// "db.coll", how index stats are keyed.
     pub(super) fn key(&self) -> String {
         format!("{}.{}", self.db, self.coll)
@@ -508,7 +549,7 @@ impl Tab {
 
     /// "conn/db/coll", the key of per-collection settings.
     pub(super) fn coll_key(&self) -> String {
-        format!("{}/{}/{}", self.sel.conn, self.sel.db, self.sel.coll)
+        if self.sel.schema.is_empty() { format!("{}/{}/{}", self.sel.conn, self.sel.db, self.sel.coll) } else { format!("{}/{}/{}.{}", self.sel.conn, self.sel.db, self.sel.schema, self.sel.coll) }
     }
 
     /// The page decoded, for a scan of every row; the tab itself keeps only BSON bytes.
@@ -773,6 +814,7 @@ pub(super) struct JsonEdit {
 pub(super) struct Draft {
     pub(super) conn: u64,
     pub(super) db: String,
+    pub(super) schema: String,
     pub(super) coll: String,
     pub(super) original: Document,
     pub(super) current: Document,
@@ -1138,7 +1180,7 @@ impl App {
     }
 
     pub(super) fn sel_is_view(&self) -> bool {
-        self.t().is_some_and(|t| self.views.contains(&(t.sel.conn, t.sel.db.clone(), t.sel.coll.clone())))
+        self.t().is_some_and(|t| self.views.contains(&(t.sel.conn, t.sel.nskey(), t.sel.coll.clone())))
     }
 
     pub(super) fn sel_writable(&self) -> bool {

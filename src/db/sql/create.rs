@@ -637,7 +637,7 @@ async fn run(db: &Db, read_only: bool, list: bool, build: impl FnOnce(bool) -> R
 }
 
 fn created(conn: u64, schema: &str, table: &str, undo: SqlUndo) -> UndoAction {
-    UndoAction { at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { cols: Vec::new(), undo } }
+    UndoAction { at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database: String::new(), cols: Vec::new(), undo } }
 }
 
 /// The part of a table undo that runs with the table locked: it must still be the table the create made,

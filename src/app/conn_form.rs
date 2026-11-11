@@ -637,7 +637,7 @@ impl App {
                             c.dbs.clear();
                             c.server = Default::default();
                         }
-                        None => self.conns.push(Conn { meta, client: None, sql: None, status: Status::Idle, writable: false, dbs: Vec::new(), masked_uri: db::mask_uri(&uri), tunnel: None, server: Default::default() }),
+                        None => self.conns.push(Conn { meta, client: None, sql: None, status: Status::Idle, writable: false, dbs: Vec::new(), tables: Default::default(), masked_uri: db::mask_uri(&uri), tunnel: None, server: Default::default() }),
                     }
                     self.active = Some(id);
                     self.save_conns();

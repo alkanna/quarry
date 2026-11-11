@@ -1,7 +1,7 @@
 //! What the read path needs of PostgreSQL beyond the catalog queries: running text that carries user SQL inside a
 //! read-only transaction that is always rolled back, and listing the schemas of a database.
 
-use super::exec::{col_infos, ColInfo, SqlRow};
+use super::exec::{col_infos, Cells, ColInfo, SqlRow};
 use super::{Db, Dialect, Pool};
 use crate::db::{e, Msg, Res, Worker};
 use futures_util::stream::BoxStream;
@@ -185,10 +185,20 @@ impl Db {
     }
 }
 
+/// One schema of a PostgreSQL database as the sidebar's switcher lists it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PgSchema {
+    pub name: String,
+    /// Tables, views and the like the sidebar would list in it.
+    pub tables: u64,
+    /// The catalogs, TOAST and temporary schemas, hidden until "Show system schemas" is on.
+    pub system: bool,
+}
+
 impl Worker {
-    /// The schemas of `database` that hold user objects, sorted. `db` is any `Db` of the connection; the database is
-    /// picked here, because a PostgreSQL connection belongs to one database. Answers `Msg::SqlSchemas`.
-    #[allow(dead_code)] // the sidebar asks from step 8 on
+    /// The schemas of `database` the login may use, sorted by name, with their table counts and a flag for the system
+    /// ones. `db` is any `Db` of the connection; the database is picked here, because a PostgreSQL connection belongs
+    /// to one database. Answers `Msg::SqlSchemas`.
     pub fn sql_schemas(&self, conn: u64, db: Db, database: String) {
         self.spawn(async move {
             let res = async {
@@ -197,11 +207,16 @@ impl Worker {
                 }
                 let at = db.at(&database);
                 let t = Instant::now();
-                let rows = read_only(&at.pg_pool()?, false, &at.pg_locals(), Dialect::Postgres.schemas()).await.map(SqlRow::wrap_pg);
-                at.note(&database, Dialect::Postgres.schemas(), t, &rows);
-                let mut names: Vec<String> = rows.map_err(e)?.iter().filter_map(|r| super::worker::text(r, "name")).collect();
-                names.sort();
-                Ok(names)
+                let sql = Dialect::Postgres.schemas_all();
+                let rows = read_only(&at.pg_pool()?, false, &at.pg_locals(), sql).await.map(SqlRow::wrap_pg);
+                at.note(&database, sql, t, &rows);
+                let mut list: Vec<PgSchema> = rows
+                    .map_err(e)?
+                    .iter()
+                    .filter_map(|r| Some(PgSchema { name: super::worker::text(r, "name")?, tables: super::structure::num(r, "tables").unwrap_or(0), system: r.int("system").is_some_and(|n| n != 0) }))
+                    .collect();
+                list.sort_by(|a, b| a.name.cmp(&b.name));
+                Ok(list)
             }
             .await;
             Msg::SqlSchemas { conn, database, res }

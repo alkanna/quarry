@@ -318,7 +318,7 @@ impl App {
     /// The key of the current tab's database in the column cache.
     fn sql_key(&self) -> (u64, String) {
         let t = &self.tabs[self.cur];
-        (t.sel.conn, t.sel.db.clone())
+        (t.sel.conn, ns_key(&t.sel.db, &self.sel_schema(&t.sel)))
     }
 
     /// Asks for the schema of the current SQL tab's database, which autocomplete shares. `again`
@@ -328,9 +328,9 @@ impl App {
         if self.demo || (self.sql_schema_asked.contains(&key) && !again) {
             return;
         }
-        let Some(db) = self.conn(key.0).and_then(|c| c.sql.clone()) else { return };
+        let Some((db, space)) = self.sql_target(&self.tabs[self.cur].sel) else { return };
         self.sql_schema_asked.insert(key.clone());
-        self.worker.sql_schema(key.0, db, key.1);
+        self.worker.sql_schema(key.0, db, space);
     }
 
     /// Sends a request about character `at` of the current script, starting the server first if

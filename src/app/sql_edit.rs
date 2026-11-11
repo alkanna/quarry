@@ -226,7 +226,7 @@ impl App {
             self.warn_ro();
             return None;
         }
-        let Some(db) = self.conn(sel.conn).and_then(|c| c.sql.clone()) else {
+        let Some((db, _)) = self.sql_target(&sel) else {
             self.warn_offline();
             return None;
         };
@@ -337,12 +337,12 @@ impl App {
     /// One transaction for the given drafts. A failure keeps every one of them staged.
     pub(super) fn write_sql_drafts(&mut self, keys: Vec<String>) {
         let drafts: Vec<(String, Draft)> = keys.into_iter().filter_map(|k| self.drafts.remove(&k).map(|d| (k, d))).collect();
-        let Some(first) = drafts.first().map(|d| Sel { conn: d.1.conn, db: d.1.db.clone(), coll: d.1.coll.clone() }) else { return };
+        let Some(first) = drafts.first().map(|d| Sel { conn: d.1.conn, db: d.1.db.clone(), schema: d.1.schema.clone(), coll: d.1.coll.clone() }) else { return };
         let put_back = |a: &mut App, drafts: Vec<(String, Draft)>, why: &str| {
             a.drafts.extend(drafts);
             a.err(why.to_string());
         };
-        let Some(db) = self.conn(first.conn).and_then(|c| c.sql.clone()) else { return put_back(self, drafts, "Not connected.") };
+        let Some((db, space)) = self.sql_target(&first) else { return put_back(self, drafts, "Not connected.") };
         let read_only = !self.conn_writable(first.conn);
         let Some((cols, pk)) = self.tabs.iter().find(|t| t.sel == first).and_then(|t| t.sql.as_ref()).map(|s| (s.cols.to_vec(), s.pk.clone())) else { return put_back(self, drafts, "Open the table to save its edits.") };
         // A row without its key could address any row, so it is never sent; its edits stay staged.
@@ -365,7 +365,7 @@ impl App {
             .collect();
         let tags: Vec<String> = drafts.iter().map(|d| d.0.clone()).collect();
         self.saving.extend(drafts);
-        self.worker.sql_save(tags, first.conn, db, first.db, first.coll, cols, pk, edits, read_only);
+        self.worker.sql_save(tags, first.conn, db, space, first.coll, cols, pk, edits, read_only);
     }
 
     /// Cmd+S, the bar's Save: asks for write access first, then confirms like Mongo's Save all when the setting says so.
@@ -439,7 +439,7 @@ impl App {
                     pk: dr.current.get_document("_id").cloned().unwrap_or_default(),
                     changes: db::diff(&dr.original, &dr.current).into_iter().filter(|c| c.0 != "_id").map(|(p, a, b)| (p, a.unwrap_or(Bson::Null), b.unwrap_or(Bson::Null))).collect(),
                 };
-                let (sql, params) = write::update_sql(d, &sel.db, &sel.coll, &cols, &edit);
+                let (sql, params) = write::update_sql(d, sel.space(), &sel.coll, &cols, &edit);
                 body.push(format!("{};", write::preview_for(d, &sql, &params, bs)));
             }
             self.modal = Some(Modal::Text { title: "SQL that Save will run".into(), body: body.join("\n"), code: false });
@@ -472,9 +472,12 @@ impl App {
             self.sql_new_row(None);
         }
         let view = self.sel_is_view();
-        if quiet_enabled(ui, !view, "Import…").on_hover_text("Add the rows of a CSV file to this table").on_disabled_hover_text("A view has no rows to add").clicked() {
-            if let Some(s) = self.t().map(|t| t.sel.clone()) {
-                self.open_sql_import(s.conn, s.db, s.coll);
+        // CSV import is built for MySQL only so far.
+        if !self.t().is_some_and(|t| self.is_pg(t.sel.conn)) {
+            if quiet_enabled(ui, !view, "Import…").on_hover_text("Add the rows of a CSV file to this table").on_disabled_hover_text("A view has no rows to add").clicked() {
+                if let Some(s) = self.t().map(|t| t.sel.clone()) {
+                    self.open_sql_import(s.conn, s.db, s.coll);
+                }
             }
         }
         vsep(ui, 4.0);
@@ -566,7 +569,7 @@ impl App {
     fn sql_insert_rows(&mut self, rows: Vec<NewRow>) {
         let Some((conn, db, sel, cols, pk)) = self.writable_sql() else { return };
         let read_only = !self.conn_writable(conn);
-        self.worker.sql_insert(conn, db, sel.db, sel.coll, cols.to_vec(), pk, rows, read_only);
+        self.worker.sql_insert(conn, db, sel.space().to_string(), sel.coll, cols.to_vec(), pk, rows, read_only);
     }
 
     /// Rows are the loaded documents of the checked or clicked rows, each with its key in `_id`.
@@ -585,7 +588,7 @@ impl App {
                 return self.ask_unlock_then(move |a| a.sql_docs_act(&ctx, act, rows));
             }
         }
-        let (sel, cols, pk) = self.sql_ctx().unwrap_or_else(|| (Sel { conn: 0, db: String::new(), coll: String::new() }, Arc::new(Vec::new()), Vec::new()));
+        let (sel, cols, pk) = self.sql_ctx().unwrap_or_else(|| (Sel { conn: 0, db: String::new(), coll: String::new(), ..Default::default() }, Arc::new(Vec::new()), Vec::new()));
         let (d, bs) = self.sql_dialect();
         // The key names are the server's, which differ from the shown name of a renamed column.
         let numeric = |name: &str| cols.iter().find(|c| c.src == name).is_some_and(|c| is_numeric(c.kind));
@@ -614,7 +617,7 @@ impl App {
                 if pk.is_empty() {
                     return self.warn("This table has no usable primary key to address these rows.");
                 }
-                let text = format!("UPDATE {}\nSET \nWHERE {};", d.qualified(&sel.db, &sel.coll), key_list());
+                let text = format!("UPDATE {}\nSET \nWHERE {};", d.qualified(sel.space(), &sel.coll), key_list());
                 let t = self.tm().unwrap();
                 if let Some(s) = t.sql.as_mut() {
                     s.query = text;
@@ -659,7 +662,7 @@ impl App {
             t.selected = None;
         }
         let read_only = !self.conn_writable(conn);
-        self.worker.sql_delete_rows(conn, db, sel.db, sel.coll, cols.to_vec(), pk, rows, read_only);
+        self.worker.sql_delete_rows(conn, db, sel.space().to_string(), sel.coll, cols.to_vec(), pk, rows, read_only);
     }
 
     pub(super) fn sql_set_dialog(&mut self, ui: &mut egui::Ui, f: &mut SetForm, keep: &mut bool) {

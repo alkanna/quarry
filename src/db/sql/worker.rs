@@ -564,8 +564,9 @@ impl Worker {
     /// Every table, view and column of `schema`, for autocomplete.
     pub fn sql_schema(&self, conn: u64, db: Db, schema: String) {
         self.spawn(async move {
+            let database = db.pg_database();
             let res = load_schema(&db, &schema).await;
-            Msg::SqlSchema { conn, schema, res }
+            Msg::SqlSchema { conn, database, schema, res }
         });
     }
 
@@ -573,8 +574,9 @@ impl Worker {
     /// (None) for big tables unless an index leads with the column.
     pub fn sql_field_values(&self, conn: u64, db: Db, schema: String, table: String, column: String, prefix: Option<String>) {
         self.spawn(async move {
+            let database = db.pg_database();
             let res = field_values(&db, &schema, &table, &column, prefix.as_deref()).await;
-            Msg::SqlValues { conn, schema, table, column, prefix, res }
+            Msg::SqlValues { conn, database, schema, table, column, prefix, res }
         });
     }
 
@@ -617,6 +619,7 @@ impl Worker {
     /// Tables sorted, and which of them are views.
     pub fn sql_tables(&self, conn: u64, db: Db, schema: String) {
         self.spawn(async move {
+            let database = db.pg_database();
             let res = async {
                 let rows = db.meta(&schema, db.dialect.tables(), [schema.as_str()]).await?;
                 let mut names = Vec::new();
@@ -632,7 +635,12 @@ impl Worker {
                 Ok((names, views))
             }
             .await;
-            Msg::Collections { conn, db: schema, res }
+            // A PostgreSQL schema name repeats across databases, so its answer says which database it belongs to.
+            if database.is_empty() {
+                Msg::Collections { conn, db: schema, res }
+            } else {
+                Msg::SqlTables { conn, database, schema, res }
+            }
         });
     }
 

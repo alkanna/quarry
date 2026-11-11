@@ -141,7 +141,7 @@ mod tests {
 
     #[test]
     fn find_query_reads_limit_and_skip() {
-        let mut t = Tab::new(Sel { conn: 0, db: "d".into(), coll: "c".into() });
+        let mut t = Tab::new(Sel { conn: 0, db: "d".into(), coll: "c".into(), ..Default::default() });
         (t.filter_txt, t.limit_txt, t.skip_txt) = ("{}".into(), " 50 ".into(), "".into());
         let q = find_query(&t).unwrap();
         assert_eq!((q.limit, q.skip), (Some(50), 0));

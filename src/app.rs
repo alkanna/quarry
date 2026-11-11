@@ -43,6 +43,7 @@ mod shell_attach;
 mod shell_ls;
 mod sidebar;
 mod sql_ac;
+mod sql_ns;
 mod sql_create;
 mod sql_structure;
 mod sql_alter;
@@ -129,6 +130,15 @@ pub struct App {
     side_closed: HashSet<(u64, String, bool)>,
     /// SQL databases whose table list was asked for; lists load when a database opens, not all at connect.
     sql_asked: HashSet<(u64, String)>,
+    /// PostgreSQL: the schema picked in the sidebar per (connection, database). Kept for the session only, since the
+    /// open tabs carry their own schema and the list of schemas can change between launches.
+    pg_pick: HashMap<(u64, String), String>,
+    /// PostgreSQL: every schema of an opened database with its table count and whether it is a system one.
+    pg_schemas: HashMap<(u64, String), Vec<db::sql::PgSchema>>,
+    /// PostgreSQL: (connection, database, schema) whose table list was asked for.
+    pg_tables_asked: HashSet<(u64, String, String)>,
+    /// The schema switcher lists the system schemas too.
+    pg_show_system: bool,
     tabs: Vec<Tab>,
     cur: usize,
     req: u64,
@@ -293,6 +303,10 @@ impl App {
             open_dbs: HashSet::new(),
             side_closed: HashSet::new(),
             sql_asked: HashSet::new(),
+            pg_pick: HashMap::new(),
+            pg_schemas: HashMap::new(),
+            pg_tables_asked: HashSet::new(),
+            pg_show_system: false,
             tabs: Vec::new(),
             cur: 0,
             req: 0,
@@ -398,8 +412,8 @@ impl App {
                 }
             };
             drop(text);
-            let sel = Sel { conn: 1, db: "fixture".into(), coll: "documents".into() };
-            app.conns.push(Conn { meta: ConnMeta { id: 1, name: "Fixture".into(), ..Default::default() }, client: None, sql: None, status: Status::Ready, writable: false, dbs: vec![("fixture".into(), Some(vec!["documents".into()]))], masked_uri: String::new(), tunnel: None, server: Default::default() });
+            let sel = Sel { conn: 1, db: "fixture".into(), coll: "documents".into(), ..Default::default() };
+            app.conns.push(Conn { meta: ConnMeta { id: 1, name: "Fixture".into(), ..Default::default() }, client: None, sql: None, status: Status::Ready, writable: false, dbs: vec![("fixture".into(), Some(vec!["documents".into()]))], tables: Default::default(), masked_uri: String::new(), tunnel: None, server: Default::default() });
             app.active = Some(1);
             app.open_dbs.insert((1, "fixture".into()));
             app.open_collection(sel, false);
@@ -440,7 +454,7 @@ impl App {
             }
             for meta in metas {
                 let masked = keychain(meta.id).and_then(|k| k.get_password().ok()).map(|u| db::mask_uri(&u)).unwrap_or_default();
-                app.conns.push(Conn { meta, client: None, sql: None, status: Status::Idle, writable: false, dbs: Vec::new(), masked_uri: masked, tunnel: None, server: Default::default() });
+                app.conns.push(Conn { meta, client: None, sql: None, status: Status::Idle, writable: false, dbs: Vec::new(), tables: Default::default(), masked_uri: masked, tunnel: None, server: Default::default() });
             }
             app.active = app.conns.first().map(|c| c.meta.id);
             // Values of deleted connections go with them.
@@ -451,7 +465,7 @@ impl App {
                     continue;
                 }
                 let engine = app.conn(st.conn).map(|c| c.meta.engine).unwrap_or_default();
-                let mut t = Tab::new(Sel { conn: st.conn, db: st.db, coll: st.coll }).for_engine(engine);
+                let mut t = Tab::new(Sel { conn: st.conn, db: st.db, schema: st.schema, coll: st.coll }).for_engine(engine);
                 t.view = match st.view.as_str() {
                     "Aggregate" => View::Aggregate,
                     "Indexes" => View::Indexes,

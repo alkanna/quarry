@@ -176,8 +176,9 @@ pub enum UndoKind {
     Delete { old: Document },
     /// Undo puts these documents back.
     DeleteMany { old: Vec<Document> },
-    /// A SQL write; `db` and `coll` of the action are the schema and table.
-    Sql { cols: Vec<sql::Col>, undo: sql::write::SqlUndo },
+    /// A SQL write; `db` and `coll` of the action are the schema and table. `database` is the PostgreSQL database the
+    /// write ran in, which picks the pool the undo runs on, and empty on MySQL.
+    Sql { database: String, cols: Vec<sql::Col>, undo: sql::write::SqlUndo },
 }
 
 pub struct UndoAction {
@@ -241,16 +242,17 @@ pub enum Msg {
     /// Whether the server takes a foreign key only on a whole primary or unique key. Answers the open dialog by `req`.
     SqlFkRules { req: u64, strict: bool },
     /// Every table, view and column of one database, for SQL autocomplete.
-    SqlSchema { conn: u64, schema: String, res: Res<sql::schema::Schema> },
+    SqlSchema { conn: u64, database: String, schema: String, res: Res<sql::schema::Schema> },
     /// A column's most frequent values with their counts, for SQL autocomplete. None when the table is too big to look in.
-    SqlValues { conn: u64, schema: String, table: String, column: String, prefix: Option<String>, res: Res<Option<Vec<(String, u64)>>> },
+    SqlValues { conn: u64, database: String, schema: String, table: String, column: String, prefix: Option<String>, res: Res<Option<Vec<(String, u64)>>> },
     /// Result of the connection form's Test button.
     Tested { req: u64, res: Res<String>, info: Option<sql::TestInfo> },
     /// Collection names (sorted) and which of them are views.
     Collections { conn: u64, db: String, res: Res<(Vec<String>, Vec<String>)> },
     /// The schemas of one PostgreSQL database, from `Worker::sql_schemas`.
-    #[allow(dead_code)] // sent from step 8 on
-    SqlSchemas { conn: u64, database: String, res: Res<Vec<String>> },
+    SqlSchemas { conn: u64, database: String, res: Res<Vec<sql::PgSchema>> },
+    /// The tables and views of one PostgreSQL schema, from `Worker::sql_tables`. MySQL answers with `Collections`.
+    SqlTables { conn: u64, database: String, schema: String, res: Res<(Vec<String>, Vec<String>)> },
     /// A read command answered (users, roles, stats, view definition); `tag` says which.
     Command { tag: String, res: Res<Document> },
     /// A database-level change finished; the collection list of `db` is reloaded.

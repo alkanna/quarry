@@ -40,16 +40,20 @@ fn schemas_hide_the_system_ones() {
     every_pg(|l, var| {
         let (db, _p) = fixture(l, "t4_schemas", "");
         l.w.sql_schemas(1, db, "quarry_test".into());
-        let Msg::SqlSchemas { res: Ok(names), database, .. } = l.next() else { panic!("expected SqlSchemas") };
+        let Msg::SqlSchemas { res: Ok(all), database, .. } = l.next() else { panic!("expected SqlSchemas") };
         assert_eq!(database, "quarry_test");
+        let names: Vec<String> = all.iter().filter(|s| !s.system).map(|s| s.name.clone()).collect();
         assert!(names.iter().any(|n| n == "public") && names.iter().any(|n| n == "t4_schemas"), "{var}: {names:?}");
         for hidden in ["pg_catalog", "information_schema"] {
             assert!(!names.iter().any(|n| n == hidden), "{var}: {names:?}");
+            assert!(all.iter().any(|s| s.name == hidden && s.system), "{var}: the system schema {hidden} is listed and flagged");
         }
         assert!(!names.iter().any(|n| n.starts_with("pg_toast") || n.starts_with("pg_temp")), "{var}: {names:?}");
         let mut sorted = names.clone();
         sorted.sort();
         assert_eq!(names, sorted);
+        // The fixture schema holds no table until the next test makes one, so its count is a number, not a guess.
+        assert_eq!(all.iter().find(|s| s.name == "t4_schemas").map(|s| s.tables), Some(0), "{var}: an empty schema counts no tables");
     });
 }
 
@@ -57,10 +61,15 @@ fn schemas_hide_the_system_ones() {
 fn tables_list_views_and_hide_partitions() {
     every_pg(|l, var| {
         let (db, _p) = fixture(l, "t4_list", "CREATE TABLE t (id int PRIMARY KEY); CREATE VIEW v AS SELECT id FROM t; CREATE MATERIALIZED VIEW m AS SELECT id FROM t; CREATE TABLE p (id int, d date) PARTITION BY RANGE (d); CREATE TABLE p_2024 PARTITION OF p FOR VALUES FROM ('2024-01-01') TO ('2025-01-01');");
-        l.w.sql_tables(1, db, "t4_list".into());
-        let Msg::Collections { res: Ok((names, views)), .. } = l.next() else { panic!("expected Collections") };
+        l.w.sql_tables(1, db.clone(), "t4_list".into());
+        let Msg::SqlTables { res: Ok((names, views)), database, schema, .. } = l.next() else { panic!("expected SqlTables") };
+        assert_eq!((database.as_str(), schema.as_str()), ("quarry_test", "t4_list"), "{var}");
         assert_eq!(names, ["m", "p", "t", "v"], "{var}");
         assert!(views.contains(&"v".to_string()) && views.contains(&"m".to_string()) && views.len() == 2, "{var}: {views:?}");
+        // The switcher's count is the sidebar's list: partitions are left out.
+        l.w.sql_schemas(1, db, "quarry_test".into());
+        let Msg::SqlSchemas { res: Ok(all), .. } = l.next() else { panic!("expected SqlSchemas") };
+        assert_eq!(all.iter().find(|s| s.name == "t4_list").map(|s| s.tables), Some(4), "{var}");
     });
 }
 
