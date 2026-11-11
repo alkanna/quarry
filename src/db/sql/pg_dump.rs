@@ -159,6 +159,9 @@ struct Col {
     name: String,
     ty: String,
     notnull: bool,
+    /// A NOT NULL constraint (PostgreSQL 18) that cannot be written inline: it is NOT VALID, named otherwise than the
+    /// default or NO INHERIT. Its name and its definition, added after the rows.
+    late_nn: Option<(String, String)>,
     ident: char,
     generated: char,
     def: Option<String>,
@@ -229,6 +232,8 @@ struct Func {
     def: Option<String>,
     phase: i64,
     oid: i64,
+    /// The tables it names (a row type, a table in a SQL-standard body), which have to exist before it.
+    tabs: Vec<i64>,
 }
 
 fn topo(deps: &[Vec<usize>]) -> Vec<usize> {
@@ -279,7 +284,7 @@ async fn dump_on(c: &mut PgConnection, db: &Db, plan: &DumpPlan, out: &mut (dyn 
     let info = cat(c, db, "SELECT current_database()::text, pg_encoding_to_char(encoding)::text FROM pg_database WHERE datname = current_database()", &[]).await?;
     let (database, encoding) = info.first().map(|r| (r.s(0), r.s(1))).unwrap_or_default();
     put(out, &format!("-- Quarry SQL dump\n-- Server: {}\n-- Database: {}{}\n-- Server encoding: {}\n\n", note(&db.label()), note(&database), if whole { String::new() } else { format!(", schema {}", note(&plan.schema)) }, note(&encoding)))?;
-    put(out, "SET client_encoding = 'UTF8';\nSET check_function_bodies = false;\nSET TimeZone = 'UTC';\nSET search_path = '';\n\n")?;
+    put(out, "SET client_encoding = 'UTF8';\nSET standard_conforming_strings = on;\nSET check_function_bodies = false;\nSET TimeZone = 'UTC';\nSET search_path = '';\n\n")?;
 
     let (rels, mut notes) = load_rels(c, db, plan, whole).await?;
     if let Some(r) = rels.iter().find(|r| r.content && !r.readable) {
@@ -392,13 +397,32 @@ async fn dump_on(c: &mut PgConnection, db: &Db, plan: &DumpPlan, out: &mut (dyn 
     write_funcs(&funcs, 0, out)?;
 
     let cols = load_cols(c, db, &rel_ids).await?;
-    for r in rels.iter().filter(|r| r.structure && r.table()) {
+    // The tables and the functions that name a table go in one order. A default or generated column that calls such a
+    // function needs it first, the function needs the table it names, and a column typed as another table's row type needs
+    // that table first.
+    let tables: Vec<&Rel> = rels.iter().filter(|r| r.structure && r.table()).collect();
+    let late: Vec<&Func> = funcs.iter().filter(|f| f.phase == 1).collect();
+    let uses = if tables.is_empty() { Vec::new() } else { cat(c, db, USES, &[Arg::Is(&structured)]).await? };
+    let mut deps: Vec<Vec<usize>> = vec![Vec::new(); tables.len() + late.len()];
+    for (i, t) in tables.iter().enumerate() {
+        for u in uses.iter().filter(|u| u.n(0) == t.oid) {
+            let at = if u.c(1) == 'p' { late.iter().position(|f| f.oid == u.n(2)).map(|p| tables.len() + p) } else { tables.iter().position(|o| o.oid == u.n(2)) };
+            deps[i].extend(at.filter(|a| *a != i));
+        }
+    }
+    for (j, f) in late.iter().enumerate() {
+        deps[tables.len() + j].extend(f.tabs.iter().filter_map(|t| tables.iter().position(|o| o.oid == *t)));
+    }
+    for k in topo(&deps) {
         stopped(cancel)?;
+        let Some(r) = tables.get(k) else {
+            write_func(late[k - tables.len()], out)?;
+            continue;
+        };
         let list: Vec<String> = cols.iter().filter(|x| x.rel == r.oid).map(|x| format!("    {}", x.clause())).collect();
         let with = if r.opts.is_empty() { String::new() } else { format!(" WITH ({})", r.opts.join(", ")) };
         put(out, &format!("--\n-- Table {}.{}\n--\n\nCREATE {}TABLE {} (\n{}\n){};\n\n", note(&r.schema), note(&r.name), if r.unlogged { "UNLOGGED " } else { "" }, r.full(), list.join(",\n"), with))?;
     }
-    write_funcs(&funcs, 1, out)?;
 
     let mut rows = 0u64;
     for r in rels.iter().filter(|r| r.content && r.table()) {
@@ -430,6 +454,18 @@ async fn dump_on(c: &mut PgConnection, db: &Db, plan: &DumpPlan, out: &mut (dyn 
                 put(out, &format!("ALTER SEQUENCE {} OWNED BY {}.{};\n", qn(&s.schema, &s.name), r.full(), q(col)))?;
                 wrote = true;
             }
+        }
+    }
+    if wrote {
+        put(out, "\n")?;
+    }
+
+    // A NOT NULL that was left out of its table: NOT VALID ones stay as they were, since the rows may hold NULLs.
+    let mut wrote = false;
+    for x in cols.iter().filter(|x| x.late_nn.is_some()) {
+        if let (Some((name, def)), Some(r)) = (&x.late_nn, rels.iter().find(|r| r.oid == x.rel && r.structure && r.table())) {
+            put(out, &format!("ALTER TABLE ONLY {} ADD CONSTRAINT {} {def};\n", r.full(), q(name)))?;
+            wrote = true;
         }
     }
     if wrote {
@@ -517,13 +553,24 @@ async fn dump_on(c: &mut PgConnection, db: &Db, plan: &DumpPlan, out: &mut (dyn 
 
 fn write_funcs(funcs: &[Func], phase: i64, out: &mut (dyn Write + Send)) -> Res<()> {
     for f in funcs.iter().filter(|f| f.phase == phase) {
-        match &f.def {
-            Some(d) => put(out, &format!("--\n-- {} {}.{}({})\n--\n\n{};\n\n", if f.kind == 'p' { "Procedure" } else { "Function" }, note(&f.schema), note(&f.name), note(&f.args), d.trim_end()))?,
-            None => put(out, &format!("-- Aggregate {}.{}({}) was left out: Quarry does not write aggregates.\n\n", note(&f.schema), note(&f.name), note(&f.args)))?,
-        }
+        write_func(f, out)?;
     }
     Ok(())
 }
+
+fn write_func(f: &Func, out: &mut (dyn Write + Send)) -> Res<()> {
+    match &f.def {
+        Some(d) => put(out, &format!("--\n-- {} {}.{}({})\n--\n\n{};\n\n", if f.kind == 'p' { "Procedure" } else { "Function" }, note(&f.schema), note(&f.name), note(&f.args), d.trim_end())),
+        None => put(out, &format!("-- Aggregate {}.{}({}) was left out: Quarry does not write aggregates.\n\n", note(&f.schema), note(&f.name), note(&f.args))),
+    }
+}
+
+/// What a table needs written before it besides other kinds of object: the functions its defaults and generated columns
+/// call ('p'), and the tables whose row type its columns have or hold an array of ('r').
+const USES: &str = "SELECT x.rel::text, x.k, x.o::text FROM ( \
+    SELECT ad.adrelid AS rel, 'p'::text AS k, d.refobjid AS o FROM pg_attrdef ad JOIN pg_depend d ON d.classid = 'pg_attrdef'::regclass AND d.objid = ad.oid AND d.refclassid = 'pg_proc'::regclass WHERE ad.adrelid::int8 = ANY($1) \
+    UNION ALL SELECT a.attrelid, 'r'::text, COALESCE(NULLIF(t.typrelid, 0), e.typrelid) FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid LEFT JOIN pg_type e ON e.oid = t.typelem AND t.typlen = -1 \
+    WHERE a.attrelid::int8 = ANY($1) AND a.attnum > 0 AND NOT a.attisdropped AND COALESCE(NULLIF(t.typrelid, 0), e.typrelid, 0) <> 0) x";
 
 /// The relations to write. The second value lists what was left out and why, as comment lines for the end of the file.
 async fn load_rels(c: &mut PgConnection, db: &Db, plan: &DumpPlan, whole: bool) -> Res<(Vec<Rel>, Vec<String>)> {
@@ -655,8 +702,10 @@ async fn load_types(c: &mut PgConnection, db: &Db, whole: bool, schemas: &[Strin
 /// The columns of a composite type or a table, in the clause form both use: the name, the type and the collation when it
 /// is not the type's own.
 const ATTRS: &str = "SELECT a.attrelid::text, a.attnum::text, a.attname::text, format_type(a.atttypid, a.atttypmod), a.attnotnull::text, a.attidentity::text, a.attgenerated::text, pg_get_expr(d.adbin, d.adrelid), cn.nspname::text, co.collname::text, \
-     sn.nspname::text, sc.relname::text, format_type(sq.seqtypid, NULL), sq.seqstart::text, sq.seqincrement::text, sq.seqmin::text, sq.seqmax::text, sq.seqcache::text, sq.seqcycle::text \
-     FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid \
+     sn.nspname::text, sc.relname::text, format_type(sq.seqtypid, NULL), sq.seqstart::text, sq.seqincrement::text, sq.seqmin::text, sq.seqmax::text, sq.seqcache::text, sq.seqcycle::text, \
+     CASE WHEN nk.oid IS NULL THEN NULL WHEN nk.convalidated AND NOT nk.connoinherit AND nk.conname::text = rc.relname::text || '_' || a.attname::text || '_not_null' THEN 'plain' ELSE 'named' END, nk.conname::text, pg_get_constraintdef(nk.oid) \
+     FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid JOIN pg_class rc ON rc.oid = a.attrelid \
+     LEFT JOIN pg_constraint nk ON nk.conrelid = a.attrelid AND nk.contype = 'n' AND nk.conkey[1] = a.attnum \
      LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
      LEFT JOIN pg_collation co ON co.oid = a.attcollation AND a.attcollation <> t.typcollation LEFT JOIN pg_namespace cn ON cn.oid = co.collnamespace \
      LEFT JOIN pg_depend dp ON a.attidentity <> '' AND dp.classid = 'pg_class'::regclass AND dp.refclassid = 'pg_class'::regclass AND dp.refobjid = a.attrelid AND dp.refobjsubid = a.attnum AND dp.deptype = 'i' \
@@ -667,7 +716,10 @@ async fn load_cols(c: &mut PgConnection, db: &Db, rels: &[i64]) -> Res<Vec<Col>>
     let mut out = Vec::new();
     for r in cat(c, db, ATTRS, &[Arg::Is(rels)]).await? {
         let seq = r.o(10).zip(r.o(11)).map(|(schema, name)| SeqOpts { schema, name, ty: r.s(12), start: r.s(13), inc: r.s(14), min: r.s(15), max: r.s(16), cache: r.s(17), cycle: r.b(18) });
-        out.push(Col { rel: r.n(0), name: r.s(2), ty: r.s(3), notnull: r.b(4), ident: r.c(5), generated: r.c(6), def: r.o(7), coll: r.o(8).zip(r.o(9)), seq });
+        // On 18 a NOT NULL is a constraint with a name. attnotnull is set even by a NOT VALID one, whose NULL rows would fail
+        // the CREATE TABLE they are loaded after, and a name other than the default would be lost.
+        let late_nn = if r.b(4) && r.s(19) == "named" { Some((r.s(20), r.s(21))) } else { None };
+        out.push(Col { rel: r.n(0), name: r.s(2), ty: r.s(3), notnull: r.b(4) && late_nn.is_none(), late_nn, ident: r.c(5), generated: r.c(6), def: r.o(7), coll: r.o(8).zip(r.o(9)), seq });
     }
     Ok(out)
 }
@@ -709,12 +761,16 @@ async fn load_funcs(c: &mut PgConnection, db: &Db, schemas: &[String]) -> Res<Ve
     let sql = format!(
         "SELECT p.oid::text, n.nspname::text, p.proname::text, p.prokind::text, pg_get_function_identity_arguments(p.oid), CASE WHEN p.prokind IN ('f', 'p', 'w') THEN pg_get_functiondef(p.oid) END, \
         (SELECT COALESCE(max(CASE WHEN z.k IN ('v', 'm') THEN 2 ELSE 1 END), 0)::text FROM ( \
-           SELECT rc.relkind::text AS k FROM pg_depend d JOIN pg_type ty ON d.refclassid = 'pg_type'::regclass AND ty.oid = d.refobjid JOIN pg_class rc ON rc.oid = ty.typrelid WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid \
-           UNION ALL SELECT rc.relkind::text FROM pg_depend d JOIN pg_class rc ON d.refclassid = 'pg_class'::regclass AND rc.oid = d.refobjid WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid) z WHERE z.k IN ('r', 'p', 'v', 'm', 'f')) \
-        FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname::text = ANY($1) AND {} ORDER BY n.nspname, p.proname, pg_get_function_identity_arguments(p.oid)",
+           SELECT rc.relkind::text AS k, rc.oid AS o FROM pg_depend d JOIN pg_type ty ON d.refclassid = 'pg_type'::regclass AND ty.oid = d.refobjid JOIN pg_class rc ON rc.oid = ty.typrelid WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid \
+           UNION ALL SELECT rc.relkind::text, rc.oid FROM pg_depend d JOIN pg_class rc ON d.refclassid = 'pg_class'::regclass AND rc.oid = d.refobjid WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid) z WHERE z.k IN ('r', 'p', 'v', 'm', 'f')), \
+        (SELECT string_agg(DISTINCT z.o::text, ',') FROM ( \
+           SELECT rc.relkind::text AS k, rc.oid AS o FROM pg_depend d JOIN pg_type ty ON d.refclassid = 'pg_type'::regclass AND ty.oid = d.refobjid JOIN pg_class rc ON rc.oid = ty.typrelid WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid \
+           UNION ALL SELECT rc.relkind::text, rc.oid FROM pg_depend d JOIN pg_class rc ON d.refclassid = 'pg_class'::regclass AND rc.oid = d.refobjid WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid) z WHERE z.k IN ('r', 'p', 'f')) \
+        FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname::text = ANY($1) AND {} \
+        AND NOT EXISTS (SELECT 1 FROM pg_depend i WHERE i.classid = 'pg_proc'::regclass AND i.objid = p.oid AND i.deptype = 'i') ORDER BY n.nspname, p.proname, pg_get_function_identity_arguments(p.oid)",
         not_ext("pg_proc", "p.oid")
     );
-    Ok(cat(c, db, &sql, &[Arg::Ts(schemas)]).await?.iter().map(|r| Func { oid: r.n(0), schema: r.s(1), name: r.s(2), kind: r.c(3), args: r.s(4), def: r.o(5), phase: r.n(6) }).collect())
+    Ok(cat(c, db, &sql, &[Arg::Ts(schemas)]).await?.iter().map(|r| Func { oid: r.n(0), schema: r.s(1), name: r.s(2), kind: r.c(3), args: r.s(4), def: r.o(5), phase: r.n(6), tabs: r.s(7).split(',').filter_map(|t| t.parse().ok()).collect() }).collect())
 }
 
 async fn load_cons(c: &mut PgConnection, db: &Db, rels: &[i64]) -> Res<Vec<R>> {
@@ -738,6 +794,15 @@ async fn load_idx(c: &mut PgConnection, db: &Db, rels: &[i64]) -> Res<Vec<R>> {
         &[Arg::Is(rels)],
     )
     .await
+}
+
+/// The name the server gives the multirange type of a range type: "range" in the name becomes "multirange", and a name without it
+/// gets a suffix.
+fn default_multirange(range: &str) -> String {
+    match range.find("range") {
+        Some(i) => format!("{}multirange{}", &range[..i], &range[i + 5..]),
+        None => format!("{range}_multirange"),
+    }
 }
 
 /// Enums, domains, composite and range types, each after the types it is made of. On a table subset the target may have
@@ -795,8 +860,9 @@ async fn write_types(c: &mut PgConnection, db: &Db, types: &[Ty], guard: bool, o
         for r in cat(
             c,
             db,
-            "SELECT r.rngtypid::text, format_type(r.rngsubtype, NULL), (r.rngsubdiff <> 0)::text, r.rngsubdiff::regproc::text, (r.rngcanonical <> 0)::text, oc.opcdefault::text, ocn.nspname::text, oc.opcname::text, cn.nspname::text, co.collname::text \
-             FROM pg_range r JOIN pg_opclass oc ON oc.oid = r.rngsubopc JOIN pg_namespace ocn ON ocn.oid = oc.opcnamespace LEFT JOIN pg_collation co ON co.oid = r.rngcollation LEFT JOIN pg_namespace cn ON cn.oid = co.collnamespace WHERE r.rngtypid::int8 = ANY($1)",
+            "SELECT r.rngtypid::text, format_type(r.rngsubtype, NULL), (r.rngsubdiff <> 0)::text, r.rngsubdiff::regproc::text, (r.rngcanonical <> 0)::text, oc.opcdefault::text, ocn.nspname::text, oc.opcname::text, cn.nspname::text, co.collname::text, \
+             CASE WHEN current_setting('server_version_num')::int >= 140000 THEN (SELECT mt.typname::text FROM pg_type mt WHERE mt.oid = (to_jsonb(r) ->> 'rngmultitypid')::oid) END, rt.typname::text, rn.nspname::text \
+             FROM pg_range r JOIN pg_type rt ON rt.oid = r.rngtypid JOIN pg_namespace rn ON rn.oid = rt.typnamespace JOIN pg_opclass oc ON oc.oid = r.rngsubopc JOIN pg_namespace ocn ON ocn.oid = oc.opcnamespace LEFT JOIN pg_collation co ON co.oid = r.rngcollation LEFT JOIN pg_namespace cn ON cn.oid = co.collnamespace WHERE r.rngtypid::int8 = ANY($1)",
             &[Arg::Is(&ranges)],
         )
         .await?
@@ -813,6 +879,10 @@ async fn write_types(c: &mut PgConnection, db: &Db, types: &[Ty], guard: bool, o
             }
             if r.b(2) {
                 s.push_str(&format!(", SUBTYPE_DIFF = {}", r.s(3)));
+            }
+            // From 14 on a range has a multirange type, named after it unless the CREATE TYPE said otherwise.
+            if let Some(m) = r.o(10).filter(|m| *m != default_multirange(&r.s(11))) {
+                s.push_str(&format!(", MULTIRANGE_TYPE_NAME = {}", qn(&r.s(12), &m)));
             }
             range.insert(r.n(0), s);
         }
@@ -1063,7 +1133,7 @@ pub async fn run_file(db: Db, schema: String, src: Source, read_only: bool, prog
         loop {
             let piece = match sp.next_piece() {
                 Ok(p) => p,
-                Err(x) => break 'run Err(format!("{x}\n\nStatements before it ran and stay applied.")),
+                Err(x) => break 'run Err(format!("{x}\n\n{}", stay(in_tx))),
             };
             match piece {
                 Some(p) => {
@@ -1071,6 +1141,9 @@ pub async fn run_file(db: Db, schema: String, src: Source, read_only: bool, prog
                         break 'run Err("Cancelled.".into());
                     }
                     n += 1;
+                    if two_phase(&p.text) {
+                        break 'run Err(format!("Statement {n} (line {}) cannot run: PREPARE TRANSACTION, COMMIT PREPARED and ROLLBACK PREPARED hand the transaction to the server, so Quarry could not tell what a file leaves applied or rolled back. Run the file with psql.\n\n{}\n\n{}", p.line, excerpt(p.text.as_bytes()), stay(in_tx)));
+                    }
                     if pooled {
                         // The header of a dump sets its search_path and the like. Nothing may stay on a shared backend, so
                         // these become settings of every statement's own transaction instead.
@@ -1091,7 +1164,7 @@ pub async fn run_file(db: Db, schema: String, src: Source, read_only: bool, prog
                             None
                         };
                         if let Some(w) = why {
-                            break 'run Err(format!("Statement {n} (line {}) cannot run: {w}\n\n{}\n\nStatements before it ran and stay applied.", p.line, excerpt(p.text.as_bytes())));
+                            break 'run Err(format!("Statement {n} (line {}) cannot run: {w}\n\n{}\n\n{}", p.line, excerpt(p.text.as_bytes()), stay(in_tx)));
                         }
                     }
                     let t = Instant::now();
@@ -1100,15 +1173,20 @@ pub async fn run_file(db: Db, schema: String, src: Source, read_only: bool, prog
                         crate::db::note_here(&p.text[..p.text.floor_char_boundary(p.text.len().min(16_000))], t, &outcome);
                     }
                     if let Err(x) = outcome {
-                        let tail = if in_tx { "The transaction the file opened is rolled back; statements before it ran and stay applied." } else { "Statements before it ran and stay applied." };
-                        break 'run Err(format!("Statement {n} (line {}) failed: {}\n\n{}\n\n{tail}", p.line, se_at(&x, &p.text, 0), excerpt(p.text.as_bytes())));
+                        break 'run Err(format!("Statement {n} (line {}) failed: {}\n\n{}\n\n{}", p.line, se_at(&x, &p.text, 0), excerpt(p.text.as_bytes()), stay(in_tx)));
                     }
                     if let Some(open) = tx_effect(&p.text) {
                         in_tx = open;
                     }
-                    // A SET of standard_conforming_strings changes how the rest of the file is read.
-                    if !pooled && lex::changes_escaping(&p.text, D) {
-                        sp.set_plain_backslash(scs_off(&mut c).await);
+                    // What the session does with the rest of the file can change under a statement that names no setting: the end
+                    // of a transaction undoes its SET LOCALs, and a function can call set_config. A client_encoding other than
+                    // UTF8 stops the run: the file is UTF-8, so the server would read other text than the splitter did.
+                    if !pooled && (lex::changes_escaping(&p.text, D) || ends_scope(&p.text)) {
+                        match reading(&mut c).await {
+                            Ok((off, enc)) if enc.eq_ignore_ascii_case("utf8") => sp.set_plain_backslash(off),
+                            Ok((_, enc)) => break 'run Err(format!("Statement {n} (line {}) set client_encoding to {enc}. Quarry sends a file as UTF-8, so anything after it would be read as other text than the file holds, and the run stops. Leave client_encoding at UTF8.\n\n{}\n\n{}", p.line, excerpt(p.text.as_bytes()), stay(in_tx))),
+                            Err(x) => break 'run Err(format!("Statement {n} (line {}) was followed by a failed read of the session's settings: {}\n\n{}", p.line, se(x), stay(in_tx))),
+                        }
                     }
                     prog.rows.store(n, Ordering::Relaxed);
                     prog.bytes.store(sp.offset(), Ordering::Relaxed);
@@ -1140,16 +1218,30 @@ pub async fn run_file(db: Db, schema: String, src: Source, read_only: bool, prog
     };
     let _ = c.close().await;
     match res {
-        Err(x) if cancel.load(Ordering::SeqCst) => Err(format!("Run stopped. Statements that already ran stay applied.\n{x}")),
+        Err(x) if cancel.load(Ordering::SeqCst) => Err(format!("Run stopped. {}\n{x}", stay(in_tx))),
         r => r,
     }
 }
 
+/// What a stop leaves: autocommit statements stay applied, but the ones inside a transaction the file opened were rolled
+/// back with it.
+fn stay(in_tx: bool) -> &'static str {
+    if in_tx { "The transaction the file opened is rolled back; statements before its BEGIN stay applied." } else { "Statements before it ran and stay applied." }
+}
+
 /// A plain `SET name = value` of a setting that is safe to carry, as the `SET LOCAL` every transaction of the run starts
-/// with. A client_encoding of UTF8 is what the session has already, so it is accepted and dropped.
+/// with. A client_encoding of UTF8 and standard_conforming_strings on are what the session has already, so they are
+/// accepted and dropped. The value is built from tokens and may hold only words, names, strings, numbers and commas, never
+/// a `;` or a parenthesis, so it cannot carry a second statement into every later transaction.
 fn pooled_set(stmt: &str) -> Option<String> {
     use super::lex::Tok;
-    let toks: Vec<(Tok, &str)> = lex::tokens(stmt, D).into_iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment)).map(|(t, r)| (t, &stmt[r])).collect();
+    let all: Vec<(Tok, &str)> = lex::tokens(stmt, D).into_iter().filter(|(t, _)| !matches!(t, Tok::Space)).map(|(t, r)| (t, &stmt[r])).collect();
+    // The comment lines at the top of a dump come with its first statement.
+    let toks = &all[all.iter().position(|t| t.0 != Tok::Comment).unwrap_or(all.len())..];
+    // A comment inside the value would swallow what follows it once the value is joined into one message.
+    if toks.iter().any(|t| t.0 == Tok::Comment) {
+        return None;
+    }
     let word = |i: usize| toks.get(i).filter(|t| t.0 == Tok::Word).map(|t| t.1.to_ascii_lowercase());
     if word(0)? != "set" {
         return None;
@@ -1160,14 +1252,26 @@ fn pooled_set(stmt: &str) -> Option<String> {
     if !(sep.1 == "=" || sep.1.eq_ignore_ascii_case("to")) {
         return None;
     }
-    // The token borrows from `stmt`, so its address says where it ends.
-    let value = stmt[(sep.1.as_ptr() as usize - stmt.as_ptr() as usize) + sep.1.len()..].trim();
-    if value.is_empty() || value.contains(';') && !value.starts_with(['\'', '"']) {
+    let value = &toks[at + 2..];
+    let ok = |t: &(Tok, &str)| match t.0 {
+        Tok::Word | Tok::Quoted | Tok::Str => true,
+        Tok::Punct => matches!(t.1, "," | "-" | "+" | "."),
+        _ => false,
+    };
+    if value.is_empty() || !value.iter().all(ok) {
         return None;
     }
+    // The tokens borrow from `stmt`, so their addresses say where the value starts and ends, spacing and all.
+    let from = value[0].1.as_ptr() as usize - stmt.as_ptr() as usize;
+    let last = value[value.len() - 1].1;
+    let text = &stmt[from..last.as_ptr() as usize - stmt.as_ptr() as usize + last.len()];
+    let plain = |v: &str| v.trim_matches('\'').to_ascii_lowercase();
     match name.as_str() {
-        "client_encoding" if value.trim_matches('\'').eq_ignore_ascii_case("utf8") => Some("SET LOCAL client_min_messages = DEFAULT".into()),
-        "search_path" | "check_function_bodies" | "timezone" | "datestyle" | "intervalstyle" | "extra_float_digits" | "client_min_messages" => Some(format!("SET LOCAL {name} = {value}")),
+        "client_encoding" if value.len() == 1 && matches!(plain(value[0].1).as_str(), "utf8" | "utf-8" | "unicode") => Some("SET LOCAL client_min_messages = DEFAULT".into()),
+        "standard_conforming_strings" if value.len() == 1 && matches!(plain(value[0].1).as_str(), "on" | "true" | "1") => Some("SET LOCAL client_min_messages = DEFAULT".into()),
+        // A search_path that names pg_temp would put what the file creates on the backend, where other clients find it.
+        "search_path" if text.to_ascii_lowercase().contains("pg_temp") => None,
+        "search_path" | "check_function_bodies" | "timezone" | "datestyle" | "intervalstyle" | "extra_float_digits" | "client_min_messages" => Some(format!("SET LOCAL {name} = {text}")),
         _ => None,
     }
 }
@@ -1186,12 +1290,12 @@ fn tx_effect(stmt: &str) -> Option<bool> {
     }
 }
 
-async fn run_text(c: &mut PgConnection, stmt: &str) -> Result<(), sqlx::Error> {
-    let mut s = raw_sql(stmt).fetch_many(&mut *c);
-    while let Some(item) = futures_util::StreamExt::next(&mut s).await {
-        item?;
-    }
-    Ok(())
+/// One piece through the extended protocol, which the server refuses when it holds more than one statement. The simple
+/// protocol would run all of them, and the splitter can disagree with the server about where a statement ends (a
+/// standard_conforming_strings or client_encoding the file switched, a BEGIN ATOMIC it misread), so a statement the
+/// progress and the pooler checks never saw would run. Unnamed, so no prepared statement stays on the connection.
+pub(super) async fn run_text(c: &mut PgConnection, stmt: &str) -> Result<(), sqlx::Error> {
+    sqlx::query(stmt).persistent(false).execute(&mut *c).await.map(|_| ())
 }
 
 /// One statement behind a pooler, in a transaction of its own that carries its settings, as a Custom Query run does.
@@ -1204,15 +1308,26 @@ async fn run_pooled(c: &mut PgConnection, db: &Db, stmt: &str, locals: &str) -> 
     c.execute("COMMIT").await.map(|_| ())
 }
 
-async fn scs_off(c: &mut PgConnection) -> bool {
-    let mut s = raw_sql("SELECT current_setting('standard_conforming_strings')").fetch_many(&mut *c);
-    let mut off = false;
-    while let Some(item) = futures_util::StreamExt::next(&mut s).await {
-        if let Ok(sqlx::Either::Right(r)) = item {
-            off = r.cell(0) != Some(b"on");
-        }
-    }
-    off
+/// How the session reads the text it is sent from now on: whether plain strings honour backslashes, and its client_encoding.
+async fn reading(c: &mut PgConnection) -> Result<(bool, String), sqlx::Error> {
+    let r = sqlx::query("SELECT current_setting('standard_conforming_strings'), current_setting('client_encoding')").persistent(false).fetch_one(&mut *c).await?;
+    let text = |i: usize| r.cell(i).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default();
+    Ok((text(0) != "on", text(1)))
+}
+
+/// Statements after which the session's settings may differ from before without a SET naming them: the end of a
+/// transaction undoes its SET LOCALs, and ROLLBACK TO undoes a SET made after a savepoint.
+fn ends_scope(stmt: &str) -> bool {
+    use super::lex::Tok;
+    let first = lex::tokens(stmt, D).into_iter().find(|(t, _)| *t == Tok::Word).map(|(_, r)| stmt[r].to_ascii_uppercase());
+    matches!(first.as_deref(), Some("COMMIT" | "END" | "ROLLBACK" | "ABORT"))
+}
+
+/// Two-phase commit leaves a transaction the session no longer holds, which the run could not account for.
+fn two_phase(stmt: &str) -> bool {
+    use super::lex::Tok;
+    let w: Vec<String> = lex::tokens(stmt, D).into_iter().filter(|(t, _)| *t == Tok::Word).map(|(_, r)| stmt[r].to_ascii_uppercase()).take(2).collect();
+    matches!((w.first().map(String::as_str), w.get(1).map(String::as_str)), (Some("PREPARE"), Some("TRANSACTION")) | (Some("COMMIT" | "ROLLBACK"), Some("PREPARED")))
 }
 
 #[cfg(test)]
@@ -1227,6 +1342,14 @@ mod tests {
         assert_eq!(pg_lit(r"a\b"), r"E'a\\b'");
         assert_eq!(pg_lit(r"it's \"), r"E'it''s \\'");
         assert_eq!(pg_lit("two\nlines"), "'two\nlines'");
+    }
+
+    #[test]
+    fn a_range_type_names_its_multirange_like_the_server_does() {
+        assert_eq!(default_multirange("floatrange"), "floatmultirange");
+        assert_eq!(default_multirange("fl"), "fl_multirange");
+        assert_eq!(default_multirange("range_of_x"), "multirange_of_x");
+        assert_eq!(default_multirange("a_range_b"), "a_multirange_b");
     }
 
     #[test]
@@ -1249,9 +1372,37 @@ mod tests {
         assert_eq!(pooled_set("set statement_timeout to 0"), None);
         assert_eq!(pooled_set("SET check_function_bodies = false").as_deref(), Some("SET LOCAL check_function_bodies = false"));
         assert!(pooled_set("SET client_encoding = 'UTF8'").is_some());
+        assert!(pooled_set("SET standard_conforming_strings = on").is_some());
+        assert_eq!(pooled_set("-- Quarry SQL dump\n-- Server: x\n\nSET search_path = ''").as_deref(), Some("SET LOCAL search_path = ''"));
+        assert_eq!(pooled_set("SET search_path = \"my schema\", public, '$user'").as_deref(), Some("SET LOCAL search_path = \"my schema\", public, '$user'"));
+        assert_eq!(pooled_set("SET extra_float_digits = -1").as_deref(), Some("SET LOCAL extra_float_digits = -1"));
         // Anything that could change how the rest is read, or that is not on the list, is left to the pooler checks.
         for s in ["SET standard_conforming_strings = off", "SET client_encoding = 'LATIN1'", "SET role = x", "SET LOCAL search_path = ''", "SELECT 1", "SET x"] {
             assert!(pooled_set(s).is_none(), "{s}");
+        }
+    }
+
+    #[test]
+    fn a_pooled_set_value_is_made_of_words_names_strings_numbers_and_commas_only() {
+        // These once went into every later transaction of the run and broke each BEGIN.
+        for s in ["SET search_path = 'a', (; DROP TABLE t; )", "SET search_path = a; DROP TABLE t", "SET search_path = a, (b)", "SET search_path = a -- x\n, b", "SET search_path = a /* x */, b", "SET search_path = pg_temp, public", "SET search_path = 'public, pg_temp'", "SET search_path = \"pg_temp\"", "SET timezone = a || b", "SET search_path ="] {
+            assert!(pooled_set(s).is_none(), "{s}");
+        }
+    }
+
+    #[test]
+    fn two_phase_commit_and_the_end_of_a_scope_are_recognised() {
+        for s in ["PREPARE TRANSACTION 'x'", "prepare  transaction 'x'", "COMMIT PREPARED 'x'", "ROLLBACK PREPARED 'x'", "/* c */ COMMIT PREPARED 'x'"] {
+            assert!(two_phase(s), "{s}");
+        }
+        for s in ["PREPARE p AS SELECT 1", "COMMIT", "SELECT 'PREPARE TRANSACTION'", "ROLLBACK TO a"] {
+            assert!(!two_phase(s), "{s}");
+        }
+        for s in ["COMMIT", "END", "rollback", "ABORT", "ROLLBACK TO SAVEPOINT a", "COMMIT AND CHAIN"] {
+            assert!(ends_scope(s), "{s}");
+        }
+        for s in ["BEGIN", "SAVEPOINT a", "SELECT 1", "RELEASE a"] {
+            assert!(!ends_scope(s), "{s}");
         }
     }
 

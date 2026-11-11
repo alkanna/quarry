@@ -101,13 +101,31 @@ fn lines(l: &LivePg, pool: &PgPool, q: &str) -> Vec<String> {
     })
 }
 
+/// What psql does with a script: each statement on its own through the simple protocol, reading the server's own
+/// standard_conforming_strings after every statement. The session starts with it off, as one of a database set so would.
+fn psql_like(l: &LivePg, pool: &PgPool, text: &str) {
+    use super::pg_script::PgSplitter;
+    l.w.rt.block_on(async {
+        let mut c = pool.acquire().await.unwrap();
+        let mut sp = PgSplitter::new(true);
+        sp.feed(text.as_bytes());
+        sp.finish();
+        while let Some(p) = sp.next_piece().unwrap() {
+            sqlx::raw_sql(&p.text).execute(&mut *c).await.unwrap_or_else(|x| panic!("statement at line {} failed: {x}\n{}", p.line, p.text));
+            let r = sqlx::query("SHOW standard_conforming_strings").persistent(false).fetch_one(&mut *c).await.unwrap();
+            sp.set_plain_backslash(super::worker::text_at(&r, 0).as_deref() != Some("on"));
+        }
+    });
+}
+
 const USER_NS: &str = "n.nspname <> 'information_schema' AND n.nspname NOT LIKE 'pg\\_%'";
 
 /// What the catalogs say of every user object, one text per object, in an order that does not depend on oids, and a count and
 /// a checksum of every table's rows. Two databases with the same list hold the same objects and data.
 fn shape(l: &LivePg, pool: &PgPool) -> Vec<String> {
     let mut out = Vec::new();
-    let queries: [(&str, String); 12] = [
+    let ver: i64 = one(l, pool, "SELECT current_setting('server_version_num')").parse().unwrap();
+    let mut queries: Vec<(&str, String)> = vec![
         ("schema", format!("SELECT n.nspname || ' ' || COALESCE(obj_description(n.oid, 'pg_namespace'), '') FROM pg_namespace n WHERE {USER_NS} ORDER BY 1")),
         ("extension", "SELECT e.extname || ' ' || e.extnamespace::regnamespace FROM pg_extension e WHERE e.extname <> 'plpgsql' ORDER BY 1".into()),
         ("relation", format!("SELECT c.oid::regclass || ' ' || c.relkind::text || c.relpersistence::text || ' ' || c.relispopulated || ' ' || COALESCE(c.reloptions::text, '') FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'v', 'm', 'S') AND {USER_NS} ORDER BY 1")),
@@ -117,10 +135,12 @@ fn shape(l: &LivePg, pool: &PgPool) -> Vec<String> {
         ("view", format!("SELECT c.oid::regclass || ' ' || pg_get_viewdef(c.oid, true) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('v', 'm') AND {USER_NS} ORDER BY 1")),
         ("function", format!("SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE p.prokind IN ('f', 'p') AND {USER_NS} AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e') ORDER BY 1")),
         ("trigger", "SELECT pg_get_triggerdef(t.oid) || ' en=' || t.tgenabled::text FROM pg_trigger t WHERE NOT t.tgisinternal ORDER BY 1".into()),
-        ("type", format!("SELECT t.oid::regtype || ' ' || t.typtype::text || ' ' || COALESCE((SELECT string_agg(e.enumlabel, '|' ORDER BY e.enumsortorder) FROM pg_enum e WHERE e.enumtypid = t.oid), '') || ' ' || COALESCE(format_type(NULLIF(t.typbasetype, 0), t.typtypmod), '') || ' nn=' || t.typnotnull || ' def=' || COALESCE(pg_get_expr(t.typdefaultbin, 0), '') || ' ' || COALESCE((SELECT string_agg(a.attname || ':' || format_type(a.atttypid, a.atttypmod), ',' ORDER BY a.attnum) FROM pg_attribute a WHERE a.attrelid = t.typrelid AND a.attnum > 0 AND t.typtype = 'c'), '') || ' ' || COALESCE((SELECT r.rngsubtype::regtype::text FROM pg_range r WHERE r.rngtypid = t.oid), '') FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE t.typtype IN ('e', 'd', 'r', 'c') AND t.typcategory <> 'A' AND (t.typrelid = 0 OR EXISTS (SELECT 1 FROM pg_class k WHERE k.oid = t.typrelid AND k.relkind = 'c')) AND {USER_NS} AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_type'::regclass AND d.objid = t.oid AND d.deptype = 'e') ORDER BY 1")),
-        ("sequence", "SELECT schemaname || '.' || sequencename || ' ' || data_type || ' ' || start_value || ' ' || increment_by || ' ' || min_value || ' ' || max_value || ' ' || cache_size || ' ' || cycle || ' last=' || COALESCE(last_value::text, 'null') FROM pg_sequences WHERE schemaname NOT LIKE 'pg\\_%' AND schemaname <> 'information_schema' ORDER BY 1".into()),
+        ("type", format!("SELECT t.oid::regtype || ' ' || t.typtype::text || ' ' || COALESCE((SELECT string_agg(e.enumlabel, '|' ORDER BY e.enumsortorder) FROM pg_enum e WHERE e.enumtypid = t.oid), '') || ' ' || COALESCE(format_type(NULLIF(t.typbasetype, 0), t.typtypmod), '') || ' nn=' || t.typnotnull || ' def=' || COALESCE(pg_get_expr(t.typdefaultbin, 0), '') || ' ' || COALESCE((SELECT string_agg(a.attname || ':' || format_type(a.atttypid, a.atttypmod) || '/' || a.attcollation::regcollation, ',' ORDER BY a.attnum) FROM pg_attribute a WHERE a.attrelid = t.typrelid AND a.attnum > 0 AND t.typtype = 'c'), '') || ' ' || COALESCE((SELECT r.rngsubtype::regtype::text FROM pg_range r WHERE r.rngtypid = t.oid), '') FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE t.typtype IN ('e', 'd', 'r', 'c') AND t.typcategory <> 'A' AND (t.typrelid = 0 OR EXISTS (SELECT 1 FROM pg_class k WHERE k.oid = t.typrelid AND k.relkind = 'c')) AND {USER_NS} AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_type'::regclass AND d.objid = t.oid AND d.deptype = 'e') ORDER BY 1")),
+        ("sequence", "SELECT schemaname || '.' || sequencename || ' ' || data_type || ' ' || start_value || ' ' || increment_by || ' ' || min_value || ' ' || max_value || ' ' || cache_size || ' ' || cycle || ' last=' || COALESCE(last_value::text, 'null') || ' owner=' || COALESCE((SELECT d.refobjid::regclass::text || '.' || d.refobjsubid || ' ' || d.deptype::text FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = format('%I.%I', schemaname, sequencename)::regclass AND d.refclassid = 'pg_class'::regclass AND d.deptype IN ('a', 'i') LIMIT 1), '') FROM pg_sequences WHERE schemaname NOT LIKE 'pg\\_%' AND schemaname <> 'information_schema' ORDER BY 1".into()),
         ("comment", "SELECT pg_describe_object(d.classoid, d.objoid, d.objsubid) || ' = ' || d.description FROM pg_description d WHERE d.objoid >= 16384 ORDER BY 1".into()),
     ];
+    // The options of a range type: subtype, operator class, collation, difference function and, from 14, the multirange type.
+    queries.push(("range", format!("SELECT r.rngtypid::regtype || ' sub=' || r.rngsubtype::regtype || ' opc=' || oc.opcname || ' coll=' || r.rngcollation::regcollation || ' diff=' || r.rngsubdiff::regproc{} FROM pg_range r JOIN pg_opclass oc ON oc.oid = r.rngsubopc JOIN pg_type t ON t.oid = r.rngtypid JOIN pg_namespace n ON n.oid = t.typnamespace WHERE {USER_NS} ORDER BY 1", if ver >= 140000 { " || ' multi=' || (to_jsonb(r) ->> 'rngmultitypid')::oid::regtype" } else { "" })));
     for (what, q) in queries {
         for line in lines(l, pool, &q) {
             out.push(format!("{what}: {line}"));
@@ -154,6 +174,9 @@ CREATE DOMAIN app.posint AS integer DEFAULT 1 NOT NULL CONSTRAINT posint_pos CHE
 CREATE DOMAIN "Odd ""Schema".txt AS text COLLATE "C" CHECK (length(VALUE) < 100);
 CREATE TYPE app.pair AS (a integer, b text);
 CREATE TYPE app.fl AS RANGE (subtype = float8);
+CREATE TYPE app.fl2 AS RANGE (subtype = float8, subtype_diff = float8mi);
+CREATE TYPE app.tr AS RANGE (subtype = text, subtype_opclass = text_pattern_ops, collation = "C");
+CREATE TYPE app.cm AS (t text COLLATE "C", u text);
 CREATE SEQUENCE app.standalone START 100 INCREMENT 5 MINVALUE 100 MAXVALUE 100000 CACHE 3 CYCLE;
 COMMENT ON SEQUENCE app.standalone IS 'standalone';
 CREATE FUNCTION app.double(i integer) RETURNS integer LANGUAGE sql IMMUTABLE AS $$ SELECT i * 2 $$;
@@ -187,6 +210,9 @@ CREATE INDEX "Items expr" ON app."Items" (lower("Mixed Case ""Name""")) INCLUDE 
 COMMENT ON INDEX app."Items expr" IS 'an index';
 ALTER TABLE app.child CLUSTER ON child_pkey;
 CREATE TABLE app.empty_t (id int);
+ALTER TABLE app.empty_t ADD CONSTRAINT bs_chk CHECK (id IS NULL OR 'x\y' <> '');
+CREATE SEQUENCE app.owned_seq OWNED BY app.empty_t.id;
+CREATE VIEW app.bs_view AS SELECT id, 'a\b'::text AS lit FROM app.empty_t WHERE 'c\d' <> '';
 CREATE TABLE app."two
 lines" (x int);
 CREATE TABLE app."a;--b" ("c;d" text PRIMARY KEY);
@@ -232,10 +258,30 @@ SELECT setval('app.standalone', 4000);
 /// A function body of the SQL standard form, which only PostgreSQL 14 and later knows.
 const ATOMIC_FN: &str = "CREATE FUNCTION app.viewf() RETURNS bigint LANGUAGE sql BEGIN ATOMIC SELECT count(*) FROM app.b_base; END;";
 
+/// From 14: a range type with a multirange name of its own.
+const MULTIRANGE: &str = "CREATE TYPE app.mr AS RANGE (subtype = int8, multirange_type_name = app.my_multi_name);";
+
+/// From 18 a NOT NULL is a constraint: one that is NOT VALID has NULL rows behind it, one is named, one is NO INHERIT.
+const NOT_NULLS: &str = "CREATE TABLE app.nnv (id int PRIMARY KEY, a int, b int, c int, d int);
+INSERT INTO app.nnv VALUES (1, NULL, 1, 1, 1);
+ALTER TABLE app.nnv ADD CONSTRAINT a_must NOT NULL a NOT VALID;
+ALTER TABLE app.nnv ADD CONSTRAINT named_b NOT NULL b;
+ALTER TABLE app.nnv ALTER COLUMN c SET NOT NULL;
+ALTER TABLE app.nnv ADD CONSTRAINT d_noinherit NOT NULL d NO INHERIT;";
+
+fn version(l: &LivePg, pool: &PgPool) -> i64 {
+    one(l, pool, "SELECT current_setting('server_version_num')").parse().unwrap()
+}
+
 fn fixture(l: &LivePg, pool: &PgPool) {
     sql(l, pool, FIXTURE);
-    if one(l, pool, "SELECT current_setting('server_version_num')::int >= 140000") == "t" {
+    let v = version(l, pool);
+    if v >= 140000 {
         sql(l, pool, ATOMIC_FN);
+        sql(l, pool, MULTIRANGE);
+    }
+    if v >= 180000 {
+        sql(l, pool, NOT_NULLS);
     }
 }
 
@@ -253,10 +299,16 @@ fn live_a_database_dumped_and_run_back_into_an_empty_one_is_the_same() {
         assert_eq!(super::worker::text_at(&ro[0], 0).as_deref(), Some("on"), "{var}");
         let path = file(&format!("whole_{t}"));
         let rows = dump(l, &src, &plan("", true, Vec::new()), &path).unwrap_or_else(|x| panic!("{var}: {x}"));
-        // Items (2501) and child (1200), a;--b (2), T"x" (2), two lines (1), unlogged (1).
-        assert_eq!(rows, 2501 + 1200 + 2 + 2 + 1 + 1, "{var}");
+        // Items (2501) and child (1200), a;--b (2), T"x" (2), two lines (1), unlogged (1), and from 18 the nnv row.
+        let v18 = version(l, &src_pool) >= 180000;
+        assert_eq!(rows, 2501 + 1200 + 2 + 2 + 1 + 1 + v18 as u64, "{var}");
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("SET search_path = '';") && text.contains("CREATE EXTENSION IF NOT EXISTS \"citext\""), "{var}");
+        if v18 {
+            // The NOT VALID one is added after the rows with its mark, and the named one keeps its name.
+            assert!(text.contains("ADD CONSTRAINT \"a_must\" NOT NULL a NOT VALID") && text.contains("ADD CONSTRAINT \"named_b\" NOT NULL b;"), "{var}");
+            assert!(!text.contains("\"a\" integer NOT NULL"), "{var}: a column whose NOT NULL is NOT VALID is written without it");
+        }
         // The order a restore needs: types, sequences, tables, rows, keys, foreign keys, views, triggers.
         let at = |s: &str| text.find(s).unwrap_or_else(|| panic!("{var}: {s} is not in the dump"));
         assert!(at("CREATE TYPE \"app\".\"mood\"") < at("CREATE SEQUENCE IF NOT EXISTS \"app\".\"standalone\""), "{var}");
@@ -475,6 +527,147 @@ CREATE TABLE "weird;--name" ("a;b" int); COMMENT ON TABLE "weird;--name" IS 'c;d
     });
 }
 
+/// A piece the splitter and the server read differently must never run as several statements the progress does not count.
+#[test]
+fn live_a_piece_the_server_reads_as_several_statements_never_runs_unseen() {
+    every_pg(|l, var| {
+        let t = tag(var);
+        let mut dbs = Dbs::new(l);
+        let (db, pool) = dbs.make(&format!("qdump_multi_{t}"));
+        sql(l, &pool, "CREATE TABLE v1 (a int); CREATE TABLE v2 (a int); CREATE TABLE v3 (a int); CREATE TABLE mt (a int)");
+        // A function called begin with an argument called atomic is no SQL body, so the DROP and the END are statements of their own.
+        let ran = run_text(l, &db, "public", "CREATE FUNCTION begin(atomic int) RETURNS int LANGUAGE sql AS 'select 1'; DROP TABLE v1; END;").unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(ran.statements, 3, "{var}: the DROP ran inside the CREATE's piece and the run never counted it");
+        assert_eq!(one(l, &pool, "SELECT to_regclass('v1') IS NULL"), "t", "{var}");
+        // A SET LOCAL that the COMMIT undoes: the string after it is a plain one again, so the DROP is a statement of its own.
+        let ran = run_text(l, &db, "public", "BEGIN; SET LOCAL standard_conforming_strings = off; COMMIT; SELECT 'a\\'; DROP TABLE v2; --';").unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(ran.statements, 5, "{var}: the splitter went on reading with backslashes after the COMMIT");
+        assert_eq!(one(l, &pool, "SELECT to_regclass('v2') IS NULL"), "t", "{var}");
+        // A client_encoding that reads the backslash as part of a character ends the run before anything it could hide.
+        let e = run_text(l, &db, "public", "SET client_encoding = 'SJIS'; SELECT E'Á\\'; DROP TABLE v3; --';").unwrap_err();
+        assert!(e.contains("client_encoding") && e.contains("SJIS") && e.contains("stay applied"), "{var}: {e}");
+        assert_eq!(one(l, &pool, "SELECT to_regclass('v3') IS NOT NULL"), "t", "{var}: the DROP behind the encoding ran");
+        let e = run_text(l, &db, "public", "SET client_encoding = 'LATIN1'; CREATE TABLE enc (t text); INSERT INTO enc VALUES ('é')").unwrap_err();
+        assert!(e.contains("client_encoding"), "{var}: {e}");
+        assert_eq!(one(l, &pool, "SELECT to_regclass('enc') IS NULL"), "t", "{var}: a UTF-8 file went in as Latin-1");
+        // Whatever the cause, the server refuses a piece of several statements when it is sent on its own.
+        let e = l.w.rt.block_on(async {
+            let mut c = pool.acquire().await.unwrap();
+            super::pg_dump::run_text(&mut c, "INSERT INTO mt VALUES (1); INSERT INTO mt VALUES (2)").await.err()
+        });
+        assert!(e.is_some_and(|e| e.to_string().contains("multiple commands")), "{var}");
+        assert_eq!(one(l, &pool, "SELECT count(*) FROM mt"), "0", "{var}");
+        // A statement the server runs outside a transaction block runs through an unnamed statement just the same.
+        run_text(l, &db, "public", "VACUUM mt; CREATE INDEX CONCURRENTLY mt_a ON mt (a); REINDEX TABLE CONCURRENTLY mt; DROP INDEX CONCURRENTLY mt_a").unwrap_or_else(|x| panic!("{var}: {x}"));
+    });
+}
+
+/// Two-phase commit hands the transaction to the server, which the run could not follow.
+#[test]
+fn live_two_phase_commit_statements_are_refused_in_a_file() {
+    every_pg(|l, var| {
+        let t = tag(var);
+        let mut dbs = Dbs::new(l);
+        let (db, pool) = dbs.make(&format!("qdump_2pc_{t}"));
+        for s in ["BEGIN; CREATE TABLE tp (a int); PREPARE TRANSACTION 'qdump_tp'", "COMMIT PREPARED 'qdump_none'", "ROLLBACK PREPARED 'qdump_none'"] {
+            let e = run_text(l, &db, "public", s).unwrap_err();
+            assert!(e.contains("hand the transaction to the server") && e.contains("line 1"), "{var}: {s}: {e}");
+        }
+        let _ = l.w.rt.block_on(async { sqlx::raw_sql("ROLLBACK PREPARED 'qdump_tp'").execute(&pool).await });
+        assert_eq!(one(l, &pool, "SELECT to_regclass('tp') IS NULL"), "t", "{var}");
+    });
+}
+
+/// A catalog text prints `'a\b'::text` plain, which a client with standard_conforming_strings off reads as another value.
+/// The file pins the setting itself, so a script runner that works like psql restores the same database.
+#[test]
+fn live_a_dump_read_by_a_client_with_standard_conforming_strings_off_restores_the_same() {
+    every_pg(|l, var| {
+        let t = tag(var);
+        let mut dbs = Dbs::new(l);
+        let (src, src_pool) = dbs.make(&format!("qdump_bs_src_{t}"));
+        let (_, dst_pool) = dbs.make(&format!("qdump_bs_dst_{t}"));
+        sql(l, &src_pool, r#"CREATE TABLE d (id int PRIMARY KEY, t text NOT NULL DEFAULT 'a\b', u text, CONSTRAINT chk CHECK (t <> 'x\y'));
+CREATE INDEX d_part ON d (id) WHERE t <> 'p\q';
+CREATE VIEW dv AS SELECT id, 'v\w'::text AS lit FROM d WHERE t <> 'c\d';
+CREATE FUNCTION dtrg() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+CREATE TRIGGER dt BEFORE UPDATE ON d FOR EACH ROW WHEN (OLD.t <> 'w\z') EXECUTE FUNCTION dtrg();
+INSERT INTO d (id, u) VALUES (1, 'q\r')"#);
+        let before = shape(l, &src_pool);
+        let path = file(&format!("bs_{t}"));
+        dump(l, &src, &plan("public", false, vec![table("d", false, true, true, false), table("dv", true, true, false, false)]), &path).unwrap_or_else(|x| panic!("{var}: {x}"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("SET standard_conforming_strings = on;\n"), "{var}");
+        sql(l, &dst_pool, &format!("ALTER DATABASE \"qdump_bs_dst_{t}\" SET standard_conforming_strings = off"));
+        let off = pool_of(l, &format!("qdump_bs_dst_{t}"));
+        assert_eq!(one(l, &off, "SHOW standard_conforming_strings"), "off", "{var}");
+        psql_like(l, &off, &text);
+        same(var, &before, &shape(l, &off));
+        assert_eq!(one(l, &off, "SELECT t FROM public.d"), "a\\b", "{var}");
+        let _ = std::fs::remove_file(path);
+    });
+}
+
+/// A default or generated column that calls a function naming a table, and a column typed as another table's row type, need
+/// that function or table written first, whatever the names sort like.
+#[test]
+fn live_functions_and_tables_that_need_each_other_are_written_in_order() {
+    every_pg(|l, var| {
+        let t = tag(var);
+        let mut dbs = Dbs::new(l);
+        let (src, src_pool) = dbs.make(&format!("qdump_order_src_{t}"));
+        let (dst, dst_pool) = dbs.make(&format!("qdump_order_dst_{t}"));
+        sql(l, &src_pool, "CREATE TABLE zt (id int PRIMARY KEY); CREATE FUNCTION zrow(t zt) RETURNS int LANGUAGE sql AS 'select $1.id'; CREATE TABLE zu (a int DEFAULT zrow(ROW(5)::zt)); CREATE TABLE za (r zt, rs zt[])");
+        let mut names = vec![table("za", false, true, false, false), table("zt", false, true, false, false), table("zu", false, true, false, false)];
+        if version(l, &src_pool) >= 140000 {
+            sql(l, &src_pool, "CREATE FUNCTION zcount() RETURNS bigint LANGUAGE sql BEGIN ATOMIC SELECT count(*) FROM zt; END; CREATE TABLE zv (n bigint DEFAULT zcount())");
+            names.push(table("zv", false, true, false, false));
+        }
+        let before = shape(l, &src_pool);
+        let path = file(&format!("order_{t}"));
+        dump(l, &src, &plan("public", false, names), &path).unwrap_or_else(|x| panic!("{var}: {x}"));
+        run(l, &dst, "", &path).unwrap_or_else(|x| panic!("{var}: {x}"));
+        same(var, &before, &shape(l, &dst_pool));
+        sql(l, &dst_pool, "INSERT INTO public.zu DEFAULT VALUES");
+        assert_eq!(one(l, &dst_pool, "SELECT a FROM public.zu"), "5", "{var}");
+        let _ = std::fs::remove_file(path);
+    });
+}
+
+/// Starts `text` as a run, presses Stop once it sleeps and returns what the run said.
+fn stopped_run(l: &LivePg, db: &Db, text: &str, var: &str) -> String {
+    let (prog, id, cancel) = (Arc::new(Progress::default()), Arc::new(AtomicU64::new(0)), Arc::new(AtomicBool::new(false)));
+    let src = Source::Mem(Arc::new(text.as_bytes().to_vec()));
+    l.w.sql_run_file(7, db.clone(), "public".into(), src, false, prog.clone(), id.clone(), cancel.clone());
+    let t0 = std::time::Instant::now();
+    while prog.rows.load(Ordering::Relaxed) < 1 || id.load(Ordering::SeqCst) == 0 {
+        assert!(t0.elapsed().as_secs() < 20, "{var}: the script did not start");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    l.w.sql_kill(db.clone(), id.load(Ordering::SeqCst), cancel.clone());
+    let t0 = std::time::Instant::now();
+    loop {
+        assert!(t0.elapsed().as_secs() < 20, "{var}: Stop did not end the script");
+        if let Ok(Msg::SqlJob { res, .. }) = l.rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            return res.err().unwrap_or_else(|| panic!("{var}: a stopped script reported success"));
+        }
+    }
+}
+
+#[test]
+fn live_stop_in_a_transaction_the_file_opened_says_it_was_rolled_back() {
+    every_pg(|l, var| {
+        let t = tag(var);
+        let mut dbs = Dbs::new(l);
+        let (db, pool) = dbs.make(&format!("qdump_stop_tx_{t}"));
+        let e = stopped_run(l, &db, "CREATE TABLE tx_before (a int); BEGIN; CREATE TABLE tx_cancel (a int); SELECT pg_sleep(60); COMMIT;", var);
+        assert!(e.contains("stopped") && e.contains("transaction the file opened is rolled back"), "{var}: {e}");
+        assert!(!e.contains("Statements that already ran stay applied"), "{var}: {e}");
+        assert_eq!(one(l, &pool, "SELECT to_regclass('tx_cancel') IS NULL AND to_regclass('tx_before') IS NOT NULL"), "t", "{var}");
+    });
+}
+
 #[test]
 fn live_stop_cancels_the_running_statement_and_the_rest_does_not_run() {
     every_pg(|l, var| {
@@ -601,6 +794,15 @@ fn live_a_dump_and_its_run_work_through_a_transaction_pooler() {
     assert!(e.contains("Statement 2") && e.contains("pooler"), "{e}");
     let e = run_text(&l, &db, "", "CREATE INDEX CONCURRENTLY nope ON pgdump_bouncer.t (s)").unwrap_err();
     assert!(e.contains("cannot run") && e.contains("pooler"), "{e}");
+    // A file's DO block, a pg_temp table and a search_path with a statement hidden in it never reach a shared backend.
+    for s in ["DO $$BEGIN PERFORM pg_advisory_lock(424244); END$$", "CREATE TABLE pg_temp.pgdump_tmp (a int)"] {
+        let got = run_text(&l, &db, "", s);
+        sql(&l, &pool, "SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype = 'advisory' AND objid = 424244");
+        let e = got.unwrap_err();
+        assert!(e.contains("cannot run") && e.contains("pooler"), "{s}: {e}");
+    }
+    let e = run_text(&l, &db, "", "SET search_path = 'a', (; DROP TABLE t; ); SELECT 1").unwrap_err();
+    assert!(e.contains("Statement 1") && e.contains("cannot run"), "{e}");
     sql(&l, &pool, &format!("DROP SCHEMA {schema} CASCADE"));
     let _ = std::fs::remove_file(path);
 }

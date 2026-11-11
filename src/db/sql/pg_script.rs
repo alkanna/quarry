@@ -263,14 +263,17 @@ impl PgSplitter {
                             i += 2;
                         } else {
                             self.code = true;
+                            self.last.clear();
                             i += 1;
                         }
                     } else if c == b'\'' {
                         self.code = true;
+                        self.last.clear();
                         self.st = In::Str(self.plain_backslash);
                         i += 1;
                     } else if c == b'"' {
                         self.code = true;
+                        self.last.clear();
                         self.st = In::Quoted;
                         i += 1;
                     } else if c == b'\\' {
@@ -282,6 +285,7 @@ impl PgSplitter {
                         let line = self.line_at(i);
                         return Err(meta(line, &cmd));
                     } else if c == b'$' {
+                        self.last.clear();
                         // $1 is a parameter; $tag$ or $$ opens a string only the same mark closes. A `$` glued to a word
                         // never gets here because the word swallows it.
                         let mut j = i + 1;
@@ -323,16 +327,25 @@ impl PgSplitter {
                         let q = b.get(j).copied();
                         if one && q == Some(b'\'') && matches!(c, b'e' | b'E') {
                             self.code = true;
+                            self.last.clear();
                             self.st = In::Str(true);
                             i = j + 1;
-                        } else if one && q == Some(b'\'') && matches!(c, b'b' | b'B' | b'x' | b'X' | b'n' | b'N') {
-                            // Bit, hex and national strings read as plain strings with the session's escaping.
+                        } else if one && q == Some(b'\'') && matches!(c, b'b' | b'B' | b'x' | b'X') {
+                            // The server reads bit and hex strings with no escapes at all, whatever standard_conforming_strings is.
                             self.code = true;
+                            self.last.clear();
+                            self.st = In::Str(false);
+                            i = j + 1;
+                        } else if one && q == Some(b'\'') && matches!(c, b'n' | b'N') {
+                            // A national string is N followed by an ordinary string, so it follows the session's escaping.
+                            self.code = true;
+                            self.last.clear();
                             self.st = In::Str(self.plain_backslash);
                             i = j + 1;
                         } else if one && matches!(c, b'u' | b'U') && q == Some(b'&') && matches!(b.get(j + 1), Some(b'\'' | b'"')) {
                             // The backslash of a Unicode escape string is not a string escape.
                             self.code = true;
+                            self.last.clear();
                             self.st = if b[j + 1] == b'"' { In::Quoted } else { In::Str(false) };
                             i = j + 2;
                         } else {
@@ -343,6 +356,7 @@ impl PgSplitter {
                         }
                     } else {
                         self.code = true;
+                        self.last.clear();
                         if c == b'(' {
                             self.depth += 1;
                         } else if c == b')' {
@@ -360,13 +374,18 @@ impl PgSplitter {
 
     /// A word of the statement's code: what the statement is, and where a SQL-standard function body opens and ends.
     fn word(&mut self, w: &str) {
+        // Only words that follow each other at depth 0 make BEGIN ATOMIC, as psql reads it: any other token or an open
+        // parenthesis in between (a function called `begin` with an `atomic` argument) breaks the pair.
+        if self.depth > 0 {
+            self.last.clear();
+        }
         if self.head.len() < 6 && self.depth == 0 {
             self.head.push(w.to_string());
             let kind = self.head.iter().skip(1).find(|x| !matches!(x.as_str(), "or" | "replace")).map(String::as_str);
             self.routine = self.head.first().is_some_and(|f| f == "create") && matches!(kind, Some("function" | "procedure"));
         }
         if self.routine {
-            if self.atomic == 0 && w == "atomic" && self.last == "begin" {
+            if self.atomic == 0 && self.depth == 0 && w == "atomic" && self.last == "begin" {
                 self.atomic = 1;
             } else if self.atomic > 0 {
                 if w == "case" {
@@ -376,7 +395,9 @@ impl PgSplitter {
                 }
             }
         }
-        self.last = w.to_string();
+        if self.depth == 0 {
+            self.last = w.to_string();
+        }
     }
 }
 
@@ -485,6 +506,33 @@ mod tests {
         // A plain BEGIN is a transaction statement and ends at its semicolon.
         assert_eq!(same("BEGIN; SELECT 1; COMMIT"), ["BEGIN", "SELECT 1", "COMMIT"]);
         assert_eq!(same("CREATE OR REPLACE PROCEDURE p() LANGUAGE sql BEGIN ATOMIC SELECT 1; END; SELECT 2"), ["CREATE OR REPLACE PROCEDURE p() LANGUAGE sql BEGIN ATOMIC SELECT 1; END", "SELECT 2"]);
+    }
+
+    #[test]
+    fn begin_atomic_is_two_words_in_a_row_at_the_top_level() {
+        // A function called begin with an argument called atomic is no SQL body: its semicolon ends the statement.
+        assert_eq!(same("CREATE FUNCTION begin(atomic int) RETURNS int LANGUAGE sql AS 'select 1'; DROP TABLE v1; END;"), ["CREATE FUNCTION begin(atomic int) RETURNS int LANGUAGE sql AS 'select 1'", "DROP TABLE v1", "END"]);
+        // Something between the two words, or a parenthesis open, breaks the pair as well.
+        assert_eq!(same("CREATE FUNCTION f() RETURNS int LANGUAGE sql AS 'x' BEGIN, atomic; SELECT 2"), ["CREATE FUNCTION f() RETURNS int LANGUAGE sql AS 'x' BEGIN, atomic", "SELECT 2"]);
+        assert_eq!(same("CREATE FUNCTION f(a begin, b (atomic)) RETURNS int LANGUAGE sql AS 'x'; SELECT 2"), ["CREATE FUNCTION f(a begin, b (atomic)) RETURNS int LANGUAGE sql AS 'x'", "SELECT 2"]);
+        // A comment between them is not a token, so the pair stands.
+        assert_eq!(same("CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN /* c */ ATOMIC SELECT 1; END; SELECT 2"), ["CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN /* c */ ATOMIC SELECT 1; END", "SELECT 2"]);
+    }
+
+    #[test]
+    fn bit_and_hex_strings_never_escape_and_national_ones_follow_the_setting() {
+        // The server reads no backslash escape inside B'' or X'', whatever standard_conforming_strings is.
+        for plain in [false, true] {
+            let mut sp = PgSplitter::new(plain);
+            sp.feed(b"SELECT B'1\\'; SELECT 2; SELECT X'0\\'; SELECT 3");
+            sp.finish();
+            let got: Vec<String> = std::iter::from_fn(|| sp.next_piece().unwrap()).map(|p| p.text).collect();
+            assert_eq!(got, ["SELECT B'1\\'", "SELECT 2", "SELECT X'0\\'", "SELECT 3"], "scs off: {plain}");
+        }
+        let mut sp = PgSplitter::new(true);
+        sp.feed(b"SELECT N'a\\'; x'; SELECT 2");
+        sp.finish();
+        assert_eq!(sp.next_piece().unwrap().unwrap().text, "SELECT N'a\\'; x'");
     }
 
     #[test]

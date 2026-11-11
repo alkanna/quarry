@@ -235,6 +235,12 @@ impl App {
         if edited && f.what == What::Whole {
             f.what = What::Selected;
         }
+        // The file drops every routine of the schema, not only the ones the checked tables use, because a routine can name
+        // a table's row type and block its DROP.
+        if pg && f.extras && f.what != What::Whole && f.rows.iter().any(|r| r.on && r.structure && r.drop) {
+            ui.add_space(4.0);
+            ui.label(RichText::new("DROP first also drops and recreates every function and procedure of the schema, whichever tables are checked.").size(TXT_SMALL).color(MUTED()));
+        }
         ui.add_space(8.0);
         caption(ui, "OPTIONS");
         ui.add_space(2.0);

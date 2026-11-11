@@ -871,6 +871,31 @@ mod tests {
     }
 
     #[test]
+    fn a_do_block_and_anything_in_pg_temp_leave_state_wherever_they_sit_in_the_statement() {
+        use super::super::session_state;
+        for s in [
+            "DO $$BEGIN PERFORM pg_advisory_lock(424243); END$$", "do language plpgsql $$ begin create temp table x(a int); end $$", "DO $$ BEGIN CREATE TABLE pg_temp.x (a int); END $$",
+            "CREATE TABLE pg_temp.x (a int)", "CREATE TABLE \"pg_temp\".x (a int)", "CREATE TABLE pg_temp_3.x (a int)", "CREATE TABLE x AS SELECT 1 FROM pg_temp.y", "SELECT * INTO pg_temp.x FROM t",
+            "CREATE FUNCTION pg_temp.f() RETURNS int LANGUAGE sql AS 'select 1'", "WITH a AS (SELECT 1) SELECT * INTO pg_temp.z FROM a", "CREATE /* c */ VIEW pg_temp.v AS SELECT 1",
+            // A DO block that only looks like the one Quarry writes.
+            "DO $q$BEGIN CREATE TYPE a.b AS ENUM ('x'); PERFORM pg_advisory_lock(1); EXCEPTION WHEN duplicate_object THEN NULL; END$q$",
+            "DO $q$BEGIN CREATE TABLE pg_temp.t (a int); EXCEPTION WHEN duplicate_object THEN NULL; END$q$", "DO $q$BEGIN CREATE TYPE a.b AS ENUM ('x'); EXCEPTION WHEN others THEN NULL; END$q$",
+            "DO $q$BEGIN SELECT set_config('a.b', '1', false); EXCEPTION WHEN duplicate_object THEN NULL; END$q$",
+        ] {
+            assert!(session_state(s, PG), "{s}");
+        }
+        // The blocks a dump of some tables holds, and a name that only contains the word.
+        for s in [
+            "DO $quarry$BEGIN CREATE TYPE \"app\".\"mood\" AS ENUM ('a', 'b'); EXCEPTION WHEN duplicate_object THEN NULL; END$quarry$",
+            "DO $quarry$BEGIN CREATE DOMAIN \"app\".\"d\" AS integer DEFAULT 1 NOT NULL; EXCEPTION WHEN duplicate_object THEN NULL; END$quarry$",
+            "DO $quarry$BEGIN ALTER DOMAIN \"app\".\"d\" ADD CONSTRAINT \"c\" CHECK (VALUE > 0); EXCEPTION WHEN duplicate_object THEN NULL; END$quarry$",
+            "CREATE TABLE my_pg_temp_x (a int)", "SELECT 'pg_temp.x'", "SELECT 1 FROM t WHERE a = $$pg_temp$$",
+        ] {
+            assert!(!session_state(s, PG), "{s}");
+        }
+    }
+
+    #[test]
     fn session_advisory_locks_and_dblink_are_session_state_in_every_spelling() {
         use super::super::session_state;
         for s in [
