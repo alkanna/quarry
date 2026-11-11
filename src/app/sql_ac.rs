@@ -24,6 +24,10 @@ impl App {
     /// has focus, and a column's values once per column and typed text. Demo mode has no server.
     pub(super) fn sql_serve(&mut self, conn: u64, db: &str, schema: &str, wants: Wants) {
         let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) else { return };
+        // A PostgreSQL tab whose schemas have not arrived has nothing to ask for, and the database name alone is not a schema.
+        if schema.is_empty() && self.is_pg(conn) {
+            return;
+        }
         let key = ns_key(db, schema);
         let space = if schema.is_empty() { db.to_string() } else { schema.to_string() };
         if wants.schema && self.sql_schema_asked.insert((conn, key.clone())) {

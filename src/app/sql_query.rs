@@ -61,10 +61,22 @@ fn run_db(t: &Tab) -> String {
     t.sql.as_ref().map(|s| s.run_db.clone()).filter(|d| !d.is_empty()).unwrap_or_else(|| t.sel.db.clone())
 }
 
-/// The schema a PostgreSQL Query view runs in: the one typed in its schema field, else the tab's own, which is the one
-/// the sidebar showed when the tab was opened.
+/// The schema a PostgreSQL Query view runs in: the one typed in its schema field, else the tab's own when the run is in
+/// the tab's own database. Another database has other schemas, so the tab's schema is never carried over to it and the
+/// answer stays empty until that database's schemas arrive.
+pub(super) fn run_schema_choice(typed: &str, run_db: &str, sel_db: &str, sel_schema: &str) -> String {
+    let typed = typed.trim();
+    if !typed.is_empty() {
+        typed.to_string()
+    } else if run_db.is_empty() || run_db == sel_db {
+        sel_schema.to_string()
+    } else {
+        String::new()
+    }
+}
+
 fn run_schema_of(t: &Tab) -> String {
-    Some(t.sql.as_ref().map(|s| s.run_schema.trim().to_string()).unwrap_or_default()).filter(|s| !s.is_empty()).unwrap_or_else(|| t.sel.schema.clone())
+    run_schema_choice(t.sql.as_ref().map_or("", |s| s.run_schema.as_str()), t.sql.as_ref().map_or("", |s| s.run_db.as_str()), &t.sel.db, &t.sel.schema)
 }
 
 /// The database a run connects to and the namespace inside it. A PostgreSQL connection is bound to one database, so
@@ -230,6 +242,10 @@ impl App {
         let engine = self.conn(conn).map(|c| c.meta.engine).unwrap_or_default();
         // A PostgreSQL Query tab starts in the schema the sidebar shows for its database.
         let mut t = Tab::new(self.sel_in(conn, &db, String::new())).for_engine(engine);
+        // A database never expanded has no schema list yet; the tab fills its schema when the list arrives.
+        if self.is_pg(conn) && !self.sql_asked.contains(&(conn, db.clone())) {
+            self.pg_ask_schemas(conn, &db);
+        }
         t.view = View::Sql;
         self.tabs.push(t);
         self.set_cur(self.tabs.len() - 1);
@@ -406,7 +422,10 @@ impl App {
             let (r, _) = ui.allocate_exact_size(egui::vec2(1.0, 16.0), Sense::hover());
             ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0, LINE()));
             explain = quiet_enabled(ui, !running, "Explain").on_hover_text("EXPLAIN the statement under the caret (Cmd+E)").clicked();
-            format = quiet_enabled(ui, !running, "Format").on_hover_text("Lay out the selection, or the whole script when nothing is selected. A statement that would read differently stays as it is.").clicked();
+            // Formatting is not built for PostgreSQL, where the button would only raise a toast.
+            if dialect != db::sql::Dialect::Postgres {
+                format = quiet_enabled(ui, !running, "Format").on_hover_text("Lay out the selection, or the whole script when nothing is selected. A statement that would read differently stays as it is.").clicked();
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if let Some(s) = &status {
                     ui.label(RichText::new(s).font(FontId::monospace(TXT_CAPTION)).color(FAINT()));
@@ -861,6 +880,15 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn another_database_never_inherits_the_tabs_schema() {
+        // Typed wins, and the tab's own schema serves only its own database.
+        assert_eq!(run_schema_choice(" audit ", "b", "a", "public"), "audit");
+        assert_eq!(run_schema_choice("", "", "a", "public"), "public");
+        assert_eq!(run_schema_choice("", "a", "a", "public"), "public");
+        assert_eq!(run_schema_choice("", "b", "a", "public"), "");
+    }
 
     #[test]
     fn caret_line_and_column() {

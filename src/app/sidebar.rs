@@ -217,7 +217,9 @@ impl App {
         };
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 32.0), Sense::click());
         let p = ui.painter();
-        let (fill, edge) = if resp.is_pointer_button_down_on() { (PRESSED(), MUTED()) } else if resp.hovered() { (RAISED(), MUTED()) } else { (RAISED(), BORDER()) };
+        // The fill follows hover and press like every other field, on top of the stronger edge.
+    let state = state_of(&resp);
+    let (fill, edge) = ([RAISED(), shade(RAISED(), 0.12), shade(RAISED(), 0.24)][state], if state > 0 { MUTED() } else { BORDER() });
         p.rect(rect, R_MD, fill, Stroke::new(1.0, if resp.has_focus() { PRIMARY() } else { edge }), egui::StrokeKind::Inside);
         p.circle_filled(egui::pos2(rect.left() + 14.0, rect.center().y), 4.0, dot);
         chevron(p, egui::pos2(rect.right() - 14.0, rect.center().y), true, if resp.hovered() { MUTED() } else { FAINT() });
@@ -537,7 +539,7 @@ impl App {
                 if is_open {
                     if pg {
                         if let Some(list) = self.pg_schemas.get(&(id, db_name.clone())) {
-                            if let Some(p) = schema_picker(ui, db_name, &picked, list, &mut show_system) {
+                            if let Some(p) = schema_picker(ui, db_name, &picked, list, &mut show_system, self.demo_opens_schema_menu(ui.ctx())) {
                                 pick_schema = Some((db_name.clone(), p));
                             }
                             ui.add_space(2.0);
@@ -780,21 +782,19 @@ impl App {
 
 /// The schema switcher under an open PostgreSQL database: the schema shown in the tree, and a menu to pick another with
 /// each one's table count and a switch for the system schemas. Returns the schema picked this frame.
-fn schema_picker(ui: &mut egui::Ui, db_name: &str, picked: &str, list: &[db::sql::PgSchema], show_system: &mut bool) -> Option<String> {
-    const INDENT: f32 = 18.0;
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), BUTTON_H + 2.0), Sense::click());
+fn schema_picker(ui: &mut egui::Ui, db_name: &str, picked: &str, list: &[db::sql::PgSchema], show_system: &mut bool, auto_open: bool) -> Option<String> {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), PICK_H), Sense::click());
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-    // QUARRY_TEST_PG=schemas has no pointer to click with, so the demo opens the menu itself once the first frames settled.
-    if (60..63).contains(&ui.ctx().cumulative_frame_nr()) && std::env::var("QUARRY_TEST_PG").as_deref() == Ok("schemas") {
+    if auto_open {
         egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&resp));
     }
     let mut pick = None;
-    let menu = egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(rect.width() - INDENT).show(|ui| {
+    let menu = egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(rect.width() - PICK_INDENT).show(|ui| {
         menu_look(ui);
         ui.spacing_mut().item_spacing.y = 2.0;
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.add_space(8.0);
+            ui.add_space(PICK_PAD);
             caption(ui, format!("SCHEMAS IN {db_name}"));
         });
         ui.add_space(2.0);
@@ -807,24 +807,24 @@ fn schema_picker(ui: &mut egui::Ui, db_name: &str, picked: &str, list: &[db::sql
         ui.add_space(2.0);
         ui.separator();
         ui.horizontal(|ui| {
-            ui.add_space(8.0);
+            ui.add_space(PICK_PAD);
             ui.label(RichText::new("Show system schemas").size(TXT_SMALL).color(MUTED()));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(8.0);
+                ui.add_space(PICK_PAD);
                 toggle(ui, show_system);
             });
         });
         ui.add_space(2.0);
     });
     let open = menu.is_some();
-    let body = egui::Rect::from_min_max(egui::pos2(rect.left() + INDENT, rect.top() + 1.0), egui::pos2(rect.right(), rect.bottom() - 1.0));
+    let body = egui::Rect::from_min_max(egui::pos2(rect.left() + PICK_INDENT, rect.top() + 1.0), egui::pos2(rect.right(), rect.bottom() - 1.0));
     let (fill, edge) = if resp.is_pointer_button_down_on() { (PRESSED(), MUTED()) } else if resp.hovered() { (RAISED(), MUTED()) } else { (RAISED(), BORDER()) };
     let p = ui.painter();
     p.rect(body, R_MD, fill, Stroke::new(1.0, if open || resp.has_focus() { PRIMARY() } else { edge }), egui::StrokeKind::Inside);
     let label = p.layout_no_wrap("schema".into(), FontId::proportional(TXT_CAPTION), FAINT());
-    p.galley(egui::pos2(body.left() + 8.0, body.center().y - label.size().y / 2.0 + optical_dy(&label)), label.clone(), FAINT());
-    let name = truncated(p, picked, FontId::proportional(TXT_BODY), BRIGHT(), body.width() - 8.0 - label.size().x - 6.0 - 26.0);
-    p.galley(egui::pos2(body.left() + 8.0 + label.size().x + 6.0, body.center().y - name.size().y / 2.0 + optical_dy(&name)), name, BRIGHT());
+    p.galley(egui::pos2(body.left() + PICK_PAD, body.center().y - label.size().y / 2.0 + optical_dy(&label)), label.clone(), FAINT());
+    let name = truncated(p, picked, FontId::proportional(TXT_BODY), BRIGHT(), body.width() - PICK_PAD - label.size().x - PICK_GAP - PICK_CHEVRON);
+    p.galley(egui::pos2(body.left() + PICK_PAD + label.size().x + PICK_GAP, body.center().y - name.size().y / 2.0 + optical_dy(&name)), name, BRIGHT());
     chevron(p, egui::pos2(body.right() - 12.0, body.center().y), true, if resp.hovered() || open { MUTED() } else { FAINT() });
     focus_ring(ui, &resp, body, R_MD as f32);
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, format!("Schema {picked}")));

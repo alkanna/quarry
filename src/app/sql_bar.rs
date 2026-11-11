@@ -1140,11 +1140,14 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col], scope: &Sco
                 r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))
             });
             // ponytail: the index names are free text; list them from SHOW INDEX when someone asks for a picker.
-            let id = query_id("SQL-INDEX");
-            run |= opt_chip(ui, "USE INDEX", id, &mut b.c.hint, |ui, text| {
-                let r = ui.add(egui::TextEdit::singleline(text).id(id).frame(editor_margin()).font(mono.clone()).hint_text("index_name").desired_width(90.0));
-                r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))
-            });
+            // USE INDEX is MySQL syntax; PostgreSQL has no index hints.
+            if d != Dialect::Postgres {
+                let id = query_id("SQL-INDEX");
+                run |= opt_chip(ui, "USE INDEX", id, &mut b.c.hint, |ui, text| {
+                    let r = ui.add(egui::TextEdit::singleline(text).id(id).frame(editor_margin()).font(mono.clone()).hint_text("index_name").desired_width(90.0));
+                    r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))
+                });
+            }
         });
         ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), BUTTON_H), egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;

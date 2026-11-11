@@ -191,6 +191,9 @@ pub(super) struct SavedTab {
     pub(super) clauses: String,
     /// The text of a SQL tab's Query view.
     pub(super) query: String,
+    /// The database and PostgreSQL schema the Query view runs in when they are not the tab's own.
+    pub(super) run_db: String,
+    pub(super) run_schema: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Default)]
@@ -426,6 +429,15 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_tabs_without_the_run_target_still_load() {
+        let old: SavedTab = serde_json::from_str(r#"{"conn":3,"db":"shop","schema":"public","coll":"","view":"Sql","query":"SELECT 1"}"#).unwrap();
+        assert_eq!((old.run_db.as_str(), old.run_schema.as_str()), ("", ""));
+        let new = SavedTab { run_db: "b".into(), run_schema: "audit".into(), ..old };
+        let back: SavedTab = serde_json::from_str(&serde_json::to_string(&new).unwrap()).unwrap();
+        assert!(back == new);
+    }
 
     #[test]
     fn sealed_cache_round_trip() {

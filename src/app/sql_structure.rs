@@ -197,13 +197,17 @@ impl App {
         let (staged, mut memo, applying) = self.take_staged();
         let (dropped, changed) = staged_marks(&staged);
         let col = sel[0].filter(|i| *i < d.columns.len());
+        let pg = self.t().is_some_and(|t| self.is_pg(t.sel.conn));
         let mut left = Vec::new();
         edit_row_with(ui, editable, note, |ui, on| {
             if quiet_enabled(ui, on, "+ Column").on_hover_text("Add a column").on_disabled_hover_text(why).clicked() {
                 left.push(Act::NewColumn);
             }
             let hint = if on { "Select a column first" } else { why };
-            for (t, tip, act) in [("Edit", "Change the selected column", col.map(Act::EditColumn)), ("Duplicate", "Add a copy of the selected column", col.map(Act::DuplicateColumn)), ("Delete", "Drop the selected column", col.map(Act::DropColumn)), ("Move up", "Place the column before the one above it", col.map(|i| Act::MoveColumn(i, -1))), ("Move down", "Place the column after the one below it", col.map(|i| Act::MoveColumn(i, 1)))] {
+            // PostgreSQL has no column order, so there is nothing to move.
+            let moves = [("Move up", "Place the column before the one above it", col.map(|i| Act::MoveColumn(i, -1))), ("Move down", "Place the column after the one below it", col.map(|i| Act::MoveColumn(i, 1)))];
+            let own = [("Edit", "Change the selected column", col.map(Act::EditColumn)), ("Duplicate", "Add a copy of the selected column", col.map(Act::DuplicateColumn)), ("Delete", "Drop the selected column", col.map(Act::DropColumn))];
+            for (t, tip, act) in own.into_iter().chain(moves.into_iter().filter(|_| !pg)) {
                 let r = quiet_enabled(ui, on && act.is_some(), t).on_hover_text(tip).on_disabled_hover_text(hint);
                 if let (true, Some(a)) = (r.clicked(), act) {
                     left.push(a);
@@ -224,9 +228,16 @@ impl App {
             ui.add_space(8.0);
         }
         egui::ScrollArea::vertical().id_salt("sql-structure").auto_shrink([false, false]).show(ui, |ui| {
-            let heads = [gc("Name", 1.5), gc("Type", 1.0), gc("Length / values", 1.4), gc("Unsigned", 0.95), gc("Null", 0.6), gc("Key", 0.6), gc("Default", 1.9), gc("Extra", 2.1), gc("Collation", 1.9), gc("Comment", 1.3)];
+            // PostgreSQL has no unsigned integers and no collation worth a column of its own, so those two are left out.
+            let shown: Vec<usize> = (0..10).filter(|i| !pg || !matches!(i, 3 | 8)).collect();
+            let all = [gc("Name", 1.5), gc("Type", 1.0), gc("Length / values", 1.4), gc("Unsigned", 0.95), gc("Null", 0.6), gc("Key", 0.6), gc("Default", 1.9), gc("Extra", 2.1), gc("Collation", 1.9), gc("Comment", 1.3)];
+            let heads: Vec<GCol> = all.into_iter().enumerate().filter(|(i, _)| shown.contains(i)).map(|(_, g)| g).collect();
             let mut menu = |ui: &mut egui::Ui, r: usize| {
-                for (label, act) in [("Edit column", Act::EditColumn(r)), ("Duplicate", Act::DuplicateColumn(r)), ("Move up", Act::MoveColumn(r, -1)), ("Move down", Act::MoveColumn(r, 1))] {
+                let mut items = vec![("Edit column", Act::EditColumn(r)), ("Duplicate", Act::DuplicateColumn(r))];
+                if !pg {
+                    items.extend([("Move up", Act::MoveColumn(r, -1)), ("Move down", Act::MoveColumn(r, 1))]);
+                }
+                for (label, act) in items {
                     if ui.add_enabled(editable, egui::Button::new(label)).on_disabled_hover_text(why).clicked() {
                         acts.push(act);
                         ui.close();
@@ -261,7 +272,7 @@ impl App {
                             ui.painter().rect_filled(Rect::from_min_size(pos2(rect.left() - 40.0, rect.top()), vec2(3.0, rect.height())), 0.0, m);
                         }
                     }
-                    column_cell(ui, rect, &d.columns[r], c)
+                    column_cell(ui, rect, &d.columns[r], shown[c], pg)
                 },
                 Some(&mut menu),
             );
@@ -292,7 +303,10 @@ impl App {
                 });
             });
             ui.add_space(6.0);
-            let heads = [gc("Key name", 2.0), gc("Columns", 2.4), gc("Unique", 0.8), gc("Type", 0.8), gc_r("Cardinality", 1.2), gc("Comment", 2.4)];
+            // PostgreSQL keeps no cardinality for an index, so its column would be empty.
+            let ishown: Vec<usize> = (0..6).filter(|i| !pg || *i != 4).collect();
+            let iall = [gc("Key name", 2.0), gc("Columns", 2.4), gc("Unique", 0.8), gc("Type", 0.8), gc_r("Cardinality", 1.2), gc("Comment", 2.4)];
+            let heads: Vec<GCol> = iall.into_iter().enumerate().filter(|(i, _)| ishown.contains(i)).map(|(_, g)| g).collect();
             let mut imenu = |ui: &mut egui::Ui, r: usize| {
                 if ui.add_enabled(editable, egui::Button::new("Edit index")).on_disabled_hover_text(why).clicked() {
                     acts.push(Act::EditIndex(r));
@@ -308,7 +322,7 @@ impl App {
                 .response
                 .on_disabled_hover_text(why);
             };
-            let hit = grid_ex(ui, "indexes", &heads, d.indexes.len(), sel[1], |ui, rect, r, c| index_cell(ui, rect, &d.indexes[r], c), Some(&mut imenu));
+            let hit = grid_ex(ui, "indexes", &heads, d.indexes.len(), sel[1], |ui, rect, r, c| index_cell(ui, rect, &d.indexes[r], ishown[c]), Some(&mut imenu));
             if let Some(r) = hit.click {
                 sel[1] = Some(r);
             }
@@ -665,7 +679,23 @@ fn named(ui: &egui::Ui, cell: Rect, name: &str, pk: bool, font: FontId) {
     }
 }
 
-fn column_cell(ui: &egui::Ui, rect: Rect, c: &Column, col: usize) {
+/// What a PostgreSQL column's Extra says: its catalog text names MySQL's auto_increment and the full GENERATED clause, which
+/// the Structure table shortens to the two things a reader looks for.
+fn pg_extra(extra: &str) -> String {
+    if extra.contains("GENERATED ALWAYS AS IDENTITY") {
+        "identity (ALWAYS)".into()
+    } else if extra.contains("IDENTITY BY DEFAULT") {
+        "identity (BY DEFAULT)".into()
+    } else if extra.starts_with("GENERATED ALWAYS AS (") {
+        "generated".into()
+    } else if extra == "auto_increment" {
+        "serial".into()
+    } else {
+        extra.to_string()
+    }
+}
+
+fn column_cell(ui: &egui::Ui, rect: Rect, c: &Column, col: usize, pg: bool) {
     let mono = || FontId::monospace(TXT_SMALL);
     let (base, args, unsigned) = (c.base_type(), c.args(), c.unsigned());
     match col {
@@ -702,7 +732,7 @@ fn column_cell(ui: &egui::Ui, rect: Rect, c: &Column, col: usize) {
             }
         },
         7 => {
-            let extra = c.extra.replace("DEFAULT_GENERATED", "");
+            let extra = if pg { pg_extra(&c.extra) } else { c.extra.replace("DEFAULT_GENERATED", "") };
             put(ui, rect, extra.trim(), mono(), TEXT(), false);
         }
         8 => {
@@ -923,5 +953,19 @@ impl App {
             s.st.data = Some(d);
             s.st.sel = [Some(3), None, Some(0), None, Some(0)];
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn postgres_extra_names_identity_and_generated_columns() {
+        assert_eq!(pg_extra("auto_increment GENERATED ALWAYS AS IDENTITY"), "identity (ALWAYS)");
+        assert_eq!(pg_extra("auto_increment IDENTITY BY DEFAULT"), "identity (BY DEFAULT)");
+        assert_eq!(pg_extra("GENERATED ALWAYS AS (id * 2) STORED"), "generated");
+        assert_eq!(pg_extra("auto_increment"), "serial");
+        assert_eq!(pg_extra(""), "");
     }
 }

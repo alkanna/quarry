@@ -32,7 +32,7 @@ fn engine_card(ui: &mut egui::Ui, code: &str, name: &str, sub: &str, color: Colo
 
 fn tls_tab(ui: &mut egui::Ui, f: &mut ConnForm) {
     settings_section(ui, "TLS", |ui| {
-        egui::Grid::new("tls").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
+        egui::Grid::new("tls").num_columns(2).spacing([FORM_GAP, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
             let pg = f.engine == db::sql::Engine::Postgres;
             form_label(ui, if pg { "Mode" } else { "SSL mode" });
             segmented(ui, &mut f.addr.ssl_mode, if pg { &db::sql::SslMode::PG_ALL } else { &db::sql::SslMode::ALL });
@@ -59,7 +59,7 @@ fn tls_tab(ui: &mut egui::Ui, f: &mut ConnForm) {
 
 /// A timeout box: seconds, empty for the default, with the unit inside the box's right edge.
 fn secs_field(ui: &mut egui::Ui, text: &mut String, hint: &str) {
-    ui.add(egui::TextEdit::singleline(text).hint_text(hint).desired_width(58.0).margin(egui::Margin::symmetric(8, 5)));
+    ui.add(egui::TextEdit::singleline(text).hint_text(hint).desired_width(58.0).margin(FIELD_MARGIN));
     ui.label(RichText::new("s").size(TXT_SMALL).color(FAINT()));
 }
 
@@ -69,13 +69,13 @@ fn advanced_tab(ui: &mut egui::Ui, f: &mut ConnForm, default_s: u64) {
         ui.add(egui::Label::new(RichText::new(t).size(TXT_SMALL).color(FAINT())).wrap());
     };
     settings_section(ui, "SESSION", |ui| {
-        let field_w = ui.available_width() - FORM_LABEL_W - 14.0;
-        egui::Grid::new("adv-session").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
+        let field_w = ui.available_width() - FORM_LABEL_W - FORM_GAP;
+        egui::Grid::new("adv-session").num_columns(2).spacing([FORM_GAP, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
             form_label(ui, "Time zone");
             ui.horizontal(|ui| {
                 segmented(ui, &mut f.zone_kind, &[(ZoneKind::Server, "Server default"), (ZoneKind::Utc, "UTC"), (ZoneKind::System, "System"), (ZoneKind::Custom, "Custom")]);
                 if f.zone_kind == ZoneKind::Custom {
-                    ui.add(egui::TextEdit::singleline(&mut f.zone_text).hint_text("+02:00 or Europe/Paris").desired_width(ui.available_width()).margin(egui::Margin::symmetric(8, 5)));
+                    ui.add(egui::TextEdit::singleline(&mut f.zone_text).hint_text("+02:00 or Europe/Paris").desired_width(ui.available_width()).margin(FIELD_MARGIN));
                 }
             });
             ui.end_row();
@@ -103,7 +103,7 @@ fn advanced_tab(ui: &mut egui::Ui, f: &mut ConnForm, default_s: u64) {
                 let default = format!("Default for {cs}");
                 let known: Vec<&str> = f.collations.iter().filter(|(c, _)| c == cs).map(|(_, n)| n.as_str()).collect();
                 if known.is_empty() {
-                    ui.add(egui::TextEdit::singleline(&mut f.adv.collation).hint_text(default).font(egui::TextStyle::Monospace).desired_width(ui.available_width()).margin(egui::Margin::symmetric(8, 5)));
+                    ui.add(egui::TextEdit::singleline(&mut f.adv.collation).hint_text(default).font(egui::TextStyle::Monospace).desired_width(ui.available_width()).margin(FIELD_MARGIN));
                 } else {
                     egui::ComboBox::from_id_salt("adv-collation").width(ui.available_width()).selected_text(if f.adv.collation.is_empty() { default.clone() } else { f.adv.collation.clone() }).show_ui(ui, |ui| {
                         menu_look(ui);
@@ -127,7 +127,7 @@ fn advanced_tab(ui: &mut egui::Ui, f: &mut ConnForm, default_s: u64) {
         });
     });
     settings_section(ui, "SQL MODE", |ui| {
-        egui::Grid::new("adv-mode").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
+        egui::Grid::new("adv-mode").num_columns(2).spacing([FORM_GAP, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
             form_label(ui, "SQL mode");
             ui.horizontal(|ui| {
                 let mut custom = f.mode_custom as u8;
@@ -152,7 +152,7 @@ fn advanced_tab(ui: &mut egui::Ui, f: &mut ConnForm, default_s: u64) {
                         }
                     });
                     ui.add_space(4.0);
-                    if ui.add(egui::TextEdit::singleline(&mut f.mode_extra).hint_text("More flags, comma separated").desired_width(ui.available_width()).margin(egui::Margin::symmetric(8, 5))).changed() {
+                    if ui.add(egui::TextEdit::singleline(&mut f.mode_extra).hint_text("More flags, comma separated").desired_width(ui.available_width()).margin(FIELD_MARGIN)).changed() {
                         f.mode_seeded = true;
                     }
                 });
@@ -193,7 +193,8 @@ fn advanced_tab(ui: &mut egui::Ui, f: &mut ConnForm, default_s: u64) {
 }
 
 /// What the paste field last did, kept in egui's memory because the form struct belongs to another file. The
-/// fields a paste filled get a blue border until the user edits them.
+/// fields a paste filled get a soft blue border until the user edits them. It is a tint of the accent, so it stays apart
+/// from the solid accent border a field with focus has.
 #[derive(Clone, Default)]
 struct Paste {
     text: String,
@@ -224,7 +225,7 @@ fn filled_border(ui: &egui::Ui, r: &egui::Response, mark: &mut bool) {
         *mark = false;
     }
     if *mark {
-        ui.painter().rect_stroke(r.rect, R_SM, Stroke::new(1.0, PRIMARY()), egui::StrokeKind::Inside);
+        ui.painter().rect_stroke(r.rect, R_SM, Stroke::new(1.0, tint(PRIMARY(), 120)), egui::StrokeKind::Inside);
     }
 }
 
@@ -281,7 +282,7 @@ fn paste_field(ui: &mut egui::Ui, f: &mut ConnForm, field_w: f32) -> Paste {
             ui.label(RichText::new("Fills the fields below").size(TXT_SMALL).color(FAINT()));
         });
     });
-    let r = ui.add(egui::TextEdit::singleline(&mut st.text).font(egui::TextStyle::Monospace).hint_text("postgresql://user@host:5432/database?sslmode=verify-full").desired_width(field_w + FORM_LABEL_W + 14.0).margin(egui::Margin::symmetric(8, 6)));
+    let r = ui.add(egui::TextEdit::singleline(&mut st.text).font(egui::TextStyle::Monospace).hint_text("postgresql://user@host:5432/database?sslmode=verify-full").desired_width(field_w + FORM_LABEL_W + FORM_GAP).margin(FIELD_MARGIN_TALL));
     if r.changed() && !st.text.trim().is_empty() {
         paste_apply(&mut st, f);
     } else if r.changed() {
@@ -291,7 +292,7 @@ fn paste_field(ui: &mut egui::Ui, f: &mut ConnForm, field_w: f32) -> Paste {
         Some(Ok(m)) => {
             ui.horizontal(|ui| {
                 let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 14.0), Sense::hover());
-                ui.painter().circle_filled(dot.center(), 3.0, SUCCESS());
+                ui.painter().circle_filled(dot.center(), STATUS_DOT_R, SUCCESS());
                 ui.add(egui::Label::new(RichText::new(m).size(TXT_SMALL).color(MUTED())).wrap());
             });
         }
@@ -308,16 +309,16 @@ fn standard_tab(ui: &mut egui::Ui, f: &mut ConnForm) {
     let pg = f.engine == db::sql::Engine::Postgres;
     let mut paste = Paste::default();
     if pg {
-        let w = ui.available_width() - FORM_LABEL_W - 14.0 - 2.0 * ui.spacing().item_spacing.x;
+        let w = ui.available_width() - FORM_LABEL_W - FORM_GAP - 2.0 * ui.spacing().item_spacing.x;
         paste = paste_field(ui, f, w);
         ui.add_space(6.0);
     }
     settings_section(ui, "SERVER", |ui| {
         // Grid cells do not know their width on the first frame, so size fields from the section.
-        let field_w = ui.available_width() - FORM_LABEL_W - 14.0;
-        egui::Grid::new("cf").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
+        let field_w = ui.available_width() - FORM_LABEL_W - FORM_GAP;
+        egui::Grid::new("cf").num_columns(2).spacing([FORM_GAP, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
             form_label(ui, "Name");
-            ui.add(egui::TextEdit::singleline(&mut f.name).hint_text("Production cluster").desired_width(field_w).margin(egui::Margin::symmetric(8, 5)));
+            ui.add(egui::TextEdit::singleline(&mut f.name).hint_text("Production cluster").desired_width(field_w).margin(FIELD_MARGIN));
             ui.end_row();
             form_label(ui, "Tag");
             ui.vertical(|ui| {
@@ -331,14 +332,14 @@ fn standard_tab(ui: &mut egui::Ui, f: &mut ConnForm) {
                     }
                 });
                 ui.add_space(4.0);
-                ui.add(egui::TextEdit::singleline(&mut f.tag).hint_text("or type a custom tag").char_limit(24).desired_width(220.0).margin(egui::Margin::symmetric(8, 5)));
+                ui.add(egui::TextEdit::singleline(&mut f.tag).hint_text("or type a custom tag").char_limit(24).desired_width(220.0).margin(FIELD_MARGIN));
             });
             ui.end_row();
             if !f.engine.is_sql() {
                 form_label(ui, "URI");
                 ui.vertical(|ui| {
                     let edit = if f.show { egui::TextEdit::multiline(&mut f.uri).desired_rows(3).return_key(None) } else { egui::TextEdit::singleline(&mut f.uri).password(true) };
-                    ui.add(edit.font(egui::TextStyle::Monospace).hint_text("mongodb+srv://user:password@host/").desired_width(field_w).margin(egui::Margin::symmetric(8, 6)));
+                    ui.add(edit.font(egui::TextStyle::Monospace).hint_text("mongodb+srv://user:password@host/").desired_width(field_w).margin(FIELD_MARGIN_TALL));
                     // Wrapping is only visual; a pasted newline would break the URI.
                     if f.show {
                         f.uri.retain(|c| c != '\n' && c != '\r');
@@ -352,11 +353,11 @@ fn standard_tab(ui: &mut egui::Ui, f: &mut ConnForm) {
             form_label(ui, "Host");
             ui.horizontal(|ui| {
                 let default_port = db::sql::Addr::default_port(&f.addr.scheme);
-                let r = ui.add(egui::TextEdit::singleline(&mut f.addr.host).hint_text("localhost").desired_width(field_w - 100.0).margin(egui::Margin::symmetric(8, 5)));
+                let r = ui.add(egui::TextEdit::singleline(&mut f.addr.host).hint_text("localhost").desired_width(field_w - 100.0).margin(FIELD_MARGIN));
                 filled_border(ui, &r, &mut paste.filled[PASTE_HOST]);
                 ui.label("Port");
                 let mut port = if f.addr.port == 0 { default_port.to_string() } else { f.addr.port.to_string() };
-                let r = ui.add(egui::TextEdit::singleline(&mut port).desired_width(60.0).margin(egui::Margin::symmetric(8, 5)));
+                let r = ui.add(egui::TextEdit::singleline(&mut port).desired_width(60.0).margin(FIELD_MARGIN));
                 if r.changed() {
                     f.addr.port = port.trim().parse().unwrap_or(default_port);
                 }
@@ -364,19 +365,19 @@ fn standard_tab(ui: &mut egui::Ui, f: &mut ConnForm) {
             });
             ui.end_row();
             form_label(ui, "User");
-            let r = ui.add(egui::TextEdit::singleline(&mut f.addr.user).desired_width(200.0).margin(egui::Margin::symmetric(8, 5)));
+            let r = ui.add(egui::TextEdit::singleline(&mut f.addr.user).desired_width(200.0).margin(FIELD_MARGIN));
             filled_border(ui, &r, &mut paste.filled[PASTE_USER]);
             ui.end_row();
             form_label(ui, "Password");
             ui.horizontal(|ui| {
-                let r = ui.add(egui::TextEdit::singleline(&mut f.addr.password).password(true).font(egui::TextStyle::Monospace).desired_width(200.0).margin(egui::Margin::symmetric(8, 5)));
+                let r = ui.add(egui::TextEdit::singleline(&mut f.addr.password).password(true).font(egui::TextStyle::Monospace).desired_width(200.0).margin(FIELD_MARGIN));
                 filled_border(ui, &r, &mut paste.filled[PASTE_PASSWORD]);
                 ui.label(RichText::new("Kept in the Keychain").size(TXT_SMALL).color(FAINT()));
             });
             ui.end_row();
             form_label(ui, "Database");
             ui.horizontal(|ui| {
-                let r = ui.add(egui::TextEdit::singleline(&mut f.addr.database).hint_text(if pg { "postgres" } else { "All databases" }).desired_width(200.0).margin(egui::Margin::symmetric(8, 5)));
+                let r = ui.add(egui::TextEdit::singleline(&mut f.addr.database).hint_text(if pg { "postgres" } else { "All databases" }).desired_width(200.0).margin(FIELD_MARGIN));
                 filled_border(ui, &r, &mut paste.filled[PASTE_DATABASE]);
                 ui.label(RichText::new(if pg { "Optional, empty opens postgres" } else { "Optional, opens this one first" }).size(TXT_SMALL).color(FAINT()));
             });
@@ -396,7 +397,7 @@ fn ssh_tab(ui: &mut egui::Ui, f: &mut ConnForm) {
     settings_section(ui, "SSH TUNNEL", |ui| {
         ui.checkbox(&mut f.ssh_on, "Connect through an SSH server (jump host)");
         if f.ssh_on {
-            egui::Grid::new("ssh").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
+            egui::Grid::new("ssh").num_columns(2).spacing([FORM_GAP, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
                 form_label(ui, "Host");
                 ui.horizontal(|ui| {
                     ui.add(egui::TextEdit::singleline(&mut f.ssh.host).hint_text("bastion.example.com").desired_width(280.0));
@@ -461,7 +462,7 @@ fn proxy_tab(ui: &mut egui::Ui, f: &mut ConnForm) {
         if f.ssh_on {
             ui.label(RichText::new("Not needed with an SSH tunnel: the tunnel already carries the connection.").size(TXT_SMALL).color(FAINT()));
         } else if f.proxy_on {
-            egui::Grid::new("px").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
+            egui::Grid::new("px").num_columns(2).spacing([FORM_GAP, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
                 form_label(ui, "Host");
                 ui.horizontal(|ui| {
                     ui.add(egui::TextEdit::singleline(&mut f.proxy.host).desired_width(280.0));
@@ -564,7 +565,7 @@ impl App {
                 ui.set_width(ui.available_width());
                 ui.horizontal_top(|ui| {
                     let (dot, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
-                    ui.painter().circle_filled(dot.center(), 6.0, tint(PRIMARY(), 60));
+                    ui.painter().circle_filled(dot.center(), INFO_DOT_R, tint(PRIMARY(), 60));
                     let g = ui.painter().layout_job(egui::text::LayoutJob::single_section("i".into(), ui_fmt(TXT_SMALL, PRIMARY(), W_SEMIBOLD, 0.0)));
                     ui.painter().galley(dot.center() - g.size() / 2.0 + egui::vec2(0.0, optical_dy(&g)), g, PRIMARY());
                     ui.add(egui::Label::new(RichText::new("A locked PostgreSQL connection refuses writes Quarry can see. Functions on the server that write by themselves still run with your role's rights; use a read-only role for full safety.").size(TXT_SMALL).color(MUTED())).wrap());

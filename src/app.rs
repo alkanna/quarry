@@ -489,7 +489,7 @@ impl App {
                     s.bar.c = c;
                 }
                 if let Some(s) = t.sql.as_mut() {
-                    s.query = st.query;
+                    (s.query, s.run_db, s.run_schema) = (st.query, st.run_db, st.run_schema);
                 }
                 if !st.agg.is_empty() {
                     t.agg_txt = st.agg;

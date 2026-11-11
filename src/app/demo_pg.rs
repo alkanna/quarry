@@ -107,6 +107,11 @@ fn schemas() -> Vec<PgSchema> {
 }
 
 impl App {
+    /// QUARRY_TEST_PG=schemas has no pointer to click with, so the demo opens the schema menu itself once the first frames settled.
+    pub(super) fn demo_opens_schema_menu(&self, ctx: &egui::Context) -> bool {
+        self.demo && (60..63).contains(&ctx.cumulative_frame_nr()) && std::env::var("QUARRY_TEST_PG").as_deref() == Ok("schemas")
+    }
+
     /// The PostgreSQL demo: a production connection with three databases, three schemas in `analytics` and an open orders table.
     pub(super) fn load_pg_demo(&mut self) {
         let which = std::env::var("QUARRY_TEST_PG").unwrap_or_default();

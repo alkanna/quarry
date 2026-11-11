@@ -145,6 +145,15 @@ impl App {
         let picked = keep.or(of_tab).unwrap_or_else(|| default_schema(&user));
         self.pg_schemas.insert(key.clone(), list);
         self.pg_pick.insert(key, picked.clone());
+        // Query tabs opened or switched to this database before its schemas were known take the schema now.
+        for t in self.tabs.iter_mut().filter(|t| t.sel.conn == conn) {
+            if t.sel.db == database && t.sel.schema.is_empty() && t.sel.coll.is_empty() && t.sql.is_some() {
+                t.sel.schema = picked.clone();
+            }
+            if let Some(s) = t.sql.as_mut().filter(|s| s.run_db == database && s.run_schema.is_empty()) {
+                s.run_schema = picked.clone();
+            }
+        }
         self.pg_load_tables(conn, &database, &picked);
     }
 
