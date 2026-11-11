@@ -186,8 +186,7 @@ impl App {
         if ctx.any_popup_open() || !ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
             return;
         }
-        // A cell editor that no row draws would otherwise outlive every Esc and block the next edit.
-        if self.inline.take().is_some() || self.new_field.take().is_some() || self.sql_cell.take().is_some() {
+        if self.inline.take().is_some() || self.new_field.take().is_some() {
             return;
         }
         if let Some(t) = self.tm() {

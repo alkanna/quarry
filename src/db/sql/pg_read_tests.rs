@@ -317,3 +317,18 @@ fn views_and_unknown_row_estimates() {
         assert!(ask("x\" FROM t; --", None).is_err());
     });
 }
+
+#[test]
+fn a_text_key_named_like_a_keyword_keys_every_row() {
+    every_pg(|l, var| {
+        let ddl = "CREATE TABLE dap (\"number\" text NOT NULL, last_name text, first_name text, caisse_id smallint, allowed_transportations smallint[], \
+                   created_at timestamptz DEFAULT CURRENT_TIMESTAMP, CONSTRAINT dap_pkey PRIMARY KEY (number)); \
+                   INSERT INTO dap (number, last_name, first_name, caisse_id) VALUES ('291202527604257003', NULL, 'AURELIE', 291), ('291202527601450001', 'X', 'Matthieu', 291);";
+        let (db, _p) = fixture(l, "t9_dap", ddl);
+        for q in [PageQuery::default(), PageQuery { order: "created_at DESC".into(), ..Default::default() }] {
+            let (_cols, pk, rows, _) = page(l, &db, "t9_dap", "dap", q, 50, 0);
+            assert_eq!(pk, vec!["number".to_string()], "{var}");
+            assert!(rows.iter().all(|r| r.get("_id").is_some()), "{var}: {rows:?}");
+        }
+    });
+}

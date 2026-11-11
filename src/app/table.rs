@@ -2,6 +2,36 @@
 
 use super::*;
 
+/// SQL cell work found while the grid was drawn, done by `results` once the page is back in the tab.
+#[derive(Default)]
+pub(super) struct SqlAfter {
+    drill: Option<usize>,
+    edit: Option<(usize, String)>,
+    finish: bool,
+    acts: Vec<(usize, String, CellAct)>,
+    fk: Option<(db::sql::structure::ForeignKey, Document)>,
+}
+
+impl App {
+    /// In the order the grid used to do it: drill into a group, open, finish, the cell menu, then a link click, which stages the edit its
+    /// click finished before it moves to the other row.
+    pub(super) fn sql_after(&mut self, ctx: &egui::Context, a: SqlAfter) {
+        if let Some(i) = a.drill {
+            self.sql_drill(i);
+        }
+        if let Some((i, c)) = a.edit {
+            self.sql_open_cell(i, c);
+        }
+        if a.finish {
+            self.sql_cell_finish();
+            self.sql_cell_acts(ctx, a.acts);
+        }
+        if let Some((fk, d)) = a.fk {
+            self.open_fk_row(&fk, &d);
+        }
+    }
+}
+
 /// The rows a results table draws: result documents, or the Documents view's rows kept as BSON bytes.
 #[derive(Clone, Copy)]
 pub(super) enum Rows<'a> {
@@ -391,7 +421,9 @@ impl App {
         self.save_prefs();
     }
 
-    pub(super) fn doc_table(&mut self, ui: &mut egui::Ui, agg: bool, docs: Rows, fields: &[String], base: u64) {
+    /// Draws the rows. SQL cell work found on the way comes back in `SqlAfter`, because the page is out of the tab
+    /// while it is drawn (see `results`) and that work looks rows up in the tab.
+    pub(super) fn doc_table(&mut self, ui: &mut egui::Ui, agg: bool, docs: Rows, fields: &[String], base: u64) -> SqlAfter {
         let key = self.col_key(agg);
         let prefs = self.prefs.cols.get(&key).cloned().unwrap_or_default();
         let cols = visible_cols(Some(&prefs), fields, self.default_cols());
@@ -784,21 +816,13 @@ impl App {
             let Some(d) = self.shown_row(docs, i, agg).or_else(|| docs.owned(i)) else { continue };
             self.handle_acts(&d, acts);
         }
-        if let Some(i) = drill {
-            self.sql_drill(i);
-        }
-        let fk_row = fk_open.and_then(|(i, k)| self.shown_row(docs, i, agg).or_else(|| docs.owned(i)).map(|d| (k, d)));
-        if let (Some((i, c)), true) = (&edit_cell, sql_rows) {
-            self.sql_open_cell(*i, c.clone());
-        }
-        if sql {
-            self.sql_cell_finish();
-            self.sql_cell_acts(ui.ctx(), sql_acts);
-        }
-        // After the cell editor finished on this tab: the link click that took its focus stages its edit here first.
-        if let Some((k, d)) = fk_row {
-            self.open_fk_row(&fks[k], &d);
-        }
+        let after = SqlAfter {
+            drill,
+            edit: edit_cell.clone().filter(|_| sql_rows),
+            finish: sql,
+            acts: sql_acts,
+            fk: fk_open.and_then(|(i, k)| self.shown_row(docs, i, agg).or_else(|| docs.owned(i)).map(|d| (fks[k].clone(), d))),
+        };
         if let (Some((i, c)), false) = (edit_cell, agg || sql) {
             self.select(agg, i, false);
             let path: Vec<String> = c.split('.').map(String::from).collect();
@@ -809,6 +833,7 @@ impl App {
                 None => self.warn(format!("This document has no field {c}. Use + Add field.")),
             }
         }
+        after
     }
 
     pub(super) fn doc_list(&mut self, ui: &mut egui::Ui, agg: bool, docs: Rows) {

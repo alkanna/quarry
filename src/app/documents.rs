@@ -588,6 +588,7 @@ impl App {
             }
         }
         let docs = if is_raw { Rows::Raw(&raw[range]) } else { Rows::Docs(&all[range]) };
+        let mut after = None;
         let loading = t.loading;
         let closed = self.t().and_then(|t| self.conn(t.sel.conn)).filter(|c| c.status != Status::Ready && !self.demo).map(|c| (c.meta.id, c.meta.name.clone(), c.status == Status::Connecting));
         let conn_failed = closed.as_ref().is_some_and(|c| self.conn_card_shown(c.0));
@@ -622,7 +623,7 @@ impl App {
                     ui.multiply_opacity(0.45);
                 }
                 if self.prefs.table || sql {
-                    self.doc_table(ui, agg, docs, &fields, base);
+                    after = Some(self.doc_table(ui, agg, docs, &fields, base));
                 } else {
                     self.doc_list(ui, agg, docs);
                 }
@@ -635,6 +636,11 @@ impl App {
                 (true, Some(Store::Raw(v))) => *v = raw,
                 (true, None) => {}
             }
+        }
+        // Only now does the tab hold its page again, and SQL cell work finds its rows there. A link followed while
+        // drawing may have moved to another tab, whose rows these indexes are not.
+        if let Some(a) = after.filter(|_| self.cur == cur) {
+            self.sql_after(ui.ctx(), a);
         }
     }
 
