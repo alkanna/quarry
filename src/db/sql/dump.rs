@@ -153,7 +153,7 @@ fn flush_rows(d: Dialect, batch: &mut Vec<Document>, copy: &[CopyCol], table: &s
     if batch.is_empty() {
         return Ok(());
     }
-    let mut w = Writer::new(Fmt::SqlInsert, true, copy.to_vec(), table, &[], true).with_dialect(d);
+    let mut w = Writer::new(d, Fmt::SqlInsert, true, copy.to_vec(), table, &[], true);
     let text = w.begin() + &w.rows(batch) + &w.end() + "\n";
     batch.clear();
     out.write_all(text.as_bytes()).map_err(io)

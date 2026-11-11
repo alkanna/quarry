@@ -3,6 +3,7 @@
 
 use super::se;
 use super::value::{hex_digits, lit, Kind, Param};
+use super::lex;
 use super::exec::{Cells, Conn};
 use super::{Col, Db, Dialect};
 use crate::db::{Msg, Res, UndoAction, UndoKind, Worker};
@@ -299,9 +300,25 @@ pub fn insert_sql(d: Dialect, schema: &str, table: &str, cols: &[Col], row: &New
 }
 
 /// The same statement as it reads with its values filled in, for the Preview SQL window. Never sent.
-/// `bs` is whether the server reads backslash escapes (false under NO_BACKSLASH_ESCAPES).
-pub fn preview(sql: &str, params: &[Param], bs: bool) -> String {
+/// `bs` is whether the server reads backslash escapes (false under NO_BACKSLASH_ESCAPES). PostgreSQL's `$n` placeholders
+/// are found by the lexer, so one inside a string, a comment, a quoted name or a dollar quote is left alone, and its
+/// values are spelled as the shell relay spells them.
+pub fn preview(d: Dialect, sql: &str, params: &[Param], bs: bool) -> String {
     let mut out = String::new();
+    if d == Dialect::Postgres {
+        let mut last = 0;
+        for (t, r) in lex::tokens_with(sql, d, false, false) {
+            let Some(n) = (t == lex::Tok::Word).then(|| lex::param_number(&sql[r.clone()])).flatten() else { continue };
+            out.push_str(&sql[last..r.start]);
+            match params.get(n.wrapping_sub(1)) {
+                Some(p) => out.push_str(&super::relay::literal_pg(p).unwrap_or_else(|why| format!("/* {why} */"))),
+                None => out.push_str("NULL"),
+            }
+            last = r.end;
+        }
+        out.push_str(&sql[last..]);
+        return out;
+    }
     let mut it = params.iter();
     for ch in sql.chars() {
         if ch == '?' {
@@ -314,39 +331,6 @@ pub fn preview(sql: &str, params: &[Param], bs: bool) -> String {
                 // A bare 0x is a syntax error, so an empty value has its own spelling.
                 Some(Param::Bytes(b)) if b.is_empty() => out.push_str("X''"),
                 Some(Param::Bytes(b)) => out.push_str(&format!("0x{}", hex_digits(b, true))),
-            }
-        } else {
-            out.push(ch);
-        }
-    }
-    out
-}
-
-/// `preview` for either engine. PostgreSQL's `$n` placeholders are found outside quoted identifiers, and its strings
-/// double the quote and nothing else, because `standard_conforming_strings` is on (the connect readback checks it).
-pub fn preview_for(d: Dialect, sql: &str, params: &[Param], bs: bool) -> String {
-    if d != Dialect::Postgres {
-        return preview(sql, params, bs);
-    }
-    let mut out = String::new();
-    let mut quoted = false;
-    let mut chars = sql.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '"' {
-            quoted = !quoted;
-        }
-        if ch == '$' && !quoted && chars.peek().is_some_and(char::is_ascii_digit) {
-            let mut n = String::new();
-            while let Some(dg) = chars.next_if(char::is_ascii_digit) {
-                n.push(dg);
-            }
-            match n.parse::<usize>().ok().and_then(|n| params.get(n.wrapping_sub(1))) {
-                Some(Param::Text(s)) => out.push_str(&format!("'{}'", s.replace('\'', "''"))),
-                Some(Param::Int(i)) => out.push_str(&i.to_string()),
-                Some(Param::UInt(u)) => out.push_str(&u.to_string()),
-                Some(Param::Float(f)) => out.push_str(&f.to_string()),
-                Some(Param::Bytes(b)) => out.push_str(&format!("'\\x{}'", hex_digits(b, false))),
-                Some(Param::Null) | None => out.push_str("NULL"),
             }
         } else {
             out.push(ch);
@@ -837,17 +821,23 @@ mod tests {
     fn postgres_previews_fill_the_numbered_placeholders() {
         let p = [Param::Text("it's $2".into()), Param::Null, Param::Text("\\x01".into())];
         // A `$2` inside a quoted identifier is a name, and a value that looks like a placeholder is not scanned again.
-        assert_eq!(preview_for(Dialect::Postgres, "UPDATE \"a$1\" SET x = CAST($1 AS text), y = $2 WHERE z = CAST($3 AS bytea)", &p, false), "UPDATE \"a$1\" SET x = CAST('it''s $2' AS text), y = NULL WHERE z = CAST('\\x01' AS bytea)");
-        assert_eq!(preview_for(Dialect::MySql, "a = ?", &[Param::Int(1)], true), "a = 1");
+        assert_eq!(preview(Dialect::Postgres, "UPDATE \"a$1\" SET x = CAST($1 AS text), y = $2 WHERE z = CAST($3 AS bytea)", &p, false), "UPDATE \"a$1\" SET x = CAST('it''s $2' AS text), y = NULL WHERE z = CAST(E'\\\\x01' AS bytea)");
+        assert_eq!(preview(Dialect::MySql, "a = ?", &[Param::Int(1)], true), "a = 1");
+    }
+
+    #[test]
+    fn postgres_previews_leave_a_placeholder_inside_a_string_a_comment_or_a_dollar_quote() {
+        let p = [Param::Int(7)];
+        assert_eq!(preview(Dialect::Postgres, "SELECT '$1', $$ $1 $$, $q$ $1 $q$, /* $1 */ $1 -- $1\n, E'$1'", &p, false), "SELECT '$1', $$ $1 $$, $q$ $1 $q$, /* $1 */ 7 -- $1\n, E'$1'");
     }
 
     #[test]
     fn preview_fills_values() {
-        let s = preview("UPDATE t SET a = ?, b = ? WHERE id <=> ?", &[Param::Text("it's".into()), Param::Null, Param::Int(4)], true);
+        let s = preview(Dialect::MySql, "UPDATE t SET a = ?, b = ? WHERE id <=> ?", &[Param::Text("it's".into()), Param::Null, Param::Int(4)], true);
         assert_eq!(s, "UPDATE t SET a = 'it''s', b = NULL WHERE id <=> 4");
         let q = [Param::Text("a\\b".into()), Param::Bytes(vec![])];
-        assert_eq!(preview("? ?", &q, true), "'a\\\\b' X''");
-        assert_eq!(preview("? ?", &q, false), "'a\\b' X''");
+        assert_eq!(preview(Dialect::MySql, "? ?", &q, true), "'a\\\\b' X''");
+        assert_eq!(preview(Dialect::MySql, "? ?", &q, false), "'a\\b' X''");
     }
 
     // Live tests need QUARRY_TEST_MYSQL and use their own database so they never meet the worker tests.

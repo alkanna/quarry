@@ -440,7 +440,7 @@ impl App {
                     changes: db::diff(&dr.original, &dr.current).into_iter().filter(|c| c.0 != "_id").map(|(p, a, b)| (p, a.unwrap_or(Bson::Null), b.unwrap_or(Bson::Null))).collect(),
                 };
                 let (sql, params) = write::update_sql(d, sel.space(), &sel.coll, &cols, &edit);
-                body.push(format!("{};", write::preview_for(d, &sql, &params, bs)));
+                body.push(format!("{};", write::preview(d, &sql, &params, bs)));
             }
             self.modal = Some(Modal::Text { title: "SQL that Save will run".into(), body: body.join("\n"), code: false });
         }
@@ -782,11 +782,11 @@ impl App {
         let header = ctx.data(|d| d.get_temp::<bool>(egui::Id::unique("copy-with-header"))).unwrap_or(true);
         let d = self.sql_dialect();
         let sheet = Sheet { rows, cols, table, pk, bs };
-        let text = copy::format_in(d, fmt, &sheet, header);
+        let text = copy::format(d, fmt, &sheet, header);
         if text.is_empty() {
             return self.warn(if fmt == Fmt::SqlUpdate { "SQL UPDATE needs a table with a primary key." } else { "Nothing to copy." });
         }
-        let rich = fmt == Fmt::Html && put_html(&text, &copy::format_in(d, Fmt::Tsv, &sheet, header));
+        let rich = fmt == Fmt::Html && put_html(&text, &copy::format(d, Fmt::Tsv, &sheet, header));
         if !rich {
             ctx.copy_text(text);
         }

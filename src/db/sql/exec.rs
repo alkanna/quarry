@@ -284,8 +284,8 @@ pub enum Opts {
 }
 
 impl Opts {
-    /// The MySQL options, for the modules that only exist for MySQL.
-    #[cfg_attr(not(test), allow(dead_code))] // only the live tests ask for the MySQL options
+    /// The MySQL options, which only the live tests read.
+    #[cfg(test)]
     pub fn my(&self) -> Res<&MySqlConnectOptions> {
         match self {
             Opts::My(o) => Ok(o),

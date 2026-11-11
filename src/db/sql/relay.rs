@@ -108,7 +108,7 @@ pub fn fill(text: &str, params: &[value::Param], backslash: bool, ansi: bool) ->
 
 /// A literal for one bound value on PostgreSQL. A text with a backslash becomes an E string with every
 /// backslash doubled, so it reads the same whatever standard_conforming_strings says.
-fn literal_pg(p: &value::Param) -> Res<String> {
+pub(super) fn literal_pg(p: &value::Param) -> Res<String> {
     use value::Param;
     Ok(match p {
         Param::Text(s) => {

@@ -349,7 +349,7 @@ impl App {
         let text = match f.fmt {
             Format::T(fmt) => {
                 let (cols, table, pk) = self.export_sheet(f.src, &rows);
-                let text = copy::format_in(self.sql_dialect(), fmt, &Sheet { rows: &rows, cols: &cols, table: &table, pk: &pk, bs: self.sql_bs() }, f.header);
+                let text = copy::format(self.sql_dialect(), fmt, &Sheet { rows: &rows, cols: &cols, table: &table, pk: &pk, bs: self.sql_bs() }, f.header);
                 if text.is_empty() {
                     return self.warn(if fmt == Fmt::SqlUpdate { "SQL UPDATE needs a table with a primary key." } else { "Nothing to export." });
                 }

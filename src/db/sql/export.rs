@@ -156,7 +156,7 @@ async fn stream_conn(conn: &mut Conn, dialect: super::Dialect, stmt: &str, plan:
                 Item::Row(row) => {
                     if writer.is_none() {
                         cols = make_cols(&row.cols(), &Default::default(), false);
-                        let mut w = Writer::new(plan.fmt, plan.header, copy_cols(&cols), &plan.table, &[], plan.bs).with_dialect(dialect);
+                        let mut w = Writer::new(dialect, plan.fmt, plan.header, copy_cols(&cols), &plan.table, &[], plan.bs);
                         out.write_all(wrap.head.as_bytes()).map_err(io)?;
                         out.write_all(w.begin().as_bytes()).map_err(io)?;
                         writer = Some(w);
@@ -186,7 +186,7 @@ async fn stream_conn(conn: &mut Conn, dialect: super::Dialect, stmt: &str, plan:
             Err(x) => return Err(e(x)),
         };
         cols = make_cols(&d, &Default::default(), false);
-        let mut w = Writer::new(plan.fmt, plan.header, copy_cols(&cols), &plan.table, &[], plan.bs).with_dialect(dialect);
+        let mut w = Writer::new(dialect, plan.fmt, plan.header, copy_cols(&cols), &plan.table, &[], plan.bs);
         out.write_all(wrap.head.as_bytes()).map_err(io)?;
         out.write_all(w.begin().as_bytes()).map_err(io)?;
         writer = Some(w);
@@ -462,7 +462,7 @@ mod tests {
         for (i, (stmt, rows)) in sets.iter().enumerate() {
             let tag = (fmt == Fmt::JsonLines).then(|| json_str(stmt));
             out += &single_head(fmt, i + 1, stmt, i == 0);
-            let mut w = Writer::new(fmt, true, cols(), "t", &[], true);
+            let mut w = Writer::new(Dialect::MySql, fmt, true, cols(), "t", &[], true);
             out += &w.begin();
             let text = w.rows(rows);
             out += &match &tag { Some(t) => tag_lines(&text, t), None => text };
