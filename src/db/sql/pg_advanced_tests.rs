@@ -30,11 +30,9 @@ const ALL: &[(&str, &str, &str)] = &[
     ("maintenance_work_mem", "80MB", "80MB"),
     ("hash_mem_multiplier", "3", "3"),
     ("lc_messages", "C", "C"),
-    ("lc_monetary", "C", "C"),
     ("lc_numeric", "C", "C"),
     ("lc_time", "C", "C"),
     ("default_text_search_config", "pg_catalog.simple", "pg_catalog.simple"),
-    ("extra_float_digits", "1", "1"),
     ("idle_in_transaction_session_timeout", "3min", "3min"),
     ("log_min_duration_statement", "250ms", "250ms"),
     ("temp_file_limit", "1GB", "1GB"),
@@ -352,5 +350,137 @@ fn the_application_name_is_shown_from_the_first_statement() {
         let db = l.quarry_test();
         let rows = l.w.rt.block_on(db.read_text("", "SELECT application_name FROM pg_stat_activity WHERE pid = pg_backend_pid()", false)).unwrap();
         assert_eq!(super::worker::text_at(&rows[0], 0).as_deref(), Some("quarry adv name"), "{var}");
+    });
+}
+
+/// `open` that hands the refusal back instead of panicking, for settings a server or Quarry may refuse.
+fn try_open(uri: &str, adv: &Advanced) -> Result<LivePg, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let w = crate::db::Worker::new(tx, eframe::egui::Context::default());
+    let pool = w.rt.block_on(async { sqlx::PgPool::connect(uri).await.unwrap() });
+    w.sql_connect_with(1, uri.to_string(), Duration::from_secs(30), Net::default(), adv.clone());
+    let Msg::SqlConnected { res, .. } = rx.recv_timeout(Duration::from_secs(30)).unwrap() else { panic!("connect") };
+    let (db, dbs, _) = res?;
+    Ok(LivePg { w, rx, db, dbs, pool, uri: uri.to_string() })
+}
+
+#[test]
+fn a_function_in_a_saved_schema_never_shadows_a_catalog_function() {
+    each(|var, uri, pooled| {
+        // pg_catalog in the list would sit behind the schemas before it, so it is refused, on Test and on connect.
+        for list in [vec!["adv_evil", "pg_catalog"], vec!["pg_catalog"], vec!["adv_evil", "PG_Catalog"]] {
+            let adv = Advanced { search_path: list.iter().map(|s| s.to_string()).collect(), ..Default::default() };
+            assert!(connect_error(uri, &adv).contains("system schema"), "{var}: {list:?}");
+        }
+        let adv = Advanced { search_path: vec!["adv_evil".into(), "public".into()], ..Default::default() };
+        let l = open(uri, &adv, pooled);
+        let db = l.quarry_test();
+        let pool = l.fixture_pool();
+        l.qsql(&pool, "DROP SCHEMA IF EXISTS adv_evil CASCADE; CREATE SCHEMA adv_evil; CREATE TABLE adv_evil.t (id int PRIMARY KEY, v int); INSERT INTO adv_evil.t VALUES (1, 1); \
+            CREATE FUNCTION adv_evil.format_type(oid, integer) RETURNS text LANGUAGE sql AS 'SELECT ''EVIL'''; \
+            CREATE FUNCTION adv_evil.to_regtype(text) RETURNS regtype LANGUAGE sql AS 'SELECT ''money''::regtype'; \
+            CREATE FUNCTION adv_evil.current_setting(text) RETURNS text LANGUAGE sql AS 'SELECT ''EVIL'''");
+        let probe = "SELECT format_type(23, NULL) AS t, to_regtype('int4')::text AS r, current_setting('work_mem') <> 'EVIL' AS s";
+        // The saved path as Quarry sets it never names pg_catalog, so the server keeps searching it first.
+        for tab in ["adv_evil", "public", ""] {
+            assert!(!db.pg_path(tab).contains("pg_"), "{var}: {}", db.pg_path(tab));
+            let sets = go(&l, &db, tab, probe, true);
+            assert!(sets[0].error.is_none(), "{var}: {:?}", sets[0].error);
+            assert_eq!((val(&sets[0], "t"), val(&sets[0], "r"), val(&sets[0], "s")), ("integer".into(), "integer".into(), "true".into()), "{var}: a run in {tab:?}");
+        }
+        // A read of Quarry's own and the metadata behind a structure.
+        let rows = l.w.rt.block_on(db.read_text("adv_evil", "SELECT format_type(23, NULL)", false)).unwrap();
+        assert_eq!(super::worker::text_at(&rows[0], 0).unwrap_or_default(), "integer", "{var}");
+        l.w.sql_structure(3, db.clone(), "adv_evil".into(), "t".into());
+        let Msg::SqlStructure { res, .. } = l.next() else { panic!("expected SqlStructure") };
+        let st = res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert!(st.columns.iter().all(|c| !c.full_type.contains("EVIL") && !c.full_type.contains("money")), "{var}: {:?}", st.columns.iter().map(|c| &c.full_type).collect::<Vec<_>>());
+        // The writer's READ WRITE transaction, where the table's schema is set first.
+        let (t, r) = l.w.rt.block_on(async {
+            let mut c = super::write::writer_conn(&db, "adv_evil", false).await.unwrap();
+            let mut tx = c.begin_write(&db).await.unwrap();
+            let rows = tx.fetch_bound("SELECT format_type(23, NULL) AS t, to_regtype('int4')::text AS r", &[]).await.unwrap();
+            let out = (super::worker::text(&rows[0], "t").unwrap(), super::worker::text(&rows[0], "r").unwrap());
+            let _ = tx.rollback().await;
+            out
+        });
+        assert_eq!((t.as_str(), r.as_str()), ("integer", "integer"), "{var}: the writer");
+        l.qsql(&pool, "DROP SCHEMA adv_evil CASCADE");
+    });
+}
+
+#[test]
+fn floats_and_money_keep_their_spelling_whatever_the_form_asked_for() {
+    each(|var, uri, pooled| {
+        // The form refuses the settings that change how a value reads. A server that took them anyway would lose digits.
+        let mut adv = all_settings();
+        adv.pg_settings.extend([("extra_float_digits".to_string(), "-15".to_string()), ("lc_monetary".to_string(), "C".to_string())]);
+        let l = match try_open(uri, &adv) {
+            Err(x) => {
+                assert!(x.contains("kept by Quarry"), "{var}: {x}");
+                open(uri, &all_settings(), pooled)
+            }
+            Ok(l) => l,
+        };
+        let db = l.quarry_test();
+        let pool = l.fixture_pool();
+        l.qsql(&pool, "DROP SCHEMA IF EXISTS adv_flt CASCADE; CREATE SCHEMA adv_flt; CREATE TABLE adv_flt.t (id int PRIMARY KEY, f float8); INSERT INTO adv_flt.t VALUES (1, 0.1::float8 + 0.2::float8), (2, 1234567.891), (3, 1e-7)");
+        l.w.sql_page(7, db.clone(), "adv_flt".into(), "t".into(), Default::default(), 100, 0);
+        let Msg::SqlCols { cols, .. } = l.next() else { panic!("expected SqlCols") };
+        let Msg::Docs { res: Ok((rows, _, _)), .. } = l.next() else { panic!("expected Docs") };
+        let docs: Vec<_> = rows.iter().map(|r| r.decode().unwrap()).collect();
+        let at = |id: i64| docs.iter().find(|d| d.get_i64("id") == Ok(id)).unwrap_or_else(|| panic!("{var}: no row {id}")).clone();
+        assert_eq!(at(1).get_f64("f").unwrap(), 0.1 + 0.2, "{var}: read");
+        assert_eq!(at(2).get_f64("f").unwrap(), 1234567.891, "{var}: read");
+        assert_eq!(at(3).get_f64("f").unwrap(), 1e-7, "{var}: read");
+        // An edit of the float itself puts the value as read in its WHERE, which only matches the exact value.
+        let ed = super::write::RowEdit { pk: at(1).get_document("_id").unwrap().clone(), changes: vec![("f".into(), Bson::Double(0.1 + 0.2), Bson::Double(5.5))] };
+        l.w.sql_save(vec!["k".into()], 1, db.clone(), "adv_flt".into(), "t".into(), cols, vec!["id".into()], vec![ed], false);
+        let Msg::Saved { res, .. } = l.next() else { panic!("expected Saved") };
+        assert!(res.is_ok(), "{var}: the edit failed as if another session had changed the row: {res:?}");
+        assert_eq!(l.qone(&pool, "SELECT f::text FROM adv_flt.t WHERE id = 1"), "5.5", "{var}");
+        // The export is not lossy.
+        let path = std::env::temp_dir().join(format!("adv_flt_{}_{}.csv", std::process::id(), var));
+        let plan = super::export::Plan { fmt: crate::db::copy::Fmt::Csv, header: false, table: String::new(), bs: false };
+        use std::sync::atomic::{AtomicBool, AtomicU64};
+        l.w.rt.block_on(super::export::export_to(&db, "adv_flt", "SELECT id, f FROM t WHERE id > 1 ORDER BY id", &plan, super::export::Sink::File(path.clone()), &AtomicU64::new(0), &AtomicBool::new(false), &AtomicU64::new(0))).unwrap_or_else(|x| panic!("{var}: {x}"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(text.replace("\r\n", "\n"), "2,1234567.891\n3,0.0000001\n", "{var}");
+        l.qsql(&pool, "DROP SCHEMA adv_flt CASCADE");
+    });
+}
+
+#[test]
+fn a_custom_offset_means_east_of_greenwich_as_the_form_says() {
+    each(|var, uri, pooled| {
+        let adv = Advanced { zone: Zone::Custom("+02:00".into()), ..Default::default() };
+        let l = open(uri, &adv, pooled);
+        let db = l.quarry_test();
+        let sets = go(&l, &db, "public", "SELECT '2024-06-01 12:00:00+00'::timestamptz::text AS shown, '2024-06-01 12:00:00'::timestamptz::text AS typed, ('2024-06-01 12:00:00+02'::timestamptz = '2024-06-01 12:00:00'::timestamptz)::text AS same", true);
+        assert!(sets[0].error.is_none(), "{var}: {:?}", sets[0].error);
+        assert_eq!((val(&sets[0], "shown"), val(&sets[0], "typed"), val(&sets[0], "same")), ("2024-06-01 14:00:00+02".into(), "2024-06-01 12:00:00+02".into(), "true".into()), "{var}");
+        assert_eq!(show(&l, &db, "TimeZone"), "<+0200>-02:00", "{var}");
+        // A zone name still goes through as typed.
+        let l = open(uri, &Advanced { zone: Zone::Custom("Europe/Paris".into()), ..Default::default() }, pooled);
+        assert_eq!(show(&l, &l.quarry_test(), "TimeZone"), "Europe/Paris", "{var}");
+    });
+}
+
+#[test]
+fn a_write_refusal_is_worded_by_its_sqlstate_with_lc_messages_set() {
+    each(|var, uri, pooled| {
+        // C is the one locale every image has; the wording of another language is covered by the unit tests on the SQLSTATE.
+        let adv = Advanced { pg_settings: vec![("lc_messages".into(), "C".into())], ..Default::default() };
+        let l = open(uri, &adv, pooled);
+        let db = l.quarry_test();
+        let pool = l.fixture_pool();
+        l.qsql(&pool, "DROP SCHEMA IF EXISTS adv_msg CASCADE; CREATE SCHEMA adv_msg; CREATE TABLE adv_msg.t (id int PRIMARY KEY, n int NOT NULL); INSERT INTO adv_msg.t VALUES (1, 1)");
+        let sets = go(&l, &db, "adv_msg", "UPDATE t SET n = NULL", false);
+        let err = sets[0].error.clone().expect("the NOT NULL refuses");
+        assert!(err.starts_with("error returned from database: 23502: "), "{var}: {err}");
+        let e = crate::db::explain(&err, &crate::db::ErrCtx { what: "run the statement".into(), ..Default::default() });
+        assert_eq!(e.title, "This column does not allow NULL", "{var}");
+        l.qsql(&pool, "DROP SCHEMA adv_msg CASCADE");
     });
 }

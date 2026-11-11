@@ -89,15 +89,18 @@ impl UiApp {
         // the frame before the click. A form that has just opened lays out its content over several frames and a first scroll can
         // land short, so it scrolls again until the item stops moving.
         let mut at = self.node(label, pick).rect();
+        let mut settled = false;
         for _ in 0..5 {
             self.node(label, pick).scroll_to_me();
             self.h.run_steps(3);
             let now = self.node(label, pick).rect();
             if now == at {
+                settled = true;
                 break;
             }
             at = now;
         }
+        assert!(settled, "\"{label}\" kept moving after 5 scrolls, so a click on it would land somewhere else");
         self.node(label, pick).click();
         self.settle();
     }

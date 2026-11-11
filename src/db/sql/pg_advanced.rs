@@ -106,11 +106,9 @@ pub const ALLOWED: &[Def] = &[
     d("temp_buffers", Memory, "Memory for temporary tables", Kind::Size, "8MB"),
     d("hash_mem_multiplier", Memory, "How far a hash may exceed work_mem", Kind::Real, "2"),
     d("lc_messages", Locale, "Language of server messages", Kind::Name, "en_US.UTF-8"),
-    d("lc_monetary", Locale, "Format of money values", Kind::Name, "en_US.UTF-8"),
     d("lc_numeric", Locale, "Format of numbers in to_char", Kind::Name, "en_US.UTF-8"),
     d("lc_time", Locale, "Format of dates and times in to_char", Kind::Name, "en_US.UTF-8"),
     d("default_text_search_config", Locale, "Text search configuration", Kind::Name, "pg_catalog.english"),
-    d("extra_float_digits", Locale, "Digits shown for floating point values", Kind::Int(-15, 3), "1"),
     d("idle_in_transaction_session_timeout", Limits, "Ends a session left idle inside a transaction", Kind::Time, "0"),
     d("log_min_duration_statement", Limits, "Logs statements slower than this", Kind::Time, "-1"),
     d("temp_file_limit", Limits, "Disk a session may use for temporary files", Kind::Size, "-1"),
@@ -127,6 +125,10 @@ pub const KEPT: &[(&str, &str)] = &[
     ("DateStyle", "how values are read and edited"),
     ("IntervalStyle", "how values are read and edited"),
     ("bytea_output", "how values are read and edited"),
+    // Floats are read back from their text and money is parsed from its text, so a different spelling loses digits or
+    // makes an edit's WHERE miss the row it was read from.
+    ("extra_float_digits", "how values are read and edited"),
+    ("lc_monetary", "how values are read and edited"),
 ];
 
 pub fn def(name: &str) -> Option<&'static Def> {
@@ -201,15 +203,40 @@ pub fn check_zone(z: &str) -> Result<(), String> {
     }
 }
 
-/// One schema of the search_path list. pg_temp is refused because what lives there belongs to one backend, which a
-/// pooler may hand to another client.
+/// An offset such as +02:00 or -0330 in the form PostgreSQL reads as meant. A bare signed offset is POSIX there, where the
+/// sign counts west of Greenwich, so +02:00 would mean UTC-2. The angle bracket spelling names the zone and flips the
+/// sign. A zone name and anything else is left as typed.
+fn posix_offset(z: &str) -> String {
+    let (sign, rest) = match z.as_bytes().first() {
+        Some(b'+') => ('+', &z[1..]),
+        Some(b'-') => ('-', &z[1..]),
+        _ => return z.to_string(),
+    };
+    let (h, m) = match rest.split_once(':') {
+        Some((h, m)) => (h, m),
+        None if rest.len() == 4 => rest.split_at(2),
+        None => (rest, "00"),
+    };
+    let digits = |t: &str| !t.is_empty() && t.len() <= 2 && t.bytes().all(|b| b.is_ascii_digit());
+    if !digits(h) || !digits(m) {
+        return z.to_string();
+    }
+    let (h, m) = (format!("{h:0>2}"), format!("{m:0>2}"));
+    let flipped = if sign == '+' { '-' } else { '+' };
+    format!("<{sign}{h}{m}>{flipped}{h}:{m}")
+}
+
+/// One schema of the search_path list. Every pg_ name is refused, because users cannot create such a schema: pg_temp
+/// holds what belongs to one backend (which a pooler may hand to another client), and pg_catalog listed after another
+/// schema would stop being searched first, so that schema's functions could shadow the built-ins Quarry's own
+/// unqualified catalog SQL calls.
 pub fn check_schema(s: &str) -> Result<(), String> {
     let s = s.trim();
     if s.is_empty() || s.len() > 63 || s.chars().any(|c| c.is_control()) {
         return Err(format!("search_path: {s:?} is not a schema name"));
     }
-    if s.to_ascii_lowercase().starts_with("pg_temp") {
-        return Err("search_path: pg_temp schemas belong to one backend and are not offered".into());
+    if s.to_ascii_lowercase().starts_with("pg_") {
+        return Err(format!("search_path: {s} is a system schema, which the server searches first on its own, and is not offered"));
     }
     Ok(())
 }
@@ -254,14 +281,15 @@ impl PgSession {
             Zone::System => settings.push(("TimeZone".into(), system.filter(|z| check_zone(z).is_ok()).ok_or("Time zone: this computer's zone name could not be read, use Custom")?)),
             Zone::Custom(z) => {
                 check_zone(z)?;
-                settings.push(("TimeZone".into(), z.trim().into()));
+                settings.push(("TimeZone".into(), posix_offset(z.trim())));
             }
         }
         let mut tail: Vec<String> = Vec::new();
         for s in &adv.search_path {
             check_schema(s)?;
-            if !tail.contains(s) {
-                tail.push(s.clone());
+            let s = s.trim().to_string();
+            if !tail.contains(&s) {
+                tail.push(s);
             }
         }
         if !tail.is_empty() {
@@ -282,10 +310,11 @@ impl PgSession {
     /// saved list, and with no list either, nothing (the server's own).
     pub fn path(&self, schema: &str) -> String {
         let mut all: Vec<String> = Vec::new();
-        if !schema.is_empty() {
+        // pg_catalog is never listed: the server searches it first when it is absent, and a listed one sits where it is put.
+        if !schema.is_empty() && !schema.eq_ignore_ascii_case("pg_catalog") {
             all.push(schema.to_string());
         }
-        all.extend(self.tail.iter().filter(|t| t.as_str() != schema).cloned());
+        all.extend(self.tail.iter().filter(|t| t.as_str() != schema && !t.eq_ignore_ascii_case("pg_catalog")).cloned());
         path_value(&all)
     }
 
@@ -324,10 +353,10 @@ mod tests {
 
     #[test]
     fn values_have_the_shape_of_their_setting() {
-        for (n, v) in [("work_mem", "64MB"), ("work_mem", "64 MB"), ("work_mem", "1024"), ("temp_file_limit", "-1"), ("random_page_cost", "1.1"), ("jit", "off"), ("JIT", "On"), ("statement_timeout", "30s"), ("statement_timeout", "5min"), ("statement_timeout", "0"), ("extra_float_digits", "-3"), ("lc_time", "en_US.UTF-8"), ("application_name", "my app"), ("log_min_duration_statement", "-1"), ("max_parallel_workers_per_gather", "0")] {
+        for (n, v) in [("work_mem", "64MB"), ("work_mem", "64 MB"), ("work_mem", "1024"), ("temp_file_limit", "-1"), ("random_page_cost", "1.1"), ("jit", "off"), ("JIT", "On"), ("statement_timeout", "30s"), ("statement_timeout", "5min"), ("statement_timeout", "0"), ("lc_time", "en_US.UTF-8"), ("application_name", "my app"), ("log_min_duration_statement", "-1"), ("max_parallel_workers_per_gather", "0")] {
             check_value(n, v).unwrap_or_else(|x| panic!("{n} {v}: {x}"));
         }
-        for (n, v) in [("work_mem", "64 megs"), ("work_mem", "MB"), ("work_mem", "1.5.2"), ("random_page_cost", "fast"), ("jit", "maybe"), ("statement_timeout", "30 sec"), ("extra_float_digits", "4"), ("lc_time", "a b"), ("application_name", "a\\b"), ("application_name", "tab\there"), ("work_mem", ""), ("max_parallel_workers_per_gather", "-1")] {
+        for (n, v) in [("work_mem", "64 megs"), ("work_mem", "MB"), ("work_mem", "1.5.2"), ("random_page_cost", "fast"), ("jit", "maybe"), ("statement_timeout", "30 sec"), ("lc_time", "a b"), ("application_name", "a\\b"), ("application_name", "tab\there"), ("work_mem", ""), ("max_parallel_workers_per_gather", "-1")] {
             assert!(check_value(n, v).is_err(), "{n} {v}");
         }
         assert_eq!(check_value("work_mem", "64 megs").unwrap_err(), "work_mem: Expected a size like 64MB or 1GB");
@@ -369,6 +398,45 @@ mod tests {
     }
 
     #[test]
+    fn pg_catalog_is_never_listed_so_the_server_keeps_searching_it_first() {
+        let s = PgSession::new(&Advanced { search_path: vec!["evil".into(), "public".into()], ..Default::default() }, None).unwrap();
+        for tab in ["", "evil", "sales", "pg_catalog", "PG_CATALOG"] {
+            assert!(!s.path(tab).to_lowercase().contains("pg_"), "{tab}: {}", s.path(tab));
+        }
+        assert_eq!(s.path("pg_catalog"), "\"evil\", \"public\"");
+        assert_eq!(PgSession::default().path("pg_catalog"), "");
+    }
+
+    #[test]
+    fn a_schema_is_stored_trimmed() {
+        let s = PgSession::new(&Advanced { search_path: vec![" sales ".into(), "sales".into(), "public ".into()], ..Default::default() }, None).unwrap();
+        assert_eq!(s.tail, ["sales", "public"]);
+        assert_eq!(s.path("sales"), "\"sales\", \"public\"");
+    }
+
+    #[test]
+    fn a_custom_offset_is_sent_the_way_postgres_reads_it_east_of_greenwich() {
+        let zone = |z: &str| PgSession::new(&Advanced { zone: Zone::Custom(z.into()), ..Default::default() }, None).unwrap().settings[0].1.clone();
+        assert_eq!(zone("+02:00"), "<+0200>-02:00");
+        assert_eq!(zone("-03:30"), "<-0330>+03:30");
+        assert_eq!(zone("+0530"), "<+0530>-05:30");
+        assert_eq!(zone("+2"), "<+0200>-02:00");
+        assert_eq!(zone(" +02:00 "), "<+0200>-02:00");
+        assert_eq!(zone("Europe/Paris"), "Europe/Paris");
+        assert_eq!(zone("UTC"), "UTC");
+    }
+
+    #[test]
+    fn what_decides_how_values_are_read_is_kept_not_offered() {
+        for k in ["extra_float_digits", "lc_monetary"] {
+            assert!(def(k).is_none() && kept_reason(k) == Some("how values are read and edited"), "{k}");
+            assert!(check_value(k, "C").unwrap_err().contains("kept by Quarry"), "{k}");
+            assert!(PgSession::new(&Advanced { pg_settings: vec![(k.into(), "1".into())], ..Default::default() }, None).is_err(), "{k}");
+        }
+        assert!(def("lc_messages").is_some() && def("lc_numeric").is_some());
+    }
+
+    #[test]
     fn the_sidebar_schema_comes_first_in_the_path() {
         let s = PgSession::new(&Advanced { search_path: vec!["reporting".into(), "public".into()], ..Default::default() }, None).unwrap();
         assert_eq!(s.path("sales"), "\"sales\", \"reporting\", \"public\"");
@@ -401,6 +469,9 @@ mod tests {
     fn refusals() {
         let bad = |a: Advanced| PgSession::new(&a, None).unwrap_err();
         assert!(bad(Advanced { search_path: vec!["pg_temp".into()], ..Default::default() }).contains("pg_temp"));
+        for s in ["pg_catalog", "PG_Catalog", " pg_catalog ", "pg_toast", "pg_temp_3", "pg_whatever"] {
+            assert!(bad(Advanced { search_path: vec!["public".into(), s.into()], ..Default::default() }).contains("system schema"), "{s}");
+        }
         assert!(bad(Advanced { search_path: vec!["".into()], ..Default::default() }).contains("search_path"));
         assert!(bad(Advanced { zone: Zone::Custom("a'b".into()), ..Default::default() }).contains("Time zone"));
         assert!(bad(Advanced { pg_settings: vec![("work_mem".into(), "1MB".into()), ("work_mem".into(), "2MB".into())], ..Default::default() }).contains("twice"));

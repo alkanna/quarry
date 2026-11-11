@@ -38,7 +38,10 @@ fn run(var: &str) {
     ui.fill("Setting filter", "role");
     ui.show("whose rights the lock checks");
     ui.show("Nothing allowed matches. A setting that is not listed is never sent.");
-    assert!(form(ui.h.state_mut()).pg_rows.iter().all(|(n, _)| n != "role"), "{var}");
+    // Clicking the greyed row itself must add nothing, which is what the missing row of the allowed list alone cannot show.
+    let before = form(ui.h.state_mut()).pg_rows.clone();
+    ui.click("role");
+    assert_eq!(form(ui.h.state_mut()).pg_rows, before, "{var}: a kept setting was added by a click on its row");
 
     // A value shaped right but refused by the server shows under its row after Test.
     add_setting(&mut ui, "work_mem", "1kB");

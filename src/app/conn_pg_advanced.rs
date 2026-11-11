@@ -170,7 +170,7 @@ fn time_zone_row(ui: &mut egui::Ui, f: &mut ConnForm) {
 fn hint_of(name: &str, default_s: u64) -> String {
     match name {
         "statement_timeout" => format!("empty follows Settings ({default_s} s); a value here wins"),
-        "lock_timeout" => "reads and edits only; structure changes and imports keep 10s".into(),
+        "lock_timeout" => "reads and queries only; edits and imports keep 10s, structure and trigger changes 3s".into(),
         "application_name" => "shown in pg_stat_activity".into(),
         _ => adv::def(name).map(|d| d.desc.to_string()).unwrap_or_default(),
     }
@@ -216,7 +216,7 @@ fn session_rows(ui: &mut egui::Ui, f: &mut ConnForm, default_s: u64) {
         f.pg_rows.remove(i);
     }
     ui.add_space(4.0);
-    small(ui, "statement_timeout here wins over the timeout in Settings. Structure changes, imports, edits and other writes always run with no statement timeout and a 10 s lock timeout, whatever is set here.", FAINT());
+    small(ui, "statement_timeout here wins over the timeout in Settings. Structure changes, imports, edits and other writes always run with no statement timeout, whatever is set here. Edits and imports wait 10 s for a lock and structure or trigger changes 3 s, whatever lock_timeout is set here.", FAINT());
     ui.add_space(6.0);
     picker(ui, f);
     ui.add_space(10.0);
