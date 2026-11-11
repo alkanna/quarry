@@ -393,8 +393,6 @@ impl App {
     #[cfg(test)]
     pub fn for_test(cc: &eframe::CreationContext<'_>) -> Self {
         style(&cc.egui_ctx, Look::default());
-        // `style` installs the fonts once per process, so every test context but the first would draw with egui's defaults and panic on glyphs such as the check mark.
-        cc.egui_ctx.set_fonts(crate::ui::theme::fonts(false));
         let mut app = Self::blank(cc, false, false, None);
         app.ephemeral = true;
         // A save runs on the click alone, and no timer-driven save can change the draft under a test.

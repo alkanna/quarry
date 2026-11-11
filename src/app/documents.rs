@@ -495,7 +495,8 @@ impl App {
                     self.export();
                 }
                 if quiet(ui, "+ Insert").clicked() {
-                    self.insert = Some("{\n  \n}".into());
+                    let open = |a: &mut App| a.insert = Some("{\n  \n}".into());
+                    if self.sel_writable() { open(self) } else { self.ask_unlock_then(open) }
                 }
                 vsep(ui, 4.0);
                 if icon_button(ui, "⟳", true).on_hover_text("Reload (Cmd+R)").clicked() {
@@ -737,6 +738,11 @@ impl App {
         }
         if self.t().is_some_and(|t| t.sql.is_some()) {
             return self.sql_docs_act(ctx, act, docs);
+        }
+        // Asked before the dialog opens, like an inline edit, rather than refused after the user confirmed it.
+        if matches!(act, DocsAct::Duplicate | DocsAct::Delete) && !self.sel_writable() {
+            let ctx = ctx.clone();
+            return self.ask_unlock_then(move |a| a.docs_act(&ctx, act, docs));
         }
         let what = if docs.len() == 1 { "1 document".to_string() } else { format!("{} documents", docs.len()) };
         let value = || if docs.len() == 1 { Bson::Document(docs[0].clone()) } else { Bson::Array(docs.iter().cloned().map(Bson::Document).collect()) };

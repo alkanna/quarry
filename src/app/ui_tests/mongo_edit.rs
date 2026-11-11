@@ -52,17 +52,6 @@ fn open(f: &Fixture) -> UiApp {
 }
 
 impl UiApp {
-    /// Double-clicks a cell. Both clicks go into one frame: a kittest step lasts 250 ms of egui time, longer than egui's double click delay.
-    fn double_click_cell(&mut self, col: &str, row: usize) {
-        self.show(&format!("{col} row {row}"));
-        let at = self.cell(col, row).rect().center();
-        self.h.hover_at(at);
-        self.h.step();
-        let press = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
-        self.h.input_mut().events.extend([press(true), press(false), press(true), press(false)]);
-        self.h.step();
-    }
-
     /// Opens the inline editor of a cell, replaces its text and commits with Enter, which stages the edit.
     fn mongo_edit_cell(&mut self, col: &str, row: usize, text: &str) {
         self.double_click_cell(col, row);
@@ -94,10 +83,8 @@ impl UiApp {
     fn undo_latest(&mut self) {
         let before = self.app().undo.len();
         self.click(&format!("Undo ({before})"));
-        self.show("Recent changes");
-        // A toast for the last write has Undo and Close buttons of its own, so the dialog's are the ones nearest its title.
-        self.click_near("Undo", "Recent changes");
-        self.settle();
+        self.click("Undo change 1");
+        // A toast for the last write may still show a Close button of its own, so the dialog's is the one nearest its title.
         self.click_near("Close", "Recent changes");
     }
 
@@ -295,26 +282,31 @@ fn locked_connection_asks_before_adding_a_field() {
 }
 
 #[test]
-fn locked_connection_refuses_to_delete() {
+fn locked_connection_asks_before_deleting() {
     let Some(f) = Fixture::new("locked_del", seed()) else { return };
     let mut ui = open(&f);
     ui.check_row(2);
-    ui.delete_checked();
-    ui.show("Unlock writes");
-    assert!(ui.app().last_problem().contains("read-only"), "{}", ui.app().last_problem());
+    ui.click("Delete…");
+    ui.show("Stay read-only");
+    assert!(!matches!(ui.app().modal, Some(Modal::Delete(..))));
+    ui.click("Stay read-only");
+    assert!(ui.app().modal.is_none() && !ui.app().conn(CONN).unwrap().writable);
     assert_eq!(f.all(), seed());
 }
 
 #[test]
-fn locked_connection_refuses_to_insert() {
+fn locked_connection_asks_before_inserting() {
     let Some(f) = Fixture::new("locked_ins", seed()) else { return };
     let mut ui = open(&f);
     ui.click("+ Insert");
+    ui.show("Stay read-only");
+    assert!(ui.app().insert.is_none());
+    ui.click("Stay read-only");
+    assert!(ui.app().modal.is_none() && ui.app().insert.is_none() && !ui.app().conn(CONN).unwrap().writable);
+    // Allowing writes carries on to the insert dialog the click asked for.
+    ui.click("+ Insert");
+    ui.click("Allow writes");
     ui.show("Insert a document");
-    ui.focus_insert_editor();
-    ui.type_over("{ _id: 10, name: \"delta\" }");
-    ui.click("Insert");
-    ui.show("Unlock writes");
-    assert!(ui.app().last_problem().contains("read-only"), "{}", ui.app().last_problem());
+    assert!(ui.app().conn(CONN).unwrap().writable);
     assert_eq!(f.all(), seed());
 }
