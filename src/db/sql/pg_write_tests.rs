@@ -442,7 +442,7 @@ fn an_export_without_startup_options_still_cannot_write() {
             let mut c = super::exec::Conn::Pg(sqlx::PgConnection::connect_with(&o).await.unwrap());
             let plan = super::export::Plan { fmt: crate::db::copy::Fmt::Csv, header: true, table: "t".into(), bs: false };
             let mut out = Vec::new();
-            let r = super::export::stream_locked(&mut c, Dialect::Postgres, "SET LOCAL statement_timeout = 0", "INSERT INTO t5f_pool.t VALUES (1) RETURNING id", &plan, &mut out, &Default::default(), &Default::default(), &Default::default()).await;
+            let r = super::export::stream_locked(&mut c, &l.db, "SET LOCAL statement_timeout = 0", "INSERT INTO t5f_pool.t VALUES (1) RETURNING id", &plan, &mut out, &Default::default(), &Default::default(), &Default::default()).await;
             let _ = c.close().await;
             r
         });

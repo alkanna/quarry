@@ -380,11 +380,6 @@ pub(super) async fn writer_conn(db: &Db, schema: &str, read_only: bool) -> Res<C
     Ok(c)
 }
 
-/// `writer_conn` for the modules that only exist for MySQL, which hold sqlx's own connection.
-pub(super) async fn writer(db: &Db, schema: &str, read_only: bool) -> Res<sqlx::MySqlConnection> {
-    writer_conn(db, schema, read_only).await?.into_my()
-}
-
 pub(super) use super::exec::bound;
 
 fn pk_of(row: &Document) -> Document {

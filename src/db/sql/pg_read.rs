@@ -4,10 +4,10 @@
 use super::se;
 use super::exec::{col_infos, Cells, ColInfo, SqlRow};
 use super::{Db, Dialect, Pool};
-use crate::db::{e, Msg, Res, Worker};
+use crate::db::{Msg, Res, Worker};
 use futures_util::stream::BoxStream;
 use futures_util::StreamExt;
-use sqlx::postgres::{PgConnection, PgDatabaseError, PgErrorPosition, PgPool, PgQueryResult, PgRow};
+use sqlx::postgres::{PgConnection, PgQueryResult, PgRow};
 use sqlx::{raw_sql, Connection, Either, Executor};
 use std::time::Instant;
 
@@ -21,47 +21,42 @@ fn rows_of<'c>(c: &'c mut PgConnection, sql: &'c str) -> BoxStream<'c, Result<Ei
 /// alone would not hold against `set_config('default_transaction_read_only', 'off', false)`, which a pooled session
 /// would keep for the next statement, and a `client_encoding` change would make the server split the next statement
 /// differently from the lexer. The rollback undoes both, and it is per statement, so no statement is ever parsed under
-/// a setting an earlier one of the user's made. `before` runs first inside the same transaction, for a `SET LOCAL`.
+/// a setting an earlier one of the user's made. `extra` is a `SET LOCAL` run in the same transaction (see `begin_sql`).
 ///
 /// A session advisory lock or a dblink connection opened by a function the user calls survives the rollback, and even
 /// DISCARD ALL does not close a named dblink connection. So when the statement carries text the user typed
 /// (`user_text`) the connection is closed instead of going back to the pool. Statements Quarry built itself keep the
 /// cheap path.
-pub(super) async fn read_only(pool: &PgPool, user_text: bool, before: &str, sql: &str) -> Result<Vec<PgRow>, sqlx::Error> {
-    let mut conn = pool.acquire().await?;
-    let res = {
-        // The transaction rolls back when it is dropped, so a future that is cancelled midway leaves nothing open either.
-        let mut tx = conn.begin_with("BEGIN READ ONLY").await?;
+pub(super) async fn read_only(db: &Db, user_text: bool, extra: &str, sql: &str) -> Result<Vec<PgRow>, sqlx::Error> {
+    let mut conn = db.pg_pool().map_err(sqlx::Error::Protocol)?.acquire().await?;
+    let res = in_read_only(&mut conn, db, extra, async |tx| {
         let mut rows = Vec::new();
-        let mut failed = None;
-        if !before.is_empty() {
-            if let Err(x) = tx.execute(before).await {
-                failed = Some(x);
+        let mut s = rows_of(tx, sql);
+        while let Some(item) = s.next().await {
+            if let Either::Right(r) = item? {
+                rows.push(r);
             }
         }
-        if failed.is_none() {
-            let mut s = rows_of(&mut tx, sql);
-            while let Some(item) = s.next().await {
-                match item {
-                    Ok(Either::Right(r)) => rows.push(r),
-                    Ok(Either::Left(_)) => {}
-                    Err(x) => {
-                        failed = Some(x);
-                        break;
-                    }
-                }
-            }
-        }
-        let _ = tx.rollback().await;
-        match failed {
-            Some(x) => Err(x),
-            None => Ok(rows),
-        }
-    };
-    if user_text {
+        Ok(rows)
+    })
+    .await;
+    if user_text || res.is_err() {
         conn.close_on_drop();
     }
     res
+}
+
+/// Runs `work` inside a `BEGIN READ ONLY` that is always rolled back. The transaction rolls back when it is dropped, so a
+/// future that is cancelled midway leaves nothing open either. A ROLLBACK that fails is returned as the error when the
+/// work succeeded: the connection may then still sit inside the transaction, so the caller must close it, never reuse it.
+pub(super) async fn in_read_only<T>(conn: &mut PgConnection, db: &Db, extra: &str, work: impl AsyncFnOnce(&mut PgConnection) -> Result<T, sqlx::Error>) -> Result<T, sqlx::Error> {
+    let mut tx = conn.begin_with(db.pg_begin("BEGIN READ ONLY", extra)).await?;
+    let res = work(&mut *tx).await;
+    let end = tx.rollback().await;
+    match res {
+        Ok(v) => end.map(|_| v),
+        Err(x) => Err(x),
+    }
 }
 
 /// Points the script's session at the tab's schema. Bound, never spliced, and run by Quarry before any user text; the
@@ -75,35 +70,41 @@ pub(super) async fn set_search_path(c: &mut PgConnection, schema: &str) -> Resul
     Ok(())
 }
 
-/// The session's statement_timeout as the server spells it ("0", "30s"), to be applied again with SET LOCAL inside
-/// each transaction. A pooler in transaction mode can hand the next statement to another backend, so a session value
-/// alone would not hold there.
-pub(super) async fn statement_timeout(c: &mut PgConnection) -> Result<String, sqlx::Error> {
-    let rows = c.fetch_all("SELECT current_setting('statement_timeout')").await?;
-    use super::exec::Cells;
-    Ok(rows.first().and_then(|r| r.cell(0)).map(|b| String::from_utf8_lossy(b).into_owned()).filter(|v| v.chars().all(|c| c.is_ascii_alphanumeric())).unwrap_or_else(|| "0".into()))
+impl Db {
+    /// The text that opens a transaction of Quarry's, all in one message: the BEGIN, the session's statement timeout as
+    /// SET LOCAL, the settings a pooler that refused startup options leaves to each transaction, and `extra` (the
+    /// per-run `pg_run_locals`). A pooler can hand the next statement to another backend, so none of these can be a
+    /// session value there. The pooler's settings come before `extra` and after the timeout so they win over it. The
+    /// user's own statement is never part of this text; it goes alone in the message that follows.
+    pub(super) fn pg_begin(&self, begin: &str, extra: &str) -> String {
+        let (timeout, locals) = match &self.pool {
+            Pool::Pg(p) => (p.timeout(), p.locals()),
+            Pool::My(_) => ("0", ""),
+        };
+        let mut sql = format!("{begin}; {}", super::pg::set_timeout(timeout));
+        for part in [locals, extra].into_iter().filter(|p| !p.is_empty()) {
+            sql.push_str("; ");
+            sql.push_str(part);
+        }
+        sql
+    }
 }
 
-/// Opens the transaction a locked statement runs in. When a setting cannot be applied the transaction is rolled back
-/// at once, so the connection is never left inside one. `locals` (`Db::pg_locals`) comes last so that behind a pooler,
-/// where the session has none of Quarry's settings, its timeout and output formats win over the session's.
-pub(super) async fn begin_read_only(c: &mut PgConnection, timeout: &str, locals: &str) -> Result<(), sqlx::Error> {
-    begin_with(c, "BEGIN READ ONLY", timeout, locals).await
+/// Opens the transaction a locked statement runs in, for a caller that cannot hand its work to `in_read_only` (a result
+/// that streams to a file). When a setting cannot be applied the transaction is rolled back at once, so the connection
+/// is never left inside one.
+pub(super) async fn begin_read_only(c: &mut PgConnection, db: &Db, extra: &str) -> Result<(), sqlx::Error> {
+    begin_with(c, db.pg_begin("BEGIN READ ONLY", extra)).await
 }
 
 /// The transaction of one unlocked statement behind a pooler: `READ WRITE` stated in the transaction itself, because
 /// the session cannot be changed there and its default may be read-only on the backend that answers.
-pub(super) async fn begin_read_write(c: &mut PgConnection, timeout: &str, locals: &str) -> Result<(), sqlx::Error> {
-    begin_with(c, "BEGIN READ WRITE", timeout, locals).await
+pub(super) async fn begin_read_write(c: &mut PgConnection, db: &Db, extra: &str) -> Result<(), sqlx::Error> {
+    begin_with(c, db.pg_begin("BEGIN READ WRITE", extra)).await
 }
 
-async fn begin_with(c: &mut PgConnection, begin: &str, timeout: &str, locals: &str) -> Result<(), sqlx::Error> {
-    c.execute(begin).await?;
-    let mut set = c.execute(format!("SET LOCAL statement_timeout = '{timeout}'").as_str()).await.map(|_| ());
-    if set.is_ok() && !locals.is_empty() {
-        set = c.execute(locals).await.map(|_| ());
-    }
-    if let Err(x) = set {
+async fn begin_with(c: &mut PgConnection, sql: String) -> Result<(), sqlx::Error> {
+    if let Err(x) = c.execute(sql.as_str()).await {
         let _ = c.execute("ROLLBACK").await;
         return Err(x);
     }
@@ -115,29 +116,6 @@ async fn begin_with(c: &mut PgConnection, begin: &str, timeout: &str, locals: &s
 pub(super) const PAGE_PREFIX: usize = 16;
 /// The same for `lex::count_sql`.
 pub(super) const COUNT_PREFIX: usize = 23;
-
-/// A server error worded for `db::explain`: the SQLSTATE, the message, the detail and hint when the server sends
-/// them, and where in the user's statement it points. `shift` is how many characters were put in front of the
-/// statement. Anything that is not a PostgreSQL error keeps the plain wording.
-pub(super) fn pg_error(err: &sqlx::Error, stmt: &str, shift: usize) -> String {
-    let Some(d) = err.as_database_error().and_then(|d| d.try_downcast_ref::<PgDatabaseError>()) else { return e(err) };
-    let mut out = format!("error returned from database: {}: {}", d.code(), d.message());
-    if let Some(x) = d.detail() {
-        out.push_str(&format!("\nDetail: {x}"));
-    }
-    if let Some(x) = d.hint() {
-        out.push_str(&format!("\nHint: {x}"));
-    }
-    if let Some(PgErrorPosition::Original(p)) = d.position() {
-        // The server counts characters from 1.
-        if p > shift {
-            let at = p - shift;
-            let (line, col) = stmt.chars().take(at - 1).fold((1, 1), |(l, c), ch| if ch == '\n' { (l + 1, 1) } else { (l, c + 1) });
-            out.push_str(&format!("\nPosition: {at} (line {line}, column {col})"));
-        }
-    }
-    out
-}
 
 impl Db {
     /// Text of the user's own (the Content filter and sort) as a read: on MySQL on the pool, on PostgreSQL in the
@@ -153,11 +131,7 @@ impl Db {
         let t = Instant::now();
         let res = match &self.pool {
             Pool::My(p) => raw_sql(sql).fetch_all(p).await.map(SqlRow::wrap),
-            Pool::Pg(p) => {
-                // Behind a pooler the settings are SET LOCAL in the transaction itself.
-                let first = [p.locals(), before].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("; ");
-                read_only(&self.pg_pool()?, user_text, &first, sql).await.map(SqlRow::wrap_pg)
-            }
+            Pool::Pg(_) => read_only(self, user_text, before, sql).await.map(SqlRow::wrap_pg),
         };
         self.note(schema, sql, t, &res);
         res.map_err(se)
@@ -172,15 +146,9 @@ impl Db {
                 // Planning with EXPLAIN can evaluate STABLE and IMMUTABLE functions of the text, so it runs inside a
                 // read-only transaction that is rolled back, like every other statement that carries user text.
                 let mut conn = self.pg_pool()?.acquire().await.map_err(se)?;
-                let mut tx = conn.begin_with("BEGIN READ ONLY").await.map_err(se)?;
-                let locals = self.pg_locals();
-                let d = match if locals.is_empty() { Ok(()) } else { (&mut *tx).execute(locals.as_str()).await.map(|_| ()) } {
-                    Ok(()) => (&mut *tx).describe(sql).await.map_err(se),
-                    Err(x) => Err(se(x)),
-                };
-                let _ = tx.rollback().await;
+                let d = in_read_only(&mut conn, self, "", async |tx| tx.describe(sql).await).await;
                 conn.close_on_drop();
-                Ok(col_infos(d?.columns(), true))
+                Ok(col_infos(d.map_err(se)?.columns(), true))
             }
         }
     }
@@ -209,7 +177,7 @@ impl Worker {
                 let at = db.at(&database);
                 let t = Instant::now();
                 let sql = Dialect::Postgres.schemas_all();
-                let rows = read_only(&at.pg_pool()?, false, &at.pg_locals(), sql).await.map(SqlRow::wrap_pg);
+                let rows = read_only(&at, false, "", sql).await.map(SqlRow::wrap_pg);
                 at.note(&database, sql, t, &rows);
                 let mut list: Vec<PgSchema> = rows
                     .map_err(se)?

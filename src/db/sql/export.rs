@@ -102,7 +102,7 @@ pub async fn stream(db: &Db, schema: &str, stmt: &str, plan: &Plan, out: &mut (d
     // All rows means all of them, and the file is written as UTF-8 from what the server sends.
     pin_reads(&mut conn).await?;
     let t = std::time::Instant::now();
-    let r = stream_locked(&mut conn, db.dialect, &db.pg_run_locals(schema), stmt, plan, out, count, cancel, &Wrap::default()).await;
+    let r = stream_locked(&mut conn, db, &db.pg_run_locals(schema), stmt, plan, out, count, cancel, &Wrap::default()).await;
     db.note(schema, stmt, t, &r);
     // A cancelled or failed read leaves its result on the wire inside a transaction, so the connection is closed, not drained.
     let failed = r.is_err() && db.dialect == Dialect::Postgres;
@@ -120,15 +120,14 @@ pub async fn stream(db: &Db, schema: &str, stmt: &str, plan: &Plan, out: &mut (d
 }
 
 /// `stream_conn` for a user statement. On PostgreSQL the statement runs alone in `BEGIN READ ONLY` with the session's
-/// timeout and `locals` (`Db::pg_locals`, which behind a pooler is the only place its settings come from), and the
+/// timeout and the settings of `Db::pg_begin` (which behind a pooler are the only place its settings come from), and the
 /// transaction is always rolled back and never committed, like a Custom Query statement. A transaction that is not
 /// rolled back here is cut off, so the caller must close the connection when this fails.
-pub(super) async fn stream_locked(conn: &mut Conn, dialect: super::Dialect, locals: &str, stmt: &str, plan: &Plan, out: &mut (dyn Write + Send), count: &AtomicU64, cancel: &AtomicBool, wrap: &Wrap<'_>) -> Res<Option<(u64, usize)>> {
+pub(super) async fn stream_locked(conn: &mut Conn, db: &Db, locals: &str, stmt: &str, plan: &Plan, out: &mut (dyn Write + Send), count: &AtomicU64, cancel: &AtomicBool, wrap: &Wrap<'_>) -> Res<Option<(u64, usize)>> {
     if let Conn::Pg(c) = conn {
-        let timeout = super::pg_read::statement_timeout(c).await.map_err(se)?;
-        super::pg_read::begin_read_only(c, &timeout, locals).await.map_err(|x| super::pg_read::pg_error(&x, stmt, 0))?;
+        super::pg_read::begin_read_only(c, db, locals).await.map_err(|x| super::se_at(&x, stmt, 0))?;
     }
-    let r = stream_conn(conn, dialect, stmt, plan, out, count, cancel, wrap).await;
+    let r = stream_conn(conn, db.dialect, stmt, plan, out, count, cancel, wrap).await;
     if r.is_ok() {
         if let Conn::Pg(c) = conn {
             sqlx::Executor::execute(&mut *c, "ROLLBACK").await.map_err(se)?;
@@ -402,7 +401,7 @@ pub(super) async fn run_all(db: &Db, schema: &str, stmts: &[String], ap: &AllPla
         let out: &mut Lazy = if ap.single { &mut shared } else { &mut own };
         *open = Some(out.tmp.clone());
         let t = std::time::Instant::now();
-        let streamed = stream_locked(&mut conn, db.dialect, &db.pg_run_locals(schema), stmt, &ap.plan, out, count, cancel, &wrap).await;
+        let streamed = stream_locked(&mut conn, db, &db.pg_run_locals(schema), stmt, &ap.plan, out, count, cancel, &wrap).await;
         db.note(schema, stmt, t, &streamed);
         if streamed.is_err() && db.dialect == Dialect::Postgres {
             let _ = conn.close().await;

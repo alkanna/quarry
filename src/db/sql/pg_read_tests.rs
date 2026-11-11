@@ -113,7 +113,7 @@ fn user_text_cannot_leave_the_session_writable_or_change_how_the_next_statement_
         // Statement A turns the guard off for the session and changes the client encoding. The pooled connection
         // goes back (user_text false) and its next statement still sees both as they were.
         let a = "SELECT set_config('default_transaction_read_only', 'off', false), set_config('client_encoding', 'SJIS', false)";
-        let rows = l.w.rt.block_on(read_only(&pool, false, "", a)).unwrap();
+        let rows = l.w.rt.block_on(read_only(&db, false, "", a)).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(show("default_transaction_read_only"), "on", "{var}");
         assert_eq!(show("client_encoding"), "UTF8", "{var}");
@@ -130,7 +130,7 @@ fn user_text_cannot_leave_the_session_writable_or_change_how_the_next_statement_
         let _ = l.rx.recv_timeout(std::time::Duration::from_secs(3));
         assert_eq!(show("default_transaction_read_only"), "on", "{var}");
         // A write is refused inside the transaction as well.
-        let err = l.w.rt.block_on(read_only(&pool, false, "", "DELETE FROM t4_ro.t")).unwrap_err();
+        let err = l.w.rt.block_on(read_only(&db, false, "", "DELETE FROM t4_ro.t")).unwrap_err();
         assert_eq!(code(&err).as_deref(), Some("25006"), "{var}");
     });
 }
@@ -156,7 +156,7 @@ fn a_connection_that_ran_user_text_does_not_go_back_to_the_pool() {
         assert_eq!(locks(), "0", "{var}: the lock outlived the connection");
         // Closed, not returned: the backend that ran user text is gone, and one that ran Quarry's own SQL stays.
         let pid_of = |user_text: bool| {
-            let rows = l.w.rt.block_on(read_only(&pool, user_text, "", "SELECT pg_backend_pid()::text, t4_lock.grab()::text")).unwrap();
+            let rows = l.w.rt.block_on(read_only(&db, user_text, "", "SELECT pg_backend_pid()::text, t4_lock.grab()::text")).unwrap();
             crate::db::sql::worker::text_at(&rows[0], 0).unwrap()
         };
         let alive = |pid: &str| l.qone(&p, &format!("SELECT count(*)::text FROM pg_stat_activity WHERE pid = {pid}"));

@@ -9,8 +9,9 @@ use super::export::Done;
 use super::import::{JobDone, Progress};
 use super::lex::{self, Piece, ScriptSplitter};
 use super::value::Kind;
-use super::worker::{make_cols, pin_reads, prepare, raw, text, text_at, num_at, to_row};
-use super::write::writer;
+use super::worker::{make_cols, pin_reads, raw, text, text_at, num_at, to_row};
+use super::write::writer_conn;
+use super::exec::Conn;
 use super::{Db, Dialect};
 use crate::db::copy::{CopyCol, Fmt, Writer};
 use crate::db::{e, Msg, Res, Worker};
@@ -240,8 +241,9 @@ fn delimited(sql_mode: Option<&str>, stmt: &str) -> String {
 /// Runs the whole dump on a read-only connection of its own.
 pub async fn dump(db: &Db, plan: &DumpPlan, out: &mut (dyn Write + Send), count: &AtomicU64, cancel: &AtomicBool, id: &AtomicU64) -> Res<u64> {
     let d = db.dialect;
-    let mut c = db.acquire().await?.detach();
-    prepare(&mut c, d, &plan.schema, true, id).await.map_err(se)?;
+    let mut conn = Conn::My(db.acquire().await?.detach());
+    super::run::prepare(&mut conn, db, &plan.schema, true, id).await?;
+    let mut c = conn.into_my()?;
     // The file says SET NAMES utf8mb4, so the values must be read as UTF-8, and every row of them.
     pin_reads(&mut c).await.map_err(se)?;
     // The statement timeout of the pool would cut the read of a big table short.
@@ -391,7 +393,7 @@ pub struct Ran {
 /// with one owned connection: split in two, the compiler cannot prove the future is Send inside a spawned task.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_file(db: Db, schema: String, src: Source, read_only: bool, prog: Arc<Progress>, cancel: Arc<AtomicBool>, id: Arc<AtomicU64>) -> Res<Ran> {
-    let mut c = writer(&db, &schema, read_only).await?;
+    let mut c = writer_conn(&db, &schema, read_only).await?.into_my()?;
     if let Ok(r) = c.fetch_one("SELECT CONNECTION_ID()").await {
         id.store(num_at(&r, 0).unwrap_or(0), Ordering::SeqCst);
     }

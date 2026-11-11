@@ -1530,7 +1530,7 @@ fn definer_note(err: String, definer: Option<&str>) -> String {
 /// A writable connection whose session reads text the way the statements were written for. When the server's
 /// sql_mode changed since, nothing runs and the error carries the mode now in force.
 pub(super) async fn session(db: &Db, schema: &str, read_only: bool, m: Mode) -> Result<sqlx::MySqlConnection, (String, Option<String>)> {
-    let mut c = super::write::writer(db, schema, read_only).await.map_err(|x| (x, None))?;
+    let mut c = super::write::writer_conn(db, schema, read_only).await.and_then(|c| c.into_my()).map_err(|x| (x, None))?;
     let now = session_sql_mode(&mut c).await.map_err(|x| (x, None))?;
     if Mode::of(&now) != m {
         return Err((format!("Nothing ran: the server's sql_mode is now {now:?}, which reads quotes or backslashes differently from when the statement was written."), Some(now)));
@@ -1565,7 +1565,7 @@ pub(super) async fn undo(db: &Db, a: UndoAction, u: AlterUndo, read_only: bool) 
         if let Some((what, _)) = u.expect.iter().zip(&now).find(|(a, b)| a != b).map(|(a, _)| a) {
             return Err(format!("Undo refused: {what} changed after this change ran, so undoing it now would not put the table back."));
         }
-        let mut c = super::write::writer(db, &schema, read_only).await?;
+        let mut c = super::write::writer_conn(db, &schema, read_only).await?.into_my()?;
         let mode = session_sql_mode(&mut c).await?;
         let m = Mode::of(&mode);
         // The steps were written for the mode of the change. A session that reads quotes or backslashes another
@@ -1783,7 +1783,7 @@ async fn trigger_job(db: &Db, schema: &str, table: &str, job: &TrigJob, m: Mode,
 /// where a previous undo stopped halfway, so it never overwrites a newer change; done twice it changes nothing.
 async fn undo_trigger_job(db: &Db, schema: &str, table: &str, u: &TrigUndo, read_only: bool) -> Res<String> {
     let d = db.dialect;
-    let mut c = super::write::writer(db, schema, read_only).await?;
+    let mut c = super::write::writer_conn(db, schema, read_only).await?.into_my()?;
     let all = super::structure::triggers_on(&mut c, d, schema, table).await?;
     let live = find(&all, &u.name).cloned();
     let refused = format!("Undo refused: the trigger {} changed after this change ran, so undoing it now would overwrite that. Undo it by hand.", u.name);

@@ -4,50 +4,44 @@ use super::se;
 use super::exec::{Conn, Item};
 use super::worker::{make_cols, num_at, to_row};
 use super::{lex, Col, Db, Dialect, Page, ResultSet, RUN_ROWS_MAX};
-use crate::db::{e, Res};
+use crate::db::Res;
 use sqlx::Executor;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Readies the script's own connection: its id for Stop, the database, and write access when unlocked.
-pub(super) async fn prepare(conn: &mut Conn, db: &Db, schema: &str, read_only: bool, id: &AtomicU64) -> Res<()> {
-    prepare_as(conn, db, schema, read_only, id, None).await.map(|_| ())
-}
-
-/// `prepare` with the pooler mode stated (`Db::pooler`) instead of read off the session. Returns whether the
-/// connection is behind a pooler, where nothing is set on the session: the schema is a `SET LOCAL search_path` of
-/// every transaction (`Db::pg_run_locals`) and write access a `BEGIN READ WRITE` of every statement.
-pub(super) async fn prepare_as(conn: &mut Conn, db: &Db, schema: &str, read_only: bool, id: &AtomicU64, pooled: Option<bool>) -> Res<bool> {
-    if let Conn::Pg(c) = conn {
+/// Readies the script's own connection: its id for Stop, the database, and write access when unlocked. Returns whether
+/// the connection is behind a pooler (`Db::pooler`), where nothing is set on the session: the schema is a
+/// `SET LOCAL search_path` of every transaction (`Db::pg_run_locals`) and write access a `BEGIN READ WRITE` of every
+/// statement.
+pub(super) async fn prepare(conn: &mut Conn, db: &Db, schema: &str, read_only: bool, id: &AtomicU64) -> Res<bool> {
+    let pooled = db.pooler();
+    match conn {
         // No USE: the database is the pool's, and the schema comes in as the search_path.
-        let pooled = super::pg::prepare(c, read_only, id, pooled, db).await.map_err(se)?;
-        if !pooled {
-            super::pg_read::set_search_path(c, schema).await.map_err(se)?;
+        Conn::Pg(c) => {
+            super::pg::prepare(c, read_only, id, db).await.map_err(se)?;
+            if !pooled {
+                super::pg_read::set_search_path(c, schema).await.map_err(se)?;
+            }
         }
-        return Ok(pooled);
+        Conn::My(c) => {
+            if let Ok(r) = c.fetch_one("SELECT CONNECTION_ID()").await {
+                id.store(num_at(&r, 0).unwrap_or(0), Ordering::SeqCst);
+            }
+            // With autocommit 0 from the server's globals, every write of the script is rolled back when the connection
+            // closes, and reads keep a snapshot and metadata locks. The script can still turn it off itself.
+            c.execute("SET SESSION autocommit = 1").await.map_err(se)?;
+            if !schema.is_empty() {
+                let q = format!("USE {}", db.dialect.quote_ident(schema));
+                c.execute(q.as_str()).await.map_err(se)?;
+            }
+            if !read_only {
+                c.execute(db.dialect.session_read_only(false)).await.map_err(se)?;
+            }
+        }
     }
-    prepare_my(conn.my()?, db.dialect, schema, read_only, id).await.map_err(se)?;
-    Ok(false)
-}
-
-/// `prepare` for the MySQL-only modules, which hold sqlx's own connection.
-pub(super) async fn prepare_my(conn: &mut sqlx::MySqlConnection, d: Dialect, schema: &str, read_only: bool, id: &AtomicU64) -> Result<(), sqlx::Error> {
-    if let Ok(r) = conn.fetch_one("SELECT CONNECTION_ID()").await {
-        id.store(num_at(&r, 0).unwrap_or(0), Ordering::SeqCst);
-    }
-    // With autocommit 0 from the server's globals, every write of the script is rolled back when the connection
-    // closes, and reads keep a snapshot and metadata locks. The script can still turn it off itself.
-    conn.execute("SET SESSION autocommit = 1").await?;
-    if !schema.is_empty() {
-        let q = format!("USE {}", d.quote_ident(schema));
-        conn.execute(q.as_str()).await?;
-    }
-    if !read_only {
-        conn.execute(d.session_read_only(false)).await?;
-    }
-    Ok(())
+    Ok(pooled)
 }
 
 /// Pins what a read of every row as stored depends on: UTF-8 both ways, and no sql_select_limit cutting a SELECT
@@ -84,7 +78,6 @@ pub(super) async fn run_one(conn: &mut Conn, stmt: &str, cap: usize) -> Vec<Resu
 /// transaction can finish. Also gives the code of the failure: the MySQL error number or the PostgreSQL SQLSTATE.
 async fn run_sent(conn: &mut Conn, stmt: &str, sent: &str, cap: usize, shift: usize, drain: bool) -> (Vec<ResultSet>, Option<String>) {
     let mut code = None;
-    let pg = matches!(conn, Conn::Pg(_));
     let t = Instant::now();
     let mut sets: Vec<ResultSet> = Vec::new();
     let mut cur = ResultSet::new(stmt);
@@ -128,7 +121,7 @@ async fn run_sent(conn: &mut Conn, stmt: &str, sent: &str, cap: usize, shift: us
                         Some(m) => Some(m.number().to_string()),
                         None => d.code().map(|c| c.to_string()),
                     });
-                    failure = Some(if pg { super::pg_read::pg_error(&err, stmt, shift) } else { e(err) });
+                    failure = Some(super::se_at(&err, stmt, shift));
                     break;
                 }
             }
@@ -207,25 +200,11 @@ pub(super) async fn run(db: &Db, schema: &str, text: &str, read_only: bool, id: 
     };
     let d = db.dialect;
     // Behind a pooler nothing is set on the session, so the schema travels in the locals of every transaction.
-    let (pooler, locals) = (db.pooler(), db.pg_run_locals(schema));
-    if let Err(err) = prepare_as(&mut conn, db, schema, read_only, id, Some(pooler)).await {
-        return vec![failed("", err)];
-    }
-    // PostgreSQL: the timeout the session got at startup, kept to be applied again where a session value would not hold.
-    let mut timeout = String::new();
-    if let Conn::Pg(c) = &mut conn {
-        timeout = match super::pg_read::statement_timeout(c).await {
-            Ok(t) => t,
-            Err(err) => return vec![failed("", e(err))],
-        };
-        // An unlocked session runs as typed, so its limit is set once here and holds for every statement. Behind a
-        // pooler a session value would leak, so each transaction sets it itself.
-        if !read_only && !pooler {
-            if let Err(err) = c.execute(format!("SET statement_timeout = '{timeout}'").as_str()).await {
-                return vec![failed("", e(err))];
-            }
-        }
-    }
+    let locals = db.pg_run_locals(schema);
+    let pooler = match prepare(&mut conn, db, schema, read_only, id).await {
+        Ok(p) => p,
+        Err(err) => return vec![failed("", err)],
+    };
     let mut sets = Vec::new();
     // Each statement goes alone, so user text is never sent as one multi-statement string.
     let stmts = lex::split_statements(text, d);
@@ -255,7 +234,7 @@ pub(super) async fn run(db: &Db, schema: &str, text: &str, read_only: bool, id: 
             sets.push(failed(stmt, POOLER_SESSION.into()));
             break;
         }
-        let one = run_on(&mut conn, d, stmt, page, read_only, pooler, &timeout, &locals);
+        let one = run_on(&mut conn, db, stmt, page, read_only, &locals);
         let ran = if pooler {
             // No cancel by pid there: dropping the statement closes the connection, which ends its transaction, and
             // the server's statement_timeout bounds what it still does.
@@ -297,18 +276,18 @@ pub(super) async fn run(db: &Db, schema: &str, text: &str, read_only: bool, id: 
 
 /// One user statement on the script's connection, and why the script must end after it when the connection cannot be
 /// used again (a result cut at the row limit, or a transaction that would not end).
-#[allow(clippy::too_many_arguments)]
-async fn run_on(conn: &mut Conn, d: Dialect, stmt: &str, page: usize, read_only: bool, pooler: bool, timeout: &str, locals: &str) -> (Vec<ResultSet>, Option<&'static str>) {
+async fn run_on(conn: &mut Conn, db: &Db, stmt: &str, page: usize, read_only: bool, locals: &str) -> (Vec<ResultSet>, Option<&'static str>) {
+    let d = db.dialect;
     if d != Dialect::Postgres {
         let rs = run_stmt(conn, d, stmt, page).await;
         let stop = rs.last().is_some_and(|r| r.capped).then_some(CUT);
         return (rs, stop);
     }
     if read_only {
-        return run_locked(conn, d, stmt, page, timeout, locals).await;
+        return run_locked(conn, db, stmt, page, locals).await;
     }
-    if pooler {
-        return run_write_pooled(conn, stmt, timeout, locals).await;
+    if db.pooler() {
+        return run_write_pooled(conn, db, stmt, locals).await;
     }
     // Unlocked on a session of its own: as typed, with no paging or count wrapper that would change what the statement
     // does (a data-modifying CTE is refused inside one, and a side effect would run once per wrapper). A statement the
@@ -343,12 +322,12 @@ mod tests_hook {
 /// committed, so nothing it does to the session outlives it and it never shares a transaction with another statement.
 /// The paging wrapper and a read's count go through here too. The second value is why the script must end after the
 /// statement: its result was cut at the row limit, or the ROLLBACK failed, and the connection is then closed.
-pub(super) async fn run_locked(conn: &mut Conn, d: Dialect, stmt: &str, page: usize, timeout: &str, locals: &str) -> (Vec<ResultSet>, Option<&'static str>) {
-    let Conn::Pg(c) = conn else { return (run_stmt(conn, d, stmt, page).await, None) };
-    if let Err(err) = super::pg_read::begin_read_only(c, timeout, locals).await {
-        return (vec![failed(stmt, super::pg_read::pg_error(&err, stmt, 0))], None);
+pub(super) async fn run_locked(conn: &mut Conn, db: &Db, stmt: &str, page: usize, locals: &str) -> (Vec<ResultSet>, Option<&'static str>) {
+    let Conn::Pg(c) = conn else { return (run_stmt(conn, db.dialect, stmt, page).await, None) };
+    if let Err(err) = super::pg_read::begin_read_only(c, db, locals).await {
+        return (vec![failed(stmt, super::se_at(&err, stmt, 0))], None);
     }
-    let rs = run_stmt(conn, d, stmt, page).await;
+    let rs = run_stmt(conn, db.dialect, stmt, page).await;
     // A read cut at the row limit leaves the rest of the result on the wire. The script ends there and the
     // connection is closed, which ends the transaction without waiting for that result to drain.
     if rs.last().is_some_and(|r| r.capped) {
@@ -361,10 +340,10 @@ pub(super) async fn run_locked(conn: &mut Conn, d: Dialect, stmt: &str, page: us
 /// One unlocked statement behind a pooler, in a transaction of its own: `BEGIN READ WRITE`, the locals, the statement
 /// and COMMIT, or ROLLBACK when it failed. Nothing is set on the session, so no other client of the pooler sees it. The
 /// result is read to its end so the COMMIT can follow.
-async fn run_write_pooled(conn: &mut Conn, stmt: &str, timeout: &str, locals: &str) -> (Vec<ResultSet>, Option<&'static str>) {
+async fn run_write_pooled(conn: &mut Conn, db: &Db, stmt: &str, locals: &str) -> (Vec<ResultSet>, Option<&'static str>) {
     let Conn::Pg(c) = conn else { return (run_one(conn, stmt, RUN_ROWS_MAX).await, None) };
-    if let Err(err) = super::pg_read::begin_read_write(c, timeout, locals).await {
-        return (vec![failed(stmt, super::pg_read::pg_error(&err, stmt, 0))], None);
+    if let Err(err) = super::pg_read::begin_read_write(c, db, locals).await {
+        return (vec![failed(stmt, super::se_at(&err, stmt, 0))], None);
     }
     let mut rs = run_sent(conn, stmt, stmt, RUN_ROWS_MAX, 0, true).await.0;
     if rs.iter().any(|r| r.error.is_some()) {
@@ -373,7 +352,7 @@ async fn run_write_pooled(conn: &mut Conn, stmt: &str, timeout: &str, locals: &s
     }
     if let Err(x) = conn.execute("COMMIT").await {
         // A deferred constraint can fail here. The server has ended the transaction either way.
-        let msg = super::pg_read::pg_error(&x, stmt, 0);
+        let msg = super::se_at(&x, stmt, 0);
         match rs.last_mut() {
             Some(l) => l.error = Some(msg),
             None => rs.push(failed(stmt, msg)),
@@ -386,22 +365,16 @@ async fn run_write_pooled(conn: &mut Conn, stmt: &str, timeout: &str, locals: &s
 /// transaction like every other statement that carries user text.
 pub(super) async fn count_rows(db: &Db, schema: &str, stmt: &str) -> Res<u64> {
     let mut conn = db.acquire_conn().await?;
-    prepare_as(&mut conn, db, schema, true, &AtomicU64::new(0), Some(db.pooler())).await?;
+    prepare(&mut conn, db, schema, true, &AtomicU64::new(0)).await?;
     let sql = lex::count_sql(stmt);
     let t = Instant::now();
     let r = match &mut conn {
-        Conn::Pg(c) => {
-            let timeout = super::pg_read::statement_timeout(c).await.map_err(se)?;
-            super::pg_read::begin_read_only(c, &timeout, &db.pg_run_locals(schema)).await.map_err(|x| super::pg_read::pg_error(&x, &sql, 0))?;
-            let r = c.fetch_all(sql.as_str()).await.map(super::exec::SqlRow::wrap_pg);
-            // The connection is closed below whatever happens, so a failed ROLLBACK cannot reach another statement.
-            let _ = c.execute("ROLLBACK").await;
-            r
-        }
+        // The connection is closed below whatever happens, so a failed ROLLBACK cannot reach another statement.
+        Conn::Pg(c) => super::pg_read::in_read_only(c, db, &db.pg_run_locals(schema), async |c| c.fetch_all(sql.as_str()).await).await.map(super::exec::SqlRow::wrap_pg),
         c => c.fetch_all(&sql).await,
     };
     db.note(schema, &sql, t, &r);
-    let r = r.map_err(|x| if db.dialect == Dialect::Postgres { super::pg_read::pg_error(&x, stmt, super::pg_read::COUNT_PREFIX) } else { e(x) })?;
+    let r = r.map_err(|x| super::se_at(&x, stmt, super::pg_read::COUNT_PREFIX))?;
     let n = r.first().and_then(|r| num_at(r, 0)).ok_or("The count was not a number")?;
     let _ = conn.close().await;
     Ok(n)
@@ -413,17 +386,21 @@ pub(super) async fn side_conn(db: &Db, why: &str) -> Res<Conn> {
     tokio::time::timeout(Duration::from_secs(10), db.detached()).await.map_err(|_| why.to_string())?
 }
 
-/// KILL QUERY from a connection of its own. A plain function, because inside a spawned block the
-/// executor lifetimes of a local connection do not infer.
-pub(super) async fn kill_query(db: &Db, id: u64) -> Res<String> {
-    if db.dialect == Dialect::Postgres {
-        return super::pg::cancel(db, id).await;
+impl Db {
+    /// Interrupts the statement running on server connection `id` from a connection of its own (KILL QUERY on MySQL, a
+    /// cancel by pid on PostgreSQL, which behind a pooler cannot cancel and closes the script's connection instead).
+    /// A method with plain arguments, because inside a spawned block the executor lifetimes of a local connection do
+    /// not infer.
+    pub(super) async fn stop(&self, id: u64) -> Res<String> {
+        if self.dialect == Dialect::Postgres {
+            return super::pg::cancel(self, id).await;
+        }
+        let mut c = side_conn(self, "Could not reach the server to stop the statement").await?;
+        let q = self.dialect.cancel(id);
+        let r = c.execute(q.as_str()).await.map(|_| "Stopped the running statement".to_string()).map_err(|x| super::server::kill_error(&x));
+        let _ = c.close().await;
+        r
     }
-    let mut c = side_conn(db, "Could not reach the server to stop the statement").await?;
-    let q = db.dialect.cancel(id);
-    let r = c.execute(q.as_str()).await.map(|_| "Stopped the running statement".to_string()).map_err(|x| super::server::kill_error(&x));
-    let _ = c.close().await;
-    r
 }
 
 /// What Stop needs of a running Custom Query: the server connection id once it is known, and the flag
@@ -542,12 +519,11 @@ mod pg_tests {
     fn set_config_never_survives_to_the_next_statement() {
         every_pg(|l, var| {
             let (db, _p) = fixture(l, "t6_cfg", "CREATE TABLE t (id int);");
-            let d = Dialect::Postgres;
             l.w.rt.block_on(async {
                 let mut conn = db.acquire_conn().await.unwrap();
                 prepare(&mut conn, &db, "t6_cfg", true, &AtomicU64::new(0)).await.unwrap();
-                let Conn::Pg(c) = &mut conn else { unreachable!() };
-                let timeout = crate::db::sql::pg_read::statement_timeout(c).await.unwrap();
+                let crate::db::sql::Pool::Pg(pp) = &db.pool else { unreachable!() };
+                let timeout = pp.timeout().to_string();
                 // The lexer would refuse these; they are sent straight to layer 2, which must hold on its own.
                 for evil in [
                     "SELECT set_config('default_transaction_read_only', 'off', false)",
@@ -555,14 +531,14 @@ mod pg_tests {
                     "SELECT set_config('client_encoding', 'SJIS', false)",
                     "SELECT set_config('statement_timeout', '1', false)",
                 ] {
-                    let sets = run_locked(&mut conn, d, evil, 0, &timeout, "").await.0;
+                    let sets = run_locked(&mut conn, &db, evil, 0, "").await.0;
                     assert!(sets[0].error.is_none(), "{var}: {evil}: {:?}", sets[0].error);
                 }
-                let sets = run_locked(&mut conn, d, "SELECT current_setting('default_transaction_read_only') AS ro, current_setting('search_path') AS sp, current_setting('client_encoding') AS enc, current_setting('statement_timeout') AS st", 0, &timeout, "").await.0;
+                let sets = run_locked(&mut conn, &db, "SELECT current_setting('default_transaction_read_only') AS ro, current_setting('search_path') AS sp, current_setting('client_encoding') AS enc, current_setting('statement_timeout') AS st", 0, "").await.0;
                 assert_eq!((val(&sets[0], 0, "ro"), val(&sets[0], 0, "sp"), val(&sets[0], 0, "enc")), ("on".into(), "\"t6_cfg\"".into(), "UTF8".into()), "{var}");
                 assert_eq!(val(&sets[0], 0, "st"), timeout, "{var}");
                 // A write is refused by the server inside the transaction, whatever the lexer did.
-                let sets = run_locked(&mut conn, d, "INSERT INTO t VALUES (1)", 0, &timeout, "").await.0;
+                let sets = run_locked(&mut conn, &db, "INSERT INTO t VALUES (1)", 0, "").await.0;
                 assert!(sets[0].error.as_deref().unwrap().contains("25006"), "{var}: {:?}", sets[0].error);
                 let _ = conn.close().await;
             });
@@ -786,13 +762,11 @@ mod pg_tests {
 
     /// Runs `stmts` the way the pooler fallback does, on one connection that stays open, and gives it back so a test can
     /// look at the session the way the next client of that backend would.
-    fn pooled_conn(l: &LivePg, db: &Db, schema: &str, read_only: bool) -> (Conn, String, String) {
+    fn pooled_conn(l: &LivePg, db: &Db, schema: &str, read_only: bool) -> (Conn, String) {
         l.w.rt.block_on(async {
             let mut conn = db.acquire_conn().await.unwrap();
-            prepare_as(&mut conn, db, schema, read_only, &AtomicU64::new(0), Some(true)).await.unwrap();
-            let Conn::Pg(c) = &mut conn else { unreachable!() };
-            let timeout = crate::db::sql::pg_read::statement_timeout(c).await.unwrap();
-            (conn, timeout, db.pg_run_locals(schema))
+            assert!(prepare(&mut conn, db, schema, read_only, &AtomicU64::new(0)).await.unwrap());
+            (conn, db.pg_run_locals(schema))
         })
     }
 
@@ -803,15 +777,15 @@ mod pg_tests {
             let (base, p) = fixture(l, "\"t6f \"\"q\"\" x\"", "CREATE TABLE things (id int PRIMARY KEY); INSERT INTO things VALUES (1);");
             let db = base.forced_pooler(&l.uri, 30_000);
             assert!(db.pooler() && !base.pooler(), "{var}");
-            assert_eq!(db.pg_run_locals(""), db.pg_locals(), "{var}");
-            assert!(db.pg_run_locals(schema).ends_with("SET LOCAL search_path = \"t6f \"\"q\"\" x\""), "{var}: {}", db.pg_run_locals(schema));
+            assert_eq!(db.pg_run_locals(""), "", "{var}");
+            assert_eq!(db.pg_run_locals(schema), "SET LOCAL search_path = \"t6f \"\"q\"\" x\"", "{var}");
             assert_eq!(base.pg_run_locals(schema), "", "{var}: normal mode sets the search_path once per run");
             for read_only in [true, false] {
-                let (mut conn, timeout, locals) = pooled_conn(l, &db, schema, read_only);
+                let (mut conn, locals) = pooled_conn(l, &db, schema, read_only);
                 let defaults: Vec<String> = ["search_path", "default_transaction_read_only", "statement_timeout"].iter().map(|n| l.one(&format!("SHOW {n}"))).collect();
                 l.w.rt.block_on(async {
                     for stmt in ["SELECT count(*) AS n FROM things", "SELECT current_setting('search_path') AS sp, current_setting('transaction_read_only') AS ro, current_setting('statement_timeout') AS st"] {
-                        let (sets, stop) = run_on(&mut conn, Dialect::Postgres, stmt, 0, read_only, true, &timeout, &locals).await;
+                        let (sets, stop) = run_on(&mut conn, &db, stmt, 0, read_only, &locals).await;
                         assert!(sets[0].error.is_none() && stop.is_none(), "{var} read_only={read_only}: {:?}", sets[0].error);
                         if stmt.contains("search_path") {
                             // Inside the transaction the schema resolves; the read-only state follows the lock; the timeout is the one of the connection.
@@ -910,7 +884,7 @@ mod pg_tests {
             // the statement timeout is left to bound.
             assert_eq!(activity(l, &p, "SELECT pg_sleep(6.25)%"), "1", "{var}: not cancelled");
             // Nor does a direct call to the cancel path reach out to the server.
-            let msg = l.w.rt.block_on(kill_query(&db, 1)).unwrap();
+            let msg = l.w.rt.block_on(db.stop(1)).unwrap();
             assert_eq!(msg, "Stopped the script", "{var}");
             assert_eq!(activity(l, &p, "SELECT pg_sleep(6.25)%"), "1", "{var}");
         });
@@ -933,13 +907,11 @@ mod pg_tests {
             l.w.rt.block_on(async {
                 let mut conn = db.acquire_conn().await.unwrap();
                 prepare(&mut conn, &db, "t6f_rb", true, &AtomicU64::new(0)).await.unwrap();
-                let Conn::Pg(c) = &mut conn else { unreachable!() };
-                let timeout = crate::db::sql::pg_read::statement_timeout(c).await.unwrap();
                 tests_hook::MARK.lock().unwrap().push("t6f_direct".into());
-                let (_, stop) = run_locked(&mut conn, Dialect::Postgres, "SELECT 1 AS t6f_direct", 0, &timeout, "").await;
+                let (_, stop) = run_locked(&mut conn, &db, "SELECT 1 AS t6f_direct", 0, "").await;
                 tests_hook::MARK.lock().unwrap().retain(|m| m != "t6f_direct");
                 assert_eq!(stop, Some(DEAD), "{var}");
-                let (_, stop) = run_locked(&mut conn, Dialect::Postgres, "SELECT 1 AS fine", 0, &timeout, "").await;
+                let (_, stop) = run_locked(&mut conn, &db, "SELECT 1 AS fine", 0, "").await;
                 assert_eq!(stop, None, "{var}");
                 let _ = conn.close().await;
             });

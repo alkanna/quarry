@@ -560,7 +560,7 @@ async fn kill_checked(db: &Db, t: &KillTarget, whole: bool, read_only: bool) -> 
     if read_only {
         return Err("Kill is locked on this connection. Unlock writes first.".into());
     }
-    let mut c = super::worker::side_conn(db, "Could not reach the server to kill it").await?;
+    let mut c = super::run::side_conn(db, "Could not reach the server to kill it").await?.into_my()?;
     let r = kill_on(&mut c, db.dialect, t, whole).await;
     let _ = c.close().await;
     r
@@ -609,7 +609,6 @@ impl Worker {
 mod tests {
     use super::*;
     use crate::db::sql::testing::every_server;
-    use crate::db::sql::worker::kill_query;
     use std::collections::HashMap;
     use std::time::Duration;
 
@@ -888,7 +887,7 @@ mod tests {
             assert!(!after.rows.iter().any(|r| r.id == id), "the connection is gone after KILL");
             // A second kill of the same id says it is gone instead of a raw code.
             assert_eq!(l.w.rt.block_on(kill_checked(&l.db, &t, true, false)).unwrap_err(), "That connection is already gone.");
-            assert_eq!(l.w.rt.block_on(kill_query(&l.db, 4_000_000_000)).unwrap_err(), "That connection is already gone.");
+            assert_eq!(l.w.rt.block_on(l.db.stop(4_000_000_000)).unwrap_err(), "That connection is already gone.");
         });
     }
 
@@ -936,11 +935,11 @@ mod tests {
             l.sql("CREATE USER 'q_nokill'@'%' IDENTIFIED BY 'nokill-pw'");
             let opts = l.db.opts.my().unwrap().clone().username("q_nokill").password("nokill-pw");
             let low = Db { opts: super::super::exec::Opts::My(opts), ..l.db.clone() };
-            let err = l.w.rt.block_on(kill_query(&low, id)).unwrap_err();
+            let err = l.w.rt.block_on(low.stop(id)).unwrap_err();
             l.sql("DROP USER 'q_nokill'@'%'");
             assert!(err.contains("CONNECTION_ADMIN"), "{err}");
             assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "the statement still runs");
-            l.w.rt.block_on(kill_query(&l.db, id)).unwrap();
+            l.w.rt.block_on(l.db.stop(id)).unwrap();
             let _ = rx.recv_timeout(Duration::from_secs(10));
         });
     }

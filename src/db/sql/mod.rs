@@ -42,11 +42,33 @@ pub use pg_read::PgSchema;
 pub use relay::{Answer, Arg, Relay};
 pub use run::RunHandle;
 
-/// A sqlx error worded for `db::explain`. A PostgreSQL server error keeps its SQLSTATE, so a duplicate key or a timeout is
-/// recognised, and has no statement to point into here, so it carries no position. Anything else, MySQL included, keeps
-/// the plain wording of `db::e`.
+/// A server error worded for `db::explain`: the SQLSTATE, the message, the detail and hint when the server sends
+/// them, and where in the user's statement it points. `shift` is how many characters were put in front of the
+/// statement. Anything that is not a PostgreSQL error, MySQL included, keeps the plain wording. This is the one wording
+/// for every call site; `se` is it without a statement to point into.
+pub(crate) fn se_at(err: &sqlx::Error, stmt: &str, shift: usize) -> String {
+    let Some(d) = err.as_database_error().and_then(|d| d.try_downcast_ref::<sqlx::postgres::PgDatabaseError>()) else { return crate::db::e(err) };
+    let mut out = format!("error returned from database: {}: {}", d.code(), d.message());
+    if let Some(x) = d.detail() {
+        out.push_str(&format!("\nDetail: {x}"));
+    }
+    if let Some(x) = d.hint() {
+        out.push_str(&format!("\nHint: {x}"));
+    }
+    if let Some(sqlx::postgres::PgErrorPosition::Original(p)) = d.position() {
+        // The server counts characters from 1.
+        if p > shift {
+            let at = p - shift;
+            let (line, col) = stmt.chars().take(at - 1).fold((1, 1), |(l, c), ch| if ch == '\n' { (l + 1, 1) } else { (l, c + 1) });
+            out.push_str(&format!("\nPosition: {at} (line {line}, column {col})"));
+        }
+    }
+    out
+}
+
+/// `se_at` for an error that has no statement to point into, so it carries no position.
 pub(crate) fn se(err: sqlx::Error) -> String {
-    pg_read::pg_error(&err, "", usize::MAX)
+    se_at(&err, "", usize::MAX)
 }
 
 /// Which kind of server a saved connection talks to. Saved connections from before SQL support

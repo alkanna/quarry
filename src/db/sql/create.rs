@@ -8,7 +8,7 @@ use super::se;
 use super::ddl::{self, Mode};
 use super::value::lit;
 use super::worker::{database_names, text, text_at};
-use super::write::{writer, SqlUndo};
+use super::write::{writer_conn, SqlUndo};
 use super::{Db, Dialect};
 use crate::db::{Msg, Res, UndoAction, UndoKind, Worker};
 use sqlx::{Connection, Executor};
@@ -626,7 +626,7 @@ async fn mode_session(db: &Db, read_only: bool) -> Res<(sqlx::MySqlConnection, M
 /// its own, prepared so the server takes exactly one statement, and for changes to the list of databases
 /// reads that list back on the same connection.
 async fn run(db: &Db, read_only: bool, list: bool, build: impl FnOnce(bool) -> Res<String>) -> Res<Option<Vec<String>>> {
-    let mut c = writer(db, "", read_only).await?;
+    let mut c = writer_conn(db, "", read_only).await?.into_my()?;
     let out = async {
         let sql = build(folds_case(&mut c).await?)?;
         ddl::exec(&mut c, &sql).await?;
@@ -663,7 +663,7 @@ async fn drop_if_same_and_empty(c: &mut sqlx::MySqlConnection, schema: &str, tab
 /// A database cannot be locked, so a table created in it in that instant would go with it.
 async fn undo_create(db: &Db, schema: &str, table: &str, made: Option<&str>, read_only: bool) -> Res<(Ddl, Option<Vec<String>>)> {
     let d = db.dialect;
-    let mut c = writer(db, "", read_only).await?;
+    let mut c = writer_conn(db, "", read_only).await?.into_my()?;
     let res = async {
         let fold = folds_case(&mut c).await?;
         if table.is_empty() {

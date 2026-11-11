@@ -8,7 +8,7 @@ use super::se;
 use super::ddl::{self, session_mode, Mode};
 use super::value::lit;
 use super::worker::text;
-use super::write::{writer, SqlUndo};
+use super::write::{writer_conn, SqlUndo};
 use super::{Db, Dialect};
 use crate::db::{e, Msg, Res, UndoAction, UndoKind, Worker};
 use sqlx::{Connection, Executor};
@@ -1308,7 +1308,7 @@ impl Worker {
         self.spawn_sql(db.conn, "", async move {
             let mut undo = None;
             let res: Res<String> = async {
-                let mut c = writer(&db, "", read_only).await?;
+                let mut c = writer_conn(&db, "", read_only).await?.into_my()?;
                 let out = async {
                     let m = session_mode(&mut c).await?;
                     // Checked on the writer, against what the server holds now rather than what the window last read.
@@ -1345,7 +1345,7 @@ impl Worker {
             let mut undo = None;
             let res: Res<String> = async {
                 check_new_user(&acct.user, &acct.host, &password)?;
-                let mut c = writer(&db, "", read_only).await?;
+                let mut c = writer_conn(&db, "", read_only).await?.into_my()?;
                 let out = async {
                     let m = session_mode(&mut c).await?;
                     ddl::exec(&mut c, &create_user_sql(m, &acct, &password, false)).await.map_err(|x| scrub(x, &password))?;
@@ -1367,7 +1367,7 @@ impl Worker {
         self.spawn_sql(db.conn, "", async move {
             let res: Res<String> = async {
                 check_password(&password)?;
-                let mut c = writer(&db, "", read_only).await?;
+                let mut c = writer_conn(&db, "", read_only).await?.into_my()?;
                 let out = async {
                     let m = session_mode(&mut c).await?;
                     if matches!(db.dialect, Dialect::MariaDb) {
@@ -1398,7 +1398,7 @@ impl Worker {
             let mut cur = acct.clone();
             let mut renamed = false;
             let res: Res<String> = async {
-                let mut c = writer(&db, "", read_only).await?;
+                let mut c = writer_conn(&db, "", read_only).await?.into_my()?;
                 let out = run_plan(&mut c, &db, conn, &acct, &plan, &mut cur, &mut renamed, &mut undo).await;
                 let _ = c.close().await;
                 out
@@ -1412,7 +1412,7 @@ impl Worker {
     pub fn sql_user_drop(&self, conn: u64, db: Db, acct: Account, read_only: bool) {
         self.spawn_sql(db.conn, "", async move {
             let res: Res<String> = async {
-                let mut c = writer(&db, "", read_only).await?;
+                let mut c = writer_conn(&db, "", read_only).await?.into_my()?;
                 let out = async {
                     let m = session_mode(&mut c).await?;
                     ddl::exec(&mut c, &drop_user_sql(m, &acct, db.dialect)).await?;
@@ -1435,7 +1435,7 @@ pub(super) async fn undo(db: &Db, a: UndoAction, u: AccountUndo, read_only: bool
     // Whether the undo ran something before it stopped; an entry that changed nothing stays in the list.
     let mut ran_any = false;
     let res: Res<String> = async {
-        let mut c = writer(db, "", read_only).await?;
+        let mut c = writer_conn(db, "", read_only).await?.into_my()?;
         let out = async {
             let m = session_mode(&mut c).await?;
             let now = grants_of(&mut c, m, &acct).await.map_err(|x| format!("Undo refused: {x}"))?;

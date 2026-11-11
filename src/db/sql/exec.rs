@@ -392,8 +392,7 @@ impl Conn {
         match self {
             Conn::My(c) => c.begin().await.map(Tx::My),
             Conn::Pg(c) => {
-                let mut tx = c.begin_with("BEGIN READ WRITE").await?;
-                tx.execute(super::pg::write_locals().as_str()).await?;
+                let tx = c.begin_with(format!("BEGIN READ WRITE; {}", super::pg::write_locals())).await?;
                 Ok(Tx::Pg(tx))
             }
         }
@@ -514,21 +513,20 @@ impl Db {
                 }
                 Pool::Pg(pp) => {
                     let pool = self.pg_pool()?;
-                    let locals = pp.locals().to_string();
                     let mut q = sqlx::query(&full);
                     for x in params {
                         q = q.bind(x);
                     }
-                    if locals.is_empty() {
+                    if pp.locals().is_empty() {
                         q.fetch_all(&pool).await.map(SqlRow::wrap_pg)
                     } else {
                         // Behind a pooler the session carries no settings, so a read sets them for its own transaction.
                         async {
                             let mut conn = pool.acquire().await?;
-                            let mut tx = conn.begin_with("BEGIN READ ONLY").await?;
-                            tx.execute(locals.as_str()).await?;
-                            let r = q.fetch_all(&mut *tx).await;
-                            let _ = tx.rollback().await;
+                            let r = super::pg_read::in_read_only(&mut conn, self, "", async move |tx| q.fetch_all(&mut *tx).await).await;
+                            if r.is_err() {
+                                conn.close_on_drop();
+                            }
                             r
                         }
                         .await

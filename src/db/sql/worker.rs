@@ -5,7 +5,7 @@
 use super::se;
 use super::value::{self, Kind};
 // What the modules that only exist for MySQL call, with sqlx's own connection type. The neutral ones are in `run`.
-pub(super) use super::run::{kill_query, pin_reads_my as pin_reads, prepare_my as prepare};
+pub(super) use super::run::pin_reads_my as pin_reads;
 use super::run::{run, RunHandle};
 use super::schema::{Schema, SchemaCol, SchemaTable};
 use super::{lex, Addr, Advanced, TestInfo, Col, Db, Dialect, PageQuery, Pool, SslMode};
@@ -141,11 +141,6 @@ impl Db {
             x => e(x),
         })
     }
-}
-
-/// `run::side_conn` for the modules that only exist for MySQL.
-pub(super) async fn side_conn(db: &Db, why: &str) -> Res<sqlx::MySqlConnection> {
-    super::run::side_conn(db, why).await?.into_my()
 }
 
 async fn open(uri: &str, timeout: Duration, net: &Net, adv: &Advanced) -> Res<(Db, Vec<String>, Option<crate::ssh::Tunnel>)> {
@@ -346,27 +341,16 @@ async fn count(db: &Db, schema: &str, table: &str, q: &PageQuery) -> Res<(u64, b
 /// would run with the editor's privileges. With the path reduced to pg_catalog every user type comes back as `schema.type`.
 /// It runs in a read-only transaction of its own that is always rolled back, so a pooler never sees the setting leave it.
 async fn pg_columns(db: &Db, schema: &str, table: &str) -> Res<Vec<SqlRow>> {
-    let mut conn = db.acquire_conn().await?;
-    let Conn::Pg(c) = &mut conn else { return Err("Not a PostgreSQL connection".into()) };
+    // Quarry's own query, no user text, so the connection goes back to the pool.
+    let Pool::Pg(pools) = &db.pool else { return Err("Not a PostgreSQL connection".into()) };
+    let mut conn = pools.acquire(db.opts.database()).await?;
     let sql = format!("{}{}", db.dialect.columns(), db.dialect.all_rows());
-    let locals = db.pg_locals();
     let t = Instant::now();
-    let res = async {
-        c.execute("BEGIN READ ONLY").await?;
-        let r = async {
-            if !locals.is_empty() {
-                c.execute(locals.as_str()).await?;
-            }
-            c.execute("SET LOCAL search_path = pg_catalog").await?;
-            sqlx::query(&sql).bind(schema).bind(table).fetch_all(&mut *c).await
-        }
-        .await;
-        let _ = c.execute("ROLLBACK").await;
-        r
-    }
-    .await;
+    let res = super::pg_read::in_read_only(&mut conn, db, "SET LOCAL search_path = pg_catalog", async |c| sqlx::query(&sql).bind(schema).bind(table).fetch_all(c).await).await;
     db.note(schema, &sql, t, &res);
-    let _ = conn.close().await;
+    if res.is_err() {
+        conn.close_on_drop();
+    }
     res.map(SqlRow::wrap_pg).map_err(se)
 }
 
@@ -389,8 +373,8 @@ fn pg_extra<R: Cells>(r: &R) -> String {
 /// Column types and the primary key, from information_schema.
 async fn table_meta(db: &Db, schema: &str, table: &str) -> Res<(HashMap<String, (String, bool, String)>, HashMap<String, Kind>, Vec<String>)> {
     let d = db.dialect;
-    let cols = if d == Dialect::Postgres { pg_columns(db, schema, table).await? } else { db.meta(schema, d.columns(), [schema, table]).await? };
-    let idx = db.meta(schema, d.indexes(), [schema, table]).await?;
+    let cols = async { if d == Dialect::Postgres { pg_columns(db, schema, table).await } else { db.meta(schema, d.columns(), [schema, table]).await } };
+    let (cols, idx) = tokio::try_join!(cols, db.meta(schema, d.indexes(), [schema, table]))?;
     let meta = cols
         .iter()
         .filter_map(|r| {
@@ -499,7 +483,7 @@ async fn field_values(db: &Db, schema: &str, table: &str, column: &str, prefix: 
     if !small && !leads {
         return Ok(None);
     }
-    let mut c = side_conn(db, "Could not reach the server").await?;
+    let mut c = super::run::side_conn(db, "Could not reach the server").await?.into_my()?;
     let res = async {
         // The pool's own setup, so values read in the same zone and charset as the grid shows them.
         session(&mut c, 300, &db.setup).await.map_err(|x| db.setup.failed_text().unwrap_or_else(|| e(x)))?;
@@ -692,7 +676,7 @@ impl Worker {
             if connection_id == 0 {
                 return Msg::Info(Ok("Stopped the script".to_string()));
             }
-            let res = kill_query(&db, connection_id).await;
+            let res = db.stop(connection_id).await;
             Msg::Info(res)
         });
     }

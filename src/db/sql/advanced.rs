@@ -816,7 +816,7 @@ mod live {
             let base = c.open(&Advanced::default()).unwrap();
             let db = c.with_setup(&base, Setup::new(vec![], vec!["SET SESSION autocommit = 0".into()]));
             let n = c.w.rt.block_on(async {
-                let mut w = super::super::write::writer(&db, schema, false).await.unwrap();
+                let mut w = super::super::write::writer_conn(&db, schema, false).await.unwrap().into_my().unwrap();
                 let n = sqlx::query("INSERT INTO t VALUES (1)").execute(&mut w).await.unwrap().rows_affected();
                 let _ = w.close().await;
                 n

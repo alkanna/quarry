@@ -7,7 +7,7 @@
 use super::se;
 use super::csv::{Mapping, Opts, Reader, Source, TableInfo};
 use super::value::{Kind, Param};
-use super::write::{action, bound, writer};
+use super::write::{action, bound, writer_conn};
 use super::{Col, Db, Dialect};
 use crate::db::{e, Msg, Res, UndoAction, Worker};
 use mongodb::bson::{Bson, Document};
@@ -176,7 +176,7 @@ pub async fn run(db: &Db, schema: &str, table: &str, plan: &ImportPlan, conn: u6
     let names: Vec<&str> = targets.iter().map(|(_, t)| plan.info.cols[*t].name.as_str()).collect();
     let d = db.dialect;
     let per = BATCH_ROWS.min(MAX_PLACEHOLDERS / names.len()).max(1);
-    let mut c = writer(db, schema, read_only).await?;
+    let mut c = writer_conn(db, schema, read_only).await?.into_my()?;
     if let Ok(r) = c.fetch_one("SELECT CONNECTION_ID()").await {
         id.store(super::worker::num_at(&r, 0).unwrap_or(0), Ordering::SeqCst);
     }

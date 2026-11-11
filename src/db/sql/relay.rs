@@ -2,8 +2,7 @@
 
 use super::se;
 use super::exec::{Cells, Conn, Item};
-use super::pg;
-use super::run::{kill_query, prepare};
+use super::run::prepare;
 use super::worker::{make_cols, raw};
 use super::{lex, value, Col, Db, Dialect};
 use crate::db::{e, Res};
@@ -49,20 +48,28 @@ const JS_SAFE: u64 = (1 << 53) - 1;
 fn literal(p: &value::Param, no_backslash: bool) -> Res<String> {
     use value::Param;
     Ok(match p {
+        // The backslash only escapes when the server reads it as an escape.
+        Param::Text(s) => no_nul(s).map(|s| value::lit(s, !no_backslash))?,
+        Param::Bytes(b) => format!("X'{}'", value::hex_digits(b, false)),
+        p => scalar_literal(p)?,
+    })
+}
+
+/// The literal of a value that reads the same on both engines: NULL and the numbers. Text and bytes are spelled per engine.
+fn scalar_literal(p: &value::Param) -> Res<String> {
+    use value::Param;
+    Ok(match p {
         Param::Null => "NULL".into(),
         Param::Int(i) => i.to_string(),
         Param::UInt(u) => u.to_string(),
         Param::Float(f) if f.is_finite() => format!("{f:e}"),
         Param::Float(_) => return Err("A value is not a finite number".into()),
-        Param::Text(s) => {
-            if s.contains('\0') {
-                return Err("A text value contains a NUL character".into());
-            }
-            // The backslash only escapes when the server reads it as an escape.
-            value::lit(s, !no_backslash)
-        }
-        Param::Bytes(b) => format!("X'{}'", value::hex_digits(b, false)),
+        Param::Text(_) | Param::Bytes(_) => return Err("Text and bytes are spelled per engine".into()),
     })
+}
+
+fn no_nul(s: &str) -> Res<&str> {
+    if s.contains('\0') { Err("A text value contains a NUL character".into()) } else { Ok(s) }
 }
 
 /// A row cell as the script gets it. An Int64 beyond 2^53 is sent as {"$numberLong"} because a plain
@@ -104,20 +111,13 @@ pub fn fill(text: &str, params: &[value::Param], backslash: bool, ansi: bool) ->
 fn literal_pg(p: &value::Param) -> Res<String> {
     use value::Param;
     Ok(match p {
-        Param::Null => "NULL".into(),
-        Param::Int(i) => i.to_string(),
-        Param::UInt(u) => u.to_string(),
-        Param::Float(f) if f.is_finite() => format!("{f:e}"),
-        Param::Float(_) => return Err("A value is not a finite number".into()),
         Param::Text(s) => {
-            if s.contains('\0') {
-                return Err("A text value contains a NUL character".into());
-            }
-            let q = s.replace('\'', "''");
+            let q = no_nul(s)?.replace('\'', "''");
             if s.contains('\\') { format!("E'{}'", q.replace('\\', "\\\\")) } else { format!("'{q}'") }
         }
         // E'\\x..' holds one backslash, so this is bytea hex input in either reading of plain strings.
         Param::Bytes(b) => format!("E'\\\\x{}'::bytea", value::hex_digits(b, false)),
+        p => scalar_literal(p)?,
     })
 }
 
@@ -173,8 +173,8 @@ pub struct Relay {
     /// For the query log: the connection's app id and the database the script runs in.
     log_conn: u64,
     schema: String,
-    /// Behind a pooler (`Db::pg_locals` is set) the settings every transaction starts with, search_path included,
-    /// because nothing may be set on a session that another client's statements can share. Empty otherwise.
+    /// Behind a pooler the schema's SET LOCAL (`Db::pg_run_locals`) that every transaction adds, because nothing may be set
+    /// on a session that another client's statements can share. Empty otherwise.
     locals: String,
     /// The database handle and backend pid, to cancel a statement the relay abandons.
     db: Db,
@@ -186,19 +186,14 @@ pub struct Relay {
 impl Relay {
     pub async fn open(db: &Db, schema: &str, read_only: bool, id: &AtomicU64) -> Res<Relay> {
         let mut conn = db.acquire_conn().await?;
-        if let Conn::Pg(c) = &mut conn {
-            // Not `prepare`, which sets search_path on the session: behind a pooler that would land on a backend other
-            // clients share, so there it travels as SET LOCAL in each transaction instead.
-            pg::prepare(c, read_only, id, Some(db.pooler()), db).await.map_err(se)?;
+        // Behind a pooler `prepare` sets nothing on the session, and the schema travels as SET LOCAL in each transaction.
+        prepare(&mut conn, db, schema, read_only, id).await?;
+        if let Conn::Pg(_) = &conn {
             let locals = db.pg_run_locals(schema);
-            if !db.pooler() {
-                super::pg_read::set_search_path(c, schema).await.map_err(se)?;
-            }
             // Values are filled as E strings that read the same in either mode, so no session mode is read here.
             let pid = id.load(std::sync::atomic::Ordering::SeqCst);
             return Ok(Relay { conn, dialect: db.dialect, read_only, backslash: false, ansi: false, dead: false, log_conn: db.conn, schema: schema.to_string(), locals, db: db.clone(), pid, cut: false });
         }
-        prepare(&mut conn, db, schema, read_only, id).await?;
         // Values are filled in for this session's mode, which may differ from the one read at connect.
         let m = super::ddl::session_mode(conn.my()?).await?;
         Ok(Relay { conn, dialect: db.dialect, read_only, backslash: m.bs, ansi: m.ansi, dead: false, log_conn: db.conn, schema: schema.to_string(), locals: String::new(), db: db.clone(), pid: 0, cut: false })
@@ -212,12 +207,12 @@ impl Relay {
 
     /// Behind a pooler, where the session is shared and Stop must not cancel by pid.
     pub fn pooled(db: &Db) -> bool {
-        db.dialect == Dialect::Postgres && !db.pg_locals().is_empty()
+        db.dialect == Dialect::Postgres && db.pooler()
     }
 
     /// Interrupts the statement running on connection `id`, from a connection of its own.
     pub async fn kill(db: &Db, id: u64) -> Res<String> {
-        kill_query(db, id).await
+        db.stop(id).await
     }
 
     /// Refuses the next statement of an unlocked PostgreSQL session when something moved how the server reads a
@@ -260,7 +255,7 @@ impl Relay {
             return Err("Prepared statements are not available in the shell; use sql`...` with values instead.".into());
         }
         let pg = self.dialect == Dialect::Postgres;
-        let pooled = pg && !self.locals.is_empty();
+        let pooled = pg && self.db.pooler();
         let stmt = if pg {
             // Only a statement with values depends on how text is read, and after a failed transaction the readback
             // itself would fail and keep the script's own ROLLBACK from being sent. Behind a pooler it runs inside
@@ -293,11 +288,10 @@ impl Relay {
         // trusted to stay on one backend, and it is committed when it succeeds.
         let begun = pg && (self.read_only || pooled);
         if begun {
-            let mut begin = self.conn.execute(if self.read_only { "BEGIN READ ONLY" } else { "BEGIN READ WRITE" }).await.map(|_| ());
-            if begin.is_ok() && !self.locals.is_empty() {
-                begin = self.conn.execute(&self.locals).await.map(|_| ());
-            }
-            if let Err(x) = begin {
+            let begin = self.db.pg_begin(if self.read_only { "BEGIN READ ONLY" } else { "BEGIN READ WRITE" }, &self.locals);
+            if let Err(x) = self.conn.execute(&begin).await {
+                // A SET LOCAL that failed leaves the transaction open and aborted.
+                let _ = self.conn.execute("ROLLBACK").await;
                 self.dead = true;
                 return Err(e(x));
             }
@@ -355,7 +349,7 @@ impl Relay {
             self.dead = true;
             self.cut = true;
             if pg && !pooled && self.pid != 0 {
-                let _ = pg::cancel(&self.db, self.pid).await;
+                let _ = self.db.stop(self.pid).await;
             }
             return Err(failure.unwrap_or_default());
         }
