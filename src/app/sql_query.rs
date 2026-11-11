@@ -485,7 +485,7 @@ impl App {
         }
     }
 
-    fn sql_editor_id(cur: usize) -> egui::Id {
+    pub(super) fn sql_editor_id(cur: usize) -> egui::Id {
         egui::Id::unique(("sql-editor", cur))
     }
 
@@ -538,9 +538,6 @@ impl App {
                 (new, Some(from..from + f.text.chars().count()), f)
             }
         };
-        if f.unsupported {
-            return self.warn(f.summary());
-        }
         let note = if new == text && f.special == 0 && f.refused == 0 { "Already formatted".to_string() } else { f.summary() };
         self.sql_replace(ctx, new, select);
         if f.refused > 0 { self.warn(note) } else { self.ok(note) }
