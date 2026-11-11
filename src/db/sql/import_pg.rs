@@ -1,17 +1,23 @@
 //! Importing a CSV file into a PostgreSQL table. The file is read and checked as on MySQL (`csv`), and the rows go in as
 //! multi-row INSERTs inside one transaction on a connection of its own, so a bad row, an error or Stop leaves the table as it
-//! was. Every value is bound as text and its placeholder is written `CAST($n AS <format_type>)`, because the server refuses a
-//! text value for an int column but never a cast from text. The types come from the structure read under the table's schema
+//! was. Every value is bound as text and its placeholder is written `CAST($n AS <type>)`, because the server refuses a
+//! text value for an int column but never a cast from text. The type is the column's without its length or precision
+//! (`TCol::cast_type`): an explicit cast to `varchar(3)` cuts a longer value, while the INSERT that follows applies the length
+//! by assignment and refuses it, as a plain INSERT does. The types come from the structure read under the table's schema
 //! as search_path and the transaction runs under the same path, so a type outside the schema means the same in both.
 //!
 //! Duplicate keys map to ON CONFLICT on the primary key. Undo is exact in every mode: the keys and values of new rows come
-//! from RETURNING, and the rows an update overwrites are read first inside the transaction with FOR UPDATE. The undo checks
-//! that every row still holds what the import left and refuses, with nothing changed, when one does not.
+//! from RETURNING, together with `xmax = 0`, which says whether the statement inserted the row or updated it. The rows an
+//! update overwrites are read first inside the transaction with FOR UPDATE. A row that was updated without such a snapshot
+//! (its key is not in the file, or a concurrent insert took it) cannot be put back, so no undo is recorded then. The undo
+//! compares every non-key value as text, the form RETURNING gave, because the equality of a type can be coarser than its
+//! text (`1.5` and `1.50`, `1 mon` and `30 days`) or missing (point, json[]), and refuses, with nothing changed, when a row
+//! no longer holds what the import left.
 
 use super::csv::{TCol, TableInfo};
 use super::exec::{Cells, Conn, SqlRow, Tx};
 use super::import::{Done, Dup, ImportPlan, Progress, UNDO_MAX_ROWS};
-use super::value::{Kind, Param};
+use super::value::Param;
 use super::write::{action, writer_conn, SqlUndo, CONFLICT};
 use super::{se, Col, Db, Dialect};
 use crate::db::Res;
@@ -29,6 +35,39 @@ const BATCH_BYTES: usize = 4 << 20;
 const UNDO_MAX_BYTES: usize = 64 << 20;
 
 pub const NEEDS_KEY: &str = "Update needs a primary key, and this table has none. Choose Skip or Stop.";
+pub const DEFERRABLE_KEY: &str = "The primary key is DEFERRABLE, which ON CONFLICT does not support, so Skip and Update cannot work on this table. Choose Stop.";
+
+/// How the duplicate choice is written in the statement.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Clause {
+    None,
+    /// No key to name, so any unique constraint passes the row over.
+    NothingAny,
+    Nothing,
+    Update,
+}
+
+impl Clause {
+    /// `has_set`: the file fills a column that is not part of the key, so an update has something to set.
+    pub fn of(dup: Dup, has_pk: bool, has_set: bool) -> Clause {
+        match dup {
+            Dup::Stop => Clause::None,
+            Dup::Skip | Dup::Update if !has_pk => Clause::NothingAny,
+            Dup::Skip => Clause::Nothing,
+            Dup::Update if !has_set => Clause::Nothing,
+            Dup::Update => Clause::Update,
+        }
+    }
+
+    pub fn text(self) -> &'static str {
+        match self {
+            Clause::None => "INSERT, STOPS AT A DUPLICATE",
+            Clause::NothingAny => "INSERT ... ON CONFLICT DO NOTHING",
+            Clause::Nothing => "INSERT ... ON CONFLICT (KEY) DO NOTHING",
+            Clause::Update => "INSERT ... ON CONFLICT (KEY) DO UPDATE",
+        }
+    }
+}
 
 /// Rows in one INSERT: 500, fewer when the columns would bind more than the protocol allows.
 pub fn batch_rows(cols: usize) -> usize {
@@ -53,10 +92,8 @@ type Cellz = Vec<Option<String>>;
 #[derive(Clone, Debug, PartialEq)]
 pub struct UCol {
     pub name: String,
-    /// The type as format_type wrote it, which every placeholder is cast to.
+    /// The type as format_type wrote it, which a key and an old value are cast to.
     pub ty: String,
-    /// Compared as text: json has no equality operator, a bit string and a geometry are only read in their text form, and xml has none either.
-    pub as_text: bool,
 }
 
 /// What undoing a PostgreSQL import does: remove the rows it inserted and put back the old values of the rows an update
@@ -66,6 +103,8 @@ pub struct ImportUndo {
     pub pk: Vec<String>,
     /// The key columns first, then the columns the file fills.
     pub cols: Vec<UCol>,
+    /// The table is an inheritance parent: its own rows are meant, not those of its children.
+    pub only: bool,
     /// New rows, with the values the server stored.
     pub inserted: Vec<Cellz>,
     /// Overwritten rows: what they held before, and what the import left.
@@ -84,8 +123,12 @@ impl ImportUndo {
 }
 
 fn ucol(c: &TCol) -> UCol {
-    let as_text = matches!(c.kind, Kind::Bit | Kind::Geometry) || (c.kind == Kind::Json && c.full_type != "jsonb") || c.full_type == "xml";
-    UCol { name: c.name.clone(), ty: c.full_type.clone(), as_text }
+    UCol { name: c.name.clone(), ty: c.full_type.clone() }
+}
+
+/// The table in a statement. ONLY keeps the rows of an inheritance child out of what is read, updated or deleted.
+fn target(schema: &str, table: &str, only: bool) -> String {
+    format!("{}{}", if only { "ONLY " } else { "" }, Dialect::Postgres.qualified(schema, table))
 }
 
 fn cells_of(r: &SqlRow, n: usize) -> Cellz {
@@ -98,8 +141,10 @@ fn size_of(row: &Cellz) -> usize {
 
 /// `INSERT INTO "s"."t" ("a", "b") VALUES (CAST($1 AS integer), DEFAULT), ... ON CONFLICT ... RETURNING "a"::text, ...` for `rows`
 /// rows whose values are `flat`, row by row. A NULL for a column that counts up by itself is written DEFAULT, as MySQL takes
-/// a NULL there, so the server hands out the number. `pk` is the table's primary key, the target of ON CONFLICT.
-pub fn insert_sql(schema: &str, table: &str, cols: &[&TCol], flat: Vec<Param>, rows: usize, dup: Dup, pk: &[String], returning: &[String]) -> (String, Vec<Param>) {
+/// a NULL there, so the server hands out the number. `pk` is the table's primary key, the target of ON CONFLICT. `flag` adds
+/// `xmax = 0` as the last RETURNING value: true for a row the statement inserted, false for one it updated.
+#[allow(clippy::too_many_arguments)]
+pub fn insert_sql(schema: &str, table: &str, cols: &[&TCol], flat: Vec<Param>, rows: usize, dup: Dup, pk: &[String], returning: &[String], flag: bool) -> (String, Vec<Param>) {
     let d = Dialect::Postgres;
     let list = cols.iter().map(|c| d.quote_ident(&c.name)).collect::<Vec<_>>().join(", ");
     let (mut params, mut tuples) = (Vec::with_capacity(flat.len()), Vec::with_capacity(rows));
@@ -111,7 +156,7 @@ pub fn insert_sql(schema: &str, table: &str, cols: &[&TCol], flat: Vec<Param>, r
                 Some(Param::Null) if c.auto_increment => "DEFAULT".to_string(),
                 Some(p) => {
                     params.push(p);
-                    format!("CAST(${} AS {})", params.len(), c.full_type)
+                    format!("CAST(${} AS {})", params.len(), c.cast_type)
                 }
                 None => "DEFAULT".to_string(),
             })
@@ -121,23 +166,27 @@ pub fn insert_sql(schema: &str, table: &str, cols: &[&TCol], flat: Vec<Param>, r
     let mut sql = format!("INSERT INTO {} ({list}) VALUES {}", d.qualified(schema, table), tuples.join(", "));
     let key = pk.iter().map(|k| d.quote_ident(k)).collect::<Vec<_>>().join(", ");
     let sets: Vec<String> = cols.iter().filter(|c| !pk.contains(&c.name)).map(|c| format!("{0} = EXCLUDED.{0}", d.quote_ident(&c.name))).collect();
-    match dup {
-        Dup::Stop => {}
-        // Only a row whose key exists is passed over. A clash on another unique constraint stays an error, so no row
-        // vanishes for a reason the dialog did not say.
-        Dup::Skip | Dup::Update if pk.is_empty() || sets.is_empty() => sql.push_str(&if pk.is_empty() { " ON CONFLICT DO NOTHING".to_string() } else { format!(" ON CONFLICT ({key}) DO NOTHING") }),
-        Dup::Skip => sql.push_str(&format!(" ON CONFLICT ({key}) DO NOTHING")),
-        Dup::Update => sql.push_str(&format!(" ON CONFLICT ({key}) DO UPDATE SET {}", sets.join(", "))),
+    // Only a row whose key exists is passed over. A clash on another unique constraint stays an error, so no row
+    // vanishes for a reason the dialog did not say.
+    match Clause::of(dup, !pk.is_empty(), !sets.is_empty()) {
+        Clause::None => {}
+        Clause::NothingAny => sql.push_str(" ON CONFLICT DO NOTHING"),
+        Clause::Nothing => sql.push_str(&format!(" ON CONFLICT ({key}) DO NOTHING")),
+        Clause::Update => sql.push_str(&format!(" ON CONFLICT ({key}) DO UPDATE SET {}", sets.join(", "))),
     }
-    if !returning.is_empty() {
-        sql.push_str(&format!(" RETURNING {}", returning.iter().map(|n| format!("{}::text", d.quote_ident(n))).collect::<Vec<_>>().join(", ")));
+    let mut ret: Vec<String> = returning.iter().map(|n| format!("{}::text", d.quote_ident(n))).collect();
+    if flag {
+        ret.push("(xmax = 0)::text".into());
+    }
+    if !ret.is_empty() {
+        sql.push_str(&format!(" RETURNING {}", ret.join(", ")));
     }
     (sql, params)
 }
 
 /// The rows of the batch that already exist, read with their old values and locked until the import ends, so what is saved
 /// for Undo is what the update overwrites. `keys` are the key values of the rows, one entry per key column.
-fn read_old_sql(schema: &str, table: &str, cols: &[&TCol], names: &[String], keys: Vec<Vec<Param>>) -> (String, Vec<Param>) {
+fn read_old_sql(schema: &str, table: &str, only: bool, cols: &[&TCol], names: &[String], keys: Vec<Vec<Param>>) -> (String, Vec<Param>) {
     let d = Dialect::Postgres;
     let list = names.iter().map(|n| format!("{}::text", d.quote_ident(n))).collect::<Vec<_>>().join(", ");
     let key = cols.iter().map(|c| d.quote_ident(&c.name)).collect::<Vec<_>>().join(", ");
@@ -156,7 +205,7 @@ fn read_old_sql(schema: &str, table: &str, cols: &[&TCol], names: &[String], key
             format!("({})", cells.join(", "))
         })
         .collect();
-    (format!("SELECT {list} FROM {} WHERE ({key}) IN ({}) FOR UPDATE", d.qualified(schema, table), tuples.join(", ")), params)
+    (format!("SELECT {list} FROM {} WHERE ({key}) IN ({}) FOR UPDATE", target(schema, table, only), tuples.join(", ")), params)
 }
 
 /// What an import records for Undo while it runs.
@@ -222,6 +271,8 @@ struct Imp<'a> {
     rec_names: Vec<String>,
     /// Whether an update has anything to set, that is a mapped column that is not part of the key.
     has_set: bool,
+    /// A plain table that may have inheritance children: its rows are read and written with ONLY.
+    only: bool,
     rec: Rec,
     why_not: Option<String>,
     flat: Vec<Param>,
@@ -251,12 +302,14 @@ impl Imp<'_> {
         }
         let (w, plan) = (self.mapped.len(), self.plan);
         let update = plan.dup == Dup::Update && self.has_set;
+        // Only an update can touch a row that was not inserted, and only it needs the statement to say which was which.
+        let flag = self.rec.on || update;
         let mut old: HashMap<Cellz, Cellz> = HashMap::new();
         if let (true, Some(at)) = (update, &self.key_at) {
             let keys: Vec<Vec<Param>> = (0..n).map(|r| at.iter().map(|&j| self.flat[r * w + j].clone()).collect::<Vec<_>>()).filter(|k| !k.iter().any(|p| *p == Param::Null)).collect();
             if !keys.is_empty() {
                 let key_cols: Vec<&TCol> = at.iter().map(|&j| self.mapped[j]).collect();
-                let (sql, params) = read_old_sql(self.schema, self.table, &key_cols, &self.rec_names, keys);
+                let (sql, params) = read_old_sql(self.schema, self.table, self.only, &key_cols, &self.rec_names, keys);
                 let rows = tx.fetch_bound(&sql, &params).await.map_err(|x| message(self.range(), x))?;
                 for r in &rows {
                     let row = cells_of(r, self.rec_names.len());
@@ -265,30 +318,41 @@ impl Imp<'_> {
             }
         }
         let returning: &[String] = if self.rec.on { &self.rec_names } else { &[] };
-        let (sql, params) = insert_sql(self.schema, self.table, &self.mapped, std::mem::take(&mut self.flat), n, plan.dup, &plan.info.pk, returning);
+        let (sql, params) = insert_sql(self.schema, self.table, &self.mapped, std::mem::take(&mut self.flat), n, plan.dup, &plan.info.pk, returning, flag);
         let started = Instant::now();
-        let (affected, rows) = if self.rec.on {
+        let rows = if flag {
             let rows = tx.fetch_bound(&sql, &params).await;
             self.db.note(self.schema, &sql, started, &rows);
-            let rows = rows.map_err(|x| message(self.range(), x))?;
-            (rows.len() as u64, rows)
+            rows.map_err(|x| message(self.range(), x))?
         } else {
             let r = tx.exec_bound(&sql, &params).await;
             self.db.note(self.schema, &sql, started, &r);
-            (r.map_err(|x| message(self.range(), x))?.rows_affected(), Vec::new())
+            self.inserted_n += r.map_err(|x| message(self.range(), x))?.rows_affected();
+            Vec::new()
         };
-        // An update statement reports the rows it overwrote too, and the read before it says which those were.
-        self.inserted_n += affected.saturating_sub(old.len() as u64);
-        if self.rec.on {
-            for r in &rows {
-                let row = cells_of(r, self.rec_names.len());
-                let was = old.get(&row[..plan.info.pk.len()]);
-                self.rec.add(row, was);
+        let width = if self.rec.on { self.rec_names.len() } else { 0 };
+        for r in &rows {
+            // The server's own word on whether it inserted the row or updated one that was there.
+            let new = r.cell(width).is_some_and(|b| b == b"true");
+            self.inserted_n += new as u64;
+            if !self.rec.on {
+                continue;
             }
-            if self.rec.full() {
-                self.rec.drop_all();
-                self.why_not = Some(format!("Over {UNDO_MAX_ROWS} rows or too much data: no undo is recorded for an import this large."));
+            let row = cells_of(r, width);
+            match (new, old.get(&row[..plan.info.pk.len()])) {
+                (true, _) => self.rec.add(row, None),
+                (false, Some(was)) => self.rec.add(row, Some(was)),
+                // An existing row was overwritten that this import had not read: its key is not in the file, is empty there and
+                // the sequence ran into it, or another session inserted it meanwhile. Its old values are lost, so no undo.
+                (false, None) => {
+                    self.rec.drop_all();
+                    self.why_not = Some("A row of the file overwrote an existing row whose old values the import could not read first (its key is empty in the file or not in it, or another session added it meanwhile), so Undo could not put it back. No undo is recorded.".into());
+                }
             }
+        }
+        if self.rec.on && self.rec.full() {
+            self.rec.drop_all();
+            self.why_not = Some(format!("Over {UNDO_MAX_ROWS} rows or too much data: no undo is recorded for an import this large."));
         }
         prog.rows.fetch_add(n as u64, Ordering::Relaxed);
         prog.bytes.store(bytes, Ordering::Relaxed);
@@ -310,6 +374,9 @@ pub async fn run(db: &Db, schema: &str, table: &str, plan: &ImportPlan, conn: u6
     }
     if plan.dup == Dup::Update && plan.info.pk.is_empty() {
         return Err(NEEDS_KEY.into());
+    }
+    if plan.dup != Dup::Stop && plan.info.pk_deferrable {
+        return Err(DEFERRABLE_KEY.into());
     }
     let mut c = writer_conn(db, schema, read_only).await?;
     // The pid lets Stop cancel a statement that is running; behind a pooler there is none and Stop acts between batches.
@@ -343,11 +410,12 @@ async fn import_on(c: &mut Conn, db: &Db, schema: &str, table: &str, plan: &Impo
         }
     }
     let rec = Rec { on, track: plan.dup == Dup::Update, n_pk: pk.len(), inserted: Vec::new(), ins_at: HashMap::new(), updated: Vec::new(), upd_at: HashMap::new(), bytes: 0 };
-    let mut imp = Imp { db, schema, table, plan, mapped, key_at, rec_names, has_set, rec, why_not, flat: Vec::new(), in_batch: 0, batch_bytes: 0, first_row: 0, seen: HashSet::new(), inserted_n: 0 };
     let mut tx = c.begin_write().await.map_err(se)?;
     // The types in the statements were read under this path, so they resolve to the same types here.
     let path = format!("SET LOCAL search_path = {}", Dialect::Postgres.quote_ident(schema));
     tx.exec_bound(&path, &[]).await.map_err(se)?;
+    let only = is_plain_table(&mut tx, schema, table).await?;
+    let mut imp = Imp { db, schema, table, plan, mapped, key_at, rec_names, has_set, only, rec, why_not, flat: Vec::new(), in_batch: 0, batch_bytes: 0, first_row: 0, seen: HashSet::new(), inserted_n: 0 };
     let done = read_file(&mut tx, &mut imp, prog, cancel, per).await;
     let rows = match done {
         Ok(rows) => rows,
@@ -356,16 +424,28 @@ async fn import_on(c: &mut Conn, db: &Db, schema: &str, table: &str, plan: &Impo
             return Err(x);
         }
     };
-    tx.commit().await.map_err(|x| format!("The server did not confirm the import ({}). Check the table: it may or may not have been applied.", se(x)))?;
-    let Imp { rec, why_not, inserted_n, mapped, rec_names, .. } = imp;
+    // An error the server sends for COMMIT (a deferred constraint, a cancel) means the transaction was rolled back. Only a lost
+    // connection leaves it open whether the commit went through.
+    tx.commit().await.map_err(|x| match x.as_database_error() {
+        Some(_) => format!("The server refused the import when it was committed ({}). It was rolled back: nothing was imported.", se(x)),
+        None => format!("The server did not confirm the import ({}). Check the table: it may or may not have been applied.", se(x)),
+    })?;
+    let Imp { rec, why_not, inserted_n, mapped, rec_names, only, .. } = imp;
     let undo = (rec.on && !(rec.inserted.is_empty() && rec.updated.is_empty())).then(|| {
         let by_name = |n: &str| mapped.iter().copied().chain(plan.info.cols.iter()).find(|c| c.name == n).map(ucol);
         let cols: Vec<UCol> = rec_names.iter().filter_map(|n| by_name(n)).collect();
-        let u = ImportUndo { pk: pk.clone(), cols, inserted: rec.inserted, updated: rec.updated };
+        let u = ImportUndo { pk: pk.clone(), cols, only, inserted: rec.inserted, updated: rec.updated };
         let all: Vec<Col> = plan.info.cols.iter().map(|c| Col { generated: c.generated, auto_increment: c.auto_increment, src: c.name.clone(), ..Col::plain(&c.name, &c.full_type, c.kind, c.nullable) }).collect();
         action(db.pg_database(), conn, schema, table, &all, SqlUndo::Import(Arc::new(u)))
     });
     Ok(Done { rows, inserted: inserted_n, undo, why_not })
+}
+
+/// Whether the table is a plain one (not partitioned, not a view), the only kind that has inheritance children to leave out.
+async fn is_plain_table(tx: &mut Tx<'_>, schema: &str, table: &str) -> Res<bool> {
+    let sql = "SELECT c.relkind::text FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2";
+    let rows = tx.fetch_bound(sql, &[Param::Text(schema.into()), Param::Text(table.into())]).await.map_err(se)?;
+    Ok(rows.first().and_then(|r| r.cell(0)).is_some_and(|b| b == b"r"))
 }
 
 /// Reads the file and sends it in batches. Returns the rows read.
@@ -416,21 +496,19 @@ async fn read_file(tx: &mut Tx<'_>, imp: &mut Imp<'_>, prog: &Progress, cancel: 
     Ok(rows)
 }
 
-fn same(c: &UCol, left: &str, right: &str) -> String {
-    if c.as_text { format!("{left}::text IS NOT DISTINCT FROM {right}::text") } else { format!("{left} IS NOT DISTINCT FROM {right}") }
-}
-
-fn values(cols: &[&UCol], rows: &[Vec<&Option<String>>]) -> (String, Vec<Param>) {
+/// A VALUES list with each column bound as the type given for it. The old and new values of a row travel as text, the form the
+/// server printed them in, and are compared as text.
+fn values(types: &[&str], rows: &[Vec<&Option<String>>]) -> (String, Vec<Param>) {
     let mut params = Vec::new();
     let tuples: Vec<String> = rows
         .iter()
         .map(|r| {
             let cells: Vec<String> = r
                 .iter()
-                .zip(cols)
-                .map(|(v, c)| {
+                .zip(types)
+                .map(|(v, ty)| {
                     params.push(v.as_ref().map_or(Param::Null, |s| Param::Text(s.clone())));
-                    format!("CAST(${} AS {})", params.len(), c.ty)
+                    format!("CAST(${} AS {ty})", params.len())
                 })
                 .collect();
             format!("({})", cells.join(", "))
@@ -444,27 +522,27 @@ pub fn restore_sql(schema: &str, table: &str, u: &ImportUndo, rows: &[(Cellz, Ce
     let d = Dialect::Postgres;
     let n_pk = u.pk.len();
     let rest: Vec<&UCol> = u.cols[n_pk..].iter().collect();
-    // The columns of the VALUES list: the key, the old values, the values the import left.
-    let order: Vec<&UCol> = u.cols[..n_pk].iter().chain(rest.iter().copied()).chain(rest.iter().copied()).collect();
+    // The columns of the VALUES list: the key as its type, then the old values and the values the import left, both as text.
+    let types: Vec<&str> = u.cols[..n_pk].iter().map(|c| c.ty.as_str()).chain(std::iter::repeat_n("text", 2 * rest.len())).collect();
     let list: Vec<Vec<&Option<String>>> = rows.iter().map(|(old, new)| old.iter().chain(new[n_pk..].iter()).collect()).collect();
-    let (tuples, params) = values(&order, &list);
-    let names: Vec<String> = (0..order.len()).map(|i| format!("v{i}")).collect();
-    let sets = rest.iter().enumerate().map(|(i, c)| format!("{} = v.v{}", d.quote_ident(&c.name), n_pk + i)).collect::<Vec<_>>().join(", ");
+    let (tuples, params) = values(&types, &list);
+    let names: Vec<String> = (0..types.len()).map(|i| format!("v{i}")).collect();
+    let sets = rest.iter().enumerate().map(|(i, c)| format!("{} = CAST(v.v{} AS {})", d.quote_ident(&c.name), n_pk + i, c.ty)).collect::<Vec<_>>().join(", ");
     let mut conds: Vec<String> = u.cols[..n_pk].iter().enumerate().map(|(i, c)| format!("t.{} = v.v{i}", d.quote_ident(&c.name))).collect();
-    conds.extend(rest.iter().enumerate().map(|(i, c)| same(c, &format!("t.{}", d.quote_ident(&c.name)), &format!("v.v{}", n_pk + rest.len() + i))));
-    (format!("UPDATE {} AS t SET {sets} FROM (VALUES {tuples}) AS v({}) WHERE {}", d.qualified(schema, table), names.join(", "), conds.join(" AND ")), params)
+    conds.extend(rest.iter().enumerate().map(|(i, c)| format!("t.{}::text IS NOT DISTINCT FROM v.v{}", d.quote_ident(&c.name), n_pk + rest.len() + i)));
+    (format!("UPDATE {} AS t SET {sets} FROM (VALUES {tuples}) AS v({}) WHERE {}", target(schema, table, u.only), names.join(", "), conds.join(" AND ")), params)
 }
 
 /// The DELETE that removes inserted rows, each only while every value is still the one the import stored.
 pub fn remove_sql(schema: &str, table: &str, u: &ImportUndo, rows: &[Cellz]) -> (String, Vec<Param>) {
     let d = Dialect::Postgres;
-    let order: Vec<&UCol> = u.cols.iter().collect();
-    let list: Vec<Vec<&Option<String>>> = rows.iter().map(|r| r.iter().collect()).collect();
-    let (tuples, params) = values(&order, &list);
-    let names: Vec<String> = (0..order.len()).map(|i| format!("v{i}")).collect();
     let n_pk = u.pk.len();
-    let conds: Vec<String> = u.cols.iter().enumerate().map(|(i, c)| if i < n_pk { format!("t.{} = v.v{i}", d.quote_ident(&c.name)) } else { same(c, &format!("t.{}", d.quote_ident(&c.name)), &format!("v.v{i}")) }).collect();
-    (format!("DELETE FROM {} AS t USING (VALUES {tuples}) AS v({}) WHERE {}", d.qualified(schema, table), names.join(", "), conds.join(" AND ")), params)
+    let types: Vec<&str> = u.cols.iter().enumerate().map(|(i, c)| if i < n_pk { c.ty.as_str() } else { "text" }).collect();
+    let list: Vec<Vec<&Option<String>>> = rows.iter().map(|r| r.iter().collect()).collect();
+    let (tuples, params) = values(&types, &list);
+    let names: Vec<String> = (0..types.len()).map(|i| format!("v{i}")).collect();
+    let conds: Vec<String> = u.cols.iter().enumerate().map(|(i, c)| if i < n_pk { format!("t.{} = v.v{i}", d.quote_ident(&c.name)) } else { format!("t.{}::text IS NOT DISTINCT FROM v.v{i}", d.quote_ident(&c.name)) }).collect();
+    (format!("DELETE FROM {} AS t USING (VALUES {tuples}) AS v({}) WHERE {}", target(schema, table, u.only), names.join(", "), conds.join(" AND ")), params)
 }
 
 /// Undoes an import in one transaction. A row that no longer holds what the import left, or is gone, refuses the whole undo
@@ -516,10 +594,13 @@ async fn undo_in(db: &Db, schema: &str, table: &str, u: &ImportUndo, tx: &mut Tx
 
 #[cfg(test)]
 mod tests {
+    use super::super::value::Kind;
     use super::*;
 
     fn col(name: &str, ty: &str, auto: bool) -> TCol {
-        TCol { name: name.into(), full_type: ty.into(), kind: Kind::Text, nullable: true, auto_increment: auto, generated: false, fills_itself: true, max_chars: None, choices: Vec::new(), pg: true }
+        // The cast type is the bare type: `character varying(20)` is cast as `character varying`.
+        let cast = ty.split('(').next().unwrap_or(ty);
+        TCol { name: name.into(), full_type: ty.into(), cast_type: cast.into(), kind: Kind::Text, nullable: true, auto_increment: auto, generated: false, fills_itself: true, max_chars: None, choices: Vec::new(), pg: true }
     }
 
     fn t(s: &str) -> Param {
@@ -543,19 +624,20 @@ mod tests {
     fn statements_cast_every_placeholder_and_quote_every_name() {
         let (a, b) = (col("id", "integer", true), col("na\"me", "character varying(20)", false));
         let key = vec!["id".to_string()];
-        let (sql, params) = insert_sql("my s", "t\"x", &[&a, &b], vec![t("1"), t("x'; DROP TABLE t; --"), Param::Null, Param::Null], 2, Dup::Stop, &key, &[]);
-        assert_eq!(sql, "INSERT INTO \"my s\".\"t\"\"x\" (\"id\", \"na\"\"me\") VALUES (CAST($1 AS integer), CAST($2 AS character varying(20))), (DEFAULT, CAST($3 AS character varying(20)))");
+        let (sql, params) = insert_sql("my s", "t\"x", &[&a, &b], vec![t("1"), t("x'; DROP TABLE t; --"), Param::Null, Param::Null], 2, Dup::Stop, &key, &[], false);
+        // The length is left out of the cast, so the INSERT checks it.
+        assert_eq!(sql, "INSERT INTO \"my s\".\"t\"\"x\" (\"id\", \"na\"\"me\") VALUES (CAST($1 AS integer), CAST($2 AS character varying)), (DEFAULT, CAST($3 AS character varying))");
         assert_eq!(params, vec![t("1"), t("x'; DROP TABLE t; --"), Param::Null]);
         let ret = vec!["id".to_string(), "na\"me".to_string()];
-        let (sql, _) = insert_sql("s", "t", &[&a, &b], vec![t("1"), t("x")], 1, Dup::Skip, &key, &ret);
-        assert_eq!(sql, "INSERT INTO \"s\".\"t\" (\"id\", \"na\"\"me\") VALUES (CAST($1 AS integer), CAST($2 AS character varying(20))) ON CONFLICT (\"id\") DO NOTHING RETURNING \"id\"::text, \"na\"\"me\"::text");
-        let (sql, _) = insert_sql("s", "t", &[&a, &b], vec![t("1"), t("x")], 1, Dup::Update, &key, &[]);
+        let (sql, _) = insert_sql("s", "t", &[&a, &b], vec![t("1"), t("x")], 1, Dup::Skip, &key, &ret, true);
+        assert_eq!(sql, "INSERT INTO \"s\".\"t\" (\"id\", \"na\"\"me\") VALUES (CAST($1 AS integer), CAST($2 AS character varying)) ON CONFLICT (\"id\") DO NOTHING RETURNING \"id\"::text, \"na\"\"me\"::text, (xmax = 0)::text");
+        let (sql, _) = insert_sql("s", "t", &[&a, &b], vec![t("1"), t("x")], 1, Dup::Update, &key, &[], false);
         assert!(sql.ends_with(" ON CONFLICT (\"id\") DO UPDATE SET \"na\"\"me\" = EXCLUDED.\"na\"\"me\""), "{sql}");
         // Only the key is filled: nothing to set, so the conflicting row stays.
-        let (sql, _) = insert_sql("s", "t", &[&a], vec![t("1")], 1, Dup::Update, &key, &[]);
+        let (sql, _) = insert_sql("s", "t", &[&a], vec![t("1")], 1, Dup::Update, &key, &[], false);
         assert!(sql.ends_with(" ON CONFLICT (\"id\") DO NOTHING"), "{sql}");
         // A table without a key skips on any unique constraint.
-        let (sql, _) = insert_sql("s", "t", &[&b], vec![t("1")], 1, Dup::Skip, &[], &[]);
+        let (sql, _) = insert_sql("s", "t", &[&b], vec![t("1")], 1, Dup::Skip, &[], &[], false);
         assert!(sql.ends_with(" ON CONFLICT DO NOTHING"), "{sql}");
     }
 
@@ -563,7 +645,7 @@ mod tests {
     fn old_rows_are_read_by_their_typed_key_and_locked() {
         let (a, b) = (col("a", "integer", false), col("b", "text", false));
         let names = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let (sql, params) = read_old_sql("s", "t", &[&a, &b], &names, vec![vec![t("1"), t("x")], vec![t("2"), t("y")]]);
+        let (sql, params) = read_old_sql("s", "t", false, &[&a, &b], &names, vec![vec![t("1"), t("x")], vec![t("2"), t("y")]]);
         assert_eq!(sql, "SELECT \"a\"::text, \"b\"::text, \"c\"::text FROM \"s\".\"t\" WHERE (\"a\", \"b\") IN ((CAST($1 AS integer), CAST($2 AS text)), (CAST($3 AS integer), CAST($4 AS text))) FOR UPDATE");
         assert_eq!(params.len(), 4);
     }
@@ -572,15 +654,22 @@ mod tests {
     fn an_undo_compares_every_value_and_binds_them_all() {
         let u = ImportUndo {
             pk: vec!["id".into()],
-            cols: vec![UCol { name: "id".into(), ty: "integer".into(), as_text: false }, UCol { name: "doc".into(), ty: "json".into(), as_text: true }, UCol { name: "n".into(), ty: "numeric(10,2)".into(), as_text: false }],
+            cols: vec![UCol { name: "id".into(), ty: "integer".into() }, UCol { name: "doc".into(), ty: "json".into() }, UCol { name: "n".into(), ty: "numeric(10,2)".into() }],
+            only: false,
             inserted: vec![vec![Some("1".into()), None, Some("1.50".into())]],
             updated: vec![(vec![Some("2".into()), Some("{}".into()), Some("2.00".into())], vec![Some("2".into()), Some("[1]".into()), Some("3.00".into())])],
         };
         let (sql, params) = remove_sql("s", "t", &u, &u.inserted);
-        assert_eq!(sql, "DELETE FROM \"s\".\"t\" AS t USING (VALUES (CAST($1 AS integer), CAST($2 AS json), CAST($3 AS numeric(10,2)))) AS v(v0, v1, v2) WHERE t.\"id\" = v.v0 AND t.\"doc\"::text IS NOT DISTINCT FROM v.v1::text AND t.\"n\" IS NOT DISTINCT FROM v.v2");
+        // The key is compared by its own equality, every other value as the text the server printed.
+        assert_eq!(sql, "DELETE FROM \"s\".\"t\" AS t USING (VALUES (CAST($1 AS integer), CAST($2 AS text), CAST($3 AS text))) AS v(v0, v1, v2) WHERE t.\"id\" = v.v0 AND t.\"doc\"::text IS NOT DISTINCT FROM v.v1 AND t.\"n\"::text IS NOT DISTINCT FROM v.v2");
         assert_eq!(params, vec![t("1"), Param::Null, t("1.50")]);
         let (sql, params) = restore_sql("s", "t", &u, &u.updated);
-        assert_eq!(sql, "UPDATE \"s\".\"t\" AS t SET \"doc\" = v.v1, \"n\" = v.v2 FROM (VALUES (CAST($1 AS integer), CAST($2 AS json), CAST($3 AS numeric(10,2)), CAST($4 AS json), CAST($5 AS numeric(10,2)))) AS v(v0, v1, v2, v3, v4) WHERE t.\"id\" = v.v0 AND t.\"doc\"::text IS NOT DISTINCT FROM v.v3::text AND t.\"n\" IS NOT DISTINCT FROM v.v4");
+        assert_eq!(sql, "UPDATE \"s\".\"t\" AS t SET \"doc\" = CAST(v.v1 AS json), \"n\" = CAST(v.v2 AS numeric(10,2)) FROM (VALUES (CAST($1 AS integer), CAST($2 AS text), CAST($3 AS text), CAST($4 AS text), CAST($5 AS text))) AS v(v0, v1, v2, v3, v4) WHERE t.\"id\" = v.v0 AND t.\"doc\"::text IS NOT DISTINCT FROM v.v3 AND t.\"n\"::text IS NOT DISTINCT FROM v.v4");
+        // An inheritance parent is read, updated and deleted without its children.
+        let only = ImportUndo { pk: u.pk.clone(), cols: u.cols.clone(), only: true, inserted: Vec::new(), updated: Vec::new() };
+        assert!(remove_sql("s", "t", &only, &u.inserted).0.starts_with("DELETE FROM ONLY \"s\".\"t\" AS t"));
+        assert!(restore_sql("s", "t", &only, &u.updated).0.starts_with("UPDATE ONLY \"s\".\"t\" AS t"));
+        assert!(read_old_sql("s", "t", true, &[&col("a", "integer", false)], &["a".to_string()], vec![vec![t("1")]]).0.contains("FROM ONLY \"s\".\"t\" WHERE"));
         assert_eq!(params, vec![t("2"), t("{}"), t("2.00"), t("[1]"), t("3.00")]);
         assert_eq!(u.describe(), "imported 1 row and updated 1 row");
     }
@@ -603,8 +692,17 @@ mod tests {
     }
 
     #[test]
+    fn the_dialog_text_says_what_the_statement_does() {
+        assert_eq!(Clause::of(Dup::Skip, false, true).text(), "INSERT ... ON CONFLICT DO NOTHING");
+        assert_eq!(Clause::of(Dup::Skip, true, true).text(), "INSERT ... ON CONFLICT (KEY) DO NOTHING");
+        assert_eq!(Clause::of(Dup::Update, true, false).text(), "INSERT ... ON CONFLICT (KEY) DO NOTHING");
+        assert_eq!(Clause::of(Dup::Update, true, true).text(), "INSERT ... ON CONFLICT (KEY) DO UPDATE");
+        assert_eq!(Clause::of(Dup::Stop, true, true).text(), "INSERT, STOPS AT A DUPLICATE");
+    }
+
+    #[test]
     fn undo_needs_a_key_and_a_file_that_fits() {
-        let mut info = TableInfo { cols: vec![col("id", "integer", true)], pk: vec!["id".into()], engine: String::new(), pg: true };
+        let mut info = TableInfo { cols: vec![col("id", "integer", true)], pk: vec!["id".into()], engine: String::new(), pg: true, pk_deferrable: false };
         assert!(undo_plan(&info, Dup::Update, 10).is_ok() && undo_plan(&info, Dup::Skip, 10).is_ok());
         assert!(undo_plan(&info, Dup::Stop, UNDO_MAX_ROWS + 1).unwrap_err().contains("Over"));
         info.pk.clear();

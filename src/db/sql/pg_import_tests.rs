@@ -370,10 +370,11 @@ fn live_names_and_types_outside_public_and_in_other_cases_resolve_like_the_read(
             "PgCsv Case",
             "CREATE TYPE feeling AS ENUM ('glad', 'sad'); CREATE DOMAIN pos AS int CHECK (VALUE > 0); CREATE TABLE \"Mixed\" (id int PRIMARY KEY, \"Name\" text, name text, f feeling, p pos, \"ARR\" feeling[])",
         );
-        let csv = "id,Name,name,f,p,ARR\n1,upper,lower,glad,5,\"{glad,sad}\"\n";
+        // The lower case name comes first in the header, the unfavourable order: a match ignoring case would give it "Name".
+        let csv = "id,name,Name,f,p,ARR\n1,lower,upper,glad,5,\"{glad,sad}\"\n";
         let plan = f.plan("Mixed", csv, Dup::Stop);
-        // Case matters: the file's `Name` goes to "Name", and `name` to name. No column is found by another case.
-        assert_eq!(plan.map.map, vec![Some(0), Some(1), Some(2), Some(3), Some(4), Some(5)], "{var}");
+        // Case matters: the file's `Name` goes to "Name", and `name` to name. No column is found by another case while its own exists.
+        assert_eq!(plan.map.map, vec![Some(0), Some(2), Some(1), Some(3), Some(4), Some(5)], "{var}");
         let done = f.run("Mixed", &plan).0.unwrap_or_else(|x| panic!("{var}: {x}"));
         assert_eq!(f.one("SELECT \"Name\" || '/' || name || '/' || f || '/' || p || '/' || \"ARR\"::text FROM \"Mixed\""), "upper/lower/glad/5/{glad,sad}", "{var}");
         assert_eq!(l.qone(&f.pool, "SELECT count(*) FROM public.\"Mixed\""), "0", "{var}: the table of another schema is untouched");
@@ -492,4 +493,223 @@ fn live_the_import_and_its_undo_work_behind_a_transaction_pooler() {
     let e = f.run("p", &f.plan("p", "id,v,w\n5,a,1\n1,dup,1\n", Dup::Stop)).0.err().unwrap();
     assert!(e.contains("duplicate key") && e.contains("Nothing was imported"), "{e}");
     assert_eq!(state(), "1:old:1");
+}
+
+#[test]
+fn live_update_never_records_an_overwritten_row_as_inserted() {
+    every_pg(|l, var| {
+        let f = fixture(l, "pgcsv_unread", "CREATE TABLE s (id serial PRIMARY KEY, v text)");
+        let reset = || f.sql("TRUNCATE s; ALTER SEQUENCE s_id_seq RESTART WITH 1; INSERT INTO s (id, v) VALUES (1, 'precious'), (2, 'other'); ALTER SEQUENCE s_id_seq RESTART WITH 1");
+        let state = || f.one("SELECT string_agg(id || ':' || v, ',' ORDER BY id) FROM s");
+        // The key is not in the file, the sequence is behind the explicit ids and hands out 1, which exists.
+        reset();
+        let done = f.import("s", "v\nnew\n", Dup::Update);
+        assert_eq!(state(), "1:new,2:other", "{var}");
+        assert_eq!(done.inserted, 0, "{var}: the row was updated, not inserted");
+        assert!(done.undo.is_none() && done.why_not.is_some(), "{var}: no undo that could delete a row that was there before: {:?}", done.why_not);
+        // The key is in the file and empty: a NULL in a counting column is DEFAULT, which runs into the same row.
+        reset();
+        let done = f.import("s", "id,v\n,again\n", Dup::Update);
+        assert_eq!((state().as_str(), done.inserted), ("1:again,2:other", 0), "{var}");
+        assert!(done.undo.is_none(), "{var}");
+        // A file with new rows and one such row still imports all of them.
+        reset();
+        let done = f.import("s", "v\nx\ny\nz\n", Dup::Update);
+        assert_eq!((state().as_str(), done.inserted), ("1:x,2:y,3:z", 1), "{var}");
+        assert!(done.undo.is_none(), "{var}");
+        // With the key in the file the old values are read first, so an update keeps its undo.
+        reset();
+        let plan = f.plan("s", "id,v\n1,new\n3,three\n", Dup::Update);
+        let done = f.run("s", &plan).0.unwrap();
+        assert_eq!(done.inserted, 1, "{var}");
+        f.undo(done.undo.unwrap_or_else(|| panic!("{var}: {:?}", done.why_not)), &pk_of(&plan)).0.unwrap();
+        assert_eq!(state(), "1:precious,2:other", "{var}");
+    });
+}
+
+#[test]
+fn live_a_value_longer_than_its_column_is_refused_as_a_plain_insert_refuses_it() {
+    every_pg(|l, var| {
+        let f = fixture(
+            l,
+            "pgcsv_length",
+            "CREATE DOMAIN d3 AS varchar(3); CREATE DOMAIN dn AS numeric(5,2); CREATE TABLE t (id serial PRIMARY KEY, va varchar(3)[], ca char(3)[], b4 bit(4), vb4 bit varying(4), c3 char(3), d d3, da d3[], n numeric(5,2), dnn dn, t2 timestamp(0))",
+        );
+        for (col, bad) in [("va", "{abcdef}"), ("ca", "{abcdef}"), ("b4", "010111"), ("b4", "01"), ("vb4", "010111"), ("d", "abcdef"), ("da", "{abcdef}"), ("n", "123456")] {
+            let plan = f.plan("t", &format!("{col}\n\"{bad}\"\n"), Dup::Stop);
+            let e = f.run("t", &plan).0.err().unwrap_or_else(|| panic!("{var}: {col} = {bad} was accepted"));
+            assert!(e.contains("Nothing was imported") && (e.contains("too long") || e.contains("does not match") || e.contains("overflow")), "{var}: {col} = {bad}: {e}");
+            assert_eq!(f.count("t"), 0, "{var}: {col} = {bad}");
+        }
+        // What fits goes in, and the precision of numeric rounds as a plain INSERT rounds.
+        let csv = "va,ca,b4,vb4,c3,d,da,n,dnn,t2\n\"{abc,d}\",\"{ab}\",0101,01,ab,abc,\"{abc}\",1.555,2.345,2026-01-01 10:00:00.6\n";
+        let plan = f.plan("t", csv, Dup::Stop);
+        let done = f.run("t", &plan).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(f.one("SELECT va::text || '/' || ca::text || '/' || b4 || '/' || vb4 || '/' || octet_length(c3) || '/' || d ||'/' || da::text || '/' || n || '/' || dnn || '/' || t2 FROM t"), "{abc,d}/{\"ab \"}/0101/01/3/abc/{abc}/1.56/2.35/2026-01-01 10:00:01", "{var}");
+        f.undo(done.undo.unwrap(), &pk_of(&plan)).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(f.count("t"), 0, "{var}");
+    });
+}
+
+#[test]
+fn live_undo_compares_the_text_so_types_without_equality_work_and_coarse_equality_cannot_hide_an_edit() {
+    every_pg(|l, var| {
+        let f = fixture(l, "pgcsv_text", "CREATE TABLE t (id int PRIMARY KEY, p point, pg polygon, pa path, ja json[], iv interval, n numeric, f float8, bx box, cr circle)");
+        // Types with no equality operator: the undo runs.
+        let plan = f.plan("t", "id,p,pg,pa,ja,bx,cr\n1,\"(1,2)\",\"((0,0),(1,1),(2,0))\",\"[(0,0),(1,1)]\",\"{\"\"{\\\"\"a\\\"\":1}\"\"}\",\"(1,1),(0,0)\",\"<(0,0),2>\"\n", Dup::Stop);
+        let done = f.run("t", &plan).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        let (res, _) = f.undo(done.undo.unwrap_or_else(|| panic!("{var}: {:?}", done.why_not)), &pk_of(&plan));
+        res.unwrap_or_else(|x| panic!("{var}: undo with point, polygon, path, json[]: {x}"));
+        assert_eq!(f.count("t"), 0, "{var}");
+        // Types whose equality is coarser than their text: an edit to an equal value still refuses the undo.
+        for (i, (col, put, edit)) in [("iv", "1 mon", "30 days"), ("n", "1.5", "1.50"), ("f", "0", "-0"), ("bx", "(2,1),(0,0)", "(1,2),(0,0)")].into_iter().enumerate() {
+            let plan = f.plan("t", &format!("id,{col}\n{},\"{put}\"\n", i + 10), Dup::Stop);
+            let done = f.run("t", &plan).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+            f.sql(&format!("UPDATE t SET {col} = '{edit}' WHERE id = {}", i + 10));
+            let edited = f.one(&format!("SELECT {col}::text FROM t WHERE id = {}", i + 10));
+            let (res, back) = f.undo(done.undo.unwrap(), &pk_of(&plan));
+            assert_eq!(res.err().as_deref(), Some(CONFLICT), "{var}: {col} {put} edited to {edit} must refuse the undo");
+            assert_eq!(f.one(&format!("SELECT {col}::text FROM t WHERE id = {}", i + 10)), edited, "{var}: {col}: the edit stays");
+            f.sql(&format!("UPDATE t SET {col} = '{put}' WHERE id = {}", i + 10));
+            f.undo(back.unwrap(), &pk_of(&plan)).0.unwrap_or_else(|x| panic!("{var}: {col}: {x}"));
+        }
+        assert_eq!(f.count("t"), 0, "{var}");
+        // An update puts back an old value of such a type too.
+        f.sql("INSERT INTO t (id, iv, p) VALUES (1, '30 days', '(1,1)')");
+        let plan = f.plan("t", "id,iv,p\n1,1 mon,\"(2,2)\"\n", Dup::Update);
+        let done = f.run("t", &plan).0.unwrap();
+        f.undo(done.undo.unwrap(), &pk_of(&plan)).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(f.one("SELECT iv::text || '/' || p::text FROM t"), "30 days/(1,1)", "{var}");
+    });
+}
+
+#[test]
+fn live_stop_cancels_the_running_statement_by_its_pid_and_the_transaction_rolls_back() {
+    every_pg(|l, var| {
+        let f = fixture(
+            l,
+            "pgcsv_pidstop",
+            "CREATE TABLE c (id serial PRIMARY KEY, v text); INSERT INTO c (v) VALUES ('keep'); CREATE FUNCTION slow() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(60); RETURN NEW; END $$; CREATE TRIGGER s BEFORE INSERT ON c FOR EACH ROW EXECUTE FUNCTION slow()",
+        );
+        let plan = f.plan("c", "v\nnew\n", Dup::Stop);
+        let id = Arc::new(AtomicU64::new(0));
+        let watcher = {
+            let (id, db, rt) = (id.clone(), f.db.clone(), f.l.w.rt.handle().clone());
+            std::thread::spawn(move || {
+                let t = std::time::Instant::now();
+                while id.load(Ordering::SeqCst) == 0 && t.elapsed().as_secs() < 30 {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                // The trigger is asleep by now, so the statement is the thing the server cancels.
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+                rt.block_on(super::pg::cancel(&db, id.load(Ordering::SeqCst)))
+            })
+        };
+        let started = std::time::Instant::now();
+        let prog = Progress::default();
+        let r = f.l.w.rt.block_on(run(&f.db, &f.schema, "c", &plan, 1, false, &prog, &AtomicBool::new(false), &id));
+        let stopped = watcher.join().unwrap();
+        assert_eq!(stopped.as_deref(), Ok("Stopped the running statement"), "{var}");
+        let e = r.err().unwrap_or_else(|| panic!("{var}: the cancelled statement is an error"));
+        assert!(e.contains("canceling statement") && e.contains("Nothing was imported"), "{var}: {e}");
+        assert!(started.elapsed().as_secs() < 30, "{var}: it did not wait out the sleep");
+        assert_eq!(f.one("SELECT string_agg(v, ',') FROM c"), "keep", "{var}: rolled back");
+        assert_eq!(f.one("SELECT count(*) FROM pg_stat_activity WHERE datname = 'quarry_test' AND state = 'idle in transaction' AND query LIKE '%pgcsv_pidstop%'"), "0", "{var}: no transaction is left open");
+    });
+}
+
+#[test]
+fn live_an_inheritance_parent_is_read_and_undone_without_its_children() {
+    every_pg(|l, var| {
+        let f = fixture(l, "pgcsv_inherit", "CREATE TABLE p (id int PRIMARY KEY, v text); CREATE TABLE ch () INHERITS (p); INSERT INTO ch VALUES (1, 'child')");
+        let plan = f.plan("p", "id,v\n1,mine\n", Dup::Update);
+        let done = f.run("p", &plan).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(done.inserted, 1, "{var}: the child's row is not the parent's");
+        assert_eq!(f.one("SELECT count(*) FROM ONLY p"), "1", "{var}");
+        f.undo(done.undo.unwrap_or_else(|| panic!("{var}: {:?}", done.why_not)), &pk_of(&plan)).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(f.one("SELECT count(*) FROM ONLY p"), "0", "{var}: the row the import added is gone");
+        assert_eq!(f.one("SELECT v FROM ch"), "child", "{var}: the child's row is untouched");
+    });
+}
+
+#[test]
+fn live_a_commit_the_server_refuses_says_it_was_rolled_back() {
+    every_pg(|l, var| {
+        let f = fixture(l, "pgcsv_commit", "CREATE TABLE par (id int PRIMARY KEY); CREATE TABLE ch (id serial PRIMARY KEY, pid int REFERENCES par (id) DEFERRABLE INITIALLY DEFERRED)");
+        let e = f.run("ch", &f.plan("ch", "pid\n999\n", Dup::Stop)).0.err().unwrap_or_else(|| panic!("{var}: the deferred key is checked at commit"));
+        assert!(e.contains("foreign key") && e.contains("rolled back") && !e.contains("may or may not"), "{var}: {e}");
+        assert_eq!(f.count("ch"), 0, "{var}");
+    });
+}
+
+#[test]
+fn live_skip_and_update_are_refused_on_a_deferrable_key_and_stop_works() {
+    every_pg(|l, var| {
+        let f = fixture(l, "pgcsv_defer", "CREATE TABLE dk (id int PRIMARY KEY DEFERRABLE, v text)");
+        for dup in [Dup::Skip, Dup::Update] {
+            let e = f.run("dk", &f.plan("dk", "id,v\n1,a\n", dup)).0.err().unwrap_or_else(|| panic!("{var}: {dup:?}"));
+            assert!(e.contains("primary key is DEFERRABLE"), "{var}: {e}");
+        }
+        assert_eq!(f.import("dk", "id,v\n1,a\n", Dup::Stop).inserted, 1, "{var}");
+    });
+}
+
+#[test]
+fn live_values_the_server_reads_are_not_refused_before_it_sees_them() {
+    every_pg(|l, var| {
+        let f = fixture(l, "pgcsv_lenient", "CREATE TABLE lc (id serial PRIMARY KEY, b bool, n numeric, f float8, c3 char(3), v3 varchar(3))");
+        let csv = "b,n,f,c3,v3\non,1e3,+Infinity,ab   ,abc  \ny,1.5E-2,1e3,a,a\nof,+5,-inf,,\ntr,.5,5.,abc,abc\nNO,-1.5e+2,nan,x,x\n";
+        let done = f.import("lc", csv, Dup::Stop);
+        assert_eq!(done.inserted, 5, "{var}");
+        assert_eq!(f.one("SELECT string_agg(b::text, ',' ORDER BY id) FROM lc"), "true,true,false,true,false", "{var}");
+        assert_eq!(f.one("SELECT string_agg(n::text, ',' ORDER BY id) FROM lc"), "1000,0.015,5,0.5,-150", "{var}");
+        assert_eq!(f.one("SELECT string_agg(f::text, ',' ORDER BY id) FROM lc"), "Infinity,1000,-Infinity,5,NaN", "{var}");
+        assert_eq!(f.one("SELECT octet_length(c3) || '|' || v3 FROM lc WHERE id = 1"), "3|abc", "{var}: spaces past the length are dropped as a plain INSERT drops them, and char pads");
+        // numeric reads Infinity since PostgreSQL 14.
+        if f.one("SHOW server_version_num").parse::<i32>().unwrap() >= 140000 {
+            assert_eq!(f.import("lc", "n\nInfinity\n-infinity\n", Dup::Stop).inserted, 2, "{var}");
+        }
+        let e = f.run("lc", &f.plan("lc", "c3\nabcd\n", Dup::Stop)).0.err().unwrap();
+        assert!(e.contains("4 characters") || e.contains("too long"), "{var}: {e}");
+    });
+}
+
+#[test]
+fn live_a_batch_is_cut_at_four_mebibytes_of_text() {
+    every_pg(|l, var| {
+        let f = fixture(
+            l,
+            "pgcsv_cut",
+            "CREATE TABLE big (id serial PRIMARY KEY, v text); CREATE TABLE lg (n int); CREATE FUNCTION lgf() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO lg VALUES (1); RETURN NULL; END $$; CREATE TRIGGER lgt AFTER INSERT ON big FOR EACH STATEMENT EXECUTE FUNCTION lgf()",
+        );
+        // Five cells of 2 MiB: a batch is sent once it holds 4 MiB, so two rows go in each statement, and 500 rows would not have.
+        let cell = "x".repeat(2 << 20);
+        let csv = format!("v\n{}", format!("{cell}\n").repeat(5));
+        let done = f.import("big", &csv, Dup::Stop);
+        assert_eq!(done.inserted, 5, "{var}");
+        assert_eq!(f.one("SELECT count(*) FROM lg"), "3", "{var}: statements of 2, 2 and 1 rows");
+        assert_eq!(f.count("big"), 5, "{var}");
+    });
+}
+
+#[test]
+fn live_an_import_too_big_to_undo_says_why_and_still_imports() {
+    every_pg(|l, var| {
+        let f = fixture(l, "pgcsv_nobig", "CREATE TABLE r (id serial PRIMARY KEY, v int); CREATE TABLE m (id serial PRIMARY KEY, v text)");
+        // One row over the row limit.
+        let csv = format!("v\n{}", "1\n".repeat(100_001));
+        let done = f.import("r", &csv, Dup::Stop);
+        assert_eq!(done.inserted, 100_001, "{var}");
+        assert!(done.undo.is_none() && done.why_not.as_deref().is_some_and(|w| w.contains("Over 100000 rows")), "{var}: {:?}", done.why_not);
+        assert_eq!(f.count("r"), 100_001, "{var}");
+        // Few rows, over 64 MB of data.
+        let cell = "y".repeat(1 << 20);
+        let csv = format!("v\n{}", format!("{cell}\n").repeat(70));
+        let done = f.import("m", &csv, Dup::Stop);
+        assert_eq!(done.inserted, 70, "{var}");
+        assert!(done.undo.is_none() && done.why_not.as_deref().is_some_and(|w| w.contains("too much data")), "{var}: {:?}", done.why_not);
+        // Within both limits the undo is there.
+        f.sql("TRUNCATE m");
+        assert!(f.import("m", "v\na\nb\n", Dup::Stop).undo.is_some(), "{var}");
+    });
 }

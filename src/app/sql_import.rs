@@ -252,8 +252,8 @@ impl App {
                     (Dup::Stop, _) => "INSERT, STOPS AT A DUPLICATE",
                     (Dup::Skip, false) => "INSERT ... ON DUPLICATE KEY, NO CHANGE",
                     (Dup::Update, false) => "INSERT ... ON DUPLICATE KEY UPDATE",
-                    (Dup::Skip, true) => "INSERT ... ON CONFLICT (KEY) DO NOTHING",
-                    (Dup::Update, true) => "INSERT ... ON CONFLICT (KEY) DO UPDATE",
+                    // The statement names the key only when the table has one, and updates only when the file fills a column besides it.
+                    (dup, true) => import::pg_clause_text(&info, &f.file.map, dup),
                 };
                 ui.label(RichText::new(how).font(FontId::monospace(TXT_CAPTION)).color(FAINT()));
             });
@@ -402,6 +402,8 @@ impl App {
             Some("Another import or script is running")
         } else if f.dup == Dup::Update && info.pg && info.pk.is_empty() {
             Some("Update needs a primary key")
+        } else if f.dup != Dup::Stop && info.pk_deferrable {
+            Some("The primary key is DEFERRABLE, which ON CONFLICT does not support. Choose Stop")
         } else if mapped.is_empty() {
             Some("Map at least one column")
         } else if f.file.map.duplicate_target().is_some() {
@@ -473,7 +475,7 @@ impl App {
         let Ok(mut file) = FileState::open(src, "orders-2026-11.csv".into()) else { return };
         file.size = 182 * 1024;
         let col = |name: &str, ty: &str, nullable: bool, auto: bool| db::sql::csv::TCol::from_column(&db::sql::structure::Column { name: name.into(), full_type: ty.into(), nullable, extra: if auto { "auto_increment".into() } else { String::new() }, ..Default::default() }, false);
-        let info = TableInfo { cols: vec![col("id", "int unsigned", false, true), col("customer_id", "int unsigned", false, false), col("status", "enum('pending','paid','shipped','refunded')", false, false), col("total", "decimal(10,2)", false, false), col("currency", "char(3)", false, false), col("created_at", "datetime", false, false)], pk: vec!["id".into()], engine: "InnoDB".into(), pg: false };
+        let info = TableInfo { cols: vec![col("id", "int unsigned", false, true), col("customer_id", "int unsigned", false, false), col("status", "enum('pending','paid','shipped','refunded')", false, false), col("total", "decimal(10,2)", false, false), col("currency", "char(3)", false, false), col("created_at", "datetime", false, false)], pk: vec!["id".into()], engine: "InnoDB".into(), pg: false, pk_deferrable: false };
         file.remap(&info);
         // The design maps the file's names to these columns, which only differ in spelling.
         file.map.map = vec![Some(0), Some(1), Some(2), Some(3), Some(4), Some(5), None];

@@ -51,6 +51,12 @@ pub fn batch_rows_pg(cols: usize) -> usize {
     super::import_pg::batch_rows(cols)
 }
 
+/// How the duplicate choice reads in the dialog for a PostgreSQL table: what the statement does with this mapping.
+pub fn pg_clause_text(info: &TableInfo, map: &Mapping, dup: Dup) -> &'static str {
+    let has_set = map.targets().iter().any(|(_, t)| !info.pk.contains(&info.cols[*t].name));
+    super::import_pg::Clause::of(dup, !info.pk.is_empty(), has_set).text()
+}
+
 /// What a running job shares with the status bar.
 #[derive(Default)]
 pub struct Progress {
@@ -396,11 +402,11 @@ mod tests {
     use crate::db::sql::csv::{DateFmt, TCol};
 
     fn tcol(name: &str, ty: &str, nullable: bool, auto: bool) -> TCol {
-        TCol { name: name.into(), full_type: ty.into(), kind: Kind::from_column_type(ty), nullable, auto_increment: auto, generated: false, fills_itself: nullable || auto, max_chars: None, choices: Vec::new(), pg: false }
+        TCol { name: name.into(), full_type: ty.into(), cast_type: ty.into(), kind: Kind::from_column_type(ty), nullable, auto_increment: auto, generated: false, fills_itself: nullable || auto, max_chars: None, choices: Vec::new(), pg: false }
     }
 
     fn info() -> TableInfo {
-        TableInfo { cols: vec![tcol("id", "int", false, true), tcol("name", "varchar(20)", true, false), tcol("qty", "int", true, false)], pk: vec!["id".into()], engine: "InnoDB".into(), pg: false }
+        TableInfo { cols: vec![tcol("id", "int", false, true), tcol("name", "varchar(20)", true, false), tcol("qty", "int", true, false)], pk: vec!["id".into()], engine: "InnoDB".into(), pg: false, pk_deferrable: false }
     }
 
     fn map(m: &[Option<usize>]) -> Mapping {

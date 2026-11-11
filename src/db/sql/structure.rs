@@ -34,6 +34,9 @@ pub struct Column {
     pub kind: Option<Kind>,
     /// PostgreSQL's default exactly as `pg_get_expr` wrote it, with its cast, so a CREATE TABLE can repeat it.
     pub default_raw: Option<String>,
+    /// PostgreSQL's type of the column without its length, precision or bit width, and with a domain replaced by its base
+    /// type: what an import casts a value to, so the INSERT applies the length and refuses a value that does not fit.
+    pub cast_type: Option<String>,
 }
 
 impl Column {
@@ -344,7 +347,7 @@ pub(super) fn columns(d: Dialect, rows: &[SqlRow]) -> Vec<Column> {
             let raw = text(r, "col_default");
             let (default, default_expr) = normalize_default(d, raw.clone(), nullable, &extra);
             let pg = d == Dialect::Postgres;
-            Column { name: s(r, "name"), full_type: s(r, "full_type"), nullable, key: s(r, "col_key"), default, default_expr, extra, collation: text(r, "collation"), comment: s(r, "comment"), srid: None, check: None, kind: pg.then(|| pg_kind(r)), default_raw: if pg { raw } else { None } }
+            Column { name: s(r, "name"), full_type: s(r, "full_type"), nullable, key: s(r, "col_key"), default, default_expr, extra, collation: text(r, "collation"), comment: s(r, "comment"), srid: None, check: None, kind: pg.then(|| pg_kind(r)), default_raw: if pg { raw } else { None }, cast_type: if pg { text(r, "cast_type") } else { None } }
         })
         .collect()
 }
