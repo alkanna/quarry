@@ -580,7 +580,7 @@ mod tests {
         assert!(!startup(PgConnectOptions::new_without_pgpass(), 0).get_options().unwrap().contains("statement_timeout"));
         // The fallback is the same settings as SET LOCAL, and never a session-level SET.
         let locals = locals_for(15_000);
-        for want in ["SET LOCAL statement_timeout = 15000", "SET LOCAL bytea_output = 'hex'", "SET LOCAL DateStyle = 'ISO'", "SET LOCAL IntervalStyle = 'postgres'"] {
+        for want in ["SET LOCAL statement_timeout = '15000'", "SET LOCAL bytea_output = 'hex'", "SET LOCAL DateStyle = 'ISO'", "SET LOCAL IntervalStyle = 'postgres'"] {
             assert!(locals.contains(want), "{locals}");
         }
         assert!(!locals.contains("default_transaction_read_only"), "the guard is the read-only transaction, not a setting");
@@ -589,7 +589,7 @@ mod tests {
         for stmt in locals.split("; ").chain(write.split("; ")) {
             assert!(stmt.starts_with("SET LOCAL "), "{stmt}");
         }
-        assert!(write.contains("statement_timeout = 0") && write.contains("lock_timeout = '10s'"));
+        assert!(write.contains("statement_timeout = '0'") && write.contains("lock_timeout = '10s'"));
     }
 
     #[test]
