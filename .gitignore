@@ -42,3 +42,6 @@ __pycache__/
 
 # FigCraft design files stay local
 *.figcraft
+
+# Per-machine make settings (REMOTE, HOST, SET)
+local.mk

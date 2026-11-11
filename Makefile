@@ -2,6 +2,9 @@
 # The live tests use throwaway Docker servers named quarry-test-*, on ports away from the defaults so they never meet a
 # real local database. Their password is a fixed test value, as in CI.
 
+# Settings for this machine only, such as REMOTE = <ssh alias>. The file is gitignored.
+-include local.mk
+
 VIEW ?= content
 OUT ?= shot.png
 THEME ?= DARK
@@ -41,10 +44,12 @@ help:
 	@echo "  make test-live               every test against the Docker servers (starts them)"
 	@echo "  make test-ui                 the headless UI tests against the Docker servers"
 	@echo "  make test-one T=<name>       tests matching a name, against the Docker servers"
+	@echo "  make remote-test [SET=n]     every test on REMOTE=<ssh alias> against its own servers, on the committed HEAD"
 	@echo "  make coverage                every test against the Docker servers under line coverage, HTML report opened"
 	@echo "  make servers-up | servers-down | servers-status"
 	@echo "  SET=n on any test or servers target uses its own server set (ports + n*100), for parallel worktrees"
-	@echo "  HOST=<ssh alias> runs the servers on that machine through Docker over SSH (e.g. HOST=winbox)"
+	@echo "  HOST=<ssh alias> runs the servers on that machine through Docker over SSH"
+	@echo "  Defaults for this machine (HOST, REMOTE, SET) can go in local.mk, which git ignores"
 	@echo "Build"
 	@echo "  make build                   release binary"
 	@echo "  make bundle [PLATFORM=...]   package into dist/ (./bundle.sh --help)"
@@ -71,6 +76,15 @@ test-ui: servers-up
 
 test-one: servers-up
 	$(LIVE) cargo test $(T)
+
+# Runs every test on another machine (REMOTE, an ssh alias) against servers there, on the committed HEAD. Each SET gets its
+# own checkout there, ~/quarry-wt/<SET>, which keeps its build between runs. Needs Rust, Bun, Docker and the build
+# libraries on that machine, and a repo at ~/quarry that accepts pushes.
+REMOTE ?=
+remote-test:
+	@[ -n "$(REMOTE)" ] || { echo "Set REMOTE=<ssh alias>, here or in local.mk"; exit 1; }
+	git push -qf $(REMOTE):quarry HEAD:refs/heads/remote-$(SET)
+	ssh $(REMOTE) 'set -e; cd ~/quarry; [ -d ~/quarry-wt/$(SET) ] || git worktree add -qf ~/quarry-wt/$(SET) remote-$(SET); cd ~/quarry-wt/$(SET); git checkout -qf remote-$(SET); git reset -q --hard remote-$(SET); export PATH=$$HOME/.cargo/bin:$$HOME/.bun/bin:$$PATH; make test-live SET=$(SET) $(if $(T),T=$(T))'
 
 # Needs cargo-llvm-cov (cargo install cargo-llvm-cov) and rustup's llvm-tools-preview component.
 coverage: servers-up
@@ -126,4 +140,4 @@ servers-status:
 release-mac:
 	QUARRY_SIGN_ID=167E682A9DE81BC21DED6018673F23E6EA9DB831 QUARRY_NOTARY_ARGS="--keychain-profile quarry" ./bundle.sh
 
-.PHONY: help run build check test test-live test-ui test-one coverage demo demo-sql demo-pg screenshot bench bundle servers-up servers-down servers-status release-mac
+.PHONY: help run build check test test-live test-ui test-one remote-test coverage demo demo-sql demo-pg screenshot bench bundle servers-up servers-down servers-status release-mac
