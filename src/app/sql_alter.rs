@@ -419,9 +419,9 @@ impl App {
     /// The answer to an ALTER, a trigger change or an undo of either. Only an ALTER makes the staged changes stale; a
     /// trigger answer reloads the structure even when it failed, since a failed MySQL swap may still have changed it.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn sql_altered(&mut self, conn: u64, schema: String, table: String, res: db::Res<String>, undo: Option<UndoAction>, sql_mode: Option<String>, alter: bool) {
+    pub(super) fn sql_altered(&mut self, conn: u64, database: String, schema: String, table: String, res: db::Res<String>, undo: Option<UndoAction>, sql_mode: Option<String>, alter: bool, unsure: bool) {
         let ok = res.is_ok();
-        let (clear, reload) = answer_effects(ok, alter);
+        let (clear, reload) = answer_effects(ok, alter, unsure);
         // The statement was refused for a stale mode; the previews follow the new one from now on.
         self.adopt_sql_mode(conn, sql_mode);
         match res {
@@ -434,8 +434,11 @@ impl App {
         if let Some(u) = undo {
             self.push_undo(u);
         }
-        let tabs: Vec<usize> = (0..self.tabs.len()).filter(|&i| self.tabs[i].sel.conn == conn && self.tabs[i].sel.space() == schema && self.tabs[i].sel.coll == table && self.tabs[i].sql.is_some()).collect();
-        let at = tabs.first().map(|&i| (self.tabs[i].sel.db.clone(), self.tabs[i].sel.schema.clone())).unwrap_or((schema.clone(), String::new()));
+        // A tab is the answer's table when its connection, its database and its namespace, resolved as a read of it resolves
+        // them (a PostgreSQL tab may leave its schema to the sidebar's pick), are the ones the answer names. Another
+        // database of the connection can hold a table of the same name.
+        let tabs: Vec<usize> = (0..self.tabs.len()).filter(|&i| self.tabs[i].sql.is_some() && answers_tab(&self.tabs[i].sel, self.sql_target(&self.tabs[i].sel).map(|(d, ns)| (d.pg_database(), ns)), (conn, &database, &schema, &table))).collect();
+        let at = if database.is_empty() { (schema.clone(), String::new()) } else { (database.clone(), schema.clone()) };
         for i in tabs {
             if let Some(s) = self.tabs[i].sql.as_mut() {
                 s.st.applying = false;
@@ -708,7 +711,7 @@ impl App {
         dialog_actions(ui, |ui| {
             stage = ui.add_enabled(text.is_ok(), primary_button(ui, "Stage change", PRIMARY())).clicked();
             let busy = self.applying();
-            now = ui.add_enabled(text.is_ok() && self.sel_writable() && !busy, egui::Button::new("Apply now")).on_hover_text("Stage this change and run everything staged").on_disabled_hover_text(if busy { BUSY_NOTE } else { READ_ONLY_NOTE }).clicked();
+            now = ui.add_enabled(text.is_ok() && !self.sel_is_view() && !busy, egui::Button::new("Apply now")).on_hover_text("Stage this change and run everything staged. A locked connection asks to unlock first.").on_disabled_hover_text(if busy { BUSY_NOTE } else { "A view cannot be changed here" }).clicked();
             if ui.button("Cancel").clicked() {
                 *keep = false;
             }
@@ -857,7 +860,7 @@ impl App {
         dialog_actions(ui, |ui| {
             stage = ui.add_enabled(text.is_ok(), primary_button(ui, "Stage change", PRIMARY())).clicked();
             let busy = self.applying();
-            now = ui.add_enabled(text.is_ok() && self.sel_writable() && !busy, egui::Button::new("Apply now")).on_hover_text("Stage this change and run everything staged").on_disabled_hover_text(if busy { BUSY_NOTE } else { READ_ONLY_NOTE }).clicked();
+            now = ui.add_enabled(text.is_ok() && !self.sel_is_view() && !busy, egui::Button::new("Apply now")).on_hover_text("Stage this change and run everything staged. A locked connection asks to unlock first.").on_disabled_hover_text(if busy { BUSY_NOTE } else { "A view cannot be changed here" }).clicked();
             if ui.button("Cancel").clicked() {
                 *keep = false;
             }
@@ -895,8 +898,19 @@ impl App {
 /// What an answer does to the tabs of its table: (clear the staged changes, reload the structure). A done ALTER
 /// leaves the staged changes written against a structure that is gone. A trigger answer leaves them as they are,
 /// and reloads even after a failure, which on MySQL may have come after the old trigger was dropped and put back.
-fn answer_effects(ok: bool, alter: bool) -> (bool, bool) {
-    (ok && alter, ok || !alter)
+/// Whether the answer of a structure change, as (connection, PostgreSQL database or empty, namespace, table), is about the
+/// table `sel` points at. `target` is what a read of the tab resolves to: the database of its pool and its namespace, which
+/// is not `sel.schema` when a PostgreSQL tab leaves its schema to the one the sidebar shows.
+fn answers_tab(sel: &Sel, target: Option<(String, String)>, answer: (u64, &str, &str, &str)) -> bool {
+    let (conn, database, schema, table) = answer;
+    sel.conn == conn && sel.coll == table && target.is_some_and(|(d, ns)| ns == schema && d == database)
+}
+
+/// What an answer does to the open tabs of its table: (clear the staged changes, reload the structure). An answer that does
+/// not know the outcome (a COMMIT that failed) clears and reloads like a success, since the staged changes may already be
+/// applied and what is on screen may be stale.
+fn answer_effects(ok: bool, alter: bool, unsure: bool) -> (bool, bool) {
+    ((ok || unsure) && alter, ok || !alter || unsure)
 }
 
 fn plural_changes(n: usize) -> String {
@@ -911,12 +925,28 @@ pub(super) const BUSY_NOTE: &str = "A structure change is still running.";
 mod tests {
     use super::*;
 
+    #[test]
+    fn an_answer_belongs_to_the_tab_of_its_database_and_resolved_schema() {
+        let sel = |db: &str, schema: &str| Sel { conn: 1, db: db.into(), schema: schema.into(), coll: "t".into() };
+        let ans = (1, "shop", "public", "t");
+        assert!(answers_tab(&sel("shop", "public"), Some(("shop".into(), "public".into())), ans));
+        // a tab that leaves its schema to the sidebar's pick still matches the schema the answer names
+        assert!(answers_tab(&sel("shop", ""), Some(("shop".into(), "public".into())), ans));
+        // the same schema and table in another database of the connection is another table
+        assert!(!answers_tab(&sel("other", "public"), Some(("other".into(), "public".into())), ans));
+        assert!(!answers_tab(&sel("shop", ""), Some(("shop".into(), "audit".into())), ans));
+        assert!(!answers_tab(&sel("shop", "public"), None, ans));
+        // MySQL has no database name beside the namespace
+        assert!(answers_tab(&sel("shop", ""), Some((String::new(), "shop".into())), (1, "", "shop", "t")));
+    }
+
     /// Review finding 8: saving or dropping a trigger cleared the staged structure changes.
     #[test]
     fn only_an_alter_clears_the_staged_changes() {
-        assert_eq!(answer_effects(true, true), (true, true));
-        assert_eq!(answer_effects(false, true), (false, false));
-        assert_eq!(answer_effects(true, false), (false, true));
-        assert_eq!(answer_effects(false, false), (false, true), "a failed trigger change still reloads");
+        assert_eq!(answer_effects(true, true, false), (true, true));
+        assert_eq!(answer_effects(false, true, false), (false, false));
+        assert_eq!(answer_effects(true, false, false), (false, true));
+        assert_eq!(answer_effects(false, false, false), (false, true), "a failed trigger change still reloads");
+        assert_eq!(answer_effects(false, true, true), (true, true), "a commit that may have run reloads the table");
     }
 }

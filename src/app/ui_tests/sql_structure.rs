@@ -169,3 +169,22 @@ fn a_default_that_carries_a_second_statement_cannot_be_staged() {
         assert_eq!(names(fx, &t), "id,name,qty");
     });
 }
+
+#[test]
+fn apply_now_on_a_connection_locked_after_the_dialog_opened_asks_to_unlock() {
+    every_engine("apply now asks to unlock", |fx, ui| {
+        let t = open_unlocked(fx, ui);
+        open_structure(ui);
+        ui.click("+ Column");
+        replace(ui, "Column name", "extra");
+        // locked while the dialog is open: the button must still work, and ask, as the Apply bar does
+        ui.h.state_mut().conns.iter_mut().find(|c| c.meta.id == CONN).unwrap().writable = false;
+        ui.h.run_steps(2);
+        assert!(!ui.h.get_by_label("Apply now").accesskit_node().is_disabled(), "Apply now is disabled on a locked connection");
+        ui.click("Apply now");
+        ui.show("Allow writes");
+        assert_eq!(names(fx, &t), "id,name,qty", "nothing ran before the answer");
+        ui.click("Allow writes");
+        until(fx, ui, "the column to land", |fx| names(fx, &t) == "id,name,qty,extra");
+    });
+}

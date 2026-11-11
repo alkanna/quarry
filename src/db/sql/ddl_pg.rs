@@ -5,13 +5,18 @@
 //! table's schema, so the search_path never decides which table is meant. The two pieces of user text, a type and a
 //! default expression, are checked with the PostgreSQL lexer to stay one clause.
 //!
+//! The text is written for one fixed session: every write transaction pins standard_conforming_strings on (`pg::write_locals`),
+//! so a literal needs only its quotes doubled, and the plan sets the search_path to the table's schema before it reads the
+//! table again and before every statement, the path the plan-time structure read used, so a type, function or sequence
+//! outside the schema is printed with its schema and resolves to the same object when it is written back.
+//!
 //! DDL is transactional here, which MySQL's is not: a plan and its undo each run as one transaction that takes the
 //! table's lock, reads the touched columns and indexes again and refuses to run when another session changed them.
 
 use super::ddl::{snapshot, touched, undo_action, undo_loss, AlterUndo, Change, ColDef, Dv, Expect, IndexDef, IndexKind, Mode, Plan, Pos, Sim};
 use super::exec::Tx;
 use super::lex::{every_reading, Tok};
-use super::structure::{columns, constraints, foreign_keys, indexes, load, Column, Index, Structure};
+use super::structure::{col_deps, columns, constraints, foreign_keys, indexes, load, Column, Structure};
 use super::value::{lit, Param};
 use super::{se, write, Db, Dialect};
 use crate::db::{Msg, Res, UndoAction, UndoKind, Worker};
@@ -91,6 +96,9 @@ fn scan(s: &str, what: Text) -> Result<(), String> {
             let t = &s[r.clone()];
             match tok {
                 Tok::Comment | Tok::ExecOpen | Tok::ExecClose => return Err(one),
+                // PostgreSQL before 16 reads `1$a$` as a number followed by a dollar quote, which opens a string this scan
+                // sees as one word.
+                Tok::Word if t.as_bytes().first().is_some_and(u8::is_ascii_digit) && t.contains('$') => return Err(format!("The {name} holds {t:?}, which some PostgreSQL versions read as a number followed by a dollar quote.")),
                 Tok::Str if what == Text::Type => return Err(format!("The type {t} holds a string, which a type name never does.")),
                 Tok::Str | Tok::Quoted => {
                     if !closed(t, n == 1) {
@@ -158,8 +166,9 @@ fn serial_of(ty: &str) -> Option<&'static str> {
 }
 
 /// How a column gets its own numbers. A serial is an integer with the default `nextval('seq')` of a sequence the column
-/// owns; an identity is the standard form. Both read as auto increment, and the serial keeps its default as an expression
-/// so changing it back puts the same default on.
+/// owns (`ColDef::serial`, set only from the catalog read); an identity is the standard form. Both read as auto increment,
+/// and the serial keeps its default as an expression so changing it back puts the same default on. A `nextval` default
+/// typed by the person names a sequence the column does not own, so it is no serial: ticking identity on it is refused.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Auto {
     No,
@@ -170,7 +179,7 @@ enum Auto {
 fn auto_of(c: &ColDef) -> Auto {
     match (&c.default, c.auto_increment) {
         (_, false) => Auto::No,
-        (Dv::Expr(x), true) if x.trim_start().to_ascii_lowercase().starts_with("nextval(") => Auto::Serial,
+        (Dv::Expr(x), true) if c.serial && x.trim_start().to_ascii_lowercase().starts_with("nextval(") => Auto::Serial,
         _ => Auto::Identity(c.identity_always),
     }
 }
@@ -188,54 +197,52 @@ pub(super) fn col_def(c: &Column) -> Result<ColDef, String> {
         (None, _) => Dv::None,
     };
     let identity = c.extra.contains("IDENTITY");
-    Ok(ColDef { default, auto_increment: c.extra.contains("auto_increment"), identity_always: identity && c.extra.contains("GENERATED ALWAYS AS IDENTITY"), collation: c.collation.clone(), nullable: c.nullable, comment: c.comment.clone(), ..ColDef::new(&c.name, &c.full_type) })
+    Ok(ColDef { default, auto_increment: c.extra.contains("auto_increment"), serial: c.extra.contains("auto_increment") && !identity, identity_always: identity && c.extra.contains("GENERATED ALWAYS AS IDENTITY"), collation: c.collation.clone(), nullable: c.nullable, comment: c.comment.clone(), ..ColDef::new(&c.name, &c.full_type) })
 }
 
-/// The index parts of a `pg_get_indexdef` text: the access method and the key parts, with what follows the closing
-/// bracket (a WHERE, INCLUDE, WITH or TABLESPACE clause).
-fn index_text(def: &str) -> Option<(&str, Vec<&str>, &str)> {
-    let rest = &def[def.find(" USING ")? + 7..];
-    let open = rest.find('(')?;
-    let method = rest[..open].trim();
-    let (mut depth, mut quoted, mut start, mut parts) = (0, false, open + 1, Vec::new());
-    for (i, c) in rest.char_indices().skip_while(|(i, _)| *i < open) {
-        match c {
-            '"' => quoted = !quoted,
-            '(' if !quoted => depth += 1,
-            ')' if !quoted => {
-                depth -= 1;
-                if depth == 0 {
-                    parts.push(rest[start..i].trim());
-                    return Some((method, parts, rest[i + 1..].trim()));
-                }
-            }
-            ',' if !quoted && depth == 1 => {
-                parts.push(rest[start..i].trim());
-                start = i + 1;
-            }
-            _ => {}
+/// A collation as the structure read gives it: a bare name (in pg_catalog, or typed by the person), or a ready
+/// `"schema"."name"` for one in another schema, which the catalog prints qualified because the plan's search_path would not
+/// find it.
+fn split_qualified(c: &str) -> Option<(String, String)> {
+    fn quoted(s: &str) -> Option<(String, &str)> {
+        let b = s.as_bytes();
+        if b.first() != Some(&b'"') {
+            return None;
         }
+        let mut j = 1;
+        while j < b.len() {
+            if b[j] == b'"' {
+                if b.get(j + 1) == Some(&b'"') {
+                    j += 2;
+                    continue;
+                }
+                return Some((s[1..j].replace("\"\"", "\""), &s[j + 1..]));
+            }
+            j += 1;
+        }
+        None
     }
-    None
+    let (schema, rest) = quoted(c)?;
+    let (name, rest) = quoted(rest.strip_prefix('.')?)?;
+    rest.is_empty().then_some((schema, name))
 }
 
-/// The name a key part spells: bare, or quoted with doubled quotes.
-fn part_name(p: &str) -> String {
-    match p.strip_prefix('"').and_then(|x| x.strip_suffix('"')) {
-        Some(inner) => inner.replace("\"\"", "\""),
-        None => p.to_string(),
+fn collation_sql(c: &str) -> String {
+    match split_qualified(c) {
+        Some((s, n)) => format!("{}.{}", q(&s), q(&n)),
+        None => q(c),
     }
 }
 
-/// Whether an index is only columns, each ascending or descending: what `IndexDef` can write back. A partial index,
-/// included columns, an operator class, a collation, NULLS ordering or storage options are in the text after the columns
-/// and would be lost by dropping the index and adding it again.
-pub(super) fn index_is_plain(ix: &Index) -> bool {
-    let Some((_, parts, tail)) = index_text(&ix.def) else { return false };
-    tail.is_empty() && parts.len() == ix.cols.len() && parts.iter().zip(&ix.cols).all(|(p, c)| {
-        let p = p.strip_suffix(" DESC").unwrap_or(p);
-        !c.name.is_empty() && part_name(p) == c.name
-    })
+fn collate(c: &Option<String>) -> String {
+    c.as_ref().map_or(String::new(), |c| format!(" COLLATE {}", collation_sql(c)))
+}
+
+fn collation_ok(c: &str) -> Result<(), String> {
+    match split_qualified(c) {
+        Some((s, n)) => name_ok(&s, "A collation schema").and_then(|_| name_ok(&n, "A collation")),
+        None => name_ok(c, "A collation"),
+    }
 }
 
 /// Whether a column of this type can be an identity or a serial.
@@ -265,7 +272,8 @@ fn has_default(d: &Dv) -> bool {
 }
 
 /// The `(expression)` or literal of a default, or None when the column has none. A literal is written unknown-typed, so
-/// the server reads it as the column's type, which is also what it reports back.
+/// the server reads it as the column's type, which is also what it reports back. Its quotes are doubled and nothing else
+/// is escaped, which is right because every write transaction pins standard_conforming_strings on.
 fn default_of(c: &ColDef) -> Result<Option<String>, String> {
     Ok(match &c.default {
         Dv::None | Dv::Null => None,
@@ -286,7 +294,7 @@ fn check_col(def: &ColDef) -> Result<(), String> {
         return Err("PostgreSQL has no unsigned, zero fill, ON UPDATE or SRID attributes.".into());
     }
     if let Some(c) = &def.collation {
-        name_ok(c, "A collation")?;
+        collation_ok(c)?;
     }
     if matches!(auto_of(def), Auto::Identity(_)) {
         if serial_of(&def.ty).is_none() {
@@ -307,6 +315,13 @@ fn comment_stmt(on: &str, text: &str) -> Result<String, String> {
         return Err("A comment cannot hold a NUL character.".into());
     }
     Ok(format!("COMMENT ON {on} IS {}", if text.is_empty() { "NULL".to_string() } else { lit(text, false) }))
+}
+
+/// Moves the identity sequence of `col` to the largest value the column holds. A column with no value of 1 or more keeps
+/// the sequence's start. `table` and `col` are already quoted names, which `pg_get_serial_sequence` reads as SQL names.
+fn sync_identity(table: &str, col: &str) -> String {
+    let raw = col.strip_prefix('"').and_then(|c| c.strip_suffix('"')).map_or(col.to_string(), |c| c.replace("\"\"", "\""));
+    format!("SELECT setval(pg_get_serial_sequence({}, {}), m) FROM (SELECT max({col}) AS m FROM {table}) s WHERE m >= 1", lit(table, false), lit(&raw, false))
 }
 
 fn key_cols(ix: &IndexDef) -> Result<String, String> {
@@ -349,8 +364,19 @@ fn add_index(schema: &str, table: &str, ix: &IndexDef) -> Result<Vec<String>, St
             return Err("A primary key or unique constraint is a plain btree on its columns, without sort order.".into());
         }
         let what = if ix.kind == IndexKind::Primary { "PRIMARY KEY" } else { "UNIQUE" };
-        out.push(format!("ALTER TABLE {t} ADD CONSTRAINT {} {what} ({cols})", q(&ix.name)));
+        let defer = match (ix.deferrable, ix.deferred) {
+            (true, true) => " DEFERRABLE INITIALLY DEFERRED",
+            (true, false) => " DEFERRABLE",
+            _ => "",
+        };
+        out.push(format!("ALTER TABLE {t} ADD CONSTRAINT {} {what} ({cols}){defer}", q(&ix.name)));
+        if !ix.con_comment.is_empty() {
+            out.push(comment_stmt(&format!("CONSTRAINT {} ON {t}", q(&ix.name)), &ix.con_comment)?);
+        }
     } else {
+        if ix.deferrable || ix.deferred {
+            return Err("Only a primary key or unique constraint can be deferred.".into());
+        }
         let using = if method.is_empty() { String::new() } else { format!(" USING {method}") };
         out.push(format!("CREATE {}INDEX {} ON {t}{using} ({cols})", if ix.kind == IndexKind::Unique { "UNIQUE " } else { "" }, q(&ix.name)));
     }
@@ -369,7 +395,7 @@ pub(super) fn statements(sim: &Sim, schema: &str, table: &str, c: &Change) -> Re
             no_pos(pos)?;
             check_col(def)?;
             let (name, ty) = (q(&def.name), type_of(def)?);
-            let collate = def.collation.as_ref().map_or(String::new(), |c| format!(" COLLATE {}", q(c)));
+            let collate = collate(&def.collation);
             let body = match auto_of(def) {
                 Auto::Serial => {
                     if def.nullable || def.collation.is_some() {
@@ -409,7 +435,7 @@ pub(super) fn statements(sim: &Sim, schema: &str, table: &str, c: &Change) -> Re
                 v.push(format!("{col} DROP DEFAULT"));
             }
             if type_changed {
-                let collate = def.collation.as_ref().map_or(String::new(), |c| format!(" COLLATE {}", q(c)));
+                let collate = collate(&def.collation);
                 v.push(format!("{col} TYPE {ty}{collate} USING {name}::{ty}"));
             }
             if matches!(ko, Auto::Identity(_)) && !matches!(kn, Auto::Identity(_)) {
@@ -420,7 +446,11 @@ pub(super) fn statements(sim: &Sim, schema: &str, table: &str, c: &Change) -> Re
             }
             match (ko, kn) {
                 (Auto::Identity(a), Auto::Identity(b)) if a != b => v.push(format!("{col} SET GENERATED {}", if b { "ALWAYS" } else { "BY DEFAULT" })),
-                (_, Auto::Identity(always)) if identity_on => v.push(format!("{col} ADD GENERATED {} AS IDENTITY", if always { "ALWAYS" } else { "BY DEFAULT" })),
+                (_, Auto::Identity(always)) if identity_on => {
+                    v.push(format!("{col} ADD GENERATED {} AS IDENTITY", if always { "ALWAYS" } else { "BY DEFAULT" }));
+                    // The new sequence starts at 1 while the column keeps its values, so the next insert would repeat one.
+                    v.push(sync_identity(&t, &name));
+                }
                 _ => {}
             }
             if let Some(d) = default_of(def)? {
@@ -476,13 +506,43 @@ pub(super) fn plan(table: &str, st: &Structure, changes: &[Change]) -> Result<Pl
     }
     let mut sim = Sim::of(st);
     let mut steps = Vec::new();
+    let mut types = Vec::new();
     for c in changes {
+        // The lexer keeps a type text to one clause; the server then has to say it is a type, which is what stops
+        // `integer REFERENCES other (id)` or `integer CHECK (..)` from adding a constraint through the type box.
+        match c {
+            Change::Add { def, .. } => types.push(def.ty.trim().to_string()),
+            Change::Modify { from, def, .. } if sim.at(from).and_then(|i| sim.cols[i].1.as_ref().ok()).is_some_and(|o| o.ty != def.ty) => types.push(def.ty.trim().to_string()),
+            _ => {}
+        }
         steps.extend(statements(&sim, schema, table, c)?);
         let _ = sim.apply(c);
     }
     let (cols, idx, fks) = touched(std::slice::from_ref(&changes.to_vec()));
-    let expect = Expect { snap: snapshot(st, &cols, &idx, &fks), cols, idx, fks };
+    // A dropped column takes whatever depends on it, and the undo only knows the ones read now, so the whole set of
+    // indexes, constraints and dependents has to be the same under the lock.
+    let all = changes.iter().any(|c| matches!(c, Change::Drop(_))).then(|| table_state(st));
+    let expect = Expect { snap: snapshot(st, &cols, &idx, &fks), cols, idx, fks, all, types };
     Ok(Plan { sql: super::ddl::script(&steps), steps, undo: undo_of(schema, table, st, changes), expect: Some(expect) })
+}
+
+/// Every index, constraint and dependent of the table in one comparable list.
+fn table_state(st: &Structure) -> Vec<String> {
+    let mut v: Vec<String> = st.indexes.iter().map(|i| format!("index {}|{}|{}|{}|{}|{}|{}", i.name, i.def, i.comment, i.deferrable, i.deferred, i.con_comment, i.complex)).collect();
+    v.extend(st.constraints.iter().map(|c| format!("constraint {}|{}|{}", c.name, c.kind, c.def)));
+    v.extend(st.pg_deps.iter().map(|d| format!("depends {}|{}|{}", d.col, d.kind, d.name)));
+    v
+}
+
+/// Whether a default expression calls a function, which is the case that can be volatile. A name preceded by `::` is a
+/// type, and the keywords that look like calls are not counted.
+pub(super) fn calls_function(expr: &str) -> bool {
+    let toks: Vec<(Tok, std::ops::Range<usize>)> = super::lex::nth_reading(expr, D, 0).into_iter().filter(|(t, _)| *t != Tok::Space).collect();
+    toks.windows(2).enumerate().any(|(i, w)| {
+        let name = &expr[w[0].1.clone()];
+        let after_cast = i > 0 && expr[toks[i - 1].1.clone()].ends_with(':');
+        w[0].0 == Tok::Word && &expr[w[1].1.clone()] == "(" && !after_cast && !matches!(name.to_ascii_lowercase().as_str(), "cast" | "coalesce" | "nullif" | "greatest" | "least" | "array" | "row" | "any" | "all" | "in" | "exists")
+    })
 }
 
 fn undo_of(schema: &str, table: &str, before: &Structure, changes: &[Change]) -> Result<AlterUndo, String> {
@@ -503,21 +563,24 @@ fn undo_of(schema: &str, table: &str, before: &Structure, changes: &[Change]) ->
     Ok(AlterUndo { steps, label: String::new(), loss, mode: Mode::DEFAULT, cols, idx, fks, expect: Vec::new(), groups })
 }
 
-/// Why a plan did not run: the table is no longer as the plan saw it (nothing ran), or a statement failed (the
-/// transaction was rolled back, so nothing ran either).
+/// Why a plan did not run: the table is no longer as the plan saw it (nothing ran), a statement failed (the transaction
+/// was rolled back, so nothing ran either), or the COMMIT failed, which leaves it unknown whether the server applied it.
 pub(super) enum Fail {
     Changed(String),
     Run(String),
+    Unknown(String),
 }
 
-/// The structure as the catalogs give it inside the transaction, which holds the table's lock by now.
+/// The structure as the catalogs give it inside the transaction, which holds the table's lock by now. The search_path is
+/// already the schema's, as it was for the read the plan was made from, so the two print the same text.
 async fn read_in(tx: &mut Tx<'_>, schema: &str, table: &str) -> Res<Structure> {
     let args = [Param::Text(schema.into()), Param::Text(table.into())];
     let cols = tx.fetch_bound(D.columns(), &args).await.map_err(se)?;
     let idx = tx.fetch_bound(D.indexes(), &args).await.map_err(se)?;
     let fks = tx.fetch_bound(D.foreign_keys(), &args).await.map_err(se)?;
     let cons = tx.fetch_bound(super::pg_catalog::CONSTRAINTS, &args).await.map_err(se)?;
-    Ok(Structure { columns: columns(D, &cols), indexes: indexes(&idx), foreign_keys: foreign_keys(&fks), constraints: constraints(&cons), pg_schema: Some(schema.into()), ..Default::default() })
+    let deps = tx.fetch_bound(super::pg_catalog::COLUMN_DEPS, &args).await.map_err(se)?;
+    Ok(Structure { columns: columns(D, &cols), indexes: indexes(&idx), foreign_keys: foreign_keys(&fks), constraints: constraints(&cons), pg_deps: col_deps(&deps), pg_schema: Some(schema.into()), ..Default::default() })
 }
 
 async fn exec(tx: &mut Tx<'_>, db: &Db, schema: &str, sql: &str) -> Result<(), sqlx::Error> {
@@ -541,7 +604,8 @@ pub(super) async fn run(db: &Db, schema: &str, table: &str, steps: &[String], ex
     let mut tx = conn.begin_write().await.map_err(|e| Fail::Run(se(e)))?;
     let out = locked_run(&mut tx, db, schema, table, steps, expect).await;
     match out {
-        Ok(()) => tx.commit().await.map_err(|e| Fail::Run(format!("{}. Nothing was changed.", se(e)))),
+        // The connection can drop after the server committed, so a failed COMMIT does not say that nothing changed.
+        Ok(()) => tx.commit().await.map_err(|e| Fail::Unknown(format!("{}. The server did not confirm the commit, so the change may or may not have been applied. The structure is being reloaded: check it before running the change again.", se(e)))),
         Err(f) => {
             let _ = tx.rollback().await;
             Err(f)
@@ -555,6 +619,9 @@ async fn locked_run(tx: &mut Tx<'_>, db: &Db, schema: &str, table: &str, steps: 
     if let Err(e) = exec(tx, db, schema, &format!("LOCK TABLE {t} IN ACCESS EXCLUSIVE MODE")).await {
         return Err(Fail::Run(lock_error(&e).unwrap_or_else(|| se(e))));
     }
+    // Before the read and the statements alike: the plan was made from a read under this path, and the statements resolve
+    // every name under it, so a type or function outside the schema is qualified in the one and found by the other.
+    exec(tx, db, schema, &format!("SET LOCAL search_path = {}", q(schema))).await.map_err(|e| Fail::Run(se(e)))?;
     let st = read_in(tx, schema, table).await.map_err(Fail::Run)?;
     let now = snapshot(&st, &expect.cols, &expect.idx, &expect.fks);
     if now.len() != expect.snap.len() {
@@ -563,9 +630,18 @@ async fn locked_run(tx: &mut Tx<'_>, db: &Db, schema: &str, table: &str, steps: 
     if let Some((what, _)) = expect.snap.iter().zip(&now).find(|(a, b)| a != b).map(|(a, _)| a) {
         return Err(Fail::Changed(what.clone()));
     }
-    // After the read, so the types it compares are written as the pool's sessions write them. User text such as a type
-    // name then resolves in the table's own schema.
-    exec(tx, db, schema, &format!("SET LOCAL search_path = {}", q(schema))).await.map_err(|e| Fail::Run(se(e)))?;
+    if let Some(all) = &expect.all {
+        if table_state(&st) != *all {
+            return Err(Fail::Changed("an index, constraint or other object that depends on the table".into()));
+        }
+    }
+    for ty in &expect.types {
+        let said = tx.fetch_bound("SELECT to_regtype($1)::text AS t", &[Param::Text(ty.clone())]).await;
+        // PostgreSQL before 16 raises an error for text that is not a type name, later ones answer NULL.
+        if said.ok().and_then(|rows| rows.first().and_then(|r| super::worker::text(r, "t"))).is_none() {
+            return Err(Fail::Run(format!("{ty:?} is not a type the server knows. Write only the type, like numeric(10,2), without constraints or other column clauses. Nothing was changed.")));
+        }
+    }
     for (i, s) in steps.iter().enumerate() {
         exec(tx, db, schema, s).await.map_err(|e| Fail::Run(format!("{} (statement {} of {}). The whole plan was rolled back, so nothing was changed.", se(e), i + 1, steps.len())))?;
     }
@@ -575,7 +651,7 @@ async fn locked_run(tx: &mut Tx<'_>, db: &Db, schema: &str, table: &str, steps: 
 /// The note for a plan that did not run.
 fn fail_text(f: Fail, undo: bool) -> String {
     match f {
-        Fail::Run(e) => e,
+        Fail::Run(e) | Fail::Unknown(e) => e,
         Fail::Changed(what) if undo => format!("Undo refused: {what} changed after this change ran, so undoing it now would not put the table back."),
         Fail::Changed(what) => format!("Nothing ran: {what} changed since this plan was made. Reload the structure and stage the change again."),
     }
@@ -594,15 +670,18 @@ fn action(db: &Db, conn: u64, schema: &str, table: &str, u: AlterUndo) -> UndoAc
 /// Runs a recorded undo in one transaction, after the same check as an apply against how the change left the table.
 pub(super) async fn undo(db: &Db, a: UndoAction, u: AlterUndo, read_only: bool) -> Msg {
     let UndoAction { at, conn, db: schema, coll: table, .. } = a;
-    let expect = Expect { cols: u.cols.clone(), idx: u.idx.clone(), fks: u.fks.clone(), snap: u.expect.clone() };
-    let res: Res<String> = crate::db::sql_scope(db.conn, &schema, async { run(db, &schema, &table, &u.steps, &expect, read_only).await.map(|_| "Undid the structure change".to_string()).map_err(|f| fail_text(f, true)) }).await;
-    // The whole undo is one transaction, so a failure ran nothing and the action stays for another try.
-    let keep = res.is_err().then(|| {
+    let expect = Expect { cols: u.cols.clone(), idx: u.idx.clone(), fks: u.fks.clone(), snap: u.expect.clone(), all: None, types: Vec::new() };
+    let out = crate::db::sql_scope(db.conn, &schema, async { run(db, &schema, &table, &u.steps, &expect, read_only).await }).await;
+    let unsure = matches!(out, Err(Fail::Unknown(_)));
+    let res: Res<String> = out.map(|_| "Undid the structure change".to_string()).map_err(|f| fail_text(f, true));
+    // The whole undo is one transaction, so a failure ran nothing and the action stays for another try, unless the commit
+    // is the one that failed, when it may have run.
+    let keep = (res.is_err() && !unsure).then(|| {
         let mut k = action(db, conn, &schema, &table, u);
         k.at = at;
         k
     });
-    Msg::SqlAltered { conn, schema, table, res, undo: keep, sql_mode: None, alter: true }
+    Msg::SqlAltered { conn, database: db.pg_database(), schema, table, res, undo: keep, sql_mode: None, alter: true, unsure }
 }
 
 impl Worker {
@@ -611,7 +690,9 @@ impl Worker {
     #[allow(clippy::too_many_arguments)]
     pub fn pg_alter(&self, conn: u64, db: Db, schema: String, table: String, steps: Vec<String>, expect: Expect, undo: Option<AlterUndo>, read_only: bool, done: String) {
         self.spawn_sql(db.conn, &schema.clone(), async move {
-            let res = run(&db, &schema, &table, &steps, &expect, read_only).await.map_err(|f| fail_text(f, false));
+            let out = run(&db, &schema, &table, &steps, &expect, read_only).await;
+            let unsure = matches!(out, Err(Fail::Unknown(_)));
+            let res = out.map_err(|f| fail_text(f, false));
             let mut done = done;
             let undo = match (res.is_ok(), undo) {
                 (true, Some(mut u)) => match load(&db, &schema, &table).await {
@@ -626,7 +707,7 @@ impl Worker {
                 },
                 _ => None,
             };
-            Msg::SqlAltered { conn, schema, table, res: res.map(|_| done), undo, sql_mode: None, alter: true }
+            Msg::SqlAltered { conn, database: db.pg_database(), schema, table, res: res.map(|_| done), undo, sql_mode: None, alter: true, unsure }
         });
     }
 }
@@ -634,7 +715,7 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::sql::structure::IndexCol;
+    use crate::db::sql::structure::{Index, IndexCol};
 
     #[test]
     fn expressions_stay_one_expression() {
@@ -720,16 +801,21 @@ mod tests {
         let mut auto = def("n", "bigint");
         (auto.nullable, auto.auto_increment) = (false, true);
         assert_eq!(steps(&[Change::Add { def: auto.clone(), pos: Pos::Keep }]), [format!("ALTER TABLE {t} ADD COLUMN \"n\" bigint GENERATED BY DEFAULT AS IDENTITY")]);
-        let mut serial = auto.clone();
-        serial.default = Dv::Expr("nextval('t_n_seq'::regclass)".into());
-        assert_eq!(steps(&[Change::Add { def: serial, pos: Pos::Keep }]), [format!("ALTER TABLE {t} ADD COLUMN \"n\" bigserial")]);
+        let mut serial = ColDef { serial: true, default: Dv::Expr("nextval('t_n_seq'::regclass)".into()), ..auto.clone() };
+        assert_eq!(steps(&[Change::Add { def: serial.clone(), pos: Pos::Keep }]), [format!("ALTER TABLE {t} ADD COLUMN \"n\" bigserial")]);
+        // a nextval default the person typed names a sequence the column does not own: it is not written as a bigserial
+        serial.serial = false;
+        assert!(plan("t", &table(), &[Change::Add { def: serial, pos: Pos::Keep }]).err().unwrap_or_default().contains("identity column cannot have a default"));
         // the identity of the table's id goes away and comes back as it was
         let mut plain = def("id", "integer");
         plain.nullable = false;
         let drop = Change::Modify { from: "id".into(), def: plain, pos: Pos::Keep };
         let p = plan("t", &table(), &[drop]).unwrap();
         assert_eq!(p.steps, [format!("ALTER TABLE {t} ALTER COLUMN \"id\" DROP IDENTITY")]);
-        assert_eq!(p.undo.unwrap().steps, [format!("ALTER TABLE {t} ALTER COLUMN \"id\" ADD GENERATED ALWAYS AS IDENTITY")]);
+        let u = p.undo.unwrap();
+        // the sequence is moved to the largest value the column holds, or the next insert repeats one
+        assert_eq!(u.steps, [format!("ALTER TABLE {t} ALTER COLUMN \"id\" ADD GENERATED ALWAYS AS IDENTITY"), format!("SELECT setval(pg_get_serial_sequence('{t}', 'id'), m) FROM (SELECT max(\"id\") AS m FROM {t}) s WHERE m >= 1")]);
+        assert!(u.loss.iter().any(|l| l.contains("new sequence")), "{:?}", u.loss);
         let mut text_auto = def("s", "text");
         (text_auto.nullable, text_auto.auto_increment) = (false, true);
         assert!(plan("t", &table(), &[Change::Add { def: text_auto, pos: Pos::Keep }]).is_err());
@@ -776,18 +862,102 @@ mod tests {
 
     #[test]
     fn indexes_the_editor_cannot_write_back_are_flagged() {
-        assert!(IndexDef::from_index(&table().indexes[1]).functional == false);
-        for def in [
-            "CREATE INDEX i ON public.t USING btree (name) WHERE (note IS NOT NULL)",
-            "CREATE INDEX i ON public.t USING btree (name) INCLUDE (note)",
-            "CREATE INDEX i ON public.t USING btree (name text_pattern_ops)",
-            "CREATE INDEX i ON public.t USING btree (name NULLS FIRST)",
-            "CREATE INDEX i ON public.t USING btree (name) WITH (fillfactor='70')",
-        ] {
-            assert!(IndexDef::from_index(&index("i", def, &["name"])).functional, "{def}");
+        assert!(!IndexDef::from_index(&table().indexes[1]).functional);
+        // the catalog says which indexes have a part the columns do not
+        let complex = Index { complex: true, ..index("i", "CREATE INDEX i ON public.t USING btree (name) WHERE (note IS NOT NULL)", &["name"]) };
+        assert!(IndexDef::from_index(&complex).functional);
+        // a quoted name that holds the words of the text is no longer read as the text
+        let tricky = index("a USING (b) WHERE", "CREATE INDEX \"a USING (b) WHERE\" ON public.t USING btree (name)", &["name"]);
+        assert!(!IndexDef::from_index(&tricky).functional);
+        let gin = Index { kind: "GIN".into(), ..index("i", "CREATE INDEX i ON public.t USING gin (name)", &["name"]) };
+        assert_eq!(IndexDef::from_index(&gin).method, "gin");
+    }
+
+    #[test]
+    fn a_constraint_is_added_back_deferrable_with_its_comment() {
+        let ix = IndexDef { name: "t_u".into(), kind: IndexKind::Unique, constraint: true, deferrable: true, deferred: true, con_comment: "one per name".into(), cols: vec![super::super::ddl::IdxCol { name: "name".into(), prefix: None, desc: false }], ..Default::default() };
+        assert_eq!(steps(&[Change::AddIndex(ix.clone())]), ["ALTER TABLE \"public\".\"t\" ADD CONSTRAINT \"t_u\" UNIQUE (\"name\") DEFERRABLE INITIALLY DEFERRED".to_string(), "COMMENT ON CONSTRAINT \"t_u\" ON \"public\".\"t\" IS 'one per name'".to_string()]);
+        assert_eq!(steps(&[Change::AddIndex(IndexDef { deferred: false, con_comment: String::new(), ..ix.clone() })]), ["ALTER TABLE \"public\".\"t\" ADD CONSTRAINT \"t_u\" UNIQUE (\"name\") DEFERRABLE".to_string()]);
+        assert!(plan("t", &table(), &[Change::AddIndex(IndexDef { constraint: false, ..ix })]).is_err(), "a plain index cannot be deferred");
+    }
+
+    #[test]
+    fn a_digit_led_word_with_a_dollar_is_refused() {
+        for bad in ["1$a$", "x + 1$a$ y", "2$"] {
+            assert!(check_expr_pg(bad).is_err(), "{bad}");
         }
-        let gin = |def: &str, col: &str| Index { kind: "GIN".into(), ..index("i", def, &[col]) };
-        assert!(!IndexDef::from_index(&gin("CREATE INDEX i ON public.t USING gin (\"Name\")", "Name")).functional);
-        assert_eq!(IndexDef::from_index(&gin("CREATE INDEX i ON public.t USING gin (name)", "name")).method, "gin");
+        for ok in ["a$b", "now()", "$$1$$"] {
+            assert!(check_expr_pg(ok).is_ok(), "{ok}");
+        }
+    }
+
+    #[test]
+    fn a_collation_outside_pg_catalog_is_written_with_its_schema() {
+        let mut d = def("s", "text");
+        d.collation = Some("\"Other\".\"my \"\"coll\"\"\"".into());
+        assert_eq!(steps(&[Change::Add { def: d.clone(), pos: Pos::Keep }]), ["ALTER TABLE \"public\".\"t\" ADD COLUMN \"s\" text COLLATE \"Other\".\"my \"\"coll\"\"\"".to_string()]);
+        d.collation = Some("en_US.utf8".into());
+        assert_eq!(steps(&[Change::Add { def: d, pos: Pos::Keep }]), ["ALTER TABLE \"public\".\"t\" ADD COLUMN \"s\" text COLLATE \"en_US.utf8\"".to_string()]);
+    }
+
+    #[test]
+    fn function_calls_in_a_default_are_found() {
+        for yes in ["random()", "gen_random_uuid()", "now() + interval '1 day'", "lower(upper('x'))", "1 + abs(-2)"] {
+            assert!(calls_function(yes), "{yes}");
+        }
+        for no in ["0", "'x'::numeric(10,2)", "(1 + 2)", "'{}'::jsonb", "CAST('1' AS integer)", "coalesce(1, 2)", "ARRAY[1, 2]"] {
+            assert!(!calls_function(no), "{no}");
+        }
+    }
+
+    #[test]
+    fn a_function_default_on_a_table_with_rows_is_warned_about() {
+        let mut st = table();
+        let with = |d: Dv| vec![Change::Add { def: ColDef { default: d, ..def("tok", "uuid") }, pos: Pos::Keep }];
+        assert!(super::super::ddl::warnings(&st, &with(Dv::Expr("gen_random_uuid()".into()))).is_empty(), "no rows known, nothing to rewrite");
+        st.status.rows = Some(3);
+        let w = super::super::ddl::warnings(&st, &with(Dv::Expr("gen_random_uuid()".into())));
+        assert!(w.iter().any(|x| x.contains("once for each of the table's rows") && x.contains("exclusive lock")), "{w:?}");
+        assert!(super::super::ddl::warnings(&st, &with(Dv::Expr("'x'::text".into()))).is_empty());
+        assert!(super::super::ddl::warnings(&st, &with(Dv::Value("x".into()))).is_empty());
+    }
+
+    #[test]
+    fn a_dropped_column_comes_back_without_what_it_cannot_hold() {
+        let mut st = table();
+        // a NOT NULL column without a default and its primary key
+        st.columns[2].nullable = false;
+        let mut pk = index("t_note_pkey", "CREATE UNIQUE INDEX t_note_pkey ON public.t USING btree (note)", &["note"]);
+        (pk.unique, pk.constraint, pk.primary) = (true, true, true);
+        st.indexes.push(pk);
+        let u = plan("t", &st, &[Change::Drop("note".into())]).unwrap().undo.unwrap();
+        assert_eq!(u.steps, ["ALTER TABLE \"public\".\"t\" ADD COLUMN \"note\" text".to_string(), "CREATE INDEX \"t_name\" ON \"public\".\"t\" (\"name\" DESC, \"note\")".to_string()]);
+        assert!(u.loss.iter().any(|l| l.contains("allowing NULL") && l.contains("primary key")), "{:?}", u.loss);
+        // with a default the column keeps NOT NULL
+        st.columns[2].default = Some("x".into());
+        let u = plan("t", &st, &[Change::Drop("note".into())]).unwrap().undo.unwrap();
+        assert!(u.steps[0].ends_with("DEFAULT 'x' NOT NULL"), "{:?}", u.steps);
+        assert!(u.steps.iter().any(|s| s.contains("PRIMARY KEY")));
+    }
+
+    #[test]
+    fn what_the_server_drops_with_a_column_must_be_something_the_undo_restores() {
+        use crate::db::sql::structure::ColDep;
+        let dep = |kind: &str, name: &str| ColDep { col: "note".into(), kind: kind.into(), name: name.into(), what: format!("{kind} {name}") };
+        let undo = |deps: Vec<ColDep>| {
+            let mut st = table();
+            st.pg_deps = deps;
+            plan("t", &st, &[Change::Drop("note".into())]).unwrap().undo
+        };
+        assert!(undo(vec![dep("index", "t_name"), dep("default", "")]).is_ok());
+        for bad in [dep("constraint", "t_note_check"), dep("index", "t_partial"), dep("other", "trigger x")] {
+            let why = undo(vec![dep("index", "t_name"), bad.clone()]).unwrap_err();
+            assert!(why.contains(&bad.what), "{why}");
+        }
+        // the plan itself is not refused, and it is checked again under the lock
+        let mut st = table();
+        st.pg_deps = vec![dep("constraint", "t_note_check")];
+        let p = plan("t", &st, &[Change::Drop("note".into())]).unwrap();
+        assert!(p.expect.unwrap().all.is_some());
     }
 }

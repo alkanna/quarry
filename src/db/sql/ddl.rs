@@ -81,11 +81,14 @@ pub struct ColDef {
     /// PostgreSQL: the identity column is GENERATED ALWAYS, not BY DEFAULT. `auto_increment` says it is an identity (or
     /// a serial, which carries its nextval default) at all.
     pub identity_always: bool,
+    /// PostgreSQL: the auto increment is a serial, an integer whose default is the `nextval` of a sequence the column owns, as
+    /// the catalog read it. A typed `nextval(...)` default is not one: it names a sequence the column does not own.
+    pub serial: bool,
 }
 
 impl ColDef {
     pub fn new(name: &str, ty: &str) -> ColDef {
-        ColDef { name: name.into(), ty: ty.into(), args: String::new(), unsigned: false, zerofill: false, nullable: true, default: Dv::Null, auto_increment: false, collation: None, on_update: None, comment: String::new(), srid: None, identity_always: false }
+        ColDef { name: name.into(), ty: ty.into(), args: String::new(), unsigned: false, zerofill: false, nullable: true, default: Dv::Null, auto_increment: false, collation: None, on_update: None, comment: String::new(), srid: None, identity_always: false, serial: false }
     }
 
     /// What the structure read holds about a column. Generated, invisible and compressed columns and MariaDB
@@ -129,7 +132,7 @@ impl ColDef {
             (None, _) if c.nullable => Dv::Null,
             (None, _) => Dv::None,
         };
-        Ok(ColDef { name: c.name.clone(), ty, args, unsigned, zerofill, nullable: c.nullable, default, auto_increment: lower.contains("auto_increment"), collation, on_update, comment: c.comment.clone(), srid: c.srid, identity_always: false })
+        Ok(ColDef { name: c.name.clone(), ty, args, unsigned, zerofill, nullable: c.nullable, default, auto_increment: lower.contains("auto_increment"), collation, on_update, comment: c.comment.clone(), srid: c.srid, identity_always: false, serial: false })
     }
 
     /// `from_column` for a column of `st`. A collation that is the table's default is left out, so an edit or an
@@ -182,6 +185,11 @@ pub struct IndexDef {
     pub constraint: bool,
     /// PostgreSQL: the access method when it is not btree (hash, gin, gist, brin, spgist), lower case.
     pub method: String,
+    /// PostgreSQL: the constraint is DEFERRABLE, and INITIALLY DEFERRED.
+    pub deferrable: bool,
+    pub deferred: bool,
+    /// PostgreSQL: the comment on the constraint, apart from the one on its index.
+    pub con_comment: String,
 }
 
 impl IndexDef {
@@ -199,9 +207,9 @@ impl IndexDef {
         } else {
             IndexKind::Index
         };
-        let functional = ix.cols.iter().any(|c| c.expr.is_some()) || (pg && !super::ddl_pg::index_is_plain(ix)) || (ix.constraint && !ix.primary && !ix.unique);
+        let functional = ix.cols.iter().any(|c| c.expr.is_some()) || (pg && ix.complex) || (ix.constraint && !ix.primary && !ix.unique);
         let method = if pg && !ix.kind.eq_ignore_ascii_case("btree") { ix.kind.to_ascii_lowercase() } else { String::new() };
-        IndexDef { name: ix.name.clone(), kind, cols: ix.cols.iter().map(|c| IdxCol { name: c.name.clone(), prefix: c.prefix, desc: c.desc }).collect(), comment: ix.comment.clone(), invisible: ix.invisible, functional, constraint: ix.constraint, method }
+        IndexDef { name: ix.name.clone(), kind, cols: ix.cols.iter().map(|c| IdxCol { name: c.name.clone(), prefix: c.prefix, desc: c.desc }).collect(), comment: ix.comment.clone(), invisible: ix.invisible, functional, constraint: ix.constraint, method, deferrable: ix.deferrable, deferred: ix.deferred, con_comment: ix.con_comment.clone() }
     }
 }
 
@@ -454,11 +462,15 @@ pub(super) struct Sim {
     fks: Vec<ForeignKey>,
     /// PostgreSQL drops a column together with every index that holds it, puts a new column last and cannot place one.
     pg: bool,
+    /// PostgreSQL: what the server drops with each column, as read from the catalog.
+    deps: Vec<super::structure::ColDep>,
+    /// What the inverses collected so far give up, for the undo's confirmation.
+    pub(super) notes: Vec<String>,
 }
 
 impl Sim {
     pub(super) fn of(st: &Structure) -> Sim {
-        Sim { cols: st.columns.iter().map(|c| (c.name.clone(), ColDef::in_table(st, c))).collect(), idx: st.indexes.iter().map(IndexDef::from_index).collect(), fks: st.foreign_keys.clone(), pg: st.pg_schema.is_some() }
+        Sim { cols: st.columns.iter().map(|c| (c.name.clone(), ColDef::in_table(st, c))).collect(), idx: st.indexes.iter().map(IndexDef::from_index).collect(), fks: st.foreign_keys.clone(), pg: st.pg_schema.is_some(), deps: st.pg_deps.clone(), notes: Vec::new() }
     }
 
     /// An index the server can use for a key on these columns: it starts with them, in order, whole.
@@ -540,12 +552,34 @@ impl Sim {
                     return Err(format!("Dropping {name} also drops the foreign key {}, which this editor cannot put back.", k.name));
                 }
                 let (_, old) = self.cols.remove(i);
-                // The column comes back last: PostgreSQL has no column order to restore it to.
-                let mut back = vec![Change::Add { def: old?, pos: Pos::Keep }];
+                let old = old?;
                 // Every index and constraint that holds the column goes whole, so undo adds each one back as it was.
                 let (gone, keep): (Vec<IndexDef>, Vec<IndexDef>) = std::mem::take(&mut self.idx).into_iter().partition(|ix| ix.cols.iter().any(|c| same_name(&c.name, name)));
-                back.extend(gone.into_iter().map(Change::AddIndex));
                 self.idx = keep;
+                // The server also drops what depends on the column without the column being in an index's key parts: a
+                // partial index that only names it in its condition, an expression or INCLUDE index, a CHECK, a trigger.
+                // Undo restores only the indexes it can write and the column's own default and sequence.
+                let lost: Vec<&str> = self.deps.iter().filter(|d| same_name(&d.col, name)).filter(|d| match d.kind.as_str() {
+                    "index" => !gone.iter().any(|ix| same_name(&ix.name, &d.name) && !ix.functional),
+                    "key" => !gone.iter().any(|ix| same_name(&ix.name, &d.name) && !ix.functional && ix.constraint),
+                    "default" => false,
+                    "sequence" => !old.auto_increment,
+                    _ => true,
+                }).map(|d| d.what.as_str()).collect();
+                if !lost.is_empty() {
+                    return Err(format!("Dropping {name} also drops {}, which this editor cannot put back.", lost.join(", ")));
+                }
+                // A NOT NULL column with nothing to fill the rows with cannot come back NOT NULL on a table that has rows,
+                // and a primary key needs it, so the column returns nullable and without its primary key.
+                let blank = !old.nullable && !old.auto_increment && !matches!(old.default, Dv::Value(_) | Dv::Expr(_));
+                let (skipped, gone): (Vec<IndexDef>, Vec<IndexDef>) = gone.into_iter().partition(|ix| blank && ix.kind == IndexKind::Primary);
+                let back_def = if blank { ColDef { nullable: true, default: Dv::Null, ..old } } else { old };
+                if blank {
+                    self.notes.push(format!("Undo adds {name} back empty and allowing NULL{}: it has no default to fill the rows with, so NOT NULL could not be set.", if skipped.is_empty() { "" } else { ", without its primary key" }));
+                }
+                // The column comes back last: PostgreSQL has no column order to restore it to.
+                let mut back = vec![Change::Add { def: back_def, pos: Pos::Keep }];
+                back.extend(gone.into_iter().map(Change::AddIndex));
                 Ok(back)
             }
             Change::Drop(name) => {
@@ -749,6 +783,11 @@ pub struct Expect {
     pub idx: Vec<String>,
     pub fks: Vec<String>,
     pub snap: Vec<(String, Option<String>)>,
+    /// PostgreSQL: every index, constraint and dependent of the table when the plan was made, for a plan (a column drop)
+    /// whose undo relies on the table having none besides these. A name list cannot see one that another session added.
+    pub all: Option<Vec<String>>,
+    /// PostgreSQL: the type texts the plan carries from the person, which the server must resolve as types.
+    pub types: Vec<String>,
 }
 
 pub fn plan(d: Dialect, version: &str, m: Mode, table: &str, st: &Structure, staged: &[Change]) -> Result<Plan, String> {
@@ -792,7 +831,7 @@ fn type_text(c: &ColDef) -> String {
 /// What the undo steps destroy, run on the table the change left.
 pub(super) fn undo_loss(after: &Sim, groups: &[Vec<Change>]) -> Vec<String> {
     let mut sim = after.clone();
-    let mut out = Vec::new();
+    let mut out = after.notes.clone();
     for c in groups.iter().flatten() {
         match c {
             Change::Drop(n) => out.push(format!("Undo drops column {n} and every value it holds.")),
@@ -800,6 +839,10 @@ pub(super) fn undo_loss(after: &Sim, groups: &[Vec<Change>]) -> Vec<String> {
                 if let Some(Ok(cur)) = sim.at(from).map(|i| &sim.cols[i].1) {
                     if converts(cur, def) {
                         out.push(format!("Undo converts {from} back to {}, which can cut or reject the values it holds now.", type_text(def)));
+                    }
+                    // Dropping an identity drops its sequence, so the undo starts a new one at the largest value the column holds.
+                    if sim.pg && def.auto_increment && !cur.auto_increment {
+                        out.push(format!("Undo makes {from} an auto increment again on a new sequence that continues after its largest value: the old sequence's step, limits, cache and position are not restored."));
                     }
                 }
             }
@@ -878,7 +921,7 @@ pub fn snapshot(st: &Structure, cols: &[String], idx: &[String], fks: &[String])
     };
     let index = |n: &String| {
         let i = st.indexes.iter().find(|i| same_name(&i.name, n));
-        (format!("index {n}"), i.map(|i| format!("{}|{}|{}|{}|{}|{}{}", i.name, i.unique, i.kind, i.comment, i.invisible, i.cols.iter().map(|c| format!("{}:{:?}:{}:{:?}", c.name, c.prefix, c.desc, c.expr)).collect::<Vec<_>>().join(","), if i.def.is_empty() { String::new() } else { format!("|{}|{}|{}", i.def, i.constraint, i.primary) })))
+        (format!("index {n}"), i.map(|i| format!("{}|{}|{}|{}|{}|{}{}", i.name, i.unique, i.kind, i.comment, i.invisible, i.cols.iter().map(|c| format!("{}:{:?}:{}:{:?}", c.name, c.prefix, c.desc, c.expr)).collect::<Vec<_>>().join(","), if i.def.is_empty() { String::new() } else { format!("|{}|{}|{}|{}|{}|{}|{}", i.def, i.constraint, i.primary, i.complex, i.deferrable, i.deferred, i.con_comment) })))
     };
     let fk = |n: &String| {
         let k = st.foreign_keys.iter().find(|k| same_name(&k.name, n));
@@ -900,7 +943,18 @@ pub fn warnings(before: &Structure, changes: &[Change]) -> Vec<String> {
         }
         let _ = fk_sim.apply(c);
         match c {
-            Change::Drop(n) if before.pg_schema.is_some() => out.push(format!("Dropping {n} deletes its values for good, with every index and constraint that uses it. Undo brings the column back empty and last, with its indexes.")),
+            Change::Drop(n) if before.pg_schema.is_some() => {
+                let blank = sim.at(n).and_then(|i| sim.cols[i].1.as_ref().ok()).is_some_and(|d| !d.nullable && !d.auto_increment && !matches!(d.default, Dv::Value(_) | Dv::Expr(_)));
+                let back = if blank { "allowing NULL and without its primary key, with its other indexes." } else { "with its indexes." };
+                out.push(format!("Dropping {n} deletes its values for good, with every index and constraint that uses it. Undo brings the column back empty and last, {back}"));
+            }
+            Change::Add { def, .. } if before.pg_schema.is_some() && !def.auto_increment && before.status.rows.is_some_and(|r| r > 0) => {
+                if let Dv::Expr(x) = &def.default {
+                    if super::ddl_pg::calls_function(x) {
+                        out.push(format!("The default of {} calls a function. Any function call is read as volatile here, since the editor does not look the function up. A volatile one runs once for each of the table's rows while PostgreSQL holds an exclusive lock on the table, and again on every later insert.", def.name));
+                    }
+                }
+            }
             Change::Drop(n) => out.push(format!("Dropping {n} deletes its values for good. Undo brings the column back empty.")),
             Change::Modify { from, def, .. } => {
                 if let Some(Ok(old)) = sim.at(from).map(|i| &sim.cols[i].1) {
@@ -1502,7 +1556,7 @@ pub(super) async fn undo(db: &Db, a: UndoAction, u: AlterUndo, read_only: bool) 
         k.at = at;
         k
     });
-    Msg::SqlAltered { conn, schema, table, res, undo: keep, sql_mode: seen, alter: true }
+    Msg::SqlAltered { conn, database: String::new(), schema, table, res, undo: keep, sql_mode: seen, alter: true, unsure: false }
 }
 
 impl Worker {
@@ -1529,7 +1583,7 @@ impl Worker {
                 },
                 _ => None,
             };
-            Msg::SqlAltered { conn, schema, table, res: res.map(|_| done), undo, sql_mode: seen, alter: true }
+            Msg::SqlAltered { conn, database: String::new(), schema, table, res: res.map(|_| done), undo, sql_mode: seen, alter: true, unsure: false }
         });
     }
 }
@@ -1733,7 +1787,7 @@ pub(super) async fn undo_trigger(db: &Db, a: UndoAction, u: TrigUndo, read_only:
     let UndoAction { at, conn, db: schema, coll: table, .. } = a;
     let res = crate::db::sql_scope(db.conn, &schema, undo_trigger_job(db, &schema, &table, &u, read_only)).await;
     let keep = res.is_err().then(|| UndoAction { at, ..trigger_undo_action(conn, &schema, &table, u) });
-    Msg::SqlAltered { conn, schema, table, res, undo: keep, sql_mode: None, alter: false }
+    Msg::SqlAltered { conn, database: String::new(), schema, table, res, undo: keep, sql_mode: None, alter: false, unsure: false }
 }
 
 fn trigger_undo_action(conn: u64, schema: &str, table: &str, u: TrigUndo) -> UndoAction {
@@ -1754,7 +1808,7 @@ impl Worker {
                 }
                 Err((why, now)) => (Err(why), None, now),
             };
-            Msg::SqlAltered { conn, schema, table, res, undo, sql_mode: seen, alter: false }
+            Msg::SqlAltered { conn, database: String::new(), schema, table, res, undo, sql_mode: seen, alter: false, unsure: false }
         });
     }
 

@@ -261,7 +261,9 @@ pub(super) fn pooled_for_test(base: &Db, uri: &str) -> Db {
 /// big update must not be cut by the limit meant for reads, a lock timeout so a write never queues behind another
 /// session's lock for ever, and the output formats the read path expects.
 pub(super) fn write_locals() -> String {
-    let mut v = vec![set_timeout("0"), set_local("lock_timeout", "10s")];
+    // The writers of literals (`value::lit` with no backslash escapes) are right only with this on, and a role or database
+    // can set it off for the session.
+    let mut v = vec![set_timeout("0"), set_local("lock_timeout", "10s"), set_local("standard_conforming_strings", "on")];
     v.extend(FORMATS.map(|(k, x)| set_local(k, x)));
     v.join("; ")
 }
@@ -607,6 +609,7 @@ mod tests {
             assert!(stmt.starts_with("SET LOCAL "), "{stmt}");
         }
         assert!(write.contains("statement_timeout = '0'") && write.contains("lock_timeout = '10s'"));
+        assert!(write.contains("SET LOCAL standard_conforming_strings = 'on'"), "a write transaction must not depend on the session's setting");
     }
 
     #[test]

@@ -73,9 +73,11 @@ impl T<'_> {
     }
 
     fn apply(&self, changes: &[Change]) -> UndoAction {
-        let (res, undo) = self.run(self.plan(changes).unwrap_or_else(|x| panic!("plan: {x}")));
+        let plan = self.plan(changes).unwrap_or_else(|x| panic!("plan: {x}"));
+        let why = plan.undo.as_ref().err().cloned();
+        let (res, undo) = self.run(plan);
         res.unwrap_or_else(|x| panic!("apply: {x}"));
-        undo.expect("an undo")
+        undo.unwrap_or_else(|| panic!("an undo, but the plan has none: {why:?}"))
     }
 
     fn undo(&self, a: UndoAction) -> (Res<String>, Option<UndoAction>) {
@@ -348,12 +350,12 @@ fn a_failing_statement_rolls_back_the_statements_before_it() {
     every_pg(|l, var| {
         let t = fixture(l, var, "fail", TABLE_DDL);
         let before = t.shape();
-        // the third change is valid text but not a type, so the server refuses it after two statements ran
-        let plan = t.plan(&[add(ColDef::new("first", "integer")), Change::Drop("note".into()), add(ColDef::new("third", "nosuchtype"))]).unwrap();
+        // the third change is valid text but a column that exists, so the server refuses it after two statements ran
+        let plan = t.plan(&[add(ColDef::new("first", "integer")), Change::Drop("note".into()), add(ColDef::new("name", "integer"))]).unwrap();
         assert_eq!(plan.steps.len(), 3);
         let (res, undo) = t.run(plan);
         let err = res.unwrap_err();
-        assert!(err.contains("nosuchtype") && err.contains("statement 3 of 3") && err.contains("rolled back"), "{var}: {err}");
+        assert!(err.contains("already exists") && err.contains("statement 3 of 3") && err.contains("rolled back"), "{var}: {err}");
         assert!(undo.is_none(), "{var}");
         assert_eq!(t.shape(), before, "{var}");
         assert_eq!(t.rows(), "1:a:1,2:b:2,3:c:30", "{var}");
@@ -412,4 +414,201 @@ fn one_apply_and_its_undo_through_a_pooler() {
     assert_eq!(t.rows(), "1:a:1,2:b:2,3:c:30");
     // the settings of the transaction never reached the session of another client of the pooler
     assert_eq!(t.one("SHOW lock_timeout"), "0");
+}
+
+#[test]
+fn a_dropped_column_with_dependents_the_undo_cannot_restore_has_no_undo() {
+    every_pg(|l, var| {
+        let t = fixture(l, var, "deps", TABLE_DDL);
+        // each of these goes with its column although the column is not a key part of any index it is in
+        for (create, drop, gone) in [
+            ("ALTER TABLE t ADD CONSTRAINT t_qty_chk CHECK (qty > 0)", "ALTER TABLE t DROP CONSTRAINT t_qty_chk", "t_qty_chk"),
+            ("ALTER TABLE t ADD CONSTRAINT t_two_chk CHECK (qty < id * 100)", "ALTER TABLE t DROP CONSTRAINT t_two_chk", "t_two_chk"),
+            ("CREATE INDEX t_part ON t (name) WHERE qty > 1", "DROP INDEX t_part", "t_part"),
+            ("CREATE INDEX t_expr ON t ((qty + 1))", "DROP INDEX t_expr", "t_expr"),
+            ("CREATE INDEX t_inc ON t (name) INCLUDE (qty)", "DROP INDEX t_inc", "t_inc"),
+        ] {
+            t.sql(create);
+            let plan = t.plan(&[Change::Drop("qty".into())]).unwrap_or_else(|x| panic!("{var}: {x}"));
+            let why = plan.undo.unwrap_err();
+            assert!(why.contains(gone), "{var}: {gone}: {why}");
+            t.sql(drop);
+        }
+        // with only the index the undo restores, there is one
+        assert!(t.plan(&[Change::Drop("qty".into())]).unwrap().undo.is_ok(), "{var}");
+        // a dependent another session adds after the plan was made is found under the lock, and nothing runs
+        let plan = t.plan(&[Change::Drop("qty".into())]).unwrap();
+        let before = t.shape();
+        t.sql("CREATE INDEX t_late ON t (name) WHERE qty > 5");
+        let (res, _) = t.run(plan);
+        assert!(res.unwrap_err().contains("changed since this plan was made"), "{var}");
+        t.sql("DROP INDEX t_late");
+        assert_eq!(t.shape(), before, "{var}");
+        let plan = t.plan(&[Change::Drop("qty".into())]).unwrap();
+        t.sql("ALTER TABLE t ADD CONSTRAINT t_late_chk CHECK (qty > 0)");
+        assert!(t.run(plan).0.unwrap_err().contains("changed since this plan was made"), "{var}");
+        assert!(t.col("qty").is_some(), "{var}");
+    });
+}
+
+#[test]
+fn types_functions_and_collations_outside_the_schema_come_back_qualified() {
+    every_pg(|l, var| {
+        // the planted type in the table's own schema is what an unqualified name would bind to
+        let t = fixture(l, var, "path", "DROP TYPE IF EXISTS public.pgddl_mood CASCADE; CREATE TYPE public.pgddl_mood AS ENUM ('ok', 'sad'); CREATE TYPE pgddl_mood AS ENUM ('x'); \
+            CREATE OR REPLACE FUNCTION public.pgddl_fn() RETURNS integer LANGUAGE sql AS 'SELECT 7'; DROP COLLATION IF EXISTS public.pgddl_coll CASCADE; CREATE COLLATION public.pgddl_coll (LOCALE = 'C'); \
+            CREATE TABLE t (id integer PRIMARY KEY, mood public.pgddl_mood, n integer DEFAULT public.pgddl_fn(), s text COLLATE public.pgddl_coll); INSERT INTO t VALUES (1, 'ok', 5, 'z')");
+        assert_eq!(t.col("mood").unwrap().full_type, "public.pgddl_mood", "{var}");
+        assert!(t.col("n").unwrap().default.as_deref().is_some_and(|d| d.contains("public.pgddl_fn()")), "{var}");
+        assert_eq!(t.col("s").unwrap().collation.as_deref(), Some("\"public\".\"pgddl_coll\""), "{var}");
+        let a = t.apply(&[Change::Drop("mood".into()), Change::Drop("n".into()), Change::Drop("s".into())]);
+        let (res, _) = t.undo(a);
+        res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(t.one("SELECT atttypid::regtype::text FROM pg_attribute WHERE attrelid = 't'::regclass AND attname = 'mood'"), "public.pgddl_mood", "{var}");
+        assert_eq!(t.one("SELECT n.nspname FROM pg_attribute a JOIN pg_collation c ON c.oid = a.attcollation JOIN pg_namespace n ON n.oid = c.collnamespace WHERE a.attrelid = 't'::regclass AND a.attname = 's'"), "public", "{var}");
+        assert_eq!(t.one("SELECT n::text FROM t"), "7", "{var}");
+        t.sql("DROP TABLE t; DROP TYPE public.pgddl_mood; DROP FUNCTION public.pgddl_fn(); DROP COLLATION public.pgddl_coll");
+    });
+}
+
+#[test]
+fn an_identity_that_comes_back_or_is_new_continues_after_the_values_the_column_holds() {
+    every_pg(|l, var| {
+        let t = fixture(l, var, "ident", TABLE_DDL);
+        let mut plain = t.def("id");
+        plain.auto_increment = false;
+        let a = t.apply(&[modify("id", plain)]);
+        t.undo(a).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        // the new sequence would start at 1 and the first insert would repeat a key
+        t.sql("INSERT INTO t (name) VALUES ('d')");
+        assert_eq!(t.one("SELECT max(id)::text FROM t"), "4", "{var}");
+        t.sql("ALTER TABLE t ADD COLUMN k integer; UPDATE t SET k = id * 10");
+        let mut k = t.def("k");
+        (k.auto_increment, k.nullable) = (true, false);
+        t.apply(&[modify("k", k)]);
+        t.sql("INSERT INTO t (name) VALUES ('e')");
+        assert_eq!(t.one("SELECT k::text FROM t WHERE name = 'e'"), "41", "{var}");
+    });
+}
+
+#[test]
+fn a_dropped_not_null_column_without_a_default_comes_back_nullable() {
+    every_pg(|l, var| {
+        let t = fixture(l, var, "blank", "CREATE TABLE t (code text PRIMARY KEY, qty integer NOT NULL, note text); INSERT INTO t VALUES ('a', 1, 'x'), ('b', 2, 'y')");
+        let plan = t.plan(&[Change::Drop("qty".into())]).unwrap();
+        assert!(plan.undo.as_ref().unwrap().loss.iter().any(|x| x.contains("allowing NULL")), "{var}: {:?}", plan.undo.unwrap().loss);
+        let a = t.apply(&[Change::Drop("qty".into())]);
+        t.undo(a).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert!(t.col("qty").unwrap().nullable, "{var}");
+        // the primary key column: no value to give the rows, so no primary key either
+        let plan = t.plan(&[Change::Drop("code".into())]).unwrap();
+        assert!(plan.undo.as_ref().unwrap().loss.iter().any(|x| x.contains("primary key")), "{var}");
+        let a = t.apply(&[Change::Drop("code".into())]);
+        t.undo(a).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert!(t.col("code").unwrap().nullable && t.structure().indexes.iter().all(|i| !i.primary), "{var}");
+    });
+}
+
+#[test]
+fn only_a_default_on_the_columns_own_sequence_is_a_serial() {
+    every_pg(|l, var| {
+        let t = fixture(l, var, "serial", "CREATE SEQUENCE shared_seq; CREATE TABLE t (id integer PRIMARY KEY, a integer DEFAULT nextval('shared_seq'), b serial, name text); INSERT INTO t (id) VALUES (1), (2)");
+        let (a, b) = (t.def("a"), t.def("b"));
+        assert!(!a.auto_increment && matches!(a.default, Dv::Expr(_)), "{var}: a shares a sequence");
+        assert!(b.auto_increment && b.serial, "{var}");
+        let default_of = |c: &str| t.one(&format!("SELECT pg_get_expr(adbin, adrelid) FROM pg_attrdef WHERE adrelid = 't'::regclass AND adnum = (SELECT attnum FROM pg_attribute WHERE attrelid = 't'::regclass AND attname = '{c}')"));
+        let (da, db) = (default_of("a"), default_of("b"));
+        for c in ["a", "b"] {
+            let u = t.apply(&[Change::Drop(c.into())]);
+            t.undo(u).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        }
+        assert_eq!((default_of("a"), default_of("b")), (da, db), "{var}: a goes back on the shared sequence, b on its own");
+        // a typed nextval is not a serial, so ticking identity on it is refused instead of writing a bigserial
+        let mut typed = ColDef::new("c", "bigint");
+        (typed.nullable, typed.auto_increment, typed.default) = (false, true, Dv::Expr("nextval('shared_seq')".into()));
+        assert!(t.plan(&[add(typed)]).unwrap_err().contains("identity column cannot have a default"), "{var}");
+    });
+}
+
+#[test]
+fn a_deferrable_constraint_and_its_comment_survive_a_drop_and_undo() {
+    every_pg(|l, var| {
+        let t = fixture(l, var, "defer", TABLE_DDL);
+        t.sql("ALTER TABLE t ADD CONSTRAINT t_name_uq UNIQUE (name) DEFERRABLE INITIALLY DEFERRED; COMMENT ON CONSTRAINT t_name_uq ON t IS 'one each'");
+        let a = t.apply(&[Change::DropIndex("t_name_uq".into())]);
+        t.undo(a).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(t.one("SELECT condeferrable::text || condeferred::text FROM pg_constraint WHERE conname = 't_name_uq'"), "truetrue", "{var}");
+        assert_eq!(t.one("SELECT obj_description(oid, 'pg_constraint') FROM pg_constraint WHERE conname = 't_name_uq'"), "one each", "{var}");
+    });
+}
+
+#[test]
+fn a_type_text_that_is_a_whole_column_clause_is_refused_by_the_server() {
+    every_pg(|l, var| {
+        let t = fixture(l, var, "types", TABLE_DDL);
+        let before = t.shape();
+        for bad in ["integer REFERENCES t (id)", "integer CHECK (qty)", "integer GENERATED ALWAYS AS (qty) STORED", "integer PRIMARY KEY", "integer DEFAULT 5", "nosuchtype"] {
+            // the lexer lets each of them through as one clause, so the plan is made and the transaction refuses it
+            let plan = t.plan(&[add(ColDef::new("x", bad))]).unwrap_or_else(|x| panic!("{var}: {bad}: {x}"));
+            let err = t.run(plan).0.unwrap_err();
+            assert!(err.contains("is not a type the server knows"), "{var}: {bad}: {err}");
+            assert_eq!(t.shape(), before, "{var}: {bad}");
+        }
+        for (i, ok) in ["timestamp with time zone", "character varying(10)[]", "pg_catalog.int4", "numeric(8,2)"].iter().enumerate() {
+            t.apply(&[add(ColDef::new(&format!("c{i}"), ok))]);
+        }
+    });
+}
+
+#[test]
+fn an_index_is_plain_by_its_catalog_fields_not_by_the_words_of_its_text() {
+    every_pg(|l, var| {
+        let t = fixture(l, var, "plain", TABLE_DDL);
+        t.sql("CREATE INDEX \"weird USING (x) WHERE\" ON t (note)");
+        let weird = t.structure().indexes.into_iter().find(|i| i.name.starts_with("weird")).unwrap();
+        assert!(!weird.complex, "{var}");
+        let before = t.shape();
+        let a = t.apply(&[Change::DropIndex(weird.name.clone())]);
+        t.undo(a).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(t.shape(), before, "{var}");
+        let mut complex = vec![
+            "CREATE INDEX c1 ON t (name) WHERE qty > 1",
+            "CREATE INDEX c2 ON t (name) INCLUDE (qty)",
+            "CREATE INDEX c3 ON t (note text_pattern_ops)",
+            "CREATE INDEX c4 ON t (name NULLS FIRST)",
+            "CREATE INDEX c5 ON t (name DESC NULLS LAST)",
+            "CREATE INDEX c6 ON t (name) WITH (fillfactor = 70)",
+            "CREATE INDEX c7 ON t (name COLLATE \"C\")",
+            "CREATE INDEX c8 ON t ((qty + 1))",
+        ];
+        if t.one("SHOW server_version_num").parse::<u32>().unwrap() >= 150000 {
+            complex.push("CREATE UNIQUE INDEX c9 ON t (qty) NULLS NOT DISTINCT");
+        }
+        for ddl in &complex {
+            t.sql(ddl);
+        }
+        for ddl in ["CREATE INDEX p1 ON t (name DESC)", "CREATE INDEX p2 ON t (name DESC NULLS FIRST)", "CREATE INDEX p3 ON t (qty NULLS LAST)", "CREATE INDEX p4 ON t USING hash (name)"] {
+            t.sql(ddl);
+        }
+        for i in t.structure().indexes {
+            let want = i.name.starts_with('c') && i.name.len() == 2;
+            assert_eq!(i.complex, want, "{var}: {} is {}", i.name, if i.complex { "complex" } else { "plain" });
+        }
+    });
+}
+
+#[test]
+fn a_commit_that_fails_does_not_claim_nothing_was_changed() {
+    every_pg(|l, var| {
+        let t = fixture(l, var, "commit", "CREATE TABLE t (id integer, name text, CONSTRAINT t_id_uq UNIQUE (id) DEFERRABLE INITIALLY DEFERRED); INSERT INTO t VALUES (1, 'a')");
+        let mut plan = t.plan(&[add(ColDef::new("x", "text"))]).unwrap();
+        // a deferred key is checked at COMMIT, so this statement passes and the commit fails
+        plan.steps = vec!["INSERT INTO t (id, name) VALUES (1, 'dup')".into()];
+        t.l.w.pg_alter(1, t.db.clone(), t.schema.clone(), "t".into(), plan.steps, plan.expect.unwrap(), None, false, "done".into());
+        let Msg::SqlAltered { res, unsure, database, schema, .. } = t.l.next() else { panic!("expected SqlAltered") };
+        let err = res.unwrap_err();
+        assert!(unsure && err.contains("did not confirm the commit") && !err.contains("Nothing was changed"), "{var}: {err}");
+        assert_eq!((database, schema), (t.db.pg_database(), t.schema.clone()), "{var}");
+        assert_eq!(t.one("SELECT count(*)::text FROM t"), "1", "{var}");
+    });
 }

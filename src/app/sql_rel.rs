@@ -2,7 +2,7 @@
 //! points to from Content. Changes are staged like column and index edits (`sql_alter.rs`), so the statement
 //! the preview shows is the one that runs and the inverse comes from the structure read before.
 
-use super::sql_alter::{sql_block, BUSY_NOTE, READ_ONLY_NOTE};
+use super::sql_alter::{sql_block, BUSY_NOTE};
 use super::*;
 use db::sql::ddl::{self, Change, FK_ACTIONS};
 use db::sql::structure::{ForeignKey, Structure};
@@ -407,7 +407,7 @@ impl App {
         dialog_actions(ui, |ui| {
             stage = ui.add_enabled(text.is_ok(), primary_button(ui, "Add relation", PRIMARY())).clicked();
             let busy = self.applying();
-            now = ui.add_enabled(text.is_ok() && self.sel_writable() && !busy, egui::Button::new("Apply now")).on_hover_text("Stage this change and run everything staged").on_disabled_hover_text(if busy { BUSY_NOTE } else { READ_ONLY_NOTE }).clicked();
+            now = ui.add_enabled(text.is_ok() && !self.sel_is_view() && !busy, egui::Button::new("Apply now")).on_hover_text("Stage this change and run everything staged. A locked connection asks to unlock first.").on_disabled_hover_text(if busy { BUSY_NOTE } else { "A view cannot be changed here" }).clicked();
             if ui.button("Cancel").clicked() {
                 *keep = false;
             }
