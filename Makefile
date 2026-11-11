@@ -9,19 +9,24 @@ THEME ?= DARK
 # SET=n (1 to 9) runs a separate set of servers, named quarry-test-n-* on ports moved by n*100, so several worktrees
 # can run the live tests at once: the tests use fixed database names that collide on one shared set.
 SET ?= 0
+# HOST=<ssh alias> runs the servers on another machine through Docker over SSH, and the tests reach them at its address,
+# which takes the database load off this machine. The alias must log in without a password and reach Docker.
+HOST ?=
+DOCKER = $(if $(HOST),DOCKER_HOST=ssh://$(HOST) )docker
+ADDR := $(if $(HOST),$(shell ssh -G $(HOST) 2>/dev/null | awk '/^hostname /{print $$2}'),127.0.0.1)
 N = quarry-test$(if $(filter 0,$(SET)),,-$(SET))
 P = $(shell expr $(1) + $(SET) \* 100)
-PG18 = postgres://postgres:quarry@127.0.0.1:$(call P,55418)/postgres
-PG13 = postgres://postgres:quarry@127.0.0.1:$(call P,55413)/postgres
-PGBOUNCER = postgres://postgres:quarry@127.0.0.1:$(call P,56432)/postgres
-MYSQL = mysql://root:quarry@127.0.0.1:$(call P,53306)
-MARIADB = mariadb://root:quarry@127.0.0.1:$(call P,53307)
-MONGO = mongodb://localhost:$(call P,57017)/?directConnection=true
+PG18 = postgres://postgres:quarry@$(ADDR):$(call P,55418)/postgres
+PG13 = postgres://postgres:quarry@$(ADDR):$(call P,55413)/postgres
+PGBOUNCER = postgres://postgres:quarry@$(ADDR):$(call P,56432)/postgres
+MYSQL = mysql://root:quarry@$(ADDR):$(call P,53306)
+MARIADB = mariadb://root:quarry@$(ADDR):$(call P,53307)
+MONGO = mongodb://$(ADDR):$(call P,57017)/?directConnection=true
 LIVE = QUARRY_TEST_POSTGRES='$(PG18)' QUARRY_TEST_POSTGRES13='$(PG13)' QUARRY_TEST_PGBOUNCER='$(PGBOUNCER)' QUARRY_TEST_MYSQL='$(MYSQL)' QUARRY_TEST_MARIADB='$(MARIADB)' QUARRY_TEST_MONGO='$(MONGO)' QUARRY_TEST_MONGO_RS='$(MONGO)'
 
 # Starts a stopped container again, or creates it. One left in "created" never started (its port was taken, say) and
 # would come up without its port, so it is made again.
-UP = { [ "$$(docker inspect -f '{{.State.Status}}' $(1) 2>/dev/null)" != created ] || docker rm -f $(1) >/dev/null; } && { docker start $(1) >/dev/null 2>&1 || docker run -d --name $(1) $(2) >/dev/null; }
+UP = { [ "$$($(DOCKER) inspect -f '{{.State.Status}}' $(1) 2>/dev/null)" != created ] || $(DOCKER) rm -f $(1) >/dev/null; } && { $(DOCKER) start $(1) >/dev/null 2>&1 || $(DOCKER) run -d --name $(1) $(2) >/dev/null; }
 
 help:
 	@echo "Run"
@@ -39,6 +44,7 @@ help:
 	@echo "  make coverage                every test against the Docker servers under line coverage, HTML report opened"
 	@echo "  make servers-up | servers-down | servers-status"
 	@echo "  SET=n on any test or servers target uses its own server set (ports + n*100), for parallel worktrees"
+	@echo "  HOST=<ssh alias> runs the servers on that machine through Docker over SSH (e.g. HOST=winbox)"
 	@echo "Build"
 	@echo "  make build                   release binary"
 	@echo "  make bundle [PLATFORM=...]   package into dist/ (./bundle.sh --help)"
@@ -97,24 +103,24 @@ servers-up:
 	@$(call UP,$(N)-mysql,-p $(call P,53306):3306 -e MYSQL_ROOT_PASSWORD=quarry mysql:8.4)
 	@$(call UP,$(N)-mariadb,-p $(call P,53307):3306 -e MARIADB_ROOT_PASSWORD=quarry mariadb:11.4)
 	@$(call UP,$(N)-mongo,-p $(call P,57017):27017 mongo:8 --replSet rs0)
-	@docker network create $(N)-pgb >/dev/null 2>&1 || true
+	@$(DOCKER) network create $(N)-pgb >/dev/null 2>&1 || true
 	@$(call UP,$(N)-pgb-pg,--network $(N)-pgb -e POSTGRES_PASSWORD=quarry postgres:18)
 	@$(call UP,$(N)-pgbouncer,--network $(N)-pgb -p $(call P,56432):5432 -e DB_HOST=$(N)-pgb-pg -e DB_USER=postgres -e DB_PASSWORD=quarry -e AUTH_TYPE=scram-sha-256 -e POOL_MODE=transaction -e MAX_PREPARED_STATEMENTS=0 -e IGNORE_STARTUP_PARAMETERS=extra_float_digits -e DEFAULT_POOL_SIZE=8 -e MAX_CLIENT_CONN=200 edoburu/pgbouncer)
 	@echo "waiting for the servers"
-	@until docker exec $(N)-mongo mongosh --quiet --eval 'try { rs.status() } catch (e) { rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "localhost:27017" }] }) }; quit(db.hello().isWritablePrimary ? 0 : 1)' >/dev/null 2>&1; do sleep 1; done
-	@until docker exec $(N)-mysql mysqladmin -uroot -pquarry ping --silent >/dev/null 2>&1; do sleep 1; done
-	@until docker exec $(N)-mariadb mariadb-admin -uroot -pquarry ping --silent >/dev/null 2>&1; do sleep 1; done
-	@until docker exec $(N)-pg18 pg_isready -U postgres -q && docker exec $(N)-pg13 pg_isready -U postgres -q && docker exec $(N)-pgb-pg pg_isready -U postgres -q; do sleep 1; done
-	@until docker run --rm --network $(N)-pgb -e PGPASSWORD=quarry postgres:18 psql -h $(N)-pgbouncer -U postgres -At -c 'select 1' >/dev/null 2>&1; do sleep 1; done
+	@until $(DOCKER) exec $(N)-mongo mongosh --quiet --eval 'try { rs.status() } catch (e) { rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "localhost:27017" }] }) }; quit(db.hello().isWritablePrimary ? 0 : 1)' >/dev/null 2>&1; do sleep 1; done
+	@until $(DOCKER) exec $(N)-mysql mysqladmin -uroot -pquarry ping --silent >/dev/null 2>&1; do sleep 1; done
+	@until $(DOCKER) exec $(N)-mariadb mariadb-admin -uroot -pquarry ping --silent >/dev/null 2>&1; do sleep 1; done
+	@until $(DOCKER) exec $(N)-pg18 pg_isready -U postgres -q && $(DOCKER) exec $(N)-pg13 pg_isready -U postgres -q && $(DOCKER) exec $(N)-pgb-pg pg_isready -U postgres -q; do sleep 1; done
+	@until $(DOCKER) run --rm --network $(N)-pgb -e PGPASSWORD=quarry postgres:18 psql -h $(N)-pgbouncer -U postgres -At -c 'select 1' >/dev/null 2>&1; do sleep 1; done
 	@echo "servers ready"
 
 # -v also removes their anonymous data volumes, which would otherwise pile up unused.
 servers-down:
-	-docker rm -f -v $(N)-pg18 $(N)-pg13 $(N)-mysql $(N)-mariadb $(N)-mongo $(N)-pgbouncer $(N)-pgb-pg
-	-docker network rm $(N)-pgb
+	-$(DOCKER) rm -f -v $(N)-pg18 $(N)-pg13 $(N)-mysql $(N)-mariadb $(N)-mongo $(N)-pgbouncer $(N)-pgb-pg
+	-$(DOCKER) network rm $(N)-pgb
 
 servers-status:
-	@docker ps -a --filter name=$(N)- --format '{{.Names}}\t{{.Status}}\t{{.Ports}}'
+	@$(DOCKER) ps -a --filter name=$(N)- --format '{{.Names}}\t{{.Status}}\t{{.Ports}}'
 
 # Developer ID build for the maintainer's Mac: needs the cert in the keychain and the "quarry" notarytool profile.
 release-mac:
