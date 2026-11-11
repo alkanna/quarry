@@ -115,18 +115,22 @@ fn put_saved(list: &mut Vec<SavedQuery>, q: SavedQuery) {
     list.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 }
 
-/// Named queries (or pipelines, or SQL scripts) saved for this collection: load, delete, or save the current one.
-/// `icon` shows it as a book icon, as in the find bar.
-pub(super) fn library_menu(ui: &mut egui::Ui, lib: &[SavedQuery], new_name: &mut String, kind: LibKind, icon: bool, acts: &mut Vec<QAct>) -> egui::Response {
-    library_menu_for(ui, lib, new_name, kind, icon, acts, crate::db::sql::Dialect::default())
+/// What a library menu lists. A SQL one carries its dialect, since the statements of a script are counted the way its
+/// server splits them.
+#[derive(Clone, Copy)]
+pub(super) enum LibMenu {
+    Query,
+    Pipeline,
+    Sql(crate::db::sql::Dialect),
 }
 
-/// `library_menu` for a SQL tab: the statements of a script are counted the way its server splits them.
-pub(super) fn library_menu_for(ui: &mut egui::Ui, lib: &[SavedQuery], new_name: &mut String, kind: LibKind, icon: bool, acts: &mut Vec<QAct>, dialect: crate::db::sql::Dialect) -> egui::Response {
+/// Named queries (or pipelines, or SQL scripts) saved for this collection: load, delete, or save the current one.
+/// `icon` shows it as a book icon, as in the find bar.
+pub(super) fn library_menu(ui: &mut egui::Ui, lib: &[SavedQuery], new_name: &mut String, kind: LibMenu, icon: bool, acts: &mut Vec<QAct>) -> egui::Response {
     let (head, sub, empty, save) = match kind {
-        LibKind::Query => ("Saved queries", "Query, sort and project, kept for this collection.", "No saved queries yet", "SAVE THE CURRENT QUERY"),
-        LibKind::Pipeline => ("Saved pipelines", "Pipelines kept for this collection.", "No saved pipelines yet", "SAVE THIS PIPELINE"),
-        LibKind::Sql => ("Library", "SQL scripts kept for this connection.", "No saved scripts yet", "SAVE THIS SCRIPT"),
+        LibMenu::Query => ("Saved queries", "Query, sort and project, kept for this collection.", "No saved queries yet", "SAVE THE CURRENT QUERY"),
+        LibMenu::Pipeline => ("Saved pipelines", "Pipelines kept for this collection.", "No saved pipelines yet", "SAVE THIS PIPELINE"),
+        LibMenu::Sql(_) => ("Library", "SQL scripts kept for this connection.", "No saved scripts yet", "SAVE THIS SCRIPT"),
     };
     let body = |ui: &mut egui::Ui| {
         popover_body(ui, 360.0, |ui| {
@@ -155,14 +159,14 @@ pub(super) fn library_menu_for(ui: &mut egui::Ui, lib: &[SavedQuery], new_name: 
                     galley_at(&p, rect.left(), name_y, p.layout_job(name), BRIGHT());
                     let mut tags = Vec::new();
                     let mut job = match kind {
-                        LibKind::Query => {
+                        LibMenu::Query => {
                             let set = |s: &str| !matches!(s.trim(), "" | "{}");
                             tags.extend(set(&q.sort).then_some("sort".to_string()));
                             tags.extend(set(&q.project).then_some("project".to_string()));
                             json_job(&one_line(&q.filter))
                         }
-                        LibKind::Pipeline => json_job(&one_line(q.pipeline.as_deref().unwrap_or_default())),
-                        LibKind::Sql => {
+                        LibMenu::Pipeline => json_job(&one_line(q.pipeline.as_deref().unwrap_or_default())),
+                        LibMenu::Sql(dialect) => {
                             let sql = q.sql.as_deref().unwrap_or_default();
                             // Counted once per script text, not every frame.
                             let key = ui.make_persistent_id(("lib-stmts", &q.name, sql.len()));

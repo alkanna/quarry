@@ -94,7 +94,7 @@ impl App {
         let rows: Vec<Row> = names
             .iter()
             .map(|n| {
-                let view = self.views.contains(&(conn, db.clone(), n.clone()));
+                let view = self.views.has(conn, &db, &n);
                 Row { name: n.clone(), view, on: true, structure: true, content: !view, drop: false, rows: schema.and_then(|s| s.table(n)).and_then(|t| t.rows) }
             })
             .collect();

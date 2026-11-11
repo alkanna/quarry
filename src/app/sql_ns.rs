@@ -17,13 +17,14 @@ pub(super) fn namespace(dialect: db::sql::Dialect, sel: &Sel, picked: &str) -> S
 
 /// Where namespace `ns` of a foreign key lives next to `base`: on PostgreSQL a key points at a table of another schema
 /// of the same database, on MySQL at a table of another database.
-pub(super) fn with_ns(pg: bool, base: &Sel, ns: &str, coll: String) -> Sel {
-    if pg { Sel { conn: base.conn, db: base.db.clone(), schema: ns.to_string(), coll } } else { Sel { conn: base.conn, db: ns.to_string(), schema: String::new(), coll } }
+pub(super) fn with_ns(dialect: db::sql::Dialect, base: &Sel, ns: &str, coll: String) -> Sel {
+    let (db, schema) = split_ns(dialect, &base.db, ns);
+    Sel { conn: base.conn, db, schema, coll }
 }
 
 /// The (database, schema) a foreign key's namespace `ns` stands for, as `Sel` and the caches take them.
-pub(super) fn split_ns(pg: bool, base_db: &str, ns: &str) -> (String, String) {
-    if pg { (base_db.to_string(), ns.to_string()) } else { (ns.to_string(), String::new()) }
+pub(super) fn split_ns(dialect: db::sql::Dialect, base_db: &str, ns: &str) -> (String, String) {
+    if dialect == db::sql::Dialect::Postgres { (base_db.to_string(), ns.to_string()) } else { (ns.to_string(), String::new()) }
 }
 
 /// The schemas the switcher lists: the user ones, and the system ones when asked for.
@@ -36,8 +37,8 @@ impl App {
     /// selection's database and its schema, on MySQL the connection and the database name. None while not connected.
     pub(super) fn sql_target(&self, sel: &Sel) -> Option<(db::sql::Db, String)> {
         let sql = self.conn(sel.conn)?.sql.as_ref()?;
-        let picked = if sel.schema.is_empty() { self.pg_picked(sel.conn, &sel.db) } else { String::new() };
-        Some((sql.at(&sel.db), namespace(sql.dialect, sel, &picked)))
+        let picked = if sel.schema.is_empty() { self.ns_of(sel.conn, &sel.db) } else { "" };
+        Some((sql.at(&sel.db), namespace(sql.dialect, sel, picked)))
     }
 
     /// The schema of a selection on PostgreSQL: its own, else the one the sidebar shows, else `public`. Empty on MySQL,
@@ -46,7 +47,7 @@ impl App {
         if !self.is_pg(sel.conn) || !sel.schema.is_empty() {
             return sel.schema.clone();
         }
-        Some(self.pg_picked(sel.conn, &sel.db)).filter(|s| !s.is_empty()).unwrap_or_else(|| PG_PUBLIC.to_string())
+        Some(self.ns_of(sel.conn, &sel.db)).filter(|s| !s.is_empty()).unwrap_or(PG_PUBLIC).to_string()
     }
 
     /// Why the open table's structure, relations and triggers cannot be changed, when the engine cannot do it yet. The
@@ -70,36 +71,47 @@ impl App {
         self.conn(conn).is_some_and(|c| c.meta.engine == db::sql::Engine::Postgres)
     }
 
-    /// The schema the sidebar shows for a PostgreSQL database: the one picked, else `public`, else the first user schema.
-    pub(super) fn pg_picked(&self, conn: u64, db: &str) -> String {
-        if let Some(p) = self.pg_pick.get(&(conn, db.to_string())) {
-            return p.clone();
+    /// The dialect of `conn`. A connection without a session (the offline demo) still has the dialect of its engine.
+    pub(super) fn dialect_of(&self, conn: u64) -> db::sql::Dialect {
+        match self.conn(conn) {
+            Some(c) if c.meta.engine == db::sql::Engine::Postgres => db::sql::Dialect::Postgres,
+            Some(Conn { sql: Some(s), .. }) => s.dialect,
+            _ => db::sql::Dialect::default(),
         }
-        let user: Vec<String> = self.conn(conn).and_then(|c| c.dbs.iter().find(|d| d.0 == db)).and_then(|d| d.1.clone()).unwrap_or_default();
-        default_schema(&user)
+    }
+
+    /// The schema the sidebar shows for a database of `conn`: on PostgreSQL the one picked, else `public`, else the first
+    /// user schema; empty on MySQL and Mongo, where the database is the whole namespace.
+    pub(super) fn ns_of(&self, conn: u64, db: &str) -> &str {
+        self.conn(conn).filter(|c| c.meta.engine == db::sql::Engine::Postgres).map_or("", |c| c.pg_picked(db))
     }
 
     /// The tables and views of the schema a selection points at, once loaded.
     pub(super) fn tables_of(&self, sel: &Sel) -> Vec<String> {
         let Some(c) = self.conn(sel.conn) else { return Vec::new() };
         if c.meta.engine == db::sql::Engine::Postgres {
-            return c.tables.get(&(sel.db.clone(), namespace(db::sql::Dialect::Postgres, sel, &self.pg_picked(sel.conn, &sel.db)))).cloned().unwrap_or_default();
+            let ns = if sel.schema.is_empty() { c.pg_picked(&sel.db) } else { &sel.schema };
+            return c.tables_in(&sel.db, ns).cloned().unwrap_or_default();
         }
         c.dbs.iter().find(|d| d.0 == sel.db).and_then(|d| d.1.clone()).unwrap_or_default()
     }
 
     /// A selection of `db` in the schema the sidebar shows, for a table or a new Query tab opened from there.
     pub(super) fn sel_in(&self, conn: u64, db: &str, coll: String) -> Sel {
-        let schema = if self.is_pg(conn) { self.pg_picked(conn, db) } else { String::new() };
-        Sel { conn, db: db.to_string(), schema, coll }
+        Sel { conn, db: db.to_string(), schema: self.ns_of(conn, db).to_string(), coll }
+    }
+
+    /// The session of `conn` for a read the demo never sends, or None while not connected.
+    fn session(&self, conn: u64) -> Option<db::sql::Db> {
+        if self.demo {
+            return None;
+        }
+        self.conn(conn)?.sql.clone()
     }
 
     /// Asks for the schemas of an opened PostgreSQL database. The tables of the picked one follow when they arrive.
     pub(super) fn pg_ask_schemas(&mut self, conn: u64, db: &str) {
-        let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) else { return };
-        if self.demo {
-            return;
-        }
+        let Some(sql) = self.session(conn) else { return };
         self.sql_asked.insert((conn, db.to_string()));
         self.worker.sql_schemas(conn, sql, db.to_string());
     }
@@ -107,8 +119,8 @@ impl App {
     /// Loads the tables of one schema unless they are held or on their way.
     pub(super) fn pg_load_tables(&mut self, conn: u64, db: &str, schema: &str) {
         // Without a session nothing is sent and nothing is marked asked, so the load happens once it exists.
-        let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) else { return };
-        if schema.is_empty() || self.demo || !self.pg_tables_asked.insert((conn, db.to_string(), schema.to_string())) {
+        let Some(sql) = self.session(conn) else { return };
+        if schema.is_empty() || !self.pg_tables_asked.insert(conn, db, schema) {
             return;
         }
         self.worker.sql_tables(conn, sql.at(db), schema.to_string());
@@ -116,21 +128,23 @@ impl App {
 
     /// The switcher's pick: the sidebar lists that schema from now on, and its tables load if they are not held.
     pub(super) fn pg_set_schema(&mut self, conn: u64, db: &str, schema: String) {
-        self.pg_pick.insert((conn, db.to_string()), schema.clone());
+        if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
+            c.pg.entry(db.to_string()).or_default().picked = schema.clone();
+        }
         self.pg_load_tables(conn, db, &schema);
     }
 
     /// Refresh: the schema list, the tables of every schema already loaded and the autocomplete cache are read again.
     /// Schemas never opened stay unloaded; they load when picked.
     pub(super) fn pg_refresh(&mut self, conn: u64, db: &str) {
-        let held: Vec<String> = self.pg_tables_asked.iter().filter(|k| k.0 == conn && k.1 == db).map(|k| k.2.clone()).collect();
-        self.pg_tables_asked.retain(|k| !(k.0 == conn && k.1 == db));
+        let held = self.pg_tables_asked.held(conn, db);
+        self.pg_tables_asked.forget(conn, Some(db), None);
         for s in &held {
             self.sql_refresh_schema(conn, db, s);
         }
         self.pg_ask_schemas(conn, db);
         // The schemas answer loads the picked one; the others wait for a pick.
-        let picked = self.pg_picked(conn, db);
+        let picked = self.ns_of(conn, db).to_string();
         if !picked.is_empty() {
             self.pg_load_tables(conn, db, &picked);
         }
@@ -144,17 +158,14 @@ impl App {
             Err(e) => return self.err_quiet(e, Some(conn), Some(Sel { conn, db: database.clone(), ..Default::default() }), format!("List schemas · {database}")),
         };
         let user: Vec<String> = list.iter().filter(|s| !s.system).map(|s| s.name.clone()).collect();
-        if let Some(d) = self.conns.iter_mut().find(|c| c.meta.id == conn).and_then(|c| c.dbs.iter_mut().find(|d| d.0 == database)) {
-            d.1 = Some(user.clone());
-        }
-        let key = (conn, database.clone());
         let listed = |name: &String| list.iter().any(|s| &s.name == name);
-        let keep = self.pg_pick.get(&key).filter(|p| listed(p)).cloned();
+        let keep = self.conn(conn).and_then(|c| c.pg.get(&database)).map(|p| p.picked.clone()).filter(|p| listed(p));
         // A tab restored from the last session names its schema before any pick exists; the tree follows it.
         let of_tab = self.t().filter(|t| t.sel.conn == conn && t.sel.db == database).map(|t| t.sel.schema.clone()).filter(|s| !s.is_empty() && listed(s));
-        let picked = keep.or(of_tab).unwrap_or_else(|| default_schema(&user));
-        self.pg_schemas.insert(key.clone(), list);
-        self.pg_pick.insert(key, picked.clone());
+        let picked = keep.or(of_tab).unwrap_or_else(|| default_schema(&user).to_string());
+        if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
+            c.set_schemas(&database, list, picked.clone());
+        }
         // Query tabs opened or switched to this database before its schemas were known take the schema now.
         for t in self.tabs.iter_mut().filter(|t| t.sel.conn == conn) {
             if t.sel.db == database && t.sel.schema.is_empty() && t.sel.coll.is_empty() && t.sql.is_some() {
@@ -171,16 +182,14 @@ impl App {
     pub(super) fn pg_tables_done(&mut self, conn: u64, database: String, schema: String, res: db::Res<(Vec<String>, Vec<String>)>) {
         match res {
             Ok((names, views)) => {
-                let key = ns_key(&database, &schema);
-                self.views.retain(|(c, d, _)| !(*c == conn && *d == key));
-                self.views.extend(views.into_iter().map(|n| (conn, key.clone(), n)));
+                self.views.set(conn, &ns_key(&database, &schema), views);
                 if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
-                    c.tables.insert((database, schema), names);
+                    c.tables.entry(database).or_default().insert(schema, names);
                 }
             }
             Err(e) => {
                 // A schema that failed to list may be asked again by picking it once more.
-                self.pg_tables_asked.remove(&(conn, database.clone(), schema.clone()));
+                self.pg_tables_asked.forget(conn, Some(&database), Some(&schema));
                 self.err_quiet(e, Some(conn), Some(Sel { conn, db: database.clone(), schema: schema.clone(), ..Default::default() }), format!("List tables · {database}.{schema}"))
             }
         }
@@ -232,12 +241,12 @@ mod tests {
     #[test]
     fn a_foreign_key_target_stays_in_the_database_on_postgres() {
         let base = sel("shop", "public");
-        let pg = with_ns(true, &base, "billing", "invoices".into());
+        let pg = with_ns(Dialect::Postgres, &base, "billing", "invoices".into());
         assert_eq!((pg.db.as_str(), pg.schema.as_str(), pg.coll.as_str()), ("shop", "billing", "invoices"));
-        let my = with_ns(false, &sel("shop", ""), "archive", "orders".into());
+        let my = with_ns(Dialect::MySql, &sel("shop", ""), "archive", "orders".into());
         assert_eq!((my.db.as_str(), my.schema.as_str()), ("archive", ""));
-        assert_eq!(split_ns(true, "shop", "billing"), ("shop".to_string(), "billing".to_string()));
-        assert_eq!(split_ns(false, "shop", "archive"), ("archive".to_string(), String::new()));
+        assert_eq!(split_ns(Dialect::Postgres, "shop", "billing"), ("shop".to_string(), "billing".to_string()));
+        assert_eq!(split_ns(Dialect::MySql, "shop", "archive"), ("archive".to_string(), String::new()));
     }
 
     #[test]

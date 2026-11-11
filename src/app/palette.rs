@@ -138,7 +138,7 @@ impl App {
                 (db.clone(), c.meta.name.clone(), Glyph::Db, meta, None)
             }
             Jump::Coll(s) => {
-                let view = self.views.contains(&(s.conn, s.nskey(), s.coll.clone()));
+                let view = self.views.has(s.conn, &s.nskey(), &s.coll);
                 let glyph = if view { Glyph::View } else if sql { Glyph::Table } else { Glyph::Coll };
                 let place = if s.schema.is_empty() { s.db.clone() } else { format!("{} \u{203a} {}", s.db, s.schema) };
                 (s.coll.clone(), format!("{} \u{203a} {}{}", c.meta.name, place, if view { " \u{b7} view" } else { "" }), glyph, String::new(), None)

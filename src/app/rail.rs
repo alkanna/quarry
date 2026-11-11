@@ -115,8 +115,8 @@ impl App {
     pub(super) fn disconnect(&mut self, id: u64) {
         let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == id) else { return };
         (c.client, c.sql, c.tunnel, c.status, c.writable) = (None, None, None, Status::Idle, false);
-        c.dbs.clear();
-        c.tables.clear();
+        c.forget_lists();
+        self.pg_tables_asked.forget(id, None, None);
         let name = c.meta.name.clone();
         self.ok(format!("Disconnected from {name}"));
     }

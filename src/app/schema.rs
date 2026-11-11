@@ -10,7 +10,7 @@ impl App {
         let maps = self.prefs.schema_maps.get(&key).cloned().unwrap_or_default();
         let sel = &self.tabs[self.cur].sel;
         // Views refuse a $natural sort, so they only offer the first documents.
-        let view = self.views.contains(&(sel.conn, sel.db.clone(), sel.coll.clone()));
+        let view = self.views.has(sel.conn, &sel.db, &sel.coll);
         let t = &mut self.tabs[self.cur];
         if view {
             t.schema.last = false;

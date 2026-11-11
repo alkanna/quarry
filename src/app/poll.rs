@@ -28,9 +28,9 @@ impl App {
                             self.worker.command(client.clone(), "admin".into(), doc! { "hello": 1 }, &format!("srv-hello:{conn}"));
                             c.client = Some(client);
                             c.status = Status::Ready;
+                            c.forget_lists();
                             c.dbs = dbs.into_iter().map(|d| (d, None)).collect();
-                            c.tables.clear();
-                            self.pg_tables_asked.retain(|k| k.0 != conn);
+                            self.pg_tables_asked.forget(conn, None, None);
                             let n = c.meta.name.clone();
                             self.ok(format!("Connected to {n} (read-only)"));
                             if let Some(fp) = trusted {
@@ -81,9 +81,9 @@ impl App {
                             c.server = ServerInfo { version: sql.label().split_once(' ').map(|(_, v)| v.to_string()).unwrap_or_default(), product: match sql.dialect { db::sql::Dialect::MySql => "MySQL", db::sql::Dialect::MariaDb => "MariaDB", db::sql::Dialect::Postgres => "PostgreSQL" }.into(), host: host_of(&c.masked_uri), tls: sql.tls, ..Default::default() };
                             c.sql = Some(sql);
                             c.status = Status::Ready;
+                            c.forget_lists();
                             c.dbs = dbs.into_iter().map(|d| (d, None)).collect();
-                            c.tables.clear();
-                            self.pg_tables_asked.retain(|k| k.0 != conn);
+                            self.pg_tables_asked.forget(conn, None, None);
                             let n = c.meta.name.clone();
                             self.ok(format!("Connected to {n} (read-only)"));
                             if let Some(fp) = trusted {
@@ -145,7 +145,7 @@ impl App {
                     // A failed read leaves the database without a schema until the next Refresh; typing still works.
                     if let Ok(s) = res {
                         let key = if database.is_empty() { schema } else { ns_key(&database, &schema) };
-                        self.sql_schema.insert((conn, key), Arc::new(s));
+                        self.put_sql_schema(conn, key, Arc::new(s));
                     }
                 }
                 Msg::SqlMeta { conn, schema, res } => self.sql_meta_done(conn, schema, res),
@@ -159,8 +159,7 @@ impl App {
                 Msg::SqlTables { conn, database, schema, res } => self.pg_tables_done(conn, database, schema, res),
                 Msg::Collections { conn, db, res } => match res {
                     Ok((v, views)) => {
-                        self.views.retain(|(c, d, _)| !(*c == conn && *d == db));
-                        self.views.extend(views.into_iter().map(|n| (conn, db.clone(), n)));
+                        self.views.set(conn, &db, views);
                         if let Some(d) = self.conns.iter_mut().find(|c| c.meta.id == conn).and_then(|c| c.dbs.iter_mut().find(|d| d.0 == db)) {
                             d.1 = Some(v);
                         }

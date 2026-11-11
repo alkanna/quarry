@@ -44,7 +44,7 @@ pub(crate) struct Scope<'a> {
     pub(crate) table: Option<String>,
     pub(crate) fallback: Arc<Vec<SchemaCol>>,
     /// Names of the views of `db` that the sidebar knows, so the plain table list shown before the schema arrives still marks them.
-    pub(crate) views: std::collections::HashSet<String>,
+    pub(crate) views: Arc<std::collections::HashSet<String>>,
     /// How identifiers are quoted when a suggestion is inserted.
     pub(crate) dialect: Dialect,
     /// The schemas of a PostgreSQL database, so `sch` and `sch.` can be completed. Empty until the sidebar loads them.

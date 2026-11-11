@@ -336,7 +336,7 @@ impl App {
                         run = true;
                     }
                     vsep(ui, 6.0);
-                    library_menu(ui, &lib, new_lib, LibKind::Query, true, &mut qacts);
+                    library_menu(ui, &lib, new_lib, LibMenu::Query, true, &mut qacts);
                     history_menu(ui, &hist, &index_sorts, &mut qacts);
                 });
             });

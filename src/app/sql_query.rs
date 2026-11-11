@@ -256,7 +256,7 @@ impl App {
     pub(super) fn sql_run(&mut self, all: bool, explain: bool) {
         let Some(t) = self.t() else { return };
         let (conn, schema) = (t.sel.conn, run_db(t));
-        let dialect = self.sql_dialect().0;
+        let dialect = self.sql_dialect();
         let Some(s) = t.sql.as_ref().filter(|s| s.run_req == 0) else { return };
         let text = if all { s.query.clone() } else { s.caret_info(dialect).stmt.map(|(r, _, _)| s.query[r].to_string()).unwrap_or_default() };
         if text.trim().is_empty() {
@@ -355,7 +355,7 @@ impl App {
         let lib: Vec<SavedQuery> = library_of(&self.prefs.library, &Self::sql_lib_key(conn), LibKind::Sql);
         let (mut lib_new, mut lib_acts) = (std::mem::take(&mut self.new_lib), Vec::new());
         let (mut pick, mut load, mut picked) = (schema.clone(), None, false);
-        let dialect = self.sql_dialect().0;
+        let dialect = self.sql_dialect();
         let mut pg_schema = t_schema(self.t());
         let tab_schema = self.t().map(|t| t.sel.schema.clone()).unwrap_or_default();
         ui.horizontal(|ui| {
@@ -397,7 +397,7 @@ impl App {
                 })
                 .on_hover_text("History");
                 ui.add_space(6.0);
-                let button = library_menu_for(ui, &lib, &mut lib_new, LibKind::Sql, false, &mut lib_acts, dialect);
+                let button = library_menu(ui, &lib, &mut lib_new, LibMenu::Sql(dialect), false, &mut lib_acts);
                 self.demo_open_library(ui.ctx(), &button);
             });
         });
@@ -408,7 +408,7 @@ impl App {
         ui.add_space(4.0);
         let (mut run, mut run_all, mut stop, mut explain, mut format) = (false, false, false, false, false);
         let status = self.t().and_then(|t| t.sql.as_ref()).map(|s| {
-            let CaretInfo { line_col: (l, c), stmt, .. } = s.caret_info(self.sql_dialect().0);
+            let CaretInfo { line_col: (l, c), stmt, .. } = s.caret_info(self.sql_dialect());
             let n = stmt.map_or(String::new(), |(_, i, n)| format!("  ·  statement {i} of {n}"));
             format!("Ln {l}, Col {c}{n}")
         });
@@ -434,7 +434,7 @@ impl App {
         ui.add_space(8.0);
         if picked {
             // Another PostgreSQL database has its own schemas, so the tab moves to the one its sidebar shows.
-            let schema = if self.is_pg(conn) { self.pg_picked(conn, &pick) } else { String::new() };
+            let schema = self.ns_of(conn, &pick).to_string();
             if self.is_pg(conn) && !self.sql_asked.contains(&(conn, pick.clone())) {
                 self.pg_ask_schemas(conn, &pick);
             }
@@ -520,7 +520,7 @@ impl App {
         let picked = egui::TextEdit::load_state(ctx, Self::sql_editor_id(self.cur)).and_then(|st| st.cursor.char_range()).filter(|r| r.primary != r.secondary);
         let (new, select, f) = match picked {
             None => {
-                let f = db::sql::format::format_script(&text, self.sql_dialect().0);
+                let f = db::sql::format::format_script(&text, self.sql_dialect());
                 (f.text.clone(), None, f)
             }
             Some(r) => {
@@ -528,10 +528,10 @@ impl App {
                 let (a, b) = (p.min(q), p.max(q));
                 let (a, b) = (byte_at(&text, a), byte_at(&text, b));
                 // A cut through a string or comment would be formatted as something it is not.
-                if lex::tokens(&text, self.sql_dialect().0).iter().any(|(t, tr)| matches!(t, lex::Tok::Str | lex::Tok::Quoted | lex::Tok::Comment) && ((tr.start < a && a < tr.end) || (tr.start < b && b < tr.end))) {
+                if lex::tokens(&text, self.sql_dialect()).iter().any(|(t, tr)| matches!(t, lex::Tok::Str | lex::Tok::Quoted | lex::Tok::Comment) && ((tr.start < a && a < tr.end) || (tr.start < b && b < tr.end))) {
                     return self.warn("The selection starts or ends inside a string or comment. Select whole statements, or nothing to format the script.");
                 }
-                let f = db::sql::format::format_script(&text[a..b], self.sql_dialect().0);
+                let f = db::sql::format::format_script(&text[a..b], self.sql_dialect());
                 let new = format!("{}{}{}", &text[..a], f.text, &text[b..]);
                 let from = text[..a].chars().count();
                 (new, Some(from..from + f.text.chars().count()), f)

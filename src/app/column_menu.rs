@@ -239,7 +239,7 @@ impl App {
     pub(super) fn head_act(&mut self, ui: &egui::Ui, agg: bool, docs: Rows, fields: &[String], c: &str, act: HeadAct) {
         let key = self.col_key(agg);
         let Some(t) = self.t() else { return };
-        let dialect = self.sql_dialect().0;
+        let dialect = self.sql_dialect();
         let label = self.prefs.cols.get(&key).map(|p| p.label(c).to_string()).unwrap_or_else(|| c.into());
         match act {
             HeadAct::AddSort if t.sql.is_some() => {

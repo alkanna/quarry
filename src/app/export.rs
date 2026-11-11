@@ -349,7 +349,7 @@ impl App {
         let text = match f.fmt {
             Format::T(fmt) => {
                 let (cols, table, pk) = self.export_sheet(f.src, &rows);
-                let text = copy::format_in(self.sql_dialect().0, fmt, &Sheet { rows: &rows, cols: &cols, table: &table, pk: &pk, bs: self.sql_bs() }, f.header);
+                let text = copy::format_in(self.sql_dialect(), fmt, &Sheet { rows: &rows, cols: &cols, table: &table, pk: &pk, bs: self.sql_bs() }, f.header);
                 if text.is_empty() {
                     return self.warn(if fmt == Fmt::SqlUpdate { "SQL UPDATE needs a table with a primary key." } else { "Nothing to export." });
                 }
@@ -393,7 +393,7 @@ impl App {
         let Some(t) = self.t() else { return };
         let Some(s) = t.sql.as_ref() else { return };
         let Some(set) = s.sets.get(s.set_sel.min(s.sets.len().saturating_sub(1))) else { return };
-        if let Err(why) = lex_check_msg(&set.stmt, self.sql_dialect().0) {
+        if let Err(why) = lex_check_msg(&set.stmt, self.sql_dialect()) {
             return self.warn(why);
         }
         let Some(db) = self.conn(t.sel.conn).and_then(|c| c.sql.clone()) else { return self.warn_offline() };

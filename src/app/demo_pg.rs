@@ -116,22 +116,19 @@ impl App {
     pub(super) fn load_pg_demo(&mut self) {
         let which = std::env::var("QUARRY_TEST_PG").unwrap_or_default();
         let which = which.as_str();
-        let mut tables: HashMap<(String, String), Vec<String>> = HashMap::new();
-        tables.insert((DB.into(), SCHEMA.into()), names(&TABLES, &VIEWS));
-        tables.insert((DB.into(), "reporting".into()), names(&["cohort_retention", "revenue_by_region", "weekly_kpis"], &["v_active_accounts"]));
-        tables.insert((DB.into(), "staging".into()), names(&["raw_events", "raw_orders", "raw_refunds"], &[]));
+        let by_schema = HashMap::from([
+            (SCHEMA.to_string(), names(&TABLES, &VIEWS)),
+            ("reporting".to_string(), names(&["cohort_retention", "revenue_by_region", "weekly_kpis"], &["v_active_accounts"])),
+            ("staging".to_string(), names(&["raw_events", "raw_orders", "raw_refunds"], &[])),
+        ]);
+        let tables = HashMap::from([(DB.to_string(), by_schema)]);
         let bare = |d: &str| (d.to_string(), None);
         self.conns.push(Conn {
-            meta: ConnMeta { id: CONN, name: "analytics-prod".into(), tag: "Production".into(), engine: db::sql::Engine::Postgres, ..Default::default() },
-            client: None,
-            sql: None,
-            status: Status::Ready,
-            writable: false,
             tables,
             dbs: vec![(DB.into(), Some(vec![SCHEMA.into(), "reporting".into(), "staging".into()])), bare("postgres"), bare("billing")],
             masked_uri: "postgresql://analyst:****@analytics-prod.internal:5432/analytics".into(),
-            tunnel: None,
             server: ServerInfo { version: "18.1".into(), product: "PostgreSQL".into(), host: "analytics-prod.internal:5432".into(), tls: true, ..Default::default() },
+            ..Conn::new(ConnMeta { id: CONN, name: "analytics-prod".into(), tag: "Production".into(), engine: db::sql::Engine::Postgres, ..Default::default() }, Status::Ready)
         });
         self.active = Some(CONN);
         self.open_dbs.insert((CONN, DB.into()));
@@ -140,14 +137,15 @@ impl App {
             self.sql_asked.insert((CONN, d.into()));
         }
         for s in [SCHEMA, "reporting", "staging"] {
-            self.pg_tables_asked.insert((CONN, DB.into(), s.into()));
+            self.pg_tables_asked.insert(CONN, DB, s);
         }
-        self.pg_schemas.insert((CONN, DB.into()), schemas());
-        self.pg_pick.insert((CONN, DB.into()), SCHEMA.into());
+        if let Some(c) = self.conns.last_mut() {
+            c.pg.insert(DB.into(), PgNs { schemas: schemas(), picked: SCHEMA.into() });
+        }
         for v in VIEWS {
-            self.views.insert((CONN, ns_key(DB, SCHEMA), v.into()));
+            self.views.add(CONN, &ns_key(DB, SCHEMA), v);
         }
-        self.views.insert((CONN, ns_key(DB, "reporting"), "v_active_accounts".into()));
+        self.views.add(CONN, &ns_key(DB, "reporting"), "v_active_accounts");
         self.pg_schema_demo();
 
         let sel = |coll: &str| Sel { conn: CONN, db: DB.into(), schema: SCHEMA.into(), coll: coll.into() };
@@ -198,7 +196,7 @@ impl App {
                 table("products", Some(2_318), vec![text("sku"), text("title"), col("price", "numeric(10,2)", Kind::Decimal, "", false)]),
             ],
         };
-        self.sql_schema.insert((CONN, ns_key(DB, SCHEMA)), Arc::new(schema));
+        self.put_sql_schema(CONN, ns_key(DB, SCHEMA), Arc::new(schema));
         let mut vals = Fields::new();
         vals.insert(crate::ui::sql_complete::value_key("orders", "status"), FieldInfo { kind: "string", values: ["paid", "shipped", "pending", "refunded", "cancelled"].map(Bson::from).to_vec(), freq: vec![61, 22, 9, 5, 3] });
         self.sql_values.insert((CONN, ns_key(DB, SCHEMA)), vals);

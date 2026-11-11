@@ -225,10 +225,10 @@ impl App {
     /// QUARRY_TEST_SQL=attach: the Attach dialog with that connection picked. Nothing here touches the Keychain or a server.
     pub(super) fn attach_demo(&mut self) {
         let colls = |v: &[&str]| Some(v.iter().map(|s| s.to_string()).collect::<Vec<_>>());
-        let mongo = |id: u64, name: &str, tag: &str, status: Status, dbs: Vec<(String, Option<Vec<String>>)>, version: &str| Conn { meta: ConnMeta { id, name: name.into(), tag: tag.into(), ..Default::default() }, client: None, sql: None, status, writable: false, dbs, tables: Default::default(), masked_uri: "mongodb://app:****@travels.internal:27017".into(), tunnel: None, server: ServerInfo { version: version.into(), ..Default::default() } };
+        let mongo = |id: u64, name: &str, tag: &str, status: Status, dbs: Vec<(String, Option<Vec<String>>)>, version: &str| Conn { dbs, masked_uri: "mongodb://app:****@travels.internal:27017".into(), server: ServerInfo { version: version.into(), ..Default::default() }, ..Conn::new(ConnMeta { id, name: name.into(), tag: tag.into(), ..Default::default() }, status) };
         self.conns.insert(0, mongo(5, "travels", "Production", Status::Ready, vec![("admin".into(), colls(&["system.users"])), ("app".into(), colls(&["bookings", "trips", "users"]))], "8.0.4"));
         for (id, name, tag, product, version) in [(6, "shop-staging", "Staging", "MySQL", "8.0.36"), (7, "analytics", "Internal", "MariaDB", "11.4.2")] {
-            self.conns.push(Conn { meta: ConnMeta { id, name: name.into(), tag: tag.into(), engine: db::sql::Engine::MySql, ..Default::default() }, client: None, sql: None, status: Status::Idle, writable: false, dbs: Vec::new(), tables: Default::default(), masked_uri: String::new(), tunnel: None, server: ServerInfo { version: version.into(), product: product.into(), ..Default::default() } });
+            self.conns.push(Conn { server: ServerInfo { version: version.into(), product: product.into(), ..Default::default() }, ..Conn::new(ConnMeta { id, name: name.into(), tag: tag.into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Idle) });
         }
         if std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("attach") {
             self.modal = Some(Modal::Attach(Box::new(AttachForm { conn: Some(5), db: "app".into(), name: "travels".into(), name_set: true, focused: true, ..Default::default() })));

@@ -149,7 +149,7 @@ impl App {
             Act::Copy(text) => ctx.copy_text(text),
             Act::Open { db, table } => {
                 let base = self.tabs[self.cur].sel.clone();
-                self.open_collection(sql_ns::with_ns(self.is_pg(base.conn), &base, &db, table), false);
+                self.open_collection(sql_ns::with_ns(self.dialect_of(base.conn), &base, &db, table), false);
             }
             Act::Refresh => {
                 if let Some(s) = self.tabs[self.cur].sql.as_mut() {
@@ -367,13 +367,13 @@ impl App {
         }
         // The schema's estimate, asked for once per database; a table it has not listed yet shows nothing.
         let (conn, base_db) = (self.tabs[self.cur].sel.conn, self.tabs[self.cur].sel.db.clone());
-        let pg = self.is_pg(conn);
+        let dialect = self.dialect_of(conn);
         let dbs: std::collections::BTreeSet<String> = d.referenced_by.iter().map(|fk| fk.db.clone()).collect();
         for ns in dbs {
-            let (db, schema) = sql_ns::split_ns(pg, &base_db, &ns);
+            let (db, schema) = sql_ns::split_ns(dialect, &base_db, &ns);
             self.sql_serve(conn, &db, &schema, crate::ui::sql_complete::Wants { schema: true, values: None });
         }
-        let in_rows: Vec<Option<u64>> = d.referenced_by.iter().map(|fk| { let (db, schema) = sql_ns::split_ns(pg, &base_db, &fk.db); self.sql_schema.get(&(conn, ns_key(&db, &schema))).and_then(|s| s.table(&fk.table)).and_then(|t| t.rows) }).collect();
+        let in_rows: Vec<Option<u64>> = d.referenced_by.iter().map(|fk| { let (db, schema) = sql_ns::split_ns(dialect, &base_db, &fk.db); self.sql_schema.get(&(conn, ns_key(&db, &schema))).and_then(|s| s.table(&fk.table)).and_then(|t| t.rows) }).collect();
         egui::ScrollArea::vertical().id_salt("sql-relations").auto_shrink([false, false]).show(ui, |ui| {
             caption(ui, "THIS TABLE POINTS TO");
             ui.add_space(6.0);

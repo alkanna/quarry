@@ -47,15 +47,14 @@ impl App {
         db
     }
 
-    /// The open tab's dialect, and whether its server reads backslash escapes in strings.
-    pub(super) fn sql_dialect(&self) -> (db::sql::Dialect, bool) {
-        let d = self.conn(self.t().map(|t| t.sel.conn).unwrap_or(0)).and_then(|c| c.sql.as_ref());
-        (d.map(|s| s.dialect).unwrap_or_default(), self.sql_mode(self.t().map(|t| t.sel.conn).unwrap_or(0)).bs)
+    /// The open tab's dialect.
+    pub(super) fn sql_dialect(&self) -> db::sql::Dialect {
+        self.dialect_of(self.t().map_or(0, |t| t.sel.conn))
     }
 
     /// Double click on a grouped row: its rows replace the grouped result.
     pub(super) fn sql_drill(&mut self, row: usize) {
-        let (dialect, bs) = self.sql_dialect();
+        let (dialect, bs) = (self.sql_dialect(), self.sql_bs());
         super::sql_bar::drill(self.tm().unwrap(), row, dialect, bs);
         self.reload();
     }
@@ -68,7 +67,7 @@ impl App {
             t.page = 0;
             self.reload();
         }
-        let (dialect, bs) = self.sql_dialect();
+        let (dialect, bs) = (self.sql_dialect(), self.sql_bs());
         let (conn, db) = (self.tabs[self.cur].sel.conn, self.tabs[self.cur].sel.db.clone());
         let schema = self.sel_schema(&self.tabs[self.cur].sel);
         let scope = Self::sql_scope(&self.conns, &self.sql_schema, &self.views, conn, &db, &schema, None);

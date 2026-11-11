@@ -131,15 +131,8 @@ pub struct App {
     side_closed: HashSet<(u64, String, bool)>,
     /// SQL databases whose table list was asked for; lists load when a database opens, not all at connect.
     sql_asked: HashSet<(u64, String)>,
-    /// PostgreSQL: the schema picked in the sidebar per (connection, database). Kept for the session only, since the
-    /// open tabs carry their own schema and the list of schemas can change between launches.
-    pg_pick: HashMap<(u64, String), String>,
-    /// PostgreSQL: every schema of an opened database with its table count and whether it is a system one.
-    pg_schemas: HashMap<(u64, String), Vec<db::sql::PgSchema>>,
     /// PostgreSQL: (connection, database, schema) whose table list was asked for.
-    pg_tables_asked: HashSet<(u64, String, String)>,
-    /// The schema switcher lists the system schemas too.
-    pg_show_system: bool,
+    pg_tables_asked: Asked,
     tabs: Vec<Tab>,
     cur: usize,
     req: u64,
@@ -182,15 +175,17 @@ pub struct App {
     menu_acts: Vec<crate::menu::Act>,
     new_pkg: String,
     new_lib: String,
-    /// Views per (connection, database), shown differently in the sidebar.
-    views: HashSet<(u64, String, String)>,
+    /// Views per namespace, shown differently in the sidebar.
+    views: Views,
     /// Tables and columns of SQL databases, per (connection, database), for autocomplete. Loaded when a
     /// SQL input there first has focus, and again on the sidebar's Refresh.
     sql_schema: HashMap<(u64, String), Arc<db::sql::schema::Schema>>,
+    /// The row estimate of each table of `sql_schema`, built once when the schema arrives, for the sidebar.
+    sql_rows: HashMap<(u64, String), HashMap<String, u64>>,
     sql_schema_asked: HashSet<(u64, String)>,
     /// Looked up column values per (connection, database), keyed `table.column`, and the lookups already sent.
     sql_values: HashMap<(u64, String), Fields>,
-    sql_values_asked: HashSet<(u64, String, String, String, Option<String>)>,
+    sql_values_asked: HashMap<(u64, String, String, String), HashSet<Option<String>>>,
     users: Option<UsersWin>,
     sql_users: Option<sql_users::SqlUsersWin>,
     server: Option<ServerWin>,
@@ -304,10 +299,7 @@ impl App {
             open_dbs: HashSet::new(),
             side_closed: HashSet::new(),
             sql_asked: HashSet::new(),
-            pg_pick: HashMap::new(),
-            pg_schemas: HashMap::new(),
-            pg_tables_asked: HashSet::new(),
-            pg_show_system: false,
+            pg_tables_asked: Asked::default(),
             tabs: Vec::new(),
             cur: 0,
             req: 0,
@@ -339,11 +331,12 @@ impl App {
             menu_acts: Vec::new(),
             new_pkg: String::new(),
             new_lib: String::new(),
-            views: HashSet::new(),
+            views: Views::default(),
             sql_schema: HashMap::new(),
+            sql_rows: HashMap::new(),
             sql_schema_asked: HashSet::new(),
             sql_values: HashMap::new(),
-            sql_values_asked: HashSet::new(),
+            sql_values_asked: HashMap::new(),
             users: None,
             sql_users: None,
             server: None,
@@ -414,7 +407,7 @@ impl App {
             };
             drop(text);
             let sel = Sel { conn: 1, db: "fixture".into(), coll: "documents".into(), ..Default::default() };
-            app.conns.push(Conn { meta: ConnMeta { id: 1, name: "Fixture".into(), ..Default::default() }, client: None, sql: None, status: Status::Ready, writable: false, dbs: vec![("fixture".into(), Some(vec!["documents".into()]))], tables: Default::default(), masked_uri: String::new(), tunnel: None, server: Default::default() });
+            app.conns.push(Conn { dbs: vec![("fixture".into(), Some(vec!["documents".into()]))], ..Conn::new(ConnMeta { id: 1, name: "Fixture".into(), ..Default::default() }, Status::Ready) });
             app.active = Some(1);
             app.open_dbs.insert((1, "fixture".into()));
             app.open_collection(sel, false);
@@ -455,7 +448,7 @@ impl App {
             }
             for meta in metas {
                 let masked = keychain(meta.id).and_then(|k| k.get_password().ok()).map(|u| db::mask_uri(&u)).unwrap_or_default();
-                app.conns.push(Conn { meta, client: None, sql: None, status: Status::Idle, writable: false, dbs: Vec::new(), tables: Default::default(), masked_uri: masked, tunnel: None, server: Default::default() });
+                app.conns.push(Conn { masked_uri: masked, ..Conn::new(meta, Status::Idle) });
             }
             app.active = app.conns.first().map(|c| c.meta.id);
             // Values of deleted connections go with them.

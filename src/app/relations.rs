@@ -176,7 +176,7 @@ impl App {
     }
 
     pub(super) fn analyze_relations(&mut self, conn: u64, client: Client, db: String, coll: String) {
-        let all: Vec<String> = self.conn(conn).and_then(|c| c.dbs.iter().find(|d| d.0 == db)).and_then(|d| d.1.clone()).unwrap_or_default().into_iter().filter(|c| !c.starts_with("system.") && !self.views.contains(&(conn, db.clone(), c.clone()))).collect();
+        let all: Vec<String> = self.conn(conn).and_then(|c| c.dbs.iter().find(|d| d.0 == db)).and_then(|d| d.1.clone()).unwrap_or_default().into_iter().filter(|c| !c.starts_with("system.") && !self.views.has(conn, &db, c)).collect();
         let colls = if coll.is_empty() { all.clone() } else { vec![coll.clone()] };
         self.ok(format!("Analyzing data relations of {}…", if coll.is_empty() { db.clone() } else { format!("{db}.{coll}") }));
         self.worker.analyze_relations(conn, Target { client, db, coll, timeout: self.timeout() }, colls, all);

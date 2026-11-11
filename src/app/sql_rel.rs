@@ -176,7 +176,7 @@ impl App {
     fn fk_tables(&mut self, conn: u64, schema: &str) -> Option<Vec<String>> {
         let list = self.conn(conn)?.dbs.iter().find(|d| d.0 == schema)?.1.clone();
         match list {
-            Some(l) => Some(l.into_iter().filter(|t| !self.views.contains(&(conn, schema.to_string(), t.clone()))).collect()),
+            Some(l) => Some(l.into_iter().filter(|t| !self.views.has(conn, schema, t)).collect()),
             None => {
                 if self.sql_asked.insert((conn, schema.to_string())) {
                     if let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) {
@@ -430,14 +430,14 @@ impl App {
         if self.sql_cell.is_some() {
             return self.warn("Finish or cancel the cell edit first.");
         }
-        let (d, bs) = self.sql_dialect();
+        let (d, bs) = (self.sql_dialect(), self.sql_bs());
         let cols = self.t().and_then(|t| t.sql.as_ref()).map(|s| s.cols.clone()).unwrap_or_default();
         let text = match fk_row_filter(d, bs, fk, &cols, row) {
             Ok(t) => t,
             Err(why) => return self.warn(why),
         };
         let base = self.t().map(|t| t.sel.clone()).unwrap_or_default();
-        let sel = sql_ns::with_ns(self.is_pg(conn), &base, &fk.ref_db, fk.ref_table.clone());
+        let sel = sql_ns::with_ns(self.dialect_of(conn), &base, &fk.ref_db, fk.ref_table.clone());
         self.reset_doc_state();
         match self.tabs.iter().position(|t| t.sel == sel && !has_clauses(t)) {
             Some(i) => self.set_cur(i),

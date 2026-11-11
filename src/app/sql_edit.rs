@@ -287,7 +287,7 @@ impl App {
             Some(true) => {
                 let kind = self.t().and_then(|t| t.sql.as_ref()).and_then(|s| s.cols.iter().find(|c| c.name == e.col)).map_or(Kind::Text, |c| c.kind);
                 let row = self.t().and_then(|t| (0..t.docs.len()).find(|&j| Rows::Raw(&t.docs).id(j) == e.id));
-                match value::parse_edit_for(self.sql_dialect().0, kind, &e.text) {
+                match value::parse_edit_for(self.sql_dialect(), kind, &e.text) {
                     Ok(_) if row.is_none() => self.warn("That row is no longer in the table, so the edit was cancelled."),
                     Ok(v) => self.sql_set_cell(row.unwrap_or_default(), &e.col, v),
                     Err(m) => {
@@ -396,7 +396,7 @@ impl App {
 
     fn sql_staged_bar(&mut self, ui: &mut egui::Ui, keys: Vec<String>) {
         let Some((sel, cols, _)) = self.sql_ctx() else { return };
-        let (d, bs) = self.sql_dialect();
+        let (d, bs) = (self.sql_dialect(), self.sql_bs());
         let (mut cells, mut summary) = (0, String::new());
         for k in &keys {
             let Some(dr) = self.drafts.get(k) else { continue };
@@ -513,7 +513,7 @@ impl App {
 
     pub(super) fn sql_row_dialog(&mut self, ui: &mut egui::Ui, f: &mut RowForm, keep: &mut bool) {
         let table = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
-        let dialect = self.sql_dialect().0;
+        let dialect = self.sql_dialect();
         ui.set_width(560.0);
         dialog_title(ui, format!("{} in {table}", f.title));
         ui.label(RichText::new("Default leaves the column to the server: its default, or the next auto-increment number.").size(TXT_SMALL).color(MUTED()));
@@ -588,7 +588,7 @@ impl App {
             }
         }
         let (sel, cols, pk) = self.sql_ctx().unwrap_or_else(|| (Sel { conn: 0, db: String::new(), coll: String::new(), ..Default::default() }, Arc::new(Vec::new()), Vec::new()));
-        let (d, bs) = self.sql_dialect();
+        let (d, bs) = (self.sql_dialect(), self.sql_bs());
         // The key names are the server's, which differ from the shown name of a renamed column.
         let numeric = |name: &str| cols.iter().find(|c| c.src == name).is_some_and(|c| is_numeric(c.kind));
         let key_lit = |r: &Document, p: &String| copy::sql_literal(r.get_document("_id").ok().and_then(|k| k.get(p)), numeric(p), bs);
@@ -666,7 +666,7 @@ impl App {
 
     pub(super) fn sql_set_dialog(&mut self, ui: &mut egui::Ui, f: &mut SetForm, keep: &mut bool) {
         let Some((sel, cols, pk)) = self.sql_ctx() else { return *keep = false };
-        let (d, bs) = self.sql_dialect();
+        let (d, bs) = (self.sql_dialect(), self.sql_bs());
         ui.set_width(560.0);
         let n = f.rows.len();
         dialog_title(ui, format!("Set value on {n} row{}", if n == 1 { "" } else { "s" }));
@@ -780,7 +780,7 @@ impl App {
     /// `copy_rows_as` for rows whose columns and table are given, such as a Query result.
     pub(super) fn copy_sheet(&mut self, ctx: &egui::Context, fmt: Fmt, rows: &[Document], cols: &[CopyCol], table: &str, pk: &[String], bs: bool) {
         let header = ctx.data(|d| d.get_temp::<bool>(egui::Id::unique("copy-with-header"))).unwrap_or(true);
-        let d = self.sql_dialect().0;
+        let d = self.sql_dialect();
         let sheet = Sheet { rows, cols, table, pk, bs };
         let text = copy::format_in(d, fmt, &sheet, header);
         if text.is_empty() {
@@ -830,7 +830,7 @@ impl App {
                 }
                 CellAct::FilterValue => {
                     let numeric = self.t().and_then(|t| t.sql.as_ref()).and_then(|s| s.cols.iter().find(|c| c.name == col)).is_some_and(|c| is_numeric(c.kind));
-                    let q = self.sql_dialect().0.quote_ident(&col);
+                    let q = self.sql_dialect().quote_ident(&col);
                     let text = if v == Bson::Null { format!("{q} IS NULL") } else { format!("{q} = {}", copy::sql_literal(Some(&v), numeric, self.sql_bs())) };
                     let t = self.tm().unwrap();
                     t.filter_txt = text;
