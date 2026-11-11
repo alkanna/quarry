@@ -323,6 +323,8 @@ pub enum Msg {
     Update(Res<Option<String>>),
     /// The MongoDB Database Tools were installed or updated to this version; None when already current.
     ToolsInstalled(Res<Option<String>>),
+    /// An answer from gcloud for the Cloud SQL browser's load `req`; a downloaded or installed proxy comes with req 0.
+    CloudSql { req: u64, found: crate::cloudsql::Found },
 }
 
 /// How to reach the server: directly, through an SSH tunnel, or through a SOCKS5 proxy.

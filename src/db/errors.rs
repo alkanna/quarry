@@ -304,8 +304,17 @@ pub fn explain(raw: &str, cx: &ErrCtx) -> Explained {
             } else if low.contains("gcloud auth login") {
                 ex.title = "Sign in to Google Cloud first".into();
                 ex.hint = "gcloud is signed out or its sign-in expired. Run `gcloud auth login` in a terminal, then try again.".into();
+            } else if raw.contains(crate::cloudsql::PROXY_MISSING) {
+                ex.title = "Cloud SQL Auth Proxy not found".into();
+                ex.hint = "Quarry starts cloud-sql-proxy for each connection. It was not on PATH or in the gcloud SDK.".into();
+            } else if low.contains("did not accept connections") {
+                ex.title = "Cloud SQL proxy failed".into();
+                ex.hint = "The proxy started but did not accept connections in time.".into();
+            } else if low.starts_with("cloud sql proxy failed") {
+                ex.title = "Cloud SQL proxy failed".into();
+                ex.hint = "The proxy stopped before it accepted connections.".into();
             } else {
-                ex.title = "The Cloud SQL proxy failed".into();
+                ex.title = "Cloud SQL proxy failed".into();
                 ex.hint = raw.trim().into();
             }
             ex.fixes = vec![Fix::EditConn, Fix::Retry];
@@ -507,6 +516,19 @@ mod tests {
         assert_eq!((e.title.as_str(), e.hint.as_str()), ("That change is no longer in Recent changes", ""));
         let e = explain("Command failed: Error code 9 (FailedToParse): $lookup requires 'from' to be specified", &ErrCtx { what: "run the pipeline".into(), ..cx() });
         assert_eq!((e.kind, e.title.as_str(), e.hint.as_str()), (ErrKind::Syntax, "The server rejected the pipeline", "$lookup requires 'from' to be specified"));
+    }
+
+    #[test]
+    fn cloud_sql_failures_get_the_card_titles() {
+        let t = |raw: &str| {
+            let e = explain(raw, &cx());
+            assert_eq!(e.kind, ErrKind::CloudSql, "{raw}");
+            e.title
+        };
+        assert_eq!(t("Cloud SQL proxy not found. Download it from the connection's error card or the Cloud SQL browser, or set its path in Settings."), "Cloud SQL Auth Proxy not found");
+        assert_eq!(t("Cloud SQL proxy failed: failed to get instance metadata: googleapi: Error 403: not authorized"), "Cloud SQL proxy failed");
+        assert_eq!(t("Cloud SQL proxy did not accept connections within 20 s"), "Cloud SQL proxy failed");
+        assert_eq!(t("Cloud SQL: gcloud is signed out. Run `gcloud auth login` and try again."), "Sign in to Google Cloud first");
     }
 
     #[test]

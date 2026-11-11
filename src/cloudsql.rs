@@ -1,9 +1,6 @@
 //! Cloud SQL for PostgreSQL: starts Google's cloud-sql-proxy on a free localhost port for the life of a
 //! connection, finds instances through the gcloud CLI, and finds or downloads the proxy program.
 
-// The connection form is the caller of discovery and download, and arrives in its own change.
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -36,6 +33,9 @@ pub struct Tools {
     pub proxy: Option<PathBuf>,
     pub gcloud: Option<PathBuf>,
 }
+
+/// The start of the error a connection gets when no proxy program is found, which the app answers with Download and Install.
+pub const PROXY_MISSING: &str = "Cloud SQL proxy not found";
 
 const PROXY_VERSION: &str = "v2.27.0";
 const PROXY_URL: &str = "https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy";
@@ -90,21 +90,29 @@ pub struct CloudProxy {
     pub port: u16,
     /// Whether the proxy signs in with the gcloud account (else Application Default Credentials).
     pub gcloud_account: bool,
-    child: tokio::process::Child,
+    /// Held only so the process dies with the handle (kill_on_drop).
+    _child: tokio::process::Child,
     #[cfg(windows)]
     _job: Option<Job>,
-}
-
-impl CloudProxy {
-    pub fn id(&self) -> Option<u32> {
-        self.child.id()
-    }
 }
 
 /// Starts the proxy for `conf` and waits until it accepts connections.
 pub async fn open(conf: &CloudSql, exe: &Path, gcloud: Option<PathBuf>, timeout: Duration) -> Result<CloudProxy, String> {
     if !valid_instance(&conf.instance) {
         return Err(format!("Cloud SQL proxy not started: \"{}\" is not an instance connection name (project:region:instance).", conf.instance));
+    }
+    // The test binary stands in for the proxy, and libtest would refuse the proxy's flags.
+    #[cfg(test)]
+    if std::env::current_exe().ok().as_deref() == Some(exe) {
+        let target = tests::STUB_TARGET.lock().unwrap().clone();
+        return open_with(timeout, false, move |port| {
+            let mut c = tests::stub(if target.is_some() { "forward" } else { "listen" })(port);
+            if let Some(t) = &target {
+                c.env("QUARRY_STUB_TARGET", t);
+            }
+            c
+        })
+        .await;
     }
     let acct = match gcloud.clone() {
         Some(g) => tokio::task::spawn_blocking(move || matches!(account(&g), Ok(Some(_)))).await.unwrap_or(false),
@@ -166,7 +174,7 @@ async fn open_with(timeout: Duration, gcloud_account: bool, build: impl Fn(u16) 
                 return Ok(CloudProxy {
                     port,
                     gcloud_account,
-                    child,
+                    _child: child,
                     #[cfg(windows)]
                     _job: job,
                 });
@@ -406,6 +414,7 @@ pub fn parse_instances(json: &str) -> Result<Vec<Instance>, String> {
     struct Settings {
         database_flags: Vec<Flag>,
         ip_configuration: IpConf,
+        activation_policy: String,
     }
     #[derive(Deserialize, Default)]
     #[serde(default)]
@@ -435,7 +444,8 @@ pub fn parse_instances(json: &str) -> Result<Vec<Instance>, String> {
             name: r.name,
             region: r.region,
             version: r.database_version,
-            state: r.state,
+            // gcloud's list already says STOPPED, but the API itself keeps RUNNABLE with the activation policy NEVER.
+            state: if r.settings.activation_policy == "NEVER" { "STOPPED".into() } else { r.state },
         })
         .collect())
 }
@@ -503,8 +513,57 @@ pub fn install_component(gcloud: &Path) -> Result<String, String> {
     })
 }
 
+/// Whether `gcloud components install` can work here. Package-manager installs say their component manager is disabled.
+fn components_manageable(gcloud: &Path) -> bool {
+    match run_gcloud(gcloud, &["components", "list", "--only-local-state", "--format=value(id)"]) {
+        Ok(_) => true,
+        Err(m) => !(m.to_lowercase().contains("component manager") && m.to_lowercase().contains("disabled")),
+    }
+}
+
+/// What the Cloud SQL browser learns when it opens: where the programs are, the gcloud account and its projects.
+#[derive(Clone, Debug)]
+pub struct Start {
+    pub gcloud: Option<PathBuf>,
+    pub proxy: Option<PathBuf>,
+    /// `gcloud components install cloud-sql-proxy` can work; only asked when the proxy is missing.
+    pub components: bool,
+    pub account: Option<String>,
+    pub projects: Result<Vec<Project>, String>,
+}
+
+/// An answer to the Cloud SQL browser.
+#[derive(Debug)]
+pub enum Found {
+    Start(Start),
+    /// The PostgreSQL instances of one project, or why they could not be listed.
+    Instances { project: String, res: Result<Vec<Instance>, String> },
+    /// The proxy was downloaded or installed at this path.
+    Proxy(Result<PathBuf, String>),
+}
+
+/// Finds gcloud and the proxy and lists the projects. Runs gcloud, so call it off the UI thread.
+pub fn start(gcloud_setting: &str, proxy_setting: &str) -> Start {
+    let Some(g) = find_gcloud(gcloud_setting) else {
+        return Start { gcloud: None, proxy: find_proxy(proxy_setting, None), components: false, account: None, projects: Ok(Vec::new()) };
+    };
+    let proxy = find_proxy(proxy_setting, Some(&g));
+    let components = proxy.is_none() && components_manageable(&g);
+    let (account, projects) = match account(&g) {
+        Ok(a) => (a, projects(&g)),
+        Err(e) => (None, Err(e)),
+    };
+    Start { gcloud: Some(g), proxy, components, account, projects }
+}
+
+/// Installs the proxy as a gcloud component, then finds where gcloud put it.
+pub fn install_and_find(gcloud: &Path) -> Result<PathBuf, String> {
+    install_component(gcloud)?;
+    find_proxy("", Some(gcloud)).ok_or_else(|| "Cloud SQL: gcloud installed cloud-sql-proxy, but it is not in the SDK's bin folder.".to_string())
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn conf(iam: bool, ip: IpKind) -> CloudSql {
@@ -545,13 +604,15 @@ mod tests {
        "ipAddresses":[{"type":"PRIVATE","ipAddress":"10.0.0.3"}],"settings":{"ipConfiguration":{"ipv4Enabled":false}}},
       {"connectionName":"proj-1:us-east1:psc","name":"psc","region":"us-east1","databaseVersion":"POSTGRES_17","state":"STOPPED",
        "settings":{"ipConfiguration":{"pscConfig":{"pscEnabled":true}}}},
+      {"connectionName":"proj-1:us-east1:idle","name":"idle","region":"us-east1","databaseVersion":"POSTGRES_14","state":"RUNNABLE","settings":{"activationPolicy":"NEVER"}},
       {"connectionName":"proj-1:us-east1:shop","name":"shop","region":"us-east1","databaseVersion":"MYSQL_8_0","state":"RUNNABLE"}
     ]"#;
 
     #[test]
     fn instances_parse_and_keep_only_postgres() {
         let v = parse_instances(INSTANCES).unwrap();
-        assert_eq!(v.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), ["main", "internal", "psc"]);
+        assert_eq!(v.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), ["main", "internal", "psc", "idle"]);
+        assert_eq!(v[3].state, "STOPPED", "an instance set to never run is stopped, as gcloud's list says");
         assert!(v[0].public_ip && v[0].iam && !v[0].private_ip && !v[0].psc);
         assert!(v[1].private_ip && !v[1].public_ip && !v[1].iam);
         assert!(v[2].psc && v[2].state == "STOPPED");
@@ -598,6 +659,9 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Where the stub forwards connections, for a test that connects through it to a real server; None makes it only listen.
+    pub(crate) static STUB_TARGET: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
     /// The test binary run again as a stand-in for the proxy, so no script or extra program is needed on any system.
     /// Does nothing unless QUARRY_STUB_PROXY is set.
     #[test]
@@ -611,6 +675,24 @@ mod tests {
                     let _ = l.accept();
                 }
             }
+            "forward" => {
+                let l = std::net::TcpListener::bind(("127.0.0.1", std::env::var("QUARRY_STUB_PORT").unwrap().parse::<u16>().unwrap())).unwrap();
+                let target = std::env::var("QUARRY_STUB_TARGET").unwrap();
+                for s in l.incoming().flatten() {
+                    let target = target.clone();
+                    std::thread::spawn(move || {
+                        let Ok(t) = std::net::TcpStream::connect(&target) else { return };
+                        let (mut up_r, mut up_w) = (s.try_clone().unwrap(), t.try_clone().unwrap());
+                        std::thread::spawn(move || {
+                            let _ = std::io::copy(&mut up_r, &mut up_w);
+                            let _ = up_w.shutdown(std::net::Shutdown::Write);
+                        });
+                        let (mut down_r, mut down_w) = (t, s);
+                        let _ = std::io::copy(&mut down_r, &mut down_w);
+                        let _ = down_w.shutdown(std::net::Shutdown::Write);
+                    });
+                }
+            }
             "fail" => {
                 eprintln!("first line");
                 eprintln!("failed to connect: instance not found");
@@ -620,7 +702,7 @@ mod tests {
         }
     }
 
-    fn stub(mode: &'static str) -> impl Fn(u16) -> tokio::process::Command {
+    pub(super) fn stub(mode: &'static str) -> impl Fn(u16) -> tokio::process::Command {
         move |port| {
             let mut c = tokio::process::Command::new(std::env::current_exe().unwrap());
             c.args(["--exact", "cloudsql::tests::stub_proxy", "--ignored", "--nocapture", "--test-threads=1"]).env("QUARRY_STUB_PROXY", mode).env("QUARRY_STUB_PORT", port.to_string());

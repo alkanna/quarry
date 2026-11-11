@@ -36,7 +36,7 @@ help:
 	@echo "  make run                     the app (release)"
 	@echo "  make demo                    the offline Mongo demo, to click around in"
 	@echo "  make demo-sql VIEW=content   the offline MySQL demo on one view (content, query, shell, structure, ...)"
-	@echo "  make demo-pg VIEW=content    the offline PostgreSQL demo on one view (also schemas, connform, paste, tls, advanced)"
+	@echo "  make demo-pg VIEW=content    the offline PostgreSQL demo on one view (also schemas, connform, paste, tls, advanced, cloudsql, cloudsql-form, cloudsql-missing)"
 	@echo "  make screenshot OUT=shot.png THEME=DARK|LIGHT [SWITCH='QUARRY_TEST_PG=content']"
 	@echo "Test"
 	@echo "  make check                   what CI runs on macOS and Windows"

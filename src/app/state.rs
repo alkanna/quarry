@@ -1035,6 +1035,8 @@ pub(super) struct ConnForm {
     pub(super) ssh_on: bool,
     /// Set when the connection goes through Cloud SQL; refused together with SSH.
     pub(super) cloud_sql: Option<crate::cloudsql::CloudSql>,
+    /// The instance as the browser listed it, for its state and the IP kinds it has; None until gcloud lists it.
+    pub(super) cloud_inst: Option<crate::cloudsql::Instance>,
     pub(super) ssh: crate::ssh::SshConf,
     pub(super) ssh_pwd: String,
     pub(super) ssh_pass: String,
@@ -1098,6 +1100,9 @@ pub(super) struct RowCheck {
     pub error: Option<String>,
     pub def: Option<&'static db::sql::pg_advanced::Def>,
 }
+
+/// The host saved in a Cloud SQL connection's address, which the proxy's local port replaces when it connects.
+pub(super) const CLOUD_HOST: &str = "127.0.0.1";
 
 /// The rows of the PostgreSQL session settings that are always there, before the ones added from the picker.
 pub(super) const PG_FIXED: [&str; 3] = ["statement_timeout", "lock_timeout", "application_name"];
@@ -1230,6 +1235,25 @@ impl ConnForm {
         self.pg_rows = a.pg_settings.clone();
         self.pg_path = a.search_path.clone();
         self.pg_ensure_rows();
+    }
+
+    /// The SQL address Test and Save use. Behind Cloud SQL the proxy replaces host and port, and an IAM sign-in sends no password.
+    pub(super) fn sql_addr(&self) -> db::sql::Addr {
+        let mut a = db::sql::Addr { host: self.addr.host.trim().into(), user: self.addr.user.trim().into(), database: self.addr.database.trim().into(), ..self.addr.clone() };
+        if let Some(c) = self.cloud_on() {
+            if a.host.is_empty() {
+                a.host = CLOUD_HOST.into();
+            }
+            if c.iam {
+                a.password.clear();
+            }
+        }
+        a
+    }
+
+    /// The Cloud SQL settings when they apply: only PostgreSQL goes through the proxy.
+    pub(super) fn cloud_on(&self) -> Option<&crate::cloudsql::CloudSql> {
+        self.cloud_sql.as_ref().filter(|_| self.engine == db::sql::Engine::Postgres)
     }
 
     pub(super) fn net(&self) -> db::Net {
@@ -1452,6 +1476,7 @@ impl App {
 
     /// Connects with a known address, so tests need no keychain.
     pub(super) fn connect_uri(&mut self, id: u64, uri: String) {
+        let tools = self.cloud_tools();
         let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == id) else { return };
         c.status = Status::Connecting;
         c.client = None;
@@ -1460,8 +1485,8 @@ impl App {
         // Asked again once connected, so a changed or failed server never shows the old one.
         c.server = ServerInfo::default();
         let mut net = net_of(&c.meta);
-        net.tools = crate::cloudsql::Tools { proxy: Some(self.prefs.cloud_sql_proxy.trim()).filter(|s| !s.is_empty()).map(Into::into), gcloud: Some(self.prefs.gcloud.trim()).filter(|s| !s.is_empty()).map(Into::into) };
         let adv = c.meta.advanced.clone();
+        net.tools = tools;
         if c.meta.engine.is_sql() {
             self.worker.sql_connect_with(id, uri, self.timeout(), net, adv);
         } else {

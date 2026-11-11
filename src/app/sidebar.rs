@@ -228,6 +228,7 @@ impl App {
         }
         let mut pick = None;
         let mut new = false;
+        let mut cloud = false;
         let mut remove = None;
         let mut edit = None;
         let mut refresh = None;
@@ -252,6 +253,9 @@ impl App {
             ui.add_space(2.0);
             if ui.button("+  New connection…").clicked() {
                 new = true;
+            }
+            if ui.button("Add from Cloud SQL…").on_hover_text("PostgreSQL instances your gcloud account can reach").clicked() {
+                cloud = true;
             }
             if let Some(c) = cur {
                 if ui.button(format!("Edit \"{}\"…", c.meta.name)).clicked() {
@@ -288,6 +292,9 @@ impl App {
         }
         if new {
             self.new_conn_modal();
+        }
+        if cloud {
+            self.open_cloud_browser(false);
         }
         if let Some((id, name)) = remove {
             self.modal = Some(Modal::Typed {

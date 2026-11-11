@@ -671,7 +671,7 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
                 tokio::task::spawn_blocking(move || crate::cloudsql::find_proxy("", g.as_deref())).await.ok().flatten()
             }
         };
-        let exe = exe.ok_or("Cloud SQL proxy not found. Install it from the connection form, or set its path in Settings.")?;
+        let exe = exe.ok_or_else(|| format!("{}. Download it from the connection's error card or the Cloud SQL browser, or set its path in Settings.", crate::cloudsql::PROXY_MISSING))?;
         let p = crate::cloudsql::open(conf, &exe, gcloud, timeout).await?;
         // The proxy already encrypts to the instance, and the server certificate would not match 127.0.0.1.
         let port = p.port;

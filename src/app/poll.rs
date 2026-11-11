@@ -596,6 +596,7 @@ impl App {
                         Err(_) => {}
                     }
                 }
+                Msg::CloudSql { req, found } => self.cloud_found(req, found),
                 Msg::ToolDone(res) => {
                     if let Some(t) = &mut self.tool {
                         t.cancel = None;

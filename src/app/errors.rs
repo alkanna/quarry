@@ -623,6 +623,9 @@ impl App {
             Some(e) => e.clone(),
             None => self.entry(raw.clone(), Some(id), None, format!("Connect · {name}"), "connect", 0),
         };
+        if e.ex.kind == ErrKind::CloudSql {
+            return self.cloud_failed_card(ui, id, &e);
+        }
         let host = host_of(&uri);
         // The server never answered, so its TLS flag is unknown; the address says whether TLS was asked for.
         let tls = uri.contains("tls=true") || uri.contains("ssl=true") || uri.starts_with("mongodb+srv") || e.ex.kind == ErrKind::Tls;

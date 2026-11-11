@@ -25,6 +25,7 @@ pub(super) enum Cmd {
     EditConn,
     Disconnect,
     NewConn,
+    CloudSql,
     Settings,
     Log,
     Reopen,
@@ -194,6 +195,7 @@ impl App {
         }
         let g = "Quarry";
         add(g, Row::cmd("New connection\u{2026}", Glyph::Prompt, keys(false, false, "N"), Cmd::NewConn));
+        add(g, Row::cmd("Add from Cloud SQL\u{2026}", Glyph::Prompt, "", Cmd::CloudSql));
         if !self.closed.is_empty() {
             add(g, Row::cmd("Reopen closed tab", Glyph::Tab, keys(true, false, "T"), Cmd::Reopen));
         }
@@ -313,6 +315,7 @@ impl App {
                 }
             }
             Cmd::NewConn => self.new_conn_modal(),
+            Cmd::CloudSql => self.open_cloud_browser(false),
             Cmd::Settings => self.modal = Some(Modal::Settings),
             Cmd::Log => self.log.open = !self.log.open,
             Cmd::Reopen => self.reopen_tab(),

@@ -13,6 +13,7 @@ use std::time::Duration;
 mod aggregate;
 mod auto_update;
 mod chrome;
+mod cloud_sql;
 mod column_menu;
 mod compare;
 pub(crate) mod config;
@@ -237,6 +238,10 @@ pub struct App {
     js: shell_ls::JsState,
     tree_filter: String,
     tools_installing: bool,
+    /// What gcloud told this session about Cloud SQL, so the browser reopens at once.
+    cloud: cloud_sql::CloudCache,
+    /// The "Add from Cloud SQL" browser, when open.
+    cloud_browser: Option<cloud_sql::CloudBrowser>,
     /// The Settings category shown, kept while the app runs.
     settings_cat: settings::SettingsCat,
     /// Tree row the palette jumped to, as (connection, database, collection), scrolled into view once drawn.
@@ -372,6 +377,8 @@ impl App {
             log: LogUi::default(),
             tree_filter: String::new(),
             tools_installing: false,
+            cloud: Default::default(),
+            cloud_browser: None,
             settings_cat: Default::default(),
             reveal: None,
             rail_order: Vec::new(),
@@ -692,6 +699,8 @@ impl eframe::App for App {
         self.server_window(&ctx);
         self.sql_server_window(&ctx);
         self.tool_window(&ctx);
+        // After the modals, so a browser opened from the connection form draws over it.
+        self.cloud_browser_window(&ctx);
         self.toasts(&ctx);
         self.screenshot(&ctx);
     }
