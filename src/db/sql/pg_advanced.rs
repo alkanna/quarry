@@ -250,10 +250,9 @@ pub fn check_connection(a: &Advanced) -> Result<(), String> {
     Ok(())
 }
 
-/// `'text'` with the quote doubled. Values reaching it have no backslash, so it reads the same whatever
-/// standard_conforming_strings says.
+/// A value as a SQL literal that reads the same whatever standard_conforming_strings says.
 pub fn literal(v: &str) -> String {
-    format!("'{}'", v.replace('\'', "''"))
+    super::value::pg_lit(v)
 }
 
 /// The search_path value as the server reads it: each schema a quoted identifier.

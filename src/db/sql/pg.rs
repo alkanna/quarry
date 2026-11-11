@@ -60,6 +60,8 @@ pub struct PgPools {
     /// What the first line of a Stop needs and a pid alone cannot give: the time each backend started, so a pid the server
     /// reused for another session is never cancelled. Kept per connection because two servers hand out the same pids.
     starts: Mutex<HashMap<u64, String>>,
+    /// The `BEGIN READ WRITE` a write opens with, built on the first write: the settings it holds never change for a pool.
+    begin_write: std::sync::OnceLock<String>,
 }
 
 /// Connections taken out of a pool for good (`PgPools::acquire_held`), counted per database. `pool.close()` does not know them,
@@ -143,7 +145,7 @@ struct Entry {
 
 impl PgPools {
     fn new(opts: PgConnectOptions, default_db: String, acquire: Duration, locals: Option<String>, timeout: String) -> PgPools {
-        PgPools { opts, default_db, acquire, idle: IDLE, per_db: PER_DB, max_pools: MAX_POOLS, locals, timeout, adv: PgSession::default(), live: Default::default(), held: Default::default(), starts: Default::default() }
+        PgPools { opts, default_db, acquire, idle: IDLE, per_db: PER_DB, max_pools: MAX_POOLS, locals, timeout, adv: PgSession::default(), live: Default::default(), held: Default::default(), starts: Default::default(), begin_write: Default::default() }
     }
 
     fn with_session(mut self, adv: PgSession) -> PgPools {
@@ -357,13 +359,16 @@ impl Db {
         }
     }
 
-    /// What a write transaction adds behind a pooler for the Advanced tab's settings: nothing on the session carries them
-    /// there. Its own timeouts and path are left out, because the writer sets those itself (`write_locals`).
-    pub(super) fn pg_writer_locals(&self) -> String {
-        match &self.pool {
-            Pool::Pg(p) if p.locals.is_some() => p.adv.locals(true),
-            _ => String::new(),
-        }
+    /// The statement a write transaction opens with: READ WRITE, then the timeouts and formats every write pins (`write_locals`),
+    /// then behind a pooler the Advanced tab's settings, which nothing on the session carries there. Its own timeouts and path are
+    /// left out of those, because the writer sets them itself.
+    pub(super) fn pg_begin_write(&self) -> &str {
+        let Pool::Pg(p) = &self.pool else { return "" };
+        p.begin_write.get_or_init(|| {
+            let extra = if p.locals.is_some() { p.adv.locals(true) } else { String::new() };
+            let sep = if extra.is_empty() { "" } else { "; " };
+            format!("BEGIN READ WRITE; {}{sep}{extra}", write_locals())
+        })
     }
 
     /// The same server as `self` with its pool built the way a pooler that refused startup options leaves it, for
@@ -381,6 +386,11 @@ impl Db {
 /// The output formats the read path expects. sqlx sends DateStyle "ISO, MDY", TimeZone UTC and extra_float_digits 2 itself;
 /// these are the ones it leaves out. One list feeds the startup options, the pooler fallback and every write transaction,
 /// so a setting added here cannot go missing behind a pooler.
+/// How long a plain write waits for a lock before it gives up, and how long a structure change, trigger edit or create waits (they
+/// name the session that held it, so they fail sooner). One place for both, so the messages in `db::errors` state the wait that applied.
+pub(crate) const WRITE_LOCK_SECS: u32 = 10;
+pub(crate) const LOCK_WAIT_SECS: u32 = 3;
+
 const FORMATS: [(&str, &str); 3] = [("bytea_output", "hex"), ("DateStyle", "ISO"), ("IntervalStyle", "postgres")];
 
 fn set_local(k: &str, v: &str) -> String {
@@ -443,10 +453,15 @@ pub(super) fn pooled_for_test(base: &Db, uri: &str) -> Db {
 /// What every write transaction starts with, whatever the session carries: no statement timeout, because an ALTER or a
 /// big update must not be cut by the limit meant for reads, a lock timeout so a write never queues behind another
 /// session's lock for ever, and the output formats the read path expects.
-pub(super) fn write_locals() -> String {
+pub(super) fn write_locals() -> &'static str {
+    static LOCALS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    LOCALS.get_or_init(build_write_locals)
+}
+
+fn build_write_locals() -> String {
     // The writers of literals (`value::lit` with no backslash escapes) are right only with this on, and a role or database
     // can set it off for the session.
-    let mut v = vec![set_timeout("0"), set_local("lock_timeout", "10s"), set_local("standard_conforming_strings", "on")];
+    let mut v = vec![set_timeout("0"), set_local("lock_timeout", &format!("{WRITE_LOCK_SECS}s")), set_local("standard_conforming_strings", "on")];
     v.extend(FORMATS.map(|(k, x)| set_local(k, x)));
     v.join("; ")
 }

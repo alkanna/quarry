@@ -8,14 +8,16 @@
 
 use super::create::{Ddl, DropInfo};
 use super::ddl::{snapshot, ColDef};
-use super::ddl_pg::{col_body, comment_stmt, exec, lock_error, may_lock, name_ok, q, read_in, sql_state, table_state, LOCK_WAIT};
-use super::exec::{Cells, Conn, SqlRow, Tx};
+use super::ddl_pg::{col_body, comment_stmt, exec, lock_error, may_lock_one, name_ok, q, read_in, run_locked, set_local, set_lock_wait, set_path, table_state, unknown_type, Fail};
+use super::exec::{sql_state, Cells, Conn, SqlRow, Tx};
 use sqlx::Connection as _;
 use super::structure::{num, Structure};
 use super::value::Param;
 use super::worker::text;
 use super::write::{self, SqlUndo};
+use super::pg::{LOCK_WAIT_SECS, WRITE_LOCK_SECS};
 use super::{se, Db, Dialect, Pool};
+use crate::db::errors::{in_use, lock_held_cascade, InUse};
 use crate::db::{Msg, Res, UndoAction, UndoKind, Worker};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -365,7 +367,7 @@ async fn cascade_effects(db: &Db, scope: &str, drop_sql: &str, skip: Option<&str
     for attempt in 0..5 {
         out = async {
             let mut tx = begin(&mut c, db, scope).await?;
-            let r = effects_in(&mut tx, drop_sql, skip, schema_oid).await;
+            let r = effects_in(&mut tx, db, scope, drop_sql, skip, schema_oid).await;
             let _ = tx.rollback().await;
             r
         }
@@ -379,16 +381,16 @@ async fn cascade_effects(db: &Db, scope: &str, drop_sql: &str, skip: Option<&str
     out
 }
 
-async fn effects_in(tx: &mut Tx<'_>, drop_sql: &str, skip: Option<&str>, schema_oid: Option<&str>) -> Res<(u64, Vec<String>)> {
+async fn effects_in(tx: &mut Tx<'_>, db: &Db, scope: &str, drop_sql: &str, skip: Option<&str>, schema_oid: Option<&str>) -> Res<(u64, Vec<String>)> {
     // One snapshot for both readings, so what another session commits between them is not taken for the drop's doing. Our own DROP stays visible to us.
     tx.exec_bound("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ", &[]).await.map_err(se)?;
     // Descriptions name the schema of every object only when none is on the path.
-    tx.exec_bound("SET LOCAL search_path = pg_catalog", &[]).await.map_err(se)?;
+    set_local(tx, db, scope, "search_path", "pg_catalog").await.map_err(se)?;
     let before = snapshot_objects(tx).await?;
     tx.exec_bound("SAVEPOINT quarry_cascade", &[]).await.map_err(se)?;
     if let Err(x) = tx.exec_bound(drop_sql, &[]).await {
         return Err(match sql_state(&x).as_deref() {
-            Some("55P03") => format!("Another session holds a lock on it or on something that depends on it, and did not let go within {LOCK_WAIT}, so what the drop takes cannot be read right now. Try again in a moment."),
+            Some("55P03") => lock_held_cascade(LOCK_WAIT_SECS),
             _ => se(x),
         });
     }
@@ -414,8 +416,8 @@ async fn effects_in(tx: &mut Tx<'_>, drop_sql: &str, skip: Option<&str>, schema_
             let counted = async {
                 tx.exec_bound("SAVEPOINT quarry_count", &[]).await.ok()?;
                 let n = async {
-                    tx.exec_bound("SET LOCAL statement_timeout = '2s'", &[]).await.ok()?;
-                    tx.exec_bound("SET LOCAL row_security = off", &[]).await.ok()?;
+                    set_local(tx, db, scope, "statement_timeout", "2s").await.ok()?;
+                    set_local(tx, db, scope, "row_security", "off").await.ok()?;
                     tx.fetch_bound(&format!("SELECT count(*)::bigint AS n FROM {q}"), &[]).await.ok()?.first().and_then(|r| num(r, "n"))
                 }
                 .await;
@@ -483,7 +485,7 @@ async fn maintenance(db: &Db, read_only: bool) -> Res<Conn> {
     }
     let mut c = db.acquire_conn().await?;
     if !db.pooler() {
-        if let Err(x) = c.execute("SET default_transaction_read_only = off; SET statement_timeout = 0; SET lock_timeout = '10s'").await {
+        if let Err(x) = c.execute(&format!("SET default_transaction_read_only = off; SET statement_timeout = 0; SET lock_timeout = '{WRITE_LOCK_SECS}s'")).await {
             let _ = c.close().await;
             return Err(se(x));
         }
@@ -531,7 +533,7 @@ async fn create_db(db: &Db, name: &str, template: Option<&str>, read_only: bool)
                     tokio::time::sleep(wait).await;
                     wait *= 2;
                 }
-                Err(x) if sql_state(&x).as_deref() == Some(IN_USE) => return Err(format!("{}\nAnother session is using the template database, and a CREATE DATABASE running at the same moment does. Try again in a moment.", se(x))),
+                Err(x) if sql_state(&x).as_deref() == Some(IN_USE) => return Err(in_use(&se(x), InUse::Template)),
                 Err(x) => return Err(se(x)),
             }
         }
@@ -592,10 +594,7 @@ async fn drop_db(db: &Db, name: &str, force: bool, read_only: bool) -> Res<Vec<S
         }
         match r {
             Ok(()) => {}
-            Err(x) if sql_state(&x).as_deref() == Some(IN_USE) => {
-                let who = if db.pooler() { "A connection pooler keeps a server connection open on it after Quarry's own are closed, or another session is using it" } else { "Another session or application is using it" };
-                return Err(format!("{}\nQuarry closed its own connections to {name} first. {who}. Nothing was dropped. WITH (FORCE) in the confirmation disconnects them.", se(x)));
-            }
+            Err(x) if sql_state(&x).as_deref() == Some(IN_USE) => return Err(in_use(&se(x), InUse::Drop { name, pooler: db.pooler() })),
             Err(x) => return Err(se(x)),
         }
         db_list(&mut c).await
@@ -607,33 +606,26 @@ async fn drop_db(db: &Db, name: &str, force: bool, read_only: bool) -> Res<Vec<S
 
 // One transaction.
 
+/// A connection with its write transaction open and the lock timeout of a structure change set, for a read that always ends in
+/// ROLLBACK (`cascade_effects`).
 async fn begin<'c>(c: &'c mut Conn, db: &Db, scope: &str) -> Res<Tx<'c>> {
     let mut tx = c.begin_write(db).await.map_err(se)?;
-    exec(&mut tx, db, scope, &format!("SET LOCAL lock_timeout = '{LOCK_WAIT}'")).await.map_err(se)?;
+    set_lock_wait(&mut tx, db, scope).await.map_err(se)?;
     Ok(tx)
 }
 
-/// COMMIT, or ROLLBACK when `out` failed. A failed COMMIT does not say that nothing changed, so it says so.
-async fn finish<T>(tx: Tx<'_>, out: Res<T>) -> Res<T> {
-    match out {
-        Ok(v) => tx.commit().await.map(|_| v).map_err(|x| format!("{}. The server did not confirm the commit, so the change may or may not have been applied. Refresh the lists and check before running it again.", se(x))),
-        Err(e) => {
-            let _ = tx.rollback().await;
-            Err(e)
-        }
-    }
+/// One write transaction of a create or a drop, ended by COMMIT, or by ROLLBACK when `body` failed (`run_locked`). A failed COMMIT
+/// does not say that nothing changed, so it says so.
+async fn in_tx<T>(db: &Db, scope: &str, read_only: bool, body: impl AsyncFnOnce(&mut Tx<'_>) -> Res<T>) -> Res<T> {
+    let run = run_locked(db, scope, read_only, &[], "Refresh the lists and check before running it again.", async |tx| body(tx).await.map_err(Fail::Run)).await;
+    run.map_err(|f| match f {
+        Fail::Run(e) | Fail::Unknown(e) | Fail::Changed(e) => e,
+    })
 }
 
 async fn namespace_oid(tx: &mut Tx<'_>, schema: &str) -> Res<Option<String>> {
     let rows = tx.fetch_bound("SELECT oid::text AS n FROM pg_namespace WHERE nspname = $1", &[Param::Text(schema.into())]).await.map_err(se)?;
     Ok(rows.first().and_then(|r| text(r, "n")))
-}
-
-/// The oids of the database this `Db` points at and of the table or view, as the server has them now. Empty when they cannot be
-/// read, which only skips the later check; a write is never refused over it.
-pub(super) async fn ids_of(db: &Db, schema: &str, table: &str) -> write::PgIds {
-    let (d, t) = pg_ids_now(db, schema, table).await.unwrap_or_default();
-    write::PgIds { db: d.unwrap_or_default(), table: t.unwrap_or_default() }
 }
 
 async fn pg_ids_now(db: &Db, schema: &str, table: &str) -> Res<(Option<String>, Option<String>)> {
@@ -666,37 +658,24 @@ async fn relation_oid(tx: &mut Tx<'_>, name: &str) -> Res<Option<String>> {
 
 async fn create_schema(db: &Db, name: &str, read_only: bool) -> Res<String> {
     let sql = create_schema_sql(name)?;
-    let mut c = write::writer_conn(db, "", read_only).await?;
-    let out = async {
-        let mut tx = begin(&mut c, db, name).await?;
-        let r = async {
-            exec(&mut tx, db, name, &sql).await.map_err(se)?;
-            namespace_oid(&mut tx, name).await?.ok_or_else(|| "The schema was made but cannot be read back.".to_string())
-        }
-        .await;
-        finish(tx, r).await
-    }
-    .await;
-    let _ = c.close().await;
-    out
+    in_tx(db, name, read_only, async |tx| {
+        exec(tx, db, name, &sql).await.map_err(se)?;
+        namespace_oid(tx, name).await?.ok_or_else(|| "The schema was made but cannot be read back.".to_string())
+    })
+    .await
 }
 
 async fn drop_schema(db: &Db, name: &str, cascade: bool, read_only: bool) -> Res<()> {
     let sql = drop_schema_sql(name, cascade)?;
-    let mut c = write::writer_conn(db, "", read_only).await?;
-    let out = async {
-        let mut tx = begin(&mut c, db, name).await?;
-        let r = exec(&mut tx, db, name, &sql).await.map_err(|x| match (sql_state(&x).as_deref(), lock_error(&x, name)) {
+    in_tx(db, name, read_only, async |tx| {
+        exec(tx, db, name, &sql).await.map_err(|x| match (sql_state(&x).as_deref(), lock_error(&x, name)) {
             (_, Some(why)) => why,
             // 2BP01 is dependent_objects_still_exist.
             (Some("2BP01"), _) => format!("{}\nTick CASCADE in the confirmation to drop what is in {name} with it. Nothing was dropped.", se(x)),
             _ => se(x),
-        });
-        finish(tx, r).await
-    }
-    .await;
-    let _ = c.close().await;
-    out
+        })
+    })
+    .await
 }
 
 /// What a create made, for the undo: the table's oid and how it reads right after.
@@ -707,128 +686,97 @@ struct Made {
 
 async fn create_table(db: &Db, spec: &TableSpec, read_only: bool) -> Res<Made> {
     let stmts = create_table_stmts(spec)?;
-    let mut c = write::writer_conn(db, "", read_only).await?;
-    let out = async {
-        let mut tx = begin(&mut c, db, &spec.schema).await?;
-        let r = async {
-            // The types and the default expressions resolve under the schema first and then the Advanced saved list, the path every other writer and the structure editor read under, so a type from a saved schema works here too.
-            exec(&mut tx, db, &spec.schema, &db.pg_set_path(&spec.schema)).await.map_err(se)?;
-            for col in &spec.cols {
-                let said = tx.fetch_bound("SELECT to_regtype($1)::text AS t", &[Param::Text(col.ty.trim().to_string())]).await;
-                // PostgreSQL before 16 raises an error for text that is not a type name, later ones answer NULL.
-                if said.ok().and_then(|rows| rows.first().and_then(|r| text(r, "t"))).is_none() {
-                    return Err(format!("Column {}: {:?} is not a type the server knows. Write only the type, like numeric(10,2), without constraints or other column clauses. Nothing was created.", col.name, col.ty));
-                }
-            }
-            for s in &stmts {
-                exec(&mut tx, db, &spec.schema, s).await.map_err(|x| lock_error(&x, &spec.name).unwrap_or_else(|| se(x)))?;
-            }
-            let state = state_in(&mut tx, &spec.schema, &spec.name).await?;
-            let oid = relation_oid(&mut tx, &D.qualified(&spec.schema, &spec.name)).await?.ok_or("The table was made but cannot be read back.")?;
-            Ok(Made { oid, state })
+    in_tx(db, &spec.schema, read_only, async |tx| {
+        // The types and the default expressions resolve under the schema first and then the Advanced saved list, the path every other writer and the structure editor read under, so a type from a saved schema works here too.
+        set_path(tx, db, &spec.schema).await.map_err(se)?;
+        let types: Vec<String> = spec.cols.iter().map(|c| c.ty.trim().to_string()).collect();
+        if let Some(bad) = unknown_type(tx, &types).await {
+            let col = spec.cols.iter().find(|c| c.ty.trim() == bad).map_or("", |c| c.name.as_str());
+            return Err(format!("Column {col}: {:?} is not a type the server knows. Write only the type, like numeric(10,2), without constraints or other column clauses. Nothing was created.", bad));
         }
-        .await;
-        finish(tx, r).await
-    }
-    .await;
-    let _ = c.close().await;
-    out
+        for s in &stmts {
+            exec(tx, db, &spec.schema, s).await.map_err(|x| lock_error(&x, &spec.name).unwrap_or_else(|| se(x)))?;
+        }
+        let state = state_in(tx, &spec.schema, &spec.name).await?;
+        let oid = relation_oid(tx, &D.qualified(&spec.schema, &spec.name)).await?.ok_or("The table was made but cannot be read back.")?;
+        Ok(Made { oid, state })
+    })
+    .await
 }
 
 async fn drop_table(db: &Db, schema: &str, table: &str, view: bool, cascade: bool, read_only: bool) -> Res<()> {
     let sql = drop_table_sql(schema, table, view, cascade)?;
-    let mut c = write::writer_conn(db, "", read_only).await?;
-    let out = async {
-        let mut tx = begin(&mut c, db, schema).await?;
-        let r = exec(&mut tx, db, schema, &sql).await.map_err(|x| match (sql_state(&x).as_deref(), lock_error(&x, table)) {
+    in_tx(db, schema, read_only, async |tx| {
+        exec(tx, db, schema, &sql).await.map_err(|x| match (sql_state(&x).as_deref(), lock_error(&x, table)) {
             (_, Some(why)) => why,
             (Some("2BP01"), _) => format!("{}\nTick CASCADE in the confirmation to drop what depends on it too. Nothing was dropped.", se(x)),
             _ => se(x),
-        });
-        finish(tx, r).await
-    }
-    .await;
-    let _ = c.close().await;
-    out
+        })
+    })
+    .await
 }
 
 // Undo of a create.
 
 async fn undo_schema(db: &Db, name: &str, oid: &str, read_only: bool) -> Res<()> {
     let sql = drop_schema_sql(name, false)?;
-    let mut c = write::writer_conn(db, "", read_only).await?;
-    let out = async {
-        let mut tx = begin(&mut c, db, name).await?;
-        let r = async {
-            match namespace_oid(&mut tx, name).await? {
-                None => return Err(format!("Not undone: the schema {name} is already gone.")),
-                Some(now) if now != oid => return Err(format!("Not undone: {name} was dropped and made again since, so it is not the schema this created.")),
-                Some(_) => {}
-            }
-            // Without CASCADE the server refuses a schema that holds anything, inside this transaction, so no object can arrive between a check and the drop.
-            exec(&mut tx, db, name, &sql).await.map_err(|x| match (sql_state(&x).as_deref(), lock_error(&x, name)) {
-                (_, Some(why)) => format!("Not undone: {why}"),
-                (Some("2BP01"), _) => format!("Not undone: {name} has objects in it now.\n{}", se(x)),
-                _ => se(x),
-            })
+    in_tx(db, name, read_only, async |tx| {
+        match namespace_oid(tx, name).await? {
+            None => return Err(format!("Not undone: the schema {name} is already gone.")),
+            Some(now) if now != oid => return Err(format!("Not undone: {name} was dropped and made again since, so it is not the schema this created.")),
+            Some(_) => {}
         }
-        .await;
-        finish(tx, r).await
-    }
-    .await;
-    let _ = c.close().await;
-    out
+        // Without CASCADE the server refuses a schema that holds anything, inside this transaction, so no object can arrive between a check and the drop.
+        exec(tx, db, name, &sql).await.map_err(|x| match (sql_state(&x).as_deref(), lock_error(&x, name)) {
+            (_, Some(why)) => format!("Not undone: {why}"),
+            (Some("2BP01"), _) => format!("Not undone: {name} has objects in it now.\n{}", se(x)),
+            _ => se(x),
+        })
+    })
+    .await
 }
 
 async fn undo_table(db: &Db, schema: &str, table: &str, made: &Made, read_only: bool) -> Res<()> {
     let sql = drop_table_sql(schema, table, false, false)?;
     let name = D.qualified(schema, table);
-    let mut c = write::writer_conn(db, "", read_only).await?;
-    let out = async {
-        let mut tx = begin(&mut c, db, schema).await?;
-        let r = async {
-            // Locked before anything is read, so a row cannot arrive between the check and the drop. Without the lock the check
-            // could be stale by the time the DROP runs, so a role that cannot take it does not get the undo.
-            if !may_lock(&mut tx, &name).await {
-                return Err(format!("Not undone: {table} cannot be locked with this role's privileges, so it cannot be checked for rows safely. Drop it from its menu instead."));
-            }
-            if let Err(x) = exec(&mut tx, db, schema, &format!("LOCK TABLE {name} IN ACCESS EXCLUSIVE MODE")).await {
-                return Err(match (sql_state(&x).as_deref(), lock_error(&x, table)) {
-                    (_, Some(why)) => format!("Not undone: {why}"),
-                    (Some("42P01"), _) => format!("Not undone: the table {table} is already gone."),
-                    _ => se(x),
-                });
-            }
-            match relation_oid(&mut tx, &name).await? {
-                None => return Err(format!("Not undone: the table {table} is already gone.")),
-                Some(now) if now != made.oid => return Err(format!("Not undone: {table} was dropped and made again since, so it is not the table this created.")),
-                Some(_) => {}
-            }
-            exec(&mut tx, db, schema, &db.pg_set_path(schema)).await.map_err(se)?;
-            if state_in(&mut tx, schema, table).await? != made.state {
-                return Err(format!("Not undone: the structure of {table} changed since it was made, so dropping it would lose more than the create made."));
-            }
-            // Row level security can hide every row from this role, even the table's owner under FORCE, and the check would then call a full table empty. With it off the
-            // server answers 42501 when a policy would apply and the role cannot bypass it, which is a refusal and never a guess.
-            exec(&mut tx, db, schema, "SET LOCAL row_security = off").await.map_err(se)?;
-            match tx.fetch_bound(&format!("SELECT 1 AS n FROM {name} LIMIT 1"), &[]).await {
-                Ok(rows) if !rows.is_empty() => return Err(format!("Not undone: {table} has rows now.")),
-                Ok(_) => {}
-                Err(x) if sql_state(&x).as_deref() == Some("42501") => return Err(format!("Not undone: row level security applies to {table} for this role, so Quarry cannot tell whether it has rows.")),
-                Err(x) => return Err(se(x)),
-            }
-            exec(&mut tx, db, schema, &sql).await.map_err(|x| match sql_state(&x).as_deref() {
-                // Another table's key or a view was made on it since.
-                Some("2BP01") => format!("Not undone: something depends on {table} now.\n{}", se(x)),
-                _ => se(x),
-            })
+    in_tx(db, schema, read_only, async |tx| {
+        // Locked before anything is read, so a row cannot arrive between the check and the drop. Without the lock the check
+        // could be stale by the time the DROP runs, so a role that cannot take it does not get the undo.
+        if !may_lock_one(tx, &name).await {
+            return Err(format!("Not undone: {table} cannot be locked with this role's privileges, so it cannot be checked for rows safely. Drop it from its menu instead."));
         }
-        .await;
-        finish(tx, r).await
-    }
-    .await;
-    let _ = c.close().await;
-    out
+        if let Err(x) = exec(tx, db, schema, &format!("LOCK TABLE {name} IN ACCESS EXCLUSIVE MODE")).await {
+            return Err(match (sql_state(&x).as_deref(), lock_error(&x, table)) {
+                (_, Some(why)) => format!("Not undone: {why}"),
+                (Some("42P01"), _) => format!("Not undone: the table {table} is already gone."),
+                _ => se(x),
+            });
+        }
+        match relation_oid(tx, &name).await? {
+            None => return Err(format!("Not undone: the table {table} is already gone.")),
+            Some(now) if now != made.oid => return Err(format!("Not undone: {table} was dropped and made again since, so it is not the table this created.")),
+            Some(_) => {}
+        }
+        set_path(tx, db, schema).await.map_err(se)?;
+        if state_in(tx, schema, table).await? != made.state {
+            return Err(format!("Not undone: the structure of {table} changed since it was made, so dropping it would lose more than the create made."));
+        }
+        // Row level security can hide every row from this role, even the table's owner under FORCE, and the check would then call a full table empty. With it off the
+        // server answers 42501 when a policy would apply and the role cannot bypass it, which is a refusal and never a guess.
+        set_local(tx, db, schema, "row_security", "off").await.map_err(se)?;
+        match tx.fetch_bound(&format!("SELECT 1 AS n FROM {name} LIMIT 1"), &[]).await {
+            Ok(rows) if !rows.is_empty() => return Err(format!("Not undone: {table} has rows now.")),
+            Ok(_) => {}
+            Err(x) if sql_state(&x).as_deref() == Some("42501") => return Err(format!("Not undone: row level security applies to {table} for this role, so Quarry cannot tell whether it has rows.")),
+            Err(x) => return Err(se(x)),
+        }
+        exec(tx, db, schema, &sql).await.map_err(|x| match sql_state(&x).as_deref() {
+            // Another table's key or a view was made on it since.
+            Some("2BP01") => format!("Not undone: something depends on {table} now.\n{}", se(x)),
+            _ => se(x),
+        })
+    })
+    .await
 }
 
 /// How many objects of a user, large objects included, the database holds, counted on a connection that stays open.
@@ -877,7 +825,7 @@ async fn undo_db(db: &Db, name: &str, oid: &str, baseline: i64, read_only: bool)
             pools.close_database(name).await;
             match alone(&mut c, db, &sql).await {
                 Ok(()) => Ok(()),
-                Err(x) if sql_state(&x).as_deref() == Some(IN_USE) => Err(format!("Not undone: another session is connected to {name}.\n{}", se(x))),
+                Err(x) if sql_state(&x).as_deref() == Some(IN_USE) => Err(in_use(&se(x), InUse::Undo { name })),
                 Err(x) => Err(se(x)),
             }
         }

@@ -13,6 +13,37 @@ pub fn lit(s: &str, bs: bool) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
+/// A PostgreSQL string literal that reads the same whatever standard_conforming_strings is: with a backslash in it the text goes
+/// in `E'...'`, where backslashes are escapes under both settings, and without one a plain string is already the same.
+pub fn pg_lit(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 3);
+    pg_lit_into(&mut out, s);
+    out
+}
+
+/// `pg_lit` appended to `out`, for a writer that builds a long text and should not allocate per value.
+pub fn pg_lit_into(out: &mut String, s: &str) {
+    if s.contains('\\') {
+        out.push_str("E'");
+        for c in s.chars() {
+            match c {
+                '\\' => out.push_str("\\\\"),
+                '\'' => out.push_str("''"),
+                c => out.push(c),
+            }
+        }
+    } else {
+        out.push('\'');
+        for c in s.chars() {
+            if c == '\'' {
+                out.push('\'');
+            }
+            out.push(c);
+        }
+    }
+    out.push('\'');
+}
+
 /// Bytes as hex digits, the part after `0x` or inside `X'..'`.
 pub fn hex_digits(b: &[u8], upper: bool) -> String {
     use std::fmt::Write;

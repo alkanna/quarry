@@ -412,8 +412,7 @@ async fn import_on(c: &mut Conn, db: &Db, schema: &str, table: &str, plan: &Impo
     let rec = Rec { on, track: plan.dup == Dup::Update, n_pk: pk.len(), inserted: Vec::new(), ins_at: HashMap::new(), updated: Vec::new(), upd_at: HashMap::new(), bytes: 0 };
     let mut tx = c.begin_write(db).await.map_err(se)?;
     // The types in the statements were read under this path, so they resolve to the same types here.
-    let path = db.pg_set_path(schema);
-    tx.exec_bound(&path, &[]).await.map_err(se)?;
+    super::ddl_pg::set_path(&mut tx, db, schema).await.map_err(se)?;
     let only = is_plain_table(&mut tx, schema, table).await?;
     let mut imp = Imp { db, schema, table, plan, mapped, key_at, rec_names, has_set, only, rec, why_not, flat: Vec::new(), in_batch: 0, batch_bytes: 0, first_row: 0, seen: HashSet::new(), inserted_n: 0 };
     let done = read_file(&mut tx, &mut imp, prog, cancel, per).await;
@@ -424,6 +423,8 @@ async fn import_on(c: &mut Conn, db: &Db, schema: &str, table: &str, plan: &Impo
             return Err(x);
         }
     };
+    // Read before the COMMIT, so the oids are those of the table this import wrote to.
+    let ids = if imp.rec.on && !(imp.rec.inserted.is_empty() && imp.rec.updated.is_empty()) { super::ddl_pg::ids_in(&mut tx, schema, table).await } else { super::write::PgIds::default() };
     // An error the server sends for COMMIT (a deferred constraint, a cancel) means the transaction was rolled back. Only a lost
     // connection leaves it open whether the commit went through.
     tx.commit().await.map_err(|x| match x.as_database_error() {
@@ -431,7 +432,6 @@ async fn import_on(c: &mut Conn, db: &Db, schema: &str, table: &str, plan: &Impo
         None => format!("The server did not confirm the import ({}). Check the table: it may or may not have been applied.", se(x)),
     })?;
     let Imp { rec, why_not, inserted_n, mapped, rec_names, only, .. } = imp;
-    let ids = if rec.on && !(rec.inserted.is_empty() && rec.updated.is_empty()) { super::create_pg::ids_of(db, schema, table).await } else { super::write::PgIds::default() };
     let undo = (rec.on && !(rec.inserted.is_empty() && rec.updated.is_empty())).then(|| {
         let by_name = |n: &str| mapped.iter().copied().chain(plan.info.cols.iter()).find(|c| c.name == n).map(ucol);
         let cols: Vec<UCol> = rec_names.iter().filter_map(|n| by_name(n)).collect();
@@ -551,8 +551,7 @@ pub fn remove_sql(schema: &str, table: &str, u: &ImportUndo, rows: &[Cellz]) -> 
 pub async fn undo(db: &Db, schema: &str, table: &str, u: &ImportUndo, read_only: bool) -> Res<String> {
     let mut c = writer_conn(db, schema, read_only).await?;
     let mut tx = c.begin_write(db).await.map_err(se)?;
-    let path = db.pg_set_path(schema);
-    tx.exec_bound(&path, &[]).await.map_err(se)?;
+    super::ddl_pg::set_path(&mut tx, db, schema).await.map_err(se)?;
     let res = undo_in(db, schema, table, u, &mut tx).await;
     match res {
         Ok(()) => tx.commit().await.map_err(se)?,

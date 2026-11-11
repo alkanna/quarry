@@ -17,9 +17,12 @@
 
 use super::csv::Source;
 use super::dump::{excerpt, note, put, stopped, DumpPlan, Ran, FILE_LOGGED, INSERT_BYTES};
+use super::ddl_pg::{q, qn};
 use super::exec::{Cells, Conn};
 use super::import::Progress;
+use super::lex::dollar_quote;
 use super::pg_script::PgSplitter;
+use super::value::{pg_lit, pg_lit_into};
 use super::{lex, se, se_at, Db, Dialect};
 use crate::db::Res;
 use sqlx::{raw_sql, Executor, PgConnection};
@@ -31,27 +34,10 @@ use std::time::Instant;
 
 const D: Dialect = Dialect::Postgres;
 
-fn q(name: &str) -> String {
-    D.quote_ident(name)
-}
-
-fn qn(schema: &str, name: &str) -> String {
-    D.qualified(schema, name)
-}
-
-/// A string as a literal that reads the same whatever standard_conforming_strings is: with a backslash in it the text goes
-/// in `E'...'`, where backslashes are escapes under both settings, and without one a plain string is already the same.
-pub(super) fn pg_lit(s: &str) -> String {
-    if s.contains('\\') { format!("E'{}'", s.replace('\\', "\\\\").replace('\'', "''")) } else { format!("'{}'", s.replace('\'', "''")) }
-}
-
 /// A body in dollar quotes, with a tag that is not in the body.
 fn dollar(body: &str) -> String {
-    let mut tag = "quarry".to_string();
-    while body.contains(&format!("${tag}$")) {
-        tag.push('x');
-    }
-    format!("${tag}${body}${tag}$")
+    let tag = dollar_quote(body, "quarry");
+    format!("{tag}{body}{tag}")
 }
 
 /// One result row of a catalog query, every column read as text.
@@ -1120,10 +1106,10 @@ pub async fn run_file(db: Db, schema: String, src: Source, read_only: bool, prog
     let pooled = super::run::prepare(&mut conn, &db, &schema, false, &id).await?;
     let Conn::Pg(mut c) = conn else { return Err("Not a PostgreSQL connection".into()) };
     // Behind a pooler nothing is set on the session: each statement is a transaction of its own that carries its settings.
-    let mut locals = [super::pg::write_locals(), db.pg_run_locals(&schema)].into_iter().filter(|l| !l.is_empty()).collect::<Vec<_>>().join("; ");
+    let mut locals = [super::pg::write_locals(), db.pg_run_locals(&schema).as_str()].into_iter().filter(|l| !l.is_empty()).collect::<Vec<_>>().join("; ");
     if !pooled {
         // A restore runs long, so no statement timeout; a lock timeout so one statement never waits for another session for ever.
-        c.execute("SET statement_timeout = 0; SET lock_timeout = '10s'").await.map_err(se)?;
+        c.execute(format!("SET statement_timeout = 0; SET lock_timeout = '{}s'", super::pg::WRITE_LOCK_SECS).as_str()).await.map_err(se)?;
     }
     let mut file = src.open().map_err(|x| format!("Could not read the file: {x}"))?;
     let mut sp = PgSplitter::new(false);

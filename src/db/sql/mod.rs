@@ -59,6 +59,7 @@ pub use structure::Structure;
 pub use pg_read::PgSchema;
 pub use relay::{Answer, Arg, Relay};
 pub use run::RunHandle;
+pub(crate) use pg::WRITE_LOCK_SECS;
 
 /// A server error worded for `db::explain`: the SQLSTATE, the message, the detail and hint when the server sends
 /// them, and where in the user's statement it points. `shift` is how many characters were put in front of the
