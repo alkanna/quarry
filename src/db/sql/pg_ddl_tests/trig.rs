@@ -503,3 +503,206 @@ fn a_trigger_is_created_and_undone_through_a_pooler() {
     assert_eq!(t.one("SHOW lock_timeout"), "0");
     assert_eq!(t.one("SHOW check_function_bodies"), "on");
 }
+
+#[test]
+fn a_when_with_spaces_line_breaks_and_a_backslash_survives_edits_of_the_rest() {
+    every_pg(|l, var| {
+        let t = fixture(l, var, "trgwhen", DDL);
+        t.sql("CREATE FUNCTION w_fn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$; \
+               CREATE TRIGGER sp BEFORE INSERT ON t FOR EACH ROW WHEN (NEW.name = 'x  y') EXECUTE FUNCTION w_fn(); \
+               CREATE TRIGGER nl AFTER INSERT ON t FOR EACH ROW WHEN (NEW.name = E'p\\nq') EXECUTE FUNCTION w_fn(); \
+               CREATE TRIGGER bs AFTER DELETE ON t FOR EACH ROW WHEN (OLD.name = 'a\\') EXECUTE FUNCTION w_fn()");
+        let def = |n: &str| t.one(&format!("SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname = '{n}' AND tgrelid = 't'::regclass"));
+        let before = world(&t);
+        // the double space stays when the timing changes
+        let a = apply(&t, edit(&t, "sp", |d| d.timing = "AFTER".into()));
+        assert!(def("sp").contains("AFTER INSERT") && def("sp").contains("'x  y'::text"), "{var}: {}", def("sp"));
+        undo(&t, a).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(world(&t), before, "{var}");
+        // a line break cannot be shown in the field: the trigger part is refused, the body and the switch still work
+        let err = run(&t, edit(&t, "nl", |d| d.timing = "BEFORE".into())).0.unwrap_err();
+        assert!(err.contains("several lines"), "{var}: {err}");
+        let a = apply(&t, edit(&t, "nl", |d| d.body = "BEGIN\n  RETURN NEW;\nEND -- x".into()));
+        undo(&t, a).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        let a = apply(&t, edit(&t, "nl", |d| d.pg.mode = "D".into()));
+        undo(&t, a).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        // a backslash in a literal blocks nothing: the server prints it as 'a\'::text
+        let a = apply(&t, edit(&t, "bs", |d| d.pg.mode = "D".into()));
+        undo(&t, a).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        let a = apply(&t, edit(&t, "bs", |d| d.body = "BEGIN\n  RETURN NEW;\nEND -- y".into()));
+        undo(&t, a).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        let a = apply(&t, edit(&t, "bs", |d| d.timing = "BEFORE".into()));
+        assert!(def("bs").contains("BEFORE DELETE") && def("bs").contains("'a\\'::text"), "{var}: {}", def("bs"));
+        undo(&t, a).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(world(&t), before, "{var}");
+    });
+}
+
+#[test]
+fn a_column_with_a_comma_in_its_name_keeps_a_body_only_save_from_rewriting_the_trigger() {
+    every_pg(|l, var| {
+        let t = fixture(l, var, "trgcomma", DDL);
+        t.sql("CREATE TABLE c (\"a,b\" integer, a integer, b integer); \
+               CREATE FUNCTION c_fn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$; \
+               CREATE TRIGGER ct BEFORE UPDATE OF \"a,b\" ON c FOR EACH ROW EXECUTE FUNCTION c_fn()");
+        let trig = || t.one("SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname = 'ct' AND tgrelid = 'c'::regclass");
+        let was = trig();
+        assert!(was.contains("UPDATE OF \"a,b\" ON"), "{var}: {was}");
+        let job = edit_on(&t, "c", "ct", |d| d.body = "BEGIN\n  RETURN NEW;\nEND -- x".into());
+        let (steps, _) = ddl_pg_trig::preview(&t.schema, "c", &job).unwrap();
+        assert_eq!(steps.len(), 1, "{var}: the trigger part is untouched, so only the function is replaced: {steps:?}");
+        let (res, undo_a, _) = run_on(t.l, &t.db, &t.schema, "c", job);
+        res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(trig(), was, "{var}");
+        t.undo(undo_a.unwrap()).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        // a change of the timing writes the name back whole
+        let (res, undo_a, _) = run_on(t.l, &t.db, &t.schema, "c", edit_on(&t, "c", "ct", |d| d.timing = "AFTER".into()));
+        res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(trig(), was.replace("BEFORE", "AFTER"), "{var}");
+        t.undo(undo_a.unwrap()).0.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(trig(), was, "{var}");
+    });
+}
+
+/// A schema made for one test, dropped with it.
+struct Extra<'a> {
+    t: &'a T<'a>,
+    name: String,
+}
+
+impl<'a> Extra<'a> {
+    fn new(t: &'a T<'a>, tag: &str) -> Extra<'a> {
+        let e = Extra { t, name: format!("{}_{tag}", t.schema) };
+        e.t.sql(&format!("DROP SCHEMA IF EXISTS {} CASCADE; CREATE SCHEMA {}", e.name, e.name));
+        e
+    }
+}
+
+impl Drop for Extra<'_> {
+    fn drop(&mut self) {
+        let _ = self.t.l.w.rt.block_on(async { sqlx::raw_sql(&format!("DROP SCHEMA IF EXISTS {} CASCADE", self.name)).execute(&self.t.pool).await });
+    }
+}
+
+#[test]
+fn a_function_in_another_schema_is_edited_dropped_and_put_back_where_it_was() {
+    every_pg(|l, var| {
+        let t = fixture(l, var, "trgother", DDL);
+        let x = Extra::new(&t, "fn");
+        t.sql(&format!("CREATE FUNCTION {s}.o_fn() RETURNS trigger LANGUAGE plpgsql AS $$\nBEGIN\n  RETURN NEW;\nEND\n$$; \
+                        CREATE TRIGGER ot BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION {s}.o_fn(); COMMENT ON FUNCTION {s}.o_fn() IS 'elsewhere'", s = x.name));
+        let funcs = || t.one(&format!("SELECT COALESCE(string_agg(pg_get_functiondef(p.oid) || '|' || COALESCE(obj_description(p.oid, 'pg_proc'), ''), E'\\n'), '') FROM pg_proc p WHERE p.pronamespace = '{}'::regnamespace", x.name));
+        let before = funcs();
+        let trig_before = world(&t);
+        assert!(before.contains(&format!("{}.o_fn()", x.name)), "{var}: {before}");
+        let a = apply(&t, edit(&t, "ot", |d| d.body = "BEGIN\n  NEW.qty := 5;\n  RETURN NEW;\nEND".into()));
+        assert_ne!(funcs(), before, "{var}");
+        undo(&t, a).0.unwrap_or_else(|e| panic!("{var}: {e}"));
+        assert_eq!(funcs(), before, "{var}");
+        // a changed trigger still runs the function in its own schema
+        let a = apply(&t, edit(&t, "ot", |d| d.timing = "AFTER".into()));
+        assert!(t.one("SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname = 'ot' AND tgrelid = 't'::regclass").contains(&format!("{}.o_fn()", x.name)), "{var}: {}", t.one("SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname = 'ot' AND tgrelid = 't'::regclass"));
+        undo(&t, a).0.unwrap_or_else(|e| panic!("{var}: {e}"));
+        let a = apply(&t, drop_job(&t, "ot"));
+        assert_eq!(funcs(), "", "{var}: the function went with its trigger");
+        undo(&t, a).0.unwrap_or_else(|e| panic!("{var}: {e}"));
+        assert_eq!(funcs(), before, "{var}");
+        assert_eq!(world(&t), trig_before, "{var}");
+    });
+}
+
+#[test]
+fn a_function_that_would_come_back_with_other_privileges_is_kept() {
+    every_pg(|l, var| {
+        let t = fixture(l, var, "trgdefacl", DDL);
+        t.sql("CREATE FUNCTION d_fn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$; CREATE TRIGGER dt BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION d_fn()");
+        let (steps, _) = ddl_pg_trig::preview(&t.schema, "t", &drop_job(&t, "dt")).unwrap();
+        assert_eq!(steps.len(), 2, "{var}: a function with no ACL and no default privileges comes back as it was");
+        // a function made now would get this ACL, while the one dropped has none
+        t.sql(&format!("ALTER DEFAULT PRIVILEGES IN SCHEMA {} GRANT EXECUTE ON FUNCTIONS TO PUBLIC", t.schema));
+        let (steps, warnings) = ddl_pg_trig::preview(&t.schema, "t", &drop_job(&t, "dt")).unwrap();
+        assert_eq!(steps.len(), 1, "{var}: {steps:?}");
+        assert!(warnings[0].contains("default privileges"), "{var}: {warnings:?}");
+    });
+}
+
+/// A login that owns `t` and the function in the extra schema but has no CREATE on either schema, which putting the function back needs.
+struct Owner<'a> {
+    t: &'a T<'a>,
+    name: String,
+}
+
+impl<'a> Owner<'a> {
+    fn new(t: &'a T<'a>, other: &str) -> Owner<'a> {
+        let o = Owner { t, name: format!("qtrgo_{}", std::process::id()) };
+        o.t.sql(&o.cleanup());
+        let (n, s) = (&o.name, &t.schema);
+        // a new owner has to hold CREATE on the schema while it is handed the object, and loses it after
+        o.t.sql(&format!("CREATE ROLE {n} LOGIN PASSWORD 'quarry'; GRANT USAGE, CREATE ON SCHEMA {s}, {other} TO {n}; \
+                          ALTER TABLE t OWNER TO {n}; ALTER FUNCTION {other}.o_fn() OWNER TO {n}; REVOKE CREATE ON SCHEMA {s}, {other} FROM {n}"));
+        o
+    }
+
+    fn cleanup(&self) -> String {
+        let n = &self.name;
+        format!("DO $$ BEGIN IF EXISTS (SELECT FROM pg_roles WHERE rolname = '{n}') THEN EXECUTE 'DROP OWNED BY {n}'; EXECUTE 'DROP ROLE {n}'; END IF; END $$")
+    }
+}
+
+impl Drop for Owner<'_> {
+    fn drop(&mut self) {
+        let _ = self.t.l.w.rt.block_on(async { sqlx::raw_sql(&self.cleanup()).execute(&self.t.pool).await });
+    }
+}
+
+#[test]
+fn a_function_the_role_cannot_create_again_is_kept_so_the_undo_of_a_drop_works() {
+    every_pg(|l, var| {
+        let t = fixture(l, var, "trgnocreate", DDL);
+        let x = Extra::new(&t, "fn");
+        t.sql(&format!("CREATE FUNCTION {s}.o_fn() RETURNS trigger LANGUAGE plpgsql AS $$\nBEGIN\n  RETURN NEW;\nEND\n$$; CREATE TRIGGER ot BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION {s}.o_fn()", s = x.name));
+        let owner = Owner::new(&t, &x.name);
+        let (scheme, rest) = l.uri.split_once("://").unwrap();
+        let (_, host) = rest.split_once('@').unwrap();
+        let r = crate::db::sql::testing::live_pg_at(format!("{scheme}://{}:quarry@{host}", owner.name));
+        let db = r.quarry_test();
+        let as_owner = |job: &dyn Fn(&Trigger) -> TrigJob| {
+            r.w.sql_structure(9, db.clone(), t.schema.clone(), "t".into());
+            let Msg::SqlStructure { res, .. } = r.next() else { panic!("expected SqlStructure") };
+            job(&res.unwrap().triggers.into_iter().find(|x| x.name == "ot").unwrap())
+        };
+        assert_eq!(t.one(&format!("SELECT has_schema_privilege('{}', '{}', 'CREATE')::text", owner.name, x.name)), "false", "{var}");
+        let drop = as_owner(&|tr| TrigJob::Drop(tr.clone()));
+        let (steps, warnings) = ddl_pg_trig::preview(&t.schema, "t", &drop).unwrap();
+        assert_eq!(steps.len(), 1, "{var}: the function stays: {steps:?}");
+        assert!(warnings[0].contains("CREATE"), "{var}: {warnings:?}");
+        // a new body is a CREATE OR REPLACE, which needs the same privilege: it is refused with the reason
+        let body = as_owner(&|tr| {
+            let mut d = ddl_pg_trig::def_of(tr);
+            d.body = "BEGIN\n  RETURN NEW;\nEND -- x".into();
+            TrigJob::Edit { was: tr.clone(), save: TrigSave { def: d, definer: None, order: None } }
+        });
+        let err = ddl_pg_trig::preview(&t.schema, "t", &body).unwrap_err();
+        assert!(err.contains("CREATE privilege"), "{var}: {err}");
+        let (res, undo_a, _) = run_on(&r, &db, &t.schema, "t", drop);
+        res.unwrap_or_else(|e| panic!("{var}: {e}"));
+        assert_eq!(t.one(&format!("SELECT count(*)::text FROM pg_proc WHERE proname = 'o_fn' AND pronamespace = '{}'::regnamespace", x.name)), "1", "{var}");
+        r.w.sql_undo(db.clone(), undo_a.unwrap(), Vec::new(), false);
+        let Msg::SqlAltered { res, .. } = r.next() else { panic!("expected SqlAltered") };
+        res.unwrap_or_else(|e| panic!("{var}: the undo: {e}"));
+        assert_eq!(t.one("SELECT count(*)::text FROM pg_trigger WHERE tgname = 'ot' AND tgrelid = 't'::regclass"), "1", "{var}");
+    });
+}
+
+#[test]
+fn a_trigger_on_a_view_cannot_be_switched_off() {
+    every_pg(|l, var| {
+        let t = fixture(l, var, "trgview", DDL);
+        t.sql("CREATE VIEW v AS SELECT * FROM t; CREATE FUNCTION v_fn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$; \
+               CREATE TRIGGER vt INSTEAD OF INSERT ON v FOR EACH ROW EXECUTE FUNCTION v_fn()");
+        let job = edit_on(&t, "v", "vt", |d| d.pg.mode = "D".into());
+        let err = ddl_pg_trig::preview(&t.schema, "v", &job).unwrap_err();
+        assert!(err.contains("view"), "{var}: {err}");
+        assert_eq!(t.one("SELECT tgenabled::text FROM pg_trigger WHERE tgname = 'vt' AND tgrelid = 'v'::regclass"), "O", "{var}");
+    });
+}

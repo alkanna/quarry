@@ -397,6 +397,7 @@ fn orders_structure() -> Structure {
                 func_owner: "app".into(),
                 func_mine: true,
                 func_can: true,
+                func_create: true,
                 ..Default::default()
             })),
             ..Default::default()

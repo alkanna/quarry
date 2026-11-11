@@ -152,8 +152,8 @@ macro_rules! seen_func {
 /// statement, since the function is separate), definer (empty), ord (the order among the triggers of one timing, which
 /// is by name), sql_mode (empty). Then what editing one needs: per_row, of_cols (a JSON array of the UPDATE OF columns),
 /// when_text, mode (tgenabled), comment, rel_kind, the function (fn_schema, fn_name, fn_lang, fn_src its body, fn_def,
-/// fn_others how many other triggers run it, fn_owner, fn_mine owned by the current role, fn_can the role may replace it,
-/// fn_secdef, fn_acl has privileges set, fn_comment, fn_ext belongs to an extension), trig_def, the two `seen_*` texts, and
+/// fn_others how many other triggers run it, fn_owner, fn_mine owned by the current role, fn_can the role may replace it (owner, and CREATE on its schema), fn_create CREATE on the function's schema,
+/// fn_secdef, fn_acl has privileges set or default privileges that a new function would get, fn_comment, fn_ext belongs to an extension), trig_def, the two `seen_*` texts, and
 /// refuse (why no change of the trigger can be written back) and no_rewrite (why it cannot be created again, though its
 /// function can still be edited).
 pub const TRIGGERS: &str = concat!("SELECT t.tgname::text AS name, CASE WHEN (t.tgtype::int & 2) = 2 THEN 'BEFORE' WHEN (t.tgtype::int & 64) = 64 THEN 'INSTEAD OF' ELSE 'AFTER' END AS timing, \
@@ -167,8 +167,8 @@ pub const TRIGGERS: &str = concat!("SELECT t.tgname::text AS name, CASE WHEN (t.
      t.tgenabled::text AS mode, COALESCE(obj_description(t.oid, 'pg_trigger'), '') AS comment, c.relkind::text AS rel_kind, \
      pn.nspname::text AS fn_schema, p.proname::text AS fn_name, l.lanname::text AS fn_lang, p.prosrc AS fn_src, pg_get_functiondef(p.oid) AS fn_def, \
      (SELECT count(*) FROM pg_trigger o WHERE o.tgfoid = p.oid AND o.oid <> t.oid)::bigint AS fn_others, \
-     pg_get_userbyid(p.proowner)::text AS fn_owner, (pg_get_userbyid(p.proowner) = current_user)::int AS fn_mine, pg_has_role(p.proowner, 'USAGE')::int AS fn_can, \
-     p.prosecdef::int AS fn_secdef, (p.proacl IS NOT NULL)::int AS fn_acl, COALESCE(obj_description(p.oid, 'pg_proc'), '') AS fn_comment, \
+     pg_get_userbyid(p.proowner)::text AS fn_owner, (pg_get_userbyid(p.proowner) = current_user)::int AS fn_mine, (pg_has_role(p.proowner, 'USAGE') AND has_schema_privilege(p.pronamespace, 'CREATE'))::int AS fn_can, has_schema_privilege(p.pronamespace, 'CREATE')::int AS fn_create, \
+     p.prosecdef::int AS fn_secdef, (p.proacl IS NOT NULL OR EXISTS (SELECT 1 FROM pg_default_acl d WHERE d.defaclobjtype = 'f' AND d.defaclrole = p.proowner AND d.defaclnamespace IN (0, p.pronamespace)))::int AS fn_acl, COALESCE(obj_description(p.oid, 'pg_proc'), '') AS fn_comment, \
      EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')::int AS fn_ext, \
      pg_get_triggerdef(t.oid, false) AS trig_def, ", seen_trig!(), " AS seen_trig, ",
      seen_func!("SELECT count(*) FROM pg_trigger o WHERE o.tgfoid = p.oid AND o.oid <> t.oid"), " AS seen_func, \
@@ -176,7 +176,8 @@ pub const TRIGGERS: &str = concat!("SELECT t.tgname::text AS name, CASE WHEN (t.
           WHEN t.tgparentid <> 0 THEN 'It is inherited from a parent table, so it can only be changed there.' \
           WHEN c.relkind = 'p' THEN 'The table is partitioned, so its triggers are cloned to its partitions, which are not rewritten here.' ELSE '' END AS refuse, \
      CASE WHEN t.tgnargs > 0 THEN 'It passes arguments to its function, which are not rewritten here.' \
-          WHEN t.tgoldtable IS NOT NULL OR t.tgnewtable IS NOT NULL THEN 'It reads transition tables, which are not rewritten here.' ELSE '' END AS no_rewrite \
+          WHEN t.tgoldtable IS NOT NULL OR t.tgnewtable IS NOT NULL THEN 'It reads transition tables, which are not rewritten here.' \
+          WHEN position(E'\\n' in COALESCE(substring(pg_get_triggerdef(t.oid, true) from ' FOR EACH [A-Z]+ WHEN [(](.*)[)] EXECUTE [A-Z]+ '), '')) > 0 THEN 'Its WHEN condition spans several lines, which the one-line field cannot show.' ELSE '' END AS no_rewrite \
      FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace \
      JOIN pg_proc p ON p.oid = t.tgfoid JOIN pg_namespace pn ON pn.oid = p.pronamespace JOIN pg_language l ON l.oid = p.prolang \
      WHERE NOT t.tgisinternal AND n.nspname = $1 AND c.relname = $2 ORDER BY 2, 3, 6");

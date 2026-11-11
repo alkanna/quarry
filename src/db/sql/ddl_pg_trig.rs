@@ -65,7 +65,9 @@ struct Head {
     mode: String,
 }
 
-fn head(d: &TrigDef) -> Result<Head, String> {
+/// `read_when` is the WHEN of the trigger being edited, as the server printed it: that text is not checked again, since its
+/// own escapes can look unclosed to the scan (a backslash before a quote in a literal) and would block every edit.
+fn head(d: &TrigDef, read_when: Option<&str>) -> Result<Head, String> {
     name_ok(&d.name, "A trigger")?;
     let timing = d.timing.trim().to_ascii_uppercase();
     if !TIMINGS.contains(&timing.as_str()) {
@@ -104,7 +106,7 @@ fn head(d: &TrigDef) -> Result<Head, String> {
             return Err("An INSTEAD OF trigger cannot have a WHEN condition.".into());
         }
     }
-    if !when.is_empty() {
+    if !when.is_empty() && read_when != Some(when.as_str()) {
         check_cond_pg(&when)?;
     }
     if !matches!(d.pg.mode.as_str(), "O" | "D" | "R" | "A") {
@@ -230,18 +232,13 @@ pub struct PgPlan {
     pub label: String,
 }
 
-/// A WHEN condition with its whitespace collapsed: the server deparses it over several lines, and a change of layout is not a change.
-fn norm(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 fn others(n: u64) -> String {
     if n == 1 { "1 other trigger".into() } else { format!("{n} other triggers") }
 }
 
 /// Whether the trigger part of the draft is not what was read: only then is the trigger dropped and created again.
 fn trigger_changed(h: &Head, pg: &PgTrig, was: &super::structure::Trigger) -> bool {
-    !was.timing.eq_ignore_ascii_case(&h.timing) || canonical(&events_of(&was.event)) != canonical(&h.events) || pg.of_cols != h.cols || pg.per_row != h.per_row || norm(&pg.when) != norm(&h.when)
+    !was.timing.eq_ignore_ascii_case(&h.timing) || canonical(&events_of(&was.event)) != canonical(&h.events) || pg.of_cols != h.cols || pg.per_row != h.per_row || pg.when.trim() != h.when
 }
 
 /// The statements for a job, written for the table `schema`.`table`, or why it cannot be written.
@@ -254,7 +251,7 @@ pub fn plan(schema: &str, table: &str, job: &TrigJob) -> Result<PgPlan, String> 
 }
 
 fn plan_create(schema: &str, table: &str, d: &TrigDef) -> Result<PgPlan, String> {
-    let h = head(d)?;
+    let h = head(d, None)?;
     let f = if d.pg.func.trim().is_empty() { func_name(table, &h.name) } else { d.pg.func.trim().to_string() };
     name_ok(&f, "The function")?;
     let mut steps = vec![new_function(schema, &f, &d.body)?, trigger_stmt(&h, schema, table, schema, &f)];
@@ -275,16 +272,24 @@ fn plan_edit(schema: &str, table: &str, was: &super::structure::Trigger, d: &Tri
     if d.name != was.name {
         return Err("A trigger keeps its name here: create the new one and drop this one.".into());
     }
-    let h = head(d)?;
+    let mut h = head(d, Some(pg.when.trim()))?;
+    // A column name with a comma in it cannot be typed in the list, so an untouched list keeps the names as the server has them.
+    if d.pg.of_cols == pg.of_cols.join(", ") {
+        h.cols = pg.of_cols.clone();
+    }
     let fn_changed = d.body.trim() != pg.src.trim();
     if fn_changed && pg.lang != "plpgsql" {
         return Err(format!("The function {} is written in {}, and only plpgsql functions are rewritten here. Its trigger part can still be changed.", func_q(&pg.func_schema, &pg.func), pg.lang));
     }
     if fn_changed && !pg.func_can {
-        return Err(format!("The function {} is owned by {}, and only its owner can replace it.", func_q(&pg.func_schema, &pg.func), pg.func_owner));
+        let f = func_q(&pg.func_schema, &pg.func);
+        return Err(if pg.func_create { format!("The function {f} is owned by {}, and only its owner can replace it.", pg.func_owner) } else { format!("Replacing the function {f} needs the CREATE privilege on the schema {}, which this role lacks.", q(&pg.func_schema)) });
     }
     let trig_changed = trigger_changed(&h, pg, was);
     let mode_changed = h.mode != pg.mode;
+    if mode_changed && pg.rel_kind == "v" {
+        return Err("The server does not let a trigger on a view be disabled or enabled. Nothing was changed.".into());
+    }
     if !fn_changed && !trig_changed && !mode_changed {
         return Err("Nothing to save.".into());
     }
@@ -359,7 +364,9 @@ fn plan_drop(schema: &str, table: &str, was: &super::structure::Trigger) -> Resu
     } else if !pg.func_mine {
         Some(format!("is owned by {}", pg.func_owner))
     } else if pg.func_acl {
-        Some("has privileges granted on it that would be lost".to_string())
+        Some("has privileges granted on it, or default privileges apply to new functions, so it would not come back as it was".to_string())
+    } else if !pg.func_create {
+        Some(format!("cannot be created again by this role, which lacks CREATE on the schema {}", q(&pg.func_schema)))
     } else if pg.func_ext {
         Some("belongs to an extension".to_string())
     } else {
@@ -385,7 +392,7 @@ fn plan_drop(schema: &str, table: &str, was: &super::structure::Trigger) -> Resu
     if !pg.comment.is_empty() {
         back.push(trigger_comment(schema, table, &was.name, &pg.comment)?);
     }
-    let undo = PgUndo { steps: back, exclusive: true, trig: was.name.clone(), func_schema: pg.func_schema.clone(), func: pg.func.clone(), expect: Seen::default(), said: if keep.is_none() { "Put the dropped trigger and its function back".into() } else { "Put the dropped trigger back".into() } };
+    let undo = PgUndo { steps: back, exclusive: false, trig: was.name.clone(), func_schema: pg.func_schema.clone(), func: pg.func.clone(), expect: Seen::default(), said: if keep.is_none() { "Put the dropped trigger and its function back".into() } else { "Put the dropped trigger back".into() } };
     Ok(PgPlan {
         steps,
         warnings,
@@ -569,7 +576,7 @@ pub fn def_of(t: &super::structure::Trigger) -> TrigDef {
         timing: t.timing.to_ascii_uppercase(),
         event: canonical(&events_of(&t.event)),
         body: pg.src.clone(),
-        pg: PgDef { per_row: pg.per_row, of_cols: pg.of_cols.join(", "), when: norm(&pg.when), mode: pg.mode.clone(), func: pg.func.clone() },
+        pg: PgDef { per_row: pg.per_row, of_cols: pg.of_cols.join(", "), when: pg.when.clone(), mode: pg.mode.clone(), func: pg.func.clone() },
     }
 }
 
@@ -597,6 +604,7 @@ mod tests {
             func_secdef: true,
             func_mine: true,
             func_can: true,
+            func_create: true,
             trig_def: "CREATE TRIGGER orders_audit BEFORE INSERT ON app.orders FOR EACH ROW EXECUTE FUNCTION orders_audit_fn()".into(),
             seen_trig: "t".into(),
             seen_func: "f".into(),
@@ -772,5 +780,64 @@ mod tests {
         let p = plan("s", "t", &TrigJob::Create(TrigSave { def: d, definer: None, order: None })).unwrap();
         assert!(p.steps[1].contains(" BEFORE INSERT OR DELETE OR UPDATE OF \"a\" ON "), "{}", p.steps[1]);
         assert_eq!(canonical(&events_of("DELETE OR INSERT")), "INSERT OR DELETE");
+    }
+
+    #[test]
+    fn a_when_keeps_its_literals_exactly_when_another_part_changes() {
+        let mut t = live();
+        t.pg.as_mut().unwrap().when = "new.note = 'x  y'::text".into();
+        assert_eq!(def_of(&t).pg.when, "new.note = 'x  y'::text");
+        assert_eq!(edit(&t, |_| {}).unwrap_err(), "Nothing to save.", "an untouched condition is not a change");
+        let p = edit(&t, |d| d.timing = "AFTER".into()).unwrap();
+        assert!(p.steps[1].contains(" WHEN (new.note = 'x  y'::text) "), "{}", p.steps[1]);
+        let p = edit(&t, |d| d.pg.when = "new.note = 'x y'::text".into()).unwrap();
+        assert!(p.steps.len() == 2, "a changed condition is a change, even when it differs only inside a literal");
+        // a condition with a line break cannot be shown in the one-line field, so the trigger is not recreated from it
+        t.pg.as_mut().unwrap().no_rewrite = "Its WHEN condition spans several lines, which the one-line field cannot show.".into();
+        assert!(edit(&t, |d| d.timing = "AFTER".into()).unwrap_err().contains("spans several lines"));
+    }
+
+    #[test]
+    fn a_when_with_a_backslash_does_not_block_other_edits() {
+        let mut t = live();
+        t.pg.as_mut().unwrap().when = "new.note = 'a\\'::text".into();
+        assert!(edit(&t, |d| d.body = "BEGIN\n  RETURN NEW;\nEND -- x".into()).is_ok());
+        assert!(edit(&t, |d| d.pg.mode = "D".into()).is_ok());
+        let p = edit(&t, |d| d.timing = "AFTER".into()).unwrap();
+        assert!(p.steps[1].contains("WHEN (new.note = 'a\\'::text)"), "{}", p.steps[1]);
+        // a condition the person typed is still checked
+        assert!(edit(&t, |d| d.pg.when = "new.note = 'a".into()).is_err());
+    }
+
+    #[test]
+    fn a_column_name_with_a_comma_is_kept_as_one_name() {
+        let mut t = live();
+        t.event = "UPDATE".into();
+        t.pg.as_mut().unwrap().of_cols = vec!["a,b".into()];
+        let p = edit(&t, |d| d.body = "BEGIN\n  RETURN NEW;\nEND -- x".into()).unwrap();
+        assert_eq!(p.steps.len(), 1, "only the function changes, the trigger is not recreated");
+        let p = edit(&t, |d| d.timing = "AFTER".into()).unwrap();
+        assert!(p.steps[1].contains("UPDATE OF \"a,b\" ON"), "{}", p.steps[1]);
+    }
+
+    #[test]
+    fn a_trigger_on_a_view_cannot_be_disabled() {
+        let mut t = live();
+        t.pg.as_mut().unwrap().rel_kind = "v".into();
+        assert!(edit(&t, |d| d.pg.mode = "D".into()).unwrap_err().contains("view"));
+        assert!(edit(&t, |d| d.body = "BEGIN\n  RETURN NEW;\nEND -- x".into()).is_ok());
+    }
+
+    #[test]
+    fn a_function_the_role_cannot_create_again_stays_when_its_trigger_is_dropped() {
+        let mut t = live();
+        t.pg.as_mut().unwrap().func_create = false;
+        t.pg.as_mut().unwrap().func_can = false;
+        let p = plan("app", "orders", &TrigJob::Drop(t.clone())).unwrap();
+        assert_eq!(p.steps.len(), 1);
+        assert!(p.warnings[0].contains("stays") && p.warnings[0].contains("CREATE"), "{:?}", p.warnings);
+        assert!(edit(&t, |d| d.body = "BEGIN END".into()).unwrap_err().contains("CREATE privilege"));
+        let ok = plan("app", "orders", &TrigJob::Drop(live())).unwrap();
+        assert!(!ok.undo.exclusive, "the undo of a drop only creates, alters and comments");
     }
 }

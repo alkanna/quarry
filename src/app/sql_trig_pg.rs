@@ -17,6 +17,10 @@ pub(super) struct Env<'a> {
 
 /// The UPDATE OF list names a column the table does not have: PostgreSQL would refuse it, and the message names it.
 pub(super) fn column_problem(def: &TrigDef, cols: &[String]) -> Option<String> {
+    // A column whose own name holds a comma is typed as that name, which the split below would take for two.
+    if cols.iter().any(|c| *c == def.pg.of_cols) {
+        return None;
+    }
     cols_of(&def.pg.of_cols).into_iter().find(|c| !cols.contains(c)).map(|c| format!("The table has no column {c}."))
 }
 
@@ -79,7 +83,10 @@ pub(super) fn head(ui: &mut egui::Ui, def: &mut TrigDef, env: &Env) {
         ui.label(RichText::new("Enabled").color(MUTED()));
         let was = env.live.map_or("O", |l| l.mode.as_str());
         let mut on = def.pg.mode != "D";
-        ui.add_enabled_ui(editable, |ui| toggle(ui, &mut on)).inner.widget_info(|| egui::WidgetInfo::selected(egui::Role::Switch, editable, on, "Trigger enabled"));
+        // The server refuses ALTER TABLE .. DISABLE TRIGGER on a view, so its INSTEAD OF triggers are always enabled.
+        let switch = editable && env.live.map_or(true, |l| l.rel_kind != "v");
+        let r = ui.add_enabled_ui(switch, |ui| toggle(ui, &mut on)).inner.on_disabled_hover_text("PostgreSQL cannot disable or enable a trigger on a view.");
+        r.widget_info(|| egui::WidgetInfo::selected(egui::Role::Switch, switch, on, "Trigger enabled"));
         // A trigger that fires only on a replica or always keeps that when it is turned on again.
         def.pg.mode = if !on { "D".into() } else if matches!(was, "R" | "A") { was.into() } else { "O".into() };
         if matches!(def.pg.mode.as_str(), "R" | "A") {

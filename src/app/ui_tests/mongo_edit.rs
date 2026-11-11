@@ -30,6 +30,21 @@ impl Fixture {
         Some(Fixture { rt, coll, name })
     }
 
+    /// Steps the UI until the server holds `want`. The undo entry leaves the list when the undo is sent, not when the server has
+    /// applied it, so reading the collection right after the click races a loaded machine.
+    fn expect(&self, ui: &mut UiApp, want: Vec<Document>) {
+        let t = std::time::Instant::now();
+        loop {
+            ui.h.step();
+            let got = self.all();
+            if got == want {
+                return;
+            }
+            assert!(t.elapsed() < LIMIT, "the server holds {got:?}, wanted {want:?}; last error: {}", ui.app().last_problem());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     fn all(&self) -> Vec<Document> {
         self.rt.block_on(async { self.coll.find(doc! {}).sort(doc! { "_id": 1 }).await.unwrap().try_collect().await.unwrap() })
     }
@@ -200,8 +215,7 @@ fn undo_an_edit() {
     assert_eq!(f.all()[0].get_str("name"), Ok("changed"));
     ui.wait("the undo entry", |a| a.undo.len() == 1);
     ui.undo_latest();
-    ui.wait("the undo to finish", |a| a.t().is_some_and(|t| !t.loading) && a.undo.is_empty());
-    assert_eq!(f.all(), seed());
+    f.expect(&mut ui, seed());
 }
 
 #[test]
@@ -215,7 +229,7 @@ fn undo_a_delete() {
     ui.wait("the undo entry", |a| a.undo.len() == 1);
     ui.undo_latest();
     ui.waits_for_rows(3);
-    assert_eq!(f.all(), seed());
+    f.expect(&mut ui, seed());
 }
 
 #[test]
@@ -230,7 +244,7 @@ fn undo_deleting_several_documents() {
     ui.wait("the undo entry", |a| a.undo.len() == 1);
     ui.undo_latest();
     ui.waits_for_rows(3);
-    assert_eq!(f.all(), seed());
+    f.expect(&mut ui, seed());
 }
 
 #[test]
@@ -247,7 +261,7 @@ fn undo_an_insert() {
     ui.wait("the undo entry", |a| a.undo.len() == 1);
     ui.undo_latest();
     ui.waits_for_rows(3);
-    assert_eq!(f.all(), seed());
+    f.expect(&mut ui, seed());
 }
 
 #[test]

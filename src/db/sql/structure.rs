@@ -187,6 +187,8 @@ pub struct PgTrig {
     pub func_owner: String,
     pub func_mine: bool,
     pub func_can: bool,
+    /// Whether the role has CREATE on the function's schema, which putting a dropped function back needs.
+    pub func_create: bool,
     pub func_secdef: bool,
     pub func_acl: bool,
     pub func_comment: String,
@@ -457,6 +459,7 @@ fn pg_trigger(r: &SqlRow) -> Option<Box<PgTrig>> {
         func_owner: s(r, "fn_owner"),
         func_mine: flag(r, "fn_mine"),
         func_can: flag(r, "fn_can"),
+        func_create: flag(r, "fn_create"),
         func_secdef: flag(r, "fn_secdef"),
         func_acl: flag(r, "fn_acl"),
         func_comment: s(r, "fn_comment"),
