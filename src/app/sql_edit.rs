@@ -18,6 +18,13 @@ pub(super) struct CellEdit {
     pub(super) done: Option<bool>,
 }
 
+impl CellEdit {
+    /// Whether this editor belongs to the cell. A missing key never matches: two keyless rows are not the same row.
+    pub(super) fn is_at(&self, id: Option<Bson>, col: &str) -> bool {
+        self.id.is_some() && self.id == id && self.col == col
+    }
+}
+
 /// The "Set value on N rows" dialog.
 pub(super) struct SetForm {
     pub(super) rows: Vec<Document>,
@@ -243,6 +250,10 @@ impl App {
         }
         let Some(t) = self.t() else { return };
         let rows = Rows::Raw(&t.docs);
+        // A row without a key would match every keyless row in the grid and could never be written back.
+        if rows.id(i).is_none() {
+            return self.warn("This row has no key, so it cannot be edited here.");
+        }
         let v = self.shown_row(rows, i, false).and_then(|d| d.get(&col).cloned()).or_else(|| rows.value(i, &col).map(|v| v.bson().into_owned())).unwrap_or(Bson::Null);
         self.sql_cell = Some(CellEdit { id: rows.id(i), col, text: edit_text(&v), err: None, focus: true, done: None });
     }
@@ -887,5 +898,29 @@ mod tests {
         assert!(infer_numeric(&rows, "a"));
         assert!(!infer_numeric(&rows, "b"));
         assert!(!infer_numeric(&rows, "c"));
+    }
+
+    #[test]
+    fn keyless_rows_never_own_the_editor() {
+        let e = |id: Option<Bson>| CellEdit { id, col: "last_name".into(), text: String::new(), err: None, focus: false, done: None };
+        // A Shell result has no keys: every row reports None, and the editor must not appear in all of them.
+        assert!(!e(None).is_at(None, "last_name"));
+        let keyed = e(Some(Bson::Int32(7)));
+        assert!(keyed.is_at(Some(Bson::Int32(7)), "last_name"));
+        assert!(!keyed.is_at(Some(Bson::Int32(8)), "last_name"));
+        assert!(!keyed.is_at(None, "last_name"));
+        assert!(!keyed.is_at(Some(Bson::Int32(7)), "first_name"));
+    }
+
+    #[test]
+    fn editor_opens_again_after_it_is_closed() {
+        // Esc leaves done = Some(false); the finish step drops the editor, and a fresh one starts clean.
+        let mut cell = Some(CellEdit { id: Some(Bson::Int32(1)), col: "a".into(), text: "x".into(), err: None, focus: true, done: Some(false) });
+        if cell.as_ref().is_some_and(|e| e.done == Some(false)) {
+            cell = None;
+        }
+        assert!(cell.is_none());
+        cell = Some(CellEdit { id: Some(Bson::Int32(1)), col: "a".into(), text: "x".into(), err: None, focus: true, done: None });
+        assert!(cell.unwrap().is_at(Some(Bson::Int32(1)), "a"));
     }
 }

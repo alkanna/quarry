@@ -186,7 +186,8 @@ impl App {
         if ctx.any_popup_open() || !ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
             return;
         }
-        if self.inline.take().is_some() || self.new_field.take().is_some() {
+        // A cell editor that no row draws would otherwise outlive every Esc and block the next edit.
+        if self.inline.take().is_some() || self.new_field.take().is_some() || self.sql_cell.take().is_some() {
             return;
         }
         if let Some(t) = self.tm() {
@@ -217,6 +218,8 @@ impl App {
         let Some(t) = self.tm().filter(|t| t.view != v) else { return };
         t.view = v;
         t.selected = None;
+        // The editor belongs to the Content grid; another view must never inherit it.
+        self.sql_cell = None;
         self.reset_doc_state();
         if v == View::Indexes {
             self.load_indexes();

@@ -52,6 +52,8 @@ impl App {
 
     /// Makes tab `i` current without touching the back and forward history.
     fn show_tab(&mut self, i: usize) {
+        // Its row key means nothing in another tab's rows.
+        self.sql_cell = None;
         self.cur = i;
         let Some(sel) = self.tabs.get(i).map(|t| t.sel.clone()) else { return };
         if let Some(id) = follow_conn(&sel, |id| self.conn(id).is_some()) {

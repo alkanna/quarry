@@ -450,6 +450,8 @@ impl App {
         let sql_sort = self.t().filter(|t| t.sql.is_some()).map(|t| t.sort_txt.clone());
         let sql = sql_sort.is_some();
         let group_cols: Vec<String> = self.t().and_then(|t| t.sql.as_ref()).filter(|s| sql && s.matched.is_some()).map(|s| super::sql_bar::group_names(s)).unwrap_or_default();
+        // A Shell result shows the same tab but is not the table's rows: its indexes and keys mean nothing to the editor.
+        let sql_rows = sql && !agg;
         let sql_grouped = sql && self.t().and_then(|t| t.sql.as_ref()).is_some_and(|s| s.matched.is_some());
         let sql_dialect = self.sql_dialect();
         let dir_of = |c: &str| match &sql_sort {
@@ -472,13 +474,13 @@ impl App {
         let sql_why: Vec<Option<String>> = cols
             .iter()
             .map(|c| {
-                if !sql {
+                if !sql_rows {
                     return None;
                 }
                 self.sql_edit_block().or_else(|| self.sql_col_block(c)).map(String::from).or_else(|| locked.then(|| "Read-only connection. Double-click to unlock writes and edit.".to_string()))
             })
             .collect();
-        let sql_edit_ok: Vec<bool> = cols.iter().map(|c| sql && self.sql_edit_block().is_none() && self.sql_col_block(c).is_none()).collect();
+        let sql_edit_ok: Vec<bool> = cols.iter().map(|c| sql_rows && self.sql_edit_block().is_none() && self.sql_col_block(c).is_none()).collect();
         let sql_nullable: Vec<bool> = cols.iter().map(|c| self.t().and_then(|t| t.sql.as_ref()).and_then(|s| s.cols.iter().find(|k| &k.name == c)).is_some_and(|k| k.nullable)).collect();
         let mut sql_acts: Vec<(usize, String, CellAct)> = Vec::new();
         // A column that belongs to a foreign key gets a link that opens the row it points to.
@@ -630,7 +632,7 @@ impl App {
                                 ui.painter().rect_filled(cell, 0, tint(WARNING(), 34));
                                 ui.painter().rect_filled(egui::Rect::from_min_size(cell.min, egui::vec2(2.0, cell.height())), 0, WARNING());
                             }
-                            if sql && self.sql_cell.as_ref().is_some_and(|e| e.id == docs.id(i) && e.col == *c) {
+                            if sql_rows && self.sql_cell.as_ref().is_some_and(|e| e.is_at(docs.id(i), c)) {
                                 self.sql_cell_editor(ui, cell);
                                 x += w;
                                 continue;
@@ -786,7 +788,7 @@ impl App {
             self.sql_drill(i);
         }
         let fk_row = fk_open.and_then(|(i, k)| self.shown_row(docs, i, agg).or_else(|| docs.owned(i)).map(|d| (k, d)));
-        if let (Some((i, c)), true) = (&edit_cell, sql) {
+        if let (Some((i, c)), true) = (&edit_cell, sql_rows) {
             self.sql_open_cell(*i, c.clone());
         }
         if sql {
