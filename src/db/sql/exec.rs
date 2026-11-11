@@ -401,13 +401,7 @@ impl Conn {
     pub async fn begin_write(&mut self, db: &Db) -> Result<Tx<'_>, sqlx::Error> {
         match self {
             Conn::My(c) => c.begin().await.map(Tx::My),
-            Conn::Pg(c) => {
-                // Behind a pooler the session carries none of the Advanced tab's settings, so they follow the writer's own.
-                let extra = db.pg_writer_locals();
-                let sep = if extra.is_empty() { "" } else { "; " };
-                let tx = c.begin_with(format!("BEGIN READ WRITE; {}{sep}{extra}", super::pg::write_locals())).await?;
-                Ok(Tx::Pg(tx))
-            }
+            Conn::Pg(c) => Ok(Tx::Pg(c.begin_with(db.pg_begin_write().to_string()).await?)),
         }
     }
 
@@ -484,6 +478,11 @@ type PgQuery<'q> = sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArgu
 /// answers `prepared statement "sqlx_s_1" does not exist` or `already exists` (another client may own that name).
 /// `statement_cache_capacity(0)` would not help: sqlx then still names the statement and never closes it. The cost in
 /// normal mode is one Parse per call, which is nothing next to the round trip.
+/// The SQLSTATE of a PostgreSQL error, which wording and refusals go by because the server's sentence follows its lc_messages.
+pub(super) fn sql_state(err: &sqlx::Error) -> Option<String> {
+    err.as_database_error().and_then(|d| d.code().map(|c| c.to_string()))
+}
+
 pub(super) fn bound_pg<'q>(sql: &'q str, params: &'q [Param]) -> PgQuery<'q> {
     let mut q = sqlx::query(sql).persistent(false);
     for p in params {

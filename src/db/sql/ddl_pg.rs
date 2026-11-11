@@ -14,25 +14,27 @@
 //! table's lock, reads the touched columns and indexes again and refuses to run when another session changed them.
 
 use super::ddl::{fk_line, orphan_row, orphan_sample_sql, orphans_sql, ref_state, same_name, snapshot, touched, undo_action, undo_loss, AlterUndo, Change, ColDef, Dv, Expect, IndexDef, IndexKind, Mode, Plan, Pos, RefCheck, Sim, ORPHAN_SAMPLE};
-use super::exec::Tx;
+use super::exec::{sql_state, Tx};
 use super::lex::{every_reading, Tok};
 use super::structure::{col_deps, columns, constraints, foreign_keys, indexes, load, Column, ForeignKey, Structure};
-use super::value::{lit, Param};
+use super::value::{lit, pg_lit, Param};
 use super::write::PgIds;
+use super::pg::LOCK_WAIT_SECS;
 use super::{se, write, Db, Dialect};
 use crate::db::{Msg, Res, UndoAction, UndoKind, Worker};
 use std::time::Instant;
 
 const D: Dialect = Dialect::Postgres;
 
-/// How long the plan waits for the table's lock. A session that holds it longer is named in the error, and nothing ran.
-pub(super) const LOCK_WAIT: &str = "3s";
-
 /// PostgreSQL cuts a longer name without a word, so the staged name would not be the one the server keeps.
 const MAX_NAME: usize = 63;
 
 pub(super) fn q(name: &str) -> String {
     D.quote_ident(name)
+}
+
+pub(super) fn qn(schema: &str, name: &str) -> String {
+    D.qualified(schema, name)
 }
 
 pub(super) fn name_ok(name: &str, what: &str) -> Result<(), String> {
@@ -137,7 +139,7 @@ fn scan(s: &str, what: Text) -> Result<(), String> {
 }
 
 /// A default expression typed by the person must stay one expression. See `scan`.
-pub fn check_expr_pg(s: &str) -> Result<(), String> {
+pub(super) fn check_expr_pg(s: &str) -> Result<(), String> {
     scan(s, Text::Expr)
 }
 
@@ -147,7 +149,7 @@ pub fn check_cond_pg(s: &str) -> Result<(), String> {
 }
 
 /// A column type typed by the person must stay one type name. See `scan`.
-pub fn check_type_pg(s: &str) -> Result<(), String> {
+pub(super) fn check_type_pg(s: &str) -> Result<(), String> {
     scan(s, Text::Type)
 }
 
@@ -258,7 +260,7 @@ fn collation_ok(c: &str) -> Result<(), String> {
 }
 
 /// Whether a column of this type can be an identity or a serial.
-pub(super) fn identity_type(ty: &str) -> bool {
+pub fn identity_type(ty: &str) -> bool {
     serial_of(ty).is_some()
 }
 
@@ -344,7 +346,7 @@ pub(super) fn comment_stmt(on: &str, text: &str) -> Result<String, String> {
     if text.contains('\0') {
         return Err("A comment cannot hold a NUL character.".into());
     }
-    Ok(format!("COMMENT ON {on} IS {}", if text.is_empty() { "NULL".to_string() } else { lit(text, false) }))
+    Ok(format!("COMMENT ON {on} IS {}", if text.is_empty() { "NULL".to_string() } else { pg_lit(text) }))
 }
 
 /// Moves the identity sequence of `col` to the largest value the column holds. A column with no value of 1 or more keeps
@@ -705,7 +707,7 @@ pub(super) fn plan(table: &str, st: &Structure, changes: &[Change]) -> Result<Pl
     let all = changes.iter().any(|c| matches!(c, Change::Drop(_))).then(|| table_state(st));
     let (refs, orphans) = others(&Sim::of(st), schema, changes);
     let expect = Expect { snap: snapshot(st, &cols, &idx, &fks), cols, idx, fks, all, types, refs, orphans, own_share: shares_only(changes) };
-    Ok(Plan { sql: super::ddl::script(&steps), steps, undo: undo_of(schema, table, st, changes), expect: Some(expect) })
+    Ok(Plan { steps, undo: undo_of(schema, table, st, changes), expect: Some(expect) })
 }
 
 /// Every index, constraint and dependent of the table in one comparable list.
@@ -774,25 +776,157 @@ pub(super) async fn exec(tx: &mut Tx<'_>, db: &Db, schema: &str, sql: &str) -> R
     res.map(|_| ())
 }
 
-pub(super) fn sql_state(err: &sqlx::Error) -> Option<String> {
-    err.as_database_error().and_then(|d| d.code().map(|c| c.to_string()))
+/// A `SET LOCAL` through `exec`, so the status log shows it, and it ends with the transaction.
+pub(super) async fn set_local(tx: &mut Tx<'_>, db: &Db, schema: &str, name: &str, value: &str) -> Result<(), sqlx::Error> {
+    exec(tx, db, schema, &format!("SET LOCAL {name} = '{}'", value.replace('\'', "''"))).await
 }
+
+/// The search_path the plan was made under, for the read and for every statement after it, so a type or function outside the
+/// schema is qualified in the one and found by the other.
+pub(super) async fn set_path(tx: &mut Tx<'_>, db: &Db, schema: &str) -> Result<(), sqlx::Error> {
+    exec(tx, db, schema, &db.pg_set_path(schema)).await
+}
+
+/// The lock timeout of a structure change, a trigger edit or a create: a session that holds the lock longer is named in the
+/// error, and nothing ran.
+pub(super) async fn set_lock_wait(tx: &mut Tx<'_>, db: &Db, schema: &str) -> Result<(), sqlx::Error> {
+    set_local(tx, db, schema, "lock_timeout", &format!("{LOCK_WAIT_SECS}s")).await
+}
+
+/// The error for a COMMIT that failed. The connection can drop after the server committed, so it does not say that nothing
+/// changed. `next` is what to do about it, which depends on the screen the change came from.
+pub(super) fn commit_unknown(err: sqlx::Error, next: &str) -> String {
+    format!("{}. The server did not confirm the commit, so the change may or may not have been applied. {next}", se(err))
+}
+
+pub(super) const RELOAD_STRUCTURE: &str = "The structure is being reloaded: check it before running the change again.";
 
 pub(super) fn lock_error(err: &sqlx::Error, name: &str) -> Option<String> {
     // 55P03 is lock_not_available, which lock_timeout raises.
-    (sql_state(err)? == "55P03").then(|| format!("The table {name} is locked by another session that did not let go within {LOCK_WAIT}. Nothing was changed."))
+    (sql_state(err)? == "55P03").then(|| crate::db::errors::lock_held(name, LOCK_WAIT_SECS))
 }
 
-/// Whether the role may take the explicit lock the plan wants on a table. LOCK TABLE in any mode but ACCESS SHARE and ROW
-/// EXCLUSIVE needs UPDATE, DELETE or TRUNCATE (MAINTAIN from PostgreSQL 17), where ADD FOREIGN KEY needs only REFERENCES on the
-/// parent and DROP CONSTRAINT only ownership of the child. A role without them skips the explicit lock, and the statement
-/// takes its own under the same lock_timeout. A table that is not there answers true, so the LOCK reports it gone.
-pub(super) async fn may_lock(tx: &mut Tx<'_>, name: &str) -> bool {
-    let sql = "SELECT COALESCE(has_table_privilege(to_regclass($1), 'UPDATE,DELETE,TRUNCATE') OR CASE WHEN current_setting('server_version_num')::int >= 170000 THEN has_table_privilege(to_regclass($1), 'MAINTAIN') ELSE false END, true)::int::bigint AS n";
-    match tx.fetch_bound(sql, &[Param::Text(name.to_string())]).await {
-        Ok(rows) => rows.first().and_then(|r| super::structure::num(r, "n")).is_none_or(|n| n != 0),
-        Err(_) => true,
+/// For each of `tables` (a name and whether only a plain table may be locked): whether the role may take the explicit lock the plan
+/// wants. LOCK TABLE in any mode but ACCESS SHARE and ROW EXCLUSIVE needs UPDATE, DELETE or TRUNCATE (MAINTAIN from PostgreSQL 17),
+/// where ADD FOREIGN KEY needs only REFERENCES on the parent and DROP CONSTRAINT only ownership of the child. A role without them
+/// skips the explicit lock, and the statement takes its own under the same lock_timeout. A table that is not there answers true, so
+/// the LOCK reports it gone. `plain_only` is for a trigger edit: a view's lock would reach the tables under it and a foreign table
+/// cannot be locked, so anything but a plain table answers false. One query answers for all of them.
+pub(super) async fn may_lock(tx: &mut Tx<'_>, tables: &[(&str, bool)]) -> Vec<bool> {
+    if tables.is_empty() {
+        return Vec::new();
     }
+    let values = (1..=tables.len()).map(|i| format!("(${i}::text, {i})")).collect::<Vec<_>>().join(", ");
+    let sql = format!("SELECT t.ord::bigint AS ord, (SELECT c.relkind::text FROM pg_class c WHERE c.oid = to_regclass(t.n)) AS k, COALESCE(has_table_privilege(to_regclass(t.n), 'UPDATE,DELETE,TRUNCATE') OR CASE WHEN current_setting('server_version_num')::int >= 170000 THEN has_table_privilege(to_regclass(t.n), 'MAINTAIN') ELSE false END, true)::int::bigint AS n FROM (VALUES {values}) AS t(n, ord)");
+    let params: Vec<Param> = tables.iter().map(|(n, _)| Param::Text(n.to_string())).collect();
+    let mut out = vec![true; tables.len()];
+    if let Ok(rows) = tx.fetch_bound(&sql, &params).await {
+        for r in &rows {
+            let Some(i) = super::structure::num(r, "ord").and_then(|o| usize::try_from(o - 1).ok()).filter(|i| *i < tables.len()) else { continue };
+            let plain = super::worker::text(r, "k").is_none_or(|k| k == "r");
+            out[i] = if tables[i].1 && !plain { false } else { super::structure::num(r, "n").is_none_or(|n| n != 0) };
+        }
+    }
+    out
+}
+
+/// One table of `may_lock`'s question.
+pub(super) async fn may_lock_one(tx: &mut Tx<'_>, name: &str) -> bool {
+    may_lock(tx, &[(name, false)]).await[0]
+}
+
+/// A table a transaction locks before it reads or changes anything.
+pub(super) struct Lock {
+    pub name: String,
+    pub mode: &'static str,
+    /// Only a plain table is locked (`may_lock`).
+    pub plain_only: bool,
+    /// What a `Fail::Changed` says when the table is gone (42P01) after the plan was made, or None when that is an error as any other.
+    pub gone: Option<String>,
+}
+
+/// Runs `body` in one write transaction that holds `locks` first, in the order given (the caller fixes one order for every plan, so
+/// two that share tables never wait on each other in a circle), with the lock timeout of `set_lock_wait` so a busy table fails the
+/// plan instead of queueing behind it. A lock the role may not take is skipped (`may_lock`). The commit is the last thing: a
+/// failure of the body rolls back, and a failed COMMIT is `Fail::Unknown`, with `next` saying what to do about it.
+pub(super) async fn run_locked<T>(db: &Db, scope: &str, read_only: bool, locks: &[Lock], next: &str, body: impl AsyncFnOnce(&mut Tx<'_>) -> Result<T, Fail>) -> Result<T, Fail> {
+    let mut conn = write::writer_conn(db, scope, read_only).await.map_err(Fail::Run)?;
+    let mut tx = conn.begin_write(db).await.map_err(|e| Fail::Run(se(e)))?;
+    let out = async {
+        set_lock_wait(&mut tx, db, scope).await.map_err(|e| Fail::Run(se(e)))?;
+        let names: Vec<(&str, bool)> = locks.iter().map(|l| (l.name.as_str(), l.plain_only)).collect();
+        let may = may_lock(&mut tx, &names).await;
+        for (l, may) in locks.iter().zip(may) {
+            if !may {
+                continue;
+            }
+            if let Err(e) = exec(&mut tx, db, scope, &format!("LOCK TABLE {} IN {} MODE", l.name, l.mode)).await {
+                return Err(match (lock_error(&e, &l.name), sql_state(&e).as_deref(), &l.gone) {
+                    (Some(why), _, _) => Fail::Run(why),
+                    // 42P01 is undefined_table: the table was dropped after the plan was made.
+                    (None, Some("42P01"), Some(what)) => Fail::Changed(what.clone()),
+                    _ => Fail::Run(se(e)),
+                });
+            }
+        }
+        body(&mut tx).await
+    }
+    .await;
+    match out {
+        Ok(v) => tx.commit().await.map(|_| v).map_err(|e| Fail::Unknown(commit_unknown(e, next))),
+        Err(f) => {
+            let _ = tx.rollback().await;
+            Err(f)
+        }
+    }
+}
+
+/// The note for a plan that did not run. `changed` words a refusal because the objects were not as expected, which reads
+/// differently for each feature and for an undo.
+pub(super) fn fail_text(f: Fail, changed: impl FnOnce(&str) -> String) -> String {
+    match f {
+        Fail::Run(e) | Fail::Unknown(e) => e,
+        Fail::Changed(what) => changed(&what),
+    }
+}
+
+/// The database and table oids as the transaction sees them, which the undo checks before it acts (`check_ids`). Read before the
+/// COMMIT, so a drop and create under the same name right after it cannot be mistaken for this change's table. Empty when they
+/// cannot be read, which only skips the later check; a write is never refused over it.
+pub(super) async fn ids_in(tx: &mut Tx<'_>, schema: &str, table: &str) -> PgIds {
+    if !matches!(tx, Tx::Pg(_)) {
+        return PgIds::default();
+    }
+    let sql = "SELECT (SELECT oid::text FROM pg_database WHERE datname = current_database()) AS d, to_regclass($1)::oid::text AS t";
+    let rows = tx.fetch_bound(sql, &[Param::Text(D.qualified(schema, table))]).await.unwrap_or_default();
+    PgIds { db: rows.first().and_then(|r| super::worker::text(r, "d")).unwrap_or_default(), table: rows.first().and_then(|r| super::worker::text(r, "t")).unwrap_or_default() }
+}
+
+/// The first of `types` the server does not know as a type name, or None. PostgreSQL before 16 raises an error for text that is
+/// not a type name and later ones answer NULL, so a failed batch is taken back to a savepoint and asked one by one.
+pub(super) async fn unknown_type(tx: &mut Tx<'_>, types: &[String]) -> Option<String> {
+    if types.len() > 1 && tx.exec_bound("SAVEPOINT quarry_types", &[]).await.is_ok() {
+        let values = (1..=types.len()).map(|i| format!("(${i}::text, {i})")).collect::<Vec<_>>().join(", ");
+        let params: Vec<Param> = types.iter().map(|t| Param::Text(t.clone())).collect();
+        match tx.fetch_bound(&format!("SELECT s.ord::bigint AS ord, to_regtype(s.v)::text AS t FROM (VALUES {values}) AS s(v, ord)"), &params).await {
+            Ok(rows) => {
+                let _ = tx.exec_bound("RELEASE SAVEPOINT quarry_types", &[]).await;
+                let bad = rows.iter().filter(|r| super::worker::text(r, "t").is_none()).filter_map(|r| super::structure::num(r, "ord")).min();
+                return bad.and_then(|o| types.get(usize::try_from(o - 1).ok()?).cloned());
+            }
+            Err(_) => {
+                let _ = tx.exec_bound("ROLLBACK TO SAVEPOINT quarry_types", &[]).await;
+                let _ = tx.exec_bound("RELEASE SAVEPOINT quarry_types", &[]).await;
+            }
+        }
+    }
+    for ty in types {
+        let said = tx.fetch_bound("SELECT to_regtype($1)::text AS t", &[Param::Text(ty.clone())]).await;
+        if said.ok().and_then(|rows| rows.first().and_then(|r| super::worker::text(r, "t"))).is_none() {
+            return Some(ty.clone());
+        }
+    }
+    None
 }
 
 /// The message for a key the server refused for the rows already there: how many rows have no parent and a few of them, so the
@@ -822,43 +956,29 @@ async fn orphan_message(tx: &mut Tx<'_>, schema: &str, table: &str, fk: &Foreign
 
 /// Runs `steps` as one transaction: the lock first, with a timeout so a busy table fails the plan instead of queueing
 /// behind it, then the check that the touched columns and indexes are as `expect` says, then the statements, then COMMIT.
-/// Any failure leaves the transaction to roll back.
-pub(super) async fn run(db: &Db, schema: &str, table: &str, steps: &[String], expect: &Expect, read_only: bool, undo: bool) -> Result<(), Fail> {
-    let mut conn = write::writer_conn(db, schema, read_only).await.map_err(Fail::Run)?;
-    let mut tx = conn.begin_write(db).await.map_err(|e| Fail::Run(se(e)))?;
-    let out = locked_run(&mut tx, db, schema, table, steps, expect, undo).await;
-    match out {
-        // The connection can drop after the server committed, so a failed COMMIT does not say that nothing changed.
-        Ok(()) => tx.commit().await.map_err(|e| Fail::Unknown(format!("{}. The server did not confirm the commit, so the change may or may not have been applied. The structure is being reloaded: check it before running the change again.", se(e)))),
-        Err(f) => {
-            let _ = tx.rollback().await;
-            Err(f)
-        }
-    }
-}
-
-async fn locked_run(tx: &mut Tx<'_>, db: &Db, schema: &str, table: &str, steps: &[String], expect: &Expect, undo: bool) -> Result<(), Fail> {
-    exec(tx, db, schema, &format!("SET LOCAL lock_timeout = '{LOCK_WAIT}'")).await.map_err(|e| Fail::Run(se(e)))?;
+/// Any failure leaves the transaction to roll back. Returns the ids the undo will check, read before the COMMIT.
+pub(super) async fn run(db: &Db, schema: &str, table: &str, steps: &[String], expect: &Expect, read_only: bool, undo: bool) -> Result<PgIds, Fail> {
     // The changed table and the other tables of its keys, in one fixed order. A key takes a lock on both of its tables, and
     // the parent can be changed by another session between the plan and here, so it is locked before it is read.
-    for (s, t, mode) in lock_order(schema, table, expect.own_share, &expect.refs) {
-        let name = D.qualified(&s, &t);
-        if !may_lock(tx, &name).await {
-            continue;
-        }
-        if let Err(e) = exec(tx, db, schema, &format!("LOCK TABLE {name} IN {mode} MODE")).await {
-            let own = s == schema && t == table;
-            return Err(match (lock_error(&e, &name), sql_state(&e).as_deref()) {
-                (Some(why), _) => Fail::Run(why),
-                // 42P01 is undefined_table: the referenced table was dropped after the plan was made.
-                (None, Some("42P01")) if !own => Fail::Changed(format!("the referenced table {name} (it is gone)")),
-                _ => Fail::Run(se(e)),
-            });
-        }
-    }
+    let locks: Vec<Lock> = lock_order(schema, table, expect.own_share, &expect.refs)
+        .into_iter()
+        .map(|(s, t, mode)| {
+            let name = D.qualified(&s, &t);
+            let gone = (s != schema || t != table).then(|| format!("the referenced table {name} (it is gone)"));
+            Lock { name, mode, plain_only: false, gone }
+        })
+        .collect();
+    run_locked(db, schema, read_only, &locks, RELOAD_STRUCTURE, async |tx| {
+        checked_run(tx, db, schema, table, steps, expect, undo).await?;
+        Ok(ids_in(tx, schema, table).await)
+    })
+    .await
+}
+
+async fn checked_run(tx: &mut Tx<'_>, db: &Db, schema: &str, table: &str, steps: &[String], expect: &Expect, undo: bool) -> Result<(), Fail> {
     // Before the read and the statements alike: the plan was made from a read under this path, and the statements resolve
     // every name under it, so a type or function outside the schema is qualified in the one and found by the other.
-    exec(tx, db, schema, &db.pg_set_path(schema)).await.map_err(|e| Fail::Run(se(e)))?;
+    set_path(tx, db, schema).await.map_err(|e| Fail::Run(se(e)))?;
     let st = read_in(tx, schema, table).await.map_err(Fail::Run)?;
     let now = snapshot(&st, &expect.cols, &expect.idx, &expect.fks);
     if now.len() != expect.snap.len() {
@@ -879,7 +999,7 @@ async fn locked_run(tx: &mut Tx<'_>, db: &Db, schema: &str, table: &str, steps: 
         let now = if r.schema == schema && r.table == table {
             ref_state(&st, &r.cols)
         } else {
-            exec(tx, db, schema, &db.pg_set_path(&r.schema)).await.map_err(|e| Fail::Run(se(e)))?;
+            set_path(tx, db, &r.schema).await.map_err(|e| Fail::Run(se(e)))?;
             moved = true;
             ref_state(&read_in(tx, &r.schema, &r.table).await.map_err(Fail::Run)?, &r.cols)
         };
@@ -888,14 +1008,10 @@ async fn locked_run(tx: &mut Tx<'_>, db: &Db, schema: &str, table: &str, steps: 
         }
     }
     if moved {
-        exec(tx, db, schema, &db.pg_set_path(schema)).await.map_err(|e| Fail::Run(se(e)))?;
+        set_path(tx, db, schema).await.map_err(|e| Fail::Run(se(e)))?;
     }
-    for ty in &expect.types {
-        let said = tx.fetch_bound("SELECT to_regtype($1)::text AS t", &[Param::Text(ty.clone())]).await;
-        // PostgreSQL before 16 raises an error for text that is not a type name, later ones answer NULL.
-        if said.ok().and_then(|rows| rows.first().and_then(|r| super::worker::text(r, "t"))).is_none() {
-            return Err(Fail::Run(format!("{ty:?} is not a type the server knows. Write only the type, like numeric(10,2), without constraints or other column clauses. Nothing was changed.")));
-        }
+    if let Some(ty) = unknown_type(tx, &expect.types).await {
+        return Err(Fail::Run(format!("{ty:?} is not a type the server knows. Write only the type, like numeric(10,2), without constraints or other column clauses. Nothing was changed.")));
     }
     for (i, s) in steps.iter().enumerate() {
         // A key that checks the rows already there runs in a savepoint: the server scans the table once, and only when it
@@ -920,13 +1036,15 @@ async fn locked_run(tx: &mut Tx<'_>, db: &Db, schema: &str, table: &str, steps: 
     Ok(())
 }
 
-/// The note for a plan that did not run.
-fn fail_text(f: Fail, undo: bool) -> String {
-    match f {
-        Fail::Run(e) | Fail::Unknown(e) => e,
-        Fail::Changed(what) if undo => format!("Undo refused: {what} changed after this change ran, so undoing it now would not put the table back."),
-        Fail::Changed(what) => format!("Nothing ran: {what} changed since this plan was made. Reload the structure and stage the change again."),
-    }
+/// The note for a structure plan that did not run.
+fn plan_failed(f: Fail, undo: bool) -> String {
+    fail_text(f, |what| {
+        if undo {
+            format!("Undo refused: {what} changed after this change ran, so undoing it now would not put the table back.")
+        } else {
+            format!("Nothing ran: {what} changed since this plan was made. Reload the structure and stage the change again.")
+        }
+    })
 }
 
 /// The undo entry for the table, which remembers the database it ran in: a PostgreSQL connection is bound to one, and
@@ -950,7 +1068,7 @@ pub(super) async fn undo(db: &Db, a: UndoAction, u: AlterUndo, read_only: bool) 
     let expect = Expect { cols: u.cols.clone(), idx: u.idx.clone(), fks: u.fks.clone(), snap: u.expect.clone(), all: None, types: Vec::new(), refs: u.refs.clone(), orphans: u.orphans.clone(), own_share: shares_only(&u.groups.iter().flatten().cloned().collect::<Vec<_>>()) };
     let out = crate::db::sql_scope(db.conn, &schema, async { run(db, &schema, &table, &u.steps, &expect, read_only, true).await }).await;
     let unsure = matches!(out, Err(Fail::Unknown(_)));
-    let res: Res<String> = out.map(|_| "Undid the structure change".to_string()).map_err(|f| fail_text(f, true));
+    let res: Res<String> = out.map(|_| "Undid the structure change".to_string()).map_err(|f| plan_failed(f, true));
     // The whole undo is one transaction, so a failure ran nothing and the action stays for another try, unless the commit
     // is the one that failed, when it may have run.
     let keep = (res.is_err() && !unsure).then(|| {
@@ -969,33 +1087,41 @@ impl Worker {
         self.spawn_sql(db.conn, &schema.clone(), async move {
             let out = run(&db, &schema, &table, &steps, &expect, read_only, false).await;
             let unsure = matches!(out, Err(Fail::Unknown(_)));
-            let res = out.map_err(|f| fail_text(f, false));
+            let (res, ids) = match out {
+                Ok(ids) => (Ok(()), ids),
+                Err(f) => (Err(plan_failed(f, false)), PgIds::default()),
+            };
             let mut done = done;
             let undo = match (res.is_ok(), undo) {
-                (true, Some(mut u)) => match load(&db, &schema, &table).await {
-                    Ok(st) => {
-                        u.expect = snapshot(&st, &u.cols, &u.idx, &u.fks);
-                        // The undo of a dropped key puts it back and leans on the parent as it is now.
-                        let mut unread = None;
-                        for r in u.refs.iter_mut().filter(|r| !r.cols.is_empty()) {
-                            match load(&db, &r.schema, &r.table).await {
-                                Ok(p) => r.seen = Some(ref_state(&p, &r.cols)),
-                                Err(err) => unread = Some(err),
+                (true, Some(mut u)) => {
+                    // The table and the tables of its keys are independent reads.
+                    let want: Vec<usize> = u.refs.iter().enumerate().filter(|(_, r)| !r.cols.is_empty()).map(|(i, _)| i).collect();
+                    let (st, loads) = futures_util::future::join(load(&db, &schema, &table), futures_util::future::join_all(want.iter().map(|&i| load(&db, &u.refs[i].schema, &u.refs[i].table)))).await;
+                    match st {
+                        Ok(st) => {
+                            u.expect = snapshot(&st, &u.cols, &u.idx, &u.fks);
+                            // The undo of a dropped key puts it back and leans on the parent as it is now.
+                            let mut unread = None;
+                            for (&i, loaded) in want.iter().zip(loads) {
+                                match loaded {
+                                    Ok(p) => u.refs[i].seen = Some(ref_state(&p, &u.refs[i].cols)),
+                                    Err(err) => unread = Some(err),
+                                }
+                            }
+                            match unread {
+                                None => Some(action(&db, conn, &schema, &table, u, ids)),
+                                Some(err) => {
+                                    done = format!("{done}. It cannot be undone: a referenced table could not be read back ({err})");
+                                    None
+                                }
                             }
                         }
-                        match unread {
-                            None => Some(action(&db, conn, &schema, &table, u, super::create_pg::ids_of(&db, &schema, &table).await)),
-                            Some(err) => {
-                                done = format!("{done}. It cannot be undone: a referenced table could not be read back ({err})");
-                                None
-                            }
+                        Err(err) => {
+                            done = format!("{done}. It cannot be undone: the table could not be read back ({err})");
+                            None
                         }
                     }
-                    Err(err) => {
-                        done = format!("{done}. It cannot be undone: the table could not be read back ({err})");
-                        None
-                    }
-                },
+                }
                 _ => None,
             };
             Msg::SqlAltered { conn, database: db.pg_database(), schema, table, res: res.map(|_| done), undo, sql_mode: None, alter: true, unsure }

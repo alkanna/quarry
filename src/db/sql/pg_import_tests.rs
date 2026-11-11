@@ -5,31 +5,24 @@
 use super::csv::{auto_map, DateFmt, Enc, Mapping, Opts, Source};
 use super::export::{export_to, Plan, Sink};
 use super::import::{run, undo_plan, Done, Dup, ImportPlan, Progress};
-use super::testing::{every_pg, live_pgbouncer, LivePg};
+use super::testing::{every_pg, live_pgbouncer, LivePg, PgFixture};
 use super::write::{SqlUndo, CONFLICT};
-use super::Db;
 use crate::db::{Msg, Res, UndoAction, UndoKind};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
-struct F<'a> {
-    l: &'a LivePg,
-    db: Db,
-    pool: sqlx::PgPool,
-    schema: String,
+/// The shared fixture with the helpers of this file's tests.
+struct F<'a>(PgFixture<'a>);
+
+impl<'a> std::ops::Deref for F<'a> {
+    type Target = PgFixture<'a>;
+    fn deref(&self) -> &PgFixture<'a> {
+        &self.0
+    }
 }
 
 fn fixture<'a>(l: &'a LivePg, schema: &str, ddl: &str) -> F<'a> {
-    let db = l.quarry_test();
-    let pool = l.fixture_pool();
-    l.qsql(&pool, &format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE; CREATE SCHEMA \"{schema}\"; SET search_path = \"{schema}\"; {ddl}"));
-    F { l, db, pool, schema: schema.into() }
-}
-
-impl Drop for F<'_> {
-    fn drop(&mut self) {
-        self.l.qsql(&self.pool, &format!("DROP SCHEMA IF EXISTS \"{}\" CASCADE", self.schema));
-    }
+    F(PgFixture::new(l, schema, ddl))
 }
 
 fn opts() -> Opts {
@@ -37,14 +30,6 @@ fn opts() -> Opts {
 }
 
 impl F<'_> {
-    fn sql(&self, s: &str) {
-        self.l.qsql(&self.pool, &format!("SET search_path = \"{}\"; {s}", self.schema));
-    }
-
-    fn one(&self, s: &str) -> String {
-        self.l.qone(&self.pool, &format!("SET search_path = \"{}\"; {s}", self.schema))
-    }
-
     fn count(&self, table: &str) -> i64 {
         self.one(&format!("SELECT count(*) FROM \"{table}\"")).parse().unwrap()
     }

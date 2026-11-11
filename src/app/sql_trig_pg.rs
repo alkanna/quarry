@@ -9,7 +9,6 @@ use db::sql::structure::PgTrig;
 
 /// What the head needs besides the draft.
 pub(super) struct Env<'a> {
-    pub exists: bool,
     pub editable: bool,
     pub live: Option<&'a PgTrig>,
     pub table: &'a str,
@@ -24,12 +23,17 @@ pub(super) fn column_problem(def: &TrigDef, cols: &[String]) -> Option<String> {
     cols_of(&def.pg.of_cols).into_iter().find(|c| !cols.contains(c)).map(|c| format!("The table has no column {c}."))
 }
 
+/// One monospace line of the head, with the name a screen reader gives it.
+fn field(ui: &mut egui::Ui, enabled: bool, text: &mut String, width: f32, hint: &str, label: &str) {
+    ui.add_enabled(enabled, egui::TextEdit::singleline(text).font(egui::TextStyle::Monospace).desired_width(width).hint_text(hint)).widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, enabled, label));
+}
+
 pub(super) fn head(ui: &mut egui::Ui, def: &mut TrigDef, env: &Env) {
-    let (editable, exists) = (env.editable, env.exists);
+    let (editable, exists) = (env.editable, env.live.is_some());
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 10.0;
         ui.label(RichText::new("Name").color(MUTED()));
-        ui.add_enabled(editable && !exists, egui::TextEdit::singleline(&mut def.name).font(egui::TextStyle::Monospace).desired_width(240.0).hint_text("orders_audit")).widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, editable && !exists, "Trigger name"));
+        field(ui, editable && !exists, &mut def.name, 240.0, "orders_audit", "Trigger name");
         ui.add_space(8.0);
         ui.label(RichText::new("Timing").color(MUTED()));
         ui.add_enabled_ui(editable, |ui| {
@@ -75,7 +79,7 @@ pub(super) fn head(ui: &mut egui::Ui, def: &mut TrigDef, env: &Env) {
         if events.iter().any(|e| e == "UPDATE") {
             ui.add_space(8.0);
             ui.label(RichText::new("Columns").color(MUTED()));
-            ui.add_enabled(editable, egui::TextEdit::singleline(&mut def.pg.of_cols).font(egui::TextStyle::Monospace).desired_width(220.0).hint_text("any column")).widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, editable, "Trigger columns"));
+            field(ui, editable, &mut def.pg.of_cols, 220.0, "any column", "Trigger columns");
         } else {
             def.pg.of_cols.clear();
         }
@@ -97,7 +101,7 @@ pub(super) fn head(ui: &mut egui::Ui, def: &mut TrigDef, env: &Env) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 10.0;
         ui.label(RichText::new("When").color(MUTED()));
-        ui.add_enabled(editable, egui::TextEdit::singleline(&mut def.pg.when).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY).hint_text("NEW.status IS DISTINCT FROM OLD.status")).widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, editable, "Trigger when"));
+        field(ui, editable, &mut def.pg.when, f32::INFINITY, "NEW.status IS DISTINCT FROM OLD.status", "Trigger when");
     });
     ui.add_space(8.0);
     function_line(ui, def, env);
@@ -126,7 +130,7 @@ fn function_line(ui: &mut egui::Ui, def: &mut TrigDef, env: &Env) {
             }
             None => {
                 let auto = func_name(env.table, &def.name);
-                ui.add_enabled(env.editable, egui::TextEdit::singleline(&mut def.pg.func).font(egui::TextStyle::Monospace).desired_width(300.0).hint_text(auto)).widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, env.editable, "Function name"));
+                field(ui, env.editable, &mut def.pg.func, 300.0, &auto, "Function name");
                 ui.label(RichText::new("a new plpgsql function that returns trigger").size(TXT_SMALL).color(FAINT()));
             }
         }

@@ -111,10 +111,7 @@ pub fn fill(text: &str, params: &[value::Param], backslash: bool, ansi: bool) ->
 pub(super) fn literal_pg(p: &value::Param) -> Res<String> {
     use value::Param;
     Ok(match p {
-        Param::Text(s) => {
-            let q = no_nul(s)?.replace('\'', "''");
-            if s.contains('\\') { format!("E'{}'", q.replace('\\', "\\\\")) } else { format!("'{q}'") }
-        }
+        Param::Text(s) => value::pg_lit(no_nul(s)?),
         // E'\\x..' holds one backslash, so this is bytea hex input in either reading of plain strings.
         Param::Bytes(b) => format!("E'\\\\x{}'::bytea", value::hex_digits(b, false)),
         p => scalar_literal(p)?,

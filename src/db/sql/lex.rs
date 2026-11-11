@@ -6,6 +6,7 @@ use std::ops::Range;
 
 #[path = "lex_pg.rs"]
 mod pg;
+pub(super) use pg::dollar_quote;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tok {
@@ -318,12 +319,32 @@ pub fn transaction_control(stmt: &str, d: Dialect) -> bool {
     if d != Dialect::Postgres {
         return false;
     }
-    let mut w = tokens(stmt, d).into_iter().filter(|(t, _)| *t == Tok::Word).map(|(_, r)| stmt[r].to_ascii_uppercase());
-    match w.next().as_deref() {
+    let w = head_words(stmt, d, 2);
+    match w.first().map(String::as_str) {
         Some("BEGIN" | "START" | "COMMIT" | "END" | "ROLLBACK" | "ABORT" | "SAVEPOINT" | "RELEASE") => true,
-        Some("PREPARE") => w.next().as_deref() == Some("TRANSACTION"),
+        Some("PREPARE") => w.get(1).map(String::as_str) == Some("TRANSACTION"),
         _ => false,
     }
+}
+
+/// The first `n` words of a statement in upper case, for a check that only needs how it starts. A script statement can be a
+/// multi-megabyte INSERT, so only the start is lexed when it holds enough words; the last two tokens of that start are left out
+/// because the cut may have split them. Anything short of `n` words in the start reads the whole statement, so the answer is
+/// the one a full read gives.
+pub(super) fn head_words(stmt: &str, d: Dialect, n: usize) -> Vec<String> {
+    const HEAD: usize = 2048;
+    let words = |text: &str, skip_tail: usize| -> Vec<String> {
+        let toks = tokens(text, d);
+        let keep = toks.len().saturating_sub(skip_tail);
+        toks[..keep].iter().filter(|(t, _)| *t == Tok::Word).map(|(_, r)| text[r.clone()].to_ascii_uppercase()).take(n).collect()
+    };
+    if stmt.len() > HEAD {
+        let w = words(&stmt[..stmt.floor_char_boundary(HEAD)], 2);
+        if w.len() >= n {
+            return w;
+        }
+    }
+    words(stmt, 0)
 }
 
 /// Whether a PostgreSQL statement leaves state on the session after its transaction commits. Behind a transaction
@@ -374,6 +395,10 @@ fn quarry_guard_block(stmt: &str) -> bool {
 /// of the text is read, like `transaction_control`.
 pub fn needs_no_transaction(stmt: &str, d: Dialect) -> bool {
     if d != Dialect::Postgres {
+        return false;
+    }
+    // Only these statements can need it, so any other, a big INSERT above all, is not read past its first word.
+    if !matches!(head_words(stmt, d, 1).first().map(String::as_str), Some("VACUUM" | "CREATE" | "DROP" | "REINDEX" | "ALTER" | "CLUSTER")) {
         return false;
     }
     let w: Vec<String> = tokens(stmt, d).into_iter().take_while(|(t, r)| !(*t == Tok::Punct && &stmt[r.clone()] == ";")).filter(|(t, _)| *t == Tok::Word).map(|(_, r)| stmt[r].to_ascii_uppercase()).collect();
@@ -905,6 +930,23 @@ mod tests {
     }
     fn use_target(t: &str) -> Option<String> {
         super::use_target(t, D)
+    }
+
+    #[test]
+    fn the_head_of_a_statement_reads_as_the_whole_would() {
+        let pg = super::Dialect::Postgres;
+        assert_eq!(super::head_words("  -- note\n/* c */ commit  and chain; x", pg, 3), ["COMMIT", "AND", "CHAIN"]);
+        assert_eq!(super::head_words("begin", pg, 3), ["BEGIN"]);
+        // A long statement is read from its start only, and one whose start has too few words is still read whole.
+        let big = format!("INSERT INTO t VALUES ({})", "'x', ".repeat(5000) + "1");
+        assert_eq!(super::head_words(&big, pg, 3), ["INSERT", "INTO", "T"]);
+        let late = format!("{}SELECT 1", "/* x */ ".repeat(1000));
+        assert_eq!(super::head_words(&late, pg, 2), ["SELECT", "1"]);
+        // A multibyte character at the cut does not split.
+        let wide = format!("{} commit", "é".repeat(3000));
+        assert_eq!(super::head_words(&wide, pg, 2).len(), 2);
+        assert!(!super::needs_no_transaction(&big, pg) && !super::transaction_control(&big, pg));
+        assert!(super::needs_no_transaction("VACUUM t", pg) && super::transaction_control("rollback", pg));
     }
 
     fn texts(s: &str) -> Vec<&str> {

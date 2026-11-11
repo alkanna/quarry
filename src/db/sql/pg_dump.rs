@@ -17,9 +17,12 @@
 
 use super::csv::Source;
 use super::dump::{excerpt, note, put, stopped, DumpPlan, Ran, FILE_LOGGED, INSERT_BYTES};
+use super::ddl_pg::{q, qn};
 use super::exec::{Cells, Conn};
 use super::import::Progress;
+use super::lex::dollar_quote;
 use super::pg_script::PgSplitter;
+use super::value::{pg_lit, pg_lit_into};
 use super::{lex, se, se_at, Db, Dialect};
 use crate::db::Res;
 use sqlx::{raw_sql, Executor, PgConnection};
@@ -31,27 +34,13 @@ use std::time::Instant;
 
 const D: Dialect = Dialect::Postgres;
 
-fn q(name: &str) -> String {
-    D.quote_ident(name)
-}
-
-fn qn(schema: &str, name: &str) -> String {
-    D.qualified(schema, name)
-}
-
-/// A string as a literal that reads the same whatever standard_conforming_strings is: with a backslash in it the text goes
-/// in `E'...'`, where backslashes are escapes under both settings, and without one a plain string is already the same.
-pub(super) fn pg_lit(s: &str) -> String {
-    if s.contains('\\') { format!("E'{}'", s.replace('\\', "\\\\").replace('\'', "''")) } else { format!("'{}'", s.replace('\'', "''")) }
-}
+/// Sequences whose positions one query reads.
+const SEQ_BATCH: usize = 100;
 
 /// A body in dollar quotes, with a tag that is not in the body.
 fn dollar(body: &str) -> String {
-    let mut tag = "quarry".to_string();
-    while body.contains(&format!("${tag}$")) {
-        tag.push('x');
-    }
-    format!("${tag}${body}${tag}$")
+    let tag = dollar_quote(body, "quarry");
+    format!("{tag}{body}{tag}")
 }
 
 /// One result row of a catalog query, every column read as text.
@@ -400,12 +389,21 @@ async fn dump_on(c: &mut PgConnection, db: &Db, plan: &DumpPlan, out: &mut (dyn 
     // The tables and the functions that name a table go in one order. A default or generated column that calls such a
     // function needs it first, the function needs the table it names, and a column typed as another table's row type needs
     // that table first.
+    let by_oid: HashMap<i64, &Rel> = rels.iter().rev().map(|r| (r.oid, r)).collect();
+    let mut cols_of: HashMap<i64, Vec<&Col>> = HashMap::new();
+    for x in &cols {
+        cols_of.entry(x.rel).or_default().push(x);
+    }
     let tables: Vec<&Rel> = rels.iter().filter(|r| r.structure && r.table()).collect();
     let late: Vec<&Func> = funcs.iter().filter(|f| f.phase == 1).collect();
     let uses = if tables.is_empty() { Vec::new() } else { cat(c, db, USES, &[Arg::Is(&structured)]).await? };
+    let mut uses_of: HashMap<i64, Vec<&R>> = HashMap::new();
+    for u in &uses {
+        uses_of.entry(u.n(0)).or_default().push(u);
+    }
     let mut deps: Vec<Vec<usize>> = vec![Vec::new(); tables.len() + late.len()];
     for (i, t) in tables.iter().enumerate() {
-        for u in uses.iter().filter(|u| u.n(0) == t.oid) {
+        for u in uses_of.get(&t.oid).into_iter().flatten() {
             let at = if u.c(1) == 'p' { late.iter().position(|f| f.oid == u.n(2)).map(|p| tables.len() + p) } else { tables.iter().position(|o| o.oid == u.n(2)) };
             deps[i].extend(at.filter(|a| *a != i));
         }
@@ -419,7 +417,7 @@ async fn dump_on(c: &mut PgConnection, db: &Db, plan: &DumpPlan, out: &mut (dyn 
             write_func(late[k - tables.len()], out)?;
             continue;
         };
-        let list: Vec<String> = cols.iter().filter(|x| x.rel == r.oid).map(|x| format!("    {}", x.clause())).collect();
+        let list: Vec<String> = cols_of.get(&r.oid).into_iter().flatten().map(|x| format!("    {}", x.clause())).collect();
         let with = if r.opts.is_empty() { String::new() } else { format!(" WITH ({})", r.opts.join(", ")) };
         put(out, &format!("--\n-- Table {}.{}\n--\n\nCREATE {}TABLE {} (\n{}\n){};\n\n", note(&r.schema), note(&r.name), if r.unlogged { "UNLOGGED " } else { "" }, r.full(), list.join(",\n"), with))?;
     }
@@ -428,29 +426,31 @@ async fn dump_on(c: &mut PgConnection, db: &Db, plan: &DumpPlan, out: &mut (dyn 
     for r in rels.iter().filter(|r| r.content && r.table()) {
         stopped(cancel)?;
         put(out, &format!("--\n-- Data for {}.{}\n--\n\n", note(&r.schema), note(&r.name)))?;
-        let mine: Vec<&Col> = cols.iter().filter(|x| x.rel == r.oid).collect();
-        rows += write_rows(c, db, plan, r, &mine, out, count, rows, cancel).await?;
+        let mine: &[&Col] = cols_of.get(&r.oid).map_or(&[], Vec::as_slice);
+        rows += write_rows(c, db, plan, r, mine, out, count, rows, cancel).await?;
         put(out, "\n")?;
     }
 
     // A sequence is not part of the snapshot, so its position is read after the rows: it is then at or past every value in
     // them.
     let mut wrote = false;
-    for s in &seqs {
+    for s in seqs.iter().filter(|s| !s.readable) {
+        notes.push(format!("-- The position of sequence {}.{} was left out: the login may not read it.", note(&s.schema), note(&s.name)));
+    }
+    // One query for many sequences: each is a relation of its own, so they are joined with UNION ALL, in the order of the list.
+    let readable: Vec<&Seq> = seqs.iter().filter(|s| s.readable).collect();
+    for group in readable.chunks(SEQ_BATCH) {
         stopped(cancel)?;
-        if !s.readable {
-            notes.push(format!("-- The position of sequence {}.{} was left out: the login may not read it.", note(&s.schema), note(&s.name)));
-            continue;
-        }
-        let v = cat(c, db, &format!("SELECT last_value::text, is_called::text FROM {}", qn(&s.schema, &s.name)), &[]).await?;
-        if let Some(v) = v.first() {
-            put(out, &format!("SELECT pg_catalog.setval({}, {}, {});\n", pg_lit(&qn(&s.schema, &s.name)), v.s(0), v.s(1)))?;
+        let sql = group.iter().enumerate().map(|(i, s)| format!("SELECT {i}::text, last_value::text, is_called::text FROM {}", qn(&s.schema, &s.name))).collect::<Vec<_>>().join(" UNION ALL ");
+        for v in cat(c, db, &sql, &[]).await? {
+            let Some(s) = group.get(v.n(0) as usize) else { continue };
+            put(out, &format!("SELECT pg_catalog.setval({}, {}, {});\n", pg_lit(&qn(&s.schema, &s.name)), v.s(1), v.s(2)))?;
             wrote = true;
         }
     }
     for s in seqs.iter().filter(|s| s.create) {
         if let Some((t, col)) = &s.owner {
-            if let Some(r) = rels.iter().find(|r| r.oid == *t && r.structure) {
+            if let Some(r) = by_oid.get(t).filter(|r| r.structure) {
                 put(out, &format!("ALTER SEQUENCE {} OWNED BY {}.{};\n", qn(&s.schema, &s.name), r.full(), q(col)))?;
                 wrote = true;
             }
@@ -463,7 +463,7 @@ async fn dump_on(c: &mut PgConnection, db: &Db, plan: &DumpPlan, out: &mut (dyn 
     // A NOT NULL that was left out of its table: NOT VALID ones stay as they were, since the rows may hold NULLs.
     let mut wrote = false;
     for x in cols.iter().filter(|x| x.late_nn.is_some()) {
-        if let (Some((name, def)), Some(r)) = (&x.late_nn, rels.iter().find(|r| r.oid == x.rel && r.structure && r.table())) {
+        if let (Some((name, def)), Some(r)) = (&x.late_nn, by_oid.get(&x.rel).filter(|r| r.structure && r.table())) {
             put(out, &format!("ALTER TABLE ONLY {} ADD CONSTRAINT {} {def};\n", r.full(), q(name)))?;
             wrote = true;
         }
@@ -476,7 +476,7 @@ async fn dump_on(c: &mut PgConnection, db: &Db, plan: &DumpPlan, out: &mut (dyn 
     let cons = load_cons(c, db, &structured).await?;
     let idxs = load_idx(c, db, &structured).await?;
     for k in cons.iter().filter(|k| k.c(3) != 'f' && k.b(8)) {
-        if let Some(r) = rels.iter().find(|r| r.oid == k.n(0)) {
+        if let Some(r) = by_oid.get(&k.n(0)) {
             put(out, &format!("ALTER TABLE ONLY {} ADD CONSTRAINT {} {};\n", r.full(), q(&k.s(2)), k.s(4)))?;
         }
     }
@@ -495,7 +495,7 @@ async fn dump_on(c: &mut PgConnection, db: &Db, plan: &DumpPlan, out: &mut (dyn 
         }
     }
     for i in &idxs {
-        let Some(r) = rels.iter().find(|r| r.oid == i.n(0) && r.table()) else { continue };
+        let Some(r) = by_oid.get(&i.n(0)).filter(|r| r.table()) else { continue };
         if !i.b(4) {
             notes.push(format!("-- Index {} on {}.{} was left out: the server marks it not valid (a CREATE INDEX CONCURRENTLY that failed).", note(&i.s(2)), note(&r.schema), note(&r.name)));
             continue;
@@ -510,7 +510,7 @@ async fn dump_on(c: &mut PgConnection, db: &Db, plan: &DumpPlan, out: &mut (dyn 
     }
     let dumped: HashSet<i64> = structured.iter().copied().collect();
     for k in cons.iter().filter(|k| k.c(3) == 'f' && k.b(8)) {
-        let Some(r) = rels.iter().find(|r| r.oid == k.n(0)) else { continue };
+        let Some(r) = by_oid.get(&k.n(0)) else { continue };
         if !dumped.contains(&k.n(5)) {
             notes.push(format!("-- Foreign key {} of {}.{} was left out: the table it points at is not part of this dump.", note(&k.s(2)), note(&r.schema), note(&r.name)));
             continue;
@@ -527,7 +527,7 @@ async fn dump_on(c: &mut PgConnection, db: &Db, plan: &DumpPlan, out: &mut (dyn 
     if plan.extras {
         trig = cat(c, db, "SELECT t.tgrelid::text, t.tgname::text, pg_get_triggerdef(t.oid), t.tgenabled::text, t.oid::text FROM pg_trigger t WHERE t.tgrelid::int8 = ANY($1) AND NOT t.tgisinternal ORDER BY t.tgrelid, t.tgname", &[Arg::Is(&structured)]).await?;
         for t in &trig {
-            let Some(r) = rels.iter().find(|r| r.oid == t.n(0)) else { continue };
+            let Some(r) = by_oid.get(&t.n(0)) else { continue };
             put(out, &format!("{};\n", t.s(2)))?;
             let how = match t.c(3) {
                 'D' => "DISABLE",
@@ -990,7 +990,10 @@ async fn write_rows(c: &mut PgConnection, db: &Db, plan: &DumpPlan, rel: &Rel, c
                     batch.push_str(", ");
                 }
                 match row.cell(i) {
-                    Some(b) => batch.push_str(&pg_lit(&String::from_utf8_lossy(b))),
+                    Some(b) => match std::str::from_utf8(b) {
+                        Ok(t) => pg_lit_into(&mut batch, t),
+                        Err(_) => pg_lit_into(&mut batch, &String::from_utf8_lossy(b)),
+                    },
                     None => batch.push_str("NULL"),
                 }
             }
@@ -1120,10 +1123,10 @@ pub async fn run_file(db: Db, schema: String, src: Source, read_only: bool, prog
     let pooled = super::run::prepare(&mut conn, &db, &schema, false, &id).await?;
     let Conn::Pg(mut c) = conn else { return Err("Not a PostgreSQL connection".into()) };
     // Behind a pooler nothing is set on the session: each statement is a transaction of its own that carries its settings.
-    let mut locals = [super::pg::write_locals(), db.pg_run_locals(&schema)].into_iter().filter(|l| !l.is_empty()).collect::<Vec<_>>().join("; ");
+    let mut locals = [super::pg::write_locals(), db.pg_run_locals(&schema).as_str()].into_iter().filter(|l| !l.is_empty()).collect::<Vec<_>>().join("; ");
     if !pooled {
         // A restore runs long, so no statement timeout; a lock timeout so one statement never waits for another session for ever.
-        c.execute("SET statement_timeout = 0; SET lock_timeout = '10s'").await.map_err(se)?;
+        c.execute(format!("SET statement_timeout = 0; SET lock_timeout = '{}s'", super::pg::WRITE_LOCK_SECS).as_str()).await.map_err(se)?;
     }
     let mut file = src.open().map_err(|x| format!("Could not read the file: {x}"))?;
     let mut sp = PgSplitter::new(false);
@@ -1278,8 +1281,7 @@ fn pooled_set(stmt: &str) -> Option<String> {
 
 /// Whether a statement opens (true) or ends (false) the file's own transaction; None for any other.
 fn tx_effect(stmt: &str) -> Option<bool> {
-    use super::lex::Tok;
-    let w: Vec<String> = lex::tokens(stmt, D).into_iter().filter(|(t, _)| *t == Tok::Word).map(|(_, r)| stmt[r].to_ascii_uppercase()).take(3).collect();
+    let w = lex::head_words(stmt, D, 3);
     let at = |i: usize| w.get(i).map(String::as_str).unwrap_or("");
     match at(0) {
         "BEGIN" | "START" => Some(true),
@@ -1318,15 +1320,12 @@ async fn reading(c: &mut PgConnection) -> Result<(bool, String), sqlx::Error> {
 /// Statements after which the session's settings may differ from before without a SET naming them: the end of a
 /// transaction undoes its SET LOCALs, and ROLLBACK TO undoes a SET made after a savepoint.
 fn ends_scope(stmt: &str) -> bool {
-    use super::lex::Tok;
-    let first = lex::tokens(stmt, D).into_iter().find(|(t, _)| *t == Tok::Word).map(|(_, r)| stmt[r].to_ascii_uppercase());
-    matches!(first.as_deref(), Some("COMMIT" | "END" | "ROLLBACK" | "ABORT"))
+    matches!(lex::head_words(stmt, D, 1).first().map(String::as_str), Some("COMMIT" | "END" | "ROLLBACK" | "ABORT"))
 }
 
 /// Two-phase commit leaves a transaction the session no longer holds, which the run could not account for.
 fn two_phase(stmt: &str) -> bool {
-    use super::lex::Tok;
-    let w: Vec<String> = lex::tokens(stmt, D).into_iter().filter(|(t, _)| *t == Tok::Word).map(|(_, r)| stmt[r].to_ascii_uppercase()).take(2).collect();
+    let w = lex::head_words(stmt, D, 2);
     matches!((w.first().map(String::as_str), w.get(1).map(String::as_str)), (Some("PREPARE"), Some("TRANSACTION")) | (Some("COMMIT" | "ROLLBACK"), Some("PREPARED")))
 }
 

@@ -118,6 +118,17 @@ pub(super) fn lex(text: &str, plain_backslash: bool) -> Vec<(Tok, Range<usize>)>
 }
 
 /// Whether a word token is `$1`, `$2`, ... and which number.
+/// The dollar quote for a body: `$base$` with an x added until the body has no `$base` in it, so the body cannot hold its own
+/// closing tag. `function` is the tag `pg_get_functiondef` picks, which a function body of a trigger edit has to match.
+pub(in crate::db::sql) fn dollar_quote(body: &str, base: &str) -> String {
+    let mut t = format!("${base}");
+    while body.contains(&t) {
+        t.push('x');
+    }
+    t.push('$');
+    t
+}
+
 pub(super) fn param_number(w: &str) -> Option<usize> {
     let d = w.strip_prefix('$')?;
     if d.is_empty() || !d.bytes().all(|c| c.is_ascii_digit()) {

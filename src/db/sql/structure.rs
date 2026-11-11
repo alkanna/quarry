@@ -263,6 +263,11 @@ pub struct Structure {
 }
 
 impl Structure {
+    /// Whether the structure came from PostgreSQL (it is the one that carries its schema).
+    pub fn is_pg(&self) -> bool {
+        self.pg_schema.is_some()
+    }
+
     /// The index that serves a foreign key: the first one that starts with the key's columns.
     pub fn index_for(&self, fk: &ForeignKey) -> Option<&Index> {
         self.indexes.iter().find(|ix| ix.cols.len() >= fk.cols.len() && ix.cols.iter().zip(&fk.cols).all(|(a, b)| &a.name == b))

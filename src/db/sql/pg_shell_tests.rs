@@ -18,11 +18,7 @@ fn bun_missing() -> bool {
 
 /// Fresh schemas of the shared database with `ddl` run in the first, and the `Db` pointing at that database.
 fn fixture(l: &LivePg, schemas: &[&str], ddl: &str) -> Db {
-    let db = l.quarry_test();
-    let pool = l.fixture_pool();
-    let drops: String = schemas.iter().map(|s| format!("DROP SCHEMA IF EXISTS {s} CASCADE; CREATE SCHEMA {s};")).collect();
-    l.qsql(&pool, &format!("{drops} SET search_path = {}; {ddl}", schemas[0]));
-    db
+    l.fresh_schemas(schemas, ddl).0
 }
 
 fn relay(db: &Db, schema: &str, read_only: bool) -> SqlRelay {

@@ -13,15 +13,14 @@
 //! every other attribute are carried through exactly; when that text cannot be taken apart exactly the change is refused.
 
 use super::ddl::{PgDef, TrigDef, TrigJob, TrigUndo};
-use super::ddl_pg::{check_cond_pg, comment_stmt, exec, lock_error, may_lock, name_ok, q, sql_state, Fail, LOCK_WAIT};
+use super::ddl_pg::{check_cond_pg, comment_stmt, fail_text, ids_in, name_ok, q, qn, run_locked, set_local, set_path, Fail, Lock, RELOAD_STRUCTURE};
 use super::exec::Tx;
+use super::lex::dollar_quote;
 use super::pg_catalog::{SEEN_FUNCTION, SEEN_TRIGGER};
 use super::structure::PgTrig;
 use super::value::Param;
-use super::{se, worker::text, write, Db, Dialect};
+use super::{se, worker::text, write, Db};
 use crate::db::{Msg, Res, UndoAction, UndoKind, Worker};
-
-const D: Dialect = Dialect::Postgres;
 
 /// The events in the order the server prints them.
 const EVENTS: [&str; 4] = ["INSERT", "DELETE", "UPDATE", "TRUNCATE"];
@@ -115,12 +114,8 @@ fn head(d: &TrigDef, read_when: Option<&str>) -> Result<Head, String> {
     Ok(Head { name: d.name.clone(), timing, events, cols, per_row, when, mode: d.pg.mode.clone() })
 }
 
-fn table_q(schema: &str, table: &str) -> String {
-    D.qualified(schema, table)
-}
-
 fn func_q(schema: &str, func: &str) -> String {
-    format!("{}()", D.qualified(schema, func))
+    format!("{}()", qn(schema, func))
 }
 
 fn trigger_stmt(h: &Head, schema: &str, table: &str, fs: &str, f: &str) -> String {
@@ -130,7 +125,7 @@ fn trigger_stmt(h: &Head, schema: &str, table: &str, fs: &str, f: &str) -> Strin
         .map(|e| if *e == "UPDATE" && !h.cols.is_empty() { format!("UPDATE OF {}", h.cols.iter().map(|c| q(c)).collect::<Vec<_>>().join(", ")) } else { (*e).to_string() })
         .collect();
     let when = if h.when.is_empty() { String::new() } else { format!(" WHEN ({})", h.when) };
-    format!("CREATE TRIGGER {} {} {} ON {} FOR EACH {}{when} EXECUTE FUNCTION {}", q(&h.name), h.timing, events.join(" OR "), table_q(schema, table), if h.per_row { "ROW" } else { "STATEMENT" }, func_q(fs, f))
+    format!("CREATE TRIGGER {} {} {} ON {} FOR EACH {}{when} EXECUTE FUNCTION {}", q(&h.name), h.timing, events.join(" OR "), qn(schema, table), if h.per_row { "ROW" } else { "STATEMENT" }, func_q(fs, f))
 }
 
 /// The ALTER TABLE that puts a trigger in the enabled state `mode` (tgenabled).
@@ -141,26 +136,20 @@ fn mode_stmt(schema: &str, table: &str, name: &str, mode: &str) -> String {
         "A" => "ENABLE ALWAYS",
         _ => "ENABLE",
     };
-    format!("ALTER TABLE {} {how} TRIGGER {}", table_q(schema, table), q(name))
+    format!("ALTER TABLE {} {how} TRIGGER {}", qn(schema, table), q(name))
 }
 
 fn drop_stmt(schema: &str, table: &str, name: &str, if_exists: bool) -> String {
-    format!("DROP TRIGGER {}{} ON {}", if if_exists { "IF EXISTS " } else { "" }, q(name), table_q(schema, table))
+    format!("DROP TRIGGER {}{} ON {}", if if_exists { "IF EXISTS " } else { "" }, q(name), qn(schema, table))
 }
 
 fn trigger_comment(schema: &str, table: &str, name: &str, text: &str) -> Result<String, String> {
-    comment_stmt(&format!("TRIGGER {} ON {}", q(name), table_q(schema, table)), text)
+    comment_stmt(&format!("TRIGGER {} ON {}", q(name), qn(schema, table)), text)
 }
 
-/// The dollar quote for a function body: the one `pg_get_functiondef` picks, `$function$` with an x added until the body has
-/// no `$function` in it, so the body cannot hold its own closing tag.
+/// The dollar quote for a function body: the one `pg_get_functiondef` picks.
 fn tag_for(body: &str) -> String {
-    let mut t = String::from("$function");
-    while body.contains(&t) {
-        t.push('x');
-    }
-    t.push('$');
-    t
+    dollar_quote(body, "function")
 }
 
 fn body_ok(body: &str) -> Result<(), String> {
@@ -411,27 +400,11 @@ pub fn preview(schema: &str, table: &str, job: &TrigJob) -> Result<(Vec<String>,
     plan(schema, table, job).map(|p| (p.steps, p.warnings))
 }
 
-/// Whether the explicit LOCK TABLE is taken at all: only a plain table can be locked (a view's lock would reach the tables
-/// under it, and a foreign table cannot be locked), and only by a role with a privilege the lock needs. A table that is not
-/// there answers yes, so the LOCK reports it gone. Without the lock each statement takes its own, under the same lock_timeout.
-async fn lockable(tx: &mut Tx<'_>, name: &str) -> bool {
-    let sql = "SELECT COALESCE((SELECT c.relkind::text FROM pg_class c WHERE c.oid = to_regclass($1)), '') AS k";
-    let kind = match tx.fetch_bound(sql, &[Param::Text(name.to_string())]).await {
-        Ok(rows) => rows.first().and_then(|r| text(r, "k")).unwrap_or_default(),
-        Err(_) => String::new(),
-    };
-    match kind.as_str() {
-        "" => true,
-        "r" => may_lock(tx, name).await,
-        _ => false,
-    }
-}
-
 /// The trigger and the function as the transaction sees them now.
 async fn seen(tx: &mut Tx<'_>, schema: &str, table: &str, trig: &str, fs: &str, f: &str) -> Result<Seen, Fail> {
     let fail = |e: sqlx::Error| Fail::Run(se(e));
     let t = tx.fetch_bound(SEEN_TRIGGER, &[Param::Text(schema.into()), Param::Text(table.into()), Param::Text(trig.into())]).await.map_err(fail)?;
-    let g = tx.fetch_bound(SEEN_FUNCTION, &[Param::Text(func_q(fs, f)), Param::Text(table_q(schema, table)), Param::Text(trig.into())]).await.map_err(fail)?;
+    let g = tx.fetch_bound(SEEN_FUNCTION, &[Param::Text(func_q(fs, f)), Param::Text(qn(schema, table)), Param::Text(trig.into())]).await.map_err(fail)?;
     Ok(Seen { trig: t.first().and_then(|r| text(r, "s")), func: g.first().and_then(|r| text(r, "s")) })
 }
 
@@ -446,44 +419,30 @@ struct Unit<'a> {
     undo: bool,
 }
 
-/// Runs a unit in one transaction and returns how it left the trigger and the function, read before COMMIT so nothing can
-/// slip in between.
-async fn run(db: &Db, schema: &str, table: &str, u: &Unit<'_>, read_only: bool) -> Result<Seen, Fail> {
-    let mut conn = write::writer_conn(db, schema, read_only).await.map_err(Fail::Run)?;
-    let mut tx = conn.begin_write(db).await.map_err(|e| Fail::Run(se(e)))?;
-    match locked(&mut tx, db, schema, table, u).await {
-        // The connection can drop after the server committed, so a failed COMMIT does not say that nothing changed.
-        Ok(after) => tx.commit().await.map(|_| after).map_err(|e| Fail::Unknown(format!("{}. The server did not confirm the commit, so the change may or may not have been applied. The structure is being reloaded: check it before running the change again.", se(e)))),
-        Err(f) => {
-            let _ = tx.rollback().await;
-            Err(f)
-        }
-    }
+/// Runs a unit in one transaction and returns how it left the trigger and the function, and the ids of the table, read before
+/// COMMIT so nothing can slip in between.
+async fn run(db: &Db, schema: &str, table: &str, u: &Unit<'_>, read_only: bool) -> Result<(Seen, write::PgIds), Fail> {
+    // DROP TRIGGER takes ACCESS EXCLUSIVE, and CREATE TRIGGER and ALTER TABLE .. ENABLE or DISABLE TRIGGER take SHARE ROW
+    // EXCLUSIVE, which also keeps another session from changing the table's triggers while this one reads them. A change of
+    // only the function takes no table lock of its own, so the weaker mode is all it holds. Only a plain table can be locked
+    // (a view's lock would reach the tables under it, and a foreign table cannot be locked).
+    let name = qn(schema, table);
+    // 42P01 is undefined_table: the table was dropped after the editor read it.
+    let lock = Lock { gone: Some(format!("the table {name} (it is gone)")), name, mode: if u.exclusive { "ACCESS EXCLUSIVE" } else { "SHARE ROW EXCLUSIVE" }, plain_only: true };
+    run_locked(db, schema, read_only, &[lock], RELOAD_STRUCTURE, async |tx| {
+        let after = checked(tx, db, schema, table, u).await?;
+        Ok((after, ids_in(tx, schema, table).await))
+    })
+    .await
 }
 
-async fn locked(tx: &mut Tx<'_>, db: &Db, schema: &str, table: &str, u: &Unit<'_>) -> Result<Seen, Fail> {
+async fn checked(tx: &mut Tx<'_>, db: &Db, schema: &str, table: &str, u: &Unit<'_>) -> Result<Seen, Fail> {
     let fail = |e: sqlx::Error| Fail::Run(se(e));
-    exec(tx, db, schema, &format!("SET LOCAL lock_timeout = '{LOCK_WAIT}'")).await.map_err(fail)?;
-    let name = table_q(schema, table);
-    if lockable(tx, &name).await {
-        // DROP TRIGGER takes ACCESS EXCLUSIVE, and CREATE TRIGGER and ALTER TABLE .. ENABLE or DISABLE TRIGGER take SHARE ROW
-        // EXCLUSIVE, which also keeps another session from changing the table's triggers while this one reads them. A change of
-        // only the function takes no table lock of its own, so the weaker mode is all it holds.
-        let mode = if u.exclusive { "ACCESS EXCLUSIVE" } else { "SHARE ROW EXCLUSIVE" };
-        if let Err(e) = exec(tx, db, schema, &format!("LOCK TABLE {name} IN {mode} MODE")).await {
-            return Err(match (lock_error(&e, &name), sql_state(&e).as_deref()) {
-                (Some(why), _) => Fail::Run(why),
-                // 42P01 is undefined_table: the table was dropped after the editor read it.
-                (None, Some("42P01")) => Fail::Changed(format!("the table {name} (it is gone)")),
-                _ => Fail::Run(se(e)),
-            });
-        }
-    }
     // The editor read the catalogs under this path, and the statements resolve every name under it, so what the server prints
     // for a function outside the schema is the same text now and when it is replayed.
-    exec(tx, db, schema, &db.pg_set_path(schema)).await.map_err(fail)?;
+    set_path(tx, db, schema).await.map_err(fail)?;
     // A role or a database can turn the body check off, and the check is what stops a body that does not parse.
-    exec(tx, db, schema, "SET LOCAL check_function_bodies = on").await.map_err(fail)?;
+    set_local(tx, db, schema, "check_function_bodies", "on").await.map_err(fail)?;
     let now = seen(tx, schema, table, u.trig, u.func_schema, u.func).await?;
     if now.func.is_some() && u.before.func.is_none() {
         let f = func_q(u.func_schema, u.func);
@@ -503,17 +462,19 @@ async fn locked(tx: &mut Tx<'_>, db: &Db, schema: &str, table: &str, u: &Unit<'_
         return Err(Fail::Changed(format!("the function {}", func_q(u.func_schema, u.func))));
     }
     for (i, s) in u.steps.iter().enumerate() {
-        exec(tx, db, schema, s).await.map_err(|e| Fail::Run(format!("{} (statement {} of {}). The whole change was rolled back, so nothing was changed.", se(e), i + 1, u.steps.len())))?;
+        super::ddl_pg::exec(tx, db, schema, s).await.map_err(|e| Fail::Run(format!("{} (statement {} of {}). The whole change was rolled back, so nothing was changed.", se(e), i + 1, u.steps.len())))?;
     }
     seen(tx, schema, table, u.trig, u.func_schema, u.func).await
 }
 
-fn fail_text(f: Fail, undo: bool) -> String {
-    match f {
-        Fail::Run(e) | Fail::Unknown(e) => e,
-        Fail::Changed(what) if undo => format!("Undo refused: {what} changed after this change ran, so undoing it now would overwrite that."),
-        Fail::Changed(what) => format!("Nothing ran: {what} changed since it was read. Reload the structure and try again."),
-    }
+fn change_failed(f: Fail, undo: bool) -> String {
+    fail_text(f, |what| {
+        if undo {
+            format!("Undo refused: {what} changed after this change ran, so undoing it now would overwrite that.")
+        } else {
+            format!("Nothing ran: {what} changed since it was read. Reload the structure and try again.")
+        }
+    })
 }
 
 fn undo_action(db: &Db, conn: u64, schema: &str, table: &str, u: TrigUndo, ids: write::PgIds) -> UndoAction {
@@ -531,7 +492,7 @@ pub(super) async fn undo(db: &Db, a: UndoAction, u: TrigUndo, read_only: bool) -
     let unit = Unit { steps: &p.steps, exclusive: p.exclusive, trig: &p.trig, func_schema: &p.func_schema, func: &p.func, before: &p.expect, undo: true };
     let out = crate::db::sql_scope(db.conn, &schema, async { run(db, &schema, &table, &unit, read_only).await }).await;
     let unsure = matches!(out, Err(Fail::Unknown(_)));
-    let res: Res<String> = out.map(|_| p.said.clone()).map_err(|f| fail_text(f, true));
+    let res: Res<String> = out.map(|_| p.said.clone()).map_err(|f| change_failed(f, true));
     // The whole undo is one transaction, so a failure ran nothing and the action stays for another try, unless the commit is
     // the one that failed, when it may have run.
     let keep = (res.is_err() && !unsure).then(|| UndoAction { at, ..undo_action(db, conn, &schema, &table, u, ids) });
@@ -548,16 +509,16 @@ impl Worker {
                 Ok(p) => {
                     let unit = Unit { steps: &p.steps, exclusive: p.exclusive, trig: &p.trig, func_schema: &p.func_schema, func: &p.func, before: &p.before, undo: false };
                     match run(&db, &schema, &table, &unit, read_only).await {
-                        Ok(after) => {
+                        Ok((after, ids)) => {
                             let mut pg = p.undo.clone();
                             // After the change the trigger exists and its function exists, or the drop took the function too.
                             pg.expect = after;
                             let u = TrigUndo { name: p.trig.clone(), restore: None, left: None, label: p.label.clone(), pg: Some(pg) };
-                            (Ok(done), Some(undo_action(&db, conn, &schema, &table, u, super::create_pg::ids_of(&db, &schema, &table).await)), false)
+                            (Ok(done), Some(undo_action(&db, conn, &schema, &table, u, ids)), false)
                         }
                         Err(f) => {
                             let unsure = matches!(f, Fail::Unknown(_));
-                            (Err(fail_text(f, false)), None, unsure)
+                            (Err(change_failed(f, false)), None, unsure)
                         }
                     }
                 }

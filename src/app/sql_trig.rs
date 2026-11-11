@@ -9,6 +9,27 @@ use db::sql::structure::{Structure, Trigger};
 
 const LINE_H: f32 = 20.0;
 
+/// What the editor shows for a draft, kept while the draft, the live trigger, the session mode and the columns stay as they are.
+pub(super) struct TrigMemo {
+    key: String,
+    def: TrigDef,
+    live: Option<Trigger>,
+    n_trigs: usize,
+    mode: ddl::Mode,
+    cols: Vec<String>,
+    dirty: bool,
+    /// None while the draft is the live trigger.
+    steps: Option<Result<Vec<String>, String>>,
+    script: String,
+    pg_warnings: Vec<String>,
+}
+
+impl TrigMemo {
+    fn holds(&self, key: &str, live: Option<&Trigger>, n_trigs: usize, mode: ddl::Mode, cols: &[&str], def: &TrigDef) -> bool {
+        self.key == key && self.live.as_ref() == live && self.n_trigs == n_trigs && self.mode == mode && self.cols.iter().map(String::as_str).eq(cols.iter().copied()) && self.def == *def
+    }
+}
+
 /// The key of the draft of a trigger that does not exist yet.
 pub(super) const NEW: &str = "";
 
@@ -76,6 +97,10 @@ fn body_editor(ui: &mut egui::Ui, salt: &str, text: &mut String, height: f32, ed
 }
 
 impl App {
+    fn trig_state_mut(&mut self) -> Option<&mut super::sql_structure::StructState> {
+        Some(&mut self.tabs.get_mut(self.cur)?.sql.as_mut()?.st)
+    }
+
     fn trig_state(&self) -> Option<&super::sql_structure::StructState> {
         Some(&self.t()?.sql.as_ref()?.st)
     }
@@ -99,7 +124,7 @@ impl App {
 
     /// Whether the connection of the open table lets writes through, which a view's own lock on rows does not decide: a view
     /// can hold INSTEAD OF triggers on PostgreSQL.
-    pub(super) fn tab_writable(&self) -> bool {
+    fn tab_writable(&self) -> bool {
         self.t().and_then(|t| self.conn(t.sel.conn)).is_some_and(|c| c.writable)
     }
 
@@ -139,24 +164,26 @@ impl App {
     /// The editor, its preview and the Save row for `key`.
     pub(super) fn trig_editor(&mut self, ui: &mut egui::Ui, st: &Structure, key: &str, editable: bool) {
         let Some((conn, table)) = self.t().map(|t| (t.sel.conn, t.sel.coll.clone())) else { return };
-        let live_trig: Option<Trigger> = st.triggers.iter().find(|t| t.name == key).cloned();
-        let live: Option<TrigDef> = live_trig.as_ref().map(def_of);
+        let live_trig: Option<&Trigger> = st.triggers.iter().find(|t| t.name == key);
         let (d, _, m) = self.alter_env();
         // None offline, where there is no session to compare with.
         let session_mode = self.conn(conn).and_then(|c| c.sql.as_ref()).map(|s| s.sql_mode.clone());
         let busy = self.trig_state().is_some_and(|s| s.applying);
         let pg = d == db::sql::Dialect::Postgres;
-        let Some(mut def) = self.trig_state().and_then(|s| s.trig.get(key).cloned()).or_else(|| live.clone()).or_else(|| (key == NEW).then(|| blank(pg))) else { return };
-        let exists = live.is_some();
-        let dirty = live.as_ref().is_none_or(|l| !same(l, &def));
-        let was = def.clone();
+        let Some(mut def) = self.trig_state().and_then(|s| s.trig.get(key).cloned()).or_else(|| live_trig.map(def_of)).or_else(|| (key == NEW).then(|| blank(pg))) else { return };
+        let exists = live_trig.is_some();
+        let mut memo = self.trig_state_mut().and_then(|s| s.trig_memo.take());
+        let cols: Vec<&str> = st.columns.iter().map(|c| c.name.as_str()).collect();
+        if !memo.as_ref().is_some_and(|x| x.holds(key, live_trig, st.triggers.len(), m, &cols, &def)) {
+            memo = Some(self.trig_memo(st, key, live_trig, &def, &cols));
+        }
+        let dirty = memo.as_ref().is_some_and(|x| x.dirty);
         // A trigger the server cannot have rewritten is shown but never editable, and the editor says why.
-        let pg_live = live_trig.as_ref().and_then(|t| t.pg.as_deref());
+        let pg_live = live_trig.and_then(|t| t.pg.as_deref());
         let editable = editable && pg_live.is_none_or(|p| p.refuse.is_empty());
-        let cols: Vec<String> = st.columns.iter().map(|c| c.name.clone()).collect();
 
         if pg {
-            super::sql_trig_pg::head(ui, &mut def, &super::sql_trig_pg::Env { exists, editable, live: pg_live, table: &table });
+            super::sql_trig_pg::head(ui, &mut def, &super::sql_trig_pg::Env { editable, live: pg_live, table: &table });
         } else {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 10.0;
@@ -183,44 +210,38 @@ impl App {
         // A function in another language is shown, not rewritten, since only plpgsql can be written back exactly.
         let body_editable = editable && pg_live.is_none_or(|p| p.lang == "plpgsql");
         body_editor(ui, key, &mut def.body, (ui.available_height() - reserve).clamp(120.0, 700.0), body_editable);
-        if let Some(s) = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()) {
-            if def != was || (dirty && !s.st.trig.contains_key(key)) {
-                s.st.trig.insert(key.to_string(), def.clone());
+        // The memo still holds the draft as it was drawn, so a difference is an edit made this frame.
+        if memo.as_ref().is_none_or(|x| x.def != def) {
+            memo = Some(self.trig_memo(st, key, live_trig, &def, &cols));
+            if let Some(s) = self.trig_state_mut() {
+                s.trig.insert(key.to_string(), def.clone());
+            }
+        } else if dirty {
+            if let Some(s) = self.trig_state_mut().filter(|s| !s.trig.contains_key(key)) {
+                s.trig.insert(key.to_string(), def.clone());
             }
         }
-        let dirty = live.as_ref().is_none_or(|l| !same(l, &def));
-        let job = ddl::save_job(&st.triggers, live_trig.as_ref(), &def);
-        let mut pg_warnings: Vec<String> = Vec::new();
-        let schema = self.t().map(|t| self.sel_schema(&t.sel)).unwrap_or_default();
-        let steps = dirty.then(|| {
-            if !pg {
-                return ddl::trigger_preview(d, m, &table, &job);
-            }
-            if let Some(why) = super::sql_trig_pg::column_problem(&def, &cols) {
-                return Err(why);
-            }
-            db::sql::ddl_pg_trig::preview(&schema, &table, &job).map(|(steps, warnings)| {
-                pg_warnings = warnings;
-                steps
-            })
-        });
-        for w in &pg_warnings {
+        let Some(memo) = memo else { return };
+        let dirty = memo.dirty;
+        let steps = &memo.steps;
+        let pg_warnings = &memo.pg_warnings;
+        for w in pg_warnings {
             ui.add_space(6.0);
             ui.label(RichText::new(w.as_str()).size(TXT_SMALL).color(WARNING()));
         }
         // The edited trigger is created with this session's sql_mode, which decides how its body runs.
-        if let (Some(t), Some(now)) = (live_trig.as_ref().filter(|_| dirty), &session_mode) {
+        if let (Some(t), Some(now)) = (live_trig.filter(|_| dirty), &session_mode) {
             if !ddl::same_modes(&t.sql_mode, now) {
                 ui.add_space(6.0);
                 ui.label(RichText::new(format!("{} was created with sql_mode {:?}. Saving creates it with this session's {:?}, which can change how its body runs (|| or double quotes, for example).", t.name, t.sql_mode, now)).size(TXT_SMALL).color(WARNING()));
             }
         }
-        if let Some(steps) = &steps {
+        if let Some(steps) = steps {
             ui.add_space(8.0);
             caption(ui, "SQL TO RUN");
             ui.add_space(4.0);
             match steps {
-                Ok(s) => sql_block(ui, "trigger-sql", &ddl::script(s), 120.0),
+                Ok(_) => sql_block(ui, "trigger-sql", &memo.script, 120.0),
                 Err(e) => {
                     ui.label(RichText::new(e.as_str()).size(TXT_SMALL).color(if def.name.is_empty() { FAINT() } else { ALERT() }));
                 }
@@ -263,11 +284,41 @@ impl App {
             }
         }
         if save && steps.as_ref().is_some_and(|s| s.is_ok()) {
+            // Built again from the live list, so the order it keeps is the one the server has now.
+            let job = ddl::save_job(&st.triggers, live_trig, &def);
             self.run_trigger(job, if exists { "Saved the trigger" } else { "Created the trigger" });
+        }
+        if let Some(s) = self.trig_state_mut() {
+            s.trig_memo = Some(memo);
         }
     }
 
-    pub(super) fn run_trigger(&mut self, job: TrigJob, done: &str) {
+    /// The save job, the preview and the verdict on the draft, which walk the whole trigger and run again only when an input changes.
+    fn trig_memo(&self, st: &Structure, key: &str, live: Option<&Trigger>, def: &TrigDef, cols: &[&str]) -> TrigMemo {
+        let (d, _, m) = self.alter_env();
+        let table = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
+        let job = ddl::save_job(&st.triggers, live, def);
+        let dirty = live.is_none_or(|l| !same(&def_of(l), def));
+        let mut pg_warnings = Vec::new();
+        let steps = dirty.then(|| {
+            if d != db::sql::Dialect::Postgres {
+                return ddl::trigger_preview(d, m, &table, &job);
+            }
+            let owned: Vec<String> = cols.iter().map(|c| c.to_string()).collect();
+            if let Some(why) = super::sql_trig_pg::column_problem(def, &owned) {
+                return Err(why);
+            }
+            let schema = self.t().map(|t| self.sel_schema(&t.sel)).unwrap_or_default();
+            db::sql::ddl_pg_trig::preview(&schema, &table, &job).map(|(steps, warnings)| {
+                pg_warnings = warnings;
+                steps
+            })
+        });
+        let script = steps.as_ref().and_then(|s| s.as_ref().ok()).map(|s| ddl::script(s)).unwrap_or_default();
+        TrigMemo { key: key.to_string(), def: def.clone(), live: live.cloned(), n_trigs: st.triggers.len(), mode: m, cols: cols.iter().map(|c| c.to_string()).collect(), dirty, steps, script, pg_warnings }
+    }
+
+    fn run_trigger(&mut self, job: TrigJob, done: &str) {
         if self.demo {
             return self.ok("Offline demo: no database is connected.");
         }

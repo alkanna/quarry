@@ -578,7 +578,7 @@ impl App {
                         });
                     }
                     let matches_len = matches.len();
-                    let schema = if sql { self.sql_schema.get(&(id, ns.clone())).cloned() } else { None };
+                    let schema = if sql { self.sql_schema.get(&(id, ns.clone())) } else { None };
                     let est_rows = self.sql_rows.get(&(id, ns.clone()));
                     let group_hidden = [false, true].map(|v| sql && self.side_closed.contains(&(id, ns.clone(), v)));
                     for coll in matches {
@@ -621,7 +621,7 @@ impl App {
                                 p.text(egui::pos2(r.left(), r.center().y), egui::Align2::LEFT_CENTER, glyph, FontId::monospace(10.0), gc);
                             }
                             // The server's estimate, once the schema is loaded for autocomplete.
-                            let est = if sql && !is_view { est_rows.and_then(|m| m.get(coll.as_str()).copied()).or_else(|| schema.as_ref().and_then(|sc| sc.table(coll)).and_then(|t| t.rows)) } else { None };
+                            let est = if sql && !is_view { est_rows.and_then(|m| m.get(coll.as_str()).copied()).or_else(|| schema.and_then(|sc| sc.table(coll)).and_then(|t| t.rows)) } else { None };
                             let mut w = r.width() - 20.0;
                             if let Some(n) = est {
                                 let g = p.layout_no_wrap(rows_short(n), FontId::monospace(TXT_CAPTION), FAINT());

@@ -13,6 +13,28 @@ pub fn lit(s: &str, bs: bool) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
+/// A PostgreSQL string literal that reads the same whatever standard_conforming_strings is: with a backslash in it the text goes
+/// in `E'...'`, where backslashes are escapes under both settings, and without one a plain string is already the same.
+pub fn pg_lit(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 3);
+    pg_lit_into(&mut out, s);
+    out
+}
+
+/// `pg_lit` appended to `out`, for a writer that builds a long text and should not allocate per value.
+pub fn pg_lit_into(out: &mut String, s: &str) {
+    out.push_str(if s.contains('\\') { "E'" } else { "'" });
+    let mut last = 0;
+    // Both specials are ASCII, so the pieces between them are copied whole. A backslash can only be found in the E form.
+    for (i, c) in s.match_indices(['\'', '\\']) {
+        out.push_str(&s[last..i]);
+        out.push_str(if c == "'" { "''" } else { "\\\\" });
+        last = i + 1;
+    }
+    out.push_str(&s[last..]);
+    out.push('\'');
+}
+
 /// Bytes as hex digits, the part after `0x` or inside `X'..'`.
 pub fn hex_digits(b: &[u8], upper: bool) -> String {
     use std::fmt::Write;
@@ -334,6 +356,16 @@ impl Param {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_postgres_literal_reads_the_same_under_both_string_settings() {
+        for (text, want) in [("plain", "'plain'"), ("it's", "'it''s'"), (r"a\b", r"E'a\\b'"), (r"it's \", r"E'it''s \\'"), ("", "''"), ("é'\n", "'é''\n'")] {
+            assert_eq!(pg_lit(text), want);
+            let mut out = String::from("x=");
+            pg_lit_into(&mut out, text);
+            assert_eq!(out, format!("x={want}"));
+        }
+    }
+
     use super::*;
 
     #[test]

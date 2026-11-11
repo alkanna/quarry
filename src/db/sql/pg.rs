@@ -60,6 +60,8 @@ pub struct PgPools {
     /// What the first line of a Stop needs and a pid alone cannot give: the time each backend started, so a pid the server
     /// reused for another session is never cancelled. Kept per connection because two servers hand out the same pids.
     starts: Mutex<HashMap<u64, String>>,
+    /// The `BEGIN READ WRITE` a write opens with, built on the first write: the settings it holds never change for a pool.
+    begin_write: std::sync::OnceLock<String>,
 }
 
 /// Connections taken out of a pool for good (`PgPools::acquire_held`), counted per database. `pool.close()` does not know them,
@@ -143,7 +145,7 @@ struct Entry {
 
 impl PgPools {
     fn new(opts: PgConnectOptions, default_db: String, acquire: Duration, locals: Option<String>, timeout: String) -> PgPools {
-        PgPools { opts, default_db, acquire, idle: IDLE, per_db: PER_DB, max_pools: MAX_POOLS, locals, timeout, adv: PgSession::default(), live: Default::default(), held: Default::default(), starts: Default::default() }
+        PgPools { opts, default_db, acquire, idle: IDLE, per_db: PER_DB, max_pools: MAX_POOLS, locals, timeout, adv: PgSession::default(), live: Default::default(), held: Default::default(), starts: Default::default(), begin_write: Default::default() }
     }
 
     fn with_session(mut self, adv: PgSession) -> PgPools {
@@ -357,13 +359,16 @@ impl Db {
         }
     }
 
-    /// What a write transaction adds behind a pooler for the Advanced tab's settings: nothing on the session carries them
-    /// there. Its own timeouts and path are left out, because the writer sets those itself (`write_locals`).
-    pub(super) fn pg_writer_locals(&self) -> String {
-        match &self.pool {
-            Pool::Pg(p) if p.locals.is_some() => p.adv.locals(true),
-            _ => String::new(),
-        }
+    /// The statement a write transaction opens with: READ WRITE, then the timeouts and formats every write pins (`write_locals`),
+    /// then behind a pooler the Advanced tab's settings, which nothing on the session carries there. Its own timeouts and path are
+    /// left out of those, because the writer sets them itself.
+    pub(super) fn pg_begin_write(&self) -> &str {
+        let Pool::Pg(p) = &self.pool else { return "" };
+        p.begin_write.get_or_init(|| {
+            let extra = if p.locals.is_some() { p.adv.locals(true) } else { String::new() };
+            let sep = if extra.is_empty() { "" } else { "; " };
+            format!("BEGIN READ WRITE; {}{sep}{extra}", write_locals())
+        })
     }
 
     /// The same server as `self` with its pool built the way a pooler that refused startup options leaves it, for
@@ -381,6 +386,11 @@ impl Db {
 /// The output formats the read path expects. sqlx sends DateStyle "ISO, MDY", TimeZone UTC and extra_float_digits 2 itself;
 /// these are the ones it leaves out. One list feeds the startup options, the pooler fallback and every write transaction,
 /// so a setting added here cannot go missing behind a pooler.
+/// How long a plain write waits for a lock before it gives up, and how long a structure change, trigger edit or create waits (they
+/// name the session that held it, so they fail sooner). One place for both, so the messages in `db::errors` state the wait that applied.
+pub(crate) const WRITE_LOCK_SECS: u32 = 10;
+pub(crate) const LOCK_WAIT_SECS: u32 = 3;
+
 const FORMATS: [(&str, &str); 3] = [("bytea_output", "hex"), ("DateStyle", "ISO"), ("IntervalStyle", "postgres")];
 
 fn set_local(k: &str, v: &str) -> String {
@@ -443,10 +453,15 @@ pub(super) fn pooled_for_test(base: &Db, uri: &str) -> Db {
 /// What every write transaction starts with, whatever the session carries: no statement timeout, because an ALTER or a
 /// big update must not be cut by the limit meant for reads, a lock timeout so a write never queues behind another
 /// session's lock for ever, and the output formats the read path expects.
-pub(super) fn write_locals() -> String {
+pub(super) fn write_locals() -> &'static str {
+    static LOCALS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    LOCALS.get_or_init(build_write_locals)
+}
+
+fn build_write_locals() -> String {
     // The writers of literals (`value::lit` with no backslash escapes) are right only with this on, and a role or database
     // can set it off for the session.
-    let mut v = vec![set_timeout("0"), set_local("lock_timeout", "10s"), set_local("standard_conforming_strings", "on")];
+    let mut v = vec![set_timeout("0"), set_local("lock_timeout", &format!("{WRITE_LOCK_SECS}s")), set_local("standard_conforming_strings", "on")];
     v.extend(FORMATS.map(|(k, x)| set_local(k, x)));
     v.join("; ")
 }
@@ -516,10 +531,29 @@ pub(super) fn server_text(x: &sqlx::Error) -> String {
 /// set_config, never spliced, and the names are the allow-list's. The guard is read back after this, so nothing here can
 /// leave the session writable.
 pub(super) async fn apply_session(c: &mut sqlx::PgConnection, adv: &PgSession) -> Result<(), String> {
+    if adv.settings.is_empty() {
+        return Ok(());
+    }
+    // One statement for all of them, in the order of the list (a VALUES list is read in order), so a connect costs one round trip.
+    // When the server refuses one, the statement is undone as a whole, so they are tried one by one to say which.
+    if set_config_all(c, &adv.settings, false).await.is_ok() {
+        return Ok(());
+    }
     for (name, value) in &adv.settings {
         sqlx::query("SELECT set_config($1, $2, false)").persistent(false).bind(name.as_str()).bind(value.as_str()).execute(&mut *c).await.map_err(|x| refused(name, value, &x))?;
     }
     Ok(())
+}
+
+/// `set_config` for every setting in one statement, each name and value bound.
+async fn set_config_all(c: &mut sqlx::PgConnection, settings: &[(String, String)], local: bool) -> Result<(), sqlx::Error> {
+    let values = (0..settings.len()).map(|i| format!("(${}::text, ${}::text)", 2 * i + 1, 2 * i + 2)).collect::<Vec<_>>().join(", ");
+    let sql = format!("SELECT set_config(s.n, s.v, {local}) FROM (VALUES {values}) AS s(n, v)");
+    let mut q = sqlx::query(&sql).persistent(false);
+    for (name, value) in settings {
+        q = q.bind(name.as_str()).bind(value.as_str());
+    }
+    q.execute(&mut *c).await.map(|_| ())
 }
 
 fn refused(name: &str, value: &str, x: &sqlx::Error) -> String {
@@ -531,6 +565,15 @@ fn refused(name: &str, value: &str, x: &sqlx::Error) -> String {
 pub(super) async fn validate_session(c: &mut sqlx::PgConnection, adv: &PgSession) -> Vec<(String, String)> {
     let mut bad = Vec::new();
     if adv.settings.is_empty() || c.execute("BEGIN").await.is_err() {
+        return bad;
+    }
+    // Most often nothing is refused, and one statement says so. Otherwise it starts over to find each refused row.
+    if set_config_all(c, &adv.settings, true).await.is_ok() {
+        let _ = c.execute("ROLLBACK").await;
+        return bad;
+    }
+    let _ = c.execute("ROLLBACK").await;
+    if c.execute("BEGIN").await.is_err() {
         return bad;
     }
     for (name, value) in &adv.settings {
@@ -710,7 +753,7 @@ pub(super) async fn prepare(c: &mut sqlx::PgConnection, read_only: bool, id: &At
         return Ok(());
     }
     // The start time travels as text so no timestamp type has to round trip, and is compared as text on Stop.
-    let rows = c.fetch_all("SELECT pg_backend_pid()::text, (SELECT backend_start::text FROM pg_stat_activity WHERE pid = pg_backend_pid())").await?;
+    let rows = c.fetch_all("SELECT pg_backend_pid()::text, s.backend_start::text FROM pg_stat_get_activity(pg_backend_pid()) AS s").await?;
     if let Some(r) = rows.first() {
         let pid = num_at(r, 0).unwrap_or(0);
         if let (Some(start), Pool::Pg(p)) = (text_at(r, 1), &db.pool) {

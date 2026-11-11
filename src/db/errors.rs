@@ -373,11 +373,41 @@ fn pg_wording(code: Option<&str>, said: &str) -> Option<(String, String)> {
         "23502" => ("This column does not allow NULL", server),
         "23503" => ("Other rows depend on this value", server),
         "23514" => ("The value breaks a check constraint", server),
-        "55P03" => ("Another session holds a lock on this table", "The write waited 10 seconds for the lock and gave up. Nothing was changed. Try again when the other session is done.".to_string()),
+        "55P03" => ("Another session holds a lock on this table", format!("The write waited {} seconds for the lock and gave up. Nothing was changed. Try again when the other session is done.", super::sql::WRITE_LOCK_SECS)),
         "25006" => ("This connection is read-only", server),
         _ => return None,
     };
     Some((title.to_string(), hint))
+}
+
+/// PostgreSQL 55P03 (lock_not_available) for a table a structure change, trigger edit or create waited for. `secs` is the wait that
+/// applied, which differs from a plain write's (`WRITE_LOCK_SECS`), and the wording stays here with the other server errors.
+pub(crate) fn lock_held(name: &str, secs: u32) -> String {
+    format!("The table {name} is locked by another session that did not let go within {secs} seconds. Nothing was changed.")
+}
+
+/// 55P03 for the drop that reads what a CASCADE takes.
+pub(crate) fn lock_held_cascade(secs: u32) -> String {
+    format!("Another session holds a lock on it or on something that depends on it, and did not let go within {secs} seconds, so what the drop takes cannot be read right now. Try again in a moment.")
+}
+
+/// What 55006 (object_in_use) is about, for the wording of `in_use`.
+pub(crate) enum InUse<'a> {
+    Template,
+    Drop { name: &'a str, pooler: bool },
+    Undo { name: &'a str },
+}
+
+/// PostgreSQL 55006 on a database or its template: `server` is the server's own text, and the rest says what Quarry did about it.
+pub(crate) fn in_use(server: &str, what: InUse) -> String {
+    match what {
+        InUse::Template => format!("{server}\nAnother session is using the template database, and a CREATE DATABASE running at the same moment does. Try again in a moment."),
+        InUse::Drop { name, pooler } => {
+            let who = if pooler { "A connection pooler keeps a server connection open on it after Quarry's own are closed, or another session is using it" } else { "Another session or application is using it" };
+            format!("{server}\nQuarry closed its own connections to {name} first. {who}. Nothing was dropped. WITH (FORCE) in the confirmation disconnects them.")
+        }
+        InUse::Undo { name } => format!("Not undone: another session is connected to {name}.\n{server}"),
+    }
 }
 
 fn sentence(s: &str) -> String {
@@ -390,6 +420,22 @@ fn sentence(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_lock_timeout_says_the_wait_that_applied() {
+        assert!(lock_held("\"s\".\"t\"", 3).contains("within 3 seconds") && lock_held("t", 3).contains("Nothing was changed"));
+        assert!(lock_held_cascade(3).contains("3 seconds"));
+        let write = explain("error returned from database: 55P03: canceling statement due to lock timeout", &cx());
+        assert!(write.hint.contains(&format!("{} seconds", crate::db::sql::WRITE_LOCK_SECS)), "{}", write.hint);
+    }
+
+    #[test]
+    fn an_object_in_use_keeps_the_server_text_and_says_what_was_done() {
+        assert!(in_use("srv", InUse::Template).starts_with("srv\nAnother session is using the template"));
+        assert!(in_use("srv", InUse::Drop { name: "d", pooler: true }).contains("connection pooler"));
+        assert!(in_use("srv", InUse::Drop { name: "d", pooler: false }).contains("Another session or application"));
+        assert!(in_use("srv", InUse::Undo { name: "d" }).starts_with("Not undone: another session is connected to d."));
+    }
+
     use super::*;
 
     fn cx() -> ErrCtx {

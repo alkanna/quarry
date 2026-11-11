@@ -2,37 +2,29 @@
 //! QUARRY_TEST_POSTGRES13. Each test makes its own schema in the shared `quarry_test` database.
 
 use super::exec::Cells;
-use super::testing::{every_pg, LivePg};
+use super::testing::{every_pg, LivePg, PgFixture};
 use super::value::{parse_edit, Kind};
 use super::write::{NewRow, RowEdit, SqlUndo, CONFLICT, SEVERAL};
-use super::{Col, Db, Dialect, PageQuery};
+use super::{Col, Dialect, PageQuery};
 use crate::db::{Msg, Res, UndoAction, UndoKind};
 use mongodb::bson::{doc, Bson, Document};
 use sqlx::{Connection, Executor};
 
-struct T<'a> {
-    l: &'a LivePg,
-    db: Db,
-    pool: sqlx::PgPool,
-    schema: String,
+/// The shared fixture with the helpers of this file's tests.
+struct T<'a>(PgFixture<'a>);
+
+impl<'a> std::ops::Deref for T<'a> {
+    type Target = PgFixture<'a>;
+    fn deref(&self) -> &PgFixture<'a> {
+        &self.0
+    }
 }
 
 fn fixture<'a>(l: &'a LivePg, schema: &str, ddl: &str) -> T<'a> {
-    let db = l.quarry_test();
-    let pool = l.fixture_pool();
-    l.qsql(&pool, &format!("DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema}; SET search_path = {schema}; {ddl}"));
-    T { l, db, pool, schema: schema.into() }
+    T(PgFixture::new(l, schema, ddl))
 }
 
 impl T<'_> {
-    fn sql(&self, s: &str) {
-        self.l.qsql(&self.pool, &format!("SET search_path = {}; {s}", self.schema));
-    }
-
-    fn one(&self, s: &str) -> String {
-        self.l.qone(&self.pool, &format!("SET search_path = {}; {s}", self.schema))
-    }
-
     fn page(&self, table: &str) -> (Vec<Col>, Vec<String>, Vec<Document>) {
         self.l.w.sql_page(7, self.db.clone(), self.schema.clone(), table.into(), PageQuery::default(), 100, 0);
         let Msg::SqlCols { cols, pk, .. } = self.l.next() else { panic!("expected SqlCols") };

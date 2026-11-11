@@ -31,6 +31,8 @@ pub(super) struct StructState {
     pub(super) trig_new: bool,
     /// The name a trigger that is being made will have, so its draft is cleared when the structure lists it.
     pub(super) trig_made: Option<String>,
+    /// What the trigger editor shows for the draft, kept between frames.
+    pub(super) trig_memo: Option<sql_trig::TrigMemo>,
 }
 
 #[derive(Default)]
@@ -480,14 +482,15 @@ impl App {
         // A trigger that was just created is listed now, so its draft has done its job.
         if let Some(s) = self.tabs[self.cur].sql.as_mut() {
             let made = s.st.trig_made.clone();
-            if let Some(i) = s.st.trig.get(sql_trig::NEW).and_then(|nd| d.triggers.iter().position(|t| sql_trig::same(&sql_trig::def_of(t), nd) || made.as_deref() == Some(t.name.as_str()))) {
+            if let Some(i) = s.st.trig.get(sql_trig::NEW).and_then(|nd| d.triggers.iter().position(|t| (t.name == nd.name && sql_trig::same(&sql_trig::def_of(t), nd)) || made.as_deref() == Some(t.name.as_str()))) {
                 s.st.trig.remove(sql_trig::NEW);
                 (s.st.trig_new, sel[4], s.st.trig_made) = (false, Some(i), None);
             }
             sql_trig::prune_drafts(&mut s.st.trig, &d.triggers);
         }
         let creating = self.tabs[self.cur].sql.as_ref().is_some_and(|s| s.st.trig_new);
-        let drafts: HashMap<String, db::sql::ddl::TrigDef> = self.tabs[self.cur].sql.as_ref().map(|s| s.st.trig.clone()).unwrap_or_default();
+        let no_drafts = HashMap::new();
+        let drafts = self.tabs[self.cur].sql.as_ref().map_or(&no_drafts, |s| &s.st.trig);
         let key = self.trig_key(&d, sel[4]);
         let existing = key.as_ref().filter(|k| !k.is_empty()).cloned();
         let mut left = Vec::new();

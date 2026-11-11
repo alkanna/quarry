@@ -158,6 +158,25 @@ impl LivePg {
         })
     }
 
+    /// Drops and creates each of `schemas` on `pool`, then runs `ddl`, which can create what a test reads and writes.
+    pub fn reset_schemas(&self, pool: &sqlx::PgPool, schemas: &[&str], ddl: &str) {
+        let drops: String = schemas.iter().map(|s| format!("DROP SCHEMA IF EXISTS {n} CASCADE; CREATE SCHEMA {n};", n = schema_ident(s))).collect();
+        self.qsql(pool, &format!("{drops} {ddl}"));
+    }
+
+    /// Fresh schemas of the shared database, with `ddl` run in the first as the search_path of the returned pool, and the `Db`
+    /// pointing at that database.
+    pub fn fresh_schemas(&self, schemas: &[&str], ddl: &str) -> (Db, sqlx::PgPool) {
+        let db = self.quarry_test();
+        let pool = self.fixture_pool();
+        self.reset_schemas(&pool, schemas, &format!("SET search_path = {}; {ddl}", schema_ident(schemas[0])));
+        (db, pool)
+    }
+
+    pub fn fresh_schema(&self, schema: &str, ddl: &str) -> (Db, sqlx::PgPool) {
+        self.fresh_schemas(&[schema], ddl)
+    }
+
     /// The next message the worker sends.
     pub fn next(&self) -> Msg {
         self.rx.recv_timeout(std::time::Duration::from_secs(40)).expect("worker answer")
@@ -194,4 +213,50 @@ pub fn live_pgbouncer() -> Option<LivePg> {
     let l = live_pg(PGBOUNCER_ENV)?;
     assert!(l.db.pooler(), "the PgBouncer should have refused the startup options");
     Some(l)
+}
+
+/// `name` as a schema identifier: left bare when it is a plain lowercase name, quoted otherwise.
+pub fn schema_ident(name: &str) -> String {
+    if !name.is_empty() && !name.starts_with(|c: char| c.is_ascii_digit()) && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
+        return name.to_string();
+    }
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// A fresh schema of the shared database with its own pool, dropped again when the test ends. A schema a failed test left behind is
+/// dropped by the next run's fixture.
+pub struct PgFixture<'a> {
+    pub l: &'a LivePg,
+    pub db: Db,
+    pub pool: sqlx::PgPool,
+    pub schema: String,
+}
+
+impl<'a> PgFixture<'a> {
+    pub fn new(l: &'a LivePg, schema: &str, ddl: &str) -> Self {
+        let (db, pool) = l.fresh_schema(schema, ddl);
+        PgFixture { l, db, pool, schema: schema.into() }
+    }
+
+    /// Runs statements with the schema as the search_path.
+    pub fn sql(&self, s: &str) {
+        self.l.qsql(&self.pool, &format!("SET search_path = {}; {s}", schema_ident(&self.schema)));
+    }
+
+    /// The first cell of the first row of a query, as text.
+    pub fn one(&self, s: &str) -> String {
+        self.l.qone(&self.pool, &format!("SET search_path = {}; {s}", schema_ident(&self.schema)))
+    }
+}
+
+impl Drop for PgFixture<'_> {
+    fn drop(&mut self) {
+        let _ = self.l.w.rt.block_on(async { sqlx::raw_sql(&format!("DROP SCHEMA IF EXISTS {} CASCADE", schema_ident(&self.schema))).execute(&self.pool).await });
+    }
+}
+
+/// A name that no other test or run uses, for what a test makes on a server shared with the rest: `base`, the process id and a counter.
+pub fn unique_name(base: &str) -> String {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    format!("{base}_{}_{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
 }

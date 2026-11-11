@@ -1069,6 +1069,29 @@ pub(super) struct ConnForm {
     pub(super) pg_tested: bool,
     /// PostgreSQL: (setting, the value that was tested, the server's refusal) from the last Test.
     pub(super) pg_refused: Vec<(String, String, String)>,
+    /// PostgreSQL: `advanced()` for the inputs it was made from, since the form asks every frame and validating every row is not free.
+    pub(super) pg_adv: Option<(PgAdvKey, Option<String>)>,
+    /// PostgreSQL: the shape check and allow-list entry of each setting row, kept while the row's name and value stay as they are.
+    pub(super) pg_checks: Vec<RowCheck>,
+}
+
+/// What the PostgreSQL Advanced tab is made from.
+#[derive(PartialEq)]
+pub(super) struct PgAdvKey {
+    zone_kind: ZoneKind,
+    zone_text: String,
+    rows: Vec<(String, String)>,
+    path: Vec<String>,
+    connect: String,
+    idle: String,
+}
+
+/// The verdict of the form on one session setting row.
+pub(super) struct RowCheck {
+    pub name: String,
+    pub value: String,
+    pub error: Option<String>,
+    pub def: Option<&'static db::sql::pg_advanced::Def>,
 }
 
 /// The rows of the PostgreSQL session settings that are always there, before the ones added from the picker.
@@ -1132,6 +1155,19 @@ impl ConnForm {
         let a = db::sql::Advanced { zone: self.time_zone(), pg_settings, search_path: self.pg_path.clone(), connect_secs: secs(&self.t_connect, "Connect")?, idle_secs: secs(&self.t_idle, "Idle")?, ..Default::default() };
         db::sql::pg_advanced::PgSession::new(&a, db::sql::advanced::system_zone_name())?;
         Ok(a)
+    }
+
+    /// What is wrong with the Advanced tab, if anything. PostgreSQL validates every row, so it runs again only when what the tab is made from changed.
+    pub(super) fn advanced_error(&mut self) -> Option<String> {
+        if self.engine != db::sql::Engine::Postgres {
+            return self.advanced().err();
+        }
+        let same = self.pg_adv.as_ref().is_some_and(|(k, _)| k.zone_kind == self.zone_kind && k.zone_text == self.zone_text && k.rows == self.pg_rows && k.path == self.pg_path && k.connect == self.t_connect && k.idle == self.t_idle);
+        if !same {
+            let key = PgAdvKey { zone_kind: self.zone_kind, zone_text: self.zone_text.clone(), rows: self.pg_rows.clone(), path: self.pg_path.clone(), connect: self.t_connect.clone(), idle: self.t_idle.clone() };
+            self.pg_adv = Some((key, self.advanced().err()));
+        }
+        self.pg_adv.as_ref().and_then(|(_, e)| e.clone())
     }
 
     /// The form's Advanced tab as saved settings, or the first thing wrong with it.

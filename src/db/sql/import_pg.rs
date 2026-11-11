@@ -14,7 +14,7 @@
 //! text (`1.5` and `1.50`, `1 mon` and `30 days`) or missing (point, json[]), and refuses, with nothing changed, when a row
 //! no longer holds what the import left.
 
-use super::csv::{TCol, TableInfo};
+use super::csv::{Mapping, TCol, TableInfo};
 use super::exec::{Cells, Conn, SqlRow, Tx};
 use super::import::{Done, Dup, ImportPlan, Progress, UNDO_MAX_ROWS};
 use super::value::Param;
@@ -34,8 +34,8 @@ const BATCH_BYTES: usize = 4 << 20;
 /// What an undo may hold in memory, so a file of large cells records none instead of filling it.
 const UNDO_MAX_BYTES: usize = 64 << 20;
 
-pub const NEEDS_KEY: &str = "Update needs a primary key, and this table has none. Choose Skip or Stop.";
-pub const DEFERRABLE_KEY: &str = "The primary key is DEFERRABLE, which ON CONFLICT does not support, so Skip and Update cannot work on this table. Choose Stop.";
+pub(super) const NEEDS_KEY: &str = "Update needs a primary key, and this table has none. Choose Skip or Stop.";
+pub(super) const DEFERRABLE_KEY: &str = "The primary key is DEFERRABLE, which ON CONFLICT does not support, so Skip and Update cannot work on this table. Choose Stop.";
 
 /// How the duplicate choice is written in the statement.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -74,15 +74,10 @@ pub fn batch_rows(cols: usize) -> usize {
     BATCH_ROWS.min(MAX_PARAMS / cols.max(1)).max(1)
 }
 
-/// Whether the rows of this import can be taken out again, or why not. The dialog shows the reason before anything starts.
-pub fn undo_plan(info: &TableInfo, _dup: Dup, rows: u64) -> Result<(), String> {
-    if info.pk.is_empty() {
-        return Err("This table has no primary key, so the new rows could not be found again. Undo is not available.".into());
-    }
-    if rows > UNDO_MAX_ROWS {
-        return Err(format!("Over {UNDO_MAX_ROWS} rows: no undo is recorded for an import this large."));
-    }
-    Ok(())
+/// How the duplicate choice reads in the dialog for a PostgreSQL table: what the statement does with this mapping.
+pub fn clause_text(info: &TableInfo, map: &Mapping, dup: Dup) -> &'static str {
+    let has_set = map.targets().iter().any(|(_, t)| !info.pk.contains(&info.cols[*t].name));
+    Clause::of(dup, !info.pk.is_empty(), has_set).text()
 }
 
 /// A row as the server printed it: the key columns, then the other columns the file fills, NULL as None.
@@ -143,22 +138,56 @@ fn size_of(row: &Cellz) -> usize {
 /// rows whose values are `flat`, row by row. A NULL for a column that counts up by itself is written DEFAULT, as MySQL takes
 /// a NULL there, so the server hands out the number. `pk` is the table's primary key, the target of ON CONFLICT. `flag` adds
 /// `xmax = 0` as the last RETURNING value: true for a row the statement inserted, false for one it updated.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn insert_sql(schema: &str, table: &str, cols: &[&TCol], flat: Vec<Param>, rows: usize, dup: Dup, pk: &[String], returning: &[String], flag: bool) -> (String, Vec<Param>) {
-    let d = Dialect::Postgres;
-    let list = cols.iter().map(|c| d.quote_ident(&c.name)).collect::<Vec<_>>().join(", ");
-    let (mut params, mut tuples) = (Vec::with_capacity(flat.len()), Vec::with_capacity(rows));
+    let (params, defaults) = bind_values(cols, flat, rows);
+    (insert_text(schema, table, cols, &defaults, rows, dup, pk, returning, flag), params)
+}
+
+/// The values that are bound, and which cells are written DEFAULT instead (a NULL for a column that counts up by itself, or a
+/// cell the row lacks). The second is empty when no column counts up by itself and no cell is missing, so a batch of the usual
+/// shape costs no list.
+fn bind_values(cols: &[&TCol], flat: Vec<Param>, rows: usize) -> (Vec<Param>, Vec<bool>) {
+    let auto = cols.iter().any(|c| c.auto_increment);
+    if !auto && flat.len() == rows * cols.len() {
+        return (flat, Vec::new());
+    }
+    let (mut params, mut defaults) = (Vec::with_capacity(flat.len()), Vec::with_capacity(rows * cols.len()));
     let mut it = flat.into_iter();
     for _ in 0..rows {
-        let cells: Vec<String> = cols
-            .iter()
-            .map(|c| match it.next() {
-                Some(Param::Null) if c.auto_increment => "DEFAULT".to_string(),
+        for c in cols {
+            match it.next() {
+                Some(Param::Null) if c.auto_increment => defaults.push(true),
                 Some(p) => {
                     params.push(p);
-                    format!("CAST(${} AS {})", params.len(), c.cast_type)
+                    defaults.push(false);
                 }
-                None => "DEFAULT".to_string(),
+                None => defaults.push(true),
+            }
+        }
+    }
+    (params, defaults)
+}
+
+/// The statement text of `insert_sql`, which depends only on the shape of the batch: how many rows, which cells are DEFAULT
+/// (`defaults`, empty for none), the duplicate choice and what RETURNING gives. An import writes batches of one shape over and
+/// over, so it builds the text once for each (`Imp::sql_for`).
+#[allow(clippy::too_many_arguments)]
+fn insert_text(schema: &str, table: &str, cols: &[&TCol], defaults: &[bool], rows: usize, dup: Dup, pk: &[String], returning: &[String], flag: bool) -> String {
+    let d = Dialect::Postgres;
+    let list = cols.iter().map(|c| d.quote_ident(&c.name)).collect::<Vec<_>>().join(", ");
+    let (mut n, mut tuples) = (0, Vec::with_capacity(rows));
+    for r in 0..rows {
+        let cells: Vec<String> = cols
+            .iter()
+            .enumerate()
+            .map(|(j, c)| {
+                if defaults.get(r * cols.len() + j).copied().unwrap_or(false) {
+                    return "DEFAULT".to_string();
+                }
+                n += 1;
+                format!("CAST(${n} AS {})", c.cast_type)
             })
             .collect();
         tuples.push(format!("({})", cells.join(", ")));
@@ -181,7 +210,7 @@ pub fn insert_sql(schema: &str, table: &str, cols: &[&TCol], flat: Vec<Param>, r
     if !ret.is_empty() {
         sql.push_str(&format!(" RETURNING {}", ret.join(", ")));
     }
-    (sql, params)
+    sql
 }
 
 /// The rows of the batch that already exist, read with their old values and locked until the import ends, so what is saved
@@ -276,6 +305,8 @@ struct Imp<'a> {
     rec: Rec,
     why_not: Option<String>,
     flat: Vec<Param>,
+    /// The statement text of each batch shape seen so far: rows, DEFAULT cells and whether RETURNING carries the insert flag.
+    texts: HashMap<(usize, Vec<bool>, bool), Arc<str>>,
     in_batch: usize,
     batch_bytes: usize,
     first_row: u64,
@@ -318,7 +349,15 @@ impl Imp<'_> {
             }
         }
         let returning: &[String] = if self.rec.on { &self.rec_names } else { &[] };
-        let (sql, params) = insert_sql(self.schema, self.table, &self.mapped, std::mem::take(&mut self.flat), n, plan.dup, &plan.info.pk, returning, flag);
+        let (params, defaults) = bind_values(&self.mapped, std::mem::take(&mut self.flat), n);
+        let sql = match self.texts.get(&(n, defaults.clone(), flag)) {
+            Some(t) => Arc::clone(t),
+            None => {
+                let t: Arc<str> = insert_text(self.schema, self.table, &self.mapped, &defaults, n, plan.dup, &plan.info.pk, returning, flag).into();
+                self.texts.insert((n, defaults, flag), Arc::clone(&t));
+                t
+            }
+        };
         let started = Instant::now();
         let rows = if flag {
             let rows = tx.fetch_bound(&sql, &params).await;
@@ -405,17 +444,16 @@ async fn import_on(c: &mut Conn, db: &Db, schema: &str, table: &str, plan: &Impo
     let mut why_not = None;
     let mut on = plan.want_undo;
     if on {
-        if let Err(w) = undo_plan(&plan.info, plan.dup, 0) {
+        if let Err(w) = super::import::undo_plan(&plan.info, &plan.map, plan.dup, 0) {
             (on, why_not) = (false, Some(w));
         }
     }
     let rec = Rec { on, track: plan.dup == Dup::Update, n_pk: pk.len(), inserted: Vec::new(), ins_at: HashMap::new(), updated: Vec::new(), upd_at: HashMap::new(), bytes: 0 };
     let mut tx = c.begin_write(db).await.map_err(se)?;
     // The types in the statements were read under this path, so they resolve to the same types here.
-    let path = db.pg_set_path(schema);
-    tx.exec_bound(&path, &[]).await.map_err(se)?;
+    super::ddl_pg::set_path(&mut tx, db, schema).await.map_err(se)?;
     let only = is_plain_table(&mut tx, schema, table).await?;
-    let mut imp = Imp { db, schema, table, plan, mapped, key_at, rec_names, has_set, only, rec, why_not, flat: Vec::new(), in_batch: 0, batch_bytes: 0, first_row: 0, seen: HashSet::new(), inserted_n: 0 };
+    let mut imp = Imp { db, schema, table, plan, mapped, key_at, rec_names, has_set, only, rec, why_not, flat: Vec::new(), texts: HashMap::new(), in_batch: 0, batch_bytes: 0, first_row: 0, seen: HashSet::new(), inserted_n: 0 };
     let done = read_file(&mut tx, &mut imp, prog, cancel, per).await;
     let rows = match done {
         Ok(rows) => rows,
@@ -424,6 +462,8 @@ async fn import_on(c: &mut Conn, db: &Db, schema: &str, table: &str, plan: &Impo
             return Err(x);
         }
     };
+    // Read before the COMMIT, so the oids are those of the table this import wrote to.
+    let ids = if imp.rec.on && !(imp.rec.inserted.is_empty() && imp.rec.updated.is_empty()) { super::ddl_pg::ids_in(&mut tx, schema, table).await } else { super::write::PgIds::default() };
     // An error the server sends for COMMIT (a deferred constraint, a cancel) means the transaction was rolled back. Only a lost
     // connection leaves it open whether the commit went through.
     tx.commit().await.map_err(|x| match x.as_database_error() {
@@ -431,7 +471,6 @@ async fn import_on(c: &mut Conn, db: &Db, schema: &str, table: &str, plan: &Impo
         None => format!("The server did not confirm the import ({}). Check the table: it may or may not have been applied.", se(x)),
     })?;
     let Imp { rec, why_not, inserted_n, mapped, rec_names, only, .. } = imp;
-    let ids = if rec.on && !(rec.inserted.is_empty() && rec.updated.is_empty()) { super::create_pg::ids_of(db, schema, table).await } else { super::write::PgIds::default() };
     let undo = (rec.on && !(rec.inserted.is_empty() && rec.updated.is_empty())).then(|| {
         let by_name = |n: &str| mapped.iter().copied().chain(plan.info.cols.iter()).find(|c| c.name == n).map(ucol);
         let cols: Vec<UCol> = rec_names.iter().filter_map(|n| by_name(n)).collect();
@@ -519,7 +558,7 @@ fn values(types: &[&str], rows: &[Vec<&Option<String>>]) -> (String, Vec<Param>)
 }
 
 /// The UPDATE that puts back the old values of rows, each only while it holds what the import left.
-pub fn restore_sql(schema: &str, table: &str, u: &ImportUndo, rows: &[(Cellz, Cellz)]) -> (String, Vec<Param>) {
+pub(super) fn restore_sql(schema: &str, table: &str, u: &ImportUndo, rows: &[(Cellz, Cellz)]) -> (String, Vec<Param>) {
     let d = Dialect::Postgres;
     let n_pk = u.pk.len();
     let rest: Vec<&UCol> = u.cols[n_pk..].iter().collect();
@@ -535,7 +574,7 @@ pub fn restore_sql(schema: &str, table: &str, u: &ImportUndo, rows: &[(Cellz, Ce
 }
 
 /// The DELETE that removes inserted rows, each only while every value is still the one the import stored.
-pub fn remove_sql(schema: &str, table: &str, u: &ImportUndo, rows: &[Cellz]) -> (String, Vec<Param>) {
+pub(super) fn remove_sql(schema: &str, table: &str, u: &ImportUndo, rows: &[Cellz]) -> (String, Vec<Param>) {
     let d = Dialect::Postgres;
     let n_pk = u.pk.len();
     let types: Vec<&str> = u.cols.iter().enumerate().map(|(i, c)| if i < n_pk { c.ty.as_str() } else { "text" }).collect();
@@ -551,8 +590,7 @@ pub fn remove_sql(schema: &str, table: &str, u: &ImportUndo, rows: &[Cellz]) -> 
 pub async fn undo(db: &Db, schema: &str, table: &str, u: &ImportUndo, read_only: bool) -> Res<String> {
     let mut c = writer_conn(db, schema, read_only).await?;
     let mut tx = c.begin_write(db).await.map_err(se)?;
-    let path = db.pg_set_path(schema);
-    tx.exec_bound(&path, &[]).await.map_err(se)?;
+    super::ddl_pg::set_path(&mut tx, db, schema).await.map_err(se)?;
     let res = undo_in(db, schema, table, u, &mut tx).await;
     match res {
         Ok(()) => tx.commit().await.map_err(se)?,
@@ -704,6 +742,8 @@ mod tests {
     #[test]
     fn undo_needs_a_key_and_a_file_that_fits() {
         let mut info = TableInfo { cols: vec![col("id", "integer", true)], pk: vec!["id".into()], engine: String::new(), pg: true, pk_deferrable: false };
+        let map = Mapping { map: vec![Some(0)], fmts: Vec::new(), empty_null: true };
+        let undo_plan = |info: &TableInfo, dup, rows| super::super::import::undo_plan(info, &map, dup, rows);
         assert!(undo_plan(&info, Dup::Update, 10).is_ok() && undo_plan(&info, Dup::Skip, 10).is_ok());
         assert!(undo_plan(&info, Dup::Stop, UNDO_MAX_ROWS + 1).unwrap_err().contains("Over"));
         info.pk.clear();

@@ -48,15 +48,30 @@ fn error_line(ui: &mut egui::Ui, text: &str) {
 }
 
 /// What the form says about one row: its own shape check, or what the server answered on the last Test for this value.
-fn row_error(f: &ConnForm, name: &str, value: &str) -> Option<String> {
+fn row_error(f: &ConnForm, check: &RowCheck) -> Option<String> {
+    check.error.clone().or_else(|| {
+        let v = check.value.trim();
+        f.pg_refused.iter().find(|(n, tested, _)| *n == check.name && tested == v).map(|(_, _, m)| m.clone())
+    })
+}
+
+/// The check of row `i`, made again only when its name or value is not the one the last check saw.
+fn check_row(f: &mut ConnForm, i: usize) {
+    let (name, value) = &f.pg_rows[i];
+    if f.pg_checks.get(i).is_some_and(|c| c.name == *name && c.value == *value) {
+        return;
+    }
     let v = value.trim();
-    if v.is_empty() {
-        return None;
-    }
-    if let Err(m) = adv::check_value(name, v) {
-        return Some(m);
-    }
-    f.pg_refused.iter().find(|(n, tested, _)| n == name && tested == v).map(|(_, _, m)| m.clone())
+    let error = if v.is_empty() { None } else { adv::check_value(name, v).err() };
+    let check = RowCheck { name: name.clone(), value: value.clone(), error, def: adv::def(name) };
+    f.pg_checks.resize_with(f.pg_rows.len().max(f.pg_checks.len()), || RowCheck { name: String::new(), value: String::new(), error: None, def: None });
+    f.pg_checks[i] = check;
+}
+
+/// The allow-list and the kept list lowercased once, in the order of `adv::ALLOWED` and `adv::KEPT`, for the picker's filter.
+fn lowered() -> &'static (Vec<[String; 3]>, Vec<[String; 2]>) {
+    static LOWER: std::sync::OnceLock<(Vec<[String; 3]>, Vec<[String; 2]>)> = std::sync::OnceLock::new();
+    LOWER.get_or_init(|| (adv::ALLOWED.iter().map(|d| [d.name.to_ascii_lowercase(), d.desc.to_ascii_lowercase(), d.group.label().to_ascii_lowercase()]).collect(), adv::KEPT.iter().map(|(n, why)| [n.to_ascii_lowercase(), why.to_ascii_lowercase()]).collect()))
 }
 
 fn search_path(ui: &mut egui::Ui, f: &mut ConnForm) {
@@ -167,12 +182,12 @@ fn time_zone_row(ui: &mut egui::Ui, f: &mut ConnForm) {
     }
 }
 
-fn hint_of(name: &str, default_s: u64) -> String {
+fn hint_of(name: &str, def: Option<&adv::Def>, default_s: u64) -> String {
     match name {
         "statement_timeout" => format!("empty follows Settings ({default_s} s); a value here wins"),
         "lock_timeout" => "reads and queries only; edits and imports keep 10s, structure and trigger changes 3s".into(),
         "application_name" => "shown in pg_stat_activity".into(),
-        _ => adv::def(name).map(|d| d.desc.to_string()).unwrap_or_default(),
+        _ => def.map(|d| d.desc.to_string()).unwrap_or_default(),
     }
 }
 
@@ -190,9 +205,10 @@ fn session_rows(ui: &mut egui::Ui, f: &mut ConnForm, default_s: u64) {
         for i in 0..f.pg_rows.len() {
             let name = f.pg_rows[i].0.clone();
             let fixed = PG_FIXED.contains(&name.as_str());
-            let hint = adv::def(&name).map_or("", |d| d.hint).to_string();
-            let hint = if name == "statement_timeout" { format!("{default_s}s") } else { hint };
-            let err = row_error(f, &name, &f.pg_rows[i].1);
+            check_row(f, i);
+            let def = f.pg_checks[i].def;
+            let hint = if name == "statement_timeout" { format!("{default_s}s") } else { def.map_or("", |d| d.hint).to_string() };
+            let err = row_error(f, &f.pg_checks[i]);
             ui.horizontal(|ui| {
                 ui.allocate_ui_with_layout(egui::vec2(NAME_W, BUTTON_H), egui::Layout::left_to_right(egui::Align::Center), |ui| ui.label(RichText::new(&name).monospace().color(BRIGHT())));
                 let r = ui.add(egui::TextEdit::singleline(&mut f.pg_rows[i].1).hint_text(RichText::new(hint).color(FAINT())).font(egui::TextStyle::Monospace).desired_width(VALUE_W).margin(FIELD_MARGIN));
@@ -204,7 +220,7 @@ fn session_rows(ui: &mut egui::Ui, f: &mut ConnForm, default_s: u64) {
                     remove = Some(i);
                 }
                 if err.is_none() {
-                    ui.add(egui::Label::new(RichText::new(hint_of(&name, default_s)).size(TXT_SMALL).color(FAINT())).truncate());
+                    ui.add(egui::Label::new(RichText::new(hint_of(&name, def, default_s)).size(TXT_SMALL).color(FAINT())).truncate());
                 }
             });
             if let Some(e) = err {
@@ -256,9 +272,10 @@ fn picker(ui: &mut egui::Ui, f: &mut ConnForm) {
             }
         });
         let q = filter.trim().to_ascii_lowercase();
-        let hit = |s: &str| q.is_empty() || s.to_ascii_lowercase().contains(&q);
+        let hit = |s: &str| q.is_empty() || s.contains(&q);
         let present = |n: &str| f.pg_rows.iter().any(|(r, _)| r == n);
-        let matches: Vec<&adv::Def> = adv::ALLOWED.iter().filter(|d| !present(d.name) && (hit(d.name) || hit(d.desc) || hit(d.group.label()))).collect();
+        let (allowed_low, kept_low) = lowered();
+        let matches: Vec<&adv::Def> = adv::ALLOWED.iter().zip(allowed_low).filter(|(d, low)| !present(d.name) && low.iter().any(|s| hit(s))).map(|(d, _)| d).collect();
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             caption(ui, "ALLOWED");
@@ -275,7 +292,7 @@ fn picker(ui: &mut egui::Ui, f: &mut ConnForm) {
                 small(ui, "Nothing allowed matches. A setting that is not listed is never sent.", FAINT());
             }
         });
-        let kept: Vec<&(&str, &str)> = adv::KEPT.iter().filter(|(n, why)| hit(n) || hit(why)).collect();
+        let kept: Vec<&(&str, &str)> = adv::KEPT.iter().zip(kept_low).filter(|(_, low)| low.iter().any(|s| hit(s))).map(|(k, _)| k).collect();
         if !kept.is_empty() {
             ui.add_space(6.0);
             ui.horizontal(|ui| {

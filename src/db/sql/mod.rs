@@ -29,7 +29,7 @@ pub mod structure;
 pub mod write;
 pub mod ddl;
 mod ddl_my;
-mod ddl_pg;
+pub mod ddl_pg;
 pub mod ddl_pg_trig;
 pub mod create;
 pub mod create_pg;
@@ -39,7 +39,7 @@ pub mod format;
 pub mod value;
 pub mod csv;
 pub mod import;
-mod import_pg;
+pub mod import_pg;
 pub mod dump;
 mod pg_script;
 mod pg_dump;
@@ -59,6 +59,7 @@ pub use structure::Structure;
 pub use pg_read::PgSchema;
 pub use relay::{Answer, Arg, Relay};
 pub use run::RunHandle;
+pub(crate) use pg::WRITE_LOCK_SECS;
 
 /// A server error worded for `db::explain`: the SQLSTATE, the message, the detail and hint when the server sends
 /// them, and where in the user's statement it points. `shift` is how many characters were put in front of the

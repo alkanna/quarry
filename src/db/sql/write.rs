@@ -390,7 +390,7 @@ fn pk_of(row: &Document) -> Document {
     row.get_document("_id").cloned().unwrap_or_default()
 }
 
-async fn apply_updates(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[String], edits: &[RowEdit], read_only: bool) -> Res<()> {
+async fn apply_updates(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[String], edits: &[RowEdit], read_only: bool) -> Res<PgIds> {
     for ed in edits {
         check_key(pk, &ed.pk)?;
     }
@@ -415,13 +415,14 @@ async fn apply_updates(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[S
             return Err(SEVERAL.into());
         }
     }
+    let ids = super::ddl_pg::ids_in(&mut tx, schema, table).await;
     tx.commit().await.map_err(se)?;
-    Ok(())
+    Ok(ids)
 }
 
 /// Deletes by key and returns the keys that really went: a row someone else deleted first is not
 /// ours to bring back on undo.
-async fn apply_deletes(db: &Db, schema: &str, table: &str, cols: &[Col], key_cols: &[String], pks: &[Document], read_only: bool) -> Res<Vec<Document>> {
+async fn apply_deletes(db: &Db, schema: &str, table: &str, cols: &[Col], key_cols: &[String], pks: &[Document], read_only: bool) -> Res<(Vec<Document>, PgIds)> {
     for pk in pks {
         check_key(key_cols, pk)?;
     }
@@ -445,13 +446,14 @@ async fn apply_deletes(db: &Db, schema: &str, table: &str, cols: &[Col], key_col
             gone.push(pk.clone());
         }
     }
+    let ids = if gone.is_empty() { PgIds::default() } else { super::ddl_pg::ids_in(&mut tx, schema, table).await };
     tx.commit().await.map_err(se)?;
-    Ok(gone)
+    Ok((gone, ids))
 }
 
 /// Inserts the rows and returns each one's key document when it is known: the values given for the key
 /// columns, or LAST_INSERT_ID() for an auto-increment key left out.
-async fn apply_inserts(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[String], rows: &[NewRow], read_only: bool, restore: bool) -> Res<Vec<Option<Document>>> {
+async fn apply_inserts(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[String], rows: &[NewRow], read_only: bool, restore: bool) -> Res<(Vec<Option<Document>>, PgIds)> {
     if db.dialect == Dialect::Postgres {
         return apply_inserts_pg(db, schema, table, cols, pk, rows, read_only, restore).await;
     }
@@ -483,8 +485,9 @@ async fn apply_inserts(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[S
         }
         keys.push((key.len() == pk.len() && !pk.is_empty()).then_some(key));
     }
+    let ids = if keys.iter().any(|k| k.is_some()) { super::ddl_pg::ids_in(&mut tx, schema, table).await } else { PgIds::default() };
     tx.commit().await.map_err(se)?;
-    Ok(keys)
+    Ok((keys, ids))
 }
 
 /// `apply_inserts` on PostgreSQL. The keys come from `RETURNING` (as text, read back by kind), so a key the server made,
@@ -492,7 +495,7 @@ async fn apply_inserts(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[S
 /// left out. An identity column that is always generated is left out too, except when `restore` puts back a deleted row:
 /// then its old value is written with OVERRIDING SYSTEM VALUE so the row returns under the key it had.
 #[allow(clippy::too_many_arguments)]
-async fn apply_inserts_pg(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[String], rows: &[NewRow], read_only: bool, restore: bool) -> Res<Vec<Option<Document>>> {
+async fn apply_inserts_pg(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[String], rows: &[NewRow], read_only: bool, restore: bool) -> Res<(Vec<Option<Document>>, PgIds)> {
     let mut c = writer_conn(db, schema, read_only).await?;
     let mut tx = c.begin_write(db).await.map_err(se)?;
     let mut keys = Vec::new();
@@ -529,8 +532,9 @@ async fn apply_inserts_pg(db: &Db, schema: &str, table: &str, cols: &[Col], pk: 
         }
         keys.push(doc.then_some(kept));
     }
+    let ids = if keys.iter().any(|k| k.is_some()) { super::ddl_pg::ids_in(&mut tx, schema, table).await } else { PgIds::default() };
     tx.commit().await.map_err(se)?;
-    Ok(keys)
+    Ok((keys, ids))
 }
 
 /// The undo of `apply_inserts_pg`: each row goes only while it still holds the values that were written, so a row someone
@@ -602,7 +606,7 @@ fn plural(n: usize, word: &str) -> String {
 }
 
 /// `database` is the PostgreSQL database the write ran in (`Db::pg_database`), empty on MySQL.
-/// `ids` is the database and table oids read right after the write (`create_pg::ids_of`), empty on MySQL.
+/// `ids` is the database and table oids read inside the write transaction (`ddl_pg::ids_in`), empty on MySQL.
 pub(super) fn action(database: String, ids: PgIds, conn: u64, schema: &str, table: &str, cols: &[Col], undo: SqlUndo) -> UndoAction {
     UndoAction { at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database, cols: cols.to_vec(), undo, ids } }
 }
@@ -616,7 +620,10 @@ impl Worker {
         self.rt.spawn(async move {
             let res = apply_updates(&db, &schema, &table, &cols, &pk, &edits, read_only).await;
             let n = edits.len();
-            let ids = if res.is_ok() { super::create_pg::ids_of(&db, &schema, &table).await } else { PgIds::default() };
+            let (res, ids) = match res {
+                Ok(ids) => (Ok(()), ids),
+                Err(e) => (Err(e), PgIds::default()),
+            };
             let mut undo = res.is_ok().then(|| action(db.pg_database(), ids, conn, &schema, &table, &cols, SqlUndo::Update(edits)));
             for tag in tags {
                 let res = res.clone().map(|_| format!("Saved {}", plural(n, "row")));
@@ -633,10 +640,9 @@ impl Worker {
             let at = (schema.clone(), table.clone());
             let pks: Vec<Document> = rows.iter().map(pk_of).collect();
             let (res, undo) = match apply_deletes(&db, &schema, &table, &cols, &pk, &pks, read_only).await {
-                Ok(gone) => {
+                Ok((gone, ids)) => {
                     let n = gone.len();
                     let rows: Vec<Document> = rows.into_iter().filter(|r| gone.contains(&pk_of(r))).collect();
-                    let ids = if n > 0 { super::create_pg::ids_of(&db, &schema, &table).await } else { PgIds::default() };
                     (Ok(format!("Deleted {}", plural(n, "row"))), (n > 0).then(|| action(db.pg_database(), ids, conn, &schema, &table, &cols, SqlUndo::Delete(rows))))
                 }
                 Err(err) => (Err(err), None),
@@ -651,10 +657,10 @@ impl Worker {
         self.spawn(async move {
             let at = (schema.clone(), table.clone());
             let (res, undo) = match apply_inserts(&db, &schema, &table, &cols, &pk, &rows, read_only, false).await {
-                Ok(keys) => {
+                Ok((keys, ids)) => {
                     let known: Option<Vec<Document>> = keys.into_iter().collect();
                     let undo = |k| if db.dialect == Dialect::Postgres { SqlUndo::Inserted(k) } else { SqlUndo::Insert(k) };
-                    let ids = if known.is_some() { super::create_pg::ids_of(&db, &schema, &table).await } else { PgIds::default() };
+                    let ids = if known.is_some() { ids } else { PgIds::default() };
                     (Ok(format!("Inserted {}", plural(rows.len(), "row"))), known.map(|k| action(db.pg_database(), ids, conn, &schema, &table, &cols, undo(k))))
                 }
                 Err(err) => (Err(err), None),

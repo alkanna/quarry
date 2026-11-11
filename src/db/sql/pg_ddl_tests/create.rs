@@ -7,14 +7,12 @@ use crate::db::UndoKind;
 use crate::db::sql::create::{Ddl as What, DropInfo};
 use crate::db::sql::create_pg::{self, TableSpec};
 use crate::db::sql::ddl::{ColDef, Dv};
-use crate::db::sql::testing::{db_turn, live_pg_at};
+use crate::db::sql::testing::{db_turn, live_pg_at, unique_name};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 fn uniq(tag: &str) -> String {
-    static N: AtomicUsize = AtomicUsize::new(0);
-    format!("qcr_{}_{}_{tag}", std::process::id(), N.fetch_add(1, Ordering::Relaxed))
+    unique_name(&format!("qcr_{tag}"))
 }
 
 /// A SQL string literal, for fixtures that name things with quotes and spaces in them.
@@ -392,7 +390,7 @@ fn a_database_named_with_quotes_capitals_and_spaces() {
 }
 
 fn schema_with(l: &LivePg, pool: &sqlx::PgPool, name: &str, ddl: &str) {
-    l.qsql(pool, &format!("DROP SCHEMA IF EXISTS {n} CASCADE; CREATE SCHEMA {n}; {ddl}", n = ident(name)));
+    l.reset_schemas(pool, &[name], ddl);
 }
 
 #[test]
