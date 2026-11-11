@@ -25,16 +25,16 @@ use std::time::Instant;
 const D: Dialect = Dialect::Postgres;
 
 /// How long the plan waits for the table's lock. A session that holds it longer is named in the error, and nothing ran.
-const LOCK_WAIT: &str = "3s";
+pub(super) const LOCK_WAIT: &str = "3s";
 
 /// PostgreSQL cuts a longer name without a word, so the staged name would not be the one the server keeps.
 const MAX_NAME: usize = 63;
 
-fn q(name: &str) -> String {
+pub(super) fn q(name: &str) -> String {
     D.quote_ident(name)
 }
 
-fn name_ok(name: &str, what: &str) -> Result<(), String> {
+pub(super) fn name_ok(name: &str, what: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err(format!("{what} needs a name."));
     }
@@ -78,6 +78,8 @@ fn closed(tok: &str, escapes: bool) -> bool {
 #[derive(Clone, Copy, PartialEq)]
 enum Text {
     Expr,
+    /// A trigger's WHEN condition, read like an expression and worded for it.
+    Cond,
     Type,
 }
 
@@ -85,8 +87,12 @@ enum Text {
 /// of the statement, balanced brackets and quotes. Both readings of backslashes are tried, so a string that one of them
 /// ends early cannot hide a statement in the other.
 fn scan(s: &str, what: Text) -> Result<(), String> {
-    let name = if what == Text::Expr { "default expression" } else { "type" };
-    let one = format!("The {name} must be {}, without ; or comments.", if what == Text::Expr { "one expression" } else { "a type name like numeric(10,2)" });
+    let name = match what {
+        Text::Expr => "default expression",
+        Text::Cond => "WHEN condition",
+        Text::Type => "type",
+    };
+    let one = format!("The {name} must be {}, without ; or comments.", if what == Text::Type { "a type name like numeric(10,2)" } else { "one expression" });
     if s.trim().is_empty() {
         return Err(format!("The {name} is empty."));
     }
@@ -132,6 +138,11 @@ fn scan(s: &str, what: Text) -> Result<(), String> {
 /// A default expression typed by the person must stay one expression. See `scan`.
 pub fn check_expr_pg(s: &str) -> Result<(), String> {
     scan(s, Text::Expr)
+}
+
+/// A trigger's WHEN condition typed by the person: one expression, like a default. See `scan`.
+pub fn check_cond_pg(s: &str) -> Result<(), String> {
+    scan(s, Text::Cond)
 }
 
 /// A column type typed by the person must stay one type name. See `scan`.
@@ -310,7 +321,7 @@ fn check_col(def: &ColDef) -> Result<(), String> {
     Ok(())
 }
 
-fn comment_stmt(on: &str, text: &str) -> Result<String, String> {
+pub(super) fn comment_stmt(on: &str, text: &str) -> Result<String, String> {
     if text.contains('\0') {
         return Err("A comment cannot hold a NUL character.".into());
     }
@@ -749,18 +760,18 @@ async fn read_in(tx: &mut Tx<'_>, schema: &str, table: &str) -> Res<Structure> {
     Ok(Structure { columns: columns(D, &cols), indexes: indexes(&idx), foreign_keys: foreign_keys(&fks), constraints: constraints(&cons), pg_deps: col_deps(&deps), pg_schema: Some(schema.into()), ..Default::default() })
 }
 
-async fn exec(tx: &mut Tx<'_>, db: &Db, schema: &str, sql: &str) -> Result<(), sqlx::Error> {
+pub(super) async fn exec(tx: &mut Tx<'_>, db: &Db, schema: &str, sql: &str) -> Result<(), sqlx::Error> {
     let t = Instant::now();
     let res = tx.exec_bound(sql, &[]).await;
     db.note(schema, sql, t, &res);
     res.map(|_| ())
 }
 
-fn sql_state(err: &sqlx::Error) -> Option<String> {
+pub(super) fn sql_state(err: &sqlx::Error) -> Option<String> {
     err.as_database_error().and_then(|d| d.code().map(|c| c.to_string()))
 }
 
-fn lock_error(err: &sqlx::Error, name: &str) -> Option<String> {
+pub(super) fn lock_error(err: &sqlx::Error, name: &str) -> Option<String> {
     // 55P03 is lock_not_available, which lock_timeout raises.
     (sql_state(err)? == "55P03").then(|| format!("The table {name} is locked by another session that did not let go within {LOCK_WAIT}. Nothing was changed."))
 }
@@ -769,7 +780,7 @@ fn lock_error(err: &sqlx::Error, name: &str) -> Option<String> {
 /// EXCLUSIVE needs UPDATE, DELETE or TRUNCATE (MAINTAIN from PostgreSQL 17), where ADD FOREIGN KEY needs only REFERENCES on the
 /// parent and DROP CONSTRAINT only ownership of the child. A role without them skips the explicit lock, and the statement
 /// takes its own under the same lock_timeout. A table that is not there answers true, so the LOCK reports it gone.
-async fn may_lock(tx: &mut Tx<'_>, name: &str) -> bool {
+pub(super) async fn may_lock(tx: &mut Tx<'_>, name: &str) -> bool {
     let sql = "SELECT COALESCE(has_table_privilege(to_regclass($1), 'UPDATE,DELETE,TRUNCATE') OR CASE WHEN current_setting('server_version_num')::int >= 170000 THEN has_table_privilege(to_regclass($1), 'MAINTAIN') ELSE false END, true)::int::bigint AS n";
     match tx.fetch_bound(sql, &[Param::Text(name.to_string())]).await {
         Ok(rows) => rows.first().and_then(|r| super::structure::num(r, "n")).is_none_or(|n| n != 0),

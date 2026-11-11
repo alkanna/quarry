@@ -42,7 +42,7 @@ fn drop_fk(n: &str) -> Change {
 
 /// A lock held on a table by another session, given up when the guard is dropped, so a test that fails with it held does not
 /// abort the run (a connection dropped outside the runtime panics).
-struct Held<'a> {
+pub(super) struct Held<'a> {
     t: &'a T<'a>,
     tx: Option<sqlx::Transaction<'static, sqlx::Postgres>>,
 }
@@ -56,7 +56,7 @@ impl Drop for Held<'_> {
 }
 
 /// Holds a lock on `table` from another session until the guard is released or dropped.
-fn hold<'a>(t: &'a T<'a>, table: &str, mode: &str) -> Held<'a> {
+pub(super) fn hold<'a>(t: &'a T<'a>, table: &str, mode: &str) -> Held<'a> {
     let tx = t.l.w.rt.block_on(async {
         let mut tx = t.pool.begin().await.unwrap();
         sqlx::raw_sql(&format!("LOCK TABLE {}.{table} IN {mode} MODE", t.schema)).execute(&mut *tx).await.unwrap();

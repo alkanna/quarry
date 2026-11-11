@@ -29,6 +29,8 @@ pub(super) struct StructState {
     pub(super) trig: HashMap<String, db::sql::ddl::TrigDef>,
     /// The editor shows the new trigger instead of the selected one.
     pub(super) trig_new: bool,
+    /// The name a trigger that is being made will have, so its draft is cleared when the structure lists it.
+    pub(super) trig_made: Option<String>,
 }
 
 #[derive(Default)]
@@ -472,13 +474,15 @@ impl App {
         let Some((d, mut sel)) = self.take_structure(ui) else { return };
         let mut acts = Vec::new();
         let block = self.struct_block().or(self.trig_block());
-        let editable = self.sel_writable() && block.is_none();
-        let why = if let Some(b) = block { b } else if self.sel_is_view() { "Views cannot be changed here" } else { "Read-only: unlock writes to change triggers" };
+        // A locked connection still edits: Save and Delete ask to unlock, as Apply does for columns.
+        let editable = self.trig_editable();
+        let why = if let Some(b) = block { b } else { "Views cannot be changed here" };
         // A trigger that was just created is listed now, so its draft has done its job.
         if let Some(s) = self.tabs[self.cur].sql.as_mut() {
-            if let Some(i) = s.st.trig.get(sql_trig::NEW).and_then(|nd| d.triggers.iter().position(|t| sql_trig::same(&sql_trig::def_of(t), nd))) {
+            let made = s.st.trig_made.clone();
+            if let Some(i) = s.st.trig.get(sql_trig::NEW).and_then(|nd| d.triggers.iter().position(|t| sql_trig::same(&sql_trig::def_of(t), nd) || made.as_deref() == Some(t.name.as_str()))) {
                 s.st.trig.remove(sql_trig::NEW);
-                (s.st.trig_new, sel[4]) = (false, Some(i));
+                (s.st.trig_new, sel[4], s.st.trig_made) = (false, Some(i), None);
             }
             sql_trig::prune_drafts(&mut s.st.trig, &d.triggers);
         }
@@ -942,6 +946,7 @@ impl App {
                 order: 1,
                 sql_mode: "STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION".into(),
                 body: "BEGIN\n  IF NEW.status = 'refunded' AND OLD.status <> 'paid' THEN\n    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Only paid orders can be refunded';\n  END IF;\nEND".into(),
+                pg: None,
             }, Trigger {
                 name: "orders_after_insert".into(),
                 timing: "AFTER".into(),
@@ -950,6 +955,7 @@ impl App {
                 order: 1,
                 sql_mode: "STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION".into(),
                 body: "INSERT INTO audit_log (tbl, row_id, action) VALUES ('orders', NEW.id, 'insert')".into(),
+                pg: None,
             }],
             status: db::sql::structure::Status {
                 engine: "InnoDB".into(),

@@ -381,7 +381,27 @@ fn orders_structure() -> Structure {
         constraints: vec![constraint("orders_pkey", 'p', "PRIMARY KEY (id)"), constraint("orders_public_id_key", 'u', "UNIQUE (public_id)"), constraint("orders_total_check", 'c', "CHECK ((total >= (0)::numeric))")],
         foreign_keys: vec![fk("orders_customer_id_fkey", "orders", "customer_id", "customers", "id", "RESTRICT")],
         referenced_by: vec![fk("order_items_order_id_fkey", "order_items", "order_id", "orders", "id", "CASCADE"), fk("events_order_id_fkey", "events", "order_id", "orders", "id", "SET NULL")],
-        triggers: vec![Trigger { name: "orders_audit".into(), timing: "AFTER".into(), event: "UPDATE".into(), body: "CREATE TRIGGER orders_audit AFTER UPDATE ON public.orders FOR EACH ROW EXECUTE FUNCTION log_order_change()".into(), ..Default::default() }],
+        triggers: vec![Trigger {
+            name: "orders_audit".into(),
+            timing: "AFTER".into(),
+            event: "UPDATE".into(),
+            body: "CREATE TRIGGER orders_audit AFTER UPDATE ON public.orders FOR EACH ROW EXECUTE FUNCTION log_order_change()".into(),
+            pg: Some(Box::new(db::sql::structure::PgTrig {
+                per_row: true,
+                mode: "O".into(),
+                rel_kind: "r".into(),
+                func_schema: SCHEMA.into(),
+                func: "log_order_change".into(),
+                lang: "plpgsql".into(),
+                src: "\nBEGIN\n  INSERT INTO events (order_id, kind) VALUES (NEW.id, 'updated');\n  RETURN NEW;\nEND\n".into(),
+                func_owner: "app".into(),
+                func_mine: true,
+                func_can: true,
+                func_create: true,
+                ..Default::default()
+            })),
+            ..Default::default()
+        }],
         pg_schema: Some(SCHEMA.into()),
         status: db::sql::structure::Status { engine: "heap".into(), rows: Some(ORDERS_ROWS), avg_row: Some(264), data: Some(318_767_104), index: Some(105_906_176), total: Some(424_673_280), comment: "Customer orders".into(), ..Default::default() },
         ..Default::default()
