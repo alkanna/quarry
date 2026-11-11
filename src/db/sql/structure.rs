@@ -76,6 +76,30 @@ pub struct Index {
     pub def: String,
     /// PostgreSQL: a primary key, unique or exclusion constraint owns the index, so it is written as that constraint.
     pub constraint: bool,
+    /// PostgreSQL: the index is the table's primary key, whose name is the constraint's, not "PRIMARY".
+    pub primary: bool,
+    /// PostgreSQL: the index has a part its key columns do not say (a condition, expressions, included columns, an operator
+    /// class, a collation or NULLS order other than the default, storage options, a tablespace, NULLS NOT DISTINCT), so
+    /// dropping it and adding it again from its columns would build a different index.
+    pub complex: bool,
+    /// PostgreSQL: the constraint that owns the index is DEFERRABLE, and INITIALLY DEFERRED.
+    pub deferrable: bool,
+    pub deferred: bool,
+    /// PostgreSQL: the comment on the constraint that owns the index, which is not the index's own.
+    pub con_comment: String,
+}
+
+/// An object the server drops together with a PostgreSQL column, from `pg_depend`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ColDep {
+    pub col: String,
+    /// "index", "key" (a primary key or unique constraint, which is also an index of the table), "constraint" (a check,
+    /// exclusion or foreign key), "sequence", "default" (the column's own) or "other" (a trigger, statistics object,
+    /// policy, generated column and the like).
+    pub kind: String,
+    pub name: String,
+    /// The server's words for the object, for the message that names it.
+    pub what: String,
 }
 
 /// A PostgreSQL primary key, unique, check or exclusion constraint, in the words of `pg_get_constraintdef`. Foreign
@@ -166,6 +190,11 @@ pub struct Structure {
     /// PostgreSQL primary key, unique, check and exclusion constraints. Empty on MySQL, whose keys are indexes and
     /// whose CHECKs are not read here.
     pub constraints: Vec<Constraint>,
+    /// The schema of a PostgreSQL table, which also says the structure came from PostgreSQL. None on MySQL, where the
+    /// database is the namespace and the statements are written for a session switched to it.
+    pub pg_schema: Option<String>,
+    /// PostgreSQL: what depends on each column, so dropping a column can say what goes with it. Empty on MySQL.
+    pub pg_deps: Vec<ColDep>,
 }
 
 impl Structure {
@@ -289,7 +318,7 @@ fn s(r: &SqlRow, name: &str) -> String {
     text(r, name).unwrap_or_default()
 }
 
-fn columns(d: Dialect, rows: &[SqlRow]) -> Vec<Column> {
+pub(super) fn columns(d: Dialect, rows: &[SqlRow]) -> Vec<Column> {
     rows.iter()
         .map(|r| {
             let nullable = r.int("nullable").map(|n| n != 0).unwrap_or(true);
@@ -303,24 +332,30 @@ fn columns(d: Dialect, rows: &[SqlRow]) -> Vec<Column> {
 }
 
 /// The rows come ordered by index name and then position, so one index is a run of rows.
-fn indexes(rows: &[SqlRow]) -> Vec<Index> {
+pub(super) fn indexes(rows: &[SqlRow]) -> Vec<Index> {
     let mut out: Vec<Index> = Vec::new();
     for r in rows {
         let name = s(r, "name");
         // Only PostgreSQL has key parts that are expressions, and it gives their text in `expr` with an empty name.
         let col = IndexCol { name: s(r, "col"), desc: text(r, "direction").as_deref() == Some("D"), prefix: num(r, "sub_part"), expr: text(r, "expr") };
         if out.last().is_some_and(|i| i.name == name) {
-            out.last_mut().unwrap().cols.push(col);
+            let last = out.last_mut().unwrap();
+            last.cols.push(col);
+            last.complex |= r.int("complex") == Some(1);
         } else {
             let unique = r.int("non_unique").map(|n| n == 0).unwrap_or(false);
-            out.push(Index { name, unique, cols: vec![col], kind: s(r, "index_type"), cardinality: num(r, "cardinality"), comment: s(r, "comment"), invisible: false, def: s(r, "def"), constraint: r.int("backs_constraint") == Some(1) });
+            out.push(Index { name, unique, cols: vec![col], kind: s(r, "index_type"), cardinality: num(r, "cardinality"), comment: s(r, "comment"), invisible: false, def: s(r, "def"), constraint: r.int("backs_constraint") == Some(1), primary: r.int("is_primary") == Some(1), complex: r.int("complex") == Some(1), deferrable: r.int("defer_ok") == Some(1), deferred: r.int("defer_init") == Some(1), con_comment: s(r, "con_comment") });
         }
     }
     out
 }
 
+pub(super) fn col_deps(rows: &[SqlRow]) -> Vec<ColDep> {
+    rows.iter().map(|r| ColDep { col: s(r, "col"), kind: s(r, "kind"), name: s(r, "name"), what: s(r, "what") }).collect()
+}
+
 /// One row per key column, ordered by constraint and then position.
-fn foreign_keys(rows: &[SqlRow]) -> Vec<ForeignKey> {
+pub(super) fn foreign_keys(rows: &[SqlRow]) -> Vec<ForeignKey> {
     let mut out: Vec<ForeignKey> = Vec::new();
     for r in rows {
         let (name, db, table) = (s(r, "name"), s(r, "db"), s(r, "tbl"));
@@ -369,26 +404,34 @@ fn status(rows: &[SqlRow]) -> Status {
     }
 }
 
+pub(super) fn constraints(rows: &[SqlRow]) -> Vec<Constraint> {
+    rows.iter().map(|r| Constraint { name: s(r, "name"), kind: s(r, "kind").chars().next().unwrap_or('c'), def: s(r, "def") }).collect()
+}
+
 /// A LIMIT of its own overrides the session's sql_select_limit, which a server's globals can set and which would
 /// show a table with only its first columns or indexes, and let an edit of that structure drop the rest.
 pub(super) const ALL_ROWS: &str = " LIMIT 18446744073709551615";
 
+/// On PostgreSQL the read runs under the table's schema as search_path, the one a structure change writes its statements
+/// under, so a type or function outside it comes back qualified and means the same when it is written back.
 async fn query(db: &Db, sql: &str, schema: &str, table: &str) -> Res<Vec<SqlRow>> {
-    db.meta(schema, sql, [schema, table]).await
+    db.meta_with(schema, sql, [schema, table], true).await
 }
 
 /// What the main queries cannot ask every server version for: SRIDs, invisible indexes and functional key parts on
 /// MySQL 8, ignored indexes and column CHECKs on MariaDB. An older server fails these queries, and has none of it.
-async fn extras(db: &Db, schema: &str, table: &str, st: &mut Structure) {
+async fn extras(db: &Db, schema: &str, table: &str, st: &mut Structure) -> Res<()> {
     let d = db.dialect;
     let (idx, cols) = match d {
         // The key parts, hidden state and SRIDs are already in the main queries. What a CREATE TABLE still needs is the
         // constraints that are not foreign keys.
         Dialect::Postgres => {
             if let Ok(rows) = query(db, super::pg_catalog::CONSTRAINTS, schema, table).await {
-                st.constraints = rows.iter().map(|r| Constraint { name: s(r, "name"), kind: s(r, "kind").chars().next().unwrap_or('c'), def: s(r, "def") }).collect();
+                st.constraints = constraints(&rows);
             }
-            return;
+            // Not optional: an undo of a dropped column trusts this list to say what went with the column.
+            st.pg_deps = col_deps(&query(db, super::pg_catalog::COLUMN_DEPS, schema, table).await?);
+            return Ok(());
         }
         Dialect::MySql => (
             "SELECT INDEX_NAME AS name, SEQ_IN_INDEX AS seq, IS_VISIBLE = 'NO' AS hidden, EXPRESSION AS expr FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
@@ -415,6 +458,7 @@ async fn extras(db: &Db, schema: &str, table: &str, st: &mut Structure) {
         c.srid = num(&r, "srid").and_then(|n| u32::try_from(n).ok());
         c.check = text(&r, "clause");
     }
+    Ok(())
 }
 
 pub(super) async fn load(db: &Db, schema: &str, table: &str) -> Res<Structure> {
@@ -449,8 +493,10 @@ pub(super) async fn load(db: &Db, schema: &str, table: &str) -> Res<Structure> {
         status: status(&stat),
         create: create.and_then(|r| text_at(&r, 1)).unwrap_or_default(),
         constraints: Vec::new(),
+        pg_schema: (d == Dialect::Postgres).then(|| schema.to_string()),
+        pg_deps: Vec::new(),
     };
-    extras(db, schema, table, &mut st).await;
+    extras(db, schema, table, &mut st).await?;
     if d == Dialect::Postgres {
         let kind = stat.first().and_then(|r| text(r, "kind")).unwrap_or_default();
         pg_finish(db, schema, table, &kind, &mut st).await?;

@@ -220,8 +220,11 @@ pub enum Msg {
     SqlStructure { req: u64, res: Res<sql::Structure> },
     /// An ALTER TABLE, a trigger change or one of their undos ran (or failed). `undo` is what reverses it.
     /// `sql_mode` is the server's mode when it no longer matched the one the statement was written for, so the
-    /// previews follow it. `alter` is false for a trigger change, which leaves the staged ALTER changes valid.
-    SqlAltered { conn: u64, schema: String, table: String, res: Res<String>, undo: Option<UndoAction>, sql_mode: Option<String>, alter: bool },
+    /// previews follow it. `alter` is false for a trigger change, which leaves the staged ALTER changes valid. `database` is
+    /// the PostgreSQL database the table is in (empty on MySQL, where `schema` is the database), so a table of the same
+    /// name in another database of the connection is not taken for it. `unsure` says a failed answer may still have run
+    /// (a COMMIT that did not come back), so the structure is read again.
+    SqlAltered { conn: u64, database: String, schema: String, table: String, res: Res<String>, undo: Option<UndoAction>, sql_mode: Option<String>, alter: bool, unsure: bool },
     /// Charsets, collations and engines for the New database and New table dialogs; `schema` is empty for a new database.
     SqlMeta { conn: u64, schema: String, res: Res<sql::create::Meta> },
     /// What a drop confirmation says will be lost; `table` is empty for a database.

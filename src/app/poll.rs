@@ -133,7 +133,7 @@ impl App {
                         s.st.finish(res);
                     }
                 }
-                Msg::SqlAltered { conn, schema, table, res, undo, sql_mode, alter } => self.sql_altered(conn, schema, table, res, undo, sql_mode, alter),
+                Msg::SqlAltered { conn, database, schema, table, res, undo, sql_mode, alter, unsure } => self.sql_altered(conn, database, schema, table, res, undo, sql_mode, alter, unsure),
                 Msg::SqlRan { req, sets, .. } => self.sql_ran(req, sets),
                 Msg::SqlCount { req, idx, res } => self.sql_counted(req, idx, res),
                 Msg::SqlExport { req, res } => self.export_done(ctx, req, res),

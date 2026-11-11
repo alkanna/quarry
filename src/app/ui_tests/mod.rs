@@ -7,6 +7,7 @@
 
 mod mongo_edit;
 mod sql_edit;
+mod sql_structure;
 
 use super::*;
 use egui_kittest::Harness;
@@ -61,6 +62,19 @@ impl UiApp {
     pub fn click(&mut self, label: &str) {
         self.show(label);
         self.h.get_by_label(label).click();
+        self.settle();
+    }
+
+    /// Waits for a widget whose accessible name contains `part`, then clicks it. For a menu item whose name carries more
+    /// than the test knows, such as a column with its type.
+    pub fn click_contains(&mut self, part: &str) {
+        let t = std::time::Instant::now();
+        while self.h.query_all_by_label_contains(part).next().is_none() {
+            assert!(t.elapsed() < LIMIT, "timed out waiting for a widget with \"{part}\" on screen; last error: {}", self.app().last_problem());
+            self.h.step();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        self.h.get_by_label_contains(part).click();
         self.settle();
     }
 
