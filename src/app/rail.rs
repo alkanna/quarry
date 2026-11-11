@@ -143,6 +143,7 @@ pub(super) fn mark_color(mark: &str) -> Color32 {
     match mark {
         "MO" => C_STRING(),
         "MA" => C_KEYWORD(),
+        "PG" => ENGINE_PG(),
         _ => C_LINK(),
     }
 }
@@ -150,6 +151,15 @@ pub(super) fn mark_color(mark: &str) -> Color32 {
 /// The engine's logo as a white mask, tinted when painted. Decoded once and kept in egui's memory.
 /// The shapes are Simple Icons' (CC0), baked to 64 px PNGs so the binary needs no SVG renderer.
 pub(super) fn engine_logo(ctx: &egui::Context, mark: &str) -> Option<egui::TextureHandle> {
+    if mark == "PG" {
+        // No permissively licensed PostgreSQL mark was available offline, so the "PG" monogram is drawn here.
+        let id = egui::Id::unique("engine-postgres");
+        return ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)).or_else(|| {
+            let tex = ctx.load_texture("engine-postgres", pg_monogram(), egui::TextureOptions::LINEAR);
+            ctx.data_mut(|d| d.insert_temp(id, tex.clone()));
+            Some(tex)
+        });
+    }
     let (name, png): (&str, &[u8]) = match mark {
         "MO" => ("engine-mongodb", include_bytes!("../../assets/engines/mongodb.png")),
         "MA" => ("engine-mariadb", include_bytes!("../../assets/engines/mariadb.png")),
@@ -163,6 +173,29 @@ pub(super) fn engine_logo(ctx: &egui::Context, mark: &str) -> Option<egui::Textu
         ctx.data_mut(|d| d.insert_temp(id, tex.clone()));
         Some(tex)
     })
+}
+
+/// "PG" as a white 64 px mask, rasterized from two stroked outlines by distance to the segments.
+fn pg_monogram() -> egui::ColorImage {
+    const P: &[(f32, f32)] = &[(14.0, 52.0), (14.0, 12.0), (26.0, 12.0), (32.0, 16.0), (34.0, 23.0), (32.0, 30.0), (26.0, 34.0), (14.0, 34.0)];
+    const G: &[(f32, f32)] = &[(58.0, 21.0), (53.0, 14.0), (47.0, 12.0), (41.0, 15.0), (38.0, 22.0), (38.0, 42.0), (41.0, 49.0), (47.0, 52.0), (54.0, 50.0), (58.0, 44.0), (58.0, 36.0), (48.0, 36.0)];
+    const HALF: f32 = 3.5;
+    fn dist(p: egui::Vec2, a: (f32, f32), b: (f32, f32)) -> f32 {
+        let (a, b) = (egui::vec2(a.0, a.1), egui::vec2(b.0, b.1));
+        let ab = b - a;
+        let t = ((p - a).dot(ab) / ab.length_sq()).clamp(0.0, 1.0);
+        (p - (a + ab * t)).length()
+    }
+    let mut img = egui::ColorImage::filled([64, 64], Color32::TRANSPARENT);
+    for y in 0..64 {
+        for x in 0..64 {
+            let p = egui::vec2(x as f32 + 0.5, y as f32 + 0.5);
+            let d = [P, G].iter().flat_map(|line| line.windows(2).map(|w| dist(p, w[0], w[1]))).fold(f32::MAX, f32::min);
+            let a = ((HALF + 0.5 - d).clamp(0.0, 1.0) * 255.0) as u8;
+            img.pixels[y * 64 + x] = Color32::from_rgba_unmultiplied(255, 255, 255, a);
+        }
+    }
+    img
 }
 
 /// A 28 px square with the engine logo, a status dot at the bottom right and, for a tagged

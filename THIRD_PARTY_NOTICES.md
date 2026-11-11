@@ -8,4 +8,4 @@ Quarry embeds these fonts in its binary. All are licensed under the SIL Open Fon
 | JetBrains Mono (variable) | Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono) | `assets/fonts/JetBrainsMono-OFL.txt` |
 | OpenDyslexic (Regular) | Copyright (c) 2019 Abbie Gonzalez, with Reserved Font Name OpenDyslexic (https://opendyslexic.org) | `assets/fonts/OpenDyslexic-OFL.txt` |
 
-The engine logos in `assets/engines/` are drawn from Simple Icons (https://simpleicons.org), released under CC0 1.0. MongoDB, MySQL and MariaDB are trademarks of their respective owners and are shown only to name the database a connection uses.
+The engine logos in `assets/engines/` are drawn from Simple Icons (https://simpleicons.org), released under CC0 1.0. MongoDB, MySQL and MariaDB are trademarks of their respective owners and are shown only to name the database a connection uses. The PostgreSQL mark is a "PG" monogram drawn in code, not the PostgreSQL logo, so it carries no third-party license.

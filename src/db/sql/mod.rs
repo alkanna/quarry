@@ -318,6 +318,20 @@ impl SslMode {
         (SslMode::VerifyIdentity, "Verify identity"),
     ];
 
+    /// The same modes under their libpq `sslmode` names, for the PostgreSQL form.
+    pub const PG_ALL: [(SslMode, &'static str); 5] = [
+        (SslMode::Disabled, "disable"),
+        (SslMode::Preferred, "prefer"),
+        (SslMode::Required, "require"),
+        (SslMode::VerifyCa, "verify-ca"),
+        (SslMode::VerifyIdentity, "verify-full"),
+    ];
+
+    /// The libpq name of this mode.
+    pub fn pg_name(self) -> &'static str {
+        self.pg_param()
+    }
+
     fn param(self) -> &'static str {
         match self {
             SslMode::Disabled => "DISABLED",
@@ -379,7 +393,7 @@ impl Addr {
         Engine::from_uri(&format!("{}://", self.scheme)).unwrap_or(Engine::MySql)
     }
 
-    fn default_port(scheme: &str) -> u16 {
+    pub fn default_port(scheme: &str) -> u16 {
         if matches!(Engine::from_uri(&format!("{scheme}://")), Some(Engine::Postgres)) { PG_PORT } else { DEFAULT_PORT }
     }
 
@@ -416,6 +430,99 @@ impl Addr {
             }
         }
         Some(a)
+    }
+
+    /// Reads what a user pastes into the form: a `postgresql://` or `postgres://` URI, or a libpq
+    /// `key=value` string. The error text never repeats the input, which may hold a password.
+    pub fn from_paste(text: &str) -> Result<Addr, String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err("Nothing to read".into());
+        }
+        let a = if let Some((scheme, _)) = text.split_once("://") {
+            if !matches!(scheme.to_ascii_lowercase().as_str(), "postgres" | "postgresql") {
+                return Err("Only postgresql:// and postgres:// strings can be pasted here".into());
+            }
+            Addr::parse(text).ok_or("Could not read this connection string, check the port")?
+        } else if text.contains('=') {
+            Addr::from_keywords(text)?
+        } else {
+            return Err("Paste a postgresql:// address or a host=... connection string".into());
+        };
+        if a.host.trim().is_empty() {
+            return Err("The connection string has no host".into());
+        }
+        Ok(Addr { scheme: "postgres".into(), ..a })
+    }
+
+    /// The libpq `key=value` form. Values may be single quoted with backslash escapes.
+    fn from_keywords(text: &str) -> Result<Addr, String> {
+        let mut a = Addr { scheme: "postgres".into(), port: PG_PORT, ..Default::default() };
+        let mut chars = text.chars().peekable();
+        loop {
+            while chars.peek().is_some_and(|c| c.is_whitespace()) {
+                chars.next();
+            }
+            if chars.peek().is_none() {
+                break;
+            }
+            let mut key = String::new();
+            while let Some(&c) = chars.peek() {
+                if c == '=' || c.is_whitespace() {
+                    break;
+                }
+                key.push(c);
+                chars.next();
+            }
+            while chars.peek().is_some_and(|c| c.is_whitespace()) {
+                chars.next();
+            }
+            if chars.next() != Some('=') {
+                return Err(format!("Expected key=value near \"{key}\""));
+            }
+            while chars.peek().is_some_and(|c| c.is_whitespace()) {
+                chars.next();
+            }
+            let mut val = String::new();
+            if chars.peek() == Some(&'\'') {
+                chars.next();
+                loop {
+                    match chars.next() {
+                        Some('\\') => val.extend(chars.next()),
+                        Some('\'') => break,
+                        Some(c) => val.push(c),
+                        None => return Err(format!("The quoted value of {key} is not closed")),
+                    }
+                }
+            } else {
+                while let Some(&c) = chars.peek() {
+                    if c.is_whitespace() {
+                        break;
+                    }
+                    chars.next();
+                    if c == '\\' {
+                        val.extend(chars.next());
+                    } else {
+                        val.push(c);
+                    }
+                }
+            }
+            match key.to_ascii_lowercase().as_str() {
+                "host" | "hostaddr" => {
+                    // A host list is a failover list; the first entry is the one a form can show.
+                    let first = val.split(',').next().unwrap_or_default();
+                    a.host = if first.contains(':') && !first.starts_with('[') { format!("[{first}]") } else { first.into() };
+                }
+                "port" => a.port = val.split(',').next().unwrap_or_default().trim().parse().map_err(|_| "The port is not a number".to_string())?,
+                "user" => a.user = val,
+                "password" => a.password = val,
+                "dbname" => a.database = val,
+                "sslmode" => a.ssl_mode = SslMode::from_pg_param(&val).ok_or_else(|| format!("Unknown sslmode {val}"))?,
+                "sslrootcert" => a.ssl_ca = val,
+                _ => {}
+            }
+        }
+        Ok(a)
     }
 
     pub fn to_uri(&self) -> String {
@@ -523,6 +630,40 @@ mod tests {
         // The MySQL spelling means nothing on a Postgres address, and the reverse.
         assert_eq!(Addr::parse("postgres://h/?ssl-mode=REQUIRED").unwrap().ssl_mode, SslMode::Preferred);
         assert_eq!(Addr::parse("mysql://h/?sslmode=REQUIRED").unwrap().ssl_mode, SslMode::Required);
+    }
+
+    #[test]
+    fn paste_reads_uris() {
+        let a = Addr::from_paste("  postgresql://analyst:p%40ss%3Aw%2Frd@analytics.internal:6543/my%20db?sslmode=verify-full&sslrootcert=%2Fcerts%2Fca.pem ").unwrap();
+        assert_eq!((a.scheme.as_str(), a.host.as_str(), a.port, a.user.as_str(), a.password.as_str(), a.database.as_str(), a.ssl_mode, a.ssl_ca.as_str()), ("postgres", "analytics.internal", 6543, "analyst", "p@ss:w/rd", "my db", SslMode::VerifyIdentity, "/certs/ca.pem"));
+        // No port means the Postgres one, and no query means the default mode.
+        let a = Addr::from_paste("postgres://u@h/d").unwrap();
+        assert_eq!((a.port, a.ssl_mode, a.password.as_str()), (5432, SslMode::Preferred, ""));
+        let a = Addr::from_paste("postgres://u:pw@[2001:db8::1]:5433/d").unwrap();
+        assert_eq!((a.host.as_str(), a.port), ("[2001:db8::1]", 5433));
+        assert_eq!(Addr::from_paste("postgres://u@[::1]/d").unwrap().port, 5432);
+        assert_eq!(Addr::from_paste("POSTGRESQL://h").unwrap().host, "h");
+    }
+
+    #[test]
+    fn paste_reads_libpq_keywords() {
+        let a = Addr::from_paste(r"host=db.internal port=5433 dbname=shop user=app password='it\'s a secret' sslmode=verify-ca sslrootcert=/certs/ca.pem").unwrap();
+        assert_eq!((a.host.as_str(), a.port, a.database.as_str(), a.user.as_str(), a.password.as_str(), a.ssl_mode, a.ssl_ca.as_str()), ("db.internal", 5433, "shop", "app", "it's a secret", SslMode::VerifyCa, "/certs/ca.pem"));
+        let a = Addr::from_paste("host = 'h' dbname = 'my db'").unwrap();
+        assert_eq!((a.port, a.database.as_str(), a.scheme.as_str()), (5432, "my db", "postgres"));
+        assert_eq!(Addr::from_paste("host=::1").unwrap().host, "[::1]");
+        assert!(Addr::from_paste("host='open").is_err());
+        assert!(Addr::from_paste("host=h port=x").is_err());
+        assert!(Addr::from_paste("user=u").is_err());
+    }
+
+    #[test]
+    fn paste_refuses_other_input_without_echoing_it() {
+        for bad in ["mysql://u:secret@h/d", "mongodb://u:secret@h", "secret", "", "postgres://u:secret@h:notaport/d", "postgres:///d"] {
+            let e = Addr::from_paste(bad).unwrap_err();
+            assert!(!e.contains("secret"), "{e}");
+        }
+        assert!(Addr::from_paste("mysql://h").unwrap_err().contains("postgresql://"));
     }
 
     #[test]

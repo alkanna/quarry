@@ -51,6 +51,8 @@ pub(crate) struct Palette {
     pub(crate) c_link: Color32,
     pub(crate) highlight: Color32,
     pub(crate) c_keyword: Color32,
+    /// The PostgreSQL engine accent.
+    pub(crate) engine_pg: Color32,
     /// Alternate table rows.
     pub(crate) stripe: Color32,
     /// An off switch and checkbox troughs.
@@ -99,6 +101,7 @@ pub(crate) const DARK_PAL: Palette = Palette {
     // #E0A84E at 25%, premultiplied.
     highlight: Color32::from_rgba_premultiplied(56, 42, 20, 64),
     c_keyword: hex(0xcf8e6d),
+    engine_pg: hex(0x2aacb8),
     stripe: hex(0x232427),
     track: hex(0x4e5157),
     well: hex(0x1e1f22),
@@ -141,6 +144,7 @@ pub(crate) const LIGHT_PAL: Palette = Palette {
     // #A86A00 at 20%, premultiplied.
     highlight: Color32::from_rgba_premultiplied(34, 21, 0, 51),
     c_keyword: hex(0x8a3fb5),
+    engine_pg: hex(0x00796b),
     stripe: hex(0xf9f7f3),
     track: hex(0xcfc9bf),
     well: hex(0xfbfaf7),
@@ -263,7 +267,7 @@ macro_rules! colors {
     };
 }
 
-colors!(BG: bg, PANEL: panel, CHROME: chrome, RAISED: raised, HOVER: hover, PRESSED: pressed, MENU_HOVER: menu_hover, BORDER: border, LINE: line, RAISED_LINE: raised_line, HDR: hdr, ON_PRIMARY: on_primary, SEL: sel, SEL_HOVER: sel_hover, TEXT: text, BRIGHT: bright, MUTED: muted, FAINT: faint, PRIMARY: primary, ALERT: alert, SUCCESS: success, WARNING: warning, C_STRING: c_string, C_NUMBER: c_number, C_TRUE: c_true, C_FALSE: c_false, C_DATE: c_date, C_NULL: c_null, C_OID: c_oid, C_OBJ: c_obj, KEY: key, C_LINK: c_link, HIGHLIGHT: highlight, C_KEYWORD: c_keyword);
+colors!(BG: bg, PANEL: panel, CHROME: chrome, RAISED: raised, HOVER: hover, PRESSED: pressed, MENU_HOVER: menu_hover, BORDER: border, LINE: line, RAISED_LINE: raised_line, HDR: hdr, ON_PRIMARY: on_primary, SEL: sel, SEL_HOVER: sel_hover, TEXT: text, BRIGHT: bright, MUTED: muted, FAINT: faint, PRIMARY: primary, ALERT: alert, SUCCESS: success, WARNING: warning, C_STRING: c_string, C_NUMBER: c_number, C_TRUE: c_true, C_FALSE: c_false, C_DATE: c_date, C_NULL: c_null, C_OID: c_oid, C_OBJ: c_obj, KEY: key, C_LINK: c_link, HIGHLIGHT: highlight, C_KEYWORD: c_keyword, ENGINE_PG: engine_pg);
 
 /// `c` at `alpha` out of 255, for tints over the background.
 pub(crate) fn tint(c: Color32, alpha: u8) -> Color32 {
