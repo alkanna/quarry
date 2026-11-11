@@ -9,7 +9,7 @@ mod sql_edit;
 
 use super::*;
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 
 const LIMIT: Duration = Duration::from_secs(20);
 const CONN: u64 = 1;
@@ -66,7 +66,7 @@ impl UiApp {
     /// Waits until a widget with this accessible name is on screen.
     pub fn show(&mut self, label: &str) {
         let t = std::time::Instant::now();
-        while self.h.query_by_label(label).is_none() {
+        while self.h.query_all_by_label(label).next().is_none() {
             assert!(t.elapsed() < LIMIT, "timed out waiting for \"{label}\" on screen; last error: {}", self.app().last_problem());
             self.h.step();
             std::thread::sleep(Duration::from_millis(10));
@@ -104,22 +104,56 @@ impl UiApp {
         self.h.get_by_label(Box::leak(format!("{col} row {row}").into_boxed_str()))
     }
 
-    /// Double-clicks a cell, types over its text and commits with Enter. The editor selects the old text when it opens.
-    pub fn edit_cell(&mut self, col: &str, row: usize, text: &str) {
+    /// Double-clicks a cell. Both clicks go into one frame: a kittest step lasts 250 ms of egui time, longer than egui's double click delay.
+    pub fn double_click_cell(&mut self, col: &str, row: usize) {
         self.show(&format!("{col} row {row}"));
         let at = self.cell(col, row).rect().center();
         self.h.hover_at(at);
         self.h.step();
-        // Both clicks go into one frame: a kittest step lasts 250 ms of egui time, longer than egui's double click delay.
         let press = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
         self.h.input_mut().events.extend([press(true), press(false), press(true), press(false)]);
         self.h.step();
+    }
+
+    /// Double-clicks a cell and waits for its editor, which replaces the cell and is focused with its text selected.
+    pub fn open_cell(&mut self, col: &str, row: usize) {
+        self.double_click_cell(col, row);
         self.wait("the cell editor", |a| a.sql_cell.is_some());
-        // The editor replaces the cell and is focused with its text selected, so typing goes straight to it.
+    }
+
+    /// Types into the focused widget.
+    pub fn type_text(&mut self, text: &str) {
         self.h.event(egui::Event::Text(text.into()));
         self.settle();
+    }
+
+    /// Opens a cell, types over its text and commits with Enter.
+    pub fn edit_cell(&mut self, col: &str, row: usize, text: &str) {
+        self.open_cell(col, row);
+        self.type_text(text);
         self.h.key_press(egui::Key::Enter);
         self.wait("the edit to be staged", |a| a.sql_cell.is_none());
+    }
+
+    /// Clicks the last widget with this accessible name: a dialog is drawn after the page, so its button comes
+    /// last when the page has one of the same name ("Delete").
+    pub fn click_last(&mut self, label: &str) {
+        self.show(label);
+        self.h.get_all_by_label(label).last().expect("a widget").click();
+        self.settle();
+    }
+
+    /// Clicks the nth widget with this accessible name.
+    pub fn click_nth(&mut self, label: &str, n: usize) {
+        self.show(label);
+        self.h.get_all_by_label(label).nth(n).expect("a widget").click();
+        self.settle();
+    }
+
+    /// Clicks a text field by its accessible name and types into it.
+    pub fn fill(&mut self, field: &str, text: &str) {
+        self.click(field);
+        self.type_text(text);
     }
 
     /// Clicks Save in the staged bar and waits until nothing is staged or in flight.

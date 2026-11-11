@@ -212,7 +212,7 @@ impl App {
                 Modal::Typed { title, expect, typed, action } => {
                     ui.label(semibold(RichText::new(title.as_str()).color(BRIGHT())));
                     ui.label(RichText::new(format!("Type {expect} to confirm (case sensitive).")).color(MUTED()));
-                    ui.add(egui::TextEdit::singleline(typed).font(egui::TextStyle::Monospace).desired_width(320.0));
+                    ui.add(egui::TextEdit::singleline(typed).font(egui::TextStyle::Monospace).desired_width(320.0)).widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Confirmation"));
                     dialog_actions(ui, |ui| {
                         let ok = typed == expect;
                         if ui.add_enabled(ok, primary_button(ui, "Confirm", ALERT())).clicked() {
@@ -604,7 +604,9 @@ impl App {
                                 let mins = a.at.elapsed().as_secs() / 60;
                                 ui.label(RichText::new(format!("{}{}{}  {what}", a.db, if a.coll.is_empty() { "" } else { "." }, a.coll)).monospace());
                                 ui.label(RichText::new(format!("{mins} min ago")).color(MUTED()));
-                                if ui.button("Undo").clicked() {
+                                let undo = ui.button("Undo");
+                                undo.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Undo change {}", i + 1)));
+                                if undo.clicked() {
                                     pick = Some(i);
                                 }
                             });
