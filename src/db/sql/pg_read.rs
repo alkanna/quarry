@@ -66,7 +66,7 @@ pub(super) async fn set_search_path(c: &mut PgConnection, schema: &str) -> Resul
     if schema.is_empty() {
         return Ok(());
     }
-    sqlx::query("SELECT set_config('search_path', $1, false)").bind(Dialect::Postgres.quote_ident(schema)).execute(&mut *c).await?;
+    sqlx::query("SELECT set_config('search_path', $1, false)").persistent(false).bind(Dialect::Postgres.quote_ident(schema)).execute(&mut *c).await?;
     Ok(())
 }
 

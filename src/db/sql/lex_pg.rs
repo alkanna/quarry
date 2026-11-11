@@ -203,6 +203,29 @@ fn refused_field(name: &str) -> bool {
     REFUSED_FUNCTIONS_EXACT.contains(&name) || REFUSED_FUNCTIONS_PREFIX.iter().any(|p| name.starts_with(p))
 }
 
+/// Whether the token at `i` is the name of a call (`f(`) or follows a `.`. `(expr).f` and `alias.f` call f(expr), so a name
+/// after a `.` is as much a call as a name before `(`.
+fn call_or_field(part: &[Code], i: usize) -> (bool, bool) {
+    (part.get(i + 1).is_some_and(|n| punct(n, "(")), i > 0 && punct(&part[i - 1], "."))
+}
+
+/// Functions whose effect stays on the session after the transaction ends: a session advisory lock stays on the backend
+/// and a dblink connection stays open there. The transaction-scoped `pg_advisory_xact_lock` family is not listed.
+const SESSION_FUNCTIONS_EXACT: &[&str] = &["pg_advisory_lock", "pg_advisory_lock_shared", "pg_try_advisory_lock", "pg_try_advisory_lock_shared"];
+const SESSION_FUNCTIONS_PREFIX: &[&str] = &["dblink"];
+
+/// Whether the statement calls a function that leaves session state behind, in any spelling the read-only check reads
+/// (plain, schema-qualified, quoted, field notation), under both readings of backslashes in strings.
+pub(super) fn session_function(stmt: &str) -> bool {
+    [false, true].into_iter().any(|bs| {
+        let code = code_of(stmt, bs);
+        (0..code.len()).any(|i| {
+            let (called, field) = call_or_field(&code, i);
+            (called || field) && ident(&code[i]).is_some_and(|n| SESSION_FUNCTIONS_EXACT.contains(&n.as_str()) || SESSION_FUNCTIONS_PREFIX.iter().any(|p| n.starts_with(p)))
+        })
+    })
+}
+
 /// Statements that read, besides EXPLAIN which is checked for ANALYZE and then for its inner statement.
 const READS: [&str; 5] = ["SELECT", "WITH", "VALUES", "TABLE", "SHOW"];
 
@@ -315,9 +338,7 @@ fn check_body(part: &[Code]) -> Result<(), String> {
                 return Err(format!("A locking clause (FOR UPDATE, FOR SHARE) takes row locks and is not allowed on a read-only connection. {REFUSED}"));
             }
         }
-        // `(expr).f` and `alias.f` call f(expr), so a name after a `.` is as much a call as a name before `(`.
-        let called = next.is_some_and(|n| punct(n, "("));
-        let field = i > 0 && punct(&part[i - 1], ".");
+        let (called, field) = call_or_field(part, i);
         if called || field {
             if let Some(name) = ident(t) {
                 if name == UNSURE {
@@ -847,5 +868,49 @@ mod tests {
             assert!(!session_state(s, PG), "{s}");
         }
         assert!(!session_state("SET x = 1", Dialect::MySql));
+    }
+
+    #[test]
+    fn session_advisory_locks_and_dblink_are_session_state_in_every_spelling() {
+        use super::super::session_state;
+        for s in [
+            "SELECT pg_advisory_lock(42)", "select PG_ADVISORY_LOCK(1, 2)", "SELECT pg_advisory_lock_shared(42)", "SELECT pg_try_advisory_lock(42)", "SELECT pg_try_advisory_lock_shared(1, 2)",
+            "SELECT pg_catalog.pg_advisory_lock(42)", "SELECT \"pg_catalog\".\"pg_advisory_lock\"(42)", "SELECT pg_catalog . pg_advisory_lock (42)", "SELECT (42).pg_advisory_lock", "SELECT x.pg_try_advisory_lock FROM (SELECT 1) x",
+            "SELECT /* c */ pg_advisory_lock(42)", "SELECT 1; SELECT pg_advisory_lock(42)", "WITH a AS (SELECT pg_advisory_lock(42)) SELECT * FROM a",
+            "SELECT dblink_connect('c', 'host=x')", "SELECT dblink('host=x', 'select 1')", "SELECT public.dblink_exec('c', 'x')", "SELECT \"dblink_open\"('c', 'k', 'select 1')", "SELECT * FROM dblink('x', 'y') AS t(a int)",
+        ] {
+            assert!(session_state(s, PG), "{s}");
+        }
+        // The transaction-scoped locks end with the transaction, and a string or a name that only looks the same is not a call.
+        for s in [
+            "SELECT pg_advisory_xact_lock(42)", "SELECT pg_try_advisory_xact_lock(42)", "SELECT pg_advisory_xact_lock_shared(42)", "SELECT 'pg_advisory_lock(42)'", "SELECT pg_advisory_lock FROM t",
+            "SELECT dblink_x FROM t", "SELECT $$dblink('x')$$", "SELECT 1 -- pg_advisory_lock(1)", "SELECT pg_advisory_unlock(42)",
+        ] {
+            assert!(!session_state(s, PG), "{s}");
+        }
+    }
+
+    #[test]
+    fn statements_the_server_refuses_inside_a_transaction_block_are_seen() {
+        use super::super::needs_no_transaction;
+        for s in [
+            "VACUUM", "vacuum full t", "VACUUM (ANALYZE) t", "/* c */ VACUUM t",
+            "CREATE INDEX CONCURRENTLY i ON t (a)", "create unique index concurrently i on t (a)", "DROP INDEX CONCURRENTLY i", "DROP INDEX CONCURRENTLY IF EXISTS i",
+            "REINDEX INDEX CONCURRENTLY i", "REINDEX TABLE CONCURRENTLY t", "REINDEX (CONCURRENTLY) TABLE t", "REINDEX (VERBOSE, CONCURRENTLY) SCHEMA s", "REINDEX SCHEMA s", "REINDEX DATABASE d", "REINDEX SYSTEM d",
+            "CREATE DATABASE d", "DROP DATABASE d", "drop database if exists d", "ALTER SYSTEM SET work_mem = '5MB'", "ALTER SYSTEM RESET ALL", "CREATE TABLESPACE s LOCATION '/x'", "DROP TABLESPACE s",
+            "ALTER DATABASE d SET TABLESPACE s", "ALTER TABLE t DETACH PARTITION p CONCURRENTLY", "CREATE SUBSCRIPTION s CONNECTION 'x' PUBLICATION p", "DROP SUBSCRIPTION s",
+            "CLUSTER", "cluster verbose", "CLUSTER (VERBOSE)", "CLUSTER;",
+        ] {
+            assert!(needs_no_transaction(s, PG), "{s}");
+        }
+        // These run in a block on every supported server, so they stay allowed. ALTER TYPE ADD VALUE and the CONCURRENTLY refresh were checked on 13 and 18.
+        for s in [
+            "ALTER TYPE mood ADD VALUE 'x'", "REFRESH MATERIALIZED VIEW CONCURRENTLY mv", "REFRESH MATERIALIZED VIEW mv", "CLUSTER t USING i", "CLUSTER t", "CLUSTER VERBOSE t", "REINDEX TABLE t", "REINDEX INDEX i",
+            "CREATE INDEX i ON t (a)", "DROP INDEX i", "CREATE TABLE concurrently_t (a int)", "ALTER TABLE t DETACH PARTITION p", "ALTER TABLE t ADD COLUMN a int", "ANALYZE", "CHECKPOINT", "SELECT 'VACUUM'", "SELECT 1; VACUUM",
+            "INSERT INTO t VALUES (1)", "CREATE SCHEMA s", "DROP TABLE t", "ALTER DATABASE d SET work_mem = '5MB'", "ALTER ROLE r SET x = 1", "SELECT * FROM vacuum",
+        ] {
+            assert!(!needs_no_transaction(s, PG), "{s}");
+        }
+        assert!(!needs_no_transaction("VACUUM", Dialect::MySql));
     }
 }

@@ -385,7 +385,13 @@ impl Conn {
     pub async fn describe(&mut self, sql: &str) -> Result<Vec<ColInfo>, sqlx::Error> {
         match self {
             Conn::My(c) => Ok(col_infos(c.describe(sql).await?.columns(), Dialect::MySql)),
-            Conn::Pg(c) => Ok(col_infos(c.describe(sql).await?.columns(), Dialect::Postgres)),
+            Conn::Pg(c) => {
+                let d = c.describe(sql).await.map(|d| col_infos(d.columns(), Dialect::Postgres));
+                // sqlx describes through a named statement it caches, which behind a pooler would stay on a backend other
+                // clients share. This runs inside the statement's own transaction, so the backend is the same one.
+                let _ = c.clear_cached_statements().await;
+                Ok(d?)
+            }
         }
     }
 
@@ -469,8 +475,14 @@ pub(super) fn bound<'q>(sql: &'q str, params: &'q [Param]) -> Query<'q> {
 type PgQuery<'q> = sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>;
 
 /// Postgres has no unsigned integers, so a value above i64::MAX is sent as text and left to the server's cast.
+///
+/// Every bound PostgreSQL statement is unnamed (`persistent(false)`). A named statement is cached per connection by sqlx
+/// and belongs to one backend, and behind transaction pooling the next transaction can run on another backend, which then
+/// answers `prepared statement "sqlx_s_1" does not exist` or `already exists` (another client may own that name).
+/// `statement_cache_capacity(0)` would not help: sqlx then still names the statement and never closes it. The cost in
+/// normal mode is one Parse per call, which is nothing next to the round trip.
 pub(super) fn bound_pg<'q>(sql: &'q str, params: &'q [Param]) -> PgQuery<'q> {
-    let mut q = sqlx::query(sql);
+    let mut q = sqlx::query(sql).persistent(false);
     for p in params {
         q = match p {
             Param::Null => q.bind(None::<String>),
@@ -517,7 +529,7 @@ impl Db {
                 }
                 Pool::Pg(pp) => {
                     let pool = self.pg_pool()?;
-                    let mut q = sqlx::query(&full);
+                    let mut q = sqlx::query(&full).persistent(false);
                     for x in params {
                         q = q.bind(x);
                     }

@@ -45,8 +45,6 @@ pub struct PgPools {
     /// The statement_timeout the server gave the session at connect, spelled as the server spells it ("0", "30s"). A
     /// transaction applies it again with SET LOCAL, because behind a pooler a session value would not hold.
     timeout: String,
-    /// A pool wraps what a connection hook failed with in a bare timeout, so the real message is kept here.
-    failure: Arc<Mutex<Option<String>>>,
     live: Mutex<Live>,
     /// What the first line of a Stop needs and a pid alone cannot give: the time each backend started, so a pid the server
     /// reused for another session is never cancelled. Kept per connection because two servers hand out the same pids.
@@ -56,12 +54,20 @@ pub struct PgPools {
 #[derive(Default)]
 struct Live {
     tick: u64,
-    pools: HashMap<String, (PgPool, u64)>,
+    pools: HashMap<String, Entry>,
+}
+
+struct Entry {
+    pool: PgPool,
+    used: u64,
+    /// A pool wraps what its connection hook failed with in a bare timeout, so the real message is kept here. It belongs
+    /// to this pool alone, so a failure of one database is never reported for another, and a connect that passes clears it.
+    failure: Arc<Mutex<Option<String>>>,
 }
 
 impl PgPools {
     fn new(opts: PgConnectOptions, default_db: String, acquire: Duration, locals: Option<String>, timeout: String) -> PgPools {
-        PgPools { opts, default_db, acquire, idle: IDLE, per_db: PER_DB, max_pools: MAX_POOLS, locals, timeout, failure: Default::default(), live: Default::default(), starts: Default::default() }
+        PgPools { opts, default_db, acquire, idle: IDLE, per_db: PER_DB, max_pools: MAX_POOLS, locals, timeout, live: Default::default(), starts: Default::default() }
     }
 
     /// The SET LOCAL statements every transaction of a pooler-fallback connection starts with, or an empty string when
@@ -91,31 +97,36 @@ impl PgPools {
     /// recently leaves the map but is not closed: closing makes every acquire on a clone someone still holds fail with
     /// PoolClosed. The last handle and the idle timeout reap it.
     pub fn pool(&self, database: Option<&str>) -> PgPool {
+        self.entry(database).0
+    }
+
+    fn entry(&self, database: Option<&str>) -> (PgPool, Arc<Mutex<Option<String>>>) {
         let name = database.filter(|d| !d.is_empty()).unwrap_or(&self.default_db).to_string();
         let mut live = self.live.lock().unwrap();
         live.tick += 1;
         let tick = live.tick;
-        if let Some((p, used)) = live.pools.get_mut(&name) {
-            *used = tick;
-            return p.clone();
+        if let Some(e) = live.pools.get_mut(&name) {
+            e.used = tick;
+            return (e.pool.clone(), e.failure.clone());
         }
         while live.pools.len() >= self.max_pools {
-            let Some(oldest) = live.pools.iter().min_by_key(|(_, (_, used))| *used).map(|(k, _)| k.clone()) else { break };
+            let Some(oldest) = live.pools.iter().min_by_key(|(_, e)| e.used).map(|(k, _)| k.clone()) else { break };
             live.pools.remove(&oldest);
         }
-        let (locals, failure) = (self.locals.clone(), self.failure.clone());
+        let failure: Arc<Mutex<Option<String>>> = Default::default();
+        let (locals, hook_failure) = (self.locals.clone(), failure.clone());
         let pool = PgPoolOptions::new()
             .max_connections(self.per_db)
             .min_connections(0)
             .idle_timeout(self.idle)
             .acquire_timeout(self.acquire)
             .after_connect(move |c, _| {
-                let (locals, failure) = (locals.clone(), failure.clone());
+                let (locals, failure) = (locals.clone(), hook_failure.clone());
                 Box::pin(async move { session(c, locals.as_deref(), &failure).await })
             })
             .connect_lazy_with(self.opts.clone().database(&name));
-        live.pools.insert(name, (pool.clone(), tick));
-        pool
+        live.pools.insert(name, Entry { pool: pool.clone(), used: tick, failure: failure.clone() });
+        (pool, failure)
     }
 
     /// Names of the databases that have a live pool.
@@ -129,8 +140,9 @@ impl PgPools {
     /// A pooled connection of `database`. When new connections fail the session guard the error says so instead of
     /// a bare timeout.
     pub async fn acquire(&self, database: Option<&str>) -> Res<sqlx::pool::PoolConnection<sqlx::Postgres>> {
-        self.pool(database).acquire().await.map_err(|x| match x {
-            sqlx::Error::PoolTimedOut => self.failure.lock().unwrap().clone().unwrap_or_else(|| e(x)),
+        let (pool, failure) = self.entry(database);
+        pool.acquire().await.map_err(|x| match x {
+            sqlx::Error::PoolTimedOut => failure.lock().unwrap().clone().unwrap_or_else(|| e(x)),
             x => e(x),
         })
     }
@@ -139,7 +151,8 @@ impl PgPools {
     pub async fn detached(&self, opts: &Opts) -> Res<Conn> {
         let Opts::Pg(o) = opts else { return Err("Not a PostgreSQL connection".into()) };
         let mut c = sqlx::PgConnection::connect_with(o).await.map_err(se)?;
-        session(&mut c, self.locals.as_deref(), &self.failure).await.map_err(|x| self.failure.lock().unwrap().clone().unwrap_or_else(|| e(x)))?;
+        let failure = Mutex::new(None);
+        session(&mut c, self.locals.as_deref(), &failure).await.map_err(|x| failure.lock().unwrap().clone().unwrap_or_else(|| e(x)))?;
         Ok(Conn::Pg(c))
     }
 }
@@ -306,10 +319,14 @@ pub(super) async fn session(c: &mut sqlx::PgConnection, locals: Option<&str>, fa
         *failure.lock().unwrap() = Some(m.clone());
         sqlx::Error::Protocol(m)
     };
-    match locals {
+    let res = match locals {
         Some(l) => pooler_check(c, l).await.map_err(fail),
         None => readback(c).await.map_err(fail),
+    };
+    if res.is_ok() {
+        *failure.lock().unwrap() = None;
     }
+    res
 }
 
 fn ssl_mode(m: SslMode) -> PgSslMode {
@@ -458,7 +475,7 @@ pub(super) async fn cancel(db: &Db, pid: u64) -> Res<String> {
     let Some(start) = pools.recall_start(pid) else { return Err("That connection is already gone.".into()) };
     let mut c = super::run::side_conn(db, "Could not reach the server to stop the statement").await?;
     let Conn::Pg(pc) = &mut c else { return Err("Not a PostgreSQL connection".into()) };
-    let q = sqlx::query("SELECT pg_cancel_backend(pid)::text FROM pg_stat_activity WHERE pid = $1 AND backend_start::text = $2").bind(pid as i32).bind(start);
+    let q = sqlx::query("SELECT pg_cancel_backend(pid)::text FROM pg_stat_activity WHERE pid = $1 AND backend_start::text = $2").persistent(false).bind(pid as i32).bind(start);
     let r = q.fetch_all(&mut *pc).await.map_err(se);
     let _ = c.close().await;
     match r? {
@@ -661,6 +678,26 @@ mod tests {
                 // The statement timeout is the connect timeout the worker was given (30 s).
                 let rows = l.w.rt.block_on(c.fetch_all("SHOW statement_timeout")).unwrap();
                 assert_eq!(rows[0].cell(0), Some(&b"30s"[..]), "{var}");
+            });
+        }
+
+        #[test]
+        fn a_guard_failure_belongs_to_its_own_pool_and_a_good_connect_clears_it() {
+            every_pg(|l, var| {
+                let _rt = l.w.rt.enter();
+                let off = pools_with(l, &[("default_transaction_read_only", "off")], Duration::from_secs(3));
+                let err = l.w.rt.block_on(off.acquire(Some("postgres"))).err().expect("must be refused");
+                assert!(err.contains("not read-only"), "{var}: {err}");
+                // Another database has its own pool and so never reports it.
+                let (_, mine) = off.entry(Some("postgres"));
+                let (_, other) = off.entry(Some("quarry_other"));
+                assert!(mine.lock().unwrap().is_some(), "{var}");
+                assert!(other.lock().unwrap().is_none(), "{var}: the other database's pool carries the message");
+                // A connection that passes the guard wipes the old message.
+                let mut raw = l.w.rt.block_on(sqlx::PgConnection::connect(&l.uri)).unwrap();
+                l.w.rt.block_on(raw.execute("SET default_transaction_read_only = on")).unwrap();
+                l.w.rt.block_on(session(&mut raw, None, &mine)).unwrap();
+                assert!(mine.lock().unwrap().is_none(), "{var}: a stale message is left after a good connect");
             });
         }
 

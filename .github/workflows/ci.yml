@@ -57,6 +57,18 @@ jobs:
           until docker exec mysql mysqladmin -uroot -pquarry ping --silent; do sleep 1; done
           until docker exec mariadb mariadb-admin -uroot -pquarry ping --silent; do sleep 1; done
           until docker exec pg18 pg_isready -U postgres -q && docker exec pg13 pg_isready -U postgres -q; do sleep 1; done
+      # PgBouncer in transaction mode with no prepared statement support, the worst case for the PostgreSQL pooler
+      # fallback. It refuses the startup options and hands every transaction to any backend, so named statements and
+      # session settings that work on a direct connection fail or leak here. It reaches its own postgres by name on a
+      # docker network, and keeps 8 backends per database, which the tests count on.
+      - name: PgBouncer for the live tests
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          docker network create pgb
+          docker run -d --name pgb-pg --network pgb -e POSTGRES_PASSWORD=quarry postgres:18
+          until docker exec pgb-pg pg_isready -U postgres -q; do sleep 1; done
+          docker run -d --name pgbouncer --network pgb -p 6432:5432 -e DB_HOST=pgb-pg -e DB_USER=postgres -e DB_PASSWORD=quarry -e AUTH_TYPE=scram-sha-256 -e POOL_MODE=transaction -e MAX_PREPARED_STATEMENTS=0 -e IGNORE_STARTUP_PARAMETERS=extra_float_digits -e DEFAULT_POOL_SIZE=8 -e MAX_CLIENT_CONN=200 edoburu/pgbouncer
+          until docker run --rm --network pgb -e PGPASSWORD=quarry postgres:18 psql -h pgbouncer -U postgres -At -c 'select 1' >/dev/null 2>&1; do sleep 1; done
       - if: matrix.os == 'ubuntu-22.04'
         run: cargo test --locked
         env:
@@ -66,5 +78,6 @@ jobs:
           QUARRY_TEST_MARIADB: mariadb://root:quarry@127.0.0.1:3307
           QUARRY_TEST_POSTGRES: postgres://postgres:quarry@127.0.0.1:5432/postgres
           QUARRY_TEST_POSTGRES13: postgres://postgres:quarry@127.0.0.1:5433/postgres
+          QUARRY_TEST_PGBOUNCER: postgres://postgres:quarry@127.0.0.1:6432/postgres
       - if: matrix.os != 'ubuntu-22.04'
         run: cargo check --locked --all-targets

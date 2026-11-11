@@ -343,7 +343,31 @@ pub fn session_state(stmt: &str, d: Dialect) -> bool {
         "CREATE" => matches!(at(1), "TEMP" | "TEMPORARY") || (matches!(at(1), "LOCAL" | "GLOBAL") && matches!(at(2), "TEMP" | "TEMPORARY")),
         _ => false,
     };
-    first || words.iter().any(|w| w == "SET_CONFIG") || words.windows(2).any(|w| w[0] == "INTO" && matches!(w[1].as_str(), "TEMP" | "TEMPORARY"))
+    first || words.iter().any(|w| w == "SET_CONFIG") || words.windows(2).any(|w| w[0] == "INTO" && matches!(w[1].as_str(), "TEMP" | "TEMPORARY")) || pg::session_function(stmt)
+}
+
+/// Whether a PostgreSQL statement is one the server refuses inside a transaction block. Behind a pooler every statement
+/// is wrapped in a transaction of Quarry's own, so these can never run there. ALTER TYPE ... ADD VALUE and REFRESH
+/// MATERIALIZED VIEW CONCURRENTLY are not listed because supported servers run them in a block. Only the first statement
+/// of the text is read, like `transaction_control`.
+pub fn needs_no_transaction(stmt: &str, d: Dialect) -> bool {
+    if d != Dialect::Postgres {
+        return false;
+    }
+    let w: Vec<String> = tokens(stmt, d).into_iter().take_while(|(t, r)| !(*t == Tok::Punct && &stmt[r.clone()] == ";")).filter(|(t, _)| *t == Tok::Word).map(|(_, r)| stmt[r].to_ascii_uppercase()).collect();
+    let at = |i: usize| w.get(i).map(String::as_str).unwrap_or("");
+    let has = |word: &str| w.iter().any(|x| x == word);
+    match at(0) {
+        "VACUUM" => true,
+        "CREATE" => matches!(at(1), "DATABASE" | "TABLESPACE" | "SUBSCRIPTION") || (at(1) == "INDEX" && at(2) == "CONCURRENTLY") || (at(1) == "UNIQUE" && at(2) == "INDEX" && at(3) == "CONCURRENTLY"),
+        "DROP" => matches!(at(1), "DATABASE" | "TABLESPACE" | "SUBSCRIPTION") || (at(1) == "INDEX" && at(2) == "CONCURRENTLY"),
+        // The option list of REINDEX (CONCURRENTLY) comes before the object kind. SCHEMA, DATABASE and SYSTEM refuse a block with or without it.
+        "REINDEX" => has("CONCURRENTLY") || matches!(at(1), "SCHEMA" | "DATABASE" | "SYSTEM"),
+        "ALTER" => at(1) == "SYSTEM" || (at(1) == "DATABASE" && has("TABLESPACE")) || (at(1) == "TABLE" && has("DETACH") && has("PARTITION") && has("CONCURRENTLY")),
+        // CLUSTER of one table runs in a block; CLUSTER alone, or with only VERBOSE, does not.
+        "CLUSTER" => w.len() == 1 || (w.len() == 2 && at(1) == "VERBOSE"),
+        _ => false,
+    }
 }
 
 /// Whether the statement orders its rows, which keeps rows from moving between pages.

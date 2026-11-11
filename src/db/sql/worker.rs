@@ -346,7 +346,7 @@ async fn pg_columns(db: &Db, schema: &str, table: &str) -> Res<Vec<SqlRow>> {
     let mut conn = pools.acquire(db.opts.database()).await?;
     let sql = format!("{}{}", db.dialect.columns(), db.dialect.all_rows());
     let t = Instant::now();
-    let res = super::pg_read::in_read_only(&mut conn, db, "SET LOCAL search_path = pg_catalog", async |c| sqlx::query(&sql).bind(schema).bind(table).fetch_all(c).await).await;
+    let res = super::pg_read::in_read_only(&mut conn, db, "SET LOCAL search_path = pg_catalog", async |c| sqlx::query(&sql).persistent(false).bind(schema).bind(table).fetch_all(c).await).await;
     db.note(schema, &sql, t, &res);
     if res.is_err() {
         conn.close_on_drop();
@@ -518,24 +518,30 @@ async fn pg_field_values(db: &Db, schema: &str, table: &str, column: &str, prefi
     }
     let mut c = db.detached().await?;
     let res = async {
-        // The lookup must stay short, so a slow one gives up instead of holding a connection.
-        c.execute(&d.session_timeout(300)).await.map_err(se)?;
+        let Conn::Pg(pc) = &mut c else { return Err("Not a PostgreSQL connection".to_string()) };
+        // The lookup must stay short, so a slow one gives up instead of holding a connection. The limit is a SET LOCAL in
+        // the read-only transaction of each read, never a session value, because a pooler would hand the session on.
+        let short = super::pg::set_timeout("300");
         if est.is_none() && !leads {
             let sql = format!("SELECT count(*)::text FROM (SELECT 1 FROM {} LIMIT {}) AS q", d.qualified(schema, table), VALUES_SMALL + 1);
-            match c.fetch_all(&sql).await {
-                Ok(rows) if rows.first().and_then(|r| num_at(r, 0)).is_some_and(|n| n <= VALUES_SMALL) => {}
+            match super::pg_read::in_read_only(pc, db, &short, async |c| c.fetch_all(sql.as_str()).await).await {
+                Ok(rows) if rows.first().and_then(|r| r.try_get::<String, _>(0).ok()).and_then(|n| n.parse::<u64>().ok()).is_some_and(|n| n <= VALUES_SMALL) => {}
                 // Too big to group, or too slow to tell.
                 _ => return Ok(None),
             }
         }
         let sql = d.value_counts(schema, table, column, prefix.is_some(), 201);
-        let Conn::Pg(pc) = &mut c else { return Err("Not a PostgreSQL connection".to_string()) };
-        let mut q = sqlx::query(&sql);
-        if let Some(p) = prefix {
-            q = q.bind(format!("{}%", super::rules::like_escape(p)));
-        }
+        let pattern = prefix.map(|p| format!("{}%", super::rules::like_escape(p)));
         let t = Instant::now();
-        let rows = q.fetch_all(&mut *pc).await.map(SqlRow::wrap_pg);
+        let rows = super::pg_read::in_read_only(pc, db, &short, async |c| {
+            let mut q = sqlx::query(&sql).persistent(false);
+            if let Some(p) = &pattern {
+                q = q.bind(p.as_str());
+            }
+            q.fetch_all(c).await
+        })
+        .await
+        .map(SqlRow::wrap_pg);
         db.note(schema, &sql, t, &rows);
         let rows = rows.map_err(se)?;
         Ok(Some(rows.iter().filter_map(|r| Some((text(r, "v")?, super::structure::num(r, "n")?))).collect()))

@@ -274,10 +274,11 @@ impl Relay {
             lex::read_only_check(&stmt, self.dialect)?;
         }
         if pooled && !self.read_only {
-            if let Some(w) = lex::tokens(&stmt, Dialect::Postgres).into_iter().find(|(t, _)| *t == lex::Tok::Word).map(|(_, r)| stmt[r].to_ascii_uppercase()) {
-                if matches!(w.as_str(), "BEGIN" | "START" | "COMMIT" | "END" | "ABORT" | "ROLLBACK" | "SAVEPOINT" | "RELEASE" | "PREPARE") {
-                    return Err("Transactions you open yourself are not available behind a connection pooler; each statement runs in its own transaction.".into());
-                }
+            if lex::transaction_control(&stmt, self.dialect) {
+                return Err(super::run::POOLER_TX.into());
+            }
+            if lex::needs_no_transaction(&stmt, self.dialect) {
+                return Err(super::run::POOLER_NO_TX.into());
             }
             if lex::session_state(&stmt, Dialect::Postgres) {
                 return Err(super::run::POOLER_SESSION.into());

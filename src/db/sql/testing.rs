@@ -168,3 +168,14 @@ impl LivePg {
         self.db.at("quarry_test")
     }
 }
+
+/// A real PgBouncer in transaction mode with `max_prepared_statements=0` in front of postgres:18, named by
+/// QUARRY_TEST_PGBOUNCER. It refuses the startup options, so the connection runs in Quarry's pooler fallback.
+pub const PGBOUNCER_ENV: &str = "QUARRY_TEST_PGBOUNCER";
+
+/// `live_pg` for the PgBouncer, which checks that the connection really took the fallback path.
+pub fn live_pgbouncer() -> Option<LivePg> {
+    let l = live_pg(PGBOUNCER_ENV)?;
+    assert!(l.db.pooler(), "the PgBouncer should have refused the startup options");
+    Some(l)
+}
