@@ -566,7 +566,7 @@ fn connection_row(ui: &mut egui::Ui, c: &Conn, active: bool) -> egui::Response {
     let (mark, product, color) = mark_of(c);
     let version = short_version(&c.server.version);
     let engine = if version.is_empty() { product.to_string() } else { format!("{product} {version}") };
-    side_row(ui, CONN_ROW_H, 0.0, active, |p, r| {
+    side_row(ui, CONN_ROW_H, 0.0, active, &c.meta.name, |p, r| {
         let mid = r.center().y;
         let sq = egui::Rect::from_center_size(egui::pos2(r.left() + 14.0, mid), egui::vec2(28.0, 28.0));
         p.rect_filled(sq, R_MD, tint(color, 45));

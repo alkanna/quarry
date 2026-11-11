@@ -551,6 +551,7 @@ impl App {
                     let dir = dir_of(c);
                     // Inset so the resize handles at both edges stay on top for their clicks.
                     let hresp = ui.interact(cell.shrink2(egui::vec2(4.0, 0.0)), ui.scope_id().with(("h", c)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                    hresp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, c.as_str()));
                     let state = state_of(&hresp);
                     ui.painter().rect_filled(cell, 0, hover_fill(state));
                     // Sorted in the accent with its direction, pinned in amber, fields missing from
@@ -645,8 +646,12 @@ impl App {
                         let num = (base + i as u64 + 1).to_string();
                         let (num, nc) = if drafted.is_some() { (format!("{num}●"), WARNING()) } else { (num, FAINT()) };
                         p.text(egui::pos2(rr.left() + off + 18.0, rr.center().y), egui::Align2::LEFT_CENTER, num, FontId::monospace(TXT_CAPTION), nc);
-                        if checks && check_box(ui, egui::pos2(rr.left() + 13.0, rr.center().y), ui.scope_id().with(("check", i)), checked.contains(&i), false).clicked() {
-                            check_click = Some(i);
+                        if checks {
+                            let cb = check_box(ui, egui::pos2(rr.left() + 13.0, rr.center().y), ui.scope_id().with(("check", i)), checked.contains(&i), false);
+                            cb.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, checked.contains(&i), format!("Select row {}", base + i as u64 + 1)));
+                            if cb.clicked() {
+                                check_click = Some(i);
+                            }
                         }
                         let mut x = rr.left() + num_w;
                         for (ci, (c, w)) in cols.iter().zip(&widths).enumerate() {
@@ -699,6 +704,12 @@ impl App {
                                 }
                             }
                             let mut cr = ui.interact(cell, ui.scope_id().with(("c", i, ci)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                            // Named after the row number the grid shows, with the cell text as its value, so tests find it.
+                            cr.widget_info(|| {
+                                let mut info = egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{c} row {}", base + i as u64 + 1));
+                                info.current_text_value = v.map(|v| cell_text(&v.bson()));
+                                info
+                            });
                             if let Some(why) = &sql_why[ci] {
                                 cr = cr.on_hover_text(why.as_str());
                             }

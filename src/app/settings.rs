@@ -89,7 +89,7 @@ impl App {
                 rows.spacing_mut().item_spacing.y = 2.0;
                 for (cat, label) in CATS {
                     let on = self.settings_cat == cat;
-                    let resp = side_row(&mut rows, ROW_H, 0.0, on, |p, r| {
+                    let resp = side_row(&mut rows, ROW_H, 0.0, on, label, |p, r| {
                         let c = r.left_center() + egui::vec2(7.0, 0.0);
                         cat_icon(p, cat, c, if on { PRIMARY() } else { MUTED() });
                         let g = p.layout_job(egui::text::LayoutJob::single_section(label.to_string(), ui_fmt(TXT_BODY, if on { BRIGHT() } else { TEXT() }, if on { W_MEDIUM } else { 400.0 }, 0.0)));

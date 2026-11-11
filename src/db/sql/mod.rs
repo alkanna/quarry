@@ -31,7 +31,7 @@ pub mod import;
 pub mod dump;
 pub mod server;
 #[cfg(test)]
-mod testing;
+pub(crate) mod testing;
 #[cfg(test)]
 mod review_final;
 pub mod rules;

@@ -6,7 +6,7 @@ use super::*;
 impl App {
     /// Keeps the open tabs and their inputs in the settings file, so the next launch reopens them.
     pub(super) fn remember_tabs(&mut self) {
-        if self.demo || self.shot.is_some() {
+        if self.ephemeral || self.shot.is_some() {
             return;
         }
         let tabs: Vec<SavedTab> = self

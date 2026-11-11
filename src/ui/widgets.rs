@@ -616,8 +616,8 @@ pub(crate) fn spin_at(ui: &egui::Ui, rect: egui::Rect) {
     }
 }
 
-/// One clickable sidebar row painted by hand, so it reads as a list rather than a form.
-pub(crate) fn side_row(ui: &mut egui::Ui, height: f32, indent: f32, active: bool, paint: impl FnOnce(&egui::Painter, egui::Rect)) -> egui::Response {
+/// One clickable sidebar row painted by hand, so it reads as a list rather than a form. `label` is its text for screen readers and tests.
+pub(crate) fn side_row(ui: &mut egui::Ui, height: f32, indent: f32, active: bool, label: &str, paint: impl FnOnce(&egui::Painter, egui::Rect)) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), Sense::click());
     let fill = match (active, state_of(&resp)) {
         (true, 0) => SEL(),
@@ -630,6 +630,7 @@ pub(crate) fn side_row(ui: &mut egui::Ui, height: f32, indent: f32, active: bool
     focus_ring(ui, &resp, rect, R_SM as f32);
     let inner = egui::Rect::from_min_max(rect.min + egui::vec2(8.0 + indent, 0.0), rect.max - egui::vec2(8.0, 0.0));
     paint(ui.painter(), inner);
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, active, label));
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 

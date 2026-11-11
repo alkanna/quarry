@@ -1329,13 +1329,18 @@ impl App {
 
     pub(super) fn connect(&mut self, id: u64) {
         // Demo ids overlap real ones, so reading the Keychain here would connect to a real server.
-        if self.demo {
+        if self.ephemeral {
             return self.ok("Offline demo: no database is connected.");
         }
         let uri = match stored_uri(id) {
             Ok(u) => u,
             Err(e) => return self.err(uri_err(e)),
         };
+        self.connect_uri(id, uri);
+    }
+
+    /// Connects with a known address, so tests need no keychain.
+    pub(super) fn connect_uri(&mut self, id: u64, uri: String) {
         let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == id) else { return };
         c.status = Status::Connecting;
         c.client = None;

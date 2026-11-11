@@ -151,7 +151,7 @@ pub(super) fn clean_tag(tag: &str) -> &str {
 
 /// A saved connection in the picker: status, name and tag, then the masked address.
 pub(super) fn conn_row(ui: &mut egui::Ui, c: &Conn, active: bool) -> egui::Response {
-    side_row(ui, 48.0, 4.0, active, |p, r| {
+    side_row(ui, 48.0, 4.0, active, &c.meta.name, |p, r| {
         let (left, right, top) = (r.left(), r.right() - 2.0, r.top() + 17.0);
         p.circle_filled(egui::pos2(left + 3.5, top), 3.5, status_color(&c.status));
         paint_name_tag(p, egui::Rangef::new(left + 16.0, right), top, &c.meta.name, FontId::proportional(TXT_TITLE), if active { BRIGHT() } else { TEXT() }, &c.meta.tag);
@@ -305,7 +305,7 @@ impl App {
             // Opening the form with an empty address would overwrite the stored one on save,
             // unless there is none, which is when re-entering it is the way out.
             // Demo ids overlap real ones, so the demo must not show the user's real secrets.
-            let uri = if self.demo {
+            let uri = if self.ephemeral {
                 self.conn(id).map(|c| c.masked_uri.clone()).unwrap_or_default()
             } else {
                 match stored_uri(id) {
@@ -314,7 +314,7 @@ impl App {
                     Err(e) => return self.err(uri_err(e)),
                 }
             };
-            let stored = |what: &str| if self.demo { String::new() } else { secret(id, what).unwrap_or_default() };
+            let stored = |what: &str| if self.ephemeral { String::new() } else { secret(id, what).unwrap_or_default() };
             let mut form = ConnForm {
                 id: Some(id),
                 name: meta.name.clone(),
@@ -454,7 +454,7 @@ impl App {
                 }
                 let dim = SYSTEM_DBS.contains(&db_name.as_str());
                 let count = colls.as_ref().map(|v| v.len().to_string()).unwrap_or_else(|| "…".into());
-                let r = side_row(ui, SIDE_ROW_H, 0.0, false, |p, r| {
+                let r = side_row(ui, SIDE_ROW_H, 0.0, false, db_name, |p, r| {
                     chevron(p, egui::pos2(r.left() + 4.0, r.center().y), is_open, FAINT());
                     p.text(egui::pos2(r.left() + 18.0, r.center().y), egui::Align2::LEFT_CENTER, db_name, FontId::proportional(TXT_TITLE), if dim { FAINT() } else { TEXT() });
                     p.text(egui::pos2(r.right(), r.center().y), egui::Align2::RIGHT_CENTER, &count, FontId::monospace(TXT_CAPTION), FAINT());
@@ -572,7 +572,7 @@ impl App {
                             continue;
                         }
                         let mut glyph_at = egui::Rect::NOTHING;
-                        let r = side_row(ui, SIDE_ROW_H, 18.0, active, |p, r| {
+                        let r = side_row(ui, SIDE_ROW_H, 18.0, active, coll, |p, r| {
                             // Collections are marked as documents, views with a hollow diamond so
                             // they read as derived data. A collection still being copied gets a spinner.
                             glyph_at = egui::Rect::from_center_size(egui::pos2(r.left() + 6.0, r.center().y), egui::Vec2::splat(TXT_SMALL));

@@ -645,10 +645,10 @@ impl App {
             // Demo ids overlap real ones, so the demo keeps its edits in memory only.
             // SQL addresses are rebuilt from the fields, so the Keychain holds one URL for either engine.
             let uri = if f.engine.is_sql() { db::sql::Addr { host: f.addr.host.trim().into(), user: f.addr.user.trim().into(), database: f.addr.database.trim().into(), ..f.addr.clone() }.to_uri() } else { f.uri.trim().to_string() };
-            let saved = if self.demo { Some(Ok(())) } else { keychain(id).map(|k| k.set_password(&uri)) };
+            let saved = if self.ephemeral { Some(Ok(())) } else { keychain(id).map(|k| k.set_password(&uri)) };
             match saved {
                 Some(Ok(())) => {
-                    let stored = if self.demo {
+                    let stored = if self.ephemeral {
                         Vec::new()
                     } else {
                         vec![

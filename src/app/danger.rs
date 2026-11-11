@@ -6,7 +6,7 @@ impl App {
     pub(super) fn danger(&mut self, action: Danger) {
         if let Danger::RemoveConnection(id) = action {
             // Demo ids overlap real ones, so removing a demo connection must not touch the Keychain.
-            if !self.demo {
+            if !self.ephemeral {
                 if let Some(k) = keychain(id) {
                     let _ = k.delete_credential();
                 }

@@ -356,7 +356,7 @@ pub(super) fn write_atomic(dir: &std::path::Path, file: &str, bytes: &[u8]) -> s
 
 impl App {
     pub(super) fn write_config(&mut self, file: &str, bytes: Vec<u8>) {
-        if self.demo {
+        if self.ephemeral {
             return;
         }
         if let Err(err) = write_atomic(&config_dir(), file, &bytes) {
@@ -372,7 +372,7 @@ impl App {
 
     pub(super) fn save_values(&mut self) {
         // The demo must not touch the keychain, and without a key nothing is written in plain text.
-        if self.demo {
+        if self.ephemeral {
             return;
         }
         if let Some(b) = cache_key().and_then(|k| seal(k, &mongodb::bson::to_vec(&self.values).ok()?)) {
