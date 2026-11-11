@@ -28,6 +28,7 @@ pub(super) struct PgNewSchema {
 }
 
 /// One column of the builder: the structure editor's definition and the two marks the table level needs.
+#[derive(Clone, PartialEq)]
 pub(super) struct PgCol {
     def: ColDef,
     pk: bool,
@@ -43,12 +44,23 @@ pub(super) struct PgNewTable {
     comment: String,
     show_sql: bool,
     focused: bool,
+    /// The statements of the form as it was last built, with the name, comment and columns they came from.
+    built: Option<((String, String, Vec<PgCol>), db::Res<Vec<String>>)>,
 }
 
 /// The types the picker offers. The type box takes any other name, and the server checks it before anything is made.
 const TYPES: [&str; 17] = ["integer", "bigint", "smallint", "text", "varchar(255)", "numeric(10,2)", "boolean", "date", "timestamp", "timestamptz", "time", "uuid", "jsonb", "json", "real", "double precision", "bytea"];
 
 impl PgNewTable {
+    /// Builds the statements again only when the name, comment or columns changed since the last frame.
+    fn refresh_built(&mut self) {
+        if self.built.as_ref().is_some_and(|(k, _)| k.0 == self.name && k.1 == self.comment && k.2 == self.cols) {
+            return;
+        }
+        let key = (self.name.clone(), self.comment.clone(), self.cols.clone());
+        self.built = Some((key, create_pg::create_table_stmts(&self.spec())));
+    }
+
     fn spec(&self) -> TableSpec {
         let cols: Vec<ColDef> = self.cols.iter().map(|c| ColDef { nullable: c.def.nullable && !c.pk && !c.def.auto_increment, ..c.def.clone() }).collect();
         TableSpec { schema: self.schema.clone(), name: self.name.clone(), cols, pk: self.cols.iter().filter(|c| c.pk).map(|c| c.def.name.clone()).collect(), uniques: self.cols.iter().filter(|c| c.unique).map(|c| vec![c.def.name.clone()]).collect(), comment: self.comment.clone() }
@@ -67,7 +79,7 @@ fn editor_label(ui: &mut egui::Ui, text: &mut String, width: f32, label: &str) -
 }
 
 impl App {
-    fn pg_session(&self, conn: u64) -> Option<db::sql::Db> {
+    pub(super) fn pg_session(&self, conn: u64) -> Option<db::sql::Db> {
         if self.demo {
             return None;
         }
@@ -112,7 +124,7 @@ impl App {
             return self.ask_unlock_on(conn, move |a| a.pg_new_table(conn, database));
         }
         let schema = self.pg_schema_of(conn, &database);
-        self.modal = Some(Modal::PgNewTable(Box::new(PgNewTable { conn, database, schema, name: String::new(), cols: vec![id_col()], comment: String::new(), show_sql: false, focused: false })));
+        self.modal = Some(Modal::PgNewTable(Box::new(PgNewTable { conn, database, schema, name: String::new(), cols: vec![id_col()], comment: String::new(), show_sql: false, focused: false, built: None })));
     }
 
     /// Asks what a drop takes. `name` is the schema for a schema, the table or view for those, and empty for a database.
@@ -140,7 +152,7 @@ impl App {
     /// Why a drop cannot start: an import, script file or shell of Quarry's own is running in that database (or schema). The server would
     /// refuse the drop for its connections and blame another session, and WITH (FORCE) would kill the work halfway.
     /// A script can touch anything in its database, and an import is known by its schema only, so a table drop is held for both.
-    pub(super) fn pg_job_blocks(&self, conn: u64, database: &str, schema: &str, kind: DropKind) -> Option<String> {
+    fn pg_job_blocks(&self, conn: u64, database: &str, schema: &str, kind: DropKind) -> Option<String> {
         let job = self.sql_job.as_ref().filter(|j| j.conn == conn && j.db.pg_database() == database).filter(|j| kind == DropKind::Database || j.kind == sql_dump::JobKind::Script || j.schema == schema);
         let what = match job {
             Some(j) if j.kind == sql_dump::JobKind::Import => "an import",
@@ -380,7 +392,8 @@ impl App {
         ui.add_space(8.0);
         self.pg_column_grid(ui, f);
         ui.add_space(4.0);
-        let built = create_pg::create_table_stmts(&f.spec());
+        f.refresh_built();
+        let built = &f.built.as_ref().unwrap().1;
         ui.horizontal(|ui| {
             if add_chip(ui, "Column").clicked() {
                 let n = f.cols.len() + 1;
@@ -390,14 +403,14 @@ impl App {
         });
         if f.show_sql {
             ui.add_space(6.0);
-            match &built {
+            match built {
                 Ok(stmts) => sql_block(ui, &stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n")),
                 Err(_) => {
                     ui.label(RichText::new("The statement appears here once the form is valid.").size(TXT_SMALL).color(FAINT()));
                 }
             }
         }
-        if let Err(e) = &built {
+        if let Err(e) = built {
             if !f.name.is_empty() {
                 ui.label(RichText::new(e.as_str()).size(TXT_SMALL).color(ALERT()));
             }
@@ -623,7 +636,7 @@ mod tests {
 
     #[test]
     fn the_first_column_is_an_identity_key() {
-        let t = PgNewTable { conn: 1, database: "d".into(), schema: "public".into(), name: "t".into(), cols: vec![id_col()], comment: String::new(), show_sql: false, focused: false };
+        let t = PgNewTable { conn: 1, database: "d".into(), schema: "public".into(), name: "t".into(), cols: vec![id_col()], comment: String::new(), show_sql: false, focused: false, built: None };
         let s = create_pg::create_table_stmts(&t.spec()).unwrap();
         assert_eq!(s[0], "CREATE TABLE \"public\".\"t\" (\n  \"id\" integer GENERATED BY DEFAULT AS IDENTITY,\n  PRIMARY KEY (\"id\")\n)");
     }

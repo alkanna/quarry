@@ -15,6 +15,22 @@ const CHECK_ROWS: u64 = 200_000;
 /// click aimed at one could hit the space it just left.
 const ORPHAN_BOX_H: f32 = 64.0;
 
+/// What the orphan count depends on, as `ddl::orphan_key` names it.
+#[derive(Clone, PartialEq)]
+struct OrphanKey {
+    cols: Vec<String>,
+    ref_db: String,
+    ref_table: String,
+    ref_cols: Vec<String>,
+}
+
+impl OrphanKey {
+    fn of(fk: &ForeignKey) -> Self {
+        let (cols, ref_db, ref_table, ref_cols) = ddl::orphan_key(fk);
+        Self { cols, ref_db, ref_table, ref_cols }
+    }
+}
+
 /// The Add relation dialog.
 pub(super) struct FkForm {
     name: String,
@@ -27,7 +43,11 @@ pub(super) struct FkForm {
     on_update: String,
     on_delete: String,
     own: Structure,
+    /// The columns of `own` the staged changes leave, for the pickers. Neither input changes while the dialog is open.
+    own_cols: Vec<String>,
     rest: Vec<Change>,
+    /// The plan of the key as it stands, kept while the changes and the table stay as they are.
+    memo: Option<PlanMemo>,
     parent: Option<Structure>,
     /// The schema and table `parent` was asked for, and the request that carries the answer.
     asked: (String, String),
@@ -35,7 +55,7 @@ pub(super) struct FkForm {
     parent_err: Option<String>,
     /// How many rows point at nothing for the key as it stands, and which columns and request that is for.
     orphans: Option<Result<u64, String>>,
-    orphan_for: Option<(Vec<String>, String, String, Vec<String>)>,
+    orphan_for: Option<OrphanKey>,
     orphan_req: u64,
     /// The server takes a key only on a whole primary or unique key, and the request that asks it.
     strict: bool,
@@ -154,7 +174,7 @@ fn has_clauses(t: &Tab) -> bool {
 
 /// The filter that finds the row a key points to, from the key columns of the clicked row. FLOAT and DOUBLE keys get
 /// none: the grid holds their value rounded to what it shows, and `=` against that may find no row or another one.
-pub(super) fn fk_row_filter(d: db::sql::Dialect, bs: bool, fk: &ForeignKey, cols: &[db::sql::Col], row: &Document) -> Result<String, String> {
+fn fk_row_filter(d: db::sql::Dialect, bs: bool, fk: &ForeignKey, cols: &[db::sql::Col], row: &Document) -> Result<String, String> {
     let mut lits = Vec::new();
     for c in &fk.cols {
         // The row is keyed by the shown name, which differs from the server's for a renamed column.
@@ -214,8 +234,10 @@ impl App {
             ref_table,
             on_update,
             on_delete,
+            own_cols: own.columns.iter().map(|c| c.name.clone()).filter(|n| !rest.iter().any(|c| matches!(c, Change::Drop(d) if d == n))).collect(),
             own,
             rest,
+            memo: None,
             parent: None,
             asked: (String::new(), String::new()),
             parent_req: 0,
@@ -252,9 +274,8 @@ impl App {
     fn fk_tables(&mut self, conn: u64, db: &str, schema: &str) -> Option<Vec<String>> {
         if self.is_pg(conn) {
             self.pg_load_tables(conn, db, schema);
-            let list = self.conn(conn)?.tables_in(db, schema)?.clone();
             let key = Sel { conn, db: db.to_string(), schema: schema.to_string(), coll: String::new() }.nskey();
-            return Some(list.into_iter().filter(|t| !self.views.has(conn, &key, t)).collect());
+            return Some(self.conn(conn)?.tables_in(db, schema)?.iter().filter(|t| !self.views.has(conn, &key, t)).cloned().collect());
         }
         let list = self.conn(conn)?.dbs.iter().find(|d| d.0 == schema)?.1.clone();
         match list {
@@ -275,7 +296,7 @@ impl App {
         let (conn, base_db, table) = (sel.conn, sel.db.clone(), sel.coll.clone());
         let pg = f.pg;
         // The session of the tab's database and the namespace its table is in.
-        let live = self.sql_target(&sel).map(|t| t.0);
+        let has_sql = self.conn(conn).is_some_and(|c| c.sql.is_some());
         let schema = if pg { self.sel_schema(&sel) } else { base_db.clone() };
         ui.set_width(600.0);
         dialog_title(ui, if f.from.is_some() { "Edit relation" } else { "Add relation" });
@@ -288,9 +309,7 @@ impl App {
         } else {
             self.conn(conn).map(|c| c.dbs.iter().map(|d| d.0.clone()).filter(|d| *d == schema || !db::sql::create::SYSTEM_SCHEMAS.contains(&d.as_str())).collect()).unwrap_or_default()
         };
-        let tables = self.fk_tables(conn, &base_db, &f.ref_db.clone());
-        let dropped: Vec<String> = f.rest.iter().filter_map(|c| if let Change::Drop(n) = c { Some(n.clone()) } else { None }).collect();
-        let own_cols: Vec<String> = f.own.columns.iter().map(|c| c.name.clone()).filter(|n| !dropped.contains(n)).collect();
+        let tables = self.fk_tables(conn, &base_db, &f.ref_db);
         let parent_cols: Vec<String> = f.parent.as_ref().map(|p| p.columns.iter().map(|c| c.name.clone()).collect()).unwrap_or_default();
         let mut remove = None;
         let mut add_pair = false;
@@ -342,7 +361,7 @@ impl App {
                     ui.horizontal(|ui| {
                         let combo = egui::ComboBox::from_id_salt(("fkown", i)).width(170.0).selected_text(if p.0.is_empty() { "Column" } else { p.0.as_str() }).show_ui(ui, |ui| {
                             menu_look(ui);
-                            for c in &own_cols {
+                            for c in &f.own_cols {
                                 ui.selectable_value(&mut p.0, c.clone(), c.as_str());
                             }
                         });
@@ -364,7 +383,7 @@ impl App {
                         }
                     });
                 }
-                if quiet_enabled(ui, f.pairs.len() < own_cols.len().min(16), "+ Column").on_hover_text("Add another column to a composite key").clicked() {
+                if quiet_enabled(ui, f.pairs.len() < f.own_cols.len().min(16), "+ Column").on_hover_text("Add another column to a composite key").clicked() {
                     add_pair = true;
                 }
             });
@@ -414,7 +433,7 @@ impl App {
             if f.ref_db == schema && f.ref_table == table {
                 f.parent = Some(f.own.clone());
                 f.parent_req = 0;
-            } else if let Some(sql) = live.clone() {
+            } else if let Some(sql) = self.sql_target(&sel).map(|t| t.0) {
                 self.req += 1;
                 f.parent_req = self.req;
                 self.worker.sql_structure(self.req, sql, f.ref_db.clone(), f.ref_table.clone());
@@ -441,14 +460,17 @@ impl App {
         }
         // The orphan check runs once per set of columns, on its own request, and a big table waits for a click. The
         // name and the actions do not change its answer, so typing them asks nothing.
-        if let (Some(k), None, Some(sql)) = (&key, &problem, &live) {
-            if f.orphan_for.as_ref() != Some(&ddl::orphan_key(k)) {
+        let okey = key.as_ref().map(OrphanKey::of);
+        if let (Some(k), None, Some(ok)) = (&key, &problem, &okey) {
+            if f.orphan_for.as_ref() != Some(ok) {
                 let big = f.own.status.rows.is_some_and(|n| n > CHECK_ROWS);
                 if f.parent.is_some() && (!big || f.check) {
-                    self.req += 1;
-                    (f.orphan_req, f.orphan_for, f.orphans) = (self.req, Some(ddl::orphan_key(k)), None);
-                    f.sample.clear();
-                    self.worker.sql_orphans(self.req, sql.clone(), schema.clone(), table.clone(), k.clone());
+                    if let Some(sql) = self.sql_target(&sel).map(|t| t.0) {
+                        self.req += 1;
+                        (f.orphan_req, f.orphan_for, f.orphans) = (self.req, okey.clone(), None);
+                        f.sample.clear();
+                        self.worker.sql_orphans(self.req, sql, schema.clone(), table.clone(), k.clone());
+                    }
                 }
             }
         }
@@ -469,7 +491,7 @@ impl App {
             } else if all.len() == f.rest.len() {
                 Err("Nothing is changed.".into())
             } else {
-                self.alter_text(&f.own, &all)
+                PlanMemo::of(&mut f.memo, self, &f.own, &all).plan.as_ref().map(|p| p.sql.clone()).map_err(Clone::clone)
             };
         } else if let Some(p) = &problem {
             text = Err(p.clone());
@@ -482,7 +504,7 @@ impl App {
             if let (Some(k), None) = (&key, &problem) {
                 let (col, rc) = (k.cols.join(", "), format!("{}.{}", k.ref_table, k.ref_cols.join(", ")));
                 match &f.orphans {
-                    Some(Ok(n)) if *n > 0 && f.orphan_for.as_ref() == Some(&ddl::orphan_key(k)) => {
+                    Some(Ok(n)) if *n > 0 && f.orphan_for == okey => {
                         egui::Frame::new().fill(tint(WARNING(), 34)).corner_radius(R_MD).inner_margin(10).show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             let them = if *n == 1 { "it" } else { "them" };
@@ -503,7 +525,7 @@ impl App {
                     None if f.orphan_for.is_some() => {
                         ui.label(RichText::new("Checking the existing rows...").size(TXT_SMALL).color(FAINT()));
                     }
-                    None if live.is_some() && f.own.status.rows.is_some_and(|n| n > CHECK_ROWS) => {
+                    None if has_sql && f.own.status.rows.is_some_and(|n| n > CHECK_ROWS) => {
                         if quiet(ui, "Check existing rows").on_hover_text("Joins the whole table, which can take a while on a big one").clicked() {
                             f.check = true;
                         }
@@ -607,7 +629,7 @@ impl App {
         // The design adds the key that the relations demo already lists, so the form starts without it.
         f.own.foreign_keys.retain(|k| k.name != "fk_orders_currency");
         let k = f.key("shop");
-        (f.orphan_for, f.orphans) = (k.as_ref().map(ddl::orphan_key), Some(Ok(3)));
+        (f.orphan_for, f.orphans) = (k.as_ref().map(OrphanKey::of), Some(Ok(3)));
     }
 }
 

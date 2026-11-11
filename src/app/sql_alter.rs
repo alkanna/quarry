@@ -18,7 +18,7 @@ const PG_TYPES: &[&str] = &["smallint", "integer", "bigint", "numeric(10,2)", "r
 const COLLATIONS: &[&str] = &["utf8mb4_0900_ai_ci", "utf8mb4_0900_as_cs", "utf8mb4_uca1400_ai_ci", "utf8mb4_unicode_ci", "utf8mb4_general_ci", "utf8mb4_bin", "utf8mb3_general_ci", "utf8mb3_bin", "latin1_swedish_ci", "latin1_bin", "ascii_general_ci", "ascii_bin"];
 
 #[derive(Clone, Copy, PartialEq)]
-pub(super) enum DMode {
+enum DMode {
     None,
     Null,
     Value,
@@ -49,6 +49,17 @@ pub(super) struct IdxForm {
     /// The columns of the table with their types, in order.
     avail: Vec<(String, String)>,
     rest: Vec<Change>,
+    view: Option<IdxView>,
+}
+
+/// The checks, the plan and the warnings of the index as it stands, kept until the definition changes.
+struct IdxView {
+    def: IndexDef,
+    changes_empty: bool,
+    /// The staged changes with this one added, which Stage change keeps.
+    all: Vec<Change>,
+    text: Result<String, String>,
+    warnings: Vec<String>,
 }
 
 /// The plan and the warnings of a list of changes, kept while the changes, the table definition and the session
@@ -57,12 +68,12 @@ pub(super) struct PlanMemo {
     changes: Vec<Change>,
     create: String,
     mode: Mode,
-    warnings: Vec<String>,
-    plan: Result<Plan, String>,
+    pub(super) warnings: Vec<String>,
+    pub(super) plan: Result<Plan, String>,
 }
 
 impl PlanMemo {
-    fn of<'a>(slot: &'a mut Option<PlanMemo>, app: &App, st: &Structure, changes: &[Change]) -> &'a PlanMemo {
+    pub(super) fn of<'a>(slot: &'a mut Option<PlanMemo>, app: &App, st: &Structure, changes: &[Change]) -> &'a PlanMemo {
         let mode = app.cur_mode();
         if !slot.as_ref().is_some_and(|m| m.mode == mode && m.create == st.create && m.changes == changes) {
             *slot = Some(PlanMemo { changes: changes.to_vec(), create: st.create.clone(), mode, warnings: ddl::warnings(st, changes), plan: app.plan_of(st, changes) });
@@ -171,7 +182,7 @@ impl App {
         ddl::plan(d, &v, m, &self.t().map(|t| t.sel.coll.clone()).unwrap_or_default(), st, changes)
     }
 
-    pub(super) fn engine_label(&self) -> String {
+    fn engine_label(&self) -> String {
         self.t().and_then(|t| self.conn(t.sel.conn)).and_then(|c| c.sql.as_ref()).map_or_else(|| "MySQL 8.4".into(), |d| d.label())
     }
 
@@ -298,7 +309,7 @@ impl App {
         })).unwrap_or_default();
         let avail = after.iter().map(|n| (n.clone(), ty(n))).collect();
         let def = from.clone().unwrap_or_default();
-        self.modal = Some(Modal::IdxEdit(Box::new(IdxForm { from, def, avail, rest: staged })));
+        self.modal = Some(Modal::IdxEdit(Box::new(IdxForm { from, def, avail, rest: staged, view: None })));
     }
 
     pub(super) fn stage_drop_index(&mut self, i: usize) {
@@ -728,6 +739,36 @@ impl App {
         }
     }
 
+    /// What the index dialog shows for its current definition: the changes it stages, the SQL or the reason there is none, and the warnings.
+    fn idx_view(&self, f: &IdxForm) -> IdxView {
+        let changes: Vec<Change> = match &f.from {
+            None => vec![Change::AddIndex(f.def.clone())],
+            Some(old) if *old == f.def => Vec::new(),
+            Some(old) if IndexDef { name: old.name.clone(), ..f.def.clone() } == *old && f.def.kind != IndexKind::Primary => vec![Change::RenameIndex { from: old.name.clone(), to: f.def.name.clone(), def: old.clone() }],
+            Some(old) => vec![Change::DropIndex(old.name.clone()), Change::AddIndex(f.def.clone())],
+        };
+        let kinds: Vec<(String, String)> = f.def.cols.iter().map(|c| (c.name.clone(), f.avail.iter().find(|a| a.0 == c.name).map(|a| a.1.clone()).unwrap_or_default())).collect();
+        let mut all = f.rest.clone();
+        all.extend(changes.clone());
+        // Against the indexes the other staged changes leave, without case, as the server compares them.
+        let taken = self.structure().map(|s| ddl::indexes_after(s, &f.rest)).unwrap_or_default();
+        let dup = f.def.kind != IndexKind::Primary && taken.iter().any(|x| ddl::same_name(x, &f.def.name) && f.from.as_ref().is_none_or(|o| !ddl::same_name(&o.name, x)));
+        let primary_taken = f.def.kind == IndexKind::Primary && f.from.as_ref().map(|o| o.kind) != Some(IndexKind::Primary) && self.structure().is_some_and(|s| s.indexes.iter().any(|x| x.name == "PRIMARY" || x.primary)) && !all.iter().any(|c| matches!(c, Change::DropIndex(n) if n == "PRIMARY" || self.structure().is_some_and(|s| s.indexes.iter().any(|x| x.primary && x.name == *n))));
+        let text = if changes.is_empty() {
+            Err("Nothing is changed yet.".to_string())
+        } else if dup {
+            Err(format!("The table already has an index called {}.", f.def.name))
+        } else if primary_taken {
+            Err("The table already has a primary key. Drop it first.".to_string())
+        } else if let Some(p) = ddl::index_problem(f.def.kind, &kinds) {
+            Err(p)
+        } else {
+            self.structure().map_or_else(|| Err("The structure is not loaded.".into()), |st| self.alter_text(st, &all))
+        };
+        let warnings = self.structure().map(|st| ddl::warnings(st, &all)).unwrap_or_default();
+        IdxView { def: f.def.clone(), changes_empty: changes.is_empty(), all, text, warnings }
+    }
+
     pub(super) fn idx_dialog(&mut self, ui: &mut egui::Ui, f: &mut IdxForm, keep: &mut bool) {
         let pg = self.alter_env().0 == Dialect::Postgres;
         let table = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
@@ -820,56 +861,37 @@ impl App {
             ui.end_row();
         });
 
-        let from_def = f.from.clone();
-        let changes: Vec<Change> = match &from_def {
-            None => vec![Change::AddIndex(f.def.clone())],
-            Some(old) if *old == f.def => Vec::new(),
-            Some(old) if IndexDef { name: old.name.clone(), ..f.def.clone() } == *old && f.def.kind != IndexKind::Primary => vec![Change::RenameIndex { from: old.name.clone(), to: f.def.name.clone(), def: old.clone() }],
-            Some(old) => vec![Change::DropIndex(old.name.clone()), Change::AddIndex(f.def.clone())],
-        };
-        let kinds: Vec<(String, String)> = f.def.cols.iter().map(|c| (c.name.clone(), f.avail.iter().find(|a| a.0 == c.name).map(|a| a.1.clone()).unwrap_or_default())).collect();
-        let mut all = f.rest.clone();
-        all.extend(changes.clone());
-        // Against the indexes the other staged changes leave, without case, as the server compares them.
-        let taken = self.structure().map(|s| ddl::indexes_after(s, &f.rest)).unwrap_or_default();
-        let dup = f.def.kind != IndexKind::Primary && taken.iter().any(|x| ddl::same_name(x, &f.def.name) && f.from.as_ref().is_none_or(|o| !ddl::same_name(&o.name, x)));
-        let primary_taken = f.def.kind == IndexKind::Primary && f.from.as_ref().map(|o| o.kind) != Some(IndexKind::Primary) && self.structure().is_some_and(|s| s.indexes.iter().any(|x| x.name == "PRIMARY" || x.primary)) && !all.iter().any(|c| matches!(c, Change::DropIndex(n) if n == "PRIMARY" || self.structure().is_some_and(|s| s.indexes.iter().any(|x| x.primary && x.name == *n))));
-        let text = if changes.is_empty() {
-            Err("Nothing is changed yet.".to_string())
-        } else if dup {
-            Err(format!("The table already has an index called {}.", f.def.name))
-        } else if primary_taken {
-            Err("The table already has a primary key. Drop it first.".to_string())
-        } else if let Some(p) = ddl::index_problem(f.def.kind, &kinds) {
-            Err(p)
-        } else {
-            self.structure().map_or_else(|| Err("The structure is not loaded.".into()), |st| self.alter_text(st, &all))
-        };
+        // The checks and the plan walk the whole structure, so they run when the index changes and not on every frame.
+        if f.view.as_ref().is_none_or(|v| v.def != f.def) {
+            f.view = Some(self.idx_view(f));
+        }
+        let v = f.view.as_ref().unwrap();
+        let (text, changes_empty) = (&v.text, v.changes_empty);
         ui.add_space(6.0);
         caption(ui, "SQL TO RUN");
         ui.add_space(4.0);
-        match &text {
+        match text {
             Ok(t) => sql_block(ui, "idx-sql", t, 130.0),
             Err(e) => {
-                ui.label(RichText::new(e.as_str()).size(TXT_SMALL).color(if changes.is_empty() { FAINT() } else { ALERT() }));
+                ui.label(RichText::new(e.as_str()).size(TXT_SMALL).color(if changes_empty { FAINT() } else { ALERT() }));
             }
         }
-        if let Some(st) = self.structure() {
-            for w in ddl::warnings(st, &all) {
-                ui.label(RichText::new(w).size(TXT_SMALL).color(WARNING()));
-            }
+        for w in &v.warnings {
+            ui.label(RichText::new(w.as_str()).size(TXT_SMALL).color(WARNING()));
         }
+        let text_ok = text.is_ok();
         let (mut stage, mut now) = (false, false);
         dialog_actions(ui, |ui| {
-            stage = ui.add_enabled(text.is_ok(), primary_button(ui, "Stage change", PRIMARY())).clicked();
+            stage = ui.add_enabled(text_ok, primary_button(ui, "Stage change", PRIMARY())).clicked();
             let busy = self.applying();
-            now = ui.add_enabled(text.is_ok() && !self.sel_is_view() && !busy, egui::Button::new("Apply now")).on_hover_text("Stage this change and run everything staged. A locked connection asks to unlock first.").on_disabled_hover_text(if busy { BUSY_NOTE } else { "A view cannot be changed here" }).clicked();
+            now = ui.add_enabled(text_ok && !self.sel_is_view() && !busy, egui::Button::new("Apply now")).on_hover_text("Stage this change and run everything staged. A locked connection asks to unlock first.").on_disabled_hover_text(if busy { BUSY_NOTE } else { "A view cannot be changed here" }).clicked();
             if ui.button("Cancel").clicked() {
                 *keep = false;
             }
         });
         if stage || now {
             *keep = false;
+            let all = f.view.take().map(|v| v.all).unwrap_or_default();
             self.set_staged(all);
             if now {
                 self.request_alter_apply();
