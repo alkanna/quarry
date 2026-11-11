@@ -33,6 +33,10 @@ pub mod value;
 pub mod csv;
 pub mod import;
 pub mod dump;
+mod pg_script;
+mod pg_dump;
+#[cfg(test)]
+mod pg_dump_tests;
 pub mod server;
 #[cfg(test)]
 pub(crate) mod testing;

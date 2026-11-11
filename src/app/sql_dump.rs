@@ -56,6 +56,8 @@ struct Row {
 pub(super) struct DumpForm {
     conn: u64,
     db: String,
+    /// The schema of a PostgreSQL database the table list is of; empty on MySQL, where the database is the namespace.
+    schema: String,
     conn_name: String,
     what: What,
     /// The open table with a filter: its name, the WHERE text and the rows it matches.
@@ -70,6 +72,8 @@ pub(super) struct DumpForm {
 pub(super) struct RunForm {
     conn: u64,
     db: String,
+    /// The schema a PostgreSQL file's unqualified names land in (its search_path); empty on MySQL.
+    schema: String,
     conn_name: String,
     src: Source,
     name: String,
@@ -83,23 +87,36 @@ fn today() -> String {
 }
 
 impl App {
-    /// Opens the dump dialog for a database. `table` is the open table whose filter the first choice offers.
+    /// Opens the dump dialog for a database, in the schema its switcher shows on PostgreSQL. `table` is the open table whose
+    /// filter the first choice offers.
     pub(super) fn open_sql_dump(&mut self, conn: u64, db: String, table: Option<String>) {
+        let schema = self.ns_of(conn, &db).to_string();
+        self.open_sql_dump_in(conn, db, schema, table)
+    }
+
+    /// `open_sql_dump` for a table of a given schema, which is not the one the sidebar shows when its tab was opened from
+    /// another. The schema is empty on MySQL.
+    pub(super) fn open_sql_dump_in(&mut self, conn: u64, db: String, schema: String, table: Option<String>) {
         let Some(c) = self.conn(conn) else { return };
         if c.sql.is_none() {
             return self.warn_offline();
         }
-        let names: Vec<String> = c.dbs.iter().find(|d| d.0 == db).and_then(|d| d.1.clone()).unwrap_or_default();
-        let schema = self.sql_schema.get(&(conn, db.clone()));
+        // A PostgreSQL database lists the tables of the schema its switcher shows; the whole-database choice still takes every schema.
+        let pg = c.meta.engine == db::sql::Engine::Postgres;
+        let schema = if pg { Some(schema).filter(|s| !s.is_empty()).unwrap_or_else(|| c.pg_picked(&db).to_string()) } else { String::new() };
+        let names: Vec<String> = if pg { c.tables_in(&db, &schema).cloned().unwrap_or_default() } else { c.dbs.iter().find(|d| d.0 == db).and_then(|d| d.1.clone()).unwrap_or_default() };
+        // The estimates are kept per database by table name, which a second schema of the same name would confuse.
+        let est = self.sql_schema.get(&(conn, db.clone())).filter(|_| !pg);
+        let ns = ns_key(&db, &schema);
         let rows: Vec<Row> = names
             .iter()
             .map(|n| {
-                let view = self.views.has(conn, &db, &n);
-                Row { name: n.clone(), view, on: true, structure: true, content: !view, drop: false, rows: schema.and_then(|s| s.table(n)).and_then(|t| t.rows) }
+                let view = self.views.has(conn, &ns, &n);
+                Row { name: n.clone(), view, on: true, structure: true, content: !view, drop: false, rows: est.and_then(|s| s.table(n)).and_then(|t| t.rows) }
             })
             .collect();
         // The table open in the Content view with a filter set is the first thing to export.
-        let filtered = self.t().filter(|t| t.sel.conn == conn && t.sel.db == db && table.as_deref() == Some(t.sel.coll.as_str()) && !t.filter_txt.trim().is_empty()).map(|t| (t.sel.coll.clone(), t.filter_txt.clone(), t.count));
+        let filtered = self.t().filter(|t| t.sel.conn == conn && t.sel.db == db && (!pg || t.sel.schema == schema) && table.as_deref() == Some(t.sel.coll.as_str()) && !t.filter_txt.trim().is_empty()).map(|t| (t.sel.coll.clone(), t.filter_txt.clone(), t.count));
         let what = if filtered.is_some() { What::Filtered } else if table.is_some() { What::Selected } else { What::Whole };
         let mut rows = rows;
         if let (What::Selected, Some(t)) = (what, &table) {
@@ -109,7 +126,7 @@ impl App {
         }
         let conn_name = c.meta.name.clone();
         let path = dirs::download_dir().unwrap_or_default().join(format!("{db}-{}.sql", today())).display().to_string();
-        self.modal = Some(Modal::SqlDump(Box::new(DumpForm { conn, db, conn_name, what, filtered, rows, extended: true, snapshot: true, extras: true, path })));
+        self.modal = Some(Modal::SqlDump(Box::new(DumpForm { conn, db, schema, conn_name, what, filtered, rows, extended: true, snapshot: true, extras: true, path })));
     }
 
     /// Asks for a script file, then opens the dialog that runs it.
@@ -118,17 +135,32 @@ impl App {
         if c.sql.is_none() {
             return self.warn_offline();
         }
-        let conn_name = c.meta.name.clone();
         let Some(p) = rfd::FileDialog::new().add_filter("SQL", &["sql", "txt"]).pick_file() else { return };
-        let src = Source::File(p.clone());
         let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        self.modal = Some(Modal::SqlRunFile(Box::new(RunForm { conn, db, conn_name, src, name })));
+        self.open_run_form(conn, db, Source::File(p), name);
+    }
+
+    /// The Run SQL file dialog for a file already chosen, which the UI tests open without the native file dialog.
+    pub(super) fn open_run_form(&mut self, conn: u64, db: String, src: Source, name: String) {
+        let Some(c) = self.conn(conn) else { return };
+        let schema = if c.meta.engine == db::sql::Engine::Postgres { c.pg_picked(&db).to_string() } else { String::new() };
+        let conn_name = c.meta.name.clone();
+        self.modal = Some(Modal::SqlRunFile(Box::new(RunForm { conn, db, schema, conn_name, src, name })));
+    }
+
+    /// Sets where the open dump dialog writes, which the UI tests do instead of using the native file dialog.
+    #[cfg(test)]
+    pub(super) fn set_dump_path(&mut self, path: &str) {
+        if let Some(Modal::SqlDump(f)) = &mut self.modal {
+            f.path = path.to_string();
+        }
     }
 
     pub(super) fn sql_dump_dialog(&mut self, ui: &mut egui::Ui, f: &mut DumpForm, keep: &mut bool) {
         ui.set_width(610.0);
         dialog_title(ui, "Export");
-        ui.label(RichText::new(format!("{} on {}", f.db, f.conn_name)).size(TXT_SMALL).color(MUTED()));
+        let pg = !f.schema.is_empty();
+        ui.label(RichText::new(if pg { format!("{}, schema {} on {}", f.db, f.schema, f.conn_name) } else { format!("{} on {}", f.db, f.conn_name) }).size(TXT_SMALL).color(MUTED()));
         ui.add_space(10.0);
         let mono = |t: String| RichText::new(t).font(FontId::monospace(TXT_SMALL)).color(FAINT());
         let selected = f.rows.iter().filter(|r| r.on).count();
@@ -145,7 +177,7 @@ impl App {
                     ui.radio_value(&mut f.what, What::Selected, "Selected tables");
                     ui.label(mono(format!("{selected} of {}", f.rows.len())));
                 });
-                if ui.radio_value(&mut f.what, What::Whole, "Whole database").clicked() {
+                if ui.radio_value(&mut f.what, What::Whole, if pg { "Whole database (every schema)" } else { "Whole database" }).on_hover_text(if pg { "Every table, view, type, sequence, function and extension of every schema, as the server has them now" } else { "" }).clicked() {
                     for r in &mut f.rows {
                         (r.on, r.structure, r.content) = (true, true, !r.view);
                     }
@@ -208,7 +240,13 @@ impl App {
         ui.add_space(2.0);
         egui::Grid::new("dump-opts").num_columns(2).spacing([40.0, 8.0]).show(ui, |ui| {
             ui.checkbox(&mut f.extended, "Extended INSERTs (1,000 rows each)").on_hover_text("One INSERT for many rows is much faster to run. Off writes one INSERT per row.");
-            ui.checkbox(&mut f.snapshot, "Consistent snapshot").on_hover_text("Reads every table from one point in time without locking anything (InnoDB).");
+            if pg {
+                // The dump is one REPEATABLE READ READ ONLY transaction, so there is nothing to choose.
+                let mut always = true;
+                ui.add_enabled(false, egui::Checkbox::new(&mut always, "Consistent snapshot")).on_disabled_hover_text("PostgreSQL always reads every table from one snapshot, in a read-only transaction that locks nothing but DDL.");
+            } else {
+                ui.checkbox(&mut f.snapshot, "Consistent snapshot").on_hover_text("Reads every table from one point in time without locking anything (InnoDB).");
+            }
             ui.end_row();
             ui.checkbox(&mut f.extras, "Include views, triggers and routines");
             // The file name carries the choice, so the path and the checkbox cannot disagree.
@@ -254,12 +292,15 @@ impl App {
 
     fn start_dump(&mut self, f: &DumpForm, total: u64) {
         let Some(sql) = self.conn(f.conn).and_then(|c| c.sql.clone()) else { return self.warn_offline() };
+        // A PostgreSQL connection belongs to one database, so the database picks the pool, and the schema is the namespace.
+        let sql = sql.at(&f.db);
+        let space = if f.schema.is_empty() { f.db.clone() } else { f.schema.clone() };
         let per = if f.extended { 1000 } else { 1 };
         let plan = match (f.what, &f.filtered) {
-            (What::Filtered, Some((t, w, _))) => DumpPlan { schema: f.db.clone(), tables: vec![DumpTable { name: t.clone(), view: false, structure: false, content: true, drop: false }], create_db: false, extras: false, rows_per_insert: per, snapshot: f.snapshot, filter: Some(w.clone()) },
+            (What::Filtered, Some((t, w, _))) => DumpPlan { schema: space.clone(), tables: vec![DumpTable { name: t.clone(), view: false, structure: false, content: true, drop: false }], create_db: false, extras: false, rows_per_insert: per, snapshot: f.snapshot, filter: Some(w.clone()) },
             _ => {
                 let tables = f.rows.iter().filter(|r| r.on && !(r.view && !f.extras)).map(|r| DumpTable { name: r.name.clone(), view: r.view, structure: r.structure, content: r.content && !r.view, drop: r.drop && r.structure }).collect();
-                DumpPlan { schema: f.db.clone(), tables, create_db: f.what == What::Whole, extras: f.extras, rows_per_insert: per, snapshot: f.snapshot, filter: None }
+                DumpPlan { schema: space.clone(), tables, create_db: f.what == What::Whole, extras: f.extras, rows_per_insert: per, snapshot: f.snapshot, filter: None }
             }
         };
         self.req += 1;
@@ -276,7 +317,11 @@ impl App {
         ui.add_space(8.0);
         let writable = self.conn_writable(f.conn);
         let say = |ui: &mut egui::Ui, t: String, c: Color32| ui.add(egui::Label::new(RichText::new(t).color(c)).wrap());
-        say(ui, format!("Runs every statement of the file on {} in the database {}. A DELIMITER line and /*! ... */ comments are understood, and the file may switch database with USE.", f.conn_name, f.db), TEXT());
+        if f.schema.is_empty() {
+            say(ui, format!("Runs every statement of the file on {} in the database {}. A DELIMITER line and /*! ... */ comments are understood, and the file may switch database with USE.", f.conn_name, f.db), TEXT());
+        } else {
+            say(ui, format!("Runs every statement of the file on {} in the database {}, with the schema {} as the search path unless the file sets its own. Dollar-quoted bodies, E'' strings and nested comments are understood. COPY ... FROM stdin and psql commands such as \\connect are refused, with their line.", f.conn_name, f.db, f.schema), TEXT());
+        }
         ui.add_space(4.0);
         say(ui, "Statements run one by one and stop at the first error, which is shown with its number and text. The ones before it stay applied. There is no undo for a script file.".into(), WARNING());
         if !writable {
@@ -297,16 +342,18 @@ impl App {
         });
         if go {
             let Some(sql) = self.conn(f.conn).and_then(|c| c.sql.clone()) else { return self.warn_offline() };
+            let sql = sql.at(&f.db);
+            let space = if f.schema.is_empty() { f.db.clone() } else { f.schema.clone() };
             self.req += 1;
-            let job = SqlJob::new(self.req, f.conn, sql.clone(), f.db.clone(), JobKind::Script, 0, f.src.len());
-            self.worker.sql_run_file(job.req, sql, f.db.clone(), f.src.clone(), !writable, job.prog.clone(), job.id.clone(), job.cancel.clone());
+            let job = SqlJob::new(self.req, f.conn, sql.clone(), space.clone(), JobKind::Script, 0, f.src.len());
+            self.worker.sql_run_file(job.req, sql, space, f.src.clone(), !writable, job.prog.clone(), job.id.clone(), job.cancel.clone());
             self.sql_job = Some(job);
             self.ok(format!("Running {}", f.name));
             *keep = false;
         } else if unlock {
             *keep = false;
-            let (conn, db, src, name, conn_name) = (f.conn, f.db.clone(), f.src.clone(), f.name.clone(), f.conn_name.clone());
-            self.modal = Some(Modal::Unlock(conn, Some(Box::new(move |a: &mut App| a.modal = Some(Modal::SqlRunFile(Box::new(RunForm { conn, db, conn_name, src, name })))))));
+            let (conn, db, schema, src, name, conn_name) = (f.conn, f.db.clone(), f.schema.clone(), f.src.clone(), f.name.clone(), f.conn_name.clone());
+            self.modal = Some(Modal::Unlock(conn, Some(Box::new(move |a: &mut App| a.modal = Some(Modal::SqlRunFile(Box::new(RunForm { conn, db, schema, conn_name, src, name })))))));
         }
     }
 
@@ -314,7 +361,16 @@ impl App {
     pub(super) fn sql_job_done(&mut self, req: u64, res: db::Res<JobDone>) {
         let Some(j) = self.sql_job.take_if(|j| j.req == req) else { return };
         // A script can create or drop anything anywhere, and one that failed or was stopped kept what ran before.
-        if j.kind == JobKind::Script {
+        if j.kind == JobKind::Script && j.db.dialect == db::sql::Dialect::Postgres {
+            // The database list of a PostgreSQL server is not what a script changes; its schemas and tables are, in the database the
+            // run was for, and the tabs of that database follow what the server has now.
+            let database = j.db.pg_database();
+            self.pg_refresh(j.conn, &database);
+            let open: Vec<usize> = (0..self.tabs.len()).filter(|&i| self.tabs[i].sel.conn == j.conn && self.tabs[i].sel.db == database && !self.tabs[i].sel.coll.is_empty()).collect();
+            for i in open {
+                self.reload_of(i);
+            }
+        } else if j.kind == JobKind::Script {
             self.worker.sql_lists(j.conn, j.db.clone(), j.schema.clone());
         }
         match res {
@@ -400,7 +456,7 @@ impl App {
             row("users", false, false, 1190),
             Row { name: "revenue_by_day".into(), view: true, on: false, structure: false, content: false, drop: false, rows: None },
         ];
-        self.modal = Some(Modal::SqlDump(Box::new(DumpForm { conn, db: "shop".into(), conn_name: "shop-prod".into(), what: What::Selected, filtered: Some(("orders".into(), "status = 'paid'".into(), 312)), rows, extended: true, snapshot: false, extras: true, path: "~/Downloads/shop-2026-11-09.sql".into() })));
+        self.modal = Some(Modal::SqlDump(Box::new(DumpForm { conn, db: "shop".into(), schema: String::new(), conn_name: "shop-prod".into(), what: What::Selected, filtered: Some(("orders".into(), "status = 'paid'".into(), 312)), rows, extended: true, snapshot: false, extras: true, path: "~/Downloads/shop-2026-11-09.sql".into() })));
     }
 }
 
