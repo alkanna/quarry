@@ -44,6 +44,8 @@ Update this list when a step lands. Each step is reviewed before it is ticked.
 
 **v3** (after v2, requested by the user 2026-11-11)
 - [ ] 1. Cloud SQL connections through the Cloud SQL Auth Proxy, with instance discovery from the user's gcloud credentials (see "Cloud SQL (v3)" below; design first)
+- [ ] 2. UI tests of the critical paths with `egui_kittest` (requested 2026-11-11): a test-only `App` constructor that needs no window, then headless flows against the Docker servers (MySQL, MariaDB, PostgreSQL, Mongo) that click and type like a user and check the rows on the server afterwards: inline cell edit and Save, Esc then edit again, multi-row edit and Save, row delete and multi-select delete, insert, undo of each, switching view or tab while an edit is open, and the locked connection refusing all of them. Why: the live tests cover the database layer, but the path from a click to the write batch had no automated test, and the cell editor bug of a664bda lived exactly there. First check that the kittest release matches egui 0.37
+- [ ] 3. Line coverage in CI with `cargo llvm-cov` on the Linux job that runs the live servers, published with each run, so gaps are measured rather than guessed
 
 **Review (63aa8c0, step 3 lexer)**, opus, verified on postgres:18.6 inside `BEGIN READ ONLY`: 3 critical, 2 high, 2 medium, 3 low.
 - C1: field notation calls a function without `(`: `(42::bigint).pg_advisory_lock`, `x.pg_advisory_lock`, `('...'::text).dblink_exec` (dropped a table through dblink's own session), `(pid).pg_terminate_backend`. Fix: refuse a listed name after `.` too; `lo_` prefix becomes exact names.
