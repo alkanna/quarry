@@ -38,6 +38,9 @@ Update this list when a step lands. Each step is reviewed before it is ticked.
 - [ ] 6. Create and drop database, schema and table
 - [ ] 7. Connection form Advanced tab (design first)
 
+**v3** (after v2, requested by the user 2026-11-11)
+- [ ] 1. Cloud SQL connections through the Cloud SQL Auth Proxy, with instance discovery from the user's gcloud credentials (see "Cloud SQL (v3)" below; design first)
+
 **Review (63aa8c0, step 3 lexer)**, opus, verified on postgres:18.6 inside `BEGIN READ ONLY`: 3 critical, 2 high, 2 medium, 3 low.
 - C1: field notation calls a function without `(`: `(42::bigint).pg_advisory_lock`, `x.pg_advisory_lock`, `('...'::text).dblink_exec` (dropped a table through dblink's own session), `(pid).pg_terminate_backend`. Fix: refuse a listed name after `.` too; `lo_` prefix becomes exact names.
 - C2: built-ins that run SQL text (`ts_stat`, `ts_rewrite`, `crosstab`, `connectby`) reached `pg_terminate_backend`, `pg_reload_conf`, `pg_switch_wal` and a replication slot that survived ROLLBACK. Fix: refuse them and known extension runners. The deny list can never be complete, so layer 2 must be strict.
@@ -52,6 +55,21 @@ Update this list when a step lands. Each step is reviewed before it is ticked.
 - A pooled connection that ran user text is closed, not returned to the pool: `DISCARD ALL` releases advisory locks but not dblink connections opened by a wrapper. Pages with no user filter text keep using the pool.
 - Pooler fallback mode: no session SETs; read-only, timeouts and formats are applied with `SET LOCAL` inside each transaction; the writer uses `BEGIN READ WRITE` plus `SET LOCAL`; statement pooling (where BEGIN fails) is refused with a clear message.
 - Known limit: a user-defined or extension function that wraps a side effect is invisible to the lexer, and non-transactional effects (signals, WAL switches, slots, COPY TO PROGRAM through such a wrapper) are not undone by the rollback. A locked connection is therefore only as safe as the role's privileges; the README and the connection form should say so.
+
+### Cloud SQL (v3)
+
+The user opens Cloud SQL databases today with `cloud-sql-proxy --port 5432 --auto-iam-authn <project>:<region>:<instance>` and then connects to localhost. Quarry should do both: list the instances the current gcloud credentials can reach, and start and stop the proxy with the connection, the way it already opens an SSH tunnel.
+
+- **Connection kind.** A Postgres connection gets a third way in next to Direct and SSH: "Cloud SQL", saved as the instance connection name (`project:region:instance`), IAM sign-in on or off, and public or private IP. No password is saved when IAM sign-in is on.
+- **Discovery.** Read the projects and the Cloud SQL instances the credentials can see, PostgreSQL ones only, with region, state and whether IAM sign-in is enabled (`cloudsql.iam_authentication`). Two ways, pick in the design step:
+  - the gcloud CLI as a child process (`gcloud projects list --format=json`, `gcloud sql instances list --project <p> --format=json`), found like Bun with `find_exe`, which needs nothing new and uses whatever account `gcloud auth` has;
+  - the Cloud SQL Admin REST API with an access token from Application Default Credentials (`gcloud auth application-default login`), which works without the CLI installed but needs an OAuth token flow in Rust.
+  The CLI route comes first. The IAM user name is filled from `gcloud config get-value account` (a service account drops its `.gserviceaccount.com`).
+- **The proxy.** First version: run the official `cloud-sql-proxy` binary as a child process on a free localhost port Quarry picks (not 5432, which may be taken), with `--auto-iam-authn` when IAM is on and `--private-ip` when asked, wait for it to accept connections, connect to `127.0.0.1:<port>`, and stop it when the connection closes or Quarry quits. Its output goes to the status bar list on failure. Nothing secret is on its command line: it reads the same gcloud credentials itself, which keeps the rule against passwords on command lines.
+- **Later, if the binary is a burden:** connect natively. Google publishes connector libraries for Go, Java and Python but not Rust; the protocol (Admin API `connectSettings` and `generateEphemeralCert`, then TLS to the instance with the ephemeral certificate, and the IAM token as the password) could be done in Rust, but only once the proxy version has shown what users need.
+- **Read-only.** Unchanged: the proxy is only the way in; the session guard, the per-statement read-only transaction and the lexer apply as for any Postgres connection. A role reached through IAM is still only as safe as its grants (the locked note in the form says so).
+- **Tests.** Discovery parsing from recorded `gcloud ... --format=json` output; proxy start, ready, stop and failure with a stub binary on PATH; one manual check against a real instance before ticking.
+- **Open questions for the user at design time:** CLI only or also ADC without the CLI; whether to download `cloud-sql-proxy` when it is missing or only point to its install page; private IP and PSC support in the first version.
 
 ## How this work is run
 
