@@ -1056,7 +1056,23 @@ pub(super) struct ConnForm {
     /// The Custom mode holds a choice (saved, clicked, or the server's once), so a Test never replaces it, even
     /// when that choice is no flags at all.
     pub(super) mode_seeded: bool,
+    /// PostgreSQL: the rows of the session settings as (name, value). The three timeout and name rows are always first.
+    pub(super) pg_rows: Vec<(String, String)>,
+    /// PostgreSQL: the saved search_path list, in order.
+    pub(super) pg_path: Vec<String>,
+    /// PostgreSQL: the "Add setting" picker, with the text typed in its filter, when it is open.
+    pub(super) pg_picker: Option<String>,
+    /// PostgreSQL: the text of the schema box beside the "Add schema" list.
+    pub(super) pg_schema_text: String,
+    /// PostgreSQL: the schemas of the default database as the last Test found them, and whether a Test ran at all.
+    pub(super) pg_schemas: Vec<String>,
+    pub(super) pg_tested: bool,
+    /// PostgreSQL: (setting, the value that was tested, the server's refusal) from the last Test.
+    pub(super) pg_refused: Vec<(String, String, String)>,
 }
+
+/// The rows of the PostgreSQL session settings that are always there, before the ones added from the picker.
+pub(super) const PG_FIXED: [&str; 3] = ["statement_timeout", "lock_timeout", "application_name"];
 
 impl ConnForm {
     /// Applies what a Test learned, if it answers this form's last Test.
@@ -1067,6 +1083,13 @@ impl ConnForm {
         self.server_mode = Some(info.sql_mode);
         self.collations = info.collations;
         self.seed_mode();
+        if self.engine == db::sql::Engine::Postgres {
+            self.pg_schemas = info.schemas;
+            self.pg_tested = true;
+            // Kept with the value that was tested, so a row the user changed since no longer shows the old refusal.
+            let value = |f: &ConnForm, n: &str| f.pg_rows.iter().find(|(r, _)| r == n).map(|(_, v)| v.trim().to_string()).unwrap_or_default();
+            self.pg_refused = info.setting_errors.into_iter().map(|(n, m)| (n.clone(), value(self, &n), m)).collect();
+        }
         true
     }
 
@@ -1080,11 +1103,45 @@ impl ConnForm {
         self.mode_seeded = true;
     }
 
+    /// Makes sure the always-present PostgreSQL rows exist, in front of the added ones.
+    pub(super) fn pg_ensure_rows(&mut self) {
+        for (i, n) in PG_FIXED.iter().enumerate() {
+            if self.pg_rows.get(i).is_none_or(|(r, _)| r != n) {
+                let v = self.pg_rows.iter().position(|(r, _)| r == n).map(|j| self.pg_rows.remove(j).1).unwrap_or_default();
+                self.pg_rows.insert(i, (n.to_string(), v));
+            }
+        }
+    }
+
+    pub(super) fn time_zone(&self) -> db::sql::Zone {
+        match self.zone_kind {
+            ZoneKind::Server => db::sql::Zone::Server,
+            ZoneKind::Utc => db::sql::Zone::Utc,
+            ZoneKind::System => db::sql::Zone::System,
+            ZoneKind::Custom => db::sql::Zone::Custom(self.zone_text.trim().into()),
+        }
+    }
+
+    /// The PostgreSQL Advanced tab as saved settings: an empty fixed row sends nothing, any other row must hold a value.
+    fn pg_advanced(&self) -> Result<db::sql::Advanced, String> {
+        let secs = |text: &str, name: &str| -> Result<Option<u32>, String> {
+            let t = text.trim();
+            if t.is_empty() { Ok(None) } else { t.parse().map(Some).map_err(|_| format!("{name} timeout: {t:?} is not a number of seconds")) }
+        };
+        let pg_settings = self.pg_rows.iter().filter(|(n, v)| !(PG_FIXED.contains(&n.as_str()) && v.trim().is_empty())).map(|(n, v)| (n.clone(), v.trim().to_string())).collect();
+        let a = db::sql::Advanced { zone: self.time_zone(), pg_settings, search_path: self.pg_path.clone(), connect_secs: secs(&self.t_connect, "Connect")?, idle_secs: secs(&self.t_idle, "Idle")?, ..Default::default() };
+        db::sql::pg_advanced::PgSession::new(&a, db::sql::advanced::system_zone_name())?;
+        Ok(a)
+    }
+
     /// The form's Advanced tab as saved settings, or the first thing wrong with it.
     pub(super) fn advanced(&self) -> Result<db::sql::Advanced, String> {
         use db::sql::advanced::{parse_flags, MODE_FLAGS};
         if !self.engine.is_sql() {
             return Ok(Default::default());
+        }
+        if self.engine == db::sql::Engine::Postgres {
+            return self.pg_advanced();
         }
         let zone = match self.zone_kind {
             ZoneKind::Server => db::sql::Zone::Server,
@@ -1129,6 +1186,9 @@ impl ConnForm {
         self.mode_extra = flags.iter().filter(|f| !MODE_FLAGS.contains(&f.as_str())).cloned().collect::<Vec<_>>().join(", ");
         let t = |s: Option<u32>| s.map(|s| s.to_string()).unwrap_or_default();
         (self.t_connect, self.t_query, self.t_idle) = (t(a.connect_secs), t(a.query_secs), t(a.idle_secs));
+        self.pg_rows = a.pg_settings.clone();
+        self.pg_path = a.search_path.clone();
+        self.pg_ensure_rows();
     }
 
     pub(super) fn net(&self) -> db::Net {
@@ -1383,7 +1443,7 @@ mod tests {
 
     #[test]
     fn a_test_answer_seeds_custom_mode_once_and_only_for_its_own_form() {
-        let info = |mode: &str| db::sql::TestInfo { sql_mode: mode.into(), collations: vec![("utf8mb4".into(), "utf8mb4_bin".into())] };
+        let info = |mode: &str| db::sql::TestInfo { sql_mode: mode.into(), collations: vec![("utf8mb4".into(), "utf8mb4_bin".into())], ..Default::default() };
         let mut f = ConnForm { engine: db::sql::Engine::MySql, mode_custom: true, test_req: 7, ..Default::default() };
         // Another form's or an older Test's answer changes nothing, and a form that never tested takes none.
         assert!(!f.take_test_info(6, info("ANSI_QUOTES")));

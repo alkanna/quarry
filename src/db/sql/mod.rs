@@ -3,6 +3,9 @@
 
 mod dialect;
 pub mod advanced;
+pub mod pg_advanced;
+#[cfg(test)]
+mod pg_advanced_tests;
 mod worker;
 mod run;
 pub mod pg;

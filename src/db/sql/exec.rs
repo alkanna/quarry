@@ -398,11 +398,14 @@ impl Conn {
     /// Starts the transaction a write runs in. On PostgreSQL the session stays read-only, so the write opens its own
     /// READ WRITE transaction and lifts the statement timeout and sets a lock timeout for it alone with SET LOCAL, which
     /// ends with the transaction and so never reaches another client of a connection pooler.
-    pub async fn begin_write(&mut self) -> Result<Tx<'_>, sqlx::Error> {
+    pub async fn begin_write(&mut self, db: &Db) -> Result<Tx<'_>, sqlx::Error> {
         match self {
             Conn::My(c) => c.begin().await.map(Tx::My),
             Conn::Pg(c) => {
-                let tx = c.begin_with(format!("BEGIN READ WRITE; {}", super::pg::write_locals())).await?;
+                // Behind a pooler the session carries none of the Advanced tab's settings, so they follow the writer's own.
+                let extra = db.pg_writer_locals();
+                let sep = if extra.is_empty() { "" } else { "; " };
+                let tx = c.begin_with(format!("BEGIN READ WRITE; {}{sep}{extra}", super::pg::write_locals())).await?;
                 Ok(Tx::Pg(tx))
             }
         }
@@ -519,7 +522,7 @@ impl Db {
     /// type, function or sequence unqualified only when it is on the path, so a read made under the path the statements
     /// will run under (see `ddl_pg`) is text that resolves the same way when it is written back.
     pub(super) fn meta_with<'a, const N: usize>(&'a self, schema: &'a str, sql: &str, params: [&str; N], in_schema: bool) -> impl std::future::Future<Output = Res<Vec<SqlRow>>> + Send + use<'a, N> {
-        let path = if in_schema && self.dialect == Dialect::Postgres { format!("SET LOCAL search_path = {}", self.dialect.quote_ident(schema)) } else { String::new() };
+        let path = if in_schema && self.dialect == Dialect::Postgres { self.pg_set_path(schema) } else { String::new() };
         // The values are taken by value and copied before the first await. A borrowed `&[a, b]` would live across the
         // caller's await and the compiler then cannot prove the caller's future Send once it is spawned.
         let full = format!("{sql}{}", self.dialect.all_rows());

@@ -22,7 +22,7 @@ pub(super) async fn prepare(conn: &mut Conn, db: &Db, schema: &str, read_only: b
         Conn::Pg(c) => {
             super::pg::prepare(c, read_only, id, db).await.map_err(se)?;
             if !pooled {
-                super::pg_read::set_search_path(c, schema).await.map_err(se)?;
+                super::pg_read::set_search_path(c, &db.pg_path(schema)).await.map_err(se)?;
             }
         }
         Conn::My(c) => {
@@ -255,6 +255,14 @@ pub(super) async fn run(db: &Db, schema: &str, text: &str, read_only: bool, id: 
             sets.push(failed(stmt, STOPPED_POOLED.into()));
             continue;
         };
+        let mut rs = rs;
+        if cancel.load(Ordering::SeqCst) {
+            for r in rs.iter_mut() {
+                if let Some(e) = r.error.as_mut().filter(|e| e.starts_with("error returned from database: 57014: ")) {
+                    e.push_str(crate::db::errors::STOP_MARK);
+                }
+            }
+        }
         let failed = rs.iter().find_map(|r| r.error.as_deref());
         crate::db::log_sql(db.conn, &here, stmt, rs.first().map_or(0, |r| r.ms), failed);
         if let (None, Some(to)) = (failed, lex::use_target(stmt, d)) {
@@ -575,7 +583,7 @@ mod pg_tests {
             assert!(start.elapsed() < Duration::from_secs(8), "{var}: the sleep was not interrupted");
             let sets = ran.unwrap();
             let err = sets[0].error.as_deref().unwrap();
-            assert!(err.contains("57014") && err.contains("user request"), "{var}: {err}");
+            assert!(err.contains("57014") && err.contains("user request") && err.contains(crate::db::errors::STOP_MARK.trim()), "{var}: {err}");
             // The error ends the script; the second statement never starts.
             assert_eq!(sets.len(), 1, "{var}");
             assert_eq!(id.load(Ordering::SeqCst), 0);

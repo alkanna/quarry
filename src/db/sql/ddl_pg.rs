@@ -824,7 +824,7 @@ async fn orphan_message(tx: &mut Tx<'_>, schema: &str, table: &str, fk: &Foreign
 /// Any failure leaves the transaction to roll back.
 pub(super) async fn run(db: &Db, schema: &str, table: &str, steps: &[String], expect: &Expect, read_only: bool, undo: bool) -> Result<(), Fail> {
     let mut conn = write::writer_conn(db, schema, read_only).await.map_err(Fail::Run)?;
-    let mut tx = conn.begin_write().await.map_err(|e| Fail::Run(se(e)))?;
+    let mut tx = conn.begin_write(db).await.map_err(|e| Fail::Run(se(e)))?;
     let out = locked_run(&mut tx, db, schema, table, steps, expect, undo).await;
     match out {
         // The connection can drop after the server committed, so a failed COMMIT does not say that nothing changed.
@@ -857,7 +857,7 @@ async fn locked_run(tx: &mut Tx<'_>, db: &Db, schema: &str, table: &str, steps: 
     }
     // Before the read and the statements alike: the plan was made from a read under this path, and the statements resolve
     // every name under it, so a type or function outside the schema is qualified in the one and found by the other.
-    exec(tx, db, schema, &format!("SET LOCAL search_path = {}", q(schema))).await.map_err(|e| Fail::Run(se(e)))?;
+    exec(tx, db, schema, &db.pg_set_path(schema)).await.map_err(|e| Fail::Run(se(e)))?;
     let st = read_in(tx, schema, table).await.map_err(Fail::Run)?;
     let now = snapshot(&st, &expect.cols, &expect.idx, &expect.fks);
     if now.len() != expect.snap.len() {
@@ -878,7 +878,7 @@ async fn locked_run(tx: &mut Tx<'_>, db: &Db, schema: &str, table: &str, steps: 
         let now = if r.schema == schema && r.table == table {
             ref_state(&st, &r.cols)
         } else {
-            exec(tx, db, schema, &format!("SET LOCAL search_path = {}", q(&r.schema))).await.map_err(|e| Fail::Run(se(e)))?;
+            exec(tx, db, schema, &db.pg_set_path(&r.schema)).await.map_err(|e| Fail::Run(se(e)))?;
             moved = true;
             ref_state(&read_in(tx, &r.schema, &r.table).await.map_err(Fail::Run)?, &r.cols)
         };
@@ -887,7 +887,7 @@ async fn locked_run(tx: &mut Tx<'_>, db: &Db, schema: &str, table: &str, steps: 
         }
     }
     if moved {
-        exec(tx, db, schema, &format!("SET LOCAL search_path = {}", q(schema))).await.map_err(|e| Fail::Run(se(e)))?;
+        exec(tx, db, schema, &db.pg_set_path(schema)).await.map_err(|e| Fail::Run(se(e)))?;
     }
     for ty in &expect.types {
         let said = tx.fetch_bound("SELECT to_regtype($1)::text AS t", &[Param::Text(ty.clone())]).await;

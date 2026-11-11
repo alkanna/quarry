@@ -595,7 +595,7 @@ async fn drop_db(db: &Db, name: &str, force: bool, read_only: bool) -> Res<Vec<S
 // One transaction.
 
 async fn begin<'c>(c: &'c mut Conn, db: &Db, scope: &str) -> Res<Tx<'c>> {
-    let mut tx = c.begin_write().await.map_err(se)?;
+    let mut tx = c.begin_write(db).await.map_err(se)?;
     exec(&mut tx, db, scope, &format!("SET LOCAL lock_timeout = '{LOCK_WAIT}'")).await.map_err(se)?;
     Ok(tx)
 }

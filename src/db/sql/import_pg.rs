@@ -410,9 +410,9 @@ async fn import_on(c: &mut Conn, db: &Db, schema: &str, table: &str, plan: &Impo
         }
     }
     let rec = Rec { on, track: plan.dup == Dup::Update, n_pk: pk.len(), inserted: Vec::new(), ins_at: HashMap::new(), updated: Vec::new(), upd_at: HashMap::new(), bytes: 0 };
-    let mut tx = c.begin_write().await.map_err(se)?;
+    let mut tx = c.begin_write(db).await.map_err(se)?;
     // The types in the statements were read under this path, so they resolve to the same types here.
-    let path = format!("SET LOCAL search_path = {}", Dialect::Postgres.quote_ident(schema));
+    let path = db.pg_set_path(schema);
     tx.exec_bound(&path, &[]).await.map_err(se)?;
     let only = is_plain_table(&mut tx, schema, table).await?;
     let mut imp = Imp { db, schema, table, plan, mapped, key_at, rec_names, has_set, only, rec, why_not, flat: Vec::new(), in_batch: 0, batch_bytes: 0, first_row: 0, seen: HashSet::new(), inserted_n: 0 };
@@ -549,8 +549,8 @@ pub fn remove_sql(schema: &str, table: &str, u: &ImportUndo, rows: &[Cellz]) -> 
 /// with nothing changed, so an edit made since is never overwritten and a row that is not the import's is never deleted.
 pub async fn undo(db: &Db, schema: &str, table: &str, u: &ImportUndo, read_only: bool) -> Res<String> {
     let mut c = writer_conn(db, schema, read_only).await?;
-    let mut tx = c.begin_write().await.map_err(se)?;
-    let path = format!("SET LOCAL search_path = {}", Dialect::Postgres.quote_ident(schema));
+    let mut tx = c.begin_write(db).await.map_err(se)?;
+    let path = db.pg_set_path(schema);
     tx.exec_bound(&path, &[]).await.map_err(se)?;
     let res = undo_in(db, schema, table, u, &mut tx).await;
     match res {
