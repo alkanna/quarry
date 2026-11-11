@@ -10,6 +10,7 @@ use crate::db::sql::ddl::{ColDef, Dv};
 use crate::db::sql::testing::{db_turn, live_pg_at};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
 fn uniq(tag: &str) -> String {
     static N: AtomicUsize = AtomicUsize::new(0);
@@ -52,6 +53,8 @@ impl<'a> Tidy<'a> {
 impl Drop for Tidy<'_> {
     fn drop(&mut self) {
         for d in self.dbs.borrow().iter() {
+            // A template database is refused by DROP until it is a plain one again, and a database whose undo was refused may have closed to connections.
+            let _ = self.l.w.rt.block_on(async { sqlx::raw_sql(&format!("ALTER DATABASE {} IS_TEMPLATE false", ident(d))).execute(&self.l.pool).await });
             let _ = self.l.w.rt.block_on(async { sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS {} WITH (FORCE)", ident(d))).execute(&self.l.pool).await });
         }
         if !self.schemas.borrow().is_empty() {
@@ -102,6 +105,38 @@ fn foreign(l: &LivePg, name: &str) -> sqlx::PgConnection {
     use sqlx::Connection;
     let o = sqlx::postgres::PgConnectOptions::from_str(&l.uri).unwrap().database(name);
     l.w.rt.block_on(async { sqlx::PgConnection::connect_with(&o).await.unwrap() })
+}
+
+/// The tables, views, sequences, functions and types of users whose description names one of `schemas`, as the server describes them.
+/// What a drop took is the difference of two of these, read from the server and not rebuilt from dependency rules.
+fn objects(l: &LivePg, pool: &sqlx::PgPool, schemas: &[&str]) -> std::collections::BTreeSet<String> {
+    let sql = "SELECT COALESCE(string_agg(d, E'\\n' ORDER BY d), '') FROM (SELECT pg_describe_object('pg_class'::regclass, oid, 0) AS d FROM pg_class WHERE oid >= 16384 AND relkind IN ('r', 'p', 'v', 'm', 'f', 'S', 'c') \
+               UNION ALL SELECT pg_describe_object('pg_proc'::regclass, oid, 0) FROM pg_proc WHERE oid >= 16384 \
+               UNION ALL SELECT pg_describe_object('pg_type'::regclass, oid, 0) FROM pg_type WHERE oid >= 16384 AND typtype IN ('d', 'e')) x";
+    l.qone(pool, sql).lines().filter(|d| schemas.iter().any(|s| d.contains(s))).map(String::from).collect()
+}
+
+/// The lines of a drop list that name a table, view, sequence, function or type, without the notes in brackets after them.
+fn kinds(lines: &[String]) -> std::collections::BTreeSet<String> {
+    lines
+        .iter()
+        .map(|x| match x.rfind(" (") {
+            Some(i) if x.ends_with(')') => x[..i].to_string(),
+            _ => x.clone(),
+        })
+        .filter(|x| ["table ", "view ", "materialized view ", "foreign table ", "sequence ", "function ", "type ", "composite type "].iter().any(|k| x.starts_with(k)))
+        .collect()
+}
+
+/// Runs statements inside another database of the server, outside Quarry's pools.
+fn in_db(l: &LivePg, name: &str, sql: &str) {
+    use sqlx::Connection;
+    let o = sqlx::postgres::PgConnectOptions::from_str(&l.uri).unwrap().database(name);
+    l.w.rt.block_on(async {
+        let mut c = sqlx::PgConnection::connect_with(&o).await.unwrap();
+        sqlx::raw_sql(sql).execute(&mut c).await.unwrap_or_else(|x| panic!("{sql}: {x}"));
+        c.close().await.unwrap();
+    });
 }
 
 fn undo_of(l: &LivePg, a: UndoAction) -> Ans {
@@ -224,6 +259,80 @@ fn the_undo_of_a_database_create_needs_it_empty_and_alone() {
 }
 
 #[test]
+fn the_undo_of_a_database_create_sees_what_a_table_count_misses_and_the_database_it_made() {
+    every_pg(|l, var| {
+        let tidy = Tidy::new(l);
+        // Things a user puts in a database that are no table, function or schema: each one makes the undo refuse, and once it is gone the undo works.
+        let cases = [
+            ("a large object", "SELECT lo_create(0)", "SELECT lo_unlink(oid) FROM pg_largeobject_metadata"),
+            ("a collation", "CREATE COLLATION qcoll FROM \"C\"", "DROP COLLATION qcoll"),
+            ("a publication", "CREATE PUBLICATION qpub", "DROP PUBLICATION qpub"),
+            ("a text search configuration", "CREATE TEXT SEARCH CONFIGURATION qcfg (COPY = simple)", "DROP TEXT SEARCH CONFIGURATION qcfg"),
+            ("a foreign data wrapper", "CREATE FOREIGN DATA WRAPPER qfdw", "DROP FOREIGN DATA WRAPPER qfdw"),
+            ("an operator", "CREATE FUNCTION qeq(int, int) RETURNS bool LANGUAGE sql AS 'select true'; CREATE OPERATOR === (LEFTARG = int, RIGHTARG = int, FUNCTION = qeq)", "DROP OPERATOR === (int, int); DROP FUNCTION qeq(int, int)"),
+        ];
+        let name = tidy.db("miss");
+        let mut entry = make_db(l, &name, None).undo.unwrap();
+        for (what, make, clean) in cases {
+            in_db(l, &name, make);
+            let u = undo_of(l, entry);
+            let why = err(&u);
+            assert!(why.starts_with("Not undone") && why.contains("has tables or other objects"), "{var}: {what}: {why}");
+            assert!(exists(l, &name), "{var}: {what}: a refused undo drops nothing");
+            in_db(l, &name, clean);
+            entry = u.undo.unwrap_or_else(|| panic!("{var}: {what}: the entry stays"));
+        }
+
+        // Another session connected: refused, and the database takes connections again afterwards, as before the undo.
+        let other = foreign(l, &name);
+        let u = undo_of(l, entry);
+        assert!(err(&u).contains("another session is connected"), "{var}: {:?}", u.res);
+        assert_eq!(l.one(&format!("SELECT datallowconn::text FROM pg_database WHERE datname = {}", lit(&name))), "true", "{var}: a refused undo leaves the database open to connections");
+        l.w.rt.block_on(async { use sqlx::Connection; other.close().await.unwrap() });
+        let u = undo_of(l, u.undo.unwrap());
+        u.res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert!(!exists(l, &name), "{var}");
+
+        // Dropped and made again under the same name: another database, which this did not create.
+        let name = tidy.db("again");
+        let a = make_db(l, &name, None);
+        l.w.rt.block_on(async { sqlx::raw_sql(&format!("DROP DATABASE {} WITH (FORCE)", ident(&name))).execute(&l.pool).await.unwrap() });
+        assert!(make_db_plain(l, &name));
+        let u = undo_of(l, a.undo.unwrap());
+        assert!(err(&u).contains("made again"), "{var}: {:?}", u.res);
+        assert!(exists(l, &name) && u.undo.is_some(), "{var}");
+
+        // What the template carried in is not the person's work: a table in the template does not stop the undo, one added later does.
+        let tpl = tidy.db("tpl");
+        make_db(l, &tpl, None).res.unwrap();
+        in_db(l, &tpl, "CREATE TABLE inherited (id int)");
+        l.w.rt.block_on(async { sqlx::raw_sql(&format!("ALTER DATABASE {} IS_TEMPLATE true", ident(&tpl))).execute(&l.pool).await.unwrap() });
+        let (kept, mine) = (tidy.db("kid"), tidy.db("kid2"));
+        let a = make_db(l, &kept, Some(&tpl));
+        a.res.clone().unwrap_or_else(|x| panic!("{var}: {x}"));
+        let u = undo_of(l, a.undo.unwrap());
+        u.res.unwrap_or_else(|x| panic!("{var}: a database copied from a template with a table is empty for the undo: {x}"));
+        let a = make_db(l, &mine, Some(&tpl));
+        in_db(l, &mine, "CREATE TABLE mine (id int)");
+        let u = undo_of(l, a.undo.unwrap());
+        assert!(err(&u).contains("has tables"), "{var}: {:?}", u.res);
+    });
+}
+
+/// CREATE DATABASE by hand for a test that needs a second database of a name, taking the same turn as `make_db`.
+fn make_db_plain(l: &LivePg, name: &str) -> bool {
+    let _turn = db_turn();
+    for attempt in 0..8 {
+        match l.w.rt.block_on(async { sqlx::raw_sql(&format!("CREATE DATABASE {}", ident(name))).execute(&l.pool).await }) {
+            Ok(_) => return true,
+            Err(x) if x.as_database_error().and_then(|d| d.code().map(|c| c.to_string())).as_deref() == Some("55006") && attempt < 7 => std::thread::sleep(std::time::Duration::from_millis(300 * (attempt + 1))),
+            Err(x) => panic!("{x}"),
+        }
+    }
+    false
+}
+
+#[test]
 fn the_connections_own_database_and_system_names_are_refused() {
     every_pg(|l, var| {
         let tidy = Tidy::new(l);
@@ -336,11 +445,10 @@ fn dropping_a_schema_lists_what_cascade_would_take_and_needs_it() {
              CREATE VIEW {b}.v AS SELECT id FROM {a}.t; CREATE TABLE {b}.child (id int REFERENCES {a}.t (id)); CREATE SEQUENCE {a}.s",
             a = ident(&a), b = ident(&b)));
         let i = info(l, "quarry_test", &a, "");
-        assert!(i.exists && i.dependents_total >= 5, "{var}: {i:?}");
+        let before = objects(l, &pool, &[&a, &b]);
+        assert!(i.exists, "{var}: {i:?}");
         let all = i.dependents.join("\n");
-        for want in ["table", "function", "view", "sequence", "constraint"] {
-            assert!(all.contains(want), "{var}: no {want} in\n{all}");
-        }
+        assert!(all.contains("constraint"), "{var}: the key of the other schema's table is listed\n{all}");
         assert!(!all.contains("index"), "{var}: an index is not listed, it goes with its table\n{all}");
 
         let drop = |cascade: bool| {
@@ -351,6 +459,9 @@ fn dropping_a_schema_lists_what_cascade_would_take_and_needs_it() {
         assert!(why.contains("2BP01") && why.contains("CASCADE"), "{var}: {why}");
         assert_eq!(l.qone(&pool, &format!("SELECT count(*)::text FROM {}.t", ident(&a))), "1", "{var}: a refused drop dropped nothing");
         drop(true).res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        let took: std::collections::BTreeSet<String> = before.difference(&objects(l, &pool, &[&a, &b])).cloned().collect();
+        assert_eq!(kinds(&i.dependents), took, "{var}: the list is exactly what the server dropped");
+        assert_eq!(i.dependents_total as usize, i.dependents.len(), "{var}: nothing is cut off here");
         assert_eq!(l.qone(&pool, &format!("SELECT count(*)::text FROM pg_namespace WHERE nspname = {}", lit(&a))), "0", "{var}");
         assert_eq!(l.qone(&pool, &format!("SELECT count(*)::text FROM pg_class WHERE relnamespace = {}::regnamespace AND relname IN ('child')", lit(&ident(&b)))), "1", "{var}: the other schema's table stays, only its key went");
         assert_eq!(l.qone(&pool, &format!("SELECT count(*)::text FROM pg_views WHERE schemaname = {} AND viewname = 'v'", lit(&b))), "0", "{var}: a view over the schema's table went with it");
@@ -361,6 +472,82 @@ fn dropping_a_schema_lists_what_cascade_would_take_and_needs_it() {
         assert_eq!(i.dependents_total, 0);
         drop(false).res.unwrap_or_else(|x| panic!("{var}: {x}"));
         assert!(!info(l, "quarry_test", &a, "").exists);
+    });
+}
+
+#[test]
+fn what_a_cascade_drops_is_read_off_the_server_with_partitions_defaults_and_columns() {
+    every_pg(|l, var| {
+        let tidy = Tidy::new(l);
+        let db = l.quarry_test();
+        let pool = l.fixture_pool();
+        let drop_schema = |name: &str, cascade: bool| {
+            l.w.pg_drop_schema(1, db.clone(), name.to_string(), cascade, false);
+            ans(l)
+        };
+        // A partitioned table whose partition lives in another schema, a default that calls a sequence, a generated column and an index
+        // that call a function: everything the server drops with the schema `s`, none of it a plain table of `s`.
+        let (s, o) = (tidy.schema(&uniq("ps")), tidy.schema(&uniq("po")));
+        schema_with(l, &pool, &o, "");
+        let (qs, qo) = (ident(&s), ident(&o));
+        schema_with(
+            l,
+            &pool,
+            &s,
+            &format!(
+                "CREATE SEQUENCE {qs}.seq; CREATE FUNCTION {qs}.f(int) RETURNS int IMMUTABLE LANGUAGE sql AS 'select $1'; CREATE TYPE {qs}.pair AS (a int, b int); \
+                 CREATE TABLE {qs}.parent (id int, k int) PARTITION BY LIST (k); CREATE TABLE {qo}.p1 PARTITION OF {qs}.parent FOR VALUES IN (1); INSERT INTO {qs}.parent VALUES (1, 1); \
+                 CREATE TABLE {qo}.t (x int DEFAULT nextval({}), y int GENERATED ALWAYS AS ({qs}.f(x)) STORED); CREATE INDEX t_fx ON {qo}.t ({qs}.f(x))",
+                lit(&format!("{qs}.seq"))
+            ),
+        );
+        let i = info(l, "quarry_test", &s, "");
+        let before = objects(l, &pool, &[&s, &o]);
+        let all = i.dependents.join("\n");
+        assert!(i.dependents_total >= 8, "{var}: the partition, the default, the generated column's expression and the index are all dropped with it\n{all}");
+        assert!(all.contains("t_fx") && all.contains("default value for column x") && all.contains("default value for column y"), "{var}: {all}");
+        assert!(i.dependents.iter().any(|x| x.contains("p1") && x.contains("1 row") && x.contains("outside this schema")), "{var}: the partition is named with its rows and as outside the schema\n{all}");
+        assert!(i.dependents[0].contains("outside this schema"), "{var}: what is outside the schema comes first\n{all}");
+        assert!(err(&drop_schema(&s, false)).contains("2BP01"), "{var}");
+        drop_schema(&s, true).res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        let took: std::collections::BTreeSet<String> = before.difference(&objects(l, &pool, &[&s, &o])).cloned().collect();
+        assert_eq!(kinds(&i.dependents), took, "{var}: the list is exactly what the server dropped\n{all}");
+        assert_eq!(l.qone(&pool, &format!("SELECT count(*)::text FROM pg_class WHERE relname = 'p1' AND relnamespace = {}::regnamespace", lit(&qo))), "0", "{var}: the partition went with its row");
+
+        // A schema that holds only a partitioned table is not empty, so the confirmation asks for CASCADE.
+        let only = tidy.schema(&uniq("pt"));
+        schema_with(l, &pool, &only, &format!("CREATE TABLE {}.parent (id int) PARTITION BY RANGE (id)", ident(&only)));
+        let i = info(l, "quarry_test", &only, "");
+        assert_eq!(i.dependents_total, 1, "{var}: {:?}", i.dependents);
+        assert!(err(&drop_schema(&only, false)).contains("2BP01"), "{var}");
+        drop_schema(&only, true).res.unwrap_or_else(|x| panic!("{var}: {x}"));
+
+        // An enum used by a column: the server drops the column and keeps the table and the view over its other columns.
+        let (e, t) = (tidy.schema(&uniq("ce")), tidy.schema(&uniq("ct")));
+        schema_with(l, &pool, &t, "");
+        schema_with(l, &pool, &e, &format!("CREATE TYPE {qe}.mood AS ENUM ('a', 'b'); CREATE TABLE {qt}.t2 (id int, m {qe}.mood); CREATE VIEW {qt}.v2 AS SELECT id FROM {qt}.t2", qe = ident(&e), qt = ident(&t)));
+        let i = info(l, "quarry_test", &e, "");
+        let all = i.dependents.join("\n");
+        assert!(all.contains("column m of table") && !kinds(&i.dependents).iter().any(|x| x.starts_with("table ") || x.starts_with("view ")), "{var}: only the column is listed, not its table or the view\n{all}");
+        let before = objects(l, &pool, &[&e, &t]);
+        drop_schema(&e, true).res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        let took: std::collections::BTreeSet<String> = before.difference(&objects(l, &pool, &[&e, &t])).cloned().collect();
+        assert_eq!(kinds(&i.dependents), took, "{var}: {all}");
+        assert_eq!(l.qone(&pool, &format!("SELECT count(*)::text FROM pg_views WHERE schemaname = {} AND viewname = 'v2'", lit(&t))), "1", "{var}: the view stays");
+        assert_eq!(l.qone(&pool, &format!("SELECT count(*)::text FROM pg_attribute WHERE attrelid = {}::regclass AND attname = 'm' AND NOT attisdropped", lit(&format!("{}.t2", ident(&t))))), "0", "{var}: the column went");
+
+        // A partitioned table dropped on its own takes its partitions, which hold rows.
+        let (a, b) = (tidy.schema(&uniq("pa")), tidy.schema(&uniq("pb")));
+        schema_with(l, &pool, &b, "");
+        schema_with(l, &pool, &a, &format!("CREATE TABLE {qa}.pp (id int) PARTITION BY RANGE (id); CREATE TABLE {qb}.pp1 PARTITION OF {qa}.pp FOR VALUES FROM (0) TO (10); INSERT INTO {qa}.pp VALUES (1), (2)", qa = ident(&a), qb = ident(&b)));
+        let i = info(l, "quarry_test", &a, "pp");
+        let before = objects(l, &pool, &[&a, &b]);
+        assert!(i.dependents.iter().any(|x| x.contains("pp1") && x.contains("2 rows")), "{var}: {:?}", i.dependents);
+        l.w.pg_drop_table(1, db.clone(), a.clone(), "pp".into(), false, true, false);
+        ans(l).res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        let mut took: std::collections::BTreeSet<String> = before.difference(&objects(l, &pool, &[&a, &b])).cloned().collect();
+        assert!(took.remove(&format!("table {a}.pp")), "{var}: {took:?}");
+        assert_eq!(kinds(&i.dependents), took, "{var}");
     });
 }
 
@@ -510,6 +697,82 @@ fn the_undo_of_a_table_create_refuses_a_table_that_is_not_the_one_it_made() {
 }
 
 #[test]
+fn the_undo_of_a_table_create_refuses_row_security_triggers_and_comments_added_since() {
+    every_pg(|l, var| {
+        let tidy = Tidy::new(l);
+        let db = l.quarry_test();
+        let pool = l.fixture_pool();
+        let s = tidy.schema(&uniq("tx"));
+        schema_with(l, &pool, &s, "");
+        let spec = TableSpec { schema: s.clone(), name: "t".into(), cols: vec![col("v", "text")], ..Default::default() };
+        let t = format!("{}.t", ident(&s));
+        let mut entry = made(l, &db, spec).undo.unwrap();
+        l.qsql(&pool, &format!("CREATE FUNCTION {}.tf() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$", ident(&s)));
+        // What the structure editor does not show, each one added and taken away again: the undo refuses while it is there, and drops the
+        // table once it is gone, so the check reads these and a table with them is not taken for the one that was created.
+        let cases = [
+            ("row security", format!("ALTER TABLE {t} ENABLE ROW LEVEL SECURITY"), format!("ALTER TABLE {t} DISABLE ROW LEVEL SECURITY")),
+            ("forced row security", format!("ALTER TABLE {t} ENABLE ROW LEVEL SECURITY; ALTER TABLE {t} FORCE ROW LEVEL SECURITY"), format!("ALTER TABLE {t} NO FORCE ROW LEVEL SECURITY; ALTER TABLE {t} DISABLE ROW LEVEL SECURITY")),
+            ("a policy", format!("CREATE POLICY p ON {t} USING (false)"), format!("DROP POLICY p ON {t}")),
+            ("a trigger", format!("CREATE TRIGGER trg BEFORE INSERT ON {t} FOR EACH ROW EXECUTE FUNCTION {}.tf()", ident(&s)), format!("DROP TRIGGER trg ON {t}")),
+            ("a comment", format!("COMMENT ON TABLE {t} IS 'mine'"), format!("COMMENT ON TABLE {t} IS NULL")),
+        ];
+        for (what, make, clean) in cases {
+            l.qsql(&pool, &make);
+            let u = undo_of(l, entry);
+            let why = err(&u);
+            assert!(why.starts_with("Not undone") && why.contains("changed"), "{var}: {what}: {why}");
+            assert_eq!(l.qone(&pool, &format!("SELECT (to_regclass({}) IS NOT NULL)::text", lit(&t))), "true", "{var}: {what}: a refused undo drops nothing");
+            l.qsql(&pool, &clean);
+            entry = u.undo.unwrap_or_else(|| panic!("{var}: {what}: the entry stays"));
+        }
+        undo_of(l, entry).res.unwrap_or_else(|x| panic!("{var}: {x}"));
+    });
+}
+
+/// Drops a role and what it owns, also when the test fails on the way.
+struct RoleGuard<'a> {
+    l: &'a LivePg,
+    pool: sqlx::PgPool,
+    role: String,
+}
+
+impl Drop for RoleGuard<'_> {
+    fn drop(&mut self) {
+        let _ = self.l.w.rt.block_on(async { sqlx::raw_sql(&format!("DROP OWNED BY {}", ident(&self.role))).execute(&self.pool).await });
+        let _ = self.l.w.rt.block_on(async { sqlx::raw_sql(&format!("DROP ROLE IF EXISTS {}", ident(&self.role))).execute(&self.l.pool).await });
+    }
+}
+
+#[test]
+fn the_undo_of_a_table_create_is_refused_when_the_role_cannot_lock_the_table() {
+    every_pg(|l, var| {
+        let tidy = Tidy::new(l);
+        let pool = l.fixture_pool();
+        let role = uniq("role");
+        let s = tidy.schema(&uniq("tl"));
+        l.w.rt.block_on(async { sqlx::raw_sql(&format!("CREATE ROLE {} LOGIN PASSWORD 'pw'", ident(&role))).execute(&l.pool).await.unwrap() });
+        let _guard = RoleGuard { l, pool: pool.clone(), role: role.clone() };
+        l.qsql(&pool, &format!("CREATE SCHEMA {} AUTHORIZATION {}", ident(&s), ident(&role)));
+        let o = sqlx::postgres::PgConnectOptions::from_str(&l.uri).unwrap();
+        let rl = crate::db::sql::testing::live_pg_at(format!("postgres://{role}:pw@{}:{}/quarry_test", o.get_host(), o.get_port()));
+        let rdb = rl.quarry_test();
+        let spec = TableSpec { schema: s.clone(), name: "t".into(), cols: vec![col("v", "text")], ..Default::default() };
+        let a = made(&rl, &rdb, spec);
+        a.res.clone().unwrap_or_else(|x| panic!("{var}: {x}"));
+        let t = format!("{}.t", ident(&s));
+        // The owner revokes its own privileges: it can still drop the table, but cannot take the lock the empty check relies on.
+        l.qsql(&pool, &format!("REVOKE ALL ON TABLE {t} FROM {}", ident(&role)));
+        let u = undo_of(&rl, a.undo.unwrap());
+        let why = err(&u);
+        assert!(why.starts_with("Not undone") && why.contains("cannot be locked"), "{var}: {why}");
+        assert_eq!(l.qone(&pool, &format!("SELECT (to_regclass({}) IS NOT NULL)::text", lit(&t))), "true", "{var}: the table is still there");
+        l.qsql(&pool, &format!("GRANT ALL ON TABLE {t} TO {}", ident(&role)));
+        undo_of(&rl, u.undo.unwrap()).res.unwrap_or_else(|x| panic!("{var}: {x}"));
+    });
+}
+
+#[test]
 fn a_table_that_cannot_be_built_is_refused_before_or_by_the_server_and_nothing_is_left() {
     every_pg(|l, var| {
         let tidy = Tidy::new(l);
@@ -573,6 +836,7 @@ fn dropping_a_table_lists_what_depends_on_it_and_cascade_is_opt_in() {
              CREATE TABLE {b}.child (id int REFERENCES {a}.t (id)); CREATE TABLE {a}.plain (id int)",
             a = ident(&a), b = ident(&b)));
         let i = info(l, "quarry_test", &a, "t");
+        let before = objects(l, &pool, &[&a, &b]);
         assert_eq!((i.exists, i.rows, i.rows_estimated), (true, Some(3), false), "{var}: {i:?}");
         let all = i.dependents.join("\n");
         assert!(all.contains("view") && all.contains("v2") && all.contains("constraint"), "{var}: a view of a view and a key of another table are listed\n{all}");
@@ -589,6 +853,11 @@ fn dropping_a_table_lists_what_depends_on_it_and_cascade_is_opt_in() {
         assert_eq!(l.qone(&pool, &format!("SELECT count(*)::text FROM {}.t", ident(&a))), "3", "{var}");
         let d = drop("t", false, true);
         d.res.clone().unwrap_or_else(|x| panic!("{var}: {x}"));
+        let mut took: std::collections::BTreeSet<String> = before.difference(&objects(l, &pool, &[&a, &b])).cloned().collect();
+        assert!(took.remove(&format!("table {}.t", a)), "{var}: the table itself went: {took:?}");
+        // The sequence of a serial column goes with a plain DROP too, so it is part of the table and not listed.
+        assert!(took.remove(&format!("sequence {a}.t_id_seq")), "{var}: {took:?}");
+        assert_eq!(kinds(&i.dependents), took, "{var}: the list is exactly what the server dropped besides the table");
         assert_eq!((d.what, d.undo.is_none()), (What::DroppedTable, true), "{var}: a drop has no undo");
         assert_eq!(l.qone(&pool, &format!("SELECT count(*)::text FROM pg_views WHERE schemaname = {} AND viewname IN ('v', 'v2')", lit(&b))), "0", "{var}");
         assert_eq!(l.qone(&pool, &format!("SELECT count(*)::text FROM {}.child", ident(&b))), "0", "{var}: the table that pointed at it stays, only its key went");
@@ -604,6 +873,24 @@ fn dropping_a_table_lists_what_depends_on_it_and_cascade_is_opt_in() {
         l.w.pg_drop_table(1, db.clone(), a.clone(), "x".into(), false, false, true);
         assert!(err(&ans(l)).contains("locked"), "{var}");
         assert!(create_pg::drop_table_sql(&a, "", false, false).is_err());
+    });
+}
+
+/// What a drop dialog reads must never write: counting the rows of a view runs the functions it calls, and one of them can insert.
+#[test]
+fn reading_what_a_view_drop_takes_writes_nothing() {
+    every_pg(|l, var| {
+        let tidy = Tidy::new(l);
+        let pool = l.fixture_pool();
+        let s = tidy.schema(&uniq("rw"));
+        let q = ident(&s);
+        schema_with(l, &pool, &s, &format!("CREATE TABLE {q}.lg (n int); CREATE FUNCTION {q}.w() RETURNS int LANGUAGE sql AS 'INSERT INTO {q}.lg VALUES (1) RETURNING 1'; CREATE VIEW {q}.v AS SELECT {q}.w() AS one"));
+        let i = info(l, "quarry_test", &s, "v");
+        assert!(i.exists, "{var}: {i:?}");
+        // The exact count runs the view, whose function writes, so a read-only transaction refuses it and the estimate stays. A transaction that
+        // allowed writes would count (and roll back) instead.
+        assert!(i.rows_estimated, "{var}: the count of a view that writes was not refused: {i:?}");
+        assert_eq!(l.qone(&pool, &format!("SELECT count(*)::text FROM {q}.lg")), "0", "{var}: looking at the drop wrote a row");
     });
 }
 
@@ -681,4 +968,34 @@ fn behind_a_pooler_a_table_is_made_and_undone_and_a_database_is_made_and_dropped
     let d = drop_db(&l, &name, true);
     d.res.clone().unwrap_or_else(|x| panic!("FORCE through the pooler: {x}"));
     assert!(!exists(&l, &name));
+}
+
+/// A connection taken out of a pool for good (a query's, a read's) is not tracked by the pool's close, so closing a database has to
+/// wait for it by itself: the drop that follows is refused while any session of Quarry's is still on the database.
+#[test]
+fn closing_a_database_waits_for_a_connection_that_a_query_still_holds() {
+    every_pg(|l, var| {
+        let tidy = Tidy::new(l);
+        let name = tidy.db("held");
+        make_db(l, &name, None).res.unwrap();
+        let at = l.db.at(&name);
+        let crate::db::sql::Pool::Pg(pools) = &l.db.pool else { panic!("not PostgreSQL") };
+        let held = l.w.rt.block_on(async { at.acquire_conn().await.unwrap() });
+        assert!(sessions(l, &name) > 0, "{var}: the held connection is a session on the database");
+        let waited = l.w.rt.block_on(async {
+            let release = tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+                let _ = held.close().await;
+            });
+            let t = Instant::now();
+            pools.close_database(&name).await;
+            let waited = t.elapsed();
+            release.await.unwrap();
+            waited
+        });
+        assert!(waited >= std::time::Duration::from_millis(600), "{var}: closing the database waited for the held connection, took {waited:?}");
+        // With the connection gone the plain drop works at the first try.
+        let d = drop_db(l, &name, false);
+        d.res.unwrap_or_else(|x| panic!("{var}: {x}"));
+    });
 }

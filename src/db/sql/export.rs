@@ -130,7 +130,7 @@ pub(super) async fn stream_locked(conn: &mut Conn, db: &Db, locals: &str, stmt: 
     let r = stream_conn(conn, db.dialect, stmt, plan, out, count, cancel, wrap).await;
     if r.is_ok() {
         if let Conn::Pg(c) = conn {
-            sqlx::Executor::execute(&mut *c, "ROLLBACK").await.map_err(se)?;
+            sqlx::Executor::execute(&mut **c, "ROLLBACK").await.map_err(se)?;
         }
     }
     r

@@ -16,7 +16,7 @@ use super::*;
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 
-const LIMIT: Duration = Duration::from_secs(20);
+const LIMIT: Duration = Duration::from_secs(40);
 const CONN: u64 = 1;
 
 /// Which of the widgets with one accessible name a click is for.

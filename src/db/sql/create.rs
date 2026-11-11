@@ -736,7 +736,7 @@ impl Worker {
             })
             .await;
             let name = res.as_ref().ok().and_then(|l| l.as_deref()).map_or(name.clone(), |l| stored_name(l, &name));
-            let undo = res.is_ok().then(|| created(conn, &name, "", SqlUndo::CreatedDb));
+            let undo = res.is_ok().then(|| created(conn, &name, "", SqlUndo::CreatedDb { oid: String::new(), baseline: 0 }));
             let (res, dbs) = split(res, format!("Created database {name}"));
             Msg::SqlDdl { conn, database: String::new(), schema: name, table: String::new(), what: Ddl::CreatedDb, res, undo, dbs, sql_mode: None }
         });
@@ -1578,7 +1578,7 @@ mod tests {
             }
             assert!(l.exists_table(&name, "t") && !l.exists_table(&name, "t2"));
             // A refused undo hands its entry back.
-            let undo = created(1, &name, "", SqlUndo::CreatedDb);
+            let undo = created(1, &name, "", SqlUndo::CreatedDb { oid: String::new(), baseline: 0 });
             let (_, res, back, _) = l.undo(undo, true);
             assert!(res.is_err() && back.is_some());
             l.exec(&format!("DROP DATABASE `{name}`"));

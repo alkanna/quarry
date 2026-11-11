@@ -134,23 +134,30 @@ impl App {
         self.modal = Some(Modal::SqlDrop(Box::new(DropForm { conn, database, schema, table, kind, typed: String::new(), opt: false, info: None })));
     }
 
-    /// Runs a confirmed drop. A database first loses its tabs and its sidebar state, so nothing of this app asks the server for it
-    /// while the drop runs, and the worker closes the pools; the other drops close their tabs when the server says it worked.
+    /// Runs a confirmed drop. Tabs and sidebar state go when the server says it worked (`pg_ddl_done`), never before: a drop that is
+    /// refused (another session, a pooler) must leave the person's query text and staged changes where they were.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn pg_drop_run(&mut self, conn: u64, sql: db::sql::Db, database: String, schema: String, table: String, kind: DropKind, opt: bool) {
         match kind {
-            DropKind::Database => {
-                self.remove_tabs(|t| t.sel.conn == conn && t.sel.db == database);
-                self.open_dbs.remove(&(conn, database.clone()));
-                self.sql_asked.remove(&(conn, database.clone()));
-                self.forget_schema(conn, &database);
-                self.pg_tables_asked.forget(conn, Some(&database), None);
-                self.worker.pg_drop_db(conn, sql, database, opt, false);
-            }
+            DropKind::Database => self.worker.pg_drop_db(conn, sql, database, opt, false),
             DropKind::Schema => self.worker.pg_drop_schema(conn, sql.at(&database), schema, opt, false),
             DropKind::Table | DropKind::View => self.worker.pg_drop_table(conn, sql.at(&database), schema, table, kind == DropKind::View, opt, false),
             DropKind::Truncate => {}
         }
+    }
+
+    /// What the open tabs of a database hold that closing them would lose: staged row edits, staged structure changes and Query text.
+    pub(super) fn pg_unsaved_in(&self, conn: u64, database: &str) -> (usize, usize, usize) {
+        let edits = self.drafts.values().filter(|d| d.conn == conn && d.db == database).count();
+        let mut staged = 0;
+        let mut queries = 0;
+        for t in self.tabs.iter().filter(|t| t.sel.conn == conn && t.sel.db == database) {
+            if let Some(s) = &t.sql {
+                staged += s.st.staged.len();
+                queries += usize::from(!s.query.trim().is_empty());
+            }
+        }
+        (edits, staged, queries)
     }
 
     /// A create or drop finished: the sidebar lists and the tabs follow what the server has now.
@@ -503,7 +510,21 @@ impl App {
                     blocked = true;
                     wrap(ui, format!("{name} is marked as a template database, and PostgreSQL refuses to drop one until it is no longer a template."), WARNING());
                 }
-                wrap(ui, "Its open tabs here are closed and Quarry's own connections to it are closed first.".into(), MUTED());
+                wrap(ui, "Its open tabs here are closed once it is dropped, and Quarry's own connections to it are closed first.".into(), MUTED());
+                let (edits, staged, queries) = self.pg_unsaved_in(f.conn, &f.database);
+                if edits + staged + queries > 0 {
+                    let mut parts = Vec::new();
+                    if edits > 0 {
+                        parts.push(plural(edits as u64, "staged row edit"));
+                    }
+                    if staged > 0 {
+                        parts.push(plural(staged as u64, "staged structure change"));
+                    }
+                    if queries > 0 {
+                        parts.push(plural(queries as u64, "query with text in its editor"));
+                    }
+                    wrap(ui, format!("Its tabs hold {}, which are lost with them when the drop works.", list_and(&parts)), WARNING());
+                }
                 if let Some(n) = info.sessions.filter(|n| *n > 0) {
                     wrap(ui, format!("{} connected to it right now (this app's own among them, if any). PostgreSQL refuses the drop while anyone is connected.", plural(n, "session")), MUTED());
                 }
@@ -513,8 +534,9 @@ impl App {
             DropKind::Schema | DropKind::Table | DropKind::View => {
                 let what = match f.kind {
                     DropKind::Schema => format!("the schema {name} in {}", f.database),
-                    DropKind::View => format!("the view {name}"),
-                    _ => format!("the table {name}"),
+                    // The same name can be in several schemas and databases, so the sentence says which one.
+                    DropKind::View => format!("the view {}.{}.{name}", f.database, f.schema),
+                    _ => format!("the table {}.{}.{name}", f.database, f.schema),
                 };
                 let rows = match (f.kind, info.rows, info.rows_estimated) {
                     (DropKind::Table, Some(n), false) => format!(", with {}", plural(n, "row")),
@@ -525,7 +547,8 @@ impl App {
                 if info.dependents_total > 0 {
                     let more = info.dependents_total.saturating_sub(info.dependents.len() as u64);
                     let tail = if more > 0 { format!(" and {more} more") } else { String::new() };
-                    let lead = if f.kind == DropKind::Schema { format!("It holds {}", plural(info.dependents_total, "object")) } else { format!("{} depend on it", plural(info.dependents_total, "object")) };
+                    // Read off the server by running the drop CASCADE and rolling it back, so the list is what the server takes and not a guess.
+                    let lead = format!("Dropping it also drops {}", plural(info.dependents_total, "object"));
                     wrap(ui, format!("{lead}: {}{tail}.", list_and(&info.dependents)), MUTED());
                     ui.add_space(4.0);
                     ui.checkbox(&mut f.opt, if f.kind == DropKind::Schema { "Drop them too (CASCADE)" } else { "Drop what depends on it too (CASCADE)" });

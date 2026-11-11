@@ -21,6 +21,14 @@ fn table_exists(fx: &Fx, table: &str) -> bool {
     n.trim() != "0"
 }
 
+/// Waits until no tab has a read in flight. A tab that is still reading its table holds a lock on it, and an undo or a drop takes
+/// ACCESS EXCLUSIVE under a 3 s lock timeout, so a loaded machine could make the test fail on the lock and not on what it checks.
+fn quiet(ui: &mut UiApp) {
+    ui.wait("the open tabs to have no read in flight", |a| a.tabs.iter().all(|t| !t.loading && t.sql.as_ref().is_none_or(|s| s.run_req == 0 && !matches!(s.st.load, crate::app::sql_structure::Load::Loading))));
+    ui.settle();
+    ui.wait("the open tabs to have no read in flight", |a| a.tabs.iter().all(|t| !t.loading && t.sql.as_ref().is_none_or(|s| s.run_req == 0 && !matches!(s.st.load, crate::app::sql_structure::Load::Loading))));
+}
+
 fn dialog_ready(a: &App) -> bool {
     match &a.modal {
         Some(Modal::SqlNewTable(f)) => f.meta.is_some(),
@@ -63,6 +71,7 @@ fn a_table_is_built_through_the_dialog_and_taken_back() {
         }
         assert_eq!(ui.app().undo.len(), 1, "the create is in the list of recent changes");
         // Take it back through the list: the table is empty, so it goes and its tab closes.
+        quiet(ui);
         ui.click("Undo (1)");
         ui.click("Undo change 1");
         until(fx, ui, "the undo to land", |fx| !table_exists(fx, &table));
@@ -85,6 +94,7 @@ fn a_table_with_rows_is_not_taken_back() {
         ui.wait("the entry", |a| a.undo.len() == 1);
         let q = fx.qualified(&table);
         fx.sql(&format!("INSERT INTO {q} (id) VALUES (1)"));
+        quiet(ui);
         ui.click("Undo (1)");
         ui.click("Undo change 1");
         ui.wait("the refusal", |a| a.last_problem().contains("has rows"));
@@ -104,6 +114,7 @@ fn a_table_is_dropped_only_through_the_typed_confirmation() {
         ui.h.state_mut().side_act(CONN, SideAct::SqlDrop(db.to_string(), table.clone(), DropKind::Table));
         ui.wait("the counts", |a| matches!(&a.modal, Some(Modal::SqlDrop(f)) if f.info.is_some()));
         ui.settle();
+        quiet(ui);
         assert!(ui.h.get_by_label("Drop table").accesskit_node().is_disabled(), "nothing is dropped before the name is typed");
         ui.fill("Confirmation", "not the name");
         ui.settle();
@@ -210,5 +221,87 @@ fn a_database_is_made_and_dropped_with_its_connections_closed() {
         until(fx, ui, "the database to be dropped", |fx| !exists(fx));
         ui.wait("the sidebar list", |a| a.conn(CONN).is_some_and(|c| !c.dbs.iter().any(|d| d.0 == db)));
         assert!(ui.app().last_problem().is_empty() || !ui.app().last_problem().contains("accessed"), "Quarry's own connections did not stop the drop");
+    });
+}
+
+#[test]
+fn the_drop_of_a_table_names_its_database_and_schema() {
+    pg_only("the drop of a table names its database and schema", |fx, ui| {
+        let table = fx.table();
+        fx.open(ui, &table);
+        ui.unlock();
+        let (db, schema) = fx.place();
+        ui.h.state_mut().side_act(CONN, SideAct::SqlDrop(db.to_string(), table.clone(), DropKind::Table));
+        ui.wait("the counts", |a| matches!(&a.modal, Some(Modal::SqlDrop(f)) if f.info.is_some()));
+        ui.settle();
+        // The same table name can be in several schemas and databases, so the title and the sentence under it say which one this is.
+        let full = format!("{db}.{schema}.{table}");
+        ui.h.get_by_label(&format!("Drop table {full}?"));
+        ui.h.get_by_label_contains(&format!("This deletes the table {full}"));
+        ui.click("Cancel");
+    });
+}
+
+#[test]
+fn a_database_drop_the_server_refuses_leaves_its_tabs_and_their_text_alone() {
+    pg_only("a refused database drop keeps its tabs", |fx, ui| {
+        let anchor = fx.table();
+        fx.open(ui, &anchor);
+        ui.unlock();
+        let db = name("keep");
+        let Server::Pg(l, _) = &fx.server else { return };
+        let exists = |fx: &Fx| one(fx, &format!("SELECT count(*) FROM pg_database WHERE datname = '{db}'")).trim() == "1";
+        ui.h.state_mut().side_act(CONN, SideAct::NewDb);
+        ui.wait("the New database dialog", |a| matches!(a.modal, Some(Modal::PgNewDb(_))));
+        ui.settle();
+        ui.type_text(&db);
+        {
+            let _turn = crate::db::sql::testing::db_turn();
+            ui.wait("the template list", |a| matches!(&a.modal, Some(Modal::PgNewDb(f)) if f.templates.is_some()));
+            ui.click("Create");
+            until(fx, ui, "the database to be made", |fx| exists(fx));
+            ui.wait("the sidebar list", |a| a.conn(CONN).is_some_and(|c| c.dbs.iter().any(|d| d.0 == db)));
+        }
+        // A Query tab with text that was never run, and another session of someone else, which makes the server refuse the drop.
+        ui.h.state_mut().side_act(CONN, SideAct::NewQuery(db.clone()));
+        ui.wait("the Query tab", |a| a.tabs.iter().any(|t| t.sel.db == db));
+        ui.h.state_mut().tabs.iter_mut().filter(|t| t.sel.db == db).for_each(|t| {
+            if let Some(s) = t.sql.as_mut() {
+                s.query = "select 'unsaved work'".into();
+            }
+        });
+        let o = {
+            use std::str::FromStr;
+            sqlx::postgres::PgConnectOptions::from_str(&l.uri).unwrap().database(&db)
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let other = rt.block_on(async {
+            use sqlx::Connection;
+            sqlx::PgConnection::connect_with(&o).await.unwrap()
+        });
+        ui.h.state_mut().side_act(CONN, SideAct::SqlDrop(db.clone(), String::new(), DropKind::Database));
+        ui.wait("the counts", |a| matches!(&a.modal, Some(Modal::SqlDrop(f)) if f.info.is_some()));
+        ui.settle();
+        assert_eq!(ui.app().pg_unsaved_in(CONN, &db), (0, 0, 1), "the confirmation counts the query text");
+        ui.h.get_by_label_contains("1 query with text in its editor");
+        replace(ui, "Confirmation", &db);
+        ui.settle();
+        ui.click("Drop database");
+        ui.wait("the server's refusal", |a| a.last_problem().contains("55006"));
+        assert!(exists(fx), "a refused drop drops nothing");
+        assert!(ui.app().tabs.iter().any(|t| t.sel.db == db && t.sql.as_ref().is_some_and(|s| s.query == "select 'unsaved work'")), "the tab and its text are still there");
+        // With the other session gone the same drop works, and only then do the tabs close.
+        rt.block_on(async {
+            use sqlx::Connection;
+            other.close().await.unwrap()
+        });
+        ui.h.state_mut().side_act(CONN, SideAct::SqlDrop(db.clone(), String::new(), DropKind::Database));
+        ui.wait("the counts", |a| matches!(&a.modal, Some(Modal::SqlDrop(f)) if f.info.is_some()));
+        ui.settle();
+        replace(ui, "Confirmation", &db);
+        ui.settle();
+        ui.click("Drop database");
+        until(fx, ui, "the database to be dropped", |fx| !exists(fx));
+        ui.wait("its tabs to close", |a| !a.tabs.iter().any(|t| t.sel.db == db));
     });
 }

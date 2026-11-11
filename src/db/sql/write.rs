@@ -38,7 +38,8 @@ pub enum SqlUndo {
     /// A trigger change: what puts the trigger back and how the change left it.
     Trigger(Box<super::ddl::TrigUndo>),
     /// A database or table this app created: undone by dropping it while it is still empty.
-    CreatedDb,
+    /// `oid` is the database's pg_database oid and `baseline` how many objects of a user it held right after the create (what its template gave it), PostgreSQL only; MySQL leaves both empty.
+    CreatedDb { oid: String, baseline: i64 },
     /// `made` is the table's CREATE_TIME right after the create, so the undo can tell it is still that table.
     CreatedTable { made: Option<String> },
     /// A PostgreSQL schema this app created, by its oid so a schema dropped and made again is not taken for it.
@@ -58,7 +59,7 @@ impl SqlUndo {
             SqlUndo::Insert(r) => r.first().cloned(),
             SqlUndo::Inserted(r) => r.first().map(pk_of),
             SqlUndo::Alter(_) | SqlUndo::Trigger(_) | SqlUndo::Account(_) => None,
-            SqlUndo::CreatedDb | SqlUndo::CreatedTable { .. } | SqlUndo::CreatedSchema { .. } | SqlUndo::PgCreatedTable { .. } => None,
+            SqlUndo::CreatedDb { .. } | SqlUndo::CreatedTable { .. } | SqlUndo::CreatedSchema { .. } | SqlUndo::PgCreatedTable { .. } => None,
         };
         first.map(|d| d.keys().cloned().collect()).unwrap_or_default()
     }
@@ -71,7 +72,7 @@ impl SqlUndo {
             SqlUndo::Insert(r) | SqlUndo::Inserted(r) => format!("inserted {}", plural(r.len(), "row")),
             SqlUndo::Alter(u) => u.label.clone(),
             SqlUndo::Trigger(u) => u.label.clone(),
-            SqlUndo::CreatedDb => "created database".into(),
+            SqlUndo::CreatedDb { .. } => "created database".into(),
             SqlUndo::CreatedTable { .. } | SqlUndo::PgCreatedTable { .. } => "created table".into(),
             SqlUndo::CreatedSchema { .. } => "created schema".into(),
             SqlUndo::Account(u) => u.label.clone(),
@@ -647,7 +648,7 @@ impl Worker {
     /// Reverts a SQL write. Updates need the new values to still be there, like the original save. When it
     /// fails the action comes back in the answer so the app can keep it in the list.
     pub fn sql_undo(&self, db: Db, a: UndoAction, pk: Vec<String>, read_only: bool) {
-        if matches!(&a.kind, UndoKind::Sql { undo: SqlUndo::CreatedDb | SqlUndo::CreatedTable { .. } | SqlUndo::CreatedSchema { .. } | SqlUndo::PgCreatedTable { .. }, .. }) {
+        if matches!(&a.kind, UndoKind::Sql { undo: SqlUndo::CreatedDb { .. } | SqlUndo::CreatedTable { .. } | SqlUndo::CreatedSchema { .. } | SqlUndo::PgCreatedTable { .. }, .. }) {
             return self.sql_undo_create(db, a, read_only);
         }
         self.spawn(async move {
@@ -684,7 +685,7 @@ impl Worker {
                 SqlUndo::Inserted(rows) => apply_undo_inserted_pg(&db, &schema, &table, &cols, &pk, &rows, read_only).await.map(|_| "Removed the inserted rows".to_string()),
                 // Taken before this match, where the structure statements run.
                 SqlUndo::Alter(_) | SqlUndo::Trigger(_) | SqlUndo::Account(_) => Err("Not a row change".into()),
-                SqlUndo::CreatedDb | SqlUndo::CreatedTable { .. } | SqlUndo::CreatedSchema { .. } | SqlUndo::PgCreatedTable { .. } => Err("Handled by sql_undo_create".to_string()),
+                SqlUndo::CreatedDb { .. } | SqlUndo::CreatedTable { .. } | SqlUndo::CreatedSchema { .. } | SqlUndo::PgCreatedTable { .. } => Err("Handled by sql_undo_create".to_string()),
             };
             let undo = res.is_err().then(|| UndoAction { at: when, conn, db: schema, coll: table, kind: UndoKind::Sql { database, cols, undo } });
             Msg::Written { at, res, undo, reload: true, retry: None }

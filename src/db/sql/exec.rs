@@ -305,7 +305,7 @@ impl Opts {
 /// A connection of its own, outside any pool.
 pub enum Conn {
     My(sqlx::MySqlConnection),
-    Pg(sqlx::PgConnection),
+    Pg(super::pg::PgConn),
 }
 
 fn done_my(r: sqlx::mysql::MySqlQueryResult) -> Done {
@@ -321,7 +321,7 @@ impl Conn {
     pub async fn connect(opts: &Opts) -> Result<Conn, sqlx::Error> {
         match opts {
             Opts::My(o) => sqlx::MySqlConnection::connect_with(o).await.map(Conn::My),
-            Opts::Pg(o) => sqlx::PgConnection::connect_with(o).await.map(Conn::Pg),
+            Opts::Pg(o) => sqlx::PgConnection::connect_with(o).await.map(|c| Conn::Pg(super::pg::PgConn::free(c))),
         }
     }
 
@@ -354,7 +354,7 @@ impl Conn {
                 })
                 .boxed(),
             Conn::Pg(c) => raw_sql(sql)
-                .fetch_many(&mut *c)
+                .fetch_many(&mut **c)
                 .map(|item| {
                     item.map(|x| match x {
                         Either::Right(row) => Item::Row(SqlRow::Pg(row)),

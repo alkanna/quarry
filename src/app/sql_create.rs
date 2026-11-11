@@ -538,7 +538,9 @@ impl App {
         let name = if pg && f.kind == DropKind::Database { f.database.as_str() } else { name }.to_string();
         let name = name.as_str();
         let mut blocked = false;
-        dialog_title(ui, if f.kind == DropKind::Truncate { format!("Empty table {name}?") } else { format!("Drop {noun} {name}?") });
+        // A table or view of PostgreSQL is named with its schema and database, because the same name lives in several.
+        let shown = if pg && matches!(f.kind, DropKind::Table | DropKind::View) { format!("{}.{}.{name}", f.database, f.schema) } else { name.to_string() };
+        dialog_title(ui, if f.kind == DropKind::Truncate { format!("Empty table {name}?") } else { format!("Drop {noun} {shown}?") });
         let wrap = |ui: &mut egui::Ui, text: String, color: Color32| {
             ui.add(egui::Label::new(RichText::new(text).color(color)).wrap());
         };

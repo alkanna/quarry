@@ -10,12 +10,14 @@ use super::create::{Ddl, DropInfo};
 use super::ddl::{snapshot, ColDef};
 use super::ddl_pg::{col_body, comment_stmt, exec, lock_error, may_lock, name_ok, q, read_in, sql_state, table_state, LOCK_WAIT};
 use super::exec::{Cells, Conn, SqlRow, Tx};
+use sqlx::Connection as _;
 use super::structure::{num, Structure};
 use super::value::Param;
 use super::worker::text;
 use super::write::{self, SqlUndo};
 use super::{se, Db, Dialect, Pool};
 use crate::db::{Msg, Res, UndoAction, UndoKind, Worker};
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 const D: Dialect = Dialect::Postgres;
@@ -185,82 +187,138 @@ fn fingerprint(st: &Structure) -> Vec<String> {
     v
 }
 
+/// What the structure editor does not read but a person can add to a table: row security and its policies, triggers and the table's
+/// comment. A table with any of these is more than the create made.
+const EXTRAS: &str = "SELECT what FROM (
+    SELECT 'rls ' || c.relrowsecurity::text || ' ' || c.relforcerowsecurity::text AS what FROM pg_class c WHERE c.oid = to_regclass($1)
+  UNION ALL SELECT 'policy ' || p.polname::text || ' ' || p.polcmd::text || ' ' || p.polpermissive::text || ' ' || p.polroles::text || ' ' || COALESCE(pg_get_expr(p.polqual, p.polrelid), '') || ' ' || COALESCE(pg_get_expr(p.polwithcheck, p.polrelid), '') FROM pg_policy p WHERE p.polrelid = to_regclass($1)
+  UNION ALL SELECT 'trigger ' || pg_get_triggerdef(t.oid) FROM pg_trigger t WHERE t.tgrelid = to_regclass($1) AND NOT t.tgisinternal
+  UNION ALL SELECT 'comment ' || obj_description(to_regclass($1), 'pg_class')::text WHERE obj_description(to_regclass($1), 'pg_class') IS NOT NULL
+) x ORDER BY 1";
+
+/// The whole fingerprint of a table, read inside the transaction that makes or drops it.
+async fn state_in(tx: &mut Tx<'_>, schema: &str, table: &str) -> Res<Vec<String>> {
+    let st = read_in(tx, schema, table).await?;
+    let mut v = fingerprint(&st);
+    let extras = tx.fetch_bound(EXTRAS, &[Param::Text(D.qualified(schema, table))]).await.map_err(se)?;
+    v.extend(extras.iter().filter_map(|r| text(r, "what")));
+    Ok(v)
+}
+
 // Reading from the server.
 
-/// The objects that would go with `refobjid` of catalog `refclass` when it is dropped CASCADE, found by walking pg_depend. `$3` lists the
-/// dependency kinds the walk starts from: a schema holds its objects by a normal or auto dependency, while a table loses its
-/// indexes, constraints and sequences whatever the mode and only the normal ones (views, keys of other tables, functions)
-/// make a plain DROP refuse. A view is reached through its rewrite rule, so the rule is mapped to the view at every step.
-/// `$4` is an object to leave out of the answer (the table itself).
-const DEPENDENTS: &str = "WITH RECURSIVE d(classid, objid) AS (
-    SELECT x.classid, x.objid FROM pg_depend p CROSS JOIN LATERAL (SELECT CASE WHEN p.classid = 'pg_rewrite'::regclass THEN 'pg_class'::regclass::oid ELSE p.classid END AS classid, CASE WHEN p.classid = 'pg_rewrite'::regclass THEN (SELECT ev_class FROM pg_rewrite WHERE oid = p.objid) ELSE p.objid END AS objid) x
-    WHERE p.refclassid = $1::text::regclass AND p.refobjid = $2::text::oid AND p.deptype::text = ANY (string_to_array($3, ','))
-  UNION
-    SELECT x.classid, x.objid FROM d JOIN pg_depend p ON p.refclassid = d.classid AND p.refobjid = d.objid AND p.deptype IN ('n', 'a')
-    CROSS JOIN LATERAL (SELECT CASE WHEN p.classid = 'pg_rewrite'::regclass THEN 'pg_class'::regclass::oid ELSE p.classid END AS classid, CASE WHEN p.classid = 'pg_rewrite'::regclass THEN (SELECT ev_class FROM pg_rewrite WHERE oid = p.objid) ELSE p.objid END AS objid) x
-)
-SELECT DISTINCT pg_describe_object(d.classid, d.objid, 0) AS what FROM d
-WHERE NOT (d.classid = 'pg_class'::regclass AND d.objid = $4::text::oid)
-  AND ((d.classid = 'pg_class'::regclass AND EXISTS (SELECT 1 FROM pg_class c WHERE c.oid = d.objid AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
-         AND NOT EXISTS (SELECT 1 FROM pg_depend o WHERE o.classid = 'pg_class'::regclass AND o.objid = c.oid AND o.refclassid = 'pg_class'::regclass AND o.deptype IN ('a', 'i'))))
-    OR d.classid = 'pg_proc'::regclass
-    OR (d.classid = 'pg_type'::regclass AND EXISTS (SELECT 1 FROM pg_type t WHERE t.oid = d.objid AND t.typtype IN ('d', 'e', 'r', 'm')))
-    OR d.classid IN ('pg_trigger'::regclass, 'pg_policy'::regclass, 'pg_constraint'::regclass))
-ORDER BY 1";
+/// The first oid PostgreSQL hands to an object a user made (FirstNormalObjectId). Everything below it is the server's own.
+const FIRST_USER_OID: u32 = 16384;
 
-/// Anything that is not a system schema, an extension's own, or `public` in a database that was just made: what the undo of a
-/// create counts to call the database empty. Relations of every kind but indexes and toast tables, functions, schemas and the
-/// standalone types.
-const NOT_EMPTY: &str = "SELECT (
-    (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S', 'c')
-       AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND NOT EXISTS (SELECT 1 FROM pg_depend e WHERE e.classid = 'pg_class'::regclass AND e.objid = c.oid AND e.deptype = 'e'))
-  + (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'
-       AND NOT EXISTS (SELECT 1 FROM pg_depend e WHERE e.classid = 'pg_proc'::regclass AND e.objid = p.oid AND e.deptype = 'e'))
-  + (SELECT count(*) FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE t.typtype IN ('d', 'e', 'r', 'm') AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'
-       AND NOT EXISTS (SELECT 1 FROM pg_depend e WHERE e.classid = 'pg_type'::regclass AND e.objid = t.oid AND e.deptype = 'e'))
-  + (SELECT count(*) FROM pg_namespace n WHERE n.nspname NOT IN ('public', 'information_schema') AND n.nspname !~ '^pg_'
-       AND NOT EXISTS (SELECT 1 FROM pg_depend e WHERE e.classid = 'pg_namespace'::regclass AND e.objid = n.oid AND e.deptype = 'e'))
-  )::bigint AS n";
+/// Catalogs whose rows are objects with an oid of their own, as `(catalog, namespace column)`. The snapshot lists the rows of
+/// each that a user made, so a drop's effect is read off the server instead of rebuilt from pg_depend's rules.
+const OBJECT_CATALOGS: [(&str, &str); 15] = [
+    ("pg_proc", "pronamespace"),
+    ("pg_operator", "oprnamespace"),
+    ("pg_opclass", "opcnamespace"),
+    ("pg_opfamily", "opfnamespace"),
+    ("pg_collation", "collnamespace"),
+    ("pg_conversion", "connamespace"),
+    ("pg_ts_config", "cfgnamespace"),
+    ("pg_ts_dict", "dictnamespace"),
+    ("pg_ts_parser", "prsnamespace"),
+    ("pg_ts_template", "tmplnamespace"),
+    ("pg_extension", "extnamespace"),
+    ("pg_cast", ""),
+    ("pg_foreign_data_wrapper", ""),
+    ("pg_foreign_server", ""),
+    ("pg_event_trigger", ""),
+];
 
-/// Runs reads in a transaction that is always rolled back, on a connection of its own, with every value bound.
+/// Every user object the server describes, as `key, what, owner, nsp, est, qname`: the key names the object, `what` is the server's
+/// own description of it, `owner` is the key of the object it is a part of (an index of its table, a default of its table), `nsp` is
+/// its schema, and `est` and `qname` are set for tables so a count can be taken. A column is listed only when something
+/// depends on it, which is the only way a drop can take a column without its table.
+static SNAPSHOT: std::sync::LazyLock<String> = std::sync::LazyLock::new(snapshot_sql);
+
+fn snapshot_sql() -> String {
+    let first = FIRST_USER_OID;
+    let ext = |cat: &str, a: &str| format!("(SELECT 'pg_extension:' || e.refobjid FROM pg_depend e WHERE e.classid = '{cat}'::regclass AND e.objid = {a}.oid AND e.deptype = 'e' LIMIT 1)");
+    let rel_ns = |col: &str| format!("(SELECT r.relnamespace::text FROM pg_class r WHERE r.oid = {col})");
+    let mut parts = vec![
+        format!(
+            "SELECT 'pg_class:' || c.oid AS key, pg_describe_object('pg_class'::regclass, c.oid, 0) AS what,
+               COALESCE(CASE WHEN c.relkind = 't' THEN (SELECT 'pg_class:' || x.oid FROM pg_class x WHERE x.reltoastrelid = c.oid LIMIT 1)
+                             WHEN c.relkind IN ('i', 'I') THEN COALESCE((SELECT 'pg_constraint:' || k.oid FROM pg_constraint k WHERE k.conindid = c.oid AND k.contype IN ('p', 'u', 'x') AND k.conrelid = i.indrelid LIMIT 1), 'pg_class:' || i.indrelid)
+                             WHEN c.relkind = 'S' THEN (SELECT 'pg_class:' || d.refobjid FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.refclassid = 'pg_class'::regclass AND d.deptype IN ('a', 'i') LIMIT 1) END, {}) AS owner,
+               c.relnamespace::text AS nsp, CASE WHEN c.relkind IN ('r', 'm') THEN c.reltuples::bigint::text END AS est,
+               CASE WHEN c.relkind IN ('r', 'm') THEN quote_ident(n.nspname) || '.' || quote_ident(c.relname) END AS qname
+             FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace LEFT JOIN pg_index i ON i.indexrelid = c.oid
+             WHERE c.oid >= {first} AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S', 'c', 'i', 'I', 't')",
+            ext("pg_class", "c")
+        ),
+        format!("SELECT 'pg_type:' || t.oid, pg_describe_object('pg_type'::regclass, t.oid, 0), {}, t.typnamespace::text, NULL::text, NULL::text FROM pg_type t WHERE t.oid >= {first} AND t.typtype IN ('d', 'e', 'r', 'b') AND t.typcategory <> 'A'", ext("pg_type", "t")),
+        format!("SELECT 'pg_constraint:' || k.oid, pg_describe_object('pg_constraint'::regclass, k.oid, 0), CASE WHEN k.conrelid <> 0 THEN 'pg_class:' || k.conrelid ELSE 'pg_type:' || k.contypid END, COALESCE({}, k.connamespace::text), NULL::text, NULL::text FROM pg_constraint k WHERE k.oid >= {first} AND k.contype <> 'n'", rel_ns("k.conrelid")),
+        format!("SELECT 'pg_attrdef:' || a.oid, pg_describe_object('pg_attrdef'::regclass, a.oid, 0), 'pg_class:' || a.adrelid, {}, NULL::text, NULL::text FROM pg_attrdef a WHERE a.oid >= {first}", rel_ns("a.adrelid")),
+        format!("SELECT 'pg_attribute:' || a.attrelid || ':' || a.attnum, pg_describe_object('pg_class'::regclass, a.attrelid, a.attnum), 'pg_class:' || a.attrelid, c.relnamespace::text, NULL::text, NULL::text FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+             WHERE a.attrelid >= {first} AND a.attnum > 0 AND NOT a.attisdropped AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'c') AND EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = a.attrelid AND d.objsubid = a.attnum)"),
+        format!("SELECT 'pg_trigger:' || t.oid, pg_describe_object('pg_trigger'::regclass, t.oid, 0), 'pg_class:' || t.tgrelid, {}, NULL::text, NULL::text FROM pg_trigger t WHERE t.oid >= {first} AND NOT t.tgisinternal", rel_ns("t.tgrelid")),
+        format!("SELECT 'pg_policy:' || p.oid, pg_describe_object('pg_policy'::regclass, p.oid, 0), 'pg_class:' || p.polrelid, {}, NULL::text, NULL::text FROM pg_policy p WHERE p.oid >= {first}", rel_ns("p.polrelid")),
+        format!("SELECT 'pg_rewrite:' || w.oid, pg_describe_object('pg_rewrite'::regclass, w.oid, 0), 'pg_class:' || w.ev_class, {}, NULL::text, NULL::text FROM pg_rewrite w WHERE w.oid >= {first}", rel_ns("w.ev_class")),
+        format!("SELECT 'pg_statistic_ext:' || x.oid, pg_describe_object('pg_statistic_ext'::regclass, x.oid, 0), 'pg_class:' || x.stxrelid, x.stxnamespace::text, NULL::text, NULL::text FROM pg_statistic_ext x WHERE x.oid >= {first}"),
+    ];
+    for (cat, ns) in OBJECT_CATALOGS {
+        let nsp = if ns.is_empty() { "NULL::text".to_string() } else { format!("x.{ns}::text") };
+        parts.push(format!("SELECT '{cat}:' || x.oid, pg_describe_object('{cat}'::regclass, x.oid, 0), {}, {nsp}, NULL::text, NULL::text FROM {cat} x WHERE x.oid >= {first}", ext(cat, "x")));
+    }
+    parts.join("\nUNION ALL\n")
+}
+
+/// Counts what a database holds that its template did not give it, in every catalog an object of a user can be in, plus large
+/// objects. Whatever the server created itself has an oid below `FIRST_USER_OID`, and the undo of a create compares this count with
+/// the one read right after the create, so objects the template carried (an extension installed in template1) do not count.
+static NOT_EMPTY: std::sync::LazyLock<String> = std::sync::LazyLock::new(not_empty_sql);
+
+fn not_empty_sql() -> String {
+    let first = FIRST_USER_OID;
+    let mut terms = vec![format!("(SELECT count(*) FROM pg_class WHERE oid >= {first} AND relkind <> 't')"), "(SELECT count(*) FROM pg_largeobject_metadata)".to_string()];
+    for cat in [
+        "pg_namespace", "pg_proc", "pg_type", "pg_constraint", "pg_trigger", "pg_policy", "pg_rewrite", "pg_attrdef", "pg_extension", "pg_publication", "pg_foreign_data_wrapper", "pg_foreign_server",
+        "pg_event_trigger", "pg_operator", "pg_collation", "pg_conversion", "pg_ts_config", "pg_ts_dict", "pg_ts_parser", "pg_ts_template", "pg_cast", "pg_opclass", "pg_opfamily", "pg_language", "pg_transform",
+        "pg_default_acl", "pg_statistic_ext",
+    ] {
+        terms.push(format!("(SELECT count(*) FROM {cat} WHERE oid >= {first})"));
+    }
+    format!("SELECT ({})::bigint AS n", terms.join(" + "))
+}
+
+/// Runs reads in a `BEGIN READ ONLY` that is always rolled back, on a connection of its own, with every value bound.
 async fn read(db: &Db, scope: &str, steps: &[(&str, Vec<Param>)]) -> Res<Vec<Vec<SqlRow>>> {
     let mut c = db.acquire_conn().await?;
-    let out = async {
-        let mut tx = c.begin_write().await.map_err(se)?;
-        let mut all = Vec::new();
-        let mut res = Ok(());
-        for (sql, args) in steps {
-            let t = Instant::now();
-            let r = tx.fetch_bound(sql, args).await;
-            db.note(scope, sql, t, &r);
-            match r {
-                Ok(rows) => all.push(rows),
-                Err(x) => {
-                    res = Err(se(x));
-                    break;
-                }
-            }
-        }
-        let _ = tx.rollback().await;
-        res.map(|_| all)
-    }
-    .await;
+    let out = read_on(&mut c, db, scope, steps).await;
     let _ = c.close().await;
     out
 }
 
-fn names(rows: &[SqlRow]) -> Vec<String> {
-    rows.iter().filter_map(|r| text(r, "what")).collect()
+async fn read_on(c: &mut Conn, db: &Db, scope: &str, steps: &[(&str, Vec<Param>)]) -> Res<Vec<Vec<SqlRow>>> {
+    let Conn::Pg(pc) = c else { return Err("Not a PostgreSQL connection".into()) };
+    let mut tx = Tx::Pg(pc.begin_with(db.pg_begin("BEGIN READ ONLY", "")).await.map_err(se)?);
+    let mut all = Vec::new();
+    let mut res = Ok(());
+    for (sql, args) in steps {
+        let t = Instant::now();
+        let r = tx.fetch_bound(sql, args).await;
+        db.note(scope, sql, t, &r);
+        match r {
+            Ok(rows) => all.push(rows),
+            Err(x) => {
+                res = Err(se(x));
+                break;
+            }
+        }
+    }
+    let _ = tx.rollback().await;
+    res.map(|_| all)
 }
 
 /// Every non-template database that can be connected to, read on the connection that ran a statement.
 async fn db_list(c: &mut Conn) -> Res<Vec<String>> {
     Ok(c.fetch_all(super::pg::DB_LIST).await.map_err(se)?.iter().filter_map(|r| text(r, "datname")).collect())
-}
-
-async fn dependents(db: &Db, scope: &str, class: &str, oid: &str, kinds: &str, skip: &str) -> Res<Vec<String>> {
-    let args = vec![Param::Text(class.into()), Param::Text(oid.into()), Param::Text(kinds.into()), Param::Text(skip.into())];
-    Ok(names(&read(db, scope, &[(DEPENDENTS, args)]).await?.remove(0)))
 }
 
 async fn db_info(db: &Db, name: &str) -> Res<DropInfo> {
@@ -272,36 +330,140 @@ async fn db_info(db: &Db, name: &str) -> Res<DropInfo> {
     Ok(DropInfo { exists: num(r, "found").unwrap_or(0) > 0, is_template: num(r, "tmpl").unwrap_or(0) > 0, size: num(r, "size"), sessions: num(r, "sessions"), own_database: own, ..Default::default() })
 }
 
+/// One object of the snapshot.
+struct Obj {
+    what: String,
+    owner: Option<String>,
+    nsp: Option<String>,
+    est: Option<i64>,
+    qname: Option<String>,
+}
+
+async fn snapshot_objects(tx: &mut Tx<'_>) -> Res<HashMap<String, Obj>> {
+    let rows = tx.fetch_bound(&SNAPSHOT, &[]).await.map_err(se)?;
+    // pg_describe_object looks the object up with the latest catalog state and answers NULL for one another session has dropped since this
+    // transaction's snapshot, while the row of it is still in the snapshot. The object is still counted as there, or it would look dropped by us.
+    Ok(rows.iter().filter_map(|r| Some((text(r, "key")?, Obj { what: text(r, "what").or_else(|| text(r, "key"))?, owner: text(r, "owner"), nsp: text(r, "nsp"), est: text(r, "est").and_then(|n| n.parse().ok()), qname: text(r, "qname") }))).collect())
+}
+
+fn rows_word(n: i64) -> String {
+    format!("{n} row{}", if n == 1 { "" } else { "s" })
+}
+
+/// What `drop_sql` (a DROP ... CASCADE) takes, read off the server: the user objects are described before and after the real
+/// statement runs inside a transaction that is always rolled back, and the difference is what CASCADE drops. Nothing of
+/// PostgreSQL's dependency rules is rebuilt here, so a rule the server has and this lacks cannot leave something out of what the
+/// person agrees to. An object that is only part of another dropped one (an index of its table) is folded into it, the object
+/// `skip` is the target itself, and `schema_oid` marks the objects of a schema being dropped, so the ones outside it come first.
+/// Tables name their rows. The lines are returned with the full count.
+async fn cascade_effects(db: &Db, scope: &str, drop_sql: &str, skip: Option<&str>, schema_oid: Option<&str>) -> Res<(u64, Vec<String>)> {
+    let mut c = db.acquire_conn().await?;
+    let mut out = Err(String::new());
+    // A session that drops or changes an object while this reads makes the server answer "cache lookup failed" (XX000) or a
+    // serialization failure (40001), which says nothing about this drop, so the reading starts over a few times, a little later each time.
+    for attempt in 0..5 {
+        out = async {
+            let mut tx = begin(&mut c, db, scope).await?;
+            let r = effects_in(&mut tx, drop_sql, skip, schema_oid).await;
+            let _ = tx.rollback().await;
+            r
+        }
+        .await;
+        if out.is_ok() || attempt == 4 || !out.as_ref().is_err_and(|e| e.contains("XX000") || e.contains("40001")) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(150 * (attempt + 1))).await;
+    }
+    let _ = c.close().await;
+    out
+}
+
+async fn effects_in(tx: &mut Tx<'_>, drop_sql: &str, skip: Option<&str>, schema_oid: Option<&str>) -> Res<(u64, Vec<String>)> {
+    // One snapshot for both readings, so what another session commits between them is not taken for the drop's doing. Our own DROP stays visible to us.
+    tx.exec_bound("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ", &[]).await.map_err(se)?;
+    // Descriptions name the schema of every object only when none is on the path.
+    tx.exec_bound("SET LOCAL search_path = pg_catalog", &[]).await.map_err(se)?;
+    let before = snapshot_objects(tx).await?;
+    tx.exec_bound("SAVEPOINT quarry_cascade", &[]).await.map_err(se)?;
+    if let Err(x) = tx.exec_bound(drop_sql, &[]).await {
+        return Err(match sql_state(&x).as_deref() {
+            Some("55P03") => format!("Another session holds a lock on it or on something that depends on it, and did not let go within {LOCK_WAIT}, so what the drop takes cannot be read right now. Try again in a moment."),
+            _ => se(x),
+        });
+    }
+    let after = snapshot_objects(tx).await?;
+    tx.exec_bound("ROLLBACK TO SAVEPOINT quarry_cascade", &[]).await.map_err(se)?;
+    let gone: HashSet<&String> = before.keys().filter(|k| !after.contains_key(*k)).collect();
+    let mut shown: Vec<(bool, &Obj)> = before
+        .iter()
+        .filter(|(k, o)| gone.contains(k) && Some(k.as_str()) != skip && !o.owner.as_ref().is_some_and(|w| gone.contains(w)))
+        .map(|(_, o)| (schema_oid.is_some() && o.nsp.as_deref() == schema_oid, o))
+        .collect();
+    // Outside the schema first, because those are the ones the person did not expect to lose.
+    shown.sort_by(|a, b| (a.0, &a.1.what).cmp(&(b.0, &b.1.what)));
+    let total = shown.len() as u64;
+    let mut lines = Vec::new();
+    for (inside, o) in shown.into_iter().take(LISTED) {
+        let mut notes = Vec::new();
+        if schema_oid.is_some() && !inside {
+            notes.push("outside this schema".to_string());
+        }
+        if let (Some(q), Some(est)) = (&o.qname, o.est) {
+            // A count that takes too long or that row security hides falls back to the planner's estimate.
+            let counted = async {
+                tx.exec_bound("SAVEPOINT quarry_count", &[]).await.ok()?;
+                let n = async {
+                    tx.exec_bound("SET LOCAL statement_timeout = '2s'", &[]).await.ok()?;
+                    tx.exec_bound("SET LOCAL row_security = off", &[]).await.ok()?;
+                    tx.fetch_bound(&format!("SELECT count(*)::bigint AS n FROM {q}"), &[]).await.ok()?.first().and_then(|r| num(r, "n"))
+                }
+                .await;
+                if n.is_none() {
+                    tx.exec_bound("ROLLBACK TO SAVEPOINT quarry_count", &[]).await.ok()?;
+                }
+                tx.exec_bound("RELEASE SAVEPOINT quarry_count", &[]).await.ok()?;
+                n
+            }
+            .await;
+            match counted {
+                Some(n) => notes.push(rows_word(n as i64)),
+                None if est > 0 => notes.push(format!("about {}", rows_word(est))),
+                None => {}
+            }
+        }
+        lines.push(if notes.is_empty() { o.what.clone() } else { format!("{} ({})", o.what, notes.join(", ")) });
+    }
+    Ok((total, lines))
+}
+
 async fn schema_info(db: &Db, schema: &str) -> Res<DropInfo> {
     let found = read(db, schema, &[("SELECT oid::text AS what FROM pg_namespace WHERE nspname = $1", vec![Param::Text(schema.into())])]).await?.remove(0);
     let Some(oid) = found.first().and_then(|r| text(r, "what")) else { return Ok(DropInfo::default()) };
-    let all = dependents(db, schema, "pg_namespace", &oid, "n,a", "0").await?;
-    Ok(DropInfo { exists: true, dependents_total: all.len() as u64, dependents: all.into_iter().take(LISTED).collect(), ..Default::default() })
+    let (total, lines) = cascade_effects(db, schema, &drop_schema_sql(schema, true)?, None, Some(&oid)).await?;
+    Ok(DropInfo { exists: true, dependents_total: total, dependents: lines, ..Default::default() })
 }
 
 async fn table_info(db: &Db, schema: &str, table: &str) -> Res<DropInfo> {
     let name = D.qualified(schema, table);
-    let sql = "SELECT c.oid::text AS what, c.reltuples::bigint AS est FROM pg_class c WHERE c.oid = to_regclass($1)";
+    let sql = "SELECT c.oid::text AS what, c.reltuples::bigint AS est, c.relkind::text AS kind FROM pg_class c WHERE c.oid = to_regclass($1)";
     let found = read(db, schema, &[(sql, vec![Param::Text(name.clone())])]).await?.remove(0);
     let Some(oid) = found.first().and_then(|r| text(r, "what")) else { return Ok(DropInfo::default()) };
     let est = found.first().and_then(|r| r.int("est")).filter(|n| *n >= 0).map(|n| n as u64);
-    let all = dependents(db, schema, "pg_class", &oid, "n", &oid).await?;
-    let mut info = DropInfo { exists: true, rows: est, rows_estimated: true, dependents_total: all.len() as u64, dependents: all.into_iter().take(LISTED).collect(), ..Default::default() };
+    let kind = found.first().and_then(|r| text(r, "kind")).unwrap_or_default();
+    // The keyword has to match the relation, or the server refuses the DROP it is asked to simulate.
+    let word = match kind.as_str() {
+        "v" => "VIEW",
+        "m" => "MATERIALIZED VIEW",
+        "f" => "FOREIGN TABLE",
+        "S" => "SEQUENCE",
+        _ => "TABLE",
+    };
+    let (total, lines) = cascade_effects(db, schema, &format!("DROP {word} {name} CASCADE"), Some(&format!("pg_class:{oid}")), None).await?;
+    let mut info = DropInfo { exists: true, rows: est, rows_estimated: true, dependents_total: total, dependents: lines, ..Default::default() };
     // An exact count within a short wait, else the estimate stays and the dialog says "about".
     let count = format!("SELECT count(*)::bigint AS n FROM {name}");
-    let mut c = db.acquire_conn().await?;
-    let exact = async {
-        let mut tx = c.begin_write().await.ok()?;
-        let r = async {
-            tx.exec_bound("SET LOCAL statement_timeout = '2s'", &[]).await.ok()?;
-            tx.fetch_bound(&count, &[]).await.ok()?.first().and_then(|r| num(r, "n"))
-        }
-        .await;
-        let _ = tx.rollback().await;
-        r
-    }
-    .await;
-    let _ = c.close().await;
+    // Read only, because counting a view runs whatever functions it calls.
+    let exact = read(db, schema, &[("SET LOCAL statement_timeout = '2s'", Vec::new()), (&count, Vec::new())]).await.ok().and_then(|mut all| all.pop()).and_then(|rows| rows.first().and_then(|r| num(r, "n")));
     if let Some(n) = exact {
         (info.rows, info.rows_estimated) = (Some(n), false);
     }
@@ -338,18 +500,47 @@ async fn alone(c: &mut Conn, db: &Db, sql: &str) -> Result<(), sqlx::Error> {
 /// Another session on the template or on the database: the server's own words, with what Quarry did about it.
 const IN_USE: &str = "55006";
 
-async fn create_db(db: &Db, name: &str, template: Option<&str>, read_only: bool) -> Res<Vec<String>> {
+/// How many more times a statement that met another session on the database or its template is tried, and how long the first pause
+/// is (it doubles). The server itself waits about five seconds for the other sessions before it refuses, so a retry that comes
+/// after a refusal has already waited; no retry is started once `WITHIN` has passed since the first try.
+const RETRIES: u32 = 2;
+const FIRST_WAIT: Duration = Duration::from_millis(150);
+const WITHIN: Duration = Duration::from_secs(8);
+
+/// What a create gives back for the undo: the new list of databases, the new database's oid, and how many objects of a user it
+/// holds right after the create.
+struct Created {
+    dbs: Vec<String>,
+    oid: String,
+    baseline: i64,
+}
+
+async fn create_db(db: &Db, name: &str, template: Option<&str>, read_only: bool) -> Res<Created> {
     let mut c = maintenance(db, read_only).await?;
     let out = async {
         let templates = template_list(&mut c).await?;
         let sql = create_db_sql(name, template, &templates)?;
-        match alone(&mut c, db, &sql).await {
-            Ok(()) => {}
-            // Two CREATE DATABASE at once both want template1 to themselves.
-            Err(x) if sql_state(&x).as_deref() == Some(IN_USE) => return Err(format!("{}\nAnother session is using the template database, and a CREATE DATABASE running at the same moment does. Try again in a moment.", se(x))),
-            Err(x) => return Err(se(x)),
+        // Two CREATE DATABASE at once both want the template to themselves, and so does anyone copying it (another instance of this
+        // app, a script), so the server's refusal is waited out a few times before it is reported.
+        let (mut wait, began) = (FIRST_WAIT, Instant::now());
+        for attempt in 0..=RETRIES {
+            match alone(&mut c, db, &sql).await {
+                Ok(()) => break,
+                Err(x) if sql_state(&x).as_deref() == Some(IN_USE) && attempt < RETRIES && began.elapsed() < WITHIN => {
+                    tokio::time::sleep(wait).await;
+                    wait *= 2;
+                }
+                Err(x) if sql_state(&x).as_deref() == Some(IN_USE) => return Err(format!("{}\nAnother session is using the template database, and a CREATE DATABASE running at the same moment does. Try again in a moment.", se(x))),
+                Err(x) => return Err(se(x)),
+            }
         }
-        db_list(&mut c).await
+        let oids = c.fetch_all("SELECT datname::text AS datname, oid::text AS oid FROM pg_database WHERE NOT datistemplate").await.map_err(se)?;
+        let oid = oids.iter().find(|r| text(r, "datname").as_deref() == Some(name)).and_then(|r| text(r, "oid")).unwrap_or_default();
+        let dbs = db_list(&mut c).await?;
+        // What the template carried in is not the person's work, so the undo compares with this count and not with zero. An unreadable
+        // database counts as empty, and the undo then refuses it if it cannot read it either.
+        let baseline = read(&db.at(name), "", &[(&NOT_EMPTY, Vec::new())]).await.ok().and_then(|mut v| v.pop()).and_then(|rows| rows.first().and_then(|r| num(r, "n"))).unwrap_or(0) as i64;
+        Ok(Created { dbs, oid, baseline })
     }
     .await;
     let _ = c.close().await;
@@ -372,10 +563,18 @@ async fn drop_db(db: &Db, name: &str, force: bool, read_only: bool) -> Res<Vec<S
         // Quarry's own connections go first: an idle one in a pool is a session on the database, and the server refuses the drop for it.
         pools.close_database(name).await;
         let mut r = alone(&mut c, db, &sql).await;
-        if !force && r.as_ref().err().and_then(sql_state).as_deref() == Some(IN_USE) {
-            // A read that was already on its way when the pool closed can make a new one before the drop runs. Once more, then the server's answer stands.
+        // A read that was already on its way when the pools closed can make a new pool and a new session before the drop runs, and
+        // so can a session that is still ending. Each retry closes what the last one left. The server waits about five seconds for the
+        // other sessions before it refuses, so the retries are bounded by `WITHIN`, after which its answer stands. FORCE ends the
+        // sessions itself and needs none of this.
+        let (mut wait, began) = (FIRST_WAIT, Instant::now());
+        for _ in 0..RETRIES {
+            if force || r.as_ref().err().and_then(sql_state).as_deref() != Some(IN_USE) || began.elapsed() >= WITHIN {
+                break;
+            }
+            tokio::time::sleep(wait).await;
+            wait *= 2;
             pools.close_database(name).await;
-            tokio::time::sleep(Duration::from_millis(250)).await;
             r = alone(&mut c, db, &sql).await;
         }
         match r {
@@ -481,9 +680,9 @@ async fn create_table(db: &Db, spec: &TableSpec, read_only: bool) -> Res<Made> {
             for s in &stmts {
                 exec(&mut tx, db, &spec.schema, s).await.map_err(|x| lock_error(&x, &spec.name).unwrap_or_else(|| se(x)))?;
             }
-            let st = read_in(&mut tx, &spec.schema, &spec.name).await?;
+            let state = state_in(&mut tx, &spec.schema, &spec.name).await?;
             let oid = relation_oid(&mut tx, &D.qualified(&spec.schema, &spec.name)).await?.ok_or("The table was made but cannot be read back.")?;
-            Ok(Made { oid, state: fingerprint(&st) })
+            Ok(Made { oid, state })
         }
         .await;
         finish(tx, r).await
@@ -545,15 +744,17 @@ async fn undo_table(db: &Db, schema: &str, table: &str, made: &Made, read_only: 
     let out = async {
         let mut tx = begin(&mut c, db, schema).await?;
         let r = async {
-            // Locked before anything is read, so a row cannot arrive between the check and the drop. A role without the privilege for the explicit lock skips it, and the DROP takes its own.
-            if may_lock(&mut tx, &name).await {
-                if let Err(x) = exec(&mut tx, db, schema, &format!("LOCK TABLE {name} IN ACCESS EXCLUSIVE MODE")).await {
-                    return Err(match (sql_state(&x).as_deref(), lock_error(&x, table)) {
-                        (_, Some(why)) => format!("Not undone: {why}"),
-                        (Some("42P01"), _) => format!("Not undone: the table {table} is already gone."),
-                        _ => se(x),
-                    });
-                }
+            // Locked before anything is read, so a row cannot arrive between the check and the drop. Without the lock the check
+            // could be stale by the time the DROP runs, so a role that cannot take it does not get the undo.
+            if !may_lock(&mut tx, &name).await {
+                return Err(format!("Not undone: {table} cannot be locked with this role's privileges, so it cannot be checked for rows safely. Drop it from its menu instead."));
+            }
+            if let Err(x) = exec(&mut tx, db, schema, &format!("LOCK TABLE {name} IN ACCESS EXCLUSIVE MODE")).await {
+                return Err(match (sql_state(&x).as_deref(), lock_error(&x, table)) {
+                    (_, Some(why)) => format!("Not undone: {why}"),
+                    (Some("42P01"), _) => format!("Not undone: the table {table} is already gone."),
+                    _ => se(x),
+                });
             }
             match relation_oid(&mut tx, &name).await? {
                 None => return Err(format!("Not undone: the table {table} is already gone.")),
@@ -561,12 +762,17 @@ async fn undo_table(db: &Db, schema: &str, table: &str, made: &Made, read_only: 
                 Some(_) => {}
             }
             exec(&mut tx, db, schema, &format!("SET LOCAL search_path = {}", q(schema))).await.map_err(se)?;
-            let st = read_in(&mut tx, schema, table).await?;
-            if fingerprint(&st) != made.state {
+            if state_in(&mut tx, schema, table).await? != made.state {
                 return Err(format!("Not undone: the structure of {table} changed since it was made, so dropping it would lose more than the create made."));
             }
-            if !tx.fetch_bound(&format!("SELECT 1 AS n FROM {name} LIMIT 1"), &[]).await.map_err(se)?.is_empty() {
-                return Err(format!("Not undone: {table} has rows now."));
+            // Row level security can hide every row from this role, even the table's owner under FORCE, and the check would then call a full table empty. With it off the
+            // server answers 42501 when a policy would apply and the role cannot bypass it, which is a refusal and never a guess.
+            exec(&mut tx, db, schema, "SET LOCAL row_security = off").await.map_err(se)?;
+            match tx.fetch_bound(&format!("SELECT 1 AS n FROM {name} LIMIT 1"), &[]).await {
+                Ok(rows) if !rows.is_empty() => return Err(format!("Not undone: {table} has rows now.")),
+                Ok(_) => {}
+                Err(x) if sql_state(&x).as_deref() == Some("42501") => return Err(format!("Not undone: row level security applies to {table} for this role, so Quarry cannot tell whether it has rows.")),
+                Err(x) => return Err(se(x)),
             }
             exec(&mut tx, db, schema, &sql).await.map_err(|x| match sql_state(&x).as_deref() {
                 // Another table's key or a view was made on it since.
@@ -582,23 +788,64 @@ async fn undo_table(db: &Db, schema: &str, table: &str, made: &Made, read_only: 
     out
 }
 
-async fn undo_db(db: &Db, name: &str, read_only: bool) -> Res<Vec<String>> {
+/// How many objects of a user, large objects included, the database holds, counted on a connection that stays open.
+async fn held_count(c: &mut Conn, db: &Db) -> Res<i64> {
+    let rows = read_on(c, db, "", &[(&NOT_EMPTY, Vec::new())]).await?.remove(0);
+    rows.first().and_then(|r| num(r, "n")).map(|n| n as i64).ok_or_else(|| "The server gave no count".to_string())
+}
+
+async fn undo_db(db: &Db, name: &str, oid: &str, baseline: i64, read_only: bool) -> Res<Vec<String>> {
     let sql = drop_db_sql(name, false)?;
     let Pool::Pg(pools) = &db.pool else { return Err("Not a PostgreSQL connection".into()) };
     let mut c = maintenance(db, read_only).await?;
     let out = async {
+        // The name is not the database: one dropped and made again under it has another oid and is not what this created.
+        let now = read(db, "", &[("SELECT oid::text AS what FROM pg_database WHERE datname = $1", vec![Param::Text(name.into())])]).await?.remove(0);
+        match now.first().and_then(|r| text(r, "what")) {
+            None => return Err(format!("Not undone: the database {name} is already gone.")),
+            Some(n) if !oid.is_empty() && n != oid => return Err(format!("Not undone: {name} was dropped and made again since, so it is not the database this created.")),
+            Some(_) => {}
+        }
         let at = db.at(name);
-        let n = read(&at, "", &[(NOT_EMPTY, Vec::new())]).await.map_err(|e| format!("Not undone: {name} could not be checked ({e})"))?.remove(0);
-        if n.first().and_then(|r| num(r, "n")).unwrap_or(1) > 0 {
-            return Err(format!("Not undone: {name} has tables or other objects in it now."));
+        let mut seen = at.acquire_conn().await.map_err(|e| format!("Not undone: {name} could not be checked ({e})"))?;
+        let held = async {
+            let n = held_count(&mut seen, &at).await.map_err(|e| format!("Not undone: {name} could not be checked ({e})"))?;
+            if n > baseline {
+                return Err(format!("Not undone: {name} has tables or other objects in it now."));
+            }
+            // From here nobody new can connect, so the second look through the connection that is still open sees what the sessions already
+            // there did meanwhile; a session still connected when the DROP runs makes it refuse, and that is the other half of the promise.
+            alone(&mut c, db, &format!("ALTER DATABASE {} WITH ALLOW_CONNECTIONS false", q(name))).await.map_err(|x| format!("Not undone: {name} could not be closed to new connections ({})", se(x)))?;
+            let again = held_count(&mut seen, &at).await;
+            Ok(again)
         }
-        // The check connected to the database, and so did anything else of Quarry's. A session of someone else makes the drop refuse, which is the other half of the promise.
-        pools.close_database(name).await;
-        match alone(&mut c, db, &sql).await {
-            Ok(()) => {}
-            Err(x) if sql_state(&x).as_deref() == Some(IN_USE) => return Err(format!("Not undone: another session is connected to {name}.\n{}", se(x))),
-            Err(x) => return Err(se(x)),
+        .await;
+        let _ = seen.close().await;
+        let blocked = held.is_ok();
+        let verdict = match held {
+            Ok(Ok(n)) if n > baseline => Err(format!("Not undone: {name} has tables or other objects in it now.")),
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => Err(format!("Not undone: {name} could not be checked ({e})")),
+            Err(e) => Err(e),
+        };
+        let dropped = async {
+            verdict?;
+            // Quarry's own connections to it go too, or the server refuses for them.
+            pools.close_database(name).await;
+            match alone(&mut c, db, &sql).await {
+                Ok(()) => Ok(()),
+                Err(x) if sql_state(&x).as_deref() == Some(IN_USE) => Err(format!("Not undone: another session is connected to {name}.\n{}", se(x))),
+                Err(x) => Err(se(x)),
+            }
         }
+        .await;
+        if dropped.is_err() && blocked {
+            // The database stays, so it takes connections again as it did before.
+            if let Err(x) = alone(&mut c, db, &format!("ALTER DATABASE {} WITH ALLOW_CONNECTIONS true", q(name))).await {
+                return Err(format!("{}\nQuarry could not open {name} to connections again ({}). Run ALTER DATABASE {} ALLOW_CONNECTIONS true.", dropped.unwrap_err(), se(x), q(name)));
+            }
+        }
+        dropped?;
         db_list(&mut c).await
     }
     .await;
@@ -649,8 +896,8 @@ impl Worker {
     pub fn pg_create_db(&self, conn: u64, db: Db, name: String, template: Option<String>, read_only: bool) {
         self.spawn_sql(db.conn, "", async move {
             let res = create_db(&db, &name, template.as_deref(), read_only).await;
-            let undo = res.is_ok().then(|| entry(&db, conn, &name, "", SqlUndo::CreatedDb));
-            let (res, dbs) = answer(res.map(Some), format!("Created database {name}"));
+            let undo = res.as_ref().ok().map(|m| entry(&db, conn, &name, "", SqlUndo::CreatedDb { oid: m.oid.clone(), baseline: m.baseline }));
+            let (res, dbs) = answer(res.map(|m| Some(m.dbs)), format!("Created database {name}"));
             Msg::SqlDdl { conn, database: String::new(), schema: name, table: String::new(), what: Ddl::CreatedDb, res, undo, dbs, sql_mode: None }
         });
     }
@@ -707,8 +954,8 @@ pub(super) async fn undo(db: Db, a: UndoAction, read_only: bool) -> Msg {
     let UndoAction { at, conn, db: schema, coll: table, kind } = a;
     let UndoKind::Sql { database, cols, undo } = kind else { return Msg::SqlDdl { conn, database: String::new(), schema, table, what: Ddl::DroppedTable, res: Err("Not a create".into()), undo: None, dbs: None, sql_mode: None } };
     let (what, res, dbs, said) = match &undo {
-        SqlUndo::CreatedDb => {
-            let r = undo_db(&db, &schema, read_only).await;
+        SqlUndo::CreatedDb { oid, baseline } => {
+            let r = undo_db(&db, &schema, oid, *baseline, read_only).await;
             (Ddl::DroppedDb, r.as_ref().map(|_| ()).map_err(Clone::clone), r.ok(), format!("Removed database {schema}"))
         }
         SqlUndo::CreatedSchema { oid } => (Ddl::DroppedSchema, undo_schema(&db, &schema, oid, read_only).await, None, format!("Removed schema {schema}")),
