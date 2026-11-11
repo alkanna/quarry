@@ -13,10 +13,10 @@
 //! DDL is transactional here, which MySQL's is not: a plan and its undo each run as one transaction that takes the
 //! table's lock, reads the touched columns and indexes again and refuses to run when another session changed them.
 
-use super::ddl::{snapshot, touched, undo_action, undo_loss, AlterUndo, Change, ColDef, Dv, Expect, IndexDef, IndexKind, Mode, Plan, Pos, Sim};
+use super::ddl::{fk_line, orphan_row, orphan_sample_sql, orphans_sql, ref_state, same_name, snapshot, touched, undo_action, undo_loss, AlterUndo, Change, ColDef, Dv, Expect, IndexDef, IndexKind, Mode, Plan, Pos, RefCheck, Sim, ORPHAN_SAMPLE};
 use super::exec::Tx;
 use super::lex::{every_reading, Tok};
-use super::structure::{col_deps, columns, constraints, foreign_keys, indexes, load, Column, Structure};
+use super::structure::{col_deps, columns, constraints, foreign_keys, indexes, load, Column, ForeignKey, Structure};
 use super::value::{lit, Param};
 use super::{se, write, Db, Dialect};
 use crate::db::{Msg, Res, UndoAction, UndoKind, Worker};
@@ -25,16 +25,16 @@ use std::time::Instant;
 const D: Dialect = Dialect::Postgres;
 
 /// How long the plan waits for the table's lock. A session that holds it longer is named in the error, and nothing ran.
-const LOCK_WAIT: &str = "3s";
+pub(super) const LOCK_WAIT: &str = "3s";
 
 /// PostgreSQL cuts a longer name without a word, so the staged name would not be the one the server keeps.
 const MAX_NAME: usize = 63;
 
-fn q(name: &str) -> String {
+pub(super) fn q(name: &str) -> String {
     D.quote_ident(name)
 }
 
-fn name_ok(name: &str, what: &str) -> Result<(), String> {
+pub(super) fn name_ok(name: &str, what: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err(format!("{what} needs a name."));
     }
@@ -78,6 +78,8 @@ fn closed(tok: &str, escapes: bool) -> bool {
 #[derive(Clone, Copy, PartialEq)]
 enum Text {
     Expr,
+    /// A trigger's WHEN condition, read like an expression and worded for it.
+    Cond,
     Type,
 }
 
@@ -85,8 +87,12 @@ enum Text {
 /// of the statement, balanced brackets and quotes. Both readings of backslashes are tried, so a string that one of them
 /// ends early cannot hide a statement in the other.
 fn scan(s: &str, what: Text) -> Result<(), String> {
-    let name = if what == Text::Expr { "default expression" } else { "type" };
-    let one = format!("The {name} must be {}, without ; or comments.", if what == Text::Expr { "one expression" } else { "a type name like numeric(10,2)" });
+    let name = match what {
+        Text::Expr => "default expression",
+        Text::Cond => "WHEN condition",
+        Text::Type => "type",
+    };
+    let one = format!("The {name} must be {}, without ; or comments.", if what == Text::Type { "a type name like numeric(10,2)" } else { "one expression" });
     if s.trim().is_empty() {
         return Err(format!("The {name} is empty."));
     }
@@ -132,6 +138,11 @@ fn scan(s: &str, what: Text) -> Result<(), String> {
 /// A default expression typed by the person must stay one expression. See `scan`.
 pub fn check_expr_pg(s: &str) -> Result<(), String> {
     scan(s, Text::Expr)
+}
+
+/// A trigger's WHEN condition typed by the person: one expression, like a default. See `scan`.
+pub fn check_cond_pg(s: &str) -> Result<(), String> {
+    scan(s, Text::Cond)
 }
 
 /// A column type typed by the person must stay one type name. See `scan`.
@@ -310,7 +321,7 @@ fn check_col(def: &ColDef) -> Result<(), String> {
     Ok(())
 }
 
-fn comment_stmt(on: &str, text: &str) -> Result<String, String> {
+pub(super) fn comment_stmt(on: &str, text: &str) -> Result<String, String> {
     if text.contains('\0') {
         return Err("A comment cannot hold a NUL character.".into());
     }
@@ -477,8 +488,170 @@ pub(super) fn statements(sim: &Sim, schema: &str, table: &str, c: &Change) -> Re
             let ix = sim.idx.iter().find(|x| x.name == *from).ok_or_else(|| format!("Index {from} is not on the table."))?;
             if ix.constraint { vec![format!("{alter} RENAME CONSTRAINT {} TO {}", q(from), q(to))] } else { vec![format!("ALTER INDEX {} RENAME TO {}", D.qualified(schema, from), q(to))] }
         }
-        Change::AddFk(_) | Change::DropFk(_) => return Err("Foreign keys of a PostgreSQL table are not edited here yet.".into()),
+        Change::AddFk(k) => add_fk(sim, schema, table, k)?,
+        Change::DropFk(n) => {
+            let k = sim.fk_at(n).map(|i| &sim.fks[i]).ok_or_else(|| format!("Foreign key {n} is not on the table."))?;
+            vec![format!("{alter} DROP CONSTRAINT {}", q(&k.name))]
+        }
+        Change::RenameFk { from, to } => {
+            name_ok(to, "A foreign key")?;
+            let k = sim.fk_at(from).map(|i| &sim.fks[i]).ok_or_else(|| format!("Foreign key {from} is not on the table."))?;
+            vec![format!("{alter} RENAME CONSTRAINT {} TO {}", q(&k.name), q(to))]
+        }
+        Change::SetFkDeferral { name, deferrable, deferred } => {
+            let k = sim.fk_at(name).map(|i| &sim.fks[i]).ok_or_else(|| format!("Foreign key {name} is not on the table."))?;
+            if *deferred && !*deferrable {
+                return Err("INITIALLY DEFERRED needs the key to be DEFERRABLE.".into());
+            }
+            let when = match (deferrable, deferred) {
+                (false, _) => "NOT DEFERRABLE",
+                (true, false) => "DEFERRABLE INITIALLY IMMEDIATE",
+                (true, true) => "DEFERRABLE INITIALLY DEFERRED",
+            };
+            vec![format!("{alter} ALTER CONSTRAINT {} {when}", q(&k.name))]
+        }
     })
+}
+
+/// The actions PostgreSQL has for a key. The dialog offers the four MySQL has; SET DEFAULT is here so a key that already has
+/// it can be dropped and put back.
+const FK_ACTIONS: [&str; 5] = ["NO ACTION", "RESTRICT", "CASCADE", "SET NULL", "SET DEFAULT"];
+
+/// The start of the statement that adds the key `name` to the table, which the run uses to tell which step is that key.
+fn add_fk_head(schema: &str, table: &str, name: &str) -> String {
+    format!("ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ", D.qualified(schema, table), q(name))
+}
+
+/// ADD CONSTRAINT .. FOREIGN KEY, with the match type, the actions, whether it is deferrable and NOT VALID, and the comment
+/// the key has. The referenced table is always written with its schema, the key's own `ref_db` or else the table's.
+fn add_fk(sim: &Sim, schema: &str, table: &str, k: &ForeignKey) -> Result<Vec<String>, String> {
+    name_ok(&k.name, "A foreign key")?;
+    name_ok(&k.ref_table, "The referenced table")?;
+    if !k.ref_db.is_empty() {
+        name_ok(&k.ref_db, "The referenced schema")?;
+    }
+    if k.cols.is_empty() || k.cols.len() != k.ref_cols.len() {
+        return Err("Pick the same number of columns on both sides.".into());
+    }
+    // PostgreSQL's index key limit is 32 columns.
+    if k.cols.len() > 32 {
+        return Err("A foreign key can have at most 32 columns.".into());
+    }
+    let mut own = Vec::new();
+    for c in &k.cols {
+        let i = sim.at(c).ok_or_else(|| format!("Column {c} is not in the table."))?;
+        own.push(q(&sim.cols[i].0));
+    }
+    let action = |a: &str| FK_ACTIONS.iter().find(|x| x.eq_ignore_ascii_case(a.trim())).copied().ok_or_else(|| format!("{a:?} is not a foreign key action."));
+    if k.deferred && !k.deferrable {
+        return Err("INITIALLY DEFERRED needs the key to be DEFERRABLE.".into());
+    }
+    let t = D.qualified(schema, table);
+    let parent = D.qualified(if k.ref_db.is_empty() { schema } else { &k.ref_db }, &k.ref_table);
+    let refs: Vec<String> = k.ref_cols.iter().map(|c| q(c)).collect();
+    let mut text = format!("{}({}) REFERENCES {parent} ({})", add_fk_head(schema, table, &k.name), own.join(", "), refs.join(", "));
+    if k.match_full {
+        text.push_str(" MATCH FULL");
+    }
+    text.push_str(&format!(" ON DELETE {} ON UPDATE {}", action(&k.on_delete)?, action(&k.on_update)?));
+    if k.deferrable {
+        text.push_str(if k.deferred { " DEFERRABLE INITIALLY DEFERRED" } else { " DEFERRABLE" });
+    }
+    if k.not_valid {
+        text.push_str(" NOT VALID");
+    }
+    let mut v = vec![text];
+    if !k.comment.is_empty() {
+        v.push(comment_stmt(&format!("CONSTRAINT {} ON {t}", q(&k.name)), &k.comment)?);
+    }
+    Ok(v)
+}
+
+/// The tables other than the changed one that the changes lock and rely on, and the keys they add that check rows. PostgreSQL
+/// takes SHARE ROW EXCLUSIVE on the parent of a key it adds or whose deferral it changes and ACCESS EXCLUSIVE on the parent of
+/// one it drops, a column drop that takes the table's own keys with it included. A column that changes type makes the server
+/// check again every key that holds it, the table's own (on their parents) and those of other tables that point at it (on
+/// those tables), all under ACCESS EXCLUSIVE. `before` is the table as it is when the first change runs.
+fn others(before: &Sim, schema: &str, changes: &[Change]) -> (Vec<RefCheck>, Vec<ForeignKey>) {
+    let mut sim = before.clone();
+    let (mut refs, mut orphans) = (Vec::new(), Vec::new());
+    let target = |k: &ForeignKey| if k.ref_db.is_empty() { schema.to_string() } else { k.ref_db.clone() };
+    let dropped = |k: &ForeignKey| RefCheck { schema: target(k), table: k.ref_table.clone(), cols: Vec::new(), exclusive: true, seen: None };
+    for c in changes {
+        match c {
+            Change::AddFk(k) => {
+                refs.push(RefCheck { schema: target(k), table: k.ref_table.clone(), cols: k.ref_cols.clone(), exclusive: false, seen: Some(k.ref_seen.clone()).filter(|s| !s.is_empty()) });
+                if !k.not_valid {
+                    orphans.push(k.clone());
+                }
+            }
+            Change::DropFk(n) => refs.extend(sim.fk_at(n).map(|i| &sim.fks[i]).map(dropped)),
+            Change::SetFkDeferral { name, .. } => refs.extend(sim.fk_at(name).map(|i| &sim.fks[i]).map(|k| RefCheck { exclusive: false, ..dropped(k) })),
+            Change::Drop(n) => refs.extend(sim.fks.iter().filter(|k| k.cols.iter().any(|c| same_name(c, n))).map(dropped)),
+            Change::Modify { from, def, .. } if sim.at(from).and_then(|i| sim.cols[i].1.as_ref().ok()).is_some_and(|o| o.ty != def.ty) => {
+                refs.extend(sim.fks.iter().filter(|k| k.cols.iter().any(|c| same_name(c, from))).map(dropped));
+                refs.extend(sim.deps.iter().filter(|d| same_name(&d.col, from) && d.kind == "constraint" && !d.own && !d.rel_table.is_empty()).map(|d| RefCheck { schema: d.rel_schema.clone(), table: d.rel_table.clone(), cols: Vec::new(), exclusive: true, seen: None }));
+            }
+            _ => {}
+        }
+        let _ = sim.apply(c);
+    }
+    (refs, orphans)
+}
+
+/// Whether the changes need only SHARE ROW EXCLUSIVE on the changed table: ADD FOREIGN KEY and ALTER CONSTRAINT take no more,
+/// and every other change takes ACCESS EXCLUSIVE.
+fn shares_only(changes: &[Change]) -> bool {
+    changes.iter().all(|c| matches!(c, Change::AddFk(_) | Change::SetFkDeferral { .. }))
+}
+
+/// The tables to lock and the mode of each, in the one order every plan takes them (by schema, then name), so two plans that
+/// share tables never wait on each other in a circle. The changed table is ACCESS EXCLUSIVE unless `own_share` says the changes
+/// need no more than SHARE ROW EXCLUSIVE, and another table is locked at the strongest mode any of its steps takes.
+fn lock_order(schema: &str, table: &str, own_share: bool, refs: &[RefCheck]) -> Vec<(String, String, &'static str)> {
+    let mut v: Vec<(String, String, bool)> = vec![(schema.to_string(), table.to_string(), !own_share)];
+    for r in refs {
+        match v.iter_mut().find(|e| e.0 == r.schema && e.1 == r.table) {
+            Some(e) => e.2 |= r.exclusive,
+            None => v.push((r.schema.clone(), r.table.clone(), r.exclusive)),
+        }
+    }
+    v.sort_by(|a, b| (a.0.as_str(), a.1.as_str()).cmp(&(b.0.as_str(), b.1.as_str())));
+    v.into_iter().map(|(s, t, ex)| (s, t, if ex { "ACCESS EXCLUSIVE" } else { "SHARE ROW EXCLUSIVE" })).collect()
+}
+
+/// A change of only the deferral of a key that is written as a drop and an add becomes ALTER CONSTRAINT, which keeps the key
+/// (no rows are checked again) and takes SHARE ROW EXCLUSIVE where the drop would take ACCESS EXCLUSIVE on both tables.
+fn fuse_deferral(st: &Structure, changes: &[Change]) -> Vec<Change> {
+    let mut sim = Sim::of(st);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < changes.len() {
+        if let (Change::DropFk(n), Some(Change::AddFk(new))) = (&changes[i], changes.get(i + 1)) {
+            let same_but_deferral = |old: &ForeignKey| {
+                old.opaque.is_empty()
+                    && old.name == new.name
+                    && (&old.cols, &old.ref_db, &old.ref_table, &old.ref_cols) == (&new.cols, &new.ref_db, &new.ref_table, &new.ref_cols)
+                    && old.on_update.eq_ignore_ascii_case(&new.on_update)
+                    && old.on_delete.eq_ignore_ascii_case(&new.on_delete)
+                    && (old.match_full, old.not_valid, &old.comment) == (new.match_full, new.not_valid, &new.comment)
+                    && (old.deferrable, old.deferred) != (new.deferrable, new.deferred)
+                    && (new.deferrable || !new.deferred)
+            };
+            if sim.fk_at(n).map(|j| &sim.fks[j]).is_some_and(same_but_deferral) {
+                let step = Change::SetFkDeferral { name: new.name.clone(), deferrable: new.deferrable, deferred: new.deferred };
+                if sim.apply(&step).is_ok() {
+                    out.push(step);
+                    i += 2;
+                    continue;
+                }
+            }
+        }
+        let _ = sim.apply(&changes[i]);
+        out.push(changes[i].clone());
+        i += 1;
+    }
+    out
 }
 
 /// Two names that differ only in case are two names on PostgreSQL, where the simulation compares without case.
@@ -504,6 +677,7 @@ pub(super) fn plan(table: &str, st: &Structure, changes: &[Change]) -> Result<Pl
     if let Some(what) = case_clash(st) {
         return Err(format!("This table has names that differ only in case ({what}), which this editor cannot tell apart. Change it with a query."));
     }
+    let changes = &fuse_deferral(st, changes);
     let mut sim = Sim::of(st);
     let mut steps = Vec::new();
     let mut types = Vec::new();
@@ -522,7 +696,8 @@ pub(super) fn plan(table: &str, st: &Structure, changes: &[Change]) -> Result<Pl
     // A dropped column takes whatever depends on it, and the undo only knows the ones read now, so the whole set of
     // indexes, constraints and dependents has to be the same under the lock.
     let all = changes.iter().any(|c| matches!(c, Change::Drop(_))).then(|| table_state(st));
-    let expect = Expect { snap: snapshot(st, &cols, &idx, &fks), cols, idx, fks, all, types };
+    let (refs, orphans) = others(&Sim::of(st), schema, changes);
+    let expect = Expect { snap: snapshot(st, &cols, &idx, &fks), cols, idx, fks, all, types, refs, orphans, own_share: shares_only(changes) };
     Ok(Plan { sql: super::ddl::script(&steps), steps, undo: undo_of(schema, table, st, changes), expect: Some(expect) })
 }
 
@@ -530,7 +705,8 @@ pub(super) fn plan(table: &str, st: &Structure, changes: &[Change]) -> Result<Pl
 fn table_state(st: &Structure) -> Vec<String> {
     let mut v: Vec<String> = st.indexes.iter().map(|i| format!("index {}|{}|{}|{}|{}|{}|{}", i.name, i.def, i.comment, i.deferrable, i.deferred, i.con_comment, i.complex)).collect();
     v.extend(st.constraints.iter().map(|c| format!("constraint {}|{}|{}", c.name, c.kind, c.def)));
-    v.extend(st.pg_deps.iter().map(|d| format!("depends {}|{}|{}", d.col, d.kind, d.name)));
+    v.extend(st.pg_deps.iter().map(|d| format!("depends {}|{}|{}|{}", d.col, d.kind, d.name, d.own)));
+    v.extend(st.foreign_keys.iter().map(|k| format!("foreign key {}", fk_line(k))));
     v
 }
 
@@ -560,7 +736,8 @@ fn undo_of(schema: &str, table: &str, before: &Structure, changes: &[Change]) ->
         steps.extend(statements(&run, schema, table, c)?);
         run.apply(c)?;
     }
-    Ok(AlterUndo { steps, label: String::new(), loss, mode: Mode::DEFAULT, cols, idx, fks, expect: Vec::new(), groups })
+    let (refs, orphans) = others(&sim, schema, &groups.iter().flatten().cloned().collect::<Vec<_>>());
+    Ok(AlterUndo { steps, label: String::new(), loss, mode: Mode::DEFAULT, cols, idx, fks, expect: Vec::new(), refs, orphans, groups })
 }
 
 /// Why a plan did not run: the table is no longer as the plan saw it (nothing ran), a statement failed (the transaction
@@ -583,26 +760,66 @@ async fn read_in(tx: &mut Tx<'_>, schema: &str, table: &str) -> Res<Structure> {
     Ok(Structure { columns: columns(D, &cols), indexes: indexes(&idx), foreign_keys: foreign_keys(&fks), constraints: constraints(&cons), pg_deps: col_deps(&deps), pg_schema: Some(schema.into()), ..Default::default() })
 }
 
-async fn exec(tx: &mut Tx<'_>, db: &Db, schema: &str, sql: &str) -> Result<(), sqlx::Error> {
+pub(super) async fn exec(tx: &mut Tx<'_>, db: &Db, schema: &str, sql: &str) -> Result<(), sqlx::Error> {
     let t = Instant::now();
     let res = tx.exec_bound(sql, &[]).await;
     db.note(schema, sql, t, &res);
     res.map(|_| ())
 }
 
-fn lock_error(err: &sqlx::Error) -> Option<String> {
-    let code = err.as_database_error().and_then(|d| d.code().map(|c| c.to_string()))?;
+pub(super) fn sql_state(err: &sqlx::Error) -> Option<String> {
+    err.as_database_error().and_then(|d| d.code().map(|c| c.to_string()))
+}
+
+pub(super) fn lock_error(err: &sqlx::Error, name: &str) -> Option<String> {
     // 55P03 is lock_not_available, which lock_timeout raises.
-    (code == "55P03").then(|| format!("The table is locked by another session that did not let go within {LOCK_WAIT}. Nothing was changed."))
+    (sql_state(err)? == "55P03").then(|| format!("The table {name} is locked by another session that did not let go within {LOCK_WAIT}. Nothing was changed."))
+}
+
+/// Whether the role may take the explicit lock the plan wants on a table. LOCK TABLE in any mode but ACCESS SHARE and ROW
+/// EXCLUSIVE needs UPDATE, DELETE or TRUNCATE (MAINTAIN from PostgreSQL 17), where ADD FOREIGN KEY needs only REFERENCES on the
+/// parent and DROP CONSTRAINT only ownership of the child. A role without them skips the explicit lock, and the statement
+/// takes its own under the same lock_timeout. A table that is not there answers true, so the LOCK reports it gone.
+pub(super) async fn may_lock(tx: &mut Tx<'_>, name: &str) -> bool {
+    let sql = "SELECT COALESCE(has_table_privilege(to_regclass($1), 'UPDATE,DELETE,TRUNCATE') OR CASE WHEN current_setting('server_version_num')::int >= 170000 THEN has_table_privilege(to_regclass($1), 'MAINTAIN') ELSE false END, true)::int::bigint AS n";
+    match tx.fetch_bound(sql, &[Param::Text(name.to_string())]).await {
+        Ok(rows) => rows.first().and_then(|r| super::structure::num(r, "n")).is_none_or(|n| n != 0),
+        Err(_) => true,
+    }
+}
+
+/// The message for a key the server refused for the rows already there: how many rows have no parent and a few of them, so the
+/// person sees what to fix. None when there is no such row (another session fixed them since), and the server's own error is
+/// shown then. The transaction is at the savepoint before the key was added, where the rows are as the server saw them.
+async fn orphan_message(tx: &mut Tx<'_>, schema: &str, table: &str, fk: &ForeignKey, undo: bool) -> Option<String> {
+    let rows = tx.fetch_bound(&orphans_sql(D, schema, table, fk), &[]).await.ok()?;
+    let n = rows.first().and_then(|r| super::structure::num(r, "n")).unwrap_or(0);
+    if n == 0 {
+        return None;
+    }
+    let rows = tx.fetch_bound(&orphan_sample_sql(D, schema, table, fk, ORPHAN_SAMPLE), &[]).await.unwrap_or_default();
+    let shown: Vec<String> = rows.iter().map(|r| orphan_row(r, fk.cols.len())).collect();
+    let parent = D.qualified(if fk.ref_db.is_empty() { schema } else { &fk.ref_db }, &fk.ref_table);
+    let cols = fk.cols.iter().map(|c| q(c)).collect::<Vec<_>>().join(", ");
+    let refs = fk.ref_cols.iter().map(|c| q(c)).collect::<Vec<_>>().join(", ");
+    let (rows_word, has, it) = if n == 1 { ("row", "has", "it") } else { ("rows", "have", "them") };
+    let eg = format!("{}{}", if shown.len() == 1 { "The row is " } else { "For example " }, shown.join(", "));
+    let what = D.qualified(schema, table);
+    // The undo cannot add the key NOT VALID, which is not how the key was before, so it asks for the rows to be fixed.
+    Some(if undo {
+        format!("{n} {rows_word} of {what} {has} a value in ({cols}) that {parent} ({refs}) does not hold, so the foreign key {} cannot be put back. {eg}. Fix {it}, then undo again. Nothing was changed.", fk.name)
+    } else {
+        format!("{n} {rows_word} of {what} {has} a value in ({cols}) that {parent} ({refs}) does not hold, so the foreign key {} cannot be added. {eg}. Fix {it} or add the key as NOT VALID. Nothing was changed.", fk.name)
+    })
 }
 
 /// Runs `steps` as one transaction: the lock first, with a timeout so a busy table fails the plan instead of queueing
 /// behind it, then the check that the touched columns and indexes are as `expect` says, then the statements, then COMMIT.
 /// Any failure leaves the transaction to roll back.
-pub(super) async fn run(db: &Db, schema: &str, table: &str, steps: &[String], expect: &Expect, read_only: bool) -> Result<(), Fail> {
+pub(super) async fn run(db: &Db, schema: &str, table: &str, steps: &[String], expect: &Expect, read_only: bool, undo: bool) -> Result<(), Fail> {
     let mut conn = write::writer_conn(db, schema, read_only).await.map_err(Fail::Run)?;
     let mut tx = conn.begin_write().await.map_err(|e| Fail::Run(se(e)))?;
-    let out = locked_run(&mut tx, db, schema, table, steps, expect).await;
+    let out = locked_run(&mut tx, db, schema, table, steps, expect, undo).await;
     match out {
         // The connection can drop after the server committed, so a failed COMMIT does not say that nothing changed.
         Ok(()) => tx.commit().await.map_err(|e| Fail::Unknown(format!("{}. The server did not confirm the commit, so the change may or may not have been applied. The structure is being reloaded: check it before running the change again.", se(e)))),
@@ -613,11 +830,24 @@ pub(super) async fn run(db: &Db, schema: &str, table: &str, steps: &[String], ex
     }
 }
 
-async fn locked_run(tx: &mut Tx<'_>, db: &Db, schema: &str, table: &str, steps: &[String], expect: &Expect) -> Result<(), Fail> {
-    let t = D.qualified(schema, table);
+async fn locked_run(tx: &mut Tx<'_>, db: &Db, schema: &str, table: &str, steps: &[String], expect: &Expect, undo: bool) -> Result<(), Fail> {
     exec(tx, db, schema, &format!("SET LOCAL lock_timeout = '{LOCK_WAIT}'")).await.map_err(|e| Fail::Run(se(e)))?;
-    if let Err(e) = exec(tx, db, schema, &format!("LOCK TABLE {t} IN ACCESS EXCLUSIVE MODE")).await {
-        return Err(Fail::Run(lock_error(&e).unwrap_or_else(|| se(e))));
+    // The changed table and the other tables of its keys, in one fixed order. A key takes a lock on both of its tables, and
+    // the parent can be changed by another session between the plan and here, so it is locked before it is read.
+    for (s, t, mode) in lock_order(schema, table, expect.own_share, &expect.refs) {
+        let name = D.qualified(&s, &t);
+        if !may_lock(tx, &name).await {
+            continue;
+        }
+        if let Err(e) = exec(tx, db, schema, &format!("LOCK TABLE {name} IN {mode} MODE")).await {
+            let own = s == schema && t == table;
+            return Err(match (lock_error(&e, &name), sql_state(&e).as_deref()) {
+                (Some(why), _) => Fail::Run(why),
+                // 42P01 is undefined_table: the referenced table was dropped after the plan was made.
+                (None, Some("42P01")) if !own => Fail::Changed(format!("the referenced table {name} (it is gone)")),
+                _ => Fail::Run(se(e)),
+            });
+        }
     }
     // Before the read and the statements alike: the plan was made from a read under this path, and the statements resolve
     // every name under it, so a type or function outside the schema is qualified in the one and found by the other.
@@ -635,6 +865,24 @@ async fn locked_run(tx: &mut Tx<'_>, db: &Db, schema: &str, table: &str, steps: 
             return Err(Fail::Changed("an index, constraint or other object that depends on the table".into()));
         }
     }
+    // The referenced columns and unique indexes a new key leans on, read under the search_path of their own schema as the
+    // plan-time read of them was.
+    let mut moved = false;
+    for r in expect.refs.iter().filter(|r| r.seen.is_some()) {
+        let now = if r.schema == schema && r.table == table {
+            ref_state(&st, &r.cols)
+        } else {
+            exec(tx, db, schema, &format!("SET LOCAL search_path = {}", q(&r.schema))).await.map_err(|e| Fail::Run(se(e)))?;
+            moved = true;
+            ref_state(&read_in(tx, &r.schema, &r.table).await.map_err(Fail::Run)?, &r.cols)
+        };
+        if Some(&now) != r.seen.as_ref() {
+            return Err(Fail::Changed(format!("the referenced table {}", D.qualified(&r.schema, &r.table))));
+        }
+    }
+    if moved {
+        exec(tx, db, schema, &format!("SET LOCAL search_path = {}", q(schema))).await.map_err(|e| Fail::Run(se(e)))?;
+    }
     for ty in &expect.types {
         let said = tx.fetch_bound("SELECT to_regtype($1)::text AS t", &[Param::Text(ty.clone())]).await;
         // PostgreSQL before 16 raises an error for text that is not a type name, later ones answer NULL.
@@ -643,6 +891,23 @@ async fn locked_run(tx: &mut Tx<'_>, db: &Db, schema: &str, table: &str, steps: 
         }
     }
     for (i, s) in steps.iter().enumerate() {
+        // A key that checks the rows already there runs in a savepoint: the server scans the table once, and only when it
+        // refuses the key are the rows that stop it looked for.
+        let checks = expect.orphans.iter().find(|k| s.starts_with(&add_fk_head(schema, table, &k.name)));
+        if let Some(fk) = checks {
+            tx.exec_bound("SAVEPOINT quarry_fk", &[]).await.map_err(|e| Fail::Run(se(e)))?;
+            if let Err(e) = exec(tx, db, schema, s).await {
+                if sql_state(&e).as_deref() == Some("23503") {
+                    tx.exec_bound("ROLLBACK TO SAVEPOINT quarry_fk", &[]).await.map_err(|e| Fail::Run(se(e)))?;
+                    if let Some(why) = orphan_message(tx, schema, table, fk, undo).await {
+                        return Err(Fail::Run(why));
+                    }
+                }
+                return Err(Fail::Run(format!("{} (statement {} of {}). The whole plan was rolled back, so nothing was changed.", se(e), i + 1, steps.len())));
+            }
+            tx.exec_bound("RELEASE SAVEPOINT quarry_fk", &[]).await.map_err(|e| Fail::Run(se(e)))?;
+            continue;
+        }
         exec(tx, db, schema, s).await.map_err(|e| Fail::Run(format!("{} (statement {} of {}). The whole plan was rolled back, so nothing was changed.", se(e), i + 1, steps.len())))?;
     }
     Ok(())
@@ -670,8 +935,8 @@ fn action(db: &Db, conn: u64, schema: &str, table: &str, u: AlterUndo) -> UndoAc
 /// Runs a recorded undo in one transaction, after the same check as an apply against how the change left the table.
 pub(super) async fn undo(db: &Db, a: UndoAction, u: AlterUndo, read_only: bool) -> Msg {
     let UndoAction { at, conn, db: schema, coll: table, .. } = a;
-    let expect = Expect { cols: u.cols.clone(), idx: u.idx.clone(), fks: u.fks.clone(), snap: u.expect.clone(), all: None, types: Vec::new() };
-    let out = crate::db::sql_scope(db.conn, &schema, async { run(db, &schema, &table, &u.steps, &expect, read_only).await }).await;
+    let expect = Expect { cols: u.cols.clone(), idx: u.idx.clone(), fks: u.fks.clone(), snap: u.expect.clone(), all: None, types: Vec::new(), refs: u.refs.clone(), orphans: u.orphans.clone(), own_share: shares_only(&u.groups.iter().flatten().cloned().collect::<Vec<_>>()) };
+    let out = crate::db::sql_scope(db.conn, &schema, async { run(db, &schema, &table, &u.steps, &expect, read_only, true).await }).await;
     let unsure = matches!(out, Err(Fail::Unknown(_)));
     let res: Res<String> = out.map(|_| "Undid the structure change".to_string()).map_err(|f| fail_text(f, true));
     // The whole undo is one transaction, so a failure ran nothing and the action stays for another try, unless the commit
@@ -690,7 +955,7 @@ impl Worker {
     #[allow(clippy::too_many_arguments)]
     pub fn pg_alter(&self, conn: u64, db: Db, schema: String, table: String, steps: Vec<String>, expect: Expect, undo: Option<AlterUndo>, read_only: bool, done: String) {
         self.spawn_sql(db.conn, &schema.clone(), async move {
-            let out = run(&db, &schema, &table, &steps, &expect, read_only).await;
+            let out = run(&db, &schema, &table, &steps, &expect, read_only, false).await;
             let unsure = matches!(out, Err(Fail::Unknown(_)));
             let res = out.map_err(|f| fail_text(f, false));
             let mut done = done;
@@ -698,7 +963,21 @@ impl Worker {
                 (true, Some(mut u)) => match load(&db, &schema, &table).await {
                     Ok(st) => {
                         u.expect = snapshot(&st, &u.cols, &u.idx, &u.fks);
-                        Some(action(&db, conn, &schema, &table, u))
+                        // The undo of a dropped key puts it back and leans on the parent as it is now.
+                        let mut unread = None;
+                        for r in u.refs.iter_mut().filter(|r| !r.cols.is_empty()) {
+                            match load(&db, &r.schema, &r.table).await {
+                                Ok(p) => r.seen = Some(ref_state(&p, &r.cols)),
+                                Err(err) => unread = Some(err),
+                            }
+                        }
+                        match unread {
+                            None => Some(action(&db, conn, &schema, &table, u)),
+                            Some(err) => {
+                                done = format!("{done}. It cannot be undone: a referenced table could not be read back ({err})");
+                                None
+                            }
+                        }
                     }
                     Err(err) => {
                         done = format!("{done}. It cannot be undone: the table could not be read back ({err})");
@@ -715,7 +994,7 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::sql::structure::{Index, IndexCol};
+    use crate::db::sql::structure::{ColDep, Index, IndexCol};
 
     #[test]
     fn expressions_stay_one_expression() {
@@ -830,7 +1109,7 @@ mod tests {
         let mut unsigned = def("x", "integer");
         unsigned.unsigned = true;
         assert!(here(Change::Add { def: unsigned, pos: Pos::Keep }).contains("unsigned"));
-        assert!(here(Change::AddFk(Default::default())).contains("Foreign keys"));
+        assert!(here(Change::AddFk(Default::default())).contains("needs a name"));
         let spatial = IndexDef { name: "g".into(), kind: IndexKind::Fulltext, cols: vec![super::super::ddl::IdxCol { name: "note".into(), prefix: None, desc: false }], ..Default::default() };
         assert!(here(Change::AddIndex(spatial)).contains("FULLTEXT"));
         let mut hostile = def("x", "integer; DROP TABLE t");
@@ -942,8 +1221,7 @@ mod tests {
 
     #[test]
     fn what_the_server_drops_with_a_column_must_be_something_the_undo_restores() {
-        use crate::db::sql::structure::ColDep;
-        let dep = |kind: &str, name: &str| ColDep { col: "note".into(), kind: kind.into(), name: name.into(), what: format!("{kind} {name}") };
+        let dep = |kind: &str, name: &str| ColDep { col: "note".into(), kind: kind.into(), name: name.into(), what: format!("{kind} {name}"), own: true, ..Default::default() };
         let undo = |deps: Vec<ColDep>| {
             let mut st = table();
             st.pg_deps = deps;
@@ -959,5 +1237,174 @@ mod tests {
         st.pg_deps = vec![dep("constraint", "t_note_check")];
         let p = plan("t", &st, &[Change::Drop("note".into())]).unwrap();
         assert!(p.expect.unwrap().all.is_some());
+    }
+    fn fk(name: &str, cols: &[&str], ref_db: &str, table: &str, ref_cols: &[&str]) -> ForeignKey {
+        let own = |v: &[&str]| v.iter().map(|c| (*c).to_string()).collect::<Vec<_>>();
+        ForeignKey { name: name.into(), db: "public".into(), table: "t".into(), cols: own(cols), ref_db: ref_db.into(), ref_table: table.into(), ref_cols: own(ref_cols), on_update: "NO ACTION".into(), on_delete: "NO ACTION".into(), ..Default::default() }
+    }
+
+    #[test]
+    fn a_foreign_key_is_written_with_everything_it_carries() {
+        let t = "\"public\".\"t\"";
+        let plain = fk("t_note_fk", &["note"], "", "p", &["code"]);
+        assert_eq!(steps(&[Change::AddFk(plain.clone())]), [format!("ALTER TABLE {t} ADD CONSTRAINT \"t_note_fk\" FOREIGN KEY (\"note\") REFERENCES \"public\".\"p\" (\"code\") ON DELETE NO ACTION ON UPDATE NO ACTION")]);
+        let full = ForeignKey { match_full: true, deferrable: true, deferred: true, not_valid: true, comment: "it's".into(), on_delete: "set null".into(), on_update: "Cascade".into(), ..fk("t_pair_fk", &["name", "note"], "other", "p", &["a", "b"]) };
+        assert_eq!(
+            steps(&[Change::AddFk(full)]),
+            [format!("ALTER TABLE {t} ADD CONSTRAINT \"t_pair_fk\" FOREIGN KEY (\"name\", \"note\") REFERENCES \"other\".\"p\" (\"a\", \"b\") MATCH FULL ON DELETE SET NULL ON UPDATE CASCADE DEFERRABLE INITIALLY DEFERRED NOT VALID"), format!("COMMENT ON CONSTRAINT \"t_pair_fk\" ON {t} IS 'it''s'")]
+        );
+        let deferrable = ForeignKey { deferrable: true, on_delete: "SET DEFAULT".into(), ..plain.clone() };
+        assert!(steps(&[Change::AddFk(deferrable)])[0].ends_with("ON DELETE SET DEFAULT ON UPDATE NO ACTION DEFERRABLE"));
+        // a key on a column the table does not have, a bad action, mismatched sides and a name that is too long are refused
+        for bad in [fk("k", &["nope"], "", "p", &["a"]), ForeignKey { on_delete: "CASCADE; DROP TABLE t".into(), ..plain.clone() }, fk("k", &["note", "name"], "", "p", &["a"]), fk(&"n".repeat(64), &["note"], "", "p", &["a"]), ForeignKey { deferred: true, ..plain.clone() }] {
+            assert!(plan("t", &table(), &[Change::AddFk(bad.clone())]).is_err(), "{bad:?}");
+        }
+        // a name that needs quoting is quoted, and a key is dropped and renamed as a constraint
+        let mut st = table();
+        st.foreign_keys = vec![fk("Odd \"name\"", &["note"], "", "p", &["code"])];
+        let go = |c: Change| plan("t", &st, &[c]).unwrap().steps;
+        assert_eq!(go(Change::DropFk("Odd \"name\"".into())), [format!("ALTER TABLE {t} DROP CONSTRAINT \"Odd \"\"name\"\"\"")]);
+        assert_eq!(go(Change::RenameFk { from: "Odd \"name\"".into(), to: "fresh".into() }), [format!("ALTER TABLE {t} RENAME CONSTRAINT \"Odd \"\"name\"\"\" TO \"fresh\"")]);
+        assert!(plan("t", &st, &[Change::RenameFk { from: "Odd \"name\"".into(), to: "x".repeat(64) }]).is_err());
+        assert!(plan("t", &st, &[Change::DropFk("missing".into())]).is_err());
+    }
+
+    #[test]
+    fn the_undo_of_a_key_change_is_the_key_as_it_was() {
+        let mut st = table();
+        let old = ForeignKey { match_full: true, deferrable: true, comment: "c".into(), on_delete: "CASCADE".into(), ..fk("t_note_fk", &["note"], "other", "p", &["code"]) };
+        st.foreign_keys = vec![old.clone()];
+        let undo = plan("t", &st, &[Change::DropFk("t_note_fk".into())]).unwrap().undo.unwrap();
+        assert_eq!(undo.groups, [vec![Change::AddFk(old.clone())]]);
+        assert!(undo.steps[0].contains("MATCH FULL ON DELETE CASCADE ON UPDATE NO ACTION DEFERRABLE") && undo.steps.len() == 2, "{:?}", undo.steps);
+        // the undo of a rename renames back, and a key written back from the catalog is dropped again by name
+        let undo = plan("t", &st, &[Change::RenameFk { from: "t_note_fk".into(), to: "fresh".into() }]).unwrap().undo.unwrap();
+        assert_eq!(undo.steps, ["ALTER TABLE \"public\".\"t\" RENAME CONSTRAINT \"fresh\" TO \"t_note_fk\""]);
+        let undo = plan("t", &table(), &[Change::AddFk(old)]).unwrap().undo.unwrap();
+        assert_eq!(undo.steps, ["ALTER TABLE \"public\".\"t\" DROP CONSTRAINT \"t_note_fk\""]);
+        // what one of the key's own columns can drop: the key, which is put back after the column
+        let mut st = table();
+        st.foreign_keys = vec![fk("t_note_fk", &["note"], "", "p", &["code"])];
+        st.pg_deps = vec![ColDep { col: "note".into(), kind: "constraint".into(), name: "t_note_fk".into(), what: "constraint t_note_fk on table t".into(), own: true, ..Default::default() }];
+        let undo = plan("t", &st, &[Change::Drop("note".into())]).unwrap().undo.unwrap();
+        // the column first, then the index that held it, then the key
+        assert!(undo.steps.len() == 3 && undo.steps[0].contains("ADD COLUMN \"note\"") && undo.steps[1].starts_with("CREATE INDEX") && undo.steps[2].contains("ADD CONSTRAINT \"t_note_fk\""), "{:?}", undo.steps);
+        // the same name on a key of another table is not this table's, and the undo says why it has none
+        st.pg_deps[0].own = false;
+        assert!(plan("t", &st, &[Change::Drop("note".into())]).unwrap().undo.unwrap_err().contains("another table"));
+    }
+
+    #[test]
+    fn a_plan_locks_every_table_of_its_keys_in_one_order() {
+        let r = |s: &str, t: &str, exclusive: bool| RefCheck { schema: s.into(), table: t.into(), cols: Vec::new(), exclusive, seen: None };
+        // whatever order the changes name the tables in, the locks go by schema and name, the changed table among them
+        let a = lock_order("public", "orders", false, &[r("public", "customers", false), r("archive", "old", false)]);
+        let b = lock_order("public", "orders", false, &[r("archive", "old", false), r("public", "customers", false)]);
+        assert_eq!(a, b);
+        let names: Vec<(&str, &str)> = a.iter().map(|(s, t, _)| (s.as_str(), t.as_str())).collect();
+        assert_eq!(names, [("archive", "old"), ("public", "customers"), ("public", "orders")]);
+        // the changed table is always exclusive, a parent only where a key is dropped, and a table asked twice is locked once
+        assert_eq!(a.iter().map(|x| x.2).collect::<Vec<_>>(), ["SHARE ROW EXCLUSIVE", "SHARE ROW EXCLUSIVE", "ACCESS EXCLUSIVE"]);
+        let c = lock_order("public", "orders", false, &[r("public", "customers", false), r("public", "customers", true), r("public", "orders", false)]);
+        assert_eq!(c.iter().map(|x| (x.1.as_str(), x.2)).collect::<Vec<_>>(), [("customers", "ACCESS EXCLUSIVE"), ("orders", "ACCESS EXCLUSIVE")]);
+    }
+
+    #[test]
+    fn a_plan_that_only_adds_keys_locks_each_table_share_row_exclusive() {
+        let k = fk("t_note_fk", &["note"], "", "p", &["code"]);
+        let p = plan("t", &table(), &[Change::AddFk(k.clone())]).unwrap();
+        let e = p.expect.unwrap();
+        assert!(e.own_share, "ADD FOREIGN KEY needs no more than SHARE ROW EXCLUSIVE on the child");
+        assert_eq!(lock_order("public", "t", e.own_share, &e.refs).iter().map(|x| x.2).collect::<Vec<_>>(), ["SHARE ROW EXCLUSIVE", "SHARE ROW EXCLUSIVE"]);
+        // any other change of the table brings ACCESS EXCLUSIVE back, and so does a drop of a key
+        let p = plan("t", &table(), &[Change::AddFk(k.clone()), Change::Drop("name".into())]).unwrap();
+        assert!(!p.expect.unwrap().own_share);
+        let mut st = table();
+        st.foreign_keys = vec![k];
+        assert!(!plan("t", &st, &[Change::DropFk("t_note_fk".into())]).unwrap().expect.unwrap().own_share);
+        // the undo of an add is a drop, which takes the stronger lock on both tables
+        let p = plan("t", &table(), &[Change::AddFk(fk("t_note_fk", &["note"], "", "p", &["code"]))]).unwrap();
+        assert!(!shares_only(&p.undo.unwrap().groups.concat()));
+    }
+
+    #[test]
+    fn a_change_of_only_when_a_key_is_checked_is_alter_constraint_and_so_is_its_undo() {
+        let t = "\"public\".\"t\"";
+        let mut st = table();
+        let old = ForeignKey { deferrable: true, comment: "c".into(), ..fk("t_note_fk", &["note"], "public", "p", &["code"]) };
+        st.foreign_keys = vec![old.clone()];
+        let edit = |new: ForeignKey| vec![Change::DropFk("t_note_fk".into()), Change::AddFk(new)];
+        // deferrable and initially immediate becomes initially deferred: no drop, no new check of the rows
+        let p = plan("t", &st, &edit(ForeignKey { deferred: true, ..old.clone() })).unwrap();
+        assert_eq!(p.steps, [format!("ALTER TABLE {t} ALTER CONSTRAINT \"t_note_fk\" DEFERRABLE INITIALLY DEFERRED")]);
+        let e = p.expect.as_ref().unwrap();
+        assert!(e.own_share && e.orphans.is_empty() && e.refs.iter().all(|r| !r.exclusive), "{e:?}");
+        assert_eq!(p.undo.unwrap().steps, [format!("ALTER TABLE {t} ALTER CONSTRAINT \"t_note_fk\" DEFERRABLE INITIALLY IMMEDIATE")]);
+        let p = plan("t", &st, &edit(ForeignKey { deferrable: false, ..old.clone() })).unwrap();
+        assert_eq!(p.steps, [format!("ALTER TABLE {t} ALTER CONSTRAINT \"t_note_fk\" NOT DEFERRABLE")]);
+        // anything else that changes is still a drop and an add
+        let p = plan("t", &st, &edit(ForeignKey { deferred: true, on_delete: "CASCADE".into(), ..old.clone() })).unwrap();
+        assert_eq!(p.steps.len(), 3, "{:?}", p.steps);
+        assert!(plan("t", &st, &edit(ForeignKey { deferred: true, deferrable: false, ..old })).is_err());
+        assert!(plan("t", &st, &[Change::SetFkDeferral { name: "t_note_fk".into(), deferrable: false, deferred: true }]).is_err());
+    }
+
+    #[test]
+    fn a_key_whose_name_differs_only_in_case_is_found_by_its_exact_name() {
+        let t = "\"public\".\"t\"";
+        let mut st = table();
+        st.foreign_keys = vec![fk("T_fk", &["note"], "", "p", &["code"]), fk("t_fk", &["name"], "", "p", &["code"])];
+        let go = |c: Change| plan("t", &st, &[c]).unwrap();
+        // each name finds its own key, in the statement and in the locks and the undo
+        assert_eq!(go(Change::DropFk("t_fk".into())).steps, [format!("ALTER TABLE {t} DROP CONSTRAINT \"t_fk\"")]);
+        assert_eq!(go(Change::DropFk("T_fk".into())).steps, [format!("ALTER TABLE {t} DROP CONSTRAINT \"T_fk\"")]);
+        assert_eq!(go(Change::RenameFk { from: "t_fk".into(), to: "other".into() }).steps, [format!("ALTER TABLE {t} RENAME CONSTRAINT \"t_fk\" TO \"other\"")]);
+        let undo = go(Change::DropFk("t_fk".into())).undo.unwrap();
+        assert!(undo.steps[0].contains("FOREIGN KEY (\"name\")"), "{:?}", undo.steps);
+        // a name that is not there is not matched by another case
+        assert!(plan("t", &st, &[Change::DropFk("T_FK".into())]).is_err());
+        // the snapshot the transaction compares reads the right key for each
+        let snap = snapshot(&st, &[], &[], &["t_fk".to_string(), "T_fk".to_string()]);
+        assert!(snap[0].1.as_deref().unwrap().contains("|name|") && snap[1].1.as_deref().unwrap().contains("|note|"), "{snap:?}");
+        // a key of one case can be added beside one of another
+        let two = plan("t", &st, &[Change::AddFk(fk("T_FK", &["id"], "", "p", &["id"]))]).unwrap();
+        assert!(two.steps[0].contains("\"T_FK\""));
+    }
+
+    #[test]
+    fn a_column_that_changes_type_locks_the_tables_of_the_keys_on_it() {
+        let mut st = table();
+        st.foreign_keys = vec![fk("t_note_fk", &["note"], "other", "p", &["code"])];
+        st.pg_deps = vec![
+            ColDep { col: "note".into(), kind: "constraint".into(), name: "t_note_fk".into(), what: "constraint t_note_fk on table t".into(), own: true, ..Default::default() },
+            ColDep { col: "id".into(), kind: "constraint".into(), name: "c_tid_fk".into(), what: "constraint c_tid_fk on table c".into(), own: false, rel_schema: "kids".into(), rel_table: "c".into() },
+        ];
+        let locks = |col: &str, ty: &str| {
+            let mut d = def(col, ty);
+            d.nullable = col != "id";
+            let e = plan("t", &st, &[Change::Modify { from: col.into(), def: d, pos: Pos::Keep }]).unwrap().expect.unwrap();
+            lock_order("public", "t", e.own_share, &e.refs).into_iter().map(|(s, t, m)| format!("{s}.{t} {m}")).collect::<Vec<_>>()
+        };
+        // retyping a column of an own key takes the parent, retyping a referenced column takes the child of the other table
+        assert_eq!(locks("note", "character varying(9)"), ["other.p ACCESS EXCLUSIVE", "public.t ACCESS EXCLUSIVE"]);
+        assert_eq!(locks("id", "bigint"), ["kids.c ACCESS EXCLUSIVE", "public.t ACCESS EXCLUSIVE"]);
+        // a column no key holds takes nothing else, and a change that keeps the type neither
+        assert_eq!(locks("name", "text"), ["public.t ACCESS EXCLUSIVE"]);
+        assert_eq!(locks("note", "text"), ["public.t ACCESS EXCLUSIVE"]);
+    }
+
+    #[test]
+    fn a_refused_column_drop_leaves_the_simulated_table_as_it_was() {
+        let mut st = table();
+        let mut opaque = fk("t_note_fk", &["note"], "", "p", &["code"]);
+        opaque.opaque = "ON DELETE SET NULL (note)".into();
+        st.foreign_keys = vec![opaque, fk("t_name_fk", &["name"], "", "p", &["code"])];
+        let mut sim = Sim::of(&st);
+        assert!(sim.apply(&Change::Drop("note".into())).unwrap_err().contains("cannot put back"));
+        assert_eq!((sim.cols.len(), sim.fks.len(), sim.idx.len()), (3, 2, 2), "a refused change changed the simulation");
+        // the plan still runs the drop, and the steps after it were written against the table as it was
+        let p = plan("t", &st, &[Change::Drop("note".into()), Change::DropFk("t_name_fk".into())]).unwrap();
+        assert_eq!(p.steps.len(), 2);
+        assert!(p.undo.is_err());
     }
 }

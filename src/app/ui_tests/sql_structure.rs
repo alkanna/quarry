@@ -5,14 +5,14 @@
 use super::sql_edit::{every_engine, open_unlocked, Fx, Server};
 use super::*;
 
-fn one(fx: &Fx, sql: &str) -> String {
+pub(super) fn one(fx: &Fx, sql: &str) -> String {
     match &fx.server {
         Server::My(l) => l.one(sql),
         Server::Pg(l, pool) => l.qone(pool, sql),
     }
 }
 
-fn is_pg(fx: &Fx) -> bool {
+pub(super) fn is_pg(fx: &Fx) -> bool {
     matches!(fx.server, Server::Pg(..))
 }
 
@@ -44,7 +44,7 @@ fn has_index(fx: &Fx, table: &str, name: &str) -> bool {
 }
 
 /// Steps the UI until `cond` holds: a structure change runs on a worker task and lands a few frames after the click.
-fn until(fx: &Fx, ui: &mut UiApp, what: &str, cond: impl Fn(&Fx) -> bool) {
+pub(super) fn until(fx: &Fx, ui: &mut UiApp, what: &str, cond: impl Fn(&Fx) -> bool) {
     let t = std::time::Instant::now();
     loop {
         ui.h.step();
@@ -57,7 +57,7 @@ fn until(fx: &Fx, ui: &mut UiApp, what: &str, cond: impl Fn(&Fx) -> bool) {
 }
 
 /// Replaces the text of a field by its accessible name.
-fn replace(ui: &mut UiApp, field: &str, text: &str) {
+pub(super) fn replace(ui: &mut UiApp, field: &str, text: &str) {
     ui.show(field);
     ui.h.get_by_label(field).focus();
     ui.h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
@@ -77,7 +77,7 @@ fn stage_new_column(ui: &mut UiApp, name: &str) {
 }
 
 /// Takes back the newest change through the toolbar button. An undo that converts a type back asks for the table name.
-fn undo_last(ui: &mut UiApp, count: usize, table: &str) {
+pub(super) fn undo_last(ui: &mut UiApp, count: usize, table: &str) {
     ui.click(&format!("Undo ({count})"));
     ui.click("Undo change 1");
     if matches!(ui.app().modal, Some(Modal::Typed { .. })) {

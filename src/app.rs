@@ -50,6 +50,7 @@ mod sql_structure;
 mod sql_alter;
 mod sql_rel;
 mod sql_trig;
+mod sql_trig_pg;
 mod sql_edit;
 mod sql_bar;
 mod sql_views;

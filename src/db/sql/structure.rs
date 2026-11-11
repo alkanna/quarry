@@ -100,6 +100,11 @@ pub struct ColDep {
     pub name: String,
     /// The server's words for the object, for the message that names it.
     pub what: String,
+    /// A constraint of this table itself, as opposed to a foreign key of another table that points at the column.
+    pub own: bool,
+    /// The schema and table a constraint belongs to, empty for anything else.
+    pub rel_schema: String,
+    pub rel_table: String,
 }
 
 /// A PostgreSQL primary key, unique, check or exclusion constraint, in the words of `pg_get_constraintdef`. Foreign
@@ -126,6 +131,19 @@ pub struct ForeignKey {
     pub ref_cols: Vec<String>,
     pub on_update: String,
     pub on_delete: String,
+    /// PostgreSQL: MATCH FULL, DEFERRABLE, INITIALLY DEFERRED, and NOT VALID (the rows that were there when it was added
+    /// were never checked). All false on MySQL.
+    pub match_full: bool,
+    pub deferrable: bool,
+    pub deferred: bool,
+    pub not_valid: bool,
+    /// PostgreSQL: the comment on the constraint.
+    pub comment: String,
+    /// PostgreSQL: why this key cannot be written back (an ON DELETE column list, PERIOD, NOT ENFORCED), empty when it can.
+    pub opaque: String,
+    /// PostgreSQL: the referenced table's key columns and unique indexes as the dialog read them (`ddl_pg::ref_state`),
+    /// which the transaction must find again after it holds the lock. Empty for a key read from the catalog.
+    pub ref_seen: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -139,6 +157,50 @@ pub struct Trigger {
     pub order: u64,
     /// The sql_mode it was created under, which its body runs with.
     pub sql_mode: String,
+    /// PostgreSQL: what editing the trigger and its function needs. None on MySQL.
+    pub pg: Option<Box<PgTrig>>,
+}
+
+/// A PostgreSQL trigger as the catalogs hold it, read with `pg_catalog::TRIGGERS`. The trigger is the part on the table; the
+/// function it runs is a separate object, often shared, and is read along because the editor writes both.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PgTrig {
+    pub per_row: bool,
+    /// The columns of UPDATE OF, empty for any column.
+    pub of_cols: Vec<String>,
+    /// The WHEN condition without its parentheses.
+    pub when: String,
+    /// tgenabled: O (enabled), D (disabled), R (replica only) or A (always).
+    pub mode: String,
+    pub comment: String,
+    /// The relkind of the table: r, p, v or f.
+    pub rel_kind: String,
+    pub func_schema: String,
+    pub func: String,
+    pub lang: String,
+    /// The function's body, which is the text between its dollar quotes.
+    pub src: String,
+    /// `pg_get_functiondef`: the statement that creates the function again.
+    pub func_def: String,
+    /// How many other triggers, on this table or others, run the function.
+    pub func_others: u64,
+    pub func_owner: String,
+    pub func_mine: bool,
+    pub func_can: bool,
+    /// Whether the role has CREATE on the function's schema, which putting a dropped function back needs.
+    pub func_create: bool,
+    pub func_secdef: bool,
+    pub func_acl: bool,
+    pub func_comment: String,
+    pub func_ext: bool,
+    /// `pg_get_triggerdef`: the statement that creates the trigger again.
+    pub trig_def: String,
+    /// What the transaction must find again under the table's lock (`pg_catalog::SEEN_TRIGGER` and `SEEN_FUNCTION`).
+    pub seen_trig: String,
+    pub seen_func: String,
+    /// Why no change of the trigger can be written back, and why it cannot be created again (its function can still change).
+    pub refuse: String,
+    pub no_rewrite: String,
 }
 
 impl Trigger {
@@ -351,7 +413,12 @@ pub(super) fn indexes(rows: &[SqlRow]) -> Vec<Index> {
 }
 
 pub(super) fn col_deps(rows: &[SqlRow]) -> Vec<ColDep> {
-    rows.iter().map(|r| ColDep { col: s(r, "col"), kind: s(r, "kind"), name: s(r, "name"), what: s(r, "what") }).collect()
+    rows.iter().map(|r| ColDep { col: s(r, "col"), kind: s(r, "kind"), name: s(r, "name"), what: s(r, "what"), own: flag(r, "own"), rel_schema: s(r, "rel_schema"), rel_table: s(r, "rel_table") }).collect()
+}
+
+/// A 0 or 1 column that MySQL's key query does not have, which reads as false there.
+fn flag(r: &SqlRow, name: &str) -> bool {
+    r.int(name).is_some_and(|n| n != 0)
 }
 
 /// One row per key column, ordered by constraint and then position.
@@ -363,14 +430,46 @@ pub(super) fn foreign_keys(rows: &[SqlRow]) -> Vec<ForeignKey> {
             k.cols.push(s(r, "col"));
             k.ref_cols.push(s(r, "ref_col"));
         } else {
-            out.push(ForeignKey { name, db, table, cols: vec![s(r, "col")], ref_db: s(r, "ref_db"), ref_table: s(r, "ref_tbl"), ref_cols: vec![s(r, "ref_col")], on_update: s(r, "on_update"), on_delete: s(r, "on_delete") });
+            out.push(ForeignKey { name, db, table, cols: vec![s(r, "col")], ref_db: s(r, "ref_db"), ref_table: s(r, "ref_tbl"), ref_cols: vec![s(r, "ref_col")], on_update: s(r, "on_update"), on_delete: s(r, "on_delete"), match_full: flag(r, "match_full"), deferrable: flag(r, "defer_ok"), deferred: flag(r, "defer_init"), not_valid: flag(r, "not_valid"), comment: s(r, "comment"), opaque: s(r, "opaque"), ref_seen: Vec::new() });
         }
     }
     out
 }
 
 fn triggers(rows: &[SqlRow]) -> Vec<Trigger> {
-    rows.iter().map(|r| Trigger { name: s(r, "name"), timing: s(r, "timing"), event: s(r, "event"), body: s(r, "body"), definer: s(r, "definer"), order: num(r, "ord").unwrap_or(0), sql_mode: s(r, "sql_mode") }).collect()
+    rows.iter().map(|r| Trigger { name: s(r, "name"), timing: s(r, "timing"), event: s(r, "event"), body: s(r, "body"), definer: s(r, "definer"), order: num(r, "ord").unwrap_or(0), sql_mode: s(r, "sql_mode"), pg: pg_trigger(r) }).collect()
+}
+
+/// The PostgreSQL columns of a trigger row, absent on MySQL's.
+fn pg_trigger(r: &SqlRow) -> Option<Box<PgTrig>> {
+    text(r, "fn_name")?;
+    Some(Box::new(PgTrig {
+        per_row: flag(r, "per_row"),
+        of_cols: serde_json::from_str(&s(r, "of_cols")).unwrap_or_default(),
+        when: s(r, "when_text"),
+        mode: s(r, "mode"),
+        comment: s(r, "comment"),
+        rel_kind: s(r, "rel_kind"),
+        func_schema: s(r, "fn_schema"),
+        func: s(r, "fn_name"),
+        lang: s(r, "fn_lang"),
+        src: s(r, "fn_src"),
+        func_def: s(r, "fn_def"),
+        func_others: num(r, "fn_others").unwrap_or(0),
+        func_owner: s(r, "fn_owner"),
+        func_mine: flag(r, "fn_mine"),
+        func_can: flag(r, "fn_can"),
+        func_create: flag(r, "fn_create"),
+        func_secdef: flag(r, "fn_secdef"),
+        func_acl: flag(r, "fn_acl"),
+        func_comment: s(r, "fn_comment"),
+        func_ext: flag(r, "fn_ext"),
+        trig_def: s(r, "trig_def"),
+        seen_trig: s(r, "seen_trig"),
+        seen_func: s(r, "seen_func"),
+        refuse: s(r, "refuse"),
+        no_rewrite: s(r, "no_rewrite"),
+    }))
 }
 
 /// The triggers of a table read on a connection of the caller's, for the trigger jobs that must see what the
@@ -578,10 +677,19 @@ pub fn pg_create_table(schema: &str, table: &str, st: &Structure) -> String {
     for fk in &st.foreign_keys {
         let list = |v: &[String]| v.iter().map(|c| q(c)).collect::<Vec<_>>().join(", ");
         let mut l = format!("CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})", q(&fk.name), list(&fk.cols), Dialect::Postgres.qualified(&fk.ref_db, &fk.ref_table), list(&fk.ref_cols));
+        if fk.match_full {
+            l.push_str(" MATCH FULL");
+        }
         for (what, rule) in [("UPDATE", &fk.on_update), ("DELETE", &fk.on_delete)] {
             if !rule.is_empty() && rule != "NO ACTION" {
                 l.push_str(&format!(" ON {what} {rule}"));
             }
+        }
+        if fk.deferrable {
+            l.push_str(if fk.deferred { " DEFERRABLE INITIALLY DEFERRED" } else { " DEFERRABLE" });
+        }
+        if fk.not_valid {
+            l.push_str(" NOT VALID");
         }
         lines.push(l);
     }

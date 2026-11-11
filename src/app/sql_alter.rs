@@ -451,6 +451,9 @@ impl App {
                 }
             }
             if reload {
+                // A structure read already on its way was made before this change, and its answer would put the old structure
+                // back with nothing left to ask for a new one.
+                self.tabs[i].idx_req = 0;
                 self.reload_of(i);
             }
         }
@@ -918,7 +921,6 @@ fn plural_changes(n: usize) -> String {
 }
 
 /// Shown under a disabled Apply now button.
-pub(super) const READ_ONLY_NOTE: &str = "Read-only: unlock writes to change the structure";
 pub(super) const BUSY_NOTE: &str = "A structure change is still running.";
 
 #[cfg(test)]

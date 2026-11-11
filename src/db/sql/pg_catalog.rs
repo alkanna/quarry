@@ -106,7 +106,12 @@ macro_rules! fk_cols {
         "SELECT co.conname::text AS name, n.nspname::text AS db, c.relname::text AS tbl, a.attname::text AS col, k.ord::bigint AS pos, \
          rn.nspname::text AS ref_db, rc.relname::text AS ref_tbl, ra.attname::text AS ref_col, \
          CASE co.confupdtype WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT' WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT' END AS on_update, \
-         CASE co.confdeltype WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT' WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT' END AS on_delete \
+         CASE co.confdeltype WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT' WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT' END AS on_delete, \
+         (co.confmatchtype = 'f')::int AS match_full, co.condeferrable::int AS defer_ok, co.condeferred::int AS defer_init, (NOT co.convalidated)::int AS not_valid, \
+         COALESCE(obj_description(co.oid, 'pg_constraint'), '') AS comment, \
+         concat_ws('; ', CASE WHEN to_jsonb(co) ->> 'confdelsetcols' IS NOT NULL THEN 'its ON DELETE action names columns' END, \
+           CASE WHEN COALESCE(to_jsonb(co) ->> 'conperiod', 'false') <> 'false' THEN 'it is a PERIOD key' END, \
+           CASE WHEN COALESCE(to_jsonb(co) ->> 'conenforced', 'true') = 'false' THEN 'it is NOT ENFORCED' END) AS opaque \
          FROM pg_constraint co JOIN pg_class c ON c.oid = co.conrelid JOIN pg_namespace n ON n.oid = c.relnamespace \
          JOIN pg_class rc ON rc.oid = co.confrelid JOIN pg_namespace rn ON rn.oid = rc.relnamespace \
          CROSS JOIN LATERAL unnest(co.conkey, co.confkey) WITH ORDINALITY AS k(attnum, refattnum, ord) \
@@ -116,22 +121,75 @@ macro_rules! fk_cols {
     };
 }
 
-/// Params: [schema, table]. Columns: name, db, tbl, col, pos, ref_db, ref_tbl, ref_col, on_update, on_delete.
+/// Params: [schema, table]. Columns: name, db, tbl, col, pos, ref_db, ref_tbl, ref_col, on_update, on_delete, and what a
+/// foreign key needs to be written back exactly: match_full, defer_ok, defer_init, not_valid (the rows present when it was
+/// added were never checked), comment, and opaque (why it cannot be written back, empty when it can: a PostgreSQL 15
+/// ON DELETE column list, an 18 PERIOD key or NOT ENFORCED, read through the row's JSON so 13 leaves them out).
 pub const FOREIGN_KEYS: &str = concat!(fk_cols!(), "n.nspname = $1 AND c.relname = $2 ORDER BY co.conname, k.ord");
 
 /// Params: [schema, table] of the referenced table. Same columns.
 pub const REFERENCED_BY: &str = concat!(fk_cols!(), "rn.nspname = $1 AND rc.relname = $2 ORDER BY n.nspname, c.relname, co.conname, k.ord");
 
+/// What a transaction compares to know a trigger is still as it was read: the statement that recreates it, whether it is
+/// enabled and its comment, written once so the structure read and the lock-time read cannot drift apart. The pieces are
+/// joined with a unit separator, which no catalog text holds. Both reads run under the table's schema as the search_path,
+/// since the statement prints a function outside it qualified.
+macro_rules! seen_trig {
+    () => {
+        "concat_ws(E'\\x1f', pg_get_triggerdef(t.oid, false), t.tgenabled::text, COALESCE(obj_description(t.oid, 'pg_trigger'), ''))"
+    };
+}
+
+/// The same for the function: its definition, owner, privileges and comment, and how many other triggers run it (`$others`
+/// is the SQL that counts them). Every part that a rewrite or a drop would change or lose.
+macro_rules! seen_func {
+    ($others:literal) => {
+        concat!("concat_ws(E'\\x1f', pg_get_functiondef(p.oid), pg_get_userbyid(p.proowner)::text, COALESCE(p.proacl::text, ''), COALESCE(obj_description(p.oid, 'pg_proc'), ''), (", $others, ")::text)")
+    };
+}
+
 /// Params: [schema, table]. Columns: name, timing, event (several joined with OR), body (the whole CREATE TRIGGER
 /// statement, since the function is separate), definer (empty), ord (the order among the triggers of one timing, which
-/// is by name), sql_mode (empty).
-pub const TRIGGERS: &str = "SELECT t.tgname::text AS name, CASE WHEN (t.tgtype::int & 2) = 2 THEN 'BEFORE' WHEN (t.tgtype::int & 64) = 64 THEN 'INSTEAD OF' ELSE 'AFTER' END AS timing, \
+/// is by name), sql_mode (empty). Then what editing one needs: per_row, of_cols (a JSON array of the UPDATE OF columns),
+/// when_text, mode (tgenabled), comment, rel_kind, the function (fn_schema, fn_name, fn_lang, fn_src its body, fn_def,
+/// fn_others how many other triggers run it, fn_owner, fn_mine owned by the current role, fn_can the role may replace it (owner, and CREATE on its schema), fn_create CREATE on the function's schema,
+/// fn_secdef, fn_acl has privileges set or default privileges that a new function would get, fn_comment, fn_ext belongs to an extension), trig_def, the two `seen_*` texts, and
+/// refuse (why no change of the trigger can be written back) and no_rewrite (why it cannot be created again, though its
+/// function can still be edited).
+pub const TRIGGERS: &str = concat!("SELECT t.tgname::text AS name, CASE WHEN (t.tgtype::int & 2) = 2 THEN 'BEFORE' WHEN (t.tgtype::int & 64) = 64 THEN 'INSTEAD OF' ELSE 'AFTER' END AS timing, \
      concat_ws(' OR ', CASE WHEN (t.tgtype::int & 4) = 4 THEN 'INSERT' END, CASE WHEN (t.tgtype::int & 8) = 8 THEN 'DELETE' END, \
        CASE WHEN (t.tgtype::int & 16) = 16 THEN 'UPDATE' END, CASE WHEN (t.tgtype::int & 32) = 32 THEN 'TRUNCATE' END) AS event, \
      pg_get_triggerdef(t.oid, true) AS body, ''::text AS definer, \
-     (row_number() OVER (PARTITION BY (t.tgtype::int & 66) ORDER BY t.tgname))::bigint AS ord, ''::text AS sql_mode \
+     (row_number() OVER (PARTITION BY (t.tgtype::int & 66) ORDER BY t.tgname))::bigint AS ord, ''::text AS sql_mode, \
+     ((t.tgtype::int & 1) = 1)::int AS per_row, \
+     COALESCE((SELECT json_agg(a.attname::text ORDER BY k.ord)::text FROM unnest(t.tgattr::int2[]) WITH ORDINALITY k(n, ord) JOIN pg_attribute a ON a.attrelid = t.tgrelid AND a.attnum = k.n), '[]') AS of_cols, \
+     COALESCE(substring(pg_get_triggerdef(t.oid, true) from ' FOR EACH [A-Z]+ WHEN [(](.*)[)] EXECUTE [A-Z]+ '), '') AS when_text, \
+     t.tgenabled::text AS mode, COALESCE(obj_description(t.oid, 'pg_trigger'), '') AS comment, c.relkind::text AS rel_kind, \
+     pn.nspname::text AS fn_schema, p.proname::text AS fn_name, l.lanname::text AS fn_lang, p.prosrc AS fn_src, pg_get_functiondef(p.oid) AS fn_def, \
+     (SELECT count(*) FROM pg_trigger o WHERE o.tgfoid = p.oid AND o.oid <> t.oid)::bigint AS fn_others, \
+     pg_get_userbyid(p.proowner)::text AS fn_owner, (pg_get_userbyid(p.proowner) = current_user)::int AS fn_mine, (pg_has_role(p.proowner, 'USAGE') AND has_schema_privilege(p.pronamespace, 'CREATE'))::int AS fn_can, has_schema_privilege(p.pronamespace, 'CREATE')::int AS fn_create, \
+     p.prosecdef::int AS fn_secdef, (p.proacl IS NOT NULL OR EXISTS (SELECT 1 FROM pg_default_acl d WHERE d.defaclobjtype = 'f' AND d.defaclrole = p.proowner AND d.defaclnamespace IN (0, p.pronamespace)))::int AS fn_acl, COALESCE(obj_description(p.oid, 'pg_proc'), '') AS fn_comment, \
+     EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')::int AS fn_ext, \
+     pg_get_triggerdef(t.oid, false) AS trig_def, ", seen_trig!(), " AS seen_trig, ",
+     seen_func!("SELECT count(*) FROM pg_trigger o WHERE o.tgfoid = p.oid AND o.oid <> t.oid"), " AS seen_func, \
+     CASE WHEN t.tgconstraint <> 0 THEN 'It is a constraint trigger, which is not rewritten here.' \
+          WHEN t.tgparentid <> 0 THEN 'It is inherited from a parent table, so it can only be changed there.' \
+          WHEN c.relkind = 'p' THEN 'The table is partitioned, so its triggers are cloned to its partitions, which are not rewritten here.' ELSE '' END AS refuse, \
+     CASE WHEN t.tgnargs > 0 THEN 'It passes arguments to its function, which are not rewritten here.' \
+          WHEN t.tgoldtable IS NOT NULL OR t.tgnewtable IS NOT NULL THEN 'It reads transition tables, which are not rewritten here.' \
+          WHEN position(E'\\n' in COALESCE(substring(pg_get_triggerdef(t.oid, true) from ' FOR EACH [A-Z]+ WHEN [(](.*)[)] EXECUTE [A-Z]+ '), '')) > 0 THEN 'Its WHEN condition spans several lines, which the one-line field cannot show.' ELSE '' END AS no_rewrite \
      FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace \
-     WHERE NOT t.tgisinternal AND n.nspname = $1 AND c.relname = $2 ORDER BY 2, 3, 6";
+     JOIN pg_proc p ON p.oid = t.tgfoid JOIN pg_namespace pn ON pn.oid = p.pronamespace JOIN pg_language l ON l.oid = p.prolang \
+     WHERE NOT t.tgisinternal AND n.nspname = $1 AND c.relname = $2 ORDER BY 2, 3, 6");
+
+/// Params: [schema, table, trigger]. One column, `s`: the `seen_trig` text of the trigger, no row when it does not exist.
+pub const SEEN_TRIGGER: &str = concat!("SELECT ", seen_trig!(), " AS s FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace \
+     WHERE NOT t.tgisinternal AND n.nspname = $1 AND c.relname = $2 AND t.tgname = $3");
+
+/// Params: [the function as a quoted `"schema"."name"()`, the table as a quoted `"schema"."name"`, the trigger's name]. One
+/// column, `s`: the `seen_func` text of the function, counting the other triggers that run it (not the named one), and no row
+/// when the function does not exist.
+pub const SEEN_FUNCTION: &str = concat!("SELECT ", seen_func!("SELECT count(*) FROM pg_trigger o WHERE o.tgfoid = p.oid AND NOT (o.tgrelid = to_regclass($2) AND o.tgname = $3)"), " AS s FROM pg_proc p WHERE p.oid = to_regprocedure($1)");
 
 /// Params: [schema, table]. The columns of the MySQL status, plus total_bytes (heap, TOAST and indexes) and kind (the
 /// relkind). The estimate is NULL while the planner has no count, and the caller counts then.
@@ -192,13 +250,16 @@ pub const CONSTRAINTS: &str = "SELECT co.conname::text AS name, co.contype::text
      ORDER BY CASE co.contype WHEN 'p' THEN 0 WHEN 'u' THEN 1 WHEN 'x' THEN 2 ELSE 3 END, co.conname";
 
 /// Params: [schema, table]. What the server drops together with a column, one row per object that depends on it
-/// through `pg_depend`: the column, the kind (index, constraint, sequence, default or other), the object's name and
-/// `pg_describe_object`'s words for it. A foreign key of another table that points at the column is not here, since the
-/// server refuses that drop instead of cascading.
+/// through `pg_depend`: the column, the kind (index, constraint, sequence, default or other), the object's name,
+/// `pg_describe_object`'s words for it, and whether a constraint is the table's own. A foreign key of another table that
+/// points at the column is here too (own = 0): the server refuses that drop instead of cascading.
 pub const COLUMN_DEPS: &str = "SELECT a.attname::text AS col, \
      CASE WHEN d.classid = 'pg_class'::regclass THEN CASE WHEN d.objsubid > 0 THEN 'other' ELSE CASE c2.relkind WHEN 'i' THEN 'index' WHEN 'I' THEN 'index' WHEN 'S' THEN 'sequence' ELSE 'other' END END \
           WHEN d.classid = 'pg_constraint'::regclass THEN CASE WHEN co.contype IN ('p', 'u') THEN 'key' ELSE 'constraint' END WHEN d.classid = 'pg_attrdef'::regclass THEN CASE WHEN ad.adrelid = d.refobjid AND ad.adnum = d.refobjsubid THEN 'default' ELSE 'other' END ELSE 'other' END AS kind, \
-     COALESCE(c2.relname::text, co.conname::text, '') AS name, pg_describe_object(d.classid, d.objid, d.objsubid) AS what \
+     COALESCE(c2.relname::text, co.conname::text, '') AS name, pg_describe_object(d.classid, d.objid, d.objsubid) AS what, \
+     COALESCE(co.conrelid = t.oid, false)::int AS own, \
+     COALESCE((SELECT n3.nspname::text FROM pg_class c3 JOIN pg_namespace n3 ON n3.oid = c3.relnamespace WHERE c3.oid = co.conrelid), '') AS rel_schema, \
+     COALESCE((SELECT c3.relname::text FROM pg_class c3 WHERE c3.oid = co.conrelid), '') AS rel_table \
      FROM pg_depend d JOIN pg_class t ON t.oid = d.refobjid JOIN pg_namespace n ON n.oid = t.relnamespace \
      JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = d.refobjsubid \
      LEFT JOIN pg_class c2 ON d.classid = 'pg_class'::regclass AND c2.oid = d.objid \

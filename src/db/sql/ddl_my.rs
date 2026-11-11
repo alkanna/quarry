@@ -150,6 +150,8 @@ pub(super) fn clause(d: Dialect, m: Mode, can_rename: bool, c: &Change) -> Resul
         Change::DropIndex(n) => vec![drop_index(d, n)],
         Change::AddFk(k) => vec![add_fk(d, k)?],
         Change::DropFk(n) => vec![format!("DROP FOREIGN KEY {}", d.quote_ident(n))],
+        Change::RenameFk { .. } => return Err("MySQL and MariaDB cannot rename a foreign key. Drop it and add it again under the new name.".into()),
+        Change::SetFkDeferral { .. } => return Err("MySQL and MariaDB have no deferred foreign keys.".into()),
         Change::RenameIndex { from, to, def } => {
             check_ident(to, "An index")?;
             if can_rename {
