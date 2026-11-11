@@ -350,18 +350,25 @@ impl SslMode {
         (SslMode::VerifyIdentity, "Verify identity"),
     ];
 
-    /// The same modes under their libpq `sslmode` names, for the PostgreSQL form.
+    /// The same modes under their libpq `sslmode` names, for the PostgreSQL form. Built from `pg_name`, the one place the
+    /// names are written.
     pub const PG_ALL: [(SslMode, &'static str); 5] = [
-        (SslMode::Disabled, "disable"),
-        (SslMode::Preferred, "prefer"),
-        (SslMode::Required, "require"),
-        (SslMode::VerifyCa, "verify-ca"),
-        (SslMode::VerifyIdentity, "verify-full"),
+        (SslMode::Disabled, SslMode::Disabled.pg_name()),
+        (SslMode::Preferred, SslMode::Preferred.pg_name()),
+        (SslMode::Required, SslMode::Required.pg_name()),
+        (SslMode::VerifyCa, SslMode::VerifyCa.pg_name()),
+        (SslMode::VerifyIdentity, SslMode::VerifyIdentity.pg_name()),
     ];
 
-    /// The libpq name of this mode.
-    pub fn pg_name(self) -> &'static str {
-        self.pg_param()
+    /// The libpq name of this mode, as `sslmode` spells it.
+    pub const fn pg_name(self) -> &'static str {
+        match self {
+            SslMode::Disabled => "disable",
+            SslMode::Preferred => "prefer",
+            SslMode::Required => "require",
+            SslMode::VerifyCa => "verify-ca",
+            SslMode::VerifyIdentity => "verify-full",
+        }
     }
 
     fn param(self) -> &'static str {
@@ -378,27 +385,12 @@ impl SslMode {
         SslMode::ALL.iter().map(|(m, _)| *m).find(|m| m.param().eq_ignore_ascii_case(s))
     }
 
-    /// The libpq spelling of `sslmode`.
-    fn pg_param(self) -> &'static str {
-        match self {
-            SslMode::Disabled => "disable",
-            SslMode::Preferred => "prefer",
-            SslMode::Required => "require",
-            SslMode::VerifyCa => "verify-ca",
-            SslMode::VerifyIdentity => "verify-full",
-        }
-    }
-
     /// `allow` tries plain first, which Quarry has no mode for, so it reads as Preferred.
     fn from_pg_param(s: &str) -> Option<SslMode> {
-        match s.to_ascii_lowercase().as_str() {
-            "disable" => Some(SslMode::Disabled),
-            "allow" | "prefer" => Some(SslMode::Preferred),
-            "require" => Some(SslMode::Required),
-            "verify-ca" => Some(SslMode::VerifyCa),
-            "verify-full" => Some(SslMode::VerifyIdentity),
-            _ => None,
+        if s.eq_ignore_ascii_case("allow") {
+            return Some(SslMode::Preferred);
         }
+        SslMode::PG_ALL.iter().find(|(_, n)| n.eq_ignore_ascii_case(s)).map(|(m, _)| *m)
     }
 }
 
@@ -487,11 +479,14 @@ impl Addr {
         Ok(Addr { scheme: "postgres".into(), ..a })
     }
 
-    /// The libpq `key=value` form. Values may be single quoted with backslash escapes.
+    /// The libpq `key=value` form. Values may be single quoted with backslash escapes. An error names the position of the
+    /// item (the 1st, 2nd and so on) and never repeats any of the text, because a value may be the password.
     fn from_keywords(text: &str) -> Result<Addr, String> {
         let mut a = Addr { scheme: "postgres".into(), port: PG_PORT, ..Default::default() };
         let mut chars = text.chars().peekable();
+        let mut item = 0;
         loop {
+            item += 1;
             while chars.peek().is_some_and(|c| c.is_whitespace()) {
                 chars.next();
             }
@@ -510,7 +505,7 @@ impl Addr {
                 chars.next();
             }
             if chars.next() != Some('=') {
-                return Err(format!("Expected key=value near \"{key}\""));
+                return Err(format!("Expected key=value in item {item} of the connection string"));
             }
             while chars.peek().is_some_and(|c| c.is_whitespace()) {
                 chars.next();
@@ -523,7 +518,7 @@ impl Addr {
                         Some('\\') => val.extend(chars.next()),
                         Some('\'') => break,
                         Some(c) => val.push(c),
-                        None => return Err(format!("The quoted value of {key} is not closed")),
+                        None => return Err(format!("The quoted value in item {item} of the connection string is not closed")),
                     }
                 }
             } else {
@@ -549,7 +544,7 @@ impl Addr {
                 "user" => a.user = val,
                 "password" => a.password = val,
                 "dbname" => a.database = val,
-                "sslmode" => a.ssl_mode = SslMode::from_pg_param(&val).ok_or_else(|| format!("Unknown sslmode {val}"))?,
+                "sslmode" => a.ssl_mode = SslMode::from_pg_param(&val).ok_or_else(|| format!("Unknown sslmode in item {item} of the connection string"))?,
                 "sslrootcert" => a.ssl_ca = val,
                 _ => {}
             }
@@ -568,7 +563,7 @@ impl Addr {
         let pg = self.engine() == Engine::Postgres;
         let mut q = Vec::new();
         if self.ssl_mode != SslMode::Preferred {
-            q.push(if pg { format!("sslmode={}", self.ssl_mode.pg_param()) } else { format!("ssl-mode={}", self.ssl_mode.param()) });
+            q.push(if pg { format!("sslmode={}", self.ssl_mode.pg_name()) } else { format!("ssl-mode={}", self.ssl_mode.param()) });
         }
         if !self.ssl_ca.is_empty() {
             q.push(format!("{}={}", if pg { "sslrootcert" } else { "ssl-ca" }, encode(&self.ssl_ca)));
@@ -696,6 +691,30 @@ mod tests {
             assert!(!e.contains("secret"), "{e}");
         }
         assert!(Addr::from_paste("mysql://h").unwrap_err().contains("postgresql://"));
+    }
+
+    #[test]
+    fn a_keyword_string_that_fails_never_echoes_what_was_typed() {
+        // A password with a space is read as a password and a stray word, and each of these breaks at a different place.
+        for bad in [
+            "host=h password=my secret", "secret", "host=h secret", "host=h password='sec ret", "host=h sslmode=secret", "host=h port=secret", "password=secret host",
+            "host=h password='sec\\'ret",
+        ] {
+            let e = Addr::from_paste(bad).unwrap_err();
+            assert!(!e.contains("secret") && !e.contains("sec ret"), "{bad}: {e}");
+        }
+        assert!(Addr::from_paste("host=h password=my secret").unwrap_err().contains("item 3"));
+    }
+
+    #[test]
+    fn the_libpq_names_come_from_one_mapping() {
+        for (m, name) in SslMode::PG_ALL {
+            assert_eq!(m.pg_name(), name);
+            assert_eq!(SslMode::from_pg_param(name), Some(m));
+            assert_eq!(Addr { scheme: "postgres".into(), host: "h".into(), ssl_mode: m, ..Default::default() }.to_uri().contains(&format!("sslmode={name}")), m != SslMode::Preferred);
+        }
+        assert_eq!(SslMode::from_pg_param("ALLOW"), Some(SslMode::Preferred));
+        assert_eq!(SslMode::from_pg_param("nope"), None);
     }
 
     #[test]
