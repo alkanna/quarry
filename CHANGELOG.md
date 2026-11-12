@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.38.0](https://github.com/alkanna/quarry/compare/v0.37.0...v0.38.0) (2026-11-12)
+
+
+### Features
+
+* check and highlight JSON in the large SQL editor, and fix two editor layout bugs ([#186](https://github.com/alkanna/quarry/issues/186)) ([a67b7cd](https://github.com/alkanna/quarry/commit/a67b7cd7ed6fb004fbf3e63add0b019f10f46e61))
+
+
+### Bug Fixes
+
+* cut long Cloud SQL instance names short so the IAM badge never covers the region ([#184](https://github.com/alkanna/quarry/issues/184)) ([c527ef9](https://github.com/alkanna/quarry/commit/c527ef9cae1a2af2b87a01a12eadb74732eecc5c))
+
 ## [0.37.0](https://github.com/alkanna/quarry/compare/v0.36.0...v0.37.0) (2026-11-12)
 
 
