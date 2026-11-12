@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.41.0](https://github.com/alkanna/quarry/compare/v0.40.0...v0.41.0) (2026-11-12)
+
+
+### Features
+
+* keep each scroll gesture on one axis, on by default ([#203](https://github.com/alkanna/quarry/issues/203)) ([9c75ce8](https://github.com/alkanna/quarry/commit/9c75ce86ffb87d7b58ccd26afae807323f0952b3))
+
 ## [0.40.0](https://github.com/alkanna/quarry/compare/v0.39.2...v0.40.0) (2026-11-12)
 
 
