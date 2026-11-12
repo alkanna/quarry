@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.39.2](https://github.com/alkanna/quarry/compare/v0.39.1...v0.39.2) (2026-11-12)
+
+
+### Bug Fixes
+
+* save the cell editor only on a click outside or Enter and Tab ([#198](https://github.com/alkanna/quarry/issues/198)) ([8acfc43](https://github.com/alkanna/quarry/commit/8acfc435cbf87ecdc61ccbe2343d842bf573eb24))
+
 ## [0.39.1](https://github.com/alkanna/quarry/compare/v0.39.0...v0.39.1) (2026-11-12)
 
 
