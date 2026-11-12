@@ -273,7 +273,7 @@ impl App {
         }
     }
 
-    fn delete_dialog(&mut self, ui: &mut egui::Ui, at: &mut Sel, docs: &mut [Document], keep: &mut bool) {
+    fn delete_dialog(&mut self, ui: &mut egui::Ui, at: &Sel, docs: &[Document], keep: &mut bool) {
         const SHOWN: usize = 5;
         let sql = self.conn(at.conn).is_some_and(|c| c.sql.is_some());
         let ids: Vec<String> = docs.iter().take(SHOWN).map(|d| d.get("_id").map(|k| if sql { k.as_document().map(|k| k.values().map(db::short).collect::<Vec<_>>().join("-")).unwrap_or_default() } else { db::short(k) }).unwrap_or_default()).collect();
@@ -310,7 +310,7 @@ impl App {
         });
     }
 
-    fn new_collection_dialog(&mut self, ui: &mut egui::Ui, conn: &mut u64, db: &mut String, name: &mut String, view: &mut bool, source: &mut String, pipeline: &mut String, keep: &mut bool) {
+    fn new_collection_dialog(&mut self, ui: &mut egui::Ui, conn: &u64, db: &String, name: &mut String, view: &mut bool, source: &mut String, pipeline: &mut String, keep: &mut bool) {
         ui.set_width(520.0);
         dialog_title(ui, if *view { format!("New view in {db}") } else { format!("New collection in {db}") });
         egui::Grid::new("newcoll").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
@@ -356,7 +356,7 @@ impl App {
         });
     }
 
-    fn duplicate_coll_dialog(&mut self, ui: &mut egui::Ui, conn: &mut u64, db: &mut String, coll: &mut String, name: &mut String, keep: &mut bool) {
+    fn duplicate_coll_dialog(&mut self, ui: &mut egui::Ui, conn: &u64, db: &String, coll: &String, name: &mut String, keep: &mut bool) {
         dialog_title(ui, format!("Duplicate {db}.{coll}"));
         ui.label(RichText::new("Copies every document, index and setting (validator, collation) into a new collection of this database.").color(MUTED()));
         ui.add(egui::TextEdit::singleline(name).desired_width(320.0));
@@ -383,7 +383,7 @@ impl App {
         });
     }
 
-    fn save_all_dialog(&mut self, ui: &mut egui::Ui, keys: &mut [String], keep: &mut bool) {
+    fn save_all_dialog(&mut self, ui: &mut egui::Ui, keys: &[String], keep: &mut bool) {
         let sql = self.t().is_some_and(|t| t.sql.is_some());
         let n: usize = keys.iter().filter_map(|k| self.drafts.get(k)).map(|d| db::diff(&d.original, &d.current).len()).sum();
         if sql {
@@ -410,7 +410,7 @@ impl App {
         });
     }
 
-    fn grouped_dialog(&mut self, ui: &mut egui::Ui, sel: &mut Sel, path: &mut String, pipeline: &mut [Document], rows: &mut [Document], keep: &mut bool) {
+    fn grouped_dialog(&mut self, ui: &mut egui::Ui, sel: &Sel, path: &String, pipeline: &[Document], rows: &[Document], keep: &mut bool) {
         ui.set_width(560.0);
         dialog_title(ui, format!("Distinct values for {}: {path}", sel.coll));
         let total: u64 = rows.iter().filter_map(|r| r.get("count").and_then(|c| c.as_i64().or_else(|| c.as_i32().map(i64::from)))).map(|c| c as u64).sum();
@@ -454,7 +454,7 @@ impl App {
         });
     }
 
-    fn rename_field_dialog(&mut self, ui: &mut egui::Ui, d: &mut Document, path: &mut [String], name: &mut String, keep: &mut bool) {
+    fn rename_field_dialog(&mut self, ui: &mut egui::Ui, d: &Document, path: &[String], name: &mut String, keep: &mut bool) {
         let from = path.join(".");
         dialog_title(ui, format!("Rename {from}"));
         ui.add(egui::TextEdit::singleline(name).font(egui::TextStyle::Monospace).desired_width(320.0));
