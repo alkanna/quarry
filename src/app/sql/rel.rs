@@ -4,6 +4,7 @@
 
 use crate::app::sql::alter::{sql_block, BUSY_NOTE};
 use crate::app::*;
+use crate::app::tabs::has_clauses;
 use db::sql::ddl::{self, Change, FK_ACTIONS};
 use db::sql::structure::{ForeignKey, Structure};
 
@@ -161,15 +162,6 @@ fn action_label(i: usize) -> &'static str {
 
 fn type_text(st: &Structure, col: &str) -> String {
     st.columns.iter().find(|c| c.name.eq_ignore_ascii_case(col)).map(|c| c.full_type.to_ascii_uppercase()).unwrap_or_default()
-}
-
-/// Whether a tab holds a filter, sort or bar clause of the person's, which opening a row there would replace.
-fn has_clauses(t: &Tab) -> bool {
-    let bar = t.sql.as_ref().is_some_and(|s| {
-        let c = &s.bar.c;
-        !(c.select.is_empty() && c.group.is_empty() && c.having.is_empty() && c.limit.is_empty() && c.offset.is_empty() && c.hint.is_empty() && !c.distinct)
-    });
-    !t.filter_txt.trim().is_empty() || !t.sort_txt.trim().is_empty() || bar
 }
 
 /// The filter that finds the row a key points to, from the key columns of the clicked row. FLOAT and DOUBLE keys get
@@ -583,8 +575,9 @@ impl App {
             Some(i) => self.set_cur(i),
             None => {
                 let engine = self.conn(conn).map(|c| c.meta.engine).unwrap_or_default();
-                self.tabs.push(Tab::new(sel).for_engine(engine));
-                self.set_cur(self.tabs.len() - 1);
+                // Next to the table it was opened from, as a browser opens a link in a new tab.
+                self.tabs.insert(self.cur + 1, Tab::new(sel).for_engine(engine));
+                self.set_cur(self.cur + 1);
             }
         }
         let Some(t) = self.tm() else { return };

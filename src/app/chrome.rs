@@ -76,8 +76,11 @@ impl App {
         if k(cmd, Key::W) {
             self.close_tab(self.cur);
         }
-        if k(cmd, Key::K) || k(cmd, Key::T) {
+        if k(cmd, Key::K) {
             self.open_palette();
+        }
+        if k(cmd, Key::T) {
+            self.open_new_tab();
         }
         let query_view = self.t().is_some_and(|t| t.view == View::Sql && t.sql.is_some());
         if query_view && k(cmd | shift, Key::Enter) {
@@ -560,8 +563,9 @@ impl App {
                 let (c, s) = (b.center(), Stroke::new(1.5, if resp.hovered() { BRIGHT() } else { MUTED() }));
                 ui.painter().line_segment([c - egui::vec2(5.5, 0.0), c + egui::vec2(5.5, 0.0)], s);
                 ui.painter().line_segment([c - egui::vec2(0.0, 5.5), c + egui::vec2(0.0, 5.5)], s);
-                if resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Duplicate this tab").clicked() {
-                    dup = true;
+                // A browser's "+": Duplicate stays in the tab's right-click menu.
+                if resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("New tab ({})", keys(false, false, "T"))).clicked() {
+                    self.open_new_tab();
                 }
             }
             if overflow {

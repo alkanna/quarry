@@ -428,7 +428,7 @@ impl App {
             Act::ShowDup => {
                 let (Some(e), Some((f, v))) = (e, e.and_then(|e| e.ex.dup.clone())) else { return };
                 let Some(sel) = e.sel.clone() else { return };
-                self.open_collection(sel, false);
+                self.open_collection(sel, Open::Here);
                 if let Some(t) = self.tm() {
                     t.view = View::Documents;
                     t.filter_txt = format!("{{ {f}: {v} }}");

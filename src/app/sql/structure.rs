@@ -153,7 +153,7 @@ impl App {
             Act::Copy(text) => ctx.copy_text(text),
             Act::Open { db, table } => {
                 let base = self.tabs[self.cur].sel.clone();
-                self.open_collection(sql::ns::with_ns(self.dialect_of(base.conn), &base, &db, table), false);
+                self.open_collection(sql::ns::with_ns(self.dialect_of(base.conn), &base, &db, table), Open::Here);
             }
             Act::Refresh => {
                 if let Some(s) = self.tabs[self.cur].sql.as_mut() {

@@ -425,7 +425,7 @@ impl App {
             }
             Ddl::CreatedTable => {
                 self.pg_refresh(conn, &database);
-                self.open_collection(Sel { conn, db: database, schema, coll: table }, false);
+                self.open_collection(Sel { conn, db: database, schema, coll: table }, Open::Here);
                 if let Some(t) = self.tm() {
                     t.view = View::Structure;
                 }

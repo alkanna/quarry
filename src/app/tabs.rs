@@ -81,21 +81,38 @@ impl App {
         }
     }
 
-    /// Opens a collection. Like the original (treeOpenInNewTab), a new tab is used unless one
-    /// already shows that collection; `replace` reuses the current tab instead.
-    pub(super) fn open_collection(&mut self, sel: Sel, replace: bool) {
+    /// Opens a collection, as a browser opens a page. `Here` goes to a tab already showing it, else takes the
+    /// current tab when nothing would be lost there, else opens a tab next to it.
+    pub(super) fn open_collection(&mut self, sel: Sel, how: Open) {
+        // Before reset_doc_state, which closes the document editor this checks for.
+        let editing = self.json_edit.is_some() || self.sql_cell.is_some();
+        let keep = self.t().is_none_or(|t| editing || keeps_work(t, &self.drafts));
         self.reset_doc_state();
-        if let Some(i) = self.tabs.iter().position(|t| t.sel == sel) {
+        if how == Open::Here
+            && let Some(i) = self.tabs.iter().position(|t| t.sel == sel)
+        {
             self.set_cur(i);
             return;
         }
         let engine = self.conn(sel.conn).map(|c| c.meta.engine).unwrap_or_default();
-        if replace && !self.tabs.is_empty() {
-            let view = self.tabs[self.cur].view;
-            self.tabs[self.cur] = Tab { view, ..Tab::new(sel).for_engine(engine) };
+        let replace = !self.tabs.is_empty() && (how == Open::Replace || how == Open::Here && !keep);
+        if replace {
+            let old = &self.tabs[self.cur];
+            // Content, Structure and the like carry over to the next table of the same kind of engine.
+            let view = if how == Open::Replace || old.sql.is_some() == engine.is_sql() { old.view } else { View::Documents };
+            let new = Tab { view, ..Tab::new(sel).for_engine(engine) };
+            let mut old = std::mem::replace(&mut self.tabs[self.cur], new);
+            if how == Open::Here {
+                // Cmd+Shift+T brings the replaced tab back, as it does a closed one.
+                old.watch.stop();
+                self.remember_closed(old);
+            }
+            let i = self.cur;
+            self.show_tab(i);
         } else {
-            self.tabs.push(Tab::new(sel).for_engine(engine));
-            self.set_cur(self.tabs.len() - 1);
+            let at = if self.tabs.is_empty() { 0 } else { self.cur + 1 };
+            self.tabs.insert(at, Tab::new(sel).for_engine(engine));
+            self.set_cur(at);
         }
         self.reload();
     }
@@ -205,9 +222,49 @@ fn nav_target(from: &mut Vec<u64>, tabs: &[Tab], cur: usize) -> Option<usize> {
     None
 }
 
+/// Whether a tab holds work a click elsewhere must not throw away: a workspace view, a query of the person's, or
+/// staged edits. Such a tab is never reused by a plain click.
+fn keeps_work(t: &Tab, drafts: &HashMap<String, Draft>) -> bool {
+    matches!(t.view, View::Shell | View::Sql | View::Import | View::Compare | View::Watch)
+        || has_clauses(t)
+        || !t.proj_txt.trim().is_empty()
+        || t.view == View::Aggregate && !t.agg_txt.trim().is_empty()
+        || !drafts_of(drafts, &t.sel).is_empty()
+}
+
+/// Whether a tab holds a filter, sort or bar clause of the person's, which opening a row there would replace.
+pub(super) fn has_clauses(t: &Tab) -> bool {
+    let bar = t.sql.as_ref().is_some_and(|s| {
+        let c = &s.bar.c;
+        !(c.select.is_empty() && c.group.is_empty() && c.having.is_empty() && c.limit.is_empty() && c.offset.is_empty() && c.hint.is_empty() && !c.distinct)
+    });
+    !t.filter_txt.trim().is_empty() || !t.sort_txt.trim().is_empty() || bar
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_click_reuses_only_a_tab_without_work_in_it() {
+        let none = HashMap::new();
+        assert!(!keeps_work(&Tab::new(sel("a")), &none), "a fresh tab is reused");
+        let with = |f: fn(&mut Tab)| {
+            let mut t = Tab::new(sel("a"));
+            f(&mut t);
+            keeps_work(&t, &none)
+        };
+        assert!(with(|t| t.filter_txt = "{a: 1}".into()), "a filter");
+        assert!(with(|t| t.proj_txt = "{a: 1}".into()), "a projection");
+        assert!(with(|t| t.view = View::Shell), "the Shell");
+        assert!(with(|t| t.view = View::Watch), "a running change stream");
+        assert!(!with(|t| t.view = View::Indexes), "a view of the collection itself");
+        let mut drafts = HashMap::new();
+        let s = sel("a");
+        drafts.insert("k".into(), Draft { conn: s.conn, db: s.db.clone(), schema: s.schema.clone(), coll: s.coll.clone(), original: Document::new(), current: Document::new() });
+        assert!(keeps_work(&Tab::new(sel("a")), &drafts), "staged edits");
+        assert!(!keeps_work(&Tab::new(sel("b")), &drafts), "edits staged in another collection");
+    }
 
     #[test]
     fn back_skips_closed_and_current_tabs() {

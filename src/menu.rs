@@ -106,6 +106,7 @@ impl MenuBar {
         let file = Submenu::new("File", true);
         add(&file, &[
             Some(("New Connection…", key(CMD, Key::N))),
+            Some(("New Tab…", key(CMD, Key::T))),
             Some(("Open Collection…", key(CMD, Key::K))),
             Some(("Reopen Closed Tab", key(CMD_SHIFT, Key::T))),
             None,

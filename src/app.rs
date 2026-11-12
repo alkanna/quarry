@@ -441,7 +441,7 @@ impl App {
             app.conns.push(Conn { dbs: vec![("fixture".into(), Some(vec!["documents".into()]))], ..Conn::new(ConnMeta { id: 1, name: "Fixture".into(), ..Default::default() }, Status::Ready) });
             app.active = Some(1);
             app.open_dbs.insert((1, "fixture".into()));
-            app.open_collection(sel, false);
+            app.open_collection(sel, Open::Here);
             app.req += 1;
             app.tabs[0].req = app.req;
             let n = rows.len() as u64;

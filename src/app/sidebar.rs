@@ -366,7 +366,7 @@ impl App {
         }
     }
 
-    pub(super) fn jump(&mut self, j: Jump) {
+    pub(super) fn jump(&mut self, j: Jump, how: Open) {
         // The jump reveals its target in the tree, which must be on screen to show it.
         self.show_sidebar();
         let (id, db) = match &j {
@@ -382,7 +382,7 @@ impl App {
             self.open_dbs.insert((id, db));
         }
         if let Jump::Coll(sel) = j {
-            self.open_collection(sel, false);
+            self.open_collection(sel, how);
         }
     }
 
@@ -649,14 +649,21 @@ impl App {
                             r.scroll_to_me(Some(egui::Align::Center));
                             revealed = true;
                         }
-                        if r.clicked() {
-                            open = Some(Sel { conn: id, db: db_name.clone(), schema: picked.to_string(), coll: coll.clone() });
+                        let this = || Sel { conn: id, db: db_name.clone(), schema: picked.to_string(), coll: coll.clone() };
+                        // Cmd+click and middle-click open a new tab, as links do in a browser.
+                        if r.middle_clicked() || r.clicked() && ui.input(|i| i.modifiers.command) {
+                            open = Some((this(), Open::NewTab));
+                        } else if r.clicked() {
+                            open = Some((this(), Open::Here));
                         }
                         r.context_menu(|ui| {
                             menu_look(ui);
                             ui.label(RichText::new(format!("{}: {coll}", if is_view { "View" } else if sql { "Table" } else { "Collection" })).size(TXT_SMALL).color(MUTED()));
                             if ui.button("Open").clicked() {
-                                open = Some(Sel { conn: id, db: db_name.clone(), schema: picked.to_string(), coll: coll.clone() });
+                                open = Some((this(), Open::Here));
+                            }
+                            if ui.button("Open in new tab").clicked() {
+                                open = Some((this(), Open::NewTab));
                             }
                             if sql {
                                 if !is_view {
@@ -747,8 +754,8 @@ impl App {
         if let Some(d) = toggle && !self.open_dbs.remove(&(id, d.clone())) {
             self.open_dbs.insert((id, d));
         }
-        if let Some(s) = open {
-            self.open_collection(s, false);
+        if let Some((s, how)) = open {
+            self.open_collection(s, how);
         }
         for a in side {
             self.side_act(id, a);
@@ -826,7 +833,7 @@ impl App {
             }
             SideAct::Restore(db) => self.modal = Some(Modal::Tool(Box::new(ToolForm { conn, from_db: db.clone(), db, restore: true, gzip: true, ..Default::default() }))),
             SideAct::Compare(db, coll) => {
-                self.open_collection(Sel { conn, db: db.clone(), coll, ..Default::default() }, false);
+                self.open_collection(Sel { conn, db: db.clone(), coll, ..Default::default() }, Open::Here);
                 let t = self.tm().unwrap();
                 t.view = View::Compare;
                 if t.compare.conn == 0 {

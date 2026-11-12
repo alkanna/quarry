@@ -69,7 +69,7 @@ impl App {
             t.bar_err = None;
         }
         if sh.coll != cur.coll {
-            self.open_collection(Sel { coll: sh.coll.clone(), ..cur }, true);
+            self.open_collection(Sel { coll: sh.coll.clone(), ..cur }, Open::Replace);
         }
         let t = self.tm().unwrap();
         t.selected = None;

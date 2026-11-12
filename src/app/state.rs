@@ -885,7 +885,7 @@ pub(super) enum Modal {
     Tool(Box<ToolForm>),
     Relations { conn: u64, db: String },
     /// `cmds` once ">" switched the palette to commands.
-    Palette { query: String, sel: usize, cmds: bool },
+    Palette { query: String, sel: usize, cmds: bool, new_tab: bool },
     /// Export or copy-to-file of the rows of a result, in any of the Copy as formats.
     Export(Box<super::export::ExportForm>),
     /// Import a CSV file into a SQL table.
@@ -1374,6 +1374,15 @@ pub(super) enum TreeAct {
     EditDoc,
     /// Open or close every container under the path; an empty path means the whole document.
     Fold(Vec<String>, bool),
+}
+
+/// Where a collection opens. `Here` reuses the current tab unless work in it would be lost.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum Open {
+    Here,
+    NewTab,
+    /// The current tab whatever it holds: the Shell switching its own collection.
+    Replace,
 }
 
 #[derive(Clone, Copy)]
