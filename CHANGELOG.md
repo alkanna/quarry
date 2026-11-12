@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.42.0](https://github.com/alkanna/quarry/compare/v0.41.0...v0.42.0) (2026-11-12)
+
+
+### Features
+
+* an accent override, five new themes and the Catppuccin flavors ([#206](https://github.com/alkanna/quarry/issues/206)) ([570f23c](https://github.com/alkanna/quarry/commit/570f23cd0eb9ba6db08c10536649b90599c5197f))
+* open collections in the current tab like a browser, new tabs on request ([#208](https://github.com/alkanna/quarry/issues/208)) ([811500f](https://github.com/alkanna/quarry/commit/811500ff04ae80786a8e48c1761e6e0b313494a1))
+
+
+### Bug Fixes
+
+* rank exact and prefix SQL completions above loose column matches ([#205](https://github.com/alkanna/quarry/issues/205)) ([8aadaa5](https://github.com/alkanna/quarry/commit/8aadaa5f905d19edc5f122a925a874b594fccbc3))
+
 ## [0.41.0](https://github.com/alkanna/quarry/compare/v0.40.0...v0.41.0) (2026-11-12)
 
 
