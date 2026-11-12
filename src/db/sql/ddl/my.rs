@@ -1,10 +1,10 @@
 //! The MySQL and MariaDB text of a structure change: one ALTER TABLE for the staged `Change`s. The shared types,
 //! the simulation and the undo are in `ddl`; PostgreSQL has its own emitter in `pg::ddl`.
 
-use super::ddl::{check_expr, check_ident, is_binary, is_geometry, is_hex_lit, is_bit_lit, is_integer, is_number, is_numeric, is_text, parse_values, Change, ColDef, Dv, IndexDef, IndexKind, Mode, Pos, FK_ACTIONS};
-use super::structure::ForeignKey;
-use super::value::lit;
-use super::Dialect;
+use crate::db::sql::ddl::{check_expr, check_ident, is_binary, is_geometry, is_hex_lit, is_bit_lit, is_integer, is_number, is_numeric, is_text, parse_values, Change, ColDef, Dv, IndexDef, IndexKind, Mode, Pos, FK_ACTIONS};
+use crate::db::sql::structure::ForeignKey;
+use crate::db::sql::value::lit;
+use crate::db::sql::Dialect;
 
 /// Everything after the column name: `DECIMAL(12,2) UNSIGNED NOT NULL DEFAULT 0.00 COMMENT '...'`.
 pub fn definition(d: Dialect, m: Mode, c: &ColDef) -> Result<String, String> {
@@ -78,7 +78,7 @@ pub fn definition(d: Dialect, m: Mode, c: &ColDef) -> Result<String, String> {
     Ok(s)
 }
 
-pub(super) fn position(d: Dialect, p: &Pos) -> String {
+pub(in crate::db::sql) fn position(d: Dialect, p: &Pos) -> String {
     match p {
         Pos::Keep => String::new(),
         Pos::First => " FIRST".into(),
@@ -86,7 +86,7 @@ pub(super) fn position(d: Dialect, p: &Pos) -> String {
     }
 }
 
-pub(super) fn index_cols(d: Dialect, ix: &IndexDef) -> Result<String, String> {
+pub(in crate::db::sql) fn index_cols(d: Dialect, ix: &IndexDef) -> Result<String, String> {
     if ix.cols.is_empty() {
         return Err("An index needs at least one column.".into());
     }
@@ -94,7 +94,7 @@ pub(super) fn index_cols(d: Dialect, ix: &IndexDef) -> Result<String, String> {
     Ok(parts.join(", "))
 }
 
-pub(super) fn add_index(d: Dialect, m: Mode, ix: &IndexDef) -> Result<String, String> {
+pub(in crate::db::sql) fn add_index(d: Dialect, m: Mode, ix: &IndexDef) -> Result<String, String> {
     if ix.functional {
         return Err(format!("Index {} has an expression part, which this editor cannot write.", ix.name));
     }
@@ -123,7 +123,7 @@ pub(super) fn add_index(d: Dialect, m: Mode, ix: &IndexDef) -> Result<String, St
     Ok(format!("ADD {kind}INDEX {} ({cols}){comment}{hidden}", d.quote_ident(&ix.name)))
 }
 
-pub(super) fn add_fk(d: Dialect, k: &ForeignKey) -> Result<String, String> {
+pub(in crate::db::sql) fn add_fk(d: Dialect, k: &ForeignKey) -> Result<String, String> {
     check_ident(&k.name, "A foreign key")?;
     check_ident(&k.ref_table, "The referenced table")?;
     if k.cols.is_empty() || k.cols.len() != k.ref_cols.len() {
@@ -135,12 +135,12 @@ pub(super) fn add_fk(d: Dialect, k: &ForeignKey) -> Result<String, String> {
     Ok(format!("ADD CONSTRAINT {}\n    FOREIGN KEY ({})\n    REFERENCES {} ({})\n    ON UPDATE {} ON DELETE {}", d.quote_ident(&k.name), names(&k.cols), target, names(&k.ref_cols), action(&k.on_update)?, action(&k.on_delete)?))
 }
 
-pub(super) fn drop_index(d: Dialect, name: &str) -> String {
+pub(in crate::db::sql) fn drop_index(d: Dialect, name: &str) -> String {
     if name == "PRIMARY" { "DROP PRIMARY KEY".into() } else { format!("DROP INDEX {}", d.quote_ident(name)) }
 }
 
 /// One clause of the ALTER, or two for a rename the server cannot do directly.
-pub(super) fn clause(d: Dialect, m: Mode, can_rename: bool, c: &Change) -> Result<Vec<String>, String> {
+pub(in crate::db::sql) fn clause(d: Dialect, m: Mode, can_rename: bool, c: &Change) -> Result<Vec<String>, String> {
     Ok(match c {
         Change::Add { def, pos } => vec![format!("ADD COLUMN {} {}{}", d.quote_ident(&def.name), definition(d, m, def)?, position(d, pos))],
         Change::Modify { from, def, pos } if *from == def.name => vec![format!("MODIFY {} {}{}", d.quote_ident(from), definition(d, m, def)?, position(d, pos))],
