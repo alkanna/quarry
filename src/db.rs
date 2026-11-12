@@ -336,6 +336,8 @@ pub struct Net {
     pub cloud_sql: Option<crate::cloudsql::CloudSql>,
     /// Where the proxy and gcloud are, when the app already knows; empty means the worker looks.
     pub tools: crate::cloudsql::Tools,
+    /// PostgreSQL: the passphrase of an encrypted client key, from the Keychain.
+    pub key_passphrase: Option<String>,
 }
 
 /// What a connection keeps alive while it is open. Dropping it closes the tunnel or stops the proxy.

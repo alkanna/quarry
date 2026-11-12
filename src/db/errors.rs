@@ -223,6 +223,9 @@ pub fn classify(raw: &str) -> ErrKind {
     // Before the others: an IAM refusal also says "authentication failed", and the cause is the Google identity, not a password.
     if low.contains("cloud sql proxy") || low.contains("cloud sql:") || low.contains("cloud sql iam") {
         ErrKind::CloudSql
+    } else if client_cert_problem(raw).is_some() {
+        // Before SignIn: the server refuses a missing certificate with 28000, and a password is not the cause.
+        ErrKind::Tls
     } else if is_unauthorized(raw) {
         ErrKind::Privilege
     } else if matches!(n, Some(18 | 1045 | 1698)) || matches!(pg, Some("28P01" | "28000")) || low.contains("authentication failed") || low.contains("scram failure") {
@@ -325,8 +328,9 @@ pub fn explain(raw: &str, cx: &ErrCtx) -> Explained {
             ex.fixes = vec![Fix::EditConn, Fix::Retry];
         }
         ErrKind::Tls => {
-            ex.title = if low.contains("certificate") { "The server's certificate is not trusted".into() } else { format!("Could not open a TLS connection to {host}") };
-            ex.hint = if low.contains("certificate") { "The server sent a certificate this machine does not trust. Add its CA file in the connection's TLS settings.".into() } else { said.clone() };
+            (ex.title, ex.hint) = client_cert_problem(raw).unwrap_or_else(|| {
+                if low.contains("certificate") { ("The server's certificate is not trusted".into(), "The server sent a certificate this machine does not trust. Add its CA file in the connection's TLS settings.".into()) } else { (format!("Could not open a TLS connection to {host}"), said.clone()) }
+            });
             ex.fixes = vec![Fix::EditConn, Fix::Retry];
         }
         ErrKind::Lost => {
@@ -393,6 +397,42 @@ pub fn explain(raw: &str, cx: &ErrCtx) -> Explained {
         ex.hint.clear();
     }
     ex
+}
+
+/// A PostgreSQL client certificate problem: the files Quarry reads before connecting, the key rustls finds not to match
+/// the certificate, and the server's refusals. Title and hint, or None when the text is about something else.
+pub fn client_cert_problem(raw: &str) -> Option<(String, String)> {
+    use super::sql::pg_cert::*;
+    let first = raw.lines().next().unwrap_or(raw).trim();
+    let low = first.to_lowercase();
+    let tab = "on the connection's TLS tab";
+    let (title, hint) = if let Some(rest) = first.strip_prefix(CERT_UNREADABLE).or_else(|| first.strip_prefix(KEY_UNREADABLE)) {
+        let what = if first.starts_with(CERT_UNREADABLE) { "certificate" } else { "key" };
+        (format!("Could not read the client {what} file"), format!("{}. Check the path {tab}.", sentence(rest.trim()).trim_end_matches('.')))
+    } else if let Some(path) = first.strip_prefix(CERT_NOT_PEM) {
+        ("The client certificate is not a PEM file".into(), format!("{} has no BEGIN CERTIFICATE block. A DER file converts with `openssl x509 -inform der -in client.der -out client.crt`.", path.trim()))
+    } else if let Some(path) = first.strip_prefix(KEY_NOT_PEM) {
+        ("The client key is not a PEM file".into(), format!("{} has no PRIVATE KEY block. A DER key converts with `openssl pkey -inform der -in client.der -out client.key`.", path.trim()))
+    } else if first == HALF_SET {
+        ("Set both the client certificate and its key".into(), format!("The certificate is sent with the key that proves it is yours. Fill both {tab}, or clear both."))
+    } else if first == KEY_LOCKED {
+        ("The client key needs its passphrase".into(), format!("The key file is encrypted. Type its passphrase {tab}."))
+    } else if first == KEY_WRONG_PASS {
+        ("The client key passphrase is wrong".into(), format!("The key could not be decrypted with it. Check the passphrase {tab}."))
+    } else if first == KEY_OLD_CIPHER {
+        ("Quarry cannot decrypt this client key".into(), "It uses the old OpenSSL key encryption or a DES cipher. Write it again as PKCS#8 with AES, `openssl pkcs8 -topk8 -v2 aes-256-cbc -in client.key -out client-pkcs8.key`, and choose the new file.".into())
+    } else if low.contains("keys may not be consistent") {
+        ("The client key does not match the certificate".into(), "The key file holds another key than the one the certificate was issued for. Choose the key that belongs to this certificate.".into())
+    } else if low.contains("requires a valid client certificate") {
+        ("The server wants a client certificate".into(), format!("pg_hba.conf asks this user for one (clientcert=verify-ca or verify-full, or cert sign-in). Set the client certificate and key {tab}."))
+    } else if low.contains("certificate authentication failed") {
+        ("The client certificate does not name this user".into(), "With cert sign-in the certificate's common name (CN) must be the user name, or map to it in pg_ident.conf.".into())
+    } else if let Some(alert) = ["UnknownCA", "BadCertificate", "CertificateUnknown", "CertificateExpired", "CertificateRevoked", "CertificateRequired", "DecryptError"].iter().find(|a| first.contains(&format!("received fatal alert: {a}"))) {
+        ("The server refused the client certificate".into(), format!("The server's ssl_ca_file must hold the CA that signed it, and it must be valid today. The TLS alert was {alert}."))
+    } else {
+        return None;
+    };
+    Some((title, hint))
 }
 
 /// PostgreSQL's refusals of a written value, told apart by SQLSTATE, because the server's sentence follows its lc_messages
@@ -473,6 +513,36 @@ mod tests {
 
     fn cx() -> ErrCtx {
         ErrCtx { what: "load the documents".into(), ns: "shop.orders".into(), host: "cluster0.mongodb.net".into() }
+    }
+
+    #[test]
+    fn client_certificate_problems_are_told_apart() {
+        use crate::db::sql::pg_cert::*;
+        let case = |raw: &str| {
+            let e = explain(raw, &cx());
+            assert_eq!(e.kind, ErrKind::Tls, "{raw}");
+            assert!(e.fixes.contains(&Fix::EditConn), "{raw}");
+            (e.title, e.hint)
+        };
+        let (t, h) = case(&format!("{CERT_UNREADABLE} /x/c.crt: No such file or directory (os error 2)"));
+        assert_eq!(t, "Could not read the client certificate file");
+        assert_eq!(h, "/x/c.crt: No such file or directory (os error 2). Check the path on the connection's TLS tab.");
+        assert_eq!(case(&format!("{KEY_UNREADABLE} /x/c.key: Permission denied (os error 13)")).0, "Could not read the client key file");
+        assert!(case(&format!("{CERT_NOT_PEM} /x/c.der")).1.starts_with("/x/c.der has no BEGIN CERTIFICATE block"));
+        assert_eq!(case(&format!("{KEY_NOT_PEM} /x/k.der")).0, "The client key is not a PEM file");
+        assert_eq!(case(HALF_SET).0, "Set both the client certificate and its key");
+        assert_eq!(case(KEY_LOCKED).0, "The client key needs its passphrase");
+        assert_eq!(case(KEY_WRONG_PASS).0, "The client key passphrase is wrong");
+        assert!(case(KEY_OLD_CIPHER).1.contains("openssl pkcs8 -topk8"));
+        assert_eq!(case("error occurred while attempting to establish a TLS connection: keys may not be consistent: KeyMismatch").0, "The client key does not match the certificate");
+        // 28000 is a sign-in refusal, but the cause is the missing certificate, not the password.
+        assert_eq!(case("error returned from database: 28000: connection requires a valid client certificate").0, "The server wants a client certificate");
+        assert_eq!(case("error returned from database: 28000: certificate authentication failed for user \"app\"").0, "The client certificate does not name this user");
+        assert!(case("error communicating with database: received fatal alert: UnknownCA").1.ends_with("The TLS alert was UnknownCA."));
+        // Other TLS and sign-in errors keep their own wording.
+        assert_eq!(explain("error returned from database: 28P01: password authentication failed for user \"app\"", &cx()).kind, ErrKind::SignIn);
+        assert_eq!(explain("error occurred while attempting to establish a TLS connection: invalid peer certificate: UnknownIssuer", &cx()).title, "The server's certificate is not trusted");
+        assert_eq!(client_cert_problem("received fatal alert: ProtocolVersion"), None);
     }
 
     #[test]

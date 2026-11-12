@@ -338,6 +338,7 @@ impl App {
                 proxy_on: meta.proxy.is_some(),
                 proxy: meta.proxy.clone().unwrap_or_default(),
                 proxy_pwd: stored("proxy-password"),
+                pg_key_pass: stored("pg-key-passphrase"),
                 cloud_sql: meta.cloud_sql.clone(),
                 show: false,
                 testing: false,

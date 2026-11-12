@@ -295,10 +295,14 @@ impl App {
             name: "analytics-prod".into(),
             tag: "Production".into(),
             engine: db::sql::Engine::Postgres,
-            addr: db::sql::Addr { scheme: "postgres".into(), host: "analytics-prod.internal".into(), port: 5432, user: "analyst".into(), password: "hunter2hunter".into(), database: "analytics".into(), ssl_mode: if tls { db::sql::SslMode::VerifyIdentity } else { Default::default() }, ssl_ca: if tls { "~/.postgresql/root.crt".into() } else { String::new() } },
+            addr: db::sql::Addr { scheme: "postgres".into(), host: "analytics-prod.internal".into(), port: 5432, user: "analyst".into(), password: "hunter2hunter".into(), database: "analytics".into(), ssl_mode: if tls { db::sql::SslMode::VerifyIdentity } else { Default::default() }, ssl_ca: if tls { "~/.postgresql/root.crt".into() } else { String::new() }, ..Default::default() },
             tab: if tls { ConnTab::Tls } else if advanced { ConnTab::Advanced } else { ConnTab::Standard },
             ..Default::default()
         })));
+        // The client certificate design: both files and a passphrase for an encrypted key.
+        if let (true, Some(Modal::Conn(form))) = (tls, self.modal.as_mut()) {
+            (form.addr.ssl_cert, form.addr.ssl_key, form.pg_key_pass) = ("~/.postgresql/analyst.crt".into(), "~/.postgresql/analyst.key".into(), "correct horse".into());
+        }
         // The design's example: a path with a schema the last Test did not find, a lock timeout, a bad size and a picker open on "cost".
         if let (true, Some(Modal::Conn(form))) = (advanced, self.modal.as_mut()) {
             form.set_advanced(&db::sql::Advanced {

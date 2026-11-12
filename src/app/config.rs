@@ -320,7 +320,7 @@ pub(super) fn keychain(id: u64) -> Option<keyring::Entry> {
     keyring::Entry::new("quarry", &format!("connection-{id}")).ok()
 }
 
-/// Other secrets of a connection: "ssh-password", "ssh-passphrase", "proxy-password".
+/// Other secrets of a connection: "ssh-password", "ssh-passphrase", "proxy-password", "pg-key-passphrase".
 pub(super) fn secret(id: u64, what: &str) -> Option<String> {
     keyring::Entry::new("quarry", &format!("connection-{id}-{what}")).ok()?.get_password().ok().filter(|s| !s.is_empty())
 }

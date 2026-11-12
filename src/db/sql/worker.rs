@@ -602,6 +602,7 @@ impl Worker {
             let mut info = None;
             let res = open_full(&uri, timeout, &net, &adv, true).await.and_then(|(db, _, t, ti)| {
                 let refused = ti.setting_errors.len();
+                let cert = super::pg_cert::test_note(&uri, &ti.client_dn, db.tls, matches!(t, Some(crate::db::Way::CloudSql(_))));
                 info = Some(ti);
                 if refused > 0 {
                     return Err(format!("Connected, but the server refused {refused} {}. See the marked rows on the Advanced tab.", if refused == 1 { "setting" } else { "settings" }));
@@ -613,7 +614,7 @@ impl Worker {
                 };
                 // Over a tunnel the certificate cannot match 127.0.0.1, so `open` checks the CA only.
                 let note = if matches!(t, Some(crate::db::Way::Ssh(_))) && Addr::parse(&uri).is_some_and(|a| a.ssl_mode == SslMode::VerifyIdentity) { " (TLS verified against the CA; the host name is the tunnel's)" } else { "" };
-                Ok(format!("Connected{via} to {} in {} ms{note}", db.label(), start.elapsed().as_millis()))
+                Ok(format!("Connected{via} to {} in {} ms{cert}{note}", db.label(), start.elapsed().as_millis()))
             });
             Msg::Tested { req, res, info }
         });

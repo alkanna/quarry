@@ -11,7 +11,7 @@ impl App {
                     let _ = k.delete_credential();
                 }
                 // ponytail: best effort, a failure only leaves an orphaned Keychain entry behind.
-                for what in ["ssh-password", "ssh-passphrase", "proxy-password"] {
+                for what in ["ssh-password", "ssh-passphrase", "proxy-password", "pg-key-passphrase"] {
                     let _ = set_secret(id, what, "");
                 }
             }
