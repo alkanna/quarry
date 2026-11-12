@@ -22,7 +22,7 @@
 - **Structure and admin.** Indexes, columns, foreign keys, triggers and validators. Server status, sessions with Kill or Cancel, users, roles and privileges on every engine.
 - **Import and export.** JSON, CSV, TSV and SQL dumps on every engine, compare and sync collections, MongoDB dump and restore.
 - **Connections.** SSH tunnels, SOCKS5, TLS (with client certificates on PostgreSQL), and Google Cloud SQL: pick an instance from your gcloud account and Quarry runs the Cloud SQL Auth Proxy for you. Passwords stay in the system keychain.
-- **Keyboard and reading.** Cmd+K jumps anywhere, Cmd+/ lists every shortcut. Larger text, OpenDyslexic, a soft background and a reading line for wide tables.
+- **Keyboard and reading.** Cmd+K searches every connection and runs commands, Cmd+/ lists every shortcut. Larger text, OpenDyslexic, a soft background and a reading line for wide tables.
 
 | | |
 |---|---|
