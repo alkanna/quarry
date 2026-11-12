@@ -387,7 +387,7 @@ impl App {
             tool: None,
             width_cache: HashMap::new(),
             frame_ms: 0.0,
-            scroll_gesture: (egui::Vec2::ZERO, None, f64::NEG_INFINITY),
+            scroll_gesture: Default::default(),
             usage: (std::time::Instant::now(), Duration::ZERO, 0.0, None),
             fps: (0.0, 0, 0.0),
             closed: Vec::new(),
@@ -795,7 +795,7 @@ mod tests {
     #[test]
     fn scroll_axis_is_picked_once_per_gesture() {
         let v = egui::vec2;
-        let mut g = (egui::Vec2::ZERO, None, f64::NEG_INFINITY);
+        let mut g = Default::default();
         // A sideways first frame does not decide a mostly vertical swipe.
         assert_eq!(scroll_axis(&mut g, v(2.0, 0.5), true, 0.0), Some(false));
         assert_eq!(scroll_axis(&mut g, v(1.0, 8.0), false, 0.016), Some(true));
