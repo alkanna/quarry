@@ -47,6 +47,9 @@ pub struct SshSecrets {
 /// An open tunnel: a local SOCKS5 port backed by the SSH session. Dropping it closes both.
 pub struct Tunnel {
     pub port: u16,
+    /// On macOS and Linux, with a fixed destination, a socket in a folder only this user may open that forwards like
+    /// the port. MySQL dials it with the host name typed, so its TLS checks the certificate against that name.
+    pub socket: Option<std::path::PathBuf>,
     pub fingerprint: String,
     task: tokio::task::JoinHandle<()>,
 }
@@ -54,6 +57,9 @@ pub struct Tunnel {
 impl Drop for Tunnel {
     fn drop(&mut self) {
         self.task.abort();
+        if let Some(dir) = self.socket.as_deref().and_then(|s| s.parent()) {
+            crate::update::remove(dir);
+        }
     }
 }
 
@@ -210,19 +216,62 @@ pub async fn open(conf: &SshConf, secrets: &SshSecrets, timeout: std::time::Dura
     let listener = TcpListener::bind("127.0.0.1:0").await.map_err(|e| e.to_string())?;
     let local = listener.local_addr().map_err(|e| e.to_string())?.port();
     let session = Arc::new(h);
+    #[cfg(unix)]
+    let unix = match &to {
+        Some(_) => Some(private_socket()?),
+        None => None,
+    };
+    #[cfg(unix)]
+    let socket = unix.as_ref().map(|(_, p)| p.clone());
+    #[cfg(not(unix))]
+    let socket = None;
+    // Both accept loops run in this one task, so aborting it on drop stops both and lets the session go.
     let task = tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let s = session.clone();
-            let to = to.clone();
-            tokio::spawn(async move {
-                let _ = match to {
-                    Some((host, port)) => forward(stream, &s, host, port, &[], &[]).await,
-                    None => socks5(stream, s).await,
-                };
-            });
-        }
+        #[cfg(unix)]
+        let by_socket = {
+            let (s, to) = (session.clone(), to.clone());
+            async move {
+                let (Some((l, _)), Some((host, port))) = (unix, to) else { return };
+                while let Ok((stream, _)) = l.accept().await {
+                    let (s, host) = (s.clone(), host.clone());
+                    tokio::spawn(async move { forward(stream, &s, host, port, &[], &[]).await });
+                }
+            }
+        };
+        #[cfg(not(unix))]
+        let by_socket = async {};
+        let by_port = async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let s = session.clone();
+                let to = to.clone();
+                tokio::spawn(async move {
+                    let _ = match to {
+                        Some((host, port)) => forward(stream, &s, host, port, &[], &[]).await,
+                        None => socks5(stream, s).await,
+                    };
+                });
+            }
+        };
+        tokio::join!(by_socket, by_port);
     });
-    Ok(Tunnel { port: local, fingerprint, task })
+    Ok(Tunnel { port: local, socket, fingerprint, task })
+}
+
+/// A socket in a fresh folder only this user may open, so no other local user can ride the tunnel through it.
+#[cfg(unix)]
+fn private_socket() -> Result<(tokio::net::UnixListener, std::path::PathBuf), String> {
+    use std::os::unix::fs::PermissionsExt;
+    // A short prefix: the whole socket path must fit in sun_path.
+    let dir = crate::update::fresh_temp_dir("qssh")?;
+    let path = dir.join("s");
+    let bound = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string()).and_then(|_| tokio::net::UnixListener::bind(&path).map_err(|e| format!("Could not open the tunnel's local socket: {e}")));
+    match bound {
+        Ok(l) => Ok((l, path)),
+        Err(e) => {
+            crate::update::remove(&dir);
+            Err(e)
+        }
+    }
 }
 
 /// A minimal SOCKS5 server (CONNECT only, no authentication, local use only).
@@ -269,7 +318,7 @@ async fn socks5(mut s: TcpStream, ssh: Arc<Session>) -> std::io::Result<()> {
 
 /// Opens a direct-tcpip channel to `host:port` and copies bytes both ways. `opened` and `failed` are
 /// written to the client first, which lets SOCKS5 answer its handshake while a plain forward sends nothing.
-async fn forward(mut s: TcpStream, ssh: &Session, host: String, port: u16, opened: &[u8], failed: &[u8]) -> std::io::Result<()> {
+async fn forward<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(mut s: S, ssh: &Session, host: String, port: u16, opened: &[u8], failed: &[u8]) -> std::io::Result<()> {
     match ssh.channel_open_direct_tcpip(host, port as u32, "127.0.0.1", 0).await {
         Ok(ch) => {
             s.write_all(opened).await?;

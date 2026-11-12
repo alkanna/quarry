@@ -17,7 +17,7 @@ pub(crate) const KEY_WRONG_PASS: &str = "The client key passphrase is wrong";
 pub(crate) const KEY_OLD_CIPHER: &str = "The client key is encrypted in a format Quarry cannot read";
 
 /// A leading `~/` is the home folder, as people type it; libpq's own default paths use it too.
-fn expand(p: &str) -> PathBuf {
+pub(super) fn expand(p: &str) -> PathBuf {
     match p.strip_prefix("~/").zip(dirs::home_dir()) {
         Some((rest, home)) => home.join(rest),
         None => PathBuf::from(p),
@@ -192,15 +192,15 @@ pub(crate) mod tests {
         use std::time::Duration;
         let Ok(dir) = std::env::var("QUARRY_TEST_PGCERT_DIR") else { return };
         let p = |f: &str| std::path::Path::new(&dir).join(f).display().to_string();
-        for var in ["QUARRY_TEST_PGCERT", "QUARRY_TEST_PGCERT13"] {
+        // require is sqlx's own TLS; verify-ca goes through pg_tls, which sends the certificate itself.
+        let modes = [(super::super::SslMode::Required, String::new()), (super::super::SslMode::VerifyCa, p("ca.crt"))];
+        for (var, (mode, ca)) in ["QUARRY_TEST_PGCERT", "QUARRY_TEST_PGCERT13"].into_iter().flat_map(|v| modes.clone().map(|m| (v, m))) {
             let Ok(base) = std::env::var(var) else { continue };
             let (tx, rx) = std::sync::mpsc::channel();
             let w = Worker::new(tx, eframe::egui::Context::default());
-            // require, not verify-ca: sqlx 0.8.6 lets verify-ca skip the host name only for rustls's older NotValidForName error,
-            // and rustls 0.23.46 reports NotValidForNameContext, so the test server's certificate would need the host's name.
             let uri = |cert: &str, key: &str| {
                 let a = super::super::Addr::parse(&base).unwrap();
-                super::super::Addr { ssl_mode: super::super::SslMode::Required, ssl_cert: cert.into(), ssl_key: key.into(), ..a }.to_uri()
+                super::super::Addr { ssl_mode: mode, ssl_ca: ca.clone(), ssl_cert: cert.into(), ssl_key: key.into(), ..a }.to_uri()
             };
             let net = |pass: Option<&str>| Net { key_passphrase: pass.map(Into::into), ..Default::default() };
             let test = |cert: &str, key: &str, pass: Option<&str>| {
