@@ -232,7 +232,7 @@ fn about() -> AboutMetadata {
         version: Some(env!("CARGO_PKG_VERSION").into()),
         short_version: Some(env!("CARGO_PKG_VERSION").into()),
         copyright: Some("Copyright © 2026 Khiman Louer. MIT License.".into()),
-        credits: Some(format!("{}\n{}\nSet in Inter and JetBrains Mono, under the SIL Open Font License.", env!("CARGO_PKG_DESCRIPTION"), env!("CARGO_PKG_REPOSITORY"))),
+        credits: Some(format!("{}\n{}\nFonts by Inter, JetBrains Mono, Geist, Cascadia Mono, Fira Code and OpenDyslexic, under the SIL Open Font License.", env!("CARGO_PKG_DESCRIPTION"), env!("CARGO_PKG_REPOSITORY"))),
         icon,
         ..Default::default()
     }

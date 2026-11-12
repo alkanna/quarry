@@ -94,8 +94,14 @@ pub(super) struct UiPrefs {
     pub(super) appearance: Appearance,
     /// Zoom of the whole interface, one of `SCALES`; 1.0 is the designed size.
     pub(super) ui_scale: f32,
-    /// OpenDyslexic instead of Inter for interface text.
+    /// Read from older ui.json files only, where it meant OpenDyslexic; `ui_font` replaced it.
+    #[serde(skip_serializing)]
     pub(super) dyslexic_font: bool,
+    /// Names from DARK_THEMES, LIGHT_THEMES, UI_FONTS and DATA_FONTS. Names, not indexes, so reordering the lists keeps choices.
+    pub(super) dark_theme: String,
+    pub(super) light_theme: String,
+    pub(super) ui_font: String,
+    pub(super) data_font: String,
     /// The lower-contrast palettes.
     pub(super) soft: bool,
     pub(super) reading_line: bool,
@@ -130,10 +136,29 @@ impl Appearance {
 }
 
 impl UiPrefs {
+    /// A hand-edited ui.json may hold any number; only the offered sizes are applied.
+    pub(super) fn scale(&self) -> f32 {
+        if SCALES.iter().any(|s| s.0 == self.ui_scale) { self.ui_scale } else { 1.0 }
+    }
+
     pub(super) fn look(&self) -> Look {
-        // A hand-edited ui.json may hold any number; only the offered sizes are applied.
-        let scale = if SCALES.iter().any(|s| s.0 == self.ui_scale) { self.ui_scale } else { 1.0 };
-        Look { scale, dyslexic: self.dyslexic_font, soft: self.soft, reading_line: self.reading_line, group_digits: self.group_digits }
+        Look {
+            scale: self.scale(),
+            dark_theme: theme_index(&self.dark_theme, false),
+            light_theme: theme_index(&self.light_theme, true),
+            ui_font: font_index(&UI_FONTS, &self.ui_font),
+            data_font: font_index(&DATA_FONTS, &self.data_font),
+            soft: self.soft,
+            reading_line: self.reading_line,
+            group_digits: self.group_digits,
+        }
+    }
+
+    /// Moves settings from older ui.json files to their current fields, once after loading, so the next save keeps them.
+    pub(super) fn migrate(&mut self) {
+        if self.dyslexic_font && self.ui_font.is_empty() {
+            self.ui_font = "OpenDyslexic".into();
+        }
     }
 }
 
@@ -211,7 +236,7 @@ pub(super) struct SavedStage {
 
 impl Default for UiPrefs {
     fn default() -> Self {
-        Self { open_inline: true, table: true, confirm_save: false, auto_save: false, value_panel: false, always_writable: false, default_cols: DEFAULT_COLS, page_size: db::PAGE_SIZE, timeout_ms: db::DEFAULT_TIMEOUT_MS, shell_runtime: String::new(), shell_histories: HashMap::new(), shell_packages: Vec::new(), history: HashMap::new(), library: HashMap::new(), open_tabs: Vec::new(), cur_tab: 0, last_conn: None, open_conns: Vec::new(), cols: HashMap::new(), schema_maps: HashMap::new(), relations: HashMap::new(), mongodump: String::new(), gcloud: String::new(), cloud_sql_proxy: String::new(), mongorestore: String::new(), auto_update: true, auto_preview: true, show_server: false, show_fps: false, show_mem: false, show_cpu: false, object_preview: false, appearance: Appearance::System, ui_scale: 1.0, dyslexic_font: false, soft: false, reading_line: false, group_digits: false, keep_toasts: false, sidebar_hidden: false, query_editor_h: 0.0, shell_editor_h: 0.0, last_version: String::new() }
+        Self { open_inline: true, table: true, confirm_save: false, auto_save: false, value_panel: false, always_writable: false, default_cols: DEFAULT_COLS, page_size: db::PAGE_SIZE, timeout_ms: db::DEFAULT_TIMEOUT_MS, shell_runtime: String::new(), shell_histories: HashMap::new(), shell_packages: Vec::new(), history: HashMap::new(), library: HashMap::new(), open_tabs: Vec::new(), cur_tab: 0, last_conn: None, open_conns: Vec::new(), cols: HashMap::new(), schema_maps: HashMap::new(), relations: HashMap::new(), mongodump: String::new(), gcloud: String::new(), cloud_sql_proxy: String::new(), mongorestore: String::new(), auto_update: true, auto_preview: true, show_server: false, show_fps: false, show_mem: false, show_cpu: false, object_preview: false, appearance: Appearance::System, ui_scale: 1.0, dyslexic_font: false, dark_theme: String::new(), light_theme: String::new(), ui_font: String::new(), data_font: String::new(), soft: false, reading_line: false, group_digits: false, keep_toasts: false, sidebar_hidden: false, query_editor_h: 0.0, shell_editor_h: 0.0, last_version: String::new() }
     }
 }
 
@@ -442,6 +467,20 @@ mod tests {
         let new = SavedTab { run_db: "b".into(), run_schema: "audit".into(), ..old };
         let back: SavedTab = serde_json::from_str(&serde_json::to_string(&new).unwrap()).unwrap();
         assert!(back == new);
+    }
+
+    #[test]
+    fn theme_and_font_names_resolve_with_fallbacks() {
+        // An older ui.json: no theme or font names, OpenDyslexic as a flag.
+        let mut old: UiPrefs = serde_json::from_str(r#"{"dyslexic_font":true}"#).unwrap();
+        old.migrate();
+        let saved: UiPrefs = serde_json::from_str(&serde_json::to_string(&old).unwrap()).unwrap();
+        let l = saved.look();
+        assert_eq!((DARK_THEMES[l.dark_theme].name, LIGHT_THEMES[l.light_theme].name, UI_FONTS[l.ui_font].0, DATA_FONTS[l.data_font].0), ("Workbench", "Paper", "OpenDyslexic", "JetBrains Mono"));
+        // A light theme named in the dark slot, or an unknown name, falls back to the default of that kind.
+        let p = UiPrefs { dark_theme: "Glacier".into(), light_theme: "Sage".into(), data_font: "Comic Mono".into(), ..Default::default() };
+        let l = p.look();
+        assert_eq!((DARK_THEMES[l.dark_theme].name, LIGHT_THEMES[l.light_theme].name, DATA_FONTS[l.data_font].0), ("Workbench", "Sage", "JetBrains Mono"));
     }
 
     #[test]
