@@ -213,6 +213,8 @@ pub enum Msg {
     SqlJob { req: u64, res: Res<sql::import::JobDone> },
     /// An answer of the SQL Server window, matched to its request by `req`.
     SqlServer { req: u64, ans: sql::server::Answer },
+    /// An answer of the PostgreSQL Server window, matched to its request by `req`.
+    PgServer { req: u64, ans: sql::pg_server::Answer },
     /// The databases of a connection and the tables of `schema` (None when it is gone), read after a script ran.
     SqlLists { conn: u64, schema: String, res: Res<(Vec<String>, Option<Vec<String>>)> },
     /// The columns and key of a table, for the Import dialog that asked with `req`.

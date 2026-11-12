@@ -9,6 +9,7 @@ mod conn_advanced;
 mod conn_cert;
 mod conn_cloudsql;
 mod mongo_edit;
+mod pg_server;
 mod sidebar;
 mod sql_create;
 mod sql_dump;
