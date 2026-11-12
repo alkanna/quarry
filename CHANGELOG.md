@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.0](https://github.com/alkanna/quarry/compare/v0.35.0...v0.36.0) (2026-11-12)
+
+
+### Features
+
+* PostgreSQL v3 (Cloud SQL, server window, roles, client certificates, TLS) ([#180](https://github.com/alkanna/quarry/issues/180)) ([3d28096](https://github.com/alkanna/quarry/commit/3d280966ed5cf7d01a50df5117b23305f38e1294))
+
 ## [0.35.0](https://github.com/alkanna/quarry/compare/v0.34.0...v0.35.0) (2026-11-11)
 
 
