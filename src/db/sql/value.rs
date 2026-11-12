@@ -214,7 +214,8 @@ fn time_ok(s: &str, hour_digits: usize, max_hour: u32) -> bool {
     matches!(p[..], [h, m, sec] if digits(h, 2, hour_digits).is_some_and(|h| h <= max_hour) && digits(m, 2, 2).is_some_and(|m| m < 60) && digits(sec, 2, 2).is_some_and(|s| s < 60))
 }
 
-/// Checks text typed into the grid editor and turns it into the value to stage. The word NULL, in any case, is a NULL.
+/// Checks text typed into the grid editor and turns it into the value to stage. The word NULL, in any case, is a NULL,
+/// and in quotes it is the text NULL for text columns.
 /// Errors are short enough to show under the cell. PostgreSQL's dates and times have more spellings than MySQL's
 /// (`2024-01-01 00:00:00+02`, `infinity`, `12:00:00+01`, five digit years), and the cast the write is made through
 /// reads all of them and names what it refuses, so they go through as typed.
@@ -248,6 +249,8 @@ pub fn parse_edit(d: Dialect, kind: Kind, text: &str) -> Result<Bson, String> {
             if ok { Ok(Bson::String(t.into())) } else { Err("Use the form YYYY-MM-DD HH:MM:SS.".into()) }
         }
         Kind::Time => if time_ok(t.strip_prefix('-').unwrap_or(t), 3, 838) { Ok(Bson::String(t.into())) } else { Err("Use the form HH:MM:SS.".into()) },
+        // Bare null is SQL NULL, and "null" is a JSON string, so the JSON literal null is typed in single quotes.
+        Kind::Json if t == "'null'" => Ok(Bson::String("null".into())),
         Kind::Json => serde_json::from_str::<serde_json::Value>(t).map(|_| Bson::String(t.into())).map_err(|e| format!("Not valid JSON: {e}")),
         Kind::Binary => match t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
             Some(h) => {
@@ -284,8 +287,36 @@ pub fn parse_edit(d: Dialect, kind: Kind, text: &str) -> Result<Bson, String> {
         },
         Kind::Uuid => uuid_text(t).map(Bson::String).ok_or_else(|| "Enter a UUID like 123e4567-e89b-12d3-a456-426614174000.".to_string()),
         // The server's cast is the only parser that knows every spelling of these, and it names what it refused.
-        Kind::Text | Kind::Enum | Kind::Set | Kind::Array | Kind::Interval | Kind::Inet | Kind::Range => Ok(Bson::String(text.into())),
+        k if text_like(k) => Ok(Bson::String(quoted_null(t).unwrap_or(text).into())),
+        k => Err(format!("{k:?} values cannot be edited as text.")),
     }
+}
+
+/// `parse_edit` for a column, refusing NULL when the column is NOT NULL so the error shows before Save.
+pub fn parse_col(d: Dialect, col: &super::Col, text: &str) -> Result<Bson, String> {
+    match parse_edit(d, col.kind, text)? {
+        // MySQL reads NULL in an AUTO_INCREMENT column as "the next id".
+        Bson::Null if !col.nullable && !col.auto_increment => Err(format!("{} cannot be NULL. Put 'NULL' in quotes for the text NULL.", col.src)),
+        v => Ok(v),
+    }
+}
+
+/// The text NULL in single or double quotes, so the word itself can still be stored in a text column.
+/// One layer comes off, so text that is itself a quoted null ('NULL' with its quotes) is typed with one more pair.
+pub fn quoted_null(t: &str) -> Option<&str> {
+    let inner = t.strip_prefix('\'').and_then(|r| r.strip_suffix('\'')).or_else(|| t.strip_prefix('"').and_then(|r| r.strip_suffix('"')))?;
+    null_like(inner).then_some(inner)
+}
+
+/// Text an editor must show in quotes, or reading it back would give null or drop a pair of quotes.
+pub fn null_like(s: &str) -> bool {
+    let s = s.trim();
+    s.eq_ignore_ascii_case("null") || quoted_null(s).is_some()
+}
+
+/// Kinds whose text is stored as typed, the ones that read a quoted null as text.
+pub fn text_like(k: Kind) -> bool {
+    matches!(k, Kind::Text | Kind::Enum | Kind::Set | Kind::Array | Kind::Interval | Kind::Inet | Kind::Range)
 }
 
 /// A UUID in the canonical lowercase form, from the spellings PostgreSQL reads: optional braces, and hyphens after any

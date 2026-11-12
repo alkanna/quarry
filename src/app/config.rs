@@ -40,6 +40,8 @@ pub(super) struct UiPrefs {
     pub(super) confirm_save: bool,
     /// Write every edit right away and offer Undo, instead of collecting unsaved edits.
     pub(super) auto_save: bool,
+    /// Long values open in a panel docked beside the page instead of a dialog.
+    pub(super) value_panel: bool,
     /// Every connection is writable and saving edits skips the change list.
     pub(super) always_writable: bool,
     /// Columns shown before the person picks their own.
@@ -209,7 +211,7 @@ pub(super) struct SavedStage {
 
 impl Default for UiPrefs {
     fn default() -> Self {
-        Self { open_inline: true, table: true, confirm_save: false, auto_save: false, always_writable: false, default_cols: DEFAULT_COLS, page_size: db::PAGE_SIZE, timeout_ms: db::DEFAULT_TIMEOUT_MS, shell_runtime: String::new(), shell_histories: HashMap::new(), shell_packages: Vec::new(), history: HashMap::new(), library: HashMap::new(), open_tabs: Vec::new(), cur_tab: 0, last_conn: None, open_conns: Vec::new(), cols: HashMap::new(), schema_maps: HashMap::new(), relations: HashMap::new(), mongodump: String::new(), gcloud: String::new(), cloud_sql_proxy: String::new(), mongorestore: String::new(), auto_update: true, auto_preview: true, show_server: false, show_fps: false, show_mem: false, show_cpu: false, object_preview: false, appearance: Appearance::System, ui_scale: 1.0, dyslexic_font: false, soft: false, reading_line: false, group_digits: false, keep_toasts: false, sidebar_hidden: false, query_editor_h: 0.0, shell_editor_h: 0.0, last_version: String::new() }
+        Self { open_inline: true, table: true, confirm_save: false, auto_save: false, value_panel: false, always_writable: false, default_cols: DEFAULT_COLS, page_size: db::PAGE_SIZE, timeout_ms: db::DEFAULT_TIMEOUT_MS, shell_runtime: String::new(), shell_histories: HashMap::new(), shell_packages: Vec::new(), history: HashMap::new(), library: HashMap::new(), open_tabs: Vec::new(), cur_tab: 0, last_conn: None, open_conns: Vec::new(), cols: HashMap::new(), schema_maps: HashMap::new(), relations: HashMap::new(), mongodump: String::new(), gcloud: String::new(), cloud_sql_proxy: String::new(), mongorestore: String::new(), auto_update: true, auto_preview: true, show_server: false, show_fps: false, show_mem: false, show_cpu: false, object_preview: false, appearance: Appearance::System, ui_scale: 1.0, dyslexic_font: false, soft: false, reading_line: false, group_digits: false, keep_toasts: false, sidebar_hidden: false, query_editor_h: 0.0, shell_editor_h: 0.0, last_version: String::new() }
     }
 }
 

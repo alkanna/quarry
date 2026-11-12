@@ -109,12 +109,19 @@ impl App {
             let d = d.clone();
             return self.ask_unlock_then(move |a| a.start_inline(&d, path, v));
         }
+        if self.panel_dirty() {
+            return self.warn("Apply or cancel the value in the side panel first.");
+        }
         self.new_field = None;
-        if matches!(v, Bson::Document(_) | Bson::Array(_)) {
+        let kind = db::type_name_kind(&v);
+        let container = matches!(v, Bson::Document(_) | Bson::Array(_));
+        let text = if container { db::to_edit_value(&v) } else { db::inline_text(&v) };
+        // With the panel open, a double-click loads the new field into it, so the panel follows the selection.
+        if container || value_edit::is_long(&text) || self.value_in_panel() {
             self.inline = None;
-            self.json_edit = Some(JsonEdit { base: d.clone(), path, text: db::to_edit_value(&v), kind: db::type_name_kind(&v), focus: true });
+            self.json_edit = Some(JsonEdit::new(d.clone(), path, text, kind));
         } else {
-            self.inline = Some(Inline { text: db::value_text(&v), kind: db::type_name_kind(&v), path, focus: true });
+            self.inline = Some(Inline { text, kind, path, focus: true });
         }
     }
 
@@ -303,6 +310,13 @@ impl App {
                 // Applied by the document view, which knows the fold's id.
                 TreeAct::Fold(..) => {}
                 TreeAct::Start(p, v) => self.start_inline(d, p, v),
+                TreeAct::Expand => {
+                    if let Some(i) = self.inline.take() {
+                        // Text typed inline counts as an edit the side panel must keep.
+                        let dirty = db::get_path(d, &i.path.join(".")).is_none_or(|v| db::inline_text(v) != i.text);
+                        self.json_edit = Some(JsonEdit { dirty, ..JsonEdit::new(d.clone(), i.path, i.text, i.kind) });
+                    }
+                }
                 TreeAct::Cancel => {
                     self.inline = None;
                     self.new_field = None;
@@ -351,7 +365,7 @@ impl App {
                 TreeAct::EditDoc => {
                     if self.sel_writable() {
                         self.inline = None;
-                        self.json_edit = Some(JsonEdit { base: d.clone(), path: Vec::new(), text: db::to_edit_json(d), kind: "object", focus: true });
+                        self.json_edit = Some(JsonEdit::new(d.clone(), Vec::new(), db::to_edit_json(d), "object"));
                     } else {
                         let d = d.clone();
                         self.ask_unlock_then(move |a| a.handle_acts(&d, vec![TreeAct::EditDoc]));
@@ -574,7 +588,12 @@ impl App {
                     ui.add_space((x0 + ui.spacing().indent + key_w - ui.cursor().left()).max(0.0));
                     if editing_here {
                         let inl = self.inline.as_mut().unwrap();
-                        let r = ui.add(egui::TextEdit::singleline(&mut inl.text).desired_width(EDITOR_W).font(egui::TextStyle::Monospace).clip_text(true));
+                        let tid = egui::Id::unique("tree-inline-editor");
+                        let expand = expand_key(ui, tid);
+                        let r = ui.add(egui::TextEdit::singleline(&mut inl.text).id(tid).desired_width(EDITOR_W).font(egui::TextStyle::Monospace).clip_text(true));
+                        if ui.add(expand_button()).clicked() || expand {
+                            acts.push(TreeAct::Expand);
+                        }
                         if inl.focus {
                             r.request_focus();
                             inl.focus = false;

@@ -917,6 +917,14 @@ pub(super) struct JsonEdit {
     pub(super) text: String,
     pub(super) kind: &'static str,
     pub(super) focus: bool,
+    /// Edited since it opened, so the side panel must not drop it for another value.
+    pub(super) dirty: bool,
+}
+
+impl JsonEdit {
+    pub(super) fn new(base: Document, path: Vec<String>, text: String, kind: &'static str) -> Self {
+        Self { base, path, text, kind, focus: true, dirty: false }
+    }
 }
 
 /// One document's edits that are not written yet. `original` is what was loaded, so saving can
@@ -1344,6 +1352,8 @@ pub(super) enum QAct {
 pub(super) enum TreeAct {
     Start(Vec<String>, Bson),
     Commit,
+    /// Move the inline edit into the large editor.
+    Expand,
     Cancel,
     Remove(Vec<String>),
     AddField(Vec<String>),

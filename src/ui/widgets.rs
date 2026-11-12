@@ -499,6 +499,31 @@ pub(crate) fn paint_dots(p: &egui::Painter, c: egui::Pos2, color: Color32) {
     }
 }
 
+/// Shift+Enter in the inline editor `id`, taken before the text box sees it, where Enter alone would commit.
+pub(crate) fn expand_key(ui: &egui::Ui, id: egui::Id) -> bool {
+    ui.memory(|m| m.has_focus(id)) && ui.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Enter))
+}
+
+/// The small square at the end of an inline editor that opens the value in the large editor.
+pub(crate) fn expand_button() -> impl egui::Widget {
+    |ui: &mut egui::Ui| {
+        let (rect, r) = ui.allocate_exact_size(egui::vec2(EXPAND_BTN, EXPAND_BTN), Sense::click());
+        let fill = [BORDER(), shade(BORDER(), 0.12), shade(BORDER(), 0.24)][state_of(&r)];
+        ui.painter().rect_filled(rect, R_SM, fill);
+        focus_ring(ui, &r, rect, R_SM as f32);
+        let (c, s) = (rect.center(), Stroke::new(1.4, BRIGHT()));
+        for d in [1.0, -1.0] {
+            let tip = c + egui::vec2(5.0 * d, -5.0 * d);
+            ui.painter().line_segment([tip, tip - egui::vec2(3.5 * d, 0.0)], s);
+            ui.painter().line_segment([tip, tip + egui::vec2(0.0, 3.5 * d)], s);
+            ui.painter().line_segment([tip, tip - egui::vec2(3.5 * d, -3.5 * d)], s);
+        }
+        let r = r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Open in editor (Shift+Enter)");
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Open in editor"));
+        r
+    }
+}
+
 pub(crate) fn paint_clock(p: &egui::Painter, c: egui::Pos2, color: Color32) {
     let s = Stroke::new(1.5, color);
     p.circle_stroke(c, 6.5, s);

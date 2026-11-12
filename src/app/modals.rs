@@ -5,71 +5,7 @@ use super::*;
 
 impl App {
     pub(super) fn modals(&mut self, ctx: &egui::Context) {
-        if let Some(mut je) = self.json_edit.take() {
-            let mut apply = false;
-            let mut close = false;
-            let screen = ctx.content_rect();
-            let r = dialog(egui::Id::unique(("quarry-layer", "jsonedit"))).show(ctx, |ui| {
-                ui.set_width((screen.width() * 0.72).clamp(480.0, 1200.0));
-                ui.horizontal(|ui| {
-                    let title = if je.path.is_empty() { "Edit document".to_string() } else { format!("Edit {}", je.path.join(".")) };
-                    dialog_title(ui, title);
-                    if !je.path.is_empty() {
-                        ui.add_space(8.0);
-                        Self::type_combo(ui, "jsonkind", &mut je.kind);
-                    }
-                });
-                ui.label(RichText::new("JSON, JSON5 or shell syntax. Applying keeps it as an unsaved edit until you press Save.").size(TXT_SMALL).color(MUTED()));
-                ui.add_space(4.0);
-                let rows = je.text.lines().count().clamp(12, 40);
-                let id = egui::Id::unique("json-editor-text");
-                let find = Find::bar(ui, id, &je.text);
-                egui::ScrollArea::vertical().max_height(screen.height() * 0.62).show(ui, |ui| {
-                    let out = with_autopair(ui, id, &mut je.text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(rows).layouter(&mut find.layouter(true)).show(ui));
-                    find.reveal(ui, &je.text, &out);
-                    if je.focus {
-                        out.response.request_focus();
-                        je.focus = false;
-                    }
-                });
-                ui.add_space(4.0);
-                dialog_actions(ui, |ui| {
-                    apply = primary(ui, "Apply", PRIMARY()).on_hover_text("Cmd+Enter").clicked() || ui.input(|i| i.modifiers.command && (i.key_pressed(Key::Enter) || i.key_pressed(Key::S)));
-                    close = ui.button("Cancel").on_hover_text("Esc").clicked();
-                });
-            });
-            if apply {
-                let new = if je.path.is_empty() {
-                    db::parse_doc(&je.text).and_then(|mut new| {
-                        match (je.base.get("_id"), new.get("_id")) {
-                            (Some(a), Some(b)) if a != b => return Err("The _id of a document cannot change. Use Duplicate to make a copy.".to_string()),
-                            (Some(a), None) => {
-                                // Keep _id first, as MongoDB stores it.
-                                let mut d = doc! { "_id": a.clone() };
-                                d.extend(new);
-                                new = d;
-                            }
-                            _ => {}
-                        }
-                        Ok(new)
-                    })
-                } else {
-                    db::make_value(je.kind, &je.text).and_then(|v| db::edit_path(&je.base, &je.path, Some(v)))
-                };
-                match new {
-                    Ok(n) => {
-                        let base = je.base.clone();
-                        self.stage(&base, Ok(n));
-                    }
-                    Err(e) => {
-                        self.err(e);
-                        self.json_edit = Some(je);
-                    }
-                }
-            } else if !(close || r.should_close()) {
-                self.json_edit = Some(je);
-            }
-        }
+        self.value_dialog(ctx);
         if let Some(text) = &mut self.insert {
             let mut close = false;
             let mut submit = false;

@@ -70,6 +70,7 @@ mod tools;
 mod tree;
 mod undo;
 mod users;
+mod value_edit;
 #[cfg(test)]
 mod ui_tests;
 mod watch;
@@ -687,6 +688,7 @@ impl eframe::App for App {
         if !self.prefs.open_inline && self.selected_doc().is_some() {
             self.inspector(ui);
         }
+        self.value_panel(ui);
         // After the side panels, so the strip spans only the workspace.
         if !self.tabs.is_empty() {
             self.tab_strip(ui);
