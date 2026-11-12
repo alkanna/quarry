@@ -308,6 +308,9 @@ pub(crate) fn collection_ref(coll: &str) -> String {
 impl App {
     /// The empty state both `new` and the test constructor start from, so a new field is added in one place.
     fn blank(cc: &eframe::CreationContext<'_>, demo: bool, menu: bool, shot: Option<PathBuf>) -> Self {
+        // Only macOS has a native menu bar.
+        #[cfg(not(target_os = "macos"))]
+        let _ = menu;
         let (tx, rx) = channel();
         Self {
             worker: Worker::new(tx, cc.egui_ctx.clone()),
