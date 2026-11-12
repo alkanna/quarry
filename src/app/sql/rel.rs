@@ -2,8 +2,8 @@
 //! points to from Content. Changes are staged like column and index edits (`sql_alter.rs`), so the statement
 //! the preview shows is the one that runs and the inverse comes from the structure read before.
 
-use super::sql_alter::{sql_block, BUSY_NOTE};
-use super::*;
+use crate::app::sql::alter::{sql_block, BUSY_NOTE};
+use crate::app::*;
 use db::sql::ddl::{self, Change, FK_ACTIONS};
 use db::sql::structure::{ForeignKey, Structure};
 
@@ -32,7 +32,7 @@ impl OrphanKey {
 }
 
 /// The Add relation dialog.
-pub(super) struct FkForm {
+pub(in crate::app) struct FkForm {
     name: String,
     /// The name was typed, so it stops following the columns.
     named: bool,
@@ -75,7 +75,7 @@ pub(super) struct FkForm {
 }
 
 impl FkForm {
-    pub(super) fn parent_loaded(&mut self, req: u64, res: db::Res<Structure>) -> bool {
+    pub(in crate::app) fn parent_loaded(&mut self, req: u64, res: db::Res<Structure>) -> bool {
         if req != self.parent_req || req == 0 {
             return false;
         }
@@ -86,13 +86,13 @@ impl FkForm {
         true
     }
 
-    pub(super) fn rules_done(&mut self, req: u64, strict: bool) {
+    pub(in crate::app) fn rules_done(&mut self, req: u64, strict: bool) {
         if req == self.rules_req && req != 0 {
             self.strict = strict;
         }
     }
 
-    pub(super) fn orphans_done(&mut self, req: u64, res: db::Res<u64>, sample: Vec<String>) -> bool {
+    pub(in crate::app) fn orphans_done(&mut self, req: u64, res: db::Res<u64>, sample: Vec<String>) -> bool {
         if req != self.orphan_req || req == 0 {
             return false;
         }
@@ -102,7 +102,7 @@ impl FkForm {
 
     /// Puts the form back in the state where the count of the rows with no match is asked and not answered yet.
     #[cfg(test)]
-    pub(super) fn forget_orphan_answer(&mut self) {
+    pub(in crate::app) fn forget_orphan_answer(&mut self) {
         self.orphans = None;
     }
 
@@ -193,7 +193,7 @@ fn fk_row_filter(d: db::sql::Dialect, bs: bool, fk: &ForeignKey, cols: &[db::sql
 
 impl App {
     /// The Add relation dialog, or with `edit` the dialog on that key of the table (PostgreSQL).
-    pub(super) fn open_fk_form(&mut self, edit: Option<usize>) {
+    pub(in crate::app) fn open_fk_form(&mut self, edit: Option<usize>) {
         let Some(own) = self.structure().cloned() else { return };
         let from = edit.and_then(|i| own.foreign_keys.get(i).cloned());
         if let Some(k) = &from {
@@ -258,7 +258,7 @@ impl App {
         })));
     }
 
-    pub(super) fn stage_drop_fk(&mut self, i: usize) {
+    pub(in crate::app) fn stage_drop_fk(&mut self, i: usize) {
         let Some(name) = self.structure().and_then(|s| s.foreign_keys.get(i)).map(|k| k.name.clone()) else { return };
         let mut staged = self.staged().to_vec();
         let pg = self.t().is_some_and(|t| self.is_pg(t.sel.conn));
@@ -271,7 +271,7 @@ impl App {
 
     /// The tables a key can point at in a namespace (a database, or a schema of `db` on PostgreSQL), views left out. None
     /// while the list is still loading.
-    pub(super) fn fk_tables(&mut self, conn: u64, db: &str, schema: &str) -> Option<Vec<String>> {
+    pub(in crate::app) fn fk_tables(&mut self, conn: u64, db: &str, schema: &str) -> Option<Vec<String>> {
         if self.is_pg(conn) {
             self.pg_load_tables(conn, db, schema);
             let key = Sel { conn, db: db.to_string(), schema: schema.to_string(), coll: String::new() }.nskey();
@@ -291,7 +291,7 @@ impl App {
         }
     }
 
-    pub(super) fn fk_dialog(&mut self, ui: &mut egui::Ui, f: &mut FkForm, keep: &mut bool) {
+    pub(in crate::app) fn fk_dialog(&mut self, ui: &mut egui::Ui, f: &mut FkForm, keep: &mut bool) {
         let Some(sel) = self.t().map(|t| t.sel.clone()) else { return };
         let (conn, base_db, table) = (sel.conn, sel.db.clone(), sel.coll.clone());
         let pg = f.pg;
@@ -572,7 +572,7 @@ impl App {
     /// Opens the row a key cell points to: the referenced table, filtered to that row. A composite key uses every
     /// column. `row` is the document of the clicked row. A tab of that table is reused only when it holds no filter,
     /// sort or clause of the person's, so none is lost; otherwise the row opens in a tab of its own. The tab loads once.
-    pub(super) fn open_fk_row(&mut self, fk: &ForeignKey, row: &Document) {
+    pub(in crate::app) fn open_fk_row(&mut self, fk: &ForeignKey, row: &Document) {
         let Some(conn) = self.t().map(|t| t.sel.conn) else { return };
         // The editor belongs to this tab's rows; it would stage into the wrong table once the tab changes.
         if self.sql_cell.is_some() {
@@ -585,7 +585,7 @@ impl App {
             Err(why) => return self.warn(why),
         };
         let base = self.t().map(|t| t.sel.clone()).unwrap_or_default();
-        let sel = sql_ns::with_ns(self.dialect_of(conn), &base, &fk.ref_db, fk.ref_table.clone());
+        let sel = sql::ns::with_ns(self.dialect_of(conn), &base, &fk.ref_db, fk.ref_table.clone());
         self.reset_doc_state();
         match self.tabs.iter().position(|t| t.sel == sel && !has_clauses(t)) {
             Some(i) => self.set_cur(i),
@@ -604,7 +604,7 @@ impl App {
 
     /// QUARRY_TEST_SQL=addrel: the dialog filled as in the design, the currency column of orders pointing at
     /// currencies.code. Offline, so the referenced table's structure and the orphan count are set here.
-    pub(super) fn sql_rel_demo(&mut self, which: &str) {
+    pub(in crate::app) fn sql_rel_demo(&mut self, which: &str) {
         if which != "addrel" {
             return;
         }

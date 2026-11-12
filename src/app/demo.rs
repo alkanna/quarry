@@ -435,7 +435,7 @@ impl App {
             }
             "colpick" => {
                 if let Some(s) = t.sql.as_mut() {
-                    s.bar.preset = super::sql_bar::Preset { order: true, pick: Some("stat".into()), ..Default::default() };
+                    s.bar.preset = super::sql::bar::Preset { order: true, pick: Some("stat".into()), ..Default::default() };
                 }
             }
             "ac" => {

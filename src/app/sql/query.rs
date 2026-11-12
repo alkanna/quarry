@@ -1,6 +1,6 @@
 //! The Query view of a SQL tab: a script editor, Run, Stop and Explain, and one result tab per statement.
 
-use super::*;
+use crate::app::*;
 use crate::db::sql::{lex, value::Kind, Col, ResultSet};
 use db::copy::{CopyCol, Fmt};
 use crate::ui::sql_complete::{open_list, sql_ac_field};
@@ -12,7 +12,7 @@ use std::sync::atomic::Ordering;
 const LINE_H: f32 = 20.0;
 
 /// 1-based line and column of a caret given as a char index.
-pub(super) fn line_col(text: &str, caret: usize) -> (usize, usize) {
+pub(in crate::app) fn line_col(text: &str, caret: usize) -> (usize, usize) {
     text.chars().take(caret).fold((1, 1), |(l, c), ch| if ch == '\n' { (l + 1, 1) } else { (l, c + 1) })
 }
 
@@ -22,16 +22,16 @@ fn byte_at(text: &str, caret: usize) -> usize {
 
 /// Where the caret stands: line and column, and the statement under it.
 #[derive(Clone)]
-pub(super) struct CaretInfo {
+pub(in crate::app) struct CaretInfo {
     key: (usize, u64, usize),
-    pub(super) line_col: (usize, usize),
-    pub(super) stmt: Option<(Range<usize>, usize, usize)>,
+    pub(in crate::app) line_col: (usize, usize),
+    pub(in crate::app) stmt: Option<(Range<usize>, usize, usize)>,
 }
 
 impl SqlTab {
     /// The caret's place in the script. Lexing the script is costly next to a frame, so the answer is kept
     /// until the text or the caret changes.
-    pub(super) fn caret_info(&self, d: db::sql::Dialect) -> CaretInfo {
+    pub(in crate::app) fn caret_info(&self, d: db::sql::Dialect) -> CaretInfo {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         self.query.hash(&mut h);
@@ -49,7 +49,7 @@ impl SqlTab {
 }
 
 /// The statement under a caret (a char index) as a byte range, with its 1-based number and the count of statements.
-pub(super) fn statement_pos(text: &str, caret: usize, d: db::sql::Dialect) -> Option<(Range<usize>, usize, usize)> {
+pub(in crate::app) fn statement_pos(text: &str, caret: usize, d: db::sql::Dialect) -> Option<(Range<usize>, usize, usize)> {
     let r = lex::statement_at(text, byte_at(text, caret), d)?;
     let all = lex::split_statements(text, d);
     let i = all.iter().position(|(a, _)| *a == r)?;
@@ -64,7 +64,7 @@ fn run_db(t: &Tab) -> String {
 /// The schema a PostgreSQL Query view runs in: the one typed in its schema field, else the tab's own when the run is in
 /// the tab's own database. Another database has other schemas, so the tab's schema is never carried over to it and the
 /// answer stays empty until that database's schemas arrive.
-pub(super) fn run_schema_choice(typed: &str, run_db: &str, sel_db: &str, sel_schema: &str) -> String {
+pub(in crate::app) fn run_schema_choice(typed: &str, run_db: &str, sel_db: &str, sel_schema: &str) -> String {
     let typed = typed.trim();
     if !typed.is_empty() {
         typed.to_string()
@@ -82,7 +82,7 @@ fn run_schema_of(t: &Tab) -> String {
 /// The database a run connects to and the namespace inside it. A PostgreSQL connection is bound to one database, so
 /// the `Db` points at it and the namespace is the tab's schema; MySQL picks the database per statement. Export of a
 /// result uses it too, so the statement reads the same tables it ran against.
-pub(super) fn run_target(t: &Tab, db: db::sql::Db) -> (db::sql::Db, String) {
+pub(in crate::app) fn run_target(t: &Tab, db: db::sql::Db) -> (db::sql::Db, String) {
     if db.dialect == db::sql::Dialect::Postgres {
         return (db.at(&run_db(t)), run_schema_of(t));
     }
@@ -229,7 +229,7 @@ fn open_pager(ui: &mut egui::Ui, page: usize, next: bool) -> Option<usize> {
 
 impl App {
     /// The name a tab shows: its table, or "Query N" for a Query tab that belongs to no table.
-    pub(super) fn tab_name(&self, i: usize) -> String {
+    pub(in crate::app) fn tab_name(&self, i: usize) -> String {
         let Some(t) = self.tabs.get(i) else { return String::new() };
         if t.sql.is_some() && t.sel.coll.is_empty() {
             return format!("Query {}", self.tabs[..=i].iter().filter(|x| x.sql.is_some() && x.sel.coll.is_empty()).count());
@@ -238,7 +238,7 @@ impl App {
     }
 
     /// Opens a Query tab for a database. It has no table, so its collection name stays empty.
-    pub(super) fn sql_new_query(&mut self, conn: u64, db: String) {
+    pub(in crate::app) fn sql_new_query(&mut self, conn: u64, db: String) {
         let engine = self.conn(conn).map(|c| c.meta.engine).unwrap_or_default();
         // A PostgreSQL Query tab starts in the schema the sidebar shows for its database.
         let mut t = Tab::new(self.sel_in(conn, &db, String::new())).for_engine(engine);
@@ -253,7 +253,7 @@ impl App {
     }
 
     /// Runs the statement under the caret, or the whole script. `explain` puts EXPLAIN in front of the statement.
-    pub(super) fn sql_run(&mut self, all: bool, explain: bool) {
+    pub(in crate::app) fn sql_run(&mut self, all: bool, explain: bool) {
         let Some(t) = self.t() else { return };
         let (conn, schema) = (t.sel.conn, run_db(t));
         let dialect = self.sql_dialect();
@@ -289,7 +289,7 @@ impl App {
 
     /// Applies a finished run to its tab; a run the tab no longer waits for is dropped. A page read replaces
     /// only its result tab and keeps the row count; a new run starts the counts of its paged results.
-    pub(super) fn sql_ran(&mut self, req: u64, mut sets: Vec<ResultSet>) {
+    pub(in crate::app) fn sql_ran(&mut self, req: u64, mut sets: Vec<ResultSet>) {
         let Some(ti) = self.tabs.iter().position(|t| t.sql.as_ref().is_some_and(|s| s.run_req == req)) else { return };
         let conn = self.tabs[ti].sel.conn;
         let Some(s) = self.tabs[ti].sql.as_mut() else { return };
@@ -325,7 +325,7 @@ impl App {
     }
 
     /// The row count of a paged result arrived.
-    pub(super) fn sql_counted(&mut self, req: u64, idx: usize, res: db::Res<u64>) {
+    pub(in crate::app) fn sql_counted(&mut self, req: u64, idx: usize, res: db::Res<u64>) {
         let p = self.tabs.iter_mut().find_map(|t| t.sql.as_mut().filter(|s| s.sets_req == req)).and_then(|s| s.sets.get_mut(idx)).and_then(|x| x.page.as_mut());
         if let (Some(p), Ok(n)) = (p, res) {
             p.total = Some(n);
@@ -347,7 +347,7 @@ impl App {
         self.worker.sql_run(req, db, schema, stmt, read_only, n, s.run.clone());
     }
 
-    pub(super) fn sql_query_view(&mut self, ui: &mut egui::Ui) {
+    pub(in crate::app) fn sql_query_view(&mut self, ui: &mut egui::Ui) {
         let Some(t) = self.t() else { return };
         let (conn, free, schema) = (t.sel.conn, t.sel.coll.is_empty(), run_db(t));
         let running = t.sql.as_ref().is_some_and(|s| s.run_req != 0);
@@ -483,14 +483,14 @@ impl App {
         }
     }
 
-    pub(super) fn sql_editor_id(cur: usize) -> egui::Id {
+    pub(in crate::app) fn sql_editor_id(cur: usize) -> egui::Id {
         egui::Id::unique(("sql-editor", cur))
     }
 
     /// Puts `new` in the editor so that Cmd+Z brings the old text back. egui's editor keeps its undo history as whole
     /// states, so the text before the change is added as a point first; changing the string alone would only become
     /// one after the text had rested for a second. `select` is the range of the new text to leave selected.
-    pub(super) fn sql_replace(&mut self, ctx: &egui::Context, new: String, select: Option<Range<usize>>) {
+    pub(in crate::app) fn sql_replace(&mut self, ctx: &egui::Context, new: String, select: Option<Range<usize>>) {
         let id = Self::sql_editor_id(self.cur);
         let Some(s) = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()) else { return };
         if s.query == new {
@@ -810,7 +810,7 @@ impl App {
     }
 
     /// QUARRY_TEST_SQL=query: a Query tab with the multi-statement script of the design and its three outcomes.
-    pub(super) fn sql_query_demo(&mut self) {
+    pub(in crate::app) fn sql_query_demo(&mut self) {
         let mut t = Tab::new(Sel { conn: 3, db: "shop".into(), coll: String::new(), ..Default::default() }).for_engine(db::sql::Engine::MySql);
         t.view = View::Sql;
         let col = |name: &str, ty: &str| Col::plain(name, ty, Kind::from_type_name(ty), false);

@@ -2,7 +2,7 @@
 //! and the clause chips under it. The text in `Tab::filter_txt` and `Tab::sort_txt` stays the one
 //! source of truth; rules, popovers and chips read and write it.
 
-use super::*;
+use crate::app::*;
 use crate::db::sql::{
     rules::{self, Grain, Input, Op, Rule},
     schema::SchemaCol,
@@ -14,16 +14,16 @@ use crate::ui::sql_complete::{open_list, sql_ac_field, Scope, Wants};
 /// The clauses a tab keeps besides the WHERE and ORDER BY text, saved with the open tabs.
 #[derive(Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub(super) struct Clauses {
+pub(in crate::app) struct Clauses {
     /// SQL mode of the bar instead of Rules mode.
-    pub(super) sql: bool,
-    pub(super) select: String,
-    pub(super) group: String,
-    pub(super) having: String,
-    pub(super) limit: String,
-    pub(super) offset: String,
-    pub(super) hint: String,
-    pub(super) distinct: bool,
+    pub(in crate::app) sql: bool,
+    pub(in crate::app) select: String,
+    pub(in crate::app) group: String,
+    pub(in crate::app) having: String,
+    pub(in crate::app) limit: String,
+    pub(in crate::app) offset: String,
+    pub(in crate::app) hint: String,
+    pub(in crate::app) distinct: bool,
 }
 
 /// One aggregate of the GROUP BY editor: function index into `FUNCS`, column ("" is `*`) and alias.
@@ -49,8 +49,8 @@ struct GroupDlg {
 
 /// Runtime state of the bar. Only `c` is saved.
 #[derive(Default)]
-pub(super) struct Bar {
-    pub(super) c: Clauses,
+pub(in crate::app) struct Bar {
+    pub(in crate::app) c: Clauses,
     rules: Vec<Rule>,
     any: bool,
     draft: Option<Rule>,
@@ -59,12 +59,12 @@ pub(super) struct Bar {
     fold_open: bool,
     gdlg: GroupDlg,
     /// The table's own columns, kept when a grouped answer replaces the result columns.
-    pub(super) table_cols: Arc<Vec<Col>>,
+    pub(in crate::app) table_cols: Arc<Vec<Col>>,
     /// The open suggestion list of whichever bar input has it, and what the inputs asked the app to look up.
-    pub(super) ac: Ac,
-    pub(super) wants: Wants,
+    pub(in crate::app) ac: Ac,
+    pub(in crate::app) wants: Wants,
     /// Initial open states; only the offline demo sets them.
-    pub(super) preset: Preset,
+    pub(in crate::app) preset: Preset,
     /// What `bar` derives from the columns, kept while they and the primary key stay the same.
     memo: Option<ColsMemo>,
     /// Whether the WHERE text read as rules, for the text, the column pairs and the mode it was read with.
@@ -83,10 +83,10 @@ struct ColsMemo {
 /// What the bar shows open from the first frame: the suggestion list, the ORDER BY popover and the
 /// text typed into its first column picker.
 #[derive(Default)]
-pub(super) struct Preset {
-    pub(super) ac: bool,
-    pub(super) order: bool,
-    pub(super) pick: Option<String>,
+pub(in crate::app) struct Preset {
+    pub(in crate::app) ac: bool,
+    pub(in crate::app) order: bool,
+    pub(in crate::app) pick: Option<String>,
 }
 
 /// A one line SQL input with highlighting and suggestions. Returns whether Enter ended the edit, which runs the query.
@@ -98,7 +98,7 @@ fn sql_input(ui: &mut egui::Ui, id: egui::Id, text: &mut String, ac: &mut Ac, wa
 }
 
 /// Splits at commas outside quotes and parentheses: select lists and GROUP BY lists.
-pub(super) fn split_top(text: &str) -> Vec<String> {
+pub(in crate::app) fn split_top(text: &str) -> Vec<String> {
     let (mut out, mut cur, mut depth, mut quote) = (Vec::new(), String::new(), 0, None::<char>);
     for c in text.chars() {
         match (quote, c) {
@@ -142,7 +142,7 @@ fn parse_order(text: &str) -> Option<Vec<(String, bool)>> {
 
 /// Shift-click on a header: the column becomes the last sort key, or flips direction when it already
 /// is one. Text that is not plain keys (expressions) is left as it is.
-pub(super) fn add_sort_key(text: &str, col: &str, d: Dialect) -> String {
+pub(in crate::app) fn add_sort_key(text: &str, col: &str, d: Dialect) -> String {
     let Some(mut keys) = parse_order(text) else { return text.to_string() };
     match keys.iter_mut().find(|(c, _)| c == col) {
         Some(k) => k.1 = !k.1,
@@ -152,7 +152,7 @@ pub(super) fn add_sort_key(text: &str, col: &str, d: Dialect) -> String {
 }
 
 /// The names of the GROUP BY columns of a grouped result, as they head its columns.
-pub(super) fn group_names(s: &SqlTab) -> Vec<String> {
+pub(in crate::app) fn group_names(s: &SqlTab) -> Vec<String> {
     split_top(&s.bar.c.group).iter().filter_map(|g| plain_ident(g)).collect()
 }
 
@@ -161,13 +161,13 @@ fn order_text(keys: &[(String, bool)], d: Dialect) -> String {
 }
 
 /// What the worker is asked for, from the tab's texts.
-pub(super) fn page_query(t: &Tab) -> PageQuery {
+pub(in crate::app) fn page_query(t: &Tab) -> PageQuery {
     let c = t.sql.as_ref().map(|s| s.bar.c.clone()).unwrap_or_default();
     PageQuery { filter: t.filter_txt.clone(), order: t.sort_txt.clone(), select: split_top(&c.select), distinct: c.distinct, group: split_top(&c.group), having: c.having, limit: c.limit.trim().parse().ok(), skip: c.offset.trim().parse().unwrap_or(0), index_hint: c.hint }
 }
 
 /// SQL text colored by token: keywords, numbers and strings. Plugs into `TextEdit::layouter`.
-pub(super) fn sql_layout(ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32) -> Arc<egui::Galley> {
+pub(in crate::app) fn sql_layout(ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32) -> Arc<egui::Galley> {
     crate::ui::editor::memo_galley(ui, 0, buf.as_str(), wrap, || sql_job(buf.as_str(), TXT_SMALL))
 }
 
@@ -853,7 +853,7 @@ fn group_texts(g: &GroupDlg, d: Dialect) -> (String, String) {
 }
 
 /// Draws the bar and the clause chips. Returns true when the query should run.
-pub(super) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, mut scope: Scope, values: &Fields) -> bool {
+pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, mut scope: Scope, values: &Fields) -> bool {
     let Some(s) = t.sql.as_mut() else { return false };
     let cols = if s.bar.table_cols.is_empty() { s.cols.clone() } else { s.bar.table_cols.clone() };
     let memo = match s.bar.memo.take() {
@@ -1193,7 +1193,7 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col], scope: &Sco
 }
 
 /// The note above grouped results, with the Ungroup link. Returns true on Ungroup.
-pub(super) fn grouped_note(ui: &mut egui::Ui, groups: u64, rows: u64) -> bool {
+pub(in crate::app) fn grouped_note(ui: &mut egui::Ui, groups: u64, rows: u64) -> bool {
     let mut ungroup = false;
     egui::Frame::new().fill(tint(PRIMARY(), 14)).corner_radius(R_MD).inner_margin(egui::Margin { left: 12, right: 12, top: 7, bottom: 7 }).show(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -1230,7 +1230,7 @@ fn bson_text(v: &Bson) -> Option<String> {
 }
 
 /// Clears GROUP BY, HAVING and the generated select list; the sort stays when it names real columns.
-pub(super) fn ungroup(t: &mut Tab) {
+pub(in crate::app) fn ungroup(t: &mut Tab) {
     let Some(s) = t.sql.as_mut() else { return };
     s.bar.c.group.clear();
     s.bar.c.having.clear();
@@ -1242,7 +1242,7 @@ pub(super) fn ungroup(t: &mut Tab) {
 }
 
 /// Turns the double-clicked group into conditions on the WHERE text and ungroups.
-pub(super) fn drill(t: &mut Tab, row: usize, d: Dialect, bs: bool) {
+pub(in crate::app) fn drill(t: &mut Tab, row: usize, d: Dialect, bs: bool) {
     let Some(doc) = t.docs.get(row).and_then(|r| r.decode().ok()) else { return };
     let Some(s) = t.sql.as_ref() else { return };
     let (select, group_list) = (split_top(&s.bar.c.select), split_top(&s.bar.c.group));

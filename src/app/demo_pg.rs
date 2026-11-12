@@ -524,6 +524,6 @@ mod tests {
     fn schema_counts_add_up_to_the_lists() {
         let all = schemas();
         assert_eq!(all.iter().find(|s| s.name == SCHEMA).map(|s| s.tables), Some(names(&TABLES, &VIEWS).len() as u64));
-        assert_eq!(super::super::sql_ns::listed_schemas(&all, false).len(), 3);
+        assert_eq!(super::super::sql::ns::listed_schemas(&all, false).len(), 3);
     }
 }

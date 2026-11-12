@@ -2,8 +2,8 @@
 //! one ALTER TABLE when applied; the statement text comes from `db::sql::ddl`, which is also what the previews
 //! show, so what is read is what runs. Writes stay behind the connection's unlock like every other write.
 
-use super::sql_structure::{size, Load};
-use super::*;
+use crate::app::sql::structure::{size, Load};
+use crate::app::*;
 use db::sql::ddl::{self, Change, ColDef, Dv, IdxCol, IndexDef, IndexKind, Mode, Plan, Pos};
 use db::sql::structure::Structure;
 use db::sql::Dialect;
@@ -26,7 +26,7 @@ enum DMode {
 }
 
 /// The Add column and Edit column dialog.
-pub(super) struct ColForm {
+pub(in crate::app) struct ColForm {
     /// The column's name now; None adds a new one.
     from: Option<String>,
     def: ColDef,
@@ -42,7 +42,7 @@ pub(super) struct ColForm {
     memo: Option<PlanMemo>,
 }
 
-pub(super) struct IdxForm {
+pub(in crate::app) struct IdxForm {
     /// The index being edited; None adds one.
     from: Option<IndexDef>,
     def: IndexDef,
@@ -64,16 +64,16 @@ struct IdxView {
 
 /// The plan and the warnings of a list of changes, kept while the changes, the table definition and the session
 /// mode stay as they are. Both walk the whole structure and a bar or dialog draws them every frame.
-pub(super) struct PlanMemo {
+pub(in crate::app) struct PlanMemo {
     changes: Vec<Change>,
     create: String,
     mode: Mode,
-    pub(super) warnings: Vec<String>,
-    pub(super) plan: Result<Plan, String>,
+    pub(in crate::app) warnings: Vec<String>,
+    pub(in crate::app) plan: Result<Plan, String>,
 }
 
 impl PlanMemo {
-    pub(super) fn of<'a>(slot: &'a mut Option<PlanMemo>, app: &App, st: &Structure, changes: &[Change]) -> &'a PlanMemo {
+    pub(in crate::app) fn of<'a>(slot: &'a mut Option<PlanMemo>, app: &App, st: &Structure, changes: &[Change]) -> &'a PlanMemo {
         let mode = app.cur_mode();
         if !slot.as_ref().is_some_and(|m| m.mode == mode && m.create == st.create && m.changes == changes) {
             *slot = Some(PlanMemo { changes: changes.to_vec(), create: st.create.clone(), mode, warnings: ddl::warnings(st, changes), plan: app.plan_of(st, changes) });
@@ -83,7 +83,7 @@ impl PlanMemo {
 }
 
 /// Columns the staged changes drop and columns they change, for marks beside the grid rows.
-pub(super) fn staged_marks(staged: &[Change]) -> (HashSet<String>, HashSet<String>) {
+pub(in crate::app) fn staged_marks(staged: &[Change]) -> (HashSet<String>, HashSet<String>) {
     let (mut dropped, mut changed) = (HashSet::new(), HashSet::new());
     for c in staged {
         match c {
@@ -131,7 +131,7 @@ fn mode_of(d: &Dv) -> (DMode, String) {
 }
 
 /// A highlighted statement in a box, scrolling both ways.
-pub(super) fn sql_block(ui: &mut egui::Ui, salt: &str, text: &str, max_h: f32) {
+pub(in crate::app) fn sql_block(ui: &mut egui::Ui, salt: &str, text: &str, max_h: f32) {
     egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(10).show(ui, |ui| {
         ui.set_width(ui.available_width());
         egui::ScrollArea::vertical().id_salt(salt).max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
@@ -141,15 +141,15 @@ pub(super) fn sql_block(ui: &mut egui::Ui, salt: &str, text: &str, max_h: f32) {
 }
 
 impl App {
-    pub(super) fn structure(&self) -> Option<&Structure> {
+    pub(in crate::app) fn structure(&self) -> Option<&Structure> {
         self.t()?.sql.as_ref()?.st.data.as_ref()
     }
 
-    pub(super) fn staged(&self) -> &[Change] {
+    pub(in crate::app) fn staged(&self) -> &[Change] {
         self.t().and_then(|t| t.sql.as_ref()).map_or(&[], |s| &s.st.staged)
     }
 
-    pub(super) fn set_staged(&mut self, v: Vec<Change>) {
+    pub(in crate::app) fn set_staged(&mut self, v: Vec<Change>) {
         if let Some(s) = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()) {
             s.st.staged = v;
         }
@@ -158,7 +158,7 @@ impl App {
     /// The engine, its version and how its sessions read quotes and backslashes, as the statements need them.
     /// The mode is the last one the server reported; the worker checks it again on the connection that runs the
     /// statement. The offline demo has no server and uses MySQL 8.4.
-    pub(super) fn alter_env(&self) -> (Dialect, String, Mode) {
+    pub(in crate::app) fn alter_env(&self) -> (Dialect, String, Mode) {
         match self.t().and_then(|t| self.conn(t.sel.conn)).and_then(|c| c.sql.as_ref()) {
             Some(d) => (d.dialect, d.version.clone(), Mode::of(&d.sql_mode)),
             None if self.t().is_some_and(|t| self.is_pg(t.sel.conn)) => (Dialect::Postgres, "18.0".into(), Mode::DEFAULT),
@@ -166,7 +166,7 @@ impl App {
         }
     }
 
-    pub(super) fn applying(&self) -> bool {
+    pub(in crate::app) fn applying(&self) -> bool {
         self.t().and_then(|t| t.sql.as_ref()).is_some_and(|s| s.st.applying)
     }
 
@@ -187,7 +187,7 @@ impl App {
     }
 
     /// The ALTER for these changes, as it will run.
-    pub(super) fn alter_text(&self, st: &Structure, changes: &[Change]) -> Result<String, String> {
+    pub(in crate::app) fn alter_text(&self, st: &Structure, changes: &[Change]) -> Result<String, String> {
         self.plan_of(st, changes).map(|p| p.sql())
     }
 
@@ -200,7 +200,7 @@ impl App {
         .unwrap_or_else(|| name.to_string())
     }
 
-    pub(super) fn open_col_form(&mut self, i: Option<usize>) {
+    pub(in crate::app) fn open_col_form(&mut self, i: Option<usize>) {
         let Some(st) = self.structure().cloned() else { return };
         let staged = self.staged().to_vec();
         let Some(i) = i else {
@@ -234,7 +234,7 @@ impl App {
         self.modal = Some(Modal::ColEdit(Box::new(ColForm { from, def, orig, dmode, dtext, pos, rest, order, memo: None })));
     }
 
-    pub(super) fn duplicate_column(&mut self, i: usize) {
+    pub(in crate::app) fn duplicate_column(&mut self, i: usize) {
         let Some(st) = self.structure().cloned() else { return };
         let c = &st.columns[i];
         let mut def = match ColDef::in_table(&st, c) {
@@ -250,7 +250,7 @@ impl App {
         self.show_col_form(None, def, pos, self.staged().to_vec());
     }
 
-    pub(super) fn stage_drop_column(&mut self, i: usize) {
+    pub(in crate::app) fn stage_drop_column(&mut self, i: usize) {
         let Some(name) = self.structure().and_then(|s| s.columns.get(i)).map(|c| c.name.clone()) else { return };
         let mut staged = self.staged().to_vec();
         if staged.iter().any(|c| matches!(c, Change::Drop(n) if *n == name)) {
@@ -261,7 +261,7 @@ impl App {
         self.set_staged(staged);
     }
 
-    pub(super) fn stage_move_column(&mut self, i: usize, by: isize) {
+    pub(in crate::app) fn stage_move_column(&mut self, i: usize, by: isize) {
         let Some(st) = self.structure().cloned() else { return };
         let Some(col) = st.columns.get(i) else { return };
         let mut staged = self.staged().to_vec();
@@ -290,7 +290,7 @@ impl App {
         self.set_staged(staged);
     }
 
-    pub(super) fn open_idx_form(&mut self, i: Option<usize>) {
+    pub(in crate::app) fn open_idx_form(&mut self, i: Option<usize>) {
         let Some(st) = self.structure().cloned() else { return };
         let staged = self.staged().to_vec();
         let from = i.and_then(|i| st.indexes.get(i)).map(IndexDef::from_index);
@@ -312,7 +312,7 @@ impl App {
         self.modal = Some(Modal::IdxEdit(Box::new(IdxForm { from, def, avail, rest: staged, view: None })));
     }
 
-    pub(super) fn stage_drop_index(&mut self, i: usize) {
+    pub(in crate::app) fn stage_drop_index(&mut self, i: usize) {
         let Some(ix) = self.structure().and_then(|s| s.indexes.get(i)) else { return };
         // The server reports the expression in a form undo could not add back.
         if ix.cols.iter().any(|c| c.expr.is_some()) {
@@ -328,7 +328,7 @@ impl App {
         self.set_staged(staged);
     }
 
-    pub(super) fn unstage(&mut self, i: usize) {
+    pub(in crate::app) fn unstage(&mut self, i: usize) {
         let mut staged = self.staged().to_vec();
         if i < staged.len() {
             staged.remove(i);
@@ -336,12 +336,12 @@ impl App {
         }
     }
 
-    pub(super) fn discard_staged(&mut self) {
+    pub(in crate::app) fn discard_staged(&mut self) {
         self.set_staged(Vec::new());
     }
 
     /// Asks for confirmation when the changes lose data or cannot be undone, then runs them.
-    pub(super) fn request_alter_apply(&mut self) {
+    pub(in crate::app) fn request_alter_apply(&mut self) {
         if self.demo {
             return self.ok("Offline demo: no database is connected.");
         }
@@ -380,7 +380,7 @@ impl App {
     }
 
     /// Sends the staged statement. The undo comes from the structure read before it runs.
-    pub(super) fn run_alter(&mut self) {
+    pub(in crate::app) fn run_alter(&mut self) {
         let Some(sel) = self.t().map(|t| t.sel.clone()) else { return };
         let (conn, table) = (sel.conn, sel.coll.clone());
         let Some((db, schema)) = self.sql_target(&sel) else { return self.warn_offline() };
@@ -418,7 +418,7 @@ impl App {
 
     /// Before a structure undo runs: one that drops a column or converts a type back loses what was written since,
     /// so it asks for the table name like a drop does. True when it asked, and the undo waits for the answer.
-    pub(super) fn alter_undo_gate(&mut self, i: usize) -> bool {
+    pub(in crate::app) fn alter_undo_gate(&mut self, i: usize) -> bool {
         let Some(a) = self.undo.get(i) else { return false };
         let UndoKind::Sql { undo: db::sql::write::SqlUndo::Alter(u), .. } = &a.kind else { return false };
         if u.loss.is_empty() {
@@ -432,7 +432,7 @@ impl App {
     /// The answer to an ALTER, a trigger change or an undo of either. Only an ALTER makes the staged changes stale; a
     /// trigger answer reloads the structure even when it failed, since a failed MySQL swap may still have changed it.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn sql_altered(&mut self, conn: u64, database: String, schema: String, table: String, res: db::Res<String>, undo: Option<UndoAction>, sql_mode: Option<String>, alter: bool, unsure: bool) {
+    pub(in crate::app) fn sql_altered(&mut self, conn: u64, database: String, schema: String, table: String, res: db::Res<String>, undo: Option<UndoAction>, sql_mode: Option<String>, alter: bool, unsure: bool) {
         let ok = res.is_ok();
         let (clear, reload) = answer_effects(ok, alter, unsure);
         // The statement was refused for a stale mode; the previews follow the new one from now on.
@@ -476,8 +476,8 @@ impl App {
     }
 
     /// The staged changes as a bar above the grids: the list, what cannot be undone, and the statement.
-    pub(super) fn staged_bar(&self, ui: &mut egui::Ui, memo: &mut Option<PlanMemo>, st: &Structure, staged: &[Change], editable: bool, applying: bool, acts: &mut Vec<super::sql_structure::Act>) {
-        use super::sql_structure::Act;
+    pub(in crate::app) fn staged_bar(&self, ui: &mut egui::Ui, memo: &mut Option<PlanMemo>, st: &Structure, staged: &[Change], editable: bool, applying: bool, acts: &mut Vec<crate::app::sql::structure::Act>) {
+        use crate::app::sql::structure::Act;
         card(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
@@ -529,7 +529,7 @@ impl App {
         });
     }
 
-    pub(super) fn col_dialog(&mut self, ui: &mut egui::Ui, f: &mut ColForm, keep: &mut bool) {
+    pub(in crate::app) fn col_dialog(&mut self, ui: &mut egui::Ui, f: &mut ColForm, keep: &mut bool) {
         let (dialect, ..) = self.alter_env();
         let pg = dialect == Dialect::Postgres;
         let table = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
@@ -771,7 +771,7 @@ impl App {
         IdxView { def: f.def.clone(), changes_empty: changes.is_empty(), all, text, warnings }
     }
 
-    pub(super) fn idx_dialog(&mut self, ui: &mut egui::Ui, f: &mut IdxForm, keep: &mut bool) {
+    pub(in crate::app) fn idx_dialog(&mut self, ui: &mut egui::Ui, f: &mut IdxForm, keep: &mut bool) {
         let pg = self.alter_env().0 == Dialect::Postgres;
         let table = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
         ui.set_width(560.0);
@@ -903,7 +903,7 @@ impl App {
 
     /// QUARRY_TEST_SQL=coledit: the dialog open on the total column of the design, and `stagebar` for the bar
     /// over the grids with a few staged changes. Offline, so the answer to Apply is the demo notice.
-    pub(super) fn sql_alter_demo(&mut self, which: &str) {
+    pub(in crate::app) fn sql_alter_demo(&mut self, which: &str) {
         let (Some(i), true) = (self.structure().and_then(|s| s.columns.iter().position(|c| c.name == "total")), matches!(which, "coledit" | "stagebar")) else { return };
         if which == "coledit" {
             self.open_col_form(Some(i));
@@ -928,7 +928,7 @@ impl App {
 /// Whether the answer of a structure change, as (connection, PostgreSQL database or empty, namespace, table), is about the
 /// table `sel` points at. `target` is what a read of the tab resolves to: the database of its pool and its namespace, which
 /// is not `sel.schema` when a PostgreSQL tab leaves its schema to the one the sidebar shows.
-pub(super) fn answers_tab(sel: &Sel, target: Option<(String, String)>, answer: (u64, &str, &str, &str)) -> bool {
+pub(in crate::app) fn answers_tab(sel: &Sel, target: Option<(String, String)>, answer: (u64, &str, &str, &str)) -> bool {
     let (conn, database, schema, table) = answer;
     sel.conn == conn && sel.coll == table && target.is_some_and(|(d, ns)| ns == schema && d == database)
 }
@@ -945,7 +945,7 @@ fn plural_changes(n: usize) -> String {
 }
 
 /// Shown under a disabled Apply now button.
-pub(super) const BUSY_NOTE: &str = "A structure change is still running.";
+pub(in crate::app) const BUSY_NOTE: &str = "A structure change is still running.";
 
 #[cfg(test)]
 mod tests {

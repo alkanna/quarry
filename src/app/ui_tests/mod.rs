@@ -77,7 +77,7 @@ impl UiApp {
     /// ACCESS EXCLUSIVE under a 3 s lock timeout, so a loaded machine could make the test fail on the lock and not on what it checks.
     /// It is checked again after a few frames, since a read the first answer asked for may only start then.
     pub fn quiet(&mut self) {
-        let idle = |a: &App| a.tabs.iter().all(|t| !t.loading && t.sql.as_ref().is_none_or(|s| s.run_req == 0 && !matches!(s.st.load, crate::app::sql_structure::Load::Loading)));
+        let idle = |a: &App| a.tabs.iter().all(|t| !t.loading && t.sql.as_ref().is_none_or(|s| s.run_req == 0 && !matches!(s.st.load, crate::app::sql::structure::Load::Loading)));
         self.wait("the open tabs to have no read in flight", idle);
         self.settle();
         self.wait("the open tabs to have no read in flight", idle);

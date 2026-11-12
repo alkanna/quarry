@@ -1,6 +1,6 @@
 //! The app side of SQL autocomplete: the schema and value caches, and the requests that fill them.
 
-use super::*;
+use crate::app::*;
 use crate::ui::sql_complete::{value_key, Need, Scope, Wants};
 
 /// Typed prefixes asked per column, and values kept per column.
@@ -11,7 +11,7 @@ impl App {
     /// What completion knows about schema `schema` of database `db` of connection `conn`; MySQL has no schema and `db` is
     /// the whole namespace. `table` is the implicit table of the Content bar. It borrows the connection list, so it takes
     /// the fields rather than `&self` and a tab can be borrowed mutably beside it.
-    pub(super) fn sql_scope<'a>(conns: &'a [Conn], schemas: &HashMap<(u64, String), Arc<db::sql::schema::Schema>>, views: &Views, conn: u64, db: &str, schema: &str, table: Option<&str>) -> Scope<'a> {
+    pub(in crate::app) fn sql_scope<'a>(conns: &'a [Conn], schemas: &HashMap<(u64, String), Arc<db::sql::schema::Schema>>, views: &Views, conn: u64, db: &str, schema: &str, table: Option<&str>) -> Scope<'a> {
         let c = conns.iter().find(|c| c.meta.id == conn);
         let dialect = c.and_then(|c| c.sql.as_ref()).map(|s| s.dialect).unwrap_or_default();
         let key = ns_key(db, schema);
@@ -25,14 +25,14 @@ impl App {
     }
 
     /// Keeps a loaded schema, with the row estimates the sidebar reads next to each table name.
-    pub(super) fn put_sql_schema(&mut self, conn: u64, key: String, schema: Arc<db::sql::schema::Schema>) {
+    pub(in crate::app) fn put_sql_schema(&mut self, conn: u64, key: String, schema: Arc<db::sql::schema::Schema>) {
         self.sql_rows.insert((conn, key.clone()), schema.tables.iter().filter_map(|t| Some((t.name.clone(), t.rows?))).collect());
         self.sql_schema.insert((conn, key), schema);
     }
 
     /// Sends what an input asked for while it was drawn: the schema's tables and columns the first time one of its inputs
     /// has focus, and a column's values once per column and typed text. Demo mode has no server.
-    pub(super) fn sql_serve(&mut self, conn: u64, db: &str, schema: &str, wants: Wants) {
+    pub(in crate::app) fn sql_serve(&mut self, conn: u64, db: &str, schema: &str, wants: Wants) {
         if !wants.schema && wants.values.is_none() {
             return;
         }
@@ -58,7 +58,7 @@ impl App {
     /// A dropped database: its cached schema and the mark that it was asked for go with it, or a database made again
     /// under that name would never get its autocomplete and shell types back. A PostgreSQL database holds one cache per
     /// schema, all of them under keys that start with its name.
-    pub(super) fn forget_schema(&mut self, conn: u64, db: &str) {
+    pub(in crate::app) fn forget_schema(&mut self, conn: u64, db: &str) {
         let mine = |k: &str| k == db || k.starts_with(&format!("{db}\u{1f}"));
         self.sql_schema.retain(|k, _| !(k.0 == conn && mine(&k.1)));
         self.sql_rows.retain(|k, _| !(k.0 == conn && mine(&k.1)));
@@ -68,7 +68,7 @@ impl App {
     }
 
     /// The sidebar's Refresh: the schema is read again and looked up values are forgotten.
-    pub(super) fn sql_refresh_schema(&mut self, conn: u64, db: &str, schema: &str) {
+    pub(in crate::app) fn sql_refresh_schema(&mut self, conn: u64, db: &str, schema: &str) {
         let key = ns_key(db, schema);
         self.sql_values.remove(&(conn, key.clone()));
         self.sql_values_asked.retain(|k, _| !(k.0 == conn && k.1 == key));
@@ -79,7 +79,7 @@ impl App {
         }
     }
 
-    pub(super) fn sql_values_done(&mut self, conn: u64, database: String, schema: String, table: String, column: String, prefix: Option<String>, res: db::Res<Option<Vec<(String, u64)>>>) {
+    pub(in crate::app) fn sql_values_done(&mut self, conn: u64, database: String, schema: String, table: String, column: String, prefix: Option<String>, res: db::Res<Option<Vec<(String, u64)>>>) {
         let key = if database.is_empty() { schema } else { ns_key(&database, &schema) };
         let entry = self.sql_values.entry((conn, key)).or_default().entry(value_key(&table, &column));
         // An answer of any kind creates the entry, so a list waiting for it stops waiting.

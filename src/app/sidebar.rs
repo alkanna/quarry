@@ -882,7 +882,7 @@ fn schema_picker(ui: &mut egui::Ui, db_name: &str, picked: &str, list: &[db::sql
             caption(ui, format!("SCHEMAS IN {db_name}"));
         });
         ui.add_space(2.0);
-        for s in super::sql_ns::listed_schemas(list, show_system) {
+        for s in super::sql::ns::listed_schemas(list, show_system) {
             if menu_row_in(ui, &s.name, if s.system { MUTED() } else { TEXT() }, s.name == picked, &s.tables.to_string(), "", false).clicked() {
                 pick = Some(s.name.clone());
                 ui.close();
