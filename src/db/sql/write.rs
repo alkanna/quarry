@@ -363,9 +363,11 @@ pub fn preview(d: Dialect, sql: &str, params: &[Param], bs: bool) -> String {
 }
 
 /// A connection of its own with write access, so the pool's read-only session is never changed.
+pub(super) const LOCKED: &str = "Writes are locked on this connection. Unlock them first.";
+
 pub(super) async fn writer_conn(db: &Db, schema: &str, read_only: bool) -> Res<Conn> {
     if read_only {
-        return Err("Writes are locked on this connection. Unlock them first.".into());
+        return Err(LOCKED.into());
     }
     let mut c = db.acquire_conn().await?;
     if db.dialect == Dialect::Postgres {

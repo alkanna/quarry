@@ -7,8 +7,23 @@
 use super::sql_users::{forget_secret, secret_id};
 use super::*;
 use db::sql::roles_pg::{self as rp, Answer, Attrs, Batch, Change, Cluster, DefKind, Defaults, Did, DropInfo, DropMode, Kind, NewRole, Obj, Objects, Opts, Privs, Role};
+use std::sync::Arc;
+use zeroize::Zeroize;
 
 const NOTE_LOCKED: &str = "Read-only: unlock writes to change roles and privileges.";
+/// What a hash computed here means for a server that checks passwords.
+const POLICY: &str = "The server gets no password to check, so policy extensions such as passwordcheck or credcheck cannot hold it to their rules, and one set to accept passwords only in clear refuses it.";
+
+fn hash_name(encryption: &str) -> &'static str {
+    if rp::wants_md5(encryption) { "the MD5 hash" } else { "a SCRAM-SHA-256 verifier" }
+}
+
+/// On a server that keeps MD5, says so: the hash is what psql's \password would send there, and weaker than SCRAM.
+fn md5_note(ui: &mut egui::Ui, encryption: &str) {
+    if rp::wants_md5(encryption) {
+        ui.add(egui::Label::new(RichText::new(format!("This server keeps passwords as MD5 (password_encryption = {encryption}), so the MD5 hash goes out, as psql's \\password would send. MD5 is weaker than SCRAM-SHA-256 and deprecated from PostgreSQL 18.")).size(TXT_SMALL).color(WARNING())).wrap());
+    }
+}
 const NAME_W: f32 = 170.0;
 const COL_W: f32 = 112.0;
 const HEAD_H: f32 = 44.0;
@@ -42,7 +57,10 @@ pub(super) struct PgRolesWin {
     pub(super) tab: PTab,
     pub(super) rtab: RTab,
     pub(super) req_cluster: u64,
-    pub(super) cluster: Option<db::Res<Cluster>>,
+    /// Shared so a frame borrows it alongside the window instead of copying every role and membership.
+    pub(super) cluster: Option<db::Res<Arc<Cluster>>>,
+    /// Each role's `Cluster::chain`, worked out once per answer rather than for every cell of every frame.
+    chains: HashMap<String, Vec<String>>,
     pub(super) database: String,
     pub(super) schema: String,
     pub(super) kind: Kind,
@@ -60,6 +78,10 @@ pub(super) struct PgRolesWin {
     pub(super) filter: String,
     pub(super) staged: Vec<Change>,
     pub(super) busy: bool,
+    /// The request id of the Apply in flight; an answer with another one is from an Apply this window no longer waits for.
+    pub(super) req_apply: u64,
+    /// The signed-in role's name typed to confirm a change to its own membership.
+    confirm: String,
     /// The Role tab's text fields as typed, for the role in `fields_for`.
     lim: String,
     until: String,
@@ -76,6 +98,7 @@ impl PgRolesWin {
             rtab: RTab::Role,
             req_cluster: 0,
             cluster: None,
+            chains: HashMap::new(),
             database,
             schema: "public".into(),
             kind: Kind::Tables,
@@ -90,6 +113,8 @@ impl PgRolesWin {
             filter: String::new(),
             staged: Vec::new(),
             busy: false,
+            req_apply: 0,
+            confirm: String::new(),
             lim: String::new(),
             until: String::new(),
             fields_for: String::new(),
@@ -99,7 +124,25 @@ impl PgRolesWin {
     }
 
     fn cl(&self) -> Option<&Cluster> {
-        self.cluster.as_ref().and_then(|c| c.as_ref().ok())
+        self.cluster.as_ref().and_then(|c| c.as_ref().ok()).map(|c| &**c)
+    }
+
+    fn cl_arc(&self) -> Option<Arc<Cluster>> {
+        self.cluster.as_ref().and_then(|c| c.as_ref().ok()).cloned()
+    }
+
+    fn set_cluster(&mut self, res: db::Res<Cluster>) {
+        self.chains = match &res {
+            Ok(c) => c.roles.iter().map(|r| (r.name.clone(), c.chain(&r.name))).chain([(String::new(), vec![String::new()])]).collect(),
+            Err(_) => HashMap::new(),
+        };
+        self.cluster = Some(res.map(Arc::new));
+    }
+
+    /// The staged changes to the signed-in role's own membership that need a typed confirmation, by index, with why.
+    fn risky(&self) -> Vec<(usize, String)> {
+        let Some(c) = self.cl() else { return Vec::new() };
+        self.staged.iter().enumerate().filter_map(|(i, s)| c.self_membership_risk(s).map(|why| (i, why))).collect()
     }
 
     fn objects(&self) -> Option<&Objects> {
@@ -198,6 +241,40 @@ pub(super) struct PgPwForm {
     serial: u64,
 }
 
+/// The typed passwords are wiped whenever a dialog goes away, by a button, Esc or another dialog taking its place.
+impl Drop for NewRoleForm {
+    fn drop(&mut self) {
+        self.password.zeroize();
+    }
+}
+
+impl Drop for PgPwForm {
+    fn drop(&mut self) {
+        self.password.zeroize();
+        self.again.zeroize();
+    }
+}
+
+#[cfg(test)]
+impl PgPwForm {
+    pub(super) fn for_test(conn: u64, role: &str, serial: u64) -> PgPwForm {
+        PgPwForm { conn, role: role.into(), oid: String::new(), password: String::new(), again: String::new(), serial }
+    }
+
+    pub(super) fn typed(&self) -> &str {
+        &self.password
+    }
+}
+
+/// Drops what egui keeps of a closing password dialog's fields, the undo history of their text included.
+pub(super) fn forget_pg_secrets(ctx: &egui::Context, m: &Modal) {
+    match m {
+        Modal::PgNewRole(f) => forget_secret(ctx, "pg-new-role", f.serial, 1),
+        Modal::PgPassword(f) => forget_secret(ctx, "pg-password", f.serial, 2),
+        _ => {}
+    }
+}
+
 pub(super) struct DropForm {
     conn: u64,
     role: String,
@@ -230,8 +307,25 @@ enum Act {
 /// What the tabs need to know about the connection and the login.
 struct Env {
     major: u32,
-    /// Why nothing can be staged: the lock, or a login without CREATEROLE. None when edits are allowed.
+    /// The lock's note while writes are locked.
+    locked: Option<String>,
+    /// Why privileges and attributes cannot be staged: the lock, or a login without CREATEROLE. Its own password and the members
+    /// of roles it holds ADMIN on have checks of their own.
     blocked: Option<String>,
+}
+
+impl Env {
+    /// Whether `c` may be staged: memberships go by the ADMIN option the server asks for, not by CREATEROLE.
+    fn may_stage(&self, c: &Change) -> bool {
+        self.locked.is_none() && (self.blocked.is_none() || matches!(c, Change::Member { .. }))
+    }
+}
+
+/// The matrix columns `left..right` shows, of `n` columns `w` wide from `x0`.
+fn col_range(left: f32, right: f32, x0: f32, w: f32, n: usize) -> std::ops::Range<usize> {
+    let first = (((left - x0) / w).floor().max(0.0) as usize).min(n);
+    let last = (((right - x0) / w).ceil().max(0.0) as usize).min(n);
+    first..last.max(first)
 }
 
 /// The chip of one privilege in a matrix cell: solid when granted, teal with "G" with the grant option, dashed when held through
@@ -391,7 +485,7 @@ impl App {
                             w.role = c.roles.iter().find(|r| !r.system() && r.name != c.me).or_else(|| c.me()).map(|r| r.name.clone());
                         }
                     }
-                    w.cluster = Some(res);
+                    w.set_cluster(res);
                 }
             }
             Answer::Objects(res) => {
@@ -422,11 +516,11 @@ impl App {
                     }
                 }
             }
-            Answer::Done { did, res, undo } => self.pg_roles_done(conn, did, res, undo),
+            Answer::Done { did, res, undo } => self.pg_roles_done(conn, req, did, res, undo),
         }
     }
 
-    fn pg_roles_done(&mut self, conn: u64, did: Did, res: db::Res<String>, undo: Option<UndoAction>) {
+    fn pg_roles_done(&mut self, conn: u64, req: u64, did: Did, res: db::Res<String>, undo: Option<UndoAction>) {
         let ok = res.is_ok();
         match res {
             Ok(s) => self.ok(s),
@@ -437,11 +531,13 @@ impl App {
         }
         let Some(w) = self.pg_roles.as_mut().filter(|w| w.conn == conn) else { return };
         match &did {
-            Did::Applied => {
+            // Only the Apply this window waits for: one from before Esc closed it must not clear what was staged since.
+            Did::Applied if req == w.req_apply => {
                 w.busy = false;
                 // A failed batch ran nothing and stays staged, so its reason can be read against what the server holds now.
                 if ok {
                     w.staged.clear();
+                    w.confirm.clear();
                 }
             }
             Did::Created(name) if ok => w.role = Some(name.clone()),
@@ -456,8 +552,9 @@ impl App {
 
     fn pg_roles_env(&self, w: &PgRolesWin) -> Env {
         let major = w.cl().map(|c| c.major).or_else(|| self.pg_roles_db(w.conn).map(|d| d.version.chars().take_while(char::is_ascii_digit).collect::<String>().parse().unwrap_or(0))).unwrap_or(17);
-        let blocked = if !self.conn_writable(w.conn) { Some(NOTE_LOCKED.to_string()) } else { w.cl().and_then(Cluster::read_only_reason) };
-        Env { major, blocked }
+        let locked = (!self.conn_writable(w.conn)).then(|| NOTE_LOCKED.to_string());
+        let blocked = locked.clone().or_else(|| w.cl().and_then(Cluster::read_only_reason));
+        Env { major, locked, blocked }
     }
 
     pub(super) fn pg_roles_window(&mut self, ctx: &egui::Context) {
@@ -516,7 +613,7 @@ impl App {
                 },
             }
             ui.add_space(10.0);
-            self.pg_staged_bar(ui, &w, &env, &mut acts);
+            self.pg_staged_bar(ui, &mut w, &env, &mut acts);
         });
         let mut open = true;
         for a in acts {
@@ -553,7 +650,10 @@ impl App {
                     w.cell = None;
                 }
                 Act::Stage(c) => {
-                    if env.blocked.is_none() && !w.busy {
+                    let me = w.cl().map(|c| c.me.clone()).unwrap_or_default();
+                    if let Some(why) = Cluster::self_lockout(&me, &c) {
+                        self.warn(why);
+                    } else if env.may_stage(&c) && !w.busy {
                         w.stage(c);
                     }
                 }
@@ -565,6 +665,7 @@ impl App {
                 Act::Discard => {
                     w.staged.clear();
                     w.fields_for.clear();
+                    w.confirm.clear();
                 }
                 Act::Close => open = false,
                 Act::Unlock => self.modal = Some(Modal::Unlock(conn, None)),
@@ -606,17 +707,41 @@ impl App {
             return self.modal = Some(Modal::Unlock(conn, None));
         }
         let Some(sql) = self.pg_roles_db(conn) else { return self.warn_offline() };
+        self.req += 1;
+        let req = self.req;
         let Some(w) = self.pg_roles.as_mut() else { return };
+        let risky = w.risky();
+        let me = w.cl().map(|c| c.me.clone()).unwrap_or_default();
+        if !risky.is_empty() && w.confirm != me {
+            return self.warn(format!("Type {me} to confirm the change to your own membership."));
+        }
         // Objects and default privileges run in the database they were read from; role changes run anywhere, so there too.
         let db_oid = if w.tied() { w.objects().map(|o| o.db_oid.clone()).or_else(|| w.defaults().map(|d| d.db_oid.clone())).unwrap_or_default() } else { String::new() };
         let roles = w.cl().map(|c| c.roles.iter().map(|r| (r.name.clone(), r.oid.clone())).collect()).unwrap_or_default();
-        let batch = Batch { database: w.database.clone(), db_oid, changes: w.staged.clone(), roles };
+        let batch = Batch { database: w.database.clone(), db_oid, changes: w.staged.clone(), roles, no_undo: risky.into_iter().map(|(i, _)| i).collect(), ..Default::default() };
         w.busy = true;
-        self.worker.pg_roles_apply(conn, sql, batch, false);
+        w.req_apply = req;
+        self.worker.pg_roles_apply(conn, req, sql, batch, false);
     }
 
-    fn pg_staged_bar(&self, ui: &mut egui::Ui, w: &PgRolesWin, env: &Env, acts: &mut Vec<Act>) {
+    fn pg_staged_bar(&self, ui: &mut egui::Ui, w: &mut PgRolesWin, env: &Env, acts: &mut Vec<Act>) {
         let preview = rp::preview(env.major, &w.staged);
+        let risky = w.risky();
+        let me = w.cl().map(|c| c.me.clone()).unwrap_or_default();
+        if !risky.is_empty() {
+            egui::Frame::new().fill(tint(WARNING(), 26)).stroke(Stroke::new(1.0, tint(WARNING(), 90))).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                for (_, why) in &risky {
+                    ui.add(egui::Label::new(RichText::new(why.as_str()).color(BRIGHT())).wrap());
+                }
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("Type {me} to apply")).color(MUTED()));
+                    ui.add(egui::TextEdit::singleline(&mut w.confirm).font(egui::TextStyle::Monospace).desired_width(160.0)).widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Confirm own membership"));
+                });
+            });
+            ui.add_space(6.0);
+        }
+        let gate = env.locked.clone().or_else(|| if w.staged.iter().all(|c| matches!(c, Change::Member { .. })) { None } else { env.blocked.clone() });
         egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, tint(PRIMARY(), 89))).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
@@ -643,8 +768,9 @@ impl App {
                     });
                 });
                 right_group(ui, |ui| {
-                    let can = !w.staged.is_empty() && preview.is_ok() && !w.busy && env.blocked.is_none();
-                    let why = if w.busy { "Applying…" } else if let Some(b) = &env.blocked { b.as_str() } else { "Nothing to apply" };
+                    let confirmed = risky.is_empty() || w.confirm == me;
+                    let can = !w.staged.is_empty() && preview.is_ok() && !w.busy && gate.is_none() && confirmed;
+                    let why = if w.busy { "Applying…" } else if let Some(b) = &gate { b.as_str() } else if !confirmed { "Type the role name above to confirm" } else { "Nothing to apply" };
                     if ui.add_enabled(can, primary_button(ui, if w.busy { "Applying…" } else { "Apply" }, PRIMARY())).on_disabled_hover_text(why).clicked() {
                         acts.push(Act::Apply);
                     }
@@ -660,7 +786,7 @@ impl App {
     // Privileges.
 
     fn pg_privileges_tab(&self, ui: &mut egui::Ui, w: &mut PgRolesWin, env: &Env, acts: &mut Vec<Act>) {
-        let Some(c) = w.cl().cloned() else { return };
+        let Some(c) = w.cl_arc() else { return };
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
             let tied = w.tied();
@@ -761,7 +887,10 @@ impl App {
                 let (hr, _) = ui.allocate_exact_size(egui::vec2(total_w, HEAD_H), Sense::hover());
                 ui.painter().rect_filled(hr, egui::CornerRadius { nw: R_MD, ne: 0, sw: 0, se: 0 }, HDR());
                 ui.painter().text(egui::pos2(hr.left() + 12.0, hr.center().y), egui::Align2::LEFT_CENTER, head, FontId::proportional(TXT_SMALL), MUTED());
-                for (i, (name, sub)) in cols.iter().enumerate() {
+                // A server with hundreds of roles makes a matrix far wider than the window; only the columns in view are drawn.
+                let clip = ui.clip_rect();
+                let vis = col_range(clip.left(), clip.right(), hr.left() + NAME_W, COL_W, cols.len());
+                for (i, (name, sub)) in cols.iter().enumerate().take(vis.end).skip(vis.start) {
                     let rect = egui::Rect::from_min_size(egui::pos2(hr.left() + NAME_W + COL_W * i as f32, hr.top()), egui::vec2(COL_W, HEAD_H));
                     let label = if name.is_empty() { "Role PUBLIC".to_string() } else { format!("Role {name}") };
                     let resp = ui.interact(rect, egui::Id::unique(("pg-col", w.conn, i)), if name.is_empty() { Sense::hover() } else { Sense::click() });
@@ -793,7 +922,7 @@ impl App {
                         if !o.detail.is_empty() && at.right() + 40.0 < name_rect.right() {
                             place(ui, egui::Rect::from_min_max(egui::pos2(at.right() + 6.0, row.top()), name_rect.max), &o.detail, FontId::proportional(TXT_CAPTION), FAINT(), false, 0.0);
                         }
-                        for (j, (role, _)) in cols.iter().enumerate() {
+                        for (j, (role, _)) in cols.iter().enumerate().take(vis.end).skip(vis.start) {
                             let rect = egui::Rect::from_min_size(egui::pos2(row.left() + NAME_W + COL_W * j as f32, row.top()), egui::vec2(COL_W, CELL_H));
                             if w.role.as_deref() == Some(role.as_str()) && !role.is_empty() {
                                 ui.painter().rect_filled(rect, 0.0, tint(PRIMARY(), 12));
@@ -810,8 +939,10 @@ impl App {
     fn pg_cell(&self, ui: &mut egui::Ui, w: &mut PgRolesWin, c: &Cluster, o: &Obj, role: &str, rect: egui::Rect, order: &[&str], env: &Env, acts: &mut Vec<Act>) {
         let id = egui::Id::unique(("pg-cell", w.conn, &o.oid, role));
         let resp = ui.interact(rect.shrink(2.0), id, Sense::click());
-        let chain = if role.is_empty() { vec![String::new()] } else { c.chain(role) };
-        let cell = rp::cell(o, &chain);
+        let cell = match w.chains.get(role) {
+            Some(chain) => rp::cell(o, chain),
+            None => rp::cell(o, &if role.is_empty() { vec![String::new()] } else { c.chain(role) }),
+        };
         let privs = w.privs_now(o, role);
         let staged = w.staged_key(&format!("acl|{:?}|{}|{role}", w.kind, o.oid));
         let this = |w: &PgRolesWin| w.cell.as_ref().is_some_and(|(oid, g)| *oid == o.oid && g == role);
@@ -933,7 +1064,7 @@ impl App {
     // Roles.
 
     fn pg_roles_tab(&self, ui: &mut egui::Ui, w: &mut PgRolesWin, env: &Env, acts: &mut Vec<Act>) {
-        let Some(c) = w.cl().cloned() else { return };
+        let Some(c) = w.cl_arc() else { return };
         ui.horizontal_top(|ui| {
             ui.allocate_ui_with_layout(egui::vec2(240.0, 480.0), egui::Layout::top_down(egui::Align::Min), |ui| {
                 ui.set_width(240.0);
@@ -989,7 +1120,14 @@ impl App {
                         continue;
                     }
                     let desc = rp::FLAGS.iter().find(|(n, _)| *n == f).map(|(_, d)| *d).unwrap_or_default();
-                    let flag_ok = c.may_set_flag(f);
+                    let mut off = now.clone();
+                    if let Some(v) = off.flag_mut(f) {
+                        *v = false;
+                    }
+                    let flag_ok = c.may_set_flag(f).and_then(|_| match Cluster::self_lockout(&c.me, &Change::Attrs { role: role.name.clone(), from: now.clone(), to: off }) {
+                        Some(why) => Err(why),
+                        None => Ok(()),
+                    });
                     let mut on = now.flag(f);
                     let r = ui.add_enabled(can && flag_ok.is_ok(), egui::Checkbox::new(&mut on, RichText::new(f).monospace().size(TXT_BODY)));
                     if let Err(why) = &flag_ok {
@@ -1029,7 +1167,7 @@ impl App {
             form_label(ui, "Valid until");
             let r = ui.add_enabled(can, egui::TextEdit::singleline(&mut w.until).font(egui::TextStyle::Monospace).desired_width(220.0).hint_text("never"));
             r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Valid until"));
-            ui.label(RichText::new("a date, or empty for never").size(TXT_SMALL).color(FAINT()));
+            ui.label(RichText::new(if now.valid_until == "-infinity" { "expired: -infinity, never valid" } else { "a date, or empty for never" }).size(TXT_SMALL).color(FAINT()));
             ui.end_row();
             if r.changed() {
                 let v = w.until.trim();
@@ -1037,8 +1175,10 @@ impl App {
                 acts.push(Act::Stage(Change::Attrs { role: role.name.clone(), from: role.attrs.clone(), to: Attrs { valid_until: v.to_string(), ..now.clone() } }));
             }
             form_label(ui, "Password");
-            let pw_ok = env.blocked.is_none() && may.is_ok();
-            if ui.add_enabled(pw_ok, egui::Button::new("Change password…")).on_disabled_hover_text(env.blocked.clone().or(may.clone().err()).unwrap_or_default()).clicked() {
+            // Every role may set its own password, CREATEROLE or not.
+            let may_pw = c.may_password(role);
+            let pw_ok = env.locked.is_none() && may_pw.is_ok();
+            if ui.add_enabled(pw_ok, egui::Button::new("Change password…")).on_disabled_hover_text(env.locked.clone().or(may_pw.err()).unwrap_or_default()).clicked() {
                 acts.push(Act::Password(role.name.clone()));
             }
             ui.label(RichText::new("A new password cannot be undone").size(TXT_SMALL).color(FAINT()));
@@ -1068,7 +1208,7 @@ impl App {
     pub(super) fn pg_new_role_dialog(&mut self, ui: &mut egui::Ui, f: &mut NewRoleForm, keep: &mut bool) {
         ui.set_width(540.0);
         let writable = self.conn_writable(f.conn);
-        let cluster = self.pg_roles.as_ref().and_then(|w| w.cl().cloned()).unwrap_or_default();
+        let cluster = self.pg_roles.as_ref().and_then(|w| w.cl_arc()).unwrap_or_default();
         dialog_title(ui, "New role");
         ui.label(RichText::new(self.conn_name(f.conn)).color(MUTED()));
         ui.add_space(10.0);
@@ -1087,7 +1227,8 @@ impl App {
                 form_label(ui, "Password");
                 ui.vertical(|ui| {
                     ui.add(egui::TextEdit::singleline(&mut f.password).id(secret_id("pg-new-role", f.serial, 0)).password(true).desired_width(f32::INFINITY)).widget_info(|| egui::WidgetInfo::labeled(egui::Role::PasswordInput, true, "Password"));
-                    ui.label(RichText::new("Sent once as a SCRAM verifier and shown as *** in the log; never kept by Quarry. Empty for none.").size(TXT_SMALL).color(FAINT()));
+                    ui.add(egui::Label::new(RichText::new(format!("Sent once as {}, shown as *** in the log; never kept by Quarry. Empty for none. {POLICY}", hash_name(&cluster.password_encryption))).size(TXT_SMALL).color(FAINT())).wrap());
+                    md5_note(ui, &cluster.password_encryption);
                 });
                 ui.end_row();
             }
@@ -1160,12 +1301,15 @@ impl App {
         }
         dialog_actions(ui, |ui| {
             if ui.add_enabled(writable && check.is_ok(), primary_button(ui, "Create", PRIMARY())).clicked() {
-                let password = std::mem::take(&mut f.password);
-                let password = if spec.attrs.login { password } else { String::new() };
+                // Whatever does not reach the worker is wiped here, a group's password included.
+                let mut password = zeroize::Zeroizing::new(std::mem::take(&mut f.password));
+                if !spec.attrs.login {
+                    password.zeroize();
+                }
                 if self.demo {
                     self.ok("Offline demo: no database is connected.");
                 } else if let Some(sql) = self.pg_roles_db(f.conn) {
-                    self.worker.pg_role_create(f.conn, sql, spec.clone(), password, false);
+                    self.worker.pg_role_create(f.conn, sql, spec.clone(), std::mem::take(&mut *password), false);
                 }
                 *keep = false;
             }
@@ -1174,7 +1318,7 @@ impl App {
             }
         });
         if !*keep {
-            f.password.clear();
+            f.password.zeroize();
             forget_secret(ui.ctx(), "pg-new-role", f.serial, 1);
         }
     }
@@ -1182,6 +1326,7 @@ impl App {
     pub(super) fn pg_password_dialog(&mut self, ui: &mut egui::Ui, f: &mut PgPwForm, keep: &mut bool) {
         ui.set_width(520.0);
         let writable = self.conn_writable(f.conn);
+        let encryption = self.pg_roles.as_ref().and_then(|w| w.cl().map(|c| c.password_encryption.clone())).unwrap_or_default();
         dialog_title(ui, "Change password");
         ui.label(RichText::new(&f.role).monospace().color(MUTED()));
         ui.add_space(8.0);
@@ -1206,18 +1351,19 @@ impl App {
             }
         }
         ui.add_space(4.0);
-        ui.add(egui::Label::new(RichText::new("A password change cannot be undone. Quarry computes the SCRAM-SHA-256 verifier here and sends only that, once; the password is not shown, logged or kept.").size(TXT_SMALL).color(MUTED())).wrap());
+        ui.add(egui::Label::new(RichText::new(format!("A password change cannot be undone. Quarry computes {} here and sends only that, once; the password is not shown, logged or kept. {POLICY}", hash_name(&encryption))).size(TXT_SMALL).color(MUTED())).wrap());
+        md5_note(ui, &encryption);
         if !writable {
             ui.label(RichText::new(NOTE_LOCKED).size(TXT_SMALL).color(FAINT()));
         }
         dialog_actions(ui, |ui| {
             if ui.add_enabled(writable && check.is_ok(), primary_button(ui, "Change password", PRIMARY())).clicked() {
-                let password = std::mem::take(&mut f.password);
-                f.again.clear();
+                let mut password = zeroize::Zeroizing::new(std::mem::take(&mut f.password));
+                f.again.zeroize();
                 if self.demo {
                     self.ok("Offline demo: no database is connected.");
                 } else if let Some(sql) = self.pg_roles_db(f.conn) {
-                    self.worker.pg_role_password(f.conn, sql, f.role.clone(), f.oid.clone(), password, false);
+                    self.worker.pg_role_password(f.conn, sql, f.role.clone(), f.oid.clone(), std::mem::take(&mut *password), false);
                 }
                 *keep = false;
             }
@@ -1226,8 +1372,8 @@ impl App {
             }
         });
         if !*keep {
-            f.password.clear();
-            f.again.clear();
+            f.password.zeroize();
+            f.again.zeroize();
             forget_secret(ui.ctx(), "pg-password", f.serial, 2);
         }
     }
@@ -1286,7 +1432,12 @@ impl App {
                 }
                 let held: usize = info.dbs.iter().map(|d| d.held).sum();
                 caption(ui, "ALSO HELD");
-                ui.label(RichText::new(if held == 0 { "No privileges or default privileges.".to_string() } else { format!("{} in {}.", plural(held as u64, "privilege or default privilege"), info.dbs.iter().filter(|d| d.held > 0).map(|d| d.database.clone()).collect::<Vec<_>>().join(", ")) }).color(TEXT()));
+                if held > 0 || info.shared_held.is_empty() {
+                    ui.label(RichText::new(if held == 0 { "No privileges or default privileges.".to_string() } else { format!("{} in {}.", plural(held as u64, "privilege or default privilege"), info.dbs.iter().filter(|d| d.held > 0).map(|d| d.database.clone()).collect::<Vec<_>>().join(", ")) }).color(TEXT()));
+                }
+                if !info.shared_held.is_empty() {
+                    ui.add(egui::Label::new(RichText::new(format!("Privileges on {}, revoked by DROP OWNED.", info.shared_held.join(", "))).color(TEXT())).wrap());
+                }
                 for (d, why) in &info.unread {
                     ui.label(RichText::new(format!("{d} could not be read: {why}")).size(TXT_SMALL).color(WARNING()));
                 }
@@ -1369,7 +1520,7 @@ impl App {
             let r = cl.role("app_writer").cloned().unwrap_or_default();
             w.staged.push(Change::Attrs { role: r.name.clone(), from: r.attrs.clone(), to: Attrs { conn_limit: 20, ..r.attrs.clone() } });
         }
-        w.cluster = Some(Ok(cl));
+        w.set_cluster(Ok(cl));
         w.objs = Some(Ok(objs));
         w.defs = Some(Ok(defs));
         self.pg_roles = Some(w);
@@ -1409,7 +1560,7 @@ fn pg_side_panel(ui: &mut egui::Ui, w: &PgRolesWin, c: &Cluster, acts: &mut Vec<
             });
         };
         row(ui, "Connection limit", if a.conn_limit < 0 { "none".into() } else { a.conn_limit.to_string() }, if a.conn_limit < 0 { TEXT() } else { C_NUMBER() });
-        row(ui, "Valid until", if a.valid_until.is_empty() { "never".into() } else { a.valid_until.clone() }, TEXT());
+        row(ui, "Valid until", rp::until_shown(&a.valid_until).to_string(), if a.valid_until == "-infinity" { ALERT() } else { TEXT() });
         row(ui, "Bypasses RLS", if a.bypassrls { "yes".into() } else { "no".into() }, TEXT());
         ui.add_space(8.0);
         if ui.button("Open role…").clicked() {
@@ -1452,7 +1603,9 @@ fn pg_role_list(ui: &mut egui::Ui, w: &mut PgRolesWin, c: &Cluster, env: &Env, a
                     if r.attrs.conn_limit >= 0 {
                         s.push_str(&format!(" · limit {}", r.attrs.conn_limit));
                     }
-                    if !r.attrs.valid_until.is_empty() {
+                    if r.attrs.valid_until == "-infinity" {
+                        s.push_str(" · expired");
+                    } else if !r.attrs.valid_until.is_empty() {
                         s.push_str(&format!(" · expires {}", r.attrs.valid_until.split(' ').next().unwrap_or_default()));
                     }
                     s
@@ -1525,7 +1678,7 @@ fn pg_role_members(ui: &mut egui::Ui, w: &mut PgRolesWin, c: &Cluster, role: &Ro
                     let now = w.member_now(g, m);
                     let group = c.role(g);
                     let may = group.map_or(Err("The role is gone.".to_string()), |r| c.may_grant_role(r));
-                    let can = env.blocked.is_none() && may.is_ok() && !w.busy;
+                    let can = env.locked.is_none() && may.is_ok() && !w.busy;
                     ui.horizontal(|ui| {
                         mono_label(ui, other, if now.is_none() { FAINT() } else { TEXT() });
                         if server.is_none() {
@@ -1566,7 +1719,7 @@ fn pg_role_members(ui: &mut egui::Ui, w: &mut PgRolesWin, c: &Cluster, role: &Ro
         });
         ui.add_space(4.0);
         let taken: Vec<&String> = list.iter().map(|(g, m)| if of { g } else { m }).collect();
-        let can_add = env.blocked.is_none() && !w.busy;
+        let can_add = env.locked.is_none() && !w.busy;
         ui.add_enabled_ui(can_add, |ui| {
             let mut pick = None;
             let combo = egui::ComboBox::from_id_salt(if of { "pg-add-group" } else { "pg-add-member" }).selected_text(if of { "+ Add to a role" } else { "+ Add a member" }).width(170.0).show_ui(ui, |ui| {
@@ -1775,7 +1928,7 @@ fn demo_data() -> (Cluster, Objects, Defaults) {
     ];
     let m = |g: &str, mem: &str| rp::Membership { group: g.into(), member: mem.into(), opts: Opts { admin: false, inherit: Some(true), set: Some(true) }, grantors: vec!["postgres".into()] };
     let members = vec![m("reporting", "app_writer"), m("reporting", "jane"), m("readonly", "app_reader"), m("readonly", "reporting")];
-    let cl = Cluster { major: 17, me: "postgres".into(), roles, members, databases: vec!["analytics".into(), "billing".into(), "postgres".into()] };
+    let cl = Cluster { major: 17, me: "postgres".into(), roles, members, databases: vec!["analytics".into(), "billing".into(), "postgres".into()], password_encryption: "scram-sha-256".into() };
     let p = |v: &[(&str, bool)]| -> Privs { v.iter().map(|(k, g)| (k.to_string(), *g)).collect() };
     let e = |g: &str, v: &[(&str, bool)]| rp::AclEntry { grantee: g.into(), grantor: "postgres".into(), privs: p(v) };
     let all: Vec<(&str, bool)> = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER", "MAINTAIN"].iter().map(|k| (*k, false)).collect();
@@ -1802,4 +1955,17 @@ fn demo_data() -> (Cluster, Objects, Defaults) {
         schemas: vec!["public".into(), "reporting".into(), "staging".into()],
     };
     (cl, objects, defs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_columns_in_view_are_drawn() {
+        // Columns 112 wide from x 170, a view from 300 to 600: columns 1 to 3 show, in part or whole.
+        assert_eq!(col_range(300.0, 600.0, 170.0, 112.0, 50), 1..4);
+        assert_eq!(col_range(0.0, 2000.0, 170.0, 112.0, 5), 0..5);
+        assert_eq!(col_range(9000.0, 9500.0, 170.0, 112.0, 5), 5..5);
+    }
 }

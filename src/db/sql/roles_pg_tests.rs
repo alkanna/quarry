@@ -94,7 +94,7 @@ fn done(l: &LivePg) -> (Did, Res<String>, Option<UndoAction>) {
 }
 
 fn apply(l: &LivePg, b: Batch) -> (Res<String>, Option<UndoAction>) {
-    l.w.pg_roles_apply(1, l.db.clone(), b, false);
+    l.w.pg_roles_apply(1, 1, l.db.clone(), b, false);
     let (_, res, undo) = done(l);
     (res, undo)
 }
@@ -129,7 +129,7 @@ fn acl(f: &PgFixture, table: &str) -> String {
 }
 
 fn batch(database: &str, o: &Objects, c: &Cluster, changes: Vec<Change>) -> Batch {
-    Batch { database: database.into(), db_oid: o.db_oid.clone(), changes, roles: oids(c) }
+    Batch { database: database.into(), db_oid: o.db_oid.clone(), changes, roles: oids(c), ..Default::default() }
 }
 
 #[test]
@@ -237,7 +237,7 @@ fn live_each_write_and_its_undo() {
         undo(l, u.unwrap()).0.unwrap_or_else(|e| panic!("{var}: {e}"));
         assert_eq!(acl(&f, "t"), before_acl, "{var}");
         // The lock refuses every write before anything runs.
-        l.w.pg_roles_apply(1, l.db.clone(), batch("quarry_test", &o, &c, vec![Change::Attrs { role: m.into(), from: attrs.clone(), to: Attrs { createdb: true, ..attrs.clone() } }]), true);
+        l.w.pg_roles_apply(1, 1, l.db.clone(), batch("quarry_test", &o, &c, vec![Change::Attrs { role: m.into(), from: attrs.clone(), to: Attrs { createdb: true, ..attrs.clone() } }]), true);
         assert!(done(l).1.unwrap_err().contains("locked"), "{var}");
     });
 }
@@ -458,7 +458,9 @@ fn live_passwords_sign_in_and_never_reach_the_log_or_an_error() {
         l.w.pg_role_create(1, l.db.clone(), NewRole { name: n.into(), attrs: Attrs { login: true, ..Default::default() }, groups: vec![] }, first.into(), false);
         done(l).1.unwrap_or_else(|e| panic!("{var}: {e}"));
         let stored = l.one(&format!("SELECT rolpassword FROM pg_authid WHERE rolname = '{n}'"));
-        assert!(stored.starts_with("SCRAM-SHA-256$4096:"), "{var}: {stored}");
+        // PostgreSQL 13 keeps MD5 by default, and gets what psql's \password would send it.
+        let want = if cluster(l).password_encryption == "md5" { "md5" } else { "SCRAM-SHA-256$4096:" };
+        assert!(stored.starts_with(want), "{var}: {stored}");
         let who = live_pg_at(uri_as(l, n, first));
         assert_eq!(who.one("SELECT current_user"), *n, "{var}");
         drop(who);
@@ -497,8 +499,8 @@ fn live_a_role_without_createrole_reads_but_cannot_change() {
         assert!(c.role(other).is_some_and(|o| c.may_alter(o).is_err()), "{var}");
         // The server agrees: an ALTER ROLE from this login is refused and leaves the role as it was.
         let a = c.role(other).unwrap().attrs.clone();
-        let b = Batch { database: String::new(), db_oid: String::new(), changes: vec![Change::Attrs { role: other.into(), from: a.clone(), to: Attrs { createdb: true, ..a.clone() } }], roles: oids(&c) };
-        w.w.pg_roles_apply(1, w.db.clone(), b, false);
+        let b = Batch { database: String::new(), db_oid: String::new(), changes: vec![Change::Attrs { role: other.into(), from: a.clone(), to: Attrs { createdb: true, ..a.clone() } }], roles: oids(&c), ..Default::default() };
+        w.w.pg_roles_apply(1, 1, w.db.clone(), b, false);
         let err = done(&w).1.unwrap_err();
         assert!(err.to_lowercase().contains("permission denied"), "{var}: {err}");
         assert!(!cluster(l).role(other).unwrap().attrs.createdb, "{var}");
@@ -542,3 +544,219 @@ fn live_version_gating_of_maintain_and_membership_options() {
     });
 }
 
+
+/// A login of its own, for the tests that need the signed-in role to be another one than postgres.
+fn login(l: &LivePg, name: &str, attrs: &str) -> LivePg {
+    let pw = "Zq9login";
+    l.w.rt.block_on(async { sqlx::raw_sql(&format!("CREATE ROLE \"{name}\" LOGIN {attrs} PASSWORD '{pw}'")).execute(&l.pool).await.unwrap() });
+    live_pg_at(uri_as(l, name, pw))
+}
+
+#[test]
+fn live_the_signed_in_role_cannot_lock_itself_out() {
+    each(false, |l, var| {
+        let r = Roles::new(l, &["su"]);
+        let su = r.get(0);
+        let w = login(l, su, "SUPERUSER");
+        let c = cluster(&w);
+        assert_eq!(c.me, su, "{var}");
+        let a = c.role(su).unwrap().attrs.clone();
+        for to in [Attrs { login: false, ..a.clone() }, Attrs { superuser: false, ..a.clone() }, Attrs { valid_until: "2000-01-01 00:00:00+00".into(), ..a.clone() }, Attrs { valid_until: "-infinity".into(), ..a.clone() }] {
+            let b = Batch { changes: vec![Change::Attrs { role: su.into(), from: a.clone(), to: to.clone() }], roles: oids(&c), ..Default::default() };
+            w.w.pg_roles_apply(1, 1, w.db.clone(), b, false);
+            let err = done(&w).1.unwrap_err();
+            assert!(err.contains("signed in as") && err.contains("Nothing was changed"), "{var}: {to:?}: {err}");
+        }
+        assert_eq!(cluster(l).role(su).unwrap().attrs, a, "{var}: nothing ran");
+        // Another role loses them as before.
+        let other = Roles::new(l, &["other"]);
+        l.w.rt.block_on(async { sqlx::raw_sql(&format!("CREATE ROLE \"{}\" LOGIN", other.get(0))).execute(&l.pool).await.unwrap() });
+        let c = cluster(&w);
+        let oa = c.role(other.get(0)).unwrap().attrs.clone();
+        let b = Batch { changes: vec![Change::Attrs { role: other.get(0).into(), from: oa.clone(), to: Attrs { login: false, ..oa } }], roles: oids(&c), ..Default::default() };
+        w.w.pg_roles_apply(1, 1, w.db.clone(), b, false);
+        done(&w).1.unwrap_or_else(|e| panic!("{var}: {e}"));
+    });
+}
+
+#[test]
+fn live_valid_until_minus_infinity_round_trips_and_fractions_are_refused() {
+    each(true, |l, var| {
+        let r = Roles::new(l, &["exp"]);
+        let n = r.get(0);
+        let f = PgFixture::new(l, &unique_name("qr_inf"), "");
+        f.sql(&format!("CREATE ROLE \"{n}\" LOGIN VALID UNTIL '-infinity'"));
+        let c = cluster(l);
+        let a = c.role(n).unwrap().attrs.clone();
+        assert_eq!(a.valid_until, "-infinity", "{var}: read as expired, not never");
+        let until = || l.one(&format!("SELECT rolvaliduntil::text FROM pg_roles WHERE rolname = '{n}'"));
+        let to = Attrs { valid_until: "2031-02-03 04:05:06+00".into(), ..a.clone() };
+        let (res, u) = apply(l, Batch { changes: vec![Change::Attrs { role: n.into(), from: a.clone(), to }], roles: oids(&c), ..Default::default() });
+        res.unwrap_or_else(|e| panic!("{var}: {e}"));
+        undo(l, u.unwrap()).0.unwrap_or_else(|e| panic!("{var}: {e}"));
+        assert_eq!(until(), "-infinity", "{var}: the undo wrote back -infinity, not infinity");
+        // Typed -infinity goes out as itself and reads back the same.
+        f.sql(&format!("ALTER ROLE \"{n}\" VALID UNTIL 'infinity'"));
+        let c = cluster(l);
+        let a = c.role(n).unwrap().attrs.clone();
+        let (res, _) = apply(l, Batch { changes: vec![Change::Attrs { role: n.into(), from: a.clone(), to: Attrs { valid_until: "-infinity".into(), ..a.clone() } }], roles: oids(&c), ..Default::default() });
+        res.unwrap_or_else(|e| panic!("{var}: {e}"));
+        assert_eq!(until(), "-infinity", "{var}");
+        // A fraction of a second would be written back without it, so it is refused.
+        let c = cluster(l);
+        let a = c.role(n).unwrap().attrs.clone();
+        let (res, _) = apply(l, Batch { changes: vec![Change::Attrs { role: n.into(), from: a.clone(), to: Attrs { valid_until: "2031-02-03 04:05:06.5+00".into(), ..a.clone() } }], roles: oids(&c), ..Default::default() });
+        assert!(res.unwrap_err().contains("not the same moment"), "{var}");
+        assert_eq!(until(), "-infinity", "{var}");
+    });
+}
+
+#[test]
+fn live_an_undo_restores_each_grantors_grant_exactly() {
+    each(false, |l, var| {
+        let r = Roles::new(l, &["grp", "mem", "mgr"]);
+        let (g, m, mgr) = (r.get(0), r.get(1), r.get(2));
+        let f = PgFixture::new(l, &unique_name("qr_grantor2"), "CREATE TABLE t (a int);");
+        let w = login(l, mgr, "CREATEROLE");
+        f.sql(&format!(
+            "CREATE ROLE \"{g}\"; CREATE ROLE \"{m}\"; GRANT \"{g}\" TO \"{m}\"; GRANT \"{g}\" TO \"{mgr}\" WITH ADMIN OPTION; \
+             GRANT SELECT ON t TO \"{m}\"; GRANT SELECT ON t TO \"{mgr}\" WITH GRANT OPTION; GRANT USAGE ON SCHEMA \"{}\" TO \"{mgr}\"",
+            f.schema
+        ));
+        let (c, o) = (cluster(&w), objects(&w, "quarry_test", &f.schema, Kind::Tables));
+        assert_eq!(c.me, mgr, "{var}");
+        // mgr gives the grant option the owner had not: its own grant, which the undo must take away whole.
+        let before = acl(&f, "t");
+        let ch = Change::Acl { target: obj(&o, "t").target(Kind::Tables), grantee: m.into(), from: privs(&[("SELECT", false)]), to: privs(&[("SELECT", true)]) };
+        let (res, u) = apply(&w, batch("quarry_test", &o, &c, vec![ch]));
+        res.unwrap_or_else(|e| panic!("{var}: {e}"));
+        assert!(acl(&f, "t").contains(&format!("{m}=r*/{mgr}")), "{var}: {}", acl(&f, "t"));
+        undo(&w, u.unwrap()).0.unwrap_or_else(|e| panic!("{var}: {e}"));
+        assert_eq!(acl(&f, "t"), before, "{var}: the undo left a grant of mgr behind");
+        // The same for a membership: from 16 mgr's GRANT makes a row of its own, which the undo revokes by name.
+        let rows = || f.one(&format!("SELECT string_agg(pg_get_userbyid(grantor) || ':' || admin_option, ',' ORDER BY 1) FROM pg_auth_members WHERE roleid = '\"{g}\"'::regrole AND member = '\"{m}\"'::regrole"));
+        let was = rows();
+        let now = c.membership(g, m).unwrap();
+        let ch = Change::Member { group: g.into(), member: m.into(), from: Some(now), to: Some(Opts { admin: true, ..now }) };
+        let (res, u) = apply(&w, batch("quarry_test", &o, &c, vec![ch]));
+        res.unwrap_or_else(|e| panic!("{var}: {e}"));
+        undo(&w, u.unwrap()).0.unwrap_or_else(|e| panic!("{var}: {e}"));
+        if c.major >= 16 {
+            assert_eq!(rows(), was, "{var}: the undo left a row of mgr behind");
+        } else {
+            // One row before 16, whose grantor the GRANT may rewrite; its options are back.
+            assert!(rows().ends_with(":false"), "{var}: {}", rows());
+        }
+    });
+}
+
+#[test]
+fn live_a_role_with_only_shared_privileges_is_dropped() {
+    each(true, |l, var| {
+        let r = Roles::new(l, &["conn"]);
+        let n = r.get(0);
+        // The fixture makes quarry_test, whose CONNECT the role gets.
+        let _f = PgFixture::new(l, &unique_name("qr_shared"), "");
+        l.w.rt.block_on(async { sqlx::raw_sql(&format!("CREATE ROLE \"{n}\"; GRANT CONNECT ON DATABASE quarry_test TO \"{n}\"; GRANT CREATE ON TABLESPACE pg_default TO \"{n}\"")).execute(&l.pool).await.unwrap() });
+        let info = drop_info(l, n);
+        assert!(info.dbs.is_empty(), "{var}: {info:?}");
+        assert!(info.shared_held.iter().any(|s| s.contains("quarry_test")) && info.shared_held.iter().any(|s| s.contains("pg_default")), "{var}: {info:?}");
+        l.w.pg_role_drop(1, l.db.clone(), info, DropMode::DropOwned, false);
+        done(l).1.unwrap_or_else(|e| panic!("{var}: {e}"));
+        assert!(cluster(l).role(n).is_none(), "{var}");
+    });
+}
+
+#[test]
+fn live_drop_refuses_when_an_owned_object_was_swapped_for_another() {
+    each(true, |l, var| {
+        let r = Roles::new(l, &["heir", "bob"]);
+        let (heir, bob) = (r.get(0), r.get(1));
+        let f = PgFixture::new(l, &unique_name("qr_swap"), "");
+        f.sql(&format!("CREATE ROLE \"{heir}\"; CREATE ROLE \"{bob}\"; CREATE TABLE bt (a int); ALTER TABLE bt OWNER TO \"{bob}\""));
+        let info = drop_info(l, bob);
+        // As many objects as the window saw, but not the same one.
+        f.sql(&format!("ALTER TABLE bt OWNER TO \"{heir}\"; CREATE TABLE bt4 (a int); ALTER TABLE bt4 OWNER TO \"{bob}\""));
+        l.w.pg_role_drop(1, l.db.clone(), info, DropMode::DropOwned, false);
+        let err = done(l).1.unwrap_err();
+        assert!(err.contains("Look again"), "{var}: {err}");
+        assert_eq!(f.one(&format!("SELECT count(*)::text FROM pg_class WHERE relnamespace = '\"{}\"'::regnamespace AND relname = 'bt4'", f.schema)), "1", "{var}: bt4 was dropped");
+    });
+}
+
+#[test]
+fn live_a_table_revoke_that_would_take_column_grants_is_refused() {
+    each(true, |l, var| {
+        let r = Roles::new(l, &["col"]);
+        let m = r.get(0);
+        let f = PgFixture::new(l, &unique_name("qr_cols"), "CREATE TABLE t (a int, b int);");
+        f.sql(&format!("CREATE ROLE \"{m}\"; GRANT SELECT, UPDATE ON t TO \"{m}\" WITH GRANT OPTION; GRANT SELECT (a) ON t TO \"{m}\"; GRANT UPDATE (b) ON t TO \"{m}\" WITH GRANT OPTION"));
+        let (c, o) = (cluster(l), objects(l, "quarry_test", &f.schema, Kind::Tables));
+        let target = obj(&o, "t").target(Kind::Tables);
+        let from = privs(&[("SELECT", true), ("UPDATE", true)]);
+        let cols = || f.one(&format!("SELECT string_agg(attname || '=' || attacl::text, ' ' ORDER BY attnum) FROM pg_attribute WHERE attrelid = '\"{}\".t'::regclass AND attacl IS NOT NULL", f.schema));
+        let was = cols();
+        // Taking SELECT would take the column grant on a; taking UPDATE's grant option would take b's.
+        for to in [privs(&[("UPDATE", true)]), privs(&[("SELECT", true), ("UPDATE", false)])] {
+            let (res, _) = apply(l, batch("quarry_test", &o, &c, vec![Change::Acl { target: target.clone(), grantee: m.into(), from: from.clone(), to }]));
+            let err = res.unwrap_err();
+            assert!(err.contains("on columns of"), "{var}: {err}");
+        }
+        assert_eq!(cols(), was, "{var}");
+        // Taking SELECT's grant option alone leaves the plain column grant on a alone, so it runs.
+        let (res, _) = apply(l, batch("quarry_test", &o, &c, vec![Change::Acl { target, grantee: m.into(), from, to: privs(&[("SELECT", false), ("UPDATE", true)]) }]));
+        res.unwrap_or_else(|e| panic!("{var}: {e}"));
+        assert_eq!(cols(), was, "{var}");
+    });
+}
+
+#[test]
+fn live_an_md5_server_gets_the_md5_hash() {
+    each(false, |l, var| {
+        let r = Roles::new(l, &["pe", "new"]);
+        let (pe, n) = (r.get(0), r.get(1));
+        l.w.rt.block_on(async { sqlx::raw_sql(&format!("CREATE ROLE \"{pe}\" LOGIN CREATEROLE PASSWORD 'Zq9login'; ALTER ROLE \"{pe}\" SET password_encryption = 'md5'")).execute(&l.pool).await.unwrap() });
+        let w = live_pg_at(uri_as(l, pe, "Zq9login"));
+        assert_eq!(cluster(&w).password_encryption, "md5", "{var}");
+        w.w.pg_role_create(1, w.db.clone(), NewRole { name: n.into(), attrs: Attrs { login: true, ..Default::default() }, groups: vec![] }, "Zq9md5pw".into(), false);
+        done(&w).1.unwrap_or_else(|e| panic!("{var}: {e}"));
+        assert_eq!(l.one(&format!("SELECT rolpassword FROM pg_authid WHERE rolname = '{n}'")), md5_verifier("Zq9md5pw", n), "{var}");
+        // Only an md5 line of pg_hba.conf signs in with an MD5 hash; the images from 14 on have scram-sha-256 lines.
+        if cluster(l).password_encryption == "md5" {
+            let who = live_pg_at(uri_as(l, n, "Zq9md5pw"));
+            assert_eq!(who.one("SELECT current_user"), *n, "{var}");
+        }
+    });
+}
+
+#[test]
+fn live_saslprep_matches_what_the_server_computes() {
+    each(false, |l, var| {
+        let r = Roles::new(l, &["prep"]);
+        let n = r.get(0);
+        l.w.rt.block_on(async { sqlx::raw_sql(&format!("CREATE ROLE \"{n}\"")).execute(&l.pool).await.unwrap() });
+        for pw in ["Zq9\u{a0}x\u{1f600}", "\u{ad}", "\u{200b}\u{ad}", "Zq9\u{a0}\u{fb01}", "\u{627}1", "\u{627}\u{628}", "a\u{301}b", "Zq9 Märker"] {
+            // The server hashes a password given in clear with its own SASLprep; the verifier here must match it.
+            let lit = pw.replace('\'', "''");
+            l.w.rt.block_on(async { sqlx::raw_sql(&format!("SET password_encryption = 'scram-sha-256'; ALTER ROLE \"{n}\" PASSWORD '{lit}'")).execute(&l.pool).await.unwrap() });
+            let stored = l.one(&format!("SELECT rolpassword FROM pg_authid WHERE rolname = '{n}'"));
+            let (iters, salt) = stored.strip_prefix("SCRAM-SHA-256$").and_then(|s| s.split('$').next()).and_then(|s| s.split_once(':')).unwrap_or_else(|| panic!("{var}: {stored}"));
+            let salt = b64_decode(salt);
+            assert_eq!(scram_verifier(pw, &salt, iters.parse().unwrap()), stored, "{var}: {pw:?}");
+        }
+    });
+}
+
+fn b64_decode(s: &str) -> Vec<u8> {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let (mut out, mut acc, mut bits) = (Vec::new(), 0u32, 0);
+    for c in s.bytes().filter(|c| *c != b'=') {
+        acc = acc << 6 | A.iter().position(|a| *a == c).unwrap() as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    out
+}

@@ -4380,6 +4380,7 @@ dependencies = [
  "json5",
  "keyring",
  "libc",
+ "md5",
  "mongodb",
  "muda",
  "rfd",
@@ -4391,8 +4392,10 @@ dependencies = [
  "sqlx",
  "stringprep",
  "tokio",
+ "unicode-normalization",
  "windows-sys 0.61.2",
  "winit",
+ "zeroize",
 ]
 
 [[package]]

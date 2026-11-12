@@ -636,6 +636,9 @@ impl App {
         });
         if keep && !r.should_close() && self.modal.is_none() {
             self.modal = Some(m);
+        } else if matches!(m, Modal::PgNewRole(_) | Modal::PgPassword(_)) {
+            // Esc closes without the dialog's own buttons, so the password fields are forgotten here; dropping the form wipes them.
+            super::pg_roles::forget_pg_secrets(ctx, &m);
         } else if matches!(m, Modal::Conn(_)) {
             // A Test still running when the form closes must not show in the next form.
             self.conn_test = None;
