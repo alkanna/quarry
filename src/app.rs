@@ -74,6 +74,7 @@ use server::*;
 use sql::server::*;
 use sql::pg_server::*;
 use watch::*;
+use tabs::new_tab_click;
 use drafts::*;
 use sql::edit::*;
 use sql::alter::*;
@@ -86,8 +87,10 @@ const SYSTEM_DBS: [&str; 3] = ["admin", "config", "local"];
 const DEFAULT_COLS: usize = 8;
 
 /// Shortcuts listed by Cmd+/. Cmd is Ctrl on Linux and Windows.
-const SHORTCUTS: [(&str, &str); 24] = [
-    ("Cmd+K, Cmd+T", "Jump to a connection, database or collection"),
+const SHORTCUTS: [(&str, &str); 26] = [
+    ("Cmd+K", "Jump to a connection, database or collection"),
+    ("Cmd+T", "Open a collection in a new tab"),
+    ("Cmd+click, middle-click", "Open a collection of the sidebar or Cmd+K in a new tab; Cmd+Enter in Cmd+K"),
     ("Cmd+R", "Reload the current tab"),
     ("Cmd+Shift+R", "Refresh the connection's databases"),
     ("Cmd+W", "Close the tab"),
@@ -441,7 +444,7 @@ impl App {
             app.conns.push(Conn { dbs: vec![("fixture".into(), Some(vec!["documents".into()]))], ..Conn::new(ConnMeta { id: 1, name: "Fixture".into(), ..Default::default() }, Status::Ready) });
             app.active = Some(1);
             app.open_dbs.insert((1, "fixture".into()));
-            app.open_collection(sel, false);
+            app.open_collection(sel, Open::Here);
             app.req += 1;
             app.tabs[0].req = app.req;
             let n = rows.len() as u64;

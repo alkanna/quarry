@@ -22,6 +22,7 @@ mod sql_import;
 mod sql_relations;
 mod sql_structure;
 mod sql_triggers;
+mod tabs;
 
 use super::*;
 use egui_kittest::Harness;

@@ -253,7 +253,7 @@ impl App {
         }
         // Test switch: the Cmd+K palette with this query; a leading ">" opens command mode.
         if let Ok(q) = std::env::var("QUARRY_TEST_PALETTE") {
-            self.modal = Some(Modal::Palette { query: q.trim_start_matches('>').into(), sel: 0, cmds: q.starts_with('>') });
+            self.modal = Some(Modal::Palette { query: q.trim_start_matches('>').into(), sel: 0, cmds: q.starts_with('>'), new_tab: false });
         }
         // Test switch: show the pipeline builder with stage previews.
         if std::env::var("QUARRY_TEST_PIPELINE").is_ok() {

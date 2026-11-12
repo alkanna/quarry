@@ -163,15 +163,6 @@ fn type_text(st: &Structure, col: &str) -> String {
     st.columns.iter().find(|c| c.name.eq_ignore_ascii_case(col)).map(|c| c.full_type.to_ascii_uppercase()).unwrap_or_default()
 }
 
-/// Whether a tab holds a filter, sort or bar clause of the person's, which opening a row there would replace.
-fn has_clauses(t: &Tab) -> bool {
-    let bar = t.sql.as_ref().is_some_and(|s| {
-        let c = &s.bar.c;
-        !(c.select.is_empty() && c.group.is_empty() && c.having.is_empty() && c.limit.is_empty() && c.offset.is_empty() && c.hint.is_empty() && !c.distinct)
-    });
-    !t.filter_txt.trim().is_empty() || !t.sort_txt.trim().is_empty() || bar
-}
-
 /// The filter that finds the row a key points to, from the key columns of the clicked row. FLOAT and DOUBLE keys get
 /// none: the grid holds their value rounded to what it shows, and `=` against that may find no row or another one.
 fn fk_row_filter(d: db::sql::Dialect, bs: bool, fk: &ForeignKey, cols: &[db::sql::Col], row: &Document) -> Result<String, String> {
@@ -578,15 +569,7 @@ impl App {
         };
         let base = self.t().map(|t| t.sel.clone()).unwrap_or_default();
         let sel = sql::ns::with_ns(self.dialect_of(conn), &base, &fk.ref_db, fk.ref_table.clone());
-        self.reset_doc_state();
-        match self.tabs.iter().position(|t| t.sel == sel && !has_clauses(t)) {
-            Some(i) => self.set_cur(i),
-            None => {
-                let engine = self.conn(conn).map(|c| c.meta.engine).unwrap_or_default();
-                self.tabs.push(Tab::new(sel).for_engine(engine));
-                self.set_cur(self.tabs.len() - 1);
-            }
-        }
+        self.open_tab(sel, Open::Link);
         let Some(t) = self.tm() else { return };
         t.view = View::Documents;
         t.filter_txt = text;
@@ -628,6 +611,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::tabs::has_clauses;
     use db::sql::value::Kind;
     use db::sql::{Col, Dialect};
 

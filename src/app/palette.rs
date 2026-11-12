@@ -109,13 +109,18 @@ impl App {
         self.open_palette_with(String::new());
     }
 
+    /// A browser's new tab: the palette, whose pick opens next to the current tab.
+    pub(super) fn open_new_tab(&mut self) {
+        self.modal = Some(Modal::Palette { query: String::new(), sel: 0, cmds: false, new_tab: true });
+    }
+
     /// The palette with `query` typed in, where a leading ">" switches to commands as typing it would.
     pub(super) fn open_palette_with(&mut self, query: String) {
         let (query, cmds) = match query.strip_prefix('>') {
             Some(rest) => (rest.to_string(), true),
             None => (query, false),
         };
-        self.modal = Some(Modal::Palette { query, sel: 0, cmds });
+        self.modal = Some(Modal::Palette { query, sel: 0, cmds, new_tab: false });
     }
 
     fn jump_row(&self, j: Jump) -> Option<Row> {
@@ -321,19 +326,22 @@ impl App {
     }
 
     pub(super) fn palette(&mut self, ctx: &egui::Context) {
-        let Some(Modal::Palette { mut query, mut sel, mut cmds }) = self.modal.take() else { return };
+        let Some(Modal::Palette { mut query, mut sel, mut cmds, new_tab }) = self.modal.take() else { return };
         // Anchored near the top, so the box stays put while the list grows and shrinks.
         let top = ctx.content_rect().height() * 0.14;
         let id = egui::Id::unique(("quarry-layer", "palette"));
         let area = egui::Modal::default_area(id).anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, top));
-        let mut pick: Option<Act> = None;
+        // The pick, and whether it opens in a new tab.
+        let mut pick: Option<(Act, bool)> = None;
         let r = egui::Modal::new(id).area(area).frame(dialog_frame()).show(ctx, |ui| {
             ui.set_width(PAL_W);
             ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
             // Taken before the text field sees them, so arrows move the selection and Enter picks.
-            let (up, down, enter, back) = ui.input_mut(|i| {
+            let (up, down, enter, back, cmd_enter) = ui.input_mut(|i| {
                 let back = cmds && query.is_empty() && i.consume_key(egui::Modifiers::NONE, Key::Backspace);
-                (i.consume_key(egui::Modifiers::NONE, Key::ArrowUp), i.consume_key(egui::Modifiers::NONE, Key::ArrowDown), i.consume_key(egui::Modifiers::NONE, Key::Enter), back)
+                // Cmd+Enter first, or the plain Enter below would take it.
+                let cmd_enter = i.consume_key(egui::Modifiers::COMMAND, Key::Enter);
+                (i.consume_key(egui::Modifiers::NONE, Key::ArrowUp), i.consume_key(egui::Modifiers::NONE, Key::ArrowDown), i.consume_key(egui::Modifiers::NONE, Key::Enter), back, cmd_enter)
             });
             if back {
                 cmds = false;
@@ -365,26 +373,32 @@ impl App {
                         if i == sel && (up || down) {
                             r.scroll_to_me(None);
                         }
-                        if r.clicked() {
-                            pick = Some(row.act.clone());
+                        if new_tab_click(&r) {
+                            pick = Some((row.act.clone(), true));
+                        } else if r.clicked() {
+                            pick = Some((row.act.clone(), new_tab));
                         }
                         i += 1;
                     }
                     ui.add_space(6.0);
                 }
             });
-            if enter {
-                pick = secs.iter().flat_map(|s| &s.1).nth(sel).map(|r| r.act.clone());
+            if enter || cmd_enter {
+                pick = secs.iter().flat_map(|s| &s.1).nth(sel).map(|r| (r.act.clone(), new_tab || cmd_enter));
             }
-            palette_footer(ui, cmds);
+            palette_footer(ui, cmds, new_tab);
         });
-        if let Some(a) = pick {
+        if let Some((a, new)) = pick {
             match a {
-                Act::Jump(j) => self.jump(j),
+                Act::Jump(j) => {
+                    // A collection already open is switched to, as a browser offers its open tab.
+                    let open = matches!(&j, Jump::Coll(s) if self.tabs.iter().any(|t| t.sel == *s));
+                    self.jump(j, if new && !open { Open::NewTab } else { Open::Here })
+                }
                 Act::Cmd(c) => self.run_cmd(c),
             }
         } else if !r.should_close() && self.modal.is_none() {
-            self.modal = Some(Modal::Palette { query, sel, cmds });
+            self.modal = Some(Modal::Palette { query, sel, cmds, new_tab });
         }
     }
 }
@@ -813,14 +827,17 @@ fn paint_tile(ui: &egui::Ui, rect: egui::Rect, glyph: Glyph, mark: Option<&'stat
     }
 }
 
-fn palette_footer(ui: &mut egui::Ui, cmds: bool) {
+fn palette_footer(ui: &mut egui::Ui, cmds: bool, new_tab: bool) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), PALETTE_FOOT_H), Sense::hover());
     let p = ui.painter();
     paint_footer_band(p, rect, R_LG);
     let cy = rect.center().y;
-    let mut left: Vec<(&[&str], &str)> = vec![(&["\u{2191}", "\u{2193}"], "move"), (&["\u{21b5}"], if cmds { "run" } else { "open" })];
+    const CMD_ENTER: [&str; 2] = [if cfg!(target_os = "macos") { "\u{2318}" } else { "Ctrl" }, "\u{21b5}"];
+    let mut left: Vec<(&[&str], &str)> = vec![(&["\u{2191}", "\u{2193}"], "move"), (&["\u{21b5}"], if cmds { "run" } else if new_tab { "open in new tab" } else { "open" })];
     if cmds {
         left.push((&["\u{232b}"], "leave commands"));
+    } else if !new_tab {
+        left.push((&CMD_ENTER, "new tab"));
     }
     key_hints(p, rect.left() + 16.0, cy, &left);
     if !cmds {

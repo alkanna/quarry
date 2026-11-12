@@ -203,7 +203,7 @@ impl App {
             }
             Ddl::CreatedTable => {
                 self.side_act(conn, SideAct::Refresh(schema.clone()));
-                self.open_collection(Sel { conn, db: schema, coll: table, ..Default::default() }, false);
+                self.open_collection(Sel { conn, db: schema, coll: table, ..Default::default() }, Open::Here);
                 if let Some(t) = self.tm() {
                     t.view = View::Structure;
                 }

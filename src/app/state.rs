@@ -779,7 +779,7 @@ impl Tab {
             check_anchor: None,
             shell_checked: BTreeSet::new(),
             expanded: BTreeSet::new(),
-            agg_txt: "[\n  { $match: {} },\n  { $limit: 20 }\n]".into(),
+            agg_txt: NEW_PIPELINE.into(),
             agg_docs: Vec::new(),
             agg_fields: Vec::new(),
             agg_ms: None,
@@ -885,7 +885,7 @@ pub(super) enum Modal {
     Tool(Box<ToolForm>),
     Relations { conn: u64, db: String },
     /// `cmds` once ">" switched the palette to commands.
-    Palette { query: String, sel: usize, cmds: bool },
+    Palette { query: String, sel: usize, cmds: bool, new_tab: bool },
     /// Export or copy-to-file of the rows of a result, in any of the Copy as formats.
     Export(Box<super::export::ExportForm>),
     /// Import a CSV file into a SQL table.
@@ -1374,6 +1374,20 @@ pub(super) enum TreeAct {
     EditDoc,
     /// Open or close every container under the path; an empty path means the whole document.
     Fold(Vec<String>, bool),
+}
+
+/// The pipeline a new tab starts with, which is not work of the person's.
+pub(super) const NEW_PIPELINE: &str = "[\n  { $match: {} },\n  { $limit: 20 }\n]";
+
+/// Where a collection opens. `Here` reuses the current tab unless work in it would be lost.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum Open {
+    Here,
+    NewTab,
+    /// A link in data: a tab showing it without work in it, else a new tab. The current tab is never replaced.
+    Link,
+    /// The current tab whatever it holds: the Shell switching its own collection.
+    Replace,
 }
 
 #[derive(Clone, Copy)]
