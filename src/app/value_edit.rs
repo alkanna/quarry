@@ -236,7 +236,8 @@ impl App {
         if json && e.json_err.is_none() && e.text.len() <= 1 << 20 {
             e.json_err = Some(self.sql_col(&e.col).and_then(|c| db::sql::value::parse_col(self.sql_dialect(), c, &e.text).err()));
         }
-        let err = e.json_err.as_ref().and_then(|r| r.as_deref()).or(e.err.as_deref());
+        // Once checked, the live result replaces the error a failed Apply left for older text.
+        let err = match &e.json_err { Some(r) => r.as_deref(), None => e.err.as_deref() };
         let mut edited = false;
         let act = value_body(ui, egui::Id::unique("sql-cell-text"), &mut e.text, json, &mut e.focus, &mut edited, err, null, rows, max_h);
         if edited {
