@@ -69,7 +69,8 @@ fn value_body(ui: &mut egui::Ui, id: egui::Id, text: &mut String, code: bool, fo
         act = ValueAct::Close;
     }
     ui.add_space(8.0);
-    ui.horizontal(|ui| {
+    // Wrapped so right_group can drop the buttons to their own row when the side panel is narrow.
+    ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new(format!("{chars} characters · {lines} {}", if lines == 1 { "line" } else { "lines" })).size(TXT_SMALL).color(FAINT()));
         ui.add_space(4.0);
         if ui.checkbox(&mut wrap, "Wrap lines").changed() {
@@ -228,7 +229,22 @@ impl App {
         ui.label(RichText::new("Type NULL for a null value. Applying keeps it as an unsaved edit until you press Save.").size(TXT_SMALL).color(MUTED()));
         ui.add_space(4.0);
         let null = col.as_ref().is_none_or(|c| c.1).then_some("Set NULL");
-        value_body(ui, egui::Id::unique("sql-cell-text"), &mut e.text, false, &mut e.focus, &mut e.dirty, e.err.as_deref(), null, rows, max_h)
+        // JSON and jsonb columns get the code look and are checked as they are typed, with the parse Apply runs, which
+        // also refuses to apply text that does not parse.
+        let json = self.sql_col(&e.col).is_some_and(|c| c.kind == db::sql::value::Kind::Json);
+        // ponytail: past 1 MB each keystroke would parse the whole text, so such values are checked on Apply only
+        if json && e.json_err.is_none() && e.text.len() <= 1 << 20 {
+            e.json_err = Some(self.sql_col(&e.col).and_then(|c| db::sql::value::parse_col(self.sql_dialect(), c, &e.text).err()));
+        }
+        // Once checked, the live result replaces the error a failed Apply left for older text.
+        let err = match &e.json_err { Some(r) => r.as_deref(), None => e.err.as_deref() };
+        let mut edited = false;
+        let act = value_body(ui, egui::Id::unique("sql-cell-text"), &mut e.text, json, &mut e.focus, &mut edited, err, null, rows, max_h);
+        if edited {
+            e.dirty = true;
+            e.json_err = None;
+        }
+        act
     }
 }
 

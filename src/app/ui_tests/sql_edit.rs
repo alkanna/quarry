@@ -363,6 +363,47 @@ fn expand_button_opens_the_dialog_and_applies() {
 }
 
 #[test]
+fn a_json_cell_is_checked_while_typed_and_bad_json_is_not_applied() {
+    every_engine("JSON is checked in the editor", |fx, ui| {
+        let t = fx.table();
+        let q = fx.qualified(&t);
+        fx.sql(&format!("ALTER TABLE {q} ADD COLUMN doc json"));
+        fx.open(ui, &t);
+        ui.unlock();
+        // MariaDB's JSON is LONGTEXT, which is edited as plain text.
+        if ui.app().sql_col("doc").is_none_or(|c| c.kind != crate::db::sql::value::Kind::Json) {
+            assert!(!fx.is_pg(), "a PostgreSQL json column was not read as JSON");
+            return;
+        }
+        ui.open_cell("doc", 1);
+        ui.click("Open in editor");
+        ui.wait("the dialog", |a| a.sql_cell.as_ref().is_some_and(|e| e.big));
+        // Set directly: the JSON editor pairs brackets, so typed braces would wrap the selection. An edit clears the check too.
+        let put = |ui: &mut UiApp, s: &str| {
+            let e = ui.h.state_mut().sql_cell.as_mut().unwrap();
+            (e.text, e.json_err) = (s.into(), None);
+        };
+        put(ui, "{\"a\": ");
+        ui.h.run_steps(2);
+        assert!(ui.h.query_by_label_contains("Not valid JSON").is_some(), "no error while the JSON is incomplete");
+        ui.click("Apply");
+        ui.h.run_steps(4);
+        assert!(ui.app().sql_cell.as_ref().is_some_and(|e| e.big) && ui.app().drafts.is_empty(), "bad JSON was applied");
+        put(ui, "{\"a\": 1}");
+        ui.h.run_steps(2);
+        assert!(ui.h.query_by_label_contains("Not valid JSON").is_none(), "the error stayed after the JSON was fixed");
+        ui.click("Apply");
+        ui.wait("the edit to be staged", |a| a.sql_cell.is_none() && !a.drafts.is_empty());
+        ui.save();
+        let t0 = std::time::Instant::now();
+        while !fx.one(&format!("SELECT doc FROM {q} WHERE id = 1")).contains("\"a\"") {
+            assert!(t0.elapsed() < LIMIT, "the JSON was not written; last error: {}", ui.app().last_problem());
+            ui.h.step();
+        }
+    });
+}
+
+#[test]
 fn shift_enter_opens_the_dialog_and_esc_cancels() {
     every_engine("Shift+Enter opens the dialog", |fx, ui| {
         let t = open_unlocked(fx, ui);
