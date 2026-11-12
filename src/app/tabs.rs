@@ -84,11 +84,11 @@ impl App {
     /// Opens a collection, as a browser opens a page. `Here` goes to a tab already showing it, else takes the
     /// current tab when nothing would be lost there, else opens a tab next to it.
     pub(super) fn open_collection(&mut self, sel: Sel, how: Open) {
-        // Before reset_doc_state, which closes the document editor this checks for.
-        let editing = self.json_edit.is_some() || self.sql_cell.is_some();
+        // Before reset_doc_state, which closes the editors this checks for.
+        let editing = self.json_edit.is_some() || self.sql_cell.is_some() || self.inline.is_some() || self.new_field.is_some();
         let keep = self.t().is_none_or(|t| editing || keeps_work(t, &self.drafts));
         self.reset_doc_state();
-        if how == Open::Here
+        if how != Open::NewTab
             && let Some(i) = self.tabs.iter().position(|t| t.sel == sel)
         {
             self.set_cur(i);
@@ -222,14 +222,22 @@ fn nav_target(from: &mut Vec<u64>, tabs: &[Tab], cur: usize) -> Option<usize> {
     None
 }
 
-/// Whether a tab holds work a click elsewhere must not throw away: a workspace view, a query of the person's, or
-/// staged edits. Such a tab is never reused by a plain click.
-fn keeps_work(t: &Tab, drafts: &HashMap<String, Draft>) -> bool {
+/// Whether a tab holds work a click elsewhere must not throw away: a workspace view, text of the person's in any of
+/// its views, or staged edits. Such a tab is never reused by a plain click.
+pub(super) fn keeps_work(t: &Tab, drafts: &HashMap<String, Draft>) -> bool {
+    let typed = [&t.proj_txt, &t.limit_txt, &t.skip_txt, &t.hint_txt, &t.collation_txt, &t.shell.code].iter().any(|s| !s.trim().is_empty());
+    let sql = t.sql.as_ref().is_some_and(|s| !s.query.trim().is_empty() || !s.st.staged.is_empty() || !s.st.trig.is_empty() || s.st.applying);
     matches!(t.view, View::Shell | View::Sql | View::Import | View::Compare | View::Watch)
         || has_clauses(t)
-        || !t.proj_txt.trim().is_empty()
-        || t.view == View::Aggregate && !t.agg_txt.trim().is_empty()
+        || typed
+        || sql
+        || t.agg_txt != NEW_PIPELINE
         || !drafts_of(drafts, &t.sel).is_empty()
+}
+
+/// Cmd+click and middle-click open a new tab, as links do in a browser.
+pub(super) fn new_tab_click(r: &egui::Response) -> bool {
+    r.middle_clicked() || r.clicked() && r.ctx.input(|i| i.modifiers.command)
 }
 
 /// Whether a tab holds a filter, sort or bar clause of the person's, which opening a row there would replace.
@@ -259,6 +267,12 @@ mod tests {
         assert!(with(|t| t.view = View::Shell), "the Shell");
         assert!(with(|t| t.view = View::Watch), "a running change stream");
         assert!(!with(|t| t.view = View::Indexes), "a view of the collection itself");
+        assert!(with(|t| t.shell.code = "db.a.find()".into()), "a script, though the tab shows Documents");
+        assert!(with(|t| t.agg_txt = "[]".into()), "a pipeline of the person's");
+        let mut t = Tab::new(sel("a")).for_engine(db::sql::Engine::MySql);
+        assert!(!keeps_work(&t, &none), "a fresh table tab");
+        t.sql.as_mut().unwrap().st.applying = true;
+        assert!(keeps_work(&t, &none), "an ALTER still running");
         let mut drafts = HashMap::new();
         let s = sel("a");
         drafts.insert("k".into(), Draft { conn: s.conn, db: s.db.clone(), schema: s.schema.clone(), coll: s.coll.clone(), original: Document::new(), current: Document::new() });

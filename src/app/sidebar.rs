@@ -650,8 +650,7 @@ impl App {
                             revealed = true;
                         }
                         let this = || Sel { conn: id, db: db_name.clone(), schema: picked.to_string(), coll: coll.clone() };
-                        // Cmd+click and middle-click open a new tab, as links do in a browser.
-                        if r.middle_clicked() || r.clicked() && ui.input(|i| i.modifiers.command) {
+                        if new_tab_click(&r) {
                             open = Some((this(), Open::NewTab));
                         } else if r.clicked() {
                             open = Some((this(), Open::Here));

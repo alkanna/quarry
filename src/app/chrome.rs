@@ -629,7 +629,7 @@ impl App {
             ui.add_space(120.0);
             ui.label(RichText::new("Pick a collection on the left").size(TXT_HEADING).color(BRIGHT()));
             ui.add_space(6.0);
-            ui.label(RichText::new("Each collection opens in its own tab. Every connection starts read-only; edits need an explicit unlock, show a change preview, and can be undone.").color(MUTED()));
+            ui.label(RichText::new("A click opens it in this tab; Cmd+click or Cmd+T opens a new one. Every connection starts read-only; edits need an explicit unlock, show a change preview, and can be undone.").color(MUTED()));
             ui.add_space(16.0);
             if ui.button("+ Add a connection").clicked() {
                 self.new_conn_modal();

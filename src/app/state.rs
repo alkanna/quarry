@@ -779,7 +779,7 @@ impl Tab {
             check_anchor: None,
             shell_checked: BTreeSet::new(),
             expanded: BTreeSet::new(),
-            agg_txt: "[\n  { $match: {} },\n  { $limit: 20 }\n]".into(),
+            agg_txt: NEW_PIPELINE.into(),
             agg_docs: Vec::new(),
             agg_fields: Vec::new(),
             agg_ms: None,
@@ -1375,6 +1375,9 @@ pub(super) enum TreeAct {
     /// Open or close every container under the path; an empty path means the whole document.
     Fold(Vec<String>, bool),
 }
+
+/// The pipeline a new tab starts with, which is not work of the person's.
+pub(super) const NEW_PIPELINE: &str = "[\n  { $match: {} },\n  { $limit: 20 }\n]";
 
 /// Where a collection opens. `Here` reuses the current tab unless work in it would be lost.
 #[derive(Clone, Copy, PartialEq)]

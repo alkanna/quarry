@@ -153,7 +153,8 @@ impl App {
             Act::Copy(text) => ctx.copy_text(text),
             Act::Open { db, table } => {
                 let base = self.tabs[self.cur].sel.clone();
-                self.open_collection(sql::ns::with_ns(self.dialect_of(base.conn), &base, &db, table), Open::Here);
+                // A link: without a per-tab Back, the table it was followed from stays in its tab.
+                self.open_collection(sql::ns::with_ns(self.dialect_of(base.conn), &base, &db, table), Open::NewTab);
             }
             Act::Refresh => {
                 if let Some(s) = self.tabs[self.cur].sql.as_mut() {

@@ -4,7 +4,7 @@
 
 use crate::app::sql::alter::{sql_block, BUSY_NOTE};
 use crate::app::*;
-use crate::app::tabs::has_clauses;
+use crate::app::tabs::keeps_work;
 use db::sql::ddl::{self, Change, FK_ACTIONS};
 use db::sql::structure::{ForeignKey, Structure};
 
@@ -571,7 +571,7 @@ impl App {
         let base = self.t().map(|t| t.sel.clone()).unwrap_or_default();
         let sel = sql::ns::with_ns(self.dialect_of(conn), &base, &fk.ref_db, fk.ref_table.clone());
         self.reset_doc_state();
-        match self.tabs.iter().position(|t| t.sel == sel && !has_clauses(t)) {
+        match self.tabs.iter().position(|t| t.sel == sel && !keeps_work(t, &self.drafts)) {
             Some(i) => self.set_cur(i),
             None => {
                 let engine = self.conn(conn).map(|c| c.meta.engine).unwrap_or_default();
@@ -621,6 +621,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::tabs::has_clauses;
     use db::sql::value::Kind;
     use db::sql::{Col, Dialect};
 

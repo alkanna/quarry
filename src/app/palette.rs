@@ -373,7 +373,7 @@ impl App {
                         if i == sel && (up || down) {
                             r.scroll_to_me(None);
                         }
-                        if r.middle_clicked() || r.clicked() && ui.input(|i| i.modifiers.command) {
+                        if new_tab_click(&r) {
                             pick = Some((row.act.clone(), true));
                         } else if r.clicked() {
                             pick = Some((row.act.clone(), new_tab));
@@ -390,7 +390,11 @@ impl App {
         });
         if let Some((a, new)) = pick {
             match a {
-                Act::Jump(j) => self.jump(j, if new { Open::NewTab } else { Open::Here }),
+                Act::Jump(j) => {
+                    // A collection already open is switched to, as a browser offers its open tab.
+                    let open = matches!(&j, Jump::Coll(s) if self.tabs.iter().any(|t| t.sel == *s));
+                    self.jump(j, if new && !open { Open::NewTab } else { Open::Here })
+                }
                 Act::Cmd(c) => self.run_cmd(c),
             }
         } else if !r.should_close() && self.modal.is_none() {
