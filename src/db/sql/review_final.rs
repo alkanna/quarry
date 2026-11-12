@@ -72,7 +72,7 @@ fn live_dumps_exports_and_structure_ignore_the_session_charset_and_row_limit() {
             assert_eq!(out.rows, 3, "{var} {set}: export");
             assert_eq!(out.text.unwrap_or_default().trim_end(), "1,a\u{1F600}b\n2,d\u{e9}\n3,x", "{var} {set}: export");
             let path = tmp(var, &format!("cs{i}.sql"));
-            let plan = DumpPlan { schema: db.into(), tables: vec![DumpTable { name: "t".into(), view: false, structure: true, content: true, drop: true }], create_db: true, extras: false, rows_per_insert: 1000, snapshot: true, filter: None };
+            let plan = DumpPlan { schema: db.into(), tables: vec![DumpTable { name: "t".into(), view: false, structure: true, content: true, drop: true }], create_db: true, extras: false, rows_per_insert: 1000, snapshot: true, filter: None, grants: false, owners: false };
             let done = l.w.rt.block_on(dump_to(&odd, &plan, path.clone(), &AtomicU64::new(0), &AtomicBool::new(false), &AtomicU64::new(0))).unwrap_or_else(|x| panic!("{var} {set}: {x}"));
             assert_eq!(done.rows, 3, "{var} {set}: dump");
             l.sql(&format!("DROP DATABASE {db}"));

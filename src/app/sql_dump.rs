@@ -66,6 +66,9 @@ pub(super) struct DumpForm {
     extended: bool,
     snapshot: bool,
     extras: bool,
+    /// PostgreSQL only. Both off by default: they name roles, and a restore where one is missing stops there.
+    grants: bool,
+    owners: bool,
     path: String,
 }
 
@@ -126,7 +129,7 @@ impl App {
         }
         let conn_name = c.meta.name.clone();
         let path = dirs::download_dir().unwrap_or_default().join(format!("{db}-{}.sql", today())).display().to_string();
-        self.modal = Some(Modal::SqlDump(Box::new(DumpForm { conn, db, schema, conn_name, what, filtered, rows, extended: true, snapshot: true, extras: true, path })));
+        self.modal = Some(Modal::SqlDump(Box::new(DumpForm { conn, db, schema, conn_name, what, filtered, rows, extended: true, snapshot: true, extras: true, grants: false, owners: false, path })));
     }
 
     /// Asks for a script file, then opens the dialog that runs it.
@@ -262,7 +265,17 @@ impl App {
                 f.path = if gz { format!("{p}.gz") } else { p.strip_suffix(".gz").unwrap_or(p).to_string() };
             }
             ui.end_row();
+            if pg {
+                ui.add_enabled(!filtered, egui::Checkbox::new(&mut f.grants, "Include grants")).on_hover_text("GRANT and REVOKE for the schemas, tables, columns, sequences, functions and types the file makes; a whole database also gets its default privileges and the grants on the database itself.");
+                ui.add_enabled(!filtered, egui::Checkbox::new(&mut f.owners, "Set owners")).on_hover_text("ALTER ... OWNER TO for everything the file makes. Off, everything belongs to the role that runs the file.");
+                ui.end_row();
+            }
         });
+        if pg && !filtered {
+            ui.add_space(4.0);
+            let roles = if f.grants || f.owners { "The roles they name must exist where the file is run, or the run stops at the first missing one (the tables and rows are in by then). " } else { "" };
+            ui.add(egui::Label::new(RichText::new(format!("{roles}Row security policies are always written; one for a named role needs that role too.")).size(TXT_SMALL).color(if roles.is_empty() { MUTED() } else { WARNING() })).wrap());
+        }
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.add_sized([FORM_LABEL_W, BUTTON_H], egui::Label::new(RichText::new("Save to").color(MUTED())));
@@ -302,11 +315,12 @@ impl App {
         let sql = sql.at(&f.db);
         let space = if f.schema.is_empty() { f.db.clone() } else { f.schema.clone() };
         let per = if f.extended { 1000 } else { 1 };
+        let pg = !f.schema.is_empty();
         let plan = match (f.what, &f.filtered) {
-            (What::Filtered, Some((t, w, _))) => DumpPlan { schema: space.clone(), tables: vec![DumpTable { name: t.clone(), view: false, structure: false, content: true, drop: false }], create_db: false, extras: false, rows_per_insert: per, snapshot: f.snapshot, filter: Some(w.clone()) },
+            (What::Filtered, Some((t, w, _))) => DumpPlan { schema: space.clone(), tables: vec![DumpTable { name: t.clone(), view: false, structure: false, content: true, drop: false }], create_db: false, extras: false, rows_per_insert: per, snapshot: f.snapshot, filter: Some(w.clone()), grants: false, owners: false },
             _ => {
                 let tables = f.rows.iter().filter(|r| r.on && !(r.view && !f.extras)).map(|r| DumpTable { name: r.name.clone(), view: r.view, structure: r.structure, content: r.content && !r.view, drop: r.drop && r.structure }).collect();
-                DumpPlan { schema: space.clone(), tables, create_db: f.what == What::Whole, extras: f.extras, rows_per_insert: per, snapshot: f.snapshot, filter: None }
+                DumpPlan { schema: space.clone(), tables, create_db: f.what == What::Whole, extras: f.extras, rows_per_insert: per, snapshot: f.snapshot, filter: None, grants: pg && f.grants, owners: pg && f.owners }
             }
         };
         self.req += 1;
@@ -464,7 +478,7 @@ impl App {
             row("users", false, false, 1190),
             Row { name: "revenue_by_day".into(), view: true, on: false, structure: false, content: false, drop: false, rows: None },
         ];
-        self.modal = Some(Modal::SqlDump(Box::new(DumpForm { conn, db: "shop".into(), schema: String::new(), conn_name: "shop-prod".into(), what: What::Selected, filtered: Some(("orders".into(), "status = 'paid'".into(), 312)), rows, extended: true, snapshot: false, extras: true, path: "~/Downloads/shop-2026-11-09.sql".into() })));
+        self.modal = Some(Modal::SqlDump(Box::new(DumpForm { conn, db: "shop".into(), schema: String::new(), conn_name: "shop-prod".into(), what: What::Selected, filtered: Some(("orders".into(), "status = 'paid'".into(), 312)), rows, extended: true, snapshot: false, extras: true, grants: false, owners: false, path: "~/Downloads/shop-2026-11-09.sql".into() })));
     }
 }
 
