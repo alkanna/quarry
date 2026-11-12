@@ -283,15 +283,16 @@ fn undo_an_insert() {
 }
 
 #[test]
-fn switching_the_view_closes_the_editor() {
-    every_engine("switching the view closes the editor", |fx, ui| {
+fn switching_the_view_stages_the_edit_and_closes_the_editor() {
+    // A click outside the cell saves it, like Enter, so typed text is never lost; the draft is undone or saved as any other.
+    every_engine("switching the view stages the edit", |fx, ui| {
         let t = open_unlocked(fx, ui);
         ui.open_cell("name", 1);
         ui.type_text("zeta");
         ui.click("Structure");
         ui.wait("the view to change", |a| a.t().is_some_and(|t| t.view == View::Structure));
         assert!(ui.app().sql_cell.is_none(), "the editor stayed open");
-        assert!(ui.app().drafts.is_empty(), "something was staged");
+        assert!(ui.app().drafts.len() == 1 && ui.app().drafts.values().all(|d| d.coll == t), "the edit was not staged for its table");
         ui.click("Content");
         ui.show("name row 1");
         assert!(ui.app().sql_cell.is_none(), "the editor came back");
@@ -300,8 +301,8 @@ fn switching_the_view_closes_the_editor() {
 }
 
 #[test]
-fn switching_the_table_closes_the_editor() {
-    every_engine("switching the table closes the editor", |fx, ui| {
+fn switching_the_table_stages_the_edit_for_the_first_table() {
+    every_engine("switching the table stages the edit", |fx, ui| {
         // Both exist before the sidebar lists the tables of the database.
         let (first, second) = (fx.table(), fx.table());
         fx.open(ui, &first);
@@ -311,7 +312,7 @@ fn switching_the_table_closes_the_editor() {
         ui.click(&second);
         ui.wait("the other table", |a| a.t().is_some_and(|t| t.sel.coll == second));
         assert!(ui.app().sql_cell.is_none(), "the editor stayed open");
-        assert!(ui.app().drafts.is_empty(), "something was staged");
+        assert!(ui.app().drafts.len() == 1 && ui.app().drafts.values().all(|d| d.coll == first), "the edit was not staged for the first table");
         fx.expect_unchanged(ui, &first, ORIGINAL);
         fx.expect_unchanged(ui, &second, ORIGINAL);
     });
@@ -385,13 +386,13 @@ fn a_json_cell_is_checked_while_typed_and_bad_json_is_not_applied() {
         };
         put(ui, "{\"a\": ");
         ui.h.run_steps(2);
-        assert!(ui.h.query_by_label_contains("Not valid JSON").is_some(), "no error while the JSON is incomplete");
+        assert!(ui.h.query_by_label_contains("A value is missing").is_some(), "no error while the JSON is incomplete");
         ui.click("Apply");
         ui.h.run_steps(4);
         assert!(ui.app().sql_cell.as_ref().is_some_and(|e| e.big) && ui.app().drafts.is_empty(), "bad JSON was applied");
         put(ui, "{\"a\": 1}");
         ui.h.run_steps(2);
-        assert!(ui.h.query_by_label_contains("Not valid JSON").is_none(), "the error stayed after the JSON was fixed");
+        assert!(ui.h.query_by_label_contains("A value is missing").is_none(), "the error stayed after the JSON was fixed");
         ui.click("Apply");
         ui.wait("the edit to be staged", |a| a.sql_cell.is_none() && !a.drafts.is_empty());
         ui.save();
