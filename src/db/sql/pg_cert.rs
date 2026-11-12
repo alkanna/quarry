@@ -15,6 +15,9 @@ pub(crate) const HALF_SET: &str = "Only one of the client certificate and the cl
 pub(crate) const KEY_LOCKED: &str = "The client key is encrypted and no passphrase is set";
 pub(crate) const KEY_WRONG_PASS: &str = "The client key passphrase is wrong";
 pub(crate) const KEY_OLD_CIPHER: &str = "The client key is encrypted in a format Quarry cannot read";
+/// Put before a TLS alert on a connection that sent a client certificate, so `db::explain` blames the certificate only
+/// there: MySQL and MongoDB have no such field and the same alert text means something else on them.
+pub(crate) const CERT_ALERT: &str = "Client certificate refused:";
 /// Refused before connecting, as libpq does: without a CA file verify-ca would trust every public CA and check no name.
 pub(crate) const VERIFY_CA_NO_CA: &str = "TLS verify-ca needs a CA file";
 

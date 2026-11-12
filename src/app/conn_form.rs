@@ -33,12 +33,7 @@ fn engine_card(ui: &mut egui::Ui, code: &str, name: &str, sub: &str, color: Colo
 /// The tabs of the connection form: Mongo reaches its servers through a proxy, SQL engines through TLS settings and, where
 /// the engine has them, session settings.
 fn conn_tabs(engine: db::sql::Engine) -> &'static [(ConnTab, &'static str)] {
-    use db::sql::Feature::AdvancedTab;
-    match (engine.is_sql(), engine.supports(AdvancedTab)) {
-        (false, _) => &[(ConnTab::Standard, "Standard"), (ConnTab::Ssh, "SSH"), (ConnTab::Proxy, "Proxy")],
-        (true, true) => &[(ConnTab::Standard, "Standard"), (ConnTab::Ssh, "SSH"), (ConnTab::Tls, "TLS"), (ConnTab::Advanced, "Advanced")],
-        (true, false) => &[(ConnTab::Standard, "Standard"), (ConnTab::Ssh, "SSH"), (ConnTab::Tls, "TLS")],
-    }
+    if engine.is_sql() { &[(ConnTab::Standard, "Standard"), (ConnTab::Ssh, "SSH"), (ConnTab::Tls, "TLS"), (ConnTab::Advanced, "Advanced")] } else { &[(ConnTab::Standard, "Standard"), (ConnTab::Ssh, "SSH"), (ConnTab::Proxy, "Proxy")] }
 }
 
 fn tls_tab(ui: &mut egui::Ui, f: &mut ConnForm) {
@@ -728,7 +723,7 @@ impl App {
                     ConnTab::Proxy => proxy_tab(ui, f),
                     ConnTab::Tls => tls_tab(ui, f),
                     ConnTab::Advanced if f.engine == db::sql::Engine::Postgres => super::conn_pg_advanced::pg_advanced_tab(ui, f, default_s),
-                    ConnTab::Advanced if f.engine.supports(db::sql::Feature::AdvancedTab) => advanced_tab(ui, f, default_s),
+                    ConnTab::Advanced if f.engine.is_sql() => advanced_tab(ui, f, default_s),
                     ConnTab::Advanced => browse |= standard_tab(ui, f, cloud),
                 });
             });

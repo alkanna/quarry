@@ -50,29 +50,9 @@ impl App {
         Some(self.ns_of(sel.conn, &sel.db)).filter(|s| !s.is_empty()).unwrap_or(PG_PUBLIC).to_string()
     }
 
-    /// Why the open table's columns and indexes cannot be changed, when the engine cannot do it.
-    pub(super) fn struct_block(&self) -> Option<&'static str> {
-        self.t().and_then(|t| self.lacks(t.sel.conn, db::sql::Feature::StructureEdit))
-    }
-
-    /// The same for the foreign keys of the Relations view.
-    pub(super) fn rel_block(&self) -> Option<&'static str> {
-        self.t().and_then(|t| self.lacks(t.sel.conn, db::sql::Feature::RelationEdit))
-    }
-
-    /// The same for the triggers.
-    pub(super) fn trig_block(&self) -> Option<&'static str> {
-        self.t().and_then(|t| self.lacks(t.sel.conn, db::sql::Feature::TriggerEdit))
-    }
-
     /// Whether the engine of `conn` has `f`. Mongo and unknown connections answer yes, so their paths stay as they are.
     pub(super) fn supports(&self, conn: u64, f: db::sql::Feature) -> bool {
         self.conn(conn).is_none_or(|c| c.meta.engine.supports(f))
-    }
-
-    /// The reason `conn` lacks `f`, for a tooltip or a toast; None when it has it.
-    pub(super) fn lacks(&self, conn: u64, f: db::sql::Feature) -> Option<&'static str> {
-        self.conn(conn).filter(|c| !c.meta.engine.supports(f)).map(|c| c.meta.engine.missing(f))
     }
 
     /// Whether `conn` is a PostgreSQL connection.

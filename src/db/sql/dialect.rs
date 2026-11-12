@@ -346,56 +346,25 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("FOUND_ROWS", "FOUND_ROWS() -> BIGINT"),
 ];
 
-/// What the app hides or disables per engine. Each gate in the UI asks `supports` and words its tooltip or toast from
-/// `missing`, so a feature a PostgreSQL phase builds is switched on in one place.
+/// What the app hides or disables per engine. Each gate in the UI asks `supports`, so a feature PostgreSQL gains is
+/// switched on in one place.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Feature {
-    StructureEdit,
-    RelationEdit,
-    TriggerEdit,
-    Users,
-    ServerStatus,
-    Format,
     IndexHint,
-    CreateDrop,
-    SqlDump,
-    Import,
-    AdvancedTab,
     ColumnOrder,
     Unsigned,
     Collation,
     IndexCardinality,
 }
 
-/// The features PostgreSQL has so far. Add one here when its phase lands.
-const PG_FEATURES: &[Feature] = &[Feature::StructureEdit, Feature::RelationEdit, Feature::TriggerEdit, Feature::Import, Feature::SqlDump, Feature::CreateDrop, Feature::AdvancedTab, Feature::Format, Feature::ServerStatus, Feature::Users];
+/// The gated features PostgreSQL has so far. Add one here when it gains one.
+const PG_FEATURES: &[Feature] = &[];
 
 impl Dialect {
     pub fn supports(self, f: Feature) -> bool {
         match self {
             Dialect::Postgres => PG_FEATURES.contains(&f),
             Dialect::MySql | Dialect::MariaDb => true,
-        }
-    }
-
-    /// The one reason text for a feature this dialect lacks, for tooltips and toasts.
-    pub fn missing(self, f: Feature) -> &'static str {
-        match f {
-            Feature::StructureEdit => "Changing the structure of this table is not supported",
-            Feature::RelationEdit => "Changing the foreign keys of a PostgreSQL table is not built yet",
-            Feature::TriggerEdit => "Changing the triggers of a PostgreSQL table is not built yet",
-            Feature::Users => "Users and privileges are not built for PostgreSQL yet.",
-            Feature::ServerStatus => "Server status is not built for PostgreSQL yet.",
-            Feature::Format => "Formatting is not built for PostgreSQL yet.",
-            Feature::IndexHint => "PostgreSQL has no index hints.",
-            Feature::CreateDrop => "Creating and dropping databases is not built for PostgreSQL yet.",
-            Feature::SqlDump => "The SQL dump is not built for PostgreSQL yet.",
-            Feature::Import => "CSV import is not built for PostgreSQL yet.",
-            Feature::AdvancedTab => "PostgreSQL has no advanced session settings.",
-            Feature::ColumnOrder => "PostgreSQL has no column order.",
-            Feature::Unsigned => "PostgreSQL has no unsigned integers.",
-            Feature::Collation => "PostgreSQL collations are not shown per column.",
-            Feature::IndexCardinality => "PostgreSQL keeps no cardinality for an index.",
         }
     }
 }
@@ -408,11 +377,6 @@ impl super::Engine {
             super::Engine::MySql => Dialect::MySql.supports(f),
             super::Engine::Postgres => Dialect::Postgres.supports(f),
         }
-    }
-
-    /// The dialect to word a missing feature in; MySQL stands for the MariaDB family too.
-    pub fn missing(self, f: Feature) -> &'static str {
-        if self == super::Engine::Postgres { Dialect::Postgres.missing(f) } else { Dialect::MySql.missing(f) }
     }
 }
 

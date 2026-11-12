@@ -188,7 +188,7 @@ impl App {
                 }
                 r.on_hover_text("Press / or Cmd+Shift+F");
                 ui.add_space(14.0);
-                let sql_conn = self.active.and_then(|id| self.conn(id)).filter(|c| c.meta.engine.is_sql() && c.meta.engine.supports(db::sql::Feature::CreateDrop) && c.status == Status::Ready).map(|c| (c.meta.id, c.writable, c.meta.engine == db::sql::Engine::Postgres));
+                let sql_conn = self.active.and_then(|id| self.conn(id)).filter(|c| c.meta.engine.is_sql() && c.status == Status::Ready).map(|c| (c.meta.id, c.writable, c.meta.engine == db::sql::Engine::Postgres));
                 let mut new_db = None;
                 ui.horizontal(|ui| {
                     ui.label(LayoutJob::single_section("Databases".into(), ui_fmt(10.5, FAINT(), W_SEMIBOLD, 0.8)));
@@ -492,12 +492,10 @@ impl App {
                         if ui.button("Refresh").clicked() {
                             side.push(SideAct::Refresh(db_name.clone()));
                         }
-                        if engine.supports(db::sql::Feature::Users) {
-                            if ui.button(if engine == db::sql::Engine::Postgres { "Roles and privileges…" } else { "Users and privileges…" }).clicked() {
-                                side.push(SideAct::SqlUsers);
-                            }
+                        if ui.button(if engine == db::sql::Engine::Postgres { "Roles and privileges…" } else { "Users and privileges…" }).clicked() {
+                            side.push(SideAct::SqlUsers);
                         }
-                        if engine.supports(db::sql::Feature::SqlDump) {
+                        {
                             ui.separator();
                             if ui.button("Export as SQL dump…").on_hover_text("Tables, views, triggers and routines as a script, with the rows").clicked() {
                                 side.push(SideAct::SqlDump(db_name.clone(), None));
@@ -506,7 +504,7 @@ impl App {
                                 side.push(SideAct::SqlRunFile(db_name.clone()));
                             }
                         }
-                        if pg && engine.supports(db::sql::Feature::CreateDrop) {
+                        if pg {
                             // PostgreSQL's items stay enabled on a locked connection and ask to unlock, like the structure editor does.
                             let own = c.sql.as_ref().and_then(|s| s.opts.database()) == Some(db_name.as_str());
                             let (sys_db, sys_schema) = (db::sql::create_pg::system_db(db_name), db::sql::create_pg::system_schema(picked));
@@ -523,7 +521,7 @@ impl App {
                             if ui.add_enabled_ui(!sys_db && !own, |ui| danger_item(ui, "Drop database…")).inner.on_disabled_hover_text(if own { "This connection opens on it" } else { "Belongs to the server" }).clicked() {
                                 side.push(SideAct::SqlDrop(db_name.clone(), String::new(), DropKind::Database));
                             }
-                        } else if engine.supports(db::sql::Feature::CreateDrop) {
+                        } else {
                             // Creating and dropping are writes, so they stay disabled until the connection is unlocked.
                             let system = db::sql::create::SYSTEM_SCHEMAS.contains(&db_name.as_str());
                             ui.separator();
@@ -665,22 +663,22 @@ impl App {
                                 open = Some(Sel { conn: id, db: db_name.clone(), schema: picked.to_string(), coll: coll.clone() });
                             }
                             if sql {
-                                if engine.supports(db::sql::Feature::Import) && !is_view {
+                                if !is_view {
                                     ui.separator();
                                     if ui.button("Import CSV…").on_hover_text("Adds the rows of a CSV file to this table").clicked() {
                                         side.push(SideAct::SqlImport(db_name.clone(), coll.clone()));
                                     }
                                 }
-                                if engine.supports(db::sql::Feature::SqlDump) && ui.button("Export as SQL dump…").clicked() {
+                                if ui.button("Export as SQL dump…").clicked() {
                                     side.push(SideAct::SqlDump(db_name.clone(), Some(coll.clone())));
                                 }
-                                if pg && engine.supports(db::sql::Feature::CreateDrop) {
+                                if pg {
                                     let system = db::sql::create_pg::system_schema(picked);
                                     ui.separator();
                                     if ui.add_enabled_ui(!system, |ui| danger_item(ui, if is_view { "Drop view…" } else { "Drop table…" })).inner.on_disabled_hover_text("Belongs to the server").clicked() {
                                         side.push(SideAct::SqlDrop(db_name.clone(), coll.clone(), if is_view { DropKind::View } else { DropKind::Table }));
                                     }
-                                } else if engine.supports(db::sql::Feature::CreateDrop) {
+                                } else {
                                     let system = db::sql::create::SYSTEM_SCHEMAS.contains(&db_name.as_str());
                                     let on = writable && !system;
                                     let note = if system { "Belongs to the server" } else { "Read-only: unlock writes to change this table" };

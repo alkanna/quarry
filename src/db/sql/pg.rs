@@ -740,6 +740,7 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
     // roots beside a CA file, so these modes open TLS in pg_tls against the name typed, and sqlx speaks plain
     // PostgreSQL to the relay.
     let mut client_cert = client_cert;
+    let sent_cert = client_cert.is_some();
     let relay = match super::pg_tls::needed(mode, matches!(way, Some(crate::db::Way::Ssh(_))), !a.ssl_ca.trim().is_empty()) {
         true => Some(super::pg_tls::start((host.clone(), port), &a.host, mode, &a.ssl_ca, client_cert.take(), timeout).await?),
         false => None,
@@ -831,7 +832,7 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
             Some(r) => r.explain(m),
             None => m,
         },
-    })?;
+    }).map_err(|m| if sent_cert && m.contains("received fatal alert") { format!("{} {m}", super::pg_cert::CERT_ALERT) } else { m })?;
     let mut pools = PgPools::new(opts.clone(), default_db.clone(), timeout, locals, f.timeout.clone()).with_session(sess);
     pools.relay = relay;
     let db = Db {
