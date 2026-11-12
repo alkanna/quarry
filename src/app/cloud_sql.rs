@@ -860,10 +860,10 @@ impl App {
                             if let Some(e) = &error {
                                 ui.add(egui::Label::new(RichText::new(e).size(TXT_SMALL).color(ALERT())).wrap());
                             } else if loading {
-                                ui.horizontal(|ui| {
-                                    spin(ui);
-                                    ui.label(RichText::new("Asking gcloud for your instances…").color(MUTED()));
-                                });
+                                // Stacked, since a horizontal row inside vertical_centered starts at the left edge.
+                                spin(ui);
+                                ui.add_space(6.0);
+                                ui.label(RichText::new("Asking gcloud for your instances…").color(MUTED()));
                             } else if !q.is_empty() {
                                 ui.label(RichText::new(format!("No instance matches \u{201c}{}\u{201d}.", b.search.trim())).color(MUTED()));
                             } else {
