@@ -70,7 +70,7 @@ fn file(name: &str) -> PathBuf {
 }
 
 fn plan(schema: &str, whole: bool, tables: Vec<DumpTable>) -> DumpPlan {
-    DumpPlan { schema: schema.into(), tables, create_db: whole, extras: true, rows_per_insert: 1000, snapshot: true, filter: None }
+    DumpPlan { schema: schema.into(), tables, create_db: whole, extras: true, rows_per_insert: 1000, snapshot: true, filter: None, grants: false, owners: false }
 }
 
 fn table(name: &str, view: bool, structure: bool, content: bool, drop: bool) -> DumpTable {
@@ -128,8 +128,8 @@ fn shape(l: &LivePg, pool: &PgPool) -> Vec<String> {
     let mut queries: Vec<(&str, String)> = vec![
         ("schema", format!("SELECT n.nspname || ' ' || COALESCE(obj_description(n.oid, 'pg_namespace'), '') FROM pg_namespace n WHERE {USER_NS} ORDER BY 1")),
         ("extension", "SELECT e.extname || ' ' || e.extnamespace::regnamespace FROM pg_extension e WHERE e.extname <> 'plpgsql' ORDER BY 1".into()),
-        ("relation", format!("SELECT c.oid::regclass || ' ' || c.relkind::text || c.relpersistence::text || ' ' || c.relispopulated || ' ' || COALESCE(c.reloptions::text, '') FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'v', 'm', 'S') AND {USER_NS} ORDER BY 1")),
-        ("column", format!("SELECT c.oid::regclass || ' ' || a.attnum || ' ' || a.attname || ' ' || format_type(a.atttypid, a.atttypmod) || ' nn=' || a.attnotnull || ' id=' || a.attidentity::text || ' gen=' || a.attgenerated::text || ' def=' || COALESCE(pg_get_expr(d.adbin, d.adrelid), '') || ' coll=' || a.attcollation::regcollation FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum WHERE a.attnum > 0 AND NOT a.attisdropped AND c.relkind IN ('r', 'v', 'm') AND {USER_NS} ORDER BY 1")),
+        ("relation", format!("SELECT c.oid::regclass || ' ' || c.relkind::text || c.relpersistence::text || ' ' || c.relispopulated || ' ' || COALESCE(c.reloptions::text, '') FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p', 'v', 'm', 'S') AND {USER_NS} ORDER BY 1")),
+        ("column", format!("SELECT c.oid::regclass || ' ' || a.attnum || ' ' || a.attname || ' ' || format_type(a.atttypid, a.atttypmod) || ' nn=' || a.attnotnull || ' id=' || a.attidentity::text || ' gen=' || a.attgenerated::text || ' def=' || COALESCE(pg_get_expr(d.adbin, d.adrelid), '') || ' coll=' || a.attcollation::regcollation FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum WHERE a.attnum > 0 AND NOT a.attisdropped AND c.relkind IN ('r', 'p', 'v', 'm') AND {USER_NS} ORDER BY 1")),
         ("constraint", format!("SELECT CASE WHEN k.conrelid <> 0 THEN k.conrelid::regclass::text ELSE k.contypid::regtype::text END || ' ' || k.conname || ' ' || k.contype::text || ' ' || pg_get_constraintdef(k.oid) FROM pg_constraint k JOIN pg_namespace n ON n.oid = k.connamespace WHERE {USER_NS} ORDER BY 1")),
         ("index", format!("SELECT pg_get_indexdef(i.indexrelid) || ' cl=' || i.indisclustered || ' valid=' || i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE {USER_NS} ORDER BY 1")),
         ("view", format!("SELECT c.oid::regclass || ' ' || pg_get_viewdef(c.oid, true) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('v', 'm') AND {USER_NS} ORDER BY 1")),
@@ -138,6 +138,11 @@ fn shape(l: &LivePg, pool: &PgPool) -> Vec<String> {
         ("type", format!("SELECT t.oid::regtype || ' ' || t.typtype::text || ' ' || COALESCE((SELECT string_agg(e.enumlabel, '|' ORDER BY e.enumsortorder) FROM pg_enum e WHERE e.enumtypid = t.oid), '') || ' ' || COALESCE(format_type(NULLIF(t.typbasetype, 0), t.typtypmod), '') || ' nn=' || t.typnotnull || ' def=' || COALESCE(pg_get_expr(t.typdefaultbin, 0), '') || ' ' || COALESCE((SELECT string_agg(a.attname || ':' || format_type(a.atttypid, a.atttypmod) || '/' || a.attcollation::regcollation, ',' ORDER BY a.attnum) FROM pg_attribute a WHERE a.attrelid = t.typrelid AND a.attnum > 0 AND t.typtype = 'c'), '') || ' ' || COALESCE((SELECT r.rngsubtype::regtype::text FROM pg_range r WHERE r.rngtypid = t.oid), '') FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE t.typtype IN ('e', 'd', 'r', 'c') AND t.typcategory <> 'A' AND (t.typrelid = 0 OR EXISTS (SELECT 1 FROM pg_class k WHERE k.oid = t.typrelid AND k.relkind = 'c')) AND {USER_NS} AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_type'::regclass AND d.objid = t.oid AND d.deptype = 'e') ORDER BY 1")),
         ("sequence", "SELECT schemaname || '.' || sequencename || ' ' || data_type || ' ' || start_value || ' ' || increment_by || ' ' || min_value || ' ' || max_value || ' ' || cache_size || ' ' || cycle || ' last=' || COALESCE(last_value::text, 'null') || ' owner=' || COALESCE((SELECT d.refobjid::regclass::text || '.' || d.refobjsubid || ' ' || d.deptype::text FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = format('%I.%I', schemaname, sequencename)::regclass AND d.refclassid = 'pg_class'::regclass AND d.deptype IN ('a', 'i') LIMIT 1), '') FROM pg_sequences WHERE schemaname NOT LIKE 'pg\\_%' AND schemaname <> 'information_schema' ORDER BY 1".into()),
         ("comment", "SELECT pg_describe_object(d.classoid, d.objoid, d.objsubid) || ' = ' || d.description FROM pg_description d WHERE d.objoid >= 16384 ORDER BY 1".into()),
+        ("partition", format!("SELECT c.oid::regclass || ' ' || c.relkind::text || ' ' || COALESCE(pg_get_partkeydef(c.oid), '') || ' ' || COALESCE(pg_get_expr(c.relpartbound, c.oid), '') FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE (c.relkind = 'p' OR c.relispartition) AND {USER_NS} ORDER BY 1")),
+        // Tables and indexes: which partition is of which parent.
+        ("inherits", "SELECT h.inhrelid::regclass || ' of ' || h.inhparent::regclass || ' ' || h.inhseqno FROM pg_inherits h ORDER BY 1".into()),
+        ("row security", format!("SELECT c.oid::regclass || ' ' || c.relrowsecurity || ' ' || c.relforcerowsecurity FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE (c.relrowsecurity OR c.relforcerowsecurity) AND {USER_NS} ORDER BY 1")),
+        ("policy", "SELECT schemaname || '.' || tablename || ' ' || policyname || ' ' || permissive || ' ' || roles::text || ' ' || cmd || ' ' || COALESCE(qual, '') || ' ' || COALESCE(with_check, '') FROM pg_policies ORDER BY 1".into()),
     ];
     // The options of a range type: subtype, operator class, collation, difference function and, from 14, the multirange type.
     queries.push(("range", format!("SELECT r.rngtypid::regtype || ' sub=' || r.rngsubtype::regtype || ' opc=' || oc.opcname || ' coll=' || r.rngcollation::regcollation || ' diff=' || r.rngsubdiff::regproc{} FROM pg_range r JOIN pg_opclass oc ON oc.oid = r.rngsubopc JOIN pg_type t ON t.oid = r.rngtypid JOIN pg_namespace n ON n.oid = t.typnamespace WHERE {USER_NS} ORDER BY 1", if ver >= 140000 { " || ' multi=' || (to_jsonb(r) ->> 'rngmultitypid')::oid::regtype" } else { "" })));
@@ -147,7 +152,7 @@ fn shape(l: &LivePg, pool: &PgPool) -> Vec<String> {
         }
     }
     // Rows: a count and one checksum over the text of every row, whatever its order.
-    let tables = lines(l, pool, &format!("SELECT format('%I.%I', n.nspname, c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'm') AND {USER_NS} ORDER BY 1"));
+    let tables = lines(l, pool, &format!("SELECT format('%I.%I', n.nspname, c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p', 'm') AND {USER_NS} ORDER BY 1"));
     for t in tables {
         let r = lines(l, pool, &format!("SELECT count(*) || ' ' || COALESCE(md5(string_agg(x::text, E'\\n' ORDER BY x::text)), '') FROM {t} x"));
         out.push(format!("rows of {t}: {}", r[0]));
@@ -827,4 +832,325 @@ fn live_cancel_leaves_no_file_and_wide_rows_go_in_batches() {
         assert_eq!(text.matches("INSERT INTO \"public\".\"wide\"").count(), 4, "{var}: one INSERT per large row");
         let _ = std::fs::remove_file(wp);
     });
+}
+
+/// Roles a test made, dropped when it ends. Declared before the test's `Dbs`, so the databases that name them go first.
+struct Roles<'a> {
+    l: &'a LivePg,
+    names: Vec<String>,
+}
+
+impl<'a> Roles<'a> {
+    fn new(l: &'a LivePg, names: &[&str]) -> Roles<'a> {
+        let r = Roles { l, names: names.iter().map(|n| n.to_string()).collect() };
+        r.drop_all();
+        for n in &r.names {
+            // One left by a test that failed while it still owned something cannot be dropped, and is used again.
+            let make = format!("DO $$BEGIN CREATE ROLE {n} LOGIN PASSWORD 'pw'; EXCEPTION WHEN duplicate_object THEN NULL; END$$");
+            l.w.rt.block_on(async { sqlx::raw_sql(&make).execute(&l.pool).await }).unwrap_or_else(|x| panic!("create role {n}: {x}"));
+        }
+        r
+    }
+
+    fn drop_all(&self) {
+        for n in &self.names {
+            let _ = self.l.w.rt.block_on(async { sqlx::raw_sql(&format!("DROP ROLE IF EXISTS {n}")).execute(&self.l.pool).await });
+        }
+    }
+}
+
+impl Drop for Roles<'_> {
+    fn drop(&mut self) {
+        self.drop_all();
+    }
+}
+
+fn with(mut p: DumpPlan, grants: bool, owners: bool) -> DumpPlan {
+    (p.grants, p.owners) = (grants, owners);
+    p
+}
+
+/// Who owns every user object and the rights on it, each line `owner:` or `acl:`, the database's own rights included.
+fn rights(l: &LivePg, pool: &PgPool) -> Vec<String> {
+    let queries = [
+        format!("SELECT 'owner: schema ' || n.nspname || ' ' || pg_get_userbyid(n.nspowner) FROM pg_namespace n WHERE {USER_NS}"),
+        format!("SELECT 'acl: schema ' || n.nspname || ' ' || n.nspacl::text FROM pg_namespace n WHERE {USER_NS} AND n.nspacl IS NOT NULL"),
+        format!("SELECT 'owner: ' || c.relkind::text || ' ' || c.oid::regclass || ' ' || pg_get_userbyid(c.relowner) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p', 'v', 'm', 'S') AND {USER_NS}"),
+        format!("SELECT 'acl: ' || c.oid::regclass || ' ' || c.relacl::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relacl IS NOT NULL AND {USER_NS}"),
+        format!("SELECT 'acl: column ' || c.oid::regclass || '.' || a.attname || ' ' || a.attacl::text FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE a.attacl IS NOT NULL AND {USER_NS}"),
+        format!("SELECT 'owner: type ' || t.oid::regtype || ' ' || pg_get_userbyid(t.typowner) FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE t.typtype IN ('e', 'd') AND {USER_NS}"),
+        format!("SELECT 'acl: type ' || t.oid::regtype || ' ' || t.typacl::text FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE t.typacl IS NOT NULL AND t.typtype IN ('e', 'd') AND {USER_NS}"),
+        format!("SELECT 'owner: function ' || p.oid::regprocedure || ' ' || pg_get_userbyid(p.proowner) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE {USER_NS}"),
+        format!("SELECT 'acl: function ' || p.oid::regprocedure || ' ' || p.proacl::text FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE p.proacl IS NOT NULL AND {USER_NS}"),
+        "SELECT 'acl: default ' || pg_get_userbyid(d.defaclrole) || ' ' || COALESCE(d.defaclnamespace::regnamespace::text, '-') || ' ' || d.defaclobjtype::text || ' ' || d.defaclacl::text FROM pg_default_acl d".into(),
+        "SELECT 'acl: database ' || COALESCE(d.datacl::text, 'default') FROM pg_database d WHERE d.datname = current_database()".into(),
+    ];
+    let mut out: Vec<String> = queries.iter().flat_map(|q| lines(l, pool, q)).collect();
+    out.sort();
+    out
+}
+
+/// Grants, default privileges and owners of schemas, tables, columns, sequences, views, functions, types, partitions and the
+/// database, with the roles made first: with both options the restored rights are the same, with grants alone everything
+/// belongs to the role that ran the file and the rights are there, and with neither the file names no role.
+#[test]
+fn live_grants_and_owners_round_trip_when_the_roles_exist() {
+    every_pg(|l, var| {
+        let t = tag(var);
+        let (owner, reader, writer) = (format!("qdump_g_owner_{t}"), format!("qdump_g_reader_{t}"), format!("qdump_g_writer_{t}"));
+        let _roles = Roles::new(l, &[&owner, &reader, &writer]);
+        let mut dbs = Dbs::new(l);
+        let src_name = format!("qdump_grant_src_{t}");
+        let (src, src_pool) = dbs.make(&src_name);
+        sql(l, &src_pool, &format!(
+            "CREATE SCHEMA g AUTHORIZATION {owner};
+GRANT USAGE ON SCHEMA g TO {reader};
+CREATE TYPE g.e AS ENUM ('a'); ALTER TYPE g.e OWNER TO {owner}; REVOKE USAGE ON TYPE g.e FROM PUBLIC; GRANT USAGE ON TYPE g.e TO {reader};
+CREATE DOMAIN g.d AS int; ALTER DOMAIN g.d OWNER TO {writer};
+CREATE TABLE g.t (id serial PRIMARY KEY, a text, b text, e g.e, x g.d); ALTER TABLE g.t OWNER TO {owner};
+GRANT SELECT ON g.t TO {reader}; GRANT SELECT (a), UPDATE (b) ON g.t TO {writer}; GRANT INSERT ON g.t TO {writer} WITH GRANT OPTION; REVOKE TRUNCATE ON g.t FROM {owner};
+GRANT USAGE ON SEQUENCE g.t_id_seq TO {writer};
+CREATE SEQUENCE g.free; ALTER SEQUENCE g.free OWNER TO {reader}; GRANT SELECT ON SEQUENCE g.free TO PUBLIC;
+CREATE VIEW g.v AS SELECT id FROM g.t; ALTER VIEW g.v OWNER TO {owner}; GRANT SELECT ON g.v TO PUBLIC;
+CREATE MATERIALIZED VIEW g.mv AS SELECT 1 AS one; ALTER MATERIALIZED VIEW g.mv OWNER TO {writer};
+CREATE FUNCTION g.f() RETURNS int LANGUAGE sql AS 'select 1'; ALTER FUNCTION g.f() OWNER TO {owner}; REVOKE EXECUTE ON FUNCTION g.f() FROM PUBLIC; GRANT EXECUTE ON FUNCTION g.f() TO {reader};
+CREATE PROCEDURE g.p() LANGUAGE sql AS 'select 1'; ALTER PROCEDURE g.p() OWNER TO {writer};
+CREATE TABLE g.pt (id int) PARTITION BY RANGE (id); CREATE TABLE g.pt1 PARTITION OF g.pt FOR VALUES FROM (0) TO (10);
+ALTER TABLE g.pt OWNER TO {owner}; ALTER TABLE g.pt1 OWNER TO {writer}; GRANT SELECT ON g.pt TO {reader}; GRANT SELECT ON g.pt1 TO {reader};
+INSERT INTO g.t (a, b, e, x) VALUES ('a', 'b', 'a', 1); INSERT INTO g.pt VALUES (1), (2);
+ALTER DEFAULT PRIVILEGES FOR ROLE {owner} IN SCHEMA g GRANT SELECT ON TABLES TO {reader};
+ALTER DEFAULT PRIVILEGES FOR ROLE {owner} REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES FOR ROLE {owner} GRANT USAGE ON TYPES TO {writer};
+ALTER DEFAULT PRIVILEGES FOR ROLE {writer} GRANT USAGE ON SEQUENCES TO {reader} WITH GRANT OPTION;
+REVOKE CONNECT, TEMPORARY ON DATABASE \"{src_name}\" FROM PUBLIC; GRANT CONNECT ON DATABASE \"{src_name}\" TO {reader};"
+        ));
+        let before = rights(l, &src_pool);
+        assert!(before.iter().filter(|x| x.starts_with("acl:")).count() >= 12, "{var}: {before:?}");
+        let path = file(&format!("grants_{t}"));
+        assert_eq!(dump(l, &src, &with(plan("", true, Vec::new()), true, true), &path).unwrap_or_else(|x| panic!("{var}: {x}")), 3, "{var}");
+        let text = std::fs::read_to_string(&path).unwrap();
+        // A right PUBLIC has by default is revoked, and owners and grants come after everything else.
+        assert!(text.contains("REVOKE EXECUTE ON FUNCTION \"g\".\"f\"() FROM PUBLIC;"), "{var}");
+        assert!(text.contains(&format!("ALTER TABLE \"g\".\"t\" OWNER TO \"{owner}\";")), "{var}");
+        let at = |s: &str| text.find(s).unwrap_or_else(|| panic!("{var}: {s} is not in the dump"));
+        assert!(at("INSERT INTO \"g\".\"t\"") < at("-- Owners") && at("-- Owners") < at("-- Grants"), "{var}");
+
+        let (dst, dst_pool) = dbs.make(&format!("qdump_grant_dst_{t}"));
+        run(l, &dst, "", &path).unwrap_or_else(|x| panic!("{var}: {x}"));
+        same(&format!("{var} grants and owners"), &before, &rights(l, &dst_pool));
+        same(var, &shape(l, &src_pool), &shape(l, &dst_pool));
+
+        // Grants alone: the role running the file owns everything, and the rights it was asked to give are there.
+        let gp = file(&format!("grants_only_{t}"));
+        dump(l, &src, &with(plan("", true, Vec::new()), true, false), &gp).unwrap_or_else(|x| panic!("{var}: {x}"));
+        let text = std::fs::read_to_string(&gp).unwrap();
+        assert!(!text.contains(" OWNER TO "), "{var}");
+        let (g_db, g_pool) = dbs.make(&format!("qdump_grant_only_{t}"));
+        run(l, &g_db, "", &gp).unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(one(l, &g_pool, "SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = 'g.t'::regclass"), "postgres", "{var}");
+        for (q, want) in [
+            (format!("SELECT has_table_privilege('{reader}', 'g.t', 'SELECT')"), "t"),
+            (format!("SELECT has_column_privilege('{writer}', 'g.t', 'a', 'SELECT')"), "t"),
+            (format!("SELECT has_column_privilege('{writer}', 'g.t', 'b', 'SELECT')"), "f"),
+            (format!("SELECT has_table_privilege('{writer}', 'g.t', 'INSERT WITH GRANT OPTION')"), "t"),
+            (format!("SELECT has_function_privilege('{writer}', 'g.f()', 'EXECUTE')"), "f"),
+            (format!("SELECT has_type_privilege('{writer}', 'g.e', 'USAGE')"), "f"),
+            (format!("SELECT has_database_privilege('{writer}', current_database(), 'CONNECT')"), "f"),
+            (format!("SELECT has_database_privilege('{reader}', current_database(), 'CONNECT')"), "t"),
+            ("SELECT count(*) FROM pg_default_acl".to_string(), "4"),
+        ] {
+            assert_eq!(one(l, &g_pool, &q), want, "{var}: {q}");
+        }
+
+        // Owners alone: the owners are the same and nothing grants or revokes.
+        let op = file(&format!("owners_only_{t}"));
+        dump(l, &src, &with(plan("", true, Vec::new()), false, true), &op).unwrap_or_else(|x| panic!("{var}: {x}"));
+        let text = std::fs::read_to_string(&op).unwrap();
+        assert!(!text.contains("GRANT ") && !text.contains("REVOKE "), "{var}");
+        let (o_db, o_pool) = dbs.make(&format!("qdump_owner_only_{t}"));
+        run(l, &o_db, "", &op).unwrap_or_else(|x| panic!("{var}: {x}"));
+        let owners = |v: Vec<String>| v.into_iter().filter(|x| x.starts_with("owner:")).collect::<Vec<_>>();
+        same(&format!("{var} owners"), &owners(before.clone()), &owners(rights(l, &o_pool)));
+
+        // Neither: the default, which names no role at all.
+        let np = file(&format!("no_roles_{t}"));
+        dump(l, &src, &plan("", true, Vec::new()), &np).unwrap_or_else(|x| panic!("{var}: {x}"));
+        let text = std::fs::read_to_string(&np).unwrap();
+        assert!(!text.contains(&owner) && !text.contains(&reader) && !text.contains(&writer), "{var}");
+
+        // A table subset: its own rights, none of the schema's, the defaults' or the database's.
+        let sp = file(&format!("grants_sub_{t}"));
+        dump(l, &src, &with(plan("g", false, vec![table("t", false, true, true, true)]), true, true), &sp).unwrap_or_else(|x| panic!("{var}: {x}"));
+        let text = std::fs::read_to_string(&sp).unwrap();
+        assert!(text.contains("GRANT SELECT (\"a\"), UPDATE (\"b\") ON TABLE \"g\".\"t\"") || text.contains("GRANT UPDATE (\"b\"), SELECT (\"a\") ON TABLE \"g\".\"t\""), "{var}: {text}");
+        assert!(!text.contains("ON SCHEMA") && !text.contains("DEFAULT PRIVILEGES") && !text.contains("DATABASE"), "{var}");
+        let (s_db, s_pool) = dbs.make(&format!("qdump_grant_sub_{t}"));
+        run(l, &s_db, "", &sp).unwrap_or_else(|x| panic!("{var}: {x}"));
+        let of_t = |v: Vec<String>| v.into_iter().filter(|x| x.contains(" g.t ") || x.contains(" g.t.") || x.contains("g.t_id_seq") || x.contains("type g.e") || x.contains("type g.d")).collect::<Vec<_>>();
+        let a = of_t(before.clone());
+        assert!(a.len() >= 8, "{var}: {a:?}");
+        same(&format!("{var} subset"), &a, &of_t(rights(l, &s_pool)));
+        for p in [path, gp, op, np, sp] {
+            let _ = std::fs::remove_file(p);
+        }
+    });
+}
+
+/// A range-partitioned table with a default partition and a sub-partitioned one, a hash-partitioned one, an index and keys
+/// on the parents, a trigger on a parent and a foreign key to a partitioned table: the rows of each leaf are written once,
+/// the partitions are made from their parent and their indexes attach to the parent's.
+#[test]
+fn live_partitioned_tables_round_trip_with_rows_counted_once() {
+    every_pg(|l, var| {
+        let t = tag(var);
+        let mut dbs = Dbs::new(l);
+        let (src, src_pool) = dbs.make(&format!("qdump_part_src_{t}"));
+        sql(l, &src_pool, "CREATE SCHEMA part;
+CREATE TABLE part.m (id int NOT NULL, d date NOT NULL, k text, v numeric DEFAULT 0, PRIMARY KEY (id, d), CONSTRAINT m_pos CHECK (id > 0)) PARTITION BY RANGE (d);
+CREATE TABLE part.m_2025 PARTITION OF part.m FOR VALUES FROM ('2025-01-01') TO ('2026-01-01');
+CREATE TABLE part.m_2026 PARTITION OF part.m (v WITH OPTIONS DEFAULT 7) FOR VALUES FROM ('2026-01-01') TO ('2027-01-01') PARTITION BY RANGE (id);
+CREATE TABLE part.m_2026_low PARTITION OF part.m_2026 FOR VALUES FROM (MINVALUE) TO (1500);
+CREATE TABLE part.m_2026_rest PARTITION OF part.m_2026 DEFAULT;
+CREATE TABLE part.m_other PARTITION OF part.m DEFAULT;
+CREATE INDEX m_k ON part.m (k);
+COMMENT ON INDEX part.m_k IS 'on the parent';
+CREATE TABLE part.h (id int PRIMARY KEY, note text) PARTITION BY HASH (id);
+CREATE TABLE part.h0 PARTITION OF part.h FOR VALUES WITH (MODULUS 2, REMAINDER 0);
+CREATE TABLE part.h1 PARTITION OF part.h FOR VALUES WITH (MODULUS 2, REMAINDER 1);
+CREATE TABLE part.ref (id int, d date, FOREIGN KEY (id, d) REFERENCES part.m);
+CREATE FUNCTION part.tf() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.v := NEW.v + 1; RETURN NEW; END $$;
+CREATE TRIGGER m_t BEFORE INSERT ON part.m FOR EACH ROW EXECUTE FUNCTION part.tf();
+INSERT INTO part.m SELECT g, DATE '2025-06-01' + (g % 900), (ARRAY['a', 'b', 'c', NULL])[1 + g % 4], g FROM generate_series(1, 3000) g;
+INSERT INTO part.h SELECT g, 'n' || g FROM generate_series(1, 100) g;
+INSERT INTO part.ref SELECT id, d FROM part.m WHERE id <= 50;");
+        let before = shape(l, &src_pool);
+        assert!(before.iter().filter(|x| x.starts_with("inherits: ")).count() >= 12, "{var}: tables and indexes of partitions");
+        let path = file(&format!("part_{t}"));
+        // 3000 rows of part.m over four leaves, 100 of part.h over two, 50 of part.ref: each once.
+        assert_eq!(dump(l, &src, &plan("", true, Vec::new()), &path).unwrap_or_else(|x| panic!("{var}: {x}")), 3150, "{var}");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("INSERT INTO \"part\".\"m\" ") && !text.contains("INSERT INTO \"part\".\"m_2026\" "), "{var}: a partitioned table has no rows of its own");
+        assert!(text.contains("PARTITION BY RANGE (d)") && text.contains("CREATE TABLE \"part\".\"m_other\" PARTITION OF \"part\".\"m\"\nDEFAULT;"), "{var}");
+        assert!(text.contains("\"v\" WITH OPTIONS DEFAULT 7"), "{var}: a partition's own default");
+        assert!(text.contains("ON ONLY \"part\".\"m\"") || text.contains("ON ONLY part.m"), "{var}: the parent's index is its own");
+        assert!(text.contains("ATTACH PARTITION"), "{var}");
+        assert!(!text.contains("partitioned tables, partitions"), "{var}");
+        let (dst, dst_pool) = dbs.make(&format!("qdump_part_dst_{t}"));
+        run(l, &dst, "", &path).unwrap_or_else(|x| panic!("{var}: {x}"));
+        same(var, &before, &shape(l, &dst_pool));
+        // The index of the parent is valid, so it serves the foreign key, and a new row goes through the trigger to its leaf.
+        assert_eq!(one(l, &dst_pool, "SELECT bool_and(indisvalid)::text FROM pg_index WHERE indrelid = 'part.m'::regclass"), "true", "{var}");
+        sql(l, &dst_pool, "INSERT INTO part.m (id, d, k, v) VALUES (9001, '2026-03-01', 'a', 1)");
+        assert_eq!(one(l, &dst_pool, "SELECT tableoid::regclass::text || ' ' || v FROM part.m WHERE id = 9001"), "part.m_2026_rest 2", "{var}");
+        sql(l, &dst_pool, "DELETE FROM part.m WHERE id = 9001");
+
+        // A subset that names the parents: every partition comes with them, and it runs twice into the same database.
+        let sp = file(&format!("part_sub_{t}"));
+        let sub = plan("part", false, vec![table("m", false, true, true, true), table("h", false, true, true, true), table("ref", false, true, true, true)]);
+        assert_eq!(dump(l, &src, &sub, &sp).unwrap_or_else(|x| panic!("{var}: {x}")), 3150, "{var}");
+        let (s_db, s_pool) = dbs.make(&format!("qdump_part_sub_{t}"));
+        for round in 0..2 {
+            run(l, &s_db, "", &sp).unwrap_or_else(|x| panic!("{var} round {round}: {x}"));
+            same(&format!("{var} subset round {round}"), &before, &shape(l, &s_pool));
+        }
+        // A partition named on its own is written as a partition of a parent the target has, and replaces only itself.
+        let lp = file(&format!("part_lone_{t}"));
+        assert_eq!(dump(l, &src, &plan("part", false, vec![table("h1", false, true, true, true)]), &lp).unwrap_or_else(|x| panic!("{var}: {x}")), one(l, &src_pool, "SELECT count(*) FROM part.h1").parse::<u64>().unwrap(), "{var}");
+        let text = std::fs::read_to_string(&lp).unwrap();
+        assert!(text.contains("PARTITION OF \"part\".\"h\"") && text.contains("-- Partition part.h1 is written as a partition of"), "{var}: {text}");
+        assert!(!text.contains("CREATE TABLE \"part\".\"h\" ") && !text.contains("h1_pkey"), "{var}: the parent and the partition's copy of its key come from the target");
+        run(l, &dst, "", &lp).unwrap_or_else(|x| panic!("{var}: {x}"));
+        same(&format!("{var} lone partition"), &before, &shape(l, &dst_pool));
+        for p in [path, sp, lp] {
+            let _ = std::fs::remove_file(p);
+        }
+    });
+}
+
+/// Row security round trips (ENABLE, FORCE, permissive and restrictive policies for PUBLIC and for a role, a comment), the
+/// rows are read with it off, and a login it would hide rows from is refused for that table instead of writing fewer rows.
+#[test]
+fn live_row_security_round_trips_and_a_login_it_would_hide_rows_from_is_refused() {
+    every_pg(|l, var| {
+        let t = tag(var);
+        let role = format!("qdump_rls_{t}");
+        let _roles = Roles::new(l, &[&role]);
+        let mut dbs = Dbs::new(l);
+        let name = format!("qdump_rls_src_{t}");
+        let (src, src_pool) = dbs.make(&name);
+        sql(l, &src_pool, &format!(
+            "CREATE TABLE s (id int PRIMARY KEY, who text, v text);
+INSERT INTO s SELECT g, 'u' || g % 3, 'v' || g FROM generate_series(1, 100) g;
+ALTER TABLE s ENABLE ROW LEVEL SECURITY; ALTER TABLE s FORCE ROW LEVEL SECURITY;
+CREATE POLICY own ON s FOR SELECT USING (who = current_user);
+CREATE POLICY ins ON s AS RESTRICTIVE FOR INSERT TO {role} WITH CHECK (v IS NOT NULL AND v <> 'it''s \\ x');
+CREATE POLICY \"upd \"\"q\"\"\" ON s FOR UPDATE TO {role}, PUBLIC USING (true) WITH CHECK (id > 0);
+COMMENT ON POLICY own ON s IS 'mine';
+CREATE TABLE open_t (id int); INSERT INTO open_t VALUES (1);
+CREATE TABLE owned (id int); INSERT INTO owned VALUES (1), (2), (3); ALTER TABLE owned ENABLE ROW LEVEL SECURITY; ALTER TABLE owned OWNER TO {role};
+GRANT USAGE ON SCHEMA public TO {role}; GRANT SELECT ON s, open_t TO {role};"
+        ));
+        let before = shape(l, &src_pool);
+        assert!(before.iter().filter(|x| x.starts_with("policy: ")).count() == 3, "{var}: {before:?}");
+        let path = file(&format!("rls_{t}"));
+        // The superuser reads every row of a table with FORCE.
+        assert_eq!(dump(l, &src, &plan("", true, Vec::new()), &path).unwrap_or_else(|x| panic!("{var}: {x}")), 104, "{var}");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let at = |s: &str| text.find(s).unwrap_or_else(|| panic!("{var}: {s} is not in the dump"));
+        assert!(at("INSERT INTO \"public\".\"s\"") < at("ENABLE ROW LEVEL SECURITY"), "{var}: the rows load before row security is on");
+        let (dst, dst_pool) = dbs.make(&format!("qdump_rls_dst_{t}"));
+        run(l, &dst, "", &path).unwrap_or_else(|x| panic!("{var}: {x}"));
+        same(var, &before, &shape(l, &dst_pool));
+        // Under both readings of standard_conforming_strings, the way psql would run it.
+        let (_, off_db) = dbs.make(&format!("qdump_rls_off_{t}"));
+        sql(l, &off_db, &format!("ALTER DATABASE \"qdump_rls_off_{t}\" SET standard_conforming_strings = off"));
+        let off = pool_of(l, &format!("qdump_rls_off_{t}"));
+        psql_like(l, &off, &text);
+        same(&format!("{var} scs off"), &before, &shape(l, &off));
+
+        // A login policies apply to: refused for that table, before anything is written.
+        let uri = l.uri.replacen("postgres:quarry@", &format!("{role}:pw@"), 1).rsplit_once('/').map(|(a, _)| format!("{a}/{name}")).unwrap();
+        let lim = live_pg_at(uri);
+        let db = lim.db.at(&name);
+        let lp = file(&format!("rls_lim_{t}"));
+        // A run that failed after writing it would leave it.
+        let _ = std::fs::remove_file(&lp);
+        let e = dump(&lim, &db, &plan("public", false, vec![table("open_t", false, true, true, false), table("s", false, true, true, false)]), &lp).unwrap_err();
+        assert!(e.contains("Row security would hide rows of public.s"), "{var}: {e}");
+        assert!(!lp.exists(), "{var}");
+        // Its structure and policies are fine, and so are the rows of a table it owns without FORCE.
+        assert_eq!(dump(&lim, &db, &plan("public", false, vec![table("s", false, true, false, false), table("owned", false, true, true, false)]), &lp).unwrap_or_else(|x| panic!("{var}: {x}")), 3, "{var}");
+        assert!(std::fs::read_to_string(&lp).unwrap().contains("CREATE POLICY \"own\" ON \"public\".\"s\""), "{var}");
+        // With FORCE the owner is subject to its policies too.
+        sql(l, &src_pool, "ALTER TABLE public.owned FORCE ROW LEVEL SECURITY");
+        let e = dump(&lim, &db, &plan("public", false, vec![table("owned", false, true, true, false)]), &lp).unwrap_err();
+        assert!(e.contains("Row security would hide rows of public.owned"), "{var}: {e}");
+        drop(lim);
+        for p in [path, lp] {
+            let _ = std::fs::remove_file(p);
+        }
+    });
+}
+
+/// Through the PgBouncer: a partitioned table with row security, its owners and grants, as a subset (a whole dump's grants on
+/// the database are a DO block, which a pooler refuses).
+#[test]
+fn live_partitions_row_security_and_grants_work_through_a_transaction_pooler() {
+    let Some(l) = live_pgbouncer() else { return };
+    let db = l.quarry_test();
+    let pool = l.fixture_pool();
+    let schema = "pgdump3_bouncer";
+    let role = "qdump_bouncer_reader";
+    let _roles = Roles::new(&l, &[role]);
+    l.reset_schemas(&pool, &[schema], &format!("CREATE TABLE {schema}.p (id int PRIMARY KEY, v text) PARTITION BY RANGE (id); CREATE TABLE {schema}.p1 PARTITION OF {schema}.p FOR VALUES FROM (0) TO (1000); CREATE TABLE {schema}.p2 PARTITION OF {schema}.p DEFAULT; INSERT INTO {schema}.p SELECT g, 'v' || g FROM generate_series(1, 2000) g; ALTER TABLE {schema}.p1 ENABLE ROW LEVEL SECURITY; CREATE POLICY r ON {schema}.p1 FOR SELECT TO {role} USING (id < 10); GRANT SELECT ON {schema}.p, {schema}.p1 TO {role}; ALTER TABLE {schema}.p2 OWNER TO {role}"));
+    let path = file("bouncer3");
+    let p = with(plan(schema, false, vec![table("p", false, true, true, false)]), true, true);
+    assert_eq!(dump(&l, &db, &p, &path).unwrap_or_else(|x| panic!("{x}")), 2000);
+    sql(&l, &pool, &format!("DROP SCHEMA {schema} CASCADE"));
+    run(&l, &db, "", &path).unwrap_or_else(|x| panic!("{x}"));
+    assert_eq!(one(&l, &pool, &format!("SELECT count(*) FROM {schema}.p")), "2000");
+    assert_eq!(one(&l, &pool, &format!("SELECT count(*) || ' ' || bool_and(relrowsecurity) FROM pg_policies JOIN pg_class ON oid = '{schema}.p1'::regclass WHERE schemaname = '{schema}' AND tablename = 'p1'")), "1 true");
+    assert_eq!(one(&l, &pool, &format!("SELECT has_table_privilege('{role}', '{schema}.p1', 'SELECT')::text || ' ' || pg_get_userbyid(relowner) FROM pg_class WHERE oid = '{schema}.p2'::regclass")), format!("true {role}"));
+    sql(&l, &pool, &format!("DROP SCHEMA {schema} CASCADE"));
+    let _ = std::fs::remove_file(path);
 }
