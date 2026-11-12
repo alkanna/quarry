@@ -37,6 +37,14 @@ pkcs8 = { version = "0.11", features = ["encryption", "pem"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 webpki-roots = "1"
+# Already in the build through sqlx; SASLprep for the SCRAM verifier of a PostgreSQL role password.
+stringprep = "0.1"
+# Already in the build through stringprep; the NFKC step of PostgreSQL's SASLprep, which stringprep's own saslprep orders differently.
+unicode-normalization = "0.1"
+# Already in the build through other crates; wipes role passwords and their verifiers from memory once sent.
+zeroize = "1"
+# Already in the build through other crates; the MD5 password hash for a server whose password_encryption is md5.
+md5 = "0.8"
 
 # Already in the build through other crates; read the app's own memory and CPU time for the status bar.
 [target.'cfg(unix)'.dependencies]

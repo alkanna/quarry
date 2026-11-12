@@ -5,7 +5,8 @@
 //! `cloudsql-missing` (the browser when no proxy is found), `cloudsql-adc` (Use on an IAM instance without Application Default
 //! Credentials). gcloud never runs in the demo. The Server window opens on `server` (Overview), `server-settings`,
 //! `server-activity`, `server-locks`, `server-confirm` (Terminate armed), `server-locked` (a read-only connection) and
-//! `server-limited` (a role without pg_read_all_stats).
+//! `server-limited` (a role without pg_read_all_stats). Roles: `roles` (the Roles and privileges window on its object matrix,
+//! a cell editor open and one grant staged) and `roles-role` (its Roles tab on app_writer).
 
 use super::*;
 use db::sql::schema::{Schema, SchemaCol, SchemaTable};
@@ -184,6 +185,7 @@ impl App {
                 }
                 self.pg_server = Some(PgServerWin::demo(CONN, which));
             }
+            "roles" | "roles-role" => self.pg_roles_demo(which, CONN),
             _ => {}
         }
     }

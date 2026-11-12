@@ -860,6 +860,9 @@ pub(super) enum Modal {
     PgNewTable(Box<super::sql_create_pg::PgNewTable>),
     SqlNewUser(Box<super::sql_users::NewUser>),
     SqlPassword(Box<super::sql_users::PwForm>),
+    PgNewRole(Box<super::pg_roles::NewRoleForm>),
+    PgPassword(Box<super::pg_roles::PgPwForm>),
+    PgDropRole(Box<super::pg_roles::DropForm>),
     /// Add a foreign key to the open SQL table, with its ALTER preview.
     FkEdit(Box<FkForm>),
     Typed { title: String, expect: String, typed: String, action: Danger },

@@ -267,6 +267,9 @@ impl App {
                 if c.meta.engine == db::sql::Engine::MySql && c.status == Status::Ready && ui.button("Users and privileges…").clicked() {
                     sql_users = Some(c.meta.id);
                 }
+                if c.meta.engine == db::sql::Engine::Postgres && c.status == Status::Ready && ui.button("Roles and privileges…").clicked() {
+                    sql_users = Some(c.meta.id);
+                }
                 ui.add_space(2.0);
                 ui.separator();
                 ui.add_space(2.0);
@@ -490,7 +493,7 @@ impl App {
                             side.push(SideAct::Refresh(db_name.clone()));
                         }
                         if engine.supports(db::sql::Feature::Users) {
-                            if ui.button("Users and privileges…").clicked() {
+                            if ui.button(if engine == db::sql::Engine::Postgres { "Roles and privileges…" } else { "Users and privileges…" }).clicked() {
                                 side.push(SideAct::SqlUsers);
                             }
                         }

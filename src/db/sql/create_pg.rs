@@ -593,7 +593,7 @@ fn not_empty_sql() -> String {
 }
 
 /// Runs reads in a `BEGIN READ ONLY` that is always rolled back, on a connection of its own, with every value bound.
-async fn read(db: &Db, scope: &str, steps: &[(&str, Vec<Param>)]) -> Res<Vec<Vec<SqlRow>>> {
+pub(super) async fn read(db: &Db, scope: &str, steps: &[(&str, Vec<Param>)]) -> Res<Vec<Vec<SqlRow>>> {
     let mut c = db.acquire_conn().await?;
     let out = read_on(&mut c, db, scope, steps).await;
     let _ = c.close().await;

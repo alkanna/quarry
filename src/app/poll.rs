@@ -161,6 +161,7 @@ impl App {
                 Msg::SqlUsers { conn, req, res } => self.sql_users_loaded(conn, req, res),
                 Msg::SqlUserGrants { conn, req, res } => self.sql_user_grants_loaded(conn, req, res),
                 Msg::SqlUserDone { conn, account, op, res, undo } => self.sql_user_done(conn, account, op, res, undo),
+                Msg::PgRoles { conn, req, ans } => self.pg_roles_answer(conn, req, ans),
                 Msg::SqlDropInfo { conn, database, schema, table, res } => self.sql_drop_info_done(conn, database, schema, table, res),
                 Msg::PgDbChoices { conn, res } => self.pg_choices_done(conn, res),
                 Msg::SqlDdl { conn, database, schema, table, what, res, undo, dbs, sql_mode } => self.sql_ddl_done(conn, database, schema, table, what, res, undo, dbs, sql_mode),

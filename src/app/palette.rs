@@ -182,7 +182,7 @@ impl App {
                     add(&g, Row::cmd("Server status", Glyph::Prompt, "", Cmd::Server));
                 }
                 if c.meta.engine.supports(db::sql::Feature::Users) {
-                    add(&g, Row::cmd("Users", Glyph::Prompt, "", Cmd::Users));
+                    add(&g, Row::cmd(if c.meta.engine == db::sql::Engine::Postgres { "Roles" } else { "Users" }, Glyph::Prompt, "", Cmd::Users));
                 }
                 add(&g, Row::cmd("Disconnect", Glyph::Prompt, "", Cmd::Disconnect));
             } else if c.status != Status::Connecting {
