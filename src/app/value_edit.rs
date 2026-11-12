@@ -69,7 +69,8 @@ fn value_body(ui: &mut egui::Ui, id: egui::Id, text: &mut String, code: bool, fo
         act = ValueAct::Close;
     }
     ui.add_space(8.0);
-    ui.horizontal(|ui| {
+    // Wrapped so right_group can drop the buttons to their own row when the side panel is narrow.
+    ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new(format!("{chars} characters · {lines} {}", if lines == 1 { "line" } else { "lines" })).size(TXT_SMALL).color(FAINT()));
         ui.add_space(4.0);
         if ui.checkbox(&mut wrap, "Wrap lines").changed() {

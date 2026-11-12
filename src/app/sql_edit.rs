@@ -291,9 +291,13 @@ impl App {
         let btn = egui::Rect::from_min_size(egui::pos2(rect.right() - pad - EXPAND_BTN, rect.top() + pad), egui::vec2(EXPAND_BTN, EXPAND_BTN));
         // Taken before the text box sees it, where Enter alone would commit.
         let expand = expand_key(ui, id);
+        // One text row centered in the cell, where the value sat before the double click.
+        let font = FontId::monospace(TXT_SMALL);
+        let row_h = ui.fonts_mut(|f| f.row_height(&font));
+        let text_rect = egui::Rect::from_min_max(egui::pos2(rect.left(), rect.center().y - row_h / 2.0), egui::pos2(btn.left(), rect.center().y + row_h / 2.0));
         let out = ui
-            .scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
-                egui::TextEdit::singleline(&mut e.text).id(id).font(FontId::monospace(TXT_SMALL)).frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(6, 0))).desired_width(btn.left() - rect.left() - 16.0).show(ui)
+            .scope_builder(egui::UiBuilder::new().max_rect(text_rect), |ui| {
+                egui::TextEdit::singleline(&mut e.text).id(id).font(font).frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(6, 0))).desired_width(btn.left() - rect.left() - 16.0).show(ui)
             })
             .inner;
         let b = ui.put(btn, expand_button());
