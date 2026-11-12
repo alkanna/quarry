@@ -16,6 +16,15 @@ pub mod export;
 pub mod lex;
 pub mod format;
 pub mod value;
+pub mod check;
+
+/// What the key picker learns about the table a foreign key points at on its first lookup, sent back with the next
+/// ones so they skip the catalog: the column that reads as a row's name, and whether the table is too big to scan.
+#[derive(Clone, Debug, Default)]
+pub struct KeyTable {
+    pub label: Option<String>,
+    pub big: bool,
+}
 pub mod csv;
 pub mod import;
 pub mod dump;

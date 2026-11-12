@@ -559,7 +559,59 @@ async fn pg_field_values(db: &Db, schema: &str, table: &str, column: &str, prefi
     res
 }
 
+/// Columns that read as a row's name, tried in order before any other text column.
+const LABELS: [&str; 9] = ["name", "full_name", "display_name", "title", "label", "username", "email", "code", "slug"];
+
+/// What the key picker needs to know about a table once: its name-like column, and whether it is too big to scan.
+async fn key_table(db: &Db, schema: &str, table: &str, key: &str) -> Res<super::KeyTable> {
+    let d = db.dialect;
+    let cols = async { if d == Dialect::Postgres { pg_columns(db, schema, table).await } else { db.meta(schema, d.columns(), [schema, table]).await } };
+    let (cols, gate) = tokio::try_join!(cols, db.meta(schema, d.value_gate(), [key, schema, table]))?;
+    let cols: Vec<(String, String)> = cols.iter().filter_map(|r| Some((text(r, "name")?, text(r, "full_type")?))).filter(|c| c.0 != key).collect();
+    // Columns come in table order, so the fallback is the first text column.
+    let label = LABELS.iter().find(|l| cols.iter().any(|c| c.0 == **l)).map(|l| l.to_string()).or_else(|| cols.iter().find(|c| c.1.contains("char") || c.1.contains("text")).map(|c| c.0.clone()));
+    // An unknown estimate counts as big: the scan it would allow is the expensive mistake.
+    let big = gate.first().and_then(|r| super::structure::num(r, "est")).is_none_or(|n| n >= VALUES_SMALL);
+    Ok(super::KeyTable { label, big })
+}
+
+/// Up to 8 rows of `table` whose `key` starts with `q` or whose name-like column contains it, as (key, name) text.
+/// On a big table only the exact key is looked up, through its index, because a LIKE on cast text scans every row.
+async fn key_search(db: &Db, schema: &str, table: &str, key: &str, q: &str, known: Option<super::KeyTable>) -> Res<(super::KeyTable, Vec<(String, String)>)> {
+    let d = db.dialect;
+    let kt = match known {
+        Some(k) => k,
+        None => key_table(db, schema, table, key).await?,
+    };
+    let pg = d == Dialect::Postgres;
+    let as_text = |c: &str| if pg { format!("{}::text", d.quote_ident(c)) } else { format!("CAST({} AS CHAR)", d.quote_ident(c)) };
+    let lit = |s: &str| if pg { value::pg_lit(s) } else { value::lit(s, db.backslash_escapes()) };
+    // An escape character of its own, because NO_BACKSLASH_ESCAPES leaves LIKE with none.
+    let pat = q.replace('!', "!!").replace('%', "!%").replace('_', "!_");
+    let shown = kt.label.as_deref().map_or_else(|| "''".to_string(), as_text);
+    let mut sql = format!("SELECT {} AS k, {shown} AS l FROM {}", as_text(key), d.qualified(schema, table));
+    if !q.is_empty() && kt.big {
+        sql += &format!(" WHERE {} = {}", d.quote_ident(key), lit(q));
+    } else if !q.is_empty() {
+        sql += &format!(" WHERE {} LIKE {} ESCAPE '!'", as_text(key), lit(&format!("{pat}%")));
+        if let Some(l) = &kt.label {
+            sql += &format!(" OR {} {} {} ESCAPE '!'", as_text(l), if pg { "ILIKE" } else { "LIKE" }, lit(&format!("%{pat}%")));
+        }
+    }
+    sql += &format!(" ORDER BY {} LIMIT 8", d.quote_ident(key));
+    // A key the server cannot compare (text typed for a number) is no match, and the table facts stay learned.
+    let rows = db.read_text(schema, &sql, false).await.unwrap_or_default();
+    Ok((kt, rows.iter().map(|r| (text_at(r, 0).unwrap_or_default(), text_at(r, 1).unwrap_or_default())).collect()))
+}
+
 impl Worker {
+    /// Rows of the table a foreign key points at, for the key picker of the grid editor. `known` is what an earlier
+    /// lookup learned about the table.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sql_key_search(&self, req: u64, db: Db, schema: String, table: String, key: String, q: String, known: Option<super::KeyTable>) {
+        self.spawn(async move { Msg::SqlKeys { req, res: key_search(&db, &schema, &table, &key, &q, known).await } });
+    }
+
     /// Every table, view and column of `schema`, for autocomplete.
     pub fn sql_schema(&self, conn: u64, db: Db, schema: String) {
         self.spawn(async move {

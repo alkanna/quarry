@@ -323,6 +323,10 @@ pub(crate) const PICK_INDENT: f32 = 18.0;
 pub(crate) const PICK_H: f32 = BUTTON_H + 2.0;
 pub(crate) const PICK_PAD: f32 = 8.0;
 pub(crate) const PICK_GAP: f32 = 6.0;
+// The calendar under a date editor: its inner width, the row of weekday names and one row of days.
+pub(crate) const DATE_PICK_W: f32 = 252.0;
+pub(crate) const DATE_HEAD_H: f32 = 18.0;
+pub(crate) const DATE_DAY_H: f32 = 28.0;
 pub(crate) const PICK_CHEVRON: f32 = 26.0;
 
 /// Also where the macOS traffic lights are centered, so it stays 40.

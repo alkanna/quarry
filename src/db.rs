@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 mod analysis;
 mod code;
-mod dates;
+pub(crate) mod dates;
 pub(crate) use dates::civil_from_days;
 mod errors;
 mod explain;
@@ -256,6 +256,8 @@ pub enum Msg {
     SqlFkRules { req: u64, strict: bool },
     /// Every table, view and column of one database, for SQL autocomplete.
     SqlSchema { conn: u64, database: String, schema: String, res: Res<sql::schema::Schema> },
+    /// The rows a foreign key cell can point at: what was learned about the table, and (key, name) pairs.
+    SqlKeys { req: u64, res: Res<(sql::KeyTable, Vec<(String, String)>)> },
     /// A column's most frequent values with their counts, for SQL autocomplete. None when the table is too big to look in.
     SqlValues { conn: u64, database: String, schema: String, table: String, column: String, prefix: Option<String>, res: Res<Option<Vec<(String, u64)>>> },
     /// Result of the connection form's Test button.

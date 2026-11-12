@@ -249,7 +249,7 @@ pub fn parse_edit(d: Dialect, kind: Kind, text: &str) -> Result<Bson, String> {
         Kind::Time => if time_ok(t.strip_prefix('-').unwrap_or(t), 3, 838) { Ok(Bson::String(t.into())) } else { Err("Use the form HH:MM:SS.".into()) },
         // Bare null is SQL NULL, and "null" is a JSON string, so the JSON literal null is typed in single quotes.
         Kind::Json if t == "'null'" => Ok(Bson::String("null".into())),
-        Kind::Json => serde_json::from_str::<serde_json::Value>(t).map(|_| Bson::String(t.into())).map_err(|e| format!("Not valid JSON: {e}")),
+        Kind::Json => serde_json::from_str::<serde_json::Value>(t).map(|_| Bson::String(t.into())).map_err(|e| json_message(&e)),
         Kind::Binary => match t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
             Some(h) => {
                 if h.len() % 2 != 0 || !h.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -288,6 +288,22 @@ pub fn parse_edit(d: Dialect, kind: Kind, text: &str) -> Result<Bson, String> {
         k if text_like(k) => Ok(Bson::String(quoted_null(t).unwrap_or(text).into())),
         k => Err(format!("{k:?} values cannot be edited as text.")),
     }
+}
+
+/// serde_json's message in the words of the editor: what is wrong and the column, on one short line.
+pub fn json_message(e: &serde_json::Error) -> String {
+    let full = e.to_string();
+    let what = full.split(" at line ").next().unwrap_or(&full);
+    let what = match what {
+        "EOF while parsing an object" => "Unclosed object",
+        "EOF while parsing a list" => "Unclosed array",
+        "EOF while parsing a string" => "Unclosed string",
+        "EOF while parsing a value" => "A value is missing",
+        w => w,
+    };
+    let mut c = what.chars();
+    let what = c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default();
+    if e.line() <= 1 { format!("{what} at column {}", e.column()) } else { format!("{what} at line {} column {}", e.line(), e.column()) }
 }
 
 /// `parse_edit` for a column, refusing NULL when the column is NOT NULL so the error shows before Save.
@@ -577,7 +593,7 @@ mod tests {
             assert!(p(Kind::Time, bad).is_err(), "{bad}");
         }
         assert_eq!(p(Kind::Json, r#"{"a":[1]}"#), Ok(Bson::String(r#"{"a":[1]}"#.into())));
-        assert!(p(Kind::Json, "{a:1}").unwrap_err().starts_with("Not valid JSON"));
+        assert_eq!(p(Kind::Json, "{a:1}").unwrap_err(), "Key must be a string at column 2");
         assert_eq!(p(Kind::Binary, "0xDEAD"), Ok(bytes(&[0xde, 0xad])));
         assert_eq!(p(Kind::Binary, "0x"), Ok(bytes(&[])));
         assert!(p(Kind::Binary, "0xABC").is_err());

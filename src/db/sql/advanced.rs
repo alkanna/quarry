@@ -144,9 +144,16 @@ pub fn offset_text(secs: i32) -> String {
 /// This computer's current offset from UTC in seconds, east positive.
 #[cfg(unix)]
 pub fn local_offset_secs() -> Option<i32> {
+    // SAFETY: time with a null pointer only returns the clock.
+    local_offset_at(unsafe { libc::time(std::ptr::null_mut()) } as i64)
+}
+
+/// This computer's offset at `utc_secs`, which differs from today's on the other side of a daylight saving change.
+#[cfg(unix)]
+pub fn local_offset_at(utc_secs: i64) -> Option<i32> {
     // SAFETY: localtime_r fills the struct we pass and keeps no pointer to it.
     unsafe {
-        let now = libc::time(std::ptr::null_mut());
+        let now = utc_secs as libc::time_t;
         let mut tm: libc::tm = std::mem::zeroed();
         if libc::localtime_r(&now, &mut tm).is_null() {
             return None;
@@ -181,6 +188,12 @@ pub fn local_offset_secs() -> Option<i32> {
 #[cfg(not(any(unix, windows)))]
 pub fn local_offset_secs() -> Option<i32> {
     None
+}
+
+// ponytail: today's offset on Windows, so dates across a daylight saving change are an hour off there; SystemTimeToTzSpecificLocalTime would fix it.
+#[cfg(not(unix))]
+pub fn local_offset_at(_utc_secs: i64) -> Option<i32> {
+    local_offset_secs()
 }
 
 /// Session variables an init command may set. Each is session scoped, leaves the read-only guard and autocommit
@@ -356,6 +369,19 @@ impl Advanced {
     }
 
     /// The zone to send, if any. `system` is this computer's offset in seconds.
+    /// The session's offset in seconds when it is fixed (UTC, System or a Custom offset). None for the server's zone or
+    /// a named one, whose offset depends on rules Quarry does not carry.
+    pub fn offset_secs(&self, system: Option<i32>) -> Option<i32> {
+        let z = self.zone_value(system).ok()??;
+        let sign = match z.as_bytes().first()? {
+            b'+' => 1,
+            b'-' => -1,
+            _ => return None,
+        };
+        let (h, m) = z[1..].split_once(':')?;
+        Some(sign * (h.parse::<i32>().ok()? * 3600 + m.parse::<i32>().ok()? * 60))
+    }
+
     pub fn zone_value(&self, system: Option<i32>) -> Result<Option<String>, String> {
         Ok(match &self.zone {
             Zone::Server => None,

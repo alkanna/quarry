@@ -149,8 +149,9 @@ impl App {
                 }
             }
         }
-        // Plain keys only act when no text field or menu wants them.
-        if ctx.memory(|m| m.focused().is_none()) && !ctx.any_popup_open() {
+        // Plain keys only act when no text field, menu or cell editor wants them. The boolean switch and the calendar
+        // leave no text field focused but still read the arrows and letters.
+        if ctx.memory(|m| m.focused().is_none()) && !ctx.any_popup_open() && !self.sql_cell.as_ref().is_some_and(|e| e.grabs_keys) && !self.inline.as_ref().is_some_and(|i| i.pick.is_some()) {
             let (up, down) = (k(none, Key::ArrowUp), k(none, Key::ArrowDown));
             let (prev, next) = (k(none, Key::PageUp), k(none, Key::PageDown));
             let nav = self.t().filter(|t| matches!(t.view, View::Documents | View::Aggregate)).map(|t| {
@@ -182,6 +183,11 @@ impl App {
         }
         // Esc closes the innermost thing that is open. Dialogs and menus handle their own Esc.
         if ctx.any_popup_open() || !ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+            return;
+        }
+        // The calendar of a date closes before the editor under it.
+        if let Some(i) = &mut self.inline && let Some(o) = i.pick.take() {
+            i.text = o;
             return;
         }
         if self.inline.take().is_some() || self.new_field.take().is_some() {

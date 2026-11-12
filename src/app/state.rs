@@ -908,6 +908,10 @@ pub(super) struct Inline {
     pub(super) text: String,
     pub(super) kind: &'static str,
     pub(super) focus: bool,
+    /// The calendar of a date is open, holding the text from before it opened for Cancel.
+    pub(super) pick: Option<String>,
+    /// Dates are shown and typed in this computer's zone instead of UTC.
+    pub(super) local: bool,
 }
 
 /// The large JSON editor for a whole document (empty path) or one object/array field.
