@@ -450,25 +450,409 @@ const SAGE_PAL: Palette = Palette {
     well: hex(0xfcfcfa),
 };
 
+/// Deep forest green with a mint accent.
+const GROVE_PAL: Palette = Palette {
+    bg: hex(0x111813),
+    panel: hex(0x172019),
+    chrome: hex(0x141c16),
+    raised: hex(0x212b23),
+    hover: hex(0x1d261f),
+    pressed: hex(0x243026),
+    menu_hover: hex(0x2b372d),
+    border: hex(0x2b362d),
+    line: hex(0x212b23),
+    raised_line: hex(0x303c32),
+    hdr: hex(0x172019),
+    text: hex(0xc4d0c6),
+    bright: hex(0xe6efe8),
+    muted: hex(0x869488),
+    faint: hex(0x5f6d62),
+    primary: hex(0x4fd69c),
+    on_primary: hex(0x06170e),
+    sel: hex(0x1c3a2c),
+    sel_hover: hex(0x1f4433),
+    alert: hex(0xff6b6b),
+    success: hex(0x6fd88f),
+    warning: hex(0xe9b949),
+    c_string: hex(0xa3d977),
+    c_number: hex(0xf2a86b),
+    c_true: hex(0x6fd88f),
+    c_false: hex(0xff6b6b),
+    c_date: hex(0x7cc4f0),
+    c_null: hex(0x6f7d72),
+    c_oid: hex(0xd7a0e0),
+    c_obj: hex(0x869488),
+    key: hex(0xc4d0c6),
+    c_link: hex(0x7cc4f0),
+    highlight: hl(0xe9b949, 64),
+    c_keyword: hex(0xb9a6ff),
+    engine_pg: hex(0x6fd3e0),
+    stripe: hex(0x141c16),
+    track: hex(0x33433a),
+    well: hex(0x0d130f),
+};
+
+/// Warm neutral graphite with a teal accent.
+const ASH_PAL: Palette = Palette {
+    bg: hex(0x1c1b1a),
+    panel: hex(0x242322),
+    chrome: hex(0x201f1e),
+    raised: hex(0x2f2d2c),
+    hover: hex(0x2a2928),
+    pressed: hex(0x333130),
+    menu_hover: hex(0x3b3938),
+    border: hex(0x3d3b39),
+    line: hex(0x2f2d2c),
+    raised_line: hex(0x45423f),
+    hdr: hex(0x242322),
+    text: hex(0xcfcac4),
+    bright: hex(0xf0ece7),
+    muted: hex(0x96908a),
+    faint: hex(0x6c6762),
+    primary: hex(0x2ec4b0),
+    on_primary: hex(0x04181a),
+    sel: hex(0x1f3935),
+    sel_hover: hex(0x20423d),
+    alert: hex(0xf2716b),
+    success: hex(0x7cc77f),
+    warning: hex(0xe3ac54),
+    c_string: hex(0xa8c97f),
+    c_number: hex(0xe9a26c),
+    c_true: hex(0x7cc77f),
+    c_false: hex(0xf2716b),
+    c_date: hex(0x86b4e8),
+    c_null: hex(0x85807a),
+    c_oid: hex(0xd49ac2),
+    c_obj: hex(0x96908a),
+    key: hex(0xcfcac4),
+    c_link: hex(0x5fd0c0),
+    highlight: hl(0xe3ac54, 64),
+    c_keyword: hex(0xc9a0e8),
+    engine_pg: hex(0x5fd0c0),
+    stripe: hex(0x201f1e),
+    track: hex(0x4a4744),
+    well: hex(0x171615),
+};
+
+/// Blush white with a raspberry accent.
+const BLOSSOM_PAL: Palette = Palette {
+    bg: hex(0xfdf8f8),
+    panel: hex(0xf8f0f1),
+    chrome: hex(0xf4eaec),
+    raised: hex(0xffffff),
+    hover: hex(0xf0e3e6),
+    pressed: hex(0xe8d8dc),
+    menu_hover: hex(0xf6ecee),
+    border: hex(0xe3d2d6),
+    line: hex(0xeee1e4),
+    raised_line: hex(0xeee1e4),
+    hdr: hex(0xf6eef0),
+    text: hex(0x3d3236),
+    bright: hex(0x1c1316),
+    muted: hex(0x6f6166),
+    faint: hex(0xa6969b),
+    primary: hex(0xc2255c),
+    on_primary: hex(0xffffff),
+    sel: hex(0xf8e7ec),
+    sel_hover: hex(0xf6dfe5),
+    alert: hex(0xc92a2a),
+    success: hex(0x2b8a3e),
+    warning: hex(0xa86a00),
+    c_string: hex(0x2f7d32),
+    c_number: hex(0x1d5fa8),
+    c_true: hex(0x267a37),
+    c_false: hex(0xc92a2a),
+    c_date: hex(0x0b7285),
+    c_null: hex(0x9a8c91),
+    c_oid: hex(0x9a5b13),
+    c_obj: hex(0x6f6166),
+    key: hex(0x3d3236),
+    c_link: hex(0xa61e4d),
+    highlight: hl(0xa86a00, 51),
+    c_keyword: hex(0x7b3fb5),
+    engine_pg: hex(0x0b7285),
+    stripe: hex(0xfbf4f5),
+    track: hex(0xdccbcf),
+    well: hex(0xffffff),
+};
+
+/// Lavender mist with a violet accent.
+const LILAC_PAL: Palette = Palette {
+    bg: hex(0xfaf9fd),
+    panel: hex(0xf3f1fa),
+    chrome: hex(0xeeebf7),
+    raised: hex(0xffffff),
+    hover: hex(0xe9e5f4),
+    pressed: hex(0xdfd9ee),
+    menu_hover: hex(0xf1eef9),
+    border: hex(0xd9d3ea),
+    line: hex(0xe6e2f2),
+    raised_line: hex(0xe6e2f2),
+    hdr: hex(0xf2f0f9),
+    text: hex(0x33304a),
+    bright: hex(0x15121f),
+    muted: hex(0x645f7d),
+    faint: hex(0x9d98b3),
+    primary: hex(0x6741d9),
+    on_primary: hex(0xffffff),
+    sel: hex(0xeeeafa),
+    sel_hover: hex(0xe8e3f9),
+    alert: hex(0xc92a3a),
+    success: hex(0x2b8a3e),
+    warning: hex(0xa86a00),
+    c_string: hex(0x267a37),
+    c_number: hex(0x0b6e99),
+    c_true: hex(0x267a37),
+    c_false: hex(0xc92a3a),
+    c_date: hex(0x087f5b),
+    c_null: hex(0x918ca6),
+    c_oid: hex(0xa35400),
+    c_obj: hex(0x645f7d),
+    key: hex(0x33304a),
+    c_link: hex(0x5f3dc4),
+    highlight: hl(0xa86a00, 51),
+    c_keyword: hex(0x9c36b5),
+    engine_pg: hex(0x0b7285),
+    stripe: hex(0xf5f3fb),
+    track: hex(0xcdc6e0),
+    well: hex(0xffffff),
+};
+
+/// High contrast light: pure white, black text and outlines that stand out. Carbon's daytime twin.
+const CHALK_PAL: Palette = Palette {
+    bg: hex(0xffffff),
+    panel: hex(0xf5f5f5),
+    chrome: hex(0xefefef),
+    raised: hex(0xffffff),
+    hover: hex(0xe8e8e8),
+    pressed: hex(0xdcdcdc),
+    menu_hover: hex(0xececec),
+    border: hex(0x767676),
+    line: hex(0xd0d0d0),
+    raised_line: hex(0xbdbdbd),
+    hdr: hex(0xf0f0f0),
+    text: hex(0x111111),
+    bright: hex(0x000000),
+    muted: hex(0x3d3d3d),
+    faint: hex(0x5c5c5c),
+    primary: hex(0x0047b3),
+    on_primary: hex(0xffffff),
+    sel: hex(0xd9e3f4),
+    sel_hover: hex(0xccdaf0),
+    alert: hex(0xb00020),
+    success: hex(0x00701a),
+    warning: hex(0x8a5300),
+    c_string: hex(0x00701a),
+    c_number: hex(0x005f73),
+    c_true: hex(0x00701a),
+    c_false: hex(0xb00020),
+    c_date: hex(0x7a1fa2),
+    c_null: hex(0x555555),
+    c_oid: hex(0x8a3b00),
+    c_obj: hex(0x3d3d3d),
+    key: hex(0x111111),
+    c_link: hex(0x0047b3),
+    highlight: hl(0xffc400, 90),
+    c_keyword: hex(0xa3005c),
+    engine_pg: hex(0x005f73),
+    stripe: hex(0xf6f6f6),
+    track: hex(0x8f8f8f),
+    well: hex(0xffffff),
+};
+
+/// Catppuccin flavors (MIT, catppuccin.com) mapped onto Palette: base, mantle and crust are the surfaces, mauve is the accent. Hover and raised fills are stepped apart where the palette has no shade between them.
+const MOCHA_PAL: Palette = Palette {
+    bg: hex(0x1e1e2e),
+    panel: hex(0x181825),
+    chrome: hex(0x11111b),
+    raised: hex(0x313244),
+    hover: hex(0x292a3b),
+    pressed: hex(0x45475a),
+    menu_hover: hex(0x45475a),
+    border: hex(0x45475a),
+    line: hex(0x313244),
+    raised_line: hex(0x45475a),
+    hdr: hex(0x181825),
+    text: hex(0xcdd6f4),
+    bright: hex(0xe1e6f8),
+    muted: hex(0xa6adc8),
+    faint: hex(0x6c7086),
+    primary: hex(0xcba6f7),
+    on_primary: hex(0x11111b),
+    sel: hex(0x413956),
+    sel_hover: hex(0x4b4162),
+    alert: hex(0xf38ba8),
+    success: hex(0xa6e3a1),
+    warning: hex(0xf9e2af),
+    c_string: hex(0xa6e3a1),
+    c_number: hex(0xfab387),
+    c_true: hex(0xa6e3a1),
+    c_false: hex(0xf38ba8),
+    c_date: hex(0x74c7ec),
+    c_null: hex(0x7f849c),
+    c_oid: hex(0xf5c2e7),
+    c_obj: hex(0x9399b2),
+    key: hex(0xcdd6f4),
+    c_link: hex(0x89b4fa),
+    highlight: hl(0xf9e2af, 64),
+    c_keyword: hex(0xcba6f7),
+    engine_pg: hex(0x94e2d5),
+    stripe: hex(0x1b1b2a),
+    track: hex(0x585b70),
+    well: hex(0x11111b),
+};
+
+const MACCHIATO_PAL: Palette = Palette {
+    bg: hex(0x24273a),
+    panel: hex(0x1e2030),
+    chrome: hex(0x181926),
+    raised: hex(0x363a4f),
+    hover: hex(0x2f3247),
+    pressed: hex(0x494d64),
+    menu_hover: hex(0x494d64),
+    border: hex(0x494d64),
+    line: hex(0x363a4f),
+    raised_line: hex(0x494d64),
+    hdr: hex(0x1e2030),
+    text: hex(0xcad3f5),
+    bright: hex(0xdfe5f9),
+    muted: hex(0xa5adcb),
+    faint: hex(0x6e738d),
+    primary: hex(0xc6a0f6),
+    on_primary: hex(0x181926),
+    sel: hex(0x443f60),
+    sel_hover: hex(0x4e466b),
+    alert: hex(0xed8796),
+    success: hex(0xa6da95),
+    warning: hex(0xeed49f),
+    c_string: hex(0xa6da95),
+    c_number: hex(0xf5a97f),
+    c_true: hex(0xa6da95),
+    c_false: hex(0xed8796),
+    c_date: hex(0x7dc4e4),
+    c_null: hex(0x8087a2),
+    c_oid: hex(0xf5bde6),
+    c_obj: hex(0x939ab7),
+    key: hex(0xcad3f5),
+    c_link: hex(0x8aadf4),
+    highlight: hl(0xeed49f, 64),
+    c_keyword: hex(0xc6a0f6),
+    engine_pg: hex(0x8bd5ca),
+    stripe: hex(0x212435),
+    track: hex(0x5b6078),
+    well: hex(0x181926),
+};
+
+const FRAPPE_PAL: Palette = Palette {
+    bg: hex(0x303446),
+    panel: hex(0x292c3c),
+    chrome: hex(0x232634),
+    raised: hex(0x414559),
+    hover: hex(0x3a3e51),
+    pressed: hex(0x51576d),
+    menu_hover: hex(0x51576d),
+    border: hex(0x51576d),
+    line: hex(0x414559),
+    raised_line: hex(0x51576d),
+    hdr: hex(0x292c3c),
+    text: hex(0xc6d0f5),
+    bright: hex(0xdde3f9),
+    muted: hex(0xa5adce),
+    faint: hex(0x737994),
+    primary: hex(0xca9ee6),
+    on_primary: hex(0x232634),
+    sel: hex(0x4f4966),
+    sel_hover: hex(0x585070),
+    alert: hex(0xe78284),
+    success: hex(0xa6d189),
+    warning: hex(0xe5c890),
+    c_string: hex(0xa6d189),
+    c_number: hex(0xef9f76),
+    c_true: hex(0xa6d189),
+    c_false: hex(0xe78284),
+    c_date: hex(0x85c1dc),
+    c_null: hex(0x838ba7),
+    c_oid: hex(0xf4b8e4),
+    c_obj: hex(0x949cbb),
+    key: hex(0xc6d0f5),
+    c_link: hex(0x8caaee),
+    highlight: hl(0xe5c890, 64),
+    c_keyword: hex(0xca9ee6),
+    engine_pg: hex(0x81c8be),
+    stripe: hex(0x2c3041),
+    track: hex(0x626880),
+    well: hex(0x232634),
+};
+
+/// Catppuccin Latte keeps its own pastel data colors, which sit under 4.5:1 on its base. Raised surfaces and wells are lifted toward white so dialogs stand off the page.
+const LATTE_PAL: Palette = Palette {
+    bg: hex(0xeff1f5),
+    panel: hex(0xe6e9ef),
+    chrome: hex(0xdce0e8),
+    raised: hex(0xf9f9fb),
+    hover: hex(0xccd0da),
+    pressed: hex(0xbcc0cc),
+    menu_hover: hex(0xd9dce4),
+    border: hex(0xbcc0cc),
+    line: hex(0xccd0da),
+    raised_line: hex(0xccd0da),
+    hdr: hex(0xe6e9ef),
+    text: hex(0x4c4f69),
+    bright: hex(0x2e2f3f),
+    muted: hex(0x6c6f85),
+    faint: hex(0x9ca0b0),
+    primary: hex(0x8839ef),
+    on_primary: hex(0xeff1f5),
+    sel: hex(0xe3dbf4),
+    sel_hover: hex(0xdcd0f4),
+    alert: hex(0xd20f39),
+    success: hex(0x40a02b),
+    warning: hex(0xdf8e1d),
+    c_string: hex(0x40a02b),
+    c_number: hex(0xfe640b),
+    c_true: hex(0x40a02b),
+    c_false: hex(0xd20f39),
+    c_date: hex(0x209fb5),
+    c_null: hex(0x8c8fa1),
+    c_oid: hex(0xea76cb),
+    c_obj: hex(0x7c7f93),
+    key: hex(0x4c4f69),
+    c_link: hex(0x1e66f5),
+    highlight: hl(0xdf8e1d, 51),
+    c_keyword: hex(0x8839ef),
+    engine_pg: hex(0x179299),
+    stripe: hex(0xeaedf2),
+    track: hex(0xacb0be),
+    well: hex(0xf9f9fb),
+};
 pub(crate) struct Theme {
     pub(crate) name: &'static str,
-    pub(crate) pal: Palette,
+    pal: Palette,
     /// The Soft background. Workbench and Paper have hand-tuned ones; the others derive theirs.
     soft: Option<Palette>,
 }
 
 /// Which list a theme is in is its kind. The first of each is the default.
-pub(crate) static DARK_THEMES: [Theme; 5] = [
+pub(crate) static DARK_THEMES: [Theme; 10] = [
     Theme { name: "Workbench", pal: DARK_PAL, soft: Some(DARK_SOFT_PAL) },
     Theme { name: "Midnight", pal: MIDNIGHT_PAL, soft: None },
     Theme { name: "Ember", pal: EMBER_PAL, soft: None },
     Theme { name: "Dusk", pal: DUSK_PAL, soft: None },
     Theme { name: "Carbon", pal: CARBON_PAL, soft: None },
+    Theme { name: "Grove", pal: GROVE_PAL, soft: None },
+    Theme { name: "Ash", pal: ASH_PAL, soft: None },
+    Theme { name: "Mocha", pal: MOCHA_PAL, soft: None },
+    Theme { name: "Macchiato", pal: MACCHIATO_PAL, soft: None },
+    Theme { name: "Frappé", pal: FRAPPE_PAL, soft: None },
 ];
-pub(crate) static LIGHT_THEMES: [Theme; 3] = [
+pub(crate) static LIGHT_THEMES: [Theme; 7] = [
     Theme { name: "Paper", pal: LIGHT_PAL, soft: Some(LIGHT_SOFT_PAL) },
     Theme { name: "Glacier", pal: GLACIER_PAL, soft: None },
     Theme { name: "Sage", pal: SAGE_PAL, soft: None },
+    Theme { name: "Blossom", pal: BLOSSOM_PAL, soft: None },
+    Theme { name: "Lilac", pal: LILAC_PAL, soft: None },
+    Theme { name: "Chalk", pal: CHALK_PAL, soft: None },
+    Theme { name: "Latte", pal: LATTE_PAL, soft: None },
 ];
 
 pub(crate) fn themes(light: bool) -> &'static [Theme] {
@@ -507,11 +891,81 @@ fn soften(p: &Palette) -> Palette {
     }
 }
 
-/// Soft palettes of the dark and the light themes, in list order.
-static SOFT_PALS: std::sync::LazyLock<[Vec<Palette>; 2]> = std::sync::LazyLock::new(|| [false, true].map(|l| themes(l).iter().map(|t| t.soft.unwrap_or_else(|| soften(&t.pal))).collect()));
+/// Every palette a choice in Settings can make, for the dark and the light themes: each theme, Standard then Soft,
+/// with its own accent then each of ACCENTS. Built once so `pal()` stays a lock-free lookup on the drawing path.
+static PALS: std::sync::LazyLock<[Vec<Palette>; 2]> = std::sync::LazyLock::new(|| {
+    [false, true].map(|l| {
+        let mut v = vec![DARK_PAL; pal_index(themes(l).len(), false, 0)];
+        for (i, t) in themes(l).iter().enumerate() {
+            for (soft, p) in [(false, t.pal), (true, t.soft.unwrap_or_else(|| soften(&t.pal)))] {
+                for a in 0..=ACCENTS.len() {
+                    v[pal_index(i, soft, a)] = with_accent(&p, a, l);
+                }
+            }
+        }
+        v
+    })
+});
 
-fn palette_of(light: bool, i: usize, soft: bool) -> &'static Palette {
-    if soft { &SOFT_PALS[light as usize][i] } else { &themes(light)[i].pal }
+/// Where theme `i` with Soft and accent `accent` (0 for the theme's own) sits in its kind's PALS.
+fn pal_index(i: usize, soft: bool, accent: usize) -> usize {
+    (i * 2 + soft as usize) * (ACCENTS.len() + 1) + accent
+}
+
+pub(crate) fn palette_of(light: bool, i: usize, soft: bool, accent: usize) -> &'static Palette {
+    &PALS[light as usize][pal_index(i, soft, accent)]
+}
+
+/// WCAG contrast ratio of two colors, 1 to 21.
+fn contrast(a: Color32, b: Color32) -> f32 {
+    let l = |c: Color32| {
+        let c = egui::Rgba::from(c);
+        0.2126 * c.r() + 0.7152 * c.g() + 0.0722 * c.b() + 0.05
+    };
+    let (x, y) = (l(a), l(b));
+    x.max(y) / x.min(y)
+}
+
+/// Accents that replace each theme's own: name, the shade on dark themes, the shade on light ones. The light shades
+/// are deeper so the accent still reads on white.
+pub(crate) const ACCENTS: [(&str, u32, u32); 6] = [
+    ("Blue", 0x3b82f6, 0x1d5fd1),
+    ("Cyan", 0x22c3ee, 0x0b7ea0),
+    ("Green", 0x22b573, 0x1e7f4a),
+    ("Orange", 0xf97316, 0xc2410c),
+    ("Pink", 0xf472b6, 0xc0267a),
+    ("Violet", 0xa78bfa, 0x6d3fd9),
+];
+
+/// 0 keeps the theme's accent; i picks ACCENTS[i - 1]. An unknown name keeps the theme's.
+pub(crate) fn accent_index(name: &str) -> usize {
+    ACCENTS.iter().position(|a| a.0 == name).map_or(0, |i| i + 1)
+}
+
+/// The inverse of `accent_index`: "Theme" for the theme's own, which `accent_index` reads back as 0.
+pub(crate) fn accent_name(i: usize) -> &'static str {
+    if i == 0 { "Theme" } else { ACCENTS[i - 1].0 }
+}
+
+/// `p` with accent `i` in place of its own. The accent also draws focus rings and accent text, so it is moved away
+/// from bg until it reaches 4.5:1 there (Blue on Frappé starts at 3.4:1). The selection is the accent over bg, and
+/// text on the accent is white only where white reaches 4.5:1, dark otherwise.
+fn with_accent(p: &Palette, i: usize, light: bool) -> Palette {
+    if i == 0 {
+        return *p;
+    }
+    let (_, dark_shade, light_shade) = ACCENTS[i - 1];
+    let mut a = hex(if light { light_shade } else { dark_shade });
+    let away = if light { Color32::BLACK } else { Color32::WHITE };
+    for _ in 0..20 {
+        if contrast(a, p.bg) >= 4.5 {
+            break;
+        }
+        a = a.lerp_to_gamma(away, 0.05);
+    }
+    let (t0, t1) = if light { (0.1, 0.15) } else { (0.2, 0.26) };
+    let on = if contrast(a, Color32::WHITE) >= 4.5 { Color32::WHITE } else { hex(0x0b0d12) };
+    Palette { primary: a, on_primary: on, sel: p.bg.lerp_to_gamma(a, t0), sel_hover: p.bg.lerp_to_gamma(a, t1), ..*p }
 }
 
 /// Set at the start of each frame from egui's resolved theme.
@@ -531,19 +985,20 @@ pub(crate) struct Look {
     pub(crate) ui_font: usize,
     pub(crate) data_font: usize,
     pub(crate) soft: bool,
+    /// 0 for each theme's own, else an index into ACCENTS plus one.
+    pub(crate) accent: usize,
     pub(crate) reading_line: bool,
     pub(crate) group_digits: bool,
 }
 
 impl Default for Look {
     fn default() -> Self {
-        Self { scale: 1.0, dark_theme: 0, light_theme: 0, ui_font: 0, data_font: 0, soft: false, reading_line: false, group_digits: false }
+        Self { scale: 1.0, dark_theme: 0, light_theme: 0, ui_font: 0, data_font: 0, soft: false, accent: 0, reading_line: false, group_digits: false }
     }
 }
 
-static SOFT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// The chosen dark and light theme, indexed by `is_light()`.
-static THEME: [std::sync::atomic::AtomicUsize; 2] = [std::sync::atomic::AtomicUsize::new(0), std::sync::atomic::AtomicUsize::new(0)];
+/// Where the dark and the light palette in use sit in PALS, indexed by `is_light()`.
+static CUR: [std::sync::atomic::AtomicUsize; 2] = [std::sync::atomic::AtomicUsize::new(0), std::sync::atomic::AtomicUsize::new(0)];
 static READING_LINE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static GROUP_DIGITS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static LOOK_GEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -571,9 +1026,8 @@ pub(crate) fn window_shadow() -> egui::Shadow {
 }
 
 pub(crate) fn pal() -> &'static Palette {
-    use std::sync::atomic::Ordering::Relaxed;
     let light = is_light();
-    palette_of(light, THEME[light as usize].load(Relaxed), SOFT.load(Relaxed))
+    &PALS[light as usize][CUR[light as usize].load(std::sync::atomic::Ordering::Relaxed)]
 }
 
 macro_rules! colors {
@@ -720,14 +1174,11 @@ pub(crate) const EDITOR_W: f32 = 230.0;
 /// Visuals for both themes; egui picks one from the system or the Appearance setting.
 pub(crate) fn style(ctx: &egui::Context, look: Look) {
     use std::sync::atomic::Ordering::Relaxed;
-    SOFT.store(look.soft, Relaxed);
-    THEME[0].store(look.dark_theme, Relaxed);
-    THEME[1].store(look.light_theme, Relaxed);
     READING_LINE.store(look.reading_line, Relaxed);
     GROUP_DIGITS.store(look.group_digits, Relaxed);
-    let (dark, light) = (palette_of(false, look.dark_theme, look.soft), palette_of(true, look.light_theme, look.soft));
-    for (theme, p) in [(egui::Theme::Dark, dark), (egui::Theme::Light, light)] {
-        ctx.set_visuals_of(theme, visuals(theme, p));
+    for (l, i, theme) in [(false, look.dark_theme, egui::Theme::Dark), (true, look.light_theme, egui::Theme::Light)] {
+        CUR[l as usize].store(pal_index(i, look.soft, look.accent), Relaxed);
+        ctx.set_visuals_of(theme, visuals(theme, palette_of(l, i, look.soft, look.accent)));
     }
     // set_fonts compares whole font files, so it runs only when the font choice changes. The choice is kept
     // in the context, not in a static, because fonts belong to a context and tests build many.
@@ -957,7 +1408,34 @@ pub(crate) const THEME_CARD_MAX_W: f32 = 110.0;
 pub(crate) const THEME_THUMB_H: f32 = 58.0;
 pub(crate) const THEME_LABEL_H: f32 = 24.0;
 pub(crate) const THEME_BADGE_R: f32 = 7.0;
+/// Settings > Appearance > Accent: a swatch and the square cell that holds it with its ring.
+pub(crate) const ACCENT_DOT_R: f32 = 9.0;
+pub(crate) const ACCENT_CELL: f32 = 30.0;
 
 pub(crate) fn mono(c: Color32) -> TextFormat {
     TextFormat { font_id: FontId::monospace(MONO_PX), color: c, ..Default::default() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accent_overrides_stay_readable_in_every_theme() {
+        for light in [false, true] {
+            for (i, t) in themes(light).iter().enumerate() {
+                for soft in [false, true] {
+                    // Workbench and Paper keep their original white-on-accent buttons, at 4.3:1 and 3.6:1.
+                    for a in (i == 0) as usize..=ACCENTS.len() {
+                        let p = palette_of(light, i, soft, a);
+                        assert!(contrast(p.primary, p.on_primary) >= 4.5, "text on {} with accent {a}", t.name);
+                        if a > 0 {
+                            assert!(contrast(p.primary, p.bg) >= 4.5, "accent {a} on {}", t.name);
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!((accent_index("Pink"), accent_index(""), accent_index("Teal")), (5, 0, 0));
+    }
 }

@@ -163,6 +163,16 @@ pub(crate) fn field_frame(ui: &egui::Ui, rect: egui::Rect, resp: &egui::Response
     ui.painter().rect(rect, R_MD, fill, Stroke::new(1.0, edge), egui::StrokeKind::Inside);
 }
 
+/// The ring around a pickable swatch or card: `on_color` when chosen, else a muted ring that thickens when pressed.
+pub(crate) fn pick_ring(on: bool, r: &egui::Response, on_color: Color32) -> Option<Stroke> {
+    match (on, state_of(r)) {
+        (true, _) => Some(Stroke::new(2.0, on_color)),
+        (false, 2) => Some(Stroke::new(2.0, MUTED())),
+        (false, 1) => Some(Stroke::new(1.0, MUTED())),
+        _ => None,
+    }
+}
+
 pub(crate) fn state_of(r: &egui::Response) -> usize {
     if r.is_pointer_button_down_on() {
         2

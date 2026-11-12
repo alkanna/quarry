@@ -168,13 +168,19 @@ impl App {
                             ui.label(medium(RichText::new(if light { "Light theme" } else { "Dark theme" }).size(TXT_TITLE).color(BRIGHT())));
                             ui.label(RichText::new(note).size(TXT_SMALL).color(FAINT()));
                         });
-                        if let Some(i) = theme_cards(ui, light, if light { look.light_theme } else { look.dark_theme }) {
+                        if let Some(i) = theme_cards(ui, light, &look) {
                             *(if light { &mut self.prefs.light_theme } else { &mut self.prefs.dark_theme }) = themes(light)[i].name.into();
                         }
                     }
                     ui.separator();
                     setting_row(ui, "Background", "Soft lowers the contrast between text and background, for less glare.", |ui| {
                         segmented(ui, &mut self.prefs.soft, &[(false, "Standard"), (true, "Soft")]);
+                    });
+                    ui.separator();
+                    setting_row(ui, "Accent", "Each theme has its own. Override it for every theme.", |ui| {
+                        if let Some(i) = accent_swatches(ui, &look) {
+                            self.prefs.accent = accent_name(i).into();
+                        }
                     });
                 });
                 settings_section(ui, "TEXT", |ui| {
@@ -392,7 +398,8 @@ fn font_combo(ui: &mut egui::Ui, id: &str, list: &[(&str, &[u8])], cur: usize) -
 }
 
 /// One card per theme of the kind, each a miniature window in that theme's own colors. Returns the index clicked.
-fn theme_cards(ui: &mut egui::Ui, light: bool, sel: usize) -> Option<usize> {
+fn theme_cards(ui: &mut egui::Ui, light: bool, look: &Look) -> Option<usize> {
+    let sel = if light { look.light_theme } else { look.dark_theme };
     let gap = PICK_GAP + 4.0;
     // Five to a row when they fit; on a narrow pane they keep their minimum width and wrap.
     let w = ((ui.available_width() - 4.0 * gap) / 5.0).clamp(THEME_CARD_MIN_W, THEME_CARD_MAX_W);
@@ -410,17 +417,12 @@ fn theme_cards(ui: &mut egui::Ui, light: bool, sel: usize) -> Option<usize> {
             // Inset so the selection ring fits inside the card.
             let th = egui::Rect::from_min_size(rect.min + egui::vec2(3.0, 3.0), egui::vec2(w - 6.0, THEME_THUMB_H - 6.0));
             let ring = th.expand(3.0);
-            let edge = match (on, state_of(&r)) {
-                (true, _) => Some(Stroke::new(2.0, PRIMARY())),
-                (false, 2) => Some(Stroke::new(2.0, MUTED())),
-                (false, 1) => Some(Stroke::new(1.0, MUTED())),
-                _ => None,
-            };
-            if let Some(s) = edge {
+            if let Some(s) = pick_ring(on, &r, PRIMARY()) {
                 p.rect_stroke(ring, R_MD + 3, s, egui::StrokeKind::Inside);
             }
             focus_ring(ui, &r, ring, (R_MD + 3) as f32);
-            paint_thumb(p, th, &t.pal);
+            // With Soft and the accent override, so a card shows what picking it gives.
+            paint_thumb(p, th, palette_of(light, i, look.soft, look.accent));
             if on {
                 let c = egui::pos2(th.right() - 2.0, th.top() + 2.0);
                 p.circle_filled(c, THEME_BADGE_R, PRIMARY());
@@ -428,6 +430,42 @@ fn theme_cards(ui: &mut egui::Ui, light: bool, sel: usize) -> Option<usize> {
             }
             let g = p.layout_job(egui::text::LayoutJob::single_section(t.name.to_string(), ui_fmt(TXT_SMALL, if on { BRIGHT() } else { TEXT() }, if on { W_MEDIUM } else { 400.0 }, 0.0)));
             p.galley(egui::pos2(th.left(), rect.bottom() - g.size().y - 2.0), g, TEXT());
+        }
+    });
+    picked
+}
+
+/// The theme's own accent, captioned "Theme", then each of ACCENTS as this theme draws it. Returns the index clicked.
+fn accent_swatches(ui: &mut egui::Ui, look: &Look) -> Option<usize> {
+    let light = is_light();
+    let theme = if light { look.light_theme } else { look.dark_theme };
+    let mut picked = None;
+    // A left-to-right box inside the right-to-left control slot, so Tab moves through the swatches in reading order.
+    let size = egui::vec2(ACCENT_CELL * (ACCENTS.len() + 1) as f32, ACCENT_CELL + TXT_CAPTION + 4.0);
+    ui.allocate_ui_with_layout(size, egui::Layout::left_to_right(egui::Align::Min), |ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        for i in 0..=ACCENTS.len() {
+            let (rect, r) = ui.allocate_exact_size(egui::vec2(ACCENT_CELL, size.y), Sense::click());
+            let on = i == look.accent;
+            let name = accent_name(i);
+            r.widget_info(|| egui::WidgetInfo::selected(egui::Role::RadioButton, true, on, name));
+            let r = r.on_hover_text(if i == 0 { "This theme's own accent" } else { name });
+            if r.clicked() && !on {
+                picked = Some(i);
+            }
+            // As this theme draws it, which can be a shade lighter or darker than the one listed.
+            let color = palette_of(light, theme, look.soft, i).primary;
+            let c = egui::pos2(rect.center().x, rect.top() + ACCENT_CELL / 2.0);
+            let p = ui.painter();
+            p.circle_filled(c, ACCENT_DOT_R, color);
+            if let Some(s) = pick_ring(on, &r, color) {
+                p.circle_stroke(c, ACCENT_DOT_R + 3.0, s);
+            }
+            focus_ring(ui, &r, egui::Rect::from_center_size(c, egui::Vec2::splat(2.0 * ACCENT_DOT_R + 6.0)), ACCENT_DOT_R + 3.0);
+            if i == 0 {
+                // Left-aligned, so a wide caption runs on under the next swatch, which has none.
+                p.text(egui::pos2(rect.left() + 2.0, rect.bottom()), egui::Align2::LEFT_BOTTOM, name, FontId::proportional(TXT_CAPTION), FAINT());
+            }
         }
     });
     picked

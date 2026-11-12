@@ -467,6 +467,9 @@ impl App {
                 app.prefs.appearance = if light { Appearance::Light } else { Appearance::Dark };
                 app.prefs.appearance.apply(&cc.egui_ctx);
             }
+            if let Ok(a) = std::env::var("QUARRY_TEST_ACCENT") {
+                app.prefs.accent = a;
+            }
             if let Ok(f) = std::env::var("QUARRY_TEST_UI_FONT") {
                 app.prefs.ui_font = f;
             }
