@@ -3,8 +3,8 @@
 //! ever a setting name or SQL: a value is bound to `set_config` on a direct connection and written as a quoted literal
 //! in the SET LOCAL a pooler needs, and a value that holds a backslash or a control character is refused.
 
-use super::advanced::{Advanced, Zone};
-use super::Dialect;
+use crate::db::sql::advanced::{Advanced, Zone};
+use crate::db::sql::Dialect;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Group {
@@ -135,7 +135,7 @@ pub fn def(name: &str) -> Option<&'static Def> {
     ALLOWED.iter().find(|d| d.name.eq_ignore_ascii_case(name.trim()))
 }
 
-pub(super) fn kept_reason(name: &str) -> Option<&'static str> {
+pub(in crate::db::sql) fn kept_reason(name: &str) -> Option<&'static str> {
     KEPT.iter().find(|(n, _)| n.eq_ignore_ascii_case(name.trim())).map(|(_, r)| *r)
 }
 
@@ -241,10 +241,10 @@ pub fn check_schema(s: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn check_connection(a: &Advanced) -> Result<(), String> {
+pub(in crate::db::sql) fn check_connection(a: &Advanced) -> Result<(), String> {
     for (name, v) in [("Connect", a.connect_secs), ("Idle", a.idle_secs)] {
-        if v.is_some_and(|v| v == 0 || v > super::advanced::TIMEOUT_MAX) {
-            return Err(format!("{name} timeout: use 1 to {} seconds, or leave it empty", super::advanced::TIMEOUT_MAX));
+        if v.is_some_and(|v| v == 0 || v > crate::db::sql::advanced::TIMEOUT_MAX) {
+            return Err(format!("{name} timeout: use 1 to {} seconds, or leave it empty", crate::db::sql::advanced::TIMEOUT_MAX));
         }
     }
     Ok(())
@@ -252,11 +252,11 @@ pub(super) fn check_connection(a: &Advanced) -> Result<(), String> {
 
 /// A value as a SQL literal that reads the same whatever standard_conforming_strings says.
 pub fn literal(v: &str) -> String {
-    super::value::pg_lit(v)
+    crate::db::sql::value::pg_lit(v)
 }
 
 /// The search_path value as the server reads it: each schema a quoted identifier.
-pub(super) fn path_value(schemas: &[String]) -> String {
+pub(in crate::db::sql) fn path_value(schemas: &[String]) -> String {
     schemas.iter().map(|s| Dialect::Postgres.quote_ident(s)).collect::<Vec<_>>().join(", ")
 }
 

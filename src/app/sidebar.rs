@@ -507,7 +507,7 @@ impl App {
                         if pg {
                             // PostgreSQL's items stay enabled on a locked connection and ask to unlock, like the structure editor does.
                             let own = c.sql.as_ref().and_then(|s| s.opts.database()) == Some(db_name.as_str());
-                            let (sys_db, sys_schema) = (db::sql::create_pg::system_db(db_name), db::sql::create_pg::system_schema(picked));
+                            let (sys_db, sys_schema) = (db::sql::pg::create::system_db(db_name), db::sql::pg::create::system_schema(picked));
                             ui.separator();
                             if ui.button("New schema…").clicked() {
                                 side.push(SideAct::NewSchema(db_name.clone()));
@@ -673,7 +673,7 @@ impl App {
                                     side.push(SideAct::SqlDump(db_name.clone(), Some(coll.clone())));
                                 }
                                 if pg {
-                                    let system = db::sql::create_pg::system_schema(picked);
+                                    let system = db::sql::pg::create::system_schema(picked);
                                     ui.separator();
                                     if ui.add_enabled_ui(!system, |ui| danger_item(ui, if is_view { "Drop view…" } else { "Drop table…" })).inner.on_disabled_hover_text("Belongs to the server").clicked() {
                                         side.push(SideAct::SqlDrop(db_name.clone(), coll.clone(), if is_view { DropKind::View } else { DropKind::Table }));

@@ -3,11 +3,11 @@
 //! Quarry's own session and in a Query run, the search_path order, refusals on Test and on connect, the read-only guard
 //! with every setting applied, and that nothing reaches another client of the pooler.
 
-use super::advanced::{Advanced, Zone};
-use super::exec::Cells;
-use super::run::RunHandle;
-use super::testing::{LivePg, PGBOUNCER_ENV, PG_ENVS};
-use super::{Db, ResultSet};
+use crate::db::sql::advanced::{Advanced, Zone};
+use crate::db::sql::exec::Cells;
+use crate::db::sql::run::RunHandle;
+use crate::db::sql::testing::{LivePg, PGBOUNCER_ENV, PG_ENVS};
+use crate::db::sql::{Db, ResultSet};
 use crate::db::{Msg, Net};
 use mongodb::bson::Bson;
 use sqlx::{Connection, Executor};
@@ -78,7 +78,7 @@ fn connect_error(uri: &str, adv: &Advanced) -> String {
     }
 }
 
-fn test_answer(uri: &str, adv: &Advanced) -> (Result<String, String>, super::TestInfo) {
+fn test_answer(uri: &str, adv: &Advanced) -> (Result<String, String>, crate::db::sql::TestInfo) {
     let (tx, rx) = std::sync::mpsc::channel();
     let w = crate::db::Worker::new(tx, eframe::egui::Context::default());
     w.sql_test_with(5, uri.to_string(), Duration::from_secs(30), Net::default(), adv.clone());
@@ -89,7 +89,7 @@ fn test_answer(uri: &str, adv: &Advanced) -> (Result<String, String>, super::Tes
 /// A setting as Quarry's own read path sees it: a read in the session or, behind a pooler, in a transaction with the locals.
 fn show(l: &LivePg, db: &Db, name: &str) -> String {
     let rows = l.w.rt.block_on(db.read_text("", &format!("SELECT current_setting('{name}')"), false)).unwrap_or_else(|x| panic!("{name}: {x}"));
-    super::worker::text_at(&rows[0], 0).unwrap_or_default()
+    crate::db::sql::worker::text_at(&rows[0], 0).unwrap_or_default()
 }
 
 fn go(l: &LivePg, db: &Db, schema: &str, text: &str, read_only: bool) -> Vec<ResultSet> {
@@ -279,17 +279,17 @@ fn the_readback_still_refuses_a_session_that_is_not_read_only() {
             return;
         }
         let l = open(uri, &Advanced::default(), false);
-        let sess = super::pg_advanced::PgSession::new(&all_settings(), Some("Europe/Paris".into())).unwrap();
+        let sess = crate::db::sql::pg::advanced::PgSession::new(&all_settings(), Some("Europe/Paris".into())).unwrap();
         let (writable, scs_off) = l.w.rt.block_on(async {
             use std::str::FromStr;
             let o = sqlx::postgres::PgConnectOptions::from_str(uri).unwrap();
             let mut a = sqlx::PgConnection::connect_with(&o).await.unwrap();
             a.execute("SET default_transaction_read_only = off").await.unwrap();
             let failure = std::sync::Mutex::new(None);
-            let writable = super::pg::session_with(&mut a, None, &sess, &failure).await.is_err();
+            let writable = crate::db::sql::pg::session_with(&mut a, None, &sess, &failure).await.is_err();
             let mut b = sqlx::PgConnection::connect_with(&o).await.unwrap();
             b.execute("SET default_transaction_read_only = on; SET standard_conforming_strings = off").await.unwrap();
-            let scs_off = super::pg::session_with(&mut b, None, &sess, &failure).await.is_err();
+            let scs_off = crate::db::sql::pg::session_with(&mut b, None, &sess, &failure).await.is_err();
             (writable, scs_off)
         });
         assert!(writable, "{var}: a session that could write is still refused after the settings");
@@ -303,10 +303,10 @@ fn a_writer_keeps_its_own_timeouts_and_still_gets_the_other_settings() {
         let l = open(uri, &all_settings(), pooled);
         let db = l.quarry_test();
         let (st, lt, wm, tz) = l.w.rt.block_on(async {
-            let mut c = super::write::writer_conn(&db, "public", false).await.unwrap();
+            let mut c = crate::db::sql::write::writer_conn(&db, "public", false).await.unwrap();
             let mut tx = c.begin_write(&db).await.unwrap();
             let rows = tx.fetch_bound("SELECT current_setting('statement_timeout') AS st, current_setting('lock_timeout') AS lt, current_setting('work_mem') AS wm, current_setting('TimeZone') AS tz", &[]).await.unwrap();
-            let t = |n| super::worker::text(&rows[0], n).unwrap();
+            let t = |n| crate::db::sql::worker::text(&rows[0], n).unwrap();
             let r = (t("st"), t("lt"), t("wm"), t("tz"));
             let _ = tx.rollback().await;
             r
@@ -349,7 +349,7 @@ fn the_application_name_is_shown_from_the_first_statement() {
         let l = open(uri, &adv, pooled);
         let db = l.quarry_test();
         let rows = l.w.rt.block_on(db.read_text("", "SELECT application_name FROM pg_stat_activity WHERE pid = pg_backend_pid()", false)).unwrap();
-        assert_eq!(super::worker::text_at(&rows[0], 0).as_deref(), Some("quarry adv name"), "{var}");
+        assert_eq!(crate::db::sql::worker::text_at(&rows[0], 0).as_deref(), Some("quarry adv name"), "{var}");
     });
 }
 
@@ -390,17 +390,17 @@ fn a_function_in_a_saved_schema_never_shadows_a_catalog_function() {
         }
         // A read of Quarry's own and the metadata behind a structure.
         let rows = l.w.rt.block_on(db.read_text("adv_evil", "SELECT format_type(23, NULL)", false)).unwrap();
-        assert_eq!(super::worker::text_at(&rows[0], 0).unwrap_or_default(), "integer", "{var}");
+        assert_eq!(crate::db::sql::worker::text_at(&rows[0], 0).unwrap_or_default(), "integer", "{var}");
         l.w.sql_structure(3, db.clone(), "adv_evil".into(), "t".into());
         let Msg::SqlStructure { res, .. } = l.next() else { panic!("expected SqlStructure") };
         let st = res.unwrap_or_else(|x| panic!("{var}: {x}"));
         assert!(st.columns.iter().all(|c| !c.full_type.contains("EVIL") && !c.full_type.contains("money")), "{var}: {:?}", st.columns.iter().map(|c| &c.full_type).collect::<Vec<_>>());
         // The writer's READ WRITE transaction, where the table's schema is set first.
         let (t, r) = l.w.rt.block_on(async {
-            let mut c = super::write::writer_conn(&db, "adv_evil", false).await.unwrap();
+            let mut c = crate::db::sql::write::writer_conn(&db, "adv_evil", false).await.unwrap();
             let mut tx = c.begin_write(&db).await.unwrap();
             let rows = tx.fetch_bound("SELECT format_type(23, NULL) AS t, to_regtype('int4')::text AS r", &[]).await.unwrap();
-            let out = (super::worker::text(&rows[0], "t").unwrap(), super::worker::text(&rows[0], "r").unwrap());
+            let out = (crate::db::sql::worker::text(&rows[0], "t").unwrap(), crate::db::sql::worker::text(&rows[0], "r").unwrap());
             let _ = tx.rollback().await;
             out
         });
@@ -434,16 +434,16 @@ fn floats_and_money_keep_their_spelling_whatever_the_form_asked_for() {
         assert_eq!(at(2).get_f64("f").unwrap(), 1234567.891, "{var}: read");
         assert_eq!(at(3).get_f64("f").unwrap(), 1e-7, "{var}: read");
         // An edit of the float itself puts the value as read in its WHERE, which only matches the exact value.
-        let ed = super::write::RowEdit { pk: at(1).get_document("_id").unwrap().clone(), changes: vec![("f".into(), Bson::Double(0.1 + 0.2), Bson::Double(5.5))] };
+        let ed = crate::db::sql::write::RowEdit { pk: at(1).get_document("_id").unwrap().clone(), changes: vec![("f".into(), Bson::Double(0.1 + 0.2), Bson::Double(5.5))] };
         l.w.sql_save(vec!["k".into()], 1, db.clone(), "adv_flt".into(), "t".into(), cols, vec!["id".into()], vec![ed], false);
         let Msg::Saved { res, .. } = l.next() else { panic!("expected Saved") };
         assert!(res.is_ok(), "{var}: the edit failed as if another session had changed the row: {res:?}");
         assert_eq!(l.qone(&pool, "SELECT f::text FROM adv_flt.t WHERE id = 1"), "5.5", "{var}");
         // The export is not lossy.
         let path = std::env::temp_dir().join(format!("adv_flt_{}_{}.csv", std::process::id(), var));
-        let plan = super::export::Plan { fmt: crate::db::copy::Fmt::Csv, header: false, table: String::new(), bs: false };
+        let plan = crate::db::sql::export::Plan { fmt: crate::db::copy::Fmt::Csv, header: false, table: String::new(), bs: false };
         use std::sync::atomic::{AtomicBool, AtomicU64};
-        l.w.rt.block_on(super::export::export_to(&db, "adv_flt", "SELECT id, f FROM t WHERE id > 1 ORDER BY id", &plan, super::export::Sink::File(path.clone()), &AtomicU64::new(0), &AtomicBool::new(false), &AtomicU64::new(0))).unwrap_or_else(|x| panic!("{var}: {x}"));
+        l.w.rt.block_on(crate::db::sql::export::export_to(&db, "adv_flt", "SELECT id, f FROM t WHERE id > 1 ORDER BY id", &plan, crate::db::sql::export::Sink::File(path.clone()), &AtomicU64::new(0), &AtomicBool::new(false), &AtomicU64::new(0))).unwrap_or_else(|x| panic!("{var}: {x}"));
         let text = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_file(&path);
         assert_eq!(text.replace("\r\n", "\n"), "2,1234567.891\n3,0.0000001\n", "{var}");
@@ -493,7 +493,7 @@ fn a_table_is_made_with_a_type_from_the_saved_search_path() {
         let db = l.quarry_test();
         let pool = l.fixture_pool();
         l.reset_schemas(&pool, &["adv_mk", "adv_ext"], "CREATE TYPE adv_ext.adv_mood AS ENUM ('a', 'b')");
-        let spec = super::create_pg::TableSpec { schema: "adv_mk".into(), name: "made".into(), cols: vec![super::ddl::ColDef::new("m", "adv_mood")], ..Default::default() };
+        let spec = crate::db::sql::pg::create::TableSpec { schema: "adv_mk".into(), name: "made".into(), cols: vec![crate::db::sql::ddl::ColDef::new("m", "adv_mood")], ..Default::default() };
         l.w.pg_create_table(1, db.clone(), spec, false);
         let Msg::SqlDdl { res, undo, .. } = l.next() else { panic!("expected SqlDdl") };
         res.unwrap_or_else(|x| panic!("{var}: a type of the saved list resolves in a create, as it does everywhere else: {x}"));
@@ -509,9 +509,9 @@ fn a_table_is_made_with_a_type_from_the_saved_search_path() {
 /// behind the dump's guard DO blocks) and then saves a grid edit of the enum and the timestamp.
 #[test]
 fn a_file_with_guarded_types_and_a_grid_edit_work_under_a_saved_path_and_zone() {
-    use super::dump::run_file;
-    use super::import::Progress;
-    use super::write::RowEdit;
+    use crate::db::sql::dump::run_file;
+    use crate::db::sql::import::Progress;
+    use crate::db::sql::write::RowEdit;
     use mongodb::bson::doc;
     each(|var, uri, pooled| {
         let adv = Advanced { search_path: vec!["adv_wr".into()], zone: Zone::Custom("Europe/Paris".into()), ..Default::default() };
@@ -524,10 +524,10 @@ fn a_file_with_guarded_types_and_a_grid_edit_work_under_a_saved_path_and_zone() 
                     DO $q$BEGIN CREATE DOMAIN adv_wr.posint AS integer CHECK (VALUE > 0); EXCEPTION WHEN duplicate_object THEN NULL; END$q$;\n\
                     CREATE TABLE adv_wr.t (id integer PRIMARY KEY, m adv_wr.mood, p adv_wr.posint, ts timestamptz);\n\
                     INSERT INTO adv_wr.t VALUES (1, 'a', 5, '2024-01-01 00:00:00+00');\n";
-        let src = super::csv::Source::Mem(std::sync::Arc::new(text.as_bytes().to_vec()));
+        let src = crate::db::sql::csv::Source::Mem(std::sync::Arc::new(text.as_bytes().to_vec()));
         let ran = l.w.rt.block_on(run_file(db.clone(), "public".into(), src, false, std::sync::Arc::new(Progress::default()), std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)), std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0))));
         ran.unwrap_or_else(|x| panic!("{var}: {x}"));
-        l.w.sql_page(7, db.clone(), "adv_wr".into(), "t".into(), super::PageQuery::default(), 100, 0);
+        l.w.sql_page(7, db.clone(), "adv_wr".into(), "t".into(), crate::db::sql::PageQuery::default(), 100, 0);
         let Msg::SqlCols { cols, .. } = l.next() else { panic!("expected SqlCols") };
         let Msg::Docs { res: Ok(_), .. } = l.next() else { panic!("expected Docs") };
         let edit = RowEdit { pk: doc! { "id": 1_i64 }, changes: vec![("m".into(), Bson::String("a".into()), Bson::String("b".into())), ("p".into(), Bson::Int64(5), Bson::Int64(7))] };
@@ -543,7 +543,7 @@ fn a_file_with_guarded_types_and_a_grid_edit_work_under_a_saved_path_and_zone() 
 /// timestamp without a zone is not touched.
 #[test]
 fn timestamptz_shows_in_the_session_zone_and_keeps_its_instant() {
-    use super::write::RowEdit;
+    use crate::db::sql::write::RowEdit;
     use mongodb::bson::doc;
     // (zone, 12:00 UTC shown, 15:00 UTC shown)
     let zones = [
@@ -558,7 +558,7 @@ fn timestamptz_shows_in_the_session_zone_and_keeps_its_instant() {
             let pool = l.fixture_pool();
             l.qsql(&pool, "DROP SCHEMA IF EXISTS adv_tz CASCADE; CREATE SCHEMA adv_tz; CREATE TABLE adv_tz.t (id int PRIMARY KEY, ts timestamptz, tn timestamp); INSERT INTO adv_tz.t VALUES (1, '2024-06-01 12:00:00+00', '2024-06-01 12:00:00'), (2, '2024-06-02 12:00:00+00', NULL)");
             let read = |filter: &str| {
-                l.w.sql_page(7, db.clone(), "adv_tz".into(), "t".into(), super::PageQuery { filter: filter.into(), order: "id".into(), ..Default::default() }, 100, 0);
+                l.w.sql_page(7, db.clone(), "adv_tz".into(), "t".into(), crate::db::sql::PageQuery { filter: filter.into(), order: "id".into(), ..Default::default() }, 100, 0);
                 let Msg::SqlCols { cols, .. } = l.next() else { panic!("expected SqlCols") };
                 let Msg::Docs { res: Ok((rows, count, _)), .. } = l.next() else { panic!("expected Docs") };
                 (cols, rows.iter().map(|r| r.decode().unwrap()).collect::<Vec<_>>(), count)

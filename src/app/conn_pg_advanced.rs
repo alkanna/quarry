@@ -1,10 +1,10 @@
 //! The Advanced tab of the connection form on PostgreSQL: the search_path list, the session settings (rows from an
 //! allow-list, added through a picker) and the connection timeouts. What is allowed and how values are written is in
-//! `db::sql::pg_advanced`; this file only draws it and edits the form's copy.
+//! `db::sql::pg::advanced`; this file only draws it and edits the form's copy.
 
 use super::conn_form::{note_row, secs_field};
 use super::*;
-use db::sql::pg_advanced as adv;
+use db::sql::pg::advanced as adv;
 
 /// Width of the setting name column and of the value box.
 const NAME_W: f32 = 230.0;

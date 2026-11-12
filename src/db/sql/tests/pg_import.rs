@@ -2,11 +2,11 @@
 //! QUARRY_TEST_POSTGRES13, and through the PgBouncer of QUARRY_TEST_PGBOUNCER. Each test makes its own schema in the
 //! shared `quarry_test` database.
 
-use super::csv::{auto_map, DateFmt, Enc, Mapping, Opts, Source};
-use super::export::{export_to, Plan, Sink};
-use super::import::{run, undo_plan, Done, Dup, ImportPlan, Progress};
-use super::testing::{every_pg, live_pgbouncer, LivePg, PgFixture};
-use super::write::{SqlUndo, CONFLICT};
+use crate::db::sql::csv::{auto_map, DateFmt, Enc, Mapping, Opts, Source};
+use crate::db::sql::export::{export_to, Plan, Sink};
+use crate::db::sql::import::{run, undo_plan, Done, Dup, ImportPlan, Progress};
+use crate::db::sql::testing::{every_pg, live_pgbouncer, LivePg, PgFixture};
+use crate::db::sql::write::{SqlUndo, CONFLICT};
 use crate::db::{Msg, Res, UndoAction, UndoKind};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -35,7 +35,7 @@ impl F<'_> {
     }
 
     fn plan(&self, table: &str, csv: &str, dup: Dup) -> ImportPlan {
-        let info = self.l.w.rt.block_on(async { super::csv::TableInfo::from_structure(&super::structure::load(&self.db, &self.schema, table).await.unwrap()) });
+        let info = self.l.w.rt.block_on(async { crate::db::sql::csv::TableInfo::from_structure(&crate::db::sql::structure::load(&self.db, &self.schema, table).await.unwrap()) });
         assert!(info.pg, "the structure of a PostgreSQL table says so");
         let names: Vec<String> = csv.lines().next().unwrap().split(',').map(|s| s.to_string()).collect();
         let map = Mapping { map: auto_map(&names, &info.cols), fmts: vec![DateFmt::DayFirst; names.len()], empty_null: true };
@@ -334,7 +334,7 @@ fn live_a_big_file_goes_in_batches_and_undo_takes_it_out() {
             csv.push('\n');
         }
         let plan = f.plan("wide", &csv, Dup::Stop);
-        assert_eq!(super::import_pg::batch_rows(140), 468);
+        assert_eq!(crate::db::sql::pg::import::batch_rows(140), 468);
         let done = f.run("wide", &plan).0.unwrap_or_else(|x| panic!("{var}: {x}"));
         assert_eq!(done.inserted, 1200, "{var}");
         assert_eq!(f.one("SELECT sum(c139) FROM wide"), (0..1200).map(|r| (r + 139) % 100).sum::<i32>().to_string(), "{var}");
@@ -587,7 +587,7 @@ fn live_stop_cancels_the_running_statement_by_its_pid_and_the_transaction_rolls_
                 }
                 // The trigger is asleep by now, so the statement is the thing the server cancels.
                 std::thread::sleep(std::time::Duration::from_millis(1500));
-                rt.block_on(super::pg::cancel(&db, id.load(Ordering::SeqCst)))
+                rt.block_on(crate::db::sql::pg::cancel(&db, id.load(Ordering::SeqCst)))
             })
         };
         let started = std::time::Instant::now();

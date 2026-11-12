@@ -1,10 +1,10 @@
 //! The PostgreSQL half of the trigger editor: the fields above the body (name, timing, events, columns, row or statement,
-//! WHEN, enabled, and the function the trigger runs). The statements come from `db::sql::ddl_pg_trig`, which also checks the
+//! WHEN, enabled, and the function the trigger runs). The statements come from `db::sql::pg::ddl_trig`, which also checks the
 //! draft; this file only draws it and says what the person should know before saving.
 
 use super::*;
 use db::sql::ddl::TrigDef;
-use db::sql::ddl_pg_trig::{canonical, cols_of, events_of, func_name};
+use db::sql::pg::ddl_trig::{canonical, cols_of, events_of, func_name};
 use db::sql::structure::PgTrig;
 
 /// What the head needs besides the draft.

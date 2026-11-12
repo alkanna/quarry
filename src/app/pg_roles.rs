@@ -2,11 +2,11 @@
 //! password and Drop role dialogs. The Privileges tab lists the objects of one kind by roles; a cell opens its editor. The
 //! Roles tab holds what the design's variant A shows for one role: attributes, memberships and default privileges. Every
 //! edit lands in one staged list, previewed in the bar at the bottom and run by Apply in one transaction; the statements,
-//! their checks and their inverses come from `db::sql::roles_pg`.
+//! their checks and their inverses come from `db::sql::pg::roles`.
 
 use super::sql_users::{forget_secret, secret_id};
 use super::*;
-use db::sql::roles_pg::{self as rp, Answer, Attrs, Batch, Change, Cluster, DefKind, Defaults, Did, DropInfo, DropMode, Kind, NewRole, Obj, Objects, Opts, Privs, Role};
+use db::sql::pg::roles::{self as rp, Answer, Attrs, Batch, Change, Cluster, DefKind, Defaults, Did, DropInfo, DropMode, Kind, NewRole, Obj, Objects, Opts, Privs, Role};
 use std::sync::Arc;
 use zeroize::Zeroize;
 

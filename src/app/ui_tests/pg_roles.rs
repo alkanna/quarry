@@ -95,7 +95,7 @@ fn pg_password_is_forgotten_when_esc_closes_the_dialog() {
 /// An Apply answer that is not the one the window waits for (from before Esc closed and reopened it) leaves what is staged now.
 #[test]
 fn pg_a_late_apply_answer_keeps_newer_staged_changes() {
-    use crate::db::sql::roles_pg::{Answer, Change, Did};
+    use crate::db::sql::pg::roles::{Answer, Change, Did};
     let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(800.0, 600.0)).build_eframe(|cc| App::for_test(cc));
     let app = h.state_mut();
     let mut w = crate::app::pg_roles::PgRolesWin::new(CONN, "shop".into());

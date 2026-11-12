@@ -214,7 +214,7 @@ pub enum Msg {
     /// An answer of the SQL Server window, matched to its request by `req`.
     SqlServer { req: u64, ans: sql::server::Answer },
     /// An answer of the PostgreSQL Server window, matched to its request by `req`.
-    PgServer { req: u64, ans: sql::pg_server::Answer },
+    PgServer { req: u64, ans: sql::pg::server::Answer },
     /// The databases of a connection and the tables of `schema` (None when it is gone), read after a script ran.
     SqlLists { conn: u64, schema: String, res: Res<(Vec<String>, Option<Vec<String>>)> },
     /// The columns and key of a table, for the Import dialog that asked with `req`.
@@ -234,7 +234,7 @@ pub enum Msg {
     /// `database` is the PostgreSQL database the schema or table is in, empty on MySQL and for a database.
     SqlDropInfo { conn: u64, database: String, schema: String, table: String, res: Res<sql::create::DropInfo> },
     /// The templates, encodings, locales and owners a new PostgreSQL database can take, for the New database dialog.
-    PgDbChoices { conn: u64, res: Res<sql::create_pg::DbChoices> },
+    PgDbChoices { conn: u64, res: Res<sql::pg::create::DbChoices> },
     /// A create or drop finished. `dbs` is the new database list after a change to it, and `undo` the entry
     /// for a create (or the one a refused undo hands back). `sql_mode` is the session's mode when it no longer
     /// matched the one the app had, so the previews follow it.
@@ -247,7 +247,7 @@ pub enum Msg {
     /// refused undo hands back.
     SqlUserDone { conn: u64, account: sql::users::Account, op: sql::users::Op, res: Res<String>, undo: Vec<UndoAction> },
     /// An answer of the PostgreSQL Roles and privileges window, matched by `req` (0 for a write or an undo).
-    PgRoles { conn: u64, req: u64, ans: sql::roles_pg::Answer },
+    PgRoles { conn: u64, req: u64, ans: sql::pg::roles::Answer },
     /// How many rows of a table point at nothing for a foreign key being added. Answers the open dialog by `req`.
     SqlOrphans { req: u64, res: Res<u64>, sample: Vec<String> },
     /// Whether the server takes a foreign key only on a whole primary or unique key. Answers the open dialog by `req`.

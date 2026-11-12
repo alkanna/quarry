@@ -35,7 +35,7 @@ pub(super) const NEW: &str = "";
 
 pub(super) fn def_of(t: &Trigger) -> TrigDef {
     if t.pg.is_some() {
-        return db::sql::ddl_pg_trig::def_of(t);
+        return db::sql::pg::ddl_trig::def_of(t);
     }
     TrigDef { name: t.name.clone(), timing: t.timing.to_ascii_uppercase(), event: t.event.to_ascii_uppercase(), body: t.body.clone(), pg: Default::default() }
 }
@@ -43,7 +43,7 @@ pub(super) fn def_of(t: &Trigger) -> TrigDef {
 /// The draft of a new trigger for the engine.
 pub(super) fn blank(pg: bool) -> TrigDef {
     if pg {
-        return db::sql::ddl_pg_trig::blank();
+        return db::sql::pg::ddl_trig::blank();
     }
     TrigDef { name: String::new(), timing: "BEFORE".into(), event: "INSERT".into(), body: "BEGIN\n  \nEND".into(), pg: Default::default() }
 }
@@ -145,7 +145,7 @@ impl App {
         // be put back is refused here, before the person types anything.
         if self.is_pg(sel.conn) {
             let Some(t) = self.structure().and_then(|s| s.triggers.iter().find(|t| t.name == name)).cloned() else { return self.warn(format!("The trigger {name} is not in the structure any more.")) };
-            match db::sql::ddl_pg_trig::preview(&self.sel_schema(&sel), &sel.coll, &TrigJob::Drop(t)) {
+            match db::sql::pg::ddl_trig::preview(&self.sel_schema(&sel), &sel.coll, &TrigJob::Drop(t)) {
                 Ok((steps, warnings)) => {
                     if steps.len() > 1 {
                         title.push_str(" Its function is dropped with it, since nothing else runs it.");
@@ -309,7 +309,7 @@ impl App {
                 return Err(why);
             }
             let schema = self.t().map(|t| self.sel_schema(&t.sel)).unwrap_or_default();
-            db::sql::ddl_pg_trig::preview(&schema, &table, &job).map(|(steps, warnings)| {
+            db::sql::pg::ddl_trig::preview(&schema, &table, &job).map(|(steps, warnings)| {
                 pg_warnings = warnings;
                 steps
             })

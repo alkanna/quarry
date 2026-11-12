@@ -34,7 +34,7 @@ pub enum SqlUndo {
     /// removes a row only while it still holds them and never one that was edited or replaced since.
     Inserted(Vec<Document>),
     /// A PostgreSQL CSV import: the rows it inserted and the old values of the rows it overwrote.
-    Import(std::sync::Arc<super::import_pg::ImportUndo>),
+    Import(std::sync::Arc<super::pg::import::ImportUndo>),
     /// A structure change: the ALTERs that reverse it and what they rely on.
     Alter(Box<super::ddl::AlterUndo>),
     /// A trigger change: what puts the trigger back and how the change left it.
@@ -50,8 +50,8 @@ pub enum SqlUndo {
     PgCreatedTable { oid: String, state: Vec<String> },
     /// A change to an account's privileges, or a user this app created; see `users`.
     Account(Box<super::users::AccountUndo>),
-    /// PostgreSQL role and privilege changes, or a role this app created; see `roles_pg`.
-    PgRoles(Box<super::roles_pg::RolesUndo>),
+    /// PostgreSQL role and privilege changes, or a role this app created; see `pg::roles`.
+    PgRoles(Box<super::pg::roles::RolesUndo>),
 }
 
 /// The oids a PostgreSQL write ran on, as text. A name says nothing about which object it was: a database or table dropped and made
@@ -420,7 +420,7 @@ async fn apply_updates(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[S
             return Err(SEVERAL.into());
         }
     }
-    let ids = super::ddl_pg::ids_in(&mut tx, schema, table).await;
+    let ids = super::pg::ddl::ids_in(&mut tx, schema, table).await;
     tx.commit().await.map_err(se)?;
     Ok(ids)
 }
@@ -451,7 +451,7 @@ async fn apply_deletes(db: &Db, schema: &str, table: &str, cols: &[Col], key_col
             gone.push(pk.clone());
         }
     }
-    let ids = if gone.is_empty() { PgIds::default() } else { super::ddl_pg::ids_in(&mut tx, schema, table).await };
+    let ids = if gone.is_empty() { PgIds::default() } else { super::pg::ddl::ids_in(&mut tx, schema, table).await };
     tx.commit().await.map_err(se)?;
     Ok((gone, ids))
 }
@@ -490,7 +490,7 @@ async fn apply_inserts(db: &Db, schema: &str, table: &str, cols: &[Col], pk: &[S
         }
         keys.push((key.len() == pk.len() && !pk.is_empty()).then_some(key));
     }
-    let ids = if keys.iter().any(|k| k.is_some()) { super::ddl_pg::ids_in(&mut tx, schema, table).await } else { PgIds::default() };
+    let ids = if keys.iter().any(|k| k.is_some()) { super::pg::ddl::ids_in(&mut tx, schema, table).await } else { PgIds::default() };
     tx.commit().await.map_err(se)?;
     Ok((keys, ids))
 }
@@ -537,7 +537,7 @@ async fn apply_inserts_pg(db: &Db, schema: &str, table: &str, cols: &[Col], pk: 
         }
         keys.push(doc.then_some(kept));
     }
-    let ids = if keys.iter().any(|k| k.is_some()) { super::ddl_pg::ids_in(&mut tx, schema, table).await } else { PgIds::default() };
+    let ids = if keys.iter().any(|k| k.is_some()) { super::pg::ddl::ids_in(&mut tx, schema, table).await } else { PgIds::default() };
     tx.commit().await.map_err(se)?;
     Ok((keys, ids))
 }
@@ -611,7 +611,7 @@ fn plural(n: usize, word: &str) -> String {
 }
 
 /// `database` is the PostgreSQL database the write ran in (`Db::pg_database`), empty on MySQL.
-/// `ids` is the database and table oids read inside the write transaction (`ddl_pg::ids_in`), empty on MySQL.
+/// `ids` is the database and table oids read inside the write transaction (`pg::ddl::ids_in`), empty on MySQL.
 pub(super) fn action(database: String, ids: PgIds, conn: u64, schema: &str, table: &str, cols: &[Col], undo: SqlUndo) -> UndoAction {
     UndoAction { at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind: UndoKind::Sql { database, cols: cols.to_vec(), undo, ids } }
 }
@@ -685,7 +685,7 @@ impl Worker {
             let UndoAction { at: when, conn, db: schema, coll: table, kind } = a;
             // The entry is dropped, not kept, when the target is another object now: nothing it does could ever apply again.
             if let UndoKind::Sql { ids, .. } = &kind {
-                if let Err(err) = super::create_pg::check_ids(&db, &schema, &table, ids).await {
+                if let Err(err) = super::pg::create::check_ids(&db, &schema, &table, ids).await {
                     // Structure undos are answered the way their own run answers.
                     return match &kind {
                         UndoKind::Sql { undo: u @ (SqlUndo::Alter(_) | SqlUndo::Trigger(_)), .. } => Msg::SqlAltered { conn, database: db.pg_database(), schema, table, res: Err(err), undo: None, sql_mode: None, alter: matches!(u, SqlUndo::Alter(_)), unsure: false },
@@ -703,7 +703,7 @@ impl Worker {
             }
             if let UndoKind::Sql { undo: SqlUndo::PgRoles(u), .. } = &kind {
                 let u = (**u).clone();
-                return crate::db::sql_scope(db.conn, "", super::roles_pg::undo(&db, UndoAction { at: when, conn, db: schema, coll: table, kind }, u, read_only)).await;
+                return crate::db::sql_scope(db.conn, "", super::pg::roles::undo(&db, UndoAction { at: when, conn, db: schema, coll: table, kind }, u, read_only)).await;
             }
             if let UndoKind::Sql { undo: SqlUndo::Account(u), .. } = &kind {
                 let u = (**u).clone();
@@ -726,7 +726,7 @@ impl Worker {
                 }
                 SqlUndo::Insert(pks) => apply_deletes(&db, &schema, &table, &cols, &pk, &pks, read_only).await.map(|_| "Removed the inserted rows".to_string()),
                 SqlUndo::Inserted(rows) => apply_undo_inserted_pg(&db, &schema, &table, &cols, &pk, &rows, read_only).await.map(|_| "Removed the inserted rows".to_string()),
-                SqlUndo::Import(u) => super::import_pg::undo(&db, &schema, &table, &u, read_only).await,
+                SqlUndo::Import(u) => super::pg::import::undo(&db, &schema, &table, &u, read_only).await,
                 // Taken before this match, where the structure statements run.
                 SqlUndo::Alter(_) | SqlUndo::Trigger(_) | SqlUndo::Account(_) | SqlUndo::PgRoles(_) => Err("Not a row change".into()),
                 SqlUndo::CreatedDb { .. } | SqlUndo::CreatedTable { .. } | SqlUndo::CreatedSchema { .. } | SqlUndo::PgCreatedTable { .. } => Err("Handled by sql_undo_create".to_string()),

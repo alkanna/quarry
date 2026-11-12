@@ -11,7 +11,7 @@
 //! Trust follows libpq: with a CA file only that file is trusted, and verify-ca without one is refused, because public
 //! roots with no name check would accept any site's certificate. The bundled web roots serve verify-full alone.
 
-use super::SslMode;
+use crate::db::sql::SslMode;
 use crate::db::Res;
 use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -33,13 +33,13 @@ const SOCKET_PORT: u16 = 5432;
 
 /// Whether `open` needs the relay: verify-ca always, and verify-full when the address dialled is a tunnel's or a CA
 /// file is set, since sqlx would trust the web roots beside the file.
-pub(super) fn needed(mode: SslMode, tunnel: bool, ca: bool) -> bool {
+pub(in crate::db::sql) fn needed(mode: SslMode, tunnel: bool, ca: bool) -> bool {
     mode == SslMode::VerifyCa || mode == SslMode::VerifyIdentity && (tunnel || ca)
 }
 
 /// The local end sqlx connects to. Dropping it stops accepting and removes the socket folder; connections already
 /// relayed end with their pool.
-pub(super) struct Relay {
+pub(in crate::db::sql) struct Relay {
     /// The localhost port on Windows; with a socket, the port in its file name.
     pub port: u16,
     dir: Option<PathBuf>,
@@ -92,7 +92,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Duplex for T {}
 
 /// Starts a relay to `to` that checks the certificate against `name` as `mode` says. Configuration errors (an
 /// unreadable CA file, a key that does not match the certificate) are returned here, before anything connects.
-pub(super) async fn start(to: (String, u16), name: &str, mode: SslMode, ca: &str, client: Option<(Vec<u8>, Vec<u8>)>, timeout: Duration) -> Res<Relay> {
+pub(in crate::db::sql) async fn start(to: (String, u16), name: &str, mode: SslMode, ca: &str, client: Option<(Vec<u8>, Vec<u8>)>, timeout: Duration) -> Res<Relay> {
     let config = config(mode, ca, client)?;
     let name = ServerName::try_from(name.to_string()).map_err(|e| tls(&e))?;
     let up = Arc::new(Upstream { host: to.0, port: to.1, name, tls: TlsConnector::from(Arc::new(config)), timeout });
@@ -269,7 +269,7 @@ fn verifier(mode: SslMode, ca: &str, provider: Arc<rustls::crypto::CryptoProvide
 fn verifier_with(mode: SslMode, ca: &str, provider: Arc<rustls::crypto::CryptoProvider>, web: impl FnOnce() -> RootCertStore) -> Res<Arc<Verifier>> {
     let roots = if !ca.trim().is_empty() {
         let mut roots = RootCertStore::empty();
-        let path = super::pg_cert::expand(ca.trim());
+        let path = crate::db::sql::pg::cert::expand(ca.trim());
         let data = std::fs::read(&path).map_err(|e| tls(&format!("could not read the CA file {}: {e}", path.display())))?;
         let mut any = false;
         for c in CertificateDer::pem_slice_iter(&data) {
@@ -284,7 +284,7 @@ fn verifier_with(mode: SslMode, ca: &str, provider: Arc<rustls::crypto::CryptoPr
     } else if mode == SslMode::VerifyIdentity {
         web()
     } else {
-        return Err(super::pg_cert::VERIFY_CA_NO_CA.into());
+        return Err(crate::db::sql::pg::cert::VERIFY_CA_NO_CA.into());
     };
     let inner = WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider).build().map_err(|e| tls(&e))?;
     Ok(Arc::new(Verifier { inner, name: mode == SslMode::VerifyIdentity }))
@@ -393,7 +393,7 @@ mod tests {
     /// A public CA stands in for the bundled web roots and has signed a certificate for another site.
     #[test]
     fn a_ca_file_is_the_only_root_and_verify_ca_needs_one() {
-        use super::super::pg_cert::tests::{make_certs, temp_dir};
+        use crate::db::sql::pg::cert::tests::{make_certs, temp_dir};
         let d = temp_dir("roots");
         let run = |args: &[&str]| std::process::Command::new("openssl").args(args).current_dir(&d).output().ok().filter(|o| o.status.success()).map(|_| ());
         let made = make_certs(&d, "db.example.test", "analyst").and_then(|_| {
@@ -424,8 +424,8 @@ mod tests {
         // verify-full with a file trusts the file alone, even for the name the certificate holds.
         let e = verify(SslMode::VerifyIdentity, &ca, "site.example.org").unwrap_err();
         assert!(e.contains("UnknownIssuer"), "{e}");
-        assert_eq!(verify(SslMode::VerifyCa, "", "db.example.test").unwrap_err(), super::super::pg_cert::VERIFY_CA_NO_CA);
-        assert_eq!(verify(SslMode::VerifyCa, "  ", "site.example.org").unwrap_err(), super::super::pg_cert::VERIFY_CA_NO_CA);
+        assert_eq!(verify(SslMode::VerifyCa, "", "db.example.test").unwrap_err(), crate::db::sql::pg::cert::VERIFY_CA_NO_CA);
+        assert_eq!(verify(SslMode::VerifyCa, "  ", "site.example.org").unwrap_err(), crate::db::sql::pg::cert::VERIFY_CA_NO_CA);
         // verify-full without a file keeps the public roots, with the name checked.
         assert!(verify(SslMode::VerifyIdentity, "", "site.example.org").is_ok());
         let e = verify(SslMode::VerifyIdentity, "", "db.example.test").unwrap_err();
@@ -446,8 +446,8 @@ mod tests {
     /// Checks the verifier against certificates made with openssl: a server certificate for db.example.test only.
     #[test]
     fn verify_ca_skips_the_name_and_verify_full_does_not() {
-        let d = super::super::pg_cert::tests::temp_dir("verify");
-        if super::super::pg_cert::tests::make_certs(&d, "db.example.test", "analyst").is_none() {
+        let d = crate::db::sql::pg::cert::tests::temp_dir("verify");
+        if crate::db::sql::pg::cert::tests::make_certs(&d, "db.example.test", "analyst").is_none() {
             eprintln!("openssl not found, skipped");
             return;
         }

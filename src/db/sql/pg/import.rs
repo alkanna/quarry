@@ -14,12 +14,12 @@
 //! text (`1.5` and `1.50`, `1 mon` and `30 days`) or missing (point, json[]), and refuses, with nothing changed, when a row
 //! no longer holds what the import left.
 
-use super::csv::{Mapping, TCol, TableInfo};
-use super::exec::{Cells, Conn, SqlRow, Tx};
-use super::import::{Done, Dup, ImportPlan, Progress, UNDO_MAX_ROWS};
-use super::value::Param;
-use super::write::{action, writer_conn, SqlUndo, CONFLICT};
-use super::{se, Col, Db, Dialect};
+use crate::db::sql::csv::{Mapping, TCol, TableInfo};
+use crate::db::sql::exec::{Cells, Conn, SqlRow, Tx};
+use crate::db::sql::import::{Done, Dup, ImportPlan, Progress, UNDO_MAX_ROWS};
+use crate::db::sql::value::Param;
+use crate::db::sql::write::{action, writer_conn, SqlUndo, CONFLICT};
+use crate::db::sql::{se, Col, Db, Dialect};
 use crate::db::Res;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -34,8 +34,8 @@ const BATCH_BYTES: usize = 4 << 20;
 /// What an undo may hold in memory, so a file of large cells records none instead of filling it.
 const UNDO_MAX_BYTES: usize = 64 << 20;
 
-pub(super) const NEEDS_KEY: &str = "Update needs a primary key, and this table has none. Choose Skip or Stop.";
-pub(super) const DEFERRABLE_KEY: &str = "The primary key is DEFERRABLE, which ON CONFLICT does not support, so Skip and Update cannot work on this table. Choose Stop.";
+pub(in crate::db::sql) const NEEDS_KEY: &str = "Update needs a primary key, and this table has none. Choose Skip or Stop.";
+pub(in crate::db::sql) const DEFERRABLE_KEY: &str = "The primary key is DEFERRABLE, which ON CONFLICT does not support, so Skip and Update cannot work on this table. Choose Stop.";
 
 /// How the duplicate choice is written in the statement.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -420,7 +420,7 @@ pub async fn run(db: &Db, schema: &str, table: &str, plan: &ImportPlan, conn: u6
     let mut c = writer_conn(db, schema, read_only).await?;
     // The pid lets Stop cancel a statement that is running; behind a pooler there is none and Stop acts between batches.
     if let Conn::Pg(pc) = &mut c {
-        super::pg::prepare(pc, true, id, db).await.map_err(se)?;
+        crate::db::sql::pg::prepare(pc, true, id, db).await.map_err(se)?;
     }
     let res = import_on(&mut c, db, schema, table, plan, conn, prog, cancel).await;
     let res = match res {
@@ -444,14 +444,14 @@ async fn import_on(c: &mut Conn, db: &Db, schema: &str, table: &str, plan: &Impo
     let mut why_not = None;
     let mut on = plan.want_undo;
     if on {
-        if let Err(w) = super::import::undo_plan(&plan.info, &plan.map, plan.dup, 0) {
+        if let Err(w) = crate::db::sql::import::undo_plan(&plan.info, &plan.map, plan.dup, 0) {
             (on, why_not) = (false, Some(w));
         }
     }
     let rec = Rec { on, track: plan.dup == Dup::Update, n_pk: pk.len(), inserted: Vec::new(), ins_at: HashMap::new(), updated: Vec::new(), upd_at: HashMap::new(), bytes: 0 };
     let mut tx = c.begin_write(db).await.map_err(se)?;
     // The types in the statements were read under this path, so they resolve to the same types here.
-    super::ddl_pg::set_path(&mut tx, db, schema).await.map_err(se)?;
+    crate::db::sql::pg::ddl::set_path(&mut tx, db, schema).await.map_err(se)?;
     let only = is_plain_table(&mut tx, schema, table).await?;
     let mut imp = Imp { db, schema, table, plan, mapped, key_at, rec_names, has_set, only, rec, why_not, flat: Vec::new(), texts: HashMap::new(), in_batch: 0, batch_bytes: 0, first_row: 0, seen: HashSet::new(), inserted_n: 0 };
     let done = read_file(&mut tx, &mut imp, prog, cancel, per).await;
@@ -463,7 +463,7 @@ async fn import_on(c: &mut Conn, db: &Db, schema: &str, table: &str, plan: &Impo
         }
     };
     // Read before the COMMIT, so the oids are those of the table this import wrote to.
-    let ids = if imp.rec.on && !(imp.rec.inserted.is_empty() && imp.rec.updated.is_empty()) { super::ddl_pg::ids_in(&mut tx, schema, table).await } else { super::write::PgIds::default() };
+    let ids = if imp.rec.on && !(imp.rec.inserted.is_empty() && imp.rec.updated.is_empty()) { crate::db::sql::pg::ddl::ids_in(&mut tx, schema, table).await } else { crate::db::sql::write::PgIds::default() };
     // An error the server sends for COMMIT (a deferred constraint, a cancel) means the transaction was rolled back. Only a lost
     // connection leaves it open whether the commit went through.
     tx.commit().await.map_err(|x| match x.as_database_error() {
@@ -492,7 +492,7 @@ async fn is_plain_table(tx: &mut Tx<'_>, schema: &str, table: &str) -> Res<bool>
 async fn read_file(tx: &mut Tx<'_>, imp: &mut Imp<'_>, prog: &Progress, cancel: &AtomicBool, per: usize) -> Res<u64> {
     let plan = imp.plan;
     let r = plan.source.open().map_err(|x| format!("Could not read the file: {x}"))?;
-    let mut rd = super::csv::Reader::new(r, plan.opts);
+    let mut rd = crate::db::sql::csv::Reader::new(r, plan.opts);
     let width = plan.map.map.len();
     let mut rows = 0u64;
     loop {
@@ -558,7 +558,7 @@ fn values(types: &[&str], rows: &[Vec<&Option<String>>]) -> (String, Vec<Param>)
 }
 
 /// The UPDATE that puts back the old values of rows, each only while it holds what the import left.
-pub(super) fn restore_sql(schema: &str, table: &str, u: &ImportUndo, rows: &[(Cellz, Cellz)]) -> (String, Vec<Param>) {
+pub(in crate::db::sql) fn restore_sql(schema: &str, table: &str, u: &ImportUndo, rows: &[(Cellz, Cellz)]) -> (String, Vec<Param>) {
     let d = Dialect::Postgres;
     let n_pk = u.pk.len();
     let rest: Vec<&UCol> = u.cols[n_pk..].iter().collect();
@@ -574,7 +574,7 @@ pub(super) fn restore_sql(schema: &str, table: &str, u: &ImportUndo, rows: &[(Ce
 }
 
 /// The DELETE that removes inserted rows, each only while every value is still the one the import stored.
-pub(super) fn remove_sql(schema: &str, table: &str, u: &ImportUndo, rows: &[Cellz]) -> (String, Vec<Param>) {
+pub(in crate::db::sql) fn remove_sql(schema: &str, table: &str, u: &ImportUndo, rows: &[Cellz]) -> (String, Vec<Param>) {
     let d = Dialect::Postgres;
     let n_pk = u.pk.len();
     let types: Vec<&str> = u.cols.iter().enumerate().map(|(i, c)| if i < n_pk { c.ty.as_str() } else { "text" }).collect();
@@ -590,7 +590,7 @@ pub(super) fn remove_sql(schema: &str, table: &str, u: &ImportUndo, rows: &[Cell
 pub async fn undo(db: &Db, schema: &str, table: &str, u: &ImportUndo, read_only: bool) -> Res<String> {
     let mut c = writer_conn(db, schema, read_only).await?;
     let mut tx = c.begin_write(db).await.map_err(se)?;
-    super::ddl_pg::set_path(&mut tx, db, schema).await.map_err(se)?;
+    crate::db::sql::pg::ddl::set_path(&mut tx, db, schema).await.map_err(se)?;
     let res = undo_in(db, schema, table, u, &mut tx).await;
     match res {
         Ok(()) => tx.commit().await.map_err(se)?,
@@ -633,7 +633,7 @@ async fn undo_in(db: &Db, schema: &str, table: &str, u: &ImportUndo, tx: &mut Tx
 
 #[cfg(test)]
 mod tests {
-    use super::super::value::Kind;
+    use crate::db::sql::value::Kind;
     use super::*;
 
     fn col(name: &str, ty: &str, auto: bool) -> TCol {
@@ -743,7 +743,7 @@ mod tests {
     fn undo_needs_a_key_and_a_file_that_fits() {
         let mut info = TableInfo { cols: vec![col("id", "integer", true)], pk: vec!["id".into()], engine: String::new(), pg: true, pk_deferrable: false };
         let map = Mapping { map: vec![Some(0)], fmts: Vec::new(), empty_null: true };
-        let undo_plan = |info: &TableInfo, dup, rows| super::super::import::undo_plan(info, &map, dup, rows);
+        let undo_plan = |info: &TableInfo, dup, rows| crate::db::sql::import::undo_plan(info, &map, dup, rows);
         assert!(undo_plan(&info, Dup::Update, 10).is_ok() && undo_plan(&info, Dup::Skip, 10).is_ok());
         assert!(undo_plan(&info, Dup::Stop, UNDO_MAX_ROWS + 1).unwrap_err().contains("Over"));
         info.pk.clear();

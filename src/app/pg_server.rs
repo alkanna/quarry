@@ -4,7 +4,7 @@
 
 use super::sql_server::{arm_time, confirmed, error_row, header, kv_rows, paint_cell, prev_of, retry_after, tile, up_text, PAD, POLL};
 use super::*;
-use db::sql::pg_server::{carry_blockers, chains, metrics, Activity, Answer, Overview, Role, Session, Setting, Settings, Sizes, Target};
+use db::sql::pg::server::{carry_blockers, chains, metrics, Activity, Answer, Overview, Role, Session, Setting, Settings, Sizes, Target};
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -88,7 +88,7 @@ impl PgServerWin {
 
     /// Canned answers for the offline demo (QUARRY_TEST_PG=server...), with the numbers of the design.
     pub(super) fn demo(conn: u64, which: &str) -> Self {
-        use db::sql::pg_server::Standby;
+        use db::sql::pg::server::Standby;
         let mut s = Self::new(conn, vec!["application_name".into(), "statement_timeout".into()]);
         s.tab = match which {
             "server-settings" => PgTab::Settings,

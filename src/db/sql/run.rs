@@ -22,7 +22,7 @@ pub(super) async fn prepare(conn: &mut Conn, db: &Db, schema: &str, read_only: b
         Conn::Pg(c) => {
             super::pg::prepare(c, read_only, id, db).await.map_err(se)?;
             if !pooled {
-                super::pg_read::set_search_path(c, &db.pg_path(schema)).await.map_err(se)?;
+                super::pg::read::set_search_path(c, &db.pg_path(schema)).await.map_err(se)?;
             }
         }
         Conn::My(c) => {
@@ -160,7 +160,7 @@ pub(super) async fn run_stmt(conn: &mut Conn, d: super::Dialect, stmt: &str, pag
         return run_one(conn, stmt, RUN_ROWS_MAX).await;
     }
     let wrapped = lex::page_sql(stmt, page, RUN_ROWS_MAX);
-    let (mut rs, code) = run_sent(conn, stmt, &wrapped, RUN_ROWS_MAX + 1, super::pg_read::PAGE_PREFIX, false).await;
+    let (mut rs, code) = run_sent(conn, stmt, &wrapped, RUN_ROWS_MAX + 1, super::pg::read::PAGE_PREFIX, false).await;
     // ER_DUP_FIELDNAME, which a derived table raises and a plain run does not.
     if rs.len() == 1 && rs[0].error.is_some() && d != Dialect::Postgres && code.as_deref() == Some("1060") {
         return run_one(conn, stmt, RUN_ROWS_MAX).await;
@@ -336,7 +336,7 @@ mod tests_hook {
 /// statement: its result was cut at the row limit, or the ROLLBACK failed, and the connection is then closed.
 pub(super) async fn run_locked(conn: &mut Conn, db: &Db, stmt: &str, page: usize, locals: &str) -> (Vec<ResultSet>, Option<&'static str>) {
     let Conn::Pg(c) = conn else { return (run_stmt(conn, db.dialect, stmt, page).await, None) };
-    if let Err(err) = super::pg_read::begin_read_only(c, db, locals).await {
+    if let Err(err) = super::pg::read::begin_read_only(c, db, locals).await {
         return (vec![failed(stmt, super::se_at(&err, stmt, 0))], None);
     }
     let rs = run_stmt(conn, db.dialect, stmt, page).await;
@@ -354,7 +354,7 @@ pub(super) async fn run_locked(conn: &mut Conn, db: &Db, stmt: &str, page: usize
 /// result is read to its end so the COMMIT can follow.
 async fn run_write_pooled(conn: &mut Conn, db: &Db, stmt: &str, locals: &str) -> (Vec<ResultSet>, Option<&'static str>) {
     let Conn::Pg(c) = conn else { return (run_one(conn, stmt, RUN_ROWS_MAX).await, None) };
-    if let Err(err) = super::pg_read::begin_read_write(c, db, locals).await {
+    if let Err(err) = super::pg::read::begin_read_write(c, db, locals).await {
         return (vec![failed(stmt, super::se_at(&err, stmt, 0))], None);
     }
     let mut rs = run_sent(conn, stmt, stmt, RUN_ROWS_MAX, 0, true).await.0;
@@ -382,11 +382,11 @@ pub(super) async fn count_rows(db: &Db, schema: &str, stmt: &str) -> Res<u64> {
     let t = Instant::now();
     let r = match &mut conn {
         // The connection is closed below whatever happens, so a failed ROLLBACK cannot reach another statement.
-        Conn::Pg(c) => super::pg_read::in_read_only(c, db, &db.pg_run_locals(schema), async |c| c.fetch_all(sql.as_str()).await).await.map(super::exec::SqlRow::wrap_pg),
+        Conn::Pg(c) => super::pg::read::in_read_only(c, db, &db.pg_run_locals(schema), async |c| c.fetch_all(sql.as_str()).await).await.map(super::exec::SqlRow::wrap_pg),
         c => c.fetch_all(&sql).await,
     };
     db.note(schema, &sql, t, &r);
-    let r = r.map_err(|x| super::se_at(&x, stmt, super::pg_read::COUNT_PREFIX))?;
+    let r = r.map_err(|x| super::se_at(&x, stmt, super::pg::read::COUNT_PREFIX))?;
     let n = r.first().and_then(|r| num_at(r, 0)).ok_or("The count was not a number")?;
     let _ = conn.close().await;
     Ok(n)
@@ -471,8 +471,8 @@ mod pg_tests {
 
     #[test]
     fn the_prefixes_match_the_wrappers() {
-        assert!(lex::page_sql("X", 0, 1).starts_with("SELECT * FROM (\n") && "SELECT * FROM (\n".chars().count() == super::super::pg_read::PAGE_PREFIX);
-        assert!(lex::count_sql("X").starts_with("SELECT COUNT(*) FROM (\n") && "SELECT COUNT(*) FROM (\n".chars().count() == super::super::pg_read::COUNT_PREFIX);
+        assert!(lex::page_sql("X", 0, 1).starts_with("SELECT * FROM (\n") && "SELECT * FROM (\n".chars().count() == super::super::pg::read::PAGE_PREFIX);
+        assert!(lex::count_sql("X").starts_with("SELECT COUNT(*) FROM (\n") && "SELECT COUNT(*) FROM (\n".chars().count() == super::super::pg::read::COUNT_PREFIX);
     }
 
     #[test]

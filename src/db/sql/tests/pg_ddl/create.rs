@@ -5,7 +5,7 @@
 use super::*;
 use crate::db::UndoKind;
 use crate::db::sql::create::{Ddl as What, DropInfo};
-use crate::db::sql::create_pg::{self, Check, DbChoices, DbOpts, NewIndex, TableSpec, Unique};
+use crate::db::sql::pg::create::{self, Check, DbChoices, DbOpts, NewIndex, TableSpec, Unique};
 use crate::db::sql::ddl::{ColDef, Dv};
 use crate::db::sql::structure::ForeignKey;
 use crate::db::sql::testing::{db_turn, live_pg_at, unique_name};
@@ -209,8 +209,8 @@ fn a_database_comes_from_a_listed_template_only() {
         // A database that is not a template is not offered, and one typed by hand is refused before a statement exists.
         let why = err(&make_db(l, &tidy.db("nope"), Some("quarry_test")));
         assert!(why.contains("not a template"), "{var}: {why}");
-        assert!(create_pg::create_db_sql("x", &tpl("t\"; DROP DATABASE y; --"), &ch).is_err());
-        assert_eq!(create_pg::create_db_sql("x", &tpl("template0"), &ch).unwrap(), "CREATE DATABASE \"x\" TEMPLATE \"template0\"");
+        assert!(create::create_db_sql("x", &tpl("t\"; DROP DATABASE y; --"), &ch).is_err());
+        assert_eq!(create::create_db_sql("x", &tpl("template0"), &ch).unwrap(), "CREATE DATABASE \"x\" TEMPLATE \"template0\"");
     });
 }
 
@@ -342,21 +342,21 @@ fn the_connections_own_database_and_system_names_are_refused() {
     every_pg(|l, var| {
         let tidy = Tidy::new(l);
         for n in ["postgres", "template0", "template1"] {
-            assert!(create_pg::create_db_sql(n, &DbOpts::default(), &DbChoices::default()).is_err() && create_pg::drop_db_sql(n, false).is_err(), "{var}: {n}");
+            assert!(create::create_db_sql(n, &DbOpts::default(), &DbChoices::default()).is_err() && create::drop_db_sql(n, false).is_err(), "{var}: {n}");
             let why = err(&drop_db(l, n, false));
             assert!(why.contains("belongs to the server"), "{var}: {why}");
         }
         // Names are exact on PostgreSQL: Postgres is a database of its own and is made like any other.
-        assert!(create_pg::create_db_sql("Postgres", &DbOpts::default(), &DbChoices::default()).is_ok() && create_pg::create_db_sql("POSTGRES", &DbOpts::default(), &DbChoices::default()).is_ok());
-        assert!(create_pg::create_db_sql(&"x".repeat(64), &DbOpts::default(), &DbChoices::default()).is_err());
-        assert!(create_pg::create_db_sql("a\nb", &DbOpts::default(), &DbChoices::default()).is_err() && create_pg::create_db_sql("", &DbOpts::default(), &DbChoices::default()).is_err());
+        assert!(create::create_db_sql("Postgres", &DbOpts::default(), &DbChoices::default()).is_ok() && create::create_db_sql("POSTGRES", &DbOpts::default(), &DbChoices::default()).is_ok());
+        assert!(create::create_db_sql(&"x".repeat(64), &DbOpts::default(), &DbChoices::default()).is_err());
+        assert!(create::create_db_sql("a\nb", &DbOpts::default(), &DbChoices::default()).is_err() && create::create_db_sql("", &DbOpts::default(), &DbChoices::default()).is_err());
         for s in ["pg_catalog", "information_schema", "pg_toast", "pg_toast_temp_1", "pg_temp_3", "pg_mine"] {
-            assert!(create_pg::create_schema_sql(s).is_err(), "{var}: create {s}");
+            assert!(create::create_schema_sql(s).is_err(), "{var}: create {s}");
         }
         for s in ["pg_catalog", "information_schema", "pg_toast", "pg_temp_3"] {
-            assert!(create_pg::drop_schema_sql(s, true).is_err() && create_pg::drop_table_sql(s, "t", false, false).is_err(), "{var}: drop {s}");
+            assert!(create::drop_schema_sql(s, true).is_err() && create::drop_table_sql(s, "t", false, false).is_err(), "{var}: drop {s}");
         }
-        assert!(create_pg::drop_schema_sql("Public", false).is_ok() && create_pg::drop_schema_sql("pgx", false).is_ok());
+        assert!(create::drop_schema_sql("Public", false).is_ok() && create::drop_schema_sql("pgx", false).is_ok());
         let why = err(&{
             let spec = TableSpec { schema: "pg_catalog".into(), name: "t".into(), cols: vec![ColDef::new("a", "int")], ..Default::default() };
             l.w.pg_create_table(1, l.db.at("quarry_test"), spec, false);
@@ -595,7 +595,7 @@ fn a_table_is_built_with_identity_defaults_keys_and_comments() {
             comment: "demo 'table'".into(),
             ..Default::default()
         };
-        let stmts = create_pg::create_table_stmts(&spec).unwrap();
+        let stmts = create::create_table_stmts(&spec).unwrap();
         assert!(stmts[0].starts_with(&format!("CREATE TABLE {}.{} (", ident(&s), ident(table))), "{}", stmts[0]);
         let a = made(l, &db, spec.clone());
         a.res.clone().unwrap_or_else(|x| panic!("{var}: {x}"));
@@ -803,7 +803,7 @@ fn a_table_that_cannot_be_built_is_refused_before_or_by_the_server_and_nothing_i
             ("a name with a line break", TableSpec { name: "x\ny".into(), ..base(vec![col("a", "int")]) }),
             ("a NUL in a comment", TableSpec { comment: "a\0b".into(), ..base(vec![col("a", "int")]) }),
         ] {
-            assert!(create_pg::create_table_stmts(&spec).is_err(), "{var}: {what} was not refused");
+            assert!(create::create_table_stmts(&spec).is_err(), "{var}: {what} was not refused");
         }
         // refused by the server's own check of the type, inside the transaction, so nothing is created
         let a = made(l, &db, base(vec![col("a", "int"), col("b", "nosuchtype")]));
@@ -878,7 +878,7 @@ fn dropping_a_table_lists_what_depends_on_it_and_cascade_is_opt_in() {
         assert!(err(&drop("Odd \"Name\" 1", false, false)).contains("42P01"), "{var}");
         l.w.pg_drop_table(1, db.clone(), a.clone(), "x".into(), false, false, true);
         assert!(err(&ans(l)).contains("locked"), "{var}");
-        assert!(create_pg::drop_table_sql(&a, "", false, false).is_err());
+        assert!(create::drop_table_sql(&a, "", false, false).is_err());
     });
 }
 
@@ -1192,7 +1192,7 @@ fn a_key_without_a_unique_parent_key_and_checks_that_act_outside_the_row_make_no
         // CHECK expressions: the scan refuses a call that acts outside the row and a second statement; the server refuses a subquery and an unknown function.
         let with = |expr: &str| TableSpec { checks: vec![Check { name: String::new(), expr: expr.into() }], ..orders(&s, Vec::new()) };
         for bad in ["pg_advisory_lock(1) IS NOT NULL", "dblink_exec('dbname=x', 'DROP TABLE y') = 'OK'", "(pg_backend_pid()).pg_terminate_backend", "price > 0); DROP TABLE x; --"] {
-            assert!(create_pg::create_table_stmts(&with(bad)).is_err(), "{var}: {bad}");
+            assert!(create::create_table_stmts(&with(bad)).is_err(), "{var}: {bad}");
             let why = err(&made(l, &db, with(bad)));
             assert!(!why.contains("(statement"), "{var}: {bad} reached the server: {why}");
         }

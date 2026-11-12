@@ -125,7 +125,7 @@ pub async fn stream(db: &Db, schema: &str, stmt: &str, plan: &Plan, out: &mut (d
 /// rolled back here is cut off, so the caller must close the connection when this fails.
 pub(super) async fn stream_locked(conn: &mut Conn, db: &Db, locals: &str, stmt: &str, plan: &Plan, out: &mut (dyn Write + Send), count: &AtomicU64, cancel: &AtomicBool, wrap: &Wrap<'_>) -> Res<Option<(u64, usize)>> {
     if let Conn::Pg(c) = conn {
-        super::pg_read::begin_read_only(c, db, locals).await.map_err(|x| super::se_at(&x, stmt, 0))?;
+        super::pg::read::begin_read_only(c, db, locals).await.map_err(|x| super::se_at(&x, stmt, 0))?;
     }
     let r = stream_conn(conn, db.dialect, stmt, plan, out, count, cancel, wrap).await;
     if r.is_ok() {

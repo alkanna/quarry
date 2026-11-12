@@ -3,17 +3,17 @@
 //! connection: a read-only transaction would not stop pg_cancel_backend or pg_terminate_backend, so the unlock is Quarry's own
 //! gate, and the statement that sends one checks in the same breath that the pid is still the backend the list showed.
 
-use super::exec::{bound_pg, Cells, Conn, SqlRow};
-use super::pg::{is_own, keep_own, own_mark, utc};
-use super::pg_read::in_read_only;
-use super::worker::{num_at, text_at};
-use super::value::Param;
-use super::{se, Advanced, Db, Dialect, Pool};
+use crate::db::sql::exec::{bound_pg, Cells, Conn, SqlRow};
+use crate::db::sql::pg::{is_own, keep_own, own_mark, utc};
+use crate::db::sql::pg::read::in_read_only;
+use crate::db::sql::worker::{num_at, text_at};
+use crate::db::sql::value::Param;
+use crate::db::sql::{se, Advanced, Db, Dialect, Pool};
 use crate::db::{Msg, Res, Worker};
 use sqlx::{Connection, Executor, Row};
 use std::collections::{HashMap, HashSet};
 
-pub use super::server::one_line;
+pub use crate::db::sql::server::one_line;
 
 /// Rows of one statement of Quarry's own over the simple protocol, so every value arrives as text.
 async fn rows(c: &mut sqlx::PgConnection, sql: &str) -> Result<Vec<sqlx::postgres::PgRow>, sqlx::Error> {
@@ -344,7 +344,7 @@ async fn settings(db: &Db) -> Res<Settings> {
 /// sqlx sends itself, and the Advanced tab's rows. The window marks them only where the session's source says they are in effect.
 pub fn set_by_quarry(adv: &Advanced) -> Vec<String> {
     let mut v: Vec<String> = ["application_name", "bytea_output", "client_encoding", "datestyle", "default_transaction_read_only", "extra_float_digits", "intervalstyle", "statement_timeout", "timezone"].map(String::from).to_vec();
-    if let Ok(s) = super::pg_advanced::PgSession::new(adv, super::advanced::system_zone_name()) {
+    if let Ok(s) = crate::db::sql::pg::advanced::PgSession::new(adv, crate::db::sql::advanced::system_zone_name()) {
         v.extend(s.settings.iter().map(|(n, _)| n.to_lowercase()));
     }
     v.sort();
@@ -614,7 +614,7 @@ async fn signal(db: &Db, t: &Target, terminate: bool, read_only: bool) -> Res<St
         let Conn::Pg(mut c) = db.acquire_conn().await? else { return Err("Not a PostgreSQL connection".into()) };
         let r = send_signal(&mut c, signal_begin(db), &sql, &params).await;
         let _ = c.close().await;
-        let rows = r.map_err(|x| if super::exec::sql_state(&x).as_deref() == Some("42501") { crate::db::pg_signal_refused(terminate) } else { se(x) })?;
+        let rows = r.map_err(|x| if crate::db::sql::exec::sql_state(&x).as_deref() == Some("42501") { crate::db::pg_signal_refused(terminate) } else { se(x) })?;
         let row = rows.first().map(|r| (txt(r, 0), txt(r, 1), txt(r, 2), txt(r, 3) == "1", text_at(r, 4)));
         signal_outcome(t, terminate, same_statement, row.as_ref().map(|(a, b, q, m, s)| (a.as_str(), b.as_str(), q.as_str(), *m, s.as_deref())))
     }
@@ -667,5 +667,5 @@ impl Worker {
 }
 
 #[cfg(test)]
-#[path = "pg_server_tests.rs"]
+#[path = "server_tests.rs"]
 mod tests;

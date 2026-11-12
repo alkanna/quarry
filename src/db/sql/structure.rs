@@ -144,7 +144,7 @@ pub struct ForeignKey {
     pub comment: String,
     /// PostgreSQL: why this key cannot be written back (an ON DELETE column list, PERIOD, NOT ENFORCED), empty when it can.
     pub opaque: String,
-    /// PostgreSQL: the referenced table's key columns and unique indexes as the dialog read them (`ddl_pg::ref_state`),
+    /// PostgreSQL: the referenced table's key columns and unique indexes as the dialog read them (`pg::ddl::ref_state`),
     /// which the transaction must find again after it holds the lock. Empty for a key read from the catalog.
     pub ref_seen: Vec<String>,
 }
@@ -164,7 +164,7 @@ pub struct Trigger {
     pub pg: Option<Box<PgTrig>>,
 }
 
-/// A PostgreSQL trigger as the catalogs hold it, read with `pg_catalog::TRIGGERS`. The trigger is the part on the table; the
+/// A PostgreSQL trigger as the catalogs hold it, read with `pg::catalog::TRIGGERS`. The trigger is the part on the table; the
 /// function it runs is a separate object, often shared, and is read along because the editor writes both.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PgTrig {
@@ -198,7 +198,7 @@ pub struct PgTrig {
     pub func_ext: bool,
     /// `pg_get_triggerdef`: the statement that creates the trigger again.
     pub trig_def: String,
-    /// What the transaction must find again under the table's lock (`pg_catalog::SEEN_TRIGGER` and `SEEN_FUNCTION`).
+    /// What the transaction must find again under the table's lock (`pg::catalog::SEEN_TRIGGER` and `SEEN_FUNCTION`).
     pub seen_trig: String,
     pub seen_func: String,
     /// Why no change of the trigger can be written back, and why it cannot be created again (its function can still change).
@@ -533,11 +533,11 @@ async fn extras(db: &Db, schema: &str, table: &str, st: &mut Structure) -> Res<(
         // The key parts, hidden state and SRIDs are already in the main queries. What a CREATE TABLE still needs is the
         // constraints that are not foreign keys.
         Dialect::Postgres => {
-            if let Ok(rows) = query(db, super::pg_catalog::CONSTRAINTS, schema, table).await {
+            if let Ok(rows) = query(db, super::pg::catalog::CONSTRAINTS, schema, table).await {
                 st.constraints = constraints(&rows);
             }
             // Not optional: an undo of a dropped column trusts this list to say what went with the column.
-            st.pg_deps = col_deps(&query(db, super::pg_catalog::COLUMN_DEPS, schema, table).await?);
+            st.pg_deps = col_deps(&query(db, super::pg::catalog::COLUMN_DEPS, schema, table).await?);
             return Ok(());
         }
         Dialect::MySql => (

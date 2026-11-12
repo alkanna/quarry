@@ -57,7 +57,7 @@ pub struct Advanced {
     pub connect_secs: Option<u32>,
     pub query_secs: Option<u32>,
     pub idle_secs: Option<u32>,
-    /// PostgreSQL only: the rows of the Advanced tab as (name, value), names from `pg_advanced::ALLOWED`.
+    /// PostgreSQL only: the rows of the Advanced tab as (name, value), names from `pg::advanced::ALLOWED`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub pg_settings: Vec<(String, String)>,
     /// PostgreSQL only: the saved search_path list. The schema picked in the sidebar goes in front of it.

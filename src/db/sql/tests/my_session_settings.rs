@@ -2,12 +2,12 @@
 //! pool whose every connection runs a SET first) must not lose writes, rows or characters. Needs QUARRY_TEST_MYSQL
 //! and QUARRY_TEST_MARIADB; a test skips a server whose variable is unset.
 
-use super::csv::Source;
-use super::dump::{dump_to, run_file, DumpPlan, DumpTable};
-use super::export::{export_to, Plan, Sink};
-use super::import::Progress;
-use super::testing::every_server;
-use super::{Db, Dialect, Relay, RunHandle};
+use crate::db::sql::csv::Source;
+use crate::db::sql::dump::{dump_to, run_file, DumpPlan, DumpTable};
+use crate::db::sql::export::{export_to, Plan, Sink};
+use crate::db::sql::import::Progress;
+use crate::db::sql::testing::every_server;
+use crate::db::sql::{Db, Dialect, Relay, RunHandle};
 use crate::db::copy::Fmt;
 use crate::db::Msg;
 use mongodb::bson::Bson;
@@ -20,7 +20,7 @@ fn tmp(var: &str, name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("quarry_ff_{}_{var}_{name}", std::process::id()))
 }
 
-fn run(l: &super::testing::Live, db: &Db, schema: &str, text: &str) -> Result<super::dump::Ran, String> {
+fn run(l: &crate::db::sql::testing::Live, db: &Db, schema: &str, text: &str) -> Result<crate::db::sql::dump::Ran, String> {
     let path = tmp(schema, "script.sql");
     std::fs::write(&path, text).unwrap();
     let r = l.w.rt.block_on(run_file(db.clone(), schema.into(), Source::File(path.clone()), false, Arc::new(Progress::default()), Arc::new(AtomicBool::new(false)), Arc::new(AtomicU64::new(0))));
@@ -66,7 +66,7 @@ fn live_dumps_exports_and_structure_ignore_the_session_charset_and_row_limit() {
                 l.sql(&format!("INSERT INTO {db}.t VALUES ({id}, '{s}')"));
             }
             let odd = l.with_session(set);
-            let st = l.w.rt.block_on(super::structure::load(&odd, db, "t")).unwrap();
+            let st = l.w.rt.block_on(crate::db::sql::structure::load(&odd, db, "t")).unwrap();
             assert_eq!(st.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["id", "s"], "{var} {set}: structure");
             let out = l.w.rt.block_on(export_to(&odd, db, "SELECT id, s FROM t ORDER BY id", &Plan { fmt: Fmt::Csv, header: false, table: String::new(), bs: true }, Sink::Clipboard, &AtomicU64::new(0), &AtomicBool::new(false), &AtomicU64::new(0))).unwrap();
             assert_eq!(out.rows, 3, "{var} {set}: export");
@@ -102,7 +102,7 @@ fn live_an_alter_runs_past_the_statement_timeout() {
             sqlx::Executor::execute(&mut hold, "START TRANSACTION").await.unwrap();
             sqlx::Executor::execute(&mut hold, format!("SELECT * FROM {db}.t").as_str()).await.unwrap();
         });
-        let m = super::ddl::Mode::of(&l.db.sql_mode);
+        let m = crate::db::sql::ddl::Mode::of(&l.db.sql_mode);
         l.w.sql_alter(1, odd, db.into(), "t".into(), "ALTER TABLE `t` ADD COLUMN `z` INT".into(), m, None, false, "done".into());
         std::thread::sleep(Duration::from_millis(2500));
         l.w.rt.block_on(async { sqlx::Executor::execute(&mut hold, "COMMIT").await.unwrap() });
@@ -138,7 +138,7 @@ fn live_the_relay_fills_values_for_its_own_session_mode() {
         let value = r"C:\temp\'x";
         l.w.rt.block_on(async {
             let mut r = Relay::open(&nb, db, false, &AtomicU64::new(0)).await.unwrap();
-            r.query("INSERT INTO t VALUES (1, ?)", &[super::value::Param::Text(value.into())]).await.unwrap();
+            r.query("INSERT INTO t VALUES (1, ?)", &[crate::db::sql::value::Param::Text(value.into())]).await.unwrap();
         });
         assert_eq!(l.one(&format!("SELECT s FROM {db}.t WHERE id = 1")), value, "{var}");
         l.sql(&format!("DROP DATABASE {db}"));
@@ -165,7 +165,7 @@ fn live_sql_statements_reach_the_query_log_without_passwords() {
         let Msg::SqlCols { cols, .. } = l.rx.recv_timeout(Duration::from_secs(15)).unwrap() else { panic!("{var}: cols") };
         let Msg::Docs { res: Ok((rows, _, _)), .. } = l.rx.recv_timeout(Duration::from_secs(15)).unwrap() else { panic!("{var}: docs") };
         let key = rows[0].decode().unwrap().get_document("_id").unwrap().clone();
-        let change = super::write::RowEdit { pk: key, changes: vec![("name".into(), Bson::String("a".into()), Bson::String("b".into()))] };
+        let change = crate::db::sql::write::RowEdit { pk: key, changes: vec![("name".into(), Bson::String("a".into()), Bson::String("b".into()))] };
         l.w.sql_save(vec!["k".into()], conn, db.clone(), schema.into(), "t".into(), cols, vec!["id".into()], vec![change], false);
         let Msg::Saved { res, .. } = l.rx.recv_timeout(Duration::from_secs(15)).unwrap() else { panic!("{var}: Saved") };
         res.unwrap_or_else(|x| panic!("{var}: {x}"));

@@ -6,7 +6,7 @@
 use super::fk::hold;
 use super::*;
 use crate::db::sql::ddl::{PgDef, TrigDef, TrigJob, TrigSave};
-use crate::db::sql::ddl_pg_trig;
+use crate::db::sql::pg::ddl_trig;
 use crate::db::sql::structure::Trigger;
 
 const DDL: &str = "CREATE TABLE t (id integer PRIMARY KEY, name text, qty integer); INSERT INTO t VALUES (1, 'a', 1); \
@@ -33,7 +33,7 @@ fn create(d: TrigDef) -> TrigJob {
 /// The trigger as the editor holds it after the person changed it.
 fn edit_on(t: &T, table: &str, name: &str, f: impl FnOnce(&mut TrigDef)) -> TrigJob {
     let was = trigger_on(t, table, name);
-    let mut d = ddl_pg_trig::def_of(&was);
+    let mut d = ddl_trig::def_of(&was);
     f(&mut d);
     TrigJob::Edit { was, save: TrigSave { def: d, definer: None, order: None } }
 }
@@ -117,7 +117,7 @@ fn a_body_is_edited_and_the_undo_puts_the_old_function_back_exactly() {
                CREATE TRIGGER audit BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION audit_fn(); COMMENT ON TRIGGER audit ON t IS 'who watches'; COMMENT ON FUNCTION audit_fn() IS 'the audit'");
         let before = world(&t);
         let job = edit(&t, "audit", |d| d.body = "BEGIN\n  NEW.name := lower(NEW.name) || '!';\n  RETURN NEW;\nEND".into());
-        let (steps, warnings) = ddl_pg_trig::preview(&t.schema, "t", &job).unwrap();
+        let (steps, warnings) = ddl_trig::preview(&t.schema, "t", &job).unwrap();
         assert_eq!(steps.len(), 1, "{var}: the trigger part is the same, so only the function is replaced");
         assert!(warnings.iter().any(|w| w.contains("SECURITY DEFINER")), "{var}: {warnings:?}");
         let a = apply(&t, job);
@@ -145,14 +145,14 @@ fn timing_events_when_columns_and_row_or_statement_are_changed_and_the_undo_is_e
             d.pg.of_cols = "name, qty".into();
             d.pg.when = "NEW.qty > 0".into();
         });
-        let (steps, _) = ddl_pg_trig::preview(&t.schema, "t", &job).unwrap();
+        let (steps, _) = ddl_trig::preview(&t.schema, "t", &job).unwrap();
         assert!(steps[0].starts_with("DROP TRIGGER IF EXISTS \"audit\" ON ") && steps[1].starts_with("CREATE TRIGGER \"audit\" AFTER INSERT OR UPDATE OF \"name\", \"qty\" ON "), "{var}: {steps:?}");
         let a = apply(&t, job);
         let now = world(&t);
         assert!(now.contains("AFTER INSERT OR UPDATE OF name, qty ON") && now.contains("WHEN ((new.qty > 0))") && now.contains("|O|who watches"), "{var}: {now}");
         // the structure reads the parts back the way the editor holds them
         let read = trigger_on(&t, "t", "audit");
-        let d = ddl_pg_trig::def_of(&read);
+        let d = ddl_trig::def_of(&read);
         assert_eq!((d.timing.as_str(), d.event.as_str(), d.pg.of_cols.as_str(), d.pg.when.as_str(), d.pg.per_row), ("AFTER", "INSERT OR UPDATE", "name, qty", "new.qty > 0", true), "{var}");
         undo(&t, a).0.unwrap_or_else(|x| panic!("{var}: {x}"));
         assert_eq!(world(&t), before, "{var}");
@@ -179,7 +179,7 @@ fn a_trigger_is_disabled_and_enabled_with_the_weak_lock_and_the_undo_is_exact() 
         t.sql("CREATE FUNCTION audit_fn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.name := 'T'; RETURN NEW; END $$; CREATE TRIGGER audit BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION audit_fn()");
         let before = world(&t);
         let job = edit(&t, "audit", |d| d.pg.mode = "D".into());
-        assert_eq!(ddl_pg_trig::preview(&t.schema, "t", &job).unwrap().0.len(), 1, "{var}: only ALTER TABLE .. DISABLE TRIGGER");
+        assert_eq!(ddl_trig::preview(&t.schema, "t", &job).unwrap().0.len(), 1, "{var}: only ALTER TABLE .. DISABLE TRIGGER");
         // ALTER TABLE .. DISABLE TRIGGER takes SHARE ROW EXCLUSIVE, so a reader of the table does not stop it
         let held = hold(&t, "t", "ACCESS SHARE");
         let a = apply(&t, job);
@@ -207,7 +207,7 @@ fn a_dropped_trigger_takes_its_function_and_the_undo_brings_both_back() {
         t.sql("CREATE FUNCTION audit_fn() RETURNS trigger LANGUAGE plpgsql AS $$\nBEGIN\n  RETURN NEW;\nEND\n$$; CREATE TRIGGER audit AFTER INSERT OR UPDATE ON t FOR EACH ROW WHEN (NEW.qty > 0) EXECUTE FUNCTION audit_fn(); \
                ALTER TABLE t DISABLE TRIGGER audit; COMMENT ON TRIGGER audit ON t IS 'who watches'; COMMENT ON FUNCTION audit_fn() IS 'the audit'");
         let before = world(&t);
-        let (steps, _) = ddl_pg_trig::preview(&t.schema, "t", &drop_job(&t, "audit")).unwrap();
+        let (steps, _) = ddl_trig::preview(&t.schema, "t", &drop_job(&t, "audit")).unwrap();
         assert_eq!(steps.len(), 2, "{var}: {steps:?}");
         let a = apply(&t, drop_job(&t, "audit"));
         assert_eq!(world(&t), "", "{var}: the function is gone with its trigger");
@@ -215,7 +215,7 @@ fn a_dropped_trigger_takes_its_function_and_the_undo_brings_both_back() {
         assert_eq!(world(&t), before, "{var}: trigger, state, comments and function are back");
         // a function with privileges granted on it is kept, since the undo could not give them back
         t.sql("REVOKE EXECUTE ON FUNCTION audit_fn() FROM PUBLIC");
-        let kept = ddl_pg_trig::preview(&t.schema, "t", &drop_job(&t, "audit"));
+        let kept = ddl_trig::preview(&t.schema, "t", &drop_job(&t, "audit"));
         let (steps, warnings) = kept.unwrap();
         assert_eq!(steps.len(), 1, "{var}: {steps:?}");
         assert!(warnings[0].contains("privileges"), "{var}: {warnings:?}");
@@ -230,7 +230,7 @@ fn a_function_other_triggers_run_is_warned_about_and_kept() {
                CREATE TRIGGER s1 BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION shared_fn(); CREATE TRIGGER s2 BEFORE UPDATE ON t FOR EACH ROW EXECUTE FUNCTION shared_fn()");
         let before = world(&t);
         let job = edit(&t, "s1", |d| d.body = "BEGIN\n  NEW.qty := 99;\n  RETURN NEW;\nEND".into());
-        let (_, warnings) = ddl_pg_trig::preview(&t.schema, "t", &job).unwrap();
+        let (_, warnings) = ddl_trig::preview(&t.schema, "t", &job).unwrap();
         assert!(warnings.iter().any(|w| w.contains("also runs 1 other trigger")), "{var}: {warnings:?}");
         let a = apply(&t, job);
         t.sql("UPDATE t SET name = 'q' WHERE id = 1");
@@ -240,7 +240,7 @@ fn a_function_other_triggers_run_is_warned_about_and_kept() {
         undo(&t, a).0.unwrap_or_else(|x| panic!("{var}: {x}"));
         assert_eq!(world(&t), before, "{var}");
         // dropping one trigger keeps the function the other runs
-        let (steps, warnings) = ddl_pg_trig::preview(&t.schema, "t", &drop_job(&t, "s1")).unwrap();
+        let (steps, warnings) = ddl_trig::preview(&t.schema, "t", &drop_job(&t, "s1")).unwrap();
         assert_eq!(steps.len(), 1, "{var}: {steps:?}");
         assert!(warnings[0].contains("stays") && warnings[0].contains("1 other trigger"), "{var}: {warnings:?}");
         let a = apply(&t, drop_job(&t, "s1"));
@@ -326,7 +326,7 @@ fn what_cannot_be_written_back_exactly_is_refused_with_its_reason() {
         let before = world(&t);
         let err = run(&t, edit(&t, "sup", |d| d.body = "x".into())).0.unwrap_err();
         assert!(err.contains("internal"), "{var}: {err}");
-        let (steps, _) = ddl_pg_trig::preview(&t.schema, "t", &drop_job(&t, "sup")).unwrap();
+        let (steps, _) = ddl_trig::preview(&t.schema, "t", &drop_job(&t, "sup")).unwrap();
         assert_eq!(steps.len(), 1, "{var}");
         let a = apply(&t, drop_job(&t, "sup"));
         undo(&t, a).0.unwrap_or_else(|x| panic!("{var}: {x}"));
@@ -549,7 +549,7 @@ fn a_column_with_a_comma_in_its_name_keeps_a_body_only_save_from_rewriting_the_t
         let was = trig();
         assert!(was.contains("UPDATE OF \"a,b\" ON"), "{var}: {was}");
         let job = edit_on(&t, "c", "ct", |d| d.body = "BEGIN\n  RETURN NEW;\nEND -- x".into());
-        let (steps, _) = ddl_pg_trig::preview(&t.schema, "c", &job).unwrap();
+        let (steps, _) = ddl_trig::preview(&t.schema, "c", &job).unwrap();
         assert_eq!(steps.len(), 1, "{var}: the trigger part is untouched, so only the function is replaced: {steps:?}");
         let (res, undo_a, _) = run_on(t.l, &t.db, &t.schema, "c", job);
         res.unwrap_or_else(|x| panic!("{var}: {x}"));
@@ -616,11 +616,11 @@ fn a_function_that_would_come_back_with_other_privileges_is_kept() {
     every_pg(|l, var| {
         let t = fixture(l, var, "trgdefacl", DDL);
         t.sql("CREATE FUNCTION d_fn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$; CREATE TRIGGER dt BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION d_fn()");
-        let (steps, _) = ddl_pg_trig::preview(&t.schema, "t", &drop_job(&t, "dt")).unwrap();
+        let (steps, _) = ddl_trig::preview(&t.schema, "t", &drop_job(&t, "dt")).unwrap();
         assert_eq!(steps.len(), 2, "{var}: a function with no ACL and no default privileges comes back as it was");
         // a function made now would get this ACL, while the one dropped has none
         t.sql(&format!("ALTER DEFAULT PRIVILEGES IN SCHEMA {} GRANT EXECUTE ON FUNCTIONS TO PUBLIC", t.schema));
-        let (steps, warnings) = ddl_pg_trig::preview(&t.schema, "t", &drop_job(&t, "dt")).unwrap();
+        let (steps, warnings) = ddl_trig::preview(&t.schema, "t", &drop_job(&t, "dt")).unwrap();
         assert_eq!(steps.len(), 1, "{var}: {steps:?}");
         assert!(warnings[0].contains("default privileges"), "{var}: {warnings:?}");
     });
@@ -673,16 +673,16 @@ fn a_function_the_role_cannot_create_again_is_kept_so_the_undo_of_a_drop_works()
         };
         assert_eq!(t.one(&format!("SELECT has_schema_privilege('{}', '{}', 'CREATE')::text", owner.name, x.name)), "false", "{var}");
         let drop = as_owner(&|tr| TrigJob::Drop(tr.clone()));
-        let (steps, warnings) = ddl_pg_trig::preview(&t.schema, "t", &drop).unwrap();
+        let (steps, warnings) = ddl_trig::preview(&t.schema, "t", &drop).unwrap();
         assert_eq!(steps.len(), 1, "{var}: the function stays: {steps:?}");
         assert!(warnings[0].contains("CREATE"), "{var}: {warnings:?}");
         // a new body is a CREATE OR REPLACE, which needs the same privilege: it is refused with the reason
         let body = as_owner(&|tr| {
-            let mut d = ddl_pg_trig::def_of(tr);
+            let mut d = ddl_trig::def_of(tr);
             d.body = "BEGIN\n  RETURN NEW;\nEND -- x".into();
             TrigJob::Edit { was: tr.clone(), save: TrigSave { def: d, definer: None, order: None } }
         });
-        let err = ddl_pg_trig::preview(&t.schema, "t", &body).unwrap_err();
+        let err = ddl_trig::preview(&t.schema, "t", &body).unwrap_err();
         assert!(err.contains("CREATE privilege"), "{var}: {err}");
         let (res, undo_a, _) = run_on(&r, &db, &t.schema, "t", drop);
         res.unwrap_or_else(|e| panic!("{var}: {e}"));
@@ -701,7 +701,7 @@ fn a_trigger_on_a_view_cannot_be_switched_off() {
         t.sql("CREATE VIEW v AS SELECT * FROM t; CREATE FUNCTION v_fn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$; \
                CREATE TRIGGER vt INSTEAD OF INSERT ON v FOR EACH ROW EXECUTE FUNCTION v_fn()");
         let job = edit_on(&t, "v", "vt", |d| d.pg.mode = "D".into());
-        let err = ddl_pg_trig::preview(&t.schema, "v", &job).unwrap_err();
+        let err = ddl_trig::preview(&t.schema, "v", &job).unwrap_err();
         assert!(err.contains("view"), "{var}: {err}");
         assert_eq!(t.one("SELECT tgenabled::text FROM pg_trigger WHERE tgname = 'vt' AND tgrelid = 'v'::regclass"), "O", "{var}");
     });

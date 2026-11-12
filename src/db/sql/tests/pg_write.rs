@@ -1,11 +1,11 @@
 //! Live tests of writing rows on PostgreSQL, run on every server named by QUARRY_TEST_POSTGRES and
 //! QUARRY_TEST_POSTGRES13. Each test makes its own schema in the shared `quarry_test` database.
 
-use super::exec::Cells;
-use super::testing::{every_pg, LivePg, PgFixture};
-use super::value::{parse_edit, Kind};
-use super::write::{NewRow, RowEdit, SqlUndo, CONFLICT, SEVERAL};
-use super::{Col, Dialect, PageQuery};
+use crate::db::sql::exec::Cells;
+use crate::db::sql::testing::{every_pg, LivePg, PgFixture};
+use crate::db::sql::value::{parse_edit, Kind};
+use crate::db::sql::write::{NewRow, RowEdit, SqlUndo, CONFLICT, SEVERAL};
+use crate::db::sql::{Col, Dialect, PageQuery};
 use crate::db::{Msg, Res, UndoAction, UndoKind};
 use mongodb::bson::{doc, Bson, Document};
 use sqlx::{Connection, Executor};
@@ -400,8 +400,8 @@ fn the_writer_writes_while_the_pooled_session_stays_read_only() {
 
 // Review fixes: the export guard and the tighter write checks.
 
-fn export_plan() -> super::export::AllPlan {
-    super::export::AllPlan { plan: super::export::Plan { fmt: crate::db::copy::Fmt::Csv, header: true, table: "t".into(), bs: false }, single: false }
+fn export_plan() -> crate::db::sql::export::AllPlan {
+    crate::db::sql::export::AllPlan { plan: crate::db::sql::export::Plan { fmt: crate::db::copy::Fmt::Csv, header: true, table: "t".into(), bs: false }, single: false }
 }
 
 #[test]
@@ -415,7 +415,7 @@ fn export_all_runs_every_statement_alone_in_a_rolled_back_transaction() {
         let stmts = vec!["SELECT set_config('quarry.leak', 'leaked', false) AS a".to_string(), "SELECT coalesce(current_setting('quarry.leak', true), '') AS seen".to_string()];
         let (mut parts, mut open) = (Vec::new(), None);
         let (count, step, cancel, id) = (Default::default(), Default::default(), Default::default(), Default::default());
-        let r = l.w.rt.block_on(super::export::run_all(&t.db, "t5f_exp", &stmts, &export_plan(), &path, &count, &step, &cancel, &id, &mut parts, &mut open));
+        let r = l.w.rt.block_on(crate::db::sql::export::run_all(&t.db, "t5f_exp", &stmts, &export_plan(), &path, &count, &step, &cancel, &id, &mut parts, &mut open));
         assert!(r.is_ok(), "{var}: {r:?}");
         assert_eq!(parts.len(), 2, "{var}");
         let second = std::fs::read_to_string(&parts[1].0).unwrap();
@@ -431,10 +431,10 @@ fn an_export_without_startup_options_still_cannot_write() {
         // A connection with no default_transaction_read_only, as behind a pooler that refused the startup options.
         let res = l.w.rt.block_on(async {
             let o = <sqlx::postgres::PgConnectOptions as std::str::FromStr>::from_str(&l.uri).unwrap().database("quarry_test");
-            let mut c = super::exec::Conn::Pg(super::pg::PgConn::free(sqlx::PgConnection::connect_with(&o).await.unwrap()));
-            let plan = super::export::Plan { fmt: crate::db::copy::Fmt::Csv, header: true, table: "t".into(), bs: false };
+            let mut c = crate::db::sql::exec::Conn::Pg(crate::db::sql::pg::PgConn::free(sqlx::PgConnection::connect_with(&o).await.unwrap()));
+            let plan = crate::db::sql::export::Plan { fmt: crate::db::copy::Fmt::Csv, header: true, table: "t".into(), bs: false };
             let mut out = Vec::new();
-            let r = super::export::stream_locked(&mut c, &l.db, "SET LOCAL statement_timeout = 0", "INSERT INTO t5f_pool.t VALUES (1) RETURNING id", &plan, &mut out, &Default::default(), &Default::default(), &Default::default()).await;
+            let r = crate::db::sql::export::stream_locked(&mut c, &l.db, "SET LOCAL statement_timeout = 0", "INSERT INTO t5f_pool.t VALUES (1) RETURNING id", &plan, &mut out, &Default::default(), &Default::default(), &Default::default()).await;
             let _ = c.close().await;
             r
         });
@@ -453,7 +453,7 @@ fn a_user_type_is_named_with_its_schema_in_the_cast() {
         let m = cols.iter().find(|c| c.name == "m").unwrap();
         assert_eq!(m.ty, "public.t5f_mood", "{var}");
         let ed = RowEdit { pk: pk_doc(&rows[0]), changes: vec![("m".into(), Bson::String("ok".into()), Bson::String("fine".into()))] };
-        let (sql, _) = super::write::update_sql(Dialect::Postgres, "t5f_ty", "t", &cols, &ed);
+        let (sql, _) = crate::db::sql::write::update_sql(Dialect::Postgres, "t5f_ty", "t", &cols, &ed);
         assert!(sql.contains("CAST($1 AS public.t5f_mood)"), "{var}: {sql}");
         t.sql("DROP SCHEMA t5f_ty CASCADE; DROP DOMAIN public.t5f_mood");
     });

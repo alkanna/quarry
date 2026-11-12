@@ -12,14 +12,14 @@
 //! is rewritten by replacing only its body inside the text `pg_get_functiondef` gave, so SECURITY DEFINER, SET clauses and
 //! every other attribute are carried through exactly; when that text cannot be taken apart exactly the change is refused.
 
-use super::ddl::{PgDef, TrigDef, TrigJob, TrigUndo};
-use super::ddl_pg::{check_cond_pg, comment_stmt, fail_text, ids_in, name_ok, q, qn, run_locked, set_local, set_path, Fail, Lock, RELOAD_STRUCTURE};
-use super::exec::Tx;
-use super::lex::dollar_quote;
-use super::pg_catalog::{SEEN_FUNCTION, SEEN_TRIGGER};
-use super::structure::PgTrig;
-use super::value::Param;
-use super::{se, worker::text, write, Db};
+use crate::db::sql::ddl::{PgDef, TrigDef, TrigJob, TrigUndo};
+use crate::db::sql::pg::ddl::{check_cond_pg, comment_stmt, fail_text, ids_in, name_ok, q, qn, run_locked, set_local, set_path, Fail, Lock, RELOAD_STRUCTURE};
+use crate::db::sql::exec::Tx;
+use crate::db::sql::lex::dollar_quote;
+use crate::db::sql::pg::catalog::{SEEN_FUNCTION, SEEN_TRIGGER};
+use crate::db::sql::structure::PgTrig;
+use crate::db::sql::value::Param;
+use crate::db::sql::{se, worker::text, write, Db};
 use crate::db::{Msg, Res, UndoAction, UndoKind, Worker};
 
 /// The events in the order the server prints them.
@@ -182,7 +182,7 @@ fn rewrite_function(def: &str, src: &str, body: &str) -> Result<String, String> 
     Ok(format!("{cut}AS {tag}{body}{tag}\n"))
 }
 
-/// What the transaction finds again under the lock: the trigger and the function as `pg_catalog::SEEN_TRIGGER` and
+/// What the transaction finds again under the lock: the trigger and the function as `pg::catalog::SEEN_TRIGGER` and
 /// `SEEN_FUNCTION` print them, or None for an object that must not exist.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Seen {
@@ -226,7 +226,7 @@ fn others(n: u64) -> String {
 }
 
 /// Whether the trigger part of the draft is not what was read: only then is the trigger dropped and created again.
-fn trigger_changed(h: &Head, pg: &PgTrig, was: &super::structure::Trigger) -> bool {
+fn trigger_changed(h: &Head, pg: &PgTrig, was: &crate::db::sql::structure::Trigger) -> bool {
     !was.timing.eq_ignore_ascii_case(&h.timing) || canonical(&events_of(&was.event)) != canonical(&h.events) || pg.of_cols != h.cols || pg.per_row != h.per_row || pg.when.trim() != h.when
 }
 
@@ -253,7 +253,7 @@ fn plan_create(schema: &str, table: &str, d: &TrigDef) -> Result<PgPlan, String>
     Ok(PgPlan { steps, warnings: Vec::new(), exclusive: false, before: Seen::default(), trig: h.name.clone(), func_schema: schema.into(), func: f, undo, label: format!("created trigger {}", h.name) })
 }
 
-fn plan_edit(schema: &str, table: &str, was: &super::structure::Trigger, d: &TrigDef) -> Result<PgPlan, String> {
+fn plan_edit(schema: &str, table: &str, was: &crate::db::sql::structure::Trigger, d: &TrigDef) -> Result<PgPlan, String> {
     let pg = was.pg.as_deref().ok_or("This is not a PostgreSQL trigger.")?;
     if !pg.refuse.is_empty() {
         return Err(format!("{} Nothing was changed.", pg.refuse));
@@ -337,7 +337,7 @@ fn plan_edit(schema: &str, table: &str, was: &super::structure::Trigger, d: &Tri
     })
 }
 
-fn plan_drop(schema: &str, table: &str, was: &super::structure::Trigger) -> Result<PgPlan, String> {
+fn plan_drop(schema: &str, table: &str, was: &crate::db::sql::structure::Trigger) -> Result<PgPlan, String> {
     let pg = was.pg.as_deref().ok_or("This is not a PostgreSQL trigger.")?;
     if !pg.refuse.is_empty() {
         return Err(format!("{} Nothing was changed.", pg.refuse));
@@ -462,7 +462,7 @@ async fn checked(tx: &mut Tx<'_>, db: &Db, schema: &str, table: &str, u: &Unit<'
         return Err(Fail::Changed(format!("the function {}", func_q(u.func_schema, u.func))));
     }
     for (i, s) in u.steps.iter().enumerate() {
-        super::ddl_pg::exec(tx, db, schema, s).await.map_err(|e| Fail::Run(format!("{} (statement {} of {}). The whole change was rolled back, so nothing was changed.", se(e), i + 1, u.steps.len())))?;
+        crate::db::sql::pg::ddl::exec(tx, db, schema, s).await.map_err(|e| Fail::Run(format!("{} (statement {} of {}). The whole change was rolled back, so nothing was changed.", se(e), i + 1, u.steps.len())))?;
     }
     seen(tx, schema, table, u.trig, u.func_schema, u.func).await
 }
@@ -482,7 +482,7 @@ fn undo_action(db: &Db, conn: u64, schema: &str, table: &str, u: TrigUndo, ids: 
 }
 
 /// Runs a recorded undo in one transaction, after checking the trigger and its function are as the change left them.
-pub(super) async fn undo(db: &Db, a: UndoAction, u: TrigUndo, read_only: bool) -> Msg {
+pub(in crate::db::sql) async fn undo(db: &Db, a: UndoAction, u: TrigUndo, read_only: bool) -> Msg {
     let ids = match &a.kind {
         UndoKind::Sql { ids, .. } => ids.clone(),
         _ => write::PgIds::default(),
@@ -534,7 +534,7 @@ pub fn blank() -> TrigDef {
 }
 
 /// The editor's definition of a trigger that exists: its function's body stands in for the body.
-pub fn def_of(t: &super::structure::Trigger) -> TrigDef {
+pub fn def_of(t: &crate::db::sql::structure::Trigger) -> TrigDef {
     let Some(pg) = t.pg.as_deref() else { return TrigDef { name: t.name.clone(), timing: t.timing.clone(), event: t.event.clone(), body: t.body.clone(), pg: PgDef::default() } };
     TrigDef {
         name: t.name.clone(),

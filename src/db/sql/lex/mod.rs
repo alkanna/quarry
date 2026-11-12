@@ -4,7 +4,6 @@
 use super::Dialect;
 use std::ops::Range;
 
-#[path = "lex_pg.rs"]
 mod pg;
 pub(super) use pg::{dollar_quote, refused_call};
 

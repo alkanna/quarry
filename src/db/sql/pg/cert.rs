@@ -22,7 +22,7 @@ pub(crate) const CERT_ALERT: &str = "Client certificate refused:";
 pub(crate) const VERIFY_CA_NO_CA: &str = "TLS verify-ca needs a CA file";
 
 /// A leading `~/` is the home folder, as people type it; libpq's own default paths use it too.
-pub(super) fn expand(p: &str) -> PathBuf {
+pub(in crate::db::sql) fn expand(p: &str) -> PathBuf {
     match p.strip_prefix("~/").zip(dirs::home_dir()) {
         Some((rest, home)) => home.join(rest),
         None => PathBuf::from(p),
@@ -44,7 +44,7 @@ fn block<'a>(text: &'a str, label: &str) -> Option<&'a str> {
 }
 
 /// Reads the certificate chain and the private key as PEM. Empty paths on both sides mean no client certificate.
-pub(super) fn load(cert: &str, key: &str, passphrase: Option<&str>) -> Res<Option<(Vec<u8>, Vec<u8>)>> {
+pub(in crate::db::sql) fn load(cert: &str, key: &str, passphrase: Option<&str>) -> Res<Option<(Vec<u8>, Vec<u8>)>> {
     let (cert, key) = (cert.trim(), key.trim());
     match (cert.is_empty(), key.is_empty()) {
         (true, true) => return Ok(None),
@@ -91,7 +91,7 @@ pub(crate) fn subject(dn: &str) -> String {
 
 /// What Test adds about the client certificate: the subject the server saw, or why none was seen.
 pub(crate) fn test_note(uri: &str, dn: &str, tls: bool, cloud: bool) -> String {
-    let set = super::Addr::parse(uri).is_some_and(|a| a.engine() == super::Engine::Postgres && !a.ssl_cert.trim().is_empty() && a.ssl_mode != super::SslMode::Disabled);
+    let set = crate::db::sql::Addr::parse(uri).is_some_and(|a| a.engine() == crate::db::sql::Engine::Postgres && !a.ssl_cert.trim().is_empty() && a.ssl_mode != crate::db::sql::SslMode::Disabled);
     if !dn.is_empty() {
         format!(" with client certificate {dn}")
     } else if !set || cloud {
@@ -197,15 +197,15 @@ pub(crate) mod tests {
         use std::time::Duration;
         let Ok(dir) = std::env::var("QUARRY_TEST_PGCERT_DIR") else { return };
         let p = |f: &str| std::path::Path::new(&dir).join(f).display().to_string();
-        // require is sqlx's own TLS; verify-ca goes through pg_tls, which sends the certificate itself.
-        let modes = [(super::super::SslMode::Required, String::new()), (super::super::SslMode::VerifyCa, p("ca.crt"))];
+        // require is sqlx's own TLS; verify-ca goes through pg::tls, which sends the certificate itself.
+        let modes = [(crate::db::sql::SslMode::Required, String::new()), (crate::db::sql::SslMode::VerifyCa, p("ca.crt"))];
         for (var, (mode, ca)) in ["QUARRY_TEST_PGCERT", "QUARRY_TEST_PGCERT13"].into_iter().flat_map(|v| modes.clone().map(|m| (v, m))) {
             let Ok(base) = std::env::var(var) else { continue };
             let (tx, rx) = std::sync::mpsc::channel();
             let w = Worker::new(tx, eframe::egui::Context::default());
             let uri = |cert: &str, key: &str| {
-                let a = super::super::Addr::parse(&base).unwrap();
-                super::super::Addr { ssl_mode: mode, ssl_ca: ca.clone(), ssl_cert: cert.into(), ssl_key: key.into(), ..a }.to_uri()
+                let a = crate::db::sql::Addr::parse(&base).unwrap();
+                crate::db::sql::Addr { ssl_mode: mode, ssl_ca: ca.clone(), ssl_cert: cert.into(), ssl_key: key.into(), ..a }.to_uri()
             };
             let net = |pass: Option<&str>| Net { key_passphrase: pass.map(Into::into), ..Default::default() };
             let test = |cert: &str, key: &str, pass: Option<&str>| {

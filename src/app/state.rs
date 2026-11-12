@@ -1118,7 +1118,7 @@ pub(super) struct RowCheck {
     pub name: String,
     pub value: String,
     pub error: Option<String>,
-    pub def: Option<&'static db::sql::pg_advanced::Def>,
+    pub def: Option<&'static db::sql::pg::advanced::Def>,
 }
 
 /// The host saved in a Cloud SQL connection's address, which the proxy's local port replaces when it connects.
@@ -1183,7 +1183,7 @@ impl ConnForm {
         };
         let pg_settings = self.pg_rows.iter().filter(|(n, v)| !(PG_FIXED.contains(&n.as_str()) && v.trim().is_empty())).map(|(n, v)| (n.clone(), v.trim().to_string())).collect();
         let a = db::sql::Advanced { zone: self.time_zone(), pg_settings, search_path: self.pg_path.clone(), connect_secs: secs(&self.t_connect, "Connect")?, idle_secs: secs(&self.t_idle, "Idle")?, ..Default::default() };
-        db::sql::pg_advanced::PgSession::new(&a, db::sql::advanced::system_zone_name())?;
+        db::sql::pg::advanced::PgSession::new(&a, db::sql::advanced::system_zone_name())?;
         Ok(a)
     }
 

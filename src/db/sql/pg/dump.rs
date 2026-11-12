@@ -16,15 +16,15 @@
 //! policies) follows the triggers; owners and grants, when asked for, come last so a missing role stops a restore only
 //! after everything else is in. Inheritance, rules, event triggers, large objects and foreign tables are not dumped.
 
-use super::csv::Source;
-use super::dump::{excerpt, note, put, stopped, DumpPlan, Ran, FILE_LOGGED, INSERT_BYTES};
-use super::ddl_pg::{q, qn};
-use super::exec::{Cells, Conn};
-use super::import::Progress;
-use super::lex::dollar_quote;
-use super::pg_script::PgSplitter;
-use super::value::{pg_lit, pg_lit_into};
-use super::{lex, se, se_at, Db, Dialect};
+use crate::db::sql::csv::Source;
+use crate::db::sql::dump::{excerpt, note, put, stopped, DumpPlan, Ran, FILE_LOGGED, INSERT_BYTES};
+use crate::db::sql::pg::ddl::{q, qn};
+use crate::db::sql::exec::{Cells, Conn};
+use crate::db::sql::import::Progress;
+use crate::db::sql::lex::dollar_quote;
+use crate::db::sql::pg::script::PgSplitter;
+use crate::db::sql::value::{pg_lit, pg_lit_into};
+use crate::db::sql::{lex, se, se_at, Db, Dialect};
 use crate::db::Res;
 use sqlx::{raw_sql, Executor, PgConnection};
 use std::collections::{HashMap, HashSet};
@@ -267,7 +267,7 @@ const READ_SETTINGS: &str = "SET LOCAL statement_timeout = 0; SET LOCAL search_p
 /// Runs the whole dump on a connection of its own.
 pub async fn dump(db: &Db, plan: &DumpPlan, out: &mut (dyn Write + Send), count: &AtomicU64, cancel: &AtomicBool, id: &AtomicU64) -> Res<u64> {
     let mut conn = db.acquire_conn().await?;
-    super::run::prepare(&mut conn, db, &plan.schema, true, id).await?;
+    crate::db::sql::run::prepare(&mut conn, db, &plan.schema, true, id).await?;
     let Conn::Pg(mut c) = conn else { return Err("Not a PostgreSQL connection".into()) };
     // One message, so behind a pooler the BEGIN and the settings land on the backend of the transaction.
     let begin = db.pg_begin("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY", READ_SETTINGS);
@@ -1566,14 +1566,14 @@ async fn left_out(c: &mut PgConnection, db: &Db, whole: bool, structured: &[i64]
 /// keeps it, and one that never ends it is reported, since everything since its BEGIN was rolled back.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_file(db: Db, schema: String, src: Source, read_only: bool, prog: Arc<Progress>, cancel: Arc<AtomicBool>, id: Arc<AtomicU64>) -> Res<Ran> {
-    let mut conn = super::write::writer_conn(&db, &schema, read_only).await?;
-    let pooled = super::run::prepare(&mut conn, &db, &schema, false, &id).await?;
+    let mut conn = crate::db::sql::write::writer_conn(&db, &schema, read_only).await?;
+    let pooled = crate::db::sql::run::prepare(&mut conn, &db, &schema, false, &id).await?;
     let Conn::Pg(mut c) = conn else { return Err("Not a PostgreSQL connection".into()) };
     // Behind a pooler nothing is set on the session: each statement is a transaction of its own that carries its settings.
-    let mut locals = [super::pg::write_locals(), db.pg_run_locals(&schema).as_str()].into_iter().filter(|l| !l.is_empty()).collect::<Vec<_>>().join("; ");
+    let mut locals = [crate::db::sql::pg::write_locals(), db.pg_run_locals(&schema).as_str()].into_iter().filter(|l| !l.is_empty()).collect::<Vec<_>>().join("; ");
     if !pooled {
         // A restore runs long, so no statement timeout; a lock timeout so one statement never waits for another session for ever.
-        c.execute(format!("SET statement_timeout = 0; SET lock_timeout = '{}s'", super::pg::WRITE_LOCK_SECS).as_str()).await.map_err(se)?;
+        c.execute(format!("SET statement_timeout = 0; SET lock_timeout = '{}s'", crate::db::sql::pg::WRITE_LOCK_SECS).as_str()).await.map_err(se)?;
     }
     let mut file = src.open().map_err(|x| format!("Could not read the file: {x}"))?;
     let mut sp = PgSplitter::new(false);
@@ -1605,11 +1605,11 @@ pub async fn run_file(db: Db, schema: String, src: Source, read_only: bool, prog
                             continue;
                         }
                         let why = if lex::transaction_control(&p.text, D) {
-                            Some(super::run::POOLER_TX)
+                            Some(crate::db::sql::run::POOLER_TX)
                         } else if lex::needs_no_transaction(&p.text, D) {
-                            Some(super::run::POOLER_NO_TX)
+                            Some(crate::db::sql::run::POOLER_NO_TX)
                         } else if lex::session_state(&p.text, D) {
-                            Some(super::run::POOLER_SESSION)
+                            Some(crate::db::sql::run::POOLER_SESSION)
                         } else {
                             None
                         };
@@ -1684,7 +1684,7 @@ fn stay(in_tx: bool) -> &'static str {
 /// accepted and dropped. The value is built from tokens and may hold only words, names, strings, numbers and commas, never
 /// a `;` or a parenthesis, so it cannot carry a second statement into every later transaction.
 fn pooled_set(stmt: &str) -> Option<String> {
-    use super::lex::Tok;
+    use crate::db::sql::lex::Tok;
     let all: Vec<(Tok, &str)> = lex::tokens(stmt, D).into_iter().filter(|(t, _)| !matches!(t, Tok::Space)).map(|(t, r)| (t, &stmt[r])).collect();
     // The comment lines at the top of a dump come with its first statement.
     let toks = &all[all.iter().position(|t| t.0 != Tok::Comment).unwrap_or(all.len())..];
@@ -1743,13 +1743,13 @@ fn tx_effect(stmt: &str) -> Option<bool> {
 /// protocol would run all of them, and the splitter can disagree with the server about where a statement ends (a
 /// standard_conforming_strings or client_encoding the file switched, a BEGIN ATOMIC it misread), so a statement the
 /// progress and the pooler checks never saw would run. Unnamed, so no prepared statement stays on the connection.
-pub(super) async fn run_text(c: &mut PgConnection, stmt: &str) -> Result<(), sqlx::Error> {
+pub(in crate::db::sql) async fn run_text(c: &mut PgConnection, stmt: &str) -> Result<(), sqlx::Error> {
     sqlx::query(stmt).persistent(false).execute(&mut *c).await.map(|_| ())
 }
 
 /// One statement behind a pooler, in a transaction of its own that carries its settings, as a Custom Query run does.
 async fn run_pooled(c: &mut PgConnection, db: &Db, stmt: &str, locals: &str) -> Result<(), sqlx::Error> {
-    super::pg_read::begin_read_write(c, db, locals).await?;
+    crate::db::sql::pg::read::begin_read_write(c, db, locals).await?;
     if let Err(x) = run_text(c, stmt).await {
         let _ = c.execute("ROLLBACK").await;
         return Err(x);
