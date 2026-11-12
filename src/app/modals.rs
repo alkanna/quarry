@@ -99,42 +99,7 @@ impl App {
                         }
                     });
                 }
-                Modal::Delete(at, docs) => {
-                    const SHOWN: usize = 5;
-                    let sql = self.conn(at.conn).is_some_and(|c| c.sql.is_some());
-                    let ids: Vec<String> = docs.iter().take(SHOWN).map(|d| d.get("_id").map(|k| if sql { k.as_document().map(|k| k.values().map(db::short).collect::<Vec<_>>().join("-")).unwrap_or_default() } else { db::short(k) }).unwrap_or_default()).collect();
-                    let more = if docs.len() > SHOWN { format!(" and {} more", docs.len() - SHOWN) } else { String::new() };
-                    let noun = if sql { "row" } else { "document" };
-                    dialog_title(ui, if docs.len() == 1 { format!("Delete this {noun}?") } else { format!("Delete {} {noun}s?", docs.len()) });
-                    ui.label(RichText::new(format!("{} {}{more}. You can undo this for 24 hours.", if sql { "Key" } else { "_id" }, ids.join(", "))).monospace().color(MUTED()));
-                    dialog_actions(ui, |ui| {
-                        let del = primary(ui, "Delete", ALERT()).clicked();
-                        // Run on the tab the rows were picked in: tabs can close or move while the dialog is open.
-                        if del && sql {
-                            let docs = docs.clone();
-                            self.on_tab(&at.clone(), |a| a.sql_delete(docs));
-                            keep = false;
-                        } else if del {
-                            let docs = docs.clone();
-                            self.on_tab(&at.clone(), |a| {
-                                if let Some((conn, target)) = a.writable_target() {
-                                    match docs.as_slice() {
-                                        [d] => a.worker.delete(conn, target, d.clone(), true),
-                                        _ => a.worker.delete_docs(conn, target, docs.clone()),
-                                    }
-                                    // The reload drops deleted rows from the checks; others stay checked.
-                                    if let Some(t) = a.tm() {
-                                        t.selected = None;
-                                    }
-                                }
-                            });
-                            keep = false;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            keep = false;
-                        }
-                    });
-                }
+                Modal::Delete(at, docs) => self.delete_dialog(ui, at, docs, &mut keep),
                 Modal::Export(f) => self.export_dialog(ui, f, &mut keep),
                 Modal::SqlImport(f) => self.sql_import_dialog(ui, f, &mut keep),
                 Modal::SqlDump(f) => self.sql_dump_dialog(ui, f, &mut keep),
@@ -171,51 +136,7 @@ impl App {
                         }
                     });
                 }
-                Modal::NewCollection { conn, db, name, view, source, pipeline } => {
-                    ui.set_width(520.0);
-                    dialog_title(ui, if *view { format!("New view in {db}") } else { format!("New collection in {db}") });
-                    egui::Grid::new("newcoll").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
-                        form_label(ui, "Name");
-                        ui.add(egui::TextEdit::singleline(name).desired_width(380.0));
-                        ui.end_row();
-                        if *view {
-                            form_label(ui, "Based on");
-                            let colls: Vec<String> = self.conn(*conn).and_then(|c| c.dbs.iter().find(|d| d.0 == *db)).and_then(|d| d.1.clone()).unwrap_or_default();
-                            egui::ComboBox::from_id_salt("view-src").width(380.0).selected_text(if source.is_empty() { "choose a collection" } else { source.as_str() }).show_ui(ui, |ui| {
-                                menu_look(ui);
-                                for c in colls {
-                                    ui.selectable_value(source, c.clone(), c);
-                                }
-                            });
-                            ui.end_row();
-                            form_label(ui, "Pipeline");
-                            let id = ui.make_persistent_id("view-pipeline");
-                            with_autopair(ui, id, pipeline, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(380.0).desired_rows(6).layouter(&mut code_layout).show(ui));
-                            ui.end_row();
-                        }
-                    });
-                    dialog_actions(ui, |ui| {
-                        let ok = !name.trim().is_empty() && (!*view || !source.is_empty());
-                        if ui.add_enabled(ok, primary_button(ui, "Create", PRIMARY())).clicked() {
-                            let cmd = if *view {
-                                db::parse_pipeline(pipeline).map(|p| doc! { "create": name.trim(), "viewOn": source.as_str(), "pipeline": p })
-                            } else {
-                                Ok(doc! { "create": name.trim() })
-                            };
-                            match (cmd, self.conn(*conn).and_then(|c| c.client.clone())) {
-                                (Ok(cmd), Some(client)) => {
-                                    self.worker.db_change(*conn, client, db.clone(), cmd, format!("Created {}", name.trim()));
-                                    keep = false;
-                                }
-                                (Err(e), _) => self.err(e),
-                                (_, None) => self.warn_offline(),
-                            }
-                        }
-                        if ui.button("Cancel").clicked() {
-                            keep = false;
-                        }
-                    });
-                }
+                Modal::NewCollection { conn, db, name, view, source, pipeline } => self.new_collection_dialog(ui, conn, db, name, view, source, pipeline, &mut keep),
                 Modal::Tool(f) => self.tool_dialog(ui, f, &mut keep),
                 Modal::Relations { conn, db } => self.relations_dialog(ui, conn, db, &mut keep),
                 Modal::RenameColl { conn, db, coll, name } => {
@@ -238,32 +159,7 @@ impl App {
                         }
                     });
                 }
-                Modal::DuplicateColl { conn, db, coll, name } => {
-                    dialog_title(ui, format!("Duplicate {db}.{coll}"));
-                    ui.label(RichText::new("Copies every document, index and setting (validator, collation) into a new collection of this database.").color(MUTED()));
-                    ui.add(egui::TextEdit::singleline(name).desired_width(320.0));
-                    let to = name.trim();
-                    let taken = self.copying.iter().any(|c| c.0 == *conn && c.1 == *db && c.2 == to) || self.conn(*conn).and_then(|c| c.dbs.iter().find(|d| d.0 == *db)).and_then(|d| d.1.as_ref()).is_some_and(|l| l.iter().any(|n| n == to));
-                    if taken {
-                        ui.label(RichText::new(format!("{db}.{to} already exists.")).color(ALERT()));
-                    }
-                    dialog_actions(ui, |ui| {
-                        if ui.add_enabled(!to.is_empty() && !taken, primary_button(ui, "Duplicate", PRIMARY())).clicked() {
-                            match self.conn(*conn).and_then(|c| c.client.clone()) {
-                                Some(client) => {
-                                    // The sidebar shows it with a spinner until the copy ends.
-                                    self.copying.insert((*conn, db.clone(), to.to_string()));
-                                    self.worker.duplicate_coll(*conn, client, db.clone(), coll.clone(), to.to_string());
-                                }
-                                None => self.warn_offline(),
-                            }
-                            keep = false;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            keep = false;
-                        }
-                    });
-                }
+                Modal::DuplicateColl { conn, db, coll, name } => self.duplicate_coll_dialog(ui, conn, db, coll, name, &mut keep),
                 Modal::ImportInsert(n) => {
                     let coll = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
                     dialog_title(ui, format!("Insert {n} documents into {coll}?"));
@@ -315,75 +211,8 @@ impl App {
                         }
                     });
                 }
-                Modal::SaveAll(keys) => {
-                    let sql = self.t().is_some_and(|t| t.sql.is_some());
-                    let n: usize = keys.iter().filter_map(|k| self.drafts.get(k)).map(|d| db::diff(&d.original, &d.current).len()).sum();
-                    if sql {
-                        dialog_title(ui, format!("Save {n} cell{} in {} row{}?", if n == 1 { "" } else { "s" }, keys.len(), if keys.len() == 1 { "" } else { "s" }));
-                        ui.label(RichText::new("They are written in one transaction. If a row changed on the server since you opened it, nothing is written and the edits stay staged.").color(MUTED()));
-                    } else {
-                        dialog_title(ui, format!("Save {} documents ({n} changes)?", keys.len()));
-                        ui.label(RichText::new("Each document is refused if someone else changed it since you opened it; its edits are kept.").color(MUTED()));
-                    }
-                    dialog_actions(ui, |ui| {
-                        if primary(ui, "Save all", PRIMARY()).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
-                            if sql {
-                                self.write_sql_drafts(keys.clone());
-                            } else {
-                                for k in keys.iter() {
-                                    self.write_draft(k);
-                                }
-                            }
-                            keep = false;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            keep = false;
-                        }
-                    });
-                }
-                Modal::Grouped { sel, path, pipeline, rows } => {
-                    ui.set_width(560.0);
-                    dialog_title(ui, format!("Distinct values for {}: {path}", sel.coll));
-                    let total: u64 = rows.iter().filter_map(|r| r.get("count").and_then(|c| c.as_i64().or_else(|| c.as_i32().map(i64::from)))).map(|c| c as u64).sum();
-                    ui.label(RichText::new(format!("{} values in {} documents{}", group(&rows.len().to_string()), group(&total.to_string()), if rows.len() >= 1000 { ", first 1000 values shown" } else { "" })).color(MUTED()));
-                    egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
-                        egui::Grid::new("grouped").striped(true).num_columns(2).spacing([24.0, 4.0]).show(ui, |ui| {
-                            caption(ui, "VALUE");
-                            caption(ui, "COUNT");
-                            ui.end_row();
-                            for r in rows.iter() {
-                                // A fixed width: a truncating label in a grid otherwise shrinks to a few letters.
-                                ui.allocate_ui_with_layout(egui::vec2(400.0, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                    ui.set_min_width(400.0);
-                                    ui.add(egui::Label::new(cell_job(r.get("_id").unwrap_or(&Bson::Null))).truncate());
-                                });
-                                ui.label(RichText::new(r.get("count").map(db::compact).unwrap_or_default()).monospace().color(C_NUMBER()));
-                                ui.end_row();
-                            }
-                        });
-                    });
-                    dialog_actions(ui, |ui| {
-                        // Values counted from pipeline or script results have no pipeline to reopen.
-                        if ui.add_enabled(!pipeline.is_empty(), primary_button(ui, "Open in Aggregate", PRIMARY())).on_hover_text("Open this pipeline in a new tab").clicked() {
-                            let mut t = Tab::new(sel.clone());
-                            t.view = View::Aggregate;
-                            t.agg_txt = format!("[\n{}\n]", pipeline.iter().map(|s| format!("  {}", db::shell_text(&Bson::Document(s.clone())))).collect::<Vec<_>>().join(",\n"));
-                            // Next to the current tab, like the original's nextToActive.
-                            let at = (self.cur + 1).min(self.tabs.len());
-                            self.tabs.insert(at, t);
-                            self.set_cur(at);
-                            self.reset_doc_state();
-                            self.run_pipeline(pipeline.clone());
-                            keep = false;
-                        }
-                        if ui.button("Copy").on_hover_text("Copy as JSON: value and count").clicked() {
-                            ui.ctx().copy_text(db::to_edit_value(&Bson::Array(rows.iter().cloned().map(Bson::Document).collect())));
-                        }
-                        if ui.button("Close").on_hover_text("Esc").clicked() {
-                            keep = false;
-                        }
-                    });
-                }
+                Modal::SaveAll(keys) => self.save_all_dialog(ui, keys, &mut keep),
+                Modal::Grouped { sel, path, pipeline, rows } => self.grouped_dialog(ui, sel, path, pipeline, rows, &mut keep),
                 Modal::ColumnCustomize { key, agg, col, label, path } => {
                     dialog_title(ui, format!("Customize column {col}"));
                     form_label(ui, "Column name");
@@ -426,145 +255,9 @@ impl App {
                     });
                 }
                 Modal::CreateIndex(f) => keep = self.create_index_dialog(ui, f),
-                Modal::Rename { doc: d, path, name } => {
-                    let from = path.join(".");
-                    dialog_title(ui, format!("Rename {from}"));
-                    ui.add(egui::TextEdit::singleline(name).font(egui::TextStyle::Monospace).desired_width(320.0));
-                    let check = rename_check(d, path, name);
-                    if let Err(Some(msg)) = &check {
-                        ui.label(RichText::new(msg).color(ALERT()));
-                    }
-                    let valid = check.is_ok();
-                    let to = check.unwrap_or_default();
-                    dialog_actions(ui, |ui| {
-                        if ui.add_enabled(valid, primary_button(ui, "In this document", PRIMARY())).clicked() {
-                            let new = db::get_path(d, &from).cloned().ok_or_else(|| "Field not found".to_string()).and_then(|v| db::edit_path(&db::edit_path(d, path, None)?, &to, Some(v)));
-                            let base = d.clone();
-                            self.stage(&base, new);
-                            keep = false;
-                        }
-                        // $rename cannot reach into arrays, so this is offered only for plain paths.
-                        let plain = path.iter().all(|s| s.parse::<usize>().is_err());
-                        let (reach, scope) = self.t().map(|t| (t.bulk_count(), t.query.scope())).unwrap_or_default();
-                        if plain && ui.add_enabled(valid, egui::Button::new("In all matching documents…")).clicked() {
-                            let coll = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
-                            self.modal = Some(Modal::Typed {
-                                title: format!("Rename {from} to {} in every document of {coll} matching the current filter ({reach})? Documents that already have {} are skipped.", to.join("."), to.join(".")),
-                                expect: coll,
-                                typed: String::new(),
-                                action: Danger::RenameMany { scope, from: from.clone(), to: to.join(".") },
-                            });
-                            keep = false;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            keep = false;
-                        }
-                    });
-                }
-                Modal::UpdateMany { set_txt, unset_txt, preview } => {
-                    ui.set_width(560.0);
-                    let scope = self.t().map(|t| t.query.scope()).unwrap_or_default();
-                    dialog_title(ui, "Update matching documents");
-                    ui.label(RichText::new("Applies to every document matching the current filter. Values starting with $ are read as field paths.").color(MUTED()));
-                    ui.label(RichText::new("Set fields").color(FAINT()));
-                    let id = ui.make_persistent_id("um-set");
-                    let mut changed = with_autopair(ui, id, set_txt, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(4).layouter(&mut code_layout).show(ui)).response.changed();
-                    ui.label(RichText::new("Remove fields (comma separated paths)").color(FAINT()));
-                    changed |= ui.add(egui::TextEdit::singleline(unset_txt).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY)).changed();
-                    if changed {
-                        *preview = None;
-                    }
-                    let stages = db::parse_doc(set_txt).map(|set| db::update_stages(set, unset_txt.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect()));
-                    match &stages {
-                        Err(err) => {
-                            ui.label(RichText::new(err).color(ALERT()));
-                        }
-                        Ok(st) if st.is_empty() => {
-                            ui.label(RichText::new("Nothing to change yet.").color(MUTED()));
-                        }
-                        Ok(_) => {}
-                    }
-                    let ready = stages.as_ref().is_ok_and(|s| !s.is_empty());
-                    let fresh = matches!((preview.as_ref(), stages.as_ref()), (Some((p, _)), Ok(s)) if p == s);
-                    match preview.as_ref().filter(|_| fresh).map(|(_, r)| r) {
-                        Some(Err(err)) => {
-                            ui.label(RichText::new(&*err).color(ALERT()));
-                        }
-                        Some(Ok((rows, n))) => {
-                            ui.label(RichText::new(format!("{} documents match. Showing {} of them after the change.", group(&n.to_string()), rows.len())).color(MUTED()));
-                            egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
-                                for (i, (old, new)) in rows.iter().enumerate() {
-                                    ui.label(RichText::new(old.get("_id").map(db::short).unwrap_or_default()).monospace().color(BRIGHT()));
-                                    egui::Grid::new(("um-chg", i)).num_columns(3).striped(true).spacing([14.0, 6.0]).show(ui, |ui| {
-                                        for (path, a, b) in db::diff(old, new) {
-                                            let show = |v: &Option<Bson>| v.as_ref().map(|v| format!("{} ({})", leaf_text(v), db::type_name(v))).unwrap_or("(none)".into());
-                                            ui.label(RichText::new(path).monospace().color(KEY()));
-                                            ui.label(RichText::new(show(&a)).monospace().color(ALERT()).strikethrough());
-                                            ui.label(RichText::new(show(&b)).monospace().color(SUCCESS()));
-                                            ui.end_row();
-                                        }
-                                    });
-                                }
-                            });
-                        }
-                        None => {}
-                    }
-                    dialog_actions(ui, |ui| {
-                        if ui.add_enabled(ready, egui::Button::new("Preview")).clicked() {
-                            if let (Ok(st), Some(t)) = (&stages, self.target()) {
-                                self.worker.update_preview(t, scope.clone(), st.clone());
-                            }
-                        }
-                        let applicable = ready && fresh && matches!(preview, Some((_, Ok(_))));
-                        if ui.add_enabled(applicable, primary_button(ui, "Apply…", ALERT())).clicked() {
-                            let coll = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
-                            let n = if let Some((_, Ok((_, n)))) = preview { *n } else { 0 };
-                            self.modal = Some(Modal::Typed {
-                                title: format!("Update every document in {coll} matching the current filter ({n})?"),
-                                expect: coll,
-                                typed: String::new(),
-                                action: Danger::UpdateMany { scope, stages: stages.unwrap_or_default() },
-                            });
-                            keep = false;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            keep = false;
-                        }
-                    });
-                }
-                Modal::Undo => {
-                    dialog_title(ui, "Recent changes");
-                    ui.label(RichText::new(format!("Last {} actions from the past 24 hours.", db::UNDO_MAX)).color(MUTED()));
-                    let mut pick = None;
-                    egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
-                        for (i, a) in self.undo.iter().enumerate() {
-                            ui.horizontal(|ui| {
-                                let what = match &a.kind {
-                                    UndoKind::Insert { id } => format!("inserted {}", db::short(id)),
-                                    UndoKind::InsertMany { ids } => format!("imported {} documents", ids.len()),
-                                    UndoKind::Delete { old } => format!("deleted {}", old.get("_id").map(db::short).unwrap_or_default()),
-                                    UndoKind::DeleteMany { old } => format!("deleted {} documents", old.len()),
-                                    UndoKind::Update { old, .. } => format!("edited {}", old.get("_id").map(db::short).unwrap_or_default()),
-                                    UndoKind::Sql { undo, .. } => undo.describe(),
-                                };
-                                let mins = a.at.elapsed().as_secs() / 60;
-                                ui.label(RichText::new(format!("{}{}{}  {what}", a.db, if a.coll.is_empty() { "" } else { "." }, a.coll)).monospace());
-                                ui.label(RichText::new(format!("{mins} min ago")).color(MUTED()));
-                                let undo = ui.button("Undo");
-                                undo.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Undo change {}", i + 1)));
-                                if undo.clicked() {
-                                    pick = Some(i);
-                                }
-                            });
-                        }
-                    });
-                    if let Some(i) = pick {
-                        self.apply_undo(i);
-                    }
-                    if dialog_actions(ui, |ui| ui.button("Close").clicked()) {
-                        keep = false;
-                    }
-                }
+                Modal::Rename { doc: d, path, name } => self.rename_field_dialog(ui, d, path, name, &mut keep),
+                Modal::UpdateMany { set_txt, unset_txt, preview } => self.update_many_dialog(ui, set_txt, unset_txt, preview, &mut keep),
+                Modal::Undo => self.undo_dialog(ui, &mut keep),
                 Modal::Explain { summary, raw, show_raw } => self.explain_dialog(ui, summary, raw, show_raw, &mut keep),
                 // Drawn by their own functions before this dialog.
                 Modal::Palette { .. } | Modal::Settings => {}
@@ -579,6 +272,329 @@ impl App {
             // A Test still running when the form closes must not show in the next form.
             self.conn_test = None;
             self.test_info = None;
+        }
+    }
+
+    fn delete_dialog(&mut self, ui: &mut egui::Ui, at: &mut Sel, docs: &mut Vec<Document>, keep: &mut bool) {
+        const SHOWN: usize = 5;
+        let sql = self.conn(at.conn).is_some_and(|c| c.sql.is_some());
+        let ids: Vec<String> = docs.iter().take(SHOWN).map(|d| d.get("_id").map(|k| if sql { k.as_document().map(|k| k.values().map(db::short).collect::<Vec<_>>().join("-")).unwrap_or_default() } else { db::short(k) }).unwrap_or_default()).collect();
+        let more = if docs.len() > SHOWN { format!(" and {} more", docs.len() - SHOWN) } else { String::new() };
+        let noun = if sql { "row" } else { "document" };
+        dialog_title(ui, if docs.len() == 1 { format!("Delete this {noun}?") } else { format!("Delete {} {noun}s?", docs.len()) });
+        ui.label(RichText::new(format!("{} {}{more}. You can undo this for 24 hours.", if sql { "Key" } else { "_id" }, ids.join(", "))).monospace().color(MUTED()));
+        dialog_actions(ui, |ui| {
+            let del = primary(ui, "Delete", ALERT()).clicked();
+            // Run on the tab the rows were picked in: tabs can close or move while the dialog is open.
+            if del && sql {
+                let docs = docs.clone();
+                self.on_tab(&at.clone(), |a| a.sql_delete(docs));
+                *keep = false;
+            } else if del {
+                let docs = docs.clone();
+                self.on_tab(&at.clone(), |a| {
+                    if let Some((conn, target)) = a.writable_target() {
+                        match docs.as_slice() {
+                            [d] => a.worker.delete(conn, target, d.clone(), true),
+                            _ => a.worker.delete_docs(conn, target, docs.clone()),
+                        }
+                        // The reload drops deleted rows from the checks; others stay checked.
+                        if let Some(t) = a.tm() {
+                            t.selected = None;
+                        }
+                    }
+                });
+                *keep = false;
+            }
+            if ui.button("Cancel").clicked() {
+                *keep = false;
+            }
+        });
+    }
+
+    fn new_collection_dialog(&mut self, ui: &mut egui::Ui, conn: &mut u64, db: &mut String, name: &mut String, view: &mut bool, source: &mut String, pipeline: &mut String, keep: &mut bool) {
+        ui.set_width(520.0);
+        dialog_title(ui, if *view { format!("New view in {db}") } else { format!("New collection in {db}") });
+        egui::Grid::new("newcoll").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
+            form_label(ui, "Name");
+            ui.add(egui::TextEdit::singleline(name).desired_width(380.0));
+            ui.end_row();
+            if *view {
+                form_label(ui, "Based on");
+                let colls: Vec<String> = self.conn(*conn).and_then(|c| c.dbs.iter().find(|d| d.0 == *db)).and_then(|d| d.1.clone()).unwrap_or_default();
+                egui::ComboBox::from_id_salt("view-src").width(380.0).selected_text(if source.is_empty() { "choose a collection" } else { source.as_str() }).show_ui(ui, |ui| {
+                    menu_look(ui);
+                    for c in colls {
+                        ui.selectable_value(source, c.clone(), c);
+                    }
+                });
+                ui.end_row();
+                form_label(ui, "Pipeline");
+                let id = ui.make_persistent_id("view-pipeline");
+                with_autopair(ui, id, pipeline, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(380.0).desired_rows(6).layouter(&mut code_layout).show(ui));
+                ui.end_row();
+            }
+        });
+        dialog_actions(ui, |ui| {
+            let ok = !name.trim().is_empty() && (!*view || !source.is_empty());
+            if ui.add_enabled(ok, primary_button(ui, "Create", PRIMARY())).clicked() {
+                let cmd = if *view {
+                    db::parse_pipeline(pipeline).map(|p| doc! { "create": name.trim(), "viewOn": source.as_str(), "pipeline": p })
+                } else {
+                    Ok(doc! { "create": name.trim() })
+                };
+                match (cmd, self.conn(*conn).and_then(|c| c.client.clone())) {
+                    (Ok(cmd), Some(client)) => {
+                        self.worker.db_change(*conn, client, db.clone(), cmd, format!("Created {}", name.trim()));
+                        *keep = false;
+                    }
+                    (Err(e), _) => self.err(e),
+                    (_, None) => self.warn_offline(),
+                }
+            }
+            if ui.button("Cancel").clicked() {
+                *keep = false;
+            }
+        });
+    }
+
+    fn duplicate_coll_dialog(&mut self, ui: &mut egui::Ui, conn: &mut u64, db: &mut String, coll: &mut String, name: &mut String, keep: &mut bool) {
+        dialog_title(ui, format!("Duplicate {db}.{coll}"));
+        ui.label(RichText::new("Copies every document, index and setting (validator, collation) into a new collection of this database.").color(MUTED()));
+        ui.add(egui::TextEdit::singleline(name).desired_width(320.0));
+        let to = name.trim();
+        let taken = self.copying.iter().any(|c| c.0 == *conn && c.1 == *db && c.2 == to) || self.conn(*conn).and_then(|c| c.dbs.iter().find(|d| d.0 == *db)).and_then(|d| d.1.as_ref()).is_some_and(|l| l.iter().any(|n| n == to));
+        if taken {
+            ui.label(RichText::new(format!("{db}.{to} already exists.")).color(ALERT()));
+        }
+        dialog_actions(ui, |ui| {
+            if ui.add_enabled(!to.is_empty() && !taken, primary_button(ui, "Duplicate", PRIMARY())).clicked() {
+                match self.conn(*conn).and_then(|c| c.client.clone()) {
+                    Some(client) => {
+                        // The sidebar shows it with a spinner until the copy ends.
+                        self.copying.insert((*conn, db.clone(), to.to_string()));
+                        self.worker.duplicate_coll(*conn, client, db.clone(), coll.clone(), to.to_string());
+                    }
+                    None => self.warn_offline(),
+                }
+                *keep = false;
+            }
+            if ui.button("Cancel").clicked() {
+                *keep = false;
+            }
+        });
+    }
+
+    fn save_all_dialog(&mut self, ui: &mut egui::Ui, keys: &mut Vec<String>, keep: &mut bool) {
+        let sql = self.t().is_some_and(|t| t.sql.is_some());
+        let n: usize = keys.iter().filter_map(|k| self.drafts.get(k)).map(|d| db::diff(&d.original, &d.current).len()).sum();
+        if sql {
+            dialog_title(ui, format!("Save {n} cell{} in {} row{}?", if n == 1 { "" } else { "s" }, keys.len(), if keys.len() == 1 { "" } else { "s" }));
+            ui.label(RichText::new("They are written in one transaction. If a row changed on the server since you opened it, nothing is written and the edits stay staged.").color(MUTED()));
+        } else {
+            dialog_title(ui, format!("Save {} documents ({n} changes)?", keys.len()));
+            ui.label(RichText::new("Each document is refused if someone else changed it since you opened it; its edits are kept.").color(MUTED()));
+        }
+        dialog_actions(ui, |ui| {
+            if primary(ui, "Save all", PRIMARY()).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
+                if sql {
+                    self.write_sql_drafts(keys.clone());
+                } else {
+                    for k in keys.iter() {
+                        self.write_draft(k);
+                    }
+                }
+                *keep = false;
+            }
+            if ui.button("Cancel").clicked() {
+                *keep = false;
+            }
+        });
+    }
+
+    fn grouped_dialog(&mut self, ui: &mut egui::Ui, sel: &mut Sel, path: &mut String, pipeline: &mut Vec<Document>, rows: &mut Vec<Document>, keep: &mut bool) {
+        ui.set_width(560.0);
+        dialog_title(ui, format!("Distinct values for {}: {path}", sel.coll));
+        let total: u64 = rows.iter().filter_map(|r| r.get("count").and_then(|c| c.as_i64().or_else(|| c.as_i32().map(i64::from)))).map(|c| c as u64).sum();
+        ui.label(RichText::new(format!("{} values in {} documents{}", group(&rows.len().to_string()), group(&total.to_string()), if rows.len() >= 1000 { ", first 1000 values shown" } else { "" })).color(MUTED()));
+        egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+            egui::Grid::new("grouped").striped(true).num_columns(2).spacing([24.0, 4.0]).show(ui, |ui| {
+                caption(ui, "VALUE");
+                caption(ui, "COUNT");
+                ui.end_row();
+                for r in rows.iter() {
+                    // A fixed width: a truncating label in a grid otherwise shrinks to a few letters.
+                    ui.allocate_ui_with_layout(egui::vec2(400.0, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.set_min_width(400.0);
+                        ui.add(egui::Label::new(cell_job(r.get("_id").unwrap_or(&Bson::Null))).truncate());
+                    });
+                    ui.label(RichText::new(r.get("count").map(db::compact).unwrap_or_default()).monospace().color(C_NUMBER()));
+                    ui.end_row();
+                }
+            });
+        });
+        dialog_actions(ui, |ui| {
+            // Values counted from pipeline or script results have no pipeline to reopen.
+            if ui.add_enabled(!pipeline.is_empty(), primary_button(ui, "Open in Aggregate", PRIMARY())).on_hover_text("Open this pipeline in a new tab").clicked() {
+                let mut t = Tab::new(sel.clone());
+                t.view = View::Aggregate;
+                t.agg_txt = format!("[\n{}\n]", pipeline.iter().map(|s| format!("  {}", db::shell_text(&Bson::Document(s.clone())))).collect::<Vec<_>>().join(",\n"));
+                // Next to the current tab, like the original's nextToActive.
+                let at = (self.cur + 1).min(self.tabs.len());
+                self.tabs.insert(at, t);
+                self.set_cur(at);
+                self.reset_doc_state();
+                self.run_pipeline(pipeline.clone());
+                *keep = false;
+            }
+            if ui.button("Copy").on_hover_text("Copy as JSON: value and count").clicked() {
+                ui.ctx().copy_text(db::to_edit_value(&Bson::Array(rows.iter().cloned().map(Bson::Document).collect())));
+            }
+            if ui.button("Close").on_hover_text("Esc").clicked() {
+                *keep = false;
+            }
+        });
+    }
+
+    fn rename_field_dialog(&mut self, ui: &mut egui::Ui, d: &mut Document, path: &mut Vec<String>, name: &mut String, keep: &mut bool) {
+        let from = path.join(".");
+        dialog_title(ui, format!("Rename {from}"));
+        ui.add(egui::TextEdit::singleline(name).font(egui::TextStyle::Monospace).desired_width(320.0));
+        let check = rename_check(d, path, name);
+        if let Err(Some(msg)) = &check {
+            ui.label(RichText::new(msg).color(ALERT()));
+        }
+        let valid = check.is_ok();
+        let to = check.unwrap_or_default();
+        dialog_actions(ui, |ui| {
+            if ui.add_enabled(valid, primary_button(ui, "In this document", PRIMARY())).clicked() {
+                let new = db::get_path(d, &from).cloned().ok_or_else(|| "Field not found".to_string()).and_then(|v| db::edit_path(&db::edit_path(d, path, None)?, &to, Some(v)));
+                let base = d.clone();
+                self.stage(&base, new);
+                *keep = false;
+            }
+            // $rename cannot reach into arrays, so this is offered only for plain paths.
+            let plain = path.iter().all(|s| s.parse::<usize>().is_err());
+            let (reach, scope) = self.t().map(|t| (t.bulk_count(), t.query.scope())).unwrap_or_default();
+            if plain && ui.add_enabled(valid, egui::Button::new("In all matching documents…")).clicked() {
+                let coll = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
+                self.modal = Some(Modal::Typed {
+                    title: format!("Rename {from} to {} in every document of {coll} matching the current filter ({reach})? Documents that already have {} are skipped.", to.join("."), to.join(".")),
+                    expect: coll,
+                    typed: String::new(),
+                    action: Danger::RenameMany { scope, from: from.clone(), to: to.join(".") },
+                });
+                *keep = false;
+            }
+            if ui.button("Cancel").clicked() {
+                *keep = false;
+            }
+        });
+    }
+
+    fn update_many_dialog(&mut self, ui: &mut egui::Ui, set_txt: &mut String, unset_txt: &mut String, preview: &mut Option<(Vec<Document>, db::Res<(Vec<(Document, Document)>, u64)>)>, keep: &mut bool) {
+        ui.set_width(560.0);
+        let scope = self.t().map(|t| t.query.scope()).unwrap_or_default();
+        dialog_title(ui, "Update matching documents");
+        ui.label(RichText::new("Applies to every document matching the current filter. Values starting with $ are read as field paths.").color(MUTED()));
+        ui.label(RichText::new("Set fields").color(FAINT()));
+        let id = ui.make_persistent_id("um-set");
+        let mut changed = with_autopair(ui, id, set_txt, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(4).layouter(&mut code_layout).show(ui)).response.changed();
+        ui.label(RichText::new("Remove fields (comma separated paths)").color(FAINT()));
+        changed |= ui.add(egui::TextEdit::singleline(unset_txt).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY)).changed();
+        if changed {
+            *preview = None;
+        }
+        let stages = db::parse_doc(set_txt).map(|set| db::update_stages(set, unset_txt.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect()));
+        match &stages {
+            Err(err) => {
+                ui.label(RichText::new(err).color(ALERT()));
+            }
+            Ok(st) if st.is_empty() => {
+                ui.label(RichText::new("Nothing to change yet.").color(MUTED()));
+            }
+            Ok(_) => {}
+        }
+        let ready = stages.as_ref().is_ok_and(|s| !s.is_empty());
+        let fresh = matches!((preview.as_ref(), stages.as_ref()), (Some((p, _)), Ok(s)) if p == s);
+        match preview.as_ref().filter(|_| fresh).map(|(_, r)| r) {
+            Some(Err(err)) => {
+                ui.label(RichText::new(&*err).color(ALERT()));
+            }
+            Some(Ok((rows, n))) => {
+                ui.label(RichText::new(format!("{} documents match. Showing {} of them after the change.", group(&n.to_string()), rows.len())).color(MUTED()));
+                egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                    for (i, (old, new)) in rows.iter().enumerate() {
+                        ui.label(RichText::new(old.get("_id").map(db::short).unwrap_or_default()).monospace().color(BRIGHT()));
+                        egui::Grid::new(("um-chg", i)).num_columns(3).striped(true).spacing([14.0, 6.0]).show(ui, |ui| {
+                            for (path, a, b) in db::diff(old, new) {
+                                let show = |v: &Option<Bson>| v.as_ref().map(|v| format!("{} ({})", leaf_text(v), db::type_name(v))).unwrap_or("(none)".into());
+                                ui.label(RichText::new(path).monospace().color(KEY()));
+                                ui.label(RichText::new(show(&a)).monospace().color(ALERT()).strikethrough());
+                                ui.label(RichText::new(show(&b)).monospace().color(SUCCESS()));
+                                ui.end_row();
+                            }
+                        });
+                    }
+                });
+            }
+            None => {}
+        }
+        dialog_actions(ui, |ui| {
+            if ui.add_enabled(ready, egui::Button::new("Preview")).clicked() {
+                if let (Ok(st), Some(t)) = (&stages, self.target()) {
+                    self.worker.update_preview(t, scope.clone(), st.clone());
+                }
+            }
+            let applicable = ready && fresh && matches!(preview, Some((_, Ok(_))));
+            if ui.add_enabled(applicable, primary_button(ui, "Apply…", ALERT())).clicked() {
+                let coll = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
+                let n = if let Some((_, Ok((_, n)))) = preview { *n } else { 0 };
+                self.modal = Some(Modal::Typed {
+                    title: format!("Update every document in {coll} matching the current filter ({n})?"),
+                    expect: coll,
+                    typed: String::new(),
+                    action: Danger::UpdateMany { scope, stages: stages.unwrap_or_default() },
+                });
+                *keep = false;
+            }
+            if ui.button("Cancel").clicked() {
+                *keep = false;
+            }
+        });
+    }
+
+    fn undo_dialog(&mut self, ui: &mut egui::Ui, keep: &mut bool) {
+        dialog_title(ui, "Recent changes");
+        ui.label(RichText::new(format!("Last {} actions from the past 24 hours.", db::UNDO_MAX)).color(MUTED()));
+        let mut pick = None;
+        egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
+            for (i, a) in self.undo.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    let what = match &a.kind {
+                        UndoKind::Insert { id } => format!("inserted {}", db::short(id)),
+                        UndoKind::InsertMany { ids } => format!("imported {} documents", ids.len()),
+                        UndoKind::Delete { old } => format!("deleted {}", old.get("_id").map(db::short).unwrap_or_default()),
+                        UndoKind::DeleteMany { old } => format!("deleted {} documents", old.len()),
+                        UndoKind::Update { old, .. } => format!("edited {}", old.get("_id").map(db::short).unwrap_or_default()),
+                        UndoKind::Sql { undo, .. } => undo.describe(),
+                    };
+                    let mins = a.at.elapsed().as_secs() / 60;
+                    ui.label(RichText::new(format!("{}{}{}  {what}", a.db, if a.coll.is_empty() { "" } else { "." }, a.coll)).monospace());
+                    ui.label(RichText::new(format!("{mins} min ago")).color(MUTED()));
+                    let undo = ui.button("Undo");
+                    undo.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Undo change {}", i + 1)));
+                    if undo.clicked() {
+                        pick = Some(i);
+                    }
+                });
+            }
+        });
+        if let Some(i) = pick {
+            self.apply_undo(i);
+        }
+        if dialog_actions(ui, |ui| ui.button("Close").clicked()) {
+            *keep = false;
         }
     }
 }
