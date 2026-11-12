@@ -538,3 +538,47 @@ fn a_file_with_guarded_types_and_a_grid_edit_work_under_a_saved_path_and_zone() 
         l.qsql(&pool, "DROP SCHEMA adv_wr CASCADE");
     });
 }
+
+/// timestamptz is shown in the session's zone with its offset, a filter and an edit keep the instant whatever the zone is, and
+/// timestamp without a zone is not touched.
+#[test]
+fn timestamptz_shows_in_the_session_zone_and_keeps_its_instant() {
+    use super::write::RowEdit;
+    use mongodb::bson::doc;
+    // (zone, 12:00 UTC shown, 15:00 UTC shown)
+    let zones = [
+        (Zone::Utc, "2024-06-01 12:00:00+00", "2024-06-01 15:00:00+00"),
+        (Zone::Custom("Europe/Paris".into()), "2024-06-01 14:00:00+02", "2024-06-01 17:00:00+02"),
+        (Zone::Custom("Asia/Kolkata".into()), "2024-06-01 17:30:00+05:30", "2024-06-01 20:30:00+05:30"),
+    ];
+    each(|var, uri, pooled| {
+        for (zone, noon, three) in &zones {
+            let l = open(uri, &Advanced { zone: zone.clone(), ..Default::default() }, pooled);
+            let db = l.quarry_test();
+            let pool = l.fixture_pool();
+            l.qsql(&pool, "DROP SCHEMA IF EXISTS adv_tz CASCADE; CREATE SCHEMA adv_tz; CREATE TABLE adv_tz.t (id int PRIMARY KEY, ts timestamptz, tn timestamp); INSERT INTO adv_tz.t VALUES (1, '2024-06-01 12:00:00+00', '2024-06-01 12:00:00'), (2, '2024-06-02 12:00:00+00', NULL)");
+            let read = |filter: &str| {
+                l.w.sql_page(7, db.clone(), "adv_tz".into(), "t".into(), super::PageQuery { filter: filter.into(), order: "id".into(), ..Default::default() }, 100, 0);
+                let Msg::SqlCols { cols, .. } = l.next() else { panic!("expected SqlCols") };
+                let Msg::Docs { res: Ok((rows, count, _)), .. } = l.next() else { panic!("expected Docs") };
+                (cols, rows.iter().map(|r| r.decode().unwrap()).collect::<Vec<_>>(), count)
+            };
+            let (cols, rows, _) = read("");
+            assert_eq!(rows[0].get_str("ts").unwrap(), *noon, "{var} {zone:?}");
+            assert_eq!(rows[0].get_str("tn").unwrap(), "2024-06-01 12:00:00", "{var} {zone:?}: timestamp has no zone");
+            // The same instant is found whether it is typed in UTC, in another offset or as the text the grid shows.
+            for f in ["ts = '2024-06-01 12:00:00+00'", "ts = '2024-06-01 14:00:00+02'", &format!("ts = '{noon}'"), "ts < '2024-06-02 00:00:00+00'"] {
+                let (_, rs, n) = read(f);
+                assert_eq!((n, rs[0].get_i64("id").unwrap()), (1, 1), "{var} {zone:?}: {f}");
+            }
+            // Saving the shown text of another instant stores that instant.
+            let edit = RowEdit { pk: doc! { "id": 1_i64 }, changes: vec![("ts".into(), Bson::String((*noon).into()), Bson::String((*three).into()))] };
+            l.w.sql_save(vec!["k".into()], 1, db.clone(), "adv_tz".into(), "t".into(), cols, vec!["id".into()], vec![edit], false);
+            let Msg::Saved { res, .. } = l.next() else { panic!("expected Saved") };
+            res.unwrap_or_else(|x| panic!("{var} {zone:?}: {x}"));
+            assert_eq!(l.qone(&pool, "SELECT (ts = '2024-06-01 15:00:00+00')::text FROM adv_tz.t WHERE id = 1"), "true", "{var} {zone:?}");
+            assert_eq!(read("").1[0].get_str("ts").unwrap(), *three, "{var} {zone:?}");
+            l.qsql(&pool, "DROP SCHEMA adv_tz CASCADE");
+        }
+    });
+}

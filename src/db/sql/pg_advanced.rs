@@ -275,7 +275,13 @@ impl PgSession {
         check_connection(adv)?;
         let mut settings: Vec<(String, String)> = Vec::new();
         match &adv.zone {
-            Zone::Server => {}
+            // sqlx starts every session in UTC, so a server default would never show: this computer's zone is what a
+            // reader expects, and a zone that cannot be read leaves the session in UTC as before.
+            Zone::Server => {
+                if let Some(z) = system.filter(|z| check_zone(z).is_ok()) {
+                    settings.push(("TimeZone".into(), z));
+                }
+            }
             Zone::Utc => settings.push(("TimeZone".into(), "UTC".into())),
             Zone::System => settings.push(("TimeZone".into(), system.filter(|z| check_zone(z).is_ok()).ok_or("Time zone: this computer's zone name could not be read, use Custom")?)),
             Zone::Custom(z) => {
@@ -394,6 +400,10 @@ mod tests {
         assert_eq!(s.locals(true), "SET LOCAL TimeZone = 'Europe/Paris'; SET LOCAL work_mem = '64MB'");
         assert!(PgSession::new(&Advanced { zone: Zone::System, ..Default::default() }, None).is_err());
         assert_eq!(PgSession::new(&Advanced::default(), None).unwrap(), PgSession::default());
+        let d = PgSession::new(&Advanced::default(), Some("Asia/Kolkata".into())).unwrap();
+        assert_eq!(d.settings, [("TimeZone".to_string(), "Asia/Kolkata".to_string())]);
+        assert_eq!(PgSession::new(&Advanced::default(), Some("bad zone;".into())).unwrap(), PgSession::default());
+        assert_eq!(PgSession::new(&Advanced { zone: Zone::Utc, ..Default::default() }, Some("Asia/Kolkata".into())).unwrap().settings[0].1, "UTC");
     }
 
     #[test]
