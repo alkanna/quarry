@@ -378,8 +378,11 @@ fn a_json_cell_is_checked_while_typed_and_bad_json_is_not_applied() {
         ui.open_cell("doc", 1);
         ui.click("Open in editor");
         ui.wait("the dialog", |a| a.sql_cell.as_ref().is_some_and(|e| e.big));
-        // Set directly: the JSON editor pairs brackets, so typed braces would wrap the selection.
-        let put = |ui: &mut UiApp, s: &str| ui.h.state_mut().sql_cell.as_mut().unwrap().text = s.into();
+        // Set directly: the JSON editor pairs brackets, so typed braces would wrap the selection. An edit clears the check too.
+        let put = |ui: &mut UiApp, s: &str| {
+            let e = ui.h.state_mut().sql_cell.as_mut().unwrap();
+            (e.text, e.json_err) = (s.into(), None);
+        };
         put(ui, "{\"a\": ");
         ui.h.run_steps(2);
         assert!(ui.h.query_by_label_contains("Not valid JSON").is_some(), "no error while the JSON is incomplete");

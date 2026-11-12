@@ -20,6 +20,8 @@ pub(super) struct CellEdit {
     pub(super) big: bool,
     /// Edited since it opened, so the side panel must not drop it for another value.
     pub(super) dirty: bool,
+    /// The large editor's live check of a JSON column: None until the text is checked again after an edit.
+    pub(super) json_err: Option<Option<String>>,
 }
 
 impl CellEdit {
@@ -273,7 +275,7 @@ impl App {
         let text = edit_text(&v, kind);
         // With the panel open, a double-click loads the new cell into it, so the panel follows the selection.
         let big = value_edit::is_long(&text) || self.value_in_panel();
-        self.sql_cell = Some(CellEdit { id: rows.id(i), col, text, dirty: false, err: None, focus: true, done: None, big });
+        self.sql_cell = Some(CellEdit { json_err: None, id: rows.id(i), col, text, dirty: false, err: None, focus: true, done: None, big });
     }
 
     /// Draws the editor over a cell and records Enter, Esc and a click elsewhere.
@@ -964,7 +966,7 @@ mod tests {
 
     #[test]
     fn keyless_rows_never_own_the_editor() {
-        let e = |id: Option<Bson>| CellEdit { id, col: "last_name".into(), text: String::new(), err: None, focus: false, done: None, big: false, dirty: false };
+        let e = |id: Option<Bson>| CellEdit { json_err: None, id, col: "last_name".into(), text: String::new(), err: None, focus: false, done: None, big: false, dirty: false };
         // A Shell result has no keys: every row reports None, and the editor must not appear in all of them.
         assert!(!e(None).is_at(None, "last_name"));
         let keyed = e(Some(Bson::Int32(7)));
@@ -977,12 +979,12 @@ mod tests {
     #[test]
     fn editor_opens_again_after_it_is_closed() {
         // Esc leaves done = Some(false); the finish step drops the editor, and a fresh one starts clean.
-        let mut cell = Some(CellEdit { id: Some(Bson::Int32(1)), col: "a".into(), text: "x".into(), err: None, focus: true, done: Some(false), big: false, dirty: false });
+        let mut cell = Some(CellEdit { json_err: None, id: Some(Bson::Int32(1)), col: "a".into(), text: "x".into(), err: None, focus: true, done: Some(false), big: false, dirty: false });
         if cell.as_ref().is_some_and(|e| e.done == Some(false)) {
             cell = None;
         }
         assert!(cell.is_none());
-        cell = Some(CellEdit { id: Some(Bson::Int32(1)), col: "a".into(), text: "x".into(), err: None, focus: true, done: None, big: false, dirty: false });
+        cell = Some(CellEdit { json_err: None, id: Some(Bson::Int32(1)), col: "a".into(), text: "x".into(), err: None, focus: true, done: None, big: false, dirty: false });
         assert!(cell.unwrap().is_at(Some(Bson::Int32(1)), "a"));
     }
 }

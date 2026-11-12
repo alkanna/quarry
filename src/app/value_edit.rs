@@ -11,9 +11,6 @@ pub(super) enum ValueAct {
     Null,
 }
 
-/// The last JSON check of the large editor: the cell it was for, the text length and the error, if any.
-type Checked = (String, usize, Option<String>);
-
 /// A value the one-line editors cannot show faithfully, so double-click opens the large editor straight away.
 pub(super) fn is_long(s: &str) -> bool {
     s.contains('\n') || s.len() > 500
@@ -52,10 +49,7 @@ fn value_body(ui: &mut egui::Ui, id: egui::Id, text: &mut String, code: bool, fo
         find.reveal(ui, text, &out);
         if out.response.changed() {
             *dirty = true;
-            ui.data_mut(|d| {
-                d.remove::<(usize, usize, usize)>(count_id);
-                d.remove::<Checked>(id.with("check"));
-            });
+            ui.data_mut(|d| d.remove::<(usize, usize, usize)>(count_id));
         }
         if std::mem::take(focus) {
             out.response.request_focus();
@@ -235,24 +229,21 @@ impl App {
         ui.label(RichText::new("Type NULL for a null value. Applying keeps it as an unsaved edit until you press Save.").size(TXT_SMALL).color(MUTED()));
         ui.add_space(4.0);
         let null = col.as_ref().is_none_or(|c| c.1).then_some("Set NULL");
-        let id = egui::Id::unique("sql-cell-text");
-        // JSON and jsonb columns get the code look and are checked as they are typed, with the same parse Apply runs.
-        let json = self.sql_col(&e.col).filter(|c| c.kind == db::sql::value::Kind::Json).cloned();
-        let check = json.as_ref().and_then(|c| {
-            // Parsed again only after an edit or for another cell, since the text can be megabytes.
-            let cell = format!("{}\0{:?}", e.col, e.id);
-            match ui.data(|d| d.get_temp::<Checked>(id.with("check"))) {
-                Some((k, len, r)) if k == cell && len == e.text.len() => r,
-                _ => {
-                    let r = db::sql::value::parse_col(self.sql_dialect(), c, &e.text).err();
-                    ui.data_mut(|d| d.insert_temp(id.with("check"), (cell, e.text.len(), r.clone())));
-                    r
-                }
-            }
-        });
-        let err = check.as_deref().or(e.err.as_deref());
-        let act = value_body(ui, id, &mut e.text, json.is_some(), &mut e.focus, &mut e.dirty, err, null, rows, max_h);
-        if act == ValueAct::Apply && check.is_some() { ValueAct::None } else { act }
+        // JSON and jsonb columns get the code look and are checked as they are typed, with the parse Apply runs, which
+        // also refuses to apply text that does not parse.
+        let json = self.sql_col(&e.col).is_some_and(|c| c.kind == db::sql::value::Kind::Json);
+        // ponytail: past 1 MB each keystroke would parse the whole text, so such values are checked on Apply only
+        if json && e.json_err.is_none() && e.text.len() <= 1 << 20 {
+            e.json_err = Some(self.sql_col(&e.col).and_then(|c| db::sql::value::parse_col(self.sql_dialect(), c, &e.text).err()));
+        }
+        let err = e.json_err.as_ref().and_then(|r| r.as_deref()).or(e.err.as_deref());
+        let mut edited = false;
+        let act = value_body(ui, egui::Id::unique("sql-cell-text"), &mut e.text, json, &mut e.focus, &mut edited, err, null, rows, max_h);
+        if edited {
+            e.dirty = true;
+            e.json_err = None;
+        }
+        act
     }
 }
 
