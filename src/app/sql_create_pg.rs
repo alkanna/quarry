@@ -145,6 +145,45 @@ impl PgNewTable {
         None
     }
 
+    /// Every pick of a column by name in the UNIQUEs, the indexes and the keys (the parent side only when the key points at this
+    /// table), so a rename or a removal reaches all of them.
+    fn picks_mut(&mut self) -> impl Iterator<Item = &mut String> {
+        let lists = self.uniques.iter_mut().map(|u| &mut u.cols).chain(self.indexes.iter_mut().map(|i| &mut i.cols));
+        let keys = self.fks.iter_mut().flat_map(|k| {
+            let own = k.own;
+            k.key.cols.iter_mut().chain(k.key.ref_cols.iter_mut().filter(move |_| own))
+        });
+        lists.flat_map(|v| v.iter_mut()).chain(keys)
+    }
+
+    /// A column was renamed from `from`. Its picks follow, unless another column still has that name and the picks may be its. An
+    /// emptied name is a removal, because an empty pick on a key line means nothing picked.
+    fn col_renamed(&mut self, from: &str, to: &str) {
+        if from.is_empty() || self.cols.iter().any(|c| c.def.name == from) {
+            return;
+        }
+        if to.is_empty() {
+            return self.forget_col(from);
+        }
+        self.picks_mut().filter(|p| *p == from).for_each(|p| *p = to.to_string());
+    }
+
+    /// Takes a removed column out of every list. A UNIQUE or index pick list hides a name it does not offer, so a stale one could
+    /// neither be seen nor removed and a new column of that name would silently take its place. A key line is kept and left unpicked.
+    fn forget_col(&mut self, name: &str) {
+        for v in self.uniques.iter_mut().map(|u| &mut u.cols).chain(self.indexes.iter_mut().map(|i| &mut i.cols)) {
+            v.retain(|c| c != name);
+        }
+        self.picks_mut().filter(|p| *p == name).for_each(String::clear);
+    }
+
+    fn remove_col(&mut self, i: usize) {
+        let gone = self.cols.remove(i).def.name;
+        if !self.cols.iter().any(|c| c.def.name == gone) {
+            self.forget_col(&gone);
+        }
+    }
+
     /// The answer to a parent's structure read, when it is for one of this dialog's keys.
     pub(super) fn parent_loaded(&mut self, req: u64, res: &db::Res<Structure>) -> bool {
         let Some(k) = self.fks.iter_mut().find(|k| k.req == req && req != 0) else { return false };
@@ -608,6 +647,8 @@ impl App {
     /// The editable column list: key mark and name, type, Null, Unique and an Extra menu with identity, default and comment.
     fn pg_column_grid(&mut self, ui: &mut egui::Ui, f: &mut PgNewTable) {
         let mut remove = None;
+        // The names before this frame's typing, so a renamed column takes its picks in keys and indexes with it.
+        let names: Vec<String> = f.cols.iter().map(|c| c.def.name.clone()).collect();
         egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| {
             ui.set_width(ui.available_width());
             egui::ScrollArea::vertical().max_height(250.0).auto_shrink([false, true]).show(ui, |ui| {
@@ -695,8 +736,14 @@ impl App {
                 });
             });
         });
+        for (i, from) in names.iter().enumerate() {
+            if f.cols[i].def.name != *from {
+                let to = f.cols[i].def.name.clone();
+                f.col_renamed(from, &to);
+            }
+        }
         if let Some(i) = remove {
-            f.cols.remove(i);
+            f.remove_col(i);
         }
     }
 
@@ -971,7 +1018,11 @@ fn pg_locale_section(ui: &mut egui::Ui, o: &mut DbOpts, ch: &DbChoices) {
     let tpl = ch.template(o.template.as_deref()).cloned().unwrap_or_default();
     let locale_of = |t: &create_pg::Template| if t.collate == t.ctype { t.collate.clone() } else { format!("{} (LC_COLLATE), {} (LC_CTYPE)", t.collate, t.ctype) };
     if o.template.as_deref() != Some(create_pg::PRISTINE) {
-        let icu = if tpl.provider == "i" { format!(", ICU locale {}", tpl.icu) } else { String::new() };
+        let icu = match tpl.provider.as_str() {
+            "i" => format!(", ICU locale {}", tpl.icu),
+            "b" => format!(", builtin locale {}", tpl.icu),
+            _ => String::new(),
+        };
         if !tpl.name.is_empty() {
             ui.label(RichText::new(format!("A copy of {} gets {}, locale {}{icu}.", tpl.name, tpl.encoding, locale_of(&tpl))).color(MUTED()));
         }
@@ -987,9 +1038,7 @@ fn pg_locale_section(ui: &mut egui::Ui, o: &mut DbOpts, ch: &DbChoices) {
         str_pick(ui, "pg-newdb-enc", "Encoding", 400.0, &mut o.encoding, &format!("Template's ({})", tpl.encoding), &ch.encodings);
         ui.end_row();
         let enc = o.encoding.clone().unwrap_or_else(|| tpl.encoding.clone());
-        let mut locales: Vec<String> = ch.locales_for(&enc).cloned().collect();
-        locales.sort();
-        locales.dedup();
+        let locales = ch.locales_with(&enc, Some(&tpl));
         // A locale made for another encoding would be refused by the server, so a change of encoding drops it.
         if o.encoding != enc_before {
             for l in [&mut o.locale, &mut o.lc_collate, &mut o.lc_ctype] {
@@ -998,8 +1047,13 @@ fn pg_locale_section(ui: &mut egui::Ui, o: &mut DbOpts, ch: &DbChoices) {
                 }
             }
         }
+        // Where LOCALE would also set the ICU or builtin locale, only LC_COLLATE and LC_CTYPE are offered.
+        let word_ok = ch.locale_word_ok(o);
+        if !word_ok {
+            o.locale = None;
+        }
         form_label(ui, "Locale");
-        str_pick(ui, "pg-newdb-locale", "Locale", 400.0, &mut o.locale, &format!("Template's ({})", locale_of(&tpl)), &locales);
+        ui.add_enabled_ui(word_ok, |ui| str_pick(ui, "pg-newdb-locale", "Locale", 400.0, &mut o.locale, &format!("Template's ({})", locale_of(&tpl)), &locales));
         ui.end_row();
         // LOCALE sets both of these, and the server refuses it together with either.
         if o.locale.is_some() {
@@ -1012,7 +1066,7 @@ fn pg_locale_section(ui: &mut egui::Ui, o: &mut DbOpts, ch: &DbChoices) {
         }
         if ch.icu_ok() {
             form_label(ui, "Provider");
-            let own = if tpl.provider == "i" { "icu" } else { "libc" };
+            let own = create_pg::provider_name(&tpl.provider);
             str_pick(ui, "pg-newdb-provider", "Locale provider", 400.0, &mut o.provider, &format!("Template's ({own})"), &["libc".to_string(), "icu".to_string()]);
             ui.end_row();
             if o.provider.as_deref() == Some("icu") {
@@ -1024,6 +1078,13 @@ fn pg_locale_section(ui: &mut egui::Ui, o: &mut DbOpts, ch: &DbChoices) {
             }
         }
     });
+    if !ch.locale_word_ok(o) {
+        let p = create_pg::provider_name(&ch.provider_of(o));
+        note(ui, format!("Locale is off: on PostgreSQL 16 and later LOCALE also sets the {p} locale of a database with the {p} provider. LC_COLLATE and LC_CTYPE set the operating system locale alone."));
+    }
+    if let Some(why) = ch.template_locale_problem(o) {
+        ui.add(egui::Label::new(RichText::new(why).size(TXT_SMALL).color(ALERT())).wrap());
+    }
     if !ch.icu_ok() {
         note(ui, if ch.version < 150000 { "A locale provider and an ICU locale need PostgreSQL 15 or later." } else { "This server was built without ICU, so a database uses the operating system's locales." }.into());
     }
@@ -1063,6 +1124,45 @@ mod tests {
         let t = PgNewTable { name: "t".into(), ..PgNewTable::new(1, "d".into(), "public".into()) };
         let s = create_pg::create_table_stmts(&t.spec()).unwrap();
         assert_eq!(s[0], "CREATE TABLE \"public\".\"t\" (\n  \"id\" integer GENERATED BY DEFAULT AS IDENTITY,\n  PRIMARY KEY (\"id\")\n)");
+    }
+
+    #[test]
+    fn a_renamed_or_removed_column_leaves_no_stale_pick_in_keys_and_indexes() {
+        let mut t = PgNewTable { name: "t".into(), ..PgNewTable::new(1, "d".into(), "public".into()) };
+        let col = |n: &str| PgCol { def: ColDef::new(n, "integer"), pk: false, unique: false };
+        t.cols.extend([col("price"), col("qty")]);
+        let v = |x: &[&str]| x.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        t.uniques = vec![Unique { name: String::new(), cols: v(&["price", "qty"]) }];
+        t.indexes = vec![NewIndex { name: String::new(), cols: v(&["qty", "price"]), unique: false }];
+        let mut other = PgFk::new("public");
+        (other.key.ref_table, other.key.cols, other.key.ref_cols) = ("parent".into(), v(&["price"]), v(&["price"]));
+        let mut own = PgFk::new("public");
+        own.own = true;
+        (own.key.cols, own.key.ref_cols) = (v(&["qty"]), v(&["price"]));
+        t.fks = vec![other, own];
+
+        t.cols[1].def.name = "cost".into();
+        t.col_renamed("price", "cost");
+        assert_eq!(t.uniques[0].cols, v(&["cost", "qty"]));
+        assert_eq!(t.indexes[0].cols, v(&["qty", "cost"]));
+        assert_eq!((t.fks[0].key.cols.clone(), t.fks[0].key.ref_cols.clone()), (v(&["cost"]), v(&["price"])), "another table's column keeps its name");
+        assert_eq!(t.fks[1].key.ref_cols, v(&["cost"]), "a key on this table follows the rename on both sides");
+
+        t.remove_col(1);
+        assert_eq!(t.uniques[0].cols, v(&["qty"]));
+        assert_eq!(t.indexes[0].cols, v(&["qty"]));
+        assert_eq!((t.fks[0].key.cols.clone(), t.fks[1].key.ref_cols.clone()), (v(&[""]), v(&[""])), "the key lines stay, unpicked");
+        // A new column of the old name does not slip into the lists.
+        t.cols.push(col("cost"));
+        let spec = t.spec();
+        assert_eq!((spec.uniques[0].cols.clone(), spec.indexes[0].cols.clone()), (v(&["qty"]), v(&["qty"])));
+
+        // Two columns of one name: renaming one leaves the picks to the other.
+        t.cols.push(col("cost"));
+        t.cols[3].def.name = "x".into();
+        t.indexes[0].cols = v(&["cost"]);
+        t.col_renamed("cost", "x");
+        assert_eq!(t.indexes[0].cols, v(&["cost"]));
     }
 
     #[test]

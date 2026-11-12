@@ -109,6 +109,56 @@ impl DbChoices {
     pub fn locales_for<'a>(&'a self, encoding: &'a str) -> impl Iterator<Item = &'a String> + 'a {
         self.locales.iter().filter(move |(_, e)| e.is_empty() || e.eq_ignore_ascii_case(encoding)).map(|(l, _)| l)
     }
+
+    /// The libc locales offered with `encoding`, sorted: the imported ones plus the template's own when the encoding is the
+    /// template's. An image without imported OS locales lists only C and POSIX, yet the server takes the locale it was made with.
+    pub fn locales_with(&self, encoding: &str, tpl: Option<&Template>) -> Vec<String> {
+        let mut v: Vec<String> = self.locales_for(encoding).cloned().collect();
+        if let Some(t) = tpl.filter(|t| t.encoding.eq_ignore_ascii_case(encoding)) {
+            v.extend([&t.collate, &t.ctype].into_iter().filter(|l| !l.is_empty()).cloned());
+        }
+        v.sort();
+        v.dedup();
+        v
+    }
+
+    /// The provider a new database gets, "c", "i" or "b": the one picked, else the template's.
+    pub fn provider_of(&self, o: &DbOpts) -> String {
+        match o.provider.as_deref() {
+            Some("icu") => "i".into(),
+            Some(_) => "c".into(),
+            None => self.template(o.template.as_deref()).map(|t| t.provider.clone()).filter(|p| !p.is_empty()).unwrap_or_else(|| "c".into()),
+        }
+    }
+
+    /// From 16 LOCALE also sets the ICU or builtin locale when the provider is not libc, where before it set only LC_COLLATE and
+    /// LC_CTYPE. Offering it only where it means the same on every version keeps the preview honest.
+    pub fn locale_word_ok(&self, o: &DbOpts) -> bool {
+        self.version < 160000 || self.provider_of(o) == "c"
+    }
+
+    /// Why an encoding picked with the template's locale left in place would be refused: the template's LC_COLLATE or LC_CTYPE
+    /// does not go with it. SQL_ASCII is left to the server, which takes any locale with it for a superuser.
+    pub fn template_locale_problem(&self, o: &DbOpts) -> Option<String> {
+        let enc = o.encoding.as_deref()?;
+        let t = self.template(o.template.as_deref())?;
+        if enc.eq_ignore_ascii_case("SQL_ASCII") || o.locale.is_some() {
+            return None;
+        }
+        let offered = self.locales_with(enc, Some(t));
+        let kept = [(o.lc_collate.is_none(), &t.collate), (o.lc_ctype.is_none(), &t.ctype)];
+        let (_, l) = kept.into_iter().find(|(k, l)| *k && !l.is_empty() && !offered.contains(l))?;
+        Some(format!("The template's locale {l} does not go with the encoding {enc}. Pick a locale for it too (C goes with every encoding)."))
+    }
+}
+
+/// How the dialog names a provider letter of pg_database.
+pub fn provider_name(p: &str) -> &'static str {
+    match p {
+        "i" => "icu",
+        "b" => "builtin",
+        _ => "libc",
+    }
 }
 
 /// What CREATE DATABASE copies when no template is named.
@@ -172,12 +222,18 @@ pub fn create_db_sql(name: &str, o: &DbOpts, ch: &DbChoices) -> Res<String> {
         return Err("Pick either one locale or LC_COLLATE and LC_CTYPE, not both.".into());
     }
     let enc = o.encoding.clone().or_else(|| tpl.map(|t| t.encoding.clone())).unwrap_or_default();
+    if o.locale.is_some() && !ch.locale_word_ok(o) {
+        let p = provider_name(&ch.provider_of(o));
+        return Err(format!("On PostgreSQL 16 and later LOCALE also sets the {p} locale of a database with the {p} provider. Pick LC_COLLATE and LC_CTYPE instead."));
+    }
+    let offered = ch.locales_with(&enc, tpl);
+    let own = |v: &String| tpl.is_some_and(|t| *v == t.collate || *v == t.ctype);
     for (word, v) in [("LOCALE", &o.locale), ("LC_COLLATE", &o.lc_collate), ("LC_CTYPE", &o.lc_ctype)] {
         let Some(v) = v else { continue };
-        if !ch.locales.iter().any(|(l, _)| l == v) {
+        if !ch.locales.iter().any(|(l, _)| l == v) && !own(v) {
             return Err(format!("{v} is not a locale this server knows."));
         }
-        if !ch.locales_for(&enc).any(|l| l == v) {
+        if !offered.contains(v) {
             return Err(format!("The locale {v} does not go with the encoding {enc}."));
         }
         sql.push_str(&format!(" {word} {}", setting("The locale", v)?));
@@ -218,6 +274,9 @@ pub fn create_db_sql(name: &str, o: &DbOpts, ch: &DbChoices) -> Res<String> {
         if !differ.is_empty() {
             return Err(format!("Another encoding or locale needs TEMPLATE template0: a copy of {} keeps its {}.", t.name, differ.join(" and ")));
         }
+    }
+    if let Some(why) = ch.template_locale_problem(o) {
+        return Err(why);
     }
     Ok(sql)
 }
@@ -760,6 +819,16 @@ struct Created {
     dbs: Vec<String>,
     oid: String,
     baseline: i64,
+    /// Why the create has no undo, when the connected role could not drop what it made.
+    no_undo: Option<String>,
+}
+
+/// DROP DATABASE needs the owner's rights, which a role holds only when it inherits them. CREATE DATABASE OWNER asks for less (SET
+/// from 16, MEMBER before), so a role can give a database away and then be unable to drop it: such a create gets no undo.
+async fn undo_blocked_by_owner(c: &mut Conn, db: &Db, owner: &str) -> Option<String> {
+    let sql = "SELECT COALESCE((SELECT pg_has_role(oid, 'USAGE') FROM pg_roles WHERE rolname = $1), false)::int::bigint AS n";
+    let ok = read_on(c, db, "", &[(sql, vec![Param::Text(owner.into())])]).await.ok().and_then(|mut v| v.pop()).and_then(|rows| rows.first().and_then(|r| num(r, "n"))).is_some_and(|n| n != 0);
+    (!ok).then(|| format!("No undo: this role does not inherit the rights of {owner}, the owner, so it could not drop the database."))
 }
 
 async fn create_db(db: &Db, name: &str, opts: &DbOpts, read_only: bool) -> Res<Created> {
@@ -788,7 +857,11 @@ async fn create_db(db: &Db, name: &str, opts: &DbOpts, read_only: bool) -> Res<C
         // What the template carried in is not the person's work, so the undo compares with this count and not with zero. An unreadable
         // database counts as empty, and the undo then refuses it if it cannot read it either.
         let baseline = read(&db.at(name), "", &[(&NOT_EMPTY, Vec::new())]).await.ok().and_then(|mut v| v.pop()).and_then(|rows| rows.first().and_then(|r| num(r, "n"))).unwrap_or(0) as i64;
-        Ok(Created { dbs, oid, baseline })
+        let no_undo = match opts.owner.as_ref().filter(|r| **r != choices.me) {
+            Some(r) => undo_blocked_by_owner(&mut c, db, r).await,
+            None => None,
+        };
+        Ok(Created { dbs, oid, baseline, no_undo })
     }
     .await;
     let _ = c.close().await;
@@ -955,6 +1028,30 @@ struct Made {
     state: Vec<String>,
 }
 
+/// The first function a CHECK of the table `$1` (an oid) reaches that is not IMMUTABLE, with its constraint: called by name, behind an
+/// operator or through a cast. pg_depend records what the server resolved, so an overload, a search_path hit or a user operator is
+/// the function that really runs. Built-ins are pinned and never recorded, which the name list of `check_constraint_pg` covers.
+const CHECK_VOLATILE: &str = "WITH d AS (
+    SELECT k.conname, d.refclassid, d.refobjid FROM pg_constraint k JOIN pg_depend d ON d.classid = 'pg_constraint'::regclass AND d.objid = k.oid
+    WHERE k.conrelid = $1::text::oid AND k.contype = 'c'
+), f AS (
+    SELECT conname, refobjid AS fn FROM d WHERE refclassid = 'pg_proc'::regclass
+    UNION ALL SELECT d.conname, o.oprcode::oid FROM d JOIN pg_operator o ON o.oid = d.refobjid WHERE d.refclassid = 'pg_operator'::regclass
+    UNION ALL SELECT d.conname, c.castfunc FROM d JOIN pg_cast c ON c.oid = d.refobjid WHERE d.refclassid = 'pg_cast'::regclass AND c.castfunc <> 0
+)
+SELECT f.conname::text AS con, p.oid::regprocedure::text AS fn, p.provolatile::text AS vol FROM f JOIN pg_proc p ON p.oid = f.fn WHERE p.provolatile <> 'i' ORDER BY 1, 2 LIMIT 1";
+
+/// Refuses a CHECK that reaches a function that is not IMMUTABLE. PostgreSQL assumes a CHECK is immutable and runs it on every row
+/// written, so a volatile or stable user function there (one that writes, calls out or reads other tables) would act on each insert.
+/// Read inside the create's transaction, so a refusal rolls the whole table back.
+async fn checks_immutable(tx: &mut Tx<'_>, oid: &str) -> Res<()> {
+    let rows = tx.fetch_bound(CHECK_VOLATILE, &[Param::Text(oid.into())]).await.map_err(se)?;
+    let Some(r) = rows.first() else { return Ok(()) };
+    let (con, f) = (text(r, "con").unwrap_or_default(), text(r, "fn").unwrap_or_default());
+    let vol = if text(r, "vol").as_deref() == Some("s") { "STABLE" } else { "VOLATILE" };
+    Err(format!("The CHECK {con} calls {f}, which is {vol}. PostgreSQL runs a CHECK on every row written and assumes it is IMMUTABLE, so only IMMUTABLE functions are allowed there. Nothing was created."))
+}
+
 async fn create_table(db: &Db, spec: &TableSpec, read_only: bool) -> Res<Made> {
     let stmts = create_table_stmts(spec)?;
     // A key takes SHARE ROW EXCLUSIVE on its parent, as ADD FOREIGN KEY does in the structure editor. The parents are locked first, in
@@ -987,8 +1084,9 @@ async fn create_table(db: &Db, spec: &TableSpec, read_only: bool) -> Res<Made> {
         for (i, s) in stmts.iter().enumerate() {
             exec(tx, db, &spec.schema, s).await.map_err(|x| Fail::Run(lock_error(&x, &spec.name).unwrap_or_else(|| if stmts.len() > 1 { format!("{} (statement {} of {}). Nothing was created.", se(x), i + 1, stmts.len()) } else { se(x) })))?;
         }
-        let state = state_in(tx, &spec.schema, &spec.name).await.map_err(Fail::Run)?;
         let oid = relation_oid(tx, &D.qualified(&spec.schema, &spec.name)).await.map_err(Fail::Run)?.ok_or_else(|| Fail::Run("The table was made but cannot be read back.".into()))?;
+        checks_immutable(tx, &oid).await.map_err(Fail::Run)?;
+        let state = state_in(tx, &spec.schema, &spec.name).await.map_err(Fail::Run)?;
         Ok(Made { oid, state })
     })
     .await;
@@ -1050,9 +1148,11 @@ async fn undo_table(db: &Db, schema: &str, table: &str, made: &Made, read_only: 
         let names: Vec<String> = all.iter().map(|(s, t)| D.qualified(s, t)).collect();
         // A parent the role may not lock is left to the DROP, which takes the lock itself under the same timeout.
         let may = may_lock(tx, &names.iter().map(|n| (n.as_str(), false)).collect::<Vec<_>>()).await;
+        let mut skipped = Vec::new();
         for ((n, may), (s, t)) in names.iter().zip(may).zip(&all) {
             let own = s == schema && t == table;
             if !own && !may {
+                skipped.push(n.clone());
                 continue;
             }
             if let Err(x) = exec(tx, db, schema, &format!("LOCK TABLE {n} IN ACCESS EXCLUSIVE MODE")).await {
@@ -1084,6 +1184,11 @@ async fn undo_table(db: &Db, schema: &str, table: &str, made: &Made, read_only: 
         exec(tx, db, schema, &sql).await.map_err(|x| match sql_state(&x).as_deref() {
             // Another table's key or a view was made on it since.
             Some("2BP01") => format!("Not undone: something depends on {table} now.\n{}", se(x)),
+            // Only a parent the role could not lock ahead is still to be locked here, after the table and out of the usual order.
+            Some("55P03") if !skipped.is_empty() => format!(
+                "Not undone: {} is locked by another session that did not let go within {LOCK_WAIT_SECS} seconds. Dropping {table} removes its foreign keys' triggers there, which needs that table's strongest lock, and this role may not lock it ahead of the drop. Nothing was changed.",
+                skipped.join(", ")
+            ),
             _ => se(x),
         })
     })
@@ -1198,8 +1303,12 @@ impl Worker {
     pub fn pg_create_db(&self, conn: u64, db: Db, name: String, opts: DbOpts, read_only: bool) {
         self.spawn_sql(db.conn, "", async move {
             let res = create_db(&db, &name, &opts, read_only).await;
-            let undo = res.as_ref().ok().map(|m| entry(&db, conn, &name, "", SqlUndo::CreatedDb { oid: m.oid.clone(), baseline: m.baseline }));
-            let (res, dbs) = answer(res.map(|m| Some(m.dbs)), format!("Created database {name}"));
+            let undo = res.as_ref().ok().filter(|m| m.no_undo.is_none()).map(|m| entry(&db, conn, &name, "", SqlUndo::CreatedDb { oid: m.oid.clone(), baseline: m.baseline }));
+            let said = match res.as_ref().ok().and_then(|m| m.no_undo.as_ref()) {
+                Some(why) => format!("Created database {name}. {why}"),
+                None => format!("Created database {name}"),
+            };
+            let (res, dbs) = answer(res.map(|m| Some(m.dbs)), said);
             Msg::SqlDdl { conn, database: String::new(), schema: name, table: String::new(), what: Ddl::CreatedDb, res, undo, dbs, sql_mode: None }
         });
     }
@@ -1306,7 +1415,7 @@ mod tests {
         s.checks = vec![Check { name: String::new(), expr: " price >= 0 ".into() }, Check { name: "code_set".into(), expr: "length(\"Code\") > 0 AND \"Code\" <> 'x;y'".into() }];
         let b = body(&s);
         assert!(b.contains("  CHECK (price >= 0)") && b.contains("  CONSTRAINT \"code_set\" CHECK (length(\"Code\") > 0 AND \"Code\" <> 'x;y')"), "{b}");
-        for bad in ["price > 0); DROP TABLE x; --", "price > 0 -- x", "price > (0", "", "pg_advisory_lock(1) IS NOT NULL", "dblink_exec('x', 'DROP TABLE y') = 'OK'", "(1).pg_terminate_backend", "\"lo_unlink\"(1) = 1", "pg_catalog.pg_reload_conf()", "U&\"\\0070g_sleep\"(1) IS NULL"] {
+        for bad in ["price > 0); DROP TABLE x; --", "price > 0 -- x", "price > (0", "", "pg_advisory_lock(1) IS NOT NULL", "dblink_exec('x', 'DROP TABLE y') = 'OK'", "(1).pg_terminate_backend", "\"lo_unlink\"(1) = 1", "pg_catalog.pg_reload_conf()", "U&\"\\0070g_sleep\"(1) IS NULL", "pg_sleep(1) IS NULL", "pg_catalog.pg_sleep_for('1s') IS NULL", "(1).pg_sleep IS NULL"] {
             s.checks = vec![Check { name: String::new(), expr: bad.into() }];
             assert!(create_table_stmts(&s).is_err(), "{bad:?} was not refused");
         }
@@ -1420,5 +1529,55 @@ mod tests {
         // A value the server listed with a quote in it is still never written into the statement.
         let odd = DbChoices { locales: vec![("x'y".into(), String::new())], ..choices() };
         assert!(create_db_sql("app", &on0(DbOpts { locale: Some("x'y".into()), ..Default::default() }), &odd).is_err());
+    }
+
+    /// A cluster made with ICU (or builtin on 17) whose templates still carry a libc LC_COLLATE and LC_CTYPE.
+    fn icu_cluster(version: u32, provider: &str) -> DbChoices {
+        let mut ch = DbChoices { version, ..choices() };
+        for t in &mut ch.templates {
+            (t.provider, t.icu) = (provider.into(), if provider == "b" { "C.UTF-8".into() } else { "en-US".into() });
+        }
+        ch
+    }
+
+    #[test]
+    fn locale_is_not_offered_where_it_would_also_set_the_icu_or_builtin_locale() {
+        let o = DbOpts { template: Some("template0".into()), locale: Some("C".into()), ..Default::default() };
+        // 15 reads LOCALE as LC_COLLATE and LC_CTYPE only; 16 and later also as the ICU or builtin locale.
+        assert!(create_db_sql("app", &o, &icu_cluster(150004, "i")).is_ok());
+        for (v, p, word) in [(160002, "i", "icu"), (170000, "b", "builtin")] {
+            let ch = icu_cluster(v, p);
+            assert!(!ch.locale_word_ok(&o));
+            let why = create_db_sql("app", &o, &ch).unwrap_err();
+            assert!(why.contains(&format!("the {word} locale")) && why.contains("LC_COLLATE and LC_CTYPE"), "{why}");
+            let both = DbOpts { locale: None, lc_collate: Some("C".into()), lc_ctype: Some("C".into()), ..o.clone() };
+            assert!(create_db_sql("app", &both, &ch).is_ok(), "{v}");
+            // With libc picked, LOCALE means the same everywhere.
+            let libc = DbOpts { provider: Some("libc".into()), ..o.clone() };
+            assert!(ch.locale_word_ok(&libc) && create_db_sql("app", &libc, &ch).is_ok(), "{v}");
+        }
+        assert_eq!((provider_name("b"), provider_name("i"), provider_name("c")), ("builtin", "icu", "libc"));
+    }
+
+    #[test]
+    fn an_encoding_left_with_the_templates_locale_is_checked_and_the_templates_locale_is_offered() {
+        let ch = choices();
+        let on0 = |o: DbOpts| DbOpts { template: Some("template0".into()), ..o };
+        // template0 is en_US.utf8, which is UTF8 only.
+        let why = create_db_sql("app", &on0(DbOpts { encoding: Some("LATIN1".into()), ..Default::default() }), &ch).unwrap_err();
+        assert!(why.contains("template's locale en_US.utf8") && why.contains("LATIN1"), "{why}");
+        assert_eq!(ch.template_locale_problem(&on0(DbOpts { encoding: Some("LATIN1".into()), ..Default::default() })), Some(why));
+        assert!(create_db_sql("app", &on0(DbOpts { encoding: Some("LATIN1".into()), locale: Some("C".into()), ..Default::default() }), &ch).is_ok());
+        // Only LC_CTYPE picked: LC_COLLATE stays the template's and is checked.
+        assert!(create_db_sql("app", &on0(DbOpts { encoding: Some("LATIN1".into()), lc_ctype: Some("C".into()), ..Default::default() }), &ch).is_err());
+        assert!(create_db_sql("app", &on0(DbOpts { encoding: Some("UTF8".into()), ..Default::default() }), &ch).is_ok());
+        assert!(create_db_sql("app", &on0(DbOpts { encoding: Some("SQL_ASCII".into()), ..Default::default() }), &ch).is_ok(), "left to the server");
+        // An image with no imported OS locales lists C and POSIX only, and still offers and takes the template's own locale.
+        let bare = DbChoices { locales: vec![("C".into(), String::new()), ("POSIX".into(), String::new())], ..choices() };
+        let t0 = bare.template(Some("template0"));
+        assert_eq!(bare.locales_with("UTF8", t0), ["C", "POSIX", "en_US.utf8"]);
+        assert_eq!(bare.locales_with("LATIN1", t0), ["C", "POSIX"]);
+        assert!(create_db_sql("app", &on0(DbOpts { encoding: Some("UTF8".into()), locale: Some("en_US.utf8".into()), ..Default::default() }), &bare).is_ok());
+        assert!(create_db_sql("app", &on0(DbOpts { encoding: Some("LATIN1".into()), locale: Some("en_US.utf8".into()), ..Default::default() }), &bare).unwrap_err().contains("does not go with"));
     }
 }

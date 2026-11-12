@@ -1203,6 +1203,70 @@ fn a_key_without_a_unique_parent_key_and_checks_that_act_outside_the_row_make_no
 }
 
 #[test]
+fn a_check_that_reaches_a_function_that_is_not_immutable_makes_nothing() {
+    every_pg(|l, var| {
+        let tidy = Tidy::new(l);
+        let db = l.quarry_test();
+        let pool = l.fixture_pool();
+        let s = tidy.schema(&uniq("vol"));
+        // A plpgsql function that writes, one that is IMMUTABLE, and an operator whose function writes.
+        schema_with(l, &pool, &s, &format!(
+            "CREATE TABLE {s}.log (n int);
+             CREATE FUNCTION {s}.writes(x numeric) RETURNS boolean LANGUAGE plpgsql VOLATILE AS $f$BEGIN INSERT INTO {s}.log VALUES (1); RETURN true; END$f$;
+             CREATE FUNCTION {s}.pure(x numeric) RETURNS boolean LANGUAGE sql IMMUTABLE AS $f$SELECT x >= 0$f$;
+             CREATE FUNCTION {s}.ge_logged(a numeric, b numeric) RETURNS boolean LANGUAGE plpgsql VOLATILE AS $f$BEGIN INSERT INTO {s}.log VALUES (2); RETURN a >= b; END$f$;
+             CREATE OPERATOR {s}.~>=~ (LEFTARG = numeric, RIGHTARG = numeric, FUNCTION = {s}.ge_logged);",
+            s = ident(&s)
+        ));
+        let t = format!("{}.orders", ident(&s));
+        let gone = || count(l, &pool, &format!("SELECT (to_regclass({}) IS NULL)::text", lit(&t))) == "true";
+        let with = |expr: &str| TableSpec { checks: vec![Check { name: "rule".into(), expr: expr.into() }], indexes: Vec::new(), ..orders(&s, Vec::new()) };
+        for (expr, f) in [("writes(price)", "writes(numeric)"), ("price ~>=~ 0", "ge_logged(numeric,numeric)")] {
+            let why = err(&made(l, &db, with(expr)));
+            assert!(why.contains("The CHECK rule calls") && why.contains(f) && why.contains("VOLATILE") && why.contains("Nothing was created"), "{var}: {expr}: {why}");
+            assert!(gone(), "{var}: {expr}: the create was rolled back");
+        }
+        let a = made(l, &db, with("pure(price)"));
+        a.res.clone().unwrap_or_else(|x| panic!("{var}: an IMMUTABLE function: {x}"));
+        assert!(l.w.rt.block_on(sqlx::raw_sql(&format!("INSERT INTO {t} (customer, price) VALUES (1, -1)")).execute(&pool)).is_err(), "{var}: the CHECK holds");
+        assert_eq!(count(l, &pool, &format!("SELECT count(*)::text FROM {}.log", ident(&s))), "0", "{var}");
+        undo_of(l, a.undo.unwrap()).res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        // pg_sleep is a built-in, which pg_depend does not record, so the scan refuses it by name before the server is asked.
+        let why = err(&made(l, &db, with("pg_sleep(0) IS NOT NULL")));
+        assert!(why.contains("pg_sleep") && !why.contains("(statement"), "{var}: {why}");
+    });
+}
+
+#[test]
+fn a_database_given_to_an_owner_whose_rights_the_role_does_not_inherit_has_no_undo() {
+    every_pg(|l, var| {
+        l.quarry_test();
+        let pool = l.fixture_pool();
+        let (me, them) = (uniq("ni"), uniq("nt"));
+        // A NOINHERIT role may still give a database away (SET from 16, MEMBER before), but cannot drop it afterwards.
+        l.qsql(&pool, &format!("CREATE ROLE {} LOGIN CREATEDB NOINHERIT PASSWORD 'pw'; CREATE ROLE {} NOLOGIN; GRANT {} TO {}", ident(&me), ident(&them), ident(&them), ident(&me)));
+        let _guards = [&me, &them].map(|r| RoleGuard { l, pool: pool.clone(), role: r.clone() });
+        let tidy = Tidy::new(l);
+        let o = sqlx::postgres::PgConnectOptions::from_str(&l.uri).unwrap();
+        let rl = live_pg_at(format!("postgres://{me}:pw@{}:{}/postgres", o.get_host(), o.get_port()));
+        let name = tidy.db("ni");
+        let _turn = db_turn();
+        rl.w.pg_create_db(1, rl.db.clone(), name.clone(), DbOpts { owner: Some(them.clone()), ..Default::default() }, false);
+        let a = ans(&rl);
+        let said = a.res.clone().unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert!(a.undo.is_none() && said.contains("No undo") && said.contains(&them), "{var}: {said}");
+        assert!(rl.w.rt.block_on(sqlx::raw_sql(&format!("DROP DATABASE {}", ident(&name))).execute(&rl.pool)).is_err(), "{var}: the server refuses the drop the undo would run");
+        // Its own databases keep their undo.
+        let mine = tidy.db("nm");
+        rl.w.pg_create_db(1, rl.db.clone(), mine.clone(), DbOpts::default(), false);
+        let a = ans(&rl);
+        a.res.clone().unwrap_or_else(|x| panic!("{var}: {x}"));
+        undo_of(&rl, a.undo.expect("an undo for a database the role owns")).res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert!(!exists(l, &mine), "{var}");
+    });
+}
+
+#[test]
 fn the_parent_of_a_new_key_is_locked_while_the_table_is_made_and_while_its_undo_drops_it() {
     every_pg(|l, var| {
         let tidy = Tidy::new(l);
