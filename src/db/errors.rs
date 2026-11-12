@@ -221,7 +221,7 @@ pub fn classify(raw: &str) -> ErrKind {
     let pg = pg_code(raw);
     let pg = pg.as_deref();
     // Before the others: an IAM refusal also says "authentication failed", and the cause is the Google identity, not a password.
-    if low.contains("cloud sql proxy") || low.contains("cloud sql:") || low.contains("cloud sql iam") {
+    if ["cloud sql proxy", "cloud sql:", "cloud sql iam"].iter().any(|p| low.starts_with(p)) {
         ErrKind::CloudSql
     } else if client_cert_problem(raw).is_some() {
         // Before SignIn: the server refuses a missing certificate with 28000, and a password is not the cause.
@@ -461,7 +461,7 @@ pub fn client_cert_problem(raw: &str) -> Option<(String, String)> {
         ("The server wants a client certificate".into(), format!("pg_hba.conf asks this user for one (clientcert=verify-ca or verify-full, or cert sign-in). Set the client certificate and key {tab}."))
     } else if low.contains("certificate authentication failed") {
         ("The client certificate does not name this user".into(), "With cert sign-in the certificate's common name (CN) must be the user name, or map to it in pg_ident.conf.".into())
-    } else if let Some(alert) = ["UnknownCA", "BadCertificate", "CertificateUnknown", "CertificateExpired", "CertificateRevoked", "CertificateRequired", "DecryptError"].iter().find(|a| first.contains(&format!("received fatal alert: {a}"))) {
+    } else if let Some(alert) = ["UnknownCA", "BadCertificate", "CertificateUnknown", "CertificateExpired", "CertificateRevoked", "CertificateRequired", "DecryptError"].iter().find(|a| first.starts_with(CERT_ALERT) && first.contains(&format!("received fatal alert: {a}"))) {
         ("The server refused the client certificate".into(), format!("The server's ssl_ca_file must hold the CA that signed it, and it must be valid today. The TLS alert was {alert}."))
     } else {
         return None;
@@ -603,11 +603,24 @@ mod tests {
         // 28000 is a sign-in refusal, but the cause is the missing certificate, not the password.
         assert_eq!(case("error returned from database: 28000: connection requires a valid client certificate").0, "The server wants a client certificate");
         assert_eq!(case("error returned from database: 28000: certificate authentication failed for user \"app\"").0, "The client certificate does not name this user");
-        assert!(case("error communicating with database: received fatal alert: UnknownCA").1.ends_with("The TLS alert was UnknownCA."));
+        assert!(case(&format!("{CERT_ALERT} error communicating with database: received fatal alert: UnknownCA")).1.ends_with("The TLS alert was UnknownCA."));
+        // Without a client certificate (MySQL, MongoDB, a PostgreSQL connection with none) the alert is a plain TLS failure.
+        let bare = "error communicating with database: received fatal alert: BadCertificate";
+        assert_eq!(client_cert_problem(bare), None);
+        assert_eq!(explain(bare, &cx()).kind, ErrKind::Tls);
         // Other TLS and sign-in errors keep their own wording.
         assert_eq!(explain("error returned from database: 28P01: password authentication failed for user \"app\"", &cx()).kind, ErrKind::SignIn);
         assert_eq!(explain("error occurred while attempting to establish a TLS connection: invalid peer certificate: UnknownIssuer", &cx()).title, "The server's certificate is not trusted");
         assert_eq!(client_cert_problem("received fatal alert: ProtocolVersion"), None);
+    }
+
+    #[test]
+    fn server_errors_echoing_cloud_sql_words_are_not_proxy_failures() {
+        let echo = r#"error returned from database: 22P02: invalid input syntax for type integer: "cloud sql proxy""#;
+        assert_ne!(classify(echo), ErrKind::CloudSql);
+        assert_eq!(classify("Cloud SQL proxy failed: instance not found"), ErrKind::CloudSql);
+        assert_eq!(classify("Cloud SQL: gcloud is signed out."), ErrKind::CloudSql);
+        assert_eq!(classify("Cloud SQL IAM sign-in refused (the proxy used Application Default Credentials): x"), ErrKind::CloudSql);
     }
 
     #[test]

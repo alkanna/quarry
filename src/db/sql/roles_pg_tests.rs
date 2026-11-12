@@ -242,6 +242,37 @@ fn live_each_write_and_its_undo() {
     });
 }
 
+/// A connection whose session runs in the given zone, made the way the app makes one from a connection with that zone setting.
+fn in_zone(uri: &str, zone: &str) -> LivePg {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let w = crate::db::Worker::new(tx, eframe::egui::Context::default());
+    let pool = w.rt.block_on(async { sqlx::PgPool::connect(uri).await.unwrap() });
+    let adv = super::advanced::Advanced { zone: super::advanced::Zone::Custom(zone.into()), ..Default::default() };
+    w.sql_connect_with(1, 0, uri.to_string(), std::time::Duration::from_secs(30), crate::db::Net::default(), adv);
+    let Msg::SqlConnected { res, .. } = rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap() else { panic!("connect") };
+    let (db, dbs, _) = res.unwrap_or_else(|x| panic!("connect: {x}"));
+    LivePg { w, rx, db, dbs, pool, uri: uri.to_string() }
+}
+
+#[test]
+fn live_valid_until_typed_without_an_offset_is_read_in_utc_whatever_the_session_zone() {
+    for var in PG_ENVS {
+        let Ok(uri) = std::env::var(var) else { continue };
+        let l = in_zone(&uri, "Asia/Kolkata");
+        let r = Roles::new(&l, &["until"]);
+        let m = r.get(0);
+        let f = PgFixture::new(&l, &unique_name("qr_until"), "CREATE TABLE t (a int);");
+        f.sql(&format!("CREATE ROLE \"{m}\" LOGIN"));
+        let c = cluster(&l);
+        let attrs = c.role(m).unwrap().attrs.clone();
+        let o = objects(&l, "quarry_test", &f.schema, Kind::Tables);
+        let to = Attrs { valid_until: "2027-01-31".into(), ..attrs.clone() };
+        let (res, _) = apply(&l, batch("quarry_test", &o, &c, vec![Change::Attrs { role: m.into(), from: attrs, to }]));
+        res.unwrap_or_else(|e| panic!("{var}: {e}"));
+        assert_eq!(cluster(&l).role(m).unwrap().attrs.valid_until, "2027-01-31 00:00:00+00", "{var}");
+    }
+}
+
 #[test]
 fn live_a_change_made_meanwhile_stops_the_apply() {
     each(true, |l, var| {

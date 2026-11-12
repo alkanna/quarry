@@ -382,6 +382,15 @@ impl Drop for Job {
 }
 
 #[cfg(windows)]
+const CREATE_SUSPENDED: u32 = 0x0000_0004;
+
+#[cfg(windows)]
+#[link(name = "ntdll")]
+unsafe extern "system" {
+    fn NtResumeProcess(process: std::os::windows::io::RawHandle) -> i32;
+}
+
+#[cfg(windows)]
 fn job_for(process: std::os::windows::io::RawHandle) -> Option<Job> {
     use windows_sys::Win32::System::JobObjects::*;
     unsafe {
@@ -513,15 +522,23 @@ fn run_limited(mut cmd: std::process::Command, limit: Duration) -> Result<std::p
     use std::io::Read;
     use std::sync::mpsc;
     cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    // Suspended, so gcloud.cmd cannot start python.exe before the job holds it; children of a process in a job join it.
     #[cfg(windows)]
-    std::os::windows::process::CommandExt::creation_flags(&mut cmd, crate::update::CREATE_NO_WINDOW);
+    std::os::windows::process::CommandExt::creation_flags(&mut cmd, crate::update::CREATE_NO_WINDOW | CREATE_SUSPENDED);
     // A group of its own, so a timeout also stops what gcloud started.
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     let mut child = cmd.spawn().map_err(Limited::Start)?;
     // On Windows gcloud is a batch file that starts Python; the job stops both, and whatever is left when it closes.
     #[cfg(windows)]
-    let job = job_for(std::os::windows::io::AsRawHandle::as_raw_handle(&child));
+    let job = {
+        let h = std::os::windows::io::AsRawHandle::as_raw_handle(&child);
+        let job = job_for(h);
+        // std keeps no thread handle, so the whole process is resumed. Also when the job could not be made: the run goes on
+        // with the plain kill, as before.
+        unsafe { NtResumeProcess(h) };
+        job
+    };
     fn read(r: Option<impl Read + Send + 'static>) -> mpsc::Receiver<Vec<u8>> {
         let (tx, rx) = mpsc::channel();
         if let Some(mut r) = r {

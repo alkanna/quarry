@@ -30,10 +30,8 @@ impl App {
             if rail_button(ui, RailIcon::Log, self.log.open, true, "Query log (Cmd+L)").clicked() {
                 self.log.open = !self.log.open;
             }
-            // Each engine has its own server window; an engine without one keeps the button disabled.
-            let lacks = self.active.and_then(|id| self.lacks(id, db::sql::Feature::ServerStatus));
-            let tip = if lacks.is_some() { "Server status (not built for PostgreSQL yet)" } else if connected { "Server status" } else { "Server status (connect first)" };
-            if rail_button(ui, RailIcon::Server, self.server.is_some() || self.sql_server.is_some() || self.pg_server.is_some(), connected && lacks.is_none(), tip).clicked()
+            let tip = if connected { "Server status" } else { "Server status (connect first)" };
+            if rail_button(ui, RailIcon::Server, self.server.is_some() || self.sql_server.is_some() || self.pg_server.is_some(), connected, tip).clicked()
                 && let Some(conn) = self.active
             {
                 self.open_server(conn);
@@ -101,10 +99,6 @@ impl App {
 
     pub(super) fn open_server(&mut self, conn: u64) {
         self.req += 1;
-        // The Mongo window would wait forever for commands a SQL server never answers, so a SQL engine without a window stops here.
-        if let Some(why) = self.lacks(conn, db::sql::Feature::ServerStatus) {
-            return self.warn(why);
-        }
         match self.conn(conn).map(|c| (c.meta.engine, c.sql.as_ref().map(|d| d.dialect), c.meta.advanced.clone())) {
             Some((db::sql::Engine::MySql, dialect, adv)) => self.sql_server = Some(SqlServerWin::new(conn, dialect.map(|d| db::sql::server::set_by_quarry(&adv, d, db::sql::advanced::local_offset_secs())).unwrap_or_default())),
             Some((db::sql::Engine::Postgres, _, adv)) => self.pg_server = Some(PgServerWin::new(conn, db::sql::pg_server::set_by_quarry(&adv))),

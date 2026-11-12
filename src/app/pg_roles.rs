@@ -1168,7 +1168,7 @@ impl App {
             form_label(ui, "Valid until");
             let r = ui.add_enabled(can, egui::TextEdit::singleline(&mut w.until).font(egui::TextStyle::Monospace).desired_width(220.0).hint_text("never"));
             r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Valid until"));
-            ui.label(RichText::new(if now.valid_until == "-infinity" { "expired: -infinity, never valid" } else { "a date, or empty for never" }).size(TXT_SMALL).color(FAINT()));
+            ui.label(RichText::new(if now.valid_until == "-infinity" { "expired: -infinity, never valid" } else { "a date in UTC, or empty for never" }).size(TXT_SMALL).color(FAINT()));
             ui.end_row();
             if r.changed() {
                 let v = w.until.trim();

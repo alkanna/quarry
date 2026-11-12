@@ -162,7 +162,7 @@ impl App {
     pub(super) fn sql_dump_dialog(&mut self, ui: &mut egui::Ui, f: &mut DumpForm, keep: &mut bool) {
         ui.set_width(610.0);
         dialog_title(ui, "Export");
-        let pg = !f.schema.is_empty();
+        let pg = self.is_pg(f.conn);
         ui.label(RichText::new(if pg { format!("{}, schema {} on {}", f.db, f.schema, f.conn_name) } else { format!("{} on {}", f.db, f.conn_name) }).size(TXT_SMALL).color(MUTED()));
         ui.add_space(10.0);
         let mono = |t: String| RichText::new(t).font(FontId::monospace(TXT_SMALL)).color(FAINT());

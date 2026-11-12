@@ -195,10 +195,9 @@ impl App {
     pub(super) fn sql_structure_view(&mut self, ui: &mut egui::Ui) {
         let Some((d, mut sel)) = self.take_structure(ui) else { return };
         let mut acts = Vec::new();
-        let block = self.struct_block();
-        let editable = self.sel_writable() && block.is_none();
+        let editable = self.sel_writable();
         let is_view = self.sel_is_view();
-        let why = if let Some(b) = block { b } else if is_view { "Views cannot be changed here" } else { READ_ONLY };
+        let why = if is_view { "Views cannot be changed here" } else { READ_ONLY };
         let note = if editable { "" } else { why };
         let (staged, mut memo, applying) = self.take_staged();
         let (dropped, changed) = staged_marks(&staged);
@@ -343,9 +342,8 @@ impl App {
         let Some((d, mut sel)) = self.take_structure(ui) else { return };
         let mut acts = Vec::new();
         let mut open = None;
-        let block = self.struct_block().or(self.rel_block());
-        let editable = self.sel_writable() && block.is_none();
-        let why = if let Some(b) = block { b } else if self.sel_is_view() { "Views cannot be changed here" } else { READ_ONLY };
+        let editable = self.sel_writable();
+        let why = if self.sel_is_view() { "Views cannot be changed here" } else { READ_ONLY };
         let (staged, mut memo, applying) = self.take_staged();
         let dropped: Vec<String> = staged.iter().filter_map(|c| if let Change::DropFk(n) = c { Some(n.to_ascii_lowercase()) } else { None }).collect();
         let fk = sel[2].filter(|i| *i < d.foreign_keys.len());
@@ -475,10 +473,9 @@ impl App {
     pub(super) fn sql_triggers_view(&mut self, ui: &mut egui::Ui) {
         let Some((d, mut sel)) = self.take_structure(ui) else { return };
         let mut acts = Vec::new();
-        let block = self.struct_block().or(self.trig_block());
         // A locked connection still edits: Save and Delete ask to unlock, as Apply does for columns.
         let editable = self.trig_editable();
-        let why = if let Some(b) = block { b } else { "Views cannot be changed here" };
+        let why = "Views cannot be changed here";
         // A trigger that was just created is listed now, so its draft has done its job.
         if let Some(s) = self.tabs[self.cur].sql.as_mut() {
             let made = s.st.trig_made.clone();

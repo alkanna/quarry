@@ -1490,6 +1490,9 @@ async fn canonical_until(tx: &mut Tx<'_>, db: &Db, typed: &str) -> Res<(String, 
     if v.is_empty() || v.eq_ignore_ascii_case("never") || v.eq_ignore_ascii_case("infinity") {
         return Ok((String::new(), false));
     }
+    // The window shows UTC, and the session may run in the computer's zone (a value without an offset reads in it), so the cast reads in UTC.
+    // set_config with is_local is SET LOCAL, which also holds behind a pooler because it ends with the transaction.
+    rows(tx, db, "SELECT set_config('TimeZone', 'UTC', true)", Vec::new()).await?;
     let sql = "WITH c AS (SELECT ts, CASE WHEN ts = 'infinity' THEN '' WHEN ts = '-infinity' THEN '-infinity' ELSE to_char(ts AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') || '+00' END AS v FROM (SELECT $1::timestamptz AS ts) t) \
                SELECT v, (CASE WHEN v = '' THEN ts = 'infinity' ELSE v::timestamptz = ts END)::text AS same, (ts <= now())::text AS past FROM c";
     let rs = rows(tx, db, sql, vec![Param::Text(v.into())]).await.map_err(|e| format!("Valid until: {e}"))?;
