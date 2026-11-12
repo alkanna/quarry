@@ -912,17 +912,24 @@ fn instance_row(ui: &mut egui::Ui, i: &Instance, b: &mut CloudBrowser) -> bool {
         p.circle_stroke(dot, 3.0, Stroke::new(1.0, FAINT()));
     }
     let name_c = if up { BRIGHT() } else { MUTED() };
-    let name = p.layout_job(LayoutJob::single_section(i.name.clone(), mono_fmt(TXT_BODY, name_c, 400.0)));
+    // Long names are cut short so the name, its badge and the state stay clear of the region column.
+    let end = left + COL_REGION - 10.0;
+    let fit = |text: &str, fmt, room: f32| {
+        let mut job = LayoutJob::single_section(text.to_owned(), fmt);
+        job.wrap = egui::text::TextWrapping::truncate_at_width(room.max(0.0));
+        p.layout_job(job)
+    };
     let mut x = left + COL_NAME + 15.0;
+    let badge_room = if i.iam { iam_galley(p).size().x + 14.0 + 8.0 } else { 0.0 };
+    let name = fit(&i.name, mono_fmt(TXT_BODY, name_c, 400.0), end - x - badge_room);
     let name_w = name.size().x;
     galley_at(p, x, cy, name, name_c);
     x += name_w + 8.0;
     if i.iam {
         x = iam_badge(p, x, cy) + 6.0;
     }
-    if !up {
-        let g = p.layout_job(LayoutJob::single_section(i.state.clone(), mono_fmt(TXT_CAPTION, FAINT(), 400.0)));
-        galley_at(p, x, cy, g, FAINT());
+    if !up && x < end {
+        galley_at(p, x, cy, fit(&i.state, mono_fmt(TXT_CAPTION, FAINT(), 400.0), end - x), FAINT());
     }
     galley_at(p, left + COL_REGION, cy, p.layout_job(LayoutJob::single_section(i.region.clone(), ui_fmt(TXT_SMALL, MUTED(), 400.0, 0.0))), MUTED());
     galley_at(p, left + COL_VERSION, cy, p.layout_job(LayoutJob::single_section(i.version.clone(), mono_fmt(TXT_SMALL, MUTED(), 400.0))), MUTED());
@@ -956,9 +963,13 @@ fn instance_row(ui: &mut egui::Ui, i: &Instance, b: &mut CloudBrowser) -> bool {
     used || r.double_clicked()
 }
 
+fn iam_galley(p: &egui::Painter) -> std::sync::Arc<egui::Galley> {
+    p.layout_job(LayoutJob::single_section("IAM".into(), ui_fmt(TXT_CAPTION, C_LINK(), W_SEMIBOLD, 0.0)))
+}
+
 /// The IAM badge after an instance name; returns its right edge.
 pub(super) fn iam_badge(p: &egui::Painter, x: f32, cy: f32) -> f32 {
-    let g = p.layout_job(LayoutJob::single_section("IAM".into(), ui_fmt(TXT_CAPTION, C_LINK(), W_SEMIBOLD, 0.0)));
+    let g = iam_galley(p);
     let rect = egui::Rect::from_min_size(egui::pos2(x, cy - 8.0), egui::vec2(g.size().x + 14.0, 16.0));
     p.rect_filled(rect, R_SM, tint(C_LINK(), 46));
     galley_at(p, rect.left() + 7.0, cy, g, C_LINK());
