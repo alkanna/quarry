@@ -1,10 +1,12 @@
-//! Headless tests that drive the real `App` through egui_kittest, against live servers.
+//! Headless tests that drive the real `App` through egui_kittest, against live servers, and a few offline ones on the
+//! demo data (`demo_ui`) for what needs no server, such as how the editors take clicks.
 //!
 //! `ui_app` returns None when its environment variable is unset, so a test returns early like the live
 //! worker tests. The app runs with `ephemeral` set: no files, no keychain, no menu bar, no window.
 //! Widgets are found by their accessible names (`Response::widget_info`): "{col} row {n}" for a grid
 //! cell, "Select row {n}" for its checkbox, the column name for a header, the text of a sidebar row.
 
+mod calendar;
 mod conn_advanced;
 mod conn_cert;
 mod conn_cloudsql;
@@ -55,7 +57,43 @@ pub(super) fn ui_app(var: &str) -> Option<UiApp> {
     Some(ui)
 }
 
+/// A harness on the offline demo that `load` builds, every connection unlocked. None when a `QUARRY_TEST_*` switch is set
+/// in the environment, because the demo loaders read them and would build another view than the test expects.
+pub(super) fn demo_ui(load: fn(&mut App)) -> Option<UiApp> {
+    if std::env::vars().any(|(k, _)| k.starts_with("QUARRY_TEST_")) {
+        eprintln!("skipped: a QUARRY_TEST_ switch is set, which changes the demo");
+        return None;
+    }
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_accessibility_check(false).build_eframe(|cc| App::for_test(cc));
+    let app = h.state_mut();
+    app.demo = true;
+    load(app);
+    for c in &mut app.conns {
+        c.writable = true;
+    }
+    let mut ui = UiApp { h };
+    ui.h.run_steps(5);
+    Some(ui)
+}
+
 impl UiApp {
+    /// A mouse click as a person makes it: move onto the widget, press, hold for `frames` frames (0 releases in the same
+    /// frame), release, then a few frames for the focus changes egui reports after a click. One frame is 250 ms of egui
+    /// time, so past about 3 frames it is a long press, not a click. `click` goes through accessibility and skips this.
+    pub fn mouse_hold(&mut self, label: &str, frames: usize) {
+        // Scrolled to only when off screen: scrolling first kept the Mongo calendar from opening in the tests, and focus
+        // is what these clicks test.
+        self.h.run_steps(2);
+        let at = self.node(label, Pick::Only).rect().center();
+        self.h.hover_at(at);
+        self.h.step();
+        let press = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        self.h.input_mut().events.push(press(true));
+        self.h.run_steps(frames);
+        self.h.input_mut().events.push(press(false));
+        self.h.run_steps(4);
+    }
+
     pub fn app(&self) -> &App {
         self.h.state()
     }
