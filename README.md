@@ -16,7 +16,7 @@
 ## Features
 
 - **MongoDB, MySQL, MariaDB and PostgreSQL** side by side (MySQL 5.7 to 9, MariaDB 10.6+, PostgreSQL 13+), in tabs with a table or JSON view.
-- **Safe by default.** Every connection opens read-only until you unlock it. Edits are staged, previewed, saved together and can be undone, and never overwrite a change someone else made meanwhile.
+- **Safe by default.** Every connection opens read-only until you unlock it. Edits are staged, previewed, saved together and can be undone, and never overwrite a change someone else made meanwhile. A server function that writes by itself still runs with your role's rights, so use a read-only role where that matters.
 - **Queries.** Mongo `find` and `aggregate` with a preview after each pipeline stage, explain plans and copy as code. SQL with typed filter rules, several statements at once, autocomplete, Format, Explain and Stop. Saved queries, history and a query log.
 - **Scripting.** A JavaScript shell on [Bun](https://bun.sh) that reads several connections, Mongo and SQL, in one script.
 - **Structure and admin.** Indexes, columns, foreign keys, triggers and validators. Server status, sessions with Kill or Cancel, users, roles and privileges on every engine.
