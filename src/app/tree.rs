@@ -121,7 +121,7 @@ impl App {
             self.inline = None;
             self.json_edit = Some(JsonEdit::new(d.clone(), path, text, kind));
         } else {
-            self.inline = Some(Inline { text, kind, path, focus: true });
+            self.inline = Some(Inline { text, kind, path, focus: true, pick: None, local: false });
         }
     }
 
@@ -586,23 +586,7 @@ impl App {
                     ui.add_space((x0 + ui.spacing().indent + key_w - ui.cursor().left()).max(0.0));
                     if editing_here {
                         let inl = self.inline.as_mut().unwrap();
-                        let tid = egui::Id::unique("tree-inline-editor");
-                        let expand = expand_key(ui, tid);
-                        let r = ui.add(egui::TextEdit::singleline(&mut inl.text).id(tid).desired_width(EDITOR_W).font(egui::TextStyle::Monospace).clip_text(true));
-                        if ui.add(expand_button()).clicked() || expand {
-                            acts.push(TreeAct::Expand);
-                        }
-                        if inl.focus {
-                            r.request_focus();
-                            inl.focus = false;
-                        }
-                        Self::type_combo(ui, "inlinekind", &mut inl.kind);
-                        if ui.button("✓").on_hover_text("Review and save (Enter)").clicked() || (r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))) {
-                            acts.push(TreeAct::Commit);
-                        }
-                        if ui.button("🗙").on_hover_text("Cancel (Esc)").clicked() {
-                            acts.push(TreeAct::Cancel);
-                        }
+                        inline_editor(ui, inl, acts);
                     } else {
                         // A one-line label never shows more than this; laying out a megabyte string on
                         // every frame stalls scrolling. "Show full value" opens the whole thing.
@@ -649,5 +633,104 @@ impl App {
         if ui.rect_contains_pointer(r) {
             ui.painter().set(at, egui::epaint::RectShape::filled(r, R_SM, HOVER()));
         }
+    }
+}
+
+/// The value editor of a tree row, with the helper its type wants: a calendar for dates, New for ObjectIds, a switch
+/// for booleans, and a line under it naming what is wrong as it is typed, or what an id says.
+fn inline_editor(ui: &mut egui::Ui, inl: &mut Inline, acts: &mut Vec<TreeAct>) {
+    let tid = egui::Id::unique("tree-inline-editor");
+    // The calendar works on the wall clock the switch shows. In Local each moment takes its own offset, so a July date
+    // edited in November keeps its summer time; the text carries that offset.
+    let local = inl.local;
+    let shown = move |utc: i64| pickers::Civil::from_ms(if local { utc + pickers::local_shift(utc) } else { utc });
+    let write = move |c: pickers::Civil| {
+        let utc = if local { pickers::from_local(c.to_ms()) } else { c.to_ms() };
+        pickers::mongo_text(utc, local.then(|| pickers::local_secs(utc)))
+    };
+    let now_utc = pickers::utc_now_ms();
+    let now = shown(now_utc);
+    let date = inl.kind == "date";
+    let utc = pickers::parse_mongo(&inl.text);
+    let mut moment = utc.map(shown);
+    if inl.pick.is_some() && pickers::date_keys(ui, &mut moment, now) && let Some(c) = moment {
+        inl.text = write(c);
+    }
+    let alt_down = date && ui.input_mut(|i| i.consume_key(egui::Modifiers::ALT, Key::ArrowDown));
+    let expand = expand_key(ui, tid);
+    let r = ui.add(egui::TextEdit::singleline(&mut inl.text).id(tid).desired_width(EDITOR_W).font(egui::TextStyle::Monospace).clip_text(true));
+    if inl.focus {
+        r.request_focus();
+        inl.focus = false;
+    }
+    if date {
+        let (b, _) = ui.allocate_exact_size(egui::vec2(EXPAND_BTN, EXPAND_BTN), Sense::hover());
+        if pickers::glyph_button(ui, b, tid.with("cal"), pickers::paint_calendar, inl.pick.is_some(), "Pick a date (Alt+Down)").clicked() || alt_down {
+            inl.pick = if inl.pick.is_some() { None } else { Some(inl.text.clone()) };
+        }
+    }
+    if inl.kind == "objectId" && ui.button("New").on_hover_text("A fresh ObjectId, stamped with this moment").clicked() {
+        inl.text = ObjectId::new().to_hex();
+    }
+    if inl.kind == "bool" {
+        let cur = match inl.text.trim() {
+            "true" | "1" => Some(true),
+            t if t.eq_ignore_ascii_case("null") => None,
+            _ => Some(false),
+        };
+        let mut v = cur;
+        segmented(ui, &mut v, &[(Some(true), "true"), (Some(false), "false"), (None, "null")]);
+        if v != cur {
+            inl.text = v.map_or("null".into(), |b| b.to_string());
+        }
+    }
+    if ui.add(expand_button()).clicked() || expand {
+        acts.push(TreeAct::Expand);
+    }
+    App::type_combo(ui, "inlinekind", &mut inl.kind);
+    if ui.button("✓").on_hover_text("Review and save (Enter)").clicked() || (r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))) {
+        acts.push(TreeAct::Commit);
+    }
+    if ui.button("🗙").on_hover_text("Cancel (Esc)").clicked() {
+        acts.push(TreeAct::Cancel);
+    }
+    let below = r.rect.left_bottom() + egui::vec2(0.0, 4.0);
+    let ctx = ui.ctx().clone();
+    if let Some(orig) = inl.pick.clone() {
+        let was_local = inl.local;
+        let offset = pickers::local_secs(utc.unwrap_or(now_utc));
+        let o = pickers::DateOpts { time: true, millis: true, zone: pickers::Zone::Switch { local: &mut inl.local, offset: crate::db::sql::advanced::offset_text(offset) }, nullable: true, now, now_button: true };
+        let (changed, act, _) = pickers::date_picker(&ctx, tid.with("date"), below, &mut moment, o);
+        if inl.local != was_local {
+            // The same moment, written in the other zone.
+            if let Some(ms) = utc {
+                inl.text = pickers::mongo_text(ms, inl.local.then(|| pickers::local_secs(ms)));
+            }
+        } else if changed && let Some(c) = moment {
+            inl.text = write(c);
+        }
+        match act {
+            Some(pickers::PickOut::Apply) => {
+                inl.pick = None;
+                acts.push(TreeAct::Commit);
+            }
+            Some(pickers::PickOut::Null) => {
+                (inl.text, inl.pick) = ("null".into(), None);
+                acts.push(TreeAct::Commit);
+            }
+            Some(pickers::PickOut::Cancel) => (inl.text, inl.pick) = (orig, None),
+            None => {}
+        }
+        return;
+    }
+    let (msg, alert, fix): (String, bool, Option<&str>) = match db::make_value(inl.kind, &inl.text) {
+        Err(_) if inl.kind == "int" && inl.text.trim().parse::<i64>().is_ok() => ("Too big for Int32".into(), true, Some("Save as Int64")),
+        Err(m) => (m, true, None),
+        Ok(Bson::ObjectId(o)) => (format!("Made {}, read from the id", o.timestamp().try_to_rfc3339_string().map(|t| t.replace('T', " ").replace('Z', " UTC")).unwrap_or_default()), false, None),
+        Ok(_) => return,
+    };
+    let (_, fixed) = pickers::callout(&ctx, tid.with("check"), below, egui::Align2::LEFT_TOP, &msg, alert.then_some(super::errors::paint_alert as fn(&egui::Painter, egui::Pos2, Color32)), fix);
+    if fixed {
+        inl.kind = "long";
     }
 }

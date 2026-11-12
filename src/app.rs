@@ -1,4 +1,4 @@
-use crate::ui::{cells::*, complete::*, editor::*, theme::*, widgets::*};
+use crate::ui::{cells::*, complete::*, editor::*, pickers, theme::*, widgets::*};
 use crate::db::{self, Msg, PAGE_SIZE, Query, ShellKind, Target, UndoAction, UndoKind, Worker};
 use eframe::egui::{self, Color32, FontId, Key, RichText, Sense, Stroke, text::LayoutJob};
 use mongodb::Client;

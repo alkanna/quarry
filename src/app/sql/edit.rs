@@ -3,11 +3,13 @@
 
 use crate::app::*;
 use db::copy::{self, CopyCol, Fmt, Sheet};
+use db::sql::check;
 use db::sql::value::{self, Kind};
 use db::sql::write::{self, NewRow, RowEdit};
 use db::sql::Col;
 
 /// A cell being edited in place. `done` is set by the editor: Some(true) to commit, Some(false) to cancel.
+#[derive(Default)]
 pub(in crate::app) struct CellEdit {
     /// The row's key, because a reload while the editor is open moves rows around.
     pub(in crate::app) id: Option<Bson>,
@@ -22,6 +24,31 @@ pub(in crate::app) struct CellEdit {
     pub(in crate::app) dirty: bool,
     /// The large editor's live check of a JSON column: None until the text is checked again after an edit.
     pub(in crate::app) json_err: Option<Option<String>>,
+    /// The calendar is open, holding the text from before it opened for Cancel.
+    pub(in crate::app) pick: Option<String>,
+    /// The row of the value list the arrows moved to, None until they are used.
+    pub(in crate::app) hl: Option<usize>,
+    /// What the helpers under the cell covered last frame, so a click in them is not a click outside the editor.
+    pub(in crate::app) pop: Option<egui::Rect>,
+    /// Give the text box focus back without selecting its text, after a helper button took it.
+    pub(in crate::app) refocus: bool,
+    /// A helper reads plain keys (arrows, Space, letters) with no text box focused, so the page must not.
+    pub(in crate::app) grabs_keys: bool,
+    pub(in crate::app) keys: Option<KeyLook>,
+}
+
+/// Rows of the table a foreign key column points at, looked up as the key is typed.
+#[derive(Default)]
+pub(in crate::app) struct KeyLook {
+    /// The single-column foreign key of the edited column, found once the table structure is loaded.
+    pub(in crate::app) fk: Option<db::sql::structure::ForeignKey>,
+    pub(in crate::app) req: u64,
+    /// The text the last lookup was for, and whether its answer is still on its way.
+    pub(in crate::app) asked: Option<String>,
+    pub(in crate::app) busy: bool,
+    /// What the first answer learned about the referenced table, sent with the next lookups.
+    pub(in crate::app) table: Option<db::sql::KeyTable>,
+    pub(in crate::app) rows: Vec<(String, String)>,
 }
 
 impl CellEdit {
@@ -70,32 +97,6 @@ pub(in crate::app) enum CellAct {
 
 pub(in crate::app) fn is_numeric(k: Kind) -> bool {
     matches!(k, Kind::Int | Kind::UInt | Kind::Float | Kind::Decimal)
-}
-
-/// The option list of an ENUM column from its type text, `enum('a','it''s')`.
-fn enum_values(ty: &str) -> Vec<String> {
-    let Some(start) = ty.find('(') else { return Vec::new() };
-    if !ty[..start].eq_ignore_ascii_case("enum") {
-        return Vec::new();
-    }
-    let (mut out, mut cur, mut inq) = (Vec::new(), String::new(), false);
-    let mut chars = ty[start + 1..].chars().peekable();
-    while let Some(c) = chars.next() {
-        match (c, inq) {
-            ('\'', false) => inq = true,
-            ('\'', true) if chars.peek() == Some(&'\'') => {
-                cur.push('\'');
-                chars.next();
-            }
-            ('\'', true) => {
-                inq = false;
-                out.push(std::mem::take(&mut cur));
-            }
-            (c, true) => cur.push(c),
-            _ => {}
-        }
-    }
-    out
 }
 
 /// Text for the editor of a `kind` column: what the cell shows, as typed back it parses to the same value.
@@ -190,6 +191,59 @@ fn put_html(_html: &str, _plain: &str) -> bool {
     false
 }
 
+/// The zone line of the calendar for a date and time column.
+fn zone_note(d: db::sql::Dialect, col: &Col) -> String {
+    if col.kind != Kind::DateTime {
+        return String::new();
+    }
+    let zoned = check::zoned(d, col);
+    let name = match (d == db::sql::Dialect::Postgres, zoned) {
+        (true, true) => "TIMESTAMPTZ",
+        (_, false) if d != db::sql::Dialect::Postgres => "DATETIME",
+        _ => "TIMESTAMP",
+    };
+    if zoned { format!("{name} · read and written in the session time zone") } else { format!("{name} · saved as typed, no time zone") }
+}
+
+/// A boolean cell: the value in the cell and a true, false and NULL switch under it. TINYINT(1) columns save 1 and 0.
+fn sql_bool_cell(ui: &mut egui::Ui, e: &mut CellEdit, col: &Col, rect: egui::Rect, below: egui::Pos2, click_out: bool) {
+    let tiny = col.kind != Kind::Bool;
+    let cur = match e.text.trim().to_ascii_lowercase().as_str() {
+        "null" => None,
+        "1" | "true" | "t" | "yes" => Some(true),
+        _ => Some(false),
+    };
+    let word = |v: Option<bool>| match v {
+        None => "NULL",
+        Some(true) => if tiny { "1" } else { "true" },
+        Some(false) => if tiny { "0" } else { "false" },
+    };
+    let color = match cur {
+        None => C_NULL(),
+        Some(true) => C_TRUE(),
+        Some(false) => C_FALSE(),
+    };
+    place(ui, rect, word(cur), FontId::monospace(TXT_SMALL), color, false, 6.0);
+    let keyed = pickers::bool_keys(ui, cur, col.nullable);
+    let label = format!("{} · {}", col.src, col.ty.to_uppercase());
+    let (clicked, r) = pickers::bool_pick(ui.ctx(), egui::Id::unique("sql-bool-cell"), below, cur, col.nullable, &label);
+    e.pop = Some(r);
+    e.grabs_keys = true;
+    if let Some(m) = &e.err {
+        pickers::callout(ui.ctx(), egui::Id::unique("sql-bool-err"), rect.left_top() - egui::vec2(0.0, 4.0), egui::Align2::LEFT_BOTTOM, m, Some(crate::app::errors::paint_alert as fn(&egui::Painter, egui::Pos2, Color32)), None);
+    }
+    if let Some(v) = keyed.or(clicked) {
+        (e.text, e.dirty) = (word(v).into(), true);
+    }
+    if clicked.is_some() {
+        e.done = Some(true);
+    } else if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+        e.done = Some(false);
+    } else if click_out || ui.input(|i| i.key_pressed(Key::Enter)) {
+        e.done = Some(true);
+    }
+}
+
 impl App {
     /// The table, columns and key of the open SQL tab.
     fn sql_ctx(&self) -> Option<(Sel, Arc<Vec<Col>>, Vec<String>)> {
@@ -275,20 +329,63 @@ impl App {
         let text = edit_text(&v, kind);
         // With the panel open, a double-click loads the new cell into it, so the panel follows the selection.
         let big = value_edit::is_long(&text) || self.value_in_panel();
-        self.sql_cell = Some(CellEdit { json_err: None, id: rows.id(i), col, text, dirty: false, err: None, focus: true, done: None, big });
+        self.sql_cell = Some(CellEdit { json_err: None, id: rows.id(i), col, text, dirty: false, err: None, focus: true, done: None, big, ..Default::default() });
     }
 
-    /// Draws the editor over a cell and records Enter, Esc and a click elsewhere.
+    /// Draws the editor over a cell and records Enter, Esc and a click elsewhere. Under it goes the helper the column
+    /// type wants: the calendar for dates, a list for ENUM, SET and foreign key columns, a switch for booleans, and
+    /// otherwise the line that names a problem as it is typed.
     pub(in crate::app) fn sql_cell_editor(&mut self, ui: &mut egui::Ui, cell: egui::Rect) {
         let Some(mut e) = self.sql_cell.take() else { return };
         let id = egui::Id::unique("sql-cell-editor");
         let rect = cell.shrink(1.0);
-        ui.painter().rect(rect, 0, BG(), Stroke::new(1.5, if e.err.is_some() { ALERT() } else { PRIMARY() }), egui::StrokeKind::Inside);
+        let d = self.sql_dialect();
+        let col = self.sql_col(&e.col).cloned().unwrap_or_else(|| Col::plain(&e.col, "", Kind::Text, true));
+        let clock = self.sql_clock(&col);
+        let now = clock.map_or_else(pickers::local_now, pickers::Civil::from_ms);
+        let checked = check::check(d, &col, &e.text, clock);
+        let bad = e.err.is_some() || checked.value.is_err();
+        ui.painter().rect(rect, 0, BG(), Stroke::new(1.5, if bad { ALERT() } else { PRIMARY() }), egui::StrokeKind::Inside);
         // The large editor has the text, so the cell only keeps its outline.
         if e.big {
             self.sql_cell = Some(e);
             return;
         }
+        let ctx = ui.ctx().clone();
+        let below = rect.left_bottom() + egui::vec2(0.0, 4.0);
+        let last_pop = e.pop.take();
+        let ours = |p: egui::Pos2| rect.contains(p) || last_pop.is_some_and(|r| r.contains(p));
+        let click = ui.input(|i| i.pointer.any_pressed().then(|| i.pointer.interact_pos()).flatten());
+        let click_out = click.is_some_and(|p| !ours(p));
+        let nullable = col.nullable || col.auto_increment;
+        if check::is_bool(d, &col) {
+            sql_bool_cell(ui, &mut e, &col, rect, below, click_out);
+            self.sql_cell = Some(e);
+            return;
+        }
+        let date = matches!(col.kind, Kind::Date | Kind::DateTime);
+        let choices = if matches!(col.kind, Kind::Enum | Kind::Set) { db::sql::schema::enum_values(&col.ty) } else { Vec::new() };
+        let set = col.kind == Kind::Set && !choices.is_empty();
+        let typed = e.text.trim().to_lowercase();
+        let (list, title, foot): (Vec<(String, String)>, Option<String>, String) = if col.kind == Kind::Enum {
+            // Unedited, the list shows every option; typing narrows it.
+            (choices.iter().filter(|c| !e.dirty || c.to_lowercase().contains(&typed)).map(|c| (c.clone(), String::new())).collect(), None, String::new())
+        } else if date || set {
+            (Vec::new(), None, String::new())
+        } else {
+            self.sql_key_lookup(&mut e, &col).unwrap_or_default()
+        };
+        let list_null = nullable && !list.is_empty();
+        let list_n = list.len() + usize::from(list_null);
+        if e.pick.is_some() {
+            let mut v = pickers::parse_sql(&e.text);
+            if pickers::date_keys(ui, &mut v, now) && let Some(c) = v {
+                (e.text, e.dirty, e.err) = (pickers::sql_text_like(c, col.kind == Kind::DateTime, &e.text), true, None);
+            }
+        } else if list_n > 0 {
+            pickers::list_keys(ui, &mut e.hl, list_n);
+        }
+        let alt_down = date && ui.input_mut(|i| i.consume_key(egui::Modifiers::ALT, Key::ArrowDown));
         let pad = (rect.height() - EXPAND_BTN) / 2.0;
         let btn = egui::Rect::from_min_size(egui::pos2(rect.right() - pad - EXPAND_BTN, rect.top() + pad), egui::vec2(EXPAND_BTN, EXPAND_BTN));
         // Taken before the text box sees it, where Enter alone would commit.
@@ -302,7 +399,11 @@ impl App {
                 egui::TextEdit::singleline(&mut e.text).id(id).font(font).frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(6, 0))).desired_width(btn.left() - rect.left() - 16.0).show(ui)
             })
             .inner;
-        let b = ui.put(btn, expand_button());
+        let (cal, b) = if date {
+            (pickers::glyph_button(ui, btn, id.with("cal"), pickers::paint_calendar, e.pick.is_some(), "Pick a date (Alt+Down)").clicked(), false)
+        } else {
+            (false, ui.put(btn, expand_button()).clicked())
+        };
         if e.focus {
             out.response.request_focus();
             let mut st = out.state.clone();
@@ -310,21 +411,148 @@ impl App {
             st.store(ui.ctx(), id);
             e.focus = false;
         }
-        e.dirty |= out.response.changed();
-        if expand || b.clicked() {
-            (e.big, e.focus) = (true, true);
-        } else if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
-            e.done = Some(false);
-        } else if out.response.lost_focus() && !b.is_pointer_button_down_on() {
-            // Pressing the button takes focus from the text first; that is not a commit.
+        if std::mem::take(&mut e.refocus) {
+            out.response.request_focus();
+        }
+        if out.response.changed() {
+            (e.dirty, e.err, e.hl) = (true, None, None);
+        }
+        // Without the arrows, Enter takes the first row only for text the column could not save as typed, and only
+        // from a list that answers this text, never an older one still on screen.
+        let fresh = e.keys.as_ref().is_none_or(|k| !k.busy && k.asked.as_deref() == Some(if typed == "null" { "" } else { e.text.trim() }));
+        let hl = e.hl.or((e.dirty && fresh && checked.value.is_err() && list_n > 0).then_some(0));
+        let mut pop: Option<egui::Rect> = None;
+        let mut commit = false;
+        if let Some(orig) = e.pick.clone() {
+            let mut v = pickers::parse_sql(&e.text);
+            let o = pickers::DateOpts { time: col.kind == Kind::DateTime, millis: false, zone: pickers::Zone::Note(zone_note(d, &col)), nullable, now, now_button: clock.is_some() };
+            let (changed, act, r) = pickers::date_picker(&ctx, id.with("date"), below, &mut v, o);
+            pop = Some(r);
+            if changed && let Some(c) = v {
+                (e.text, e.dirty, e.err) = (pickers::sql_text_like(c, col.kind == Kind::DateTime, &e.text), true, None);
+            }
+            match act {
+                Some(pickers::PickOut::Apply) => (e.pick, commit) = (None, true),
+                Some(pickers::PickOut::Null) => (e.text, e.pick, commit) = ("NULL".into(), None, true),
+                Some(pickers::PickOut::Cancel) => (e.text, e.pick, e.refocus) = (orig, None, true),
+                None => {}
+            }
+        } else if set {
+            let parts: Vec<String> = e.text.split(',').map(|x| x.trim().to_lowercase()).collect();
+            let mut on: Vec<bool> = choices.iter().map(|c| parts.contains(&c.to_lowercase())).collect();
+            let (t, r) = pickers::check_list(&ctx, id.with("set"), below, rect.width().max(200.0), &choices, &on);
+            pop = Some(r);
+            if let Some(i) = t {
+                on[i] = !on[i];
+                // Written in the column's own order, which is how the server reads it back.
+                e.text = choices.iter().zip(&on).filter(|x| *x.1).map(|x| x.0.as_str()).collect::<Vec<_>>().join(",");
+                (e.dirty, e.err, e.refocus) = (true, None, true);
+            }
+        } else if list_n > 0 || title.is_some() {
+            let saved = (!typed.eq_ignore_ascii_case("null")).then_some(e.text.trim());
+            let (picked, r) = pickers::choice_list(&ctx, id.with("list"), below, rect.width().max(220.0), title.as_deref(), &list, saved, hl, list_null, &foot);
+            pop = Some(r);
+            if let Some(i) = picked {
+                (e.text, commit) = (list.get(i).map_or("NULL".into(), |x| x.0.clone()), true);
+            }
+        }
+        // The problem line goes under the cell, or over it when a helper fills the space under; a note only goes under.
+        let shown = match checked.value.as_ref().err().or(e.err.as_ref()) {
+            Some(m) => Some((m.clone(), true)),
+            None => checked.note.clone().map(|n| (n, false)),
+        };
+        if let Some((m, is_err)) = shown.filter(|s| pop.is_none() || s.1) {
+            let (at, pivot) = if pop.is_none() { (below, egui::Align2::LEFT_TOP) } else { (rect.left_top() - egui::vec2(0.0, 4.0), egui::Align2::LEFT_BOTTOM) };
+            let (r, fixed) = pickers::callout(&ctx, id.with("check"), at, pivot, &m, is_err.then_some(crate::app::errors::paint_alert as fn(&egui::Painter, egui::Pos2, Color32)), checked.fix.as_ref().map(|f| format!("Use {f}")).as_deref());
+            pop = Some(pop.map_or(r, |p| p.union(r)));
+            if fixed && let Some(f) = &checked.fix {
+                (e.text, e.dirty, e.err, e.refocus) = (f.clone(), true, None, true);
+            }
+        }
+        let esc = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape));
+        let enter = ui.input(|i| i.key_pressed(Key::Enter));
+        if alt_down || cal {
+            e.pick = if e.pick.is_some() { None } else { Some(e.text.clone()) };
+            e.refocus = true;
+        } else if expand || b {
+            (e.big, e.focus, e.pick) = (true, true, None);
+        } else if esc {
+            // Esc closes the calendar first, and the editor only when nothing is open over it.
+            match e.pick.take() {
+                Some(o) => (e.text, e.refocus) = (o, true),
+                None => e.done = Some(false),
+            }
+        } else if commit {
+            e.done = Some(true);
+        } else if out.response.lost_focus() && !(ui.input(|i| i.pointer.any_pressed() || i.pointer.any_released()) && ui.input(|i| i.pointer.latest_pos()).is_some_and(ours)) {
+            // egui hands focus over on the release, so a click in a helper is told apart by where the pointer is.
+            // Enter on a highlighted row saves that row rather than the typed text.
+            if let Some(h) = hl.filter(|h| enter && *h < list_n) {
+                e.text = list.get(h).map_or("NULL".into(), |x| x.0.clone());
+            }
+            e.done = Some(true);
+        } else if !out.response.has_focus() && !out.response.lost_focus() && (click_out || enter) {
+            // Focus went to a helper (a time field, a checkbox), so the text box no longer sees these.
             e.done = Some(true);
         }
-        if let Some(m) = &e.err {
-            egui::Area::new(id.with("err")).order(egui::Order::Tooltip).fixed_pos(rect.left_bottom() + egui::vec2(0.0, 4.0)).show(ui.ctx(), |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| ui.label(RichText::new(m).size(TXT_SMALL).color(ALERT())));
-            });
-        }
+        e.pop = pop;
+        e.grabs_keys = e.pick.is_some() || list_n > 0;
         self.sql_cell = Some(e);
+    }
+
+    /// The clock in the zone `col` is read in, as milliseconds of that wall clock. None for a TIMESTAMP column under
+    /// the server's own zone, which Quarry does not know.
+    fn sql_clock(&self, col: &Col) -> Option<i64> {
+        if !check::zoned(self.sql_dialect(), col) {
+            return Some(pickers::local_now().to_ms());
+        }
+        let conn = self.conn(self.t()?.sel.conn)?;
+        let off = conn.meta.advanced.offset_secs(db::sql::advanced::local_offset_secs())?;
+        Some(pickers::utc_now_ms() + i64::from(off) * 1000)
+    }
+
+    /// The rows a single-column foreign key can point at, looked up as the key is typed: the list, its title and its
+    /// footer. None for other columns.
+    fn sql_key_lookup(&mut self, e: &mut CellEdit, col: &Col) -> Option<(Vec<(String, String)>, Option<String>, String)> {
+        if e.keys.is_none() {
+            // Found once, after the structure the grid loads for its key links has arrived.
+            self.t().and_then(|t| t.sql.as_ref()).filter(|s| s.st.data.is_some())?;
+            let fk = self.sql_fks().into_iter().find(|k| k.cols.len() == 1 && k.cols[0] == col.src);
+            e.keys = Some(KeyLook { fk, ..Default::default() });
+        }
+        let look = e.keys.as_mut()?;
+        let fk = look.fk.clone()?;
+        let key = fk.ref_cols.first()?.clone();
+        let t = e.text.trim();
+        let q = if t.eq_ignore_ascii_case("null") { "" } else { t };
+        // One lookup at a time; the answer for older text asks again with the newest.
+        if !look.busy && look.asked.as_deref() != Some(q) && !self.demo && let Some((db, space)) = self.t().map(|t| t.sel.clone()).and_then(|s| self.sql_target(&s)) {
+            self.req += 1;
+            (look.req, look.busy, look.asked) = (self.req, true, Some(q.to_string()));
+            let schema = if fk.ref_db.is_empty() { space } else { fk.ref_db.clone() };
+            self.worker.sql_key_search(self.req, db, schema, fk.ref_table.clone(), key.clone(), q.to_string(), look.table.clone());
+        }
+        let title = format!("{} references {} ({key})", col.src, fk.ref_table);
+        let saves = look.rows.get(e.hl.unwrap_or(0)).map(|r| format!(" Picking one saves {}.", r.0)).unwrap_or_default();
+        let foot = match (look.table.as_ref().and_then(|t| t.label.as_ref()), look.rows.is_empty()) {
+            _ if look.asked.is_none() => String::new(),
+            (_, true) if look.busy => "Looking…".into(),
+            (_, true) => format!("No {} row matches.", fk.ref_table),
+            (Some(l), false) => format!("Matches {key} or {l}.{saves}"),
+            (None, false) => format!("Matches {key}.{saves}"),
+        };
+        Some((look.rows.clone(), look.asked.is_some().then_some(title), foot))
+    }
+
+    pub(in crate::app) fn sql_keys_done(&mut self, req: u64, res: db::Res<(db::sql::KeyTable, Vec<(String, String)>)>) {
+        let Some(k) = self.sql_cell.as_mut().and_then(|e| e.keys.as_mut()).filter(|k| k.req == req) else { return };
+        k.busy = false;
+        // A lookup the server refuses leaves the list empty; the key can still be typed and saved.
+        match res {
+            Ok((t, rows)) => (k.table, k.rows) = (Some(t), rows),
+            // Treated as a big table with no name column, so later lookups skip the catalog and only match exact keys.
+            Err(_) => (k.table, k.rows) = (Some(db::sql::KeyTable { label: None, big: true }), Vec::new()),
+        }
     }
 
     /// After the table is drawn: stage the edit, or keep the editor open with its error.
@@ -336,7 +564,7 @@ impl App {
             Some(true) => {
                 let col = self.sql_col(&e.col).cloned().unwrap_or_else(|| Col::plain(&e.col, "", Kind::Text, true));
                 let row = self.t().and_then(|t| (0..t.docs.len()).find(|&j| Rows::Raw(&t.docs).id(j) == e.id));
-                match value::parse_col(self.sql_dialect(), &col, &e.text) {
+                match check::check(self.sql_dialect(), &col, &e.text, self.sql_clock(&col)).value {
                     Ok(_) if row.is_none() => self.warn("That row is no longer in the table, so the edit was cancelled."),
                     Ok(v) => self.sql_set_cell(row.unwrap_or_default(), &e.col, v),
                     Err(m) => {
@@ -737,7 +965,7 @@ impl App {
             ui.end_row();
             form_label(ui, "Value");
             ui.vertical(|ui| {
-                let opts = enum_values(&col.ty);
+                let opts = db::sql::schema::enum_values(&col.ty);
                 if col.kind == Kind::Enum && !opts.is_empty() {
                     ui.horizontal_wrapped(|ui| {
                         for o in &opts {
@@ -915,13 +1143,6 @@ mod tests {
     use super::*;
     use crate::db::sql::Dialect;
 
-    #[test]
-    fn enum_options_are_read_from_the_type() {
-        assert_eq!(enum_values("enum('pending','paid','it''s')"), ["pending", "paid", "it's"]);
-        assert_eq!(enum_values("ENUM('a,b','c')"), ["a,b", "c"]);
-        assert!(enum_values("varchar(20)").is_empty());
-        assert!(enum_values("ENUM").is_empty());
-    }
 
     #[test]
     fn edit_text_round_trips_through_parse_edit() {
@@ -964,7 +1185,7 @@ mod tests {
 
     #[test]
     fn keyless_rows_never_own_the_editor() {
-        let e = |id: Option<Bson>| CellEdit { json_err: None, id, col: "last_name".into(), text: String::new(), err: None, focus: false, done: None, big: false, dirty: false };
+        let e = |id: Option<Bson>| CellEdit { json_err: None, id, col: "last_name".into(), text: String::new(), err: None, focus: false, done: None, big: false, dirty: false, ..Default::default() };
         // A Shell result has no keys: every row reports None, and the editor must not appear in all of them.
         assert!(!e(None).is_at(None, "last_name"));
         let keyed = e(Some(Bson::Int32(7)));
@@ -977,12 +1198,12 @@ mod tests {
     #[test]
     fn editor_opens_again_after_it_is_closed() {
         // Esc leaves done = Some(false); the finish step drops the editor, and a fresh one starts clean.
-        let mut cell = Some(CellEdit { json_err: None, id: Some(Bson::Int32(1)), col: "a".into(), text: "x".into(), err: None, focus: true, done: Some(false), big: false, dirty: false });
+        let mut cell = Some(CellEdit { json_err: None, id: Some(Bson::Int32(1)), col: "a".into(), text: "x".into(), err: None, focus: true, done: Some(false), big: false, dirty: false, ..Default::default() });
         if cell.as_ref().is_some_and(|e| e.done == Some(false)) {
             cell = None;
         }
         assert!(cell.is_none());
-        cell = Some(CellEdit { json_err: None, id: Some(Bson::Int32(1)), col: "a".into(), text: "x".into(), err: None, focus: true, done: None, big: false, dirty: false });
+        cell = Some(CellEdit { json_err: None, id: Some(Bson::Int32(1)), col: "a".into(), text: "x".into(), err: None, focus: true, done: None, big: false, dirty: false, ..Default::default() });
         assert!(cell.unwrap().is_at(Some(Bson::Int32(1)), "a"));
     }
 }

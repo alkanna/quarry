@@ -22,13 +22,17 @@ pub(crate) fn civil_from_days(z: i64) -> (i64, i64, i64) {
     (yoe + era * 400 + i64::from(m <= 2), m, doy - (153 * mp + 2) / 5 + 1)
 }
 
+/// Days in month `m` of year `y`.
+pub(crate) fn month_len(y: i64, m: i64) -> i64 {
+    days_from_civil(y + i64::from(m == 12), m % 12 + 1, 1) - days_from_civil(y, m, 1)
+}
+
 /// `ms` moved back by whole calendar months, the day clamped so Mar 31 minus one month is Feb 28.
 pub(crate) fn months_back(ms: i64, months: i64) -> i64 {
     let (y, m, d) = civil_from_days(ms.div_euclid(DAY_MS));
     let idx = y * 12 + m - 1 - months;
     let (y, m) = (idx.div_euclid(12), idx.rem_euclid(12) + 1);
-    let len = days_from_civil(y + i64::from(m == 12), m % 12 + 1, 1) - days_from_civil(y, m, 1);
-    days_from_civil(y, m, d.min(len)) * DAY_MS + ms.rem_euclid(DAY_MS)
+    days_from_civil(y, m, d.min(month_len(y, m))) * DAY_MS + ms.rem_euclid(DAY_MS)
 }
 
 /// Mingo's query shortcuts (dehumanizeSelector, renderer line 2129), shown by autocomplete.
@@ -52,6 +56,13 @@ pub const DATE_SHORTCUTS: [(&str, &str); 18] = [
     ("#tomorrow", "tomorrow"),
     ("#now", "this instant"),
 ];
+
+pub(crate) const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+/// Seconds into a day as `HH:MM:SS`.
+pub(crate) fn hms(secs: i64) -> String {
+    format!("{:02}:{:02}:{:02}", secs / 3600, secs % 3600 / 60, secs % 60)
+}
 
 pub(crate) fn ymd(day: i64) -> String {
     let (y, m, d) = civil_from_days(day);
