@@ -10,6 +10,7 @@ mod worker;
 mod run;
 pub mod pg;
 pub(crate) mod pg_cert;
+mod pg_tls;
 mod pg_catalog;
 mod pg_read;
 #[cfg(test)]
@@ -24,6 +25,8 @@ mod pg_import_tests;
 mod pg_pgbouncer_tests;
 #[cfg(test)]
 mod pg_ddl_tests;
+#[cfg(test)]
+mod tls_tests;
 pub mod exec;
 mod relay;
 pub mod structure;

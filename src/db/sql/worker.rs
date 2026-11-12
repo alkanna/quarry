@@ -160,16 +160,21 @@ async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info
     let setup = Setup::new(adv.session_statements(super::advanced::local_offset_secs())?, super::advanced::init_statements(&adv.init)?);
     let (timeout, ms) = adv.timeouts(timeout);
     let tunnel = match &net.ssh {
-        Some((conf, secrets)) => Some(crate::ssh::open(conf, secrets, timeout, Some((a.host.clone(), a.port))).await?),
+        // The socket only matters when sqlx checks the certificate's name.
+        Some((conf, secrets)) => Some(crate::ssh::open(conf, secrets, timeout, Some((a.host.clone(), a.port)), matches!(a.ssl_mode, SslMode::VerifyCa | SslMode::VerifyIdentity)).await?),
         None => None,
     };
-    // The certificate names the real host, not the tunnel's 127.0.0.1, so the name check cannot pass.
-    let (host, port, mode) = match &tunnel {
-        Some(t) => ("127.0.0.1".to_string(), t.port, if a.ssl_mode == SslMode::VerifyIdentity { SslMode::VerifyCa } else { a.ssl_mode }),
-        None => (a.host.clone(), a.port, a.ssl_mode),
+    // sqlx checks the certificate against the host it is given. Through the tunnel's socket that stays the name typed;
+    // Windows has only the tunnel's port, so there the name checked is 127.0.0.1.
+    let (host, port) = match &tunnel {
+        Some(t) if t.socket.is_none() => ("127.0.0.1".to_string(), t.port),
+        _ => (a.host.clone(), a.port),
     };
     // The sqlx defaults change how the server reads user SQL (|| as concat, UTC), so they are turned off.
-    let mut o = MySqlConnectOptions::new().host(&host).port(port).username(&a.user).ssl_mode(ssl_mode(mode)).pipes_as_concat(false).no_engine_substitution(false).timezone(None);
+    let mut o = MySqlConnectOptions::new().host(&host).port(port).username(&a.user).ssl_mode(ssl_mode(a.ssl_mode)).pipes_as_concat(false).no_engine_substitution(false).timezone(None);
+    if let Some(s) = tunnel.as_ref().and_then(|t| t.socket.as_ref()) {
+        o = o.socket(s);
+    }
     if !a.password.is_empty() {
         o = o.password(&a.password);
     }
@@ -182,7 +187,7 @@ async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info
     // The pool retries a connection whose setup failed until its timeout, so one plain connection runs the setup
     // first and a failing setting or init command is reported at once, with its statement.
     let first = async {
-        let mut c = sqlx::MySqlConnection::connect_with(&o).await.map_err(se)?;
+        let mut c = sqlx::MySqlConnection::connect_with(&o).await.map_err(|x| crate::db::mysql_name_note(se(x), a.ssl_mode == SslMode::VerifyCa))?;
         let r = session(&mut c, ms, &setup).await;
         let _ = c.close().await;
         r.map_err(|err| setup.failed_text().unwrap_or_else(|| e(err)))
@@ -612,9 +617,7 @@ impl Worker {
                     Some(crate::db::Way::CloudSql(p)) => format!(" through the Cloud SQL proxy (credentials: {})", if p.gcloud_account { "gcloud account" } else { "Application Default Credentials" }),
                     None => String::new(),
                 };
-                // Over a tunnel the certificate cannot match 127.0.0.1, so `open` checks the CA only.
-                let note = if matches!(t, Some(crate::db::Way::Ssh(_))) && Addr::parse(&uri).is_some_and(|a| a.ssl_mode == SslMode::VerifyIdentity) { " (TLS verified against the CA; the host name is the tunnel's)" } else { "" };
-                Ok(format!("Connected{via} to {} in {} ms{cert}{note}", db.label(), start.elapsed().as_millis()))
+                Ok(format!("Connected{via} to {} in {} ms{cert}", db.label(), start.elapsed().as_millis()))
             });
             Msg::Tested { req, res, info }
         });

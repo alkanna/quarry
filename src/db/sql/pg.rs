@@ -62,6 +62,8 @@ pub struct PgPools {
     starts: Mutex<HashMap<u64, String>>,
     /// The `BEGIN READ WRITE` a write opens with, built on the first write: the settings it holds never change for a pool.
     begin_write: std::sync::OnceLock<String>,
+    /// Held so the TLS relay lives as long as the connections that dial it.
+    relay: Option<super::pg_tls::Relay>,
 }
 
 /// Connections taken out of a pool for good (`PgPools::acquire_held`), counted per database. `pool.close()` does not know them,
@@ -145,7 +147,7 @@ struct Entry {
 
 impl PgPools {
     fn new(opts: PgConnectOptions, default_db: String, acquire: Duration, locals: Option<String>, timeout: String) -> PgPools {
-        PgPools { opts, default_db, acquire, idle: IDLE, per_db: PER_DB, max_pools: MAX_POOLS, locals, timeout, adv: PgSession::default(), live: Default::default(), held: Default::default(), starts: Default::default(), begin_write: Default::default() }
+        PgPools { opts, default_db, acquire, idle: IDLE, per_db: PER_DB, max_pools: MAX_POOLS, locals, timeout, adv: PgSession::default(), live: Default::default(), held: Default::default(), starts: Default::default(), begin_write: Default::default(), relay: None }
     }
 
     fn with_session(mut self, adv: PgSession) -> PgPools {
@@ -696,6 +698,9 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
     if net.cloud_sql.is_some() && net.ssh.is_some() {
         return Err("Cloud SQL and an SSH tunnel cannot be used together".into());
     }
+    if net.cloud_sql.is_none() && a.ssl_mode == SslMode::VerifyCa && a.ssl_ca.trim().is_empty() {
+        return Err(super::pg_cert::VERIFY_CA_NO_CA.into());
+    }
     // Read before any tunnel or proxy starts. The Cloud SQL proxy does its own TLS, and libpq ignores the files when
     // sslmode is disable. Decrypting a key runs a deliberately slow key derivation, so it stays off the async threads.
     let client_cert = if net.cloud_sql.is_none() && a.ssl_mode != SslMode::Disabled {
@@ -720,17 +725,28 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
         (Some(crate::db::Way::CloudSql(p)), "127.0.0.1".to_string(), port, SslMode::Disabled)
     } else {
         let tunnel = match &net.ssh {
-            Some((conf, secrets)) => Some(crate::ssh::open(conf, secrets, timeout, Some((a.host.clone(), a.port))).await?),
+            Some((conf, secrets)) => Some(crate::ssh::open(conf, secrets, timeout, Some((a.host.clone(), a.port)), false).await?),
             None => None,
         };
-        // The certificate names the real host, not the tunnel's 127.0.0.1, so the name check cannot pass.
         match tunnel {
             Some(t) => {
                 let port = t.port;
-                (Some(crate::db::Way::Ssh(t)), "127.0.0.1".to_string(), port, if a.ssl_mode == SslMode::VerifyIdentity { SslMode::VerifyCa } else { a.ssl_mode })
+                (Some(crate::db::Way::Ssh(t)), "127.0.0.1".to_string(), port, a.ssl_mode)
             }
             None => (None, a.host.clone(), a.port, a.ssl_mode),
         }
+    };
+    // sqlx 0.8 checks the host name in verify-ca too, through a tunnel it would check 127.0.0.1, and it trusts the web
+    // roots beside a CA file, so these modes open TLS in pg_tls against the name typed, and sqlx speaks plain
+    // PostgreSQL to the relay.
+    let mut client_cert = client_cert;
+    let relay = match super::pg_tls::needed(mode, matches!(way, Some(crate::db::Way::Ssh(_))), !a.ssl_ca.trim().is_empty()) {
+        true => Some(super::pg_tls::start((host.clone(), port), &a.host, mode, &a.ssl_ca, client_cert.take(), timeout).await?),
+        false => None,
+    };
+    let (host, port, mode) = match &relay {
+        Some(r) => ("127.0.0.1".to_string(), r.port, SslMode::Disabled),
+        None => (host, port, mode),
     };
     let default_db = if a.database.is_empty() { FALLBACK_DB.to_string() } else { a.database.clone() };
     // The environment (PGPASSWORD, PGSSLROOTCERT and so on) and ~/.pgpass would change what a saved connection
@@ -740,8 +756,11 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
     if let Some(dir) = way.as_ref().and_then(|w| if let crate::db::Way::CloudSql(p) = w { p.socket_dir() } else { None }) {
         base = base.socket(dir);
     }
+    if let Some(dir) = relay.as_ref().and_then(|r| r.socket_dir()) {
+        base = base.socket(dir);
+    }
     base = base.password(&a.password);
-    if !a.ssl_ca.is_empty() {
+    if !a.ssl_ca.is_empty() && relay.is_none() {
         base = base.ssl_root_cert(&a.ssl_ca);
     }
     // Handed over as PEM in memory, so the pool's later connections never read the files again.
@@ -807,9 +826,14 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
         // A refused login is most often the wrong Google identity. IAM always signs in with Application Default
         // Credentials, which may be another account than the gcloud one that filled the user.
         (Some(c), Some(crate::db::Way::CloudSql(_))) if c.iam && classify(&m) == ErrKind::SignIn => format!("Cloud SQL IAM sign-in refused (the proxy used Application Default Credentials): {m}"),
-        _ => m,
+        // sqlx saw the relay's refusal; the relay's own text reads as sqlx's would without it.
+        _ => match &relay {
+            Some(r) => r.explain(m),
+            None => m,
+        },
     })?;
-    let pools = PgPools::new(opts.clone(), default_db.clone(), timeout, locals, f.timeout.clone()).with_session(sess);
+    let mut pools = PgPools::new(opts.clone(), default_db.clone(), timeout, locals, f.timeout.clone()).with_session(sess);
+    pools.relay = relay;
     let db = Db {
         pool: Pool::Pg(Arc::new(pools)),
         dialect: Dialect::Postgres,

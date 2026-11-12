@@ -328,7 +328,7 @@ pub fn explain(raw: &str, cx: &ErrCtx) -> Explained {
             ex.fixes = vec![Fix::EditConn, Fix::Retry];
         }
         ErrKind::Tls => {
-            (ex.title, ex.hint) = client_cert_problem(raw).unwrap_or_else(|| {
+            (ex.title, ex.hint) = client_cert_problem(raw).or_else(|| name_mismatch(raw)).unwrap_or_else(|| {
                 if low.contains("certificate") { ("The server's certificate is not trusted".into(), "The server sent a certificate this machine does not trust. Add its CA file in the connection's TLS settings.".into()) } else { (format!("Could not open a TLS connection to {host}"), said.clone()) }
             });
             ex.fixes = vec![Fix::EditConn, Fix::Retry];
@@ -399,6 +399,38 @@ pub fn explain(raw: &str, cx: &ErrCtx) -> Explained {
     ex
 }
 
+/// Added to a MySQL refusal on the host name: sqlx 0.8 checks the name in Verify CA too, so that mode is no way out.
+pub const MYSQL_NAME_CHECKED: &str = "MySQL checks the host name in Verify CA too.";
+
+/// `raw` with MYSQL_NAME_CHECKED when it is a refusal on the host name and the mode was Verify CA.
+pub fn mysql_name_note(raw: String, verify_ca: bool) -> String {
+    if verify_ca && raw.contains(NOT_FOR_NAME) { format!("{raw}\n{MYSQL_NAME_CHECKED}") } else { raw }
+}
+
+/// rustls's words for a certificate that does not hold the name connected to.
+const NOT_FOR_NAME: &str = "certificate not valid for name \"";
+
+/// A server certificate that does not name the host connected to: title and hint, naming the names it holds.
+fn name_mismatch(raw: &str) -> Option<(String, String)> {
+    let rest = &raw[raw.find(NOT_FOR_NAME)? + NOT_FOR_NAME.len()..];
+    let (asked, rest) = rest.split_once('"')?;
+    let rest = rest.lines().next().unwrap_or_default();
+    // The names come as DnsName("a") or DnsName("b"); an IP address is not quoted.
+    let names: Vec<&str> = match rest.split_once("is only valid for ") {
+        Some((_, list)) => list.split(", ").flat_map(|n| n.split(" or ")).map(|n| n.split('"').nth(1).unwrap_or(n)).collect(),
+        None => Vec::new(),
+    };
+    let holds = if names.is_empty() { "It names no host.".to_string() } else { format!("It is for {}.", names.join(", ")) };
+    let way = if raw.contains(MYSQL_NAME_CHECKED) {
+        "MySQL checks the host name in Verify CA too, so connect by one of its names, or choose Required to encrypt without checking the certificate."
+    } else if asked == "127.0.0.1" || asked == "::1" {
+        "Through an SSH tunnel on Windows, MySQL checks the tunnel's own name 127.0.0.1. Choose Required there, which encrypts without checking the certificate."
+    } else {
+        "Connect by one of its names, or choose verify-ca (Verify CA) to check only that a trusted CA signed it."
+    };
+    Some((format!("The certificate is not for {asked}"), format!("{holds} {way}")))
+}
+
 /// A PostgreSQL client certificate problem: the files Quarry reads before connecting, the key rustls finds not to match
 /// the certificate, and the server's refusals. Title and hint, or None when the text is about something else.
 pub fn client_cert_problem(raw: &str) -> Option<(String, String)> {
@@ -415,6 +447,8 @@ pub fn client_cert_problem(raw: &str) -> Option<(String, String)> {
         ("The client key is not a PEM file".into(), format!("{} has no PRIVATE KEY block. A DER key converts with `openssl pkey -inform der -in client.der -out client.key`.", path.trim()))
     } else if first == HALF_SET {
         ("Set both the client certificate and its key".into(), format!("The certificate is sent with the key that proves it is yours. Fill both {tab}, or clear both."))
+    } else if first == VERIFY_CA_NO_CA {
+        ("verify-ca needs a CA file".into(), format!("Without one any public certificate would pass, whatever host it names. Choose the file of the CA that signed the server's certificate {tab}, or choose verify-full, which checks the host name against the public CAs."))
     } else if first == KEY_LOCKED {
         ("The client key needs its passphrase".into(), format!("The key file is encrypted. Type its passphrase {tab}."))
     } else if first == KEY_WRONG_PASS {
@@ -523,6 +557,27 @@ mod tests {
     }
 
     #[test]
+    fn a_certificate_for_another_host_names_its_hosts() {
+        let raw = "error communicating with database: invalid peer certificate: certificate not valid for name \"10.0.0.5\"; certificate is only valid for DnsName(\"db.example.test\") or DnsName(\"mysql.example.test\")";
+        let e = explain(raw, &ErrCtx::default());
+        assert_eq!(e.title, "The certificate is not for 10.0.0.5");
+        assert!(e.hint.starts_with("It is for db.example.test, mysql.example.test. Connect by one of its names, or choose verify-ca"), "{}", e.hint);
+        let three = raw.replace(" or DnsName", ", DnsName(\"a.test\") or DnsName");
+        assert!(explain(&three, &ErrCtx::default()).hint.starts_with("It is for db.example.test, a.test, mysql.example.test."));
+        let none = "error communicating with database: invalid peer certificate: certificate not valid for name \"h\"; certificate is not valid for any names (according to its subjectAltName extension)";
+        assert!(explain(none, &ErrCtx::default()).hint.starts_with("It names no host."));
+        // MySQL's Verify CA checks the name too, so the hint does not send the user there.
+        let my = mysql_name_note(raw.to_string(), true);
+        assert!(explain(&my, &ErrCtx::default()).hint.contains("choose Required"));
+        assert_eq!(mysql_name_note(raw.to_string(), false), raw);
+        assert_eq!(mysql_name_note("other".into(), true), "other");
+        let tunnel = raw.replace("10.0.0.5", "127.0.0.1");
+        assert!(explain(&tunnel, &ErrCtx::default()).hint.contains("SSH tunnel on Windows"));
+        // An untrusted chain keeps its own wording.
+        assert_eq!(explain("error communicating with database: invalid peer certificate: UnknownIssuer", &ErrCtx::default()).title, "The server's certificate is not trusted");
+    }
+
+    #[test]
     fn client_certificate_problems_are_told_apart() {
         use crate::db::sql::pg_cert::*;
         let case = |raw: &str| {
@@ -541,6 +596,9 @@ mod tests {
         assert_eq!(case(KEY_LOCKED).0, "The client key needs its passphrase");
         assert_eq!(case(KEY_WRONG_PASS).0, "The client key passphrase is wrong");
         assert!(case(KEY_OLD_CIPHER).1.contains("openssl pkcs8 -topk8"));
+        let (t, h) = case(VERIFY_CA_NO_CA);
+        assert_eq!(t, "verify-ca needs a CA file");
+        assert!(h.starts_with("Without one any public certificate would pass"), "{h}");
         assert_eq!(case("error occurred while attempting to establish a TLS connection: keys may not be consistent: KeyMismatch").0, "The client key does not match the certificate");
         // 28000 is a sign-in refusal, but the cause is the missing certificate, not the password.
         assert_eq!(case("error returned from database: 28000: connection requires a valid client certificate").0, "The server wants a client certificate");
