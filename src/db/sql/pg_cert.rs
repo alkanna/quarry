@@ -15,6 +15,8 @@ pub(crate) const HALF_SET: &str = "Only one of the client certificate and the cl
 pub(crate) const KEY_LOCKED: &str = "The client key is encrypted and no passphrase is set";
 pub(crate) const KEY_WRONG_PASS: &str = "The client key passphrase is wrong";
 pub(crate) const KEY_OLD_CIPHER: &str = "The client key is encrypted in a format Quarry cannot read";
+/// Refused before connecting, as libpq does: without a CA file verify-ca would trust every public CA and check no name.
+pub(crate) const VERIFY_CA_NO_CA: &str = "TLS verify-ca needs a CA file";
 
 /// A leading `~/` is the home folder, as people type it; libpq's own default paths use it too.
 pub(super) fn expand(p: &str) -> PathBuf {

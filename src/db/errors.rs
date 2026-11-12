@@ -447,6 +447,8 @@ pub fn client_cert_problem(raw: &str) -> Option<(String, String)> {
         ("The client key is not a PEM file".into(), format!("{} has no PRIVATE KEY block. A DER key converts with `openssl pkey -inform der -in client.der -out client.key`.", path.trim()))
     } else if first == HALF_SET {
         ("Set both the client certificate and its key".into(), format!("The certificate is sent with the key that proves it is yours. Fill both {tab}, or clear both."))
+    } else if first == VERIFY_CA_NO_CA {
+        ("verify-ca needs a CA file".into(), format!("Without one any public certificate would pass, whatever host it names. Choose the file of the CA that signed the server's certificate {tab}, or choose verify-full, which checks the host name against the public CAs."))
     } else if first == KEY_LOCKED {
         ("The client key needs its passphrase".into(), format!("The key file is encrypted. Type its passphrase {tab}."))
     } else if first == KEY_WRONG_PASS {
@@ -587,6 +589,9 @@ mod tests {
         assert_eq!(case(KEY_LOCKED).0, "The client key needs its passphrase");
         assert_eq!(case(KEY_WRONG_PASS).0, "The client key passphrase is wrong");
         assert!(case(KEY_OLD_CIPHER).1.contains("openssl pkcs8 -topk8"));
+        let (t, h) = case(VERIFY_CA_NO_CA);
+        assert_eq!(t, "verify-ca needs a CA file");
+        assert!(h.starts_with("Without one any public certificate would pass"), "{h}");
         assert_eq!(case("error occurred while attempting to establish a TLS connection: keys may not be consistent: KeyMismatch").0, "The client key does not match the certificate");
         // 28000 is a sign-in refusal, but the cause is the missing certificate, not the password.
         assert_eq!(case("error returned from database: 28000: connection requires a valid client certificate").0, "The server wants a client certificate");

@@ -666,6 +666,9 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
     if net.cloud_sql.is_some() && net.ssh.is_some() {
         return Err("Cloud SQL and an SSH tunnel cannot be used together".into());
     }
+    if net.cloud_sql.is_none() && a.ssl_mode == SslMode::VerifyCa && a.ssl_ca.trim().is_empty() {
+        return Err(super::pg_cert::VERIFY_CA_NO_CA.into());
+    }
     // Read before any tunnel or proxy starts. The Cloud SQL proxy does its own TLS, and libpq ignores the files when
     // sslmode is disable. Decrypting a key runs a deliberately slow key derivation, so it stays off the async threads.
     let client_cert = if net.cloud_sql.is_none() && a.ssl_mode != SslMode::Disabled {
@@ -690,7 +693,7 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
         (Some(crate::db::Way::CloudSql(p)), "127.0.0.1".to_string(), port, SslMode::Disabled)
     } else {
         let tunnel = match &net.ssh {
-            Some((conf, secrets)) => Some(crate::ssh::open(conf, secrets, timeout, Some((a.host.clone(), a.port))).await?),
+            Some((conf, secrets)) => Some(crate::ssh::open(conf, secrets, timeout, Some((a.host.clone(), a.port)), false).await?),
             None => None,
         };
         match tunnel {
@@ -701,11 +704,12 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
             None => (None, a.host.clone(), a.port, a.ssl_mode),
         }
     };
-    // sqlx 0.8 checks the host name in verify-ca too, and through a tunnel it would check 127.0.0.1, so these modes
-    // open TLS in pg_tls against the name typed, and sqlx speaks plain PostgreSQL to the relay.
+    // sqlx 0.8 checks the host name in verify-ca too, through a tunnel it would check 127.0.0.1, and it trusts the web
+    // roots beside a CA file, so these modes open TLS in pg_tls against the name typed, and sqlx speaks plain
+    // PostgreSQL to the relay.
     let mut client_cert = client_cert;
-    let relay = match super::pg_tls::needed(mode, matches!(way, Some(crate::db::Way::Ssh(_)))) {
-        true => Some(super::pg_tls::start((host.clone(), port), &a.host, mode, &a.ssl_ca, client_cert.take()).await?),
+    let relay = match super::pg_tls::needed(mode, matches!(way, Some(crate::db::Way::Ssh(_))), !a.ssl_ca.trim().is_empty()) {
+        true => Some(super::pg_tls::start((host.clone(), port), &a.host, mode, &a.ssl_ca, client_cert.take(), timeout).await?),
         false => None,
     };
     let (host, port, mode) = match &relay {
@@ -791,7 +795,10 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
         // Credentials, which may be another account than the gcloud one that filled the user.
         (Some(c), Some(crate::db::Way::CloudSql(_))) if c.iam && classify(&m) == ErrKind::SignIn => format!("Cloud SQL IAM sign-in refused (the proxy used Application Default Credentials): {m}"),
         // sqlx saw the relay's refusal; the relay's own text reads as sqlx's would without it.
-        _ => relay.as_ref().and_then(|r| r.take_failure()).unwrap_or(m),
+        _ => match &relay {
+            Some(r) => r.explain(m),
+            None => m,
+        },
     })?;
     let mut pools = PgPools::new(opts.clone(), default_db.clone(), timeout, locals, f.timeout.clone()).with_session(sess);
     pools.relay = relay;

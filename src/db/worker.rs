@@ -1053,7 +1053,7 @@ impl Worker {
 pub(crate) async fn open_client(conn: u64, uri: &str, timeout: Duration, net: &Net) -> Res<(Client, Vec<String>, Option<crate::ssh::Tunnel>)> {
     use mongodb::options::Socks5Proxy;
     let tunnel = match &net.ssh {
-        Some((conf, secrets)) => Some(crate::ssh::open(conf, secrets, timeout, None).await?),
+        Some((conf, secrets)) => Some(crate::ssh::open(conf, secrets, timeout, None, false).await?),
         None => None,
     };
     let mut o = ClientOptions::parse(uri).await.map_err(e)?;

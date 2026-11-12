@@ -188,8 +188,9 @@ async fn authenticate(h: &mut Session, conf: &SshConf, s: &SshSecrets) -> Result
 }
 
 /// Opens the SSH session and a local gateway. With `to` set, every connection is forwarded to that
-/// host and port as is, for clients that cannot speak SOCKS5. Otherwise the gateway is SOCKS5.
-pub async fn open(conf: &SshConf, secrets: &SshSecrets, timeout: std::time::Duration, to: Option<(String, u16)>) -> Result<Tunnel, String> {
+/// host and port as is, for clients that cannot speak SOCKS5. Otherwise the gateway is SOCKS5. `want_socket` also asks
+/// for `Tunnel::socket` when `to` is set; on Windows, or when the socket cannot be made, there is only the port.
+pub async fn open(conf: &SshConf, secrets: &SshSecrets, timeout: std::time::Duration, to: Option<(String, u16)>, want_socket: bool) -> Result<Tunnel, String> {
     let seen = Arc::new(Mutex::new(None));
     let config = client::Config {
         keepalive_interval: Some(std::time::Duration::from_secs(30)),
@@ -216,15 +217,16 @@ pub async fn open(conf: &SshConf, secrets: &SshSecrets, timeout: std::time::Dura
     let listener = TcpListener::bind("127.0.0.1:0").await.map_err(|e| e.to_string())?;
     let local = listener.local_addr().map_err(|e| e.to_string())?.port();
     let session = Arc::new(h);
+    // Without the socket the caller dials the port as before, so a long or unwritable TMPDIR costs only the name check.
     #[cfg(unix)]
-    let unix = match &to {
-        Some(_) => Some(private_socket()?),
-        None => None,
-    };
+    let unix = if want_socket && to.is_some() { private_socket().ok() } else { None };
     #[cfg(unix)]
     let socket = unix.as_ref().map(|(_, p)| p.clone());
     #[cfg(not(unix))]
-    let socket = None;
+    let socket = {
+        let _ = want_socket;
+        None
+    };
     // Both accept loops run in this one task, so aborting it on drop stops both and lets the session go.
     let task = tokio::spawn(async move {
         #[cfg(unix)]

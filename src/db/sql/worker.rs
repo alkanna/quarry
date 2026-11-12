@@ -160,7 +160,8 @@ async fn open_full(uri: &str, timeout: Duration, net: &Net, adv: &Advanced, info
     let setup = Setup::new(adv.session_statements(super::advanced::local_offset_secs())?, super::advanced::init_statements(&adv.init)?);
     let (timeout, ms) = adv.timeouts(timeout);
     let tunnel = match &net.ssh {
-        Some((conf, secrets)) => Some(crate::ssh::open(conf, secrets, timeout, Some((a.host.clone(), a.port))).await?),
+        // The socket only matters when sqlx checks the certificate's name.
+        Some((conf, secrets)) => Some(crate::ssh::open(conf, secrets, timeout, Some((a.host.clone(), a.port)), matches!(a.ssl_mode, SslMode::VerifyCa | SslMode::VerifyIdentity)).await?),
         None => None,
     };
     // sqlx checks the certificate against the host it is given. Through the tunnel's socket that stays the name typed;

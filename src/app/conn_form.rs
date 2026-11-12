@@ -81,11 +81,11 @@ fn tls_settings(ui: &mut egui::Ui, f: &mut ConnForm) {
         });
         ui.add_space(6.0);
         if f.engine == db::sql::Engine::Postgres {
-            ui.add(egui::Label::new(RichText::new("Names follow libpq sslmode. prefer tries TLS and falls back to plain, require encrypts without checking the certificate, verify-ca checks the chain and verify-full also checks the host name. Through an SSH tunnel the name checked is still the host typed above.").size(TXT_SMALL).color(FAINT())).wrap());
+            ui.add(egui::Label::new(RichText::new("Names follow libpq sslmode. prefer tries TLS and falls back to plain, require encrypts without checking the certificate, verify-ca checks the chain against the CA file and needs one, verify-full also checks the host name. With a CA file only that CA is trusted; verify-full without one trusts the public CAs. Through an SSH tunnel the name checked is still the host typed above.").size(TXT_SMALL).color(FAINT())).wrap());
             ui.add_space(4.0);
             ui.add(egui::Label::new(RichText::new("Certificate and key are PEM files. The passphrase is only for an encrypted key.").size(TXT_SMALL).color(FAINT())).wrap());
         } else {
-            ui.add(egui::Label::new(RichText::new("Verify CA also checks the host name, a limit of Quarry's MySQL driver. Through an SSH tunnel the name checked is the host typed above, except on Windows, where it is the tunnel's 127.0.0.1.").size(TXT_SMALL).color(FAINT())).wrap());
+            ui.add(egui::Label::new(RichText::new("Verify CA also checks the host name, a limit of Quarry's MySQL driver, and the public CAs are trusted beside the CA file. Through an SSH tunnel the name checked is the host typed above, except on Windows, where it is the tunnel's 127.0.0.1.").size(TXT_SMALL).color(FAINT())).wrap());
         }
     });
 }

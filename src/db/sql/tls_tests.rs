@@ -72,6 +72,12 @@ fn check(var: &str, names: (&str, &str), ca_skips_name: bool) {
     expect("verify-ca", r, &if ca_skips_name { "connected".to_string() } else { format!("The certificate is not for {}", a.host) });
     expect("verify-full", l.test(&with(SslMode::VerifyIdentity, "ca.crt"), Net::default()), &format!("The certificate is not for {}", a.host));
     expect("verify-ca with another CA", l.test(&with(SslMode::VerifyCa, "other-ca.crt"), Net::default()), "The server's certificate is not trusted");
+    // PostgreSQL trusts the CA file alone (libpq), so verify-full with another CA fails on the chain, and verify-ca
+    // without a file is refused before connecting.
+    if ca_skips_name {
+        expect("verify-full with another CA", l.test(&with(SslMode::VerifyIdentity, "other-ca.crt"), Net::default()), "The server's certificate is not trusted");
+        expect("verify-ca without a CA file", l.test(&Addr { ssl_mode: SslMode::VerifyCa, ssl_ca: String::new(), ..a.clone() }, Net::default()), "verify-ca needs a CA file");
+    }
     // Through the tunnel the certificate is checked against the name typed, not the tunnel's 127.0.0.1.
     if let Some(net) = ssh() {
         let far = |mode: SslMode, host: &str| Addr { host: host.into(), port: Addr::default_port(&a.scheme), ..with(mode, "ca.crt") };
@@ -91,4 +97,18 @@ fn live_postgres_certificate_checks() {
 #[test]
 fn live_mysql_certificate_checks() {
     check("QUARRY_TEST_MYTLS", ("mysql.example.test", "my.other.test"), false);
+}
+
+/// The tunnel makes its private socket only when asked, which only MySQL with a certificate check does.
+#[test]
+fn live_ssh_tunnel_socket_only_when_asked() {
+    let Some((conf, secrets)) = ssh().and_then(|n| n.ssh) else { return };
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let to = Some(("db.example.test".to_string(), 5432));
+        let t = crate::ssh::open(&conf, &secrets, Duration::from_secs(20), to.clone(), false).await.unwrap();
+        assert!(t.socket.is_none());
+        let t = crate::ssh::open(&conf, &secrets, Duration::from_secs(20), to, true).await.unwrap();
+        assert_eq!(t.socket.is_some(), cfg!(unix));
+    });
 }

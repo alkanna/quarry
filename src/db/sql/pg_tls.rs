@@ -7,6 +7,9 @@
 //! PostgreSQL asks for TLS before anything else is said, so a local relay can open it: sqlx speaks plain PostgreSQL to a
 //! private socket, and the relay asks the server for TLS, checks its certificate the way the mode says against the
 //! host name the user typed, and copies bytes both ways.
+//!
+//! Trust follows libpq: with a CA file only that file is trusted, and verify-ca without one is refused, because public
+//! roots with no name check would accept any site's certificate. The bundled web roots serve verify-full alone.
 
 use super::SslMode;
 use crate::db::Res;
@@ -17,6 +20,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::{CertificateError, ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
@@ -27,9 +31,10 @@ const TLS_FAILED: &str = "error occurred while attempting to establish a TLS con
 #[cfg_attr(not(unix), allow(dead_code))]
 const SOCKET_PORT: u16 = 5432;
 
-/// Whether `open` needs the relay: verify-ca always, and verify-full when the address dialled is a tunnel's.
-pub(super) fn needed(mode: SslMode, tunnel: bool) -> bool {
-    mode == SslMode::VerifyCa || mode == SslMode::VerifyIdentity && tunnel
+/// Whether `open` needs the relay: verify-ca always, and verify-full when the address dialled is a tunnel's or a CA
+/// file is set, since sqlx would trust the web roots beside the file.
+pub(super) fn needed(mode: SslMode, tunnel: bool, ca: bool) -> bool {
+    mode == SslMode::VerifyCa || mode == SslMode::VerifyIdentity && (tunnel || ca)
 }
 
 /// The local end sqlx connects to. Dropping it stops accepting and removes the socket folder; connections already
@@ -49,10 +54,10 @@ impl Relay {
         self.dir.as_deref()
     }
 
-    /// What sqlx would have said for the failure the relay turned into a refusal, so the first connect reads the same
-    /// with or without the relay.
-    pub fn take_failure(&self) -> Option<String> {
-        self.failure.lock().unwrap().take()
+    /// The relay's own text for `m` when `m` is the refusal the relay sent, so the first connect reads the same with or
+    /// without the relay. Any other error stays as it is, even after an earlier refusal.
+    pub fn explain(&self, m: String) -> String {
+        pick(self.failure.lock().unwrap().take(), m)
     }
 }
 
@@ -65,11 +70,21 @@ impl Drop for Relay {
     }
 }
 
+/// The refusal travels to sqlx as the message of an ErrorResponse, so sqlx's error holds it word for word.
+fn pick(failure: Option<String>, m: String) -> String {
+    match failure {
+        Some(f) if m.contains(&f) => f,
+        _ => m,
+    }
+}
+
 struct Upstream {
     host: String,
     port: u16,
     name: ServerName<'static>,
     tls: TlsConnector,
+    /// The connection's timeout, so a server that stops answering does not leave relay tasks waiting forever.
+    timeout: Duration,
 }
 
 trait Duplex: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -77,10 +92,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Duplex for T {}
 
 /// Starts a relay to `to` that checks the certificate against `name` as `mode` says. Configuration errors (an
 /// unreadable CA file, a key that does not match the certificate) are returned here, before anything connects.
-pub(super) async fn start(to: (String, u16), name: &str, mode: SslMode, ca: &str, client: Option<(Vec<u8>, Vec<u8>)>) -> Res<Relay> {
+pub(super) async fn start(to: (String, u16), name: &str, mode: SslMode, ca: &str, client: Option<(Vec<u8>, Vec<u8>)>, timeout: Duration) -> Res<Relay> {
     let config = config(mode, ca, client)?;
     let name = ServerName::try_from(name.to_string()).map_err(|e| tls(&e))?;
-    let up = Arc::new(Upstream { host: to.0, port: to.1, name, tls: TlsConnector::from(Arc::new(config)) });
+    let up = Arc::new(Upstream { host: to.0, port: to.1, name, tls: TlsConnector::from(Arc::new(config)), timeout });
     let failure = Arc::new(Mutex::new(None));
     let (listener, dir, port) = listen().await?;
     let fail = failure.clone();
@@ -93,6 +108,8 @@ pub(super) async fn start(to: (String, u16), name: &str, mode: SslMode, ca: &str
                     Err(_) => break,
                 },
                 Listener::Tcp(l) => match l.accept().await {
+                    #[cfg(windows)]
+                    Ok((_, peer)) if !l.local_addr().is_ok_and(|me| own_process(peer, me)) => continue,
                     Ok((s, _)) => Box::new(s),
                     Err(_) => break,
                 },
@@ -135,8 +152,43 @@ async fn listen() -> Res<(Listener, Option<PathBuf>, u16)> {
     }
 }
 
+/// Whether the client at `peer`, connected to the relay at `me`, is a socket of this process. A localhost port is open
+/// to every user of the machine, and each session presents the user's client certificate, so another local user must
+/// not get one. Fails closed: when the table cannot be read, nobody is served.
+#[cfg(windows)]
+fn own_process(peer: std::net::SocketAddr, me: std::net::SocketAddr) -> bool {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{GetExtendedTcpTable, TCP_TABLE_OWNER_PID_CONNECTIONS};
+    let (std::net::SocketAddr::V4(peer), std::net::SocketAddr::V4(me)) = (peer, me) else { return false };
+    const AF_INET: u32 = 2;
+    const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+    // MIB_TCPTABLE_OWNER_PID read as u32 words: the row count, then rows of state, local address, local port, remote
+    // address, remote port and owning pid. Addresses are stored in network order, ports too in their low 16 bits.
+    let mut buf: Vec<u32> = vec![0; 1];
+    let mut ok = false;
+    // The table can grow between asking its size and reading it.
+    for _ in 0..4 {
+        let mut size = (buf.len() * 4) as u32;
+        match unsafe { GetExtendedTcpTable(buf.as_mut_ptr().cast(), &mut size, 0, AF_INET, TCP_TABLE_OWNER_PID_CONNECTIONS, 0) } {
+            0 => {
+                ok = true;
+                break;
+            }
+            ERROR_INSUFFICIENT_BUFFER => buf = vec![0; (size as usize).div_ceil(4) + 6],
+            _ => return false,
+        }
+    }
+    let n = buf[0] as usize;
+    if !ok || buf.len() < 1 + n * 6 {
+        return false;
+    }
+    let addr = |a: &std::net::SocketAddrV4| (u32::from_ne_bytes(a.ip().octets()), a.port());
+    let port = |w: u32| u16::from_be(w as u16);
+    buf[1..1 + n * 6].chunks_exact(6).any(|r| (r[1], port(r[2])) == addr(&peer) && (r[3], port(r[4])) == addr(&me) && r[5] == std::process::id())
+}
+
 async fn serve(mut client: Box<dyn Duplex>, up: Arc<Upstream>, failure: Arc<Mutex<Option<String>>>) {
-    match upstream(&up).await {
+    let late = || format!("error communicating with database: connection timed out: no TLS session with the server within {} s", up.timeout.as_secs());
+    match tokio::time::timeout(up.timeout, upstream(&up)).await.unwrap_or_else(|_| Err(late())) {
         Ok(mut tls) => {
             let _ = tokio::io::copy_bidirectional(&mut client, &mut tls).await;
         }
@@ -190,7 +242,7 @@ fn error_response(msg: &str) -> Vec<u8> {
     out
 }
 
-/// The roots sqlx trusts (the bundled web roots, plus the CA file when one is set) and the client certificate.
+/// The roots the mode trusts (see `verifier_with`) and the client certificate.
 fn config(mode: SslMode, ca: &str, client: Option<(Vec<u8>, Vec<u8>)>) -> Res<ClientConfig> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let b = ClientConfig::builder_with_provider(provider.clone()).with_safe_default_protocol_versions().map_err(|e| tls(&e))?.dangerous().with_custom_certificate_verifier(verifier(mode, ca, provider)?);
@@ -209,8 +261,14 @@ fn tls(e: &dyn std::fmt::Display) -> String {
 }
 
 fn verifier(mode: SslMode, ca: &str, provider: Arc<rustls::crypto::CryptoProvider>) -> Res<Arc<Verifier>> {
-    let mut roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    if !ca.trim().is_empty() {
+    verifier_with(mode, ca, provider, || RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned()))
+}
+
+/// What libpq trusts: the CA file alone when one is set, whatever the mode, and the public roots (`web`) only for
+/// verify-full without a file, where the name check is what makes them safe. verify-ca without a file is refused.
+fn verifier_with(mode: SslMode, ca: &str, provider: Arc<rustls::crypto::CryptoProvider>, web: impl FnOnce() -> RootCertStore) -> Res<Arc<Verifier>> {
+    let roots = if !ca.trim().is_empty() {
+        let mut roots = RootCertStore::empty();
         let path = super::pg_cert::expand(ca.trim());
         let data = std::fs::read(&path).map_err(|e| tls(&format!("could not read the CA file {}: {e}", path.display())))?;
         let mut any = false;
@@ -222,7 +280,12 @@ fn verifier(mode: SslMode, ca: &str, provider: Arc<rustls::crypto::CryptoProvide
         if !any {
             return Err(tls(&format!("Invalid certificate {}: no BEGIN CERTIFICATE block", path.display())));
         }
-    }
+        roots
+    } else if mode == SslMode::VerifyIdentity {
+        web()
+    } else {
+        return Err(super::pg_cert::VERIFY_CA_NO_CA.into());
+    };
     let inner = WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider).build().map_err(|e| tls(&e))?;
     Ok(Arc::new(Verifier { inner, name: mode == SslMode::VerifyIdentity }))
 }
@@ -261,13 +324,113 @@ mod tests {
 
     #[test]
     fn which_modes_need_the_relay() {
-        assert!(needed(SslMode::VerifyCa, false));
-        assert!(needed(SslMode::VerifyCa, true));
-        assert!(needed(SslMode::VerifyIdentity, true));
-        assert!(!needed(SslMode::VerifyIdentity, false));
-        for m in [SslMode::Disabled, SslMode::Preferred, SslMode::Required] {
-            assert!(!needed(m, true) && !needed(m, false));
+        for ca in [false, true] {
+            assert!(needed(SslMode::VerifyCa, false, ca));
+            assert!(needed(SslMode::VerifyCa, true, ca));
+            assert!(needed(SslMode::VerifyIdentity, true, ca));
+            for m in [SslMode::Disabled, SslMode::Preferred, SslMode::Required] {
+                assert!(!needed(m, true, ca) && !needed(m, false, ca));
+            }
         }
+        // sqlx would trust the web roots beside the file, so verify-full with a CA file goes through the relay.
+        assert!(needed(SslMode::VerifyIdentity, false, true));
+        assert!(!needed(SslMode::VerifyIdentity, false, false));
+    }
+
+    #[test]
+    fn only_the_relays_own_refusal_is_reworded() {
+        let f = "error communicating with database: invalid peer certificate: UnknownIssuer".to_string();
+        assert_eq!(pick(Some(f.clone()), format!("error returned from database: {f}")), f);
+        // An earlier refusal does not replace an unrelated error of a later attempt.
+        let other = "error returned from database: password authentication failed for user \"app\"".to_string();
+        assert_eq!(pick(Some(f), other.clone()), other);
+        assert_eq!(pick(None, other.clone()), other);
+    }
+
+    /// A server that answers the SSLRequest and then says nothing: the relay gives up within the timeout and refuses.
+    #[test]
+    fn a_server_that_goes_silent_is_given_up_on() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = l.local_addr().unwrap().port();
+            let server = tokio::spawn(async move {
+                let (mut s, _) = l.accept().await.unwrap();
+                let mut req = [0u8; 8];
+                s.read_exact(&mut req).await.unwrap();
+                s.write_all(b"S").await.unwrap();
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            });
+            let tls = TlsConnector::from(Arc::new(config(SslMode::VerifyIdentity, "", None).unwrap()));
+            let up = Arc::new(Upstream { host: "127.0.0.1".into(), port, name: ServerName::try_from("db.example.test").unwrap(), tls, timeout: Duration::from_millis(300) });
+            let (client, mut sqlx) = tokio::io::duplex(4096);
+            // A startup message, which the refusal reads before it answers.
+            sqlx.write_all(&[0, 0, 0, 8, 0, 3, 0, 0]).await.unwrap();
+            let failure = Arc::new(Mutex::new(None));
+            tokio::time::timeout(Duration::from_secs(5), serve(Box::new(client), up, failure.clone())).await.expect("the relay waited past its timeout");
+            let f = failure.lock().unwrap().clone().unwrap();
+            assert!(f.contains("timed out"), "{f}");
+            let mut answer = Vec::new();
+            sqlx.read_to_end(&mut answer).await.unwrap();
+            assert_eq!(answer.first(), Some(&b'E'));
+            server.abort();
+        });
+    }
+
+    /// Windows only: the relay's port is open to every local user, so it serves only sockets of this process.
+    #[cfg(windows)]
+    #[test]
+    fn a_socket_of_this_process_is_recognised() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let me = l.local_addr().unwrap();
+        let c = std::net::TcpStream::connect(me).unwrap();
+        let (_s, peer) = l.accept().unwrap();
+        assert_eq!(peer, c.local_addr().unwrap());
+        assert!(own_process(peer, me));
+        assert!(!own_process("127.0.0.1:1".parse().unwrap(), me));
+    }
+
+    /// A public CA stands in for the bundled web roots and has signed a certificate for another site.
+    #[test]
+    fn a_ca_file_is_the_only_root_and_verify_ca_needs_one() {
+        use super::super::pg_cert::tests::{make_certs, temp_dir};
+        let d = temp_dir("roots");
+        let run = |args: &[&str]| std::process::Command::new("openssl").args(args).current_dir(&d).output().ok().filter(|o| o.status.success()).map(|_| ());
+        let made = make_certs(&d, "db.example.test", "analyst").and_then(|_| {
+            run(&["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", "public-ca.key", "-out", "public-ca.crt", "-days", "2", "-subj", "/CN=quarry-public-ca"])?;
+            std::fs::write(d.join("site.ext"), "subjectAltName=DNS:site.example.org\n").ok()?;
+            run(&["req", "-newkey", "rsa:2048", "-nodes", "-keyout", "site.key", "-out", "site.csr", "-subj", "/CN=site.example.org"])?;
+            run(&["x509", "-req", "-in", "site.csr", "-CA", "public-ca.crt", "-CAkey", "public-ca.key", "-CAcreateserial", "-out", "site.crt", "-days", "2", "-extfile", "site.ext"])
+        });
+        if made.is_none() {
+            eprintln!("openssl not found, skipped");
+            return;
+        }
+        let ca = d.join("ca.crt").display().to_string();
+        let public = CertificateDer::from_pem_file(d.join("public-ca.crt")).unwrap();
+        let site = CertificateDer::from_pem_file(d.join("site.crt")).unwrap();
+        let verify = |mode: SslMode, ca: &str, host: &str| {
+            let web = || {
+                let mut r = RootCertStore::empty();
+                r.add(public.clone()).unwrap();
+                r
+            };
+            let v = verifier_with(mode, ca, Arc::new(rustls::crypto::ring::default_provider()), web)?;
+            v.verify_server_cert(&site, &[], &ServerName::try_from(host.to_string()).unwrap(), &[], UnixTime::now()).map(|_| ()).map_err(|e| e.to_string())
+        };
+        // With the web roots beside the file, verify-ca forgave the name and took any public site's certificate.
+        let e = verify(SslMode::VerifyCa, &ca, "db.example.test").unwrap_err();
+        assert!(e.contains("UnknownIssuer"), "{e}");
+        // verify-full with a file trusts the file alone, even for the name the certificate holds.
+        let e = verify(SslMode::VerifyIdentity, &ca, "site.example.org").unwrap_err();
+        assert!(e.contains("UnknownIssuer"), "{e}");
+        assert_eq!(verify(SslMode::VerifyCa, "", "db.example.test").unwrap_err(), super::super::pg_cert::VERIFY_CA_NO_CA);
+        assert_eq!(verify(SslMode::VerifyCa, "  ", "site.example.org").unwrap_err(), super::super::pg_cert::VERIFY_CA_NO_CA);
+        // verify-full without a file keeps the public roots, with the name checked.
+        assert!(verify(SslMode::VerifyIdentity, "", "site.example.org").is_ok());
+        let e = verify(SslMode::VerifyIdentity, "", "db.example.test").unwrap_err();
+        assert!(e.contains("not valid for name"), "{e}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -301,8 +464,8 @@ mod tests {
         assert!(verify(SslMode::VerifyIdentity, &ca, "db.example.test").is_ok());
         let e = verify(SslMode::VerifyIdentity, &ca, "10.9.8.7").unwrap_err().to_string();
         assert!(e.contains("certificate not valid for name \"10.9.8.7\""), "{e}");
-        // Without the CA the chain fails first, whatever the mode.
-        let e = verify(SslMode::VerifyCa, "", "db.example.test").unwrap_err().to_string();
+        // Without the CA the chain fails first.
+        let e = verify(SslMode::VerifyIdentity, "", "db.example.test").unwrap_err().to_string();
         assert!(e.contains("UnknownIssuer"), "{e}");
         let _ = std::fs::remove_dir_all(&d);
     }
