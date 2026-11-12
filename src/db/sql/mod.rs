@@ -11,7 +11,6 @@ mod relay;
 pub mod structure;
 pub mod write;
 pub mod ddl;
-mod ddl_my;
 pub mod create;
 pub mod export;
 pub mod lex;
