@@ -15,23 +15,19 @@
 
 ## Features
 
-- **MongoDB, MySQL, MariaDB and PostgreSQL** side by side (MySQL 5.7, 8 and 9, MariaDB 10.6+, PostgreSQL 13+), in tabs with a table or JSON view. PostgreSQL databases show their schemas in a picker in the sidebar.
-- **Safe editing.** Every connection opens read-only until you unlock it. Edits are staged, saved together and can be undone, and never overwrite a change someone else made meanwhile. Bulk updates, structure changes and drops show what they will run first. On PostgreSQL every statement of a locked connection runs in a read-only transaction that is rolled back; a function on the server that writes by itself still runs with your role's rights, so use a read-only role where that matters.
-- **Queries.** Paste `db.orders.find(...)` or `aggregate([...])`, use date shortcuts like `#today`, build a pipeline with a preview after each stage, read explain plans and copy as driver code. For SQL, filter with typed rules or plain SQL, or run several statements at once with autocomplete, Format, Explain and Stop. Saved queries, history and a query log (Cmd+L).
-- **Scripting.** A JavaScript shell on [Bun](https://bun.sh) with npm packages and autocomplete: the MongoDB driver, `` sql`...` `` templates, and other connections attached to the same script.
-- **Structure.** MongoDB indexes with usage and suggestions, field types, validators, references and live change streams. SQL columns, indexes, foreign keys and triggers through a previewed ALTER. On PostgreSQL each change runs in one transaction that checks nobody changed the table since, and undo puts back exactly what it can or says what it cannot.
-- **Import and export.** JSON, CSV, TSV and SQL dumps, on every engine, compare and sync two collections, dump and restore with the MongoDB Database Tools (installed for you).
-- **Server.** Status, variables, running operations with Kill, users, roles and privileges (MongoDB, MySQL and MariaDB).
-- **Connections.** SSH tunnels, SOCKS5 proxies and TLS. Paste a `postgresql://` string to fill the form. Passwords stay in the system keychain. Tag connections as Production, Staging or anything you like.
-- **Keyboard and reading.** Cmd+K searches every connection and runs commands, Cmd+[ and Cmd+] move through visited tabs, Cmd+/ lists every shortcut (Ctrl on Linux and Windows). Reading options: larger text, the OpenDyslexic font, a soft background, a line that follows the pointer across wide tables, and grouped digits.
+- **MongoDB, MySQL, MariaDB and PostgreSQL** side by side (MySQL 5.7 to 9, MariaDB 10.6+, PostgreSQL 13+), in tabs with a table or JSON view.
+- **Safe by default.** Every connection opens read-only until you unlock it. Edits are staged, previewed, saved together and can be undone, and never overwrite a change someone else made meanwhile.
+- **Queries.** Mongo `find` and `aggregate` with a preview after each pipeline stage, explain plans and copy as code. SQL with typed filter rules, several statements at once, autocomplete, Format, Explain and Stop. Saved queries, history and a query log.
+- **Scripting.** A JavaScript shell on [Bun](https://bun.sh) that reads several connections, Mongo and SQL, in one script.
+- **Structure and admin.** Indexes, columns, foreign keys, triggers and validators. Server status, sessions with Kill or Cancel, users, roles and privileges on every engine.
+- **Import and export.** JSON, CSV, TSV and SQL dumps on every engine, compare and sync collections, MongoDB dump and restore.
+- **Connections.** SSH tunnels, SOCKS5, TLS (with client certificates on PostgreSQL), and Google Cloud SQL: pick an instance from your gcloud account and Quarry runs the Cloud SQL Auth Proxy for you. Passwords stay in the system keychain.
+- **Keyboard and reading.** Cmd+K jumps anywhere, Cmd+/ lists every shortcut. Larger text, OpenDyslexic, a soft background and a reading line for wide tables.
 
 | | |
 |---|---|
-| ![A MySQL table filtered with rules](docs/sql-content.png) | ![SQL Query with several statements](docs/sql-query.png) |
-| ![Structure with staged column and index changes](docs/sql-structure.png) | ![A SQL shell reading a MongoDB connection in the same script](docs/shell-attach.png) |
-| ![Editing a document](docs/edit.png) | ![Aggregation pipeline with a preview after each stage](docs/aggregate.png) |
-| ![Schema](docs/schema.png) | ![Compare and sync](docs/compare.png) |
-| ![Server processes](docs/sql-server.png) | ![Connection with a tag and an SSH tunnel](docs/connection.png) |
+| ![SQL Query with several statements](docs/sql-query.png) | ![Aggregation pipeline with a preview after each stage](docs/aggregate.png) |
+| ![A shell script reading a SQL and a MongoDB connection](docs/shell-attach.png) | ![PostgreSQL roles and privileges](docs/pg-roles.png) |
 
 ## Install
 
