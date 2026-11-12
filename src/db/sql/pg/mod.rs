@@ -2,10 +2,24 @@
 //! A Postgres connection belongs to one database and there is no USE, so the pool is picked by the database the
 //! `Db`'s options name (see `Db::at`).
 
+pub mod advanced;
+pub(crate) mod cert;
+pub(super) mod tls;
+pub(super) mod catalog;
+pub(super) mod read;
+pub(super) mod script;
+pub(super) mod dump;
+pub mod server;
+pub mod create;
+pub mod ddl;
+pub mod ddl_trig;
+pub mod import;
+pub mod roles;
+
 use super::se;
 use super::exec::{Cells, Conn, Opts};
 use super::worker::{num_at, text_at};
-use super::pg_advanced::PgSession;
+use super::pg::advanced::PgSession;
 use super::{Addr, Db, Dialect, Pool, SslMode, TestInfo};
 use crate::db::{classify, e, ErrKind, Net, Res};
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions, PgSslMode};
@@ -63,7 +77,7 @@ pub struct PgPools {
     /// The `BEGIN READ WRITE` a write opens with, built on the first write: the settings it holds never change for a pool.
     begin_write: std::sync::OnceLock<String>,
     /// Held so the TLS relay lives as long as the connections that dial it.
-    relay: Option<super::pg_tls::Relay>,
+    relay: Option<super::pg::tls::Relay>,
 }
 
 /// Connections taken out of a pool for good (`PgPools::acquire_held`), counted per database. `pool.close()` does not know them,
@@ -699,13 +713,13 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
         return Err("Cloud SQL and an SSH tunnel cannot be used together".into());
     }
     if net.cloud_sql.is_none() && a.ssl_mode == SslMode::VerifyCa && a.ssl_ca.trim().is_empty() {
-        return Err(super::pg_cert::VERIFY_CA_NO_CA.into());
+        return Err(super::pg::cert::VERIFY_CA_NO_CA.into());
     }
     // Read before any tunnel or proxy starts. The Cloud SQL proxy does its own TLS, and libpq ignores the files when
     // sslmode is disable. Decrypting a key runs a deliberately slow key derivation, so it stays off the async threads.
     let client_cert = if net.cloud_sql.is_none() && a.ssl_mode != SslMode::Disabled {
         let (c, k, p) = (a.ssl_cert.clone(), a.ssl_key.clone(), net.key_passphrase.clone());
-        tokio::task::spawn_blocking(move || super::pg_cert::load(&c, &k, p.as_deref())).await.map_err(|e| e.to_string())??
+        tokio::task::spawn_blocking(move || super::pg::cert::load(&c, &k, p.as_deref())).await.map_err(|e| e.to_string())??
     } else {
         None
     };
@@ -741,8 +755,8 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
     // PostgreSQL to the relay.
     let mut client_cert = client_cert;
     let sent_cert = client_cert.is_some();
-    let relay = match super::pg_tls::needed(mode, matches!(way, Some(crate::db::Way::Ssh(_))), !a.ssl_ca.trim().is_empty()) {
-        true => Some(super::pg_tls::start((host.clone(), port), &a.host, mode, &a.ssl_ca, client_cert.take(), timeout).await?),
+    let relay = match super::pg::tls::needed(mode, matches!(way, Some(crate::db::Way::Ssh(_))), !a.ssl_ca.trim().is_empty()) {
+        true => Some(super::pg::tls::start((host.clone(), port), &a.host, mode, &a.ssl_ca, client_cert.take(), timeout).await?),
         false => None,
     };
     let (host, port, mode) = match &relay {
@@ -820,7 +834,7 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
         let _ = c.close().await;
         let (f, dbs, schemas) = res?;
         // Behind a pooler pg_stat_ssl describes the pooler's own connection, not this client's.
-        let client_dn = if locals.is_some() { String::new() } else { super::pg_cert::subject(&f.client_dn) };
+        let client_dn = if locals.is_some() { String::new() } else { super::pg::cert::subject(&f.client_dn) };
         Ok::<_, String>((f, dbs, opts, locals, TestInfo { schemas, setting_errors: errors, client_dn, ..Default::default() }))
     };
     let (f, dbs, opts, locals, ti) = tokio::time::timeout(timeout, first).await.map_err(|_| format!("Could not connect and set up the session within {} s", timeout.as_secs()))?.map_err(|m| match (&net.cloud_sql, &way) {
@@ -832,7 +846,7 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
             Some(r) => r.explain(m),
             None => m,
         },
-    }).map_err(|m| if sent_cert && m.contains("received fatal alert") { format!("{} {m}", super::pg_cert::CERT_ALERT) } else { m })?;
+    }).map_err(|m| if sent_cert && m.contains("received fatal alert") { format!("{} {m}", super::pg::cert::CERT_ALERT) } else { m })?;
     let mut pools = PgPools::new(opts.clone(), default_db.clone(), timeout, locals, f.timeout.clone()).with_session(sess);
     pools.relay = relay;
     let db = Db {
@@ -1402,10 +1416,10 @@ mod tests {
                 assert_eq!(p.locals(), locals_for(30_000));
                 // Inside a read transaction the locals apply and the guard holds.
                 let db = Db { pool: Pool::Pg(Arc::new(p)), ..l.db.clone() };
-                let rows = l.w.rt.block_on(crate::db::sql::pg_read::read_only(&db, false, "", "SELECT current_setting('statement_timeout'), current_setting('transaction_read_only'), current_setting('DateStyle')")).unwrap();
+                let rows = l.w.rt.block_on(crate::db::sql::pg::read::read_only(&db, false, "", "SELECT current_setting('statement_timeout'), current_setting('transaction_read_only'), current_setting('DateStyle')")).unwrap();
                 assert_eq!(rows[0].cell(0), Some(&b"30s"[..]), "{var}");
                 assert_eq!(rows[0].cell(1), Some(&b"on"[..]), "{var}");
-                let err = l.w.rt.block_on(crate::db::sql::pg_read::read_only(&db, false, "", "CREATE TABLE t_pg5_pooled (id int)")).unwrap_err();
+                let err = l.w.rt.block_on(crate::db::sql::pg::read::read_only(&db, false, "", "CREATE TABLE t_pg5_pooled (id int)")).unwrap_err();
                 assert_eq!(code(&err).as_deref(), Some("25006"), "{var}: {err}");
                 // The session is untouched afterwards as well.
                 let rows = l.w.rt.block_on(c.fetch_all("SHOW statement_timeout")).unwrap();

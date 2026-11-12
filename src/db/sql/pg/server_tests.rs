@@ -297,7 +297,7 @@ fn live_the_signal_runs_in_a_read_only_transaction() {
 
 #[test]
 fn the_signal_opens_a_read_only_transaction_direct_and_behind_a_pooler() {
-    use crate::db::sql::pg_advanced::PgSession;
+    use crate::db::sql::pg::advanced::PgSession;
     for pooled in [false, true] {
         let db = Db::offline_pg(pooled, PgSession::default());
         let b = signal_begin(&db);

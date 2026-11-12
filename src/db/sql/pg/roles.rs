@@ -13,13 +13,13 @@
 //! verifier with the server's scram_iterations and PostgreSQL's own SASLprep, or the MD5 hash on a server set to md5 (the
 //! default up to PostgreSQL 13). It is shown as '***' in previews and in the Query log.
 
-use super::create_pg::read;
-use super::ddl_pg::{commit_unknown, exec, name_ok, q, set_lock_wait};
-use super::exec::{SqlRow, Tx};
-use super::value::{pg_lit, Param};
-use super::worker::text;
-use super::write::{writer_conn, SqlUndo, LOCKED};
-use super::{se, Db};
+use crate::db::sql::pg::create::read;
+use crate::db::sql::pg::ddl::{commit_unknown, exec, name_ok, q, set_lock_wait};
+use crate::db::sql::exec::{SqlRow, Tx};
+use crate::db::sql::value::{pg_lit, Param};
+use crate::db::sql::worker::text;
+use crate::db::sql::write::{writer_conn, SqlUndo, LOCKED};
+use crate::db::sql::{se, Db};
 use crate::db::{Msg, Res, UndoAction, UndoKind, Worker};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
@@ -1262,11 +1262,11 @@ async fn load_cluster(db: &Db) -> Res<Cluster> {
     let r = head.first().ok_or("The server gave no answer")?;
     let (me, major, password_encryption) = (t(r, "me"), major_of(&t(r, "v")), t(r, "pe"));
     let (roles, members) = (roles_sql(""), members_sql(major));
-    let mut all = read(db, "", &[(roles.as_str(), Vec::new()), (members.as_str(), Vec::new()), (super::pg::DB_LIST, Vec::new())]).await?;
+    let mut all = read(db, "", &[(roles.as_str(), Vec::new()), (members.as_str(), Vec::new()), (crate::db::sql::pg::DB_LIST, Vec::new())]).await?;
     let dbs = all.pop().unwrap_or_default();
     let members = memberships(&all.pop().unwrap_or_default());
     let roles = all.pop().unwrap_or_default().iter().map(|r| Role { oid: t(r, "oid"), name: t(r, "name"), attrs: attrs_of(r), admin: b(r, "adm") }).collect();
-    let databases = dbs.iter().filter_map(|r| super::worker::text_at(r, 0)).collect();
+    let databases = dbs.iter().filter_map(|r| crate::db::sql::worker::text_at(r, 0)).collect();
     Ok(Cluster { major, me, roles, members, databases, password_encryption })
 }
 
@@ -2036,7 +2036,7 @@ impl Worker {
 
 /// Runs an undo from Recent changes on the database it was recorded for (`db` is already that one). A refused undo changed
 /// nothing, since every undo is one transaction, so the entry comes back to stay in the list.
-pub(super) async fn undo(db: &Db, a: UndoAction, u: RolesUndo, read_only: bool) -> Msg {
+pub(in crate::db::sql) async fn undo(db: &Db, a: UndoAction, u: RolesUndo, read_only: bool) -> Msg {
     let conn = a.conn;
     let res = match &u {
         RolesUndo::Batch { batch, label } => run_batch(db, batch.clone(), read_only, true).await.map(|_| format!("Undid: {label}")),

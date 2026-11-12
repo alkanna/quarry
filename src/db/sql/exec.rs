@@ -519,7 +519,7 @@ impl Db {
 
     /// `meta`, and on PostgreSQL with `schema` as the search_path of the read when `in_schema` is set. The catalog prints a
     /// type, function or sequence unqualified only when it is on the path, so a read made under the path the statements
-    /// will run under (see `ddl_pg`) is text that resolves the same way when it is written back.
+    /// will run under (see `pg::ddl`) is text that resolves the same way when it is written back.
     pub(super) fn meta_with<'a, const N: usize>(&'a self, schema: &'a str, sql: &str, params: [&str; N], in_schema: bool) -> impl std::future::Future<Output = Res<Vec<SqlRow>>> + Send + use<'a, N> {
         let path = if in_schema && self.dialect == Dialect::Postgres { self.pg_set_path(schema) } else { String::new() };
         // The values are taken by value and copied before the first await. A borrowed `&[a, b]` would live across the
@@ -549,7 +549,7 @@ impl Db {
                         // Behind a pooler the session carries no settings, so a read sets them for its own transaction.
                         async {
                             let mut conn = pool.acquire().await?;
-                            let r = super::pg_read::in_read_only(&mut conn, self, &path, async move |tx| q.fetch_all(&mut *tx).await).await;
+                            let r = super::pg::read::in_read_only(&mut conn, self, &path, async move |tx| q.fetch_all(&mut *tx).await).await;
                             if r.is_err() {
                                 conn.close_on_drop();
                             }

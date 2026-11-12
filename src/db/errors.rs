@@ -434,7 +434,7 @@ fn name_mismatch(raw: &str) -> Option<(String, String)> {
 /// A PostgreSQL client certificate problem: the files Quarry reads before connecting, the key rustls finds not to match
 /// the certificate, and the server's refusals. Title and hint, or None when the text is about something else.
 pub fn client_cert_problem(raw: &str) -> Option<(String, String)> {
-    use super::sql::pg_cert::*;
+    use super::sql::pg::cert::*;
     let first = raw.lines().next().unwrap_or(raw).trim();
     let low = first.to_lowercase();
     let tab = "on the connection's TLS tab";
@@ -579,7 +579,7 @@ mod tests {
 
     #[test]
     fn client_certificate_problems_are_told_apart() {
-        use crate::db::sql::pg_cert::*;
+        use crate::db::sql::pg::cert::*;
         let case = |raw: &str| {
             let e = explain(raw, &cx());
             assert_eq!(e.kind, ErrKind::Tls, "{raw}");

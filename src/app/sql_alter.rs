@@ -603,7 +603,7 @@ impl App {
             ui.horizontal(|ui| {
                 if pg {
                     ui.checkbox(&mut f.def.nullable, "Allow NULL");
-                    ui.add_enabled(db::sql::ddl_pg::identity_type(&f.def.ty), egui::Checkbox::new(&mut f.def.auto_increment, "Identity (auto increment)"));
+                    ui.add_enabled(db::sql::pg::ddl::identity_type(&f.def.ty), egui::Checkbox::new(&mut f.def.auto_increment, "Identity (auto increment)"));
                     // An identity is never NULL.
                     if f.def.auto_increment {
                         f.def.nullable = false;

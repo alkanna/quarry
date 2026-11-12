@@ -354,7 +354,7 @@ async fn pg_columns(db: &Db, schema: &str, table: &str) -> Res<Vec<SqlRow>> {
     let mut conn = pools.acquire(db.opts.database()).await?;
     let sql = format!("{}{}", db.dialect.columns(), db.dialect.all_rows());
     let t = Instant::now();
-    let res = super::pg_read::in_read_only(&mut conn, db, "SET LOCAL search_path = pg_catalog", async |c| sqlx::query(&sql).persistent(false).bind(schema).bind(table).fetch_all(c).await).await;
+    let res = super::pg::read::in_read_only(&mut conn, db, "SET LOCAL search_path = pg_catalog", async |c| sqlx::query(&sql).persistent(false).bind(schema).bind(table).fetch_all(c).await).await;
     db.note(schema, &sql, t, &res);
     if res.is_err() {
         conn.close_on_drop();
@@ -532,7 +532,7 @@ async fn pg_field_values(db: &Db, schema: &str, table: &str, column: &str, prefi
         let short = super::pg::set_timeout("300");
         if est.is_none() && !leads {
             let sql = format!("SELECT count(*)::text FROM (SELECT 1 FROM {} LIMIT {}) AS q", d.qualified(schema, table), VALUES_SMALL + 1);
-            match super::pg_read::in_read_only(pc, db, &short, async |c| c.fetch_all(sql.as_str()).await).await {
+            match super::pg::read::in_read_only(pc, db, &short, async |c| c.fetch_all(sql.as_str()).await).await {
                 Ok(rows) if rows.first().and_then(|r| r.try_get::<String, _>(0).ok()).and_then(|n| n.parse::<u64>().ok()).is_some_and(|n| n <= VALUES_SMALL) => {}
                 // Too big to group, or too slow to tell.
                 _ => return Ok(None),
@@ -541,7 +541,7 @@ async fn pg_field_values(db: &Db, schema: &str, table: &str, column: &str, prefi
         let sql = d.value_counts(schema, table, column, prefix.is_some(), 201);
         let pattern = prefix.map(|p| format!("{}%", super::rules::like_escape(p)));
         let t = Instant::now();
-        let rows = super::pg_read::in_read_only(pc, db, &short, async |c| {
+        let rows = super::pg::read::in_read_only(pc, db, &short, async |c| {
             let mut q = sqlx::query(&sql).persistent(false);
             if let Some(p) = &pattern {
                 q = q.bind(p.as_str());
@@ -607,7 +607,7 @@ impl Worker {
             let mut info = None;
             let res = open_full(&uri, timeout, &net, &adv, true).await.and_then(|(db, _, t, ti)| {
                 let refused = ti.setting_errors.len();
-                let cert = super::pg_cert::test_note(&uri, &ti.client_dn, db.tls, matches!(t, Some(crate::db::Way::CloudSql(_))));
+                let cert = super::pg::cert::test_note(&uri, &ti.client_dn, db.tls, matches!(t, Some(crate::db::Way::CloudSql(_))));
                 info = Some(ti);
                 if refused > 0 {
                     return Err(format!("Connected, but the server refused {refused} {}. See the marked rows on the Advanced tab.", if refused == 1 { "setting" } else { "settings" }));

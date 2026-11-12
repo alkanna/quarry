@@ -174,7 +174,7 @@ pub struct Done {
 #[allow(clippy::too_many_arguments)]
 pub async fn run(db: &Db, schema: &str, table: &str, plan: &ImportPlan, conn: u64, read_only: bool, prog: &Progress, cancel: &AtomicBool, id: &AtomicU64) -> Res<Done> {
     if db.dialect == Dialect::Postgres {
-        return super::import_pg::run(db, schema, table, plan, conn, read_only, prog, cancel, id).await;
+        return super::pg::import::run(db, schema, table, plan, conn, read_only, prog, cancel, id).await;
     }
     let targets = plan.map.targets();
     if targets.is_empty() {

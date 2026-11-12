@@ -6,7 +6,7 @@
 //! `user:password@host:port` of an SSH server that reaches the PostgreSQL server as db.example.test and pg.other.test, and
 //! the MySQL one as mysql.example.test and my.other.test. Commands in docs/sql/POSTGRES.md Verification.
 
-use super::{Addr, SslMode};
+use crate::db::sql::{Addr, SslMode};
 use crate::db::{ErrCtx, Msg, Net, Worker, explain};
 use std::time::Duration;
 

@@ -13,14 +13,14 @@
 //! DDL is transactional here, which MySQL's is not: a plan and its undo each run as one transaction that takes the
 //! table's lock, reads the touched columns and indexes again and refuses to run when another session changed them.
 
-use super::ddl::{fk_line, orphan_row, orphan_sample_sql, orphans_sql, ref_state, same_name, snapshot, touched, undo_action, undo_loss, AlterUndo, Change, ColDef, Dv, Expect, IndexDef, IndexKind, Mode, Plan, Pos, RefCheck, Sim, ORPHAN_SAMPLE};
-use super::exec::{sql_state, Tx};
-use super::lex::{every_reading, Tok};
-use super::structure::{col_deps, columns, constraints, foreign_keys, indexes, load, Column, ForeignKey, Structure};
-use super::value::{lit, pg_lit, Param};
-use super::write::PgIds;
-use super::pg::LOCK_WAIT_SECS;
-use super::{se, write, Db, Dialect};
+use crate::db::sql::ddl::{fk_line, orphan_row, orphan_sample_sql, orphans_sql, ref_state, same_name, snapshot, touched, undo_action, undo_loss, AlterUndo, Change, ColDef, Dv, Expect, IndexDef, IndexKind, Mode, Plan, Pos, RefCheck, Sim, ORPHAN_SAMPLE};
+use crate::db::sql::exec::{sql_state, Tx};
+use crate::db::sql::lex::{every_reading, Tok};
+use crate::db::sql::structure::{col_deps, columns, constraints, foreign_keys, indexes, load, Column, ForeignKey, Structure};
+use crate::db::sql::value::{lit, pg_lit, Param};
+use crate::db::sql::write::PgIds;
+use crate::db::sql::pg::LOCK_WAIT_SECS;
+use crate::db::sql::{se, write, Db, Dialect};
 use crate::db::{Msg, Res, UndoAction, UndoKind, Worker};
 use std::time::Instant;
 
@@ -29,15 +29,15 @@ const D: Dialect = Dialect::Postgres;
 /// PostgreSQL cuts a longer name without a word, so the staged name would not be the one the server keeps.
 const MAX_NAME: usize = 63;
 
-pub(super) fn q(name: &str) -> String {
+pub(in crate::db::sql) fn q(name: &str) -> String {
     D.quote_ident(name)
 }
 
-pub(super) fn qn(schema: &str, name: &str) -> String {
+pub(in crate::db::sql) fn qn(schema: &str, name: &str) -> String {
     D.qualified(schema, name)
 }
 
-pub(super) fn name_ok(name: &str, what: &str) -> Result<(), String> {
+pub(in crate::db::sql) fn name_ok(name: &str, what: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err(format!("{what} needs a name."));
     }
@@ -142,7 +142,7 @@ fn scan(s: &str, what: Text) -> Result<(), String> {
 }
 
 /// A default expression typed by the person must stay one expression. See `scan`.
-pub(super) fn check_expr_pg(s: &str) -> Result<(), String> {
+pub(in crate::db::sql) fn check_expr_pg(s: &str) -> Result<(), String> {
     scan(s, Text::Expr)
 }
 
@@ -155,14 +155,14 @@ pub fn check_cond_pg(s: &str) -> Result<(), String> {
 /// because the server runs it on every row written later. See `scan`.
 pub fn check_constraint_pg(s: &str) -> Result<(), String> {
     scan(s, Text::Check)?;
-    match super::lex::refused_call(s) {
+    match crate::db::sql::lex::refused_call(s) {
         Some(f) => Err(format!("The CHECK expression calls {f}, which acts outside the row and is refused.")),
         None => Ok(()),
     }
 }
 
 /// A column type typed by the person must stay one type name. See `scan`.
-pub(super) fn check_type_pg(s: &str) -> Result<(), String> {
+pub(in crate::db::sql) fn check_type_pg(s: &str) -> Result<(), String> {
     scan(s, Text::Type)
 }
 
@@ -213,7 +213,7 @@ fn auto_of(c: &ColDef) -> Auto {
 
 /// A column as the catalog read gives it. A stored generated column is refused: it has an expression this definition does
 /// not hold, and rewriting it would lose it.
-pub(super) fn col_def(c: &Column) -> Result<ColDef, String> {
+pub(in crate::db::sql) fn col_def(c: &Column) -> Result<ColDef, String> {
     if c.extra.contains("GENERATED ALWAYS AS (") {
         return Err(format!("Column {} is a generated column. Edit it with a query.", c.name));
     }
@@ -339,7 +339,7 @@ fn check_col(def: &ColDef) -> Result<(), String> {
 
 /// What follows a column's name when it is made, in ALTER TABLE .. ADD COLUMN and in CREATE TABLE alike: type, collation, then
 /// the identity, the serial type or the default and NOT NULL. Checked first, so a bad definition never reaches the server.
-pub(super) fn col_body(def: &ColDef) -> Result<String, String> {
+pub(in crate::db::sql) fn col_body(def: &ColDef) -> Result<String, String> {
     check_col(def)?;
     let ty = type_of(def)?;
     let collate = collate(&def.collation);
@@ -355,7 +355,7 @@ pub(super) fn col_body(def: &ColDef) -> Result<String, String> {
     })
 }
 
-pub(super) fn comment_stmt(on: &str, text: &str) -> Result<String, String> {
+pub(in crate::db::sql) fn comment_stmt(on: &str, text: &str) -> Result<String, String> {
     if text.contains('\0') {
         return Err("A comment cannot hold a NUL character.".into());
     }
@@ -432,7 +432,7 @@ fn add_index(schema: &str, table: &str, ix: &IndexDef) -> Result<Vec<String>, St
 }
 
 /// The statements of one change, written against the table as it is before the change (`sim`).
-pub(super) fn statements(sim: &Sim, schema: &str, table: &str, c: &Change) -> Result<Vec<String>, String> {
+pub(in crate::db::sql) fn statements(sim: &Sim, schema: &str, table: &str, c: &Change) -> Result<Vec<String>, String> {
     let t = D.qualified(schema, table);
     let alter = format!("ALTER TABLE {t}");
     Ok(match c {
@@ -546,7 +546,7 @@ fn add_fk_head(schema: &str, table: &str, name: &str) -> String {
 
 /// What follows a key's own columns: the parent, the match type, the actions and whether it is deferrable. The parent is always
 /// written with its schema, the key's own `ref_db` or else `schema`. ADD CONSTRAINT and CREATE TABLE write the same text.
-pub(super) fn fk_refs(schema: &str, k: &ForeignKey) -> Result<String, String> {
+pub(in crate::db::sql) fn fk_refs(schema: &str, k: &ForeignKey) -> Result<String, String> {
     name_ok(&k.ref_table, "The referenced table")?;
     if !k.ref_db.is_empty() {
         name_ok(&k.ref_db, "The referenced schema")?;
@@ -698,7 +698,7 @@ fn case_clash(st: &Structure) -> Option<String> {
 }
 
 /// The plan: the statements, what the undo is (or why there is none), and what the table must look like to run it.
-pub(super) fn plan(table: &str, st: &Structure, changes: &[Change]) -> Result<Plan, String> {
+pub(in crate::db::sql) fn plan(table: &str, st: &Structure, changes: &[Change]) -> Result<Plan, String> {
     let schema = st.pg_schema.as_deref().ok_or("The structure has no schema.")?;
     if changes.is_empty() {
         return Err("Nothing is staged.".into());
@@ -731,7 +731,7 @@ pub(super) fn plan(table: &str, st: &Structure, changes: &[Change]) -> Result<Pl
 }
 
 /// Every index, constraint and dependent of the table in one comparable list.
-pub(super) fn table_state(st: &Structure) -> Vec<String> {
+pub(in crate::db::sql) fn table_state(st: &Structure) -> Vec<String> {
     let mut v: Vec<String> = st.indexes.iter().map(|i| format!("index {}|{}|{}|{}|{}|{}|{}", i.name, i.def, i.comment, i.deferrable, i.deferred, i.con_comment, i.complex)).collect();
     v.extend(st.constraints.iter().map(|c| format!("constraint {}|{}|{}", c.name, c.kind, c.def)));
     v.extend(st.pg_deps.iter().map(|d| format!("depends {}|{}|{}|{}", d.col, d.kind, d.name, d.own)));
@@ -741,8 +741,8 @@ pub(super) fn table_state(st: &Structure) -> Vec<String> {
 
 /// Whether a default expression calls a function, which is the case that can be volatile. A name preceded by `::` is a
 /// type, and the keywords that look like calls are not counted.
-pub(super) fn calls_function(expr: &str) -> bool {
-    let toks: Vec<(Tok, std::ops::Range<usize>)> = super::lex::nth_reading(expr, D, 0).into_iter().filter(|(t, _)| *t != Tok::Space).collect();
+pub(in crate::db::sql) fn calls_function(expr: &str) -> bool {
+    let toks: Vec<(Tok, std::ops::Range<usize>)> = crate::db::sql::lex::nth_reading(expr, D, 0).into_iter().filter(|(t, _)| *t != Tok::Space).collect();
     toks.windows(2).enumerate().any(|(i, w)| {
         let name = &expr[w[0].1.clone()];
         let after_cast = i > 0 && expr[toks[i - 1].1.clone()].ends_with(':');
@@ -771,7 +771,7 @@ fn undo_of(schema: &str, table: &str, before: &Structure, changes: &[Change]) ->
 
 /// Why a plan did not run: the table is no longer as the plan saw it (nothing ran), a statement failed (the transaction
 /// was rolled back, so nothing ran either), or the COMMIT failed, which leaves it unknown whether the server applied it.
-pub(super) enum Fail {
+pub(in crate::db::sql) enum Fail {
     Changed(String),
     Run(String),
     Unknown(String),
@@ -779,17 +779,17 @@ pub(super) enum Fail {
 
 /// The structure as the catalogs give it inside the transaction, which holds the table's lock by now. The search_path is
 /// already the schema's, as it was for the read the plan was made from, so the two print the same text.
-pub(super) async fn read_in(tx: &mut Tx<'_>, schema: &str, table: &str) -> Res<Structure> {
+pub(in crate::db::sql) async fn read_in(tx: &mut Tx<'_>, schema: &str, table: &str) -> Res<Structure> {
     let args = [Param::Text(schema.into()), Param::Text(table.into())];
     let cols = tx.fetch_bound(D.columns(), &args).await.map_err(se)?;
     let idx = tx.fetch_bound(D.indexes(), &args).await.map_err(se)?;
     let fks = tx.fetch_bound(D.foreign_keys(), &args).await.map_err(se)?;
-    let cons = tx.fetch_bound(super::pg_catalog::CONSTRAINTS, &args).await.map_err(se)?;
-    let deps = tx.fetch_bound(super::pg_catalog::COLUMN_DEPS, &args).await.map_err(se)?;
+    let cons = tx.fetch_bound(crate::db::sql::pg::catalog::CONSTRAINTS, &args).await.map_err(se)?;
+    let deps = tx.fetch_bound(crate::db::sql::pg::catalog::COLUMN_DEPS, &args).await.map_err(se)?;
     Ok(Structure { columns: columns(D, &cols), indexes: indexes(&idx), foreign_keys: foreign_keys(&fks), constraints: constraints(&cons), pg_deps: col_deps(&deps), pg_schema: Some(schema.into()), ..Default::default() })
 }
 
-pub(super) async fn exec(tx: &mut Tx<'_>, db: &Db, schema: &str, sql: &str) -> Result<(), sqlx::Error> {
+pub(in crate::db::sql) async fn exec(tx: &mut Tx<'_>, db: &Db, schema: &str, sql: &str) -> Result<(), sqlx::Error> {
     let t = Instant::now();
     let res = tx.exec_bound(sql, &[]).await;
     db.note(schema, sql, t, &res);
@@ -797,31 +797,31 @@ pub(super) async fn exec(tx: &mut Tx<'_>, db: &Db, schema: &str, sql: &str) -> R
 }
 
 /// A `SET LOCAL` through `exec`, so the status log shows it, and it ends with the transaction.
-pub(super) async fn set_local(tx: &mut Tx<'_>, db: &Db, schema: &str, name: &str, value: &str) -> Result<(), sqlx::Error> {
+pub(in crate::db::sql) async fn set_local(tx: &mut Tx<'_>, db: &Db, schema: &str, name: &str, value: &str) -> Result<(), sqlx::Error> {
     exec(tx, db, schema, &format!("SET LOCAL {name} = '{}'", value.replace('\'', "''"))).await
 }
 
 /// The search_path the plan was made under, for the read and for every statement after it, so a type or function outside the
 /// schema is qualified in the one and found by the other.
-pub(super) async fn set_path(tx: &mut Tx<'_>, db: &Db, schema: &str) -> Result<(), sqlx::Error> {
+pub(in crate::db::sql) async fn set_path(tx: &mut Tx<'_>, db: &Db, schema: &str) -> Result<(), sqlx::Error> {
     exec(tx, db, schema, &db.pg_set_path(schema)).await
 }
 
 /// The lock timeout of a structure change, a trigger edit or a create: a session that holds the lock longer is named in the
 /// error, and nothing ran.
-pub(super) async fn set_lock_wait(tx: &mut Tx<'_>, db: &Db, schema: &str) -> Result<(), sqlx::Error> {
+pub(in crate::db::sql) async fn set_lock_wait(tx: &mut Tx<'_>, db: &Db, schema: &str) -> Result<(), sqlx::Error> {
     set_local(tx, db, schema, "lock_timeout", &format!("{LOCK_WAIT_SECS}s")).await
 }
 
 /// The error for a COMMIT that failed. The connection can drop after the server committed, so it does not say that nothing
 /// changed. `next` is what to do about it, which depends on the screen the change came from.
-pub(super) fn commit_unknown(err: sqlx::Error, next: &str) -> String {
+pub(in crate::db::sql) fn commit_unknown(err: sqlx::Error, next: &str) -> String {
     format!("{}. The server did not confirm the commit, so the change may or may not have been applied. {next}", se(err))
 }
 
-pub(super) const RELOAD_STRUCTURE: &str = "The structure is being reloaded: check it before running the change again.";
+pub(in crate::db::sql) const RELOAD_STRUCTURE: &str = "The structure is being reloaded: check it before running the change again.";
 
-pub(super) fn lock_error(err: &sqlx::Error, name: &str) -> Option<String> {
+pub(in crate::db::sql) fn lock_error(err: &sqlx::Error, name: &str) -> Option<String> {
     // 55P03 is lock_not_available, which lock_timeout raises.
     (sql_state(err)? == "55P03").then(|| crate::db::errors::lock_held(name, LOCK_WAIT_SECS))
 }
@@ -832,7 +832,7 @@ pub(super) fn lock_error(err: &sqlx::Error, name: &str) -> Option<String> {
 /// skips the explicit lock, and the statement takes its own under the same lock_timeout. A table that is not there answers true, so
 /// the LOCK reports it gone. `plain_only` is for a trigger edit: a view's lock would reach the tables under it and a foreign table
 /// cannot be locked, so anything but a plain table answers false. One query answers for all of them.
-pub(super) async fn may_lock(tx: &mut Tx<'_>, tables: &[(&str, bool)]) -> Vec<bool> {
+pub(in crate::db::sql) async fn may_lock(tx: &mut Tx<'_>, tables: &[(&str, bool)]) -> Vec<bool> {
     if tables.is_empty() {
         return Vec::new();
     }
@@ -842,21 +842,21 @@ pub(super) async fn may_lock(tx: &mut Tx<'_>, tables: &[(&str, bool)]) -> Vec<bo
     let mut out = vec![true; tables.len()];
     if let Ok(rows) = tx.fetch_bound(&sql, &params).await {
         for r in &rows {
-            let Some(i) = super::structure::num(r, "ord").and_then(|o| usize::try_from(o - 1).ok()).filter(|i| *i < tables.len()) else { continue };
-            let plain = super::worker::text(r, "k").is_none_or(|k| k == "r");
-            out[i] = if tables[i].1 && !plain { false } else { super::structure::num(r, "n").is_none_or(|n| n != 0) };
+            let Some(i) = crate::db::sql::structure::num(r, "ord").and_then(|o| usize::try_from(o - 1).ok()).filter(|i| *i < tables.len()) else { continue };
+            let plain = crate::db::sql::worker::text(r, "k").is_none_or(|k| k == "r");
+            out[i] = if tables[i].1 && !plain { false } else { crate::db::sql::structure::num(r, "n").is_none_or(|n| n != 0) };
         }
     }
     out
 }
 
 /// One table of `may_lock`'s question.
-pub(super) async fn may_lock_one(tx: &mut Tx<'_>, name: &str) -> bool {
+pub(in crate::db::sql) async fn may_lock_one(tx: &mut Tx<'_>, name: &str) -> bool {
     may_lock(tx, &[(name, false)]).await[0]
 }
 
 /// A table a transaction locks before it reads or changes anything.
-pub(super) struct Lock {
+pub(in crate::db::sql) struct Lock {
     pub name: String,
     pub mode: &'static str,
     /// Only a plain table is locked (`may_lock`).
@@ -869,7 +869,7 @@ pub(super) struct Lock {
 /// two that share tables never wait on each other in a circle), with the lock timeout of `set_lock_wait` so a busy table fails the
 /// plan instead of queueing behind it. A lock the role may not take is skipped (`may_lock`). The commit is the last thing: a
 /// failure of the body rolls back, and a failed COMMIT is `Fail::Unknown`, with `next` saying what to do about it.
-pub(super) async fn run_locked<T>(db: &Db, scope: &str, read_only: bool, locks: &[Lock], next: &str, body: impl AsyncFnOnce(&mut Tx<'_>) -> Result<T, Fail>) -> Result<T, Fail> {
+pub(in crate::db::sql) async fn run_locked<T>(db: &Db, scope: &str, read_only: bool, locks: &[Lock], next: &str, body: impl AsyncFnOnce(&mut Tx<'_>) -> Result<T, Fail>) -> Result<T, Fail> {
     let mut conn = write::writer_conn(db, scope, read_only).await.map_err(Fail::Run)?;
     let mut tx = conn.begin_write(db).await.map_err(|e| Fail::Run(se(e)))?;
     let out = async {
@@ -903,7 +903,7 @@ pub(super) async fn run_locked<T>(db: &Db, scope: &str, read_only: bool, locks: 
 
 /// The note for a plan that did not run. `changed` words a refusal because the objects were not as expected, which reads
 /// differently for each feature and for an undo.
-pub(super) fn fail_text(f: Fail, changed: impl FnOnce(&str) -> String) -> String {
+pub(in crate::db::sql) fn fail_text(f: Fail, changed: impl FnOnce(&str) -> String) -> String {
     match f {
         Fail::Run(e) | Fail::Unknown(e) => e,
         Fail::Changed(what) => changed(&what),
@@ -913,25 +913,25 @@ pub(super) fn fail_text(f: Fail, changed: impl FnOnce(&str) -> String) -> String
 /// The database and table oids as the transaction sees them, which the undo checks before it acts (`check_ids`). Read before the
 /// COMMIT, so a drop and create under the same name right after it cannot be mistaken for this change's table. Empty when they
 /// cannot be read, which only skips the later check; a write is never refused over it.
-pub(super) async fn ids_in(tx: &mut Tx<'_>, schema: &str, table: &str) -> PgIds {
+pub(in crate::db::sql) async fn ids_in(tx: &mut Tx<'_>, schema: &str, table: &str) -> PgIds {
     if !matches!(tx, Tx::Pg(_)) {
         return PgIds::default();
     }
     let sql = "SELECT (SELECT oid::text FROM pg_database WHERE datname = current_database()) AS d, to_regclass($1)::oid::text AS t";
     let rows = tx.fetch_bound(sql, &[Param::Text(D.qualified(schema, table))]).await.unwrap_or_default();
-    PgIds { db: rows.first().and_then(|r| super::worker::text(r, "d")).unwrap_or_default(), table: rows.first().and_then(|r| super::worker::text(r, "t")).unwrap_or_default() }
+    PgIds { db: rows.first().and_then(|r| crate::db::sql::worker::text(r, "d")).unwrap_or_default(), table: rows.first().and_then(|r| crate::db::sql::worker::text(r, "t")).unwrap_or_default() }
 }
 
 /// The first of `types` the server does not know as a type name, or None. PostgreSQL before 16 raises an error for text that is
 /// not a type name and later ones answer NULL, so a failed batch is taken back to a savepoint and asked one by one.
-pub(super) async fn unknown_type(tx: &mut Tx<'_>, types: &[String]) -> Option<String> {
+pub(in crate::db::sql) async fn unknown_type(tx: &mut Tx<'_>, types: &[String]) -> Option<String> {
     if types.len() > 1 && tx.exec_bound("SAVEPOINT quarry_types", &[]).await.is_ok() {
         let values = (1..=types.len()).map(|i| format!("(${i}::text, {i})")).collect::<Vec<_>>().join(", ");
         let params: Vec<Param> = types.iter().map(|t| Param::Text(t.clone())).collect();
         match tx.fetch_bound(&format!("SELECT s.ord::bigint AS ord, to_regtype(s.v)::text AS t FROM (VALUES {values}) AS s(v, ord)"), &params).await {
             Ok(rows) => {
                 let _ = tx.exec_bound("RELEASE SAVEPOINT quarry_types", &[]).await;
-                let bad = rows.iter().filter(|r| super::worker::text(r, "t").is_none()).filter_map(|r| super::structure::num(r, "ord")).min();
+                let bad = rows.iter().filter(|r| crate::db::sql::worker::text(r, "t").is_none()).filter_map(|r| crate::db::sql::structure::num(r, "ord")).min();
                 return bad.and_then(|o| types.get(usize::try_from(o - 1).ok()?).cloned());
             }
             Err(_) => {
@@ -942,7 +942,7 @@ pub(super) async fn unknown_type(tx: &mut Tx<'_>, types: &[String]) -> Option<St
     }
     for ty in types {
         let said = tx.fetch_bound("SELECT to_regtype($1)::text AS t", &[Param::Text(ty.clone())]).await;
-        if said.ok().and_then(|rows| rows.first().and_then(|r| super::worker::text(r, "t"))).is_none() {
+        if said.ok().and_then(|rows| rows.first().and_then(|r| crate::db::sql::worker::text(r, "t"))).is_none() {
             return Some(ty.clone());
         }
     }
@@ -954,7 +954,7 @@ pub(super) async fn unknown_type(tx: &mut Tx<'_>, types: &[String]) -> Option<St
 /// shown then. The transaction is at the savepoint before the key was added, where the rows are as the server saw them.
 async fn orphan_message(tx: &mut Tx<'_>, schema: &str, table: &str, fk: &ForeignKey, undo: bool) -> Option<String> {
     let rows = tx.fetch_bound(&orphans_sql(D, schema, table, fk), &[]).await.ok()?;
-    let n = rows.first().and_then(|r| super::structure::num(r, "n")).unwrap_or(0);
+    let n = rows.first().and_then(|r| crate::db::sql::structure::num(r, "n")).unwrap_or(0);
     if n == 0 {
         return None;
     }
@@ -977,7 +977,7 @@ async fn orphan_message(tx: &mut Tx<'_>, schema: &str, table: &str, fk: &Foreign
 /// Runs `steps` as one transaction: the lock first, with a timeout so a busy table fails the plan instead of queueing
 /// behind it, then the check that the touched columns and indexes are as `expect` says, then the statements, then COMMIT.
 /// Any failure leaves the transaction to roll back. Returns the ids the undo will check, read before the COMMIT.
-pub(super) async fn run(db: &Db, schema: &str, table: &str, steps: &[String], expect: &Expect, read_only: bool, undo: bool) -> Result<PgIds, Fail> {
+pub(in crate::db::sql) async fn run(db: &Db, schema: &str, table: &str, steps: &[String], expect: &Expect, read_only: bool, undo: bool) -> Result<PgIds, Fail> {
     // The changed table and the other tables of its keys, in one fixed order. A key takes a lock on both of its tables, and
     // the parent can be changed by another session between the plan and here, so it is locked before it is read.
     let locks: Vec<Lock> = lock_order(schema, table, expect.own_share, &expect.refs)
@@ -1079,7 +1079,7 @@ fn action(db: &Db, conn: u64, schema: &str, table: &str, u: AlterUndo, ids: PgId
 }
 
 /// Runs a recorded undo in one transaction, after the same check as an apply against how the change left the table.
-pub(super) async fn undo(db: &Db, a: UndoAction, u: AlterUndo, read_only: bool) -> Msg {
+pub(in crate::db::sql) async fn undo(db: &Db, a: UndoAction, u: AlterUndo, read_only: bool) -> Msg {
     let ids = match &a.kind {
         UndoKind::Sql { ids, .. } => ids.clone(),
         _ => PgIds::default(),
@@ -1175,7 +1175,7 @@ mod tests {
     }
 
     fn col(name: &str, ty: &str) -> Column {
-        Column { name: name.into(), full_type: ty.into(), nullable: true, kind: Some(super::super::value::Kind::Text), ..Default::default() }
+        Column { name: name.into(), full_type: ty.into(), nullable: true, kind: Some(crate::db::sql::value::Kind::Text), ..Default::default() }
     }
 
     fn index(name: &str, def: &str, cols: &[&str]) -> Index {
@@ -1223,7 +1223,7 @@ mod tests {
         let mut notnull = def("note", "text");
         notnull.nullable = false;
         assert_eq!(steps(&[Change::Modify { from: "note".into(), def: notnull, pos: Pos::Keep }]), [format!("ALTER TABLE {t} ALTER COLUMN \"note\" SET NOT NULL")]);
-        let ix = IndexDef { name: "t_note".into(), kind: IndexKind::Unique, cols: vec![super::super::ddl::IdxCol { name: "note".into(), prefix: None, desc: true }], comment: "by note".into(), ..Default::default() };
+        let ix = IndexDef { name: "t_note".into(), kind: IndexKind::Unique, cols: vec![crate::db::sql::ddl::IdxCol { name: "note".into(), prefix: None, desc: true }], comment: "by note".into(), ..Default::default() };
         assert_eq!(steps(&[Change::AddIndex(ix)]), [format!("CREATE UNIQUE INDEX \"t_note\" ON {t} (\"note\" DESC)"), "COMMENT ON INDEX \"public\".\"t_note\" IS 'by note'".to_string()]);
         assert_eq!(steps(&[Change::DropIndex("t_name".into())]), ["DROP INDEX \"public\".\"t_name\"".to_string()]);
         assert_eq!(steps(&[Change::DropIndex("t_pkey".into())]), [format!("ALTER TABLE {t} DROP CONSTRAINT \"t_pkey\"")]);
@@ -1268,7 +1268,7 @@ mod tests {
         unsigned.unsigned = true;
         assert!(here(Change::Add { def: unsigned, pos: Pos::Keep }).contains("unsigned"));
         assert!(here(Change::AddFk(Default::default())).contains("needs a name"));
-        let spatial = IndexDef { name: "g".into(), kind: IndexKind::Fulltext, cols: vec![super::super::ddl::IdxCol { name: "note".into(), prefix: None, desc: false }], ..Default::default() };
+        let spatial = IndexDef { name: "g".into(), kind: IndexKind::Fulltext, cols: vec![crate::db::sql::ddl::IdxCol { name: "note".into(), prefix: None, desc: false }], ..Default::default() };
         assert!(here(Change::AddIndex(spatial)).contains("FULLTEXT"));
         let mut hostile = def("x", "integer; DROP TABLE t");
         assert!(here(Change::Add { def: hostile.clone(), pos: Pos::Keep }).contains("type"));
@@ -1289,7 +1289,7 @@ mod tests {
 
     #[test]
     fn a_primary_key_undo_gives_back_nullability() {
-        let ix = IndexDef { name: "t_note_pkey".into(), kind: IndexKind::Primary, cols: vec![super::super::ddl::IdxCol { name: "note".into(), prefix: None, desc: false }], ..Default::default() };
+        let ix = IndexDef { name: "t_note_pkey".into(), kind: IndexKind::Primary, cols: vec![crate::db::sql::ddl::IdxCol { name: "note".into(), prefix: None, desc: false }], ..Default::default() };
         let mut st = table();
         st.indexes.remove(0);
         let p = plan("t", &st, &[Change::AddIndex(ix)]).unwrap();
@@ -1312,7 +1312,7 @@ mod tests {
 
     #[test]
     fn a_constraint_is_added_back_deferrable_with_its_comment() {
-        let ix = IndexDef { name: "t_u".into(), kind: IndexKind::Unique, constraint: true, deferrable: true, deferred: true, con_comment: "one per name".into(), cols: vec![super::super::ddl::IdxCol { name: "name".into(), prefix: None, desc: false }], ..Default::default() };
+        let ix = IndexDef { name: "t_u".into(), kind: IndexKind::Unique, constraint: true, deferrable: true, deferred: true, con_comment: "one per name".into(), cols: vec![crate::db::sql::ddl::IdxCol { name: "name".into(), prefix: None, desc: false }], ..Default::default() };
         assert_eq!(steps(&[Change::AddIndex(ix.clone())]), ["ALTER TABLE \"public\".\"t\" ADD CONSTRAINT \"t_u\" UNIQUE (\"name\") DEFERRABLE INITIALLY DEFERRED".to_string(), "COMMENT ON CONSTRAINT \"t_u\" ON \"public\".\"t\" IS 'one per name'".to_string()]);
         assert_eq!(steps(&[Change::AddIndex(IndexDef { deferred: false, con_comment: String::new(), ..ix.clone() })]), ["ALTER TABLE \"public\".\"t\" ADD CONSTRAINT \"t_u\" UNIQUE (\"name\") DEFERRABLE".to_string()]);
         assert!(plan("t", &table(), &[Change::AddIndex(IndexDef { constraint: false, ..ix })]).is_err(), "a plain index cannot be deferred");
@@ -1351,12 +1351,12 @@ mod tests {
     fn a_function_default_on_a_table_with_rows_is_warned_about() {
         let mut st = table();
         let with = |d: Dv| vec![Change::Add { def: ColDef { default: d, ..def("tok", "uuid") }, pos: Pos::Keep }];
-        assert!(super::super::ddl::warnings(&st, &with(Dv::Expr("gen_random_uuid()".into()))).is_empty(), "no rows known, nothing to rewrite");
+        assert!(crate::db::sql::ddl::warnings(&st, &with(Dv::Expr("gen_random_uuid()".into()))).is_empty(), "no rows known, nothing to rewrite");
         st.status.rows = Some(3);
-        let w = super::super::ddl::warnings(&st, &with(Dv::Expr("gen_random_uuid()".into())));
+        let w = crate::db::sql::ddl::warnings(&st, &with(Dv::Expr("gen_random_uuid()".into())));
         assert!(w.iter().any(|x| x.contains("once for each of the table's rows") && x.contains("exclusive lock")), "{w:?}");
-        assert!(super::super::ddl::warnings(&st, &with(Dv::Expr("'x'::text".into()))).is_empty());
-        assert!(super::super::ddl::warnings(&st, &with(Dv::Value("x".into()))).is_empty());
+        assert!(crate::db::sql::ddl::warnings(&st, &with(Dv::Expr("'x'::text".into()))).is_empty());
+        assert!(crate::db::sql::ddl::warnings(&st, &with(Dv::Value("x".into()))).is_empty());
     }
 
     #[test]

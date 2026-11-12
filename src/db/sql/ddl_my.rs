@@ -1,5 +1,5 @@
 //! The MySQL and MariaDB text of a structure change: one ALTER TABLE for the staged `Change`s. The shared types,
-//! the simulation and the undo are in `ddl`; PostgreSQL has its own emitter in `ddl_pg`.
+//! the simulation and the undo are in `ddl`; PostgreSQL has its own emitter in `pg::ddl`.
 
 use super::ddl::{check_expr, check_ident, is_binary, is_geometry, is_hex_lit, is_bit_lit, is_integer, is_number, is_numeric, is_text, parse_values, Change, ColDef, Dv, IndexDef, IndexKind, Mode, Pos, FK_ACTIONS};
 use super::structure::ForeignKey;

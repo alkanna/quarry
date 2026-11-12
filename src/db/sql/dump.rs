@@ -245,7 +245,7 @@ fn delimited(sql_mode: Option<&str>, stmt: &str) -> String {
 /// Runs the whole dump on a read-only connection of its own.
 pub async fn dump(db: &Db, plan: &DumpPlan, out: &mut (dyn Write + Send), count: &AtomicU64, cancel: &AtomicBool, id: &AtomicU64) -> Res<u64> {
     if db.dialect == Dialect::Postgres {
-        return super::pg_dump::dump(db, plan, out, count, cancel, id).await;
+        return super::pg::dump::dump(db, plan, out, count, cancel, id).await;
     }
     let d = db.dialect;
     let mut conn = Conn::My(db.acquire().await?.detach());
@@ -402,7 +402,7 @@ pub struct Ran {
 #[allow(clippy::too_many_arguments)]
 pub async fn run_file(db: Db, schema: String, src: Source, read_only: bool, prog: Arc<Progress>, cancel: Arc<AtomicBool>, id: Arc<AtomicU64>) -> Res<Ran> {
     if db.dialect == Dialect::Postgres {
-        return super::pg_dump::run_file(db, schema, src, read_only, prog, cancel, id).await;
+        return super::pg::dump::run_file(db, schema, src, read_only, prog, cancel, id).await;
     }
     let mut c = writer_conn(&db, &schema, read_only).await?.into_my()?;
     if let Ok(r) = c.fetch_one("SELECT CONNECTION_ID()").await {

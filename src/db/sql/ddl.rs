@@ -97,7 +97,7 @@ impl ColDef {
     pub fn from_column(c: &Column) -> Result<ColDef, String> {
         // Only a PostgreSQL column has a catalog kind.
         if c.kind.is_some() {
-            return super::ddl_pg::col_def(c);
+            return super::pg::ddl::col_def(c);
         }
         let extra = c.extra.to_ascii_uppercase().replace("DEFAULT_GENERATED", "");
         if extra.contains("GENERATED") || extra.contains("INVISIBLE") || extra.contains("PERSISTENT") {
@@ -869,7 +869,7 @@ pub struct Expect {
 }
 
 /// PostgreSQL: a table other than the one being changed that a plan locks. A key that is added relies on the referenced
-/// columns and the unique indexes there (`seen` is how they looked, `ddl_pg::ref_state`), and a key that is dropped only
+/// columns and the unique indexes there (`seen` is how they looked, `pg::ddl::ref_state`), and a key that is dropped only
 /// needs the lock, which PostgreSQL takes on both tables of a key.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RefCheck {
@@ -884,7 +884,7 @@ pub struct RefCheck {
 pub fn plan(d: Dialect, version: &str, m: Mode, table: &str, st: &Structure, staged: &[Change]) -> Result<Plan, String> {
     let changes = expand(d, st, staged);
     if d == Dialect::Postgres {
-        return super::ddl_pg::plan(table, st, &changes);
+        return super::pg::ddl::plan(table, st, &changes);
     }
     let sql = alter(d, version, m, table, &changes)?;
     Ok(Plan { steps: vec![sql], undo: undo_of(d, version, m, table, st, &changes), expect: None })
@@ -1080,7 +1080,7 @@ pub fn warnings(before: &Structure, changes: &[Change]) -> Vec<String> {
             }
             Change::Add { def, .. } if before.is_pg() && !def.auto_increment && before.status.rows.is_some_and(|r| r > 0) => {
                 if let Dv::Expr(x) = &def.default {
-                    if super::ddl_pg::calls_function(x) {
+                    if super::pg::ddl::calls_function(x) {
                         out.push(format!("The default of {} calls a function. Any function call is read as volatile here, since the editor does not look the function up. A volatile one runs once for each of the table's rows while PostgreSQL holds an exclusive lock on the table, and again on every later insert.", def.name));
                     }
                 }
@@ -1311,7 +1311,7 @@ pub struct PgDef {
     pub when: String,
     /// tgenabled: O enabled, D disabled, R replica only, A always.
     pub mode: String,
-    /// The name of the function, which a new trigger gets made; empty lets `ddl_pg_trig::func_name` pick one.
+    /// The name of the function, which a new trigger gets made; empty lets `pg::ddl_trig::func_name` pick one.
     pub func: String,
 }
 
@@ -1661,7 +1661,7 @@ pub struct TrigUndo {
     pub label: String,
     /// PostgreSQL: the statements that put the trigger and its function back and the state they rely on. The two fields above
     /// are MySQL's and stay empty then.
-    pub pg: Option<super::ddl_pg_trig::PgUndo>,
+    pub pg: Option<super::pg::ddl_trig::PgUndo>,
 }
 
 /// A trigger change for the worker.
@@ -1739,7 +1739,7 @@ pub(super) fn undo_action(conn: u64, schema: &str, table: &str, u: AlterUndo) ->
 /// applying one; the action comes back for another try only when nothing ran.
 pub(super) async fn undo(db: &Db, a: UndoAction, u: AlterUndo, read_only: bool) -> Msg {
     if db.dialect == Dialect::Postgres {
-        return super::ddl_pg::undo(db, a, u, read_only).await;
+        return super::pg::ddl::undo(db, a, u, read_only).await;
     }
     let UndoAction { at, conn, db: schema, coll: table, .. } = a;
     let (mut ran, mut seen, mut lost) = (0, None, false);
@@ -2006,7 +2006,7 @@ async fn undo_trigger_job(db: &Db, schema: &str, table: &str, u: &TrigUndo, read
 /// safe.
 pub(super) async fn undo_trigger(db: &Db, a: UndoAction, u: TrigUndo, read_only: bool) -> Msg {
     if u.pg.is_some() {
-        return super::ddl_pg_trig::undo(db, a, u, read_only).await;
+        return super::pg::ddl_trig::undo(db, a, u, read_only).await;
     }
     let UndoAction { at, conn, db: schema, coll: table, .. } = a;
     let res = crate::db::sql_scope(db.conn, &schema, undo_trigger_job(db, &schema, &table, &u, read_only)).await;

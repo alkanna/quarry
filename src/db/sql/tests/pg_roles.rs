@@ -3,9 +3,9 @@
 //! an undo, CREATE ROLE and its undo, DROP ROLE across two databases, passwords that never reach the log, a login without
 //! CREATEROLE, and what each version offers. Every role a test makes has a name of its own and is dropped at the end.
 
-use super::roles_pg::*;
-use super::testing::{db_turn, live_pg, live_pg_at, unique_name, LivePg, PgFixture, PGBOUNCER_ENV, PG_ENVS};
-use super::Db;
+use crate::db::sql::pg::roles::*;
+use crate::db::sql::testing::{db_turn, live_pg, live_pg_at, unique_name, LivePg, PgFixture, PGBOUNCER_ENV, PG_ENVS};
+use crate::db::sql::Db;
 use crate::db::{Msg, Res, UndoAction};
 
 /// Each PostgreSQL, and the PgBouncer when `pooler` is set.
@@ -247,7 +247,7 @@ fn in_zone(uri: &str, zone: &str) -> LivePg {
     let (tx, rx) = std::sync::mpsc::channel();
     let w = crate::db::Worker::new(tx, eframe::egui::Context::default());
     let pool = w.rt.block_on(async { sqlx::PgPool::connect(uri).await.unwrap() });
-    let adv = super::advanced::Advanced { zone: super::advanced::Zone::Custom(zone.into()), ..Default::default() };
+    let adv = crate::db::sql::advanced::Advanced { zone: crate::db::sql::advanced::Zone::Custom(zone.into()), ..Default::default() };
     w.sql_connect_with(1, 0, uri.to_string(), std::time::Duration::from_secs(30), crate::db::Net::default(), adv);
     let Msg::SqlConnected { res, .. } = rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap() else { panic!("connect") };
     let (db, dbs, _) = res.unwrap_or_else(|x| panic!("connect: {x}"));
@@ -413,7 +413,7 @@ impl<'a> OtherDb<'a> {
             let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect_with(o).await.unwrap();
             let rows = sqlx::raw_sql(s).fetch_all(&pool).await.unwrap();
             pool.close().await;
-            super::worker::text_at(&rows[0], 0).unwrap_or_default()
+            crate::db::sql::worker::text_at(&rows[0], 0).unwrap_or_default()
         })
     }
 }

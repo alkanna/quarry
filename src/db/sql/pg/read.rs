@@ -1,9 +1,9 @@
 //! What the read path needs of PostgreSQL beyond the catalog queries: running text that carries user SQL inside a
 //! read-only transaction that is always rolled back, and listing the schemas of a database.
 
-use super::se;
-use super::exec::{col_infos, Cells, ColInfo, SqlRow};
-use super::{Db, Dialect, Pool};
+use crate::db::sql::se;
+use crate::db::sql::exec::{col_infos, Cells, ColInfo, SqlRow};
+use crate::db::sql::{Db, Dialect, Pool};
 use crate::db::{Msg, Res, Worker};
 use futures_util::stream::BoxStream;
 use futures_util::StreamExt;
@@ -27,7 +27,7 @@ fn rows_of<'c>(c: &'c mut PgConnection, sql: &'c str) -> BoxStream<'c, Result<Ei
 /// DISCARD ALL does not close a named dblink connection. So when the statement carries text the user typed
 /// (`user_text`) the connection is closed instead of going back to the pool. Statements Quarry built itself keep the
 /// cheap path.
-pub(super) async fn read_only(db: &Db, user_text: bool, extra: &str, sql: &str) -> Result<Vec<PgRow>, sqlx::Error> {
+pub(in crate::db::sql) async fn read_only(db: &Db, user_text: bool, extra: &str, sql: &str) -> Result<Vec<PgRow>, sqlx::Error> {
     let mut conn = db.pg_pool().map_err(sqlx::Error::Protocol)?.acquire().await?;
     let res = in_read_only(&mut conn, db, extra, async |tx| {
         let mut rows = Vec::new();
@@ -49,7 +49,7 @@ pub(super) async fn read_only(db: &Db, user_text: bool, extra: &str, sql: &str) 
 /// Runs `work` inside a `BEGIN READ ONLY` that is always rolled back. The transaction rolls back when it is dropped, so a
 /// future that is cancelled midway leaves nothing open either. A ROLLBACK that fails is returned as the error when the
 /// work succeeded: the connection may then still sit inside the transaction, so the caller must close it, never reuse it.
-pub(super) async fn in_read_only<T>(conn: &mut PgConnection, db: &Db, extra: &str, work: impl AsyncFnOnce(&mut PgConnection) -> Result<T, sqlx::Error>) -> Result<T, sqlx::Error> {
+pub(in crate::db::sql) async fn in_read_only<T>(conn: &mut PgConnection, db: &Db, extra: &str, work: impl AsyncFnOnce(&mut PgConnection) -> Result<T, sqlx::Error>) -> Result<T, sqlx::Error> {
     let mut tx = conn.begin_with(db.pg_begin("BEGIN READ ONLY", extra)).await?;
     let res = work(&mut *tx).await;
     let end = tx.rollback().await;
@@ -63,7 +63,7 @@ pub(super) async fn in_read_only<T>(conn: &mut PgConnection, db: &Db, extra: &st
 /// user cannot change it afterwards, because the lexer refuses SET and set_config and the per-statement rollback would
 /// undo one that got through. `path` is `Db::pg_path` of the tab's schema: the schema first, then the list saved on the
 /// Advanced tab. An empty one keeps the session's own search_path.
-pub(super) async fn set_search_path(c: &mut PgConnection, path: &str) -> Result<(), sqlx::Error> {
+pub(in crate::db::sql) async fn set_search_path(c: &mut PgConnection, path: &str) -> Result<(), sqlx::Error> {
     if path.is_empty() {
         return Ok(());
     }
@@ -77,12 +77,12 @@ impl Db {
     /// per-run `pg_run_locals`). A pooler can hand the next statement to another backend, so none of these can be a
     /// session value there. The pooler's settings come before `extra` and after the timeout so they win over it. The
     /// user's own statement is never part of this text; it goes alone in the message that follows.
-    pub(super) fn pg_begin(&self, begin: &str, extra: &str) -> String {
+    pub(in crate::db::sql) fn pg_begin(&self, begin: &str, extra: &str) -> String {
         let (timeout, locals) = match &self.pool {
             Pool::Pg(p) => (p.timeout(), p.locals()),
             Pool::My(_) => ("0", ""),
         };
-        let mut sql = format!("{begin}; {}", super::pg::set_timeout(timeout));
+        let mut sql = format!("{begin}; {}", crate::db::sql::pg::set_timeout(timeout));
         for part in [locals, extra].into_iter().filter(|p| !p.is_empty()) {
             sql.push_str("; ");
             sql.push_str(part);
@@ -94,13 +94,13 @@ impl Db {
 /// Opens the transaction a locked statement runs in, for a caller that cannot hand its work to `in_read_only` (a result
 /// that streams to a file). When a setting cannot be applied the transaction is rolled back at once, so the connection
 /// is never left inside one.
-pub(super) async fn begin_read_only(c: &mut PgConnection, db: &Db, extra: &str) -> Result<(), sqlx::Error> {
+pub(in crate::db::sql) async fn begin_read_only(c: &mut PgConnection, db: &Db, extra: &str) -> Result<(), sqlx::Error> {
     begin_with(c, db.pg_begin("BEGIN READ ONLY", extra)).await
 }
 
 /// The transaction of one unlocked statement behind a pooler: `READ WRITE` stated in the transaction itself, because
 /// the session cannot be changed there and its default may be read-only on the backend that answers.
-pub(super) async fn begin_read_write(c: &mut PgConnection, db: &Db, extra: &str) -> Result<(), sqlx::Error> {
+pub(in crate::db::sql) async fn begin_read_write(c: &mut PgConnection, db: &Db, extra: &str) -> Result<(), sqlx::Error> {
     begin_with(c, db.pg_begin("BEGIN READ WRITE", extra)).await
 }
 
@@ -114,21 +114,21 @@ async fn begin_with(c: &mut PgConnection, sql: String) -> Result<(), sqlx::Error
 
 /// The characters sent before the user's statement when it sits in a paged wrapper (`lex::page_sql`), which a
 /// server position has to be moved back by.
-pub(super) const PAGE_PREFIX: usize = 16;
+pub(in crate::db::sql) const PAGE_PREFIX: usize = 16;
 /// The same for `lex::count_sql`.
-pub(super) const COUNT_PREFIX: usize = 23;
+pub(in crate::db::sql) const COUNT_PREFIX: usize = 23;
 
 impl Db {
     /// Text of the user's own (the Content filter and sort) as a read: on MySQL on the pool, on PostgreSQL in the
     /// read-only transaction of `read_only`. Every row is read, over the text protocol, so values arrive as the server
     /// wrote them.
-    pub(super) async fn read_text(&self, schema: &str, sql: &str, user_text: bool) -> Res<Vec<SqlRow>> {
+    pub(in crate::db::sql) async fn read_text(&self, schema: &str, sql: &str, user_text: bool) -> Res<Vec<SqlRow>> {
         self.read_text_with(schema, "", sql, user_text).await
     }
 
     /// `read_text` with a statement run first in the same transaction, which only PostgreSQL has. `user_text` says the
     /// statement carries something the user typed, so a PostgreSQL connection that ran it is closed afterwards.
-    pub(super) async fn read_text_with(&self, schema: &str, before: &str, sql: &str, user_text: bool) -> Res<Vec<SqlRow>> {
+    pub(in crate::db::sql) async fn read_text_with(&self, schema: &str, before: &str, sql: &str, user_text: bool) -> Res<Vec<SqlRow>> {
         let t = Instant::now();
         let res = match &self.pool {
             Pool::My(p) => raw_sql(sql).fetch_all(p).await.map(SqlRow::wrap),
@@ -140,7 +140,7 @@ impl Db {
 
     /// The columns `sql` would return, without running it, for a page that came back empty and still needs its headers.
     /// Preparing runs nothing, so no transaction is needed.
-    pub(super) async fn describe_text(&self, sql: &str) -> Res<Vec<ColInfo>> {
+    pub(in crate::db::sql) async fn describe_text(&self, sql: &str) -> Res<Vec<ColInfo>> {
         match &self.pool {
             Pool::My(p) => Ok(col_infos((&*p).describe(sql).await.map_err(se)?.columns(), self.dialect)),
             Pool::Pg(_) => {
@@ -183,7 +183,7 @@ impl Worker {
                 let mut list: Vec<PgSchema> = rows
                     .map_err(se)?
                     .iter()
-                    .filter_map(|r| Some(PgSchema { name: super::worker::text(r, "name")?, tables: super::structure::num(r, "tables").unwrap_or(0), system: r.int("system").is_some_and(|n| n != 0) }))
+                    .filter_map(|r| Some(PgSchema { name: crate::db::sql::worker::text(r, "name")?, tables: crate::db::sql::structure::num(r, "tables").unwrap_or(0), system: r.int("system").is_some_and(|n| n != 0) }))
                     .collect();
                 list.sort_by(|a, b| a.name.cmp(&b.name));
                 Ok(list)
@@ -204,13 +204,13 @@ impl Worker {
                 let t = Instant::now();
                 let rows = raw_sql(Dialect::Postgres.schemas()).fetch_all(&at.pg_pool()?).await.map(SqlRow::wrap_pg);
                 at.note(&database, Dialect::Postgres.schemas(), t, &rows);
-                let mut schemas: Vec<String> = rows.map_err(se)?.iter().filter_map(|r| super::worker::text(r, "name")).collect();
+                let mut schemas: Vec<String> = rows.map_err(se)?.iter().filter_map(|r| crate::db::sql::worker::text(r, "name")).collect();
                 schemas.sort();
                 let (mut tables, mut views) = (Vec::new(), Vec::new());
                 if !schema.is_empty() {
                     for r in at.meta(&schema, Dialect::Postgres.tables(), [schema.as_str()]).await? {
-                        let Some(n) = super::worker::text(&r, "name") else { continue };
-                        if super::worker::text(&r, "kind").is_some_and(|k| k.contains("VIEW")) {
+                        let Some(n) = crate::db::sql::worker::text(&r, "name") else { continue };
+                        if crate::db::sql::worker::text(&r, "kind").is_some_and(|k| k.contains("VIEW")) {
                             views.push(n.clone());
                         }
                         tables.push(n);

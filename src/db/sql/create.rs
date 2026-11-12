@@ -811,7 +811,7 @@ impl Worker {
     pub fn sql_undo_create(&self, db: Db, a: UndoAction, read_only: bool) {
         let scope = a.db.clone();
         if db.dialect == Dialect::Postgres {
-            return self.spawn_sql(db.conn, &scope, super::create_pg::undo(db.clone(), a, read_only));
+            return self.spawn_sql(db.conn, &scope, super::pg::create::undo(db.clone(), a, read_only));
         }
         self.spawn_sql(db.conn, &scope, async move {
             let UndoAction { at, conn, db: schema, coll: table, kind } = a;

@@ -1,12 +1,12 @@
 //! Creating and dropping on PostgreSQL: the New database, New schema and New table dialogs, the extra options of the drop
 //! confirmation (CASCADE, WITH (FORCE)) and what the app does when an answer arrives. The statements come from
-//! `db::sql::create_pg`. MySQL's dialogs are in `sql_create.rs`; this server has no engines, charsets or collations to pick
+//! `db::sql::pg::create`. MySQL's dialogs are in `sql_create.rs`; this server has no engines, charsets or collations to pick
 //! and a table is built from the structure editor's column model.
 
 use super::sql_create::{list_and, plural, right_actions, sql_block, DropForm, DropKind, NOTE_DB, NOTE_TABLE};
 use super::*;
 use db::sql::create::{Ddl, DropInfo};
-use db::sql::create_pg::{self, Check, DbChoices, DbOpts, NewIndex, TableSpec, Unique};
+use db::sql::pg::create::{self, Check, DbChoices, DbOpts, NewIndex, TableSpec, Unique};
 use db::sql::ddl::{self, ColDef, Dv};
 use db::sql::structure::{ForeignKey, Structure};
 
@@ -92,7 +92,7 @@ impl PgNewTable {
         if self.built.as_ref().is_some_and(|(k, _)| *k == spec) {
             return;
         }
-        let stmts = create_pg::create_table_stmts(&spec);
+        let stmts = create::create_table_stmts(&spec);
         self.built = Some((spec, stmts));
     }
 
@@ -466,7 +466,7 @@ impl App {
                 let names: Vec<String> = ch.templates.iter().map(|t| t.name.clone()).collect();
                 str_pick(ui, "pg-newdb-template", "Template", 400.0, &mut f.opts.template, "Server default (template1)", &names);
                 // The encoding and locale picks belong to template0, so another template drops them rather than keep a choice it refuses.
-                if f.opts.template != before && f.opts.template.as_deref() != Some(create_pg::PRISTINE) {
+                if f.opts.template != before && f.opts.template.as_deref() != Some(create::PRISTINE) {
                     f.opts = DbOpts { template: f.opts.template.take(), owner: f.opts.owner.take(), ..Default::default() };
                 }
                 ui.end_row();
@@ -477,7 +477,7 @@ impl App {
         }
         ui.add_space(8.0);
         let choices = f.choices.clone().unwrap_or_default();
-        let built = create_pg::create_db_sql(&f.name, &f.opts, &choices);
+        let built = create::create_db_sql(&f.name, &f.opts, &choices);
         match (&built, &f.load_err) {
             (_, Some(e)) => {
                 ui.label(RichText::new(format!("Could not read the server's templates, encodings and roles: {e}")).size(TXT_SMALL).color(ALERT()));
@@ -525,7 +525,7 @@ impl App {
             ui.end_row();
         });
         ui.add_space(8.0);
-        let built = create_pg::create_schema_sql(&f.name);
+        let built = create::create_schema_sql(&f.name);
         match &built {
             Ok(sql) => sql_block(ui, &format!("{sql};")),
             Err(e) => {
@@ -1016,8 +1016,8 @@ fn pg_locale_section(ui: &mut egui::Ui, o: &mut DbOpts, ch: &DbChoices) {
         ui.add(egui::Label::new(RichText::new(text).size(TXT_SMALL).color(FAINT())).wrap());
     };
     let tpl = ch.template(o.template.as_deref()).cloned().unwrap_or_default();
-    let locale_of = |t: &create_pg::Template| if t.collate == t.ctype { t.collate.clone() } else { format!("{} (LC_COLLATE), {} (LC_CTYPE)", t.collate, t.ctype) };
-    if o.template.as_deref() != Some(create_pg::PRISTINE) {
+    let locale_of = |t: &create::Template| if t.collate == t.ctype { t.collate.clone() } else { format!("{} (LC_COLLATE), {} (LC_CTYPE)", t.collate, t.ctype) };
+    if o.template.as_deref() != Some(create::PRISTINE) {
         let icu = match tpl.provider.as_str() {
             "i" => format!(", ICU locale {}", tpl.icu),
             "b" => format!(", builtin locale {}", tpl.icu),
@@ -1027,8 +1027,8 @@ fn pg_locale_section(ui: &mut egui::Ui, o: &mut DbOpts, ch: &DbChoices) {
             ui.label(RichText::new(format!("A copy of {} gets {}, locale {}{icu}.", tpl.name, tpl.encoding, locale_of(&tpl))).color(MUTED()));
         }
         note(ui, "Another encoding or locale needs TEMPLATE template0: the server refuses one that differs from the template's, because a copy of any other template keeps its own.".into());
-        if ch.templates.iter().any(|t| t.name == create_pg::PRISTINE) && quiet(ui, "Use template0").clicked() {
-            o.template = Some(create_pg::PRISTINE.into());
+        if ch.templates.iter().any(|t| t.name == create::PRISTINE) && quiet(ui, "Use template0").clicked() {
+            o.template = Some(create::PRISTINE.into());
         }
         return;
     }
@@ -1066,7 +1066,7 @@ fn pg_locale_section(ui: &mut egui::Ui, o: &mut DbOpts, ch: &DbChoices) {
         }
         if ch.icu_ok() {
             form_label(ui, "Provider");
-            let own = create_pg::provider_name(&tpl.provider);
+            let own = create::provider_name(&tpl.provider);
             str_pick(ui, "pg-newdb-provider", "Locale provider", 400.0, &mut o.provider, &format!("Template's ({own})"), &["libc".to_string(), "icu".to_string()]);
             ui.end_row();
             if o.provider.as_deref() == Some("icu") {
@@ -1079,7 +1079,7 @@ fn pg_locale_section(ui: &mut egui::Ui, o: &mut DbOpts, ch: &DbChoices) {
         }
     });
     if !ch.locale_word_ok(o) {
-        let p = create_pg::provider_name(&ch.provider_of(o));
+        let p = create::provider_name(&ch.provider_of(o));
         note(ui, format!("Locale is off: on PostgreSQL 16 and later LOCALE also sets the {p} locale of a database with the {p} provider. LC_COLLATE and LC_CTYPE set the operating system locale alone."));
     }
     if let Some(why) = ch.template_locale_problem(o) {
@@ -1122,7 +1122,7 @@ mod tests {
     #[test]
     fn the_first_column_is_an_identity_key() {
         let t = PgNewTable { name: "t".into(), ..PgNewTable::new(1, "d".into(), "public".into()) };
-        let s = create_pg::create_table_stmts(&t.spec()).unwrap();
+        let s = create::create_table_stmts(&t.spec()).unwrap();
         assert_eq!(s[0], "CREATE TABLE \"public\".\"t\" (\n  \"id\" integer GENERATED BY DEFAULT AS IDENTITY,\n  PRIMARY KEY (\"id\")\n)");
     }
 

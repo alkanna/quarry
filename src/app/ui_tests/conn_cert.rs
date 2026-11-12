@@ -1,5 +1,5 @@
 //! The client certificate rows of the PostgreSQL TLS tab. They show on PostgreSQL only and are greyed with Cloud SQL. With
-//! QUARRY_TEST_PGCERT and QUARRY_TEST_PGCERT_DIR set (see `db::sql::pg_cert`), the form's Test signs in with the
+//! QUARRY_TEST_PGCERT and QUARRY_TEST_PGCERT_DIR set (see `db::sql::pg::cert`), the form's Test signs in with the
 //! certificate and an encrypted key whose passphrase is in the form, then fails with the passphrase cleared.
 
 use super::*;

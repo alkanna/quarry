@@ -412,8 +412,8 @@ fn meta(line: u64, cmd: &str) -> String {
 /// Refuses a statement that only psql can run. The data lines of a COPY FROM stdin follow the statement in the file and
 /// would be read as SQL, so the run stops at the COPY itself.
 fn refuse(stmt: &str, line: u64) -> Result<(), String> {
-    use super::lex::Tok;
-    let words: Vec<String> = super::lex::tokens(stmt, super::Dialect::Postgres).into_iter().filter(|(t, _)| matches!(t, Tok::Word | Tok::Punct | Tok::Quoted)).map(|(_, r)| stmt[r].to_ascii_lowercase()).collect();
+    use crate::db::sql::lex::Tok;
+    let words: Vec<String> = crate::db::sql::lex::tokens(stmt, crate::db::sql::Dialect::Postgres).into_iter().filter(|(t, _)| matches!(t, Tok::Word | Tok::Punct | Tok::Quoted)).map(|(_, r)| stmt[r].to_ascii_lowercase()).collect();
     if words.first().is_some_and(|w| w == "copy") {
         // A parenthesised query is `COPY (SELECT ..) TO`, which has no FROM at the top level; its FROM is inside
         // the parentheses, so only a FROM at depth 0 counts.

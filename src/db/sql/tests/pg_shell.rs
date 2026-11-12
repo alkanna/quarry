@@ -2,8 +2,8 @@
 //! named by QUARRY_TEST_POSTGRES and QUARRY_TEST_POSTGRES13 and skip when Bun is not installed. Each test makes its own
 //! schemas in the shared `quarry_test` database.
 
-use super::testing::{every_pg, live, LivePg};
-use super::Db;
+use crate::db::sql::testing::{every_pg, live, LivePg};
+use crate::db::sql::Db;
 use crate::db::{Msg, Res, ShellJob, ShellQuery, SqlRelay, Worker};
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
@@ -357,7 +357,7 @@ fn behind_a_pooler_each_statement_has_its_own_transaction_and_the_session_stays_
     }
     every_pg(|l, var| {
         let db = fixture(l, &["t7_pool"], "CREATE TABLE t (id int PRIMARY KEY, note text);");
-        let pooled = super::pg::pooled_for_test(&db, &l.uri);
+        let pooled = crate::db::sql::pg::pooled_for_test(&db, &l.uri);
         let want_path = l.one("SHOW search_path");
         let want_ro = l.one("SHOW default_transaction_read_only");
         // Locked: the unqualified table is found through the search_path of the statement's own transaction.
@@ -409,7 +409,7 @@ fn the_columns_of_an_empty_locked_answer_are_planned_inside_the_read_only_transa
             "CREATE TABLE log (n int); CREATE FUNCTION g(x int) RETURNS int LANGUAGE plpgsql VOLATILE AS $f$ BEGIN IF current_setting('transaction_read_only') = 'off' THEN INSERT INTO t7_desc.log VALUES (x); END IF; RETURN x; END $f$;
              CREATE FUNCTION f(x int) RETURNS int LANGUAGE plpgsql IMMUTABLE AS 'BEGIN RETURN t7_desc.g(x); END';",
         );
-        let pooled = super::pg::pooled_for_test(&db, &l.uri);
+        let pooled = crate::db::sql::pg::pooled_for_test(&db, &l.uri);
         let (_, res) = script(l, &pooled, "t7_desc", "async function run() { return await sql`SELECT t7_desc.f(${1}) AS x WHERE false` }", &[], true);
         let v = res.unwrap_or_else(|x| panic!("{var}: {x}"));
         assert_eq!(v, serde_json::json!([]), "{var}");

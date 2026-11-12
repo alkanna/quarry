@@ -2,10 +2,10 @@
 //! worst case: every transaction may run on another backend and the pooler knows nothing of named statements. The fake
 //! pooler of the other tests keeps one backend per connection, so it cannot show what these do.
 
-use super::testing::{live_pgbouncer, LivePg};
+use crate::db::sql::testing::{live_pgbouncer, LivePg};
 use crate::db::{Msg, UndoAction};
-use super::write::RowEdit;
-use super::{Col, PageQuery};
+use crate::db::sql::write::RowEdit;
+use crate::db::sql::{Col, PageQuery};
 use mongodb::bson::{Bson, Document};
 use std::collections::HashMap;
 use sqlx::Connection;
@@ -118,14 +118,14 @@ fn bound_statements_survive_a_pooler_that_moves_every_transaction() {
     l.qsql(&pool, &format!("DROP SCHEMA {schema} CASCADE"));
 }
 
-fn script(l: &LivePg, db: &super::Db, schema: &str, text: &str) -> Vec<super::ResultSet> {
+fn script(l: &LivePg, db: &crate::db::sql::Db, schema: &str, text: &str) -> Vec<crate::db::sql::ResultSet> {
     let (id, stop) = (std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicBool::new(false));
-    l.w.rt.block_on(super::run::run(db, schema, text, false, &id, &stop, 0))
+    l.w.rt.block_on(crate::db::sql::run::run(db, schema, text, false, &id, &stop, 0))
 }
 
-fn relay_query(l: &LivePg, db: &super::Db, schema: &str, text: &str) -> Result<(), String> {
+fn relay_query(l: &LivePg, db: &crate::db::sql::Db, schema: &str, text: &str) -> Result<(), String> {
     let id = std::sync::atomic::AtomicU64::new(0);
-    let mut relay = l.w.rt.block_on(super::relay::Relay::open(db, schema, false, &id))?;
+    let mut relay = l.w.rt.block_on(crate::db::sql::relay::Relay::open(db, schema, false, &id))?;
     l.w.rt.block_on(relay.query(text, &[])).map(|_| ())
 }
 
@@ -171,7 +171,7 @@ fn session_advisory_locks_and_dblink_are_refused_before_they_reach_a_shared_back
     for (i, stmt) in ["SELECT pg_advisory_lock(7101)", "SELECT pg_try_advisory_lock(7102)", "SELECT pg_catalog.pg_advisory_lock_shared(7103)", "SELECT pg_try_advisory_lock_shared(7104)"].into_iter().enumerate() {
         let key = 7101 + i as i64;
         let sets = script(&l, &db, schema, stmt);
-        let refused = sets[0].error.as_deref() == Some(super::run::POOLER_SESSION);
+        let refused = sets[0].error.as_deref() == Some(crate::db::sql::run::POOLER_SESSION);
         if held(key) != "0" {
             leaked.push(key);
         }
@@ -181,7 +181,7 @@ fn session_advisory_locks_and_dblink_are_refused_before_they_reach_a_shared_back
     assert!(leaked.is_empty(), "locks left on a shared backend: {leaked:?}");
     // The shell relay takes the same path.
     let err = relay_query(&l, &db, schema, "SELECT pg_advisory_lock(7110)").err().expect("refused");
-    assert_eq!(err, super::run::POOLER_SESSION);
+    assert_eq!(err, crate::db::sql::run::POOLER_SESSION);
     assert_eq!(held(7110), "0");
     release(7110);
     // The transaction-scoped lock ends with its transaction and stays allowed.
@@ -203,7 +203,7 @@ fn do_blocks_and_pg_temp_are_refused_behind_a_pooler_in_a_query_a_shell_and_a_fi
     let release = |key: i64| l.qsql(&pool, &format!("SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype = 'advisory' AND objid = {key}"));
     let lock = "DO $$BEGIN PERFORM pg_advisory_lock(424243); END$$";
     let sets = script(&l, &db, schema, lock);
-    let (refused, leaked) = (sets[0].error.as_deref() == Some(super::run::POOLER_SESSION), held(424243) != "0");
+    let (refused, leaked) = (sets[0].error.as_deref() == Some(crate::db::sql::run::POOLER_SESSION), held(424243) != "0");
     release(424243);
     assert!(refused && !leaked, "Custom Query: a DO block took a session lock on a shared backend (refused: {refused}, held: {leaked}): {:?}", sets[0].error);
     for stmt in [
@@ -211,10 +211,10 @@ fn do_blocks_and_pg_temp_are_refused_behind_a_pooler_in_a_query_a_shell_and_a_fi
         "CREATE FUNCTION pg_temp.pgb_tmp_f() RETURNS int LANGUAGE sql AS 'select 1'",
     ] {
         let sets = script(&l, &db, schema, stmt);
-        assert_eq!(sets[0].error.as_deref(), Some(super::run::POOLER_SESSION), "Custom Query: {stmt}");
+        assert_eq!(sets[0].error.as_deref(), Some(crate::db::sql::run::POOLER_SESSION), "Custom Query: {stmt}");
         // The shell refuses a DO block earlier still, as something that changes how values are escaped.
         let shell = relay_query(&l, &db, schema, stmt).err();
-        assert!(if stmt.starts_with("DO") { shell.is_some() } else { shell.as_deref() == Some(super::run::POOLER_SESSION) }, "shell: {stmt}: {shell:?}");
+        assert!(if stmt.starts_with("DO") { shell.is_some() } else { shell.as_deref() == Some(crate::db::sql::run::POOLER_SESSION) }, "shell: {stmt}: {shell:?}");
     }
     assert!(relay_query(&l, &db, schema, lock).is_err());
     assert_eq!(held(424243), "0");
@@ -233,8 +233,8 @@ fn statements_that_cannot_run_in_a_transaction_block_say_so_behind_a_pooler() {
     let db = l.quarry_test();
     for stmt in ["VACUUM t", "CREATE INDEX CONCURRENTLY i ON t (v)", "DROP INDEX CONCURRENTLY IF EXISTS i", "REINDEX TABLE CONCURRENTLY t", "REINDEX SCHEMA pgb_notx", "CREATE DATABASE pgb_notx_db", "DROP DATABASE IF EXISTS pgb_notx_db", "ALTER SYSTEM SET work_mem = '5MB'", "CLUSTER"] {
         let sets = script(&l, &db, schema, stmt);
-        assert_eq!(sets[0].error.as_deref(), Some(super::run::POOLER_NO_TX), "{stmt}");
-        assert_eq!(relay_query(&l, &db, schema, stmt).err().as_deref(), Some(super::run::POOLER_NO_TX), "relay: {stmt}");
+        assert_eq!(sets[0].error.as_deref(), Some(crate::db::sql::run::POOLER_NO_TX), "{stmt}");
+        assert_eq!(relay_query(&l, &db, schema, stmt).err().as_deref(), Some(crate::db::sql::run::POOLER_NO_TX), "relay: {stmt}");
     }
     // What a transaction block allows still runs.
     for stmt in ["ALTER TABLE t ADD COLUMN w int", "REFRESH MATERIALIZED VIEW m", "CREATE INDEX i ON t (v)", "REINDEX TABLE t"] {

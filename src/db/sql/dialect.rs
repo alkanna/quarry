@@ -44,14 +44,14 @@ impl Dialect {
     /// or "SYSTEM VIEW"), engine, row_estimate, data_bytes, index_bytes, comment. The row estimate is
     /// approximate for InnoDB.
     pub fn tables(self) -> &'static str {
-        if self == Dialect::Postgres { return super::pg_catalog::TABLES }
+        if self == Dialect::Postgres { return super::pg::catalog::TABLES }
         "SELECT TABLE_NAME AS name, TABLE_TYPE AS kind, ENGINE AS engine, TABLE_ROWS AS row_estimate, DATA_LENGTH AS data_bytes, INDEX_LENGTH AS index_bytes, TABLE_COMMENT AS comment FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME"
     }
 
     /// Columns of one table. Params: [schema, table]. Columns: name, full_type, nullable (1 or 0),
     /// col_key ("PRI", "UNI", "MUL" or empty), col_default, extra, collation, comment, position.
     pub fn columns(self) -> &'static str {
-        if self == Dialect::Postgres { return super::pg_catalog::COLUMNS }
+        if self == Dialect::Postgres { return super::pg::catalog::COLUMNS }
         "SELECT COLUMN_NAME AS name, COLUMN_TYPE AS full_type, IS_NULLABLE = 'YES' AS nullable, COLUMN_KEY AS col_key, COLUMN_DEFAULT AS col_default, EXTRA AS extra, COLLATION_NAME AS collation, COLUMN_COMMENT AS comment, ORDINAL_POSITION AS position FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION"
     }
 
@@ -59,28 +59,28 @@ impl Dialect {
     /// non_unique (1 or 0), seq, col, direction ("A", "D" or NULL), cardinality, sub_part,
     /// index_type, nullable ("YES" or empty), comment.
     pub fn indexes(self) -> &'static str {
-        if self == Dialect::Postgres { return super::pg_catalog::INDEXES }
+        if self == Dialect::Postgres { return super::pg::catalog::INDEXES }
         "SELECT INDEX_NAME AS name, NON_UNIQUE AS non_unique, SEQ_IN_INDEX AS seq, COLUMN_NAME AS col, COLLATION AS direction, CARDINALITY AS cardinality, SUB_PART AS sub_part, INDEX_TYPE AS index_type, NULLABLE AS nullable, INDEX_COMMENT AS comment FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY INDEX_NAME <> 'PRIMARY', INDEX_NAME, SEQ_IN_INDEX"
     }
 
     /// Foreign keys defined on a table. Params: [schema, table]. Columns: name, db, tbl, col, pos,
     /// ref_db, ref_tbl, ref_col, on_update, on_delete, where db and tbl are the table that owns the key.
     pub fn foreign_keys(self) -> &'static str {
-        if self == Dialect::Postgres { return super::pg_catalog::FOREIGN_KEYS }
+        if self == Dialect::Postgres { return super::pg::catalog::FOREIGN_KEYS }
         "SELECT k.CONSTRAINT_NAME AS name, k.TABLE_SCHEMA AS db, k.TABLE_NAME AS tbl, k.COLUMN_NAME AS col, k.ORDINAL_POSITION AS pos, k.REFERENCED_TABLE_SCHEMA AS ref_db, k.REFERENCED_TABLE_NAME AS ref_tbl, k.REFERENCED_COLUMN_NAME AS ref_col, r.UPDATE_RULE AS on_update, r.DELETE_RULE AS on_delete FROM information_schema.KEY_COLUMN_USAGE k JOIN information_schema.REFERENTIAL_CONSTRAINTS r ON r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND r.TABLE_NAME = k.TABLE_NAME WHERE k.TABLE_SCHEMA = ? AND k.TABLE_NAME = ? AND k.REFERENCED_TABLE_NAME IS NOT NULL ORDER BY k.CONSTRAINT_NAME, k.ORDINAL_POSITION"
     }
 
     /// Foreign keys in other tables that point to this one. Params: [schema, table] of the
     /// referenced table. Same columns as `foreign_keys`.
     pub fn referenced_by(self) -> &'static str {
-        if self == Dialect::Postgres { return super::pg_catalog::REFERENCED_BY }
+        if self == Dialect::Postgres { return super::pg::catalog::REFERENCED_BY }
         "SELECT k.CONSTRAINT_NAME AS name, k.TABLE_SCHEMA AS db, k.TABLE_NAME AS tbl, k.COLUMN_NAME AS col, k.ORDINAL_POSITION AS pos, k.REFERENCED_TABLE_SCHEMA AS ref_db, k.REFERENCED_TABLE_NAME AS ref_tbl, k.REFERENCED_COLUMN_NAME AS ref_col, r.UPDATE_RULE AS on_update, r.DELETE_RULE AS on_delete FROM information_schema.KEY_COLUMN_USAGE k JOIN information_schema.REFERENTIAL_CONSTRAINTS r ON r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND r.TABLE_NAME = k.TABLE_NAME WHERE k.REFERENCED_TABLE_SCHEMA = ? AND k.REFERENCED_TABLE_NAME = ? ORDER BY k.TABLE_SCHEMA, k.TABLE_NAME, k.CONSTRAINT_NAME, k.ORDINAL_POSITION"
     }
 
     /// Triggers on a table. Params: [schema, table]. Columns: name, timing ("BEFORE" or "AFTER"),
     /// event ("INSERT", "UPDATE" or "DELETE"), body, definer, ord (ACTION_ORDER), sql_mode.
     pub fn triggers(self) -> &'static str {
-        if self == Dialect::Postgres { return super::pg_catalog::TRIGGERS }
+        if self == Dialect::Postgres { return super::pg::catalog::TRIGGERS }
         "SELECT TRIGGER_NAME AS name, ACTION_TIMING AS timing, EVENT_MANIPULATION AS event, ACTION_STATEMENT AS body, DEFINER AS definer, ACTION_ORDER AS ord, SQL_MODE AS sql_mode FROM information_schema.TRIGGERS WHERE EVENT_OBJECT_SCHEMA = ? AND EVENT_OBJECT_TABLE = ? ORDER BY ACTION_TIMING, EVENT_MANIPULATION, ACTION_ORDER"
     }
 
@@ -89,28 +89,28 @@ impl Dialect {
     /// data_bytes, index_bytes, free_bytes, auto_increment, created, updated, collation, options,
     /// comment.
     pub fn table_status(self) -> &'static str {
-        if self == Dialect::Postgres { return super::pg_catalog::TABLE_STATUS }
+        if self == Dialect::Postgres { return super::pg::catalog::TABLE_STATUS }
         "SELECT TABLE_NAME AS name, ENGINE AS engine, ROW_FORMAT AS row_format, TABLE_ROWS AS row_estimate, AVG_ROW_LENGTH AS avg_row_bytes, DATA_LENGTH AS data_bytes, INDEX_LENGTH AS index_bytes, DATA_FREE AS free_bytes, AUTO_INCREMENT AS auto_increment, CAST(CREATE_TIME AS CHAR) AS created, CAST(UPDATE_TIME AS CHAR) AS updated, TABLE_COLLATION AS collation, CREATE_OPTIONS AS options, TABLE_COMMENT AS comment FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?"
     }
 
     /// Every column of a database in one round trip, for autocomplete. Params: [schema]. Columns:
     /// tbl, name, full_type, col_key, nullable (1 or 0).
     pub fn all_columns(self) -> &'static str {
-        if self == Dialect::Postgres { return super::pg_catalog::ALL_COLUMNS }
+        if self == Dialect::Postgres { return super::pg::catalog::ALL_COLUMNS }
         "SELECT TABLE_NAME AS tbl, COLUMN_NAME AS name, COLUMN_TYPE AS full_type, COLUMN_KEY AS col_key, IS_NULLABLE = 'YES' AS nullable FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME, ORDINAL_POSITION"
     }
 
     /// Which columns of a database hold a foreign key, for autocomplete. Params: [schema]. Columns:
     /// tbl, name.
     pub fn all_foreign_keys(self) -> &'static str {
-        if self == Dialect::Postgres { return super::pg_catalog::ALL_FOREIGN_KEYS }
+        if self == Dialect::Postgres { return super::pg::catalog::ALL_FOREIGN_KEYS }
         "SELECT TABLE_NAME AS tbl, COLUMN_NAME AS name FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = ? AND REFERENCED_TABLE_NAME IS NOT NULL"
     }
 
     /// What decides whether a column's values may be looked up: the table's row estimate and how
     /// many indexes lead with the column. Params: [column, schema, table]. Columns: est, leads.
     pub fn value_gate(self) -> &'static str {
-        if self == Dialect::Postgres { return super::pg_catalog::VALUE_GATE }
+        if self == Dialect::Postgres { return super::pg::catalog::VALUE_GATE }
         "SELECT t.TABLE_ROWS AS est, (SELECT COUNT(*) FROM information_schema.STATISTICS s WHERE s.TABLE_SCHEMA = t.TABLE_SCHEMA AND s.TABLE_NAME = t.TABLE_NAME AND s.COLUMN_NAME = ? AND s.SEQ_IN_INDEX = 1) AS leads FROM information_schema.TABLES t WHERE t.TABLE_SCHEMA = ? AND t.TABLE_NAME = ?"
     }
 
@@ -161,12 +161,12 @@ impl Dialect {
     /// The schemas of the connected database that hold user objects, PostgreSQL only. Empty on the MySQL family, whose
     /// databases are listed by `SHOW DATABASES`.
     pub fn schemas(self) -> &'static str {
-        if self == Dialect::Postgres { super::pg_catalog::SCHEMAS } else { "" }
+        if self == Dialect::Postgres { super::pg::catalog::SCHEMAS } else { "" }
     }
 
     /// Like `schemas` with the system schemas flagged and a table count per schema, for the sidebar's switcher.
     pub fn schemas_all(self) -> &'static str {
-        if self == Dialect::Postgres { super::pg_catalog::SCHEMAS_ALL } else { "" }
+        if self == Dialect::Postgres { super::pg::catalog::SCHEMAS_ALL } else { "" }
     }
 
     /// Works on both engines and stops writes inside the session.
@@ -444,7 +444,7 @@ mod tests {
     #[test]
     fn postgres_queries_bind_dollar_placeholders() {
         let d = Dialect::Postgres;
-        for (q, params) in [(d.tables(), 1), (d.columns(), 2), (d.indexes(), 2), (d.foreign_keys(), 2), (d.referenced_by(), 2), (d.triggers(), 2), (d.table_status(), 2), (d.all_columns(), 1), (d.all_foreign_keys(), 1), (d.value_gate(), 3), (super::super::pg_catalog::CONSTRAINTS, 2)] {
+        for (q, params) in [(d.tables(), 1), (d.columns(), 2), (d.indexes(), 2), (d.foreign_keys(), 2), (d.referenced_by(), 2), (d.triggers(), 2), (d.table_status(), 2), (d.all_columns(), 1), (d.all_foreign_keys(), 1), (d.value_gate(), 3), (super::super::pg::catalog::CONSTRAINTS, 2)] {
             assert!(!q.contains('?'), "{q}");
             assert!(q.contains(&format!("${params}")) && !q.contains(&format!("${}", params + 1)), "{q}");
             assert!(q.starts_with("SELECT "));

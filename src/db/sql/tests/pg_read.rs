@@ -1,10 +1,10 @@
 //! Live tests of the PostgreSQL read path, run on every server named by QUARRY_TEST_POSTGRES and
 //! QUARRY_TEST_POSTGRES13. Each test makes its own schema in the shared `quarry_test` database.
 
-use super::pg_read::read_only;
-use super::testing::{every_pg, LivePg};
-use super::value::Kind;
-use super::{Db, PageQuery};
+use crate::db::sql::pg::read::read_only;
+use crate::db::sql::testing::{every_pg, LivePg};
+use crate::db::sql::value::Kind;
+use crate::db::sql::{Db, PageQuery};
 use crate::db::Msg;
 use mongodb::bson::{Bson, Document};
 use sqlx::Executor;
@@ -15,14 +15,14 @@ fn fixture(l: &LivePg, schema: &str, ddl: &str) -> (Db, sqlx::PgPool) {
     l.fresh_schema(schema, ddl)
 }
 
-fn page(l: &LivePg, db: &Db, schema: &str, table: &str, q: PageQuery, limit: u64, offset: u64) -> (Vec<super::Col>, Vec<String>, Vec<Document>, u64) {
+fn page(l: &LivePg, db: &Db, schema: &str, table: &str, q: PageQuery, limit: u64, offset: u64) -> (Vec<crate::db::sql::Col>, Vec<String>, Vec<Document>, u64) {
     l.w.sql_page(7, db.clone(), schema.into(), table.into(), q, limit, offset);
     let Msg::SqlCols { cols, pk, .. } = l.next() else { panic!("expected SqlCols") };
     let Msg::Docs { res: Ok((rows, count, _)), .. } = l.next() else { panic!("expected Docs") };
     (cols, pk, rows.iter().map(|r| r.decode().unwrap()).collect(), count)
 }
 
-fn structure(l: &LivePg, db: &Db, schema: &str, table: &str) -> super::Structure {
+fn structure(l: &LivePg, db: &Db, schema: &str, table: &str) -> crate::db::sql::Structure {
     l.w.sql_structure(3, db.clone(), schema.into(), table.into());
     let Msg::SqlStructure { res, .. } = l.next() else { panic!("expected SqlStructure") };
     res.unwrap_or_else(|x| panic!("{schema}.{table}: {x}"))
@@ -272,7 +272,7 @@ fn structure_info_relations_and_triggers() {
         assert!(pst.foreign_keys.is_empty() && pst.referenced_by.len() == 1 && pst.referenced_by[0].table == "orders");
         // The CREATE TABLE text runs back and gives the same table.
         assert!(st.create.starts_with("CREATE TABLE \"t4_struct\".\"orders\" ("), "{}", st.create);
-        let names = |s: &super::Structure| (s.columns.iter().map(|c| (c.name.clone(), c.full_type.clone(), c.nullable, c.default.clone())).collect::<Vec<_>>(), s.indexes.iter().map(|i| i.name.clone()).collect::<Vec<_>>(), s.constraints.len(), s.foreign_keys.len());
+        let names = |s: &crate::db::sql::Structure| (s.columns.iter().map(|c| (c.name.clone(), c.full_type.clone(), c.nullable, c.default.clone())).collect::<Vec<_>>(), s.indexes.iter().map(|i| i.name.clone()).collect::<Vec<_>>(), s.constraints.len(), s.foreign_keys.len());
         let before = names(&st);
         l.qsql(&p, "DROP TABLE t4_struct.items; DROP TABLE t4_struct.orders");
         l.qsql(&p, &st.create);

@@ -2,11 +2,11 @@
 //! QUARRY_TEST_POSTGRES13, and once through the PgBouncer. Each test makes databases of its own with a unique name and
 //! drops them again, so tests of one server run side by side and never touch a database another test uses.
 
-use super::csv::Source;
-use super::dump::{dump_to, run_file, DumpPlan, DumpTable, Ran};
-use super::import::Progress;
-use super::testing::{every_pg, live_pg_at, live_pgbouncer, LivePg};
-use super::Db;
+use crate::db::sql::csv::Source;
+use crate::db::sql::dump::{dump_to, run_file, DumpPlan, DumpTable, Ran};
+use crate::db::sql::import::Progress;
+use crate::db::sql::testing::{every_pg, live_pg_at, live_pgbouncer, LivePg};
+use crate::db::sql::Db;
 use crate::db::{Msg, Res};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::PgPool;
@@ -97,14 +97,14 @@ fn lines(l: &LivePg, pool: &PgPool, q: &str) -> Vec<String> {
         let mut c = pool.acquire().await.unwrap();
         sqlx::raw_sql("SET search_path = ''; SET standard_conforming_strings = on").execute(&mut *c).await.unwrap();
         let rows = sqlx::raw_sql(q).fetch_all(&mut *c).await.unwrap_or_else(|x| panic!("{q}: {x}"));
-        rows.iter().map(|r| super::worker::text_at(r, 0).unwrap_or_default()).collect()
+        rows.iter().map(|r| crate::db::sql::worker::text_at(r, 0).unwrap_or_default()).collect()
     })
 }
 
 /// What psql does with a script: each statement on its own through the simple protocol, reading the server's own
 /// standard_conforming_strings after every statement. The session starts with it off, as one of a database set so would.
 fn psql_like(l: &LivePg, pool: &PgPool, text: &str) {
-    use super::pg_script::PgSplitter;
+    use crate::db::sql::pg::script::PgSplitter;
     l.w.rt.block_on(async {
         let mut c = pool.acquire().await.unwrap();
         let mut sp = PgSplitter::new(true);
@@ -113,7 +113,7 @@ fn psql_like(l: &LivePg, pool: &PgPool, text: &str) {
         while let Some(p) = sp.next_piece().unwrap() {
             sqlx::raw_sql(&p.text).execute(&mut *c).await.unwrap_or_else(|x| panic!("statement at line {} failed: {x}\n{}", p.line, p.text));
             let r = sqlx::query("SHOW standard_conforming_strings").persistent(false).fetch_one(&mut *c).await.unwrap();
-            sp.set_plain_backslash(super::worker::text_at(&r, 0).as_deref() != Some("on"));
+            sp.set_plain_backslash(crate::db::sql::worker::text_at(&r, 0).as_deref() != Some("on"));
         }
     });
 }
@@ -301,7 +301,7 @@ fn live_a_database_dumped_and_run_back_into_an_empty_one_is_the_same() {
         let before = shape(l, &src_pool);
         // The session of the connection is read-only, which is what a locked connection is, and the dump still works.
         let ro = l.w.rt.block_on(async { sqlx::raw_sql("SHOW default_transaction_read_only").fetch_all(&src.pg_pool().unwrap()).await }).unwrap();
-        assert_eq!(super::worker::text_at(&ro[0], 0).as_deref(), Some("on"), "{var}");
+        assert_eq!(crate::db::sql::worker::text_at(&ro[0], 0).as_deref(), Some("on"), "{var}");
         let path = file(&format!("whole_{t}"));
         let rows = dump(l, &src, &plan("", true, Vec::new()), &path).unwrap_or_else(|x| panic!("{var}: {x}"));
         // Items (2501) and child (1200), a;--b (2), T"x" (2), two lines (1), unlogged (1), and from 18 the nnv row.
@@ -558,7 +558,7 @@ fn live_a_piece_the_server_reads_as_several_statements_never_runs_unseen() {
         // Whatever the cause, the server refuses a piece of several statements when it is sent on its own.
         let e = l.w.rt.block_on(async {
             let mut c = pool.acquire().await.unwrap();
-            super::pg_dump::run_text(&mut c, "INSERT INTO mt VALUES (1); INSERT INTO mt VALUES (2)").await.err()
+            crate::db::sql::pg::dump::run_text(&mut c, "INSERT INTO mt VALUES (1); INSERT INTO mt VALUES (2)").await.err()
         });
         assert!(e.is_some_and(|e| e.to_string().contains("multiple commands")), "{var}");
         assert_eq!(one(l, &pool, "SELECT count(*) FROM mt"), "0", "{var}");

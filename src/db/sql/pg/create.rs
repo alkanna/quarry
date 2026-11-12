@@ -1,22 +1,22 @@
 //! Creating and dropping PostgreSQL databases, schemas and tables. Every name is quoted, and the only user text besides names
-//! is a column type and a default expression, which `ddl_pg` checks the way the structure editor does. Where MySQL's DDL
+//! is a column type and a default expression, which `pg::ddl` checks the way the structure editor does. Where MySQL's DDL
 //! commits by itself, PostgreSQL's is transactional, so a schema or a table is made and dropped inside one transaction
 //! and an undo checks and drops in the same one. A database is the exception: CREATE and DROP DATABASE refuse to run in a
 //! transaction block, so they run alone on a connection of their own taken from the pool of the connection's own database
 //! (never from the pool of the database being dropped), and the undo of a create checks that the database is empty a
 //! round trip before it drops it, which no lock can close.
 
-use super::create::{Ddl, DropInfo};
-use super::ddl::{fk_problem, ref_state, snapshot, ColDef};
-use super::ddl_pg::{check_constraint_pg, col_body, comment_stmt, exec, fail_text, fk_refs, lock_error, may_lock, may_lock_one, name_ok, q, read_in, run_locked, set_local, set_lock_wait, set_path, table_state, unknown_type, Fail, Lock};
-use super::exec::{sql_state, Cells, Conn, SqlRow, Tx};
+use crate::db::sql::create::{Ddl, DropInfo};
+use crate::db::sql::ddl::{fk_problem, ref_state, snapshot, ColDef};
+use crate::db::sql::pg::ddl::{check_constraint_pg, col_body, comment_stmt, exec, fail_text, fk_refs, lock_error, may_lock, may_lock_one, name_ok, q, read_in, run_locked, set_local, set_lock_wait, set_path, table_state, unknown_type, Fail, Lock};
+use crate::db::sql::exec::{sql_state, Cells, Conn, SqlRow, Tx};
 use sqlx::Connection as _;
-use super::structure::{num, Column, ForeignKey, Index, IndexCol, Structure};
-use super::value::Param;
-use super::worker::text;
-use super::write::{self, SqlUndo};
-use super::pg::{LOCK_WAIT_SECS, WRITE_LOCK_SECS};
-use super::{se, Db, Dialect, Pool};
+use crate::db::sql::structure::{num, Column, ForeignKey, Index, IndexCol, Structure};
+use crate::db::sql::value::Param;
+use crate::db::sql::worker::text;
+use crate::db::sql::write::{self, SqlUndo};
+use crate::db::sql::pg::{LOCK_WAIT_SECS, WRITE_LOCK_SECS};
+use crate::db::sql::{se, Db, Dialect, Pool};
 use crate::db::errors::{in_use, lock_held_cascade, InUse};
 use crate::db::{Msg, Res, UndoAction, UndoKind, Worker};
 use std::collections::{HashMap, HashSet};
@@ -38,7 +38,7 @@ pub fn system_db(name: &str) -> bool {
 }
 
 /// How many dependent objects a confirmation lists before it says "and N more".
-pub(super) const LISTED: usize = 20;
+pub(in crate::db::sql) const LISTED: usize = 20;
 
 const LOCKED: &str = "Writes are locked on this connection. Unlock them first.";
 
@@ -593,7 +593,7 @@ fn not_empty_sql() -> String {
 }
 
 /// Runs reads in a `BEGIN READ ONLY` that is always rolled back, on a connection of its own, with every value bound.
-pub(super) async fn read(db: &Db, scope: &str, steps: &[(&str, Vec<Param>)]) -> Res<Vec<Vec<SqlRow>>> {
+pub(in crate::db::sql) async fn read(db: &Db, scope: &str, steps: &[(&str, Vec<Param>)]) -> Res<Vec<Vec<SqlRow>>> {
     let mut c = db.acquire_conn().await?;
     let out = read_on(&mut c, db, scope, steps).await;
     let _ = c.close().await;
@@ -623,7 +623,7 @@ async fn read_on(c: &mut Conn, db: &Db, scope: &str, steps: &[(&str, Vec<Param>)
 
 /// Every non-template database that can be connected to, read on the connection that ran a statement.
 async fn db_list(c: &mut Conn) -> Res<Vec<String>> {
-    Ok(c.fetch_all(super::pg::DB_LIST).await.map_err(se)?.iter().filter_map(|r| text(r, "datname")).collect())
+    Ok(c.fetch_all(crate::db::sql::pg::DB_LIST).await.map_err(se)?.iter().filter_map(|r| text(r, "datname")).collect())
 }
 
 async fn db_info(db: &Db, name: &str) -> Res<DropInfo> {
@@ -980,7 +980,7 @@ async fn pg_ids_now(db: &Db, schema: &str, table: &str) -> Res<(Option<String>, 
 
 /// Refuses an undo whose database or table is not the one the change ran on, by oid. A drop of the database (or a dump that drops
 /// first) followed by a create under the same name gives the same structure, and the undo would otherwise act on the new one.
-pub(super) async fn check_ids(db: &Db, schema: &str, table: &str, ids: &write::PgIds) -> Res<()> {
+pub(in crate::db::sql) async fn check_ids(db: &Db, schema: &str, table: &str, ids: &write::PgIds) -> Res<()> {
     if ids.db.is_empty() && ids.table.is_empty() {
         return Ok(());
     }
@@ -1361,7 +1361,7 @@ impl Worker {
 
 /// Undoes a create of a database, schema or table (`sql_undo_create` hands PostgreSQL's here). Only an empty, unchanged object goes. A
 /// refused undo hands the entry back, so it stays in the list with the reason.
-pub(super) async fn undo(db: Db, a: UndoAction, read_only: bool) -> Msg {
+pub(in crate::db::sql) async fn undo(db: Db, a: UndoAction, read_only: bool) -> Msg {
     let UndoAction { at, conn, db: schema, coll: table, kind } = a;
     let UndoKind::Sql { database, cols, undo, ids } = kind else { return Msg::SqlDdl { conn, database: String::new(), schema, table, what: Ddl::DroppedTable, res: Err("Not a create".into()), undo: None, dbs: None, sql_mode: None } };
     let (what, res, dbs, said) = match &undo {
