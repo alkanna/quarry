@@ -993,7 +993,8 @@ impl App {
             menu_look(ui);
             let mut changed: Option<Privs> = None;
             popover_body(ui, 230.0, |ui| {
-                ui.label(semibold(RichText::new(format!("{who} on {}", if o.schema.is_empty() { o.name.clone() } else { format!("{}.{}", o.schema, o.name) })).size(TXT_TITLE).color(BRIGHT())));
+                // The popover layout is justified, which makes egui stretch a wrapped label across the width
+                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| ui.label(semibold(RichText::new(format!("{who} on {}", if o.schema.is_empty() { o.name.clone() } else { format!("{}.{}", o.schema, o.name) })).size(TXT_TITLE).color(BRIGHT()))));
                 ui.add_space(8.0);
                 let (hr, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 18.0), Sense::hover());
                 ui.painter().text(egui::pos2(hr.right() - 104.0, hr.center().y), egui::Align2::CENTER_CENTER, "Granted", FontId::proportional(TXT_SMALL), MUTED());
