@@ -908,7 +908,8 @@ impl App {
                     }
                 }
                 // Room for the horizontal scroll bar under the last row.
-                let h = (objs.objs.len() as f32 * CELL_H + 12.0).min(330.0);
+                // The horizontal bar floats over the content, so the room is the bar's whole height, not a margin.
+                let h = (objs.objs.len() as f32 * CELL_H + 24.0).min(330.0);
                 egui::ScrollArea::vertical().id_salt("pg-matrix-v").max_height(h).min_scrolled_height(h).auto_shrink([false, true]).show_rows(ui, CELL_H, objs.objs.len(), |ui, range| {
                     for i in range {
                         let o = &objs.objs[i];
