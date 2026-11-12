@@ -378,14 +378,19 @@ fn a_json_cell_is_checked_while_typed_and_bad_json_is_not_applied() {
         ui.open_cell("doc", 1);
         ui.click("Open in editor");
         ui.wait("the dialog", |a| a.sql_cell.as_ref().is_some_and(|e| e.big));
-        ui.h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
-        ui.type_text("{\"a\": ");
+        // Set directly: the JSON editor pairs brackets, so typed braces would wrap the selection.
+        let put = |ui: &mut UiApp, s: &str| ui.h.state_mut().sql_cell.as_mut().unwrap().text = s.into();
+        put(ui, "{\"a\": ");
         ui.h.run_steps(2);
         assert!(ui.h.query_by_label_contains("Not valid JSON").is_some(), "no error while the JSON is incomplete");
         ui.click("Apply");
         ui.h.run_steps(4);
         assert!(ui.app().sql_cell.as_ref().is_some_and(|e| e.big) && ui.app().drafts.is_empty(), "bad JSON was applied");
-        apply_in_editor(ui, "{\"a\": 1}");
+        put(ui, "{\"a\": 1}");
+        ui.h.run_steps(2);
+        assert!(ui.h.query_by_label_contains("Not valid JSON").is_none(), "the error stayed after the JSON was fixed");
+        ui.click("Apply");
+        ui.wait("the edit to be staged", |a| a.sql_cell.is_none() && !a.drafts.is_empty());
         ui.save();
         let t0 = std::time::Instant::now();
         while !fx.one(&format!("SELECT doc FROM {q} WHERE id = 1")).contains("\"a\"") {
