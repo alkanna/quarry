@@ -755,6 +755,9 @@ impl App {
                 let right = 170.0;
                 let width = (ui.available_width() - right).max(120.0);
                 ui.allocate_ui_with_layout(egui::vec2(width, 90.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                    // The count label is centered in the row height while this column starts at the top, so drop the first line onto the same center
+                    let small_h = ui.fonts_mut(|f| f.row_height(&egui::FontId::proportional(TXT_SMALL)));
+                    ui.add_space(((ui.spacing().interact_size.y - small_h) / 2.0).max(0.0));
                     egui::ScrollArea::vertical().id_salt("pg-roles-staged").max_height(84.0).auto_shrink([false, true]).show(ui, |ui| match &preview {
                         Ok(t) if t.is_empty() => {
                             ui.label(RichText::new(if env.blocked.is_some() { "Nothing can be staged on this connection." } else { "Click a cell, or change a role, to stage a statement. Nothing runs until Apply." }).size(TXT_SMALL).color(FAINT()));
