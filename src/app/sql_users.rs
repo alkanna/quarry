@@ -274,12 +274,12 @@ fn held_grants(w: &SqlUsersWin) -> &[Grant] {
 
 /// The id of a password field. egui keeps the cursor and an undo history of each text field under its id, in memory
 /// that outlives the dialog, so a password field gets an id of its own for each dialog.
-fn secret_id(what: &str, serial: u64, n: u8) -> egui::Id {
+pub(super) fn secret_id(what: &str, serial: u64, n: u8) -> egui::Id {
     egui::Id::unique(("quarry-secret", what, serial, n))
 }
 
 /// Drops what egui remembers of the password fields of one dialog.
-fn forget_secret(ctx: &egui::Context, what: &str, serial: u64, fields: u8) {
+pub(super) fn forget_secret(ctx: &egui::Context, what: &str, serial: u64, fields: u8) {
     ctx.data_mut(|d| {
         for n in 0..fields {
             d.remove::<egui::text_edit::TextEditState>(secret_id(what, serial, n));
@@ -326,6 +326,9 @@ impl App {
     }
 
     pub(super) fn open_sql_users(&mut self, conn: u64) {
+        if self.users_dialect(conn) == Dialect::Postgres || self.conn(conn).is_some_and(|c| c.meta.engine == db::sql::Engine::Postgres) {
+            return self.open_pg_roles(conn);
+        }
         self.sql_users = Some(SqlUsersWin::new(conn));
         self.sql_users_reload();
     }

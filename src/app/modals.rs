@@ -215,6 +215,9 @@ impl App {
                 Modal::PgNewTable(f) => self.pg_new_table_dialog(ui, f, &mut keep),
                 Modal::SqlNewUser(f) => self.sql_new_user_dialog(ui, f, &mut keep),
                 Modal::SqlPassword(f) => self.sql_password_dialog(ui, f, &mut keep),
+                Modal::PgNewRole(f) => self.pg_new_role_dialog(ui, f, &mut keep),
+                Modal::PgPassword(f) => self.pg_password_dialog(ui, f, &mut keep),
+                Modal::PgDropRole(f) => self.pg_drop_role_dialog(ui, f, &mut keep),
                 Modal::FkEdit(f) => self.fk_dialog(ui, f, &mut keep),
                 Modal::Typed { title, expect, typed, action } => {
                     ui.label(semibold(RichText::new(title.as_str()).color(BRIGHT())));

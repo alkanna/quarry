@@ -50,6 +50,8 @@ pub enum SqlUndo {
     PgCreatedTable { oid: String, state: Vec<String> },
     /// A change to an account's privileges, or a user this app created; see `users`.
     Account(Box<super::users::AccountUndo>),
+    /// PostgreSQL role and privilege changes, or a role this app created; see `roles_pg`.
+    PgRoles(Box<super::roles_pg::RolesUndo>),
 }
 
 /// The oids a PostgreSQL write ran on, as text. A name says nothing about which object it was: a database or table dropped and made
@@ -71,7 +73,7 @@ impl SqlUndo {
             SqlUndo::Delete(r) => r.first().map(pk_of),
             SqlUndo::Insert(r) => r.first().cloned(),
             SqlUndo::Inserted(r) => r.first().map(pk_of),
-            SqlUndo::Alter(_) | SqlUndo::Trigger(_) | SqlUndo::Account(_) | SqlUndo::Import(_) => None,
+            SqlUndo::Alter(_) | SqlUndo::Trigger(_) | SqlUndo::Account(_) | SqlUndo::PgRoles(_) | SqlUndo::Import(_) => None,
             SqlUndo::CreatedDb { .. } | SqlUndo::CreatedTable { .. } | SqlUndo::CreatedSchema { .. } | SqlUndo::PgCreatedTable { .. } => None,
         };
         first.map(|d| d.keys().cloned().collect()).unwrap_or_default()
@@ -90,6 +92,7 @@ impl SqlUndo {
             SqlUndo::CreatedTable { .. } | SqlUndo::PgCreatedTable { .. } => "created table".into(),
             SqlUndo::CreatedSchema { .. } => "created schema".into(),
             SqlUndo::Account(u) => u.label.clone(),
+            SqlUndo::PgRoles(u) => u.label(),
         }
     }
 }
@@ -696,6 +699,10 @@ impl Worker {
                 let u = (**u).clone();
                 return super::ddl::undo_trigger(&db, UndoAction { at: when, conn, db: schema, coll: table, kind }, u, read_only).await;
             }
+            if let UndoKind::Sql { undo: SqlUndo::PgRoles(u), .. } = &kind {
+                let u = (**u).clone();
+                return crate::db::sql_scope(db.conn, "", super::roles_pg::undo(&db, UndoAction { at: when, conn, db: schema, coll: table, kind }, u, read_only)).await;
+            }
             if let UndoKind::Sql { undo: SqlUndo::Account(u), .. } = &kind {
                 let u = (**u).clone();
                 return crate::db::sql_scope(db.conn, "", super::users::undo(&db, UndoAction { at: when, conn, db: schema, coll: table, kind }, u, read_only)).await;
@@ -719,7 +726,7 @@ impl Worker {
                 SqlUndo::Inserted(rows) => apply_undo_inserted_pg(&db, &schema, &table, &cols, &pk, &rows, read_only).await.map(|_| "Removed the inserted rows".to_string()),
                 SqlUndo::Import(u) => super::import_pg::undo(&db, &schema, &table, &u, read_only).await,
                 // Taken before this match, where the structure statements run.
-                SqlUndo::Alter(_) | SqlUndo::Trigger(_) | SqlUndo::Account(_) => Err("Not a row change".into()),
+                SqlUndo::Alter(_) | SqlUndo::Trigger(_) | SqlUndo::Account(_) | SqlUndo::PgRoles(_) => Err("Not a row change".into()),
                 SqlUndo::CreatedDb { .. } | SqlUndo::CreatedTable { .. } | SqlUndo::CreatedSchema { .. } | SqlUndo::PgCreatedTable { .. } => Err("Handled by sql_undo_create".to_string()),
             };
             let undo = res.is_err().then(|| UndoAction { at: when, conn, db: schema, coll: table, kind: UndoKind::Sql { database, cols, undo, ids } });

@@ -53,6 +53,9 @@ mod review_final;
 pub mod rules;
 pub mod schema;
 pub mod users;
+pub mod roles_pg;
+#[cfg(test)]
+mod roles_pg_tests;
 pub use advanced::{Advanced, Charset, TestInfo, Zone};
 pub use dialect::{Dialect, Feature, FUNCTIONS, KEYWORDS};
 pub use structure::Structure;

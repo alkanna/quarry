@@ -30,6 +30,8 @@ flate2 = "1"
 sqlformat = "0.5.0"
 # Already in the build through chrono; names this computer's IANA time zone for the PostgreSQL Advanced tab.
 iana-time-zone = "0.1"
+# Already in the build through sqlx; SASLprep for the SCRAM verifier of a PostgreSQL role password.
+stringprep = "0.1"
 
 # Already in the build through other crates; read the app's own memory and CPU time for the status bar.
 [target.'cfg(unix)'.dependencies]

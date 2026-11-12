@@ -3,7 +3,8 @@
 //! demo where the feature exists on PostgreSQL, plus `schemas` (the switcher open), `connform`, `paste` and `tls`, and for
 //! Cloud SQL `cloudsql` (the browser over recorded acme-* instances), `cloudsql-form` (the form after Use) and
 //! `cloudsql-missing` (the browser when no proxy is found), `cloudsql-adc` (Use on an IAM instance without Application Default
-//! Credentials). gcloud never runs in the demo.
+//! Credentials), and for roles `roles` (the Roles and privileges window on its object matrix, a cell editor open and one grant
+//! staged) and `roles-role` (its Roles tab on app_writer). gcloud never runs in the demo.
 
 use super::*;
 use db::sql::schema::{Schema, SchemaCol, SchemaTable};
@@ -176,6 +177,7 @@ impl App {
             "select" => self.tabs[0].checked = [1, 2, 4, 5].into(),
             "connform" | "paste" | "tls" | "advanced" => self.pg_form_demo(which),
             "cloudsql" | "cloudsql-form" | "cloudsql-missing" | "cloudsql-adc" => self.pg_cloud_demo(which),
+            "roles" | "roles-role" => self.pg_roles_demo(which, CONN),
             _ => {}
         }
     }

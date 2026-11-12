@@ -8,6 +8,7 @@
 mod conn_advanced;
 mod conn_cloudsql;
 mod mongo_edit;
+mod pg_roles;
 mod sidebar;
 mod sql_create;
 mod sql_dump;

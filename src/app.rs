@@ -61,6 +61,7 @@ mod sql_query;
 mod sql_import;
 mod sql_dump;
 mod sql_users;
+mod pg_roles;
 mod state;
 mod table;
 mod tabs;
@@ -197,6 +198,7 @@ pub struct App {
     sql_values_asked: HashMap<(u64, String, String, String), HashSet<Option<String>>>,
     users: Option<UsersWin>,
     sql_users: Option<sql_users::SqlUsersWin>,
+    pg_roles: Option<pg_roles::PgRolesWin>,
     server: Option<ServerWin>,
     sql_server: Option<SqlServerWin>,
     /// Kill requests sent from the Server window and not answered yet. Kept here so an answer that arrives after
@@ -352,6 +354,7 @@ impl App {
             sql_values_asked: HashMap::new(),
             users: None,
             sql_users: None,
+            pg_roles: None,
             server: None,
             sql_server: None,
             sql_kills: HashSet::new(),
@@ -696,6 +699,7 @@ impl eframe::App for App {
         self.modals(&ctx);
         self.users_window(&ctx);
         self.sql_users_window(&ctx);
+        self.pg_roles_window(&ctx);
         self.server_window(&ctx);
         self.sql_server_window(&ctx);
         self.tool_window(&ctx);

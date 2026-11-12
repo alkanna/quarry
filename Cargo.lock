@@ -4389,6 +4389,7 @@ dependencies = [
  "sha2 0.11.1",
  "sqlformat",
  "sqlx",
+ "stringprep",
  "tokio",
  "windows-sys 0.61.2",
  "winit",
