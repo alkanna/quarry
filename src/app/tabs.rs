@@ -81,18 +81,35 @@ impl App {
         }
     }
 
+    /// Whether tab `i` holds work a click must not throw away, an editor open on the current tab included.
+    fn holds_work(&self, i: usize) -> bool {
+        let editing = i == self.cur && (self.json_edit.is_some() || self.sql_cell.is_some() || self.inline.is_some() || self.new_field.is_some());
+        editing || self.tabs.get(i).is_some_and(|t| keeps_work(t, &self.drafts))
+    }
+
     /// Opens a collection, as a browser opens a page. `Here` goes to a tab already showing it, else takes the
     /// current tab when nothing would be lost there, else opens a tab next to it.
     pub(super) fn open_collection(&mut self, sel: Sel, how: Open) {
-        // Before reset_doc_state, which closes the editors this checks for.
-        let editing = self.json_edit.is_some() || self.sql_cell.is_some() || self.inline.is_some() || self.new_field.is_some();
-        let keep = self.t().is_none_or(|t| editing || keeps_work(t, &self.drafts));
+        if self.open_tab(sel, how) {
+            self.reload();
+        }
+    }
+
+    /// `open_collection` without the first read, for a caller that sets the query before reading. True when the
+    /// tab is a new one, which has nothing to show yet.
+    pub(super) fn open_tab(&mut self, sel: Sel, how: Open) -> bool {
+        // Before reset_doc_state, which closes the editors holds_work checks for.
+        let keep = self.holds_work(self.cur);
+        let shown = match how {
+            Open::NewTab => None,
+            // A link sets its own filter, so it never takes a tab with work in it.
+            Open::Link => (0..self.tabs.len()).find(|&i| self.tabs[i].sel == sel && !self.holds_work(i)),
+            Open::Here | Open::Replace => self.tabs.iter().position(|t| t.sel == sel),
+        };
         self.reset_doc_state();
-        if how != Open::NewTab
-            && let Some(i) = self.tabs.iter().position(|t| t.sel == sel)
-        {
+        if let Some(i) = shown {
             self.set_cur(i);
-            return;
+            return false;
         }
         let engine = self.conn(sel.conn).map(|c| c.meta.engine).unwrap_or_default();
         let replace = !self.tabs.is_empty() && (how == Open::Replace || how == Open::Here && !keep);
@@ -107,14 +124,13 @@ impl App {
                 old.watch.stop();
                 self.remember_closed(old);
             }
-            let i = self.cur;
-            self.show_tab(i);
+            self.show_tab(self.cur);
         } else {
             let at = if self.tabs.is_empty() { 0 } else { self.cur + 1 };
             self.tabs.insert(at, Tab::new(sel).for_engine(engine));
             self.set_cur(at);
         }
-        self.reload();
+        true
     }
 
     /// Keeps the 10 most recently closed tabs for "Reopen closed tab" (maxClosedTabsCount,
@@ -224,7 +240,7 @@ fn nav_target(from: &mut Vec<u64>, tabs: &[Tab], cur: usize) -> Option<usize> {
 
 /// Whether a tab holds work a click elsewhere must not throw away: a workspace view, text of the person's in any of
 /// its views, or staged edits. Such a tab is never reused by a plain click.
-pub(super) fn keeps_work(t: &Tab, drafts: &HashMap<String, Draft>) -> bool {
+fn keeps_work(t: &Tab, drafts: &HashMap<String, Draft>) -> bool {
     let typed = [&t.proj_txt, &t.limit_txt, &t.skip_txt, &t.hint_txt, &t.collation_txt, &t.shell.code].iter().any(|s| !s.trim().is_empty());
     let sql = t.sql.as_ref().is_some_and(|s| !s.query.trim().is_empty() || !s.st.staged.is_empty() || !s.st.trig.is_empty() || s.st.applying);
     matches!(t.view, View::Shell | View::Sql | View::Import | View::Compare | View::Watch)
@@ -232,7 +248,7 @@ pub(super) fn keeps_work(t: &Tab, drafts: &HashMap<String, Draft>) -> bool {
         || typed
         || sql
         || t.agg_txt != NEW_PIPELINE
-        || !drafts_of(drafts, &t.sel).is_empty()
+        || drafts.values().any(|d| d.is_in(&t.sel))
 }
 
 /// Cmd+click and middle-click open a new tab, as links do in a browser.

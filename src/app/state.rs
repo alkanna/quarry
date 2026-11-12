@@ -1384,6 +1384,8 @@ pub(super) const NEW_PIPELINE: &str = "[\n  { $match: {} },\n  { $limit: 20 }\n]
 pub(super) enum Open {
     Here,
     NewTab,
+    /// A link in data: a tab showing it without work in it, else a new tab. The current tab is never replaced.
+    Link,
     /// The current tab whatever it holds: the Shell switching its own collection.
     Replace,
 }

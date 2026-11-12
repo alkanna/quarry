@@ -106,7 +106,13 @@ pub(super) fn stage_draft(drafts: &mut HashMap<String, Draft>, key: &str, sel: &
 /// Keys of the drafts in one collection. Matched on the draft's own fields, not a key prefix:
 /// collection names may contain `#`, so `a#` would also match drafts of `a#b`.
 pub(super) fn drafts_of(drafts: &HashMap<String, Draft>, sel: &Sel) -> Vec<String> {
-    drafts.iter().filter(|(_, d)| d.conn == sel.conn && d.db == sel.db && d.schema == sel.schema && d.coll == sel.coll).map(|(k, _)| k.clone()).collect()
+    drafts.iter().filter(|(_, d)| d.is_in(sel)).map(|(k, _)| k.clone()).collect()
+}
+
+impl Draft {
+    pub(super) fn is_in(&self, sel: &Sel) -> bool {
+        self.conn == sel.conn && self.db == sel.db && self.schema == sel.schema && self.coll == sel.coll
+    }
 }
 
 /// The document as stored on the server: deletes must match that, not its unsaved edits.

@@ -4,7 +4,6 @@
 
 use crate::app::sql::alter::{sql_block, BUSY_NOTE};
 use crate::app::*;
-use crate::app::tabs::keeps_work;
 use db::sql::ddl::{self, Change, FK_ACTIONS};
 use db::sql::structure::{ForeignKey, Structure};
 
@@ -570,16 +569,7 @@ impl App {
         };
         let base = self.t().map(|t| t.sel.clone()).unwrap_or_default();
         let sel = sql::ns::with_ns(self.dialect_of(conn), &base, &fk.ref_db, fk.ref_table.clone());
-        self.reset_doc_state();
-        match self.tabs.iter().position(|t| t.sel == sel && !keeps_work(t, &self.drafts)) {
-            Some(i) => self.set_cur(i),
-            None => {
-                let engine = self.conn(conn).map(|c| c.meta.engine).unwrap_or_default();
-                // Next to the table it was opened from, as a browser opens a link in a new tab.
-                self.tabs.insert(self.cur + 1, Tab::new(sel).for_engine(engine));
-                self.set_cur(self.cur + 1);
-            }
-        }
+        self.open_tab(sel, Open::Link);
         let Some(t) = self.tm() else { return };
         t.view = View::Documents;
         t.filter_txt = text;
