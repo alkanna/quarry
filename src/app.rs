@@ -454,9 +454,23 @@ impl App {
             }
             if std::env::var("QUARRY_TEST_READING").is_ok() {
                 let p = &mut app.prefs;
-                (p.ui_scale, p.dyslexic_font, p.soft, p.reading_line, p.group_digits, p.keep_toasts) = (1.25, true, true, true, true, true);
-                style(&cc.egui_ctx, p.look());
+                (p.ui_scale, p.soft, p.reading_line, p.group_digits, p.keep_toasts) = (1.25, true, true, true, true);
+                p.ui_font = "OpenDyslexic".into();
             }
+            // QUARRY_TEST_THEME=<name> shows that theme in its own mode; the font switches take a name from the Settings lists.
+            if let Ok(name) = std::env::var("QUARRY_TEST_THEME") {
+                let light = LIGHT_THEMES.iter().any(|t| t.name == name);
+                *(if light { &mut app.prefs.light_theme } else { &mut app.prefs.dark_theme }) = name;
+                app.prefs.appearance = if light { Appearance::Light } else { Appearance::Dark };
+                app.prefs.appearance.apply(&cc.egui_ctx);
+            }
+            if let Ok(f) = std::env::var("QUARRY_TEST_UI_FONT") {
+                app.prefs.ui_font = f;
+            }
+            if let Ok(f) = std::env::var("QUARRY_TEST_DATA_FONT") {
+                app.prefs.data_font = f;
+            }
+            style(&cc.egui_ctx, app.prefs.look());
             if let Ok(q) = std::env::var("QUARRY_TEST_FIND") {
                 let f = Find { open: true, query: q, ..Default::default() };
                 cc.egui_ctx.data_mut(|d| d.insert_temp(egui::Id::unique("json-editor-text").with("find"), f));
@@ -467,6 +481,7 @@ impl App {
             let ui_json = config_dir().join("ui.json").exists().then_some(());
             let (prefs, broken_prefs) = parse_config(&config_dir().join("ui.json"));
             app.prefs = prefs;
+            app.prefs.migrate();
             app.values = load_values();
             app.prefs.appearance.apply(&cc.egui_ctx);
             // A hand-edited size that is not offered shows and applies as 100 %.

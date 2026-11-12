@@ -4,7 +4,8 @@
 use eframe::egui::{self, Color32, CornerRadius, FontId, RichText, Stroke, TextFormat};
 
 // Colors come from the palette of the theme in use, so they are functions, not constants.
-// Dark is "Workbench" and light is "Paper"; both share one layout, only colors differ.
+// Every theme shares one layout, only colors differ. Designs are in docs/themes.figcraft.
+#[derive(Clone, Copy)]
 pub(crate) struct Palette {
     /// The workspace: central page, table body, active tab and inputs.
     pub(crate) bg: Color32,
@@ -63,6 +64,11 @@ pub(crate) struct Palette {
 
 const fn hex(v: u32) -> Color32 {
     Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
+}
+
+/// `v` at `a` out of 255, premultiplied, for the search highlight.
+const fn hl(v: u32, a: u32) -> Color32 {
+    Color32::from_rgba_premultiplied(((v >> 16 & 0xff) * a / 255) as u8, ((v >> 8 & 0xff) * a / 255) as u8, ((v & 0xff) * a / 255) as u8, a as u8)
 }
 
 pub(crate) const DARK_PAL: Palette = Palette {
@@ -195,6 +201,319 @@ pub(crate) const LIGHT_SOFT_PAL: Palette = Palette {
     ..LIGHT_PAL
 };
 
+// The accents of Midnight, Ember, Dusk and Carbon are bright, so text on them is dark: white is under 4.5:1.
+const MIDNIGHT_PAL: Palette = Palette {
+    bg: hex(0x10141c),
+    panel: hex(0x161b25),
+    chrome: hex(0x131821),
+    raised: hex(0x1f2633),
+    hover: hex(0x1c2230),
+    pressed: hex(0x232b3a),
+    menu_hover: hex(0x2a3343),
+    border: hex(0x283040),
+    line: hex(0x1f2633),
+    raised_line: hex(0x2c3546),
+    hdr: hex(0x161b25),
+    text: hex(0xc3cad8),
+    bright: hex(0xe6ebf5),
+    muted: hex(0x8590a6),
+    faint: hex(0x5f6a80),
+    primary: hex(0x38bdf8),
+    on_primary: hex(0x04121c),
+    sel: hex(0x173049),
+    sel_hover: hex(0x1b3854),
+    alert: hex(0xff6b7a),
+    success: hex(0x4fd18b),
+    warning: hex(0xf2b552),
+    c_string: hex(0x7ee0a1),
+    c_number: hex(0xf5a97f),
+    c_true: hex(0x4fd18b),
+    c_false: hex(0xff6b7a),
+    c_date: hex(0x82aaff),
+    c_null: hex(0x6c7891),
+    c_oid: hex(0xc79bff),
+    c_obj: hex(0x8590a6),
+    key: hex(0xc3cad8),
+    c_link: hex(0x38bdf8),
+    highlight: hl(0xf2b552, 64),
+    c_keyword: hex(0xc79bff),
+    engine_pg: hex(0x5eead4),
+    stripe: hex(0x131821),
+    track: hex(0x334056),
+    well: hex(0x0d1118),
+};
+
+/// Paper's dark twin.
+const EMBER_PAL: Palette = Palette {
+    bg: hex(0x1a1714),
+    panel: hex(0x221e1a),
+    chrome: hex(0x1e1b17),
+    raised: hex(0x2e2924),
+    hover: hex(0x2a2520),
+    pressed: hex(0x332d27),
+    menu_hover: hex(0x3a342d),
+    border: hex(0x3a332c),
+    line: hex(0x2e2924),
+    raised_line: hex(0x40392f),
+    hdr: hex(0x221e1a),
+    text: hex(0xd2c8bc),
+    bright: hex(0xf2ebe2),
+    muted: hex(0x9a8f82),
+    faint: hex(0x6e655a),
+    primary: hex(0xf0743e),
+    on_primary: hex(0x1c1009),
+    sel: hex(0x3d2618),
+    sel_hover: hex(0x472c1b),
+    alert: hex(0xff6f61),
+    success: hex(0x8cc265),
+    warning: hex(0xf2b14c),
+    c_string: hex(0xb5cc6a),
+    c_number: hex(0xf2a65a),
+    c_true: hex(0x8cc265),
+    c_false: hex(0xff6f61),
+    c_date: hex(0x7fbfb4),
+    c_null: hex(0x8a8076),
+    c_oid: hex(0xd59ac0),
+    c_obj: hex(0x9a8f82),
+    key: hex(0xd2c8bc),
+    c_link: hex(0x7fbfb4),
+    highlight: hl(0xf2b14c, 64),
+    c_keyword: hex(0xe8b86b),
+    engine_pg: hex(0x7fbfb4),
+    stripe: hex(0x1e1b17),
+    track: hex(0x4a4239),
+    well: hex(0x161310),
+};
+
+const DUSK_PAL: Palette = Palette {
+    bg: hex(0x1a1722),
+    panel: hex(0x211d2b),
+    chrome: hex(0x1d1a26),
+    raised: hex(0x2c2738),
+    hover: hex(0x282334),
+    pressed: hex(0x302a3e),
+    menu_hover: hex(0x383148),
+    border: hex(0x3a3348),
+    line: hex(0x2c2738),
+    raised_line: hex(0x403852),
+    hdr: hex(0x211d2b),
+    text: hex(0xccc4da),
+    bright: hex(0xefe9f7),
+    muted: hex(0x958ca8),
+    faint: hex(0x6a6280),
+    primary: hex(0xe56fa8),
+    on_primary: hex(0x1e0a15),
+    sel: hex(0x3d2443),
+    sel_hover: hex(0x472a4e),
+    alert: hex(0xff6e7f),
+    success: hex(0x6fd6a6),
+    warning: hex(0xf3c06b),
+    c_string: hex(0xa6da95),
+    c_number: hex(0xf5a97f),
+    c_true: hex(0x6fd6a6),
+    c_false: hex(0xff6e7f),
+    c_date: hex(0x8bb8ff),
+    c_null: hex(0x7c7392),
+    c_oid: hex(0xf0a6ca),
+    c_obj: hex(0x958ca8),
+    key: hex(0xccc4da),
+    c_link: hex(0x8bb8ff),
+    highlight: hl(0xf3c06b, 64),
+    c_keyword: hex(0xc3a6ff),
+    engine_pg: hex(0x7dd3fc),
+    stripe: hex(0x1d1a26),
+    track: hex(0x463e58),
+    well: hex(0x16131d),
+};
+
+/// High contrast: true black, near-white text and outlines that stand out.
+const CARBON_PAL: Palette = Palette {
+    bg: hex(0x000000),
+    panel: hex(0x0d0d0d),
+    chrome: hex(0x0a0a0a),
+    raised: hex(0x1a1a1a),
+    hover: hex(0x1c1c1c),
+    pressed: hex(0x262626),
+    menu_hover: hex(0x2e2e2e),
+    border: hex(0x5c5c5c),
+    line: hex(0x2b2b2b),
+    raised_line: hex(0x3d3d3d),
+    hdr: hex(0x0d0d0d),
+    text: hex(0xf0f0f0),
+    bright: hex(0xffffff),
+    muted: hex(0xbdbdbd),
+    faint: hex(0x8f8f8f),
+    primary: hex(0xffb000),
+    on_primary: hex(0x000000),
+    sel: hex(0x3a2a00),
+    sel_hover: hex(0x4a3600),
+    alert: hex(0xff5c5c),
+    success: hex(0x3ee07a),
+    warning: hex(0xffd23f),
+    c_string: hex(0x7cf29a),
+    c_number: hex(0x5cd6ff),
+    c_true: hex(0x3ee07a),
+    c_false: hex(0xff5c5c),
+    c_date: hex(0x8fb8ff),
+    c_null: hex(0xa6a6a6),
+    c_oid: hex(0xff8fe0),
+    c_obj: hex(0xbdbdbd),
+    key: hex(0xf0f0f0),
+    c_link: hex(0x5cd6ff),
+    highlight: hl(0xffd23f, 80),
+    c_keyword: hex(0xff9a5c),
+    engine_pg: hex(0x5cd6ff),
+    stripe: hex(0x0a0a0a),
+    track: hex(0x4d4d4d),
+    well: hex(0x000000),
+};
+
+const GLACIER_PAL: Palette = Palette {
+    bg: hex(0xf8fafc),
+    panel: hex(0xf1f4f8),
+    chrome: hex(0xeaeef4),
+    raised: hex(0xffffff),
+    hover: hex(0xe5eaf1),
+    pressed: hex(0xdae1ea),
+    menu_hover: hex(0xeef2f7),
+    border: hex(0xd2dae5),
+    line: hex(0xe1e7ef),
+    raised_line: hex(0xe1e7ef),
+    hdr: hex(0xeff2f7),
+    text: hex(0x2c3442),
+    bright: hex(0x0f1623),
+    muted: hex(0x5d6878),
+    faint: hex(0x95a0b0),
+    primary: hex(0x3b5bdb),
+    on_primary: hex(0xffffff),
+    sel: hex(0xe6ebfb),
+    sel_hover: hex(0xdde4fa),
+    alert: hex(0xc92a3a),
+    success: hex(0x2b8a3e),
+    warning: hex(0xb06d00),
+    c_string: hex(0x2b8a3e),
+    c_number: hex(0x0b7285),
+    c_true: hex(0x2b8a3e),
+    c_false: hex(0xc92a3a),
+    c_date: hex(0x6741d9),
+    c_null: hex(0x8a94a3),
+    c_oid: hex(0xa35400),
+    c_obj: hex(0x5d6878),
+    key: hex(0x2c3442),
+    c_link: hex(0x1c64d8),
+    highlight: hl(0xb06d00, 51),
+    c_keyword: hex(0xae3ec9),
+    engine_pg: hex(0x0b7285),
+    stripe: hex(0xf3f6fa),
+    track: hex(0xc5cfdc),
+    well: hex(0xffffff),
+};
+
+const SAGE_PAL: Palette = Palette {
+    bg: hex(0xf7f8f4),
+    panel: hex(0xeff1ea),
+    chrome: hex(0xe9ece3),
+    raised: hex(0xfdfdfb),
+    hover: hex(0xe3e7dc),
+    pressed: hex(0xd8ddcf),
+    menu_hover: hex(0xeceee6),
+    border: hex(0xd0d6c6),
+    line: hex(0xdfe3d7),
+    raised_line: hex(0xdfe3d7),
+    hdr: hex(0xedf0e8),
+    text: hex(0x333a30),
+    bright: hex(0x141a12),
+    muted: hex(0x606a5b),
+    faint: hex(0x9aa292),
+    primary: hex(0x2f7a5f),
+    on_primary: hex(0xffffff),
+    sel: hex(0xe4efe7),
+    sel_hover: hex(0xdae9df),
+    alert: hex(0xb83a2e),
+    success: hex(0x2f7a3a),
+    warning: hex(0x9c6a00),
+    c_string: hex(0x4d7c1f),
+    c_number: hex(0x1f5fa0),
+    c_true: hex(0x2f7a3a),
+    c_false: hex(0xb83a2e),
+    c_date: hex(0x0f766e),
+    c_null: hex(0x8a9284),
+    c_oid: hex(0x9a4f1a),
+    c_obj: hex(0x606a5b),
+    key: hex(0x333a30),
+    c_link: hex(0x1f6a9a),
+    highlight: hl(0x9c6a00, 51),
+    c_keyword: hex(0x8b3fa8),
+    engine_pg: hex(0x0f766e),
+    stripe: hex(0xf2f4ee),
+    track: hex(0xc6ccbb),
+    well: hex(0xfcfcfa),
+};
+
+pub(crate) struct Theme {
+    pub(crate) name: &'static str,
+    pub(crate) pal: Palette,
+    /// The Soft background. Workbench and Paper have hand-tuned ones; the others derive theirs.
+    soft: Option<Palette>,
+}
+
+/// Which list a theme is in is its kind. The first of each is the default.
+pub(crate) static DARK_THEMES: [Theme; 5] = [
+    Theme { name: "Workbench", pal: DARK_PAL, soft: Some(DARK_SOFT_PAL) },
+    Theme { name: "Midnight", pal: MIDNIGHT_PAL, soft: None },
+    Theme { name: "Ember", pal: EMBER_PAL, soft: None },
+    Theme { name: "Dusk", pal: DUSK_PAL, soft: None },
+    Theme { name: "Carbon", pal: CARBON_PAL, soft: None },
+];
+pub(crate) static LIGHT_THEMES: [Theme; 3] = [
+    Theme { name: "Paper", pal: LIGHT_PAL, soft: Some(LIGHT_SOFT_PAL) },
+    Theme { name: "Glacier", pal: GLACIER_PAL, soft: None },
+    Theme { name: "Sage", pal: SAGE_PAL, soft: None },
+];
+
+pub(crate) fn themes(light: bool) -> &'static [Theme] {
+    if light { &LIGHT_THEMES } else { &DARK_THEMES }
+}
+
+/// The theme named `name` among that kind, or the default, so an unknown name in ui.json still loads.
+pub(crate) fn theme_index(name: &str, light: bool) -> usize {
+    themes(light).iter().position(|t| t.name == name).unwrap_or(0)
+}
+
+/// Less contrast the way the hand-tuned Soft palettes do it: the page moves toward the panel, the surfaces on it
+/// follow by a third of that step, and text moves toward muted. Moving every surface by an offset rather than a
+/// mix keeps the gaps between them, so stripes and hovers stay visible.
+fn soften(p: &Palette) -> Palette {
+    let bg = p.bg.lerp_to_gamma(p.panel, 0.45);
+    let d = [bg.r() as i16 - p.bg.r() as i16, bg.g() as i16 - p.bg.g() as i16, bg.b() as i16 - p.bg.b() as i16];
+    let by = |c: Color32, k: i16| {
+        let ch = |v: u8, d: i16| (v as i16 + d / k).clamp(0, 255) as u8;
+        Color32::from_rgb(ch(c.r(), d[0]), ch(c.g(), d[1]), ch(c.b(), d[2]))
+    };
+    Palette {
+        bg,
+        well: by(p.well, 1),
+        stripe: by(p.stripe, 1),
+        panel: by(p.panel, 3),
+        chrome: by(p.chrome, 3),
+        hdr: by(p.hdr, 3),
+        hover: by(p.hover, 3),
+        pressed: by(p.pressed, 3),
+        line: by(p.line, 3),
+        border: by(p.border, 3),
+        text: p.text.lerp_to_gamma(p.muted, 0.15),
+        bright: p.bright.lerp_to_gamma(p.text, 0.35),
+        ..*p
+    }
+}
+
+/// Soft palettes of the dark and the light themes, in list order.
+static SOFT_PALS: std::sync::LazyLock<[Vec<Palette>; 2]> = std::sync::LazyLock::new(|| [false, true].map(|l| themes(l).iter().map(|t| t.soft.unwrap_or_else(|| soften(&t.pal))).collect()));
+
+fn palette_of(light: bool, i: usize, soft: bool) -> &'static Palette {
+    if soft { &SOFT_PALS[light as usize][i] } else { &themes(light)[i].pal }
+}
+
 /// Set at the start of each frame from egui's resolved theme.
 pub(crate) static LIGHT_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -206,7 +525,11 @@ pub(crate) fn is_light() -> bool {
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct Look {
     pub(crate) scale: f32,
-    pub(crate) dyslexic: bool,
+    /// Indexes into DARK_THEMES, LIGHT_THEMES, UI_FONTS and DATA_FONTS.
+    pub(crate) dark_theme: usize,
+    pub(crate) light_theme: usize,
+    pub(crate) ui_font: usize,
+    pub(crate) data_font: usize,
     pub(crate) soft: bool,
     pub(crate) reading_line: bool,
     pub(crate) group_digits: bool,
@@ -214,11 +537,13 @@ pub(crate) struct Look {
 
 impl Default for Look {
     fn default() -> Self {
-        Self { scale: 1.0, dyslexic: false, soft: false, reading_line: false, group_digits: false }
+        Self { scale: 1.0, dark_theme: 0, light_theme: 0, ui_font: 0, data_font: 0, soft: false, reading_line: false, group_digits: false }
     }
 }
 
 static SOFT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The chosen dark and light theme, indexed by `is_light()`.
+static THEME: [std::sync::atomic::AtomicUsize; 2] = [std::sync::atomic::AtomicUsize::new(0), std::sync::atomic::AtomicUsize::new(0)];
 static READING_LINE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static GROUP_DIGITS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static LOOK_GEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -246,12 +571,9 @@ pub(crate) fn window_shadow() -> egui::Shadow {
 }
 
 pub(crate) fn pal() -> &'static Palette {
-    match (is_light(), SOFT.load(std::sync::atomic::Ordering::Relaxed)) {
-        (true, false) => &LIGHT_PAL,
-        (true, true) => &LIGHT_SOFT_PAL,
-        (false, false) => &DARK_PAL,
-        (false, true) => &DARK_SOFT_PAL,
-    }
+    use std::sync::atomic::Ordering::Relaxed;
+    let light = is_light();
+    palette_of(light, THEME[light as usize].load(Relaxed), SOFT.load(Relaxed))
 }
 
 macro_rules! colors {
@@ -399,18 +721,21 @@ pub(crate) const EDITOR_W: f32 = 230.0;
 pub(crate) fn style(ctx: &egui::Context, look: Look) {
     use std::sync::atomic::Ordering::Relaxed;
     SOFT.store(look.soft, Relaxed);
+    THEME[0].store(look.dark_theme, Relaxed);
+    THEME[1].store(look.light_theme, Relaxed);
     READING_LINE.store(look.reading_line, Relaxed);
     GROUP_DIGITS.store(look.group_digits, Relaxed);
-    let (dark, light) = if look.soft { (&DARK_SOFT_PAL, &LIGHT_SOFT_PAL) } else { (&DARK_PAL, &LIGHT_PAL) };
+    let (dark, light) = (palette_of(false, look.dark_theme, look.soft), palette_of(true, look.light_theme, look.soft));
     for (theme, p) in [(egui::Theme::Dark, dark), (egui::Theme::Light, light)] {
         ctx.set_visuals_of(theme, visuals(theme, p));
     }
     // set_fonts compares whole font files, so it runs only when the font choice changes. The choice is kept
     // in the context, not in a static, because fonts belong to a context and tests build many.
-    let id = egui::Id::unique("quarry-dyslexic-fonts");
-    if ctx.data(|d| d.get_temp::<bool>(id)) != Some(look.dyslexic) {
-        ctx.set_fonts(fonts(look.dyslexic));
-        ctx.data_mut(|d| d.insert_temp(id, look.dyslexic));
+    let id = egui::Id::unique("quarry-fonts");
+    let pick = (look.ui_font, look.data_font);
+    if ctx.data(|d| d.get_temp::<(usize, usize)>(id)) != Some(pick) {
+        ctx.set_fonts(fonts(look.ui_font, look.data_font));
+        ctx.data_mut(|d| d.insert_temp(id, pick));
     }
     LOOK_GEN.fetch_add(1, Relaxed);
     // egui's own Cmd+= zoom steps by 10 % and is not saved; App::zoom_keys steps through SCALES instead.
@@ -438,28 +763,42 @@ pub(crate) fn style(ctx: &egui::Context, look: Look) {
     });
 }
 
-static INTER: &[u8] = include_bytes!("../../assets/fonts/InterVariable.ttf");
-static JB_MONO: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono-Variable.ttf");
-static OPEN_DYSLEXIC: &[u8] = include_bytes!("../../assets/fonts/OpenDyslexic-Regular.otf");
+/// Interface fonts for Settings: name and file. Inter is first, the default and the fallback.
+pub(crate) const UI_FONTS: [(&str, &[u8]); 3] = [
+    ("Inter", include_bytes!("../../assets/fonts/InterVariable.ttf")),
+    ("Geist", include_bytes!("../../assets/fonts/Geist-Variable.ttf")),
+    ("OpenDyslexic", include_bytes!("../../assets/fonts/OpenDyslexic-Regular.otf")),
+];
+/// Data fonts. JetBrains Mono is first, the default and the fallback for glyphs the others lack.
+pub(crate) const DATA_FONTS: [(&str, &[u8]); 4] = [
+    ("JetBrains Mono", include_bytes!("../../assets/fonts/JetBrainsMono-Variable.ttf")),
+    ("Geist Mono", include_bytes!("../../assets/fonts/GeistMono-Variable.ttf")),
+    ("Cascadia Mono", include_bytes!("../../assets/fonts/CascadiaMono-Variable.ttf")),
+    ("Fira Code", include_bytes!("../../assets/fonts/FiraCode-Variable.ttf")),
+];
 
-/// Inter for the interface and JetBrains Mono for data, both variable so one file covers every
-/// weight. egui's own fonts stay behind them as fallbacks for icons and emoji. Inter's metrics
-/// center in buttons as they are, so it needs none of the shift egui's Ubuntu font did.
-/// OpenDyslexic, when chosen, goes in front of Inter for interface text only: it has no mono
-/// version, and data columns need one. It has one weight, so medium and semibold draw as Regular.
-fn fonts(dyslexic: bool) -> egui::FontDefinitions {
+/// The index of the font named `name`, or 0 (the default) for an unknown name.
+pub(crate) fn font_index(list: &[(&str, &[u8])], name: &str) -> usize {
+    list.iter().position(|f| f.0 == name).unwrap_or(0)
+}
+
+/// The chosen interface and data fonts, each in front of the default one so glyphs it lacks still draw.
+/// All but OpenDyslexic are variable, so one file covers every weight. egui's own fonts stay behind them
+/// as fallbacks for icons and emoji. Inter's metrics center in buttons as they are, so it needs none of
+/// the shift egui's Ubuntu font did. OpenDyslexic is for interface text only: it has no mono version, and
+/// data columns need one. It has one weight, so medium and semibold draw as Regular.
+fn fonts(ui_font: usize, data_font: usize) -> egui::FontDefinitions {
     use egui::{FontData, FontFamily, FontTweak, epaint::text::VariationCoords};
     let mut fonts = egui::FontDefinitions::default();
     // Without an explicit weight a variable font draws its default instance, which for
-    // JetBrains Mono is not Regular.
+    // JetBrains Mono is not Regular. The tweak is harmless on OpenDyslexic, which has no axes.
     let regular = |bytes: &'static [u8]| std::sync::Arc::new(FontData::from_static(bytes).tweak(FontTweak { coords: VariationCoords::new([(b"wght", 400.0)]), ..Default::default() }));
-    fonts.font_data.insert("Inter".into(), regular(INTER));
-    fonts.font_data.insert("JetBrainsMono".into(), regular(JB_MONO));
-    fonts.families.entry(FontFamily::Proportional).or_default().insert(0, "Inter".into());
-    fonts.families.entry(FontFamily::Monospace).or_default().insert(0, "JetBrainsMono".into());
-    if dyslexic {
-        fonts.font_data.insert("OpenDyslexic".into(), std::sync::Arc::new(FontData::from_static(OPEN_DYSLEXIC)));
-        fonts.families.entry(FontFamily::Proportional).or_default().insert(0, "OpenDyslexic".into());
+    for (family, list, pick) in [(FontFamily::Proportional, &UI_FONTS[..], ui_font), (FontFamily::Monospace, &DATA_FONTS[..], data_font)] {
+        let pick = pick.min(list.len() - 1);
+        for &(name, bytes) in &[list[0], list[pick]][..1 + (pick != 0) as usize] {
+            fonts.font_data.insert(name.into(), regular(bytes));
+            fonts.families.entry(family.clone()).or_default().insert(0, name.into());
+        }
     }
     fonts
 }
@@ -611,6 +950,13 @@ pub(crate) const MONO_PX: f32 = TXT_BODY;
 
 /// Width of the checkbox column in front of the row number.
 pub(crate) const CHECK_W: f32 = 22.0;
+
+/// Theme cards in Settings: the miniature window, the name under it and the check badge on the chosen one.
+pub(crate) const THEME_CARD_MIN_W: f32 = 84.0;
+pub(crate) const THEME_CARD_MAX_W: f32 = 110.0;
+pub(crate) const THEME_THUMB_H: f32 = 58.0;
+pub(crate) const THEME_LABEL_H: f32 = 24.0;
+pub(crate) const THEME_BADGE_R: f32 = 7.0;
 
 pub(crate) fn mono(c: Color32) -> TextFormat {
     TextFormat { font_id: FontId::monospace(MONO_PX), color: c, ..Default::default() }

@@ -46,14 +46,14 @@ impl App {
     pub(super) fn zoom_keys(&mut self, ctx: &egui::Context) {
         let cmd = egui::Modifiers::COMMAND;
         let (up, down, reset) = ctx.input_mut(|i| (i.consume_key(cmd, Key::Equals) || i.consume_key(cmd, Key::Plus), i.consume_key(cmd, Key::Minus), i.consume_key(cmd, Key::Num0)));
-        let at = SCALES.iter().position(|s| s.0 == self.prefs.look().scale).unwrap_or(0);
+        let at = SCALES.iter().position(|s| s.0 == self.prefs.scale()).unwrap_or(0);
         let to = match (up, down, reset) {
             (_, _, true) => 0,
             (true, _, _) => (at + 1).min(SCALES.len() - 1),
             (_, true, _) => at.saturating_sub(1),
             _ => return,
         };
-        if SCALES[to].0 != self.prefs.look().scale {
+        if SCALES[to].0 != self.prefs.scale() {
             self.prefs.ui_scale = SCALES[to].0;
             style(ctx, self.prefs.look());
             self.save_prefs();
@@ -147,13 +147,31 @@ impl App {
         match self.settings_cat {
             SettingsCat::Appearance => {
                 settings_section(ui, "THEME", |ui| {
-                    setting_row(ui, "Theme", "System follows the macOS light or dark setting.", |ui| {
+                    setting_row(ui, "Mode", "System follows the light or dark setting of your computer.", |ui| {
                         let was = self.prefs.appearance;
                         segmented(ui, &mut self.prefs.appearance, &[(Appearance::System, "System"), (Appearance::Light, "Light"), (Appearance::Dark, "Dark")]);
                         if self.prefs.appearance != was {
                             self.prefs.appearance.apply(ui.ctx());
                         }
                     });
+                    let look = self.prefs.look();
+                    for light in [false, true] {
+                        ui.separator();
+                        let note = if self.prefs.appearance == Appearance::System {
+                            if light { "used when the system is light" } else { "used when the system is dark" }
+                        } else if is_light() == light {
+                            "in use"
+                        } else {
+                            ""
+                        };
+                        ui.horizontal(|ui| {
+                            ui.label(medium(RichText::new(if light { "Light theme" } else { "Dark theme" }).size(TXT_TITLE).color(BRIGHT())));
+                            ui.label(RichText::new(note).size(TXT_SMALL).color(FAINT()));
+                        });
+                        if let Some(i) = theme_cards(ui, light, if light { look.light_theme } else { look.dark_theme }) {
+                            *(if light { &mut self.prefs.light_theme } else { &mut self.prefs.dark_theme }) = themes(light)[i].name.into();
+                        }
+                    }
                     ui.separator();
                     setting_row(ui, "Background", "Soft lowers the contrast between text and background, for less glare.", |ui| {
                         segmented(ui, &mut self.prefs.soft, &[(false, "Standard"), (true, "Soft")]);
@@ -164,14 +182,17 @@ impl App {
                         segmented(ui, &mut self.prefs.ui_scale, &SCALES);
                     });
                     ui.separator();
-                    setting_row(ui, "Interface font", "OpenDyslexic has heavier letter bottoms that some people with dyslexia find easier to read. Data stays in JetBrains Mono.", |ui| {
-                        let name = |d: bool| if d { "OpenDyslexic" } else { "Inter" };
-                        egui::ComboBox::from_id_salt("ui-font").width(150.0).selected_text(name(self.prefs.dyslexic_font)).show_ui(ui, |ui| {
-                            menu_look(ui);
-                            for d in [false, true] {
-                                ui.selectable_value(&mut self.prefs.dyslexic_font, d, name(d));
-                            }
-                        });
+                    let look = self.prefs.look();
+                    setting_row(ui, "Interface font", "OpenDyslexic has heavier letter bottoms that some people with dyslexia find easier to read.", |ui| {
+                        if let Some(i) = font_combo(ui, "ui-font", &UI_FONTS, look.ui_font) {
+                            self.prefs.ui_font = UI_FONTS[i].0.into();
+                        }
+                    });
+                    ui.separator();
+                    setting_row(ui, "Data font", "For values, queries and the Shell.", |ui| {
+                        if let Some(i) = font_combo(ui, "data-font", &DATA_FONTS, look.data_font) {
+                            self.prefs.data_font = DATA_FONTS[i].0.into();
+                        }
                     });
                 });
             }
@@ -350,4 +371,86 @@ fn cat_icon(p: &egui::Painter, cat: SettingsCat, c: egui::Pos2, color: Color32) 
             p.add(egui::Shape::line(vec![pt(4.0, -7.5), pt(4.0, -4.0), pt(0.5, -4.0)], s));
         }
     }
+}
+
+/// A dropdown of font names; returns the index picked this frame.
+fn font_combo(ui: &mut egui::Ui, id: &str, list: &[(&str, &[u8])], cur: usize) -> Option<usize> {
+    let mut picked = None;
+    egui::ComboBox::from_id_salt(id).width(150.0).selected_text(list[cur].0).show_ui(ui, |ui| {
+        menu_look(ui);
+        for (i, f) in list.iter().enumerate() {
+            if ui.selectable_label(i == cur, f.0).clicked() {
+                picked = Some(i);
+            }
+        }
+    });
+    picked.filter(|&i| i != cur)
+}
+
+/// One card per theme of the kind, each a miniature window in that theme's own colors. Returns the index clicked.
+fn theme_cards(ui: &mut egui::Ui, light: bool, sel: usize) -> Option<usize> {
+    let gap = PICK_GAP + 4.0;
+    // Five to a row when they fit; on a narrow pane they keep their minimum width and wrap.
+    let w = ((ui.available_width() - 4.0 * gap) / 5.0).clamp(THEME_CARD_MIN_W, THEME_CARD_MAX_W);
+    let mut picked = None;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
+        for (i, t) in themes(light).iter().enumerate() {
+            let (rect, r) = ui.allocate_exact_size(egui::vec2(w, THEME_THUMB_H + THEME_LABEL_H), Sense::click());
+            let on = i == sel;
+            r.widget_info(|| egui::WidgetInfo::selected(egui::Role::RadioButton, true, on, t.name));
+            if r.clicked() && !on {
+                picked = Some(i);
+            }
+            let p = ui.painter();
+            // Inset so the selection ring fits inside the card.
+            let th = egui::Rect::from_min_size(rect.min + egui::vec2(3.0, 3.0), egui::vec2(w - 6.0, THEME_THUMB_H - 6.0));
+            let ring = th.expand(3.0);
+            let edge = match (on, state_of(&r)) {
+                (true, _) => Some(Stroke::new(2.0, PRIMARY())),
+                (false, 2) => Some(Stroke::new(2.0, MUTED())),
+                (false, 1) => Some(Stroke::new(1.0, MUTED())),
+                _ => None,
+            };
+            if let Some(s) = edge {
+                p.rect_stroke(ring, R_MD + 3, s, egui::StrokeKind::Inside);
+            }
+            focus_ring(ui, &r, ring, (R_MD + 3) as f32);
+            paint_thumb(p, th, &t.pal);
+            if on {
+                let c = egui::pos2(th.right() - 2.0, th.top() + 2.0);
+                p.circle_filled(c, THEME_BADGE_R, PRIMARY());
+                paint_check(p, c, ON_PRIMARY());
+            }
+            let g = p.layout_job(egui::text::LayoutJob::single_section(t.name.to_string(), ui_fmt(TXT_SMALL, if on { BRIGHT() } else { TEXT() }, if on { W_MEDIUM } else { 400.0 }, 0.0)));
+            p.galley(egui::pos2(th.left(), rect.bottom() - g.size().y - 2.0), g, TEXT());
+        }
+    });
+    picked
+}
+
+/// Title bar, sidebar with a selected row, three typed values per row and an accent button. The miniature is
+/// laid out at 78 px wide and its x positions scale with the card, so nothing spills over at any width.
+fn paint_thumb(p: &egui::Painter, r: egui::Rect, t: &Palette) {
+    let k = r.width() / 78.0;
+    let at = |x: f32, y: f32, w: f32, h: f32| egui::Rect::from_min_size(r.min + egui::vec2(x * k, y), egui::vec2(w * k, h));
+    let bar = |x: f32, y: f32, w: f32, h: f32, c: Color32| p.rect_filled(at(x, y, w, h), R_SM, c);
+    let title_h = 9.0;
+    p.rect_filled(r, R_MD, t.bg);
+    p.rect_filled(at(0.0, 0.0, 78.0, title_h), egui::CornerRadius { nw: R_MD, ne: R_MD, sw: 0, se: 0 }, t.chrome);
+    p.rect_filled(at(0.0, title_h, 24.0, r.height() - title_h), egui::CornerRadius { sw: R_MD, ..Default::default() }, t.panel);
+    bar(4.0, 15.0, 16.0, 4.0, t.sel);
+    bar(4.0, 23.0, 12.0, 3.0, t.faint);
+    bar(4.0, 30.0, 14.0, 3.0, t.faint);
+    for (j, c) in [t.c_string, t.c_number, t.c_date].into_iter().enumerate() {
+        let y = 15.0 + j as f32 * 10.0;
+        if j == 1 {
+            p.rect_filled(at(24.0, y - 3.0, 54.0, 10.0), 0, t.sel);
+        }
+        bar(29.0, y, 14.0, 4.0, t.c_oid);
+        bar(46.0, y, 16.0, 4.0, c);
+        bar(65.0, y, 8.0, 4.0, tint(t.text, 150));
+    }
+    bar(56.0, r.height() - 12.0, 18.0, 7.0, t.primary);
+    p.rect_stroke(r, R_MD, Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
 }
