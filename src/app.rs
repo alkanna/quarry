@@ -246,6 +246,8 @@ pub struct App {
     tool: Option<ToolRun>,
     /// CPU time of the last frame in milliseconds, for the frame rate readout.
     frame_ms: f32,
+    /// Whether the current scroll gesture is locked vertical, and when that axis last moved, for `prefs.lock_scroll_axis`.
+    scroll_axis: Option<(bool, f64)>,
     /// Last memory and CPU sample for the status bar: when, total CPU time then, CPU percent, bytes.
     usage: (std::time::Instant, Duration, f32, Option<u64>),
     /// Frame rate readout: seconds and frames counted so far, and the rate last shown.
@@ -382,6 +384,7 @@ impl App {
             tool: None,
             width_cache: HashMap::new(),
             frame_ms: 0.0,
+            scroll_axis: None,
             usage: (std::time::Instant::now(), Duration::ZERO, 0.0, None),
             fps: (0.0, 0, 0.0),
             closed: Vec::new(),
@@ -596,6 +599,27 @@ impl App {
         }
     }
 
+    /// Keeps one scroll gesture on the axis it started on, so a slightly diagonal trackpad swipe
+    /// does not drift off the row the eye follows. The lock ends 0.25 s after the locked axis last moved.
+    pub(super) fn lock_scroll_axis(&mut self, ctx: &egui::Context) {
+        // A read lock first, since nearly every frame has no scroll.
+        if !self.prefs.lock_scroll_axis || ctx.input(|i| i.smooth_scroll_delta == egui::Vec2::ZERO) {
+            return;
+        }
+        ctx.input_mut(|i| {
+            let d = i.smooth_scroll_delta;
+            let (vertical, locked) = match self.scroll_axis {
+                Some((v, t)) if i.time - t < 0.25 => (v, true),
+                // The first frames of a swipe are often sideways, so lock only once one axis clearly leads.
+                _ => (d.y.abs() >= d.x.abs(), d.y.abs() >= 2.0 * d.x.abs() || d.x.abs() >= 2.0 * d.y.abs()),
+            };
+            let moved = if vertical { i.smooth_scroll_delta.x = 0.0; d.y } else { i.smooth_scroll_delta.y = 0.0; d.x };
+            // Refreshed only when the kept axis moves, so a new swipe the other way is not swallowed by the lock it replaces.
+            if locked && moved != 0.0 {
+                self.scroll_axis = Some((vertical, i.time));
+            }
+        });
+    }
 }
 
 impl eframe::App for App {
@@ -668,6 +692,7 @@ impl eframe::App for App {
         }
         let ctx = ui.ctx().clone();
         self.poll(&ctx);
+        self.lock_scroll_axis(&ctx);
         self.stop_hidden_watches();
         self.remember_tabs();
         set_window_over_page(&ctx, self.window_open());

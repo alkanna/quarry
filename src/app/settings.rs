@@ -64,7 +64,7 @@ impl App {
         let mut keep = true;
         let look = self.prefs.look();
         // Settings that save when changed. Tuples compare up to 12 items, so small ones are grouped.
-        let saved = |p: &UiPrefs| (p.open_inline, p.auto_save, p.always_writable, p.confirm_save, p.default_cols, p.timeout_ms, p.shell_runtime.clone(), p.mongodump.clone(), p.mongorestore.clone(), p.auto_update, (p.show_server, p.show_fps, p.show_mem, p.show_cpu, p.object_preview), (p.keep_toasts, p.appearance, p.gcloud.clone(), p.cloud_sql_proxy.clone(), p.value_panel));
+        let saved = |p: &UiPrefs| (p.open_inline, p.auto_save, p.always_writable, p.confirm_save, p.default_cols, p.timeout_ms, p.shell_runtime.clone(), p.mongodump.clone(), p.mongorestore.clone(), p.auto_update, (p.show_server, p.show_fps, p.show_mem, p.show_cpu, p.object_preview), (p.keep_toasts, p.appearance, p.gcloud.clone(), p.cloud_sql_proxy.clone(), p.value_panel, p.lock_scroll_axis));
         let before = saved(&self.prefs);
         let r = egui::Modal::new(egui::Id::unique(("quarry-layer", "modal"))).frame(dialog_frame()).show(ctx, |ui| {
             let screen = ui.ctx().content_rect();
@@ -204,6 +204,10 @@ impl App {
                     ui.separator();
                     setting_row(ui, "Group digits", "Shows 1 234 567 instead of 1234567. Only the display changes: copy, edit and export keep the raw value.", |ui| {
                         toggle(ui, &mut self.prefs.group_digits);
+                    });
+                    ui.separator();
+                    setting_row(ui, "Scroll one way at a time", "A scroll moves either across or down, never both, so a slightly diagonal swipe stays on the same row. Shift+wheel still scrolls across.", |ui| {
+                        toggle(ui, &mut self.prefs.lock_scroll_axis);
                     });
                 });
                 settings_section(ui, "MESSAGES", |ui| {
