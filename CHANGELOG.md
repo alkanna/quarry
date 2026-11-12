@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.39.1](https://github.com/alkanna/quarry/compare/v0.39.0...v0.39.1) (2026-11-12)
+
+
+### Bug Fixes
+
+* keep the calendar open on clicks and add a month and year chooser ([#196](https://github.com/alkanna/quarry/issues/196)) ([179f6cf](https://github.com/alkanna/quarry/commit/179f6cff715aaccd5445310f549414baccb067b9))
+
 ## [0.39.0](https://github.com/alkanna/quarry/compare/v0.38.0...v0.39.0) (2026-11-12)
 
 
