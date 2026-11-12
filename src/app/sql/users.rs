@@ -502,11 +502,9 @@ impl App {
                     }
                 });
             });
-            if let Some(Ok(l)) = &w.list {
-                if !l.whole {
-                    let why = l.why.clone().unwrap_or_default();
-                    ui.add(egui::Label::new(RichText::new("This user may not read the list of accounts (mysql.user), so only your own account is shown.").size(TXT_SMALL).color(WARNING())).wrap()).on_hover_text(why);
-                }
+            if let Some(Ok(l)) = &w.list && !l.whole {
+                let why = l.why.clone().unwrap_or_default();
+                ui.add(egui::Label::new(RichText::new("This user may not read the list of accounts (mysql.user), so only your own account is shown.").size(TXT_SMALL).color(WARNING())).wrap()).on_hover_text(why);
             }
             ui.add_space(8.0);
             ui.horizontal_top(|ui| {
@@ -525,12 +523,8 @@ impl App {
             let can = self.users_can_apply(&w, &env);
             ui.horizontal(|ui| {
                 // Dropping sits at the left of the Account tab's footer, as in the design.
-                if w.tab == UTab::Account {
-                    if let Some(a) = acct.clone().filter(|_| w.list.is_some()) {
-                        if ui.add_enabled_ui(writable, |ui| danger(ui, "Drop user…")).inner.on_disabled_hover_text("Read-only: unlock writes to drop a user").clicked() {
-                            acts.push(Act::Drop(a));
-                        }
-                    }
+                if w.tab == UTab::Account && let Some(a) = acct.clone().filter(|_| w.list.is_some()) && ui.add_enabled_ui(writable, |ui| danger(ui, "Drop user…")).inner.on_disabled_hover_text("Read-only: unlock writes to drop a user").clicked() {
+                    acts.push(Act::Drop(a));
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.add_enabled(can, primary_button(ui, "Apply", PRIMARY())).on_disabled_hover_text(if !writable { NOTE_APPLY } else { "Nothing to apply" }).clicked() {
@@ -998,10 +992,8 @@ impl App {
                     cancel = true;
                 }
             });
-            if let Err(e) = users::check_db_name(text) {
-                if !text.is_empty() {
-                    ui.label(RichText::new(e).size(TXT_SMALL).color(ALERT()));
-                }
+            if let Err(e) = users::check_db_name(text) && !text.is_empty() {
+                ui.label(RichText::new(e).size(TXT_SMALL).color(ALERT()));
             }
             if add && users::check_db_name(text).is_ok() {
                 let pattern = users::pattern_of(text.trim());
@@ -1101,10 +1093,8 @@ impl App {
         let check = users::check_new_user(&f.user, &f.host, &f.password);
         // The password never reaches the preview.
         sql_block(ui, &format!("{};", users::create_user_sql(self.sql_mode(f.conn), &acct, &f.password, true)));
-        if let Err(e) = &check {
-            if !f.user.is_empty() || !f.password.is_empty() {
-                ui.label(RichText::new(e.as_str()).size(TXT_SMALL).color(ALERT()));
-            }
+        if let Err(e) = &check && (!f.user.is_empty() || !f.password.is_empty()) {
+            ui.label(RichText::new(e.as_str()).size(TXT_SMALL).color(ALERT()));
         }
         ui.add_space(4.0);
         ui.add(egui::Label::new(RichText::new("The account starts with no privileges: choose them on the Databases tab afterwards. The password is sent once and not kept by Quarry.").size(TXT_SMALL).color(MUTED())).wrap());
@@ -1173,10 +1163,8 @@ impl App {
         let shown = users::password_sql(self.sql_mode(f.conn), dialect, &f.acct, plugin, "", true);
         sql_block(ui, &shown.as_ref().map_or_else(|e| format!("-- {e}"), |s| format!("{s};")));
         let check = users::check_password(&f.password).and_then(|_| if f.password == f.again { Ok(()) } else { Err("The two passwords differ.".to_string()) }).and_then(|_| f.blocked.clone().map_or(Ok(()), Err));
-        if let Err(e) = &check {
-            if !f.password.is_empty() || !f.again.is_empty() {
-                ui.label(RichText::new(e.as_str()).size(TXT_SMALL).color(ALERT()));
-            }
+        if let Err(e) = &check && (!f.password.is_empty() || !f.again.is_empty()) {
+            ui.label(RichText::new(e.as_str()).size(TXT_SMALL).color(ALERT()));
         }
         ui.add_space(4.0);
         ui.add(egui::Label::new(RichText::new("A password change cannot be undone. It is sent once and is not shown, logged or kept by Quarry.").size(TXT_SMALL).color(MUTED())).wrap());

@@ -139,11 +139,9 @@ async fn run_sent(conn: &mut Conn, stmt: &str, sent: &str, cap: usize, shift: us
     }
     if sets.len() == 1 && sets[0].error.is_none() && sets[0].cols.is_empty() {
         // No rows came back: a SELECT with an empty result still has headers, a write does not.
-        if let Ok(desc) = conn.describe(sent).await {
-            if !desc.is_empty() {
-                sets[0].cols = make_cols(&desc, &HashMap::new(), false);
-                sets[0].affected = None;
-            }
+        if let Ok(desc) = conn.describe(sent).await && !desc.is_empty() {
+            sets[0].cols = make_cols(&desc, &HashMap::new(), false);
+            sets[0].affected = None;
         }
     }
     let ms = t.elapsed().as_millis();

@@ -1563,30 +1563,26 @@ async fn run_batch(db: &Db, mut b: Batch, read_only: bool, undoing: bool) -> Res
                     return Err(refuse(format!("database {} was dropped and made again since.", b.database)));
                 }
             }
-            check_roles(&mut tx, db, &b.roles, &b.changes).await.map_err(&refuse)?;
+            check_roles(&mut tx, db, &b.roles, &b.changes).await.map_err(refuse)?;
             let me = rows(&mut tx, db, "SELECT current_user::text AS me", Vec::new()).await?.first().map(|r| t(r, "me")).unwrap_or_default();
             for c in b.changes.iter_mut() {
                 if let Some(why) = Cluster::self_lockout(&me, c) {
                     return Err(refuse(why));
                 }
-                if let Change::Attrs { role, from, to } = c {
-                    if from.valid_until != to.valid_until {
-                        let (until, past) = canonical_until(&mut tx, db, &to.valid_until).await?;
-                        if past && *role == me {
-                            return Err(refuse(format!("{me} is the role you are signed in as. A VALID UNTIL that has passed would stop it signing in, and then nothing could undo it.")));
-                        }
-                        to.valid_until = until;
+                if let Change::Attrs { role, from, to } = c && from.valid_until != to.valid_until {
+                    let (until, past) = canonical_until(&mut tx, db, &to.valid_until).await?;
+                    if past && *role == me {
+                        return Err(refuse(format!("{me} is the role you are signed in as. A VALID UNTIL that has passed would stop it signing in, and then nothing could undo it.")));
                     }
+                    to.valid_until = until;
                 }
             }
             let given = std::mem::take(&mut b.exact);
             let ex = |i: usize| given.get(i).and_then(Option::as_ref);
             let mut before = Vec::new();
             for (i, c) in b.changes.iter().enumerate() {
-                if let Change::Acl { target, .. } = c {
-                    if !target_ok(&mut tx, db, target).await? {
-                        return Err(refuse(format!("{} was dropped, renamed or made again since.", target.shown())));
-                    }
+                if let Change::Acl { target, .. } = c && !target_ok(&mut tx, db, target).await? {
+                    return Err(refuse(format!("{} was dropped, renamed or made again since.", target.shown())));
                 }
                 let now = state(&mut tx, db, major, c).await?;
                 if !holds(c, ex(i), &now, true) {
@@ -1599,7 +1595,7 @@ async fn run_batch(db: &Db, mut b: Batch, read_only: bool, undoing: bool) -> Res
                 before.push(now);
             }
             for (i, c) in b.changes.iter().enumerate() {
-                for s in stmts(c, ex(i), major).map_err(&refuse)? {
+                for s in stmts(c, ex(i), major).map_err(refuse)? {
                     exec(&mut tx, db, "", &s).await.map_err(se)?;
                 }
             }
@@ -1804,10 +1800,8 @@ pub fn drop_plan(info: &DropInfo, mode: &DropMode, home: &str) -> Res<Vec<(Strin
         DropMode::Reassign(t) => vec![format!("REASSIGN OWNED BY {r} TO {}", q(t)), format!("DROP OWNED BY {r}")],
         DropMode::DropOwned => vec![format!("DROP OWNED BY {r}")],
     };
-    if let DropMode::Reassign(t) = mode {
-        if t.is_empty() || *t == info.role {
-            return Err("Pick the role that gets the objects.".into());
-        }
+    if let DropMode::Reassign(t) = mode && (t.is_empty() || *t == info.role) {
+        return Err("Pick the role that gets the objects.".into());
     }
     if *mode == DropMode::DropOwned && !info.shared.is_empty() {
         return Err(format!("{} owns {}, which DROP OWNED does not drop. Give the objects to another role, or drop that first.", info.role, info.shared.join(", ")));
@@ -1898,10 +1892,8 @@ async fn drop_role(db: &Db, info: &DropInfo, mode: &DropMode, read_only: bool) -
             if now.as_deref() != Some(info.oid.as_str()) {
                 return Err(format!("Role {} is gone or was made again since the window read it.", info.role));
             }
-            if let Some(want) = want {
-                if deps_of(&rows(tx, &at, &in_db, vec![Param::Text(info.oid.clone())]).await?) != *want {
-                    return Err(format!("What {} owns or holds in {database} changed since the window read it. Look again before dropping it.", info.role));
-                }
+            if let Some(want) = want && deps_of(&rows(tx, &at, &in_db, vec![Param::Text(info.oid.clone())]).await?) != *want {
+                return Err(format!("What {} owns or holds in {database} changed since the window read it. Look again before dropping it.", info.role));
             }
             if i == 0 && deps_of(&rows(tx, &at, &shared_sql, vec![Param::Text(info.oid.clone())]).await?) != info.shared_deps {
                 return Err(format!("The databases, tablespaces or parameters {} owns or holds privileges on changed since the window read it. Look again before dropping it.", info.role));
@@ -2121,10 +2113,11 @@ mod tests {
 
     #[test]
     fn memberships_follow_the_version() {
-        let o16 = Some(Opts { admin: false, inherit: Some(true), set: Some(false) });
+        let opts16 = Opts { admin: false, inherit: Some(true), set: Some(false) };
+        let o16 = Some(opts16);
         assert_eq!(member_sql(16, "rep", "app", &None, &o16), ["GRANT \"rep\" TO \"app\" WITH ADMIN FALSE, INHERIT TRUE, SET FALSE"]);
         assert_eq!(member_sql(16, "rep", "app", &o16, &None), ["REVOKE \"rep\" FROM \"app\""]);
-        let admin16 = Some(Opts { admin: true, ..o16.unwrap() });
+        let admin16 = Some(Opts { admin: true, ..opts16 });
         assert_eq!(member_sql(16, "rep", "app", &o16, &admin16), ["GRANT \"rep\" TO \"app\" WITH ADMIN TRUE"]);
         assert_eq!(member_sql(16, "rep", "app", &admin16, &o16), ["GRANT \"rep\" TO \"app\" WITH ADMIN FALSE"]);
         let (plain, admin) = (Some(Opts::default()), Some(Opts { admin: true, ..Default::default() }));

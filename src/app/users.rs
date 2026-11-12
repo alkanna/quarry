@@ -100,31 +100,29 @@ impl App {
                             });
                             // On its own line and wrapped: a user can hold dozens of roles.
                             ui.add(egui::Label::new(RichText::new(roles_text(user)).monospace().size(TXT_SMALL).color(C_STRING())).wrap());
-                            if let Some((en, edb, pwd, roles)) = &mut u.edit {
-                                if *en == name && *edb == db {
-                                    egui::Frame::new().fill(pal().well).corner_radius(R_MD).inner_margin(8).show(ui, |ui| {
-                                        egui::Grid::new(("edit", &name)).num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
-                                            form_label(ui, "New password");
-                                            ui.add(egui::TextEdit::singleline(pwd).password(true).hint_text("leave empty to keep").desired_width(280.0));
-                                            ui.end_row();
-                                            form_label(ui, "Roles");
-                                            ui.add(egui::TextEdit::singleline(roles).hint_text("readWrite@shop, read@analytics").desired_width(280.0).font(egui::TextStyle::Monospace));
-                                            ui.end_row();
-                                        });
-                                        ui.horizontal(|ui| {
-                                            if primary(ui, "Save", PRIMARY()).clicked() {
-                                                let mut cmd = doc! { "updateUser": en.as_str(), "roles": parse_roles(roles, edb) };
-                                                if !pwd.is_empty() {
-                                                    cmd.insert("pwd", pwd.as_str());
-                                                }
-                                                cmds.push((edb.clone(), cmd, format!("Updated user {en}")));
-                                            }
-                                            if ui.button("Cancel").clicked() {
-                                                cmds.push(("*close-edit".into(), Document::new(), String::new()));
-                                            }
-                                        });
+                            if let Some((en, edb, pwd, roles)) = &mut u.edit && *en == name && *edb == db {
+                                egui::Frame::new().fill(pal().well).corner_radius(R_MD).inner_margin(8).show(ui, |ui| {
+                                    egui::Grid::new(("edit", &name)).num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
+                                        form_label(ui, "New password");
+                                        ui.add(egui::TextEdit::singleline(pwd).password(true).hint_text("leave empty to keep").desired_width(280.0));
+                                        ui.end_row();
+                                        form_label(ui, "Roles");
+                                        ui.add(egui::TextEdit::singleline(roles).hint_text("readWrite@shop, read@analytics").desired_width(280.0).font(egui::TextStyle::Monospace));
+                                        ui.end_row();
                                     });
-                                }
+                                    ui.horizontal(|ui| {
+                                        if primary(ui, "Save", PRIMARY()).clicked() {
+                                            let mut cmd = doc! { "updateUser": en.as_str(), "roles": parse_roles(roles, edb) };
+                                            if !pwd.is_empty() {
+                                                cmd.insert("pwd", pwd.as_str());
+                                            }
+                                            cmds.push((edb.clone(), cmd, format!("Updated user {en}")));
+                                        }
+                                        if ui.button("Cancel").clicked() {
+                                            cmds.push(("*close-edit".into(), Document::new(), String::new()));
+                                        }
+                                    });
+                                });
                             }
                             ui.separator();
                         }

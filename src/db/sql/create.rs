@@ -657,10 +657,8 @@ fn created(conn: u64, schema: &str, table: &str, undo: SqlUndo) -> UndoAction {
 /// and empty. CREATE_TIME has one second steps, so a table dropped and made again within the same second as
 /// the create passes; it is then just as empty.
 async fn drop_if_same_and_empty(c: &mut sqlx::MySqlConnection, schema: &str, table: &str, made: Option<&str>, q: &str, sql: &str) -> Res<()> {
-    if let Some(made) = made {
-        if create_time(c, schema, table).await.as_deref() != Some(made) {
-            return Err(format!("Not undone: {table} was dropped and made again since, so it is not the table this created."));
-        }
+    if let Some(made) = made && create_time(c, schema, table).await.as_deref() != Some(made) {
+        return Err(format!("Not undone: {table} was dropped and made again since, so it is not the table this created."));
     }
     let has = sqlx::query(&format!("SELECT 1 AS n FROM {q} LIMIT 1")).persistent(false).fetch_optional(&mut *c).await.map_err(se)?.is_some();
     if has {
@@ -775,8 +773,8 @@ impl Worker {
         self.spawn(async move {
             let res = async {
                 let mut c = db.acquire().await?;
-                let dbs = database_names(&mut *c).await?;
-                let tables = if schema.is_empty() || !dbs.contains(&schema) { None } else { Some(table_names(&mut *c, db.dialect, &schema).await?) };
+                let dbs = database_names(&mut c).await?;
+                let tables = if schema.is_empty() || !dbs.contains(&schema) { None } else { Some(table_names(&mut c, db.dialect, &schema).await?) };
                 Ok((dbs, tables))
             }
             .await;

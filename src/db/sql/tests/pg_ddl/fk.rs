@@ -179,7 +179,7 @@ fn rows_that_point_at_nothing_refuse_the_key_and_are_shown() {
         let (res, undo) = t.run(t.plan(&[add_fk(k.clone())]).unwrap());
         let err = res.unwrap_err();
         assert!(err.starts_with("2 rows of") && err.contains("have a value in (\"pid\")") && err.contains("(77)") && err.contains("(78)") && err.contains("NOT VALID") && err.contains("Nothing was changed"), "{var}: {err}");
-        assert!(undo.is_none() && fks(&t) == "" && t.shape() == before, "{var}");
+        assert!(undo.is_none() && fks(&t).is_empty() && t.shape() == before, "{var}");
         // one row is said in the singular
         t.sql("DELETE FROM t WHERE pid = 78");
         let err = t.run(t.plan(&[add_fk(k.clone())]).unwrap()).0.unwrap_err();
@@ -216,7 +216,7 @@ fn a_parent_changed_after_the_plan_was_made_refuses_the_plan_and_nothing_runs() 
         let (res, undo) = t.run(plan);
         let err = res.unwrap_err();
         assert!(err.contains("changed since this plan was made") && err.contains("referenced table") && err.contains("\"p\""), "{var}: {err}");
-        assert!(undo.is_none() && fks(&t) == "" && t.shape() == before, "{var}");
+        assert!(undo.is_none() && fks(&t).is_empty() && t.shape() == before, "{var}");
         // a plan made without having seen the parent runs and the server refuses it, which rolls everything back
         let blind = ForeignKey { ref_seen: Vec::new(), ..k.clone() };
         let (res, _) = t.run(t.plan(&[add_fk(blind)]).unwrap());
@@ -282,7 +282,7 @@ fn a_parent_that_changed_after_a_drop_refuses_the_undo() {
         let (res, kept) = t.undo(a);
         let err = res.unwrap_err();
         assert!(err.contains("Undo refused") && err.contains("referenced table"), "{var}: {err}");
-        assert!(kept.is_some() && fks(&t) == "", "{var}");
+        assert!(kept.is_some() && fks(&t).is_empty(), "{var}");
         // the parent as it was: the same undo now runs
         t.sql("ALTER TABLE p ALTER COLUMN code TYPE text");
         let (res, _) = t.undo(kept.unwrap());
@@ -669,7 +669,7 @@ fn an_undo_refused_for_rows_that_point_at_nothing_says_to_fix_the_rows() {
         let err = res.unwrap_err();
         // the undo cannot add the key NOT VALID, which is not how it was, so the message must not offer that
         assert!(err.contains("(77)") && err.contains("put back") && err.contains("undo again") && !err.contains("NOT VALID") && err.contains("Nothing was changed"), "{var}: {err}");
-        assert!(kept.is_some() && fks(&t) == "", "{var}");
+        assert!(kept.is_some() && fks(&t).is_empty(), "{var}");
         t.sql("DELETE FROM t WHERE id = 4");
         t.undo(kept.unwrap()).0.unwrap_or_else(|x| panic!("{var}: {x}"));
         assert_eq!(fks(&t), before, "{var}");

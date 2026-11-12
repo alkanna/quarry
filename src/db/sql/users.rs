@@ -345,11 +345,9 @@ pub fn parse_grant(line: &str) -> Grant {
     }
     i += 1;
     let mut routine = false;
-    if let Some(Tok::Word(w)) = t.get(i) {
-        if ["TABLE", "FUNCTION", "PROCEDURE"].iter().any(|k| w.eq_ignore_ascii_case(k)) {
-            routine = !w.eq_ignore_ascii_case("TABLE");
-            i += 1;
-        }
+    if let Some(Tok::Word(w)) = t.get(i) && ["TABLE", "FUNCTION", "PROCEDURE"].iter().any(|k| w.eq_ignore_ascii_case(k)) {
+        routine = !w.eq_ignore_ascii_case("TABLE");
+        i += 1;
     }
     let part = |t: Option<&Tok>| match t {
         Some(Tok::Ident(n)) => Some(Some(n.clone())),
@@ -758,7 +756,7 @@ impl Caps {
         let mut n = v.split(|c: char| !c.is_ascii_digit()).filter(|x| !x.is_empty()).map(|x| x.parse::<u32>().unwrap_or(0));
         let at = (n.next().unwrap_or(0), n.next().unwrap_or(0), n.next().unwrap_or(0));
         match d {
-            Dialect::MySql => Caps { alter_user: at >= (5, 7, 6), lock: at >= (5, 7, 6), lifetime: at >= (5, 7, 4), roles: at >= (8, 0, 0), dynamic: at >= (8, 0, 0), plugin_choice: true, caching: at >= (8, 0, 0), native_off: at >= (8, 4, 0), sha256: at >= (5, 6, 0) && at < (9, 0, 0) },
+            Dialect::MySql => Caps { alter_user: at >= (5, 7, 6), lock: at >= (5, 7, 6), lifetime: at >= (5, 7, 4), roles: at >= (8, 0, 0), dynamic: at >= (8, 0, 0), plugin_choice: true, caching: at >= (8, 0, 0), native_off: at >= (8, 4, 0), sha256: ((5, 6, 0)..(9, 0, 0)).contains(&at) },
             Dialect::MariaDb => Caps { alter_user: at >= (10, 2, 0), lock: at >= (10, 4, 2), lifetime: at >= (10, 4, 3), roles: at >= (10, 0, 5), dynamic: false, plugin_choice: false, caching: false, native_off: false, sha256: false },
             // Nothing here applies to PostgreSQL roles
             Dialect::Postgres => Caps { alter_user: false, lock: false, lifetime: false, roles: false, dynamic: false, plugin_choice: false, caching: false, native_off: false, sha256: false },
@@ -811,12 +809,12 @@ pub fn alter_sql(m: Mode, acct: &Account, from: &Settings, to: &Settings) -> Res
         });
     }
     let mut with = Vec::new();
-    for i in 0..4 {
+    for (i, name) in LIMIT_NAMES.iter().enumerate() {
         if from.limits[i] != to.limits[i] {
             if to.limits[i] > LIMIT_MAX {
-                return Err(format!("{} is at most {LIMIT_MAX}.", LIMIT_NAMES[i]));
+                return Err(format!("{name} is at most {LIMIT_MAX}."));
             }
-            with.push(format!("{} {}", LIMIT_NAMES[i], to.limits[i]));
+            with.push(format!("{name} {}", to.limits[i]));
         }
     }
     if !with.is_empty() {
@@ -1261,14 +1259,12 @@ async fn run_plan(c: &mut sqlx::MySqlConnection, db: &Db, conn: u64, acct: &Acco
             }
         }
     }
-    if !gr.is_empty() || !rv.is_empty() {
-        if let Ok(g) = grants_of(c, m, cur).await {
-            let defaults_now = default_roles(c, d, cur).await;
-            let names = |v: Vec<&String>| v.into_iter().map(|r| role_shown(r)).collect::<Vec<_>>().join(", ");
-            let label = [(!gr.is_empty()).then(|| format!("gave role {}", names(gr.iter().collect()))), (!rv.is_empty()).then(|| format!("took role {}", names(rv.iter().map(|r| &r.role).collect())))].into_iter().flatten().collect::<Vec<_>>().join(", ");
-            let id = ident(c, d, cur).await;
-            undo.push(action(conn, cur, AccountUndo { account: cur.clone(), label, what: What::Roles { grant: gr, revoke: rv, expect: roles_state(&g, &defaults_now) }, ident: id }));
-        }
+    if (!gr.is_empty() || !rv.is_empty()) && let Ok(g) = grants_of(c, m, cur).await {
+        let defaults_now = default_roles(c, d, cur).await;
+        let names = |v: Vec<&String>| v.into_iter().map(|r| role_shown(r)).collect::<Vec<_>>().join(", ");
+        let label = [(!gr.is_empty()).then(|| format!("gave role {}", names(gr.iter().collect()))), (!rv.is_empty()).then(|| format!("took role {}", names(rv.iter().map(|r| &r.role).collect())))].into_iter().flatten().collect::<Vec<_>>().join(", ");
+        let id = ident(c, d, cur).await;
+        undo.push(action(conn, cur, AccountUndo { account: cur.clone(), label, what: What::Roles { grant: gr, revoke: rv, expect: roles_state(&g, &defaults_now) }, ident: id }));
     }
     if let Some(x) = stop {
         return fail(x, done);
@@ -1378,10 +1374,8 @@ impl Worker {
                     let m = session_mode(&mut c).await?;
                     if matches!(db.dialect, Dialect::MariaDb) {
                         // SET PASSWORD sets the mysql_native_password part only; any other way in would be left as it was.
-                        if let Ok(i) = read_info(&mut c, db.dialect, &acct).await {
-                            if i.chain || (!i.plugin.is_empty() && i.plugin != "mysql_native_password") {
-                                return Err(format!("{} logs in with {}, and Quarry only sets a mysql_native_password password on MariaDB. Change it in a SQL shell.", acct.label(), if i.chain { "more than one method".to_string() } else { i.plugin }));
-                            }
+                        if let Ok(i) = read_info(&mut c, db.dialect, &acct).await && (i.chain || (!i.plugin.is_empty() && i.plugin != "mysql_native_password")) {
+                            return Err(format!("{} logs in with {}, and Quarry only sets a mysql_native_password password on MariaDB. Change it in a SQL shell.", acct.label(), if i.chain { "more than one method".to_string() } else { i.plugin }));
                         }
                     }
                     let sql = password_sql(m, db.dialect, &acct, plugin.as_deref(), &password, false)?;
@@ -1448,10 +1442,8 @@ pub(super) async fn undo(db: &Db, a: UndoAction, u: AccountUndo, read_only: bool
         let out = async {
             let m = session_mode(&mut c).await?;
             let now = grants_of(&mut c, m, &acct).await.map_err(|x| format!("Undo refused: {x}"))?;
-            if let (Some(want), Some(got)) = (&u.ident, ident(&mut c, db.dialect, &acct).await) {
-                if *want != got {
-                    return Err(format!("Undo refused: {} is not the account this change was made on (it was dropped and made again, or its password changed).", acct.label()));
-                }
+            if let (Some(want), Some(got)) = (&u.ident, ident(&mut c, db.dialect, &acct).await) && *want != got {
+                return Err(format!("Undo refused: {} is not the account this change was made on (it was dropped and made again, or its password changed).", acct.label()));
             }
             match &u.what {
                 What::Grants { edits, expect } => {
@@ -1518,10 +1510,8 @@ pub(super) async fn undo(db: &Db, a: UndoAction, u: AccountUndo, read_only: bool
                     want.extend(revoke.iter().filter(|r| r.default).map(|r| r.role.clone()));
                     want.sort();
                     want.dedup();
-                    if revoke.iter().any(|r| r.default) {
-                        if let Some(sql) = default_roles_sql(m, db.dialect, &acct, &want)? {
-                            exec_any(&mut c, &sql).await?;
-                        }
+                    if revoke.iter().any(|r| r.default) && let Some(sql) = default_roles_sql(m, db.dialect, &acct, &want)? {
+                        exec_any(&mut c, &sql).await?;
                     }
                     Ok(format!("Undid: {}", u.label))
                 }

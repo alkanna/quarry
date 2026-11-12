@@ -54,7 +54,7 @@ pub fn fk_pair_problem(d: Dialect, child_table: &str, child: &Column, parent_tab
     match fc {
         Fam::Int if size(&ct) != size(&pt) || cu != pu => Some(format!("{c} is {} but {p} is {}. Integer columns must have the same size and the same signedness.", show(child), show(parent))),
         Fam::Decimal | Fam::Float | Fam::Double if cargs != pargs || cu != pu || (fc == Fam::Float && ct != pt) => Some(format!("{c} is {} but {p} is {}. Number columns must match exactly.", show(child), show(parent))),
-        Fam::Other(_) if child.full_type.to_ascii_lowercase() != parent.full_type.to_ascii_lowercase() => Some(format!("{c} is {} but {p} is {}. These types must match exactly.", show(child), show(parent))),
+        Fam::Other(_) if !child.full_type.eq_ignore_ascii_case(&parent.full_type) => Some(format!("{c} is {} but {p} is {}. These types must match exactly.", show(child), show(parent))),
         Fam::Text => {
             let (a, b) = (child.collation.as_deref().map(str::to_ascii_lowercase), parent.collation.as_deref().map(str::to_ascii_lowercase));
             (a != b).then(|| format!("{c} uses {} but {p} uses {}. Give both columns the same collation.", child.collation.as_deref().unwrap_or("the default collation"), parent.collation.as_deref().unwrap_or("the default collation")))

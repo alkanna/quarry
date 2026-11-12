@@ -186,10 +186,8 @@ impl App {
                 }
             }
             right_group(ui, |ui| {
-                if quiet(ui, "Close").on_hover_text("Esc").clicked() {
-                    if let Some(key) = row.or(selected) {
-                        self.close_row(key);
-                    }
+                if quiet(ui, "Close").on_hover_text("Esc").clicked() && let Some(key) = row.or(selected) {
+                    self.close_row(key);
                 }
                 if quiet(ui, "Copy JSON").clicked() {
                     self.docs_act(ui.ctx(), DocsAct::CopyJson, vec![d.clone()]);

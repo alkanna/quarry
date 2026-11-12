@@ -166,11 +166,9 @@ impl App {
                     ui.label(RichText::new("They are added as new documents. Undo removes exactly these documents again.").color(MUTED()));
                     dialog_actions(ui, |ui| {
                         if primary(ui, "Import", PRIMARY()).clicked() {
-                            if let Some((conn, target)) = self.writable_target() {
-                                if let Some(Ok(docs)) = self.tabs[self.cur].import.parsed.clone() {
-                                    self.worker.import(conn, target, docs, None);
-                                    self.ok("Importing…");
-                                }
+                            if let Some((conn, target)) = self.writable_target() && let Some(Ok(docs)) = self.tabs[self.cur].import.parsed.clone() {
+                                self.worker.import(conn, target, docs, None);
+                                self.ok("Importing…");
                             }
                             keep = false;
                         }
@@ -275,7 +273,7 @@ impl App {
         }
     }
 
-    fn delete_dialog(&mut self, ui: &mut egui::Ui, at: &mut Sel, docs: &mut Vec<Document>, keep: &mut bool) {
+    fn delete_dialog(&mut self, ui: &mut egui::Ui, at: &Sel, docs: &[Document], keep: &mut bool) {
         const SHOWN: usize = 5;
         let sql = self.conn(at.conn).is_some_and(|c| c.sql.is_some());
         let ids: Vec<String> = docs.iter().take(SHOWN).map(|d| d.get("_id").map(|k| if sql { k.as_document().map(|k| k.values().map(db::short).collect::<Vec<_>>().join("-")).unwrap_or_default() } else { db::short(k) }).unwrap_or_default()).collect();
@@ -287,11 +285,11 @@ impl App {
             let del = primary(ui, "Delete", ALERT()).clicked();
             // Run on the tab the rows were picked in: tabs can close or move while the dialog is open.
             if del && sql {
-                let docs = docs.clone();
+                let docs = docs.to_vec();
                 self.on_tab(&at.clone(), |a| a.sql_delete(docs));
                 *keep = false;
             } else if del {
-                let docs = docs.clone();
+                let docs = docs.to_vec();
                 self.on_tab(&at.clone(), |a| {
                     if let Some((conn, target)) = a.writable_target() {
                         match docs.as_slice() {
@@ -312,7 +310,7 @@ impl App {
         });
     }
 
-    fn new_collection_dialog(&mut self, ui: &mut egui::Ui, conn: &mut u64, db: &mut String, name: &mut String, view: &mut bool, source: &mut String, pipeline: &mut String, keep: &mut bool) {
+    fn new_collection_dialog(&mut self, ui: &mut egui::Ui, conn: &u64, db: &String, name: &mut String, view: &mut bool, source: &mut String, pipeline: &mut String, keep: &mut bool) {
         ui.set_width(520.0);
         dialog_title(ui, if *view { format!("New view in {db}") } else { format!("New collection in {db}") });
         egui::Grid::new("newcoll").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
@@ -358,7 +356,7 @@ impl App {
         });
     }
 
-    fn duplicate_coll_dialog(&mut self, ui: &mut egui::Ui, conn: &mut u64, db: &mut String, coll: &mut String, name: &mut String, keep: &mut bool) {
+    fn duplicate_coll_dialog(&mut self, ui: &mut egui::Ui, conn: &u64, db: &String, coll: &String, name: &mut String, keep: &mut bool) {
         dialog_title(ui, format!("Duplicate {db}.{coll}"));
         ui.label(RichText::new("Copies every document, index and setting (validator, collation) into a new collection of this database.").color(MUTED()));
         ui.add(egui::TextEdit::singleline(name).desired_width(320.0));
@@ -385,7 +383,7 @@ impl App {
         });
     }
 
-    fn save_all_dialog(&mut self, ui: &mut egui::Ui, keys: &mut Vec<String>, keep: &mut bool) {
+    fn save_all_dialog(&mut self, ui: &mut egui::Ui, keys: &[String], keep: &mut bool) {
         let sql = self.t().is_some_and(|t| t.sql.is_some());
         let n: usize = keys.iter().filter_map(|k| self.drafts.get(k)).map(|d| db::diff(&d.original, &d.current).len()).sum();
         if sql {
@@ -398,7 +396,7 @@ impl App {
         dialog_actions(ui, |ui| {
             if primary(ui, "Save all", PRIMARY()).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
                 if sql {
-                    self.write_sql_drafts(keys.clone());
+                    self.write_sql_drafts(keys.to_vec());
                 } else {
                     for k in keys.iter() {
                         self.write_draft(k);
@@ -412,7 +410,7 @@ impl App {
         });
     }
 
-    fn grouped_dialog(&mut self, ui: &mut egui::Ui, sel: &mut Sel, path: &mut String, pipeline: &mut Vec<Document>, rows: &mut Vec<Document>, keep: &mut bool) {
+    fn grouped_dialog(&mut self, ui: &mut egui::Ui, sel: &Sel, path: &String, pipeline: &[Document], rows: &[Document], keep: &mut bool) {
         ui.set_width(560.0);
         dialog_title(ui, format!("Distinct values for {}: {path}", sel.coll));
         let total: u64 = rows.iter().filter_map(|r| r.get("count").and_then(|c| c.as_i64().or_else(|| c.as_i32().map(i64::from)))).map(|c| c as u64).sum();
@@ -444,7 +442,7 @@ impl App {
                 self.tabs.insert(at, t);
                 self.set_cur(at);
                 self.reset_doc_state();
-                self.run_pipeline(pipeline.clone());
+                self.run_pipeline(pipeline.to_vec());
                 *keep = false;
             }
             if ui.button("Copy").on_hover_text("Copy as JSON: value and count").clicked() {
@@ -456,7 +454,7 @@ impl App {
         });
     }
 
-    fn rename_field_dialog(&mut self, ui: &mut egui::Ui, d: &mut Document, path: &mut Vec<String>, name: &mut String, keep: &mut bool) {
+    fn rename_field_dialog(&mut self, ui: &mut egui::Ui, d: &Document, path: &[String], name: &mut String, keep: &mut bool) {
         let from = path.join(".");
         dialog_title(ui, format!("Rename {from}"));
         ui.add(egui::TextEdit::singleline(name).font(egui::TextStyle::Monospace).desired_width(320.0));
@@ -519,7 +517,7 @@ impl App {
         let fresh = matches!((preview.as_ref(), stages.as_ref()), (Some((p, _)), Ok(s)) if p == s);
         match preview.as_ref().filter(|_| fresh).map(|(_, r)| r) {
             Some(Err(err)) => {
-                ui.label(RichText::new(&*err).color(ALERT()));
+                ui.label(RichText::new(err).color(ALERT()));
             }
             Some(Ok((rows, n))) => {
                 ui.label(RichText::new(format!("{} documents match. Showing {} of them after the change.", group(&n.to_string()), rows.len())).color(MUTED()));
@@ -541,10 +539,8 @@ impl App {
             None => {}
         }
         dialog_actions(ui, |ui| {
-            if ui.add_enabled(ready, egui::Button::new("Preview")).clicked() {
-                if let (Ok(st), Some(t)) = (&stages, self.target()) {
-                    self.worker.update_preview(t, scope.clone(), st.clone());
-                }
+            if ui.add_enabled(ready, egui::Button::new("Preview")).clicked() && let (Ok(st), Some(t)) = (&stages, self.target()) {
+                self.worker.update_preview(t, scope.clone(), st.clone());
             }
             let applicable = ready && fresh && matches!(preview, Some((_, Ok(_))));
             if ui.add_enabled(applicable, primary_button(ui, "Apply…", ALERT())).clicked() {

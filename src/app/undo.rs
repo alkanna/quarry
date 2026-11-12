@@ -116,7 +116,7 @@ mod tests {
         assert_eq!(left("shop", "public", ""), 3, "a schema takes its tables");
         assert_eq!(left("shop", "", ""), 2, "a database takes all of its own");
         // MySQL has no separate database name: the schema is the database.
-        let my = vec![sql_action(1, "", "shop", "orders"), sql_action(1, "", "shop", "items"), sql_action(1, "", "other", "orders")];
+        let my = [sql_action(1, "", "shop", "orders"), sql_action(1, "", "shop", "items"), sql_action(1, "", "other", "orders")];
         assert_eq!(my.iter().filter(|a| !undo_is_under(a, 1, "", "shop", "")).count(), 1);
         assert_eq!(my.iter().filter(|a| !undo_is_under(a, 1, "", "shop", "orders")).count(), 2);
     }

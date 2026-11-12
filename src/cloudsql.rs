@@ -871,7 +871,7 @@ pub(crate) mod tests {
         assert_eq!(search(&file, Some(path.clone()), &tools, &[]), None, "a relative PATH entry is skipped");
         std::fs::write(extra.join(&file), b"").unwrap();
         std::fs::write(tools.join(&file), b"").unwrap();
-        assert_eq!(search(&file, Some(path), &tools, &[extra.clone()]), Some(tools.join(&file)), "Quarry's tools folder comes before the guessed folders");
+        assert_eq!(search(&file, Some(path), &tools, std::slice::from_ref(&extra)), Some(tools.join(&file)), "Quarry's tools folder comes before the guessed folders");
         for d in [&rel, &tools, &extra] {
             let _ = std::fs::remove_dir_all(d);
         }

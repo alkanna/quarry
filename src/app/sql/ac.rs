@@ -72,10 +72,8 @@ impl App {
         let key = ns_key(db, schema);
         self.sql_values.remove(&(conn, key.clone()));
         self.sql_values_asked.retain(|k, _| !(k.0 == conn && k.1 == key));
-        if self.sql_schema_asked.contains(&(conn, key)) {
-            if let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) {
-                self.worker.sql_schema(conn, sql.at(db), if schema.is_empty() { db.to_string() } else { schema.to_string() });
-            }
+        if self.sql_schema_asked.contains(&(conn, key)) && let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) {
+            self.worker.sql_schema(conn, sql.at(db), if schema.is_empty() { db.to_string() } else { schema.to_string() });
         }
     }
 

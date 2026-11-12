@@ -459,10 +459,8 @@ pub fn create_table_stmts(spec: &TableSpec) -> Res<Vec<String>> {
         let cols = group("foreign key", &k.cols)?;
         // A key on the table itself leans on a key made by this statement, so it is checked here; one on another table is checked
         // against that table as the transaction finds it under its lock.
-        if spec.self_ref(k) {
-            if let Some(p) = fk_problem(&own, &spec.name, &own, k, false) {
-                return Err(p);
-            }
+        if spec.self_ref(k) && let Some(p) = fk_problem(&own, &spec.name, &own, k, false) {
+            return Err(p);
         }
         lines.push(format!("  {}FOREIGN KEY ({cols}) {}", named("A foreign key", &k.name)?, fk_refs(&spec.schema, k)?));
     }
@@ -787,11 +785,9 @@ async fn maintenance(db: &Db, read_only: bool) -> Res<Conn> {
         return Err(LOCKED.into());
     }
     let mut c = db.acquire_conn().await?;
-    if !db.pooler() {
-        if let Err(x) = c.execute(&format!("SET default_transaction_read_only = off; SET statement_timeout = 0; SET lock_timeout = '{WRITE_LOCK_SECS}s'")).await {
-            let _ = c.close().await;
-            return Err(se(x));
-        }
+    if !db.pooler() && let Err(x) = c.execute(&format!("SET default_transaction_read_only = off; SET statement_timeout = 0; SET lock_timeout = '{WRITE_LOCK_SECS}s'")).await {
+        let _ = c.close().await;
+        return Err(se(x));
     }
     Ok(c)
 }
@@ -1246,10 +1242,10 @@ async fn undo_db(db: &Db, name: &str, oid: &str, baseline: i64, read_only: bool)
             }
         }
         .await;
-        if dropped.is_err() && blocked {
+        if blocked && let Err(d) = &dropped {
             // The database stays, so it takes connections again as it did before.
             if let Err(x) = alone(&mut c, db, &format!("ALTER DATABASE {} WITH ALLOW_CONNECTIONS true", q(name))).await {
-                return Err(format!("{}\nQuarry could not open {name} to connections again ({}). Run ALTER DATABASE {} ALLOW_CONNECTIONS true.", dropped.unwrap_err(), se(x), q(name)));
+                return Err(format!("{}\nQuarry could not open {name} to connections again ({}). Run ALTER DATABASE {} ALLOW_CONNECTIONS true.", d, se(x), q(name)));
             }
         }
         dropped?;

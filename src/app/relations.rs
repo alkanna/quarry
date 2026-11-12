@@ -56,40 +56,34 @@ impl App {
                 analyze = Some(String::new());
             }
             let cur = self.t().filter(|t| t.sel.conn == *conn && t.sel.db == *db).map(|t| t.sel.coll.clone());
-            if let Some(c) = cur {
-                if ui.button(format!("Analyze {c}")).clicked() {
-                    analyze = Some(c);
-                }
+            if let Some(c) = cur && ui.button(format!("Analyze {c}")).clicked() {
+                analyze = Some(c);
             }
         });
         let mut note: Option<db::Res<String>> = None;
         let mut changed = false;
         ui.horizontal(|ui| {
             let list = self.prefs.relations.entry(key.clone()).or_default();
-            if ui.add_enabled(!list.is_empty(), egui::Button::new("Export…")).clicked() {
-                if let Some(path) = rfd::FileDialog::new().set_file_name(format!("{db}-data-relations.json")).save_file() {
-                    match std::fs::write(&path, relations_export(db, list)) {
-                        Ok(()) => note = Some(Ok(format!("Exported {} data relations", list.len()))),
-                        Err(e) => note = Some(Err(format!("Failed to export relations: {e}"))),
-                    }
+            if ui.add_enabled(!list.is_empty(), egui::Button::new("Export…")).clicked() && let Some(path) = rfd::FileDialog::new().set_file_name(format!("{db}-data-relations.json")).save_file() {
+                match std::fs::write(&path, relations_export(db, list)) {
+                    Ok(()) => note = Some(Ok(format!("Exported {} data relations", list.len()))),
+                    Err(e) => note = Some(Err(format!("Failed to export relations: {e}"))),
                 }
             }
-            if ui.button("Import…").on_hover_text("A file exported here or from Mingo; relations already present are skipped").clicked() {
-                if let Some(path) = rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file() {
-                    match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| relations_import(&t)) {
-                        Ok(new) => {
-                            let mut added = 0;
-                            for r in new {
-                                if !list.iter().any(|x| x.coll == r.coll && x.path == r.path && x.target == r.target) {
-                                    list.push(r);
-                                    added += 1;
-                                }
+            if ui.button("Import…").on_hover_text("A file exported here or from Mingo; relations already present are skipped").clicked() && let Some(path) = rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file() {
+                match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| relations_import(&t)) {
+                    Ok(new) => {
+                        let mut added = 0;
+                        for r in new {
+                            if !list.iter().any(|x| x.coll == r.coll && x.path == r.path && x.target == r.target) {
+                                list.push(r);
+                                added += 1;
                             }
-                            changed = true;
-                            note = Some(Ok(format!("Imported {added} data relations")));
                         }
-                        Err(e) => note = Some(Err(format!("Failed to import relations: {e}"))),
+                        changed = true;
+                        note = Some(Ok(format!("Imported {added} data relations")));
                     }
+                    Err(e) => note = Some(Err(format!("Failed to import relations: {e}"))),
                 }
             }
             let n = self.prefs.relations.get(&key).map_or(0, Vec::len);

@@ -396,6 +396,8 @@ pub fn pretty_shell(b: &Bson) -> String {
     at(b, 0)
 }
 
+// ponytail: made once per Shell run, so the copy is cheap; boxing the large variant would change every match on it.
+#[allow(clippy::large_enum_variant)]
 pub enum ShellKind {
     Find(Query),
     Aggregate(Vec<Document>),

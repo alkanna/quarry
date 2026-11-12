@@ -461,10 +461,9 @@ pub fn client_cert_problem(raw: &str) -> Option<(String, String)> {
         ("The server wants a client certificate".into(), format!("pg_hba.conf asks this user for one (clientcert=verify-ca or verify-full, or cert sign-in). Set the client certificate and key {tab}."))
     } else if low.contains("certificate authentication failed") {
         ("The client certificate does not name this user".into(), "With cert sign-in the certificate's common name (CN) must be the user name, or map to it in pg_ident.conf.".into())
-    } else if let Some(alert) = ["UnknownCA", "BadCertificate", "CertificateUnknown", "CertificateExpired", "CertificateRevoked", "CertificateRequired", "DecryptError"].iter().find(|a| first.starts_with(CERT_ALERT) && first.contains(&format!("received fatal alert: {a}"))) {
-        ("The server refused the client certificate".into(), format!("The server's ssl_ca_file must hold the CA that signed it, and it must be valid today. The TLS alert was {alert}."))
     } else {
-        return None;
+        let alert = ["UnknownCA", "BadCertificate", "CertificateUnknown", "CertificateExpired", "CertificateRevoked", "CertificateRequired", "DecryptError"].iter().find(|a| first.starts_with(CERT_ALERT) && first.contains(&format!("received fatal alert: {a}")))?;
+        ("The server refused the client certificate".into(), format!("The server's ssl_ca_file must hold the CA that signed it, and it must be valid today. The TLS alert was {alert}."))
     };
     Some((title, hint))
 }

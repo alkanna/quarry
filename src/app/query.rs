@@ -112,7 +112,7 @@ pub(super) fn library_of(lib: &HashMap<String, Vec<SavedQuery>>, key: &str, kind
 fn put_saved(list: &mut Vec<SavedQuery>, q: SavedQuery) {
     list.retain(|x| !(x.name == q.name && LibKind::of(x) == LibKind::of(&q)));
     list.push(q);
-    list.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    list.sort_by_key(|a| a.name.to_lowercase());
 }
 
 /// What a library menu lists. A SQL one carries its dialect, since the statements of a script are counted the way its

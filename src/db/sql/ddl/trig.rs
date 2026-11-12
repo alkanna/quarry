@@ -189,18 +189,14 @@ pub fn check_body(body: &str, m: Mode) -> Result<String, String> {
             end = toks[k - 1].1.end;
             if top != Blk::CaseExpr {
                 // An end label must repeat the begin label, so only that word is taken as one.
-                if let Some(l) = &label {
-                    if k < toks.len() && matches!(toks[k].0, Tok::Word | Tok::Quoted) && unquote(text(k)).to_lowercase() == *l {
-                        end = toks[k].1.end;
-                        k += 1;
-                    }
+                if let Some(l) = &label && k < toks.len() && matches!(toks[k].0, Tok::Word | Tok::Quoted) && unquote(text(k)).to_lowercase() == *l {
+                    end = toks[k].1.end;
+                    k += 1;
                 }
                 closed = stack.is_empty();
             }
             continue;
-        } else if is_word && matches!(up.as_str(), "THEN" | "ELSE") && matches!(stack.last(), Some((Blk::If | Blk::CaseStmt, _))) {
-            start = true;
-        } else if is_word && up == "DO" && matches!(stack.last(), Some((Blk::While | Blk::For, _))) {
+        } else if is_word && ((matches!(up.as_str(), "THEN" | "ELSE") && matches!(stack.last(), Some((Blk::If | Blk::CaseStmt, _)))) || (up == "DO" && matches!(stack.last(), Some((Blk::While | Blk::For, _))))) {
             start = true;
         }
         k += 1;

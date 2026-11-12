@@ -684,14 +684,12 @@ impl Worker {
             let at = (a.db.clone(), a.coll.clone());
             let UndoAction { at: when, conn, db: schema, coll: table, kind } = a;
             // The entry is dropped, not kept, when the target is another object now: nothing it does could ever apply again.
-            if let UndoKind::Sql { ids, .. } = &kind {
-                if let Err(err) = super::pg::create::check_ids(&db, &schema, &table, ids).await {
-                    // Structure undos are answered the way their own run answers.
-                    return match &kind {
-                        UndoKind::Sql { undo: u @ (SqlUndo::Alter(_) | SqlUndo::Trigger(_)), .. } => Msg::SqlAltered { conn, database: db.pg_database(), schema, table, res: Err(err), undo: None, sql_mode: None, alter: matches!(u, SqlUndo::Alter(_)), unsure: false },
-                        _ => Msg::Written { at, res: Err(err), undo: None, reload: false, retry: None },
-                    };
-                }
+            if let UndoKind::Sql { ids, .. } = &kind && let Err(err) = super::pg::create::check_ids(&db, &schema, &table, ids).await {
+                // Structure undos are answered the way their own run answers.
+                return match &kind {
+                    UndoKind::Sql { undo: u @ (SqlUndo::Alter(_) | SqlUndo::Trigger(_)), .. } => Msg::SqlAltered { conn, database: db.pg_database(), schema, table, res: Err(err), undo: None, sql_mode: None, alter: matches!(u, SqlUndo::Alter(_)), unsure: false },
+                    _ => Msg::Written { at, res: Err(err), undo: None, reload: false, retry: None },
+                };
             }
             if let UndoKind::Sql { undo: SqlUndo::Alter(u), .. } = &kind {
                 let u = (**u).clone();

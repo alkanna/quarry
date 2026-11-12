@@ -297,10 +297,8 @@ impl App {
         if let Some(f) = from.as_ref().filter(|f| f.functional) {
             return self.warn(format!("{} has an expression part, which this editor cannot write back. Change it with a query.", f.name));
         }
-        if let Some(f) = &from {
-            if staged.iter().any(|c| matches!(c, Change::DropIndex(n) if *n == f.name) || matches!(c, Change::RenameIndex { from, .. } if *from == f.name)) {
-                return self.warn(format!("{} already has a staged change. Remove it first.", f.name));
-            }
+        if let Some(f) = &from && staged.iter().any(|c| matches!(c, Change::DropIndex(n) if *n == f.name) || matches!(c, Change::RenameIndex { from, .. } if *from == f.name)) {
+            return self.warn(format!("{} already has a staged change. Remove it first.", f.name));
         }
         let after = ddl::columns_after(&st, &staged);
         let ty = |n: &str| st.columns.iter().find(|c| c.name == n).map(|c| c.full_type.clone()).or_else(|| staged.iter().find_map(|c| match c {
@@ -674,10 +672,8 @@ impl App {
         });
         f.def.default = dflt_of(f.dmode, &f.dtext);
         // A position that names a column that no longer exists would break the statement.
-        if let Pos::After(c) = &f.pos {
-            if !f.order.contains(c) {
-                f.pos = Pos::Keep;
-            }
+        if let Pos::After(c) = &f.pos && !f.order.contains(c) {
+            f.pos = Pos::Keep;
         }
 
         let change = match &f.from {

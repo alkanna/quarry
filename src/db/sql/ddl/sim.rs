@@ -200,13 +200,9 @@ impl Sim {
                     let mut back = vec![Change::DropIndex(def.name.clone())];
                     if def.kind == IndexKind::Primary {
                         for ic in &def.cols {
-                            if let Some(i) = self.at(&ic.name) {
-                                if let Ok(old) = &self.cols[i].1.clone() {
-                                    if old.nullable {
-                                        self.cols[i].1 = Ok(ColDef { nullable: false, ..old.clone() });
-                                        back.push(Change::Modify { from: old.name.clone(), def: old.clone(), pos: Pos::Keep });
-                                    }
-                                }
+                            if let Some(i) = self.at(&ic.name) && let Ok(old) = &self.cols[i].1.clone() && old.nullable {
+                                self.cols[i].1 = Ok(ColDef { nullable: false, ..old.clone() });
+                                back.push(Change::Modify { from: old.name.clone(), def: old.clone(), pos: Pos::Keep });
                             }
                         }
                     }
@@ -600,10 +596,8 @@ pub fn warnings(before: &Structure, changes: &[Change]) -> Vec<String> {
     let mut fk_sim = Sim::of(before);
     let sim = Sim::of(before);
     for c in changes {
-        if let Change::DropFk(n) = c {
-            if let Some(ix) = fk_sim.backing_index(n).filter(|_| !before.is_pg()) {
-                out.push(format!("Dropping {n} also drops the index {ix}, which was made for it. Undo brings both back."));
-            }
+        if let Change::DropFk(n) = c && let Some(ix) = fk_sim.backing_index(n).filter(|_| !before.is_pg()) {
+            out.push(format!("Dropping {n} also drops the index {ix}, which was made for it. Undo brings both back."));
         }
         if let (Change::AddFk(k), Some(_)) = (c, &before.pg_schema) {
             if !fk_sim.serves(&k.cols) {
@@ -621,18 +615,14 @@ pub fn warnings(before: &Structure, changes: &[Change]) -> Vec<String> {
                 out.push(format!("Dropping {n} deletes its values for good, with every index and constraint that uses it. Undo brings the column back empty and last, {back}"));
             }
             Change::Add { def, .. } if before.is_pg() && !def.auto_increment && before.status.rows.is_some_and(|r| r > 0) => {
-                if let Dv::Expr(x) = &def.default {
-                    if crate::db::sql::pg::ddl::calls_function(x) {
-                        out.push(format!("The default of {} calls a function. Any function call is read as volatile here, since the editor does not look the function up. A volatile one runs once for each of the table's rows while PostgreSQL holds an exclusive lock on the table, and again on every later insert.", def.name));
-                    }
+                if let Dv::Expr(x) = &def.default && crate::db::sql::pg::ddl::calls_function(x) {
+                    out.push(format!("The default of {} calls a function. Any function call is read as volatile here, since the editor does not look the function up. A volatile one runs once for each of the table's rows while PostgreSQL holds an exclusive lock on the table, and again on every later insert.", def.name));
                 }
             }
             Change::Drop(n) => out.push(format!("Dropping {n} deletes its values for good. Undo brings the column back empty.")),
             Change::Modify { from, def, .. } => {
-                if let Some(Ok(old)) = sim.at(from).map(|i| &sim.cols[i].1) {
-                    if converts(old, def) {
-                        out.push(format!("Changing {from} converts its values and can cut or reject some. Undo restores the definition, not the values."));
-                    }
+                if let Some(Ok(old)) = sim.at(from).map(|i| &sim.cols[i].1) && converts(old, def) {
+                    out.push(format!("Changing {from} converts its values and can cut or reject some. Undo restores the definition, not the values."));
                 }
             }
             Change::DropIndex(n) if n == "PRIMARY" || before.indexes.iter().any(|i| i.primary && i.name == *n) => out.push("Dropping the primary key makes the rows read-only here until the table has a key again.".into()),

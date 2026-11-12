@@ -309,12 +309,10 @@ impl App {
                 *keep = false;
             }
             // A table of the Content view can also leave as a dump with its structure.
-            if f.sql && f.src == Src::Content {
-                if quiet(ui, "SQL dump…").on_hover_text("The table with its structure, or the whole database, as a script").clicked() {
-                    *keep = false;
-                    if let Some(s) = self.t().map(|t| t.sel.clone()) {
-                        self.open_sql_dump_in(s.conn, s.db, s.schema, Some(s.coll));
-                    }
+            if f.sql && f.src == Src::Content && quiet(ui, "SQL dump…").on_hover_text("The table with its structure, or the whole database, as a script").clicked() {
+                *keep = false;
+                if let Some(s) = self.t().map(|t| t.sel.clone()) {
+                    self.open_sql_dump_in(s.conn, s.db, s.schema, Some(s.coll));
                 }
             }
         });
@@ -430,10 +428,8 @@ impl App {
         spin(ui);
         let text = if j.of > 0 { format!("Statement {} of {}, {} rows", j.step.load(Ordering::Relaxed), j.of, human_rows(n)) } else { format!("{} {} rows", if copy { "Copied" } else { "Exported" }, human_rows(n)) };
         ui.label(RichText::new(text).size(TXT_CAPTION).color(MUTED()));
-        if quiet(ui, RichText::new("Cancel").size(TXT_CAPTION)).on_hover_text("Stop and discard the output").clicked() {
-            if let Some(j) = &self.export_job {
-                self.worker.sql_kill(j.db.clone(), j.id.load(Ordering::SeqCst), j.cancel.clone());
-            }
+        if quiet(ui, RichText::new("Cancel").size(TXT_CAPTION)).on_hover_text("Stop and discard the output").clicked() && let Some(j) = &self.export_job {
+            self.worker.sql_kill(j.db.clone(), j.id.load(Ordering::SeqCst), j.cancel.clone());
         }
         ui.ctx().request_repaint_after(Duration::from_millis(200));
         true

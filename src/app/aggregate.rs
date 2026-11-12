@@ -120,10 +120,8 @@ pub(super) fn stage_samples(ui: &mut egui::Ui, s: &mut Stage, i: usize, acts: &m
             let g = ui.fonts_mut(|f| f.layout_job(cell_job(&Bson::Document(d.clone()))));
             let clip = ui.painter().with_clip_rect(rect.shrink2(egui::vec2(2.0, 0.0)));
             clip.galley(egui::pos2(rect.left() + 20.0, rect.center().y - g.size().y / 2.0), g, TEXT());
-            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(if open { "Click to close" } else { "Click to see the whole document" }).clicked() {
-                if !s.open.remove(&k) {
-                    s.open.insert(k);
-                }
+            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(if open { "Click to close" } else { "Click to see the whole document" }).clicked() && !s.open.remove(&k) {
+                s.open.insert(k);
             }
             if open {
                 let text = db::to_edit_json(d);
@@ -275,11 +273,9 @@ impl App {
             }
         }
         let t = self.tm().unwrap();
-        if let (Some(i), false) = (stage, run) {
-            if let Some(p) = db::parse_pipeline(&t.agg_txt).ok().and_then(|p| db::stage_preview(&p, i)) {
-                self.run_pipeline(p);
-                self.tm().unwrap().agg_stage = Some(i);
-            }
+        if let (Some(i), false) = (stage, run) && let Some(p) = db::parse_pipeline(&t.agg_txt).ok().and_then(|p| db::stage_preview(&p, i)) {
+            self.run_pipeline(p);
+            self.tm().unwrap().agg_stage = Some(i);
         }
         let t = self.tm().unwrap();
         if run {
@@ -391,10 +387,8 @@ impl App {
         if t.stages.iter().any(|s| s.req != 0) {
             return;
         }
-        if let Some(next) = t.stages.iter().filter_map(|s| s.due).min() {
-            if next > now {
-                ctx.request_repaint_after(next - now);
-            }
+        if let Some(next) = t.stages.iter().filter_map(|s| s.due).min() && next > now {
+            ctx.request_repaint_after(next - now);
         }
         let Some(k) = t.stages.iter().position(|s| s.due.is_some_and(|d| d <= now)) else { return };
         t.stages[k].due = None;

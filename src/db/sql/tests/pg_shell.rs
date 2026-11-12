@@ -474,10 +474,7 @@ fn stop_cancels_a_running_pg_sleep() {
         }
         cancel.send(()).unwrap();
         let res = loop {
-            match l.rx.recv_timeout(Duration::from_secs(30)).expect("shell answer") {
-                Msg::ShellDone { res, .. } => break res,
-                _ => {}
-            }
+            if let Msg::ShellDone { res, .. } = l.rx.recv_timeout(Duration::from_secs(30)).expect("shell answer") { break res }
         };
         assert_eq!(res, Err("Stopped.".to_string()), "{var}");
         let gone = std::time::Instant::now();

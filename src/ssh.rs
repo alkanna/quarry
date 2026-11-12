@@ -141,12 +141,8 @@ async fn auth_agent(h: &mut Session, user: &str) -> Result<bool, String> {
     }
     let hash = h.best_supported_rsa_hash().await.map_err(|e| e.to_string())?.flatten();
     for id in ids {
-        if let keys::agent::AgentIdentity::PublicKey { key, .. } = id {
-            if let Ok(r) = h.authenticate_publickey_with(user, key, hash, &mut agent).await {
-                if r.success() {
-                    return Ok(true);
-                }
-            }
+        if let keys::agent::AgentIdentity::PublicKey { key, .. } = id && let Ok(r) = h.authenticate_publickey_with(user, key, hash, &mut agent).await && r.success() {
+            return Ok(true);
         }
     }
     Ok(false)

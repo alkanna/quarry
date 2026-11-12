@@ -152,10 +152,8 @@ fn bytes(b: &[u8]) -> Bson {
 /// the edge, and the rest of the app sees the same bytes as on MySQL.
 pub fn to_bson(d: Dialect, kind: Kind, raw: Option<&[u8]>) -> Bson {
     let pg = d == Dialect::Postgres;
-    if pg && kind == Kind::Binary {
-        if let Some(b) = raw.and_then(unhex) {
-            return bytes(&b);
-        }
+    if pg && kind == Kind::Binary && let Some(b) = raw.and_then(unhex) {
+        return bytes(&b);
     }
     let Some(raw) = raw else { return Bson::Null };
     let text = || String::from_utf8_lossy(raw).into_owned();
@@ -347,10 +345,8 @@ pub enum Param {
 impl Param {
     /// Like `from_bson`, but a UInt column's text above i64::MAX binds as a number, not as text.
     pub fn for_kind(kind: Kind, v: &Bson) -> Param {
-        if let (Kind::UInt, Bson::String(s)) = (kind, v) {
-            if let Some(u) = s.parse::<u64>().ok().filter(|u| i64::try_from(*u).is_err()) {
-                return Param::UInt(u);
-            }
+        if let (Kind::UInt, Bson::String(s)) = (kind, v) && let Some(u) = s.parse::<u64>().ok().filter(|u| i64::try_from(*u).is_err()) {
+            return Param::UInt(u);
         }
         Param::from_bson(v)
     }

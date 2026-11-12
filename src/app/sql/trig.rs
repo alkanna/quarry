@@ -216,10 +216,8 @@ impl App {
             if let Some(s) = self.trig_state_mut() {
                 s.trig.insert(key.to_string(), def.clone());
             }
-        } else if dirty {
-            if let Some(s) = self.trig_state_mut().filter(|s| !s.trig.contains_key(key)) {
-                s.trig.insert(key.to_string(), def.clone());
-            }
+        } else if dirty && let Some(s) = self.trig_state_mut().filter(|s| !s.trig.contains_key(key)) {
+            s.trig.insert(key.to_string(), def.clone());
         }
         let Some(memo) = memo else { return };
         let dirty = memo.dirty;
@@ -230,11 +228,9 @@ impl App {
             ui.label(RichText::new(w.as_str()).size(TXT_SMALL).color(WARNING()));
         }
         // The edited trigger is created with this session's sql_mode, which decides how its body runs.
-        if let (Some(t), Some(now)) = (live_trig.filter(|_| dirty), &session_mode) {
-            if !ddl::same_modes(&t.sql_mode, now) {
-                ui.add_space(6.0);
-                ui.label(RichText::new(format!("{} was created with sql_mode {:?}. Saving creates it with this session's {:?}, which can change how its body runs (|| or double quotes, for example).", t.name, t.sql_mode, now)).size(TXT_SMALL).color(WARNING()));
-            }
+        if let (Some(t), Some(now)) = (live_trig.filter(|_| dirty), &session_mode) && !ddl::same_modes(&t.sql_mode, now) {
+            ui.add_space(6.0);
+            ui.label(RichText::new(format!("{} was created with sql_mode {:?}. Saving creates it with this session's {:?}, which can change how its body runs (|| or double quotes, for example).", t.name, t.sql_mode, now)).size(TXT_SMALL).color(WARNING()));
         }
         if let Some(steps) = steps {
             ui.add_space(8.0);
@@ -275,12 +271,10 @@ impl App {
                 }
             });
         });
-        if revert {
-            if let Some(s) = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()) {
-                s.st.trig.remove(key);
-                if key == NEW {
-                    s.st.trig_new = false;
-                }
+        if revert && let Some(s) = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()) {
+            s.st.trig.remove(key);
+            if key == NEW {
+                s.st.trig_new = false;
             }
         }
         if save && steps.as_ref().is_some_and(|s| s.is_ok()) {

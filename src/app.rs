@@ -606,10 +606,8 @@ impl eframe::App for App {
         let mut pos = egui::pos2(x, y);
         let mode = parts.next();
         // "x,y,right,x2,y2": after the menu opened, the pointer moves on to x2,y2, to open a submenu.
-        if let (Some("right"), Some(Ok(x2)), Some(Ok(y2))) = (mode, parts.next().map(str::parse::<f32>), parts.next().map(str::parse::<f32>)) {
-            if self.shot.as_ref().is_some_and(|s| s.1 > 62) {
-                pos = egui::pos2(x2, y2);
-            }
+        if let (Some("right"), Some(Ok(x2)), Some(Ok(y2))) = (mode, parts.next().map(str::parse::<f32>), parts.next().map(str::parse::<f32>)) && self.shot.as_ref().is_some_and(|s| s.1 > 62) {
+            pos = egui::pos2(x2, y2);
         }
         raw.events.push(egui::Event::PointerMoved(pos));
         match mode {
@@ -713,7 +711,7 @@ fn human_bytes(n: usize) -> String {
 pub(crate) fn group(n: &str) -> String {
     let mut out = String::new();
     for (i, ch) in n.chars().enumerate() {
-        if i > 0 && (n.len() - i) % 3 == 0 {
+        if i > 0 && (n.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(ch);

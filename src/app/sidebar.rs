@@ -285,10 +285,8 @@ impl App {
         if let Some(id) = sql_users {
             self.side_act(id, SideAct::SqlUsers);
         }
-        if let Some(id) = refresh {
-            if !self.demo {
-                self.connect(id);
-            }
+        if let Some(id) = refresh && !self.demo {
+            self.connect(id);
         }
         if let Some(id) = pick {
             self.activate(id);
@@ -565,10 +563,8 @@ impl App {
                     }
                 });
                 if is_open {
-                    if pg {
-                        if let Some(p) = self.pg_schema_row(ui, c, db_name, picked) {
-                            pick_schema = Some((db_name.clone(), p));
-                        }
+                    if pg && let Some(p) = self.pg_schema_row(ui, c, db_name, picked) {
+                        pick_schema = Some((db_name.clone(), p));
                     }
                     // Nothing listed yet: a row says the list is on its way, or why it failed with a retry, so an open
                     // database never sits empty. A PostgreSQL database loads its schemas, then the picked schema's tables.
@@ -748,10 +744,8 @@ impl App {
         if let Some((d, schema)) = pick_schema {
             self.pg_set_schema(id, &d, schema);
         }
-        if let Some(d) = toggle {
-            if !self.open_dbs.remove(&(id, d.clone())) {
-                self.open_dbs.insert((id, d));
-            }
+        if let Some(d) = toggle && !self.open_dbs.remove(&(id, d.clone())) {
+            self.open_dbs.insert((id, d));
         }
         if let Some(s) = open {
             self.open_collection(s, false);

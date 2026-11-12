@@ -165,10 +165,8 @@ impl App {
     }
 
     pub(in crate::app) fn sql_drop_info_done(&mut self, conn: u64, database: String, schema: String, table: String, res: db::Res<DropInfo>) {
-        if let Some(Modal::SqlDrop(f)) = &mut self.modal {
-            if f.conn == conn && f.database == database && f.schema == schema && f.table == table {
-                f.info = Some(res);
-            }
+        if let Some(Modal::SqlDrop(f)) = &mut self.modal && f.conn == conn && f.database == database && f.schema == schema && f.table == table {
+            f.info = Some(res);
         }
     }
 
@@ -192,10 +190,8 @@ impl App {
             let old = std::mem::take(&mut c.dbs);
             c.dbs = dbs.into_iter().map(|d| (d.clone(), old.iter().find(|o| o.0 == d).and_then(|o| o.1.clone()))).collect();
             // A database just created is known to be empty, so it shows 0 instead of a spinner.
-            if what == Ddl::CreatedDb {
-                if let Some(d) = c.dbs.iter_mut().find(|d| d.0 == schema) {
-                    d.1 = Some(Vec::new());
-                }
+            if what == Ddl::CreatedDb && let Some(d) = c.dbs.iter_mut().find(|d| d.0 == schema) {
+                d.1 = Some(Vec::new());
             }
         }
         let gone = |t: &Tab| t.sel.conn == conn && t.sel.db == schema && (table.is_empty() || t.sel.coll == table);
@@ -406,10 +402,8 @@ impl App {
                 }
             }
         }
-        if let Some(Err(e)) = &built {
-            if !f.name.is_empty() {
-                ui.label(RichText::new(e.as_str()).size(TXT_SMALL).color(ALERT()));
-            }
+        if let Some(Err(e)) = &built && !f.name.is_empty() {
+            ui.label(RichText::new(e.as_str()).size(TXT_SMALL).color(ALERT()));
         }
         if !writable {
             ui.label(RichText::new(NOTE_TABLE).size(TXT_SMALL).color(FAINT()));

@@ -541,10 +541,8 @@ fn identity_of(r: &sqlx::mysql::MySqlRow, from: usize, d: Dialect) -> String {
 /// a failover shows.
 async fn me_and_identity(c: &mut sqlx::MySqlConnection, d: Dialect) -> Res<(u64, String)> {
     let q = identity_columns(d)?.replacen("SELECT ", "SELECT CONNECTION_ID(), ", 1);
-    if let Ok(r) = rows(c, &q).await {
-        if let Some(r) = r.first() {
-            return Ok((super::worker::num_at(r, 0).unwrap_or(0), identity_of(r, 1, d)));
-        }
+    if let Ok(r) = rows(c, &q).await && let Some(r) = r.first() {
+        return Ok((super::worker::num_at(r, 0).unwrap_or(0), identity_of(r, 1, d)));
     }
     let r = rows(c, "SELECT CONNECTION_ID()").await.map_err(se)?;
     Ok((r.first().and_then(|r| super::worker::num_at(r, 0)).unwrap_or(0), String::new()))

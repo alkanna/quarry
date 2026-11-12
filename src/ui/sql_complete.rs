@@ -188,8 +188,7 @@ fn parse_refs(toks: &[Tk], dl: Dialect) -> Vec<Ref> {
             continue;
         }
         i += 1;
-        loop {
-            let Some(first) = toks.get(i).and_then(Tk::name) else { break };
+        while let Some(first) = toks.get(i).and_then(Tk::name) {
             i += 1;
             let (db, table) = match (toks.get(i), toks.get(i + 1).and_then(Tk::name)) {
                 (Some(d), Some(t)) if d.punct(".") => {
@@ -276,10 +275,8 @@ fn clause(toks: &[Tk]) -> Option<String> {
             depth += 1;
         } else if t.punct("(") {
             depth = (depth - 1).max(0);
-        } else if depth == 0 && t.tok == Tok::Word {
-            if let Some(c) = CLAUSES.iter().find(|c| t.s.eq_ignore_ascii_case(c)) {
-                return Some(c.to_string());
-            }
+        } else if depth == 0 && t.tok == Tok::Word && let Some(c) = CLAUSES.iter().find(|c| t.s.eq_ignore_ascii_case(c)) {
+            return Some(c.to_string());
         }
     }
     None
@@ -381,10 +378,8 @@ pub(crate) fn analyze(before: &str, full_stmt: &str, scope: &Scope, values: &Fie
         }
     };
     // A number typed after a comparison: the values of a numeric column, which go in unquoted.
-    if !in_tick && word.starts_with(|c: char| c.is_ascii_digit()) {
-        if let Some(out) = value_list(prev, word, from, "", &rts, values) {
-            return Some(out);
-        }
+    if !in_tick && word.starts_with(|c: char| c.is_ascii_digit()) && let Some(out) = value_list(prev, word, from, "", &rts, values) {
+        return Some(out);
     }
     // After `::` PostgreSQL wants a type, and nothing else fits.
     if !in_tick && scope.dialect == Dialect::Postgres && prev.len() >= 2 && prev[prev.len() - 1].punct(":") && prev[prev.len() - 2].punct(":") && prev[prev.len() - 2].start + 1 == prev[prev.len() - 1].start {
@@ -488,13 +483,11 @@ fn cols_out(dl: Dialect, label: &str, table: &str, cols: &[SchemaCol], word: &st
 fn tables_list(word: &str, from: usize, in_tick: bool, scope: &Scope) -> Out {
     let mut sugs: Vec<Sug> = scope.schema.tables.iter().filter(|t| starts_ci(&t.name, word)).map(|t| table_sug(scope.dialect, t, in_tick)).collect();
     // A name still loading is listed from the sidebar's table list, without the row counts.
-    if scope.schema.tables.is_empty() {
-        if let Some((_, Some(names))) = scope.dbs.iter().find(|(d, _)| d.eq_ignore_ascii_case(&scope.db)) {
-            sugs.extend(names.iter().filter(|t| starts_ci(t, word)).map(|t| {
-                let view = scope.views.contains(t.as_str());
-                sug(t.clone(), if view { "view" } else { "table" }, ident(scope.dialect, t, in_tick), if view { "view".to_string() } else { String::new() }, String::new())
-            }));
-        }
+    if scope.schema.tables.is_empty() && let Some((_, Some(names))) = scope.dbs.iter().find(|(d, _)| d.eq_ignore_ascii_case(&scope.db)) {
+        sugs.extend(names.iter().filter(|t| starts_ci(t, word)).map(|t| {
+            let view = scope.views.contains(t.as_str());
+            sug(t.clone(), if view { "view" } else { "table" }, ident(scope.dialect, t, in_tick), if view { "view".to_string() } else { String::new() }, String::new())
+        }));
     }
     for (d, tables) in scope.dbs.iter().filter(|(d, _)| !d.eq_ignore_ascii_case(&scope.db)) {
         if starts_ci(d, word) {
@@ -687,10 +680,8 @@ pub(crate) fn sql_ac_field(
     };
     let (out, picked, _moved) = ac_input_with(ui, id, text, ac, &compute, false, show);
     let caret = out.cursor_range.filter(|r| r.is_empty()).map(|r| r.primary.index.0);
-    if ac.id == Some(id) && !ac.items.is_empty() {
-        if let Some((t, f)) = meta.borrow_mut().take() {
-            (ac.title, ac.foot) = (t, f);
-        }
+    if ac.id == Some(id) && !ac.items.is_empty() && let Some((t, f)) = meta.borrow_mut().take() {
+        (ac.title, ac.foot) = (t, f);
     }
     if let (Some(n), Some(ci)) = (need.borrow_mut().take(), caret) {
         // Values asked for the first time: the list waits, and says so, until they arrive.
@@ -933,7 +924,7 @@ mod tests {
         assert_eq!(from, "SELECT * FROM orders WHERE customer_id IN (5, ".len());
         assert_eq!(text_of(&s), ["12", "120"]);
         // A digit after a text column is no value.
-        assert!(run_with("SELECT * FROM orders WHERE currency = 1|", &values()).map_or(true, |(_, s)| s.iter().all(|s| s.note != "literal")));
+        assert!(run_with("SELECT * FROM orders WHERE currency = 1|", &values()).is_none_or(|(_, s)| s.iter().all(|s| s.note != "literal")));
     }
 
     #[test]

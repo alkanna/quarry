@@ -254,8 +254,8 @@ fn the_read_only_guard_holds_with_every_setting_applied() {
             assert_eq!(show(&l, &db, "default_transaction_read_only"), "on", "{var}");
         }
         let sets = go(&l, &db, "public", "INSERT INTO adv_guard VALUES (1); DELETE FROM adv_guard; CREATE TABLE adv_guard2 (a int); SELECT set_config('default_transaction_read_only', 'off', false); SELECT 1 AS ok", true);
-        for i in 0..4 {
-            assert!(sets[i].error.is_some(), "{var}: statement {i} must be refused on a locked connection: {:?}", sets[i].stmt);
+        for (i, s) in sets.iter().take(4).enumerate() {
+            assert!(s.error.is_some(), "{var}: statement {i} must be refused on a locked connection: {:?}", s.stmt);
         }
         assert_eq!(val(&sets[4], "ok"), "1", "{var}");
         assert_eq!(l.qone(&pool, "SELECT count(*)::text FROM public.adv_guard"), "0", "{var}");

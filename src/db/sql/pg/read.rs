@@ -142,7 +142,7 @@ impl Db {
     /// Preparing runs nothing, so no transaction is needed.
     pub(in crate::db::sql) async fn describe_text(&self, sql: &str) -> Res<Vec<ColInfo>> {
         match &self.pool {
-            Pool::My(p) => Ok(col_infos((&*p).describe(sql).await.map_err(se)?.columns(), self.dialect)),
+            Pool::My(p) => Ok(col_infos(p.describe(sql).await.map_err(se)?.columns(), self.dialect)),
             Pool::Pg(_) => {
                 // Planning with EXPLAIN can evaluate STABLE and IMMUTABLE functions of the text, so it runs inside a
                 // read-only transaction that is rolled back, like every other statement that carries user text.

@@ -600,15 +600,11 @@ pub fn convert(col: &TCol, raw: &str, empty_null: bool, fmt: DateFmt) -> Result<
             return Err(format!("{n} characters, the column holds {max}."));
         }
     }
-    if let (Kind::Enum, Bson::String(s)) = (col.kind, &parsed) {
-        if !col.choices.iter().any(|c| c.eq_ignore_ascii_case(s)) {
-            return Err(format!("Not one of {}.", col.choices.iter().take(4).cloned().collect::<Vec<_>>().join(", ")));
-        }
+    if let (Kind::Enum, Bson::String(s)) = (col.kind, &parsed) && !col.choices.iter().any(|c| c.eq_ignore_ascii_case(s)) {
+        return Err(format!("Not one of {}.", col.choices.iter().take(4).cloned().collect::<Vec<_>>().join(", ")));
     }
-    if let (Kind::Set, Bson::String(s)) = (col.kind, &parsed) {
-        if let Some(bad) = s.split(',').filter(|v| !v.is_empty()).find(|v| !col.choices.iter().any(|c| c.eq_ignore_ascii_case(v))) {
-            return Err(format!("{bad} is not one of {}.", col.choices.iter().take(4).cloned().collect::<Vec<_>>().join(", ")));
-        }
+    if let (Kind::Set, Bson::String(s)) = (col.kind, &parsed) && let Some(bad) = s.split(',').filter(|v| !v.is_empty()).find(|v| !col.choices.iter().any(|c| c.eq_ignore_ascii_case(v))) {
+        return Err(format!("{bad} is not one of {}.", col.choices.iter().take(4).cloned().collect::<Vec<_>>().join(", ")));
     }
     Ok(Param::for_kind(col.kind, &parsed))
 }

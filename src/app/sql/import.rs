@@ -81,10 +81,8 @@ impl FileState {
     }
 
     fn refmt(&mut self, ci: usize, info: &TableInfo) {
-        if let Some(t) = self.map.map[ci] {
-            if matches!(info.cols[t].kind, db::sql::value::Kind::Date | db::sql::value::Kind::DateTime) {
-                self.map.fmts[ci] = csv::guess_date_fmt(&self.values(ci));
-            }
+        if let Some(t) = self.map.map[ci] && matches!(info.cols[t].kind, db::sql::value::Kind::Date | db::sql::value::Kind::DateTime) {
+            self.map.fmts[ci] = csv::guess_date_fmt(&self.values(ci));
         }
     }
 
@@ -112,13 +110,9 @@ impl FileState {
     }
 
     fn poll(&mut self) {
-        if let Some((epoch, rx)) = &self.rx {
-            if let Ok((g, rep)) = rx.try_recv() {
-                if g == *epoch {
-                    self.report = Some(rep);
-                    self.rx = None;
-                }
-            }
+        if let Some((epoch, rx)) = &self.rx && let Ok((g, rep)) = rx.try_recv() && g == *epoch {
+            self.report = Some(rep);
+            self.rx = None;
         }
     }
 }
@@ -308,7 +302,7 @@ impl App {
                                 }
                             }
                         });
-                        let vals: Vec<String> = f.file.values(ci).into_iter().take(3).map(|v| csv::short(v)).collect();
+                        let vals: Vec<String> = f.file.values(ci).into_iter().take(3).map(csv::short).collect();
                         ui.allocate_ui_with_layout(egui::vec2(190.0, BUTTON_H), egui::Layout::left_to_right(egui::Align::Center), |ui| ui.add(egui::Label::new(RichText::new(vals.join(", ")).font(FontId::monospace(TXT_SMALL)).color(FAINT())).truncate()));
                         let mono = |t: String, c: Color32| RichText::new(t).font(FontId::monospace(TXT_SMALL)).color(c);
                         match (cur, &rep) {
@@ -378,8 +372,8 @@ impl App {
             ui.set_width(ui.available_width());
             let say = |ui: &mut egui::Ui, t: String, c: Color32| ui.add(egui::Label::new(RichText::new(t).size(TXT_SMALL).color(c)).wrap());
             say(ui, format!("Runs in one transaction in batches of {per}. {}", match &undo {
-                Ok(()) if info.pg && f.dup == Dup::Update => format!("Undo removes the new rows and puts back what an update overwrote, if nothing changed since."),
-                Ok(()) if info.pg => format!("Undo removes the new rows again, if nothing changed since."),
+                Ok(()) if info.pg && f.dup == Dup::Update => "Undo removes the new rows and puts back what an update overwrote, if nothing changed since.".to_string(),
+                Ok(()) if info.pg => "Undo removes the new rows again, if nothing changed since.".to_string(),
                 Ok(()) => format!("Undo removes the {} rows again.", group(&rows.to_string())),
                 Err(why) => why.clone(),
             }), MUTED());

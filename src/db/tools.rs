@@ -76,10 +76,8 @@ pub fn restore_args(uri: &str, archive: &str, from_db: &str, coll: Option<&str>,
 
 pub fn mask_uri(uri: &str) -> String {
     // Hide the password between "user:" and "@".
-    if let (Some(s), Some(at)) = (uri.find("://"), uri.rfind('@')) {
-        if let Some(colon) = uri[s + 3..at].find(':') {
-            return format!("{}****{}", &uri[..s + 3 + colon + 1], &uri[at..]);
-        }
+    if let (Some(s), Some(at)) = (uri.find("://"), uri.rfind('@')) && let Some(colon) = uri[s + 3..at].find(':') {
+        return format!("{}****{}", &uri[..s + 3 + colon + 1], &uri[at..]);
     }
     uri.to_string()
 }

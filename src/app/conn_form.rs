@@ -57,10 +57,8 @@ fn tls_settings(ui: &mut egui::Ui, f: &mut ConnForm) {
                 form_label(ui, label);
                 ui.horizontal(|ui| {
                     ui.add(egui::TextEdit::singleline(path).hint_text("optional, PEM file").desired_width(280.0));
-                    if ui.button("Choose…").clicked() {
-                        if let Some(p) = rfd::FileDialog::new().set_directory(dirs::home_dir().unwrap_or_default()).pick_file() {
-                            *path = p.display().to_string();
-                        }
+                    if ui.button("Choose…").clicked() && let Some(p) = rfd::FileDialog::new().set_directory(dirs::home_dir().unwrap_or_default()).pick_file() {
+                        *path = p.display().to_string();
                     }
                 });
                 ui.end_row();
@@ -401,10 +399,8 @@ fn cloud_rows(ui: &mut egui::Ui, f: &mut ConnForm, cloud: &super::cloud_sql::Clo
         t.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, conf.iam, "Sign in with IAM"));
         // Turned on, the user becomes the gcloud account, which is usually also the one Application Default Credentials
         // were made with. The proxy cannot use the gcloud account for IAM, so the note says which one counts.
-        if conf.iam && !was {
-            if let Some(a) = account {
-                f.addr.user = crate::cloudsql::iam_user(a);
-            }
+        if conf.iam && !was && let Some(a) = account {
+            f.addr.user = crate::cloudsql::iam_user(a);
         }
         let note = if conf.iam { "No password. The proxy signs in with Application Default Credentials, which must be this user's account" } else { "The database user signs in with its password" };
         ui.label(RichText::new(note).color(MUTED()));
@@ -580,10 +576,8 @@ fn ssh_tab(ui: &mut egui::Ui, f: &mut ConnForm) {
                     form_label(ui, "Key file");
                     ui.horizontal(|ui| {
                         ui.add(egui::TextEdit::singleline(&mut f.ssh.key_path).hint_text(if f.ssh.auth == Auto { "optional; ~/.ssh/id_* are tried" } else { "~/.ssh/id_ed25519" }).desired_width(280.0));
-                        if ui.button("Choose…").clicked() {
-                            if let Some(p) = rfd::FileDialog::new().set_directory(dirs::home_dir().unwrap_or_default().join(".ssh")).pick_file() {
-                                f.ssh.key_path = p.display().to_string();
-                            }
+                        if ui.button("Choose…").clicked() && let Some(p) = rfd::FileDialog::new().set_directory(dirs::home_dir().unwrap_or_default().join(".ssh")).pick_file() {
+                            f.ssh.key_path = p.display().to_string();
                         }
                     });
                     ui.end_row();

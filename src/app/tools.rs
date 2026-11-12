@@ -50,10 +50,8 @@ impl App {
             });
             dialog_actions(ui, |ui| {
                 if t.done.is_none() {
-                    if danger(ui, "Stop").clicked() {
-                        if let Some(c) = t.cancel.take() {
-                            let _ = c.send(());
-                        }
+                    if danger(ui, "Stop").clicked() && let Some(c) = t.cancel.take() {
+                        let _ = c.send(());
                     }
                 } else {
                     close = ui.button("Close").clicked();

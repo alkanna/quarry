@@ -517,7 +517,7 @@ impl App {
         let mut sql_acts: Vec<(usize, String, CellAct)> = Vec::new();
         // A column that belongs to a foreign key gets a link that opens the row it points to.
         let fks = if sql && !agg && !sql_grouped { self.sql_fks() } else { Vec::new() };
-        let fk_of: Vec<Option<usize>> = cols.iter().map(|c| self.t().and_then(|t| t.sql.as_ref()).and_then(|s| s.cols.iter().find(|k| &k.name == c)).and_then(|k| fks.iter().position(|f| f.cols.iter().any(|x| *x == k.src)))).collect();
+        let fk_of: Vec<Option<usize>> = cols.iter().map(|c| self.t().and_then(|t| t.sql.as_ref()).and_then(|s| s.cols.iter().find(|k| &k.name == c)).and_then(|k| fks.iter().position(|f| f.cols.contains(&k.src)))).collect();
         let mut fk_open: Option<(usize, usize)> = None;
         let hl_cols: Vec<bool> = cols.iter().map(|c| prefs.highlight.contains(&db::strip_indices(c))).collect();
         let related = if agg { HashMap::new() } else { self.t().map(|t| t.related.clone()).unwrap_or_default() };
@@ -714,12 +714,10 @@ impl App {
                                 cr = cr.on_hover_text(why.as_str());
                             }
                             // Added after the cell so it takes the click; a NULL points to nothing and gets no link.
-                            if let (Some(k), Some(val)) = (fk_of[ci], v) {
-                                if !matches!(*val.bson(), Bson::Null) {
-                                    let fr = fk_link(ui, cell, ui.scope_id().with(("fk", i, ci)), &fks[k]);
-                                    if fr.clicked() {
-                                        fk_open = Some((i, k));
-                                    }
+                            if let (Some(k), Some(val)) = (fk_of[ci], v) && !matches!(*val.bson(), Bson::Null) {
+                                let fr = fk_link(ui, cell, ui.scope_id().with(("fk", i, ci)), &fks[k]);
+                                if fr.clicked() {
+                                    fk_open = Some((i, k));
                                 }
                             }
                             if cr.double_clicked() && sql_grouped {
@@ -925,28 +923,6 @@ impl App {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sql_shows_every_column_by_default() {
-        let fields: Vec<String> = (0..30).map(|i| format!("f{i}")).collect();
-        assert_eq!(visible_cols(None, &fields, default_n(true, DEFAULT_COLS)).len(), 30);
-        assert_eq!(visible_cols(None, &fields, default_n(false, DEFAULT_COLS)).len(), DEFAULT_COLS);
-    }
-
-    #[test]
-    fn columns_default_pin_and_move() {
-        let fields: Vec<String> = (0..12).map(|i| format!("f{i}")).collect();
-        assert_eq!(visible_cols(None, &fields, DEFAULT_COLS).len(), DEFAULT_COLS);
-        let p = ColPrefs { pinned: vec!["f3".into()], ..Default::default() };
-        assert_eq!(visible_cols(Some(&p), &fields, DEFAULT_COLS)[0], "f3");
-        let p = ColPrefs { shown: Some(vec!["a".into(), "b".into()]), pinned: vec!["b".into(), "zz".into()], ..Default::default() };
-        assert_eq!(visible_cols(Some(&p), &fields, DEFAULT_COLS), ["b", "a"]);
-    }
-}
-
 /// A result row's fill: selection, then checked, pressed and hovered, then the zebra stripe.
 pub(super) fn row_fill(active: bool, checked: bool, hovered: bool, pressed: bool, odd: bool) -> Color32 {
     match () {
@@ -982,4 +958,26 @@ fn eye_button(ui: &mut egui::Ui) -> egui::Response {
     paint_eye_off(ui.painter(), rect.center(), if state > 0 { BRIGHT() } else { MUTED() });
     focus_ring(ui, &r, rect, R_SM as f32);
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sql_shows_every_column_by_default() {
+        let fields: Vec<String> = (0..30).map(|i| format!("f{i}")).collect();
+        assert_eq!(visible_cols(None, &fields, default_n(true, DEFAULT_COLS)).len(), 30);
+        assert_eq!(visible_cols(None, &fields, default_n(false, DEFAULT_COLS)).len(), DEFAULT_COLS);
+    }
+
+    #[test]
+    fn columns_default_pin_and_move() {
+        let fields: Vec<String> = (0..12).map(|i| format!("f{i}")).collect();
+        assert_eq!(visible_cols(None, &fields, DEFAULT_COLS).len(), DEFAULT_COLS);
+        let p = ColPrefs { pinned: vec!["f3".into()], ..Default::default() };
+        assert_eq!(visible_cols(Some(&p), &fields, DEFAULT_COLS)[0], "f3");
+        let p = ColPrefs { shown: Some(vec!["a".into(), "b".into()]), pinned: vec!["b".into(), "zz".into()], ..Default::default() };
+        assert_eq!(visible_cols(Some(&p), &fields, DEFAULT_COLS), ["b", "a"]);
+    }
 }

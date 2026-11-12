@@ -149,15 +149,13 @@ pub(crate) fn with_autopair(ui: &mut egui::Ui, id: egui::Id, text: &mut String, 
             text.remove(byte_at(text, ci));
         }
     }
-    if let (Some(c), Some(ci)) = (typed, cursor) {
-        if ")]}\"'".contains(c) && text.chars().nth(ci) == Some(c) {
-            ui.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Text(t) if t.chars().count() == 1)));
-            if let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), id) {
-                st.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(ci + 1))));
-                st.store(ui.ctx(), id);
-            }
-            return show(ui, text);
+    if let (Some(c), Some(ci)) = (typed, cursor) && ")]}\"'".contains(c) && text.chars().nth(ci) == Some(c) {
+        ui.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Text(t) if t.chars().count() == 1)));
+        if let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), id) {
+            st.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(ci + 1))));
+            st.store(ui.ctx(), id);
         }
+        return show(ui, text);
     }
     let out = show(ui, text);
     let close = match typed {
@@ -285,10 +283,8 @@ pub(crate) fn resize_editor(r: &egui::Response, pref: &mut f32, rendered: f32, l
         let y = r.interact_pointer_pos().map_or(0.0, |p| p.y);
         r.ctx.data_mut(|d| d.insert_temp(id, (rendered, y)));
     }
-    if r.dragged() {
-        if let (Some((h0, y0)), Some(p)) = (r.ctx.data(|d| d.get_temp::<(f32, f32)>(id)), r.interact_pointer_pos()) {
-            *pref = (h0 + p.y - y0).clamp(lo, hi.max(lo));
-        }
+    if r.dragged() && let (Some((h0, y0)), Some(p)) = (r.ctx.data(|d| d.get_temp::<(f32, f32)>(id)), r.interact_pointer_pos()) {
+        *pref = (h0 + p.y - y0).clamp(lo, hi.max(lo));
     }
     if r.double_clicked() {
         *pref = 0.0;
@@ -442,8 +438,8 @@ pub(crate) fn js_job(text: &str) -> LayoutJob {
         let color = if rest.starts_with("//") {
             i += rest.find('\n').unwrap_or(rest.len());
             FAINT()
-        } else if rest.starts_with("/*") {
-            i += rest[2..].find("*/").map(|e| e + 4).unwrap_or(rest.len());
+        } else if let Some(body) = rest.strip_prefix("/*") {
+            i += body.find("*/").map(|e| e + 4).unwrap_or(rest.len());
             FAINT()
         } else if c == '"' || c == '\'' || c == '`' {
             i += 1;

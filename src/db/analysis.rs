@@ -285,7 +285,7 @@ pub fn analyze_schema(docs: &[Document], maps: &[String]) -> Vec<FieldStat> {
             }
         }
         for (mut f, kids, _) in rows {
-            f.types.sort_by(|a, b| b.1.cmp(&a.1));
+            f.types.sort_by_key(|t| std::cmp::Reverse(t.1));
             let (path, dynamic) = (f.path.clone(), f.dynamic);
             stats.push(f);
             if !kids.is_empty() {

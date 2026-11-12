@@ -1,5 +1,8 @@
 // Release builds on Windows are GUI apps; without this a console window opens next to them.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// Views and SQL builders take the state they draw as plain arguments; argument structs and type aliases for each
+// would be the extra layers the codebase keeps out.
+#![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
 mod app;
 mod cloudsql;

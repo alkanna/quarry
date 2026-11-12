@@ -84,11 +84,11 @@ impl Fx {
     /// Every row as `id:name:qty`, ordered by id and joined with commas, read with a plain query.
     pub(super) fn rows(&self, table: &str) -> String {
         let q = self.qualified(table);
-        let one = match &self.server {
+        
+        match &self.server {
             Server::My(l) => l.one(&format!("SELECT COALESCE(GROUP_CONCAT(CONCAT(id, ':', name, ':', qty) ORDER BY id SEPARATOR ','), '') FROM {q}")),
             Server::Pg(l, pool) => l.qone(pool, &format!("SELECT COALESCE(string_agg(id || ':' || name || ':' || qty, ',' ORDER BY id), '') FROM {q}")),
-        };
-        one
+        }
     }
 
     /// Steps the UI until the server holds `want`: a write goes out on a worker task, so it lands a few frames after the click.
