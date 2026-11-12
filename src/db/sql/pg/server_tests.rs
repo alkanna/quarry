@@ -53,7 +53,7 @@ fn sleeper(l: &LivePg, tag: &str) -> mpsc::Receiver<(Result<(), String>, bool)> 
 fn find(l: &LivePg, db: &Db, tag: &str, ok: impl Fn(&Session) -> bool) -> Session {
     for _ in 0..200 {
         let a = l.w.rt.block_on(activity(db, true)).unwrap();
-        if let Some(s) = a.rows.into_iter().find(|s| s.query.contains(tag) && ok(&s)) {
+        if let Some(s) = a.rows.into_iter().find(|s| s.query.contains(tag) && ok(s)) {
             return s;
         }
         std::thread::sleep(Duration::from_millis(50));

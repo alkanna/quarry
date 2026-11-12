@@ -281,10 +281,8 @@ impl App {
         match list {
             Some(l) => Some(l.into_iter().filter(|t| !self.views.has(conn, schema, t)).collect()),
             None => {
-                if self.sql_asked.insert((conn, schema.to_string())) {
-                    if let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) {
-                        self.worker.sql_tables(conn, sql, schema.to_string());
-                    }
+                if self.sql_asked.insert((conn, schema.to_string())) && let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) {
+                    self.worker.sql_tables(conn, sql, schema.to_string());
                 }
                 None
             }
@@ -461,17 +459,13 @@ impl App {
         // The orphan check runs once per set of columns, on its own request, and a big table waits for a click. The
         // name and the actions do not change its answer, so typing them asks nothing.
         let okey = key.as_ref().map(OrphanKey::of);
-        if let (Some(k), None, Some(ok)) = (&key, &problem, &okey) {
-            if f.orphan_for.as_ref() != Some(ok) {
-                let big = f.own.status.rows.is_some_and(|n| n > CHECK_ROWS);
-                if f.parent.is_some() && (!big || f.check) {
-                    if let Some(sql) = self.sql_target(&sel).map(|t| t.0) {
-                        self.req += 1;
-                        (f.orphan_req, f.orphan_for, f.orphans) = (self.req, okey.clone(), None);
-                        f.sample.clear();
-                        self.worker.sql_orphans(self.req, sql, schema.clone(), table.clone(), k.clone());
-                    }
-                }
+        if let (Some(k), None, Some(ok)) = (&key, &problem, &okey) && f.orphan_for.as_ref() != Some(ok) {
+            let big = f.own.status.rows.is_some_and(|n| n > CHECK_ROWS);
+            if f.parent.is_some() && (!big || f.check) && let Some(sql) = self.sql_target(&sel).map(|t| t.0) {
+                self.req += 1;
+                (f.orphan_req, f.orphan_for, f.orphans) = (self.req, okey.clone(), None);
+                f.sample.clear();
+                self.worker.sql_orphans(self.req, sql, schema.clone(), table.clone(), k.clone());
             }
         }
 
@@ -525,10 +519,8 @@ impl App {
                     None if f.orphan_for.is_some() => {
                         ui.label(RichText::new("Checking the existing rows...").size(TXT_SMALL).color(FAINT()));
                     }
-                    None if has_sql && f.own.status.rows.is_some_and(|n| n > CHECK_ROWS) => {
-                        if quiet(ui, "Check existing rows").on_hover_text("Joins the whole table, which can take a while on a big one").clicked() {
-                            f.check = true;
-                        }
+                    None if has_sql && f.own.status.rows.is_some_and(|n| n > CHECK_ROWS) && quiet(ui, "Check existing rows").on_hover_text("Joins the whole table, which can take a while on a big one").clicked() => {
+                        f.check = true;
                     }
                     None => {}
                 }

@@ -653,11 +653,9 @@ impl App {
                         copy = Some((f, None));
                         ui.close();
                     }
-                    if paged.is_some() {
-                        if let Some(DocsAct::CopyAs(f)) = ui.menu_button("Copy all pages as", |ui| copy_as_menu(ui, true)).inner.flatten() {
-                            copy_all = Some(f);
-                            ui.close();
-                        }
+                    if paged.is_some() && let Some(DocsAct::CopyAs(f)) = ui.menu_button("Copy all pages as", |ui| copy_as_menu(ui, true)).inner.flatten() {
+                        copy_all = Some(f);
+                        ui.close();
                     }
                     if ui.button("Export…").clicked() {
                         export = Some((s.qchecked.iter().copied().collect(), false));

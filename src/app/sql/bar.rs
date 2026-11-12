@@ -510,29 +510,25 @@ fn value_inputs(ui: &mut egui::Ui, r: &mut Rule, cols: &[Col], salt: egui::Id) -
 /// An editable rule: column, operator and values. Returns (changed, Enter pressed).
 fn rule_editor(ui: &mut egui::Ui, r: &mut Rule, cols: &[Col], salt: egui::Id) -> (bool, bool) {
     let mut changed = false;
-    if let Some(p) = col_pick(ui, &r.col, cols, 130.0, None) {
-        if p != r.col {
-            let kind = cols.iter().find(|c| c.name == p).map(|c| c.kind).unwrap_or(Kind::Text);
-            r.col = p;
-            // Keep the operator when the new column offers it, else start over with its first one.
-            if !rules::ops_for(kind).contains(&r.op) || rules::group_of(kind) != rules::group_of(r.kind) {
-                r.op = rules::ops_for(kind)[0];
-                r.values = rules::default_values(r.op);
-            }
-            r.kind = kind;
-            changed = true;
+    if let Some(p) = col_pick(ui, &r.col, cols, 130.0, None) && p != r.col {
+        let kind = cols.iter().find(|c| c.name == p).map(|c| c.kind).unwrap_or(Kind::Text);
+        r.col = p;
+        // Keep the operator when the new column offers it, else start over with its first one.
+        if !rules::ops_for(kind).contains(&r.op) || rules::group_of(kind) != rules::group_of(r.kind) {
+            r.op = rules::ops_for(kind)[0];
+            r.values = rules::default_values(r.op);
         }
+        r.kind = kind;
+        changed = true;
     }
-    if let Some(op) = op_pick(ui, r.kind, r.op, 90.0) {
-        if op != r.op {
-            let keep: Vec<String> = r.values.iter().filter(|v| !v.is_empty()).cloned().collect();
-            r.op = op;
-            r.values = rules::default_values(op);
-            if let (Some(first), true) = (keep.first(), matches!(rules::input(op), Input::One)) {
-                r.values[0] = first.clone();
-            }
-            changed = true;
+    if let Some(op) = op_pick(ui, r.kind, r.op, 90.0) && op != r.op {
+        let keep: Vec<String> = r.values.iter().filter(|v| !v.is_empty()).cloned().collect();
+        r.op = op;
+        r.values = rules::default_values(op);
+        if let (Some(first), true) = (keep.first(), matches!(rules::input(op), Input::One)) {
+            r.values[0] = first.clone();
         }
+        changed = true;
     }
     let (c, e) = value_inputs(ui, r, cols, salt);
     (changed || c, e)
@@ -594,11 +590,9 @@ fn order_popover(ui: &mut egui::Ui, text: &mut String, cols: &[Col], d: Dialect,
     }
     ui.add_space(2.0);
     ui.horizontal(|ui| {
-        if quiet(ui, RichText::new("+ Sort key").color(PRIMARY())).clicked() {
-            if let Some(c) = cols.iter().find(|c| !keys.iter().any(|(k, _)| *k == c.name)) {
-                keys.push((c.name.clone(), false));
-                changed = true;
-            }
+        if quiet(ui, RichText::new("+ Sort key").color(PRIMARY())).clicked() && let Some(c) = cols.iter().find(|c| !keys.iter().any(|(k, _)| *k == c.name)) {
+            keys.push((c.name.clone(), false));
+            changed = true;
         }
         ui.label(RichText::new("Shift-click a column header adds one too").size(TXT_SMALL).color(FAINT()));
     });
@@ -784,10 +778,8 @@ fn group_popover(ui: &mut egui::Ui, g: &mut GroupDlg, c: &mut Clauses, cols: &[C
     let aliases: Vec<Col> = g.aggs.iter().filter(|a| !a.alias.trim().is_empty()).map(|a| Col::plain(a.alias.trim(), "DECIMAL", Kind::Decimal, true)).collect();
     ui.horizontal(|ui| {
         if g.having.is_none() {
-            if quiet(ui, RichText::new("+ Condition").color(PRIMARY())).clicked() {
-                if let Some(a) = aliases.first() {
-                    g.having = Some(Rule::new(&a.name, Kind::Decimal));
-                }
+            if quiet(ui, RichText::new("+ Condition").color(PRIMARY())).clicked() && let Some(a) = aliases.first() {
+                g.having = Some(Rule::new(&a.name, Kind::Decimal));
             }
         } else if let Some(r) = g.having.as_mut() {
             if !aliases.iter().any(|a| a.name == r.col) {
@@ -885,10 +877,8 @@ pub(in crate::app) fn bar(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, bs: bool, 
         }
         b.src = t.filter_txt.clone();
     }
-    if !b.c.sql && b.draft.is_none() {
-        if let Some(c) = cols.first() {
-            b.draft = Some(Rule::new(&c.name, c.kind));
-        }
+    if !b.c.sql && b.draft.is_none() && let Some(c) = cols.first() {
+        b.draft = Some(Rule::new(&c.name, c.kind));
     }
     let size = ui.available_width();
     let mono = FontId::monospace(TXT_SMALL);
@@ -1046,11 +1036,9 @@ fn clauses(ui: &mut egui::Ui, t: &mut Tab, d: Dialect, cols: &[Col], scope: &Sco
                             run = true;
                         }
                     });
-                    if r.clicked() && t.sort_txt.is_empty() {
-                        if let Some(c) = cols.first() {
-                            t.sort_txt = order_text(&[(c.name.clone(), false)], d);
-                            run = true;
-                        }
+                    if r.clicked() && t.sort_txt.is_empty() && let Some(c) = cols.first() {
+                        t.sort_txt = order_text(&[(c.name.clone(), false)], d);
+                        run = true;
                     }
                 } else {
                     let (r, cleared) = clause_chip(ui, "ORDER BY", &summary, false);

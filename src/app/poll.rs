@@ -30,16 +30,12 @@ impl App {
                 }
                 Msg::SqlStructure { req, res } => {
                     // The Add relation dialog asks for the table it points at on a request of its own.
-                    if let Some(Modal::FkEdit(f)) = self.modal.as_mut() {
-                        if f.parent_loaded(req, res.clone()) {
-                            continue;
-                        }
+                    if let Some(Modal::FkEdit(f)) = self.modal.as_mut() && f.parent_loaded(req, res.clone()) {
+                        continue;
                     }
                     // So does the New table dialog, for the parent of each of its foreign keys.
-                    if let Some(Modal::PgNewTable(f)) = self.modal.as_mut() {
-                        if f.parent_loaded(req, &res) {
-                            continue;
-                        }
+                    if let Some(Modal::PgNewTable(f)) = self.modal.as_mut() && f.parent_loaded(req, &res) {
+                        continue;
                     }
                     if let Some(s) = self.tabs.iter_mut().find(|t| t.idx_req == req).and_then(|t| t.sql.as_mut()) {
                         s.st.finish(res);
@@ -321,11 +317,9 @@ impl App {
             Ok((client, dbs, tunnel)) => {
                 // Trust the SSH host key the first time; later a different key is refused.
                 let mut trusted = None;
-                if let (Some(t), Some(sc)) = (&tunnel, c.meta.ssh.as_mut()) {
-                    if sc.known_host.is_none() && !t.fingerprint.is_empty() {
-                        sc.known_host = Some(t.fingerprint.clone());
-                        trusted = Some(t.fingerprint.clone());
-                    }
+                if let (Some(t), Some(sc)) = (&tunnel, c.meta.ssh.as_mut()) && sc.known_host.is_none() && !t.fingerprint.is_empty() {
+                    sc.known_host = Some(t.fingerprint.clone());
+                    trusted = Some(t.fingerprint.clone());
                 }
                 c.tunnel = tunnel.map(db::Way::Ssh);
                 // Load every database's collections up front so the list can show counts.
@@ -369,11 +363,9 @@ impl App {
         match res {
             Ok((sql, dbs, tunnel)) => {
                 let mut trusted = None;
-                if let (Some(db::Way::Ssh(t)), Some(sc)) = (&tunnel, c.meta.ssh.as_mut()) {
-                    if sc.known_host.is_none() && !t.fingerprint.is_empty() {
-                        sc.known_host = Some(t.fingerprint.clone());
-                        trusted = Some(t.fingerprint.clone());
-                    }
+                if let (Some(db::Way::Ssh(t)), Some(sc)) = (&tunnel, c.meta.ssh.as_mut()) && sc.known_host.is_none() && !t.fingerprint.is_empty() {
+                    sc.known_host = Some(t.fingerprint.clone());
+                    trusted = Some(t.fingerprint.clone());
                 }
                 c.tunnel = tunnel;
                 // A server can hold hundreds of schemas, so only those on screen load now.
@@ -516,11 +508,9 @@ impl App {
     fn on_db_changed(&mut self, conn: u64, db: String, copied: Option<String>, res: db::Res<String>) {
         if let Some(to) = copied {
             // Listed now so the row does not blink out before the reload below answers.
-            if res.is_ok() {
-                if let Some(l) = self.conns.iter_mut().find(|c| c.meta.id == conn).and_then(|c| c.dbs.iter_mut().find(|d| d.0 == db)).and_then(|d| d.1.as_mut()) {
-                    l.push(to.clone());
-                    l.sort();
-                }
+            if res.is_ok() && let Some(l) = self.conns.iter_mut().find(|c| c.meta.id == conn).and_then(|c| c.dbs.iter_mut().find(|d| d.0 == db)).and_then(|d| d.1.as_mut()) {
+                l.push(to.clone());
+                l.sort();
             }
             self.copying.remove(&(conn, db.clone(), to));
         }
@@ -529,11 +519,9 @@ impl App {
             Ok(m) => self.ok(m),
             Err(e) => {
                 self.err(e);
-                if dropped.is_some() {
-                    if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
-                        c.dbs.push((db.clone(), None));
-                        c.dbs.sort_by(|a, b| a.0.cmp(&b.0));
-                    }
+                if dropped.is_some() && let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
+                    c.dbs.push((db.clone(), None));
+                    c.dbs.sort_by(|a, b| a.0.cmp(&b.0));
                 }
             }
         }
@@ -586,10 +574,8 @@ impl App {
                     t.check_anchor = None;
                 }
                 // The open document follows its _id too; rows without one keep their position.
-                if let Some((false, i)) = t.selected {
-                    if t.docs.get(i).is_some_and(|d| d.id().is_some()) {
-                        t.selected = follow_ids(&t.docs, &docs, std::iter::once(i)).first().map(|&j| (false, j));
-                    }
+                if let Some((false, i)) = t.selected && t.docs.get(i).is_some_and(|d| d.id().is_some()) {
+                    t.selected = follow_ids(&t.docs, &docs, std::iter::once(i)).first().map(|&j| (false, j));
                 }
                 let open = follow_ids(&t.docs, &docs, t.expanded.iter().filter(|e| !e.0).map(|e| e.1));
                 t.expanded.retain(|e| e.0);
@@ -604,9 +590,7 @@ impl App {
                 let ask = (!t.stats_asked && t.sql.is_none()).then(|| t.sel.clone());
                 t.stats_asked = true;
                 self.load_related(req);
-                if let Some(s) = ask
-                    && let Some(client) = self.conn(s.conn).and_then(|c| c.client.clone())
-                {
+                if let Some(s) = ask && let Some(client) = self.conn(s.conn).and_then(|c| c.client.clone()) {
                     let tag = format!("tabstats\u{1f}{}\u{1f}{}\u{1f}{}", s.conn, s.db, s.coll);
                     self.worker.coll_stats(client, s.db, s.coll, tag);
                 }
@@ -658,10 +642,8 @@ impl App {
             Err(e) => {
                 // Reopen the refused insert so the typed document is not lost, but
                 // only over the collection it was meant for.
-                if let Some((db, coll, text)) = retry {
-                    if self.t().is_some_and(|t| t.sel.space() == db && t.sel.coll == coll) {
-                        self.insert = Some(text);
-                    }
+                if let Some((db, coll, text)) = retry && self.t().is_some_and(|t| t.sel.space() == db && t.sel.coll == coll) {
+                    self.insert = Some(text);
                 }
                 self.err(e);
             }

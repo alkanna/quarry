@@ -180,7 +180,7 @@ fn session_advisory_locks_and_dblink_are_refused_before_they_reach_a_shared_back
     }
     assert!(leaked.is_empty(), "locks left on a shared backend: {leaked:?}");
     // The shell relay takes the same path.
-    let err = relay_query(&l, &db, schema, "SELECT pg_advisory_lock(7110)").err().expect("refused");
+    let err = relay_query(&l, &db, schema, "SELECT pg_advisory_lock(7110)").expect_err("refused");
     assert_eq!(err, crate::db::sql::run::POOLER_SESSION);
     assert_eq!(held(7110), "0");
     release(7110);

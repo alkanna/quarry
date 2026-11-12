@@ -83,10 +83,8 @@ fn value_body(ui: &mut egui::Ui, id: egui::Id, text: &mut String, code: bool, fo
             if ui.button("Cancel").on_hover_text("Esc").clicked() {
                 act = ValueAct::Close;
             }
-            if let Some(l) = null {
-                if quiet(ui, l).clicked() {
-                    act = ValueAct::Null;
-                }
+            if let Some(l) = null && quiet(ui, l).clicked() {
+                act = ValueAct::Null;
             }
         });
     });

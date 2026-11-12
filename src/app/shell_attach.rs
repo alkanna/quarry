@@ -538,13 +538,11 @@ async function run() {
             return self.err_quiet(e.to_string(), Some(conn), None, format!("List schemas · {database}"));
         }
         let names = |k: &str| d.get_array(k).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect::<Vec<_>>()).unwrap_or_default();
-        if let Some(Modal::Attach(f)) = &mut self.modal {
-            if f.conn == Some(conn) && f.db == database && schema.is_empty() {
-                f.schemas = names("schemas");
-                // Where a new database starts, else the first one a person would look at.
-                if !f.schemas.contains(&f.schema) {
-                    f.schema = if f.schemas.iter().any(|s| s == PG_SCHEMA) { PG_SCHEMA.to_string() } else { f.schemas.first().cloned().unwrap_or_default() };
-                }
+        if let Some(Modal::Attach(f)) = &mut self.modal && f.conn == Some(conn) && f.db == database && schema.is_empty() {
+            f.schemas = names("schemas");
+            // Where a new database starts, else the first one a person would look at.
+            if !f.schemas.contains(&f.schema) {
+                f.schema = if f.schemas.iter().any(|s| s == PG_SCHEMA) { PG_SCHEMA.to_string() } else { f.schemas.first().cloned().unwrap_or_default() };
             }
         }
         if !schema.is_empty() {

@@ -625,6 +625,8 @@ async fn signal(db: &Db, t: &Target, terminate: bool, read_only: bool) -> Res<St
 }
 
 /// What the PostgreSQL Server window asked for and got.
+// ponytail: one per Server window read, so the copy is cheap; boxing the large variant would change every match on it.
+#[allow(clippy::large_enum_variant)]
 pub enum Answer {
     Overview(Res<Overview>),
     Sizes(Res<Sizes>),

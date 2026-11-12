@@ -280,12 +280,10 @@ impl App {
     }
 
     pub(in crate::app) fn pg_choices_done(&mut self, conn: u64, res: db::Res<DbChoices>) {
-        if let Some(Modal::PgNewDb(f)) = &mut self.modal {
-            if f.conn == conn {
-                match res {
-                    Ok(t) => f.choices = Some(t),
-                    Err(e) => f.load_err = Some(e),
-                }
+        if let Some(Modal::PgNewDb(f)) = &mut self.modal && f.conn == conn {
+            match res {
+                Ok(t) => f.choices = Some(t),
+                Err(e) => f.load_err = Some(e),
             }
         }
     }

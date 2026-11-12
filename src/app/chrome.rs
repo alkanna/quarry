@@ -92,10 +92,8 @@ impl App {
                 self.explain();
             }
         }
-        if k(cmd | shift, Key::R) {
-            if let Some(id) = self.active.filter(|_| !self.demo) {
-                self.connect(id);
-            }
+        if k(cmd | shift, Key::R) && let Some(id) = self.active.filter(|_| !self.demo) {
+            self.connect(id);
         }
         if k(cmd, Key::R) && !self.tabs.is_empty() {
             self.reload();

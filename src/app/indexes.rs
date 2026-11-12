@@ -206,10 +206,8 @@ impl App {
         if let Some(k) = create {
             self.open_create_index(Some(k));
         }
-        if profiling {
-            if let Some((conn, target)) = self.writable_target() {
-                self.worker.db_change(conn, target.client, target.db, doc! { "profile": 1, "slowms": 100 }, "Profiling slow operations".into());
-            }
+        if profiling && let Some((conn, target)) = self.writable_target() {
+            self.worker.db_change(conn, target.client, target.db, doc! { "profile": 1, "slowms": 100 }, "Profiling slow operations".into());
         }
     }
 
@@ -290,12 +288,10 @@ impl App {
                 keep = false;
             }
         });
-        if let (true, Ok(s)) = (create, spec) {
-            if let Some((conn, target)) = self.writable_target() {
-                let done = format!("Created index {}", s.get_str("name").unwrap_or_default());
-                self.worker.db_change(conn, target.client, target.db, command(s), done);
-                keep = false;
-            }
+        if let (true, Ok(s)) = (create, spec) && let Some((conn, target)) = self.writable_target() {
+            let done = format!("Created index {}", s.get_str("name").unwrap_or_default());
+            self.worker.db_change(conn, target.client, target.db, command(s), done);
+            keep = false;
         }
         keep
     }

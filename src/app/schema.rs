@@ -206,14 +206,12 @@ impl App {
                 Err(e) => self.err(e),
             }
         }
-        if !self.tabs[self.cur].schema.vloaded {
-            if let Some(target) = self.target() {
-                self.req += 1;
-                let (req, coll) = (self.req, target.coll.clone());
-                let s = &mut self.tabs[self.cur].schema;
-                (s.vloaded, s.vreq) = (true, req);
-                self.worker.command(target.client, target.db, doc! { "listCollections": 1, "filter": { "name": coll } }, &format!("validator:{req}"));
-            }
+        if !self.tabs[self.cur].schema.vloaded && let Some(target) = self.target() {
+            self.req += 1;
+            let (req, coll) = (self.req, target.coll.clone());
+            let s = &mut self.tabs[self.cur].schema;
+            (s.vloaded, s.vreq) = (true, req);
+            self.worker.command(target.client, target.db, doc! { "listCollections": 1, "filter": { "name": coll } }, &format!("validator:{req}"));
         }
         if let Some(p) = toggle {
             let closed = &mut self.tabs[self.cur].schema.closed;

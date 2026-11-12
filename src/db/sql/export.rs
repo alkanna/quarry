@@ -128,10 +128,8 @@ pub(super) async fn stream_locked(conn: &mut Conn, db: &Db, locals: &str, stmt: 
         super::pg::read::begin_read_only(c, db, locals).await.map_err(|x| super::se_at(&x, stmt, 0))?;
     }
     let r = stream_conn(conn, db.dialect, stmt, plan, out, count, cancel, wrap).await;
-    if r.is_ok() {
-        if let Conn::Pg(c) = conn {
-            sqlx::Executor::execute(&mut **c, "ROLLBACK").await.map_err(se)?;
-        }
+    if r.is_ok() && let Conn::Pg(c) = conn {
+        sqlx::Executor::execute(&mut **c, "ROLLBACK").await.map_err(se)?;
     }
     r
 }

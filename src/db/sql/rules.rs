@@ -509,19 +509,15 @@ fn rule_of(t: &[T], cols: &[(String, Kind)], d: Dialect) -> Option<Rule> {
     // Wrapped forms: NOT IN ... OR NULL and this month.
     if t.first() == Some(&T::P('(')) && close_of(t, 0) == Some(t.len() - 1) {
         let inner = &t[1..t.len() - 1];
-        if let [T::Id(c), n, i, T::P('('), ..] = inner {
-            if word(n, "NOT") && word(i, "IN") {
-                let (vals, used) = list_of(&inner[3..])?;
-                let rest = &inner[3 + used..];
-                if matches!(rest, [o, T::Id(c2), is, nu] if word(o, "OR") && c2 == c && word(is, "IS") && word(nu, "NULL")) {
-                    return mk(c, Op::NotInOrNull, vals);
-                }
+        if let [T::Id(c), n, i, T::P('('), ..] = inner && word(n, "NOT") && word(i, "IN") {
+            let (vals, used) = list_of(&inner[3..])?;
+            let rest = &inner[3 + used..];
+            if matches!(rest, [o, T::Id(c2), is, nu] if word(o, "OR") && c2 == c && word(is, "IS") && word(nu, "NULL")) {
+                return mk(c, Op::NotInOrNull, vals);
             }
         }
-        if let [y, T::P('('), T::Id(c), T::P(')'), ..] = inner {
-            if word(y, "YEAR") && inner.len() == 23 {
-                return mk(c, Op::ThisMonth, vec![]);
-            }
+        if let [y, T::P('('), T::Id(c), T::P(')'), ..] = inner && word(y, "YEAR") && inner.len() == 23 {
+            return mk(c, Op::ThisMonth, vec![]);
         }
         return None;
     }
@@ -685,7 +681,7 @@ mod tests {
                 }
                 let r = Rule { col: col.clone(), kind, op, values: v };
                 assert!(r.complete(), "{op:?}");
-                let sql = to_sql(&[r.clone()], false, Dialect::MySql, true);
+                let sql = to_sql(std::slice::from_ref(&r), false, Dialect::MySql, true);
                 let (back, any) = parse(&sql, &cols(), Dialect::MySql, true).unwrap_or_else(|| panic!("no parse for {op:?} on {col}: {sql}"));
                 assert!(!any);
                 assert_eq!(back, vec![r], "{sql}");

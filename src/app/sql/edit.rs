@@ -200,7 +200,7 @@ impl App {
 
     /// Whether the open connection's server reads backslash escapes in strings.
     pub(in crate::app) fn sql_bs(&self) -> bool {
-        self.t().and_then(|t| self.conn(t.sel.conn)).and_then(|c| c.sql.as_ref()).map_or(true, |d| d.backslash_escapes())
+        self.t().and_then(|t| self.conn(t.sel.conn)).and_then(|c| c.sql.as_ref()).is_none_or(|d| d.backslash_escapes())
     }
 
     /// Why the open table cannot be edited at all, if so.
@@ -522,11 +522,9 @@ impl App {
         }
         let view = self.sel_is_view();
         {
-            if quiet_enabled(ui, !view, "Import…").on_hover_text("Add the rows of a CSV file to this table").on_disabled_hover_text("A view has no rows to add").clicked() {
-                if let Some(s) = self.t().map(|t| t.sel.clone()) {
-                    let schema = self.sel_schema(&s);
-                    self.open_sql_import(s.conn, s.db, schema, s.coll);
-                }
+            if quiet_enabled(ui, !view, "Import…").on_hover_text("Add the rows of a CSV file to this table").on_disabled_hover_text("A view has no rows to add").clicked() && let Some(s) = self.t().map(|t| t.sel.clone()) {
+                let schema = self.sel_schema(&s);
+                self.open_sql_import(s.conn, s.db, schema, s.coll);
             }
         }
         vsep(ui, 4.0);

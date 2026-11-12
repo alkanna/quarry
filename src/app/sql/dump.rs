@@ -114,7 +114,7 @@ impl App {
         let rows: Vec<Row> = names
             .iter()
             .map(|n| {
-                let view = self.views.has(conn, &ns, &n);
+                let view = self.views.has(conn, &ns, n);
                 Row { name: n.clone(), view, on: true, structure: true, content: !view, drop: false, rows: est.and_then(|s| s.table(n)).and_then(|t| t.rows) }
             })
             .collect();
@@ -451,7 +451,7 @@ impl App {
         let (rows, bytes) = (j.prog.rows.load(Ordering::Relaxed), j.prog.bytes.load(Ordering::Relaxed));
         let text = match j.kind {
             JobKind::Import => format!("Importing {} of {} rows", group(&rows.to_string()), group(&j.total_rows.to_string())),
-            JobKind::Script => format!("Running statement {}, {}%", group(&rows.to_string()), if j.total_bytes == 0 { 0 } else { (bytes * 100 / j.total_bytes).min(100) }),
+            JobKind::Script => format!("Running statement {}, {}%", group(&rows.to_string()), (bytes * 100).checked_div(j.total_bytes).map_or(0, |p| p.min(100))),
         };
         ui.label(RichText::new(text).size(TXT_CAPTION).color(MUTED()));
         if quiet(ui, RichText::new("Cancel").size(TXT_CAPTION)).on_hover_text(if j.kind == JobKind::Import && j.rolls_back { "Stop and roll everything back" } else if j.kind == JobKind::Import { "Stop. This table's engine cannot roll back, so rows written so far stay." } else { "Interrupt the running statement and stop. Statements that already ran stay applied." }).clicked() {

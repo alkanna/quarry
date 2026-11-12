@@ -317,10 +317,8 @@ fn pg_default(v: &str) -> (Option<String>, bool) {
     if t.eq_ignore_ascii_case("null") || t.get(..6).is_some_and(|p| p.eq_ignore_ascii_case("null::")) && is_cast(&t[4..]) {
         return (None, false);
     }
-    if let Some((inner, escapes, rest)) = split_literal(t) {
-        if rest.is_empty() || is_cast(rest) {
-            return (Some(if escapes { unquote(&inner) } else { inner.replace("''", "'") }), false);
-        }
+    if let Some((inner, escapes, rest)) = split_literal(t) && (rest.is_empty() || is_cast(rest)) {
+        return (Some(if escapes { unquote(&inner) } else { inner.replace("''", "'") }), false);
     }
     if (first.is_ascii_digit() || first == '-' || first == '.') && t.parse::<f64>().is_ok() || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("false") {
         return (Some(t.to_string()), false);
@@ -654,7 +652,7 @@ pub fn pg_create_table(schema: &str, table: &str, st: &Structure) -> String {
     let mut lines: Vec<String> = Vec::new();
     for c in &st.columns {
         // A serial column's default points at a sequence the new table would not have, so it is written as serial.
-        let serial = c.default_raw.as_deref().is_some_and(|d| d.starts_with("nextval(")).then(|| match c.full_type.as_str() {
+        let serial = c.default_raw.as_deref().is_some_and(|d| d.starts_with("nextval(")).then_some(match c.full_type.as_str() {
             "integer" => Some("serial"),
             "bigint" => Some("bigserial"),
             "smallint" => Some("smallserial"),

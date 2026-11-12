@@ -372,23 +372,19 @@ fn check_body(part: &[Code]) -> Result<(), String> {
             }
         }
         let (called, field) = call_or_field(part, i);
-        if called || field {
-            if let Some(name) = ident(t) {
-                if name == UNSURE {
-                    return Err(format!("A function named with a Unicode escape cannot be checked and is not allowed on a read-only connection. {REFUSED}"));
-                }
-                if (called && refused_function(&name)) || (field && refused_field(&name)) {
-                    return Err(format!("{name}() changes state and is not allowed on a read-only connection. {REFUSED}"));
-                }
+        if (called || field) && let Some(name) = ident(t) {
+            if name == UNSURE {
+                return Err(format!("A function named with a Unicode escape cannot be checked and is not allowed on a read-only connection. {REFUSED}"));
+            }
+            if (called && refused_function(&name)) || (field && refused_field(&name)) {
+                return Err(format!("{name}() changes state and is not allowed on a read-only connection. {REFUSED}"));
             }
         }
     }
     // A data modifying statement can only sit in a WITH, but a column or alias may share its name, so look
     // only when a WITH is there.
-    if part.iter().any(|t| is(t, "WITH")) {
-        if let Some(t) = part.iter().find(|t| ["INSERT", "UPDATE", "DELETE", "MERGE"].iter().any(|k| is(t, k))) {
-            return Err(format!("{} inside WITH writes data and this connection is read-only. {REFUSED}", t.1.to_ascii_uppercase()));
-        }
+    if part.iter().any(|t| is(t, "WITH")) && let Some(t) = part.iter().find(|t| ["INSERT", "UPDATE", "DELETE", "MERGE"].iter().any(|k| is(t, k))) {
+        return Err(format!("{} inside WITH writes data and this connection is read-only. {REFUSED}", t.1.to_ascii_uppercase()));
     }
     Ok(())
 }

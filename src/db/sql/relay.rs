@@ -293,11 +293,9 @@ impl Relay {
                 self.dead = true;
                 return Err(e(x));
             }
-            if pooled && !self.read_only && !args.is_empty() {
-                if let Err(x) = self.escaping_intact().await {
-                    let _ = self.conn.execute("ROLLBACK").await;
-                    return Err(x);
-                }
+            if pooled && !self.read_only && !args.is_empty() && let Err(x) = self.escaping_intact().await {
+                let _ = self.conn.execute("ROLLBACK").await;
+                return Err(x);
             }
         }
         let (mut cols, mut rows, mut wrote, mut bytes) = (Vec::<Col>::new(), Vec::new(), None, 0usize);
@@ -336,10 +334,8 @@ impl Relay {
             }
         }
         crate::db::log_sql(self.log_conn, &self.schema, &stmt, started.elapsed().as_millis(), failure.as_deref());
-        if !pg {
-            if let (None, Some(to)) = (&failure, lex::use_target(&stmt, self.dialect)) {
-                self.schema = to;
-            }
+        if !pg && let (None, Some(to)) = (&failure, lex::use_target(&stmt, self.dialect)) {
+            self.schema = to;
         }
         // Dropping the stream mid-result leaves unread packets on the wire, so nothing more can run on it. On PostgreSQL
         // the backend is cancelled so the transaction and its locks end now, not when the script does.

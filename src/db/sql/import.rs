@@ -726,7 +726,7 @@ mod tests {
             let r = l.w.rt.block_on(run(&l.db, db, "m", &plan, 1, false, &prog, &cancel, &AtomicU64::new(0)));
             watcher.join().unwrap();
             let kept = l.count(&format!("{db}.m"));
-            assert!(kept >= 5_000 && kept < 300_000, "{var}: {kept}");
+            assert!((5_000..300_000).contains(&kept), "{var}: {kept}");
             assert_eq!(r.err().unwrap_or_default(), format!("Import stopped. {kept} rows were written and stay: the MyISAM engine of this table cannot roll back."), "{var}");
             l.sql(&format!("DROP DATABASE {db}"));
         });

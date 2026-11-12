@@ -486,10 +486,8 @@ pub(in crate::db::sql) fn statements(sim: &Sim, schema: &str, table: &str, c: &C
                 }
                 _ => {}
             }
-            if let Some(d) = default_of(def)? {
-                if dropped || old.default != def.default {
-                    v.push(format!("{col} SET DEFAULT {d}"));
-                }
+            if let Some(d) = default_of(def)? && (dropped || old.default != def.default) {
+                v.push(format!("{col} SET DEFAULT {d}"));
             }
             if old.comment != def.comment {
                 v.push(comment_stmt(&format!("COLUMN {t}.{name}"), &def.comment)?);
@@ -1007,10 +1005,8 @@ async fn checked_run(tx: &mut Tx<'_>, db: &Db, schema: &str, table: &str, steps:
     if let Some((what, _)) = expect.snap.iter().zip(&now).find(|(a, b)| a != b).map(|(a, _)| a) {
         return Err(Fail::Changed(what.clone()));
     }
-    if let Some(all) = &expect.all {
-        if table_state(&st) != *all {
-            return Err(Fail::Changed("an index, constraint or other object that depends on the table".into()));
-        }
+    if let Some(all) = &expect.all && table_state(&st) != *all {
+        return Err(Fail::Changed("an index, constraint or other object that depends on the table".into()));
     }
     // The referenced columns and unique indexes a new key leans on, read under the search_path of their own schema as the
     // plan-time read of them was.

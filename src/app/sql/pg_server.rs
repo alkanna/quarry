@@ -232,10 +232,8 @@ impl PgServerWin {
                 self.act_next = Some(now + retry_after(r.is_ok()));
                 match &mut r {
                     Ok(a) => {
-                        if !a.blockers {
-                            if let Some(Ok(old)) = &self.act {
-                                carry_blockers(&mut a.rows, &old.rows);
-                            }
+                        if !a.blockers && let Some(Ok(old)) = &self.act {
+                            carry_blockers(&mut a.rows, &old.rows);
                         }
                         self.sel = self.sel.filter(|p| a.rows.iter().any(|x| x.pid == *p));
                         self.confirm = self.confirm.take().filter(|c| confirm_ok(c, &a.rows));
@@ -308,7 +306,7 @@ fn span(secs: f64) -> String {
     let s = secs.max(0.0) as u64;
     match s {
         0..60 => format!("{s} s"),
-        60..600 if s % 60 != 0 => format!("{} min {} s", s / 60, s % 60),
+        60..600 if !s.is_multiple_of(60) => format!("{} min {} s", s / 60, s % 60),
         60..3600 => format!("{} min", s / 60),
         _ => format!("{} h {} min", s / 3600, s / 60 % 60),
     }
@@ -1072,10 +1070,8 @@ fn session_row(ui: &egui::Ui, rect: egui::Rect, resp: &egui::Response, r: &Sessi
         st => (st.to_string(), MUTED()),
     };
     text_at(ui, x, col(3), y1, h, &state, state_c, false, TXT_SMALL, false);
-    if warn {
-        if let Some(t) = r.state_secs {
-            text_at(ui, x, col(3), y2, h, &format!("for {}", span(t)), WARNING(), false, TXT_SMALL, false);
-        }
+    if warn && let Some(t) = r.state_secs {
+        text_at(ui, x, col(3), y2, h, &format!("for {}", span(t)), WARNING(), false, TXT_SMALL, false);
     }
     x += col(3);
     if !r.wait_type.is_empty() {

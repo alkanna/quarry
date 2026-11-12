@@ -26,10 +26,8 @@ impl App {
 
     /// The server refused or reported a newer sql_mode than the one the previews follow; they follow the new one now.
     pub(in crate::app) fn adopt_sql_mode(&mut self, conn: u64, mode: Option<String>) {
-        if let Some(m) = mode {
-            if let Some(d) = self.conns.iter_mut().find(|c| c.meta.id == conn).and_then(|c| c.sql.as_mut()) {
-                d.sql_mode = m;
-            }
+        if let Some(m) = mode && let Some(d) = self.conns.iter_mut().find(|c| c.meta.id == conn).and_then(|c| c.sql.as_mut()) {
+            d.sql_mode = m;
         }
     }
 

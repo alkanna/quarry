@@ -127,10 +127,8 @@ impl App {
         }
         let c = &mut self.tabs[i].compare;
         let (tc, tdb, tcoll) = (c.conn, c.db.clone(), c.coll.clone());
-        if let Some(d) = load_colls {
-            if let Some(client) = self.conn(tc).and_then(|c| c.client.clone()) {
-                self.worker.collections(tc, client, d);
-            }
+        if let Some(d) = load_colls && let Some(client) = self.conn(tc).and_then(|c| c.client.clone()) {
+            self.worker.collections(tc, client, d);
         }
         if run {
             let (Some(a), Some(b)) = (self.conn(src.conn).and_then(|c| c.client.clone()), self.conn(tc).and_then(|c| c.client.clone())) else {

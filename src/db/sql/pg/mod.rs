@@ -237,10 +237,8 @@ impl PgPools {
                 Box::pin(async move {
                     session_with(c, locals.as_deref(), &adv, &failure).await?;
                     // Behind a pooler the backend serves other clients too, so it is not Quarry's.
-                    if locals.is_none() {
-                        if let Some(b) = own_backend(c).await {
-                            note_own(&b.server, b.pid, &b.start);
-                        }
+                    if locals.is_none() && let Some(b) = own_backend(c).await {
+                        note_own(&b.server, b.pid, &b.start);
                     }
                     Ok(())
                 })
@@ -283,7 +281,7 @@ impl PgPools {
             }
         })
         .await;
-        self.held.n.lock().unwrap().get(&self.name_of(Some(database))).copied().unwrap_or(0) as usize
+        self.held.n.lock().unwrap().get(&self.name_of(Some(database))).copied().unwrap_or(0)
     }
 
     fn name_of(&self, database: Option<&str>) -> String {
@@ -323,10 +321,8 @@ impl PgPools {
         let mut c = sqlx::PgConnection::connect_with(o).await.map_err(se)?;
         let failure = Mutex::new(None);
         session_with(&mut c, self.locals.as_deref(), &self.adv, &failure).await.map_err(|x| failure.lock().unwrap().clone().unwrap_or_else(|| e(x)))?;
-        if self.locals.is_none() {
-            if let Some(b) = own_backend(&mut c).await {
-                note_own(&b.server, b.pid, &b.start);
-            }
+        if self.locals.is_none() && let Some(b) = own_backend(&mut c).await {
+            note_own(&b.server, b.pid, &b.start);
         }
         Ok(Conn::Pg(PgConn::free(c)))
     }
@@ -1218,7 +1214,7 @@ mod tests {
             every_pg(|l, var| {
                 let _rt = l.w.rt.enter();
                 let off = pools_with(l, &[("default_transaction_read_only", "off")], Duration::from_secs(3));
-                let err = l.w.rt.block_on(off.acquire(Some("postgres"))).err().expect("must be refused");
+                let err = l.w.rt.block_on(off.acquire(Some("postgres"))).expect_err("must be refused");
                 assert!(err.contains("not read-only"), "{var}: {err}");
                 // Another database has its own pool and so never reports it.
                 let (_, mine) = off.entry(Some("postgres"));
@@ -1241,10 +1237,10 @@ mod tests {
                 // A pool whose connections turn the guard off, as a server or pooler that ignores the startup
                 // options would leave them.
                 let off = pools_with(l, &[("default_transaction_read_only", "off")], Duration::from_secs(3));
-                let err = l.w.rt.block_on(off.acquire(None)).err().expect("must be refused");
+                let err = l.w.rt.block_on(off.acquire(None)).expect_err("must be refused");
                 assert!(err.contains("not read-only"), "{var}: {err}");
                 let scs = pools_with(l, &[("default_transaction_read_only", "on"), ("standard_conforming_strings", "off")], Duration::from_secs(3));
-                let err = l.w.rt.block_on(scs.acquire(None)).err().expect("must be refused");
+                let err = l.w.rt.block_on(scs.acquire(None)).expect_err("must be refused");
                 assert!(err.contains("standard_conforming_strings"), "{var}: {err}");
                 // Direct readback on a connection that was switched.
                 let mut raw = l.w.rt.block_on(sqlx::PgConnection::connect(&l.uri)).unwrap();

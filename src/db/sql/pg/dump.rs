@@ -340,10 +340,8 @@ async fn dump_on(c: &mut PgConnection, db: &Db, plan: &DumpPlan, out: &mut (dyn 
         }
     }
     for t in &types {
-        if let Some(e) = &t.ext {
-            if !exts.contains(e) {
-                exts.push(e.clone());
-            }
+        if let Some(e) = &t.ext && !exts.contains(e) {
+            exts.push(e.clone());
         }
     }
 
@@ -500,11 +498,9 @@ async fn dump_on(c: &mut PgConnection, db: &Db, plan: &DumpPlan, out: &mut (dyn 
         }
     }
     for s in seqs.iter().filter(|s| s.create) {
-        if let Some((t, col)) = &s.owner {
-            if let Some(r) = by_oid.get(t).filter(|r| r.structure) {
-                put(out, &format!("ALTER SEQUENCE {} OWNED BY {}.{};\n", qn(&s.schema, &s.name), r.full(), q(col)))?;
-                wrote = true;
-            }
+        if let Some((t, col)) = &s.owner && let Some(r) = by_oid.get(t).filter(|r| r.structure) {
+            put(out, &format!("ALTER SEQUENCE {} OWNED BY {}.{};\n", qn(&s.schema, &s.name), r.full(), q(col)))?;
+            wrote = true;
         }
     }
     if wrote {
@@ -677,10 +673,8 @@ async fn load_rels(c: &mut PgConnection, db: &Db, plan: &DumpPlan, whole: bool) 
         cat(c, db, &sql, &[Arg::T(&plan.schema), Arg::Ts(&names)]).await?
     };
     let listed = |r: &R| if whole || r.s(1) != plan.schema { None } else { plan.tables.iter().find(|t| t.name == r.s(2)) };
-    if !whole {
-        if let Some(t) = plan.tables.iter().find(|t| !rows.iter().any(|r| r.s(1) == plan.schema && r.s(2) == t.name)) {
-            return Err(format!("{}.{} no longer exists on the server.", plan.schema, t.name));
-        }
+    if !whole && let Some(t) = plan.tables.iter().find(|t| !rows.iter().any(|r| r.s(1) == plan.schema && r.s(2) == t.name)) {
+        return Err(format!("{}.{} no longer exists on the server.", plan.schema, t.name));
     }
     let parent_of = |r: &R| r.o(9).and_then(|p| p.split('\x1f').next().and_then(|o| o.parse::<i64>().ok()));
     let (mut out, mut notes) = (Vec::new(), Vec::new());
@@ -712,10 +706,8 @@ async fn load_rels(c: &mut PgConnection, db: &Db, plan: &DumpPlan, whole: bool) 
             let mut it = p.split('\x1f');
             Some((it.next()?.parse::<i64>().ok()?, qn(it.next()?, it.next()?)))
         });
-        if let Some((p, pname)) = &parent {
-            if structure && !rows.iter().any(|o| o.n(0) == *p) {
-                notes.push(format!("-- Partition {}.{} is written as a partition of {}, which must exist where the file is run.", note(&schema), note(&name), note(pname)));
-            }
+        if let Some((p, pname)) = &parent && structure && !rows.iter().any(|o| o.n(0) == *p) {
+            notes.push(format!("-- Partition {}.{} is written as a partition of {}, which must exist where the file is run.", note(&schema), note(&name), note(pname)));
         }
         if r.b(15) && structure {
             notes.push(format!("-- Table {}.{} inherits from another table: it is written as a table of its own with every column, without INHERITS.", note(&schema), note(&name)));

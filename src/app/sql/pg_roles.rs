@@ -480,10 +480,8 @@ impl App {
         match ans {
             Answer::Cluster(res) => {
                 if let Some(w) = self.pg_roles.as_mut().filter(|w| w.conn == conn && w.req_cluster == req) {
-                    if let Ok(c) = &res {
-                        if w.role.as_ref().is_none_or(|r| c.role(r).is_none()) {
-                            w.role = c.roles.iter().find(|r| !r.system() && r.name != c.me).or_else(|| c.me()).map(|r| r.name.clone());
-                        }
+                    if let Ok(c) = &res && w.role.as_ref().is_none_or(|r| c.role(r).is_none()) {
+                        w.role = c.roles.iter().find(|r| !r.system() && r.name != c.me).or_else(|| c.me()).map(|r| r.name.clone());
                     }
                     w.set_cluster(res);
                 }
@@ -491,15 +489,11 @@ impl App {
             Answer::Objects(res) => {
                 if let Some(w) = self.pg_roles.as_mut().filter(|w| w.conn == conn && w.req_objs == req) {
                     // A schema that is not in this database falls back to public or the first one listed.
-                    if let Ok(o) = &res {
-                        if w.kind.in_schema() && !o.schemas.contains(&w.schema) {
-                            if let Some(s) = o.schemas.iter().find(|s| *s == "public").or(o.schemas.first()).cloned() {
-                                w.schema = s;
-                                w.objs = None;
-                                self.pg_roles_objects();
-                                return;
-                            }
-                        }
+                    if let Ok(o) = &res && w.kind.in_schema() && !o.schemas.contains(&w.schema) && let Some(s) = o.schemas.iter().find(|s| *s == "public").or(o.schemas.first()).cloned() {
+                        w.schema = s;
+                        w.objs = None;
+                        self.pg_roles_objects();
+                        return;
                     }
                     w.objs = Some(res);
                 }
@@ -510,10 +504,8 @@ impl App {
                 }
             }
             Answer::DropInfo(res) => {
-                if let Some(Modal::PgDropRole(f)) = &mut self.modal {
-                    if f.conn == conn && f.req == req {
-                        f.info = Some(res);
-                    }
+                if let Some(Modal::PgDropRole(f)) = &mut self.modal && f.conn == conn && f.req == req {
+                    f.info = Some(res);
                 }
             }
             Answer::Done { did, res, undo } => self.pg_roles_done(conn, req, did, res, undo),
@@ -1349,10 +1341,8 @@ impl App {
         ui.add_space(8.0);
         crate::app::sql::create::sql_block(ui, &format!("{};", rp::password_sql(&f.role, rp::REDACTED)));
         let check = rp::check_password(&f.password).and_then(|_| if f.password == f.again { Ok(()) } else { Err("The two passwords differ.".to_string()) });
-        if let Err(e) = &check {
-            if !f.password.is_empty() || !f.again.is_empty() {
-                ui.label(RichText::new(e.as_str()).size(TXT_SMALL).color(ALERT()));
-            }
+        if let Err(e) = &check && (!f.password.is_empty() || !f.again.is_empty()) {
+            ui.label(RichText::new(e.as_str()).size(TXT_SMALL).color(ALERT()));
         }
         ui.add_space(4.0);
         ui.add(egui::Label::new(RichText::new(format!("A password change cannot be undone. Quarry computes {} here and sends only that, once; the password is not shown, logged or kept. {POLICY}", hash_name(&encryption))).size(TXT_SMALL).color(MUTED())).wrap());
@@ -1648,10 +1638,8 @@ fn pg_role_members(ui: &mut egui::Ui, w: &mut PgRolesWin, c: &Cluster, role: &Ro
     let pairs = |of: bool| -> Vec<(String, String)> {
         let mut v: Vec<(String, String)> = if of { c.member_of(&role.name).iter().map(|m| (m.group.clone(), m.member.clone())).collect() } else { c.members_of(&role.name).iter().map(|m| (m.group.clone(), m.member.clone())).collect() };
         for s in &w.staged {
-            if let Change::Member { group, member, from: None, .. } = s {
-                if (of && *member == role.name) || (!of && *group == role.name) {
-                    v.push((group.clone(), member.clone()));
-                }
+            if let Change::Member { group, member, from: None, .. } = s && ((of && *member == role.name) || (!of && *group == role.name)) {
+                v.push((group.clone(), member.clone()));
             }
         }
         v
@@ -1774,10 +1762,8 @@ fn pg_role_defaults(ui: &mut egui::Ui, w: &mut PgRolesWin, c: &Cluster, role: &R
     // Rows that name the role as grantee, plus staged ones that are not on the server yet.
     let mut rows: Vec<(String, String, DefKind, Privs)> = defs.rows.iter().filter(|d| !d.granted(&role.name).is_empty()).map(|d| (d.owner.clone(), d.schema.clone(), d.kind, d.granted(&role.name))).collect();
     for s in &w.staged {
-        if let Change::Default { owner, schema, kind, grantee, from, .. } = s {
-            if *grantee == role.name && !rows.iter().any(|(o, sc, k, _)| o == owner && sc == schema && k == kind) {
-                rows.push((owner.clone(), schema.clone(), *kind, from.clone()));
-            }
+        if let Change::Default { owner, schema, kind, grantee, from, .. } = s && *grantee == role.name && !rows.iter().any(|(o, sc, k, _)| o == owner && sc == schema && k == kind) {
+            rows.push((owner.clone(), schema.clone(), *kind, from.clone()));
         }
     }
     egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {

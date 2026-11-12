@@ -337,7 +337,7 @@ impl Imp<'_> {
         let flag = self.rec.on || update;
         let mut old: HashMap<Cellz, Cellz> = HashMap::new();
         if let (true, Some(at)) = (update, &self.key_at) {
-            let keys: Vec<Vec<Param>> = (0..n).map(|r| at.iter().map(|&j| self.flat[r * w + j].clone()).collect::<Vec<_>>()).filter(|k| !k.iter().any(|p| *p == Param::Null)).collect();
+            let keys: Vec<Vec<Param>> = (0..n).map(|r| at.iter().map(|&j| self.flat[r * w + j].clone()).collect::<Vec<_>>()).filter(|k| !k.contains(&Param::Null)).collect();
             if !keys.is_empty() {
                 let key_cols: Vec<&TCol> = at.iter().map(|&j| self.mapped[j]).collect();
                 let (sql, params) = read_old_sql(self.schema, self.table, self.only, &key_cols, &self.rec_names, keys);
@@ -443,10 +443,8 @@ async fn import_on(c: &mut Conn, db: &Db, schema: &str, table: &str, plan: &Impo
     let per = batch_rows(w);
     let mut why_not = None;
     let mut on = plan.want_undo;
-    if on {
-        if let Err(w) = crate::db::sql::import::undo_plan(&plan.info, &plan.map, plan.dup, 0) {
-            (on, why_not) = (false, Some(w));
-        }
+    if on && let Err(w) = crate::db::sql::import::undo_plan(&plan.info, &plan.map, plan.dup, 0) {
+        (on, why_not) = (false, Some(w));
     }
     let rec = Rec { on, track: plan.dup == Dup::Update, n_pk: pk.len(), inserted: Vec::new(), ins_at: HashMap::new(), updated: Vec::new(), upd_at: HashMap::new(), bytes: 0 };
     let mut tx = c.begin_write(db).await.map_err(se)?;
@@ -509,16 +507,14 @@ async fn read_file(tx: &mut Tx<'_>, imp: &mut Imp<'_>, prog: &Progress, cancel: 
             return Err(format!("Row {row} has {} values, the first row has {width}. Nothing was imported.", rec.len()));
         }
         let params = plan.map.convert_record(&plan.info.cols, &rec).map_err(|(ci, why)| format!("Row {row}, column {}: {why} Nothing was imported.", ci + 1))?;
-        if plan.dup == Dup::Update && imp.has_set {
-            if let Some(at) = &imp.key_at {
-                let key: Option<Vec<String>> = at.iter().map(|&j| if let Param::Text(s) = &params[j] { Some(s.clone()) } else { None }).collect();
-                if let Some(k) = key {
-                    // ON CONFLICT DO UPDATE cannot touch a row twice in one statement, so a repeated key starts a new batch.
-                    if imp.seen.contains(&k) {
-                        imp.flush(tx, prog, rd.bytes()).await?;
-                    }
-                    imp.seen.insert(k);
+        if plan.dup == Dup::Update && imp.has_set && let Some(at) = &imp.key_at {
+            let key: Option<Vec<String>> = at.iter().map(|&j| if let Param::Text(s) = &params[j] { Some(s.clone()) } else { None }).collect();
+            if let Some(k) = key {
+                // ON CONFLICT DO UPDATE cannot touch a row twice in one statement, so a repeated key starts a new batch.
+                if imp.seen.contains(&k) {
+                    imp.flush(tx, prog, rd.bytes()).await?;
                 }
+                imp.seen.insert(k);
             }
         }
         if imp.in_batch == 0 {

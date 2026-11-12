@@ -195,6 +195,8 @@ pub enum ExplainOf {
     Aggregate(Vec<Document>),
 }
 
+// ponytail: sent a few times per frame at most, so the copy is cheap; boxing the large variant would change every match on it.
+#[allow(clippy::large_enum_variant)]
 pub enum Msg {
     /// Connected (or not); a tunnel, if any, must be kept alive as long as the client is used.
     Connected { conn: u64, attempt: u64, res: Res<(Client, Vec<String>, Option<crate::ssh::Tunnel>)> },
@@ -484,23 +486,21 @@ fn shell_to_ejson(src: &str) -> String {
             if word == "new" {
                 continue; // `new Date(...)` is treated like `Date(...)`
             }
-            if j < chars.len() && chars[j] == '(' {
-                if let Some(close) = chars[j..].iter().position(|&ch| ch == ')') {
-                    let arg: String = chars[j + 1..j + close].iter().collect();
-                    let arg = arg.trim().trim_matches(|ch| ch == '"' || ch == '\'').to_string();
-                    let rep = match word.as_str() {
-                        "ObjectId" => Some(format!("{{\"$oid\":\"{arg}\"}}")),
-                        "ISODate" | "Date" => Some(format!("{{\"$date\":\"{arg}\"}}")),
-                        "NumberLong" => Some(format!("{{\"$numberLong\":\"{arg}\"}}")),
-                        "NumberDecimal" => Some(format!("{{\"$numberDecimal\":\"{arg}\"}}")),
-                        "NumberInt" => Some(arg.clone()),
-                        _ => None,
-                    };
-                    if let Some(rep) = rep {
-                        out.push_str(&rep);
-                        i = j + close + 1;
-                        continue;
-                    }
+            if j < chars.len() && chars[j] == '(' && let Some(close) = chars[j..].iter().position(|&ch| ch == ')') {
+                let arg: String = chars[j + 1..j + close].iter().collect();
+                let arg = arg.trim().trim_matches(|ch| ch == '"' || ch == '\'').to_string();
+                let rep = match word.as_str() {
+                    "ObjectId" => Some(format!("{{\"$oid\":\"{arg}\"}}")),
+                    "ISODate" | "Date" => Some(format!("{{\"$date\":\"{arg}\"}}")),
+                    "NumberLong" => Some(format!("{{\"$numberLong\":\"{arg}\"}}")),
+                    "NumberDecimal" => Some(format!("{{\"$numberDecimal\":\"{arg}\"}}")),
+                    "NumberInt" => Some(arg.clone()),
+                    _ => None,
+                };
+                if let Some(rep) = rep {
+                    out.push_str(&rep);
+                    i = j + close + 1;
+                    continue;
                 }
             }
             out.push_str(&word);

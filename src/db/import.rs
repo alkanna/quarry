@@ -174,10 +174,8 @@ pub(crate) fn csv_value(cell: &str) -> Bson {
             return Bson::Double(f);
         }
     }
-    if t.len() >= 20 && t.as_bytes()[4] == b'-' && t.contains('T') {
-        if let Ok(d) = mongodb::bson::DateTime::parse_rfc3339_str(t) {
-            return Bson::DateTime(d);
-        }
+    if t.len() >= 20 && t.as_bytes()[4] == b'-' && t.contains('T') && let Ok(d) = mongodb::bson::DateTime::parse_rfc3339_str(t) {
+        return Bson::DateTime(d);
     }
     Bson::String(cell.to_string())
 }

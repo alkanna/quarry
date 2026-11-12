@@ -657,10 +657,8 @@ impl App {
                         .layouter(&mut layout)
                         .show(ui)
                 });
-                if ac.id == Some(id) && !ac.items.is_empty() {
-                    if let Some((title, foot)) = meta.borrow_mut().take() {
-                        (ac.title, ac.foot) = (title, foot);
-                    }
+                if ac.id == Some(id) && !ac.items.is_empty() && let Some((title, foot)) = meta.borrow_mut().take() {
+                    (ac.title, ac.foot) = (title, foot);
                 }
                 sql_need = need.borrow_mut().take();
                 let caret = out.cursor_range.filter(|r| r.is_empty()).map(|r| r.primary.index.0);
@@ -820,10 +818,8 @@ impl App {
         if let Some(f) = editor {
             self.js_editor(ui.ctx(), f, &colls);
         }
-        if stop {
-            if let Some(c) = self.tabs[self.cur].shell.cancel.take() {
-                let _ = c.send(());
-            }
+        if stop && let Some(c) = self.tabs[self.cur].shell.cancel.take() {
+            let _ = c.send(());
         }
         if let Some(i) = detach {
             self.tabs[self.cur].shell.attached.remove(i);

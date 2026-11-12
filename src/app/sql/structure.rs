@@ -503,10 +503,8 @@ impl App {
             if refresh_button(ui) {
                 acts.push(Act::Refresh);
             }
-            if let Some(t) = existing.as_ref().and_then(|n| d.triggers.iter().find(|t| &t.name == n)) {
-                if quiet(ui, "Copy CREATE").clicked() {
-                    acts.push(Act::Copy(t.create_sql(&self.tabs[self.cur].sel.coll)));
-                }
+            if let Some(t) = existing.as_ref().and_then(|n| d.triggers.iter().find(|t| &t.name == n)) && quiet(ui, "Copy CREATE").clicked() {
+                acts.push(Act::Copy(t.create_sql(&self.tabs[self.cur].sel.coll)));
             }
         });
         acts.extend(left);

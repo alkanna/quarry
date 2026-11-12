@@ -98,26 +98,24 @@ impl App {
                 preview = true;
             }
         }
-        if open_file {
-            if let Some(path) = rfd::FileDialog::new().add_filter("Data", &["json", "jsonl", "ndjson", "csv", "tsv", "txt"]).pick_file() {
-                match std::fs::read_to_string(&path) {
-                    Ok(text) => {
-                        let im = &mut self.tabs[self.cur].import;
-                        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
-                        im.kind = match ext.as_str() {
-                            "csv" | "tsv" => db::ImportKind::Csv,
-                            "jsonl" | "ndjson" => db::ImportKind::JsonLines,
-                            _ if text.trim_start().starts_with('{') && text.lines().filter(|l| !l.trim().is_empty()).count() > 1 && db::parse_doc(text.lines().next().unwrap_or_default()).is_ok() => db::ImportKind::JsonLines,
-                            _ => db::ImportKind::Json,
-                        };
-                        if ext == "tsv" {
-                            im.separator = Some('\t');
-                        }
-                        im.file = path.file_name().map(|f| f.to_string_lossy().to_string());
-                        im.text = text;
+        if open_file && let Some(path) = rfd::FileDialog::new().add_filter("Data", &["json", "jsonl", "ndjson", "csv", "tsv", "txt"]).pick_file() {
+            match std::fs::read_to_string(&path) {
+                Ok(text) => {
+                    let im = &mut self.tabs[self.cur].import;
+                    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+                    im.kind = match ext.as_str() {
+                        "csv" | "tsv" => db::ImportKind::Csv,
+                        "jsonl" | "ndjson" => db::ImportKind::JsonLines,
+                        _ if text.trim_start().starts_with('{') && text.lines().filter(|l| !l.trim().is_empty()).count() > 1 && db::parse_doc(text.lines().next().unwrap_or_default()).is_ok() => db::ImportKind::JsonLines,
+                        _ => db::ImportKind::Json,
+                    };
+                    if ext == "tsv" {
+                        im.separator = Some('\t');
                     }
-                    Err(e) => self.err(format!("Could not read the file: {e}")),
+                    im.file = path.file_name().map(|f| f.to_string_lossy().to_string());
+                    im.text = text;
                 }
+                Err(e) => self.err(format!("Could not read the file: {e}")),
             }
         }
         if start {

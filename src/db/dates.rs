@@ -192,11 +192,9 @@ pub fn moment(word: &str, now: i64) -> Option<String> {
         return Some(date(now));
     }
     let digits = |t: &str| t.len() == 2 && t.chars().all(|c| c.is_ascii_digit());
-    if let [h, mi, rest @ ..] = word.split(':').collect::<Vec<_>>().as_slice() {
-        if word.len() <= 8 && digits(h) && digits(mi) && rest.iter().all(|s| digits(s)) && rest.len() <= 1 {
-            let secs = h.parse::<i64>().ok()? * 3600 + mi.parse::<i64>().ok()? * 60 + rest.first().map_or(Some(0), |s| s.parse::<i64>().ok())?;
-            return (secs < 86_400).then(|| date(now.div_euclid(DAY_MS) * DAY_MS + secs * 1000));
-        }
+    if let [h, mi, rest @ ..] = word.split(':').collect::<Vec<_>>().as_slice() && word.len() <= 8 && digits(h) && digits(mi) && rest.iter().all(|s| digits(s)) && rest.len() <= 1 {
+        let secs = h.parse::<i64>().ok()? * 3600 + mi.parse::<i64>().ok()? * 60 + rest.first().map_or(Some(0), |s| s.parse::<i64>().ok())?;
+        return (secs < 86_400).then(|| date(now.div_euclid(DAY_MS) * DAY_MS + secs * 1000));
     }
     if word.len() == 10 {
         return period(word).map(|(a, _)| date(a));

@@ -15,10 +15,8 @@ fn each(pooler: bool, f: impl Fn(&LivePg, &str)) {
             f(&l, var);
         }
     }
-    if pooler {
-        if let Some(l) = live_pg(PGBOUNCER_ENV) {
-            f(&l, PGBOUNCER_ENV);
-        }
+    if pooler && let Some(l) = live_pg(PGBOUNCER_ENV) {
+        f(&l, PGBOUNCER_ENV);
     }
 }
 
