@@ -17,6 +17,20 @@ pub(super) fn retry_after(ok: bool) -> Duration {
     if ok { POLL } else { BACKOFF }
 }
 
+/// How long a confirm button ignores clicks after it was armed, in seconds. A confirm can be drawn where the button that
+/// armed it was, so the second click of a double click would otherwise confirm at once.
+pub(super) const ARM_GUARD: f64 = 0.5;
+
+/// The time a confirm is armed at: egui's input time, which a test can set.
+pub(super) fn arm_time(ui: &egui::Ui) -> f64 {
+    ui.input(|i| i.time)
+}
+
+/// Whether a click on the confirm button armed at `at` counts: not within ARM_GUARD of arming.
+pub(super) fn confirmed(ui: &egui::Ui, r: &egui::Response, at: f64) -> bool {
+    r.clicked() && arm_time(ui) - at >= ARM_GUARD
+}
+
 /// A Kill waiting for its second click, with everything the list showed about its target.
 #[derive(Clone)]
 pub(super) struct Confirm {
@@ -24,6 +38,8 @@ pub(super) struct Confirm {
     identity: String,
     /// The whole connection ends (KILL) instead of only its statement (KILL QUERY).
     whole: bool,
+    /// `arm_time` when it was armed.
+    at: f64,
 }
 
 /// Whether the confirmation still points at the same statement of the same connection on the same server.
@@ -467,7 +483,7 @@ fn procs_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32, kill: &mut Op
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let r = ui.add_enabled_ui(sel_row.is_some(), |ui| danger(ui, "Kill query")).inner;
             if let (true, Some(p)) = (r.clicked(), sel_row) {
-                s.confirm = Some(Confirm { p: (*p).clone(), identity: identity.clone(), whole: false });
+                s.confirm = Some(Confirm { p: (*p).clone(), identity: identity.clone(), whole: false, at: arm_time(ui) });
             }
         });
     });
@@ -538,7 +554,8 @@ fn procs_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32, kill: &mut Op
             }
             let can_query = can_kill(writable, &own, p, false);
             let can_end = can_kill(writable, &own, p, true);
-            let arm = |whole: bool| Confirm { p: p.clone(), identity: identity.clone(), whole };
+            let now = arm_time(ui);
+            let arm = |whole: bool| Confirm { p: p.clone(), identity: identity.clone(), whole, at: now };
             resp.context_menu(|ui| {
                 menu_look(ui);
                 if ui.add_enabled(can_query, egui::Button::new("Kill query").frame_when_inactive(false)).clicked() {
@@ -567,7 +584,8 @@ fn procs_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32, kill: &mut Op
                         if quiet(&mut k, "Keep").clicked() {
                             confirm = None;
                         }
-                        if danger(&mut k, if c.whole { "Kill connection" } else { "Kill it" }).clicked() {
+                        let r = danger(&mut k, if c.whole { "Kill connection" } else { "Kill it" });
+                        if confirmed(&k, &r, c.at) {
                             *kill = Some(c.clone());
                             confirm = None;
                         }
@@ -914,7 +932,7 @@ mod tests {
 
     #[test]
     fn a_pending_kill_dies_with_any_change_of_its_target() {
-        let c = Confirm { p: p(9, "app", "shop", "Query", "SELECT 1"), identity: "uuid-a".into(), whole: false };
+        let c = Confirm { p: p(9, "app", "shop", "Query", "SELECT 1"), identity: "uuid-a".into(), whole: false, at: 0.0 };
         assert!(confirm_ok(&c, &procs(vec![p(9, "app", "shop", "Query", "SELECT 1")], "uuid-a")));
         // The id went to another statement, to Sleep, to another user, or is gone.
         for rows in [vec![p(9, "app", "shop", "Query", "SELECT 2")], vec![p(9, "app", "shop", "Sleep", "")], vec![p(9, "other", "shop", "Query", "SELECT 1")], vec![p(10, "app", "shop", "Query", "SELECT 1")]] {

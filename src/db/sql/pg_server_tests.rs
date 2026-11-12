@@ -52,7 +52,7 @@ fn sleeper(l: &LivePg, tag: &str) -> mpsc::Receiver<(Result<(), String>, bool)> 
 /// The session whose query carries `tag` once `ok` holds for it.
 fn find(l: &LivePg, db: &Db, tag: &str, ok: impl Fn(&Session) -> bool) -> Session {
     for _ in 0..200 {
-        let a = l.w.rt.block_on(activity(db)).unwrap();
+        let a = l.w.rt.block_on(activity(db, true)).unwrap();
         if let Some(s) = a.rows.into_iter().find(|s| s.query.contains(tag) && ok(&s)) {
             return s;
         }
@@ -65,21 +65,26 @@ fn running(l: &LivePg, tag: &str) -> Session {
     find(l, &l.db, tag, |s| s.state == "active")
 }
 
+/// What the window would send for `s`, with the server of the list it read.
+fn tgt(l: &LivePg, s: &Session) -> Target {
+    let server = l.w.rt.block_on(activity(&l.db, false)).unwrap().server;
+    Target::of(s, &server)
+}
+
 #[test]
 fn live_every_read_answers() {
     every(|l, pooled| {
-        let o = l.w.rt.block_on(overview(&l.db, true)).unwrap();
+        let o = l.w.rt.block_on(overview(&l.db)).unwrap();
         assert!(o.version.starts_with("PostgreSQL") && !o.short_version.is_empty(), "{o:?}");
         assert!(o.uptime.is_some() && o.max_connections.is_some_and(|m| m > 0.0) && o.connections.is_some_and(|c| c >= 1.0));
         assert!(o.commits.is_some() && o.hits.is_some() && o.shared_buffers.is_some_and(|b| b > 0.0) && o.started.ends_with("UTC"));
         assert!(o.read_all && o.user == "postgres" && !o.data_dir.is_empty() && !o.encoding.is_empty());
         assert!(matches!(o.role, Some(Role::Primary { ref standbys, visible: true }) if standbys.is_empty()), "{:?}", o.role);
-        let sizes = o.sizes.clone().unwrap();
-        assert!(sizes.iter().any(|(n, b)| n == "postgres" && b.is_some_and(|b| b > 0)), "{sizes:?}");
-        // The second sample gives a rate, and without sizes the read leaves them out.
+        let sz = l.w.rt.block_on(sizes(&l.db)).unwrap();
+        assert!(sz.iter().any(|(n, b)| n == "postgres" && b.is_some_and(|b| b > 0)), "{sz:?}");
+        // The second sample gives a rate.
         std::thread::sleep(Duration::from_millis(300));
-        let o2 = l.w.rt.block_on(overview(&l.db, false)).unwrap();
-        assert!(o2.sizes.is_none());
+        let o2 = l.w.rt.block_on(overview(&l.db)).unwrap();
         let m = metrics(&o2, Some(&(0.3, o)));
         assert!(m.tps.is_some_and(|t| t >= 0.0) && m.commit.is_some() && m.hit.is_some_and(|h| h > 0.0 && h <= 1.0), "{m:?}");
         let st = l.w.rt.block_on(settings(&l.db)).unwrap();
@@ -96,11 +101,36 @@ fn live_every_read_answers() {
         // pg_file_settings is asked only when a setting waits for a restart; check that its statement reads as the superuser.
         let pending = l.w.rt.block_on(read(&l.db, async |c| Ok((rows(c, FILE_READABLE).await?, rows(c, FILE_PENDING).await?)))).unwrap();
         assert_eq!(text_at(&pending.0[0], 0).as_deref(), Some("1"));
-        let a = l.w.rt.block_on(activity(&l.db)).unwrap();
+        let a = l.w.rt.block_on(activity(&l.db, true)).unwrap();
         assert!(a.read_all && a.user == "postgres");
         // The reading connection is in the list and marked as Quarry's.
         let me = a.rows.iter().find(|r| r.query.contains("pg_blocking_pids")).expect("the reader");
-        assert!(me.ours && me.state == "active" && !me.backend_start.is_empty(), "{me:?}");
+        assert!(me.ours && me.state == "active" && !me.backend_start.is_empty() && !a.server.is_empty(), "{me:?}");
+        assert_eq!(a.own_app.is_some(), pooled);
+        // A poll without blockers does not call pg_blocking_pids.
+        let b = l.w.rt.block_on(activity(&l.db, false)).unwrap();
+        assert!(!b.blockers && !b.rows.iter().any(|r| r.query.contains("pg_blocking_pids")));
+    });
+}
+
+#[test]
+fn live_a_long_query_is_cut_and_copy_reads_the_whole() {
+    every(|l, _| {
+        let tag = unique_name("q_srv_long");
+        // The tag goes first: the server keeps only track_activity_query_size bytes of the text.
+        let pad = "x".repeat(QUERY_CUT + 500);
+        let rx = session(l, "postgres", format!("SELECT /* {tag} */ pg_sleep(30), '{pad}'"));
+        let s = running(l, &tag);
+        assert!(s.query.chars().count() <= QUERY_CUT, "{}", s.query.len());
+        // The window cuts only what the server kept past QUERY_CUT, which needs a raised track_activity_query_size (1 kB by default).
+        assert!(!s.cut || s.query.chars().count() == QUERY_CUT);
+        let full = l.w.rt.block_on(full_query(&l.db, s.pid, s.backend_start.clone(), s.query.clone())).unwrap();
+        assert!(full.starts_with(&s.query) && full.len() >= s.query.len());
+        // Another statement than the one shown copies nothing.
+        let other = l.w.rt.block_on(full_query(&l.db, s.pid, s.backend_start.clone(), "SELECT other".into())).unwrap_err();
+        assert!(other.contains("another statement"), "{other}");
+        l.w.rt.block_on(signal(&l.db, &tgt(l, &s), false, false)).unwrap();
+        let _ = rx.recv_timeout(Duration::from_secs(10));
     });
 }
 
@@ -111,7 +141,7 @@ fn live_cancel_stops_the_statement_and_keeps_the_session() {
         let rx = sleeper(l, &tag);
         let s = running(l, &tag);
         assert!(s.signal && s.signalable() && s.active() && !s.ours);
-        let r = l.w.rt.block_on(signal(&l.db, &Target::of(&s), false, false)).unwrap();
+        let r = l.w.rt.block_on(signal(&l.db, &tgt(l, &s), false, false)).unwrap();
         assert!(r.contains("Cancelled"), "{r}");
         let (out, alive) = rx.recv_timeout(Duration::from_secs(10)).unwrap();
         let err = out.unwrap_err();
@@ -126,7 +156,7 @@ fn live_terminate_ends_the_session() {
         let tag = unique_name("q_srv_term");
         let rx = sleeper(l, &tag);
         let s = running(l, &tag);
-        let r = l.w.rt.block_on(signal(&l.db, &Target::of(&s), true, false)).unwrap();
+        let r = l.w.rt.block_on(signal(&l.db, &tgt(l, &s), true, false)).unwrap();
         assert!(r.contains("Ended session"), "{r}");
         let (out, alive) = rx.recv_timeout(Duration::from_secs(10)).unwrap();
         assert!(out.is_err());
@@ -135,10 +165,10 @@ fn live_terminate_ends_the_session() {
             assert!(!alive, "the session is gone after a terminate");
         }
         std::thread::sleep(Duration::from_millis(300));
-        let a = l.w.rt.block_on(activity(&l.db)).unwrap();
+        let a = l.w.rt.block_on(activity(&l.db, true)).unwrap();
         assert!(!a.rows.iter().any(|r| r.pid == s.pid && r.backend_start == s.backend_start), "the backend is gone");
         // A second try finds the session gone and sends nothing.
-        let again = l.w.rt.block_on(signal(&l.db, &Target::of(&s), true, false)).unwrap_err();
+        let again = l.w.rt.block_on(signal(&l.db, &tgt(l, &s), true, false)).unwrap_err();
         assert!(again.contains("already gone") || again.contains("another session"), "{again}");
     });
 }
@@ -149,7 +179,7 @@ fn live_a_locked_connection_a_reused_pid_and_a_changed_statement_send_nothing() 
         let tag = unique_name("q_srv_refuse");
         let rx = sleeper(l, &tag);
         let s = running(l, &tag);
-        let t = Target::of(&s);
+        let t = tgt(l, &s);
         for terminate in [false, true] {
             let err = l.w.rt.block_on(signal(&l.db, &t, terminate, true)).unwrap_err();
             assert!(err.contains("locked"), "{err}");
@@ -179,20 +209,146 @@ fn live_quarrys_own_sessions_are_refused() {
     for var in PG_ENVS {
         let Some(l) = live_pg(var) else { continue };
         // A pooled connection of Quarry's: the one that read the list.
-        let a = l.w.rt.block_on(activity(&l.db)).unwrap();
+        let a = l.w.rt.block_on(activity(&l.db, true)).unwrap();
         let me = a.rows.iter().find(|r| r.ours && r.query.contains("pg_blocking_pids")).expect("the reader");
         for terminate in [false, true] {
-            let err = l.w.rt.block_on(signal(&l.db, &Target::of(me), terminate, false)).unwrap_err();
+            let err = l.w.rt.block_on(signal(&l.db, &tgt(&l, me), terminate, false)).unwrap_err();
             assert!(err.contains("Quarry's own"), "{err}");
         }
         // A connection of Quarry's own outside the pools (Stop and the script runs open these) is marked too.
         let c = l.w.rt.block_on(l.db.detached()).unwrap();
-        let a = l.w.rt.block_on(activity(&l.db)).unwrap();
-        let Pool::Pg(p) = &l.db.pool else { panic!() };
+        let a = l.w.rt.block_on(activity(&l.db, true)).unwrap();
         let ours: Vec<&Session> = a.rows.iter().filter(|r| r.ours).collect();
-        assert!(ours.len() >= 2 && ours.iter().all(|r| r.pid == me.pid || p.is_own(r.pid, &r.backend_start)), "{ours:?}");
+        assert!(ours.len() >= 2 && ours.iter().all(|r| r.pid == me.pid || is_own(&a.server, r.pid, &r.backend_start)), "{ours:?}");
+        // Another saved connection to the same server, here under another login, sees the first one's sessions as Quarry's.
+        let role = unique_name("q_srv_other");
+        l.w.rt.block_on(sqlx::raw_sql(&format!("CREATE ROLE {role} LOGIN PASSWORD 'other-pw'; GRANT pg_read_all_stats TO {role}")).execute(&l.pool)).unwrap();
+        let other = live_pg_at(l.uri.replacen("postgres:quarry@", &format!("{role}:other-pw@"), 1));
+        let seen = l.w.rt.block_on(activity(&other.db, true)).unwrap();
+        assert_eq!(seen.server, a.server);
+        // A pooled backend may have closed in between, but the detached one is held, so at least one is still there.
+        let still: Vec<&Session> = seen.rows.iter().filter(|r| ours.iter().any(|o| o.pid == r.pid && o.backend_start == r.backend_start)).collect();
+        assert!(!still.is_empty() && still.iter().all(|r| r.ours), "{still:?}");
+        let reader = still[0];
+        let err = l.w.rt.block_on(signal(&other.db, &Target::of(reader, &seen.server), true, false)).unwrap_err();
+        assert!(err.contains("Quarry's own"), "{err}");
         drop(c);
+        drop(other);
+        std::thread::sleep(Duration::from_millis(200));
+        let _ = l.w.rt.block_on(sqlx::raw_sql(&format!("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '{role}'; DROP ROLE {role}")).execute(&l.pool));
     }
+}
+
+#[test]
+fn live_behind_a_pooler_sessions_named_like_quarry_are_its_own() {
+    every(|l, pooled| {
+        let tag = unique_name("q_srv_named");
+        let o = at(&l.uri, "postgres").application_name("Quarry");
+        let (tx, rx) = mpsc::channel();
+        let sql = format!("SELECT pg_sleep(30) /* {tag} */");
+        l.w.rt.spawn(async move {
+            let mut c = sqlx::PgConnection::connect_with(&o).await.unwrap();
+            let r = exec(&mut c, &sql).await.map_err(se);
+            let _ = tx.send(r);
+        });
+        let s = running(l, &tag);
+        // A direct connection knows its own backends exactly, so another client's "Quarry" session is foreign there.
+        assert_eq!(s.ours, pooled, "{s:?}");
+        let r = l.w.rt.block_on(signal(&l.db, &tgt(l, &s), false, false));
+        if pooled {
+            assert!(r.unwrap_err().contains("Quarry's own"));
+            let _ = l.w.rt.block_on(sqlx::raw_sql(&format!("SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE query LIKE '%{tag}%' AND pid <> pg_backend_pid()")).execute(&l.pool));
+        } else {
+            r.unwrap();
+        }
+        let _ = rx.recv_timeout(Duration::from_secs(10));
+    });
+}
+
+#[test]
+fn live_the_signal_runs_in_a_read_only_transaction() {
+    // A hot standby refuses BEGIN READ WRITE (25006), which the test servers cannot be put in; the check and the signal must
+    // then work inside the READ ONLY transaction Quarry opens for them, on a held connection.
+    every(|l, _| {
+        let tag = unique_name("q_srv_ro");
+        let rx = sleeper(l, &tag);
+        let s = running(l, &tag);
+        let t = tgt(l, &s);
+        let begin = signal_begin(&l.db);
+        assert!(begin.starts_with("BEGIN READ ONLY"), "{begin}");
+        let sql = signal_sql(false, true);
+        let params = [Param::Int(t.pid as i64), Param::Text(t.backend_start.clone()), Param::Text(t.user.clone()), Param::Text(t.query_start.clone())];
+        let rows = l.w.rt.block_on(async {
+            let Conn::Pg(mut c) = l.db.acquire_conn().await.unwrap() else { panic!() };
+            // The transaction is read-only for real: a write in it is refused.
+            let mut probe = c.begin_with(begin.clone()).await.unwrap();
+            let w = sqlx::Executor::execute(&mut *probe, "CREATE TEMP TABLE q_srv_ro_probe (a int)").await.unwrap_err();
+            assert_eq!(crate::db::sql::exec::sql_state(&w).as_deref(), Some("25006"), "{w}");
+            probe.rollback().await.unwrap();
+            let rows = send_signal(&mut c, begin, &sql, &params).await.unwrap();
+            let _ = c.close().await;
+            rows
+        });
+        assert_eq!(text_at(&rows[0], 4).as_deref(), Some("true"));
+        let (out, _) = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(out.unwrap_err().contains("57014"));
+    });
+}
+
+#[test]
+fn the_signal_opens_a_read_only_transaction_direct_and_behind_a_pooler() {
+    use crate::db::sql::pg_advanced::PgSession;
+    for pooled in [false, true] {
+        let db = Db::offline_pg(pooled, PgSession::default());
+        let b = signal_begin(&db);
+        assert!(b.starts_with("BEGIN READ ONLY") && !b.contains("READ WRITE"), "{b}");
+    }
+}
+
+#[test]
+fn the_own_registry_keeps_a_backend_noted_during_a_read() {
+    use crate::db::sql::pg::note_own;
+    let server = unique_name("srv");
+    let other = unique_name("srv");
+    note_own(&server, 10, "2026-11-12 10:00:00.000001");
+    note_own(&server, 11, "2026-11-12 10:00:00.000002");
+    note_own(&other, 10, "2026-11-12 10:00:00.000001");
+    let mark = own_mark();
+    // Opened after the snapshot began: the list below cannot show it yet.
+    note_own(&server, 12, "2026-11-12 10:00:00.000003");
+    let s = |pid: u64, start: &str| Session { pid, backend_start: start.into(), ..Default::default() };
+    // 10 closed, 11 is listed under a role that may not read its start.
+    let listed = vec![s(11, ""), s(99, "x")];
+    keep_own(&server, mark, |pid, start| gone(&listed, pid, start));
+    assert!(!is_own(&server, 10, "2026-11-12 10:00:00.000001"));
+    assert!(is_own(&server, 11, "2026-11-12 10:00:00.000002"));
+    assert!(is_own(&server, 12, "2026-11-12 10:00:00.000003"));
+    // Another server's entries are left alone, and a pid that now has another start is gone.
+    assert!(is_own(&other, 10, "2026-11-12 10:00:00.000001"));
+    keep_own(&server, own_mark(), |pid, start| gone(&[s(11, "2026-11-12 11:00:00.000000"), s(12, "2026-11-12 10:00:00.000003")], pid, start));
+    assert!(!is_own(&server, 11, "2026-11-12 10:00:00.000002") && is_own(&server, 12, "2026-11-12 10:00:00.000003"));
+    assert!(!is_own(&server, 12, ""));
+}
+
+#[test]
+fn a_poll_without_blockers_keeps_the_last_ones_for_sessions_that_still_wait() {
+    let s = |pid: u64, start: &str, lock: &str, blockers: &[u64]| Session { pid, backend_start: start.into(), lock_mode: lock.into(), blockers: blockers.to_vec(), ..Default::default() };
+    let old = vec![s(1, "a", "", &[]), s(2, "b", "ShareLock", &[1, 7]), s(3, "c", "ShareLock", &[1]), s(4, "d", "ShareLock", &[1])];
+    // 2 still waits (7 has gone), 3 got its lock, 4 is a new backend on the same pid, 5 started waiting since.
+    let mut rows = vec![s(1, "a", "", &[]), s(2, "b", "ShareLock", &[]), s(3, "c", "", &[]), s(4, "e", "ShareLock", &[]), s(5, "f", "ShareLock", &[])];
+    carry_blockers(&mut rows, &old);
+    let got: Vec<Vec<u64>> = rows.iter().map(|r| r.blockers.clone()).collect();
+    assert_eq!(got, [vec![], vec![1], vec![], vec![], vec![]]);
+}
+
+#[test]
+fn the_query_log_says_what_a_signal_did() {
+    assert_eq!(signal_log(true, 41877, &Ok("Ended session 41877".into())), ("SELECT pg_terminate_backend(41877) -- Ended session 41877".to_string(), None));
+    let (line, err) = signal_log(false, 41877, &Err("Session 41877 is running another statement now, so nothing was sent. Refresh and try again.".into()));
+    assert_eq!(line, "SELECT pg_cancel_backend(41877)");
+    assert!(err.unwrap().contains("nothing was sent"));
+    // The guarded statement with its placeholders is not what the log shows.
+    assert!(!line.contains('$'));
 }
 
 #[test]
@@ -217,13 +373,13 @@ fn live_locks_show_the_chain_and_terminate_frees_it() {
         assert_eq!(c.lock_mode, "AccessExclusiveLock");
         assert_eq!(c.lock_on, format!("{schema}.t"));
         assert!(d.blockers.contains(&c.pid) && d.lock_mode == "AccessShareLock", "{d:?}");
-        let rows = l.w.rt.block_on(activity(&db)).unwrap().rows;
+        let rows = l.w.rt.block_on(activity(&db, true)).unwrap().rows;
         let chain = chains(&rows).into_iter().find(|ch| ch.head == a.pid).expect("a's chain");
         // C waits for A and for B, which both hold a lock on the table, so it leads under A; D only queues behind C.
         assert!(chain.waiting.contains(&(b.pid, 1)) && chain.waiting.contains(&(c.pid, 1)) && chain.waiting.contains(&(d.pid, 2)), "{chain:?}");
         // Ending the head rolls its transaction back and lets every waiter through.
         let head = rows.iter().find(|r| r.pid == a.pid).unwrap();
-        l.w.rt.block_on(signal(&l.db, &Target::of(head), true, false)).unwrap();
+        l.w.rt.block_on(signal(&l.db, &tgt(l, head), true, false)).unwrap();
         assert!(a_rx.recv_timeout(Duration::from_secs(10)).unwrap().0.is_err());
         for rx in [b_rx, c_rx, d_rx] {
             assert!(rx.recv_timeout(Duration::from_secs(10)).unwrap().0.is_ok());
@@ -243,29 +399,29 @@ fn live_a_role_without_pg_read_all_stats_sees_others_as_insufficient_privilege()
         let low = live_pg_at(uri);
         let rx = sleeper(&l, &tag);
         let theirs = running(&l, &tag);
-        let a = l.w.rt.block_on(activity(&low.db)).unwrap();
+        let a = l.w.rt.block_on(activity(&low.db, true)).unwrap();
         assert!(!a.read_all && a.user == role);
         let seen = a.rows.iter().find(|r| r.pid == theirs.pid).expect("the superuser's session is listed");
         assert!(seen.hidden && seen.line == "insufficient privilege" && seen.backend_start.is_empty() && seen.state.is_empty() && !seen.signal, "{seen:?}");
         assert_eq!((seen.user.as_str(), seen.db.as_str()), ("postgres", "postgres"));
         // Its own session is fully visible.
         assert!(a.rows.iter().any(|r| r.user == role && !r.hidden && !r.backend_start.is_empty()));
-        let o = l.w.rt.block_on(overview(&low.db, true)).unwrap();
+        let o = l.w.rt.block_on(overview(&low.db)).unwrap();
         assert!(!o.read_all && o.data_dir.is_empty());
         // Nothing is sent for a row the role could not check, even with what another role saw of it.
-        for t in [Target::of(seen), Target::of(&theirs)] {
+        for t in [tgt(&low, seen), tgt(&l, &theirs)] {
             let err = l.w.rt.block_on(signal(&low.db, &t, false, false)).unwrap_err();
             assert!(err.contains("pg_read_all_stats"), "{err}");
         }
         // With pg_read_all_stats it sees the row, and the server refuses to signal a superuser's session.
         l.w.rt.block_on(sqlx::raw_sql(&format!("GRANT pg_read_all_stats TO {role}")).execute(&l.pool)).unwrap();
-        let a = l.w.rt.block_on(activity(&low.db)).unwrap();
+        let a = l.w.rt.block_on(activity(&low.db, true)).unwrap();
         let seen = a.rows.iter().find(|r| r.pid == theirs.pid).unwrap();
         assert!(a.read_all && !seen.hidden && !seen.signal, "{seen:?}");
-        let err = l.w.rt.block_on(signal(&low.db, &Target::of(seen), false, false)).unwrap_err();
+        let err = l.w.rt.block_on(signal(&low.db, &tgt(&low, seen), false, false)).unwrap_err();
         assert!(err.contains("Your role cannot"), "{err}");
         assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "the statement still runs");
-        l.w.rt.block_on(signal(&l.db, &Target::of(&theirs), false, false)).unwrap();
+        l.w.rt.block_on(signal(&l.db, &tgt(&l, &theirs), false, false)).unwrap();
         let _ = rx.recv_timeout(Duration::from_secs(10));
         drop(low);
         std::thread::sleep(Duration::from_millis(200));
@@ -300,7 +456,7 @@ fn metrics_need_two_samples_for_a_rate() {
 
 #[test]
 fn the_signal_check_words_every_outcome() {
-    let t = Target { pid: 41877, backend_start: "s".into(), user: "app".into(), query_start: "q".into() };
+    let t = Target { pid: 41877, backend_start: "s".into(), user: "app".into(), query_start: "q".into(), app: "psql".into(), server: String::new() };
     assert!(signal_outcome(&t, true, false, None).unwrap_err().contains("already gone"));
     assert!(signal_outcome(&t, true, false, Some(("s", "app", "q", true, None))).unwrap_err().contains("Quarry sends this on"));
     assert!(signal_outcome(&t, true, false, Some(("s2", "app", "q", false, None))).unwrap_err().contains("reused"));

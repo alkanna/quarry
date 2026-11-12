@@ -1,16 +1,17 @@
 //! The PostgreSQL Server window's reads and its two actions. Every read runs in a `BEGIN READ ONLY` that is rolled back, on a
-//! pooled connection, and is not put in the query log because the window polls. Cancel and Terminate go through the writer:
-//! the read-only transaction would not stop pg_cancel_backend or pg_terminate_backend, so only an unlocked connection may send
-//! them, and the statement that sends one checks in the same breath that the pid is still the backend the list showed.
+//! pooled connection, and is not put in the query log because the window polls. Cancel and Terminate need an unlocked
+//! connection: a read-only transaction would not stop pg_cancel_backend or pg_terminate_backend, so the unlock is Quarry's own
+//! gate, and the statement that sends one checks in the same breath that the pid is still the backend the list showed.
 
-use super::exec::{Cells, SqlRow};
+use super::exec::{bound_pg, Cells, Conn, SqlRow};
+use super::pg::{is_own, keep_own, own_mark, utc};
 use super::pg_read::in_read_only;
 use super::worker::{num_at, text_at};
 use super::value::Param;
-use super::{se, write, Advanced, Db, Dialect, Pool};
+use super::{se, Advanced, Db, Dialect, Pool};
 use crate::db::{Msg, Res, Worker};
-use sqlx::Executor;
-use std::collections::HashMap;
+use sqlx::{Connection, Executor, Row};
+use std::collections::{HashMap, HashSet};
 
 pub use super::server::one_line;
 
@@ -59,10 +60,14 @@ pub struct Session {
     pub xact_secs: Option<f64>,
     pub state_secs: Option<f64>,
     pub query_secs: Option<f64>,
-    /// As the server prints it. Empty when the role may not see the row, which then cannot be checked before a signal.
+    /// In UTC to the microsecond (`utc!`), so it compares across connections whatever their TimeZone. Empty when the role may
+    /// not see the row, which then cannot be checked before a signal.
     pub backend_start: String,
     pub query_start: String,
+    /// At most QUERY_CUT characters; Copy query asks for the rest.
     pub query: String,
+    /// The server holds more of the query than `query`.
+    pub cut: bool,
     /// The query on one line, cut once per answer.
     pub line: String,
     /// Lower case user, database, application and the start of the query, for the filter.
@@ -76,7 +81,8 @@ pub struct Session {
     pub lock_on: String,
     /// The role may send this session a signal (its own role, pg_signal_backend for a non-superuser's, or a superuser).
     pub signal: bool,
-    /// The connection that read this list, or another connection of Quarry's own on this server.
+    /// One of Quarry's own sessions on this server, from any of its connections (the registry in `pg` is process-wide), or
+    /// behind a pooler any session that carries this connection's application_name.
     pub ours: bool,
 }
 
@@ -119,6 +125,12 @@ pub struct Activity {
     pub user: String,
     /// The role may read every session (pg_read_all_stats or a superuser).
     pub read_all: bool,
+    /// The server as the own-session registry knows it (its postmaster start, `utc!`).
+    pub server: String,
+    /// Behind a pooler, the application_name that marks Quarry's own sessions; None on a direct connection.
+    pub own_app: Option<String>,
+    /// pg_blocking_pids was asked; when not, the rows carry no blockers until `carry_blockers` gives them the last ones.
+    pub blockers: bool,
 }
 
 /// pg_blocking_pids as printed by array_to_string.
@@ -126,22 +138,30 @@ pub fn pids(s: &str) -> Vec<u64> {
     s.split(',').filter_map(|p| p.trim().parse().ok()).collect()
 }
 
+/// The longest query text a poll reads per session. track_activity_query_size can be up to 1 MB, and the list only shows a
+/// line of it.
+pub const QUERY_CUT: usize = 4096;
+
 /// Every session with what it waits for. pg_locks is read by any role, so the lock columns are known even for a session whose
-/// state is hidden; pg_blocking_pids is asked only for a session that waits, since it takes the lock manager's locks.
-const ACTIVITY: &str = "WITH w AS (SELECT DISTINCT ON (pid) pid, mode, locktype, database, relation, transactionid FROM pg_locks WHERE NOT granted AND pid IS NOT NULL ORDER BY pid), \
+/// state is hidden. pg_blocking_pids is asked only with `blockers` and only for a session that waits, since each call takes
+/// every lock manager partition lock.
+fn activity_sql(blockers: bool) -> String {
+    let blk = if blockers { "CASE WHEN w.pid IS NOT NULL THEN array_to_string(pg_blocking_pids(a.pid), ',') END" } else { "NULL::text" };
+    format!("WITH w AS (SELECT DISTINCT ON (pid) pid, mode, locktype, database, relation, transactionid FROM pg_locks WHERE NOT granted AND pid IS NOT NULL ORDER BY pid), \
 me AS (SELECT r.rolsuper AS su, pg_has_role('pg_signal_backend', 'USAGE') AS sig FROM pg_roles r WHERE r.rolname = current_user) \
 SELECT a.pid::text, COALESCE(a.usename::text, ''), CASE WHEN a.client_port = -1 THEN 'local' ELSE COALESCE(host(a.client_addr), '') END, \
 COALESCE(a.datname::text, ''), COALESCE(a.application_name, ''), COALESCE(a.state, ''), COALESCE(a.wait_event_type, ''), COALESCE(a.wait_event, ''), COALESCE(a.backend_type, ''), \
 extract(epoch FROM now() - a.xact_start)::text, extract(epoch FROM now() - a.state_change)::text, extract(epoch FROM now() - a.query_start)::text, \
-COALESCE(a.backend_start::text, ''), COALESCE(a.query_start::text, ''), COALESCE(a.query, ''), \
-CASE WHEN w.pid IS NOT NULL THEN array_to_string(pg_blocking_pids(a.pid), ',') END, COALESCE(w.mode, ''), \
+COALESCE({}, ''), COALESCE(a.query_start::text, ''), COALESCE(left(a.query, {QUERY_CUT}), ''), \
+{blk}, COALESCE(w.mode, ''), \
 CASE WHEN w.relation IS NOT NULL THEN COALESCE((SELECT n.nspname || '.' || c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = w.relation AND w.database = (SELECT oid FROM pg_database WHERE datname = current_database())), 'relation ' || w.relation::text) \
 WHEN w.locktype = 'transactionid' THEN 'transaction ' || w.transactionid::text WHEN w.locktype IS NOT NULL THEN w.locktype END, \
 COALESCE(CASE WHEN (SELECT rolsuper FROM pg_roles WHERE oid = a.usesysid) THEN me.su ELSE me.su OR pg_has_role(a.usesysid, 'USAGE') OR me.sig END, false)::int::text, \
-(a.pid = pg_backend_pid())::int::text \
-FROM pg_stat_activity a LEFT JOIN w ON w.pid = a.pid CROSS JOIN me ORDER BY a.pid";
+(a.pid = pg_backend_pid())::int::text, COALESCE(length(a.query) > {QUERY_CUT}, false)::int::text \
+FROM pg_stat_activity a LEFT JOIN w ON w.pid = a.pid CROSS JOIN me ORDER BY a.pid", utc!("a.backend_start"))
+}
 
-const WHO: &str = "SELECT current_user::text, pg_has_role('pg_read_all_stats', 'USAGE')::int::text";
+const WHO: &str = concat!("SELECT current_user::text, pg_has_role('pg_read_all_stats', 'USAGE')::int::text, ", utc!("pg_postmaster_start_time()"));
 
 fn session_of<R: Cells>(r: &R) -> Option<Session> {
     let mut s = Session::new(num_at(r, 0)?, &txt(r, 1), &txt(r, 2), &txt(r, 3), &txt(r, 4), &txt(r, 5), &txt(r, 14), &txt(r, 8));
@@ -152,22 +172,59 @@ fn session_of<R: Cells>(r: &R) -> Option<Session> {
     (s.lock_mode, s.lock_on) = (txt(r, 16), txt(r, 17));
     s.signal = txt(r, 18) == "1";
     s.ours = txt(r, 19) == "1";
+    s.cut = txt(r, 20) == "1";
     Some(s)
 }
 
-async fn activity(db: &Db) -> Res<Activity> {
-    let (who, list) = read(db, async |c| Ok((rows(c, WHO).await?, rows(c, ACTIVITY).await?))).await?;
+/// Whether a backend the registry holds has closed by this list: its pid is gone, or now belongs to a backend that started
+/// at another time. A row whose start the role may not read proves nothing, so the entry stays.
+pub fn gone(rows: &[Session], pid: u64, start: &str) -> bool {
+    rows.iter().find(|r| r.pid == pid).is_none_or(|r| !r.backend_start.is_empty() && r.backend_start != start)
+}
+
+async fn activity(db: &Db, blockers: bool) -> Res<Activity> {
+    // Taken before the snapshot: a backend noted while the read runs may be missing from it and must not be pruned.
+    let mark = own_mark();
+    let sql = activity_sql(blockers);
+    let (who, list) = read(db, async |c| Ok((rows(c, WHO).await?, rows(c, &sql).await?))).await?;
     let w = who.first().ok_or("The server did not say who is signed in")?;
+    let server = txt(w, 2);
     let mut rows: Vec<Session> = list.iter().filter_map(session_of).collect();
-    if let Pool::Pg(p) = &db.pool {
-        if !db.pooler() {
-            p.keep_own(|pid, start| rows.iter().any(|r| r.pid == pid && r.backend_start == start));
-            for r in rows.iter_mut() {
-                r.ours |= p.is_own(r.pid, &r.backend_start);
-            }
+    keep_own(&server, mark, |pid, start| gone(&rows, pid, start));
+    // Behind a pooler Quarry records no backend (each serves other clients too), so its sessions are known by their name.
+    let own_app = match &db.pool {
+        Pool::Pg(p) if db.pooler() => Some(p.app_name().to_string()),
+        _ => None,
+    };
+    for r in rows.iter_mut() {
+        r.ours |= is_own(&server, r.pid, &r.backend_start) || own_app.as_deref().is_some_and(|a| r.app == a);
+    }
+    Ok(Activity { rows, user: txt(w, 0), read_all: txt(w, 1) == "1", server, own_app, blockers })
+}
+
+/// Gives a read without blockers the ones the last read with them found, on a row of the same backend that still waits for a
+/// lock, keeping only blockers still listed.
+pub fn carry_blockers(rows: &mut [Session], old: &[Session]) {
+    let listed: HashSet<u64> = rows.iter().map(|r| r.pid).collect();
+    let before: HashMap<(u64, &str), &Vec<u64>> = old.iter().filter(|o| !o.blockers.is_empty()).map(|o| ((o.pid, o.backend_start.as_str()), &o.blockers)).collect();
+    for r in rows.iter_mut().filter(|r| !r.lock_mode.is_empty() && r.blockers.is_empty()) {
+        let carried = before.get(&(r.pid, r.backend_start.as_str())).map(|b| b.iter().copied().filter(|p| listed.contains(p)).collect());
+        if let Some(b) = carried {
+            r.blockers = b;
         }
     }
-    Ok(Activity { rows, user: txt(w, 0), read_all: txt(w, 1) == "1" })
+}
+
+/// The whole text of a query the list cut, if the session still runs the statement the list showed.
+const FULL_QUERY: &str = concat!("SELECT COALESCE(a.query, '') FROM pg_stat_activity a WHERE a.pid = $1 AND ", utc!("a.backend_start"), " = $2");
+
+async fn full_query(db: &Db, pid: u64, start: String, shown: String) -> Res<String> {
+    let found = read(db, async |c| sqlx::query(FULL_QUERY).persistent(false).bind(pid as i32).bind(start).fetch_all(&mut *c).await).await?;
+    let q: String = found.first().and_then(|r| r.try_get(0).ok()).ok_or_else(|| format!("Session {pid} is gone, so its query was not copied."))?;
+    if !q.starts_with(&shown) {
+        return Err(format!("Session {pid} runs another statement now, so its query was not copied."));
+    }
+    Ok(q)
 }
 
 /// A blocking chain for the Locks tab: the session at its head and those queued behind it, each with its depth.
@@ -342,9 +399,10 @@ pub struct Overview {
     pub tls: String,
     pub read_all: bool,
     pub user: String,
-    /// Each database with its size, None for one the role may not size; only on the reads that asked for them.
-    pub sizes: Option<Vec<(String, Option<u64>)>>,
 }
+
+/// Each database with its size, None for one the role may not size.
+pub type Sizes = Vec<(String, Option<u64>)>;
 
 const OVERVIEW: &str = "SELECT split_part(version(), ' on ', 1), current_setting('server_version'), \
 extract(epoch FROM now() - pg_postmaster_start_time())::bigint::text, to_char(pg_postmaster_start_time() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI') || ' UTC', \
@@ -366,13 +424,21 @@ fn num<R: Cells>(r: &R, i: usize) -> Option<f64> {
     secs(r, i)
 }
 
-async fn overview(db: &Db, with_sizes: bool) -> Res<Overview> {
-    let (main, standbys, receiver, sizes) = read(db, async |c| {
+/// Sizes walk each database's files, which can outlast the statement timeout on a big server, so they are a read of their own
+/// and a failure leaves the Overview standing.
+async fn sizes(db: &Db) -> Res<Sizes> {
+    let list = read(db, async |c| rows(c, SIZES).await).await?;
+    let mut v: Sizes = list.iter().map(|s| (txt(s, 0), num_at(s, 1))).collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    Ok(v)
+}
+
+async fn overview(db: &Db) -> Res<Overview> {
+    let (main, standbys, receiver) = read(db, async |c| {
         let main = rows(c, OVERVIEW).await?;
         let replica = main.first().is_some_and(|r| txt(r, 13) == "1");
         let (standbys, receiver) = if replica { (Vec::new(), rows(c, RECEIVER).await?) } else { (rows(c, STANDBYS).await?, Vec::new()) };
-        let sizes = if with_sizes { Some(rows(c, SIZES).await?) } else { None };
-        Ok((main, standbys, receiver, sizes))
+        Ok((main, standbys, receiver))
     })
     .await?;
     let r = main.first().ok_or("The server did not answer the overview")?;
@@ -387,11 +453,6 @@ async fn overview(db: &Db, with_sizes: bool) -> Res<Overview> {
         let visible = read_all || standbys.iter().all(|s| !s.state.is_empty());
         Role::Primary { standbys, visible }
     };
-    let sizes = sizes.map(|list| {
-        let mut v: Vec<(String, Option<u64>)> = list.iter().map(|s| (txt(s, 0), num_at(s, 1))).collect();
-        v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        v
-    });
     Ok(Overview {
         version: txt(r, 0),
         short_version: txt(r, 1).split_whitespace().next().unwrap_or_default().to_string(),
@@ -416,7 +477,6 @@ async fn overview(db: &Db, with_sizes: bool) -> Res<Overview> {
         tls: txt(r, 21),
         read_all,
         user: txt(r, 23),
-        sizes,
     })
 }
 
@@ -455,11 +515,14 @@ pub struct Target {
     pub backend_start: String,
     pub user: String,
     pub query_start: String,
+    pub app: String,
+    /// `Activity::server` of the list the row came from, for the own-session check.
+    pub server: String,
 }
 
 impl Target {
-    pub fn of(s: &Session) -> Target {
-        Target { pid: s.pid, backend_start: s.backend_start.clone(), user: s.user.clone(), query_start: s.query_start.clone() }
+    pub fn of(s: &Session, server: &str) -> Target {
+        Target { pid: s.pid, backend_start: s.backend_start.clone(), user: s.user.clone(), query_start: s.query_start.clone(), app: s.app.clone(), server: server.into() }
     }
 }
 
@@ -469,7 +532,32 @@ impl Target {
 fn signal_sql(terminate: bool, same_statement: bool) -> String {
     let f = if terminate { "pg_terminate_backend" } else { "pg_cancel_backend" };
     let stmt = if same_statement { " AND COALESCE(a.query_start::text, '') = $4" } else { "" };
-    format!("SELECT COALESCE(a.backend_start::text, ''), COALESCE(a.usename::text, ''), COALESCE(a.query_start::text, ''), (a.pid = pg_backend_pid())::int::text, CASE WHEN a.pid <> pg_backend_pid() AND a.backend_start::text = $2 AND a.usename::text = $3{stmt} THEN {f}(a.pid)::text END FROM pg_stat_activity a WHERE a.pid = $1")
+    let start = utc!("a.backend_start");
+    format!("SELECT COALESCE({start}, ''), COALESCE(a.usename::text, ''), COALESCE(a.query_start::text, ''), (a.pid = pg_backend_pid())::int::text, CASE WHEN a.pid <> pg_backend_pid() AND {start} = $2 AND a.usename::text = $3{stmt} THEN {f}(a.pid)::text END FROM pg_stat_activity a WHERE a.pid = $1")
+}
+
+/// The transaction a signal runs in. READ ONLY, because pg_cancel_backend and pg_terminate_backend write nothing and a hot
+/// standby refuses READ WRITE (25006); the unlock that allows them is Quarry's own gate, checked before.
+fn signal_begin(db: &Db) -> String {
+    db.pg_begin("BEGIN READ ONLY", "")
+}
+
+/// Runs the check-and-signal statement in a transaction opened by `begin`.
+async fn send_signal(c: &mut sqlx::PgConnection, begin: String, sql: &str, params: &[Param]) -> Result<Vec<SqlRow>, sqlx::Error> {
+    let mut tx = c.begin_with(begin).await?;
+    let rows = bound_pg(sql, params).fetch_all(&mut *tx).await.map(SqlRow::wrap_pg)?;
+    tx.commit().await?;
+    Ok(rows)
+}
+
+/// The Query log line of a signal: the call with its pid, and how it ended. The statement Quarry sends is the guarded one with
+/// placeholders, which would read as sent even when the check refused.
+fn signal_log(terminate: bool, pid: u64, res: &Res<String>) -> (String, Option<String>) {
+    let f = if terminate { "pg_terminate_backend" } else { "pg_cancel_backend" };
+    match res {
+        Ok(m) => (format!("SELECT {f}({pid}) -- {m}"), None),
+        Err(e) => (format!("SELECT {f}({pid})"), Some(e.clone())),
+    }
 }
 
 fn blind(pid: u64) -> String {
@@ -497,8 +585,8 @@ pub fn signal_outcome(t: &Target, terminate: bool, same_statement: bool, row: Op
     }
 }
 
-/// Cancel or Terminate on the writer, after the checks: an unlocked connection, a row the role could see, and not one of Quarry's own
-/// connections. The statement goes in the query log.
+/// Cancel or Terminate on a connection of its own, after the checks: an unlocked connection, a row the role could see, and not
+/// one of Quarry's own sessions. A line saying what happened goes in the query log.
 async fn signal(db: &Db, t: &Target, terminate: bool, read_only: bool) -> Res<String> {
     if db.dialect != Dialect::Postgres {
         return Err("Not a PostgreSQL connection".into());
@@ -510,10 +598,9 @@ async fn signal(db: &Db, t: &Target, terminate: bool, read_only: bool) -> Res<St
     if t.backend_start.is_empty() {
         return Err(blind(t.pid));
     }
-    if let Pool::Pg(p) = &db.pool {
-        if p.is_own(t.pid, &t.backend_start) {
-            return Err("That is one of Quarry's own connections. Stop its work where it runs instead.".into());
-        }
+    let Pool::Pg(p) = &db.pool else { return Err("Not a PostgreSQL connection".into()) };
+    if is_own(&t.server, t.pid, &t.backend_start) || (db.pooler() && t.app == p.app_name()) {
+        return Err("That is one of Quarry's own connections. Stop its work where it runs instead.".into());
     }
     let same_statement = !terminate || db.pooler();
     let sql = signal_sql(terminate, same_statement);
@@ -521,42 +608,54 @@ async fn signal(db: &Db, t: &Target, terminate: bool, read_only: bool) -> Res<St
     if same_statement {
         params.push(Param::Text(t.query_start.clone()));
     }
-    let mut c = write::writer_conn(db, "", read_only).await?;
     let started = std::time::Instant::now();
-    let r: Result<Vec<SqlRow>, sqlx::Error> = async {
-        let mut tx = c.begin_write(db).await?;
-        let rows = tx.fetch_bound(&sql, &params).await?;
-        tx.commit().await?;
-        Ok(rows)
+    // A held connection, closed after, so the shared pooled sessions never carry a signal's transaction.
+    let res = async {
+        let Conn::Pg(mut c) = db.acquire_conn().await? else { return Err("Not a PostgreSQL connection".into()) };
+        let r = send_signal(&mut c, signal_begin(db), &sql, &params).await;
+        let _ = c.close().await;
+        let rows = r.map_err(|x| if super::exec::sql_state(&x).as_deref() == Some("42501") { crate::db::pg_signal_refused(terminate) } else { se(x) })?;
+        let row = rows.first().map(|r| (txt(r, 0), txt(r, 1), txt(r, 2), txt(r, 3) == "1", text_at(r, 4)));
+        signal_outcome(t, terminate, same_statement, row.as_ref().map(|(a, b, q, m, s)| (a.as_str(), b.as_str(), q.as_str(), *m, s.as_deref())))
     }
     .await;
-    db.note("", &sql, started, &r);
-    let _ = c.close().await;
-    let rows = r.map_err(|x| if super::exec::sql_state(&x).as_deref() == Some("42501") { crate::db::pg_signal_refused(terminate) } else { se(x) })?;
-    let row = rows.first().map(|r| (txt(r, 0), txt(r, 1), txt(r, 2), txt(r, 3) == "1", text_at(r, 4)));
-    signal_outcome(t, terminate, same_statement, row.as_ref().map(|(a, b, q, m, s)| (a.as_str(), b.as_str(), q.as_str(), *m, s.as_deref())))
+    let (line, err) = signal_log(terminate, t.pid, &res);
+    crate::db::log_sql(db.conn, "", &line, started.elapsed().as_millis(), err.as_deref());
+    res
 }
 
 /// What the PostgreSQL Server window asked for and got.
 pub enum Answer {
     Overview(Res<Overview>),
+    Sizes(Res<Sizes>),
     Settings(Res<Settings>),
     Activity(Res<Activity>),
     /// How a Cancel or Terminate ended.
     Signal(Res<String>),
+    /// The whole text of a query for Copy query.
+    Query(Res<String>),
 }
 
 impl Worker {
-    pub fn pg_server_overview(&self, db: Db, req: u64, sizes: bool) {
-        self.spawn(async move { Msg::PgServer { req, ans: Answer::Overview(overview(&db, sizes).await) } });
+    pub fn pg_server_overview(&self, db: Db, req: u64) {
+        self.spawn(async move { Msg::PgServer { req, ans: Answer::Overview(overview(&db).await) } });
+    }
+
+    pub fn pg_server_sizes(&self, db: Db, req: u64) {
+        self.spawn(async move { Msg::PgServer { req, ans: Answer::Sizes(sizes(&db).await) } });
     }
 
     pub fn pg_server_settings(&self, db: Db, req: u64) {
         self.spawn(async move { Msg::PgServer { req, ans: Answer::Settings(settings(&db).await) } });
     }
 
-    pub fn pg_server_activity(&self, db: Db, req: u64) {
-        self.spawn(async move { Msg::PgServer { req, ans: Answer::Activity(activity(&db).await) } });
+    pub fn pg_server_activity(&self, db: Db, req: u64, blockers: bool) {
+        self.spawn(async move { Msg::PgServer { req, ans: Answer::Activity(activity(&db, blockers).await) } });
+    }
+
+    pub fn pg_server_query(&self, db: Db, req: u64, s: &Session) {
+        let (pid, start, shown) = (s.pid, s.backend_start.clone(), s.query.clone());
+        self.spawn(async move { Msg::PgServer { req, ans: Answer::Query(full_query(&db, pid, start, shown).await) } });
     }
 
     pub fn pg_server_signal(&self, db: Db, req: u64, target: Target, terminate: bool, read_only: bool) {

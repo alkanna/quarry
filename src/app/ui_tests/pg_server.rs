@@ -25,6 +25,63 @@ fn listed(a: &App, tag: &str) -> Option<u64> {
     a.pg_server.as_ref()?.listed(tag)
 }
 
+/// One frame at egui time `at`. Set by hand because a kittest step lasts 250 ms of egui time, too coarse for a double click.
+fn frame_at(ui: &mut UiApp, at: f64) {
+    ui.h.input_mut().time = Some(at);
+    ui.h.step();
+}
+
+/// A click on the widget named `label`, pressed and released in the frame at egui time `at`.
+fn click_at(ui: &mut UiApp, label: &str, at: f64) {
+    let p = ui.h.get_by_label(label).rect().center();
+    let press = |pressed| egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+    ui.h.input_mut().events.extend([egui::Event::PointerMoved(p), press(true), press(false)]);
+    frame_at(ui, at);
+}
+
+#[test]
+fn a_double_click_on_terminate_arms_it_and_does_not_send() {
+    for var in ["QUARRY_TEST_POSTGRES", "QUARRY_TEST_POSTGRES13"] {
+        let Some(mut ui) = ui_app(var) else { continue };
+        let uri = std::env::var(var).unwrap();
+        let tag = format!("ui_srv_dbl_{}", std::process::id());
+        let rx = sleeper(&uri, &tag);
+        ui.h.state_mut().open_server(CONN);
+        ui.click("Activity");
+        ui.wait("the sleeping session to be listed", |a| listed(a, &tag).is_some());
+        let pid = listed(ui.app(), &tag).unwrap();
+        ui.click("Unlock…");
+        ui.click("Allow writes");
+        ui.wait("writes to be allowed", |a| a.conn(CONN).is_some_and(|c| c.writable));
+        ui.click(&format!("Session {pid}"));
+        // The red confirm takes the place of Terminate, so the second click of a double click lands on it 150 ms later.
+        let t = ui.h.ctx.input(|i| i.time) + 1.0;
+        click_at(&mut ui, "Terminate", t);
+        assert!(ui.app().pg_server.as_ref().is_some_and(|s| s.armed()), "the first click arms");
+        frame_at(&mut ui, t + 0.05);
+        ui.show(&format!("End session {pid}?"));
+        click_at(&mut ui, "Terminate", t + 0.15);
+        frame_at(&mut ui, t + 0.2);
+        assert!(ui.app().sql_kills.is_empty() && ui.app().pg_server.as_ref().is_some_and(|s| s.armed()), "a double click does not send");
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(rx.try_recv().is_err(), "the session still runs");
+        // A deliberate second click after the guard sends it.
+        click_at(&mut ui, "Terminate", t + 0.75);
+        ui.h.input_mut().time = None;
+        assert!(!ui.app().sql_kills.is_empty(), "the click after the guard sends");
+        let started = std::time::Instant::now();
+        let out = loop {
+            ui.h.step();
+            if let Ok(r) = rx.try_recv() {
+                break r;
+            }
+            assert!(started.elapsed() < LIMIT, "the session was not ended; last error: {}", ui.app().last_problem());
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(out.is_err(), "the terminated session's statement fails");
+    }
+}
+
 #[test]
 fn activity_cancels_a_sleeping_session_after_unlock_and_a_second_click() {
     for var in ["QUARRY_TEST_POSTGRES", "QUARRY_TEST_POSTGRES13"] {

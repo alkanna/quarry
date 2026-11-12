@@ -62,9 +62,6 @@ pub struct PgPools {
     starts: Mutex<HashMap<u64, String>>,
     /// The `BEGIN READ WRITE` a write opens with, built on the first write: the settings it holds never change for a pool.
     begin_write: std::sync::OnceLock<String>,
-    /// The backends of Quarry's own connections on this server (pooled, detached and script connections) by pid, with their
-    /// start time, so the Server window marks them and never offers to signal them. A pid alone could be a reused one.
-    own: Arc<Mutex<HashMap<u64, String>>>,
 }
 
 /// Connections taken out of a pool for good (`PgPools::acquire_held`), counted per database. `pool.close()` does not know them,
@@ -148,7 +145,7 @@ struct Entry {
 
 impl PgPools {
     fn new(opts: PgConnectOptions, default_db: String, acquire: Duration, locals: Option<String>, timeout: String) -> PgPools {
-        PgPools { opts, default_db, acquire, idle: IDLE, per_db: PER_DB, max_pools: MAX_POOLS, locals, timeout, adv: PgSession::default(), live: Default::default(), held: Default::default(), starts: Default::default(), begin_write: Default::default(), own: Default::default() }
+        PgPools { opts, default_db, acquire, idle: IDLE, per_db: PER_DB, max_pools: MAX_POOLS, locals, timeout, adv: PgSession::default(), live: Default::default(), held: Default::default(), starts: Default::default(), begin_write: Default::default() }
     }
 
     fn with_session(mut self, adv: PgSession) -> PgPools {
@@ -179,19 +176,9 @@ impl PgPools {
         self.starts.lock().unwrap().get(&pid).cloned()
     }
 
-    pub(super) fn note_own(&self, pid: u64, start: String) {
-        self.own.lock().unwrap().insert(pid, start);
-    }
-
-    /// Whether backend `pid` that started at `start` is one of Quarry's own connections.
-    pub(super) fn is_own(&self, pid: u64, start: &str) -> bool {
-        !start.is_empty() && self.own.lock().unwrap().get(&pid).is_some_and(|s| s == start)
-    }
-
-    /// Forgets the backends `alive` no longer lists, which have closed. Called with a full read of pg_stat_activity, where the
-    /// role always sees its own sessions.
-    pub(super) fn keep_own(&self, alive: impl Fn(u64, &str) -> bool) {
-        self.own.lock().unwrap().retain(|pid, start| alive(*pid, start));
+    /// The application_name every session of this connection carries: the Advanced tab's, or Quarry's own.
+    pub fn app_name(&self) -> &str {
+        app_name_of(&self.adv)
     }
 
     /// The pool of `database`, made on first use. Making it opens no connection. Past the cap the pool used least
@@ -223,20 +210,20 @@ impl PgPools {
             }
         }
         let failure: Arc<Mutex<Option<String>>> = Default::default();
-        let (locals, hook_failure, adv, own) = (self.locals.clone(), failure.clone(), self.adv.clone(), self.own.clone());
+        let (locals, hook_failure, adv) = (self.locals.clone(), failure.clone(), self.adv.clone());
         let pool = PgPoolOptions::new()
             .max_connections(self.per_db)
             .min_connections(0)
             .idle_timeout(self.idle)
             .acquire_timeout(self.acquire)
             .after_connect(move |c, _| {
-                let (locals, failure, adv, own) = (locals.clone(), hook_failure.clone(), adv.clone(), own.clone());
+                let (locals, failure, adv) = (locals.clone(), hook_failure.clone(), adv.clone());
                 Box::pin(async move {
                     session_with(c, locals.as_deref(), &adv, &failure).await?;
                     // Behind a pooler the backend serves other clients too, so it is not Quarry's.
                     if locals.is_none() {
-                        if let Some((pid, start)) = own_backend(c).await {
-                            own.lock().unwrap().insert(pid, start);
+                        if let Some(b) = own_backend(c).await {
+                            note_own(&b.server, b.pid, &b.start);
                         }
                     }
                     Ok(())
@@ -321,8 +308,8 @@ impl PgPools {
         let failure = Mutex::new(None);
         session_with(&mut c, self.locals.as_deref(), &self.adv, &failure).await.map_err(|x| failure.lock().unwrap().clone().unwrap_or_else(|| e(x)))?;
         if self.locals.is_none() {
-            if let Some((pid, start)) = own_backend(&mut c).await {
-                self.note_own(pid, start);
+            if let Some(b) = own_backend(&mut c).await {
+                note_own(&b.server, b.pid, &b.start);
             }
         }
         Ok(Conn::Pg(PgConn::free(c)))
@@ -413,6 +400,14 @@ impl Db {
         let p = PgPools::new(base.clone(), "postgres".into(), Duration::from_secs(10), Some(locals_for(ms)), "0".into());
         Db { pool: Pool::Pg(Arc::new(p)), opts: Opts::Pg(base.database(o.get_database().unwrap_or("postgres"))), ..self.clone() }
     }
+
+    /// A PostgreSQL `Db` that never connects (port 1), direct or behind a pooler, for tests of what Quarry would send.
+    #[cfg(test)]
+    pub fn offline_pg(pooled: bool, adv: PgSession) -> Db {
+        let base = PgConnectOptions::new_without_pgpass().host("127.0.0.1").port(1);
+        let p = PgPools::new(base.clone(), "postgres".into(), Duration::from_secs(1), pooled.then(|| locals_for(0)), "0".into()).with_session(adv);
+        Db { pool: Pool::Pg(Arc::new(p)), dialect: Dialect::Postgres, opts: Opts::Pg(base.database("postgres")), version: "18.0".into(), tls: false, sql_mode: String::new(), setup: Default::default(), conn: 0 }
+    }
 }
 
 /// The output formats the read path expects. sqlx sends DateStyle "ISO, MDY", TimeZone UTC and extra_float_digits 2 itself;
@@ -440,10 +435,15 @@ fn startup(o: PgConnectOptions, ms: u64) -> PgConnectOptions {
     startup_with(o, ms, &PgSession::default())
 }
 
+/// The application_name the Advanced tab gives, or Quarry's own.
+fn app_name_of(adv: &PgSession) -> &str {
+    adv.settings.iter().find(|(n, _)| n == "application_name").map_or("Quarry", |(_, v)| v.as_str())
+}
+
 /// `startup`, with the application name the Advanced tab gives: it is an ordinary startup parameter, so a pooler passes it
 /// and pg_stat_activity shows it from the first statement.
 fn startup_with(o: PgConnectOptions, ms: u64, adv: &PgSession) -> PgConnectOptions {
-    let name = adv.settings.iter().find(|(n, _)| n == "application_name").map_or("Quarry", |(_, v)| v.as_str());
+    let name = app_name_of(adv);
     let mut opts: Vec<(&str, String)> = vec![("default_transaction_read_only", "on".into())];
     if ms > 0 {
         opts.push(("statement_timeout", ms.to_string()));
@@ -735,7 +735,7 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
         base = base.ssl_root_cert(&a.ssl_ca);
     }
     // Also a plain startup parameter, so a pooler that refuses `options` still shows the name.
-    base = base.application_name(sess.settings.iter().find(|(n, _)| n == "application_name").map_or("Quarry", |(_, v)| v.as_str()));
+    base = base.application_name(app_name_of(&sess));
     let first = async {
         let mut pooled = false;
         let (mut c, opts) = match sqlx::PgConnection::connect_with(&startup_with(base.clone().database(&default_db), ms, &sess)).await {
@@ -807,14 +807,73 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
     Ok((db, dbs, way, ti))
 }
 
-/// The start time travels as text so no timestamp type has to round trip, and is compared as text.
-const OWN_BACKEND: &str = "SELECT pg_backend_pid()::text, s.backend_start::text FROM pg_stat_get_activity(pg_backend_pid()) AS s";
+/// A timestamp as UTC text to the microsecond. `::text` follows the session's TimeZone and DateStyle, which the Advanced tab
+/// may set differently on two connections, and the own-session registry compares starts across connections.
+macro_rules! utc {
+    ($e:literal) => {
+        concat!("to_char(", $e, " AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US')")
+    };
+}
+pub(super) use utc;
 
-/// This connection's backend pid and start time.
-async fn own_backend(c: &mut sqlx::PgConnection) -> Option<(u64, String)> {
+/// Stop compares the start as `::text` on a connection of the same pool; the registry uses the UTC forms. Start times travel
+/// as text so no timestamp type has to round trip.
+const OWN_BACKEND: &str = concat!("SELECT pg_backend_pid()::text, s.backend_start::text, ", utc!("s.backend_start"), ", ", utc!("pg_postmaster_start_time()"), " FROM pg_stat_get_activity(pg_backend_pid()) AS s");
+
+/// A backend of Quarry's own as `OWN_BACKEND` reads it.
+struct OwnBackend {
+    pid: u64,
+    /// `backend_start::text`, for Stop.
+    local_start: String,
+    start: String,
+    server: String,
+}
+
+fn own_backend_of<R: Cells>(r: &R) -> Option<OwnBackend> {
+    Some(OwnBackend { pid: num_at(r, 0)?, local_start: text_at(r, 1)?, start: text_at(r, 2)?, server: text_at(r, 3)? })
+}
+
+/// This connection's backend.
+async fn own_backend(c: &mut sqlx::PgConnection) -> Option<OwnBackend> {
     let rows = c.fetch_all(OWN_BACKEND).await.ok()?;
-    let r = rows.first()?;
-    Some((num_at(r, 0)?, text_at(r, 1)?))
+    own_backend_of(rows.first()?)
+}
+
+/// Quarry's own backends on every server it reached, by server (its postmaster start, which a tunnel or a proxy does not
+/// change the way it changes host and port), pid and backend start, each with the number of the note that recorded it.
+/// Process-wide, so the Server window of one saved connection also marks the sessions of another one, or of another login,
+/// to the same server.
+static OWN: std::sync::LazyLock<Mutex<HashMap<(String, u64, String), u64>>> = std::sync::LazyLock::new(Default::default);
+static OWN_SEQ: AtomicU64 = AtomicU64::new(0);
+/// Entries no Activity read prunes (a server whose window is never opened) are dropped past this many newer notes.
+const MAX_OWN: u64 = 4096;
+
+pub(super) fn note_own(server: &str, pid: u64, start: &str) {
+    if server.is_empty() || start.is_empty() {
+        return;
+    }
+    let mut m = OWN.lock().unwrap();
+    let seq = OWN_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+    m.insert((server.to_string(), pid, start.to_string()), seq);
+    if m.len() as u64 > MAX_OWN {
+        m.retain(|_, s| *s + MAX_OWN > seq);
+    }
+}
+
+/// Whether backend `pid` of `server` that started at `start` (both as `utc!` prints them) is one of Quarry's own.
+pub(super) fn is_own(server: &str, pid: u64, start: &str) -> bool {
+    !start.is_empty() && OWN.lock().unwrap().contains_key(&(server.to_string(), pid, start.to_string()))
+}
+
+/// The number of the latest note. A read of pg_stat_activity takes it before it starts, so `keep_own` never drops a backend
+/// noted after the snapshot was taken, which the snapshot cannot list yet.
+pub(super) fn own_mark() -> u64 {
+    OWN_SEQ.load(Ordering::SeqCst)
+}
+
+/// Forgets the backends of `server` noted up to `mark` that `gone` says have closed.
+pub(super) fn keep_own(server: &str, mark: u64, gone: impl Fn(u64, &str) -> bool) {
+    OWN.lock().unwrap().retain(|(s, pid, start), seq| s != server || *seq > mark || !gone(*pid, start));
 }
 
 /// Readies a connection of its own for a script: the backend's pid for Stop, and write access when unlocked. Behind a
@@ -826,13 +885,12 @@ pub(super) async fn prepare(c: &mut sqlx::PgConnection, read_only: bool, id: &At
         return Ok(());
     }
     let rows = c.fetch_all(OWN_BACKEND).await?;
-    if let Some(r) = rows.first() {
-        let pid = num_at(r, 0).unwrap_or(0);
-        if let (Some(start), Pool::Pg(p)) = (text_at(r, 1), &db.pool) {
-            p.note_own(pid, start.clone());
-            p.remember_start(pid, start);
+    if let Some(b) = rows.first().and_then(own_backend_of) {
+        note_own(&b.server, b.pid, &b.start);
+        if let Pool::Pg(p) = &db.pool {
+            p.remember_start(b.pid, b.local_start);
         }
-        id.store(pid, Ordering::SeqCst);
+        id.store(b.pid, Ordering::SeqCst);
     }
     if !read_only {
         c.execute(Dialect::Postgres.session_read_only(false)).await?;
