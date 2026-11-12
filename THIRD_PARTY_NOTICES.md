@@ -12,3 +12,5 @@ Quarry embeds these fonts in its binary. All are licensed under the SIL Open Fon
 | OpenDyslexic (Regular) | Copyright (c) 2019 Abbie Gonzalez, with Reserved Font Name OpenDyslexic (https://opendyslexic.org) | `assets/fonts/OpenDyslexic-OFL.txt` |
 
 The engine logos in `assets/engines/` are drawn from Simple Icons (https://simpleicons.org), released under CC0 1.0. MongoDB, MySQL and MariaDB are trademarks of their respective owners and are shown only to name the database a connection uses. The PostgreSQL mark is a "PG" monogram drawn in code, not the PostgreSQL logo, so it carries no third-party license.
+
+The Mocha, Macchiato, Frappé and Latte themes use the Catppuccin palette (https://catppuccin.com), Copyright (c) 2021 Catppuccin, released under the MIT License.
