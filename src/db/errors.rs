@@ -424,6 +424,13 @@ pub(crate) fn lock_held_cascade(secs: u32) -> String {
     format!("Another session holds a lock on it or on something that depends on it, and did not let go within {secs} seconds, so what the drop takes cannot be read right now. Try again in a moment.")
 }
 
+/// PostgreSQL 42501 from pg_cancel_backend or pg_terminate_backend: the role may signal only its own sessions, others only with
+/// pg_signal_backend, and a superuser's only as a superuser.
+pub(crate) fn pg_signal_refused(terminate: bool) -> String {
+    let what = if terminate { "end this session" } else { "cancel this query" };
+    format!("Your role cannot {what}: signalling another role's session needs membership in that role or in pg_signal_backend, and a superuser's session needs a superuser. Nothing was sent.")
+}
+
 /// What 55006 (object_in_use) is about, for the wording of `in_use`.
 pub(crate) enum InUse<'a> {
     Template,

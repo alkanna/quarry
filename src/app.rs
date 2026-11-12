@@ -40,6 +40,7 @@ mod run;
 mod schema;
 mod server;
 mod sql_server;
+mod pg_server;
 mod settings;
 mod shell;
 mod shell_attach;
@@ -87,6 +88,7 @@ use users::*;
 use indexes::*;
 use server::*;
 use sql_server::*;
+use pg_server::*;
 use watch::*;
 use drafts::*;
 use sql_edit::*;
@@ -199,6 +201,7 @@ pub struct App {
     sql_users: Option<sql_users::SqlUsersWin>,
     server: Option<ServerWin>,
     sql_server: Option<SqlServerWin>,
+    pg_server: Option<PgServerWin>,
     /// Kill requests sent from the Server window and not answered yet. Kept here so an answer that arrives after
     /// the window was closed still reaches the person.
     sql_kills: HashSet<u64>,
@@ -354,6 +357,7 @@ impl App {
             sql_users: None,
             server: None,
             sql_server: None,
+            pg_server: None,
             sql_kills: HashSet::new(),
             conn_test: None,
             test_info: None,
@@ -698,6 +702,7 @@ impl eframe::App for App {
         self.sql_users_window(&ctx);
         self.server_window(&ctx);
         self.sql_server_window(&ctx);
+        self.pg_server_window(&ctx);
         self.tool_window(&ctx);
         // After the modals, so a browser opened from the connection form draws over it.
         self.cloud_browser_window(&ctx);

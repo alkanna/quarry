@@ -62,6 +62,9 @@ pub struct PgPools {
     starts: Mutex<HashMap<u64, String>>,
     /// The `BEGIN READ WRITE` a write opens with, built on the first write: the settings it holds never change for a pool.
     begin_write: std::sync::OnceLock<String>,
+    /// The backends of Quarry's own connections on this server (pooled, detached and script connections) by pid, with their
+    /// start time, so the Server window marks them and never offers to signal them. A pid alone could be a reused one.
+    own: Arc<Mutex<HashMap<u64, String>>>,
 }
 
 /// Connections taken out of a pool for good (`PgPools::acquire_held`), counted per database. `pool.close()` does not know them,
@@ -145,7 +148,7 @@ struct Entry {
 
 impl PgPools {
     fn new(opts: PgConnectOptions, default_db: String, acquire: Duration, locals: Option<String>, timeout: String) -> PgPools {
-        PgPools { opts, default_db, acquire, idle: IDLE, per_db: PER_DB, max_pools: MAX_POOLS, locals, timeout, adv: PgSession::default(), live: Default::default(), held: Default::default(), starts: Default::default(), begin_write: Default::default() }
+        PgPools { opts, default_db, acquire, idle: IDLE, per_db: PER_DB, max_pools: MAX_POOLS, locals, timeout, adv: PgSession::default(), live: Default::default(), held: Default::default(), starts: Default::default(), begin_write: Default::default(), own: Default::default() }
     }
 
     fn with_session(mut self, adv: PgSession) -> PgPools {
@@ -174,6 +177,21 @@ impl PgPools {
 
     pub(super) fn recall_start(&self, pid: u64) -> Option<String> {
         self.starts.lock().unwrap().get(&pid).cloned()
+    }
+
+    pub(super) fn note_own(&self, pid: u64, start: String) {
+        self.own.lock().unwrap().insert(pid, start);
+    }
+
+    /// Whether backend `pid` that started at `start` is one of Quarry's own connections.
+    pub(super) fn is_own(&self, pid: u64, start: &str) -> bool {
+        !start.is_empty() && self.own.lock().unwrap().get(&pid).is_some_and(|s| s == start)
+    }
+
+    /// Forgets the backends `alive` no longer lists, which have closed. Called with a full read of pg_stat_activity, where the
+    /// role always sees its own sessions.
+    pub(super) fn keep_own(&self, alive: impl Fn(u64, &str) -> bool) {
+        self.own.lock().unwrap().retain(|pid, start| alive(*pid, start));
     }
 
     /// The pool of `database`, made on first use. Making it opens no connection. Past the cap the pool used least
@@ -205,15 +223,24 @@ impl PgPools {
             }
         }
         let failure: Arc<Mutex<Option<String>>> = Default::default();
-        let (locals, hook_failure, adv) = (self.locals.clone(), failure.clone(), self.adv.clone());
+        let (locals, hook_failure, adv, own) = (self.locals.clone(), failure.clone(), self.adv.clone(), self.own.clone());
         let pool = PgPoolOptions::new()
             .max_connections(self.per_db)
             .min_connections(0)
             .idle_timeout(self.idle)
             .acquire_timeout(self.acquire)
             .after_connect(move |c, _| {
-                let (locals, failure, adv) = (locals.clone(), hook_failure.clone(), adv.clone());
-                Box::pin(async move { session_with(c, locals.as_deref(), &adv, &failure).await })
+                let (locals, failure, adv, own) = (locals.clone(), hook_failure.clone(), adv.clone(), own.clone());
+                Box::pin(async move {
+                    session_with(c, locals.as_deref(), &adv, &failure).await?;
+                    // Behind a pooler the backend serves other clients too, so it is not Quarry's.
+                    if locals.is_none() {
+                        if let Some((pid, start)) = own_backend(c).await {
+                            own.lock().unwrap().insert(pid, start);
+                        }
+                    }
+                    Ok(())
+                })
             })
             .connect_lazy_with(self.opts.clone().database(&name));
         live.pools.insert(name, Entry { pool: pool.clone(), used: tick, failure: failure.clone() });
@@ -293,6 +320,11 @@ impl PgPools {
         let mut c = sqlx::PgConnection::connect_with(o).await.map_err(se)?;
         let failure = Mutex::new(None);
         session_with(&mut c, self.locals.as_deref(), &self.adv, &failure).await.map_err(|x| failure.lock().unwrap().clone().unwrap_or_else(|| e(x)))?;
+        if self.locals.is_none() {
+            if let Some((pid, start)) = own_backend(&mut c).await {
+                self.note_own(pid, start);
+            }
+        }
         Ok(Conn::Pg(PgConn::free(c)))
     }
 }
@@ -775,6 +807,16 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
     Ok((db, dbs, way, ti))
 }
 
+/// The start time travels as text so no timestamp type has to round trip, and is compared as text.
+const OWN_BACKEND: &str = "SELECT pg_backend_pid()::text, s.backend_start::text FROM pg_stat_get_activity(pg_backend_pid()) AS s";
+
+/// This connection's backend pid and start time.
+async fn own_backend(c: &mut sqlx::PgConnection) -> Option<(u64, String)> {
+    let rows = c.fetch_all(OWN_BACKEND).await.ok()?;
+    let r = rows.first()?;
+    Some((num_at(r, 0)?, text_at(r, 1)?))
+}
+
 /// Readies a connection of its own for a script: the backend's pid for Stop, and write access when unlocked. Behind a
 /// pooler (`Db::pooler`) nothing is set on the session, the pid is not kept (the backend may serve another client by the
 /// time Stop is pressed) and write access is a `BEGIN READ WRITE` of each statement, because a session setting would land
@@ -783,11 +825,11 @@ pub(super) async fn prepare(c: &mut sqlx::PgConnection, read_only: bool, id: &At
     if db.pooler() {
         return Ok(());
     }
-    // The start time travels as text so no timestamp type has to round trip, and is compared as text on Stop.
-    let rows = c.fetch_all("SELECT pg_backend_pid()::text, s.backend_start::text FROM pg_stat_get_activity(pg_backend_pid()) AS s").await?;
+    let rows = c.fetch_all(OWN_BACKEND).await?;
     if let Some(r) = rows.first() {
         let pid = num_at(r, 0).unwrap_or(0);
         if let (Some(start), Pool::Pg(p)) = (text_at(r, 1), &db.pool) {
+            p.note_own(pid, start.clone());
             p.remember_start(pid, start);
         }
         id.store(pid, Ordering::SeqCst);

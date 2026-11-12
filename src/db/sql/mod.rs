@@ -46,6 +46,7 @@ mod pg_dump;
 #[cfg(test)]
 mod pg_dump_tests;
 pub mod server;
+pub mod pg_server;
 #[cfg(test)]
 pub(crate) mod testing;
 #[cfg(test)]
