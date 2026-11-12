@@ -226,7 +226,7 @@ impl App {
     pub(in crate::app) fn sql_col_block(&self, col: &str) -> Option<&'static str> {
         let s = self.t()?.sql.as_ref()?;
         if s.pk.iter().any(|p| p == col) {
-            return Some("Primary key columns are not edited here: undo could no longer find the row.");
+            return Some("Primary key columns can't be edited inline, because changing the key would break undo for this row. Use a query instead.");
         }
         let c = self.sql_col(col)?;
         if c.generated {
