@@ -131,6 +131,12 @@ impl App {
                             continue;
                         }
                     }
+                    // So does the New table dialog, for the parent of each of its foreign keys.
+                    if let Some(Modal::PgNewTable(f)) = self.modal.as_mut() {
+                        if f.parent_loaded(req, &res) {
+                            continue;
+                        }
+                    }
                     if let Some(s) = self.tabs.iter_mut().find(|t| t.idx_req == req).and_then(|t| t.sql.as_mut()) {
                         s.st.finish(res);
                     }
@@ -155,7 +161,7 @@ impl App {
                 Msg::SqlUserGrants { conn, req, res } => self.sql_user_grants_loaded(conn, req, res),
                 Msg::SqlUserDone { conn, account, op, res, undo } => self.sql_user_done(conn, account, op, res, undo),
                 Msg::SqlDropInfo { conn, database, schema, table, res } => self.sql_drop_info_done(conn, database, schema, table, res),
-                Msg::PgTemplates { conn, res } => self.pg_templates_done(conn, res),
+                Msg::PgDbChoices { conn, res } => self.pg_choices_done(conn, res),
                 Msg::SqlDdl { conn, database, schema, table, what, res, undo, dbs, sql_mode } => self.sql_ddl_done(conn, database, schema, table, what, res, undo, dbs, sql_mode),
                 Msg::SqlValues { conn, database, schema, table, column, prefix, res } => self.sql_values_done(conn, database, schema, table, column, prefix, res),
                 Msg::SqlSchemas { conn, database, res } => self.pg_schemas_done(conn, database, res),

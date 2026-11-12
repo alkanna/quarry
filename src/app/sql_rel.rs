@@ -271,7 +271,7 @@ impl App {
 
     /// The tables a key can point at in a namespace (a database, or a schema of `db` on PostgreSQL), views left out. None
     /// while the list is still loading.
-    fn fk_tables(&mut self, conn: u64, db: &str, schema: &str) -> Option<Vec<String>> {
+    pub(super) fn fk_tables(&mut self, conn: u64, db: &str, schema: &str) -> Option<Vec<String>> {
         if self.is_pg(conn) {
             self.pg_load_tables(conn, db, schema);
             let key = Sel { conn, db: db.to_string(), schema: schema.to_string(), coll: String::new() }.nskey();
