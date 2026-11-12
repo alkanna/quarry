@@ -5,8 +5,9 @@
 use super::*;
 use crate::db::UndoKind;
 use crate::db::sql::create::{Ddl as What, DropInfo};
-use crate::db::sql::create_pg::{self, TableSpec};
+use crate::db::sql::create_pg::{self, Check, DbChoices, DbOpts, NewIndex, TableSpec, Unique};
 use crate::db::sql::ddl::{ColDef, Dv};
+use crate::db::sql::structure::ForeignKey;
 use crate::db::sql::testing::{db_turn, live_pg_at, unique_name};
 use std::str::FromStr;
 use std::time::Instant;
@@ -81,7 +82,7 @@ fn ans(l: &LivePg) -> Ans {
 fn make_db(l: &LivePg, name: &str, template: Option<&str>) -> Ans {
     // Two CREATE DATABASE at once both want template1 to themselves, so the tests of one run take turns.
     let _turn = db_turn();
-    l.w.pg_create_db(1, l.db.clone(), name.into(), template.map(String::from), false);
+    l.w.pg_create_db(1, l.db.clone(), name.into(), DbOpts { template: template.map(String::from), ..Default::default() }, false);
     ans(l)
 }
 
@@ -198,19 +199,25 @@ fn a_database_is_made_and_dropped_with_and_without_force() {
 fn a_database_comes_from_a_listed_template_only() {
     every_pg(|l, var| {
         let tidy = Tidy::new(l);
-        l.w.pg_templates(1, l.db.clone());
-        let Msg::PgTemplates { res, .. } = l.next() else { panic!("expected PgTemplates") };
-        let templates = res.unwrap();
-        assert!(templates.contains(&"template0".to_string()) && templates.contains(&"template1".to_string()), "{var}: {templates:?}");
+        let ch = choices(l);
+        let names: Vec<&str> = ch.templates.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"template0") && names.contains(&"template1"), "{var}: {names:?}");
+        let tpl = |t: &str| DbOpts { template: Some(t.into()), ..Default::default() };
         let name = tidy.db("tpl");
         make_db(l, &name, Some("template0")).res.unwrap_or_else(|x| panic!("{var}: {x}"));
         assert!(exists(l, &name));
         // A database that is not a template is not offered, and one typed by hand is refused before a statement exists.
         let why = err(&make_db(l, &tidy.db("nope"), Some("quarry_test")));
         assert!(why.contains("not a template"), "{var}: {why}");
-        assert!(create_pg::create_db_sql("x", Some("t\"; DROP DATABASE y; --"), &templates).is_err());
-        assert_eq!(create_pg::create_db_sql("x", Some("template0"), &templates).unwrap(), "CREATE DATABASE \"x\" TEMPLATE \"template0\"");
+        assert!(create_pg::create_db_sql("x", &tpl("t\"; DROP DATABASE y; --"), &ch).is_err());
+        assert_eq!(create_pg::create_db_sql("x", &tpl("template0"), &ch).unwrap(), "CREATE DATABASE \"x\" TEMPLATE \"template0\"");
     });
+}
+
+fn choices(l: &LivePg) -> DbChoices {
+    l.w.pg_db_choices(1, l.db.clone());
+    let Msg::PgDbChoices { res, .. } = l.next() else { panic!("expected PgDbChoices") };
+    res.unwrap_or_else(|x| panic!("choices: {x}"))
 }
 
 #[test]
@@ -335,14 +342,14 @@ fn the_connections_own_database_and_system_names_are_refused() {
     every_pg(|l, var| {
         let tidy = Tidy::new(l);
         for n in ["postgres", "template0", "template1"] {
-            assert!(create_pg::create_db_sql(n, None, &[]).is_err() && create_pg::drop_db_sql(n, false).is_err(), "{var}: {n}");
+            assert!(create_pg::create_db_sql(n, &DbOpts::default(), &DbChoices::default()).is_err() && create_pg::drop_db_sql(n, false).is_err(), "{var}: {n}");
             let why = err(&drop_db(l, n, false));
             assert!(why.contains("belongs to the server"), "{var}: {why}");
         }
         // Names are exact on PostgreSQL: Postgres is a database of its own and is made like any other.
-        assert!(create_pg::create_db_sql("Postgres", None, &[]).is_ok() && create_pg::create_db_sql("POSTGRES", None, &[]).is_ok());
-        assert!(create_pg::create_db_sql(&"x".repeat(64), None, &[]).is_err());
-        assert!(create_pg::create_db_sql("a\nb", None, &[]).is_err() && create_pg::create_db_sql("", None, &[]).is_err());
+        assert!(create_pg::create_db_sql("Postgres", &DbOpts::default(), &DbChoices::default()).is_ok() && create_pg::create_db_sql("POSTGRES", &DbOpts::default(), &DbChoices::default()).is_ok());
+        assert!(create_pg::create_db_sql(&"x".repeat(64), &DbOpts::default(), &DbChoices::default()).is_err());
+        assert!(create_pg::create_db_sql("a\nb", &DbOpts::default(), &DbChoices::default()).is_err() && create_pg::create_db_sql("", &DbOpts::default(), &DbChoices::default()).is_err());
         for s in ["pg_catalog", "information_schema", "pg_toast", "pg_toast_temp_1", "pg_temp_3", "pg_mine"] {
             assert!(create_pg::create_schema_sql(s).is_err(), "{var}: create {s}");
         }
@@ -584,8 +591,9 @@ fn a_table_is_built_with_identity_defaults_keys_and_comments() {
                 ColDef { auto_increment: true, identity_always: true, nullable: false, ..col("ticket", "bigint") },
             ],
             pk: vec!["id".into()],
-            uniques: vec![vec!["Order Code".into()], vec!["note".into(), "Mood".into()]],
+            uniques: vec![Unique { name: String::new(), cols: vec!["Order Code".into()] }, Unique { name: String::new(), cols: vec!["note".into(), "Mood".into()] }],
             comment: "demo 'table'".into(),
+            ..Default::default()
         };
         let stmts = create_pg::create_table_stmts(&spec).unwrap();
         assert!(stmts[0].starts_with(&format!("CREATE TABLE {}.{} (", ident(&s), ident(table))), "{}", stmts[0]);
@@ -790,7 +798,7 @@ fn a_table_that_cannot_be_built_is_refused_before_or_by_the_server_and_nothing_i
             ("an identity with a default", base(vec![ColDef { auto_increment: true, nullable: false, default: Dv::Value("1".into()), ..col("a", "int") }])),
             ("a default that is two statements", base(vec![ColDef { default: Dv::Expr("1); DROP TABLE x; (2".into()), ..col("a", "int") }])),
             ("a key on a missing column", TableSpec { pk: vec!["zz".into()], ..base(vec![col("a", "int")]) }),
-            ("a unique constraint with a column twice", TableSpec { uniques: vec![vec!["a".into(), "a".into()]], ..base(vec![col("a", "int")]) }),
+            ("a unique constraint with a column twice", TableSpec { uniques: vec![Unique { name: String::new(), cols: vec!["a".into(), "a".into()] }], ..base(vec![col("a", "int")]) }),
             ("a name of 64 bytes", TableSpec { name: "x".repeat(64), ..base(vec![col("a", "int")]) }),
             ("a name with a line break", TableSpec { name: "x\ny".into(), ..base(vec![col("a", "int")]) }),
             ("a NUL in a comment", TableSpec { comment: "a\0b".into(), ..base(vec![col("a", "int")]) }),
@@ -1071,4 +1079,240 @@ fn what_a_drop_takes_is_not_read_through_a_locked_connection() {
         let why = res.unwrap_err();
         assert!(why.contains("locked"), "{var}: a rolled back DROP is still a write: {why}");
     });
+}
+
+// The table builder's keys, checks, foreign keys and indexes (v3 step 5c).
+
+/// A child schema and a parent schema with `customers` (a primary key and a two-column UNIQUE) and `loose` (no key at all).
+fn two_schemas<'a>(l: &LivePg, tidy: &Tidy<'a>, pool: &sqlx::PgPool, tag: &str) -> (String, String) {
+    let (s, p) = (tidy.schema(&uniq(&format!("{tag}c"))), tidy.schema(&uniq(&format!("{tag}p"))));
+    schema_with(l, pool, &s, "");
+    schema_with(l, pool, &p, &format!("CREATE TABLE {p}.customers (id int PRIMARY KEY, region text, code text, UNIQUE (region, code)); CREATE TABLE {p}.loose (id int, v text); INSERT INTO {p}.customers VALUES (1, 'eu', 'a')", p = ident(&p)));
+    (s, p)
+}
+
+/// The parent as the dialog reads it, and the key on it with what the dialog saw of it.
+fn key_to(l: &LivePg, db: &Db, schema: &str, table: &str, cols: &[&str], refs: &[&str]) -> ForeignKey {
+    l.w.sql_structure(9, db.clone(), schema.into(), table.into());
+    let Msg::SqlStructure { res, .. } = l.next() else { panic!("expected SqlStructure") };
+    let st = res.unwrap_or_else(|x| panic!("{x}"));
+    let v = |x: &[&str]| x.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    ForeignKey { cols: v(cols), ref_db: schema.into(), ref_table: table.into(), ref_cols: v(refs), on_delete: "CASCADE".into(), on_update: "NO ACTION".into(), ref_seen: crate::db::sql::ddl::ref_state(&st, &v(refs)), ..Default::default() }
+}
+
+fn orders(s: &str, fks: Vec<ForeignKey>) -> TableSpec {
+    TableSpec {
+        schema: s.into(),
+        name: "orders".into(),
+        cols: vec![ColDef { auto_increment: true, nullable: false, ..col("id", "integer") }, col("customer", "bigint"), col("region", "text"), col("code", "text"), col("price", "numeric(10,2)")],
+        pk: vec!["id".into()],
+        uniques: vec![Unique { name: String::new(), cols: vec!["customer".into(), "code".into()] }],
+        checks: vec![Check { name: "price_set".into(), expr: "price >= 0".into() }],
+        fks,
+        indexes: vec![NewIndex { name: String::new(), cols: vec!["region".into()], unique: false }, NewIndex { name: "by price".into(), cols: vec!["price".into(), "code".into()], unique: true }],
+        ..Default::default()
+    }
+}
+
+/// Whether another session can take the strongest lock on `table` right away, which it cannot while a transaction of Quarry's still holds one.
+fn free(l: &LivePg, table: &str) -> bool {
+    let mut c = foreign(l, "quarry_test");
+    l.w.rt.block_on(async {
+        sqlx::raw_sql("BEGIN").execute(&mut c).await.unwrap();
+        let got = sqlx::raw_sql(&format!("LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE NOWAIT")).execute(&mut c).await.is_ok();
+        let _ = sqlx::raw_sql("ROLLBACK").execute(&mut c).await;
+        got
+    })
+}
+
+#[test]
+fn a_table_is_built_with_a_two_column_unique_a_check_a_key_to_another_schema_and_indexes() {
+    every_pg(|l, var| {
+        let tidy = Tidy::new(l);
+        let db = l.quarry_test();
+        let pool = l.fixture_pool();
+        let (s, p) = two_schemas(l, &tidy, &pool, "fk");
+        let k = ForeignKey { deferrable: true, ..key_to(l, &db, &p, "customers", &["customer"], &["id"]) };
+        let spec = orders(&s, vec![k]);
+        let a = made(l, &db, spec);
+        a.res.clone().unwrap_or_else(|x| panic!("{var}: {x}"));
+        let t = format!("{}.orders", ident(&s));
+        let parent = format!("{}.customers", ident(&p));
+        let one = |sql: &str| count(l, &pool, &sql.replace("@T", &lit(&t)));
+        let cons = one("SELECT string_agg(contype::text || ':' || pg_get_constraintdef(oid), ' | ' ORDER BY contype, conname) FROM pg_constraint WHERE conrelid = @T::regclass");
+        assert!(cons.contains("u:UNIQUE (customer, code)") && cons.contains("c:CHECK ((price >= (0)::numeric))") && cons.contains("p:PRIMARY KEY (id)"), "{var}: {cons}");
+        assert!(cons.contains(&format!("f:FOREIGN KEY (customer) REFERENCES {p}.customers(id) ON DELETE CASCADE DEFERRABLE")), "{var}: {cons}");
+        assert_eq!(one("SELECT string_agg(conname::text, ',' ORDER BY conname) FROM pg_constraint WHERE conrelid = @T::regclass AND contype NOT IN ('p', 'n')"), "orders_customer_code_key,orders_customer_fkey,price_set", "{var}: the server names what the person did not");
+        let idx = one("SELECT string_agg(indexrelid::regclass::text || ':' || indisunique::text, ',' ORDER BY indexrelid::regclass::text) FROM pg_index WHERE indrelid = @T::regclass AND NOT indisprimary");
+        assert!(idx.contains("orders_region_idx:false") && idx.contains("\"by price\":true"), "{var}: {idx}");
+        // The rules hold: a negative price, a customer the parent does not have.
+        assert!(l.w.rt.block_on(sqlx::raw_sql(&format!("INSERT INTO {t} (customer, price) VALUES (1, -1)")).execute(&pool)).is_err(), "{var}: the CHECK");
+        assert!(l.w.rt.block_on(sqlx::raw_sql(&format!("INSERT INTO {t} (customer, price) VALUES (9, 1)")).execute(&pool)).is_err(), "{var}: the key");
+        // The transaction is over, so nothing of it holds the parent.
+        assert!(free(l, &parent), "{var}: the parent is not locked after the create");
+        let u = undo_of(l, a.undo.unwrap());
+        u.res.clone().unwrap_or_else(|x| panic!("{var}: undo: {x}"));
+        assert_eq!(one("SELECT (to_regclass(@T) IS NULL)::text"), "true", "{var}");
+        assert_eq!(count(l, &pool, &format!("SELECT count(*)::text FROM pg_trigger WHERE tgrelid = {}::regclass", lit(&parent))), "0", "{var}: the key's triggers on the parent went with it");
+        assert!(free(l, &parent), "{var}: the parent is not locked after the undo");
+        assert_eq!(count(l, &pool, &format!("SELECT count(*)::text FROM {parent}")), "1", "{var}: the parent keeps its rows");
+
+        // A key on the table itself leans on its own primary key and needs no lock on another table.
+        let me = ForeignKey { cols: vec!["customer".into()], ref_table: "orders".into(), ref_cols: vec!["id".into()], on_delete: "SET NULL".into(), on_update: "NO ACTION".into(), ..Default::default() };
+        let a = made(l, &db, orders(&s, vec![me]));
+        a.res.clone().unwrap_or_else(|x| panic!("{var}: a key on itself: {x}"));
+        undo_of(l, a.undo.unwrap()).res.unwrap_or_else(|x| panic!("{var}: {x}"));
+    });
+}
+
+#[test]
+fn a_key_without_a_unique_parent_key_and_checks_that_act_outside_the_row_make_nothing() {
+    every_pg(|l, var| {
+        let tidy = Tidy::new(l);
+        let db = l.quarry_test();
+        let pool = l.fixture_pool();
+        let (s, p) = two_schemas(l, &tidy, &pool, "no");
+        let gone = || count(l, &pool, &format!("SELECT (to_regclass({}) IS NULL)::text", lit(&format!("{}.orders", ident(&s))))) == "true";
+        // No primary key or unique constraint on the parent's column: refused with the reason, read from the parent under its lock.
+        let why = err(&made(l, &db, orders(&s, vec![key_to(l, &db, &p, "loose", &["customer"], &["id"])])));
+        assert!(why.contains("needs a primary key or unique constraint on exactly (id)") && why.contains("Nothing was created"), "{var}: {why}");
+        assert!(gone(), "{var}");
+        // Only part of the two-column UNIQUE is no key either.
+        let why = err(&made(l, &db, orders(&s, vec![key_to(l, &db, &p, "customers", &["region"], &["region"])])));
+        assert!(why.contains("needs a primary key or unique constraint"), "{var}: {why}");
+        // The parent changed since the dialog read it: its key is gone, so the key the person picked is not there to lean on.
+        let k = key_to(l, &db, &p, "customers", &["region", "code"], &["region", "code"]);
+        l.qsql(&pool, &format!("ALTER TABLE {}.customers DROP CONSTRAINT customers_region_code_key", ident(&p)));
+        let why = err(&made(l, &db, orders(&s, vec![k])));
+        assert!(why.contains("Nothing was created") && why.contains("customers"), "{var}: {why}");
+        assert!(gone(), "{var}");
+        // A parent that is not there.
+        let why = err(&made(l, &db, orders(&s, vec![ForeignKey { ref_table: "nope".into(), ref_seen: Vec::new(), ..key_to(l, &db, &p, "customers", &["customer"], &["id"]) }])));
+        assert!(why.contains("gone"), "{var}: {why}");
+        // CHECK expressions: the scan refuses a call that acts outside the row and a second statement; the server refuses a subquery and an unknown function.
+        let with = |expr: &str| TableSpec { checks: vec![Check { name: String::new(), expr: expr.into() }], ..orders(&s, Vec::new()) };
+        for bad in ["pg_advisory_lock(1) IS NOT NULL", "dblink_exec('dbname=x', 'DROP TABLE y') = 'OK'", "(pg_backend_pid()).pg_terminate_backend", "price > 0); DROP TABLE x; --"] {
+            assert!(create_pg::create_table_stmts(&with(bad)).is_err(), "{var}: {bad}");
+            let why = err(&made(l, &db, with(bad)));
+            assert!(!why.contains("(statement"), "{var}: {bad} reached the server: {why}");
+        }
+        assert!(err(&made(l, &db, with("price > (SELECT 1)"))).contains("0A000"), "{var}");
+        assert!(err(&made(l, &db, with("no_such_check_fn(price)"))).contains("42883"), "{var}");
+        assert!(gone(), "{var}: a refused build leaves nothing");
+    });
+}
+
+#[test]
+fn the_parent_of_a_new_key_is_locked_while_the_table_is_made_and_while_its_undo_drops_it() {
+    every_pg(|l, var| {
+        let tidy = Tidy::new(l);
+        let db = l.quarry_test();
+        let pool = l.fixture_pool();
+        let (s, p) = two_schemas(l, &tidy, &pool, "lk");
+        let parent = format!("{}.customers", ident(&p));
+        let spec = orders(&s, vec![key_to(l, &db, &p, "customers", &["customer"], &["id"])]);
+        // Another session writing to the parent holds ROW EXCLUSIVE, which the key's SHARE ROW EXCLUSIVE waits for: refused, nothing made.
+        let mut other = foreign(l, "quarry_test");
+        l.w.rt.block_on(sqlx::raw_sql(&format!("BEGIN; LOCK TABLE {parent} IN ROW EXCLUSIVE MODE")).execute(&mut other)).unwrap();
+        let why = err(&made(l, &db, spec.clone()));
+        assert!(why.contains("locked by another session") && why.contains("customers"), "{var}: {why}");
+        l.w.rt.block_on(sqlx::raw_sql("ROLLBACK").execute(&mut other)).unwrap();
+        let a = made(l, &db, spec);
+        a.res.clone().unwrap_or_else(|x| panic!("{var}: {x}"));
+        // A reader of the parent holds ACCESS SHARE, and dropping the child's key needs ACCESS EXCLUSIVE there: the undo says whose lock it is.
+        l.w.rt.block_on(sqlx::raw_sql(&format!("BEGIN; SELECT count(*) FROM {parent}")).execute(&mut other)).unwrap();
+        let u = undo_of(l, a.undo.unwrap());
+        let why = err(&u);
+        assert!(why.starts_with("Not undone") && why.contains("customers") && why.contains("locked"), "{var}: {why}");
+        assert_eq!(count(l, &pool, &format!("SELECT (to_regclass({}) IS NOT NULL)::text", lit(&format!("{}.orders", ident(&s))))), "true", "{var}: a refused undo drops nothing");
+        l.w.rt.block_on(sqlx::raw_sql("ROLLBACK").execute(&mut other)).unwrap();
+        undo_of(l, u.undo.unwrap()).res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert!(free(l, &parent), "{var}");
+    });
+}
+
+#[test]
+fn a_database_takes_an_encoding_a_locale_and_an_owner_through_template0() {
+    every_pg(|l, var| {
+        l.quarry_test();
+        let pool = l.fixture_pool();
+        let ch = choices(l);
+        assert!(ch.encodings.iter().any(|e| e == "UTF8") && ch.encodings.iter().any(|e| e == "LATIN1") && !ch.encodings.iter().any(|e| e == "SJIS"), "{var}: server encodings only: {:?}", ch.encodings);
+        assert!(ch.locales.iter().any(|(l, e)| l == "C" && e.is_empty()), "{var}: {:?}", ch.locales);
+        let role = uniq("own");
+        l.qsql(&pool, &format!("CREATE ROLE {} NOLOGIN", ident(&role)));
+        let _guard = RoleGuard { l, pool: pool.clone(), role: role.clone() };
+        // Made after the guard so it drops the database before the guard drops its owner.
+        let tidy = Tidy::new(l);
+        let ch = choices(l);
+        assert!(ch.owners.contains(&role) && !ch.owners.iter().any(|r| r.starts_with("pg_")), "{var}: a superuser may give it to any role: {:?}", ch.owners);
+        let opts = DbOpts { template: Some("template0".into()), encoding: Some("UTF8".into()), locale: Some("C".into()), owner: Some(role.clone()), ..Default::default() };
+        let name = tidy.db("enc");
+        let a = {
+            let _turn = db_turn();
+            l.w.pg_create_db(1, l.db.clone(), name.clone(), opts, false);
+            ans(l)
+        };
+        a.res.clone().unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(l.one(&format!("SELECT pg_encoding_to_char(encoding)::text || ' ' || datcollate::text || ' ' || datctype::text || ' ' || pg_get_userbyid(datdba)::text FROM pg_database WHERE datname = {}", lit(&name))), format!("UTF8 C C {role}"), "{var}");
+        undo_of(l, a.undo.unwrap()).res.unwrap_or_else(|x| panic!("{var}: the undo of a create with options: {x}"));
+        assert!(!exists(l, &name), "{var}");
+        // Another encoding from template1 is refused before the server is asked.
+        l.w.pg_create_db(1, l.db.clone(), tidy.db("t1"), DbOpts { encoding: Some("LATIN1".into()), ..Default::default() }, false);
+        let why = err(&ans(l));
+        assert!(why.contains("needs TEMPLATE template0"), "{var}: {why}");
+        if ch.version < 150000 {
+            assert!(!ch.icu_ok() && ch.icu_locales.is_empty(), "{var}: no locale provider before 15");
+            l.w.pg_create_db(1, l.db.clone(), tidy.db("icu"), DbOpts { template: Some("template0".into()), provider: Some("icu".into()), icu_locale: Some("und".into()), ..Default::default() }, false);
+            assert!(err(&ans(l)).contains("15 or later"), "{var}");
+        } else if let Some(icu) = ch.icu_locales.iter().find(|x| *x == "und" || x.starts_with("en")).cloned() {
+            let name = tidy.db("icu");
+            let _turn = db_turn();
+            l.w.pg_create_db(1, l.db.clone(), name.clone(), DbOpts { template: Some("template0".into()), provider: Some("icu".into()), icu_locale: Some(icu.clone()), ..Default::default() }, false);
+            ans(l).res.unwrap_or_else(|x| panic!("{var}: ICU {icu}: {x}"));
+            assert_eq!(l.one(&format!("SELECT datlocprovider::text FROM pg_database WHERE datname = {}", lit(&name))), "i", "{var}");
+        }
+    });
+}
+
+#[test]
+fn a_role_that_is_no_superuser_is_offered_only_the_owners_it_may_take() {
+    every_pg(|l, var| {
+        l.quarry_test();
+        let pool = l.fixture_pool();
+        let (me, them, other) = (uniq("me"), uniq("them"), uniq("other"));
+        l.qsql(&pool, &format!("CREATE ROLE {} LOGIN CREATEDB PASSWORD 'pw'; CREATE ROLE {} NOLOGIN; CREATE ROLE {} NOLOGIN; GRANT {} TO {}", ident(&me), ident(&them), ident(&other), ident(&them), ident(&me)));
+        let _guards = [&me, &them, &other].map(|r| RoleGuard { l, pool: pool.clone(), role: r.clone() });
+        // Made after the guards so it drops the database before they drop its owner.
+        let tidy = Tidy::new(l);
+        let o = sqlx::postgres::PgConnectOptions::from_str(&l.uri).unwrap();
+        let rl = live_pg_at(format!("postgres://{me}:pw@{}:{}/postgres", o.get_host(), o.get_port()));
+        let ch = choices(&rl);
+        assert!(ch.owners.contains(&me) && ch.owners.contains(&them) && !ch.owners.contains(&other), "{var}: {:?}", ch.owners);
+        let name = tidy.db("own");
+        let _turn = db_turn();
+        rl.w.pg_create_db(1, rl.db.clone(), name.clone(), DbOpts { owner: Some(them.clone()), ..Default::default() }, false);
+        ans(&rl).res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(l.one(&format!("SELECT pg_get_userbyid(datdba)::text FROM pg_database WHERE datname = {}", lit(&name))), them, "{var}");
+        rl.w.pg_create_db(1, rl.db.clone(), tidy.db("own2"), DbOpts { owner: Some(other.clone()), ..Default::default() }, false);
+        assert!(err(&ans(&rl)).contains("not a role this connection can make the owner"), "{var}");
+    });
+}
+
+#[test]
+fn behind_a_pooler_the_builder_and_the_database_options_work() {
+    let Some(l) = live_pgbouncer() else { return };
+    let tidy = Tidy::new(&l);
+    let db = l.quarry_test();
+    let pool = l.fixture_pool();
+    let (s, p) = two_schemas(&l, &tidy, &pool, "pb");
+    let a = made(&l, &db, orders(&s, vec![key_to(&l, &db, &p, "customers", &["customer"], &["id"])]));
+    a.res.clone().unwrap_or_else(|x| panic!("{x}"));
+    assert!(free(&l, &format!("{}.customers", ident(&p))));
+    undo_of(&l, a.undo.unwrap()).res.unwrap_or_else(|x| panic!("undo: {x}"));
+    let name = tidy.db("pbenc");
+    let _turn = db_turn();
+    l.w.pg_create_db(1, l.db.clone(), name.clone(), DbOpts { template: Some("template0".into()), encoding: Some("UTF8".into()), locale: Some("C".into()), ..Default::default() }, false);
+    ans(&l).res.unwrap_or_else(|x| panic!("{x}"));
+    assert_eq!(l.one(&format!("SELECT datcollate::text FROM pg_database WHERE datname = {}", lit(&name))), "C");
 }

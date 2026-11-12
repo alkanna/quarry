@@ -213,7 +213,7 @@ fn a_database_is_made_and_dropped_with_its_connections_closed() {
         {
             // Two CREATE DATABASE at once fail on template1 being in use, so the live tests take turns.
             let _turn = crate::db::sql::testing::db_turn();
-            ui.wait("the template list", |a| matches!(&a.modal, Some(Modal::PgNewDb(f)) if f.templates.is_some()));
+            ui.wait("the template list", |a| matches!(&a.modal, Some(Modal::PgNewDb(f)) if f.choices.is_some()));
             ui.click("Create");
             until(fx, ui, "the database to be made", |fx| exists(fx));
             ui.wait("the sidebar list", |a| a.conn(CONN).is_some_and(|c| c.dbs.iter().any(|d| d.0 == db)));
@@ -266,7 +266,7 @@ fn a_database_drop_the_server_refuses_leaves_its_tabs_and_their_text_alone() {
         ui.type_text(&db);
         {
             let _turn = crate::db::sql::testing::db_turn();
-            ui.wait("the template list", |a| matches!(&a.modal, Some(Modal::PgNewDb(f)) if f.templates.is_some()));
+            ui.wait("the template list", |a| matches!(&a.modal, Some(Modal::PgNewDb(f)) if f.choices.is_some()));
             ui.click("Create");
             until(fx, ui, "the database to be made", |fx| exists(fx));
             ui.wait("the sidebar list", |a| a.conn(CONN).is_some_and(|c| c.dbs.iter().any(|d| d.0 == db)));
@@ -312,5 +312,66 @@ fn a_database_drop_the_server_refuses_leaves_its_tabs_and_their_text_alone() {
         ui.click("Drop database");
         until(fx, ui, "the database to be dropped", |fx| !exists(fx));
         ui.wait("its tabs to close", |a| !a.tabs.iter().any(|t| t.sel.db == db));
+    });
+}
+
+/// Picks columns, in key order, in a row of column toggles of the New table dialog.
+fn pick_cols(ui: &mut UiApp, row: &str, cols: &[&str]) {
+    for c in cols {
+        ui.click(&format!("{row} {c}"));
+    }
+}
+
+#[test]
+fn a_table_is_built_with_a_unique_a_check_a_key_to_another_schema_and_an_index() {
+    pg_only("a table is built with one of each key through the dialog", |fx, ui| {
+        // The parent is in a schema of its own, made before the database's schemas are read.
+        let ps = name("par");
+        fx.sql(&format!("CREATE SCHEMA {ps}; CREATE TABLE {ps}.parent_t (pid int PRIMARY KEY)"));
+        let anchor = fx.table();
+        fx.open(ui, &anchor);
+        ui.unlock();
+        let table = name("keys");
+        open_builder(fx, ui);
+        ui.type_text(&table);
+        ui.click("Add Column");
+        replace(ui, "Column name 2", "ref");
+        replace(ui, "Column type 2", "integer");
+        ui.click("Add Unique");
+        pick_cols(ui, "Unique columns 1", &["id", "ref"]);
+        ui.click("Add Check");
+        ui.fill("Check expression 1", "ref > 0");
+        ui.click("Add Foreign key");
+        ui.click("Referenced schema 1");
+        ui.click_last(&ps);
+        ui.click("Referenced table 1");
+        ui.click_last("parent_t");
+        ui.click("Foreign key 1 Column 1");
+        ui.click_last("ref");
+        ui.wait("the parent's columns", |a| matches!(&a.modal, Some(Modal::PgNewTable(f)) if f.fks.first().is_some_and(|k| k.parent.is_some())));
+        ui.click("Foreign key 1 Referenced column 1");
+        ui.click_last("pid");
+        ui.click("Add Index");
+        pick_cols(ui, "Index columns 1", &["ref"]);
+        ui.click("Preview SQL");
+        ui.show("Create table");
+        let t = std::time::Instant::now();
+        while ui.h.get_by_label("Create table").accesskit_node().is_disabled() {
+            assert!(t.elapsed() < LIMIT, "Create table stayed disabled: {:?}", ui.app().modal.as_ref().and_then(|m| if let Modal::PgNewTable(f) = m { f.built.as_ref().map(|b| b.1.clone()) } else { None }));
+            ui.h.step();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        ui.click("Create table");
+        until(fx, ui, "the table to be made", |fx| table_exists(fx, &table));
+        let cons = fx.one(&format!("SELECT string_agg(pg_get_constraintdef(oid), ' | ' ORDER BY contype, conname) FROM pg_constraint WHERE conrelid = 'public.{table}'::regclass"));
+        assert!(cons.contains("CHECK ((ref > 0))") && cons.contains("UNIQUE (id, ref)") && cons.contains(&format!("FOREIGN KEY (ref) REFERENCES {ps}.parent_t(pid)")), "{cons}");
+        assert_eq!(fx.one(&format!("SELECT count(*) FROM pg_index WHERE indrelid = 'public.{table}'::regclass AND NOT indisunique")).trim(), "1", "the index on ref");
+        // The undo drops the child with its key, which locks the parent in the other schema too.
+        ui.wait("the entry", |a| a.undo.len() == 1);
+        ui.quiet();
+        ui.click("Undo (1)");
+        ui.click("Undo change 1");
+        until(fx, ui, "the undo to land", |fx| !table_exists(fx, &table));
+        fx.sql(&format!("DROP SCHEMA {ps} CASCADE"));
     });
 }

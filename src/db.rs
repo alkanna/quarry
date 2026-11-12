@@ -231,8 +231,8 @@ pub enum Msg {
     /// What a drop confirmation says will be lost; `table` is empty for a database.
     /// `database` is the PostgreSQL database the schema or table is in, empty on MySQL and for a database.
     SqlDropInfo { conn: u64, database: String, schema: String, table: String, res: Res<sql::create::DropInfo> },
-    /// The template databases of a PostgreSQL server, for the New database dialog.
-    PgTemplates { conn: u64, res: Res<Vec<String>> },
+    /// The templates, encodings, locales and owners a new PostgreSQL database can take, for the New database dialog.
+    PgDbChoices { conn: u64, res: Res<sql::create_pg::DbChoices> },
     /// A create or drop finished. `dbs` is the new database list after a change to it, and `undo` the entry
     /// for a create (or the one a refused undo hands back). `sql_mode` is the session's mode when it no longer
     /// matched the one the app had, so the previews follow it.

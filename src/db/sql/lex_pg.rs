@@ -220,6 +220,22 @@ fn call_or_field(part: &[Code], i: usize) -> (bool, bool) {
     (part.get(i + 1).is_some_and(|n| punct(n, "(")), i > 0 && punct(&part[i - 1], "."))
 }
 
+/// The first function in an expression that the read-only check refuses, under both readings of backslashes, for text that
+/// runs later on every row (a CHECK constraint), where such a call would act on each insert.
+pub(crate) fn refused_call(expr: &str) -> Option<String> {
+    [false, true].into_iter().find_map(|bs| {
+        let code = code_of(expr, bs);
+        (0..code.len()).find_map(|i| {
+            let (called, field) = call_or_field(&code, i);
+            let name = ident(&code[i]).filter(|_| called || field)?;
+            if name == UNSURE {
+                return Some("a function named with a Unicode escape".to_string());
+            }
+            ((called && refused_function(&name)) || (field && refused_field(&name))).then_some(name)
+        })
+    })
+}
+
 /// Functions whose effect stays on the session after the transaction ends: a session advisory lock stays on the backend
 /// and a dblink connection stays open there. The transaction-scoped `pg_advisory_xact_lock` family is not listed.
 const SESSION_FUNCTIONS_EXACT: &[&str] = &["pg_advisory_lock", "pg_advisory_lock_shared", "pg_try_advisory_lock", "pg_try_advisory_lock_shared"];

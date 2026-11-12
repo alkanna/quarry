@@ -83,6 +83,8 @@ enum Text {
     Expr,
     /// A trigger's WHEN condition, read like an expression and worded for it.
     Cond,
+    /// A CHECK constraint's expression.
+    Check,
     Type,
 }
 
@@ -93,6 +95,7 @@ fn scan(s: &str, what: Text) -> Result<(), String> {
     let name = match what {
         Text::Expr => "default expression",
         Text::Cond => "WHEN condition",
+        Text::Check => "CHECK expression",
         Text::Type => "type",
     };
     let one = format!("The {name} must be {}, without ; or comments.", if what == Text::Type { "a type name like numeric(10,2)" } else { "one expression" });
@@ -146,6 +149,16 @@ pub(super) fn check_expr_pg(s: &str) -> Result<(), String> {
 /// A trigger's WHEN condition typed by the person: one expression, like a default. See `scan`.
 pub fn check_cond_pg(s: &str) -> Result<(), String> {
     scan(s, Text::Cond)
+}
+
+/// A CHECK expression typed by the person: one expression, like a WHEN condition, and no call the read-only check refuses,
+/// because the server runs it on every row written later. See `scan`.
+pub fn check_constraint_pg(s: &str) -> Result<(), String> {
+    scan(s, Text::Check)?;
+    match super::lex::refused_call(s) {
+        Some(f) => Err(format!("The CHECK expression calls {f}, which acts outside the row and is refused.")),
+        None => Ok(()),
+    }
 }
 
 /// A column type typed by the person must stay one type name. See `scan`.
@@ -531,10 +544,9 @@ fn add_fk_head(schema: &str, table: &str, name: &str) -> String {
     format!("ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ", D.qualified(schema, table), q(name))
 }
 
-/// ADD CONSTRAINT .. FOREIGN KEY, with the match type, the actions, whether it is deferrable and NOT VALID, and the comment
-/// the key has. The referenced table is always written with its schema, the key's own `ref_db` or else the table's.
-fn add_fk(sim: &Sim, schema: &str, table: &str, k: &ForeignKey) -> Result<Vec<String>, String> {
-    name_ok(&k.name, "A foreign key")?;
+/// What follows a key's own columns: the parent, the match type, the actions and whether it is deferrable. The parent is always
+/// written with its schema, the key's own `ref_db` or else `schema`. ADD CONSTRAINT and CREATE TABLE write the same text.
+pub(super) fn fk_refs(schema: &str, k: &ForeignKey) -> Result<String, String> {
     name_ok(&k.ref_table, "The referenced table")?;
     if !k.ref_db.is_empty() {
         name_ok(&k.ref_db, "The referenced schema")?;
@@ -546,19 +558,13 @@ fn add_fk(sim: &Sim, schema: &str, table: &str, k: &ForeignKey) -> Result<Vec<St
     if k.cols.len() > 32 {
         return Err("A foreign key can have at most 32 columns.".into());
     }
-    let mut own = Vec::new();
-    for c in &k.cols {
-        let i = sim.at(c).ok_or_else(|| format!("Column {c} is not in the table."))?;
-        own.push(q(&sim.cols[i].0));
-    }
     let action = |a: &str| FK_ACTIONS.iter().find(|x| x.eq_ignore_ascii_case(a.trim())).copied().ok_or_else(|| format!("{a:?} is not a foreign key action."));
     if k.deferred && !k.deferrable {
         return Err("INITIALLY DEFERRED needs the key to be DEFERRABLE.".into());
     }
-    let t = D.qualified(schema, table);
     let parent = D.qualified(if k.ref_db.is_empty() { schema } else { &k.ref_db }, &k.ref_table);
     let refs: Vec<String> = k.ref_cols.iter().map(|c| q(c)).collect();
-    let mut text = format!("{}({}) REFERENCES {parent} ({})", add_fk_head(schema, table, &k.name), own.join(", "), refs.join(", "));
+    let mut text = format!("REFERENCES {parent} ({})", refs.join(", "));
     if k.match_full {
         text.push_str(" MATCH FULL");
     }
@@ -566,6 +572,20 @@ fn add_fk(sim: &Sim, schema: &str, table: &str, k: &ForeignKey) -> Result<Vec<St
     if k.deferrable {
         text.push_str(if k.deferred { " DEFERRABLE INITIALLY DEFERRED" } else { " DEFERRABLE" });
     }
+    Ok(text)
+}
+
+/// ADD CONSTRAINT .. FOREIGN KEY with `fk_refs`, NOT VALID, and the comment the key has.
+fn add_fk(sim: &Sim, schema: &str, table: &str, k: &ForeignKey) -> Result<Vec<String>, String> {
+    name_ok(&k.name, "A foreign key")?;
+    let refs = fk_refs(schema, k)?;
+    let mut own = Vec::new();
+    for c in &k.cols {
+        let i = sim.at(c).ok_or_else(|| format!("Column {c} is not in the table."))?;
+        own.push(q(&sim.cols[i].0));
+    }
+    let t = D.qualified(schema, table);
+    let mut text = format!("{}({}) {refs}", add_fk_head(schema, table, &k.name), own.join(", "));
     if k.not_valid {
         text.push_str(" NOT VALID");
     }
