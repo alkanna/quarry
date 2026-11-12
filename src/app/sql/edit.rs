@@ -34,9 +34,6 @@ pub(in crate::app) struct CellEdit {
     pub(in crate::app) refocus: bool,
     /// A helper reads plain keys (arrows, Space, letters) with no text box focused, so the page must not.
     pub(in crate::app) grabs_keys: bool,
-    /// The last press landed on a helper or the calendar button. egui reports the text box's lost focus on the frames
-    /// after the click, when the press is no longer in the input, so where it landed is kept until then.
-    pub(in crate::app) press_helper: bool,
     pub(in crate::app) keys: Option<KeyLook>,
 }
 
@@ -417,13 +414,6 @@ impl App {
         if std::mem::take(&mut e.refocus) {
             out.response.request_focus();
         }
-        // A press is remembered until the focus it moves away is reported; once the text box has focus with no new
-        // press, nothing it loses next came from a click in the cell or a helper.
-        if let Some(p) = click {
-            e.press_helper = ours(p);
-        } else if out.response.has_focus() {
-            e.press_helper = false;
-        }
         if out.response.changed() {
             (e.dirty, e.err, e.hl) = (true, None, None);
         }
@@ -480,7 +470,7 @@ impl App {
             }
         }
         let esc = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape));
-        let enter = ui.input(|i| i.key_pressed(Key::Enter));
+        let (enter, tab) = ui.input(|i| (i.key_pressed(Key::Enter), i.key_pressed(Key::Tab)));
         if alt_down || cal {
             e.pick = if e.pick.is_some() { None } else { Some(e.text.clone()) };
             e.refocus = true;
@@ -494,14 +484,16 @@ impl App {
             }
         } else if commit {
             e.done = Some(true);
-        } else if out.response.lost_focus() && !e.press_helper {
+        } else if click_out {
+            // A press outside the cell and its helpers, seen in the frame it happens. The text box's lost focus is not
+            // used for clicks: egui reports it on the release or later, when the press is gone.
+            e.done = Some(true);
+        } else if (enter || tab) && out.response.lost_focus() || enter && !out.response.has_focus() {
+            // Enter or Tab from the text box, or Enter after a helper (a day, a time field, a checkbox) took the focus.
             // Enter on a highlighted row saves that row rather than the typed text.
             if let Some(h) = hl.filter(|h| enter && *h < list_n) {
                 e.text = list.get(h).map_or("NULL".into(), |x| x.0.clone());
             }
-            e.done = Some(true);
-        } else if !out.response.has_focus() && !out.response.lost_focus() && (click_out || enter) {
-            // Focus went to a helper (a time field, a checkbox), so the text box no longer sees these.
             e.done = Some(true);
         }
         e.pop = pop;

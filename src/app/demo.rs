@@ -362,7 +362,7 @@ impl App {
     }
 
     /// The MySQL demo: a production connection and an open orders table. Nothing here reads the Keychain or the network.
-    fn load_sql_demo(&mut self) {
+    pub(super) fn load_sql_demo(&mut self) {
         use db::sql::{Col, value::Kind};
         let which = std::env::var("QUARRY_TEST_SQL").unwrap_or_default();
         let which = which.as_str();
