@@ -55,7 +55,10 @@ fn the_cloud_sql_browser_fills_the_form_and_saves_the_instance_without_a_passwor
     assert_eq!(ui.app().cloud.running, 0, "no gcloud was started for projects that had answered");
 
     ui.show("acme-prod:europe-west1:orders-db");
-    ui.show("acme-sandbox has the Cloud SQL Admin API off.");
+    // A project with nothing to list is folded away, its reason on hover, so dozens of them do not bury the list.
+    assert!(ui.h.query_all_by_label("acme-sandbox").next().is_none(), "a refused project is folded by default");
+    ui.click("1 more without PostgreSQL");
+    ui.show("acme-sandbox");
     assert!(ui.h.query_all_by_label("acme-prod:us-central1:billing-legacy").next().is_none(), "a stopped instance shows only on request");
     ui.click("Show stopped instances");
     ui.show("acme-prod:us-central1:billing-legacy");

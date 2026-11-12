@@ -95,6 +95,9 @@ pub(super) struct CloudBrowser {
     pub(super) change: bool,
     /// An IAM instance whose Use found no Application Default Credentials, which the browser then asks for.
     pub(super) adc_for: Option<String>,
+    /// Shows the projects with no PostgreSQL instance or no access, folded by default since an account often reaches
+    /// dozens of them (Apps Script's sys- projects among them).
+    pub(super) others: bool,
 }
 
 /// The states a Cloud SQL card explains.
@@ -173,7 +176,8 @@ pub(super) fn use_host(f: &mut ConnForm) {
 /// Why a project's instances could not be listed, in a line under the project list.
 fn reason(project: &str, err: &str) -> String {
     let low = err.to_lowercase();
-    if low.contains("sqladmin") || low.contains("cloud sql admin api") {
+    // gcloud's last line for a project with the API off is often just "reason: SERVICE_DISABLED".
+    if low.contains("sqladmin") || low.contains("cloud sql admin api") || low.contains("service_disabled") {
         format!("{project} has the Cloud SQL Admin API off.")
     } else if low.contains("403") || low.contains("permission") || low.contains("not authorized") {
         format!("{project}: this account may not list its instances.")
@@ -750,45 +754,57 @@ impl App {
                     if all.clicked() {
                         b.project = None;
                     }
-                    for pr in &projects {
+                    // Projects with instances first; empty or refused ones fold away, their reason on hover, so an account
+                    // that reaches many projects does not bury the few that matter.
+                    let has = |id: &str| matches!(self.cloud.instances.get(id), Some(r @ Ok(_)) if shown(r) > 0);
+                    let pending = projects.iter().filter(|p| !self.cloud.instances.contains_key(&p.id)).count();
+                    let others: Vec<_> = projects.iter().filter(|p| self.cloud.instances.contains_key(&p.id) && !has(&p.id)).collect();
+                    let mut rows: Vec<_> = projects.iter().filter(|p| has(&p.id) || b.project.as_deref() == Some(&p.id)).collect();
+                    if b.others {
+                        rows.extend(others.iter().copied().filter(|p| b.project.as_deref() != Some(&p.id)));
+                    }
+                    for pr in rows {
                         let res = self.cloud.instances.get(&pr.id);
                         let n = res.map(shown);
-                        let faint = matches!(res, Some(Err(_))) || n == Some(0);
+                        let faint = !has(&pr.id);
+                        let right = match res {
+                            None => String::new(),
+                            Some(Err(_)) => "No access".to_string(),
+                            Some(Ok(_)) => n.unwrap_or(0).to_string(),
+                        };
                         let hit = side_row(ui, SIDE_ROW_H, 0.0, b.project.as_ref() == Some(&pr.id), &pr.id, |p, r| {
                             let name_c = if faint { FAINT() } else { TEXT() };
-                            galley_at(p, r.left(), r.center().y, p.layout_job(LayoutJob::single_section(pr.id.clone(), mono_fmt(TXT_SMALL, name_c, 400.0))), name_c);
-                            let right = match res {
-                                None => None,
-                                Some(Err(_)) => Some("No access".to_string()),
-                                Some(Ok(_)) => n.map(|n| n.to_string()),
-                            };
-                            match right {
-                                Some(t) => {
-                                    let g = p.layout_no_wrap(t, FontId::proportional(TXT_SMALL), FAINT());
-                                    galley_at(p, r.right() - g.size().x, r.center().y, g, FAINT());
-                                }
-                                None => {}
-                            }
+                            let g = p.layout_no_wrap(right.clone(), FontId::proportional(TXT_SMALL), FAINT());
+                            let room = r.width() - g.size().x - 8.0;
+                            galley_at(p, r.right() - g.size().x, r.center().y, g, FAINT());
+                            let mut job = LayoutJob::single_section(pr.id.clone(), mono_fmt(TXT_SMALL, name_c, 400.0));
+                            job.wrap = egui::text::TextWrapping::truncate_at_width(room.max(0.0));
+                            galley_at(p, r.left(), r.center().y, p.layout_job(job), name_c);
                         });
-                        if res.is_none() {
-                            spin_at(ui, egui::Rect::from_center_size(egui::pos2(hit.rect.right() - 16.0, hit.rect.center().y), egui::vec2(12.0, 12.0)));
-                        }
+                        let hit = match res {
+                            Some(Err(e)) => hit.on_hover_text(reason(&pr.id, e)),
+                            _ => hit.on_hover_text(&pr.id),
+                        };
                         if hit.clicked() {
                             b.project = Some(pr.id.clone());
                         }
                     }
-                    let failed: Vec<(String, String)> = projects.iter().filter_map(|p| match self.cloud.instances.get(&p.id) {
-                        Some(Err(e)) => Some((p.id.clone(), e.clone())),
-                        _ => None,
-                    }).collect();
-                    if !failed.is_empty() {
-                        ui.add_space(10.0);
-                        for (p, e) in failed {
-                            ui.horizontal(|ui| {
-                                ui.add_space(8.0);
-                                small(ui, &reason(&p, &e), FAINT());
-                            });
-                        }
+                    if pending > 0 {
+                        ui.horizontal(|ui| {
+                            ui.add_space(8.0);
+                            ui.add(egui::Spinner::new().size(10.0).color(FAINT()));
+                            small(ui, &format!("Checking {pending} of {} projects", projects.len()), FAINT());
+                        });
+                    }
+                    if !others.is_empty() {
+                        let label = if b.others { "Hide projects without PostgreSQL".to_string() } else { format!("{} more without PostgreSQL", others.len()) };
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.add_space(4.0);
+                            if quiet(ui, &label).on_hover_text("Projects with no PostgreSQL instance, or that this account may not list. Hover one for the reason.").clicked() {
+                                b.others = !b.others;
+                            }
+                        });
                     }
                 });
             });
@@ -1020,6 +1036,7 @@ mod tests {
     fn a_failed_project_says_why_and_proxy_lines_come_out_of_the_error() {
         assert_eq!(reason("acme-sandbox", "Cloud SQL: gcloud failed: ERROR: Cloud SQL Admin API has not been used in project acme-sandbox"), "acme-sandbox has the Cloud SQL Admin API off.");
         assert_eq!(reason("p", "Cloud SQL: gcloud failed: HTTPError 403: not authorized"), "p: this account may not list its instances.");
+        assert_eq!(reason("p", "Cloud SQL: gcloud failed: reason: SERVICE_DISABLED"), "p has the Cloud SQL Admin API off.");
         assert_eq!(proxy_lines("Cloud SQL proxy failed: a\n\n b \nc"), ["a", "b", "c"]);
         assert_eq!(proxy_lines("Cloud SQL proxy did not accept connections within 20 s: x"), ["x"]);
         assert!(proxy_lines("Cloud SQL IAM sign-in refused (the proxy used x): y").is_empty());
