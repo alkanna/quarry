@@ -653,7 +653,7 @@ fn inline_editor(ui: &mut egui::Ui, inl: &mut Inline, acts: &mut Vec<TreeAct>) {
     let date = inl.kind == "date";
     let utc = pickers::parse_mongo(&inl.text);
     let mut moment = utc.map(shown);
-    if inl.pick.is_some() && pickers::date_keys(ui, &mut moment, now) && let Some(c) = moment {
+    if inl.pick.is_some() && pickers::date_keys(ui, tid, &mut moment, now) && let Some(c) = moment {
         inl.text = write(c);
     }
     let alt_down = date && ui.input_mut(|i| i.consume_key(egui::Modifiers::ALT, Key::ArrowDown));

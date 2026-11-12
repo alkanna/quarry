@@ -34,6 +34,9 @@ pub(in crate::app) struct CellEdit {
     pub(in crate::app) refocus: bool,
     /// A helper reads plain keys (arrows, Space, letters) with no text box focused, so the page must not.
     pub(in crate::app) grabs_keys: bool,
+    /// The last press landed on a helper or the calendar button. egui reports the text box's lost focus on the frames
+    /// after the click, when the press is no longer in the input, so where it landed is kept until then.
+    pub(in crate::app) press_helper: bool,
     pub(in crate::app) keys: Option<KeyLook>,
 }
 
@@ -379,7 +382,7 @@ impl App {
         let list_n = list.len() + usize::from(list_null);
         if e.pick.is_some() {
             let mut v = pickers::parse_sql(&e.text);
-            if pickers::date_keys(ui, &mut v, now) && let Some(c) = v {
+            if pickers::date_keys(ui, id, &mut v, now) && let Some(c) = v {
                 (e.text, e.dirty, e.err) = (pickers::sql_text_like(c, col.kind == Kind::DateTime, &e.text), true, None);
             }
         } else if list_n > 0 {
@@ -413,6 +416,13 @@ impl App {
         }
         if std::mem::take(&mut e.refocus) {
             out.response.request_focus();
+        }
+        // A press is remembered until the focus it moves away is reported; once the text box has focus with no new
+        // press, nothing it loses next came from a click in the cell or a helper.
+        if let Some(p) = click {
+            e.press_helper = ours(p);
+        } else if out.response.has_focus() {
+            e.press_helper = false;
         }
         if out.response.changed() {
             (e.dirty, e.err, e.hl) = (true, None, None);
@@ -484,8 +494,7 @@ impl App {
             }
         } else if commit {
             e.done = Some(true);
-        } else if out.response.lost_focus() && !(ui.input(|i| i.pointer.any_pressed() || i.pointer.any_released()) && ui.input(|i| i.pointer.latest_pos()).is_some_and(ours)) {
-            // egui hands focus over on the release, so a click in a helper is told apart by where the pointer is.
+        } else if out.response.lost_focus() && !e.press_helper {
             // Enter on a highlighted row saves that row rather than the typed text.
             if let Some(h) = hl.filter(|h| enter && *h < list_n) {
                 e.text = list.get(h).map_or("NULL".into(), |x| x.0.clone());

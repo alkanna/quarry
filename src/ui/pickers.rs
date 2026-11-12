@@ -129,7 +129,12 @@ pub(crate) enum PickOut {
 
 /// Keys that move the picked day while the picker is open. Called before the text box, which would take the arrows.
 /// Up and Down move a week, Alt with Left or Right a day, Page Up and Page Down a month.
-pub(crate) fn date_keys(ui: &egui::Ui, v: &mut Option<Civil>, now: Civil) -> bool {
+/// The calendar's own fields (year, time) keep their arrows, so the day moves only while the editor's text box `text`
+/// has focus or nothing does.
+pub(crate) fn date_keys(ui: &egui::Ui, text: egui::Id, v: &mut Option<Civil>, now: Civil) -> bool {
+    if !ui.ctx().memory(|m| m.focused()).is_none_or(|f| f == text) {
+        return false;
+    }
     let (none, alt) = (egui::Modifiers::NONE, egui::Modifiers::ALT);
     let keys = [(none, Key::ArrowUp, (0, -7)), (none, Key::ArrowDown, (0, 7)), (alt, Key::ArrowLeft, (0, -1)), (alt, Key::ArrowRight, (0, 1)), (none, Key::PageUp, (-1, 0)), (none, Key::PageDown, (1, 0))];
     let step = ui.input_mut(|i| keys.iter().find(|k| i.consume_key(k.0, k.1)).map(|k| k.2));
@@ -139,63 +144,134 @@ pub(crate) fn date_keys(ui: &egui::Ui, v: &mut Option<Civil>, now: Civil) -> boo
     true
 }
 
+/// A month as one number, `year * 12 + month - 1`, so paging is adding.
+fn month_idx(y: i64, m: i64) -> i64 {
+    y * 12 + m - 1
+}
+
+/// The year and month (1 to 12) of a `month_idx`.
+fn month_of(i: i64) -> (i64, i64) {
+    (i.div_euclid(12), i.rem_euclid(12) + 1)
+}
+
+/// The months the calendar can show, January of year 1 to December of 9999.
+const MIN_MONTH: i64 = 12;
+const MAX_MONTH: i64 = 9999 * 12 + 11;
+
+/// What the calendar keeps between frames: the month shown, the picked day it was last centered on, whether the month
+/// chooser is open, and the pass it was drawn in.
+#[derive(Clone, Copy)]
+struct CalState {
+    month: i64,
+    seen: Option<i64>,
+    choosing: bool,
+    pass: u64,
+}
+
 /// The calendar under the editor at `at`. `v` is the moment the text holds, None when it does not parse. Returns
 /// whether `v` was changed here, what the footer asked for, and the rect it covers so a click in it is not a click
 /// outside the editor.
 pub(crate) fn date_picker(ctx: &egui::Context, id: egui::Id, at: egui::Pos2, v: &mut Option<Civil>, o: DateOpts) -> (bool, Option<PickOut>, egui::Rect) {
     let mid = id.with("month");
-    // The month shown follows the value when the text changes, and the arrows page without touching the value.
-    let (mut month, seen) = ctx.data(|d| d.get_temp::<(i64, Option<i64>)>(mid)).unwrap_or((i64::MIN, None));
+    // The month shown follows the value when the text changes, and the arrows page without touching the value. The
+    // state is dropped when the calendar was not drawn last pass, so every cell opens on its own month and on days.
+    let pass = ctx.cumulative_pass_nr();
+    let kept = ctx.data(|d| d.get_temp::<CalState>(mid)).filter(|k| k.pass + 1 >= pass);
+    let (mut month, mut choosing) = kept.map_or((i64::MIN, false), |k| (k.month, k.choosing));
     let cur = v.map(|c| c.day);
-    if month == i64::MIN || (cur != seen && cur.is_some()) {
+    if month == i64::MIN || (cur != kept.and_then(|k| k.seen) && cur.is_some()) {
         let (y, m, _) = civil_from_days(v.unwrap_or(o.now).day);
-        month = y * 12 + m - 1;
+        month = month_idx(y, m);
     }
     let (mut changed, mut out) = (false, None);
     let rect = float(ctx, id, at, egui::Align2::LEFT_TOP, 12, |ui| {
         ui.set_width(DATE_PICK_W);
         ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
-        let (y, m) = (month.div_euclid(12), month.rem_euclid(12) + 1);
+        let (y, m) = month_of(month);
+        // The title switches the grid to the twelve months of a year, for jumping far without paging month by month.
+        // There, a new year or month also moves the picked date, keeping its day, so Enter saves what is shown.
+        let mut moved = false;
         ui.horizontal(|ui| {
-            ui.label(semibold(RichText::new(format!("{} {y}", MONTHS[m as usize - 1])).size(TXT_TITLE).color(BRIGHT())));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if arrow(ui, false, "Next month").clicked() {
-                    month += 1;
+            let title = if choosing { MONTHS[m as usize - 1].to_string() } else { format!("{} {y}", MONTHS[m as usize - 1]) };
+            if title_button(ui, &title, choosing).clicked() {
+                choosing = !choosing;
+            }
+            if choosing {
+                let mut yy = y;
+                if ui.add(egui::DragValue::new(&mut yy).range(1..=9999).speed(0.1)).on_hover_text("Type or drag a year").changed() {
+                    (month, moved) = (month_idx(yy, m), true);
                 }
-                if arrow(ui, true, "Previous month").clicked() {
-                    month -= 1;
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let (step, unit) = if choosing { (12, "year") } else { (1, "month") };
+                if arrow(ui, false, &format!("Next {unit}")).clicked() {
+                    (month, moved) = (month + step, choosing);
+                }
+                if arrow(ui, true, &format!("Previous {unit}")).clicked() {
+                    (month, moved) = (month - step, choosing);
                 }
             });
         });
         ui.add_space(8.0);
-        let cw = DATE_PICK_W / 7.0;
-        let (head, _) = ui.allocate_exact_size(egui::vec2(DATE_PICK_W, DATE_HEAD_H), Sense::hover());
-        for (i, d) in ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"].iter().enumerate() {
-            ui.painter().text(egui::pos2(head.left() + cw * (i as f32 + 0.5), head.center().y), egui::Align2::CENTER_CENTER, *d, FontId::proportional(TXT_CAPTION), FAINT());
+        if choosing {
+            // The same height as the days, so the card does not jump when it switches.
+            let (grid, _) = ui.allocate_exact_size(egui::vec2(DATE_PICK_W, DATE_HEAD_H + DATE_DAY_H * 6.0), Sense::hover());
+            let size = egui::vec2(DATE_PICK_W / 3.0, grid.height() / 4.0);
+            let picked = cur.map(civil_from_days);
+            let (ty, tm, _) = civil_from_days(o.now.day);
+            for (i, name) in MONTHS.iter().enumerate() {
+                let cell = egui::Rect::from_min_size(grid.min + egui::vec2(size.x * (i % 3) as f32, size.y * (i / 3) as f32), size).shrink(3.0);
+                let r = ui.interact(cell, id.with(("month", i)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                let on = picked.is_some_and(|(py, pm, _)| py == y && pm == i as i64 + 1);
+                ui.painter().rect_filled(cell, R_SM, if on { state_fill(ui, PRIMARY()) } else { menu_fill(&r) });
+                // This month is outlined like today in the days, so it reads the same with or without a value.
+                if !on && ty == y && tm == i as i64 + 1 {
+                    ui.painter().rect_stroke(cell, R_SM, Stroke::new(1.0, PRIMARY()), egui::StrokeKind::Inside);
+                }
+                let fg = if on { ON_PRIMARY() } else { TEXT() };
+                let g = ui.painter().layout_no_wrap(name[..3].to_string(), FontId::proportional(TXT_SMALL), fg);
+                galley_at(ui.painter(), cell.center().x - g.size().x / 2.0, cell.center().y, g, fg);
+                r.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, on, *name));
+                if r.clicked() {
+                    (month, choosing, moved) = (month_idx(y, i as i64 + 1), false, true);
+                }
+            }
+        } else {
+            let cw = DATE_PICK_W / 7.0;
+            let (head, _) = ui.allocate_exact_size(egui::vec2(DATE_PICK_W, DATE_HEAD_H), Sense::hover());
+            for (i, d) in ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"].iter().enumerate() {
+                ui.painter().text(egui::pos2(head.left() + cw * (i as f32 + 0.5), head.center().y), egui::Align2::CENTER_CENTER, *d, FontId::proportional(TXT_CAPTION), FAINT());
+            }
+            let first = days_from_civil(y, m, 1);
+            // 1970-01-01 was a Thursday, so Monday is day 0 of the week at (day + 3) mod 7.
+            let lead = (first + 3).rem_euclid(7);
+            let start = first - lead;
+            let (grid, _) = ui.allocate_exact_size(egui::vec2(DATE_PICK_W, DATE_DAY_H * 6.0), Sense::hover());
+            for k in 0..42 {
+                let day = start + k;
+                let cell = egui::Rect::from_min_size(grid.min + egui::vec2(cw * (k % 7) as f32, DATE_DAY_H * (k / 7) as f32), egui::vec2(cw, DATE_DAY_H)).shrink(1.5);
+                let r = ui.interact(cell, id.with(("day", day)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                let (_, dm, dd) = civil_from_days(day);
+                let picked = cur == Some(day);
+                let fill = if picked { state_fill(ui, PRIMARY()) } else { menu_fill(&r) };
+                ui.painter().rect_filled(cell, R_SM, fill);
+                if day == o.now.day && !picked {
+                    ui.painter().rect_stroke(cell, R_SM, Stroke::new(1.0, PRIMARY()), egui::StrokeKind::Inside);
+                }
+                let color = if picked { ON_PRIMARY() } else if dm != m { FAINT() } else { TEXT() };
+                ui.painter().text(cell.center(), egui::Align2::CENTER_CENTER, dd.to_string(), FontId::proportional(TXT_SMALL), color);
+                r.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, picked, format!("Day {dd}")));
+                if r.clicked() {
+                    *v = Some(Civil { day, ms: v.map_or(0, |c| c.ms) });
+                    changed = true;
+                }
+            }
         }
-        let first = days_from_civil(y, m, 1);
-        // 1970-01-01 was a Thursday, so Monday is day 0 of the week at (day + 3) mod 7.
-        let lead = (first + 3).rem_euclid(7);
-        let start = first - lead;
-        let (grid, _) = ui.allocate_exact_size(egui::vec2(DATE_PICK_W, DATE_DAY_H * 6.0), Sense::hover());
-        for k in 0..42 {
-            let day = start + k;
-            let cell = egui::Rect::from_min_size(grid.min + egui::vec2(cw * (k % 7) as f32, DATE_DAY_H * (k / 7) as f32), egui::vec2(cw, DATE_DAY_H)).shrink(1.5);
-            let r = ui.interact(cell, id.with(("day", day)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
-            let (_, dm, dd) = civil_from_days(day);
-            let picked = cur == Some(day);
-            let fill = if picked { state_fill(ui, PRIMARY()) } else { menu_fill(&r) };
-            ui.painter().rect_filled(cell, R_SM, fill);
-            if day == o.now.day && !picked {
-                ui.painter().rect_stroke(cell, R_SM, Stroke::new(1.0, PRIMARY()), egui::StrokeKind::Inside);
-            }
-            let color = if picked { ON_PRIMARY() } else if dm != m { FAINT() } else { TEXT() };
-            ui.painter().text(cell.center(), egui::Align2::CENTER_CENTER, dd.to_string(), FontId::proportional(TXT_SMALL), color);
-            r.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, picked, format!("Day {dd}")));
-            if r.clicked() {
-                *v = Some(Civil { day, ms: v.map_or(0, |c| c.ms) });
-                changed = true;
-            }
+        month = month.clamp(MIN_MONTH, MAX_MONTH);
+        if moved && let Some(c) = *v {
+            let (py, pm, _) = civil_from_days(c.day);
+            *v = Some(c.add_months(month - month_idx(py, pm)));
+            changed = true;
         }
         if o.time {
             ui.add_space(8.0);
@@ -276,7 +352,7 @@ pub(crate) fn date_picker(ctx: &egui::Context, id: egui::Id, at: egui::Pos2, v: 
             });
         });
     });
-    ctx.data_mut(|d| d.insert_temp(mid, (month, v.map(|c| c.day))));
+    ctx.data_mut(|d| d.insert_temp(mid, CalState { month, seen: v.map(|c| c.day), choosing, pass }));
     (changed, out, rect)
 }
 
@@ -295,6 +371,19 @@ fn float(ctx: &egui::Context, id: egui::Id, at: egui::Pos2, pivot: egui::Align2,
 /// The fill of a row or button on a popup in its idle, hovered and pressed states.
 fn menu_fill(r: &egui::Response) -> Color32 {
     [Color32::TRANSPARENT, MENU_HOVER(), menu_pressed()][state_of(r)]
+}
+
+/// The calendar's title as a button with a chevron, which opens the month and year chooser.
+fn title_button(ui: &mut egui::Ui, text: &str, open: bool) -> egui::Response {
+    let g = ui.painter().layout_job(egui::text::LayoutJob::single_section(text.to_string(), ui_fmt(TXT_TITLE, BRIGHT(), W_SEMIBOLD, 0.0)));
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(g.size().x + 26.0, BUTTON_H), Sense::click());
+    ui.painter().rect_filled(rect, R_SM, if open && state_of(&r) == 0 { MENU_HOVER() } else { menu_fill(&r) });
+    focus_ring(ui, &r, rect, R_SM as f32);
+    galley_at(ui.painter(), rect.left() + 6.0, rect.center().y, g, BRIGHT());
+    chevron(ui.painter(), egui::pos2(rect.right() - 10.0, rect.center().y), true, MUTED());
+    let name = if open { "Back to days" } else { "Choose month and year" };
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
+    r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(name)
 }
 
 /// A small round arrow button for the month pager, painted so it centers.
@@ -480,5 +569,45 @@ mod tests {
         assert_eq!(mongo_text(ms, Some(3600)), "2026-11-09T13:30:19.000+01:00");
         assert_eq!(parse_mongo("2026-11-09T13:30:19.000+01:00"), Some(ms));
         assert_eq!(Civil { day: days_from_civil(2026, 1, 31), ms: 5 }.add_months(1), Civil { day: days_from_civil(2026, 2, 28), ms: 5 });
+    }
+}
+
+#[cfg(test)]
+mod ui_tests {
+    use super::*;
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    /// The calendar alone, showing November 2026 with the 9th picked.
+    fn calendar() -> Harness<'static, Option<Civil>> {
+        Harness::builder().with_accessibility_check(false).build_ui_state(
+            |ui, v: &mut Option<Civil>| {
+                let o = DateOpts { time: false, millis: false, zone: Zone::Note(String::new()), nullable: false, now: Civil { day: days_from_civil(2026, 11, 12), ms: 0 }, now_button: true };
+                date_picker(ui.ctx(), egui::Id::unique("cal-test"), egui::pos2(10.0, 10.0), v, o);
+            },
+            Some(Civil { day: days_from_civil(2026, 11, 9), ms: 0 }),
+        )
+    }
+
+    #[test]
+    fn months_page_and_the_title_picks_a_month_and_year() {
+        let mut h = calendar();
+        h.run();
+        h.get_by_label("Next month").click();
+        h.run();
+        h.get_by_label("Day 25").click();
+        h.run();
+        assert_eq!(h.state().map(|c| c.ymd()).as_deref(), Some("2026-12-25"));
+        h.get_by_label("Choose month and year").click();
+        h.run();
+        h.get_by_label("Previous year").click();
+        h.run();
+        h.get_by_label("March").click();
+        h.run();
+        // Choosing a year and month moves the picked date with them, keeping its day.
+        assert_eq!(h.state().map(|c| c.ymd()).as_deref(), Some("2025-03-25"));
+        h.get_by_label("Day 15").click();
+        h.run();
+        assert_eq!(h.state().map(|c| c.ymd()).as_deref(), Some("2025-03-15"));
     }
 }
