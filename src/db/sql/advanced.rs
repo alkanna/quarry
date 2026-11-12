@@ -76,6 +76,8 @@ pub struct TestInfo {
     pub schemas: Vec<String>,
     /// PostgreSQL: (setting, the server's refusal) of each row the server did not accept.
     pub setting_errors: Vec<(String, String)>,
+    /// PostgreSQL: the subject of the client certificate the server saw, empty when none was sent.
+    pub client_dn: String,
 }
 
 fn word(s: &str, extra: &str) -> bool {

@@ -58,20 +58,32 @@ fn tls_settings(ui: &mut egui::Ui, f: &mut ConnForm) {
             form_label(ui, if pg { "Mode" } else { "SSL mode" });
             segmented(ui, &mut f.addr.ssl_mode, if pg { &db::sql::SslMode::PG_ALL } else { &db::sql::SslMode::ALL });
             ui.end_row();
-            form_label(ui, "CA file");
-            ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut f.addr.ssl_ca).hint_text("optional, PEM file").desired_width(280.0));
-                if ui.button("Choose…").clicked() {
-                    if let Some(p) = rfd::FileDialog::new().set_directory(dirs::home_dir().unwrap_or_default()).pick_file() {
-                        f.addr.ssl_ca = p.display().to_string();
+            let file_row = |ui: &mut egui::Ui, label: &str, path: &mut String| {
+                form_label(ui, label);
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(path).hint_text("optional, PEM file").desired_width(280.0));
+                    if ui.button("Choose…").clicked() {
+                        if let Some(p) = rfd::FileDialog::new().set_directory(dirs::home_dir().unwrap_or_default()).pick_file() {
+                            *path = p.display().to_string();
+                        }
                     }
-                }
-            });
-            ui.end_row();
+                });
+                ui.end_row();
+            };
+            file_row(ui, "CA file", &mut f.addr.ssl_ca);
+            if pg {
+                file_row(ui, "Client cert", &mut f.addr.ssl_cert);
+                file_row(ui, "Client key", &mut f.addr.ssl_key);
+                form_label(ui, "Passphrase");
+                ui.add(egui::TextEdit::singleline(&mut f.pg_key_pass).password(true).hint_text("only for an encrypted key").desired_width(280.0));
+                ui.end_row();
+            }
         });
         ui.add_space(6.0);
         if f.engine == db::sql::Engine::Postgres {
             ui.add(egui::Label::new(RichText::new("Names follow libpq sslmode. prefer tries TLS and falls back to plain, require encrypts without checking the certificate, verify-ca checks the chain and verify-full also checks the host name. Through an SSH tunnel the host name is the tunnel's, so verify-full behaves like verify-ca.").size(TXT_SMALL).color(FAINT())).wrap());
+            ui.add_space(4.0);
+            ui.add(egui::Label::new(RichText::new("Certificate and key are PEM files. The passphrase is only for an encrypted key.").size(TXT_SMALL).color(FAINT())).wrap());
         } else {
             ui.label(RichText::new("Through an SSH tunnel the host name is the tunnel's, so Verify identity behaves like Verify CA.").size(TXT_SMALL).color(FAINT()));
         }
@@ -255,7 +267,8 @@ fn paste_apply(st: &mut Paste, f: &mut ConnForm) {
     match db::sql::Addr::from_paste(&st.text) {
         Ok(a) => {
             let had_password = !a.password.is_empty();
-            st.filled = [true, true, !a.user.is_empty(), had_password, !a.database.is_empty(), a.ssl_mode != db::sql::SslMode::Preferred || !a.ssl_ca.is_empty()];
+            let cert = !a.ssl_cert.is_empty() || !a.ssl_key.is_empty();
+            st.filled = [true, true, !a.user.is_empty(), had_password, !a.database.is_empty(), a.ssl_mode != db::sql::SslMode::Preferred || !a.ssl_ca.is_empty() || cert];
             let mut parts = vec!["host", "port"];
             for (i, w) in [(PASTE_USER, "user"), (PASTE_PASSWORD, "password"), (PASTE_DATABASE, "database")] {
                 if st.filled[i] {
@@ -265,6 +278,9 @@ fn paste_apply(st: &mut Paste, f: &mut ConnForm) {
             let mut note = format!("Filled {}", parts.join(", "));
             if st.filled[PASTE_TLS] {
                 note += &format!(" and TLS {}", a.ssl_mode.pg_name());
+                if cert {
+                    note += " with a client certificate";
+                }
             }
             note += if had_password { "." } else { ". No password in the URL, type it below." };
             f.addr = db::sql::Addr { ssl_mode: a.ssl_mode, ..a };
@@ -740,7 +756,9 @@ impl App {
             }
             Some(Err(e)) if e.contains(crate::cloudsql::PROXY_MISSING) => {}
             Some(Err(e)) => {
-                ui.add(egui::Label::new(RichText::new(e).color(ALERT())).wrap());
+                // The driver's text for a client certificate problem names no file or fix; the explained words do.
+                let text = db::client_cert_problem(e).map_or_else(|| e.clone(), |(t, h)| format!("{t}. {h}"));
+                ui.add(egui::Label::new(RichText::new(text).color(ALERT())).wrap());
             }
             None => {}
         }
@@ -802,6 +820,7 @@ impl App {
                             set_secret(id, "ssh-password", if f.ssh_on { &f.ssh_pwd } else { "" }),
                             set_secret(id, "ssh-passphrase", if f.ssh_on { &f.ssh_pass } else { "" }),
                             set_secret(id, "proxy-password", if f.proxy_on && !f.ssh_on && !f.engine.is_sql() { &f.proxy_pwd } else { "" }),
+                            set_secret(id, "pg-key-passphrase", if f.engine == db::sql::Engine::Postgres && f.cloud_on().is_none() && !f.addr.ssl_key.trim().is_empty() { &f.pg_key_pass } else { "" }),
                         ]
                     };
                     let meta = ConnMeta {

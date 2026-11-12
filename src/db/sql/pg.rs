@@ -626,6 +626,8 @@ struct Facts {
     version: String,
     tls: bool,
     timeout: String,
+    /// The subject of the client certificate the server checked, or empty.
+    client_dn: String,
 }
 
 /// The guard settings, the version, the TLS state and the statement timeout in one SELECT. Behind a pooler the session
@@ -633,7 +635,7 @@ struct Facts {
 async fn probe(c: &mut sqlx::PgConnection, guarded: bool) -> Res<Facts> {
     let rows = c
         .fetch_all(
-            "SELECT current_setting('server_version_num'), split_part(current_setting('server_version'), ' ', 1), COALESCE((SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()), false)::text, current_setting('statement_timeout'), current_setting('default_transaction_read_only'), current_setting('standard_conforming_strings')",
+            "SELECT current_setting('server_version_num'), split_part(current_setting('server_version'), ' ', 1), COALESCE((SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()), false)::text, current_setting('statement_timeout'), current_setting('default_transaction_read_only'), current_setting('standard_conforming_strings'), COALESCE((SELECT client_dn FROM pg_stat_ssl WHERE pid = pg_backend_pid()), '')",
         )
         .await
         .map_err(se)?;
@@ -650,7 +652,7 @@ async fn probe(c: &mut sqlx::PgConnection, guarded: bool) -> Res<Facts> {
     }
     // Only a sane value is kept, because it is written back into SET LOCAL statements.
     let timeout = Some(text(3)).filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_alphanumeric())).unwrap_or_else(|| "0".into());
-    Ok(Facts { version, tls: text(2) == "true", timeout })
+    Ok(Facts { version, tls: text(2) == "true", timeout, client_dn: text(6) })
 }
 
 /// Connects the way `worker::open_full` does for MySQL: one plain connection first, so a refusal (the guard, the
@@ -662,6 +664,14 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
     if net.cloud_sql.is_some() && net.ssh.is_some() {
         return Err("Cloud SQL and an SSH tunnel cannot be used together".into());
     }
+    // Read before any tunnel or proxy starts. The Cloud SQL proxy does its own TLS, and libpq ignores the files when
+    // sslmode is disable. Decrypting a key runs a deliberately slow key derivation, so it stays off the async threads.
+    let client_cert = if net.cloud_sql.is_none() && a.ssl_mode != SslMode::Disabled {
+        let (c, k, p) = (a.ssl_cert.clone(), a.ssl_key.clone(), net.key_passphrase.clone());
+        tokio::task::spawn_blocking(move || super::pg_cert::load(&c, &k, p.as_deref())).await.map_err(|e| e.to_string())??
+    } else {
+        None
+    };
     let (way, host, port, mode) = if let Some(conf) = &net.cloud_sql {
         let gcloud = net.tools.gcloud.clone().or_else(|| crate::cloudsql::find_gcloud(""));
         let exe = match net.tools.proxy.clone() {
@@ -701,6 +711,10 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
     base = base.password(&a.password);
     if !a.ssl_ca.is_empty() {
         base = base.ssl_root_cert(&a.ssl_ca);
+    }
+    // Handed over as PEM in memory, so the pool's later connections never read the files again.
+    if let Some((cert, key)) = client_cert {
+        base = base.ssl_client_cert_from_pem(cert).ssl_client_key_from_pem(key);
     }
     // Also a plain startup parameter, so a pooler that refuses `options` still shows the name.
     base = base.application_name(sess.settings.iter().find(|(n, _)| n == "application_name").map_or("Quarry", |(_, v)| v.as_str()));
@@ -753,7 +767,9 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
         .await;
         let _ = c.close().await;
         let (f, dbs, schemas) = res?;
-        Ok::<_, String>((f, dbs, opts, locals, TestInfo { schemas, setting_errors: errors, ..Default::default() }))
+        // Behind a pooler pg_stat_ssl describes the pooler's own connection, not this client's.
+        let client_dn = if locals.is_some() { String::new() } else { super::pg_cert::subject(&f.client_dn) };
+        Ok::<_, String>((f, dbs, opts, locals, TestInfo { schemas, setting_errors: errors, client_dn, ..Default::default() }))
     };
     let (f, dbs, opts, locals, ti) = tokio::time::timeout(timeout, first).await.map_err(|_| format!("Could not connect and set up the session within {} s", timeout.as_secs()))?.map_err(|m| match (&net.cloud_sql, &way) {
         // A refused login is most often the wrong Google identity. IAM always signs in with Application Default

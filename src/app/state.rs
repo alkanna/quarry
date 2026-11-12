@@ -1050,6 +1050,8 @@ pub(super) struct ConnForm {
     pub(super) proxy_on: bool,
     pub(super) proxy: db::Proxy,
     pub(super) proxy_pwd: String,
+    /// PostgreSQL: the passphrase of an encrypted client key, kept in the Keychain.
+    pub(super) pg_key_pass: String,
     pub(super) testing: bool,
     /// Charset, collation and init command are edited in place; the rest has form state of its own below.
     pub(super) adv: db::sql::Advanced,
@@ -1270,6 +1272,7 @@ impl ConnForm {
             proxy: (self.proxy_on && !self.ssh_on && !self.engine.is_sql()).then(|| db::Proxy { host: self.proxy.host.trim().into(), password: Some(self.proxy_pwd.clone()), ..self.proxy.clone() }),
             cloud_sql: self.cloud_sql.clone().filter(|_| self.engine == db::sql::Engine::Postgres),
             tools: Default::default(),
+            key_passphrase: (self.engine == db::sql::Engine::Postgres && !self.pg_key_pass.is_empty()).then(|| self.pg_key_pass.clone()),
         }
     }
 }
@@ -1396,6 +1399,7 @@ pub(super) fn net_of(meta: &ConnMeta) -> db::Net {
         proxy: meta.proxy.clone().map(|p| db::Proxy { password: secret(meta.id, "proxy-password"), ..p }),
         cloud_sql: meta.cloud_sql.clone(),
         tools: Default::default(),
+        key_passphrase: None,
     }
 }
 
@@ -1497,6 +1501,10 @@ impl App {
         let mut net = net_of(&c.meta);
         let adv = c.meta.advanced.clone();
         net.tools = tools;
+        // Only a connection with a client key can have a passphrase, so the others never ask the Keychain for one.
+        if c.meta.engine == db::sql::Engine::Postgres && db::sql::Addr::parse(&uri).is_some_and(|a| !a.ssl_key.is_empty()) {
+            net.key_passphrase = secret(id, "pg-key-passphrase");
+        }
         if c.meta.engine.is_sql() {
             self.worker.sql_connect_with(id, attempt, uri, self.timeout(), net, adv);
         } else {

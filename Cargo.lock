@@ -4382,6 +4382,7 @@ dependencies = [
  "libc",
  "mongodb",
  "muda",
+ "pkcs8 0.11.0",
  "rfd",
  "russh",
  "serde",
