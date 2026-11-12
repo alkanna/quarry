@@ -249,8 +249,8 @@ pub struct App {
     tool: Option<ToolRun>,
     /// CPU time of the last frame in milliseconds, for the frame rate readout.
     frame_ms: f32,
-    /// Whether the current scroll gesture is locked vertical, and when that axis last moved, for `prefs.lock_scroll_axis`.
-    scroll_axis: Option<(bool, f64)>,
+    /// The current scroll gesture for `prefs.lock_scroll_axis`: distance so far, locked axis (true is vertical) and last scroll time.
+    scroll_gesture: (egui::Vec2, Option<bool>, f64),
     /// Last memory and CPU sample for the status bar: when, total CPU time then, CPU percent, bytes.
     usage: (std::time::Instant, Duration, f32, Option<u64>),
     /// Frame rate readout: seconds and frames counted so far, and the rate last shown.
@@ -387,7 +387,7 @@ impl App {
             tool: None,
             width_cache: HashMap::new(),
             frame_ms: 0.0,
-            scroll_axis: None,
+            scroll_gesture: (egui::Vec2::ZERO, None, f64::NEG_INFINITY),
             usage: (std::time::Instant::now(), Duration::ZERO, 0.0, None),
             fps: (0.0, 0, 0.0),
             closed: Vec::new(),
@@ -606,26 +606,38 @@ impl App {
     }
 
     /// Keeps one scroll gesture on the axis it started on, so a slightly diagonal trackpad swipe
-    /// does not drift off the row the eye follows. The lock ends 0.25 s after the locked axis last moved.
+    /// does not drift off the row the eye follows, like NSScrollView's predominant axis scrolling.
     pub(super) fn lock_scroll_axis(&mut self, ctx: &egui::Context) {
-        // A read lock first, since nearly every frame has no scroll.
-        if !self.prefs.lock_scroll_axis || ctx.input(|i| i.smooth_scroll_delta == egui::Vec2::ZERO) {
+        if !self.prefs.lock_scroll_axis {
             return;
         }
-        ctx.input_mut(|i| {
-            let d = i.smooth_scroll_delta;
-            let (vertical, locked) = match self.scroll_axis {
-                Some((v, t)) if i.time - t < 0.25 => (v, true),
-                // The first frames of a swipe are often sideways, so lock only once one axis clearly leads.
-                _ => (d.y.abs() >= d.x.abs(), d.y.abs() >= 2.0 * d.x.abs() || d.x.abs() >= 2.0 * d.y.abs()),
-            };
-            let moved = if vertical { i.smooth_scroll_delta.x = 0.0; d.y } else { i.smooth_scroll_delta.y = 0.0; d.x };
-            // Refreshed only when the kept axis moves, so a new swipe the other way is not swallowed by the lock it replaces.
-            if locked && moved != 0.0 {
-                self.scroll_axis = Some((vertical, i.time));
-            }
-        });
+        let (d, started, t) = ctx.input(|i| (i.smooth_scroll_delta, i.events.iter().any(|e| matches!(e, egui::Event::MouseWheel { phase: egui::TouchPhase::Start, .. })), i.time));
+        if let Some(vertical) = scroll_axis(&mut self.scroll_gesture, d, started, t) {
+            ctx.input_mut(|i| if vertical { i.smooth_scroll_delta.x = 0.0 } else { i.smooth_scroll_delta.y = 0.0 });
+        }
     }
+}
+
+/// Which axis a scroll frame keeps, or None when nothing scrolls. The axis is picked once per gesture,
+/// from the distance so far rather than one frame, because single frames at the start of a swipe are noisy
+/// and a wrong pick then held for the whole gesture is what made scrolling feel like a fight.
+/// Fingers touching the trackpad start a new gesture (and stop momentum), so a swipe the other way
+/// takes over at once. Wheels and platforms that send no phases start one after a 0.2 s pause.
+fn scroll_axis(g: &mut (egui::Vec2, Option<bool>, f64), d: egui::Vec2, started: bool, t: f64) -> Option<bool> {
+    if started || (d != egui::Vec2::ZERO && t - g.2 > 0.2) {
+        *g = (egui::Vec2::ZERO, None, t);
+    }
+    if d == egui::Vec2::ZERO {
+        return None;
+    }
+    g.0 += d;
+    g.2 = t;
+    let vertical = g.0.y.abs() >= g.0.x.abs();
+    // Until 8 pt have gone by the leading axis may still change, but the distance so far keeps it from flickering.
+    if g.1.is_none() && g.0.length() >= 8.0 {
+        g.1 = Some(vertical);
+    }
+    Some(g.1.unwrap_or(vertical))
 }
 
 impl eframe::App for App {
@@ -778,6 +790,23 @@ mod tests {
             assert_eq!(collection_ref(word), format!("db.collection(\"{word}\")"));
         }
         assert_eq!(query_script("default", ""), "async function run() {\n\treturn await db.collection(\"default\").find({})\n}");
+    }
+
+    #[test]
+    fn scroll_axis_is_picked_once_per_gesture() {
+        let v = egui::vec2;
+        let mut g = (egui::Vec2::ZERO, None, f64::NEG_INFINITY);
+        // A sideways first frame does not decide a mostly vertical swipe.
+        assert_eq!(scroll_axis(&mut g, v(2.0, 0.5), true, 0.0), Some(false));
+        assert_eq!(scroll_axis(&mut g, v(1.0, 8.0), false, 0.016), Some(true));
+        assert_eq!(g.1, Some(true));
+        // Once locked, a sideways frame and the momentum after it stay vertical.
+        assert_eq!(scroll_axis(&mut g, v(9.0, 1.0), false, 0.032), Some(true));
+        assert_eq!(scroll_axis(&mut g, egui::Vec2::ZERO, false, 0.048), None);
+        // Fingers down start a new gesture, which can go across right away.
+        assert_eq!(scroll_axis(&mut g, v(10.0, 1.0), true, 0.06), Some(false));
+        // A wheel with no phases starts a new gesture after a pause.
+        assert_eq!(scroll_axis(&mut g, v(0.0, 12.0), false, 0.5), Some(true));
     }
 
 }
