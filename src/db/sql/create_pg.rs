@@ -7,11 +7,11 @@
 //! round trip before it drops it, which no lock can close.
 
 use super::create::{Ddl, DropInfo};
-use super::ddl::{snapshot, ColDef};
-use super::ddl_pg::{col_body, comment_stmt, exec, lock_error, may_lock_one, name_ok, q, read_in, run_locked, set_local, set_lock_wait, set_path, table_state, unknown_type, Fail};
+use super::ddl::{fk_problem, ref_state, snapshot, ColDef};
+use super::ddl_pg::{check_constraint_pg, col_body, comment_stmt, exec, fail_text, fk_refs, lock_error, may_lock, may_lock_one, name_ok, q, read_in, run_locked, set_local, set_lock_wait, set_path, table_state, unknown_type, Fail, Lock};
 use super::exec::{sql_state, Cells, Conn, SqlRow, Tx};
 use sqlx::Connection as _;
-use super::structure::{num, Structure};
+use super::structure::{num, Column, ForeignKey, Index, IndexCol, Structure};
 use super::value::Param;
 use super::worker::text;
 use super::write::{self, SqlUndo};
@@ -62,18 +62,223 @@ fn existing(what: &str, name: &str) -> Res<()> {
     Ok(())
 }
 
-pub fn create_db_sql(name: &str, template: Option<&str>, templates: &[String]) -> Res<String> {
+/// A template database and the settings a copy of it keeps unless template0 is the template.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Template {
+    pub name: String,
+    pub encoding: String,
+    pub collate: String,
+    pub ctype: String,
+    /// "c" libc, "i" ICU, "b" builtin (17 and later). Always "c" before 15.
+    pub provider: String,
+    /// The ICU locale of an ICU template, empty otherwise.
+    pub icu: String,
+}
+
+/// What the server offers a new database, read when the New database dialog opens and again right before the create.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DbChoices {
+    /// server_version_num, such as 180001.
+    pub version: u32,
+    pub templates: Vec<Template>,
+    /// The server encodings, by name.
+    pub encodings: Vec<String>,
+    /// The libc locales the server knows, each with the encoding it is for, empty for any.
+    pub locales: Vec<(String, String)>,
+    /// The ICU locales, empty when the server has no ICU.
+    pub icu_locales: Vec<String>,
+    /// The roles the connected role may make the owner: those it may SET ROLE to (16 and later) or is a member of (before 16). A
+    /// superuser gets every role. The server's predefined pg_ roles are left out.
+    pub owners: Vec<String>,
+    /// The connected role.
+    pub me: String,
+}
+
+impl DbChoices {
+    /// The ICU provider and ICU_LOCALE came with PostgreSQL 15, and need a server built with ICU.
+    pub fn icu_ok(&self) -> bool {
+        self.version >= 150000 && !self.icu_locales.is_empty()
+    }
+
+    pub fn template(&self, name: Option<&str>) -> Option<&Template> {
+        let name = name.unwrap_or(DEFAULT_TEMPLATE);
+        self.templates.iter().find(|t| t.name == name)
+    }
+
+    /// The libc locales that work with `encoding`.
+    pub fn locales_for<'a>(&'a self, encoding: &'a str) -> impl Iterator<Item = &'a String> + 'a {
+        self.locales.iter().filter(move |(_, e)| e.is_empty() || e.eq_ignore_ascii_case(encoding)).map(|(l, _)| l)
+    }
+
+    /// The libc locales offered with `encoding`, sorted: the imported ones plus the template's own when the encoding is the
+    /// template's. An image without imported OS locales lists only C and POSIX, yet the server takes the locale it was made with.
+    pub fn locales_with(&self, encoding: &str, tpl: Option<&Template>) -> Vec<String> {
+        let mut v: Vec<String> = self.locales_for(encoding).cloned().collect();
+        if let Some(t) = tpl.filter(|t| t.encoding.eq_ignore_ascii_case(encoding)) {
+            v.extend([&t.collate, &t.ctype].into_iter().filter(|l| !l.is_empty()).cloned());
+        }
+        v.sort();
+        v.dedup();
+        v
+    }
+
+    /// The provider a new database gets, "c", "i" or "b": the one picked, else the template's.
+    pub fn provider_of(&self, o: &DbOpts) -> String {
+        match o.provider.as_deref() {
+            Some("icu") => "i".into(),
+            Some(_) => "c".into(),
+            None => self.template(o.template.as_deref()).map(|t| t.provider.clone()).filter(|p| !p.is_empty()).unwrap_or_else(|| "c".into()),
+        }
+    }
+
+    /// From 16 LOCALE also sets the ICU or builtin locale when the provider is not libc, where before it set only LC_COLLATE and
+    /// LC_CTYPE. Offering it only where it means the same on every version keeps the preview honest.
+    pub fn locale_word_ok(&self, o: &DbOpts) -> bool {
+        self.version < 160000 || self.provider_of(o) == "c"
+    }
+
+    /// Why an encoding picked with the template's locale left in place would be refused: the template's LC_COLLATE or LC_CTYPE
+    /// does not go with it. SQL_ASCII is left to the server, which takes any locale with it for a superuser.
+    pub fn template_locale_problem(&self, o: &DbOpts) -> Option<String> {
+        let enc = o.encoding.as_deref()?;
+        let t = self.template(o.template.as_deref())?;
+        if enc.eq_ignore_ascii_case("SQL_ASCII") || o.locale.is_some() {
+            return None;
+        }
+        let offered = self.locales_with(enc, Some(t));
+        let kept = [(o.lc_collate.is_none(), &t.collate), (o.lc_ctype.is_none(), &t.ctype)];
+        let (_, l) = kept.into_iter().find(|(k, l)| *k && !l.is_empty() && !offered.contains(l))?;
+        Some(format!("The template's locale {l} does not go with the encoding {enc}. Pick a locale for it too (C goes with every encoding)."))
+    }
+}
+
+/// How the dialog names a provider letter of pg_database.
+pub fn provider_name(p: &str) -> &'static str {
+    match p {
+        "i" => "icu",
+        "b" => "builtin",
+        _ => "libc",
+    }
+}
+
+/// What CREATE DATABASE copies when no template is named.
+pub const DEFAULT_TEMPLATE: &str = "template1";
+
+/// The only template a copy of may take another encoding, locale or provider: the server refuses that for any other, because its
+/// data may already be in the old ones.
+pub const PRISTINE: &str = "template0";
+
+/// The options of a new database. None is the template's own setting (or the connected role, for the owner).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DbOpts {
+    pub template: Option<String>,
+    pub encoding: Option<String>,
+    /// LOCALE, which sets LC_COLLATE and LC_CTYPE at once; the server refuses it together with either of those.
+    pub locale: Option<String>,
+    pub lc_collate: Option<String>,
+    pub lc_ctype: Option<String>,
+    /// LOCALE_PROVIDER: "libc" or "icu".
+    pub provider: Option<String>,
+    pub icu_locale: Option<String>,
+    pub owner: Option<String>,
+}
+
+/// A setting written as a plain string literal. Every value comes from a list the server gave, and none holds a quote, a backslash or a
+/// control character, so the literal reads the same whatever standard_conforming_strings is on the session that runs it.
+fn setting(what: &str, v: &str) -> Res<String> {
+    if v.is_empty() || v.chars().any(|c| c == '\'' || c == '\\' || c.is_control()) {
+        return Err(format!("{what} {v:?} is not one this server lists."));
+    }
+    Ok(format!("'{v}'"))
+}
+
+pub fn create_db_sql(name: &str, o: &DbOpts, ch: &DbChoices) -> Res<String> {
     new_name("A database", name)?;
     if system_db(name) {
         return Err(format!("{name} belongs to the server and is left alone."));
     }
-    let with = match template {
-        None => String::new(),
+    let mut sql = format!("CREATE DATABASE {}", q(name));
+    if let Some(r) = &o.owner {
+        if !ch.owners.contains(r) {
+            return Err(format!("{r} is not a role this connection can make the owner."));
+        }
+        sql.push_str(&format!(" OWNER {}", q(r)));
+    }
+    if let Some(t) = &o.template {
         // The list is the server's own. A name outside it would be a database someone is connected to, which PostgreSQL refuses to copy.
-        Some(t) if templates.iter().any(|k| k == t) => format!(" TEMPLATE {}", q(t)),
-        Some(t) => return Err(format!("{t} is not a template database on this server.")),
+        if !ch.templates.iter().any(|k| &k.name == t) {
+            return Err(format!("{t} is not a template database on this server."));
+        }
+        sql.push_str(&format!(" TEMPLATE {}", q(t)));
+    }
+    let tpl = ch.template(o.template.as_deref());
+    if let Some(e) = &o.encoding {
+        if !ch.encodings.iter().any(|k| k == e) {
+            return Err(format!("{e} is not an encoding this server can store."));
+        }
+        sql.push_str(&format!(" ENCODING {}", setting("The encoding", e)?));
+    }
+    if o.locale.is_some() && (o.lc_collate.is_some() || o.lc_ctype.is_some()) {
+        return Err("Pick either one locale or LC_COLLATE and LC_CTYPE, not both.".into());
+    }
+    let enc = o.encoding.clone().or_else(|| tpl.map(|t| t.encoding.clone())).unwrap_or_default();
+    if o.locale.is_some() && !ch.locale_word_ok(o) {
+        let p = provider_name(&ch.provider_of(o));
+        return Err(format!("On PostgreSQL 16 and later LOCALE also sets the {p} locale of a database with the {p} provider. Pick LC_COLLATE and LC_CTYPE instead."));
+    }
+    let offered = ch.locales_with(&enc, tpl);
+    let own = |v: &String| tpl.is_some_and(|t| *v == t.collate || *v == t.ctype);
+    for (word, v) in [("LOCALE", &o.locale), ("LC_COLLATE", &o.lc_collate), ("LC_CTYPE", &o.lc_ctype)] {
+        let Some(v) = v else { continue };
+        if !ch.locales.iter().any(|(l, _)| l == v) && !own(v) {
+            return Err(format!("{v} is not a locale this server knows."));
+        }
+        if !offered.contains(v) {
+            return Err(format!("The locale {v} does not go with the encoding {enc}."));
+        }
+        sql.push_str(&format!(" {word} {}", setting("The locale", v)?));
+    }
+    if (o.provider.is_some() || o.icu_locale.is_some()) && ch.version < 150000 {
+        return Err("A locale provider and an ICU locale need PostgreSQL 15 or later.".into());
+    }
+    let icu = match o.provider.as_deref() {
+        None => tpl.is_some_and(|t| t.provider == "i"),
+        Some("icu") if !ch.icu_ok() => return Err("This server was built without ICU.".into()),
+        Some(p @ ("libc" | "icu")) => {
+            sql.push_str(&format!(" LOCALE_PROVIDER {p}"));
+            p == "icu"
+        }
+        Some(p) => return Err(format!("{p} is not a locale provider Quarry offers.")),
     };
-    Ok(format!("CREATE DATABASE {}{with}", q(name)))
+    match &o.icu_locale {
+        Some(_) if !icu => return Err("An ICU locale needs the ICU provider.".into()),
+        Some(v) if !ch.icu_locales.contains(v) => return Err(format!("{v} is not an ICU locale this server knows.")),
+        Some(v) => sql.push_str(&format!(" ICU_LOCALE {}", setting("The ICU locale", v)?)),
+        // PostgreSQL 15 refuses the ICU provider without an ICU locale, and later ones would take the template's.
+        None if o.provider.as_deref() == Some("icu") => return Err("Pick an ICU locale for the ICU provider.".into()),
+        None => {}
+    }
+    // A copy of any template but template0 keeps the template's encoding and locale, and the server refuses a different one.
+    if let Some(t) = tpl.filter(|t| t.name != PRISTINE) {
+        let mut differ = Vec::new();
+        if o.encoding.as_ref().is_some_and(|e| !e.eq_ignore_ascii_case(&t.encoding)) {
+            differ.push(format!("encoding {}", t.encoding));
+        }
+        if o.locale.as_ref().is_some_and(|l| *l != t.collate || *l != t.ctype) || o.lc_collate.as_ref().is_some_and(|l| *l != t.collate) || o.lc_ctype.as_ref().is_some_and(|l| *l != t.ctype) {
+            differ.push(format!("locale {}", t.collate));
+        }
+        let prov = |p: &str| if p == "icu" { "i" } else { "c" };
+        if o.provider.as_deref().is_some_and(|p| prov(p) != t.provider) || o.icu_locale.as_ref().is_some_and(|l| *l != t.icu) {
+            differ.push("its locale provider".into());
+        }
+        if !differ.is_empty() {
+            return Err(format!("Another encoding or locale needs TEMPLATE template0: a copy of {} keeps its {}.", t.name, differ.join(" and ")));
+        }
+    }
+    if let Some(why) = ch.template_locale_problem(o) {
+        return Err(why);
+    }
+    Ok(sql)
 }
 
 pub fn drop_db_sql(name: &str, force: bool) -> Res<String> {
@@ -109,22 +314,91 @@ pub fn drop_table_sql(schema: &str, table: &str, view: bool, cascade: bool) -> R
     Ok(format!("DROP {} {}{}", if view { "VIEW" } else { "TABLE" }, D.qualified(schema, table), if cascade { " CASCADE" } else { "" }))
 }
 
+/// One UNIQUE constraint over its columns, in key order. An empty name lets the server name it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Unique {
+    pub name: String,
+    pub cols: Vec<String>,
+}
+
+/// One CHECK constraint. An empty name lets the server name it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Check {
+    pub name: String,
+    pub expr: String,
+}
+
+/// A plain btree index made right after the table, in the same transaction. An empty name lets the server name it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NewIndex {
+    pub name: String,
+    pub cols: Vec<String>,
+    pub unique: bool,
+}
+
 /// What the New table dialog collects. A column is the structure editor's `ColDef`, so its type, default and identity are written
-/// and checked by the same code that adds a column to an existing table.
-#[derive(Clone, Debug, Default)]
+/// and checked by the same code that adds a column to an existing table, and a foreign key is the Relations editor's `ForeignKey`
+/// (an empty name lets the server name it, `ref_db` is the parent's schema and empty for the table's own).
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct TableSpec {
     pub schema: String,
     pub name: String,
     pub cols: Vec<ColDef>,
     /// The columns of the primary key, in key order.
     pub pk: Vec<String>,
-    /// Each entry is one UNIQUE constraint over its columns.
-    pub uniques: Vec<Vec<String>>,
+    pub uniques: Vec<Unique>,
+    pub checks: Vec<Check>,
+    pub fks: Vec<ForeignKey>,
+    pub indexes: Vec<NewIndex>,
     pub comment: String,
 }
 
-/// The statements that make the table: the CREATE TABLE, then the comments. PostgreSQL names the key and unique constraints
-/// itself (`t_pkey`, `t_c_key`), which is the name every other client and the structure editor already know.
+impl TableSpec {
+    /// The schema of a key's parent.
+    pub fn parent_schema<'a>(&'a self, k: &'a ForeignKey) -> &'a str {
+        if k.ref_db.is_empty() { &self.schema } else { &k.ref_db }
+    }
+
+    /// A key that points back at the table being made, whose parent is this spec rather than a table on the server.
+    pub fn self_ref(&self, k: &ForeignKey) -> bool {
+        self.parent_schema(k) == self.schema && k.ref_table == self.name
+    }
+
+    /// The other tables the keys point at, each once, in the one order every structure change locks tables (by schema, then name),
+    /// so two writers that share them never wait on each other in a circle.
+    pub fn parents(&self) -> Vec<(String, String)> {
+        let mut v: Vec<(String, String)> = self.fks.iter().filter(|k| !self.self_ref(k)).map(|k| (self.parent_schema(k).to_string(), k.ref_table.clone())).collect();
+        v.sort();
+        v.dedup();
+        v
+    }
+
+    /// The table as the structure editor would read it once made, as far as a foreign key check needs it: the columns with the types
+    /// as typed, and the primary key and UNIQUE constraints. The indexes are left out because they are made after the table, too
+    /// late for a key of its own to lean on.
+    pub fn as_structure(&self) -> Structure {
+        let col = |c: &ColDef| Column { name: c.name.clone(), full_type: c.ty.trim().to_string(), nullable: c.nullable && !self.pk.contains(&c.name), collation: c.collation.clone(), ..Default::default() };
+        let key = |name: &str, cols: &[String], primary: bool| Index { name: name.to_string(), unique: true, primary, constraint: true, cols: cols.iter().map(|n| IndexCol { name: n.clone(), ..Default::default() }).collect(), ..Default::default() };
+        let mut indexes: Vec<Index> = self.uniques.iter().map(|u| key(&u.name, &u.cols, false)).collect();
+        if !self.pk.is_empty() {
+            indexes.insert(0, key("", &self.pk, true));
+        }
+        Structure { columns: self.cols.iter().map(col).collect(), indexes, pg_schema: Some(self.schema.clone()), ..Default::default() }
+    }
+}
+
+/// `CONSTRAINT "name" ` when the person named it, else nothing, so the server picks the name.
+fn named(what: &str, name: &str) -> Res<String> {
+    if name.is_empty() {
+        return Ok(String::new());
+    }
+    new_name(what, name)?;
+    Ok(format!("CONSTRAINT {} ", q(name)))
+}
+
+/// The statements that make the table: the CREATE TABLE with its keys, checks and foreign keys, the indexes, then the comments.
+/// PostgreSQL names an unnamed constraint or index itself (`t_pkey`, `t_c_key`, `t_c_fkey`, `t_c_idx`), which is the name every
+/// other client and the structure editor already know.
 pub fn create_table_stmts(spec: &TableSpec) -> Res<Vec<String>> {
     new_name("A schema", &spec.schema)?;
     if system_schema(&spec.schema) {
@@ -161,14 +435,43 @@ pub fn create_table_stmts(spec: &TableSpec) -> Res<Vec<String>> {
         }
         Ok(cols.iter().map(|n| q(n)).collect::<Vec<_>>().join(", "))
     };
+    // Constraints and indexes share one name space per schema for the indexes behind them, and the server's refusal would come
+    // after the work, so a name given twice is refused here.
+    let given: Vec<&str> = spec.uniques.iter().map(|u| u.name.as_str()).chain(spec.checks.iter().map(|c| c.name.as_str())).chain(spec.fks.iter().map(|k| k.name.as_str())).chain(spec.indexes.iter().map(|i| i.name.as_str())).filter(|n| !n.is_empty()).collect();
+    if let Some(n) = given.iter().enumerate().find(|(i, n)| given[..*i].contains(n)).map(|(_, n)| n) {
+        return Err(format!("Two constraints or indexes are called {n}."));
+    }
     if !spec.pk.is_empty() {
         lines.push(format!("  PRIMARY KEY ({})", group("primary key", &spec.pk)?));
     }
     for u in &spec.uniques {
-        lines.push(format!("  UNIQUE ({})", group("unique constraint", u)?));
+        lines.push(format!("  {}UNIQUE ({})", named("A unique constraint", &u.name)?, group("unique constraint", &u.cols)?));
+    }
+    for c in &spec.checks {
+        check_constraint_pg(&c.expr)?;
+        lines.push(format!("  {}CHECK ({})", named("A check constraint", &c.name)?, c.expr.trim()));
+    }
+    let own = spec.as_structure();
+    for k in &spec.fks {
+        if k.not_valid {
+            return Err("A new table has no rows for NOT VALID to skip, so a key is always checked.".into());
+        }
+        let cols = group("foreign key", &k.cols)?;
+        // A key on the table itself leans on a key made by this statement, so it is checked here; one on another table is checked
+        // against that table as the transaction finds it under its lock.
+        if spec.self_ref(k) {
+            if let Some(p) = fk_problem(&own, &spec.name, &own, k, false) {
+                return Err(p);
+            }
+        }
+        lines.push(format!("  {}FOREIGN KEY ({cols}) {}", named("A foreign key", &k.name)?, fk_refs(&spec.schema, k)?));
     }
     let t = D.qualified(&spec.schema, &spec.name);
     let mut out = vec![format!("CREATE TABLE {t} (\n{}\n)", lines.join(",\n"))];
+    for i in &spec.indexes {
+        let name = if i.name.is_empty() { String::new() } else { new_name("An index", &i.name).map(|_| format!("{} ", q(&i.name)))? };
+        out.push(format!("CREATE {}INDEX {name}ON {t} ({})", if i.unique { "UNIQUE " } else { "" }, group("index", &i.cols)?));
+    }
     if !spec.comment.is_empty() {
         out.push(comment_stmt(&format!("TABLE {t}"), &spec.comment)?);
     }
@@ -290,7 +593,7 @@ fn not_empty_sql() -> String {
 }
 
 /// Runs reads in a `BEGIN READ ONLY` that is always rolled back, on a connection of its own, with every value bound.
-async fn read(db: &Db, scope: &str, steps: &[(&str, Vec<Param>)]) -> Res<Vec<Vec<SqlRow>>> {
+pub(super) async fn read(db: &Db, scope: &str, steps: &[(&str, Vec<Param>)]) -> Res<Vec<Vec<SqlRow>>> {
     let mut c = db.acquire_conn().await?;
     let out = read_on(&mut c, db, scope, steps).await;
     let _ = c.close().await;
@@ -516,13 +819,24 @@ struct Created {
     dbs: Vec<String>,
     oid: String,
     baseline: i64,
+    /// Why the create has no undo, when the connected role could not drop what it made.
+    no_undo: Option<String>,
 }
 
-async fn create_db(db: &Db, name: &str, template: Option<&str>, read_only: bool) -> Res<Created> {
+/// DROP DATABASE needs the owner's rights, which a role holds only when it inherits them. CREATE DATABASE OWNER asks for less (SET
+/// from 16, MEMBER before), so a role can give a database away and then be unable to drop it: such a create gets no undo.
+async fn undo_blocked_by_owner(c: &mut Conn, db: &Db, owner: &str) -> Option<String> {
+    let sql = "SELECT COALESCE((SELECT pg_has_role(oid, 'USAGE') FROM pg_roles WHERE rolname = $1), false)::int::bigint AS n";
+    let ok = read_on(c, db, "", &[(sql, vec![Param::Text(owner.into())])]).await.ok().and_then(|mut v| v.pop()).and_then(|rows| rows.first().and_then(|r| num(r, "n"))).is_some_and(|n| n != 0);
+    (!ok).then(|| format!("No undo: this role does not inherit the rights of {owner}, the owner, so it could not drop the database."))
+}
+
+async fn create_db(db: &Db, name: &str, opts: &DbOpts, read_only: bool) -> Res<Created> {
     let mut c = maintenance(db, read_only).await?;
     let out = async {
-        let templates = template_list(&mut c).await?;
-        let sql = create_db_sql(name, template, &templates)?;
+        // Read again on the connection that runs the statement, so a role or template that changed since the dialog opened is checked as it is now.
+        let choices = db_choices(&mut c).await?;
+        let sql = create_db_sql(name, opts, &choices)?;
         // Two CREATE DATABASE at once both want the template to themselves, and so does anyone copying it (another instance of this
         // app, a script), so the server's refusal is waited out a few times before it is reported.
         let (mut wait, began) = (FIRST_WAIT, Instant::now());
@@ -543,15 +857,45 @@ async fn create_db(db: &Db, name: &str, template: Option<&str>, read_only: bool)
         // What the template carried in is not the person's work, so the undo compares with this count and not with zero. An unreadable
         // database counts as empty, and the undo then refuses it if it cannot read it either.
         let baseline = read(&db.at(name), "", &[(&NOT_EMPTY, Vec::new())]).await.ok().and_then(|mut v| v.pop()).and_then(|rows| rows.first().and_then(|r| num(r, "n"))).unwrap_or(0) as i64;
-        Ok(Created { dbs, oid, baseline })
+        let no_undo = match opts.owner.as_ref().filter(|r| **r != choices.me) {
+            Some(r) => undo_blocked_by_owner(&mut c, db, r).await,
+            None => None,
+        };
+        Ok(Created { dbs, oid, baseline, no_undo })
     }
     .await;
     let _ = c.close().await;
     out
 }
 
-async fn template_list(c: &mut Conn) -> Res<Vec<String>> {
-    Ok(c.fetch_all("SELECT datname::text AS datname FROM pg_database WHERE datistemplate ORDER BY 1").await.map_err(se)?.iter().filter_map(|r| text(r, "datname")).collect())
+/// The template databases with their settings. The columns of the locale provider and the ICU locale came in 15 and were renamed in
+/// 17, so they are read through the row's JSON, which answers NULL for a column the server does not have.
+const TEMPLATES: &str = "SELECT datname::text AS name, pg_encoding_to_char(encoding)::text AS enc, datcollate::text AS coll, datctype::text AS ctype, COALESCE(to_jsonb(d)->>'datlocprovider', 'c') AS prov, COALESCE(to_jsonb(d)->>'datlocale', to_jsonb(d)->>'daticulocale', '') AS icu FROM pg_database d WHERE datistemplate ORDER BY 1";
+
+/// The server encodings are the ids up to KOI8U (PG_ENCODING_BE_LAST, 34 since 8.3); the ones after it are for clients only.
+const ENCODINGS: &str = "SELECT pg_encoding_to_char(i)::text AS name FROM generate_series(0, 34) AS i ORDER BY 1";
+
+/// The libc locales come from the collations initdb imported from the operating system, which are the ones the server can use.
+const LOCALES: &str = "SELECT DISTINCT to_jsonb(c)->>'collcollate' AS name, CASE WHEN collencoding = -1 THEN '' ELSE pg_encoding_to_char(collencoding)::text END AS enc FROM pg_collation c WHERE collprovider = 'c' AND to_jsonb(c)->>'collcollate' <> '' ORDER BY 1, 2";
+
+const ICU_LOCALES: &str = "SELECT DISTINCT COALESCE(to_jsonb(c)->>'colllocale', to_jsonb(c)->>'colliculocale', to_jsonb(c)->>'collcollate') AS name FROM pg_collation c WHERE collprovider = 'i' ORDER BY 1";
+
+/// CREATE DATABASE OWNER needs the right to SET ROLE to the owner from 16 on and membership in it before, which pg_has_role answers
+/// (true for every role for a superuser).
+const OWNERS: &str = "SELECT rolname::text AS name FROM pg_roles WHERE rolname !~ '^pg_' AND pg_has_role(current_user, oid, CASE WHEN current_setting('server_version_num')::int >= 160000 THEN 'SET' ELSE 'MEMBER' END) ORDER BY 1";
+
+async fn db_choices(c: &mut Conn) -> Res<DbChoices> {
+    let names = |rows: Vec<SqlRow>| rows.iter().filter_map(|r| text(r, "name")).collect::<Vec<_>>();
+    let head = c.fetch_all("SELECT current_setting('server_version_num') AS v, current_user::text AS me").await.map_err(se)?;
+    let version = head.first().and_then(|r| text(r, "v")).and_then(|v| v.parse().ok()).unwrap_or(0);
+    let me = head.first().and_then(|r| text(r, "me")).unwrap_or_default();
+    let templates = c.fetch_all(TEMPLATES).await.map_err(se)?.iter().filter_map(|r| Some(Template { name: text(r, "name")?, encoding: text(r, "enc").unwrap_or_default(), collate: text(r, "coll").unwrap_or_default(), ctype: text(r, "ctype").unwrap_or_default(), provider: text(r, "prov").unwrap_or_default(), icu: text(r, "icu").unwrap_or_default() })).collect();
+    let encodings = names(c.fetch_all(ENCODINGS).await.map_err(se)?).into_iter().filter(|e| !e.is_empty()).collect();
+    let locales = c.fetch_all(LOCALES).await.map_err(se)?.iter().filter_map(|r| Some((text(r, "name")?, text(r, "enc").unwrap_or_default()))).collect();
+    // Before 15 a database cannot use ICU, so its long list is not read.
+    let icu_locales = if version >= 150000 { names(c.fetch_all(ICU_LOCALES).await.map_err(se)?) } else { Vec::new() };
+    let owners = names(c.fetch_all(OWNERS).await.map_err(se)?);
+    Ok(DbChoices { version, templates, encodings, locales, icu_locales, owners, me })
 }
 
 /// A drop must not go on while Quarry's own import, script or shell still holds a connection to the database: the server would refuse it
@@ -684,24 +1028,69 @@ struct Made {
     state: Vec<String>,
 }
 
+/// The first function a CHECK of the table `$1` (an oid) reaches that is not IMMUTABLE, with its constraint: called by name, behind an
+/// operator or through a cast. pg_depend records what the server resolved, so an overload, a search_path hit or a user operator is
+/// the function that really runs. Built-ins are pinned and never recorded, which the name list of `check_constraint_pg` covers.
+const CHECK_VOLATILE: &str = "WITH d AS (
+    SELECT k.conname, d.refclassid, d.refobjid FROM pg_constraint k JOIN pg_depend d ON d.classid = 'pg_constraint'::regclass AND d.objid = k.oid
+    WHERE k.conrelid = $1::text::oid AND k.contype = 'c'
+), f AS (
+    SELECT conname, refobjid AS fn FROM d WHERE refclassid = 'pg_proc'::regclass
+    UNION ALL SELECT d.conname, o.oprcode::oid FROM d JOIN pg_operator o ON o.oid = d.refobjid WHERE d.refclassid = 'pg_operator'::regclass
+    UNION ALL SELECT d.conname, c.castfunc FROM d JOIN pg_cast c ON c.oid = d.refobjid WHERE d.refclassid = 'pg_cast'::regclass AND c.castfunc <> 0
+)
+SELECT f.conname::text AS con, p.oid::regprocedure::text AS fn, p.provolatile::text AS vol FROM f JOIN pg_proc p ON p.oid = f.fn WHERE p.provolatile <> 'i' ORDER BY 1, 2 LIMIT 1";
+
+/// Refuses a CHECK that reaches a function that is not IMMUTABLE. PostgreSQL assumes a CHECK is immutable and runs it on every row
+/// written, so a volatile or stable user function there (one that writes, calls out or reads other tables) would act on each insert.
+/// Read inside the create's transaction, so a refusal rolls the whole table back.
+async fn checks_immutable(tx: &mut Tx<'_>, oid: &str) -> Res<()> {
+    let rows = tx.fetch_bound(CHECK_VOLATILE, &[Param::Text(oid.into())]).await.map_err(se)?;
+    let Some(r) = rows.first() else { return Ok(()) };
+    let (con, f) = (text(r, "con").unwrap_or_default(), text(r, "fn").unwrap_or_default());
+    let vol = if text(r, "vol").as_deref() == Some("s") { "STABLE" } else { "VOLATILE" };
+    Err(format!("The CHECK {con} calls {f}, which is {vol}. PostgreSQL runs a CHECK on every row written and assumes it is IMMUTABLE, so only IMMUTABLE functions are allowed there. Nothing was created."))
+}
+
 async fn create_table(db: &Db, spec: &TableSpec, read_only: bool) -> Res<Made> {
     let stmts = create_table_stmts(spec)?;
-    in_tx(db, &spec.schema, read_only, async |tx| {
+    // A key takes SHARE ROW EXCLUSIVE on its parent, as ADD FOREIGN KEY does in the structure editor. The parents are locked first, in
+    // the order every plan takes, and read only once they are held, so the key the dialog checked is the one the server sees.
+    let locks: Vec<Lock> = spec.parents().into_iter().map(|(s, t)| {
+        let name = D.qualified(&s, &t);
+        Lock { gone: Some(format!("the referenced table {name} (it is gone)")), name, mode: "SHARE ROW EXCLUSIVE", plain_only: false }
+    }).collect();
+    let run = run_locked(db, &spec.schema, read_only, &locks, "Refresh the lists and check before running it again.", async |tx| {
+        let own = spec.as_structure();
+        for k in spec.fks.iter().filter(|k| !spec.self_ref(k)) {
+            let (ps, name) = (spec.parent_schema(k), D.qualified(spec.parent_schema(k), &k.ref_table));
+            // Read under the parent's own path, as the dialog's read of it was, so both print its types the same way.
+            set_path(tx, db, ps).await.map_err(|e| Fail::Run(se(e)))?;
+            let parent = read_in(tx, ps, &k.ref_table).await.map_err(Fail::Run)?;
+            if !k.ref_seen.is_empty() && ref_state(&parent, &k.ref_cols) != k.ref_seen {
+                return Err(Fail::Changed(format!("the referenced table {name}")));
+            }
+            if let Some(why) = fk_problem(&own, &spec.name, &parent, k, false) {
+                return Err(Fail::Run(format!("{why} Nothing was created.")));
+            }
+        }
         // The types and the default expressions resolve under the schema first and then the Advanced saved list, the path every other writer and the structure editor read under, so a type from a saved schema works here too.
-        set_path(tx, db, &spec.schema).await.map_err(se)?;
+        set_path(tx, db, &spec.schema).await.map_err(|e| Fail::Run(se(e)))?;
         let types: Vec<String> = spec.cols.iter().map(|c| c.ty.trim().to_string()).collect();
         if let Some(bad) = unknown_type(tx, &types).await {
             let col = spec.cols.iter().find(|c| c.ty.trim() == bad).map_or("", |c| c.name.as_str());
-            return Err(format!("Column {col}: {:?} is not a type the server knows. Write only the type, like numeric(10,2), without constraints or other column clauses. Nothing was created.", bad));
+            return Err(Fail::Run(format!("Column {col}: {:?} is not a type the server knows. Write only the type, like numeric(10,2), without constraints or other column clauses. Nothing was created.", bad)));
         }
-        for s in &stmts {
-            exec(tx, db, &spec.schema, s).await.map_err(|x| lock_error(&x, &spec.name).unwrap_or_else(|| se(x)))?;
+        for (i, s) in stmts.iter().enumerate() {
+            exec(tx, db, &spec.schema, s).await.map_err(|x| Fail::Run(lock_error(&x, &spec.name).unwrap_or_else(|| if stmts.len() > 1 { format!("{} (statement {} of {}). Nothing was created.", se(x), i + 1, stmts.len()) } else { se(x) })))?;
         }
-        let state = state_in(tx, &spec.schema, &spec.name).await?;
-        let oid = relation_oid(tx, &D.qualified(&spec.schema, &spec.name)).await?.ok_or("The table was made but cannot be read back.")?;
+        let oid = relation_oid(tx, &D.qualified(&spec.schema, &spec.name)).await.map_err(Fail::Run)?.ok_or_else(|| Fail::Run("The table was made but cannot be read back.".into()))?;
+        checks_immutable(tx, &oid).await.map_err(Fail::Run)?;
+        let state = state_in(tx, &spec.schema, &spec.name).await.map_err(Fail::Run)?;
         Ok(Made { oid, state })
     })
-    .await
+    .await;
+    run.map_err(|f| fail_text(f, |what| format!("Nothing was created: {what} changed since the dialog read it. Pick the key again.")))
 }
 
 async fn drop_table(db: &Db, schema: &str, table: &str, view: bool, cascade: bool, read_only: bool) -> Res<()> {
@@ -736,6 +1125,9 @@ async fn undo_schema(db: &Db, name: &str, oid: &str, read_only: bool) -> Res<()>
     .await
 }
 
+/// The other tables the foreign keys of `$1` point at.
+const KEY_PARENTS: &str = "SELECT DISTINCT n.nspname::text AS s, c.relname::text AS t FROM pg_constraint k JOIN pg_class c ON c.oid = k.confrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE k.contype = 'f' AND k.conrelid = to_regclass($1) AND k.confrelid <> k.conrelid";
+
 async fn undo_table(db: &Db, schema: &str, table: &str, made: &Made, read_only: bool) -> Res<()> {
     let sql = drop_table_sql(schema, table, false, false)?;
     let name = D.qualified(schema, table);
@@ -745,12 +1137,31 @@ async fn undo_table(db: &Db, schema: &str, table: &str, made: &Made, read_only: 
         if !may_lock_one(tx, &name).await {
             return Err(format!("Not undone: {table} cannot be locked with this role's privileges, so it cannot be checked for rows safely. Drop it from its menu instead."));
         }
-        if let Err(x) = exec(tx, db, schema, &format!("LOCK TABLE {name} IN ACCESS EXCLUSIVE MODE")).await {
-            return Err(match (sql_state(&x).as_deref(), lock_error(&x, table)) {
-                (_, Some(why)) => format!("Not undone: {why}"),
-                (Some("42P01"), _) => format!("Not undone: the table {table} is already gone."),
-                _ => se(x),
-            });
+        // Dropping the table drops its keys, and the server takes ACCESS EXCLUSIVE on each parent to remove the key's triggers there,
+        // so the parents are locked with it, in the order every plan takes. A key added or dropped between this read and the locks
+        // changes the fingerprint, which refuses the undo below.
+        let rows = tx.fetch_bound(KEY_PARENTS, &[Param::Text(name.clone())]).await.map_err(se)?;
+        let mut all: Vec<(String, String)> = rows.iter().filter_map(|r| Some((text(r, "s")?, text(r, "t")?))).collect();
+        all.push((schema.to_string(), table.to_string()));
+        all.sort();
+        all.dedup();
+        let names: Vec<String> = all.iter().map(|(s, t)| D.qualified(s, t)).collect();
+        // A parent the role may not lock is left to the DROP, which takes the lock itself under the same timeout.
+        let may = may_lock(tx, &names.iter().map(|n| (n.as_str(), false)).collect::<Vec<_>>()).await;
+        let mut skipped = Vec::new();
+        for ((n, may), (s, t)) in names.iter().zip(may).zip(&all) {
+            let own = s == schema && t == table;
+            if !own && !may {
+                skipped.push(n.clone());
+                continue;
+            }
+            if let Err(x) = exec(tx, db, schema, &format!("LOCK TABLE {n} IN ACCESS EXCLUSIVE MODE")).await {
+                return Err(match (sql_state(&x).as_deref(), lock_error(&x, if own { table } else { n })) {
+                    (_, Some(why)) => format!("Not undone: {why}"),
+                    (Some("42P01"), _) if own => format!("Not undone: the table {table} is already gone."),
+                    _ => format!("Not undone: {}", se(x)),
+                });
+            }
         }
         match relation_oid(tx, &name).await? {
             None => return Err(format!("Not undone: the table {table} is already gone.")),
@@ -773,6 +1184,11 @@ async fn undo_table(db: &Db, schema: &str, table: &str, made: &Made, read_only: 
         exec(tx, db, schema, &sql).await.map_err(|x| match sql_state(&x).as_deref() {
             // Another table's key or a view was made on it since.
             Some("2BP01") => format!("Not undone: something depends on {table} now.\n{}", se(x)),
+            // Only a parent the role could not lock ahead is still to be locked here, after the table and out of the usual order.
+            Some("55P03") if !skipped.is_empty() => format!(
+                "Not undone: {} is locked by another session that did not let go within {LOCK_WAIT_SECS} seconds. Dropping {table} removes its foreign keys' triggers there, which needs that table's strongest lock, and this role may not lock it ahead of the drop. Nothing was changed.",
+                skipped.join(", ")
+            ),
             _ => se(x),
         })
     })
@@ -856,17 +1272,17 @@ fn answer(res: Res<Option<Vec<String>>>, said: String) -> (Res<String>, Option<V
 }
 
 impl Worker {
-    /// The template databases the New database dialog offers.
-    pub fn pg_templates(&self, conn: u64, db: Db) {
+    /// The templates, encodings, locales and owners the New database dialog offers.
+    pub fn pg_db_choices(&self, conn: u64, db: Db) {
         self.spawn_sql(db.conn, "", async move {
             let res = async {
                 let mut c = db.acquire_conn().await?;
-                let out = template_list(&mut c).await;
+                let out = db_choices(&mut c).await;
                 let _ = c.close().await;
                 out
             }
             .await;
-            Msg::PgTemplates { conn, res }
+            Msg::PgDbChoices { conn, res }
         });
     }
 
@@ -884,11 +1300,15 @@ impl Worker {
         });
     }
 
-    pub fn pg_create_db(&self, conn: u64, db: Db, name: String, template: Option<String>, read_only: bool) {
+    pub fn pg_create_db(&self, conn: u64, db: Db, name: String, opts: DbOpts, read_only: bool) {
         self.spawn_sql(db.conn, "", async move {
-            let res = create_db(&db, &name, template.as_deref(), read_only).await;
-            let undo = res.as_ref().ok().map(|m| entry(&db, conn, &name, "", SqlUndo::CreatedDb { oid: m.oid.clone(), baseline: m.baseline }));
-            let (res, dbs) = answer(res.map(|m| Some(m.dbs)), format!("Created database {name}"));
+            let res = create_db(&db, &name, &opts, read_only).await;
+            let undo = res.as_ref().ok().filter(|m| m.no_undo.is_none()).map(|m| entry(&db, conn, &name, "", SqlUndo::CreatedDb { oid: m.oid.clone(), baseline: m.baseline }));
+            let said = match res.as_ref().ok().and_then(|m| m.no_undo.as_ref()) {
+                Some(why) => format!("Created database {name}. {why}"),
+                None => format!("Created database {name}"),
+            };
+            let (res, dbs) = answer(res.map(|m| Some(m.dbs)), said);
             Msg::SqlDdl { conn, database: String::new(), schema: name, table: String::new(), what: Ddl::CreatedDb, res, undo, dbs, sql_mode: None }
         });
     }
@@ -956,4 +1376,208 @@ pub(super) async fn undo(db: Db, a: UndoAction, read_only: bool) -> Msg {
     let kept = res.is_err().then(|| UndoAction { at, conn, db: schema.clone(), coll: table.clone(), kind: UndoKind::Sql { database: database.clone(), cols, undo, ids } });
     // A refused undo changes nothing, so the app has nothing to refresh.
     Msg::SqlDdl { conn, database, schema, table, what, res: res.map(|_| said), undo: kept, dbs, sql_mode: None }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec() -> TableSpec {
+        let id = ColDef { auto_increment: true, nullable: false, ..ColDef::new("id", "integer") };
+        TableSpec { schema: "app".into(), name: "orders".into(), cols: vec![id, ColDef::new("customer", "bigint"), ColDef::new("Code", "text"), ColDef::new("price", "numeric(10,2)")], pk: vec!["id".into()], ..Default::default() }
+    }
+
+    fn fk(cols: &[&str], schema: &str, table: &str, refs: &[&str]) -> ForeignKey {
+        let v = |x: &[&str]| x.iter().map(|s| s.to_string()).collect();
+        ForeignKey { cols: v(cols), ref_db: schema.into(), ref_table: table.into(), ref_cols: v(refs), on_delete: "NO ACTION".into(), on_update: "NO ACTION".into(), ..Default::default() }
+    }
+
+    fn body(s: &TableSpec) -> String {
+        create_table_stmts(s).unwrap_or_else(|e| panic!("{e}"))[0].clone()
+    }
+
+    #[test]
+    fn a_unique_over_two_columns_is_named_by_the_server_unless_the_person_names_it() {
+        let mut s = spec();
+        s.uniques = vec![Unique { name: String::new(), cols: vec!["customer".into(), "Code".into()] }, Unique { name: "one \"code\"".into(), cols: vec!["Code".into()] }];
+        let b = body(&s);
+        assert!(b.contains("  UNIQUE (\"customer\", \"Code\")"), "{b}");
+        assert!(b.contains("  CONSTRAINT \"one \"\"code\"\"\" UNIQUE (\"Code\")"), "{b}");
+        s.uniques[0].name = "x".repeat(64);
+        assert!(create_table_stmts(&s).unwrap_err().contains("63 bytes"));
+        s.uniques[0] = Unique { name: String::new(), cols: vec!["customer".into(), "nope".into()] };
+        assert!(create_table_stmts(&s).unwrap_err().contains("not a column"));
+    }
+
+    #[test]
+    fn a_check_is_one_expression_without_calls_that_act_outside_the_row() {
+        let mut s = spec();
+        s.checks = vec![Check { name: String::new(), expr: " price >= 0 ".into() }, Check { name: "code_set".into(), expr: "length(\"Code\") > 0 AND \"Code\" <> 'x;y'".into() }];
+        let b = body(&s);
+        assert!(b.contains("  CHECK (price >= 0)") && b.contains("  CONSTRAINT \"code_set\" CHECK (length(\"Code\") > 0 AND \"Code\" <> 'x;y')"), "{b}");
+        for bad in ["price > 0); DROP TABLE x; --", "price > 0 -- x", "price > (0", "", "pg_advisory_lock(1) IS NOT NULL", "dblink_exec('x', 'DROP TABLE y') = 'OK'", "(1).pg_terminate_backend", "\"lo_unlink\"(1) = 1", "pg_catalog.pg_reload_conf()", "U&\"\\0070g_sleep\"(1) IS NULL", "pg_sleep(1) IS NULL", "pg_catalog.pg_sleep_for('1s') IS NULL", "(1).pg_sleep IS NULL"] {
+            s.checks = vec![Check { name: String::new(), expr: bad.into() }];
+            assert!(create_table_stmts(&s).is_err(), "{bad:?} was not refused");
+        }
+        s.checks = vec![Check { name: String::new(), expr: "pg_advisory_lock(1) IS NOT NULL".into() }];
+        assert!(create_table_stmts(&s).unwrap_err().contains("pg_advisory_lock"));
+    }
+
+    #[test]
+    fn a_foreign_key_names_its_parent_with_the_schema_and_keeps_its_options() {
+        let mut s = spec();
+        let mut k = fk(&["customer"], "sales", "Customers", &["id"]);
+        (k.on_delete, k.on_update, k.match_full, k.deferrable, k.deferred) = ("cascade".into(), "SET NULL".into(), true, true, true);
+        s.fks = vec![k, ForeignKey { name: "to_me".into(), ..fk(&["customer"], "", "orders", &["id"]) }];
+        let b = body(&s);
+        assert!(b.contains("  FOREIGN KEY (\"customer\") REFERENCES \"sales\".\"Customers\" (\"id\") MATCH FULL ON DELETE CASCADE ON UPDATE SET NULL DEFERRABLE INITIALLY DEFERRED"), "{b}");
+        // An empty ref_db is the table's own schema, and a key on the table itself leans on its primary key.
+        assert!(b.contains("  CONSTRAINT \"to_me\" FOREIGN KEY (\"customer\") REFERENCES \"app\".\"orders\" (\"id\") ON DELETE NO ACTION ON UPDATE NO ACTION"), "{b}");
+        assert_eq!(s.parents(), vec![("sales".to_string(), "Customers".to_string())], "the table itself is no parent to lock");
+        let refused = |k: ForeignKey| {
+            let mut s = spec();
+            s.fks = vec![k];
+            create_table_stmts(&s).unwrap_err()
+        };
+        assert!(refused(fk(&["Code"], "", "orders", &["Code"])).contains("primary key or unique constraint"), "a key on itself needs a key of its own there");
+        assert!(refused(fk(&["customer", "Code"], "s", "p", &["id"])).contains("same number"));
+        assert!(refused(fk(&["nope"], "s", "p", &["id"])).contains("not a column"));
+        assert!(refused(ForeignKey { on_delete: "DROP".into(), ..fk(&["customer"], "s", "p", &["id"]) }).contains("not a foreign key action"));
+        assert!(refused(ForeignKey { deferred: true, ..fk(&["customer"], "s", "p", &["id"]) }).contains("DEFERRABLE"));
+        assert!(refused(ForeignKey { not_valid: true, ..fk(&["customer"], "s", "p", &["id"]) }).contains("NOT VALID"));
+        assert!(refused(ForeignKey { name: "k".repeat(64), ..fk(&["customer"], "s", "p", &["id"]) }).contains("63 bytes"));
+        // Two keys on one parent lock it once, and the parents go by schema, then name.
+        let mut s = spec();
+        s.fks = vec![fk(&["customer"], "b", "t", &["id"]), fk(&["id"], "a", "z", &["id"]), fk(&["Code"], "b", "t", &["c"])];
+        assert_eq!(s.parents(), vec![("a".into(), "z".into()), ("b".into(), "t".into())]);
+    }
+
+    #[test]
+    fn indexes_come_after_the_table_and_names_are_not_given_twice() {
+        let mut s = spec();
+        s.indexes = vec![NewIndex { name: String::new(), cols: vec!["customer".into(), "price".into()], unique: false }, NewIndex { name: "by code".into(), cols: vec!["Code".into()], unique: true }];
+        s.comment = "c".into();
+        let all = create_table_stmts(&s).unwrap();
+        assert_eq!(all[1], "CREATE INDEX ON \"app\".\"orders\" (\"customer\", \"price\")");
+        assert_eq!(all[2], "CREATE UNIQUE INDEX \"by code\" ON \"app\".\"orders\" (\"Code\")");
+        assert!(all[3].starts_with("COMMENT ON TABLE"), "the comments come last");
+        s.checks = vec![Check { name: "by code".into(), expr: "true".into() }];
+        assert!(create_table_stmts(&s).unwrap_err().contains("Two constraints or indexes are called by code"));
+        s.checks.clear();
+        s.indexes[0].cols.clear();
+        assert!(create_table_stmts(&s).unwrap_err().contains("at least one column"));
+    }
+
+    #[test]
+    fn the_spec_reads_as_a_structure_for_the_key_checks() {
+        let mut s = spec();
+        s.uniques = vec![Unique { name: "u".into(), cols: vec!["customer".into(), "Code".into()] }];
+        s.indexes = vec![NewIndex { name: String::new(), cols: vec!["price".into()], unique: true }];
+        let st = s.as_structure();
+        assert!(st.is_pg() && st.columns.len() == 4 && !st.columns[0].nullable && st.columns[1].nullable);
+        assert_eq!(st.indexes.iter().map(|i| i.cols.len()).collect::<Vec<_>>(), [1, 2], "the key and the UNIQUE, not the index made after the table");
+    }
+
+    fn choices() -> DbChoices {
+        let t = |name: &str| Template { name: name.into(), encoding: "UTF8".into(), collate: "en_US.utf8".into(), ctype: "en_US.utf8".into(), provider: "c".into(), icu: String::new() };
+        DbChoices {
+            version: 180001,
+            templates: vec![t("template0"), t("template1")],
+            encodings: vec!["LATIN1".into(), "SQL_ASCII".into(), "UTF8".into()],
+            locales: vec![("C".into(), String::new()), ("POSIX".into(), String::new()), ("en_US.utf8".into(), "UTF8".into()), ("de_DE".into(), "LATIN1".into())],
+            icu_locales: vec!["en-US".into(), "und".into()],
+            owners: vec!["app_owner".into(), "me".into()],
+            me: "me".into(),
+        }
+    }
+
+    #[test]
+    fn a_database_takes_an_encoding_a_locale_and_an_owner_on_template0() {
+        let ch = choices();
+        let o = DbOpts { template: Some("template0".into()), encoding: Some("UTF8".into()), locale: Some("C".into()), owner: Some("app_owner".into()), ..Default::default() };
+        assert_eq!(create_db_sql("app", &o, &ch).unwrap(), "CREATE DATABASE \"app\" OWNER \"app_owner\" TEMPLATE \"template0\" ENCODING 'UTF8' LOCALE 'C'");
+        let o = DbOpts { template: Some("template0".into()), encoding: Some("LATIN1".into()), lc_collate: Some("de_DE".into()), lc_ctype: Some("C".into()), ..Default::default() };
+        assert_eq!(create_db_sql("app", &o, &ch).unwrap(), "CREATE DATABASE \"app\" TEMPLATE \"template0\" ENCODING 'LATIN1' LC_COLLATE 'de_DE' LC_CTYPE 'C'");
+        let o = DbOpts { template: Some("template0".into()), provider: Some("icu".into()), icu_locale: Some("und".into()), ..Default::default() };
+        assert_eq!(create_db_sql("app", &o, &ch).unwrap(), "CREATE DATABASE \"app\" TEMPLATE \"template0\" LOCALE_PROVIDER icu ICU_LOCALE 'und'");
+        // The template's own settings need no template0.
+        let o = DbOpts { encoding: Some("UTF8".into()), locale: Some("en_US.utf8".into()), ..Default::default() };
+        assert!(create_db_sql("app", &o, &ch).is_ok());
+    }
+
+    #[test]
+    fn database_options_the_server_or_the_template_would_refuse_are_refused_first() {
+        let ch = choices();
+        let on0 = |o: DbOpts| DbOpts { template: Some("template0".into()), ..o };
+        let why = |o: DbOpts| create_db_sql("app", &o, &ch).unwrap_err();
+        assert!(why(DbOpts { encoding: Some("LATIN1".into()), ..Default::default() }).contains("needs TEMPLATE template0"));
+        assert!(why(DbOpts { template: Some("template1".into()), locale: Some("C".into()), ..Default::default() }).contains("needs TEMPLATE template0"));
+        assert!(why(on0(DbOpts { encoding: Some("KOI8X".into()), ..Default::default() })).contains("not an encoding"));
+        assert!(why(on0(DbOpts { encoding: Some("LATIN1".into()), locale: Some("en_US.utf8".into()), ..Default::default() })).contains("does not go with the encoding LATIN1"));
+        assert!(why(on0(DbOpts { locale: Some("C".into()), lc_ctype: Some("C".into()), ..Default::default() })).contains("not both"));
+        assert!(why(on0(DbOpts { locale: Some("C'; DROP DATABASE x; --".into()), ..Default::default() })).contains("not a locale"));
+        assert!(why(on0(DbOpts { icu_locale: Some("und".into()), ..Default::default() })).contains("needs the ICU provider"));
+        assert!(why(on0(DbOpts { provider: Some("icu".into()), ..Default::default() })).contains("Pick an ICU locale"));
+        assert!(why(on0(DbOpts { provider: Some("builtin".into()), ..Default::default() })).contains("not a locale provider"));
+        assert!(why(DbOpts { owner: Some("someone".into()), ..Default::default() }).contains("not a role"));
+        // Before 15 there is no provider to pick, and a server without ICU offers none either.
+        let old = DbChoices { version: 130023, icu_locales: Vec::new(), ..choices() };
+        assert!(create_db_sql("app", &on0(DbOpts { provider: Some("icu".into()), icu_locale: Some("und".into()), ..Default::default() }), &old).unwrap_err().contains("15 or later"));
+        assert!(!old.icu_ok() && ch.icu_ok());
+        let no_icu = DbChoices { icu_locales: Vec::new(), ..choices() };
+        assert!(create_db_sql("app", &on0(DbOpts { provider: Some("icu".into()), icu_locale: Some("und".into()), ..Default::default() }), &no_icu).unwrap_err().contains("without ICU"));
+        // A value the server listed with a quote in it is still never written into the statement.
+        let odd = DbChoices { locales: vec![("x'y".into(), String::new())], ..choices() };
+        assert!(create_db_sql("app", &on0(DbOpts { locale: Some("x'y".into()), ..Default::default() }), &odd).is_err());
+    }
+
+    /// A cluster made with ICU (or builtin on 17) whose templates still carry a libc LC_COLLATE and LC_CTYPE.
+    fn icu_cluster(version: u32, provider: &str) -> DbChoices {
+        let mut ch = DbChoices { version, ..choices() };
+        for t in &mut ch.templates {
+            (t.provider, t.icu) = (provider.into(), if provider == "b" { "C.UTF-8".into() } else { "en-US".into() });
+        }
+        ch
+    }
+
+    #[test]
+    fn locale_is_not_offered_where_it_would_also_set_the_icu_or_builtin_locale() {
+        let o = DbOpts { template: Some("template0".into()), locale: Some("C".into()), ..Default::default() };
+        // 15 reads LOCALE as LC_COLLATE and LC_CTYPE only; 16 and later also as the ICU or builtin locale.
+        assert!(create_db_sql("app", &o, &icu_cluster(150004, "i")).is_ok());
+        for (v, p, word) in [(160002, "i", "icu"), (170000, "b", "builtin")] {
+            let ch = icu_cluster(v, p);
+            assert!(!ch.locale_word_ok(&o));
+            let why = create_db_sql("app", &o, &ch).unwrap_err();
+            assert!(why.contains(&format!("the {word} locale")) && why.contains("LC_COLLATE and LC_CTYPE"), "{why}");
+            let both = DbOpts { locale: None, lc_collate: Some("C".into()), lc_ctype: Some("C".into()), ..o.clone() };
+            assert!(create_db_sql("app", &both, &ch).is_ok(), "{v}");
+            // With libc picked, LOCALE means the same everywhere.
+            let libc = DbOpts { provider: Some("libc".into()), ..o.clone() };
+            assert!(ch.locale_word_ok(&libc) && create_db_sql("app", &libc, &ch).is_ok(), "{v}");
+        }
+        assert_eq!((provider_name("b"), provider_name("i"), provider_name("c")), ("builtin", "icu", "libc"));
+    }
+
+    #[test]
+    fn an_encoding_left_with_the_templates_locale_is_checked_and_the_templates_locale_is_offered() {
+        let ch = choices();
+        let on0 = |o: DbOpts| DbOpts { template: Some("template0".into()), ..o };
+        // template0 is en_US.utf8, which is UTF8 only.
+        let why = create_db_sql("app", &on0(DbOpts { encoding: Some("LATIN1".into()), ..Default::default() }), &ch).unwrap_err();
+        assert!(why.contains("template's locale en_US.utf8") && why.contains("LATIN1"), "{why}");
+        assert_eq!(ch.template_locale_problem(&on0(DbOpts { encoding: Some("LATIN1".into()), ..Default::default() })), Some(why));
+        assert!(create_db_sql("app", &on0(DbOpts { encoding: Some("LATIN1".into()), locale: Some("C".into()), ..Default::default() }), &ch).is_ok());
+        // Only LC_CTYPE picked: LC_COLLATE stays the template's and is checked.
+        assert!(create_db_sql("app", &on0(DbOpts { encoding: Some("LATIN1".into()), lc_ctype: Some("C".into()), ..Default::default() }), &ch).is_err());
+        assert!(create_db_sql("app", &on0(DbOpts { encoding: Some("UTF8".into()), ..Default::default() }), &ch).is_ok());
+        assert!(create_db_sql("app", &on0(DbOpts { encoding: Some("SQL_ASCII".into()), ..Default::default() }), &ch).is_ok(), "left to the server");
+        // An image with no imported OS locales lists C and POSIX only, and still offers and takes the template's own locale.
+        let bare = DbChoices { locales: vec![("C".into(), String::new()), ("POSIX".into(), String::new())], ..choices() };
+        let t0 = bare.template(Some("template0"));
+        assert_eq!(bare.locales_with("UTF8", t0), ["C", "POSIX", "en_US.utf8"]);
+        assert_eq!(bare.locales_with("LATIN1", t0), ["C", "POSIX"]);
+        assert!(create_db_sql("app", &on0(DbOpts { encoding: Some("UTF8".into()), locale: Some("en_US.utf8".into()), ..Default::default() }), &bare).is_ok());
+        assert!(create_db_sql("app", &on0(DbOpts { encoding: Some("LATIN1".into()), locale: Some("en_US.utf8".into()), ..Default::default() }), &bare).unwrap_err().contains("does not go with"));
+    }
 }

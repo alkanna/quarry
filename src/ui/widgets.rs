@@ -176,35 +176,42 @@ pub(crate) fn state_of(r: &egui::Response) -> usize {
 /// A row of joined buttons where exactly one is chosen: a bordered track with the chosen option
 /// raised inside it.
 pub(crate) fn segmented<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options: &[(T, &str)]) {
+    let all: Vec<(T, &str, bool)> = options.iter().map(|&(v, l)| (v, l, true)).collect();
+    segmented_on(ui, value, &all);
+}
+
+/// `segmented` where an option whose flag is false is shown faint and cannot be chosen.
+pub(crate) fn segmented_on<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options: &[(T, &str, bool)]) {
     // Painted at a fixed height: a Frame grew with the row, leaving the track taller than its options.
     const PAD: f32 = 2.0;
     const GAP: f32 = 2.0;
     let pad_x = ui.spacing().button_padding.x;
-    let galleys: Vec<_> = options.iter().map(|(v, l)| ui.painter().layout_job(egui::text::LayoutJob::single_section(l.to_string(), ui_fmt(TXT_SMALL, Color32::PLACEHOLDER, if *value == *v { W_MEDIUM } else { 400.0 }, 0.0)))).collect();
+    let galleys: Vec<_> = options.iter().map(|(v, l, _)| ui.painter().layout_job(egui::text::LayoutJob::single_section(l.to_string(), ui_fmt(TXT_SMALL, Color32::PLACEHOLDER, if *value == *v { W_MEDIUM } else { 400.0 }, 0.0)))).collect();
     let widths: Vec<f32> = galleys.iter().map(|g| g.size().x + pad_x * 2.0).collect();
     let total = widths.iter().sum::<f32>() + GAP * (options.len().saturating_sub(1)) as f32 + PAD * 2.0;
     let base = ui.next_auto_id();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(total, BUTTON_H), Sense::hover());
     ui.painter().rect(rect, R_MD, PANEL(), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
     let mut x = rect.left() + PAD;
-    for (i, (((v, label), g), w)) in options.iter().zip(galleys).zip(widths).enumerate() {
+    for (i, (((v, label, can), g), w)) in options.iter().zip(galleys).zip(widths).enumerate() {
         let seg = egui::Rect::from_min_size(egui::pos2(x, rect.top() + PAD), egui::vec2(w, BUTTON_H - PAD * 2.0));
         x += w + GAP;
-        let r = ui.interact(seg, base.with(i), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        let r = ui.interact(seg, base.with(i), if *can { Sense::click() } else { Sense::hover() });
+        let r = if *can { r.on_hover_cursor(egui::CursorIcon::PointingHand) } else { r };
         let on = *value == *v;
-        let state = state_of(&r);
+        let state = if *can { state_of(&r) } else { 0 };
         let fill = if on { [RAISED(), RAISED(), PRESSED()][state] } else { [Color32::TRANSPARENT, HOVER(), PRESSED()][state] };
         ui.painter().rect_filled(seg, R_SM, fill);
         if on && is_light() {
             ui.painter().rect_stroke(seg, R_SM, Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
         }
         let dy = optical_dy(&g);
-        let text_c = if on || state > 0 { BRIGHT() } else { MUTED() };
+        let text_c = if !*can { FAINT() } else if on || state > 0 { BRIGHT() } else { MUTED() };
         ui.painter().galley(seg.center() - g.size() / 2.0 + egui::vec2(0.0, dy), g, text_c);
         focus_ring(ui, &r, seg, R_SM as f32);
-        let enabled = ui.is_enabled();
+        let enabled = ui.is_enabled() && *can;
         r.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, enabled, on, *label));
-        if r.clicked() {
+        if *can && r.clicked() {
             *value = *v;
         }
     }
@@ -259,10 +266,15 @@ pub(crate) fn paint_kbd(p: &egui::Painter, rect: egui::Rect, g: std::sync::Arc<e
 /// One of a row of underline tabs: muted at rest, a faint underline on hover, the accent
 /// underline and bright text when chosen.
 pub(crate) fn view_tab(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Response {
+    view_tab_dim(ui, label, active, false)
+}
+
+/// `view_tab` for a tab whose settings do not apply right now: faint while not chosen, still clickable.
+pub(crate) fn view_tab_dim(ui: &mut egui::Ui, label: &str, active: bool, dim: bool) -> egui::Response {
     let g = ui.painter().layout_job(egui::text::LayoutJob::single_section(label.to_string(), ui_fmt(13.0, Color32::PLACEHOLDER, if active { W_MEDIUM } else { 400.0 }, 0.0)));
     let (rect, r) = ui.allocate_exact_size(egui::vec2(g.size().x, 30.0), Sense::click());
     let state = state_of(&r);
-    let color = if active { BRIGHT() } else if state > 0 { TEXT() } else { MUTED() };
+    let color = if active { BRIGHT() } else if state > 0 { TEXT() } else if dim { FAINT() } else { MUTED() };
     let dy = optical_dy(&g);
     ui.painter().galley(egui::pos2(rect.left(), rect.center().y - g.size().y / 2.0 + dy - 1.0), g, color);
     let line = egui::Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 2.0), rect.max);

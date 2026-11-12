@@ -64,7 +64,7 @@ impl App {
         let mut keep = true;
         let look = self.prefs.look();
         // Settings that save when changed. Tuples compare up to 12 items, so small ones are grouped.
-        let saved = |p: &UiPrefs| (p.open_inline, p.auto_save, p.always_writable, p.confirm_save, p.default_cols, p.timeout_ms, p.shell_runtime.clone(), p.mongodump.clone(), p.mongorestore.clone(), p.auto_update, (p.show_server, p.show_fps, p.show_mem, p.show_cpu, p.object_preview), (p.keep_toasts, p.appearance));
+        let saved = |p: &UiPrefs| (p.open_inline, p.auto_save, p.always_writable, p.confirm_save, p.default_cols, p.timeout_ms, p.shell_runtime.clone(), p.mongodump.clone(), p.mongorestore.clone(), p.auto_update, (p.show_server, p.show_fps, p.show_mem, p.show_cpu, p.object_preview), (p.keep_toasts, p.appearance, p.gcloud.clone(), p.cloud_sql_proxy.clone()));
         let before = saved(&self.prefs);
         let r = egui::Modal::new(egui::Id::unique(("quarry-layer", "modal"))).frame(dialog_frame()).show(ctx, |ui| {
             let screen = ui.ctx().content_rect();
@@ -242,6 +242,16 @@ impl App {
                     };
                     setting_row(ui, "Bun runtime", &desc, |ui| {
                         ui.add(egui::TextEdit::singleline(&mut self.prefs.shell_runtime).hint_text("automatic").desired_width(190.0));
+                    });
+                });
+                let desc = self.gcloud_found_text();
+                settings_section(ui, "CLOUD SQL", |ui| {
+                    setting_row(ui, "gcloud", &desc, |ui| {
+                        ui.add(egui::TextEdit::singleline(&mut self.prefs.gcloud).hint_text("automatic").desired_width(190.0));
+                    });
+                    ui.separator();
+                    setting_row(ui, "Cloud SQL proxy", "Found automatically, or downloaded by Quarry. Set a path only to use another build.", |ui| {
+                        ui.add(egui::TextEdit::singleline(&mut self.prefs.cloud_sql_proxy).hint_text("automatic").desired_width(190.0));
                     });
                 });
                 settings_section(ui, "DATABASE TOOLS", |ui| {

@@ -66,7 +66,7 @@ impl App {
 pub(super) fn undo_is_under(a: &UndoAction, conn: u64, database: &str, schema: &str, table: &str) -> bool {
     let UndoKind::Sql { database: d, undo, .. } = &a.kind else { return false };
     // An account is not under any schema, whatever its label looks like.
-    if a.conn != conn || matches!(undo, db::sql::write::SqlUndo::Account(_)) {
+    if a.conn != conn || matches!(undo, db::sql::write::SqlUndo::Account(_) | db::sql::write::SqlUndo::PgRoles(_)) {
         return false;
     }
     if schema.is_empty() && table.is_empty() && !database.is_empty() {

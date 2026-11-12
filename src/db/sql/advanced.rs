@@ -76,6 +76,8 @@ pub struct TestInfo {
     pub schemas: Vec<String>,
     /// PostgreSQL: (setting, the server's refusal) of each row the server did not accept.
     pub setting_errors: Vec<(String, String)>,
+    /// PostgreSQL: the subject of the client certificate the server saw, empty when none was sent.
+    pub client_dn: String,
 }
 
 fn word(s: &str, extra: &str) -> bool {
@@ -123,6 +125,11 @@ pub fn parse_flags(text: &str) -> Result<Vec<String>, String> {
 /// This computer's IANA zone name such as Europe/Paris, which is what PostgreSQL takes for "System": an offset would
 /// freeze today's daylight saving state.
 pub fn system_zone_name() -> Option<String> {
+    // Tests read timestamptz text, which a Default zone renders in this zone, so they pin UTC to give the same text on
+    // every machine; tests of other zones set them explicitly.
+    if cfg!(test) {
+        return Some("UTC".into());
+    }
     // Read once: the form asks on every frame, and the platform call reads files or system settings.
     static ZONE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     ZONE.get_or_init(|| iana_time_zone::get_timezone().ok()).clone()
@@ -633,7 +640,7 @@ mod live {
         }
 
         fn open(&self, adv: &Advanced) -> Result<Db, String> {
-            self.w.sql_connect_with(1, self.uri.clone(), Duration::from_secs(20), Net::default(), adv.clone());
+            self.w.sql_connect_with(1, 0, self.uri.clone(), Duration::from_secs(20), Net::default(), adv.clone());
             let Msg::SqlConnected { res, .. } = self.rx.recv_timeout(Duration::from_secs(40)).unwrap() else { panic!("expected SqlConnected") };
             res.map(|(db, _, _)| db)
         }

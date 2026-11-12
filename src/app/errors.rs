@@ -153,7 +153,7 @@ fn paint_kind(p: &egui::Painter, c: egui::Pos2, k: ErrKind, color: Color32) {
             p.line_segment([pt(3.5, 0.0), pt(3.5, 2.5)], s);
         }
         ErrKind::Timeout => paint_clock(p, c, color),
-        ErrKind::Lost | ErrKind::Unreachable | ErrKind::Tunnel => {
+        ErrKind::Lost | ErrKind::Unreachable | ErrKind::Tunnel | ErrKind::CloudSql => {
             p.rect_stroke(egui::Rect::from_min_max(pt(-5.0, -3.0), pt(5.0, 4.0)), 2.0, s, egui::StrokeKind::Middle);
             p.line_segment([pt(-2.5, -3.0), pt(-2.5, -7.0)], s);
             p.line_segment([pt(2.5, -3.0), pt(2.5, -7.0)], s);
@@ -623,6 +623,9 @@ impl App {
             Some(e) => e.clone(),
             None => self.entry(raw.clone(), Some(id), None, format!("Connect · {name}"), "connect", 0),
         };
+        if e.ex.kind == ErrKind::CloudSql {
+            return self.cloud_failed_card(ui, id, &e);
+        }
         let host = host_of(&uri);
         // The server never answered, so its TLS flag is unknown; the address says whether TLS was asked for.
         let tls = uri.contains("tls=true") || uri.contains("ssl=true") || uri.starts_with("mongodb+srv") || e.ex.kind == ErrKind::Tls;
@@ -642,7 +645,7 @@ impl App {
         steps.push("Listed the databases".into());
         let low = raw.to_lowercase();
         let failed = match e.ex.kind {
-            ErrKind::Tunnel => 0,
+            ErrKind::Tunnel | ErrKind::CloudSql => 0,
             ErrKind::Unreachable if low.contains("lookup") || low.contains("servname") || low.contains("not known") => usize::from(ssh),
             ErrKind::Unreachable | ErrKind::Lost => usize::from(ssh) + 1,
             ErrKind::Tls => usize::from(ssh) + 2,
@@ -654,6 +657,7 @@ impl App {
             ErrKind::Unreachable | ErrKind::Lost => &["The host name and port are right.", "A VPN is needed to reach this network.", "The server only accepts connections through an SSH tunnel."],
             ErrKind::Tls => &["The CA file in the connection's TLS settings signs this server's certificate.", "The host name matches the certificate."],
             ErrKind::Tunnel => &["The SSH host, port, user and key are right.", "The SSH server's host key has not changed."],
+            ErrKind::CloudSql => &["IAM sign-in has Application Default Credentials (`gcloud auth application-default login`); a password sign-in has gcloud signed in (`gcloud auth login`) or those credentials.", "The account may connect to the instance (Cloud SQL Client role).", "The instance name is project:region:instance, and its IP kind (public, private or PSC) is reachable from here."],
             ErrKind::Privilege => &["The user may sign in but not list databases. Name a database in the connection string."],
             _ => &[],
         };

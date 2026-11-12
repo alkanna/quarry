@@ -33,37 +33,54 @@ fn engine_card(ui: &mut egui::Ui, code: &str, name: &str, sub: &str, color: Colo
 /// The tabs of the connection form: Mongo reaches its servers through a proxy, SQL engines through TLS settings and, where
 /// the engine has them, session settings.
 fn conn_tabs(engine: db::sql::Engine) -> &'static [(ConnTab, &'static str)] {
-    use db::sql::Feature::AdvancedTab;
-    match (engine.is_sql(), engine.supports(AdvancedTab)) {
-        (false, _) => &[(ConnTab::Standard, "Standard"), (ConnTab::Ssh, "SSH"), (ConnTab::Proxy, "Proxy")],
-        (true, true) => &[(ConnTab::Standard, "Standard"), (ConnTab::Ssh, "SSH"), (ConnTab::Tls, "TLS"), (ConnTab::Advanced, "Advanced")],
-        (true, false) => &[(ConnTab::Standard, "Standard"), (ConnTab::Ssh, "SSH"), (ConnTab::Tls, "TLS")],
-    }
+    if engine.is_sql() { &[(ConnTab::Standard, "Standard"), (ConnTab::Ssh, "SSH"), (ConnTab::Tls, "TLS"), (ConnTab::Advanced, "Advanced")] } else { &[(ConnTab::Standard, "Standard"), (ConnTab::Ssh, "SSH"), (ConnTab::Proxy, "Proxy")] }
 }
 
 fn tls_tab(ui: &mut egui::Ui, f: &mut ConnForm) {
+    if f.cloud_on().is_some() {
+        note_row(ui, C_LINK(), true, "The Cloud SQL proxy encrypts the connection with the instance's own certificate, so these settings are not used.");
+        ui.add_space(8.0);
+        ui.add_enabled_ui(false, |ui| tls_settings(ui, f));
+    } else {
+        tls_settings(ui, f);
+    }
+}
+
+fn tls_settings(ui: &mut egui::Ui, f: &mut ConnForm) {
     settings_section(ui, "TLS", |ui| {
         egui::Grid::new("tls").num_columns(2).spacing([FORM_GAP, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
             let pg = f.engine == db::sql::Engine::Postgres;
             form_label(ui, if pg { "Mode" } else { "SSL mode" });
             segmented(ui, &mut f.addr.ssl_mode, if pg { &db::sql::SslMode::PG_ALL } else { &db::sql::SslMode::ALL });
             ui.end_row();
-            form_label(ui, "CA file");
-            ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut f.addr.ssl_ca).hint_text("optional, PEM file").desired_width(280.0));
-                if ui.button("Choose…").clicked() {
-                    if let Some(p) = rfd::FileDialog::new().set_directory(dirs::home_dir().unwrap_or_default()).pick_file() {
-                        f.addr.ssl_ca = p.display().to_string();
+            let file_row = |ui: &mut egui::Ui, label: &str, path: &mut String| {
+                form_label(ui, label);
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(path).hint_text("optional, PEM file").desired_width(280.0));
+                    if ui.button("Choose…").clicked() {
+                        if let Some(p) = rfd::FileDialog::new().set_directory(dirs::home_dir().unwrap_or_default()).pick_file() {
+                            *path = p.display().to_string();
+                        }
                     }
-                }
-            });
-            ui.end_row();
+                });
+                ui.end_row();
+            };
+            file_row(ui, "CA file", &mut f.addr.ssl_ca);
+            if pg {
+                file_row(ui, "Client cert", &mut f.addr.ssl_cert);
+                file_row(ui, "Client key", &mut f.addr.ssl_key);
+                form_label(ui, "Passphrase");
+                ui.add(egui::TextEdit::singleline(&mut f.pg_key_pass).password(true).hint_text("only for an encrypted key").desired_width(280.0));
+                ui.end_row();
+            }
         });
         ui.add_space(6.0);
         if f.engine == db::sql::Engine::Postgres {
-            ui.add(egui::Label::new(RichText::new("Names follow libpq sslmode. prefer tries TLS and falls back to plain, require encrypts without checking the certificate, verify-ca checks the chain and verify-full also checks the host name. Through an SSH tunnel the host name is the tunnel's, so verify-full behaves like verify-ca.").size(TXT_SMALL).color(FAINT())).wrap());
+            ui.add(egui::Label::new(RichText::new("Names follow libpq sslmode. prefer tries TLS and falls back to plain, require encrypts without checking the certificate, verify-ca checks the chain against the CA file and needs one, verify-full also checks the host name. With a CA file only that CA is trusted; verify-full without one trusts the public CAs. Through an SSH tunnel the name checked is still the host typed above.").size(TXT_SMALL).color(FAINT())).wrap());
+            ui.add_space(4.0);
+            ui.add(egui::Label::new(RichText::new("Certificate and key are PEM files. The passphrase is only for an encrypted key.").size(TXT_SMALL).color(FAINT())).wrap());
         } else {
-            ui.label(RichText::new("Through an SSH tunnel the host name is the tunnel's, so Verify identity behaves like Verify CA.").size(TXT_SMALL).color(FAINT()));
+            ui.add(egui::Label::new(RichText::new("Verify CA also checks the host name, a limit of Quarry's MySQL driver, and the public CAs are trusted beside the CA file. Through an SSH tunnel the name checked is the host typed above, except on Windows, where it is the tunnel's 127.0.0.1.").size(TXT_SMALL).color(FAINT())).wrap());
         }
     });
 }
@@ -245,7 +262,8 @@ fn paste_apply(st: &mut Paste, f: &mut ConnForm) {
     match db::sql::Addr::from_paste(&st.text) {
         Ok(a) => {
             let had_password = !a.password.is_empty();
-            st.filled = [true, true, !a.user.is_empty(), had_password, !a.database.is_empty(), a.ssl_mode != db::sql::SslMode::Preferred || !a.ssl_ca.is_empty()];
+            let cert = !a.ssl_cert.is_empty() || !a.ssl_key.is_empty();
+            st.filled = [true, true, !a.user.is_empty(), had_password, !a.database.is_empty(), a.ssl_mode != db::sql::SslMode::Preferred || !a.ssl_ca.is_empty() || cert];
             let mut parts = vec!["host", "port"];
             for (i, w) in [(PASTE_USER, "user"), (PASTE_PASSWORD, "password"), (PASTE_DATABASE, "database")] {
                 if st.filled[i] {
@@ -255,6 +273,9 @@ fn paste_apply(st: &mut Paste, f: &mut ConnForm) {
             let mut note = format!("Filled {}", parts.join(", "));
             if st.filled[PASTE_TLS] {
                 note += &format!(" and TLS {}", a.ssl_mode.pg_name());
+                if cert {
+                    note += " with a client certificate";
+                }
             }
             note += if had_password { "." } else { ". No password in the URL, type it below." };
             f.addr = db::sql::Addr { ssl_mode: a.ssl_mode, ..a };
@@ -327,10 +348,108 @@ fn paste_field(ui: &mut egui::Ui, f: &mut ConnForm, field_w: f32) -> Paste {
     st
 }
 
-fn standard_tab(ui: &mut egui::Ui, f: &mut ConnForm) {
+/// The rows that replace host, port and password while the connection goes through Cloud SQL. True when Change is clicked.
+fn cloud_rows(ui: &mut egui::Ui, f: &mut ConnForm, cloud: &super::cloud_sql::CloudCache, field_w: f32) -> bool {
+    let Some(mut conf) = f.cloud_sql.clone() else { return false };
+    let inst = f.cloud_inst.clone().or_else(|| cloud.instance(&conf.instance).cloned());
+    let account = cloud.account();
+    let mut change = false;
+    form_label(ui, "Cloud SQL");
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(field_w, BUTTON_H + 1.0), Sense::hover());
+    ui.painter().rect(rect, R_MD, PANEL(), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
+    // The links go first, so a long instance name is cut before it runs under them.
+    let mut host = false;
+    let links = put_at(ui, rect.shrink2(egui::vec2(10.0, 0.0)), |ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 14.0;
+            let h = ui.link(RichText::new("Use a host").size(TXT_SMALL));
+            let c = ui.link(RichText::new("Change").size(TXT_SMALL));
+            host = h.clicked();
+            change = c.clicked();
+            c.rect.left()
+        })
+        .inner
+    });
+    let p = ui.painter().with_clip_rect(egui::Rect::from_min_max(rect.min, egui::pos2(links - 10.0, rect.bottom())));
+    let dot = egui::pos2(rect.left() + 12.0, rect.center().y);
+    match &inst {
+        Some(i) if i.state != "RUNNABLE" => p.circle_stroke(dot, 3.0, Stroke::new(1.0, FAINT())),
+        Some(_) => p.circle_filled(dot, 3.5, SUCCESS()),
+        None => p.circle_filled(dot, 3.5, FAINT()),
+    };
+    let g = p.layout_job(egui::text::LayoutJob::single_section(conf.instance.clone(), mono_fmt(TXT_BODY, TEXT(), 400.0)));
+    let x = rect.left() + 22.0 + g.size().x + 8.0;
+    galley_at(&p, rect.left() + 22.0, rect.center().y, g, TEXT());
+    // A badge cut in half reads worse than none; IAM sign-in is also shown by its switch below.
+    if conf.iam && x + 40.0 <= links - 10.0 {
+        super::cloud_sql::iam_badge(&p, x, rect.center().y);
+    }
+    ui.end_row();
+    form_label(ui, "IP address");
+    ui.horizontal(|ui| {
+        let (opts, note) = super::cloud_sql::ip_choices(inst.as_ref());
+        segmented_on(ui, &mut conf.ip, &opts);
+        if !note.is_empty() {
+            ui.label(RichText::new(note).size(TXT_SMALL).color(FAINT()));
+        }
+    });
+    ui.end_row();
+    form_label(ui, "IAM sign-in");
+    ui.horizontal(|ui| {
+        let was = conf.iam;
+        let t = toggle(ui, &mut conf.iam);
+        t.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, conf.iam, "Sign in with IAM"));
+        // Turned on, the user becomes the gcloud account, which is usually also the one Application Default Credentials
+        // were made with. The proxy cannot use the gcloud account for IAM, so the note says which one counts.
+        if conf.iam && !was {
+            if let Some(a) = account {
+                f.addr.user = crate::cloudsql::iam_user(a);
+            }
+        }
+        let note = if conf.iam { "No password. The proxy signs in with Application Default Credentials, which must be this user's account" } else { "The database user signs in with its password" };
+        ui.label(RichText::new(note).color(MUTED()));
+    });
+    ui.end_row();
+    form_label(ui, "User");
+    ui.horizontal(|ui| {
+        ui.add(egui::TextEdit::singleline(&mut f.addr.user).font(egui::TextStyle::Monospace).desired_width(200.0).margin(FIELD_MARGIN));
+        let note = match (conf.iam, account) {
+            (true, Some(a)) if f.addr.user.trim() == crate::cloudsql::iam_user(a) => "From gcloud, editable",
+            (true, Some(_)) => "The IAM user to sign in as",
+            (true, None) => "No gcloud account, so type the IAM user",
+            (false, _) => "A database user of the instance",
+        };
+        ui.label(RichText::new(note).size(TXT_SMALL).color(FAINT()));
+    });
+    ui.end_row();
+    if !conf.iam {
+        form_label(ui, "Password");
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut f.addr.password).password(true).font(egui::TextStyle::Monospace).desired_width(200.0).margin(FIELD_MARGIN));
+            ui.label(RichText::new("Kept in the Keychain").size(TXT_SMALL).color(FAINT()));
+        });
+        ui.end_row();
+    }
+    form_label(ui, "Database");
+    ui.horizontal(|ui| {
+        ui.add(egui::TextEdit::singleline(&mut f.addr.database).hint_text("postgres").desired_width(200.0).margin(FIELD_MARGIN));
+        ui.label(RichText::new("Optional, empty opens postgres").size(TXT_SMALL).color(FAINT()));
+    });
+    ui.end_row();
+    f.cloud_sql = Some(conf);
+    if host {
+        super::cloud_sql::use_host(f);
+    }
+    change
+}
+
+/// The Standard tab. True when Change asks for the Cloud SQL browser.
+fn standard_tab(ui: &mut egui::Ui, f: &mut ConnForm, cloud: &super::cloud_sql::CloudCache) -> bool {
     let pg = f.engine == db::sql::Engine::Postgres;
+    let cloud_on = f.cloud_on().is_some();
+    let mut change = false;
     let mut paste = Paste::default();
-    if pg {
+    if pg && !cloud_on {
         let w = ui.available_width() - FORM_LABEL_W - FORM_GAP - 2.0 * ui.spacing().item_spacing.x;
         paste = paste_field(ui, f, w);
         ui.add_space(6.0);
@@ -357,6 +476,10 @@ fn standard_tab(ui: &mut egui::Ui, f: &mut ConnForm) {
                 ui.add(egui::TextEdit::singleline(&mut f.tag).hint_text("or type a custom tag").char_limit(24).desired_width(220.0).margin(FIELD_MARGIN));
             });
             ui.end_row();
+            if cloud_on {
+                change = cloud_rows(ui, f, cloud, field_w);
+                return;
+            }
             if !f.engine.is_sql() {
                 form_label(ui, "URI");
                 ui.vertical(|ui| {
@@ -405,18 +528,29 @@ fn standard_tab(ui: &mut egui::Ui, f: &mut ConnForm) {
             });
             ui.end_row();
         });
+        if cloud_on {
+            ui.add_space(4.0);
+            note_row(ui, C_LINK(), true, "Filled from Cloud SQL. The proxy starts on a free local port when you connect.");
+        }
         if pg && paste.filled.iter().any(|b| *b) {
             ui.add_space(4.0);
             ui.label(RichText::new(if paste.filled[PASTE_TLS] { format!("Blue borders came from the string. The TLS tab now reads {}.", f.addr.ssl_mode.pg_name()) } else { "Blue borders came from the string.".to_string() }).size(TXT_SMALL).color(FAINT()));
         }
     });
-    if pg {
+    if pg && !cloud_on {
         ui.data_mut(|d| d.insert_temp(paste_id(f), paste));
     }
+    change
 }
 
 fn ssh_tab(ui: &mut egui::Ui, f: &mut ConnForm) {
     settings_section(ui, "SSH TUNNEL", |ui| {
+        if f.cloud_on().is_some() {
+            f.ssh_on = false;
+            ui.add_enabled(false, egui::Checkbox::new(&mut f.ssh_on, "Connect through an SSH server (jump host)"));
+            ui.label(RichText::new("Not used with Cloud SQL: the proxy carries the connection. Use a host on the Standard tab to set a tunnel.").size(TXT_SMALL).color(FAINT()));
+            return;
+        }
         ui.checkbox(&mut f.ssh_on, "Connect through an SSH server (jump host)");
         if f.ssh_on {
             egui::Grid::new("ssh").num_columns(2).spacing([FORM_GAP, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
@@ -513,7 +647,12 @@ impl App {
         }
         let mut save = false;
         let mut test = false;
+        let mut browse = false;
         let default_s = self.prefs.timeout_ms / 1000;
+        // An edited Cloud SQL connection shows the gcloud account and the instance's state, which the browser's load reads.
+        if f.cloud_on().is_some() {
+            self.cloud_load(false);
+        }
         // Custom starts from what the server runs, once, so a mode the user already shaped is never replaced.
         if let Some((req, info)) = self.test_info.take() {
             f.take_test_info(req, info);
@@ -522,6 +661,7 @@ impl App {
         dialog_title(ui, if f.id.is_some() { "Edit connection" } else { "New connection" });
         ui.label(RichText::new("Addresses, passwords and passphrases are stored in the macOS Keychain. The connection opens read-only.").size(TXT_SMALL).color(MUTED()));
         ui.add_space(8.0);
+        let cloud = &self.cloud;
         ui.horizontal_top(|ui| {
             ui.allocate_ui_with_layout(egui::vec2(210.0, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
                 ui.spacing_mut().item_spacing.y = 8.0;
@@ -542,6 +682,9 @@ impl App {
                     pick = Some((db::sql::Engine::Postgres, "postgres"));
                 }
                 engine_card(ui, "SQ", "SQLite", "Coming later", FAINT(), false, false);
+                if quiet(ui, "Add from Cloud SQL…").on_hover_text("Fill this form from a PostgreSQL instance your gcloud account can reach").clicked() {
+                    browse = true;
+                }
                 if let Some((engine, scheme)) = pick {
                     f.engine = engine;
                     if engine.is_sql() {
@@ -566,21 +709,22 @@ impl App {
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 18.0;
+                    let cloud = f.cloud_on().is_some();
                     for &(t, label) in conn_tabs(f.engine) {
-                        if view_tab(ui, label, f.tab == t).clicked() {
+                        if view_tab_dim(ui, label, f.tab == t, cloud && matches!(t, ConnTab::Ssh | ConnTab::Tls)).clicked() {
                             f.tab = t;
                         }
                     }
                 });
                 ui.add_space(6.0);
                 egui::ScrollArea::vertical().max_height(ui.ctx().content_rect().height() - 260.0).show(ui, |ui| match f.tab {
-                    ConnTab::Standard => standard_tab(ui, f),
+                    ConnTab::Standard => browse |= standard_tab(ui, f, cloud),
                     ConnTab::Ssh => ssh_tab(ui, f),
                     ConnTab::Proxy => proxy_tab(ui, f),
                     ConnTab::Tls => tls_tab(ui, f),
                     ConnTab::Advanced if f.engine == db::sql::Engine::Postgres => super::conn_pg_advanced::pg_advanced_tab(ui, f, default_s),
-                    ConnTab::Advanced if f.engine.supports(db::sql::Feature::AdvancedTab) => advanced_tab(ui, f, default_s),
-                    ConnTab::Advanced => standard_tab(ui, f),
+                    ConnTab::Advanced if f.engine.is_sql() => advanced_tab(ui, f, default_s),
+                    ConnTab::Advanced => browse |= standard_tab(ui, f, cloud),
                 });
             });
         });
@@ -605,20 +749,32 @@ impl App {
             Some(Ok(m)) => {
                 ui.label(RichText::new(m).color(SUCCESS()));
             }
+            Some(Err(e)) if e.contains(crate::cloudsql::PROXY_MISSING) => {}
             Some(Err(e)) => {
-                ui.add(egui::Label::new(RichText::new(e).color(ALERT())).wrap());
+                // The driver's text for a client certificate problem names no file or fix; the explained words do.
+                let text = db::client_cert_problem(e).map_or_else(|| e.clone(), |(t, h)| format!("{t}. {h}"));
+                ui.add(egui::Label::new(RichText::new(text).color(ALERT())).wrap());
             }
             None => {}
+        }
+        if matches!(&self.conn_test, Some((_, Err(e))) if e.contains(crate::cloudsql::PROXY_MISSING)) {
+            ui.add_space(6.0);
+            match self.proxy_missing_card(ui, "Test") {
+                Some(super::cloud_sql::CardAct::Again) => test = true,
+                act => self.cloud_card_act(act, |_| {}),
+            }
         }
         let adv_error = f.advanced_error();
         if let Some(m) = &adv_error {
             ui.add(egui::Label::new(RichText::new(m).color(ALERT())).wrap());
         }
         dialog_actions(ui, |ui| {
-            let address_ok = if f.engine.is_sql() { !f.addr.host.trim().is_empty() && !f.addr.user.trim().is_empty() } else { f.uri.starts_with("mongodb://") || f.uri.starts_with("mongodb+srv://") };
+            let address_ok = if let Some(c) = f.cloud_on() {
+                crate::cloudsql::valid_instance(&c.instance) && !f.addr.user.trim().is_empty()
+            } else if f.engine.is_sql() { !f.addr.host.trim().is_empty() && !f.addr.user.trim().is_empty() } else { f.uri.starts_with("mongodb://") || f.uri.starts_with("mongodb+srv://") };
             let valid = adv_error.is_none() && !f.name.trim().is_empty() && address_ok && (!f.ssh_on || (!f.ssh.host.trim().is_empty() && !f.ssh.user.trim().is_empty())) && (!f.proxy_on || f.ssh_on || f.engine.is_sql() || !f.proxy.host.trim().is_empty());
             save = ui.add_enabled(valid, primary_button(ui, "Save and connect", PRIMARY())).clicked();
-            test = ui.add_enabled(valid, egui::Button::new("Test")).clicked();
+            test |= ui.add_enabled(valid, egui::Button::new("Test")).clicked();
             if ui.button("Cancel").clicked() {
                 *keep = false;
             }
@@ -626,16 +782,19 @@ impl App {
         if !*keep {
             paste_reset(ui.ctx(), f);
         }
+        if browse {
+            self.open_cloud_browser(true);
+        }
         if test {
             f.testing = true;
             self.conn_test = None;
             self.test_info = None;
             self.req += 1;
             f.test_req = self.req;
-            let net = f.net();
+            let mut net = f.net();
+            net.tools = self.cloud_tools();
             if f.engine.is_sql() {
-                let addr = db::sql::Addr { host: f.addr.host.trim().into(), user: f.addr.user.trim().into(), database: f.addr.database.trim().into(), ..f.addr.clone() };
-                self.worker.sql_test_with(f.test_req, addr.to_uri(), self.timeout(), net, f.advanced().unwrap_or_default());
+                self.worker.sql_test_with(f.test_req, f.sql_addr().to_uri(), self.timeout(), net, f.advanced().unwrap_or_default());
             } else {
                 self.worker.test(f.test_req, f.uri.trim().to_string(), self.timeout(), net);
             }
@@ -644,7 +803,8 @@ impl App {
             let id = f.id.unwrap_or_else(|| self.conns.iter().map(|c| c.meta.id).max().unwrap_or(0) + 1);
             // Demo ids overlap real ones, so the demo keeps its edits in memory only.
             // SQL addresses are rebuilt from the fields, so the Keychain holds one URL for either engine.
-            let uri = if f.engine.is_sql() { db::sql::Addr { host: f.addr.host.trim().into(), user: f.addr.user.trim().into(), database: f.addr.database.trim().into(), ..f.addr.clone() }.to_uri() } else { f.uri.trim().to_string() };
+            // A Cloud SQL IAM sign-in has no password, so none is stored with the address.
+            let uri = if f.engine.is_sql() { f.sql_addr().to_uri() } else { f.uri.trim().to_string() };
             let saved = if self.ephemeral { Some(Ok(())) } else { keychain(id).map(|k| k.set_password(&uri)) };
             match saved {
                 Some(Ok(())) => {
@@ -655,6 +815,7 @@ impl App {
                             set_secret(id, "ssh-password", if f.ssh_on { &f.ssh_pwd } else { "" }),
                             set_secret(id, "ssh-passphrase", if f.ssh_on { &f.ssh_pass } else { "" }),
                             set_secret(id, "proxy-password", if f.proxy_on && !f.ssh_on && !f.engine.is_sql() { &f.proxy_pwd } else { "" }),
+                            set_secret(id, "pg-key-passphrase", if f.engine == db::sql::Engine::Postgres && f.cloud_on().is_none() && !f.addr.ssl_key.trim().is_empty() { &f.pg_key_pass } else { "" }),
                         ]
                     };
                     let meta = ConnMeta {
@@ -664,6 +825,7 @@ impl App {
                         tag: clean_tag(&f.tag).into(),
                         ssh: f.ssh_on.then(|| crate::ssh::SshConf { host: f.ssh.host.trim().into(), user: f.ssh.user.trim().into(), ..f.ssh.clone() }),
                         proxy: (f.proxy_on && !f.ssh_on && !f.engine.is_sql()).then(|| db::Proxy { host: f.proxy.host.trim().into(), password: None, ..f.proxy.clone() }),
+                        cloud_sql: f.cloud_on().filter(|_| !f.ssh_on).cloned(),
                         advanced: f.advanced().unwrap_or_default(),
                     };
                     match self.conns.iter_mut().find(|c| c.meta.id == id) {

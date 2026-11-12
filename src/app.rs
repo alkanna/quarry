@@ -13,9 +13,10 @@ use std::time::Duration;
 mod aggregate;
 mod auto_update;
 mod chrome;
+mod cloud_sql;
 mod column_menu;
 mod compare;
-mod config;
+pub(crate) mod config;
 mod conn_form;
 mod conn_pg_advanced;
 mod danger;
@@ -39,6 +40,7 @@ mod run;
 mod schema;
 mod server;
 mod sql_server;
+mod pg_server;
 mod settings;
 mod shell;
 mod shell_attach;
@@ -60,6 +62,7 @@ mod sql_query;
 mod sql_import;
 mod sql_dump;
 mod sql_users;
+mod pg_roles;
 mod state;
 mod table;
 mod tabs;
@@ -86,6 +89,7 @@ use users::*;
 use indexes::*;
 use server::*;
 use sql_server::*;
+use pg_server::*;
 use watch::*;
 use drafts::*;
 use sql_edit::*;
@@ -196,8 +200,10 @@ pub struct App {
     sql_values_asked: HashMap<(u64, String, String, String), HashSet<Option<String>>>,
     users: Option<UsersWin>,
     sql_users: Option<sql_users::SqlUsersWin>,
+    pg_roles: Option<pg_roles::PgRolesWin>,
     server: Option<ServerWin>,
     sql_server: Option<SqlServerWin>,
+    pg_server: Option<PgServerWin>,
     /// Kill requests sent from the Server window and not answered yet. Kept here so an answer that arrives after
     /// the window was closed still reaches the person.
     sql_kills: HashSet<u64>,
@@ -237,6 +243,10 @@ pub struct App {
     js: shell_ls::JsState,
     tree_filter: String,
     tools_installing: bool,
+    /// What gcloud told this session about Cloud SQL, so the browser reopens at once.
+    cloud: cloud_sql::CloudCache,
+    /// The "Add from Cloud SQL" browser, when open.
+    cloud_browser: Option<cloud_sql::CloudBrowser>,
     /// The Settings category shown, kept while the app runs.
     settings_cat: settings::SettingsCat,
     /// Tree row the palette jumped to, as (connection, database, collection), scrolled into view once drawn.
@@ -347,8 +357,10 @@ impl App {
             sql_values_asked: HashMap::new(),
             users: None,
             sql_users: None,
+            pg_roles: None,
             server: None,
             sql_server: None,
+            pg_server: None,
             sql_kills: HashSet::new(),
             conn_test: None,
             test_info: None,
@@ -372,6 +384,8 @@ impl App {
             log: LogUi::default(),
             tree_filter: String::new(),
             tools_installing: false,
+            cloud: Default::default(),
+            cloud_browser: None,
             settings_cat: Default::default(),
             reveal: None,
             rail_order: Vec::new(),
@@ -689,9 +703,13 @@ impl eframe::App for App {
         self.modals(&ctx);
         self.users_window(&ctx);
         self.sql_users_window(&ctx);
+        self.pg_roles_window(&ctx);
         self.server_window(&ctx);
         self.sql_server_window(&ctx);
+        self.pg_server_window(&ctx);
         self.tool_window(&ctx);
+        // After the modals, so a browser opened from the connection form draws over it.
+        self.cloud_browser_window(&ctx);
         self.toasts(&ctx);
         self.screenshot(&ctx);
     }

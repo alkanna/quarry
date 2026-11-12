@@ -60,7 +60,7 @@ impl App {
     /// A dialog or window over the page. It takes its own keys, Esc included, so page shortcuts
     /// stay off while it is open; a new kind of window belongs in this list.
     pub(super) fn window_open(&self) -> bool {
-        self.modal.is_some() || self.insert.is_some() || self.json_edit.is_some() || self.users.is_some() || self.server.is_some() || self.sql_users.is_some() || self.sql_server.is_some() || self.tool.is_some()
+        self.modal.is_some() || self.cloud_browser.is_some() || self.insert.is_some() || self.json_edit.is_some() || self.users.is_some() || self.server.is_some() || self.sql_users.is_some() || self.pg_roles.is_some() || self.sql_server.is_some() || self.pg_server.is_some() || self.tool.is_some()
     }
 
     pub(super) fn keys(&mut self, ctx: &egui::Context) {
@@ -320,7 +320,7 @@ impl App {
                             if self.busy() {
                                 self.warn("Save or discard your edits and wait for running scripts first.");
                             } else {
-                                crate::update::restart();
+                                self.restart();
                             }
                         }
                     }
@@ -625,6 +625,10 @@ impl App {
             ui.add_space(16.0);
             if ui.button("+ Add a connection").clicked() {
                 self.new_conn_modal();
+            }
+            ui.add_space(4.0);
+            if quiet(ui, "Add from Cloud SQL…").clicked() {
+                self.open_cloud_browser(false);
             }
         });
     }

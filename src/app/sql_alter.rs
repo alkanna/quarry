@@ -487,8 +487,8 @@ impl App {
                 ui.label(RichText::new("Nothing runs until Apply.").size(TXT_SMALL).color(FAINT()));
                 right_group(ui, |ui| {
                     let label = if applying { "Applying..." } else { "Apply" };
-                    // A locked connection is asked to unlock when Apply is pressed; only a view or an engine that cannot edit stops it.
-                    let can = editable || (self.struct_block().is_none() && !self.sel_is_view());
+                    // A locked connection is asked to unlock when Apply is pressed; only a view stops it.
+                    let can = editable || !self.sel_is_view();
                     let why = if can { "" } else { "This table cannot be changed here" };
                     if ui.add_enabled(can && !applying, primary_button(ui, label, PRIMARY())).on_disabled_hover_text(why).clicked() {
                         acts.push(Act::Apply);

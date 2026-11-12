@@ -47,6 +47,10 @@ pub struct DumpPlan {
     pub snapshot: bool,
     /// A WHERE clause for the rows of the only table, which then has no structure.
     pub filter: Option<String>,
+    /// PostgreSQL: GRANT and REVOKE statements for what the file makes, and its default privileges.
+    pub grants: bool,
+    /// PostgreSQL: ALTER ... OWNER TO for what the file makes.
+    pub owners: bool,
 }
 
 /// An INSERT stops growing at this much text, so a table of large cells stays under max_allowed_packet.
@@ -657,7 +661,7 @@ mod tests {
             l.sql(&format!("CREATE FUNCTION {db}.f_dbl(a INT) RETURNS INT DETERMINISTIC RETURN a * 2"));
             let tables = ["parent", "child", "small", "empty_t"];
             let before: Vec<(String, String, String)> = tables.iter().map(|t| (shape(l, &format!("SHOW CREATE TABLE {db}.{t}")), l.cell(&format!("CHECKSUM TABLE {db}.{t}"), 1), l.count(&format!("{db}.{t}")).to_string())).collect();
-            let plan = |per| DumpPlan { schema: db.into(), tables: tables.iter().map(|t| DumpTable { name: t.to_string(), view: false, structure: true, content: true, drop: true }).chain([DumpTable { name: "v_sum".into(), view: true, structure: true, content: false, drop: true }]).collect(), create_db: true, extras: true, rows_per_insert: per, snapshot: true, filter: None };
+            let plan = |per| DumpPlan { schema: db.into(), tables: tables.iter().map(|t| DumpTable { name: t.to_string(), view: false, structure: true, content: true, drop: true }).chain([DumpTable { name: "v_sum".into(), view: true, structure: true, content: false, drop: true }]).collect(), create_db: true, extras: true, rows_per_insert: per, snapshot: true, filter: None, grants: false, owners: false };
             let path = tmp(var, "sql");
             let (count, cancel, id) = (AtomicU64::new(0), AtomicBool::new(false), AtomicU64::new(0));
             let done = l.w.rt.block_on(dump_to(&l.db, &plan(1000), path.clone(), &count, &cancel, &id)).unwrap_or_else(|x| panic!("{var}: {x}"));
@@ -750,7 +754,7 @@ mod tests {
             let rows = sqlx::raw_sql(&format!("SELECT TABLE_NAME, TABLE_TYPE = 'VIEW' FROM information_schema.TABLES WHERE TABLE_SCHEMA = '{db}' ORDER BY TABLE_NAME")).fetch_all(&l.pool).await.unwrap();
             rows.iter().map(|r| (String::from_utf8_lossy(raw(r, 0).unwrap()).into_owned(), raw(r, 1) == Some(b"1"))).collect()
         });
-        DumpPlan { schema: db.into(), tables: names.into_iter().map(|(name, view)| DumpTable { name, view, structure: true, content: !view, drop: true }).collect(), create_db: true, extras: true, rows_per_insert: 1000, snapshot: true, filter: None }
+        DumpPlan { schema: db.into(), tables: names.into_iter().map(|(name, view)| DumpTable { name, view, structure: true, content: !view, drop: true }).collect(), create_db: true, extras: true, rows_per_insert: 1000, snapshot: true, filter: None, grants: false, owners: false }
     }
 
     fn dump_with(l: &crate::db::sql::testing::Live, db: &Db, plan: &DumpPlan, path: &Path) {

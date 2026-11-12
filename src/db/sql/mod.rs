@@ -9,6 +9,8 @@ mod pg_advanced_tests;
 mod worker;
 mod run;
 pub mod pg;
+pub(crate) mod pg_cert;
+mod pg_tls;
 mod pg_catalog;
 mod pg_read;
 #[cfg(test)]
@@ -23,6 +25,8 @@ mod pg_import_tests;
 mod pg_pgbouncer_tests;
 #[cfg(test)]
 mod pg_ddl_tests;
+#[cfg(test)]
+mod tls_tests;
 pub mod exec;
 mod relay;
 pub mod structure;
@@ -46,6 +50,7 @@ mod pg_dump;
 #[cfg(test)]
 mod pg_dump_tests;
 pub mod server;
+pub mod pg_server;
 #[cfg(test)]
 pub(crate) mod testing;
 #[cfg(test)]
@@ -53,6 +58,9 @@ mod review_final;
 pub mod rules;
 pub mod schema;
 pub mod users;
+pub mod roles_pg;
+#[cfg(test)]
+mod roles_pg_tests;
 pub use advanced::{Advanced, Charset, TestInfo, Zone};
 pub use dialect::{Dialect, Feature, FUNCTIONS, KEYWORDS};
 pub use structure::Structure;
@@ -424,6 +432,9 @@ pub struct Addr {
     pub database: String,
     pub ssl_mode: SslMode,
     pub ssl_ca: String,
+    /// PostgreSQL only: the client certificate and key files, as libpq's `sslcert` and `sslkey` name them.
+    pub ssl_cert: String,
+    pub ssl_key: String,
 }
 
 pub const DEFAULT_PORT: u16 = 3306;
@@ -460,6 +471,8 @@ impl Addr {
                 match k.as_str() {
                     "sslmode" => a.ssl_mode = SslMode::from_pg_param(v).unwrap_or_default(),
                     "sslrootcert" => a.ssl_ca = decode(v),
+                    "sslcert" => a.ssl_cert = decode(v),
+                    "sslkey" => a.ssl_key = decode(v),
                     _ => {}
                 }
                 continue;
@@ -563,6 +576,8 @@ impl Addr {
                 "dbname" => a.database = val,
                 "sslmode" => a.ssl_mode = SslMode::from_pg_param(&val).ok_or_else(|| format!("Unknown sslmode in item {item} of the connection string"))?,
                 "sslrootcert" => a.ssl_ca = val,
+                "sslcert" => a.ssl_cert = val,
+                "sslkey" => a.ssl_key = val,
                 _ => {}
             }
         }
@@ -584,6 +599,11 @@ impl Addr {
         }
         if !self.ssl_ca.is_empty() {
             q.push(format!("{}={}", if pg { "sslrootcert" } else { "ssl-ca" }, encode(&self.ssl_ca)));
+        }
+        for (k, v) in [("sslcert", &self.ssl_cert), ("sslkey", &self.ssl_key)] {
+            if pg && !v.is_empty() {
+                q.push(format!("{k}={}", encode(v)));
+            }
         }
         let q = if q.is_empty() { String::new() } else { format!("?{}", q.join("&")) };
         format!("{scheme}://{auth}{}:{port}/{}{q}", self.host.trim(), encode(&self.database))
@@ -647,6 +667,7 @@ mod tests {
             database: "shop".into(),
             ssl_mode: SslMode::VerifyCa,
             ssl_ca: "/certs/ca.pem".into(),
+            ..Default::default()
         };
         let uri = a.to_uri();
         assert_eq!(uri, "mariadb://app:p%40ss%3Aw%2Frd%25@db.internal:3307/shop?ssl-mode=VERIFY_CA&ssl-ca=%2Fcerts%2Fca.pem");
@@ -699,6 +720,21 @@ mod tests {
         assert!(Addr::from_paste("host='open").is_err());
         assert!(Addr::from_paste("host=h port=x").is_err());
         assert!(Addr::from_paste("user=u").is_err());
+    }
+
+    #[test]
+    fn client_certificate_paths_come_from_the_string_and_go_back_into_it() {
+        let a = Addr::from_paste("postgresql://analyst@db.internal/shop?sslmode=verify-full&sslcert=%2Fhome%2Fa%2Fmy%20cert.crt&sslkey=~%2F.postgresql%2Fanalyst.key&sslpassword=nope").unwrap();
+        assert_eq!((a.ssl_cert.as_str(), a.ssl_key.as_str()), ("/home/a/my cert.crt", "~/.postgresql/analyst.key"));
+        // sslpassword is a secret, so a string never carries it into the Keychain URL; the TLS tab's field does.
+        assert_eq!(a.to_uri(), "postgres://analyst@db.internal:5432/shop?sslmode=verify-full&sslcert=%2Fhome%2Fa%2Fmy%20cert.crt&sslkey=~%2F.postgresql%2Fanalyst.key");
+        assert_eq!(Addr::parse(&a.to_uri()), Some(a));
+        let a = Addr::from_paste(r"host=h sslmode=require sslcert='/c/my cert.crt' sslkey=/c/k.key").unwrap();
+        assert_eq!((a.ssl_mode, a.ssl_cert.as_str(), a.ssl_key.as_str()), (SslMode::Required, "/c/my cert.crt", "/c/k.key"));
+        // MySQL has no such fields in Quarry, so they are neither read nor written there.
+        let m = Addr::parse("mysql://u@h/?sslcert=%2Fc.crt").unwrap();
+        assert_eq!(m.ssl_cert, "");
+        assert!(!Addr { ssl_cert: "/c.crt".into(), ..m }.to_uri().contains("sslcert"));
     }
 
     #[test]

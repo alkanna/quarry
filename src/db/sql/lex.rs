@@ -6,7 +6,7 @@ use std::ops::Range;
 
 #[path = "lex_pg.rs"]
 mod pg;
-pub(super) use pg::dollar_quote;
+pub(super) use pg::{dollar_quote, refused_call};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tok {

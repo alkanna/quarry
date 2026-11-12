@@ -8,13 +8,27 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-const POLL: Duration = Duration::from_secs(2);
+pub(super) const POLL: Duration = Duration::from_secs(2);
 /// After a failed read a polling tab tries again this often, so one dropped packet does not end the polling and a
 /// missing privilege is not asked about every 2 seconds.
 const BACKOFF: Duration = Duration::from_secs(10);
 
-fn retry_after(ok: bool) -> Duration {
+pub(super) fn retry_after(ok: bool) -> Duration {
     if ok { POLL } else { BACKOFF }
+}
+
+/// How long a confirm button ignores clicks after it was armed, in seconds. A confirm can be drawn where the button that
+/// armed it was, so the second click of a double click would otherwise confirm at once.
+pub(super) const ARM_GUARD: f64 = 0.5;
+
+/// The time a confirm is armed at: egui's input time, which a test can set.
+pub(super) fn arm_time(ui: &egui::Ui) -> f64 {
+    ui.input(|i| i.time)
+}
+
+/// Whether a click on the confirm button armed at `at` counts: not within ARM_GUARD of arming.
+pub(super) fn confirmed(ui: &egui::Ui, r: &egui::Response, at: f64) -> bool {
+    r.clicked() && arm_time(ui) - at >= ARM_GUARD
 }
 
 /// A Kill waiting for its second click, with everything the list showed about its target.
@@ -24,6 +38,8 @@ pub(super) struct Confirm {
     identity: String,
     /// The whole connection ends (KILL) instead of only its statement (KILL QUERY).
     whole: bool,
+    /// `arm_time` when it was armed.
+    at: f64,
 }
 
 /// Whether the confirmation still points at the same statement of the same connection on the same server.
@@ -49,7 +65,7 @@ fn kill_toast(kills: &mut HashSet<u64>, req: u64, ans: &Answer) -> Option<Result
 
 /// The sample before the latest and the seconds between them, from the two instants themselves; a failed read
 /// in between leaves no sample, so a rate never spans an unknown gap.
-fn prev_of<T>(old: Option<db::Res<(Instant, T)>>, now: Instant) -> Option<(f64, T)> {
+pub(super) fn prev_of<T>(old: Option<db::Res<(Instant, T)>>, now: Instant) -> Option<(f64, T)> {
     match old {
         Some(Ok((at, t))) => Some((now.duration_since(at).as_secs_f64(), t)),
         _ => None,
@@ -57,7 +73,7 @@ fn prev_of<T>(old: Option<db::Res<(Instant, T)>>, now: Instant) -> Option<(f64, 
 }
 
 /// An error with the way to try again, true when Refresh was clicked.
-fn error_row(ui: &mut egui::Ui, text: String) -> bool {
+pub(super) fn error_row(ui: &mut egui::Ui, text: String) -> bool {
     ui.horizontal(|ui| {
         ui.label(RichText::new(text).color(ALERT()));
         quiet(ui, "Refresh").clicked()
@@ -184,7 +200,7 @@ impl SqlServerWin {
     }
 }
 
-fn up_text(secs: u64) -> String {
+pub(super) fn up_text(secs: u64) -> String {
     let (d, h, m) = (secs / 86_400, secs / 3600, secs / 60);
     let plural = |n: u64, w: &str| format!("{n} {w}{}", if n == 1 { "" } else { "s" });
     if d > 0 { plural(d, "day") } else if h > 0 { plural(h, "hour") } else { plural(m, "minute") }
@@ -319,7 +335,7 @@ impl App {
     /// Quarry's own sessions on connection `conn` by server thread id, with what each one is: the ids kept for Stop
     /// (a Query run, a running export, an import or script file, the shell's relays). They get no Kill, because
     /// Stop also sets the cancel flag so the work ends instead of carrying on after the statement is cut.
-    fn own_sessions(&self, conn: u64) -> HashMap<u64, String> {
+    pub(super) fn own_sessions(&self, conn: u64) -> HashMap<u64, String> {
         let mut own = HashMap::new();
         let mut add = |id: u64, what: &str| {
             if id != 0 {
@@ -412,17 +428,17 @@ impl App {
 
 const ID_W: f32 = 64.0;
 const COLS: [(&str, f32); 7] = [("Id", ID_W), ("User", 120.0), ("Host", 140.0), ("Db", 100.0), ("Command", 74.0), ("Time", 76.0), ("State", 150.0)];
-const PAD: f32 = 10.0;
+pub(super) const PAD: f32 = 10.0;
 const KILL_W: f32 = 72.0;
 const CONFIRM_W: f32 = 290.0;
 
 /// One cell of a painted row: a single line cut with an ellipsis at the cell's width.
-fn paint_cell(ui: &egui::Ui, row: egui::Rect, x: f32, w: f32, text: &str, color: Color32, mono: bool, right: bool) {
+pub(super) fn paint_cell(ui: &egui::Ui, row: egui::Rect, x: f32, w: f32, text: &str, color: Color32, mono: bool, right: bool) {
     let font = if mono { FontId::monospace(TXT_SMALL) } else { FontId::proportional(TXT_SMALL) };
     place(ui, egui::Rect::from_min_max(egui::pos2(x, row.top()), egui::pos2(x + w, row.bottom())), text, font, color, right, PAD);
 }
 
-fn header(ui: &mut egui::Ui, cols: &[(&str, f32, bool)]) {
+pub(super) fn header(ui: &mut egui::Ui, cols: &[(&str, f32, bool)]) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_H), Sense::hover());
     ui.painter().rect_filled(rect, R_SM, HDR());
     let mut x = rect.left();
@@ -467,7 +483,7 @@ fn procs_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32, kill: &mut Op
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let r = ui.add_enabled_ui(sel_row.is_some(), |ui| danger(ui, "Kill query")).inner;
             if let (true, Some(p)) = (r.clicked(), sel_row) {
-                s.confirm = Some(Confirm { p: (*p).clone(), identity: identity.clone(), whole: false });
+                s.confirm = Some(Confirm { p: (*p).clone(), identity: identity.clone(), whole: false, at: arm_time(ui) });
             }
         });
     });
@@ -538,7 +554,8 @@ fn procs_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32, kill: &mut Op
             }
             let can_query = can_kill(writable, &own, p, false);
             let can_end = can_kill(writable, &own, p, true);
-            let arm = |whole: bool| Confirm { p: p.clone(), identity: identity.clone(), whole };
+            let now = arm_time(ui);
+            let arm = |whole: bool| Confirm { p: p.clone(), identity: identity.clone(), whole, at: now };
             resp.context_menu(|ui| {
                 menu_look(ui);
                 if ui.add_enabled(can_query, egui::Button::new("Kill query").frame_when_inactive(false)).clicked() {
@@ -567,7 +584,8 @@ fn procs_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32, kill: &mut Op
                         if quiet(&mut k, "Keep").clicked() {
                             confirm = None;
                         }
-                        if danger(&mut k, if c.whole { "Kill connection" } else { "Kill it" }).clicked() {
+                        let r = danger(&mut k, if c.whole { "Kill connection" } else { "Kill it" });
+                        if confirmed(&k, &r, c.at) {
                             *kill = Some(c.clone());
                             confirm = None;
                         }
@@ -685,7 +703,7 @@ fn thread_state(v: &str) -> (&str, Color32) {
     }
 }
 
-fn tile(ui: &mut egui::Ui, rect: egui::Rect, title: &str, big: &str, suffix: &str, sub: &str) {
+pub(super) fn tile(ui: &mut egui::Ui, rect: egui::Rect, title: &str, big: &str, suffix: &str, sub: &str) {
     ui.painter().rect(rect, R_MD, PANEL(), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
     let x = rect.left() + 12.0;
     let t = ui.painter().layout_no_wrap(title.to_string(), FontId::proportional(TXT_SMALL), MUTED());
@@ -701,7 +719,7 @@ fn tile(ui: &mut egui::Ui, rect: egui::Rect, title: &str, big: &str, suffix: &st
 }
 
 /// Label and value rows of a key/value box.
-fn kv_rows(ui: &mut egui::Ui, w: f32, rows: &[(&str, String, Color32)]) {
+pub(super) fn kv_rows(ui: &mut egui::Ui, w: f32, rows: &[(&str, String, Color32)]) {
     for (i, (k, v, c)) in rows.iter().enumerate() {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(w, ROW_H), Sense::hover());
         ui.painter().rect_filled(rect, 0.0, if i % 2 == 1 { PANEL() } else { BG() });
@@ -914,7 +932,7 @@ mod tests {
 
     #[test]
     fn a_pending_kill_dies_with_any_change_of_its_target() {
-        let c = Confirm { p: p(9, "app", "shop", "Query", "SELECT 1"), identity: "uuid-a".into(), whole: false };
+        let c = Confirm { p: p(9, "app", "shop", "Query", "SELECT 1"), identity: "uuid-a".into(), whole: false, at: 0.0 };
         assert!(confirm_ok(&c, &procs(vec![p(9, "app", "shop", "Query", "SELECT 1")], "uuid-a")));
         // The id went to another statement, to Sleep, to another user, or is gone.
         for rows in [vec![p(9, "app", "shop", "Query", "SELECT 2")], vec![p(9, "app", "shop", "Sleep", "")], vec![p(9, "other", "shop", "Query", "SELECT 1")], vec![p(10, "app", "shop", "Query", "SELECT 1")]] {

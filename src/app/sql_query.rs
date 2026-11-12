@@ -423,9 +423,7 @@ impl App {
             let (r, _) = ui.allocate_exact_size(egui::vec2(1.0, 16.0), Sense::hover());
             ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0, LINE()));
             explain = quiet_enabled(ui, !running, "Explain").on_hover_text("EXPLAIN the statement under the caret (Cmd+E)").clicked();
-            if dialect.supports(db::sql::Feature::Format) {
-                format = quiet_enabled(ui, !running, "Format").on_hover_text("Lay out the selection, or the whole script when nothing is selected. A statement that would read differently stays as it is.").clicked();
-            }
+            format = quiet_enabled(ui, !running, "Format").on_hover_text("Lay out the selection, or the whole script when nothing is selected. A statement that would read differently stays as it is.").clicked();
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if let Some(s) = &status {
                     ui.label(RichText::new(s).font(FontId::monospace(TXT_CAPTION)).color(FAINT()));
@@ -485,7 +483,7 @@ impl App {
         }
     }
 
-    fn sql_editor_id(cur: usize) -> egui::Id {
+    pub(super) fn sql_editor_id(cur: usize) -> egui::Id {
         egui::Id::unique(("sql-editor", cur))
     }
 
@@ -538,9 +536,6 @@ impl App {
                 (new, Some(from..from + f.text.chars().count()), f)
             }
         };
-        if f.unsupported {
-            return self.warn(f.summary());
-        }
         let note = if new == text && f.special == 0 && f.refused == 0 { "Already formatted".to_string() } else { f.summary() };
         self.sql_replace(ctx, new, select);
         if f.refused > 0 { self.warn(note) } else { self.ok(note) }

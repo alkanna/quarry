@@ -8,6 +8,8 @@ pub enum ErrKind {
     SignIn,
     Unreachable,
     Tunnel,
+    /// The Cloud SQL proxy or gcloud failed, or Cloud SQL refused an IAM sign-in.
+    CloudSql,
     Tls,
     Lost,
     Timeout,
@@ -218,7 +220,13 @@ pub fn classify(raw: &str) -> ErrKind {
     let n = mongo_code(raw).map(|m| m.0).or(mysql_code(raw));
     let pg = pg_code(raw);
     let pg = pg.as_deref();
-    if is_unauthorized(raw) {
+    // Before the others: an IAM refusal also says "authentication failed", and the cause is the Google identity, not a password.
+    if ["cloud sql proxy", "cloud sql:", "cloud sql iam"].iter().any(|p| low.starts_with(p)) {
+        ErrKind::CloudSql
+    } else if client_cert_problem(raw).is_some() {
+        // Before SignIn: the server refuses a missing certificate with 28000, and a password is not the cause.
+        ErrKind::Tls
+    } else if is_unauthorized(raw) {
         ErrKind::Privilege
     } else if matches!(n, Some(18 | 1045 | 1698)) || matches!(pg, Some("28P01" | "28000")) || low.contains("authentication failed") || low.contains("scram failure") {
         ErrKind::SignIn
@@ -291,9 +299,38 @@ pub fn explain(raw: &str, cx: &ErrCtx) -> Explained {
             ex.hint = said.clone();
             ex.fixes = vec![Fix::EditConn, Fix::Retry];
         }
+        ErrKind::CloudSql => {
+            if low.contains("iam sign-in refused") {
+                ex.title = "Cloud SQL refused the IAM sign-in".into();
+                ex.hint = "The proxy signed in with Application Default Credentials, and the database has no IAM user for that account, or the instance does not allow IAM sign-in. Those credentials are often another account than the gcloud one that filled the user. The database user must be the same account (a service account name ends in .iam, not .gserviceaccount.com), and the instance flag cloudsql.iam_authentication must be on. Run `gcloud auth application-default login` as that account, then Retry.".into();
+            } else if raw.contains(crate::cloudsql::ADC_MISSING) {
+                ex.title = "IAM sign-in needs Application Default Credentials".into();
+                ex.hint = "The Cloud SQL proxy signs in to IAM with Application Default Credentials, not the gcloud account, and this machine has none. Run `gcloud auth application-default login` as the account the database user names, then Retry.".into();
+            } else if low.contains("gcloud auth login") {
+                ex.title = "Sign in to Google Cloud first".into();
+                ex.hint = "gcloud is signed out or its sign-in expired. Run `gcloud auth login` in a terminal, then try again.".into();
+            } else if raw.contains(crate::cloudsql::PROXY_MISSING) {
+                ex.title = "Cloud SQL Auth Proxy not found".into();
+                ex.hint = "Quarry starts cloud-sql-proxy for each connection. It was not on PATH or in the gcloud SDK.".into();
+            } else if low.contains("did not accept connections") {
+                ex.title = "Cloud SQL proxy failed".into();
+                ex.hint = "The proxy started but did not accept connections in time.".into();
+            } else if low.starts_with("cloud sql proxy failed") {
+                ex.title = "Cloud SQL proxy failed".into();
+                ex.hint = "The proxy stopped before it accepted connections.".into();
+            } else if low.contains("gcloud did not answer") {
+                ex.title = "gcloud did not answer".into();
+                ex.hint = "gcloud took too long and was stopped. Run the same gcloud command in a terminal to see what it waits for, then Retry.".into();
+            } else {
+                ex.title = "Cloud SQL proxy failed".into();
+                ex.hint = raw.trim().into();
+            }
+            ex.fixes = vec![Fix::EditConn, Fix::Retry];
+        }
         ErrKind::Tls => {
-            ex.title = if low.contains("certificate") { "The server's certificate is not trusted".into() } else { format!("Could not open a TLS connection to {host}") };
-            ex.hint = if low.contains("certificate") { "The server sent a certificate this machine does not trust. Add its CA file in the connection's TLS settings.".into() } else { said.clone() };
+            (ex.title, ex.hint) = client_cert_problem(raw).or_else(|| name_mismatch(raw)).unwrap_or_else(|| {
+                if low.contains("certificate") { ("The server's certificate is not trusted".into(), "The server sent a certificate this machine does not trust. Add its CA file in the connection's TLS settings.".into()) } else { (format!("Could not open a TLS connection to {host}"), said.clone()) }
+            });
             ex.fixes = vec![Fix::EditConn, Fix::Retry];
         }
         ErrKind::Lost => {
@@ -362,6 +399,76 @@ pub fn explain(raw: &str, cx: &ErrCtx) -> Explained {
     ex
 }
 
+/// Added to a MySQL refusal on the host name: sqlx 0.8 checks the name in Verify CA too, so that mode is no way out.
+pub const MYSQL_NAME_CHECKED: &str = "MySQL checks the host name in Verify CA too.";
+
+/// `raw` with MYSQL_NAME_CHECKED when it is a refusal on the host name and the mode was Verify CA.
+pub fn mysql_name_note(raw: String, verify_ca: bool) -> String {
+    if verify_ca && raw.contains(NOT_FOR_NAME) { format!("{raw}\n{MYSQL_NAME_CHECKED}") } else { raw }
+}
+
+/// rustls's words for a certificate that does not hold the name connected to.
+const NOT_FOR_NAME: &str = "certificate not valid for name \"";
+
+/// A server certificate that does not name the host connected to: title and hint, naming the names it holds.
+fn name_mismatch(raw: &str) -> Option<(String, String)> {
+    let rest = &raw[raw.find(NOT_FOR_NAME)? + NOT_FOR_NAME.len()..];
+    let (asked, rest) = rest.split_once('"')?;
+    let rest = rest.lines().next().unwrap_or_default();
+    // The names come as DnsName("a") or DnsName("b"); an IP address is not quoted.
+    let names: Vec<&str> = match rest.split_once("is only valid for ") {
+        Some((_, list)) => list.split(", ").flat_map(|n| n.split(" or ")).map(|n| n.split('"').nth(1).unwrap_or(n)).collect(),
+        None => Vec::new(),
+    };
+    let holds = if names.is_empty() { "It names no host.".to_string() } else { format!("It is for {}.", names.join(", ")) };
+    let way = if raw.contains(MYSQL_NAME_CHECKED) {
+        "MySQL checks the host name in Verify CA too, so connect by one of its names, or choose Required to encrypt without checking the certificate."
+    } else if asked == "127.0.0.1" || asked == "::1" {
+        "Through an SSH tunnel on Windows, MySQL checks the tunnel's own name 127.0.0.1. Choose Required there, which encrypts without checking the certificate."
+    } else {
+        "Connect by one of its names, or choose verify-ca (Verify CA) to check only that a trusted CA signed it."
+    };
+    Some((format!("The certificate is not for {asked}"), format!("{holds} {way}")))
+}
+
+/// A PostgreSQL client certificate problem: the files Quarry reads before connecting, the key rustls finds not to match
+/// the certificate, and the server's refusals. Title and hint, or None when the text is about something else.
+pub fn client_cert_problem(raw: &str) -> Option<(String, String)> {
+    use super::sql::pg_cert::*;
+    let first = raw.lines().next().unwrap_or(raw).trim();
+    let low = first.to_lowercase();
+    let tab = "on the connection's TLS tab";
+    let (title, hint) = if let Some(rest) = first.strip_prefix(CERT_UNREADABLE).or_else(|| first.strip_prefix(KEY_UNREADABLE)) {
+        let what = if first.starts_with(CERT_UNREADABLE) { "certificate" } else { "key" };
+        (format!("Could not read the client {what} file"), format!("{}. Check the path {tab}.", sentence(rest.trim()).trim_end_matches('.')))
+    } else if let Some(path) = first.strip_prefix(CERT_NOT_PEM) {
+        ("The client certificate is not a PEM file".into(), format!("{} has no BEGIN CERTIFICATE block. A DER file converts with `openssl x509 -inform der -in client.der -out client.crt`.", path.trim()))
+    } else if let Some(path) = first.strip_prefix(KEY_NOT_PEM) {
+        ("The client key is not a PEM file".into(), format!("{} has no PRIVATE KEY block. A DER key converts with `openssl pkey -inform der -in client.der -out client.key`.", path.trim()))
+    } else if first == HALF_SET {
+        ("Set both the client certificate and its key".into(), format!("The certificate is sent with the key that proves it is yours. Fill both {tab}, or clear both."))
+    } else if first == VERIFY_CA_NO_CA {
+        ("verify-ca needs a CA file".into(), format!("Without one any public certificate would pass, whatever host it names. Choose the file of the CA that signed the server's certificate {tab}, or choose verify-full, which checks the host name against the public CAs."))
+    } else if first == KEY_LOCKED {
+        ("The client key needs its passphrase".into(), format!("The key file is encrypted. Type its passphrase {tab}."))
+    } else if first == KEY_WRONG_PASS {
+        ("The client key passphrase is wrong".into(), format!("The key could not be decrypted with it. Check the passphrase {tab}."))
+    } else if first == KEY_OLD_CIPHER {
+        ("Quarry cannot decrypt this client key".into(), "It uses the old OpenSSL key encryption or a DES cipher. Write it again as PKCS#8 with AES, `openssl pkcs8 -topk8 -v2 aes-256-cbc -in client.key -out client-pkcs8.key`, and choose the new file.".into())
+    } else if low.contains("keys may not be consistent") {
+        ("The client key does not match the certificate".into(), "The key file holds another key than the one the certificate was issued for. Choose the key that belongs to this certificate.".into())
+    } else if low.contains("requires a valid client certificate") {
+        ("The server wants a client certificate".into(), format!("pg_hba.conf asks this user for one (clientcert=verify-ca or verify-full, or cert sign-in). Set the client certificate and key {tab}."))
+    } else if low.contains("certificate authentication failed") {
+        ("The client certificate does not name this user".into(), "With cert sign-in the certificate's common name (CN) must be the user name, or map to it in pg_ident.conf.".into())
+    } else if let Some(alert) = ["UnknownCA", "BadCertificate", "CertificateUnknown", "CertificateExpired", "CertificateRevoked", "CertificateRequired", "DecryptError"].iter().find(|a| first.starts_with(CERT_ALERT) && first.contains(&format!("received fatal alert: {a}"))) {
+        ("The server refused the client certificate".into(), format!("The server's ssl_ca_file must hold the CA that signed it, and it must be valid today. The TLS alert was {alert}."))
+    } else {
+        return None;
+    };
+    Some((title, hint))
+}
+
 /// PostgreSQL's refusals of a written value, told apart by SQLSTATE, because the server's sentence follows its lc_messages
 /// and reads in another language on many servers. The title says what is wrong in the user's terms and the hint keeps
 /// the server's sentence, which names the value and the type.
@@ -389,6 +496,13 @@ pub(crate) fn lock_held(name: &str, secs: u32) -> String {
 /// 55P03 for the drop that reads what a CASCADE takes.
 pub(crate) fn lock_held_cascade(secs: u32) -> String {
     format!("Another session holds a lock on it or on something that depends on it, and did not let go within {secs} seconds, so what the drop takes cannot be read right now. Try again in a moment.")
+}
+
+/// PostgreSQL 42501 from pg_cancel_backend or pg_terminate_backend: the role may signal only its own sessions, others only with
+/// pg_signal_backend, and a superuser's only as a superuser.
+pub(crate) fn pg_signal_refused(terminate: bool) -> String {
+    let what = if terminate { "end this session" } else { "cancel this query" };
+    format!("Your role cannot {what}: signalling another role's session needs membership in that role or in pg_signal_backend, and a superuser's session needs a superuser. Nothing was sent.")
 }
 
 /// What 55006 (object_in_use) is about, for the wording of `in_use`.
@@ -443,6 +557,73 @@ mod tests {
     }
 
     #[test]
+    fn a_certificate_for_another_host_names_its_hosts() {
+        let raw = "error communicating with database: invalid peer certificate: certificate not valid for name \"10.0.0.5\"; certificate is only valid for DnsName(\"db.example.test\") or DnsName(\"mysql.example.test\")";
+        let e = explain(raw, &ErrCtx::default());
+        assert_eq!(e.title, "The certificate is not for 10.0.0.5");
+        assert!(e.hint.starts_with("It is for db.example.test, mysql.example.test. Connect by one of its names, or choose verify-ca"), "{}", e.hint);
+        let three = raw.replace(" or DnsName", ", DnsName(\"a.test\") or DnsName");
+        assert!(explain(&three, &ErrCtx::default()).hint.starts_with("It is for db.example.test, a.test, mysql.example.test."));
+        let none = "error communicating with database: invalid peer certificate: certificate not valid for name \"h\"; certificate is not valid for any names (according to its subjectAltName extension)";
+        assert!(explain(none, &ErrCtx::default()).hint.starts_with("It names no host."));
+        // MySQL's Verify CA checks the name too, so the hint does not send the user there.
+        let my = mysql_name_note(raw.to_string(), true);
+        assert!(explain(&my, &ErrCtx::default()).hint.contains("choose Required"));
+        assert_eq!(mysql_name_note(raw.to_string(), false), raw);
+        assert_eq!(mysql_name_note("other".into(), true), "other");
+        let tunnel = raw.replace("10.0.0.5", "127.0.0.1");
+        assert!(explain(&tunnel, &ErrCtx::default()).hint.contains("SSH tunnel on Windows"));
+        // An untrusted chain keeps its own wording.
+        assert_eq!(explain("error communicating with database: invalid peer certificate: UnknownIssuer", &ErrCtx::default()).title, "The server's certificate is not trusted");
+    }
+
+    #[test]
+    fn client_certificate_problems_are_told_apart() {
+        use crate::db::sql::pg_cert::*;
+        let case = |raw: &str| {
+            let e = explain(raw, &cx());
+            assert_eq!(e.kind, ErrKind::Tls, "{raw}");
+            assert!(e.fixes.contains(&Fix::EditConn), "{raw}");
+            (e.title, e.hint)
+        };
+        let (t, h) = case(&format!("{CERT_UNREADABLE} /x/c.crt: No such file or directory (os error 2)"));
+        assert_eq!(t, "Could not read the client certificate file");
+        assert_eq!(h, "/x/c.crt: No such file or directory (os error 2). Check the path on the connection's TLS tab.");
+        assert_eq!(case(&format!("{KEY_UNREADABLE} /x/c.key: Permission denied (os error 13)")).0, "Could not read the client key file");
+        assert!(case(&format!("{CERT_NOT_PEM} /x/c.der")).1.starts_with("/x/c.der has no BEGIN CERTIFICATE block"));
+        assert_eq!(case(&format!("{KEY_NOT_PEM} /x/k.der")).0, "The client key is not a PEM file");
+        assert_eq!(case(HALF_SET).0, "Set both the client certificate and its key");
+        assert_eq!(case(KEY_LOCKED).0, "The client key needs its passphrase");
+        assert_eq!(case(KEY_WRONG_PASS).0, "The client key passphrase is wrong");
+        assert!(case(KEY_OLD_CIPHER).1.contains("openssl pkcs8 -topk8"));
+        let (t, h) = case(VERIFY_CA_NO_CA);
+        assert_eq!(t, "verify-ca needs a CA file");
+        assert!(h.starts_with("Without one any public certificate would pass"), "{h}");
+        assert_eq!(case("error occurred while attempting to establish a TLS connection: keys may not be consistent: KeyMismatch").0, "The client key does not match the certificate");
+        // 28000 is a sign-in refusal, but the cause is the missing certificate, not the password.
+        assert_eq!(case("error returned from database: 28000: connection requires a valid client certificate").0, "The server wants a client certificate");
+        assert_eq!(case("error returned from database: 28000: certificate authentication failed for user \"app\"").0, "The client certificate does not name this user");
+        assert!(case(&format!("{CERT_ALERT} error communicating with database: received fatal alert: UnknownCA")).1.ends_with("The TLS alert was UnknownCA."));
+        // Without a client certificate (MySQL, MongoDB, a PostgreSQL connection with none) the alert is a plain TLS failure.
+        let bare = "error communicating with database: received fatal alert: BadCertificate";
+        assert_eq!(client_cert_problem(bare), None);
+        assert_eq!(explain(bare, &cx()).kind, ErrKind::Tls);
+        // Other TLS and sign-in errors keep their own wording.
+        assert_eq!(explain("error returned from database: 28P01: password authentication failed for user \"app\"", &cx()).kind, ErrKind::SignIn);
+        assert_eq!(explain("error occurred while attempting to establish a TLS connection: invalid peer certificate: UnknownIssuer", &cx()).title, "The server's certificate is not trusted");
+        assert_eq!(client_cert_problem("received fatal alert: ProtocolVersion"), None);
+    }
+
+    #[test]
+    fn server_errors_echoing_cloud_sql_words_are_not_proxy_failures() {
+        let echo = r#"error returned from database: 22P02: invalid input syntax for type integer: "cloud sql proxy""#;
+        assert_ne!(classify(echo), ErrKind::CloudSql);
+        assert_eq!(classify("Cloud SQL proxy failed: instance not found"), ErrKind::CloudSql);
+        assert_eq!(classify("Cloud SQL: gcloud is signed out."), ErrKind::CloudSql);
+        assert_eq!(classify("Cloud SQL IAM sign-in refused (the proxy used Application Default Credentials): x"), ErrKind::CloudSql);
+    }
+
+    #[test]
     fn privilege_errors_name_the_command_place_and_role() {
         let e = explain(r#"Command failed: Error code 13 (Unauthorized): not authorized on shop to execute command { find: "orders", filter: {}, $db: "shop" }"#, &cx());
         assert_eq!(e.kind, ErrKind::Privilege);
@@ -488,6 +669,27 @@ mod tests {
         assert_eq!((e.title.as_str(), e.hint.as_str()), ("That change is no longer in Recent changes", ""));
         let e = explain("Command failed: Error code 9 (FailedToParse): $lookup requires 'from' to be specified", &ErrCtx { what: "run the pipeline".into(), ..cx() });
         assert_eq!((e.kind, e.title.as_str(), e.hint.as_str()), (ErrKind::Syntax, "The server rejected the pipeline", "$lookup requires 'from' to be specified"));
+    }
+
+    #[test]
+    fn cloud_sql_failures_get_the_card_titles() {
+        let t = |raw: &str| {
+            let e = explain(raw, &cx());
+            assert_eq!(e.kind, ErrKind::CloudSql, "{raw}");
+            e.title
+        };
+        assert_eq!(t("Cloud SQL proxy not found. Download it from the connection's error card or the Cloud SQL browser, or set its path in Settings."), "Cloud SQL Auth Proxy not found");
+        assert_eq!(t("Cloud SQL proxy failed: failed to get instance metadata: googleapi: Error 403: not authorized"), "Cloud SQL proxy failed");
+        assert_eq!(t("Cloud SQL proxy did not accept connections within 20 s"), "Cloud SQL proxy failed");
+        assert_eq!(t("Cloud SQL: gcloud is signed out. Run `gcloud auth login` and try again."), "Sign in to Google Cloud first");
+        assert_eq!(t("Cloud SQL: gcloud did not answer within 30 s and was stopped."), "gcloud did not answer");
+        // IAM never uses the gcloud account, so both IAM cards point at Application Default Credentials.
+        let adc = explain(&format!("{}. Run `gcloud auth application-default login`, then Retry.", crate::cloudsql::ADC_MISSING), &cx());
+        assert_eq!((adc.kind, adc.title.as_str()), (ErrKind::CloudSql, "IAM sign-in needs Application Default Credentials"));
+        assert!(adc.hint.contains("gcloud auth application-default login") && adc.hint.contains("then Retry"));
+        let refused = explain("Cloud SQL IAM sign-in refused (the proxy used Application Default Credentials): error returned from database: 28P01: password authentication failed", &cx());
+        assert_eq!(refused.title, "Cloud SQL refused the IAM sign-in");
+        assert!(refused.hint.contains("Application Default Credentials") && refused.hint.contains("gcloud auth application-default login"));
     }
 
     #[test]

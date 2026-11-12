@@ -59,6 +59,9 @@ pub(super) struct ConnMeta {
     /// Reach the server through a SOCKS5 proxy; its password lives in the Keychain.
     #[serde(default)]
     pub(super) proxy: Option<db::Proxy>,
+    /// Reach a PostgreSQL server through Google's Cloud SQL proxy, which Quarry starts. Nothing in it is secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) cloud_sql: Option<crate::cloudsql::CloudSql>,
     /// Environment label shown next to the name, such as Production.
     #[serde(default)]
     pub(super) tag: String,
@@ -92,8 +95,10 @@ pub(super) struct Conn {
     /// schema names of the same list, written together with it by `set_schemas`.
     pub(super) pg: HashMap<String, PgNs>,
     pub(super) masked_uri: String,
-    /// Kept alive while connected through SSH; dropping it closes the tunnel.
-    pub(super) tunnel: Option<crate::ssh::Tunnel>,
+    /// Kept alive while connected through SSH or Cloud SQL; dropping it closes the tunnel or stops the proxy.
+    pub(super) tunnel: Option<db::Way>,
+    /// The connect in flight, so an answer to one the user stopped or replaced is dropped.
+    pub(super) attempt: u64,
     /// Shown in the status bar and under the sidebar; filled after connecting.
     pub(super) server: ServerInfo,
 }
@@ -109,7 +114,12 @@ pub(super) struct PgNs {
 
 impl Conn {
     pub(super) fn new(meta: ConnMeta, status: Status) -> Conn {
-        Conn { meta, client: None, sql: None, status, writable: false, dbs: Vec::new(), tables: Default::default(), pg: Default::default(), masked_uri: String::new(), tunnel: None, server: Default::default() }
+        Conn { meta, client: None, sql: None, status, writable: false, dbs: Vec::new(), tables: Default::default(), pg: Default::default(), masked_uri: String::new(), tunnel: None, attempt: 0, server: Default::default() }
+    }
+
+    /// Whether a connect answer for `attempt` is still wanted: this connection is connecting, for that attempt.
+    pub(super) fn waits_for(&self, attempt: u64) -> bool {
+        self.status == Status::Connecting && self.attempt == attempt
     }
 
     /// Forgets every list read from the server, for a new session or a closed one.
@@ -850,6 +860,9 @@ pub(super) enum Modal {
     PgNewTable(Box<super::sql_create_pg::PgNewTable>),
     SqlNewUser(Box<super::sql_users::NewUser>),
     SqlPassword(Box<super::sql_users::PwForm>),
+    PgNewRole(Box<super::pg_roles::NewRoleForm>),
+    PgPassword(Box<super::pg_roles::PgPwForm>),
+    PgDropRole(Box<super::pg_roles::DropForm>),
     /// Add a foreign key to the open SQL table, with its ALTER preview.
     FkEdit(Box<FkForm>),
     Typed { title: String, expect: String, typed: String, action: Danger },
@@ -1030,12 +1043,18 @@ pub(super) struct ConnForm {
     pub(super) uri: String,
     pub(super) show: bool,
     pub(super) ssh_on: bool,
+    /// Set when the connection goes through Cloud SQL; refused together with SSH.
+    pub(super) cloud_sql: Option<crate::cloudsql::CloudSql>,
+    /// The instance as the browser listed it, for its state and the IP kinds it has; None until gcloud lists it.
+    pub(super) cloud_inst: Option<crate::cloudsql::Instance>,
     pub(super) ssh: crate::ssh::SshConf,
     pub(super) ssh_pwd: String,
     pub(super) ssh_pass: String,
     pub(super) proxy_on: bool,
     pub(super) proxy: db::Proxy,
     pub(super) proxy_pwd: String,
+    /// PostgreSQL: the passphrase of an encrypted client key, kept in the Keychain.
+    pub(super) pg_key_pass: String,
     pub(super) testing: bool,
     /// Charset, collation and init command are edited in place; the rest has form state of its own below.
     pub(super) adv: db::sql::Advanced,
@@ -1093,6 +1112,9 @@ pub(super) struct RowCheck {
     pub error: Option<String>,
     pub def: Option<&'static db::sql::pg_advanced::Def>,
 }
+
+/// The host saved in a Cloud SQL connection's address, which the proxy's local port replaces when it connects.
+pub(super) const CLOUD_HOST: &str = "127.0.0.1";
 
 /// The rows of the PostgreSQL session settings that are always there, before the ones added from the picker.
 pub(super) const PG_FIXED: [&str; 3] = ["statement_timeout", "lock_timeout", "application_name"];
@@ -1227,11 +1249,33 @@ impl ConnForm {
         self.pg_ensure_rows();
     }
 
+    /// The SQL address Test and Save use. Behind Cloud SQL the proxy replaces host and port, and an IAM sign-in sends no password.
+    pub(super) fn sql_addr(&self) -> db::sql::Addr {
+        let mut a = db::sql::Addr { host: self.addr.host.trim().into(), user: self.addr.user.trim().into(), database: self.addr.database.trim().into(), ..self.addr.clone() };
+        if let Some(c) = self.cloud_on() {
+            if a.host.is_empty() {
+                a.host = CLOUD_HOST.into();
+            }
+            if c.iam {
+                a.password.clear();
+            }
+        }
+        a
+    }
+
+    /// The Cloud SQL settings when they apply: only PostgreSQL goes through the proxy.
+    pub(super) fn cloud_on(&self) -> Option<&crate::cloudsql::CloudSql> {
+        self.cloud_sql.as_ref().filter(|_| self.engine == db::sql::Engine::Postgres)
+    }
+
     pub(super) fn net(&self) -> db::Net {
         db::Net {
             ssh: self.ssh_on.then(|| (crate::ssh::SshConf { host: self.ssh.host.trim().into(), user: self.ssh.user.trim().into(), ..self.ssh.clone() }, crate::ssh::SshSecrets { password: Some(self.ssh_pwd.clone()), passphrase: Some(self.ssh_pass.clone()) })),
             // SQL drivers cannot use SOCKS, so a stale proxy setting must not apply.
             proxy: (self.proxy_on && !self.ssh_on && !self.engine.is_sql()).then(|| db::Proxy { host: self.proxy.host.trim().into(), password: Some(self.proxy_pwd.clone()), ..self.proxy.clone() }),
+            cloud_sql: self.cloud_sql.clone().filter(|_| self.engine == db::sql::Engine::Postgres),
+            tools: Default::default(),
+            key_passphrase: (self.engine == db::sql::Engine::Postgres && !self.pg_key_pass.is_empty()).then(|| self.pg_key_pass.clone()),
         }
     }
 }
@@ -1356,6 +1400,9 @@ pub(super) fn net_of(meta: &ConnMeta) -> db::Net {
     db::Net {
         ssh: meta.ssh.clone().map(|c| (c, crate::ssh::SshSecrets { password: secret(meta.id, "ssh-password"), passphrase: secret(meta.id, "ssh-passphrase") })),
         proxy: meta.proxy.clone().map(|p| db::Proxy { password: secret(meta.id, "proxy-password"), ..p }),
+        cloud_sql: meta.cloud_sql.clone(),
+        tools: Default::default(),
+        key_passphrase: None,
     }
 }
 
@@ -1443,19 +1490,28 @@ impl App {
 
     /// Connects with a known address, so tests need no keychain.
     pub(super) fn connect_uri(&mut self, id: u64, uri: String) {
+        let tools = self.cloud_tools();
+        self.req += 1;
+        let attempt = self.req;
         let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == id) else { return };
         c.status = Status::Connecting;
+        c.attempt = attempt;
         c.client = None;
         c.sql = None;
         c.tunnel = None;
         // Asked again once connected, so a changed or failed server never shows the old one.
         c.server = ServerInfo::default();
-        let net = net_of(&c.meta);
+        let mut net = net_of(&c.meta);
         let adv = c.meta.advanced.clone();
+        net.tools = tools;
+        // Only a connection with a client key can have a passphrase, so the others never ask the Keychain for one.
+        if c.meta.engine == db::sql::Engine::Postgres && db::sql::Addr::parse(&uri).is_some_and(|a| !a.ssl_key.is_empty()) {
+            net.key_passphrase = secret(id, "pg-key-passphrase");
+        }
         if c.meta.engine.is_sql() {
-            self.worker.sql_connect_with(id, uri, self.timeout(), net, adv);
+            self.worker.sql_connect_with(id, attempt, uri, self.timeout(), net, adv);
         } else {
-            self.worker.connect(id, uri, self.timeout(), net);
+            self.worker.connect(id, attempt, uri, self.timeout(), net);
         }
     }
 

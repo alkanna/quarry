@@ -12,8 +12,9 @@
 //! path. The same empty path is set for the reads, so `pg_get_viewdef`, `pg_get_indexdef` and the rest print every name
 //! qualified, which is the text that resolves the same way when it is written back. Values are written as the text the
 //! server prints, in a literal that reads the same under both settings of standard_conforming_strings: a plain `'...'`
-//! when the text has no backslash, `E'...'` with doubled backslashes when it has. Grants, owners, row security,
-//! partitioning and inheritance are not dumped.
+//! when the text has no backslash, `E'...'` with doubled backslashes when it has. Row security (ENABLE, FORCE and the
+//! policies) follows the triggers; owners and grants, when asked for, come last so a missing role stops a restore only
+//! after everything else is in. Inheritance, rules, event triggers, large objects and foreign tables are not dumped.
 
 use super::csv::Source;
 use super::dump::{excerpt, note, put, stopped, DumpPlan, Ran, FILE_LOGGED, INSERT_BYTES};
@@ -109,6 +110,15 @@ struct Rel {
     structure: bool,
     content: bool,
     drop: bool,
+    /// A partition: its parent's oid and quoted name, and its bound (`FOR VALUES ...` or `DEFAULT`).
+    parent: Option<(i64, String)>,
+    bound: String,
+    /// A partitioned table's key, as `RANGE (d)`.
+    partkey: Option<String>,
+    rls: bool,
+    force_rls: bool,
+    /// Row security would hide rows of it from the login even with row_security off.
+    hidden: bool,
 }
 
 impl Rel {
@@ -116,8 +126,14 @@ impl Rel {
         qn(&self.schema, &self.name)
     }
 
+    /// A table with columns of its own: a plain or a partitioned one.
     fn table(&self) -> bool {
-        self.kind == 'r'
+        matches!(self.kind, 'r' | 'p')
+    }
+
+    /// ONLY keeps a statement off the partitions, which a CHECK, a foreign key or a NOT NULL on a partitioned table may not.
+    fn only(&self) -> &'static str {
+        if self.kind == 'p' { "" } else { "ONLY " }
     }
 
     fn view(&self) -> bool {
@@ -243,8 +259,9 @@ fn not_ext(cls: &str, oid: &str) -> String {
 }
 
 /// The settings the dump reads under. The empty search_path makes every printed name qualified; the others fix how values
-/// print so the text reads back to the same value.
-const READ_SETTINGS: &str = "SET LOCAL statement_timeout = 0; SET LOCAL search_path = ''; SET LOCAL TimeZone = 'UTC'; SET LOCAL extra_float_digits = 3; SET LOCAL standard_conforming_strings = on; SET LOCAL bytea_output = 'hex'; SET LOCAL DateStyle = 'ISO, MDY'; SET LOCAL IntervalStyle = 'postgres'";
+/// print so the text reads back to the same value. With row_security off the server refuses a read its policies would
+/// filter rather than return fewer rows.
+const READ_SETTINGS: &str = "SET LOCAL statement_timeout = 0; SET LOCAL search_path = ''; SET LOCAL TimeZone = 'UTC'; SET LOCAL extra_float_digits = 3; SET LOCAL standard_conforming_strings = on; SET LOCAL bytea_output = 'hex'; SET LOCAL DateStyle = 'ISO, MDY'; SET LOCAL IntervalStyle = 'postgres'; SET LOCAL row_security = off";
 
 
 /// Runs the whole dump on a connection of its own.
@@ -279,9 +296,15 @@ async fn dump_on(c: &mut PgConnection, db: &Db, plan: &DumpPlan, out: &mut (dyn 
     if let Some(r) = rels.iter().find(|r| r.content && !r.readable) {
         return Err(format!("The login has no SELECT privilege on {}.{}, so its rows cannot be dumped.", r.schema, r.name));
     }
+    // The rows are read with row_security off, which makes the server refuse a table whose policies would apply rather than
+    // return fewer rows. Saying so before anything is written names the table and what would let it through.
+    if let Some(r) = rels.iter().find(|r| r.content && r.hidden) {
+        return Err(format!("Row security would hide rows of {}.{} from this login, so its dump would be short. Dump it as its owner (when it has no FORCE ROW LEVEL SECURITY), a role with BYPASSRLS or a superuser, or leave out its content.", r.schema, r.name));
+    }
     // The first catalog read took the snapshot. Locking the tables now keeps DDL off them until the transaction ends,
     // as pg_dump does, so the definitions read next still describe the rows read later.
-    let locked: Vec<String> = rels.iter().filter(|r| r.table() && r.readable).map(Rel::full).collect();
+    // ONLY: the partitions are listed on their own, and locking through a parent would need the right to read every one.
+    let locked: Vec<String> = rels.iter().filter(|r| r.table() && r.readable).map(|r| format!("ONLY {}", r.full())).collect();
     if !locked.is_empty() {
         let sql = format!("LOCK TABLE {} IN ACCESS SHARE MODE", locked.join(", "));
         let t = Instant::now();
@@ -357,9 +380,9 @@ async fn dump_on(c: &mut PgConnection, db: &Db, plan: &DumpPlan, out: &mut (dyn 
                 }
             }
             1 | 3 => {
-                let kinds: &[(&str, char)] = if step == 1 { &[("MATERIALIZED VIEW", 'm'), ("VIEW", 'v')] } else { &[("TABLE", 'r')] };
+                let kinds: &[(&str, &[char])] = if step == 1 { &[("MATERIALIZED VIEW", &['m']), ("VIEW", &['v'])] } else { &[("TABLE", &['r', 'p'])] };
                 for (kind, k) in kinds {
-                    let list: Vec<String> = rels.iter().filter(|r| r.drop && r.structure && r.kind == *k).map(Rel::full).collect();
+                    let list: Vec<String> = rels.iter().filter(|r| r.drop && r.structure && k.contains(&r.kind)).map(Rel::full).collect();
                     if !list.is_empty() {
                         put(out, &format!("DROP {kind} IF EXISTS {};\n", list.join(", ")))?;
                         dropped = true;
@@ -411,15 +434,43 @@ async fn dump_on(c: &mut PgConnection, db: &Db, plan: &DumpPlan, out: &mut (dyn 
     for (j, f) in late.iter().enumerate() {
         deps[tables.len() + j].extend(f.tabs.iter().filter_map(|t| tables.iter().position(|o| o.oid == *t)));
     }
+    // A partition after the table it is a partition of.
+    for (i, t) in tables.iter().enumerate() {
+        deps[i].extend(t.parent.as_ref().and_then(|(p, _)| tables.iter().position(|o| o.oid == *p)));
+    }
     for k in topo(&deps) {
         stopped(cancel)?;
         let Some(r) = tables.get(k) else {
             write_func(late[k - tables.len()], out)?;
             continue;
         };
-        let list: Vec<String> = cols_of.get(&r.oid).into_iter().flatten().map(|x| format!("    {}", x.clause())).collect();
         let with = if r.opts.is_empty() { String::new() } else { format!(" WITH ({})", r.opts.join(", ")) };
-        put(out, &format!("--\n-- Table {}.{}\n--\n\nCREATE {}TABLE {} (\n{}\n){};\n\n", note(&r.schema), note(&r.name), if r.unlogged { "UNLOGGED " } else { "" }, r.full(), list.join(",\n"), with))?;
+        let by = r.partkey.as_ref().map(|k| format!(" PARTITION BY {k}")).unwrap_or_default();
+        let unlogged = if r.unlogged { "UNLOGGED " } else { "" };
+        let mine = cols_of.get(&r.oid).map_or(&[][..], Vec::as_slice);
+        if let Some((p, pname)) = &r.parent {
+            // A partition takes its columns from the parent; only a default or a NOT NULL of its own is written.
+            let theirs = cols_of.get(p).map_or(&[][..], Vec::as_slice);
+            let own: Vec<String> = mine
+                .iter()
+                .filter_map(|x| {
+                    let up = theirs.iter().find(|o| o.name == x.name)?;
+                    let mut o = String::new();
+                    if x.ident == ' ' && x.generated == ' ' && x.def.is_some() && x.def != up.def {
+                        o.push_str(&format!(" DEFAULT {}", x.def.as_deref().unwrap_or_default()));
+                    }
+                    if x.notnull && !up.notnull {
+                        o.push_str(" NOT NULL");
+                    }
+                    (!o.is_empty()).then(|| format!("    {} WITH OPTIONS{o}", q(&x.name)))
+                })
+                .collect();
+            let own = if own.is_empty() { String::new() } else { format!(" (\n{}\n)", own.join(",\n")) };
+            put(out, &format!("--\n-- Partition {}.{}\n--\n\nCREATE {unlogged}TABLE {} PARTITION OF {pname}{own}\n{}{by}{with};\n\n", note(&r.schema), note(&r.name), r.full(), r.bound))?;
+        } else {
+            let list: Vec<String> = mine.iter().map(|x| format!("    {}", x.clause())).collect();
+            put(out, &format!("--\n-- Table {}.{}\n--\n\nCREATE {unlogged}TABLE {} (\n{}\n){by}{with};\n\n", note(&r.schema), note(&r.name), r.full(), list.join(",\n")))?;
+        }
     }
 
     let mut rows = 0u64;
@@ -464,7 +515,7 @@ async fn dump_on(c: &mut PgConnection, db: &Db, plan: &DumpPlan, out: &mut (dyn 
     let mut wrote = false;
     for x in cols.iter().filter(|x| x.late_nn.is_some()) {
         if let (Some((name, def)), Some(r)) = (&x.late_nn, by_oid.get(&x.rel).filter(|r| r.structure && r.table())) {
-            put(out, &format!("ALTER TABLE ONLY {} ADD CONSTRAINT {} {def};\n", r.full(), q(name)))?;
+            put(out, &format!("ALTER TABLE {}{} ADD CONSTRAINT {} {def};\n", r.only(), r.full(), q(name)))?;
             wrote = true;
         }
     }
@@ -475,9 +526,19 @@ async fn dump_on(c: &mut PgConnection, db: &Db, plan: &DumpPlan, out: &mut (dyn 
     // Keys, checks and indexes after the rows, so loading them does not maintain each row by row.
     let cons = load_cons(c, db, &structured).await?;
     let idxs = load_idx(c, db, &structured).await?;
-    for k in cons.iter().filter(|k| k.c(3) != 'f' && k.b(8)) {
+    let in_dump = |oid: i64| by_oid.get(&oid).is_some_and(|r| r.structure);
+    // A partition's copy of a key of its parent is made on the partition and attached to the parent's index below. Its copies
+    // of checks and foreign keys are made by the parent's own, which reach every partition.
+    let kept = |k: &R| if k.n(9) != 0 { matches!(k.c(3), 'p' | 'u' | 'x') && by_oid.get(&k.n(0)).and_then(|r| r.parent.as_ref()).is_some_and(|(p, _)| in_dump(*p)) } else { k.b(8) };
+    let mut idx_made: Vec<i64> = Vec::new();
+    for k in cons.iter().filter(|k| k.c(3) != 'f' && kept(k)) {
         if let Some(r) = by_oid.get(&k.n(0)) {
-            put(out, &format!("ALTER TABLE ONLY {} ADD CONSTRAINT {} {};\n", r.full(), q(&k.s(2)), k.s(4)))?;
+            // A key stays on the one table, so its partitions' copies can be attached; a check reaches the partitions.
+            let only = if k.c(3) == 'c' { r.only() } else { "ONLY " };
+            put(out, &format!("ALTER TABLE {only}{} ADD CONSTRAINT {} {};\n", r.full(), q(&k.s(2)), k.s(4)))?;
+            if k.n(6) != 0 {
+                idx_made.push(k.n(6));
+            }
         }
     }
     let domains: Vec<i64> = types.iter().filter(|t| t.kind == 'd' && t.ext.is_none()).map(|t| t.oid).collect();
@@ -500,22 +561,34 @@ async fn dump_on(c: &mut PgConnection, db: &Db, plan: &DumpPlan, out: &mut (dyn 
             notes.push(format!("-- Index {} on {}.{} was left out: the server marks it not valid (a CREATE INDEX CONCURRENTLY that failed).", note(&i.s(2)), note(&r.schema), note(&r.name)));
             continue;
         }
+        // A partition's copy of an index of a parent that is not in the dump comes with that parent where the file is run.
+        if i.n(7) != 0 && !idxs.iter().any(|p| p.n(1) == i.n(7)) {
+            continue;
+        }
         // An index that backs a key is made by the key.
         if !i.b(6) {
             put(out, &format!("{};\n", i.s(3)))?;
+            idx_made.push(i.n(1));
         }
-        if i.b(5) {
+        if i.b(5) && r.kind != 'p' {
             put(out, &format!("ALTER TABLE {} CLUSTER ON {};\n", r.full(), q(&i.s(2))))?;
         }
     }
+    // Each partition's index joins its parent's, which is valid once every partition has one; a foreign key to a
+    // partitioned table needs that, so this comes before the foreign keys.
+    for i in idxs.iter().filter(|i| i.n(7) != 0 && idx_made.contains(&i.n(1)) && idx_made.contains(&i.n(7))) {
+        let (Some(p), Some(r)) = (idxs.iter().find(|p| p.n(1) == i.n(7)), by_oid.get(&i.n(0))) else { continue };
+        let Some(pr) = by_oid.get(&p.n(0)) else { continue };
+        put(out, &format!("ALTER INDEX {} ATTACH PARTITION {};\n", qn(&pr.schema, &p.s(2)), qn(&r.schema, &i.s(2))))?;
+    }
     let dumped: HashSet<i64> = structured.iter().copied().collect();
-    for k in cons.iter().filter(|k| k.c(3) == 'f' && k.b(8)) {
+    for k in cons.iter().filter(|k| k.c(3) == 'f' && kept(k)) {
         let Some(r) = by_oid.get(&k.n(0)) else { continue };
         if !dumped.contains(&k.n(5)) {
             notes.push(format!("-- Foreign key {} of {}.{} was left out: the table it points at is not part of this dump.", note(&k.s(2)), note(&r.schema), note(&r.name)));
             continue;
         }
-        put(out, &format!("ALTER TABLE ONLY {} ADD CONSTRAINT {} {};\n", r.full(), q(&k.s(2)), k.s(4)))?;
+        put(out, &format!("ALTER TABLE {}{} ADD CONSTRAINT {} {};\n", r.only(), r.full(), q(&k.s(2)), k.s(4)))?;
     }
     put(out, "\n")?;
 
@@ -525,7 +598,7 @@ async fn dump_on(c: &mut PgConnection, db: &Db, plan: &DumpPlan, out: &mut (dyn 
     // Triggers after the rows, so loading them fires nothing.
     let mut trig: Vec<R> = Vec::new();
     if plan.extras {
-        trig = cat(c, db, "SELECT t.tgrelid::text, t.tgname::text, pg_get_triggerdef(t.oid), t.tgenabled::text, t.oid::text FROM pg_trigger t WHERE t.tgrelid::int8 = ANY($1) AND NOT t.tgisinternal ORDER BY t.tgrelid, t.tgname", &[Arg::Is(&structured)]).await?;
+        trig = cat(c, db, "SELECT t.tgrelid::text, t.tgname::text, pg_get_triggerdef(t.oid), t.tgenabled::text, t.oid::text FROM pg_trigger t WHERE t.tgrelid::int8 = ANY($1) AND NOT t.tgisinternal AND t.tgparentid = 0 ORDER BY t.tgrelid, t.tgname", &[Arg::Is(&structured)]).await?;
         for t in &trig {
             let Some(r) = by_oid.get(&t.n(0)) else { continue };
             put(out, &format!("{};\n", t.s(2)))?;
@@ -542,7 +615,17 @@ async fn dump_on(c: &mut PgConnection, db: &Db, plan: &DumpPlan, out: &mut (dyn 
         }
     }
 
-    write_comments(c, db, &schemas, &rels, &types, &seqs, &cons, &idxs, &funcs, &trig, out).await?;
+    let pols = write_rls(c, db, &rels, out).await?;
+    write_comments(c, db, &schemas, &rels, &types, &seqs, &cons, &idx_made, &funcs, &trig, &pols, out).await?;
+    // Last, so a role missing where the file runs stops it only after the tables, rows and everything else are in.
+    let made = Made { whole, schemas: &schemas, rels: &rels, types: &types, seqs: &seqs, funcs: &funcs };
+    if plan.owners {
+        write_owners(c, db, &made, out).await?;
+    }
+    if plan.grants {
+        write_grants(c, db, &made, out).await?;
+    }
+    left_out(c, db, whole, &structured, &rels, &mut notes).await?;
     for n in &notes {
         put(out, &format!("{n}\n"))?;
     }
@@ -573,39 +656,93 @@ const USES: &str = "SELECT x.rel::text, x.k, x.o::text FROM ( \
     WHERE a.attrelid::int8 = ANY($1) AND a.attnum > 0 AND NOT a.attisdropped AND COALESCE(NULLIF(t.typrelid, 0), e.typrelid, 0) <> 0) x";
 
 /// The relations to write. The second value lists what was left out and why, as comment lines for the end of the file.
+/// A partitioned table brings its partitions, at every level, with its own choices unless the list names a partition itself.
 async fn load_rels(c: &mut PgConnection, db: &Db, plan: &DumpPlan, whole: bool) -> Res<(Vec<Rel>, Vec<String>)> {
-    let head = "SELECT c.oid::text, n.nspname::text, c.relname::text, c.relkind::text, (c.relpersistence = 'u')::text, c.relispopulated::text, COALESCE(array_to_string(c.reloptions, chr(31)), ''), has_table_privilege(c.oid, 'SELECT')::text, (c.relispartition OR c.relkind IN ('p', 'f'))::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') AND ";
+    let head = "SELECT c.oid::text, n.nspname::text, c.relname::text, c.relkind::text, (c.relpersistence = 'u')::text, c.relispopulated::text, COALESCE(array_to_string(c.reloptions, chr(31)), ''), has_table_privilege(c.oid, 'SELECT')::text, (c.relkind = 'f')::text, \
+        (SELECT h.inhparent::text || chr(31) || pn.nspname::text || chr(31) || pc.relname::text FROM pg_inherits h JOIN pg_class pc ON pc.oid = h.inhparent JOIN pg_namespace pn ON pn.oid = pc.relnamespace WHERE h.inhrelid = c.oid AND c.relispartition), \
+        CASE WHEN c.relispartition THEN pg_get_expr(c.relpartbound, c.oid) END, CASE WHEN c.relkind = 'p' THEN pg_get_partkeydef(c.oid) END, c.relrowsecurity::text, c.relforcerowsecurity::text, \
+        (c.relrowsecurity AND NOT (SELECT r.rolsuper OR r.rolbypassrls FROM pg_roles r WHERE r.rolname = current_user) AND (c.relforcerowsecurity OR NOT pg_has_role(c.relowner, 'USAGE')))::text, \
+        (NOT c.relispartition AND EXISTS (SELECT 1 FROM pg_inherits h WHERE h.inhrelid = c.oid))::text \
+        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') AND ";
     let rows = if whole {
         let sql = format!("{head}{NOT_SYSTEM} AND {} ORDER BY n.nspname, c.relname", not_ext("pg_class", "c.oid"));
         cat(c, db, &sql, &[]).await?
     } else {
         let names: Vec<String> = plan.tables.iter().map(|t| t.name.clone()).collect();
-        let sql = format!("{head}n.nspname::text = $1 AND c.relname::text = ANY($2)");
+        // The partitions of a listed partitioned table, which may live in other schemas.
+        let sql = format!(
+            "{head}((n.nspname::text = $1 AND c.relname::text = ANY($2)) OR c.oid IN (SELECT t.relid FROM pg_class pc JOIN pg_namespace pn ON pn.oid = pc.relnamespace CROSS JOIN LATERAL pg_partition_tree(pc.oid) t \
+             WHERE pn.nspname::text = $1 AND pc.relname::text = ANY($2) AND pc.relkind = 'p')) ORDER BY n.nspname, c.relname"
+        );
         cat(c, db, &sql, &[Arg::T(&plan.schema), Arg::Ts(&names)]).await?
     };
+    let listed = |r: &R| if whole || r.s(1) != plan.schema { None } else { plan.tables.iter().find(|t| t.name == r.s(2)) };
     if !whole {
-        if let Some(t) = plan.tables.iter().find(|t| !rows.iter().any(|r| r.s(2) == t.name)) {
+        if let Some(t) = plan.tables.iter().find(|t| !rows.iter().any(|r| r.s(1) == plan.schema && r.s(2) == t.name)) {
             return Err(format!("{}.{} no longer exists on the server.", plan.schema, t.name));
         }
     }
+    let parent_of = |r: &R| r.o(9).and_then(|p| p.split('\x1f').next().and_then(|o| o.parse::<i64>().ok()));
     let (mut out, mut notes) = (Vec::new(), Vec::new());
     for r in &rows {
         let (schema, name, kind) = (r.s(1), r.s(2), r.c(3));
         if r.b(8) {
             // Saying nothing would be a gap nobody notices when the dump is restored.
-            notes.push(format!("-- {} {}.{} was left out: partitioned tables, partitions and foreign tables are not dumped.", if kind == 'f' { "Foreign table" } else { "Table" }, note(&schema), note(&name)));
+            notes.push(format!("-- Foreign table {}.{} was left out: foreign tables are not dumped.", note(&schema), note(&name)));
             continue;
         }
+        // A partition the list does not name takes the choices of the nearest partitioned table above it that it does.
+        let mut at = Some(r);
+        let mut pick = None;
+        while let Some(x) = at {
+            pick = listed(x);
+            if pick.is_some() {
+                break;
+            }
+            at = parent_of(x).and_then(|p| rows.iter().find(|o| o.n(0) == p));
+        }
         let view = matches!(kind, 'v' | 'm');
-        let (structure, content, drop) = match if whole { None } else { plan.tables.iter().find(|t| t.name == name) } {
-            Some(t) => (t.structure, t.content && !view, t.drop && t.structure),
-            None => (true, !view, false),
+        // A partitioned table holds no rows of its own: they are read from its partitions.
+        let rows_here = !view && kind != 'p';
+        let (structure, content, drop) = match pick {
+            Some(t) => (t.structure, t.content && rows_here, t.drop && t.structure),
+            None => (true, rows_here, false),
         };
-        out.push(Rel { oid: r.n(0), schema, name, kind, unlogged: r.b(4), populated: r.b(5), opts: r.s(6).split('\x1f').filter(|o| !o.is_empty()).map(String::from).collect(), readable: r.b(7), structure, content, drop });
+        let parent = r.o(9).and_then(|p| {
+            let mut it = p.split('\x1f');
+            Some((it.next()?.parse::<i64>().ok()?, qn(it.next()?, it.next()?)))
+        });
+        if let Some((p, pname)) = &parent {
+            if structure && !rows.iter().any(|o| o.n(0) == *p) {
+                notes.push(format!("-- Partition {}.{} is written as a partition of {}, which must exist where the file is run.", note(&schema), note(&name), note(pname)));
+            }
+        }
+        if r.b(15) && structure {
+            notes.push(format!("-- Table {}.{} inherits from another table: it is written as a table of its own with every column, without INHERITS.", note(&schema), note(&name)));
+        }
+        out.push(Rel {
+            oid: r.n(0),
+            schema,
+            name,
+            kind,
+            unlogged: r.b(4),
+            populated: r.b(5),
+            opts: r.s(6).split('\x1f').filter(|o| !o.is_empty()).map(String::from).collect(),
+            readable: r.b(7),
+            structure,
+            content,
+            drop,
+            parent,
+            bound: r.s(10),
+            partkey: r.o(11),
+            rls: r.b(12),
+            force_rls: r.b(13),
+            hidden: r.b(14),
+        });
     }
     if !whole {
         // The order the dialog listed them in.
-        out.sort_by_key(|r| plan.tables.iter().position(|t| t.name == r.name).unwrap_or(usize::MAX));
+        out.sort_by_key(|r| if r.schema == plan.schema { plan.tables.iter().position(|t| t.name == r.name).unwrap_or(usize::MAX) } else { usize::MAX });
     }
     Ok((out, notes))
 }
@@ -703,7 +840,7 @@ async fn load_types(c: &mut PgConnection, db: &Db, whole: bool, schemas: &[Strin
 /// is not the type's own.
 const ATTRS: &str = "SELECT a.attrelid::text, a.attnum::text, a.attname::text, format_type(a.atttypid, a.atttypmod), a.attnotnull::text, a.attidentity::text, a.attgenerated::text, pg_get_expr(d.adbin, d.adrelid), cn.nspname::text, co.collname::text, \
      sn.nspname::text, sc.relname::text, format_type(sq.seqtypid, NULL), sq.seqstart::text, sq.seqincrement::text, sq.seqmin::text, sq.seqmax::text, sq.seqcache::text, sq.seqcycle::text, \
-     CASE WHEN nk.oid IS NULL THEN NULL WHEN nk.convalidated AND NOT nk.connoinherit AND nk.conname::text = rc.relname::text || '_' || a.attname::text || '_not_null' THEN 'plain' ELSE 'named' END, nk.conname::text, pg_get_constraintdef(nk.oid) \
+     CASE WHEN nk.oid IS NULL THEN NULL WHEN nk.convalidated AND NOT nk.connoinherit AND nk.conname::text = rc.relname::text || '_' || a.attname::text || '_not_null' THEN 'plain' ELSE 'named' END, nk.conname::text, pg_get_constraintdef(nk.oid), nk.conislocal::text \
      FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid JOIN pg_class rc ON rc.oid = a.attrelid \
      LEFT JOIN pg_constraint nk ON nk.conrelid = a.attrelid AND nk.contype = 'n' AND nk.conkey[1] = a.attnum \
      LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
@@ -718,7 +855,8 @@ async fn load_cols(c: &mut PgConnection, db: &Db, rels: &[i64]) -> Res<Vec<Col>>
         let seq = r.o(10).zip(r.o(11)).map(|(schema, name)| SeqOpts { schema, name, ty: r.s(12), start: r.s(13), inc: r.s(14), min: r.s(15), max: r.s(16), cache: r.s(17), cycle: r.b(18) });
         // On 18 a NOT NULL is a constraint with a name. attnotnull is set even by a NOT VALID one, whose NULL rows would fail
         // the CREATE TABLE they are loaded after, and a name other than the default would be lost.
-        let late_nn = if r.b(4) && r.s(19) == "named" { Some((r.s(20), r.s(21))) } else { None };
+        // One a partition has from its parent comes with the partition.
+        let late_nn = if r.b(4) && r.s(19) == "named" && r.b(22) { Some((r.s(20), r.s(21))) } else { None };
         out.push(Col { rel: r.n(0), name: r.s(2), ty: r.s(3), notnull: r.b(4) && late_nn.is_none(), late_nn, ident: r.c(5), generated: r.c(6), def: r.o(7), coll: r.o(8).zip(r.o(9)), seq });
     }
     Ok(out)
@@ -777,7 +915,7 @@ async fn load_cons(c: &mut PgConnection, db: &Db, rels: &[i64]) -> Res<Vec<R>> {
     cat(
         c,
         db,
-        "SELECT k.conrelid::text, k.oid::text, k.conname::text, k.contype::text, pg_get_constraintdef(k.oid), k.confrelid::text, k.conindid::text, k.convalidated::text, k.conislocal::text FROM pg_constraint k WHERE k.conrelid::int8 = ANY($1) AND k.contype IN ('p', 'u', 'c', 'x', 'f') \
+        "SELECT k.conrelid::text, k.oid::text, k.conname::text, k.contype::text, pg_get_constraintdef(k.oid), k.confrelid::text, k.conindid::text, k.convalidated::text, k.conislocal::text, k.conparentid::text FROM pg_constraint k WHERE k.conrelid::int8 = ANY($1) AND k.contype IN ('p', 'u', 'c', 'x', 'f') \
          ORDER BY k.conrelid, CASE k.contype WHEN 'p' THEN 0 WHEN 'u' THEN 1 WHEN 'x' THEN 2 WHEN 'c' THEN 3 ELSE 4 END, k.conname",
         &[Arg::Is(rels)],
     )
@@ -789,7 +927,8 @@ async fn load_idx(c: &mut PgConnection, db: &Db, rels: &[i64]) -> Res<Vec<R>> {
         c,
         db,
         "SELECT i.indrelid::text, i.indexrelid::text, ic.relname::text, pg_get_indexdef(i.indexrelid), i.indisvalid::text, i.indisclustered::text, \
-         (EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conindid = i.indexrelid AND k.contype IN ('p', 'u', 'x') AND k.conrelid = i.indrelid))::text \
+         (EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conindid = i.indexrelid AND k.contype IN ('p', 'u', 'x') AND k.conrelid = i.indrelid))::text, \
+         COALESCE((SELECT h.inhparent::text FROM pg_inherits h WHERE h.inhrelid = i.indexrelid), '0') \
          FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid WHERE i.indrelid::int8 = ANY($1) ORDER BY i.indrelid, ic.relname",
         &[Arg::Is(rels)],
     )
@@ -1030,14 +1169,14 @@ fn flush(out: &mut (dyn Write + Send), head: &str, batch: &mut String, n: &mut u
 
 /// Comments on what the dump wrote, last because they name objects of every kind.
 #[allow(clippy::too_many_arguments)]
-async fn write_comments(c: &mut PgConnection, db: &Db, schemas: &[String], rels: &[Rel], types: &[Ty], seqs: &[Seq], cons: &[R], idxs: &[R], funcs: &[Func], trig: &[R], out: &mut (dyn Write + Send)) -> Res<()> {
+async fn write_comments(c: &mut PgConnection, db: &Db, schemas: &[String], rels: &[Rel], types: &[Ty], seqs: &[Seq], cons: &[R], idxs: &[i64], funcs: &[Func], trig: &[R], pols: &[i64], out: &mut (dyn Write + Send)) -> Res<()> {
     let mut lines: Vec<String> = Vec::new();
     let on = |what: &str, desc: &str| format!("COMMENT ON {what} IS {};\n", pg_lit(desc));
     for r in cat(c, db, "SELECT n.nspname::text, d.description FROM pg_description d JOIN pg_namespace n ON n.oid = d.objoid WHERE d.classoid = 'pg_namespace'::regclass AND d.objsubid = 0 AND n.nspname::text = ANY($1) ORDER BY n.nspname", &[Arg::Ts(schemas)]).await? {
         lines.push(on(&format!("SCHEMA {}", q(&r.s(0))), &r.s(1)));
     }
     let mut ids: Vec<i64> = rels.iter().filter(|r| r.structure).map(|r| r.oid).collect();
-    ids.extend(idxs.iter().map(|i| i.n(1)));
+    ids.extend(idxs);
     ids.extend(seqs.iter().filter(|s| s.create).map(|s| s.oid));
     if !ids.is_empty() {
         for r in cat(
@@ -1059,7 +1198,7 @@ async fn write_comments(c: &mut PgConnection, db: &Db, schemas: &[String], rels:
                 let kind = match r.c(0) {
                     'v' => "VIEW",
                     'm' => "MATERIALIZED VIEW",
-                    'i' => "INDEX",
+                    'i' | 'I' => "INDEX",
                     'S' => "SEQUENCE",
                     _ => "TABLE",
                 };
@@ -1103,11 +1242,319 @@ async fn write_comments(c: &mut PgConnection, db: &Db, schemas: &[String], rels:
             }
         }
     }
+    if !pols.is_empty() {
+        for r in cat(c, db, "SELECT p.polrelid::text, p.polname::text, d.description FROM pg_description d JOIN pg_policy p ON p.oid = d.objoid WHERE d.classoid = 'pg_policy'::regclass AND d.objoid::int8 = ANY($1) ORDER BY p.polrelid, p.polname", &[Arg::Is(pols)]).await? {
+            if let Some(t) = rels.iter().find(|x| x.oid == r.n(0)) {
+                lines.push(on(&format!("POLICY {} ON {}", q(&r.s(1)), t.full()), &r.s(2)));
+            }
+        }
+    }
     for l in &lines {
         put(out, l)?;
     }
     if !lines.is_empty() {
         put(out, "\n")?;
+    }
+    Ok(())
+}
+
+/// Row security of the tables, after their rows: ENABLE and FORCE, then the policies. Returns the policies' oids, for
+/// their comments.
+async fn write_rls(c: &mut PgConnection, db: &Db, rels: &[Rel], out: &mut (dyn Write + Send)) -> Res<Vec<i64>> {
+    let tables: Vec<&Rel> = rels.iter().filter(|r| r.structure && r.table()).collect();
+    if tables.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut lines: Vec<String> = Vec::new();
+    for r in &tables {
+        if r.rls {
+            lines.push(format!("ALTER TABLE {} ENABLE ROW LEVEL SECURITY;\n", r.full()));
+        }
+        if r.force_rls {
+            lines.push(format!("ALTER TABLE {} FORCE ROW LEVEL SECURITY;\n", r.full()));
+        }
+    }
+    let ids: Vec<i64> = tables.iter().map(|r| r.oid).collect();
+    // A role of 0 is PUBLIC, written as an empty name.
+    let pols = cat(
+        c,
+        db,
+        "SELECT p.polrelid::text, p.polname::text, p.polcmd::text, p.polpermissive::text, \
+         (SELECT string_agg(CASE WHEN u.r = 0 THEN '' ELSE pg_get_userbyid(u.r)::text END, chr(31) ORDER BY u.o) FROM unnest(p.polroles) WITH ORDINALITY u(r, o)), \
+         pg_get_expr(p.polqual, p.polrelid), pg_get_expr(p.polwithcheck, p.polrelid), p.oid::text FROM pg_policy p WHERE p.polrelid::int8 = ANY($1) ORDER BY p.polrelid, p.polname",
+        &[Arg::Is(&ids)],
+    )
+    .await?;
+    for p in &pols {
+        let Some(r) = tables.iter().find(|r| r.oid == p.n(0)) else { continue };
+        let cmd = match p.c(2) {
+            'r' => "SELECT",
+            'a' => "INSERT",
+            'w' => "UPDATE",
+            'd' => "DELETE",
+            _ => "ALL",
+        };
+        let to: Vec<String> = p.s(4).split('\x1f').map(|n| if n.is_empty() { "PUBLIC".to_string() } else { q(n) }).collect();
+        let mut s = format!("CREATE POLICY {} ON {} AS {} FOR {cmd} TO {}", q(&p.s(1)), r.full(), if p.b(3) { "PERMISSIVE" } else { "RESTRICTIVE" }, to.join(", "));
+        if let Some(e) = p.o(5) {
+            s.push_str(&format!(" USING ({e})"));
+        }
+        if let Some(e) = p.o(6) {
+            s.push_str(&format!(" WITH CHECK ({e})"));
+        }
+        lines.push(format!("{s};\n"));
+    }
+    for l in &lines {
+        put(out, l)?;
+    }
+    if !lines.is_empty() {
+        put(out, "\n")?;
+    }
+    Ok(pols.iter().map(|p| p.n(7)).collect())
+}
+
+/// What the file makes, for its owners and grants.
+struct Made<'a> {
+    whole: bool,
+    schemas: &'a [String],
+    rels: &'a [Rel],
+    types: &'a [Ty],
+    seqs: &'a [Seq],
+    funcs: &'a [Func],
+}
+
+/// A type the file writes: `write_types` leaves out a range with a canonical function.
+const TYPE_WRITTEN: &str = "NOT EXISTS (SELECT 1 FROM pg_range g WHERE g.rngtypid = t.oid AND g.rngcanonical <> 0)";
+
+impl Made<'_> {
+    fn types(&self) -> Vec<i64> {
+        self.types.iter().filter(|t| t.ext.is_none()).map(|t| t.oid).collect()
+    }
+
+    fn funcs(&self) -> Vec<i64> {
+        self.funcs.iter().filter(|f| f.def.is_some()).map(|f| f.oid).collect()
+    }
+
+    /// A sequence that belongs to a table of the dump, through OWNED BY or an identity column, follows the table's owner.
+    fn linked(&self, s: &Seq) -> bool {
+        s.owner.as_ref().is_some_and(|(t, _)| self.rels.iter().any(|r| r.oid == *t && r.structure))
+    }
+}
+
+/// `ALTER ... OWNER TO` for everything the file makes. A sequence that belongs to a table and an index follow their table.
+async fn write_owners(c: &mut PgConnection, db: &Db, m: &Made<'_>, out: &mut (dyn Write + Send)) -> Res<()> {
+    let mut lines: Vec<String> = Vec::new();
+    // A role dropped since leaves only its oid, which no statement can name.
+    let named = |r: &R, i: usize| Some(r.s(i)).filter(|o| !o.is_empty() && !o.starts_with("unknown (OID="));
+    if m.whole {
+        for r in cat(c, db, "SELECT n.nspname::text, pg_get_userbyid(n.nspowner)::text FROM pg_namespace n WHERE n.nspname::text = ANY($1) ORDER BY 1", &[Arg::Ts(m.schemas)]).await? {
+            if let Some(o) = named(&r, 1) {
+                lines.push(format!("ALTER SCHEMA {} OWNER TO {};\n", q(&r.s(0)), q(&o)));
+            }
+        }
+    }
+    let types = m.types();
+    if !types.is_empty() {
+        for r in cat(c, db, &format!("SELECT n.nspname::text, t.typname::text, t.typtype::text, pg_get_userbyid(t.typowner)::text FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE t.oid::int8 = ANY($1) AND {TYPE_WRITTEN} ORDER BY 1, 2"), &[Arg::Is(&types)]).await? {
+            if let Some(o) = named(&r, 3) {
+                lines.push(format!("ALTER {} {} OWNER TO {};\n", if r.c(2) == 'd' { "DOMAIN" } else { "TYPE" }, qn(&r.s(0), &r.s(1)), q(&o)));
+            }
+        }
+    }
+    let mut ids: Vec<i64> = m.seqs.iter().filter(|s| s.create && !m.linked(s)).map(|s| s.oid).collect();
+    ids.extend(m.rels.iter().filter(|r| r.structure).map(|r| r.oid));
+    if !ids.is_empty() {
+        for r in cat(c, db, "SELECT n.nspname::text, c.relname::text, c.relkind::text, pg_get_userbyid(c.relowner)::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid::int8 = ANY($1) ORDER BY 1, 2", &[Arg::Is(&ids)]).await? {
+            let kind = match r.c(2) {
+                'S' => "SEQUENCE",
+                'v' => "VIEW",
+                'm' => "MATERIALIZED VIEW",
+                _ => "TABLE",
+            };
+            if let Some(o) = named(&r, 3) {
+                lines.push(format!("ALTER {kind} {} OWNER TO {};\n", qn(&r.s(0), &r.s(1)), q(&o)));
+            }
+        }
+    }
+    let funcs = m.funcs();
+    if !funcs.is_empty() {
+        for r in cat(c, db, "SELECT n.nspname::text, p.proname::text, p.prokind::text, pg_get_function_identity_arguments(p.oid), pg_get_userbyid(p.proowner)::text FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE p.oid::int8 = ANY($1) ORDER BY 1, 2, 4", &[Arg::Is(&funcs)]).await? {
+            if let Some(o) = named(&r, 4) {
+                lines.push(format!("ALTER {} {}({}) OWNER TO {};\n", if r.c(2) == 'p' { "PROCEDURE" } else { "FUNCTION" }, qn(&r.s(0), &r.s(1)), r.s(3), q(&o)));
+            }
+        }
+    }
+    if !lines.is_empty() {
+        put(out, "--\n-- Owners\n--\n\n")?;
+        for l in &lines {
+            put(out, l)?;
+        }
+        put(out, "\n")?;
+    }
+    Ok(())
+}
+
+/// The rights an object's ACL grants and revokes against `def`, the ACL it has when it is made, compared the way pg_dump
+/// does: one row per right, the `keys` columns, then `g` or `r`, the role (empty for PUBLIC), the right and whether it
+/// carries the grant option. The grantor is not compared, since a restore grants as the owner. A NULL ACL is the default
+/// one, so it has no rows.
+fn acl_diff(keys: &[&str], from: &str, acl: &str, def: &str, filter: &str) -> String {
+    let order: Vec<String> = (1..=keys.len() + 4).map(|i| i.to_string()).collect();
+    format!(
+        "SELECT {}, x.k, COALESCE(g.rolname::text, ''), x.p, x.o::text FROM {from} CROSS JOIN LATERAL ( \
+         (SELECT 'g'::text AS k, a.grantee AS r, a.privilege_type::text AS p, a.is_grantable AS o FROM aclexplode({acl}) a EXCEPT SELECT 'g', d.grantee, d.privilege_type::text, d.is_grantable FROM aclexplode({def}) d) \
+         UNION ALL (SELECT 'r', d.grantee, d.privilege_type::text, d.is_grantable FROM aclexplode({def}) d EXCEPT SELECT 'r', a.grantee, a.privilege_type::text, a.is_grantable FROM aclexplode({acl}) a)) x \
+         LEFT JOIN pg_roles g ON g.oid = x.r WHERE {acl} IS NOT NULL AND {filter} ORDER BY {}",
+        keys.join(", "),
+        order.join(", ")
+    )
+}
+
+/// REVOKE then GRANT statements for one object from its `acl_diff` rows, whose `g` or `r` column is `at`, with each role's
+/// rights in one statement. `col` is the column of a column name, whose rights read `SELECT ("c")`. `head` goes before each
+/// GRANT or REVOKE, for ALTER DEFAULT PRIVILEGES.
+fn acl_lines(head: &str, on: &str, rows: &[&R], at: usize, col: Option<usize>) -> Vec<String> {
+    let who = |g: &str| if g.is_empty() { "PUBLIC".to_string() } else { q(g) };
+    let mut rev: Vec<(String, Vec<String>)> = Vec::new();
+    let mut gr: Vec<((String, bool), Vec<String>)> = Vec::new();
+    for r in rows {
+        let right = match col {
+            Some(i) => format!("{} ({})", r.s(at + 2), q(&r.s(i))),
+            None => r.s(at + 2),
+        };
+        if r.s(at) == "r" {
+            match rev.iter_mut().find(|x| x.0 == r.s(at + 1)) {
+                Some(x) => x.1.push(right),
+                None => rev.push((r.s(at + 1), vec![right])),
+            }
+        } else {
+            let key = (r.s(at + 1), r.b(at + 3));
+            match gr.iter_mut().find(|x| x.0 == key) {
+                Some(x) => x.1.push(right),
+                None => gr.push((key, vec![right])),
+            }
+        }
+    }
+    let mut out: Vec<String> = rev.iter().map(|(g, p)| format!("{head}REVOKE {} ON {on} FROM {}", p.join(", "), who(g))).collect();
+    out.extend(gr.iter().map(|((g, opt), p)| format!("{head}GRANT {} ON {on} TO {}{}", p.join(", "), who(g), if *opt { " WITH GRANT OPTION" } else { "" })));
+    out
+}
+
+/// Runs of rows whose first `n` columns are the same.
+fn groups(rows: &[R], n: usize) -> Vec<Vec<&R>> {
+    let mut out: Vec<Vec<&R>> = Vec::new();
+    for r in rows {
+        match out.last_mut() {
+            Some(g) if (0..n).all(|i| g[0].s(i) == r.s(i)) => g.push(r),
+            _ => out.push(vec![r]),
+        }
+    }
+    out
+}
+
+/// GRANT and REVOKE for everything the file makes, after the owners, so a right the owner gave reads back as the owner's.
+/// A whole database also gets its default privileges and the rights on the database itself.
+async fn write_grants(c: &mut PgConnection, db: &Db, m: &Made<'_>, out: &mut (dyn Write + Send)) -> Res<()> {
+    let mut lines: Vec<String> = Vec::new();
+    if m.whole {
+        let sql = acl_diff(&["n.nspname::text"], "pg_namespace n", "n.nspacl", "acldefault('n', n.nspowner)", "n.nspname::text = ANY($1)");
+        for g in groups(&cat(c, db, &sql, &[Arg::Ts(m.schemas)]).await?, 1) {
+            lines.extend(acl_lines("", &format!("SCHEMA {}", q(&g[0].s(0))), &g, 1, None));
+        }
+    }
+    let types = m.types();
+    if !types.is_empty() {
+        let sql = acl_diff(&["n.nspname::text", "t.typname::text"], "pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace", "t.typacl", "acldefault('T', t.typowner)", &format!("t.oid::int8 = ANY($1) AND {TYPE_WRITTEN}"));
+        for g in groups(&cat(c, db, &sql, &[Arg::Is(&types)]).await?, 2) {
+            lines.extend(acl_lines("", &format!("TYPE {}", qn(&g[0].s(0), &g[0].s(1))), &g, 2, None));
+        }
+    }
+    let rels: Vec<i64> = m.rels.iter().filter(|r| r.structure).map(|r| r.oid).collect();
+    let mut ids: Vec<i64> = m.seqs.iter().filter(|s| s.create || m.linked(s)).map(|s| s.oid).collect();
+    ids.extend(&rels);
+    if !ids.is_empty() {
+        let sql = acl_diff(&["n.nspname::text", "c.relname::text", "c.relkind::text"], "pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace", "c.relacl", "acldefault(CASE WHEN c.relkind = 'S' THEN 's' ELSE 'r' END::\"char\", c.relowner)", "c.oid::int8 = ANY($1)");
+        for g in groups(&cat(c, db, &sql, &[Arg::Is(&ids)]).await?, 2) {
+            let kind = if g[0].c(2) == 'S' { "SEQUENCE" } else { "TABLE" };
+            lines.extend(acl_lines("", &format!("{kind} {}", qn(&g[0].s(0), &g[0].s(1))), &g, 3, None));
+        }
+    }
+    if !rels.is_empty() {
+        // A column has no rights of its own when it is made.
+        let sql = acl_diff(&["n.nspname::text", "c.relname::text", "a.attnum::text", "a.attname::text"], "pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace", "a.attacl", "acldefault('c', c.relowner)", "a.attrelid::int8 = ANY($1) AND a.attnum > 0 AND NOT a.attisdropped");
+        for g in groups(&cat(c, db, &sql, &[Arg::Is(&rels)]).await?, 2) {
+            lines.extend(acl_lines("", &format!("TABLE {}", qn(&g[0].s(0), &g[0].s(1))), &g, 4, Some(3)));
+        }
+    }
+    let funcs = m.funcs();
+    if !funcs.is_empty() {
+        let sql = acl_diff(&["n.nspname::text", "p.proname::text", "pg_get_function_identity_arguments(p.oid)", "p.prokind::text"], "pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace", "p.proacl", "acldefault('f', p.proowner)", "p.oid::int8 = ANY($1)");
+        for g in groups(&cat(c, db, &sql, &[Arg::Is(&funcs)]).await?, 3) {
+            let kind = if g[0].c(3) == 'p' { "PROCEDURE" } else { "FUNCTION" };
+            lines.extend(acl_lines("", &format!("{kind} {}({})", qn(&g[0].s(0), &g[0].s(1)), g[0].s(2)), &g, 4, None));
+        }
+    }
+    if m.whole {
+        // A default for every schema starts from what the role's objects get anyway; one for a schema only adds to that.
+        let sql = acl_diff(
+            &["pg_get_userbyid(da.defaclrole)::text", "COALESCE(dn.nspname::text, '')", "da.defaclobjtype::text"],
+            "pg_default_acl da LEFT JOIN pg_namespace dn ON dn.oid = da.defaclnamespace",
+            "da.defaclacl",
+            "CASE WHEN da.defaclnamespace = 0 THEN acldefault(CASE WHEN da.defaclobjtype = 'S' THEN 's' ELSE da.defaclobjtype END::\"char\", da.defaclrole) END",
+            "da.defaclobjtype IN ('r', 'S', 'f', 'T', 'n') AND (da.defaclnamespace = 0 OR dn.nspname::text = ANY($1))",
+        );
+        for g in groups(&cat(c, db, &sql, &[Arg::Ts(m.schemas)]).await?, 3) {
+            let what = match g[0].c(2) {
+                'r' => "TABLES",
+                'S' => "SEQUENCES",
+                'f' => "FUNCTIONS",
+                'T' => "TYPES",
+                _ => "SCHEMAS",
+            };
+            let schema = g[0].s(1);
+            let head = format!("ALTER DEFAULT PRIVILEGES FOR ROLE {}{} ", q(&g[0].s(0)), if schema.is_empty() { String::new() } else { format!(" IN SCHEMA {}", q(&schema)) });
+            lines.extend(acl_lines(&head, what, &g, 3, None));
+        }
+        // The rights on the database name it, and the file may run in a database of another name, so they name the one it
+        // runs in. Last, because a pooler refuses this DO block.
+        let sql = acl_diff(&["d.datname::text"], "pg_database d", "d.datacl", "acldefault('d', d.datdba)", "d.datname = current_database()");
+        let rows = cat(c, db, &sql, &[]).await?;
+        let refs: Vec<&R> = rows.iter().collect();
+        let on: Vec<String> = acl_lines("", "DATABASE \0", &refs, 1, None).iter().map(|l| format!("EXECUTE format({}, current_database());", pg_lit(&l.replace('%', "%%").replace('\0', "%I")))).collect();
+        if !on.is_empty() {
+            lines.push(format!("DO {}", dollar(&format!("BEGIN {} END", on.join(" ")))));
+        }
+    }
+    if !lines.is_empty() {
+        put(out, "--\n-- Grants\n--\n\n")?;
+        for l in &lines {
+            put(out, &format!("{l};\n"))?;
+        }
+        put(out, "\n")?;
+    }
+    Ok(())
+}
+
+/// What the database has and the dump does not write, as comment lines for the end of the file, so a restore does not
+/// lose it without a word.
+async fn left_out(c: &mut PgConnection, db: &Db, whole: bool, structured: &[i64], rels: &[Rel], notes: &mut Vec<String>) -> Res<()> {
+    if !structured.is_empty() {
+        for r in cat(c, db, "SELECT w.ev_class::text, w.rulename::text FROM pg_rewrite w WHERE w.ev_class::int8 = ANY($1) AND w.rulename <> '_RETURN' ORDER BY 1, 2", &[Arg::Is(structured)]).await? {
+            if let Some(t) = rels.iter().find(|t| t.oid == r.n(0)) {
+                notes.push(format!("-- Rule {} on {}.{} was left out: rules are not dumped.", note(&r.s(1)), note(&t.schema), note(&t.name)));
+            }
+        }
+    }
+    if whole {
+        let r = cat(c, db, "SELECT (SELECT count(*) FROM pg_event_trigger)::text, (SELECT count(*) FROM pg_largeobject_metadata)::text", &[]).await?;
+        if let Some(r) = r.first() {
+            if r.n(0) > 0 {
+                notes.push(format!("-- {} event trigger(s) were left out: event triggers are not dumped.", r.n(0)));
+            }
+            if r.n(1) > 0 {
+                notes.push(format!("-- {} large object(s) were left out: large objects are not dumped.", r.n(1)));
+            }
+        }
     }
     Ok(())
 }

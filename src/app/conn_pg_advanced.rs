@@ -164,7 +164,7 @@ fn error_line_free(ui: &mut egui::Ui, text: &str) {
 fn time_zone_row(ui: &mut egui::Ui, f: &mut ConnForm) {
     ui.horizontal(|ui| {
         ui.allocate_ui_with_layout(egui::vec2(NAME_W, BUTTON_H), egui::Layout::left_to_right(egui::Align::Center), |ui| ui.label(RichText::new("TimeZone").monospace().color(BRIGHT())));
-        segmented(ui, &mut f.zone_kind, &[(ZoneKind::Server, "Server default"), (ZoneKind::Utc, "UTC"), (ZoneKind::System, "System"), (ZoneKind::Custom, "Custom")]);
+        segmented(ui, &mut f.zone_kind, &[(ZoneKind::Server, "Default"), (ZoneKind::Utc, "UTC"), (ZoneKind::System, "System"), (ZoneKind::Custom, "Custom")]);
         match f.zone_kind {
             ZoneKind::Custom => {
                 let r = ui.add(egui::TextEdit::singleline(&mut f.zone_text).hint_text("Europe/Paris or +02:00").font(egui::TextStyle::Monospace).desired_width(160.0).margin(FIELD_MARGIN));
@@ -173,6 +173,10 @@ fn time_zone_row(ui: &mut egui::Ui, f: &mut ConnForm) {
             ZoneKind::System => match db::sql::advanced::system_zone_name() {
                 Some(z) => small(ui, &format!("Sends {z}"), FAINT()),
                 None => small(ui, "This computer's zone could not be read", ALERT()),
+            },
+            ZoneKind::Server => match db::sql::advanced::system_zone_name() {
+                Some(z) => small(ui, &format!("Shows timestamptz in {z}, this computer's zone"), FAINT()),
+                None => small(ui, "Shows timestamptz in UTC", FAINT()),
             },
             _ => {}
         }

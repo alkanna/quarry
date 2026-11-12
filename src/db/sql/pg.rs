@@ -7,7 +7,7 @@ use super::exec::{Cells, Conn, Opts};
 use super::worker::{num_at, text_at};
 use super::pg_advanced::PgSession;
 use super::{Addr, Db, Dialect, Pool, SslMode, TestInfo};
-use crate::db::{e, Net, Res};
+use crate::db::{classify, e, ErrKind, Net, Res};
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions, PgSslMode};
 use sqlx::{Connection, Executor};
 use std::collections::HashMap;
@@ -62,6 +62,8 @@ pub struct PgPools {
     starts: Mutex<HashMap<u64, String>>,
     /// The `BEGIN READ WRITE` a write opens with, built on the first write: the settings it holds never change for a pool.
     begin_write: std::sync::OnceLock<String>,
+    /// Held so the TLS relay lives as long as the connections that dial it.
+    relay: Option<super::pg_tls::Relay>,
 }
 
 /// Connections taken out of a pool for good (`PgPools::acquire_held`), counted per database. `pool.close()` does not know them,
@@ -145,7 +147,7 @@ struct Entry {
 
 impl PgPools {
     fn new(opts: PgConnectOptions, default_db: String, acquire: Duration, locals: Option<String>, timeout: String) -> PgPools {
-        PgPools { opts, default_db, acquire, idle: IDLE, per_db: PER_DB, max_pools: MAX_POOLS, locals, timeout, adv: PgSession::default(), live: Default::default(), held: Default::default(), starts: Default::default(), begin_write: Default::default() }
+        PgPools { opts, default_db, acquire, idle: IDLE, per_db: PER_DB, max_pools: MAX_POOLS, locals, timeout, adv: PgSession::default(), live: Default::default(), held: Default::default(), starts: Default::default(), begin_write: Default::default(), relay: None }
     }
 
     fn with_session(mut self, adv: PgSession) -> PgPools {
@@ -174,6 +176,11 @@ impl PgPools {
 
     pub(super) fn recall_start(&self, pid: u64) -> Option<String> {
         self.starts.lock().unwrap().get(&pid).cloned()
+    }
+
+    /// The application_name every session of this connection carries: the Advanced tab's, or Quarry's own.
+    pub fn app_name(&self) -> &str {
+        app_name_of(&self.adv)
     }
 
     /// The pool of `database`, made on first use. Making it opens no connection. Past the cap the pool used least
@@ -213,7 +220,16 @@ impl PgPools {
             .acquire_timeout(self.acquire)
             .after_connect(move |c, _| {
                 let (locals, failure, adv) = (locals.clone(), hook_failure.clone(), adv.clone());
-                Box::pin(async move { session_with(c, locals.as_deref(), &adv, &failure).await })
+                Box::pin(async move {
+                    session_with(c, locals.as_deref(), &adv, &failure).await?;
+                    // Behind a pooler the backend serves other clients too, so it is not Quarry's.
+                    if locals.is_none() {
+                        if let Some(b) = own_backend(c).await {
+                            note_own(&b.server, b.pid, &b.start);
+                        }
+                    }
+                    Ok(())
+                })
             })
             .connect_lazy_with(self.opts.clone().database(&name));
         live.pools.insert(name, Entry { pool: pool.clone(), used: tick, failure: failure.clone() });
@@ -293,6 +309,11 @@ impl PgPools {
         let mut c = sqlx::PgConnection::connect_with(o).await.map_err(se)?;
         let failure = Mutex::new(None);
         session_with(&mut c, self.locals.as_deref(), &self.adv, &failure).await.map_err(|x| failure.lock().unwrap().clone().unwrap_or_else(|| e(x)))?;
+        if self.locals.is_none() {
+            if let Some(b) = own_backend(&mut c).await {
+                note_own(&b.server, b.pid, &b.start);
+            }
+        }
         Ok(Conn::Pg(PgConn::free(c)))
     }
 }
@@ -381,6 +402,14 @@ impl Db {
         let p = PgPools::new(base.clone(), "postgres".into(), Duration::from_secs(10), Some(locals_for(ms)), "0".into());
         Db { pool: Pool::Pg(Arc::new(p)), opts: Opts::Pg(base.database(o.get_database().unwrap_or("postgres"))), ..self.clone() }
     }
+
+    /// A PostgreSQL `Db` that never connects (port 1), direct or behind a pooler, for tests of what Quarry would send.
+    #[cfg(test)]
+    pub fn offline_pg(pooled: bool, adv: PgSession) -> Db {
+        let base = PgConnectOptions::new_without_pgpass().host("127.0.0.1").port(1);
+        let p = PgPools::new(base.clone(), "postgres".into(), Duration::from_secs(1), pooled.then(|| locals_for(0)), "0".into()).with_session(adv);
+        Db { pool: Pool::Pg(Arc::new(p)), dialect: Dialect::Postgres, opts: Opts::Pg(base.database("postgres")), version: "18.0".into(), tls: false, sql_mode: String::new(), setup: Default::default(), conn: 0 }
+    }
 }
 
 /// The output formats the read path expects. sqlx sends DateStyle "ISO, MDY", TimeZone UTC and extra_float_digits 2 itself;
@@ -408,10 +437,15 @@ fn startup(o: PgConnectOptions, ms: u64) -> PgConnectOptions {
     startup_with(o, ms, &PgSession::default())
 }
 
+/// The application_name the Advanced tab gives, or Quarry's own.
+fn app_name_of(adv: &PgSession) -> &str {
+    adv.settings.iter().find(|(n, _)| n == "application_name").map_or("Quarry", |(_, v)| v.as_str())
+}
+
 /// `startup`, with the application name the Advanced tab gives: it is an ordinary startup parameter, so a pooler passes it
 /// and pg_stat_activity shows it from the first statement.
 fn startup_with(o: PgConnectOptions, ms: u64, adv: &PgSession) -> PgConnectOptions {
-    let name = adv.settings.iter().find(|(n, _)| n == "application_name").map_or("Quarry", |(_, v)| v.as_str());
+    let name = app_name_of(adv);
     let mut opts: Vec<(&str, String)> = vec![("default_transaction_read_only", "on".into())];
     if ms > 0 {
         opts.push(("statement_timeout", ms.to_string()));
@@ -626,6 +660,8 @@ struct Facts {
     version: String,
     tls: bool,
     timeout: String,
+    /// The subject of the client certificate the server checked, or empty.
+    client_dn: String,
 }
 
 /// The guard settings, the version, the TLS state and the statement timeout in one SELECT. Behind a pooler the session
@@ -633,7 +669,7 @@ struct Facts {
 async fn probe(c: &mut sqlx::PgConnection, guarded: bool) -> Res<Facts> {
     let rows = c
         .fetch_all(
-            "SELECT current_setting('server_version_num'), split_part(current_setting('server_version'), ' ', 1), COALESCE((SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()), false)::text, current_setting('statement_timeout'), current_setting('default_transaction_read_only'), current_setting('standard_conforming_strings')",
+            "SELECT current_setting('server_version_num'), split_part(current_setting('server_version'), ' ', 1), COALESCE((SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()), false)::text, current_setting('statement_timeout'), current_setting('default_transaction_read_only'), current_setting('standard_conforming_strings'), COALESCE((SELECT client_dn FROM pg_stat_ssl WHERE pid = pg_backend_pid()), '')",
         )
         .await
         .map_err(se)?;
@@ -650,34 +686,90 @@ async fn probe(c: &mut sqlx::PgConnection, guarded: bool) -> Res<Facts> {
     }
     // Only a sane value is kept, because it is written back into SET LOCAL statements.
     let timeout = Some(text(3)).filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_alphanumeric())).unwrap_or_else(|| "0".into());
-    Ok(Facts { version, tls: text(2) == "true", timeout })
+    Ok(Facts { version, tls: text(2) == "true", timeout, client_dn: text(6) })
 }
 
 /// Connects the way `worker::open_full` does for MySQL: one plain connection first, so a refusal (the guard, the
 /// version, a login) is reported at once, then the pools that open their connections on first use.
-pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Advanced, info: bool) -> Res<(Db, Vec<String>, Option<crate::ssh::Tunnel>, TestInfo)> {
+pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Advanced, info: bool) -> Res<(Db, Vec<String>, Option<crate::db::Way>, TestInfo)> {
     // Checked before anything connects, so a bad value never costs a tunnel or a login.
     let sess = PgSession::new(adv, super::advanced::system_zone_name())?;
     let (timeout, ms) = adv.timeouts(timeout);
-    let tunnel = match &net.ssh {
-        Some((conf, secrets)) => Some(crate::ssh::open(conf, secrets, timeout, Some((a.host.clone(), a.port))).await?),
-        None => None,
+    if net.cloud_sql.is_some() && net.ssh.is_some() {
+        return Err("Cloud SQL and an SSH tunnel cannot be used together".into());
+    }
+    if net.cloud_sql.is_none() && a.ssl_mode == SslMode::VerifyCa && a.ssl_ca.trim().is_empty() {
+        return Err(super::pg_cert::VERIFY_CA_NO_CA.into());
+    }
+    // Read before any tunnel or proxy starts. The Cloud SQL proxy does its own TLS, and libpq ignores the files when
+    // sslmode is disable. Decrypting a key runs a deliberately slow key derivation, so it stays off the async threads.
+    let client_cert = if net.cloud_sql.is_none() && a.ssl_mode != SslMode::Disabled {
+        let (c, k, p) = (a.ssl_cert.clone(), a.ssl_key.clone(), net.key_passphrase.clone());
+        tokio::task::spawn_blocking(move || super::pg_cert::load(&c, &k, p.as_deref())).await.map_err(|e| e.to_string())??
+    } else {
+        None
     };
-    // The certificate names the real host, not the tunnel's 127.0.0.1, so the name check cannot pass.
-    let (host, port, mode) = match &tunnel {
-        Some(t) => ("127.0.0.1".to_string(), t.port, if a.ssl_mode == SslMode::VerifyIdentity { SslMode::VerifyCa } else { a.ssl_mode }),
-        None => (a.host.clone(), a.port, a.ssl_mode),
+    let (way, host, port, mode) = if let Some(conf) = &net.cloud_sql {
+        let gcloud = net.tools.gcloud.clone().or_else(|| crate::cloudsql::find_gcloud(""));
+        let exe = match net.tools.proxy.clone() {
+            Some(p) => Some(p),
+            None => {
+                let g = gcloud.clone();
+                tokio::task::spawn_blocking(move || crate::cloudsql::find_proxy("", g.as_deref())).await.ok().flatten()
+            }
+        };
+        let exe = exe.ok_or_else(|| format!("{}. Download it from the connection's error card or the Cloud SQL browser, or set its path in Settings.", crate::cloudsql::PROXY_MISSING))?;
+        let p = crate::cloudsql::open(conf, &exe, gcloud, timeout).await?;
+        // The proxy already encrypts to the instance, and the server certificate would not match 127.0.0.1.
+        let port = p.port;
+        (Some(crate::db::Way::CloudSql(p)), "127.0.0.1".to_string(), port, SslMode::Disabled)
+    } else {
+        let tunnel = match &net.ssh {
+            Some((conf, secrets)) => Some(crate::ssh::open(conf, secrets, timeout, Some((a.host.clone(), a.port)), false).await?),
+            None => None,
+        };
+        match tunnel {
+            Some(t) => {
+                let port = t.port;
+                (Some(crate::db::Way::Ssh(t)), "127.0.0.1".to_string(), port, a.ssl_mode)
+            }
+            None => (None, a.host.clone(), a.port, a.ssl_mode),
+        }
+    };
+    // sqlx 0.8 checks the host name in verify-ca too, through a tunnel it would check 127.0.0.1, and it trusts the web
+    // roots beside a CA file, so these modes open TLS in pg_tls against the name typed, and sqlx speaks plain
+    // PostgreSQL to the relay.
+    let mut client_cert = client_cert;
+    let sent_cert = client_cert.is_some();
+    let relay = match super::pg_tls::needed(mode, matches!(way, Some(crate::db::Way::Ssh(_))), !a.ssl_ca.trim().is_empty()) {
+        true => Some(super::pg_tls::start((host.clone(), port), &a.host, mode, &a.ssl_ca, client_cert.take(), timeout).await?),
+        false => None,
+    };
+    let (host, port, mode) = match &relay {
+        Some(r) => ("127.0.0.1".to_string(), r.port, SslMode::Disabled),
+        None => (host, port, mode),
     };
     let default_db = if a.database.is_empty() { FALLBACK_DB.to_string() } else { a.database.clone() };
     // The environment (PGPASSWORD, PGSSLROOTCERT and so on) and ~/.pgpass would change what a saved connection
     // does depending on where Quarry was started, so neither is read.
     let mut base = PgConnectOptions::new_without_pgpass().host(&host).port(port).username(&a.user).ssl_mode(ssl_mode(mode));
+    // On macOS and Linux the proxy listens on a socket in a private folder; sqlx adds `.s.PGSQL.<port>` to it.
+    if let Some(dir) = way.as_ref().and_then(|w| if let crate::db::Way::CloudSql(p) = w { p.socket_dir() } else { None }) {
+        base = base.socket(dir);
+    }
+    if let Some(dir) = relay.as_ref().and_then(|r| r.socket_dir()) {
+        base = base.socket(dir);
+    }
     base = base.password(&a.password);
-    if !a.ssl_ca.is_empty() {
+    if !a.ssl_ca.is_empty() && relay.is_none() {
         base = base.ssl_root_cert(&a.ssl_ca);
     }
+    // Handed over as PEM in memory, so the pool's later connections never read the files again.
+    if let Some((cert, key)) = client_cert {
+        base = base.ssl_client_cert_from_pem(cert).ssl_client_key_from_pem(key);
+    }
     // Also a plain startup parameter, so a pooler that refuses `options` still shows the name.
-    base = base.application_name(sess.settings.iter().find(|(n, _)| n == "application_name").map_or("Quarry", |(_, v)| v.as_str()));
+    base = base.application_name(app_name_of(&sess));
     let first = async {
         let mut pooled = false;
         let (mut c, opts) = match sqlx::PgConnection::connect_with(&startup_with(base.clone().database(&default_db), ms, &sess)).await {
@@ -727,10 +819,22 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
         .await;
         let _ = c.close().await;
         let (f, dbs, schemas) = res?;
-        Ok::<_, String>((f, dbs, opts, locals, TestInfo { schemas, setting_errors: errors, ..Default::default() }))
+        // Behind a pooler pg_stat_ssl describes the pooler's own connection, not this client's.
+        let client_dn = if locals.is_some() { String::new() } else { super::pg_cert::subject(&f.client_dn) };
+        Ok::<_, String>((f, dbs, opts, locals, TestInfo { schemas, setting_errors: errors, client_dn, ..Default::default() }))
     };
-    let (f, dbs, opts, locals, ti) = tokio::time::timeout(timeout, first).await.map_err(|_| format!("Could not connect and set up the session within {} s", timeout.as_secs()))??;
-    let pools = PgPools::new(opts.clone(), default_db.clone(), timeout, locals, f.timeout.clone()).with_session(sess);
+    let (f, dbs, opts, locals, ti) = tokio::time::timeout(timeout, first).await.map_err(|_| format!("Could not connect and set up the session within {} s", timeout.as_secs()))?.map_err(|m| match (&net.cloud_sql, &way) {
+        // A refused login is most often the wrong Google identity. IAM always signs in with Application Default
+        // Credentials, which may be another account than the gcloud one that filled the user.
+        (Some(c), Some(crate::db::Way::CloudSql(_))) if c.iam && classify(&m) == ErrKind::SignIn => format!("Cloud SQL IAM sign-in refused (the proxy used Application Default Credentials): {m}"),
+        // sqlx saw the relay's refusal; the relay's own text reads as sqlx's would without it.
+        _ => match &relay {
+            Some(r) => r.explain(m),
+            None => m,
+        },
+    }).map_err(|m| if sent_cert && m.contains("received fatal alert") { format!("{} {m}", super::pg_cert::CERT_ALERT) } else { m })?;
+    let mut pools = PgPools::new(opts.clone(), default_db.clone(), timeout, locals, f.timeout.clone()).with_session(sess);
+    pools.relay = relay;
     let db = Db {
         pool: Pool::Pg(Arc::new(pools)),
         dialect: Dialect::Postgres,
@@ -741,7 +845,76 @@ pub(super) async fn open(a: Addr, timeout: Duration, net: &Net, adv: &super::Adv
         setup: Default::default(),
         conn: 0,
     };
-    Ok((db, dbs, tunnel, ti))
+    Ok((db, dbs, way, ti))
+}
+
+/// A timestamp as UTC text to the microsecond. `::text` follows the session's TimeZone and DateStyle, which the Advanced tab
+/// may set differently on two connections, and the own-session registry compares starts across connections.
+macro_rules! utc {
+    ($e:literal) => {
+        concat!("to_char(", $e, " AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US')")
+    };
+}
+pub(super) use utc;
+
+/// Stop compares the start as `::text` on a connection of the same pool; the registry uses the UTC forms. Start times travel
+/// as text so no timestamp type has to round trip.
+const OWN_BACKEND: &str = concat!("SELECT pg_backend_pid()::text, s.backend_start::text, ", utc!("s.backend_start"), ", ", utc!("pg_postmaster_start_time()"), " FROM pg_stat_get_activity(pg_backend_pid()) AS s");
+
+/// A backend of Quarry's own as `OWN_BACKEND` reads it.
+struct OwnBackend {
+    pid: u64,
+    /// `backend_start::text`, for Stop.
+    local_start: String,
+    start: String,
+    server: String,
+}
+
+fn own_backend_of<R: Cells>(r: &R) -> Option<OwnBackend> {
+    Some(OwnBackend { pid: num_at(r, 0)?, local_start: text_at(r, 1)?, start: text_at(r, 2)?, server: text_at(r, 3)? })
+}
+
+/// This connection's backend.
+async fn own_backend(c: &mut sqlx::PgConnection) -> Option<OwnBackend> {
+    let rows = c.fetch_all(OWN_BACKEND).await.ok()?;
+    own_backend_of(rows.first()?)
+}
+
+/// Quarry's own backends on every server it reached, by server (its postmaster start, which a tunnel or a proxy does not
+/// change the way it changes host and port), pid and backend start, each with the number of the note that recorded it.
+/// Process-wide, so the Server window of one saved connection also marks the sessions of another one, or of another login,
+/// to the same server.
+static OWN: std::sync::LazyLock<Mutex<HashMap<(String, u64, String), u64>>> = std::sync::LazyLock::new(Default::default);
+static OWN_SEQ: AtomicU64 = AtomicU64::new(0);
+/// Entries no Activity read prunes (a server whose window is never opened) are dropped past this many newer notes.
+const MAX_OWN: u64 = 4096;
+
+pub(super) fn note_own(server: &str, pid: u64, start: &str) {
+    if server.is_empty() || start.is_empty() {
+        return;
+    }
+    let mut m = OWN.lock().unwrap();
+    let seq = OWN_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+    m.insert((server.to_string(), pid, start.to_string()), seq);
+    if m.len() as u64 > MAX_OWN {
+        m.retain(|_, s| *s + MAX_OWN > seq);
+    }
+}
+
+/// Whether backend `pid` of `server` that started at `start` (both as `utc!` prints them) is one of Quarry's own.
+pub(super) fn is_own(server: &str, pid: u64, start: &str) -> bool {
+    !start.is_empty() && OWN.lock().unwrap().contains_key(&(server.to_string(), pid, start.to_string()))
+}
+
+/// The number of the latest note. A read of pg_stat_activity takes it before it starts, so `keep_own` never drops a backend
+/// noted after the snapshot was taken, which the snapshot cannot list yet.
+pub(super) fn own_mark() -> u64 {
+    OWN_SEQ.load(Ordering::SeqCst)
+}
+
+/// Forgets the backends of `server` noted up to `mark` that `gone` says have closed.
+pub(super) fn keep_own(server: &str, mark: u64, gone: impl Fn(u64, &str) -> bool) {
+    OWN.lock().unwrap().retain(|(s, pid, start), seq| s != server || *seq > mark || !gone(*pid, start));
 }
 
 /// Readies a connection of its own for a script: the backend's pid for Stop, and write access when unlocked. Behind a
@@ -752,14 +925,13 @@ pub(super) async fn prepare(c: &mut sqlx::PgConnection, read_only: bool, id: &At
     if db.pooler() {
         return Ok(());
     }
-    // The start time travels as text so no timestamp type has to round trip, and is compared as text on Stop.
-    let rows = c.fetch_all("SELECT pg_backend_pid()::text, s.backend_start::text FROM pg_stat_get_activity(pg_backend_pid()) AS s").await?;
-    if let Some(r) = rows.first() {
-        let pid = num_at(r, 0).unwrap_or(0);
-        if let (Some(start), Pool::Pg(p)) = (text_at(r, 1), &db.pool) {
-            p.remember_start(pid, start);
+    let rows = c.fetch_all(OWN_BACKEND).await?;
+    if let Some(b) = rows.first().and_then(own_backend_of) {
+        note_own(&b.server, b.pid, &b.start);
+        if let Pool::Pg(p) = &db.pool {
+            p.remember_start(b.pid, b.local_start);
         }
-        id.store(pid, Ordering::SeqCst);
+        id.store(b.pid, Ordering::SeqCst);
     }
     if !read_only {
         c.execute(Dialect::Postgres.session_read_only(false)).await?;

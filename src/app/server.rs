@@ -31,7 +31,8 @@ pub(super) struct ServerWin {
     auto_ops: bool,
     /// The role cannot list other users' operations, so only its own are asked for.
     own_only: bool,
-    confirm_kill: Option<String>,
+    /// The operation whose Kill waits for its second click, and when it was armed (`arm_time`).
+    confirm_kill: Option<(String, f64)>,
 }
 
 impl ServerWin {
@@ -306,16 +307,23 @@ impl App {
                     if !writable {
                         return;
                     }
-                    if s.confirm_kill.as_deref() == Some(key.as_str()) {
-                        if danger(ui, "Kill it").clicked() {
-                            *kill = Some(id.clone());
-                            s.confirm_kill = None;
+                    match s.confirm_kill.clone().filter(|(k, _)| *k == key) {
+                        Some((_, at)) => {
+                            // "Kill it" is drawn where "Kill…" was, so a double click must not reach it.
+                            let r = danger(ui, "Kill it");
+                            if confirmed(ui, &r, at) {
+                                *kill = Some(id.clone());
+                                s.confirm_kill = None;
+                            }
+                            if ui.button("Keep").clicked() {
+                                s.confirm_kill = None;
+                            }
                         }
-                        if ui.button("Keep").clicked() {
-                            s.confirm_kill = None;
+                        None => {
+                            if ui.button("Kill…").clicked() {
+                                s.confirm_kill = Some((key, arm_time(ui)));
+                            }
                         }
-                    } else if ui.button("Kill…").clicked() {
-                        s.confirm_kill = Some(key);
                     }
                 });
                 ui.end_row();

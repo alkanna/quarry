@@ -102,6 +102,10 @@ impl App {
             }
         }
 
+        // Settings looks for gcloud each time it opens, so it forgets the answer once closed.
+        if self.cloud.gcloud_asked && !matches!(self.modal, Some(Modal::Settings)) {
+            self.gcloud_forget();
+        }
         if matches!(self.modal, Some(Modal::Palette { .. })) {
             return self.palette(ctx);
         }
@@ -211,6 +215,9 @@ impl App {
                 Modal::PgNewTable(f) => self.pg_new_table_dialog(ui, f, &mut keep),
                 Modal::SqlNewUser(f) => self.sql_new_user_dialog(ui, f, &mut keep),
                 Modal::SqlPassword(f) => self.sql_password_dialog(ui, f, &mut keep),
+                Modal::PgNewRole(f) => self.pg_new_role_dialog(ui, f, &mut keep),
+                Modal::PgPassword(f) => self.pg_password_dialog(ui, f, &mut keep),
+                Modal::PgDropRole(f) => self.pg_drop_role_dialog(ui, f, &mut keep),
                 Modal::FkEdit(f) => self.fk_dialog(ui, f, &mut keep),
                 Modal::Typed { title, expect, typed, action } => {
                     ui.label(semibold(RichText::new(title.as_str()).color(BRIGHT())));
@@ -629,6 +636,9 @@ impl App {
         });
         if keep && !r.should_close() && self.modal.is_none() {
             self.modal = Some(m);
+        } else if matches!(m, Modal::PgNewRole(_) | Modal::PgPassword(_)) {
+            // Esc closes without the dialog's own buttons, so the password fields are forgotten here; dropping the form wipes them.
+            super::pg_roles::forget_pg_secrets(ctx, &m);
         } else if matches!(m, Modal::Conn(_)) {
             // A Test still running when the form closes must not show in the next form.
             self.conn_test = None;

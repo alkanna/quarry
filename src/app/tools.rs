@@ -10,17 +10,11 @@ pub(super) fn find_bun(setting: &str) -> Option<PathBuf> {
 
 /// A program from its Settings path, else from PATH and the usual install folders.
 pub(super) fn find_exe(name: &str, setting: &str) -> Option<PathBuf> {
-    if !setting.trim().is_empty() {
-        return Some(PathBuf::from(setting.trim()));
-    }
-    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
-    dirs.extend(["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from));
+    let mut extra = crate::cloudsql::brew_dirs();
     if let Some(h) = dirs::home_dir() {
-        dirs.push(h.join(".bun").join("bin"));
+        extra.push(h.join(".bun").join("bin"));
     }
-    dirs.push(tools_dir());
-    let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
-    dirs.into_iter().map(|d| d.join(&file)).find(|p| p.is_file())
+    crate::cloudsql::find_program(&format!("{name}{}", std::env::consts::EXE_SUFFIX), setting, &extra)
 }
 
 impl App {

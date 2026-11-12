@@ -25,6 +25,7 @@ pub(super) enum Cmd {
     EditConn,
     Disconnect,
     NewConn,
+    CloudSql,
     Settings,
     Log,
     Reopen,
@@ -177,12 +178,8 @@ impl App {
                 if lockable && c.writable {
                     add(&g, Row::cmd("Lock writes", Glyph::Lock, "", Cmd::LockWrites));
                 }
-                if c.meta.engine.supports(db::sql::Feature::ServerStatus) {
-                    add(&g, Row::cmd("Server status", Glyph::Prompt, "", Cmd::Server));
-                }
-                if c.meta.engine.supports(db::sql::Feature::Users) {
-                    add(&g, Row::cmd("Users", Glyph::Prompt, "", Cmd::Users));
-                }
+                add(&g, Row::cmd("Server status", Glyph::Prompt, "", Cmd::Server));
+                add(&g, Row::cmd(if c.meta.engine == db::sql::Engine::Postgres { "Roles" } else { "Users" }, Glyph::Prompt, "", Cmd::Users));
                 add(&g, Row::cmd("Disconnect", Glyph::Prompt, "", Cmd::Disconnect));
             } else if c.status != Status::Connecting {
                 add(&g, Row::cmd("Connect", Glyph::Reload, keys(true, false, "R"), Cmd::Connect));
@@ -194,6 +191,7 @@ impl App {
         }
         let g = "Quarry";
         add(g, Row::cmd("New connection\u{2026}", Glyph::Prompt, keys(false, false, "N"), Cmd::NewConn));
+        add(g, Row::cmd("Add from Cloud SQL\u{2026}", Glyph::Prompt, "", Cmd::CloudSql));
         if !self.closed.is_empty() {
             add(g, Row::cmd("Reopen closed tab", Glyph::Tab, keys(true, false, "T"), Cmd::Reopen));
         }
@@ -297,7 +295,6 @@ impl App {
                 }
             }
             Cmd::Users => match active {
-                Some(id) if !self.supports(id, db::sql::Feature::Users) => self.warn(self.lacks(id, db::sql::Feature::Users).unwrap_or_default()),
                 Some(id) if self.conn(id).is_some_and(|c| c.meta.engine.is_sql()) => self.open_sql_users(id),
                 Some(id) => self.side_act(id, SideAct::Users),
                 None => {}
@@ -313,6 +310,7 @@ impl App {
                 }
             }
             Cmd::NewConn => self.new_conn_modal(),
+            Cmd::CloudSql => self.open_cloud_browser(false),
             Cmd::Settings => self.modal = Some(Modal::Settings),
             Cmd::Log => self.log.open = !self.log.open,
             Cmd::Reopen => self.reopen_tab(),

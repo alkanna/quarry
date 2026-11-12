@@ -6,8 +6,9 @@ impl App {
     pub(super) fn poll(&mut self, ctx: &egui::Context) {
         while let Ok(m) = self.rx.try_recv() {
             match m {
-                Msg::Connected { conn, res } => {
-                    let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) else { continue };
+                Msg::Connected { conn, attempt, res } => {
+                    // A connect the user stopped (Disconnect, removal) or replaced is dropped, and its tunnel with it.
+                    let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn && c.waits_for(attempt)) else { continue };
                     match res {
                         Ok((client, dbs, tunnel)) => {
                             // Trust the SSH host key the first time; later a different key is refused.
@@ -18,7 +19,7 @@ impl App {
                                     trusted = Some(t.fingerprint.clone());
                                 }
                             }
-                            c.tunnel = tunnel;
+                            c.tunnel = tunnel.map(db::Way::Ssh);
                             // Load every database's collections up front so the list can show counts.
                             for d in &dbs {
                                 self.worker.collections(conn, client.clone(), d.clone());
@@ -53,12 +54,13 @@ impl App {
                         }
                     }
                 }
-                Msg::SqlConnected { conn, res } => {
-                    let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) else { continue };
+                Msg::SqlConnected { conn, attempt, res } => {
+                    // Dropping a stopped or replaced connect's answer also stops its Cloud SQL proxy or SSH tunnel.
+                    let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn && c.waits_for(attempt)) else { continue };
                     match res {
                         Ok((sql, dbs, tunnel)) => {
                             let mut trusted = None;
-                            if let (Some(t), Some(sc)) = (&tunnel, c.meta.ssh.as_mut()) {
+                            if let (Some(db::Way::Ssh(t)), Some(sc)) = (&tunnel, c.meta.ssh.as_mut()) {
                                 if sc.known_host.is_none() && !t.fingerprint.is_empty() {
                                     sc.known_host = Some(t.fingerprint.clone());
                                     trusted = Some(t.fingerprint.clone());
@@ -129,6 +131,12 @@ impl App {
                             continue;
                         }
                     }
+                    // So does the New table dialog, for the parent of each of its foreign keys.
+                    if let Some(Modal::PgNewTable(f)) = self.modal.as_mut() {
+                        if f.parent_loaded(req, &res) {
+                            continue;
+                        }
+                    }
                     if let Some(s) = self.tabs.iter_mut().find(|t| t.idx_req == req).and_then(|t| t.sql.as_mut()) {
                         s.st.finish(res);
                     }
@@ -139,6 +147,7 @@ impl App {
                 Msg::SqlExport { req, res } => self.export_done(ctx, req, res),
                 Msg::SqlJob { req, res } => self.sql_job_done(req, res),
                 Msg::SqlServer { req, ans } => self.sql_server_done(req, ans),
+                Msg::PgServer { req, ans } => self.pg_server_done(req, ans),
                 Msg::SqlLists { conn, schema, res } => self.sql_lists_done(conn, schema, res),
                 Msg::SqlTableInfo { req, res } => self.import_info(req, res),
                 Msg::SqlSchema { conn, database, schema, res } => {
@@ -152,8 +161,9 @@ impl App {
                 Msg::SqlUsers { conn, req, res } => self.sql_users_loaded(conn, req, res),
                 Msg::SqlUserGrants { conn, req, res } => self.sql_user_grants_loaded(conn, req, res),
                 Msg::SqlUserDone { conn, account, op, res, undo } => self.sql_user_done(conn, account, op, res, undo),
+                Msg::PgRoles { conn, req, ans } => self.pg_roles_answer(conn, req, ans),
                 Msg::SqlDropInfo { conn, database, schema, table, res } => self.sql_drop_info_done(conn, database, schema, table, res),
-                Msg::PgTemplates { conn, res } => self.pg_templates_done(conn, res),
+                Msg::PgDbChoices { conn, res } => self.pg_choices_done(conn, res),
                 Msg::SqlDdl { conn, database, schema, table, what, res, undo, dbs, sql_mode } => self.sql_ddl_done(conn, database, schema, table, what, res, undo, dbs, sql_mode),
                 Msg::SqlValues { conn, database, schema, table, column, prefix, res } => self.sql_values_done(conn, database, schema, table, column, prefix, res),
                 Msg::SqlSchemas { conn, database, res } => self.pg_schemas_done(conn, database, res),
@@ -596,6 +606,7 @@ impl App {
                         Err(_) => {}
                     }
                 }
+                Msg::CloudSql { req, found } => self.cloud_found(req, found),
                 Msg::ToolDone(res) => {
                     if let Some(t) = &mut self.tool {
                         t.cancel = None;

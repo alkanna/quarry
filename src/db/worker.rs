@@ -131,10 +131,11 @@ impl Worker {
         self.spawn(sql_scope(conn, schema, f));
     }
 
-    pub fn connect(&self, conn: u64, uri: String, timeout: Duration, net: Net) {
+    /// `attempt` comes back with the answer, so the app can drop one for a connect it no longer waits for.
+    pub fn connect(&self, conn: u64, attempt: u64, uri: String, timeout: Duration, net: Net) {
         self.spawn(async move {
             let res = open_client(conn, &uri, timeout, &net).await;
-            Msg::Connected { conn, res }
+            Msg::Connected { conn, attempt, res }
         });
     }
 
@@ -1052,7 +1053,7 @@ impl Worker {
 pub(crate) async fn open_client(conn: u64, uri: &str, timeout: Duration, net: &Net) -> Res<(Client, Vec<String>, Option<crate::ssh::Tunnel>)> {
     use mongodb::options::Socks5Proxy;
     let tunnel = match &net.ssh {
-        Some((conf, secrets)) => Some(crate::ssh::open(conf, secrets, timeout, None).await?),
+        Some((conf, secrets)) => Some(crate::ssh::open(conf, secrets, timeout, None, false).await?),
         None => None,
     };
     let mut o = ClientOptions::parse(uri).await.map_err(e)?;
@@ -1191,7 +1192,7 @@ mod tests {
                 let _ = s.write_all(&[5, 5, 0, 1, 0, 0, 0, 0, 0, 0]).await;
                 (String::from_utf8(name).unwrap(), u16::from_be_bytes(p))
             });
-            let net = Net { ssh: None, proxy: Some(Proxy { host: "127.0.0.1".into(), port, user: String::new(), password: None }) };
+            let net = Net { proxy: Some(Proxy { host: "127.0.0.1".into(), port, user: String::new(), password: None }), ..Default::default() };
             let r = open_client(0, "mongodb://db.internal.example:27018/", Duration::from_millis(1500), &net).await;
             assert!(r.is_err());
             assert_eq!(seen.await.unwrap(), ("db.internal.example".to_string(), 27018));

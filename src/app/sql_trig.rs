@@ -128,10 +128,10 @@ impl App {
         self.t().and_then(|t| self.conn(t.sel.conn)).is_some_and(|c| c.writable)
     }
 
-    /// Whether the triggers of the open table can be edited at all: the engine can, and the table is not a view that the
+    /// Whether the triggers of the open table can be edited at all: the table is not a view that the
     /// engine cannot put a trigger on. A locked connection still edits; Save and Delete ask to unlock.
     pub(super) fn trig_editable(&self) -> bool {
-        self.trig_block().is_none() && (!self.sel_is_view() || self.t().is_some_and(|t| self.is_pg(t.sel.conn)))
+        !self.sel_is_view() || self.t().is_some_and(|t| self.is_pg(t.sel.conn))
     }
 
     /// Asks before dropping the selected trigger.

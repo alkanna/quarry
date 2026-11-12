@@ -197,9 +197,9 @@ pub enum ExplainOf {
 
 pub enum Msg {
     /// Connected (or not); a tunnel, if any, must be kept alive as long as the client is used.
-    Connected { conn: u64, res: Res<(Client, Vec<String>, Option<crate::ssh::Tunnel>)> },
+    Connected { conn: u64, attempt: u64, res: Res<(Client, Vec<String>, Option<crate::ssh::Tunnel>)> },
     /// A SQL connection opened (or not): the databases, and the SSH tunnel to keep alive.
-    SqlConnected { conn: u64, res: Res<(sql::Db, Vec<String>, Option<crate::ssh::Tunnel>)> },
+    SqlConnected { conn: u64, attempt: u64, res: Res<(sql::Db, Vec<String>, Option<Way>)> },
     /// The columns of a SQL table page and its primary key columns, sent just before the page's `Docs`.
     /// `estimated` says the count in that `Docs` is the information_schema estimate, not exact.
     SqlCols { req: u64, cols: Vec<sql::Col>, pk: Vec<String>, estimated: bool, matched: Option<u64> },
@@ -213,6 +213,8 @@ pub enum Msg {
     SqlJob { req: u64, res: Res<sql::import::JobDone> },
     /// An answer of the SQL Server window, matched to its request by `req`.
     SqlServer { req: u64, ans: sql::server::Answer },
+    /// An answer of the PostgreSQL Server window, matched to its request by `req`.
+    PgServer { req: u64, ans: sql::pg_server::Answer },
     /// The databases of a connection and the tables of `schema` (None when it is gone), read after a script ran.
     SqlLists { conn: u64, schema: String, res: Res<(Vec<String>, Option<Vec<String>>)> },
     /// The columns and key of a table, for the Import dialog that asked with `req`.
@@ -231,8 +233,8 @@ pub enum Msg {
     /// What a drop confirmation says will be lost; `table` is empty for a database.
     /// `database` is the PostgreSQL database the schema or table is in, empty on MySQL and for a database.
     SqlDropInfo { conn: u64, database: String, schema: String, table: String, res: Res<sql::create::DropInfo> },
-    /// The template databases of a PostgreSQL server, for the New database dialog.
-    PgTemplates { conn: u64, res: Res<Vec<String>> },
+    /// The templates, encodings, locales and owners a new PostgreSQL database can take, for the New database dialog.
+    PgDbChoices { conn: u64, res: Res<sql::create_pg::DbChoices> },
     /// A create or drop finished. `dbs` is the new database list after a change to it, and `undo` the entry
     /// for a create (or the one a refused undo hands back). `sql_mode` is the session's mode when it no longer
     /// matched the one the app had, so the previews follow it.
@@ -244,6 +246,8 @@ pub enum Msg {
     /// A privilege edit, create, drop or undo of an account finished. `undo` holds the entries to record, or the one a
     /// refused undo hands back.
     SqlUserDone { conn: u64, account: sql::users::Account, op: sql::users::Op, res: Res<String>, undo: Vec<UndoAction> },
+    /// An answer of the PostgreSQL Roles and privileges window, matched by `req` (0 for a write or an undo).
+    PgRoles { conn: u64, req: u64, ans: sql::roles_pg::Answer },
     /// How many rows of a table point at nothing for a foreign key being added. Answers the open dialog by `req`.
     SqlOrphans { req: u64, res: Res<u64>, sample: Vec<String> },
     /// Whether the server takes a foreign key only on a whole primary or unique key. Answers the open dialog by `req`.
@@ -323,6 +327,8 @@ pub enum Msg {
     Update(Res<Option<String>>),
     /// The MongoDB Database Tools were installed or updated to this version; None when already current.
     ToolsInstalled(Res<Option<String>>),
+    /// An answer from gcloud for the Cloud SQL browser's load `req`; a downloaded or installed proxy comes with req 0.
+    CloudSql { req: u64, found: crate::cloudsql::Found },
 }
 
 /// How to reach the server: directly, through an SSH tunnel, or through a SOCKS5 proxy.
@@ -330,6 +336,18 @@ pub enum Msg {
 pub struct Net {
     pub ssh: Option<(crate::ssh::SshConf, crate::ssh::SshSecrets)>,
     pub proxy: Option<Proxy>,
+    /// A PostgreSQL connection through Google's Cloud SQL proxy, which Quarry starts. Exclusive with `ssh`.
+    pub cloud_sql: Option<crate::cloudsql::CloudSql>,
+    /// Where the proxy and gcloud are, when the app already knows; empty means the worker looks.
+    pub tools: crate::cloudsql::Tools,
+    /// PostgreSQL: the passphrase of an encrypted client key, from the Keychain.
+    pub key_passphrase: Option<String>,
+}
+
+/// What a connection keeps alive while it is open. Dropping it closes the tunnel or stops the proxy.
+pub enum Way {
+    Ssh(crate::ssh::Tunnel),
+    CloudSql(crate::cloudsql::CloudProxy),
 }
 
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Debug)]

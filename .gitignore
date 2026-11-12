@@ -45,3 +45,6 @@ __pycache__/
 
 # Per-machine make settings (REMOTE, HOST, SET)
 local.mk
+
+# Plans and progress notes for the SQL work, kept local
+/docs/sql/*.md

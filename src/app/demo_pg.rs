@@ -1,6 +1,12 @@
 //! The PostgreSQL demo for QUARRY_TEST_PG=<view>: an offline "analytics-prod" connection with its orders table open, the way
 //! QUARRY_TEST_SQL builds the MySQL one. Nothing here reads the keychain or the network. The views have the names of the MySQL
-//! demo where the feature exists on PostgreSQL, plus `schemas` (the switcher open), `connform`, `paste` and `tls`.
+//! demo where the feature exists on PostgreSQL, plus `schemas` (the switcher open), `connform`, `paste` and `tls`, and for
+//! Cloud SQL `cloudsql` (the browser over recorded acme-* instances), `cloudsql-form` (the form after Use) and
+//! `cloudsql-missing` (the browser when no proxy is found), `cloudsql-adc` (Use on an IAM instance without Application Default
+//! Credentials). gcloud never runs in the demo. The Server window opens on `server` (Overview), `server-settings`,
+//! `server-activity`, `server-locks`, `server-confirm` (Terminate armed), `server-locked` (a read-only connection) and
+//! `server-limited` (a role without pg_read_all_stats). Roles: `roles` (the Roles and privileges window on its object matrix,
+//! a cell editor open and one grant staged) and `roles-role` (its Roles tab on app_writer).
 
 use super::*;
 use db::sql::schema::{Schema, SchemaCol, SchemaTable};
@@ -172,6 +178,14 @@ impl App {
             "edit" => self.sql_demo_stage(),
             "select" => self.tabs[0].checked = [1, 2, 4, 5].into(),
             "connform" | "paste" | "tls" | "advanced" => self.pg_form_demo(which),
+            "cloudsql" | "cloudsql-form" | "cloudsql-missing" | "cloudsql-adc" => self.pg_cloud_demo(which),
+            "server" | "server-settings" | "server-activity" | "server-locks" | "server-confirm" | "server-locked" | "server-limited" => {
+                if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == CONN) {
+                    c.writable = which != "server-locked";
+                }
+                self.pg_server = Some(PgServerWin::demo(CONN, which));
+            }
+            "roles" | "roles-role" => self.pg_roles_demo(which, CONN),
             _ => {}
         }
     }
@@ -291,10 +305,14 @@ impl App {
             name: "analytics-prod".into(),
             tag: "Production".into(),
             engine: db::sql::Engine::Postgres,
-            addr: db::sql::Addr { scheme: "postgres".into(), host: "analytics-prod.internal".into(), port: 5432, user: "analyst".into(), password: "hunter2hunter".into(), database: "analytics".into(), ssl_mode: if tls { db::sql::SslMode::VerifyIdentity } else { Default::default() }, ssl_ca: if tls { "~/.postgresql/root.crt".into() } else { String::new() } },
+            addr: db::sql::Addr { scheme: "postgres".into(), host: "analytics-prod.internal".into(), port: 5432, user: "analyst".into(), password: "hunter2hunter".into(), database: "analytics".into(), ssl_mode: if tls { db::sql::SslMode::VerifyIdentity } else { Default::default() }, ssl_ca: if tls { "~/.postgresql/root.crt".into() } else { String::new() }, ..Default::default() },
             tab: if tls { ConnTab::Tls } else if advanced { ConnTab::Advanced } else { ConnTab::Standard },
             ..Default::default()
         })));
+        // The client certificate design: both files and a passphrase for an encrypted key.
+        if let (true, Some(Modal::Conn(form))) = (tls, self.modal.as_mut()) {
+            (form.addr.ssl_cert, form.addr.ssl_key, form.pg_key_pass) = ("~/.postgresql/analyst.crt".into(), "~/.postgresql/analyst.key".into(), "correct horse".into());
+        }
         // The design's example: a path with a schema the last Test did not find, a lock timeout, a bad size and a picker open on "cost".
         if let (true, Some(Modal::Conn(form))) = (advanced, self.modal.as_mut()) {
             form.set_advanced(&db::sql::Advanced {
@@ -307,6 +325,48 @@ impl App {
             form.pg_schemas = vec!["public".into(), "reporting".into(), "staging".into()];
             form.pg_tested = true;
             form.pg_picker = Some("cost".into());
+        }
+    }
+}
+
+/// gcloud's answers for the Cloud SQL demo, in the shape `gcloud sql instances list --format=json` prints, so they go through
+/// the same parser. acme-sandbox has the Admin API off and acme-analytics has no PostgreSQL instance.
+const CLOUD_INSTANCES: [(&str, &str); 3] = [
+    (
+        "acme-prod",
+        r#"[{"connectionName":"acme-prod:europe-west1:orders-db","name":"orders-db","region":"europe-west1","databaseVersion":"POSTGRES_17","state":"RUNNABLE","ipAddresses":[{"type":"PRIMARY"},{"type":"PRIVATE"}],"settings":{"databaseFlags":[{"name":"cloudsql.iam_authentication","value":"on"}]}},
+            {"connectionName":"acme-prod:europe-west1:reporting","name":"reporting","region":"europe-west1","databaseVersion":"POSTGRES_16","state":"RUNNABLE","ipAddresses":[{"type":"PRIVATE"}],"settings":{"databaseFlags":[{"name":"cloudsql.iam_authentication","value":"on"}],"ipConfiguration":{"pscConfig":{"pscEnabled":true}}}},
+            {"connectionName":"acme-prod:us-central1:billing-legacy","name":"billing-legacy","region":"us-central1","databaseVersion":"POSTGRES_13","state":"RUNNABLE","ipAddresses":[{"type":"PRIMARY"}],"settings":{"activationPolicy":"NEVER"}},
+            {"connectionName":"acme-prod:europe-west1:queue","name":"queue","region":"europe-west1","databaseVersion":"MYSQL_8_0","state":"RUNNABLE"}]"#,
+    ),
+    (
+        "acme-staging",
+        r#"[{"connectionName":"acme-staging:europe-west1:orders-db","name":"orders-db","region":"europe-west1","databaseVersion":"POSTGRES_17","state":"RUNNABLE","ipAddresses":[{"type":"PRIMARY"}],"settings":{"databaseFlags":[{"name":"cloudsql.iam_authentication","value":"on"}]}},
+            {"connectionName":"acme-staging:us-east1:scratch","name":"scratch","region":"us-east1","databaseVersion":"POSTGRES_15","state":"RUNNABLE","ipAddresses":[{"type":"PRIMARY"}]}]"#,
+    ),
+    ("acme-analytics", "[]"),
+];
+
+impl App {
+    /// The Cloud SQL demo: the browser over recorded instances, the form after Use, the browser with no proxy found, or with
+    /// no Application Default Credentials for an IAM instance.
+    fn pg_cloud_demo(&mut self, which: &str) {
+        use crate::cloudsql::{Project, Start};
+        let projects = ["acme-prod", "acme-staging", "acme-analytics", "acme-sandbox"].map(|id| Project { id: id.into(), name: String::new() }).to_vec();
+        let mut instances: HashMap<String, Result<Vec<crate::cloudsql::Instance>, String>> = CLOUD_INSTANCES.iter().map(|(p, json)| (p.to_string(), crate::cloudsql::parse_instances(json))).collect();
+        instances.insert("acme-sandbox".into(), Err("Cloud SQL: gcloud failed: ERROR: (gcloud.sql.instances.list) HTTPError 403: Cloud SQL Admin API has not been used in project acme-sandbox before or it is disabled.".into()));
+        let proxy = (which != "cloudsql-missing").then(|| PathBuf::from("/opt/homebrew/bin/cloud-sql-proxy"));
+        // A load id that is not 0, so nothing asks gcloud.
+        self.cloud = super::cloud_sql::CloudCache { req: 1, start: Some(Start { gcloud: Some("/opt/homebrew/bin/gcloud".into()), proxy, components: true, account: Some("jane@example.com".into()), projects: Ok(projects), adc: which != "cloudsql-adc" }), instances, ..Default::default() };
+        if which == "cloudsql-form" {
+            let inst = self.cloud.instance("acme-prod:europe-west1:orders-db").cloned();
+            let mut f = ConnForm { tag: "Production".into(), ..Default::default() };
+            if let Some(i) = &inst {
+                super::cloud_sql::use_instance(&mut f, i, self.cloud.account());
+            }
+            self.modal = Some(Modal::Conn(Box::new(f)));
+        } else {
+            self.cloud_browser = Some(super::cloud_sql::CloudBrowser { stopped: true, sel: Some("acme-prod:europe-west1:orders-db".into()), adc_for: (which == "cloudsql-adc").then(|| "acme-prod:europe-west1:orders-db".into()), ..Default::default() });
         }
     }
 }

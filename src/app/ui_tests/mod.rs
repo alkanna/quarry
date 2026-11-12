@@ -6,11 +6,16 @@
 //! cell, "Select row {n}" for its checkbox, the column name for a header, the text of a sidebar row.
 
 mod conn_advanced;
+mod conn_cert;
+mod conn_cloudsql;
 mod mongo_edit;
+mod pg_server;
+mod pg_roles;
 mod sidebar;
 mod sql_create;
 mod sql_dump;
 mod sql_edit;
+mod sql_format;
 mod sql_import;
 mod sql_relations;
 mod sql_structure;
