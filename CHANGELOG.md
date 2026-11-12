@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.37.0](https://github.com/alkanna/quarry/compare/v0.36.0...v0.37.0) (2026-11-12)
+
+
+### Features
+
+* edit long values in a dialog or a side panel, and make unquoted NULL mean null ([#183](https://github.com/alkanna/quarry/issues/183)) ([7bf0b6c](https://github.com/alkanna/quarry/commit/7bf0b6cf24f03e4b701957f18cf0b7836bf7e054))
+
+
+### Bug Fixes
+
+* no unused menu warning off macOS ([385a9aa](https://github.com/alkanna/quarry/commit/385a9aab0c8b8584f8cecf8fb23b34ea29a12895))
+
 ## [0.36.0](https://github.com/alkanna/quarry/compare/v0.35.0...v0.36.0) (2026-11-12)
 
 
