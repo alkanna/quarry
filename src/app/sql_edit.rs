@@ -16,6 +16,10 @@ pub(super) struct CellEdit {
     pub(super) err: Option<String>,
     pub(super) focus: bool,
     pub(super) done: Option<bool>,
+    /// Shown in the large editor instead of over the cell.
+    pub(super) big: bool,
+    /// Edited since it opened, so the side panel must not drop it for another value.
+    pub(super) dirty: bool,
 }
 
 impl CellEdit {
@@ -92,10 +96,12 @@ fn enum_values(ty: &str) -> Vec<String> {
     out
 }
 
-/// Text for the editor: what the cell shows, as typed back it parses to the same value.
-fn edit_text(b: &Bson) -> String {
+/// Text for the editor of a `kind` column: what the cell shows, as typed back it parses to the same value.
+fn edit_text(b: &Bson, kind: Kind) -> String {
     match b {
         Bson::Null => "NULL".into(),
+        Bson::String(s) if value::text_like(kind) && value::null_like(s) => format!("'{s}'"),
+        Bson::String(s) if kind == Kind::Json && s.trim() == "null" => "'null'".into(),
         Bson::String(s) => s.clone(),
         Bson::Int32(n) => n.to_string(),
         Bson::Int64(n) => n.to_string(),
@@ -209,13 +215,18 @@ impl App {
         }
     }
 
+    /// A column of the open SQL table, by its key in the row documents.
+    pub(super) fn sql_col(&self, name: &str) -> Option<&Col> {
+        self.t()?.sql.as_ref()?.cols.iter().find(|c| c.name == name)
+    }
+
     /// Why one column cannot be edited in place, if so.
     pub(super) fn sql_col_block(&self, col: &str) -> Option<&'static str> {
         let s = self.t()?.sql.as_ref()?;
         if s.pk.iter().any(|p| p == col) {
             return Some("Primary key columns are not edited here: undo could no longer find the row.");
         }
-        let c = s.cols.iter().find(|c| c.name == col)?;
+        let c = self.sql_col(col)?;
         if c.generated {
             return Some("Generated columns are computed by the server and cannot be written.");
         }
@@ -248,6 +259,9 @@ impl App {
         if !self.sel_writable() {
             return self.ask_unlock_then(move |a| a.sql_open_cell(i, col));
         }
+        if self.panel_dirty() {
+            return self.warn("Apply or cancel the value in the side panel first.");
+        }
         let Some(t) = self.t() else { return };
         let rows = Rows::Raw(&t.docs);
         // A row without a key would match every keyless row in the grid and could never be written back.
@@ -255,7 +269,11 @@ impl App {
             return self.warn("This row has no key, so it cannot be edited here.");
         }
         let v = self.shown_row(rows, i, false).and_then(|d| d.get(&col).cloned()).or_else(|| rows.value(i, &col).map(|v| v.bson().into_owned())).unwrap_or(Bson::Null);
-        self.sql_cell = Some(CellEdit { id: rows.id(i), col, text: edit_text(&v), err: None, focus: true, done: None });
+        let kind = self.sql_col(&col).map_or(Kind::Text, |c| c.kind);
+        let text = edit_text(&v, kind);
+        // With the panel open, a double-click loads the new cell into it, so the panel follows the selection.
+        let big = value_edit::is_long(&text) || self.value_in_panel();
+        self.sql_cell = Some(CellEdit { id: rows.id(i), col, text, dirty: false, err: None, focus: true, done: None, big });
     }
 
     /// Draws the editor over a cell and records Enter, Esc and a click elsewhere.
@@ -264,11 +282,21 @@ impl App {
         let id = egui::Id::unique("sql-cell-editor");
         let rect = cell.shrink(1.0);
         ui.painter().rect(rect, 0, BG(), Stroke::new(1.5, if e.err.is_some() { ALERT() } else { PRIMARY() }), egui::StrokeKind::Inside);
+        // The large editor has the text, so the cell only keeps its outline.
+        if e.big {
+            self.sql_cell = Some(e);
+            return;
+        }
+        let pad = (rect.height() - EXPAND_BTN) / 2.0;
+        let btn = egui::Rect::from_min_size(egui::pos2(rect.right() - pad - EXPAND_BTN, rect.top() + pad), egui::vec2(EXPAND_BTN, EXPAND_BTN));
+        // Taken before the text box sees it, where Enter alone would commit.
+        let expand = expand_key(ui, id);
         let out = ui
             .scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
-                egui::TextEdit::singleline(&mut e.text).id(id).font(FontId::monospace(TXT_SMALL)).frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(6, 0))).desired_width(rect.width()).show(ui)
+                egui::TextEdit::singleline(&mut e.text).id(id).font(FontId::monospace(TXT_SMALL)).frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(6, 0))).desired_width(btn.left() - rect.left() - 16.0).show(ui)
             })
             .inner;
+        let b = ui.put(btn, expand_button());
         if e.focus {
             out.response.request_focus();
             let mut st = out.state.clone();
@@ -276,9 +304,13 @@ impl App {
             st.store(ui.ctx(), id);
             e.focus = false;
         }
-        if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+        e.dirty |= out.response.changed();
+        if expand || b.clicked() {
+            (e.big, e.focus) = (true, true);
+        } else if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
             e.done = Some(false);
-        } else if out.response.lost_focus() {
+        } else if out.response.lost_focus() && !b.is_pointer_button_down_on() {
+            // Pressing the button takes focus from the text first; that is not a commit.
             e.done = Some(true);
         }
         if let Some(m) = &e.err {
@@ -296,9 +328,9 @@ impl App {
             None => self.sql_cell = Some(e),
             Some(false) => {}
             Some(true) => {
-                let kind = self.t().and_then(|t| t.sql.as_ref()).and_then(|s| s.cols.iter().find(|c| c.name == e.col)).map_or(Kind::Text, |c| c.kind);
+                let col = self.sql_col(&e.col).cloned().unwrap_or_else(|| Col::plain(&e.col, "", Kind::Text, true));
                 let row = self.t().and_then(|t| (0..t.docs.len()).find(|&j| Rows::Raw(&t.docs).id(j) == e.id));
-                match value::parse_edit(self.sql_dialect(), kind, &e.text) {
+                match value::parse_col(self.sql_dialect(), &col, &e.text) {
                     Ok(_) if row.is_none() => self.warn("That row is no longer in the table, so the edit was cancelled."),
                     Ok(v) => self.sql_set_cell(row.unwrap_or_default(), &e.col, v),
                     Err(m) => {
@@ -514,7 +546,7 @@ impl App {
                 let (mode, text) = match v {
                     None => (Mode::Default, String::new()),
                     Some(Bson::Null) => (Mode::Null, String::new()),
-                    Some(v) => (Mode::Value, edit_text(v)),
+                    Some(v) => (Mode::Value, edit_text(v, col.kind)),
                 };
                 RowField { col: col.clone(), mode, text }
             })
@@ -556,7 +588,7 @@ impl App {
                     match fld.mode {
                         Mode::Default => {}
                         Mode::Null => row.push((fld.col.name.clone(), Bson::Null)),
-                        Mode::Value => match value::parse_edit(dialect, fld.col.kind, &fld.text) {
+                        Mode::Value => match value::parse_col(dialect, &fld.col, &fld.text) {
                             Ok(v) => row.push((fld.col.name.clone(), v)),
                             Err(m) => {
                                 bad = Some(format!("{}: {m}", fld.col.name));
@@ -719,7 +751,7 @@ impl App {
             });
             ui.end_row();
         });
-        let parsed = if f.null { Ok(Bson::Null) } else if col.kind == Kind::Enum { Ok(Bson::String(f.text.clone())) } else { value::parse_edit(d, col.kind, &f.text) };
+        let parsed = if f.null { Ok(Bson::Null) } else if col.kind == Kind::Enum { Ok(Bson::String(f.text.clone())) } else { value::parse_col(d, &col, &f.text) };
         ui.add_space(4.0);
         ui.label(RichText::new(format!("Staged as {n} cell edit{}. Nothing runs until Save, and Undo reverts them together.", if n == 1 { "" } else { "s" })).size(TXT_SMALL).color(FAINT()));
         ui.add_space(6.0);
@@ -827,7 +859,9 @@ impl App {
                 CellAct::CopyValue => {
                     ctx.copy_text(match &v {
                         Bson::Null => String::new(),
-                        other => edit_text(other),
+                        // The value itself: the quotes the editor adds around a text null are not part of it.
+                        Bson::String(s) => s.clone(),
+                        other => edit_text(other, Kind::Text),
                     });
                     self.ok("Copied the value");
                 }
@@ -841,7 +875,7 @@ impl App {
                     self.sql_set_cell(i, &col, Bson::Null);
                 }
                 CellAct::FilterValue => {
-                    let numeric = self.t().and_then(|t| t.sql.as_ref()).and_then(|s| s.cols.iter().find(|c| c.name == col)).is_some_and(|c| is_numeric(c.kind));
+                    let numeric = self.sql_col(&col).is_some_and(|c| is_numeric(c.kind));
                     let q = self.sql_dialect().quote_ident(&col);
                     let text = if v == Bson::Null { format!("{q} IS NULL") } else { format!("{q} = {}", copy::sql_literal(Some(&v), numeric, self.sql_bs())) };
                     let t = self.tm().unwrap();
@@ -888,9 +922,32 @@ mod tests {
     #[test]
     fn edit_text_round_trips_through_parse_edit() {
         for (k, v) in [(Kind::Int, Bson::Int64(-5)), (Kind::Decimal, Bson::String("12.50".into())), (Kind::Text, Bson::String("a b".into())), (Kind::Binary, Bson::Binary(mongodb::bson::Binary { subtype: mongodb::bson::spec::BinarySubtype::Generic, bytes: vec![1, 2] }))] {
-            assert_eq!(value::parse_edit(Dialect::MySql, k, &edit_text(&v)), Ok(v.clone()), "{k:?}");
+            assert_eq!(value::parse_edit(Dialect::MySql, k, &edit_text(&v, k)), Ok(v.clone()), "{k:?}");
         }
-        assert_eq!(value::parse_edit(Dialect::MySql, Kind::Int, &edit_text(&Bson::Null)), Ok(Bson::Null));
+        assert_eq!(value::parse_edit(Dialect::MySql, Kind::Int, &edit_text(&Bson::Null, Kind::Int)), Ok(Bson::Null));
+    }
+
+    #[test]
+    fn bare_null_is_null_and_quoted_null_is_text() {
+        let note = Col::plain("note", "TEXT", Kind::Text, true);
+        for t in ["NULL", "null", " Null "] {
+            assert_eq!(value::parse_col(Dialect::Postgres, &note, t), Ok(Bson::Null), "{t}");
+        }
+        for t in ["'NULL'", "\"null\""] {
+            assert_eq!(value::parse_col(Dialect::MySql, &note, t), Ok(Bson::String(t[1..t.len() - 1].into())), "{t}");
+        }
+        // The text NULL, with its quotes or without, survives an unchanged edit; JSON null stays valid JSON.
+        for t in ["NULL", "'null'", "\"NULL\"", " null "] {
+            let text = Bson::String(t.into());
+            assert_eq!(value::parse_col(Dialect::MySql, &note, &edit_text(&text, Kind::Text)), Ok(text), "{t}");
+        }
+        let json = Bson::String("null".into());
+        assert_eq!(value::parse_edit(Dialect::MySql, Kind::Json, &edit_text(&json, Kind::Json)), Ok(json));
+        let id = Col { auto_increment: true, ..Col::plain("id", "INT", Kind::Int, false) };
+        assert_eq!(value::parse_col(Dialect::MySql, &id, "NULL"), Ok(Bson::Null));
+        let name = Col::plain("name", "VARCHAR(20)", Kind::Text, false);
+        assert!(value::parse_col(Dialect::MySql, &name, "NULL").is_err());
+        assert_eq!(value::parse_col(Dialect::MySql, &name, "'NULL'"), Ok(Bson::String("NULL".into())));
     }
 
     #[test]
@@ -903,7 +960,7 @@ mod tests {
 
     #[test]
     fn keyless_rows_never_own_the_editor() {
-        let e = |id: Option<Bson>| CellEdit { id, col: "last_name".into(), text: String::new(), err: None, focus: false, done: None };
+        let e = |id: Option<Bson>| CellEdit { id, col: "last_name".into(), text: String::new(), err: None, focus: false, done: None, big: false, dirty: false };
         // A Shell result has no keys: every row reports None, and the editor must not appear in all of them.
         assert!(!e(None).is_at(None, "last_name"));
         let keyed = e(Some(Bson::Int32(7)));
@@ -916,12 +973,12 @@ mod tests {
     #[test]
     fn editor_opens_again_after_it_is_closed() {
         // Esc leaves done = Some(false); the finish step drops the editor, and a fresh one starts clean.
-        let mut cell = Some(CellEdit { id: Some(Bson::Int32(1)), col: "a".into(), text: "x".into(), err: None, focus: true, done: Some(false) });
+        let mut cell = Some(CellEdit { id: Some(Bson::Int32(1)), col: "a".into(), text: "x".into(), err: None, focus: true, done: Some(false), big: false, dirty: false });
         if cell.as_ref().is_some_and(|e| e.done == Some(false)) {
             cell = None;
         }
         assert!(cell.is_none());
-        cell = Some(CellEdit { id: Some(Bson::Int32(1)), col: "a".into(), text: "x".into(), err: None, focus: true, done: None });
+        cell = Some(CellEdit { id: Some(Bson::Int32(1)), col: "a".into(), text: "x".into(), err: None, focus: true, done: None, big: false, dirty: false });
         assert!(cell.unwrap().is_at(Some(Bson::Int32(1)), "a"));
     }
 }

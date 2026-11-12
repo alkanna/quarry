@@ -310,7 +310,7 @@ impl App {
             changed.insert("status", "shipped");
             self.drafts.insert(self.draft_key(&d), Draft { conn: 1, db: "shop".into(), schema: String::new(), coll: "orders".into(), original: d.clone(), current: changed.clone() });
             let items = changed.get("items").cloned().unwrap();
-            self.json_edit = Some(JsonEdit { base: changed, path: vec!["items".into()], text: db::to_edit_value(&items), kind: "array", focus: false });
+            self.json_edit = Some(JsonEdit { focus: false, ..JsonEdit::new(changed, vec!["items".into()], db::to_edit_value(&items), "array") });
         }
         // QUARRY_TEST_ERR shows an error state: view, timeout, bar, toast, log, details or conn.
         if let Ok(v) = std::env::var("QUARRY_TEST_ERR") {

@@ -775,6 +775,14 @@ pub fn copy_text(v: &Bson) -> String {
     }
 }
 
+/// Text for the inline editor, which `make_value` reads back to the same value: the text null is quoted so it does not become null.
+pub fn inline_text(b: &Bson) -> String {
+    match b {
+        Bson::String(s) if sql::value::null_like(s) => format!("\"{s}\""),
+        other => value_text(other),
+    }
+}
+
 pub fn value_text(b: &Bson) -> String {
     match b {
         Bson::String(s) => s.clone(),
@@ -793,8 +801,12 @@ pub fn value_text(b: &Bson) -> String {
 pub fn make_value(kind: &str, text: &str) -> Res<Bson> {
     let t = text.trim();
     let bad = |what: &str| format!("\"{t}\" is not a valid {what}");
+    // Any field can hold null, so the bare word is null whatever the type; quoted it stays the text.
+    if t.eq_ignore_ascii_case("null") && kind != "object" && kind != "array" {
+        return Ok(Bson::Null);
+    }
     Ok(match kind {
-        "string" => Bson::String(text.to_string()),
+        "string" => Bson::String(sql::value::quoted_null(t).unwrap_or(text).to_string()),
         "int" => Bson::Int32(t.parse().map_err(|_| bad("int (32-bit whole number)"))?),
         "long" => Bson::Int64(t.parse().map_err(|_| bad("long (64-bit whole number)"))?),
         "double" => Bson::Double(t.parse().map_err(|_| bad("double"))?),
@@ -1023,6 +1035,14 @@ mod tests {
     fn typed_edits() {
         let d = doc! { "a": { "b": [1, 2] }, "c": "x" };
         let e = edit_path(&d, &["a".into(), "b".into(), "1".into()], Some(make_value("long", "7").unwrap())).unwrap();
+        for k in ["string", "int", "date"] {
+            assert_eq!(make_value(k, " NULL "), Ok(Bson::Null), "{k}");
+        }
+        assert_eq!(make_value("string", "\"null\""), Ok(Bson::String("null".into())));
+        // Text that is itself a quoted null keeps its quotes through an unchanged edit.
+        for t in ["null", "\"null\"", "'NULL'", " null "] {
+            assert_eq!(make_value("string", &inline_text(&Bson::String(t.into()))), Ok(Bson::String(t.into())), "{t}");
+        }
         assert_eq!(get_path(&e, "a.b.1"), Some(&Bson::Int64(7)));
         let e = edit_path(&e, &["c".into()], None).unwrap();
         assert!(!e.contains_key("c"));

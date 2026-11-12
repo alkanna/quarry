@@ -340,3 +340,109 @@ fn a_locked_connection_asks_before_any_write() {
         stay(ui, fx, "+ Row");
     });
 }
+
+/// Replaces the text of the focused large editor and applies it with its button.
+fn apply_in_editor(ui: &mut UiApp, text: &str) {
+    ui.h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    ui.type_text(text);
+    ui.click("Apply");
+    ui.wait("the edit to be staged", |a| a.sql_cell.is_none() && !a.drafts.is_empty());
+}
+
+#[test]
+fn expand_button_opens_the_dialog_and_applies() {
+    every_engine("expand button opens the dialog", |fx, ui| {
+        let t = open_unlocked(fx, ui);
+        ui.open_cell("name", 1);
+        ui.click("Open in editor");
+        ui.wait("the dialog", |a| a.sql_cell.as_ref().is_some_and(|e| e.big) && a.window_open());
+        apply_in_editor(ui, "a longer name");
+        ui.save();
+        fx.expect(ui, &t, "1:a longer name:10,2:beta:20,3:gamma:30");
+    });
+}
+
+#[test]
+fn shift_enter_opens_the_dialog_and_esc_cancels() {
+    every_engine("Shift+Enter opens the dialog", |fx, ui| {
+        let t = open_unlocked(fx, ui);
+        ui.open_cell("name", 1);
+        ui.h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Enter);
+        ui.wait("the dialog", |a| a.sql_cell.as_ref().is_some_and(|e| e.big));
+        assert!(ui.app().drafts.is_empty(), "Shift+Enter staged the inline text");
+        ui.click("Cancel");
+        ui.wait("the dialog to close", |a| a.sql_cell.is_none());
+        assert!(ui.app().drafts.is_empty(), "Cancel staged something");
+        fx.expect_unchanged(ui, &t, ORIGINAL);
+    });
+}
+
+#[test]
+fn a_value_with_a_line_break_opens_the_dialog_directly() {
+    every_engine("a line break opens the dialog", |fx, ui| {
+        let t = fx.table();
+        let nl = if fx.is_pg() { "'one' || chr(10) || 'two'" } else { "CONCAT('one', CHAR(10), 'two')" };
+        fx.sql(&format!("UPDATE {} SET name = {nl} WHERE id = 1", fx.qualified(&t)));
+        fx.open(ui, &t);
+        ui.unlock();
+        ui.open_cell("name", 1);
+        let e = ui.app().sql_cell.as_ref().unwrap();
+        assert!(e.big, "the inline editor opened");
+        assert_eq!(e.text, "one\ntwo");
+    });
+}
+
+#[test]
+fn set_null_in_the_dialog_writes_null() {
+    every_engine("Set NULL writes null", |fx, ui| {
+        let t = open_unlocked(fx, ui);
+        ui.open_cell("name", 2);
+        ui.h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Enter);
+        ui.wait("the dialog", |a| a.sql_cell.as_ref().is_some_and(|e| e.big));
+        ui.click("Set NULL");
+        ui.wait("the edit to be staged", |a| a.sql_cell.is_none() && !a.drafts.is_empty());
+        ui.save();
+        let q = fx.qualified(&t);
+        let t0 = std::time::Instant::now();
+        while fx.one(&format!("SELECT COUNT(*) FROM {q} WHERE id = 2 AND name IS NULL")) != "1" {
+            assert!(t0.elapsed() < LIMIT, "name never became NULL");
+            ui.h.step();
+        }
+    });
+}
+
+#[test]
+fn the_side_panel_follows_the_double_clicked_cell() {
+    every_engine("the side panel follows the cell", |fx, ui| {
+        let t = open_unlocked(fx, ui);
+        ui.h.state_mut().prefs.value_panel = true;
+        ui.open_cell("name", 1);
+        ui.h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Enter);
+        ui.wait("the panel", |a| a.value_in_panel());
+        assert!(!ui.app().window_open(), "the panel blocks the page like a dialog");
+        ui.double_click_cell("name", 3);
+        ui.wait("the panel to load row 3", |a| a.value_in_panel() && a.sql_cell.as_ref().is_some_and(|e| e.text == "gamma"));
+        ui.h.state_mut().sql_cell.as_mut().unwrap().focus = true;
+        ui.settle();
+        apply_in_editor(ui, "omega");
+        ui.save();
+        fx.expect(ui, &t, "1:alpha:10,2:beta:20,3:omega:30");
+    });
+}
+
+#[test]
+fn the_side_panel_keeps_text_not_applied_yet() {
+    every_engine("the side panel keeps unapplied text", |fx, ui| {
+        let t = open_unlocked(fx, ui);
+        ui.h.state_mut().prefs.value_panel = true;
+        ui.open_cell("name", 1);
+        ui.h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Enter);
+        ui.wait("the panel", |a| a.value_in_panel());
+        ui.h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        ui.type_text("changed");
+        ui.double_click_cell("name", 3);
+        ui.settle();
+        assert_eq!(ui.app().sql_cell.as_ref().map(|e| e.text.as_str()), Some("changed"), "the panel lost its text");
+        fx.expect_unchanged(ui, &t, ORIGINAL);
+    });
+}

@@ -324,3 +324,47 @@ fn locked_connection_asks_before_inserting() {
     assert!(ui.app().conn(CONN).unwrap().writable);
     assert_eq!(f.all(), seed());
 }
+
+#[test]
+fn expand_button_moves_the_inline_edit_to_the_dialog() {
+    let Some(f) = Fixture::new("expand", seed()) else { return };
+    let mut ui = open(&f);
+    ui.unlock();
+    ui.double_click_cell("name", 2);
+    ui.wait("the inline editor", |a| a.inline.is_some());
+    ui.click("Open in editor");
+    ui.wait("the dialog", |a| a.inline.is_none() && a.json_edit.as_ref().is_some_and(|j| j.kind == "string" && j.text == "beta"));
+    ui.type_over("two\nlines");
+    ui.click("Apply");
+    ui.wait("the edit to be staged", |a| a.json_edit.is_none() && !a.drafts.is_empty());
+    ui.save();
+    f.expect(&mut ui, vec![doc! { "_id": 1, "name": "alpha", "qty": 1 }, doc! { "_id": 2, "name": "two\nlines", "qty": 2 }, doc! { "_id": 3, "name": "gamma", "qty": 3 }]);
+}
+
+#[test]
+fn set_null_in_the_dialog_stores_null() {
+    let Some(f) = Fixture::new("setnull", seed()) else { return };
+    let mut ui = open(&f);
+    ui.unlock();
+    ui.double_click_cell("name", 1);
+    ui.wait("the inline editor", |a| a.inline.is_some());
+    ui.h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Enter);
+    ui.wait("the dialog", |a| a.json_edit.is_some());
+    ui.click("Set null");
+    ui.wait("the edit to be staged", |a| a.json_edit.is_none() && !a.drafts.is_empty());
+    ui.save();
+    f.expect(&mut ui, vec![doc! { "_id": 1, "name": null, "qty": 1 }, doc! { "_id": 2, "name": "beta", "qty": 2 }, doc! { "_id": 3, "name": "gamma", "qty": 3 }]);
+}
+
+#[test]
+fn a_long_string_opens_the_side_panel_directly() {
+    let long = "x".repeat(600);
+    let Some(f) = Fixture::new("panel", vec![doc! { "_id": 1, "note": &long }]) else { return };
+    let mut ui = open(&f);
+    ui.unlock();
+    ui.h.state_mut().prefs.value_panel = true;
+    ui.double_click_cell("note", 1);
+    ui.wait("the panel", |a| a.inline.is_none() && a.value_in_panel());
+    assert!(!ui.app().window_open(), "the panel blocks the page like a dialog");
+    assert_eq!(ui.app().json_edit.as_ref().unwrap().text, long);
+}

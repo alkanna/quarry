@@ -298,6 +298,8 @@ pub(crate) const TXT_SEARCH: f32 = 15.0;
 
 /// Height of every button and single-line input.
 pub(crate) const BUTTON_H: f32 = 24.0;
+/// The square button at the end of an inline editor that opens the large editor.
+pub(crate) const EXPAND_BTN: f32 = 20.0;
 /// Height of the bolt marking an indexed field, and the room it takes beside a label.
 pub(crate) const BOLT_H: f32 = 10.0;
 pub(crate) const BOLT_ROOM: f32 = 12.0;
