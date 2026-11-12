@@ -449,6 +449,12 @@ pub(crate) fn analyze(before: &str, full_stmt: &str, scope: &Scope, values: &Fie
     if sugs.len() == 1 && sugs[0].text.trim_end_matches("()").eq_ignore_ascii_case(word) {
         return None;
     }
+    // Columns come first, so their loose matches would push a keyword or function the word spells out of view.
+    sugs.sort_by_key(|s| {
+        let name = s.text.trim_end_matches("()");
+        let name = name.rsplit_once('.').map_or(name, |x| x.1);
+        if name.eq_ignore_ascii_case(word) { 0 } else if starts_ci(name, word) { 1 } else { 2 }
+    });
     sugs.truncate(MAX_SUGGESTIONS);
     Some(Out { from, sugs, ..Default::default() })
 }
@@ -1015,7 +1021,8 @@ mod tests {
             suggest(&b, &full, &sc, &values()).map(|x| x.1)
         };
         let s = sug("status = 'paid' AND cur").unwrap();
-        assert_eq!(text_of(&s)[..4], ["currency", "customer_id", "CURDATE()", "CURTIME()"]);
+        assert_eq!(text_of(&s)[..4], ["currency", "CURDATE()", "CURTIME()", "CURRENT_USER()"]);
+        assert!(text_of(&s).contains(&"customer_id"), "{:?}", text_of(&s));
         assert_eq!(s[0].sql.as_ref().unwrap().detail, "CHAR(3)");
         assert_eq!(s[0].sql.as_ref().unwrap().foot, "Values: 'EUR' 61%  'USD' 27%  'GBP' 12%");
         // Before the schema arrives the bar's own columns serve.
@@ -1222,5 +1229,18 @@ mod tests {
                 assert!(!lex::pg_refuses_function(x.text.trim_end_matches("()")), "{}", x.text);
             }
         }
+    }
+
+    #[test]
+    fn strong_matches_rank_above_loose_columns() {
+        // "currency" only holds c..r in order, so it goes below the columns and keywords that start with "cr".
+        let (_, s) = run("SELECT * FROM orders WHERE id > 0 cr|").unwrap();
+        let t = text_of(&s);
+        assert_eq!(t.first(), Some(&"created_at"), "{t:?}");
+        assert_eq!(t.last(), Some(&"currency"), "{t:?}");
+        assert!(t.len() > 2, "{t:?}");
+        // A keyword typed in full comes first even with loose column matches.
+        let (_, s) = run("SELECT * FROM orders WHERE id > 0 AND id < 9 OR|").unwrap();
+        assert_eq!(s[0].text, "OR", "{:?}", text_of(&s));
     }
 }
