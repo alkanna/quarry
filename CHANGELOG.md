@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.39.0](https://github.com/alkanna/quarry/compare/v0.38.0...v0.39.0) (2026-11-12)
+
+
+### Features
+
+* type-aware helpers for inline value editing ([#195](https://github.com/alkanna/quarry/issues/195)) ([e42b26a](https://github.com/alkanna/quarry/commit/e42b26aef2244a66146baadccc30dbbbcda94cc4))
+
+
+### Bug Fixes
+
+* clearer message when editing a primary key cell ([#192](https://github.com/alkanna/quarry/issues/192)) ([a094832](https://github.com/alkanna/quarry/commit/a09483287f3a00202adea6a564c40bc99cd7576c))
+* stop the privilege popover title from stretching when it wraps ([#194](https://github.com/alkanna/quarry/issues/194)) ([f077616](https://github.com/alkanna/quarry/commit/f0776168f22d3b1a389485ff01e667a4a247a9f9))
+
 ## [0.38.0](https://github.com/alkanna/quarry/compare/v0.37.0...v0.38.0) (2026-11-12)
 
 
