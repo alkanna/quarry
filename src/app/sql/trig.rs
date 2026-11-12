@@ -2,15 +2,15 @@
 //! come from `db::sql::ddl`; the preview shows what Save sends. The body is the user's own SQL, so nothing else is
 //! ever written into it, and it is checked to be exactly one statement before it is shown or sent.
 
-use super::sql_alter::{sql_block, BUSY_NOTE};
-use super::*;
+use crate::app::sql::alter::{sql_block, BUSY_NOTE};
+use crate::app::*;
 use db::sql::ddl::{self, TrigDef, TrigJob};
 use db::sql::structure::{Structure, Trigger};
 
 const LINE_H: f32 = 20.0;
 
 /// What the editor shows for a draft, kept while the draft, the live trigger, the session mode and the columns stay as they are.
-pub(super) struct TrigMemo {
+pub(in crate::app) struct TrigMemo {
     key: String,
     def: TrigDef,
     live: Option<Trigger>,
@@ -31,9 +31,9 @@ impl TrigMemo {
 }
 
 /// The key of the draft of a trigger that does not exist yet.
-pub(super) const NEW: &str = "";
+pub(in crate::app) const NEW: &str = "";
 
-pub(super) fn def_of(t: &Trigger) -> TrigDef {
+pub(in crate::app) fn def_of(t: &Trigger) -> TrigDef {
     if t.pg.is_some() {
         return db::sql::pg::ddl_trig::def_of(t);
     }
@@ -41,7 +41,7 @@ pub(super) fn def_of(t: &Trigger) -> TrigDef {
 }
 
 /// The draft of a new trigger for the engine.
-pub(super) fn blank(pg: bool) -> TrigDef {
+pub(in crate::app) fn blank(pg: bool) -> TrigDef {
     if pg {
         return db::sql::pg::ddl_trig::blank();
     }
@@ -51,13 +51,13 @@ pub(super) fn blank(pg: bool) -> TrigDef {
 /// A body is the same when only its outer whitespace differs, which the server does not keep. The name of a new trigger's
 /// function is not compared: a trigger that was just made has the name the server kept, and the draft may have left it to
 /// be picked.
-pub(super) fn same(a: &TrigDef, b: &TrigDef) -> bool {
+pub(in crate::app) fn same(a: &TrigDef, b: &TrigDef) -> bool {
     a.name == b.name && a.timing == b.timing && a.event == b.event && a.body.trim() == b.body.trim() && db::sql::ddl::PgDef { func: String::new(), ..a.pg.clone() } == db::sql::ddl::PgDef { func: String::new(), ..b.pg.clone() }
 }
 
 /// Drops the drafts of triggers that are gone, so a trigger made again later under the same name does not open
 /// with the edits of the dropped one. The new trigger's draft stays.
-pub(super) fn prune_drafts(drafts: &mut std::collections::HashMap<String, TrigDef>, live: &[Trigger]) {
+pub(in crate::app) fn prune_drafts(drafts: &mut std::collections::HashMap<String, TrigDef>, live: &[Trigger]) {
     drafts.retain(|k, _| k == NEW || live.iter().any(|t| t.name == *k));
 }
 
@@ -97,16 +97,16 @@ fn body_editor(ui: &mut egui::Ui, salt: &str, text: &mut String, height: f32, ed
 }
 
 impl App {
-    fn trig_state_mut(&mut self) -> Option<&mut super::sql_structure::StructState> {
+    fn trig_state_mut(&mut self) -> Option<&mut crate::app::sql::structure::StructState> {
         Some(&mut self.tabs.get_mut(self.cur)?.sql.as_mut()?.st)
     }
 
-    fn trig_state(&self) -> Option<&super::sql_structure::StructState> {
+    fn trig_state(&self) -> Option<&crate::app::sql::structure::StructState> {
         Some(&self.t()?.sql.as_ref()?.st)
     }
 
     /// The draft being edited: the new trigger's, or the selected trigger's.
-    pub(super) fn trig_key(&self, st: &Structure, sel: Option<usize>) -> Option<String> {
+    pub(in crate::app) fn trig_key(&self, st: &Structure, sel: Option<usize>) -> Option<String> {
         if self.trig_state()?.trig_new {
             return Some(NEW.to_string());
         }
@@ -114,7 +114,7 @@ impl App {
         Some(st.triggers[i].name.clone())
     }
 
-    pub(super) fn trig_new(&mut self) {
+    pub(in crate::app) fn trig_new(&mut self) {
         let pg = self.t().is_some_and(|t| self.is_pg(t.sel.conn));
         if let Some(s) = self.tabs.get_mut(self.cur).and_then(|t| t.sql.as_mut()) {
             s.st.trig_new = true;
@@ -130,12 +130,12 @@ impl App {
 
     /// Whether the triggers of the open table can be edited at all: the table is not a view that the
     /// engine cannot put a trigger on. A locked connection still edits; Save and Delete ask to unlock.
-    pub(super) fn trig_editable(&self) -> bool {
+    pub(in crate::app) fn trig_editable(&self) -> bool {
         !self.sel_is_view() || self.t().is_some_and(|t| self.is_pg(t.sel.conn))
     }
 
     /// Asks before dropping the selected trigger.
-    pub(super) fn trig_ask_drop(&mut self, name: String) {
+    pub(in crate::app) fn trig_ask_drop(&mut self, name: String) {
         if !self.tab_writable() {
             return self.ask_unlock_then(move |a| a.trig_ask_drop(name));
         }
@@ -162,7 +162,7 @@ impl App {
     }
 
     /// The editor, its preview and the Save row for `key`.
-    pub(super) fn trig_editor(&mut self, ui: &mut egui::Ui, st: &Structure, key: &str, editable: bool) {
+    pub(in crate::app) fn trig_editor(&mut self, ui: &mut egui::Ui, st: &Structure, key: &str, editable: bool) {
         let Some((conn, table)) = self.t().map(|t| (t.sel.conn, t.sel.coll.clone())) else { return };
         let live_trig: Option<&Trigger> = st.triggers.iter().find(|t| t.name == key);
         let (d, _, m) = self.alter_env();
@@ -183,7 +183,7 @@ impl App {
         let editable = editable && pg_live.is_none_or(|p| p.refuse.is_empty());
 
         if pg {
-            super::sql_trig_pg::head(ui, &mut def, &super::sql_trig_pg::Env { editable, live: pg_live, table: &table });
+            crate::app::sql::trig_pg::head(ui, &mut def, &crate::app::sql::trig_pg::Env { editable, live: pg_live, table: &table });
         } else {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 10.0;
@@ -305,7 +305,7 @@ impl App {
                 return ddl::trigger_preview(d, m, &table, &job);
             }
             let owned: Vec<String> = cols.iter().map(|c| c.to_string()).collect();
-            if let Some(why) = super::sql_trig_pg::column_problem(def, &owned) {
+            if let Some(why) = crate::app::sql::trig_pg::column_problem(def, &owned) {
                 return Err(why);
             }
             let schema = self.t().map(|t| self.sel_schema(&t.sel)).unwrap_or_default();
@@ -341,14 +341,14 @@ impl App {
         self.worker.sql_trigger(sel.conn, db, schema, sel.coll, job, m, !self.tab_writable(), done.to_string());
     }
 
-    pub(super) fn drop_trigger(&mut self, name: String) {
+    pub(in crate::app) fn drop_trigger(&mut self, name: String) {
         let Some(t) = self.structure().and_then(|s| s.triggers.iter().find(|t| t.name == name)).cloned() else { return self.warn(format!("The trigger {name} is not in the structure any more.")) };
         self.run_trigger(TrigJob::Drop(t), "Dropped the trigger");
     }
 
     /// QUARRY_TEST_SQL=trigedit: the orders_before_update trigger with its body changed, so the preview shows
     /// the DROP and CREATE that Save would send. The demo connection is unlocked so Save is live.
-    pub(super) fn sql_trig_demo(&mut self, which: &str) {
+    pub(in crate::app) fn sql_trig_demo(&mut self, which: &str) {
         if which != "trigedit" {
             return;
         }

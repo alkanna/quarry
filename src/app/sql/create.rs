@@ -1,15 +1,15 @@
 //! Creating and dropping SQL databases and tables: the New database and New table dialogs with their
 //! statement previews, and the typed confirmations for drops. The statements come from `db::sql::create`.
 
-use super::*;
+use crate::app::*;
 use db::sql::create::{self, ColumnSpec, DefaultKind, Ddl, DropInfo, Meta, TableSpec, TYPES};
 
-pub(super) const NOTE_DB: &str = "Read-only: unlock writes to create a database";
-pub(super) const NOTE_TABLE: &str = "Read-only: unlock writes to create a table";
-pub(super) const NOTE_DROP: &str = "Read-only: unlock writes to drop or empty";
+pub(in crate::app) const NOTE_DB: &str = "Read-only: unlock writes to create a database";
+pub(in crate::app) const NOTE_TABLE: &str = "Read-only: unlock writes to create a table";
+pub(in crate::app) const NOTE_DROP: &str = "Read-only: unlock writes to drop or empty";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum DropKind {
+pub(in crate::app) enum DropKind {
     Database,
     Table,
     View,
@@ -19,49 +19,49 @@ pub(super) enum DropKind {
     Schema,
 }
 
-pub(super) struct NewDb {
-    pub(super) conn: u64,
-    pub(super) name: String,
-    pub(super) charset: String,
-    pub(super) collation: String,
+pub(in crate::app) struct NewDb {
+    pub(in crate::app) conn: u64,
+    pub(in crate::app) name: String,
+    pub(in crate::app) charset: String,
+    pub(in crate::app) collation: String,
     /// None while the server's lists load.
-    pub(super) meta: Option<Meta>,
-    pub(super) load_err: Option<String>,
+    pub(in crate::app) meta: Option<Meta>,
+    pub(in crate::app) load_err: Option<String>,
 }
 
-pub(super) struct NewTable {
-    pub(super) conn: u64,
-    pub(super) schema: String,
-    pub(super) name: String,
-    pub(super) engine: String,
-    pub(super) collation: String,
-    pub(super) cols: Vec<ColumnSpec>,
-    pub(super) meta: Option<Meta>,
-    pub(super) load_err: Option<String>,
-    pub(super) show_sql: bool,
+pub(in crate::app) struct NewTable {
+    pub(in crate::app) conn: u64,
+    pub(in crate::app) schema: String,
+    pub(in crate::app) name: String,
+    pub(in crate::app) engine: String,
+    pub(in crate::app) collation: String,
+    pub(in crate::app) cols: Vec<ColumnSpec>,
+    pub(in crate::app) meta: Option<Meta>,
+    pub(in crate::app) load_err: Option<String>,
+    pub(in crate::app) show_sql: bool,
 }
 
-pub(super) struct DropForm {
-    pub(super) conn: u64,
+pub(in crate::app) struct DropForm {
+    pub(in crate::app) conn: u64,
     /// PostgreSQL: the database the schema or table is in, or the database itself for a database drop. Empty on MySQL.
-    pub(super) database: String,
-    pub(super) schema: String,
+    pub(in crate::app) database: String,
+    pub(in crate::app) schema: String,
     /// Empty for a database.
-    pub(super) table: String,
-    pub(super) kind: DropKind,
-    pub(super) typed: String,
+    pub(in crate::app) table: String,
+    pub(in crate::app) kind: DropKind,
+    pub(in crate::app) typed: String,
     /// PostgreSQL: CASCADE for a schema or table, WITH (FORCE) for a database. Ticked inside the dialog, never by default.
-    pub(super) opt: bool,
+    pub(in crate::app) opt: bool,
     /// None while the counts load.
-    pub(super) info: Option<Result<DropInfo, String>>,
+    pub(in crate::app) info: Option<Result<DropInfo, String>>,
 }
 
-pub(super) fn plural(n: u64, word: &str) -> String {
+pub(in crate::app) fn plural(n: u64, word: &str) -> String {
     format!("{} {word}{}", group(&n.to_string()), if n == 1 { "" } else { "s" })
 }
 
 /// "a, b and c".
-pub(super) fn list_and(items: &[String]) -> String {
+pub(in crate::app) fn list_and(items: &[String]) -> String {
     match items {
         [] => String::new(),
         [one] => one.clone(),
@@ -69,7 +69,7 @@ pub(super) fn list_and(items: &[String]) -> String {
     }
 }
 
-pub(super) fn pick(ui: &mut egui::Ui, id: &str, width: f32, shown: &str, items: impl FnOnce(&mut egui::Ui)) {
+pub(in crate::app) fn pick(ui: &mut egui::Ui, id: &str, width: f32, shown: &str, items: impl FnOnce(&mut egui::Ui)) {
     egui::ComboBox::from_id_salt(id).width(width).selected_text(shown.to_string()).show_ui(ui, |ui| {
         menu_look(ui);
         items(ui);
@@ -77,7 +77,7 @@ pub(super) fn pick(ui: &mut egui::Ui, id: &str, width: f32, shown: &str, items: 
 }
 
 /// The preview block of the design: the statement in mono on the page color.
-pub(super) fn sql_block(ui: &mut egui::Ui, text: &str) {
+pub(in crate::app) fn sql_block(ui: &mut egui::Ui, text: &str) {
     egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(12, 10)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.add(egui::Label::new(sql_job(text, TXT_BODY)).selectable(true));
@@ -86,17 +86,17 @@ pub(super) fn sql_block(ui: &mut egui::Ui, text: &str) {
 
 /// The row of buttons at the bottom, right aligned as in the designs: the main action first in the
 /// code so it ends up rightmost.
-pub(super) fn right_actions(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+pub(in crate::app) fn right_actions(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     ui.add_space(8.0);
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add);
 }
 
 impl App {
-    pub(super) fn conn_name(&self, conn: u64) -> String {
+    pub(in crate::app) fn conn_name(&self, conn: u64) -> String {
         self.conn(conn).map(|c| c.meta.name.clone()).unwrap_or_default()
     }
 
-    pub(super) fn conn_writable(&self, conn: u64) -> bool {
+    pub(in crate::app) fn conn_writable(&self, conn: u64) -> bool {
         self.conn(conn).is_some_and(|c| c.writable)
     }
 
@@ -108,11 +108,11 @@ impl App {
     }
 
     /// A create or drop on a locked connection asks to allow writes first, then goes on with what was asked.
-    pub(super) fn ask_unlock_on(&mut self, conn: u64, then: impl FnOnce(&mut App) + 'static) {
+    pub(in crate::app) fn ask_unlock_on(&mut self, conn: u64, then: impl FnOnce(&mut App) + 'static) {
         self.modal = Some(Modal::Unlock(conn, Some(Box::new(then))));
     }
 
-    pub(super) fn sql_new_db(&mut self, conn: u64) {
+    pub(in crate::app) fn sql_new_db(&mut self, conn: u64) {
         if self.is_pg(conn) {
             return self.pg_new_db(conn);
         }
@@ -123,7 +123,7 @@ impl App {
         self.modal = Some(Modal::SqlNewDb(Box::new(NewDb { conn, name: String::new(), charset: String::new(), collation: String::new(), meta: None, load_err: None })));
     }
 
-    pub(super) fn sql_new_table(&mut self, conn: u64, schema: String) {
+    pub(in crate::app) fn sql_new_table(&mut self, conn: u64, schema: String) {
         if !self.conn_writable(conn) {
             return self.ask_unlock_on(conn, move |a| a.sql_new_table(conn, schema));
         }
@@ -131,7 +131,7 @@ impl App {
         self.modal = Some(Modal::SqlNewTable(Box::new(NewTable { conn, schema, name: String::new(), engine: String::new(), collation: String::new(), cols: vec![ColumnSpec::id()], meta: None, load_err: None, show_sql: false })));
     }
 
-    pub(super) fn sql_drop_ask(&mut self, conn: u64, schema: String, table: String, kind: DropKind) {
+    pub(in crate::app) fn sql_drop_ask(&mut self, conn: u64, schema: String, table: String, kind: DropKind) {
         if !self.conn_writable(conn) {
             return self.ask_unlock_on(conn, move |a| a.sql_drop_ask(conn, schema, table, kind));
         }
@@ -142,7 +142,7 @@ impl App {
     }
 
     /// The lists arrived: fill the open dialog and pick the server's defaults.
-    pub(super) fn sql_meta_done(&mut self, conn: u64, schema: String, res: db::Res<Meta>) {
+    pub(in crate::app) fn sql_meta_done(&mut self, conn: u64, schema: String, res: db::Res<Meta>) {
         match &mut self.modal {
             Some(Modal::SqlNewDb(f)) if f.conn == conn && schema.is_empty() => match res {
                 Ok(m) => {
@@ -164,7 +164,7 @@ impl App {
         }
     }
 
-    pub(super) fn sql_drop_info_done(&mut self, conn: u64, database: String, schema: String, table: String, res: db::Res<DropInfo>) {
+    pub(in crate::app) fn sql_drop_info_done(&mut self, conn: u64, database: String, schema: String, table: String, res: db::Res<DropInfo>) {
         if let Some(Modal::SqlDrop(f)) = &mut self.modal {
             if f.conn == conn && f.database == database && f.schema == schema && f.table == table {
                 f.info = Some(res);
@@ -174,7 +174,7 @@ impl App {
 
     /// A create or drop finished: refresh what the sidebar and the tabs show of it.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn sql_ddl_done(&mut self, conn: u64, database: String, schema: String, table: String, what: Ddl, res: db::Res<String>, undo: Option<UndoAction>, dbs: Option<Vec<String>>, sql_mode: Option<String>) {
+    pub(in crate::app) fn sql_ddl_done(&mut self, conn: u64, database: String, schema: String, table: String, what: Ddl, res: db::Res<String>, undo: Option<UndoAction>, dbs: Option<Vec<String>>, sql_mode: Option<String>) {
         // The create was built for the session's mode, which changed since connecting; the previews follow it now.
         self.adopt_sql_mode(conn, sql_mode);
         // A refused undo hands its entry back, so it is kept whether or not the write went through.
@@ -236,7 +236,7 @@ impl App {
     }
 
     /// Runs a confirmed drop. Tabs close and the sidebar updates when the server says it worked.
-    pub(super) fn sql_drop_run(&mut self, conn: u64, database: String, schema: String, table: String, kind: DropKind, opt: bool) {
+    pub(in crate::app) fn sql_drop_run(&mut self, conn: u64, database: String, schema: String, table: String, kind: DropKind, opt: bool) {
         if self.demo {
             return self.ok("Offline demo: no database is connected.");
         }
@@ -251,7 +251,7 @@ impl App {
         self.worker.sql_drop(conn, sql, schema, table, kind == DropKind::View, kind == DropKind::Truncate, false);
     }
 
-    pub(super) fn sql_new_db_dialog(&mut self, ui: &mut egui::Ui, f: &mut NewDb, keep: &mut bool) {
+    pub(in crate::app) fn sql_new_db_dialog(&mut self, ui: &mut egui::Ui, f: &mut NewDb, keep: &mut bool) {
         ui.set_width(540.0);
         let writable = self.conn_writable(f.conn);
         dialog_title(ui, "New database");
@@ -339,7 +339,7 @@ impl App {
         self.worker.sql_create_db(f.conn, sql, f.name.clone(), f.charset.clone(), f.collation.clone(), meta, !self.conn_writable(f.conn));
     }
 
-    pub(super) fn sql_new_table_dialog(&mut self, ui: &mut egui::Ui, f: &mut NewTable, keep: &mut bool) {
+    pub(in crate::app) fn sql_new_table_dialog(&mut self, ui: &mut egui::Ui, f: &mut NewTable, keep: &mut bool) {
         ui.set_max_width(740.0);
         ui.set_width(700.0);
         let writable = self.conn_writable(f.conn);
@@ -523,7 +523,7 @@ impl App {
         }
     }
 
-    pub(super) fn sql_drop_dialog(&mut self, ui: &mut egui::Ui, f: &mut DropForm, keep: &mut bool) {
+    pub(in crate::app) fn sql_drop_dialog(&mut self, ui: &mut egui::Ui, f: &mut DropForm, keep: &mut bool) {
         ui.set_width(560.0);
         let writable = self.conn_writable(f.conn);
         let conn = self.conn_name(f.conn);
@@ -606,7 +606,7 @@ impl App {
     }
 
     /// QUARRY_TEST_SQL=newdb, newtable or droptable: the dialogs of docs/sql/designs.figcraft, "Create and drop".
-    pub(super) fn sql_create_demo(&mut self, which: &str) {
+    pub(in crate::app) fn sql_create_demo(&mut self, which: &str) {
         if !matches!(which, "newdb" | "newtable" | "droptable") {
             return;
         }

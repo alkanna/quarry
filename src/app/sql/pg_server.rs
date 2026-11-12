@@ -2,8 +2,8 @@
 //! Settings, Activity and Locks. It follows the MySQL window (`sql_server.rs`): it asks only while it is open and Quarry is
 //! focused, keeps errors in the window, and offers Cancel and Terminate only on an unlocked connection, after a second click.
 
-use super::sql_server::{arm_time, confirmed, error_row, header, kv_rows, paint_cell, prev_of, retry_after, tile, up_text, PAD, POLL};
-use super::*;
+use crate::app::sql::server::{arm_time, confirmed, error_row, header, kv_rows, paint_cell, prev_of, retry_after, tile, up_text, PAD, POLL};
+use crate::app::*;
 use db::sql::pg::server::{carry_blockers, chains, metrics, Activity, Answer, Overview, Role, Session, Setting, Settings, Sizes, Target};
 use std::collections::HashMap;
 use std::time::Instant;
@@ -17,7 +17,7 @@ const ROW2_H: f32 = 40.0;
 const HEAD_H: f32 = 50.0;
 
 #[derive(Clone, Copy, PartialEq, Default, Debug)]
-pub(super) enum PgTab {
+pub(in crate::app) enum PgTab {
     #[default]
     Overview,
     Settings,
@@ -27,7 +27,7 @@ pub(super) enum PgTab {
 
 /// A Cancel or Terminate waiting for its second click, with the row as the list showed it.
 #[derive(Clone)]
-pub(super) struct PgConfirm {
+pub(in crate::app) struct PgConfirm {
     s: Session,
     terminate: bool,
     /// `arm_time` when it was armed: the confirm ignores clicks for a moment after.
@@ -35,8 +35,8 @@ pub(super) struct PgConfirm {
 }
 
 #[derive(Default)]
-pub(super) struct PgServerWin {
-    pub(super) conn: u64,
+pub(in crate::app) struct PgServerWin {
+    pub(in crate::app) conn: u64,
     tab: PgTab,
     /// The settings Quarry gives every session of this connection, lower case.
     quarry: Vec<String>,
@@ -82,12 +82,12 @@ pub(super) struct PgServerWin {
 }
 
 impl PgServerWin {
-    pub(super) fn new(conn: u64, quarry: Vec<String>) -> Self {
+    pub(in crate::app) fn new(conn: u64, quarry: Vec<String>) -> Self {
         Self { conn, quarry, auto: true, hide_idle: true, changed_only: true, ..Default::default() }
     }
 
     /// Canned answers for the offline demo (QUARRY_TEST_PG=server...), with the numbers of the design.
-    pub(super) fn demo(conn: u64, which: &str) -> Self {
+    pub(in crate::app) fn demo(conn: u64, which: &str) -> Self {
         use db::sql::pg::server::Standby;
         let mut s = Self::new(conn, vec!["application_name".into(), "statement_timeout".into()]);
         s.tab = match which {
@@ -189,13 +189,13 @@ impl PgServerWin {
 
     /// The pid of a running session whose query carries `tag`, for the UI test.
     #[cfg(test)]
-    pub(super) fn listed(&self, tag: &str) -> Option<u64> {
+    pub(in crate::app) fn listed(&self, tag: &str) -> Option<u64> {
         self.rows().iter().find(|r| r.query.contains(tag) && r.active()).map(|r| r.pid)
     }
 
     /// Whether a Cancel or Terminate waits for its second click, for the UI test.
     #[cfg(test)]
-    pub(super) fn armed(&self) -> bool {
+    pub(in crate::app) fn armed(&self) -> bool {
         self.confirm.is_some()
     }
 
@@ -474,7 +474,7 @@ impl App {
         }
     }
 
-    pub(super) fn pg_server_done(&mut self, req: u64, ans: Answer) {
+    pub(in crate::app) fn pg_server_done(&mut self, req: u64, ans: Answer) {
         // A Cancel or Terminate is told even when the window is gone, and only once.
         if let Answer::Signal(res) = &ans {
             if !self.sql_kills.remove(&req) {
@@ -495,7 +495,7 @@ impl App {
         }
     }
 
-    pub(super) fn pg_server_window(&mut self, ctx: &egui::Context) {
+    pub(in crate::app) fn pg_server_window(&mut self, ctx: &egui::Context) {
         let Some(mut s) = self.pg_server.take() else { return };
         let conn = s.conn;
         let db = self.conn(conn).and_then(|c| c.sql.clone());

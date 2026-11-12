@@ -426,7 +426,7 @@ pub(super) struct SqlTab {
     /// Rows before grouping when the last answer was grouped; None for an ordinary answer.
     pub(super) matched: Option<u64>,
     /// The Content bar: rules, clause chips and their text.
-    pub(super) bar: super::sql_bar::Bar,
+    pub(super) bar: super::sql::bar::Bar,
     /// What Stop reaches of the running Custom Query.
     pub(super) run: db::sql::RunHandle,
     /// The outcome of each statement of the last run, the one shown, and the request still awaited (0 when idle).
@@ -439,7 +439,7 @@ pub(super) struct SqlTab {
     pub(super) run_schema: String,
     /// Caret of the Query editor as a char index, and what the script says about it.
     pub(super) caret: usize,
-    pub(super) caret_cache: std::cell::RefCell<Option<super::sql_query::CaretInfo>>,
+    pub(super) caret_cache: std::cell::RefCell<Option<super::sql::query::CaretInfo>>,
     /// Results as text instead of a grid, and that text for the set it was built from.
     pub(super) text_mode: bool,
     pub(super) text_cache: Option<(usize, String)>,
@@ -452,7 +452,7 @@ pub(super) struct SqlTab {
     pub(super) sets_req: u64,
     pub(super) paging: Option<usize>,
     /// What the Structure, Relations, Triggers and Info views show.
-    pub(super) st: super::sql_structure::StructState,
+    pub(super) st: super::sql::structure::StructState,
 }
 
 /// The Compare view: this tab's collection (source) against a chosen target.
@@ -855,14 +855,14 @@ pub(super) enum Modal {
     SqlNewDb(Box<NewDb>),
     SqlNewTable(Box<NewTable>),
     SqlDrop(Box<DropForm>),
-    PgNewDb(Box<super::sql_create_pg::PgNewDb>),
-    PgNewSchema(Box<super::sql_create_pg::PgNewSchema>),
-    PgNewTable(Box<super::sql_create_pg::PgNewTable>),
-    SqlNewUser(Box<super::sql_users::NewUser>),
-    SqlPassword(Box<super::sql_users::PwForm>),
-    PgNewRole(Box<super::pg_roles::NewRoleForm>),
-    PgPassword(Box<super::pg_roles::PgPwForm>),
-    PgDropRole(Box<super::pg_roles::DropForm>),
+    PgNewDb(Box<super::sql::create_pg::PgNewDb>),
+    PgNewSchema(Box<super::sql::create_pg::PgNewSchema>),
+    PgNewTable(Box<super::sql::create_pg::PgNewTable>),
+    SqlNewUser(Box<super::sql::users::NewUser>),
+    SqlPassword(Box<super::sql::users::PwForm>),
+    PgNewRole(Box<super::sql::pg_roles::NewRoleForm>),
+    PgPassword(Box<super::sql::pg_roles::PgPwForm>),
+    PgDropRole(Box<super::sql::pg_roles::DropForm>),
     /// Add a foreign key to the open SQL table, with its ALTER preview.
     FkEdit(Box<FkForm>),
     Typed { title: String, expect: String, typed: String, action: Danger },
@@ -889,11 +889,11 @@ pub(super) enum Modal {
     /// Export or copy-to-file of the rows of a result, in any of the Copy as formats.
     Export(Box<super::export::ExportForm>),
     /// Import a CSV file into a SQL table.
-    SqlImport(Box<super::sql_import::ImportForm>),
+    SqlImport(Box<super::sql::import::ImportForm>),
     /// Export a SQL database or some of its tables as a dump script.
-    SqlDump(Box<super::sql_dump::DumpForm>),
+    SqlDump(Box<super::sql::dump::DumpForm>),
     /// Run a script file on a SQL database.
-    SqlRunFile(Box<super::sql_dump::RunForm>),
+    SqlRunFile(Box<super::sql::dump::RunForm>),
     /// Values of a field with how many documents hold each, and the pipeline that counted them.
     Grouped { sel: Sel, path: String, pipeline: Vec<Document>, rows: Vec<Document> },
     /// The column header's Customize window; `key` is the column prefs key it edits.

@@ -244,7 +244,7 @@ impl App {
         match act {
             HeadAct::AddSort if t.sql.is_some() => {
                 let t = self.tm().unwrap();
-                t.sort_txt = super::sql_bar::add_sort_key(&t.sort_txt, c, dialect);
+                t.sort_txt = super::sql::bar::add_sort_key(&t.sort_txt, c, dialect);
                 t.page = 0;
                 self.reload();
             }

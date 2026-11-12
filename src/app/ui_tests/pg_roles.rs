@@ -79,11 +79,11 @@ fn pg_roles_grant_through_the_cell_editor_apply_and_undo() {
 fn pg_password_is_forgotten_when_esc_closes_the_dialog() {
     let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_eframe(|cc| App::for_test(cc));
     let serial = 77;
-    h.state_mut().modal = Some(Modal::PgPassword(Box::new(crate::app::pg_roles::PgPwForm::for_test(CONN, "jane", serial))));
+    h.state_mut().modal = Some(Modal::PgPassword(Box::new(crate::app::sql::pg_roles::PgPwForm::for_test(CONN, "jane", serial))));
     h.run_steps(3);
     h.event(egui::Event::Text("Zq9secret".into()));
     h.run_steps(2);
-    let id = crate::app::sql_users::secret_id("pg-password", serial, 0);
+    let id = crate::app::sql::users::secret_id("pg-password", serial, 0);
     assert!(matches!(&h.state().modal, Some(Modal::PgPassword(f)) if f.typed() == "Zq9secret"), "the field took the typing");
     assert!(egui::TextEdit::load_state(&h.ctx, id).is_some(), "egui keeps the field's state while it is open");
     h.key_press(egui::Key::Escape);
@@ -98,7 +98,7 @@ fn pg_a_late_apply_answer_keeps_newer_staged_changes() {
     use crate::db::sql::pg::roles::{Answer, Change, Did};
     let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(800.0, 600.0)).build_eframe(|cc| App::for_test(cc));
     let app = h.state_mut();
-    let mut w = crate::app::pg_roles::PgRolesWin::new(CONN, "shop".into());
+    let mut w = crate::app::sql::pg_roles::PgRolesWin::new(CONN, "shop".into());
     w.staged.push(Change::Member { group: "g".into(), member: "m".into(), from: None, to: Some(Default::default()) });
     (w.busy, w.req_apply) = (true, 7);
     app.pg_roles = Some(w);

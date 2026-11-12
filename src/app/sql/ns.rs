@@ -3,11 +3,11 @@
 //! calls take as their "schema" argument is the schema there and the database on MySQL. This file turns a `Sel` into that
 //! pair, and loads and remembers the schemas the sidebar switches between.
 
-use super::*;
+use crate::app::*;
 
 /// The namespace a worker call takes for `sel`. A PostgreSQL selection that names no schema (a Query tab opened before the
 /// database's schemas were listed) uses `picked`, so no call ever sends the database name as a schema.
-pub(super) fn namespace(dialect: db::sql::Dialect, sel: &Sel, picked: &str) -> String {
+pub(in crate::app) fn namespace(dialect: db::sql::Dialect, sel: &Sel, picked: &str) -> String {
     match dialect {
         db::sql::Dialect::Postgres if sel.schema.is_empty() => picked.to_string(),
         db::sql::Dialect::Postgres => sel.schema.clone(),
@@ -17,25 +17,25 @@ pub(super) fn namespace(dialect: db::sql::Dialect, sel: &Sel, picked: &str) -> S
 
 /// Where namespace `ns` of a foreign key lives next to `base`: on PostgreSQL a key points at a table of another schema
 /// of the same database, on MySQL at a table of another database.
-pub(super) fn with_ns(dialect: db::sql::Dialect, base: &Sel, ns: &str, coll: String) -> Sel {
+pub(in crate::app) fn with_ns(dialect: db::sql::Dialect, base: &Sel, ns: &str, coll: String) -> Sel {
     let (db, schema) = split_ns(dialect, &base.db, ns);
     Sel { conn: base.conn, db, schema, coll }
 }
 
 /// The (database, schema) a foreign key's namespace `ns` stands for, as `Sel` and the caches take them.
-pub(super) fn split_ns(dialect: db::sql::Dialect, base_db: &str, ns: &str) -> (String, String) {
+pub(in crate::app) fn split_ns(dialect: db::sql::Dialect, base_db: &str, ns: &str) -> (String, String) {
     if dialect == db::sql::Dialect::Postgres { (base_db.to_string(), ns.to_string()) } else { (ns.to_string(), String::new()) }
 }
 
 /// The schemas the switcher lists: the user ones, and the system ones when asked for.
-pub(super) fn listed_schemas(all: &[db::sql::PgSchema], system: bool) -> Vec<&db::sql::PgSchema> {
+pub(in crate::app) fn listed_schemas(all: &[db::sql::PgSchema], system: bool) -> Vec<&db::sql::PgSchema> {
     all.iter().filter(|s| system || !s.system).collect()
 }
 
 impl App {
     /// The connection and namespace a worker call about `sel` takes: on PostgreSQL the connection pointing at the
     /// selection's database and its schema, on MySQL the connection and the database name. None while not connected.
-    pub(super) fn sql_target(&self, sel: &Sel) -> Option<(db::sql::Db, String)> {
+    pub(in crate::app) fn sql_target(&self, sel: &Sel) -> Option<(db::sql::Db, String)> {
         let sql = self.conn(sel.conn)?.sql.as_ref()?;
         let picked = if sel.schema.is_empty() { self.ns_of(sel.conn, &sel.db) } else { "" };
         Some((sql.at(&sel.db), namespace(sql.dialect, sel, picked)))
@@ -43,7 +43,7 @@ impl App {
 
     /// The schema of a selection on PostgreSQL: its own, else the one the sidebar shows, else `public`. Empty on MySQL,
     /// where the database is the whole namespace.
-    pub(super) fn sel_schema(&self, sel: &Sel) -> String {
+    pub(in crate::app) fn sel_schema(&self, sel: &Sel) -> String {
         if !self.is_pg(sel.conn) || !sel.schema.is_empty() {
             return sel.schema.clone();
         }
@@ -51,17 +51,17 @@ impl App {
     }
 
     /// Whether the engine of `conn` has `f`. Mongo and unknown connections answer yes, so their paths stay as they are.
-    pub(super) fn supports(&self, conn: u64, f: db::sql::Feature) -> bool {
+    pub(in crate::app) fn supports(&self, conn: u64, f: db::sql::Feature) -> bool {
         self.conn(conn).is_none_or(|c| c.meta.engine.supports(f))
     }
 
     /// Whether `conn` is a PostgreSQL connection.
-    pub(super) fn is_pg(&self, conn: u64) -> bool {
+    pub(in crate::app) fn is_pg(&self, conn: u64) -> bool {
         self.conn(conn).is_some_and(|c| c.meta.engine == db::sql::Engine::Postgres)
     }
 
     /// The dialect of `conn`. A connection without a session (the offline demo) still has the dialect of its engine.
-    pub(super) fn dialect_of(&self, conn: u64) -> db::sql::Dialect {
+    pub(in crate::app) fn dialect_of(&self, conn: u64) -> db::sql::Dialect {
         match self.conn(conn) {
             Some(c) if c.meta.engine == db::sql::Engine::Postgres => db::sql::Dialect::Postgres,
             Some(Conn { sql: Some(s), .. }) => s.dialect,
@@ -71,12 +71,12 @@ impl App {
 
     /// The schema the sidebar shows for a database of `conn`: on PostgreSQL the one picked, else `public`, else the first
     /// user schema; empty on MySQL and Mongo, where the database is the whole namespace.
-    pub(super) fn ns_of(&self, conn: u64, db: &str) -> &str {
+    pub(in crate::app) fn ns_of(&self, conn: u64, db: &str) -> &str {
         self.conn(conn).filter(|c| c.meta.engine == db::sql::Engine::Postgres).map_or("", |c| c.pg_picked(db))
     }
 
     /// The tables and views of the schema a selection points at, once loaded.
-    pub(super) fn tables_of(&self, sel: &Sel) -> Vec<String> {
+    pub(in crate::app) fn tables_of(&self, sel: &Sel) -> Vec<String> {
         let Some(c) = self.conn(sel.conn) else { return Vec::new() };
         if c.meta.engine == db::sql::Engine::Postgres {
             let ns = if sel.schema.is_empty() { c.pg_picked(&sel.db) } else { &sel.schema };
@@ -86,7 +86,7 @@ impl App {
     }
 
     /// A selection of `db` in the schema the sidebar shows, for a table or a new Query tab opened from there.
-    pub(super) fn sel_in(&self, conn: u64, db: &str, coll: String) -> Sel {
+    pub(in crate::app) fn sel_in(&self, conn: u64, db: &str, coll: String) -> Sel {
         Sel { conn, db: db.to_string(), schema: self.ns_of(conn, db).to_string(), coll }
     }
 
@@ -99,14 +99,14 @@ impl App {
     }
 
     /// Asks for the schemas of an opened PostgreSQL database. The tables of the picked one follow when they arrive.
-    pub(super) fn pg_ask_schemas(&mut self, conn: u64, db: &str) {
+    pub(in crate::app) fn pg_ask_schemas(&mut self, conn: u64, db: &str) {
         let Some(sql) = self.session(conn) else { return };
         self.sql_asked.insert((conn, db.to_string()));
         self.worker.sql_schemas(conn, sql, db.to_string());
     }
 
     /// Loads the tables of one schema unless they are held or on their way.
-    pub(super) fn pg_load_tables(&mut self, conn: u64, db: &str, schema: &str) {
+    pub(in crate::app) fn pg_load_tables(&mut self, conn: u64, db: &str, schema: &str) {
         // Without a session nothing is sent and nothing is marked asked, so the load happens once it exists.
         let Some(sql) = self.session(conn) else { return };
         if schema.is_empty() || !self.pg_tables_asked.insert(conn, db, schema) {
@@ -116,7 +116,7 @@ impl App {
     }
 
     /// The switcher's pick: the sidebar lists that schema from now on, and its tables load if they are not held.
-    pub(super) fn pg_set_schema(&mut self, conn: u64, db: &str, schema: String) {
+    pub(in crate::app) fn pg_set_schema(&mut self, conn: u64, db: &str, schema: String) {
         if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
             c.pg.entry(db.to_string()).or_default().picked = schema.clone();
         }
@@ -126,7 +126,7 @@ impl App {
     /// Refresh: the schema list, the tables of every schema already loaded and the autocomplete cache are read again.
     /// Every loaded schema is reloaded, not only the picked one, because the command palette lists the tables of all of
     /// them and a schema left alone would keep offering dropped tables. Schemas never opened stay unloaded.
-    pub(super) fn pg_refresh(&mut self, conn: u64, db: &str) {
+    pub(in crate::app) fn pg_refresh(&mut self, conn: u64, db: &str) {
         let held = self.pg_tables_asked.held(conn, db);
         self.pg_tables_asked.forget(conn, Some(db), None);
         for s in &held {
@@ -141,7 +141,7 @@ impl App {
 
     /// The schemas of a database arrived. The pick is kept while its schema still exists, else it falls back to the
     /// default, and the tables of the pick load.
-    pub(super) fn pg_schemas_done(&mut self, conn: u64, database: String, res: db::Res<Vec<db::sql::PgSchema>>) {
+    pub(in crate::app) fn pg_schemas_done(&mut self, conn: u64, database: String, res: db::Res<Vec<db::sql::PgSchema>>) {
         let list = match res {
             Ok(l) => l,
             Err(e) => {
@@ -172,7 +172,7 @@ impl App {
     }
 
     /// The tables of one schema arrived.
-    pub(super) fn pg_tables_done(&mut self, conn: u64, database: String, schema: String, res: db::Res<(Vec<String>, Vec<String>)>) {
+    pub(in crate::app) fn pg_tables_done(&mut self, conn: u64, database: String, schema: String, res: db::Res<(Vec<String>, Vec<String>)>) {
         match res {
             Ok((names, views)) => {
                 self.side_err.remove(&(conn, ns_key(&database, &schema)));

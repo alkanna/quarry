@@ -2,9 +2,8 @@
 //! fetch (`db::sql::Structure`), asked for when a view first draws and again on refresh. Columns and
 //! indexes are edited here through staged changes (`sql_alter.rs`); the other three views stay read-only.
 
-use super::*;
-use super::sql_alter::staged_marks;
-use super::sql_trig;
+use crate::app::*;
+use crate::app::sql::alter::staged_marks;
 use db::sql::ddl::Change;
 use db::sql::structure::{Column, ForeignKey, Index, Structure, Trigger};
 use egui::{pos2, vec2, Rect};
@@ -14,29 +13,29 @@ const LATER: &str = "Comes with writes";
 
 /// What the four views keep per tab.
 #[derive(Default)]
-pub(super) struct StructState {
-    pub(super) load: Load,
-    pub(super) data: Option<Structure>,
+pub(in crate::app) struct StructState {
+    pub(in crate::app) load: Load,
+    pub(in crate::app) data: Option<Structure>,
     /// The selected row of each grid: columns, indexes, keys out, keys in, triggers.
-    pub(super) sel: [Option<usize>; 5],
+    pub(in crate::app) sel: [Option<usize>; 5],
     /// Column and index changes waiting to become one ALTER TABLE.
-    pub(super) staged: Vec<Change>,
+    pub(in crate::app) staged: Vec<Change>,
     /// The statement and warnings of `staged`, kept between frames.
-    pub(super) bar: Option<super::sql_alter::PlanMemo>,
+    pub(in crate::app) bar: Option<crate::app::sql::alter::PlanMemo>,
     /// The ALTER or trigger statement is running.
-    pub(super) applying: bool,
+    pub(in crate::app) applying: bool,
     /// Trigger edits not saved yet, by trigger name; the new trigger's is under the empty name.
-    pub(super) trig: HashMap<String, db::sql::ddl::TrigDef>,
+    pub(in crate::app) trig: HashMap<String, db::sql::ddl::TrigDef>,
     /// The editor shows the new trigger instead of the selected one.
-    pub(super) trig_new: bool,
+    pub(in crate::app) trig_new: bool,
     /// The name a trigger that is being made will have, so its draft is cleared when the structure lists it.
-    pub(super) trig_made: Option<String>,
+    pub(in crate::app) trig_made: Option<String>,
     /// What the trigger editor shows for the draft, kept between frames.
-    pub(super) trig_memo: Option<sql_trig::TrigMemo>,
+    pub(in crate::app) trig_memo: Option<sql::trig::TrigMemo>,
 }
 
 #[derive(Default)]
-pub(super) enum Load {
+pub(in crate::app) enum Load {
     #[default]
     Idle,
     Loading,
@@ -44,7 +43,7 @@ pub(super) enum Load {
 }
 
 impl StructState {
-    pub(super) fn finish(&mut self, res: db::Res<Structure>) {
+    pub(in crate::app) fn finish(&mut self, res: db::Res<Structure>) {
         match res {
             Ok(s) => (self.data, self.load) = (Some(s), Load::Idle),
             Err(e) => self.load = Load::Failed(e),
@@ -53,7 +52,7 @@ impl StructState {
 }
 
 /// What a frame of drawing asks the app to do afterwards.
-pub(super) enum Act {
+pub(in crate::app) enum Act {
     Copy(String),
     Open { db: String, table: String },
     Refresh,
@@ -92,7 +91,7 @@ impl App {
 
     /// The foreign keys of the open table, for the key cells of Content. The structure is asked for the first time
     /// they are wanted and kept until a change to it clears it.
-    pub(super) fn sql_fks(&mut self) -> Vec<db::sql::structure::ForeignKey> {
+    pub(in crate::app) fn sql_fks(&mut self) -> Vec<db::sql::structure::ForeignKey> {
         let Some(st) = self.tabs.get(self.cur).and_then(|t| t.sql.as_ref()).map(|s| &s.st) else { return Vec::new() };
         if st.data.is_none() && matches!(st.load, Load::Idle) && !self.demo {
             self.request_structure();
@@ -130,11 +129,11 @@ impl App {
 
     /// The staged changes and their kept plan, moved out of the tab for the frame so the draw reads them without a
     /// copy. `hold_staged` puts them back before the frame's actions run.
-    fn take_staged(&mut self) -> (Vec<Change>, Option<super::sql_alter::PlanMemo>, bool) {
+    fn take_staged(&mut self) -> (Vec<Change>, Option<crate::app::sql::alter::PlanMemo>, bool) {
         self.tabs[self.cur].sql.as_mut().map_or((Vec::new(), None, false), |s| (std::mem::take(&mut s.st.staged), s.st.bar.take(), s.st.applying))
     }
 
-    fn hold_staged(&mut self, staged: Vec<Change>, memo: Option<super::sql_alter::PlanMemo>) {
+    fn hold_staged(&mut self, staged: Vec<Change>, memo: Option<crate::app::sql::alter::PlanMemo>) {
         if let Some(s) = self.tabs[self.cur].sql.as_mut() {
             (s.st.staged, s.st.bar) = (staged, memo);
         }
@@ -154,7 +153,7 @@ impl App {
             Act::Copy(text) => ctx.copy_text(text),
             Act::Open { db, table } => {
                 let base = self.tabs[self.cur].sel.clone();
-                self.open_collection(sql_ns::with_ns(self.dialect_of(base.conn), &base, &db, table), false);
+                self.open_collection(sql::ns::with_ns(self.dialect_of(base.conn), &base, &db, table), false);
             }
             Act::Refresh => {
                 if let Some(s) = self.tabs[self.cur].sql.as_mut() {
@@ -182,7 +181,7 @@ impl App {
     }
 
     /// The count shown beside a view's tab once the structure is known.
-    pub(super) fn sql_view_count(&self, v: View) -> Option<usize> {
+    pub(in crate::app) fn sql_view_count(&self, v: View) -> Option<usize> {
         let d = self.t()?.sql.as_ref()?.st.data.as_ref()?;
         Some(match v {
             View::Relations => d.foreign_keys.len(),
@@ -192,7 +191,7 @@ impl App {
         .filter(|n| *n > 0)
     }
 
-    pub(super) fn sql_structure_view(&mut self, ui: &mut egui::Ui) {
+    pub(in crate::app) fn sql_structure_view(&mut self, ui: &mut egui::Ui) {
         let Some((d, mut sel)) = self.take_structure(ui) else { return };
         let mut acts = Vec::new();
         let editable = self.sel_writable();
@@ -338,7 +337,7 @@ impl App {
         self.keep(&ui.ctx().clone(), d, sel, acts);
     }
 
-    pub(super) fn sql_relations_view(&mut self, ui: &mut egui::Ui) {
+    pub(in crate::app) fn sql_relations_view(&mut self, ui: &mut egui::Ui) {
         let Some((d, mut sel)) = self.take_structure(ui) else { return };
         let mut acts = Vec::new();
         let mut open = None;
@@ -382,10 +381,10 @@ impl App {
         let dialect = self.dialect_of(conn);
         let dbs: std::collections::BTreeSet<String> = d.referenced_by.iter().map(|fk| fk.db.clone()).collect();
         for ns in dbs {
-            let (db, schema) = sql_ns::split_ns(dialect, &base_db, &ns);
+            let (db, schema) = sql::ns::split_ns(dialect, &base_db, &ns);
             self.sql_serve(conn, &db, &schema, crate::ui::sql_complete::Wants { schema: true, values: None });
         }
-        let in_rows: Vec<Option<u64>> = d.referenced_by.iter().map(|fk| { let (db, schema) = sql_ns::split_ns(dialect, &base_db, &fk.db); self.sql_schema.get(&(conn, ns_key(&db, &schema))).and_then(|s| s.table(&fk.table)).and_then(|t| t.rows) }).collect();
+        let in_rows: Vec<Option<u64>> = d.referenced_by.iter().map(|fk| { let (db, schema) = sql::ns::split_ns(dialect, &base_db, &fk.db); self.sql_schema.get(&(conn, ns_key(&db, &schema))).and_then(|s| s.table(&fk.table)).and_then(|t| t.rows) }).collect();
         egui::ScrollArea::vertical().id_salt("sql-relations").auto_shrink([false, false]).show(ui, |ui| {
             caption(ui, "THIS TABLE POINTS TO");
             ui.add_space(6.0);
@@ -470,7 +469,7 @@ impl App {
         self.keep(&ui.ctx().clone(), d, sel, acts);
     }
 
-    pub(super) fn sql_triggers_view(&mut self, ui: &mut egui::Ui) {
+    pub(in crate::app) fn sql_triggers_view(&mut self, ui: &mut egui::Ui) {
         let Some((d, mut sel)) = self.take_structure(ui) else { return };
         let mut acts = Vec::new();
         // A locked connection still edits: Save and Delete ask to unlock, as Apply does for columns.
@@ -479,11 +478,11 @@ impl App {
         // A trigger that was just created is listed now, so its draft has done its job.
         if let Some(s) = self.tabs[self.cur].sql.as_mut() {
             let made = s.st.trig_made.clone();
-            if let Some(i) = s.st.trig.get(sql_trig::NEW).and_then(|nd| d.triggers.iter().position(|t| (t.name == nd.name && sql_trig::same(&sql_trig::def_of(t), nd)) || made.as_deref() == Some(t.name.as_str()))) {
-                s.st.trig.remove(sql_trig::NEW);
+            if let Some(i) = s.st.trig.get(sql::trig::NEW).and_then(|nd| d.triggers.iter().position(|t| (t.name == nd.name && sql::trig::same(&sql::trig::def_of(t), nd)) || made.as_deref() == Some(t.name.as_str()))) {
+                s.st.trig.remove(sql::trig::NEW);
                 (s.st.trig_new, sel[4], s.st.trig_made) = (false, Some(i), None);
             }
-            sql_trig::prune_drafts(&mut s.st.trig, &d.triggers);
+            sql::trig::prune_drafts(&mut s.st.trig, &d.triggers);
         }
         let creating = self.tabs[self.cur].sql.as_ref().is_some_and(|s| s.st.trig_new);
         let no_drafts = HashMap::new();
@@ -518,7 +517,7 @@ impl App {
             let t = &d.triggers[r];
             match c {
                 0 => {
-                    let edited = drafts.get(&t.name).is_some_and(|x| !sql_trig::same(&sql_trig::def_of(t), x));
+                    let edited = drafts.get(&t.name).is_some_and(|x| !sql::trig::same(&sql::trig::def_of(t), x));
                     put(ui, rect, &t.name, mono(TXT_SMALL), if edited { WARNING() } else { TEXT() }, false)
                 }
                 1 => put(ui, rect, &t.timing, mono(TXT_SMALL), C_KEYWORD(), false),
@@ -543,7 +542,7 @@ impl App {
         self.keep(&ui.ctx().clone(), d, sel, acts);
     }
 
-    pub(super) fn sql_info_view(&mut self, ui: &mut egui::Ui) {
+    pub(in crate::app) fn sql_info_view(&mut self, ui: &mut egui::Ui) {
         let Some((d, sel)) = self.take_structure(ui) else { return };
         let mut acts = Vec::new();
         let s = &d.status;
@@ -635,7 +634,7 @@ fn edit_row_with(ui: &mut egui::Ui, on: bool, note: &str, buttons: impl FnOnce(&
 }
 
 /// "1.4 MB" for a byte count, one decimal from kilobytes up.
-pub(super) fn size(n: u64) -> String {
+pub(in crate::app) fn size(n: u64) -> String {
     match n {
         n if n >= 1 << 30 => format!("{:.1} GB", n as f64 / (1u64 << 30) as f64),
         n if n >= 1 << 20 => format!("{:.1} MB", n as f64 / (1u64 << 20) as f64),
@@ -750,7 +749,7 @@ fn column_cell(ui: &egui::Ui, rect: Rect, c: &Column, col: usize, pg: bool) {
                 put(ui, rect, d, mono(), C_KEYWORD(), false);
             }
             // PostgreSQL types carry the kind its catalog gave them, which sees through domains and enums.
-            Some(d) if c.kind.map_or_else(|| matches!(base.as_str(), "TINYINT" | "SMALLINT" | "MEDIUMINT" | "INT" | "INTEGER" | "BIGINT" | "DECIMAL" | "NUMERIC" | "FLOAT" | "DOUBLE" | "BIT" | "YEAR"), super::sql_edit::is_numeric) => {
+            Some(d) if c.kind.map_or_else(|| matches!(base.as_str(), "TINYINT" | "SMALLINT" | "MEDIUMINT" | "INT" | "INTEGER" | "BIGINT" | "DECIMAL" | "NUMERIC" | "FLOAT" | "DOUBLE" | "BIT" | "YEAR"), crate::app::sql::edit::is_numeric) => {
                 put(ui, rect, d, mono(), C_NUMBER(), false);
             }
             Some(d) => {
@@ -887,7 +886,7 @@ fn mono(size: f32) -> FontId {
 impl App {
     /// The orders table of docs/sql/designs.figcraft for the QUARRY_TEST_SQL demo: structure, info,
     /// relations or triggers pick the view. Never touches a server or the keychain.
-    pub(super) fn sql_structure_demo(&mut self, which: &str) {
+    pub(in crate::app) fn sql_structure_demo(&mut self, which: &str) {
         let view = match which {
             "structure" | "coledit" | "stagebar" => View::Structure,
             "fkcell" => View::Documents,

@@ -481,7 +481,7 @@ impl App {
         // A SQL tab's sort is the ORDER BY text, which a header click writes as "`col` ASC".
         let sql_sort = self.t().filter(|t| t.sql.is_some()).map(|t| t.sort_txt.clone());
         let sql = sql_sort.is_some();
-        let group_cols: Vec<String> = self.t().and_then(|t| t.sql.as_ref()).filter(|s| sql && s.matched.is_some()).map(|s| super::sql_bar::group_names(s)).unwrap_or_default();
+        let group_cols: Vec<String> = self.t().and_then(|t| t.sql.as_ref()).filter(|s| sql && s.matched.is_some()).map(|s| super::sql::bar::group_names(s)).unwrap_or_default();
         // A Shell result shows the same tab but is not the table's rows: its indexes and keys mean nothing to the editor.
         let sql_rows = sql && !agg;
         let sql_grouped = sql && self.t().and_then(|t| t.sql.as_ref()).is_some_and(|s| s.matched.is_some());

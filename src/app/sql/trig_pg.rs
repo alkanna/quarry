@@ -2,20 +2,20 @@
 //! WHEN, enabled, and the function the trigger runs). The statements come from `db::sql::pg::ddl_trig`, which also checks the
 //! draft; this file only draws it and says what the person should know before saving.
 
-use super::*;
+use crate::app::*;
 use db::sql::ddl::TrigDef;
 use db::sql::pg::ddl_trig::{canonical, cols_of, events_of, func_name};
 use db::sql::structure::PgTrig;
 
 /// What the head needs besides the draft.
-pub(super) struct Env<'a> {
+pub(in crate::app) struct Env<'a> {
     pub editable: bool,
     pub live: Option<&'a PgTrig>,
     pub table: &'a str,
 }
 
 /// The UPDATE OF list names a column the table does not have: PostgreSQL would refuse it, and the message names it.
-pub(super) fn column_problem(def: &TrigDef, cols: &[String]) -> Option<String> {
+pub(in crate::app) fn column_problem(def: &TrigDef, cols: &[String]) -> Option<String> {
     // A column whose own name holds a comma is typed as that name, which the split below would take for two.
     if cols.iter().any(|c| *c == def.pg.of_cols) {
         return None;
@@ -28,7 +28,7 @@ fn field(ui: &mut egui::Ui, enabled: bool, text: &mut String, width: f32, hint: 
     ui.add_enabled(enabled, egui::TextEdit::singleline(text).font(egui::TextStyle::Monospace).desired_width(width).hint_text(hint)).widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, enabled, label));
 }
 
-pub(super) fn head(ui: &mut egui::Ui, def: &mut TrigDef, env: &Env) {
+pub(in crate::app) fn head(ui: &mut egui::Ui, def: &mut TrigDef, env: &Env) {
     let (editable, exists) = (env.editable, env.live.is_some());
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 10.0;

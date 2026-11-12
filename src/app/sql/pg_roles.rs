@@ -4,8 +4,8 @@
 //! edit lands in one staged list, previewed in the bar at the bottom and run by Apply in one transaction; the statements,
 //! their checks and their inverses come from `db::sql::pg::roles`.
 
-use super::sql_users::{forget_secret, secret_id};
-use super::*;
+use crate::app::sql::users::{forget_secret, secret_id};
+use crate::app::*;
 use db::sql::pg::roles::{self as rp, Answer, Attrs, Batch, Change, Cluster, DefKind, Defaults, Did, DropInfo, DropMode, Kind, NewRole, Obj, Objects, Opts, Privs, Role};
 use std::sync::Arc;
 use zeroize::Zeroize;
@@ -32,54 +32,54 @@ const CHIP_PRIV_H: f32 = 18.0;
 const SIDE_W: f32 = 220.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum PTab {
+pub(in crate::app) enum PTab {
     Privileges,
     Roles,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum RTab {
+pub(in crate::app) enum RTab {
     Role,
     Membership,
     Defaults,
 }
 
 /// The + Default privilege form of the Roles tab.
-pub(super) struct DefForm {
+pub(in crate::app) struct DefForm {
     owner: String,
     schema: String,
     kind: DefKind,
     privs: BTreeSet<String>,
 }
 
-pub(super) struct PgRolesWin {
-    pub(super) conn: u64,
-    pub(super) tab: PTab,
-    pub(super) rtab: RTab,
-    pub(super) req_cluster: u64,
+pub(in crate::app) struct PgRolesWin {
+    pub(in crate::app) conn: u64,
+    pub(in crate::app) tab: PTab,
+    pub(in crate::app) rtab: RTab,
+    pub(in crate::app) req_cluster: u64,
     /// Shared so a frame borrows it alongside the window instead of copying every role and membership.
-    pub(super) cluster: Option<db::Res<Arc<Cluster>>>,
+    pub(in crate::app) cluster: Option<db::Res<Arc<Cluster>>>,
     /// Each role's `Cluster::chain`, worked out once per answer rather than for every cell of every frame.
     chains: HashMap<String, Vec<String>>,
-    pub(super) database: String,
-    pub(super) schema: String,
-    pub(super) kind: Kind,
-    pub(super) inherited: bool,
+    pub(in crate::app) database: String,
+    pub(in crate::app) schema: String,
+    pub(in crate::app) kind: Kind,
+    pub(in crate::app) inherited: bool,
     /// Whether the pg_ roles are listed.
-    pub(super) system: bool,
-    pub(super) req_objs: u64,
-    pub(super) objs: Option<db::Res<Objects>>,
-    pub(super) req_defs: u64,
-    pub(super) defs: Option<db::Res<Defaults>>,
+    pub(in crate::app) system: bool,
+    pub(in crate::app) req_objs: u64,
+    pub(in crate::app) objs: Option<db::Res<Objects>>,
+    pub(in crate::app) req_defs: u64,
+    pub(in crate::app) defs: Option<db::Res<Defaults>>,
     /// The role of the side panel and the Roles tab.
-    pub(super) role: Option<String>,
+    pub(in crate::app) role: Option<String>,
     /// The cell whose editor is open: the object's oid and the grantee ("" for PUBLIC).
-    pub(super) cell: Option<(String, String)>,
-    pub(super) filter: String,
-    pub(super) staged: Vec<Change>,
-    pub(super) busy: bool,
+    pub(in crate::app) cell: Option<(String, String)>,
+    pub(in crate::app) filter: String,
+    pub(in crate::app) staged: Vec<Change>,
+    pub(in crate::app) busy: bool,
     /// The request id of the Apply in flight; an answer with another one is from an Apply this window no longer waits for.
-    pub(super) req_apply: u64,
+    pub(in crate::app) req_apply: u64,
     /// The signed-in role's name typed to confirm a change to its own membership.
     confirm: String,
     /// The Role tab's text fields as typed, for the role in `fields_for`.
@@ -91,7 +91,7 @@ pub(super) struct PgRolesWin {
 }
 
 impl PgRolesWin {
-    pub(super) fn new(conn: u64, database: String) -> PgRolesWin {
+    pub(in crate::app) fn new(conn: u64, database: String) -> PgRolesWin {
         PgRolesWin {
             conn,
             tab: PTab::Privileges,
@@ -222,7 +222,7 @@ fn key(c: &Change) -> String {
     }
 }
 
-pub(super) struct NewRoleForm {
+pub(in crate::app) struct NewRoleForm {
     conn: u64,
     name: String,
     attrs: Attrs,
@@ -232,7 +232,7 @@ pub(super) struct NewRoleForm {
     serial: u64,
 }
 
-pub(super) struct PgPwForm {
+pub(in crate::app) struct PgPwForm {
     conn: u64,
     role: String,
     oid: String,
@@ -257,17 +257,17 @@ impl Drop for PgPwForm {
 
 #[cfg(test)]
 impl PgPwForm {
-    pub(super) fn for_test(conn: u64, role: &str, serial: u64) -> PgPwForm {
+    pub(in crate::app) fn for_test(conn: u64, role: &str, serial: u64) -> PgPwForm {
         PgPwForm { conn, role: role.into(), oid: String::new(), password: String::new(), again: String::new(), serial }
     }
 
-    pub(super) fn typed(&self) -> &str {
+    pub(in crate::app) fn typed(&self) -> &str {
         &self.password
     }
 }
 
 /// Drops what egui keeps of a closing password dialog's fields, the undo history of their text included.
-pub(super) fn forget_pg_secrets(ctx: &egui::Context, m: &Modal) {
+pub(in crate::app) fn forget_pg_secrets(ctx: &egui::Context, m: &Modal) {
     match m {
         Modal::PgNewRole(f) => forget_secret(ctx, "pg-new-role", f.serial, 1),
         Modal::PgPassword(f) => forget_secret(ctx, "pg-password", f.serial, 2),
@@ -275,7 +275,7 @@ pub(super) fn forget_pg_secrets(ctx: &egui::Context, m: &Modal) {
     }
 }
 
-pub(super) struct DropForm {
+pub(in crate::app) struct DropForm {
     conn: u64,
     role: String,
     req: u64,
@@ -428,7 +428,7 @@ impl App {
     }
 
     /// Opens the window on the connection's own database.
-    pub(super) fn open_pg_roles(&mut self, conn: u64) {
+    pub(in crate::app) fn open_pg_roles(&mut self, conn: u64) {
         let database = self.pg_roles_db(conn).map(|d| d.pg_database()).filter(|d| !d.is_empty()).unwrap_or_else(|| "postgres".into());
         self.pg_roles = Some(PgRolesWin::new(conn, database));
         self.pg_roles_reload();
@@ -476,7 +476,7 @@ impl App {
         self.worker.pg_roles_defaults(conn, r, sql, database);
     }
 
-    pub(super) fn pg_roles_answer(&mut self, conn: u64, req: u64, ans: Answer) {
+    pub(in crate::app) fn pg_roles_answer(&mut self, conn: u64, req: u64, ans: Answer) {
         match ans {
             Answer::Cluster(res) => {
                 if let Some(w) = self.pg_roles.as_mut().filter(|w| w.conn == conn && w.req_cluster == req) {
@@ -557,7 +557,7 @@ impl App {
         Env { major, locked, blocked }
     }
 
-    pub(super) fn pg_roles_window(&mut self, ctx: &egui::Context) {
+    pub(in crate::app) fn pg_roles_window(&mut self, ctx: &egui::Context) {
         let Some(mut w) = self.pg_roles.take() else { return };
         let conn = w.conn;
         let env = self.pg_roles_env(&w);
@@ -1209,7 +1209,7 @@ impl App {
         self.modal = Some(Modal::PgNewRole(Box::new(NewRoleForm { conn, name: String::new(), attrs: Attrs { login: true, ..Default::default() }, groups: Vec::new(), password: String::new(), serial: self.req })));
     }
 
-    pub(super) fn pg_new_role_dialog(&mut self, ui: &mut egui::Ui, f: &mut NewRoleForm, keep: &mut bool) {
+    pub(in crate::app) fn pg_new_role_dialog(&mut self, ui: &mut egui::Ui, f: &mut NewRoleForm, keep: &mut bool) {
         ui.set_width(540.0);
         let writable = self.conn_writable(f.conn);
         let cluster = self.pg_roles.as_ref().and_then(|w| w.cl_arc()).unwrap_or_default();
@@ -1291,7 +1291,7 @@ impl App {
         let secret = (!f.password.is_empty() && f.attrs.login).then_some(rp::REDACTED);
         let spec = NewRole { name: f.name.trim().to_string(), attrs: f.attrs.clone(), groups: f.groups.clone() };
         let check = rp::create_sql(&spec, secret).and_then(|_| if f.password.contains('\0') { Err("A password cannot hold a NUL character.".into()) } else { Ok(()) });
-        super::sql_create::sql_block(ui, &match rp::create_sql(&spec, secret) {
+        crate::app::sql::create::sql_block(ui, &match rp::create_sql(&spec, secret) {
             Ok(s) => format!("{s};"),
             Err(_) => "-- Not valid yet.".into(),
         });
@@ -1327,7 +1327,7 @@ impl App {
         }
     }
 
-    pub(super) fn pg_password_dialog(&mut self, ui: &mut egui::Ui, f: &mut PgPwForm, keep: &mut bool) {
+    pub(in crate::app) fn pg_password_dialog(&mut self, ui: &mut egui::Ui, f: &mut PgPwForm, keep: &mut bool) {
         ui.set_width(520.0);
         let writable = self.conn_writable(f.conn);
         let encryption = self.pg_roles.as_ref().and_then(|w| w.cl().map(|c| c.password_encryption.clone())).unwrap_or_default();
@@ -1347,7 +1347,7 @@ impl App {
             ui.end_row();
         });
         ui.add_space(8.0);
-        super::sql_create::sql_block(ui, &format!("{};", rp::password_sql(&f.role, rp::REDACTED)));
+        crate::app::sql::create::sql_block(ui, &format!("{};", rp::password_sql(&f.role, rp::REDACTED)));
         let check = rp::check_password(&f.password).and_then(|_| if f.password == f.again { Ok(()) } else { Err("The two passwords differ.".to_string()) });
         if let Err(e) = &check {
             if !f.password.is_empty() || !f.again.is_empty() {
@@ -1395,7 +1395,7 @@ impl App {
         }
     }
 
-    pub(super) fn pg_drop_role_dialog(&mut self, ui: &mut egui::Ui, f: &mut DropForm, keep: &mut bool) {
+    pub(in crate::app) fn pg_drop_role_dialog(&mut self, ui: &mut egui::Ui, f: &mut DropForm, keep: &mut bool) {
         ui.set_width(540.0);
         let writable = self.conn_writable(f.conn);
         let tag = self.conn(f.conn).map(|c| c.meta.tag.clone()).unwrap_or_default();
@@ -1462,7 +1462,7 @@ impl App {
                 let mode = if f.reassign { DropMode::Reassign(f.heir.clone()) } else { DropMode::DropOwned };
                 let plan = rp::drop_plan(info, &mode, &home);
                 match &plan {
-                    Ok(p) => super::sql_create::sql_block(ui, &rp::drop_preview(p)),
+                    Ok(p) => crate::app::sql::create::sql_block(ui, &rp::drop_preview(p)),
                     Err(e) => {
                         ui.label(RichText::new(e.as_str()).size(TXT_SMALL).color(ALERT()));
                     }
@@ -1476,8 +1476,8 @@ impl App {
         if !tag.is_empty() {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                badge(ui, &tag, super::sidebar::tag_color(&tag));
-                ui.label(RichText::new(format!("This connection is tagged {tag}")).color(super::sidebar::tag_color(&tag)));
+                badge(ui, &tag, crate::app::sidebar::tag_color(&tag));
+                ui.label(RichText::new(format!("This connection is tagged {tag}")).color(crate::app::sidebar::tag_color(&tag)));
             });
         }
         if !writable {
@@ -1499,7 +1499,7 @@ impl App {
 
     /// QUARRY_TEST_PG=roles (the Privileges tab with a cell editor open and one change staged) or roles-role (the Roles tab on
     /// app_writer with its connection limit staged).
-    pub(super) fn pg_roles_demo(&mut self, which: &str, conn: u64) {
+    pub(in crate::app) fn pg_roles_demo(&mut self, which: &str, conn: u64) {
         if !matches!(which, "roles" | "roles-role") {
             return;
         }

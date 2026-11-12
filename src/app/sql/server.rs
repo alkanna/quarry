@@ -2,38 +2,38 @@
 //! window (`server.rs`): it asks only while it is open and Quarry is focused, never piles up requests, and keeps
 //! errors in the window so a missing privilege is not announced every 2 seconds. View only: no SET anywhere.
 
-use super::*;
+use crate::app::*;
 use db::sql::server::{metrics, rate, Answer, KillTarget, Metrics, Overview, Proc, Processes, Replica, Snap, StatusGroup, Var, Variables};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-pub(super) const POLL: Duration = Duration::from_secs(2);
+pub(in crate::app) const POLL: Duration = Duration::from_secs(2);
 /// After a failed read a polling tab tries again this often, so one dropped packet does not end the polling and a
 /// missing privilege is not asked about every 2 seconds.
 const BACKOFF: Duration = Duration::from_secs(10);
 
-pub(super) fn retry_after(ok: bool) -> Duration {
+pub(in crate::app) fn retry_after(ok: bool) -> Duration {
     if ok { POLL } else { BACKOFF }
 }
 
 /// How long a confirm button ignores clicks after it was armed, in seconds. A confirm can be drawn where the button that
 /// armed it was, so the second click of a double click would otherwise confirm at once.
-pub(super) const ARM_GUARD: f64 = 0.5;
+pub(in crate::app) const ARM_GUARD: f64 = 0.5;
 
 /// The time a confirm is armed at: egui's input time, which a test can set.
-pub(super) fn arm_time(ui: &egui::Ui) -> f64 {
+pub(in crate::app) fn arm_time(ui: &egui::Ui) -> f64 {
     ui.input(|i| i.time)
 }
 
 /// Whether a click on the confirm button armed at `at` counts: not within ARM_GUARD of arming.
-pub(super) fn confirmed(ui: &egui::Ui, r: &egui::Response, at: f64) -> bool {
+pub(in crate::app) fn confirmed(ui: &egui::Ui, r: &egui::Response, at: f64) -> bool {
     r.clicked() && arm_time(ui) - at >= ARM_GUARD
 }
 
 /// A Kill waiting for its second click, with everything the list showed about its target.
 #[derive(Clone)]
-pub(super) struct Confirm {
+pub(in crate::app) struct Confirm {
     p: Proc,
     identity: String,
     /// The whole connection ends (KILL) instead of only its statement (KILL QUERY).
@@ -65,7 +65,7 @@ fn kill_toast(kills: &mut HashSet<u64>, req: u64, ans: &Answer) -> Option<Result
 
 /// The sample before the latest and the seconds between them, from the two instants themselves; a failed read
 /// in between leaves no sample, so a rate never spans an unknown gap.
-pub(super) fn prev_of<T>(old: Option<db::Res<(Instant, T)>>, now: Instant) -> Option<(f64, T)> {
+pub(in crate::app) fn prev_of<T>(old: Option<db::Res<(Instant, T)>>, now: Instant) -> Option<(f64, T)> {
     match old {
         Some(Ok((at, t))) => Some((now.duration_since(at).as_secs_f64(), t)),
         _ => None,
@@ -73,7 +73,7 @@ pub(super) fn prev_of<T>(old: Option<db::Res<(Instant, T)>>, now: Instant) -> Op
 }
 
 /// An error with the way to try again, true when Refresh was clicked.
-pub(super) fn error_row(ui: &mut egui::Ui, text: String) -> bool {
+pub(in crate::app) fn error_row(ui: &mut egui::Ui, text: String) -> bool {
     ui.horizontal(|ui| {
         ui.label(RichText::new(text).color(ALERT()));
         quiet(ui, "Refresh").clicked()
@@ -82,7 +82,7 @@ pub(super) fn error_row(ui: &mut egui::Ui, text: String) -> bool {
 }
 
 #[derive(Clone, Copy, PartialEq, Default)]
-pub(super) enum SqlServerTab {
+pub(in crate::app) enum SqlServerTab {
     Overview,
     Variables,
     Status,
@@ -91,8 +91,8 @@ pub(super) enum SqlServerTab {
 }
 
 #[derive(Default)]
-pub(super) struct SqlServerWin {
-    pub(super) conn: u64,
+pub(in crate::app) struct SqlServerWin {
+    pub(in crate::app) conn: u64,
     tab: SqlServerTab,
     /// The variables Quarry sets on every session of this connection, for the Variables note.
     quarry: Vec<String>,
@@ -140,7 +140,7 @@ pub(super) struct SqlServerWin {
 }
 
 impl SqlServerWin {
-    pub(super) fn new(conn: u64, quarry: Vec<String>) -> Self {
+    pub(in crate::app) fn new(conn: u64, quarry: Vec<String>) -> Self {
         Self { conn, quarry, auto: true, hide_sleeping: true, writable: true, st_auto: true, ..Default::default() }
     }
 
@@ -152,7 +152,7 @@ impl SqlServerWin {
     }
 
     /// Canned answers for the offline demo: `variables` opens that tab, anything else the processes.
-    pub(super) fn demo(conn: u64, tab: &str) -> Self {
+    pub(in crate::app) fn demo(conn: u64, tab: &str) -> Self {
         let p = Proc::new;
         let mut rows = vec![
             p(8812, "report", "10.0.4.12:51522", "analytics", "Query", 142.0, "Sending data", "SELECT customer_id, SUM(total) FROM orders GROUP BY customer_id"),
@@ -200,7 +200,7 @@ impl SqlServerWin {
     }
 }
 
-pub(super) fn up_text(secs: u64) -> String {
+pub(in crate::app) fn up_text(secs: u64) -> String {
     let (d, h, m) = (secs / 86_400, secs / 3600, secs / 60);
     let plural = |n: u64, w: &str| format!("{n} {w}{}", if n == 1 { "" } else { "s" });
     if d > 0 { plural(d, "day") } else if h > 0 { plural(h, "hour") } else { plural(m, "minute") }
@@ -219,7 +219,7 @@ fn shown_vars<'a>(rows: &'a [Var], filter: &str) -> Vec<&'a Var> {
 }
 
 impl App {
-    pub(super) fn sql_server_window(&mut self, ctx: &egui::Context) {
+    pub(in crate::app) fn sql_server_window(&mut self, ctx: &egui::Context) {
         let Some(mut s) = self.sql_server.take() else { return };
         let conn = s.conn;
         let db = self.conn(conn).and_then(|c| c.sql.clone());
@@ -335,7 +335,7 @@ impl App {
     /// Quarry's own sessions on connection `conn` by server thread id, with what each one is: the ids kept for Stop
     /// (a Query run, a running export, an import or script file, the shell's relays). They get no Kill, because
     /// Stop also sets the cancel flag so the work ends instead of carrying on after the statement is cut.
-    pub(super) fn own_sessions(&self, conn: u64) -> HashMap<u64, String> {
+    pub(in crate::app) fn own_sessions(&self, conn: u64) -> HashMap<u64, String> {
         let mut own = HashMap::new();
         let mut add = |id: u64, what: &str| {
             if id != 0 {
@@ -358,12 +358,12 @@ impl App {
             add(j.id.load(Ordering::SeqCst), "Export");
         }
         if let Some(j) = self.sql_job.as_ref().filter(|j| j.conn == conn) {
-            add(j.id.load(Ordering::SeqCst), if j.kind == sql_dump::JobKind::Import { "Import" } else { "Script file" });
+            add(j.id.load(Ordering::SeqCst), if j.kind == sql::dump::JobKind::Import { "Import" } else { "Script file" });
         }
         own
     }
 
-    pub(super) fn sql_server_done(&mut self, req: u64, ans: Answer) {
+    pub(in crate::app) fn sql_server_done(&mut self, req: u64, ans: Answer) {
         // A Kill answer is told even when the window is gone, so a failure is never silent.
         if let Some(told) = kill_toast(&mut self.sql_kills, req, &ans) {
             if let (Ok(_), Some(s)) = (&told, self.sql_server.as_mut()) {
@@ -428,17 +428,17 @@ impl App {
 
 const ID_W: f32 = 64.0;
 const COLS: [(&str, f32); 7] = [("Id", ID_W), ("User", 120.0), ("Host", 140.0), ("Db", 100.0), ("Command", 74.0), ("Time", 76.0), ("State", 150.0)];
-pub(super) const PAD: f32 = 10.0;
+pub(in crate::app) const PAD: f32 = 10.0;
 const KILL_W: f32 = 72.0;
 const CONFIRM_W: f32 = 290.0;
 
 /// One cell of a painted row: a single line cut with an ellipsis at the cell's width.
-pub(super) fn paint_cell(ui: &egui::Ui, row: egui::Rect, x: f32, w: f32, text: &str, color: Color32, mono: bool, right: bool) {
+pub(in crate::app) fn paint_cell(ui: &egui::Ui, row: egui::Rect, x: f32, w: f32, text: &str, color: Color32, mono: bool, right: bool) {
     let font = if mono { FontId::monospace(TXT_SMALL) } else { FontId::proportional(TXT_SMALL) };
     place(ui, egui::Rect::from_min_max(egui::pos2(x, row.top()), egui::pos2(x + w, row.bottom())), text, font, color, right, PAD);
 }
 
-pub(super) fn header(ui: &mut egui::Ui, cols: &[(&str, f32, bool)]) {
+pub(in crate::app) fn header(ui: &mut egui::Ui, cols: &[(&str, f32, bool)]) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_H), Sense::hover());
     ui.painter().rect_filled(rect, R_SM, HDR());
     let mut x = rect.left();
@@ -703,7 +703,7 @@ fn thread_state(v: &str) -> (&str, Color32) {
     }
 }
 
-pub(super) fn tile(ui: &mut egui::Ui, rect: egui::Rect, title: &str, big: &str, suffix: &str, sub: &str) {
+pub(in crate::app) fn tile(ui: &mut egui::Ui, rect: egui::Rect, title: &str, big: &str, suffix: &str, sub: &str) {
     ui.painter().rect(rect, R_MD, PANEL(), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
     let x = rect.left() + 12.0;
     let t = ui.painter().layout_no_wrap(title.to_string(), FontId::proportional(TXT_SMALL), MUTED());
@@ -719,7 +719,7 @@ pub(super) fn tile(ui: &mut egui::Ui, rect: egui::Rect, title: &str, big: &str, 
 }
 
 /// Label and value rows of a key/value box.
-pub(super) fn kv_rows(ui: &mut egui::Ui, w: f32, rows: &[(&str, String, Color32)]) {
+pub(in crate::app) fn kv_rows(ui: &mut egui::Ui, w: f32, rows: &[(&str, String, Color32)]) {
     for (i, (k, v, c)) in rows.iter().enumerate() {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(w, ROW_H), Sense::hover());
         ui.painter().rect_filled(rect, 0.0, if i % 2 == 1 { PANEL() } else { BG() });

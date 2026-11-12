@@ -3,25 +3,25 @@
 //! `db::sql::pg::create`. MySQL's dialogs are in `sql_create.rs`; this server has no engines, charsets or collations to pick
 //! and a table is built from the structure editor's column model.
 
-use super::sql_create::{list_and, plural, right_actions, sql_block, DropForm, DropKind, NOTE_DB, NOTE_TABLE};
-use super::*;
+use crate::app::sql::create::{list_and, plural, right_actions, sql_block, DropForm, DropKind, NOTE_DB, NOTE_TABLE};
+use crate::app::*;
 use db::sql::create::{Ddl, DropInfo};
 use db::sql::pg::create::{self, Check, DbChoices, DbOpts, NewIndex, TableSpec, Unique};
 use db::sql::ddl::{self, ColDef, Dv};
 use db::sql::structure::{ForeignKey, Structure};
 
-pub(super) struct PgNewDb {
+pub(in crate::app) struct PgNewDb {
     conn: u64,
     name: String,
     /// The template is None for the server's own default, template1, and every other None is the template's own setting.
-    pub(super) opts: DbOpts,
+    pub(in crate::app) opts: DbOpts,
     /// None while the server's lists load.
-    pub(super) choices: Option<DbChoices>,
+    pub(in crate::app) choices: Option<DbChoices>,
     load_err: Option<String>,
     focused: bool,
 }
 
-pub(super) struct PgNewSchema {
+pub(in crate::app) struct PgNewSchema {
     conn: u64,
     database: String,
     name: String,
@@ -30,7 +30,7 @@ pub(super) struct PgNewSchema {
 
 /// One column of the builder: the structure editor's definition and the two marks the table level needs.
 #[derive(Clone, PartialEq)]
-pub(super) struct PgCol {
+pub(in crate::app) struct PgCol {
     def: ColDef,
     pk: bool,
     unique: bool,
@@ -39,11 +39,11 @@ pub(super) struct PgCol {
 /// A foreign key of the builder, with the parent's structure as the server gave it, read on a request of its own like the Add
 /// relation dialog's. `key.cols` and `key.ref_cols` are kept the same length, one pair per line, empty until picked.
 #[derive(Clone)]
-pub(super) struct PgFk {
+pub(in crate::app) struct PgFk {
     key: ForeignKey,
     /// The key points at the table being made, which follows the name typed.
     own: bool,
-    pub(super) parent: Option<Structure>,
+    pub(in crate::app) parent: Option<Structure>,
     /// The schema and table `parent` was asked for, and the request that carries the answer.
     asked: (String, String),
     req: u64,
@@ -57,7 +57,7 @@ impl PgFk {
     }
 }
 
-pub(super) struct PgNewTable {
+pub(in crate::app) struct PgNewTable {
     conn: u64,
     database: String,
     schema: String,
@@ -66,13 +66,13 @@ pub(super) struct PgNewTable {
     /// The UNIQUE constraints over several columns; one over a single column is also its column's Unique box.
     uniques: Vec<Unique>,
     checks: Vec<Check>,
-    pub(super) fks: Vec<PgFk>,
+    pub(in crate::app) fks: Vec<PgFk>,
     indexes: Vec<NewIndex>,
     comment: String,
     show_sql: bool,
     focused: bool,
     /// The statements of the form as it was last built, with the spec they came from.
-    pub(super) built: Option<(TableSpec, db::Res<Vec<String>>)>,
+    pub(in crate::app) built: Option<(TableSpec, db::Res<Vec<String>>)>,
 }
 
 /// The types the picker offers. The type box takes any other name, and the server checks it before anything is made.
@@ -185,7 +185,7 @@ impl PgNewTable {
     }
 
     /// The answer to a parent's structure read, when it is for one of this dialog's keys.
-    pub(super) fn parent_loaded(&mut self, req: u64, res: &db::Res<Structure>) -> bool {
+    pub(in crate::app) fn parent_loaded(&mut self, req: u64, res: &db::Res<Structure>) -> bool {
         let Some(k) = self.fks.iter_mut().find(|k| k.req == req && req != 0) else { return false };
         match res {
             Ok(s) => (k.parent, k.err) = (Some(s.clone()), None),
@@ -257,7 +257,7 @@ fn editor_label(ui: &mut egui::Ui, text: &mut String, width: f32, label: &str) -
 }
 
 impl App {
-    pub(super) fn pg_session(&self, conn: u64) -> Option<db::sql::Db> {
+    pub(in crate::app) fn pg_session(&self, conn: u64) -> Option<db::sql::Db> {
         if self.demo {
             return None;
         }
@@ -269,7 +269,7 @@ impl App {
         Some(self.ns_of(conn, db)).filter(|s| !s.is_empty()).unwrap_or(PG_PUBLIC).to_string()
     }
 
-    pub(super) fn pg_new_db(&mut self, conn: u64) {
+    pub(in crate::app) fn pg_new_db(&mut self, conn: u64) {
         if !self.conn_writable(conn) {
             return self.ask_unlock_on(conn, move |a| a.pg_new_db(conn));
         }
@@ -279,7 +279,7 @@ impl App {
         self.modal = Some(Modal::PgNewDb(Box::new(PgNewDb { conn, name: String::new(), opts: DbOpts::default(), choices: None, load_err: None, focused: false })));
     }
 
-    pub(super) fn pg_choices_done(&mut self, conn: u64, res: db::Res<DbChoices>) {
+    pub(in crate::app) fn pg_choices_done(&mut self, conn: u64, res: db::Res<DbChoices>) {
         if let Some(Modal::PgNewDb(f)) = &mut self.modal {
             if f.conn == conn {
                 match res {
@@ -290,14 +290,14 @@ impl App {
         }
     }
 
-    pub(super) fn pg_new_schema(&mut self, conn: u64, database: String) {
+    pub(in crate::app) fn pg_new_schema(&mut self, conn: u64, database: String) {
         if !self.conn_writable(conn) {
             return self.ask_unlock_on(conn, move |a| a.pg_new_schema(conn, database));
         }
         self.modal = Some(Modal::PgNewSchema(Box::new(PgNewSchema { conn, database, name: String::new(), focused: false })));
     }
 
-    pub(super) fn pg_new_table(&mut self, conn: u64, database: String) {
+    pub(in crate::app) fn pg_new_table(&mut self, conn: u64, database: String) {
         if !self.conn_writable(conn) {
             return self.ask_unlock_on(conn, move |a| a.pg_new_table(conn, database));
         }
@@ -306,7 +306,7 @@ impl App {
     }
 
     /// Asks what a drop takes. `name` is the schema for a schema, the table or view for those, and empty for a database.
-    pub(super) fn pg_drop_ask(&mut self, conn: u64, db: String, name: String, kind: DropKind) {
+    pub(in crate::app) fn pg_drop_ask(&mut self, conn: u64, db: String, name: String, kind: DropKind) {
         if !self.conn_writable(conn) {
             return self.ask_unlock_on(conn, move |a| a.pg_drop_ask(conn, db, name, kind));
         }
@@ -331,9 +331,9 @@ impl App {
     /// refuse the drop for its connections and blame another session, and WITH (FORCE) would kill the work halfway.
     /// A script can touch anything in its database, and an import is known by its schema only, so a table drop is held for both.
     fn pg_job_blocks(&self, conn: u64, database: &str, schema: &str, kind: DropKind) -> Option<String> {
-        let job = self.sql_job.as_ref().filter(|j| j.conn == conn && j.db.pg_database() == database).filter(|j| kind == DropKind::Database || j.kind == sql_dump::JobKind::Script || j.schema == schema);
+        let job = self.sql_job.as_ref().filter(|j| j.conn == conn && j.db.pg_database() == database).filter(|j| kind == DropKind::Database || j.kind == sql::dump::JobKind::Script || j.schema == schema);
         let what = match job {
-            Some(j) if j.kind == sql_dump::JobKind::Import => "an import",
+            Some(j) if j.kind == sql::dump::JobKind::Import => "an import",
             Some(_) => "a script file",
             None if self.tabs.iter().any(|t| t.sel.conn == conn && t.sel.db == database && t.shell.cancel.is_some()) => "a shell script",
             None => return None,
@@ -344,7 +344,7 @@ impl App {
     /// Runs a confirmed drop. Tabs and sidebar state go when the server says it worked (`pg_ddl_done`), never before: a drop that is
     /// refused (another session, a pooler) must leave the person's query text and staged changes where they were.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn pg_drop_run(&mut self, conn: u64, sql: db::sql::Db, database: String, schema: String, table: String, kind: DropKind, opt: bool) {
+    pub(in crate::app) fn pg_drop_run(&mut self, conn: u64, sql: db::sql::Db, database: String, schema: String, table: String, kind: DropKind, opt: bool) {
         // A job can start while the confirmation is open, so the check is made again here.
         if let Some(why) = self.pg_job_blocks(conn, &database, &schema, kind) {
             return self.warn(why);
@@ -360,7 +360,7 @@ impl App {
     }
 
     /// What the open tabs of a database hold that closing them would lose: staged row edits, staged structure changes and Query text.
-    pub(super) fn pg_unsaved_in(&self, conn: u64, database: &str) -> (usize, usize, usize) {
+    pub(in crate::app) fn pg_unsaved_in(&self, conn: u64, database: &str) -> (usize, usize, usize) {
         let edits = self.drafts.values().filter(|d| d.conn == conn && d.db == database).count();
         let mut staged = 0;
         let mut queries = 0;
@@ -375,7 +375,7 @@ impl App {
 
     /// A create or drop finished: the sidebar lists and the tabs follow what the server has now.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn pg_ddl_done(&mut self, conn: u64, database: String, schema: String, table: String, what: Ddl, res: db::Res<String>, dbs: Option<Vec<String>>) {
+    pub(in crate::app) fn pg_ddl_done(&mut self, conn: u64, database: String, schema: String, table: String, what: Ddl, res: db::Res<String>, dbs: Option<Vec<String>>) {
         match res {
             Ok(s) => self.ok(s),
             Err(e) => return self.err(e),
@@ -441,7 +441,7 @@ impl App {
         }
     }
 
-    pub(super) fn pg_new_db_dialog(&mut self, ui: &mut egui::Ui, f: &mut PgNewDb, keep: &mut bool) {
+    pub(in crate::app) fn pg_new_db_dialog(&mut self, ui: &mut egui::Ui, f: &mut PgNewDb, keep: &mut bool) {
         ui.set_width(540.0);
         let writable = self.conn_writable(f.conn);
         dialog_title(ui, "New database");
@@ -509,7 +509,7 @@ impl App {
         });
     }
 
-    pub(super) fn pg_new_schema_dialog(&mut self, ui: &mut egui::Ui, f: &mut PgNewSchema, keep: &mut bool) {
+    pub(in crate::app) fn pg_new_schema_dialog(&mut self, ui: &mut egui::Ui, f: &mut PgNewSchema, keep: &mut bool) {
         ui.set_width(480.0);
         let writable = self.conn_writable(f.conn);
         dialog_title(ui, "New schema");
@@ -552,7 +552,7 @@ impl App {
         });
     }
 
-    pub(super) fn pg_new_table_dialog(&mut self, ui: &mut egui::Ui, f: &mut PgNewTable, keep: &mut bool) {
+    pub(in crate::app) fn pg_new_table_dialog(&mut self, ui: &mut egui::Ui, f: &mut PgNewTable, keep: &mut bool) {
         ui.set_max_width(780.0);
         ui.set_width(740.0);
         let writable = self.conn_writable(f.conn);
@@ -932,7 +932,7 @@ impl App {
 
     /// The body of a PostgreSQL drop confirmation: what goes, what a drop cannot do, and the opt-in that widens it (CASCADE or
     /// WITH (FORCE)), which is ticked in this dialog and never remembered. True when the drop cannot run as things stand.
-    pub(super) fn pg_drop_notes(&mut self, ui: &mut egui::Ui, f: &mut DropForm, info: &DropInfo, name: &str, conn: &str) -> bool {
+    pub(in crate::app) fn pg_drop_notes(&mut self, ui: &mut egui::Ui, f: &mut DropForm, info: &DropInfo, name: &str, conn: &str) -> bool {
         let wrap = |ui: &mut egui::Ui, text: String, color: Color32| {
             ui.add(egui::Label::new(RichText::new(text).color(color)).wrap());
         };

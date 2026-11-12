@@ -1,7 +1,7 @@
 //! The Users and privileges window of a SQL connection, its New user and Change password dialogs. The
 //! statements and their inverses come from `db::sql::users`; this file draws and routes the answers.
 
-use super::*;
+use crate::app::*;
 use db::sql::ddl::Mode;
 use db::sql::users::{self, Account, AccountInfo, AccountPlan, Caps, Edit, Expire, Grant, Loaded, Op, Scope, Settings, Tls, UserList, DB_PRIVS};
 use db::sql::Dialect;
@@ -10,7 +10,7 @@ const NOTE_APPLY: &str = "Read-only: unlock writes to change this account";
 const NOTE_USER: &str = "Read-only: unlock writes to create a user";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum UTab {
+pub(in crate::app) enum UTab {
     Account,
     Global,
     Databases,
@@ -19,58 +19,58 @@ pub(super) enum UTab {
 
 /// How the password lifetime is chosen; "After N days" has its number in a field beside it.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum ExpKind {
+pub(in crate::app) enum ExpKind {
     Never,
     Default,
     Days,
 }
 
 /// One database of the Databases tab: what the server holds and what the boxes say now.
-pub(super) struct GrantRow {
+pub(in crate::app) struct GrantRow {
     /// The database as the server's grant writes it, `\_` for a literal underscore.
-    pub(super) pattern: String,
-    pub(super) orig: BTreeSet<String>,
-    pub(super) now: BTreeSet<String>,
+    pub(in crate::app) pattern: String,
+    pub(in crate::app) orig: BTreeSet<String>,
+    pub(in crate::app) now: BTreeSet<String>,
 }
 
-pub(super) struct SqlUsersWin {
-    pub(super) conn: u64,
-    pub(super) list_req: u64,
-    pub(super) list: Option<db::Res<UserList>>,
+pub(in crate::app) struct SqlUsersWin {
+    pub(in crate::app) conn: u64,
+    pub(in crate::app) list_req: u64,
+    pub(in crate::app) list: Option<db::Res<UserList>>,
     /// The label of each account of `list` in lowercase, for the filter box.
     search: Vec<String>,
-    pub(super) filter: String,
+    pub(in crate::app) filter: String,
     /// (user, host) of the account on show.
-    pub(super) sel: Option<(String, String)>,
-    pub(super) tab: UTab,
-    pub(super) grants_req: u64,
-    pub(super) grants: Option<db::Res<Vec<Grant>>>,
-    pub(super) info: Option<AccountInfo>,
+    pub(in crate::app) sel: Option<(String, String)>,
+    pub(in crate::app) tab: UTab,
+    pub(in crate::app) grants_req: u64,
+    pub(in crate::app) grants: Option<db::Res<Vec<Grant>>>,
+    pub(in crate::app) info: Option<AccountInfo>,
     /// Why the login settings are not shown.
-    pub(super) info_err: Option<String>,
-    pub(super) rows: Vec<GrantRow>,
+    pub(in crate::app) info_err: Option<String>,
+    pub(in crate::app) rows: Vec<GrantRow>,
     /// The name being typed for "+ Database".
-    pub(super) adding: Option<String>,
+    pub(in crate::app) adding: Option<String>,
     /// An Apply is running.
-    pub(super) busy: bool,
+    pub(in crate::app) busy: bool,
     // Account tab.
-    pub(super) name: String,
-    pub(super) host: String,
-    pub(super) locked: bool,
-    pub(super) exp: ExpKind,
-    pub(super) days: String,
-    pub(super) tls: Tls,
-    pub(super) roles_orig: Vec<String>,
-    pub(super) roles_now: Vec<String>,
-    pub(super) role_add: Option<String>,
+    pub(in crate::app) name: String,
+    pub(in crate::app) host: String,
+    pub(in crate::app) locked: bool,
+    pub(in crate::app) exp: ExpKind,
+    pub(in crate::app) days: String,
+    pub(in crate::app) tls: Tls,
+    pub(in crate::app) roles_orig: Vec<String>,
+    pub(in crate::app) roles_now: Vec<String>,
+    pub(in crate::app) role_add: Option<String>,
     // Global tab.
-    pub(super) g_orig: BTreeSet<String>,
-    pub(super) g_now: BTreeSet<String>,
-    pub(super) priv_add: Option<String>,
+    pub(in crate::app) g_orig: BTreeSet<String>,
+    pub(in crate::app) g_now: BTreeSet<String>,
+    pub(in crate::app) priv_add: Option<String>,
     /// Dynamic privileges held WITH GRANT OPTION, which this window does not revoke.
-    pub(super) dyn_grant: BTreeSet<String>,
+    pub(in crate::app) dyn_grant: BTreeSet<String>,
     // Limits tab, as typed.
-    pub(super) limits: [String; 4],
+    pub(in crate::app) limits: [String; 4],
 }
 
 impl SqlUsersWin {
@@ -199,27 +199,27 @@ impl SqlUsersWin {
     }
 }
 
-pub(super) struct NewUser {
-    pub(super) conn: u64,
-    pub(super) user: String,
-    pub(super) host: String,
+pub(in crate::app) struct NewUser {
+    pub(in crate::app) conn: u64,
+    pub(in crate::app) user: String,
+    pub(in crate::app) host: String,
     /// Typed here and handed to the worker by Create; never shown, logged or kept after.
-    pub(super) password: String,
+    pub(in crate::app) password: String,
     /// Makes the password field's id new for each dialog, so the text editor's undo history of an earlier one is out of reach.
-    pub(super) serial: u64,
+    pub(in crate::app) serial: u64,
 }
 
-pub(super) struct PwForm {
-    pub(super) conn: u64,
-    pub(super) acct: Account,
-    pub(super) plugin: String,
+pub(in crate::app) struct PwForm {
+    pub(in crate::app) conn: u64,
+    pub(in crate::app) acct: Account,
+    pub(in crate::app) plugin: String,
     /// The plugin the account has now, for the plugins on offer.
-    pub(super) current: String,
+    pub(in crate::app) current: String,
     /// Why the password cannot be changed from here (MariaDB accounts with another way in).
-    pub(super) blocked: Option<String>,
-    pub(super) password: String,
-    pub(super) again: String,
-    pub(super) serial: u64,
+    pub(in crate::app) blocked: Option<String>,
+    pub(in crate::app) password: String,
+    pub(in crate::app) again: String,
+    pub(in crate::app) serial: u64,
 }
 
 enum Act {
@@ -274,12 +274,12 @@ fn held_grants(w: &SqlUsersWin) -> &[Grant] {
 
 /// The id of a password field. egui keeps the cursor and an undo history of each text field under its id, in memory
 /// that outlives the dialog, so a password field gets an id of its own for each dialog.
-pub(super) fn secret_id(what: &str, serial: u64, n: u8) -> egui::Id {
+pub(in crate::app) fn secret_id(what: &str, serial: u64, n: u8) -> egui::Id {
     egui::Id::unique(("quarry-secret", what, serial, n))
 }
 
 /// Drops what egui remembers of the password fields of one dialog.
-pub(super) fn forget_secret(ctx: &egui::Context, what: &str, serial: u64, fields: u8) {
+pub(in crate::app) fn forget_secret(ctx: &egui::Context, what: &str, serial: u64, fields: u8) {
     ctx.data_mut(|d| {
         for n in 0..fields {
             d.remove::<egui::text_edit::TextEditState>(secret_id(what, serial, n));
@@ -325,7 +325,7 @@ impl App {
         self.users_sql(conn).map_or_else(|| Caps::of(Dialect::MySql, "8.4.3"), |s| Caps::of(s.dialect, &s.version))
     }
 
-    pub(super) fn open_sql_users(&mut self, conn: u64) {
+    pub(in crate::app) fn open_sql_users(&mut self, conn: u64) {
         if self.users_dialect(conn) == Dialect::Postgres || self.conn(conn).is_some_and(|c| c.meta.engine == db::sql::Engine::Postgres) {
             return self.open_pg_roles(conn);
         }
@@ -360,7 +360,7 @@ impl App {
         self.worker.sql_user_grants(conn, req, sql, acct);
     }
 
-    pub(super) fn sql_users_loaded(&mut self, conn: u64, req: u64, res: db::Res<UserList>) {
+    pub(in crate::app) fn sql_users_loaded(&mut self, conn: u64, req: u64, res: db::Res<UserList>) {
         let Some(w) = self.sql_users.as_mut().filter(|w| w.conn == conn && w.list_req == req) else { return };
         if let Ok(l) = &res {
             let has = |s: &Option<(String, String)>| s.as_ref().is_some_and(|(u, h)| l.accounts.iter().any(|a| &a.user == u && &a.host == h));
@@ -372,7 +372,7 @@ impl App {
         self.sql_users_ask_grants();
     }
 
-    pub(super) fn sql_user_grants_loaded(&mut self, conn: u64, req: u64, res: db::Res<Loaded>) {
+    pub(in crate::app) fn sql_user_grants_loaded(&mut self, conn: u64, req: u64, res: db::Res<Loaded>) {
         let Some(w) = self.sql_users.as_mut().filter(|w| w.conn == conn && w.grants_req == req) else { return };
         match res {
             Ok(l) => {
@@ -389,7 +389,7 @@ impl App {
     }
 
     /// An edit, create, drop, password change or undo finished. The window reads the server again, so it shows what is there.
-    pub(super) fn sql_user_done(&mut self, conn: u64, account: Account, op: Op, res: db::Res<String>, undo: Vec<UndoAction>) {
+    pub(in crate::app) fn sql_user_done(&mut self, conn: u64, account: Account, op: Op, res: db::Res<String>, undo: Vec<UndoAction>) {
         match res {
             Ok(s) => self.ok(s),
             Err(e) => self.err(e),
@@ -415,7 +415,7 @@ impl App {
         self.sql_users_reload();
     }
 
-    pub(super) fn sql_new_user(&mut self, conn: u64) {
+    pub(in crate::app) fn sql_new_user(&mut self, conn: u64) {
         if !self.conn_writable(conn) {
             return self.warn(NOTE_USER);
         }
@@ -423,13 +423,13 @@ impl App {
         self.modal = Some(Modal::SqlNewUser(Box::new(NewUser { conn, user: String::new(), host: "%".into(), password: String::new(), serial: self.req })));
     }
 
-    pub(super) fn sql_user_drop_ask(&mut self, conn: u64, acct: Account) {
+    pub(in crate::app) fn sql_user_drop_ask(&mut self, conn: u64, acct: Account) {
         let what = if acct.is_role { "role" } else { "user" };
         let title = format!("Drop the {what} {} on {}? Its password and every privilege go with it, and logins that use it stop working. This cannot be undone.", acct.label(), self.conn(conn).map(|c| c.meta.name.clone()).unwrap_or_default());
         self.modal = Some(Modal::Typed { title, expect: acct.label(), typed: String::new(), action: Danger::SqlDropUser { conn, acct } });
     }
 
-    pub(super) fn sql_user_drop_run(&mut self, conn: u64, acct: Account) {
+    pub(in crate::app) fn sql_user_drop_run(&mut self, conn: u64, acct: Account) {
         if self.demo {
             return self.ok("Offline demo: no database is connected.");
         }
@@ -473,7 +473,7 @@ impl App {
         }
     }
 
-    pub(super) fn sql_users_window(&mut self, ctx: &egui::Context) {
+    pub(in crate::app) fn sql_users_window(&mut self, ctx: &egui::Context) {
         let Some(mut w) = self.sql_users.take() else { return };
         let conn = w.conn;
         let writable = self.conn_writable(conn);
@@ -1076,7 +1076,7 @@ impl App {
         });
     }
 
-    pub(super) fn sql_new_user_dialog(&mut self, ui: &mut egui::Ui, f: &mut NewUser, keep: &mut bool) {
+    pub(in crate::app) fn sql_new_user_dialog(&mut self, ui: &mut egui::Ui, f: &mut NewUser, keep: &mut bool) {
         ui.set_width(520.0);
         let writable = self.conn_writable(f.conn);
         dialog_title(ui, "New user");
@@ -1134,7 +1134,7 @@ impl App {
     }
 
     /// Change password: two masked fields, the plugin on MySQL, and a preview that shows '***'.
-    pub(super) fn sql_password_dialog(&mut self, ui: &mut egui::Ui, f: &mut PwForm, keep: &mut bool) {
+    pub(in crate::app) fn sql_password_dialog(&mut self, ui: &mut egui::Ui, f: &mut PwForm, keep: &mut bool) {
         ui.set_width(520.0);
         let writable = self.conn_writable(f.conn);
         let caps = self.users_caps(f.conn);
@@ -1212,7 +1212,7 @@ impl App {
     }
 
     /// QUARRY_TEST_SQL=users, useraccount, userglobal or userlimits (the window on user "report"), or newuser (the + User dialog).
-    pub(super) fn sql_users_demo(&mut self, which: &str) {
+    pub(in crate::app) fn sql_users_demo(&mut self, which: &str) {
         if !matches!(which, "users" | "newuser" | "useraccount" | "userglobal" | "userlimits") {
             return;
         }

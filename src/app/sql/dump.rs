@@ -1,36 +1,36 @@
 //! SQL dumps in and out: the Export dialog for tables and whole databases, the Run SQL file dialog, and the
 //! status bar readout shared by every long write of this kind (a CSV import, a script file).
 
-use super::*;
+use crate::app::*;
 use db::sql::csv::Source;
 use db::sql::dump::{DumpPlan, DumpTable};
 use db::sql::import::{JobDone, Progress};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[derive(Clone, Copy, PartialEq)]
-pub(super) enum JobKind {
+pub(in crate::app) enum JobKind {
     Import,
     Script,
 }
 
 /// A CSV import or a script file running, with what Cancel needs.
-pub(super) struct SqlJob {
-    pub(super) req: u64,
-    pub(super) conn: u64,
-    pub(super) db: db::sql::Db,
-    pub(super) schema: String,
-    pub(super) kind: JobKind,
-    pub(super) prog: Arc<Progress>,
-    pub(super) id: Arc<AtomicU64>,
-    pub(super) cancel: Arc<AtomicBool>,
-    pub(super) total_rows: u64,
-    pub(super) total_bytes: u64,
+pub(in crate::app) struct SqlJob {
+    pub(in crate::app) req: u64,
+    pub(in crate::app) conn: u64,
+    pub(in crate::app) db: db::sql::Db,
+    pub(in crate::app) schema: String,
+    pub(in crate::app) kind: JobKind,
+    pub(in crate::app) prog: Arc<Progress>,
+    pub(in crate::app) id: Arc<AtomicU64>,
+    pub(in crate::app) cancel: Arc<AtomicBool>,
+    pub(in crate::app) total_rows: u64,
+    pub(in crate::app) total_bytes: u64,
     /// False for an import into a table whose engine has no transactions, where Cancel keeps what was written.
-    pub(super) rolls_back: bool,
+    pub(in crate::app) rolls_back: bool,
 }
 
 impl SqlJob {
-    pub(super) fn new(req: u64, conn: u64, db: db::sql::Db, schema: String, kind: JobKind, total_rows: u64, total_bytes: u64) -> SqlJob {
+    pub(in crate::app) fn new(req: u64, conn: u64, db: db::sql::Db, schema: String, kind: JobKind, total_rows: u64, total_bytes: u64) -> SqlJob {
         SqlJob { req, conn, db, schema, kind, prog: Arc::new(Progress::default()), id: Arc::new(AtomicU64::new(0)), cancel: Arc::new(AtomicBool::new(false)), total_rows, total_bytes, rolls_back: true }
     }
 }
@@ -53,7 +53,7 @@ struct Row {
     rows: Option<u64>,
 }
 
-pub(super) struct DumpForm {
+pub(in crate::app) struct DumpForm {
     conn: u64,
     db: String,
     /// The schema of a PostgreSQL database the table list is of; empty on MySQL, where the database is the namespace.
@@ -72,7 +72,7 @@ pub(super) struct DumpForm {
     path: String,
 }
 
-pub(super) struct RunForm {
+pub(in crate::app) struct RunForm {
     conn: u64,
     db: String,
     /// The schema a PostgreSQL file's unqualified names land in (its search_path); empty on MySQL.
@@ -92,14 +92,14 @@ fn today() -> String {
 impl App {
     /// Opens the dump dialog for a database, in the schema its switcher shows on PostgreSQL. `table` is the open table whose
     /// filter the first choice offers.
-    pub(super) fn open_sql_dump(&mut self, conn: u64, db: String, table: Option<String>) {
+    pub(in crate::app) fn open_sql_dump(&mut self, conn: u64, db: String, table: Option<String>) {
         let schema = self.ns_of(conn, &db).to_string();
         self.open_sql_dump_in(conn, db, schema, table)
     }
 
     /// `open_sql_dump` for a table of a given schema, which is not the one the sidebar shows when its tab was opened from
     /// another. The schema is empty on MySQL.
-    pub(super) fn open_sql_dump_in(&mut self, conn: u64, db: String, schema: String, table: Option<String>) {
+    pub(in crate::app) fn open_sql_dump_in(&mut self, conn: u64, db: String, schema: String, table: Option<String>) {
         let Some(c) = self.conn(conn) else { return };
         if c.sql.is_none() {
             return self.warn_offline();
@@ -133,7 +133,7 @@ impl App {
     }
 
     /// Asks for a script file, then opens the dialog that runs it.
-    pub(super) fn open_sql_run_file(&mut self, conn: u64, db: String) {
+    pub(in crate::app) fn open_sql_run_file(&mut self, conn: u64, db: String) {
         let Some(c) = self.conn(conn) else { return };
         if c.sql.is_none() {
             return self.warn_offline();
@@ -144,7 +144,7 @@ impl App {
     }
 
     /// The Run SQL file dialog for a file already chosen, which the UI tests open without the native file dialog.
-    pub(super) fn open_run_form(&mut self, conn: u64, db: String, src: Source, name: String) {
+    pub(in crate::app) fn open_run_form(&mut self, conn: u64, db: String, src: Source, name: String) {
         let Some(c) = self.conn(conn) else { return };
         let schema = if c.meta.engine == db::sql::Engine::Postgres { c.pg_picked(&db).to_string() } else { String::new() };
         let conn_name = c.meta.name.clone();
@@ -153,13 +153,13 @@ impl App {
 
     /// Sets where the open dump dialog writes, which the UI tests do instead of using the native file dialog.
     #[cfg(test)]
-    pub(super) fn set_dump_path(&mut self, path: &str) {
+    pub(in crate::app) fn set_dump_path(&mut self, path: &str) {
         if let Some(Modal::SqlDump(f)) = &mut self.modal {
             f.path = path.to_string();
         }
     }
 
-    pub(super) fn sql_dump_dialog(&mut self, ui: &mut egui::Ui, f: &mut DumpForm, keep: &mut bool) {
+    pub(in crate::app) fn sql_dump_dialog(&mut self, ui: &mut egui::Ui, f: &mut DumpForm, keep: &mut bool) {
         ui.set_width(610.0);
         dialog_title(ui, "Export");
         let pg = self.is_pg(f.conn);
@@ -324,13 +324,13 @@ impl App {
             }
         };
         self.req += 1;
-        let job = super::export::ExportJob { req: self.req, count: Arc::new(AtomicU64::new(0)), cancel: Arc::new(AtomicBool::new(false)), id: Arc::new(AtomicU64::new(0)), db: sql.clone(), copy: false, step: Arc::new(AtomicU64::new(0)), of: 0 };
+        let job = crate::app::export::ExportJob { req: self.req, count: Arc::new(AtomicU64::new(0)), cancel: Arc::new(AtomicBool::new(false)), id: Arc::new(AtomicU64::new(0)), db: sql.clone(), copy: false, step: Arc::new(AtomicU64::new(0)), of: 0 };
         self.worker.sql_dump(job.req, sql, plan, PathBuf::from(f.path.trim()), job.count.clone(), job.id.clone(), job.cancel.clone());
         self.export_job = Some(job);
         self.ok(format!("Exporting {} to {}", if total > 0 { format!("about {} rows", group(&total.to_string())) } else { "the structure".to_string() }, f.path.trim()));
     }
 
-    pub(super) fn sql_run_file_dialog(&mut self, ui: &mut egui::Ui, f: &mut RunForm, keep: &mut bool) {
+    pub(in crate::app) fn sql_run_file_dialog(&mut self, ui: &mut egui::Ui, f: &mut RunForm, keep: &mut bool) {
         ui.set_width(520.0);
         dialog_title(ui, "Run SQL file");
         ui.label(RichText::new(format!("{} \u{b7} {}", f.name, human_bytes(f.src.len() as usize))).size(TXT_SMALL).color(MUTED()));
@@ -378,7 +378,7 @@ impl App {
     }
 
     /// An import or a script finished: report it, keep its undo, and reload what it changed.
-    pub(super) fn sql_job_done(&mut self, req: u64, res: db::Res<JobDone>) {
+    pub(in crate::app) fn sql_job_done(&mut self, req: u64, res: db::Res<JobDone>) {
         let Some(j) = self.sql_job.take_if(|j| j.req == req) else { return };
         // A script can create or drop anything anywhere, and one that failed or was stopped kept what ran before.
         if j.kind == JobKind::Script && j.db.dialect == db::sql::Dialect::Postgres {
@@ -403,7 +403,7 @@ impl App {
                 if j.kind == JobKind::Import {
                     // A tab is the table's when its database and namespace, resolved as a read of it resolves them, are the job's: another
                     // PostgreSQL database or schema can hold a table of the same name.
-                    let tabs: Vec<usize> = (0..self.tabs.len()).filter(|&i| d.table.as_ref().is_some_and(|t| super::sql_alter::answers_tab(&self.tabs[i].sel, self.sql_target(&self.tabs[i].sel).map(|(x, ns)| (x.pg_database(), ns)), (j.conn, &d.database, &d.schema, t)))).collect();
+                    let tabs: Vec<usize> = (0..self.tabs.len()).filter(|&i| d.table.as_ref().is_some_and(|t| crate::app::sql::alter::answers_tab(&self.tabs[i].sel, self.sql_target(&self.tabs[i].sel).map(|(x, ns)| (x.pg_database(), ns)), (j.conn, &d.database, &d.schema, t)))).collect();
                     for i in tabs {
                         self.reload_of(i);
                     }
@@ -421,7 +421,7 @@ impl App {
 
     /// After a script, finished or not: the database list, the tables of its database and the open tabs follow what
     /// the server has now. Tabs of a database or table that is gone close; the others of its database reload.
-    pub(super) fn sql_lists_done(&mut self, conn: u64, schema: String, res: db::Res<(Vec<String>, Option<Vec<String>>)>) {
+    pub(in crate::app) fn sql_lists_done(&mut self, conn: u64, schema: String, res: db::Res<(Vec<String>, Option<Vec<String>>)>) {
         let Ok((dbs, tables)) = res else { return };
         let mut dropped = Vec::new();
         if let Some(c) = self.conns.iter_mut().find(|c| c.meta.id == conn) {
@@ -445,7 +445,7 @@ impl App {
     }
 
     /// The status bar readout of a running import or script, with Cancel. True while one runs.
-    pub(super) fn sql_job_progress(&mut self, ui: &mut egui::Ui) -> bool {
+    pub(in crate::app) fn sql_job_progress(&mut self, ui: &mut egui::Ui) -> bool {
         let Some(j) = &self.sql_job else { return false };
         spin(ui);
         let (rows, bytes) = (j.prog.rows.load(Ordering::Relaxed), j.prog.bytes.load(Ordering::Relaxed));
@@ -462,7 +462,7 @@ impl App {
     }
 
     /// QUARRY_TEST_SQL=dump: the Export dialog of the design with the shop database.
-    pub(super) fn demo_sql_dump(&mut self) {
+    pub(in crate::app) fn demo_sql_dump(&mut self) {
         let conn = self.t().map_or(0, |t| t.sel.conn);
         let row = |name: &str, on: bool, content: bool, rows: u64| Row { name: name.into(), view: false, on, structure: on, content, drop: false, rows: Some(rows) };
         let rows = vec![

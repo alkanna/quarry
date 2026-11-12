@@ -1,14 +1,14 @@
 //! The Import dialog of a SQL table: a CSV file, how to read it, which column goes where, and what the check of
 //! every value found. The check reads the whole file in a thread of its own, so the dialog stays quick on a big file.
 
-use super::*;
+use crate::app::*;
 use db::sql::csv::{self, DateFmt, Enc, Mapping, Opts, Report, Source, TableInfo};
 use db::sql::import::{self, Dup, ImportPlan};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
 /// The file being imported and everything read from it.
-pub(super) struct FileState {
+pub(in crate::app) struct FileState {
     src: Source,
     name: String,
     size: u64,
@@ -29,7 +29,7 @@ pub(super) struct FileState {
     epoch: u64,
 }
 
-pub(super) struct ImportForm {
+pub(in crate::app) struct ImportForm {
     conn: u64,
     /// The database on MySQL, the PostgreSQL database of the connection otherwise.
     db: String,
@@ -143,12 +143,12 @@ fn quote_label(q: Option<char>) -> &'static str {
 
 impl App {
     /// Opens the Import dialog for `table`, asking for the file first.
-    pub(super) fn open_sql_import(&mut self, conn: u64, db: String, schema: String, table: String) {
+    pub(in crate::app) fn open_sql_import(&mut self, conn: u64, db: String, schema: String, table: String) {
         self.open_sql_import_with(conn, db, schema, table, None);
     }
 
     /// `src` is the file to read; None asks for one in the system dialog, so a test hands it in.
-    pub(super) fn open_sql_import_with(&mut self, conn: u64, db: String, schema: String, table: String, src: Option<Source>) {
+    pub(in crate::app) fn open_sql_import_with(&mut self, conn: u64, db: String, schema: String, table: String, src: Option<Source>) {
         // The pool of the table's database and the namespace a worker call takes: the schema on PostgreSQL, the database on MySQL.
         let Some((sql, ns)) = self.sql_target(&Sel { conn, db: db.clone(), schema: schema.clone(), coll: table.clone() }) else { return self.warn_offline() };
         if self.demo {
@@ -175,7 +175,7 @@ impl App {
     }
 
     /// The columns of the table arrived.
-    pub(super) fn import_info(&mut self, req: u64, res: db::Res<TableInfo>) {
+    pub(in crate::app) fn import_info(&mut self, req: u64, res: db::Res<TableInfo>) {
         let Some(Modal::SqlImport(f)) = &mut self.modal else { return };
         if f.req != req {
             return;
@@ -189,7 +189,7 @@ impl App {
         });
     }
 
-    pub(super) fn sql_import_dialog(&mut self, ui: &mut egui::Ui, f: &mut ImportForm, keep: &mut bool) {
+    pub(in crate::app) fn sql_import_dialog(&mut self, ui: &mut egui::Ui, f: &mut ImportForm, keep: &mut bool) {
         ui.set_width(720.0);
         dialog_title(ui, format!("Import into {}", f.table));
         let writable = self.conn_writable(f.conn);
@@ -457,7 +457,7 @@ impl App {
         let Some((sql, ns)) = self.sql_target(&Sel { conn: f.conn, db: f.db.clone(), schema: f.schema.clone(), coll: f.table.clone() }) else { return self.warn_offline() };
         let plan = ImportPlan { source: f.file.src.clone(), opts: f.file.opts, header: f.file.header, info: info.clone(), map: f.file.map.clone(), dup: f.dup, want_undo };
         self.req += 1;
-        let mut job = super::sql_dump::SqlJob::new(self.req, f.conn, sql.clone(), ns.clone(), super::sql_dump::JobKind::Import, f.file.report.as_ref().map_or(0, |r| r.rows), f.file.size);
+        let mut job = crate::app::sql::dump::SqlJob::new(self.req, f.conn, sql.clone(), ns.clone(), crate::app::sql::dump::JobKind::Import, f.file.report.as_ref().map_or(0, |r| r.rows), f.file.size);
         job.rolls_back = info.transactional();
         self.worker.sql_import(job.req, f.conn, sql, ns, f.table.clone(), plan, !writable, job.prog.clone(), job.id.clone(), job.cancel.clone());
         self.sql_job = Some(job);
@@ -465,7 +465,7 @@ impl App {
     }
 
     /// QUARRY_TEST_SQL=import: the dialog over the orders table with a file that has one bad value, built offline.
-    pub(super) fn demo_sql_import(&mut self) {
+    pub(in crate::app) fn demo_sql_import(&mut self) {
         let mut csv = String::from("order_id,customer,state,amount,ccy,created,source\n");
         for i in 0..1240u32 {
             let amount = if i == 5 { "twelve".to_string() } else { format!("{}.{:02}", 20 + i % 90, (i * 7) % 100) };
@@ -485,6 +485,6 @@ impl App {
     }
 }
 
-fn job_rows(j: &Option<super::sql_dump::SqlJob>) -> u64 {
+fn job_rows(j: &Option<crate::app::sql::dump::SqlJob>) -> u64 {
     j.as_ref().map_or(0, |j| j.total_rows)
 }

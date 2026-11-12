@@ -39,30 +39,12 @@ mod relations;
 mod run;
 mod schema;
 mod server;
-mod sql_server;
-mod pg_server;
 mod settings;
+mod sql;
 mod shell;
 mod shell_attach;
 mod shell_ls;
 mod sidebar;
-mod sql_ac;
-mod sql_ns;
-mod sql_create;
-mod sql_create_pg;
-mod sql_structure;
-mod sql_alter;
-mod sql_rel;
-mod sql_trig;
-mod sql_trig_pg;
-mod sql_edit;
-mod sql_bar;
-mod sql_views;
-mod sql_query;
-mod sql_import;
-mod sql_dump;
-mod sql_users;
-mod pg_roles;
 mod state;
 mod table;
 mod tabs;
@@ -89,14 +71,14 @@ use tree::*;
 use users::*;
 use indexes::*;
 use server::*;
-use sql_server::*;
-use pg_server::*;
+use sql::server::*;
+use sql::pg_server::*;
 use watch::*;
 use drafts::*;
-use sql_edit::*;
-use sql_alter::*;
-use sql_create::*;
-use sql_rel::*;
+use sql::edit::*;
+use sql::alter::*;
+use sql::create::*;
+use sql::rel::*;
 use table::Rows;
 
 const SYSTEM_DBS: [&str; 3] = ["admin", "config", "local"];
@@ -176,7 +158,7 @@ pub struct App {
     /// The Query result being streamed to a file or the clipboard, shown in the status bar with a Cancel.
     export_job: Option<export::ExportJob>,
     /// A CSV import or a script file running, shown in the status bar with a Cancel.
-    sql_job: Option<sql_dump::SqlJob>,
+    sql_job: Option<sql::dump::SqlJob>,
     prefs: UiPrefs,
     col_filter: String,
     /// Column data actions cover the whole query instead of the loaded page.
@@ -200,8 +182,8 @@ pub struct App {
     sql_values: HashMap<(u64, String), Fields>,
     sql_values_asked: HashMap<(u64, String, String, String), HashSet<Option<String>>>,
     users: Option<UsersWin>,
-    sql_users: Option<sql_users::SqlUsersWin>,
-    pg_roles: Option<pg_roles::PgRolesWin>,
+    sql_users: Option<sql::users::SqlUsersWin>,
+    pg_roles: Option<sql::pg_roles::PgRolesWin>,
     server: Option<ServerWin>,
     sql_server: Option<SqlServerWin>,
     pg_server: Option<PgServerWin>,
