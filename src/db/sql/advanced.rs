@@ -125,6 +125,11 @@ pub fn parse_flags(text: &str) -> Result<Vec<String>, String> {
 /// This computer's IANA zone name such as Europe/Paris, which is what PostgreSQL takes for "System": an offset would
 /// freeze today's daylight saving state.
 pub fn system_zone_name() -> Option<String> {
+    // Tests read timestamptz text, which a Default zone renders in this zone, so they pin UTC to give the same text on
+    // every machine; tests of other zones set them explicitly.
+    if cfg!(test) {
+        return Some("UTC".into());
+    }
     // Read once: the form asks on every frame, and the platform call reads files or system settings.
     static ZONE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     ZONE.get_or_init(|| iana_time_zone::get_timezone().ok()).clone()
