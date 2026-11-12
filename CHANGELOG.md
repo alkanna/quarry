@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.40.0](https://github.com/alkanna/quarry/compare/v0.39.2...v0.40.0) (2026-11-12)
+
+
+### Features
+
+* more themes, a theme picker and a data font choice ([#200](https://github.com/alkanna/quarry/issues/200)) ([77738b9](https://github.com/alkanna/quarry/commit/77738b92e55aacf6e70fae22576da0250c5b532c))
+
 ## [0.39.2](https://github.com/alkanna/quarry/compare/v0.39.1...v0.39.2) (2026-11-12)
 
 
