@@ -386,11 +386,20 @@ pub(crate) fn analyze(before: &str, full_stmt: &str, scope: &Scope, values: &Fie
         let sugs: Vec<Sug> = TYPES_PG.iter().filter(|t| starts_ci(t, word)).map(|t| sug((*t).to_string(), "type", (*t).to_string(), String::new(), String::new())).collect();
         return (!sugs.is_empty() && !(sugs.len() == 1 && sugs[0].text.eq_ignore_ascii_case(word))).then_some(Out { from, sugs, ..Default::default() });
     }
-    if !in_tick && word.is_empty() && !prev.last().is_some_and(|t| t.punct(".")) {
+    let last = prev.last();
+    let table_kw = last.is_some_and(|t| ["FROM", "JOIN", "UPDATE", "INTO", "TABLE"].iter().any(|k| t.is(k))) || last.is_some_and(|t| t.punct(",")) && clause(prev).as_deref() == Some("FROM");
+    // An empty word lists only where the choice is narrow: tables after FROM and the like, values after a comparison.
+    // Anywhere else every column, function and keyword would pop up after each space.
+    if !in_tick && word.is_empty() && !last.is_some_and(|t| t.punct(".")) && !table_kw {
+        // Only values already known: asking the server here would run a lookup for every `a = b` typed, where a column
+        // or a function often follows. A typed quote or digit still asks.
+        if let Some(out) = value_list(prev, "", from, "", &rts, values).filter(|o| !o.sugs.is_empty()) {
+            return Some(out);
+        }
         return None;
     }
     // After `x.`: the columns of table or alias x, or the tables of database x.
-    if prev.last().is_some_and(|t| t.punct(".")) {
+    if last.is_some_and(|t| t.punct(".")) {
         let parts = operand(prev, prev.len() - 1);
         return match parts.as_slice() {
             [q] => qualified(q, word, from, in_tick, scope, &rts, values),
@@ -398,9 +407,8 @@ pub(crate) fn analyze(before: &str, full_stmt: &str, scope: &Scope, values: &Fie
             _ => None,
         };
     }
-    let last = prev.last();
     // After a table keyword, or a comma in a FROM list: tables.
-    if last.is_some_and(|t| ["FROM", "JOIN", "UPDATE", "INTO", "TABLE"].iter().any(|k| t.is(k))) || last.is_some_and(|t| t.punct(",")) && clause(prev).as_deref() == Some("FROM") {
+    if table_kw {
         return Some(tables_list(word, from, in_tick, scope));
     }
     // Right after a table name: an alias or the next keyword, so only keywords fit.
@@ -545,7 +553,8 @@ fn value_list(toks: &[Tk], typed: &str, from: usize, quote: &str, rts: &[Rt], va
         _ => None,
     }?;
     let numeric = matches!(col.kind, Kind::Int | Kind::UInt | Kind::Float | Kind::Decimal | Kind::Year);
-    if quote.is_empty() && !numeric {
+    // Text values need their quote typed first, except right after the operator, where the pick adds it.
+    if quote.is_empty() && !numeric && !typed.is_empty() {
         return None;
     }
     // A number is written bare, so a quote typed before one is replaced along with the value.
@@ -560,9 +569,10 @@ fn value_list(toks: &[Tk], typed: &str, from: usize, quote: &str, rts: &[Rt], va
         return Some(Out { from, sugs, title, foot: String::new(), need });
     }
     let q = quote.chars().next().unwrap_or('\'');
+    let open = if quote.is_empty() { "'" } else { "" };
     // The quote is closed with the value; one doubled stays inside the string. Values with a
     // backslash or a line break are left out, since how they read depends on the server's mode.
-    let insert = |v: &str| format!("{}{q}", v.replace(q, &format!("{q}{q}")));
+    let insert = |v: &str| format!("{open}{}{q}", v.replace(q, &format!("{q}{q}")));
     let usable = |v: &str| !v.contains(['\\', '\n', '\r']);
     let key = value_key(table, &col.name);
     let title = format!("{}.{} · {}", table.to_ascii_uppercase(), col.name.to_ascii_uppercase(), type_label(col).split('(').next().unwrap_or(""));
@@ -1065,9 +1075,18 @@ mod tests {
     fn a_word_typed_in_full_needs_no_list_and_empty_words_stay_quiet() {
         assert!(run("SELECT * FROM orders WHERE statu|").is_some());
         assert!(run("SELECT * FROM orders WHERE JOIN|").is_none());
-        assert!(run("SELECT * FROM |").is_none());
         assert!(run("SELECT |").is_none());
         assert!(run("|").is_none());
+    }
+
+    #[test]
+    fn tables_and_values_list_before_a_letter() {
+        let t = run("SELECT * FROM |").unwrap();
+        assert!(t.1.iter().any(|s| s.text == "orders"));
+        assert!(run("SELECT * FROM orders o JOIN |").is_some());
+        // Values of an enum need no lookup and go in with their quotes.
+        let v = run("SELECT * FROM orders WHERE status = |").unwrap();
+        assert!(v.1.iter().any(|s| s.insert.starts_with('\'') && s.insert.ends_with('\'')), "{:?}", text_of(&v.1));
     }
 
     #[test]
