@@ -78,13 +78,13 @@ fn a_clicked_script_gets_a_preview_with_open_run_and_new_tab() {
     assert_eq!(ui.app().lib_ui.panel.sel, Some(Node::Script(11)));
     // The name is in the row and in the card.
     assert_eq!(ui.h.query_all_by_label("Top customers").count(), 2);
-    for b in ["Open", "Run", "New tab"] {
+    for b in ["Open", "Run all", "New tab"] {
         assert!(ui.shown(b), "{b}");
     }
     // A filter has nothing to run.
     ui.click("All connections");
     ui.click("Paid orders");
-    assert!(ui.shown("Open") && ui.shown("New tab") && !ui.shown("Run"));
+    assert!(ui.shown("Open") && ui.shown("New tab") && !ui.shown("Run all"));
     ui.click("New tab");
     ui.click("Open");
 }

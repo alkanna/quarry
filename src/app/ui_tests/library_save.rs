@@ -39,9 +39,9 @@ fn cmd_s_opens_the_dialog_and_saves_the_script_bound_to_the_tab() {
     let Some(mut ui) = demo_ui(sql_query) else { return };
     set_query(&mut ui, "SELECT 1");
     ui.key(CMD, egui::Key::S);
-    assert_eq!(dialog_name(&ui).as_deref(), Some("Untitled"));
-    // The name starts focused: replace it.
-    ui.key(CMD, egui::Key::A);
+    // With no comment to take a name from, the tab's name is offered, focused and selected, so typing replaces it.
+    let tab = ui.app().tab_name(ui.app().cur);
+    assert_eq!(dialog_name(&ui), Some(tab));
     ui.type_text("Late");
     ui.click("Save");
     assert!(ui.app().modal.is_none());
@@ -77,10 +77,28 @@ fn saving_under_a_taken_name_in_the_same_folder_replaces_it() {
     ui.h.state_mut().sql_new_query(3, "shop".into());
     set_query(&mut ui, "SELECT 9");
     ui.key(CMD, egui::Key::S);
-    assert_eq!(dialog_name(&ui).as_deref(), Some("Untitled"));
-    ui.click("Save");
+    let first = ui.app().library.scripts[0].name.clone();
+    if let Some(Modal::SaveScript(f)) = &mut ui.h.state_mut().modal {
+        f.name = first.clone();
+    }
+    // The button says what will happen, and the toast after it can take it back.
+    ui.click("Replace");
     let lib = &ui.app().library;
     assert_eq!((lib.scripts.len(), lib.scripts[0].body.as_str()), (1, "SELECT 9"));
+    ui.click_last("Undo");
+    assert_eq!(ui.app().library.scripts[0].body, "SELECT 1", "Undo did not put the replaced script back");
+}
+
+#[test]
+fn a_leading_comment_names_the_script() {
+    let Some(mut ui) = demo_ui(sql_query) else { return };
+    set_query(&mut ui, "-- Paid orders that never shipped\nSELECT 1");
+    ui.key(CMD, egui::Key::S);
+    assert_eq!(dialog_name(&ui).as_deref(), Some("Paid orders that never shipped"));
+    use crate::app::library::save_dialog::comment_name;
+    assert_eq!(comment_name("/* Totals */\nSELECT 1").as_deref(), Some("Totals"));
+    assert_eq!(comment_name("// count\nasync function run() {}").as_deref(), Some("count"));
+    assert_eq!(comment_name("SELECT 1 -- not a name"), None);
 }
 
 #[test]
@@ -181,7 +199,7 @@ fn a_shell_script_opens_in_a_tab_with_no_collection_named_for_the_database() {
     assert_eq!(a.tabs.len(), before + 1);
     let t = a.t().unwrap();
     assert!(t.view == View::Shell && t.sel.coll.is_empty() && t.sel.db == "shop");
-    assert_eq!(a.tab_name(a.cur), "Shell · shop");
+    assert_eq!(a.tab_name(a.cur), "Backfill note field", "a bound tab is named for its script");
     assert!(t.shell.code.contains("Fill the empty notes"));
     // The tab binds again to its script after a restart, and an edited one stays edited.
     let bound = a.rebind(t, ScriptRef::Saved(id)).expect("bound again");
@@ -196,7 +214,7 @@ fn a_shell_script_of_a_sql_connection_shows_the_shell() {
     ui.settle();
     let a = ui.app();
     assert!(a.t().is_some_and(|t| t.view == View::Shell && t.shell.code.contains("COUNT(*)")));
-    assert_eq!(a.tab_name(a.cur), "Shell · shop");
+    assert_eq!(a.tab_name(a.cur), "Count orders by status", "a bound tab is named for its script");
     // The Shell is on screen, not the Query view that shares the tab.
     ui.h.get_by_label("Shell editor");
 }

@@ -252,14 +252,14 @@ impl RowCx<'_> {
         if let Some(c) = self.active.and_then(|a| fit.iter().find(|c| c.meta.id == a)) {
             out.push((String::new(), vec![(c.meta.id, c.meta.name.clone())]));
         }
-        let rest = |c: &&Conn| Some(c.meta.id) != self.active;
+        let active = self.active;
         for g in &self.groups.groups {
-            let ids: Vec<(u64, String)> = g.members.iter().filter_map(|m| fit.iter().find(|c| c.meta.id == *m)).filter(rest).map(|c| (c.meta.id, c.meta.name.clone())).collect();
+            let ids: Vec<(u64, String)> = g.members.iter().filter_map(|m| fit.iter().find(|c| c.meta.id == *m)).filter(|c| Some(c.meta.id) != active).map(|c| (c.meta.id, c.meta.name.clone())).collect();
             if !ids.is_empty() {
                 out.push((g.name.clone(), ids));
             }
         }
-        let loose: Vec<(u64, String)> = fit.iter().filter(rest).filter(|c| self.groups.group_of(c.meta.id).is_none()).map(|c| (c.meta.id, c.meta.name.clone())).collect();
+        let loose: Vec<(u64, String)> = fit.iter().filter(|c| Some(c.meta.id) != active).filter(|c| self.groups.group_of(c.meta.id).is_none()).map(|c| (c.meta.id, c.meta.name.clone())).collect();
         if !loose.is_empty() {
             out.push((if out.is_empty() { String::new() } else { "Not in a group".into() }, loose));
         }

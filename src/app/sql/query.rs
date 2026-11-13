@@ -303,6 +303,14 @@ impl App {
     /// The name a tab shows: its table, or "Query N" for a Query tab that belongs to no table.
     pub(in crate::app) fn tab_name(&self, i: usize) -> String {
         let Some(t) = self.tabs.get(i) else { return String::new() };
+        // A tab opened from the library, or saved to it, is named for its script or file, so Cmd+S writing it back silently
+        // is never a surprise.
+        if let Some(b) = &t.script {
+            let name = self.script_name(&b.r);
+            if !name.is_empty() {
+                return name;
+            }
+        }
         // A Shell script opened from the library has no collection: the tab is named for its database.
         if t.sel.coll.is_empty() && t.view == View::Shell {
             return format!("Shell · {}", t.sel.db);

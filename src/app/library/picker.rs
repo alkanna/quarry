@@ -67,13 +67,22 @@ pub(in crate::app) struct PickData {
     pub folders: Vec<PickFolder>,
     /// Scripts in no folder, after the folders.
     pub loose: Vec<usize>,
+    /// The files of linked folders that fit the view, after the recent ones.
+    pub linked: Vec<usize>,
     /// Whether the sidebar has a Library panel to open.
     pub sidebar: bool,
+    /// Cmd+O asked for the popover.
+    pub open: bool,
+    /// The script the tab is bound to, for the chip beside the button: what it shows and whether the tab changed it.
+    pub bound: Option<(String, bool)>,
 }
 
 pub(in crate::app) enum PickAct {
     Open(ScriptRef, How),
     Save,
+    SaveAs,
+    Show,
+    Unbind,
     Sidebar,
 }
 
@@ -107,9 +116,22 @@ impl App {
         let lib = &self.library;
         let (conn, db, coll) = self.t().map(|t| (t.sel.conn, t.sel.db.clone(), t.sel.coll.clone())).unwrap_or_default();
         let fits = |s: &crate::library::Script| s.kind == kind.kind() && s.conn == conn && (matches!(kind, PickKind::Sql | PickKind::Shell) || (s.db == db && s.coll == coll));
-        let count = lib.scripts.iter().filter(|s| fits(s)).count();
+        // Files of the linked folders used on this connection, of this view's kind; a filter or pipeline file that names a
+        // collection shows only on that collection.
+        let engine = self.conn(conn).map(|c| c.meta.engine);
+        let files: Vec<(u64, &crate::library::disk::Entry)> = lib
+            .links
+            .iter()
+            .filter(|l| engine.is_some_and(|e| crate::library::format::fits(l, kind.kind(), conn, e)))
+            .filter_map(|l| self.lib_ui.scans.get(&l.id).map(|s| (l.id, s)))
+            .flat_map(|(id, s)| s.entries.iter().map(move |e| (id, e)))
+            .filter(|(_, e)| e.kind == kind.kind() && (matches!(kind, PickKind::Sql | PickKind::Shell) || ((e.target.coll.is_empty() || e.target.coll == coll) && (e.target.db.is_empty() || e.target.db == db))))
+            .collect();
+        let count = lib.scripts.iter().filter(|s| fits(s)).count() + files.len();
+        let bound = self.t().and_then(|t| t.script.as_ref().filter(|b| b.view == t.view).map(|b| (b.r.clone(), super::linked::bound_text(t).is_some_and(|x| x != b.base))));
+        let bound = bound.map(|(r, edited)| (self.chip_text(&r), edited));
         if !picker_open(ctx) {
-            return PickData { kind, count, full: false, conn_name: String::new(), dialect: self.dialect_of(conn), rows: Vec::new(), recent: Vec::new(), folders: Vec::new(), loose: Vec::new(), sidebar: panel::READY };
+            return PickData { kind, count, full: false, conn_name: String::new(), dialect: self.dialect_of(conn), rows: Vec::new(), recent: Vec::new(), folders: Vec::new(), loose: Vec::new(), linked: Vec::new(), sidebar: panel::READY, open: self.lib_ui.open_picker, bound };
         }
         let mut rows = Vec::new();
         let mut index = std::collections::HashMap::new();
@@ -119,9 +141,16 @@ impl App {
             index.insert(s.id, rows.len());
             rows.push(PickRow { r: ScriptRef::Saved(s.id), name: s.name.clone(), first, hay });
         }
+        let mut linked = Vec::new();
+        for (link, e) in &files {
+            let name = e.rel.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let hay = format!("{} {}", e.rel.to_string_lossy(), e.head.chars().take(200).collect::<String>()).to_lowercase();
+            linked.push(rows.len());
+            rows.push(PickRow { r: ScriptRef::File { link: *link, rel: e.rel.clone() }, name, first: first_line(kind.kind(), &e.head), hay });
+        }
         let recent: Vec<usize> = lib.recent.iter().filter_map(|r| match r {
             ScriptRef::Saved(id) => index.get(id).copied(),
-            _ => None,
+            file => rows.iter().position(|x| x.r == *file),
         }).take(6).collect();
         let folder_of = |id: u64| lib.scripts.iter().find(|s| s.id == id).and_then(|s| s.folder);
         let mut folders = Vec::new();
@@ -152,15 +181,42 @@ impl App {
         }
         // A script whose folder is gone shows with the loose ones, as in the panel.
         let loose: Vec<usize> = lib.scripts.iter().filter(|s| live_parent(lib, s.folder).is_none()).filter_map(|s| index.get(&s.id).copied()).collect();
-        PickData { kind, count, full: true, conn_name: self.conn_name(conn), dialect: self.dialect_of(conn), rows, recent, folders, loose, sidebar: panel::READY }
+        PickData { kind, count, full: true, conn_name: self.conn_name(conn), dialect: self.dialect_of(conn), rows, recent, folders, loose, linked, sidebar: panel::READY, open: self.lib_ui.open_picker, bound }
+    }
+
+    /// The chip of a bound tab: "monthly-revenue.sql  ·  shop-queries / reports", the script and where it is kept.
+    pub(in crate::app) fn chip_text(&self, r: &ScriptRef) -> String {
+        let place = match r {
+            ScriptRef::Saved(id) => {
+                let folder = self.library.scripts.iter().find(|s| s.id == *id).map(|s| crate::library::ops::folder_path(&self.library, s.folder)).unwrap_or_default();
+                if folder.is_empty() { "Library".to_string() } else { folder }
+            }
+            ScriptRef::File { link, rel } => {
+                let l = self.library.links.iter().find(|l| l.id == *link).map(|l| if l.name.is_empty() { l.path.display().to_string() } else { l.name.clone() }).unwrap_or_default();
+                match rel.parent().filter(|p| !p.as_os_str().is_empty()) {
+                    Some(p) => format!("{l} / {}", p.display()),
+                    None => l,
+                }
+            }
+        };
+        format!("{}  \u{b7}  {place}", self.script_name(r))
     }
 
     /// Does what the picker asked for.
     pub(in crate::app) fn pick_acts(&mut self, acts: Vec<PickAct>) {
+        // The view drew its picker this frame, so a Cmd+O for it has been seen.
+        self.lib_ui.open_picker = false;
         for a in acts {
             match a {
                 PickAct::Open(r, how) => self.open_script(&r, how),
                 PickAct::Save => self.save_script(),
+                PickAct::SaveAs => self.save_script_as(),
+                PickAct::Show => {
+                    if let Some(r) = self.t().and_then(|t| t.script.as_ref()).map(|b| b.r.clone()) {
+                        self.show_in_library(&r);
+                    }
+                }
+                PickAct::Unbind => self.unbind_script(),
                 PickAct::Sidebar => {
                     if self.prefs.sidebar_hidden || self.prefs.side_mode() != SideMode::Library {
                         self.prefs.set_side_mode(SideMode::Library);
@@ -180,7 +236,10 @@ impl App {
     }
 }
 
-const HINT: &str = "Return opens  ·  Alt+Return opens in a new tab  ·  Cmd+Enter runs";
+/// What the keys do on a row, spelled for this system.
+fn hint() -> String {
+    format!("{} opens  \u{b7}  {} opens in a new tab  \u{b7}  {} runs all", super::keys_text(false, false, false, "Enter"), super::keys_text(false, false, true, "Enter"), super::keys_text(true, false, false, "Enter"))
+}
 
 /// One two-line row: the name over the start of the script in mono with its syntax colors.
 fn script_row(ui: &mut egui::Ui, d: &PickData, row: &PickRow, selected: bool) -> egui::Response {
@@ -203,14 +262,57 @@ fn script_row(ui: &mut egui::Ui, d: &PickData, row: &PickRow, selected: bool) ->
     galley_at(&p, rect.left(), code_y, p.layout_job(job), TEXT());
     let label = format!("Script {}", row.name);
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label.clone()));
-    resp.on_hover_text(HINT)
+    resp.on_hover_text(hint())
 }
 
 /// The popover. `icon` shows its button as the book icon, as the find bar does; otherwise it is a text button with the
 /// number of scripts. Returns the button, which the demo uses to hold the popover open.
 pub(in crate::app) fn picker_button(ui: &mut egui::Ui, d: &PickData, icon: bool, acts: &mut Vec<PickAct>) -> egui::Response {
     let body = |ui: &mut egui::Ui| picker_body(ui, d, acts);
-    if icon { icon_menu(ui, paint_book, true, body).on_hover_text("Library") } else { sticky_menu(ui, format!("Library {}", d.count), body) }
+    let button = if icon { icon_menu(ui, paint_book, true, body).on_hover_text(format!("Library ({})", super::keys_text(true, false, false, "O"))) } else { sticky_menu(ui, format!("Library {}", d.count), body) };
+    if d.open {
+        egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&button));
+    }
+    // Drawn after the button, so in the views' right-to-left headers it sits to its left.
+    if let Some((text, edited)) = &d.bound {
+        bound_chip(ui, text, *edited, acts);
+    }
+    button
+}
+
+/// The chip of a tab bound to a script: its name and place, a dot while the tab holds changes not saved to it, and a menu
+/// with what can be done with the binding.
+fn bound_chip(ui: &mut egui::Ui, text: &str, edited: bool, acts: &mut Vec<PickAct>) {
+    use egui::containers::menu::MenuButton;
+    ui.scope(|ui| {
+        quiet_look(ui);
+        ui.set_max_width(280.0);
+        if edited {
+            let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, BUTTON_H), Sense::hover());
+            ui.painter().circle_filled(dot.center(), 3.0, WARNING());
+        }
+        let (r, _) = MenuButton::from_button(egui::Button::new(RichText::new(text).size(TXT_SMALL)).truncate()).ui(ui, |ui| {
+            menu_look(ui);
+            ui.spacing_mut().button_padding = egui::vec2(10.0, 5.0);
+            for (label, key, act) in [("Save", super::keys_text(true, false, false, "S"), PickAct::Save), ("Save as new\u{2026}", super::keys_text(true, true, false, "S"), PickAct::SaveAs)] {
+                if ui.add(egui::Button::new(label).shortcut_text(RichText::new(key).color(FAINT()))).clicked() {
+                    acts.push(act);
+                    ui.close();
+                }
+            }
+            ui.separator();
+            if ui.button("Show in library").clicked() {
+                acts.push(PickAct::Show);
+                ui.close();
+            }
+            if ui.button("Unbind").on_hover_text("Keep the text, and stop saving it to this script").clicked() {
+                acts.push(PickAct::Unbind);
+                ui.close();
+            }
+        });
+        let label = format!("Bound to {text}{}", if edited { ", edited" } else { "" });
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label.clone()));
+    });
 }
 
 fn picker_body(ui: &mut egui::Ui, d: &PickData, acts: &mut Vec<PickAct>) {
@@ -288,7 +390,7 @@ fn picker_body(ui: &mut egui::Ui, d: &PickData, acts: &mut Vec<PickAct>) {
                 return;
             }
             if d.rows.is_empty() {
-                empty_state(ui, paint_book, "No saved scripts yet", "Cmd+S saves the one you are writing.", |_| {});
+                empty_state(ui, paint_book, "No saved scripts yet", &format!("{} saves the one you are writing.", super::keys_text(true, false, false, "S")), |_| {});
                 return;
             }
             if !d.recent.is_empty() {
@@ -298,7 +400,14 @@ fn picker_body(ui: &mut egui::Ui, d: &PickData, acts: &mut Vec<PickAct>) {
                 }
                 ui.add_space(8.0);
             }
-            if !d.folders.is_empty() || !d.loose.is_empty() {
+            if !d.linked.is_empty() {
+                section_head(ui, "LINKED", None);
+                for &i in &d.linked {
+                    draw(ui, i, &mut order);
+                }
+                ui.add_space(8.0);
+            }
+            if !d.folders.is_empty() {
                 section_head(ui, "FOLDERS", None);
             }
             // A closed folder hides what is below it: the rows after it that are deeper.
@@ -330,6 +439,10 @@ fn picker_body(ui: &mut egui::Ui, d: &PickData, acts: &mut Vec<PickAct>) {
                 } else {
                     hidden = Some(f.depth);
                 }
+            }
+            if !d.loose.is_empty() {
+                ui.add_space(8.0);
+                section_head(ui, "NOT IN A FOLDER", None);
             }
             for &i in &d.loose {
                 draw(ui, i, &mut order);
@@ -363,7 +476,7 @@ fn picker_body(ui: &mut egui::Ui, d: &PickData, acts: &mut Vec<PickAct>) {
         let (p, rect) = (ui.painter().clone(), row.rect);
         paint_plus(&p, egui::pos2(rect.left() + 6.0, rect.center().y), 4.5, PRIMARY());
         galley_at(&p, rect.left() + 20.0, rect.center().y, p.layout_no_wrap("Save this script…".into(), FontId::proportional(TXT_BODY), TEXT()), TEXT());
-        let key = p.layout_no_wrap("⌘S".into(), FontId::proportional(TXT_CAPTION), FAINT());
+        let key = p.layout_no_wrap(super::keys_text(true, false, false, "S"), FontId::proportional(TXT_CAPTION), FAINT());
         galley_at(&p, rect.right() - key.size().x, rect.center().y, key, FAINT());
         row.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Save this script"));
         if row.clicked() {
@@ -371,7 +484,7 @@ fn picker_body(ui: &mut egui::Ui, d: &PickData, acts: &mut Vec<PickAct>) {
             ui.close();
         }
         ui.add_space(4.0);
-        let (n, m) = (d.rows.len(), d.folders.len());
+        let (n, m) = (d.rows.len() - d.linked.len(), d.folders.len());
         ui.label(RichText::new(format!("{n} script{}, {m} folder{}", if n == 1 { "" } else { "s" }, if m == 1 { "" } else { "s" })).size(TXT_CAPTION).color(FAINT()));
     });
 }

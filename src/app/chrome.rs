@@ -567,7 +567,11 @@ impl App {
                         let xr = egui::Rect::from_center_size(egui::pos2(rect.right() - 14.0, rect.center().y), egui::vec2(16.0, 16.0));
                         let xresp = ui.interact(xr, ui.scope_id().with("close"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
                         xresp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Close tab {}", self.tab_name(i))));
-                        if active || hovered || xresp.hovered() {
+                        // A tab whose library script has unsaved changes shows a dot where the cross is, until the pointer
+                        // comes to close it, as editors do.
+                        if self.tab_edited(i) && !hovered && !xresp.hovered() {
+                            ui.painter().circle_filled(xr.center(), 3.5, if active { TEXT() } else { MUTED() });
+                        } else if active || hovered || xresp.hovered() {
                             if xresp.is_pointer_button_down_on() {
                                 ui.painter().rect_filled(xr, R_SM, PRESSED());
                             } else if xresp.hovered() {

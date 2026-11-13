@@ -61,6 +61,14 @@ fn link_dirs(scan: &disk::Scan) -> Vec<PathBuf> {
     all.into_iter().collect()
 }
 
+/// A name for a new script from the comment it starts with, such as "revenue per month" from "-- revenue per month".
+pub(in crate::app) fn comment_name(body: &str) -> Option<String> {
+    let first = body.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let text = ["--", "//", "/*", "#"].iter().find_map(|m| first.strip_prefix(m))?;
+    let text = text.trim().trim_end_matches("*/").trim().trim_start_matches('*').trim();
+    (!text.is_empty()).then(|| text.chars().take(60).collect::<String>().trim().to_string())
+}
+
 /// The script a save would replace: same name, folder, kind and target. A filter or pipeline belongs to a collection, a SQL
 /// or Shell script to its connection only, since it runs on whichever database the tab has.
 pub(in crate::app) fn same_place(lib: &Library, f: &SaveForm, name: &str, folder: Option<u64>) -> Option<usize> {
@@ -78,7 +86,7 @@ impl App {
             ScriptRef::Saved(id) => self.library.scripts.iter().find(|s| s.id == *id),
             _ => None,
         });
-        let name = bound.map_or_else(|| "Untitled".to_string(), |s| s.name.clone());
+        let name = bound.map_or_else(|| comment_name(&tt.body).unwrap_or_else(|| self.tab_name(self.cur)), |s| s.name.clone());
         let last = self.lib_ui.last_folder.filter(|id| self.library.folders.iter().any(|f| f.id == *id));
         let folder = bound.map_or(last, |s| s.folder);
         let (cname, product, version) = self.conn(conn).map(|c| (c.meta.name.clone(), c.server.product.clone(), c.server.version.clone())).unwrap_or_default();
@@ -121,8 +129,11 @@ impl App {
                 }
             });
         }
+        let mut replaced = None;
         let id = match same_place(&self.library, f, &name, folder) {
             Some(i) => {
+                // Kept for the toast's Undo, since the old text is otherwise gone.
+                replaced = Some(self.library.scripts[i].clone());
                 let s = &mut self.library.scripts[i];
                 (s.body, s.sort, s.project, s.db, s.schema, s.updated) = (f.body.clone(), f.sort.clone(), f.project.clone(), f.db.clone(), f.schema.clone(), now_secs());
                 s.id
@@ -155,7 +166,10 @@ impl App {
                 self.save_library();
             }
         }
-        self.ok(format!("Saved \"{name}\" to the library"));
+        match replaced {
+            Some(old) => self.toast_restore(format!("Replaced \"{name}\" in the library"), crate::app::restore::Restore::Script(old)),
+            None => self.ok(format!("Saved \"{name}\" to the library")),
+        }
         let tt = TabText { kind: if f.kind == "sql" { "sql" } else { "" }, body: f.body.clone(), sort: String::new(), project: String::new(), view: f.view.unwrap_or(View::Sql), db: String::new(), schema: String::new(), coll: String::new() };
         self.warn_plain_password(&tt);
     }
@@ -215,6 +229,11 @@ impl App {
                     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Script name"));
                     if !f.focused {
                         r.request_focus();
+                        // The name is a suggestion: selected, so typing replaces it instead of adding to it.
+                        // The field keeps no state before its first frame, so this waits for one.
+                        let mut s = egui::TextEdit::load_state(ui.ctx(), r.id).unwrap_or_default();
+                        s.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(f.name.chars().count()))));
+                        s.store(ui.ctx(), r.id);
                         f.focused = true;
                     }
                     enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -278,11 +297,13 @@ impl App {
         let ok = !name.is_empty() && !new_folder_empty && linked_ok;
         let mut save = false;
         dialog_foot(ui, |ui| {
-            save = ui.add_enabled(ok, primary_button(ui, "Save", PRIMARY())).clicked() || (enter && ok);
+            // Saving over a script of the same name says so on the button, and the toast after it offers Undo.
+            let replaces = f.link.is_none() && f.new_folder.is_none() && !name.is_empty() && same_place(&self.library, f, &name, f.folder).is_some();
+            save = ui.add_enabled(ok, primary_button(ui, if replaces { "Replace" } else { "Save" }, PRIMARY())).clicked() || (enter && ok);
             if ui.button("Cancel").on_hover_text("Esc").clicked() {
                 *keep = false;
             }
-            foot_note(ui, "Then Cmd+S saves straight back to it");
+            foot_note(ui, &format!("Then {} saves straight back to it", super::keys_text(true, false, false, "S")));
         });
         if save {
             self.commit_save(f);
