@@ -360,20 +360,23 @@ fn run_chip(ui: &mut egui::Ui) -> egui::Response {
 
 /// The widest a Library menu grows: a long folder or connection name is cut rather than stretching the menu.
 pub(in crate::app) const MENU_MAX_W: f32 = 260.0;
+/// The longest item label a Library menu shows in full, in characters.
+const MENU_LABEL_MAX: usize = 36;
 
 /// Sets up a Library menu as the app's other menus are (the Connections group menu, the tab and rail menus): the menu
-/// look, their padding, and a width that follows the items up to `MENU_MAX_W`.
+/// look and their padding. The menu takes the width of its widest item; long labels are cut by `lib_button`.
 fn lib_menu(ui: &mut egui::Ui) {
     menu_look(ui);
     ui.spacing_mut().item_spacing.y = 2.0;
     ui.spacing_mut().button_padding = egui::vec2(10.0, 5.0);
-    ui.set_max_width(MENU_MAX_W);
 }
 
 /// One item of a Library menu: the interface font, the shortcut faint on the right, and a check at the right end for an
 /// option that is on, as the other menus draw them.
 fn lib_button(ui: &mut egui::Ui, label: &str, key: &str, checked: bool) -> egui::Response {
-    let mut b = egui::Button::new(label);
+    // The menu sizes to its widest item, so a very long name (a folder, a connection) is cut instead of widening it.
+    let shown: String = if label.chars().count() > MENU_LABEL_MAX { label.chars().take(MENU_LABEL_MAX - 1).collect::<String>() + "\u{2026}" } else { label.to_string() };
+    let mut b = egui::Button::new(shown);
     if !key.is_empty() {
         b = b.shortcut_text(RichText::new(key).color(FAINT()));
     }
