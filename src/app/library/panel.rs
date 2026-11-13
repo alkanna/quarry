@@ -12,7 +12,7 @@ use crate::library::ops::{self, DropAt};
 use crate::library::tree::{self, Node, Pos, Row, Scans};
 use crate::library::{Library, ScriptRef};
 use std::path::{Path, PathBuf};
-use crate::ui::dnd::{drag_source, drop_fill, drop_line, hover_open, side_row_drag};
+use crate::ui::dnd::{Spot, Zone, auto_scroll_while_dragging, drag_cancelled, drag_source_with, drop_fill, hover_open, paint_spot, side_row_drag};
 use super::open::How;
 
 /// Whether the rail shows the Library button.
@@ -509,7 +509,8 @@ impl App {
             scans: &self.lib_ui.scans,
             changed: &self.lib_ui.changed,
             active,
-            drag: egui::DragAndDrop::payload::<DragItem>(&ctx).and_then(|d| item_node(&d)),
+            // Esc drops the payload; drag_cancelled keeps the marks off until the button comes up.
+            drag: egui::DragAndDrop::payload::<DragItem>(&ctx).filter(|_| !drag_cancelled(&ctx)).and_then(|d| item_node(&d)),
             demo_drag: demo_drag.as_ref(),
         };
         let total = rows.len();
@@ -521,6 +522,7 @@ impl App {
             .scope(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 area.show_rows(ui, ROW_H, total, |ui, range| {
+                    auto_scroll_while_dragging(ui);
                     for i in range {
                         draw_row(ui, &cx, st, &rows[i], acts);
                     }
@@ -538,7 +540,7 @@ impl App {
             if let (Some(p), Some(item)) = (r.dnd_hover_payload::<DragItem>(), cx.drag.as_ref()) {
                 let _ = p;
                 if root_plan(&self.library, item).is_ok() {
-                    drop_line(ui.painter(), zone.x_range(), zone.top() + 1.0);
+                    paint_spot(ui.painter(), zone.with_max_y(zone.top() + 2.0), Spot { zone: Zone::Before, depth: 0 }, zone.left() + 8.0, INDENT);
                 }
             }
             if let (Some(_), Some(item)) = (r.dnd_release_payload::<DragItem>(), cx.drag.clone()) {
@@ -829,7 +831,7 @@ impl App {
                     if st.sel.as_ref().is_some_and(|s| *s == n || matches!(s, Node::Script(id) if scripts.iter().any(|x| x.id == *id)) || matches!(s, Node::Folder(id) if folders.iter().any(|f| f.id == *id))) {
                         st.sel = None;
                     }
-                    self.toast_restore(msg, Restore::Saved { scripts, folders });
+                    self.toast_restore(msg, Restore::Saved { scripts, folders, written: None });
                 }
             }
             Act::NewFolder(parent) => {
@@ -1146,10 +1148,17 @@ fn draw_row_in(ui: &mut egui::Ui, cx: &RowCx, st: &mut PanelUi, row: &Row, acts:
 
     // Dragging a folder, a script or a linked file, and what a drag over this row would do.
     if let Some(item) = drag_item(&row.node) {
-        drag_source(ui, &r, item, &look.name);
+        // The ghost is the row itself: its glyph and name, without the indent.
+        drag_source_with(ui, &r, item, |p, g| {
+            let cy = g.center().y;
+            glyph(p, egui::pos2(g.left() + 30.0, cy), gcol);
+            let name = p.layout_job(LayoutJob::single_section(look.name.clone(), ui_fmt(TXT_BODY, BRIGHT(), if is_container { W_MEDIUM } else { 400.0 }, 0.0)));
+            let dy = optical_dy(&name);
+            p.galley(egui::pos2(g.left() + 41.0, cy - name.size().y / 2.0 + dy), name, BRIGHT());
+        });
     }
     let target_is_folder = matches!(row.node, Node::Folder(_)) || dir_like;
-    let over = r.dnd_hover_payload::<DragItem>().and_then(|p| item_node(&p));
+    let over = r.dnd_hover_payload::<DragItem>().filter(|_| !drag_cancelled(&ctx)).and_then(|p| item_node(&p));
     let frac = ctx.pointer_hover_pos().map_or(0.5, |p| ((p.y - rect.top()) / rect.height()).clamp(0.0, 1.0));
     // A linked folder has nothing to order, so any part of its row means "into".
     let pos = if dir_like { Pos::Into } else { tree::drop_at(target_is_folder, row.open, frac) };
@@ -1157,12 +1166,15 @@ fn draw_row_in(ui: &mut egui::Ui, cx: &RowCx, st: &mut PanelUi, row: &Row, acts:
     if let Some(item) = over.as_ref().filter(|i| **i != row.node) {
         let plan = plan_drop(cx.lib, item, &row.node, pos);
         if plan.is_ok() {
-            match (pos, &plan) {
-                (Pos::Into, Ok(Plan::Saved(DropAt::Into(_)))) if target_is_folder => drop_fill(ui.painter(), rect),
-                (_, Ok(Plan::Into { .. })) if dir_like => drop_fill(ui.painter(), rect),
-                (Pos::Before, _) => drop_line(ui.painter(), egui::Rangef::new(rect.left() + 8.0 + indent, rect.right()), rect.top()),
-                _ => drop_line(ui.painter(), egui::Rangef::new(rect.left() + 8.0 + indent, rect.right()), rect.bottom()),
-            }
+            // The mark follows the plan: a fill for into a folder, else a line at the depth of the row it lands beside.
+            let zone = match (pos, &plan) {
+                (Pos::Into, Ok(Plan::Saved(DropAt::Into(_)))) if target_is_folder => Zone::Into,
+                (_, Ok(Plan::Into { .. })) if dir_like => Zone::Into,
+                (Pos::Before, _) => Zone::Before,
+                _ => Zone::After,
+            };
+            let depth = row.depth;
+            paint_spot(ui.painter(), rect, Spot { zone, depth }, rect.left() + 8.0, INDENT);
         } else {
             ctx.set_cursor_icon(egui::CursorIcon::NotAllowed);
         }

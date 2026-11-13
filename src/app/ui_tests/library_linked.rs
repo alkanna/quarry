@@ -309,10 +309,19 @@ fn a_library_script_dropped_on_a_linked_folder_becomes_a_file_and_leaves_the_lib
     assert_eq!(rel, Path::new("Revenue.sql"));
     assert_eq!(std::fs::read_to_string(dir.join("Revenue.sql")).unwrap(), "select sum(1)");
     assert!(a.library.scripts.iter().all(|s| s.id != 7));
-    // Undo brings the script back; the file stays.
+    // Undo brings the script back and takes the file it wrote away again.
     let id = a.restores.first().map(|r| r.0).unwrap();
     a.apply_restore(id);
-    assert!(a.library.scripts.iter().any(|s| s.name == "Revenue") && dir.join("Revenue.sql").exists());
+    assert!(a.library.scripts.iter().any(|s| s.name == "Revenue"), "Undo did not bring the script back");
+    assert!(!dir.join("Revenue.sql").exists(), "Undo left the file the move wrote");
+    // A file edited since the move is kept by the undo.
+    let s = a.library.scripts.iter().find(|s| s.name == "Revenue").map(|s| s.id).unwrap();
+    a.script_to_link(s, 1, Path::new("")).expect("a file again");
+    std::fs::write(dir.join("Revenue.sql"), "select 2").unwrap();
+    let id = a.restores.last().map(|r| r.0).unwrap();
+    a.apply_restore(id);
+    assert!(dir.join("Revenue.sql").exists(), "Undo removed a file that was edited after the move");
+    assert_eq!(a.library.scripts.iter().filter(|s| s.name == "Revenue").count(), 1);
     // A folder that does not show .js files refuses a shell script.
     a.library.links[0].exts = vec!["sql".into()];
     a.library.scripts.push(crate::library::Script { id: 8, name: "Job".into(), kind: "shell".into(), body: "1".into(), conn: 1, ..Default::default() });

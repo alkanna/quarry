@@ -421,7 +421,7 @@ impl App {
         self.lib_ui.rescan.insert(link);
     }
 
-    fn drop_entry(&mut self, link: u64, rel: &std::path::Path) {
+    pub(in crate::app) fn drop_entry(&mut self, link: u64, rel: &std::path::Path) {
         if let Some(s) = self.lib_ui.scans.get_mut(&link) {
             s.entries.retain(|x| x.rel != rel);
         }
@@ -629,7 +629,7 @@ impl App {
     }
 
     /// A script kept by Quarry written into a linked folder as a file. The Quarry copy is removed and Undo puts it back (the
-    /// file stays then, as a copy). Refused when the folder does not show files of that kind.
+    /// file goes again, unless it was edited since). Refused when the folder does not show files of that kind.
     pub(in crate::app) fn script_to_link(&mut self, id: u64, link: u64, dir: &std::path::Path) -> Option<PathBuf> {
         let s = self.library.scripts.iter().find(|s| s.id == id)?.clone();
         let l = self.library.links.iter().find(|l| l.id == link)?.clone();
@@ -661,7 +661,7 @@ impl App {
         self.add_entry(link, &rel);
         if let Some((folders, scripts)) = ops::delete(&mut self.library, &Node::Script(id)) {
             self.save_library();
-            self.toast_restore(format!("Moved \"{}\" to {} as {}.", s.name, l.name, file_label(&rel)), Restore::Saved { scripts, folders });
+            self.toast_restore(format!("Moved \"{}\" to {} as {}.", s.name, l.name, file_label(&rel)), Restore::Saved { scripts, folders, written: Some((link, rel.clone(), bytes.clone())) });
         }
         Some(rel)
     }

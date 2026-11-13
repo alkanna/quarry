@@ -222,3 +222,15 @@ fn new_folder_adds_a_folder_and_starts_its_rename() {
     ui.settle();
     assert!(ui.app().library.folders.iter().any(|f| f.name == "Archive"));
 }
+
+#[test]
+fn esc_cancels_a_library_drag_and_a_click_still_selects() {
+    let Some(mut ui) = demo_ui(load) else { return };
+    let before = ui.app().library.clone();
+    ui.drag_esc("Slow orders lookup", "Maintenance", 0.5);
+    assert_eq!(ui.app().library, before, "Esc did not cancel the drop");
+    assert!(!egui::DragAndDrop::has_any_payload(&ui.h.ctx), "the payload outlived the drag");
+    ui.mouse_hold("Slow orders lookup", 0);
+    assert!(matches!(ui.app().lib_ui.panel.sel, Some(Node::Script(_))), "a click did not select the script");
+    assert_eq!(ui.app().library, before, "a click moved the script");
+}

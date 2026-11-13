@@ -13,7 +13,8 @@ pub(super) enum Restore {
     /// `rail` is the rail order then, so the tile goes back to its place as well.
     Groups { groups: Box<Groups>, rail: Vec<u64> },
     /// Deleted library scripts and the folders that held them.
-    Saved { scripts: Vec<Script>, folders: Vec<Folder> },
+    /// `written` is the file a script moved into a linked folder left there: its link, its path in the link and what it held.
+    Saved { scripts: Vec<Script>, folders: Vec<Folder>, written: Option<(u64, PathBuf, Vec<u8>)> },
     /// A file moved to the trash, with the bytes it held.
     File { path: PathBuf, bytes: Vec<u8> },
 }
@@ -40,10 +41,27 @@ impl App {
                 self.save_groups();
                 self.ok("Grouping undone.");
             }
-            Restore::Saved { scripts, folders } => {
+            Restore::Saved { scripts, folders, written } => {
                 let n = scripts.len();
                 self.library.restore(folders, scripts);
                 self.save_library();
+                // A script moved into a linked folder left a file there. It goes too, unless it was changed since, which
+                // would make the undo throw away the person's edits.
+                if let Some((link, rel, bytes)) = written
+                    && let Some(root) = self.library.links.iter().find(|l| l.id == link).map(|l| l.path.clone())
+                {
+                    let path = root.join(&rel);
+                    if std::fs::read(&path).is_ok_and(|now| now == bytes) {
+                        if let Err(e) = std::fs::remove_file(&path) {
+                            self.warn(format!("The script is back, but {} could not be removed: {e}", path.display()));
+                            return;
+                        }
+                        self.drop_entry(link, &rel);
+                    } else if path.exists() {
+                        self.warn(format!("The script is back. {} was changed since, so it was kept.", path.display()));
+                        return;
+                    }
+                }
                 self.ok(if n == 1 { "Script restored.".to_string() } else { format!("{n} scripts restored.") });
             }
             Restore::File { path, bytes } => {
