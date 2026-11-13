@@ -6,8 +6,8 @@ const MIN_W: f32 = 200.0;
 /// The sidebar panel's laid out rect and the left edge of the central panel, as the last frame drew them.
 fn edges(ui: &UiApp) -> (egui::Rect, f32) {
     let ctx = ui.h.ctx.clone();
-    let side = ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new("test-sidebar-rect"))).expect("sidebar was not drawn");
-    let central = ctx.data(|d| d.get_temp::<f32>(egui::Id::new("test-central-left"))).expect("central panel was not drawn");
+    let side = ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::unique("test-sidebar-rect"))).expect("sidebar was not drawn");
+    let central = ctx.data(|d| d.get_temp::<f32>(egui::Id::unique("test-central-left"))).expect("central panel was not drawn");
     (side, central)
 }
 

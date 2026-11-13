@@ -222,7 +222,7 @@ impl App {
                 ui.allocate_rect(room, Sense::hover());
             });
         #[cfg(test)]
-        ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("test-sidebar-rect"), shown.response.rect));
+        ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique("test-sidebar-rect"), shown.response.rect));
     }
 
     /// The database explorer: connection picker, tree filter and the tree of the active connection.
