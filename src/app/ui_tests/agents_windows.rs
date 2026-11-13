@@ -141,14 +141,17 @@ fn custom_rules_drag_to_reorder_and_the_selection_follows() {
 fn custom_rules_move_from_their_menu_and_with_alt_arrows() {
     let Some(mut ui) = demo_ui(three_rules) else { return };
     ui.click("Custom 3");
-    ui.show("Rule row 1");
-    let at = ui.h.get_by_label("Rule row 1").rect().center();
-    ui.press_at(at, egui::PointerButton::Secondary, 1);
-    ui.settle();
-    ui.click_contains("Move down");
-    assert_eq!(rule_names(&ui), ["b", "a", "c"]);
+    ui.show("Rule row 3");
     ui.h.get_by_label("Rule row 3").focus();
     ui.settle();
     ui.key(egui::Modifiers::ALT, egui::Key::ArrowUp);
-    assert_eq!(rule_names(&ui), ["b", "c", "a"]);
+    assert_eq!(rule_names(&ui), ["a", "c", "b"], "Alt+Up did not move the focused rule");
+    let at = ui.h.get_by_label("Rule row 1").rect().center();
+    ui.press_at(at, egui::PointerButton::Secondary, 1);
+    ui.settle();
+    ui.show_contains("Move down");
+    let item = ui.h.get_by_label_contains("Move down").rect().center();
+    ui.press_at(item, egui::PointerButton::Primary, 1);
+    ui.settle();
+    assert_eq!(rule_names(&ui), ["c", "a", "b"], "Move down in the rule menu did nothing");
 }
