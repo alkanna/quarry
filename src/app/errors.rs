@@ -7,6 +7,8 @@ use std::time::Instant;
 
 /// Errors kept for the status bar list; older ones drop off.
 const ERRORS_MAX: usize = 200;
+/// Undo entries kept for toasts that may still be up; older ones drop off.
+const RESTORES_MAX: usize = 10;
 const OK_S: u64 = 8;
 const WARN_S: u64 = 6;
 const TOAST_W: f32 = 380.0;
@@ -46,6 +48,10 @@ pub(super) enum Tone {
 pub(super) enum Act {
     Fix(Fix),
     Undo(Instant),
+    /// Puts back what `App::restores` holds under this id: a deleted group, scripts or a file.
+    Restore(u64),
+    /// Opens the Edit group dialog on this group, for the Rename of a group just made by a drop.
+    EditGroup(u64),
     Unlock(u64),
     Connect(u64),
     Settings,
@@ -366,6 +372,26 @@ impl App {
         self.toasts.push(Toast { id: self.err_seq, tone: Tone::Ok, title: s, body: String::new(), acts, at: Instant::now(), err: None });
     }
 
+    /// A success note whose Undo puts back something that is not a database edit, which `apply_undo` could not do on a
+    /// read-only connection: a group, saved scripts or a file.
+    pub(super) fn toast_restore(&mut self, s: String, r: Restore) {
+        self.toast_restore_edit(s, r, None);
+    }
+
+    /// `toast_restore` with a Rename beside Undo that opens the Edit group dialog on `group`.
+    pub(super) fn toast_restore_edit(&mut self, s: String, r: Restore, group: Option<u64>) {
+        self.err_seq += 1;
+        let id = self.err_seq;
+        self.restores.push((id, r));
+        if self.restores.len() > RESTORES_MAX {
+            self.restores.remove(0);
+        }
+        let mut acts = vec![("Undo".to_string(), Act::Restore(id))];
+        acts.extend(group.map(|g| ("Rename".to_string(), Act::EditGroup(g))));
+        self.toasts.retain(|t| t.tone != Tone::Ok);
+        self.toasts.push(Toast { id, tone: Tone::Ok, title: s, body: String::new(), acts, at: Instant::now(), err: None });
+    }
+
     /// Runs a toast, panel or card button. `tab` is the tab whose panel it was on.
     pub(super) fn run_act(&mut self, ctx: &egui::Context, act: Act, e: Option<&ErrEntry>, tab: Option<(usize, View)>) {
         let conn = e.and_then(|e| e.conn);
@@ -412,6 +438,8 @@ impl App {
                     self.apply_undo(i);
                 }
             }
+            Act::Restore(id) => self.apply_restore(id),
+            Act::EditGroup(g) => self.edit_group(g),
             Act::Unlock(c) => self.modal = Some(Modal::Unlock(c, None)),
             Act::Connect(c) => self.connect_active(c),
             Act::Settings => self.open_tool_settings(),
@@ -474,7 +502,7 @@ impl App {
     pub(super) fn toasts(&mut self, ctx: &egui::Context) {
         let keep = self.prefs.keep_toasts;
         // An Undo still ends on its timer: one left up for hours would revert an edit long forgotten.
-        let fades = |t: &Toast| t.tone != Tone::Err && (!keep || t.acts.iter().any(|(_, a)| matches!(a, Act::Undo(_))));
+        let fades = |t: &Toast| t.tone != Tone::Err && (!keep || t.acts.iter().any(|(_, a)| matches!(a, Act::Undo(_) | Act::Restore(_))));
         self.toasts.retain(|t| !fades(t) || t.at.elapsed().as_secs() < if t.tone == Tone::Ok { OK_S } else { WARN_S });
         // Only the latest few fit; older errors stay in the status bar list.
         while self.toasts.len() > 4 {

@@ -168,46 +168,54 @@ impl App {
             .size_range(200.0..=480.0)
             .resizable(true)
             .frame(egui::Frame::new().fill(PANEL()).inner_margin(egui::Margin { left: 12, right: 12, top: 12, bottom: 8 }))
-            .show(ui, |ui| {
-                ui.label(LayoutJob::single_section("DATABASE EXPLORER".into(), ui_fmt(10.5, MUTED(), W_SEMIBOLD, 0.6)));
-                ui.add_space(6.0);
-                self.conn_picker(ui);
-                ui.add_space(8.0);
-                let hint = if self.active.and_then(|id| self.conn(id)).is_some_and(|c| c.meta.engine.is_sql()) { "Filter tables" } else { "Filter collections" };
-                let r = ui.add(
-                    egui::TextEdit::singleline(&mut self.tree_filter)
-                        .id(egui::Id::unique("tree-filter"))
-                        .hint_text(RichText::new(hint).color(FAINT()))
-                        .desired_width(f32::INFINITY)
-                        .margin(egui::Margin { left: 10, right: 28, top: 5, bottom: 5 }),
-                );
-                if !r.has_focus() && self.tree_filter.is_empty() {
-                    let g = ui.painter().layout_job(LayoutJob::single_section("/".into(), mono_fmt(10.0, MUTED(), 400.0)));
-                    let kr = egui::Rect::from_min_size(egui::pos2(r.rect.right() - 24.0, r.rect.center().y - 8.0), egui::vec2(18.0, 16.0));
-                    paint_kbd(ui.painter(), kr, g);
-                }
-                r.on_hover_text("Press / or Cmd+Shift+F");
-                ui.add_space(14.0);
-                let sql_conn = self.active.and_then(|id| self.conn(id)).filter(|c| c.meta.engine.is_sql() && c.status == Status::Ready).map(|c| (c.meta.id, c.writable, c.meta.engine == db::sql::Engine::Postgres));
-                let mut new_db = None;
-                ui.horizontal(|ui| {
-                    ui.label(LayoutJob::single_section("Databases".into(), ui_fmt(10.5, FAINT(), W_SEMIBOLD, 0.8)));
-                    if let Some((id, writable, pg)) = sql_conn {
-                        // PostgreSQL's create asks to unlock on a locked connection; MySQL's button stays disabled until it is unlocked.
-                        let on = writable || pg;
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if plus_button(ui, on).on_hover_text(if writable { "New database…" } else if pg { "New database… (asks to unlock writes first)" } else { "Read-only: unlock writes to create a database" }).clicked() && on {
-                                new_db = Some(id);
-                            }
-                        });
+            .show(ui, |ui| match self.prefs.side_mode() {
+                // A panel that is not built yet shows the explorer, so a setting from a newer build never leaves the sidebar empty.
+                SideMode::Connections if conns_panel::READY => self.conns_panel(ui),
+                SideMode::Library if library::panel::READY => self.library_panel(ui),
+                _ => self.explorer_panel(ui),
+            });
+    }
+
+    /// The database explorer: connection picker, tree filter and the tree of the active connection.
+    pub(super) fn explorer_panel(&mut self, ui: &mut egui::Ui) {
+        ui.label(LayoutJob::single_section("DATABASE EXPLORER".into(), ui_fmt(10.5, MUTED(), W_SEMIBOLD, 0.6)));
+        ui.add_space(6.0);
+        self.conn_picker(ui);
+        ui.add_space(8.0);
+        let hint = if self.active.and_then(|id| self.conn(id)).is_some_and(|c| c.meta.engine.is_sql()) { "Filter tables" } else { "Filter collections" };
+        let r = ui.add(
+            egui::TextEdit::singleline(&mut self.tree_filter)
+                .id(egui::Id::unique("tree-filter"))
+                .hint_text(RichText::new(hint).color(FAINT()))
+                .desired_width(f32::INFINITY)
+                .margin(egui::Margin { left: 10, right: 28, top: 5, bottom: 5 }),
+        );
+        if !r.has_focus() && self.tree_filter.is_empty() {
+            let g = ui.painter().layout_job(LayoutJob::single_section("/".into(), mono_fmt(10.0, MUTED(), 400.0)));
+            let kr = egui::Rect::from_min_size(egui::pos2(r.rect.right() - 24.0, r.rect.center().y - 8.0), egui::vec2(18.0, 16.0));
+            paint_kbd(ui.painter(), kr, g);
+        }
+        r.on_hover_text("Press / or Cmd+Shift+F");
+        ui.add_space(14.0);
+        let sql_conn = self.active.and_then(|id| self.conn(id)).filter(|c| c.meta.engine.is_sql() && c.status == Status::Ready).map(|c| (c.meta.id, c.writable, c.meta.engine == db::sql::Engine::Postgres));
+        let mut new_db = None;
+        ui.horizontal(|ui| {
+            ui.label(LayoutJob::single_section("Databases".into(), ui_fmt(10.5, FAINT(), W_SEMIBOLD, 0.8)));
+            if let Some((id, writable, pg)) = sql_conn {
+                // PostgreSQL's create asks to unlock on a locked connection; MySQL's button stays disabled until it is unlocked.
+                let on = writable || pg;
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if plus_button(ui, on).on_hover_text(if writable { "New database…" } else if pg { "New database… (asks to unlock writes first)" } else { "Read-only: unlock writes to create a database" }).clicked() && on {
+                        new_db = Some(id);
                     }
                 });
-                if let Some(id) = new_db {
-                    self.side_act(id, SideAct::NewDb);
-                }
-                ui.add_space(2.0);
-                egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| self.db_tree(ui));
-            });
+            }
+        });
+        if let Some(id) = new_db {
+            self.side_act(id, SideAct::NewDb);
+        }
+        ui.add_space(2.0);
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| self.db_tree(ui));
     }
 
     pub(super) fn conn_picker(&mut self, ui: &mut egui::Ui) {
@@ -373,10 +381,12 @@ impl App {
         }
     }
 
-    /// Opens the explorer if it was collapsed from the rail, remembering that for the next launch.
+    /// Opens the explorer if it was collapsed from the rail or showing another panel, remembering that for the next launch.
+    /// Callers reach for the tree: a jump, `/` or Cmd+Shift+F.
     pub(super) fn show_sidebar(&mut self) {
-        if self.prefs.sidebar_hidden {
+        if self.prefs.sidebar_hidden || self.prefs.side_mode() != SideMode::Explorer {
             self.prefs.sidebar_hidden = false;
+            self.prefs.set_side_mode(SideMode::Explorer);
             self.save_prefs();
         }
     }

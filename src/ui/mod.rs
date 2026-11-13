@@ -1,6 +1,7 @@
 pub mod cells;
 pub mod complete;
 pub mod dialog;
+pub mod dnd;
 pub mod editor;
 pub mod glyphs;
 pub mod js_doc;

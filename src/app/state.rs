@@ -414,6 +414,32 @@ pub(super) struct Tab {
     pub(super) stats_asked: bool,
     /// Set for tabs of a SQL connection, whose rows come from `sql_page` instead of `find`.
     pub(super) sql: Option<Box<SqlTab>>,
+    /// The library script or linked file this tab's editor holds, so Cmd+S writes it back.
+    pub(super) script: Option<Bound>,
+}
+
+/// The tie between a tab and the library script or linked file it was opened from.
+#[allow(dead_code)]
+pub(super) struct Bound {
+    pub(super) r: crate::library::ScriptRef,
+    /// The view whose text is the script. Cmd+S in another view of the tab does not write it.
+    pub(super) view: View,
+    /// The text as last opened or saved, to tell an edited tab from a clean one.
+    pub(super) base: String,
+    /// Modified time and length of a linked file when it was last read or written.
+    pub(super) disk: Option<(std::time::SystemTime, u64)>,
+    /// A linked file that changed on disk under an edited tab: the text found there, until the person picks Reload,
+    /// Keep mine or Compare.
+    pub(super) conflict: Option<String>,
+}
+
+/// What a row of the sidebar carries while it is dragged. Dropped on another row, or on a rail tile.
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum DragItem {
+    Conn(u64),
+    Script(crate::library::ScriptRef),
+    Folder(u64),
 }
 
 /// What a SQL tab keeps besides the shared row fields of `Tab`.
@@ -823,6 +849,7 @@ impl Tab {
             stats: None,
             stats_asked: false,
             sql: None,
+            script: None,
         }
     }
 }
@@ -920,6 +947,12 @@ pub(super) enum Modal {
     ColumnCustomize { key: String, agg: bool, col: String, label: String, path: String },
     /// Attach another saved connection to the current Shell tab.
     Attach(Box<super::shell_attach::AttachForm>),
+    /// Edit a connection group.
+    GroupEdit(Box<super::group_dialog::GroupForm>),
+    /// Save the current script to the library.
+    SaveScript(Box<super::library::save_dialog::SaveForm>),
+    /// Link a folder on disk to the library.
+    LinkFolder(Box<super::library::link_dialog::LinkForm>),
 }
 
 /// A value being edited in place in the document tree.

@@ -12,9 +12,14 @@ mod dialogs;
 mod conn_advanced;
 mod conn_cert;
 mod conn_cloudsql;
+mod conns_panel;
+mod library_linked;
+mod library_panel;
+mod library_save;
 mod mongo_edit;
 mod pg_roles;
 mod pg_server;
+mod rail;
 mod sidebar;
 mod sql_create;
 mod sql_dump;
@@ -248,6 +253,36 @@ impl UiApp {
     pub fn open_cell(&mut self, col: &str, row: usize) {
         self.double_click_cell(col, row);
         self.wait("the cell editor", |a| a.sql_cell.is_some());
+    }
+
+    /// A mouse drag as a person makes it: press on `from`, move to `to` in steps so egui passes its 6 px drag threshold on the
+    /// way, hold there for `hold_frames` frames (a hover timer such as a folder opening needs time to run), then release.
+    /// `at_frac` is where over the target the pointer rests, from 0.0 at its top edge to 1.0 at its bottom edge. Start and
+    /// target must be more than 6 px apart, or the press stays a click.
+    pub fn drag(&mut self, from: &str, to: &str, at_frac: f32, hold_frames: usize) {
+        self.show(from);
+        self.show(to);
+        let start = self.node(from, Pick::Only).rect().center();
+        let r = self.node(to, Pick::Only).rect();
+        let end = egui::pos2(r.center().x, r.top() + r.height() * at_frac);
+        self.h.hover_at(start);
+        self.h.step();
+        let button = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        self.h.input_mut().events.push(button(start, true));
+        self.h.step();
+        for i in 1..=6 {
+            self.h.hover_at(start.lerp(end, i as f32 / 6.0));
+            self.h.step();
+        }
+        self.h.run_steps(hold_frames);
+        self.h.input_mut().events.push(button(end, false));
+        self.h.run_steps(4);
+    }
+
+    /// Presses a key with modifiers and gives the frames its effects need.
+    pub fn key(&mut self, mods: egui::Modifiers, key: egui::Key) {
+        self.h.key_press_modifiers(mods, key);
+        self.settle();
     }
 
     /// Types into the focused widget.

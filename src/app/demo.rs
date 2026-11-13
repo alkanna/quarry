@@ -246,6 +246,14 @@ impl App {
         if let Ok(v) = std::env::var("QUARRY_TEST_AGENTS") {
             self.agents_demo_view(&v);
         }
+        // QUARRY_TEST_CONNS=<state> shows the Connections panel and its groups, see conns_panel.rs.
+        if let Ok(v) = std::env::var("QUARRY_TEST_CONNS") {
+            self.demo_conns(&v);
+        }
+        // QUARRY_TEST_LIBRARY=<state> shows the script library, see library/panel.rs.
+        if let Ok(v) = std::env::var("QUARRY_TEST_LIBRARY") {
+            self.demo_library(&v);
+        }
         // Test switch: show the Shell view with a finished run in the demo picture. QUARRY_TEST_VIM shows it too, with
         // Vim on and the editor in that mode (see vim::demo).
         let vim = std::env::var("QUARRY_TEST_VIM").is_ok();

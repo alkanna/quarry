@@ -5,6 +5,8 @@ use super::*;
 #[derive(Clone, Copy)]
 pub(super) enum RailIcon {
     Explorer,
+    Connections,
+    Library,
     Search,
     Log,
     Server,
@@ -20,9 +22,16 @@ impl App {
             ui.spacing_mut().item_spacing.y = 8.0;
             let connected = self.active.and_then(|id| self.conn(id)).is_some_and(|c| c.client.is_some() || c.sql.is_some());
             let palette = matches!(self.modal, Some(Modal::Palette { .. }));
-            if rail_button(ui, RailIcon::Explorer, !self.prefs.sidebar_hidden, true, "Database explorer").clicked() {
-                self.prefs.sidebar_hidden = !self.prefs.sidebar_hidden;
-                self.save_prefs();
+            let mode = self.prefs.side_mode();
+            let shown = !self.prefs.sidebar_hidden;
+            if rail_button(ui, RailIcon::Explorer, shown && mode == SideMode::Explorer, true, "Database explorer").clicked() {
+                self.pick_side_mode(SideMode::Explorer);
+            }
+            if conns_panel::READY && rail_button(ui, RailIcon::Connections, shown && mode == SideMode::Connections, true, "Saved connections").clicked() {
+                self.pick_side_mode(SideMode::Connections);
+            }
+            if library::panel::READY && rail_button(ui, RailIcon::Library, shown && mode == SideMode::Library, true, "Script library").clicked() {
+                self.pick_side_mode(SideMode::Library);
             }
             if rail_button(ui, RailIcon::Search, palette, true, "Jump to a collection (Cmd+K)").clicked() {
                 self.open_palette();
@@ -47,6 +56,17 @@ impl App {
 }
 
 impl App {
+    /// A click on a panel button of the rail: the panel that is showing folds the sidebar away, any other shows in it.
+    pub(super) fn pick_side_mode(&mut self, m: SideMode) {
+        if !self.prefs.sidebar_hidden && self.prefs.side_mode() == m {
+            self.prefs.sidebar_hidden = true;
+        } else {
+            self.prefs.set_side_mode(m);
+            self.prefs.sidebar_hidden = false;
+        }
+        self.save_prefs();
+    }
+
     /// One square per open connection under the panel buttons, scrolling when they outgrow the rail.
     fn conn_shortcuts(&mut self, ui: &mut egui::Ui) {
         let open: Vec<u64> = self.conns.iter().filter(|c| matches!(c.status, Status::Ready | Status::Connecting)).map(|c| c.meta.id).collect();
@@ -249,6 +269,7 @@ fn rail_button(ui: &mut egui::Ui, icon: RailIcon, active: bool, enabled: bool, t
     let color = if !enabled { FAINT() } else if active || state > 0 { BRIGHT() } else { MUTED() };
     paint_icon(p, rect.center(), icon, Stroke::new(1.3, color));
     focus_ring(ui, &r, rect, R_MD as f32);
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, tip));
     let r = r.on_hover_text(tip);
     if enabled { r.on_hover_cursor(egui::CursorIcon::PointingHand) } else { r }
 }
@@ -262,6 +283,24 @@ pub(super) fn paint_icon(p: &egui::Painter, c: egui::Pos2, icon: RailIcon, s: St
             let r = egui::Rect::from_center_size(c, v(15.0, 13.0));
             p.rect_stroke(r, 2.5, s, egui::StrokeKind::Middle);
             p.vline(r.left() + 5.0, r.y_range(), s);
+        }
+        // A database cylinder: the top ellipse, the sides and two curves below.
+        RailIcon::Connections => {
+            let arc = |dy: f32, from: f32, to: f32| -> Vec<egui::Pos2> { (0..=16).map(|i| from + (to - from) * i as f32 / 16.0).map(|a| c + v(6.0 * a.cos(), dy + 2.4 * a.sin())).collect() };
+            p.add(egui::Shape::closed_line(arc(-4.8, 0.0, std::f32::consts::TAU), s));
+            p.line_segment([c + v(-6.0, -4.8), c + v(-6.0, 4.8)], s);
+            p.line_segment([c + v(6.0, -4.8), c + v(6.0, 4.8)], s);
+            p.line(arc(0.0, 0.0, std::f32::consts::PI), s);
+            p.line(arc(4.8, 0.0, std::f32::consts::PI), s);
+        }
+        // A book: the cover with its spine and two lines of text.
+        RailIcon::Library => {
+            let r = egui::Rect::from_center_size(c, v(11.5, 14.0));
+            p.rect_stroke(r, 2.0, s, egui::StrokeKind::Middle);
+            p.vline(r.left() + 3.0, r.y_range(), s);
+            for dy in [-2.5, 1.0] {
+                p.line_segment([c + v(-1.0, dy), c + v(3.0, dy)], s);
+            }
         }
         RailIcon::Search => {
             p.circle_stroke(c + v(-1.5, -1.5), 5.0, s);

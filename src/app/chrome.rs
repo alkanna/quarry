@@ -45,6 +45,7 @@ impl App {
                 run_schema: t.sql.as_ref().map(|s| s.run_schema.trim().to_string()).unwrap_or_default(),
                 stages: if t.stages_src == t.agg_txt { t.stages.iter().map(|s| SavedStage { op: s.op.clone(), text: s.text.clone(), on: s.on }).collect() } else { Vec::new() },
                 agg_text_mode: t.agg_text_mode,
+                script: t.script.as_ref().map(|b| b.r.clone()),
             })
             .collect();
         let open: Vec<u64> = self.rail_order.iter().copied().filter(|id| self.conn(*id).is_some_and(|c| matches!(c.status, Status::Ready | Status::Connecting))).collect();
@@ -69,6 +70,9 @@ impl App {
         }
         let k = |m: egui::Modifiers, key: Key| ctx.input_mut(|i| i.consume_key(m, key));
         let (none, cmd, shift, ctrl, alt) = (egui::Modifiers::NONE, egui::Modifiers::COMMAND, egui::Modifiers::SHIFT, egui::Modifiers::CTRL, egui::Modifiers::ALT);
+        // Cmd+S reaches the library arm of this function only when no page handler took it: staged SQL grid edits and document
+        // drafts consume it where they draw, so they win. A new page handler of Cmd+S must consume the key too, or its press
+        // would also open the Save dialog.
         // Extra Shift and Alt still match a plain Cmd shortcut, so the longer combos go first.
         if k(cmd | shift, Key::T) {
             self.reopen_tab();

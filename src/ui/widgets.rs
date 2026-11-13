@@ -683,7 +683,13 @@ pub(crate) fn spin_at(ui: &egui::Ui, rect: egui::Rect) {
 
 /// One clickable sidebar row painted by hand, so it reads as a list rather than a form. `label` is its text for screen readers and tests.
 pub(crate) fn side_row(ui: &mut egui::Ui, height: f32, indent: f32, active: bool, label: &str, paint: impl FnOnce(&egui::Painter, egui::Rect)) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), Sense::click());
+    side_row_sense(ui, Sense::click(), height, indent, active, label, paint)
+}
+
+/// `side_row` with the senses chosen by the caller, which `dnd::side_row_drag` uses to make a row draggable. The row keeps
+/// its own click, right-click and focus either way.
+pub(crate) fn side_row_sense(ui: &mut egui::Ui, sense: Sense, height: f32, indent: f32, active: bool, label: &str, paint: impl FnOnce(&egui::Painter, egui::Rect)) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), sense);
     let fill = match (active, state_of(&resp)) {
         (true, 0) => SEL(),
         (true, _) => SEL_HOVER(),

@@ -937,6 +937,25 @@ pub(crate) const ACCENTS: [(&str, u32, u32); 6] = [
     ("Violet", 0xa78bfa, 0x6d3fd9),
 ];
 
+/// Colors a connection group can take: name, the shade on dark themes, the shade on light ones. Stored by name in
+/// groups.json, so reordering the list or changing a shade never changes what a group was saved with.
+pub(crate) const GROUP_COLORS: [(&str, u32, u32); 8] = [
+    ("red", 0xef6a6a, 0xc43d3d),
+    ("amber", 0xf2b035, 0xb7791f),
+    ("green", 0x3fc27a, 0x2a8a52),
+    ("teal", 0x2fc4b8, 0x1b8a82),
+    ("blue", 0x5b9cf6, 0x2f6fd0),
+    ("purple", 0xa98bf5, 0x7449d6),
+    ("pink", 0xf07cb8, 0xc22f80),
+    ("gray", 0x8b93a1, 0x6b7280),
+];
+
+/// The color named in a group, in the shade of the current mode. An unknown name, such as one from a newer build, is gray.
+pub(crate) fn group_color(name: &str) -> Color32 {
+    let (_, dark, light) = GROUP_COLORS.iter().find(|c| c.0 == name).unwrap_or(&GROUP_COLORS[GROUP_COLORS.len() - 1]);
+    hex(if is_light() { *light } else { *dark })
+}
+
 /// 0 keeps the theme's accent; i picks ACCENTS[i - 1]. An unknown name keeps the theme's.
 pub(crate) fn accent_index(name: &str) -> usize {
     ACCENTS.iter().position(|a| a.0 == name).map_or(0, |i| i + 1)
