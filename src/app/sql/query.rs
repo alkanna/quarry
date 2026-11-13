@@ -125,6 +125,8 @@ struct GridOut {
     act: Option<(usize, DocsAct)>,
     check: Option<(usize, bool)>,
     all: Option<bool>,
+    /// A value to open in full, from a double click on its cell or the eye shown over it.
+    view: Option<(String, Bson)>,
 }
 
 /// The rows of one result set as a grid with a checkbox column. Checked rows are tinted, and the menu of a
@@ -150,6 +152,7 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, checked: &BTreeSet<usize>) -> GridOu
                 let shift = ui.input(|i| i.modifiers.shift);
                 for i in range {
                     let (rr, resp) = ui.allocate_exact_size(egui::vec2(total.max(view_w - 2.0), ROW_H), Sense::click());
+                    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Row, true, format!("Result row {}", i + 1)));
                     let hovered = ui.rect_contains_pointer(rr) && !ui.ctx().any_popup_open();
                     table::paint_row(ui, rr, false, checked.contains(&i), hovered, resp.is_pointer_button_down_on(), i % 2 == 1);
                     ui.painter().text(egui::pos2(rr.left() + CHECK_W + 18.0, rr.center().y), egui::Align2::LEFT_CENTER, (i + 1).to_string(), FontId::monospace(TXT_CAPTION), FAINT());
@@ -157,13 +160,18 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, checked: &BTreeSet<usize>) -> GridOu
                         out.check = Some((i, shift));
                     }
                     let mut x = rr.left() + lead;
-                    for (c, w) in set.cols.iter().zip(&widths) {
+                    for (ci, (c, w)) in set.cols.iter().zip(&widths).enumerate() {
                         let cell = egui::Rect::from_min_size(egui::pos2(x, rr.top()), egui::vec2(*w, ROW_H));
                         x += w;
                         if !ui.is_rect_visible(cell) {
                             continue;
                         }
-                        let (mut job, color) = match rows.value(i, &c.name) {
+                        let v = rows.value(i, &c.name);
+                        // The row takes the clicks, so a double click finds its cell by where it landed.
+                        if resp.double_clicked() && resp.interact_pointer_pos().is_some_and(|p| cell.x_range().contains(p.x)) {
+                            out.view = Some((c.name.clone(), Val::owned(v)));
+                        }
+                        let (mut job, color) = match v {
                             Some(v) => (sql_cell_job(v, c.kind, false), TEXT()),
                             None => (egui::text::LayoutJob::single_section("—".into(), mono_fmt(TXT_SMALL, FAINT(), 400.0)), FAINT()),
                         };
@@ -171,6 +179,9 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, checked: &BTreeSet<usize>) -> GridOu
                         let g = ui.fonts_mut(|f| f.layout_job(job));
                         let gx = if is_numeric(c.kind) { cell.right() - 8.0 - g.size().x } else { cell.left() + 8.0 }.max(cell.left() + 8.0);
                         ui.painter().with_clip_rect(cell.shrink2(egui::vec2(6.0, 0.0))).galley(egui::pos2(gx, cell.center().y - g.size().y / 2.0), g, color);
+                        if let Some(v) = table::view_button(ui, cell, 0.0, v, ("eye", i, ci), || format!("View {} row {}", c.name, i + 1)) {
+                            out.view = Some((c.name.clone(), v));
+                        }
                     }
                     // Cmd or Shift on a row checks it like in the Content grid.
                     if resp.clicked() && ui.input(|i| i.modifiers.command || i.modifiers.shift) {
@@ -625,6 +636,7 @@ impl App {
         let (mut pick, mut text_mode) = (None, s.text_mode);
         // What the frame asked for, done after `s` is let go: rows to copy (None is the whole page), rows to
         // export with whether the dialog starts on every page, copying every page, and a page to read.
+        let mut view = None;
         let (mut copy, mut export, mut copy_all, mut goto): (Option<(Fmt, Option<Vec<usize>>)>, Option<(Vec<usize>, bool)>, Option<Fmt>, Option<(usize, usize)>) = (None, None, None, None);
         let sel = s.set_sel.min(s.sets.len() - 1);
         let paged = s.sets[sel].page.filter(|p| p.next || p.n > 0);
@@ -757,6 +769,7 @@ impl App {
                     }
                 }
                 let out = grid(ui, &s.sets[sel], &s.qchecked);
+                view = out.view;
                 if let Some(on) = out.all {
                     s.qchecked = if on { (0..s.sets[sel].rows.len()).collect() } else { BTreeSet::new() };
                 }
@@ -787,6 +800,9 @@ impl App {
             let rows = &s.sets[sel.min(s.sets.len().saturating_sub(1))].rows;
             rows.iter().enumerate().filter(|(i, _)| idx.as_ref().is_none_or(|v| v.contains(i))).map(|(_, r)| r.owned()).collect()
         };
+        if let Some((c, v)) = view {
+            self.sql_view_value(&c, &v);
+        }
         if let Some((fmt, idx)) = copy {
             let rows = set_rows(self, &idx);
             let cols: Vec<CopyCol> = self.tabs[cur].sql.as_ref().map(|s| s.sets[sel].cols.iter().map(|c| CopyCol { name: c.name.clone(), src: c.src.clone(), numeric: is_numeric(c.kind) }).collect()).unwrap_or_default();

@@ -24,6 +24,7 @@ mod sql_relations;
 mod sql_structure;
 mod sql_suggest;
 mod sql_triggers;
+mod sql_view;
 mod tabs;
 mod leak;
 
@@ -226,10 +227,18 @@ impl UiApp {
     pub fn double_click_cell(&mut self, col: &str, row: usize) {
         self.show(&format!("{col} row {row}"));
         let at = self.cell(col, row).rect().center();
+        self.press_at(at, egui::PointerButton::Primary, 2);
+    }
+
+    /// Moves onto `at`, then presses and releases `button` there `n` times in one frame: 2 is a double click.
+    pub fn press_at(&mut self, at: egui::Pos2, button: egui::PointerButton, n: usize) {
         self.h.hover_at(at);
         self.h.step();
-        let press = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
-        self.h.input_mut().events.extend([press(true), press(false), press(true), press(false)]);
+        for _ in 0..n {
+            for pressed in [true, false] {
+                self.h.input_mut().events.push(egui::Event::PointerButton { pos: at, button, pressed, modifiers: egui::Modifiers::NONE });
+            }
+        }
         self.h.step();
     }
 

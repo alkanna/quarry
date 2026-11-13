@@ -1115,11 +1115,17 @@ pub(crate) fn paint_shield(p: &egui::Painter, c: egui::Pos2, color: Color32) {
     p.add(egui::Shape::closed_line(vec![pt(0.0, -6.0), pt(5.0, -4.0), pt(5.0, 0.0), pt(3.5, 3.5), pt(0.0, 6.0), pt(-3.5, 3.5), pt(-5.0, 0.0), pt(-5.0, -4.0)], Stroke::new(1.1, color)));
 }
 
-/// An eye with a slash through it, for hiding a column.
-pub(crate) fn paint_eye_off(p: &egui::Painter, c: egui::Pos2, color: Color32) {
+/// An eye, for showing a value.
+pub(crate) fn paint_eye(p: &egui::Painter, c: egui::Pos2, color: Color32) {
     let s = Stroke::new(1.3, color);
     let pts: Vec<egui::Pos2> = (0..=16).map(|i| std::f32::consts::TAU * i as f32 / 16.0).map(|a| c + egui::vec2(6.5 * a.cos(), 4.0 * a.sin())).collect();
     p.add(egui::Shape::closed_line(pts, s));
     p.circle_stroke(c, 1.8, s);
+}
+
+/// An eye with a slash through it, for hiding a column.
+pub(crate) fn paint_eye_off(p: &egui::Painter, c: egui::Pos2, color: Color32) {
+    let s = Stroke::new(1.3, color);
+    paint_eye(p, c, color);
     p.line_segment([c + egui::vec2(-6.0, 5.0), c + egui::vec2(6.0, -5.0)], s);
 }
