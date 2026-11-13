@@ -69,8 +69,22 @@ pub(in crate::app) struct SqlUsersWin {
     pub(in crate::app) priv_add: Option<String>,
     /// Dynamic privileges held WITH GRANT OPTION, which this window does not revoke.
     pub(in crate::app) dyn_grant: BTreeSet<String>,
+    /// The server compares database names without case (lower_case_table_names is not 0).
+    pub(in crate::app) fold_case: bool,
     // Limits tab, as typed.
     pub(in crate::app) limits: [String; 4],
+}
+
+/// Whether `rows` has one for `pattern` already. Where the server folds case, `Shop` is the row `shop`, and a second
+/// row would grant on it again under another spelling. Takes the fields, not the window, so it can be called while
+/// the add field holds the window's text.
+fn has_row(rows: &[GrantRow], fold: bool, pattern: &str) -> bool {
+    if fold {
+        let low = pattern.to_lowercase();
+        rows.iter().any(|r| r.pattern.to_lowercase() == low)
+    } else {
+        rows.iter().any(|r| r.pattern == pattern)
+    }
 }
 
 impl SqlUsersWin {
@@ -103,6 +117,7 @@ impl SqlUsersWin {
             g_now: BTreeSet::new(),
             priv_add: None,
             dyn_grant: BTreeSet::new(),
+            fold_case: false,
             limits: Default::default(),
         }
     }
@@ -136,6 +151,7 @@ impl SqlUsersWin {
         self.g_orig = users::global_privs(&l.grants);
         self.g_now = self.g_orig.clone();
         self.dyn_grant = users::dynamic_with_grant(&l.grants);
+        self.fold_case = l.fold_case;
         self.roles_orig = users::roles_of(&l.grants);
         self.roles_now = self.roles_orig.clone();
         self.name = acct.user.clone();
@@ -1028,7 +1044,7 @@ impl App {
                 if !r.has_focus() && text.is_empty() {
                     r.request_focus();
                 }
-                let free: Vec<&String> = env.known.iter().filter(|d| !w.rows.iter().any(|r| r.pattern == users::pattern_of(d))).collect();
+                let free: Vec<&String> = env.known.iter().filter(|d| !has_row(&w.rows, w.fold_case, &users::pattern_of(d))).collect();
                 if !free.is_empty() {
                     egui::ComboBox::from_id_salt("sql-users-known").width(160.0).selected_text("Existing database").show_ui(ui, |ui| {
                         menu_look(ui);
@@ -1053,7 +1069,7 @@ impl App {
             }
             if add && users::check_db_name(text).is_ok() {
                 let pattern = users::pattern_of(text.trim());
-                if !w.rows.iter().any(|r| r.pattern == pattern) {
+                if !has_row(&w.rows, w.fold_case, &pattern) {
                     w.rows.push(GrantRow { pattern, orig: BTreeSet::new(), now: BTreeSet::new() });
                 }
                 w.adding = None;

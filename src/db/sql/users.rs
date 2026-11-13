@@ -731,6 +731,8 @@ pub struct Loaded {
     pub info: Option<AccountInfo>,
     /// Why `info` is missing: mysql.user is closed to this user, or the account has no row.
     pub info_err: Option<String>,
+    /// lower_case_table_names is not 0, so `Shop` and `shop` are one database to the server.
+    pub fold_case: bool,
 }
 
 /// What this server version can do, so only that is offered.
@@ -1129,7 +1131,8 @@ fn fold_edits(g: &[Grant], edits: &mut [Edit]) -> Res<Vec<(String, Vec<String>)>
     let mut out = Vec::new();
     for ed in edits.iter_mut() {
         if !ed.db.is_empty() && !ed.grant.is_empty() && !rows.iter().any(|(k, _)| *k == ed.db) {
-            let alike: Vec<&String> = rows.iter().map(|(k, _)| k).filter(|k| k.eq_ignore_ascii_case(&ed.db)).collect();
+            let low = ed.db.to_lowercase();
+            let alike: Vec<&String> = rows.iter().map(|(k, _)| k).filter(|k| k.to_lowercase() == low).collect();
             match alike.as_slice() {
                 [one] => ed.db = (*one).clone(),
                 _ => return Err(format!("{} is not among the account's grants after the change", shown_pattern(&ed.db))),
@@ -1138,6 +1141,98 @@ fn fold_edits(g: &[Grant], edits: &mut [Edit]) -> Res<Vec<(String, Vec<String>)>
         out.push((ed.db.clone(), held(g, &ed.db)));
     }
     Ok(out)
+}
+
+/// Cuts each edit to what it changes against `g`, the grants the account holds now: a privilege already held leaves
+/// the grant and one not held leaves the revoke. The undo recorded afterwards is the plain inverse, so without this
+/// it would take away what the account had before (a stale window, another admin, or `Shop` typed for a stored
+/// `shop`). With `fold` (lower_case_table_names is not 0) a database is matched in any case and renamed to the
+/// spelling the server stores. Returns the edits left to run and the parts taken out.
+pub fn trim_edits(g: &[Grant], edits: &[Edit], fold: bool) -> Res<(Vec<Edit>, Vec<Edit>)> {
+    // Updated as each edit is cut, so a later edit of the same scope sees what an earlier one will have done.
+    let mut state = db_grants(g);
+    state.push((String::new(), global_privs(g)));
+    let (mut kept, mut left) = (Vec::new(), Vec::new());
+    for ed in edits {
+        let mut db = ed.db.clone();
+        if fold && !db.is_empty() && !state.iter().any(|(k, _)| *k == db) {
+            let low = db.to_lowercase();
+            let alike: Vec<&String> = state.iter().map(|(k, _)| k).filter(|k| !k.is_empty() && k.to_lowercase() == low).collect();
+            match alike.as_slice() {
+                [] => {}
+                [one] => db = (*one).clone(),
+                _ => return Err(format!("{} is held under several spellings the server does not tell apart, so Quarry cannot tell which one would change.", shown_pattern(&ed.db))),
+            }
+        }
+        let at = match state.iter().position(|(k, _)| *k == db) {
+            Some(i) => i,
+            None => {
+                state.push((db.clone(), BTreeSet::new()));
+                state.len() - 1
+            }
+        };
+        let held = &mut state[at].1;
+        let (grant, g_out): (Vec<String>, Vec<String>) = ed.grant.iter().cloned().partition(|p| !held.contains(p));
+        held.extend(grant.iter().cloned());
+        let (revoke, r_out): (Vec<String>, Vec<String>) = ed.revoke.iter().cloned().partition(|p| held.contains(p));
+        for p in &revoke {
+            held.remove(p);
+        }
+        let out = Edit { db: db.clone(), grant: g_out, revoke: r_out };
+        if !out.is_empty() {
+            left.push(out);
+        }
+        let ed = Edit { db, grant, revoke };
+        if !ed.is_empty() {
+            kept.push(ed);
+        }
+    }
+    Ok((kept, left))
+}
+
+/// What `trim_edits` took out, for the result message.
+fn left_note(left: &[Edit]) -> String {
+    let (g, r) = (list_text(left, |e| &e.grant), list_text(left, |e| &e.revoke));
+    let mut s = String::new();
+    if !g.is_empty() {
+        s.push_str(&format!(" Already held, so not granted again: {g}."));
+    }
+    if !r.is_empty() {
+        s.push_str(&format!(" Not held, so not revoked: {r}."));
+    }
+    s
+}
+
+/// Whether two role names are the same role. MySQL writes `name@host`, reads a bare name as host `%` and compares
+/// the host without case; MariaDB names are bare on both sides and compared as written.
+fn same_role(a: &str, b: &str) -> bool {
+    match (a.rsplit_once('@'), b.rsplit_once('@')) {
+        (None, None) => a == b,
+        (x, y) => {
+            let ((ua, ha), (ub, hb)) = (x.unwrap_or((a, "%")), y.unwrap_or((b, "%")));
+            ua == ub && ha.eq_ignore_ascii_case(hb)
+        }
+    }
+}
+
+/// Roles cut like `trim_edits`: one the account already has leaves `grant` and one it lacks leaves `revoke`, so the
+/// undo never takes away a role it had before. A revoked role takes the spelling SHOW GRANTS gives, which undo reads
+/// back. Returns the grants, the revokes and the roles taken out.
+pub fn trim_roles(held: &[String], grant: &[String], revoke: &[String]) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let find = |r: &String| held.iter().find(|h| same_role(h, r));
+    let mut left = Vec::new();
+    let mut g = Vec::new();
+    for r in grant {
+        if find(r).is_some() { left.push(r.clone()) } else { g.push(r.clone()) }
+    }
+    let mut v = Vec::new();
+    for r in revoke {
+        match find(r) {
+            Some(h) => v.push(h.clone()),
+            None => left.push(r.clone()),
+        }
+    }
+    (g, v, left)
 }
 
 /// What each touched database holds now, to compare against at undo.
@@ -1205,6 +1300,15 @@ pub enum Op {
 async fn run_plan(c: &mut sqlx::MySqlConnection, db: &Db, conn: u64, acct: &Account, plan: &AccountPlan, cur: &mut Account, renamed: &mut bool, undo: &mut Vec<UndoAction>) -> Res<String> {
     let m = session_mode(c).await?;
     let d = db.dialect;
+    // What each role about to be taken away carries, read first: undo gives it back with the role. The same read
+    // cuts the role changes to what is not so already, and a rename leaves the account's grants as they are.
+    let (before, defaults) = if plan.roles_revoke.is_empty() && plan.roles_grant.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        (grants_of(c, m, acct).await.map_err(|x| format!("Could not read the roles of {}: {x}", acct.label()))?, default_roles(c, d, acct).await)
+    };
+    let (roles_grant, roles_revoke, left) = trim_roles(&roles_of(&before), &plan.roles_grant, &plan.roles_revoke);
+    let plan = &AccountPlan { roles_grant, roles_revoke, ..plan.clone() };
     let total = plan_sql(m, d, acct, plan)?.len();
     let mut done = 0;
     let fail = |x: String, done: usize| Err(format!("{x}. {done} of {total} statements ran before it stopped."));
@@ -1228,8 +1332,6 @@ async fn run_plan(c: &mut sqlx::MySqlConnection, db: &Db, conn: u64, acct: &Acco
         let id = ident(c, d, cur).await;
         undo.push(action(conn, cur, AccountUndo { account: cur.clone(), label: settings_label(a, b), what: What::Settings { from: a.clone(), to: b.clone() }, ident: id }));
     }
-    // What each role about to be taken away carries, read first: undo gives it back with the role.
-    let (before, defaults) = if plan.roles_revoke.is_empty() { (Vec::new(), Vec::new()) } else { (grants_of(c, m, cur).await.unwrap_or_default(), default_roles(c, d, cur).await) };
     let admin = roles_with_admin(&before);
     let (mut gr, mut rv): (Vec<String>, Vec<RoleMeta>) = (Vec::new(), Vec::new());
     let mut stop = None;
@@ -1269,7 +1371,8 @@ async fn run_plan(c: &mut sqlx::MySqlConnection, db: &Db, conn: u64, acct: &Acco
     if let Some(x) = stop {
         return fail(x, done);
     }
-    Ok(format!("Changed {}", cur.label()))
+    let note = if left.is_empty() { String::new() } else { format!(". Left out roles it already had or did not have: {}", left.iter().map(|r| role_shown(r)).collect::<Vec<_>>().join(", ")) };
+    Ok(format!("Changed {}{note}", cur.label()))
 }
 
 impl Worker {
@@ -1294,7 +1397,9 @@ impl Worker {
                         Err(x) => (None, Some(x)),
                     }
                 };
-                Ok(Loaded { grants, info, info_err })
+                // Unread counts as not folding: the window then only compares names exactly, as before.
+                let fold_case = super::create::folds_case(&mut c).await.unwrap_or(false);
+                Ok(Loaded { grants, info, info_err, fold_case })
             }
             .await;
             Msg::SqlUserGrants { conn, req, res }
@@ -1312,9 +1417,16 @@ impl Worker {
                 let out = async {
                     let m = session_mode(&mut c).await?;
                     // Checked on the writer, against what the server holds now rather than what the window last read.
-                    check_partial(&grants_of(&mut c, m, &acct).await?, &edits)?;
+                    let now = grants_of(&mut c, m, &acct).await?;
+                    let fold = super::create::folds_case(&mut c).await?;
+                    let (edits, left) = trim_edits(&now, &edits, fold)?;
+                    let skipped = left_note(&left);
+                    if edits.is_empty() {
+                        return Ok(format!("Nothing to change for {}.{skipped}", acct.label()));
+                    }
+                    check_partial(&now, &edits)?;
                     let (mut ran, err) = run_edits(&mut c, m, &acct, &edits).await;
-                    let mut note = String::new();
+                    let mut note = skipped;
                     if !ran.is_empty() {
                         // Without a snapshot there is nothing to check against, so no undo is offered.
                         match snapshot(&mut c, m, &acct, &mut ran).await {
@@ -1322,7 +1434,7 @@ impl Worker {
                                 let id = ident(&mut c, db.dialect, &acct).await;
                                 undo = Some(action(conn, &acct, AccountUndo { account: acct.clone(), label: label_of(&ran), what: What::Grants { edits: ran.clone(), expect }, ident: id }));
                             }
-                            Err(why) => note = format!(" There is no undo for it: {why}."),
+                            Err(why) => note.push_str(&format!(" There is no undo for it: {why}.")),
                         }
                     }
                     match err {
@@ -1866,6 +1978,53 @@ mod tests {
         assert!(fold_edits(&two, &mut amb).is_err());
     }
 
+    /// Review finding: an undo took away what the account held before the change. Under lower_case_table_names 1
+    /// a row typed `Shop` granted SELECT, INSERT on the stored `shop`, which held SELECT already, and the undo, the
+    /// plain inverse, revoked that SELECT too. A stale window and another admin's grants did the same.
+    #[test]
+    fn edits_are_cut_to_what_changes_so_undo_never_takes_what_was_held() {
+        let g = [parse_grant("GRANT SELECT ON `shop`.* TO `u`@`%`"), parse_grant("GRANT RELOAD ON *.* TO `u`@`%`")];
+        let ask = [Edit { db: "Shop".into(), grant: vec!["SELECT".into(), "INSERT".into()], revoke: vec![] }];
+        let (kept, left) = trim_edits(&g, &ask, true).unwrap();
+        assert_eq!(kept, vec![Edit { db: "shop".into(), grant: vec!["INSERT".into()], revoke: vec![] }]);
+        assert_eq!(left, vec![Edit { db: "shop".into(), grant: vec!["SELECT".into()], revoke: vec![] }]);
+        assert_eq!(kept[0].inverse().revoke, vec!["INSERT".to_string()]);
+        // Without folding `Shop` is another database, so nothing it asks for is held.
+        let (kept, left) = trim_edits(&g, &ask, false).unwrap();
+        assert_eq!(kept, ask.to_vec());
+        assert!(left.is_empty());
+        // A stale window: a revoke of what is gone and a grant of what another admin gave meanwhile.
+        let stale = [Edit { db: "shop".into(), grant: vec![], revoke: vec!["SELECT".into(), "DELETE".into()] }, Edit { db: String::new(), grant: vec!["RELOAD".into(), "PROCESS".into()], revoke: vec!["SUPER".into()] }];
+        let (kept, left) = trim_edits(&g, &stale, false).unwrap();
+        assert_eq!(kept, vec![Edit { db: "shop".into(), grant: vec![], revoke: vec!["SELECT".into()] }, Edit { db: String::new(), grant: vec!["PROCESS".into()], revoke: vec![] }]);
+        assert_eq!(left_note(&left), " Already held, so not granted again: reload on *.*. Not held, so not revoked: delete on shop; super on *.*.");
+        let (kept, _) = trim_edits(&g, &[Edit { db: "shop".into(), grant: vec!["SELECT".into()], revoke: vec![] }], false).unwrap();
+        assert!(kept.is_empty());
+        // Two edits of one database: the second sees what the first will have done.
+        let twice = [Edit { db: "Shop".into(), grant: vec!["INSERT".into()], revoke: vec![] }, Edit { db: "shop".into(), grant: vec!["INSERT".into()], revoke: vec!["SELECT".into()] }];
+        let (kept, _) = trim_edits(&g, &twice, true).unwrap();
+        assert_eq!(kept, vec![Edit { db: "shop".into(), grant: vec!["INSERT".into()], revoke: vec![] }, Edit { db: "shop".into(), grant: vec![], revoke: vec!["SELECT".into()] }]);
+        // Two stored spellings the server does not tell apart are refused before anything runs.
+        let two = [parse_grant("GRANT SELECT ON `ab`.* TO `u`@`%`"), parse_grant("GRANT SELECT ON `aB`.* TO `u`@`%`")];
+        assert!(trim_edits(&two, &[Edit { db: "AB".into(), grant: vec!["INSERT".into()], revoke: vec![] }], true).is_err());
+    }
+
+    /// The same finding for roles: giving a role the account had already recorded an undo that took it away.
+    #[test]
+    fn roles_already_given_are_not_given_again_nor_missing_ones_taken() {
+        let held = ["reader@%".to_string(), "ops@localhost".to_string()];
+        let (g, r, left) = trim_roles(&held, &["reader@%".into(), "writer@%".into()], &["ops@LOCALHOST".into(), "gone@%".into()]);
+        assert_eq!(g, vec!["writer@%".to_string()]);
+        assert_eq!(r, vec!["ops@localhost".to_string()]);
+        assert_eq!(left, vec!["reader@%".to_string(), "gone@%".to_string()]);
+        // A bare MySQL name is the role at host %.
+        let (_, r, _) = trim_roles(&held, &[], &["reader".into()]);
+        assert_eq!(r, vec!["reader@%".to_string()]);
+        // MariaDB names a role without a host, compared as written.
+        let (g, r, _) = trim_roles(&["Reader".into()], &["reader".into()], &["Reader".into()]);
+        assert_eq!((g, r), (vec!["reader".to_string()], vec!["Reader".to_string()]));
+    }
+
     #[test]
     fn grant_option_stays_with_its_line() {
         let st = parse_grant("GRANT SELECT ON *.* TO `u`@`%` WITH GRANT OPTION");
@@ -2025,6 +2184,26 @@ mod tests {
             assert!(err.starts_with("Undo refused"), "{var}: {err}");
             assert!(back.is_some(), "{var}: the entry stays");
             assert!(grants(l, &a).iter().any(|g| g.contains("DELETE")), "{var}");
+            drop_it(l, &a);
+        });
+    }
+
+    /// Review finding: a window that read the grants before another admin changed them granted what the account
+    /// held already, and the undo then took that away. Only what changed runs, so the undo leaves it.
+    #[test]
+    fn live_undo_keeps_what_the_account_held_before() {
+        every_server(|l, var| {
+            let a = Account::named(&unique("hd"), "%");
+            create(l, &a);
+            l.sql(&format!("GRANT SELECT ON `shop\\_h`.* TO {}", a.literal(true)));
+            let before = grants(l, &a);
+            l.w.sql_user_edit(1, l.db.clone(), a.clone(), vec![Edit { db: pattern_of("shop_h"), grant: vec!["SELECT".into(), "INSERT".into()], revoke: vec!["DELETE".into()] }], false);
+            let (_, res, undo) = done(l);
+            let msg = res.unwrap_or_else(|x| panic!("{var}: {x}"));
+            assert!(msg.contains("not granted again") && msg.contains("not revoked"), "{var}: {msg}");
+            l.w.sql_undo(l.db.clone(), undo.expect("an undo entry"), Vec::new(), false);
+            done(l).1.unwrap_or_else(|x| panic!("{var}: {x}"));
+            assert_eq!(grants(l, &a), before, "{var}: the SELECT held before is still there");
             drop_it(l, &a);
         });
     }
