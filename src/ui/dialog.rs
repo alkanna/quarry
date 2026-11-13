@@ -9,8 +9,7 @@ use eframe::egui::{self, Color32, RichText, Sense, Stroke};
 
 /// A dialog without padding on its frame: the bands lay out their own edges.
 pub(crate) fn banded(id: egui::Id) -> Dialog {
-    // The frame's 1 px border on each side.
-    Dialog::new(egui::Modal::new(id).frame(dialog_frame()), 2.0)
+    Dialog::new(id, dialog_frame())
 }
 
 /// `banded` raised above everything else every frame, for windows opened from another window. Not while a popup is open:
@@ -32,9 +31,10 @@ pub(crate) struct Dialog {
 }
 
 impl Dialog {
-    /// A dialog on `modal`, whose frame takes `chrome` across both sides.
-    pub(crate) fn new(modal: egui::Modal, chrome: f32) -> Self {
-        Self { modal, chrome }
+    /// A modal `id` drawn in `frame`, whose border and padding the room it fits in leaves out.
+    pub(crate) fn new(id: egui::Id, frame: egui::Frame) -> Self {
+        let m = frame.total_margin();
+        Self { modal: egui::Modal::new(id).frame(frame), chrome: m.left + m.right }
     }
 
     pub(crate) fn show<R>(self, ctx: &egui::Context, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::ModalResponse<R> {
@@ -70,9 +70,14 @@ fn fit_id(layer: egui::LayerId) -> egui::Id {
     layer.id.with("dialog-fit")
 }
 
-/// This frame's measures, or the last frame's.
-fn bands_id(layer: egui::LayerId, now: bool) -> egui::Id {
-    layer.id.with(("dialog-bands", now))
+/// The measures the bands are taking this frame.
+fn bands_now(layer: egui::LayerId) -> egui::Id {
+    layer.id.with("dialog-bands-now")
+}
+
+/// The measures the bands took last frame.
+fn bands_last(layer: egui::LayerId) -> egui::Id {
+    layer.id.with("dialog-bands-last")
 }
 
 fn active_fit(ui: &egui::Ui) -> Option<Fit> {
@@ -80,7 +85,7 @@ fn active_fit(ui: &egui::Ui) -> Option<Fit> {
 }
 
 fn note_bands(ui: &egui::Ui, f: impl FnOnce(&mut Bands)) {
-    let id = bands_id(ui.layer_id(), true);
+    let id = bands_now(ui.layer_id());
     ui.ctx().data_mut(|d| f(d.get_temp_mut_or_default::<Bands>(id)));
 }
 
@@ -96,7 +101,7 @@ fn fit<R>(ui: &mut egui::Ui, chrome: f32, add: impl FnOnce(&mut egui::Ui) -> R) 
     let ctx = ui.ctx().clone();
     let layer = ui.layer_id();
     let room = (ctx.content_rect().size() - egui::Vec2::splat(2.0 * DIALOG_MARGIN + chrome)).max(egui::Vec2::splat(FIT_MIN_H));
-    let last: Bands = ctx.data(|d| d.get_temp(bands_id(layer, false))).unwrap_or_default();
+    let last: Bands = ctx.data(|d| d.get_temp(bands_last(layer))).unwrap_or_default();
     // A footer seen last frame keeps its height; a first frame assumes the one-button footer most dialogs have.
     let measured = last.width > 0.0;
     let foot = last.foot.unwrap_or_else(|| if measured { 0.0 } else { foot_h(ui) });
@@ -119,22 +124,17 @@ fn fit<R>(ui: &mut egui::Ui, chrome: f32, add: impl FnOnce(&mut egui::Ui) -> R) 
     if !ctx.memory(|m| m.areas().visible_last_frame(&layer)) || ctx.data(|d| d.get_temp::<bool>(reset_id)).unwrap_or(false) {
         area = area.scroll_offset(egui::Vec2::ZERO);
     }
-    ctx.data_mut(|d| {
-        d.insert_temp(fit_id(layer), Fit { top, max: egui::vec2(room.x, view_h), content_top: top.y, clip: ui.clip_rect() });
-        d.remove::<Bands>(bands_id(layer, true));
-    });
+    let clip = ui.clip_rect();
+    ctx.data_mut(|d| d.remove::<Bands>(bands_now(layer)));
     let out = area.show(ui, |ui| {
         ui.spacing_mut().item_spacing = spacing;
-        let content_top = ui.cursor().top();
-        if let Some(mut f) = ctx.data(|d| d.get_temp::<Fit>(fit_id(layer))) {
-            f.content_top = content_top;
-            ctx.data_mut(|d| d.insert_temp(fit_id(layer), f));
-        }
+        // Set once the scrolled content's top is known, before the bands that read it draw.
+        ctx.data_mut(|d| d.insert_temp(fit_id(layer), Fit { top, max: egui::vec2(room.x, view_h), content_top: ui.cursor().top(), clip }));
         add(ui)
     });
     let mut now: Bands = ctx.data_mut(|d| {
         d.remove::<Fit>(fit_id(layer));
-        d.remove_temp::<Bands>(bands_id(layer, true))
+        d.remove_temp::<Bands>(bands_now(layer))
     })
     .unwrap_or_default();
     // The output's inner_rect is the room offered before the area shrank to its content; what the area took is the
@@ -145,7 +145,7 @@ fn fit<R>(ui: &mut egui::Ui, chrome: f32, add: impl FnOnce(&mut egui::Ui) -> R) 
     }
     now.width = width;
     ctx.data_mut(|d| {
-        d.insert_temp(bands_id(layer, false), now);
+        d.insert_temp(bands_last(layer), now);
         d.insert_temp(reset_id, now.key != last.key);
     });
     if now != last {
@@ -213,9 +213,7 @@ pub(crate) fn dialog_head_with(ui: &mut egui::Ui, h: &Head, right: impl FnOnce(&
     ui.spacing_mut().item_spacing.y = 0.0;
     let Some(fit) = active_fit(ui) else { return head_band(ui, h, right) };
     // Pinned at the dialog's top, outside the scrolled content, which keeps only a gap of its height.
-    let w = ui.max_rect().width().min(fit.max.x);
-    let mut band = ui.new_child(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(fit.top, egui::vec2(w, fit.max.y))).layout(egui::Layout::top_down(egui::Align::Min)));
-    band.set_clip_rect(fit.clip);
+    let mut band = pinned(ui, &fit, fit.top);
     band.spacing_mut().item_spacing.y = 0.0;
     let picked = head_band(&mut band, h, right);
     let hh = band.min_rect().height();
@@ -230,6 +228,15 @@ pub(crate) fn dialog_head_with(ui: &mut egui::Ui, h: &Head, right: impl FnOnce(&
         b.key = key;
     });
     picked
+}
+
+/// A band pinned at `at`, outside the scroll area, as wide as the dialog and clipped to the area's clip rather than the
+/// body's viewport.
+fn pinned(ui: &mut egui::Ui, fit: &Fit, at: egui::Pos2) -> egui::Ui {
+    let w = ui.max_rect().width().min(fit.max.x);
+    let mut band = ui.new_child(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(at, egui::vec2(w, fit.max.y))).layout(egui::Layout::top_down(egui::Align::Min)));
+    band.set_clip_rect(fit.clip);
+    band
 }
 
 fn head_band(ui: &mut egui::Ui, h: &Head, right: impl FnOnce(&mut egui::Ui)) -> Option<usize> {
@@ -790,10 +797,7 @@ pub(crate) fn dialog_foot_free<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui:
     let Some(fit) = active_fit(ui) else { return foot_band(ui, add) };
     // Pinned where the scroll area will end: the body's height so far, or the most the area may take.
     let used = ui.min_rect().bottom() - fit.content_top;
-    let y = fit.top.y + used.min(fit.max.y);
-    let w = ui.max_rect().width().min(fit.max.x);
-    let mut band = ui.new_child(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(egui::pos2(fit.top.x, y), egui::vec2(w, fit.max.y))).layout(egui::Layout::top_down(egui::Align::Min)));
-    band.set_clip_rect(fit.clip);
+    let mut band = pinned(ui, &fit, egui::pos2(fit.top.x, fit.top.y + used.min(fit.max.y)));
     let r = foot_band(&mut band, add);
     let fh = band.min_rect().height();
     note_bands(ui, |b| b.foot = Some(fh));

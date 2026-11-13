@@ -462,9 +462,7 @@ fn on_fill(fill: Color32) -> Color32 {
 
 /// The padded dialog frame the value editors keep; every other dialog is `banded`, whose bands lay out their own edges.
 pub(crate) fn dialog(id: egui::Id) -> super::dialog::Dialog {
-    const PAD: i8 = 18;
-    // The padding and the 1 px border, on both sides.
-    super::dialog::Dialog::new(egui::Modal::new(id).frame(dialog_frame().inner_margin(PAD)), 2.0 * (PAD as f32 + 1.0))
+    super::dialog::Dialog::new(id, dialog_frame().inner_margin(18))
 }
 
 /// The dialog look without padding, for dialogs that lay out their own edges like the Cmd+K palette.
