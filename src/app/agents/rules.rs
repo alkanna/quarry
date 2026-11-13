@@ -385,7 +385,7 @@ impl App {
                     let fill = if on_sel { tint(PRIMARY(), 40) } else { hover_fill(state) };
                     ui.painter().rect_filled(rect.expand2(egui::vec2(4.0, 0.0)), R_SM, fill);
                 }
-                resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Row, true, on_sel, format!("Rule {}", offset + i + 1)));
+                resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Row, true, on_sel, format!("Rule row {}", offset + i + 1)));
                 if resp.clicked() {
                     w.sel = Some(i);
                 }

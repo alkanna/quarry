@@ -126,13 +126,13 @@ fn rule_names(ui: &UiApp) -> Vec<String> {
 fn custom_rules_drag_to_reorder_and_the_selection_follows() {
     let Some(mut ui) = demo_ui(three_rules) else { return };
     ui.click("Custom 3");
-    ui.show("Rule 3");
-    ui.drag_esc("Rule 3", "Rule 1", 0.1);
+    ui.show("Rule row 3");
+    ui.drag_esc("Rule row 3", "Rule row 1", 0.1);
     assert_eq!(rule_names(&ui), ["a", "b", "c"], "Esc moved a rule");
     assert!(ui.app().agents.rules.is_some(), "Esc closed the window instead of cancelling the drag");
     // A click selects a rule; dragging it below the last one keeps it selected there.
-    ui.click("Rule 1");
-    ui.drag("Rule 1", "Rule 3", 0.9, 1);
+    ui.click("Rule row 1");
+    ui.drag("Rule row 1", "Rule row 3", 0.9, 1);
     assert_eq!(rule_names(&ui), ["b", "c", "a"]);
     assert_eq!(ui.app().agents.rules.as_ref().and_then(|w| w.sel), Some(2), "the selection stayed on the old index");
 }
