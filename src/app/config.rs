@@ -352,7 +352,10 @@ pub(super) fn store_uri(id: u64, uri: &str) -> keyring::Result<()> {
     crate::vault::set(&format!("connection-{id}"), uri)
 }
 
-/// Other secrets of a connection: "ssh-password", "ssh-passphrase", "proxy-password", "pg-key-passphrase".
+/// Other secrets of a connection, besides its address.
+pub(super) const SECRETS: [&str; 4] = ["ssh-password", "ssh-passphrase", "proxy-password", "pg-key-passphrase"];
+
+/// One of `SECRETS` for the connection.
 pub(super) fn secret(id: u64, what: &str) -> Option<String> {
     crate::vault::get(&format!("connection-{id}-{what}")).ok().filter(|s| !s.is_empty())
 }

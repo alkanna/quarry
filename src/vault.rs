@@ -60,9 +60,10 @@ mod mac {
         drop(cache);
         let old = Entry::new(SERVICE, name)?;
         let v = old.get_password()?;
-        // The old item goes only once its value is safe in the new one.
-        set(name, &v)?;
-        let _ = old.delete_credential();
+        // The old item goes only once its value is safe in the new one; the value read is good either way.
+        if set(name, &v).is_ok() {
+            let _ = old.delete_credential();
+        }
         Ok(v)
     }
 

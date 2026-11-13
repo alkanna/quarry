@@ -9,7 +9,7 @@ impl App {
             if !self.ephemeral {
                 let _ = store_uri(id, "");
                 // ponytail: best effort, a failure only leaves an orphaned Keychain entry behind.
-                for what in ["ssh-password", "ssh-passphrase", "proxy-password", "pg-key-passphrase"] {
+                for what in SECRETS {
                     let _ = set_secret(id, what, "");
                 }
             }
