@@ -340,7 +340,7 @@ pub fn explain(raw: &str, cx: &ErrCtx) -> Explained {
         }
         ErrKind::Timeout => {
             ex.title = "The query ran past its time limit".into();
-            ex.hint = if pg_code(raw).is_some() { "The server stopped it at the statement timeout. A filter or sort on a column without an index reads the whole table; Explain shows the plan.".into() } else { "The server stopped it. A filter on an unindexed field scans every document; Explain shows whether an index is used.".into() };
+            ex.hint = if pg_code(raw).is_some() || mysql_code(raw).is_some() { "The server stopped it at its statement time limit. A filter or sort on a column without an index reads the whole table; Explain shows the plan.".into() } else { "The server stopped it. A filter on an unindexed field scans every document; Explain shows whether an index is used.".into() };
             ex.fixes = vec![Fix::Retry, Fix::Explain, Fix::RaiseLimit];
         }
         ErrKind::Duplicate => {

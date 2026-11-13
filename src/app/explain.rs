@@ -59,6 +59,19 @@ impl App {
     /// Explains the Documents query or the Aggregate pipeline, whichever view is open.
     pub(super) fn explain(&mut self) {
         let Some(t) = self.t() else { return };
+        if let Some(s) = t.sql.as_ref() {
+            if t.view == View::Sql {
+                return self.sql_run(false, true);
+            }
+            // The grid has no editor to run EXPLAIN in, so a Query tab gets the SELECT its last page ran.
+            let text = s.ran.select_sql(self.dialect_of(t.sel.conn), t.sel.space(), &t.sel.coll, &s.pk, None);
+            let (conn, db) = (t.sel.conn, t.sel.db.clone());
+            self.sql_new_query(conn, db);
+            if let Some(s) = self.tabs[self.cur].sql.as_mut() {
+                s.query = text;
+            }
+            return self.sql_run(true, true);
+        }
         let what = match t.view {
             View::Documents if !db::is_shell(&t.filter_txt) => Ok(db::ExplainOf::Find(Box::new(t.query.clone()))),
             View::Aggregate if !db::is_shell(&t.agg_txt) => db::parse_pipeline(&t.agg_txt).and_then(|p| if db::has_write_stage(&p) { Err("Explain would run the write stage.".into()) } else { Ok(db::ExplainOf::Aggregate(p)) }),
