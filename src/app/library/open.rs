@@ -310,6 +310,9 @@ impl App {
             return self.warn("The connection of this script was removed. The script stays in the library, but it needs a connection to open.");
         };
         // Checked before anything opens, so a script of another engine never leaves a half-built tab behind.
+        if view_of_kind(&s.kind).is_none() {
+            return self.warn(format!("This build does not know scripts of kind \"{}\".", s.kind));
+        }
         if !kind_fits(&s.kind, engine) {
             let what = if engine.is_sql() { "SQL" } else { "MongoDB" };
             return self.warn(format!("Not opened: \"{}\" is a {}, and {cname} is a {what} connection.", s.name, kind_label(&s.kind)));

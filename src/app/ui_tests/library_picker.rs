@@ -46,7 +46,7 @@ fn the_picker_lists_the_scripts_of_this_connection_and_kind_with_the_recent_ones
     assert_eq!(names(&ui, PickKind::Sql, |d| d.loose.clone()), ["Scratch"]);
     ui.show("NOT IN A FOLDER");
     // The search looks at the names and the start of the text.
-    ui.fill("Search library", "LEFT JOIN payments");
+    ui.fill("Search library", "JOIN orders");
     ui.show("Script Orphaned payments");
     assert!(ui.h.query_all_by_label("Script Late shipments").next().is_none());
 }

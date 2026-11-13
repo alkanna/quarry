@@ -55,6 +55,12 @@ pub(super) struct LibUi {
     pub(in crate::app) focus_tree: bool,
 }
 
+/// Whether the saved queries of ui.json come over at launch: the first run with a library, or a library.json so broken that
+/// nothing of it could be read, which leaves an empty library while the old queries are still in ui.json.
+pub(super) fn should_migrate(existed: bool, broken: bool, lib: &Library) -> bool {
+    !existed || (broken && lib.scripts.is_empty() && lib.folders.is_empty())
+}
+
 /// A shortcut spelled as the palette spells it: the key glyphs on macOS, words elsewhere, where Cmd is Ctrl.
 pub(in crate::app) fn keys_text(cmd: bool, shift: bool, alt: bool, key: &str) -> String {
     if cfg!(target_os = "macos") {
@@ -187,6 +193,16 @@ mod tests {
         assert!(note.is_some_and(|n| n.contains("Skipped 2 of 6")));
         assert!(p.exists() && dir.join("library.json.bak").exists());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_library_file_that_could_not_be_read_lets_the_old_queries_come_over_again() {
+        let empty = Library::default();
+        assert!(should_migrate(false, false, &empty));
+        assert!(!should_migrate(true, false, &empty), "an empty library someone kept stays empty");
+        assert!(should_migrate(true, true, &empty));
+        let kept = Library { scripts: vec![crate::library::Script { id: 1, ..Default::default() }], ..Default::default() };
+        assert!(!should_migrate(true, true, &kept), "what was read of a damaged file is not doubled");
     }
 
     #[test]

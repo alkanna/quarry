@@ -61,6 +61,23 @@ fn link_dirs(scan: &disk::Scan) -> Vec<PathBuf> {
     all.into_iter().collect()
 }
 
+/// `name` as a file name in the style of the files beside it: kebab-case among kebab-case names, snake_case among snake_case
+/// ones, as typed otherwise, so a team's folder keeps one style.
+pub(in crate::app) fn styled_name(name: &str, ext: &str, siblings: &[String]) -> String {
+    let stems: Vec<&str> = siblings.iter().map(|s| s.rsplit_once('.').map_or(s.as_str(), |(a, _)| a)).collect();
+    let style = |sep: char, other: char| stems.iter().filter(|s| s.contains(sep) && !s.contains(' ') && !s.contains(other) && **s == s.to_lowercase()).count();
+    let (kebab, snake) = (style('-', '_'), style('_', '-'));
+    let words = || name.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase).collect::<Vec<_>>();
+    let styled = if kebab * 2 > stems.len() {
+        words().join("-")
+    } else if snake * 2 > stems.len() {
+        words().join("_")
+    } else {
+        name.to_string()
+    };
+    disk::file_name(if styled.is_empty() { name } else { &styled }, ext)
+}
+
 /// A name for a new script from the comment it starts with, such as "revenue per month" from "-- revenue per month".
 pub(in crate::app) fn comment_name(body: &str) -> Option<String> {
     let first = body.lines().map(str::trim).find(|l| !l.is_empty())?;
@@ -188,8 +205,7 @@ impl App {
         if !l.exts.iter().any(|e| e == ext) {
             return self.warn(format!("{} does not show .{ext} files. Add the type in Use on connections first.", l.name));
         }
-        let typed = f.file.trim();
-        let file = disk::file_name(if typed.is_empty() { f.name.trim() } else { typed }, ext);
+        let file = self.file_for(f, f.name.trim());
         let rel = f.dir.join(&file);
         let (root, sub, path) = (l.path.clone(), f.dir.clone(), l.path.join(&rel));
         let target = format::Target { db: f.db.clone(), schema: f.schema.clone(), coll: f.coll.clone() };
@@ -213,6 +229,17 @@ impl App {
                 None => FileOut::Saved(SaveOut::Failed(format!("{} was written but cannot be read back", path.display()))),
             }
         });
+    }
+
+    /// The file a linked save writes: the name typed in the File row, else the script's name in the style of its folder.
+    fn file_for(&self, f: &SaveForm, name: &str) -> String {
+        let typed = f.file.trim();
+        if typed.is_empty() { self.styled_file(f, name, kind_ext(&f.kind)) } else { disk::file_name(typed, kind_ext(&f.kind)) }
+    }
+
+    fn styled_file(&self, f: &SaveForm, name: &str, ext: &str) -> String {
+        let siblings: Vec<String> = f.link.and_then(|l| self.lib_ui.scans.get(&l)).map(|s| s.entries.iter().filter(|e| e.rel.parent().unwrap_or(std::path::Path::new("")) == f.dir).filter_map(|e| e.rel.file_name().map(|n| n.to_string_lossy().into_owned())).collect()).unwrap_or_default();
+        styled_name(name, ext, &siblings)
     }
 
     pub(in crate::app) fn save_dialog(&mut self, ui: &mut egui::Ui, f: &mut SaveForm, keep: &mut bool) {
@@ -248,7 +275,7 @@ impl App {
                 }
                 if let Some(l) = f.link.and_then(|id| self.library.links.iter().find(|l| l.id == id)) {
                     let ext = kind_ext(&f.kind);
-                    let default = disk::file_name(f.name.trim(), ext);
+                    let default = self.styled_file(f, f.name.trim(), ext);
                     rows.row("File", "", |ui| {
                         let r = ui.add(egui::TextEdit::singleline(&mut f.file).font(egui::TextStyle::Monospace).hint_text(default).desired_width(ui.available_width()));
                         r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "File name"));
@@ -278,8 +305,7 @@ impl App {
             });
             let folder = if f.new_folder.is_some() { None } else { f.folder };
             if let Some(l) = f.link.and_then(|id| self.library.links.iter().find(|l| l.id == id)) {
-                let typed = f.file.trim();
-                let file = disk::file_name(if typed.is_empty() { name.as_str() } else { typed }, kind_ext(&f.kind));
+                let file = self.file_for(f, &name);
                 // Looked up once per path, not every frame: on a network drive each look is a round trip.
                 let path = l.path.join(&f.dir).join(&file);
                 if f.exists.as_ref().is_none_or(|(p, _)| *p != path) {

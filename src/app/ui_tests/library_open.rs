@@ -86,6 +86,19 @@ fn a_restored_tab_on_a_linked_file_keeps_its_edits_when_the_file_is_read() {
 }
 
 #[test]
+fn a_missing_script_or_an_unknown_kind_opens_nothing() {
+    let Some(mut ui) = demo_ui(sql_query) else { return };
+    let tabs = ui.app().tabs.len();
+    open(&mut ui, 9_999, How::Here);
+    assert!(ui.app().last_problem().contains("no longer in the library"), "{}", ui.app().last_problem());
+    // A kind written by a newer build.
+    let id = add(ui.h.state_mut(), "chart", 3, "Later", "x", "shop", "");
+    open(&mut ui, id, How::Run);
+    assert_eq!(ui.app().tabs.len(), tabs);
+    assert!(ui.app().last_problem().contains("does not know scripts of kind"), "{}", ui.app().last_problem());
+}
+
+#[test]
 fn a_reused_query_tab_runs_the_script_in_its_own_database() {
     let Some(mut ui) = demo_ui(sql_query) else { return };
     let tabs = ui.app().tabs.len();

@@ -90,6 +90,16 @@ fn saving_under_a_taken_name_in_the_same_folder_replaces_it() {
 }
 
 #[test]
+fn a_new_file_is_named_in_the_style_of_its_folder() {
+    use crate::app::library::save_dialog::styled_name;
+    let kebab = ["monthly-revenue.sql".to_string(), "top-customers.sql".into(), "x.sql".into()];
+    assert_eq!(styled_name("Late shipments", "sql", &kebab), "late-shipments.sql");
+    let snake = ["monthly_revenue.sql".to_string(), "top_customers.sql".into()];
+    assert_eq!(styled_name("Late shipments", "sql", &snake), "late_shipments.sql");
+    assert_eq!(styled_name("Late shipments", "sql", &[]), "Late shipments.sql");
+}
+
+#[test]
 fn a_leading_comment_names_the_script() {
     let Some(mut ui) = demo_ui(sql_query) else { return };
     set_query(&mut ui, "-- Paid orders that never shipped\nSELECT 1");
