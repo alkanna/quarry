@@ -78,6 +78,18 @@ impl App {
             self.cur = 1;
             self.active = Some(1);
             self.conns.push(Conn { masked_uri: "mysql://app:****@reports.internal:3306".into(), ..Conn::new(ConnMeta { id: 4, name: "reports".into(), tag: "Staging".into(), engine: db::sql::Engine::MySql, ..Default::default() }, Status::Connecting) });
+            // QUARRY_TEST_RAIL=groups folds the two SQL connections into a Production folder, open shows it open, and tip
+            // is the closed folder, which a QUARRY_TEST_POINTER over it shows the tooltip of.
+            if matches!(std::env::var("QUARRY_TEST_RAIL").as_deref(), Ok("groups" | "open" | "tip")) {
+                let gid = self.groups.new_group("Production");
+                let all = self.conn_ids();
+                for id in [3, 4] {
+                    self.groups.place(id, Place::Into(gid, None), &all);
+                }
+                if std::env::var("QUARRY_TEST_RAIL").as_deref() == Ok("open") {
+                    self.rail_open.insert(gid);
+                }
+            }
         }
         // QUARRY_TEST_PG=<view> does the same with an offline PostgreSQL connection, see demo_pg.rs.
         if std::env::var("QUARRY_TEST_PG").is_ok() {
