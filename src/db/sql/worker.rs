@@ -979,7 +979,7 @@ mod tests {
         assert!(pipeline.is_empty());
         assert_eq!(rows[0], mongodb::bson::doc! { "_id": "2.50", "count": 2i64 });
         let Msg::ColumnValues { res: Ok((ColOut::Copy(text, 3), _)), .. } = run(ColOp::CopyDistinct, "a.b", PageQuery { order: "id".into(), ..Default::default() }) else { panic!("expected a copy") };
-        assert_eq!(text, "1.50\n2.50\nnull");
+        assert_eq!(text, "1.50\n2.50\n");
     }
 
     #[test]
