@@ -327,7 +327,7 @@ impl App {
         // Search
         let r = ui.add(
             egui::TextEdit::singleline(&mut st.query)
-                .id(egui::Id::new("library-search"))
+                .id(egui::Id::unique("library-search"))
                 .hint_text(RichText::new("Search scripts").color(FAINT()))
                 .desired_width(f32::INFINITY)
                 .margin(egui::Margin { left: 28, right: 10, top: 5, bottom: 5 }),
@@ -388,14 +388,14 @@ impl App {
                 })
             })
             .inner;
-        st.scroll_y = out.state.offset.y;
+        st.scroll_y = out.state.offset().y;
         st.view_h = out.inner_rect.height();
 
         // The space below the last row takes drops that move an item out of its folder.
         let used = (total as f32 * ROW_H - st.scroll_y).max(0.0);
         let zone = egui::Rect::from_min_max(egui::pos2(out.inner_rect.left(), out.inner_rect.top() + used), out.inner_rect.right_bottom());
         if zone.height() > 6.0 && cx.drag.is_some() {
-            let r = ui.interact(zone, egui::Id::new("library-root-drop"), Sense::hover());
+            let r = ui.interact(zone, egui::Id::unique("library-root-drop"), Sense::hover());
             if let (Some(p), Some(item)) = (r.dnd_hover_payload::<DragItem>(), cx.drag.as_ref()) {
                 let _ = p;
                 if ops::can_move(&self.library, item, &DropAt::Root).is_ok() {
@@ -454,7 +454,7 @@ impl App {
 
     /// Return, Alt+Return, Cmd+Enter, F2, Delete and the arrows, while a row has been clicked and no text box has the keys.
     fn library_keys(&mut self, ctx: &egui::Context, st: &mut PanelUi, rows: &[Row], acts: &mut Vec<Act>) {
-        if !st.focus || self.window_open() || st.rename.is_some() || ctx.wants_keyboard_input() {
+        if !st.focus || self.window_open() || st.rename.is_some() || ctx.egui_wants_keyboard_input() {
             return;
         }
         let none = egui::Modifiers::NONE;
@@ -758,7 +758,7 @@ fn draw_row_in(ui: &mut egui::Ui, cx: &RowCx, st: &mut PanelUi, row: &Row, acts:
         }
         glyph(ui.painter(), egui::pos2(x + 22.0, rect.center().y), gcol);
         let er = egui::Rect::from_min_max(egui::pos2(x + 33.0, rect.top() + 2.0), egui::pos2(rect.right() - 8.0, rect.bottom() - 2.0));
-        let id = egui::Id::new("library-rename");
+        let id = egui::Id::unique("library-rename");
         let te = put_at(ui, er, |ui| ui.add(egui::TextEdit::singleline(buf).id(id).desired_width(er.width()).margin(egui::Margin::symmetric(6, 3))));
         te.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Rename"));
         if *fresh {
@@ -786,7 +786,7 @@ fn draw_row_in(ui: &mut egui::Ui, cx: &RowCx, st: &mut PanelUi, row: &Row, acts:
     let rect_est = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), ROW_H));
     let hovered = cx.drag.is_none() && ui.rect_contains_pointer(rect_est);
     let selected = st.sel.as_ref() == Some(&row.node);
-    let dots_id = egui::Id::new(("lib-dots", &row.node));
+    let dots_id = egui::Id::unique(("lib-dots", &row.node));
     let menu_open = egui::Popup::is_id_open(&ctx, dots_id.with("popup")) || st.demo_menu.as_ref() == Some(&row.node);
     let show_tools = (hovered || menu_open) && has_menu(&row.node);
     let (is_container, saved) = (row.node.is_container(), row.node.is_saved());
@@ -905,7 +905,7 @@ fn draw_row_in(ui: &mut egui::Ui, cx: &RowCx, st: &mut PanelUi, row: &Row, acts:
         && *target == row.node
     {
         drop_fill(ui.painter(), rect);
-        let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("library-demo-ghost")));
+        let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("library-demo-ghost")));
         let galley = p.layout_no_wrap("Slow orders lookup".to_string(), FontId::proportional(TXT_BODY), TEXT());
         let g = egui::Rect::from_min_size(rect.center() + egui::vec2(18.0, 10.0), galley.size() + egui::vec2(24.0, 10.0));
         p.rect(g, R_SM, RAISED(), Stroke::new(1.0, PRIMARY()), egui::StrokeKind::Inside);
