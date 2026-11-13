@@ -198,8 +198,11 @@ impl App {
         }
         if let Some(t) = self.tm() {
             // A SQL row's record closes before the row is let go.
-            if t.record && t.selected.is_some() {
+            if t.record && t.record_row() {
                 t.record = false;
+                return;
+            }
+            if t.view == View::Sql && let Some(s) = &mut t.sql && s.qsel.take().is_some() {
                 return;
             }
             if let Some(key) = t.selected {

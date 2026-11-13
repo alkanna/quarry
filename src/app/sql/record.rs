@@ -156,13 +156,13 @@ impl App {
     /// into a focus move, which would give the focus to the first button of the top bar.
     pub(in crate::app) fn record_key(&mut self, ctx: &egui::Context) {
         // The record belongs to a selected row: whatever let the row go (a view switch, a reload, a delete) ends it too.
-        if let Some(t) = self.tm().filter(|t| t.record && t.selected.is_none()) {
+        if let Some(t) = self.tm().filter(|t| t.record && !t.record_row()) {
             t.record = false;
         }
         if self.window_open() || self.sql_cell.is_some() || ctx.memory(|m| m.focused().is_some()) || ctx.any_popup_open() {
             return;
         }
-        let Some(t) = self.tm().filter(|t| t.sql.is_some() && t.selected.is_some()) else { return };
+        let Some(t) = self.tm().filter(|t| t.sql.is_some() && t.record_row()) else { return };
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Tab)) {
             t.record = !t.record;
             ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
