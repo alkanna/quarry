@@ -805,9 +805,9 @@ impl App {
             // SQL addresses are rebuilt from the fields, so the Keychain holds one URL for either engine.
             // A Cloud SQL IAM sign-in has no password, so none is stored with the address.
             let uri = if f.engine.is_sql() { f.sql_addr().to_uri() } else { f.uri.trim().to_string() };
-            let saved = if self.ephemeral { Some(Ok(())) } else { Some(store_uri(id, &uri)) };
+            let saved = if self.ephemeral { Ok(()) } else { store_uri(id, &uri) };
             match saved {
-                Some(Ok(())) => {
+                Ok(()) => {
                     let stored = if self.ephemeral {
                         Vec::new()
                     } else {
@@ -846,8 +846,7 @@ impl App {
                         self.err(e);
                     }
                 }
-                Some(Err(e)) => self.err(format!("Could not save the address to the Keychain: {e}")),
-                None => self.err("The Keychain is not available."),
+                Err(e) => self.err(format!("Could not save the address to the Keychain: {e}")),
             }
         }
     }

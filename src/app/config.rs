@@ -355,6 +355,16 @@ pub(super) fn store_uri(id: u64, uri: &str) -> keyring::Result<()> {
 /// Other secrets of a connection, besides its address.
 pub(super) const SECRETS: [&str; 4] = ["ssh-password", "ssh-passphrase", "proxy-password", "pg-key-passphrase"];
 
+/// Every Keychain name the app and the connections `ids` may have saved, for the move into one item.
+pub(super) fn secret_names(ids: impl Iterator<Item = u64>) -> Vec<String> {
+    let mut names = vec!["suggestion-cache-key".to_string(), "agents-config-key".to_string()];
+    for id in ids {
+        names.push(format!("connection-{id}"));
+        names.extend(SECRETS.map(|w| format!("connection-{id}-{w}")));
+    }
+    names
+}
+
 /// One of `SECRETS` for the connection.
 pub(super) fn secret(id: u64, what: &str) -> Option<String> {
     crate::vault::get(&format!("connection-{id}-{what}")).ok().filter(|s| !s.is_empty())
@@ -371,10 +381,7 @@ pub(super) fn uri_err(e: keyring::Error) -> String {
 
 /// Stores a secret, or removes it when `value` is empty.
 pub(super) fn set_secret(id: u64, what: &str, value: &str) -> Result<(), String> {
-    match crate::vault::set(&format!("connection-{id}-{what}"), value) {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(format!("Could not store the {} in the Keychain: {e}", what.replace('-', " "))),
-    }
+    crate::vault::set(&format!("connection-{id}-{what}"), value).map_err(|e| format!("Could not store the {} in the Keychain: {e}", what.replace('-', " ")))
 }
 
 /// Written beside the file, then renamed over it: a crash mid-write leaves the old file whole

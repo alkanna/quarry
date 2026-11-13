@@ -508,13 +508,9 @@ impl App {
             if app.prefs.look() != Look::default() {
                 style(&cc.egui_ctx, app.prefs.look());
             }
+            crate::vault::migrate(&secret_names(metas.iter().map(|m| m.id)));
             for meta in metas {
                 let masked = stored_uri(meta.id).ok().map(|u| db::mask_uri(&u)).unwrap_or_default();
-                // Read now so items saved one per secret by older versions all move into one at the first launch,
-                // rather than each asking for access later on connect. A secret never saved asks nothing.
-                for what in SECRETS {
-                    let _ = secret(meta.id, what);
-                }
                 app.conns.push(Conn { masked_uri: masked, ..Conn::new(meta, Status::Idle) });
             }
             app.active = app.conns.first().map(|c| c.meta.id);

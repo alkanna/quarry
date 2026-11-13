@@ -12,7 +12,11 @@ use fake::Entry;
 const SERVICE: &str = "quarry";
 
 #[cfg(any(target_os = "macos", test))]
-pub use mac::{get, set};
+pub use mac::{get, migrate, set};
+
+/// Nothing to move: only macOS keeps the secrets in one item.
+#[cfg(not(any(target_os = "macos", test)))]
+pub fn migrate(_names: &[String]) {}
 
 #[cfg(not(any(target_os = "macos", test)))]
 pub fn get(name: &str) -> keyring::Result<String> {
@@ -33,58 +37,108 @@ mod mac {
     use super::*;
     use std::collections::HashMap;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
 
     const ITEM: &str = "secrets";
+    /// Set in the map once the items of older versions have moved into it.
+    const MOVED: &str = "#moved";
+    // ponytail: a short cache covers the burst of reads at launch, one prompt for all of them if the user picks
+    // Allow over Always Allow, while a change saved by another running Quarry is seen a few seconds later.
+    const FRESH: Duration = Duration::from_secs(5);
 
-    /// The map as last read or written, so a launch reads the Keychain once.
-    static CACHE: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+    static CACHE: Mutex<Option<(Instant, HashMap<String, String>)>> = Mutex::new(None);
+    /// A refused read is not asked again in this launch: each secret read at launch would prompt once more.
+    static REFUSED: AtomicBool = AtomicBool::new(false);
 
     fn read() -> keyring::Result<HashMap<String, String>> {
-        match Entry::new(SERVICE, ITEM)?.get_password() {
-            // A map that does not parse is an error, not an empty map: the next write would wipe every secret.
-            Ok(s) => serde_json::from_str(&s).map_err(|e| Error::BadEncoding(e.to_string().into_bytes())),
-            Err(Error::NoEntry) => Ok(HashMap::new()),
-            Err(e) => Err(e),
+        if REFUSED.load(Ordering::Relaxed) {
+            return Err(Error::NoStorageAccess("access to the Keychain was refused earlier; restart Quarry to be asked again".into()));
         }
+        let map = match Entry::new(SERVICE, ITEM)?.get_password() {
+            // A map that does not parse is an error, not an empty map: the next write would wipe every secret.
+            Ok(s) => serde_json::from_str(&s).map_err(|_| Error::BadStoreFormat(format!("the Keychain item \"{SERVICE}\" / \"{ITEM}\" is damaged; delete it in Keychain Access and enter the passwords again"))),
+            Err(Error::NoEntry) => Ok(HashMap::new()),
+            Err(e) => {
+                REFUSED.store(true, Ordering::Relaxed);
+                Err(e)
+            }
+        }?;
+        *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), map.clone()));
+        Ok(map)
+    }
+
+    fn cached() -> keyring::Result<HashMap<String, String>> {
+        match &*CACHE.lock().unwrap_or_else(|e| e.into_inner()) {
+            Some((at, map)) if at.elapsed() < FRESH => return Ok(map.clone()),
+            _ => {}
+        }
+        read()
+    }
+
+    fn write(map: &HashMap<String, String>) -> keyring::Result<()> {
+        let json = serde_json::to_string(map).map_err(|e| Error::BadStoreFormat(e.to_string()))?;
+        Entry::new(SERVICE, ITEM)?.set_password(&json)?;
+        *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), map.clone()));
+        Ok(())
     }
 
     /// The secret saved as `name`, or `Error::NoEntry`.
     pub fn get(name: &str) -> keyring::Result<String> {
-        let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-        if cache.is_none() {
-            *cache = Some(read()?);
+        let map = cached()?;
+        match map.get(name) {
+            Some(v) => Ok(v.clone()),
+            // Until the move has run, which it does not when an old item was refused, the old items still count.
+            None if !map.contains_key(MOVED) => Entry::new(SERVICE, name)?.get_password(),
+            None => Err(Error::NoEntry),
         }
-        if let Some(v) = cache.as_ref().and_then(|m| m.get(name)) {
-            return Ok(v.clone());
-        }
-        drop(cache);
-        let old = Entry::new(SERVICE, name)?;
-        let v = old.get_password()?;
-        // The old item goes only once its value is safe in the new one; the value read is good either way.
-        if set(name, &v).is_ok() {
-            let _ = old.delete_credential();
-        }
-        Ok(v)
     }
 
     /// Saves `value` as `name`, or removes it when `value` is empty.
     pub fn set(name: &str, value: &str) -> keyring::Result<()> {
-        let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
         // Read again rather than trusting the cache, so a change saved by another running Quarry is kept.
         let mut map = read()?;
         if value.is_empty() {
             map.remove(name);
-            // An item from an older version never read since would otherwise come back on the next get.
-            if let Ok(old) = Entry::new(SERVICE, name) {
-                let _ = old.delete_credential();
+            if !map.contains_key(MOVED) {
+                let _ = Entry::new(SERVICE, name).and_then(|e| e.delete_credential());
             }
         } else {
             map.insert(name.to_string(), value.to_string());
         }
-        let json = serde_json::to_string(&map).map_err(|e| Error::BadEncoding(e.to_string().into_bytes()))?;
-        Entry::new(SERVICE, ITEM)?.set_password(&json)?;
-        *cache = Some(map);
-        Ok(())
+        write(&map)
+    }
+
+    /// Moves the items older versions saved one per secret into the single one, once. `names` are every name that may
+    /// have been saved. Stops without marking the move done when an old item is refused, so the next launch tries again.
+    pub fn migrate(names: &[String]) {
+        let Ok(mut map) = read() else { return };
+        if map.contains_key(MOVED) {
+            return;
+        }
+        let mut moved = Vec::new();
+        let todo: Vec<&String> = names.iter().filter(|n| !map.contains_key(*n)).collect();
+        for name in todo {
+            match Entry::new(SERVICE, name).and_then(|e| e.get_password()) {
+                Ok(v) => {
+                    map.insert(name.clone(), v);
+                    moved.push(name);
+                }
+                Err(Error::NoEntry) => {}
+                Err(_) => return,
+            }
+        }
+        map.insert(MOVED.to_string(), String::new());
+        if write(&map).is_err() {
+            return;
+        }
+        // An old item goes only once its value reads back from the new one, so two windows moving at once lose nothing.
+        let Ok(saved) = read() else { return };
+        for name in moved {
+            if saved.get(name) == map.get(name) {
+                let _ = Entry::new(SERVICE, name).and_then(|e| e.delete_credential());
+            }
+        }
     }
 }
 
@@ -131,23 +185,29 @@ mod tests {
 
     // One test: the fake Keychain and the cache are process-wide.
     #[test]
-    fn older_items_move_into_one_and_removals_reach_both() {
-        for (k, v) in [("connection-1", "mongodb://a"), ("connection-2", "mongodb://b"), ("connection-2-ssh-password", "pw")] {
-            Entry::new(SERVICE, k).unwrap().set_password(v).unwrap();
-        }
-        assert_eq!(get("connection-1").unwrap(), "mongodb://a");
-        assert_eq!(get("connection-1").unwrap(), "mongodb://a", "a second read comes from the moved value");
-        assert!(matches!(get("connection-3"), Err(Error::NoEntry)));
-        assert_eq!(items(), ["quarry/connection-2", "quarry/connection-2-ssh-password", "quarry/secrets"], "connection-1's own item is still there after the move");
+    fn older_items_move_into_one_once() {
+        let old = |k: &str, v: &str| Entry::new(SERVICE, k).unwrap().set_password(v).unwrap();
+        old("connection-1", "mongodb://a");
+        old("connection-2-ssh-password", "pw");
+        assert_eq!(get("connection-1").unwrap(), "mongodb://a", "an old item still reads before the move");
 
-        // An item never read since the upgrade must not come back after a removal.
+        let names: Vec<String> = ["connection-1", "connection-1-ssh-password", "connection-2", "connection-2-ssh-password"].map(String::from).to_vec();
+        migrate(&names);
+        assert_eq!(items(), ["quarry/secrets"], "the old items are gone once moved");
+        assert_eq!(get("connection-1").unwrap(), "mongodb://a");
+        assert_eq!(get("connection-2-ssh-password").unwrap(), "pw");
+        assert!(matches!(get("connection-2"), Err(Error::NoEntry)));
+
+        // An item an older build saves after the move is not picked up again: the move runs once.
+        old("connection-3", "mongodb://c");
+        migrate(&["connection-3".to_string()]);
+        assert!(matches!(get("connection-3"), Err(Error::NoEntry)));
+
         set("connection-2-ssh-password", "").unwrap();
-        assert!(matches!(get("connection-2-ssh-password"), Err(Error::NoEntry)));
         set("connection-4", "mongodb://d").unwrap();
-        assert_eq!(get("connection-2").unwrap(), "mongodb://b");
-        assert_eq!(items(), ["quarry/secrets"]);
+        assert!(matches!(get("connection-2-ssh-password"), Err(Error::NoEntry)));
         let saved: std::collections::HashMap<String, String> = serde_json::from_str(&Entry::new(SERVICE, "secrets").unwrap().get_password().unwrap()).unwrap();
-        assert_eq!(saved.len(), 3);
         assert_eq!(saved["connection-4"], "mongodb://d");
+        assert_eq!(saved.len(), 3, "connection-1, connection-4 and the moved marker");
     }
 }
