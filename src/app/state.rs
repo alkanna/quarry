@@ -371,6 +371,8 @@ pub(super) struct Tab {
     pub(super) shell_checked: BTreeSet<usize>,
     /// Rows open inline besides the selected one, keyed like `selected`.
     pub(super) expanded: BTreeSet<(bool, usize)>,
+    /// A SQL grid shows its selected row as a record under it, toggled by Tab.
+    pub(super) record: bool,
     pub(super) agg_txt: String,
     pub(super) agg_docs: Vec<db::Row>,
     pub(super) agg_fields: Vec<String>,
@@ -784,6 +786,7 @@ impl Tab {
             check_anchor: None,
             shell_checked: BTreeSet::new(),
             expanded: BTreeSet::new(),
+            record: false,
             agg_txt: NEW_PIPELINE.into(),
             agg_docs: Vec::new(),
             agg_fields: Vec::new(),

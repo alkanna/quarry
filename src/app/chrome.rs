@@ -197,6 +197,11 @@ impl App {
             return;
         }
         if let Some(t) = self.tm() {
+            // A SQL row's record closes before the row is let go.
+            if t.record && t.selected.is_some() {
+                t.record = false;
+                return;
+            }
             if let Some(key) = t.selected {
                 return self.close_row(key);
             }

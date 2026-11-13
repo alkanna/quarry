@@ -12,6 +12,7 @@ pub(super) mod ns;
 pub(super) mod pg_roles;
 pub(super) mod pg_server;
 pub(super) mod query;
+pub(super) mod record;
 pub(super) mod rel;
 pub(super) mod server;
 pub(super) mod structure;
