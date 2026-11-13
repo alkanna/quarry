@@ -341,8 +341,8 @@ fn pg_rule_sql(r: &Rule, c: &str, n: String) -> Option<String> {
     Some(match r.op {
         Eq if other && r.kind == Kind::Json => format!("{c} = {}::jsonb", typed(first)),
         Ne if other && r.kind == Kind::Json => format!("{c} <> {}::jsonb", typed(first)),
-        Eq if other => format!("{} = {}", if r.kind == Kind::Binary { &c } else { &side }, typed(first)),
-        Ne if other => format!("{} <> {}", if r.kind == Kind::Binary { &c } else { &side }, typed(first)),
+        Eq if other => format!("{side} = {}", typed(first)),
+        Ne if other => format!("{side} <> {}", typed(first)),
         LenEq if other => format!("octet_length({side}) = {n}"),
         LenGt if other => format!("octet_length({side}) > {n}"),
         LenLt if other => format!("octet_length({side}) < {n}"),
