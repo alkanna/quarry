@@ -50,13 +50,6 @@ fn engine_name(e: Engine) -> &'static str {
     }
 }
 
-fn engine_from(key: &str) -> Engine {
-    match key {
-        "mysql" => Engine::MySql,
-        "postgres" => Engine::Postgres,
-        _ => Engine::Mongo,
-    }
-}
 
 /// The path as typed, with a leading `~` read as the home folder.
 fn expand(path: &str) -> PathBuf {
@@ -217,7 +210,7 @@ impl App {
                 f.name_set = true;
                 f.on = l.on.clone();
                 f.conns = l.conns.clone();
-                f.engine = if l.engine.is_empty() { f.engine } else { engine_from(&l.engine) };
+                f.engine = if l.engine.is_empty() { f.engine } else { format::engine_of_key(&l.engine) };
                 (f.sql, f.js, f.json) = (l.exts.iter().any(|e| e == "sql"), l.exts.iter().any(|e| e == "js"), l.exts.iter().any(|e| e == "json"));
                 f.follow = l.follow;
             }

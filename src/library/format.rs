@@ -192,16 +192,31 @@ pub fn engine_key(e: Engine) -> &'static str {
     }
 }
 
+/// The engine of an `engine_key` word; MongoDB for one this build does not know.
+pub fn engine_of_key(key: &str) -> Engine {
+    match key {
+        "mysql" => Engine::MySql,
+        "postgres" => Engine::Postgres,
+        _ => Engine::Mongo,
+    }
+}
+
+/// Whether a script of `kind` runs on `engine`: SQL on SQL connections, a filter or pipeline on MongoDB and a Shell
+/// script on any. None for a kind this build does not know, which a saved script refuses and a file allows.
+pub fn kind_runs_on(kind: &str, engine: Engine) -> Option<bool> {
+    match kind {
+        "sql" => Some(engine.is_sql()),
+        "filter" | "pipeline" => Some(engine == Engine::Mongo),
+        "shell" => Some(true),
+        _ => None,
+    }
+}
+
 /// Whether a file of `kind` in `link` shows for connection `conn` of `engine`. `.sql` belongs to SQL connections, a
 /// filter or pipeline (.json) to Mongo ones and a Shell script (.js) to any. `engine` "mysql" covers MySQL and MariaDB,
 /// which are one `Engine`.
 pub fn fits(link: &Link, kind: &str, conn: u64, engine: Engine) -> bool {
-    let kind_ok = match kind {
-        "sql" => engine.is_sql(),
-        "filter" | "pipeline" => engine == Engine::Mongo,
-        _ => true,
-    };
-    kind_ok && used_on(link, conn, Some(engine))
+    kind_runs_on(kind, engine).unwrap_or(true) && used_on(link, conn, Some(engine))
 }
 
 /// Whether a link is used on connection `conn` of `engine` (None when not known yet). An `on` this build does not know is

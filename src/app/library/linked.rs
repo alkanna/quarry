@@ -31,6 +31,12 @@ pub(in crate::app) enum Job {
     Trash { link: u64, rel: PathBuf, path: PathBuf },
 }
 
+/// The kind of the linked file `rel`: what the scan found, else what its extension says.
+pub(in crate::app) fn kind_in(scans: &crate::library::tree::Scans, link: u64, rel: &std::path::Path) -> String {
+    let found = scans.get(&link).and_then(|s| s.entries.iter().find(|e| e.rel == rel)).map(|e| e.kind.clone());
+    found.or_else(|| format::kind_of_ext(&format::ext_of(rel)).map(String::from)).unwrap_or_default()
+}
+
 /// The text of the view a tab's script is bound to. Borrowed, since the tab strip asks every frame whether each tab
 /// holds edits.
 pub(in crate::app) fn bound_text(t: &Tab) -> Option<&str> {
@@ -557,8 +563,7 @@ impl App {
 
     /// The kind of a linked file: what its scan found, else its extension tells.
     pub(in crate::app) fn file_kind(&self, link: u64, rel: &std::path::Path) -> String {
-        let found = self.lib_ui.scans.get(&link).and_then(|s| s.entries.iter().find(|e| e.rel == rel)).map(|e| e.kind.clone());
-        found.or_else(|| format::kind_of_ext(&format::ext_of(rel)).map(String::from)).unwrap_or_default()
+        kind_in(&self.lib_ui.scans, link, rel)
     }
 
     /// The connection a copy of a linked file is kept for in the library: the current tab's, then the active one, then any

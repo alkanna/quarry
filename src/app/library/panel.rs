@@ -272,7 +272,7 @@ impl RowCx<'_> {
             }
             Node::File { link, rel } => {
                 let Some(l) = self.lib.links.iter().find(|l| l.id == *link).cloned() else { return Vec::new() };
-                let kind = self.scans.get(link).and_then(|s| s.entries.iter().find(|e| e.rel == *rel)).map(|e| e.kind.clone()).or_else(|| crate::library::format::kind_of_ext(&crate::library::format::ext_of(rel)).map(String::from)).unwrap_or_default();
+                let kind = super::linked::kind_in(self.scans, *link, rel);
                 Box::new(move |c: &Conn| crate::library::format::fits(&l, &kind, c.meta.id, c.meta.engine))
             }
             _ => return Vec::new(),

@@ -82,9 +82,7 @@ impl App {
     fn conn_shortcuts(&mut self, ui: &mut egui::Ui) {
         let open: Vec<u64> = self.conns.iter().filter(|c| c.status.is_open()).map(|c| c.meta.id).collect();
         sync_order(&mut self.rail_order, &open);
-        // A deleted group's id is given to the next new one, which must not show open for it.
-        let groups = &self.groups;
-        self.rail_open.retain(|g| groups.group(*g).is_some());
+        self.prune_rail_open();
         if self.rail_order.is_empty() {
             return;
         }
@@ -285,6 +283,13 @@ impl App {
             Some((id, TileAct::Disconnect)) => self.disconnect(id),
             None => {}
         }
+    }
+
+    /// Forgets the open rail folders of deleted groups: a deleted group's id is given to the next new one, which must not
+    /// show open for it.
+    pub(super) fn prune_rail_open(&mut self) {
+        let groups = &self.groups;
+        self.rail_open.retain(|g| groups.group(*g).is_some());
     }
 
     /// Opens or closes a folder in the rail, with its animation.

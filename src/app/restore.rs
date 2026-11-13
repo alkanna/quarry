@@ -50,8 +50,7 @@ impl App {
                     };
                     self.rail_order.insert(i, tile);
                 }
-                let groups = &self.groups;
-                self.rail_open.retain(|g| groups.group(*g).is_some());
+                self.prune_rail_open();
                 self.save_groups();
                 self.ok("Grouping undone.");
             }

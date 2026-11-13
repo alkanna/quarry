@@ -49,12 +49,7 @@ pub(in crate::app) enum Target {
 /// Whether a script of `kind` can run on a connection of `engine`: SQL on MySQL, MariaDB and PostgreSQL, filters and
 /// pipelines on MongoDB, Shell scripts on any.
 pub(in crate::app) fn kind_fits(kind: &str, engine: db::sql::Engine) -> bool {
-    match kind {
-        "sql" => engine.is_sql(),
-        "filter" | "pipeline" => !engine.is_sql(),
-        "shell" => true,
-        _ => false,
-    }
+    crate::library::format::kind_runs_on(kind, engine).unwrap_or(false)
 }
 
 fn kind_label(kind: &str) -> &'static str {
