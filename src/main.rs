@@ -4,6 +4,7 @@
 // would be the extra layers the codebase keeps out.
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
+mod agents;
 mod app;
 mod cloudsql;
 mod db;
@@ -37,6 +38,10 @@ fn fall_back_to_x11_without_wayland_lib() {
 }
 
 fn main() -> eframe::Result {
+    // `quarry mcp` is the MCP server an agent starts: stdio only, no window, nothing else of the app runs.
+    if std::env::args().nth(1).as_deref() == Some("mcp") {
+        std::process::exit(agents::bridge::run());
+    }
     #[cfg(target_os = "linux")]
     fall_back_to_x11_without_wayland_lib();
     let args: Vec<String> = std::env::args().collect();

@@ -2,7 +2,7 @@
 
 use super::*;
 
-#[derive(Clone, Copy, PartialEq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub(super) enum SettingsCat {
     #[default]
     Appearance,
@@ -10,16 +10,18 @@ pub(super) enum SettingsCat {
     Documents,
     Editing,
     Tools,
+    Agents,
     StatusBar,
     Updates,
 }
 
-const CATS: [(SettingsCat, &str); 7] = [
+const CATS: [(SettingsCat, &str); 8] = [
     (SettingsCat::Appearance, "Appearance"),
     (SettingsCat::Reading, "Reading"),
     (SettingsCat::Documents, "Documents"),
     (SettingsCat::Editing, "Editing"),
     (SettingsCat::Tools, "Queries and tools"),
+    (SettingsCat::Agents, "AI agents"),
     (SettingsCat::StatusBar, "Status bar"),
     (SettingsCat::Updates, "Updates"),
 ];
@@ -101,13 +103,26 @@ impl App {
                     }
                 }
                 ui.allocate_ui_with_layout(egui::vec2(w - side_w, body_h), egui::Layout::top_down(egui::Align::Min), |ui| {
-                    egui::ScrollArea::vertical().id_salt("settings-scroll").max_height(body_h).min_scrolled_height(body_h).auto_shrink([false, false]).show(ui, |ui| {
+                    // Opening a category or connection page always starts at the top, also one seen before, so the
+                    // view it was last scrolled to is reset when the view changes rather than kept per view.
+                    let view = (self.settings_cat, self.agents.page);
+                    let seen = egui::Id::unique("settings-scroll-view");
+                    let moved = ui.ctx().data_mut(|d| d.get_temp::<(SettingsCat, Option<u64>)>(seen).is_some_and(|v| v != view));
+                    ui.ctx().data_mut(|d| d.insert_temp(seen, view));
+                    let mut area = egui::ScrollArea::vertical().id_salt("settings-scroll").max_height(body_h).min_scrolled_height(body_h).auto_shrink([false, false]);
+                    if moved {
+                        area = area.vertical_scroll_offset(0.0);
+                    }
+                    area.show(ui, |ui| {
                         egui::Frame::new().inner_margin(egui::Margin { left: 24, right: 24, top: 18, bottom: 12 }).show(ui, |ui| {
                             ui.set_width(w - side_w - 48.0);
                             ui.spacing_mut().item_spacing.y = 6.0;
-                            let title = CATS.iter().find(|c| c.0 == self.settings_cat).map_or("", |c| c.1);
-                            ui.label(semibold(RichText::new(title).size(TXT_SUBHEAD).color(BRIGHT())));
-                            ui.add_space(6.0);
+                            // A connection's agent page draws its own breadcrumb in place of the title.
+                            if !(self.settings_cat == SettingsCat::Agents && self.agents.page.is_some()) {
+                                let title = CATS.iter().find(|c| c.0 == self.settings_cat).map_or("", |c| c.1);
+                                ui.label(semibold(RichText::new(title).size(TXT_SUBHEAD).color(BRIGHT())));
+                                ui.add_space(6.0);
+                            }
                             self.settings_pane(ui);
                         });
                     });
@@ -308,6 +323,7 @@ impl App {
                     self.install_tools_button(ui);
                 }
             }
+            SettingsCat::Agents => self.agents_settings(ui),
             SettingsCat::StatusBar => {
                 settings_section(ui, "", |ui| {
                     setting_row(ui, "Server", "The connection's host, MongoDB version and replica set, with a dot for whether it is connected.", |ui| {
@@ -371,6 +387,13 @@ fn cat_icon(p: &egui::Painter, cat: SettingsCat, c: egui::Pos2, color: Color32) 
             p.rect_stroke(egui::Rect::from_center_size(c, egui::vec2(14.0, 12.0)), 2.5, s, egui::StrokeKind::Inside);
             p.add(egui::Shape::line(vec![pt(-4.0, -2.0), pt(-1.5, 0.0), pt(-4.0, 2.0)], s));
             line(pt(0.0, 2.5), pt(4.0, 2.5));
+        }
+        SettingsCat::Agents => {
+            // A plug: two prongs, the body, the cord.
+            line(pt(-2.0, -6.5), pt(-2.0, -3.5));
+            line(pt(2.0, -6.5), pt(2.0, -3.5));
+            p.rect_stroke(egui::Rect::from_min_max(pt(-4.5, -3.5), pt(4.5, 2.0)), 2.0, s, egui::StrokeKind::Inside);
+            line(pt(0.0, 2.0), pt(0.0, 6.5));
         }
         SettingsCat::StatusBar => {
             p.rect_stroke(egui::Rect::from_center_size(c, egui::vec2(14.0, 12.0)), 2.5, s, egui::StrokeKind::Inside);

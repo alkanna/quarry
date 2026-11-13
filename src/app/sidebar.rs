@@ -769,6 +769,23 @@ impl App {
         pick
     }
 
+    /// Refresh on a database: its collections or tables listed again, and on SQL what autocomplete knew of it dropped.
+    /// `db` is the sidebar's database, on PostgreSQL never a schema. Agents that change structure use it too. False
+    /// when the connection is not open.
+    pub(super) fn refresh_db(&mut self, conn: u64, db: &str) -> bool {
+        let Some(c) = self.conn(conn) else { return false };
+        match (c.sql.clone(), c.client.clone()) {
+            (Some(sql), _) if sql.dialect == db::sql::Dialect::Postgres => self.pg_refresh(conn, db),
+            (Some(sql), _) => {
+                self.sql_refresh_schema(conn, db, "");
+                self.worker.sql_tables(conn, sql, db.to_string());
+            }
+            (None, Some(client)) => self.worker.collections(conn, client, db.to_string()),
+            (None, None) => return false,
+        }
+        true
+    }
+
     pub(super) fn side_act(&mut self, conn: u64, a: SideAct) {
         let a = match a {
             SideAct::NewQuery(db) => return self.sql_new_query(conn, db),
@@ -789,12 +806,11 @@ impl App {
             SideAct::SqlRunFile(db) => return self.open_sql_run_file(conn, db),
             a => a,
         };
-        if let (SideAct::Refresh(db), Some(sql)) = (&a, self.conn(conn).and_then(|c| c.sql.clone())) {
-            if sql.dialect == db::sql::Dialect::Postgres {
-                return self.pg_refresh(conn, db);
-            }
-            self.sql_refresh_schema(conn, db, "");
-            return self.worker.sql_tables(conn, sql, db.clone());
+        if let SideAct::Refresh(db) = &a
+            && self.conn(conn).is_some_and(|c| c.sql.is_some())
+        {
+            self.refresh_db(conn, db);
+            return;
         }
         if self.conn(conn).is_some_and(|c| c.meta.engine.is_sql()) {
             return self.warn(if self.conn(conn).is_some_and(|c| c.sql.is_some()) { "Not available for SQL connections yet." } else { "Not connected. Connect to this server first." });
@@ -809,7 +825,9 @@ impl App {
         }
         match a {
             SideAct::NewColl(db, view) => self.modal = Some(Modal::NewCollection { conn, db, name: String::new(), view, source: String::new(), pipeline: "[\n  { $match: {} }\n]".into() }),
-            SideAct::Refresh(db) => self.worker.collections(conn, client, db),
+            SideAct::Refresh(db) => {
+                self.refresh_db(conn, &db);
+            }
             SideAct::Users => {
                 self.users = Some(UsersWin { conn, new_db: "admin".into(), ..Default::default() });
                 self.load_users(conn);

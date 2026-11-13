@@ -60,7 +60,7 @@ impl App {
     /// A dialog or window over the page. It takes its own keys, Esc included, so page shortcuts
     /// stay off while it is open; a new kind of window belongs in this list.
     pub(super) fn window_open(&self) -> bool {
-        self.modal.is_some() || self.cloud_browser.is_some() || self.insert.is_some() || self.value_dialog_open() || self.users.is_some() || self.server.is_some() || self.sql_users.is_some() || self.pg_roles.is_some() || self.sql_server.is_some() || self.pg_server.is_some() || self.tool.is_some()
+        self.modal.is_some() || self.cloud_browser.is_some() || self.insert.is_some() || self.value_dialog_open() || self.users.is_some() || self.server.is_some() || self.sql_users.is_some() || self.pg_roles.is_some() || self.sql_server.is_some() || self.pg_server.is_some() || self.tool.is_some() || !self.agents.asks.is_empty() || self.agents.activity_open || self.agents.rules.is_some()
     }
 
     pub(super) fn keys(&mut self, ctx: &egui::Context) {
@@ -400,6 +400,7 @@ impl App {
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    self.agents_pill(ui);
                     let log = RichText::new("Query log").size(TXT_CAPTION);
                     if quiet(ui, if self.log.open { log.color(BRIGHT()) } else { log }).on_hover_text("Every command sent to the servers (Cmd+L)").clicked() {
                         self.log.open = !self.log.open;

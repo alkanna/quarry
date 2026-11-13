@@ -1953,7 +1953,7 @@ impl RolesUndo {
 }
 
 fn entry(conn: u64, database: &str, u: RolesUndo) -> UndoAction {
-    UndoAction { at: Instant::now(), conn, db: database.into(), coll: String::new(), kind: UndoKind::Sql { database: database.into(), cols: Vec::new(), undo: SqlUndo::PgRoles(Box::new(u)), ids: Default::default() } }
+    UndoAction { agent: None, at: Instant::now(), conn, db: database.into(), coll: String::new(), kind: UndoKind::Sql { database: database.into(), cols: Vec::new(), undo: SqlUndo::PgRoles(Box::new(u)), ids: Default::default() } }
 }
 
 /// `req` is the Apply's request id, so a late answer cannot clear changes staged after it; 0 for the others.

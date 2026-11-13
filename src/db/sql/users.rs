@@ -1059,7 +1059,7 @@ pub fn label_of(edits: &[Edit]) -> String {
 }
 
 fn action(conn: u64, acct: &Account, undo: AccountUndo) -> UndoAction {
-    UndoAction { at: Instant::now(), conn, db: acct.label(), coll: String::new(), kind: UndoKind::Sql { database: String::new(), cols: Vec::new(), undo: SqlUndo::Account(Box::new(undo)), ids: Default::default() } }
+    UndoAction { agent: None, at: Instant::now(), conn, db: acct.label(), coll: String::new(), kind: UndoKind::Sql { database: String::new(), cols: Vec::new(), undo: SqlUndo::Account(Box::new(undo)), ids: Default::default() } }
 }
 
 // Running.
@@ -1532,7 +1532,7 @@ pub(super) async fn undo(db: &Db, a: UndoAction, u: AccountUndo, read_only: bool
     // Any failure that ran nothing keeps the entry, whatever its cause; a partial run does not, since what it
     // expected no longer holds.
     let keep = res.is_err() && !ran_any;
-    let undo: Vec<UndoAction> = keep.then(|| UndoAction { at: a.at, conn, db: a.db, coll: a.coll, kind: a.kind }).into_iter().collect();
+    let undo: Vec<UndoAction> = keep.then(|| UndoAction { agent: None, at: a.at, conn, db: a.db, coll: a.coll, kind: a.kind }).into_iter().collect();
     let renamed = res.is_ok() && matches!(u.what, What::Renamed { .. });
     let op = if renamed { Op::UndoneRename } else { Op::Undone };
     let acct = if renamed { match &u.what { What::Renamed { from } => from.clone(), _ => acct } } else { acct };

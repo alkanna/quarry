@@ -394,6 +394,13 @@ pub(crate) fn dialog(id: egui::Id) -> egui::Modal {
     egui::Modal::new(id).frame(dialog_frame().inner_margin(18))
 }
 
+/// A `dialog` raised above everything else every frame, for windows opened from another window (Settings) whose click
+/// would otherwise leave them underneath.
+pub(crate) fn top_dialog(ctx: &egui::Context, id: egui::Id) -> egui::Modal {
+    ctx.move_to_top(egui::LayerId::new(egui::Order::Foreground, id));
+    dialog(id)
+}
+
 /// The dialog look without padding, for dialogs that lay out their own edges like the Cmd+K palette.
 pub(crate) fn dialog_frame() -> egui::Frame {
     egui::Frame::new().shadow(window_shadow()).fill(RAISED()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_LG)

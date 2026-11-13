@@ -6,6 +6,8 @@
 //! Widgets are found by their accessible names (`Response::widget_info`): "{col} row {n}" for a grid
 //! cell, "Select row {n}" for its checkbox, the column name for a header, the text of a sidebar row.
 
+mod agents;
+mod agents_windows;
 mod calendar;
 mod conn_advanced;
 mod conn_cert;

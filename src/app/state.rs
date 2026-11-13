@@ -361,6 +361,8 @@ pub(super) struct Tab {
     pub(super) failed: Vec<super::errors::Failed>,
     /// Why the query bar's text could not be run, shown under it; the rows from before stay.
     pub(super) bar_err: Option<String>,
+    /// An agent changed this collection or table since the tab loaded; cleared by a reload.
+    pub(super) agent_changed: bool,
     pub(super) selected: Option<(bool, usize)>,
     /// Rows of the current page checked for bulk actions, and the last one clicked for Shift ranges.
     pub(super) checked: BTreeSet<usize>,
@@ -776,6 +778,7 @@ impl Tab {
             loading: false,
             failed: Vec::new(),
             bar_err: None,
+            agent_changed: false,
             selected: None,
             checked: BTreeSet::new(),
             check_anchor: None,

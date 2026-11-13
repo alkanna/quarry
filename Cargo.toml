@@ -13,7 +13,8 @@ egui = { version = "0.37", default-features = false, features = ["monochrome_emo
 mongodb = { version = "3", features = ["socks5-proxy"] }
 # MySQL and MariaDB. Postgres and SQLite are one feature each when they come. Runtime queries only, no macros.
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "mysql", "postgres"] }
-tokio = { version = "1", features = ["rt-multi-thread", "process", "io-util", "macros", "sync"] }
+# net and time also come in through other crates; named because the AI agents link uses sockets, pipes and timeouts.
+tokio = { version = "1", features = ["rt-multi-thread", "process", "io-util", "macros", "sync", "net", "time"] }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -23,6 +24,8 @@ rfd = "0.17"
 dirs = "6"
 image = { version = "0.25", default-features = false, features = ["png"] }
 sha2 = "0.11"
+# Already in the build through sqlx; signs agents.json, proves both ends of the AI agents link and keys the scrub hash.
+hmac = "0.13"
 russh = { version = "0.65", default-features = false, features = ["ring", "rsa", "flate2"] }
 chacha20poly1305 = { version = "0.11.0", features = ["getrandom"] }
 # Already in the build through russh; compresses SQL dumps saved as .gz.
@@ -45,13 +48,15 @@ unicode-normalization = "0.1"
 zeroize = "1"
 # Already in the build through other crates; the MD5 password hash for a server whose password_encryption is md5.
 md5 = "0.8"
+# Already in the build through other crates; scrub rules for AI agents, linear time with size limits.
+regex = "1"
 
 # Already in the build through other crates; read the app's own memory and CPU time for the status bar.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_System_ProcessStatus", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Time"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_System_ProcessStatus", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Time", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Console"] }
 
 [dev-dependencies]
 # Drives the real App without a window in the tests under src/app/ui_tests.

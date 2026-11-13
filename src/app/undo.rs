@@ -88,7 +88,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     fn action(at: Instant) -> UndoAction {
-        UndoAction { at, conn: 1, db: "shop".into(), coll: "c".into(), kind: UndoKind::Insert { id: Bson::Int32(1) } }
+        UndoAction { agent: None, at, conn: 1, db: "shop".into(), coll: "c".into(), kind: UndoKind::Insert { id: Bson::Int32(1) } }
     }
 
     #[test]
@@ -105,7 +105,7 @@ mod tests {
 
     fn sql_action(conn: u64, database: &str, schema: &str, table: &str) -> UndoAction {
         let kind = UndoKind::Sql { database: database.into(), cols: Vec::new(), undo: db::sql::write::SqlUndo::Inserted(Vec::new()), ids: Default::default() };
-        UndoAction { at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind }
+        UndoAction { agent: None, at: Instant::now(), conn, db: schema.into(), coll: table.into(), kind }
     }
 
     #[test]
