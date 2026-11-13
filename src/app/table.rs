@@ -553,6 +553,9 @@ impl App {
         let related = if agg { HashMap::new() } else { self.t().map(|t| t.related.clone()).unwrap_or_default() };
         let in_coll = self.in_coll();
         let menu = self.row_menu_kind(agg);
+        // Tab shows the selected row as a record under it; Esc or Tab again hides it.
+        let record = sql && self.t().is_some_and(|t| t.record);
+        let mut rec = super::sql::record::RecordOut::default();
         let mut view: Option<(String, Bson)> = None;
         egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(1).show(ui, |ui| {
             let mut area = egui::ScrollArea::both().id_salt(("res", agg)).auto_shrink(false);
@@ -700,7 +703,8 @@ impl App {
                                 ui.painter().rect_filled(cell, 0, tint(WARNING(), 34));
                                 ui.painter().rect_filled(egui::Rect::from_min_size(cell.min, egui::vec2(2.0, cell.height())), 0, WARNING());
                             }
-                            if sql_rows && self.sql_cell.as_ref().is_some_and(|e| e.is_at(docs.id(i), c)) {
+                            // With the record open, the row's editor is drawn in the record.
+                            if sql_rows && !(record && active) && self.sql_cell.as_ref().is_some_and(|e| e.is_at(docs.id(i), c)) {
                                 self.sql_cell_editor(ui, cell);
                                 x += w;
                                 continue;
@@ -841,10 +845,34 @@ impl App {
                         });
                         ui.add_space(6.0);
                     }
+                    if record && active {
+                        ui.add_space(4.0);
+                        // As wide as the grid on screen and moved to where it is scrolled sideways, so the card is in view.
+                        let w = row_w.min(view_w - 2.0).max(320.0);
+                        let shown: HashSet<&String> = cols.iter().collect();
+                        let names: Vec<String> = cols.iter().chain(fields.iter().filter(|f| !shown.contains(f))).cloned().collect();
+                        let left = (ui.clip_rect().left() - ui.max_rect().left()).max(0.0);
+                        ui.horizontal(|ui| {
+                            ui.add_space(left);
+                            card(ui, |ui| {
+                                ui.set_width(w - 30.0);
+                                // The card takes the row's horizontal layout; its lines go one under the other.
+                                ui.vertical(|ui| self.sql_record(ui, docs, i, agg, &names, &fks, menu, &checked, &mut rec));
+                            });
+                        });
+                        ui.add_space(6.0);
+                    }
                 }
             });
         });
-        if let Some((c, v)) = view {
+        // The record is only drawn under the selected row, so what it asked for is that row's.
+        if let Some((_, i)) = selected {
+            edit_cell = rec.edit.map(|c| (i, c)).or(edit_cell);
+            sql_acts.extend(rec.acts.into_iter().map(|(c, a)| (i, c, a)));
+            fk_open = rec.fk.map(|k| (i, k)).or(fk_open);
+        }
+        row_act = rec.row_act.or(row_act);
+        if let Some((c, v)) = view.or(rec.view) {
             self.sql_view_value(&c, &v);
         }
         if let Some((c, w)) = resized {

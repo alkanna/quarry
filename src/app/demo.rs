@@ -502,6 +502,8 @@ impl App {
         match which {
             "edit" => self.sql_demo_stage(),
             "select" => self.tabs[0].checked = [1, 2, 4, 5].into(),
+            // QUARRY_TEST_SQL=record shows row 2 as the record Tab opens.
+            "record" => (self.tabs[0].selected, self.tabs[0].record) = (Some((false, 1)), true),
             _ => {}
         }
         self.sql_json_demo();
