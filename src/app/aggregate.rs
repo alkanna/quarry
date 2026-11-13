@@ -1,12 +1,13 @@
 //! The aggregation pipeline builder.
 
 use super::*;
+use crate::ui::dnd;
 
 pub(super) enum StageAct {
     Edited(usize),
     Toggled(usize),
-    /// Move a stage one place, down when true.
-    Move(usize, bool),
+    /// Move the stage at the first index to the second, dragged there.
+    Move(usize, usize),
     Remove(usize),
     Add(String),
     Op(usize, String),
@@ -46,11 +47,8 @@ pub(super) fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, a
                         ui.close();
                     }
                 });
-                if ui.add_enabled(i + 1 < n, egui::Button::new("⏷")).on_hover_text("Move this stage down").clicked() {
-                    acts.push(StageAct::Move(i, true));
-                }
-                if ui.add_enabled(i > 0, egui::Button::new("⏶")).on_hover_text("Move this stage up").clicked() {
-                    acts.push(StageAct::Move(i, false));
+                if n > 1 {
+                    ui.label(RichText::new("Drag to reorder").size(TXT_SMALL).color(FAINT()));
                 }
             });
         });
@@ -98,6 +96,20 @@ pub(super) fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, a
             });
         });
     });
+}
+
+/// A stage card while it is dragged: its number, operator and the first lines of its body, painted without the editors
+/// and menus that would otherwise follow the pointer.
+fn lifted_stage(ui: &mut egui::Ui, i: usize, s: &Stage) -> egui::Response {
+    let rect = ui.max_rect().shrink2(egui::vec2(12.0, 6.0));
+    let p = ui.painter().with_clip_rect(rect);
+    let head = p.layout_job(LayoutJob::single_section(format!("{}  {}", i + 1, s.op), mono_fmt(TXT_BODY, if s.on { C_KEYWORD() } else { FAINT() }, W_SEMIBOLD)));
+    let y = rect.top() + 8.0;
+    p.galley(egui::pos2(rect.left(), y), head.clone(), TEXT());
+    let body: String = s.text.lines().take(6).collect::<Vec<_>>().join("\n");
+    let g = p.layout(body, FontId::monospace(TXT_SMALL), MUTED(), rect.width());
+    p.galley(egui::pos2(rect.left(), y + head.size().y + 8.0), g, MUTED());
+    ui.response()
 }
 
 /// The first documents out of a stage, one line each. The whole row toggles the document open
@@ -193,9 +205,38 @@ impl App {
                                 });
                             });
                             let n = t.stages.len();
-                            for (i, s) in t.stages.iter_mut().enumerate() {
+                            // Cards drag to reorder with the whole card as the handle; the editor and the sample list
+                            // keep their own drags (select text, scroll). The engine needs each card's height before it
+                            // draws, so it uses the height the card had on the last frame and redraws when it changed.
+                            let hid = egui::Id::unique("stage-heights");
+                            let mut heights: HashMap<u64, f32> = ui.ctx().data(|d| d.get_temp(hid)).unwrap_or_default();
+                            let sizes: Vec<f32> = t.stages.iter().map(|s| heights.get(&s.uid).copied().unwrap_or(160.0)).collect();
+                            let keys: Vec<egui::Id> = t.stages.iter().map(|s| egui::Id::unique(("stage", s.uid))).collect();
+                            let mut grew = false;
+                            let mv = dnd::reorder(ui, egui::Id::unique("stage-cards"), dnd::Items::vertical(&sizes).keys(&keys), |ui, i, st| {
+                                let s = &mut t.stages[i];
+                                if st.lifted {
+                                    return lifted_stage(ui, i, s);
+                                }
+                                let top = ui.max_rect().top();
+                                // A selectable label would take a drag that starts on it for selecting its text.
+                                ui.style_mut().interaction.selectable_labels = false;
                                 ui.add_space(6.0);
                                 stage_card(ui, i, n, s, auto, &mut sacts);
+                                let h = ui.min_rect().bottom() - top;
+                                if heights.get(&s.uid).is_none_or(|old| (old - h).abs() > 0.5) {
+                                    heights.insert(s.uid, h);
+                                    grew = true;
+                                }
+                                ui.response()
+                            });
+                            if grew {
+                                ui.ctx().request_repaint();
+                            }
+                            heights.retain(|uid, _| t.stages.iter().any(|s| s.uid == *uid));
+                            ui.ctx().data_mut(|d| d.insert_temp(hid, heights));
+                            if let Some(m) = mv {
+                                sacts.push(StageAct::Move(m.from, m.to));
                             }
                             ui.add_space(6.0);
                             ui.menu_button(semibold(RichText::new("+ Add stage").color(PRIMARY())), |ui| {
@@ -320,10 +361,10 @@ impl App {
             match a {
                 StageAct::Edited(i) => self.stages_changed(i, true),
                 StageAct::Toggled(i) => self.stages_changed(i, false),
-                StageAct::Move(i, down) => {
-                    let j = if down { i + 1 } else { i.wrapping_sub(1) };
-                    if j < t.stages.len() {
-                        t.stages.swap(i, j);
+                StageAct::Move(i, j) => {
+                    if i < t.stages.len() && j < t.stages.len() && i != j {
+                        let s = t.stages.remove(i);
+                        t.stages.insert(j, s);
                         self.stages_changed(i.min(j), false);
                     }
                 }
