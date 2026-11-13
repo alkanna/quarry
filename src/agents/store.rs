@@ -17,20 +17,11 @@ pub const FILE: &str = "agents.json";
 /// refuses. Never called by the demo or the tests.
 pub fn key() -> Option<&'static [u8; 32]> {
     static KEY: std::sync::OnceLock<Option<[u8; 32]>> = std::sync::OnceLock::new();
-    KEY.get_or_init(|| {
-        let entry = keyring::Entry::new("quarry", "agents-config-key").ok()?;
-        match entry.get_password() {
-            Ok(hex) => link::unhex(&hex).and_then(|b| b.try_into().ok()),
-            Err(keyring::Error::NoEntry) => {
-                let key = link::random();
-                entry.set_password(&link::hex(&key)).ok()?;
-                Some(key)
-            }
-            Err(_) => None,
-        }
-    })
-    .as_ref()
+    KEY.get_or_init(|| crate::vault::key(KEY_NAME)).as_ref()
 }
+
+/// The Keychain name of the signing key.
+pub const KEY_NAME: &str = "agents-config-key";
 
 fn mac(key: &[u8; 32], config: &Value) -> Hmac<Sha256> {
     let mut m = <Hmac<Sha256> as KeyInit>::new_from_slice(key).expect("HMAC takes any key length");

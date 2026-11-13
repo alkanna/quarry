@@ -13,6 +13,7 @@ mod menu;
 mod ssh;
 mod ui;
 mod update;
+mod vault;
 
 /// QUARRY_NO_FOCUS runs benchmark and screenshot windows in the background: never the active app,
 /// so they cannot take focus from whatever the user is doing.

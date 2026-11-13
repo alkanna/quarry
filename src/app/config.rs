@@ -2,7 +2,7 @@
 
 use super::*;
 use chacha20poly1305::{
-    ChaCha20Poly1305, Key, Nonce,
+    ChaCha20Poly1305, Nonce,
     aead::{Aead, Generate, KeyInit},
 };
 
@@ -296,35 +296,13 @@ pub(super) fn load_values() -> HashMap<String, HashMap<String, Vec<Bson>>> {
     vals.unwrap_or_default()
 }
 
-/// Key of the suggestion cache, read from the keychain on first use and created there if absent.
-/// None when the keychain refuses, so the cache then stays in memory.
+/// Key of the suggestion cache. None when the keychain refuses, so the cache then stays in memory.
 fn cache_key() -> Option<&'static [u8; 32]> {
     static KEY: std::sync::OnceLock<Option<[u8; 32]>> = std::sync::OnceLock::new();
-    KEY.get_or_init(|| {
-        let entry = keyring::Entry::new("quarry", "suggestion-cache-key").ok()?;
-        match entry.get_password() {
-            Ok(hex) => unhex(&hex),
-            Err(keyring::Error::NoEntry) => {
-                let key: [u8; 32] = Key::generate().into();
-                entry.set_password(&key.iter().map(|b| format!("{b:02x}")).collect::<String>()).ok()?;
-                Some(key)
-            }
-            Err(_) => None,
-        }
-    })
-    .as_ref()
+    KEY.get_or_init(|| crate::vault::key(CACHE_KEY)).as_ref()
 }
 
-fn unhex(s: &str) -> Option<[u8; 32]> {
-    let mut key = [0u8; 32];
-    if s.len() != 64 || !s.is_ascii() {
-        return None;
-    }
-    for (i, b) in key.iter_mut().enumerate() {
-        *b = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok()?;
-    }
-    Some(key)
-}
+const CACHE_KEY: &str = "suggestion-cache-key";
 
 /// Random nonce first, then the ciphertext with its authentication tag.
 fn seal(key: &[u8; 32], plain: &[u8]) -> Option<Vec<u8>> {
@@ -348,18 +326,32 @@ pub(crate) fn tools_dir() -> PathBuf {
     config_dir().join("tools")
 }
 
-pub(super) fn keychain(id: u64) -> Option<keyring::Entry> {
-    keyring::Entry::new("quarry", &format!("connection-{id}")).ok()
+/// Saves the connection's address in the Keychain.
+pub(super) fn store_uri(id: u64, uri: &str) -> keyring::Result<()> {
+    crate::vault::set(&format!("connection-{id}"), uri)
 }
 
-/// Other secrets of a connection: "ssh-password", "ssh-passphrase", "proxy-password", "pg-key-passphrase".
+/// Other secrets of a connection, besides its address.
+pub(super) const SECRETS: [&str; 4] = ["ssh-password", "ssh-passphrase", "proxy-password", "pg-key-passphrase"];
+
+/// Every Keychain name the app and the connections `ids` may have saved, for the move into one item.
+pub(super) fn secret_names(ids: impl Iterator<Item = u64>) -> Vec<String> {
+    let mut names = vec![CACHE_KEY.to_string(), crate::agents::store::KEY_NAME.to_string()];
+    for id in ids {
+        names.push(format!("connection-{id}"));
+        names.extend(SECRETS.map(|w| format!("connection-{id}-{w}")));
+    }
+    names
+}
+
+/// One of `SECRETS` for the connection.
 pub(super) fn secret(id: u64, what: &str) -> Option<String> {
-    keyring::Entry::new("quarry", &format!("connection-{id}-{what}")).ok()?.get_password().ok().filter(|s| !s.is_empty())
+    crate::vault::get(&format!("connection-{id}-{what}")).ok().filter(|s| !s.is_empty())
 }
 
 /// The connection's address from the Keychain.
 pub(super) fn stored_uri(id: u64) -> Result<String, keyring::Error> {
-    keychain(id).ok_or(keyring::Error::NoEntry)?.get_password()
+    crate::vault::get(&format!("connection-{id}"))
 }
 
 pub(super) fn uri_err(e: keyring::Error) -> String {
@@ -368,11 +360,7 @@ pub(super) fn uri_err(e: keyring::Error) -> String {
 
 /// Stores a secret, or removes it when `value` is empty.
 pub(super) fn set_secret(id: u64, what: &str, value: &str) -> Result<(), String> {
-    let r = keyring::Entry::new("quarry", &format!("connection-{id}-{what}")).and_then(|k| if value.is_empty() { k.delete_credential() } else { k.set_password(value) });
-    match r {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(format!("Could not store the {} in the Keychain: {e}", what.replace('-', " "))),
-    }
+    crate::vault::set(&format!("connection-{id}-{what}"), value).map_err(|e| format!("Could not store the {} in the Keychain: {e}", what.replace('-', " ")))
 }
 
 /// Written beside the file, then renamed over it: a crash mid-write leaves the old file whole

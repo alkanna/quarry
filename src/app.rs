@@ -508,8 +508,9 @@ impl App {
             if app.prefs.look() != Look::default() {
                 style(&cc.egui_ctx, app.prefs.look());
             }
+            crate::vault::migrate(&secret_names(metas.iter().map(|m| m.id)));
             for meta in metas {
-                let masked = keychain(meta.id).and_then(|k| k.get_password().ok()).map(|u| db::mask_uri(&u)).unwrap_or_default();
+                let masked = stored_uri(meta.id).ok().map(|u| db::mask_uri(&u)).unwrap_or_default();
                 app.conns.push(Conn { masked_uri: masked, ..Conn::new(meta, Status::Idle) });
             }
             app.active = app.conns.first().map(|c| c.meta.id);
