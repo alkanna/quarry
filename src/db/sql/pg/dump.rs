@@ -1,8 +1,9 @@
 //! PostgreSQL SQL dumps and script runs. A dump is written from the catalogs inside one REPEATABLE READ READ ONLY
 //! transaction, so it sees one snapshot and works on a locked connection, and it is a script that replays:
 //!
-//! 1. schemas, extensions (as `CREATE EXTENSION IF NOT EXISTS`, never their objects), types, sequences, functions that
-//!    need nothing of the tables, the tables themselves (columns only), functions that use a table's row type;
+//! 1. schemas (each made only when missing), extensions (as `CREATE EXTENSION IF NOT EXISTS`, never their objects), types,
+//!    sequences, functions that need nothing of the tables, domain defaults, the tables themselves (columns only),
+//!    functions that use a table's row type;
 //! 2. the rows as multi-row INSERTs, then each sequence's `setval` and its owner;
 //! 3. primary and unique keys, checks and exclusions, domain checks, indexes, foreign keys last;
 //! 4. views and materialized views in the order of their `pg_depend` edges (each materialized view with its indexes),
@@ -94,8 +95,19 @@ async fn cat(c: &mut PgConnection, db: &Db, sql: &str, args: &[Arg<'_>]) -> Res<
         db.note(&db.pg_database(), sql, t, &res);
     }
     let rows = res.map_err(se)?;
-    Ok(rows.iter().map(|r| R((0..sqlx::Row::len(r)).map(|i| r.cell(i).map(|b| String::from_utf8_lossy(b).into_owned())).collect())).collect())
+    // A SQL_ASCII database hands back its bytes unchecked. A name or a definition read with replacement characters would be
+    // written as another object than the source has, so the dump stops instead.
+    rows.iter()
+        .map(|r| {
+            (0..sqlx::Row::len(r))
+                .map(|i| r.cell(i).map(|b| String::from_utf8(b.to_vec()).map_err(|_| NOT_UTF8_CATALOG.to_string())).transpose())
+                .collect::<Res<Vec<_>>>()
+                .map(R)
+        })
+        .collect()
 }
+
+const NOT_UTF8_CATALOG: &str = "The server sent a name or a definition that is not valid UTF-8 (a SQL_ASCII database stores bytes as they came), so it cannot be written to the dump without changing it.";
 
 /// What a dumped relation is and what to write of it.
 struct Rel {
@@ -119,6 +131,8 @@ struct Rel {
     force_rls: bool,
     /// Row security would hide rows of it from the login even with row_security off.
     hidden: bool,
+    /// A child of plain INHERITS, which is written as a table of its own.
+    inherits: bool,
 }
 
 impl Rel {
@@ -354,8 +368,12 @@ async fn dump_on(c: &mut PgConnection, db: &Db, plan: &DumpPlan, out: &mut (dyn 
             made.push(s.clone());
         }
     }
+    // The server checks CREATE on the database and the reserved pg_ prefix before IF NOT EXISTS, so CREATE SCHEMA IF NOT
+    // EXISTS stops a restore on public for a login without that right, and on pg_catalog (where PL/Perl, PL/Python and
+    // PL/Tcl live) for anyone. A system schema is always there, and any other is made only when it is missing.
+    made.retain(|s| s != "information_schema" && !s.starts_with("pg_"));
     for s in &made {
-        put(out, &format!("CREATE SCHEMA IF NOT EXISTS {};\n", q(s)))?;
+        put(out, &format!("{};\n", schema_block(s)))?;
     }
     for (e, s) in &exts {
         put(out, &format!("CREATE EXTENSION IF NOT EXISTS {} WITH SCHEMA {} CASCADE;\n", q(e), q(s)))?;
@@ -394,7 +412,7 @@ async fn dump_on(c: &mut PgConnection, db: &Db, plan: &DumpPlan, out: &mut (dyn 
         put(out, "\n")?;
     }
 
-    write_types(c, db, &types, !whole, out).await?;
+    let defaults = write_types(c, db, &types, !whole, out).await?;
 
     // Sequences before the tables whose defaults call them.
     for s in seqs.iter().filter(|s| s.create) {
@@ -405,6 +423,14 @@ async fn dump_on(c: &mut PgConnection, db: &Db, plan: &DumpPlan, out: &mut (dyn 
     }
 
     write_funcs(&funcs, 0, out)?;
+    // CREATE DOMAIN resolves the functions of its DEFAULT at once, and a function may take the domain, so the default comes
+    // after the functions that need no table.
+    for d in &defaults {
+        put(out, d)?;
+    }
+    if !defaults.is_empty() {
+        put(out, "\n")?;
+    }
 
     let cols = load_cols(c, db, &rel_ids).await?;
     // The tables and the functions that name a table go in one order. A default or generated column that calls such a
@@ -524,14 +550,19 @@ async fn dump_on(c: &mut PgConnection, db: &Db, plan: &DumpPlan, out: &mut (dyn 
     let idxs = load_idx(c, db, &structured).await?;
     let in_dump = |oid: i64| by_oid.get(&oid).is_some_and(|r| r.structure);
     // A partition's copy of a key of its parent is made on the partition and attached to the parent's index below. Its copies
-    // of checks and foreign keys are made by the parent's own, which reach every partition.
-    let kept = |k: &R| if k.n(9) != 0 { matches!(k.c(3), 'p' | 'u' | 'x') && by_oid.get(&k.n(0)).and_then(|r| r.parent.as_ref()).is_some_and(|(p, _)| in_dump(*p)) } else { k.b(8) };
+    // of checks and foreign keys are made by the parent's own, which reach every partition. A child of plain INHERITS is
+    // written without INHERITS, so the checks it has from its parents are its own in the file.
+    let inherited = |k: &R| k.c(3) == 'c' && by_oid.get(&k.n(0)).is_some_and(|r| r.inherits);
+    let kept = |k: &R| if k.n(9) != 0 { matches!(k.c(3), 'p' | 'u' | 'x') && by_oid.get(&k.n(0)).and_then(|r| r.parent.as_ref()).is_some_and(|(p, _)| in_dump(*p)) } else { k.b(8) || inherited(k) };
     let mut idx_made: Vec<i64> = Vec::new();
+    // The constraints the file makes, so a comment never names one it left out.
+    let mut con_made: Vec<i64> = Vec::new();
     for k in cons.iter().filter(|k| k.c(3) != 'f' && kept(k)) {
         if let Some(r) = by_oid.get(&k.n(0)) {
             // A key stays on the one table, so its partitions' copies can be attached; a check reaches the partitions.
             let only = if k.c(3) == 'c' { r.only() } else { "ONLY " };
             put(out, &format!("ALTER TABLE {only}{} ADD CONSTRAINT {} {};\n", r.full(), q(&k.s(2)), k.s(4)))?;
+            con_made.push(k.n(1));
             if k.n(6) != 0 {
                 idx_made.push(k.n(6));
             }
@@ -585,6 +616,7 @@ async fn dump_on(c: &mut PgConnection, db: &Db, plan: &DumpPlan, out: &mut (dyn 
             continue;
         }
         put(out, &format!("ALTER TABLE {}{} ADD CONSTRAINT {} {};\n", r.only(), r.full(), q(&k.s(2)), k.s(4)))?;
+        con_made.push(k.n(1));
     }
     put(out, "\n")?;
 
@@ -612,7 +644,7 @@ async fn dump_on(c: &mut PgConnection, db: &Db, plan: &DumpPlan, out: &mut (dyn 
     }
 
     let pols = write_rls(c, db, &rels, out).await?;
-    write_comments(c, db, &schemas, &rels, &types, &seqs, &cons, &idx_made, &funcs, &trig, &pols, out).await?;
+    write_comments(c, db, &schemas, &rels, &types, &seqs, &con_made, &idx_made, &funcs, &trig, &pols, out).await?;
     // Last, so a role missing where the file runs stops it only after the tables, rows and everything else are in.
     let made = Made { whole, schemas: &schemas, rels: &rels, types: &types, seqs: &seqs, funcs: &funcs };
     if plan.owners {
@@ -628,6 +660,28 @@ async fn dump_on(c: &mut PgConnection, db: &Db, plan: &DumpPlan, out: &mut (dyn 
     crate::db::note_here("-- Catalog reads of the dump, in one REPEATABLE READ READ ONLY transaction", started, &Ok::<(), String>(()));
     put(out, "-- Dump complete\n")?;
     Ok(rows)
+}
+
+/// The block a dump makes a schema with when the target lacks it. CREATE SCHEMA IF NOT EXISTS needs CREATE on the
+/// database even when the schema is there, so the name is looked up first.
+fn schema_block(name: &str) -> String {
+    format!("DO {}", dollar(&format!("BEGIN IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = {}) THEN CREATE SCHEMA {}; END IF; END", pg_lit(name), q(name))))
+}
+
+/// Whether a statement is exactly the block `schema_block` writes for a schema, which leaves nothing on the session, so a
+/// dump's own schemas can be made behind a pooler that refuses every other DO block. The name is read back and the block
+/// rebuilt from it, so only that one text passes, whatever the name holds; a pg_ name is refused since the dump never
+/// writes one and pg_temp would stay on the backend.
+fn is_schema_block(stmt: &str) -> bool {
+    use crate::db::sql::lex::Tok;
+    let Some(body) = stmt.strip_prefix("DO ") else { return false };
+    let Some(tag_end) = body.strip_prefix('$').and_then(|r| r.find('$')).map(|i| i + 2) else { return false };
+    let Some(inner) = body.get(tag_end..).and_then(|b| b.strip_suffix(&body[..tag_end])) else { return false };
+    let toks: Vec<(Tok, &str)> = lex::tokens(inner, D).into_iter().filter(|(t, _)| !matches!(t, Tok::Space | Tok::Comment)).map(|(t, r)| (t, &inner[r])).collect();
+    let word = |t: &(Tok, &str), w: &str| t.0 == Tok::Word && t.1.eq_ignore_ascii_case(w);
+    let Some(quoted) = toks.windows(3).find(|w| word(&w[0], "CREATE") && word(&w[1], "SCHEMA") && w[2].0 == Tok::Quoted).map(|w| w[2].1) else { return false };
+    let Some(name) = quoted.strip_prefix('"').and_then(|x| x.strip_suffix('"')).map(|x| x.replace("\"\"", "\"")) else { return false };
+    !name.starts_with("pg_") && name != "information_schema" && schema_block(&name) == stmt
 }
 
 fn write_funcs(funcs: &[Func], phase: i64, out: &mut (dyn Write + Send)) -> Res<()> {
@@ -730,6 +784,7 @@ async fn load_rels(c: &mut PgConnection, db: &Db, plan: &DumpPlan, whole: bool) 
             rls: r.b(12),
             force_rls: r.b(13),
             hidden: r.b(14),
+            inherits: r.b(15),
         });
     }
     if !whole {
@@ -937,11 +992,13 @@ fn default_multirange(range: &str) -> String {
 }
 
 /// Enums, domains, composite and range types, each after the types it is made of. On a table subset the target may have
-/// some of them already, so each is made inside a block that ignores "already exists".
-async fn write_types(c: &mut PgConnection, db: &Db, types: &[Ty], guard: bool, out: &mut (dyn Write + Send)) -> Res<()> {
+/// some of them already, so each is made inside a block that ignores "already exists". Returns the domains' defaults as
+/// `ALTER DOMAIN ... SET DEFAULT` lines for after the functions.
+async fn write_types(c: &mut PgConnection, db: &Db, types: &[Ty], guard: bool, out: &mut (dyn Write + Send)) -> Res<Vec<String>> {
     let mine: Vec<&Ty> = types.iter().filter(|t| t.ext.is_none()).collect();
+    let mut defaults: Vec<String> = Vec::new();
     if mine.is_empty() {
-        return Ok(());
+        return Ok(defaults);
     }
     let ids = |k: char| -> Vec<i64> { mine.iter().filter(|t| t.kind == k).map(|t| t.oid).collect() };
     let (enums, doms, comps, ranges) = (ids('e'), ids('d'), ids('c'), ids('r'));
@@ -966,8 +1023,12 @@ async fn write_types(c: &mut PgConnection, db: &Db, types: &[Ty], guard: bool, o
             if let (Some(n), Some(c)) = (r.o(4), r.o(5)) {
                 s.push_str(&format!(" COLLATE {}", qn(&n, &c)));
             }
-            if let Some(d) = r.o(3) {
-                s.push_str(&format!(" DEFAULT {d}"));
+            // Only a default that calls something waits for the functions: a constant stays in CREATE DOMAIN, so a subset
+            // restored over an existing domain does not need to own it to set a default it already has.
+            match (r.o(3), mine.iter().find(|t| t.oid == r.n(0))) {
+                (Some(d), Some(t)) if d.contains('(') => defaults.push(format!("ALTER DOMAIN {} SET DEFAULT {d};\n", qn(&t.schema, &t.name))),
+                (Some(d), _) => s.push_str(&format!(" DEFAULT {d}")),
+                _ => {}
             }
             if r.b(2) {
                 s.push_str(" NOT NULL");
@@ -1045,7 +1106,7 @@ async fn write_types(c: &mut PgConnection, db: &Db, types: &[Ty], guard: bool, o
     if wrote {
         put(out, "\n")?;
     }
-    Ok(())
+    Ok(defaults)
 }
 
 /// Views and materialized views, each after the ones it reads from (the `pg_rewrite` to `pg_depend` edges), a
@@ -1123,7 +1184,9 @@ async fn write_rows(c: &mut PgConnection, db: &Db, plan: &DumpPlan, rel: &Rel, c
                 match row.cell(i) {
                     Some(b) => match std::str::from_utf8(b) {
                         Ok(t) => pg_lit_into(&mut batch, t),
-                        Err(_) => pg_lit_into(&mut batch, &String::from_utf8_lossy(b)),
+                        // A SQL_ASCII database stores bytes unchecked. Writing them with replacement characters would make a
+                        // dump that restores other values without a word, so it stops and names where.
+                        Err(_) => return Err(format!("A value of column {} in {}.{} is not valid UTF-8 (a SQL_ASCII database stores bytes as they came), so it cannot be written to the dump without changing it. Fix the value or leave out the table's content.", names[i], rel.schema, rel.name)),
                     },
                     None => batch.push_str("NULL"),
                 }
@@ -1161,7 +1224,7 @@ fn flush(out: &mut (dyn Write + Send), head: &str, batch: &mut String, n: &mut u
 
 /// Comments on what the dump wrote, last because they name objects of every kind.
 #[allow(clippy::too_many_arguments)]
-async fn write_comments(c: &mut PgConnection, db: &Db, schemas: &[String], rels: &[Rel], types: &[Ty], seqs: &[Seq], cons: &[R], idxs: &[i64], funcs: &[Func], trig: &[R], pols: &[i64], out: &mut (dyn Write + Send)) -> Res<()> {
+async fn write_comments(c: &mut PgConnection, db: &Db, schemas: &[String], rels: &[Rel], types: &[Ty], seqs: &[Seq], cons: &[i64], idxs: &[i64], funcs: &[Func], trig: &[R], pols: &[i64], out: &mut (dyn Write + Send)) -> Res<()> {
     let mut lines: Vec<String> = Vec::new();
     let on = |what: &str, desc: &str| format!("COMMENT ON {what} IS {};\n", pg_lit(desc));
     for r in cat(c, db, "SELECT n.nspname::text, d.description FROM pg_description d JOIN pg_namespace n ON n.oid = d.objoid WHERE d.classoid = 'pg_namespace'::regclass AND d.objsubid = 0 AND n.nspname::text = ANY($1) ORDER BY n.nspname", &[Arg::Ts(schemas)]).await? {
@@ -1201,7 +1264,8 @@ async fn write_comments(c: &mut PgConnection, db: &Db, schemas: &[String], rels:
     }
     let tids: Vec<i64> = types.iter().filter(|t| t.ext.is_none()).map(|t| t.oid).collect();
     if !tids.is_empty() {
-        for r in cat(c, db, "SELECT n.nspname::text, t.typname::text, t.typtype::text, d.description FROM pg_description d JOIN pg_type t ON t.oid = d.objoid JOIN pg_namespace n ON n.oid = t.typnamespace WHERE d.classoid = 'pg_type'::regclass AND d.objoid::int8 = ANY($1) ORDER BY n.nspname, t.typname", &[Arg::Is(&tids)]).await? {
+        let sql = format!("SELECT n.nspname::text, t.typname::text, t.typtype::text, d.description FROM pg_description d JOIN pg_type t ON t.oid = d.objoid JOIN pg_namespace n ON n.oid = t.typnamespace WHERE d.classoid = 'pg_type'::regclass AND d.objoid::int8 = ANY($1) AND {TYPE_WRITTEN} ORDER BY n.nspname, t.typname");
+        for r in cat(c, db, &sql, &[Arg::Is(&tids)]).await? {
             lines.push(on(&format!("{} {}", if r.c(2) == 'd' { "DOMAIN" } else { "TYPE" }, qn(&r.s(0), &r.s(1))), &r.s(3)));
         }
     }
@@ -1218,9 +1282,8 @@ async fn write_comments(c: &mut PgConnection, db: &Db, schemas: &[String], rels:
             lines.push(on(&format!("{} {}({})", if r.c(2) == 'p' { "PROCEDURE" } else { "FUNCTION" }, qn(&r.s(0), &r.s(1)), r.s(3)), &r.s(4)));
         }
     }
-    let kids: Vec<i64> = cons.iter().filter(|k| k.b(8)).map(|k| k.n(1)).collect();
-    if !kids.is_empty() {
-        for r in cat(c, db, "SELECT k.conrelid::text, k.conname::text, d.description FROM pg_description d JOIN pg_constraint k ON k.oid = d.objoid WHERE d.classoid = 'pg_constraint'::regclass AND d.objoid::int8 = ANY($1) ORDER BY k.conrelid, k.conname", &[Arg::Is(&kids)]).await? {
+    if !cons.is_empty() {
+        for r in cat(c, db, "SELECT k.conrelid::text, k.conname::text, d.description FROM pg_description d JOIN pg_constraint k ON k.oid = d.objoid WHERE d.classoid = 'pg_constraint'::regclass AND d.objoid::int8 = ANY($1) ORDER BY k.conrelid, k.conname", &[Arg::Is(cons)]).await? {
             if let Some(t) = rels.iter().find(|x| x.oid == r.n(0)) {
                 lines.push(on(&format!("CONSTRAINT {} ON {}", q(&r.s(1)), t.full()), &r.s(2)));
             }
@@ -1600,7 +1663,7 @@ pub async fn run_file(db: Db, schema: String, src: Source, read_only: bool, prog
                             Some(crate::db::sql::run::POOLER_TX)
                         } else if lex::needs_no_transaction(&p.text, D) {
                             Some(crate::db::sql::run::POOLER_NO_TX)
-                        } else if lex::session_state(&p.text, D) {
+                        } else if lex::session_state(&p.text, D) && !is_schema_block(&p.text) {
                             Some(crate::db::sql::run::POOLER_SESSION)
                         } else {
                             None
@@ -1825,6 +1888,29 @@ mod tests {
         // These once went into every later transaction of the run and broke each BEGIN.
         for s in ["SET search_path = 'a', (; DROP TABLE t; )", "SET search_path = a; DROP TABLE t", "SET search_path = a, (b)", "SET search_path = a -- x\n, b", "SET search_path = a /* x */, b", "SET search_path = pg_temp, public", "SET search_path = 'public, pg_temp'", "SET search_path = \"pg_temp\"", "SET timezone = a || b", "SET search_path ="] {
             assert!(pooled_set(s).is_none(), "{s}");
+        }
+    }
+
+    #[test]
+    fn a_dump_schema_block_runs_behind_a_pooler_and_nothing_like_it_does() {
+        for n in ["app", "Odd \"Schema", "it's \\ x", "a; DROP TABLE t", "x\"\"", "$quarry$"] {
+            let b = schema_block(n);
+            assert!(lex::session_state(&b, D), "{b}: a DO block is refused behind a pooler by default");
+            assert!(is_schema_block(&b), "{b}");
+        }
+        let b = schema_block("app");
+        for s in [
+            format!("{b}; DROP TABLE t"),
+            b.replace("CREATE SCHEMA", "CREATE TEMP TABLE"),
+            b.replace("END IF;", "PERFORM pg_advisory_lock(1); END IF;"),
+            b.replace("\"app\"", "\"app\" CREATE TABLE pg_temp.t (a int)"),
+            schema_block("pg_temp"),
+            schema_block("pg_temp_3"),
+            schema_block("pg_catalog"),
+            "DO $$BEGIN PERFORM pg_advisory_lock(1); END$$".to_string(),
+            b.replacen("DO ", "DO  ", 1),
+        ] {
+            assert!(!is_schema_block(&s), "{s}");
         }
     }
 
