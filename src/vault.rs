@@ -13,22 +13,40 @@ const SERVICE: &str = "quarry";
 
 #[cfg(any(target_os = "macos", test))]
 pub use mac::{get, migrate, set};
-
-/// Nothing to move: only macOS keeps the secrets in one item.
 #[cfg(not(any(target_os = "macos", test)))]
-pub fn migrate(_names: &[String]) {}
+pub use plain::{get, migrate, set};
 
-#[cfg(not(any(target_os = "macos", test)))]
-pub fn get(name: &str) -> keyring::Result<String> {
-    Entry::new(SERVICE, name)?.get_password()
+/// A random 32-byte key saved as `name`, created on first use. None when the Keychain refuses.
+pub fn key(name: &str) -> Option<[u8; 32]> {
+    use crate::agents::link;
+    match get(name) {
+        Ok(hex) => link::unhex(&hex).and_then(|b| b.try_into().ok()),
+        Err(Error::NoEntry) => {
+            let key = link::random();
+            set(name, &link::hex(&key)).ok()?;
+            Some(key)
+        }
+        Err(_) => None,
+    }
 }
 
 #[cfg(not(any(target_os = "macos", test)))]
-pub fn set(name: &str, value: &str) -> keyring::Result<()> {
-    let e = Entry::new(SERVICE, name)?;
-    match if value.is_empty() { e.delete_credential() } else { e.set_password(value) } {
-        Err(Error::NoEntry) => Ok(()),
-        r => r,
+mod plain {
+    use super::*;
+
+    /// Nothing to move: only macOS keeps the secrets in one item.
+    pub fn migrate(_names: &[String]) {}
+
+    pub fn get(name: &str) -> keyring::Result<String> {
+        Entry::new(SERVICE, name)?.get_password()
+    }
+
+    pub fn set(name: &str, value: &str) -> keyring::Result<()> {
+        let e = Entry::new(SERVICE, name)?;
+        match if value.is_empty() { e.delete_credential() } else { e.set_password(value) } {
+            Err(Error::NoEntry) => Ok(()),
+            r => r,
+        }
     }
 }
 
@@ -64,28 +82,32 @@ mod mac {
                 Err(e)
             }
         }?;
-        *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), map.clone()));
+        remember(&map);
         Ok(map)
-    }
-
-    fn cached() -> keyring::Result<HashMap<String, String>> {
-        match &*CACHE.lock().unwrap_or_else(|e| e.into_inner()) {
-            Some((at, map)) if at.elapsed() < FRESH => return Ok(map.clone()),
-            _ => {}
-        }
-        read()
     }
 
     fn write(map: &HashMap<String, String>) -> keyring::Result<()> {
         let json = serde_json::to_string(map).map_err(|e| Error::BadStoreFormat(e.to_string()))?;
         Entry::new(SERVICE, ITEM)?.set_password(&json)?;
-        *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), map.clone()));
+        remember(map);
         Ok(())
+    }
+
+    fn remember(map: &HashMap<String, String>) {
+        *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), map.clone()));
     }
 
     /// The secret saved as `name`, or `Error::NoEntry`.
     pub fn get(name: &str) -> keyring::Result<String> {
-        let map = cached()?;
+        if let Some((at, map)) = &*CACHE.lock().unwrap_or_else(|e| e.into_inner())
+            && at.elapsed() < FRESH
+        {
+            return lookup(map, name);
+        }
+        lookup(&read()?, name)
+    }
+
+    fn lookup(map: &HashMap<String, String>, name: &str) -> keyring::Result<String> {
         match map.get(name) {
             Some(v) => Ok(v.clone()),
             // Until the move has run, which it does not when an old item was refused, the old items still count.
