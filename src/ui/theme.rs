@@ -951,6 +951,7 @@ pub(crate) const GROUP_COLORS: [(&str, u32, u32); 8] = [
 ];
 
 /// The color named in a group, in the shade of the current mode. An unknown name, such as one from a newer build, is gray.
+#[allow(dead_code)]
 pub(crate) fn group_color(name: &str) -> Color32 {
     let (_, dark, light) = GROUP_COLORS.iter().find(|c| c.0 == name).unwrap_or(&GROUP_COLORS[GROUP_COLORS.len() - 1]);
     hex(if is_light() { *light } else { *dark })

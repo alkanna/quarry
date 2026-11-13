@@ -8,6 +8,7 @@ use std::time::Instant;
 /// Errors kept for the status bar list; older ones drop off.
 const ERRORS_MAX: usize = 200;
 /// Undo entries kept for toasts that may still be up; older ones drop off.
+#[allow(dead_code)]
 const RESTORES_MAX: usize = 10;
 const OK_S: u64 = 8;
 const WARN_S: u64 = 6;
@@ -45,6 +46,7 @@ pub(super) enum Tone {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub(super) enum Act {
     Fix(Fix),
     Undo(Instant),
@@ -374,11 +376,13 @@ impl App {
 
     /// A success note whose Undo puts back something that is not a database edit, which `apply_undo` could not do on a
     /// read-only connection: a group, saved scripts or a file.
+    #[allow(dead_code)]
     pub(super) fn toast_restore(&mut self, s: String, r: Restore) {
         self.toast_restore_edit(s, r, None);
     }
 
     /// `toast_restore` with a Rename beside Undo that opens the Edit group dialog on `group`.
+    #[allow(dead_code)]
     pub(super) fn toast_restore_edit(&mut self, s: String, r: Restore, group: Option<u64>) {
         self.err_seq += 1;
         let id = self.err_seq;

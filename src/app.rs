@@ -66,6 +66,7 @@ mod watch;
 use column_menu::*;
 use errors::*;
 use config::*;
+#[allow(unused_imports)]
 use groups::{Group, Groups, Place};
 use restore::Restore;
 use documents::*;

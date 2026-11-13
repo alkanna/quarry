@@ -29,7 +29,7 @@ pub(crate) fn drag_source<T: std::any::Any + Send + Sync>(ui: &egui::Ui, r: &egu
     }
     ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
     let Some(pos) = ui.ctx().pointer_interact_pos() else { return };
-    let p = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("quarry-drag-ghost")));
+    let p = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("quarry-drag-ghost")));
     let galley = p.layout_no_wrap(label.to_string(), FontId::proportional(TXT_BODY), TEXT());
     let rect = egui::Rect::from_min_size(pos + egui::vec2(12.0, 8.0), galley.size() + egui::vec2(24.0, 10.0));
     p.rect(rect, R_SM, RAISED(), Stroke::new(1.0, PRIMARY()), egui::StrokeKind::Inside);

@@ -885,6 +885,7 @@ pub(super) enum Danger {
 /// What to run once writes are allowed.
 pub(super) type Retry = Box<dyn FnOnce(&mut App)>;
 
+#[allow(dead_code)]
 pub(super) enum Modal {
     Conn(Box<ConnForm>),
     Settings,
