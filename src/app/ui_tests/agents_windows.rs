@@ -105,3 +105,34 @@ fn the_pill_opens_agent_activity() {
     ui.click("update shop.orders at 22:41:07");
     assert_eq!(ui.app().agents.picked, Some(8));
 }
+
+/// The Data protection window with three custom rules of the person's, which match the field names a, b and c.
+fn three_rules(a: &mut App) {
+    use crate::agents::config::{Action, Matcher, RuleSpec};
+    a.load_demo();
+    a.agents_demo_view("rules");
+    a.agents.cfg.rules = ["a", "b", "c"].iter().map(|n| RuleSpec { on: true, matcher: Matcher::FieldName((*n).into()), scope: Vec::new(), action: Action::Redact, mode: Default::default() }).collect();
+}
+
+fn rule_names(ui: &UiApp) -> Vec<String> {
+    use crate::agents::config::Matcher;
+    ui.app().agents.cfg.rules.iter().map(|r| match &r.matcher {
+        Matcher::FieldName(n) => n.clone(),
+        _ => String::new(),
+    }).collect()
+}
+
+#[test]
+fn custom_rules_drag_to_reorder_and_the_selection_follows() {
+    let Some(mut ui) = demo_ui(three_rules) else { return };
+    ui.click("Custom 3");
+    ui.show("Rule 3");
+    ui.drag_esc("Rule 3", "Rule 1", 0.1);
+    assert_eq!(rule_names(&ui), ["a", "b", "c"], "Esc moved a rule");
+    assert!(ui.app().agents.rules.is_some(), "Esc closed the window instead of cancelling the drag");
+    // A click selects a rule; dragging it below the last one keeps it selected there.
+    ui.click("Rule 1");
+    ui.drag("Rule 1", "Rule 3", 0.9, 1);
+    assert_eq!(rule_names(&ui), ["b", "c", "a"]);
+    assert_eq!(ui.app().agents.rules.as_ref().and_then(|w| w.sel), Some(2), "the selection stayed on the old index");
+}

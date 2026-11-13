@@ -4,6 +4,7 @@
 use super::conn_sheet::{matcher_kind, matcher_text};
 use super::settings::{MODES, action_label, named_toggle, pick, preset_actions};
 use super::*;
+use crate::ui::dnd;
 use crate::app::sql::create::plural;
 use super::activity::cell;
 use crate::agents::config::{Action, Detector, Matcher, PresetMode, RuleSpec, Tri};
@@ -13,6 +14,9 @@ use crate::agents::scrub::{Fired, Rules};
 /// Hashes in the tester use this key, not the keychain one: the tester must work in the demo, and a hash shown here
 /// must not match what agents get.
 const TESTER_KEY: [u8; 32] = [0; 32];
+
+/// A rule row of the list: the 26 pt row and the line above it.
+const RULE_ROW_H: f32 = 32.0;
 
 const SAMPLE: &str = "{\n  \"full_name\": \"Ada Lovelace\",\n  \"email\": \"ada@example.com\",\n  \"card_number\": \"4111 1111 1111 1111\",\n  \"notes\": \"SSN 123-45-6789, call back\",\n  \"password\": \"hunter2\",\n  \"avatar\": { \"$binary\": { \"base64\": \"iVBORw0KGgo=\", \"subType\": \"00\" } }\n}";
 
@@ -29,7 +33,7 @@ pub(in crate::app) struct RulesWin {
     /// Whose custom rules show and which rules the tester runs: every connection, or one.
     pub(in crate::app) scope: Option<u64>,
     /// The custom rule open in the editor.
-    pub(super) sel: Option<usize>,
+    pub(in crate::app) sel: Option<usize>,
     /// The editor's "where" globs as typed, and the rule they belong to.
     globs: (Option<usize>, String),
     pub(in crate::app) sample: String,
@@ -305,6 +309,7 @@ impl App {
         });
         ui.add_space(6.0);
         let mut flip = None;
+        let mut moved = None;
         card(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
@@ -349,6 +354,7 @@ impl App {
             w.sel = None;
         }
         let mut flip = None;
+        let mut moved = None;
         card(ui, |ui| {
             ui.set_width(ui.available_width());
             let full = ui.available_width();
@@ -363,12 +369,19 @@ impl App {
                 ui.separator();
                 ui.label(RichText::new(if scope.is_some() { "No rules for this connection yet." } else { "No rules of yours yet." }).size(TXT_SMALL).color(MUTED()));
             }
-            for (i, r) in list.iter().enumerate() {
-                ui.separator();
+            // Rules apply in order, so the rows drag to reorder, or Alt+Up and Alt+Down on the focused one.
+            let sizes = vec![RULE_ROW_H; list.len()];
+            moved = dnd::reorder(ui, egui::Id::unique(("agents-rules", scope)), dnd::Items::vertical(&sizes), |ui, i, st| {
+                let r = &list[i];
+                let slot = ui.max_rect();
+                if !st.lifted {
+                    ui.painter().hline(slot.x_range(), slot.top() + 3.0, Stroke::new(1.0, LINE()));
+                }
                 let on_sel = w.sel == Some(i);
                 // The row is sensed first and its content drawn on top, so the switch inside still takes its own clicks.
-                let (rect, resp) = ui.allocate_exact_size(egui::vec2(full, 26.0), Sense::click());
-                let state = state_of(&resp);
+                let rect = egui::Rect::from_min_size(egui::pos2(slot.left(), slot.bottom() - 26.0), egui::vec2(full, 26.0));
+                let resp = ui.interact(rect, ui.scope_id().with("rule-row"), Sense::click());
+                let state = if st.busy { 0 } else { state_of(&resp) };
                 if on_sel || state > 0 {
                     let fill = if on_sel { tint(PRIMARY(), 40) } else { hover_fill(state) };
                     ui.painter().rect_filled(rect.expand2(egui::vec2(4.0, 0.0)), R_SM, fill);
@@ -394,8 +407,15 @@ impl App {
                     cell(ui, cols[3], egui::Label::new(RichText::new(at).size(TXT_SMALL).color(MUTED())).truncate());
                     ui.label(RichText::new(action_label(&r.action)).size(TXT_SMALL).color(c));
                 }));
-            }
+                resp
+            });
         });
+        if let Some(m) = moved {
+            m.apply(list);
+            // The selection follows the rule it was on.
+            w.sel = w.sel.map(|s| if s == m.from { m.to } else if m.from < s && m.to >= s { s - 1 } else if m.from > s && m.to <= s { s + 1 } else { s });
+            w.globs.0 = None;
+        }
         if let Some(i) = flip {
             list[i].on = !list[i].on;
         }
@@ -410,8 +430,6 @@ impl App {
         }
         ui.add_space(8.0);
         let mut delete = false;
-        let mut swap = None;
-        let n = list.len();
         let r = &mut list[i];
         card(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -488,22 +506,11 @@ impl App {
                 ui.label(RichText::new("Off. Turn it on in the list once the pattern is ready.").size(TXT_SMALL).color(FAINT()));
             }
             ui.horizontal(|ui| {
-                if quiet_enabled(ui, i > 0, "Move up").clicked() {
-                    swap = Some(i - 1);
-                }
-                if quiet_enabled(ui, i + 1 < n, "Move down").clicked() {
-                    swap = Some(i + 1);
-                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     delete = danger(ui, "Delete rule").clicked();
                 });
             });
         });
-        if let Some(j) = swap {
-            list.swap(i, j);
-            w.sel = Some(j);
-            w.globs.0 = None;
-        }
         if delete {
             list.remove(i);
             w.sel = None;
