@@ -453,6 +453,8 @@ pub(super) struct SqlTab {
     /// or a new run clears them: checks belong to the page they were made on.
     pub(super) qchecked: BTreeSet<usize>,
     pub(super) qanchor: Option<usize>,
+    /// The selected row of that page, whose record Tab opens. Cleared with the checks.
+    pub(super) qsel: Option<usize>,
     /// The run the shown results belong to, which their row counts answer to, and the result tab being
     /// read at another page (its answer replaces only that tab).
     pub(super) sets_req: u64,
@@ -696,6 +698,16 @@ impl Tab {
             View::Watch => Store::Raw(&mut self.watch.rows),
             _ => Store::Raw(&mut self.agg_docs),
         })
+    }
+
+    /// Whether the grid on screen has a selected row for Tab to open as a record. The Query view keeps its own,
+    /// because its rows are none of the ones `selected` points into.
+    pub(super) fn record_row(&self) -> bool {
+        match (self.view, &self.sql) {
+            // Text mode draws no grid, so no record either.
+            (View::Sql, Some(s)) => s.qsel.is_some() && !s.text_mode,
+            _ => self.selected.is_some(),
+        }
     }
 
     /// The rows on screen in that table, their columns, and the number of the first one minus one.

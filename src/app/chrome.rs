@@ -160,11 +160,7 @@ impl App {
             let nav = self.t().filter(|t| matches!(t.view, View::Documents | View::Aggregate)).map(|t| {
                 let agg = t.view == View::Aggregate;
                 let len = if agg { t.agg_docs.len() } else { t.docs.len() };
-                let row = ((up || down) && len > 0).then(|| match t.selected.filter(|s| s.0 == agg) {
-                    None => 0,
-                    Some((_, i)) if down => (i + 1).min(len - 1),
-                    Some((_, i)) => i.saturating_sub(1),
-                });
+                let row = ((up || down) && len > 0).then(|| step(t.selected.filter(|s| s.0 == agg).map(|s| s.1), down, len));
                 let (page, pages) = (t.page, t.count.div_ceil(self.page_size()).max(1));
                 let go = if agg { None } else if prev && page > 0 { Some(page - 1) } else if next && page + 1 < pages { Some(page + 1) } else { None };
                 (agg, row, go)
@@ -183,6 +179,14 @@ impl App {
                     self.reload();
                 }
             }
+            // The Query grid keeps its own selection, so the arrows move that one.
+            if (up || down) && let Some(s) = self.tm().filter(|t| t.view == View::Sql).and_then(|t| t.sql.as_mut()).filter(|s| !s.text_mode) {
+                let len = s.sets.get(s.set_sel.min(s.sets.len().saturating_sub(1))).map_or(0, |x| x.rows.len());
+                if len > 0 {
+                    s.qsel = Some(step(s.qsel, down, len));
+                    self.scroll_sel = true;
+                }
+            }
         }
         // Esc closes the innermost thing that is open. Dialogs and menus handle their own Esc.
         if ctx.any_popup_open() || !ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
@@ -198,8 +202,11 @@ impl App {
         }
         if let Some(t) = self.tm() {
             // A SQL row's record closes before the row is let go.
-            if t.record && t.selected.is_some() {
+            if t.record && t.record_row() {
                 t.record = false;
+                return;
+            }
+            if t.view == View::Sql && let Some(s) = &mut t.sql && s.qsel.take().is_some() {
                 return;
             }
             if let Some(key) = t.selected {
@@ -742,4 +749,13 @@ fn search_pill(ui: &mut egui::Ui) -> egui::Response {
     let kr = egui::Rect::from_min_size(egui::pos2(rect.right() - 6.0 - (k.size().x + 10.0), rect.center().y - 8.0), egui::vec2(k.size().x + 10.0, 16.0));
     paint_kbd(p, kr, k);
     r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Jump to a connection, database or collection")
+}
+
+/// The row an arrow key moves a grid's selection to: the first one when none is selected.
+fn step(cur: Option<usize>, down: bool, len: usize) -> usize {
+    match cur {
+        None => 0,
+        Some(i) if down => (i + 1).min(len - 1),
+        Some(i) => i.saturating_sub(1),
+    }
 }
