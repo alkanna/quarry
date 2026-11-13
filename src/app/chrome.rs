@@ -90,6 +90,8 @@ impl App {
             self.open_new_tab();
         }
         let query_view = self.t().is_some_and(|t| t.view == View::Sql && t.sql.is_some());
+        // With the Library tree focused, Cmd+Enter runs the selected script, which the panel takes itself.
+        let query_view = query_view && !self.lib_ui.panel.focus;
         if query_view && k(cmd | shift, Key::Enter) {
             self.sql_run(true, false);
         } else if query_view && k(cmd, Key::Enter) {
