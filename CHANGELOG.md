@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.43.0](https://github.com/alkanna/quarry/compare/v0.42.0...v0.43.0) (2026-11-13)
+
+
+### Features
+
+* AI agents can work with Quarry through a built-in MCP server ([#215](https://github.com/alkanna/quarry/issues/215)) ([0fac1e0](https://github.com/alkanna/quarry/commit/0fac1e06a006a1e2c1a80296b6453c578aea16cd))
+* column Data actions on MySQL and PostgreSQL tables ([#212](https://github.com/alkanna/quarry/issues/212)) ([d718164](https://github.com/alkanna/quarry/commit/d718164fd66c8ed00bf30f7f6c58dd6fe1b16235))
+
+
+### Bug Fixes
+
+* lock scrolling only when a swipe starts straight, and let go when it turns ([#213](https://github.com/alkanna/quarry/issues/213)) ([91508eb](https://github.com/alkanna/quarry/commit/91508ebd48109b95c51fd1ec3372978bab074512))
+* pick the scroll axis once per gesture so the lock stops fighting the swipe ([#210](https://github.com/alkanna/quarry/issues/210)) ([4581172](https://github.com/alkanna/quarry/commit/4581172f1be50b5178acb6af3e3c425ec6d33eb2))
+* space the theme title from its note in Settings ([#214](https://github.com/alkanna/quarry/issues/214)) ([cfa3b8a](https://github.com/alkanna/quarry/commit/cfa3b8aa4a9617538195f5f6ac485531a28a24ff))
+
 ## [0.42.0](https://github.com/alkanna/quarry/compare/v0.41.0...v0.42.0) (2026-11-12)
 
 
