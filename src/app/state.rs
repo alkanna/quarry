@@ -610,6 +610,8 @@ pub(super) struct SchemaTab {
     pub(super) vtext: String,
     pub(super) vlevel: u8,
     pub(super) vwarn: bool,
+    /// An error action the switch has no place for, like MongoDB 8.1's errorAndLog, kept so Apply does not drop it.
+    pub(super) vaction: Option<String>,
     pub(super) vreq: u64,
     pub(super) vloaded: bool,
     /// Field paths whose children are folded away.
@@ -618,7 +620,7 @@ pub(super) struct SchemaTab {
 
 impl Default for SchemaTab {
     fn default() -> Self {
-        Self { req: 0, limit: SCHEMA_DEFAULT_LIMIT, last: false, running: false, stats: Vec::new(), docs: 0, ms: None, err: None, vtext: String::new(), vlevel: 2, vwarn: false, vreq: 0, vloaded: false, closed: HashSet::new() }
+        Self { req: 0, limit: SCHEMA_DEFAULT_LIMIT, last: false, running: false, stats: Vec::new(), docs: 0, ms: None, err: None, vtext: String::new(), vlevel: 2, vwarn: false, vaction: None, vreq: 0, vloaded: false, closed: HashSet::new() }
     }
 }
 

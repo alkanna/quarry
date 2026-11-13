@@ -200,7 +200,7 @@ impl App {
             match db::parse_doc(&t.schema.vtext) {
                 Ok(v) => {
                     let level = ["off", "moderate", "strict"][t.schema.vlevel as usize];
-                    let cmd = doc! { "collMod": &t.sel.coll, "validator": v, "validationLevel": level, "validationAction": if t.schema.vwarn { "warn" } else { "error" } };
+                    let cmd = doc! { "collMod": &t.sel.coll, "validator": v, "validationLevel": level, "validationAction": if t.schema.vwarn { "warn" } else { t.schema.vaction.as_deref().unwrap_or("error") } };
                     self.modal = Some(Modal::Typed { title: format!("Change the validator of {}? Writes that fail it may be rejected.", t.sel.coll), expect: t.sel.coll.clone(), typed: String::new(), action: Danger::Validator(cmd) });
                 }
                 Err(e) => self.err(e),
@@ -248,6 +248,8 @@ impl App {
             }
         }
         if analyze {
+            // Read again: a toggle above changed the saved list after `maps` was taken.
+            let maps = self.prefs.schema_maps.get(&key).cloned().unwrap_or_default();
             if let Some(target) = self.target() {
                 self.req += 1;
                 let req = self.req;

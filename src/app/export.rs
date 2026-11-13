@@ -221,6 +221,15 @@ impl App {
 
     pub(super) fn export_dialog(&mut self, ui: &mut egui::Ui, f: &mut ExportForm, keep: &mut bool) {
         ui.set_width(520.0);
+        // Opened from a row menu or the selection bar, the dialog was made while the grid had its rows out of the tab,
+        // so it counted none; they are back by the time it draws.
+        if f.shown == 0 && let Some(t) = self.t() {
+            f.shown = match f.src {
+                Src::Query => t.sql.as_ref().and_then(|s| s.sets.get(s.set_sel.min(s.sets.len().saturating_sub(1)))).map_or(0, |x| x.rows.len()),
+                Src::Shell => t.shell.docs.len(),
+                Src::Content => t.docs.len(),
+            };
+        }
         let where_ = self.t().map(|t| t.sel.ns()).unwrap_or_default();
         dialog_head(ui, &Head::new("Export rows").sub(where_).glyph(glyphs::download));
         let mut b = body_begin(ui);

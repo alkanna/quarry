@@ -154,6 +154,8 @@ pub(super) fn stage_samples(ui: &mut egui::Ui, s: &mut Stage, i: usize, acts: &m
 
 impl App {
     pub(super) fn aggregate(&mut self, ui: &mut egui::Ui) {
+        // The page draws before the windows over it, so a Cmd+Enter meant for the palette or a dialog reaches it first.
+        let covered = self.window_open();
         let mut run = false;
         let mut explain = false;
         let pick = self.pick_data(ui.ctx(), PickKind::Pipeline);
@@ -271,7 +273,7 @@ impl App {
                 crate::ui::vim::wrap(ui, id, &mut t.agg_txt, |ui, text| with_autopair(ui, id, text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(8).layouter(&mut code_layout).show(ui)));
             }
             ui.horizontal(|ui| {
-                run = run_button(ui, "Run", "⌘↵").on_hover_text("Run the whole pipeline (Cmd+Enter)").clicked() || ui.input(|i| i.modifiers.command && i.key_pressed(Key::Enter));
+                run = run_button(ui, "Run", "⌘↵").on_hover_text("Run the whole pipeline (Cmd+Enter)").clicked() || (!covered && ui.input(|i| i.modifiers.command && i.key_pressed(Key::Enter)));
                 explain = quiet(ui, "Explain").on_hover_text("Cmd+E").clicked();
                 code_menu(ui, &mut code_lang);
                 if t.agg_req != 0 {

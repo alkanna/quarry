@@ -508,6 +508,7 @@ impl App {
                         _ => 2,
                     };
                     s.vwarn = opts.get_str("validationAction") == Ok("warn");
+                    s.vaction = opts.get_str("validationAction").ok().filter(|a| !matches!(*a, "warn" | "error")).map(str::to_string);
                 }
             }
             (tag, r) if tag.starts_with("server:") => self.server_reply(tag, r),

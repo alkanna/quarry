@@ -55,6 +55,11 @@ impl App {
         // Its row key means nothing in another tab's rows, and a field edit would be staged against the other tab's collection.
         self.sql_cell = None;
         self.json_edit = None;
+        // A field edit is matched by its path only, so on another tab it would be staged on that tab's document.
+        if i != self.cur {
+            self.inline = None;
+            self.new_field = None;
+        }
         self.cur = i;
         let Some(sel) = self.tabs.get(i).map(|t| t.sel.clone()) else { return };
         if let Some(id) = follow_conn(&sel, |id| self.conn(id).is_some()) {
