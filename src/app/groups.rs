@@ -177,28 +177,11 @@ impl Groups {
 /// Reads groups.json. The file is an object, and its lists are parsed entry by entry: a bad group is skipped and the
 /// file copied to `.bak`, never the other groups lost. A file that is not an object at all is moved aside by `parse_config`.
 pub(super) fn load_groups_from(path: &std::path::Path) -> (Groups, Option<String>) {
-    let Ok(b) = std::fs::read(path) else { return (Groups::default(), None) };
-    let Ok(serde_json::Value::Object(mut o)) = serde_json::from_slice::<serde_json::Value>(&b) else { return parse_config(path) };
-    // A list key holding something else counts as a skipped entry, so the file is copied aside before the next save drops it.
-    let mut bad = Vec::new();
-    let mut list = |k: &str| match o.remove(k) {
-        Some(serde_json::Value::Array(a)) => a,
-        None | Some(serde_json::Value::Null) => Vec::new(),
-        Some(_) => {
-            bad.push(format!("{k} is not a list"));
-            Vec::new()
-        }
-    };
-    let (groups, loose) = (list("groups"), list("loose"));
-    let total = groups.len() + loose.len() + bad.len();
-    let (groups, mut errs) = parse_entries::<Group>(groups);
-    let (loose, e) = parse_entries::<u64>(loose);
-    errs.extend(e);
-    errs.extend(bad);
-    let v = o.get("v").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-    let mut g = Groups { v, groups, loose };
-    g.normalize();
-    (g, skipped_note(path, total, &errs))
+    load_lists(path, &["groups", "loose"], |l| {
+        let mut g = Groups { v: l.num("v") as u32, groups: l.take(0), loose: l.take(1) };
+        g.normalize();
+        g
+    })
 }
 
 pub(super) fn load_groups() -> (Groups, Option<String>) {

@@ -327,6 +327,52 @@ pub(crate) fn skipped_note(path: &std::path::Path, total: usize, errs: &[String]
     Some(format!("Skipped {} of {total} entries in {}: {}. {kept}", errs.len(), path.display(), errs.join("; ")))
 }
 
+/// The lists of a config file that is an object, taken one by one by `load_lists`'s builder.
+pub(super) struct Lists {
+    lists: Vec<Vec<serde_json::Value>>,
+    obj: serde_json::Map<String, serde_json::Value>,
+    /// Why entries were skipped, for `skipped_note`. A builder adds its own reasons here.
+    pub(super) errs: Vec<String>,
+}
+
+impl Lists {
+    /// The entries of the `i`th key that parse; the others are counted in `errs`.
+    pub(super) fn take<T: serde::de::DeserializeOwned>(&mut self, i: usize) -> Vec<T> {
+        let (good, errs) = parse_entries(std::mem::take(&mut self.lists[i]));
+        self.errs.extend(errs);
+        good
+    }
+
+    /// A number beside the lists, such as the version, or 0.
+    pub(super) fn num(&self, key: &str) -> u64 {
+        self.obj.get(key).and_then(|v| v.as_u64()).unwrap_or(0)
+    }
+}
+
+/// Reads a config file that is an object of the lists `keys`, parsed entry by entry: a bad entry is skipped and the file
+/// copied to `.bak`, never the other entries lost. A file that is not an object at all is moved aside by `parse_config`.
+pub(super) fn load_lists<T: serde::de::DeserializeOwned + Default>(path: &std::path::Path, keys: &[&str], build: impl FnOnce(&mut Lists) -> T) -> (T, Option<String>) {
+    let Ok(b) = std::fs::read(path) else { return (T::default(), None) };
+    let Ok(serde_json::Value::Object(mut obj)) = serde_json::from_slice::<serde_json::Value>(&b) else { return parse_config(path) };
+    // A list key holding something else counts as a skipped entry, so the file is copied aside before the next save drops it.
+    let mut errs = Vec::new();
+    let lists: Vec<Vec<serde_json::Value>> = keys
+        .iter()
+        .map(|k| match obj.remove(*k) {
+            Some(serde_json::Value::Array(a)) => a,
+            None | Some(serde_json::Value::Null) => Vec::new(),
+            Some(_) => {
+                errs.push(format!("{k} is not a list"));
+                Vec::new()
+            }
+        })
+        .collect();
+    let total = lists.iter().map(Vec::len).sum::<usize>() + errs.len();
+    let mut l = Lists { lists, obj, errs };
+    let t = build(&mut l);
+    (t, skipped_note(path, total, &l.errs))
+}
+
 /// Like `parse_config` for a list, but an entry that no longer parses is skipped instead of losing every other one.
 pub(super) fn parse_config_list<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> (Vec<T>, Option<String>) {
     let Ok(b) = std::fs::read(path) else { return (Vec::new(), None) };
@@ -417,18 +463,13 @@ pub(super) fn set_secret(id: u64, what: &str, value: &str) -> Result<(), String>
     crate::vault::set(&format!("connection-{id}-{what}"), value).map_err(|e| format!("Could not store the {} in the Keychain: {e}", what.replace('-', " ")))
 }
 
-/// Written beside the file, then renamed over it: a crash mid-write leaves the old file whole
+/// Written beside the file, then renamed over it by `disk::write_file`: a crash mid-write leaves the old file whole
 /// instead of a truncated one that no longer parses.
 // ponytail: no fsync; ui.json is saved on every keystroke in the query boxes and an fsync on the UI
 // thread stalls typing. Only a power loss right after a save can lose it; sync on a worker if that matters.
 pub(super) fn write_atomic(dir: &std::path::Path, file: &str, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
-    let tmp = dir.join(format!(".{file}.tmp"));
-    let res = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, dir.join(file)));
-    if res.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    res
+    crate::library::disk::write_file(&dir.join(file), bytes)
 }
 
 impl App {
@@ -567,7 +608,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("busy.json").join("keep")).unwrap();
         assert!(write_atomic(&dir, "busy.json", b"x").is_err());
         assert!(dir.join("busy.json").join("keep").is_dir());
-        assert!(!dir.join(".busy.json.tmp").exists());
+        assert!(!dir.join(".busy.json.quarry-tmp").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

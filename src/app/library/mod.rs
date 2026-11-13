@@ -72,43 +72,21 @@ pub(in crate::app) fn keys_text(cmd: bool, shift: bool, alt: bool, key: &str) ->
 /// Reads library.json. Its lists are parsed entry by entry: a bad script or folder is skipped and the file copied to
 /// `.bak`, never the whole library reset.
 pub(super) fn load_library_from(path: &std::path::Path) -> (Library, Option<String>) {
-    let Ok(b) = std::fs::read(path) else { return (Library::default(), None) };
-    let Ok(serde_json::Value::Object(mut o)) = serde_json::from_slice::<serde_json::Value>(&b) else { return parse_config(path) };
-    // A list key holding something else counts as a skipped entry, so the file is copied aside before the next save drops it.
-    let mut bad = Vec::new();
-    let mut list = |k: &str| match o.remove(k) {
-        Some(serde_json::Value::Array(a)) => a,
-        None | Some(serde_json::Value::Null) => Vec::new(),
-        Some(_) => {
-            bad.push(format!("{k} is not a list"));
-            Vec::new()
+    load_lists(path, &["folders", "scripts", "links", "recent"], |l| {
+        let (folders, scripts, mut links, recent): (_, _, Vec<crate::library::Link>, Vec<crate::library::ScriptRef>) = (l.take(0), l.take(1), l.take(2), l.take(3));
+        // A recent file whose path leaves its folder is skipped like an entry that does not parse.
+        let (recent, bad): (Vec<_>, Vec<_>) = recent.into_iter().partition(|r| r.is_safe());
+        l.errs.extend(bad.iter().map(|r| format!("{r:?} leaves its linked folder")));
+        // A link with no file types, which no dialog makes, would show nothing at all: it shows every type instead.
+        for k in &mut links {
+            if k.exts.is_empty() {
+                k.exts = ["sql", "js", "json"].map(String::from).to_vec();
+            }
         }
-    };
-    let (folders, scripts, links, recent) = (list("folders"), list("scripts"), list("links"), list("recent"));
-    let total = folders.len() + scripts.len() + links.len() + recent.len() + bad.len();
-    let (folders, mut errs) = parse_entries(folders);
-    errs.extend(bad);
-    let (scripts, e) = parse_entries(scripts);
-    errs.extend(e);
-    let (links, e) = parse_entries(links);
-    errs.extend(e);
-    let (recent, e) = parse_entries::<crate::library::ScriptRef>(recent);
-    errs.extend(e);
-    // A recent file whose path leaves its folder is skipped like an entry that does not parse.
-    let (recent, bad): (Vec<crate::library::ScriptRef>, Vec<crate::library::ScriptRef>) = recent.into_iter().partition(|r| r.is_safe());
-    errs.extend(bad.iter().map(|r| format!("{r:?} leaves its linked folder")));
-    let v = o.get("v").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-    let next = o.get("next").and_then(|v| v.as_u64()).unwrap_or(0);
-    let mut links: Vec<crate::library::Link> = links;
-    // A link with no file types, which no dialog makes, would show nothing at all: it shows every type instead.
-    for l in &mut links {
-        if l.exts.is_empty() {
-            l.exts = ["sql", "js", "json"].map(String::from).to_vec();
-        }
-    }
-    let mut lib = Library { v, folders, scripts, links, recent, next };
-    lib.reserve_ids();
-    (lib, skipped_note(path, total, &errs))
+        let mut lib = Library { v: l.num("v") as u32, folders, scripts, links, recent, next: l.num("next") };
+        lib.reserve_ids();
+        lib
+    })
 }
 
 pub(super) fn load_library() -> (Library, Option<String>) {
