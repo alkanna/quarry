@@ -267,6 +267,9 @@ pub fn rule_sql(r: &Rule, d: Dialect, bs: bool) -> String {
     let other = group_of(r.kind) == Group::Other;
     let len = if group_of(r.kind) == Group::Text { "CHAR_LENGTH" } else { "LENGTH" };
     let n = || if is_number(v(0)) { v(0).trim().to_string() } else { "0".into() };
+    if d == Dialect::Postgres && let Some(sql) = pg_rule_sql(r, &c, n()) {
+        return sql;
+    }
     match r.op {
         Eq if other => format!("{c} = {}", hex(v(0), bs)),
         Ne if other => format!("{c} <> {}", hex(v(0), bs)),
@@ -307,6 +310,31 @@ pub fn rule_sql(r: &Rule, d: Dialect, bs: bool) -> String {
         JsonContains => format!("JSON_CONTAINS({c}, {})", lit(v(0), bs)),
         JsonHasPath => format!("JSON_CONTAINS_PATH({c}, 'one', {})", lit(v(0), bs)),
     }
+}
+
+/// PostgreSQL's spelling of the operators whose MySQL form it does not have. Its jsonpath reads the same `$.a.b`.
+fn pg_rule_sql(r: &Rule, c: &str, n: String) -> Option<String> {
+    use Op::*;
+    let v = |i: usize| super::value::pg_lit(r.values.get(i).map(|s| s.as_str()).unwrap_or(""));
+    let unit = match r.values.get(1).map(|s| s.as_str()) {
+        Some("hours") => "hours",
+        Some("weeks") => "weeks",
+        Some("months") => "months",
+        _ => "days",
+    };
+    Some(match r.op {
+        Regexp => format!("{c}::text ~ {}", v(0)),
+        NotRegexp => format!("{c}::text !~ {}", v(0)),
+        Today => format!("{c}::date = CURRENT_DATE"),
+        Last => format!("{c} >= NOW() - INTERVAL '{n} {unit}'"),
+        ThisWeek => format!("date_trunc('week', {c}) = date_trunc('week', CURRENT_DATE)"),
+        ThisMonth => format!("date_trunc('month', {c}) = date_trunc('month', CURRENT_DATE)"),
+        SetContains => format!("{} = ANY(string_to_array({c}::text, ','))", v(0)),
+        JsonPathEq => format!("jsonb_path_query_first({c}::jsonb, {}) #>> '{{}}' = {}", v(0), v(1)),
+        JsonContains => format!("{c}::jsonb @> {}::jsonb", v(0)),
+        JsonHasPath => format!("jsonb_path_exists({c}::jsonb, {})", v(0)),
+        _ => return None,
+    })
 }
 
 /// The WHERE text of a rule list: complete rules only, joined with AND (or OR when `any`).
@@ -692,6 +720,19 @@ mod tests {
                 assert!(!any);
                 assert_eq!(back, vec![r], "{sql}");
             }
+        }
+    }
+
+    #[test]
+    fn postgres_rules_use_postgres_operators() {
+        let sql = |col: &str, kind: Kind, op: Op, values: &[&str]| rule_sql(&Rule { col: col.into(), kind, op, values: values.iter().map(|s| s.to_string()).collect() }, Dialect::Postgres, false);
+        assert_eq!(sql("name", Kind::Text, Op::Regexp, &["^a"]), "\"name\"::text ~ '^a'");
+        assert_eq!(sql("created_at", Kind::DateTime, Op::Today, &[]), "\"created_at\"::date = CURRENT_DATE");
+        assert_eq!(sql("created_at", Kind::DateTime, Op::Last, &["3", "weeks"]), "\"created_at\" >= NOW() - INTERVAL '3 weeks'");
+        assert_eq!(sql("data", Kind::Json, Op::JsonHasPath, &["$.a.b"]), "jsonb_path_exists(\"data\"::jsonb, '$.a.b')");
+        for op in [Op::Regexp, Op::Today, Op::ThisWeek, Op::ThisMonth, Op::JsonContains] {
+            let s = sql("c", Kind::Text, op, &["x"]);
+            assert!(!s.contains("REGEXP") && !s.contains("CURDATE") && !s.contains("YEARWEEK") && !s.contains("JSON_"), "{s}");
         }
     }
 

@@ -872,6 +872,10 @@ fn dropping_a_table_lists_what_depends_on_it_and_cascade_is_opt_in() {
         l.qsql(&pool, &format!("CREATE VIEW {a}.w AS SELECT 1 AS one", a = ident(&a)));
         assert!(err(&drop("w", false, false)).contains("42809"), "{var}");
         drop("w", true, false).res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        // the sidebar lists a materialized view as a view, so Drop view must still drop it
+        l.qsql(&pool, &format!("CREATE MATERIALIZED VIEW {a}.mv AS SELECT 1 AS one", a = ident(&a)));
+        drop("mv", true, false).res.unwrap_or_else(|x| panic!("{var}: {x}"));
+        assert_eq!(l.qone(&pool, &format!("SELECT count(*)::text FROM pg_matviews WHERE schemaname = {} AND matviewname = 'mv'", lit(&a))), "0", "{var}");
         // awkward names and a table that is gone
         l.qsql(&pool, &format!("CREATE TABLE {a}.{n} (id int)", a = ident(&a), n = ident("Odd \"Name\" 1")));
         drop("Odd \"Name\" 1", false, false).res.unwrap_or_else(|x| panic!("{var}: {x}"));
