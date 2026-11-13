@@ -10,6 +10,8 @@ repository = "https://github.com/alkanna/quarry"
 eframe = "0.37"
 # Only for its bundled monochrome icon font, used for toolbar icons; eframe already depends on it.
 egui = { version = "0.37", default-features = false, features = ["monochrome_emoji_fonts"] }
+# Already used by eframe for the clipboard; Vim's p reads it directly because egui only hands pasted text to the focused editor.
+arboard = { version = "3", default-features = false }
 mongodb = { version = "3", features = ["socks5-proxy"] }
 # MySQL and MariaDB. Postgres and SQLite are one feature each when they come. Runtime queries only, no macros.
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "mysql", "postgres"] }
@@ -80,4 +82,3 @@ debug = false
 # Already used by eframe; named here only to keep benchmark and test windows in the background.
 winit = { version = "0.30", default-features = false }
 muda = { version = "0.21", default-features = false }
-arboard = { version = "3", default-features = false }

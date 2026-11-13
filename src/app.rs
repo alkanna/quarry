@@ -709,6 +709,7 @@ impl eframe::App for App {
         // and other worker answers must still be handled then. logic() runs first, so the order is unchanged.
         self.poll(ctx);
         LIGHT_MODE.store(ctx.theme() == egui::Theme::Light, std::sync::atomic::Ordering::Relaxed);
+        crate::ui::vim::set_on(ctx, self.prefs.vim);
         // macOS leaves an app started from a terminal or Finder behind the frontmost one; the first
         // frames ask for focus once the window is visible (a no-op when it already has it).
         if ctx.cumulative_frame_nr() < 3 && crate::takes_focus() {
