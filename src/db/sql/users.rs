@@ -2518,7 +2518,7 @@ mod tests {
                         crate::db::log_sql(conn, "", &sql, 1, None);
                         // And once more as a failure whose message quotes the statement from where it broke.
                         crate::db::log_sql(conn, "", &sql, 1, Some(&format!("You have an error in your SQL syntax; check the manual for the right syntax to use near '{}' at line 1", &sql[sql.find("BY ").or_else(|| sql.find("PASSWORD(")).unwrap_or(0)..])));
-                        let log = crate::db::LOG.lock().unwrap();
+                        let log = crate::db::log();
                         for l in log.iter().filter(|l| l.conn == conn) {
                             let all = format!("{} {}", l.cmd, l.err.clone().unwrap_or_default());
                             assert!(!all.contains("Marker") && !all.contains("Zq9"), "bs={bs} {d:?} {secret:?}: {all}");
@@ -2547,7 +2547,7 @@ mod tests {
             done(l).1.unwrap_or_else(|x| panic!("{var}: {x}"));
             l.w.sql_user_drop(1, l.db.clone(), a.clone(), false);
             done(l).1.unwrap_or_else(|x| panic!("{var}: {x}"));
-            let log = crate::db::LOG.lock().unwrap();
+            let log = crate::db::log();
             let mine: Vec<&str> = log.iter().filter(|e| e.conn == l.db.conn && e.cmd.contains(&a.user)).map(|e| e.cmd.as_str()).collect();
             let has = |w: &str| mine.iter().any(|c| c.starts_with(w));
             assert!(has("CREATE USER") && has("GRANT SELECT") && has("REVOKE SELECT") && has("DROP USER"), "{var}: {mine:?}");
