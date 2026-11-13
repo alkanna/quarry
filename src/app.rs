@@ -88,7 +88,7 @@ const SYSTEM_DBS: [&str; 3] = ["admin", "config", "local"];
 const DEFAULT_COLS: usize = 8;
 
 /// Shortcuts listed by Cmd+/. Cmd is Ctrl on Linux and Windows.
-const SHORTCUTS: [(&str, &str); 26] = [
+const SHORTCUTS: [(&str, &str); 27] = [
     ("Cmd+K", "Jump to a connection, database or collection"),
     ("Cmd+T", "Open a collection in a new tab"),
     ("Cmd+click, middle-click", "Open a collection of the sidebar or Cmd+K in a new tab; Cmd+Enter in Cmd+K"),
@@ -115,6 +115,7 @@ const SHORTCUTS: [(&str, &str); 26] = [
     ("Cmd+N", "New connection"),
     ("Cmd+L", "Show or hide the query log"),
     ("Cmd+/", "This list"),
+    ("Ctrl+Space", "Suggestions in a query or SQL field, also where none show by themselves"),
 ];
 
 pub struct App {

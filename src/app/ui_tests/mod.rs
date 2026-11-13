@@ -5,7 +5,6 @@
 //! worker tests. The app runs with `ephemeral` set: no files, no keychain, no menu bar, no window.
 //! Widgets are found by their accessible names (`Response::widget_info`): "{col} row {n}" for a grid
 //! cell, "Select row {n}" for its checkbox, the column name for a header, the text of a sidebar row.
-
 mod agents;
 mod agents_windows;
 mod calendar;
@@ -13,8 +12,8 @@ mod conn_advanced;
 mod conn_cert;
 mod conn_cloudsql;
 mod mongo_edit;
-mod pg_server;
 mod pg_roles;
+mod pg_server;
 mod sidebar;
 mod sql_create;
 mod sql_dump;
@@ -23,6 +22,7 @@ mod sql_format;
 mod sql_import;
 mod sql_relations;
 mod sql_structure;
+mod sql_suggest;
 mod sql_triggers;
 mod tabs;
 mod leak;

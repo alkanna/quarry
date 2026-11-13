@@ -541,7 +541,7 @@ impl App {
 
     /// QUARRY_TEST_SQL=ac or acquery: the schema and column values the suggestions come from, and for `acquery`
     /// a Query tab with the caret after `c.`. The list is opened by the bar preset (see `open_list`).
-    fn sql_ac_demo(&mut self) {
+    pub(super) fn sql_ac_demo(&mut self) {
         use db::sql::schema::{Schema, SchemaCol, SchemaTable};
         use db::sql::value::Kind;
         let col = |name: &str, ty: &str, key: &str, fk: bool| SchemaCol { name: name.into(), ty: ty.into(), kind: Kind::from_type_name(ty.split('(').next().unwrap_or(ty).trim_end_matches(" unsigned")), key: key.into(), nullable: false, fk };

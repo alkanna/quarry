@@ -516,8 +516,19 @@ pub(crate) fn suggest(before: &str, kind: FieldKind, paths: &[String], fields: &
     (!items.is_empty()).then(|| (token.chars().count(), items))
 }
 
-/// Suggestions for the text before the caret: the length of the word they replace, and the list.
-pub(crate) type Suggest<'a> = dyn Fn(&str) -> Option<(usize, Vec<Sug>)> + 'a;
+/// Takes Ctrl+Space, which asks for suggestions where typing alone shows none, and the space it may also type, so the
+/// text box never sees either. Ctrl on macOS too, as in DBeaver and VS Code, since Cmd+Space is Spotlight.
+fn take_ctrl_space(ui: &egui::Ui) -> bool {
+    let hit = ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Key { key: Key::Space, pressed: true, modifiers, .. } if modifiers.ctrl)));
+    if hit {
+        ui.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Key { key: Key::Space, .. }) && !matches!(e, egui::Event::Text(t) if t == " ")));
+    }
+    hit
+}
+
+/// Suggestions for the text before the caret: the length of the word they replace, and the list. The flag is Ctrl+Space,
+/// which asks for a list even where typing alone shows none.
+pub(crate) type Suggest<'a> = dyn Fn(&str, bool) -> Option<(usize, Vec<Sug>)> + 'a;
 
 /// A code input with brackets that close themselves and a suggestion list under the caret.
 /// Up/Down move, Enter or Tab insert, Esc closes. Returns the editor output and whether a
@@ -572,6 +583,7 @@ pub(crate) fn ac_input_with(
     let open = ac.id == Some(id) && !ac.items.is_empty();
     let mut pick = None;
     let mut moved = false;
+    let force = ui.memory(|m| m.has_focus(id)) && take_ctrl_space(ui);
     if open && ui.memory(|m| m.has_focus(id)) {
         ui.input_mut(|i| {
             if i.consume_key(egui::Modifiers::NONE, Key::ArrowDown) {
@@ -598,9 +610,9 @@ pub(crate) fn ac_input_with(
     }
     let cursor = out.cursor_range.filter(|r| r.is_empty()).map(|r| r.primary.index.0);
     if let (true, Some(ci)) = (focused, cursor) {
-        if out.response.changed() {
+        if out.response.changed() || force {
             let before: String = text.chars().take(ci).collect();
-            match compute(&before) {
+            match compute(&before, force) {
                 Some((token, items)) => *ac = Ac { id: Some(id), token, items, cursor: ci, ..Default::default() },
                 None if ac.id == Some(id) => ac.close(),
                 None => {}
