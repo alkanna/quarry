@@ -823,6 +823,8 @@ impl eframe::App for App {
             self.tab_strip(ui);
         }
         egui::CentralPanel::default_margins().frame(egui::Frame::new().fill(BG()).inner_margin(egui::Margin { left: 20, right: 20, top: 10, bottom: 12 })).show(ui, |ui| {
+            #[cfg(test)]
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("test-central-left"), ui.max_rect().left() - 20.0));
             if self.tabs.is_empty() {
                 self.welcome(ui);
             } else {
