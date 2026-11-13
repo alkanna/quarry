@@ -28,7 +28,6 @@ mod sql_suggest;
 mod sql_triggers;
 mod sql_view;
 mod tabs;
-mod leak;
 
 use super::*;
 use egui_kittest::Harness;
