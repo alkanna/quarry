@@ -82,12 +82,13 @@ pub(crate) fn settings_section(ui: &mut egui::Ui, title: &str, add: impl FnOnce(
         caption(ui, title);
         ui.add_space(2.0);
     }
-    card(ui, |ui| {
+    // The raised card of the dialog body, so settings read the same as every other form.
+    super::dialog::card_frame().inner_margin(egui::Margin::symmetric(14, 12)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.spacing_mut().item_spacing.y = 6.0;
         add(ui);
     });
-    ui.add_space(10.0);
+    ui.add_space(14.0);
 }
 
 /// One setting: its name and a short explanation on the left, the control on the right.
@@ -410,7 +411,7 @@ pub(crate) fn dialog_frame() -> egui::Frame {
 pub(crate) fn form_label(ui: &mut egui::Ui, text: &str) {
     ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
         ui.add_space(4.0);
-        ui.label(RichText::new(text).color(MUTED()));
+        ui.label(medium(RichText::new(text).size(TXT_BODY).color(BRIGHT())));
     });
 }
 

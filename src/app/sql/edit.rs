@@ -796,10 +796,11 @@ impl App {
         let table = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
         let dialect = self.sql_dialect();
         ui.set_width(560.0);
-        dialog_title(ui, format!("{} in {table}", f.title));
-        ui.label(RichText::new("Default leaves the column to the server: its default, or the next auto-increment number.").size(TXT_SMALL).color(MUTED()));
-        ui.add_space(6.0);
-        egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
+        dialog_head(ui, &Head::new(format!("{} in {table}", f.title)).sub("Default leaves a column to the server: its default or the next number").glyph(glyphs::plus));
+        let mut b = body_begin(ui);
+        let outer = ui;
+        let ui = &mut b.content_ui;
+        plain_card(ui, |ui| egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
             egui::Grid::new("sql-row").num_columns(3).spacing([12.0, 6.0]).show(ui, |ui| {
                 for fld in f.fields.iter_mut() {
                     ui.vertical(|ui| {
@@ -813,11 +814,13 @@ impl App {
                     ui.end_row();
                 }
             });
-        });
+        }));
         if let Some(m) = &f.err {
-            ui.label(RichText::new(m).size(TXT_SMALL).color(ALERT()));
+            field_note(ui, m, ALERT());
         }
-        dialog_actions(ui, |ui| {
+        b.end(outer);
+        let ui = outer;
+        dialog_foot(ui, |ui| {
             if primary(ui, "Insert", PRIMARY()).clicked() {
                 let mut row: NewRow = Vec::new();
                 let mut bad = None;
@@ -950,14 +953,15 @@ impl App {
         let (d, bs) = (self.sql_dialect(), self.sql_bs());
         ui.set_width(560.0);
         let n = f.rows.len();
-        dialog_title(ui, format!("Set value on {n} row{}", if n == 1 { "" } else { "s" }));
         let ids: Vec<String> = f.rows.iter().take(4).map(|r| r.get_document("_id").map(|k| k.values().map(db::short).collect::<Vec<_>>().join("-")).unwrap_or_default()).collect();
-        ui.label(RichText::new(format!("{} · rows {}{}", sel.coll, ids.join(", "), if n > 4 { ", …" } else { "" })).color(MUTED()));
-        ui.add_space(6.0);
+        dialog_head(ui, &Head::new(format!("Set value on {n} row{}", if n == 1 { "" } else { "s" })).sub(format!("{}  ·  rows {}{}", sel.coll, ids.join(", "), if n > 4 { ", …" } else { "" })).glyph(glyphs::pencil));
+        let mut b = body_begin(ui);
+        let outer = ui;
+        let ui = &mut b.content_ui;
         let editable: Vec<&Col> = cols.iter().filter(|c| !pk.contains(&c.src) && c.kind != Kind::Geometry).collect();
         let col = editable.iter().find(|c| c.name == f.col).copied().or(editable.first().copied());
         let Some(col) = col.cloned() else { return *keep = false };
-        egui::Grid::new("sql-set").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
+        form_grid(ui, "sql-set", |ui| {
             form_label(ui, "Column");
             egui::ComboBox::from_id_salt("sql-set-col").width(300.0).selected_text(format!("{}  {}", col.name, col.ty.to_ascii_uppercase())).show_ui(ui, |ui| {
                 menu_look(ui);
@@ -997,14 +1001,16 @@ impl App {
             Err(_) => "…".into(),
         };
         let keys = if pk.len() == 1 { format!("{} IN ({})", d.quote_ident(&pk[0]), f.rows.iter().map(|r| copy::sql_literal(r.get_document("_id").ok().and_then(|k| k.get(&pk[0])), cols.iter().any(|c| c.src == pk[0] && is_numeric(c.kind)), bs)).collect::<Vec<_>>().join(", ")) } else { format!("{} composite keys", n) };
-        egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(10).show(ui, |ui| {
+        egui::Frame::new().fill(WELL()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_BAR).inner_margin(10).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(RichText::new(format!("UPDATE {}\n  SET {} = {lit}\n  WHERE {keys};", d.quote_ident(&sel.coll), d.quote_ident(&col.src))).monospace().size(TXT_SMALL).color(TEXT()));
         });
         if let (Some(m), false) = (&f.err, f.null) {
-            ui.label(RichText::new(m).size(TXT_SMALL).color(ALERT()));
+            field_note(ui, m, ALERT());
         }
-        dialog_actions(ui, |ui| {
+        b.end(outer);
+        let ui = outer;
+        dialog_foot(ui, |ui| {
             if primary(ui, &format!("Stage {n} edit{}", if n == 1 { "" } else { "s" }), PRIMARY()).clicked() {
                 match parsed {
                     Ok(v) => {

@@ -132,7 +132,7 @@ fn mode_of(d: &Dv) -> (DMode, String) {
 
 /// A highlighted statement in a box, scrolling both ways.
 pub(in crate::app) fn sql_block(ui: &mut egui::Ui, salt: &str, text: &str, max_h: f32) {
-    egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(10).show(ui, |ui| {
+    egui::Frame::new().fill(WELL()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_BAR).inner_margin(10).show(ui, |ui| {
         ui.set_width(ui.available_width());
         egui::ScrollArea::vertical().id_salt(salt).max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
             ui.add(egui::Label::new(sql_job(text, TXT_SMALL)).wrap());
@@ -532,9 +532,10 @@ impl App {
         let pg = dialect == Dialect::Postgres;
         let table = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
         ui.set_width(600.0);
-        dialog_title(ui, if f.from.is_some() { "Edit column" } else { "Add column" });
-        ui.label(RichText::new(format!("{table}.{}", f.from.as_deref().unwrap_or("new column"))).size(TXT_SMALL).color(MUTED()));
-        ui.add_space(8.0);
+        dialog_head(ui, &Head::new(if f.from.is_some() { "Edit column" } else { "Add column" }).sub(format!("{table}.{}", f.from.as_deref().unwrap_or("new column"))).glyph(glyphs::table));
+        let mut b = body_begin(ui);
+        let outer = ui;
+        let ui = &mut b.content_ui;
         let ty = f.def.ty.to_ascii_uppercase();
         egui::Grid::new("colform").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W + 20.0).show(ui, |ui| {
             form_label(ui, "Name");
@@ -720,7 +721,9 @@ impl App {
             ui.label(RichText::new(note).size(TXT_SMALL).color(FAINT()));
         }
         let (mut stage, mut now) = (false, false);
-        dialog_actions(ui, |ui| {
+        b.end(outer);
+        let ui = outer;
+        dialog_foot(ui, |ui| {
             stage = ui.add_enabled(text.is_ok(), primary_button(ui, "Stage change", PRIMARY())).clicked();
             let busy = self.applying();
             now = ui.add_enabled(text.is_ok() && !self.sel_is_view() && !busy, egui::Button::new("Apply now")).on_hover_text("Stage this change and run everything staged. A locked connection asks to unlock first.").on_disabled_hover_text(if busy { BUSY_NOTE } else { "A view cannot be changed here" }).clicked();
@@ -771,10 +774,11 @@ impl App {
         let pg = self.alter_env().0 == Dialect::Postgres;
         let table = self.t().map(|t| t.sel.coll.clone()).unwrap_or_default();
         ui.set_width(560.0);
-        dialog_title(ui, if f.from.is_some() { "Edit index" } else { "Add index" });
-        ui.label(RichText::new(format!("{table}.{}", f.from.as_ref().map_or("new index", |d| d.name.as_str()))).size(TXT_SMALL).color(MUTED()));
-        ui.add_space(8.0);
-        egui::Grid::new("idxform").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
+        dialog_head(ui, &Head::new(if f.from.is_some() { "Edit index" } else { "Add index" }).sub(format!("{table}.{}", f.from.as_ref().map_or("new index", |d| d.name.as_str()))).glyph(glyphs::list));
+        let mut b = body_begin(ui);
+        let outer = ui;
+        let ui = &mut b.content_ui;
+        form_grid(ui, "idxform", |ui| {
             form_label(ui, "Name");
             let primary = f.def.kind == IndexKind::Primary;
             // A PostgreSQL primary key is a named constraint, and its usual name is the table's with _pkey.
@@ -879,7 +883,9 @@ impl App {
         }
         let text_ok = text.is_ok();
         let (mut stage, mut now) = (false, false);
-        dialog_actions(ui, |ui| {
+        b.end(outer);
+        let ui = outer;
+        dialog_foot(ui, |ui| {
             stage = ui.add_enabled(text_ok, primary_button(ui, "Stage change", PRIMARY())).clicked();
             let busy = self.applying();
             now = ui.add_enabled(text_ok && !self.sel_is_view() && !busy, egui::Button::new("Apply now")).on_hover_text("Stage this change and run everything staged. A locked connection asks to unlock first.").on_disabled_hover_text(if busy { BUSY_NOTE } else { "A view cannot be changed here" }).clicked();

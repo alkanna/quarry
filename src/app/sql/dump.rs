@@ -161,10 +161,11 @@ impl App {
 
     pub(in crate::app) fn sql_dump_dialog(&mut self, ui: &mut egui::Ui, f: &mut DumpForm, keep: &mut bool) {
         ui.set_width(610.0);
-        dialog_title(ui, "Export");
         let pg = self.is_pg(f.conn);
-        ui.label(RichText::new(if pg { format!("{}, schema {} on {}", f.db, f.schema, f.conn_name) } else { format!("{} on {}", f.db, f.conn_name) }).size(TXT_SMALL).color(MUTED()));
-        ui.add_space(10.0);
+        dialog_head(ui, &Head::new("Export").sub(if pg { format!("{}, schema {} on {}", f.db, f.schema, f.conn_name) } else { format!("{} on {}", f.db, f.conn_name) }).glyph(glyphs::download));
+        let mut b = body_begin(ui);
+        let outer = ui;
+        let ui = &mut b.content_ui;
         let mono = |t: String| RichText::new(t).font(FontId::monospace(TXT_SMALL)).color(FAINT());
         let selected = f.rows.iter().filter(|r| r.on).count();
         egui::Grid::new("dump-what").num_columns(2).spacing([14.0, 8.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
@@ -296,7 +297,9 @@ impl App {
         let ready = !f.path.trim().is_empty() && (filtered || f.rows.iter().any(|r| r.on && (r.structure || r.content) && !(r.view && !f.extras)));
         let mut go = false;
         ui.add_space(8.0);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        b.end(outer);
+        let ui = outer;
+        dialog_foot(ui, |ui| {
             let busy = self.export_job.is_some();
             go = ui.add_enabled(ready && !busy, primary_button(ui, if total > 0 { format!("Export {} rows", group(&total.to_string())) } else { "Export".to_string() }, PRIMARY())).on_disabled_hover_text(if busy { "An export is already running" } else { "Pick something to export" }).clicked();
             if ui.button("Cancel").clicked() {
@@ -332,9 +335,10 @@ impl App {
 
     pub(in crate::app) fn sql_run_file_dialog(&mut self, ui: &mut egui::Ui, f: &mut RunForm, keep: &mut bool) {
         ui.set_width(520.0);
-        dialog_title(ui, "Run SQL file");
-        ui.label(RichText::new(format!("{} \u{b7} {}", f.name, human_bytes(f.src.len() as usize))).size(TXT_SMALL).color(MUTED()));
-        ui.add_space(8.0);
+        dialog_head(ui, &Head::new("Run SQL file").sub(format!("{} \u{b7} {}", f.name, human_bytes(f.src.len() as usize))).glyph(glyphs::upload));
+        let mut b = body_begin(ui);
+        let outer = ui;
+        let ui = &mut b.content_ui;
         let writable = self.conn_writable(f.conn);
         let say = |ui: &mut egui::Ui, t: String, c: Color32| ui.add(egui::Label::new(RichText::new(t).color(c)).wrap());
         if f.schema.is_empty() {
@@ -350,7 +354,9 @@ impl App {
         }
         let (mut go, mut unlock) = (false, false);
         ui.add_space(8.0);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        b.end(outer);
+        let ui = outer;
+        dialog_foot(ui, |ui| {
             let busy = self.sql_job.is_some();
             go = ui.add_enabled(writable && !busy, primary_button(ui, "Run file", ALERT())).on_disabled_hover_text(if busy { "Another import or script is running" } else { "Allow writes on this connection first" }).clicked();
             if ui.button("Cancel").clicked() {

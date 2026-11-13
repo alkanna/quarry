@@ -221,7 +221,10 @@ impl App {
 
     pub(super) fn export_dialog(&mut self, ui: &mut egui::Ui, f: &mut ExportForm, keep: &mut bool) {
         ui.set_width(520.0);
-        dialog_title(ui, "Export rows");
+        dialog_head(ui, &Head::new("Export rows").glyph(glyphs::download));
+        let mut b = body_begin(ui);
+        let outer = ui;
+        let ui = &mut b.content_ui;
         let formats: Vec<Format> = if f.sql {
             let mut v = vec![Format::T(Fmt::SqlInsert)];
             // A Query result or a Shell result has no key to write an UPDATE by.
@@ -234,7 +237,7 @@ impl App {
             vec![Format::MongoJs, Format::MongoJson, Format::MongoLines, Format::T(Fmt::Csv), Format::T(Fmt::Tsv), Format::T(Fmt::Markdown), Format::T(Fmt::Html)]
         };
         let noun = if f.sql { "rows" } else { "documents" };
-        egui::Grid::new("export-form").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
+        form_grid(ui, "export-form", |ui| {
             form_label(ui, "Format");
             egui::ComboBox::from_id_salt("export-fmt").width(220.0).selected_text(f.fmt.label()).show_ui(ui, |ui| {
                 menu_look(ui);
@@ -297,7 +300,9 @@ impl App {
             Scope::All => f.all.as_ref().is_some_and(|a| a.refused.is_none()),
             Scope::Script => f.script.as_ref().is_some_and(|s| s.stmts.is_ok()),
         };
-        dialog_actions(ui, |ui| {
+        b.end(outer);
+        let ui = outer;
+        dialog_foot(ui, |ui| {
             if ui.add_enabled(ready, primary_button(ui, "Export…", PRIMARY())).clicked() {
                 let file = rfd::FileDialog::new().set_file_name(format!("{}.{}", self.export_name(f.src), f.fmt.ext())).add_filter(f.fmt.label(), &[f.fmt.ext()]).save_file();
                 if let Some(path) = file {

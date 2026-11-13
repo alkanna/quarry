@@ -875,7 +875,7 @@ impl App {
         if objs.cut {
             ui.label(RichText::new(format!("Only the first {} are listed.", rp::OBJ_LIMIT)).size(TXT_SMALL).color(WARNING()));
         }
-        let frame = egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD);
+        let frame = card_frame();
         frame.show(ui, |ui| {
             egui::ScrollArea::horizontal().id_salt("pg-matrix-h").auto_shrink([false, true]).show(ui, |ui| {
                 // The header row.
@@ -1206,9 +1206,10 @@ impl App {
         ui.set_width(540.0);
         let writable = self.conn_writable(f.conn);
         let cluster = self.pg_roles.as_ref().and_then(|w| w.cl_arc()).unwrap_or_default();
-        dialog_title(ui, "New role");
-        ui.label(RichText::new(self.conn_name(f.conn)).color(MUTED()));
-        ui.add_space(10.0);
+        dialog_head(ui, &Head::new("New role").sub(self.conn_name(f.conn)).glyph(glyphs::user));
+        let mut b = body_begin(ui);
+        let outer = ui;
+        let ui = &mut b.content_ui;
         egui::Grid::new("pg-new-role").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W + 30.0).show(ui, |ui| {
             form_label(ui, "Name");
             let r = ui.add(egui::TextEdit::singleline(&mut f.name).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
@@ -1296,7 +1297,9 @@ impl App {
         if !writable {
             ui.label(RichText::new(NOTE_LOCKED).size(TXT_SMALL).color(FAINT()));
         }
-        dialog_actions(ui, |ui| {
+        b.end(outer);
+        let ui = outer;
+        dialog_foot(ui, |ui| {
             if ui.add_enabled(writable && check.is_ok(), primary_button(ui, "Create", PRIMARY())).clicked() {
                 // Whatever does not reach the worker is wiped here, a group's password included.
                 let mut password = zeroize::Zeroizing::new(std::mem::take(&mut f.password));
@@ -1324,10 +1327,11 @@ impl App {
         ui.set_width(520.0);
         let writable = self.conn_writable(f.conn);
         let encryption = self.pg_roles.as_ref().and_then(|w| w.cl().map(|c| c.password_encryption.clone())).unwrap_or_default();
-        dialog_title(ui, "Change password");
-        ui.label(RichText::new(&f.role).monospace().color(MUTED()));
-        ui.add_space(8.0);
-        egui::Grid::new("pg-newpw").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W + 14.0).show(ui, |ui| {
+        dialog_head(ui, &Head::new("Change password").sub(&f.role).glyph(glyphs::key));
+        let mut b = body_begin(ui);
+        let outer = ui;
+        let ui = &mut b.content_ui;
+        form_grid(ui, "pg-newpw", |ui| {
             form_label(ui, "New password");
             let r = ui.add(egui::TextEdit::singleline(&mut f.password).id(secret_id("pg-password", f.serial, 0)).password(true).desired_width(340.0));
             r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::PasswordInput, true, "New password"));
@@ -1351,7 +1355,9 @@ impl App {
         if !writable {
             ui.label(RichText::new(NOTE_LOCKED).size(TXT_SMALL).color(FAINT()));
         }
-        dialog_actions(ui, |ui| {
+        b.end(outer);
+        let ui = outer;
+        dialog_foot(ui, |ui| {
             if ui.add_enabled(writable && check.is_ok(), primary_button(ui, "Change password", PRIMARY())).clicked() {
                 let mut password = zeroize::Zeroizing::new(std::mem::take(&mut f.password));
                 f.again.zeroize();
@@ -1392,7 +1398,10 @@ impl App {
         let tag = self.conn(f.conn).map(|c| c.meta.tag.clone()).unwrap_or_default();
         let home = self.pg_roles_db(f.conn).map(|d| d.pg_database()).unwrap_or_default();
         let roles: Vec<String> = self.pg_roles.as_ref().and_then(|w| w.cl().map(|c| c.roles.iter().filter(|r| !r.system() && r.name != f.role).map(|r| r.name.clone()).collect())).unwrap_or_default();
-        dialog_title(ui, format!("Drop role {}?", f.role));
+        dialog_head(ui, &Head::new(format!("Drop role {}?", f.role)).glyph(glyphs::trash).tone(ALERT()));
+        let mut b = body_begin(ui);
+        let outer = ui;
+        let ui = &mut b.content_ui;
         let plan = match &f.info {
             None => {
                 spin(ui);
@@ -1411,7 +1420,7 @@ impl App {
                 if !owned.is_empty() {
                     caption(ui, format!("OWNED BY {}", f.role.to_uppercase()));
                     ui.add_space(4.0);
-                    egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
+                    card_frame().inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         egui::ScrollArea::vertical().id_salt("pg-drop-owned").max_height(120.0).show(ui, |ui| {
                             egui::Grid::new("pg-drop-owned-grid").num_columns(2).spacing([18.0, 6.0]).striped(true).show(ui, |ui| {
@@ -1474,7 +1483,9 @@ impl App {
         if !writable {
             ui.label(RichText::new(NOTE_LOCKED).size(TXT_SMALL).color(FAINT()));
         }
-        dialog_actions(ui, |ui| {
+        b.end(outer);
+        let ui = outer;
+        dialog_foot(ui, |ui| {
             let ok = writable && plan.is_some() && f.typed == f.role;
             if ui.add_enabled(ok, primary_button(ui, "Drop role", ALERT())).clicked() {
                 if let (Some((info, mode)), Some(sql)) = (plan, self.pg_roles_db(f.conn)) {
@@ -1523,7 +1534,7 @@ impl App {
 }
 
 fn pg_side_panel(ui: &mut egui::Ui, w: &PgRolesWin, c: &Cluster, acts: &mut Vec<Act>) {
-    egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(12, 12)).show(ui, |ui| {
+    card_frame().inner_margin(egui::Margin::symmetric(12, 12)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         let Some(r) = w.role.as_ref().and_then(|r| c.role(r)) else {
             ui.label(RichText::new("Click a role's column to see it here.").size(TXT_SMALL).color(MUTED()));
@@ -1649,7 +1660,7 @@ fn pg_role_members(ui: &mut egui::Ui, w: &mut PgRolesWin, c: &Cluster, role: &Ro
         caption(ui, if of { "MEMBER OF" } else { "MEMBERS" });
         ui.add_space(4.0);
         let list = pairs(of);
-        egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
+        card_frame().inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
             ui.set_width(ui.available_width());
             egui::Grid::new(if of { "pg-member-of" } else { "pg-members" }).num_columns(if opts { 6 } else { 4 }).spacing([22.0, 6.0]).min_col_width(40.0).show(ui, |ui| {
                 ui.label(RichText::new("Role").size(TXT_SMALL).color(MUTED()));
@@ -1767,7 +1778,7 @@ fn pg_role_defaults(ui: &mut egui::Ui, w: &mut PgRolesWin, c: &Cluster, role: &R
             rows.push((owner.clone(), schema.clone(), *kind, from.clone()));
         }
     }
-    egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
+    card_frame().inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         egui::Grid::new("pg-defaults").num_columns(5).spacing([22.0, 6.0]).show(ui, |ui| {
             for h in ["Created by", "In schema", "Kind", "Privileges", ""] {

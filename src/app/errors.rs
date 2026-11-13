@@ -187,7 +187,7 @@ fn kind_icon(ui: &mut egui::Ui, k: ErrKind, r: f32) {
 
 /// The raw server text in a well, without passwords.
 fn raw_well(ui: &mut egui::Ui, e: &ErrEntry, color: Color32) {
-    egui::Frame::new().fill(pal().well).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(12, 10)).show(ui, |ui| {
+    egui::Frame::new().fill(pal().well).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_BAR).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
             ui.add(egui::Label::new(RichText::new(db::scrub_uri(&e.raw)).monospace().size(TXT_CAPTION).color(color)).wrap().selectable(true));
@@ -807,45 +807,42 @@ impl App {
     pub(super) fn error_details(&mut self, ui: &mut egui::Ui, e: &ErrEntry) -> bool {
         let mut keep = true;
         let mut run = None;
-        ui.set_width(560.0);
-        ui.horizontal(|ui| {
-            kind_icon(ui, e.ex.kind, 16.0);
-            ui.add_space(10.0);
-            ui.vertical(|ui| {
-                ui.add(egui::Label::new(semibold(RichText::new(&e.ex.title).size(TXT_SUBHEAD).color(BRIGHT()))).wrap());
-                let when = [e.place.clone(), super::log::ago(e.at)].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
-                ui.label(RichText::new(when).size(TXT_SMALL).color(MUTED()));
-            });
-        });
-        if !e.ex.hint.is_empty() {
-            ui.add_space(8.0);
-            ui.add(egui::Label::new(RichText::new(&e.ex.hint).size(TXT_BODY).color(TEXT())).wrap());
-        }
-        ui.add_space(10.0);
-        egui::Grid::new("err-details").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
-            for (k, v) in detail_rows(e) {
-                ui.label(RichText::new(k).size(TXT_SMALL).color(MUTED()));
-                ui.label(RichText::new(v).monospace().size(TXT_SMALL).color(if k == "Code" { ALERT() } else { TEXT() }));
-                ui.end_row();
+        ui.set_width(600.0);
+        let when = [e.place.clone(), super::log::ago(e.at)].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("  ·  ");
+        dialog_head(ui, &Head::new(e.ex.title.as_str()).sub(when).glyph(glyphs::warn).tone(kind_color(e.ex.kind)));
+        dialog_body(ui, |ui| {
+            if !e.ex.hint.is_empty() {
+                ui.add(egui::Label::new(RichText::new(&e.ex.hint).size(TXT_BODY).color(TEXT())).wrap());
+                ui.add_space(14.0);
             }
+            form_card(ui, "Details", "", |rows| {
+                rows.label_width(110.0);
+                for (k, v) in detail_rows(e) {
+                    rows.row(k, "", |ui| {
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.add(egui::Label::new(RichText::new(v).monospace().size(TXT_SMALL).color(if k == "Code" { ALERT() } else { TEXT() })).truncate());
+                        });
+                    });
+                }
+            });
+            card_caption(ui, "Server message", "");
+            raw_well(ui, e, TEXT());
+            ui.add_space(6.0);
+            ui.label(RichText::new("Copied text leaves out passwords in connection strings.").size(TXT_SMALL).color(FAINT()));
         });
-        ui.add_space(10.0);
-        ui.label(semibold(RichText::new("Server message").size(TXT_SMALL).color(MUTED())));
-        ui.add_space(4.0);
-        raw_well(ui, e, TEXT());
-        ui.add_space(6.0);
-        ui.label(RichText::new("Copied text leaves out passwords in connection strings.").size(TXT_SMALL).color(FAINT()));
-        dialog_actions(ui, |ui| {
+        dialog_foot(ui, |ui| {
             if primary(ui, "Close", PRIMARY()).on_hover_text("Esc").clicked() {
                 keep = false;
-            }
-            if ui.button("Copy details").clicked() {
-                run = Some(Act::Copy);
             }
             if e.conn.is_some() && ui.button("Edit connection").clicked() {
                 run = Some(Act::Fix(Fix::EditConn));
                 keep = false;
             }
+            foot_left(ui, |ui| {
+                if ui.button("Copy details").clicked() {
+                    run = Some(Act::Copy);
+                }
+            });
         });
         if let Some(a) = run {
             self.run_act(&ui.ctx().clone(), a, Some(e), None);

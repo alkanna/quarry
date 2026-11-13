@@ -7,9 +7,12 @@ impl App {
         ui.set_max_width(860.0);
         ui.set_width(820.0);
         let colls: Vec<String> = self.conn(*conn).and_then(|c| c.dbs.iter().find(|d| d.0 == *db)).and_then(|d| d.1.clone()).unwrap_or_default();
-        dialog_title(ui, format!("Data relations in {db}"));
-        ui.label(RichText::new("A field that holds ids of another collection's documents. Its preview field is shown next to the ids, and \"Go to referenced document\" opens them. Add them by analyzing, or by right-clicking an id and choosing that action.").size(TXT_SMALL).color(MUTED()));
-        ui.add_space(6.0);
+        dialog_head(ui, &Head::new(format!("Data relations in {db}")).sub("Fields that hold ids of another collection's documents").glyph(glyphs::link));
+        let mut b = body_begin(ui);
+        let outer = ui;
+        let ui = &mut b.content_ui;
+        ui.add(egui::Label::new(RichText::new("Each relation's preview field is shown next to its ids, and \"Go to referenced document\" opens them. Add them by analyzing, or by right-clicking an id and choosing that action.").size(TXT_SMALL).color(MUTED())).wrap());
+        ui.add_space(10.0);
         let key = format!("{conn}/{db}");
         let before = self.prefs.relations.get(&key).cloned().unwrap_or_default();
         let list = self.prefs.relations.entry(key.clone()).or_default();
@@ -112,7 +115,9 @@ impl App {
                 None => self.warn_offline(),
             }
         }
-        if done(ui) {
+        b.end(outer);
+        let ui = outer;
+        if dialog_done(ui) {
             *keep = false;
             let reqs: Vec<u64> = self.tabs.iter().filter(|t| t.sel.conn == *conn && t.sel.db == *db).map(|t| t.req).collect();
             for r in reqs {

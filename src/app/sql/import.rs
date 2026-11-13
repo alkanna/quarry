@@ -185,7 +185,10 @@ impl App {
 
     pub(in crate::app) fn sql_import_dialog(&mut self, ui: &mut egui::Ui, f: &mut ImportForm, keep: &mut bool) {
         ui.set_width(720.0);
-        dialog_title(ui, format!("Import into {}", f.table));
+        dialog_head(ui, &Head::new(format!("Import into {}", f.table)).glyph(glyphs::upload));
+        let mut b = body_begin(ui);
+        let outer = ui;
+        let ui = &mut b.content_ui;
         let writable = self.conn_writable(f.conn);
         f.file.poll();
         let ctx = ui.ctx().clone();
@@ -215,14 +218,16 @@ impl App {
                     ui.label(RichText::new("Reading the columns of the table").color(MUTED()));
                 });
                 ui.add_space(8.0);
-                if dialog_actions(ui, |ui| ui.button("Cancel").clicked()) {
+                if dialog_foot(ui, |ui| ui.button("Cancel").clicked()) {
                     *keep = false;
                 }
                 return;
             }
             Some(Err(e)) => {
                 ui.label(RichText::new(e.as_str()).color(ALERT()));
-                if dialog_actions(ui, |ui| ui.button("Close").clicked()) {
+                b.end(outer);
+                let ui = outer;
+                if dialog_foot(ui, |ui| ui.button("Close").clicked()) {
                     *keep = false;
                 }
                 return;

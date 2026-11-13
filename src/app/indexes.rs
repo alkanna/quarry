@@ -224,7 +224,10 @@ impl App {
         let mut ac = std::mem::take(&mut self.ac);
         let t = self.t().unwrap();
         let coll = t.sel.coll.clone();
-        dialog_title(ui, format!("New index on {coll}"));
+        dialog_head(ui, &Head::new(format!("New index on {coll}")).glyph(glyphs::list));
+        let mut b = body_begin(ui);
+        let outer = ui;
+        let ui = &mut b.content_ui;
         caption(ui, "KEYS");
         let id = egui::Id::unique("index-keys");
         ac_field(ui, id, &mut f.keys, &mut ac, &|b, _| suggest(b, FieldKind::Sort, &t.paths, &t.field_info), |ui, text, _| {
@@ -282,7 +285,9 @@ impl App {
         }
         let mut keep = true;
         let mut create = false;
-        dialog_actions(ui, |ui| {
+        b.end(outer);
+        let ui = outer;
+        dialog_foot(ui, |ui| {
             create = ui.add_enabled(spec.is_ok(), primary_button(ui, "Create", PRIMARY())).clicked();
             if ui.button("Cancel").on_hover_text("Esc").clicked() {
                 keep = false;

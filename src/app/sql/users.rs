@@ -293,7 +293,7 @@ fn short_version(v: &str) -> String {
 }
 
 fn sql_block(ui: &mut egui::Ui, text: &str) {
-    egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(12, 10)).show(ui, |ui| {
+    egui::Frame::new().fill(WELL()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_BAR).inner_margin(egui::Margin::symmetric(12, 10)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.add(egui::Label::new(sql_job(text, TXT_BODY)).selectable(true));
     });
@@ -1071,10 +1071,11 @@ impl App {
     pub(in crate::app) fn sql_new_user_dialog(&mut self, ui: &mut egui::Ui, f: &mut NewUser, keep: &mut bool) {
         ui.set_width(520.0);
         let writable = self.conn_writable(f.conn);
-        dialog_title(ui, "New user");
-        ui.label(RichText::new(self.conn(f.conn).map(|c| c.meta.name.clone()).unwrap_or_default()).color(MUTED()));
-        ui.add_space(8.0);
-        egui::Grid::new("newuser").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W + 14.0).show(ui, |ui| {
+        dialog_head(ui, &Head::new("New user").sub(self.conn(f.conn).map(|c| c.meta.name.clone()).unwrap_or_default()).glyph(glyphs::user));
+        let mut b = body_begin(ui);
+        let outer = ui;
+        let ui = &mut b.content_ui;
+        form_grid(ui, "newuser", |ui| {
             form_label(ui, "Name");
             let r = ui.add(egui::TextEdit::singleline(&mut f.user).font(egui::TextStyle::Monospace).desired_width(340.0));
             if !r.has_focus() && f.user.is_empty() && f.password.is_empty() {
@@ -1102,7 +1103,9 @@ impl App {
             ui.label(RichText::new(NOTE_USER).size(TXT_SMALL).color(FAINT()));
         }
         ui.add_space(8.0);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        b.end(outer);
+        let ui = outer;
+        dialog_foot(ui, |ui| {
             if ui.add_enabled(writable && check.is_ok(), primary_button(ui, "Create", PRIMARY())).clicked() {
                 self.sql_user_create_run(f);
                 *keep = false;
@@ -1129,10 +1132,11 @@ impl App {
         let writable = self.conn_writable(f.conn);
         let caps = self.users_caps(f.conn);
         let dialect = self.users_dialect(f.conn);
-        dialog_title(ui, "Change password");
-        ui.label(RichText::new(f.acct.label()).monospace().color(MUTED()));
-        ui.add_space(8.0);
-        egui::Grid::new("newpw").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W + 14.0).show(ui, |ui| {
+        dialog_head(ui, &Head::new("Change password").sub(f.acct.label()).glyph(glyphs::key));
+        let mut b = body_begin(ui);
+        let outer = ui;
+        let ui = &mut b.content_ui;
+        form_grid(ui, "newpw", |ui| {
             form_label(ui, "New password");
             let r = ui.add(egui::TextEdit::singleline(&mut f.password).id(secret_id("change-password", f.serial, 0)).password(true).desired_width(340.0));
             if !r.has_focus() && f.password.is_empty() && f.again.is_empty() {
@@ -1172,7 +1176,9 @@ impl App {
             ui.label(RichText::new(NOTE_APPLY).size(TXT_SMALL).color(FAINT()));
         }
         ui.add_space(8.0);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        b.end(outer);
+        let ui = outer;
+        dialog_foot(ui, |ui| {
             if ui.add_enabled(writable && check.is_ok() && shown.is_ok(), primary_button(ui, "Change password", PRIMARY())).clicked() {
                 self.sql_password_run(f);
                 *keep = false;

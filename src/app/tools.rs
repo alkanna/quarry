@@ -100,7 +100,11 @@ impl App {
     pub(super) fn tool_dialog(&mut self, ui: &mut egui::Ui, f: &mut ToolForm, keep: &mut bool) {
         let name = if f.coll.is_empty() { f.db.clone() } else { format!("{}.{}", f.db, f.coll) };
         ui.set_width(560.0);
-        dialog_title(ui, if f.restore { format!("Restore into {name}") } else { format!("Dump {name}") });
+        let conn_name = self.conn_name(f.conn);
+        dialog_head(ui, &Head::new(if f.restore { format!("Restore into {name}") } else { format!("Dump {name}") }).sub(format!("{conn_name}  ·  MongoDB Database Tools")).glyph(if f.restore { glyphs::upload } else { glyphs::download }));
+        let mut b = body_begin(ui);
+        let outer = ui;
+        let ui = &mut b.content_ui;
         let meta = self.conn(f.conn).map(|c| c.meta.clone()).unwrap_or_default();
         let tool = if f.restore { "mongorestore" } else { "mongodump" };
         let exe = find_exe(tool, if f.restore { &self.prefs.mongorestore } else { &self.prefs.mongodump });
@@ -116,7 +120,7 @@ impl App {
             ui.label(RichText::new("This connection goes through SSH or a proxy, which the MongoDB tools cannot use. Open an SSH port forward and use a direct connection instead.").color(WARNING()));
         }
         ui.add_space(6.0);
-        egui::Grid::new("toolform").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
+        form_grid(ui, "toolform", |ui| {
             form_label(ui, "Archive file");
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut f.path).desired_width(360.0));
@@ -148,8 +152,9 @@ impl App {
                 ui.end_row();
             }
         });
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
+        b.end(outer);
+        let ui = outer;
+        dialog_foot(ui, |ui| {
             let ok = exe.is_some() && !tunneled && !f.path.trim().is_empty() && (!f.restore || !f.from_db.trim().is_empty());
             if ui.add_enabled(ok, primary_button(ui, if f.restore { "Restore…" } else { "Dump" }, if f.restore { WARNING() } else { PRIMARY() })).clicked() {
                 match stored_uri(f.conn) {

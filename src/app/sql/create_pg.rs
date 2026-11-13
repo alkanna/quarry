@@ -3,7 +3,7 @@
 //! `db::sql::pg::create`. MySQL's dialogs are in `sql_create.rs`; this server has no engines, charsets or collations to pick
 //! and a table is built from the structure editor's column model.
 
-use crate::app::sql::create::{list_and, plural, right_actions, sql_block, DropForm, DropKind, NOTE_DB, NOTE_TABLE};
+use crate::app::sql::create::{list_and, plural, sql_block, DropForm, DropKind, NOTE_DB, NOTE_TABLE};
 use crate::app::*;
 use db::sql::create::{Ddl, DropInfo};
 use db::sql::pg::create::{self, Check, DbChoices, DbOpts, NewIndex, TableSpec, Unique};
@@ -442,10 +442,9 @@ impl App {
     pub(in crate::app) fn pg_new_db_dialog(&mut self, ui: &mut egui::Ui, f: &mut PgNewDb, keep: &mut bool) {
         ui.set_width(540.0);
         let writable = self.conn_writable(f.conn);
-        dialog_title(ui, "New database");
-        ui.label(RichText::new(self.conn_name(f.conn)).color(MUTED()));
-        ui.add_space(8.0);
-        egui::Grid::new("pg-newdb").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W + 14.0).show(ui, |ui| {
+        dialog_head(ui, &Head::new("New database").sub(self.conn_name(f.conn)).glyph(glyphs::plus));
+        let built = dialog_body(ui, |ui| {
+        form_grid(ui, "pg-newdb", |ui| {
             form_label(ui, "Name");
             let r = editor_label(ui, &mut f.name, 400.0, "Database name");
             if !f.focused {
@@ -485,16 +484,16 @@ impl App {
                 sql_block(ui, "CREATE DATABASE \"name\";");
                 // An empty name is a form not filled in yet, not a mistake to point at.
                 if !f.name.is_empty() {
-                    ui.label(RichText::new(e.as_str()).size(TXT_SMALL).color(ALERT()));
+                    field_note(ui, e.as_str(), ALERT());
                 }
             }
         }
-        ui.label(RichText::new("A database cannot be locked, so undo removes it only while it is empty and nobody else is connected.").size(TXT_SMALL).color(FAINT()));
-        if !writable {
-            ui.label(RichText::new(NOTE_DB).size(TXT_SMALL).color(FAINT()));
-        }
+        ui.add_space(8.0);
+        ui.add(egui::Label::new(RichText::new("A database cannot be locked, so undo removes it only while it is empty and nobody else is connected.").size(TXT_SMALL).color(MUTED())).wrap());
+        built
+        });
         let ok = writable && f.choices.is_some() && built.is_ok();
-        right_actions(ui, |ui| {
+        dialog_foot(ui, |ui| {
             if ui.add_enabled(ok, primary_button(ui, "Create", PRIMARY())).clicked() {
                 if let Some(sql) = self.sql_db_for(f.conn, None) {
                     self.worker.pg_create_db(f.conn, sql, f.name.clone(), f.opts.clone(), !writable);
@@ -504,16 +503,18 @@ impl App {
             if ui.button("Cancel").on_hover_text("Esc").clicked() {
                 *keep = false;
             }
+            if !writable {
+                foot_note(ui, NOTE_DB);
+            }
         });
     }
 
     pub(in crate::app) fn pg_new_schema_dialog(&mut self, ui: &mut egui::Ui, f: &mut PgNewSchema, keep: &mut bool) {
         ui.set_width(480.0);
         let writable = self.conn_writable(f.conn);
-        dialog_title(ui, "New schema");
-        ui.label(RichText::new(format!("{} · {}", self.conn_name(f.conn), f.database)).color(MUTED()));
-        ui.add_space(8.0);
-        egui::Grid::new("pg-newschema").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W + 14.0).show(ui, |ui| {
+        dialog_head(ui, &Head::new("New schema").sub(format!("in {} on {}", f.database, self.conn_name(f.conn))).glyph(glyphs::plus));
+        let built = dialog_body(ui, |ui| {
+        form_grid(ui, "pg-newschema", |ui| {
             form_label(ui, "Name");
             let r = editor_label(ui, &mut f.name, 320.0, "Schema name");
             if !f.focused {
@@ -529,15 +530,17 @@ impl App {
             Err(e) => {
                 sql_block(ui, "CREATE SCHEMA \"name\";");
                 if !f.name.is_empty() {
-                    ui.label(RichText::new(e.as_str()).size(TXT_SMALL).color(ALERT()));
+                    field_note(ui, e.as_str(), ALERT());
                 }
             }
         }
-        if !writable {
-            ui.label(RichText::new(NOTE_DB).size(TXT_SMALL).color(FAINT()));
-        }
+        built
+        });
         let ok = writable && built.is_ok();
-        right_actions(ui, |ui| {
+        dialog_foot(ui, |ui| {
+            if !writable {
+                foot_note(ui, NOTE_DB);
+            }
             if ui.add_enabled(ok, primary_button(ui, "Create schema", PRIMARY())).clicked() {
                 if let Some(sql) = self.sql_db_for(f.conn, None) {
                     self.worker.pg_create_schema(f.conn, sql.at(&f.database), f.name.clone(), !writable);
@@ -554,10 +557,9 @@ impl App {
         ui.set_max_width(780.0);
         ui.set_width(740.0);
         let writable = self.conn_writable(f.conn);
-        dialog_title(ui, "New table");
-        ui.label(RichText::new(format!("{} · {}", f.database, f.schema)).color(MUTED()));
-        ui.add_space(8.0);
-        egui::Grid::new("pg-newtable-head").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
+        dialog_head(ui, &Head::new("New table").sub(format!("in {}.{} on {}", f.database, f.schema, self.conn_name(f.conn))).glyph(glyphs::table));
+        let (ok, summary) = dialog_body(ui, |ui| {
+        form_grid(ui, "pg-newtable-head", |ui| {
             form_label(ui, "Name");
             let r = editor_label(ui, &mut f.name, 320.0, "Table name");
             if !f.focused {
@@ -569,7 +571,7 @@ impl App {
             ui.add(egui::TextEdit::singleline(&mut f.comment).desired_width(320.0)).widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Table comment"));
             ui.end_row();
         });
-        ui.add_space(8.0);
+        card_caption(ui, "Columns", "columns, keys and indexes can be changed later in Structure");
         self.pg_column_grid(ui, f);
         ui.add_space(4.0);
         ui.horizontal(|ui| {
@@ -577,11 +579,9 @@ impl App {
                 let n = f.cols.len() + 1;
                 f.cols.push(PgCol { def: ColDef::new(&format!("column_{n}"), "text"), pk: false, unique: false });
             }
-            ui.label(RichText::new("Columns, keys and indexes can be changed later in Structure").size(TXT_SMALL).color(FAINT()));
         });
-        ui.add_space(10.0);
-        caption(ui, "KEYS, CHECKS AND INDEXES");
-        ui.add_space(4.0);
+        ui.add_space(16.0);
+        card_caption(ui, "Keys, checks and indexes", "");
         self.pg_constraint_list(ui, f);
         ui.add_space(4.0);
         ui.horizontal(|ui| {
@@ -611,22 +611,19 @@ impl App {
             }
         }
         match (built, &keys) {
-            (Err(e), _) if !f.name.is_empty() => {
-                ui.label(RichText::new(e.as_str()).size(TXT_SMALL).color(ALERT()));
-            }
-            (_, Some((e, loading))) => {
-                ui.label(RichText::new(e.as_str()).size(TXT_SMALL).color(if *loading { FAINT() } else { ALERT() }));
-            }
+            (Err(e), _) if !f.name.is_empty() => field_note(ui, e.as_str(), ALERT()),
+            (_, Some((e, loading))) => field_note(ui, e.as_str(), if *loading { FAINT() } else { ALERT() }),
             _ => {}
         }
         if !spec.fks.is_empty() {
-            ui.label(RichText::new("Each foreign key locks the table it points at while the table is made. PostgreSQL makes no index for the referencing columns; add one under Index if rows are looked up by them.").size(TXT_SMALL).color(FAINT()));
+            ui.add_space(6.0);
+            ui.add(egui::Label::new(RichText::new("Each foreign key locks the table it points at while the table is made. PostgreSQL makes no index for the referencing columns; add one under Index if rows are looked up by them.").size(TXT_SMALL).color(MUTED())).wrap());
         }
-        if !writable {
-            ui.label(RichText::new(NOTE_TABLE).size(TXT_SMALL).color(FAINT()));
-        }
-        let ok = writable && built.is_ok() && keys.is_none();
-        right_actions(ui, |ui| {
+        let keys_of: Vec<String> = f.cols.iter().filter(|c| c.pk).map(|c| c.def.name.clone()).collect();
+        let summary = format!("{} column{}{}", f.cols.len(), if f.cols.len() == 1 { "" } else { "s" }, if keys_of.is_empty() { String::new() } else { format!("  ·  primary key {}", keys_of.join(", ")) });
+        (writable && built.is_ok() && keys.is_none(), summary)
+        });
+        dialog_foot(ui, |ui| {
             if ui.add_enabled(ok, primary_button(ui, "Create table", PRIMARY())).clicked() {
                 if let Some(sql) = self.sql_db_for(f.conn, None) {
                     self.worker.pg_create_table(f.conn, sql.at(&f.database), f.spec(), !writable);
@@ -639,6 +636,7 @@ impl App {
             if ui.button("Cancel").on_hover_text("Esc").clicked() {
                 *keep = false;
             }
+            foot_note(ui, if writable { &summary } else { NOTE_TABLE });
         });
     }
 
@@ -647,7 +645,7 @@ impl App {
         let mut remove = None;
         // The names before this frame's typing, so a renamed column takes its picks in keys and indexes with it.
         let names: Vec<String> = f.cols.iter().map(|c| c.def.name.clone()).collect();
-        egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| {
+        card_frame().inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| {
             ui.set_width(ui.available_width());
             egui::ScrollArea::vertical().max_height(250.0).auto_shrink([false, true]).show(ui, |ui| {
                 egui::Grid::new("pg-newtable-cols").num_columns(7).spacing([10.0, 6.0]).show(ui, |ui| {
@@ -764,7 +762,7 @@ impl App {
         }
         let (mut drop_u, mut drop_c, mut drop_f, mut drop_i) = (None, None, None, None);
         let this = format!("{} (this table)", if f.name.is_empty() { "new table" } else { f.name.as_str() });
-        egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| {
+        card_frame().inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| {
             ui.set_width(ui.available_width());
             egui::ScrollArea::vertical().id_salt("pg-newtable-keys").max_height(230.0).auto_shrink([false, true]).show(ui, |ui| {
                 egui::Grid::new("pg-newtable-keys-grid").num_columns(3).spacing([10.0, 8.0]).show(ui, |ui| {
@@ -1007,9 +1005,7 @@ impl App {
 /// locale, and the server refuses another, so the picks are offered on template0 only; on any other the section says what the copy
 /// gets and how to change it.
 fn pg_locale_section(ui: &mut egui::Ui, o: &mut DbOpts, ch: &DbChoices) {
-    ui.add_space(10.0);
-    caption(ui, "ENCODING AND LOCALE");
-    ui.add_space(4.0);
+    card_caption(ui, "Encoding and locale", "");
     let note = |ui: &mut egui::Ui, text: String| {
         ui.add(egui::Label::new(RichText::new(text).size(TXT_SMALL).color(FAINT())).wrap());
     };
@@ -1031,7 +1027,7 @@ fn pg_locale_section(ui: &mut egui::Ui, o: &mut DbOpts, ch: &DbChoices) {
         return;
     }
     let enc_before = o.encoding.clone();
-    egui::Grid::new("pg-newdb-locale").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W + 14.0).show(ui, |ui| {
+    form_grid(ui, "pg-newdb-locale", |ui| {
         form_label(ui, "Encoding");
         str_pick(ui, "pg-newdb-enc", "Encoding", 400.0, &mut o.encoding, &format!("Template's ({})", tpl.encoding), &ch.encodings);
         ui.end_row();
