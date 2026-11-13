@@ -47,7 +47,7 @@ fn every_library_state_draws() {
 #[test]
 fn every_rail_state_draws() {
     for s in RAIL {
-        let Some(ui) = draw(|a| a.demo_rail(s)) else { return };
+        let Some(mut ui) = draw(|a| a.demo_rail(s)) else { return };
         // A closed folder hides its members; elsewhere the connecting reports tile shows.
         if matches!(s, "groups" | "tip") {
             ui.show("Production folder");
