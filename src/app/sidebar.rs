@@ -207,11 +207,19 @@ impl App {
             .size_range(200.0..=480.0)
             .resizable(true)
             .frame(egui::Frame::new().fill(PANEL()).inner_margin(egui::Margin { left: 12, right: 12, top: 12, bottom: 8 }))
-            .show(ui, |ui| match self.prefs.side_mode() {
-                // A panel that is not built yet shows the explorer, so a setting from a newer build never leaves the sidebar empty.
-                SideMode::Connections if conns_panel::READY => self.conns_panel(ui),
-                SideMode::Library if library::panel::READY => self.library_panel(ui),
-                _ => self.explorer_panel(ui),
+            .show(ui, |ui| {
+                // The body lives in a child that reports no size back. egui grows a panel to fit content wider than its minimum
+                // but only paints and clips the fill at the clamped width, which left an unpainted band between the sidebar
+                // and the page. The body is clipped at the panel instead, so a row that cannot shrink is cut, never widens it.
+                let room = ui.available_rect_before_wrap();
+                let mut body = ui.new_child(egui::UiBuilder::new().max_rect(room).layout(egui::Layout::top_down(egui::Align::Min)));
+                match self.prefs.side_mode() {
+                    // A panel that is not built yet shows the explorer, so a setting from a newer build never leaves the sidebar empty.
+                    SideMode::Connections if conns_panel::READY => self.conns_panel(&mut body),
+                    SideMode::Library if library::panel::READY => self.library_panel(&mut body),
+                    _ => self.explorer_panel(&mut body),
+                }
+                ui.allocate_rect(room, Sense::hover());
             });
         #[cfg(test)]
         ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("test-sidebar-rect"), shown.response.rect));
