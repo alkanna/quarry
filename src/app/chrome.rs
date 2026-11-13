@@ -75,8 +75,19 @@ impl App {
         // drafts consume it where they draw, so they win. A new page handler of Cmd+S must consume the key too, or its press
         // would also open the Save dialog. A view that holds no script (a table's Content grid, Indexes and the like) leaves
         // the key alone, so a press there while the grid's cell editor is open does not warn about a missing script.
+        // Cmd+Shift+S first: a plain Cmd shortcut also matches it with Shift held.
+        if self.sql_cell.is_none() && self.tab_text().is_some() && k(cmd | shift, Key::S) {
+            self.save_script_as();
+        }
         if self.sql_cell.is_none() && self.tab_text().is_some() && k(cmd, Key::S) {
             self.save_script();
+        }
+        // Cmd+O opens the library picker of the view on screen; a view with no script has none.
+        if self.tab_text().is_some() && k(cmd, Key::O) {
+            self.lib_ui.open_picker = true;
+        }
+        if k(cmd | shift, Key::L) {
+            self.focus_library();
         }
         // Extra Shift and Alt still match a plain Cmd shortcut, so the longer combos go first.
         if k(cmd | shift, Key::T) {
@@ -92,8 +103,10 @@ impl App {
             self.open_new_tab();
         }
         let query_view = self.t().is_some_and(|t| t.view == View::Sql && t.sql.is_some());
-        // With the Library tree focused, Cmd+Enter runs the selected script, which the panel takes itself.
-        let query_view = query_view && !self.lib_ui.panel.focus;
+        // With the Library tree focused, Cmd+Enter runs the selected script, which the panel takes itself. The tree has the keys
+        // only while it is on screen and no text field has taken them, so a flag left from a click never holds the editor's.
+        let tree_keys = self.lib_ui.panel.focus && !self.prefs.sidebar_hidden && self.prefs.side_mode() == SideMode::Library && !ctx.text_edit_focused();
+        let query_view = query_view && !tree_keys;
         if query_view && k(cmd | shift, Key::Enter) {
             self.sql_run(true, false);
         } else if query_view && k(cmd, Key::Enter) {

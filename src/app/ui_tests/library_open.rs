@@ -37,6 +37,11 @@ fn open(ui: &mut UiApp, id: u64, how: How) {
     ui.settle();
 }
 
+/// Whether the app said `part`: in the status line, where the offline demo's notes go, or in a toast.
+fn said(a: &App, part: &str) -> bool {
+    a.status.contains(part) || a.last_problem().contains(part)
+}
+
 fn sql_of(a: &App) -> &SqlTab {
     a.t().and_then(|t| t.sql.as_ref()).expect("a SQL tab")
 }
@@ -168,7 +173,7 @@ fn cmd_enter_in_the_editor_runs_the_query_after_a_click_in_the_library() {
     let before = ui.app().tabs.len();
     ui.key(CMD, egui::Key::Enter);
     assert_eq!(ui.app().tabs.len(), before, "the library script ran instead of the editor's query");
-    assert!(ui.app().last_problem().contains("Offline demo"), "the editor's query did not run: {}", ui.app().last_problem());
+    assert!(said(ui.app(), "Offline demo"), "the editor's query did not run: {}", ui.app().last_problem());
 }
 
 #[test]
@@ -196,7 +201,7 @@ fn return_alt_return_and_cmd_enter_act_on_the_selected_script() {
     pick(&mut ui, 10);
     ui.key(CMD, egui::Key::Enter);
     assert!(sql_of(ui.app()).query.contains("revenue per month"));
-    assert!(ui.app().last_problem().contains("Offline demo"), "Cmd+Enter did not run it: {}", ui.app().last_problem());
+    assert!(said(ui.app(), "Offline demo"), "Cmd+Enter did not run it: {}", ui.app().last_problem());
 }
 
 /// Steps frames until the linked-file reads and writes on the worker are back.
@@ -292,7 +297,7 @@ fn run_on_a_read_only_connection_goes_through_the_read_only_gates() {
     let id = add(ui.h.state_mut(), "sql", 3, "Stale carts", "DELETE FROM carts WHERE id = 1", "shop", "");
     open(&mut ui, id, How::Run);
     // It runs, as a read-only run: the server refuses the write. Nothing is held back for a notice.
-    assert!(ui.app().last_problem().contains("Offline demo"), "{}", ui.app().last_problem());
+    assert!(said(ui.app(), "Offline demo"), "{}", ui.app().last_problem());
     assert!(ui.app().lib_ui.writes.is_empty());
 
     // A pipeline with a write stage stops at the read-only gate.
@@ -307,7 +312,7 @@ fn run_on_a_read_only_connection_goes_through_the_read_only_gates() {
     let id = add(ui.h.state_mut(), "shell", 1, "Clean", "async function run() {\n  return await orders.deleteMany({ a: 1 });\n}", "shop", "");
     open(&mut ui, id, How::Run);
     assert!(!matches!(ui.app().modal, Some(Modal::ShellWrite(_))));
-    assert!(ui.app().last_problem().contains("the shell needs a real connection"), "{}", ui.app().last_problem());
+    assert!(said(ui.app(), "the shell needs a real connection"), "{}", ui.app().last_problem());
 }
 
 #[test]
@@ -316,11 +321,11 @@ fn run_on_a_writable_connection_opens_a_writing_script_with_a_notice() {
     let id = add(ui.h.state_mut(), "sql", 3, "Stale carts", "SELECT 1;\nDELETE FROM carts WHERE id = 1", "shop", "");
     open(&mut ui, id, How::Run);
     assert!(sql_of(ui.app()).query.contains("DELETE FROM carts"));
-    assert!(!ui.app().last_problem().contains("Offline demo"), "it ran: {}", ui.app().last_problem());
+    assert!(!said(ui.app(), "Offline demo"), "it ran: {}", ui.app().last_problem());
     assert!(ui.app().lib_ui.writes.contains(&ui.app().t().unwrap().uid));
     ui.show("This script writes");
     ui.click_nth("Run all", 0);
-    assert!(ui.app().last_problem().contains("Offline demo"), "Run all in the notice did not run it: {}", ui.app().last_problem());
+    assert!(said(ui.app(), "Offline demo"), "Run all in the notice did not run it: {}", ui.app().last_problem());
     assert!(ui.app().lib_ui.writes.is_empty());
 
     let Some(mut ui) = demo_ui(App::load_demo) else { return };
@@ -346,9 +351,9 @@ fn opening_a_pipeline_loads_it_and_only_run_runs_it() {
     let id = add(ui.h.state_mut(), "pipeline", 1, "Totals", "[{ $group: { _id: '$status', n: { $sum: 1 } } }]", "shop", "orders");
     open(&mut ui, id, How::Here);
     assert!(ui.app().t().is_some_and(|t| t.view == View::Aggregate && t.agg_txt.contains("$group")));
-    assert!(!ui.app().last_problem().contains("nothing to run"), "Open ran the pipeline: {}", ui.app().last_problem());
+    assert!(!said(ui.app(), "nothing to run"), "Open ran the pipeline: {}", ui.app().last_problem());
     open(&mut ui, id, How::Run);
-    assert!(ui.app().last_problem().contains("nothing to run"), "Run did not run it: {}", ui.app().last_problem());
+    assert!(said(ui.app(), "nothing to run"), "Run did not run it: {}", ui.app().last_problem());
 }
 
 /// An app with no demo flag, where a script on a connection that is not ready waits for it.
@@ -458,7 +463,59 @@ fn the_conflict_banner_shows_on_a_query_tab_and_reload_can_be_undone() {
     ui.click("Reload");
     io(&mut ui.h);
     assert_eq!(sql_of(ui.app()).query, "select 2");
-    ui.click("Undo");
+    ui.click_last("Undo");
     assert_eq!(sql_of(ui.app()).query, "select 1 -- mine", "Undo did not bring the edits back");
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+fn panel(a: &mut App) {
+    sql_query(a);
+    a.demo_library("panel");
+    a.lib_ui.panel.sel = None;
+}
+
+#[test]
+fn the_library_menus_are_as_narrow_as_the_apps_other_menus() {
+    let Some(mut ui) = demo_ui(panel) else { return };
+    let max = crate::app::library::panel::MENU_MAX_W + 2.0;
+    ui.click("Library menu");
+    for item in ["Link a folder\u{2026}", "Fold all", "Show all connections"] {
+        ui.show(item);
+        let w = ui.h.get_by_label(item).rect().width();
+        assert!(w <= max, "{item} is {w} px wide");
+    }
+    ui.key(egui::Modifiers::NONE, egui::Key::Escape);
+    // The row menu, with its shortcuts on the right of each item, keeps the same width.
+    ui.show("Top customers");
+    let at = ui.h.get_by_label("Top customers").rect().center();
+    ui.h.hover_at(at);
+    ui.h.run_steps(2);
+    ui.click("More for Top customers");
+    for item in ["Open", "Open in a new tab", "Run all", "Move to folder"] {
+        ui.show(item);
+        let w = ui.h.get_by_label(item).rect().width();
+        assert!(w <= max && w >= 120.0, "{item} is {w} px wide");
+    }
+}
+
+#[test]
+fn a_script_opens_on_another_connection_from_its_menu() {
+    let Some(mut ui) = demo_ui(|a| {
+        panel(a);
+        a.conns.push(Conn { writable: true, ..conn(4, "shop-staging", db::sql::Engine::MySql, Status::Ready) });
+    }) else { return };
+    let tabs = ui.app().tabs.len();
+    ui.show("Top customers");
+    let at = ui.h.get_by_label("Top customers").rect().center();
+    ui.h.hover_at(at);
+    ui.h.run_steps(2);
+    ui.click("More for Top customers");
+    ui.click("Open on");
+    ui.click("shop-staging");
+    let a = ui.app();
+    assert!(a.tabs.len() > tabs || a.t().is_some_and(|t| t.sel.conn == 4));
+    assert_eq!(a.t().map(|t| t.sel.conn), Some(4));
+    assert!(sql_of(a).query.starts_with("SELECT customer_id"));
+    // The script keeps its own connection.
+    assert_eq!(a.library.scripts.iter().find(|s| s.id == 11).map(|s| s.conn), Some(3));
 }

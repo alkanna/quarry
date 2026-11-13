@@ -455,6 +455,81 @@ impl App {
         self.open_save_dialog(tt);
     }
 
+    /// Cmd+Shift+S and the chip's Save as new: the Save dialog for the tab's text as a new script, whatever the tab is bound
+    /// to, so the bound one stays as it was.
+    pub(in crate::app) fn save_script_as(&mut self) {
+        let Some(tt) = self.tab_text() else { return };
+        if tt.body.trim().is_empty() && tt.sort.trim().is_empty() && tt.project.trim().is_empty() {
+            return self.warn("Nothing to save: the script is empty.");
+        }
+        let name = self.t().and_then(|t| t.script.as_ref()).map(|b| self.script_name(&b.r));
+        self.open_save_dialog(tt);
+        if let (Some(Modal::SaveScript(f)), Some(n)) = (&mut self.modal, name) {
+            let stem = std::path::Path::new(&n).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or(n);
+            f.name = format!("{stem} copy");
+        }
+    }
+
+    /// Cmd+Shift+L: the Library panel on screen with the keys on its tree.
+    pub(in crate::app) fn focus_library(&mut self) {
+        if self.prefs.sidebar_hidden || self.prefs.side_mode() != SideMode::Library {
+            self.prefs.set_side_mode(SideMode::Library);
+            self.prefs.sidebar_hidden = false;
+            self.save_prefs();
+        }
+        self.lib_ui.focus_tree = true;
+    }
+
+    /// The chip's Show in library: the panel on screen with the script selected and the folders above it open.
+    pub(in crate::app) fn show_in_library(&mut self, r: &ScriptRef) {
+        use crate::library::tree::Node;
+        self.focus_library();
+        let st = &mut self.lib_ui.panel;
+        st.query.clear();
+        let node = match r {
+            ScriptRef::Saved(id) => {
+                let lib = &self.library;
+                let mut at = lib.scripts.iter().find(|s| s.id == *id).and_then(|s| crate::library::tree::live_parent(lib, s.folder));
+                // Bounded, since a hand-edited file could hold a loop of folders.
+                for _ in 0..32 {
+                    let Some(f) = at else { break };
+                    st.open.insert(Node::Folder(f));
+                    at = lib.folders.iter().find(|x| x.id == f).and_then(|x| crate::library::tree::live_parent(lib, x.parent));
+                }
+                // A script of another connection shows only in the All connections scope.
+                let conn = lib.scripts.iter().find(|s| s.id == *id).map(|s| s.conn);
+                if conn.is_some() && conn != self.t().map(|t| t.sel.conn).or(self.active) {
+                    self.prefs.lib_scope_all = true;
+                }
+                Node::Script(*id)
+            }
+            ScriptRef::File { link, rel } => {
+                st.open.insert(Node::Link(*link));
+                let mut at = std::path::PathBuf::new();
+                for c in rel.parent().into_iter().flat_map(|p| p.components()) {
+                    at.push(c);
+                    st.open.insert(Node::Dir { link: *link, rel: at.clone() });
+                }
+                Node::File { link: *link, rel: rel.clone() }
+            }
+        };
+        let st = &mut self.lib_ui.panel;
+        st.sel = Some(node);
+        st.focus = true;
+    }
+
+    /// The chip's Unbind: the tab keeps its text but no longer writes back to the script, so Cmd+S asks again.
+    pub(in crate::app) fn unbind_script(&mut self) {
+        if let Some(t) = self.tm() {
+            t.script = None;
+        }
+    }
+
+    /// The connection the Library panel scopes to: the current tab's, else the active one.
+    pub(in crate::app) fn lib_conn(&self) -> Option<u64> {
+        self.t().map(|t| t.sel.conn).filter(|c| self.conn(*c).is_some()).or(self.active.filter(|c| self.conn(*c).is_some()))
+    }
+
     /// A SQL script with a password in it is saved as typed, since one with the password cut out would not run, and the
     /// person is told where it now sits.
     pub(in crate::app) fn warn_plain_password(&mut self, tt: &TabText) {

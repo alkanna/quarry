@@ -4,7 +4,7 @@
 #![allow(dead_code)]
 
 use super::*;
-use crate::library::{Library, ScriptRef};
+use crate::library::Library;
 
 pub(super) mod link_dialog;
 pub(super) mod linked;
@@ -53,6 +53,15 @@ pub(super) struct LibUi {
     pub(in crate::app) open_picker: bool,
     /// Cmd+Shift+L asked for the tree: the panel selects its first row if none is selected and takes the keys.
     pub(in crate::app) focus_tree: bool,
+}
+
+/// A shortcut spelled as the palette spells it: the key glyphs on macOS, words elsewhere, where Cmd is Ctrl.
+pub(in crate::app) fn keys_text(cmd: bool, shift: bool, alt: bool, key: &str) -> String {
+    if cfg!(target_os = "macos") {
+        format!("{}{}{}{key}", if alt { "\u{2325}" } else { "" }, if shift { "\u{21e7}" } else { "" }, if cmd { "\u{2318}" } else { "" })
+    } else {
+        format!("{}{}{}{key}", if cmd { "Ctrl+" } else { "" }, if shift { "Shift+" } else { "" }, if alt { "Alt+" } else { "" })
+    }
 }
 
 /// Reads library.json. Its lists are parsed entry by entry: a bad script or folder is skipped and the file copied to

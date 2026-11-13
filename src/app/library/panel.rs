@@ -59,6 +59,10 @@ enum Act {
     FoldAll,
     Scope(bool),
     Link,
+    /// Open on another connection than the script's own, from the Open on submenu.
+    OpenOn(Node, u64),
+    /// The empty state's Save current query: the Save dialog for the current tab.
+    SaveCurrent,
     Refuse(&'static str),
     /// A linked folder's own actions: a new file or folder in it (link, folder below it), a read of the disk, the file
     /// manager (path, select it), the path on the clipboard, the text of a file, Use on connections and Unlink.
@@ -194,6 +198,9 @@ struct RowCx<'a> {
     /// The linked files that changed on disk since Quarry last opened or saved them.
     changed: &'a HashSet<(u64, PathBuf)>,
     active: Option<u64>,
+    groups: &'a crate::app::groups::Groups,
+    /// The search, for the matched part of a name and the "in text" of a hit inside the script.
+    query: String,
     /// The item being dragged, if a drag of a script or folder is on.
     drag: Option<Node>,
     demo_drag: Option<&'a (Node, Node)>,
@@ -221,6 +228,42 @@ impl Look {
 impl RowCx<'_> {
     fn conn_name(&self, id: u64) -> String {
         self.conns.iter().find(|c| c.meta.id == id).map_or_else(|| "removed connection".to_string(), |c| c.meta.name.clone())
+    }
+
+    /// The connections a script or file can open on besides its own, for the Open on submenu: same engine for a saved
+    /// script, the connections its link is used on for a file, with the current one first and the rest by group.
+    fn open_on(&self, node: &Node) -> Vec<(String, Vec<(u64, String)>)> {
+        let fits: Box<dyn Fn(&Conn) -> bool> = match node {
+            Node::Script(id) => {
+                let Some(s) = self.lib.scripts.iter().find(|s| s.id == *id) else { return Vec::new() };
+                let own = self.conns.iter().find(|c| c.meta.id == s.conn).map(|c| c.meta.engine);
+                let kind = s.kind.clone();
+                Box::new(move |c: &Conn| super::open::kind_fits(&kind, c.meta.engine) && own.is_none_or(|e| e == c.meta.engine))
+            }
+            Node::File { link, rel } => {
+                let Some(l) = self.lib.links.iter().find(|l| l.id == *link).cloned() else { return Vec::new() };
+                let kind = self.scans.get(link).and_then(|s| s.entries.iter().find(|e| e.rel == *rel)).map(|e| e.kind.clone()).or_else(|| crate::library::format::kind_of_ext(&crate::library::format::ext_of(rel)).map(String::from)).unwrap_or_default();
+                Box::new(move |c: &Conn| crate::library::format::fits(&l, &kind, c.meta.id, c.meta.engine))
+            }
+            _ => return Vec::new(),
+        };
+        let fit: Vec<&Conn> = self.conns.iter().filter(|c| fits(c)).collect();
+        let mut out: Vec<(String, Vec<(u64, String)>)> = Vec::new();
+        if let Some(c) = self.active.and_then(|a| fit.iter().find(|c| c.meta.id == a)) {
+            out.push((String::new(), vec![(c.meta.id, c.meta.name.clone())]));
+        }
+        let rest = |c: &&Conn| Some(c.meta.id) != self.active;
+        for g in &self.groups.groups {
+            let ids: Vec<(u64, String)> = g.members.iter().filter_map(|m| fit.iter().find(|c| c.meta.id == *m)).filter(rest).map(|c| (c.meta.id, c.meta.name.clone())).collect();
+            if !ids.is_empty() {
+                out.push((g.name.clone(), ids));
+            }
+        }
+        let loose: Vec<(u64, String)> = fit.iter().filter(rest).filter(|c| self.groups.group_of(c.meta.id).is_none()).map(|c| (c.meta.id, c.meta.name.clone())).collect();
+        if !loose.is_empty() {
+            out.push((if out.is_empty() { String::new() } else { "Not in a group".into() }, loose));
+        }
+        out
     }
 
     fn look(&self, row: &Row) -> Look {
@@ -286,7 +329,7 @@ fn row_tool(ui: &mut egui::Ui, id: egui::Id, at: egui::Rect, glyph: glyphs::Glyp
 
 /// A bordered button with the play mark, for Run in the preview card.
 fn run_chip(ui: &mut egui::Ui) -> egui::Response {
-    let g = ui.painter().layout_job(LayoutJob::single_section("Run".into(), ui_fmt(TXT_BODY, Color32::PLACEHOLDER, W_MEDIUM, 0.0)));
+    let g = ui.painter().layout_job(LayoutJob::single_section("Run all".into(), ui_fmt(TXT_BODY, Color32::PLACEHOLDER, W_MEDIUM, 0.0)));
     let (rect, r) = ui.allocate_exact_size(egui::vec2(g.size().x + 38.0, BUTTON_H), Sense::click());
     let state = state_of(&r);
     ui.painter().rect(rect, R_MD, [RAISED(), shade(RAISED(), 0.12), shade(RAISED(), 0.24)][state], Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
@@ -294,12 +337,40 @@ fn run_chip(ui: &mut egui::Ui) -> egui::Response {
     let dy = optical_dy(&g);
     ui.painter().galley(egui::pos2(rect.left() + 28.0, rect.center().y - g.size().y / 2.0 + dy), g, TEXT());
     focus_ring(ui, &r, rect, R_MD as f32);
-    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Run"));
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Run all"));
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// The widest a Library menu grows: a long folder or connection name is cut rather than stretching the menu.
+pub(in crate::app) const MENU_MAX_W: f32 = 260.0;
+
+/// Sets up a Library menu as the app's other menus are (the Connections group menu, the tab and rail menus): the menu
+/// look, their padding, and a width that follows the items up to `MENU_MAX_W`.
+fn lib_menu(ui: &mut egui::Ui) {
+    menu_look(ui);
+    ui.spacing_mut().item_spacing.y = 2.0;
+    ui.spacing_mut().button_padding = egui::vec2(10.0, 5.0);
+    ui.set_max_width(MENU_MAX_W);
+}
+
+/// One item of a Library menu: the interface font, the shortcut faint on the right, and a check at the right end for an
+/// option that is on, as the other menus draw them.
+fn lib_button(ui: &mut egui::Ui, label: &str, key: &str, checked: bool) -> egui::Response {
+    let mut b = egui::Button::new(label).truncate();
+    if !key.is_empty() {
+        b = b.shortcut_text(RichText::new(key).color(FAINT()));
+    }
+    let r = ui.add(b);
+    if checked {
+        paint_check(ui.painter(), egui::pos2(r.rect.right() - 14.0, r.rect.center().y), TEXT());
+        let label = label.to_string();
+        r.widget_info(|| egui::WidgetInfo::selected(egui::Role::MenuItem, true, true, label.clone()));
+    }
+    r
+}
+
 fn menu_item(ui: &mut egui::Ui, acts: &mut Vec<Act>, label: &str, key: &str, act: Act) {
-    if menu_row(ui, label, TEXT(), false, key).clicked() {
+    if lib_button(ui, label, key, false).clicked() {
         acts.push(act);
         ui.close();
     }
@@ -318,16 +389,38 @@ fn reveal_label() -> &'static str {
 /// The menu of a row: what Return, Alt+Return, Cmd+Enter and F2 do, plus the rest. A linked folder has its own: new files
 /// and folders, a read of the disk, the file manager, which connections use it, and Unlink. A linked file edits like a script
 /// kept by Quarry, but on disk: Rename renames the file and Delete moves it to the Trash.
-fn node_menu(ui: &mut egui::Ui, lib: &Library, links: &[crate::library::Link], node: &Node, kind: &str, acts: &mut Vec<Act>) {
-    menu_look(ui);
+fn node_menu(ui: &mut egui::Ui, cx: &RowCx, node: &Node, kind: &str, acts: &mut Vec<Act>) {
+    let (lib, links) = (cx.lib, &cx.lib.links);
+    lib_menu(ui);
     let run = kind != "filter";
     let path_of = |link: u64, rel: &Path| links.iter().find(|l| l.id == link).map(|l| if rel.as_os_str().is_empty() { l.path.clone() } else { l.path.join(rel) }).unwrap_or_default();
     match node {
         Node::Script(_) | Node::File { .. } => {
-            menu_item(ui, acts, "Open", "Return", Act::Open(node.clone(), How::Here));
-            menu_item(ui, acts, "Open in a new tab", "Alt+Return", Act::Open(node.clone(), How::NewTab));
+            menu_item(ui, acts, "Open", &super::keys_text(false, false, false, "Enter"), Act::Open(node.clone(), How::Here));
+            menu_item(ui, acts, "Open in a new tab", &super::keys_text(false, false, true, "Enter"), Act::Open(node.clone(), How::NewTab));
             if run {
-                menu_item(ui, acts, "Run", "Cmd+Enter", Act::Open(node.clone(), How::Run));
+                menu_item(ui, acts, "Run all", &super::keys_text(true, false, false, "Enter"), Act::Open(node.clone(), How::Run));
+            }
+            // A script kept by Quarry belongs to one connection; this opens it on another of the same engine.
+            let on = cx.open_on(node);
+            if !on.is_empty() {
+                ui.menu_button("Open on", |ui| {
+                    lib_menu(ui);
+                    for (i, (group, conns)) in on.iter().enumerate() {
+                        if !group.is_empty() {
+                            if i > 0 {
+                                ui.separator();
+                            }
+                            ui.horizontal(|ui| {
+                                ui.add_space(10.0);
+                                caption(ui, group.to_uppercase());
+                            });
+                        }
+                        for (id, name) in conns {
+                            menu_item(ui, acts, name, "", Act::OpenOn(node.clone(), *id));
+                        }
+                    }
+                });
             }
         }
         _ => {}
@@ -368,10 +461,10 @@ fn node_menu(ui: &mut egui::Ui, lib: &Library, links: &[crate::library::Link], n
         let (label, linked_file) = if matches!(node, Node::File { .. }) { ("Copy to folder", true) } else { ("Move to folder", false) };
         let go = |to: DropAt| if linked_file { Act::Drop(node.clone(), Plan::Out(to)) } else { Act::Move(node.clone(), to) };
         ui.menu_button(label, |ui| {
-            menu_look(ui);
+            lib_menu(ui);
             for (id, depth, name) in ops::folder_list(lib, skip) {
-                let label = format!("{}{}", "  ".repeat(depth), name);
-                if menu_row(ui, &label, TEXT(), cur == Some(id), "").clicked() {
+                let label = format!("{}{}", "    ".repeat(depth), name);
+                if lib_button(ui, &label, "", cur == Some(id)).clicked() {
                     acts.push(go(DropAt::Into(id)));
                     ui.close();
                 }
@@ -420,13 +513,17 @@ impl App {
 
     fn library_body(&mut self, ui: &mut egui::Ui, st: &mut PanelUi, acts: &mut Vec<Act>) {
         let ctx = ui.ctx().clone();
-        let active = self.active.filter(|id| self.conn(*id).is_some());
+        let active = self.lib_conn();
         let all = self.prefs.lib_scope_all || active.is_none();
         let active_name = active.and_then(|id| self.conn(id)).map(|c| c.meta.name.clone());
         let scope_conn = if all { None } else { active };
 
-        // A press outside the panel hands the keys back to the page.
+        // A press outside the panel hands the keys back to the page, and so does a text field taking the keyboard, such as
+        // the editor reached with Tab.
         if ctx.input(|i| i.pointer.any_pressed()) && ctx.pointer_interact_pos().is_some_and(|p| !ui.max_rect().contains(p)) {
+            st.focus = false;
+        }
+        if ctx.text_edit_focused() {
             st.focus = false;
         }
 
@@ -440,15 +537,16 @@ impl App {
             ui.label(LayoutJob::single_section("LIBRARY".into(), ui_fmt(TXT_SECTION, MUTED(), W_SEMIBOLD, 0.6)));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let r = dots_menu(ui, |ui| {
-                    if menu_row(ui, "Link a folder…", TEXT(), false, "").clicked() {
+                    lib_menu(ui);
+                    if lib_button(ui, "Link a folder\u{2026}", "", false).clicked() {
                         acts.push(Act::Link);
                         ui.close();
                     }
-                    if menu_row(ui, "Fold all", TEXT(), false, "").clicked() {
+                    if lib_button(ui, "Fold all", "", false).clicked() {
                         acts.push(Act::FoldAll);
                         ui.close();
                     }
-                    if menu_row(ui, "Show all connections", TEXT(), all, "").clicked() {
+                    if lib_button(ui, "Show all connections", "", all).clicked() {
                         acts.push(Act::Scope(!all));
                         ui.close();
                     }
@@ -501,6 +599,23 @@ impl App {
         if st.sel.as_ref().is_some_and(|n| !rows.iter().any(|r| r.node == *n)) && st.rename.is_none() {
             st.sel = None;
         }
+        // Cmd+Shift+L: the tree takes the keys, on its first row when none is selected.
+        if std::mem::take(&mut self.lib_ui.focus_tree) {
+            ctx.memory_mut(|m| {
+                if let Some(id) = m.focused() {
+                    m.surrender_focus(id);
+                }
+            });
+            st.focus = true;
+            if st.sel.is_none() {
+                st.sel = rows.first().map(|r| r.node.clone());
+            }
+        }
+        if !st.query.trim().is_empty() {
+            let hits = rows.iter().filter(|r| r.hit).count();
+            ui.label(RichText::new(format!("{hits} match{}", if hits == 1 { "" } else { "es" })).size(TXT_CAPTION).color(FAINT()));
+            ui.add_space(4.0);
+        }
         self.library_keys(&ctx, st, &rows, acts);
 
         // Tree, splitter and preview share what is left of the panel's height.
@@ -518,6 +633,8 @@ impl App {
             scans: &self.lib_ui.scans,
             changed: &self.lib_ui.changed,
             active,
+            groups: &self.groups,
+            query: st.query.trim().to_string(),
             // Esc drops the payload; drag_cancelled keeps the marks off until the button comes up.
             drag: egui::DragAndDrop::payload::<DragItem>(&ctx).filter(|_| !drag_cancelled(&ctx)).and_then(|d| item_node(&d)),
             demo_drag: demo_drag.as_ref(),
@@ -584,9 +701,16 @@ impl App {
             (Some(n), false) => format!("No saved scripts on {n}"),
             _ => "No saved scripts".to_string(),
         };
-        empty_state(ui, paint_book, &title, "Press Cmd+S in a query to keep it here,\nor link a folder of scripts from a repo.", |ui| {
+        // Saving what is on screen is the likely first step, so it leads when there is something to save.
+        let can_save = self.tab_text().is_some_and(|t| !t.body.trim().is_empty());
+        let hint = format!("Press {} in a query to keep it here, or link a folder of scripts from a repo.", super::keys_text(true, false, false, "S"));
+        empty_state(ui, paint_book, &title, &hint, |ui| {
             ui.add_space(10.0);
-            if primary(ui, "Link a folder…", PRIMARY()).clicked() {
+            if ui.add_enabled_ui(can_save, |ui| primary(ui, "Save current query", PRIMARY())).inner.clicked() {
+                acts.push(Act::SaveCurrent);
+            }
+            ui.add_space(2.0);
+            if quiet(ui, "Link a folder\u{2026}").clicked() {
                 acts.push(Act::Link);
             }
             ui.add_space(2.0);
@@ -606,8 +730,9 @@ impl App {
     }
 
     /// Return, Alt+Return, Cmd+Enter, F2, Delete and the arrows, while a row has been clicked and no text box has the keys.
+    /// A row that has the keyboard focus (reached with Tab) still lets them through: only a text field takes them.
     fn library_keys(&mut self, ctx: &egui::Context, st: &mut PanelUi, rows: &[Row], acts: &mut Vec<Act>) {
-        if !st.focus || self.window_open() || st.rename.is_some() || ctx.egui_wants_keyboard_input() {
+        if !st.focus || self.window_open() || st.rename.is_some() || ctx.text_edit_focused() {
             return;
         }
         let none = egui::Modifiers::NONE;
@@ -699,6 +824,7 @@ impl App {
             }
             None => return,
         };
+        let runs_on = node.script_ref().map(|r| self.runs_on(&r)).unwrap_or_default();
         let avail = ui.available_height();
         egui::Frame::new().fill(RAISED()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -710,6 +836,10 @@ impl App {
             let mut subj = LayoutJob::single_section(sub.clone(), ui_fmt(TXT_CAPTION, FAINT(), 400.0, 0.0));
             subj.wrap = egui::text::TextWrapping::truncate_at_width(w);
             ui.label(subj);
+            // Where Open and Run all would land, so a script never runs on a connection the person did not expect.
+            let mut on = LayoutJob::single_section(runs_on.clone(), ui_fmt(TXT_CAPTION, MUTED(), 400.0, 0.0));
+            on.wrap = egui::text::TextWrapping::truncate_at_width(w);
+            ui.label(on);
             ui.add_space(6.0);
             // As many lines as the card has room for between the header and the buttons.
             let lines = (((avail - 112.0) / 15.0) as usize).clamp(2, 8);
@@ -727,7 +857,7 @@ impl App {
                 if primary(ui, "Open", PRIMARY()).clicked() {
                     acts.push(Act::Open(node.clone(), How::Here));
                 }
-                if kind != "filter" && run_chip(ui).clicked() {
+                if kind != "filter" && run_chip(ui).on_hover_text(&runs_on).clicked() {
                     acts.push(Act::Open(node.clone(), How::Run));
                 }
                 if quiet(ui, "New tab").clicked() {
@@ -745,6 +875,12 @@ impl App {
                     self.open_script(&r, how);
                 }
             }
+            Act::OpenOn(n, conn) => {
+                if let Some(r) = n.script_ref() {
+                    self.open_script_on(&r, How::Here, conn);
+                }
+            }
+            Act::SaveCurrent => self.save_script(),
             Act::Toggle(n) => {
                 if !st.open.remove(&n) {
                     st.open.insert(n);
@@ -1081,7 +1217,9 @@ fn draw_row_in(ui: &mut egui::Ui, cx: &RowCx, st: &mut PanelUi, row: &Row, acts:
         }
         glyph(p, egui::pos2(x + 22.0, cy), gcol);
         let tools_w = if show_tools { 52.0 } else { 0.0 };
-        let right = if show_tools { String::new() } else { look.right.clone() };
+        // A hit found only in the script's text says so, since nothing in its name shows why it is listed.
+        let in_text = row.hit && !cx.query.is_empty() && matches!(row.node, Node::Script(_) | Node::File { .. }) && crate::ui::widgets::find_ci(&look.name, &cx.query).is_none();
+        let right = if show_tools { String::new() } else if in_text { "in text".to_string() } else { look.right.clone() };
         let right_col = if look.warn { ALERT() } else if look.pill { C_LINK() } else { FAINT() };
         let rg = (!right.is_empty()).then(|| p.layout_job(LayoutJob::single_section(right, mono_fmt(TXT_SECTION, right_col, 400.0))));
         // The pill and the changed dot take a little more room than the bare text.
@@ -1101,7 +1239,17 @@ fn draw_row_in(ui: &mut egui::Ui, cx: &RowCx, st: &mut PanelUi, row: &Row, acts:
         }
         let weight = if is_container { W_MEDIUM } else { 400.0 };
         let color = if selected || hovered { BRIGHT() } else { TEXT() };
-        let mut job = LayoutJob::single_section(look.name.clone(), ui_fmt(TXT_BODY, color, weight, 0.0));
+        // The part of the name the search matched is marked, as in the Connections filter.
+        let mut job = LayoutJob::default();
+        let plain = ui_fmt(TXT_BODY, color, weight, 0.0);
+        match crate::ui::widgets::find_ci(&look.name, &cx.query).filter(|_| row.hit) {
+            Some((a, b)) => {
+                job.append(&look.name[..a], 0.0, plain.clone());
+                job.append(&look.name[a..b], 0.0, egui::TextFormat { background: HIGHLIGHT(), ..plain.clone() });
+                job.append(&look.name[b..], 0.0, plain);
+            }
+            None => job.append(&look.name, 0.0, plain),
+        }
         job.wrap = egui::text::TextWrapping::truncate_at_width((inner.right() - rw - tools_w - (x + 33.0)).max(20.0));
         let g = p.layout_job(job);
         let dy = optical_dy(&g);
@@ -1117,7 +1265,7 @@ fn draw_row_in(ui: &mut egui::Ui, cx: &RowCx, st: &mut PanelUi, row: &Row, acts:
         let at = |k: f32| egui::Rect::from_center_size(egui::pos2(rect.right() - 18.0 - 24.0 * k, rect.center().y), egui::vec2(20.0, 20.0));
         let dots = row_tool(ui, dots_id, at(0.0), paint_dots, &format!("More for {}", look.name), "More");
         if matches!(row.node, Node::Script(_) | Node::File { .. }) {
-            if look.kind != "filter" && row_tool(ui, dots_id.with("run"), at(1.0), glyphs::play, &format!("Run {}", look.name), "Run (Cmd+Enter)").clicked() {
+            if look.kind != "filter" && row_tool(ui, dots_id.with("run"), at(1.0), glyphs::play, &format!("Run all {}", look.name), &format!("Run all ({})", super::keys_text(true, false, false, "Enter"))).clicked() {
                 acts.push(Act::Open(row.node.clone(), How::Run));
             }
         } else if let Node::Folder(id) = row.node {
@@ -1133,9 +1281,14 @@ fn draw_row_in(ui: &mut egui::Ui, cx: &RowCx, st: &mut PanelUi, row: &Row, acts:
             egui::Popup::open_id(&ctx, dots_id.with("popup"));
             st.demo_menu = None;
         }
-        egui::Popup::menu(&dots).width(210.0).show(|ui| node_menu(ui, cx.lib, &cx.lib.links, &row.node, &look.kind, acts));
+        egui::Popup::menu(&dots).show(|ui| node_menu(ui, cx, &row.node, &look.kind, acts));
     }
 
+    // Tab reaching a row selects it and gives the tree the keys, as a click does.
+    if r.gained_focus() {
+        st.sel = Some(row.node.clone());
+        st.focus = true;
+    }
     if r.clicked() || r.secondary_clicked() {
         st.sel = Some(row.node.clone());
         st.focus = true;
@@ -1147,7 +1300,7 @@ fn draw_row_in(ui: &mut egui::Ui, cx: &RowCx, st: &mut PanelUi, row: &Row, acts:
         acts.push(Act::Open(row.node.clone(), How::Here));
     }
     if has_menu(&row.node) {
-        r.context_menu(|ui| node_menu(ui, cx.lib, &cx.lib.links, &row.node, &look.kind, acts));
+        r.context_menu(|ui| node_menu(ui, cx, &row.node, &look.kind, acts));
     }
 
     // Dragging a folder, a script or a linked file, and what a drag over this row would do.
