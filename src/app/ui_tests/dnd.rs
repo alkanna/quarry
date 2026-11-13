@@ -30,11 +30,16 @@ fn release(ui: &mut UiApp, at: egui::Pos2) {
     ui.h.run_steps(4);
 }
 
-/// The point `frac` of the way across the header `col`, at its middle height. Other widgets in the Mongo demo carry
-/// field names too, so the header is the one right above the column's first cell.
-fn across(ui: &UiApp, col: &str, frac: f32) -> egui::Pos2 {
+/// The rect of the header of `col`. Other widgets in the Mongo demo carry field names too, so it is the one right above
+/// the column's first cell.
+fn header(ui: &UiApp, col: &str) -> egui::Rect {
     let cell = ui.h.get_by_label(Box::leak(format!("{col} row 1").into_boxed_str())).rect();
-    let r = ui.h.get_all_by_label(col).map(|n| n.rect()).filter(|r| r.bottom() <= cell.top() + 1.0 && r.x_range().intersects(cell.x_range())).max_by(|a, b| a.top().total_cmp(&b.top())).expect("a header");
+    ui.h.get_all_by_label(col).map(|n| n.rect()).filter(|r| r.bottom() <= cell.top() + 1.0 && r.x_range().intersects(cell.x_range())).max_by(|a, b| a.top().total_cmp(&b.top())).expect("a header")
+}
+
+/// The point `frac` of the way across the header `col`, at its middle height.
+fn across(ui: &UiApp, col: &str, frac: f32) -> egui::Pos2 {
+    let r = header(ui, col);
     egui::pos2(r.left() + r.width() * frac, r.center().y)
 }
 
@@ -143,4 +148,33 @@ fn esc_cancels_a_header_drag() {
     ui.h.step();
     release(&mut ui, to);
     assert_eq!(shown(&ui), before, "Esc did not cancel the header drag");
+}
+
+#[test]
+fn the_resize_edge_still_resizes_instead_of_dragging_the_header() {
+    let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
+    let before = shown(&ui);
+    let c = before[pins(&ui)].clone();
+    // The header's widget is inset 4 pt from its cell, and the resize edge covers 3 pt either side of the cell's border.
+    let from = across(&ui, &c, 1.0) + egui::vec2(3.0, 0.0);
+    let to = from + egui::vec2(60.0, 0.0);
+    press_and_move(&mut ui, from, to);
+    release(&mut ui, to);
+    assert_eq!(shown(&ui), before, "dragging the resize edge moved the column");
+    let a = ui.app();
+    assert!(a.prefs.cols.get(&a.col_key(false)).is_some_and(|p| p.widths.contains_key(&c)), "dragging the resize edge did not resize {c}");
+}
+
+#[test]
+fn alt_arrow_moves_the_focused_header() {
+    let Some(mut ui) = demo_ui(App::load_sql_demo) else { return };
+    let before = shown(&ui);
+    let k = pins(&ui);
+    let r = header(&ui, &before[k]);
+    ui.h.get_all_by_label(&before[k]).find(|n| n.rect() == r).expect("the header").focus();
+    ui.settle();
+    ui.key(egui::Modifiers::ALT, egui::Key::ArrowRight);
+    let mut want = before.clone();
+    want.swap(k, k + 1);
+    assert_eq!(shown(&ui), want, "Alt+Right did not move the focused header");
 }

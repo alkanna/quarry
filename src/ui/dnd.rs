@@ -5,7 +5,7 @@
 #![allow(dead_code)]
 
 use super::theme::*;
-use super::widgets::side_row_sense;
+use super::widgets::{focus_ring, side_row_sense};
 use eframe::egui::{self, FontId, Sense, Stroke};
 use std::time::Duration;
 
@@ -208,6 +208,9 @@ struct Mem {
     /// Part of every slide animation's id. It changes when a move is committed, so the items start the next frame in
     /// their new slots instead of sliding back from the old gap.
     epoch: u64,
+    /// The frame it was last drawn in. A list missing for a frame (a closed popover, another tab) drops its drag, so
+    /// a lift left over from then is not read as a release when the list comes back.
+    frame: u64,
 }
 
 /// The index the item lifted from `from` lands at when its center is at `center` along the list: how many of the other
@@ -352,6 +355,12 @@ pub(crate) fn reorder(ui: &mut egui::Ui, id: egui::Id, items: Items, mut draw: i
     let slot = |k: usize| egui::Rect::from_min_size(list.min + axis.vec(starts[k], 0.0), axis.vec(sizes[k], cross));
     let rel = |p: egui::Pos2| axis.main(p - list.min);
     let mut m: Mem = ctx.data(|d| d.get_temp(id)).unwrap_or_default();
+    let frame = ctx.cumulative_frame_nr();
+    if frame > m.frame + 1 {
+        m.lift = None;
+        m.settle = None;
+    }
+    m.frame = frame;
     if m.lift.is_some_and(|l| l.from >= n) {
         m.lift = None;
     }
@@ -362,7 +371,7 @@ pub(crate) fn reorder(ui: &mut egui::Ui, id: egui::Id, items: Items, mut draw: i
     let handles: Vec<egui::Response> = (0..n).map(|k| ui.interact(slot(k), id.with(("drag", key(k))), Sense::drag())).collect();
     let (pointer, decided, now, dt) = ctx.input(|i| (i.pointer.latest_pos(), i.pointer.is_decidedly_dragging(), i.time, i.stable_dt.min(0.1)));
     let clip = ui.clip_rect();
-    if m.lift.is_none() && decided && let Some(k) = handles.iter().position(|h| h.dragged()) {
+    if m.lift.is_none() && decided && let Some(k) = handles.iter().position(|h| h.dragged_by(egui::PointerButton::Primary)) {
         let origin = ctx.input(|i| i.pointer.press_origin()).or(pointer).unwrap_or(slot(k).min);
         m.lift = Some(Lift { from: k, grab: rel(origin) - starts[k], cancelled: false, to: k });
         m.settle = None;
@@ -467,6 +476,7 @@ pub(crate) fn reorder(ui: &mut egui::Ui, id: egui::Id, items: Items, mut draw: i
         if busy {
             continue;
         }
+        focus_ring(ui, &r, r.rect, R_SM as f32);
         if r.hovered() {
             ctx.set_cursor_icon(egui::CursorIcon::Grab);
         }
@@ -644,6 +654,48 @@ mod tests {
         assert_eq!(v, vec!['b', 'c', 'a', 'd']);
         assert_eq!(m.before(), 3);
         assert_eq!(Move { from: 3, to: 1, into: false }.before(), 1);
+    }
+
+    /// Drags item `from` of four 30 pt rows to `at` points below the list's top and returns what `reorder` let go of.
+    fn drag_in_list(from: usize, at: f32, into: &[bool]) -> Option<Move> {
+        use std::cell::{Cell, RefCell};
+        let (out, top) = (Cell::new(None), RefCell::new(None));
+        let sizes = [30.0; 4];
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(200.0, 200.0)).build_ui(|ui| {
+            *top.borrow_mut() = Some(ui.cursor().min);
+            if let Some(m) = reorder(ui, egui::Id::unique("dnd-test"), Items::vertical(&sizes).into(into), |ui, _, _| ui.response()) {
+                out.set(Some(m));
+            }
+        });
+        h.step();
+        let top = top.borrow().unwrap();
+        let start = top + egui::vec2(50.0, from as f32 * 30.0 + 15.0);
+        let end = egui::pos2(start.x, top.y + at);
+        let button = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        h.hover_at(start);
+        h.step();
+        h.input_mut().events.push(button(start, true));
+        h.step();
+        for i in 1..=6 {
+            h.hover_at(start.lerp(end, i as f32 / 6.0));
+            h.step();
+        }
+        h.input_mut().events.push(button(end, false));
+        h.run_steps(3);
+        drop(h);
+        out.get()
+    }
+
+    #[test]
+    fn a_drag_reorders_and_a_drop_on_a_middle_goes_into_it() {
+        // Down past the middle of row 2: lands after it.
+        assert_eq!(drag_in_list(0, 80.0, &[false; 4]), Some(Move { from: 0, to: 2, into: false }));
+        // Same spot on a row that takes drops: into it, since the gap left row 2 where it stood.
+        assert_eq!(drag_in_list(0, 75.0, &[false, false, true, false]), Some(Move { from: 0, to: 2, into: true }));
+        // On the edge of that row it is a plain move again.
+        assert_eq!(drag_in_list(0, 88.0, &[false, false, true, false]), Some(Move { from: 0, to: 2, into: false }));
+        // Back where it started: nothing.
+        assert_eq!(drag_in_list(1, 46.0, &[false; 4]), None);
     }
 
     #[test]
