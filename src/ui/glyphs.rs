@@ -100,24 +100,9 @@ pub(crate) fn lock(p: &egui::Painter, c: Pos2, col: Color32) {
     line(p, c, col, &[(5.5, 7.5), (5.5, 5.0), (6.2, 3.2), (8.0, 2.5), (9.8, 3.2), (10.5, 5.0), (10.5, 7.5)]);
 }
 
-pub(crate) fn folder(p: &egui::Painter, c: Pos2, col: Color32) {
-    line(p, c, col, &[(2.0, 12.0), (2.0, 4.5), (2.6, 3.5), (6.0, 3.5), (7.5, 5.0), (13.0, 5.0), (14.0, 6.0), (14.0, 12.0), (13.0, 13.0), (3.0, 13.0), (2.0, 12.0)]);
-}
-
 pub(crate) fn copy(p: &egui::Painter, c: Pos2, col: Color32) {
     rect(p, c, col, 6.0, 5.5, 7.0, 8.0, 1.0);
     line(p, c, col, &[(4.0, 10.5), (3.5, 10.5), (3.5, 3.0), (10.0, 3.0), (10.0, 3.5)]);
-}
-
-pub(crate) fn refresh(p: &egui::Painter, c: Pos2, col: Color32) {
-    // A three-quarter circle with its arrowhead at the top right.
-    let center = at(c, 8.0, 8.0);
-    let pts: Vec<Pos2> = (0..=18).map(|i| {
-        let a = -0.25 * std::f32::consts::PI + i as f32 * (1.5 * std::f32::consts::PI / 18.0);
-        center + egui::vec2(a.cos(), a.sin()) * 5.0
-    }).collect();
-    p.add(egui::Shape::line(pts, Stroke::new(W, col)));
-    line(p, c, col, &[(13.0, 2.5), (13.0, 5.5), (10.0, 5.5)]);
 }
 
 pub(crate) fn doc(p: &egui::Painter, c: Pos2, col: Color32) {

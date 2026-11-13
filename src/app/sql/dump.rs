@@ -51,6 +51,8 @@ struct Row {
     content: bool,
     drop: bool,
     rows: Option<u64>,
+    /// Data and indexes on disk, once the server said.
+    bytes: Option<u64>,
 }
 
 pub(in crate::app) struct DumpForm {
@@ -70,6 +72,8 @@ pub(in crate::app) struct DumpForm {
     grants: bool,
     owners: bool,
     path: String,
+    /// The request the table sizes answer.
+    size_req: u64,
 }
 
 pub(in crate::app) struct RunForm {
@@ -83,6 +87,18 @@ pub(in crate::app) struct RunForm {
 }
 
 /// Today as YYYY-MM-DD in UTC, for a default file name.
+/// "210 MB", in the largest unit that keeps a number of at least 1.
+fn human_size(b: u64) -> String {
+    let units = ["bytes", "KB", "MB", "GB", "TB"];
+    let mut v = b as f64;
+    let mut i = 0;
+    while v >= 1024.0 && i < units.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 { format!("{b} bytes") } else if v < 10.0 { format!("{v:.1} {}", units[i]) } else { format!("{v:.0} {}", units[i]) }
+}
+
 fn today() -> String {
     let days = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() / 86_400) as i64;
     let (y, m, d) = db::civil_from_days(days);
@@ -92,6 +108,17 @@ fn today() -> String {
 impl App {
     /// Opens the dump dialog for a database, in the schema its switcher shows on PostgreSQL. `table` is the open table whose
     /// filter the first choice offers.
+    pub(in crate::app) fn sql_sizes_done(&mut self, req: u64, res: db::Res<Vec<(String, u64)>>) {
+        // Sizes are an extra: a refusal leaves the estimate out.
+        let (Some(Modal::SqlDump(f)), Ok(sizes)) = (self.modal.as_mut(), res) else { return };
+        if f.size_req != req {
+            return;
+        }
+        for r in &mut f.rows {
+            r.bytes = sizes.iter().find(|s| s.0 == r.name).map(|s| s.1);
+        }
+    }
+
     pub(in crate::app) fn open_sql_dump(&mut self, conn: u64, db: String, table: Option<String>) {
         let schema = self.ns_of(conn, &db).to_string();
         self.open_sql_dump_in(conn, db, schema, table)
@@ -115,7 +142,7 @@ impl App {
             .iter()
             .map(|n| {
                 let view = self.views.has(conn, &ns, n);
-                Row { name: n.clone(), view, on: true, structure: true, content: !view, drop: false, rows: est.and_then(|s| s.table(n)).and_then(|t| t.rows) }
+                Row { name: n.clone(), view, on: true, structure: true, content: !view, drop: false, rows: est.and_then(|s| s.table(n)).and_then(|t| t.rows), bytes: None }
             })
             .collect();
         // The table open in the Content view with a filter set is the first thing to export.
@@ -129,7 +156,13 @@ impl App {
         }
         let conn_name = c.meta.name.clone();
         let path = dirs::download_dir().unwrap_or_default().join(format!("{db}-{}.sql", today())).display().to_string();
-        self.modal = Some(Modal::SqlDump(Box::new(DumpForm { conn, db, schema, conn_name, what, filtered, rows, extended: true, snapshot: true, extras: true, grants: false, owners: false, path })));
+        // The sizes come later; until then the footer counts rows only.
+        self.req += 1;
+        let size_req = self.req;
+        if let Some(sql) = self.conn(conn).and_then(|c| c.sql.clone()) {
+            self.worker.sql_table_sizes(size_req, sql.at(&db), if pg { schema.clone() } else { db.clone() });
+        }
+        self.modal = Some(Modal::SqlDump(Box::new(DumpForm { conn, db, schema, conn_name, what, filtered, rows, extended: true, snapshot: true, extras: true, grants: false, owners: false, path, size_req })));
     }
 
     /// Asks for a script file, then opens the dialog that runs it.
@@ -160,43 +193,43 @@ impl App {
     }
 
     pub(in crate::app) fn sql_dump_dialog(&mut self, ui: &mut egui::Ui, f: &mut DumpForm, keep: &mut bool) {
-        ui.set_width(610.0);
+        ui.set_width(660.0);
         let pg = self.is_pg(f.conn);
         dialog_head(ui, &Head::new("Export").sub(if pg { format!("{}, schema {} on {}", f.db, f.schema, f.conn_name) } else { format!("{} on {}", f.db, f.conn_name) }).glyph(glyphs::download));
         let mut b = body_begin(ui);
         let outer = ui;
         let ui = &mut b.content_ui;
-        let mono = |t: String| RichText::new(t).font(FontId::monospace(TXT_SMALL)).color(FAINT());
         let selected = f.rows.iter().filter(|r| r.on).count();
-        egui::Grid::new("dump-what").num_columns(2).spacing([14.0, 8.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
-            form_label(ui, "What");
-            ui.vertical(|ui| {
-                if let Some((t, _, n)) = f.filtered.clone() {
-                    ui.horizontal(|ui| {
-                        ui.radio_value(&mut f.what, What::Filtered, format!("Filtered rows of {t}"));
-                        ui.label(mono(format!("{} rows", group(&n.to_string()))));
-                    });
+        let views = f.rows.iter().filter(|r| r.view).count();
+        card_caption(ui, "What to export", "");
+        // Radio cards side by side: the whole database, the checked tables, and the filtered rows when there are some.
+        let n_cards = if f.filtered.is_some() { 3.0 } else { 2.0 };
+        let cw = (ui.available_width() - 10.0 * (n_cards - 1.0)) / n_cards;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            let whole_desc = format!("{} tables{}", f.rows.len() - views, if views > 0 { format!(", {views} views") } else { String::new() });
+            let r = radio_card(ui, cw, f.what == What::Whole, if pg { "Whole database" } else { "Whole database" }, &if pg { format!("{whole_desc}, every schema") } else { whole_desc });
+            if r.on_hover_text(if pg { "Every table, view, type, sequence, function and extension of every schema, as the server has them now" } else { "Every table with its rows" }).clicked() {
+                f.what = What::Whole;
+                for r in &mut f.rows {
+                    (r.on, r.structure, r.content) = (true, true, !r.view);
                 }
-                ui.horizontal(|ui| {
-                    ui.radio_value(&mut f.what, What::Selected, "Selected tables");
-                    ui.label(mono(format!("{selected} of {}", f.rows.len())));
-                });
-                if ui.radio_value(&mut f.what, What::Whole, if pg { "Whole database (every schema)" } else { "Whole database" }).on_hover_text(if pg { "Every table, view, type, sequence, function and extension of every schema, as the server has them now" } else { "" }).clicked() {
-                    for r in &mut f.rows {
-                        (r.on, r.structure, r.content) = (true, true, !r.view);
-                    }
-                }
-            });
-            ui.end_row();
+            }
+            if radio_card(ui, cw, f.what == What::Selected, "Selected tables", &format!("{selected} of {} checked below", f.rows.len())).clicked() {
+                f.what = What::Selected;
+            }
+            if let Some((t, _, n)) = f.filtered.clone() && radio_card(ui, cw, f.what == What::Filtered, &format!("Filtered rows of {t}"), &format!("{} rows", group(&n.to_string()))).clicked() {
+                f.what = What::Filtered;
+            }
         });
-        ui.add_space(8.0);
+        ui.add_space(12.0);
         let filtered = f.what == What::Filtered;
         let mut edited = false;
         ui.scope(|ui| {
             if filtered {
                 ui.disable();
             }
-            egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_MD).show(ui, |ui| {
+            card_frame().inner_margin(egui::Margin::symmetric(4, 8)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 egui::ScrollArea::vertical().id_salt("dump-tables").max_height(190.0).auto_shrink([false, true]).show(ui, |ui| {
                     egui::Grid::new("dump-tables").num_columns(5).spacing([22.0, 7.0]).min_col_width(60.0).show(ui, |ui| {
@@ -245,41 +278,60 @@ impl App {
             ui.add_space(4.0);
             ui.label(RichText::new("DROP first also drops and recreates every function and procedure of the schema, whichever tables are checked.").size(TXT_SMALL).color(MUTED()));
         }
-        ui.add_space(8.0);
-        caption(ui, "OPTIONS");
-        ui.add_space(2.0);
-        egui::Grid::new("dump-opts").num_columns(2).spacing([40.0, 8.0]).show(ui, |ui| {
-            ui.checkbox(&mut f.extended, "Extended INSERTs (1,000 rows each)").on_hover_text("One INSERT for many rows is much faster to run. Off writes one INSERT per row.");
-            if pg {
-                // The dump is one REPEATABLE READ READ ONLY transaction, so there is nothing to choose.
-                let mut always = true;
-                ui.add_enabled(false, egui::Checkbox::new(&mut always, "Consistent snapshot")).on_disabled_hover_text("PostgreSQL always reads every table from one snapshot, in a read-only transaction that locks nothing but DDL.");
-            } else {
-                ui.checkbox(&mut f.snapshot, "Consistent snapshot").on_hover_text("Reads every table from one point in time without locking anything (InnoDB).");
-            }
-            ui.end_row();
-            ui.checkbox(&mut f.extras, "Include views, triggers and routines");
-            // The file name carries the choice, so the path and the checkbox cannot disagree.
-            let mut gz = f.path.trim_end().ends_with(".gz");
-            if ui.checkbox(&mut gz, "Compress with gzip").changed() {
-                let p = f.path.trim_end();
-                f.path = if gz { format!("{p}.gz") } else { p.strip_suffix(".gz").unwrap_or(p).to_string() };
-            }
-            ui.end_row();
-            if pg {
-                ui.add_enabled(!filtered, egui::Checkbox::new(&mut f.grants, "Include grants")).on_hover_text("GRANT and REVOKE for the schemas, tables, columns, sequences, functions and types the file makes; a whole database also gets its default privileges and the grants on the database itself.");
-                ui.add_enabled(!filtered, egui::Checkbox::new(&mut f.owners, "Set owners")).on_hover_text("ALTER ... OWNER TO for everything the file makes. Off, everything belongs to the role that runs the file.");
-                ui.end_row();
-            }
+        ui.add_space(16.0);
+        // The options as switches in two columns of one card.
+        let mut gz = f.path.trim_end().ends_with(".gz");
+        let gz_was = gz;
+        let mut always = true;
+        form_card(ui, "Options", "", |rows| {
+            rows.full(|ui| {
+                ui.columns(2, |c| {
+                    let opt = |ui: &mut egui::Ui, on: &mut bool, enabled: bool, title: &str, hint: &str, tip: &str| {
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 1.0;
+                                ui.label(medium(RichText::new(title).size(TXT_BODY).color(BRIGHT())));
+                                ui.label(RichText::new(hint).size(TXT_SMALL).color(MUTED()));
+                            });
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let r = ui.add_enabled_ui(enabled, |ui| toggle(ui, on)).inner;
+                                r.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, enabled, *on, title));
+                                if !tip.is_empty() {
+                                    r.on_hover_text(tip);
+                                }
+                            });
+                        });
+                        ui.add_space(10.0);
+                    };
+                    opt(&mut c[0], &mut f.extended, true, "Extended INSERTs", "1,000 rows per statement", "One INSERT for many rows is much faster to run. Off writes one INSERT per row.");
+                    opt(&mut c[0], &mut f.extras, true, "Views, triggers, routines", "Written after the tables", "");
+                    if pg {
+                        // The dump is one REPEATABLE READ READ ONLY transaction, so there is nothing to choose.
+                        opt(&mut c[1], &mut always, false, "Consistent snapshot", "Always, in one read-only transaction", "PostgreSQL always reads every table from one snapshot, in a read-only transaction that locks nothing but DDL.");
+                    } else {
+                        opt(&mut c[1], &mut f.snapshot, true, "Consistent snapshot", "One point in time, no locks", "Reads every table from one point in time without locking anything (InnoDB).");
+                    }
+                    opt(&mut c[1], &mut gz, true, "Compress with gzip", "Saves a .sql.gz file", "");
+                    if pg {
+                        opt(&mut c[0], &mut f.grants, !filtered, "Include grants", "GRANT and REVOKE for what it makes", "GRANT and REVOKE for the schemas, tables, columns, sequences, functions and types the file makes; a whole database also gets its default privileges and the grants on the database itself.");
+                        opt(&mut c[1], &mut f.owners, !filtered, "Set owners", "ALTER ... OWNER TO for each object", "ALTER ... OWNER TO for everything the file makes. Off, everything belongs to the role that runs the file.");
+                    }
+                });
+            });
         });
+        // The file name carries the choice, so the path and the switch cannot disagree.
+        if gz != gz_was {
+            let p = f.path.trim_end();
+            f.path = if gz { format!("{p}.gz") } else { p.strip_suffix(".gz").unwrap_or(p).to_string() };
+        }
         if pg && !filtered {
             ui.add_space(4.0);
             let roles = if f.grants || f.owners { "The roles they name must exist where the file is run, or the run stops at the first missing one (the tables and rows are in by then). " } else { "" };
             ui.add(egui::Label::new(RichText::new(format!("{roles}Row security policies are always written; one for a named role needs that role too.")).size(TXT_SMALL).color(if roles.is_empty() { MUTED() } else { WARNING() })).wrap());
         }
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.add_sized([FORM_LABEL_W, BUTTON_H], egui::Label::new(RichText::new("Save to").color(MUTED())));
+        ui.add_space(4.0);
+        card_caption(ui, "Save to", "");
+        plain_card(ui, |ui| ui.horizontal(|ui| {
             let w = ui.available_width() - 100.0;
             ui.add(egui::TextEdit::singleline(&mut f.path).font(egui::TextStyle::Monospace).desired_width(w));
             if ui.button("Choose…").clicked() {
@@ -292,7 +344,7 @@ impl App {
                     f.path = p.display().to_string();
                 }
             }
-        });
+        }));
         let total: u64 = if filtered { f.filtered.as_ref().map_or(0, |x| x.2) } else { f.rows.iter().filter(|r| r.on && r.content && !r.view).filter_map(|r| r.rows).sum() };
         let ready = !f.path.trim().is_empty() && (filtered || f.rows.iter().any(|r| r.on && (r.structure || r.content) && !(r.view && !f.extras)));
         let mut go = false;
@@ -305,6 +357,11 @@ impl App {
             if ui.button("Cancel").clicked() {
                 *keep = false;
             }
+            let n = if filtered { 1 } else { f.rows.iter().filter(|r| r.on && !(r.view && !f.extras)).count() };
+            // The tables as they sit on the server; the file is usually smaller than that, and much smaller compressed.
+            let bytes: u64 = if filtered { 0 } else { f.rows.iter().filter(|r| r.on && r.content && !r.view).filter_map(|r| r.bytes).sum() };
+            let size = if bytes > 0 { format!("  ·  {} on the server", human_size(bytes)) } else { String::new() };
+            foot_note(ui, &format!("{}{}{size}", crate::app::sql::create::plural(n as u64, "table"), if total > 0 { format!("  ·  about {} rows", group(&total.to_string())) } else { String::new() }));
         });
         if go {
             self.start_dump(f, total);
@@ -470,7 +527,7 @@ impl App {
     /// QUARRY_TEST_SQL=dump: the Export dialog of the design with the shop database.
     pub(in crate::app) fn demo_sql_dump(&mut self) {
         let conn = self.t().map_or(0, |t| t.sel.conn);
-        let row = |name: &str, on: bool, content: bool, rows: u64| Row { name: name.into(), view: false, on, structure: on, content, drop: false, rows: Some(rows) };
+        let row = |name: &str, on: bool, content: bool, rows: u64| Row { name: name.into(), view: false, on, structure: on, content, drop: false, rows: Some(rows), bytes: Some(rows * 180) };
         let rows = vec![
             row("customers", true, true, 1284),
             row("order_items", true, true, 8902),
@@ -482,9 +539,9 @@ impl App {
             row("suppliers", false, false, 38),
             row("tags", false, false, 54),
             row("users", false, false, 1190),
-            Row { name: "revenue_by_day".into(), view: true, on: false, structure: false, content: false, drop: false, rows: None },
+            Row { name: "revenue_by_day".into(), view: true, on: false, structure: false, content: false, drop: false, rows: None, bytes: None },
         ];
-        self.modal = Some(Modal::SqlDump(Box::new(DumpForm { conn, db: "shop".into(), schema: String::new(), conn_name: "shop-prod".into(), what: What::Selected, filtered: Some(("orders".into(), "status = 'paid'".into(), 312)), rows, extended: true, snapshot: false, extras: true, grants: false, owners: false, path: "~/Downloads/shop-2026-11-09.sql".into() })));
+        self.modal = Some(Modal::SqlDump(Box::new(DumpForm { conn, db: "shop".into(), schema: String::new(), conn_name: "shop-prod".into(), what: What::Selected, filtered: Some(("orders".into(), "status = 'paid'".into(), 312)), rows, extended: true, snapshot: false, extras: true, grants: false, owners: false, path: "~/Downloads/shop-2026-11-09.sql".into(), size_req: 0 })));
     }
 }
 
@@ -518,5 +575,15 @@ mod tests {
         assert!(!tab_gone(&sel("shop", ""), &dbs, "shop", t), "a Query tab of the database stays");
         assert!(!tab_gone(&sel("other", "items"), &dbs, "shop", t), "tables of other databases were not read");
         assert!(!tab_gone(&sel("shop", "items"), &dbs, "shop", None));
+    }
+}
+
+#[cfg(test)]
+mod size_tests {
+    #[test]
+    fn sizes_read_in_the_largest_unit() {
+        assert_eq!(super::human_size(512), "512 bytes");
+        assert_eq!(super::human_size(1536), "1.5 KB");
+        assert_eq!(super::human_size(220 * 1024 * 1024), "220 MB");
     }
 }

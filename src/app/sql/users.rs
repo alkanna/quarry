@@ -299,6 +299,15 @@ fn sql_block(ui: &mut egui::Ui, text: &str) {
     });
 }
 
+/// Days since the password was set, from MySQL's account ident, which starts with password_last_changed
+/// ("2026-04-15 10:22:01|plugin|hash"). MariaDB's ident has no date, so it gives none.
+fn password_age(ident: &str, today: i64) -> Option<i64> {
+    let date = ident.split('|').next()?.get(..10)?;
+    let mut p = date.split('-').map(|x| x.parse::<i64>().ok());
+    let (y, m, d) = (p.next()??, p.next()??, p.next()??);
+    Some((today - db::days_from_civil(y, m, d)).max(0))
+}
+
 /// The statements a tab would run, in a drawer above the footer that opens by itself on the first change.
 fn statements(ui: &mut egui::Ui, id: &str, title: &str, text: Result<String, String>) {
     let (count, first) = match &text {
@@ -704,7 +713,14 @@ impl App {
                         }
                     });
                     let plugin = w.info.as_ref().map(|i| i.plugin.clone()).filter(|p| !p.is_empty());
-                    ui.label(RichText::new(if a.is_role { "Role".to_string() } else { plugin.unwrap_or_else(|| "Account".into()) }).size(TXT_SMALL).color(MUTED()));
+                    let today = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() / 86_400) as i64;
+                    let age = w.info.as_ref().and_then(|i| i.ident.as_deref()).and_then(|id| password_age(id, today)).map(|d| match d {
+                        0 => "  ·  password set today".to_string(),
+                        1 => "  ·  password set yesterday".to_string(),
+                        d => format!("  ·  password set {d} days ago"),
+                    });
+                    let line = if a.is_role { "Role".to_string() } else { format!("{}{}", plugin.unwrap_or_else(|| "Account".into()), age.unwrap_or_default()) };
+                    ui.label(RichText::new(line).size(TXT_SMALL).color(MUTED()));
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let (t, c) = if flags.0 { ("LOCKED", ALERT()) } else if flags.1 { ("EXPIRED", WARNING()) } else { ("ACTIVE", SUCCESS()) };
@@ -814,7 +830,7 @@ impl App {
         });
         // Roles are GRANT and REVOKE, which older servers have without ALTER USER.
         if env.caps.roles && !acct.is_role {
-            form_card(ui, "Roles", "active at login; click one to take it away", |rows| {
+            form_card(ui, "Roles", "active at login", |rows| {
                 rows.full(|ui| self.role_chips(ui, w, env));
             });
         }
@@ -830,14 +846,13 @@ impl App {
                 }
             }
             for r in all {
-                let on = w.roles_now.contains(&r);
-                let hint = if !on { "Will be taken away; click to keep" } else if w.roles_orig.contains(&r) { "Click to take this role away" } else { "Will be given; click to cancel" };
-                if chip(ui, &users::role_shown(&r), PRIMARY(), on).on_hover_text(hint).clicked() {
-                    if on {
+                // A granted role is a pill with a cross; one taken away stays as a faint chip that gives it back.
+                if w.roles_now.contains(&r) {
+                    if pill_chip(ui, &users::role_shown(&r), true) {
                         w.roles_now.retain(|x| *x != r);
-                    } else {
-                        w.roles_now.push(r);
                     }
+                } else if chip(ui, &users::role_shown(&r), PRIMARY(), false).on_hover_text("Will be taken away; click to keep").clicked() {
+                    w.roles_now.push(r);
                 }
             }
             if w.role_add.is_none() {
@@ -1291,5 +1306,19 @@ impl App {
             w.limits = if which == "userlimits" { w.limits } else { ["0".into(), "0".into(), "0".into(), "0".into()] };
         }
         self.sql_users = Some(w);
+    }
+}
+
+#[cfg(test)]
+mod age_tests {
+    use super::password_age;
+
+    #[test]
+    fn password_age_reads_the_date_at_the_start_of_the_ident() {
+        let today = crate::db::days_from_civil(2026, 11, 13);
+        assert_eq!(password_age("2026-11-01 09:00:00|caching_sha2_password|abcd", today), Some(12));
+        assert_eq!(password_age("2026-11-13 23:59:59|x|y", today), Some(0));
+        assert_eq!(password_age("mysql_native_password|abcd", today), None);
+        assert_eq!(password_age("", today), None);
     }
 }
