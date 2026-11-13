@@ -220,6 +220,8 @@ fn picker_body(ui: &mut egui::Ui, d: &PickData, acts: &mut Vec<PickAct>) {
     ctx.data_mut(|x| x.insert_temp(seen_id(), frame));
     // The frame the popover opens in had only the count. It is egui's invisible sizing pass, and the next frame has the lists.
     if !d.full {
+        // The width is taken all the same: egui places the popover from this pass, and a narrow one ran off the window.
+        popover_body(ui, 360.0, |_| {});
         ctx.request_repaint();
         return;
     }
