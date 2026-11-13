@@ -65,17 +65,14 @@ impl App {
         let large_change = p.map_or(0, |p| p.large_change);
         let undo_docs = self.agents.cfg.limits.undo_docs;
         let client = if ask.client.is_empty() { "An agent".to_string() } else { ask.client.clone() };
-        top_dialog(ctx, id).show(ctx, |ui| {
-            ui.set_width(w);
-            ui.horizontal(|ui| {
-                let title = if ask.gone { format!("{client} stopped waiting") } else { format!("{client} wants to {}", verb(&ask.tool)) };
-                dialog_title(ui, title);
-                if total > 1 {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(RichText::new(format!("1 of {total}")).size(TXT_SMALL).color(MUTED()));
-                    });
-                }
-            });
+        top_banded(ctx, id).show(ctx, |ui| {
+            ui.set_width(w + 40.0);
+            let title = if ask.gone { format!("{client} stopped waiting") } else { format!("{client} wants to {}", verb(&ask.tool)) };
+            let sub = if total > 1 { format!("AI agent  ·  1 of {total} waiting") } else { "AI agent  ·  asks before it acts".to_string() };
+            dialog_head(ui, &Head::new(title).sub(sub).glyph(glyphs::shield).tone(if shell { ALERT() } else { WARNING() }));
+            let mut b = body_begin(ui);
+            let outer = ui;
+            let ui = &mut b.content_ui;
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 if let Some(c) = conn {
@@ -147,7 +144,9 @@ impl App {
                 }
             });
             ui.add_space(12.0);
-            ui.horizontal(|ui| {
+            b.end(outer);
+            let ui = outer;
+            {
                 let left = if ask.gone {
                     "The agent stopped waiting".to_string()
                 } else if !awake {
@@ -156,12 +155,12 @@ impl App {
                     let left = DENY_AFTER.saturating_sub(now.saturating_duration_since(ask.at)).as_secs();
                     format!("Denied in {}:{:02}", left / 60, left % 60)
                 };
-                ui.label(RichText::new(left).size(TXT_SMALL).color(FAINT()));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                dialog_foot(ui, |ui| {
                     if ask.gone {
                         if ui.button("Close").clicked() {
                             answer = Some(Answer::Close);
                         }
+                        foot_note(ui, &left);
                         return;
                     }
                     let (text, a, fill) = if ask.no_undo.is_some() {
@@ -180,8 +179,9 @@ impl App {
                     if ui.button("Deny").on_hover_text("Esc").clicked() {
                         answer = Some(Answer::Deny);
                     }
+                    foot_note(ui, &left);
                 });
-            });
+            }
         });
         // The countdown, and Allow waking up.
         ctx.request_repaint_after(if awake { Duration::from_millis(500) } else { WAKE.saturating_sub(now.saturating_duration_since(shown)) });

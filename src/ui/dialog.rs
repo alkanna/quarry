@@ -599,3 +599,16 @@ pub(crate) fn plain_card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -
 pub(crate) fn dialog_done(ui: &mut egui::Ui) -> bool {
     dialog_foot(ui, |ui| ui.button("Done").on_hover_text("Esc").clicked())
 }
+
+/// The footer band laid out freely, for windows whose footer is more than a row of buttons.
+pub(crate) fn dialog_foot_free<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    rule(ui, 0.5);
+    egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(DIALOG_PAD as i8, 12))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing = ui.ctx().global_style().spacing.item_spacing;
+            add(ui)
+        })
+        .inner
+}

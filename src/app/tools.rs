@@ -25,40 +25,48 @@ impl App {
         }
         let Some(t) = &mut self.tool else { return };
         let mut close = false;
-        dialog(egui::Id::unique(("quarry-layer", "tool"))).show(ctx, |ui| {
-            ui.set_width(640.0);
-            ui.horizontal(|ui| {
-                dialog_title(ui, &t.title);
+        banded(egui::Id::unique(("quarry-layer", "tool"))).show(ctx, |ui| {
+            ui.set_width(660.0);
+            let sub = match &t.done {
+                None => "Running…".to_string(),
+                Some(Ok(_)) => "Finished".to_string(),
+                Some(Err(_)) => "Failed".to_string(),
+            };
+            dialog_head(ui, &Head::new(t.title.as_str()).sub(sub).glyph(glyphs::code));
+            dialog_pane(ui, |ui| {
                 match &t.done {
-                    None => {
-                        spin(ui);
-                    }
                     Some(Ok(m)) => {
-                        ui.label(RichText::new(m).color(SUCCESS()));
+                        banner(ui, Notice::Ok, "", m, None);
                     }
                     Some(Err(e)) => {
-                        ui.label(RichText::new(e).color(ALERT()));
+                        banner(ui, Notice::Danger, "", e, None);
                     }
+                    None => {}
                 }
-            });
-            egui::Frame::new().fill(pal().well).corner_radius(R_MD).inner_margin(8).show(ui, |ui| {
-                egui::ScrollArea::vertical().max_height(320.0).stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
-                    for l in &t.log {
-                        ui.label(RichText::new(l).monospace().size(TXT_SMALL).color(TEXT()));
-                    }
+                code_card(ui, "Output", |ui| {
+                    egui::ScrollArea::vertical().max_height(320.0).stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
+                        for l in &t.log {
+                            ui.label(RichText::new(l).monospace().size(TXT_SMALL).color(TEXT()));
+                        }
+                    });
                 });
             });
-            dialog_actions(ui, |ui| {
+            dialog_foot(ui, |ui| {
                 if t.done.is_none() {
                     if danger(ui, "Stop").clicked() && let Some(c) = t.cancel.take() {
                         let _ = c.send(());
                     }
                 } else {
-                    close = ui.button("Close").clicked();
+                    close = primary(ui, "Close", PRIMARY()).clicked();
                 }
-                if ui.button("Copy log").clicked() {
-                    ui.ctx().copy_text(t.log.join("\n"));
-                }
+                foot_left(ui, |ui| {
+                    if t.done.is_none() {
+                        spin(ui);
+                    }
+                    if ui.button("Copy log").clicked() {
+                        ui.ctx().copy_text(t.log.join("\n"));
+                    }
+                });
             });
         });
         if close {

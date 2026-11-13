@@ -380,20 +380,11 @@ fn cell_chips(cell: &rp::Cell, privs: &Privs, order: &[&str], inherited: bool) -
     out
 }
 
-fn banner(ui: &mut egui::Ui, text: &str, color: Color32, unlock: bool, acts: &mut Vec<Act>) {
-    egui::Frame::new().fill(tint(color, 26)).stroke(Stroke::new(1.0, tint(color, 90))).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
-            ui.add(egui::Label::new(RichText::new(text).color(if unlock { color } else { BRIGHT() })).wrap());
-            if unlock {
-                right_group(ui, |ui| {
-                    if ui.button("Unlock…").clicked() {
-                        acts.push(Act::Unlock);
-                    }
-                });
-            }
-        });
-    });
+fn banner(ui: &mut egui::Ui, text: &str, unlock: bool, acts: &mut Vec<Act>) {
+    let tone = if unlock { Notice::Locked } else { Notice::Info };
+    if crate::ui::dialog::banner(ui, tone, "", text, unlock.then_some("Unlock…")) {
+        acts.push(Act::Unlock);
+    }
 }
 
 /// What the role is, in a few words: "login role, member of reporting", "group, 3 members".
@@ -559,38 +550,28 @@ impl App {
         let popover_open = w.cell.is_some();
         let mut acts: Vec<Act> = Vec::new();
         let screen = ctx.content_rect();
-        let r = dialog(egui::Id::unique(("quarry-layer", "pg-roles-window"))).show(ctx, |ui| {
+        let r = banded(egui::Id::unique(("quarry-layer", "pg-roles-window"))).show(ctx, |ui| {
             ui.set_width((screen.width() * 0.8).clamp(860.0, 1240.0));
-            dialog_title(ui, "Roles and privileges");
-            ui.horizontal(|ui| {
-                let who = match (w.cl(), &env.blocked) {
-                    (Some(c), Some(_)) if !locked => format!(" · signed in as {}", c.me),
-                    _ => String::new(),
-                };
-                ui.label(RichText::new(format!("{conn_name} · PostgreSQL {version}{who}")).color(MUTED()));
-                right_group(ui, |ui| {
-                    if quiet(ui, "Refresh").clicked() {
-                        acts.push(Act::Refresh);
-                    }
-                });
-            });
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 18.0;
-                for (t, label) in [(PTab::Privileges, "Privileges"), (PTab::Roles, "Roles")] {
-                    if view_tab(ui, label, w.tab == t).clicked() {
-                        acts.push(Act::Tab(t));
-                    }
+            let who = match (w.cl(), &env.blocked) {
+                (Some(c), Some(_)) if !locked => format!("  ·  signed in as {}", c.me),
+                _ => String::new(),
+            };
+            const TABS: [(PTab, &str); 2] = [(PTab::Privileges, "Privileges"), (PTab::Roles, "Roles")];
+            let labels = TABS.map(|t| t.1);
+            let active = TABS.iter().position(|t| t.0 == w.tab).unwrap_or(0);
+            let head = Head::new("Roles and privileges").sub(format!("{conn_name}  ·  PostgreSQL {version}{who}")).glyph(glyphs::user).tabs(&labels, active);
+            if let Some(i) = dialog_head_with(ui, &head, |ui| {
+                if ui.button("Refresh").clicked() {
+                    acts.push(Act::Refresh);
                 }
-            });
-            ui.add_space(8.0);
+            }) {
+                acts.push(Act::Tab(TABS[i].0));
+            }
+            let mut b = body_begin(ui);
+            let outer = ui;
+            let ui = &mut b.content_ui;
             if let Some(why) = &env.blocked {
-                if locked {
-                    banner(ui, why, SUCCESS(), true, &mut acts);
-                } else {
-                    banner(ui, why, PRIMARY(), false, &mut acts);
-                }
-                ui.add_space(8.0);
+                banner(ui, why, locked, &mut acts);
             }
             match &w.cluster {
                 None => {
@@ -604,8 +585,8 @@ impl App {
                     PTab::Roles => self.pg_roles_tab(ui, &mut w, &env, &mut acts),
                 },
             }
-            ui.add_space(10.0);
-            self.pg_staged_bar(ui, &mut w, &env, &mut acts);
+            b.end(outer);
+            dialog_foot_free(outer, |ui| self.pg_staged_bar(ui, &mut w, &env, &mut acts));
         });
         let mut open = true;
         for a in acts {
@@ -721,7 +702,7 @@ impl App {
         let risky = w.risky();
         let me = w.cl().map(|c| c.me.clone()).unwrap_or_default();
         if !risky.is_empty() {
-            egui::Frame::new().fill(tint(WARNING(), 26)).stroke(Stroke::new(1.0, tint(WARNING(), 90))).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
+            egui::Frame::new().fill(tint(WARNING(), 20)).stroke(Stroke::new(1.0, tint(WARNING(), 84))).corner_radius(R_BAR).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 for (_, why) in &risky {
                     ui.add(egui::Label::new(RichText::new(why.as_str()).color(BRIGHT())).wrap());
@@ -734,7 +715,7 @@ impl App {
             ui.add_space(6.0);
         }
         let gate = env.locked.clone().or_else(|| if w.staged.iter().all(|c| matches!(c, Change::Member { .. })) { None } else { env.blocked.clone() });
-        egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, tint(PRIMARY(), 89))).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
+        egui::Frame::new().show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 let n = w.staged.len();

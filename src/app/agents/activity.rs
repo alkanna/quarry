@@ -158,21 +158,20 @@ impl App {
             s => Some(format!("{} agents connected", s.len())),
         };
         let layer = egui::Id::unique(("quarry-layer", "agents-activity"));
-        let r = top_dialog(ctx, layer).show(ctx, |ui| {
-            ui.set_width(width);
-            ui.horizontal(|ui| {
-                dialog_title(ui, "Agent activity");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if let Some(t) = &connected {
-                        ui.label(RichText::new(t).size(TXT_SMALL).color(TEXT()));
-                        let (d, _) = ui.allocate_exact_size(egui::vec2(8.0, 14.0), Sense::hover());
-                        ui.painter().circle_filled(d.center(), STATUS_DOT_R, SUCCESS());
-                    } else {
-                        ui.label(RichText::new("No agent connected").size(TXT_SMALL).color(MUTED()));
-                    }
-                });
+        let r = top_banded(ctx, layer).show(ctx, |ui| {
+            ui.set_width(width + 40.0);
+            dialog_head_with(ui, &Head::new("Agent activity").sub("Every call an AI agent made through Quarry").glyph(glyphs::list), |ui| {
+                if let Some(t) = &connected {
+                    ui.label(RichText::new(t).size(TXT_SMALL).color(TEXT()));
+                    let (d, _) = ui.allocate_exact_size(egui::vec2(8.0, 14.0), Sense::hover());
+                    ui.painter().circle_filled(d.center(), STATUS_DOT_R, SUCCESS());
+                } else {
+                    ui.label(RichText::new("No agent connected").size(TXT_SMALL).color(MUTED()));
+                }
             });
-            ui.add_space(6.0);
+            let mut b = body_begin(ui);
+            let outer = ui;
+            let ui = &mut b.content_ui;
             ui.horizontal(|ui| {
                 segmented(ui, &mut self.agents.filter, &FILTERS);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -181,7 +180,7 @@ impl App {
             });
             ui.add_space(6.0);
             let cols = [76.0, 140.0, 210.0];
-            egui::Frame::new().fill(PANEL()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).show(ui, |ui| {
+            card_frame().show(ui, |ui| {
                 ui.set_width(width);
                 egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 6)).show(ui, |ui| {
                     ui.horizontal(|ui| {
@@ -255,11 +254,11 @@ impl App {
                     ui.add(egui::Label::new(RichText::new(why).size(TXT_SMALL).color(ALERT())).wrap());
                 }
             }
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
+            b.end(outer);
+            let ui = outer;
+            dialog_foot(ui, |ui| {
                 let note = if picked.is_some() { "Arguments and answers are shown as scrubbed for the agent. Kept until Quarry quits." } else { "Select a call to see its arguments and answer. Kept until Quarry quits." };
-                ui.label(RichText::new(note).size(TXT_SMALL).color(FAINT()));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                {
                     if ui.button("Done").on_hover_text("Esc").clicked() {
                         keep = false;
                     }
@@ -269,7 +268,8 @@ impl App {
                         undo = picked.map(|a| a.id);
                     }
                     reveal = ui.button(REVEAL).on_hover_text("The audit log on disk").clicked();
-                });
+                }
+                foot_note(ui, note);
             });
         });
         if clear {

@@ -361,7 +361,7 @@ fn text_at(ui: &egui::Ui, x: f32, w: f32, cy: f32, h: f32, s: &str, color: Color
 /// A note above the list: a tinted box with the text and an optional button, true when the button was clicked.
 fn banner(ui: &mut egui::Ui, color: Color32, add: impl FnOnce(&mut egui::Ui), button: Option<&str>) -> bool {
     let mut clicked = false;
-    egui::Frame::new().fill(tint(color, 24)).stroke(Stroke::new(1.0, tint(color, 110))).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(12, 6)).show(ui, |ui| {
+    egui::Frame::new().fill(tint(color, 20)).stroke(Stroke::new(1.0, tint(color, 84))).corner_radius(R_BAR).inner_margin(egui::Margin { left: 12, right: 8, top: 7, bottom: 7 }).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
             ui.set_min_height(26.0);
@@ -371,15 +371,13 @@ fn banner(ui: &mut egui::Ui, color: Color32, add: impl FnOnce(&mut egui::Ui), bu
             }
         });
     });
-    ui.add_space(8.0);
+    ui.add_space(14.0);
     clicked
 }
 
 /// The read-only note of the Activity and Locks tabs, true when Unlock was clicked.
 fn locked_banner(ui: &mut egui::Ui) -> bool {
-    banner(ui, SUCCESS(), |ui| {
-        ui.label(RichText::new("Read-only: unlock writes to cancel queries or terminate sessions.").color(SUCCESS()));
-    }, Some("Unlock…"))
+    crate::ui::dialog::banner(ui, Notice::Locked, "Read-only.", "Unlock writes to cancel queries or terminate sessions.", Some("Unlock…"))
 }
 
 /// What a click on Cancel or Terminate does on a locked connection: a popover that offers Unlock instead of acting. True when
@@ -511,15 +509,15 @@ impl App {
         }
         let mut acts = Acts::default();
         let screen = ctx.content_rect();
-        let r = dialog(egui::Id::unique(("quarry-layer", "pg-server-window"))).show(ctx, |ui| {
+        let r = banded(egui::Id::unique(("quarry-layer", "pg-server-window"))).show(ctx, |ui| {
             ui.set_width((screen.width() * 0.7).clamp(760.0, 1100.0));
-            dialog_title(ui, "Server");
-            ui.label(RichText::new(subtitle(&s, &name, product.trim())).size(TXT_SMALL).color(MUTED()));
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 16.0;
-                for (tab, label) in [(PgTab::Overview, "Overview"), (PgTab::Settings, "Settings"), (PgTab::Activity, "Activity"), (PgTab::Locks, "Locks")] {
-                    if view_tab(ui, label, s.tab == tab).clicked() && s.tab != tab {
+            const TABS: [(PgTab, &str); 4] = [(PgTab::Overview, "Overview"), (PgTab::Settings, "Settings"), (PgTab::Activity, "Activity"), (PgTab::Locks, "Locks")];
+            let labels = TABS.map(|t| t.1);
+            let active = TABS.iter().position(|t| t.0 == s.tab).unwrap_or(0);
+            let picked = dialog_head(ui, &Head::new("Server").sub(subtitle(&s, &name, product.trim())).glyph(glyphs::server).tabs(&labels, active));
+            {
+                for (tab, _) in TABS.iter().copied().filter(|t| picked.is_some_and(|i| TABS[i].0 == t.0)) {
+                    if s.tab != tab {
                         s.tab = tab;
                         match tab {
                             PgTab::Overview => s.ov_next = None,
@@ -533,20 +531,21 @@ impl App {
                         s.confirm = None;
                     }
                 }
-            });
-            ui.add_space(8.0);
-            let max = screen.height() - 330.0;
-            if !live {
-                ui.label(RichText::new("This connection is closed. Reconnect to see the server again.").color(MUTED()));
-            } else {
-                match s.tab {
-                    PgTab::Overview => overview_view(ui, &mut s),
-                    PgTab::Settings => settings_view(ui, &mut s, max),
-                    PgTab::Activity => activity_view(ui, &mut s, max, &name, &mut acts),
-                    PgTab::Locks => locks_view(ui, &mut s, max, &name, &mut acts),
-                }
             }
-            if done(ui) {
+            let max = screen.height() - 400.0;
+            dialog_pane(ui, |ui| {
+                if !live {
+                    ui.label(RichText::new("This connection is closed. Reconnect to see the server again.").color(MUTED()));
+                } else {
+                    match s.tab {
+                        PgTab::Overview => overview_view(ui, &mut s),
+                        PgTab::Settings => settings_view(ui, &mut s, max),
+                        PgTab::Activity => activity_view(ui, &mut s, max, &name, &mut acts),
+                        PgTab::Locks => locks_view(ui, &mut s, max, &name, &mut acts),
+                    }
+                }
+            });
+            if dialog_done(ui) {
                 s.unlock = false;
                 acts.send = None;
                 return false;
