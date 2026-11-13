@@ -203,6 +203,8 @@ fn the_empty_state_offers_a_link_a_folder_and_the_other_connections() {
     assert!(ui.shown("Link a folder…"));
     assert!(ui.h.query_all_by_label_contains("3 scripts on other connections").next().is_some());
     ui.click("Link a folder…");
+    assert!(matches!(ui.app().modal, Some(Modal::LinkFolder(_))));
+    ui.click("Cancel");
     ui.click("Show all connections");
     assert!(ui.app().prefs.lib_scope_all);
     assert!(ui.shown("Paid orders"));
