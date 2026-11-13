@@ -846,21 +846,9 @@ impl App {
                         ui.add_space(6.0);
                     }
                     if record && active {
-                        ui.add_space(4.0);
-                        // As wide as the grid on screen and moved to where it is scrolled sideways, so the card is in view.
-                        let w = row_w.min(view_w - 2.0).max(320.0);
                         let shown: HashSet<&String> = cols.iter().collect();
                         let names: Vec<String> = cols.iter().chain(fields.iter().filter(|f| !shown.contains(f))).cloned().collect();
-                        let left = (ui.clip_rect().left() - ui.max_rect().left()).max(0.0);
-                        ui.horizontal(|ui| {
-                            ui.add_space(left);
-                            card(ui, |ui| {
-                                ui.set_width(w - 30.0);
-                                // The card takes the row's horizontal layout; its lines go one under the other.
-                                ui.vertical(|ui| self.sql_record(ui, docs, i, agg, &names, &fks, menu, &checked, &mut rec));
-                            });
-                        });
-                        ui.add_space(6.0);
+                        record_card(ui, row_w, view_w, |ui| self.sql_record(ui, docs, i, agg, &names, &fks, menu, &checked, &mut rec));
                     }
                 }
             });
@@ -1019,6 +1007,22 @@ pub(super) fn row_fill(active: bool, checked: bool, hovered: bool, pressed: bool
 }
 
 /// The reading line's bar sits at the visible left edge, so it stays in view when scrolled sideways.
+/// The selected row's record under it in a grid, as wide as the grid on screen and moved to where it is scrolled
+/// sideways, so the card is in view.
+pub(super) fn record_card(ui: &mut egui::Ui, row_w: f32, view_w: f32, add: impl FnOnce(&mut egui::Ui)) {
+    ui.add_space(4.0);
+    let left = (ui.clip_rect().left() - ui.max_rect().left()).max(0.0);
+    ui.horizontal(|ui| {
+        ui.add_space(left);
+        card(ui, |ui| {
+            ui.set_width(row_w.min(view_w - 2.0).max(320.0) - 30.0);
+            // The card takes the row's horizontal layout; its lines go one under the other.
+            ui.vertical(add);
+        });
+    });
+    ui.add_space(6.0);
+}
+
 pub(super) fn paint_row(ui: &egui::Ui, row: egui::Rect, active: bool, checked: bool, hovered: bool, pressed: bool, odd: bool) {
     let fill = row_fill(active, checked, hovered, pressed, odd);
     if fill != Color32::TRANSPARENT {

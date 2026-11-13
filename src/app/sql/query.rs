@@ -58,6 +58,12 @@ pub(in crate::app) fn statement_pos(text: &str, caret: usize, d: db::sql::Dialec
 
 /// A statement on one line for a menu, from its first word of code: a leading comment would color the whole line as one.
 fn preview(text: &str, d: db::sql::Dialect) -> String {
+    let text = text.trim_start();
+    // Most statements start with code, and the History menu builds every line each frame, so only those that open
+    // with a comment are lexed.
+    if !(text.starts_with("--") || text.starts_with("/*") || text.starts_with('#')) {
+        return db::sql::server::one_line(text, 90);
+    }
     let start = lex::tokens(text, d).into_iter().find(|(t, _)| !matches!(t, lex::Tok::Space | lex::Tok::Comment)).map_or(0, |(_, r)| r.start);
     db::sql::server::one_line(&text[start..], 90)
 }
@@ -199,7 +205,7 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, checked: &BTreeSet<usize>, sel: Opti
                         }
                         // Cmd or Shift on a row checks it like in the Content grid; a plain click selects it.
                         if resp.clicked() {
-                            if ui.input(|i| i.modifiers.command || i.modifiers.shift) {
+                            if shift || ui.input(|i| i.modifiers.command) {
                                 out.check = Some((i, shift));
                             } else {
                                 out.select = Some(i);
@@ -214,17 +220,7 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, checked: &BTreeSet<usize>, sel: Opti
                         });
                     }
                     if sel == Some(i) && let Some(rec) = record.as_mut() {
-                        ui.add_space(4.0);
-                        // As wide as the grid on screen and moved to where it is scrolled sideways, like the Content record.
-                        let left = (ui.clip_rect().left() - ui.max_rect().left()).max(0.0);
-                        ui.horizontal(|ui| {
-                            ui.add_space(left);
-                            card(ui, |ui| {
-                                ui.set_width(row_w.min(view_w - 2.0).max(320.0) - 30.0);
-                                ui.vertical(|ui| rec(ui));
-                            });
-                        });
-                        ui.add_space(6.0);
+                        table::record_card(ui, row_w, view_w, |ui| rec(ui));
                     }
                 }
             })
@@ -484,10 +480,9 @@ impl App {
         }
         ui.add_space(4.0);
         let (mut run, mut run_all, mut stop, mut explain, mut format, mut run_pick) = (false, false, false, false, false, None);
-        let mut many = false;
-        let status = self.t().and_then(|t| t.sql.as_ref()).map(|s| {
-            let CaretInfo { line_col: (l, c), stmt, .. } = s.caret_info(self.sql_dialect());
-            many = stmt.as_ref().is_some_and(|(_, _, n)| *n > 1);
+        let caret = self.t().and_then(|t| t.sql.as_ref()).map(|s| s.caret_info(self.sql_dialect()));
+        let many = caret.as_ref().and_then(|c| c.stmt.as_ref()).is_some_and(|(_, _, n)| *n > 1);
+        let status = caret.map(|CaretInfo { line_col: (l, c), stmt, .. }| {
             let n = stmt.map_or(String::new(), |(_, i, n)| format!("  ·  statement {i} of {n}"));
             format!("Ln {l}, Col {c}{n}")
         });
@@ -848,7 +843,7 @@ impl App {
                 // The record draws through `self`, so the results leave the tab while the grid draws, as in `results`.
                 let qsel = s.qsel.filter(|&i| i < s.sets[sel].rows.len());
                 let (sets, checked) = (std::mem::take(&mut s.sets), std::mem::take(&mut s.qchecked));
-                let names: Vec<String> = sets[sel].cols.iter().map(|c| c.name.clone()).collect();
+                let names: Vec<String> = if record_open { sets[sel].cols.iter().map(|c| c.name.clone()).collect() } else { Vec::new() };
                 let scroll = std::mem::take(&mut self.scroll_sel);
                 let mut rec = crate::app::sql::record::RecordOut::default();
                 let mut draw = |ui: &mut egui::Ui| self.sql_record(ui, Rows::Raw(&sets[sel].rows), qsel.unwrap_or(0), true, &names, &[], RowMenu::None, &checked, &mut rec);
