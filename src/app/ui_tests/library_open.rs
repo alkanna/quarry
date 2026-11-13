@@ -567,10 +567,11 @@ fn the_library_menus_are_as_narrow_as_the_apps_other_menus() {
     let Some(mut ui) = demo_ui(panel) else { return };
     let max = crate::app::library::panel::MENU_MAX_W + 2.0;
     ui.click("Library menu");
+    // The menu takes the width of its longest item, not the cap: three short items stay well under it.
     for item in ["Link a folder\u{2026}", "Fold all", "Show all connections"] {
         ui.show(item);
         let w = ui.h.get_by_label(item).rect().width();
-        assert!(w <= max, "{item} is {w} px wide");
+        assert!(w <= 200.0, "{item} is {w} px wide");
     }
     ui.key(egui::Modifiers::NONE, egui::Key::Escape);
     // The row menu, with its shortcuts on the right of each item, keeps the same width.

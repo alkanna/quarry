@@ -373,7 +373,7 @@ fn lib_menu(ui: &mut egui::Ui) {
 /// One item of a Library menu: the interface font, the shortcut faint on the right, and a check at the right end for an
 /// option that is on, as the other menus draw them.
 fn lib_button(ui: &mut egui::Ui, label: &str, key: &str, checked: bool) -> egui::Response {
-    let mut b = egui::Button::new(label).truncate();
+    let mut b = egui::Button::new(label);
     if !key.is_empty() {
         b = b.shortcut_text(RichText::new(key).color(FAINT()));
     }
