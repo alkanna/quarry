@@ -966,7 +966,9 @@ mod tests {
 
     #[test]
     fn a_closed_folder_shows_its_worst_member() {
-        let s = |v: &[Status]| folder_status(v.iter());
+        fn s(v: &[Status]) -> Option<&Status> {
+            folder_status(v.iter())
+        }
         assert!(s(&[Status::Ready, Status::Idle]) == Some(&Status::Ready));
         assert!(s(&[Status::Ready, Status::Connecting]) == Some(&Status::Connecting));
         assert!(matches!(s(&[Status::Connecting, Status::Failed("x".into()), Status::Ready]), Some(Status::Failed(_))));

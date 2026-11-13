@@ -182,17 +182,9 @@ pub(super) fn clean_tag(tag: &str) -> &str {
     if t.eq_ignore_ascii_case("none") { "" } else { t }
 }
 
-/// A saved connection in the picker: status, name and tag, then the masked address.
-pub(super) fn conn_row(ui: &mut egui::Ui, c: &Conn, active: bool) -> egui::Response {
-    conn_row_in(ui, c, active, 0.0, &[], false)
-}
-
-/// `conn_row` indented by `indent`, with the matched byte ranges of the name highlighted, and optionally draggable.
-pub(super) fn conn_row_in(ui: &mut egui::Ui, c: &Conn, active: bool, indent: f32, hl: &[(usize, usize)], drag: bool) -> egui::Response {
-    conn_row_room(ui, c, active, indent, hl, drag, 0.0)
-}
-
-/// `conn_row_in` that keeps `room` px free at its right end for the row's own buttons.
+/// A saved connection in a list: status, name and tag, then the masked address. It is indented by `indent`, the matched byte
+/// ranges of the name are highlighted, it is optionally draggable, and it keeps `room` px free at its right end for the
+/// row's own buttons.
 pub(super) fn conn_row_room(ui: &mut egui::Ui, c: &Conn, active: bool, indent: f32, hl: &[(usize, usize)], drag: bool, room: f32) -> egui::Response {
     let sense = if drag { Sense::click_and_drag() } else { Sense::click() };
     side_row_sense(ui, sense, 48.0, 4.0 + indent, active, &c.meta.name, |p, r| paint_conn_row(p, r.with_max_x(r.right() - room), c, active, hl))
