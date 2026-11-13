@@ -1090,6 +1090,10 @@ pub(crate) const R_MD: u8 = 6;
 pub(crate) const R_LG: u8 = 10;
 /// The Documents find bar, a step rounder than inputs since it frames a whole row.
 pub(crate) const R_BAR: u8 = R_MD + 2;
+/// Vim's block caret, just off square like a terminal cursor.
+pub(crate) const R_CARET: u8 = 1;
+/// Padding inside the Vim mode badge, and its distance from the editor's corner.
+pub(crate) const VIM_BADGE_PAD: f32 = 6.0;
 
 pub(crate) const SIDE_ROW_H: f32 = 26.0;
 

@@ -648,7 +648,7 @@ impl App {
             egui::ScrollArea::vertical().id_salt("shell-ed").max_height(h).auto_shrink([false, true]).show(ui, |ui| {
                 crate::ui::vim::demo(ui, id, &t.shell.code);
                 crate::ui::vim::begin(ui, id, &mut t.shell.code);
-                let (out, picked) = ac_field(ui, id, &mut t.shell.code, ac, &compute, |ui, text, _open| {
+                let (mut out, picked) = ac_field(ui, id, &mut t.shell.code, ac, &compute, |ui, text, _open| {
                     egui::TextEdit::multiline(text)
                         .id(id)
                         .font(FontId::monospace(TXT_SMALL))
@@ -659,7 +659,7 @@ impl App {
                         .layouter(&mut layout)
                         .show(ui)
                 });
-                crate::ui::vim::end(ui, id, &out);
+                crate::ui::vim::end(ui, id, &mut out);
                 out.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::MultilineTextInput, true, "Shell editor"));
                 if ac.id == Some(id) && !ac.items.is_empty() && let Some((title, foot)) = meta.borrow_mut().take() {
                     (ac.title, ac.foot) = (title, foot);

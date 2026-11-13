@@ -61,6 +61,7 @@ pub(super) fn stage_card(ui: &mut egui::Ui, i: usize, n: usize, s: &mut Stage, a
                 let id = egui::Id::unique(("stage-editor", s.uid));
                 let rows = s.text.lines().count().clamp(2, 16);
                 let out = crate::ui::vim::wrap(ui, id, &mut s.text, |ui, text| with_autopair(ui, id, text, |ui, text| egui::TextEdit::multiline(text).id(id).code_editor().desired_width(f32::INFINITY).desired_rows(rows).layouter(&mut code_layout).show(ui)));
+                out.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::MultilineTextInput, true, format!("Stage {} editor", i + 1)));
                 if out.response.changed() {
                     acts.push(StageAct::Edited(i));
                 }

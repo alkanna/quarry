@@ -36,8 +36,12 @@ pub(crate) enum History {
 #[derive(Default, Debug)]
 pub(crate) struct Out {
     pub(crate) changed: bool,
+    /// The text before the change, for the editor's undo history, so callers need not copy it first.
+    pub(crate) before: Option<String>,
     pub(crate) yank: Option<String>,
     pub(crate) history: Option<History>,
+    /// A paste that waits for the clipboard: the keys to run again once its text is known.
+    pub(crate) paste: Option<Vec<char>>,
 }
 
 #[derive(Clone, Default)]
@@ -64,6 +68,9 @@ pub(crate) struct Vim {
     dot: Vec<char>,
     dot_text: String,
     replaying: bool,
+    /// Set while the clipboard has not been read yet: `p` and `P` then hand their keys back in
+    /// `Out::paste` instead of running, because the editor reads the clipboard asynchronously.
+    pub(crate) defer_paste: bool,
     ins_at: usize,
     ins_len: usize,
 }
@@ -151,7 +158,7 @@ impl Vim {
         let mut out = Out::default();
         self.step(&mut b, &mut c, k, clip, &mut out);
         if out.changed {
-            *text = b.iter().collect();
+            out.before = Some(std::mem::replace(text, b.iter().collect()));
         }
         *cur = c;
         out
@@ -206,6 +213,12 @@ impl Vim {
             *c = self.settle(b, *c);
             return;
         }
+        // Backspace drops a half-typed command, and Enter or an arrow never becomes the char that
+        // r, f or t wait for.
+        if !self.pending.is_empty() && !matches!(k, K::Ch(_) | K::Esc | K::CtrlR) && (k == K::Backspace || self.pending.last().is_some_and(|p| "rfFtTg".contains(*p))) {
+            self.pending.clear();
+            return;
+        }
         let ch = match k {
             K::Esc => {
                 self.pending.clear();
@@ -249,6 +262,10 @@ impl Vim {
 
     fn run(&mut self, b: &mut Vec<char>, c: &mut usize, cmd: Cmd, keys: &[char], clip: &mut dyn FnMut() -> Option<String>, out: &mut Out) {
         let n = cmd.n;
+        if self.defer_paste && matches!(cmd.what, What::Simple('p' | 'P')) {
+            out.paste = Some(keys.to_vec());
+            return;
+        }
         if matches!(self.mode, Mode::Visual | Mode::VisualLine) {
             return self.run_visual(b, c, cmd, clip, out);
         }
@@ -448,11 +465,22 @@ impl Vim {
                 None => {}
             },
             Target::M(m) => {
-                // `cw` on a word changes to its end, like `ce`, so the space after it stays.
-                let m = match m {
-                    M::W(big) if op == 'c' && b.get(start).is_some_and(|ch| !ch.is_whitespace()) => M::E(big),
-                    m => m,
-                };
+                // `cw` on a word changes to its end, like `ce`, so the space after it stays. On the
+                // word's last char that end is the char itself, where `e` would reach the next word.
+                if let M::W(big) = m
+                    && op == 'c'
+                    && b.get(start).is_some_and(|ch| !ch.is_whitespace())
+                {
+                    let last = |i: usize| i + 1 >= b.len() || class(b[i + 1], big) != class(b[i], big);
+                    let mut to = start;
+                    for k in 0..n {
+                        if !(k == 0 && last(to)) {
+                            to = end_word(b, to, big);
+                        }
+                    }
+                    self.operate(b, c, op, start, to + 1, false, out);
+                    return;
+                }
                 let Some((mut to, kind)) = self.eval(b, start, m, n, has, true) else {
                     if op == 'c' && matches!(m, M::L) {
                         self.enter_insert(b, start);
@@ -1368,6 +1396,41 @@ mod tests {
         assert_eq!(run("  |a\nb", "ox\x1b"), "  a\n  |x\nb");
         assert_eq!(run("  |a\nb", "Ox\x1b"), "  |x\n  a\nb");
         assert_eq!(run("ab|c", "i\x1b"), "a|bc");
+    }
+
+    #[test]
+    fn cw_on_a_last_letter_changes_only_that_word() {
+        assert_eq!(run("let |a = foo;", "cwb\x1b"), "let |b = foo;");
+        assert_eq!(run("fo|o bar", "cwx\x1b"), "fo|x bar");
+        assert_eq!(run("|a b c", "2cwx\x1b"), "|x c");
+        assert_eq!(run("|ab cd", "cwx\x1b"), "|x cd");
+    }
+
+    #[test]
+    fn keys_that_are_not_chars_cancel_a_waiting_command() {
+        assert_eq!(run("|abc", "r\x08"), "|abc");
+        assert_eq!(run("|abc", "r\rx"), "|bc");
+        assert_eq!(run("|a,b", "f\r;"), "|a,b");
+        assert_eq!(run("|abc", "d\x08x"), "|bc");
+        assert_eq!(run("a|bc\nd", "2\x1bj"), "abc\n|d");
+    }
+
+    #[test]
+    fn a_deferred_paste_hands_its_keys_back_and_runs_later() {
+        let mut v = Vim { defer_paste: true, ..Default::default() };
+        let (mut text, mut cur) = ("ab".to_string(), 0);
+        let out = v.key(&mut text, &mut cur, K::Ch('2'), &mut || None);
+        assert!(out.paste.is_none());
+        let out = v.key(&mut text, &mut cur, K::Ch('p'), &mut || Some("X".into()));
+        assert_eq!(out.paste, Some(vec!['2', 'p']));
+        assert_eq!(text, "ab");
+        v.defer_paste = false;
+        let mut out = Out::default();
+        for k in ['2', 'p'] {
+            out = v.key(&mut text, &mut cur, K::Ch(k), &mut || Some("X".into()));
+        }
+        assert_eq!(text, "aXXb");
+        assert_eq!(out.before.as_deref(), Some("ab"));
     }
 
     #[test]
