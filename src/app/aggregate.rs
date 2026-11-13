@@ -156,7 +156,7 @@ impl App {
     pub(super) fn aggregate(&mut self, ui: &mut egui::Ui) {
         let mut run = false;
         let mut explain = false;
-        let pick = self.pick_data(PickKind::Pipeline);
+        let pick = self.pick_data(ui.ctx(), PickKind::Pipeline);
         let mut pick_acts = Vec::new();
         let mut demo_pick = None;
         let mut code_lang = None;

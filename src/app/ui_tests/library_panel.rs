@@ -234,3 +234,39 @@ fn esc_cancels_a_library_drag_and_a_click_still_selects() {
     assert!(matches!(ui.app().lib_ui.panel.sel, Some(Node::Script(_))), "a click did not select the script");
     assert_eq!(ui.app().library, before, "a click moved the script");
 }
+
+#[test]
+fn a_deleted_script_unbinds_its_tab_and_its_id_is_never_given_again() {
+    use crate::library::ScriptRef;
+    // "Slow orders lookup" (14) is the highest id once the later scripts are gone, which max + 1 used to hand out again.
+    let Some(mut ui) = demo_ui(|a| {
+        load(a);
+        a.library.scripts.retain(|s| s.id <= 14);
+    }) else { return };
+    ui.h.state_mut().open_script(&ScriptRef::Saved(14), crate::app::library::open::How::NewTab);
+    ui.settle();
+    let tab = ui.app().cur;
+    assert!(ui.app().tabs[tab].script.as_ref().is_some_and(|b| b.r == ScriptRef::Saved(14)));
+    ui.row_menu("Slow orders lookup", "Delete…");
+    let a = ui.app();
+    assert!(a.tabs[tab].script.is_none(), "the tab of a deleted script is unbound");
+    assert!(!a.library.recent.contains(&ScriptRef::Saved(14)));
+    let next = ui.h.state_mut().library.next_id();
+    assert!(next > 14, "a new script took the deleted id {next}");
+    // The old tab's Cmd+S asks where to save instead of writing into another script.
+    ui.h.state_mut().cur = tab;
+    ui.settle();
+    ui.key(egui::Modifiers::COMMAND, egui::Key::S);
+    assert!(matches!(ui.app().modal, Some(Modal::SaveScript(_))));
+}
+
+#[test]
+fn the_scope_control_spans_the_panel_in_two_equal_halves() {
+    let Some(ui) = demo_ui(load) else { return };
+    let name = ui.app().active.and_then(|id| ui.app().conn(id)).map(|c| c.meta.name.clone()).expect("an active connection");
+    let all = ui.h.get_by_label("All connections").rect();
+    let one = ui.h.query_all_by_label(&name).map(|n| n.rect()).find(|r| (r.center().y - all.center().y).abs() < 1.0).expect("the connection half of the scope");
+    assert!((one.width() - all.width()).abs() < 1.0, "halves {} and {}", one.width(), all.width());
+    // The sidebar is 250 wide less its margins: two hugging labels come to far less.
+    assert!(one.width() + all.width() > 200.0, "the control spans {}", one.width() + all.width());
+}

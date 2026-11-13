@@ -187,7 +187,8 @@ pub fn file_name(name: &str, ext: &str) -> String {
         s = "script".into();
     }
     let dotted = format!(".{ext}");
-    if !ext.is_empty() && !s.to_lowercase().ends_with(&dotted) {
+    // Both sides lowercased, or "Q.SQL" with ext "SQL" would gain a second ".SQL".
+    if !ext.is_empty() && !s.to_lowercase().ends_with(&dotted.to_lowercase()) {
         s.push_str(&dotted);
     }
     s
@@ -227,10 +228,22 @@ pub fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     res
 }
 
-/// Creates a new file `name` in `dir` and returns its path. A name that is taken gets " 2", " 3" and so on; nothing is
-/// overwritten.
-pub fn create_file(dir: &Path, name: &str, ext: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
-    std::fs::create_dir_all(dir)?;
+/// The folder `dir` below the linked folder `root`, made when it is missing. A missing `root` is refused, never made: it is
+/// a moved folder or a drive that is not mounted, and writing there would build the dead path again on the local disk.
+pub fn dir_below(root: &Path, dir: &Path) -> std::io::Result<PathBuf> {
+    if !root.is_dir() {
+        return Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("{} is not there", root.display())));
+    }
+    let at = root.join(dir);
+    std::fs::create_dir_all(&at)?;
+    Ok(at)
+}
+
+/// Creates a new file `name` in the folder `dir` of the linked folder `root` and returns its path. A name that is taken
+/// gets " 2", " 3" and so on; nothing is overwritten.
+pub fn create_file(root: &Path, dir: &Path, name: &str, ext: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
+    let dir = dir_below(root, dir)?;
+    let dir = dir.as_path();
     loop {
         let path = dir.join(unique_name(dir, &file_name(name, ext)));
         match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
@@ -245,14 +258,22 @@ pub fn create_file(dir: &Path, name: &str, ext: &str, bytes: &[u8]) -> std::io::
     }
 }
 
-/// Renames the file at `path` to `name` in the same folder, and returns the new path. Refuses a name that is taken.
+/// Whether `to` names the same file as `from` under another case, as it does on a case-insensitive filesystem (macOS,
+/// Windows). There a case-only rename finds its own file at the target and must still go ahead.
+pub fn same_file_other_case(from: &Path, to: &Path) -> bool {
+    let (Some(a), Some(b)) = (from.file_name().and_then(|f| f.to_str()), to.file_name().and_then(|f| f.to_str())) else { return false };
+    from.parent() == to.parent() && a != b && a.to_lowercase() == b.to_lowercase() && matches!((std::fs::canonicalize(from), std::fs::canonicalize(to)), (Ok(x), Ok(y)) if x == y)
+}
+
+/// Renames the file at `path` to `name` in the same folder, and returns the new path. Refuses a name that is taken by
+/// another file; a change of case only is allowed.
 pub fn rename_file(path: &Path, name: &str) -> std::io::Result<PathBuf> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let to = path.with_file_name(file_name(name, ext));
     if to == path {
         return Ok(to);
     }
-    if std::fs::symlink_metadata(&to).is_ok() {
+    if std::fs::symlink_metadata(&to).is_ok() && !same_file_other_case(path, &to) {
         return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("{} already exists", to.file_name().and_then(|f| f.to_str()).unwrap_or(""))));
     }
     std::fs::rename(path, &to)?;
@@ -474,14 +495,57 @@ mod tests {
         assert_eq!(file_name("  ..  ", "sql"), "script.sql");
         assert_eq!(file_name("Report.SQL", "sql"), "Report.SQL");
         let d = temp_dir("names");
-        let a = create_file(&d, "q", "sql", b"1").unwrap();
-        let b = create_file(&d, "q", "sql", b"2").unwrap();
-        let c = create_file(&d, "q", "sql", b"3").unwrap();
+        let a = create_file(&d, Path::new(""), "q", "sql", b"1").unwrap();
+        let b = create_file(&d, Path::new(""), "q", "sql", b"2").unwrap();
+        let c = create_file(&d, Path::new(""), "q", "sql", b"3").unwrap();
         let names: Vec<_> = [&a, &b, &c].iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
         assert_eq!(names, ["q.sql", "q 2.sql", "q 3.sql"]);
         assert_eq!(std::fs::read(&a).unwrap(), b"1");
         assert!(rename_file(&b, "q").is_err());
         assert_eq!(rename_file(&b, "other").unwrap().file_name().unwrap(), "other.sql");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn nothing_is_written_below_a_linked_folder_that_is_gone() {
+        let d = temp_dir("gone");
+        let root = d.join("moved-repo");
+        assert!(create_file(&root, Path::new("reports"), "q", "sql", b"1").is_err());
+        assert!(dir_below(&root, Path::new("")).is_err());
+        assert!(!root.exists(), "the dead path was made again");
+        // Below a folder that is there, a missing subfolder is still made.
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(create_file(&root, Path::new("reports"), "q", "sql", b"1").unwrap().ends_with("reports/q.sql"));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn an_uppercase_extension_is_not_added_twice() {
+        assert_eq!(file_name("Q2.SQL", "SQL"), "Q2.SQL");
+        assert_eq!(file_name("Q2", "SQL"), "Q2.SQL");
+        assert_eq!(file_name("q2.sql", "SQL"), "q2.sql");
+        let d = temp_dir("upper");
+        put(&d, "Q.SQL", "select 1");
+        let to = rename_file(&d.join("Q.SQL"), "Q2").unwrap();
+        assert_eq!(to.file_name().unwrap(), "Q2.SQL");
+        let again = rename_file(&to, "Q2.SQL").unwrap();
+        assert_eq!(again.file_name().unwrap(), "Q2.SQL");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_rename_that_changes_only_the_case_goes_ahead() {
+        // On a case-insensitive filesystem the target "exists" because it is the same file; on a case-sensitive one it
+        // does not exist at all. Either way the rename must work, and a real other file must still be refused.
+        let d = temp_dir("case");
+        put(&d, "report.sql", "select 1");
+        let to = rename_file(&d.join("report.sql"), "Report").unwrap();
+        assert_eq!(to.file_name().unwrap(), "Report.sql");
+        let names: Vec<String> = std::fs::read_dir(&d).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, ["Report.sql"]);
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "select 1");
+        put(&d, "other.sql", "select 2");
+        assert_eq!(rename_file(&to, "other").unwrap_err().kind(), std::io::ErrorKind::AlreadyExists);
         std::fs::remove_dir_all(&d).unwrap();
     }
 

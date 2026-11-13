@@ -193,13 +193,34 @@ pub(crate) fn segmented<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, o
 
 /// `segmented` where an option whose flag is false is shown faint and cannot be chosen.
 pub(crate) fn segmented_on<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options: &[(T, &str, bool)]) {
+    segmented_impl(ui, value, options, false);
+}
+
+/// `segmented_on` spanning the width left in `ui`, in equal parts, for a control that heads a panel. A label too long for
+/// its part is cut with an ellipsis.
+pub(crate) fn segmented_fill<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options: &[(T, &str, bool)]) {
+    segmented_impl(ui, value, options, true);
+}
+
+fn segmented_impl<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options: &[(T, &str, bool)], fill: bool) {
     // Painted at a fixed height: a Frame grew with the row, leaving the track taller than its options.
     const PAD: f32 = 2.0;
     const GAP: f32 = 2.0;
     let pad_x = ui.spacing().button_padding.x;
-    let galleys: Vec<_> = options.iter().map(|(v, l, _)| ui.painter().layout_job(egui::text::LayoutJob::single_section(l.to_string(), ui_fmt(TXT_SMALL, Color32::PLACEHOLDER, if *value == *v { W_MEDIUM } else { 400.0 }, 0.0)))).collect();
-    let widths: Vec<f32> = galleys.iter().map(|g| g.size().x + pad_x * 2.0).collect();
-    let total = widths.iter().sum::<f32>() + GAP * (options.len().saturating_sub(1)) as f32 + PAD * 2.0;
+    let gaps = GAP * (options.len().saturating_sub(1)) as f32 + PAD * 2.0;
+    let part = (ui.available_width() - gaps).max(0.0) / options.len().max(1) as f32;
+    let galleys: Vec<_> = options
+        .iter()
+        .map(|(v, l, _)| {
+            let mut job = egui::text::LayoutJob::single_section(l.to_string(), ui_fmt(TXT_SMALL, Color32::PLACEHOLDER, if *value == *v { W_MEDIUM } else { 400.0 }, 0.0));
+            if fill {
+                job.wrap = egui::text::TextWrapping::truncate_at_width((part - pad_x * 2.0).max(0.0));
+            }
+            ui.painter().layout_job(job)
+        })
+        .collect();
+    let widths: Vec<f32> = if fill { vec![part; options.len()] } else { galleys.iter().map(|g| g.size().x + pad_x * 2.0).collect() };
+    let total = widths.iter().sum::<f32>() + gaps;
     let base = ui.next_auto_id();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(total, BUTTON_H), Sense::hover());
     ui.painter().rect(rect, R_MD, PANEL(), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);

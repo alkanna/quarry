@@ -96,6 +96,17 @@ fn cmd_s_with_staged_grid_edits_saves_only_the_edits() {
 }
 
 #[test]
+fn cmd_s_in_a_view_without_a_script_does_nothing() {
+    // A table's Content grid holds no script. Its own Cmd+S stands aside while the cell editor is open, and the library
+    // must not answer the key there with a warning about a missing script.
+    let Some(mut ui) = demo_ui(|a| a.load_sql_demo()) else { return };
+    assert!(ui.app().tab_text().is_none() && ui.app().drafts.is_empty());
+    ui.key(CMD, egui::Key::S);
+    assert!(!matches!(ui.app().modal, Some(Modal::SaveScript(_))));
+    assert!(!ui.app().last_problem().contains("no script to save"), "{}", ui.app().last_problem());
+}
+
+#[test]
 fn cmd_s_with_a_document_draft_saves_only_the_draft() {
     let Some(mut ui) = demo_ui(App::load_demo) else { return };
     {
@@ -215,4 +226,37 @@ fn the_old_saved_queries_move_into_the_library_once() {
     assert_eq!(lib.scripts.iter().map(|s| s.kind.as_str()).collect::<std::collections::BTreeSet<_>>().into_iter().collect::<Vec<_>>(), ["filter", "sql"]);
     // ui.json keeps its copy for an older build.
     assert_eq!(a.prefs.library.len(), 2);
+}
+
+#[test]
+fn an_orphaned_folder_and_script_show_at_the_top_of_the_save_dialog_and_the_picker() {
+    use crate::library::{Folder, Script};
+    let Some(mut ui) = demo_ui(sql_query_with_scripts) else { return };
+    let lost = {
+        let a = ui.h.state_mut();
+        let lost = a.library.next_id();
+        a.library.folders.push(Folder { id: lost, name: "Lost folder".into(), parent: Some(9_999) });
+        let id = a.library.next_id();
+        a.library.scripts.push(Script { id, name: "Lost script".into(), kind: "sql".into(), body: "SELECT 2;".into(), conn: 3, folder: Some(9_998), ..Default::default() });
+        lost
+    };
+    // The panel puts both at the top level; the Save dialog's folder list and the picker must too.
+    let rows = crate::app::library::save_dialog::folder_rows(&ui.app().library);
+    assert!(rows.contains(&(lost, 0)), "{rows:?}");
+    ui.click("Library 6");
+    ui.click("Script Lost script");
+    assert_eq!(query(&ui), "SELECT 2;");
+}
+
+#[test]
+fn the_picker_lists_are_built_only_while_it_is_open() {
+    use crate::app::library::picker::PickKind;
+    let Some(mut ui) = demo_ui(sql_query_with_scripts) else { return };
+    let ctx = ui.h.ctx.clone();
+    let closed = ui.app().pick_data(&ctx, PickKind::Sql);
+    assert!(!closed.full && closed.rows.is_empty() && closed.count == 5);
+    ui.click("Library 5");
+    ui.show("Script Late shipments");
+    let open = ui.app().pick_data(&ctx, PickKind::Sql);
+    assert!(open.full && open.rows.len() == 5);
 }

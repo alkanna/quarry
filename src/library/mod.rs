@@ -26,6 +26,9 @@ pub struct Library {
     pub scripts: Vec<Script>,
     pub links: Vec<Link>,
     pub recent: Vec<ScriptRef>,
+    /// The next id to hand out. Ids are never reused: a tab or a recent entry that still names a deleted script must not
+    /// find a new one under its id. A file without it starts after the highest id in use.
+    pub next: u64,
 }
 
 /// A folder kept by Quarry. Siblings show in the order of the list.
@@ -83,10 +86,13 @@ pub enum ScriptRef {
 }
 
 impl Library {
-    /// An id no folder, script or link uses, so the three share one id space.
-    pub fn next_id(&self) -> u64 {
+    /// An id no folder, script or link uses or ever used, so the three share one id space and a deleted item's id is not
+    /// handed out again.
+    pub fn next_id(&mut self) -> u64 {
         let ids = self.folders.iter().map(|f| f.id).chain(self.scripts.iter().map(|s| s.id)).chain(self.links.iter().map(|l| l.id));
-        ids.max().unwrap_or(0) + 1
+        let id = self.next.max(ids.max().unwrap_or(0) + 1);
+        self.next = id + 1;
+        id
     }
 
     /// Puts deleted folders and scripts back for an Undo. An item whose id was taken since gets a new one, and what pointed
@@ -137,6 +143,20 @@ mod tests {
         }
         l.push_recent(ScriptRef::Saved(25));
         assert_eq!((l.recent.len(), l.recent[0].clone(), l.recent[1].clone()), (RECENT_MAX, ScriptRef::Saved(25), ScriptRef::Saved(29)));
+    }
+
+    #[test]
+    fn a_deleted_id_is_never_handed_out_again() {
+        let mut l = Library::default();
+        let (a, b) = (l.next_id(), l.next_id());
+        l.scripts.push(Script { id: a, ..Default::default() });
+        l.scripts.push(Script { id: b, ..Default::default() });
+        // The highest id goes: max + 1 would give it again.
+        l.scripts.retain(|s| s.id != b);
+        assert_eq!(l.next_id(), b + 1);
+        // The counter survives the file.
+        let back: Library = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
+        assert_eq!(back.next, b + 2);
     }
 
     #[test]

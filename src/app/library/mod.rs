@@ -63,7 +63,8 @@ pub(super) fn load_library_from(path: &std::path::Path) -> (Library, Option<Stri
     let (recent, e) = parse_entries(recent);
     errs.extend(e);
     let v = o.get("v").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-    (Library { v, folders, scripts, links, recent }, skipped_note(path, total, &errs))
+    let next = o.get("next").and_then(|v| v.as_u64()).unwrap_or(0);
+    (Library { v, folders, scripts, links, recent, next }, skipped_note(path, total, &errs))
 }
 
 pub(super) fn load_library() -> (Library, Option<String>) {
@@ -151,6 +152,18 @@ mod tests {
         assert_eq!((l.folders.len(), l.scripts.len(), l.links.len(), l.recent.clone()), (1, 1, 1, vec![ScriptRef::Saved(2)]));
         assert!(note.is_some_and(|n| n.contains("Skipped 2 of 6")));
         assert!(p.exists() && dir.join("library.json.bak").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_id_counter_is_read_back_from_the_file() {
+        let dir = std::env::temp_dir().join(format!("quarry-library-next-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("library.json");
+        // Script 12 was deleted: the highest id left is 3, but 12 and below were handed out.
+        std::fs::write(&p, r#"{"v":1,"scripts":[{"id":3,"name":"a","kind":"sql"}],"next":13}"#).unwrap();
+        let (mut l, _) = load_library_from(&p);
+        assert_eq!(l.next_id(), 13);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -73,8 +73,9 @@ impl App {
         let (none, cmd, shift, ctrl, alt) = (egui::Modifiers::NONE, egui::Modifiers::COMMAND, egui::Modifiers::SHIFT, egui::Modifiers::CTRL, egui::Modifiers::ALT);
         // Cmd+S reaches the library arm of this function only when no page handler took it: staged SQL grid edits and document
         // drafts consume it where they draw, so they win. A new page handler of Cmd+S must consume the key too, or its press
-        // would also open the Save dialog.
-        if k(cmd, Key::S) && !self.tabs.is_empty() {
+        // would also open the Save dialog. A view that holds no script (a table's Content grid, Indexes and the like) leaves
+        // the key alone, so a press there while the grid's cell editor is open does not warn about a missing script.
+        if self.sql_cell.is_none() && self.tab_text().is_some() && k(cmd, Key::S) {
             self.save_script();
         }
         // Extra Shift and Alt still match a plain Cmd shortcut, so the longer combos go first.
@@ -260,6 +261,11 @@ impl App {
 
     pub(super) fn screenshot(&mut self, ctx: &egui::Context) {
         let Some((path, frames, slot)) = &mut self.shot else { return };
+        // A window in the background is not held to vsync, so the 120 frames can pass in less than the fade-in of a popup
+        // or dialog, which then shows half see-through in the picture. Pictures show the settled state.
+        if *frames == 0 {
+            ctx.all_styles_mut(|s| s.animation_time = 0.0);
+        }
         // AppKit draws the window buttons outside our frame, so the capture would lack them.
         // Stand-ins go where set_traffic_lights_position puts the real ones.
         if cfg!(target_os = "macos") {

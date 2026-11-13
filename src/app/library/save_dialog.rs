@@ -38,21 +38,10 @@ pub(in crate::app) struct SaveForm {
     pub focused: bool,
 }
 
-/// Every Quarry folder in display order with its depth: top level folders in list order, each followed by its own.
+/// Every Quarry folder in display order with its depth, as the panel shows them: a folder whose parent is gone sits at the
+/// top level instead of vanishing.
 pub(in crate::app) fn folder_rows(lib: &Library) -> Vec<(u64, usize)> {
-    fn walk(lib: &Library, parent: Option<u64>, depth: usize, out: &mut Vec<(u64, usize)>) {
-        // A folder file edited by hand could loop through its parents; the depth stops it.
-        if depth > 32 {
-            return;
-        }
-        for f in lib.folders.iter().filter(|f| f.parent == parent) {
-            out.push((f.id, depth));
-            walk(lib, Some(f.id), depth + 1, out);
-        }
-    }
-    let mut out = Vec::new();
-    walk(lib, None, 0, &mut out);
-    out
+    crate::library::ops::folder_list(lib, None).into_iter().map(|(id, depth, _)| (id, depth)).collect()
 }
 
 /// The folders of a scan below its top, parents before children, empty ones too.
@@ -121,7 +110,7 @@ impl App {
         let name = f.name.trim().to_string();
         let mut folder = f.folder;
         if let Some(n) = f.new_folder.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
-            folder = Some(match self.library.folders.iter().find(|x| x.parent.is_none() && x.name == n) {
+            folder = Some(match self.library.folders.iter().find(|x| crate::library::tree::live_parent(&self.library, x.parent).is_none() && x.name == n) {
                 Some(x) => x.id,
                 None => {
                     let id = self.library.next_id();
@@ -176,6 +165,9 @@ impl App {
         if self.demo {
             return self.warn("The demo does not write files.");
         }
+        if self.link_missing(link) {
+            return self.warn(super::panel::MISSING);
+        }
         let ext = kind_ext(&f.kind);
         if !l.exts.iter().any(|e| e == ext) {
             return self.warn(format!("{} does not show .{ext} files. Add the type in Use on connections first.", l.name));
@@ -190,7 +182,7 @@ impl App {
             Ok(b) => b,
             Err(e) => return self.warn(format!("Not saved: {e}")),
         };
-        if let Err(e) = std::fs::create_dir_all(&dir).and_then(|()| disk::write_file(&path, &bytes)) {
+        if let Err(e) = disk::dir_below(&l.path, &f.dir).and_then(|_| disk::write_file(&path, &bytes)) {
             return self.err(format!("Could not save {}: {e}", path.display()));
         }
         self.add_entry(link, &rel);
@@ -316,7 +308,7 @@ impl App {
             .library
             .links
             .iter()
-            .filter(|l| engine.is_some_and(|e| format::fits(l, &f.kind, f.conn, e)))
+            .filter(|l| engine.is_some_and(|e| format::fits(l, &f.kind, f.conn, e)) && !self.link_missing(l.id))
             .map(|l| (l.id, link_name(l.id), self.lib_ui.scans.get(&l.id).map(link_dirs).unwrap_or_default()))
             .collect();
         egui::ComboBox::from_id_salt("save-folder").width(ui.available_width()).selected_text(shown).show_ui(ui, |ui| {

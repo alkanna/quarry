@@ -303,7 +303,7 @@ impl App {
         let key = self.col_key(false);
         let hist = self.prefs.history.get(&key).cloned().unwrap_or_default();
         let index_sorts: Vec<String> = self.t().map(|t| t.indexes.iter().filter_map(|ix| ix.get_document("keys").ok()).map(|k| db::shell_text(&Bson::Document(k.clone()))).collect()).unwrap_or_default();
-        let pick = self.pick_data(PickKind::Query);
+        let pick = self.pick_data(ui.ctx(), PickKind::Query);
         let (mut qacts, mut pick_acts) = (Vec::new(), Vec::new());
         let (t, ac) = (&mut self.tabs[self.cur], &mut self.ac);
         // Not asked yet (it is, right after this frame) or asked and not back.

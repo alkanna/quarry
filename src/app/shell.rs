@@ -533,7 +533,7 @@ impl App {
             pkg_names.push("_".into());
         }
         let mut new_pkg = std::mem::take(&mut self.new_pkg);
-        let pick = self.pick_data(PickKind::Shell);
+        let pick = self.pick_data(ui.ctx(), PickKind::Shell);
         let (mut pick_acts, mut demo_pick) = (Vec::new(), None);
         let colls: Vec<String> = self.t().map(|t| self.tables_of(&t.sel)).unwrap_or_default();
         let known = if sql { Vec::new() } else { self.db_fields() };
@@ -567,7 +567,7 @@ impl App {
             // The pills share what the Attach button and the Packages, History and Help buttons on the right leave.
             let text_w = |t: &str| ui.painter().layout_no_wrap(t.to_string(), FontId::proportional(TXT_BODY), TEXT()).size().x;
             let pad = ui.spacing().button_padding.x * 2.0 + ui.spacing().item_spacing.x;
-            let right = text_w("Help") + text_w("History") + text_w(&format!("Packages {}", packages.len())) + text_w(&format!("Library {}", pick.rows.len())) + 4.0 * pad + 110.0;
+            let right = text_w("Help") + text_w("History") + text_w(&format!("Packages {}", packages.len())) + text_w(&format!("Library {}", pick.count)) + 4.0 * pad + 110.0;
             let n = 1 + att_pills.len();
             let pill_w = ((ui.available_width() - right) / n as f32 - ui.spacing().item_spacing.x).max(120.0);
             conn_pill(ui, ui.make_persistent_id("pill-own"), &own_pill, false, pill_w);

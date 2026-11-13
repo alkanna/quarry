@@ -208,7 +208,7 @@ impl App {
     pub(super) fn conns_panel(&mut self, ui: &mut egui::Ui) {
         let mut acts: Vec<PanelAct> = Vec::new();
         ui.horizontal(|ui| {
-            ui.label(LayoutJob::single_section("CONNECTIONS".into(), ui_fmt(10.5, MUTED(), W_SEMIBOLD, 0.6)));
+            ui.label(LayoutJob::single_section("CONNECTIONS".into(), ui_fmt(TXT_SECTION, MUTED(), W_SEMIBOLD, 0.6)));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 if icon_btn(ui, "New connection", paint_plus).clicked() {
@@ -443,7 +443,7 @@ fn draw_rows(ui: &mut egui::Ui, rows: &[CRow], cx: &Cx, st: &mut ConnsUi, acts: 
         match row {
             CRow::Caption { text, note } => {
                 let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), CAPTION_H), Sense::hover());
-                let t = ui.painter().layout_job(LayoutJob::single_section(text.to_string(), ui_fmt(10.5, MUTED(), W_SEMIBOLD, 0.6)));
+                let t = ui.painter().layout_job(LayoutJob::single_section(text.to_string(), ui_fmt(TXT_SECTION, MUTED(), W_SEMIBOLD, 0.6)));
                 ui.painter().galley(egui::pos2(rect.left() + 8.0, rect.center().y - t.size().y / 2.0), t, MUTED());
                 if !note.is_empty() {
                     ui.painter().text(egui::pos2(rect.right() - 8.0, rect.center().y), egui::Align2::RIGHT_CENTER, note, FontId::proportional(TXT_CAPTION), FAINT());
@@ -799,7 +799,7 @@ pub(super) fn picker_list(ui: &mut egui::Ui, conns: &[Conn], groups: &Groups, st
                     let cy = rect.center().y;
                     chevron(p, egui::pos2(rect.left() + 8.0, cy), *open, FAINT());
                     paint_folder(p, egui::pos2(rect.left() + 26.0, cy), col, true);
-                    let t = p.layout_job(LayoutJob::single_section(g.name.to_uppercase(), ui_fmt(10.5, MUTED(), W_SEMIBOLD, 0.6)));
+                    let t = p.layout_job(LayoutJob::single_section(g.name.to_uppercase(), ui_fmt(TXT_SECTION, MUTED(), W_SEMIBOLD, 0.6)));
                     p.galley(egui::pos2(rect.left() + 40.0, cy - t.size().y / 2.0), t, MUTED());
                     let cg = p.layout_no_wrap(n.to_string(), FontId::proportional(TXT_CAPTION), FAINT());
                     p.galley(egui::pos2(rect.right() - 4.0 - cg.size().x, cy - cg.size().y / 2.0), cg, FAINT());

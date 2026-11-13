@@ -8,6 +8,7 @@ use super::open::How;
 use super::save_dialog::folder_rows;
 use super::*;
 use crate::library::ScriptRef;
+use crate::library::tree::live_parent;
 use std::collections::HashSet;
 
 /// What a view lists: the scripts of its own kind that fit it.
@@ -54,6 +55,10 @@ pub(in crate::app) struct PickFolder {
 
 pub(in crate::app) struct PickData {
     pub kind: PickKind,
+    /// The scripts that fit the view, for the button's label. Known even when the lists below are not built.
+    pub count: usize,
+    /// The lists below are built, which happens only while the popover is open.
+    pub full: bool,
     pub conn_name: String,
     pub dialect: db::sql::Dialect,
     pub rows: Vec<PickRow>,
@@ -84,12 +89,28 @@ fn first_line(kind: &str, body: &str) -> String {
     text.chars().take(200).collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// The frame a picker's popover last drew in, kept in egui's memory: the views build the full lists only while it is open.
+fn seen_id() -> egui::Id {
+    egui::Id::unique("quarry-lib-picker-seen")
+}
+
+/// Whether a picker popover drew last frame or this one, so it is open.
+fn picker_open(ctx: &egui::Context) -> bool {
+    let now = ctx.cumulative_frame_nr();
+    ctx.data(|d| d.get_temp::<u64>(seen_id())).is_some_and(|f| f + 1 >= now)
+}
+
 impl App {
-    /// The scripts the current tab's view lists, grouped for the picker.
-    pub(in crate::app) fn pick_data(&self, kind: PickKind) -> PickData {
+    /// The scripts the current tab's view lists, grouped for the picker. While no picker is open only the count is worked
+    /// out, since the views ask for this every frame and the lists cost an allocation per script.
+    pub(in crate::app) fn pick_data(&self, ctx: &egui::Context, kind: PickKind) -> PickData {
         let lib = &self.library;
         let (conn, db, coll) = self.t().map(|t| (t.sel.conn, t.sel.db.clone(), t.sel.coll.clone())).unwrap_or_default();
         let fits = |s: &crate::library::Script| s.kind == kind.kind() && s.conn == conn && (matches!(kind, PickKind::Sql | PickKind::Shell) || (s.db == db && s.coll == coll));
+        let count = lib.scripts.iter().filter(|s| fits(s)).count();
+        if !picker_open(ctx) {
+            return PickData { kind, count, full: false, conn_name: String::new(), dialect: self.dialect_of(conn), rows: Vec::new(), recent: Vec::new(), folders: Vec::new(), loose: Vec::new(), sidebar: panel::READY };
+        }
         let mut rows = Vec::new();
         let mut index = std::collections::HashMap::new();
         for s in lib.scripts.iter().filter(|s| fits(s)) {
@@ -105,7 +126,7 @@ impl App {
         let folder_of = |id: u64| lib.scripts.iter().find(|s| s.id == id).and_then(|s| s.folder);
         let mut folders = Vec::new();
         for (id, depth) in folder_rows(lib) {
-            let own: Vec<usize> = lib.scripts.iter().filter(|s| s.folder == Some(id)).filter_map(|s| index.get(&s.id).copied()).collect();
+            let own: Vec<usize> = lib.scripts.iter().filter(|s| live_parent(lib, s.folder) == Some(id)).filter_map(|s| index.get(&s.id).copied()).collect();
             // The scripts below it count too, so a closed parent still says what it holds.
             let below = rows.iter().enumerate().filter(|(_, r)| match r.r {
                 ScriptRef::Saved(sid) => {
@@ -129,8 +150,9 @@ impl App {
                 folders.push(PickFolder { id, depth, name: lib.folders.iter().find(|f| f.id == id).map(|f| f.name.clone()).unwrap_or_default(), count: below, own });
             }
         }
-        let loose: Vec<usize> = lib.scripts.iter().filter(|s| s.folder.is_none()).filter_map(|s| index.get(&s.id).copied()).collect();
-        PickData { kind, conn_name: self.conn_name(conn), dialect: self.dialect_of(conn), rows, recent, folders, loose, sidebar: panel::READY }
+        // A script whose folder is gone shows with the loose ones, as in the panel.
+        let loose: Vec<usize> = lib.scripts.iter().filter(|s| live_parent(lib, s.folder).is_none()).filter_map(|s| index.get(&s.id).copied()).collect();
+        PickData { kind, count, full: true, conn_name: self.conn_name(conn), dialect: self.dialect_of(conn), rows, recent, folders, loose, sidebar: panel::READY }
     }
 
     /// Does what the picker asked for.
@@ -188,10 +210,17 @@ fn script_row(ui: &mut egui::Ui, d: &PickData, row: &PickRow, selected: bool) ->
 /// number of scripts. Returns the button, which the demo uses to hold the popover open.
 pub(in crate::app) fn picker_button(ui: &mut egui::Ui, d: &PickData, icon: bool, acts: &mut Vec<PickAct>) -> egui::Response {
     let body = |ui: &mut egui::Ui| picker_body(ui, d, acts);
-    if icon { icon_menu(ui, paint_book, true, body).on_hover_text("Library") } else { sticky_menu(ui, format!("Library {}", d.rows.len()), body) }
+    if icon { icon_menu(ui, paint_book, true, body).on_hover_text("Library") } else { sticky_menu(ui, format!("Library {}", d.count), body) }
 }
 
 fn picker_body(ui: &mut egui::Ui, d: &PickData, acts: &mut Vec<PickAct>) {
+    let ctx = ui.ctx().clone();
+    ctx.data_mut(|x| x.insert_temp(seen_id(), ctx.cumulative_frame_nr()));
+    // The frame the popover opens in had only the count. It is egui's invisible sizing pass, and the next frame has the lists.
+    if !d.full {
+        ctx.request_repaint();
+        return;
+    }
     popover_body(ui, 360.0, |ui| {
         ui.horizontal(|ui| {
             ui.label(semibold(RichText::new("Library").size(TXT_TITLE).color(BRIGHT())));

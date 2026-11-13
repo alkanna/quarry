@@ -106,6 +106,21 @@ impl App {
         unchanged && !staged
     }
 
+    /// Scripts that left the library (deleted, or moved into a linked folder): tabs bound to them keep their text but are
+    /// unbound, so their next Cmd+S opens the Save dialog, and they leave the recent list and a pending open.
+    pub(in crate::app) fn forget_scripts(&mut self, ids: &[u64]) {
+        let gone = |r: &ScriptRef| matches!(r, ScriptRef::Saved(id) if ids.contains(id));
+        for t in &mut self.tabs {
+            if t.script.as_ref().is_some_and(|b| gone(&b.r)) {
+                t.script = None;
+            }
+        }
+        self.library.recent.retain(|r| !gone(r));
+        if self.lib_ui.pending.as_ref().is_some_and(|(r, _)| gone(r)) {
+            self.lib_ui.pending = None;
+        }
+    }
+
     /// Ties the current tab to a script, so Cmd+S writes it back, and puts it first in the recent list.
     pub(in crate::app) fn bind_script(&mut self, r: ScriptRef, view: View, base: String) {
         if let Some(t) = self.tm() {

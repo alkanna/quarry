@@ -214,7 +214,7 @@ impl App {
 
     /// The database explorer: connection picker, tree filter and the tree of the active connection.
     pub(super) fn explorer_panel(&mut self, ui: &mut egui::Ui) {
-        ui.label(LayoutJob::single_section("DATABASE EXPLORER".into(), ui_fmt(10.5, MUTED(), W_SEMIBOLD, 0.6)));
+        ui.label(LayoutJob::single_section("DATABASE EXPLORER".into(), ui_fmt(TXT_SECTION, MUTED(), W_SEMIBOLD, 0.6)));
         ui.add_space(6.0);
         self.conn_picker(ui);
         ui.add_space(8.0);
@@ -236,7 +236,7 @@ impl App {
         let sql_conn = self.active.and_then(|id| self.conn(id)).filter(|c| c.meta.engine.is_sql() && c.status == Status::Ready).map(|c| (c.meta.id, c.writable, c.meta.engine == db::sql::Engine::Postgres));
         let mut new_db = None;
         ui.horizontal(|ui| {
-            ui.label(LayoutJob::single_section("Databases".into(), ui_fmt(10.5, FAINT(), W_SEMIBOLD, 0.8)));
+            ui.label(LayoutJob::single_section("Databases".into(), ui_fmt(TXT_SECTION, FAINT(), W_SEMIBOLD, 0.8)));
             if let Some((id, writable, pg)) = sql_conn {
                 // PostgreSQL's create asks to unlock on a locked connection; MySQL's button stays disabled until it is unlocked.
                 let on = writable || pg;

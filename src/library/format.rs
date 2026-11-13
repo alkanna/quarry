@@ -75,7 +75,11 @@ pub struct Parsed {
     pub target: Target,
 }
 
+/// A filter, sort or projection kept as a string holds the text as the person wrote it, query shortcuts and all.
 fn doc_text(v: &Value) -> Option<String> {
+    if let Value::String(t) = v {
+        return crate::db::parse_doc(t).is_ok().then(|| t.clone());
+    }
     match Bson::try_from(v.clone()).ok()? {
         Bson::Document(d) if d.is_empty() => Some(String::new()),
         b @ Bson::Document(_) => Some(crate::db::shell_text(&b)),
@@ -84,6 +88,9 @@ fn doc_text(v: &Value) -> Option<String> {
 }
 
 fn pipeline_text(v: &Value) -> Option<String> {
+    if let Value::String(t) = v {
+        return crate::db::parse_pipeline(t).is_ok().then(|| t.clone());
+    }
     let Bson::Array(a) = Bson::try_from(v.clone()).ok()? else { return None };
     a.iter().all(|s| matches!(s, Bson::Document(_))).then(|| crate::db::shell_text(&Bson::Array(a)))
 }
@@ -120,13 +127,26 @@ pub fn parse_json(text: &str) -> Option<Parsed> {
     Some(p)
 }
 
-/// Shell text as Extended JSON, in the relaxed form people write by hand.
+/// Whether text may hold a query shortcut (`#today`, `@2024-01-02`, `~"text"`). Parsing expands those to a fixed date or a
+/// regex, so text with one is kept as written. A false hit, such as a `#` inside a string, only keeps the text too.
+fn has_shortcut(text: &str) -> bool {
+    text.contains(['~', '#', '@'])
+}
+
+/// Shell text as Extended JSON, in the relaxed form people write by hand. Text with a query shortcut is checked, then kept
+/// as a string, which `parse_json` reads back as the same text.
 fn to_value(text: &str, pipeline: bool) -> Result<Value, String> {
     if pipeline {
         let stages: Vec<Bson> = crate::db::parse_pipeline(text)?.into_iter().map(Bson::Document).collect();
+        if has_shortcut(text) {
+            return Ok(Value::String(text.trim().to_string()));
+        }
         Ok(Bson::Array(stages).into_relaxed_extjson())
     } else {
         let d: Document = crate::db::parse_doc(text)?;
+        if has_shortcut(text) {
+            return Ok(Value::String(text.trim().to_string()));
+        }
         Ok(Bson::Document(d).into_relaxed_extjson())
     }
 }
@@ -247,6 +267,22 @@ mod tests {
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["filter"]["s"], Value::String("{\"$oid\": 1}".into()));
         assert_eq!(v["filter"]["code"], Value::String("2024-01-02".into()));
+    }
+
+    #[test]
+    fn query_shortcuts_are_kept_as_written() {
+        // Expanding #today into a date when the file is written would freeze the filter to the day it was saved.
+        let p = Parsed { kind: "filter".into(), body: "{ created: #today, name: ~\"x\" }".into(), sort: "{ created: -1 }".into(), target: Target { coll: "orders".into(), ..Default::default() }, ..Default::default() };
+        let out = to_json(&p, None).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["filter"], Value::String(p.body.clone()), "{out}");
+        assert_eq!(v["sort"]["created"], -1, "text without a shortcut stays an object");
+        assert_eq!(parse_json(&out).unwrap(), p);
+        let q = Parsed { kind: "pipeline".into(), body: "[{ $match: { at: #last7days } }]".into(), ..Default::default() };
+        let out = to_json(&q, None).unwrap();
+        assert_eq!(parse_json(&out).unwrap().body, q.body);
+        // A string that is no filter is still not a script.
+        assert!(parse_json(r#"{"collection": "c", "filter": "{ a: "}"#).is_none());
     }
 
     #[test]

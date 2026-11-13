@@ -462,7 +462,7 @@ impl App {
         let (conn, free, schema) = (t.sel.conn, t.sel.coll.is_empty(), run_db(t));
         let running = t.sql.as_ref().is_some_and(|s| s.run_req != 0);
         let title = if free { self.tab_name(self.cur) } else { "Query".into() };
-        let lib_pick = self.pick_data(PickKind::Sql);
+        let lib_pick = self.pick_data(ui.ctx(), PickKind::Sql);
         let mut pick_acts = Vec::new();
         let (mut pick, mut load, mut picked) = (schema.clone(), None, false);
         let dialect = self.sql_dialect();

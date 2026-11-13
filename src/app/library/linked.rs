@@ -122,6 +122,11 @@ impl App {
         self.worker.blocking(move || db::Msg::LibScan { link: id, scan: disk::scan(&path, &exts, prev.as_ref()) });
     }
 
+    /// Whether the last scan of a link found its folder gone. Nothing is written there until a scan finds it again.
+    pub(in crate::app) fn link_missing(&self, link: u64) -> bool {
+        self.lib_ui.scans.get(&link).is_some_and(|s| s.missing)
+    }
+
     /// Asks for a new scan of a link at the next frame, such as after Reload or a file was written.
     pub(in crate::app) fn rescan_link(&mut self, id: u64) {
         self.lib_ui.rescan.insert(id);
@@ -500,9 +505,9 @@ impl App {
     pub(in crate::app) fn new_linked_script(&mut self, link: u64, dir: &std::path::Path) -> Option<PathBuf> {
         let l = self.library.links.iter().find(|l| l.id == link)?;
         let ext = ["sql", "js", "json"].into_iter().find(|e| l.exts.iter().any(|x| x == e)).unwrap_or("sql");
-        let (root, at) = (l.path.clone(), l.path.join(dir));
+        let root = l.path.clone();
         let body: &[u8] = if ext == "json" { b"{\n  \"filter\": {}\n}\n" } else { b"" };
-        match disk::create_file(&at, "New script", ext, body) {
+        match disk::create_file(&root, dir, "New script", ext, body) {
             Ok(p) => {
                 let rel = p.strip_prefix(&root).ok()?.to_path_buf();
                 self.add_entry(link, &rel);
@@ -642,6 +647,10 @@ impl App {
             self.warn("The demo does not write files.");
             return None;
         }
+        if self.link_missing(link) {
+            self.warn(super::panel::MISSING);
+            return None;
+        }
         let target = format::Target { db: s.db.clone(), schema: s.schema.clone(), coll: s.coll.clone() };
         let bytes = match file_bytes(&s.kind, &s.body, &s.sort, &s.project, target, None) {
             Ok(b) => b,
@@ -650,7 +659,7 @@ impl App {
                 return None;
             }
         };
-        let path = match disk::create_file(&l.path.join(dir), &s.name, ext, &bytes) {
+        let path = match disk::create_file(&l.path, dir, &s.name, ext, &bytes) {
             Ok(p) => p,
             Err(e) => {
                 self.err(format!("Could not write the file: {e}"));
@@ -660,6 +669,7 @@ impl App {
         let rel = path.strip_prefix(&l.path).ok()?.to_path_buf();
         self.add_entry(link, &rel);
         if let Some((folders, scripts)) = ops::delete(&mut self.library, &Node::Script(id)) {
+            self.forget_scripts(&[id]);
             self.save_library();
             self.toast_restore(format!("Moved \"{}\" to {} as {}.", s.name, l.name, file_label(&rel)), Restore::Saved { scripts, folders, written: Some((link, rel.clone(), bytes.clone())) });
         }

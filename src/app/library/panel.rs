@@ -94,9 +94,17 @@ fn dir_of(n: &Node) -> Option<(u64, PathBuf)> {
     }
 }
 
+/// Why nothing goes into a linked folder whose scan found it gone.
+pub(in crate::app) const MISSING: &str = "That folder is not there. Reload it once it is back, or link the folder where it moved.";
+
 /// What dropping `item` on `target` at `pos` would do, or why it cannot be done. Each link keeps its files to itself: a file
 /// moves between the folders of its own link, and leaves it only as a copy in the library.
-fn plan_drop(lib: &Library, item: &Node, target: &Node, pos: Pos) -> Result<Plan, &'static str> {
+fn plan_drop(lib: &Library, scans: &Scans, item: &Node, target: &Node, pos: Pos) -> Result<Plan, &'static str> {
+    if let Some((l, _)) = dir_of(target)
+        && scans.get(&l).is_some_and(|s| s.missing)
+    {
+        return Err(MISSING);
+    }
     let at = match (target, pos) {
         (Node::Folder(id), Pos::Into) => Some(DropAt::Into(*id)),
         (n, Pos::Before) if n.is_saved() => Some(DropAt::Before(n.clone())),
@@ -429,7 +437,7 @@ impl App {
             _ => None,
         };
         ui.horizontal(|ui| {
-            ui.label(LayoutJob::single_section("LIBRARY".into(), ui_fmt(10.5, MUTED(), W_SEMIBOLD, 0.6)));
+            ui.label(LayoutJob::single_section("LIBRARY".into(), ui_fmt(TXT_SECTION, MUTED(), W_SEMIBOLD, 0.6)));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let r = dots_menu(ui, |ui| {
                     if menu_row(ui, "Link a folder…", TEXT(), false, "").clicked() {
@@ -455,8 +463,9 @@ impl App {
 
         // Scope
         let mut scope_all = all;
-        let label = active_name.as_deref().map(|n| if n.chars().count() > 16 { format!("{}…", n.chars().take(15).collect::<String>()) } else { n.to_string() }).unwrap_or_else(|| "No connection".into());
-        segmented_on(ui, &mut scope_all, &[(false, label.as_str(), active.is_some()), (true, "All connections", true)]);
+        // The design spans the panel in two equal halves; a long name is cut to its half by the control.
+        let label = active_name.clone().unwrap_or_else(|| "No connection".into());
+        segmented_fill(ui, &mut scope_all, &[(false, label.as_str(), active.is_some()), (true, "All connections", true)]);
         if scope_all != all {
             acts.push(Act::Scope(scope_all));
         }
@@ -822,6 +831,7 @@ impl App {
                     _ => None,
                 };
                 if let Some((folders, scripts)) = ops::delete(&mut self.library, &n) {
+                    self.forget_scripts(&scripts.iter().map(|s| s.id).collect::<Vec<_>>());
                     self.save_library();
                     let msg = match (&n, scripts.len()) {
                         (Node::Folder(_), 0) => format!("Deleted {}.", label.unwrap_or_default()),
@@ -1079,7 +1089,7 @@ fn draw_row_in(ui: &mut egui::Ui, cx: &RowCx, st: &mut PanelUi, row: &Row, acts:
         let tools_w = if show_tools { 52.0 } else { 0.0 };
         let right = if show_tools { String::new() } else { look.right.clone() };
         let right_col = if look.warn { ALERT() } else if look.pill { C_LINK() } else { FAINT() };
-        let rg = (!right.is_empty()).then(|| p.layout_job(LayoutJob::single_section(right, mono_fmt(10.5, right_col, 400.0))));
+        let rg = (!right.is_empty()).then(|| p.layout_job(LayoutJob::single_section(right, mono_fmt(TXT_SECTION, right_col, 400.0))));
         // The pill and the changed dot take a little more room than the bare text.
         let mut rw = rg.as_ref().map_or(0.0, |g| g.size().x + 8.0 + if look.pill { 10.0 } else { 0.0 });
         if let Some(g) = rg {
@@ -1164,7 +1174,7 @@ fn draw_row_in(ui: &mut egui::Ui, cx: &RowCx, st: &mut PanelUi, row: &Row, acts:
     let pos = if dir_like { Pos::Into } else { tree::drop_at(target_is_folder, row.open, frac) };
     let into_closed = target_is_folder && !row.open;
     if let Some(item) = over.as_ref().filter(|i| **i != row.node) {
-        let plan = plan_drop(cx.lib, item, &row.node, pos);
+        let plan = plan_drop(cx.lib, cx.scans, item, &row.node, pos);
         if plan.is_ok() {
             // The mark follows the plan: a fill for into a folder, else a line at the depth of the row it lands beside.
             let zone = match (pos, &plan) {
@@ -1218,15 +1228,20 @@ mod linked_tests {
     fn what_a_drop_on_a_row_does_depends_on_what_is_dragged_and_where() {
         let lib = Library { links: vec![Link { id: 1, ..Default::default() }, Link { id: 2, ..Default::default() }], folders: vec![crate::library::Folder { id: 5, name: "F".into(), parent: None }], ..Default::default() };
         let dir = |rel: &str| Node::Dir { link: 1, rel: rel.into() };
+        let mut scans = Scans::default();
         // A file goes to another folder of its own link, not the one it is in, and never to another link.
-        assert_eq!(plan_drop(&lib, &node_file("a.sql"), &dir("sub"), Pos::Into), Ok(Plan::Into { link: 1, dir: "sub".into() }));
-        assert!(plan_drop(&lib, &node_file("sub/a.sql"), &dir("sub"), Pos::Into).is_err());
-        assert_eq!(plan_drop(&lib, &node_file("sub/a.sql"), &Node::Link(1), Pos::Into), Ok(Plan::Into { link: 1, dir: PathBuf::new() }));
-        assert!(plan_drop(&lib, &node_file("a.sql"), &Node::Link(2), Pos::Into).is_err());
-        assert!(plan_drop(&lib, &Node::File { link: 2, rel: "x.sql".into() }, &Node::Link(1), Pos::Into).is_err());
+        assert_eq!(plan_drop(&lib, &scans, &node_file("a.sql"), &dir("sub"), Pos::Into), Ok(Plan::Into { link: 1, dir: "sub".into() }));
+        assert!(plan_drop(&lib, &scans, &node_file("sub/a.sql"), &dir("sub"), Pos::Into).is_err());
+        assert_eq!(plan_drop(&lib, &scans, &node_file("sub/a.sql"), &Node::Link(1), Pos::Into), Ok(Plan::Into { link: 1, dir: PathBuf::new() }));
+        assert!(plan_drop(&lib, &scans, &node_file("a.sql"), &Node::Link(2), Pos::Into).is_err());
+        assert!(plan_drop(&lib, &scans, &Node::File { link: 2, rel: "x.sql".into() }, &Node::Link(1), Pos::Into).is_err());
         // Onto a library folder it is copied there; a library script goes into the linked folder; a library folder does not.
-        assert_eq!(plan_drop(&lib, &node_file("a.sql"), &Node::Folder(5), Pos::Into), Ok(Plan::Out(DropAt::Into(5))));
-        assert_eq!(plan_drop(&lib, &Node::Script(9), &dir("sub"), Pos::Before), Ok(Plan::Into { link: 1, dir: "sub".into() }));
-        assert!(plan_drop(&lib, &Node::Folder(5), &Node::Link(1), Pos::Into).is_err());
+        assert_eq!(plan_drop(&lib, &scans, &node_file("a.sql"), &Node::Folder(5), Pos::Into), Ok(Plan::Out(DropAt::Into(5))));
+        assert_eq!(plan_drop(&lib, &scans, &Node::Script(9), &dir("sub"), Pos::Before), Ok(Plan::Into { link: 1, dir: "sub".into() }));
+        assert!(plan_drop(&lib, &scans, &Node::Folder(5), &Node::Link(1), Pos::Into).is_err());
+        // A linked folder that is gone takes nothing, neither at its top nor in one of its folders.
+        scans.insert(1, crate::library::disk::Scan { missing: true, ..Default::default() });
+        assert_eq!(plan_drop(&lib, &scans, &Node::Script(9), &Node::Link(1), Pos::Into), Err(MISSING));
+        assert_eq!(plan_drop(&lib, &scans, &node_file("a.sql"), &dir("sub"), Pos::Into), Err(MISSING));
     }
 }

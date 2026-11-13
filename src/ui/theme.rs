@@ -1071,6 +1071,9 @@ pub(crate) fn tint(c: Color32, alpha: u8) -> Color32 {
 pub(crate) const SIDEBAR_W: f32 = 250.0;
 
 // Type scale: every text size in the app is one of these.
+/// Small caps headers over a sidebar panel or a group ("DATABASE EXPLORER", "LIBRARY") and the faint counts on tree rows.
+pub(crate) const TXT_SECTION: f32 = 10.5;
+
 /// Section captions, badges and hints.
 pub(crate) const TXT_CAPTION: f32 = 11.0;
 
