@@ -93,10 +93,10 @@ pub(super) fn load_library_from(path: &std::path::Path) -> (Library, Option<Stri
     errs.extend(e);
     let (links, e) = parse_entries(links);
     errs.extend(e);
-    let (recent, e) = parse_entries::<ScriptRef>(recent);
+    let (recent, e) = parse_entries::<crate::library::ScriptRef>(recent);
     errs.extend(e);
     // A recent file whose path leaves its folder is skipped like an entry that does not parse.
-    let (recent, bad): (Vec<ScriptRef>, Vec<ScriptRef>) = recent.into_iter().partition(|r| r.is_safe());
+    let (recent, bad): (Vec<crate::library::ScriptRef>, Vec<crate::library::ScriptRef>) = recent.into_iter().partition(|r| r.is_safe());
     errs.extend(bad.iter().map(|r| format!("{r:?} leaves its linked folder")));
     let v = o.get("v").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     let next = o.get("next").and_then(|v| v.as_u64()).unwrap_or(0);
