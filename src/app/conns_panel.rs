@@ -191,7 +191,6 @@ enum PanelAct {
     Ungroup(u64),
     Remove(u64),
     FoldAll,
-    Cloud,
     /// Show the connection's databases: it becomes the active one and the sidebar shows the explorer.
     Browse(u64),
 }
@@ -246,7 +245,7 @@ impl App {
         let toks = tokens(&self.conns_ui.filter);
         let all = self.conn_ids();
         let rows = panel_rows(&self.conns, &self.groups, &self.conns_ui.filter, |g| g.open);
-        let foot_h = 72.0;
+        let foot_h = 48.0;
         let room = (ui.available_height() - foot_h).max(80.0);
         egui::ScrollArea::vertical().id_salt("conns-panel").auto_shrink(false).max_height(room).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
@@ -264,10 +263,6 @@ impl App {
         });
         if new.clicked() {
             acts.push(PanelAct::NewConnIn(None));
-        }
-        let cloud = ui.add(egui::Label::new(RichText::new("Add from Cloud SQL").size(TXT_SMALL).color(PRIMARY())).sense(Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("PostgreSQL instances your gcloud account can reach");
-        if cloud.clicked() {
-            acts.push(PanelAct::Cloud);
         }
         for a in acts {
             self.apply_panel_act(a);
@@ -355,7 +350,6 @@ impl App {
                     action: Danger::RemoveConnection(id),
                 });
             }
-            PanelAct::Cloud => self.open_cloud_browser(false),
         }
     }
 
