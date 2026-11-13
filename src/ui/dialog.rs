@@ -12,9 +12,12 @@ pub(crate) fn banded(id: egui::Id) -> egui::Modal {
     egui::Modal::new(id).frame(dialog_frame())
 }
 
-/// `banded` raised above everything else every frame, for windows opened from another window.
+/// `banded` raised above everything else every frame, for windows opened from another window. Not while a popup is open:
+/// a menu opened inside the window would land under it and its items could not be clicked.
 pub(crate) fn top_banded(ctx: &egui::Context, id: egui::Id) -> egui::Modal {
-    ctx.move_to_top(egui::LayerId::new(egui::Order::Foreground, id));
+    if !egui::Popup::is_any_open(ctx) {
+        ctx.move_to_top(egui::LayerId::new(egui::Order::Foreground, id));
+    }
     banded(id)
 }
 
