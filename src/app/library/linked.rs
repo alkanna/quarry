@@ -930,6 +930,13 @@ impl App {
             st.open.insert(Node::Dir { link: 100, rel: "reports".into() });
             self.lib_ui.changed.insert((100, "reports/refunds.sql".into()));
         }
+        // The Library shows the scripts that fit the current tab's connection, so the .sql link needs a MySQL tab in front.
+        if matches!(state, "linked" | "missing") {
+            let mut t = Tab::new(Sel { conn: 3, db: "shop".into(), schema: String::new(), coll: String::new() }).for_engine(db::sql::Engine::MySql);
+            t.view = View::Sql;
+            self.tabs = vec![t];
+            self.cur = 0;
+        }
         match state {
             "linked" => self.lib_ui.panel.sel = Some(Node::File { link: 100, rel: "monthly-revenue.sql".into() }),
             "missing" => {
