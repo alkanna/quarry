@@ -104,12 +104,14 @@ fn live_every_read_answers() {
         let a = l.w.rt.block_on(activity(&l.db, true)).unwrap();
         assert!(a.read_all && a.user == "postgres");
         // The reading connection is in the list and marked as Quarry's.
-        let me = a.rows.iter().find(|r| r.query.contains("pg_blocking_pids")).expect("the reader");
+        // Active only: an idle pooled session keeps the text of its last statement, and a parallel test's poll shows up the same way.
+        let me = a.rows.iter().find(|r| r.state == "active" && r.query.contains("pg_blocking_pids")).expect("the reader");
         assert!(me.ours && me.state == "active" && !me.backend_start.is_empty() && !a.server.is_empty(), "{me:?}");
         assert_eq!(a.own_app.is_some(), pooled);
-        // A poll without blockers does not call pg_blocking_pids.
+        // A poll without blockers does not call pg_blocking_pids. The list is the whole server's, where parallel tests poll with blockers
+        // on, so what is checked is the statement this poll sends, not the rows it reads back.
         let b = l.w.rt.block_on(activity(&l.db, false)).unwrap();
-        assert!(!b.blockers && !b.rows.iter().any(|r| r.query.contains("pg_blocking_pids")));
+        assert!(!b.blockers && !activity_sql(false).contains("pg_blocking_pids") && activity_sql(true).contains("pg_blocking_pids"));
     });
 }
 
@@ -210,7 +212,7 @@ fn live_quarrys_own_sessions_are_refused() {
         let Some(l) = live_pg(var) else { continue };
         // A pooled connection of Quarry's: the one that read the list.
         let a = l.w.rt.block_on(activity(&l.db, true)).unwrap();
-        let me = a.rows.iter().find(|r| r.ours && r.query.contains("pg_blocking_pids")).expect("the reader");
+        let me = a.rows.iter().find(|r| r.ours && r.state == "active" && r.query.contains("pg_blocking_pids")).expect("the reader");
         for terminate in [false, true] {
             let err = l.w.rt.block_on(signal(&l.db, &tgt(&l, me), terminate, false)).unwrap_err();
             assert!(err.contains("Quarry's own"), "{err}");
