@@ -606,7 +606,7 @@ pub fn col_op_result(op: ColOp, values: &[Bson]) -> ColOut {
             ColOut::Copy(shell_text(&Bson::Array(d)), n)
         }
         ColOp::CountDistinct => ColOut::Notice(format!("{} distinct values among {}", distinct().len(), values.len())),
-        _ if op.is_stat() => ColOut::Notice(stat_result(op, values)),
+        ColOp::Sum | ColOp::Avg | ColOp::Median | ColOp::Range => ColOut::Notice(stat_result(op, values)),
         ColOp::Group => {
             let mut rows: Vec<(Bson, i64)> = Vec::new();
             let mut at: HashMap<String, usize> = HashMap::new();
