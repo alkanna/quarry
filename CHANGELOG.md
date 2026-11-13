@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.44.0](https://github.com/alkanna/quarry/compare/v0.43.0...v0.44.0) (2026-11-13)
+
+
+### Features
+
+* Ctrl+Space opens suggestions in query fields ([058bb34](https://github.com/alkanna/quarry/commit/058bb34a9ef01c9ad5649af8c31bb581d1ecce2f))
+* dialogs get a header band, a recessed body with cards and a footer for their actions ([#219](https://github.com/alkanna/quarry/issues/219)) ([018fc5f](https://github.com/alkanna/quarry/commit/018fc5f212813f034f8c085a46109e2753092150))
+* JSON values can be read as a folding tree in the full-value dialog and the large editor ([5e363d2](https://github.com/alkanna/quarry/commit/5e363d28d0a6f04bd682c0a3a5a0ff230f9fee8b))
+* open any SQL value in full, even on a read-only connection ([ded9403](https://github.com/alkanna/quarry/commit/ded94037f3c47482395a391628d44c79d4e4282e))
+* Tab shows the selected SQL row as a record that edits like the grid ([65c3604](https://github.com/alkanna/quarry/commit/65c3604d4c2158498a0afb6f3777c064b4095837))
+
+
+### Bug Fixes
+
+* Explain on a SQL time limit error runs EXPLAIN instead of saying Not connected ([#216](https://github.com/alkanna/quarry/issues/216)) ([8de7f7a](https://github.com/alkanna/quarry/commit/8de7f7a730f3664f4226f8aab69d357a706b8a4f))
+* SQL suggestions list tables right after FROM and known values right after a comparison ([95dcf72](https://github.com/alkanna/quarry/commit/95dcf7222290b20091f9ae3c2e1c4ba8d81b3fb7))
+* the query log keeps recording after a thread panics while holding it ([cdb8fcd](https://github.com/alkanna/quarry/commit/cdb8fcd1e07243c9ec738cbb0455d1fd393f61be))
+
 ## [0.43.0](https://github.com/alkanna/quarry/compare/v0.42.0...v0.43.0) (2026-11-13)
 
 
