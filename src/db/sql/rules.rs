@@ -141,7 +141,9 @@ pub fn ops_for(kind: Kind) -> &'static [Op] {
         Group::Text => &[Eq, Ne, Contains, NotContains, StartsWith, NotStartsWith, EndsWith, NotEndsWith, Like, NotLike, Regexp, NotRegexp, In, NotInOrNull, Empty, NotEmpty, IsNull, NotNull, LenEq, LenGt, LenLt],
         Group::Date => &[Eq, Ne, Lt, Gt, Between, Today, Last, ThisWeek, ThisMonth, AfterCol, IsNull, NotNull],
         Group::Choice => &[Eq, Ne, In, NotIn, SetContains, IsNull, NotNull],
-        Group::Other => &[Eq, Ne, LenEq, JsonPathEq, JsonContains, JsonHasPath, IsNull, NotNull],
+        Group::Other if kind == Kind::Json => &[Eq, Ne, LenEq, JsonPathEq, JsonContains, JsonHasPath, IsNull, NotNull],
+        // Binary, bit and geometry values are not JSON documents, so the JSON operators would only fail.
+        Group::Other => &[Eq, Ne, LenEq, IsNull, NotNull],
     }
 }
 
