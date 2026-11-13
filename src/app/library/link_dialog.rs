@@ -122,7 +122,7 @@ fn engine_copy(e: Engine) -> &'static str {
 
 /// A warning for a chosen connection on which none of the folder's files would show, such as a folder of .sql files
 /// chosen for a MongoDB connection. None when one shows or there is nothing to show.
-fn unfit_note(entries: &[disk::Entry], name: &str, engine: Engine) -> Option<String> {
+fn unfit_note(entries: &[&disk::Entry], name: &str, engine: Engine) -> Option<String> {
     if entries.is_empty() {
         return None;
     }
@@ -143,16 +143,16 @@ fn unfit_note(entries: &[disk::Entry], name: &str, engine: Engine) -> Option<Str
     Some(if n == 1 { format!("{none} {what} does not show on {name} ({engine})") } else { format!("{none} {what} {show} on {name} ({engine})") })
 }
 
-/// The summary under the folder field: how many scripts, in how many folders, and the git branch.
-fn summary(scan: &disk::Scan) -> (Color32, String) {
+/// The summary under the folder field: how many of the `shown` scripts, in how many folders, and the git branch.
+fn summary(scan: &disk::Scan, shown: &[&disk::Entry]) -> (Color32, String) {
     if scan.missing {
         return (ALERT(), "That folder does not exist".into());
     }
-    if scan.entries.is_empty() {
+    if shown.is_empty() {
         return (WARNING(), "No scripts of the chosen file types in it yet".into());
     }
-    let folders: std::collections::HashSet<_> = scan.entries.iter().map(|e| e.rel.parent().map(|p| p.to_path_buf()).unwrap_or_default()).collect();
-    let mut s = format!("{} in {}", plural(scan.entries.len() as u64, "script"), plural(folders.len() as u64, "folder"));
+    let folders: std::collections::HashSet<_> = shown.iter().map(|e| e.rel.parent().unwrap_or(std::path::Path::new(""))).collect();
+    let mut s = format!("{} in {}", plural(shown.len() as u64, "script"), plural(folders.len() as u64, "folder"));
     match scan.branch.as_deref() {
         Some(b) if b.starts_with("detached") => s.push_str(&format!(" \u{b7} git, {b}")),
         Some(b) => s.push_str(&format!(" \u{b7} git, branch {b}")),
@@ -288,7 +288,7 @@ impl App {
         let path = f.path.trim().to_string();
         let exts = f.exts();
         // The files the folder shows with the types ticked, for the summary and the warnings under the chosen connections.
-        let shown: Vec<disk::Entry> = f.preview.as_ref().filter(|(p, _)| *p == path).map(|(_, s)| s.entries.iter().filter(|e| exts.contains(&format::ext_of(&e.rel))).cloned().collect()).unwrap_or_default();
+        let shown: Vec<&disk::Entry> = f.preview.as_ref().filter(|(p, _)| *p == path).map(|(_, s)| s.entries.iter().filter(|e| exts.contains(&format::ext_of(&e.rel))).collect()).unwrap_or_default();
         let fresh = f.preview.as_ref().is_some_and(|(p, _)| *p == path);
         if !path.is_empty() && !fresh && f.asking.is_none() && now - f.typed_at >= TYPING_PAUSE {
             f.asking = Some(path.clone());
@@ -306,8 +306,7 @@ impl App {
                 }
                 (Some((p, scan)), false) if *p == path => {
                     // The scan reads every type, so the count follows the file types ticked below.
-                    let shown = disk::Scan { entries: shown.clone(), ..scan.clone() };
-                    let (dot, text) = summary(&shown);
+                    let (dot, text) = summary(scan, &shown);
                     let (r, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), Sense::hover());
                     ui.painter().circle_filled(r.center(), 4.0, dot);
                     ui.label(RichText::new(text).size(TXT_SMALL).color(MUTED()));
@@ -484,13 +483,13 @@ mod tests {
 
     #[test]
     fn a_chosen_connection_that_would_show_nothing_is_warned_about() {
-        let sql = entries(&["a.sql", "b.sql"]);
-        assert_eq!(unfit_note(&sql, "Local sample", Engine::Mongo).as_deref(), Some("None of the 2 .sql files show on Local sample (MongoDB)"));
-        assert_eq!(unfit_note(&entries(&["a.sql"]), "Local sample", Engine::Mongo).as_deref(), Some("The .sql file does not show on Local sample (MongoDB)"));
-        assert_eq!(unfit_note(&sql, "shop", Engine::MySql), None);
+        let note = |files: &[&str], name: &str, engine| unfit_note(&entries(files).iter().collect::<Vec<_>>(), name, engine);
+        assert_eq!(note(&["a.sql", "b.sql"], "Local sample", Engine::Mongo).as_deref(), Some("None of the 2 .sql files show on Local sample (MongoDB)"));
+        assert_eq!(note(&["a.sql"], "Local sample", Engine::Mongo).as_deref(), Some("The .sql file does not show on Local sample (MongoDB)"));
+        assert_eq!(note(&["a.sql", "b.sql"], "shop", Engine::MySql), None);
         // A shell script shows anywhere, and an empty folder warns of nothing.
-        assert_eq!(unfit_note(&entries(&["a.sql", "b.js"]), "Local sample", Engine::Mongo), None);
-        assert_eq!(unfit_note(&[], "Local sample", Engine::Mongo), None);
+        assert_eq!(note(&["a.sql", "b.js"], "Local sample", Engine::Mongo), None);
+        assert_eq!(note(&[], "Local sample", Engine::Mongo), None);
         assert_eq!(engine_copy(Engine::Mongo), "Its .json filters and pipelines and .js scripts");
     }
 

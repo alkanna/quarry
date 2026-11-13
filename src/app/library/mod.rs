@@ -35,7 +35,8 @@ pub(super) struct LibUi {
     pub(super) frozen: bool,
     /// What Quarry last read or wrote of each linked file, by link and path; a scan that finds another time or length marks the
     /// file in `changed`. Neither is saved.
-    pub(super) baseline: HashMap<(u64, std::path::PathBuf), (std::time::SystemTime, u64)>,
+    /// By link, then path, so a scan looks up each file without building a key.
+    pub(super) baseline: HashMap<u64, HashMap<std::path::PathBuf, (std::time::SystemTime, u64)>>,
     pub(super) changed: HashSet<(u64, std::path::PathBuf)>,
     /// Linked-file reads and writes running on the worker, by job id, and the last id given.
     pub(in crate::app) jobs: HashMap<u64, linked::Job>,

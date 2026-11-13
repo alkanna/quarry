@@ -295,14 +295,14 @@ impl App {
             .collect();
         // A file that differs from what Quarry last read or wrote of it gets a dot in the panel until it is opened or saved.
         // The first scan of a file is its baseline, so nothing shows changed at startup.
+        let base = self.lib_ui.baseline.entry(link).or_default();
         for e in &scan.entries {
-            let k = (link, e.rel.clone());
-            match self.lib_ui.baseline.get(&k) {
+            match base.get(&e.rel) {
                 None => {
-                    self.lib_ui.baseline.insert(k, (e.mtime, e.len));
+                    base.insert(e.rel.clone(), (e.mtime, e.len));
                 }
                 Some(m) if *m != (e.mtime, e.len) => {
-                    self.lib_ui.changed.insert(k);
+                    self.lib_ui.changed.insert((link, e.rel.clone()));
                 }
                 _ => {}
             }
@@ -513,12 +513,17 @@ impl App {
     /// What Quarry last read or wrote of a file, so the panel can tell that it changed since. A change found later by a scan
     /// puts a dot on its row until the file is opened or saved here.
     pub(in crate::app) fn mark_seen(&mut self, link: u64, rel: &std::path::Path, meta: Meta) {
-        let k = (link, rel.to_path_buf());
-        self.lib_ui.changed.remove(&k);
+        self.lib_ui.changed.remove(&(link, rel.to_path_buf()));
         match meta {
-            Some(m) => self.lib_ui.baseline.insert(k, m),
-            None => self.lib_ui.baseline.remove(&k),
-        };
+            Some(m) => {
+                self.lib_ui.baseline.entry(link).or_default().insert(rel.to_path_buf(), m);
+            }
+            None => {
+                if let Some(b) = self.lib_ui.baseline.get_mut(&link) {
+                    b.remove(rel);
+                }
+            }
+        }
     }
 
     /// Puts the file `rel` into the stored scan of its link at once, so a file made here shows before the next scan.
@@ -836,7 +841,7 @@ impl App {
         }
         self.lib_ui.scans.remove(&link);
         self.lib_ui.changed.retain(|(x, _)| *x != link);
-        self.lib_ui.baseline.retain(|(x, _), _| *x != link);
+        self.lib_ui.baseline.remove(&link);
         self.save_library();
         let name = if l.name.is_empty() { l.path.display().to_string() } else { l.name.clone() };
         let unbound = match tabs.len() {

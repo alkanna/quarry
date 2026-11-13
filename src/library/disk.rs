@@ -247,7 +247,8 @@ pub fn scan(root: &Path, exts: &[String], prev: Option<&Scan>) -> Scan {
         }
     }
     out.empty_dirs.sort();
-    out.entries.sort_by(|a, b| a.rel.to_string_lossy().to_lowercase().cmp(&b.rel.to_string_lossy().to_lowercase()).then_with(|| a.rel.cmp(&b.rel)));
+    // The key is built once per entry, not twice per comparison.
+    out.entries.sort_by_cached_key(|e| (e.rel.to_string_lossy().to_lowercase(), e.rel.clone()));
     out
 }
 
