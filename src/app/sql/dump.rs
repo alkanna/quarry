@@ -135,7 +135,9 @@ impl App {
             })
             .collect();
         // The table open in the Content view with a filter set is the first thing to export.
-        let filtered = self.t().filter(|t| t.sel.conn == conn && t.sel.db == db && (!pg || t.sel.schema == schema) && table.as_deref() == Some(t.sel.coll.as_str()) && !t.filter_txt.trim().is_empty()).map(|t| (t.sel.coll.clone(), t.filter_txt.clone(), t.count));
+        // The filter the grid last ran, as its count is: the box may hold an edit not run yet, or one that does not parse.
+        let ran = |t: &Tab| t.sql.as_ref().map(|s| s.ran.filter.clone()).unwrap_or_default();
+        let filtered = self.t().filter(|t| t.sel.conn == conn && t.sel.db == db && (!pg || t.sel.schema == schema) && table.as_deref() == Some(t.sel.coll.as_str()) && !ran(t).trim().is_empty()).map(|t| (t.sel.coll.clone(), ran(t), t.count));
         let what = if filtered.is_some() { What::Filtered } else if table.is_some() { What::Selected } else { What::Whole };
         let mut rows = rows;
         if let (What::Selected, Some(t)) = (what, &table) {

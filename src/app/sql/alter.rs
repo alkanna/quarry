@@ -466,6 +466,15 @@ impl App {
         for i in tabs {
             if let Some(s) = self.tabs[i].sql.as_mut() {
                 s.st.applying = false;
+                if !alter {
+                    let saving = s.st.trig_saving.take();
+                    if !ok {
+                        // A refused create keeps its draft: an existing trigger of that name is not the one it would make.
+                        s.st.trig_made = None;
+                    } else if let Some(k) = saving {
+                        s.st.trig.remove(&k);
+                    }
+                }
                 if clear {
                     s.st.staged.clear();
                 }
