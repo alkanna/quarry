@@ -112,7 +112,6 @@ impl App {
             ui.spacing_mut().scroll.bar_width = 3.0;
             // A capsule is wider than the 28 px column, so the scroll area's clip must not cut its sides.
             ui.set_clip_rect(ui.clip_rect().expand2(egui::vec2(6.0, 0.0)));
-            dnd::auto_scroll_while_dragging(ui);
             outer = dnd::reorder(ui, egui::Id::unique("rail-tiles"), dnd::Items::vertical(&sizes).keys(&keys).into(&into), |ui, k, st| {
                 let slot = ui.max_rect();
                 let tile = egui::Rect::from_min_size(slot.min + egui::vec2(0.0, 4.0), egui::vec2(28.0, 28.0));

@@ -82,4 +82,7 @@ fn a_tab_moves_by_dragging_it_and_stays_current() {
     ui.h.step();
     ui.release(to);
     assert_eq!(colls(ui.app()), ["orders", "events", "customers"], "Esc did not cancel the tab drag");
+    // The cross still closes its tab.
+    ui.mouse_hold("Close tab events", 0);
+    assert_eq!(colls(ui.app()), ["orders", "customers"], "the cross did not close the tab");
 }
