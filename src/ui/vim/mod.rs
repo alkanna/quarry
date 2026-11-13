@@ -52,9 +52,10 @@ pub(crate) fn normal(ctx: &egui::Context, id: egui::Id) -> bool {
     on(ctx) && ctx.data(|d| d.get_temp::<State>(sid(id))).is_some_and(|s| s.vim.mode != Mode::Insert)
 }
 
-/// Removes the keys Vim handles from this pass's input and returns them. Command shortcuts (Cmd on
-/// macOS, Ctrl elsewhere) stay, so running, undo and the clipboard work in every mode. Esc stays
-/// too: `begin` has already taken it when it meant something here.
+/// Removes the keys Vim handles from this pass's input and returns them. Keys held with Cmd, Ctrl or
+/// Alt stay, so running, undo, the clipboard and shortcuts like Ctrl+Tab and Ctrl+Space work in every
+/// mode; Ctrl+R is the one Vim keeps. Esc stays too: `begin` has already taken it when it meant
+/// something here.
 fn take_keys(ctx: &egui::Context) -> Vec<K> {
     let mut keys = Vec::new();
     ctx.input_mut(|i| {
@@ -70,7 +71,7 @@ fn take_keys(ctx: &egui::Context) -> Vec<K> {
                     }
                     return false;
                 }
-                if modifiers.command || *key == Key::Escape {
+                if modifiers.command || modifiers.ctrl || modifiers.alt || *key == Key::Escape {
                     return true;
                 }
                 // Printable keys also arrive as Text, which is what Vim reads; dropping their Key events
@@ -178,7 +179,10 @@ pub(crate) fn begin(ui: &mut egui::Ui, id: egui::Id, text: &mut String) {
         ui.visuals_mut().text_cursor.stroke.color = egui::Color32::TRANSPARENT;
     }
     if !keys.is_empty() {
-        let mut clip = || arboard::Clipboard::new().ok()?.get_text().ok();
+        // A yank reaches the system clipboard only after this frame, so a paste in the same frame (`yyp`
+        // typed fast, or a test) reads Vim's own register instead of the stale clipboard.
+        let yanked = std::cell::Cell::new(false);
+        let mut clip = || if yanked.get() { None } else { arboard::Clipboard::new().ok()?.get_text().ok() };
         let mut undoer = st.undoer();
         for k in keys {
             let snap = (CCursorRange::one(CCursor::new(cur)), text.clone());
@@ -188,6 +192,7 @@ pub(crate) fn begin(ui: &mut egui::Ui, id: egui::Id, text: &mut String) {
                 undoer.add_undo(&snap);
             }
             if let Some(y) = o.yank {
+                yanked.set(true);
                 ctx.copy_text(y);
             }
             if let Some(h) = o.history {
@@ -271,11 +276,16 @@ pub(crate) fn end(ui: &mut egui::Ui, id: egui::Id, out: &TextEditOutput) {
     let fg = if mode == Mode::Insert { MUTED() } else { PRIMARY() };
     let g = painter.layout_job(LayoutJob::single_section(label, mono_fmt(TXT_CAPTION - 1.0, fg, W_SEMIBOLD)));
     let size = egui::vec2(g.size().x + 12.0, 16.0);
-    let rect = egui::Rect::from_min_size(clip.right_bottom() - size - egui::vec2(6.0, 6.0), size);
-    // An opaque base keeps the badge readable over the text it covers.
-    painter.rect_filled(rect, R_SM, BG());
-    painter.rect_filled(rect, R_SM, tint(fg, 31));
-    let dy = optical_dy(&g);
-    painter.galley(rect.center() - g.size() / 2.0 + egui::vec2(0.0, dy), g, fg);
+    let inset = egui::vec2(6.0, 6.0);
+    // A one-line box like the Mongo query has no room for it without covering the text; the block
+    // caret still tells Normal from Insert there.
+    if clip.height() >= 2.0 * (size.y + inset.y) {
+        let rect = egui::Rect::from_min_size(clip.right_bottom() - size - inset, size);
+        // An opaque base keeps the badge readable over the text it covers.
+        painter.rect_filled(rect, R_SM, BG());
+        painter.rect_filled(rect, R_SM, tint(fg, 31));
+        let dy = optical_dy(&g);
+        painter.galley(rect.center() - g.size() / 2.0 + egui::vec2(0.0, dy), g, fg);
+    }
     store(&ctx, id, s);
 }
