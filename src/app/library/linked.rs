@@ -797,7 +797,7 @@ impl App {
 
     fn copy_into_library(&mut self, mut s: Script, rel: &std::path::Path, at: DropAt) {
         s.id = self.library.next_id();
-        s.updated = super::open::now_secs();
+        s.updated = crate::library::now_secs();
         if let Some(n) = rel.file_stem() {
             s.name = n.to_string_lossy().into_owned();
         }

@@ -39,16 +39,10 @@ pub(super) struct ConnsUi {
     pub(super) picker_filter: String,
     /// Groups the picker shows folded. Apart from `Group.open`, so folding in the picker never changes the panel.
     pub(super) picker_closed: HashSet<u64>,
-    /// Demo states: the group menu drawn open, a drop shown in progress, and the picker opened.
+    /// Demo states: the group menu drawn open, a connection shown hovering inside a group, and the picker opened.
     pub(super) demo_menu: Option<u64>,
-    pub(super) demo_drop: Option<DemoDrop>,
+    pub(super) demo_drop: Option<u64>,
     pub(super) demo_picker: bool,
-}
-
-#[derive(Clone, Copy)]
-pub(super) enum DemoDrop {
-    /// A connection hovering inside this group.
-    Into(u64),
 }
 
 /// One row of the panel or of the picker.
@@ -443,7 +437,7 @@ impl App {
                 self.conns_ui.focus_edit = true;
             }
             "edit" => self.edit_group(prod),
-            "drag" => self.conns_ui.demo_drop = Some(DemoDrop::Into(stage)),
+            "drag" => self.conns_ui.demo_drop = Some(stage),
             "picker" => {
                 self.prefs.set_side_mode(SideMode::Explorer);
                 self.conns_ui.demo_picker = true;
@@ -735,17 +729,14 @@ fn group_row(ui: &mut egui::Ui, g: &Group, (open, t, shown, total): (bool, f32, 
     if hover_open(ctx, r.id, held_over) {
         acts.push(PanelAct::Toggle(g.id));
     }
-    match st.demo_drop {
-        Some(DemoDrop::Into(id)) if id == g.id => {
-            drop_fill(ui.painter(), r.rect);
-            // The ghost a real drag draws beside the pointer, for the picture.
-            let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("demo-drag-ghost")));
-            let galley = p.layout_no_wrap("sandbox".into(), FontId::proportional(TXT_BODY), TEXT());
-            let rect = egui::Rect::from_min_size(r.rect.center() + egui::vec2(24.0, 10.0), galley.size() + egui::vec2(24.0, 10.0));
-            p.rect(rect, R_SM, RAISED(), Stroke::new(1.0, PRIMARY()), egui::StrokeKind::Inside);
-            p.galley(rect.min + egui::vec2(12.0, 5.0), galley, TEXT());
-        }
-        _ => {}
+    if st.demo_drop == Some(g.id) {
+        drop_fill(ui.painter(), r.rect);
+        // The ghost a real drag draws beside the pointer, for the picture.
+        let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("demo-drag-ghost")));
+        let galley = p.layout_no_wrap("sandbox".into(), FontId::proportional(TXT_BODY), TEXT());
+        let rect = egui::Rect::from_min_size(r.rect.center() + egui::vec2(24.0, 10.0), galley.size() + egui::vec2(24.0, 10.0));
+        p.rect(rect, R_SM, RAISED(), Stroke::new(1.0, PRIMARY()), egui::StrokeKind::Inside);
+        p.galley(rect.min + egui::vec2(12.0, 5.0), galley, TEXT());
     }
     if st.demo_menu == Some(g.id) {
         let pos = r.rect.right_top() + egui::vec2(-24.0, 20.0);

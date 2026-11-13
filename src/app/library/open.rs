@@ -1,5 +1,5 @@
-//! Opening a library script into a tab, and writing a tab's text back to the script it came from. The signatures of
-//! `open_script` and `save_script` are fixed so the panel (B3) and the linked folders (B2) can call them.
+//! Opening a library script into a tab, and writing a tab's text back to the script it came from. The panel and the
+//! linked folders call `open_script` and `save_script`.
 
 use super::*;
 use crate::library::ScriptRef;
@@ -35,9 +35,6 @@ pub(in crate::app) fn view_of_kind(kind: &str) -> Option<View> {
     })
 }
 
-pub(in crate::app) fn now_secs() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
-}
 
 /// Where a script runs, as `App::script_target` works it out.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -444,7 +441,7 @@ impl App {
         {
             let tab_conn = self.t().map(|t| t.sel.conn);
             let sc = &mut self.library.scripts[i];
-            (sc.body, sc.sort, sc.project, sc.updated) = (tt.body.clone(), tt.sort.clone(), tt.project.clone(), now_secs());
+            (sc.body, sc.sort, sc.project, sc.updated) = (tt.body.clone(), tt.sort.clone(), tt.project.clone(), crate::library::now_secs());
             // The database and collection the tab runs on now are part of what is saved, as the Save dialog keeps them. A script
             // opened on another connection keeps its own, which name places on its own server.
             let own = tab_conn == Some(sc.conn);

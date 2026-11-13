@@ -2,7 +2,7 @@
 //! bound to the library yet (see `save_script` in open.rs).
 
 use super::linked::{FileOut, Job, SaveOut, file_bytes, kind_ext};
-use super::open::{TabText, now_secs};
+use super::open::TabText;
 use super::*;
 use crate::library::{Library, Script, ScriptRef, disk, format};
 
@@ -151,7 +151,7 @@ impl App {
                 // Kept for the toast's Undo, since the old text is otherwise gone.
                 replaced = Some(self.library.scripts[i].clone());
                 let s = &mut self.library.scripts[i];
-                (s.body, s.sort, s.project, s.db, s.schema, s.updated) = (f.body.clone(), f.sort.clone(), f.project.clone(), f.db.clone(), f.schema.clone(), now_secs());
+                (s.body, s.sort, s.project, s.db, s.schema, s.updated) = (f.body.clone(), f.sort.clone(), f.project.clone(), f.db.clone(), f.schema.clone(), crate::library::now_secs());
                 s.id
             }
             None => {
@@ -168,7 +168,7 @@ impl App {
                     schema: f.schema.clone(),
                     coll: f.coll.clone(),
                     folder,
-                    updated: now_secs(),
+                    updated: crate::library::now_secs(),
                     ..Default::default()
                 });
                 id

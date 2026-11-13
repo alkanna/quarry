@@ -1,6 +1,5 @@
 //! The script library in the app: loading and saving library.json, opening scripts into tabs, the Save dialog, the quick
 //! pickers and the sidebar panel. The data types and the rules on them are in `crate::library`, free of egui.
-//! F0 holds the frozen state types and the stubs; the streams fill the submodules.
 
 use super::*;
 use crate::library::Library;
@@ -12,20 +11,17 @@ pub(super) mod panel;
 pub(super) mod picker;
 pub(super) mod save_dialog;
 
-/// What the Library panel and its dialogs remember while the app runs. Each stream adds its own block below, apart from
-/// the others, so merging them stays free of conflicts.
+/// What the Library panel and its dialogs remember while the app runs.
 #[derive(Default)]
 pub(super) struct LibUi {
-    // B1: the script waiting for its connection to be ready, the folder the Save dialog offers first.
     /// A script asked for while its connection was not ready: opened by `library_tick` once it is, dropped if it fails.
     pub(in crate::app) pending: Option<open::Pending>,
     /// The folder the last save went to, which the Save dialog offers first.
     pub(super) last_folder: Option<u64>,
 
-    // B3: the panel's open folders, selection, search and drags.
+    /// The panel's open folders, selection, search and drags.
     pub(in crate::app) panel: panel::PanelUi,
 
-    // B2: link scans in flight, conflicts and the Link a folder dialog.
     /// The last scan of each link, by link id. Entries keep their modified time and length, so a rescan reuses what did not change.
     pub(super) scans: HashMap<u64, crate::library::disk::Scan>,
     /// Links with a scan running, so each has at most one.
@@ -45,7 +41,6 @@ pub(super) struct LibUi {
     pub(in crate::app) jobs: HashMap<u64, linked::Job>,
     pub(super) job_seq: u64,
 
-    // Hardening: the write notice, and the keys that reach the picker and the tree from anywhere.
     /// Tabs, by uid, that Run opened instead of running because their script can write: they show "This script writes".
     pub(in crate::app) writes: HashSet<u64>,
     /// Cmd+O asked for the current view's picker; the picker button opens it when it draws and `pick_acts` clears it.
@@ -165,7 +160,7 @@ impl App {
             .iter()
             .map(|(k, v)| (k.clone(), v.iter().map(|q| crate::library::migrate::OldEntry { name: q.name.clone(), filter: q.filter.clone(), sort: q.sort.clone(), project: q.project.clone(), pipeline: q.pipeline.clone(), sql: q.sql.clone() }).collect()))
             .collect();
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let now = crate::library::now_secs();
         // Written even when nothing came over (every key was bad), so library.json exists and this never runs again.
         crate::library::migrate::migrate_into(&mut self.library, &old, now);
         self.save_library();

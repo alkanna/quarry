@@ -14,6 +14,11 @@ pub mod tree;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// The clock in whole seconds since the Unix epoch, as scripts record when they were edited.
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
 /// Scripts opened recently, newest first, never more than this many.
 pub const RECENT_MAX: usize = 20;
 

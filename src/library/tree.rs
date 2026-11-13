@@ -7,7 +7,7 @@ use super::format;
 use crate::db::sql::Engine;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-/// One thing a row stands for. Linked folders are rows too, so a drag, a menu or a key can name them; B2 fills them.
+/// One thing a row stands for. Linked folders are rows too, so a drag, a menu or a key can name them.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Node {
     Link(u64),
@@ -24,6 +24,14 @@ impl Node {
             Node::Script(id) => Some(ScriptRef::Saved(*id)),
             Node::File { link, rel } => Some(ScriptRef::File { link: *link, rel: rel.clone() }),
             _ => None,
+        }
+    }
+
+    /// The row of a script or file a tab opens: the inverse of `script_ref`.
+    pub fn of_ref(r: &ScriptRef) -> Node {
+        match r {
+            ScriptRef::Saved(id) => Node::Script(*id),
+            ScriptRef::File { link, rel } => Node::File { link: *link, rel: rel.clone() },
         }
     }
 

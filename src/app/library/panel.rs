@@ -1,4 +1,4 @@
-//! The Library panel of the sidebar: folders and scripts kept by Quarry (and, once B2 lands, linked folders), a scope switch,
+//! The Library panel of the sidebar: folders and scripts kept by Quarry and linked folders, a scope switch,
 //! a search, a preview card, and the menus and drags that organize them. The rows come from `library::tree::flatten`, the
 //! changes go through `library::ops`, and a script leaves for a tab through `open_script`.
 //!
@@ -171,26 +171,23 @@ fn kind_glyph(kind: &str) -> (glyphs::Glyph, egui::Color32) {
     }
 }
 
-fn now_secs() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
-}
 
 /// "edited 5m ago", or "" for a script that never recorded a time.
 fn edited(updated: u64) -> String {
     if updated == 0 {
         return String::new();
     }
-    let s = now_secs().saturating_sub(updated);
+    let s = crate::library::now_secs().saturating_sub(updated);
     if s >= 2 * 86400 {
         return format!("edited {}d ago", s / 86400);
     }
     format!("edited {} ago", crate::app::log::ago(std::time::UNIX_EPOCH + Duration::from_secs(updated)))
 }
 
+/// The row a drag carries; `drag_item` is its inverse.
 fn item_node(d: &DragItem) -> Option<Node> {
     match d {
-        DragItem::Script(ScriptRef::Saved(id)) => Some(Node::Script(*id)),
-        DragItem::Script(ScriptRef::File { link, rel }) => Some(Node::File { link: *link, rel: rel.clone() }),
+        DragItem::Script(r) => Some(Node::of_ref(r)),
         DragItem::Folder(id) => Some(Node::Folder(*id)),
         _ => None,
     }
@@ -216,10 +213,8 @@ fn root_plan(lib: &Library, item: &Node) -> Result<Plan, &'static str> {
 
 fn drag_item(node: &Node) -> Option<DragItem> {
     match node {
-        Node::Script(id) => Some(DragItem::Script(ScriptRef::Saved(*id))),
         Node::Folder(id) => Some(DragItem::Folder(*id)),
-        Node::File { link, rel } => Some(DragItem::Script(ScriptRef::File { link: *link, rel: rel.clone() })),
-        _ => None,
+        n => n.script_ref().map(DragItem::Script),
     }
 }
 
@@ -1000,7 +995,7 @@ impl App {
                 }
             },
             Act::Duplicate(id) => {
-                if let Some(new) = ops::duplicate(&mut self.library, id, now_secs()) {
+                if let Some(new) = ops::duplicate(&mut self.library, id, crate::library::now_secs()) {
                     self.save_library();
                     st.sel = Some(Node::Script(new));
                 }
@@ -1159,20 +1154,14 @@ impl App {
         }
     }
 
-    /// QUARRY_TEST_LIBRARY=<state>: save, picker, picker-docs, picker-shell (B1); panel, all, search, empty, menu,
-    /// folder-menu, drag (B3); linked, missing, link, save-linked, conflict (B2).
+    /// QUARRY_TEST_LIBRARY=<state>: panel, all, search, empty, menu, folder-menu, drag (here); linked, missing, link,
+    /// save-linked, conflict (linked.rs); save, picker, picker-docs, picker-shell (picker.rs).
     pub(in crate::app) fn demo_library(&mut self, state: &str) {
-        // B3
         if matches!(state, "panel" | "all" | "search" | "empty" | "menu" | "folder-menu" | "drag") {
             self.demo_library_panel(state);
         }
-        // B2: linked, missing, link, save-linked, conflict (linked.rs).
-        if self.demo_library_linked(state) {
-            return;
-        }
-        // B1: save, picker, picker-docs, picker-shell (picker.rs).
-        if self.demo_library_quick(state) {
-            return;
+        if !self.demo_library_linked(state) {
+            self.demo_library_quick(state);
         }
     }
 
@@ -1187,7 +1176,7 @@ impl App {
         self.prefs.set_side_mode(SideMode::Library);
         self.prefs.sidebar_hidden = false;
         self.prefs.lib_scope_all = state == "all";
-        let now = now_secs();
+        let now = crate::library::now_secs();
         let folder = |id, name: &str, parent| Folder { id, name: name.into(), parent };
         let script = |id, name: &str, kind: &str, conn, folder, db: &str, coll: &str, body: &str, age: u64| Script { id, name: name.into(), kind: kind.into(), body: body.into(), conn, db: db.into(), coll: coll.into(), folder, updated: now - age, ..Default::default() };
         let mut lib = Library {
