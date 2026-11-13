@@ -330,3 +330,22 @@ fn a_text_key_named_like_a_keyword_keys_every_row() {
         }
     });
 }
+
+#[test]
+fn column_values_read_numeric_and_dates_of_the_whole_query() {
+    use crate::db::{ColOp, ColOut};
+    every_pg(|l, var| {
+        let (db, _p) = fixture(l, "t4_colvals", "CREATE TABLE t (id int PRIMARY KEY, price numeric(6,2), on_day date, at timestamptz); INSERT INTO t VALUES (1, 1.50, '2026-01-01', '2026-01-01 00:00:00+00'), (2, 2.50, '2026-01-04', '2026-01-01 12:00:00+05:30'), (3, NULL, NULL, NULL);");
+        let run = |op, col: &str| {
+            l.w.sql_column_values(1, db.clone(), "quarry_test".into(), "t4_colvals".into(), "t".into(), PageQuery { limit: Some(1), ..Default::default() }, op, col.into(), col.into());
+            l.next()
+        };
+        let Msg::ColumnValues { res: Ok((ColOut::Notice(s), false)), .. } = run(ColOp::Avg, "price") else { panic!("{var}: expected an average") };
+        assert!(s.starts_with("2\n") && s.contains("2 of 3 values are numbers"), "{var}: {s}");
+        let Msg::ColumnValues { res: Ok((ColOut::Notice(s), _)), .. } = run(ColOp::Range, "on_day") else { panic!("{var}: expected a range") };
+        assert!(s.contains("Span 3d") && s.contains("2 of 3 values are dates"), "{var}: {s}");
+        // The +05:30 zone is applied: 12:00 there is 06:30 UTC.
+        let Msg::ColumnValues { res: Ok((ColOut::Notice(s), _)), .. } = run(ColOp::Range, "at") else { panic!("{var}: expected a range") };
+        assert!(s.contains("Span 6h 30m"), "{var}: {s}");
+    });
+}

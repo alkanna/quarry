@@ -488,6 +488,11 @@ impl ColOp {
     /// In menu order.
     pub const ALL: [ColOp; 9] = [ColOp::Copy, ColOp::CopyDistinct, ColOp::CopyDistinctJs, ColOp::CountDistinct, ColOp::Sum, ColOp::Avg, ColOp::Median, ColOp::Range, ColOp::Group];
 
+    /// Sum, average, median and range, which read values as numbers or dates.
+    pub fn is_stat(self) -> bool {
+        matches!(self, ColOp::Sum | ColOp::Avg | ColOp::Median | ColOp::Range)
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             ColOp::Copy => "Copy values",

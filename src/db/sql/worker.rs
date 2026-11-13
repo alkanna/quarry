@@ -9,7 +9,7 @@ pub(super) use super::run::pin_reads_my as pin_reads;
 use super::run::{run, RunHandle};
 use super::schema::{Schema, SchemaCol, SchemaTable};
 use super::{lex, Addr, Advanced, TestInfo, Col, Db, Dialect, PageQuery, Pool, SslMode};
-use crate::db::{e, Msg, Net, Res, Row, Worker};
+use crate::db::{col_op_result, e, ColOp, ColOut, Msg, Net, Res, Row, Worker, COL_VALUES_CAP};
 use mongodb::bson::{Bson, Document};
 use super::exec::{Cells, ColInfo, ColMeta, Conn, Opts, SqlRow};
 use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlSslMode};
@@ -412,7 +412,8 @@ pub(super) fn pg_kind<R: Cells>(r: &R) -> Kind {
 /// grouped), whether that is an estimate, the time, and the rows before grouping when grouped.
 type Paged = (Vec<Col>, Vec<String>, Vec<Row>, u64, bool, u128, Option<u64>);
 
-async fn page(db: &Db, schema: &str, table: &str, q: &PageQuery, limit: u64, offset: u64) -> Res<Paged> {
+/// Without `counted` the count and the grouped row count are skipped and come back as 0 and None.
+async fn page(db: &Db, schema: &str, table: &str, q: &PageQuery, limit: u64, offset: u64, counted: bool) -> Res<Paged> {
     let start = Instant::now();
     let d = db.dialect;
     // The key is needed before the data query: without a total order, pages overlap and skip rows.
@@ -423,10 +424,11 @@ async fn page(db: &Db, schema: &str, table: &str, q: &PageQuery, limit: u64, off
     let sql = q.select_sql(d, schema, table, &pk, Some((limit, offset)));
     one_read(&sql, d)?;
     let data = db.read_text(schema, &sql, user_text(q));
-    let ((total, estimated), rows) = tokio::try_join!(count(db, schema, table, q), data)?;
+    let total = async { if counted { count(db, schema, table, q).await } else { Ok((0, false)) } };
+    let ((total, estimated), rows) = tokio::try_join!(total, data)?;
     // The LIMIT chip caps the whole result, not a page.
     let count = total.saturating_sub(q.skip).min(q.limit.unwrap_or(u64::MAX));
-    let matched = if q.grouped() {
+    let matched = if q.grouped() && counted {
         let sql = q.rows_sql(d, schema, table);
         one_read(&sql, d)?;
         let r = db.read_text(schema, &sql, user_text(q)).await?;
@@ -631,6 +633,33 @@ impl Worker {
         });
     }
 
+    /// A column data action over every row the Content bar matches, at most COL_VALUES_CAP of them in its order. Like
+    /// the Mongo one it ignores the LIMIT and OFFSET chips. `col` is the row key, `src` the column's name on the server.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sql_column_values(&self, conn: u64, db: Db, database: String, schema: String, table: String, mut q: PageQuery, op: ColOp, col: String, src: String) {
+        self.spawn_sql(conn, &schema.clone(), async move {
+            (q.limit, q.skip) = (None, 0);
+            // Reads only this column when the bar selects every column, as the Mongo path projects one field.
+            let narrow = q.select.is_empty() && !q.grouped() && !q.distinct;
+            if narrow {
+                q.select = vec![db.dialect.quote_ident(&src)];
+            }
+            let res = async {
+                let (cols, _, rows, ..) = page(&db, &schema, &table, &q, COL_VALUES_CAP as u64, 0, false).await?;
+                let c = if narrow { cols.first() } else { cols.iter().find(|x| x.name == col) };
+                let c = c.ok_or_else(|| format!("{col} is not in the result"))?;
+                let values = rows.iter().filter_map(|r| r.raw().get(&c.name).ok().flatten()).filter_map(|v| Bson::try_from(v).ok()).collect();
+                let values = value::stat_values(op, Some(c.kind), values);
+                Ok((col_op_result(op, &values), rows.len() as i64 >= COL_VALUES_CAP))
+            }
+            .await;
+            match res {
+                Ok((ColOut::Groups(rows), _)) => Msg::Grouped { conn, db: database, coll: table, path: col, pipeline: Vec::new(), res: Ok(rows) },
+                res => Msg::ColumnValues { conn, op, coll: table, path: col, res },
+            }
+        });
+    }
+
     #[cfg(test)]
     pub fn sql_connect(&self, conn: u64, uri: String, timeout: Duration, net: Net) {
         self.sql_connect_with(conn, 0, uri, timeout, net, Advanced::default());
@@ -709,7 +738,7 @@ impl Worker {
     pub fn sql_page(&self, req: u64, db: Db, schema: String, table: String, q: PageQuery, limit: u64, offset: u64) {
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
-            let res = match page(&db, &schema, &table, &q, limit, offset).await {
+            let res = match page(&db, &schema, &table, &q, limit, offset, true).await {
                 Ok((cols, pk, rows, count, estimated, ms, matched)) => {
                     let _ = tx.send(Msg::SqlCols { req, cols, pk, estimated, matched });
                     Ok((rows, count, ms))
@@ -931,6 +960,27 @@ mod tests {
         let view = s.table("v_sch").unwrap();
         assert!(view.view && view.rows.is_none() && view.cols.len() == 1);
         assert_eq!(child.cols.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["id", "parent_id", "status", "note"]);
+    }
+
+    #[test]
+    fn live_column_values_read_the_whole_query() {
+        let Some((w, rx, db, p)) = live("t_colvals", "id INT PRIMARY KEY, `a.b` DECIMAL(6,2), at DATETIME") else { return };
+        exec(&w, &p, "INSERT INTO quarry_test.t_colvals VALUES (1, 1.50, '2026-01-01 00:00:00'), (2, 2.50, '2026-01-03 06:00:00'), (3, NULL, NULL), (4, 2.50, '2026-01-02 00:00:00')");
+        let run = |op, col: &str, q: PageQuery| {
+            w.sql_column_values(1, db.clone(), "quarry_test".into(), "quarry_test".into(), "t_colvals".into(), q, op, col.into(), col.into());
+            next(&rx)
+        };
+        // The LIMIT chip is ignored, the dotted name is one column, and DECIMAL text counts as numbers.
+        let Msg::ColumnValues { res: Ok((ColOut::Notice(s), false)), .. } = run(ColOp::Sum, "a.b", PageQuery { limit: Some(1), ..Default::default() }) else { panic!("expected a sum") };
+        assert!(s.starts_with("6.5\n") && s.contains("3 of 4 values are numbers"), "{s}");
+        let Msg::ColumnValues { res: Ok((ColOut::Notice(s), _)), .. } = run(ColOp::Range, "at", PageQuery { filter: "id < 3".into(), ..Default::default() }) else { panic!("expected a range") };
+        assert!(s.contains("2026-01-01T00:00:00") && s.contains("Span 2d 6h"), "{s}");
+        // Groups keep the exact text, and a SQL table has no pipeline to open.
+        let Msg::Grouped { res: Ok(rows), pipeline, .. } = run(ColOp::Group, "a.b", PageQuery::default()) else { panic!("expected groups") };
+        assert!(pipeline.is_empty());
+        assert_eq!(rows[0], mongodb::bson::doc! { "_id": "2.50", "count": 2i64 });
+        let Msg::ColumnValues { res: Ok((ColOut::Copy(text, 3), _)), .. } = run(ColOp::CopyDistinct, "a.b", PageQuery { order: "id".into(), ..Default::default() }) else { panic!("expected a copy") };
+        assert_eq!(text, "1.50\n2.50\n");
     }
 
     #[test]
