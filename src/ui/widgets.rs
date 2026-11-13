@@ -353,6 +353,30 @@ pub(crate) fn danger_item(ui: &mut egui::Ui, text: impl Into<String>) -> egui::R
 /// a baseline there, so the triangle (from a fallback font) and the hint sat off center. Here
 /// each part is centered on its own.
 pub(crate) fn run_button(ui: &mut egui::Ui, text: &str, keys: &str) -> egui::Response {
+    run_face(ui, text, keys, egui::CornerRadius::same(R_MD))
+}
+
+/// `run_button` with a narrow tip on its right edge, as in JetBrains IDEs: the tip opens a menu of what to run.
+/// Returns the button, then the tip.
+pub(crate) fn run_split(ui: &mut egui::Ui, text: &str, keys: &str, tip_on: bool) -> (egui::Response, egui::Response) {
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let main = run_face(ui, text, keys, egui::CornerRadius { nw: R_MD, sw: R_MD, ne: 0, se: 0 });
+        let (rect, r) = ui.allocate_exact_size(egui::vec2(22.0, 26.0), if tip_on { Sense::click() } else { Sense::hover() });
+        let p = ui.painter();
+        let fill = if tip_on { [PRIMARY(), shade(PRIMARY(), 0.10), shade(PRIMARY(), 0.20)][state_of(&r)] } else { PRIMARY() };
+        p.rect_filled(rect, egui::CornerRadius { nw: 0, sw: 0, ne: R_MD, se: R_MD }, fill);
+        p.vline(rect.left(), rect.shrink2(egui::vec2(0.0, 5.0)).y_range(), Stroke::new(1.0, tint(ON_PRIMARY(), 70)));
+        chevron(p, rect.center() + egui::vec2(0.0, 0.5), true, if tip_on { ON_PRIMARY() } else { tint(ON_PRIMARY(), 110) });
+        focus_ring(ui, &r, rect, R_MD as f32);
+        let enabled = ui.is_enabled() && tip_on;
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, "Choose what to run"));
+        (main, if tip_on { r.on_hover_cursor(egui::CursorIcon::PointingHand) } else { r })
+    })
+    .inner
+}
+
+fn run_face(ui: &mut egui::Ui, text: &str, keys: &str, corners: egui::CornerRadius) -> egui::Response {
     const TRI: f32 = 8.0;
     let label = ui.painter().layout_job(egui::text::LayoutJob::single_section(text.to_string(), ui_fmt(TXT_BODY, ON_PRIMARY(), W_SEMIBOLD, 0.0)));
     let hint = ui.painter().layout_job(egui::text::LayoutJob::single_section(keys.to_string(), mono_fmt(TXT_CAPTION, tint(ON_PRIMARY(), 170), 400.0)));
@@ -360,7 +384,7 @@ pub(crate) fn run_button(ui: &mut egui::Ui, text: &str, keys: &str) -> egui::Res
     let (rect, r) = ui.allocate_exact_size(egui::vec2((content + 28.0).max(96.0), 26.0), Sense::click());
     let fill = [PRIMARY(), shade(PRIMARY(), 0.10), shade(PRIMARY(), 0.20)][state_of(&r)];
     let p = ui.painter();
-    p.rect_filled(rect, R_MD, fill);
+    p.rect_filled(rect, corners, fill);
     let (cy, mut x) = (rect.center().y, rect.center().x - content / 2.0);
     p.add(egui::Shape::convex_polygon(vec![egui::pos2(x, cy - TRI * 0.62), egui::pos2(x + TRI, cy), egui::pos2(x, cy + TRI * 0.62)], ON_PRIMARY(), Stroke::NONE));
     x += TRI + 8.0;

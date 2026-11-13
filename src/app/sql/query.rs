@@ -56,6 +56,18 @@ pub(in crate::app) fn statement_pos(text: &str, caret: usize, d: db::sql::Dialec
     Some((r, i + 1, all.len()))
 }
 
+/// A statement on one line for a menu, from its first word of code: a leading comment would color the whole line as one.
+fn preview(text: &str, d: db::sql::Dialect) -> String {
+    let text = text.trim_start();
+    // Most statements start with code, and the History menu builds every line each frame, so only those that open
+    // with a comment are lexed.
+    if !(text.starts_with("--") || text.starts_with("/*") || text.starts_with('#')) {
+        return db::sql::server::one_line(text, 90);
+    }
+    let start = lex::tokens(text, d).into_iter().find(|(t, _)| !matches!(t, lex::Tok::Space | lex::Tok::Comment)).map_or(0, |(_, r)| r.start);
+    db::sql::server::one_line(&text[start..], 90)
+}
+
 /// The database a run uses: the picked one, else the tab's own.
 fn run_db(t: &Tab) -> String {
     t.sql.as_ref().map(|s| s.run_db.clone()).filter(|d| !d.is_empty()).unwrap_or_else(|| t.sel.db.clone())
@@ -125,13 +137,15 @@ struct GridOut {
     act: Option<(usize, DocsAct)>,
     check: Option<(usize, bool)>,
     all: Option<bool>,
+    /// A plain click on a row, which selects it.
+    select: Option<usize>,
     /// A value to open in full, from a double click on its cell or the eye shown over it.
     view: Option<(String, Bson)>,
 }
 
 /// The rows of one result set as a grid with a checkbox column. Checked rows are tinted, and the menu of a
-/// checked row acts on every checked row.
-fn grid(ui: &mut egui::Ui, set: &ResultSet, checked: &BTreeSet<usize>) -> GridOut {
+/// checked row acts on every checked row. `record` draws the selected row's record under it.
+fn grid(ui: &mut egui::Ui, set: &ResultSet, checked: &BTreeSet<usize>, sel: Option<usize>, scroll: bool, mut record: Option<&mut dyn FnMut(&mut egui::Ui)>) -> GridOut {
     let mono = FontId::monospace(TXT_SMALL);
     let cw = ui.fonts_mut(|f| f.glyph_width(&mono, '0'));
     // Widths from the headers and the first rows, so a wide cell further down is cut with an ellipsis.
@@ -147,53 +161,67 @@ fn grid(ui: &mut egui::Ui, set: &ResultSet, checked: &BTreeSet<usize>) -> GridOu
         let (head, _) = ui.allocate_exact_size(egui::vec2(view_w, TABLE_HEAD_H), Sense::hover());
         let area = ui.scope(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            egui::ScrollArea::both().id_salt("sql-grid").auto_shrink(false).show_rows(ui, ROW_H, set.rows.len(), |ui, range| {
+            egui::ScrollArea::both().id_salt("sql-grid").auto_shrink(false).show(ui, |ui| {
                 let rows = Rows::Raw(&set.rows);
                 let shift = ui.input(|i| i.modifiers.shift);
-                for i in range {
-                    let (rr, resp) = ui.allocate_exact_size(egui::vec2(total.max(view_w - 2.0), ROW_H), Sense::click());
-                    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Row, true, format!("Result row {}", i + 1)));
-                    let hovered = ui.rect_contains_pointer(rr) && !ui.ctx().any_popup_open();
-                    table::paint_row(ui, rr, false, checked.contains(&i), hovered, resp.is_pointer_button_down_on(), i % 2 == 1);
-                    ui.painter().text(egui::pos2(rr.left() + CHECK_W + 18.0, rr.center().y), egui::Align2::LEFT_CENTER, (i + 1).to_string(), FontId::monospace(TXT_CAPTION), FAINT());
-                    if check_box(ui, egui::pos2(rr.left() + 13.0, rr.center().y), ui.scope_id().with(("check", i)), checked.contains(&i), false).clicked() {
-                        out.check = Some((i, shift));
+                let row_w = total.max(view_w - 2.0);
+                for i in 0..set.rows.len() {
+                    // Every row takes its room so the scroll stays true, but only rows on screen are drawn.
+                    let (rr, resp) = ui.allocate_exact_size(egui::vec2(row_w, ROW_H), Sense::click());
+                    if scroll && sel == Some(i) {
+                        resp.scroll_to_me(None);
                     }
-                    let mut x = rr.left() + lead;
-                    for (ci, (c, w)) in set.cols.iter().zip(&widths).enumerate() {
-                        let cell = egui::Rect::from_min_size(egui::pos2(x, rr.top()), egui::vec2(*w, ROW_H));
-                        x += w;
-                        if !ui.is_rect_visible(cell) {
-                            continue;
+                    if ui.is_rect_visible(rr) {
+                        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Row, true, format!("Result row {}", i + 1)));
+                        let hovered = ui.rect_contains_pointer(rr) && !ui.ctx().any_popup_open();
+                        table::paint_row(ui, rr, sel == Some(i), checked.contains(&i), hovered, resp.is_pointer_button_down_on(), i % 2 == 1);
+                        ui.painter().text(egui::pos2(rr.left() + CHECK_W + 18.0, rr.center().y), egui::Align2::LEFT_CENTER, (i + 1).to_string(), FontId::monospace(TXT_CAPTION), FAINT());
+                        if check_box(ui, egui::pos2(rr.left() + 13.0, rr.center().y), ui.scope_id().with(("check", i)), checked.contains(&i), false).clicked() {
+                            out.check = Some((i, shift));
                         }
-                        let v = rows.value(i, &c.name);
-                        // The row takes the clicks, so a double click finds its cell by where it landed.
-                        if resp.double_clicked() && resp.interact_pointer_pos().is_some_and(|p| cell.x_range().contains(p.x)) {
-                            out.view = Some((c.name.clone(), Val::owned(v)));
+                        let mut x = rr.left() + lead;
+                        for (ci, (c, w)) in set.cols.iter().zip(&widths).enumerate() {
+                            let cell = egui::Rect::from_min_size(egui::pos2(x, rr.top()), egui::vec2(*w, ROW_H));
+                            x += w;
+                            if !ui.is_rect_visible(cell) {
+                                continue;
+                            }
+                            let v = rows.value(i, &c.name);
+                            // The row takes the clicks, so a double click finds its cell by where it landed.
+                            if resp.double_clicked() && resp.interact_pointer_pos().is_some_and(|p| cell.x_range().contains(p.x)) {
+                                out.view = Some((c.name.clone(), Val::owned(v)));
+                            }
+                            let (mut job, color) = match v {
+                                Some(v) => (sql_cell_job(v, c.kind, false), TEXT()),
+                                None => (egui::text::LayoutJob::single_section("—".into(), mono_fmt(TXT_SMALL, FAINT(), 400.0)), FAINT()),
+                            };
+                            job.wrap = egui::text::TextWrapping::truncate_at_width(w - 14.0);
+                            let g = ui.fonts_mut(|f| f.layout_job(job));
+                            let gx = if is_numeric(c.kind) { cell.right() - 8.0 - g.size().x } else { cell.left() + 8.0 }.max(cell.left() + 8.0);
+                            ui.painter().with_clip_rect(cell.shrink2(egui::vec2(6.0, 0.0))).galley(egui::pos2(gx, cell.center().y - g.size().y / 2.0), g, color);
+                            if let Some(v) = table::view_button(ui, cell, 0.0, v, ("eye", i, ci), || format!("View {} row {}", c.name, i + 1)) {
+                                out.view = Some((c.name.clone(), v));
+                            }
                         }
-                        let (mut job, color) = match v {
-                            Some(v) => (sql_cell_job(v, c.kind, false), TEXT()),
-                            None => (egui::text::LayoutJob::single_section("—".into(), mono_fmt(TXT_SMALL, FAINT(), 400.0)), FAINT()),
-                        };
-                        job.wrap = egui::text::TextWrapping::truncate_at_width(w - 14.0);
-                        let g = ui.fonts_mut(|f| f.layout_job(job));
-                        let gx = if is_numeric(c.kind) { cell.right() - 8.0 - g.size().x } else { cell.left() + 8.0 }.max(cell.left() + 8.0);
-                        ui.painter().with_clip_rect(cell.shrink2(egui::vec2(6.0, 0.0))).galley(egui::pos2(gx, cell.center().y - g.size().y / 2.0), g, color);
-                        if let Some(v) = table::view_button(ui, cell, 0.0, v, ("eye", i, ci), || format!("View {} row {}", c.name, i + 1)) {
-                            out.view = Some((c.name.clone(), v));
+                        // Cmd or Shift on a row checks it like in the Content grid; a plain click selects it.
+                        if resp.clicked() {
+                            if shift || ui.input(|i| i.modifiers.command) {
+                                out.check = Some((i, shift));
+                            } else {
+                                out.select = Some(i);
+                            }
                         }
+                        resp.context_menu(|ui| {
+                            menu_look(ui);
+                            if let Some(a) = results_menu(ui, if checked.contains(&i) { checked.len() } else { 1 }, true, true) {
+                                out.act = Some((i, a));
+                                ui.close();
+                            }
+                        });
                     }
-                    // Cmd or Shift on a row checks it like in the Content grid.
-                    if resp.clicked() && ui.input(|i| i.modifiers.command || i.modifiers.shift) {
-                        out.check = Some((i, shift));
+                    if sel == Some(i) && let Some(rec) = record.as_mut() {
+                        table::record_card(ui, row_w, view_w, |ui| rec(ui));
                     }
-                    resp.context_menu(|ui| {
-                        menu_look(ui);
-                        if let Some(a) = results_menu(ui, if checked.contains(&i) { checked.len() } else { 1 }, true, true) {
-                            out.act = Some((i, a));
-                            ui.close();
-                        }
-                    });
                 }
             })
         });
@@ -265,11 +293,45 @@ impl App {
 
     /// Runs the statement under the caret, or the whole script. `explain` puts EXPLAIN in front of the statement.
     pub(in crate::app) fn sql_run(&mut self, all: bool, explain: bool) {
+        let dialect = self.sql_dialect();
+        let Some(s) = self.t().and_then(|t| t.sql.as_ref()) else { return };
+        let text = if all { s.query.clone() } else { s.caret_info(dialect).stmt.map(|(r, _, _)| s.query[r].to_string()).unwrap_or_default() };
+        self.sql_run_text(text, explain);
+    }
+
+    /// The statements of the script, one line each, for the Run button's tip. Returns the one picked.
+    fn sql_statement_menu(&self, ui: &mut egui::Ui) -> Option<String> {
+        let s = self.t()?.sql.as_ref()?;
+        let d = self.sql_dialect();
+        let here = s.caret_info(d).stmt.map(|(r, _, _)| r);
+        let mut pick = None;
+        egui::ScrollArea::vertical().id_salt("sql-run-pick").max_height(360.0).show(ui, |ui| {
+            for (i, (r, text)) in lex::split_statements(&s.query, d).into_iter().enumerate() {
+                // The number keeps two statements that read the same apart; the one under the caret is in the accent.
+                let mut job = egui::text::LayoutJob::single_section(format!("{:>2}  ", i + 1), mono_fmt(TXT_SMALL, if here.as_ref() == Some(&r) { PRIMARY() } else { FAINT() }, 400.0));
+                let sql = sql_job_in(&preview(text, d), TXT_SMALL, d);
+                for sec in sql.sections {
+                    job.append(&sql.text[sec.byte_range.start.0..sec.byte_range.end.0], 0.0, sec.format);
+                }
+                job.wrap = egui::text::TextWrapping::truncate_at_width(396.0);
+                let r = ui.add(quiet_button(job)).on_hover_text(text);
+                r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Run statement {}", i + 1)));
+                if r.clicked() {
+                    pick = Some(text.to_string());
+                    ui.close();
+                }
+            }
+        });
+        pick
+    }
+
+    /// Runs `text` in the current Query tab, as picked from the Run button's tip or found by `sql_run`.
+    fn sql_run_text(&mut self, text: String, explain: bool) {
         let Some(t) = self.t() else { return };
         let (conn, schema) = (t.sel.conn, run_db(t));
-        let dialect = self.sql_dialect();
-        let Some(s) = t.sql.as_ref().filter(|s| s.run_req == 0) else { return };
-        let text = if all { s.query.clone() } else { s.caret_info(dialect).stmt.map(|(r, _, _)| s.query[r].to_string()).unwrap_or_default() };
+        if t.sql.as_ref().is_none_or(|s| s.run_req != 0) {
+            return;
+        }
         if text.trim().is_empty() {
             return self.warn("Nothing to run.");
         }
@@ -305,7 +367,7 @@ impl App {
         let conn = self.tabs[ti].sel.conn;
         let Some(s) = self.tabs[ti].sql.as_mut() else { return };
         // Checks belong to the page they were made on.
-        (s.run_req, s.text_cache, s.qanchor) = (0, None, None);
+        (s.run_req, s.text_cache, s.qanchor, s.qsel) = (0, None, None, None);
         s.qchecked.clear();
         if let Some(idx) = s.paging.take() {
             let failed = match (s.sets.get_mut(idx), sets.pop()) {
@@ -396,9 +458,8 @@ impl App {
                     }
                     egui::ScrollArea::vertical().id_salt("sql-hist").max_height(300.0).show(ui, |ui| {
                         for h in hist {
-                            let one_line: String = h.split_whitespace().collect::<Vec<_>>().join(" ");
-                            let mut job = sql_job(&one_line.chars().take(90).collect::<String>(), TXT_SMALL);
-                            job.wrap.max_rows = 1;
+                            let mut job = sql_job_in(&preview(h, dialect), TXT_SMALL, dialect);
+                            job.wrap = egui::text::TextWrapping::truncate_at_width(496.0);
                             if ui.add(quiet_button(job)).on_hover_text(h.as_str()).clicked() {
                                 load = Some(h.clone());
                                 ui.close();
@@ -418,16 +479,23 @@ impl App {
             s.run_schema = pg_schema;
         }
         ui.add_space(4.0);
-        let (mut run, mut run_all, mut stop, mut explain, mut format) = (false, false, false, false, false);
-        let status = self.t().and_then(|t| t.sql.as_ref()).map(|s| {
-            let CaretInfo { line_col: (l, c), stmt, .. } = s.caret_info(self.sql_dialect());
+        let (mut run, mut run_all, mut stop, mut explain, mut format, mut run_pick) = (false, false, false, false, false, None);
+        let caret = self.t().and_then(|t| t.sql.as_ref()).map(|s| s.caret_info(self.sql_dialect()));
+        let many = caret.as_ref().and_then(|c| c.stmt.as_ref()).is_some_and(|(_, _, n)| *n > 1);
+        let status = caret.map(|CaretInfo { line_col: (l, c), stmt, .. }| {
             let n = stmt.map_or(String::new(), |(_, i, n)| format!("  ·  statement {i} of {n}"));
             format!("Ln {l}, Col {c}{n}")
         });
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             ui.add_enabled_ui(!running, |ui| {
-                run = run_button(ui, "Run statement", "⌘↵").on_hover_text("Run the statement under the caret (Cmd+Enter)").clicked();
+                let (main, tip) = run_split(ui, "Run statement", "⌘↵", many);
+                run = main.on_hover_text("Run the statement under the caret (Cmd+Enter)").clicked();
+                let tip = if many { tip.on_hover_text("Choose the statement to run") } else { tip };
+                egui::Popup::menu(&tip).width(420.0).show(|ui| {
+                    menu_look(ui);
+                    run_pick = self.sql_statement_menu(ui);
+                });
                 run_all = ui.add(egui::Button::new("Run all").right_text(RichText::new("⇧⌘↵").size(TXT_CAPTION).color(FAINT()))).on_hover_text("Run every statement (Cmd+Shift+Enter)").clicked();
             });
             stop = quiet_enabled(ui, running, "Stop").on_hover_text("Interrupt the running statement and skip the rest").clicked();
@@ -488,6 +556,9 @@ impl App {
         self.sql_result_pane(ui, running);
         if stop {
             self.sql_stop();
+        }
+        if let Some(text) = run_pick {
+            self.sql_run_text(text, false);
         }
         if run || run_all || explain {
             self.sql_run(run_all, explain);
@@ -623,6 +694,7 @@ impl App {
     fn sql_result_pane(&mut self, ui: &mut egui::Ui, running: bool) {
         let cur = self.cur;
         let hidden = self.modal.is_some() || self.insert.is_some();
+        let record_open = self.tabs.get(cur).is_some_and(|t| t.record);
         let Some(s) = self.tabs.get_mut(cur).and_then(|t| t.sql.as_mut()) else { return };
         if s.sets.is_empty() {
             ui.horizontal(|ui| {
@@ -685,7 +757,7 @@ impl App {
         if let Some(i) = pick {
             (s.set_sel, s.text_cache) = (i, None);
             s.qchecked.clear();
-            s.qanchor = None;
+            (s.qanchor, s.qsel) = (None, None);
         }
         let (error, stmt, affected, ms, capped, page) = {
             let x = &s.sets[sel];
@@ -768,8 +840,20 @@ impl App {
                         _ => {}
                     }
                 }
-                let out = grid(ui, &s.sets[sel], &s.qchecked);
-                view = out.view;
+                // The record draws through `self`, so the results leave the tab while the grid draws, as in `results`.
+                let qsel = s.qsel.filter(|&i| i < s.sets[sel].rows.len());
+                let (sets, checked) = (std::mem::take(&mut s.sets), std::mem::take(&mut s.qchecked));
+                let names: Vec<String> = if record_open { sets[sel].cols.iter().map(|c| c.name.clone()).collect() } else { Vec::new() };
+                let scroll = std::mem::take(&mut self.scroll_sel);
+                let mut rec = crate::app::sql::record::RecordOut::default();
+                let mut draw = |ui: &mut egui::Ui| self.sql_record(ui, Rows::Raw(&sets[sel].rows), qsel.unwrap_or(0), true, &names, &[], RowMenu::None, &checked, &mut rec);
+                let out = grid(ui, &sets[sel], &checked, qsel, scroll, record_open.then_some(&mut draw as &mut dyn FnMut(&mut egui::Ui)));
+                let Some(s) = self.tabs[cur].sql.as_mut() else { return };
+                (s.sets, s.qchecked) = (sets, checked);
+                view = out.view.or(rec.view);
+                if let Some(i) = out.select {
+                    s.qsel = Some(i);
+                }
                 if let Some(on) = out.all {
                     s.qchecked = if on { (0..s.sets[sel].rows.len()).collect() } else { BTreeSet::new() };
                 }
@@ -921,6 +1005,12 @@ mod tests {
         // A caret past the end stays with the last statement.
         assert_eq!(statement_pos(t, 999, D).unwrap().1, 3);
         assert!(statement_pos("  ", 0, D).is_none());
+    }
+
+    #[test]
+    fn the_menu_preview_starts_at_the_code() {
+        assert_eq!(preview("-- Paid orders\n/* by customer */\nSELECT  c.name\nFROM c", db::sql::Dialect::MySql), "SELECT c.name FROM c");
+        assert_eq!(preview("-- only a comment", db::sql::Dialect::MySql), "-- only a comment");
     }
 
     #[test]
