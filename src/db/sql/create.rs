@@ -612,7 +612,8 @@ async fn stop_count(pool: &sqlx::MySqlPool, d: Dialect, me: &(u64, String), sql:
     if info.is_none_or(|i| i.trim() != sql.trim()) {
         return;
     }
-    if sqlx::raw_sql(&d.cancel(id)).execute(&mut *k).await.is_err() {
+    // A plain query, not raw_sql: a raw statement on a borrowed connection makes the spawned future not Send.
+    if sqlx::query(&d.cancel(id)).persistent(false).execute(&mut *k).await.is_err() {
         return;
     }
     for _ in 0..30 {
