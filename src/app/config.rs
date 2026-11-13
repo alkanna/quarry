@@ -301,12 +301,11 @@ pub(super) fn load_values() -> HashMap<String, HashMap<String, Vec<Bson>>> {
 fn cache_key() -> Option<&'static [u8; 32]> {
     static KEY: std::sync::OnceLock<Option<[u8; 32]>> = std::sync::OnceLock::new();
     KEY.get_or_init(|| {
-        let entry = keyring::Entry::new("quarry", "suggestion-cache-key").ok()?;
-        match entry.get_password() {
+        match crate::vault::get("suggestion-cache-key") {
             Ok(hex) => unhex(&hex),
             Err(keyring::Error::NoEntry) => {
                 let key: [u8; 32] = Key::generate().into();
-                entry.set_password(&key.iter().map(|b| format!("{b:02x}")).collect::<String>()).ok()?;
+                crate::vault::set("suggestion-cache-key", &key.iter().map(|b| format!("{b:02x}")).collect::<String>()).ok()?;
                 Some(key)
             }
             Err(_) => None,
@@ -348,18 +347,19 @@ pub(crate) fn tools_dir() -> PathBuf {
     config_dir().join("tools")
 }
 
-pub(super) fn keychain(id: u64) -> Option<keyring::Entry> {
-    keyring::Entry::new("quarry", &format!("connection-{id}")).ok()
+/// Saves the connection's address in the Keychain.
+pub(super) fn store_uri(id: u64, uri: &str) -> keyring::Result<()> {
+    crate::vault::set(&format!("connection-{id}"), uri)
 }
 
 /// Other secrets of a connection: "ssh-password", "ssh-passphrase", "proxy-password", "pg-key-passphrase".
 pub(super) fn secret(id: u64, what: &str) -> Option<String> {
-    keyring::Entry::new("quarry", &format!("connection-{id}-{what}")).ok()?.get_password().ok().filter(|s| !s.is_empty())
+    crate::vault::get(&format!("connection-{id}-{what}")).ok().filter(|s| !s.is_empty())
 }
 
 /// The connection's address from the Keychain.
 pub(super) fn stored_uri(id: u64) -> Result<String, keyring::Error> {
-    keychain(id).ok_or(keyring::Error::NoEntry)?.get_password()
+    crate::vault::get(&format!("connection-{id}"))
 }
 
 pub(super) fn uri_err(e: keyring::Error) -> String {
@@ -368,8 +368,7 @@ pub(super) fn uri_err(e: keyring::Error) -> String {
 
 /// Stores a secret, or removes it when `value` is empty.
 pub(super) fn set_secret(id: u64, what: &str, value: &str) -> Result<(), String> {
-    let r = keyring::Entry::new("quarry", &format!("connection-{id}-{what}")).and_then(|k| if value.is_empty() { k.delete_credential() } else { k.set_password(value) });
-    match r {
+    match crate::vault::set(&format!("connection-{id}-{what}"), value) {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(e) => Err(format!("Could not store the {} in the Keychain: {e}", what.replace('-', " "))),
     }

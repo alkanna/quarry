@@ -7,9 +7,7 @@ impl App {
         if let Danger::RemoveConnection(id) = action {
             // Demo ids overlap real ones, so removing a demo connection must not touch the Keychain.
             if !self.ephemeral {
-                if let Some(k) = keychain(id) {
-                    let _ = k.delete_credential();
-                }
+                let _ = store_uri(id, "");
                 // ponytail: best effort, a failure only leaves an orphaned Keychain entry behind.
                 for what in ["ssh-password", "ssh-passphrase", "proxy-password", "pg-key-passphrase"] {
                     let _ = set_secret(id, what, "");

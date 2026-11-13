@@ -18,12 +18,11 @@ pub const FILE: &str = "agents.json";
 pub fn key() -> Option<&'static [u8; 32]> {
     static KEY: std::sync::OnceLock<Option<[u8; 32]>> = std::sync::OnceLock::new();
     KEY.get_or_init(|| {
-        let entry = keyring::Entry::new("quarry", "agents-config-key").ok()?;
-        match entry.get_password() {
+        match crate::vault::get("agents-config-key") {
             Ok(hex) => link::unhex(&hex).and_then(|b| b.try_into().ok()),
             Err(keyring::Error::NoEntry) => {
                 let key = link::random();
-                entry.set_password(&link::hex(&key)).ok()?;
+                crate::vault::set("agents-config-key", &link::hex(&key)).ok()?;
                 Some(key)
             }
             Err(_) => None,

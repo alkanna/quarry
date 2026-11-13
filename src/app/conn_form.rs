@@ -805,7 +805,7 @@ impl App {
             // SQL addresses are rebuilt from the fields, so the Keychain holds one URL for either engine.
             // A Cloud SQL IAM sign-in has no password, so none is stored with the address.
             let uri = if f.engine.is_sql() { f.sql_addr().to_uri() } else { f.uri.trim().to_string() };
-            let saved = if self.ephemeral { Some(Ok(())) } else { keychain(id).map(|k| k.set_password(&uri)) };
+            let saved = if self.ephemeral { Some(Ok(())) } else { Some(store_uri(id, &uri)) };
             match saved {
                 Some(Ok(())) => {
                     let stored = if self.ephemeral {
