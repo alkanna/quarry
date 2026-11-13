@@ -2,7 +2,10 @@
 //! conflict banner, and writing a bound file back. The files themselves are read and written through `crate::library::disk`.
 
 use super::*;
-use crate::library::{Library, ScriptRef, disk, format};
+use crate::app::restore::Restore;
+use crate::library::ops::{self, DropAt};
+use crate::library::tree::Node;
+use crate::library::{Library, Script, ScriptRef, disk, format};
 use std::time::{Duration, SystemTime};
 
 /// How often a followed link, or one with an open tab, is scanned again while the window has focus. Polling replaces a
@@ -150,10 +153,24 @@ impl App {
                 _ => None,
             })
             .collect();
+        // A file that differs from what Quarry last read or wrote of it gets a dot in the panel until it is opened or saved.
+        // The first scan of a file is its baseline, so nothing shows changed at startup.
+        for e in &scan.entries {
+            let k = (link, e.rel.clone());
+            match self.lib_ui.baseline.get(&k) {
+                None => {
+                    self.lib_ui.baseline.insert(k, (e.mtime, e.len));
+                }
+                Some(m) if *m != (e.mtime, e.len) => {
+                    self.lib_ui.changed.insert(k);
+                }
+                _ => {}
+            }
+        }
         self.lib_ui.scans.insert(link, scan);
         for (i, rel) in changed {
             if let Some(path) = self.library.file_path(link, &rel) {
-                self.file_changed(i, &path);
+                self.file_changed(i, link, &rel, &path);
             }
         }
     }
@@ -162,7 +179,7 @@ impl App {
     /// 1. the text is the one the tab was opened or saved with: only the remembered time changes;
     /// 2. the tab holds no edits and the link follows changes: the tab takes the new text;
     /// 3. otherwise the tab keeps its text and shows the conflict banner.
-    fn file_changed(&mut self, i: usize, path: &std::path::Path) {
+    fn file_changed(&mut self, i: usize, link: u64, rel: &std::path::Path, path: &std::path::Path) {
         // A file caught half written, or one that stopped being a script, waits for the next scan.
         let Ok(now) = read_script(path) else { return };
         let Some(t) = self.tabs.get_mut(i) else { return };
@@ -171,16 +188,23 @@ impl App {
             ScriptRef::File { link, .. } => self.library.links.iter().find(|l| l.id == *link).is_some_and(|l| l.follow),
             _ => false,
         };
-        if now.text == b.base {
+        let meta = now.meta;
+        let seen = if now.text == b.base {
             let b = t.script.as_mut().unwrap();
             (b.disk, b.conflict) = (now.meta, None);
+            true
         } else if mine == b.base && follow {
             set_bound_text(t, &now.text, now.parsed.as_ref());
             let b = t.script.as_mut().unwrap();
             (b.base, b.disk, b.conflict) = (now.text, now.meta, None);
+            true
         } else {
             let b = t.script.as_mut().unwrap();
             (b.disk, b.conflict) = (now.meta, Some(now.text));
+            false
+        };
+        if seen {
+            self.mark_seen(link, rel, meta);
         }
     }
 
@@ -244,6 +268,7 @@ impl App {
         if let Some(b) = self.tabs.get_mut(self.cur).and_then(|t| t.script.as_mut()) {
             (b.base, b.disk, b.conflict) = (text, meta, None);
         }
+        self.mark_seen(link, &rel, meta);
         self.rescan_link(link);
         self.ok(format!("Saved {}", file_label(&rel)));
         true
@@ -294,6 +319,7 @@ impl App {
                 if let Some(b) = t.script.as_mut() {
                     (b.base, b.disk, b.conflict) = (now.text, now.meta, None);
                 }
+                self.mark_seen(link, &rel, now.meta);
             }
             Err(e) => self.err(format!("Could not read {}: {e}", path.display())),
         }
@@ -318,5 +344,453 @@ impl App {
             None => "Too many lines to compare here. Use Reload or Keep mine.".to_string(),
         };
         self.modal = Some(Modal::Text { title: format!("{} in this tab and on disk", file_label(rel)), body, code: true });
+    }
+}
+
+/// Opens `path` in the file manager, selecting it where the system can. The one place that starts the file manager, so
+/// the audit log and the linked folders do it the same way.
+pub(in crate::app) fn reveal(path: &std::path::Path, select: bool) -> std::io::Result<()> {
+    let mut cmd = if cfg!(target_os = "macos") {
+        let mut c = std::process::Command::new("open");
+        if select {
+            c.arg("-R");
+        }
+        c.arg(path);
+        c
+    } else if cfg!(windows) {
+        let mut c = std::process::Command::new("explorer");
+        if select {
+            c.arg(format!("/select,{}", path.display()));
+        } else {
+            c.arg(path);
+        }
+        c
+    } else {
+        // xdg-open has no select; the folder that holds the file is the closest.
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(if select { path.parent().unwrap_or(path) } else { path });
+        c
+    };
+    cmd.spawn().map(|_| ())
+}
+
+/// The extension a script of `kind` is kept under in a linked folder.
+pub(in crate::app) fn kind_ext(kind: &str) -> &'static str {
+    match kind {
+        "sql" => "sql",
+        "shell" => "js",
+        _ => "json",
+    }
+}
+
+/// The bytes of a linked file for a script. SQL and Shell files are the text as it is, with no header added. A filter or a
+/// pipeline is the small JSON shape, which needs its collection; `old` is the file's text now, so its other keys stay.
+pub(in crate::app) fn file_bytes(kind: &str, body: &str, sort: &str, project: &str, target: format::Target, old: Option<&str>) -> Result<Vec<u8>, String> {
+    if kind_ext(kind) != "json" {
+        return Ok(body.as_bytes().to_vec());
+    }
+    let p = format::Parsed { kind: kind.into(), body: body.into(), sort: sort.into(), project: project.into(), target };
+    format::to_json(&p, old).map(String::into_bytes)
+}
+
+type Meta = Option<(SystemTime, u64)>;
+
+impl App {
+    /// What Quarry last read or wrote of a file, so the panel can tell that it changed since. A change found later by a scan
+    /// puts a dot on its row until the file is opened or saved here.
+    pub(in crate::app) fn mark_seen(&mut self, link: u64, rel: &std::path::Path, meta: Meta) {
+        let k = (link, rel.to_path_buf());
+        self.lib_ui.changed.remove(&k);
+        match meta {
+            Some(m) => self.lib_ui.baseline.insert(k, m),
+            None => self.lib_ui.baseline.remove(&k),
+        };
+    }
+
+    /// Puts the file `rel` into the stored scan of its link at once, so a file made here shows before the next scan.
+    pub(in crate::app) fn add_entry(&mut self, link: u64, rel: &std::path::Path) {
+        let Some(root) = self.library.links.iter().find(|l| l.id == link).map(|l| l.path.clone()) else { return };
+        let Some(e) = disk::entry_of(&root, rel) else { return };
+        self.mark_seen(link, rel, Some((e.mtime, e.len)));
+        let scan = self.lib_ui.scans.entry(link).or_default();
+        scan.missing = false;
+        scan.entries.retain(|x| x.rel != rel);
+        scan.entries.push(e);
+        scan.entries.sort_by(|a, b| a.rel.to_string_lossy().to_lowercase().cmp(&b.rel.to_string_lossy().to_lowercase()));
+        scan.empty_dirs.retain(|d| !rel.starts_with(d));
+        self.lib_ui.rescan.insert(link);
+    }
+
+    fn drop_entry(&mut self, link: u64, rel: &std::path::Path) {
+        if let Some(s) = self.lib_ui.scans.get_mut(&link) {
+            s.entries.retain(|x| x.rel != rel);
+        }
+        self.mark_seen(link, rel, None);
+        self.lib_ui.rescan.insert(link);
+    }
+
+    /// The kind of a linked file: what its scan found, else its extension tells.
+    pub(in crate::app) fn file_kind(&self, link: u64, rel: &std::path::Path) -> String {
+        let found = self.lib_ui.scans.get(&link).and_then(|s| s.entries.iter().find(|e| e.rel == rel)).map(|e| e.kind.clone());
+        found.or_else(|| format::kind_of_ext(&format::ext_of(rel)).map(String::from)).unwrap_or_default()
+    }
+
+    /// The connection a linked file opens on: the current tab's, then the active one, then any other, taking the first the
+    /// link is used on and the file can run on.
+    pub(in crate::app) fn file_conn(&self, link: u64, rel: &std::path::Path) -> Option<u64> {
+        let l = self.library.links.iter().find(|l| l.id == link)?;
+        let kind = self.file_kind(link, rel);
+        let order = self.t().map(|t| t.sel.conn).into_iter().chain(self.active).chain(self.conns.iter().map(|c| c.meta.id));
+        order.into_iter().find(|id| self.conn(*id).is_some_and(|c| format::fits(l, &kind, *id, c.meta.engine)))
+    }
+
+    /// The file `rel` read as the script a tab opens, with the time and length it had. The target is a header the person
+    /// wrote or the keys of a .json file; without one it is the current tab's database on that connection, or the
+    /// connection's first.
+    pub(in crate::app) fn file_script(&self, link: u64, rel: &std::path::Path) -> Result<(Script, Meta), String> {
+        let path = self.library.file_path(link, rel).ok_or("That folder is no longer linked.")?;
+        let loaded = read_script(&path).map_err(|e| format!("Could not open {}: {e}", file_label(rel)))?;
+        let (kind, tgt, sort, project) = match &loaded.parsed {
+            Some(p) => (p.kind.clone(), p.target.clone(), p.sort.clone(), p.project.clone()),
+            None => (format::kind_of_ext(&format::ext_of(rel)).unwrap_or("sql").to_string(), format::header(&loaded.text), String::new(), String::new()),
+        };
+        let conn = self.file_conn(link, rel).ok_or("No connection this folder is used on can run that file.")?;
+        let own = self.t().filter(|t| t.sel.conn == conn);
+        let mut db = tgt.db.clone();
+        if db.is_empty() {
+            db = own.map(|t| t.sel.db.clone()).filter(|d| !d.is_empty()).or_else(|| self.conn(conn).and_then(|c| c.dbs.first().map(|d| d.0.clone()))).unwrap_or_default();
+        }
+        let mut coll = tgt.coll.clone();
+        if matches!(kind.as_str(), "filter" | "pipeline") && coll.is_empty() {
+            coll = own.map(|t| t.sel.coll.clone()).unwrap_or_default();
+            if coll.is_empty() {
+                return Err(format!("{} names no collection. Add \"collection\" to the file, or open it from a tab on one.", file_label(rel)));
+            }
+        }
+        let script = Script { name: file_label(rel), kind, body: loaded.text, sort, project, conn, db, schema: tgt.schema, coll, ..Default::default() };
+        Ok((script, loaded.meta))
+    }
+
+    /// Re-points the tabs bound to a file that moved, or unbinds them when it is gone (`to` None). Their text stays.
+    fn retarget(&mut self, link: u64, from: &std::path::Path, to: Option<PathBuf>) {
+        for t in &mut self.tabs {
+            if let Some(b) = t.script.as_mut()
+                && matches!(&b.r, ScriptRef::File { link: l, rel } if *l == link && rel == from)
+            {
+                match &to {
+                    Some(n) => b.r = ScriptRef::File { link, rel: n.clone() },
+                    None => t.script = None,
+                }
+            }
+        }
+        match &to {
+            Some(n) => {
+                for r in &mut self.library.recent {
+                    if matches!(r, ScriptRef::File { link: l, rel } if *l == link && rel == from) {
+                        *r = ScriptRef::File { link, rel: n.clone() };
+                    }
+                }
+            }
+            None => self.library.recent.retain(|r| !matches!(r, ScriptRef::File { link: l, rel } if *l == link && rel == from)),
+        }
+    }
+
+    /// New script in a linked folder: an empty file of the first kind the link shows, named "New script", which the panel
+    /// then lets the person name. Returns its path relative to the link.
+    pub(in crate::app) fn new_linked_script(&mut self, link: u64, dir: &std::path::Path) -> Option<PathBuf> {
+        let l = self.library.links.iter().find(|l| l.id == link)?;
+        let ext = ["sql", "js", "json"].into_iter().find(|e| l.exts.iter().any(|x| x == e)).unwrap_or("sql");
+        let (root, at) = (l.path.clone(), l.path.join(dir));
+        let body: &[u8] = if ext == "json" { b"{\n  \"filter\": {}\n}\n" } else { b"" };
+        match disk::create_file(&at, "New script", ext, body) {
+            Ok(p) => {
+                let rel = p.strip_prefix(&root).ok()?.to_path_buf();
+                self.add_entry(link, &rel);
+                Some(rel)
+            }
+            Err(e) => {
+                self.err(format!("Could not create the file: {e}"));
+                None
+            }
+        }
+    }
+
+    /// New folder in a linked folder. It is empty, so the scan lists it among its empty folders.
+    pub(in crate::app) fn new_linked_dir(&mut self, link: u64, dir: &std::path::Path) -> Option<PathBuf> {
+        let root = self.library.links.iter().find(|l| l.id == link)?.path.clone();
+        let at = root.join(dir);
+        let name = disk::unique_name(&at, "New folder");
+        match std::fs::create_dir(at.join(&name)) {
+            Ok(()) => {
+                let rel = dir.join(&name);
+                self.lib_ui.scans.entry(link).or_default().empty_dirs.push(rel.clone());
+                self.lib_ui.rescan.insert(link);
+                Some(rel)
+            }
+            Err(e) => {
+                self.err(format!("Could not create the folder: {e}"));
+                None
+            }
+        }
+    }
+
+    /// Renames a file or a folder below a link on disk, and returns its new path relative to the link. The files in a
+    /// renamed folder keep their names.
+    pub(in crate::app) fn rename_linked(&mut self, link: u64, rel: &std::path::Path, is_dir: bool, text: &str) -> Option<PathBuf> {
+        let from = self.library.file_path(link, rel)?;
+        let new = if is_dir {
+            let name = text.trim();
+            if name.is_empty() || name.contains(['/', '\\']) || name == "." || name == ".." {
+                self.warn("Use a name without slashes.");
+                return None;
+            }
+            let to = from.with_file_name(name);
+            if to != from && std::fs::symlink_metadata(&to).is_ok() {
+                self.warn(format!("{name} already exists here."));
+                return None;
+            }
+            std::fs::rename(&from, &to).map(|()| to)
+        } else {
+            disk::rename_file(&from, text)
+        };
+        match new {
+            Ok(to) => {
+                let root = self.library.links.iter().find(|l| l.id == link)?.path.clone();
+                let new_rel = to.strip_prefix(&root).ok()?.to_path_buf();
+                if new_rel != rel {
+                    if is_dir {
+                        self.dir_moved(link, rel, &new_rel);
+                    } else {
+                        self.retarget(link, rel, Some(new_rel.clone()));
+                        self.drop_entry(link, rel);
+                        self.add_entry(link, &new_rel);
+                    }
+                    self.save_library();
+                }
+                Some(new_rel)
+            }
+            Err(e) => {
+                self.warn(format!("Could not rename: {e}"));
+                None
+            }
+        }
+    }
+
+    /// A folder moved: tabs bound to files in it follow, and the link is read again.
+    fn dir_moved(&mut self, link: u64, old: &std::path::Path, new: &std::path::Path) {
+        let moved: Vec<PathBuf> = self.lib_ui.scans.get(&link).map(|s| s.entries.iter().filter(|e| e.rel.starts_with(old)).map(|e| e.rel.clone()).collect()).unwrap_or_default();
+        for f in moved {
+            if let Ok(rest) = f.strip_prefix(old) {
+                self.retarget(link, &f, Some(new.join(rest)));
+            }
+        }
+        self.lib_ui.scans.remove(&link);
+        self.lib_ui.rescan.insert(link);
+    }
+
+    /// Moves a file to the Trash, keeping its bytes for the Undo toast. A tab that holds it keeps its text but is unbound.
+    pub(in crate::app) fn delete_linked_file(&mut self, link: u64, rel: &std::path::Path) -> bool {
+        let Some(path) = self.library.file_path(link, rel) else { return false };
+        if self.demo {
+            self.warn("The demo does not delete files.");
+            return false;
+        }
+        match disk::trash_file(&path) {
+            Ok(bytes) => {
+                self.retarget(link, rel, None);
+                self.drop_entry(link, rel);
+                self.save_library();
+                self.toast_restore(format!("Moved {} to the Trash.", file_label(rel)), Restore::File { path, bytes });
+                true
+            }
+            Err(e) => {
+                self.err(format!("Could not move {} to the Trash: {e}", file_label(rel)));
+                false
+            }
+        }
+    }
+
+    /// Moves a file into another folder of the same link, never over a file that is there.
+    pub(in crate::app) fn move_linked_file(&mut self, link: u64, rel: &std::path::Path, dir: &std::path::Path) -> Option<PathBuf> {
+        let root = self.library.links.iter().find(|l| l.id == link)?.path.clone();
+        let (from, name) = (root.join(rel), rel.file_name()?.to_string_lossy().into_owned());
+        let at = root.join(dir);
+        let to = at.join(disk::unique_name(&at, &name));
+        if let Err(e) = std::fs::rename(&from, &to) {
+            self.warn(format!("Could not move {name}: {e}"));
+            return None;
+        }
+        let new_rel = to.strip_prefix(&root).ok()?.to_path_buf();
+        self.retarget(link, rel, Some(new_rel.clone()));
+        self.drop_entry(link, rel);
+        self.add_entry(link, &new_rel);
+        self.save_library();
+        Some(new_rel)
+    }
+
+    /// A script kept by Quarry written into a linked folder as a file. The Quarry copy is removed and Undo puts it back (the
+    /// file stays then, as a copy). Refused when the folder does not show files of that kind.
+    pub(in crate::app) fn script_to_link(&mut self, id: u64, link: u64, dir: &std::path::Path) -> Option<PathBuf> {
+        let s = self.library.scripts.iter().find(|s| s.id == id)?.clone();
+        let l = self.library.links.iter().find(|l| l.id == link)?.clone();
+        let ext = kind_ext(&s.kind);
+        if !l.exts.iter().any(|e| e == ext) {
+            self.warn(format!("{} does not show .{ext} files. Add the type in Use on connections first.", l.name));
+            return None;
+        }
+        if self.demo {
+            self.warn("The demo does not write files.");
+            return None;
+        }
+        let target = format::Target { db: s.db.clone(), schema: s.schema.clone(), coll: s.coll.clone() };
+        let bytes = match file_bytes(&s.kind, &s.body, &s.sort, &s.project, target, None) {
+            Ok(b) => b,
+            Err(e) => {
+                self.warn(format!("Not moved: {e}"));
+                return None;
+            }
+        };
+        let path = match disk::create_file(&l.path.join(dir), &s.name, ext, &bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                self.err(format!("Could not write the file: {e}"));
+                return None;
+            }
+        };
+        let rel = path.strip_prefix(&l.path).ok()?.to_path_buf();
+        self.add_entry(link, &rel);
+        if let Some((folders, scripts)) = ops::delete(&mut self.library, &Node::Script(id)) {
+            self.save_library();
+            self.toast_restore(format!("Moved \"{}\" to {} as {}.", s.name, l.name, file_label(&rel)), Restore::Saved { scripts, folders });
+        }
+        Some(rel)
+    }
+
+    /// A linked file copied into the library as a script. The file stays where it is. `at` places the copy in a folder.
+    pub(in crate::app) fn file_to_quarry(&mut self, link: u64, rel: &std::path::Path, at: DropAt) -> Option<u64> {
+        let mut s = match self.file_script(link, rel) {
+            Ok((s, _)) => s,
+            Err(e) => {
+                self.warn(e);
+                return None;
+            }
+        };
+        s.id = self.library.next_id();
+        s.updated = super::open::now_secs();
+        if let Some(n) = rel.file_stem() {
+            s.name = n.to_string_lossy().into_owned();
+        }
+        let (id, name) = (s.id, s.name.clone());
+        self.library.scripts.push(s);
+        if let Err(e) = ops::move_to(&mut self.library, &Node::Script(id), at) {
+            self.warn(e);
+        }
+        self.save_library();
+        self.ok(format!("Copied {name} to the library. The file stays in the folder."));
+        Some(id)
+    }
+
+    /// Unlink: the link and what Quarry remembers of it go, the files stay on disk. Tabs bound to its files keep their text.
+    pub(in crate::app) fn unlink(&mut self, link: u64) {
+        let Some(l) = self.library.links.iter().find(|l| l.id == link).cloned() else { return };
+        self.library.links.retain(|x| x.id != link);
+        self.library.recent.retain(|r| !matches!(r, ScriptRef::File { link: x, .. } if *x == link));
+        for t in &mut self.tabs {
+            if matches!(t.script.as_ref().map(|b| &b.r), Some(ScriptRef::File { link: x, .. }) if *x == link) {
+                t.script = None;
+            }
+        }
+        self.lib_ui.scans.remove(&link);
+        self.lib_ui.changed.retain(|(x, _)| *x != link);
+        self.lib_ui.baseline.retain(|(x, _), _| *x != link);
+        self.save_library();
+        self.ok(format!("Unlinked {}. Its files stay on disk.", if l.name.is_empty() { l.path.display().to_string() } else { l.name }));
+    }
+}
+
+/// A made-up scan of the demo folder: `files` are (path below the folder, kind, first text).
+fn demo_scan(files: &[(&str, &str, &str)]) -> disk::Scan {
+    let now = SystemTime::now();
+    let entries = files
+        .iter()
+        .enumerate()
+        .map(|(i, (rel, kind, head))| disk::Entry { rel: PathBuf::from(rel), mtime: now - Duration::from_secs(600 + 7200 * i as u64), len: head.len() as u64, kind: kind.to_string(), head: head.to_string(), target: format::Target::default() })
+        .collect();
+    disk::Scan { branch: Some("main".into()), entries, ..Default::default() }
+}
+
+const DEMO_FILES: [(&str, &str, &str); 14] = [
+    ("monthly-revenue.sql", "sql", "SELECT DATE_FORMAT(created_at, '%Y-%m') AS month,\n       SUM(total) AS revenue\nFROM orders\nWHERE status = 'paid'\nGROUP BY month\nORDER BY month DESC;"),
+    ("top-customers.sql", "sql", "SELECT customer_id, SUM(total) AS spent\nFROM orders\nGROUP BY customer_id\nORDER BY spent DESC\nLIMIT 20;"),
+    ("slow-lookup.sql", "sql", "EXPLAIN SELECT * FROM orders WHERE customer_id = 42;"),
+    ("scratch.sql", "sql", "SELECT 1;"),
+    ("reports/orders-per-day.sql", "sql", "SELECT DATE(created_at) AS day, COUNT(*) FROM orders GROUP BY day;"),
+    ("reports/refunds.sql", "sql", "SELECT * FROM refunds WHERE created_at > NOW() - INTERVAL 7 DAY;"),
+    ("reports/stock-low.sql", "sql", "SELECT sku, qty FROM stock WHERE qty < 5;"),
+    ("reports/by-region.sql", "sql", "SELECT region, SUM(total) FROM orders GROUP BY region;"),
+    ("reports/cohorts.sql", "sql", "SELECT 1;"),
+    ("reports/shipping.sql", "sql", "SELECT 1;"),
+    ("maintenance/stale-carts.sql", "sql", "DELETE FROM carts WHERE updated_at < NOW() - INTERVAL 30 DAY;"),
+    ("maintenance/vacuum.sql", "sql", "OPTIMIZE TABLE orders;"),
+    ("maintenance/backfill.js", "shell", "const n = await orders.countDocuments({ total: null });"),
+    ("maintenance/indexes.sql", "sql", "SHOW INDEX FROM orders;"),
+];
+
+impl App {
+    /// QUARRY_TEST_LIBRARY=linked, missing, link, save-linked or conflict: linked folders over made-up scans, so nothing
+    /// reads the disk. True when `state` is one of them.
+    pub(in crate::app) fn demo_library_linked(&mut self, state: &str) -> bool {
+        if !matches!(state, "linked" | "missing" | "link" | "save-linked" | "conflict") {
+            return false;
+        }
+        self.demo_library("panel");
+        self.lib_ui.panel.sel = None;
+        self.lib_ui.frozen = true;
+        let link = |id, name: &str, path: &str| crate::library::Link { id, name: name.into(), path: path.into(), on: "engine".into(), engine: "mysql".into(), exts: ["sql", "js", "json"].map(String::from).to_vec(), follow: true, ..Default::default() };
+        if state != "link" {
+            self.library.links.push(link(100, "shop-queries", "/Users/demo/work/shop-queries"));
+            self.lib_ui.scans.insert(100, demo_scan(&DEMO_FILES));
+            let st = &mut self.lib_ui.panel;
+            st.open.insert(Node::Link(100));
+            st.open.insert(Node::Dir { link: 100, rel: "reports".into() });
+            self.lib_ui.changed.insert((100, "reports/refunds.sql".into()));
+        }
+        match state {
+            "linked" => self.lib_ui.panel.sel = Some(Node::File { link: 100, rel: "monthly-revenue.sql".into() }),
+            "missing" => {
+                self.library.links.push(link(101, "legacy-exports", "/Volumes/archive/exports"));
+                self.lib_ui.scans.insert(101, disk::Scan { missing: true, ..Default::default() });
+            }
+            "link" => {
+                self.open_link_dialog(None);
+                let scan = demo_scan(&DEMO_FILES);
+                if let Some(Modal::LinkFolder(f)) = &mut self.modal {
+                    f.fill_demo("/Users/demo/work/shop-queries", scan);
+                }
+            }
+            "save-linked" => {
+                if self.demo_library_quick("save")
+                    && let Some(Modal::SaveScript(f)) = &mut self.modal
+                {
+                    (f.link, f.dir, f.name) = (Some(100), "reports".into(), "Monthly revenue".into());
+                }
+            }
+            _ => {
+                // A tab open on a file whose text was edited here and changed on disk since.
+                let rel = PathBuf::from("monthly-revenue.sql");
+                let base = DEMO_FILES[0].2.to_string();
+                let mine = base.replace("ORDER BY month DESC", "ORDER BY month ASC");
+                let theirs = base.replace("status = 'paid'", "status IN ('paid', 'shipped')");
+                let mut t = Tab::new(Sel { conn: 3, db: "shop".into(), schema: String::new(), coll: String::new() }).for_engine(db::sql::Engine::MySql);
+                t.view = View::Sql;
+                if let Some(q) = t.sql.as_mut() {
+                    q.query = mine;
+                }
+                t.script = Some(Bound { r: ScriptRef::File { link: 100, rel }, view: View::Sql, base, disk: None, conflict: Some(theirs) });
+                self.tabs = vec![t];
+                self.cur = 0;
+            }
+        }
+        true
     }
 }

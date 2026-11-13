@@ -45,6 +45,8 @@ pub struct Scan {
     pub truncated: bool,
     /// Sorted by path, so a folder's files sit together.
     pub entries: Vec<Entry>,
+    /// Folders with nothing in them at all, which no file would otherwise show, such as one just made.
+    pub empty_dirs: Vec<PathBuf>,
 }
 
 fn skipped_dir(name: &str) -> bool {
@@ -80,7 +82,9 @@ pub fn scan(root: &Path, exts: &[String], prev: Option<&Scan>) -> Scan {
             break;
         }
         let Ok(rd) = std::fs::read_dir(root.join(&rel)) else { continue };
+        let mut any = false;
         for de in rd.flatten() {
+            any = true;
             let name = de.file_name().to_string_lossy().into_owned();
             let Ok(ft) = de.file_type() else { continue };
             let path = de.path();
@@ -117,9 +121,20 @@ pub fn scan(root: &Path, exts: &[String], prev: Option<&Scan>) -> Scan {
                 break 'walk;
             }
         }
+        if !any && !rel.as_os_str().is_empty() {
+            out.empty_dirs.push(rel);
+        }
     }
+    out.empty_dirs.sort();
     out.entries.sort_by(|a, b| a.rel.to_string_lossy().to_lowercase().cmp(&b.rel.to_string_lossy().to_lowercase()).then_with(|| a.rel.cmp(&b.rel)));
     out
+}
+
+/// The entry for the file `rel` below `root` as it is now, for a file the app just wrote.
+pub fn entry_of(root: &Path, rel: &Path) -> Option<Entry> {
+    let path = root.join(rel);
+    let meta = std::fs::metadata(&path).ok()?;
+    read_entry(&path, rel.to_path_buf(), &format::ext_of(&path), meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), meta.len())
 }
 
 fn read_entry(path: &Path, rel: PathBuf, ext: &str, mtime: SystemTime, len: u64) -> Option<Entry> {

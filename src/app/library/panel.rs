@@ -11,6 +11,7 @@ use crate::app::restore::Restore;
 use crate::library::ops::{self, DropAt};
 use crate::library::tree::{self, Node, Pos, Row, Scans};
 use crate::library::{Library, ScriptRef};
+use std::path::{Path, PathBuf};
 use crate::ui::dnd::{drag_source, drop_fill, drop_line, hover_open, side_row_drag};
 use super::open::How;
 
@@ -39,8 +40,6 @@ pub(in crate::app) struct PanelUi {
     pub scroll_y: f32,
     pub view_h: f32,
     pub scroll_set: Option<f32>,
-    /// What B2's scans found below each link. Empty until a folder is linked.
-    pub scans: Scans,
     /// Demo only: a menu to open on this node, and a drag held from the first node over the second.
     pub demo_menu: Option<Node>,
     pub demo_drag: Option<(Node, Node)>,
@@ -61,6 +60,69 @@ enum Act {
     Scope(bool),
     Link,
     Refuse(&'static str),
+    /// A linked folder's own actions: a new file or folder in it (link, folder below it), a read of the disk, the file
+    /// manager (path, select it), the path on the clipboard, the text of a file, Use on connections and Unlink.
+    NewScript(u64, PathBuf),
+    NewDir(u64, PathBuf),
+    Reload(u64),
+    Reveal(PathBuf, bool),
+    CopyPath(PathBuf),
+    CopyFileText(u64, PathBuf),
+    UseOn(u64),
+    Unlink(u64),
+    /// A drop or a menu move that touches the disk: a script into a linked folder, a file to another folder of its link, or
+    /// a file copied into the library.
+    Drop(Node, Plan),
+}
+
+/// What a drop on a row does. `Saved` is a move within the library, `Into` writes into a linked folder (a script) or moves
+/// a file between its folders, `Out` copies a linked file into the library and leaves the file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Plan {
+    Saved(DropAt),
+    Into { link: u64, dir: PathBuf },
+    Out(DropAt),
+}
+
+/// The linked folder a drop on this row lands in: the link itself, one of its folders, or the folder of a file.
+fn dir_of(n: &Node) -> Option<(u64, PathBuf)> {
+    match n {
+        Node::Link(l) => Some((*l, PathBuf::new())),
+        Node::Dir { link, rel } => Some((*link, rel.clone())),
+        Node::File { link, rel } => Some((*link, rel.parent().map(Path::to_path_buf).unwrap_or_default())),
+        _ => None,
+    }
+}
+
+/// What dropping `item` on `target` at `pos` would do, or why it cannot be done. Each link keeps its files to itself: a file
+/// moves between the folders of its own link, and leaves it only as a copy in the library.
+fn plan_drop(lib: &Library, item: &Node, target: &Node, pos: Pos) -> Result<Plan, &'static str> {
+    let at = match (target, pos) {
+        (Node::Folder(id), Pos::Into) => Some(DropAt::Into(*id)),
+        (n, Pos::Before) if n.is_saved() => Some(DropAt::Before(n.clone())),
+        (n, Pos::After) if n.is_saved() => Some(DropAt::After(n.clone())),
+        _ => None,
+    };
+    let dir = dir_of(target);
+    match (item, dir) {
+        (Node::File { link, rel }, Some((l, dir))) => {
+            if l != *link {
+                Err("A file moves only between the folders of its own linked folder.")
+            } else if rel.parent().unwrap_or(Path::new("")) == dir {
+                Err("It is already in that folder.")
+            } else {
+                Ok(Plan::Into { link: l, dir })
+            }
+        }
+        (Node::File { .. }, None) => at.map(Plan::Out).ok_or("Drop it on a folder of the library to copy it there."),
+        (Node::Script(_), Some((link, dir))) => Ok(Plan::Into { link, dir }),
+        (Node::Folder(_), Some(_)) => Err("Folders stay in the library. Drop a script on a linked folder instead."),
+        (_, None) => match at {
+            Some(a) => ops::can_move(lib, item, &a).map(|()| Plan::Saved(a)),
+            None => Err("Drop it on a folder or beside a script."),
+        },
+        _ => Err("That cannot go there."),
+    }
 }
 
 /// The glyph and color of a script kind.
@@ -93,8 +155,17 @@ fn edited(updated: u64) -> String {
 fn item_node(d: &DragItem) -> Option<Node> {
     match d {
         DragItem::Script(ScriptRef::Saved(id)) => Some(Node::Script(*id)),
+        DragItem::Script(ScriptRef::File { link, rel }) => Some(Node::File { link: *link, rel: rel.clone() }),
         DragItem::Folder(id) => Some(Node::Folder(*id)),
         _ => None,
+    }
+}
+
+/// What a drop in the empty space below the rows does: a script or folder goes to the top level, a file is copied there.
+fn root_plan(lib: &Library, item: &Node) -> Result<Plan, &'static str> {
+    match item {
+        Node::File { .. } => Ok(Plan::Out(DropAt::Root)),
+        _ => ops::can_move(lib, item, &DropAt::Root).map(|()| Plan::Saved(DropAt::Root)),
     }
 }
 
@@ -102,6 +173,7 @@ fn drag_item(node: &Node) -> Option<DragItem> {
     match node {
         Node::Script(id) => Some(DragItem::Script(ScriptRef::Saved(*id))),
         Node::Folder(id) => Some(DragItem::Folder(*id)),
+        Node::File { link, rel } => Some(DragItem::Script(ScriptRef::File { link: *link, rel: rel.clone() })),
         _ => None,
     }
 }
@@ -111,6 +183,8 @@ struct RowCx<'a> {
     lib: &'a Library,
     conns: &'a [Conn],
     scans: &'a Scans,
+    /// The linked files that changed on disk since Quarry last opened or saved them.
+    changed: &'a HashSet<(u64, PathBuf)>,
     active: Option<u64>,
     /// The item being dragged, if a drag of a script or folder is on.
     drag: Option<Node>,
@@ -119,8 +193,21 @@ struct RowCx<'a> {
 
 struct Look {
     name: String,
+    /// What assistive tools read for the row: the name, with the state a missing folder shows.
+    label: String,
     kind: String,
     right: String,
+    /// The right text is a warning (a folder that is not there), or a branch drawn as a pill.
+    warn: bool,
+    pill: bool,
+    /// A linked file that changed on disk since Quarry last opened or saved it.
+    dot: bool,
+}
+
+impl Look {
+    fn new(name: String, kind: String, right: String) -> Look {
+        Look { label: name.clone(), name, kind, right, warn: false, pill: false, dot: false }
+    }
 }
 
 impl RowCx<'_> {
@@ -131,9 +218,9 @@ impl RowCx<'_> {
     fn look(&self, row: &Row) -> Look {
         let file_name = |rel: &std::path::Path| rel.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         match &row.node {
-            Node::Folder(id) => Look { name: self.lib.folders.iter().find(|f| f.id == *id).map(|f| f.name.clone()).unwrap_or_default(), kind: String::new(), right: row.count.to_string() },
+            Node::Folder(id) => Look::new(self.lib.folders.iter().find(|f| f.id == *id).map(|f| f.name.clone()).unwrap_or_default(), String::new(), row.count.to_string()),
             Node::Script(id) => {
-                let Some(s) = self.lib.scripts.iter().find(|s| s.id == *id) else { return Look { name: String::new(), kind: String::new(), right: String::new() } };
+                let Some(s) = self.lib.scripts.iter().find(|s| s.id == *id) else { return Look::new(String::new(), String::new(), String::new()) };
                 let right = if self.active.is_some_and(|a| a != s.conn) || (self.active.is_none() && !self.conns.iter().any(|c| c.meta.id == s.conn)) {
                     self.conn_name(s.conn)
                 } else {
@@ -143,17 +230,27 @@ impl RowCx<'_> {
                         _ => s.db.clone(),
                     }
                 };
-                Look { name: s.name.clone(), kind: s.kind.clone(), right }
+                Look::new(s.name.clone(), s.kind.clone(), right)
             }
             Node::Link(id) => {
                 let l = self.lib.links.iter().find(|l| l.id == *id);
                 let name = l.map(|l| if l.name.is_empty() { file_name(&l.path) } else { l.name.clone() }).unwrap_or_default();
-                Look { name, kind: String::new(), right: row.count.to_string() }
+                let scan = self.scans.get(id);
+                let mut look = Look::new(name, String::new(), row.count.to_string());
+                if scan.is_some_and(|s| s.missing) {
+                    (look.right, look.warn) = ("not found".into(), true);
+                    look.label = format!("{} (not found)", look.name);
+                } else if let Some(b) = scan.and_then(|s| s.branch.clone()) {
+                    (look.right, look.pill) = (b, true);
+                }
+                look
             }
-            Node::Dir { rel, .. } => Look { name: file_name(rel), kind: String::new(), right: row.count.to_string() },
+            Node::Dir { rel, .. } => Look::new(file_name(rel), String::new(), row.count.to_string()),
             Node::File { link, rel } => {
-                let kind = self.scans.get(link).and_then(|s| s.files.iter().find(|f| f.rel == *rel)).map(|f| f.kind.clone()).unwrap_or_default();
-                Look { name: file_name(rel), kind, right: String::new() }
+                let kind = self.scans.get(link).and_then(|s| s.entries.iter().find(|f| f.rel == *rel)).map(|f| f.kind.clone()).unwrap_or_default();
+                let mut look = Look::new(file_name(rel), kind, String::new());
+                look.dot = self.changed.contains(&(*link, rel.clone()));
+                look
             }
         }
     }
@@ -200,11 +297,23 @@ fn menu_item(ui: &mut egui::Ui, acts: &mut Vec<Act>, label: &str, key: &str, act
     }
 }
 
-/// The menu of a row: what Return, Alt+Return, Cmd+Enter and F2 do, plus the rest. A linked file offers what opens it; the
-/// edits are for folders and scripts kept by Quarry. B2 adds the menus of linked folders here.
-fn node_menu(ui: &mut egui::Ui, lib: &Library, node: &Node, kind: &str, acts: &mut Vec<Act>) {
+fn reveal_label() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Reveal in Finder"
+    } else if cfg!(windows) {
+        "Show in Explorer"
+    } else {
+        "Show in file manager"
+    }
+}
+
+/// The menu of a row: what Return, Alt+Return, Cmd+Enter and F2 do, plus the rest. A linked folder has its own: new files
+/// and folders, a read of the disk, the file manager, which connections use it, and Unlink. A linked file edits like a script
+/// kept by Quarry, but on disk: Rename renames the file and Delete moves it to the Trash.
+fn node_menu(ui: &mut egui::Ui, lib: &Library, links: &[crate::library::Link], node: &Node, kind: &str, acts: &mut Vec<Act>) {
     menu_look(ui);
     let run = kind != "filter";
+    let path_of = |link: u64, rel: &Path| links.iter().find(|l| l.id == link).map(|l| if rel.as_os_str().is_empty() { l.path.clone() } else { l.path.join(rel) }).unwrap_or_default();
     match node {
         Node::Script(_) | Node::File { .. } => {
             menu_item(ui, acts, "Open", "Return", Act::Open(node.clone(), How::Here));
@@ -218,7 +327,26 @@ fn node_menu(ui: &mut egui::Ui, lib: &Library, node: &Node, kind: &str, acts: &m
     if let Node::Folder(id) = node {
         menu_item(ui, acts, "New folder", "", Act::NewFolder(Some(*id)));
     }
-    if node.is_saved() {
+    if let Some((link, dir)) = dir_of(node).filter(|_| !matches!(node, Node::File { .. })) {
+        menu_item(ui, acts, "New script", "", Act::NewScript(link, dir.clone()));
+        menu_item(ui, acts, "New folder", "", Act::NewDir(link, dir.clone()));
+        if matches!(node, Node::Link(_)) {
+            menu_item(ui, acts, "Reload from disk", "", Act::Reload(link));
+        }
+        ui.separator();
+        menu_item(ui, acts, reveal_label(), "", Act::Reveal(path_of(link, &dir), false));
+        menu_item(ui, acts, "Copy path", "", Act::CopyPath(path_of(link, &dir)));
+        if matches!(node, Node::Link(_)) {
+            menu_item(ui, acts, "Use on connections\u{2026}", "", Act::UseOn(link));
+        }
+        ui.separator();
+        menu_item(ui, acts, "Rename", "F2", Act::Rename(node.clone()));
+        if matches!(node, Node::Link(_)) && danger_item(ui, "Unlink folder").clicked() {
+            acts.push(Act::Unlink(link));
+            ui.close();
+        }
+    }
+    if node.is_saved() || matches!(node, Node::File { .. }) {
         ui.separator();
         menu_item(ui, acts, "Rename", "F2", Act::Rename(node.clone()));
         if let Node::Script(id) = node {
@@ -229,35 +357,45 @@ fn node_menu(ui: &mut egui::Ui, lib: &Library, node: &Node, kind: &str, acts: &m
             Node::Script(id) => (None, lib.scripts.iter().find(|s| s.id == *id).and_then(|s| tree::live_parent(lib, s.folder))),
             _ => (None, None),
         };
-        ui.menu_button("Move to folder", |ui| {
+        let (label, linked_file) = if matches!(node, Node::File { .. }) { ("Copy to folder", true) } else { ("Move to folder", false) };
+        let go = |to: DropAt| if linked_file { Act::Drop(node.clone(), Plan::Out(to)) } else { Act::Move(node.clone(), to) };
+        ui.menu_button(label, |ui| {
             menu_look(ui);
             for (id, depth, name) in ops::folder_list(lib, skip) {
                 let label = format!("{}{}", "  ".repeat(depth), name);
                 if menu_row(ui, &label, TEXT(), cur == Some(id), "").clicked() {
-                    acts.push(Act::Move(node.clone(), DropAt::Into(id)));
+                    acts.push(go(DropAt::Into(id)));
                     ui.close();
                 }
             }
             ui.separator();
-            menu_item(ui, acts, "New folder…", "", Act::MoveToNew(node.clone()));
-            if cur.is_some() {
-                menu_item(ui, acts, "Move out of folders", "", Act::Move(node.clone(), DropAt::Root));
+            if !linked_file {
+                menu_item(ui, acts, "New folder\u{2026}", "", Act::MoveToNew(node.clone()));
+            }
+            if cur.is_some() || linked_file {
+                menu_item(ui, acts, if linked_file { "Copy to the top level" } else { "Move out of folders" }, "", go(DropAt::Root));
             }
         });
-        if let Node::Script(id) = node {
-            menu_item(ui, acts, "Copy text", "", Act::Copy(*id));
+        match node {
+            Node::Script(id) => menu_item(ui, acts, "Copy text", "", Act::Copy(*id)),
+            Node::File { link, rel } => {
+                menu_item(ui, acts, "Copy text", "", Act::CopyFileText(*link, rel.clone()));
+                menu_item(ui, acts, reveal_label(), "", Act::Reveal(path_of(*link, rel), true));
+                menu_item(ui, acts, "Copy path", "", Act::CopyPath(path_of(*link, rel)));
+            }
+            _ => {}
         }
         ui.separator();
-        if danger_item(ui, "Delete…").clicked() {
+        if danger_item(ui, if linked_file { "Move to Trash\u{2026}" } else { "Delete\u{2026}" }).clicked() {
             acts.push(Act::Delete(node.clone()));
             ui.close();
         }
     }
 }
 
-/// Whether a row has a menu: folders and scripts kept by Quarry, and linked files.
-fn has_menu(node: &Node) -> bool {
-    node.is_saved() || matches!(node, Node::File { .. })
+/// Every row has a menu.
+fn has_menu(_node: &Node) -> bool {
+    true
 }
 
 impl App {
@@ -339,7 +477,8 @@ impl App {
         }
         ui.add_space(10.0);
 
-        let rows = tree::flatten(&self.library, &st.scans, scope_conn, &st.query, &st.open);
+        let engine = scope_conn.and_then(|c| self.conn(c)).map(|c| c.meta.engine);
+        let rows = tree::flatten(&self.library, &self.lib_ui.scans, scope_conn, engine, &st.query, &st.open);
         if rows.is_empty() && st.query.trim().is_empty() {
             self.library_empty(ui, active, active_name.as_deref(), all, acts);
             return;
@@ -362,13 +501,13 @@ impl App {
         let preview_h = want.clamp(PREVIEW_MIN, (avail - TREE_MIN - 6.0).max(PREVIEW_MIN));
         let tree_h = if show_preview { avail - preview_h - 6.0 } else { avail };
 
-        // The scans and the demo drag move out of `st` for the frame, so the rows can read them while `st` is borrowed for state.
-        let scans = std::mem::take(&mut st.scans);
+        // The demo drag moves out of `st` for the frame, so the rows can read it while `st` is borrowed for state.
         let demo_drag = st.demo_drag.clone();
         let cx = RowCx {
             lib: &self.library,
             conns: &self.conns,
-            scans: &scans,
+            scans: &self.lib_ui.scans,
+            changed: &self.lib_ui.changed,
             active,
             drag: egui::DragAndDrop::payload::<DragItem>(&ctx).and_then(|d| item_node(&d)),
             demo_drag: demo_drag.as_ref(),
@@ -398,15 +537,18 @@ impl App {
             let r = ui.interact(zone, egui::Id::unique("library-root-drop"), Sense::hover());
             if let (Some(p), Some(item)) = (r.dnd_hover_payload::<DragItem>(), cx.drag.as_ref()) {
                 let _ = p;
-                if ops::can_move(&self.library, item, &DropAt::Root).is_ok() {
+                if root_plan(&self.library, item).is_ok() {
                     drop_line(ui.painter(), zone.x_range(), zone.top() + 1.0);
                 }
             }
             if let (Some(_), Some(item)) = (r.dnd_release_payload::<DragItem>(), cx.drag.clone()) {
-                acts.push(Act::Move(item, DropAt::Root));
+                acts.push(match root_plan(&self.library, &item) {
+                    Ok(Plan::Saved(a)) => Act::Move(item, a),
+                    Ok(plan) => Act::Drop(item, plan),
+                    Err(e) => Act::Refuse(e),
+                });
             }
         }
-        st.scans = scans;
 
         if show_preview {
             let mut pref = if self.prefs.lib_preview_h > 0.0 { avail - preview_h } else { 0.0 };
@@ -462,7 +604,7 @@ impl App {
         let at = st.sel.as_ref().and_then(|n| rows.iter().position(|r| r.node == *n));
         let kind = |n: &Node| match n {
             Node::Script(id) => self.library.scripts.iter().find(|s| s.id == *id).map(|s| s.kind.clone()).unwrap_or_default(),
-            Node::File { link, rel } => st.scans.get(link).and_then(|s| s.files.iter().find(|f| f.rel == *rel)).map(|f| f.kind.clone()).unwrap_or_default(),
+            Node::File { link, rel } => self.file_kind(*link, rel),
             _ => String::new(),
         };
         let go = |st: &mut PanelUi, i: usize| {
@@ -483,10 +625,10 @@ impl App {
             } else if k(none, Key::Enter) {
                 acts.push(if n.script_ref().is_some() { Act::Open(n.clone(), How::Here) } else { Act::Toggle(n.clone()) });
             }
-            if k(none, Key::F2) && n.is_saved() {
+            if k(none, Key::F2) {
                 acts.push(Act::Rename(n.clone()));
             }
-            if (k(none, Key::Delete) || k(none, Key::Backspace)) && n.is_saved() {
+            if (k(none, Key::Delete) || k(none, Key::Backspace)) && (n.is_saved() || matches!(n, Node::File { .. })) {
                 acts.push(Act::Delete(n.clone()));
             }
             let open = at.is_some_and(|i| rows[i].open);
@@ -519,33 +661,48 @@ impl App {
     }
 
     fn library_preview(&mut self, ui: &mut egui::Ui, node: &Node, st: &mut PanelUi, all: bool, acts: &mut Vec<Act>) {
-        let ScriptRef::Saved(id) = node.script_ref().unwrap_or(ScriptRef::Saved(0)) else {
-            // A linked file shows its text once B2 reads it.
-            return;
+        // What the card shows: a script's name, where it lives and when it was edited, its kind and the start of its text.
+        let (name, sub, kind, text) = match node.script_ref() {
+            Some(ScriptRef::Saved(id)) => {
+                let Some(s) = self.library.scripts.iter().find(|s| s.id == id).cloned() else { return };
+                let place = {
+                    let p = ops::folder_path(&self.library, s.folder);
+                    let p = if p.is_empty() { "Library".to_string() } else { p };
+                    if all { format!("{} · {p}", self.conns.iter().find(|c| c.meta.id == s.conn).map_or("removed connection", |c| c.meta.name.as_str())) } else { p }
+                };
+                let when = edited(s.updated);
+                (s.name.clone(), if when.is_empty() { place } else { format!("{place}  ·  {when}") }, s.kind.clone(), s.body.chars().take(1500).collect::<String>())
+            }
+            // A linked file shows what its scan kept of it, so the card never reads the disk while it is drawn.
+            Some(ScriptRef::File { link, rel }) => {
+                let Some(e) = self.lib_ui.scans.get(&link).and_then(|s| s.entries.iter().find(|e| e.rel == rel)) else { return };
+                let l = self.library.links.iter().find(|l| l.id == link);
+                let folder = l.map(|l| if l.name.is_empty() { l.path.display().to_string() } else { l.name.clone() }).unwrap_or_default();
+                let place = match rel.parent().filter(|p| !p.as_os_str().is_empty()) {
+                    Some(p) => format!("{folder} / {}", p.display()),
+                    None => folder,
+                };
+                let secs = e.mtime.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                let when = edited(secs);
+                (rel.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), if when.is_empty() { place } else { format!("{place}  ·  {when}") }, e.kind.clone(), e.head.clone())
+            }
+            None => return,
         };
-        let Some(s) = self.library.scripts.iter().find(|s| s.id == id).cloned() else { return };
-        let place = {
-            let p = ops::folder_path(&self.library, s.folder);
-            let p = if p.is_empty() { "Library".to_string() } else { p };
-            if all { format!("{} · {p}", self.conns.iter().find(|c| c.meta.id == s.conn).map_or("removed connection", |c| c.meta.name.as_str())) } else { p }
-        };
-        let when = edited(s.updated);
         let avail = ui.available_height();
         egui::Frame::new().fill(RAISED()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.set_min_height((avail - 20.0).max(0.0));
             let w = ui.available_width();
-            let mut head = LayoutJob::single_section(s.name.clone(), ui_fmt(TXT_TITLE, BRIGHT(), W_MEDIUM, 0.0));
+            let mut head = LayoutJob::single_section(name.clone(), ui_fmt(TXT_TITLE, BRIGHT(), W_MEDIUM, 0.0));
             head.wrap = egui::text::TextWrapping::truncate_at_width(w);
             ui.label(head);
-            let mut sub = LayoutJob::single_section(if when.is_empty() { place.clone() } else { format!("{place}  ·  {when}") }, ui_fmt(TXT_CAPTION, FAINT(), 400.0, 0.0));
-            sub.wrap = egui::text::TextWrapping::truncate_at_width(w);
-            ui.label(sub);
+            let mut subj = LayoutJob::single_section(sub.clone(), ui_fmt(TXT_CAPTION, FAINT(), 400.0, 0.0));
+            subj.wrap = egui::text::TextWrapping::truncate_at_width(w);
+            ui.label(subj);
             ui.add_space(6.0);
             // As many lines as the card has room for between the header and the buttons.
             let lines = (((avail - 112.0) / 15.0) as usize).clamp(2, 8);
-            let text: String = s.body.chars().take(1500).collect();
-            let job = match s.kind.as_str() {
+            let job = match kind.as_str() {
                 "shell" => js_job(&text),
                 "filter" | "pipeline" => json_job(&text),
                 _ => sql_job(&text, TXT_SMALL),
@@ -559,7 +716,7 @@ impl App {
                 if primary(ui, "Open", PRIMARY()).clicked() {
                     acts.push(Act::Open(node.clone(), How::Here));
                 }
-                if s.kind != "filter" && run_chip(ui).clicked() {
+                if kind != "filter" && run_chip(ui).clicked() {
                     acts.push(Act::Open(node.clone(), How::Run));
                 }
                 if quiet(ui, "New tab").clicked() {
@@ -586,18 +743,39 @@ impl App {
                 let name = match &n {
                     Node::Folder(id) => self.library.folders.iter().find(|f| f.id == *id).map(|f| f.name.clone()),
                     Node::Script(id) => self.library.scripts.iter().find(|s| s.id == *id).map(|s| s.name.clone()),
-                    _ => None,
+                    Node::Link(id) => self.library.links.iter().find(|l| l.id == *id).map(|l| if l.name.is_empty() { l.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default() } else { l.name.clone() }),
+                    Node::Dir { rel, .. } => rel.file_name().map(|n| n.to_string_lossy().into_owned()),
+                    Node::File { rel, .. } => rel.file_stem().map(|n| n.to_string_lossy().into_owned()),
                 };
                 if let Some(name) = name {
                     st.sel = Some(n.clone());
                     st.rename = Some((n, name, true));
                 }
             }
-            Act::Commit(n, text) => {
-                if ops::rename(&mut self.library, &n, &text) {
-                    self.save_library();
+            Act::Commit(n, text) => match &n {
+                Node::Link(id) => {
+                    let name = text.trim().to_string();
+                    if !name.is_empty() && let Some(l) = self.library.links.iter_mut().find(|l| l.id == *id) {
+                        l.name = name;
+                        self.save_library();
+                    }
                 }
-            }
+                Node::Dir { link, rel } | Node::File { link, rel } => {
+                    let is_dir = matches!(n, Node::Dir { .. });
+                    if let Some(new) = self.rename_linked(*link, rel, is_dir, &text) {
+                        let to = if is_dir { Node::Dir { link: *link, rel: new } } else { Node::File { link: *link, rel: new } };
+                        if st.open.remove(&n) {
+                            st.open.insert(to.clone());
+                        }
+                        st.sel = Some(to);
+                    }
+                }
+                _ => {
+                    if ops::rename(&mut self.library, &n, &text) {
+                        self.save_library();
+                    }
+                }
+            },
             Act::Duplicate(id) => {
                 if let Some(new) = ops::duplicate(&mut self.library, id, now_secs()) {
                     self.save_library();
@@ -628,6 +806,11 @@ impl App {
                 if let Some(s) = self.library.scripts.iter().find(|s| s.id == id) {
                     ctx.copy_text(s.body.clone());
                     self.ok("Script text copied.");
+                }
+            }
+            Act::Delete(Node::File { link, rel }) => {
+                if self.delete_linked_file(link, &rel) {
+                    st.sel = None;
                 }
             }
             Act::Delete(n) => {
@@ -667,6 +850,88 @@ impl App {
             }
             Act::Link => self.open_link_dialog(None),
             Act::Refuse(why) => self.warn(why),
+            Act::NewScript(link, dir) => {
+                if let Some(rel) = self.new_linked_script(link, &dir) {
+                    self.show_linked(st, link, &dir);
+                    let node = Node::File { link, rel: rel.clone() };
+                    let stem = rel.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    st.query.clear();
+                    st.sel = Some(node.clone());
+                    st.rename = Some((node, stem, true));
+                }
+            }
+            Act::NewDir(link, dir) => {
+                if let Some(rel) = self.new_linked_dir(link, &dir) {
+                    self.show_linked(st, link, &dir);
+                    let node = Node::Dir { link, rel: rel.clone() };
+                    let name = rel.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    st.query.clear();
+                    st.sel = Some(node.clone());
+                    st.rename = Some((node, name, true));
+                }
+            }
+            Act::Reload(link) => {
+                self.rescan_link(link);
+                self.ok("Reading the folder again.");
+            }
+            Act::Reveal(path, select) => {
+                if let Err(e) = super::linked::reveal(&path, select) {
+                    self.err(format!("Could not open {}: {e}", path.display()));
+                }
+            }
+            Act::CopyPath(path) => {
+                ctx.copy_text(path.to_string_lossy().into_owned());
+                self.ok("Path copied.");
+            }
+            Act::CopyFileText(link, rel) => match self.library.file_path(link, &rel).map(|p| super::linked::read_script(&p)) {
+                Some(Ok(l)) => {
+                    ctx.copy_text(l.text);
+                    self.ok("Script text copied.");
+                }
+                Some(Err(e)) => self.warn(format!("Could not read the file: {e}")),
+                None => {}
+            },
+            Act::UseOn(link) => self.open_link_dialog(Some(link)),
+            Act::Unlink(link) => {
+                self.unlink(link);
+                st.open.retain(|n| !matches!(n, Node::Link(l) | Node::Dir { link: l, .. } | Node::File { link: l, .. } if *l == link));
+                if st.sel.as_ref().is_some_and(|n| matches!(n, Node::Link(l) | Node::Dir { link: l, .. } | Node::File { link: l, .. } if *l == link)) {
+                    st.sel = None;
+                }
+            }
+            Act::Drop(item, plan) => match (item, plan) {
+                (Node::Script(id), Plan::Into { link, dir }) => {
+                    if let Some(rel) = self.script_to_link(id, link, &dir) {
+                        self.show_linked(st, link, &dir);
+                        st.sel = Some(Node::File { link, rel });
+                    }
+                }
+                (Node::File { link, rel }, Plan::Into { dir, .. }) => {
+                    if let Some(new) = self.move_linked_file(link, &rel, &dir) {
+                        self.show_linked(st, link, &dir);
+                        st.sel = Some(Node::File { link, rel: new });
+                    }
+                }
+                (Node::File { link, rel }, Plan::Out(at)) => {
+                    if let Some(id) = self.file_to_quarry(link, &rel, at.clone()) {
+                        if let DropAt::Into(f) = at {
+                            st.open.insert(Node::Folder(f));
+                        }
+                        st.sel = Some(Node::Script(id));
+                    }
+                }
+                _ => {}
+            },
+        }
+    }
+
+    /// Opens a linked folder and the folders above `dir` in it, so a file just made or moved there shows.
+    fn show_linked(&mut self, st: &mut PanelUi, link: u64, dir: &Path) {
+        st.open.insert(Node::Link(link));
+        let mut at = PathBuf::new();
+        for c in dir.components() {
+            at.push(c);
+            st.open.insert(Node::Dir { link, rel: at.clone() });
         }
     }
 
@@ -677,11 +942,14 @@ impl App {
         if matches!(state, "panel" | "all" | "search" | "empty" | "menu" | "folder-menu" | "drag") {
             self.demo_library_panel(state);
         }
+        // B2: linked, missing, link, save-linked, conflict (linked.rs).
+        if self.demo_library_linked(state) {
+            return;
+        }
         // B1: save, picker, picker-docs, picker-shell (picker.rs).
         if self.demo_library_quick(state) {
             return;
         }
-        // B2: its states go in a block of their own below B1's.
     }
 
     /// The panel states. The library is made up here: reports kept in folders on the MySQL "shop-prod" connection, and the
@@ -749,7 +1017,7 @@ fn draw_row_in(ui: &mut egui::Ui, cx: &RowCx, st: &mut PanelUi, row: &Row, acts:
     let indent = INDENT * row.depth as f32;
     let (glyph, gcol): (glyphs::Glyph, Color32) = match &row.node {
         Node::Folder(_) | Node::Dir { .. } => (if row.open { glyphs::folder_open } else { glyphs::folder }, MUTED()),
-        Node::Link(_) => (glyphs::link, C_LINK()),
+        Node::Link(_) => (glyphs::link, if look.warn { ALERT() } else { C_LINK() }),
         Node::Script(_) | Node::File { .. } => kind_glyph(&look.kind),
     };
 
@@ -792,9 +1060,10 @@ fn draw_row_in(ui: &mut egui::Ui, cx: &RowCx, st: &mut PanelUi, row: &Row, acts:
     let dots_id = egui::Id::unique(("lib-dots", &row.node));
     let menu_open = egui::Popup::is_id_open(&ctx, dots_id.with("popup")) || st.demo_menu.as_ref() == Some(&row.node);
     let show_tools = (hovered || menu_open) && has_menu(&row.node);
-    let (is_container, saved) = (row.node.is_container(), row.node.is_saved());
+    let is_container = row.node.is_container();
+    let dir_like = matches!(row.node, Node::Link(_) | Node::Dir { .. });
 
-    let r = side_row_drag(ui, ROW_H, indent, selected, &look.name, |p, inner| {
+    let r = side_row_drag(ui, ROW_H, indent, selected, &look.label, |p, inner| {
         let cy = inner.center().y;
         for k in 0..row.depth {
             let gx = inner.left() - indent + INDENT * k as f32 + 7.0;
@@ -807,11 +1076,22 @@ fn draw_row_in(ui: &mut egui::Ui, cx: &RowCx, st: &mut PanelUi, row: &Row, acts:
         glyph(p, egui::pos2(x + 22.0, cy), gcol);
         let tools_w = if show_tools { 52.0 } else { 0.0 };
         let right = if show_tools { String::new() } else { look.right.clone() };
-        let rg = (!right.is_empty()).then(|| p.layout_job(LayoutJob::single_section(right, mono_fmt(10.5, FAINT(), 400.0))));
-        let rw = rg.as_ref().map_or(0.0, |g| g.size().x + 8.0);
+        let right_col = if look.warn { ALERT() } else if look.pill { C_LINK() } else { FAINT() };
+        let rg = (!right.is_empty()).then(|| p.layout_job(LayoutJob::single_section(right, mono_fmt(10.5, right_col, 400.0))));
+        // The pill and the changed dot take a little more room than the bare text.
+        let mut rw = rg.as_ref().map_or(0.0, |g| g.size().x + 8.0 + if look.pill { 10.0 } else { 0.0 });
         if let Some(g) = rg {
             let dy = optical_dy(&g);
-            p.galley(egui::pos2(inner.right() - g.size().x, cy - g.size().y / 2.0 + dy), g, FAINT());
+            if look.pill {
+                let pill = egui::Rect::from_center_size(egui::pos2(inner.right() - g.size().x / 2.0 - 4.0, cy), egui::vec2(g.size().x + 10.0, 16.0));
+                p.rect_filled(pill, R_SM, tint(C_LINK(), 30));
+            }
+            let shift = if look.pill { 4.0 } else { 0.0 };
+            p.galley(egui::pos2(inner.right() - g.size().x - shift, cy - g.size().y / 2.0 + dy), g, right_col);
+        }
+        if look.dot && !show_tools {
+            p.circle_filled(egui::pos2(inner.right() - 4.0, cy), 3.0, WARNING());
+            rw += 12.0;
         }
         let weight = if is_container { W_MEDIUM } else { 400.0 };
         let color = if selected || hovered { BRIGHT() } else { TEXT() };
@@ -834,16 +1114,20 @@ fn draw_row_in(ui: &mut egui::Ui, cx: &RowCx, st: &mut PanelUi, row: &Row, acts:
             if look.kind != "filter" && row_tool(ui, dots_id.with("run"), at(1.0), glyphs::play, &format!("Run {}", look.name), "Run (Cmd+Enter)").clicked() {
                 acts.push(Act::Open(row.node.clone(), How::Run));
             }
-        } else if let Node::Folder(id) = row.node
-            && row_tool(ui, dots_id.with("plus"), at(1.0), glyphs::plus, &format!("New folder in {}", look.name), "New folder inside").clicked()
+        } else if let Node::Folder(id) = row.node {
+            if row_tool(ui, dots_id.with("plus"), at(1.0), glyphs::plus, &format!("New folder in {}", look.name), "New folder inside").clicked() {
+                acts.push(Act::NewFolder(Some(id)));
+            }
+        } else if let Some((link, dir)) = dir_of(&row.node).filter(|_| dir_like)
+            && row_tool(ui, dots_id.with("plus"), at(1.0), glyphs::plus, &format!("New script in {}", look.name), "New script inside").clicked()
         {
-            acts.push(Act::NewFolder(Some(id)));
+            acts.push(Act::NewScript(link, dir));
         }
         if st.demo_menu.as_ref() == Some(&row.node) {
             egui::Popup::open_id(&ctx, dots_id.with("popup"));
             st.demo_menu = None;
         }
-        egui::Popup::menu(&dots).width(210.0).show(|ui| node_menu(ui, cx.lib, &row.node, &look.kind, acts));
+        egui::Popup::menu(&dots).width(210.0).show(|ui| node_menu(ui, cx.lib, &cx.lib.links, &row.node, &look.kind, acts));
     }
 
     if r.clicked() || r.secondary_clicked() {
@@ -857,44 +1141,37 @@ fn draw_row_in(ui: &mut egui::Ui, cx: &RowCx, st: &mut PanelUi, row: &Row, acts:
         acts.push(Act::Open(row.node.clone(), How::Here));
     }
     if has_menu(&row.node) {
-        r.context_menu(|ui| node_menu(ui, cx.lib, &row.node, &look.kind, acts));
+        r.context_menu(|ui| node_menu(ui, cx.lib, &cx.lib.links, &row.node, &look.kind, acts));
     }
 
-    // Dragging a folder or script, and what a drag over this row would do.
-    if saved && let Some(item) = drag_item(&row.node) {
+    // Dragging a folder, a script or a linked file, and what a drag over this row would do.
+    if let Some(item) = drag_item(&row.node) {
         drag_source(ui, &r, item, &look.name);
     }
-    let target_is_folder = matches!(row.node, Node::Folder(_));
+    let target_is_folder = matches!(row.node, Node::Folder(_)) || dir_like;
     let over = r.dnd_hover_payload::<DragItem>().and_then(|p| item_node(&p));
     let frac = ctx.pointer_hover_pos().map_or(0.5, |p| ((p.y - rect.top()) / rect.height()).clamp(0.0, 1.0));
-    let pos = tree::drop_at(target_is_folder, row.open, frac);
-    let at = match (&row.node, pos) {
-        (Node::Folder(id), Pos::Into) => Some(DropAt::Into(*id)),
-        (n, Pos::Before) if n.is_saved() => Some(DropAt::Before(n.clone())),
-        (n, Pos::After) if n.is_saved() => Some(DropAt::After(n.clone())),
-        _ => None,
-    };
+    // A linked folder has nothing to order, so any part of its row means "into".
+    let pos = if dir_like { Pos::Into } else { tree::drop_at(target_is_folder, row.open, frac) };
     let into_closed = target_is_folder && !row.open;
     if let Some(item) = over.as_ref().filter(|i| **i != row.node) {
-        let verdict = match &at {
-            Some(a) => ops::can_move(cx.lib, item, a),
-            None => ops::can_move(cx.lib, item, &DropAt::Before(row.node.clone())),
-        };
-        if verdict.is_ok() {
-            match pos {
-                Pos::Into if target_is_folder => drop_fill(ui.painter(), rect),
-                Pos::Before => drop_line(ui.painter(), egui::Rangef::new(rect.left() + 8.0 + indent, rect.right()), rect.top()),
+        let plan = plan_drop(cx.lib, item, &row.node, pos);
+        if plan.is_ok() {
+            match (pos, &plan) {
+                (Pos::Into, Ok(Plan::Saved(DropAt::Into(_)))) if target_is_folder => drop_fill(ui.painter(), rect),
+                (_, Ok(Plan::Into { .. })) if dir_like => drop_fill(ui.painter(), rect),
+                (Pos::Before, _) => drop_line(ui.painter(), egui::Rangef::new(rect.left() + 8.0 + indent, rect.right()), rect.top()),
                 _ => drop_line(ui.painter(), egui::Rangef::new(rect.left() + 8.0 + indent, rect.right()), rect.bottom()),
             }
         } else {
             ctx.set_cursor_icon(egui::CursorIcon::NotAllowed);
         }
         if let Some(DragItem::Script(_) | DragItem::Folder(_)) = r.dnd_release_payload::<DragItem>().as_deref() {
-            match (verdict, at) {
-                (Ok(()), Some(a)) => acts.push(Act::Move(item.clone(), a)),
-                (Err(e), _) => acts.push(Act::Refuse(e)),
-                (Ok(()), None) => acts.push(Act::Refuse("Linked folders are kept on disk, so nothing moves into or out of them here.")),
-            }
+            acts.push(match plan {
+                Ok(Plan::Saved(a)) => Act::Move(item.clone(), a),
+                Ok(plan) => Act::Drop(item.clone(), plan),
+                Err(e) => Act::Refuse(e),
+            });
         }
     }
     // A closed folder under a drag opens after a short rest, so the item can go inside it.
@@ -913,5 +1190,31 @@ fn draw_row_in(ui: &mut egui::Ui, cx: &RowCx, st: &mut PanelUi, row: &Row, acts:
         let g = egui::Rect::from_min_size(rect.center() + egui::vec2(18.0, 10.0), galley.size() + egui::vec2(24.0, 10.0));
         p.rect(g, R_SM, RAISED(), Stroke::new(1.0, PRIMARY()), egui::StrokeKind::Inside);
         p.galley(g.min + egui::vec2(12.0, 5.0), galley, TEXT());
+    }
+}
+
+#[cfg(test)]
+mod linked_tests {
+    use super::*;
+    use crate::library::Link;
+
+    fn node_file(rel: &str) -> Node {
+        Node::File { link: 1, rel: rel.into() }
+    }
+
+    #[test]
+    fn what_a_drop_on_a_row_does_depends_on_what_is_dragged_and_where() {
+        let lib = Library { links: vec![Link { id: 1, ..Default::default() }, Link { id: 2, ..Default::default() }], folders: vec![crate::library::Folder { id: 5, name: "F".into(), parent: None }], ..Default::default() };
+        let dir = |rel: &str| Node::Dir { link: 1, rel: rel.into() };
+        // A file goes to another folder of its own link, not the one it is in, and never to another link.
+        assert_eq!(plan_drop(&lib, &node_file("a.sql"), &dir("sub"), Pos::Into), Ok(Plan::Into { link: 1, dir: "sub".into() }));
+        assert!(plan_drop(&lib, &node_file("sub/a.sql"), &dir("sub"), Pos::Into).is_err());
+        assert_eq!(plan_drop(&lib, &node_file("sub/a.sql"), &Node::Link(1), Pos::Into), Ok(Plan::Into { link: 1, dir: PathBuf::new() }));
+        assert!(plan_drop(&lib, &node_file("a.sql"), &Node::Link(2), Pos::Into).is_err());
+        assert!(plan_drop(&lib, &Node::File { link: 2, rel: "x.sql".into() }, &Node::Link(1), Pos::Into).is_err());
+        // Onto a library folder it is copied there; a library script goes into the linked folder; a library folder does not.
+        assert_eq!(plan_drop(&lib, &node_file("a.sql"), &Node::Folder(5), Pos::Into), Ok(Plan::Out(DropAt::Into(5))));
+        assert_eq!(plan_drop(&lib, &Node::Script(9), &dir("sub"), Pos::Before), Ok(Plan::Into { link: 1, dir: "sub".into() }));
+        assert!(plan_drop(&lib, &Node::Folder(5), &Node::Link(1), Pos::Into).is_err());
     }
 }

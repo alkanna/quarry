@@ -38,6 +38,10 @@ pub(super) struct LibUi {
     pub(super) was_focused: bool,
     /// The scans are set by hand, as the demo does, and nothing reads the disk.
     pub(super) frozen: bool,
+    /// What Quarry last read or wrote of each linked file, by link and path; a scan that finds another time or length marks the
+    /// file in `changed`. Neither is saved.
+    pub(super) baseline: HashMap<(u64, std::path::PathBuf), (std::time::SystemTime, u64)>,
+    pub(super) changed: HashSet<(u64, std::path::PathBuf)>,
 }
 
 /// Reads library.json. Its lists are parsed entry by entry: a bad script or folder is skipped and the file copied to
@@ -87,10 +91,9 @@ impl App {
     /// Opens the script that waited for its connection, once the connection is ready.
     fn library_pending(&mut self) {
         let Some((r, how)) = self.lib_ui.pending.clone() else { return };
-        // A linked file is the linked folders' business; its stream applies its own pending opens.
         let conn = match &r {
             ScriptRef::Saved(id) => self.library.scripts.iter().find(|s| s.id == *id).map(|s| s.conn),
-            ScriptRef::File { .. } => return,
+            ScriptRef::File { link, rel } => self.file_conn(*link, rel),
         };
         let Some(conn) = conn.filter(|c| self.conn(*c).is_some()) else {
             self.lib_ui.pending = None;

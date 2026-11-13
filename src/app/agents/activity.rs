@@ -75,14 +75,7 @@ impl App {
         }
         let dir = crate::agents::link::agents_dir();
         let _ = std::fs::create_dir_all(&dir);
-        let cmd = if cfg!(target_os = "macos") {
-            "open"
-        } else if cfg!(windows) {
-            "explorer"
-        } else {
-            "xdg-open"
-        };
-        if let Err(e) = std::process::Command::new(cmd).arg(&dir).spawn() {
+        if let Err(e) = crate::app::library::linked::reveal(&dir, false) {
             self.err(format!("Could not open {}: {e}", dir.display()));
         }
     }

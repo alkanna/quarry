@@ -119,13 +119,21 @@ impl App {
     /// of the same kind and connection, like a click on a table, and otherwise opens a tab beside it. A script whose
     /// connection is not ready waits in `lib_ui.pending` and opens when it is. Run goes through the gated run paths.
     pub(in crate::app) fn open_script(&mut self, r: &ScriptRef, how: How) {
+        // A linked file is read now, as a script of the connection it is opened on; its time and length go on the tab's
+        // binding afterwards, so a change on disk is told from the text just read.
+        let mut file = None;
         let s = match r {
             ScriptRef::Saved(id) => match self.library.scripts.iter().find(|s| s.id == *id).cloned() {
                 Some(s) => s,
                 None => return self.warn("That script is no longer in the library."),
             },
-            // B2 wires here: read the file with `linked::read_script`, bind it, and open it like the kinds below.
-            ScriptRef::File { .. } => return,
+            ScriptRef::File { link, rel } => match self.file_script(*link, rel) {
+                Ok((s, meta)) => {
+                    file = Some((*link, rel.clone(), meta));
+                    s
+                }
+                Err(e) => return self.warn(e),
+            },
         };
         let Some(status_ready) = self.conn(s.conn).map(|c| c.status == Status::Ready) else {
             return self.warn("The connection of this script was removed. The script stays in the library, but it needs a connection to open.");
@@ -197,6 +205,12 @@ impl App {
             }
             other => self.warn(format!("This build does not know scripts of kind \"{other}\".")),
         }
+        if let Some((link, rel, meta)) = file {
+            if let Some(b) = self.tm().and_then(|t| t.script.as_mut()) {
+                b.disk = meta;
+            }
+            self.mark_seen(link, &rel, meta);
+        }
     }
 
     /// Runs a pipeline opened from the library through the Aggregate view's own gate, which asks before a write stage.
@@ -218,7 +232,10 @@ impl App {
         if tt.body.trim().is_empty() && tt.sort.trim().is_empty() && tt.project.trim().is_empty() {
             return self.warn("Nothing to save: the script is empty.");
         }
-        // B2 wires here: `if self.save_linked() { return; }` writes a tab bound to a linked file before the code below.
+        // A tab bound to a linked file writes that file, or raises the conflict when it changed on disk.
+        if self.save_linked() {
+            return;
+        }
         let bound = self.t().and_then(|t| t.script.as_ref()).filter(|b| b.view == tt.view).map(|b| b.r.clone());
         // A bound linked file is written by the linked folders' code; until then it takes the dialog.
         if let Some(ScriptRef::Saved(id)) = bound

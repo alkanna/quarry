@@ -69,6 +69,14 @@ impl LinkForm {
         [("sql", self.sql), ("js", self.js), ("json", self.json)].iter().filter(|(_, on)| *on).map(|(e, _)| e.to_string()).collect()
     }
 
+    /// The demo's dialog: a folder typed and already looked at, so nothing is scanned.
+    pub(super) fn fill_demo(&mut self, path: &str, scan: disk::Scan) {
+        self.path = path.into();
+        self.name = "shop-queries".into();
+        self.name_set = true;
+        self.preview = Some((path.into(), scan));
+    }
+
     /// The scan that came back, once the dialog has asked for it. A scan for a path that was changed since is dropped.
     pub(super) fn got_preview(&mut self, scan: disk::Scan) {
         if let Some(p) = self.asking.take() {

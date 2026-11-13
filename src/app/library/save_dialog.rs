@@ -2,9 +2,10 @@
 //! bound to the library yet (see `save_script` in open.rs).
 #![allow(dead_code)]
 
+use super::linked::{file_bytes, kind_ext};
 use super::open::{TabText, now_secs};
 use super::*;
-use crate::library::{Library, Script, ScriptRef};
+use crate::library::{Library, Script, ScriptRef, disk, format};
 
 /// The fields of the Save to library dialog. The text and target are taken from the tab when it opens, so the dialog saves
 /// what was on screen even though nothing else can change while it is up.
@@ -15,8 +16,10 @@ pub(in crate::app) struct SaveForm {
     pub folder: Option<u64>,
     /// Set while a new folder is being named in the dialog; it is made on Save and takes the script.
     pub new_folder: Option<String>,
-    /// B2: the linked folder chosen instead of a Quarry one, and the file name inside it. Both stay empty here.
+    /// The linked folder chosen instead of a Quarry one, the folder inside it (empty for its top), and the file name, which
+    /// stays empty until typed and then follows the script's name.
     pub link: Option<u64>,
+    pub dir: PathBuf,
     pub file: String,
     pub kind: String,
     pub body: String,
@@ -50,6 +53,21 @@ pub(in crate::app) fn folder_rows(lib: &Library) -> Vec<(u64, usize)> {
     let mut out = Vec::new();
     walk(lib, None, 0, &mut out);
     out
+}
+
+/// The folders of a scan below its top, parents before children, empty ones too.
+fn link_dirs(scan: &disk::Scan) -> Vec<PathBuf> {
+    let mut all = std::collections::BTreeSet::new();
+    // An empty folder is walked up from itself, a file from the folder that holds it.
+    let starts: Vec<&std::path::Path> = scan.entries.iter().filter_map(|e| e.rel.parent()).chain(scan.empty_dirs.iter().map(|d| d.as_path())).collect();
+    for start in starts {
+        let mut cur = Some(start);
+        while let Some(d) = cur.filter(|d| !d.as_os_str().is_empty()) {
+            all.insert(d.to_path_buf());
+            cur = d.parent();
+        }
+    }
+    all.into_iter().collect()
 }
 
 /// The script a save would replace: same name, folder, kind and target. A filter or pipeline belongs to a collection, a SQL
@@ -97,6 +115,9 @@ impl App {
     /// Writes the script the dialog describes: a new one, or the one of the same name in the same folder, replaced. The tab
     /// is bound to it, so the next Cmd+S writes back without asking.
     fn commit_save(&mut self, f: &SaveForm) {
+        if let Some(link) = f.link {
+            return self.commit_save_linked(f, link);
+        }
         let name = f.name.trim().to_string();
         let mut folder = f.folder;
         if let Some(n) = f.new_folder.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
@@ -148,6 +169,51 @@ impl App {
         self.warn_plain_password(&tt);
     }
 
+    /// Writes the script as a file in a linked folder: the text as it is, never with a header added, or the JSON shape for a
+    /// filter or pipeline. A file of that name is replaced. The tab is bound to it, so the next Cmd+S writes it again.
+    fn commit_save_linked(&mut self, f: &SaveForm, link: u64) {
+        let Some(l) = self.library.links.iter().find(|l| l.id == link).cloned() else { return self.warn("That folder is no longer linked.") };
+        if self.demo {
+            return self.warn("The demo does not write files.");
+        }
+        let ext = kind_ext(&f.kind);
+        if !l.exts.iter().any(|e| e == ext) {
+            return self.warn(format!("{} does not show .{ext} files. Add the type in Use on connections first.", l.name));
+        }
+        let typed = f.file.trim();
+        let file = disk::file_name(if typed.is_empty() { f.name.trim() } else { typed }, ext);
+        let (dir, rel) = (l.path.join(&f.dir), f.dir.join(&file));
+        let path = dir.join(&file);
+        let old = std::fs::read_to_string(&path).ok();
+        let target = format::Target { db: f.db.clone(), schema: f.schema.clone(), coll: f.coll.clone() };
+        let bytes = match file_bytes(&f.kind, &f.body, &f.sort, &f.project, target, old.as_deref()) {
+            Ok(b) => b,
+            Err(e) => return self.warn(format!("Not saved: {e}")),
+        };
+        if let Err(e) = std::fs::create_dir_all(&dir).and_then(|()| disk::write_file(&path, &bytes)) {
+            return self.err(format!("Could not save {}: {e}", path.display()));
+        }
+        self.add_entry(link, &rel);
+        let meta = std::fs::metadata(&path).ok().and_then(|m| Some((m.modified().ok()?, m.len())));
+        match f.view.filter(|v| self.t().is_some_and(|t| t.view == *v)) {
+            Some(v) => {
+                self.bind_script(ScriptRef::File { link, rel: rel.clone() }, v, f.body.clone());
+                if let Some(b) = self.tm().and_then(|t| t.script.as_mut()) {
+                    b.disk = meta;
+                }
+            }
+            None => {
+                self.library.push_recent(ScriptRef::File { link, rel: rel.clone() });
+                self.save_library();
+            }
+        }
+        self.mark_seen(link, &rel, meta);
+        self.ok(format!("Saved {file} to {}", if l.name.is_empty() { l.path.display().to_string() } else { l.name.clone() }));
+        if f.kind == "sql" && !db::redact_sql(&f.body).1.is_empty() {
+            self.warn("Saved, but the script holds a password in plain text in the file.");
+        }
+    }
+
     pub(in crate::app) fn save_dialog(&mut self, ui: &mut egui::Ui, f: &mut SaveForm, keep: &mut bool) {
         ui.set_width(520.0);
         dialog_head(ui, &Head::new("Save to library").sub(f.head.clone()).glyph(paint_book));
@@ -174,7 +240,17 @@ impl App {
                         r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "New folder name"));
                     });
                 }
-                // B2 adds the File row here when the folder chosen is a linked one.
+                if let Some(l) = f.link.and_then(|id| self.library.links.iter().find(|l| l.id == id)) {
+                    let ext = kind_ext(&f.kind);
+                    let default = disk::file_name(f.name.trim(), ext);
+                    rows.row("File", "", |ui| {
+                        let r = ui.add(egui::TextEdit::singleline(&mut f.file).font(egui::TextStyle::Monospace).hint_text(default).desired_width(ui.available_width()));
+                        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "File name"));
+                    });
+                    if !l.exts.iter().any(|e| e == ext) {
+                        rows.full(|ui| field_note(ui, &format!("{} does not show .{ext} files.", l.name), ALERT()));
+                    }
+                }
             });
             let (caption, note) = match f.kind.as_str() {
                 "sql" => ("Statement", format!("the whole script  ·  {} lines", f.body.lines().count().max(1))),
@@ -195,11 +271,18 @@ impl App {
                 });
             });
             let folder = if f.new_folder.is_some() { None } else { f.folder };
-            if f.new_folder.is_none() && !name.is_empty() && same_place(&self.library, f, &name, folder).is_some() {
+            if let Some(l) = f.link.and_then(|id| self.library.links.iter().find(|l| l.id == id)) {
+                let typed = f.file.trim();
+                let file = disk::file_name(if typed.is_empty() { name.as_str() } else { typed }, kind_ext(&f.kind));
+                if !name.is_empty() && l.path.join(&f.dir).join(&file).exists() {
+                    field_note(ui, &format!("Replaces {file} in this folder."), WARNING());
+                }
+            } else if f.new_folder.is_none() && !name.is_empty() && same_place(&self.library, f, &name, folder).is_some() {
                 field_note(ui, &format!("Replaces the saved \"{name}\" in this folder."), WARNING());
             }
         });
-        let ok = !name.is_empty() && !new_folder_empty;
+        let linked_ok = f.link.is_none_or(|id| self.library.links.iter().find(|l| l.id == id).is_some_and(|l| l.exts.iter().any(|e| e == kind_ext(&f.kind))));
+        let ok = !name.is_empty() && !new_folder_empty && linked_ok;
         let mut save = false;
         dialog_foot(ui, |ui| {
             save = ui.add_enabled(ok, primary_button(ui, "Save", PRIMARY())).clicked() || (enter && ok);
@@ -219,16 +302,29 @@ impl App {
     fn folder_combo(&mut self, ui: &mut egui::Ui, f: &mut SaveForm) {
         let rows = folder_rows(&self.library);
         let name_of = |id: u64| self.library.folders.iter().find(|x| x.id == id).map(|x| x.name.clone()).unwrap_or_default();
-        let shown = match (&f.new_folder, f.folder) {
-            (Some(_), _) => "New folder".to_string(),
-            (None, Some(id)) => name_of(id),
-            (None, None) => "No folder".to_string(),
+        let link_name = |id: u64| self.library.links.iter().find(|l| l.id == id).map(|l| if l.name.is_empty() { l.path.display().to_string() } else { l.name.clone() }).unwrap_or_default();
+        let shown = match (&f.new_folder, f.folder, f.link) {
+            (_, _, Some(id)) if f.dir.as_os_str().is_empty() => link_name(id),
+            (_, _, Some(id)) => format!("{} / {}", link_name(id), f.dir.display()),
+            (Some(_), _, _) => "New folder".to_string(),
+            (None, Some(id), _) => name_of(id),
+            (None, None, _) => "No folder".to_string(),
         };
+        // The linked folders the script can be written to: used on its connection and showing files of its kind.
+        let engine = self.conn(f.conn).map(|c| c.meta.engine);
+        let linked: Vec<(u64, String, Vec<PathBuf>)> = self
+            .library
+            .links
+            .iter()
+            .filter(|l| engine.is_some_and(|e| format::fits(l, &f.kind, f.conn, e)))
+            .map(|l| (l.id, link_name(l.id), self.lib_ui.scans.get(&l.id).map(link_dirs).unwrap_or_default()))
+            .collect();
         egui::ComboBox::from_id_salt("save-folder").width(ui.available_width()).selected_text(shown).show_ui(ui, |ui| {
             menu_look(ui);
             ui.set_min_width(260.0);
-            // LINKED FOLDERS: filled by the linked folders' stream, which lists them here.
-            section_head(ui, "IN QUARRY", None);
+            if !linked.is_empty() {
+                section_head(ui, "LINKED FOLDERS", None);
+            }
             let pick = |ui: &mut egui::Ui, label: &str, depth: usize, on: bool| -> bool {
                 let (row, _) = pop_row(ui, 28.0);
                 let (p, rect) = (ui.painter(), row.rect);
@@ -241,18 +337,34 @@ impl App {
                 row.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Folder {label}")));
                 row.clicked()
             };
+            for (id, name, dirs) in &linked {
+                if pick(ui, name, 0, f.link == Some(*id) && f.dir.as_os_str().is_empty()) {
+                    (f.link, f.dir, f.folder, f.new_folder) = (Some(*id), PathBuf::new(), None, None);
+                    ui.close();
+                }
+                for d in dirs {
+                    let label = d.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    if pick(ui, &label, d.components().count(), f.link == Some(*id) && f.dir == *d) {
+                        (f.link, f.dir, f.folder, f.new_folder) = (Some(*id), d.clone(), None, None);
+                        ui.close();
+                    }
+                }
+            }
+            if !linked.is_empty() {
+                section_head(ui, "IN QUARRY", None);
+            }
             for (id, depth) in &rows {
-                if pick(ui, &name_of(*id), *depth, f.new_folder.is_none() && f.folder == Some(*id)) {
-                    (f.folder, f.new_folder) = (Some(*id), None);
+                if pick(ui, &name_of(*id), *depth, f.link.is_none() && f.new_folder.is_none() && f.folder == Some(*id)) {
+                    (f.folder, f.new_folder, f.link) = (Some(*id), None, None);
                     ui.close();
                 }
             }
-            if pick(ui, "No folder", 0, f.new_folder.is_none() && f.folder.is_none()) {
-                (f.folder, f.new_folder) = (None, None);
+            if pick(ui, "No folder", 0, f.link.is_none() && f.new_folder.is_none() && f.folder.is_none()) {
+                (f.folder, f.new_folder, f.link) = (None, None, None);
                 ui.close();
             }
             if pick(ui, "New folder…", 0, false) {
-                (f.folder, f.new_folder) = (None, Some(String::new()));
+                (f.folder, f.new_folder, f.link) = (None, Some(String::new()), None);
                 ui.close();
             }
         });

@@ -49,7 +49,12 @@ impl App {
                 }
                 let (Some(dir), Some(file)) = (path.parent(), path.file_name().and_then(|f| f.to_str())) else { return };
                 match write_atomic(dir, file, &bytes) {
-                    Ok(()) => self.ok(format!("{file} restored.")),
+                    Ok(()) => {
+                        // The folder it came from shows the file again at the next scan.
+                        let links: Vec<u64> = self.library.links.iter().filter(|l| path.starts_with(&l.path)).map(|l| l.id).collect();
+                        self.lib_ui.rescan.extend(links);
+                        self.ok(format!("{file} restored."));
+                    }
                     Err(e) => self.err(format!("Could not restore {}: {e}", path.display())),
                 }
             }
