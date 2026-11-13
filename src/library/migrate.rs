@@ -126,4 +126,31 @@ mod tests {
         let l = run(vec![("junk", vec![entry("a", "{}", None, None)]), ("5/#sql", vec![entry("b", "", None, Some("SELECT 1")), entry("c", "{}", None, None)])]);
         assert_eq!(l.scripts.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["b"]);
     }
+
+    #[test]
+    fn short_keys_give_scripts_with_what_they_name() {
+        // A key with only a connection, or a database and no collection, still keeps its entries: the script opens with a
+        // note that it names no collection instead of being lost.
+        let l = run(vec![("1", vec![entry("a", "{}", None, None)]), ("2/shop", vec![entry("b", "{}", None, None)]), ("3/shop/", vec![entry("c", "{}", None, None)])]);
+        let by = |n: &str| l.scripts.iter().find(|s| s.name == n).unwrap();
+        assert_eq!((by("a").conn, by("a").db.as_str(), by("a").coll.as_str()), (1, "", ""));
+        assert_eq!((by("b").kind.as_str(), by("b").db.as_str(), by("b").coll.as_str()), ("filter", "shop", ""));
+        assert_eq!((by("c").db.as_str(), by("c").coll.as_str()), ("shop", ""));
+    }
+
+    #[test]
+    fn sql_wins_over_a_pipeline_and_an_unnamed_entry_gets_a_name() {
+        let l = run(vec![("1/shop/orders", vec![entry("both", "", Some("[]"), Some("SELECT 1")), entry("", "{ a: 1 }", None, None), entry("empty", "", None, None)])]);
+        let both = l.scripts.iter().find(|s| s.name == "both").unwrap();
+        assert_eq!((both.kind.as_str(), both.body.as_str()), ("sql", "SELECT 1"));
+        assert!(l.scripts.iter().any(|s| s.name == "Untitled" && s.body == "{ a: 1 }"), "{:?}", l.scripts.iter().map(|s| &s.name).collect::<Vec<_>>());
+        // An empty filter is still a query someone saved, with its sort and projection.
+        assert!(l.scripts.iter().any(|s| s.name == "empty"));
+    }
+
+    #[test]
+    fn a_duplicate_inside_one_key_is_imported_once() {
+        let l = run(vec![("1/shop/orders", vec![entry("q", "{}", None, None), entry("q", "{}", None, None)])]);
+        assert_eq!(l.scripts.len(), 1);
+    }
 }

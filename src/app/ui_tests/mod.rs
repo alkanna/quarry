@@ -16,6 +16,7 @@ mod conn_cert;
 mod conn_cloudsql;
 mod conns_panel;
 mod library_linked;
+mod library_open;
 mod library_panel;
 mod library_save;
 mod mongo_edit;
