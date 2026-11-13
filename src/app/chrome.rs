@@ -1,6 +1,7 @@
 //! The window frame around the views: top bar, tab strip, status bar, toasts and keyboard shortcuts.
 
 use super::*;
+use crate::ui::dnd;
 
 
 impl App {
@@ -457,6 +458,7 @@ impl App {
         let mut many: Option<(usize, TabClose)> = None;
         let mut reopen = false;
         let mut search = None;
+        let mut tab_move: Option<dnd::Move> = None;
         let has_closed = !self.closed.is_empty();
         const TAB_MIN_W: f32 = 120.0;
         const PLUS_W: f32 = 32.0;
@@ -511,73 +513,84 @@ impl App {
                 .max_width(view_w)
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        for (i, (t, title)) in self.tabs.iter().zip(titles).enumerate() {
-                            let active = i == self.cur;
-                            let (rect, resp) = ui.allocate_exact_size(egui::vec2(widths[i], TAB_STRIP_H), Sense::click());
-                            let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-                            if active && moved {
-                                resp.scroll_to_me(None);
-                            }
-                            let p = ui.painter();
-                            let hovered = resp.hovered();
-                            if active {
-                                // The page's fill and an accent underline, covering the strip's bottom line
-                                // so the tab joins what it shows.
-                                p.rect_filled(rect, 0, BG());
-                                p.rect_filled(egui::Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 2.0), rect.max), 0, PRIMARY());
-                            } else {
-                                p.rect_filled(rect.with_max_y(rect.bottom() - 1.0), 0, hover_fill(state_of(&resp)));
-                            }
-                            p.vline(rect.right() - 0.5, rect.shrink2(egui::vec2(0.0, 7.0)).y_range(), Stroke::new(1.0, LINE()));
-                            let clip = egui::Rect::from_min_max(rect.min, egui::pos2(rect.right() - 28.0, rect.bottom()));
-                            let name = if active { BRIGHT() } else if hovered { TEXT() } else { MUTED() };
-                            p.with_clip_rect(clip.intersect(p.clip_rect())).galley(egui::pos2(rect.left() + 14.0, rect.center().y - title.size().y / 2.0), title, name);
-                            let xr = egui::Rect::from_center_size(egui::pos2(rect.right() - 14.0, rect.center().y), egui::vec2(16.0, 16.0));
-                            let xresp = ui.interact(xr, ui.scope_id().with(("close", i)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
-                            if active || hovered || xresp.hovered() {
-                                if xresp.is_pointer_button_down_on() {
-                                    ui.painter().rect_filled(xr, R_SM, PRESSED());
-                                } else if xresp.hovered() {
-                                    ui.painter().rect_filled(xr, R_SM, if active { HOVER() } else { PRESSED() });
-                                }
-                                let c = xr.center();
-                                let s = Stroke::new(1.4, if xresp.hovered() { BRIGHT() } else { MUTED() });
-                                ui.painter().line_segment([c + egui::vec2(-3.5, -3.5), c + egui::vec2(3.5, 3.5)], s);
-                                ui.painter().line_segment([c + egui::vec2(3.5, -3.5), c + egui::vec2(-3.5, 3.5)], s);
-                            }
-                            let conn_name = self.conn(t.sel.conn).map_or("", |c| c.meta.name.as_str());
-                            let place = if t.sel.schema.is_empty() || t.sel.coll.is_empty() { t.sel.db.clone() } else { format!("{} / {}", t.sel.db, t.sel.schema) };
-                            let resp = resp.on_hover_text(format!("{conn_name} / {place} / {}\nMiddle-click closes, right-click for more", self.tab_name(i)));
-                            resp.context_menu(|ui| {
-                                menu_look(ui);
-                                ui.set_min_width(190.0);
-                                for (label, what, enabled) in [
-                                    ("Close", TabClose::This, true),
-                                    ("Close others", TabClose::Others, n > 1),
-                                    ("Close tabs to the left", TabClose::Left, i > 0),
-                                    ("Close tabs to the right", TabClose::Right, i + 1 < n),
-                                    ("Close all", TabClose::All, true),
-                                ] {
-                                    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
-                                        many = Some((i, what));
-                                    }
-                                }
-                                ui.separator();
-                                if ui.button("Duplicate").clicked() {
-                                    pick = Some(i);
-                                    dup = true;
-                                }
-                                if ui.add_enabled(has_closed, egui::Button::new("Reopen closed tab").shortcut_text("Cmd+Shift+T")).clicked() {
-                                    reopen = true;
-                                }
-                            });
-                            if xresp.clicked() || resp.middle_clicked() {
-                                close = Some(i);
-                            } else if resp.clicked() {
-                                pick = Some(i);
-                            }
+                    // Tabs drag sideways to reorder; the engine's drag sits under each tab's own click, so a click picks,
+                    // a middle click closes and the right click opens the menu as before.
+                    let keys: Vec<egui::Id> = self.tabs.iter().map(|t| egui::Id::unique(("tab", t.uid))).collect();
+                    tab_move = dnd::reorder(ui, egui::Id::unique("tab-strip"), dnd::Items::horizontal(&widths, TAB_STRIP_H).keys(&keys), |ui, i, st| {
+                        let t = &self.tabs[i];
+                        let title = titles[i].clone();
+                        let active = i == self.cur;
+                        let rect = ui.max_rect();
+                        let resp = ui.interact(rect, ui.scope_id().with("tab"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                        resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Tab, true, active, format!("Tab {}", self.tab_name(i))));
+                        if active && moved && !st.busy {
+                            resp.scroll_to_me(None);
                         }
+                        let p = ui.painter();
+                        let hovered = resp.hovered() && !st.busy;
+                        if active {
+                            // The page's fill and an accent underline, covering the strip's bottom line
+                            // so the tab joins what it shows.
+                            p.rect_filled(rect, 0, BG());
+                            p.rect_filled(egui::Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 2.0), rect.max), 0, PRIMARY());
+                        } else {
+                            p.rect_filled(rect.with_max_y(rect.bottom() - 1.0), 0, if st.lifted { PANEL() } else { hover_fill(if st.busy { 0 } else { state_of(&resp) }) });
+                        }
+                        if !st.lifted {
+                            p.vline(rect.right() - 0.5, rect.shrink2(egui::vec2(0.0, 7.0)).y_range(), Stroke::new(1.0, LINE()));
+                        }
+                        let clip = egui::Rect::from_min_max(rect.min, egui::pos2(rect.right() - 28.0, rect.bottom()));
+                        let name = if active { BRIGHT() } else if hovered || st.lifted { TEXT() } else { MUTED() };
+                        p.with_clip_rect(clip.intersect(p.clip_rect())).galley(egui::pos2(rect.left() + 14.0, rect.center().y - title.size().y / 2.0), title, name);
+                        if st.lifted {
+                            return resp;
+                        }
+                        let xr = egui::Rect::from_center_size(egui::pos2(rect.right() - 14.0, rect.center().y), egui::vec2(16.0, 16.0));
+                        let xresp = ui.interact(xr, ui.scope_id().with("close"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                        xresp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Close tab {}", self.tab_name(i))));
+                        if active || hovered || xresp.hovered() {
+                            if xresp.is_pointer_button_down_on() {
+                                ui.painter().rect_filled(xr, R_SM, PRESSED());
+                            } else if xresp.hovered() {
+                                ui.painter().rect_filled(xr, R_SM, if active { HOVER() } else { PRESSED() });
+                            }
+                            let c = xr.center();
+                            let s = Stroke::new(1.4, if xresp.hovered() { BRIGHT() } else { MUTED() });
+                            ui.painter().line_segment([c + egui::vec2(-3.5, -3.5), c + egui::vec2(3.5, 3.5)], s);
+                            ui.painter().line_segment([c + egui::vec2(3.5, -3.5), c + egui::vec2(-3.5, 3.5)], s);
+                        }
+                        let conn_name = self.conn(t.sel.conn).map_or("", |c| c.meta.name.as_str());
+                        let place = if t.sel.schema.is_empty() || t.sel.coll.is_empty() { t.sel.db.clone() } else { format!("{} / {}", t.sel.db, t.sel.schema) };
+                        let resp = resp.on_hover_text(format!("{conn_name} / {place} / {}\nDrag to reorder, middle-click closes, right-click for more", self.tab_name(i)));
+                        resp.context_menu(|ui| {
+                            menu_look(ui);
+                            ui.set_min_width(190.0);
+                            for (label, what, enabled) in [
+                                ("Close", TabClose::This, true),
+                                ("Close others", TabClose::Others, n > 1),
+                                ("Close tabs to the left", TabClose::Left, i > 0),
+                                ("Close tabs to the right", TabClose::Right, i + 1 < n),
+                                ("Close all", TabClose::All, true),
+                            ] {
+                                if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                                    many = Some((i, what));
+                                }
+                            }
+                            ui.separator();
+                            if ui.button("Duplicate").clicked() {
+                                pick = Some(i);
+                                dup = true;
+                            }
+                            if ui.add_enabled(has_closed, egui::Button::new("Reopen closed tab").shortcut_text("Cmd+Shift+T")).clicked() {
+                                reopen = true;
+                            }
+                        });
+                        if xresp.clicked() || resp.middle_clicked() {
+                            close = Some(i);
+                        } else if resp.clicked() {
+                            pick = Some(i);
+                        }
+                        resp
                     });
                 });
             // Outside the scroll area so it stays reachable when the strip overflows.
@@ -601,6 +614,15 @@ impl App {
             }
         });
         });
+        if let Some(m) = tab_move {
+            // The current tab stays current wherever it or the others move; nothing else is kept by tab index.
+            let c = self.cur;
+            self.cur = if c == m.from { m.to } else if m.from < c && m.to >= c { c - 1 } else if m.from > c && m.to <= c { c + 1 } else { c };
+            m.apply(&mut self.tabs);
+            self.tab_seen = Some(self.cur);
+            ui.ctx().request_repaint();
+            return;
+        }
         if pick.is_some() {
             // Scroll even when the picked tab was already active but scrolled out of view.
             self.tab_seen = None;
