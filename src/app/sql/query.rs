@@ -273,6 +273,10 @@ impl App {
         if t.sql.is_some() && t.sel.coll.is_empty() {
             return format!("Query {}", self.tabs[..=i].iter().filter(|x| x.sql.is_some() && x.sel.coll.is_empty()).count());
         }
+        // A Mongo Shell script opened from the library has no collection: the tab is named for its database.
+        if t.sql.is_none() && t.sel.coll.is_empty() && t.view == View::Shell {
+            return format!("Shell · {}", t.sel.db);
+        }
         t.sel.coll.clone()
     }
 
@@ -425,8 +429,8 @@ impl App {
         let (conn, free, schema) = (t.sel.conn, t.sel.coll.is_empty(), run_db(t));
         let running = t.sql.as_ref().is_some_and(|s| s.run_req != 0);
         let title = if free { self.tab_name(self.cur) } else { "Query".into() };
-        let lib: Vec<SavedQuery> = library_of(&self.prefs.library, &Self::sql_lib_key(conn), LibKind::Sql);
-        let (mut lib_new, mut lib_acts) = (std::mem::take(&mut self.new_lib), Vec::new());
+        let lib_pick = self.pick_data(PickKind::Sql);
+        let mut pick_acts = Vec::new();
         let (mut pick, mut load, mut picked) = (schema.clone(), None, false);
         let dialect = self.sql_dialect();
         let mut pg_schema = t_schema(self.t());
@@ -469,11 +473,11 @@ impl App {
                 })
                 .on_hover_text("History");
                 ui.add_space(6.0);
-                let button = library_menu(ui, &lib, &mut lib_new, LibMenu::Sql(dialect), false, &mut lib_acts);
+                let button = picker_button(ui, &lib_pick, false, &mut pick_acts);
                 self.demo_open_library(ui.ctx(), &button);
+                self.demo_open_picker(ui.ctx(), &button, "picker");
             });
         });
-        self.new_lib = lib_new;
         if let Some(s) = self.tm().and_then(|t| t.sql.as_mut()) {
             // Kept as typed: trimming here would eat a space the user is still typing. Every reader trims.
             s.run_schema = pg_schema;
@@ -528,26 +532,6 @@ impl App {
         if let Some(text) = load {
             self.sql_replace(&ctx, text, None);
         }
-        for a in lib_acts {
-            match a {
-                QAct::Load(q) => self.sql_replace(&ctx, q.sql.unwrap_or_default(), None),
-                QAct::Save(name) => {
-                    let sql = self.t().and_then(|t| t.sql.as_ref()).map(|s| s.query.clone()).unwrap_or_default();
-                    if sql.trim().is_empty() {
-                        self.warn("Nothing to save: the script is empty.");
-                    } else {
-                        let has_password = !db::redact_sql(&sql).1.is_empty();
-                        self.save_to_library(SavedQuery { name, sql: Some(sql), ..Default::default() });
-                        // Saved as typed, because a script with its password cut out would not run.
-                        if has_password {
-                            self.warn("Saved, but the script holds a password in plain text in the library file.");
-                        }
-                    }
-                }
-                QAct::Delete(name) => self.delete_sql_from_library(&name),
-                _ => {}
-            }
-        }
         if format {
             self.sql_format(&ctx);
         }
@@ -563,6 +547,8 @@ impl App {
         if run || run_all || explain {
             self.sql_run(run_all, explain);
         }
+        // Last, since opening a script may change the tab this frame was drawn for.
+        self.pick_acts(pick_acts);
     }
 
     pub(in crate::app) fn sql_editor_id(cur: usize) -> egui::Id {
@@ -927,8 +913,12 @@ impl App {
         // QUARRY_TEST_SQL=format shows the same script after Format.
         // QUARRY_TEST_SQL=library has two saved scripts and the menu open.
         if std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("library") {
-            let saved = |name: &str, sql: &str| SavedQuery { name: name.into(), sql: Some(sql.into()), ..Default::default() };
-            self.prefs.library.insert(Self::sql_lib_key(3), vec![saved("Late shipments", "SELECT o.id, o.created_at, s.carrier\nFROM orders o\nLEFT JOIN shipments s ON s.order_id = o.id\nWHERE o.status = 'paid' AND s.id IS NULL;"), saved("Revenue by tier", "SELECT tier, SUM(total) AS revenue FROM orders GROUP BY tier ORDER BY revenue DESC;")]);
+            let saved = |name: &str, sql: &str| crate::library::Script { name: name.into(), kind: "sql".into(), body: sql.into(), conn: 3, ..Default::default() };
+            let id = self.library.next_id();
+            self.library.scripts.push(crate::library::Script { id, ..saved("Late shipments", "SELECT o.id, o.created_at, s.carrier\nFROM orders o\nLEFT JOIN shipments s ON s.order_id = o.id\nWHERE o.status = 'paid' AND s.id IS NULL;") });
+            let id = self.library.next_id();
+            self.library.scripts.push(crate::library::Script { id, ..saved("Revenue by tier", "SELECT tier, SUM(total) AS revenue FROM orders GROUP BY tier ORDER BY revenue DESC;") });
+            self.library.recent = self.library.scripts.iter().map(|s| crate::library::ScriptRef::Saved(s.id)).collect();
         }
         let query = if std::env::var("QUARRY_TEST_SQL").as_deref() == Ok("format") { db::sql::format::format_script(raw, db::sql::Dialect::MySql).text } else { raw.to_string() };
         let query = query.as_str();

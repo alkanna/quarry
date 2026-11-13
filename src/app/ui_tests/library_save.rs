@@ -1,1 +1,205 @@
-//! UI tests of Cmd+S, the Save to library dialog and the quick pickers. Filled in by stream B1.
+//! UI tests of Cmd+S, the Save to library dialog and the quick pickers, on the offline demo.
+
+use super::*;
+use crate::library::ScriptRef;
+
+const CMD: egui::Modifiers = egui::Modifiers::COMMAND;
+
+/// The MySQL demo with an empty Query tab current.
+fn sql_query(a: &mut App) {
+    a.load_sql_demo();
+    a.sql_new_query(3, "shop".into());
+}
+
+/// The same with the demo's scripts in the library.
+fn sql_query_with_scripts(a: &mut App) {
+    sql_query(a);
+    a.demo_scripts();
+}
+
+fn set_query(ui: &mut UiApp, text: &str) {
+    let a = ui.h.state_mut();
+    let c = a.cur;
+    a.tabs[c].sql.as_mut().unwrap().query = text.into();
+}
+
+fn query(ui: &UiApp) -> String {
+    ui.app().t().and_then(|t| t.sql.as_ref()).map(|s| s.query.clone()).unwrap_or_default()
+}
+
+fn dialog_name(ui: &UiApp) -> Option<String> {
+    match &ui.app().modal {
+        Some(Modal::SaveScript(f)) => Some(f.name.clone()),
+        _ => None,
+    }
+}
+
+#[test]
+fn cmd_s_opens_the_dialog_and_saves_the_script_bound_to_the_tab() {
+    let Some(mut ui) = demo_ui(sql_query) else { return };
+    set_query(&mut ui, "SELECT 1");
+    ui.key(CMD, egui::Key::S);
+    assert_eq!(dialog_name(&ui).as_deref(), Some("Untitled"));
+    // The name starts focused: replace it.
+    ui.key(CMD, egui::Key::A);
+    ui.type_text("Late");
+    ui.click("Save");
+    assert!(ui.app().modal.is_none());
+    let lib = &ui.app().library;
+    assert_eq!(lib.scripts.len(), 1);
+    let s = &lib.scripts[0];
+    assert_eq!((s.name.as_str(), s.kind.as_str(), s.body.as_str(), s.conn, s.db.as_str()), ("Late", "sql", "SELECT 1", 3, "shop"));
+    assert_eq!(lib.recent, [ScriptRef::Saved(s.id)]);
+    assert!(ui.app().t().and_then(|t| t.script.as_ref()).is_some_and(|b| b.r == ScriptRef::Saved(s.id) && b.base == "SELECT 1"));
+}
+
+#[test]
+fn a_second_cmd_s_writes_back_without_a_dialog() {
+    let Some(mut ui) = demo_ui(sql_query) else { return };
+    set_query(&mut ui, "SELECT 1");
+    ui.key(CMD, egui::Key::S);
+    ui.click("Save");
+    set_query(&mut ui, "SELECT 2");
+    ui.key(CMD, egui::Key::S);
+    assert!(ui.app().modal.is_none(), "the bound script is written without asking");
+    let lib = &ui.app().library;
+    assert_eq!((lib.scripts.len(), lib.scripts[0].body.as_str()), (1, "SELECT 2"));
+    assert!(ui.app().t().and_then(|t| t.script.as_ref()).is_some_and(|b| b.base == "SELECT 2"));
+}
+
+#[test]
+fn saving_under_a_taken_name_in_the_same_folder_replaces_it() {
+    let Some(mut ui) = demo_ui(sql_query) else { return };
+    set_query(&mut ui, "SELECT 1");
+    ui.key(CMD, egui::Key::S);
+    ui.click("Save");
+    // Another tab, as an unsaved script with the same name.
+    ui.h.state_mut().sql_new_query(3, "shop".into());
+    set_query(&mut ui, "SELECT 9");
+    ui.key(CMD, egui::Key::S);
+    assert_eq!(dialog_name(&ui).as_deref(), Some("Untitled"));
+    ui.click("Save");
+    let lib = &ui.app().library;
+    assert_eq!((lib.scripts.len(), lib.scripts[0].body.as_str()), (1, "SELECT 9"));
+}
+
+#[test]
+fn cmd_s_with_staged_grid_edits_saves_only_the_edits() {
+    let Some(mut ui) = demo_ui(|a| {
+        a.load_sql_demo();
+        a.sql_demo_stage();
+    }) else { return };
+    assert!(!ui.app().drafts.is_empty());
+    ui.key(CMD, egui::Key::S);
+    assert!(!matches!(ui.app().modal, Some(Modal::SaveScript(_))), "the grid's Save took the key");
+    assert!(ui.app().library.scripts.is_empty());
+}
+
+#[test]
+fn cmd_s_with_a_document_draft_saves_only_the_draft() {
+    let Some(mut ui) = demo_ui(App::load_demo) else { return };
+    {
+        let a = ui.h.state_mut();
+        let t = &a.tabs[a.cur];
+        let old = t.docs[2].owned();
+        let mut new = old.clone();
+        new.insert("status", "refunded");
+        let key = format!("{}#{}", t.coll_key(), db::compact(old.get("_id").unwrap_or(&Bson::Null)));
+        let sel = t.sel.clone();
+        crate::app::drafts::stage_draft(&mut a.drafts, &key, &sel, &old, new);
+    }
+    ui.settle();
+    ui.key(CMD, egui::Key::S);
+    assert!(!matches!(ui.app().modal, Some(Modal::SaveScript(_))), "the document's Save took the key");
+    assert!(ui.app().library.scripts.is_empty());
+}
+
+#[test]
+fn a_recent_script_loads_its_text_into_the_empty_tab() {
+    let Some(mut ui) = demo_ui(sql_query_with_scripts) else { return };
+    let tabs = ui.app().tabs.len();
+    ui.click("Library 5");
+    ui.click("Script Late shipments");
+    assert!(query(&ui).starts_with("-- Paid orders that never shipped"));
+    assert_eq!(ui.app().tabs.len(), tabs, "an empty tab is reused, as a click on a table does");
+    assert!(ui.app().t().and_then(|t| t.script.as_ref()).is_some());
+}
+
+#[test]
+fn a_script_opens_beside_a_tab_that_holds_text() {
+    let Some(mut ui) = demo_ui(sql_query_with_scripts) else { return };
+    set_query(&mut ui, "SELECT 7");
+    let tabs = ui.app().tabs.len();
+    let id = ui.app().library.scripts.iter().find(|s| s.name == "Revenue by tier" && s.kind == "sql").map(|s| s.id).unwrap();
+    ui.h.state_mut().open_script(&ScriptRef::Saved(id), crate::app::library::open::How::Here);
+    ui.settle();
+    assert_eq!(ui.app().tabs.len(), tabs + 1);
+    assert!(query(&ui).starts_with("SELECT tier"));
+    // The first tab kept what was typed there.
+    let first = ui.app().tabs.iter().filter_map(|t| t.sql.as_ref()).any(|s| s.query == "SELECT 7");
+    assert!(first);
+}
+
+#[test]
+fn saving_from_the_shell_makes_a_shell_script() {
+    let Some(mut ui) = demo_ui(App::load_demo) else { return };
+    {
+        let a = ui.h.state_mut();
+        let c = a.cur;
+        a.tabs[c].view = View::Shell;
+        a.tabs[c].shell.code = "async function run() {\n  return await orders.count();\n}".into();
+    }
+    ui.settle();
+    ui.key(CMD, egui::Key::S);
+    assert!(matches!(ui.app().modal, Some(Modal::SaveScript(_))));
+    ui.click("Save");
+    let s = &ui.app().library.scripts[0];
+    assert_eq!((s.kind.as_str(), s.conn, s.db.as_str()), ("shell", 1, "shop"));
+    assert!(s.body.contains("orders.count"));
+}
+
+#[test]
+fn a_shell_script_opens_in_a_tab_with_no_collection_named_for_the_database() {
+    let Some(mut ui) = demo_ui(App::load_demo) else { return };
+    ui.h.state_mut().demo_scripts();
+    let id = ui.app().library.scripts.iter().find(|s| s.kind == "shell" && s.conn == 1).map(|s| s.id).unwrap();
+    let before = ui.app().tabs.len();
+    ui.h.state_mut().open_script(&ScriptRef::Saved(id), crate::app::library::open::How::Here);
+    ui.settle();
+    let a = ui.app();
+    assert_eq!(a.tabs.len(), before + 1);
+    let t = a.t().unwrap();
+    assert!(t.view == View::Shell && t.sel.coll.is_empty() && t.sel.db == "shop");
+    assert_eq!(a.tab_name(a.cur), "Shell · shop");
+    assert!(t.shell.code.contains("Fill the empty notes"));
+    // The tab binds again to its script after a restart, and an edited one stays edited.
+    let bound = a.rebind(t, ScriptRef::Saved(id)).expect("bound again");
+    assert_eq!(bound.base, a.library.scripts.iter().find(|s| s.id == id).unwrap().body);
+}
+
+#[test]
+fn a_filter_script_opens_its_collection_with_the_query_set() {
+    let Some(mut ui) = demo_ui(App::load_demo) else { return };
+    ui.h.state_mut().demo_scripts();
+    let id = ui.app().library.scripts.iter().find(|s| s.kind == "filter" && s.name == "Pending orders").map(|s| s.id).unwrap();
+    ui.h.state_mut().open_script(&ScriptRef::Saved(id), crate::app::library::open::How::NewTab);
+    ui.settle();
+    let t = ui.app().t().unwrap();
+    assert!(t.view == View::Documents);
+    assert_eq!((t.sel.coll.as_str(), t.filter_txt.as_str()), ("orders", "{ status: 'pending' }"));
+}
+
+#[test]
+fn the_old_saved_queries_move_into_the_library_once() {
+    let Some(mut ui) = demo_ui(App::load_demo) else { return };
+    let a = ui.h.state_mut();
+    a.prefs.library.insert("3/#sql".into(), vec![SavedQuery { name: "Old".into(), sql: Some("SELECT 1".into()), ..Default::default() }]);
+    a.prefs.library.insert("1/shop/orders".into(), vec![SavedQuery { name: "Paid".into(), filter: "{ status: 'paid' }".into(), ..Default::default() }]);
+    a.migrate_library();
+    a.migrate_library();
+    let lib = &a.library;
+    assert_eq!(lib.scripts.len(), 2);
+    assert_eq!(lib.scripts.iter().map(|s| s.kind.as_str()).collect::<std::collections::BTreeSet<_>>().into_iter().collect::<Vec<_>>(), ["filter", "sql"]);
+    // ui.json keeps its copy for an older build.
+    assert_eq!(a.prefs.library.len(), 2);
+}

@@ -4,7 +4,7 @@
 #![allow(dead_code)]
 
 use super::*;
-use crate::library::Library;
+use crate::library::{Library, ScriptRef};
 
 pub(super) mod link_dialog;
 pub(super) mod linked;
@@ -17,7 +17,11 @@ pub(super) mod save_dialog;
 /// the others, so merging them stays free of conflicts.
 #[derive(Default)]
 pub(super) struct LibUi {
-    // B1: the script waiting for its connection to be ready, the quick picker.
+    // B1: the script waiting for its connection to be ready, the folder the Save dialog offers first.
+    /// A script asked for while its connection was not ready: opened by `library_tick` once it is, dropped if it fails.
+    pub(super) pending: Option<(ScriptRef, open::How)>,
+    /// The folder the last save went to, which the Save dialog offers first.
+    pub(super) last_folder: Option<u64>,
 
     // B3: the panel's open folders, selection, search and drags.
     pub(in crate::app) panel: panel::PanelUi,
@@ -60,7 +64,57 @@ impl App {
 
     /// Called every frame from `logic()`: scheduled library work, such as opening a script once its connection is ready
     /// and rescanning linked folders. Timers use egui time and anything that changes asks for a repaint.
-    pub(super) fn library_tick(&mut self, _ctx: &egui::Context) {}
+    pub(super) fn library_tick(&mut self, _ctx: &egui::Context) {
+        self.library_pending();
+    }
+
+    /// Opens the script that waited for its connection, once the connection is ready.
+    fn library_pending(&mut self) {
+        let Some((r, how)) = self.lib_ui.pending.clone() else { return };
+        // A linked file is the linked folders' business; its stream applies its own pending opens.
+        let conn = match &r {
+            ScriptRef::Saved(id) => self.library.scripts.iter().find(|s| s.id == *id).map(|s| s.conn),
+            ScriptRef::File { .. } => return,
+        };
+        let Some(conn) = conn.filter(|c| self.conn(*c).is_some()) else {
+            self.lib_ui.pending = None;
+            return;
+        };
+        let state = self.conn(conn).map(|c| match c.status {
+            Status::Ready => Some(true),
+            Status::Failed(_) => Some(false),
+            _ => None,
+        });
+        match state.flatten() {
+            Some(true) => {
+                self.lib_ui.pending = None;
+                self.open_script(&r, how);
+            }
+            Some(false) => {
+                self.lib_ui.pending = None;
+                self.warn("The script was not opened: its connection failed.");
+            }
+            None => {}
+        }
+    }
+
+    /// Fills an empty library from the saved queries of ui.json, once: library.json is absent and the old map is not.
+    /// The old map stays in ui.json, frozen, for an older build.
+    pub(super) fn migrate_library(&mut self) {
+        if self.prefs.library.is_empty() {
+            return;
+        }
+        let old: Vec<(String, Vec<crate::library::migrate::OldEntry>)> = self
+            .prefs
+            .library
+            .iter()
+            .map(|(k, v)| (k.clone(), v.iter().map(|q| crate::library::migrate::OldEntry { name: q.name.clone(), filter: q.filter.clone(), sort: q.sort.clone(), project: q.project.clone(), pipeline: q.pipeline.clone(), sql: q.sql.clone() }).collect()))
+            .collect();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        if crate::library::migrate::migrate_into(&mut self.library, &old, now) > 0 {
+            self.save_library();
+        }
+    }
 }
 
 #[cfg(test)]

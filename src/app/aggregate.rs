@@ -144,11 +144,10 @@ impl App {
     pub(super) fn aggregate(&mut self, ui: &mut egui::Ui) {
         let mut run = false;
         let mut explain = false;
-        let key = self.col_key(false);
-        let agg_lib: Vec<SavedQuery> = library_of(&self.prefs.library, &key, LibKind::Pipeline);
-        let mut agg_acts = Vec::new();
+        let pick = self.pick_data(PickKind::Pipeline);
+        let mut pick_acts = Vec::new();
+        let mut demo_pick = None;
         let mut code_lang = None;
-        let mut agg_new = std::mem::take(&mut self.new_lib);
         let mut stage = None;
         let mut sacts: Vec<StageAct> = Vec::new();
         self.sync_stages();
@@ -174,7 +173,7 @@ impl App {
                     ui.checkbox(&mut auto_now, "Auto preview").on_hover_text("Preview each stage a second after you stop typing. Every preview runs two read-only aggregations on the server.");
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    library_menu(ui, &agg_lib, &mut agg_new, LibMenu::Pipeline, false, &mut agg_acts);
+                    demo_pick = Some(picker_button(ui, &pick, false, &mut pick_acts));
                 });
             });
             if builder {
@@ -255,23 +254,11 @@ impl App {
         if builder && unsynced.is_none() {
             self.pump_previews(ui.ctx());
         }
-        self.new_lib = agg_new;
         if let Some(l) = code_lang {
             self.show_code(l, false);
         }
-        for a in agg_acts {
-            match a {
-                QAct::Load(q) => {
-                    self.tabs[self.cur].agg_txt = q.pipeline.unwrap_or_default();
-                    run = true;
-                }
-                QAct::Save(name) => {
-                    let pipeline = Some(self.tabs[self.cur].agg_txt.clone());
-                    self.save_to_library(SavedQuery { name, pipeline, ..Default::default() });
-                }
-                QAct::Delete(name) => self.delete_from_library(&name, true),
-                _ => {}
-            }
+        if let Some(b) = demo_pick {
+            self.demo_open_picker(ui.ctx(), &b, "picker-agg");
         }
         let t = self.tm().unwrap();
         if let (Some(i), false) = (stage, run) && let Some(p) = db::parse_pipeline(&t.agg_txt).ok().and_then(|p| db::stage_preview(&p, i)) {
@@ -297,6 +284,8 @@ impl App {
         if !builder || has_results {
             self.results(ui, true);
         }
+        // Last, since opening a script may change the tab this frame was drawn for.
+        self.pick_acts(pick_acts);
     }
 
     /// Rebuilds the builder's stages when the pipeline text changed elsewhere (Text mode, the

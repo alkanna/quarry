@@ -677,7 +677,10 @@ impl App {
         if matches!(state, "panel" | "all" | "search" | "empty" | "menu" | "folder-menu" | "drag") {
             self.demo_library_panel(state);
         }
-        // B1: its states go in a block of their own below this line.
+        // B1: save, picker, picker-docs, picker-shell (picker.rs).
+        if self.demo_library_quick(state) {
+            return;
+        }
         // B2: its states go in a block of their own below B1's.
     }
 

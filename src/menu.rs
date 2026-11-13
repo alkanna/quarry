@@ -110,6 +110,8 @@ impl MenuBar {
             Some(("Open Collection…", key(CMD, Key::K))),
             Some(("Reopen Closed Tab", key(CMD_SHIFT, Key::T))),
             None,
+            Some(("Save to Library…", key(CMD, Key::S))),
+            None,
             Some(("Insert Document…", Act::Insert)),
             Some(("Export…", Act::Export)),
             None,

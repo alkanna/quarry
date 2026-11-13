@@ -73,6 +73,9 @@ impl App {
         // Cmd+S reaches the library arm of this function only when no page handler took it: staged SQL grid edits and document
         // drafts consume it where they draw, so they win. A new page handler of Cmd+S must consume the key too, or its press
         // would also open the Save dialog.
+        if k(cmd, Key::S) && !self.tabs.is_empty() {
+            self.save_script();
+        }
         // Extra Shift and Alt still match a plain Cmd shortcut, so the longer combos go first.
         if k(cmd | shift, Key::T) {
             self.reopen_tab();

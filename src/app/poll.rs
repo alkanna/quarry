@@ -727,6 +727,10 @@ impl App {
         if self.tabs.get(i).is_some_and(|t| t.sql.is_some()) {
             return self.reload_sql(i);
         }
+        // A Shell tab opened from the library has no collection to read.
+        if self.tabs.get(i).is_some_and(|t| t.sel.coll.is_empty()) {
+            return;
+        }
         let Some(target) = self.tabs.get(i).and_then(|t| self.target_for(&t.sel)) else { return };
         // Each answer is matched to its tab by id; a slower older one never overwrites a newer one.
         self.req += 1;

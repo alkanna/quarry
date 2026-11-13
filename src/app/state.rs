@@ -1404,9 +1404,6 @@ pub(super) enum QAct {
     Filter(String),
     Sort(String),
     Project(String),
-    Load(SavedQuery),
-    Save(String),
-    Delete(String),
 }
 
 pub(super) enum TreeAct {

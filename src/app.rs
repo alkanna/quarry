@@ -69,6 +69,7 @@ use config::*;
 #[allow(unused_imports)]
 use groups::{Group, Groups, Place};
 use restore::Restore;
+use library::picker::{PickKind, picker_button};
 use documents::*;
 use shell::*;
 use shell_attach::*;
@@ -189,7 +190,6 @@ pub struct App {
     #[cfg(target_os = "macos")]
     menu_acts: Vec<crate::menu::Act>,
     new_pkg: String,
-    new_lib: String,
     /// Views per namespace, shown differently in the sidebar.
     views: Views,
     /// Tables and columns of SQL databases, per (connection, database), for autocomplete. Loaded when a
@@ -376,7 +376,6 @@ impl App {
             #[cfg(target_os = "macos")]
             menu_acts: Vec::new(),
             new_pkg: String::new(),
-            new_lib: String::new(),
             views: Views::default(),
             sql_schema: HashMap::new(),
             sql_rows: HashMap::new(),
@@ -545,9 +544,14 @@ impl App {
             }
             let alive: Vec<u64> = metas.iter().map(|m| m.id).collect();
             let (groups, broken_groups) = groups::load_groups();
+            let library_existed = config_dir().join("library.json").exists();
             let (library, broken_library) = library::load_library();
             app.groups = groups;
             app.library = library;
+            // The first run with a library: the queries saved in ui.json move over, once. ui.json keeps them as they were.
+            if !library_existed {
+                app.migrate_library();
+            }
             // Connections removed since the last run leave their groups, but their scripts stay.
             if app.groups.prune(&alive) {
                 app.save_groups();
@@ -599,6 +603,12 @@ impl App {
                 if !stages.is_empty() && text_from_stages(&stages) == t.agg_txt {
                     t.stages_src = t.agg_txt.clone();
                     t.stages = stages;
+                }
+                // A tab opened from the library is bound to its script again, when the script is still there and the tab
+                // still shows the view the script is written in. Its base is the saved text, so edits made before the
+                // restart still show as edits.
+                if let Some(r) = st.script {
+                    t.script = app.rebind(&t, r);
                 }
                 app.tabs.push(t);
             }
