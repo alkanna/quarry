@@ -32,6 +32,7 @@ mod import;
 mod rail;
 mod indexes;
 mod log;
+mod mem;
 mod modals;
 mod palette;
 mod poll;

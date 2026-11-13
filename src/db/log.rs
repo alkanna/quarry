@@ -21,6 +21,11 @@ impl LogEntry {
         let at = std::time::SystemTime::now() - std::time::Duration::from_secs(secs_ago);
         LogEntry { conn, at, db: db.into(), name: name.into(), cmd: cmd.into(), ms: Some(ms), err: err.map(Into::into), req: 0 }
     }
+
+    /// About the bytes this entry holds, for the memory readout.
+    pub fn mem(&self) -> usize {
+        std::mem::size_of::<Self>() + self.cmd.len() + self.db.len() + self.name.len() + self.err.as_ref().map_or(0, String::len)
+    }
 }
 
 /// Entries kept. Tests run in parallel in one process and all write here, so a cap this low would drop a test's own
