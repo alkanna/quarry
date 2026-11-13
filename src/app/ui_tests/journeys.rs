@@ -58,9 +58,14 @@ impl UiApp {
         self.settle();
     }
 
-    /// Selects a row of the Library panel with a click, which hands the panel the keys.
+    /// Selects a row of the Library panel with a click, which hands the panel the keys. A tab bound to the script carries
+    /// its name too, so the row is the one furthest left, in the sidebar.
     fn library_row(&mut self, label: &str) {
-        self.click(label);
+        self.show(label);
+        self.settle();
+        let row = self.h.get_all_by_label(label).min_by(|a, b| a.rect().left().total_cmp(&b.rect().left())).expect("a row");
+        row.click();
+        self.settle();
         self.wait("the row to be selected", |a| a.lib_ui.panel.focus);
     }
 
