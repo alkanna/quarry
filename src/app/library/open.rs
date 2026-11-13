@@ -124,7 +124,7 @@ impl App {
                 Some(s) => s,
                 None => return self.warn("That script is no longer in the library."),
             },
-            // Linked files open through the linked folders' code, which fills this arm in.
+            // B2 wires here: read the file with `linked::read_script`, bind it, and open it like the kinds below.
             ScriptRef::File { .. } => return,
         };
         let Some(status_ready) = self.conn(s.conn).map(|c| c.status == Status::Ready) else {
@@ -218,8 +218,9 @@ impl App {
         if tt.body.trim().is_empty() && tt.sort.trim().is_empty() && tt.project.trim().is_empty() {
             return self.warn("Nothing to save: the script is empty.");
         }
+        // B2 wires here: `if self.save_linked() { return; }` writes a tab bound to a linked file before the code below.
         let bound = self.t().and_then(|t| t.script.as_ref()).filter(|b| b.view == tt.view).map(|b| b.r.clone());
-        // A bound linked file is written here by the linked folders' code; until then it takes the dialog.
+        // A bound linked file is written by the linked folders' code; until then it takes the dialog.
         if let Some(ScriptRef::Saved(id)) = bound
             && let Some(i) = self.library.scripts.iter().position(|s| s.id == id)
         {
