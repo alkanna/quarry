@@ -647,19 +647,19 @@ impl App {
         let mut close = false;
         let mut pick: Option<Instance> = None;
         let mut act = None;
-        let r = dialog(egui::Id::unique(("quarry-layer", "cloud-sql"))).show(ctx, |ui| {
-            ui.set_width(BROWSER_W);
-            ui.horizontal(|ui| {
-                dialog_title(ui, "Add from Cloud SQL");
-                if let Some(a) = self.cloud.account() {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(RichText::new(a).monospace().size(TXT_SMALL).color(TEXT()));
-                        ui.label(RichText::new("gcloud account").size(TXT_SMALL).color(FAINT()));
-                    });
+        let r = banded(egui::Id::unique(("quarry-layer", "cloud-sql"))).show(ctx, |ui| {
+            ui.set_width(BROWSER_W + 40.0);
+            let sub = if b.change { "PostgreSQL instances your gcloud account can reach. Use puts one in the open form." } else { "PostgreSQL instances your gcloud account can reach. Use fills a new connection." };
+            let account = self.cloud.account();
+            dialog_head_with(ui, &Head::new("Add from Cloud SQL").sub(sub).glyph(glyphs::server), |ui| {
+                if let Some(a) = account {
+                    ui.label(RichText::new(a).monospace().size(TXT_SMALL).color(TEXT()));
+                    ui.label(RichText::new("gcloud account").size(TXT_SMALL).color(FAINT()));
                 }
             });
-            ui.label(RichText::new(if b.change { "PostgreSQL instances your gcloud account can reach. Use puts one in the open form." } else { "PostgreSQL instances your gcloud account can reach. Use fills a new connection." }).color(MUTED()));
-            ui.add_space(10.0);
+            let mut bd = body_begin(ui);
+            let outer = ui;
+            let ui = &mut bd.content_ui;
             ui.horizontal(|ui| {
                 let id = egui::Id::unique("cloud-sql-search");
                 let w = ui.available_width() - 260.0;
@@ -703,16 +703,16 @@ impl App {
                     });
                 }
             }
-            ui.add_space(10.0);
+            bd.end(outer);
+            let ui = outer;
             let shown = b.sel.as_ref().and_then(|n| self.cloud.instance(n));
             let foot = match shown {
                 Some(i) => format!("Only PostgreSQL instances are listed. Use saves {} {}.", i.connection_name, if i.iam { "with IAM sign-in on" } else { "with a database password" }),
                 None => "Only PostgreSQL instances are listed.".to_string(),
             };
-            ui.label(RichText::new(foot).size(TXT_SMALL).color(FAINT()));
-            ui.add_space(8.0);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            dialog_foot(ui, |ui| {
                 close = ui.button("Cancel").on_hover_text("Esc").clicked();
+                foot_note(ui, &foot);
             });
         });
         self.cloud_card_act(act, |a| a.cloud_load(true));

@@ -65,17 +65,14 @@ impl App {
         let large_change = p.map_or(0, |p| p.large_change);
         let undo_docs = self.agents.cfg.limits.undo_docs;
         let client = if ask.client.is_empty() { "An agent".to_string() } else { ask.client.clone() };
-        top_dialog(ctx, id).show(ctx, |ui| {
-            ui.set_width(w);
-            ui.horizontal(|ui| {
-                let title = if ask.gone { format!("{client} stopped waiting") } else { format!("{client} wants to {}", verb(&ask.tool)) };
-                dialog_title(ui, title);
-                if total > 1 {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(RichText::new(format!("1 of {total}")).size(TXT_SMALL).color(MUTED()));
-                    });
-                }
-            });
+        let r = top_banded(ctx, id).show(ctx, |ui| {
+            ui.set_width(w + 40.0);
+            let title = if ask.gone { format!("{client} stopped waiting") } else { format!("{client} wants to {}", verb(&ask.tool)) };
+            let sub = if total > 1 { format!("AI agent  ·  1 of {total} waiting") } else { "AI agent  ·  asks before it acts".to_string() };
+            dialog_head(ui, &Head::new(title).sub(sub).glyph(glyphs::shield).tone(if shell { ALERT() } else { WARNING() }));
+            let mut b = body_begin(ui);
+            let outer = ui;
+            let ui = &mut b.content_ui;
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 if let Some(c) = conn {
@@ -147,42 +144,47 @@ impl App {
                 }
             });
             ui.add_space(12.0);
-            ui.horizontal(|ui| {
-                let left = if ask.gone {
-                    "The agent stopped waiting".to_string()
-                } else if !awake {
-                    "Allow wakes up after 1 s".to_string()
+            b.end(outer);
+            let ui = outer;
+            let left = if ask.gone {
+                "The agent stopped waiting".to_string()
+            } else if !awake {
+                "Allow wakes up after 1 s".to_string()
+            } else {
+                let left = DENY_AFTER.saturating_sub(now.saturating_duration_since(ask.at)).as_secs();
+                format!("Denied in {}:{:02}", left / 60, left % 60)
+            };
+            dialog_foot(ui, |ui| {
+                if ask.gone {
+                    if ui.button("Close").clicked() {
+                        answer = Some(Answer::Close);
+                    }
+                    foot_note(ui, &left);
+                    return;
+                }
+                let (text, a, fill) = if ask.no_undo.is_some() {
+                    ("Allow without undo", Answer::WithoutUndo, ALERT())
+                } else if ask.why.unlock {
+                    ("Unlock writes and allow once", Answer::UnlockOnce, PRIMARY())
                 } else {
-                    let left = DENY_AFTER.saturating_sub(now.saturating_duration_since(ask.at)).as_secs();
-                    format!("Denied in {}:{:02}", left / 60, left % 60)
+                    ("Allow once", Answer::Once, PRIMARY())
                 };
-                ui.label(RichText::new(left).size(TXT_SMALL).color(FAINT()));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ask.gone {
-                        if ui.button("Close").clicked() {
-                            answer = Some(Answer::Close);
-                        }
-                        return;
-                    }
-                    let (text, a, fill) = if ask.no_undo.is_some() {
-                        ("Allow without undo", Answer::WithoutUndo, ALERT())
-                    } else if ask.why.unlock {
-                        ("Unlock writes and allow once", Answer::UnlockOnce, PRIMARY())
-                    } else {
-                        ("Allow once", Answer::Once, PRIMARY())
-                    };
-                    if ui.add_enabled(awake, primary_button(ui, text, fill)).clicked() && awake {
-                        answer = Some(a);
-                    }
-                    if ask.why.session_ok && ask.no_undo.is_none() && !ask.why.unlock && !shell && ui.add_enabled(awake, egui::Button::new("Allow for this session")).on_hover_text("Allows this kind of call on this connection until the agent disconnects").clicked() && awake {
-                        answer = Some(Answer::Session);
-                    }
-                    if ui.button("Deny").on_hover_text("Esc").clicked() {
-                        answer = Some(Answer::Deny);
-                    }
-                });
+                if ui.add_enabled(awake, primary_button(ui, text, fill)).clicked() && awake {
+                    answer = Some(a);
+                }
+                if ask.why.session_ok && ask.no_undo.is_none() && !ask.why.unlock && !shell && ui.add_enabled(awake, egui::Button::new("Allow for this session")).on_hover_text("Allows this kind of call on this connection until the agent disconnects").clicked() && awake {
+                    answer = Some(Answer::Session);
+                }
+                if ui.button("Deny").on_hover_text("Esc").clicked() {
+                    answer = Some(Answer::Deny);
+                }
+                foot_note(ui, &left);
             });
         });
+        // The header's close button answers like Esc.
+        if answer.is_none() && r.should_close() {
+            answer = Some(if ask.gone { Answer::Close } else { Answer::Deny });
+        }
         // The countdown, and Allow waking up.
         ctx.request_repaint_after(if awake { Duration::from_millis(500) } else { WAKE.saturating_sub(now.saturating_duration_since(shown)) });
         if let Some(a) = answer {

@@ -175,20 +175,20 @@ impl App {
         let body_h = (screen.height() - 200.0).clamp(300.0, 520.0);
         let scopes: Vec<(Option<u64>, String)> = std::iter::once((None, "All connections".to_string())).chain(self.conns.iter().filter(|c| self.agents.cfg.conn(c.meta.id).is_some() || w.scope == Some(c.meta.id)).map(|c| (Some(c.meta.id), c.meta.name.clone()))).collect();
         let layer = egui::Id::unique(("quarry-layer", "agents-rules"));
-        let r = top_dialog(ctx, layer).show(ctx, |ui| {
+        let r = top_banded(ctx, layer).show(ctx, |ui| {
             ui.set_width(width);
-            ui.horizontal(|ui| {
-                dialog_title(ui, "Data protection");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let opts: Vec<(Option<u64>, &str)> = scopes.iter().map(|(id, n)| (*id, n.as_str())).collect();
-                    let mut s = w.scope;
-                    segmented(ui, &mut s, &opts);
-                    if s != w.scope {
-                        (w.scope, w.sel) = (s, None);
-                    }
-                });
+            dialog_head_with(ui, &Head::new("Data protection").sub("What AI agents may read, and what they see masked").glyph(glyphs::shield), |ui| {
+                let opts: Vec<(Option<u64>, &str)> = scopes.iter().map(|(id, n)| (*id, n.as_str())).collect();
+                let mut s = w.scope;
+                segmented(ui, &mut s, &opts);
+                if s != w.scope {
+                    (w.scope, w.sel) = (s, None);
+                }
             });
-            ui.add_space(8.0);
+            let mut b = body_begin(ui);
+            let outer = ui;
+            let ui = &mut b.content_ui;
+            let width = ui.available_width();
             let left_w = (width * 0.62).floor();
             ui.horizontal_top(|ui| {
                 ui.allocate_ui_with_layout(egui::vec2(left_w, body_h), egui::Layout::top_down(egui::Align::Min), |ui| {
@@ -213,23 +213,22 @@ impl App {
                     self.rules_tester(ui, &mut w);
                 });
             });
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
+            b.end(outer);
+            let ui = outer;
+            dialog_foot(ui, |ui| {
                 let note = if w.tab == RulesTab::Custom { "Rules run top to bottom, after the presets. A rule that doesn't compile stops every agent call until it is fixed." } else { "Secrets first, then personal data, then your rules. A rule that doesn't compile stops every agent call until it is fixed." };
-                ui.label(RichText::new(note).size(TXT_SMALL).color(FAINT()));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Done").on_hover_text("Esc").clicked() {
-                        keep = false;
-                    }
-                    if w.tab == RulesTab::Custom && primary(ui, "Add rule", PRIMARY()).clicked() {
-                        let r = RuleSpec { on: false, matcher: Matcher::FieldPath(String::new()), scope: Vec::new(), action: Action::Replace("hidden".into()), mode: PresetMode::Hide };
-                        let list = self.rule_list(w.scope);
-                        list.push(r);
-                        w.sel = Some(list.len() - 1);
-                    }
-                    export = ui.button("Export…").clicked();
-                    import = ui.button("Import…").clicked();
-                });
+                if ui.button("Done").on_hover_text("Esc").clicked() {
+                    keep = false;
+                }
+                if w.tab == RulesTab::Custom && primary(ui, "Add rule", PRIMARY()).clicked() {
+                    let r = RuleSpec { on: false, matcher: Matcher::FieldPath(String::new()), scope: Vec::new(), action: Action::Replace("hidden".into()), mode: PresetMode::Hide };
+                    let list = self.rule_list(w.scope);
+                    list.push(r);
+                    w.sel = Some(list.len() - 1);
+                }
+                export = ui.button("Export…").clicked();
+                import = ui.button("Import…").clicked();
+                foot_note(ui, note);
             });
         });
         if before.is_some_and(|b| b != self.agents.cfg) {

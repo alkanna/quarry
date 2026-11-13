@@ -382,9 +382,10 @@ async function run() {
     /// The Attach dialog.
     pub(super) fn attach_dialog(&mut self, ui: &mut egui::Ui, f: &mut AttachForm, keep: &mut bool) {
         ui.set_width(600.0);
-        dialog_title(ui, "Attach a connection");
-        ui.label(RichText::new("Its data becomes a handle in this shell's scripts").size(TXT_SMALL).color(MUTED()));
-        ui.add_space(8.0);
+        dialog_head(ui, &Head::new("Attach a connection").sub("Its data becomes a handle in this shell's scripts").glyph(glyphs::plug));
+        let mut b = body_begin(ui);
+        let outer = ui;
+        let ui = &mut b.content_ui;
         let filter = ui.add(egui::TextEdit::singleline(&mut f.filter).hint_text("Filter saved connections").desired_width(f32::INFINITY));
         if !f.focused {
             filter.request_focus();
@@ -513,7 +514,9 @@ async function run() {
         ui.add_space(4.0);
         let can = ready && !f.db.is_empty() && problem.is_none() && !f.name.is_empty() && (!pg || !f.schema.is_empty());
         let mut attach = false;
-        dialog_actions(ui, |ui| {
+        b.end(outer);
+        let ui = outer;
+        dialog_foot(ui, |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 attach = ui.add_enabled(can, primary_button(ui, "Attach", PRIMARY())).clicked();
                 if ui.button("Cancel").on_hover_text("Esc").clicked() {

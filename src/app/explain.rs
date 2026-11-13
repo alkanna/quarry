@@ -5,8 +5,10 @@ use super::*;
 impl App {
     pub(super) fn explain_dialog(&mut self, ui: &mut egui::Ui, summary: &mut db::ExplainSummary, raw: &str, show_raw: &mut bool, keep: &mut bool) {
         ui.set_width(720.0);
-        dialog_title(ui, "Explain");
-        ui.label(RichText::new(format!("{} returned  ·  {} keys examined  ·  {} documents examined  ·  {} ms", group(&summary.returned.to_string()), group(&summary.keys.to_string()), group(&summary.docs.to_string()), summary.ms)).color(MUTED()));
+        dialog_head(ui, &Head::new("Explain").sub(format!("{} returned  ·  {} keys examined  ·  {} documents examined  ·  {} ms", group(&summary.returned.to_string()), group(&summary.keys.to_string()), group(&summary.docs.to_string()), summary.ms)).glyph(glyphs::list));
+        let mut b = body_begin(ui);
+        let outer = ui;
+        let ui = &mut b.content_ui;
         for w in &summary.warnings {
             ui.label(RichText::new(w.as_str()).color(WARNING()));
         }
@@ -44,7 +46,9 @@ impl App {
                 });
             }
         });
-        dialog_actions(ui, |ui| {
+        b.end(outer);
+        let ui = outer;
+        dialog_foot(ui, |ui| {
             if ui.button("Copy raw").clicked() {
                 ui.ctx().copy_text(raw.to_string());
             }

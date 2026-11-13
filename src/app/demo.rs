@@ -59,6 +59,16 @@ impl App {
         self.tabs.push(t);
         self.tabs.push(Tab::new(sel("analytics", "events")));
         self.cur = 1;
+        // QUARRY_TEST_CROWD=1 adds long collection names and thirty connections, for the one-line rows and the scrolling connections menu.
+        if std::env::var("QUARRY_TEST_CROWD").is_ok() {
+            if let Some((_, Some(c))) = self.conns[0].dbs.iter_mut().find(|d| d.0 == "shop") {
+                c.extend(["hydra_oauth2_obfuscated_authentication_session", "hydra_oauth2_trusted_jwt_bearer_issuer"].map(String::from));
+                c.sort();
+            }
+            for i in 0..30u64 {
+                self.conns.push(Conn::new(ConnMeta { id: 100 + i, name: format!("cluster-{i:02}"), ..Default::default() }, Status::Idle));
+            }
+        }
         // QUARRY_TEST_RAIL=1 adds the MySQL demo connection and a connecting one beside the Mongo demo, for the rail shortcuts.
         if std::env::var("QUARRY_TEST_RAIL").is_ok() && std::env::var("QUARRY_TEST_SQL").is_err() {
             // The SQL demo replaces the tabs, which the Mongo demo keeps.
@@ -324,6 +334,38 @@ impl App {
         if let Ok(v) = std::env::var("QUARRY_TEST_ERR") {
             self.demo_error(&v);
         }
+        // QUARRY_TEST_DIALOG=<name> opens one of the smaller dialogs, to check its look.
+        if let Ok(v) = std::env::var("QUARRY_TEST_DIALOG") {
+            self.demo_dialog(&v);
+        }
+    }
+
+    pub(super) fn demo_dialog(&mut self, which: &str) {
+        let sel = self.tabs[1].sel.clone();
+        let docs: Vec<Document> = self.tabs[1].decoded_docs().into_iter().take(3).collect();
+        self.modal = Some(match which {
+            "unlock" => Modal::Unlock(1, None),
+            "delete" => Modal::Delete(sel, docs),
+            "typed" => Modal::Typed { title: "Drop the collection orders in shop? Its 1,284 documents and 4 indexes are deleted for good.".into(), expect: "orders".into(), typed: "ord".into(), action: Danger::DropCollection },
+            "newcoll" => Modal::NewCollection { conn: 1, db: "shop".into(), name: "invoice_lines".into(), view: false, source: String::new(), pipeline: String::new() },
+            "newview" => Modal::NewCollection { conn: 1, db: "shop".into(), name: "orders_paid".into(), view: true, source: "orders".into(), pipeline: "[\n  { $match: { status: 'paid' } },\n  { $project: { total: 1, paidAt: 1 } }\n]".into() },
+            "rename" => Modal::RenameColl { conn: 1, db: "shop".into(), coll: "orders".into(), name: "orders_2024".into() },
+            "duplicate" => Modal::DuplicateColl { conn: 1, db: "shop".into(), coll: "orders".into(), name: "customers".into() },
+            "save" => {
+                let d = docs[0].clone();
+                let mut c = d.clone();
+                c.insert("status", "shipped");
+                c.insert("gift", true);
+                Modal::Save { tag: String::new(), changes: db::diff(&d, &c) }
+            }
+            "shell" => Modal::ShellWrite(vec!["deleteMany".into(), "drop".into()]),
+            "agg" => Modal::AggWrite(vec![]),
+            "column" => Modal::ColumnCustomize { key: String::new(), agg: false, col: "customer.name".into(), label: "Customer".into(), path: "customer.name".into() },
+            "text" => Modal::Text { title: "Query help".into(), body: "{ status: 'paid' }            exact value\n{ total: { $gt: 100 } }       comparison\n{ tags: { $in: ['a', 'b'] } } any of".into(), code: true },
+            "update" => Modal::UpdateMany { set_txt: "{ status: 'archived' }".into(), unset_txt: "note".into(), preview: None },
+            "undo" => Modal::Undo,
+            _ => return,
+        });
     }
 
     fn demo_error(&mut self, which: &str) {

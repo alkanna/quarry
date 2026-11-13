@@ -288,9 +288,10 @@ impl App {
         let has_sql = self.conn(conn).is_some_and(|c| c.sql.is_some());
         let schema = if pg { self.sel_schema(&sel) } else { base_db.clone() };
         ui.set_width(600.0);
-        dialog_title(ui, if f.from.is_some() { "Edit relation" } else { "Add relation" });
-        ui.label(RichText::new(&table).size(TXT_SMALL).color(MUTED()));
-        ui.add_space(8.0);
+        dialog_head(ui, &Head::new(if f.from.is_some() { "Edit relation" } else { "Add relation" }).sub(&table).glyph(glyphs::link));
+        let mut b = body_begin(ui);
+        let outer = ui;
+        let ui = &mut b.content_ui;
 
         let dbs: Vec<String> = if pg {
             // Every schema of this database that holds user objects, and the table's own.
@@ -532,7 +533,9 @@ impl App {
             }
         }
         let (mut stage, mut now) = (false, false);
-        dialog_actions(ui, |ui| {
+        b.end(outer);
+        let ui = outer;
+        dialog_foot(ui, |ui| {
             stage = ui.add_enabled(text.is_ok(), primary_button(ui, if f.from.is_some() { "Change relation" } else { "Add relation" }, PRIMARY())).clicked();
             let busy = self.applying();
             // The dialog's own count of the rows with no match holds a read lock on the table until it answers, which a change that

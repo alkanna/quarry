@@ -223,6 +223,7 @@ impl App {
         chevron(p, egui::pos2(rect.right() - 14.0, rect.center().y), true, if resp.hovered() { MUTED() } else { FAINT() });
         paint_name_tag(p, egui::Rangef::new(rect.left() + 26.0, rect.right() - 28.0), rect.center().y, &name, FontId::proportional(TXT_TITLE), BRIGHT(), &tag);
         let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Connections"));
         if cur.is_none() && resp.clicked() {
             return self.new_conn_modal();
         }
@@ -243,11 +244,25 @@ impl App {
                 caption(ui, "CONNECTIONS");
             });
             ui.add_space(2.0);
-            for c in &self.conns {
-                if conn_row(ui, c, Some(c.meta.id) == self.active).clicked() {
-                    pick = Some(c.meta.id);
+            // Only the list scrolls, so the actions below stay reachable however many connections there are.
+            let room = (ui.ctx().content_rect().bottom() - ui.cursor().top() - 260.0).max(4.0 * 34.0);
+            // The menu was not drawn last frame, so it just opened: bring the active connection into view once.
+            let seen = egui::Id::unique("conn-menu-frame");
+            let frame = ui.ctx().cumulative_frame_nr();
+            let opened = ui.ctx().data(|d| d.get_temp::<u64>(seen)) != Some(frame.wrapping_sub(1));
+            ui.ctx().data_mut(|d| d.insert_temp(seen, frame));
+            egui::ScrollArea::vertical().id_salt("conn-menu").max_height(room).show(ui, |ui| {
+                for c in &self.conns {
+                    let on = Some(c.meta.id) == self.active;
+                    let r = conn_row(ui, c, on);
+                    if on && opened {
+                        r.scroll_to_me(Some(egui::Align::Center));
+                    }
+                    if r.clicked() {
+                        pick = Some(c.meta.id);
+                    }
                 }
-            }
+            });
             ui.add_space(4.0);
             ui.separator();
             ui.add_space(2.0);
@@ -617,6 +632,7 @@ impl App {
                             continue;
                         }
                         let mut glyph_at = egui::Rect::NOTHING;
+                        let mut cut = false;
                         let r = side_row(ui, SIDE_ROW_H, 18.0, active, coll, |p, r| {
                             // Collections are marked as documents, views with a hollow diamond so
                             // they read as derived data. A collection still being copied gets a spinner.
@@ -635,7 +651,11 @@ impl App {
                                 p.galley(egui::pos2(r.right() - 8.0 - g.size().x, r.center().y - g.size().y / 2.0 + optical_dy(&g)), g.clone(), FAINT());
                                 w -= g.size().x + 12.0;
                             }
-                            let galley = p.layout(coll.clone(), FontId::proportional(TXT_TITLE), if active { BRIGHT() } else if is_view { C_DATE() } else { TEXT() }, w);
+                            // One line cut with an ellipsis: the row has a fixed height, so a wrapped name drew over its neighbours.
+                            let mut job = egui::text::LayoutJob::simple_singleline(coll.clone(), FontId::proportional(TXT_TITLE), if active { BRIGHT() } else if is_view { C_DATE() } else { TEXT() });
+                            job.wrap = egui::text::TextWrapping::truncate_at_width(w.max(0.0));
+                            let galley = p.layout_job(job);
+                            cut = galley.elided;
                             p.galley(egui::pos2(r.left() + 20.0, r.center().y - galley.size().y / 2.0), galley, TEXT());
                         });
                         // A collection still being copied does not exist yet, so it neither opens nor offers actions.
@@ -644,7 +664,12 @@ impl App {
                             r.on_hover_text("Being copied");
                             continue;
                         }
-                        let r = if is_view { r.on_hover_text("View (read-only)") } else { r };
+                        let r = match (is_view, cut) {
+                            (true, true) => r.on_hover_text(format!("{coll}\nView (read-only)")),
+                            (true, false) => r.on_hover_text("View (read-only)"),
+                            (false, true) => r.on_hover_text(coll.as_str()),
+                            (false, false) => r,
+                        };
                         if matches!(&self.reveal, Some((c, d, Some(k))) if *c == id && d == db_name && k == coll) {
                             r.scroll_to_me(Some(egui::Align::Center));
                             revealed = true;

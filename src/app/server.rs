@@ -172,39 +172,44 @@ impl App {
         let mut open = true;
         let (mut unlock, mut kill) = (false, None);
         let screen = ctx.content_rect();
-        let r = dialog(egui::Id::unique(("quarry-layer", "server-window"))).show(ctx, |ui| {
-            ui.set_width((screen.width() * 0.7).clamp(620.0, 1100.0));
-            ui.horizontal(|ui| {
-                dialog_title(ui, format!("Server: {name}"));
-                ui.add_space(12.0);
-                for (ops, label) in [(false, "Overview"), (true, "Operations")] {
-                    if view_tab(ui, label, s.ops_tab == ops).clicked() && s.ops_tab != ops {
-                        s.ops_tab = ops;
-                        s.next = None;
-                    }
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Refresh").clicked() {
-                        s.status = s.status.take().filter(|r| r.is_ok());
-                        s.rs = s.rs.take().filter(|r| r.is_ok());
-                        s.hello = None;
-                        s.refresh = true;
-                        s.next = None;
-                    }
+        let r = banded(egui::Id::unique(("quarry-layer", "server-window"))).show(ctx, |ui| {
+            ui.set_width((screen.width() * 0.7).clamp(660.0, 1100.0));
+            let mut refresh = false;
+            let picked = dialog_head_with(ui, &Head::new("Server").sub(name.clone()).glyph(glyphs::server).tabs(&["Overview", "Operations"], s.ops_tab as usize), |ui| {
+                refresh = ui.button("Refresh").clicked();
+            });
+            if let Some(i) = picked && (i == 1) != s.ops_tab {
+                s.ops_tab = i == 1;
+                s.next = None;
+            }
+            if refresh {
+                s.status = s.status.take().filter(|r| r.is_ok());
+                s.rs = s.rs.take().filter(|r| r.is_ok());
+                s.hello = None;
+                s.refresh = true;
+                s.next = None;
+            }
+            dialog_pane(ui, |ui| {
+                egui::ScrollArea::both().max_height(screen.height() - 300.0).auto_shrink([false, true]).show(ui, |ui| {
                     if s.ops_tab {
-                        ui.checkbox(&mut s.auto_ops, "Every 2 s");
+                        self.ops_section(ui, &mut s, writable, &mut unlock, &mut kill);
+                    } else {
+                        overview_section(ui, &s);
                     }
                 });
             });
-            ui.add_space(4.0);
-            egui::ScrollArea::both().max_height(screen.height() - 220.0).auto_shrink([false, true]).show(ui, |ui| {
-                if s.ops_tab {
-                    self.ops_section(ui, &mut s, writable, &mut unlock, &mut kill);
-                } else {
-                    overview_section(ui, &s);
+            let ops = s.ops_tab;
+            open = !dialog_foot(ui, |ui| {
+                let done = ui.button("Done").on_hover_text("Esc").clicked();
+                if ops {
+                    foot_left(ui, |ui| {
+                        if chip(ui, "Refresh every 2 s", PRIMARY(), s.auto_ops).clicked() {
+                            s.auto_ops = !s.auto_ops;
+                        }
+                    });
                 }
+                done
             });
-            open = !done(ui);
         });
         if unlock {
             self.modal = Some(Modal::Unlock(conn, None));
@@ -264,10 +269,7 @@ impl App {
             ui.label(RichText::new("Showing only your operations: listing everyone's needs the inprog privilege (clusterMonitor role).").size(TXT_SMALL).color(WARNING()));
         }
         if !writable {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Read-only: unlock writes to kill operations.").color(SUCCESS()));
-                *unlock = ui.button("Unlock…").clicked();
-            });
+            *unlock = banner(ui, Notice::Locked, "Read-only.", "Unlock writes to kill operations.", Some("Unlock…"));
         }
         let ops = match &s.ops {
             None => return spin(ui),

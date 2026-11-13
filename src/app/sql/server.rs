@@ -237,36 +237,43 @@ impl App {
             s.confirm = None;
         }
         let screen = ctx.content_rect();
-        let r = dialog(egui::Id::unique(("quarry-layer", "sql-server-window"))).show(ctx, |ui| {
-            ui.set_width((screen.width() * 0.7).clamp(700.0, 1100.0));
-            dialog_title(ui, "Server");
-            let up = s.uptime.map(|u| format!(" · up {}", up_text(u))).unwrap_or_default();
-            ui.label(RichText::new(format!("{name} · {}{up}", product.trim())).size(TXT_SMALL).color(MUTED()));
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 16.0;
-                for (tab, label) in [(SqlServerTab::Overview, "Overview"), (SqlServerTab::Variables, "Variables"), (SqlServerTab::Status, "Status"), (SqlServerTab::Processes, "Processes")] {
-                    if view_tab(ui, label, s.tab == tab).clicked() && s.tab != tab {
-                        s.tab = tab;
-                        // Ask for the new tab's data on the next frame instead of when the old tab's timer ends.
-                        s.next = None;
+        let r = banded(egui::Id::unique(("quarry-layer", "sql-server-window"))).show(ctx, |ui| {
+            ui.set_width((screen.width() * 0.7).clamp(760.0, 1100.0));
+            let up = s.uptime.map(|u| format!("  ·  up {}", up_text(u))).unwrap_or_default();
+            const TABS: [(SqlServerTab, &str); 4] = [(SqlServerTab::Overview, "Overview"), (SqlServerTab::Variables, "Variables"), (SqlServerTab::Status, "Status"), (SqlServerTab::Processes, "Processes")];
+            let labels = TABS.map(|t| t.1);
+            let active = TABS.iter().position(|t| t.0 == s.tab).unwrap_or(0);
+            if let Some(i) = dialog_head(ui, &Head::new("Server").sub(format!("{name}  ·  {}{up}", product.trim())).glyph(glyphs::server).tabs(&labels, active)) && TABS[i].0 != s.tab {
+                s.tab = TABS[i].0;
+                // Ask for the new tab's data on the next frame instead of when the old tab's timer ends.
+                s.next = None;
+            }
+            let max = screen.height() - 380.0;
+            dialog_pane(ui, |ui| {
+                if !live {
+                    // The pool is gone, so nothing here can be read or killed any more.
+                    ui.label(RichText::new("This connection is closed. Reconnect to see the server again.").color(MUTED()));
+                } else {
+                    match s.tab {
+                        SqlServerTab::Overview => overview_view(ui, &mut s),
+                        SqlServerTab::Status => status_view(ui, &mut s, max),
+                        SqlServerTab::Processes => procs_view(ui, &mut s, max, &mut kill),
+                        SqlServerTab::Variables => vars_view(ui, &mut s, max),
                     }
                 }
             });
-            ui.add_space(8.0);
-            let max = screen.height() - 300.0;
-            if !live {
-                // The pool is gone, so nothing here can be read or killed any more.
-                ui.label(RichText::new("This connection is closed. Reconnect to see the server again.").color(MUTED()));
-            } else {
-                match s.tab {
-                SqlServerTab::Overview => overview_view(ui, &mut s),
-                SqlServerTab::Status => status_view(ui, &mut s, max),
-                SqlServerTab::Processes => procs_view(ui, &mut s, max, &mut kill),
-                SqlServerTab::Variables => vars_view(ui, &mut s, max),
+            let auto = s.tab == SqlServerTab::Processes && s.auto;
+            open = !dialog_foot(ui, |ui| {
+                let done = ui.button("Done").on_hover_text("Esc").clicked();
+                if auto {
+                    foot_left(ui, |ui| {
+                        let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), Sense::hover());
+                        ui.painter().circle_filled(r.center(), 4.0, SUCCESS());
+                        ui.label(RichText::new("Live  ·  refreshing every 2 s").size(TXT_SMALL).color(MUTED()));
+                    });
                 }
-            }
-            open = !done(ui);
+                done
+            });
         });
         if std::mem::take(&mut s.unlock) {
             self.modal = Some(Modal::Unlock(conn, None));
@@ -465,20 +472,33 @@ fn procs_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32, kill: &mut Op
     own.entry(me).or_insert_with(|| "Server window".to_string());
     let sel_row = s.sel.and_then(|id| rows.iter().find(|r| r.id == id)).filter(|r| can_kill(writable, &own, r, false));
     if !writable {
+        s.unlock = banner(ui, Notice::Locked, "Read-only.", "Unlock writes to kill queries or connections.", Some("Unlock…"));
+    }
+    if let Some(Ok(p)) = &s.procs {
+        // Summary tiles over the list, read from the rows already loaded.
+        let sleeping = p.rows.iter().filter(|r| r.sleeping()).count();
+        let longest = p.rows.iter().filter(|r| r.running()).map(|r| r.secs).fold(0.0, f64::max);
+        let tile_w = (ui.available_width() - 36.0) / 4.0;
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Read-only: unlock writes to kill operations.").color(SUCCESS()));
-            s.unlock = ui.button("Unlock…").clicked();
+            ui.spacing_mut().item_spacing.x = 12.0;
+            stat_tile(ui, tile_w, "Connections", &group(&total.to_string()), None);
+            stat_tile(ui, tile_w, "Running", &group(&running.to_string()), (running > 0).then(PRIMARY));
+            stat_tile(ui, tile_w, "Sleeping", &group(&sleeping.to_string()), None);
+            stat_tile(ui, tile_w, "Longest running", &format!("{} s", group(&(longest as i64).to_string())), (longest >= 60.0).then(WARNING));
         });
+        ui.add_space(14.0);
     }
     ui.horizontal(|ui| {
-        ui.add(egui::TextEdit::singleline(&mut s.filter).hint_text("Filter by user, database or query").desired_width(240.0));
-        ui.checkbox(&mut s.hide_sleeping, "Hide sleeping");
-        ui.checkbox(&mut s.auto, "Refresh every 2 s");
+        well_field(ui, egui::Id::unique("sql-procs-filter"), FieldIcon::Search, None, |ui| ui.add(field_edit(&mut s.filter, egui::Id::unique("sql-procs-filter"), "Filter by user, database or query", 260.0, egui::TextStyle::Body)));
+        ui.add_space(4.0);
+        if chip(ui, "Hide sleeping", PRIMARY(), s.hide_sleeping).clicked() {
+            s.hide_sleeping = !s.hide_sleeping;
+        }
+        if chip(ui, "Refresh every 2 s", PRIMARY(), s.auto).clicked() {
+            s.auto = !s.auto;
+        }
         if !s.auto && quiet(ui, "Refresh").clicked() {
             s.refresh = true;
-        }
-        if total > 0 {
-            ui.label(RichText::new(format!("{total} connections, {running} running")).size(TXT_SMALL).color(MUTED()));
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let r = ui.add_enabled_ui(sel_row.is_some(), |ui| danger(ui, "Kill query")).inner;
@@ -498,15 +518,23 @@ fn procs_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32, kill: &mut Op
         }
         Some(Ok(_)) => {}
     }
+    let hidden = if hide && filter.trim().is_empty() { total - rows.len() } else { 0 };
+    let mut show_all = false;
+    card_frame().show(ui, |ui| {
+    ui.set_width(ui.available_width());
+    ui.spacing_mut().item_spacing.y = 0.0;
     let w = ui.available_width();
     let info_w = (w - COLS.iter().map(|c| c.1).sum::<f32>()).max(120.0);
     let mut cols: Vec<(&str, f32, bool)> = COLS.iter().map(|(l, w)| (*l, *w, *l == "Time")).collect();
     cols.push(("Info", info_w, false));
     header(ui, &cols);
     if rows.is_empty() {
-        ui.add_space(8.0);
-        ui.label(RichText::new(if s.filter.trim().is_empty() { "Nothing is running." } else { "No process matches." }).color(MUTED()));
-        return;
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            ui.add_space(PAD);
+            ui.label(RichText::new(if s.filter.trim().is_empty() { "Nothing is running." } else { "No process matches." }).color(MUTED()));
+        });
+        ui.add_space(10.0);
     }
     let mut sel = s.sel;
     let mut confirm = s.confirm.clone();
@@ -519,7 +547,7 @@ fn procs_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32, kill: &mut Op
             let fill = match (selected, state_of(&resp)) {
                 (true, 0) => SEL(),
                 (true, _) => SEL_HOVER(),
-                (false, 0) => if i % 2 == 1 { PANEL() } else { BG() },
+                (false, 0) => if i % 2 == 1 { tint(TEXT(), 6) } else { Color32::TRANSPARENT },
                 (false, st) => hover_fill(st),
             };
             ui.painter().rect_filled(rect, 0.0, fill);
@@ -603,6 +631,14 @@ fn procs_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32, kill: &mut Op
     });
     s.sel = sel;
     s.confirm = confirm;
+    if hidden > 0 {
+        show_all = table_foot_row(ui, &format!("{} sleeping connection{} hidden.", group(&hidden.to_string()), if hidden == 1 { "" } else { "s" }), Some("Show them"));
+    }
+    });
+    if show_all {
+        s.hide_sleeping = false;
+    }
+    ui.add_space(14.0);
 }
 
 fn vars_view(ui: &mut egui::Ui, s: &mut SqlServerWin, max_h: f32) {

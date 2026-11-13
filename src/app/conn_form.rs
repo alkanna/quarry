@@ -651,10 +651,19 @@ impl App {
         if let Some((req, info)) = self.test_info.take() {
             f.take_test_info(req, info);
         }
-        ui.set_width(760.0);
-        dialog_title(ui, if f.id.is_some() { "Edit connection" } else { "New connection" });
-        ui.label(RichText::new("Addresses, passwords and passphrases are stored in the macOS Keychain. The connection opens read-only.").size(TXT_SMALL).color(MUTED()));
-        ui.add_space(8.0);
+        ui.set_width(800.0);
+        let tabs = conn_tabs(f.engine);
+        let labels: Vec<&str> = tabs.iter().map(|t| t.1).collect();
+        let cloud_on = f.cloud_on().is_some();
+        let dims: Vec<bool> = tabs.iter().map(|(t, _)| cloud_on && matches!(t, ConnTab::Ssh | ConnTab::Tls)).collect();
+        let active = tabs.iter().position(|(t, _)| *t == f.tab).unwrap_or(0);
+        let head = Head::new(if f.id.is_some() { "Edit connection" } else { "New connection" }).sub("Stored in the Keychain  ·  opens read-only").glyph(glyphs::plug).tabs(&labels, active).dim(&dims);
+        if let Some(i) = dialog_head(ui, &head) {
+            f.tab = tabs[i].0;
+        }
+        let mut b = body_begin(ui);
+        let outer = ui;
+        let ui = &mut b.content_ui;
         let cloud = &self.cloud;
         ui.horizontal_top(|ui| {
             ui.allocate_ui_with_layout(egui::vec2(210.0, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
@@ -699,19 +708,9 @@ impl App {
                     }
                 }
             });
-            ui.add_space(12.0);
+            ui.add_space(16.0);
             ui.vertical(|ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 18.0;
-                    let cloud = f.cloud_on().is_some();
-                    for &(t, label) in conn_tabs(f.engine) {
-                        if view_tab_dim(ui, label, f.tab == t, cloud && matches!(t, ConnTab::Ssh | ConnTab::Tls)).clicked() {
-                            f.tab = t;
-                        }
-                    }
-                });
-                ui.add_space(6.0);
-                egui::ScrollArea::vertical().max_height(ui.ctx().content_rect().height() - 260.0).show(ui, |ui| match f.tab {
+                egui::ScrollArea::vertical().max_height(ui.ctx().content_rect().height() - 300.0).show(ui, |ui| match f.tab {
                     ConnTab::Standard => browse |= standard_tab(ui, f, cloud),
                     ConnTab::Ssh => ssh_tab(ui, f),
                     ConnTab::Proxy => proxy_tab(ui, f),
@@ -724,32 +723,22 @@ impl App {
         });
         if f.engine == db::sql::Engine::Postgres {
             ui.add_space(6.0);
-            egui::Frame::new().fill(BG()).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                note_row(ui, PRIMARY(), true, "A locked PostgreSQL connection refuses writes Quarry can see. Functions on the server that write by themselves still run with your role's rights; use a read-only role for full safety.");
-            });
+            banner(ui, Notice::Info, "", "A locked PostgreSQL connection refuses writes Quarry can see. Functions on the server that write by themselves still run with your role's rights; use a read-only role for full safety.", None);
         }
         // An answer for an older Test or another form is not this form's.
         if self.conn_test.as_ref().is_some_and(|(req, _)| *req != f.test_req) {
             self.conn_test = None;
         }
         match self.conn_test.as_ref().map(|(_, r)| r) {
-            None if f.testing => {
-                ui.horizontal(|ui| {
-                    spin(ui);
-                    ui.label(RichText::new("Testing…").color(MUTED()));
-                });
-            }
-            Some(Ok(m)) => {
-                ui.label(RichText::new(m).color(SUCCESS()));
-            }
+            // Testing and a success show in the footer, beside the Test button.
+            None | Some(Ok(_)) => {}
             Some(Err(e)) if e.contains(crate::cloudsql::PROXY_MISSING) => {}
             Some(Err(e)) => {
                 // The driver's text for a client certificate problem names no file or fix; the explained words do.
                 let text = db::client_cert_problem(e).map_or_else(|| e.clone(), |(t, h)| format!("{t}. {h}"));
-                ui.add(egui::Label::new(RichText::new(text).color(ALERT())).wrap());
+                ui.add_space(10.0);
+                banner(ui, Notice::Danger, "Test failed.", &text, None);
             }
-            None => {}
         }
         if matches!(&self.conn_test, Some((_, Err(e))) if e.contains(crate::cloudsql::PROXY_MISSING)) {
             ui.add_space(6.0);
@@ -760,9 +749,16 @@ impl App {
         }
         let adv_error = f.advanced_error();
         if let Some(m) = &adv_error {
-            ui.add(egui::Label::new(RichText::new(m).color(ALERT())).wrap());
+            field_note(ui, m, ALERT());
         }
-        dialog_actions(ui, |ui| {
+        b.end(outer);
+        let ui = outer;
+        let testing = f.testing && self.conn_test.is_none();
+        let passed = match self.conn_test.as_ref().map(|(_, r)| r) {
+            Some(Ok(m)) => Some(m.clone()),
+            _ => None,
+        };
+        dialog_foot(ui, |ui| {
             let address_ok = if let Some(c) = f.cloud_on() {
                 crate::cloudsql::valid_instance(&c.instance) && !f.addr.user.trim().is_empty()
             } else if f.engine.is_sql() { !f.addr.host.trim().is_empty() && !f.addr.user.trim().is_empty() } else { f.uri.starts_with("mongodb://") || f.uri.starts_with("mongodb+srv://") };
@@ -772,6 +768,15 @@ impl App {
             if ui.button("Cancel").clicked() {
                 *keep = false;
             }
+            foot_left(ui, |ui| {
+                if testing {
+                    spin(ui);
+                    ui.label(RichText::new("Testing…").size(TXT_SMALL).color(MUTED()));
+                } else if let Some(m) = &passed {
+                    glyph_icon(ui, glyphs::check, SUCCESS(), 14.0);
+                    ui.add(egui::Label::new(RichText::new(m).size(TXT_SMALL).color(SUCCESS())).truncate());
+                }
+            });
         });
         if !*keep {
             paste_reset(ui.ctx(), f);
@@ -785,6 +790,7 @@ impl App {
             self.test_info = None;
             self.req += 1;
             f.test_req = self.req;
+            self.test_started = Some(std::time::Instant::now());
             let mut net = f.net();
             net.tools = self.cloud_tools();
             if f.engine.is_sql() {

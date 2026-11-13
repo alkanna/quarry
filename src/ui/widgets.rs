@@ -82,12 +82,13 @@ pub(crate) fn settings_section(ui: &mut egui::Ui, title: &str, add: impl FnOnce(
         caption(ui, title);
         ui.add_space(2.0);
     }
-    card(ui, |ui| {
+    // The raised card of the dialog body, so settings read the same as every other form.
+    super::dialog::card_frame().inner_margin(egui::Margin::symmetric(14, 12)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.spacing_mut().item_spacing.y = 6.0;
         add(ui);
     });
-    ui.add_space(10.0);
+    ui.add_space(14.0);
 }
 
 /// One setting: its name and a short explanation on the left, the control on the right.
@@ -389,16 +390,9 @@ fn on_fill(fill: Color32) -> Color32 {
     if lum > 170.0 { Color32::from_rgb(0x15, 0x13, 0x0f) } else { ON_PRIMARY() }
 }
 
-/// Every dialog gets the same frame; egui's popup frame has only 6 px of margin.
+/// The padded dialog frame the value editors keep; every other dialog is `banded`, whose bands lay out their own edges.
 pub(crate) fn dialog(id: egui::Id) -> egui::Modal {
     egui::Modal::new(id).frame(dialog_frame().inner_margin(18))
-}
-
-/// A `dialog` raised above everything else every frame, for windows opened from another window (Settings) whose click
-/// would otherwise leave them underneath.
-pub(crate) fn top_dialog(ctx: &egui::Context, id: egui::Id) -> egui::Modal {
-    ctx.move_to_top(egui::LayerId::new(egui::Order::Foreground, id));
-    dialog(id)
 }
 
 /// The dialog look without padding, for dialogs that lay out their own edges like the Cmd+K palette.
@@ -410,19 +404,8 @@ pub(crate) fn dialog_frame() -> egui::Frame {
 pub(crate) fn form_label(ui: &mut egui::Ui, text: &str) {
     ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
         ui.add_space(4.0);
-        ui.label(RichText::new(text).color(MUTED()));
+        ui.label(medium(RichText::new(text).size(TXT_BODY).color(BRIGHT())));
     });
-}
-
-/// The Done row of a dialog that saves as it goes.
-pub(crate) fn done(ui: &mut egui::Ui) -> bool {
-    dialog_actions(ui, |ui| ui.button("Done").on_hover_text("Esc").clicked())
-}
-
-/// The button row at the bottom of a dialog: primary action first, then the rest, Cancel last.
-pub(crate) fn dialog_actions<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    ui.add_space(8.0);
-    ui.horizontal(add).inner
 }
 
 pub(crate) fn dialog_title(ui: &mut egui::Ui, text: impl Into<String>) {

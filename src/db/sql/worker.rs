@@ -704,6 +704,17 @@ impl Worker {
         });
     }
 
+    /// The size on disk of each table of a schema, data and indexes together, for the Export dialog's estimate.
+    pub fn sql_table_sizes(&self, req: u64, db: Db, schema: String) {
+        self.spawn(async move {
+            const PG: &str = "SELECT c.relname AS name, pg_total_relation_size(c.oid) AS bytes FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relkind IN ('r', 'p', 'm')";
+            const MY: &str = "SELECT TABLE_NAME AS name, COALESCE(DATA_LENGTH, 0) + COALESCE(INDEX_LENGTH, 0) AS bytes FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE'";
+            let sql = if db.dialect == Dialect::Postgres { PG } else { MY };
+            let res = db.meta(&schema, sql, [schema.as_str()]).await.map(|rows| rows.iter().filter_map(|r| Some((text(r, "name")?, super::structure::num(r, "bytes")?))).collect());
+            Msg::SqlSizes { req, res }
+        });
+    }
+
     /// Tables sorted, and which of them are views.
     pub fn sql_tables(&self, conn: u64, db: Db, schema: String) {
         self.spawn(async move {

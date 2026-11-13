@@ -1,6 +1,8 @@
 pub mod cells;
 pub mod complete;
+pub mod dialog;
 pub mod editor;
+pub mod glyphs;
 pub mod js_doc;
 pub mod js_elide;
 pub mod json_tree;

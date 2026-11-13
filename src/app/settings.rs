@@ -73,20 +73,16 @@ impl App {
             let w = SETTINGS_W.min(screen.width() - 40.0);
             let body_h = (screen.height() - 220.0).clamp(240.0, 480.0);
             ui.set_width(w);
-            ui.spacing_mut().item_spacing.y = 0.0;
-            egui::Frame::new().inner_margin(egui::Margin { left: 20, right: 20, top: 14, bottom: 12 }).show(ui, |ui| {
-                ui.set_width(w - 40.0);
-                dialog_title(ui, "Settings");
-            });
-            ui.painter().hline(egui::Rangef::new(ui.min_rect().left(), ui.min_rect().left() + w), ui.cursor().top(), Stroke::new(1.0, LINE()));
+            dialog_head(ui, &Head::new("Settings").sub("Changes are saved right away").glyph(glyphs::sliders));
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
                 // Wide fonts such as OpenDyslexic need a wider list than Inter does.
                 let widest = CATS.iter().map(|(_, l)| ui.painter().layout_job(egui::text::LayoutJob::single_section(l.to_string(), ui_fmt(TXT_BODY, TEXT(), W_MEDIUM, 0.0))).size().x).fold(0.0, f32::max);
                 let side_w = SETTINGS_SIDE_W.max(widest + 60.0);
                 let (side, _) = ui.allocate_exact_size(egui::vec2(side_w, body_h), Sense::hover());
-                ui.painter().rect_filled(side, 0, PANEL());
-                ui.painter().vline(side.right(), side.y_range(), Stroke::new(1.0, LINE()));
+                // The categories sit on the raised surface like the header; the page is the recessed body.
+                ui.painter().rect_filled(egui::Rect::from_min_size(egui::pos2(side.right(), side.top()), egui::vec2(w - side_w, body_h)), 0, PANEL());
+                ui.painter().vline(side.right() - 0.5, side.y_range(), Stroke::new(1.0, RAISED_LINE()));
                 let mut rows = ui.new_child(egui::UiBuilder::new().max_rect(side.shrink2(egui::vec2(10.0, 12.0))).layout(egui::Layout::top_down(egui::Align::Min)));
                 rows.spacing_mut().item_spacing.y = 2.0;
                 for (cat, label) in CATS {
@@ -128,16 +124,13 @@ impl App {
                     });
                 });
             });
-            ui.painter().hline(egui::Rangef::new(ui.min_rect().left(), ui.min_rect().left() + w), ui.cursor().top(), Stroke::new(1.0, LINE()));
-            egui::Frame::new().inner_margin(egui::Margin::symmetric(20, 12)).show(ui, |ui| {
-                ui.set_width(w - 40.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Changes are saved right away.").size(TXT_SMALL).color(FAINT()));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Done").on_hover_text("Esc").clicked() {
-                            keep = false;
-                        }
-                    });
+            dialog_foot(ui, |ui| {
+                if ui.button("Done").on_hover_text("Esc").clicked() {
+                    keep = false;
+                }
+                foot_left(ui, |ui| {
+                    glyph_icon(ui, glyphs::check, SUCCESS(), 14.0);
+                    ui.label(RichText::new("Saved").size(TXT_SMALL).color(MUTED()));
                 });
             });
         });

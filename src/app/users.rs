@@ -47,32 +47,30 @@ impl App {
         let mut drop_user = None;
         let mut unlock = false;
         let screen = ctx.content_rect();
-        let r = dialog(egui::Id::unique(("quarry-layer", "users-window"))).show(ctx, |ui| {
-            ui.set_width((screen.width() * 0.6).clamp(560.0, 900.0));
-            ui.horizontal(|ui| {
-                dialog_title(ui, "Users and roles");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Refresh").clicked() {
-                        u.users = None;
-                        u.roles = None;
-                        u.self_only = false;
-                        cmds.push(("*reload".into(), Document::new(), String::new()));
-                    }
-                });
+        let conn_name = self.conn_name(conn);
+        let r = banded(egui::Id::unique(("quarry-layer", "users-window"))).show(ctx, |ui| {
+            ui.set_width((screen.width() * 0.6).clamp(600.0, 900.0));
+            dialog_head_with(ui, &Head::new("Users and roles").sub(conn_name).glyph(glyphs::user), |ui| {
+                if ui.button("Refresh").clicked() {
+                    u.users = None;
+                    u.roles = None;
+                    u.self_only = false;
+                    cmds.push(("*reload".into(), Document::new(), String::new()));
+                }
             });
+            let mut b = body_begin(ui);
+            let outer = ui;
+            let ui = &mut b.content_ui;
             if !writable {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Read-only: unlock writes to add, change or drop users.").color(SUCCESS()));
-                    unlock = ui.button("Unlock…").clicked();
-                });
+                unlock = banner(ui, Notice::Locked, "Read-only.", "Unlock writes to add, change or drop users.", Some("Unlock…"));
             }
             if u.self_only {
-                ui.label(RichText::new("This user may not list other users (it needs viewUser on every database), so only your own user is shown.").size(TXT_SMALL).color(WARNING()));
+                banner(ui, Notice::Warn, "", "This user may not list other users (it needs viewUser on every database), so only your own user is shown.", None);
             }
             if atlas {
-                ui.label(RichText::new("Atlas manages database users in its web console; it refuses adding, changing or dropping users from here, and may list none.").size(TXT_SMALL).color(WARNING()));
+                banner(ui, Notice::Info, "", "Atlas manages database users in its web console; it refuses adding, changing or dropping users from here, and may list none.", None);
             }
-            egui::ScrollArea::vertical().max_height(screen.height() - 220.0).show(ui, |ui| {
+            egui::ScrollArea::vertical().max_height(screen.height() - 320.0).show(ui, |ui| {
                 settings_section(ui, "USERS", |ui| match &u.users {
                     None => {
                         spin(ui);
@@ -174,7 +172,8 @@ impl App {
                     }
                 });
             });
-            open = !done(ui);
+            b.end(outer);
+            open = !dialog_done(outer);
         });
         if unlock {
             self.modal = Some(Modal::Unlock(conn, None));

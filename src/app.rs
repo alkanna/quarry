@@ -1,4 +1,4 @@
-use crate::ui::{cells::*, complete::*, editor::*, pickers, theme::*, widgets::*};
+use crate::ui::{cells::*, complete::*, dialog::*, editor::*, glyphs, pickers, theme::*, widgets::*};
 use crate::db::{self, Msg, PAGE_SIZE, Query, ShellKind, Target, UndoAction, UndoKind, Worker};
 use eframe::egui::{self, Color32, FontId, Key, RichText, Sense, Stroke, text::LayoutJob};
 use mongodb::Client;
@@ -198,6 +198,8 @@ pub struct App {
     sql_kills: HashSet<u64>,
     /// The answer to a connection form Test, with the request id it answers.
     conn_test: Option<(u64, db::Res<String>)>,
+    /// When the connection form's Test was sent, to say how long it took.
+    test_started: Option<std::time::Instant>,
     /// What the last Test learned from a SQL server, for the Advanced tab to offer.
     test_info: Option<(u64, db::sql::TestInfo)>,
     /// Usage and suggestions of the collection "db.coll" the Indexes view last asked about.
@@ -359,6 +361,7 @@ impl App {
             pg_server: None,
             sql_kills: HashSet::new(),
             conn_test: None,
+            test_started: None,
             test_info: None,
             idx_info: None,
             undo: Vec::new(),

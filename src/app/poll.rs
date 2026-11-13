@@ -70,6 +70,7 @@ impl App {
                 Msg::SqlValues { conn, database, schema, table, column, prefix, res } => self.sql_values_done(conn, database, schema, table, column, prefix, res),
                 Msg::SqlSchemas { conn, database, res } => self.pg_schemas_done(conn, database, res),
                 Msg::SqlTables { conn, database, schema, res } => self.pg_tables_done(conn, database, schema, res),
+                Msg::SqlSizes { req, res } => self.sql_sizes_done(req, res),
                 Msg::Collections { conn, db, res } => match res {
                     Ok((v, views)) => {
                         self.side_err.remove(&(conn, db.clone()));
@@ -239,6 +240,12 @@ impl App {
                     }
                 }
                 Msg::Tested { req, res, info } => {
+                    // A SQL test already says how long it took; the others get the time measured here.
+                    let started = self.test_started.take();
+                    let res = res.map(|m| match started {
+                        Some(t) if !m.contains(" ms") => format!("{}  ·  {} ms", m.trim_end_matches('.'), t.elapsed().as_millis()),
+                        _ => m,
+                    });
                     self.conn_test = Some((req, res));
                     self.test_info = info.map(|i| (req, i));
                 }

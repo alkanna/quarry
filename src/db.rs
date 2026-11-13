@@ -275,6 +275,8 @@ pub enum Msg {
     SqlSchemas { conn: u64, database: String, res: Res<Vec<sql::PgSchema>> },
     /// The tables and views of one PostgreSQL schema, from `Worker::sql_tables`. MySQL answers with `Collections`.
     SqlTables { conn: u64, database: String, schema: String, res: Res<(Vec<String>, Vec<String>)> },
+    /// Table sizes in bytes by name, from `Worker::sql_table_sizes`.
+    SqlSizes { req: u64, res: Res<Vec<(String, u64)>> },
     /// A read command answered (users, roles, stats, view definition); `tag` says which.
     Command { tag: String, res: Res<Document> },
     /// A database-level change finished; the collection list of `db` is reloaded.

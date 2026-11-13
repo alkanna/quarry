@@ -78,17 +78,10 @@ pub(in crate::app) fn pick(ui: &mut egui::Ui, id: &str, width: f32, shown: &str,
 
 /// The preview block of the design: the statement in mono on the page color.
 pub(in crate::app) fn sql_block(ui: &mut egui::Ui, text: &str) {
-    egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(12, 10)).show(ui, |ui| {
+    egui::Frame::new().fill(WELL()).stroke(Stroke::new(1.0, BORDER())).corner_radius(R_BAR).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.add(egui::Label::new(sql_job(text, TXT_BODY)).selectable(true));
     });
-}
-
-/// The row of buttons at the bottom, right aligned as in the designs: the main action first in the
-/// code so it ends up rightmost.
-pub(in crate::app) fn right_actions(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
-    ui.add_space(8.0);
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add);
 }
 
 impl App {
@@ -248,23 +241,27 @@ impl App {
     }
 
     pub(in crate::app) fn sql_new_db_dialog(&mut self, ui: &mut egui::Ui, f: &mut NewDb, keep: &mut bool) {
-        ui.set_width(540.0);
+        ui.set_width(560.0);
         let writable = self.conn_writable(f.conn);
-        dialog_title(ui, "New database");
-        ui.label(RichText::new(self.conn_name(f.conn)).color(MUTED()));
-        ui.add_space(8.0);
+        dialog_head(ui, &Head::new("New database").sub(self.conn_name(f.conn)).glyph(glyphs::plus));
         let d = self.conn(f.conn).and_then(|c| c.sql.as_ref().map(|s| s.dialect)).unwrap_or_default();
-        egui::Grid::new("newdb").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W + 14.0).show(ui, |ui| {
-            form_label(ui, "Name");
-            let r = ui.add(egui::TextEdit::singleline(&mut f.name).font(egui::TextStyle::Monospace).desired_width(400.0));
+        let built = match &f.meta {
+            Some(m) => Some(create::create_db_sql(d, &f.name, &f.charset, &f.collation, m)),
+            None => None,
+        };
+        dialog_body(ui, |ui| {
+        form_card(ui, "", "", |rows| {
+            rows.label_width(110.0);
+            rows.row("Name", "", |ui| {
+            let r = ui.add(egui::TextEdit::singleline(&mut f.name).font(egui::TextStyle::Monospace).desired_width(ui.available_width()));
             if f.meta.is_some() && !r.has_focus() && f.name.is_empty() {
                 r.request_focus();
             }
-            ui.end_row();
+            });
             if let Some(m) = &f.meta {
-                form_label(ui, "Charset");
+                rows.row("Charset", "", |ui| {
                 let shown = m.charsets.iter().find(|c| c.name == f.charset).map_or(f.charset.clone(), |c| if c.desc.is_empty() { c.name.clone() } else { format!("{} · {}", c.name, c.desc) });
-                pick(ui, "newdb-cs", 400.0, &shown, |ui| {
+                pick(ui, "newdb-cs", ui.available_width(), &shown, |ui| {
                     egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
                         for c in &m.charsets {
                             if ui.selectable_label(c.name == f.charset, if c.desc.is_empty() { c.name.clone() } else { format!("{} · {}", c.name, c.desc) }).clicked() {
@@ -274,11 +271,11 @@ impl App {
                         }
                     });
                 });
-                ui.end_row();
-                form_label(ui, "Collation");
+                });
+                rows.row("Collation", "", |ui| {
                 let label = |c: &create::Collation| if c.is_default { format!("{} (default)", c.name) } else { c.name.clone() };
                 let shown = m.collations.iter().find(|c| c.name == f.collation).map_or(f.collation.clone(), label);
-                pick(ui, "newdb-co", 400.0, &shown, |ui| {
+                pick(ui, "newdb-co", ui.available_width(), &shown, |ui| {
                     egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
                         for c in m.collations_of(&f.charset) {
                             if ui.selectable_label(c.name == f.collation, label(c)).clicked() {
@@ -287,14 +284,9 @@ impl App {
                         }
                     });
                 });
-                ui.end_row();
+                });
             }
         });
-        ui.add_space(8.0);
-        let built = match &f.meta {
-            Some(m) => Some(create::create_db_sql(d, &f.name, &f.charset, &f.collation, m)),
-            None => None,
-        };
         match (&built, &f.load_err) {
             (_, Some(e)) => {
                 ui.label(RichText::new(format!("Could not read the server's charsets: {e}")).size(TXT_SMALL).color(ALERT()));
@@ -310,21 +302,22 @@ impl App {
                 // An empty name is a form not filled in yet, not a mistake to point at.
                 sql_block(ui, "CREATE DATABASE `name`\n  CHARACTER SET … COLLATE …;");
                 if !f.name.is_empty() {
-                    ui.label(RichText::new(e.as_str()).size(TXT_SMALL).color(ALERT()));
+                    field_note(ui, e.as_str(), ALERT());
                 }
             }
         }
-        if !writable {
-            ui.label(RichText::new(NOTE_DB).size(TXT_SMALL).color(FAINT()));
-        }
+        });
         let ok = writable && matches!(built, Some(Ok(_)));
-        right_actions(ui, |ui| {
+        dialog_foot(ui, |ui| {
             if ui.add_enabled(ok, primary_button(ui, "Create", PRIMARY())).clicked() {
                 self.sql_create_db_run(f);
                 *keep = false;
             }
             if ui.button("Cancel").on_hover_text("Esc").clicked() {
                 *keep = false;
+            }
+            if !writable {
+                foot_note(ui, NOTE_DB);
             }
         });
     }
@@ -336,80 +329,87 @@ impl App {
     }
 
     pub(in crate::app) fn sql_new_table_dialog(&mut self, ui: &mut egui::Ui, f: &mut NewTable, keep: &mut bool) {
-        ui.set_max_width(740.0);
-        ui.set_width(700.0);
+        ui.set_max_width(960.0);
+        ui.set_width(940.0);
         let writable = self.conn_writable(f.conn);
-        dialog_title(ui, "New table");
-        ui.label(RichText::new(f.schema.as_str()).color(MUTED()));
-        ui.add_space(8.0);
         let d = self.conn(f.conn).and_then(|c| c.sql.as_ref().map(|s| s.dialect)).unwrap_or_default();
         let bs = self.sql_mode(f.conn).bs;
-        egui::Grid::new("newtable-head").num_columns(4).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
-            form_label(ui, "Name");
-            let r = ui.add(egui::TextEdit::singleline(&mut f.name).font(egui::TextStyle::Monospace).desired_width(280.0));
-            if f.meta.is_some() && !r.has_focus() && f.name.is_empty() {
-                r.request_focus();
-            }
-            form_label(ui, "Engine");
-            match &f.meta {
-                Some(m) => pick(ui, "newtable-engine", 130.0, &f.engine.clone(), |ui| {
-                    for e in &m.engines {
-                        if ui.selectable_label(*e == f.engine, e).clicked() {
-                            f.engine = e.clone();
+        dialog_head(ui, &Head::new("New table").sub(format!("in {} on {}", f.schema, self.conn_name(f.conn))).glyph(glyphs::table));
+        dialog_body(ui, |ui| {
+        card_frame().inner_margin(egui::Margin::symmetric(14, 12)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let w = (ui.available_width() - 24.0) / 3.0;
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 12.0;
+                ui.vertical(|ui| {
+                    ui.set_width(w);
+                    ui.label(medium(RichText::new("Name").size(TXT_SMALL).color(TEXT())));
+                    let r = ui.add(egui::TextEdit::singleline(&mut f.name).font(egui::TextStyle::Monospace).desired_width(w));
+                    if f.meta.is_some() && !r.has_focus() && f.name.is_empty() {
+                        r.request_focus();
+                    }
+                });
+                ui.vertical(|ui| {
+                    ui.set_width(w);
+                    ui.label(medium(RichText::new("Engine").size(TXT_SMALL).color(TEXT())));
+                    match &f.meta {
+                        Some(m) => pick(ui, "newtable-engine", w, &f.engine.clone(), |ui| {
+                            for e in &m.engines {
+                                if ui.selectable_label(*e == f.engine, e).clicked() {
+                                    f.engine = e.clone();
+                                }
+                            }
+                        }),
+                        None => {
+                            spin(ui);
                         }
                     }
-                }),
-                None => {
-                    spin(ui);
-                }
-            }
-            ui.end_row();
-            if let Some(m) = &f.meta {
-                form_label(ui, "Collation");
-                let from = if m.schema_collation.as_deref() == Some(f.collation.as_str()) { format!(" (from {})", f.schema) } else if f.collation == m.server_collation { " (server default)".to_string() } else { String::new() };
-                pick(ui, "newtable-co", 280.0, &format!("{}{from}", f.collation), |ui| {
-                    egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                        for c in &m.collations {
-                            if ui.selectable_label(c.name == f.collation, format!("{}  ({})", c.name, c.charset)).clicked() {
-                                f.collation = c.name.clone();
-                            }
-                        }
-                    });
                 });
-                ui.end_row();
-            }
+                ui.vertical(|ui| {
+                    ui.set_width(w);
+                    ui.label(medium(RichText::new("Collation").size(TXT_SMALL).color(TEXT())));
+                    if let Some(m) = &f.meta {
+                        let from = if m.schema_collation.as_deref() == Some(f.collation.as_str()) { format!(" (from {})", f.schema) } else if f.collation == m.server_collation { " (server default)".to_string() } else { String::new() };
+                        pick(ui, "newtable-co", w, &format!("{}{from}", f.collation), |ui| {
+                            egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                                for c in &m.collations {
+                                    if ui.selectable_label(c.name == f.collation, format!("{}  ({})", c.name, c.charset)).clicked() {
+                                        f.collation = c.name.clone();
+                                    }
+                                }
+                            });
+                        });
+                    }
+                });
+            });
         });
-        ui.add_space(8.0);
+        ui.add_space(16.0);
+        card_caption(ui, "Columns", "change them later in Structure");
         self.column_grid(ui, f);
-        ui.add_space(4.0);
-        let built = f.meta.as_ref().map(|m| create::create_table_sql(d, bs, &TableSpec { schema: f.schema.clone(), name: f.name.clone(), engine: f.engine.clone(), collation: f.collation.clone(), columns: f.cols.clone() }, m));
-        ui.horizontal(|ui| {
-            if add_chip(ui, "Column").clicked() {
-                let n = f.cols.len() + 1;
-                f.cols.push(ColumnSpec { name: format!("column_{n}"), ..Default::default() });
-            }
-            ui.label(RichText::new("Columns can be changed later in Structure").size(TXT_SMALL).color(FAINT()));
-        });
         if let Some(e) = &f.load_err {
-            ui.label(RichText::new(format!("Could not read the server's engines and collations: {e}")).size(TXT_SMALL).color(ALERT()));
+            field_note(ui, &format!("Could not read the server's engines and collations: {e}"), ALERT());
         }
-        if f.show_sql {
-            ui.add_space(6.0);
-            match &built {
-                Some(Ok(sql)) => sql_block(ui, &create::shown(sql)),
-                _ => {
-                    ui.label(RichText::new("The statement appears here once the form is valid.").size(TXT_SMALL).color(FAINT()));
+        });
+        let built = f.meta.as_ref().map(|m| create::create_table_sql(d, bs, &TableSpec { schema: f.schema.clone(), name: f.name.clone(), engine: f.engine.clone(), collation: f.collation.clone(), columns: f.cols.clone() }, m));
+        if f.show_sql || matches!(&built, Some(Err(_))) && !f.name.is_empty() {
+            dialog_pane(ui, |ui| {
+                if f.show_sql {
+                    match &built {
+                        Some(Ok(sql)) => sql_block(ui, &create::shown(sql)),
+                        _ => {
+                            ui.label(RichText::new("The statement appears here once the form is valid.").size(TXT_SMALL).color(FAINT()));
+                        }
+                    }
                 }
-            }
-        }
-        if let Some(Err(e)) = &built && !f.name.is_empty() {
-            ui.label(RichText::new(e.as_str()).size(TXT_SMALL).color(ALERT()));
-        }
-        if !writable {
-            ui.label(RichText::new(NOTE_TABLE).size(TXT_SMALL).color(FAINT()));
+                if let Some(Err(e)) = &built && !f.name.is_empty() {
+                    field_note(ui, e.as_str(), ALERT());
+                }
+            });
         }
         let ok = writable && matches!(built, Some(Ok(_)));
-        right_actions(ui, |ui| {
+        let keys: Vec<String> = f.cols.iter().filter(|c| c.pk).map(|c| c.name.clone()).collect();
+        let summary = format!("{}{}", plural(f.cols.len() as u64, "column"), if keys.is_empty() { String::new() } else { format!("  ·  primary key {}", keys.join(", ")) });
+        dialog_foot(ui, |ui| {
             if ui.add_enabled(ok, primary_button(ui, "Create table", PRIMARY())).clicked() {
                 self.sql_create_table_run(f);
                 *keep = false;
@@ -420,6 +420,7 @@ impl App {
             if ui.button("Cancel").on_hover_text("Esc").clicked() {
                 *keep = false;
             }
+            foot_note(ui, if writable { &summary } else { NOTE_TABLE });
         });
     }
 
@@ -433,8 +434,10 @@ impl App {
     /// The editable column list: name with a key toggle, type with its length, Null, and an Extra menu.
     fn column_grid(&mut self, ui: &mut egui::Ui, f: &mut NewTable) {
         let mut remove = None;
-        egui::Frame::new().fill(BG()).stroke(Stroke::new(1.0, LINE())).corner_radius(R_MD).inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| {
+        let mut add = false;
+        card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width());
+            egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
             egui::ScrollArea::vertical().max_height(250.0).auto_shrink([false, true]).show(ui, |ui| {
                 egui::Grid::new("newtable-cols").num_columns(6).spacing([10.0, 6.0]).show(ui, |ui| {
                     ui.label("");
@@ -511,14 +514,21 @@ impl App {
                     }
                 });
             });
+            });
+            add = table_foot_row(ui, "", Some("+ Add column"));
         });
+        ui.add_space(16.0);
+        if add {
+            let n = f.cols.len() + 1;
+            f.cols.push(ColumnSpec { name: format!("column_{n}"), ..Default::default() });
+        }
         if let Some(i) = remove {
             f.cols.remove(i);
         }
     }
 
     pub(in crate::app) fn sql_drop_dialog(&mut self, ui: &mut egui::Ui, f: &mut DropForm, keep: &mut bool) {
-        ui.set_width(560.0);
+        ui.set_width(540.0);
         let writable = self.conn_writable(f.conn);
         let conn = self.conn_name(f.conn);
         let tag = self.conn(f.conn).map(|c| c.meta.tag.clone()).unwrap_or_default();
@@ -536,7 +546,9 @@ impl App {
         let mut blocked = false;
         // A table or view of PostgreSQL is named with its schema and database, because the same name lives in several.
         let shown = if pg && matches!(f.kind, DropKind::Table | DropKind::View) { format!("{}.{}.{name}", f.database, f.schema) } else { name.to_string() };
-        dialog_title(ui, if f.kind == DropKind::Truncate { format!("Empty table {name}?") } else { format!("Drop {noun} {shown}?") });
+        let title = if f.kind == DropKind::Truncate { format!("Empty table {name}?") } else { format!("Drop {noun} {shown}?") };
+        dialog_head(ui, &Head::new(title).sub(conn.clone()).glyph(glyphs::trash).tone(ALERT()));
+        let ok = dialog_body(ui, |ui| {
         let wrap = |ui: &mut egui::Ui, text: String, color: Color32| {
             ui.add(egui::Label::new(RichText::new(text).color(color)).wrap());
         };
@@ -574,27 +586,23 @@ impl App {
                 }
             }
         }
-        ui.add_space(10.0);
-        ui.label(RichText::new(format!("Type the {noun} name to confirm")).color(MUTED()));
-        ui.add(egui::TextEdit::singleline(&mut f.typed).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY)).widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Confirmation"));
+        ui.add_space(12.0);
         if !tag.is_empty() {
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                badge(ui, &tag, tag_color(&tag));
-                ui.label(RichText::new(format!("This connection is tagged {tag}")).color(tag_color(&tag)));
-            });
+            banner(ui, Notice::Warn, "", &format!("This connection is tagged {tag}."), None);
         }
-        if !writable {
-            ui.label(RichText::new(NOTE_DROP).size(TXT_SMALL).color(FAINT()));
-        }
-        let ok = writable && loaded && !blocked && f.typed == name;
-        right_actions(ui, |ui| {
-            if ui.add_enabled_ui(ok, |ui| danger(ui, button)).inner.clicked() {
+        crate::app::modals::typed_confirm(ui, name, &mut f.typed);
+        writable && loaded && !blocked && f.typed == name
+        });
+        dialog_foot(ui, |ui| {
+            if danger_solid(ui, ok, button).clicked() {
                 *keep = false;
                 self.danger(Danger::SqlDrop { conn: f.conn, database: f.database.clone(), schema: f.schema.clone(), table: f.table.clone(), kind: f.kind, opt: f.opt });
             }
             if ui.button("Cancel").on_hover_text("Esc").clicked() {
                 *keep = false;
+            }
+            if !writable {
+                foot_note(ui, NOTE_DROP);
             }
         });
     }

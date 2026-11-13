@@ -221,7 +221,11 @@ impl App {
 
     pub(super) fn export_dialog(&mut self, ui: &mut egui::Ui, f: &mut ExportForm, keep: &mut bool) {
         ui.set_width(520.0);
-        dialog_title(ui, "Export rows");
+        let where_ = self.t().map(|t| t.sel.ns()).unwrap_or_default();
+        dialog_head(ui, &Head::new("Export rows").sub(where_).glyph(glyphs::download));
+        let mut b = body_begin(ui);
+        let outer = ui;
+        let ui = &mut b.content_ui;
         let formats: Vec<Format> = if f.sql {
             let mut v = vec![Format::T(Fmt::SqlInsert)];
             // A Query result or a Shell result has no key to write an UPDATE by.
@@ -234,57 +238,60 @@ impl App {
             vec![Format::MongoJs, Format::MongoJson, Format::MongoLines, Format::T(Fmt::Csv), Format::T(Fmt::Tsv), Format::T(Fmt::Markdown), Format::T(Fmt::Html)]
         };
         let noun = if f.sql { "rows" } else { "documents" };
-        egui::Grid::new("export-form").num_columns(2).spacing([14.0, 10.0]).min_col_width(FORM_LABEL_W).show(ui, |ui| {
-            form_label(ui, "Format");
-            egui::ComboBox::from_id_salt("export-fmt").width(220.0).selected_text(f.fmt.label()).show_ui(ui, |ui| {
-                menu_look(ui);
-                for x in formats {
-                    ui.selectable_value(&mut f.fmt, x, x.label());
-                }
-            });
-            ui.end_row();
-            form_label(ui, "Column names");
-            let table = !matches!(f.fmt, Format::MongoJs | Format::MongoJson | Format::MongoLines);
-            ui.add_enabled_ui(table, |ui| toggle(ui, &mut f.header)).response.on_disabled_hover_text("This format has no header row");
-            ui.end_row();
-            form_label(ui, "Rows");
-            ui.vertical(|ui| {
-                ui.add_enabled_ui(!f.selected.is_empty(), |ui| ui.radio_value(&mut f.scope, Scope::Selected, format!("Selected {noun} ({})", group(&f.selected.len().to_string()))));
-                let shown = if f.paged { format!("This page ({})", group(&f.shown.to_string())) } else { format!("Shown {noun} ({})", group(&f.shown.to_string())) };
-                ui.radio_value(&mut f.scope, Scope::Shown, shown);
-                if let Some(a) = &f.all {
-                    let what = match (a.paged, a.total) {
-                        (true, Some(n)) => format!("All pages ({} rows)", group(&n.to_string())),
-                        (true, None) => "All pages".to_string(),
-                        _ => "All rows".to_string(),
-                    };
-                    let table = matches!(f.fmt, Format::T(_));
-                    ui.add_enabled_ui(a.refused.is_none() && table, |ui| ui.radio_value(&mut f.scope, Scope::All, format!("{what}: runs the statement again and streams to the file")));
-                    if let Some(why) = &a.refused {
-                        ui.label(RichText::new(format!("Not available: {why}")).size(TXT_SMALL).color(ALERT()));
+        // Which rows: one radio card each, with why a choice is not available under it.
+        card_caption(ui, "What to export", "");
+        let w = ui.available_width();
+        let radio = |ui: &mut egui::Ui, f: &mut ExportForm, on: bool, scope: Scope, title: &str, desc: &str| {
+            if radio_card(ui, w, on, title, desc).clicked() {
+                f.scope = scope;
+            }
+            ui.add_space(6.0);
+        };
+        let table = matches!(f.fmt, Format::T(_));
+        ui.add_enabled_ui(!f.selected.is_empty(), |ui| radio(ui, f, f.scope == Scope::Selected, Scope::Selected, &format!("Selected {noun}"), &format!("{} picked in the grid", group(&f.selected.len().to_string()))));
+        let shown = if f.paged { "This page" } else { "Shown" };
+        radio(ui, f, f.scope == Scope::Shown, Scope::Shown, &format!("{shown} {noun}"), &format!("{} as they are on screen", group(&f.shown.to_string())));
+        if let Some((paged, total, refused)) = f.all.as_ref().map(|a| (a.paged, a.total, a.refused.clone())) {
+            let what = match (paged, total) {
+                (true, Some(n)) => format!("All pages, {} rows", group(&n.to_string())),
+                (true, None) => "All pages".to_string(),
+                _ => "All rows".to_string(),
+            };
+            let why = refused.clone().map_or_else(|| "Runs the statement again and streams to the file".to_string(), |w| format!("Not available: {w}"));
+            ui.add_enabled_ui(refused.is_none() && table, |ui| radio(ui, f, f.scope == Scope::All, Scope::All, &what, &why));
+        }
+        if let Some(sc) = &f.script {
+            let n = sc.stmts.as_ref().map_or(0, Vec::len);
+            let ok = sc.stmts.is_ok();
+            let why = match &sc.stmts {
+                Ok(_) => "Runs them in order and streams each result".to_string(),
+                Err(w) => format!("Not available: {w}"),
+            };
+            ui.add_enabled_ui(ok && table, |ui| radio(ui, f, f.scope == Scope::Script, Scope::Script, &format!("All statements in the editor ({n})"), &why));
+        }
+        ui.add_space(10.0);
+        form_card(ui, "Format", "", |rows| {
+            rows.label_width(140.0);
+            rows.row("Format", "", |ui| {
+                egui::ComboBox::from_id_salt("export-fmt").width(220.0).selected_text(f.fmt.label()).show_ui(ui, |ui| {
+                    menu_look(ui);
+                    for x in formats {
+                        ui.selectable_value(&mut f.fmt, x, x.label());
                     }
-                }
-                if let Some(sc) = &f.script {
-                    let n = sc.stmts.as_ref().map_or(0, Vec::len);
-                    let table = matches!(f.fmt, Format::T(_));
-                    ui.add_enabled_ui(sc.stmts.is_ok() && table, |ui| ui.radio_value(&mut f.scope, Scope::Script, format!("All statements in the editor ({n}): runs them in order and streams each result")));
-                    if let Err(why) = &sc.stmts {
-                        ui.label(RichText::new(format!("Not available: {why}")).size(TXT_SMALL).color(ALERT()));
-                    }
-                }
+                });
             });
-            ui.end_row();
+            let has_header = !matches!(f.fmt, Format::MongoJs | Format::MongoJson | Format::MongoLines);
+            rows.row("Column names", if has_header { "A header row first" } else { "This format has no header row" }, |ui| {
+                ui.add_enabled_ui(has_header, |ui| toggle(ui, &mut f.header));
+            });
             if f.scope == Scope::Script {
-                form_label(ui, "Output");
                 let one_ok = matches!(f.fmt, Format::T(x) if db::sql::export::can_single(x));
                 if !one_ok {
                     f.single = false;
                 }
-                ui.vertical(|ui| {
-                    ui.radio_value(&mut f.single, false, "One file per result (name-1, name-2, and so on)");
-                    ui.add_enabled_ui(one_ok, |ui| ui.radio_value(&mut f.single, true, "One file, a section for each statement")).response.on_disabled_hover_text("CSV, TSV and Values only: they have no place for a second header");
+                rows.row("One file", if one_ok { "A section for each statement, instead of name-1, name-2…" } else { "CSV, TSV and Values only: the others have no place for a second header" }, |ui| {
+                    ui.add_enabled_ui(one_ok, |ui| toggle(ui, &mut f.single));
                 });
-                ui.end_row();
             }
         });
         // A format only the Shell and Documents know cannot come from a statement.
@@ -297,7 +304,9 @@ impl App {
             Scope::All => f.all.as_ref().is_some_and(|a| a.refused.is_none()),
             Scope::Script => f.script.as_ref().is_some_and(|s| s.stmts.is_ok()),
         };
-        dialog_actions(ui, |ui| {
+        b.end(outer);
+        let ui = outer;
+        dialog_foot(ui, |ui| {
             if ui.add_enabled(ready, primary_button(ui, "Export…", PRIMARY())).clicked() {
                 let file = rfd::FileDialog::new().set_file_name(format!("{}.{}", self.export_name(f.src), f.fmt.ext())).add_filter(f.fmt.label(), &[f.fmt.ext()]).save_file();
                 if let Some(path) = file {
@@ -309,7 +318,7 @@ impl App {
                 *keep = false;
             }
             // A table of the Content view can also leave as a dump with its structure.
-            if f.sql && f.src == Src::Content && quiet(ui, "SQL dump…").on_hover_text("The table with its structure, or the whole database, as a script").clicked() {
+            if f.sql && f.src == Src::Content && foot_left(ui, |ui| ui.button("SQL dump…").on_hover_text("The table with its structure, or the whole database, as a script").clicked()) {
                 *keep = false;
                 if let Some(s) = self.t().map(|t| t.sel.clone()) {
                     self.open_sql_dump_in(s.conn, s.db, s.schema, Some(s.coll));

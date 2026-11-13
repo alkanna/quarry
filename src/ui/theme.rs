@@ -1041,7 +1041,7 @@ macro_rules! colors {
     };
 }
 
-colors!(BG: bg, PANEL: panel, CHROME: chrome, RAISED: raised, HOVER: hover, PRESSED: pressed, MENU_HOVER: menu_hover, BORDER: border, LINE: line, RAISED_LINE: raised_line, HDR: hdr, ON_PRIMARY: on_primary, SEL: sel, SEL_HOVER: sel_hover, TEXT: text, BRIGHT: bright, MUTED: muted, FAINT: faint, PRIMARY: primary, ALERT: alert, SUCCESS: success, WARNING: warning, C_STRING: c_string, C_NUMBER: c_number, C_TRUE: c_true, C_FALSE: c_false, C_DATE: c_date, C_NULL: c_null, C_OID: c_oid, C_OBJ: c_obj, KEY: key, C_LINK: c_link, HIGHLIGHT: highlight, C_KEYWORD: c_keyword, ENGINE_PG: engine_pg);
+colors!(BG: bg, PANEL: panel, CHROME: chrome, RAISED: raised, HOVER: hover, PRESSED: pressed, MENU_HOVER: menu_hover, BORDER: border, LINE: line, RAISED_LINE: raised_line, HDR: hdr, ON_PRIMARY: on_primary, SEL: sel, SEL_HOVER: sel_hover, TEXT: text, BRIGHT: bright, MUTED: muted, FAINT: faint, PRIMARY: primary, ALERT: alert, SUCCESS: success, WARNING: warning, C_STRING: c_string, C_NUMBER: c_number, C_TRUE: c_true, C_FALSE: c_false, C_DATE: c_date, C_NULL: c_null, C_OID: c_oid, C_OBJ: c_obj, KEY: key, C_LINK: c_link, HIGHLIGHT: highlight, C_KEYWORD: c_keyword, ENGINE_PG: engine_pg, WELL: well, TRACK: track);
 
 /// `c` at `alpha` out of 255, for tints over the background.
 pub(crate) fn tint(c: Color32, alpha: u8) -> Color32 {
@@ -1386,6 +1386,15 @@ pub(crate) fn state_fill(ui: &egui::Ui, base: Color32) -> Color32 {
     }
 }
 
+/// Side padding of a dialog's header, body and footer bands.
+pub(crate) const DIALOG_PAD: f32 = 20.0;
+/// The tinted square holding a dialog header's glyph.
+pub(crate) const HEAD_TILE: f32 = 34.0;
+/// A form card row with only a label, and one with a hint under the label.
+pub(crate) const CARD_ROW_H: f32 = 40.0;
+pub(crate) const CARD_ROW_HINT_H: f32 = 52.0;
+/// The label column of a form card row.
+pub(crate) const CARD_LABEL_W: f32 = 170.0;
 /// Label column width of dialog form grids, so fields in every section start at the same x.
 pub(crate) const FORM_LABEL_W: f32 = 84.0;
 /// The gap between a form's label column and its fields, which fields that span both columns must add back.
