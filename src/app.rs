@@ -250,7 +250,7 @@ pub struct App {
     /// CPU time of the last frame in milliseconds, for the frame rate readout.
     frame_ms: f32,
     /// The current scroll gesture for `prefs.lock_scroll_axis`: distance so far, locked axis (true is vertical) and last scroll time.
-    scroll_gesture: (egui::Vec2, Option<bool>, f64),
+    scroll_gesture: (egui::Vec2, Option<Option<bool>>, f64, egui::Vec2),
     /// Last memory and CPU sample for the status bar: when, total CPU time then, CPU percent, bytes.
     usage: (std::time::Instant, Duration, f32, Option<u64>),
     /// Frame rate readout: seconds and frames counted so far, and the rate last shown.
@@ -606,7 +606,7 @@ impl App {
     }
 
     /// Keeps one scroll gesture on the axis it started on, so a slightly diagonal trackpad swipe
-    /// does not drift off the row the eye follows, like NSScrollView's predominant axis scrolling.
+    /// does not drift off the row the eye follows. See `scroll_axis` for when a gesture locks.
     pub(super) fn lock_scroll_axis(&mut self, ctx: &egui::Context) {
         if !self.prefs.lock_scroll_axis {
             return;
@@ -618,26 +618,39 @@ impl App {
     }
 }
 
-/// Which axis a scroll frame keeps, or None when nothing scrolls. The axis is picked once per gesture,
-/// from the distance so far rather than one frame, because single frames at the start of a swipe are noisy
-/// and a wrong pick then held for the whole gesture is what made scrolling feel like a fight.
+/// Which axis a scroll frame keeps, or None to leave it alone. Like UIScrollView's directional lock:
+/// a gesture that starts within about 27 degrees of an axis rides that axis, momentum included,
+/// and a clearly diagonal start scrolls freely, because locking every gesture felt too restrictive.
+/// A locked gesture lets go for good once the last few frames lean clearly toward the other axis,
+/// so turning mid-swipe works without lifting the fingers.
+/// The start is judged on the first 8 pt travelled, since single frames at the start of a swipe are noisy.
 /// Fingers touching the trackpad start a new gesture (and stop momentum), so a swipe the other way
 /// takes over at once. Wheels and platforms that send no phases start one after a 0.2 s pause.
-fn scroll_axis(g: &mut (egui::Vec2, Option<bool>, f64), d: egui::Vec2, started: bool, t: f64) -> Option<bool> {
+fn scroll_axis(g: &mut (egui::Vec2, Option<Option<bool>>, f64, egui::Vec2), d: egui::Vec2, started: bool, t: f64) -> Option<bool> {
     if started || (d != egui::Vec2::ZERO && t - g.2 > 0.2) {
-        *g = (egui::Vec2::ZERO, None, t);
+        *g = (egui::Vec2::ZERO, None, t, egui::Vec2::ZERO);
     }
     if d == egui::Vec2::ZERO {
         return None;
     }
     g.0 += d;
     g.2 = t;
-    let vertical = g.0.y.abs() >= g.0.x.abs();
-    // Until 8 pt have gone by the leading axis may still change, but the distance so far keeps it from flickering.
-    if g.1.is_none() && g.0.length() >= 8.0 {
-        g.1 = Some(vertical);
+    // ponytail: decays per frame, so the window is about 3 frames at any frame rate; a time constant if that ever matters.
+    g.3 = g.3 * 0.7 + d;
+    if let Some(Some(vertical)) = g.1 {
+        let (on, off) = if vertical { (g.3.y.abs(), g.3.x.abs()) } else { (g.3.x.abs(), g.3.y.abs()) };
+        // ponytail: feel knobs; 4 pt keeps end-of-swipe jitter from releasing, 0.8 is about 39 degrees of recent travel.
+        if off >= 4.0 && off >= 0.8 * on {
+            g.1 = Some(None);
+        }
     }
-    Some(g.1.unwrap_or(vertical))
+    let (x, y) = (g.0.x.abs(), g.0.y.abs());
+    if g.1.is_none() && g.0.length() >= 8.0 {
+        // ponytail: the threshold is a feel knob; 0.5 is tan(27 degrees).
+        g.1 = Some((x.min(y) <= 0.5 * x.max(y)).then_some(y >= x));
+    }
+    // Undecided frames keep the leading axis, so a near-axis swipe does not wobble before its lock.
+    g.1.unwrap_or(Some(y >= x))
 }
 
 impl eframe::App for App {
@@ -793,18 +806,25 @@ mod tests {
     }
 
     #[test]
-    fn scroll_axis_is_picked_once_per_gesture() {
+    fn scroll_axis_locks_near_axis_gestures_and_frees_diagonal_ones() {
         let v = egui::vec2;
         let mut g = Default::default();
         // A sideways first frame does not decide a mostly vertical swipe.
         assert_eq!(scroll_axis(&mut g, v(2.0, 0.5), true, 0.0), Some(false));
         assert_eq!(scroll_axis(&mut g, v(1.0, 8.0), false, 0.016), Some(true));
-        assert_eq!(g.1, Some(true));
-        // Once locked, a sideways frame and the momentum after it stay vertical.
-        assert_eq!(scroll_axis(&mut g, v(9.0, 1.0), false, 0.032), Some(true));
+        assert_eq!(g.1, Some(Some(true)));
+        // Once locked, a slight drift and the momentum after it stay vertical.
+        assert_eq!(scroll_axis(&mut g, v(2.0, 8.0), false, 0.032), Some(true));
         assert_eq!(scroll_axis(&mut g, egui::Vec2::ZERO, false, 0.048), None);
+        // A small sideways frame does not let go, turning clearly sideways does, for the rest of the gesture.
+        assert_eq!(scroll_axis(&mut g, v(3.0, 1.0), false, 0.064), Some(true));
+        assert_eq!(scroll_axis(&mut g, v(9.0, 1.0), false, 0.08), None);
+        assert_eq!(scroll_axis(&mut g, v(0.0, 9.0), false, 0.096), None);
         // Fingers down start a new gesture, which can go across right away.
         assert_eq!(scroll_axis(&mut g, v(10.0, 1.0), true, 0.06), Some(false));
+        // A diagonal start scrolls freely for the whole gesture.
+        assert_eq!(scroll_axis(&mut g, v(7.0, 6.0), true, 0.1), None);
+        assert_eq!(scroll_axis(&mut g, v(0.0, 9.0), false, 0.116), None);
         // A wheel with no phases starts a new gesture after a pause.
         assert_eq!(scroll_axis(&mut g, v(0.0, 12.0), false, 0.5), Some(true));
     }

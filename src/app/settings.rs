@@ -212,7 +212,7 @@ impl App {
                         toggle(ui, &mut self.prefs.group_digits);
                     });
                     ui.separator();
-                    setting_row(ui, "Scroll one way at a time", "A scroll moves either across or down, never both, so a slightly diagonal swipe stays on the same row. Shift+wheel still scrolls across.", |ui| {
+                    setting_row(ui, "Scroll straight", "A swipe that starts down or across stays on that line. Diagonal swipes move freely.", |ui| {
                         toggle(ui, &mut self.prefs.lock_scroll_axis);
                     });
                 });
