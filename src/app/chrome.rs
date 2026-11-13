@@ -397,7 +397,8 @@ impl App {
                     let (_, _, cpu, mem) = self.usage;
                     if self.prefs.show_mem {
                         let text = mem.map_or("mem n/a".into(), |b| format!("mem {:>9}", human_bytes(b as usize)));
-                        fixed_readout(ui, text, "mem 0000.0 MB", MUTED()).on_hover_text("Memory Quarry uses now, updated every second.");
+                        // Built only while hovered: it walks every row of every tab.
+                        fixed_readout(ui, text, "mem 0000.0 MB", MUTED()).on_hover_ui(|ui| self.mem_tip(ui, mem));
                     }
                     if self.prefs.show_cpu {
                         let color = if cpu >= 80.0 { WARNING() } else { MUTED() };

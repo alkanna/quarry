@@ -37,3 +37,21 @@ fn a_click_reuses_a_clean_tab_and_new_tabs_are_asked_for() {
     assert!(ui.app().modal.is_none());
     assert_eq!(colls(ui.app()).len(), 6, "an open tab was opened again");
 }
+
+#[test]
+fn the_memory_tooltip_moves_a_closed_tabs_rows_to_the_reopen_line() {
+    let Some(mut ui) = demo_ui(App::load_demo) else { return };
+    let part = |a: &App, what: &str| a.mem_parts().iter().find(|p| p.0 == what).map_or(0, |p| p.1);
+    let a = ui.h.state_mut();
+    let mut t = Tab::new(a.tabs[0].sel.clone());
+    let pad = "x".repeat(1000);
+    t.docs = (0..100).filter_map(|i| db::Row::from_doc(&mongodb::bson::doc! { "_id": i, "pad": &pad }).ok()).collect();
+    let bytes = t.mem();
+    assert!(bytes > 100_000);
+    a.tabs.push(t);
+    let (open, closed) = (part(a, "Other open tabs"), part(a, "Closed tabs kept to reopen"));
+    let last = a.tabs.len() - 1;
+    a.close_tab(last);
+    assert_eq!(part(a, "Other open tabs"), open - bytes);
+    assert_eq!(part(a, "Closed tabs kept to reopen"), closed + bytes);
+}

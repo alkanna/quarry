@@ -103,6 +103,13 @@ impl Row {
     pub fn raw(&self) -> &RawDocument {
         &self.raw
     }
+
+    /// About the bytes this row holds, for the memory readout. A decoded copy counts as 11 more, the ratio above.
+    /// The struct itself counts too, since a short SQL row is about as small as it.
+    pub fn mem(&self) -> usize {
+        let n = self.raw.as_bytes().len();
+        std::mem::size_of::<Row>() + if self.doc.get().is_some() { n * 12 } else { n }
+    }
 }
 
 #[derive(Clone)]
